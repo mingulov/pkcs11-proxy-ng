@@ -248,6 +248,17 @@ or the application.
    Service after `backend_health_consecutive_failures` consecutive
    failures.
 
+## Daemon startup failures (not CK_RV)
+
+These surface as process-startup errors before any PKCS#11 call is served:
+
+| Message fragment | Meaning | Operator action |
+|---|---|---|
+| `already reserved (epoch N)` | A second backend provider chain was registered in this process | Run one provider chain per daemon process (see `doc/release/native-mechanism-ownership.md` §3) |
+| `constructor registry poisoned` / `constructor registry lock poisoned` | A constructor panicked during registration, or the registry mutex was poisoned | Restart the daemon; if it recurs, inspect the panic backtrace and fix the backend module |
+| `native FFI unavailable on this platform` | A native constructor was used off supported Linux targets | Run the daemon on Linux GNU/musl x86_64 or x86, or use a portable/mock constructor |
+| `constructor epoch exhausted` | Internal epoch counter overflow (defensive; not expected in service) | Restart the daemon and report the incident |
+
 ## Related docs
 
 - Runbook §6 (Troubleshooting common CK_RV codes) — surfaces the

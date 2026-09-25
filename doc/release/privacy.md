@@ -82,9 +82,7 @@ wire input before secret-bearing generated messages are allocated.
 The selected v0.2 [native ownership contract](native-mechanism-ownership.md)
 requires a private return-aware raw Linux `exit_group(70)` when shutdown cannot
 establish native quiescence or final-domain Drop lacks its proof. This contract
-is implemented (`crates/backend/src/ffi/native_stop.rs`, Tasks 3–4) and
-natively qualified (stop-topology-oracle receipt, 2026-09-17: GNU/musl stop
-suites green 32/32 native on both widths). Still-retained roots
+still needs implementation and native qualification. Still-retained roots
 must not be wiped or freed first. The path initiates no unwinding, user-space
 destruction, provider cleanup, native Finalize, logging or audit flush. It
 promises no wiping, token deletion or complete audit tail. The release panic

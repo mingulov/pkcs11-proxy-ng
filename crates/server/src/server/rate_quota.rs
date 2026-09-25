@@ -36,8 +36,8 @@ use std::time::{Duration, Instant};
 /// There is no per-op window here (unlike `rate_limit.rs`), so a fixed constant is used.
 const INFLIGHT_GC_INTERVAL: Duration = Duration::from_secs(60);
 
+use super::slot_map::BackendSlotId;
 use dashmap::DashMap;
-use pkcs11_proxy_ng_types::CkSlotId;
 
 /// Default failed-login cooldown when a budget is configured but
 /// `per_slot_failed_login_cooldown_secs` is absent.
@@ -61,7 +61,7 @@ struct RateQuota {
     /// `try_lock` is used; a missed sweep is not a correctness issue, only
     /// a bounded delay in reclaiming idle entries.
     last_inflight_gc: Mutex<Instant>,
-    login_state: DashMap<CkSlotId, FailedLoginState>,
+    login_state: DashMap<BackendSlotId, FailedLoginState>,
 }
 
 static STATE: OnceLock<RateQuota> = OnceLock::new();
@@ -131,8 +131,8 @@ fn begin_op_on(
 fn record_failure_on(
     login_budget: Option<u32>,
     login_cooldown: Duration,
-    login_state: &DashMap<CkSlotId, FailedLoginState>,
-    slot: CkSlotId,
+    login_state: &DashMap<BackendSlotId, FailedLoginState>,
+    slot: BackendSlotId,
 ) -> bool {
     let budget = match login_budget {
         None => return false,
@@ -158,7 +158,7 @@ fn record_failure_on(
 }
 
 /// Reset the failure count and clear any active cooldown for `slot`.
-fn record_success_on(login_state: &DashMap<CkSlotId, FailedLoginState>, slot: CkSlotId) {
+fn record_success_on(login_state: &DashMap<BackendSlotId, FailedLoginState>, slot: BackendSlotId) {
     if let Some(mut entry) = login_state.get_mut(&slot) {
         entry.count = 0;
         entry.cooldown_until = None;
@@ -166,7 +166,10 @@ fn record_success_on(login_state: &DashMap<CkSlotId, FailedLoginState>, slot: Ck
 }
 
 /// Returns `true` if `slot` is within an active cooldown window.
-fn in_cooldown_on(login_state: &DashMap<CkSlotId, FailedLoginState>, slot: CkSlotId) -> bool {
+fn in_cooldown_on(
+    login_state: &DashMap<BackendSlotId, FailedLoginState>,
+    slot: BackendSlotId,
+) -> bool {
     login_state.get(&slot).is_some_and(|e| e.cooldown_until.is_some_and(|t| t > Instant::now()))
 }
 
@@ -262,14 +265,14 @@ pub fn per_principal_max_sessions() -> Option<usize> {
 /// Returns `true` if the failure count has now reached the configured budget
 /// (the slot has entered its cooldown window). Returns `false` otherwise.
 /// When `per_slot_failed_login_budget` is unset always returns `false`.
-pub fn record_login_failure(slot: CkSlotId) -> bool {
+pub fn record_login_failure(slot: BackendSlotId) -> bool {
     let Some(state) = STATE.get() else { return false };
     record_failure_on(state.login_budget, state.login_cooldown, &state.login_state, slot)
 }
 
 /// Record a successful login for `slot`, resetting the failure count and clearing
 /// any active cooldown. No-op when `per_slot_failed_login_budget` is unset.
-pub fn record_login_success(slot: CkSlotId) {
+pub fn record_login_success(slot: BackendSlotId) {
     let Some(state) = STATE.get() else { return };
     if state.login_budget.is_none() {
         return;
@@ -279,7 +282,7 @@ pub fn record_login_success(slot: CkSlotId) {
 
 /// Returns `true` if `slot` is currently within a failed-login cooldown window.
 /// Always returns `false` when `per_slot_failed_login_budget` is unset.
-pub fn login_slot_in_cooldown(slot: CkSlotId) -> bool {
+pub fn login_slot_in_cooldown(slot: BackendSlotId) -> bool {
     let Some(state) = STATE.get() else { return false };
     if state.login_budget.is_none() {
         return false;
@@ -356,9 +359,25 @@ mod tests {
     // ── Login budget ──────────────────────────────────────────────────────────
 
     #[test]
+    fn failed_login_budget_is_isolated_by_backend_slot() {
+        let q = make_quota(None, None, Some(1), 60);
+        let a = BackendSlotId(pkcs11_proxy_ng_types::CkSlotId(42));
+        let b = BackendSlotId(pkcs11_proxy_ng_types::CkSlotId(1));
+        assert!(record_failure_on(q.login_budget, q.login_cooldown, &q.login_state, a));
+        assert!(in_cooldown_on(&q.login_state, a));
+        assert!(!in_cooldown_on(&q.login_state, b));
+        record_success_on(&q.login_state, b);
+        assert!(in_cooldown_on(&q.login_state, a));
+        assert!(record_failure_on(q.login_budget, q.login_cooldown, &q.login_state, b));
+        record_success_on(&q.login_state, a);
+        assert!(!in_cooldown_on(&q.login_state, a));
+        assert!(in_cooldown_on(&q.login_state, b));
+    }
+
+    #[test]
     fn login_budget_trips_at_k() {
         let q = make_quota(None, None, Some(3), 60);
-        let slot = CkSlotId(100);
+        let slot = BackendSlotId(pkcs11_proxy_ng_types::CkSlotId(100));
         assert!(
             !record_failure_on(q.login_budget, q.login_cooldown, &q.login_state, slot),
             "1st failure: not tripped"
@@ -377,7 +396,7 @@ mod tests {
     #[test]
     fn login_success_clears_cooldown() {
         let q = make_quota(None, None, Some(3), 60);
-        let slot = CkSlotId(101);
+        let slot = BackendSlotId(pkcs11_proxy_ng_types::CkSlotId(101));
         record_failure_on(q.login_budget, q.login_cooldown, &q.login_state, slot);
         record_failure_on(q.login_budget, q.login_cooldown, &q.login_state, slot);
         record_failure_on(q.login_budget, q.login_cooldown, &q.login_state, slot); // trips
@@ -396,7 +415,7 @@ mod tests {
         // 0-second cooldown: the window instant is set to now+0, so it is in
         // the past by the time in_cooldown_on checks `t > Instant::now()`.
         let q = make_quota(None, None, Some(1), 0);
-        let slot = CkSlotId(102);
+        let slot = BackendSlotId(pkcs11_proxy_ng_types::CkSlotId(102));
         assert!(
             record_failure_on(q.login_budget, q.login_cooldown, &q.login_state, slot),
             "budget=1 trips on first failure"
@@ -408,7 +427,7 @@ mod tests {
     #[test]
     fn login_none_budget_always_inert() {
         let q = make_quota(None, None, None, 60);
-        let slot = CkSlotId(103);
+        let slot = BackendSlotId(pkcs11_proxy_ng_types::CkSlotId(103));
         for _ in 0..10 {
             assert!(
                 !record_failure_on(q.login_budget, q.login_cooldown, &q.login_state, slot),

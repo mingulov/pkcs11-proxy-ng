@@ -674,7 +674,7 @@ async fn byte_output_exact_wrap_key_returns_gcm_output_params_through_grpc() {
 
     assert_eq!(wrap_result.ck_rv, CkRv::OK);
     assert_eq!(wrap_result.returned_len, Some(4));
-    assert_eq!(wrap_result.value, Some(SecretBytes::new(vec![0xDE, 0xAD, 0xBE, 0xEF])));
+    assert_eq!(wrap_result.value, Some(vec![0xDE, 0xAD, 0xBE, 0xEF]));
     assert_eq!(
         mechanism_out,
         Some(CkMechanismParams::Gcm(GcmParams {

@@ -1,8 +1,8 @@
 //! Shared raw-output helpers for exact PKCS#11 caller-buffer semantics.
 
 use crate::error::{MessageCallError, grpc_status_to_ck_rv};
+use pkcs11_proxy_ng_proto::convert::message_effects::ParameterEffectCallMode;
 
-use pkcs11_proxy_ng_proto::convert::message_params::validate_structured_wire_parameter;
 use pkcs11_proxy_ng_proto::pkcs11_proxy_ng::v1 as v1_proto;
 use pkcs11_proxy_ng_types::{
     ByteOutputFunction, CkAttribute, CkAttributeQuery, CkAttributeQueryResult, CkInBuf,
@@ -64,7 +64,7 @@ fn decode_parameter_output_exact_response(
             })
     } else {
         parameter.returned_len == parameter_spec.buffer_len
-            && parameter.value == parameter_spec.buffer_present.then(SecretBytes::default)
+            && parameter.value == parameter_spec.buffer_present.then(Vec::new)
     };
     if parameter.ck_rv != output.ck_rv || !valid_parameter {
         return Err(CkRv::FUNCTION_NOT_SUPPORTED);
@@ -122,149 +122,6 @@ fn decode_parameter_output_exact_contract_response(
         flags,
     )
     .map_err(|_| MessageCallError::protocol())?;
-    Ok(decoded)
-}
-
-pub type ParameterOutputExactDecoded = (
-    CkOutputBufferResult,
-    CkParameterRoundtripResult,
-    Option<pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
-);
-
-fn decode_parameter_output_exact_response(
-    response: pkcs11_proxy_ng_proto::ParameterOutputExactResponse,
-    output_spec: &CkOutputBufferSpec,
-    parameter_spec: &CkParameterRoundtripSpec,
-    request_parameter: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
-    function: ParameterOutputFunction,
-) -> Result<ParameterOutputExactDecoded, CkRv> {
-    let output = response
-        .output_result
-        .as_ref()
-        .map(CkOutputBufferResult::from)
-        .ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
-    let parameter = response
-        .parameter_result
-        .as_ref()
-        .map(CkParameterRoundtripResult::from)
-        .ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
-
-    if output_spec.length_pointer_null && (output.returned_len != 0 || output.value.is_some()) {
-        return Err(CkRv::FUNCTION_NOT_SUPPORTED);
-    }
-
-    let validates_memory = output.ck_rv == CkRv::OK || output.ck_rv == CkRv::BUFFER_TOO_SMALL;
-    if validates_memory {
-        let output_valid = if output_spec.length_pointer_null {
-            output.returned_len == 0 && output.value.is_none()
-        } else {
-            match output.ck_rv {
-                CkRv::OK if !output_spec.buffer_present => output.value.is_none(),
-                CkRv::OK => output.value.as_ref().is_some_and(|value| {
-                    value.len() as u64 == output.returned_len
-                        && output.returned_len <= output_spec.buffer_len
-                }),
-                CkRv::BUFFER_TOO_SMALL if output_spec.buffer_present => {
-                    output.value.is_none() && output.returned_len > output_spec.buffer_len
-                }
-                _ => false,
-            }
-        };
-        let message_function = matches!(
-            function,
-            ParameterOutputFunction::EncryptMessage
-                | ParameterOutputFunction::DecryptMessage
-                | ParameterOutputFunction::SignMessage
-                | ParameterOutputFunction::EncryptMessageNext
-                | ParameterOutputFunction::DecryptMessageNext
-                | ParameterOutputFunction::SignMessageNext
-        );
-        let parameter_valid = parameter.ck_rv == output.ck_rv
-            && if message_function {
-                parameter.returned_len == parameter_spec.buffer_len
-                    && match (parameter_spec.buffer_present, parameter.value.as_ref()) {
-                        (true, Some(value)) => value.is_empty(),
-                        (false, None) => true,
-                        _ => false,
-                    }
-            } else if output_spec.length_pointer_null {
-                match (parameter_spec.buffer_present, parameter.value.as_ref()) {
-                    (false, None) => parameter.returned_len == parameter_spec.buffer_len,
-                    (true, Some(value)) => {
-                        value.len() as u64 == parameter.returned_len
-                            && parameter.returned_len <= parameter_spec.buffer_len
-                    }
-                    _ => false,
-                }
-            } else {
-                match (output.ck_rv, parameter_spec.buffer_present, parameter.value.as_ref()) {
-                    (CkRv::OK, false, None) => true,
-                    (CkRv::OK, true, Some(value)) => {
-                        value.len() as u64 == parameter.returned_len
-                            && parameter.returned_len <= parameter_spec.buffer_len
-                    }
-                    (CkRv::BUFFER_TOO_SMALL, true, None) => {
-                        parameter.returned_len > parameter_spec.buffer_len
-                    }
-                    _ => false,
-                }
-            };
-        if !output_valid || !parameter_valid {
-            return Err(CkRv::FUNCTION_NOT_SUPPORTED);
-        }
-    }
-
-    let response_parameter = if validates_memory {
-        match (request_parameter, response.message_parameter_out.as_ref()) {
-            (Some(request), Some(wire)) => {
-                request.validate_structured().map_err(|_| CkRv::FUNCTION_NOT_SUPPORTED)?;
-                validate_structured_wire_parameter(wire)
-                    .map_err(|_| CkRv::FUNCTION_NOT_SUPPORTED)?;
-                let decoded =
-                    pkcs11_proxy_ng_proto::convert::message_params::MessageParameter::try_from(
-                        wire,
-                    )
-                    .map_err(|_| CkRv::FUNCTION_NOT_SUPPORTED)?;
-                decoded.validate_structured().map_err(|_| CkRv::FUNCTION_NOT_SUPPORTED)?;
-                if !request.same_layout_and_scalars(&decoded)
-                    || (matches!(
-                        function,
-                        ParameterOutputFunction::DecryptMessage
-                            | ParameterOutputFunction::DecryptMessageNext
-                    ) && request != &decoded)
-                {
-                    return Err(CkRv::FUNCTION_NOT_SUPPORTED);
-                }
-                Some(decoded)
-            }
-            (None, None) => None,
-            _ => return Err(CkRv::FUNCTION_NOT_SUPPORTED),
-        }
-    } else {
-        None
-    };
-
-    Ok((output, parameter, response_parameter))
-}
-
-fn decode_parameter_output_exact_contract_response(
-    response: pkcs11_proxy_ng_proto::ParameterOutputExactResponse,
-    output_spec: &CkOutputBufferSpec,
-    parameter_spec: &CkParameterRoundtripSpec,
-    request_parameter: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
-    function: ParameterOutputFunction,
-) -> Result<ParameterOutputExactDecoded, MessageCallError> {
-    let decoded = decode_parameter_output_exact_response(
-        response,
-        output_spec,
-        parameter_spec,
-        request_parameter,
-        function,
-    )
-    .map_err(|_| MessageCallError::protocol())?;
-    if !matches!(decoded.0.ck_rv, CkRv::OK | CkRv::BUFFER_TOO_SMALL) {
-        return Err(MessageCallError::backend(decoded.0.ck_rv));
-    }
     Ok(decoded)
 }
 
@@ -373,15 +230,21 @@ impl Pkcs11Client {
             &pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
         >,
     ) -> Result<
-        (
-            CkOutputBufferResult,
-            CkParameterRoundtripResult,
-            Option<pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
-        ),
+        (CkOutputBufferResult, CkParameterRoundtripResult, Option<MessageEffects>),
         MessageCallError,
     > {
+        self.require_exact_output_effects().await.map_err(|_| MessageCallError::protocol())?;
         let ctx = self.context_id().map_err(MessageCallError::backend)?;
+        if function == ParameterOutputFunction::WrapKeyAuthenticated
+            && mechanism.is_some_and(|m| {
+                !pkcs11_proxy_ng_proto::convert::authenticated::legacy_parameter_supported(m)
+            })
+        {
+            return Err(MessageCallError::backend(CkRv::FUNCTION_NOT_SUPPORTED));
+        }
         let mut req = pkcs11_proxy_ng_proto::ParameterOutputExactRequest {
+            exact_output_effects_version: 1,
+            authenticated_parameters: None,
             client_context_id: ctx,
             session_handle: session.0,
             function: pkcs11_proxy_ng_proto::convert::output::parameter_output_function_to_i32(
@@ -420,6 +283,7 @@ impl Pkcs11Client {
             param_out_spec,
             message_parameter,
             function,
+            flags,
         )
     }
 
@@ -629,7 +493,10 @@ mod message_contract_tests {
         let parameter_spec =
             CkParameterRoundtripSpec { buffer_present: false, buffer_len: 0, value: None };
         let response = |returned_len, value| pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+            message_effects: None,
+            authenticated_output: None,
             output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
+                apply_returned_len: Some(false),
                 ck_rv: CkRv::ARGUMENTS_BAD.0,
                 returned_len,
                 value,
@@ -648,6 +515,7 @@ mod message_contract_tests {
             &parameter_spec,
             None,
             ParameterOutputFunction::WrapKeyAuthenticated,
+            0,
         )
         .expect("canonical missing-length envelope");
         assert_eq!(output.ck_rv, CkRv::ARGUMENTS_BAD);
@@ -658,6 +526,7 @@ mod message_contract_tests {
                 &parameter_spec,
                 None,
                 ParameterOutputFunction::WrapKeyAuthenticated,
+                0,
             ),
             Err(CkRv::FUNCTION_NOT_SUPPORTED),
         );
@@ -668,6 +537,7 @@ mod message_contract_tests {
                 &parameter_spec,
                 None,
                 ParameterOutputFunction::WrapKeyAuthenticated,
+                0,
             ),
             Err(CkRv::FUNCTION_NOT_SUPPORTED),
         );
@@ -680,7 +550,10 @@ mod message_contract_tests {
         let parameter_spec =
             CkParameterRoundtripSpec { buffer_present: true, buffer_len: 3, value: None };
         let response = pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+            message_effects: None,
+            authenticated_output: None,
             output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
+                apply_returned_len: Some(false),
                 ck_rv: CkRv::OK.0,
                 returned_len: 0,
                 value: None,
@@ -699,6 +572,7 @@ mod message_contract_tests {
             &parameter_spec,
             None,
             ParameterOutputFunction::WrapKeyAuthenticated,
+            0,
         )
         .expect("genuine parameter output");
         assert_eq!(parameter.value, Some(vec![1, 0xA5, 3]));
@@ -711,7 +585,10 @@ mod message_contract_tests {
         let parameter_spec =
             CkParameterRoundtripSpec { buffer_present: true, buffer_len: 3, value: None };
         let response = pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+            message_effects: None,
+            authenticated_output: None,
             output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
+                apply_returned_len: Some(false),
                 ck_rv: CkRv::BUFFER_TOO_SMALL.0,
                 returned_len: 0,
                 value: None,
@@ -730,6 +607,7 @@ mod message_contract_tests {
             &parameter_spec,
             None,
             ParameterOutputFunction::WrapKeyAuthenticated,
+            0,
         )
         .expect("canonical buffer-too-small response");
 
@@ -742,7 +620,10 @@ mod message_contract_tests {
     fn old_server_missing_parameter_ack_on_b2s_is_rejected() {
         let request = gcm_parameter();
         let response = pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+            message_effects: None,
+            authenticated_output: None,
             output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
+                apply_returned_len: Some(true),
                 ck_rv: CkRv::BUFFER_TOO_SMALL.0,
                 returned_len: 8,
                 value: None,
@@ -761,6 +642,7 @@ mod message_contract_tests {
             &parameter_spec,
             Some(&request),
             ParameterOutputFunction::EncryptMessage,
+            0,
         )
         .unwrap_err();
 
@@ -789,7 +671,10 @@ mod message_contract_tests {
             for (label, parameter_result) in [("pointer class", wrong_class), ("length", wrong_len)]
             {
                 let response = pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+                    message_effects: None,
+                    authenticated_output: None,
                     output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
+                        apply_returned_len: Some(true),
                         ck_rv: CkRv::OK.0,
                         returned_len: 1,
                         value: Some(vec![0x31]),
@@ -803,6 +688,7 @@ mod message_contract_tests {
                     &parameter_spec,
                     None,
                     ParameterOutputFunction::EncryptMessage,
+                    0,
                 )
                 .unwrap_err();
                 assert_eq!(error, CkRv::FUNCTION_NOT_SUPPORTED, "{label} for {parameter_spec:?}",);
@@ -836,7 +722,10 @@ mod message_contract_tests {
 
         for (label, message_parameter_out) in responses {
             let response = pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+                message_effects: None,
+                authenticated_output: None,
                 output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
+                    apply_returned_len: Some(true),
                     ck_rv: CkRv::OK.0,
                     returned_len: 4,
                     value: Some(vec![1, 2, 3, 4]),
@@ -854,6 +743,7 @@ mod message_contract_tests {
                 &parameter_spec,
                 Some(&request),
                 ParameterOutputFunction::EncryptMessage,
+                0,
             )
             .unwrap_err();
             assert_eq!(error, CkRv::FUNCTION_NOT_SUPPORTED, "{label}");
@@ -863,7 +753,10 @@ mod message_contract_tests {
     #[test]
     fn completed_parameter_output_error_retains_backend_origin() {
         let response = pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+            message_effects: None,
+            authenticated_output: None,
             output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
+                apply_returned_len: Some(false),
                 ck_rv: CkRv::FUNCTION_FAILED.0,
                 returned_len: 0,
                 value: None,
@@ -875,7 +768,7 @@ mod message_contract_tests {
             }),
             message_parameter_out: None,
         };
-        let error = decode_parameter_output_exact_contract_response(
+        let (output, _, _) = decode_parameter_output_exact_contract_response(
             response,
             &CkOutputBufferSpec {
                 buffer_present: false,
@@ -885,17 +778,21 @@ mod message_contract_tests {
             &CkParameterRoundtripSpec { buffer_present: false, buffer_len: 0, value: None },
             None,
             ParameterOutputFunction::EncryptMessage,
+            0,
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert_eq!(error.origin, crate::error::MessageCallErrorOrigin::Backend);
-        assert_eq!(error.ck_rv, CkRv::FUNCTION_FAILED);
+        assert_eq!(output.ck_rv, CkRv::FUNCTION_FAILED);
+        assert_eq!(output.returned_len, None);
     }
 
     #[test]
     fn authenticated_wrap_accepts_actual_mechanism_parameter_length() {
         let response = pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+            message_effects: None,
+            authenticated_output: None,
             output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
+                apply_returned_len: Some(true),
                 ck_rv: CkRv::OK.0,
                 returned_len: 8,
                 value: None,
@@ -918,6 +815,7 @@ mod message_contract_tests {
             &parameter_spec,
             None,
             ParameterOutputFunction::WrapKeyAuthenticated,
+            0,
         )
         .expect("actual mechanism parameter size within caller capacity is valid");
 

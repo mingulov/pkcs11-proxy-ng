@@ -163,6 +163,48 @@ async fn capacity_eviction_reclaims_sessionless_expired_contexts() {
 }
 
 #[tokio::test]
+async fn backend_slot_metadata_invalidation_does_not_touch_colliding_virtual_number() {
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let a = BackendSlotId(CkSlotId(42));
+    let b = BackendSlotId(CkSlotId(1));
+    mgr.register_slot(a).await;
+    mgr.register_slot(b).await;
+    assert_eq!(mgr.to_virtual_slot(a).await, Some(VirtualSlotId(1)));
+    mgr.cache_token_info(a, "Token42".into(), "serial42".into());
+    mgr.cache_token_info(b, "Token1".into(), "serial1".into());
+    mgr.invalidate_token_info(a);
+    assert_eq!(mgr.cached_token_info(a), None);
+    assert_eq!(mgr.cached_token_info(b), Some(("Token1".into(), "serial1".into())));
+}
+
+#[test]
+fn backend_slot_login_locks_share_only_the_same_backend_slot() {
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let a = mgr.slot_login_lock(BackendSlotId(CkSlotId(42)));
+    let same = mgr.slot_login_lock(BackendSlotId(CkSlotId(42)));
+    let other = mgr.slot_login_lock(BackendSlotId(CkSlotId(1)));
+    assert!(Arc::ptr_eq(&a, &same));
+    assert!(!Arc::ptr_eq(&a, &other));
+}
+
+#[test]
+fn remove_sessions_for_backend_slot_preserves_other_slot_state() {
+    let mut ctx = LogicalClientInstance::new(None);
+    let a = BackendSlotId(CkSlotId(42));
+    let b = BackendSlotId(CkSlotId(1));
+    let sa = ctx.register_session(BackendHandle(101), a);
+    let sb = ctx.register_session(BackendHandle(202), b);
+    ctx.login_state.insert(a, LoginState::User);
+    ctx.login_state.insert(b, LoginState::So);
+    assert_eq!(ctx.remove_sessions_for_slot(a), vec![BackendHandle(101)]);
+    assert_eq!(ctx.session_handles.resolve(sa), None);
+    assert_eq!(ctx.session_handles.resolve(sb), Some(BackendHandle(202)));
+    assert_eq!(ctx.session_slots.get(&sb), Some(&b));
+    assert!(!ctx.login_state.contains_key(&a));
+    assert_eq!(ctx.login_state.get(&b), Some(&LoginState::So));
+}
+
+#[tokio::test]
 async fn begin_operation_capped_enforces_the_per_context_limit() {
     // M2: a context can hold at most `max_in_flight` concurrent operations; the
     // next is rejected (Err) so one client cannot drain the shared budget. A
@@ -205,15 +247,25 @@ async fn operation_guard_identity_includes_its_manager() {
 #[test]
 fn token_info_cache_serves_within_ttl_and_expires_after() {
     let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
-    mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "SN1".into());
+    mgr.cache_token_info(
+        crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+        "MockToken".into(),
+        "SN1".into(),
+    );
     assert_eq!(
-        mgr.cached_token_info_within(CkSlotId(0), std::time::Duration::from_secs(60)),
+        mgr.cached_token_info_within(
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+            std::time::Duration::from_secs(60)
+        ),
         Some(("MockToken".to_string(), "SN1".to_string())),
         "a fresh entry must be served"
     );
     std::thread::sleep(std::time::Duration::from_millis(3));
     assert_eq!(
-        mgr.cached_token_info_within(CkSlotId(0), std::time::Duration::from_millis(1)),
+        mgr.cached_token_info_within(
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+            std::time::Duration::from_millis(1)
+        ),
         None,
         "an entry older than the TTL must not be served"
     );
@@ -222,9 +274,13 @@ fn token_info_cache_serves_within_ttl_and_expires_after() {
 #[test]
 fn invalidate_token_info_drops_the_entry() {
     let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
-    mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "SN1".into());
-    mgr.invalidate_token_info(CkSlotId(0));
-    assert_eq!(mgr.cached_token_info(CkSlotId(0)), None);
+    mgr.cache_token_info(
+        crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+        "MockToken".into(),
+        "SN1".into(),
+    );
+    mgr.invalidate_token_info(crate::server::slot_map::BackendSlotId(CkSlotId(0)));
+    assert_eq!(mgr.cached_token_info(crate::server::slot_map::BackendSlotId(CkSlotId(0))), None);
 }
 
 #[tokio::test]
@@ -237,7 +293,7 @@ async fn capacity_eviction_skips_contexts_with_open_backend_sessions() {
     let mgr = ContextManager::new(std::time::Duration::from_millis(1), 1);
     let ctx_a = mgr.create_context(None).await.unwrap();
     mgr.get_context(&ctx_a, |c| {
-        c.register_session(BackendHandle(100), CkSlotId(0));
+        c.register_session(BackendHandle(100), crate::server::slot_map::BackendSlotId(CkSlotId(0)));
     })
     .await;
     tokio::time::sleep(std::time::Duration::from_millis(5)).await; // expire ctx_a
@@ -397,11 +453,11 @@ fn remove_session_evicts_only_its_recorded_session_objects() {
 fn remove_sessions_for_slot_evicts_their_session_objects() {
     let mut ctx = LogicalClientInstance::new(None);
     let session = ctx.session_handles.insert(BackendHandle(11));
-    ctx.session_slots.insert(session, CkSlotId(7));
+    ctx.session_slots.insert(session, crate::server::slot_map::BackendSlotId(CkSlotId(7)));
     let obj = ctx.object_handles.insert(BackendHandle(111));
     ctx.record_session_object(session, obj);
 
-    ctx.remove_sessions_for_slot(CkSlotId(7));
+    ctx.remove_sessions_for_slot(crate::server::slot_map::BackendSlotId(CkSlotId(7)));
 
     assert_eq!(ctx.object_handles.resolve(obj), None, "slot-close evicts session objects");
 }
@@ -411,8 +467,8 @@ fn remove_sessions_for_slot_evicts_only_target_message_operation_shapes() {
     let mut ctx = LogicalClientInstance::new(None);
     let target = ctx.session_handles.insert(BackendHandle(11));
     let other = ctx.session_handles.insert(BackendHandle(12));
-    ctx.session_slots.insert(target, CkSlotId(7));
-    ctx.session_slots.insert(other, CkSlotId(8));
+    ctx.session_slots.insert(target, crate::server::slot_map::BackendSlotId(CkSlotId(7)));
+    ctx.session_slots.insert(other, crate::server::slot_map::BackendSlotId(CkSlotId(8)));
     for session in [target, other] {
         ctx.message_operations.insert(
             (session, MessageOperation::Encrypt),
@@ -420,7 +476,7 @@ fn remove_sessions_for_slot_evicts_only_target_message_operation_shapes() {
         );
     }
 
-    ctx.remove_sessions_for_slot(CkSlotId(7));
+    ctx.remove_sessions_for_slot(crate::server::slot_map::BackendSlotId(CkSlotId(7)));
 
     assert!(!ctx.message_operations.contains_key(&(target, MessageOperation::Encrypt)));
     assert!(ctx.message_operations.contains_key(&(other, MessageOperation::Encrypt)));
@@ -608,7 +664,8 @@ fn login_state_variants_are_distinct() {
 fn teardown_clears_login_state_for_all_slots() {
     let mut ctx = LogicalClientInstance::new(None);
     for i in 0..5 {
-        ctx.login_state.insert(CkSlotId(i as u64), LoginState::User);
+        ctx.login_state
+            .insert(crate::server::slot_map::BackendSlotId(CkSlotId(i as u64)), LoginState::User);
     }
     let _ = ctx.teardown();
     assert!(ctx.login_state.is_empty(), "teardown must clear all per-slot login state");
@@ -923,14 +980,14 @@ fn attr_cache_evicted_on_session_close_via_remove_sessions_for_slot() {
     // entries must also be evicted (R2, Task 1).
     let mut ctx = LogicalClientInstance::new(None);
     let session = ctx.session_handles.insert(BackendHandle(11));
-    ctx.session_slots.insert(session, CkSlotId(7));
+    ctx.session_slots.insert(session, crate::server::slot_map::BackendSlotId(CkSlotId(7)));
     let obj = ctx.object_handles.insert(BackendHandle(111));
     ctx.record_session_object(session, obj);
 
     let attr = CkAttributeType::TOKEN;
     ctx.attr_cache.insert((obj, attr), super::CachedAttr { value: vec![0x01], ck_rv: 0 });
 
-    ctx.remove_sessions_for_slot(CkSlotId(7));
+    ctx.remove_sessions_for_slot(crate::server::slot_map::BackendSlotId(CkSlotId(7)));
 
     assert!(
         !ctx.attr_cache.contains_key(&(obj, attr)),
@@ -1058,8 +1115,12 @@ async fn close_transition_drop_before_invocation_reactivates_session() {
     let mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
     let ctx_id = mgr.create_context(None).await.unwrap();
     let backend = BackendHandle(77);
-    let session =
-        mgr.get_context(&ctx_id, |ctx| ctx.register_session(backend, CkSlotId(1))).await.unwrap();
+    let session = mgr
+        .get_context(&ctx_id, |ctx| {
+            ctx.register_session(backend, crate::server::slot_map::BackendSlotId(CkSlotId(1)))
+        })
+        .await
+        .unwrap();
 
     let transition = mgr.begin_close_session(&ctx_id, session).unwrap();
     assert_eq!(transition.backend_handle(), backend);
@@ -1080,8 +1141,12 @@ async fn close_transition_terminal_result_removes_session_and_shapes() {
     let mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
     let ctx_id = mgr.create_context(None).await.unwrap();
     let backend = BackendHandle(77);
-    let session =
-        mgr.get_context(&ctx_id, |ctx| ctx.register_session(backend, CkSlotId(1))).await.unwrap();
+    let session = mgr
+        .get_context(&ctx_id, |ctx| {
+            ctx.register_session(backend, crate::server::slot_map::BackendSlotId(CkSlotId(1)))
+        })
+        .await
+        .unwrap();
     let operation =
         mgr.message_operation_lock(&ctx_id, session, MessageOperation::Encrypt).await.unwrap();
     operation.lock().await.shape = Some(MessageParameterShape::Gcm);
@@ -1108,8 +1173,12 @@ async fn close_transition_panic_after_invocation_quarantines_session_and_clears_
     let mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
     let ctx_id = mgr.create_context(None).await.unwrap();
     let backend = BackendHandle(77);
-    let session =
-        mgr.get_context(&ctx_id, |ctx| ctx.register_session(backend, CkSlotId(1))).await.unwrap();
+    let session = mgr
+        .get_context(&ctx_id, |ctx| {
+            ctx.register_session(backend, crate::server::slot_map::BackendSlotId(CkSlotId(1)))
+        })
+        .await
+        .unwrap();
     let operation =
         mgr.message_operation_lock(&ctx_id, session, MessageOperation::Encrypt).await.unwrap();
     operation.lock().await.shape = Some(MessageParameterShape::Gcm);
@@ -1136,13 +1205,21 @@ async fn transient_old_close_completion_cannot_steal_recycled_session_binding() 
     let mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
     let ctx_id = mgr.create_context(None).await.unwrap();
     let backend = BackendHandle(77);
-    let old =
-        mgr.get_context(&ctx_id, |ctx| ctx.register_session(backend, CkSlotId(1))).await.unwrap();
+    let old = mgr
+        .get_context(&ctx_id, |ctx| {
+            ctx.register_session(backend, crate::server::slot_map::BackendSlotId(CkSlotId(1)))
+        })
+        .await
+        .unwrap();
     let mut transition = mgr.begin_close_session(&ctx_id, old).unwrap();
     transition.mark_started();
 
-    let new =
-        mgr.get_context(&ctx_id, |ctx| ctx.register_session(backend, CkSlotId(1))).await.unwrap();
+    let new = mgr
+        .get_context(&ctx_id, |ctx| {
+            ctx.register_session(backend, crate::server::slot_map::BackendSlotId(CkSlotId(1)))
+        })
+        .await
+        .unwrap();
     assert_ne!(new, old);
     transition.settle(&Err(CkRv::FUNCTION_FAILED));
 
@@ -1165,13 +1242,21 @@ async fn terminal_old_close_completion_cannot_remove_recycled_session_binding() 
     let mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
     let ctx_id = mgr.create_context(None).await.unwrap();
     let backend = BackendHandle(77);
-    let old =
-        mgr.get_context(&ctx_id, |ctx| ctx.register_session(backend, CkSlotId(1))).await.unwrap();
+    let old = mgr
+        .get_context(&ctx_id, |ctx| {
+            ctx.register_session(backend, crate::server::slot_map::BackendSlotId(CkSlotId(1)))
+        })
+        .await
+        .unwrap();
     let mut transition = mgr.begin_close_session(&ctx_id, old).unwrap();
     transition.mark_started();
 
-    let new =
-        mgr.get_context(&ctx_id, |ctx| ctx.register_session(backend, CkSlotId(1))).await.unwrap();
+    let new = mgr
+        .get_context(&ctx_id, |ctx| {
+            ctx.register_session(backend, crate::server::slot_map::BackendSlotId(CkSlotId(1)))
+        })
+        .await
+        .unwrap();
     assert_ne!(new, old);
     transition.settle(&Ok(()));
 

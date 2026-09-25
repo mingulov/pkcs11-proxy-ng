@@ -90,8 +90,7 @@ pub(super) async fn open_session(
 
     match result {
         Ok(backend_session) => {
-            let slot_id = CkSlotId(req.slot_id as u64);
-            match register_session_handle(ctx_mgr, &ctx_id, backend_session, slot_id).await {
+            match register_session_handle(ctx_mgr, &ctx_id, backend_session, backend_slot).await {
                 Some(virtual_handle) => {
                     debug!(
                         context_id = %ctx_id.0,
@@ -224,7 +223,6 @@ pub(super) async fn close_all_sessions(
     // ADR-0002 §7: close only THIS client's sessions for the target slot.
     // We MUST NOT call backend.close_all_sessions() — that would close
     // sessions belonging to other logical client instances.
-    let slot_id = CkSlotId(req.slot_id as u64);
     let backend_sessions = ctx_mgr
         .get_context(&ctx_id, |ctx| ctx.remove_sessions_for_slot(backend_slot))
         .await

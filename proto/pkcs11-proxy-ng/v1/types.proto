@@ -1477,6 +1477,8 @@ message WrapKeyAuthenticatedRequest {
   bytes associated_data = 6;
   // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; associated_data is then empty.
   optional uint64 associated_data_null_len = 7;
+  // Presence acknowledges the pointer-safe authenticated contract.
+  AuthenticatedParameters authenticated_parameters = 8;
 }
 message WrapKeyAuthenticatedResponse {
   uint64 ck_rv = 1;
@@ -1498,6 +1500,7 @@ message UnwrapKeyAuthenticatedRequest {
   optional uint64 wrapped_key_null_len = 8;
   // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; associated_data is then empty.
   optional uint64 associated_data_null_len = 9;
+  AuthenticatedParameters authenticated_parameters = 10;
 }
 message UnwrapKeyAuthenticatedResponse {
   uint64 ck_rv = 1;
@@ -1571,6 +1574,7 @@ message ByteOutputExactRequest {
   // ADR-0010 Scope 2: present => caller passed a NULL input pointer with this
   // claimed length; input_data is then empty. Absent => input_data is the input.
   optional uint64 input_data_null_len = 9;
+  uint32 exact_output_effects_version = 10;
 }
 message ByteOutputExactResponse {
   OutputBufferResult result = 1;
@@ -1610,6 +1614,8 @@ message ParameterOutputExactRequest {
   optional uint64 input_data_null_len = 14;
   // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; associated_data is then empty.
   optional uint64 associated_data_null_len = 15;
+  AuthenticatedParameters authenticated_parameters = 16;
+  uint32 exact_output_effects_version = 17;
 }
 
 message ParameterOutputExactResponse {
@@ -1649,8 +1655,6 @@ message EncapsulateKeyExactRequest {
   repeated Attribute template = 5;
   OutputBufferSpec output_spec = 6;
   uint32 exact_output_effects_version = 7;
-  // Wave 3.5 D2: true => caller passed (NULL, 0); template is then empty.
-  bool template_null = 8;
 }
 
 message EncapsulateKeyExactResponse {
@@ -1694,6 +1698,8 @@ message GetBackendInterfacesResponse {
   // True only when the daemon implements the shape-bound message-parameter
   // contract. Absent from older daemons and therefore treated as false.
   optional bool pointer_safe_message_parameters = 6;
+  optional bool pointer_safe_authenticated_parameters = 7;
+  optional uint32 exact_output_effects_version = 8;
 }
 
 // Server-driven mechanism parameter registry payload. Carries the
@@ -1713,6 +1719,11 @@ message MechanismRegistryPayload {
   repeated uint64 parameterless = 3;
   // shape -> mechanisms mapping (one entry per known shape name).
   repeated MechanismParamEntry params = 4;
+  // CK_MECHANISM_TYPE values the operator hard-disabled via the registry
+  // `exclude` list. The shim rejects these at operation time (even without
+  // params) and hides them from discovery in every discovery mode.
+  // Absent from older daemons and therefore treated as empty.
+  repeated uint64 excluded = 5;
 }
 
 message MechanismParamEntry {

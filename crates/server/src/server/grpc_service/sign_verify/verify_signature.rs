@@ -13,6 +13,8 @@ use tracing::{info, warn};
 use pkcs11_proxy_ng_types::*;
 
 use super::super::super::context_manager::ClientContextId;
+use super::super::authorization::mechanism_permitted;
+use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
     check_sanitize, ck_rv_only, input_from_wire, parse_mechanism, resolve_session,
     resolve_session_and_key, spawn_backend,

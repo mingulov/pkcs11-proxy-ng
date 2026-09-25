@@ -8,11 +8,8 @@
 //!
 //! The observation records addresses and values read through the retained
 //! root; pointer-identity equality is computed test-side from those
-//! recorded addresses. The oracle dereferences no foreign pointer except
-//! that retained root itself — the Init-time snapshot
-//! (`provider::encrypt_init`) and the Encrypt-time readback
-//! (`provider::encrypt`) are the deliberate retention emulation — and it
-//! never carries secret material: outputs are a fixed canary.
+//! recorded addresses. The oracle itself never dereferences foreign
+//! pointers and never carries secret material: outputs are a fixed canary.
 //!
 //! Dual fixture: this module compiles in-process into backend contract
 //! tests (default suite) and as an unpublished cdylib for

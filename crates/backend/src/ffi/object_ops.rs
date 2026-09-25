@@ -23,14 +23,9 @@ impl FfiBackend {
         let ffi_attrs = FfiAttrs::from_slice(template)?;
         let ck_attrs = &ffi_attrs.attrs;
         let h_session = Self::session_handle(session)?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
-        Self::call_unit(
-            &admission,
-            unsafe { (*self.func_list).C_FindObjectsInit },
-            |function| unsafe {
-                function(h_session, Self::ffi_attr_ptr(&ffi_attrs), Self::ulong_len(ck_attrs.len()))
-            },
-        )
+        Self::call_unit(unsafe { (*self.func_list).C_FindObjectsInit }, |function| unsafe {
+            function(h_session, ck_attrs.as_ptr() as *mut _, Self::ulong_len(ck_attrs.len()))
+        })
     }
 
     pub(super) fn ffi_find_objects(
@@ -41,13 +36,9 @@ impl FfiBackend {
         let cap = cap_find_objects_count(max_count);
         let mut handles = vec![0 as cryptoki_sys::CK_OBJECT_HANDLE; cap];
         let mut found: cryptoki_sys::CK_ULONG = 0;
+        let h_session = Self::session_handle(session)?;
         Self::call_unit(unsafe { (*self.func_list).C_FindObjects }, |function| unsafe {
-            function(
-                Self::session_handle(session),
-                handles.as_mut_ptr(),
-                cap as cryptoki_sys::CK_ULONG,
-                &mut found,
-            )
+            function(h_session, handles.as_mut_ptr(), cap as cryptoki_sys::CK_ULONG, &mut found)
         })?;
         // A conformant backend writes at most `cap` handles; clamp `found`
         // defensively so a buggy backend cannot drive an out-of-bounds slice.
@@ -56,14 +47,10 @@ impl FfiBackend {
     }
 
     pub(super) fn ffi_find_objects_final(&self, session: CkSessionHandle) -> CkResult<()> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
         let h_session = Self::session_handle(session)?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
-        Self::call_unit(
-            &admission,
-            unsafe { (*self.func_list).C_FindObjectsFinal },
-            |function| unsafe { function(h_session) },
-        )
+        Self::call_unit(unsafe { (*self.func_list).C_FindObjectsFinal }, |function| unsafe {
+            function(h_session)
+        })
     }
 
     pub(super) fn ffi_get_attribute_value(
@@ -73,6 +60,8 @@ impl FfiBackend {
         template: &mut [CkAttribute],
     ) -> CkResult<()> {
         let mut ffi_attrs = FfiAttrs::from_slice(template)?;
+        let h_session = Self::session_handle(session)?;
+        let h_object = Self::object_handle(object)?;
         let rv =
             Self::call_raw(unsafe { (*self.func_list).C_GetAttributeValue }, |function| unsafe {
                 function(
@@ -97,11 +86,8 @@ impl FfiBackend {
         let mut ffi_queries = FfiAttributeQueries::from_queries(queries)?;
         let h_session = Self::session_handle(session)?;
         let h_object = Self::object_handle(object)?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
-        let rv = Self::call_raw(
-            &admission,
-            unsafe { (*self.func_list).C_GetAttributeValue },
-            |function| unsafe {
+        let rv =
+            Self::call_raw(unsafe { (*self.func_list).C_GetAttributeValue }, |function| unsafe {
                 function(
                     h_session,
                     h_object,
@@ -110,7 +96,7 @@ impl FfiBackend {
                 )
             })?;
         let rv = CkRv(rv as u64);
-        Ok((rv, exact_attribute_results_from_ffi(queries, &ffi_queries.attrs, rv)))
+        Ok((rv, ffi_queries.readback(queries, rv)))
     }
 
     pub(super) fn ffi_create_object(
@@ -119,6 +105,7 @@ impl FfiBackend {
         template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
         let ffi_attrs = FfiAttrs::from_slice(template)?;
+        let h_session = Self::session_handle(session)?;
         Self::call_object_output(
             &admission,
             unsafe { (*self.func_list).C_CreateObject },
@@ -140,6 +127,8 @@ impl FfiBackend {
         template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
         let ffi_attrs = FfiAttrs::from_slice(template)?;
+        let h_session = Self::session_handle(session)?;
+        let h_object = Self::object_handle(object)?;
         Self::call_object_output(
             &admission,
             unsafe { (*self.func_list).C_CopyObject },
@@ -160,32 +149,9 @@ impl FfiBackend {
         session: CkSessionHandle,
         object: CkObjectHandle,
     ) -> CkResult<()> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
         let h_session = Self::session_handle(session)?;
         let h_object = Self::object_handle(object)?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
-        Self::call_unit(
-            &admission,
-            unsafe { (*self.func_list).C_DestroyObject },
-            |function| unsafe { function(h_session, h_object) },
-        )
-    }
-
-    /// Drop-path destroy: rides the enclosing op's exclusion via the control
-    /// choke instead of admitting (a nested `admit_ordinary` under the live
-    /// guard would deadlock behind a queued Finalize writer). Debug-pins the
-    /// enclosing guard via `debug_assert_admitted`, and skips fence-enter:
-    /// the destroy runs on the enclosing op's own session whose fence-read
-    /// it already holds.
-    pub(super) fn ffi_destroy_object_unadmitted(
-        &self,
-        session: CkSessionHandle,
-        object: CkObjectHandle,
-    ) -> CkResult<()> {
-        super::native_domain::debug_assert_admitted();
-        let h_session = Self::session_handle(session)?;
-        let h_object = Self::object_handle(object)?;
-        Self::call_control_unit(unsafe { (*self.func_list).C_DestroyObject }, |function| unsafe {
+        Self::call_unit(unsafe { (*self.func_list).C_DestroyObject }, |function| unsafe {
             function(h_session, h_object)
         })
     }
@@ -195,10 +161,8 @@ impl FfiBackend {
         session: CkSessionHandle,
         object: CkObjectHandle,
     ) -> CkResult<u64> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
         let h_session = Self::session_handle(session)?;
         let h_object = Self::object_handle(object)?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_ulong_output(
             &admission,
             unsafe { (*self.func_list).C_GetObjectSize },
@@ -213,10 +177,12 @@ impl FfiBackend {
         template: Option<&[CkAttribute]>,
     ) -> CkResult<()> {
         let ffi_attrs = FfiAttrs::from_slice(template)?;
+        let h_session = Self::session_handle(session)?;
+        let h_object = Self::object_handle(object)?;
         Self::call_unit(unsafe { (*self.func_list).C_SetAttributeValue }, |function| unsafe {
             function(
-                Self::session_handle(session),
-                Self::object_handle(object),
+                h_session,
+                h_object,
                 Self::ffi_attr_ptr(&ffi_attrs),
                 Self::ffi_attr_len(&ffi_attrs),
             )

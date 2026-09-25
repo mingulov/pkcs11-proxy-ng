@@ -8,8 +8,8 @@ use pkcs11_proxy_ng_types::{
 
 use super::super::context_manager::ClientContextId;
 use super::service_utils::{
-    check_sanitize, input_from_wire, mechanism_output_to_proto, parse_mechanism, resolve_session,
-    resolve_session_and_two_objects, spawn_backend,
+    ExactCompletion, check_sanitize, input_from_wire, mechanism_output_to_proto, resolve_session,
+    spawn_backend_exact,
 };
 
 use crate::server::grpc_service::HandlerContext;
@@ -18,6 +18,7 @@ pub(super) async fn byte_output_exact(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::ByteOutputExactRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::ByteOutputExactResponse>, Status> {
+    let started = std::time::Instant::now();
     let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     if req.exact_output_effects_version != 1 {
@@ -39,6 +40,7 @@ pub(super) async fn byte_output_exact(
     fn error_response(error: CkRv) -> pkcs11_proxy_ng_proto::ByteOutputExactResponse {
         pkcs11_proxy_ng_proto::ByteOutputExactResponse {
             result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
+                apply_returned_len: Some(false),
                 ck_rv: error.0,
                 returned_len: 0,
                 value: None,
@@ -61,30 +63,42 @@ pub(super) async fn byte_output_exact(
     match function {
         // Shape: (session, mechanism, wrapping_key, key, spec) -> wrap_key_exact
         ByteOutputFunction::WrapKey => {
-            let mechanism = match parse_mechanism(req.mechanism) {
-                Ok(m) => m,
-                Err(error) => return Ok(Response::new(error_response(error))),
-            };
-
-            let (session, wrapping_key, key) = match resolve_session_and_two_objects(
+            let outcome = async {
+                let p = match super::key_ops::wrap_preparation::prepare_wrap(
+                    ctx,
+                    &ctx_id,
+                    req.session_handle,
+                    req.wrapping_key_handle,
+                    req.key_handle,
+                    req.mechanism,
+                )
+                .await?
+                {
+                    Ok(p) => p,
+                    Err(rv) => return Ok(Err(rv)),
+                };
+                let backend = ctx.backend.clone();
+                spawn_backend_exact(move || {
+                    ExactCompletion::capture(backend.wrap_key_exact_with_output(
+                        p.session,
+                        &p.mechanism,
+                        p.wrapping_key,
+                        p.key,
+                        &spec,
+                    ))
+                })
+                .await
+            }
+            .await;
+            let result = super::audit_events::audit_key_outcome(
                 ctx,
                 &ctx_id,
                 "C_WrapKey",
                 req.session_handle,
-                req.wrapping_key_handle,
-                req.key_handle,
-            )
-            .await
-            {
-                Ok(handles) => handles,
-                Err(error) => return Ok(Response::new(error_response(error))),
-            };
-
-            let backend = ctx.backend.clone();
-            let result = spawn_backend(move || {
-                backend.wrap_key_exact_with_output(session, &mechanism, wrapping_key, key, &spec)
-            })
-            .await?;
+                started,
+                outcome,
+                |(output, _)| output.ck_rv,
+            )?;
             let (wrap_result, mechanism_out) = match result {
                 Ok((output, mech_out)) => (Ok(output), mech_out),
                 Err(error) => (Err(error), None),
@@ -108,9 +122,10 @@ pub(super) async fn byte_output_exact(
                 };
 
             let backend = ctx.backend.clone();
-            let result =
-                spawn_backend(move || dispatch_session_only(function, &*backend, session, &spec))
-                    .await?;
+            let result = spawn_backend_exact(move || {
+                ExactCompletion::capture(dispatch_session_only(function, &*backend, session, &spec))
+            })
+            .await?;
 
             Ok(Response::new(pkcs11_proxy_ng_proto::ByteOutputExactResponse {
                 result: Some(result_to_proto(result)),
@@ -133,9 +148,9 @@ pub(super) async fn byte_output_exact(
 
             let backend = ctx.backend.clone();
             let (result, mechanism_out) = if function == ByteOutputFunction::Encrypt {
-                let result = spawn_backend(move || {
+                let result = spawn_backend_exact(move || {
                     let buf = input_from_wire(&input_data, input_data_null_len);
-                    backend.encrypt_exact_with_output(session, buf, &spec)
+                    ExactCompletion::capture(backend.encrypt_exact_with_output(session, buf, &spec))
                 })
                 .await?;
                 match result {
@@ -143,9 +158,11 @@ pub(super) async fn byte_output_exact(
                     Err(error) => (Err(error), None),
                 }
             } else {
-                let result = spawn_backend(move || {
+                let result = spawn_backend_exact(move || {
                     let buf = input_from_wire(&input_data, input_data_null_len);
-                    dispatch_session_data(function, &*backend, session, buf, &spec)
+                    ExactCompletion::capture(dispatch_session_data(
+                        function, &*backend, session, buf, &spec,
+                    ))
                 })
                 .await?;
                 (result, None)
@@ -255,7 +272,7 @@ mod sanitize_inputs_tests {
         let backend: Arc<dyn Pkcs11Backend> = mock.clone();
 
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
-        ctx_mgr.register_slot(CkSlotId(0)).await;
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
         let ctx_id = ctx_mgr.create_context(None).await.unwrap();
         let virtual_slot = ctx_mgr.virtual_slots().await[0];
 
@@ -346,6 +363,7 @@ mod sanitize_inputs_tests {
         let resp = byte_output_exact(
             &service.ctx,
             Request::new(pkcs11_proxy_ng_proto::ByteOutputExactRequest {
+                exact_output_effects_version: 1,
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
                 function: pkcs11_proxy_ng_proto::ByteOutputFunction::Decrypt as i32,
@@ -394,6 +412,7 @@ mod sanitize_inputs_tests {
         let _resp = byte_output_exact(
             &service.ctx,
             Request::new(pkcs11_proxy_ng_proto::ByteOutputExactRequest {
+                exact_output_effects_version: 1,
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
                 function: pkcs11_proxy_ng_proto::ByteOutputFunction::Decrypt as i32,
@@ -426,6 +445,7 @@ mod sanitize_inputs_tests {
         let response = byte_output_exact(
             &HandlerContext::for_test(&ctx_mgr, &backend),
             Request::new(pkcs11_proxy_ng_proto::ByteOutputExactRequest {
+                exact_output_effects_version: 1,
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
                 function: pkcs11_proxy_ng_proto::ByteOutputFunction::Decrypt as i32,

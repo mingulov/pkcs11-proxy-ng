@@ -661,7 +661,7 @@ pub trait Pkcs11Backend: Send + Sync {
     ) -> CkResult<(
         CkOutputBufferResult,
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
     )> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -677,7 +677,7 @@ pub trait Pkcs11Backend: Send + Sync {
     ) -> CkResult<(
         CkOutputBufferResult,
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
     )> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -690,7 +690,7 @@ pub trait Pkcs11Backend: Send + Sync {
         _provider_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
     )> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -703,7 +703,7 @@ pub trait Pkcs11Backend: Send + Sync {
         _provider_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
     )> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -732,7 +732,7 @@ pub trait Pkcs11Backend: Send + Sync {
     ) -> CkResult<(
         CkOutputBufferResult,
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
     )> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -748,7 +748,7 @@ pub trait Pkcs11Backend: Send + Sync {
     ) -> CkResult<(
         CkOutputBufferResult,
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
     )> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -1172,7 +1172,7 @@ pub trait Pkcs11Backend: Send + Sync {
         _wrapping_key: CkObjectHandle,
         _key: CkObjectHandle,
         _aad: CkInBuf<'_>,
-    ) -> CkResult<(SecretBytes, pkcs11_proxy_ng_proto::convert::authenticated::AuthenticatedOutput)>
+    ) -> CkResult<(Vec<u8>, pkcs11_proxy_ng_proto::convert::authenticated::AuthenticatedOutput)>
     {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -1200,7 +1200,7 @@ pub trait Pkcs11Backend: Send + Sync {
         _parameter: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         _unwrapping_key: CkObjectHandle,
         _wrapped_key: CkInBuf<'_>,
-        _template: Option<&[CkAttribute]>,
+        _template: &[CkAttribute],
         _aad: CkInBuf<'_>,
     ) -> CkResult<(
         CkObjectHandle,

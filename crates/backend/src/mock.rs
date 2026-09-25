@@ -28,6 +28,7 @@ struct LoginGate {
 mod crypto_ops;
 pub mod echo;
 mod historical_flags;
+mod mechanism_entry;
 mod mock_types;
 mod object_ops;
 pub mod output_lengths;
@@ -35,6 +36,7 @@ mod session_ops;
 mod state;
 mod wrap_entry;
 
+pub use self::mechanism_entry::{MockEmbeddedHandles, MockMechanismEntry};
 pub use self::mock_types::{MockAbi, MockAttributeSlot, MultiPartOp};
 use self::state::{MockState, compute_session_state};
 pub use self::wrap_entry::{MockWrapAction, MockWrapEntry, MockWrapObservation};
@@ -120,14 +122,6 @@ pub struct MockBackend {
     /// the normal `enqueue_slot_event` wakeup (or by clearing the flag,
     /// which also wakes parked waiters to re-check).
     hang_slot_event: Mutex<bool>,
-    /// One-shot `wait_for_slot_event` outcome override for ownership-matrix
-    /// tests (TO26b group 2). The next wait consumes it, letting tests
-    /// script backend errors (contention, sentinel RVs) the queue cannot
-    /// express. Set via `set_next_wait_outcome()`.
-    next_wait_outcome: Mutex<Option<CkResult<CkSlotId>>>,
-    /// Count of `wait_for_slot_event` trait calls reaching the backend.
-    /// Wait-matrix tests use it to prove zero-backend-entry refusals.
-    wait_calls: AtomicUsize,
     /// Per-slot token presence override. Slots not present in this map default
     /// to token-present to preserve the historical mock behavior.
     token_presence: Mutex<HashMap<CkSlotId, bool>>,
@@ -306,8 +300,6 @@ impl MockBackend {
             }),
             slot_event_queue: Mutex::new(std::collections::VecDeque::new()),
             hang_slot_event: Mutex::new(false),
-            next_wait_outcome: Mutex::new(None),
-            wait_calls: AtomicUsize::new(0),
             mechanism_entries: Mutex::new(mechanism_entry::MechanismEntries::default()),
             wrap_entries: Mutex::new(Vec::new()),
             wrap_action: Mutex::new(None),
@@ -466,18 +458,6 @@ impl MockBackend {
         self.slot_event_condvar.notify_all();
     }
 
-    /// Script the next `wait_for_slot_event` outcome (consumed one-shot).
-    /// Lets ownership-matrix tests drive backend errors — contention
-    /// refusals, sentinel RVs — the event queue cannot express.
-    pub fn set_next_wait_outcome(&self, outcome: CkResult<CkSlotId>) {
-        *self.next_wait_outcome.lock().unwrap() = Some(outcome);
-    }
-
-    /// Number of `wait_for_slot_event` trait calls that reached the backend.
-    pub fn wait_call_count(&self) -> usize {
-        self.wait_calls.load(Ordering::SeqCst)
-    }
-
     /// Configure whether a token is present in a known slot.
     ///
     /// This lets tests model insertion/removal without changing the default
@@ -550,6 +530,31 @@ impl MockBackend {
     /// (M9) deduplicates repeated authorization checks.
     pub fn token_info_call_count(&self) -> usize {
         self.token_info_calls.load(Ordering::SeqCst)
+    }
+
+    /// Override only the token's identity; presence and injected errors still apply.
+    pub fn set_slot_token_identity(&self, slot: CkSlotId, label: String, serial: String) {
+        self.token_identities.lock().unwrap().insert(slot, (label, serial));
+    }
+
+    /// Native token-metadata request arguments, including calls that returned errors.
+    pub fn token_info_requested_slots(&self) -> Vec<CkSlotId> {
+        self.token_info_requested_slots.lock().unwrap().clone()
+    }
+
+    /// Native InitToken slot arguments; PIN and label payloads are not retained.
+    pub fn init_token_requested_slots(&self) -> Vec<CkSlotId> {
+        self.init_token_requested_slots.lock().unwrap().clone()
+    }
+
+    /// Simulate a provider reporting an inconsistent session owner.
+    pub fn set_session_info_slot_override(&self, session: CkSessionHandle, slot: Option<CkSlotId>) {
+        let mut overrides = self.session_info_slot_overrides.lock().unwrap();
+        if let Some(slot) = slot {
+            overrides.insert(session, slot);
+        } else {
+            overrides.remove(&session);
+        }
     }
 
     /// Number of `C_GetAttributeValue` calls reaching the backend (regular path).
@@ -1446,6 +1451,7 @@ impl Pkcs11Backend for MockBackend {
 
     fn get_token_info(&self, slot_id: CkSlotId) -> CkResult<CkTokenInfo> {
         self.token_info_calls.fetch_add(1, Ordering::SeqCst);
+        self.token_info_requested_slots.lock().unwrap().push(slot_id);
         self.token_info(slot_id)
     }
 
@@ -1669,6 +1675,7 @@ impl Pkcs11Backend for MockBackend {
         Ok(())
     }
     fn digest_init_cancel(&self, s: CkSessionHandle) -> CkResult<()> {
+        self.record_mechanism_entry(MockMechanismEntry::DigestInitCancel, None);
         self.session_digest_mechanism.lock().unwrap().remove(&s.0);
         self.init_cancel_impl(s, MultiPartOp::Digest)
     }
@@ -1829,7 +1836,7 @@ impl Pkcs11Backend for MockBackend {
         m: &CkMechanism,
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
-    ) -> CkResult<SecretBytes> {
+    ) -> CkResult<Vec<u8>> {
         self.record_wrap_entry(MockWrapEntry::Wrap, s, m, wrapping_key, key, None, None)?;
         self.require_mechanism_workflow_for_session(s, m, CkMechanismFlags::WRAP)?;
         let state = self.state.lock().unwrap();
@@ -2174,8 +2181,8 @@ impl Pkcs11Backend for MockBackend {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         public_key: CkObjectHandle,
-        template: Option<&[CkAttribute]>,
-    ) -> CkResult<(SecretBytes, CkObjectHandle)> {
+        template: &[CkAttribute],
+    ) -> CkResult<(Vec<u8>, CkObjectHandle)> {
         self.record_mechanism_entry(MockMechanismEntry::EncapsulateKey, Some(mechanism));
         self.require_mechanism_workflow_for_session(
             session,
@@ -2336,7 +2343,11 @@ impl Pkcs11Backend for MockBackend {
         plaintext: CkInBuf<'_>,
         output_spec: &CkOutputBufferSpec,
         provider_spec: &CkParameterRoundtripSpec,
-    ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult, MessageParameter)> {
+    ) -> CkResult<(
+        CkOutputBufferResult,
+        CkParameterRoundtripResult,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
+    )> {
         self.message_parameter_calls.fetch_add(1, Ordering::SeqCst);
         *self.last_message_parameter_call.lock().unwrap() = Some(msg_param.clone());
         let (output, message) = self.encrypt_message_exact_msg_impl(
@@ -2352,7 +2363,18 @@ impl Pkcs11Backend for MockBackend {
             value: provider_spec.buffer_present.then(Vec::new),
         });
         let message = self.next_message_parameter_response_or(message);
-        Ok((output, parameter, message))
+        let effects = pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects::capture(
+            msg_param,
+            &message,
+            pkcs11_proxy_ng_proto::convert::message_effects::MessageEffectContext {
+                mode: ParameterEffectCallMode::from_output_spec(output_spec),
+                encrypt: true,
+                generated_stage: true,
+                auth_stage: true,
+                rv: output.ck_rv,
+            },
+        );
+        Ok((output, parameter, effects))
     }
 
     fn decrypt_message_exact_msg(
@@ -2363,7 +2385,11 @@ impl Pkcs11Backend for MockBackend {
         ciphertext: CkInBuf<'_>,
         output_spec: &CkOutputBufferSpec,
         provider_spec: &CkParameterRoundtripSpec,
-    ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult, MessageParameter)> {
+    ) -> CkResult<(
+        CkOutputBufferResult,
+        CkParameterRoundtripResult,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
+    )> {
         self.message_parameter_calls.fetch_add(1, Ordering::SeqCst);
         *self.last_message_parameter_call.lock().unwrap() = Some(msg_param.clone());
         let (output, message) = self.decrypt_message_exact_msg_impl(
@@ -2379,7 +2405,18 @@ impl Pkcs11Backend for MockBackend {
             value: provider_spec.buffer_present.then(Vec::new),
         });
         let message = self.next_message_parameter_response_or(message);
-        Ok((output, parameter, message))
+        let effects = pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects::capture(
+            msg_param,
+            &message,
+            pkcs11_proxy_ng_proto::convert::message_effects::MessageEffectContext {
+                mode: ParameterEffectCallMode::from_output_spec(output_spec),
+                encrypt: false,
+                generated_stage: true,
+                auth_stage: true,
+                rv: output.ck_rv,
+            },
+        );
+        Ok((output, parameter, effects))
     }
 
     fn encrypt_message_begin_msg(
@@ -2388,7 +2425,10 @@ impl Pkcs11Backend for MockBackend {
         msg_param: &MessageParameter,
         aad: CkInBuf<'_>,
         provider_spec: &CkParameterRoundtripSpec,
-    ) -> CkResult<(CkParameterRoundtripResult, MessageParameter)> {
+    ) -> CkResult<(
+        CkParameterRoundtripResult,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
+    )> {
         self.message_begin_calls.fetch_add(1, Ordering::SeqCst);
         let _ = self.resolve_input(aad)?;
         if !self.state.lock().unwrap().has_session(session) {
@@ -2396,16 +2436,25 @@ impl Pkcs11Backend for MockBackend {
         }
         msg_param.validate_structured()?;
         *self.last_message_parameter_call.lock().unwrap() = Some(msg_param.clone());
-        Ok((
-            self.next_message_parameter_ack_or(CkParameterRoundtripResult {
-                ck_rv: CkRv::OK,
-                returned_len: provider_spec.buffer_len,
-                value: provider_spec.buffer_present.then(Vec::new),
-            }),
-            self.next_message_parameter_response_or(Self::mock_message_begin_parameter_out(
-                msg_param,
-            )),
-        ))
+        let ack = self.next_message_parameter_ack_or(CkParameterRoundtripResult {
+            ck_rv: CkRv::OK,
+            returned_len: provider_spec.buffer_len,
+            value: provider_spec.buffer_present.then(Vec::new),
+        });
+        let returned = self
+            .next_message_parameter_response_or(Self::mock_message_begin_parameter_out(msg_param));
+        let effects = pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects::capture(
+            msg_param,
+            &returned,
+            pkcs11_proxy_ng_proto::convert::message_effects::MessageEffectContext {
+                mode: ParameterEffectCallMode::Begin,
+                encrypt: true,
+                generated_stage: true,
+                auth_stage: false,
+                rv: ack.ck_rv,
+            },
+        );
+        Ok((ack, effects))
     }
 
     fn decrypt_message_begin_msg(
@@ -2414,7 +2463,10 @@ impl Pkcs11Backend for MockBackend {
         msg_param: &MessageParameter,
         aad: CkInBuf<'_>,
         provider_spec: &CkParameterRoundtripSpec,
-    ) -> CkResult<(CkParameterRoundtripResult, MessageParameter)> {
+    ) -> CkResult<(
+        CkParameterRoundtripResult,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
+    )> {
         self.message_begin_calls.fetch_add(1, Ordering::SeqCst);
         let _ = self.resolve_input(aad)?;
         if !self.state.lock().unwrap().has_session(session) {
@@ -2422,14 +2474,24 @@ impl Pkcs11Backend for MockBackend {
         }
         msg_param.validate_structured()?;
         *self.last_message_parameter_call.lock().unwrap() = Some(msg_param.clone());
-        Ok((
-            self.next_message_parameter_ack_or(CkParameterRoundtripResult {
-                ck_rv: CkRv::OK,
-                returned_len: provider_spec.buffer_len,
-                value: provider_spec.buffer_present.then(Vec::new),
-            }),
-            self.next_message_parameter_response_or(msg_param.clone()),
-        ))
+        let ack = self.next_message_parameter_ack_or(CkParameterRoundtripResult {
+            ck_rv: CkRv::OK,
+            returned_len: provider_spec.buffer_len,
+            value: provider_spec.buffer_present.then(Vec::new),
+        });
+        let returned = self.next_message_parameter_response_or(msg_param.clone());
+        let effects = pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects::capture(
+            msg_param,
+            &returned,
+            pkcs11_proxy_ng_proto::convert::message_effects::MessageEffectContext {
+                mode: ParameterEffectCallMode::Begin,
+                encrypt: false,
+                generated_stage: true,
+                auth_stage: false,
+                rv: ack.ck_rv,
+            },
+        );
+        Ok((ack, effects))
     }
 
     fn sign_message_exact_msg(
@@ -2450,7 +2512,11 @@ impl Pkcs11Backend for MockBackend {
         flags: CkFlags,
         output_spec: &CkOutputBufferSpec,
         provider_spec: &CkParameterRoundtripSpec,
-    ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult, MessageParameter)> {
+    ) -> CkResult<(
+        CkOutputBufferResult,
+        CkParameterRoundtripResult,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
+    )> {
         self.message_parameter_calls.fetch_add(1, Ordering::SeqCst);
         *self.last_message_parameter_call.lock().unwrap() = Some(msg_param.clone());
         let (output, message) = self.encrypt_message_next_exact_msg_impl(
@@ -2466,7 +2532,18 @@ impl Pkcs11Backend for MockBackend {
             value: provider_spec.buffer_present.then(Vec::new),
         });
         let message = self.next_message_parameter_response_or(message);
-        Ok((output, parameter, message))
+        let effects = pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects::capture(
+            msg_param,
+            &message,
+            pkcs11_proxy_ng_proto::convert::message_effects::MessageEffectContext {
+                mode: ParameterEffectCallMode::from_output_spec(output_spec),
+                encrypt: true,
+                generated_stage: false,
+                auth_stage: flags.0 & cryptoki_sys::CKF_END_OF_MESSAGE as u64 != 0,
+                rv: output.ck_rv,
+            },
+        );
+        Ok((output, parameter, effects))
     }
 
     fn decrypt_message_next_exact_msg(
@@ -2477,7 +2554,11 @@ impl Pkcs11Backend for MockBackend {
         flags: CkFlags,
         output_spec: &CkOutputBufferSpec,
         provider_spec: &CkParameterRoundtripSpec,
-    ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult, MessageParameter)> {
+    ) -> CkResult<(
+        CkOutputBufferResult,
+        CkParameterRoundtripResult,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
+    )> {
         self.message_parameter_calls.fetch_add(1, Ordering::SeqCst);
         *self.last_message_parameter_call.lock().unwrap() = Some(msg_param.clone());
         let (output, message) = self.decrypt_message_next_exact_msg_impl(
@@ -2493,7 +2574,18 @@ impl Pkcs11Backend for MockBackend {
             value: provider_spec.buffer_present.then(Vec::new),
         });
         let message = self.next_message_parameter_response_or(message);
-        Ok((output, parameter, message))
+        let effects = pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects::capture(
+            msg_param,
+            &message,
+            pkcs11_proxy_ng_proto::convert::message_effects::MessageEffectContext {
+                mode: ParameterEffectCallMode::from_output_spec(output_spec),
+                encrypt: false,
+                generated_stage: false,
+                auth_stage: flags.0 & cryptoki_sys::CKF_END_OF_MESSAGE as u64 != 0,
+                rv: output.ck_rv,
+            },
+        );
+        Ok((output, parameter, effects))
     }
 
     fn sign_message_next_exact_msg(
@@ -2521,6 +2613,15 @@ impl Pkcs11Backend for MockBackend {
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
+        self.record_wrap_entry(
+            MockWrapEntry::AuthenticatedExact,
+            s,
+            mechanism,
+            wrapping_key,
+            key,
+            Some(output_spec),
+            Some(aad),
+        )?;
         let _ = self.resolve_input(aad)?;
         self.require_mechanism_workflow_for_session(s, mechanism, CkMechanismFlags::WRAP)?;
         let state = self.state.lock().unwrap();
@@ -2602,6 +2703,7 @@ impl Pkcs11Backend for MockBackend {
         template: &[CkAttribute],
         ciphertext: CkInBuf<'_>,
     ) -> CkResult<CkObjectHandle> {
+        self.record_mechanism_entry(MockMechanismEntry::DecapsulateKey, Some(mechanism));
         let _ = self.resolve_input(ciphertext)?;
         self.require_mechanism_workflow_for_session(
             session,
@@ -3198,7 +3300,7 @@ impl Pkcs11Backend for MockBackend {
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
         aad: CkInBuf<'_>,
-    ) -> CkResult<(SecretBytes, pkcs11_proxy_ng_proto::convert::authenticated::AuthenticatedOutput)>
+    ) -> CkResult<(Vec<u8>, pkcs11_proxy_ng_proto::convert::authenticated::AuthenticatedOutput)>
     {
         let output = self.authenticated_output(mechanism, parameter)?;
         let (bytes, _) = self.wrap_key_authenticated(session, mechanism, wrapping_key, key, aad)?;
@@ -3258,7 +3360,7 @@ impl Pkcs11Backend for MockBackend {
         parameter: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
-        template: Option<&[CkAttribute]>,
+        template: &[CkAttribute],
         aad: CkInBuf<'_>,
     ) -> CkResult<(
         CkObjectHandle,
@@ -3277,9 +3379,7 @@ impl Pkcs11Backend for MockBackend {
             *self.destroy_error.lock().unwrap() = (rv != CkRv::OK).then_some(rv);
             return Ok((
                 key,
-                pkcs11_proxy_ng_proto::convert::authenticated::AuthenticatedOutput::Iv(
-                    Vec::new().into(),
-                ),
+                pkcs11_proxy_ng_proto::convert::authenticated::AuthenticatedOutput::Iv(Vec::new()),
             ));
         }
         Ok((key, output))
@@ -3293,6 +3393,15 @@ impl Pkcs11Backend for MockBackend {
         key: CkObjectHandle,
         aad: CkInBuf<'_>,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+        self.record_wrap_entry(
+            MockWrapEntry::Authenticated,
+            session,
+            mechanism,
+            wrapping_key,
+            key,
+            None,
+            Some(aad),
+        )?;
         let _ = self.resolve_input(aad)?;
         self.require_mechanism_workflow_for_session(session, mechanism, CkMechanismFlags::WRAP)?;
         let state = self.state.lock().unwrap();
@@ -3309,6 +3418,15 @@ impl Pkcs11Backend for MockBackend {
         template: &[CkAttribute],
         aad: CkInBuf<'_>,
     ) -> CkResult<(CkObjectHandle, Vec<u8>)> {
+        self.record_wrap_entry(
+            MockWrapEntry::UnwrapAuthenticated,
+            session,
+            mechanism,
+            unwrapping_key,
+            CkObjectHandle(0),
+            None,
+            Some(aad),
+        )?;
         let _ = self.resolve_input(wrapped_key)?;
         let _ = self.resolve_input(aad)?;
         self.require_mechanism_workflow_for_session(session, mechanism, CkMechanismFlags::UNWRAP)?;

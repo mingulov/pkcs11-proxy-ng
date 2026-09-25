@@ -91,27 +91,19 @@ impl FfiBackend {
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
         aad: CkInBuf<'_>,
-    ) -> CkResult<(SecretBytes, AuthenticatedOutput)> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
+    ) -> CkResult<(Vec<u8>, AuthenticatedOutput)> {
         let fl = self.func_list_3_2.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_WrapKeyAuthenticated }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let (aad_ptr, aad_len) = aad.as_ptr_len();
         let aad_len = narrow_wire_ulong(aad_len)?;
-        let h_session = Self::session_handle(session)?;
-        let h_wrapping_key = Self::object_handle(wrapping_key)?;
-        let h_key = Self::object_handle(key)?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
-        // Each leg routes through the unit choke (single call, no retry);
-        // narrowing hoists verbatim, and the inter-leg input validation
-        // stays exactly between the two native calls (row-11 property).
         with_parameter(mechanism, parameter, |native| {
             let mut len = 0;
-            Self::call_unit(&admission, Some(f), |function| unsafe {
-                function(
-                    h_session,
+            Self::ck_result(unsafe {
+                f(
+                    Self::session_handle(session)?,
                     native.pointer(),
-                    h_wrapping_key,
-                    h_key,
+                    Self::object_handle(wrapping_key)?,
+                    Self::object_handle(key)?,
                     aad_ptr.cast_mut(),
                     aad_len,
                     std::ptr::null_mut(),
@@ -124,12 +116,12 @@ impl FfiBackend {
             let size = super::call_helpers::capped_output_len(len as u64);
             let mut bytes = vec![0; size];
             len = size as cryptoki_sys::CK_ULONG;
-            Self::call_unit(&admission, Some(f), |function| unsafe {
-                function(
-                    h_session,
+            Self::ck_result(unsafe {
+                f(
+                    Self::session_handle(session)?,
                     native.pointer(),
-                    h_wrapping_key,
-                    h_key,
+                    Self::object_handle(wrapping_key)?,
+                    Self::object_handle(key)?,
                     aad_ptr.cast_mut(),
                     aad_len,
                     bytes.as_mut_ptr(),
@@ -137,8 +129,7 @@ impl FfiBackend {
                 )
             })?;
             bytes.truncate(len as usize);
-            // ADR-0013 S5: adopt the provider-written buffer immediately.
-            Ok(SecretBytes::new(bytes))
+            Ok(bytes)
         })
     }
 
@@ -152,7 +143,6 @@ impl FfiBackend {
         aad: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<(CkOutputBufferResult, AuthenticatedOutput)> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
         let fl = self.func_list_3_2.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_WrapKeyAuthenticated }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let (aad_ptr, aad_len) = aad.as_ptr_len();
@@ -161,8 +151,7 @@ impl FfiBackend {
         let h_session = Self::session_handle(session)?;
         let h_wrapping_key = Self::object_handle(wrapping_key)?;
         let h_key = Self::object_handle(key)?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
-        let output = Self::single_call_bytes_exact(&admission, spec, |output, length| unsafe {
+        let output = Self::single_call_bytes_exact(spec, |output, length| unsafe {
             f(
                 h_session,
                 native.pointer(),
@@ -207,42 +196,38 @@ impl FfiBackend {
         parameter: Option<&MessageParameter>,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
-        template: Option<&[CkAttribute]>,
+        template: &[CkAttribute],
         aad: CkInBuf<'_>,
     ) -> CkResult<(CkObjectHandle, AuthenticatedOutput)> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
         self.object_cleanup.ensure_clear()?;
         let fl = self.func_list_3_2.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_UnwrapKeyAuthenticated }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
-        let attrs = FfiAttrs::from_opt_slice(template)?;
+        let attrs = FfiAttrs::from_slice(template)?;
         let (aad_ptr, aad_len) = aad.as_ptr_len();
         let aad_len = narrow_wire_ulong(aad_len)?;
         let (wrapped_ptr, wrapped_len) = wrapped_key.as_ptr_len();
         let wrapped_len = narrow_wire_ulong(wrapped_len)?;
         let mut native = NativeParameter::new(mechanism, parameter)?;
-        let h_session = Self::session_handle(session)?;
-        let h_unwrapping_key = Self::object_handle(unwrapping_key)?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
-        let handle =
-            Self::call_object_output(&admission, Some(f), |function, handle_out| unsafe {
-                function(
-                    h_session,
-                    native.pointer(),
-                    h_unwrapping_key,
-                    wrapped_ptr.cast_mut(),
-                    wrapped_len,
-                    Self::ffi_attr_ptr(&attrs),
-                    Self::ffi_attr_len(&attrs),
-                    aad_ptr.cast_mut(),
-                    aad_len,
-                    handle_out,
-                )
-            })?;
+        let mut handle = 0;
+        Self::ck_result(unsafe {
+            f(
+                Self::session_handle(session)?,
+                native.pointer(),
+                Self::object_handle(unwrapping_key)?,
+                wrapped_ptr.cast_mut(),
+                wrapped_len,
+                Self::ffi_attr_ptr(&attrs),
+                Self::ffi_attr_len(&attrs),
+                aad_ptr.cast_mut(),
+                aad_len,
+                &mut handle,
+            )
+        })?;
         let created = crate::object_cleanup::PendingNativeObject::new(
             self,
             &self.object_cleanup,
             session,
-            handle,
+            CkObjectHandle(handle as u64),
         );
         native.validate_inputs()?;
         let output = native.read_output()?;

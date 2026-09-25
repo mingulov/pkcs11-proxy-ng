@@ -40,6 +40,7 @@ fn attribute_query_results_into_proto(
     }
 }
 
+#[cfg(test)]
 fn attribute_query_results_from_proto(
     results: &v1_proto::AttributeQueryResultList,
 ) -> Result<Vec<CkAttributeQueryResult>, CkRv> {
@@ -71,7 +72,7 @@ impl From<&CkOutputBufferResult> for v1_proto::OutputBufferResult {
         Self {
             ck_rv: result.ck_rv.0,
             returned_len: result.returned_len.unwrap_or(0),
-            value: result.value.as_ref().map(secret_to_plain),
+            value: result.value.clone(),
             apply_returned_len: Some(result.returned_len.is_some()),
         }
     }
@@ -87,7 +88,7 @@ impl TryFrom<&v1_proto::OutputBufferResult> for CkOutputBufferResult {
         Ok(Self {
             ck_rv: CkRv(result.ck_rv),
             returned_len: apply.then_some(result.returned_len),
-            value: result.value.clone().map(SecretBytes::new),
+            value: result.value.clone(),
         })
     }
 }
@@ -137,7 +138,7 @@ impl From<&CkOutputAndHandleResult> for v1_proto::OutputAndHandleResult {
         Self {
             ck_rv: result.ck_rv.0,
             returned_len: result.returned_len.unwrap_or(0),
-            value: result.value.as_ref().map(secret_to_plain),
+            value: result.value.clone(),
             object_handle: result.object_handle.map_or(0, |handle| handle.0),
             apply_returned_len: Some(result.returned_len.is_some()),
             apply_object_handle: Some(result.object_handle.is_some()),
@@ -159,7 +160,7 @@ impl TryFrom<&v1_proto::OutputAndHandleResult> for CkOutputAndHandleResult {
         Ok(Self {
             ck_rv: CkRv(result.ck_rv),
             returned_len: apply.then_some(result.returned_len),
-            value: result.value.clone().map(SecretBytes::new),
+            value: result.value.clone(),
             object_handle: handle.then_some(CkObjectHandle(result.object_handle)),
         })
     }
@@ -204,23 +205,11 @@ impl From<&CkAttributeQueryResult> for v1_proto::AttributeQueryResult {
 impl From<CkAttributeQueryResult> for v1_proto::AttributeQueryResult {
     fn from(result: CkAttributeQueryResult) -> Self {
         Self {
-            attr_type: result.attr_type.0,
-            returned_len: result.returned_len,
-            value: result.value,
-            ck_rv: result.ck_rv.map(|rv| rv.0),
-            nested: result.nested.map(attribute_query_results_into_proto),
-        }
-    }
-}
-
-impl From<&v1_proto::AttributeQueryResult> for CkAttributeQueryResult {
-    fn from(result: &v1_proto::AttributeQueryResult) -> Self {
-        Self {
             apply_returned_len: Some(result.apply_returned_len),
             apply_type: Some(result.apply_type),
             attr_type: result.attr_type.0,
             returned_len: result.returned_len,
-            value: result.value.as_ref().map(secret_to_plain),
+            value: result.value,
             ck_rv: result.ck_rv.map(|rv| rv.0),
             nested: result.nested.map(attribute_query_results_into_proto),
         }
@@ -253,7 +242,7 @@ fn decode_attribute_result(
         apply_type,
         attr_type: CkAttributeType(result.attr_type),
         returned_len: result.returned_len,
-        value: result.value.clone().map(SecretBytes::new),
+        value: result.value.clone(),
         ck_rv: result.ck_rv.map(CkRv),
         nested: result
             .nested
@@ -574,7 +563,7 @@ mod tests {
         let original = CkOutputAndHandleResult {
             ck_rv: CkRv::OK,
             returned_len: Some(3),
-            value: Some(vec![0xAA, 0xBB, 0xCC].into()),
+            value: Some(vec![0xAA, 0xBB, 0xCC]),
             object_handle: Some(CkObjectHandle(41)),
         };
         let proto = v1_proto::OutputAndHandleResult::from(&original);
@@ -763,6 +752,7 @@ mod tests {
     #[test]
     fn byte_output_exact_request_null_len_roundtrip() {
         let req = v1_proto::ByteOutputExactRequest {
+            exact_output_effects_version: 1,
             input_data_null_len: Some(42),
             ..Default::default()
         };
@@ -793,8 +783,11 @@ mod tests {
     fn null_len_present_with_zero_is_distinct_from_absent() {
         // NULL pointer with claimed length 0 is a real client input class; the
         // wire must distinguish Some(0) (NULL, len 0) from None (valid pointer).
-        let req =
-            v1_proto::ByteOutputExactRequest { input_data_null_len: Some(0), ..Default::default() };
+        let req = v1_proto::ByteOutputExactRequest {
+            exact_output_effects_version: 1,
+            input_data_null_len: Some(0),
+            ..Default::default()
+        };
         let bytes = prost::Message::encode_to_vec(&req);
         let back = v1_proto::ByteOutputExactRequest::decode(&bytes[..]).unwrap();
         assert_eq!(back.input_data_null_len, Some(0));

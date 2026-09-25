@@ -36,7 +36,6 @@ Readiness is process-global, so its cases share one test and drain setup events
 before measuring each native call. The oversized-capacity cases exercise proven
 pre-native rejection only: their small canary backing is never dereferenced.
 
-The backend's `classic_gcm_initialized_error_iv_effect` test (formerly the
-ignored `..._pending_provenance_prerequisite` Phase B RED) is un-ignored and
-passing; the Phase B error-effect rule is pinned by the backend suite, and this
-oracle gate stays green alongside it.
+The backend's ignored
+`classic_gcm_initialized_error_iv_effect_pending_provenance_prerequisite` test is
+a deliberately retained Phase B RED, not part of this passing oracle gate.

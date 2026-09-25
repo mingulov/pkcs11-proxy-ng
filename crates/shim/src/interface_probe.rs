@@ -976,11 +976,50 @@ unsafe impl Sync for FallbackCatalog {}
 
 #[cfg(test)]
 mod backend_abi_tests {
+    use cryptoki_sys::{CK_INTERFACE, CK_VERSION};
+
     use super::{
-        clear_pointer_safe_message_parameters, pointer_safe_message_parameters,
-        record_pointer_safe_message_parameters, resolve_backend_attribute_stride,
-        resolve_backend_ulong_size,
+        clear_pointer_safe_message_parameters, find_interface_in_catalog,
+        pointer_safe_message_parameters, record_pointer_safe_message_parameters,
+        resolve_backend_attribute_stride, resolve_backend_ulong_size,
     };
+
+    fn synthetic_catalog() -> [CK_INTERFACE; 2] {
+        static NAME: &[u8] = b"PKCS 11\0";
+        [
+            CK_INTERFACE {
+                pInterfaceName: NAME.as_ptr() as *mut _,
+                pFunctionList: crate::function_list_3_0::get_function_list_3_0() as *mut _,
+                flags: 0b0011,
+            },
+            CK_INTERFACE {
+                pInterfaceName: NAME.as_ptr() as *mut _,
+                pFunctionList: crate::function_list_3_2::get_function_list_3_2() as *mut _,
+                flags: 0b0011,
+            },
+        ]
+    }
+
+    #[test]
+    fn synthetic_interface_catalog_applies_flag_subset_to_all_selectors() {
+        let catalog = synthetic_catalog();
+        let name = c"PKCS 11";
+        let version = CK_VERSION { major: 3, minor: 0 };
+
+        for flags in [0, 0b0001, 0b0011] {
+            assert!(find_interface_in_catalog(&catalog, Some(name), None, flags).is_some());
+            assert!(find_interface_in_catalog(&catalog, None, None, flags).is_some());
+            assert!(
+                find_interface_in_catalog(&catalog, Some(name), Some(&version), flags).is_some()
+            );
+            assert!(find_interface_in_catalog(&catalog, None, Some(&version), flags).is_some());
+        }
+        for (name, version) in
+            [(Some(name), None), (None, None), (Some(name), Some(&version)), (None, Some(&version))]
+        {
+            assert!(find_interface_in_catalog(&catalog, name, version, 0b0100).is_none());
+        }
+    }
 
     #[test]
     fn message_parameter_capability_is_cleared_before_reprobe() {

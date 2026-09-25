@@ -30,16 +30,13 @@ struct Harness {
     oracle: Library,
     _shim: std::mem::ManuallyDrop<Library>,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
-    server: Option<tokio::task::JoinHandle<()>>,
-    backend: Arc<dyn Pkcs11Backend>,
     previous_endpoint: Option<std::ffi::OsString>,
-    teardown_done: bool,
 }
 impl Harness {
     async fn start() -> Self {
         let oracle_path = required_path("PKCS11_PROXY_EXACT_ORACLE_LIB");
         let backend = Arc::new(FfiBackend::load(&oracle_path).expect("load native exact oracle"));
-        let (endpoint, stop, server) = service(backend.clone()).await;
+        let (endpoint, stop) = service(backend).await;
         let previous_endpoint = std::env::var_os("PKCS11_PROXY_ENDPOINT");
         unsafe { std::env::set_var("PKCS11_PROXY_ENDPOINT", endpoint) };
         let shim = unsafe { Library::new(required_path("PKCS11_PROXY_SHIM_LIB")) }
@@ -99,52 +96,7 @@ impl Harness {
             oracle,
             _shim: std::mem::ManuallyDrop::new(shim),
             stop: Some(stop),
-            server: Some(server),
-            backend,
             previous_endpoint,
-            teardown_done: false,
-        }
-    }
-
-    /// Production-order teardown: client close/finalize, endpoint
-    /// restore, server stop, then backend finalize, then abort+join the
-    /// server task. Every test must call this (not rely on `Drop`).
-    /// Rationale: the shim keeps its idle connection open across
-    /// C_Finalize, so the server's graceful shutdown never completes on
-    /// its own; and without the join, the `#[tokio::test]` runtime drop
-    /// cancels the server task while it still owns an unfinalized
-    /// backend, so the final-owner guard stop-fires 70. Finalizing
-    /// before the abort makes every later drop clean (Release); a
-    /// failed finalize still drops loudly via that same guard.
-    async fn shutdown(mut self) {
-        self.teardown_sync();
-        let _ = self.backend.finalize();
-        if let Some(server) = self.server.take() {
-            server.abort();
-            let _ = server.await;
-        }
-    }
-
-    /// Synchronous teardown half, shared with `Drop` (panic-path
-    /// best-effort: sends stop but cannot wait — a mid-test panic still
-    /// ends 70 via runtime cancel, which stays loud). Runs once: the
-    /// explicit `shutdown()` consumes the flag so the trailing `Drop`
-    /// does not re-issue close/finalize RPCs.
-    fn teardown_sync(&mut self) {
-        if self.teardown_done {
-            return;
-        }
-        self.teardown_done = true;
-        unsafe {
-            (self.functions.C_CloseSession.unwrap())(self.session);
-            (self.functions.C_Finalize.unwrap())(ptr::null_mut());
-            match &self.previous_endpoint {
-                Some(value) => std::env::set_var("PKCS11_PROXY_ENDPOINT", value),
-                None => std::env::remove_var("PKCS11_PROXY_ENDPOINT"),
-            }
-        }
-        if let Some(stop) = self.stop.take() {
-            let _ = stop.send(());
         }
     }
     fn scenario(&self, scenario: ExactOracleScenario) {
@@ -182,7 +134,17 @@ impl Harness {
 }
 impl Drop for Harness {
     fn drop(&mut self) {
-        self.teardown_sync();
+        unsafe {
+            (self.functions.C_CloseSession.unwrap())(self.session);
+            (self.functions.C_Finalize.unwrap())(ptr::null_mut());
+            match &self.previous_endpoint {
+                Some(value) => std::env::set_var("PKCS11_PROXY_ENDPOINT", value),
+                None => std::env::remove_var("PKCS11_PROXY_ENDPOINT"),
+            }
+        }
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
     }
 }
 
@@ -338,7 +300,6 @@ async fn exact_byte_error_effects_roundtrip_through_loaded_shim_and_native_oracl
         failures.len(),
         failures.join("\n")
     );
-    harness.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -396,7 +357,6 @@ async fn exact_message_error_effects_roundtrip_without_changing_operation_settle
         assert_eq!(iv[0], 0x42);
         assert_eq!(tag, [0x22; 16]);
     }
-    harness.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -446,7 +406,6 @@ async fn exact_begin_error_effects_preserve_initialized_iv_and_operation() {
         assert_eq!(iv[0], 0x42, "native initialized Begin IV effect must survive errors");
         assert_eq!(tag, [0xa5; 16]);
     }
-    harness.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -510,7 +469,6 @@ async fn exported_standard_sign_rejects_nonempty_parameters_before_native_or_mem
         assert_eq!(length, 8);
         assert_eq!(harness.observation().calls, 0);
     }
-    harness.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -548,7 +506,6 @@ async fn exact_auth_wrap_error_effects_use_typed_c2b_outputs() {
     assert_eq!(rv, CKR_FUNCTION_FAILED);
     assert_eq!(length, 7);
     assert_eq!(iv[0], 0x42);
-    harness.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -614,7 +571,6 @@ async fn invalid_native_parameter_completion_suppresses_all_channels_and_clears_
         assert_eq!(call(&mut parameter, &mut output, &mut length), CKR_OPERATION_NOT_INITIALIZED);
         assert_eq!(harness.observation().calls, 1);
     }
-    harness.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -656,7 +612,6 @@ async fn exact_preprovider_rejections_leave_all_caller_outputs_untouched() {
         assert_eq!(output, [0xa5; 8]);
         assert_eq!(harness.observation().calls, u64::from(valid_session));
     }
-    harness.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -718,7 +673,6 @@ async fn exact_attribute_partial_errors_and_nested_bounds_roundtrip() {
     assert_eq!(outer.ulValueLen, 2 * std::mem::size_of_val(&nested) as CK_ULONG);
     assert_eq!(nested.type_, 0x99);
     assert_eq!(sub_value, [0xa5; 4]);
-    harness.shutdown().await;
 }
 #[path = "fix_round_one.rs"]
 mod fix_round_one;

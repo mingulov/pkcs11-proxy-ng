@@ -57,6 +57,10 @@ AI agents, automation, and human contributors.
   handling structs in `crates/types/src/mechanism.rs` rely on
   `ZeroizeOnDrop` running during stack unwinding to wipe password buffers
   on panic. With `panic = "abort"` those drops do not run.
+- The selected abnormal native-lifetime stop is the explicit exception to
+  normal wiping/destruction: unresolved retained storage must not be wiped or
+  freed. It preserves unwinding for ordinary panics and requires the exact
+  target/environment/retirement contract in the native-ownership document.
 - Never add `Debug` logging of PKCS#11 request types that can contain secret
   fields.
 - Preserve existing mTLS, peer-credential, and policy boundaries.

@@ -91,7 +91,6 @@ async fn open(f: &MtlsFixture, second: bool) -> Client {
             .create_object(CreateObjectRequest {
                 client_context_id: context.clone(),
                 session_handle: session.session_handle,
-                template_null: false,
                 template: [
                     CkAttribute {
                         attr_type: CkAttributeType::CLASS,
@@ -103,7 +102,7 @@ async fn open(f: &MtlsFixture, second: bool) -> Client {
                     },
                     CkAttribute {
                         attr_type: CkAttributeType::UNIQUE_ID,
-                        value: Some(CkAttributeValue::Bytes(vec![0xa1].into())),
+                        value: Some(CkAttributeValue::Bytes(vec![0xa1])),
                     },
                 ]
                 .iter()

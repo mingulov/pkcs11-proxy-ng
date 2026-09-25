@@ -2,9 +2,6 @@
 //! and the per-shape `read_mechanism_with_shape` match (kept flat by
 //! design for auditability), plus the shared raw-parameter utilities.
 
-use cryptoki_sys::*;
-use pkcs11_proxy_ng_types::*;
-
 use super::*;
 
 /// Return `true` when an embedded mechanism-parameter **data** payload (seed,

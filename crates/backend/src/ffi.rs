@@ -41,11 +41,6 @@ mod native_domain;
 #[cfg(test)]
 #[path = "ffi/native_domain_tests.rs"]
 mod native_domain_tests;
-#[path = "ffi/native_stop.rs"]
-mod native_stop;
-#[cfg(all(test, unix))]
-#[path = "ffi/native_stop_tests.rs"]
-mod native_stop_tests;
 #[path = "ffi/object_ops.rs"]
 mod object_ops;
 #[path = "ffi/session_3x_ops.rs"]
@@ -77,10 +72,16 @@ use mapping::{
 
 macro_rules! session_bytes_input {
     ($session:expr, $input:expr, $function:ident, $output:ident, $output_len:ident) => {{
+        // The macro always expands as the tail of a CK_RV-returning closure:
+        // an unrepresentable handle fails the call loudly, never truncates.
+        let _ck_session = match Self::session_handle($session) {
+            Ok(h) => h,
+            Err(_) => return CkRv::FUNCTION_FAILED.0 as cryptoki_sys::CK_RV,
+        };
         let (_ck_in_ptr, _ck_in_len) = $input.as_ptr_len();
         unsafe {
             $function(
-                Self::session_handle($session),
+                _ck_session,
                 _ck_in_ptr as *mut _,
                 Self::ulong_len_u64(_ck_in_len),
                 $output,
@@ -93,14 +94,13 @@ pub(crate) use session_bytes_input;
 
 macro_rules! session_unit_input {
     ($session:expr, $input:expr, $function:ident) => {{
+        // See session_bytes_input: fail loudly, never truncate.
+        let _ck_session = match Self::session_handle($session) {
+            Ok(h) => h,
+            Err(_) => return CkRv::FUNCTION_FAILED.0 as cryptoki_sys::CK_RV,
+        };
         let (_ck_in_ptr, _ck_in_len) = $input.as_ptr_len();
-        unsafe {
-            $function(
-                Self::session_handle($session),
-                _ck_in_ptr as *mut _,
-                Self::ulong_len_u64(_ck_in_len),
-            )
-        }
+        unsafe { $function(_ck_session, _ck_in_ptr as *mut _, Self::ulong_len_u64(_ck_in_len)) }
     }};
 }
 pub(crate) use session_unit_input;
@@ -213,16 +213,25 @@ pub struct FfiBackend {
     /// PKCS#11 3.2 function list, if the module supports `C_GetInterface`.
     func_list_3_2: Option<*const cryptoki_sys::CK_FUNCTION_LIST_3_2>,
     initialize_args: Option<CString>,
-    /// Per-session mechanism parameter cache.  Some backends (OpenCryptoki)
-    /// store pointers from the mechanism struct passed to *Init calls and
-    /// dereference them during the subsequent operation (Encrypt/Decrypt/…).
-    /// The spec says backends should copy, but for compatibility we keep the
-    /// FfiMechanism (and its backing `Vec<u8>` buffers) alive until the next
-    /// Init call or session close replaces it.
+    /// Per-session, per-family mechanism parameter cache.  Some backends
+    /// (OpenCryptoki) store pointers from the mechanism struct passed to
+    /// *Init calls and dereference them during the subsequent operation
+    /// (Encrypt/Decrypt/…).  The spec says backends should copy, but for
+    /// compatibility we keep the FfiMechanism (and its backing buffers)
+    /// alive until the same family's next Init, cancel, or session close
+    /// replaces it.  Keying by [`OperationFamily`] (C3M.3) means a later
+    /// `*Init` of another family — e.g. Digest after Encrypt, per the pinned
+    /// OASIS dual-operation example — never evicts the first family's
+    /// retained graph, and a cancel retires only its own family's slot.
     ///
     /// Sharded (`DashMap`) so concurrent sessions doing crypto `*Init` calls on
     /// the shared backend do not serialise on one global lock (L4).
-    mech_cache: DashMap<u64, ffi_conversion::FfiMechanism>,
+    mech_cache: DashMap<(u64, OperationFamily), ffi_conversion::FfiMechanism>,
+    /// Per-session marker naming the family stored by the last `*Init` call.
+    /// Preserves the documented [`Pkcs11Backend::session_output_mechanism_params`]
+    /// contract ("set by the last `*_init` call") now that retention slots
+    /// are per-family: the unscoped read resolves through this marker.
+    last_init_family: DashMap<u64, OperationFamily>,
     /// Map of session handle -> slot id. Lets a per-session close path find the
     /// owning slot in O(1) to keep [`slot_sessions`](Self::slot_sessions)
     /// consistent. Populated on successful `ffi_open_session`, drained on close.
@@ -231,6 +240,13 @@ pub struct FfiBackend {
     /// `C_CloseAllSessions` evict exactly the sessions on one slot in
     /// O(sessions-on-slot) instead of scanning every session (L4).
     slot_sessions: DashMap<u64, HashSet<u64>>,
+    /// Proof that this instance owns the process construction slot (C3M.4).
+    /// The reservation is released when the last owner drops; stale handles
+    /// can never free another epoch's slot.
+    construction: native_domain::ConstructionPermit,
+    /// Locally observed init/finalize/session lifecycle driving the honest
+    /// retirement decision in `Drop` (C3M.4).
+    lifecycle: native_domain::LifecycleTracker,
 }
 
 // Safety: PKCS#11 spec requires modules loaded with CKF_OS_LOCKING_OK to be
@@ -290,109 +306,38 @@ impl Pkcs11Backend for FfiBackend {
                 .map(|s| s.as_ptr() as *mut std::ffi::c_void)
                 .unwrap_or(std::ptr::null_mut()),
         };
-        // F-08 gate BEFORE native entry: a refused cycle never touches the
-        // provider and records nothing — not even the attempt marker — so
-        // the retained-session evidence stays intact.
-        self.lifecycle.check_reinitialize().map_err(lifecycle_refusal_rv)?;
-        // F-01 control transition (TF01a): short write entering
-        // `Initializing`. Never holds read (this path admits nothing), and
-        // the ticket is detached — the write is not HELD across the native
-        // call below. ACQUIRING write still blocks until in-flight readers
-        // drain (a queued writer also stalls new admissions); that blocking
-        // is intended (I1 decision — see the design block), unreachable in
-        // the daemon flow (init-once-at-startup; per-client Initialize never
-        // touches the backend).
-        let init_control = self.lifecycle_domain.begin_initialize()?;
-        // Fail-closed attempt marker BEFORE native entry (C3M steps 4-5):
-        // a failed `C_Initialize` ran provider code, so the reservation
-        // must poison instead of recycling.
-        self.lifecycle.note_init_attempted();
-        // Control choke: Initialize takes the write lock (above) while
-        // holding no read — the choke takes no guard, structurally.
-        let outcome =
-            Self::call_control_unit(unsafe { (*self.func_list).C_Initialize }, |function| unsafe {
-                function(&mut args as *mut _ as cryptoki_sys::CK_VOID_PTR)
-            });
-        if outcome.is_err() {
-            // Native failure restores the prior domain state (behavior
-            // parity: a failed re-Initialize leaves a live incarnation
-            // usable, exactly as before the domain existed).
-            self.lifecycle_domain.abandon_initialize(init_control);
-            return outcome;
-        }
+        Self::call_unit(unsafe { (*self.func_list).C_Initialize }, |function| unsafe {
+            function(&mut args as *mut _ as cryptoki_sys::CK_VOID_PTR)
+        })?;
         // A new initialization cycle starts a clean incarnation (C3M.4/row
         // 10): session bindings cached under a dead generation must not
         // survive, or a reused numeric handle would alias stale owners.
         // Re-affirming an already-open incarnation keeps its live bindings.
         let generation_before = self.lifecycle.current_generation();
-        // Checked record: the residual refusal (a Finalize failed, or the
-        // last generation was claimed, after the gate passed) propagates
-        // before the purge, so a refused cycle purges nothing. (The `?`
-        // also drops the control ticket, abandoning the domain transition.)
-        self.lifecycle.note_initialized().map_err(lifecycle_refusal_rv)?;
-        // Publish `Open` with the incarnation purge INSIDE the publish
-        // write section (I2): the write acquisition drains pre-publish
-        // in-flight readers, and post-publish admissions wait until the
-        // purge completes — no admitted reader ever observes a live
-        // incarnation's stale bindings. Failure here (poison/epoch
-        // exhaustion — practically unreachable) fails closed without
-        // purging, like a refused cycle.
-        let generation_changed = self.lifecycle.current_generation() != generation_before;
-        self.lifecycle_domain.publish_open_with_purge(init_control, || {
-            if generation_changed {
-                self.drop_all_mech_cache();
-            }
-        })?;
+        self.lifecycle.note_initialized();
+        if self.lifecycle.current_generation() != generation_before {
+            self.drop_all_mech_cache();
+        }
         Ok(())
     }
 
     fn finalize(&self) -> CkResult<()> {
-        let _deadline = native_stop::arm_shutdown_deadline(native_stop::shutdown_grace());
-        // TF01b seal/drain (I3): the two-arm acquisition drains in-flight
-        // ordinary work and seals admission (`Draining`) before native
-        // entry. Deadline overrun suicides inside `begin_finalize` — this
-        // path never runs native unsealed. Denial (no live incarnation,
-        // concurrent control, poison, exhaustion) returns WITHOUT native
-        // entry; the RV matches what a compliant provider reports outside
-        // a live incarnation, so out-of-incarnation callers observe no
-        // new RV.
-        let seal = self.lifecycle_domain.begin_finalize()?;
-        // Exclusive native call on this thread, which holds the armed
-        // `DeadlineGuard` (no spawned worker; the ticket is detached —
-        // write is NOT held across native entry, mirroring Initialize).
-        // An `enter_finalizing` failure drops the seal through the Drop
-        // backstop, abandoning the seal before the error propagates.
-        seal.enter_finalizing()?;
-        // Control choke: Finalize holds no read (the seal above took short
-        // writes only, never read) — the choke takes no guard, structurally.
-        let outcome =
-            Self::call_control_unit(unsafe { (*self.func_list).C_Finalize }, |function| unsafe {
-                function(std::ptr::null_mut())
-            });
+        let outcome = Self::call_unit(unsafe { (*self.func_list).C_Finalize }, |function| unsafe {
+            function(std::ptr::null_mut())
+        });
         if outcome.is_err() {
-            // The failure proves nothing about provider state, so the seal
-            // is abandoned (the live incarnation keeps admitting) and every
+            // The failure proves nothing about provider state, so every
             // binding stays — but the incarnation is now uncertain, and a
-            // later re-initialization is refused until a successful
-            // C_Finalize (F-08).
-            self.lifecycle_domain.abandon_finalize(seal);
+            // later re-initialization must open a new cycle (C3M.4/row 10).
             self.lifecycle.note_finalize_failed();
             return outcome;
         }
-        // Record the clean close BEFORE publishing: a (practically
-        // unreachable) publish failure must not leave C3M believing an
-        // incarnation is live after its provider finalized.
-        self.lifecycle.note_finalized();
-        // Publish `Finalized` with the incarnation purge INSIDE the publish
-        // write section (I2 mirror): `Finalized` implies purged, so a racing
-        // re-Initialize observes no dead bindings.
         // This is the daemon/backend finalizer, not the per-client gRPC
         // Finalize path. Per-client Finalize removes only that client context
         // and closes its sessions. Once the underlying module accepts
         // C_Finalize, every cached session binding is out of scope.
-        self.lifecycle_domain.publish_finalized_with_purge(seal, || {
-            self.drop_all_mech_cache();
-        })?;
+        self.drop_all_mech_cache();
+        self.lifecycle.note_finalized();
         Ok(())
     }
 
@@ -1414,7 +1359,7 @@ impl Pkcs11Backend for FfiBackend {
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
         aad: CkInBuf<'_>,
-    ) -> CkResult<(SecretBytes, pkcs11_proxy_ng_proto::convert::authenticated::AuthenticatedOutput)>
+    ) -> CkResult<(Vec<u8>, pkcs11_proxy_ng_proto::convert::authenticated::AuthenticatedOutput)>
     {
         self.ffi_wrap_authenticated_typed(session, mechanism, parameter, wrapping_key, key, aad)
     }
@@ -1450,7 +1395,7 @@ impl Pkcs11Backend for FfiBackend {
         parameter: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
-        template: Option<&[CkAttribute]>,
+        template: &[CkAttribute],
         aad: CkInBuf<'_>,
     ) -> CkResult<(
         CkObjectHandle,
@@ -1620,7 +1565,7 @@ impl Pkcs11Backend for FfiBackend {
     ) -> CkResult<(
         CkOutputBufferResult,
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
     )> {
         self.ffi_encrypt_message_exact_msg(
             session,
@@ -1643,7 +1588,7 @@ impl Pkcs11Backend for FfiBackend {
     ) -> CkResult<(
         CkOutputBufferResult,
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
     )> {
         self.ffi_decrypt_message_exact_msg(
             session,
@@ -1663,7 +1608,7 @@ impl Pkcs11Backend for FfiBackend {
         provider_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
     )> {
         self.ffi_encrypt_message_begin_msg(session, msg_param, aad, provider_spec)
     }
@@ -1676,7 +1621,7 @@ impl Pkcs11Backend for FfiBackend {
         provider_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
     )> {
         self.ffi_decrypt_message_begin_msg(session, msg_param, aad, provider_spec)
     }
@@ -1705,7 +1650,7 @@ impl Pkcs11Backend for FfiBackend {
     ) -> CkResult<(
         CkOutputBufferResult,
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
     )> {
         self.ffi_encrypt_message_next_exact_msg(
             session,
@@ -1728,7 +1673,7 @@ impl Pkcs11Backend for FfiBackend {
     ) -> CkResult<(
         CkOutputBufferResult,
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
     )> {
         self.ffi_decrypt_message_next_exact_msg(
             session,
@@ -1777,27 +1722,6 @@ mod tests {
         cryptoki_sys::CKR_OK
     }
 
-    std::thread_local! {
-        static INITIALIZE_CALL_COUNT: std::cell::Cell<usize> =
-            const { std::cell::Cell::new(0) };
-    }
-
-    /// Counting `C_Initialize` stub: proves refused cycles never reach the
-    /// provider. Thread-local because libtest runs each `#[test]` on its own
-    /// thread, so parallel tests cannot pollute each other's count.
-    unsafe extern "C" fn initialize_counting_ok(_: *mut std::ffi::c_void) -> cryptoki_sys::CK_RV {
-        INITIALIZE_CALL_COUNT.with(|count| count.set(count.get() + 1));
-        cryptoki_sys::CKR_OK
-    }
-
-    fn initialize_call_count() -> usize {
-        INITIALIZE_CALL_COUNT.with(|count| count.get())
-    }
-
-    unsafe extern "C" fn initialize_fails(_: *mut std::ffi::c_void) -> cryptoki_sys::CK_RV {
-        cryptoki_sys::CKR_GENERAL_ERROR
-    }
-
     fn backend_with_finalize(
         finalize: cryptoki_sys::CK_C_Finalize,
     ) -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
@@ -1819,8 +1743,14 @@ mod tests {
             func_list_3_2: None,
             initialize_args: None,
             mech_cache: DashMap::new(),
+            last_init_family: DashMap::new(),
             session_slot_map: DashMap::new(),
             slot_sessions: DashMap::new(),
+            object_cleanup: Default::default(),
+            // Test-local backend: bypasses the process reservation without
+            // consuming it; never backs production dispatch (C3M.4).
+            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
+            lifecycle: Default::default(),
         };
 
         (backend, functions)
@@ -1863,7 +1793,8 @@ mod tests {
     fn seed_cache(backend: &FfiBackend) {
         let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
         let ffi_mechanism = ffi_conversion::mechanism_to_ffi(&mechanism).unwrap();
-        backend.mech_cache.insert(7, ffi_mechanism);
+        backend.mech_cache.insert((7, OperationFamily::Sign), ffi_mechanism);
+        backend.last_init_family.insert(7, OperationFamily::Sign);
         // Use the public path so the forward map and reverse index stay in sync.
         backend.remember_session_slot(CkSessionHandle(7), CkSlotId(11));
     }
@@ -1880,7 +1811,8 @@ mod tests {
 
         assert_eq!(backend.finalize().unwrap_err(), CkRv::GENERAL_ERROR);
 
-        assert!(backend.mech_cache.contains_key(&7));
+        assert!(backend.mech_cache.contains_key(&(7, OperationFamily::Sign)));
+        assert_eq!(backend.last_init_family.get(&7).as_deref(), Some(&OperationFamily::Sign));
         assert_eq!(backend.session_slot_map.get(&7).as_deref(), Some(&11));
     }
 
@@ -1897,8 +1829,110 @@ mod tests {
         backend.finalize().unwrap();
 
         assert!(backend.mech_cache.is_empty());
+        assert!(backend.last_init_family.is_empty());
         assert!(backend.session_slot_map.is_empty());
         assert!(backend.slot_sessions.is_empty());
+    }
+
+    #[test]
+    fn initialize_after_failed_finalize_starts_a_clean_incarnation() {
+        // C3M.4/row 10: a re-initialization after a failed Finalize is a new
+        // lifecycle generation. Stale session bindings and the stale open
+        // count must not leak into it, or a reused numeric handle would alias
+        // a dead incarnation's owners.
+        let (backend, _functions) =
+            backend_with_init_and_finalize(Some(initialize_ok), Some(finalize_fails));
+        backend.initialize().expect("first initialization succeeds");
+        assert_eq!(backend.lifecycle.current_generation(), 1);
+        backend.remember_session_slot(CkSessionHandle(7), CkSlotId(11));
+        backend.lifecycle.note_session_opened();
+        backend.lifecycle.note_session_opened();
+        assert_eq!(backend.finalize().unwrap_err(), CkRv::GENERAL_ERROR);
+        // Failed Finalize retains everything (existing contract).
+        assert!(backend.session_slot_map.contains_key(&7));
+        assert_eq!(backend.lifecycle.open_session_count_for_tests(), 2);
+
+        backend.initialize().expect("re-initialization succeeds");
+        assert_eq!(backend.lifecycle.current_generation(), 2);
+        assert!(backend.session_slot_map.is_empty());
+        assert!(backend.slot_sessions.is_empty());
+        assert!(backend.mech_cache.is_empty());
+        assert!(backend.last_init_family.is_empty());
+        assert_eq!(backend.lifecycle.open_session_count_for_tests(), 0);
+    }
+
+    #[test]
+    fn stale_init_completion_does_not_publish_into_new_incarnation() {
+        // C3M.4/row 10: an Init whose native call ran under a dead
+        // incarnation must not publish its owner into the new one, even
+        // when the numeric session handle was reused and the native call
+        // itself succeeded.
+        let (backend, _functions) =
+            backend_with_init_and_finalize(Some(initialize_ok), Some(finalize_fails));
+        backend.initialize().expect("first initialization succeeds");
+        let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
+        let err = backend
+            .call_init_with_mechanism(
+                CkSessionHandle(7),
+                OperationFamily::Sign,
+                Some(0u8),
+                &mechanism,
+                |_, _| {
+                    // Deterministic race simulation: the incarnation turns
+                    // over while the native Init runs (failed Finalize,
+                    // then a new Initialize).
+                    backend.lifecycle.note_finalize_failed();
+                    backend.lifecycle.note_initialized();
+                    cryptoki_sys::CKR_OK
+                },
+            )
+            .unwrap_err();
+        assert_eq!(err, CkRv::SESSION_HANDLE_INVALID);
+        assert!(backend.mech_cache.is_empty());
+        assert!(backend.last_init_family.is_empty());
+    }
+
+    #[test]
+    fn stale_init_completion_with_output_does_not_publish() {
+        // Same dead-incarnation refusal through the output-bearing Init
+        // choke point: extracted native output is discarded with the
+        // retired owner, never published.
+        let (backend, _functions) =
+            backend_with_init_and_finalize(Some(initialize_ok), Some(finalize_fails));
+        backend.initialize().expect("first initialization succeeds");
+        let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
+        let err = backend
+            .call_init_with_mechanism_output(
+                CkSessionHandle(7),
+                OperationFamily::Sign,
+                Some(0u8),
+                &mechanism,
+                |_, _| {
+                    backend.lifecycle.note_finalize_failed();
+                    backend.lifecycle.note_initialized();
+                    cryptoki_sys::CKR_OK
+                },
+            )
+            .unwrap_err();
+        assert_eq!(err, CkRv::SESSION_HANDLE_INVALID);
+        assert!(backend.mech_cache.is_empty());
+        assert!(backend.last_init_family.is_empty());
+    }
+
+    #[test]
+    fn double_initialize_without_finalize_keeps_current_incarnation() {
+        // Re-affirming an already-open incarnation must not evict its live
+        // session bindings or reset its open count.
+        let (backend, _functions) =
+            backend_with_init_and_finalize(Some(initialize_ok), Some(finalize_fails));
+        backend.initialize().expect("first initialization succeeds");
+        backend.remember_session_slot(CkSessionHandle(7), CkSlotId(11));
+        backend.lifecycle.note_session_opened();
+
+        backend.initialize().expect("second initialization succeeds");
+        assert_eq!(backend.lifecycle.current_generation(), 1);
+        assert_eq!(backend.session_slot_map.get(&7).as_deref(), Some(&11));
+        assert_eq!(backend.lifecycle.open_session_count_for_tests(), 1);
     }
 
     #[test]
@@ -1908,19 +1942,31 @@ mod tests {
         let (backend, _functions) = backend_with_finalize(Some(finalize_ok));
         for (session, slot) in [(7u64, 11u64), (8, 11), (9, 22)] {
             let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
-            backend
-                .mech_cache
-                .insert(session, ffi_conversion::mechanism_to_ffi(&mechanism).unwrap());
+            backend.mech_cache.insert(
+                (session, OperationFamily::Sign),
+                ffi_conversion::mechanism_to_ffi(&mechanism).unwrap(),
+            );
             backend.remember_session_slot(CkSessionHandle(session as u64), CkSlotId(slot as u64));
         }
+        // Session 7 holds a second family slot: per-slot eviction must drop
+        // every family of the evicted sessions, not just one entry.
+        backend.mech_cache.insert(
+            (7, OperationFamily::Encrypt),
+            ffi_conversion::mechanism_to_ffi(&CkMechanism {
+                mechanism_type: CkMechanismType::RSA_PKCS,
+                params: None,
+            })
+            .unwrap(),
+        );
 
         backend.drop_mech_cache_for_slot(CkSlotId(11));
 
         for evicted in [7u64, 8] {
-            assert!(!backend.mech_cache.contains_key(&evicted));
+            assert!(!backend.mech_cache.contains_key(&(evicted, OperationFamily::Sign)));
             assert!(backend.session_slot_map.get(&evicted).is_none());
         }
-        assert!(backend.mech_cache.contains_key(&9));
+        assert!(!backend.mech_cache.contains_key(&(7, OperationFamily::Encrypt)));
+        assert!(backend.mech_cache.contains_key(&(9, OperationFamily::Sign)));
         assert_eq!(backend.session_slot_map.get(&9).as_deref(), Some(&22));
         // The emptied slot-11 reverse entry is pruned; slot 22 still maps to {9}.
         assert!(backend.slot_sessions.get(&11).is_none());

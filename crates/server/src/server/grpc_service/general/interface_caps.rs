@@ -80,6 +80,8 @@ pub(super) async fn get_backend_interfaces(
         .collect();
 
     Ok(Response::new(pkcs11_proxy_ng_proto::GetBackendInterfacesResponse {
+        exact_output_effects_version: Some(1),
+        pointer_safe_authenticated_parameters: Some(true),
         interfaces,
         mechanism_registry: Some((*registry_payload).clone()),
         backend_ulong_size: Some(backend.abi_ulong_size()),

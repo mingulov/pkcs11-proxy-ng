@@ -45,16 +45,15 @@ impl<T> NativeAllocation<T> {
         Self { root, owned_invariant: PhantomData }
     }
 
-    /// Project the persistent raw root. Callers must hold the lifecycle
-    /// read exclusion (an `OrdinaryGuard` from `admit_ordinary`); no native
-    /// writer or live reference may alias this storage during the use.
+    /// Project the persistent raw root. Callers must hold the
+    /// native-operation guard; no native writer or live reference may alias
+    /// this storage during the use.
     pub(in crate::ffi) fn root(&self) -> *mut T {
         self.root.as_ptr()
     }
 
-    // SAFETY: valid initialized T; caller holds the lifecycle read exclusion
-    // (`OrdinaryGuard`); no native writer or live reference aliases this
-    // storage during the read.
+    // SAFETY: valid initialized T; caller holds the native-operation guard;
+    // no native writer or live reference aliases this storage during the read.
     // Production readback lands with the P2 guard API; unit tests cover it now.
     #[allow(dead_code)]
     pub(in crate::ffi) unsafe fn snapshot(&self) -> T

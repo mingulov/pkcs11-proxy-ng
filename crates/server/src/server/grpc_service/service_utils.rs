@@ -1,3 +1,4 @@
+use crate::server::slot_map::{BackendSlotId, VirtualSlotId};
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -15,6 +16,9 @@ use super::super::context_manager::{
 };
 use super::super::handle_map::{BackendHandle, VirtualHandle};
 use super::HandlerContext;
+
+mod exact_completion;
+pub(super) use exact_completion::{ExactCompletion, spawn_backend_exact};
 
 static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 static BACKEND_TIMEOUT: OnceLock<Duration> = OnceLock::new();
@@ -49,10 +53,10 @@ static LAST_SENT_HEALTHY: AtomicBool = AtomicBool::new(true);
 
 /// Outcome reported by [`spawn_backend`] for the health-gating task
 /// in `main.rs` to consume. `Success` = backend produced any
-/// `CkResult` (including a PKCS#11 error code that is a normal
-/// application-level outcome); `Failure` = transport-level failure
-/// (timeout, blocking-pool panic, circuit-breaker trip) — those are
-/// the only conditions that flip `tonic-health` to NOT_SERVING.
+/// completed application-level outcome; `Failure` = transport failure
+/// (timeout, blocking-pool panic, circuit-breaker trip) or an established
+/// provider-down RV (DEVICE_REMOVED/HOST_MEMORY). Exact pre-native rejection
+/// emits neither event, so it cannot degrade readiness or signal recovery.
 #[derive(Debug, Clone, Copy)]
 pub enum BackendHealthEvent {
     Success,
@@ -216,6 +220,26 @@ where
         .await
 }
 
+/// Testable variant of [`spawn_backend_with_timeout`] with explicit
+/// breaker/stuck counters. Tests asserting exact stuck deltas must not
+/// use the global gauges: concurrent suite tests move them, which makes
+/// exact-delta asserts racy (and a failure there can strand a parked
+/// backend thread — see the session hang-guard tests).
+#[cfg(test)]
+pub(super) async fn spawn_backend_with_counters<T, F>(
+    counter: &'static AtomicUsize,
+    stuck_gauge: &'static AtomicUsize,
+    timeout: Duration,
+    max_calls: usize,
+    operation: F,
+) -> Result<CkResult<T>, Status>
+where
+    T: Send + 'static,
+    F: FnOnce() -> CkResult<T> + Send + 'static,
+{
+    spawn_backend_core(counter, stuck_gauge, timeout, max_calls, operation).await
+}
+
 pub(super) async fn spawn_backend_with_optional_timeout<T, F>(
     timeout: Option<Duration>,
     operation: F,
@@ -248,6 +272,25 @@ async fn spawn_backend_core<T, F>(
 where
     T: Send + 'static,
     F: FnOnce() -> CkResult<T> + Send + 'static,
+{
+    spawn_backend_core_classified(counter, stuck_gauge, timeout, max_calls, operation, |result| {
+        Some(classify_backend_outcome(result))
+    })
+    .await
+}
+
+async fn spawn_backend_core_classified<T, F, C>(
+    counter: &'static AtomicUsize,
+    stuck_gauge: &'static AtomicUsize,
+    timeout: Duration,
+    max_calls: usize,
+    operation: F,
+    classify: C,
+) -> Result<CkResult<T>, Status>
+where
+    T: Send + 'static,
+    F: FnOnce() -> CkResult<T> + Send + 'static,
+    C: FnOnce(&Result<CkResult<T>, Status>) -> Option<bool>,
 {
     // Circuit breaker
     let Some(guard) = try_acquire_backend_call(counter, max_calls) else {
@@ -314,9 +357,10 @@ where
         }
     };
 
-    let healthy = classify_backend_outcome::<T>(&result);
-    tracing::debug!(healthy, "backend outcome classified");
-    report_backend_outcome(healthy);
+    if let Some(healthy) = classify(&result) {
+        tracing::debug!(healthy, "backend outcome classified");
+        report_backend_outcome(healthy);
+    }
 
     result
 }
@@ -324,29 +368,32 @@ where
 /// Classify a `spawn_backend` result as healthy (true) or unhealthy
 /// (false) from the daemon-level readiness gauge's perspective.
 ///
-/// Health gating triggers ONLY on transport-level failures:
-///   * timeouts (mapped to `Ok(Err(CkRv::DEVICE_ERROR))` by
-///     [`spawn_backend`] above, distinguishable because PKCS#11
-///     application errors must never produce `CKR_DEVICE_ERROR`),
+/// Transport failures are classified separately from provider responses:
+///   * timeouts (reported before returning proxy-generated DEVICE_ERROR),
 ///   * `spawn_blocking` panics (`Err(Status)`),
 ///   * circuit-breaker trips (also `Ok(Err(CkRv::DEVICE_ERROR))` —
 ///     reported separately by `spawn_backend` before this function is
 ///     called).
 ///
-/// PKCS#11 application errors (CKR_PIN_INCORRECT, CKR_DATA_INVALID,
+/// Native DEVICE_REMOVED/HOST_MEMORY also retain their provider-down meaning.
+/// Other PKCS#11 application errors (CKR_PIN_INCORRECT, CKR_DATA_INVALID,
 /// CKR_MECHANISM_INVALID, …) are normal client-side outcomes; they
 /// must NOT trip the readiness gauge, or a noisy authentication user
 /// could take the daemon out of the load-balancer rotation.
 ///
 /// Extracted as a pure function so the contract is testable without
 /// the global `HEALTH_EVENT_TX` channel state.
+fn provider_rv_is_healthy(rv: CkRv) -> bool {
+    rv != CkRv::DEVICE_REMOVED && rv != CkRv::HOST_MEMORY
+}
+
 fn classify_backend_outcome<T>(result: &Result<CkResult<T>, Status>) -> bool {
     match result {
         Ok(Ok(_)) => true,
         // Genuine backend/HSM-down signals: the device reports that it is gone
         // or out of memory. A single client's request shape cannot induce these,
         // so repeated occurrences remain a daemon-readiness signal.
-        Ok(Err(rv)) if *rv == CkRv::DEVICE_REMOVED || *rv == CkRv::HOST_MEMORY => {
+        Ok(Err(rv)) if !provider_rv_is_healthy(*rv) => {
             tracing::debug!(?rv, "backend outcome: unhealthy");
             false
         }
@@ -484,8 +531,8 @@ pub(super) async fn context_exists(
 pub(super) async fn resolve_slot(
     ctx_mgr: &Arc<ContextManager>,
     slot_id: u64,
-) -> Result<CkSlotId, CkRv> {
-    ctx_mgr.resolve_slot(CkSlotId(slot_id as u64)).await.ok_or(CkRv::SLOT_ID_INVALID)
+) -> Result<BackendSlotId, CkRv> {
+    ctx_mgr.resolve_slot(VirtualSlotId(slot_id)).await.ok_or(CkRv::SLOT_ID_INVALID)
 }
 
 pub(super) fn parse_mechanism(
@@ -542,7 +589,7 @@ pub(super) async fn resolve_object_authz_context(
         Some(cached) => cached,
         None => {
             let backend_ref = ctx.backend.clone();
-            match spawn_backend(move || backend_ref.get_token_info(backend_slot)).await {
+            match spawn_backend(move || backend_ref.get_token_info(backend_slot.0)).await {
                 Ok(Ok(info)) => {
                     ctx.context_manager.cache_token_info(
                         backend_slot,
@@ -1679,7 +1726,10 @@ mod tests {
         let ctx_id = ctx_mgr.create_context(None).await.unwrap();
         let (session, known_object) = ctx_mgr
             .get_context(&ctx_id, |c| {
-                let session = c.register_session(BackendHandle(123), CkSlotId(7));
+                let session = c.register_session(
+                    BackendHandle(123),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(7)),
+                );
                 let object = c.object_handles.insert(BackendHandle(456));
                 (session, object)
             })
@@ -1703,7 +1753,10 @@ mod tests {
         let ctx_id = ctx_mgr.create_context(None).await.unwrap();
         let (session, known_object) = ctx_mgr
             .get_context(&ctx_id, |c| {
-                let session = c.register_session(BackendHandle(123), CkSlotId(7));
+                let session = c.register_session(
+                    BackendHandle(123),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(7)),
+                );
                 let object = c.object_handles.insert(BackendHandle(456));
                 (session, object)
             })
@@ -1835,13 +1888,20 @@ mod tests {
 
         let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock;
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
-        ctx_mgr.register_slot(CkSlotId(0)).await;
-        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        ctx_mgr.cache_token_info(
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+            "MockToken".into(),
+            "0001".into(),
+        );
         let ctx_id = ctx_mgr.create_context(identity).await.unwrap();
 
         let (virtual_session, virtual_object) = ctx_mgr
             .get_context(&ctx_id, |c| {
-                let vs = c.register_session(BackendHandle(backend_session.0), CkSlotId(0));
+                let vs = c.register_session(
+                    BackendHandle(backend_session.0),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                );
                 let vo = c.object_handles.insert(BackendHandle(backend_object.0));
                 (vs, vo)
             })
@@ -1876,7 +1936,10 @@ mod tests {
         let ctx_id = ctx_mgr.create_context(Some(IDENTITY.into())).await.unwrap();
         let (vs, vo) = ctx_mgr
             .get_context(&ctx_id, |c| {
-                let vs = c.register_session(BackendHandle(77), CkSlotId(0));
+                let vs = c.register_session(
+                    BackendHandle(77),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                );
                 let vo = c.object_handles.insert(BackendHandle(42));
                 (vs, vo)
             })
@@ -2023,7 +2086,10 @@ mod tests {
         let ctx_id = ctx_mgr.create_context(Some(IDENTITY.into())).await.unwrap();
         let (vs, vo) = ctx_mgr
             .get_context(&ctx_id, |c| {
-                let vs = c.register_session(BackendHandle(77), CkSlotId(0));
+                let vs = c.register_session(
+                    BackendHandle(77),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                );
                 let vo = c.object_handles.insert(BackendHandle(42));
                 (vs, vo)
             })
@@ -2069,12 +2135,19 @@ mod tests {
         let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock.clone();
         let policy = per_object_policy(IDENTITY, "MockToken", ALLOWED_UID_HEX);
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
-        ctx_mgr.register_slot(CkSlotId(0)).await;
-        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        ctx_mgr.cache_token_info(
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+            "MockToken".into(),
+            "0001".into(),
+        );
         let ctx_id = ctx_mgr.create_context(Some(IDENTITY.into())).await.unwrap();
         let (virtual_session, virtual_object) = ctx_mgr
             .get_context(&ctx_id, |c| {
-                let vs = c.register_session(BackendHandle(backend_session.0), CkSlotId(0));
+                let vs = c.register_session(
+                    BackendHandle(backend_session.0),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                );
                 let vo = c.object_handles.insert(BackendHandle(backend_object.0));
                 (vs, vo)
             })
@@ -2137,13 +2210,20 @@ mod tests {
 
         let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock;
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
-        ctx_mgr.register_slot(CkSlotId(0)).await;
-        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        ctx_mgr.cache_token_info(
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+            "MockToken".into(),
+            "0001".into(),
+        );
         let ctx_id = ctx_mgr.create_context(Some(IDENTITY.into())).await.unwrap();
 
         let virtual_session = ctx_mgr
             .get_context(&ctx_id, |c| {
-                c.register_session(BackendHandle(backend_session.0), CkSlotId(0))
+                c.register_session(
+                    BackendHandle(backend_session.0),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                )
             })
             .await
             .unwrap();
@@ -2230,14 +2310,21 @@ mod tests {
 
         let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock;
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
-        ctx_mgr.register_slot(CkSlotId(0)).await;
-        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        ctx_mgr.cache_token_info(
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+            "MockToken".into(),
+            "0001".into(),
+        );
 
         // Context A: IDENTITY mints the object.
         let ctx_id_a = ctx_mgr.create_context(Some(IDENTITY.into())).await.unwrap();
         let vs_a = ctx_mgr
             .get_context(&ctx_id_a, |c| {
-                c.register_session(BackendHandle(backend_session.0), CkSlotId(0))
+                c.register_session(
+                    BackendHandle(backend_session.0),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                )
             })
             .await
             .unwrap();
@@ -2249,7 +2336,10 @@ mod tests {
         let ctx_id_b = ctx_mgr.create_context(Some("uid=9999".into())).await.unwrap();
         let vo_b_raw = ctx_mgr
             .get_context(&ctx_id_b, |c| {
-                let vs_b = c.register_session(BackendHandle(backend_session.0), CkSlotId(0));
+                let vs_b = c.register_session(
+                    BackendHandle(backend_session.0),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                );
                 // B registers the handle as a find result (NOT via register_session_object_handle).
                 let vo_b = c.object_handles.insert(BackendHandle(backend_object.0));
                 (vs_b.0, vo_b.0)
@@ -2303,12 +2393,15 @@ mod tests {
 
         let _backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock;
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
-        ctx_mgr.register_slot(CkSlotId(0)).await;
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
         let ctx_id = ctx_mgr.create_context(None).await.unwrap();
 
         let vs = ctx_mgr
             .get_context(&ctx_id, |c| {
-                c.register_session(BackendHandle(backend_session.0), CkSlotId(0))
+                c.register_session(
+                    BackendHandle(backend_session.0),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                )
             })
             .await
             .unwrap();
@@ -2370,13 +2463,20 @@ mod tests {
 
         let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock;
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
-        ctx_mgr.register_slot(CkSlotId(0)).await;
-        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        ctx_mgr.cache_token_info(
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+            "MockToken".into(),
+            "0001".into(),
+        );
         let ctx_id = ctx_mgr.create_context(Some(IDENTITY.into())).await.unwrap();
 
         let virtual_session = ctx_mgr
             .get_context(&ctx_id, |c| {
-                c.register_session(BackendHandle(backend_session.0), CkSlotId(0))
+                c.register_session(
+                    BackendHandle(backend_session.0),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                )
             })
             .await
             .unwrap();
@@ -2433,13 +2533,20 @@ mod tests {
 
         let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock;
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
-        ctx_mgr.register_slot(CkSlotId(0)).await;
-        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        ctx_mgr.cache_token_info(
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+            "MockToken".into(),
+            "0001".into(),
+        );
         let ctx_id = ctx_mgr.create_context(Some(IDENTITY.into())).await.unwrap();
 
         let virtual_session = ctx_mgr
             .get_context(&ctx_id, |c| {
-                c.register_session(BackendHandle(backend_session.0), CkSlotId(0))
+                c.register_session(
+                    BackendHandle(backend_session.0),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                )
             })
             .await
             .unwrap();
@@ -2491,13 +2598,20 @@ mod tests {
 
         let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock;
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
-        ctx_mgr.register_slot(CkSlotId(0)).await;
-        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        ctx_mgr.cache_token_info(
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+            "MockToken".into(),
+            "0001".into(),
+        );
         let ctx_id = ctx_mgr.create_context(Some(IDENTITY.into())).await.unwrap();
 
         let virtual_session = ctx_mgr
             .get_context(&ctx_id, |c| {
-                c.register_session(BackendHandle(backend_session.0), CkSlotId(0))
+                c.register_session(
+                    BackendHandle(backend_session.0),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                )
             })
             .await
             .unwrap();

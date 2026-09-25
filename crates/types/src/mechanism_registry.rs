@@ -40,9 +40,10 @@ pub enum DiscoveryMode {
 /// no content-derived revision otherwise.
 pub const EMBEDDED_DEFAULT_REVISION: &str = "embedded-default";
 
-/// Registry of mechanism parameter shapes, parameterless mechanisms, and
-/// discovery mode. Built from an embedded TOML default plus an optional
-/// operator override, or reconstructed from a server-published payload.
+/// Registry of mechanism parameter shapes, parameterless mechanisms,
+/// operator-excluded mechanisms, and discovery mode. Built from an embedded
+/// TOML default plus an optional operator override, or reconstructed from a
+/// server-published payload.
 #[derive(Debug)]
 pub struct MechanismRegistry {
     param_shapes: HashMap<u64, String>,
@@ -168,6 +169,7 @@ impl MechanismRegistry {
         Ok(Self {
             param_shapes,
             parameterless,
+            disabled,
             discovery_mode,
             revision: EMBEDDED_DEFAULT_REVISION.to_string(),
         })
@@ -216,6 +218,7 @@ impl MechanismRegistry {
         Ok(Self {
             param_shapes,
             parameterless,
+            disabled,
             discovery_mode,
             revision: EMBEDDED_DEFAULT_REVISION.to_string(),
         })
@@ -227,10 +230,11 @@ impl MechanismRegistry {
     pub fn from_parts(
         param_shapes: HashMap<u64, String>,
         parameterless: HashSet<u64>,
+        disabled: HashSet<u64>,
         discovery_mode: DiscoveryMode,
         revision: String,
     ) -> Self {
-        Self { param_shapes, parameterless, discovery_mode, revision }
+        Self { param_shapes, parameterless, disabled, discovery_mode, revision }
     }
 
     /// Replace the revision string. Used by the daemon after loading a
@@ -256,6 +260,12 @@ impl MechanismRegistry {
     /// payload.
     pub fn parameterless_view(&self) -> &HashSet<u64> {
         &self.parameterless
+    }
+
+    /// Borrow the operator-excluded set, for serialisation into the proto
+    /// payload.
+    pub fn excluded_view(&self) -> &HashSet<u64> {
+        &self.disabled
     }
 
     /// Return the parameter shape name for a mechanism, or `None` if the

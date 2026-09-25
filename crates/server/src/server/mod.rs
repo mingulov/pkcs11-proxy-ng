@@ -10,7 +10,7 @@ pub mod health;
 pub mod rate_limit;
 pub mod rate_quota;
 pub mod resilience;
-mod slot_map;
+pub mod slot_map;
 pub mod trace_id;
 pub mod transport;
 

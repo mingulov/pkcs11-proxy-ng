@@ -141,7 +141,7 @@ impl Pkcs11Client {
         parameter: Option<&MessageParameter>,
         unwrapping_key: CkObjectHandle,
         wrapped: CkInBuf<'_>,
-        template: Option<&[CkAttribute]>,
+        template: &[CkAttribute],
         aad: CkInBuf<'_>,
     ) -> CkResult<(CkObjectHandle, AuthenticatedOutput)> {
         validate_input(mechanism, parameter)?;
@@ -151,8 +151,7 @@ impl Pkcs11Client {
             session_handle: session.0,
             mechanism: Some(mechanism.into()),
             unwrapping_key_handle: unwrapping_key.0,
-            template: Self::proto_template(template.unwrap_or(&[])),
-            template_null: template.is_none(),
+            template: Self::proto_template(template),
             authenticated_parameters: Some(wire::AuthenticatedParameters {
                 message_parameter: parameter.map(Into::into),
             }),
@@ -220,10 +219,9 @@ mod tests {
             mechanism_type: CkMechanismType::AES_CBC,
             params: Some(CkMechanismParams::Iv(IvParams { iv: vec![0; 16] })),
         };
-        let valid = wire::AuthenticatedMechanismOutput::try_from(&AuthenticatedOutput::Iv(
-            vec![0; 16].into(),
-        ))
-        .unwrap();
+        let valid =
+            wire::AuthenticatedMechanismOutput::try_from(&AuthenticatedOutput::Iv(vec![0; 16]))
+                .unwrap();
         assert!(decode_output(&mechanism, None, Some(&valid), &[]).is_ok());
         for output in [
             None,

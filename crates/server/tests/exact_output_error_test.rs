@@ -7,9 +7,7 @@ use std::{sync::Arc, time::Duration};
 #[path = "exact_output_error/loaded.rs"]
 mod loaded;
 
-async fn service(
-    backend: Arc<dyn Pkcs11Backend>,
-) -> (String, tokio::sync::oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
+async fn service(backend: Arc<dyn Pkcs11Backend>) -> (String, tokio::sync::oneshot::Sender<()>) {
     backend.initialize().unwrap();
     let context = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
     context.populate_slots(&backend).await.unwrap();
@@ -17,8 +15,8 @@ async fn service(
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let (stop, stopped) = tokio::sync::oneshot::channel();
     let (ready, readiness) = tokio::sync::oneshot::channel();
-    let server = tokio::spawn(async move {
-        let service = Pkcs11ProxyService::insecure_for_tests(context, backend.clone());
+    tokio::spawn(async move {
+        let service = Pkcs11ProxyService::insecure_for_tests(context, backend);
         ready.send(()).unwrap();
         tonic::transport::Server::builder()
             .add_service(wire::Pkcs11ProxyServer::new(service))
@@ -30,24 +28,15 @@ async fn service(
             )
             .await
             .unwrap();
-        // Graceful-serve completion path (defense in depth; normally the
-        // caller aborts below after finalizing — the shim keeps its idle
-        // connection open across C_Finalize, so graceful shutdown alone
-        // never completes). The explicit drops run the final backend
-        // drop here when this path wins the race.
-        let _ = backend.finalize();
-        drop(backend);
     });
     readiness.await.unwrap();
-    (endpoint, stop, server)
+    (endpoint, stop)
 }
 
 #[tokio::test]
 async fn exact_preprovider_rejections_leave_all_caller_outputs_untouched() {
     let backend = Arc::new(MockBackend::default_test());
-    // Mock backend: no final-owner guard, so the completion join is
-    // unneeded (runtime cancel of the server task is clean here).
-    let (endpoint, _stop, _server) = service(backend.clone()).await;
+    let (endpoint, _stop) = service(backend.clone()).await;
     let mut client =
         tokio::time::timeout(Duration::from_secs(5), wire::Pkcs11ProxyClient::connect(endpoint))
             .await

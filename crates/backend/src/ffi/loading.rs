@@ -66,42 +66,7 @@ impl FfiBackend {
     /// reservation back; any later failure (native code may have run)
     /// poisons the slot instead of recycling it.
     pub fn load_with_init_args(path: &Path, initialize_args: Option<&str>) -> Result<Self, String> {
-        let lib = unsafe { Library::new(path).map_err(|e| format!("dlopen failed: {e}"))? };
-
-        let get_iface_sym = Self::resolve_get_interface(&lib);
-        let mut legacy = || pkcs11_module::function_list(&lib);
-        let (func_list, primary_from_interface) = match get_iface_sym {
-            Some(sym) => {
-                let mut q = ffi_query(sym);
-                select_primary(Some(&mut q), &mut legacy)?
-            }
-            None => select_primary(None, &mut legacy)?,
-        };
-
-        // Attempt to discover 3.0 and 3.2 function lists. These are optional;
-        // a 2.40-only module will simply leave both as None.
-        //
-        // Some 3.x modules answer an *explicit* versioned `C_GetInterface`
-        // query for {3,0} with a NULL interface even though they implement the
-        // 3.0 functions — BouncyHSM, for instance, exposes a 3.1 default
-        // interface and a 3.2 interface but no literal "3.0" one. Because the
-        // 3.0 function list is a prefix of every higher 3.x list, the primary
-        // interface (already resolved into `func_list`) can serve the 3.0
-        // functions whenever it is itself >= 3.0. Without this fallback,
-        // 3.0-only dispatch (e.g. `C_SessionCancel`) wrongly returns
-        // `CKR_FUNCTION_NOT_SUPPORTED` through the proxy on such modules.
-        //
-        let func_list_3_0 = get_iface_sym
-            .and_then(|sym| select_versioned(&mut ffi_query(sym), 3, 0))
-            .or_else(|| Self::primary_interface_fallback(func_list, primary_from_interface, 3, 0))
-            .map(|ptr| ptr as *const cryptoki_sys::CK_FUNCTION_LIST_3_0);
-        let func_list_3_2 = get_iface_sym
-            .and_then(|sym| select_versioned(&mut ffi_query(sym), 3, 2))
-            // 3.2-only fields are valid only on an actual >= 3.2 list, so this
-            // fallback is gated on the stricter version than the 3.0 one above.
-            .or_else(|| Self::primary_interface_fallback(func_list, primary_from_interface, 3, 2))
-            .map(|ptr| ptr as *const cryptoki_sys::CK_FUNCTION_LIST_3_2);
-
+        super::native_domain::check_native_platform().map_err(|e| e.to_string())?;
         let initialize_args = initialize_args
             .map(|s| {
                 CString::new(s)
@@ -114,7 +79,7 @@ impl FfiBackend {
             Ok(lib) => lib,
             Err(e) => {
                 permit.rollback_before_native();
-                return Err(format!("native module load failed: {e}"));
+                return Err(format!("dlopen failed: {e}"));
             }
         };
 
@@ -176,8 +141,12 @@ impl FfiBackend {
             func_list_3_2,
             initialize_args,
             mech_cache: dashmap::DashMap::new(),
+            last_init_family: dashmap::DashMap::new(),
             session_slot_map: dashmap::DashMap::new(),
             slot_sessions: dashmap::DashMap::new(),
+            object_cleanup: Default::default(),
+            construction: permit,
+            lifecycle: super::native_domain::LifecycleTracker::default(),
         })
     }
 
@@ -224,11 +193,33 @@ impl FfiBackend {
     }
 }
 
+impl Drop for FfiBackend {
+    /// Retire the construction reservation honestly: release the exact epoch
+    /// only when the instance lifecycle proves quiescence (never initialized,
+    /// or finalized with no open sessions); otherwise retain ownership and
+    /// poison the slot until process restart. Stale handles and already
+    /// poisoned slots are untouched.
+    fn drop(&mut self) {
+        use super::native_domain::RetirementDecision::{Poison, Release};
+        match self.lifecycle.retirement_decision() {
+            Release => {
+                super::native_domain::ConstructionPermit::release_if_owner(self.construction.epoch);
+            }
+            Poison => {
+                self.construction.poison();
+            }
+        }
+    }
+}
+
 /// One `C_GetInterface` answer as the module reported it.
 pub(crate) struct InterfaceAnswer {
     pub name: Option<Vec<u8>>,
     pub func_list: *mut std::ffi::c_void,
 }
+
+type InterfaceQuery<'a> =
+    dyn FnMut(Option<&[u8]>, Option<cryptoki_sys::CK_VERSION>) -> Option<InterfaceAnswer> + 'a;
 
 const STANDARD_NAME: &[u8] = b"PKCS 11";
 
@@ -245,9 +236,7 @@ fn accepts_standard(ans: &InterfaceAnswer) -> bool {
 /// validated unnamed → legacy. Provenance in the returned bool comes from
 /// the branch that produced the pointer, never from symbol existence.
 fn select_primary(
-    query: Option<
-        &mut dyn FnMut(Option<&[u8]>, Option<cryptoki_sys::CK_VERSION>) -> Option<InterfaceAnswer>,
-    >,
+    query: Option<&mut InterfaceQuery<'_>>,
     legacy: &mut dyn FnMut() -> Result<*mut cryptoki_sys::CK_FUNCTION_LIST, String>,
 ) -> Result<(*mut cryptoki_sys::CK_FUNCTION_LIST, bool), String> {
     if let Some(q) = query {
@@ -267,7 +256,7 @@ fn select_primary(
 /// the same §6a name rule on the unnamed result. Rejecting a hypothetical
 /// vendor-named answer here is soundness over coverage.
 fn select_versioned(
-    q: &mut dyn FnMut(Option<&[u8]>, Option<cryptoki_sys::CK_VERSION>) -> Option<InterfaceAnswer>,
+    q: &mut InterfaceQuery<'_>,
     major: u8,
     minor: u8,
 ) -> Option<*mut std::ffi::c_void> {
@@ -426,6 +415,10 @@ mod tests {
     #[test]
     fn bouncyhsm_3_0_interface_falls_back_to_primary() {
         use std::path::Path;
+
+        // Serialized with the constructor-domain tests: this is the only
+        // other test touching the process-global reservation.
+        let _serial = crate::ffi::native_domain::serial_domain_test_guard();
 
         const DEFAULT_MODULE: &str = concat!(
             "/home/user/.nuget/packages/bouncyhsm.client/2.0.1/",

@@ -82,13 +82,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //
     // Until that PR series lands, keep `Vec<u8>` everywhere — the
     // consistency is more valuable than a half-measure.
-    tonic_prost_build::configure().build_server(true).build_client(true).compile_protos(
-        &[
-            "../../proto/pkcs11-proxy-ng/v1/service.proto",
-            "../../proto/pkcs11-proxy-ng/v1/types.proto",
-            "../../proto/pkcs11-proxy-ng/v1/mechanism_params.proto",
-        ],
-        &["../../proto"],
-    )?;
+    tonic_prost_build::configure()
+        .build_server(true)
+        .build_client(true)
+        .skip_debug([
+            ".pkcs11_proxy_ng.v1.AuthenticatedMechanismOutput",
+            ".pkcs11_proxy_ng.v1.AuthenticatedParameters",
+            ".pkcs11_proxy_ng.v1.MessageParameterEffects",
+            ".pkcs11_proxy_ng.v1.GcmMessageEffects",
+            ".pkcs11_proxy_ng.v1.CcmMessageEffects",
+            ".pkcs11_proxy_ng.v1.SalsaMessageEffects",
+        ])
+        .compile_protos(
+            &[
+                "../../proto/pkcs11-proxy-ng/v1/service.proto",
+                "../../proto/pkcs11-proxy-ng/v1/types.proto",
+                "../../proto/pkcs11-proxy-ng/v1/mechanism_params.proto",
+            ],
+            &["../../proto"],
+        )?;
     Ok(())
 }

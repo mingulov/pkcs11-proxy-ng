@@ -106,7 +106,7 @@ async fn open(f: &MtlsFixture, second: bool) -> Client {
         .unwrap();
     // Keep virtual handles, native objects, and native sessions noncolliding.
     for _ in 0..8 {
-        f.backend.create_object(CkSessionHandle(native_session), Some(&[])).unwrap();
+        f.backend.create_object(CkSessionHandle(native_session), &[]).unwrap();
     }
     let mut c = Client {
         rpc,
@@ -130,7 +130,7 @@ async fn mapped_object(f: &MtlsFixture, c: &Client, class: CkObjectClass, uid: u
         .backend
         .create_object(
             CkSessionHandle(c.native_session),
-            Some(&[
+            &[
                 CkAttribute {
                     attr_type: CkAttributeType::CLASS,
                     value: Some(CkAttributeValue::Ulong(class.0)),
@@ -141,20 +141,15 @@ async fn mapped_object(f: &MtlsFixture, c: &Client, class: CkObjectClass, uid: u
                 },
                 CkAttribute {
                     attr_type: CkAttributeType::UNIQUE_ID,
-                    value: Some(CkAttributeValue::Bytes(vec![uid].into())),
+                    value: Some(CkAttributeValue::Bytes(vec![uid])),
                 },
-            ]),
+            ],
         )
         .unwrap();
     let virtual_key = f
         .context_manager
         .get_context(&ClientContextId(c.context.clone()), |ctx| {
-            let vh = ctx.object_handles.insert(BackendHandle(native.0));
-            // D6(1) fixture provisioning: the backend object carries no
-            // CKA_PRIVATE (public by default) — record what mint
-            // registration would record, so USE needs no backend probe.
-            ctx.object_private.insert(vh, false);
-            vh.0
+            ctx.object_handles.insert(BackendHandle(native.0)).0
         })
         .await
         .unwrap();

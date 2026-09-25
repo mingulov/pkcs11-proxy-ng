@@ -20,7 +20,7 @@ use std::sync::{Arc, OnceLock};
 
 use cryptoki_sys::*;
 use libloading::{Library, Symbol};
-use pkcs11_proxy_ng_backend::MockBackend;
+use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
 use pkcs11_proxy_ng_proto::convert::message_params::MessageParameter;
 use pkcs11_proxy_ng_types::{CkMechanismParams, CkMechanismType, CkSlotId, GcmParams};
 use tokio::sync::Mutex;
@@ -262,7 +262,7 @@ async fn loaded_shim_preserves_provider_mechanism_info_flags() {
     let expected: Vec<_> = [CKM_BATON_KEY_GEN, CKM_CAMELLIA_CTR, CKM_DES_CBC]
         .into_iter()
         .map(|mechanism| {
-            backend.get_mechanism_info(CkSlotId(0), CkMechanismType(mechanism as u64)).unwrap()
+            backend.get_mechanism_info(CkSlotId(0), CkMechanismType(mechanism)).unwrap()
         })
         .collect();
     // BATON and DES now have a source-grounded historical registry; Camellia
@@ -620,13 +620,10 @@ async fn loaded_shim_writes_mechanism_out_to_caller_stack_after_encrypt_wrap_and
             CKR_OK as CK_RV,
             "C_GetMechanismInfo(CKM_BATON_KEY_GEN)"
         );
-        // E0793: CK structs are packed on Windows; assert on by-value copies.
-        let (min_key_size, max_key_size, flags) =
-            (baton_info.ulMinKeySize, baton_info.ulMaxKeySize, baton_info.flags);
-        assert_eq!(min_key_size, 2048, "no-source min key size");
-        assert_eq!(max_key_size, 4096, "no-source max key size");
+        assert_eq!(baton_info.ulMinKeySize, 2048, "no-source min key size");
+        assert_eq!(baton_info.ulMaxKeySize, 4096, "no-source max key size");
         assert_eq!(
-            flags,
+            baton_info.flags,
             CKF_GENERATE | CKF_GENERATE_KEY_PAIR,
             "source-grounded historical BATON flags preserved"
         );
@@ -1565,6 +1562,7 @@ async fn loaded_shim_sign_verify_message_preserves_empty_parameter_classes_once_
         let functions = &*((*interface).pFunctionList as *const CK_FUNCTION_LIST_3_2);
         let c_initialize = functions.C_Initialize.expect("C_Initialize");
         let c_finalize = functions.C_Finalize.expect("C_Finalize");
+        let _finalize_on_drop = FinalizeOnDrop(c_finalize);
         let c_get_slot_list = functions.C_GetSlotList.expect("C_GetSlotList");
         let c_open_session = functions.C_OpenSession.expect("C_OpenSession");
         let c_close_session = functions.C_CloseSession.expect("C_CloseSession");

@@ -300,8 +300,11 @@ fn write_exact_output_rejects_value_larger_than_declared_buffer_without_copy() {
     let mut declared_len: CK_ULONG = 2;
     let spec =
         unsafe { dispatch::general::output_buffer_spec(backing.as_mut_ptr(), &mut declared_len) };
-    let result =
-        CkOutputBufferResult { ck_rv: CkRv::OK, returned_len: 4, value: Some(vec![1, 2, 3, 4]) };
+    let result = CkOutputBufferResult {
+        ck_rv: CkRv::OK,
+        returned_len: Some(4),
+        value: Some(vec![1, 2, 3, 4]),
+    };
 
     let rv = unsafe {
         dispatch::general::write_exact_output(
@@ -322,11 +325,8 @@ fn write_exact_output_validates_all_effects_before_any_store() {
     let mut backing = [0xa5; 8];
     let mut length = 8;
     let spec = unsafe { dispatch::general::output_buffer_spec(backing.as_mut_ptr(), &mut length) };
-    let result = CkOutputBufferResult {
-        ck_rv: CkRv::OK,
-        returned_len: Some(7),
-        value: Some(vec![1; 4].into()),
-    };
+    let result =
+        CkOutputBufferResult { ck_rv: CkRv::OK, returned_len: Some(7), value: Some(vec![1; 4]) };
     let rv = unsafe {
         dispatch::general::write_exact_output(&spec, &result, backing.as_mut_ptr(), &mut length)
     };
@@ -362,7 +362,7 @@ fn write_exact_output_does_not_copy_value_on_buffer_too_small() {
     let result = CkOutputBufferResult {
         ck_rv: CkRv::BUFFER_TOO_SMALL,
         returned_len: Some(4),
-        value: Some(vec![1, 2, 3, 4].into()),
+        value: Some(vec![1, 2, 3, 4]),
     };
 
     let rv = unsafe {
@@ -3223,7 +3223,9 @@ fn null_output_length_parameter_rpc_preserves_exact_provider_rv() {
             )
             .await;
 
-        assert_eq!(result, Err(CkRv::ARGUMENTS_BAD));
+        let (output, _, _) = result.expect("completed native result remains an envelope");
+        assert_eq!(output.ck_rv, CkRv::ARGUMENTS_BAD);
+        assert_eq!(output.returned_len, None);
 
         client.close_session(session).await.expect("C_CloseSession");
         client.finalize().await.expect("C_Finalize");

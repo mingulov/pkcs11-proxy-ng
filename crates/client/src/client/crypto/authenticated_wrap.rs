@@ -20,6 +20,7 @@ impl Pkcs11Client {
         }
         let ctx = self.context_id()?;
         let mut req = pkcs11_proxy_ng_proto::WrapKeyAuthenticatedRequest {
+            authenticated_parameters: None,
             client_context_id: ctx,
             session_handle: session.0,
             mechanism: Some(Self::proto_mechanism(mechanism)),
@@ -50,6 +51,7 @@ impl Pkcs11Client {
         let ctx = self.context_id()?;
         let proto_template = Self::proto_template(template);
         let mut req = pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedRequest {
+            authenticated_parameters: None,
             client_context_id: ctx,
             session_handle: session.0,
             mechanism: Some(Self::proto_mechanism(mechanism)),

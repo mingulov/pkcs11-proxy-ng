@@ -86,7 +86,6 @@ impl Harness {
                 client_context_id: context.clone(),
                 session_handle: session,
                 template: Vec::new(),
-                template_null: false,
             })
             .await
             .unwrap()

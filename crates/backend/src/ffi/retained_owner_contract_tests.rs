@@ -26,7 +26,7 @@ fn backend_with_oracle_provider() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_
     functions.C_EncryptInit = Some(oracle::provider::encrypt_init);
     functions.C_Encrypt = Some(oracle::provider::encrypt);
     let backend = FfiBackend {
-        _lib: crate::ffi::loading::test_library_handle(),
+        _lib: libloading::os::unix::Library::this().into(),
         func_list: functions.as_mut(),
         func_list_3_0: None,
         func_list_3_2: None,
@@ -40,9 +40,6 @@ fn backend_with_oracle_provider() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_
         // consuming it; never backs production dispatch (C3M.4).
         construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
         lifecycle: Default::default(),
-        lifecycle_domain: Default::default(),
-        session_fences: Default::default(),
-        retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(),
     };
     (backend, functions)
 }
@@ -54,11 +51,8 @@ fn gcm_mechanism() -> CkMechanism {
             iv: vec![0xA5; 12],
             iv_bits: 96,
             iv_buffer_len: 12,
-            aad: Vec::new().into(),
+            aad: Vec::new(),
             tag_bits: 128,
-
-            iv_null: false,
-            aad_null: false,
         })),
     }
 }
@@ -78,7 +72,7 @@ fn init_and_encrypt(
     backend: &FfiBackend,
     session: CkSessionHandle,
     controls: OracleControls,
-) -> SecretBytes {
+) -> Vec<u8> {
     reset_oracle(controls, 16);
     let gcm = gcm_mechanism();
     backend.ffi_encrypt_init_with_output(session, &gcm, CkObjectHandle(1)).unwrap();
@@ -113,9 +107,6 @@ fn assert_retention(observation: &RetainedOracleObservation) {
 fn oracle_retains_init_root_across_native_calls() {
     let _guard = oracle::acquire_test_serial();
     let (backend, _functions) = backend_with_oracle_provider();
-    // Mirror production: Initialize (opens the lifecycle domain) before
-    // ordinary work.
-    backend.initialize().expect("oracle initialize");
     let session = CkSessionHandle(31);
     let controls = OracleControls {
         set_scenario: RetainedOracle_SetScenario,
@@ -268,14 +259,10 @@ fn oracle_gate_holds_native_entry_until_released() {
     }
 }
 
-#[cfg_attr(miri, ignore = "Miri cannot dlopen; covered natively")]
 #[test]
 fn native_owner_call_readback_is_one_transaction() {
     let _guard = oracle::acquire_test_serial();
     let (backend, _functions) = backend_with_oracle_provider();
-    // Mirror production: Initialize (opens the lifecycle domain) before
-    // ordinary work.
-    backend.initialize().expect("oracle initialize");
     let controls = OracleControls {
         set_scenario: RetainedOracle_SetScenario,
         reset_observation: RetainedOracle_ResetObservation,

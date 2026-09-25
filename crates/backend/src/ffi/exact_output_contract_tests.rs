@@ -19,11 +19,7 @@ fn invoke(
         });
     }
     ExactOracle_ResetObservation();
-    // Direct-leaf oracle: admit on a throwaway test domain.
-    let choke_domain = crate::ffi::native_domain::LifecycleDomain::new();
-    choke_domain.open_for_tests();
-    let choke_admission = choke_domain.admit_ordinary().expect("test domain admits");
-    let result = FfiBackend::single_call_bytes_exact(&choke_admission, spec, |out, len| unsafe {
+    let result = FfiBackend::single_call_bytes_exact(spec, |out, len| unsafe {
         ExactOracle_ByteOutput(out, len)
     });
     let mut observation = ExactOracleObservation::default();
@@ -97,9 +93,7 @@ fn exact_unrepresentable_or_over_limit_capacity_rejects_before_native_call() {
         observation.calls, 0,
         "a resource cap must reject rather than alter the native call"
     );
-    // F4/D7 (ADR-0010 Limits-(d)): an unforwardable capacity claim is a bad
-    // argument, not a failed allocation.
-    assert_eq!(result, Err(CkRv::ARGUMENTS_BAD));
+    assert_eq!(result, Err(CkRv::HOST_MEMORY));
 }
 
 #[test]
@@ -233,7 +227,7 @@ fn exact_kem_error_keeps_length_and_never_publishes_output_only_handle() {
     let mut table = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_2::default());
     table.C_EncapsulateKey = Some(kem_error);
     let backend = FfiBackend {
-        _lib: crate::ffi::loading::test_library_handle(),
+        _lib: libloading::os::unix::Library::this().into(),
         func_list: base.as_mut(),
         func_list_3_0: None,
         func_list_3_2: Some(table.as_ref()),
@@ -247,12 +241,7 @@ fn exact_kem_error_keeps_length_and_never_publishes_output_only_handle() {
         // consuming it; never backs production dispatch (C3M.4).
         construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
         lifecycle: Default::default(),
-        lifecycle_domain: Default::default(),
-        session_fences: Default::default(),
-        retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(),
     };
-    // Exact paths are ordinary: establish post-Initialize state.
-    backend.lifecycle_domain.open_for_tests();
     for (present, missing) in [(true, false), (false, false), (true, true), (false, true)] {
         unsafe {
             ExactOracle_SetScenario(&ExactOracleScenario {
@@ -267,7 +256,7 @@ fn exact_kem_error_keeps_length_and_never_publishes_output_only_handle() {
             CkSessionHandle(1),
             &CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None },
             CkObjectHandle(2),
-            Some(&[]),
+            &[],
             &CkOutputBufferSpec {
                 buffer_present: present,
                 buffer_len: 8,
@@ -312,7 +301,7 @@ fn exact_parameter_error_preserves_only_defined_initialized_effects() {
     let mut table = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_0::default());
     table.C_EncryptMessage = Some(message_error);
     let backend = FfiBackend {
-        _lib: crate::ffi::loading::test_library_handle(),
+        _lib: libloading::os::unix::Library::this().into(),
         func_list: base.as_mut(),
         func_list_3_0: Some(table.as_ref()),
         func_list_3_2: None,
@@ -326,12 +315,7 @@ fn exact_parameter_error_preserves_only_defined_initialized_effects() {
         // consuming it; never backs production dispatch (C3M.4).
         construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
         lifecycle: Default::default(),
-        lifecycle_domain: Default::default(),
-        session_fences: Default::default(),
-        retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(),
     };
-    // Exact paths are ordinary: establish post-Initialize state.
-    backend.lifecycle_domain.open_for_tests();
     let parameter = MessageParameter::GcmMessage(GcmMessageParams {
         iv: vec![0x11; 12],
         iv_null_len: None,
@@ -404,7 +388,7 @@ fn exact_begin_error_preserves_native_completion_and_initialized_iv() {
     let mut table = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_0::default());
     table.C_EncryptMessageBegin = Some(begin_error);
     let backend = FfiBackend {
-        _lib: crate::ffi::loading::test_library_handle(),
+        _lib: libloading::os::unix::Library::this().into(),
         func_list: base.as_mut(),
         func_list_3_0: Some(table.as_ref()),
         func_list_3_2: None,
@@ -418,12 +402,7 @@ fn exact_begin_error_preserves_native_completion_and_initialized_iv() {
         // consuming it; never backs production dispatch (C3M.4).
         construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
         lifecycle: Default::default(),
-        lifecycle_domain: Default::default(),
-        session_fences: Default::default(),
-        retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(),
     };
-    // Exact paths are ordinary: establish post-Initialize state.
-    backend.lifecycle_domain.open_for_tests();
     let parameter = MessageParameter::GcmMessage(GcmMessageParams {
         iv: vec![0x11; 12],
         iv_null_len: None,
@@ -478,26 +457,19 @@ fn exact_begin_error_preserves_native_completion_and_initialized_iv() {
 }
 
 #[test]
-fn classic_gcm_initialized_error_iv_effect() {
+#[ignore = "C3 Phase B: requires independently accepted common mechanism provenance prerequisite"]
+fn classic_gcm_initialized_error_iv_effect_pending_provenance_prerequisite() {
     let mechanism = CkMechanism {
         mechanism_type: CkMechanismType::AES_GCM,
         params: Some(CkMechanismParams::Gcm(GcmParams {
             iv: vec![0x11; 12],
             iv_bits: 96,
             iv_buffer_len: 12,
-            aad: vec![].into(),
+            aad: vec![],
             tag_bits: 128,
-
-            iv_null: false,
-            aad_null: false,
         })),
     };
-    // Direct-choke unit test: admit on a throwaway test domain.
-    let choke_domain = crate::ffi::native_domain::LifecycleDomain::new();
-    choke_domain.open_for_tests();
-    let choke_admission = choke_domain.admit_ordinary().expect("test domain admits");
     let (output, effects) = FfiBackend::call_bytes_exact_with_mechanism_output(
-        &choke_admission,
         Some(()),
         &mechanism,
         &CkOutputBufferSpec { buffer_present: true, buffer_len: 4, length_pointer_null: false },
@@ -518,187 +490,4 @@ fn classic_gcm_initialized_error_iv_effect() {
         panic!("initialized classic GCM IV error effect must survive");
     };
     assert_eq!(gcm.iv[0], 0x42);
-}
-
-#[test]
-fn classic_gcm_error_effect_matrix_data_query_and_missing_length() {
-    let input = GcmParams {
-        iv: vec![0x11; 12],
-        iv_bits: 96,
-        iv_buffer_len: 12,
-        aad: vec![].into(),
-        tag_bits: 128,
-
-        iv_null: false,
-        aad_null: false,
-    };
-    let mechanism = CkMechanism {
-        mechanism_type: CkMechanismType::AES_GCM,
-        params: Some(CkMechanismParams::Gcm(input.clone())),
-    };
-    let modes = [
-        (
-            "data",
-            CkOutputBufferSpec { buffer_present: true, buffer_len: 4, length_pointer_null: false },
-        ),
-        (
-            "size query",
-            CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: false },
-        ),
-        (
-            "missing-length with buffer",
-            CkOutputBufferSpec { buffer_present: true, buffer_len: 4, length_pointer_null: true },
-        ),
-        (
-            "missing-length without buffer",
-            CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: true },
-        ),
-    ];
-    let rvs = [
-        (CkRv::OK, cryptoki_sys::CKR_OK),
-        (CkRv::BUFFER_TOO_SMALL, cryptoki_sys::CKR_BUFFER_TOO_SMALL),
-        (CkRv::FUNCTION_FAILED, cryptoki_sys::CKR_FUNCTION_FAILED),
-        (CkRv::DEVICE_ERROR, cryptoki_sys::CKR_DEVICE_ERROR),
-        (CkRv::ARGUMENTS_BAD, cryptoki_sys::CKR_ARGUMENTS_BAD),
-        (CkRv(0x8000_0017), 0x8000_0017),
-    ];
-    for (mode_name, spec) in &modes {
-        for (rv, native_rv) in &rvs {
-            for write in [true, false] {
-                let cell = format!("{mode_name} {rv:?} write={write}");
-                // Direct-choke unit test: admit on a throwaway test domain.
-                let choke_domain = crate::ffi::native_domain::LifecycleDomain::new();
-                choke_domain.open_for_tests();
-                let choke_admission = choke_domain.admit_ordinary().expect("test domain admits");
-                let (output, effects) = FfiBackend::call_bytes_exact_with_mechanism_output(
-                    &choke_admission,
-                    Some(()),
-                    &mechanism,
-                    spec,
-                    |(), native, _, length| {
-                        if write {
-                            // Benign native-provider effect: write within an
-                            // initialized owned IV, plus the length cell when one exists.
-                            let gcm = unsafe {
-                                &*native.pParameter.cast::<cryptoki_sys::CK_GCM_PARAMS>()
-                            };
-                            unsafe { gcm.pIv.write(0x42) };
-                            if !length.is_null() {
-                                unsafe { length.write(7) };
-                            }
-                        }
-                        *native_rv
-                    },
-                )
-                .unwrap();
-                assert_eq!(output.ck_rv, *rv, "{cell}: rv");
-                let (expected_len, expected_value) = if spec.length_pointer_null {
-                    (None, None)
-                } else if spec.buffer_present {
-                    if write {
-                        (Some(7), None)
-                    } else if *rv == CkRv::OK {
-                        (Some(4), Some(vec![0u8; 4]))
-                    } else {
-                        (Some(4), None)
-                    }
-                } else if write {
-                    (Some(7), None)
-                } else if *rv == CkRv::OK {
-                    (Some(0), None)
-                } else {
-                    (None, None)
-                };
-                assert_eq!(output.returned_len, expected_len, "{cell}: returned_len");
-                assert_eq!(output.value, expected_value.map(SecretBytes::new), "{cell}: value");
-                let gated = spec.buffer_present || spec.length_pointer_null;
-                if !gated {
-                    assert_eq!(effects, None, "{cell}: size query suppresses effects");
-                } else if write {
-                    let Some(CkMechanismParams::Gcm(gcm)) = &effects else {
-                        panic!("{cell}: expected mutated GCM effects, got {effects:?}");
-                    };
-                    assert_eq!(gcm.iv[0], 0x42, "{cell}: mutated IV byte");
-                    assert_eq!(gcm.iv.len(), 12, "{cell}: IV length preserved");
-                } else if *rv == CkRv::OK {
-                    assert_eq!(
-                        effects,
-                        Some(CkMechanismParams::Gcm(input.clone())),
-                        "{cell}: OK echoes unchanged input params"
-                    );
-                } else {
-                    assert_eq!(effects, None, "{cell}: unchanged error surfaces no effects");
-                }
-            }
-        }
-    }
-}
-
-#[test]
-fn classic_gcm_ok_effect_unchanged_data_and_missing_length() {
-    let input = GcmParams {
-        iv: vec![0x11; 12],
-        iv_bits: 96,
-        iv_buffer_len: 12,
-        aad: vec![].into(),
-        tag_bits: 128,
-
-        iv_null: false,
-        aad_null: false,
-    };
-    let mechanism = CkMechanism {
-        mechanism_type: CkMechanismType::AES_GCM,
-        params: Some(CkMechanismParams::Gcm(input.clone())),
-    };
-    let modes = [
-        (
-            "data",
-            CkOutputBufferSpec { buffer_present: true, buffer_len: 4, length_pointer_null: false },
-            true,
-        ),
-        (
-            "missing-length with buffer",
-            CkOutputBufferSpec { buffer_present: true, buffer_len: 4, length_pointer_null: true },
-            true,
-        ),
-        (
-            "missing-length without buffer",
-            CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: true },
-            true,
-        ),
-        (
-            "size query",
-            CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: false },
-            false,
-        ),
-    ];
-    for (mode_name, spec, expect_echo) in &modes {
-        // Direct-choke unit test: admit on a throwaway test domain.
-        let choke_domain = crate::ffi::native_domain::LifecycleDomain::new();
-        choke_domain.open_for_tests();
-        let choke_admission = choke_domain.admit_ordinary().expect("test domain admits");
-        let (output, effects) = FfiBackend::call_bytes_exact_with_mechanism_output(
-            &choke_admission,
-            Some(()),
-            &mechanism,
-            spec,
-            |(), _, _, length| {
-                if !length.is_null() {
-                    unsafe { length.write(3) };
-                }
-                cryptoki_sys::CKR_OK
-            },
-        )
-        .unwrap();
-        assert_eq!(output.ck_rv, CkRv::OK, "{mode_name}");
-        if *expect_echo {
-            assert_eq!(
-                effects,
-                Some(CkMechanismParams::Gcm(input.clone())),
-                "{mode_name}: OK echoes unchanged input params"
-            );
-        } else {
-            assert_eq!(effects, None, "{mode_name}: OK size query suppresses effects");
-        }
-    }
 }

@@ -128,19 +128,6 @@ pub(crate) fn input_buf_to_ck_in_buf(buf: InputBuf<'_>) -> Result<CkInBuf<'_>, C
     }
 }
 
-pub(crate) unsafe fn write_output_slice<'a, T>(ptr: *mut T, len: usize) -> &'a mut [T] {
-    if ptr.is_null() || len == 0 {
-        return &mut [];
-    }
-    let byte_size = len.checked_mul(std::mem::size_of::<T>());
-    match byte_size {
-        Some(n) if n <= MAX_SERIALIZABLE_BYTES => unsafe {
-            std::slice::from_raw_parts_mut(ptr, len)
-        },
-        _ => panic!("output length {len} exceeds serializable limit"),
-    }
-}
-
 /// Build a `CkOutputBufferSpec` from the C caller's pointer pair.
 ///
 /// This captures exactly what the PKCS#11 caller passed:
@@ -187,44 +174,64 @@ pub(crate) unsafe fn write_exact_output(
     p_output: CK_BYTE_PTR,
     pul_output_len: CK_ULONG_PTR,
 ) -> CK_RV {
-    if spec.length_pointer_null {
-        if !pul_output_len.is_null()
-            || p_output.is_null() == spec.buffer_present
-            || result.returned_len != 0
-            || result.value.is_some()
-        {
-            return rv_err(CkRv::GENERAL_ERROR);
-        }
-        return rv_err(result.ck_rv);
-    }
-    if pul_output_len.is_null() {
+    if p_output.is_null() == spec.buffer_present
+        || pul_output_len.is_null() != spec.length_pointer_null
+    {
         return rv_err(CkRv::ARGUMENTS_BAD);
     }
-    let caller_capacity = unsafe { *pul_output_len } as u64;
-
-    // Always write back the returned length
-    unsafe { *pul_output_len = result.returned_len as CK_ULONG };
-
-    if result.ck_rv != CkRv::OK {
-        return result.ck_rv.0 as CK_RV;
+    if let Err(rv) = result.validate_for(spec, CK_ULONG::MAX as u64) {
+        return rv_err(rv);
     }
-
-    let Some(ref value) = result.value else {
-        return result.ck_rv.0 as CK_RV;
-    };
-    if p_output.is_null() {
-        return result.ck_rv.0 as CK_RV;
-    }
-
-    let value_len = value.len() as u64;
-    if value_len != result.returned_len || value_len > caller_capacity {
-        return rv_err(CkRv::GENERAL_ERROR);
-    }
-    if !value.is_empty() {
+    // The validated request snapshot is the capacity authority. In particular,
+    // a NULL-output query may have an uninitialized incoming length cell.
+    let rv = CK_RV::try_from(result.ck_rv.0).unwrap_or(CKR_GENERAL_ERROR);
+    let length = result.returned_len.map(|n| CK_ULONG::try_from(n).expect("validated width"));
+    if let Some(value) = &result.value
+        && !value.is_empty()
+    {
         unsafe { std::ptr::copy_nonoverlapping(value.as_ptr(), p_output, value.len()) };
     }
+    if let Some(length) = length {
+        unsafe { pul_output_len.write(length) };
+    }
+    rv
+}
 
-    result.ck_rv.0 as CK_RV
+#[cfg(test)]
+mod exact_scalar_tests {
+    use super::*;
+
+    #[test]
+    fn write_exact_output_size_query_never_reads_incoming_length() {
+        let mut length = std::mem::MaybeUninit::<CK_ULONG>::uninit();
+        let pointer = length.as_mut_ptr();
+        let spec = unsafe { output_buffer_spec(std::ptr::null_mut(), pointer) };
+        assert_eq!(spec.buffer_len, 0);
+        let output = CkOutputBufferResult {
+            ck_rv: CkRv::FUNCTION_FAILED,
+            returned_len: Some(7),
+            value: None,
+        };
+        assert_eq!(
+            unsafe { write_exact_output(&spec, &output, std::ptr::null_mut(), pointer) },
+            CKR_FUNCTION_FAILED
+        );
+        assert_eq!(unsafe { length.assume_init() }, 7);
+    }
+
+    #[test]
+    fn write_exact_output_preprovider_failure_leaves_length_and_bytes_untouched() {
+        let mut value = [0xa5u8; 4];
+        let mut length = 4;
+        let spec = unsafe { output_buffer_spec(value.as_mut_ptr(), &mut length) };
+        let output = CkOutputBufferResult::no_effects(CkRv::HOST_MEMORY);
+        assert_eq!(
+            unsafe { write_exact_output(&spec, &output, value.as_mut_ptr(), &mut length) },
+            CKR_HOST_MEMORY
+        );
+        assert_eq!(length, 4);
+        assert_eq!(value, [0xa5; 4]);
+    }
 }
 
 pub(crate) unsafe fn write_session_handle_output(
@@ -250,62 +257,6 @@ pub(crate) unsafe fn write_object_handle_pair_output(
     unsafe {
         *p_public_handle = public_handle.0 as CK_OBJECT_HANDLE;
         *p_private_handle = private_handle.0 as CK_OBJECT_HANDLE;
-    }
-}
-
-/// Write parameter_out back to a C caller's pParameter buffer.
-/// Copies min(parameter_out.len(), ul_parameter_len) bytes.
-///
-/// # Safety
-///
-/// `p_parameter` must be either null or point to a writable buffer of at
-/// least `ul_parameter_len` bytes.
-pub(crate) unsafe fn write_parameter_out(
-    parameter_out: &[u8],
-    p_parameter: *mut ::std::os::raw::c_void,
-    ul_parameter_len: CK_ULONG,
-) {
-    if p_parameter.is_null() || ul_parameter_len == 0 {
-        return;
-    }
-    let copy_len = parameter_out.len().min(ul_parameter_len as usize);
-    if copy_len > 0 {
-        unsafe {
-            std::ptr::copy_nonoverlapping(parameter_out.as_ptr(), p_parameter as *mut u8, copy_len);
-        }
-    }
-}
-
-/// Build a `CkParameterRoundtripSpec` from the C caller's parameter pointer pair.
-///
-/// Captures what the caller passed for the dual-purpose parameter buffer:
-/// - Non-null `p_parameter` with `ul_parameter_len > 0` → buffer_present = true,
-///   and we capture the input bytes as `value`.
-/// - Otherwise → buffer_present = false.
-///
-/// # Safety
-///
-/// `p_parameter` must be either null or point to a readable buffer of at
-/// least `ul_parameter_len` bytes.
-pub(crate) unsafe fn parameter_roundtrip_spec(
-    p_parameter: *mut ::std::os::raw::c_void,
-    ul_parameter_len: CK_ULONG,
-) -> pkcs11_proxy_ng_types::CkParameterRoundtripSpec {
-    if p_parameter.is_null() || ul_parameter_len == 0 {
-        pkcs11_proxy_ng_types::CkParameterRoundtripSpec {
-            buffer_present: false,
-            buffer_len: 0,
-            value: None,
-        }
-    } else {
-        let input = unsafe {
-            std::slice::from_raw_parts(p_parameter as *const u8, ul_parameter_len as usize)
-        };
-        pkcs11_proxy_ng_types::CkParameterRoundtripSpec {
-            buffer_present: true,
-            buffer_len: ul_parameter_len as u64,
-            value: Some(input.to_vec()),
-        }
     }
 }
 
@@ -341,38 +292,6 @@ pub(crate) unsafe fn empty_message_parameter_roundtrip_spec(
     unsafe { message_parameter_roundtrip_spec(p_parameter, ul_parameter_len) }
 }
 
-/// Write both an exact `CkOutputBufferResult` and a `CkParameterRoundtripResult`
-/// back to the C caller.
-///
-/// Handles:
-/// 1. Writing the main output via [`write_exact_output`].
-/// 2. Writing the parameter write-back bytes to the caller's `p_parameter` buffer.
-///
-/// # Safety
-///
-/// Same safety requirements as `write_exact_output` plus `p_parameter` must be
-/// writable for `ul_parameter_len` bytes if non-null.
-pub(crate) unsafe fn write_exact_parameter_output(
-    output_spec: &pkcs11_proxy_ng_types::CkOutputBufferSpec,
-    output_result: &pkcs11_proxy_ng_types::CkOutputBufferResult,
-    param_result: &pkcs11_proxy_ng_types::CkParameterRoundtripResult,
-    p_output: CK_BYTE_PTR,
-    pul_output_len: CK_ULONG_PTR,
-    p_parameter: *mut ::std::os::raw::c_void,
-    ul_parameter_len: CK_ULONG,
-) -> CK_RV {
-    // Write the main output first
-    let rv = unsafe { write_exact_output(output_spec, output_result, p_output, pul_output_len) };
-
-    // Write back the parameter if present and the main result was OK or
-    // BUFFER_TOO_SMALL (parameter write-back happens regardless for size queries)
-    if let Some(ref param_bytes) = param_result.value {
-        unsafe { write_parameter_out(param_bytes, p_parameter, ul_parameter_len) };
-    }
-
-    rv
-}
-
 pub(crate) fn pad_string(dest: &mut [CK_UTF8CHAR], src: &str) {
     let bytes = src.as_bytes();
     let copy_len = bytes.len().min(dest.len());
@@ -400,11 +319,13 @@ where
 /// are bounded by `MAX_SERIALIZABLE_BYTES`.
 pub(crate) const MAX_MECHANISM_PARAM_STRUCT_LEN: usize = 65_536;
 
+mod authenticated_params;
 mod mechanism_read;
 mod mechanism_writeback;
 mod message_params;
 mod template_input;
 
+pub(crate) use authenticated_params::*;
 pub(crate) use mechanism_read::*;
 pub(crate) use mechanism_writeback::*;
 pub(crate) use message_params::*;

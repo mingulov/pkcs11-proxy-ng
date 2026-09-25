@@ -1,7 +1,6 @@
 use super::{
     FfiBackend, OperationFamily,
     ffi_conversion::{mechanism_to_ffi, narrow_wire_ulong},
-    native_domain::OrdinaryGuard,
 };
 use crate::traits::CkDeriveKeyOutputResult;
 use pkcs11_proxy_ng_types::*;
@@ -11,9 +10,8 @@ use pkcs11_proxy_ng_types::*;
 /// two-call helpers retain their separate legacy allocation policy.
 pub(super) const MAX_OUTPUT_BUFFER_BYTES: u64 = 512 * 1024 * 1024;
 
-/// Cap a client-claimed exact-output buffer length to `MAX_OUTPUT_BUFFER_BYTES`
-/// before allocating, so a single request cannot drive a multi-GB allocation in
-/// the shared daemon. The backend writes at most this many bytes.
+/// Legacy convenience-helper cap. Public exact paths must use checked rejection,
+/// never this helper. Backend-only structured-sign helpers remain a follow-up.
 pub(super) fn capped_output_len(buffer_len: u64) -> usize {
     buffer_len.min(MAX_OUTPUT_BUFFER_BYTES) as usize
 }
@@ -374,9 +372,17 @@ impl FfiBackend {
         let generation = self.lifecycle.current_generation();
         let function = Self::require_fn(function)?;
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
-        Self::ck_result(call(function, &mut ffi_mech.ck_mechanism))?;
-        // Keep the mechanism's backing memory alive for the session.
-        self.mech_cache.insert(session.0, ffi_mech);
+        Self::ck_result(call(function, ffi_mech.ck_mechanism_mut()))?;
+        // Row-10 stale-completion guard: if re-initialization advanced the
+        // generation while the native call ran, this completion belongs to
+        // a dead incarnation. Retire its owner instead of publishing it —
+        // the slot may already belong to a reused handle in the new one.
+        if self.lifecycle.current_generation() != generation {
+            return Err(CkRv::SESSION_HANDLE_INVALID);
+        }
+        // Keep the mechanism's backing memory alive in this family's slot.
+        self.mech_cache.insert((session.0, family), ffi_mech);
+        self.last_init_family.insert(session.0, family);
         Ok(())
     }
 
@@ -398,14 +404,32 @@ impl FfiBackend {
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
         Self::ck_result(call(function, ffi_mech.ck_mechanism_mut()))?;
         let output_params = ffi_mech.output_params();
-        // Keep the mechanism's backing memory alive for the session.
-        self.mech_cache.insert(session.0, ffi_mech);
+        // Row-10 stale-completion guard: same dead-incarnation refusal as
+        // `call_init_with_mechanism` — never publish into a reused slot.
+        if self.lifecycle.current_generation() != generation {
+            return Err(CkRv::SESSION_HANDLE_INVALID);
+        }
+        // Keep the mechanism's backing memory alive in this family's slot.
+        self.mech_cache.insert((session.0, family), ffi_mech);
+        self.last_init_family.insert(session.0, family);
         Ok(output_params)
     }
 
-    /// Drop any cached mechanism for the given session (called on session close).
-    pub(super) fn drop_mech_cache(&self, session: CkSessionHandle) {
-        self.mech_cache.remove(&session.0);
+    /// Retire one family's cached mechanism (called on that family's Init
+    /// cancel). Sibling families' slots and the last-Init marker are
+    /// untouched: a cancel proves nothing about other families' owners.
+    /// If the marker names the retired family, the unscoped read below
+    /// yields None rather than a sibling's graph — matching the pre-slot
+    /// observable behavior where cancel emptied the whole cache.
+    pub(super) fn drop_mech_cache_family(&self, session: CkSessionHandle, family: OperationFamily) {
+        self.mech_cache.remove(&(session.0, family));
+    }
+
+    /// Drop every cached mechanism of the given session, plus its last-Init
+    /// marker (called on session close).
+    pub(super) fn drop_mech_cache_session(&self, session: CkSessionHandle) {
+        self.mech_cache.retain(|key, _| key.0 != session.0);
+        self.last_init_family.remove(&session.0);
     }
 
     /// Record `session -> slot` for later per-slot eviction in
@@ -437,13 +461,15 @@ impl FfiBackend {
     /// is reflected in our Rust-owned caches.
     pub(super) fn drop_mech_cache_for_slot(&self, slot_id: CkSlotId) {
         // O(sessions-on-slot): take the slot's session set from the reverse
-        // index, then evict exactly those entries from the mechanism cache and
+        // index, then evict exactly those sessions' entries — every family
+        // slot plus the last-Init marker — from the mechanism cache and
         // the forward map — no full scan of every open session (L4).
         let Some((_, sessions)) = self.slot_sessions.remove(&slot_id.0) else {
             return;
         };
         for session in sessions {
-            self.mech_cache.remove(&session);
+            self.mech_cache.retain(|key, _| key.0 != session);
+            self.last_init_family.remove(&session);
             self.session_slot_map.remove(&session);
         }
     }
@@ -453,10 +479,9 @@ impl FfiBackend {
     /// released even when the caller doesn't close sessions individually first.
     /// Also used when a successful `C_Initialize` opens a new incarnation:
     /// bindings cached under the dead generation must not survive it.
-    /// Session fences clear with the same purge (no guard — hence no fence
-    /// holder — can exist under the publish write that runs this).
     pub(super) fn drop_all_mech_cache(&self) {
         self.mech_cache.clear();
+        self.last_init_family.clear();
         self.session_slot_map.clear();
         self.slot_sessions.clear();
     }
@@ -469,7 +494,7 @@ impl FfiBackend {
         session: CkSessionHandle,
         family: OperationFamily,
     ) -> Option<CkMechanismParams> {
-        self.mech_cache.get(&session.0).and_then(|mechanism| mechanism.output_params())
+        self.mech_cache.get(&(session.0, family)).and_then(|mechanism| mechanism.output_params())
     }
 
     pub(super) fn call_bytes_with_mechanism<TFunction, F>(
@@ -528,63 +553,47 @@ impl FfiBackend {
         call: F,
     ) -> CkResult<CkOutputBufferResult>
     where
-        F: FnMut(*mut cryptoki_sys::CK_BYTE, *mut cryptoki_sys::CK_ULONG) -> cryptoki_sys::CK_RV,
+        F: FnOnce(*mut cryptoki_sys::CK_BYTE, *mut cryptoki_sys::CK_ULONG) -> cryptoki_sys::CK_RV,
     {
-        if spec.length_pointer_null {
-            let output = if spec.buffer_present {
-                std::ptr::NonNull::<cryptoki_sys::CK_BYTE>::dangling().as_ptr()
-            } else {
-                std::ptr::null_mut()
-            };
-            let rv = call(output, std::ptr::null_mut());
-            return Ok(CkOutputBufferResult {
-                ck_rv: CkRv(rv as u64),
-                returned_len: 0,
-                value: None,
-            });
-        }
-
-        let mut out_len: cryptoki_sys::CK_ULONG = 0;
-
-        if !spec.buffer_present {
-            // Size query: pass NULL buffer
-            let rv = call(std::ptr::null_mut(), &mut out_len);
-            if rv == CkRv::OK.0 as cryptoki_sys::CK_RV {
-                Ok(CkOutputBufferResult {
-                    ck_rv: CkRv::OK,
-                    returned_len: out_len as u64,
-                    value: None,
-                })
-            } else {
-                // Propagate exact CK_RV from backend
-                Err(CkRv(rv as u64))
+        // Preparation is complete before invoking the FnOnce. A resource limit
+        // must never change the caller's native capacity.
+        let capacity = if spec.buffer_present && !spec.length_pointer_null {
+            if spec.buffer_len > MAX_OUTPUT_BUFFER_BYTES {
+                return Err(CkRv::HOST_MEMORY);
             }
             usize::try_from(spec.buffer_len).map_err(|_| CkRv::HOST_MEMORY)?
         } else {
-            // Data query: allocate caller-specified buffer, capped to prevent
-            // OOM/panic from absurd client-supplied lengths.
-            let capped_len = spec.buffer_len.min(MAX_OUTPUT_BUFFER_BYTES);
-            out_len = capped_len as cryptoki_sys::CK_ULONG;
-            let mut buf = vec![0u8; capped_len as usize];
-            let rv = call(buf.as_mut_ptr(), &mut out_len);
-
-            if rv == CkRv::OK.0 as cryptoki_sys::CK_RV {
-                buf.truncate(out_len as usize);
-                Ok(CkOutputBufferResult {
-                    ck_rv: CkRv::OK,
-                    returned_len: out_len as u64,
-                    value: Some(buf),
-                })
-            } else if rv == CkRv::BUFFER_TOO_SMALL.0 as cryptoki_sys::CK_RV {
-                Ok(CkOutputBufferResult {
-                    ck_rv: CkRv::BUFFER_TOO_SMALL,
-                    returned_len: out_len as u64,
-                    value: None,
-                })
-            } else {
-                Err(CkRv(rv as u64))
-            }
-        }
+            0
+        };
+        let mut length = if spec.buffer_present && !spec.length_pointer_null {
+            cryptoki_sys::CK_ULONG::try_from(spec.buffer_len).map_err(|_| CkRv::HOST_MEMORY)?
+        } else {
+            0
+        };
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(capacity).map_err(|_| CkRv::HOST_MEMORY)?;
+        bytes.resize(capacity, 0);
+        let output = if spec.buffer_present { bytes.as_mut_ptr() } else { std::ptr::null_mut() };
+        let length_pointer =
+            if spec.length_pointer_null { std::ptr::null_mut() } else { &mut length };
+        let rv = CkRv(call(output, length_pointer) as u64);
+        // In/out cells are initialized. Query cells are output-only: OK defines
+        // the length, otherwise only a changed initialized value proves a store.
+        // An error store of zero and no store remain observationally ambiguous.
+        let returned_len = (!spec.length_pointer_null
+            && (spec.buffer_present || rv == CkRv::OK || length != 0))
+            .then_some(length as u64);
+        let value = if rv == CkRv::OK
+            && !spec.length_pointer_null
+            && spec.buffer_present
+            && (length as u64) <= capacity as u64
+        {
+            bytes.truncate(length as usize);
+            Some(bytes)
+        } else {
+            None
+        };
+        Ok(CkOutputBufferResult { ck_rv: rv, returned_len, value })
     }
 
     /// Resolve a function pointer then call `single_call_bytes_exact`.
@@ -627,7 +636,7 @@ impl FfiBackend {
     {
         let function = Self::require_fn(function)?;
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
-        Self::single_call_bytes_exact(_admission, spec, |output, output_len| {
+        Self::single_call_bytes_exact(spec, |output, output_len| {
             call(function, ffi_mech.ck_mechanism_mut(), output, output_len)
         })
     }
@@ -683,7 +692,7 @@ impl FfiBackend {
             Err(rv) => return Ok(CkDeriveKeyOutputResult::error(rv, None)),
         };
         let mut handle: cryptoki_sys::CK_OBJECT_HANDLE = 0;
-        let rv = CkRv(call(function, &mut ffi_mech.ck_mechanism, &mut handle) as u64);
+        let rv = CkRv(call(function, ffi_mech.ck_mechanism_mut(), &mut handle) as u64);
         let mechanism_out = ffi_mech.output_params();
         if rv.is_ok() {
             Ok(CkDeriveKeyOutputResult::ok(CkObjectHandle(handle as u64), mechanism_out))
@@ -722,8 +731,7 @@ impl FfiBackend {
     {
         let function = Self::require_fn(function)?;
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
-        let before = ffi_mech.output_params();
-        let result = Self::single_call_bytes_exact(_admission, spec, |output, output_len| {
+        let result = Self::single_call_bytes_exact(spec, |output, output_len| {
             call(function, ffi_mech.ck_mechanism_mut(), output, output_len)
         })?;
         // Surface mutated params after successful data calls and genuine
@@ -792,82 +800,16 @@ impl FfiBackend {
         let param_ck_len = cryptoki_sys::CK_ULONG::try_from(param_out_spec.buffer_len)
             .map_err(|_| CkRv::ARGUMENTS_BAD)?;
 
-        if output_spec.length_pointer_null {
-            let output = if output_spec.buffer_present {
-                std::ptr::NonNull::<cryptoki_sys::CK_BYTE>::dangling().as_ptr()
-            } else {
-                std::ptr::null_mut()
-            };
-            let rv = CkRv(call(param_ptr, param_ck_len, output, std::ptr::null_mut()) as u64);
-            if rv != CkRv::OK && rv != CkRv::BUFFER_TOO_SMALL {
-                return Err(rv);
-            }
-            return Ok((
-                CkOutputBufferResult { ck_rv: rv, returned_len: 0, value: None },
-                CkParameterRoundtripResult {
-                    ck_rv: rv,
-                    returned_len: param_out_spec.buffer_len,
-                    value: param_out_spec.buffer_present.then_some(param_buf),
-                },
-            ));
-        }
-
-        // Prepare the main output buffer.
-        let mut out_len: cryptoki_sys::CK_ULONG = 0;
-
-        if !output_spec.buffer_present {
-            // Size query: pass NULL buffer for main output.
-            let rv = call(param_ptr, param_ck_len, std::ptr::null_mut(), &mut out_len);
-            if rv == CkRv::OK.0 as cryptoki_sys::CK_RV {
-                let output_result = CkOutputBufferResult {
-                    ck_rv: CkRv::OK,
-                    returned_len: out_len as u64,
-                    value: None,
-                };
-                let param_result = CkParameterRoundtripResult {
-                    ck_rv: CkRv::OK,
-                    returned_len: param_out_spec.buffer_len,
-                    value: if param_out_spec.buffer_present { Some(param_buf) } else { None },
-                };
-                Ok((output_result, param_result))
-            } else {
-                Err(CkRv(rv as u64))
-            }
-        } else {
-            param_buf.as_mut_ptr()
+        let output = Self::single_call_bytes_exact(output_spec, |buffer, length| {
+            call(param_ptr, param_ck_len, buffer, length)
+        })?;
+        let defined = output.ck_rv == CkRv::OK || parameter_input.len() == param_buf_len;
+        let parameter = CkParameterRoundtripResult {
+            ck_rv: output.ck_rv,
+            returned_len: param_out_spec.buffer_len,
+            value: (param_out_spec.buffer_present && defined).then_some(param_buf),
         };
-        let param_ck_len = cryptoki_sys::CK_ULONG::try_from(param_out_spec.buffer_len)
-            .map_err(|_| CkRv::ARGUMENTS_BAD)?;
-
-            if rv == CkRv::OK.0 as cryptoki_sys::CK_RV {
-                buf.truncate(out_len as usize);
-                let output_result = CkOutputBufferResult {
-                    ck_rv: CkRv::OK,
-                    returned_len: out_len as u64,
-                    value: Some(buf),
-                };
-                let param_result = CkParameterRoundtripResult {
-                    ck_rv: CkRv::OK,
-                    returned_len: param_out_spec.buffer_len,
-                    value: if param_out_spec.buffer_present { Some(param_buf) } else { None },
-                };
-                Ok((output_result, param_result))
-            } else if rv == CkRv::BUFFER_TOO_SMALL.0 as cryptoki_sys::CK_RV {
-                let output_result = CkOutputBufferResult {
-                    ck_rv: CkRv::BUFFER_TOO_SMALL,
-                    returned_len: out_len as u64,
-                    value: None,
-                };
-                let param_result = CkParameterRoundtripResult {
-                    ck_rv: CkRv::BUFFER_TOO_SMALL,
-                    returned_len: param_out_spec.buffer_len,
-                    value: if param_out_spec.buffer_present { Some(param_buf) } else { None },
-                };
-                Ok((output_result, param_result))
-            } else {
-                Err(CkRv(rv as u64))
-            }
-        }
+        Ok((output, parameter))
     }
 
     pub(super) fn call_object_pair_with_mechanism<TFunction, F>(
@@ -896,7 +838,10 @@ impl FfiBackend {
 #[cfg(test)]
 mod output_cap_tests {
     use super::{FfiBackend, MAX_OUTPUT_BUFFER_BYTES, capped_output_len};
-    use pkcs11_proxy_ng_types::{CkOutputBufferSpec, CkParameterRoundtripSpec, CkRv};
+    use pkcs11_proxy_ng_types::{
+        CkObjectHandle, CkOutputBufferSpec, CkParameterRoundtripSpec, CkRv, CkSessionHandle,
+        CkSlotId,
+    };
 
     #[test]
     fn caps_absurd_buffer_len() {
@@ -908,6 +853,97 @@ mod output_cap_tests {
     fn passes_through_reasonable_buffer_len() {
         assert_eq!(capped_output_len(1024), 1024);
         assert_eq!(capped_output_len(0), 0);
+    }
+
+    #[test]
+    fn native_owner_convenience_observes_one_two_three_attempt_sequences() {
+        // C3M.6 row 11: the query/fill convenience helper makes exactly one
+        // native attempt for failed or zero-count sizing, two for an
+        // ordinary fill, and three when BUFFER_TOO_SMALL demands a retry.
+        // A non-retryable fill error stops after the second attempt.
+        // Already-green invariant kept as a named regression.
+        use std::cell::Cell;
+
+        // Failed sizing: the query error propagates after one attempt.
+        let attempts = Cell::new(0);
+        let err = FfiBackend::two_call_array(|_: *mut u8, _: &mut cryptoki_sys::CK_ULONG| {
+            attempts.set(attempts.get() + 1);
+            cryptoki_sys::CKR_GENERAL_ERROR
+        })
+        .unwrap_err();
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(err, CkRv::GENERAL_ERROR);
+
+        // Zero-count sizing: one query, no fill, empty result.
+        let attempts = Cell::new(0);
+        let empty: Vec<u8> =
+            FfiBackend::two_call_array(|values: *mut u8, count: &mut cryptoki_sys::CK_ULONG| {
+                attempts.set(attempts.get() + 1);
+                assert!(values.is_null(), "zero-count sizing must not reach fill");
+                *count = 0;
+                cryptoki_sys::CKR_OK
+            })
+            .expect("zero-count sizing succeeds");
+        assert_eq!(attempts.get(), 1);
+        assert!(empty.is_empty());
+
+        // Ordinary fill: query plus one fill.
+        let attempts = Cell::new(0);
+        let filled: Vec<u8> =
+            FfiBackend::two_call_array(|values: *mut u8, count: &mut cryptoki_sys::CK_ULONG| {
+                attempts.set(attempts.get() + 1);
+                if values.is_null() {
+                    *count = 3;
+                } else {
+                    unsafe { std::ptr::copy_nonoverlapping(b"abc".as_ptr(), values, 3) };
+                }
+                cryptoki_sys::CKR_OK
+            })
+            .expect("ordinary fill succeeds");
+        assert_eq!(attempts.get(), 2);
+        assert_eq!(filled, b"abc");
+
+        // BUFFER_TOO_SMALL with a larger count: query, fill, retry fill.
+        let attempts = Cell::new(0);
+        let grown: Vec<u8> =
+            FfiBackend::two_call_array(|values: *mut u8, count: &mut cryptoki_sys::CK_ULONG| {
+                let attempt = attempts.get() + 1;
+                attempts.set(attempt);
+                match attempt {
+                    1 => {
+                        assert!(values.is_null());
+                        *count = 2;
+                        cryptoki_sys::CKR_OK
+                    }
+                    2 => {
+                        *count = 5;
+                        cryptoki_sys::CKR_BUFFER_TOO_SMALL
+                    }
+                    _ => {
+                        assert_eq!(*count as usize, 5);
+                        cryptoki_sys::CKR_OK
+                    }
+                }
+            })
+            .expect("retry fill succeeds");
+        assert_eq!(attempts.get(), 3);
+        assert_eq!(grown.len(), 5);
+
+        // Non-retryable fill error: query plus one failed fill, no retry.
+        let attempts = Cell::new(0);
+        let err =
+            FfiBackend::two_call_array(|values: *mut u8, count: &mut cryptoki_sys::CK_ULONG| {
+                attempts.set(attempts.get() + 1);
+                if values.is_null() {
+                    *count = 2;
+                    cryptoki_sys::CKR_OK
+                } else {
+                    cryptoki_sys::CKR_DEVICE_ERROR
+                }
+            })
+            .unwrap_err();
+        assert_eq!(attempts.get(), 2);
+        assert_eq!(err, CkRv::DEVICE_ERROR);
     }
 
     #[test]
@@ -927,7 +963,7 @@ mod output_cap_tests {
         .expect("provider result envelope");
         assert_eq!(missing_calls, 1);
         assert_eq!(missing.ck_rv, CkRv::ARGUMENTS_BAD);
-        assert_eq!(missing.returned_len, 0);
+        assert_eq!(missing.returned_len, None);
         assert_eq!(missing.value, None);
 
         let size_spec =
@@ -945,7 +981,7 @@ mod output_cap_tests {
         )
         .expect("size result");
         assert_eq!(size_calls, 1);
-        assert_eq!(size.returned_len, 3);
+        assert_eq!(size.returned_len, Some(3));
         assert_eq!(size.value, None);
 
         let data_spec =
@@ -1001,7 +1037,7 @@ mod output_cap_tests {
 
         assert_eq!(calls, 1);
         assert_eq!(output.ck_rv, CkRv::OK);
-        assert_eq!(output.returned_len, 0);
+        assert_eq!(output.returned_len, None);
         assert_eq!(output.value, None);
         assert_eq!(parameter.ck_rv, CkRv::OK);
         assert_eq!(parameter.returned_len, 3);
@@ -1037,7 +1073,7 @@ mod output_cap_tests {
             output,
             pkcs11_proxy_ng_types::CkOutputBufferResult {
                 ck_rv: CkRv::BUFFER_TOO_SMALL,
-                returned_len: 0,
+                returned_len: None,
                 value: None,
             },
         );
@@ -1127,5 +1163,33 @@ mod output_cap_tests {
         assert_eq!(calls, 1);
         assert_eq!(result.returned_len, 0);
         assert_eq!(result.value, Some(Vec::new()));
+    }
+
+    #[test]
+    fn small_handles_convert_on_all_platforms() {
+        assert_eq!(FfiBackend::slot_id(CkSlotId(7)).unwrap(), 7);
+        assert_eq!(FfiBackend::session_handle(CkSessionHandle(7)).unwrap(), 7);
+        assert_eq!(FfiBackend::object_handle(CkObjectHandle(7)).unwrap(), 7);
+    }
+
+    #[test]
+    fn oversized_handle_fails_loudly_on_narrow_hosts() {
+        // On wide hosts CK_ULONG is 64-bit so every u64 fits (pass-through);
+        // on narrow hosts (32-bit CK_ULONG) an unrepresentable handle must
+        // fail with FUNCTION_FAILED, never truncate.
+        let too_big = u64::from(u32::MAX) + 1;
+        if size_of::<cryptoki_sys::CK_ULONG>() >= size_of::<u64>() {
+            assert!(FfiBackend::session_handle(CkSessionHandle(too_big)).is_ok());
+        } else {
+            assert_eq!(
+                FfiBackend::session_handle(CkSessionHandle(too_big)),
+                Err(CkRv::FUNCTION_FAILED)
+            );
+            assert_eq!(
+                FfiBackend::object_handle(CkObjectHandle(u64::MAX)),
+                Err(CkRv::FUNCTION_FAILED)
+            );
+            assert_eq!(FfiBackend::slot_id(CkSlotId(u64::MAX)), Err(CkRv::FUNCTION_FAILED));
+        }
     }
 }

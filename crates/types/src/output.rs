@@ -33,7 +33,7 @@ pub struct CkOutputBufferResult {
     pub ck_rv: CkRv,
     /// A safely observable scalar effect, not a claim that a native store occurred.
     pub returned_len: Option<u64>,
-    pub value: Option<SecretBytes>,
+    pub value: Option<Vec<u8>>,
 }
 
 impl CkOutputBufferResult {
@@ -68,14 +68,14 @@ impl CkOutputBufferResult {
     /// - Otherwise, returns `CKR_BUFFER_TOO_SMALL` with the required length.
     pub fn from_convenience_bytes(bytes: &[u8], spec: &CkOutputBufferSpec) -> Self {
         if spec.length_pointer_null {
-            Self { ck_rv: CkRv::ARGUMENTS_BAD, returned_len: 0, value: None }
+            Self::no_effects(CkRv::ARGUMENTS_BAD)
         } else if !spec.buffer_present {
-            Self { ck_rv: CkRv::OK, returned_len: bytes.len() as u64, value: None }
+            Self { ck_rv: CkRv::OK, returned_len: Some(bytes.len() as u64), value: None }
         } else if spec.buffer_len >= bytes.len() as u64 {
             Self {
                 ck_rv: CkRv::OK,
                 returned_len: Some(bytes.len() as u64),
-                value: Some(SecretBytes::copy_from_slice(bytes)),
+                value: Some(bytes.to_vec()),
             }
         } else {
             Self {
@@ -161,7 +161,7 @@ pub struct CkParameterRoundtripResult {
 pub struct CkOutputAndHandleResult {
     pub ck_rv: CkRv,
     pub returned_len: Option<u64>,
-    pub value: Option<SecretBytes>,
+    pub value: Option<Vec<u8>>,
     pub object_handle: Option<CkObjectHandle>,
 }
 
@@ -216,7 +216,7 @@ pub struct CkAttributeQueryResult {
     pub apply_returned_len: bool,
     /// Nested array types are output-only and only valid on defined output RVs.
     pub apply_type: bool,
-    pub value: Option<SecretBytes>,
+    pub value: Option<Vec<u8>>,
     pub ck_rv: Option<CkRv>,
     pub nested: Option<Vec<CkAttributeQueryResult>>,
 }

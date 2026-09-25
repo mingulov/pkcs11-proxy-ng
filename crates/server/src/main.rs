@@ -480,6 +480,17 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
         tracing::info!(path = %sock.display(), "resilience metrics endpoint bound");
     }
 
+    // Hook-gated control plane (C3M.6 row 18): fail closed when configured
+    // without a hook-enabled build, otherwise bind the control socket.
+    server::validate_test_hooks_config(&config).map_err(std::io::Error::other)?;
+    #[cfg(feature = "native-owner-test-hooks")]
+    if let Some(ref sock) = config.test_hooks.control_socket {
+        server::control::spawn_control_endpoint(sock.clone())
+            .await
+            .map_err(|e| format!("failed to bind control socket {}: {e}", sock.display()))?;
+        tracing::info!(path = %sock.display(), "test-hooks control endpoint bound");
+    }
+
     let (svc, context_manager, registry_source) =
         build_service(&config, &backend, audit_sink.clone()).await?;
 
@@ -791,6 +802,21 @@ auth = "peer_cred"
         let policy = per_object_policy();
         check_per_object_version_requirement(&policy, &mock)
             .expect("v3.0 backend with per-object policy must start");
+    }
+
+    /// `LOG_FORMAT` selects the daemon's log line format. Only `plain`
+    /// (case-insensitive, surrounding whitespace ignored) selects
+    /// human-readable output; unset or any other value keeps the
+    /// historical JSON default — so existing `LOG_FORMAT=json`
+    /// deployments and the hardcoded-JSON past behave identically.
+    #[test]
+    fn log_format_parses_documented_values() {
+        assert_eq!(parse_log_format(None), LogFormat::Json);
+        assert_eq!(parse_log_format(Some("json")), LogFormat::Json);
+        assert_eq!(parse_log_format(Some("plain")), LogFormat::Plain);
+        assert_eq!(parse_log_format(Some("  PLAIN  ")), LogFormat::Plain);
+        assert_eq!(parse_log_format(Some("xml")), LogFormat::Json);
+        assert_eq!(parse_log_format(Some("")), LogFormat::Json);
     }
 
     #[test]

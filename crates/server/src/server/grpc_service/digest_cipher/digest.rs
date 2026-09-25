@@ -8,6 +8,7 @@ use std::time::Instant;
 use pkcs11_proxy_ng_audit::EventClass;
 use tonic::{Request, Response, Status};
 
+use super::super::authorization::mechanism_permitted;
 use super::super::ck_result_to_rv;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
