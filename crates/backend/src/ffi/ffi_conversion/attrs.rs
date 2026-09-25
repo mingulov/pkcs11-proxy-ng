@@ -232,20 +232,8 @@ impl FfiAttributeQueries {
                 let ul_value_len = cryptoki_sys::CK_ULONG::try_from(query.buffer_len)
                     .map_err(|_| CkRv::HOST_MEMORY)?;
                 let (pvalue, len) = if query.buffer_present {
-                    let buffer_len =
-                        usize::try_from(query.buffer_len).map_err(|_| CkRv::HOST_MEMORY)?;
-                    let mut buffer = Zeroizing::new(Vec::new());
-                    buffer.try_reserve_exact(buffer_len).map_err(|_| CkRv::HOST_MEMORY)?;
-                    buffer.resize(buffer_len, 0);
-                    // T4-FIX: pass NULL for 0-length buffers. An empty Vec's
-                    // `as_mut_ptr()` is a dangling non-null pointer (0x1);
-                    // backends that null-check pValue and then write
-                    // regardless of length (NSS softokn) segfault on it.
-                    let ptr = if buffer.is_empty() {
-                        std::ptr::null_mut()
-                    } else {
-                        buffer.as_mut_ptr() as *mut std::ffi::c_void
-                    };
+                    let mut buffer = Self::output_buffer(query.buffer_len)?;
+                    let ptr = buffer.as_mut_ptr() as *mut std::ffi::c_void;
                     buffers.push(buffer);
                     (ptr, ul_value_len)
                 } else {
@@ -291,7 +279,10 @@ impl FfiAttributeQueries {
                 let Ok(length) = usize::try_from(result.returned_len) else {
                     continue;
                 };
-                if length > backing._template.len() * stride || length % stride != 0 {
+                if result.returned_len > query.buffer_len
+                    || length > backing._template.len() * stride
+                    || length % stride != 0
+                {
                     continue;
                 }
                 let count = length / stride;
@@ -318,6 +309,7 @@ impl FfiAttributeQueries {
                         && !out.attr_type.is_attribute_template()
                         && sub.pValue == old.pValue
                         && query.buffer_present
+                        && out.returned_len <= query.buffer_len
                     {
                         out.value = owned_attribute_bytes(
                             &backing._sub_buffers,
@@ -327,12 +319,32 @@ impl FfiAttributeQueries {
                     }
                 }
                 result.nested = Some(nested);
-            } else if values_defined && query.buffer_present {
+            } else if values_defined
+                && query.buffer_present
+                && result.returned_len <= query.buffer_len
+            {
                 result.value =
                     owned_attribute_bytes(&self._buffers, original.pValue, result.returned_len);
             }
         }
         results
+    }
+
+    /// Keep pointer presence separate from the advertised capacity. Some native
+    /// providers write fixed-size scalar values before checking ulValueLen. Give
+    /// even short/empty queries real writable storage for a CK_ULONG or CK_DATE;
+    /// boolean values also fit. This is bounded padding, not protection against
+    /// arbitrary provider overruns. Readback still uses the advertised capacity.
+    fn output_buffer(capacity: u64) -> CkResult<Zeroizing<Vec<u8>>> {
+        let capacity = usize::try_from(capacity).map_err(|_| CkRv::HOST_MEMORY)?;
+        let extent = capacity.max(
+            std::mem::size_of::<cryptoki_sys::CK_ULONG>()
+                .max(std::mem::size_of::<cryptoki_sys::CK_DATE>()),
+        );
+        let mut buffer = Zeroizing::new(Vec::new());
+        buffer.try_reserve_exact(extent).map_err(|_| CkRv::HOST_MEMORY)?;
+        buffer.resize(extent, 0);
+        Ok(buffer)
     }
 
     /// Build a `CK_ATTRIBUTE` entry for a nested template attribute.
@@ -381,19 +393,8 @@ impl FfiAttributeQueries {
                 .map_err(|_| CkRv::HOST_MEMORY)?;
 
             let (sub_pvalue, sub_len) = if sub_query.buffer_present {
-                let sub_buf_len =
-                    usize::try_from(sub_query.buffer_len).map_err(|_| CkRv::HOST_MEMORY)?;
-                let mut sub_buf = Zeroizing::new(Vec::new());
-                sub_buf.try_reserve_exact(sub_buf_len).map_err(|_| CkRv::HOST_MEMORY)?;
-                sub_buf.resize(sub_buf_len, 0);
-                // T4-AUDIT site 2: NULL for 0-length sub buffers (same
-                // T4-FIX shape as the flat arm: dangling non-null + 0
-                // segfaults null-check-then-write backends).
-                let ptr = if sub_buf.is_empty() {
-                    std::ptr::null_mut()
-                } else {
-                    sub_buf.as_mut_ptr() as *mut std::ffi::c_void
-                };
+                let mut sub_buf = Self::output_buffer(sub_query.buffer_len)?;
+                let ptr = sub_buf.as_mut_ptr() as *mut std::ffi::c_void;
                 sub_buffers.push(sub_buf);
                 (ptr, sub_ul_value_len)
             } else {
@@ -410,24 +411,21 @@ impl FfiAttributeQueries {
             });
         }
 
-        // Pin the sub-attribute array at a stable heap address.
-        // We must create the pinned box from the completed array so no
-        // further mutations move it.
+        // An empty present template still needs a real aligned address. The
+        // dummy entry is storage only: the native length and readback bounds
+        // remain those of the original (empty) query.
+        if sub_attrs.is_empty() {
+            sub_attrs.push(cryptoki_sys::CK_ATTRIBUTE {
+                type_: 0,
+                pValue: std::ptr::null_mut(),
+                ulValueLen: 0,
+            });
+        }
         let mut template_box: std::pin::Pin<Box<[cryptoki_sys::CK_ATTRIBUTE]>> =
             sub_attrs.into_boxed_slice().into();
-
-        // The parent attribute points into the pinned template.
-        // T4-AUDIT site 5: NULL for a degenerate empty template box
-        // (`nested=Some(vec![])` + `buffer_len==0`); an empty box slice's
-        // `as_mut_ptr()` is dangling non-null with length 0.
-        let template_ptr = if template_box.is_empty() {
-            std::ptr::null_mut()
-        } else {
-            template_box.as_mut_ptr() as *mut std::ffi::c_void
-        };
-        let template_byte_len = (template_box.len()
-            * std::mem::size_of::<cryptoki_sys::CK_ATTRIBUTE>())
-            as cryptoki_sys::CK_ULONG;
+        let template_ptr = template_box.as_mut_ptr() as *mut std::ffi::c_void;
+        let template_byte_len =
+            cryptoki_sys::CK_ULONG::try_from(native_len).map_err(|_| CkRv::HOST_MEMORY)?;
 
         attrs.push(cryptoki_sys::CK_ATTRIBUTE {
             type_: narrow_wire_ulong(query.attr_type.0)?,
@@ -659,5 +657,94 @@ mod ffi_attrs_narrowing_tests {
                 assert_eq!(rv, CkRv::FUNCTION_FAILED);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod exact_query_storage_tests {
+    use super::*;
+
+    fn query(attr_type: CkAttributeType, present: bool, capacity: u64) -> CkAttributeQuery {
+        CkAttributeQuery { attr_type, buffer_present: present, buffer_len: capacity, nested: None }
+    }
+
+    #[test]
+    fn fixed_width_scratch_is_writable_without_enlarging_advertised_capacity() {
+        // Catch both dangling empty Vec pointers and accidental promotion of
+        // ulValueLen. Fixed-size native writes (seen in NSS) stay in owned storage;
+        // extra scratch bytes never become caller-visible output.
+        for attr_type in [
+            CkAttributeType::PRIVATE,
+            CkAttributeType::CLASS,
+            CkAttributeType(cryptoki_sys::CKA_START_DATE as u64),
+        ] {
+            for capacity in [0, 1, 2] {
+                let queries = [
+                    query(attr_type, true, capacity),
+                    query(CkAttributeType::LABEL, true, 16),
+                    query(attr_type, false, 0),
+                ];
+                let mut ffi = FfiAttributeQueries::from_queries(&queries).unwrap();
+                assert!(!ffi.attrs[0].pValue.is_null());
+                assert!(ffi.attrs[2].pValue.is_null());
+                assert_eq!(ffi.attrs[0].ulValueLen as u64, capacity);
+                let extent = std::mem::size_of::<cryptoki_sys::CK_ULONG>()
+                    .max(std::mem::size_of::<cryptoki_sys::CK_DATE>());
+                assert!(ffi._buffers[0].len() >= extent);
+                ffi._buffers[1].fill(0xa5);
+                unsafe { std::ptr::write_bytes(ffi.attrs[0].pValue.cast::<u8>(), 0x5a, extent) };
+                ffi.attrs[0].ulValueLen = extent as cryptoki_sys::CK_ULONG;
+                let results = ffi.readback(&queries, CkRv::OK);
+                assert!(results[0].value.is_none(), "scratch is not advertised output capacity");
+                assert_eq!(results[0].returned_len, extent as u64);
+                assert!(ffi._buffers[1].iter().all(|b| *b == 0xa5), "neighbor canary");
+            }
+        }
+    }
+
+    #[test]
+    fn nested_scratch_preserves_zero_capacity_and_bounds_readback() {
+        let stride = std::mem::size_of::<cryptoki_sys::CK_ATTRIBUTE>();
+        let queries = [CkAttributeQuery {
+            attr_type: CkAttributeType::WRAP_TEMPLATE,
+            buffer_present: true,
+            buffer_len: (2 * stride) as u64,
+            nested: Some(vec![
+                query(CkAttributeType::CLASS, true, 0),
+                query(CkAttributeType::PRIVATE, false, 0),
+            ]),
+        }];
+        let mut ffi = FfiAttributeQueries::from_queries(&queries).unwrap();
+        let backing = &mut ffi._nested[0];
+        assert!(!backing._template[0].pValue.is_null());
+        assert!(backing._template[1].pValue.is_null());
+        assert_eq!(backing._template[0].ulValueLen as u64, 0);
+        let extent = std::mem::size_of::<cryptoki_sys::CK_ULONG>();
+        assert!(backing._sub_buffers[0].len() >= extent);
+        unsafe { std::ptr::write_bytes(backing._template[0].pValue.cast::<u8>(), 0x5a, extent) };
+        backing._template[0].ulValueLen = extent as cryptoki_sys::CK_ULONG;
+        let result = ffi.readback(&queries, CkRv::OK);
+        let children = result[0].nested.as_ref().unwrap();
+        assert_eq!(children[0].returned_len, extent as u64);
+        assert!(children[0].value.is_none());
+        assert!(children[1].value.is_none());
+    }
+
+    #[test]
+    fn empty_nested_parent_has_storage_but_no_readable_entries() {
+        let queries = [CkAttributeQuery {
+            nested: Some(vec![]),
+            ..query(CkAttributeType::WRAP_TEMPLATE, true, 0)
+        }];
+        let mut ffi = FfiAttributeQueries::from_queries(&queries).unwrap();
+        assert!(!ffi.attrs[0].pValue.is_null());
+        assert_eq!(ffi.attrs[0].ulValueLen as u64, 0);
+        assert!(!ffi._nested[0]._template.is_empty(), "must own a real aligned allocation");
+        let results = ffi.readback(&queries, CkRv::OK);
+        assert_eq!(results[0].nested.as_ref().unwrap().len(), 0);
+        ffi.attrs[0].ulValueLen =
+            std::mem::size_of::<cryptoki_sys::CK_ATTRIBUTE>() as cryptoki_sys::CK_ULONG;
+        let results = ffi.readback(&queries, CkRv::BUFFER_TOO_SMALL);
+        assert!(results[0].nested.is_none(), "padding must not invent returned children");
     }
 }
