@@ -75,8 +75,8 @@ pub unsafe extern "C" fn c_wrap_key_authenticated(
         ));
 
         match result {
-            Ok((output_result, parameter)) => unsafe {
-                call.write_output(
+            Ok((output_result, param_result, _)) => unsafe {
+                write_exact_parameter_output(
                     &output_spec,
                     &output_result,
                     &parameter,

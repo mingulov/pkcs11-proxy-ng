@@ -297,8 +297,12 @@ pub(crate) async fn encapsulate_key_exact(
         }
     };
 
-    // A NULL template carries no attributes; classification treats it as empty.
-    let template_view = template.as_deref().unwrap_or(&[]);
+    let spec =
+        req.output_spec.as_ref().map(CkOutputBufferSpec::from).unwrap_or(CkOutputBufferSpec {
+            buffer_present: false,
+            buffer_len: 0,
+            length_pointer_null: false,
+        });
 
     // The exact-encapsulated key is a session object unless CKA_TOKEN is set (B2).
     let is_token = template_declares_token_object(&template);
@@ -376,19 +380,15 @@ mod tests {
         mock.initialize().unwrap();
         let backend_session =
             mock.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).unwrap();
-        let public_key = mock.create_object(backend_session, Some(&[])).unwrap();
+        let public_key = mock.create_object(backend_session, &[]).unwrap();
         let backend: Arc<dyn Pkcs11Backend> = mock;
         let manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
-        manager.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        manager.register_slot(CkSlotId(0)).await;
         let context_id = manager.create_context(None).await.unwrap();
-        let virtual_session = register_session_handle(
-            &manager,
-            &context_id,
-            backend_session,
-            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
-        )
-        .await
-        .unwrap();
+        let virtual_session =
+            register_session_handle(&manager, &context_id, backend_session, CkSlotId(0))
+                .await
+                .unwrap();
         let virtual_session = VirtualHandle(virtual_session);
         let virtual_public_key = register_session_object_handle(
             &manager,
@@ -396,14 +396,12 @@ mod tests {
             virtual_session,
             public_key,
             false,
-            None,
         )
         .await;
 
         let result = encapsulate_key_exact(
             &HandlerContext::for_test(&manager, &backend),
             Request::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactRequest {
-                exact_output_effects_version: 1,
                 client_context_id: context_id.0,
                 session_handle: virtual_session.0,
                 mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {
@@ -417,8 +415,6 @@ mod tests {
                     buffer_len: 0,
                     length_pointer_null: true,
                 }),
-
-                template_null: false,
             }),
         )
         .await

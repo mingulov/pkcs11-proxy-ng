@@ -68,9 +68,15 @@ impl FfiBackend {
     pub fn load_with_init_args(path: &Path, initialize_args: Option<&str>) -> Result<Self, String> {
         let lib = unsafe { Library::new(path).map_err(|e| format!("dlopen failed: {e}"))? };
 
-        let primary_from_interface = Self::resolve_get_interface(&lib).is_some();
-        let func_list =
-            Self::try_get_interface(&lib).or_else(|_| Self::try_get_function_list(&lib))?;
+        let get_iface_sym = Self::resolve_get_interface(&lib);
+        let mut legacy = || pkcs11_module::function_list(&lib);
+        let (func_list, primary_from_interface) = match get_iface_sym {
+            Some(sym) => {
+                let mut q = ffi_query(sym);
+                select_primary(Some(&mut q), &mut legacy)?
+            }
+            None => select_primary(None, &mut legacy)?,
+        };
 
         // Attempt to discover 3.0 and 3.2 function lists. These are optional;
         // a 2.40-only module will simply leave both as None.
@@ -85,13 +91,12 @@ impl FfiBackend {
         // 3.0-only dispatch (e.g. `C_SessionCancel`) wrongly returns
         // `CKR_FUNCTION_NOT_SUPPORTED` through the proxy on such modules.
         //
-        let get_iface_sym = Self::resolve_get_interface(&lib);
         let func_list_3_0 = get_iface_sym
-            .and_then(|sym| Self::try_get_versioned_interface(sym, 3, 0))
+            .and_then(|sym| select_versioned(&mut ffi_query(sym), 3, 0))
             .or_else(|| Self::primary_interface_fallback(func_list, primary_from_interface, 3, 0))
             .map(|ptr| ptr as *const cryptoki_sys::CK_FUNCTION_LIST_3_0);
         let func_list_3_2 = get_iface_sym
-            .and_then(|sym| Self::try_get_versioned_interface(sym, 3, 2))
+            .and_then(|sym| select_versioned(&mut ffi_query(sym), 3, 2))
             // 3.2-only fields are valid only on an actual >= 3.2 list, so this
             // fallback is gated on the stricter version than the 3.0 one above.
             .or_else(|| Self::primary_interface_fallback(func_list, primary_from_interface, 3, 2))
@@ -219,37 +224,78 @@ impl FfiBackend {
     }
 }
 
-    fn primary_interface_fallback(
-        func_list: *mut cryptoki_sys::CK_FUNCTION_LIST,
-        primary_from_interface: bool,
-        major: u8,
-        minor: u8,
-    ) -> Option<*mut std::ffi::c_void> {
-        if !primary_from_interface {
-            return None;
-        }
-        // The first field of every `CK_FUNCTION_LIST*` variant is `version`,
-        // so reading it through the 2.40-typed pointer is sound. Using fields
-        // beyond the base list is only sound when this pointer came from a
-        // `CK_INTERFACE`; `C_GetFunctionList` can still return a base-size list
-        // whose version field reports 3.x.
-        let primary_version = unsafe { (*func_list).version };
-        let primary_at_least = primary_version.major > major
-            || (primary_version.major == major && primary_version.minor >= minor);
-        primary_at_least.then_some(func_list as *mut std::ffi::c_void)
-    }
+/// One `C_GetInterface` answer as the module reported it.
+pub(crate) struct InterfaceAnswer {
+    pub name: Option<Vec<u8>>,
+    pub func_list: *mut std::ffi::c_void,
+}
 
-    fn get_interface_with_name(
-        get_interface: GetInterfaceFn,
-        major: u8,
-        minor: u8,
-        use_name: bool,
-    ) -> Option<*mut std::ffi::c_void> {
-        let name = b"PKCS 11\0";
-        let name_ptr = if use_name {
-            name.as_ptr() as *mut cryptoki_sys::CK_UTF8CHAR
-        } else {
-            std::ptr::null_mut()
+const STANDARD_NAME: &[u8] = b"PKCS 11";
+
+/// §6a acceptance rule, applied uniformly to named and unnamed answers:
+/// only an interface named exactly "PKCS 11" with a non-NULL function
+/// list may be treated as a standard table. OASIS lets any unnamed query
+/// return "a default interface of its choice", and a vendor interface's
+/// function list has no guaranteed layout beyond the leading CK_VERSION.
+fn accepts_standard(ans: &InterfaceAnswer) -> bool {
+    ans.name.as_deref() == Some(STANDARD_NAME) && !ans.func_list.is_null()
+}
+
+/// Primary-list selection (§6a order, §6b provenance): named standard →
+/// validated unnamed → legacy. Provenance in the returned bool comes from
+/// the branch that produced the pointer, never from symbol existence.
+fn select_primary(
+    query: Option<
+        &mut dyn FnMut(Option<&[u8]>, Option<cryptoki_sys::CK_VERSION>) -> Option<InterfaceAnswer>,
+    >,
+    legacy: &mut dyn FnMut() -> Result<*mut cryptoki_sys::CK_FUNCTION_LIST, String>,
+) -> Result<(*mut cryptoki_sys::CK_FUNCTION_LIST, bool), String> {
+    if let Some(q) = query {
+        for name in [Some(STANDARD_NAME), None] {
+            if let Some(ans) = q(name, None)
+                && accepts_standard(&ans)
+            {
+                return Ok((ans.func_list as *mut cryptoki_sys::CK_FUNCTION_LIST, true));
+            }
+        }
+    }
+    legacy().map(|func_list| (func_list, false))
+}
+
+/// Versioned-list selection: named first, then the unnamed fallback for
+/// modules (e.g. BouncyHSM) that only respond to the unnamed form — with
+/// the same §6a name rule on the unnamed result. Rejecting a hypothetical
+/// vendor-named answer here is soundness over coverage.
+fn select_versioned(
+    q: &mut dyn FnMut(Option<&[u8]>, Option<cryptoki_sys::CK_VERSION>) -> Option<InterfaceAnswer>,
+    major: u8,
+    minor: u8,
+) -> Option<*mut std::ffi::c_void> {
+    let version = cryptoki_sys::CK_VERSION { major, minor };
+    for name in [Some(STANDARD_NAME), None] {
+        if let Some(ans) = q(name, Some(version))
+            && accepts_standard(&ans)
+        {
+            return Some(ans.func_list);
+        }
+    }
+    None
+}
+
+/// FFI adapter: performs one real `C_GetInterface` query and copies the
+/// answer out of module-owned memory.
+fn ffi_query(
+    get_interface: GetInterfaceFn,
+) -> impl FnMut(Option<&[u8]>, Option<cryptoki_sys::CK_VERSION>) -> Option<InterfaceAnswer> {
+    move |name, version| {
+        // NUL-terminated storage must outlive the call.
+        let name_buf: Vec<u8>;
+        let name_ptr = match name {
+            Some(n) => {
+                name_buf = [n, b"\0"].concat();
+                name_buf.as_ptr() as *mut cryptoki_sys::CK_UTF8CHAR
+            }
+            None => std::ptr::null_mut(),
         };
         let mut version_val = version.unwrap_or(cryptoki_sys::CK_VERSION { major: 0, minor: 0 });
         let version_ptr: *mut cryptoki_sys::CK_VERSION =
@@ -422,5 +468,77 @@ mod tests {
         );
         // BouncyHSM also offers an explicit 3.2 interface.
         assert!(backend.has_3_2_interface(), "BouncyHSM advertises a 3.2 interface");
+    }
+
+    use super::{InterfaceAnswer, select_primary, select_versioned};
+
+    fn dangling_list() -> *mut cryptoki_sys::CK_FUNCTION_LIST {
+        std::ptr::NonNull::dangling().as_ptr()
+    }
+    fn answer(name: &[u8]) -> InterfaceAnswer {
+        InterfaceAnswer {
+            name: Some(name.to_vec()),
+            func_list: std::ptr::NonNull::<std::ffi::c_void>::dangling().as_ptr(),
+        }
+    }
+
+    /// §6b: C_GetInterface exists but every query fails; the legacy table
+    /// must carry provenance false (the current code derives the flag from
+    /// symbol existence, which this test would catch).
+    #[test]
+    fn provenance_is_false_when_queries_fail_and_legacy_succeeds() {
+        let mut q = |_: Option<&[u8]>, _: Option<cryptoki_sys::CK_VERSION>| None;
+        let expected = dangling_list();
+        let mut legacy = || Ok(expected);
+        let (list, from_interface) =
+            select_primary(Some(&mut q), &mut legacy).expect("legacy succeeds");
+        assert_eq!(list, expected);
+        assert!(!from_interface, "a C_GetFunctionList pointer is never interface-derived");
+    }
+
+    /// §6a: an unnamed result is accepted only when named exactly "PKCS 11".
+    #[test]
+    fn unnamed_vendor_interface_is_rejected_and_falls_through_to_legacy() {
+        let mut q = |name: Option<&[u8]>, _: Option<cryptoki_sys::CK_VERSION>| match name {
+            Some(_) => None,                      // named standard query fails
+            None => Some(answer(b"ACME Vendor")), // unnamed returns a vendor interface
+        };
+        let expected = dangling_list();
+        let mut legacy = || Ok(expected);
+        let (list, from_interface) = select_primary(Some(&mut q), &mut legacy).unwrap();
+        assert_eq!(list, expected);
+        assert!(!from_interface);
+    }
+
+    #[test]
+    fn unnamed_standard_interface_is_accepted() {
+        let std_answer = answer(b"PKCS 11");
+        let expected = std_answer.func_list as *mut cryptoki_sys::CK_FUNCTION_LIST;
+        let mut q = |name: Option<&[u8]>, _: Option<cryptoki_sys::CK_VERSION>| match name {
+            Some(_) => None,
+            None => Some(answer(b"PKCS 11")),
+        };
+        let mut legacy = || -> Result<*mut cryptoki_sys::CK_FUNCTION_LIST, String> {
+            panic!("legacy must not be consulted when the unnamed standard answer is valid")
+        };
+        let (list, from_interface) = select_primary(Some(&mut q), &mut legacy).unwrap();
+        assert_eq!(list, expected);
+        assert!(from_interface);
+    }
+
+    /// The versioned (BouncyHSM-class) unnamed fallback applies the same rule.
+    #[test]
+    fn versioned_unnamed_vendor_is_rejected_standard_is_accepted() {
+        let mut vendor_q = |name: Option<&[u8]>, _: Option<cryptoki_sys::CK_VERSION>| match name {
+            Some(_) => None,
+            None => Some(answer(b"ACME Vendor")),
+        };
+        assert!(select_versioned(&mut vendor_q, 3, 0).is_none());
+
+        let mut std_q = |name: Option<&[u8]>, _: Option<cryptoki_sys::CK_VERSION>| match name {
+            Some(_) => None,
+            None => Some(answer(b"PKCS 11")),
+        };
+        assert!(select_versioned(&mut std_q, 3, 0).is_some());
     }
 }

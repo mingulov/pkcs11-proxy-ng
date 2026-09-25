@@ -31,6 +31,35 @@ impl FfiBackend {
         let h_public_key = Self::object_handle(public_key)?;
         let mut key_handle: cryptoki_sys::CK_OBJECT_HANDLE = 0;
 
+        if spec.length_pointer_null {
+            let output = if spec.buffer_present {
+                std::ptr::NonNull::<cryptoki_sys::CK_BYTE>::dangling().as_ptr()
+            } else {
+                std::ptr::null_mut()
+            };
+            let rv = CkRv(unsafe {
+                function(
+                    Self::session_handle(session),
+                    &mut ffi_mech.ck_mechanism,
+                    Self::object_handle(public_key),
+                    Self::ffi_attr_ptr(&ffi_attrs),
+                    Self::ffi_attr_len(&ffi_attrs),
+                    output,
+                    std::ptr::null_mut(),
+                    &mut key_handle,
+                )
+            } as u64);
+            if !rv.is_ok() {
+                return Err(rv);
+            }
+            return Ok(CkOutputAndHandleResult {
+                ck_rv: rv,
+                returned_len: 0,
+                value: None,
+                object_handle: CkObjectHandle(key_handle as u64),
+            });
+        }
+
         if !spec.buffer_present {
             // Size query: pass NULL pCiphertext
             let rv = unsafe {
@@ -230,98 +259,16 @@ mod tests {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_2::default());
         functions.C_EncapsulateKey = Some(missing_length_encapsulate);
         let backend = FfiBackend {
-            _lib: crate::ffi::loading::test_library_handle(),
+            _lib: libloading::os::unix::Library::this().into(),
             func_list: base.as_mut(),
             func_list_3_0: None,
             func_list_3_2: Some(functions.as_ref()),
             initialize_args: None,
             mech_cache: dashmap::DashMap::new(),
-            last_init_family: dashmap::DashMap::new(),
             session_slot_map: dashmap::DashMap::new(),
             slot_sessions: dashmap::DashMap::new(),
-            object_cleanup: Default::default(),
-            // Test-local backend: bypasses the process reservation without
-            // consuming it; never backs production dispatch (C3M.4).
-            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-            lifecycle: Default::default(),
-            lifecycle_domain: Default::default(),
-            session_fences: Default::default(),
-            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
-            ),
         };
         (backend, base, functions)
-    }
-
-    #[test]
-    fn encapsulate_exact_denied_before_lifecycle_open() {
-        // TF01b `single_call_bytes_exact` (3.x direct) ordinary proof: no
-        // admission pre-Init.
-        let _guard = TEST_LOCK.lock().unwrap();
-        let (backend, _base, _functions) = backend_with_missing_length_encapsulate();
-        let mechanism = CkMechanism { mechanism_type: CkMechanismType(0x0000_0017), params: None };
-        let output_spec =
-            CkOutputBufferSpec { buffer_present: true, buffer_len: 0, length_pointer_null: true };
-        assert_eq!(
-            backend
-                .ffi_encapsulate_key_exact(
-                    CkSessionHandle(1),
-                    &mechanism,
-                    CkObjectHandle(2),
-                    Some(&[]),
-                    &output_spec,
-                )
-                .unwrap_err(),
-            CkRv::CRYPTOKI_NOT_INITIALIZED
-        );
-    }
-
-    #[test]
-    fn encapsulate_exact_admitted_after_lifecycle_open() {
-        // Control: the same call reaches the stub once the domain is open.
-        let _guard = TEST_LOCK.lock().unwrap();
-        let (backend, _base, _functions) = backend_with_missing_length_encapsulate();
-        backend.lifecycle_domain.open_for_tests();
-        let mechanism = CkMechanism { mechanism_type: CkMechanismType(0x0000_0017), params: None };
-        let output_spec =
-            CkOutputBufferSpec { buffer_present: true, buffer_len: 0, length_pointer_null: true };
-        let result = backend
-            .ffi_encapsulate_key_exact(
-                CkSessionHandle(1),
-                &mechanism,
-                CkObjectHandle(2),
-                Some(&[]),
-                &output_spec,
-            )
-            .expect("provider result envelope");
-        assert_eq!(result.ck_rv, CkRv::OK);
-    }
-
-    #[test]
-    fn encapsulate_key_denied_before_lifecycle_open() {
-        // TF01b KEM convenience (no-retry two-call) ordinary proof: no
-        // admission pre-Init.
-        let _guard = TEST_LOCK.lock().unwrap();
-        let (backend, _base, _functions) = backend_with_missing_length_encapsulate();
-        let mechanism = CkMechanism { mechanism_type: CkMechanismType(0x0000_0017), params: None };
-        assert_eq!(
-            backend
-                .ffi_encapsulate_key(CkSessionHandle(1), &mechanism, CkObjectHandle(2), None)
-                .unwrap_err(),
-            CkRv::CRYPTOKI_NOT_INITIALIZED
-        );
-    }
-
-    #[test]
-    fn encapsulate_key_admitted_after_lifecycle_open() {
-        // Control: the same call reaches the stub once the domain is open.
-        let _guard = TEST_LOCK.lock().unwrap();
-        let (backend, _base, _functions) = backend_with_missing_length_encapsulate();
-        backend.lifecycle_domain.open_for_tests();
-        let mechanism = CkMechanism { mechanism_type: CkMechanismType(0x0000_0017), params: None };
-        let (_ciphertext, handle) = backend
-            .ffi_encapsulate_key(CkSessionHandle(1), &mechanism, CkObjectHandle(2), None)
-            .unwrap();
-        assert_eq!(handle, CkObjectHandle(0x44));
     }
 
     #[test]
@@ -331,8 +278,6 @@ mod tests {
         OUTPUT_PRESENT.store(0, Ordering::SeqCst);
         LENGTH_NULL.store(0, Ordering::SeqCst);
         let (backend, _base, _functions) = backend_with_missing_length_encapsulate();
-        // Exact paths are ordinary: establish post-Initialize state.
-        backend.lifecycle_domain.open_for_tests();
         let mechanism = CkMechanism { mechanism_type: CkMechanismType(0x0000_0017), params: None };
         let output_spec =
             CkOutputBufferSpec { buffer_present: true, buffer_len: 0, length_pointer_null: true };
@@ -342,7 +287,7 @@ mod tests {
                 CkSessionHandle(1),
                 &mechanism,
                 CkObjectHandle(2),
-                Some(&[]),
+                &[],
                 &output_spec,
             )
             .expect("provider result envelope");
@@ -351,8 +296,8 @@ mod tests {
         assert_eq!(OUTPUT_PRESENT.load(Ordering::SeqCst), 1);
         assert_eq!(LENGTH_NULL.load(Ordering::SeqCst), 1);
         assert_eq!(result.ck_rv, CkRv::OK);
-        assert_eq!(result.returned_len, None);
+        assert_eq!(result.returned_len, 0);
         assert_eq!(result.value, None);
-        assert_eq!(result.object_handle, Some(CkObjectHandle(0x44)));
+        assert_eq!(result.object_handle, CkObjectHandle(0x44));
     }
 }

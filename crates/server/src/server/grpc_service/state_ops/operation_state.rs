@@ -15,6 +15,7 @@ use super::super::super::handle_map::{BackendHandle, VirtualHandle};
 use super::super::ck_result_to_rv;
 use super::super::service_utils::{
     check_sanitize, ck_rv_only, gate_object_handle, input_from_wire, spawn_backend,
+    spawn_backend_with_optional_timeout,
 };
 use crate::server::grpc_service::HandlerContext;
 
@@ -85,6 +86,15 @@ pub(super) async fn set_operation_state(
     sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::SetOperationStateRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SetOperationStateResponse>, Status> {
+    set_operation_state_with_timeout(ctx, sanitize_inputs, request, None).await
+}
+
+async fn set_operation_state_with_timeout(
+    ctx: &HandlerContext,
+    sanitize_inputs: bool,
+    request: Request<pkcs11_proxy_ng_proto::SetOperationStateRequest>,
+    timeout_override: Option<Duration>,
+) -> Result<Response<pkcs11_proxy_ng_proto::SetOperationStateResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
     let req = request.into_inner();
@@ -140,14 +150,41 @@ pub(super) async fn set_operation_state(
     if let Err(rv) = check_sanitize(sanitize_inputs, operation_state_null_len) {
         return Ok(Response::new(pkcs11_proxy_ng_proto::SetOperationStateResponse { ck_rv: rv.0 }));
     }
+    let mut transitions = match ctx_mgr
+        .begin_message_operation_transitions(
+            &ctx_id,
+            VirtualHandle(req.session_handle),
+            &[
+                MessageOperation::Encrypt,
+                MessageOperation::Decrypt,
+                MessageOperation::Sign,
+                MessageOperation::Verify,
+            ],
+        )
+        .await
+    {
+        Ok(transitions) => transitions,
+        Err(error) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::SetOperationStateResponse {
+                ck_rv: error.0,
+            }));
+        }
+    };
     let backend = backend_ref.clone();
-    let result = spawn_backend(move || {
-        backend.set_operation_state(
+    let result = spawn_backend_with_optional_timeout(timeout_override, move || {
+        for transition in &mut transitions {
+            transition.mark_started();
+        }
+        let result = backend.set_operation_state(
             session,
             input_from_wire(&operation_state, operation_state_null_len),
             encryption_key,
             authentication_key,
-        )
+        );
+        for transition in &mut transitions {
+            transition.settle(&result, None);
+        }
+        result
     })
     .await?;
 
@@ -178,10 +215,7 @@ mod tests {
         let ctx_id = ctx_mgr.create_context(None).await.unwrap();
         let virtual_session = ctx_mgr
             .get_context(&ctx_id, |ctx| {
-                ctx.register_session(
-                    BackendHandle(backend_session.0),
-                    crate::server::slot_map::BackendSlotId(CkSlotId(1)),
-                )
+                ctx.register_session(BackendHandle(backend_session.0), CkSlotId(1))
             })
             .await
             .unwrap();

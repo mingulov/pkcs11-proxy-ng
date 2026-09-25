@@ -1319,9 +1319,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 
 [[package]]
-name = "pkcs11-abi"
+name = "pkcs11-module"
 version = "0.2.0"
-source = "git+https://github.com/mingulov/pkcs11-components?rev=d0a47c71d34294466bc41100ae6b5a5a329029d2#d0a47c71d34294466bc41100ae6b5a5a329029d2"
+dependencies = [
+ "cryptoki-sys",
+ "libloading",
+]
+
+[[package]]
+name = "pkcs11-proxy-ng"
+version = "0.2.0"
 dependencies = [
  "cryptoki-sys",
 ]
@@ -1381,7 +1388,7 @@ dependencies = [
 
 [[package]]
 name = "pkcs11-proxy-ng-audit"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -1398,6 +1405,7 @@ dependencies = [
  "cryptoki-sys",
  "dashmap",
  "libloading",
+ "pkcs11-module",
  "pkcs11-proxy-ng-proto",
  "pkcs11-proxy-ng-types",
  "tracing",

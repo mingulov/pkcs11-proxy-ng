@@ -48,11 +48,12 @@ pub(super) async fn byte_output_exact(
     }
 
     // Build the output buffer spec
-    let spec = req
-        .output_spec
-        .as_ref()
-        .map(|s| CkOutputBufferSpec { buffer_present: s.buffer_present, buffer_len: s.buffer_len })
-        .unwrap_or(CkOutputBufferSpec { buffer_present: false, buffer_len: 0 });
+    let spec =
+        req.output_spec.as_ref().map(CkOutputBufferSpec::from).unwrap_or(CkOutputBufferSpec {
+            buffer_present: false,
+            buffer_len: 0,
+            length_pointer_null: false,
+        });
 
     let input_data = req.input_data;
     let input_data_null_len = req.input_data_null_len;
@@ -354,6 +355,7 @@ mod sanitize_inputs_tests {
                 output_spec: Some(pkcs11_proxy_ng_proto::OutputBufferSpec {
                     buffer_present: true,
                     buffer_len: 64,
+                    length_pointer_null: false,
                 }),
                 ..Default::default()
             }),
@@ -400,6 +402,7 @@ mod sanitize_inputs_tests {
                 output_spec: Some(pkcs11_proxy_ng_proto::OutputBufferSpec {
                     buffer_present: true,
                     buffer_len: 64,
+                    length_pointer_null: false,
                 }),
                 ..Default::default()
             }),
@@ -411,6 +414,40 @@ mod sanitize_inputs_tests {
             mock.data_op_call_count() > before,
             "sanitize OFF: backend must be called even for NULL input (transparent forwarding)"
         );
+    }
+
+    #[tokio::test]
+    async fn missing_output_length_is_forwarded_to_byte_output_backend_once() {
+        let (ctx_mgr, mock, ctx_id, session) = setup_mock_session().await;
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        setup_decrypt(&ctx_mgr, &backend, &ctx_id, session).await;
+        let before = mock.data_op_call_count();
+
+        let response = byte_output_exact(
+            &HandlerContext::for_test(&ctx_mgr, &backend),
+            Request::new(pkcs11_proxy_ng_proto::ByteOutputExactRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: session,
+                function: pkcs11_proxy_ng_proto::ByteOutputFunction::Decrypt as i32,
+                input_data: b"data".to_vec(),
+                output_spec: Some(pkcs11_proxy_ng_proto::OutputBufferSpec {
+                    buffer_present: true,
+                    buffer_len: 0,
+                    length_pointer_null: true,
+                }),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .result
+        .unwrap();
+
+        assert_eq!(response.ck_rv, CkRv::ARGUMENTS_BAD.0);
+        assert_eq!(response.returned_len, 0);
+        assert_eq!(response.value, None);
+        assert_eq!(mock.data_op_call_count(), before + 1);
     }
 
     // -----------------------------------------------------------------------

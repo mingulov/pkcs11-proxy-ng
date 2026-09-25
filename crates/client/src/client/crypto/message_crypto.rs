@@ -1,11 +1,12 @@
-use pkcs11_proxy_ng_proto::convert::message_params::MessageParameter;
+use pkcs11_proxy_ng_proto::convert::message_params::{
+    MessageParameter, MessageParameterShape, validate_structured_wire_parameter,
+};
 use pkcs11_proxy_ng_types::*;
 
 use crate::client::Pkcs11Client;
 use crate::error::{MessageCallError, grpc_status_to_ck_rv};
 
-use pkcs11_proxy_ng_proto::convert::message_effects::{MessageEffectContext, MessageEffects};
-type MessageBeginContractDecoded = (CkParameterRoundtripResult, Option<MessageEffects>);
+type MessageBeginContractDecoded = (CkParameterRoundtripResult, Option<MessageParameter>);
 
 fn decode_message_init_contract_response(
     ck_rv: u64,
@@ -26,7 +27,7 @@ fn decode_message_init_contract_response(
         .ok_or_else(MessageCallError::protocol)?;
     if parameter_result.ck_rv != CkRv::OK
         || parameter_result.returned_len != envelope.buffer_len
-        || parameter_result.value != envelope.buffer_present.then(SecretBytes::default)
+        || parameter_result.value != envelope.buffer_present.then(Vec::new)
     {
         return Err(MessageCallError::protocol());
     }
@@ -56,54 +57,42 @@ fn decode_message_init_contract_response(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn decode_message_begin_contract_response(
     ck_rv: u64,
     legacy_parameter: &[u8],
     parameter_result: Option<&pkcs11_proxy_ng_proto::ParameterRoundtripResult>,
     message_parameter_out: Option<&pkcs11_proxy_ng_proto::MessageParameter>,
-    message_effects: Option<&pkcs11_proxy_ng_proto::pkcs11_proxy_ng::v1::MessageParameterEffects>,
     envelope: &CkParameterRoundtripSpec,
     requested: Option<&MessageParameter>,
     decrypt: bool,
 ) -> Result<MessageBeginContractDecoded, MessageCallError> {
     let rv = CkRv(ck_rv);
-    if rv.is_err()
-        && parameter_result.is_none()
-        && message_effects.is_none()
-        && message_parameter_out.is_none()
-        && legacy_parameter.is_empty()
-    {
+    if rv.is_err() {
         return Err(MessageCallError::backend(rv));
     }
-    if !legacy_parameter.is_empty() || message_parameter_out.is_some() {
+    if !legacy_parameter.is_empty() {
         return Err(MessageCallError::protocol());
     }
     let parameter_result = parameter_result
         .map(CkParameterRoundtripResult::from)
         .ok_or_else(MessageCallError::protocol)?;
-    if parameter_result.ck_rv != rv
+    if parameter_result.ck_rv != CkRv::OK
         || parameter_result.returned_len != envelope.buffer_len
-        || parameter_result.value != envelope.buffer_present.then(SecretBytes::default)
+        || parameter_result.value != envelope.buffer_present.then(Vec::new)
     {
         return Err(MessageCallError::protocol());
     }
-    let response_parameter = match (requested, message_effects) {
+    let response_parameter = match (requested, message_parameter_out) {
         (Some(request), Some(response)) => {
-            let decoded =
-                MessageEffects::try_from(response).map_err(|_| MessageCallError::protocol())?;
-            decoded
-                .validate_for(
-                    request,
-                    MessageEffectContext {
-                        mode: ParameterEffectCallMode::Begin,
-                        encrypt: !decrypt,
-                        generated_stage: true,
-                        auth_stage: false,
-                        rv,
-                    },
-                )
+            request.validate_structured().map_err(|_| MessageCallError::protocol())?;
+            validate_structured_wire_parameter(response)
                 .map_err(|_| MessageCallError::protocol())?;
+            let decoded =
+                MessageParameter::try_from(response).map_err(|_| MessageCallError::protocol())?;
+            decoded.validate_structured().map_err(|_| MessageCallError::protocol())?;
+            if !request.same_layout_and_scalars(&decoded) || (decrypt && request != &decoded) {
+                return Err(MessageCallError::protocol());
+            }
             Some(decoded)
         }
         (None, None) => None,
@@ -131,7 +120,7 @@ fn decode_empty_message_parameter_response(
         .ok_or_else(MessageCallError::protocol)?;
     if result.ck_rv != CkRv::OK
         || result.returned_len != envelope.buffer_len
-        || result.value != envelope.buffer_present.then(SecretBytes::default)
+        || result.value != envelope.buffer_present.then(Vec::new)
     {
         return Err(MessageCallError::protocol());
     }
@@ -172,6 +161,8 @@ impl Pkcs11Client {
             mechanism: mechanism.map(Self::proto_mechanism),
             key_handle: key.0,
             init_message_parameter: init_param.map(Into::into),
+            parameter_out_spec: None,
+            parameter_shape: None,
         };
         let response = self
             .grpc
@@ -279,6 +270,8 @@ impl Pkcs11Client {
             mechanism: mechanism.map(Self::proto_mechanism),
             key_handle: key.0,
             init_message_parameter: init_param.map(Into::into),
+            parameter_out_spec: None,
+            parameter_shape: None,
         };
         let response = self
             .grpc
@@ -523,6 +516,8 @@ impl Pkcs11Client {
             parameter: parameter.to_vec(),
             associated_data: Vec::new(),
             associated_data_null_len: None,
+            parameter_out_spec: None,
+            message_parameter: None,
         };
         Self::fill_input(aad, &mut req.associated_data, &mut req.associated_data_null_len);
         let resp = pkcs11_unary_call!(self.grpc.encrypt_message_begin(req), true);
@@ -539,10 +534,8 @@ impl Pkcs11Client {
         message_parameter: Option<&MessageParameter>,
         aad: CkInBuf<'_>,
     ) -> Result<MessageBeginContractDecoded, MessageCallError> {
-        self.require_exact_output_effects().await.map_err(MessageCallError::backend)?;
         let ctx = self.context_id().map_err(MessageCallError::backend)?;
         let mut req = pkcs11_proxy_ng_proto::EncryptMessageBeginRequest {
-            exact_output_effects_version: 1,
             client_context_id: ctx,
             session_handle: session.0,
             parameter: Vec::new(),
@@ -565,7 +558,6 @@ impl Pkcs11Client {
             &response.parameter_out,
             response.parameter_result.as_ref(),
             response.message_parameter_out.as_ref(),
-            response.message_effects.as_ref(),
             envelope,
             message_parameter,
             false,
@@ -635,6 +627,8 @@ impl Pkcs11Client {
             parameter: parameter.to_vec(),
             associated_data: Vec::new(),
             associated_data_null_len: None,
+            parameter_out_spec: None,
+            message_parameter: None,
         };
         Self::fill_input(aad, &mut req.associated_data, &mut req.associated_data_null_len);
         let resp = pkcs11_unary_call!(self.grpc.decrypt_message_begin(req), true);
@@ -648,10 +642,8 @@ impl Pkcs11Client {
         message_parameter: Option<&MessageParameter>,
         aad: CkInBuf<'_>,
     ) -> Result<MessageBeginContractDecoded, MessageCallError> {
-        self.require_exact_output_effects().await.map_err(MessageCallError::backend)?;
         let ctx = self.context_id().map_err(MessageCallError::backend)?;
         let mut req = pkcs11_proxy_ng_proto::DecryptMessageBeginRequest {
-            exact_output_effects_version: 1,
             client_context_id: ctx,
             session_handle: session.0,
             parameter: Vec::new(),
@@ -674,7 +666,6 @@ impl Pkcs11Client {
             &response.parameter_out,
             response.parameter_result.as_ref(),
             response.message_parameter_out.as_ref(),
-            response.message_effects.as_ref(),
             envelope,
             message_parameter,
             true,
@@ -793,6 +784,7 @@ impl Pkcs11Client {
             data_part: Vec::new(),
             request_signature,
             data_part_null_len: None,
+            parameter_out_spec: None,
         };
         Self::fill_input(data_part, &mut req.data_part, &mut req.data_part_null_len);
         let resp = pkcs11_unary_call!(self.grpc.sign_message_next(req), true);
@@ -851,6 +843,7 @@ impl Pkcs11Client {
             signature: Vec::new(),
             data_null_len: None,
             signature_null_len: None,
+            parameter_out_spec: None,
         };
         Self::fill_input(data, &mut req.data, &mut req.data_null_len);
         Self::fill_input(signature, &mut req.signature, &mut req.signature_null_len);
@@ -960,6 +953,7 @@ impl Pkcs11Client {
             signature: Vec::new(),
             data_part_null_len: None,
             signature_null_len: None,
+            parameter_out_spec: None,
         };
         Self::fill_input(data_part, &mut req.data_part, &mut req.data_part_null_len);
         Self::fill_input(signature, &mut req.signature, &mut req.signature_null_len);
@@ -1218,7 +1212,6 @@ mod begin_contract_tests {
         let envelope =
             CkParameterRoundtripSpec { buffer_present: true, buffer_len: 32, value: None };
         let response = pkcs11_proxy_ng_proto::EncryptMessageBeginResponse {
-            message_effects: None,
             ck_rv: CkRv::OK.0,
             parameter_out: Vec::new(),
             parameter_result: None,
@@ -1230,7 +1223,6 @@ mod begin_contract_tests {
             &response.parameter_out,
             response.parameter_result.as_ref(),
             response.message_parameter_out.as_ref(),
-            response.message_effects.as_ref(),
             &envelope,
             Some(&requested),
             false,
@@ -1262,7 +1254,6 @@ mod begin_contract_tests {
                     CkRv::OK.0,
                     &[],
                     Some(&response),
-                    None,
                     None,
                     &envelope,
                     None,
@@ -1311,7 +1302,6 @@ mod begin_contract_tests {
                 &[],
                 Some(&acknowledged),
                 Some(&response),
-                None,
                 &envelope,
                 Some(&requested),
                 false,

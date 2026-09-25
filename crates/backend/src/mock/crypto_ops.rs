@@ -419,7 +419,7 @@ impl MockBackend {
             return Ok(None);
         }
         self.state.lock().unwrap().end_op(session, op)?;
-        Ok(Some(CkOutputBufferResult::no_effects(CkRv::ARGUMENTS_BAD)))
+        Ok(Some(CkOutputBufferResult { ck_rv: CkRv::ARGUMENTS_BAD, returned_len: 0, value: None }))
     }
 
     pub(super) fn sign_exact_impl(
@@ -651,11 +651,7 @@ impl MockBackend {
             } else {
                 parameter.len() as u64
             },
-            value: if param_out_spec.buffer_present {
-                Some(parameter.to_vec().into())
-            } else {
-                None
-            },
+            value: if param_out_spec.buffer_present { Some(parameter.to_vec()) } else { None },
         }
     }
 
@@ -882,7 +878,8 @@ impl MockBackend {
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
-        let bytes = self.sign_impl(session, data)?;
+        self.require_open_session(session)?;
+        let bytes = Self::reverse_bytes(data);
         let output_result = CkOutputBufferResult::from_convenience_bytes(&bytes, output_spec);
         let mut param_result = Self::mock_param_roundtrip(parameter, param_out_spec);
         param_result.ck_rv = output_result.ck_rv;
@@ -931,7 +928,8 @@ impl MockBackend {
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
-        let bytes = self.sign_impl(session, data_part)?;
+        self.require_open_session(session)?;
+        let bytes = Self::reverse_bytes(data_part);
         let output_result = CkOutputBufferResult::from_convenience_bytes(&bytes, output_spec);
         let mut param_result = Self::mock_param_roundtrip(parameter, param_out_spec);
         param_result.ck_rv = output_result.ck_rv;

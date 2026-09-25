@@ -41,7 +41,7 @@ pub unsafe extern "C" fn c_wrap_key(
                 // the main output pointer. Ordinary size queries keep the
                 // historical no-writeback behavior.
                 if rv == rv_ok()
-                    && spec.buffer_present
+                    && (spec.buffer_present || spec.length_pointer_null)
                     && let Some(params) = mechanism_out
                 {
                     unsafe { write_mechanism_output_params(p_mechanism, &params) };
@@ -280,7 +280,11 @@ pub unsafe extern "C" fn c_generate_random(
         if p_random_data.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
-        match with_client!(client => client.generate_random(CkSessionHandle(h_session as u64), ul_random_len as u32))
+        let random_len = match u32::try_from(ul_random_len) {
+            Ok(len) => len,
+            Err(_) => return rv_err(CkRv::DATA_LEN_RANGE),
+        };
+        match with_client!(client => client.generate_random(CkSessionHandle(h_session as u64), random_len))
         {
             Ok(data) => {
                 if data.len() != random_len as usize {

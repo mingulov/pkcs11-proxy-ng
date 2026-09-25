@@ -1149,6 +1149,14 @@ message MessageEncryptInitRequest {
   // `mechanism` carries only the type and this carries the message params;
   // the backend reconstructs the *_MESSAGE_PARAMS struct for C_MessageEncryptInit.
   optional MessageParameter init_message_parameter = 5;
+  optional ParameterRoundtripSpec parameter_out_spec = 6;
+  optional MessageParameterShape parameter_shape = 7;
+}
+message MessageEncryptInitResponse {
+  uint64 ck_rv = 1;
+  optional ParameterRoundtripResult parameter_result = 2;
+  optional MessageParameter init_message_parameter = 3;
+  optional MessageParameterShape parameter_shape = 4;
 }
 
 // C_EncryptMessage
@@ -1178,6 +1186,8 @@ message EncryptMessageBeginRequest {
   bytes associated_data = 4;
   // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; associated_data is then empty.
   optional uint64 associated_data_null_len = 5;
+  optional ParameterRoundtripSpec parameter_out_spec = 6;
+  optional MessageParameter message_parameter = 7;
 }
 message EncryptMessageBeginResponse {
   optional MessageParameterEffects message_effects = 5;
@@ -1219,6 +1229,14 @@ message MessageDecryptInitRequest {
   // AEAD message-based init params (CK_GCM/CCM_MESSAGE_PARAMS); see
   // MessageEncryptInitRequest.init_message_parameter.
   optional MessageParameter init_message_parameter = 5;
+  optional ParameterRoundtripSpec parameter_out_spec = 6;
+  optional MessageParameterShape parameter_shape = 7;
+}
+message MessageDecryptInitResponse {
+  uint64 ck_rv = 1;
+  optional ParameterRoundtripResult parameter_result = 2;
+  optional MessageParameter init_message_parameter = 3;
+  optional MessageParameterShape parameter_shape = 4;
 }
 
 // C_DecryptMessage
@@ -1248,6 +1266,8 @@ message DecryptMessageBeginRequest {
   bytes associated_data = 4;
   // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; associated_data is then empty.
   optional uint64 associated_data_null_len = 5;
+  optional ParameterRoundtripSpec parameter_out_spec = 6;
+  optional MessageParameter message_parameter = 7;
 }
 message DecryptMessageBeginResponse {
   optional MessageParameterEffects message_effects = 5;
@@ -1326,6 +1346,7 @@ message SignMessageNextRequest {
   bool request_signature = 5;  // true = final part, return signature
   // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; data_part is then empty.
   optional uint64 data_part_null_len = 6;
+  optional ParameterRoundtripSpec parameter_out_spec = 7;
 }
 message SignMessageNextResponse {
   uint64 ck_rv = 1;
@@ -1361,6 +1382,11 @@ message VerifyMessageRequest {
   optional uint64 data_null_len = 6;
   // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; signature is then empty.
   optional uint64 signature_null_len = 7;
+  optional ParameterRoundtripSpec parameter_out_spec = 8;
+}
+message VerifyMessageResponse {
+  uint64 ck_rv = 1;
+  optional ParameterRoundtripResult parameter_result = 2;
 }
 
 // C_VerifyMessageBegin
@@ -1388,6 +1414,11 @@ message VerifyMessageNextRequest {
   optional uint64 data_part_null_len = 7;
   // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; signature is then empty.
   optional uint64 signature_null_len = 8;
+  optional ParameterRoundtripSpec parameter_out_spec = 9;
+}
+message VerifyMessageNextResponse {
+  uint64 ck_rv = 1;
+  optional ParameterRoundtripResult parameter_result = 2;
 }
 
 // C_MessageVerifyFinal
@@ -1660,6 +1691,9 @@ message GetBackendInterfacesResponse {
   // On LLP64 backends the packed stride (16) is not derivable from the
   // ulong width; absent => client falls back to 3 * backend_ulong_size.
   optional uint32 backend_attribute_stride = 5;
+  // True only when the daemon implements the shape-bound message-parameter
+  // contract. Absent from older daemons and therefore treated as false.
+  optional bool pointer_safe_message_parameters = 6;
 }
 
 // Server-driven mechanism parameter registry payload. Carries the

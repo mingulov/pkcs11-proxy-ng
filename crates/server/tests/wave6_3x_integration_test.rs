@@ -201,6 +201,7 @@ async fn message_encrypt_decrypt_round_trip() {
         .encrypt_message(session, parameter, CkInBuf::Bytes(&[]), CkInBuf::Bytes(plaintext))
         .await
         .unwrap();
+    assert!(param_out.is_empty());
     assert_ne!(ciphertext, plaintext.to_vec(), "ciphertext should differ from plaintext");
 
     // Finalize encrypt
@@ -236,7 +237,7 @@ async fn message_encrypt_decrypt_begin_next_round_trip() {
     client.message_encrypt_init(session, Some(&mechanism), None, key).await.unwrap();
     let encrypt_parameter =
         client.encrypt_message_begin(session, parameter, CkInBuf::Bytes(aad)).await.unwrap();
-    assert_eq!(encrypt_parameter, parameter);
+    assert!(encrypt_parameter.is_empty());
 
     let (encrypt_parameter, ciphertext1) = client
         .encrypt_message_next(session, &encrypt_parameter, CkInBuf::Bytes(part1), CkFlags(0))
@@ -246,7 +247,7 @@ async fn message_encrypt_decrypt_begin_next_round_trip() {
         .encrypt_message_next(session, &encrypt_parameter, CkInBuf::Bytes(part2), CkFlags(0))
         .await
         .unwrap();
-    assert_eq!(encrypt_parameter, parameter);
+    assert!(encrypt_parameter.is_empty());
     assert_ne!(ciphertext1, part1);
     assert_ne!(ciphertext2, part2);
     client.message_encrypt_final(session).await.unwrap();
@@ -256,7 +257,7 @@ async fn message_encrypt_decrypt_begin_next_round_trip() {
         .decrypt_message_begin(session, &encrypt_parameter, CkInBuf::Bytes(aad))
         .await
         .unwrap();
-    assert_eq!(decrypt_parameter, parameter);
+    assert!(decrypt_parameter.is_empty());
 
     let (decrypt_parameter, recovered1) = client
         .decrypt_message_next(session, &decrypt_parameter, CkInBuf::Bytes(&ciphertext1), CkFlags(0))
@@ -709,6 +710,7 @@ async fn message_sign_verify_round_trip() {
     // Sign message
     let (param_out, signature) =
         client.sign_message(session, parameter, CkInBuf::Bytes(data)).await.unwrap();
+    assert!(param_out.is_empty());
     assert!(!signature.is_empty(), "signature should not be empty");
 
     // Finalize sign
@@ -747,7 +749,7 @@ async fn message_sign_verify_begin_next_round_trip() {
         .sign_message_next(session, &sign_parameter, CkInBuf::Bytes(nonfinal_data), false)
         .await
         .unwrap();
-    assert_eq!(sign_parameter, parameter);
+    assert!(sign_parameter.is_empty());
     assert!(nonfinal_signature.is_empty());
 
     let (sign_parameter, signature) = client
@@ -809,7 +811,7 @@ async fn sign_begin_empty_contract_rejects_positive_before_backend_and_acks_poin
         let empty = CkParameterRoundtripSpec { buffer_present, buffer_len: 0, value: None };
         let acknowledgement = client.sign_message_begin_contract(session, &empty).await.unwrap();
         assert_eq!(acknowledgement.returned_len, 0);
-        assert_eq!(acknowledgement.value, buffer_present.then(Vec::new).map(SecretBytes::new));
+        assert_eq!(acknowledgement.value, buffer_present.then(Vec::new));
     }
     assert_eq!(backend.message_parameter_call_count(), 2);
 }

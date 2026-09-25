@@ -161,6 +161,45 @@ static SESSION_SLOTS: LazyLock<SessionSlotMap> = LazyLock::new(|| Mutex::new(Has
 static DELAYED_GCM_WRITEBACK: LazyLock<SessionMechanismParamMap> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MessageOperation {
+    Encrypt,
+    Decrypt,
+    Sign,
+    Verify,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct MessageOperationState {
+    pub(crate) shape: Option<MessageParameterShape>,
+}
+
+type MessageOperationStateMap =
+    Mutex<HashMap<(CK_SESSION_HANDLE, MessageOperation), Arc<Mutex<MessageOperationState>>>>;
+static MESSAGE_OPERATION_STATES: LazyLock<MessageOperationStateMap> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Return the stable per-session/per-operation guard object without retaining
+/// the global map lock. Callers lock this object across parsing, RPC and
+/// writeback so a concurrent Init cannot change shape mid-call.
+pub(crate) fn message_operation_state(
+    h_session: CK_SESSION_HANDLE,
+    operation: MessageOperation,
+) -> Arc<Mutex<MessageOperationState>> {
+    MESSAGE_OPERATION_STATES
+        .lock()
+        .expect("message-operation state map poisoned")
+        .entry((h_session, operation))
+        .or_insert_with(|| Arc::new(Mutex::new(MessageOperationState::default())))
+        .clone()
+}
+
+fn evict_message_operations(h_session: CK_SESSION_HANDLE) {
+    if let Ok(mut map) = MESSAGE_OPERATION_STATES.lock() {
+        map.retain(|(session, _), _| *session != h_session);
+    }
+}
+
 pub(crate) fn remember_session_slot(h_session: CK_SESSION_HANDLE, slot_id: CK_SLOT_ID) {
     if let Ok(mut map) = SESSION_SLOTS.lock() {
         map.insert(h_session, slot_id);
@@ -420,6 +459,9 @@ pub(crate) fn clear_all_caches() {
     if let Ok(mut map) = DELAYED_GCM_WRITEBACK.lock() {
         map.clear();
     }
+    if let Ok(mut map) = MESSAGE_OPERATION_STATES.lock() {
+        map.clear();
+    }
 }
 
 fn evict_disposable_output_caches_for_session(h_session: CK_SESSION_HANDLE) {
@@ -434,14 +476,16 @@ fn evict_disposable_output_caches_for_session(h_session: CK_SESSION_HANDLE) {
     clear_delayed_gcm_writeback(h_session);
 }
 
-/// Remove all cached two-call-pattern data for the given session handle.
-///
-/// Called from `c_close_session` on the close *attempt*, unconditionally — the
-/// caches are dropped regardless of the server's `CK_RV`, so stale entries do
-/// not accumulate and leak memory. (If a close fails and the caller
-/// legitimately retries on the same handle, the next two-call sequence simply
-/// re-primes the caches.)
-pub(crate) fn evict_session_caches(h_session: CK_SESSION_HANDLE) {
+/// Drop only retryable/two-call output material, without changing session
+/// ownership or authoritative message-operation discriminators.
+pub(crate) fn evict_session_output_caches(h_session: CK_SESSION_HANDLE) {
+    evict_disposable_output_caches_for_session(h_session);
+}
+
+/// Forget session ownership and all message-operation discriminators without
+/// touching the disposable output caches.  Close uses this only for terminal
+/// or outcome-ambiguous results; decoded transient failures keep it intact.
+pub(crate) fn evict_session_authoritative_state(h_session: CK_SESSION_HANDLE) {
     forget_session_slot(h_session);
     evict_message_operations(h_session);
 }

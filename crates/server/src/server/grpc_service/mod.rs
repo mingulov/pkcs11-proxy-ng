@@ -607,7 +607,7 @@ macro_rules! impl_proxy_service {
                     // the shared backend-call budget and DEVICE_ERROR every tenant
                     // (M2). A context that is already gone yields Ok(None) and the
                     // handler returns the right CKR.
-                    let _op = match self.ctx.context_manager.begin_operation_capped(
+                    let operation_guard = match self.ctx.context_manager.begin_operation_capped(
                         &$crate::server::context_manager::ClientContextId(
                             request.get_ref().client_context_id.clone(),
                         ),
@@ -620,17 +620,20 @@ macro_rules! impl_proxy_service {
                             ));
                         }
                     };
-                    // G2-PR3: per-principal in-flight cap (opt-in; zero-cost
-                    // no-op when per_principal_max_in_flight is unset →
-                    // byte-identical to the pre-quota path). Acquired AFTER
-                    // context-owner validation and the per-context cap.
-                    // Never reaches the backend → rejection does NOT increment
-                    // the backend-health failure counter.
-                    let _pguard = acquire_principal_op_guard(
-                        &self.ctx,
-                        &request.get_ref().client_context_id,
-                    )?;
-                    $module(&self.ctx, request).await
+                    service_utils::scope_context_operation(operation_guard, async {
+                        // G2-PR3: per-principal in-flight cap (opt-in; zero-cost
+                        // no-op when per_principal_max_in_flight is unset →
+                        // byte-identical to the pre-quota path). Acquired AFTER
+                        // context-owner validation and the per-context cap.
+                        // Never reaches the backend → rejection does NOT increment
+                        // the backend-health failure counter.
+                        let _pguard = acquire_principal_op_guard(
+                            &self.ctx,
+                            &request.get_ref().client_context_id,
+                        )?;
+                        $module(&self.ctx, request).await
+                    })
+                    .await
                 }
             )+
         }

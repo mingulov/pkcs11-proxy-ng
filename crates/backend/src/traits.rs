@@ -661,7 +661,7 @@ pub trait Pkcs11Backend: Send + Sync {
     ) -> CkResult<(
         CkOutputBufferResult,
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
+        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
     )> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -677,7 +677,7 @@ pub trait Pkcs11Backend: Send + Sync {
     ) -> CkResult<(
         CkOutputBufferResult,
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
+        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
     )> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -690,7 +690,7 @@ pub trait Pkcs11Backend: Send + Sync {
         _provider_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
+        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
     )> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -703,7 +703,7 @@ pub trait Pkcs11Backend: Send + Sync {
         _provider_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
+        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
     )> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -732,7 +732,7 @@ pub trait Pkcs11Backend: Send + Sync {
     ) -> CkResult<(
         CkOutputBufferResult,
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
+        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
     )> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -748,7 +748,7 @@ pub trait Pkcs11Backend: Send + Sync {
     ) -> CkResult<(
         CkOutputBufferResult,
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
+        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
     )> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -873,7 +873,7 @@ pub trait Pkcs11Backend: Send + Sync {
         Ok(CkParameterRoundtripResult {
             ck_rv: CkRv::OK,
             returned_len: provider_spec.buffer_len,
-            value: provider_spec.buffer_present.then(Vec::new).map(SecretBytes::new),
+            value: provider_spec.buffer_present.then(Vec::new),
         })
     }
 
@@ -893,6 +893,15 @@ pub trait Pkcs11Backend: Send + Sync {
         _parameter: &mut [u8],
         _aad: CkInBuf<'_>,
     ) -> CkResult<Vec<u8>> {
+        Err(CkRv::FUNCTION_NOT_SUPPORTED)
+    }
+
+    fn encrypt_message_begin_exact(
+        &self,
+        _session: CkSessionHandle,
+        _aad: CkInBuf<'_>,
+        _provider_spec: &CkParameterRoundtripSpec,
+    ) -> CkResult<CkParameterRoundtripResult> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
 
@@ -934,7 +943,7 @@ pub trait Pkcs11Backend: Send + Sync {
         Ok(CkParameterRoundtripResult {
             ck_rv: CkRv::OK,
             returned_len: provider_spec.buffer_len,
-            value: provider_spec.buffer_present.then(Vec::new).map(SecretBytes::new),
+            value: provider_spec.buffer_present.then(Vec::new),
         })
     }
 
@@ -954,6 +963,15 @@ pub trait Pkcs11Backend: Send + Sync {
         _parameter: &mut [u8],
         _aad: CkInBuf<'_>,
     ) -> CkResult<Vec<u8>> {
+        Err(CkRv::FUNCTION_NOT_SUPPORTED)
+    }
+
+    fn decrypt_message_begin_exact(
+        &self,
+        _session: CkSessionHandle,
+        _aad: CkInBuf<'_>,
+        _provider_spec: &CkParameterRoundtripSpec,
+    ) -> CkResult<CkParameterRoundtripResult> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
 
@@ -1007,6 +1025,14 @@ pub trait Pkcs11Backend: Send + Sync {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
 
+    fn sign_message_begin_exact(
+        &self,
+        _session: CkSessionHandle,
+        _provider_spec: &CkParameterRoundtripSpec,
+    ) -> CkResult<CkParameterRoundtripResult> {
+        Err(CkRv::FUNCTION_NOT_SUPPORTED)
+    }
+
     fn sign_message_next(
         &self,
         _session: CkSessionHandle,
@@ -1014,6 +1040,15 @@ pub trait Pkcs11Backend: Send + Sync {
         _data_part: CkInBuf<'_>,
         _request_signature: bool,
     ) -> CkResult<(SecretBytes, SecretBytes)> {
+        Err(CkRv::FUNCTION_NOT_SUPPORTED)
+    }
+
+    fn sign_message_next_feed_exact(
+        &self,
+        _session: CkSessionHandle,
+        _data_part: CkInBuf<'_>,
+        _provider_spec: &CkParameterRoundtripSpec,
+    ) -> CkResult<CkParameterRoundtripResult> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
 

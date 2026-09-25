@@ -2,16 +2,14 @@
 name = "pkcs11-proxy-ng-backend"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 publish = false
 
 [dependencies]
 pkcs11-proxy-ng-types = { path = "../types" }
 pkcs11-proxy-ng-proto = { path = "../proto" }
-# Shared module-FFI facts (raw acquisition, function-table layouts). Moved to the
-# pkcs11-components repo; consumed as a pinned git dependency (see deny.toml
-# allow-git). Default features keep `native` (cryptoki-sys tables + acquisition).
-pkcs11-module = { git = "https://github.com/mingulov/pkcs11-components", rev = "d0a47c71d34294466bc41100ae6b5a5a329029d2" }
+pkcs11-module = { path = "../module" }
 libloading.workspace = true
 cryptoki-sys.workspace = true
 tracing.workspace = true

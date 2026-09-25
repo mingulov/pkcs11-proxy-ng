@@ -128,15 +128,6 @@ impl HandleMap {
             .collect();
         handles.into_iter()
     }
-
-    /// True when `backend` is retained by this map in any state (active or
-    /// suspended). Used for the teardown refcount check (D9): a departing
-    /// context's backend session is closed only when no live context still
-    /// references it.
-    pub fn references_backend(&self, backend: BackendHandle) -> bool {
-        self.backend_to_virtual.contains_key(&backend)
-            || self.suspended_virtual_to_backend.values().any(|b| *b == backend)
-    }
 }
 
 #[cfg(test)]

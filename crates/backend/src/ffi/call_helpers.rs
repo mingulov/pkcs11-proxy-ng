@@ -528,8 +528,22 @@ impl FfiBackend {
         call: F,
     ) -> CkResult<CkOutputBufferResult>
     where
-        F: FnOnce(*mut cryptoki_sys::CK_BYTE, *mut cryptoki_sys::CK_ULONG) -> cryptoki_sys::CK_RV,
+        F: FnMut(*mut cryptoki_sys::CK_BYTE, *mut cryptoki_sys::CK_ULONG) -> cryptoki_sys::CK_RV,
     {
+        if spec.length_pointer_null {
+            let output = if spec.buffer_present {
+                std::ptr::NonNull::<cryptoki_sys::CK_BYTE>::dangling().as_ptr()
+            } else {
+                std::ptr::null_mut()
+            };
+            let rv = call(output, std::ptr::null_mut());
+            return Ok(CkOutputBufferResult {
+                ck_rv: CkRv(rv as u64),
+                returned_len: 0,
+                value: None,
+            });
+        }
+
         let mut out_len: cryptoki_sys::CK_ULONG = 0;
 
         if !spec.buffer_present {
@@ -712,17 +726,14 @@ impl FfiBackend {
         let result = Self::single_call_bytes_exact(_admission, spec, |output, output_len| {
             call(function, ffi_mech.ck_mechanism_mut(), output, output_len)
         })?;
-        // Surface post-call params on data and genuine missing-length calls:
-        // always on OK, and on errors iff the params changed since the
-        // pre-call snapshot. Ordinary NULL-output size queries suppress them.
-        let after = ffi_mech.output_params();
-        let mechanism_out = if !(spec.buffer_present || spec.length_pointer_null) {
-            None
-        } else if result.ck_rv == CkRv::OK || after != before {
-            after
-        } else {
-            None
-        };
+        // Surface mutated params after successful data calls and genuine
+        // missing-length calls. Ordinary NULL-output size queries suppress them.
+        let mechanism_out =
+            if (spec.buffer_present || spec.length_pointer_null) && result.ck_rv == CkRv::OK {
+                ffi_mech.output_params()
+            } else {
+                None
+            };
         Ok((result, mechanism_out))
     }
 
@@ -771,9 +782,35 @@ impl FfiBackend {
         if copy_len > 0 {
             param_buf[..copy_len].copy_from_slice(&parameter_input[..copy_len]);
         }
-        let param_ptr =
-            if param_buf_len > 0 { param_buf.as_mut_ptr() } else { std::ptr::null_mut() };
-        let param_ck_len = param_buf_len as cryptoki_sys::CK_ULONG;
+        let param_ptr = if !param_out_spec.buffer_present {
+            std::ptr::null_mut()
+        } else if param_buf_len == 0 {
+            std::ptr::NonNull::<u8>::dangling().as_ptr()
+        } else {
+            param_buf.as_mut_ptr()
+        };
+        let param_ck_len = cryptoki_sys::CK_ULONG::try_from(param_out_spec.buffer_len)
+            .map_err(|_| CkRv::ARGUMENTS_BAD)?;
+
+        if output_spec.length_pointer_null {
+            let output = if output_spec.buffer_present {
+                std::ptr::NonNull::<cryptoki_sys::CK_BYTE>::dangling().as_ptr()
+            } else {
+                std::ptr::null_mut()
+            };
+            let rv = CkRv(call(param_ptr, param_ck_len, output, std::ptr::null_mut()) as u64);
+            if rv != CkRv::OK && rv != CkRv::BUFFER_TOO_SMALL {
+                return Err(rv);
+            }
+            return Ok((
+                CkOutputBufferResult { ck_rv: rv, returned_len: 0, value: None },
+                CkParameterRoundtripResult {
+                    ck_rv: rv,
+                    returned_len: param_out_spec.buffer_len,
+                    value: param_out_spec.buffer_present.then_some(param_buf),
+                },
+            ));
+        }
 
         // Prepare the main output buffer.
         let mut out_len: cryptoki_sys::CK_ULONG = 0;
@@ -789,7 +826,7 @@ impl FfiBackend {
                 };
                 let param_result = CkParameterRoundtripResult {
                     ck_rv: CkRv::OK,
-                    returned_len: param_buf_len as u64,
+                    returned_len: param_out_spec.buffer_len,
                     value: if param_out_spec.buffer_present { Some(param_buf) } else { None },
                 };
                 Ok((output_result, param_result))
@@ -811,7 +848,7 @@ impl FfiBackend {
                 };
                 let param_result = CkParameterRoundtripResult {
                     ck_rv: CkRv::OK,
-                    returned_len: param_buf_len as u64,
+                    returned_len: param_out_spec.buffer_len,
                     value: if param_out_spec.buffer_present { Some(param_buf) } else { None },
                 };
                 Ok((output_result, param_result))
@@ -823,8 +860,8 @@ impl FfiBackend {
                 };
                 let param_result = CkParameterRoundtripResult {
                     ck_rv: CkRv::BUFFER_TOO_SMALL,
-                    returned_len: param_buf_len as u64,
-                    value: None,
+                    returned_len: param_out_spec.buffer_len,
+                    value: if param_out_spec.buffer_present { Some(param_buf) } else { None },
                 };
                 Ok((output_result, param_result))
             } else {
@@ -858,7 +895,8 @@ impl FfiBackend {
 
 #[cfg(test)]
 mod output_cap_tests {
-    use super::{MAX_OUTPUT_BUFFER_BYTES, capped_output_len};
+    use super::{FfiBackend, MAX_OUTPUT_BUFFER_BYTES, capped_output_len};
+    use pkcs11_proxy_ng_types::{CkOutputBufferSpec, CkParameterRoundtripSpec, CkRv};
 
     #[test]
     fn caps_absurd_buffer_len() {
@@ -870,5 +908,224 @@ mod output_cap_tests {
     fn passes_through_reasonable_buffer_len() {
         assert_eq!(capped_output_len(1024), 1024);
         assert_eq!(capped_output_len(0), 0);
+    }
+
+    #[test]
+    fn null_output_length_shared_helper_preserves_all_three_native_shapes() {
+        let missing_len_spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 0, length_pointer_null: true };
+        let mut missing_calls = 0;
+        let missing = FfiBackend::single_call_bytes_exact(
+            &missing_len_spec,
+            |output, output_len: *mut cryptoki_sys::CK_ULONG| {
+                missing_calls += 1;
+                assert!(!output.is_null(), "non-NULL output class must be preserved");
+                assert!(output_len.is_null(), "missing length pointer must reach provider as NULL");
+                CkRv::ARGUMENTS_BAD.0 as cryptoki_sys::CK_RV
+            },
+        )
+        .expect("provider result envelope");
+        assert_eq!(missing_calls, 1);
+        assert_eq!(missing.ck_rv, CkRv::ARGUMENTS_BAD);
+        assert_eq!(missing.returned_len, 0);
+        assert_eq!(missing.value, None);
+
+        let size_spec =
+            CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: false };
+        let mut size_calls = 0;
+        let size = FfiBackend::single_call_bytes_exact(
+            &size_spec,
+            |output, output_len: *mut cryptoki_sys::CK_ULONG| {
+                size_calls += 1;
+                assert!(output.is_null());
+                assert!(!output_len.is_null());
+                unsafe { *output_len = 3 };
+                CkRv::OK.0 as cryptoki_sys::CK_RV
+            },
+        )
+        .expect("size result");
+        assert_eq!(size_calls, 1);
+        assert_eq!(size.returned_len, 3);
+        assert_eq!(size.value, None);
+
+        let data_spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 3, length_pointer_null: false };
+        let mut data_calls = 0;
+        let data = FfiBackend::single_call_bytes_exact(
+            &data_spec,
+            |output, output_len: *mut cryptoki_sys::CK_ULONG| {
+                data_calls += 1;
+                assert!(!output.is_null());
+                assert!(!output_len.is_null());
+                unsafe {
+                    std::ptr::copy_nonoverlapping(b"out".as_ptr(), output, 3);
+                    *output_len = 3;
+                }
+                CkRv::OK.0 as cryptoki_sys::CK_RV
+            },
+        )
+        .expect("data result");
+        assert_eq!(data_calls, 1);
+        assert_eq!(data.value.as_deref(), Some(b"out".as_slice()));
+    }
+
+    #[test]
+    fn null_output_length_parameter_helper_preserves_provider_parameter_output() {
+        let output_spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 0, length_pointer_null: true };
+        let parameter_spec = CkParameterRoundtripSpec {
+            buffer_present: true,
+            buffer_len: 3,
+            value: Some(vec![1, 2, 3]),
+        };
+        let mut calls = 0;
+
+        let (output, parameter) = FfiBackend::single_call_parameter_output_exact(
+            &output_spec,
+            parameter_spec.value.as_deref().unwrap(),
+            &parameter_spec,
+            |parameter,
+             parameter_len,
+             main_output,
+             main_output_len: *mut cryptoki_sys::CK_ULONG| {
+                calls += 1;
+                assert!(!parameter.is_null());
+                assert_eq!(parameter_len, 3);
+                assert!(!main_output.is_null());
+                assert!(main_output_len.is_null());
+                unsafe { *parameter.add(1) = 0xA5 };
+                CkRv::OK.0 as cryptoki_sys::CK_RV
+            },
+        )
+        .expect("provider result and parameter output");
+
+        assert_eq!(calls, 1);
+        assert_eq!(output.ck_rv, CkRv::OK);
+        assert_eq!(output.returned_len, 0);
+        assert_eq!(output.value, None);
+        assert_eq!(parameter.ck_rv, CkRv::OK);
+        assert_eq!(parameter.returned_len, 3);
+        assert_eq!(parameter.value, Some(vec![1, 0xA5, 3]));
+    }
+
+    #[test]
+    fn null_output_length_parameter_helper_preserves_buffer_too_small_and_parameter_output() {
+        let output_spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 0, length_pointer_null: true };
+        let parameter_spec = CkParameterRoundtripSpec {
+            buffer_present: true,
+            buffer_len: 3,
+            value: Some(vec![1, 2, 3]),
+        };
+        let mut calls = 0;
+
+        let (output, parameter) = FfiBackend::single_call_parameter_output_exact(
+            &output_spec,
+            parameter_spec.value.as_deref().unwrap(),
+            &parameter_spec,
+            |parameter, _, _, output_len: *mut cryptoki_sys::CK_ULONG| {
+                calls += 1;
+                assert!(output_len.is_null());
+                unsafe { *parameter.add(1) = 0xA5 };
+                CkRv::BUFFER_TOO_SMALL.0 as cryptoki_sys::CK_RV
+            },
+        )
+        .expect("provider result and parameter output");
+
+        assert_eq!(calls, 1);
+        assert_eq!(
+            output,
+            pkcs11_proxy_ng_types::CkOutputBufferResult {
+                ck_rv: CkRv::BUFFER_TOO_SMALL,
+                returned_len: 0,
+                value: None,
+            },
+        );
+        assert_eq!(parameter.ck_rv, CkRv::BUFFER_TOO_SMALL);
+        assert_eq!(parameter.returned_len, 3);
+        assert_eq!(parameter.value, Some(vec![1, 0xA5, 3]));
+    }
+
+    #[test]
+    fn parameter_exact_preserves_null_positive_envelope() {
+        let output_spec =
+            CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: false };
+        let parameter_spec =
+            CkParameterRoundtripSpec { buffer_present: false, buffer_len: 7, value: None };
+        let mut calls = 0;
+
+        let (_, result) = FfiBackend::single_call_parameter_output_exact(
+            &output_spec,
+            &[],
+            &parameter_spec,
+            |parameter, parameter_len, output, output_len| {
+                calls += 1;
+                assert!(parameter.is_null());
+                assert_eq!(parameter_len, 7);
+                assert!(output.is_null());
+                unsafe { *output_len = 0 };
+                CkRv::OK.0 as cryptoki_sys::CK_RV
+            },
+        )
+        .expect("provider call");
+
+        assert_eq!(calls, 1);
+        assert_eq!(result.ck_rv, CkRv::OK);
+        assert_eq!(result.returned_len, 7);
+        assert_eq!(result.value, None);
+    }
+
+    #[test]
+    fn parameter_exact_preserves_null_zero_envelope() {
+        let output_spec =
+            CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: false };
+        let parameter_spec =
+            CkParameterRoundtripSpec { buffer_present: false, buffer_len: 0, value: None };
+        let mut calls = 0;
+
+        let (_, result) = FfiBackend::single_call_parameter_output_exact(
+            &output_spec,
+            &[],
+            &parameter_spec,
+            |parameter, parameter_len, _, output_len| {
+                calls += 1;
+                assert!(parameter.is_null());
+                assert_eq!(parameter_len, 0);
+                unsafe { *output_len = 0 };
+                CkRv::OK.0 as cryptoki_sys::CK_RV
+            },
+        )
+        .expect("provider call");
+
+        assert_eq!(calls, 1);
+        assert_eq!(result.returned_len, 0);
+        assert_eq!(result.value, None);
+    }
+
+    #[test]
+    fn parameter_exact_preserves_nonnull_zero_envelope() {
+        let output_spec =
+            CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: false };
+        let parameter_spec =
+            CkParameterRoundtripSpec { buffer_present: true, buffer_len: 0, value: None };
+        let mut calls = 0;
+
+        let (_, result) = FfiBackend::single_call_parameter_output_exact(
+            &output_spec,
+            &[],
+            &parameter_spec,
+            |parameter, parameter_len, _, output_len| {
+                calls += 1;
+                assert!(!parameter.is_null());
+                assert_eq!(parameter_len, 0);
+                unsafe { *output_len = 0 };
+                CkRv::OK.0 as cryptoki_sys::CK_RV
+            },
+        )
+        .expect("provider call");
+
+        assert_eq!(calls, 1);
+        assert_eq!(result.returned_len, 0);
+        assert_eq!(result.value, Some(Vec::new()));
     }
 }

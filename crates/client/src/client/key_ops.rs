@@ -207,7 +207,19 @@ impl Pkcs11Client {
         enc_key: CkObjectHandle,
         auth_key: CkObjectHandle,
     ) -> CkResult<()> {
-        let ctx = self.context_id()?;
+        self.set_operation_state_stateful(session, state, enc_key, auth_key)
+            .await
+            .map_err(|error| error.ck_rv)
+    }
+
+    pub async fn set_operation_state_stateful(
+        &mut self,
+        session: CkSessionHandle,
+        state: CkInBuf<'_>,
+        enc_key: CkObjectHandle,
+        auth_key: CkObjectHandle,
+    ) -> Result<(), MessageCallError> {
+        let ctx = self.context_id().map_err(MessageCallError::backend)?;
         let mut req = pkcs11_proxy_ng_proto::SetOperationStateRequest {
             client_context_id: ctx,
             session_handle: session.0,
@@ -217,7 +229,16 @@ impl Pkcs11Client {
             operation_state_null_len: None,
         };
         Self::fill_input(state, &mut req.operation_state, &mut req.operation_state_null_len);
-        pkcs11_unary_ok!(self.grpc.set_operation_state(req), true)
+        let response = self
+            .grpc
+            .set_operation_state(req)
+            .await
+            .map_err(|status| {
+                MessageCallError::transport(grpc_status_to_ck_rv(status.code(), true))
+            })?
+            .into_inner();
+        let rv = CkRv(response.ck_rv);
+        if rv.is_ok() { Ok(()) } else { Err(MessageCallError::backend(rv)) }
     }
 
     pub async fn seed_random(

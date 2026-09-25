@@ -1123,6 +1123,17 @@ impl Pkcs11Backend for FfiBackend {
         self.ffi_message_encrypt_init(session, mechanism, init_param, key)
     }
 
+    fn message_encrypt_init_contract(
+        &self,
+        session: CkSessionHandle,
+        mechanism: &CkMechanism,
+        init_param: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
+        key: CkObjectHandle,
+        provider_spec: &CkParameterRoundtripSpec,
+    ) -> CkResult<CkParameterRoundtripResult> {
+        self.ffi_message_encrypt_init_contract(session, mechanism, init_param, key, provider_spec)
+    }
+
     fn message_encrypt_final(&self, session: CkSessionHandle) -> CkResult<()> {
         self.ffi_message_encrypt_final(session)
     }
@@ -1135,6 +1146,17 @@ impl Pkcs11Backend for FfiBackend {
         key: CkObjectHandle,
     ) -> CkResult<()> {
         self.ffi_message_decrypt_init(session, mechanism, init_param, key)
+    }
+
+    fn message_decrypt_init_contract(
+        &self,
+        session: CkSessionHandle,
+        mechanism: &CkMechanism,
+        init_param: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
+        key: CkObjectHandle,
+        provider_spec: &CkParameterRoundtripSpec,
+    ) -> CkResult<CkParameterRoundtripResult> {
+        self.ffi_message_decrypt_init_contract(session, mechanism, init_param, key, provider_spec)
     }
 
     fn message_decrypt_final(&self, session: CkSessionHandle) -> CkResult<()> {
@@ -1598,7 +1620,7 @@ impl Pkcs11Backend for FfiBackend {
     ) -> CkResult<(
         CkOutputBufferResult,
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
+        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
     )> {
         self.ffi_encrypt_message_exact_msg(
             session,
@@ -1621,7 +1643,7 @@ impl Pkcs11Backend for FfiBackend {
     ) -> CkResult<(
         CkOutputBufferResult,
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
+        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
     )> {
         self.ffi_decrypt_message_exact_msg(
             session,
@@ -1641,7 +1663,7 @@ impl Pkcs11Backend for FfiBackend {
         provider_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
+        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
     )> {
         self.ffi_encrypt_message_begin_msg(session, msg_param, aad, provider_spec)
     }
@@ -1654,7 +1676,7 @@ impl Pkcs11Backend for FfiBackend {
         provider_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
+        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
     )> {
         self.ffi_decrypt_message_begin_msg(session, msg_param, aad, provider_spec)
     }
@@ -1683,7 +1705,7 @@ impl Pkcs11Backend for FfiBackend {
     ) -> CkResult<(
         CkOutputBufferResult,
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
+        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
     )> {
         self.ffi_encrypt_message_next_exact_msg(
             session,
@@ -1706,7 +1728,7 @@ impl Pkcs11Backend for FfiBackend {
     ) -> CkResult<(
         CkOutputBufferResult,
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
+        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
     )> {
         self.ffi_decrypt_message_next_exact_msg(
             session,

@@ -3,6 +3,33 @@ use std::sync::OnceLock;
 use pkcs11_proxy_ng_types::CkRv;
 use tonic::Code;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageCallErrorOrigin {
+    Backend,
+    Transport,
+    Protocol,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MessageCallError {
+    pub ck_rv: CkRv,
+    pub origin: MessageCallErrorOrigin,
+}
+
+impl MessageCallError {
+    pub(crate) const fn backend(ck_rv: CkRv) -> Self {
+        Self { ck_rv, origin: MessageCallErrorOrigin::Backend }
+    }
+
+    pub(crate) const fn transport(ck_rv: CkRv) -> Self {
+        Self { ck_rv, origin: MessageCallErrorOrigin::Transport }
+    }
+
+    pub(crate) const fn protocol() -> Self {
+        Self { ck_rv: CkRv::FUNCTION_NOT_SUPPORTED, origin: MessageCallErrorOrigin::Protocol }
+    }
+}
+
 /// Hook fired whenever a gRPC **transport** failure is mapped to a CK_RV
 /// (see [`grpc_status_to_ck_rv_kind`]). The shim registers this so it can
 /// mark its cached channel for reconnect *only* on genuine transport

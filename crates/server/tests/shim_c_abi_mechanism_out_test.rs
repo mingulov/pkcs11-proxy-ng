@@ -12,10 +12,6 @@
 //! Encrypt/Decrypt stack structs and the separate empty-only Sign/Verify
 //! pointer-class contract.
 
-// CK_MECHANISM_TYPE is u64 on LP64 but u32 on Windows LLP64/ILP32, so the
-// `as u64` casts below are live on some targets and vacuous on others.
-#![allow(clippy::unnecessary_cast)]
-
 mod common_3x;
 
 use std::mem;
@@ -24,7 +20,7 @@ use std::sync::{Arc, OnceLock};
 
 use cryptoki_sys::*;
 use libloading::{Library, Symbol};
-use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
+use pkcs11_proxy_ng_backend::MockBackend;
 use pkcs11_proxy_ng_proto::convert::message_params::MessageParameter;
 use pkcs11_proxy_ng_types::{CkMechanismParams, CkMechanismType, CkSlotId, GcmParams};
 use tokio::sync::Mutex;
@@ -962,10 +958,8 @@ async fn loaded_shim_message_begin_next_round_trips_c_stack_params() {
 
     const CKM_SYNTHETIC_MESSAGE: CK_MECHANISM_TYPE = CKM_AES_GCM;
 
-    let backend = Arc::new(MockBackend::new(
-        vec![CkSlotId(0)],
-        vec![CkMechanismType(CKM_SYNTHETIC_MESSAGE as u64)],
-    ));
+    let backend =
+        Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType(CKM_SYNTHETIC_MESSAGE)]));
     let server_backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = backend.clone();
     let (endpoint, _shutdown) = common_3x::mock_daemon(server_backend).await;
     let _endpoint_guard = EnvRestore::set("PKCS11_PROXY_ENDPOINT", &endpoint);
@@ -1306,10 +1300,14 @@ async fn loaded_shim_message_begin_next_round_trips_c_stack_params() {
                     init_calls + 1,
                     "{direction} Init {class} reaches the backend exactly once",
                 );
-                let (p_parameter, ul_parameter_len) =
-                    (mechanism.pParameter, mechanism.ulParameterLen);
-                assert_eq!(p_parameter, parameter, "{direction} Init {class} pointer echo");
-                assert_eq!(ul_parameter_len, parameter_len, "{direction} Init {class} length echo",);
+                assert_eq!(
+                    mechanism.pParameter, parameter,
+                    "{direction} Init {class} pointer echo"
+                );
+                assert_eq!(
+                    mechanism.ulParameterLen, parameter_len,
+                    "{direction} Init {class} length echo",
+                );
 
                 let input = [0x31_u8];
                 let mut output = [0_u8];
@@ -1550,8 +1548,7 @@ async fn loaded_shim_sign_verify_message_preserves_empty_parameter_classes_once_
         return;
     };
 
-    let backend =
-        Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType(CKM_AES_GCM as u64)]));
+    let backend = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType(CKM_AES_GCM)]));
     let server_backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = backend.clone();
     let (endpoint, _shutdown) = common_3x::mock_daemon(server_backend).await;
     let _endpoint_guard = EnvRestore::set("PKCS11_PROXY_ENDPOINT", &endpoint);
@@ -1568,7 +1565,6 @@ async fn loaded_shim_sign_verify_message_preserves_empty_parameter_classes_once_
         let functions = &*((*interface).pFunctionList as *const CK_FUNCTION_LIST_3_2);
         let c_initialize = functions.C_Initialize.expect("C_Initialize");
         let c_finalize = functions.C_Finalize.expect("C_Finalize");
-        let _finalize_on_drop = FinalizeOnDrop(c_finalize);
         let c_get_slot_list = functions.C_GetSlotList.expect("C_GetSlotList");
         let c_open_session = functions.C_OpenSession.expect("C_OpenSession");
         let c_close_session = functions.C_CloseSession.expect("C_CloseSession");

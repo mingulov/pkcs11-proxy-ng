@@ -1,4 +1,3 @@
-use crate::server::slot_map::{BackendSlotId, VirtualSlotId};
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -11,7 +10,9 @@ use tonic::Status;
 use pkcs11_proxy_ng_types::*;
 
 use super::super::auth::identity::AuthenticatedIdentity;
-use super::super::context_manager::{ClientContextId, ContextManager, ObjectMetadata};
+use super::super::context_manager::{
+    ClientContextId, ContextManager, ObjectMetadata, OperationGuard,
+};
 use super::super::handle_map::{BackendHandle, VirtualHandle};
 use super::HandlerContext;
 
@@ -20,6 +21,24 @@ static BACKEND_TIMEOUT: OnceLock<Duration> = OnceLock::new();
 static MAX_BACKEND_CALLS: OnceLock<usize> = OnceLock::new();
 static LOGIN_LOCK_TIMEOUT: OnceLock<Duration> = OnceLock::new();
 static HEALTH_EVENT_TX: OnceLock<mpsc::Sender<BackendHealthEvent>> = OnceLock::new();
+
+tokio::task_local! {
+    static CONTEXT_OPERATION_GUARD: Option<OperationGuard>;
+}
+
+/// Scope one already-admitted context operation around a service handler.
+/// Backend tasks clone the same guard, so a timeout cannot make the context
+/// reapable while its blocking provider call is still running.
+pub(super) async fn scope_context_operation<T, F>(guard: Option<OperationGuard>, future: F) -> T
+where
+    F: Future<Output = T>,
+{
+    CONTEXT_OPERATION_GUARD.scope(guard, future).await
+}
+
+pub(super) fn current_context_operation_guard() -> Option<OperationGuard> {
+    CONTEXT_OPERATION_GUARD.try_with(|guard| guard.clone()).ok().flatten()
+}
 /// Tracks whether the LAST sent health event was `Success`. Initialized
 /// to `true` because the health-gate task assumes the daemon starts in
 /// `SERVING`. Used by [`report_backend_outcome`] to suppress
@@ -182,6 +201,35 @@ where
     .await
 }
 
+/// Testable variant of [`spawn_backend`] with an explicit timeout.  It uses
+/// the same breaker/completion machinery; production callers use the
+/// configured timeout through `spawn_backend`.
+pub(super) async fn spawn_backend_with_timeout<T, F>(
+    timeout: Duration,
+    operation: F,
+) -> Result<CkResult<T>, Status>
+where
+    T: Send + 'static,
+    F: FnOnce() -> CkResult<T> + Send + 'static,
+{
+    spawn_backend_core(&IN_FLIGHT, &STUCK_CALLS, timeout, max_concurrent_backend_calls(), operation)
+        .await
+}
+
+pub(super) async fn spawn_backend_with_optional_timeout<T, F>(
+    timeout: Option<Duration>,
+    operation: F,
+) -> Result<CkResult<T>, Status>
+where
+    T: Send + 'static,
+    F: FnOnce() -> CkResult<T> + Send + 'static,
+{
+    match timeout {
+        Some(timeout) => spawn_backend_with_timeout(timeout, operation).await,
+        None => spawn_backend(operation).await,
+    }
+}
+
 /// Timeout/breaker core of [`spawn_backend`], parameterized for tests.
 ///
 /// The in-flight guard travels INTO the blocking task and drops when the
@@ -228,6 +276,7 @@ where
         // exactly when the FFI returns (even if the caller timed out or
         // the gRPC future was cancelled long before).
         let _guard = guard;
+        let _context_operation_guard = context_operation_guard;
         let result = operation();
         if timed_out_task.load(Ordering::Acquire) {
             let remaining = stuck_gauge.fetch_sub(1, Ordering::Relaxed) - 1;

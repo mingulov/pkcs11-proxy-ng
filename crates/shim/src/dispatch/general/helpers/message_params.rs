@@ -3,307 +3,706 @@
 //! back (incl. the bits-derived-length wild-read guards).
 
 use cryptoki_sys::*;
+use pkcs11_proxy_ng_proto::convert::message_params::{
+    CcmMessageParams, GcmMessageParams, MessageParameter, MessageParameterShape,
+    Salsa20ChaCha20Poly1305MessageParams,
+};
+use pkcs11_proxy_ng_types::{CkResult, CkRv};
 
 use super::*;
 
-/// Read a `CK_GCM_MESSAGE_PARAMS` C struct, dereferencing its embedded
-/// pointers (`pIv`, `pTag`) to extract the actual IV/tag data.
-///
-/// # Safety
-///
-/// `p_parameter` must point to a valid `CK_GCM_MESSAGE_PARAMS` struct.
-/// `pIv` must be valid for `ulIvLen` bytes only when `pIv` is non-null
-/// and `ulIvLen <= MAX_SERIALIZABLE_BYTES`; otherwise the IV field is
-/// read as empty without dereferencing the pointer.  `pTag` must be
-/// valid for `ulTagBits/8` bytes only when `pTag` is non-null and the
-/// derived byte count is `<= MAX_SERIALIZABLE_BYTES`; otherwise the tag
-/// field is read as empty.
-pub(crate) unsafe fn read_gcm_message_params(
-    p_parameter: *const std::ffi::c_void,
-) -> pkcs11_proxy_ng_proto::convert::message_params::GcmMessageParams {
-    let p = unsafe { &*(p_parameter as *const CK_GCM_MESSAGE_PARAMS) };
-    let iv = if !p.pIv.is_null() && p.ulIvLen > 0 && (p.ulIvLen as usize) <= MAX_SERIALIZABLE_BYTES
-    {
-        unsafe { std::slice::from_raw_parts(p.pIv, p.ulIvLen as usize) }.to_vec()
-    } else {
-        Vec::new()
-    };
-    // Compute in u64 and reject at the cap (`<`, not `<=`): on a 32-bit CK_ULONG
-    // target a near-u32::MAX bit count's byte length sits AT MAX_SERIALIZABLE_BYTES,
-    // so `<=` would wild-read a dangling/short pTag at the boundary (i686 SIGSEGV).
-    let tag_bytes = (p.ulTagBits as u64).div_ceil(8);
-    let tag = if !p.pTag.is_null() && tag_bytes > 0 && tag_bytes < MAX_SERIALIZABLE_BYTES as u64 {
-        unsafe { std::slice::from_raw_parts(p.pTag, tag_bytes as usize) }.to_vec()
-    } else {
-        Vec::new()
-    };
-    pkcs11_proxy_ng_proto::convert::message_params::GcmMessageParams {
-        iv,
-        iv_fixed_bits: p.ulIvFixedBits as u64,
-        iv_generator: p.ivGenerator as u64,
-        tag,
-        tag_bits: p.ulTagBits as u64,
+// cryptoki-sys mirrors the platform ABI: LP64 Linux uses a 48-byte GCM
+// message envelope, i686 ILP32 uses 24, and Windows x64 LLP64 is packed to 32.
+// Structured transport must never reinterpret one of these sizes as another.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const _: [(); 48] = [(); std::mem::size_of::<CK_GCM_MESSAGE_PARAMS>()];
+#[cfg(all(target_os = "linux", target_arch = "x86"))]
+const _: [(); 24] = [(); std::mem::size_of::<CK_GCM_MESSAGE_PARAMS>()];
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+const _: [(); 32] = [(); std::mem::size_of::<CK_GCM_MESSAGE_PARAMS>()];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MessageParameterDirection {
+    Encrypt,
+    Decrypt,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MessageParameterStage {
+    Init,
+    OneShot,
+    Begin,
+    Next { final_part: bool },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CallerRangeRole {
+    MechanismOuter,
+    ParameterOuter,
+    EmbeddedParameter,
+    AssociatedData,
+    MainInput,
+    MainOutput,
+    OutputLength,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CallerRange {
+    start: usize,
+    end: usize,
+    role: CallerRangeRole,
+}
+
+/// Additional caller buffers that participate in one message operation.
+/// The outer parameter and its embedded buffers are supplied by the shape-
+/// bound reader itself; this snapshot adds the surrounding C call's ranges.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MessageCallMemory {
+    mechanism_outer: *const u8,
+    associated_data: *const u8,
+    associated_data_len: u64,
+    main_input: *const u8,
+    main_input_len: u64,
+    main_output: *mut u8,
+    main_output_len: u64,
+    output_length: CK_ULONG_PTR,
+}
+
+impl MessageCallMemory {
+    pub(crate) const fn none() -> Self {
+        Self {
+            mechanism_outer: std::ptr::null(),
+            associated_data: std::ptr::null(),
+            associated_data_len: 0,
+            main_input: std::ptr::null(),
+            main_input_len: 0,
+            main_output: std::ptr::null_mut(),
+            main_output_len: 0,
+            output_length: std::ptr::null_mut(),
+        }
+    }
+
+    pub(crate) const fn init(mechanism_outer: CK_MECHANISM_PTR) -> Self {
+        Self { mechanism_outer: mechanism_outer.cast(), ..Self::none() }
+    }
+
+    pub(crate) const fn begin(associated_data: *const u8, associated_data_len: CK_ULONG) -> Self {
+        Self { associated_data, associated_data_len: associated_data_len as u64, ..Self::none() }
+    }
+
+    pub(crate) const fn output(
+        associated_data: *const u8,
+        associated_data_len: CK_ULONG,
+        main_input: *const u8,
+        main_input_len: CK_ULONG,
+        main_output: *mut u8,
+        main_output_len: u64,
+        output_length: CK_ULONG_PTR,
+    ) -> Self {
+        Self {
+            associated_data,
+            associated_data_len: associated_data_len as u64,
+            main_input,
+            main_input_len: main_input_len as u64,
+            main_output,
+            main_output_len,
+            output_length,
+            ..Self::none()
+        }
     }
 }
 
-/// Read a `CK_CCM_MESSAGE_PARAMS` C struct, dereferencing embedded pointers.
-///
-/// # Safety
-///
-/// `p_parameter` must point to a valid `CK_CCM_MESSAGE_PARAMS` struct.
-/// `pNonce` must be valid for `ulNonceLen` bytes only when `pNonce` is
-/// non-null and `ulNonceLen <= MAX_SERIALIZABLE_BYTES`; otherwise the
-/// nonce field is read as empty.  `pMAC` must be valid for `ulMACLen`
-/// bytes only when `pMAC` is non-null and `ulMACLen <= MAX_SERIALIZABLE_BYTES`;
-/// otherwise the mac field is read as empty.
-pub(crate) unsafe fn read_ccm_message_params(
-    p_parameter: *const std::ffi::c_void,
-) -> pkcs11_proxy_ng_proto::convert::message_params::CcmMessageParams {
-    let p = unsafe { &*(p_parameter as *const CK_CCM_MESSAGE_PARAMS) };
-    let nonce = if !p.pNonce.is_null()
-        && p.ulNonceLen > 0
-        && (p.ulNonceLen as usize) <= MAX_SERIALIZABLE_BYTES
-    {
-        unsafe { std::slice::from_raw_parts(p.pNonce, p.ulNonceLen as usize) }.to_vec()
-    } else {
-        Vec::new()
-    };
-    let mac =
-        if !p.pMAC.is_null() && p.ulMACLen > 0 && (p.ulMACLen as usize) <= MAX_SERIALIZABLE_BYTES {
-            unsafe { std::slice::from_raw_parts(p.pMAC, p.ulMACLen as usize) }.to_vec()
-        } else {
-            Vec::new()
-        };
-    pkcs11_proxy_ng_proto::convert::message_params::CcmMessageParams {
-        data_len: p.ulDataLen as u64,
-        nonce,
-        nonce_fixed_bits: p.ulNonceFixedBits as u64,
-        nonce_generator: p.nonceGenerator as u64,
-        mac,
-        mac_len: p.ulMACLen as u64,
-    }
-}
-
-/// Read a `CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS` C struct.
-///
-/// # Safety
-///
-/// `p_parameter` must point to a valid struct.  `pNonce` must be valid
-/// for `ulNonceLen` bytes only when `pNonce` is non-null and
-/// `ulNonceLen <= MAX_SERIALIZABLE_BYTES`; otherwise the nonce field is
-/// read as empty.  `pTag` must be valid for 16 bytes when non-null
-/// (Poly1305 tag is a compile-time constant 16 bytes; no length guard
-/// is required).
-pub(crate) unsafe fn read_salsa_chacha_message_params(
-    p_parameter: *const std::ffi::c_void,
-) -> pkcs11_proxy_ng_proto::convert::message_params::Salsa20ChaCha20Poly1305MessageParams {
-    let p = unsafe { &*(p_parameter as *const CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS) };
-    let nonce = if !p.pNonce.is_null()
-        && p.ulNonceLen > 0
-        && (p.ulNonceLen as usize) <= MAX_SERIALIZABLE_BYTES
-    {
-        unsafe { std::slice::from_raw_parts(p.pNonce, p.ulNonceLen as usize) }.to_vec()
-    } else {
-        Vec::new()
-    };
-    // Poly1305 tag is always 16 bytes (compile-time constant, no length guard needed)
-    let tag = if !p.pTag.is_null() {
-        unsafe { std::slice::from_raw_parts(p.pTag, 16) }.to_vec()
-    } else {
-        Vec::new()
-    };
-    pkcs11_proxy_ng_proto::convert::message_params::Salsa20ChaCha20Poly1305MessageParams {
-        nonce,
-        tag,
-    }
-}
-
-/// Read the message parameter C struct based on its size, returning
-/// a structured `MessageParameter` for safe serialization over gRPC.
-///
-/// Size detection (x86_64): GCM=48, CCM=56, Salsa/ChaCha=24.
-/// Falls back to `MessageParameter::Raw` for unknown sizes.
-///
-/// # Safety
-///
-/// `p_parameter` must point to a valid message parameter struct of
-/// the appropriate type for the size indicated by `ul_parameter_len`.
-pub(crate) unsafe fn read_message_parameter(
-    p_parameter: *const std::ffi::c_void,
-    ul_parameter_len: CK_ULONG,
-) -> pkcs11_proxy_ng_proto::convert::message_params::MessageParameter {
-    use pkcs11_proxy_ng_proto::convert::message_params::MessageParameter;
-    let len = ul_parameter_len as usize;
-    let gcm_size = std::mem::size_of::<CK_GCM_MESSAGE_PARAMS>();
-    let ccm_size = std::mem::size_of::<CK_CCM_MESSAGE_PARAMS>();
-    let salsa_size = std::mem::size_of::<CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS>();
-
-    if len == gcm_size {
-        MessageParameter::GcmMessage(unsafe { read_gcm_message_params(p_parameter) })
-    } else if len == ccm_size {
-        MessageParameter::CcmMessage(unsafe { read_ccm_message_params(p_parameter) })
-    } else if len == salsa_size {
-        MessageParameter::SalaChacha(unsafe { read_salsa_chacha_message_params(p_parameter) })
-    } else {
-        // Unknown struct — send raw bytes (will likely crash the daemon
-        // if it contains embedded pointers, but we can't parse what we
-        // don't recognise).
-        let raw = unsafe { std::slice::from_raw_parts(p_parameter as *const u8, len) }.to_vec();
-        MessageParameter::Raw(raw)
-    }
-}
-
-/// Safely read an optional message parameter after validating the outer
-/// pointer/length pair. This prevents undefined behavior for NULL/0 and
-/// NULL/non-zero inputs before the structured readers dereference C pointers.
-///
-/// # Safety
-///
-/// If `p_parameter` is non-null and `ul_parameter_len > 0`, it must point to
-/// a readable message parameter object or raw buffer of at least
-/// `ul_parameter_len` bytes.
-pub(crate) unsafe fn try_read_message_parameter(
-    p_parameter: *const std::ffi::c_void,
-    ul_parameter_len: CK_ULONG,
-) -> pkcs11_proxy_ng_types::CkResult<
-    Option<pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
-> {
-    if p_parameter.is_null() {
-        return if ul_parameter_len == 0 {
-            Ok(None)
-        } else {
-            Err(pkcs11_proxy_ng_types::CkRv::ARGUMENTS_BAD)
-        };
-    }
-
-    if ul_parameter_len == 0 {
+fn checked_caller_range(
+    pointer: *const u8,
+    byte_len: u64,
+    role: CallerRangeRole,
+) -> CkResult<Option<CallerRange>> {
+    if pointer.is_null() || byte_len == 0 {
         return Ok(None);
     }
-
-    if (ul_parameter_len as usize) > MAX_MECHANISM_PARAM_STRUCT_LEN {
-        return Err(pkcs11_proxy_ng_types::CkRv::MECHANISM_PARAM_INVALID);
+    let len = usize::try_from(byte_len).map_err(|_| CkRv::MECHANISM_PARAM_INVALID)?;
+    if len > isize::MAX as usize {
+        return Err(CkRv::MECHANISM_PARAM_INVALID);
     }
-
-    Ok(Some(unsafe { read_message_parameter(p_parameter, ul_parameter_len) }))
+    let start = pointer as usize;
+    let end = start.checked_add(len).ok_or(CkRv::MECHANISM_PARAM_INVALID)?;
+    Ok(Some(CallerRange { start, end, role }))
 }
 
-/// Write modified GCM message parameters back to the caller's C struct.
-///
-/// After the backend call, the IV may have been updated by the IV generator
-/// and the tag buffer contains the authentication tag (for encrypt).
+fn ranges_overlap(left: CallerRange, right: CallerRange) -> bool {
+    left.start < right.end && right.start < left.end
+}
+
+fn allowed_in_place_pair(left: CallerRange, right: CallerRange) -> bool {
+    matches!(
+        (left.role, right.role),
+        (CallerRangeRole::MainInput, CallerRangeRole::MainOutput)
+            | (CallerRangeRole::MainOutput, CallerRangeRole::MainInput)
+    ) && left.start == right.start
+}
+
+fn validate_message_caller_ranges(
+    memory: MessageCallMemory,
+    parameter_outer: *const std::ffi::c_void,
+    parameter_outer_len: u64,
+    embedded: &[(*const u8, u64)],
+) -> CkResult<()> {
+    let mut ranges = Vec::with_capacity(7 + embedded.len());
+    let candidates = [
+        (
+            memory.mechanism_outer,
+            std::mem::size_of::<CK_MECHANISM>() as u64,
+            CallerRangeRole::MechanismOuter,
+        ),
+        (parameter_outer.cast(), parameter_outer_len, CallerRangeRole::ParameterOuter),
+        (memory.associated_data, memory.associated_data_len, CallerRangeRole::AssociatedData),
+        (memory.main_input, memory.main_input_len, CallerRangeRole::MainInput),
+        (memory.main_output.cast_const(), memory.main_output_len, CallerRangeRole::MainOutput),
+        (
+            memory.output_length.cast_const().cast(),
+            if memory.output_length.is_null() { 0 } else { std::mem::size_of::<CK_ULONG>() as u64 },
+            CallerRangeRole::OutputLength,
+        ),
+    ];
+    for (pointer, len, role) in candidates {
+        if let Some(range) = checked_caller_range(pointer, len, role)? {
+            ranges.push(range);
+        }
+    }
+    for &(pointer, len) in embedded {
+        if let Some(range) = checked_caller_range(pointer, len, CallerRangeRole::EmbeddedParameter)?
+        {
+            ranges.push(range);
+        }
+    }
+
+    for (index, left) in ranges.iter().copied().enumerate() {
+        for right in ranges.iter().copied().skip(index + 1) {
+            if ranges_overlap(left, right) && !allowed_in_place_pair(left, right) {
+                return Err(CkRv::MECHANISM_PARAM_INVALID);
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_message_mechanism_outer(p_mechanism: CK_MECHANISM_PTR) -> CkResult<()> {
+    checked_caller_range(
+        p_mechanism.cast(),
+        std::mem::size_of::<CK_MECHANISM>() as u64,
+        CallerRangeRole::MechanismOuter,
+    )?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MessageParameterWriteback {
+    Gcm { iv: *mut CK_BYTE, iv_len: usize, tag: *mut CK_BYTE, tag_len: usize },
+    Ccm { nonce: *mut CK_BYTE, nonce_len: usize, mac: *mut CK_BYTE, mac_len: usize },
+    SalsaChacha { tag: *mut CK_BYTE, tag_len: usize },
+}
+
+/// One immutable caller snapshot used for both request serialization and
+/// eventual writeback. Embedded output pointers are copied from the unaligned
+/// outer struct exactly once, before the RPC.
+#[derive(Debug, Clone)]
+pub(crate) struct MessageParameterCall {
+    parameter: Option<MessageParameter>,
+    writeback: Option<MessageParameterWriteback>,
+    direction: MessageParameterDirection,
+    stage: MessageParameterStage,
+}
+
+impl MessageParameterCall {
+    pub(crate) fn parameter(&self) -> Option<&MessageParameter> {
+        self.parameter.as_ref()
+    }
+
+    pub(crate) fn into_parameter(self) -> Option<MessageParameter> {
+        self.parameter
+    }
+}
+
+pub(crate) fn empty_message_parameter_call(
+    direction: MessageParameterDirection,
+    stage: MessageParameterStage,
+) -> MessageParameterCall {
+    MessageParameterCall { parameter: None, writeback: None, direction, stage }
+}
+
+impl MessageParameterStage {
+    fn reads_authentication_input(self) -> bool {
+        matches!(self, Self::OneShot | Self::Next { final_part: true })
+    }
+}
+
+unsafe fn embedded_bytes(
+    pointer: *mut CK_BYTE,
+    byte_len: u64,
+    read_input: bool,
+) -> CkResult<(Vec<u8>, Option<u64>)> {
+    if pointer.is_null() {
+        return Ok((Vec::new(), Some(byte_len)));
+    }
+    let len = usize::try_from(byte_len).map_err(|_| CkRv::MECHANISM_PARAM_INVALID)?;
+    if len > MAX_SERIALIZABLE_BYTES || len > isize::MAX as usize {
+        return Err(CkRv::MECHANISM_PARAM_INVALID);
+    }
+    checked_caller_range(pointer.cast_const(), byte_len, CallerRangeRole::EmbeddedParameter)?;
+    if !read_input {
+        return Ok((vec![0; len], None));
+    }
+    if len == 0 {
+        return Ok((Vec::new(), None));
+    }
+    Ok((unsafe { std::slice::from_raw_parts(pointer.cast_const(), len) }.to_vec(), None))
+}
+
+fn generating_prefix_len(generator: u64, fixed_bits: u64, total_len: u64) -> CkResult<u64> {
+    if generator > CKG_GENERATE_COUNTER_XOR as u64 || fixed_bits.div_ceil(8) > total_len {
+        return Err(CkRv::MECHANISM_PARAM_INVALID);
+    }
+    if matches!(generator, x if x == CKG_NO_GENERATE as u64 || x == CKG_GENERATE_COUNTER_XOR as u64)
+    {
+        Ok(total_len)
+    } else {
+        Ok(fixed_bits.div_ceil(8))
+    }
+}
+
+unsafe fn generated_input_bytes(
+    pointer: *mut CK_BYTE,
+    total_len: u64,
+    fixed_bits: u64,
+    generator: u64,
+    copy_generated_value: bool,
+) -> CkResult<(Vec<u8>, Option<u64>)> {
+    if pointer.is_null() {
+        return Ok((Vec::new(), Some(total_len)));
+    }
+    let total = usize::try_from(total_len).map_err(|_| CkRv::MECHANISM_PARAM_INVALID)?;
+    if total > MAX_SERIALIZABLE_BYTES || total > isize::MAX as usize {
+        return Err(CkRv::MECHANISM_PARAM_INVALID);
+    }
+    checked_caller_range(pointer.cast_const(), total_len, CallerRangeRole::EmbeddedParameter)?;
+    let prefix = if copy_generated_value {
+        total_len
+    } else {
+        generating_prefix_len(generator, fixed_bits, total_len)?
+    };
+    let prefix = usize::try_from(prefix).map_err(|_| CkRv::MECHANISM_PARAM_INVALID)?;
+    let mut result = vec![0; total];
+    if prefix > 0 {
+        let source = unsafe { std::slice::from_raw_parts(pointer.cast_const(), prefix) };
+        result[..prefix].copy_from_slice(source);
+    }
+    if !copy_generated_value
+        && !matches!(generator, x if x == CKG_NO_GENERATE as u64 || x == CKG_GENERATE_COUNTER_XOR as u64)
+        && !fixed_bits.is_multiple_of(8)
+        && prefix > 0
+    {
+        result[prefix - 1] &= 0xff << (8 - (fixed_bits % 8));
+    }
+    Ok((result, None))
+}
+
+/// Shape-bound reader with the surrounding C call's memory ranges included
+/// in the pre-dereference alias check.
 ///
 /// # Safety
 ///
-/// `p_parameter` must point to the original `CK_GCM_MESSAGE_PARAMS`.
-pub(crate) unsafe fn write_gcm_message_params_back(
-    result: &pkcs11_proxy_ng_proto::convert::message_params::GcmMessageParams,
-    p_parameter: *mut std::ffi::c_void,
-) {
-    let p = unsafe { &mut *(p_parameter as *mut CK_GCM_MESSAGE_PARAMS) };
-    if !p.pIv.is_null() {
-        let copy_len = result.iv.len().min(p.ulIvLen as usize);
-        if copy_len > 0 {
-            unsafe {
-                std::ptr::copy_nonoverlapping(result.iv.as_ptr(), p.pIv, copy_len);
-            }
-        }
-    }
-    if !p.pTag.is_null() {
-        let tag_bytes = (p.ulTagBits as usize).div_ceil(8);
-        let copy_len = result.tag.len().min(tag_bytes);
-        if copy_len > 0 {
-            unsafe {
-                std::ptr::copy_nonoverlapping(result.tag.as_ptr(), p.pTag, copy_len);
-            }
-        }
-    }
-}
-
-/// Write modified CCM message parameters back to the caller's C struct.
-///
-/// # Safety
-///
-/// `p_parameter` must point to the original `CK_CCM_MESSAGE_PARAMS`.
-pub(crate) unsafe fn write_ccm_message_params_back(
-    result: &pkcs11_proxy_ng_proto::convert::message_params::CcmMessageParams,
-    p_parameter: *mut std::ffi::c_void,
-) {
-    let p = unsafe { &mut *(p_parameter as *mut CK_CCM_MESSAGE_PARAMS) };
-    if !p.pNonce.is_null() {
-        let copy_len = result.nonce.len().min(p.ulNonceLen as usize);
-        if copy_len > 0 {
-            unsafe {
-                std::ptr::copy_nonoverlapping(result.nonce.as_ptr(), p.pNonce, copy_len);
-            }
-        }
-    }
-    if !p.pMAC.is_null() {
-        let copy_len = result.mac.len().min(p.ulMACLen as usize);
-        if copy_len > 0 {
-            unsafe {
-                std::ptr::copy_nonoverlapping(result.mac.as_ptr(), p.pMAC, copy_len);
-            }
-        }
-    }
-}
-
-/// Write modified Salsa20/ChaCha20-Poly1305 message parameters back.
-///
-/// # Safety
-///
-/// `p_parameter` must point to the original struct.
-pub(crate) unsafe fn write_salsa_chacha_message_params_back(
-    result: &pkcs11_proxy_ng_proto::convert::message_params::Salsa20ChaCha20Poly1305MessageParams,
-    p_parameter: *mut std::ffi::c_void,
-) {
-    let p = unsafe { &mut *(p_parameter as *mut CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS) };
-    if !p.pNonce.is_null() {
-        let copy_len = result.nonce.len().min(p.ulNonceLen as usize);
-        if copy_len > 0 {
-            unsafe {
-                std::ptr::copy_nonoverlapping(result.nonce.as_ptr(), p.pNonce, copy_len);
-            }
-        }
-    }
-    if !p.pTag.is_null() {
-        let copy_len = result.tag.len().min(16); // Poly1305 tag is always 16 bytes
-        if copy_len > 0 {
-            unsafe {
-                std::ptr::copy_nonoverlapping(result.tag.as_ptr(), p.pTag, copy_len);
-            }
-        }
-    }
-}
-
-/// Write a `MessageParameter` result back to the caller's C struct.
-///
-/// # Safety
-///
-/// `p_parameter` must point to the original message parameter C struct.
-pub(crate) unsafe fn write_message_parameter_back(
-    result: &pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
-    p_parameter: *mut std::ffi::c_void,
+/// A non-null, positive-length `p_parameter` must designate the exact outer
+/// struct selected by `shape`; every non-null embedded pointer and non-null
+/// pointer captured by `memory` must satisfy its PKCS#11 caller contract.
+pub(crate) unsafe fn read_message_parameter_call_for_shape_with_memory(
+    p_parameter: *const std::ffi::c_void,
     ul_parameter_len: CK_ULONG,
-) {
-    use pkcs11_proxy_ng_proto::convert::message_params::MessageParameter;
-    match result {
-        MessageParameter::GcmMessage(gcm) => unsafe {
-            write_gcm_message_params_back(gcm, p_parameter);
-        },
-        MessageParameter::CcmMessage(ccm) => unsafe {
-            write_ccm_message_params_back(ccm, p_parameter);
-        },
-        MessageParameter::SalaChacha(sc) => unsafe {
-            write_salsa_chacha_message_params_back(sc, p_parameter);
-        },
-        MessageParameter::Raw(data) => {
-            // Write raw bytes back (same as the old path)
-            let copy_len = data.len().min(ul_parameter_len as usize);
-            if copy_len > 0 && !p_parameter.is_null() {
-                unsafe {
-                    std::ptr::copy_nonoverlapping(data.as_ptr(), p_parameter as *mut u8, copy_len);
-                }
+    shape: MessageParameterShape,
+    direction: MessageParameterDirection,
+    stage: MessageParameterStage,
+    memory: MessageCallMemory,
+) -> CkResult<MessageParameterCall> {
+    if p_parameter.is_null() || ul_parameter_len == 0 {
+        validate_message_caller_ranges(memory, p_parameter, ul_parameter_len as u64, &[])?;
+        return Ok(MessageParameterCall { parameter: None, writeback: None, direction, stage });
+    }
+
+    let (parameter, writeback) = match shape {
+        MessageParameterShape::Unmodeled => return Err(CkRv::MECHANISM_PARAM_INVALID),
+        MessageParameterShape::Gcm => {
+            if ul_parameter_len as usize != std::mem::size_of::<CK_GCM_MESSAGE_PARAMS>() {
+                return Err(CkRv::MECHANISM_PARAM_INVALID);
+            }
+            checked_caller_range(
+                p_parameter.cast(),
+                std::mem::size_of::<CK_GCM_MESSAGE_PARAMS>() as u64,
+                CallerRangeRole::ParameterOuter,
+            )?;
+            let outer =
+                unsafe { std::ptr::read_unaligned(p_parameter.cast::<CK_GCM_MESSAGE_PARAMS>()) };
+            let iv_len = outer.ulIvLen as u64;
+            let tag_bits = outer.ulTagBits as u64;
+            let tag_len = tag_bits.div_ceil(8);
+            generating_prefix_len(outer.ivGenerator as u64, outer.ulIvFixedBits as u64, iv_len)?;
+            if tag_bits > 128 {
+                return Err(CkRv::MECHANISM_PARAM_INVALID);
+            }
+            validate_message_caller_ranges(
+                memory,
+                p_parameter,
+                ul_parameter_len as u64,
+                &[(outer.pIv.cast_const(), iv_len), (outer.pTag.cast_const(), tag_len)],
+            )?;
+            // Encrypt may ask the provider to generate the non-fixed suffix,
+            // so before Begin only the source-defined prefix is input.  For
+            // Decrypt the IV is entirely caller-supplied at every stage.
+            // After Begin, Encrypt Next also carries the generated full IV.
+            let copy_full_iv = direction == MessageParameterDirection::Decrypt
+                || matches!(stage, MessageParameterStage::Next { .. });
+            let (iv, iv_null_len) = unsafe {
+                generated_input_bytes(
+                    outer.pIv,
+                    iv_len,
+                    outer.ulIvFixedBits as u64,
+                    outer.ivGenerator as u64,
+                    copy_full_iv,
+                )
+            }?;
+            let read_tag = direction == MessageParameterDirection::Decrypt
+                && stage.reads_authentication_input();
+            let (tag, tag_null_len) = unsafe { embedded_bytes(outer.pTag, tag_len, read_tag) }?;
+            (
+                MessageParameter::GcmMessage(GcmMessageParams {
+                    iv,
+                    iv_null_len,
+                    iv_fixed_bits: outer.ulIvFixedBits as u64,
+                    iv_generator: outer.ivGenerator as u64,
+                    tag,
+                    tag_null_len,
+                    tag_bits,
+                }),
+                MessageParameterWriteback::Gcm {
+                    iv: outer.pIv,
+                    iv_len: usize::try_from(iv_len).map_err(|_| CkRv::MECHANISM_PARAM_INVALID)?,
+                    tag: outer.pTag,
+                    tag_len: usize::try_from(tag_len).map_err(|_| CkRv::MECHANISM_PARAM_INVALID)?,
+                },
+            )
+        }
+        MessageParameterShape::Ccm => {
+            if ul_parameter_len as usize != std::mem::size_of::<CK_CCM_MESSAGE_PARAMS>() {
+                return Err(CkRv::MECHANISM_PARAM_INVALID);
+            }
+            checked_caller_range(
+                p_parameter.cast(),
+                std::mem::size_of::<CK_CCM_MESSAGE_PARAMS>() as u64,
+                CallerRangeRole::ParameterOuter,
+            )?;
+            let outer =
+                unsafe { std::ptr::read_unaligned(p_parameter.cast::<CK_CCM_MESSAGE_PARAMS>()) };
+            let nonce_len = outer.ulNonceLen as u64;
+            let mac_len = outer.ulMACLen as u64;
+            if !(7..=13).contains(&nonce_len) || !matches!(mac_len, 4 | 6 | 8 | 10 | 12 | 14 | 16) {
+                return Err(CkRv::MECHANISM_PARAM_INVALID);
+            }
+            generating_prefix_len(
+                outer.nonceGenerator as u64,
+                outer.ulNonceFixedBits as u64,
+                nonce_len,
+            )?;
+            validate_message_caller_ranges(
+                memory,
+                p_parameter,
+                ul_parameter_len as u64,
+                &[(outer.pNonce.cast_const(), nonce_len), (outer.pMAC.cast_const(), mac_len)],
+            )?;
+            // Decrypt nonces are always complete inputs.  Encrypt copies only
+            // the fixed prefix until Begin has generated the remaining bytes;
+            // every subsequent Next transports the complete generated nonce.
+            let copy_full_nonce = direction == MessageParameterDirection::Decrypt
+                || matches!(stage, MessageParameterStage::Next { .. });
+            let (nonce, nonce_null_len) = unsafe {
+                generated_input_bytes(
+                    outer.pNonce,
+                    nonce_len,
+                    outer.ulNonceFixedBits as u64,
+                    outer.nonceGenerator as u64,
+                    copy_full_nonce,
+                )
+            }?;
+            let read_mac = direction == MessageParameterDirection::Decrypt
+                && stage.reads_authentication_input();
+            let (mac, mac_null_len) = unsafe { embedded_bytes(outer.pMAC, mac_len, read_mac) }?;
+            (
+                MessageParameter::CcmMessage(CcmMessageParams {
+                    data_len: outer.ulDataLen as u64,
+                    nonce,
+                    nonce_null_len,
+                    nonce_fixed_bits: outer.ulNonceFixedBits as u64,
+                    nonce_generator: outer.nonceGenerator as u64,
+                    mac,
+                    mac_null_len,
+                    mac_len,
+                }),
+                MessageParameterWriteback::Ccm {
+                    nonce: outer.pNonce,
+                    nonce_len: usize::try_from(nonce_len)
+                        .map_err(|_| CkRv::MECHANISM_PARAM_INVALID)?,
+                    mac: outer.pMAC,
+                    mac_len: usize::try_from(mac_len).map_err(|_| CkRv::MECHANISM_PARAM_INVALID)?,
+                },
+            )
+        }
+        MessageParameterShape::SalsaChacha => {
+            if ul_parameter_len as usize
+                != std::mem::size_of::<CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS>()
+            {
+                return Err(CkRv::MECHANISM_PARAM_INVALID);
+            }
+            checked_caller_range(
+                p_parameter.cast(),
+                std::mem::size_of::<CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS>() as u64,
+                CallerRangeRole::ParameterOuter,
+            )?;
+            let outer = unsafe {
+                std::ptr::read_unaligned(
+                    p_parameter.cast::<CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS>(),
+                )
+            };
+            let nonce_bits = outer.ulNonceLen as u64;
+            if !matches!(nonce_bits, 64 | 96 | 192) {
+                return Err(CkRv::MECHANISM_PARAM_INVALID);
+            }
+            let nonce_len = nonce_bits.div_ceil(8);
+            validate_message_caller_ranges(
+                memory,
+                p_parameter,
+                ul_parameter_len as u64,
+                &[(outer.pNonce.cast_const(), nonce_len), (outer.pTag.cast_const(), 16)],
+            )?;
+            let (nonce, nonce_null_len) = unsafe { embedded_bytes(outer.pNonce, nonce_len, true) }?;
+            let read_tag = direction == MessageParameterDirection::Decrypt
+                && stage.reads_authentication_input();
+            let (tag, tag_null_len) = unsafe { embedded_bytes(outer.pTag, 16, read_tag) }?;
+            (
+                MessageParameter::SalaChacha(Salsa20ChaCha20Poly1305MessageParams {
+                    nonce,
+                    nonce_bits,
+                    nonce_null_len,
+                    tag,
+                    tag_null_len,
+                }),
+                MessageParameterWriteback::SalsaChacha { tag: outer.pTag, tag_len: 16 },
+            )
+        }
+    };
+    parameter.validate_structured_shape(shape)?;
+    Ok(MessageParameterCall {
+        parameter: Some(parameter),
+        writeback: Some(writeback),
+        direction,
+        stage,
+    })
+}
+
+fn parameter_result_matches_request(
+    result: &CkParameterRoundtripResult,
+    spec: &CkParameterRoundtripSpec,
+    expected_rv: CkRv,
+) -> bool {
+    result.ck_rv == expected_rv
+        && result.returned_len == spec.buffer_len
+        && match (spec.buffer_present, result.value.as_ref()) {
+            (true, Some(value)) => value.is_empty(),
+            (false, None) => true,
+            _ => false,
+        }
+}
+
+fn validate_exact_output_result(
+    result: &CkOutputBufferResult,
+    spec: &CkOutputBufferSpec,
+) -> CkResult<()> {
+    if spec.length_pointer_null {
+        return if result.returned_len == 0 && result.value.is_none() {
+            Ok(())
+        } else {
+            Err(CkRv::GENERAL_ERROR)
+        };
+    }
+    match result.ck_rv {
+        CkRv::OK if !spec.buffer_present => {
+            if result.value.is_none() {
+                Ok(())
+            } else {
+                Err(CkRv::GENERAL_ERROR)
             }
         }
+        CkRv::OK => {
+            let value = result.value.as_ref().ok_or(CkRv::GENERAL_ERROR)?;
+            if value.len() as u64 == result.returned_len && result.returned_len <= spec.buffer_len {
+                Ok(())
+            } else {
+                Err(CkRv::GENERAL_ERROR)
+            }
+        }
+        CkRv::BUFFER_TOO_SMALL if spec.buffer_present => {
+            if result.value.is_none() && result.returned_len > spec.buffer_len {
+                Ok(())
+            } else {
+                Err(CkRv::GENERAL_ERROR)
+            }
+        }
+        CkRv::BUFFER_TOO_SMALL => Err(CkRv::GENERAL_ERROR),
+        _ => Ok(()),
+    }
+}
+
+unsafe fn copy_message_bytes(target: *mut CK_BYTE, capacity: usize, value: &[u8]) {
+    if target.is_null() || value.is_empty() {
+        return;
+    }
+    debug_assert_eq!(capacity, value.len());
+    unsafe { std::ptr::copy_nonoverlapping(value.as_ptr(), target, value.len()) };
+}
+
+unsafe fn commit_message_parameter_writeback(
+    call: &MessageParameterCall,
+    response: &MessageParameter,
+) {
+    if call.direction != MessageParameterDirection::Encrypt {
+        return;
+    }
+    let write_generated =
+        matches!(call.stage, MessageParameterStage::OneShot | MessageParameterStage::Begin);
+    let write_auth = matches!(
+        call.stage,
+        MessageParameterStage::OneShot | MessageParameterStage::Next { final_part: true }
+    );
+
+    match (call.writeback, response) {
+        (
+            Some(MessageParameterWriteback::Gcm { iv, iv_len, tag, tag_len }),
+            MessageParameter::GcmMessage(result),
+        ) => {
+            if write_generated {
+                unsafe { copy_message_bytes(iv, iv_len, &result.iv) };
+            }
+            if write_auth {
+                unsafe { copy_message_bytes(tag, tag_len, &result.tag) };
+            }
+        }
+        (
+            Some(MessageParameterWriteback::Ccm { nonce, nonce_len, mac, mac_len }),
+            MessageParameter::CcmMessage(result),
+        ) => {
+            if write_generated {
+                unsafe { copy_message_bytes(nonce, nonce_len, &result.nonce) };
+            }
+            if write_auth {
+                unsafe { copy_message_bytes(mac, mac_len, &result.mac) };
+            }
+        }
+        (
+            Some(MessageParameterWriteback::SalsaChacha { tag, tag_len }),
+            MessageParameter::SalaChacha(result),
+        ) if write_auth => unsafe { copy_message_bytes(tag, tag_len, &result.tag) },
+        _ => {}
+    }
+}
+
+/// Validate the complete canonical message response before committing any
+/// caller-visible byte or length.  The `MessageParameterCall` supplies the
+/// pre-RPC outer/embedded-pointer snapshot, so writeback never re-reads the
+/// caller's outer struct.
+///
+/// # Safety
+///
+/// `p_output` and `pul_output_len` must be the same writable pointers captured
+/// in `output_spec`. Embedded pointers inside `call` must remain writable for
+/// their source-declared extents for the duration of the PKCS#11 call.
+pub(crate) unsafe fn write_exact_message_output(
+    output_spec: &CkOutputBufferSpec,
+    parameter_spec: &CkParameterRoundtripSpec,
+    call: &MessageParameterCall,
+    output_result: &CkOutputBufferResult,
+    parameter_result: &CkParameterRoundtripResult,
+    response_parameter: Option<&MessageParameter>,
+    p_output: CK_BYTE_PTR,
+    pul_output_len: CK_ULONG_PTR,
+) -> CK_RV {
+    if pul_output_len.is_null() != output_spec.length_pointer_null
+        || p_output.is_null() == output_spec.buffer_present
+    {
+        return rv_err(CkRv::GENERAL_ERROR);
+    }
+    if validate_exact_output_result(output_result, output_spec).is_err() {
+        return rv_err(CkRv::GENERAL_ERROR);
+    }
+    if output_result.ck_rv != CkRv::OK && output_result.ck_rv != CkRv::BUFFER_TOO_SMALL {
+        return rv_err(output_result.ck_rv);
+    }
+    if !parameter_result_matches_request(parameter_result, parameter_spec, output_result.ck_rv) {
+        return rv_err(CkRv::GENERAL_ERROR);
+    }
+
+    let response_parameter = match (call.parameter(), response_parameter) {
+        (Some(request), Some(response))
+            if request.validate_structured().is_ok()
+                && response.validate_structured().is_ok()
+                && request.same_layout_and_scalars(response)
+                && (call.direction != MessageParameterDirection::Decrypt
+                    || request == response) =>
+        {
+            Some(response)
+        }
+        (None, None) => None,
+        _ => return rv_err(CkRv::GENERAL_ERROR),
+    };
+
+    let returned_len = match CK_ULONG::try_from(output_result.returned_len) {
+        Ok(len) => len,
+        Err(_) => return rv_err(CkRv::GENERAL_ERROR),
+    };
+    if let Some(response) = response_parameter {
+        unsafe { commit_message_parameter_writeback(call, response) };
+    }
+    if output_spec.length_pointer_null {
+        return rv_err(output_result.ck_rv);
+    }
+    if let Some(value) = output_result.value.as_ref()
+        && !value.is_empty()
+    {
+        unsafe { std::ptr::copy_nonoverlapping(value.as_ptr(), p_output, value.len()) };
+    }
+    unsafe { *pul_output_len = returned_len };
+    rv_err(output_result.ck_rv)
+}
+
+/// Validate and commit a Begin response through the same transactional seam as
+/// one-shot/Next. Begin has no main output buffer, so a local zero-length size
+/// query stands in for that part of the contract while generated IV/nonce
+/// writeback still uses the pre-RPC embedded-pointer snapshot.
+pub(crate) unsafe fn write_message_begin_output(
+    parameter_spec: &CkParameterRoundtripSpec,
+    call: &MessageParameterCall,
+    parameter_result: &CkParameterRoundtripResult,
+    response_parameter: Option<&MessageParameter>,
+) -> CK_RV {
+    let output_spec =
+        CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: false };
+    let output_result = CkOutputBufferResult { ck_rv: CkRv::OK, returned_len: 0, value: None };
+    let mut output_len = 0;
+    unsafe {
+        write_exact_message_output(
+            &output_spec,
+            parameter_spec,
+            call,
+            &output_result,
+            parameter_result,
+            response_parameter,
+            std::ptr::null_mut(),
+            &mut output_len,
+        )
     }
 }

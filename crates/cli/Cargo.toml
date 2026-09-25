@@ -2,6 +2,7 @@
 name = "pkcs11-proxy-ng-cli"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 publish = false
 

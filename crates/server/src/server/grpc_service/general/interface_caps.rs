@@ -64,6 +64,7 @@ pub(super) async fn get_backend_interfaces(
                 backend_ulong_size: Some(backend.abi_ulong_size()),
                 backend_byte_order: Some(backend.abi_byte_order()),
                 backend_attribute_stride: Some(backend.abi_attribute_stride()),
+                pointer_safe_message_parameters: Some(true),
             }));
         }
     };
@@ -84,5 +85,36 @@ pub(super) async fn get_backend_interfaces(
         backend_ulong_size: Some(backend.abi_ulong_size()),
         backend_byte_order: Some(backend.abi_byte_order()),
         backend_attribute_stride: Some(backend.abi_attribute_stride()),
+        pointer_safe_message_parameters: Some(true),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use pkcs11_proxy_ng_backend::MockBackend;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn pointer_safe_message_backend_interfaces_advertises_true() {
+        let context_manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        let backend = Arc::new(MockBackend::default_test());
+        backend.initialize().expect("initialize mock backend");
+        let backend: Arc<dyn Pkcs11Backend> = backend;
+        let registry = MechanismRegistrySource::load(None).expect("load embedded registry");
+
+        let response = get_backend_interfaces(
+            &context_manager,
+            &backend,
+            &registry,
+            Request::new(pkcs11_proxy_ng_proto::GetBackendInterfacesRequest {}),
+        )
+        .await
+        .expect("GetBackendInterfaces should succeed")
+        .into_inner();
+
+        assert_eq!(response.pointer_safe_message_parameters, Some(true));
+    }
 }

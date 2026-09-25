@@ -2,6 +2,7 @@
 name = "pkcs11-proxy-ng"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 publish = false
 
@@ -20,6 +21,7 @@ pkcs11-proxy-ng-types = { path = "../types" }
 pkcs11-proxy-ng-proto = { path = "../proto" }
 pkcs11-proxy-ng-backend = { path = "../backend" }
 pkcs11-proxy-ng-audit = { path = "../audit" }
+cryptoki-sys.workspace = true
 serde_json.workspace = true
 clap.workspace = true
 # Daemon: server-side transport (`Server::builder().add_service`) needs `server`
@@ -47,8 +49,6 @@ http = "1"
 
 [dev-dependencies]
 pkcs11-proxy-ng-client = { path = "../client" }
-hyper = { version = "1", features = ["client", "http2"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
 libloading.workspace = true
 tempfile = "3"
 rcgen = "0.14"

@@ -35,9 +35,50 @@ pub unsafe extern "C" fn c_login_user(
 
 pub unsafe extern "C" fn c_session_cancel(h_session: CK_SESSION_HANDLE, flags: CK_FLAGS) -> CK_RV {
     catch_panics(|| {
-        unit_result_to_rv(
-            with_client!(client => client.session_cancel(CkSessionHandle(h_session as u64), CkFlags(flags as u64))),
-        )
+        if !state::is_initialized() {
+            return rv_err(CkRv::CRYPTOKI_NOT_INITIALIZED);
+        }
+        let message_flags =
+            CKF_MESSAGE_ENCRYPT | CKF_MESSAGE_DECRYPT | CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY;
+        if flags & message_flags != 0 && !crate::interface_probe::pointer_safe_message_parameters()
+        {
+            return rv_err(CkRv::FUNCTION_NOT_SUPPORTED);
+        }
+        let operation_states = [
+            (CKF_MESSAGE_ENCRYPT, state::MessageOperation::Encrypt),
+            (CKF_MESSAGE_DECRYPT, state::MessageOperation::Decrypt),
+            (CKF_MESSAGE_SIGN, state::MessageOperation::Sign),
+            (CKF_MESSAGE_VERIFY, state::MessageOperation::Verify),
+        ]
+        .into_iter()
+        .filter(|(flag, _)| flags & *flag != 0)
+        .map(|(_, operation)| state::message_operation_state(h_session, operation))
+        .collect::<Vec<_>>();
+        let mut operation_guards = Vec::with_capacity(operation_states.len());
+        for operation_state in &operation_states {
+            let Ok(guard) = operation_state.lock() else {
+                return rv_err(CkRv::GENERAL_ERROR);
+            };
+            operation_guards.push(guard);
+        }
+        let saved_shapes =
+            operation_guards.iter_mut().map(|operation| operation.shape.take()).collect::<Vec<_>>();
+
+        let result = with_client!(client => client.session_cancel_stateful(
+            CkSessionHandle(h_session as u64),
+            CkFlags(flags as u64),
+        ));
+        if let Err(error) = &result
+            && error.origin == MessageCallErrorOrigin::Backend
+            && error.ck_rv != CkRv::DEVICE_ERROR
+        {
+            for (operation, saved_shape) in
+                operation_guards.iter_mut().zip(saved_shapes.into_iter())
+            {
+                operation.shape = saved_shape;
+            }
+        }
+        unit_result_to_rv(result.map_err(|error| error.ck_rv))
     })
 }
 
