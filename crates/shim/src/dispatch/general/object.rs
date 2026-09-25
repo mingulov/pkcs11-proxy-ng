@@ -326,7 +326,9 @@ mod tests {
         };
         assert_eq!(build_attribute_query(&outer, 4, 8, 24), Err(CkRv::FUNCTION_NOT_SUPPORTED));
         assert_eq!(value, [0xa5; 4]);
-        assert_eq!(nested.ulValueLen, 4);
+        // E0793: CK_ATTRIBUTE is packed on Windows; assert on a by-value copy.
+        let ul_value_len = nested.ulValueLen;
+        assert_eq!(ul_value_len, 4);
     }
 
     #[test]
@@ -457,7 +459,8 @@ mod tests {
         assert_eq!(subs[0].ulValueLen as usize, w);
         assert_eq!(ul_buf, key_type_bytes, "ulong sub-value written");
         assert_eq!(subs[1].type_ as u64, CkAttributeType::LABEL.0);
-        assert_eq!(subs[1].ulValueLen, 1);
+        let ul_value_len = subs[1].ulValueLen;
+        assert_eq!(ul_value_len, 1);
         assert_eq!(&label_buf[..1], b"k", "byte sub-value written");
     }
 }

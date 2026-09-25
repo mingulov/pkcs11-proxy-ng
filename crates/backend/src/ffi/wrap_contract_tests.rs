@@ -73,7 +73,7 @@ fn backend()
     let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_2::default());
     functions.C_WrapKeyAuthenticated = Some(authenticated);
     let backend = FfiBackend {
-        _lib: libloading::os::unix::Library::this().into(),
+        _lib: crate::ffi::loading::test_library_handle(),
         func_list: base.as_mut(),
         func_list_3_0: None,
         func_list_3_2: Some(functions.as_ref()),
@@ -87,6 +87,7 @@ fn backend()
         // consuming it; never backs production dispatch (C3M.4).
         construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
         lifecycle: Default::default(),
+        retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(),
     };
     (backend, base, functions)
 }
@@ -186,6 +187,7 @@ fn ordinary_wrap_native_sizing_calls_twice_and_stops_on_error() {
     FAIL_SIZING.store(false, Ordering::SeqCst);
 }
 
+#[cfg_attr(miri, ignore = "Miri cannot dlopen; covered natively")]
 #[test]
 fn native_owner_authenticated_validation_precedes_second_call() {
     // C3M.6 row 11: the typed authenticated path validates the mechanism
@@ -211,4 +213,93 @@ fn native_owner_authenticated_validation_precedes_second_call() {
     assert_eq!(err, CkRv::DEVICE_ERROR);
     assert_eq!(*CALLS.lock().unwrap(), vec![(false, Some(0))]);
     MUTATE_SIZING_INPUTS.store(false, Ordering::SeqCst);
+}
+
+unsafe extern "C" fn wrap_gcm_error(
+    _: cryptoki_sys::CK_SESSION_HANDLE,
+    mechanism: cryptoki_sys::CK_MECHANISM_PTR,
+    _: cryptoki_sys::CK_OBJECT_HANDLE,
+    _: cryptoki_sys::CK_OBJECT_HANDLE,
+    _: cryptoki_sys::CK_BYTE_PTR,
+    length: cryptoki_sys::CK_ULONG_PTR,
+) -> cryptoki_sys::CK_RV {
+    if !mechanism.is_null() {
+        // Benign native-provider effect: write within an initialized owned IV.
+        let gcm = unsafe { &*(*mechanism).pParameter.cast::<cryptoki_sys::CK_GCM_PARAMS>() };
+        unsafe { gcm.pIv.write(0x42) };
+    }
+    if !length.is_null() {
+        unsafe { length.write(7) };
+    }
+    cryptoki_sys::CKR_FUNCTION_FAILED
+}
+
+fn gcm_error_backend() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
+    let mut base = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+    base.C_WrapKey = Some(wrap_gcm_error);
+    let backend = FfiBackend {
+        _lib: crate::ffi::loading::test_library_handle(),
+        func_list: base.as_mut(),
+        func_list_3_0: None,
+        func_list_3_2: None,
+        initialize_args: None,
+        mech_cache: DashMap::new(),
+        last_init_family: DashMap::new(),
+        session_slot_map: DashMap::new(),
+        slot_sessions: DashMap::new(),
+        object_cleanup: Default::default(),
+        // Test-local backend: bypasses the process reservation without
+        // consuming it; never backs production dispatch (C3M.4).
+        construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
+        lifecycle: Default::default(),
+        retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(),
+    };
+    (backend, base)
+}
+
+#[cfg_attr(miri, ignore = "Miri cannot dlopen; covered natively")]
+#[test]
+fn ordinary_wrap_error_iv_effect_matches_one_shot_rule() {
+    let _guard = LOCK.lock().unwrap();
+    let (b, _base) = gcm_error_backend();
+    let mechanism = CkMechanism {
+        mechanism_type: CkMechanismType::AES_GCM,
+        params: Some(CkMechanismParams::Gcm(GcmParams {
+            iv: vec![0x11; 12],
+            iv_bits: 96,
+            iv_buffer_len: 12,
+            aad: vec![],
+            tag_bits: 128,
+        })),
+    };
+    let (output, effects) = b
+        .ffi_wrap_key_exact_with_output(
+            CkSessionHandle(4),
+            &mechanism,
+            CkObjectHandle(8),
+            CkObjectHandle(9),
+            &CkOutputBufferSpec { buffer_present: true, buffer_len: 4, length_pointer_null: false },
+        )
+        .unwrap();
+    assert_eq!(output.ck_rv, CkRv::FUNCTION_FAILED);
+    assert_eq!(output.returned_len, Some(7));
+    let Some(CkMechanismParams::Gcm(gcm)) = effects else {
+        panic!("failed wrap must surface the mutated owned GCM IV");
+    };
+    assert_eq!(gcm.iv[0], 0x42);
+    let (output, effects) = b
+        .ffi_wrap_key_exact_with_output(
+            CkSessionHandle(4),
+            &mechanism,
+            CkObjectHandle(8),
+            CkObjectHandle(9),
+            &CkOutputBufferSpec {
+                buffer_present: false,
+                buffer_len: 0,
+                length_pointer_null: false,
+            },
+        )
+        .unwrap();
+    assert_eq!(output.ck_rv, CkRv::FUNCTION_FAILED);
+    assert_eq!(effects, None);
 }

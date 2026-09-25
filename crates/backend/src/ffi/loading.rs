@@ -3,6 +3,40 @@ use libloading::{Library, Symbol};
 use std::ffi::CString;
 use std::path::Path;
 
+/// Portable test-only stand-in for the provider-module handle.
+///
+/// Unit tests build `FfiBackend` values with hand-written function lists and
+/// need a placeholder `_lib` that is never used for symbol lookup. The unix
+/// arm is the historical `dlopen(NULL)` self handle (null handle on static
+/// musl, where `dlopen` is unsupported — see below); the Windows arm is the
+/// process image handle (`GetModuleHandleExW(0, NULL, _)`, libloading 0.8.9).
+#[cfg(test)]
+#[cfg(all(unix, not(target_env = "musl")))]
+pub(in crate::ffi) fn test_library_handle() -> libloading::Library {
+    libloading::os::unix::Library::this().into()
+}
+
+/// Static-musl arm: `dlopen` (including `dlopen(NULL)`) is unsupported in
+/// static-pie musl binaries, so `Library::this()` panics. The placeholder is
+/// never used for symbol lookup (`_lib` is never read), so a null handle
+/// suffices; its `Drop` calls `dlclose(NULL)`, which musl answers with an
+/// error (no crash) that libloading ignores. Proven natively on both musl
+/// widths (C3M Task 4 fix).
+#[cfg(test)]
+#[cfg(all(unix, target_env = "musl"))]
+pub(in crate::ffi) fn test_library_handle() -> libloading::Library {
+    // SAFETY: never used for lookup; dropping only calls `dlclose(NULL)`,
+    // which is error-returning, not fatal, on musl.
+    unsafe { libloading::os::unix::Library::from_raw(std::ptr::null_mut()) }.into()
+}
+
+/// Portable test-only stand-in for the provider-module handle (Windows arm).
+#[cfg(test)]
+#[cfg(windows)]
+pub(in crate::ffi) fn test_library_handle() -> libloading::Library {
+    libloading::os::windows::Library::this().expect("test process image handle").into()
+}
+
 /// Type alias for the `C_GetInterface` symbol signature.
 type GetInterfaceFn = unsafe extern "C" fn(
     *mut cryptoki_sys::CK_UTF8CHAR,
@@ -45,7 +79,7 @@ impl FfiBackend {
             Ok(lib) => lib,
             Err(e) => {
                 permit.rollback_before_native();
-                return Err(format!("dlopen failed: {e}"));
+                return Err(format!("native module load failed: {e}"));
             }
         };
 
@@ -111,6 +145,7 @@ impl FfiBackend {
             session_slot_map: dashmap::DashMap::new(),
             slot_sessions: dashmap::DashMap::new(),
             object_cleanup: Default::default(),
+            retirement_sentinel: super::native_domain::RetirementSentinel::for_permit(&permit),
             construction: permit,
             lifecycle: super::native_domain::LifecycleTracker::default(),
         })
@@ -159,17 +194,61 @@ impl FfiBackend {
     }
 }
 
+/// Pure fire condition for the abnormal-stop guard: stop only when the
+/// retiring instance cannot prove quiescence (`Poison`) and still holds
+/// the process-registry slot (managed permit). Ungated so the unit-test
+/// matrix below exercises it on every host; the `Drop` guard applies the
+/// qualified-target cfg around the call.
+fn stop_fire_condition(
+    decision: super::native_domain::RetirementDecision,
+    holds_slot: bool,
+) -> bool {
+    matches!(decision, super::native_domain::RetirementDecision::Poison) && holds_slot
+}
+
 impl Drop for FfiBackend {
-    /// Retire the construction reservation honestly: release the exact epoch
-    /// only when the instance lifecycle proves quiescence (never initialized,
-    /// or finalized with no open sessions); otherwise retain ownership and
-    /// poison the slot until process restart. Stale handles and already
+    /// Retire the construction reservation honestly: enter `Retiring` for the
+    /// exact epoch only when the instance lifecycle proves quiescence (never
+    /// initialized, or finalized with no open sessions) — the slot stays
+    /// occupied throughout dependent retirement and library close, and the
+    /// last-field [`super::native_domain::RetirementSentinel`] publishes the
+    /// next `Vacant` once every field has dropped; otherwise retain ownership
+    /// and poison the slot until process restart. Stale handles and already
     /// poisoned slots are untouched.
     fn drop(&mut self) {
         use super::native_domain::RetirementDecision::{Poison, Release};
-        match self.lifecycle.retirement_decision() {
+        let decision = self.lifecycle.retirement_decision();
+        // Qualified targets only (Linux x86_64/x86 GNU/musl, Windows MSVC
+        // x86_64): abnormally stop the native lifetime when the managed
+        // final owner cannot prove quiescence. First statement and
+        // lock-free (atomic-only decision plus a plain-bool slot check), so
+        // it precedes the lock-taking poison path and all dependent field
+        // drops. Elsewhere this block cfg-compiles out and the arms below
+        // keep today's behavior bit-for-bit.
+        #[cfg(any(
+            all(
+                target_os = "linux",
+                any(target_env = "gnu", target_env = "musl"),
+                any(
+                    all(target_arch = "x86_64", target_pointer_width = "64"),
+                    all(target_arch = "x86", target_pointer_width = "32")
+                )
+            ),
+            all(
+                target_os = "windows",
+                target_env = "msvc",
+                target_arch = "x86_64",
+                target_pointer_width = "64"
+            )
+        ))]
+        if stop_fire_condition(decision, self.construction.holds_registry_slot()) {
+            super::native_stop::abnormal_stop_native_lifetime(
+                super::native_stop::StopReason::UnprovenFinalOwner,
+            );
+        }
+        match decision {
             Release => {
-                super::native_domain::ConstructionPermit::release_if_owner(self.construction.epoch);
+                self.construction.begin_retirement();
             }
             Poison => {
                 self.construction.poison();
@@ -278,6 +357,27 @@ fn ffi_query(
 
 #[cfg(test)]
 mod tests {
+    /// T7: the factored stop-fire condition preserves the guard's
+    /// `Poison + holds_registry_slot` truth table exactly. The `Drop`
+    /// guard applies the qualified-target cfg; this matrix pins the pure
+    /// decision logic on every host.
+    #[test]
+    fn stop_fire_condition_matrix() {
+        use crate::ffi::native_domain::RetirementDecision::{Poison, Release};
+        for (decision, holds_slot, expected) in [
+            (Poison, true, true),
+            (Poison, false, false),
+            (Release, true, false),
+            (Release, false, false),
+        ] {
+            assert_eq!(
+                super::stop_fire_condition(decision, holds_slot),
+                expected,
+                "decision={decision:?} holds_slot={holds_slot}"
+            );
+        }
+    }
+
     /// Verify that a backend constructed with `None` for the 3.x fields
     /// reports both as absent.
     #[test]

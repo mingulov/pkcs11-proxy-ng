@@ -1546,8 +1546,10 @@ fn wtls_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
         super::write_mechanism_output_params(&mut mechanism, &mech_out);
     }
 
-    assert_eq!(key_mat_out.hMacSecret, 101);
-    assert_eq!(key_mat_out.hKey, 202);
+    // E0793: params structs are packed on Windows; assert on by-value copies.
+    let (h_mac_secret, h_key) = (key_mat_out.hMacSecret, key_mat_out.hKey);
+    assert_eq!(h_mac_secret, 101);
+    assert_eq!(h_key, 202);
     assert_eq!(iv, [0xA1, 0xA2, 0xA3, 0xA4]);
 }
 
@@ -1634,10 +1636,16 @@ fn ssl3_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
         super::write_mechanism_output_params(&mut mechanism, &mech_out);
     }
 
-    assert_eq!(key_mat_out.hClientMacSecret, 101);
-    assert_eq!(key_mat_out.hServerMacSecret, 102);
-    assert_eq!(key_mat_out.hClientKey, 201);
-    assert_eq!(key_mat_out.hServerKey, 202);
+    let (h_client_mac, h_server_mac, h_client_key, h_server_key) = (
+        key_mat_out.hClientMacSecret,
+        key_mat_out.hServerMacSecret,
+        key_mat_out.hClientKey,
+        key_mat_out.hServerKey,
+    );
+    assert_eq!(h_client_mac, 101);
+    assert_eq!(h_server_mac, 102);
+    assert_eq!(h_client_key, 201);
+    assert_eq!(h_server_key, 202);
     assert_eq!(client_iv, [0xA1, 0xA2, 0xA3, 0xA4]);
     assert_eq!(server_iv, [0xB1, 0xB2, 0xB3, 0xB4]);
 }

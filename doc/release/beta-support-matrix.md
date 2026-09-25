@@ -13,18 +13,28 @@ this document makes no `v0.2.0` parity or public support claim.
 
 ## Selected v0.2 boundary (implementation and qualification pending)
 
-The [native ownership contract](native-mechanism-ownership.md) limits live
-production FFI to qualified Linux GNU/musl x86_64/64-bit and x86/32-bit (i686).
-All four Linux caller/daemon width combinations require actual loaded-shim
-receipts; assembly/cross-compilation and old bridge runs are insufficient.
-Windows native-provider daemon support was deferred for v0.2 in ADR-0011/0006
-and is re-admitted as committed tail stretch (low priority, before the
-comprehensive matrix gate) per [ADR-0014](../adr/ADR-0014-v020-tail-platform-stretch.md):
-Windows x64 daemon plus Windows x64
-client shim, both interoperation directions, and the 32-bit/mixed claim.
-Portable Windows client/shim/proto/types and mock-only
-backend/server builds remain, including Windows-client/Linux-daemon use under
-the existing client contract.
+The [native ownership contract](native-mechanism-ownership.md) qualifies live
+production FFI on Linux GNU/musl x86_64/64-bit and x86/32-bit (i686), and —
+via the implemented tail stretch
+([ADR-0014](../adr/ADR-0014-v020-tail-platform-stretch.md)) — on Windows x64
+MSVC (`NATIVE_FFI_QUALIFIED` includes the Windows MSVC x86_64 host;
+`crates/backend/src/ffi/native_domain.rs`). All four Linux caller/daemon
+width combinations run as loaded-shim legs in
+`scripts/run-cross-width-live-test.sh` (legs 1–4: 32c/64b, 64/64, 64c/32b,
+32/32), with a second 32-bit provider leg in
+`scripts/run-cross-width-nss32-live-test.sh` (NSS i386 softokn, 64c/32b +
+32/32); nightly runs both via `scripts/run-test-tiers.sh live`, extracting
+the i386 SoftHSM2 and NSS/NSPR/SQLite closures. The Windows x64 daemon plus
+the Windows x64 client shim, in both interoperation directions, passed on
+real Windows Server 2022: workspace-root
+`artifacts/v020-tail-windows-2026-09-16/` leg A (Windows daemon +
+SoftHSM2-win DLL over mTLS, driven by a Linux client), leg B (Windows shim
+DLL + smoke client vs a Linux daemon, plus the `[listener.local]` rejection
+negative), and leg C (BouncyHsm-win second provider, full set green).
+Windows compile coverage is the per-PR Tier 0f `windows-client-llp64` job
+(`cargo xwin build --target x86_64-pc-windows-msvc --all-targets`).
+Still excluded: Windows GNU, 32-bit Windows (PE32), and macOS/ARM/big-endian
+runtime claims.
 
 v0.2 supports slot waiting only with `CKF_DONT_BLOCK`; blocking mode is local
 `CKR_FUNCTION_NOT_SUPPORTED`, without polling. One supported waiter uses the

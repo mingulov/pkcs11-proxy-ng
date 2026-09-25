@@ -50,12 +50,19 @@ impl FfiMechanism {
         self.outer.root()
     }
 
-    /// Exclusive access to the heap-allocated outer for pre/post-call
-    /// fixups (e.g. the message fallback NULL/empty acknowledgement).
+    /// Exclusive access to the heap-allocated outer for native entry and
+    /// pre/post-call fixups (e.g. the message fallback NULL/empty
+    /// acknowledgement).
     ///
     /// Like [`NativeAllocation::root`], the caller must hold the
-    /// native-operation guard; the borrow ends before native entry, so no
-    /// live reference crosses a provider call.
+    /// native-operation guard. The borrow is live across the provider
+    /// call itself — it is the native-call argument at the migrated
+    /// entry sites (e.g. `call_helpers::call_unit_with_mechanism`,
+    /// `call_init_with_mechanism`, `kem_ops::ffi_encapsulate_key`) — but
+    /// no borrow is retained afterwards: the heap address stays stable
+    /// while the owner (and its session family slot) is alive, so the
+    /// provider's later reads address stable storage with no Rust
+    /// borrow outstanding.
     pub(in crate::ffi) fn ck_mechanism_mut(&mut self) -> &mut cryptoki_sys::CK_MECHANISM {
         // SAFETY: owned allocation, valid initialized CK_MECHANISM, unique
         // borrow of the owner; no other reference aliases this storage.

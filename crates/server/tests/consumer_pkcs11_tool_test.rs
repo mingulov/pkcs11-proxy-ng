@@ -51,25 +51,61 @@ async fn run_pkcs11_tool_timeout(
     args: &[&str],
     timeout_dur: std::time::Duration,
 ) -> (String, String, bool) {
-    // Spawn in a new process group so we can kill forked children.
-    let child = {
-        unsafe {
-            Command::new("pkcs11-tool")
-                .arg("--module")
-                .arg(shim_path)
-                .args(args)
-                .env("PKCS11_PROXY_ENDPOINT", endpoint)
-                .pre_exec(|| {
-                    libc::setpgid(0, 0);
-                    Ok(())
-                })
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .expect("failed to spawn pkcs11-tool")
-        }
-    };
+    let child = spawn_pkcs11_tool(shim_path, endpoint, args);
+    wait_pkcs11_tool_output(child, timeout_dur).await
+}
 
+/// Spawn `pkcs11-tool` with piped stdio in a new process group, so a timeout
+/// can kill forked grandchildren too.
+#[cfg(unix)]
+fn spawn_pkcs11_tool(
+    shim_path: &std::path::Path,
+    endpoint: &str,
+    args: &[&str],
+) -> tokio::process::Child {
+    // Spawn in a new process group so we can kill forked children.
+    unsafe {
+        Command::new("pkcs11-tool")
+            .arg("--module")
+            .arg(shim_path)
+            .args(args)
+            .env("PKCS11_PROXY_ENDPOINT", endpoint)
+            .pre_exec(|| {
+                libc::setpgid(0, 0);
+                Ok(())
+            })
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("failed to spawn pkcs11-tool")
+    }
+}
+
+/// Non-unix spawn: plain piped spawn, no process group (`pre_exec` is unix-only).
+#[cfg(not(unix))]
+fn spawn_pkcs11_tool(
+    shim_path: &std::path::Path,
+    endpoint: &str,
+    args: &[&str],
+) -> tokio::process::Child {
+    Command::new("pkcs11-tool")
+        .arg("--module")
+        .arg(shim_path)
+        .args(args)
+        .env("PKCS11_PROXY_ENDPOINT", endpoint)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to spawn pkcs11-tool")
+}
+
+/// Wait for `pkcs11-tool` with a timeout; on timeout kill the whole process
+/// group (including forked children).
+#[cfg(unix)]
+async fn wait_pkcs11_tool_output(
+    child: tokio::process::Child,
+    timeout_dur: std::time::Duration,
+) -> (String, String, bool) {
     let pid = child.id();
     match tokio::time::timeout(timeout_dur, child.wait_with_output()).await {
         Ok(Ok(output)) => {
@@ -79,12 +115,51 @@ async fn run_pkcs11_tool_timeout(
         }
         Ok(Err(e)) => (String::new(), format!("pkcs11-tool IO error: {e}"), false),
         Err(_) => {
-            // Kill the entire process group (including forked children).
-            if let Some(pid) = pid {
-                unsafe {
-                    libc::kill(-(pid as i32), libc::SIGKILL);
-                }
+            kill_timed_out_process_group(pid);
+            (String::new(), "pkcs11-tool timed out".to_string(), false)
+        }
+    }
+}
+
+/// Kill the entire process group (including forked children).
+#[cfg(unix)]
+fn kill_timed_out_process_group(pid: Option<u32>) {
+    if let Some(pid) = pid {
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+    }
+}
+
+/// Non-unix wait: no process groups, so `wait()` borrows the child and the
+/// timeout arm kills the child handle directly. Pipes are drained after exit.
+#[cfg(not(unix))]
+async fn wait_pkcs11_tool_output(
+    mut child: tokio::process::Child,
+    timeout_dur: std::time::Duration,
+) -> (String, String, bool) {
+    use tokio::io::AsyncReadExt;
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    match tokio::time::timeout(timeout_dur, child.wait()).await {
+        Ok(Ok(status)) => {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            if let Some(pipe) = stdout_pipe.as_mut() {
+                let _ = pipe.read_to_end(&mut stdout).await;
             }
+            if let Some(pipe) = stderr_pipe.as_mut() {
+                let _ = pipe.read_to_end(&mut stderr).await;
+            }
+            let stdout = String::from_utf8_lossy(&stdout).to_string();
+            let stderr = String::from_utf8_lossy(&stderr).to_string();
+            (stdout, stderr, status.success())
+        }
+        Ok(Err(e)) => (String::new(), format!("pkcs11-tool IO error: {e}"), false),
+        Err(_) => {
+            // No process group off unix: kill the child handle directly.
+            let _ = child.kill().await;
+            let _ = child.wait().await;
             (String::new(), "pkcs11-tool timed out".to_string(), false)
         }
     }

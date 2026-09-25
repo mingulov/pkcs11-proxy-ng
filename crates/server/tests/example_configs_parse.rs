@@ -148,6 +148,23 @@ fn example_fips_mechanism_params_parses() {
             "{name} ({mech:#010x}) must be hard-excluded by the FIPS registry"
         );
     }
+    // F-09 regression pins: the ARIA/SEED/Camellia family members once
+    // missing from the FIPS `exclude` list (sequences must not jump).
+    // CKM_CAMELLIA_ECB_ENCRYPT_DATA = 0x0556,
+    // CKM_ARIA_MAC_GENERAL = 0x0564, CKM_ARIA_ECB_ENCRYPT_DATA = 0x0566,
+    // CKM_SEED_ECB_ENCRYPT_DATA = 0x0656.
+    for (mech, name) in &[
+        (0x0556u64, "CKM_CAMELLIA_ECB_ENCRYPT_DATA"),
+        (0x0564, "CKM_ARIA_MAC_GENERAL"),
+        (0x0566, "CKM_ARIA_ECB_ENCRYPT_DATA"),
+        (0x0656, "CKM_SEED_ECB_ENCRYPT_DATA"),
+    ] {
+        assert_eq!(
+            registry.check_operation(*mech, false),
+            Err(pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID),
+            "{name} ({mech:#010x}) must be hard-excluded by the FIPS registry"
+        );
+    }
     // Exclusion wins over the default's shapes, so parameterized
     // invocations are rejected too.
     assert_eq!(
@@ -155,6 +172,23 @@ fn example_fips_mechanism_params_parses() {
         Err(pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID),
         "CKM_DES_CBC with params must be hard-excluded"
     );
+    // F-09 mechanism: the embedded default models 0x0564 under
+    // `mac_general`, so without the FIPS remap
+    // `check_operation(0x0564, true)` returned `Ok` and a
+    // parameterized invocation of a non-approved mechanism was still
+    // forwarded. All four restored members must reject with params.
+    for (mech, name) in &[
+        (0x0556u64, "CKM_CAMELLIA_ECB_ENCRYPT_DATA"),
+        (0x0564, "CKM_ARIA_MAC_GENERAL"),
+        (0x0566, "CKM_ARIA_ECB_ENCRYPT_DATA"),
+        (0x0656, "CKM_SEED_ECB_ENCRYPT_DATA"),
+    ] {
+        assert_eq!(
+            registry.check_operation(*mech, true),
+            Err(pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID),
+            "{name} ({mech:#010x}) with params must be hard-excluded"
+        );
+    }
     // Excluded mechanisms stay out of discovery as well.
     assert!(
         registry.filter_mechanisms(&[0x0111, 0x1087]).iter().all(|m| *m != 0x0111),

@@ -302,6 +302,39 @@ complete dump/storage/inspection policy; see [privacy.md](privacy.md). The
 stop cannot retroactively prevent destructors that ran before its guard, so
 placement and pre-entry publication are part of the implementation proof.
 
+### Windows abnormal-stop contract
+
+On qualified Windows (MSVC, x86_64, 64-bit pointers — the Windows leg of
+`NATIVE_FFI_QUALIFIED`), the backstop's one raw attempt is
+`TerminateProcess(GetCurrentProcess(), 70)` via a hand-declared
+`#[link(name = "kernel32")] unsafe extern "system"` block with
+`type HANDLE = *mut c_void` (no new crate; see the Windows `mod arch`
+arm in `crates/backend/src/ffi/native_stop.rs`), followed by a modeled
+non-return spin: `TerminateProcess` never returns on success, and a
+hypothetical return must spin rather than fall through to dependent
+destruction. This is the faithful `exit_group` analog: whole-process,
+immediate, with no DLL detach routines, C exit handlers, or Rust
+destructors running, and it preserves status 70 for supervisor
+`Restart=on-failure` handling with identical receipt criteria. `abort()`
+was ruled out (reviewer Q3): it risks provider-handler interference and
+loses the 70 channel (SIGABRT/abnormal instead of a plain exit status),
+so `on-abnormal`/`on-abort`-only supervision would be required instead
+of `on-failure`.
+
+This arm is strictly weaker than the Linux contract above and claims
+less. Non-claims, each explicit: no seccomp or per-thread permission
+model applies on Windows; no memory wiping is performed; no audit tail
+is flushed or promised (status 70 is the terminal status channel, as on
+Linux); no core-dump suppression is configured (no WER policy is
+touched). The shutdown-deadline controller and the final-owner guard
+predicate keep their Linux semantics (lock-free, no registry or
+lifecycle waits); only the raw attempt differs.
+
+Receipt criteria (supervisor side, no in-process observation): the
+process dies (reaped, no lingering threads); no hang (a supervisor
+timeout bounds the stop); exit-70 evidence is captured from the
+supervisor side (exit code 70 observed by the parent via wait status).
+
 ## Required acceptance evidence
 
 All cases below remain required future tests, not receipts from this amendment.

@@ -248,7 +248,7 @@ mod tests {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
         functions.C_CloseSession = close;
         let backend = FfiBackend {
-            _lib: libloading::os::unix::Library::this().into(),
+            _lib: crate::ffi::loading::test_library_handle(),
             func_list: functions.as_mut(),
             func_list_3_0: None,
             func_list_3_2: None,
@@ -262,6 +262,8 @@ mod tests {
             // consuming it; never backs production dispatch (C3M.4).
             construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
             lifecycle: Default::default(),
+            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
+            ),
         };
         (backend, functions)
     }
@@ -292,12 +294,13 @@ mod tests {
         assert_eq!(backend.session_slot_map.get(&session.0).as_deref(), Some(&11));
     }
 
+    #[cfg_attr(miri, ignore = "Miri cannot dlopen; covered natively")]
     #[test]
     fn native_owner_close_all_isolates_slots() {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
         functions.C_CloseAllSessions = Some(close_all_sessions_fails);
         let backend = FfiBackend {
-            _lib: libloading::os::unix::Library::this().into(),
+            _lib: crate::ffi::loading::test_library_handle(),
             func_list: functions.as_mut(),
             func_list_3_0: None,
             func_list_3_2: None,
@@ -309,6 +312,8 @@ mod tests {
             object_cleanup: Default::default(),
             construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
             lifecycle: Default::default(),
+            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
+            ),
         };
         let session = CkSessionHandle(23);
         seed_sign_slot(&backend, session, CkSlotId(11));

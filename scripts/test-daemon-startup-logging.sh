@@ -15,8 +15,8 @@
 #     startup line.
 #   * The daemon exits 0/143 on SIGTERM (no crash).
 #
-# Live-tier script: skips cleanly (exit 0) when SoftHSM2, the daemon
-# binary, or pkcs11-tool is absent. Release binaries are the default;
+# Live-tier script: skips cleanly (exit 0) when SoftHSM2 or the daemon
+# binary is absent. Release binaries are the default;
 # DAEMON_BIN overrides for local iteration.
 #
 # Runs against the host's local binaries, like
@@ -106,8 +106,8 @@ grep -q "Backend module loaded and initialized" "$WORKDIR/daemon.log" || {
 
 echo "[3/3] Stopping daemon"
 kill -TERM "$DAEMON_PID"
-wait "$DAEMON_PID" 2>/dev/null || true
-daemon_status=$?
+daemon_status=0
+wait "$DAEMON_PID" 2>/dev/null || daemon_status=$?
 DAEMON_PID=""
 if (( daemon_status != 0 && daemon_status != 143 )); then
     echo "fail: daemon exited with unexpected status ${daemon_status}" >&2

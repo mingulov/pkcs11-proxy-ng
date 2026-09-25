@@ -176,8 +176,10 @@ fn live_daemon_bridges_ulong_widths_end_to_end() {
     };
     let rv = unsafe { dispatch::general::c_get_attribute_value(session, object, &mut attr, 1) };
     assert_eq!(rv, CKR_BUFFER_TOO_SMALL as CK_RV, "too-small CKA_CLASS query");
+    // E0793: CK_ATTRIBUTE is packed on Windows; assert on a by-value copy.
+    let ul_value_len = attr.ulValueLen;
     assert_eq!(
-        attr.ulValueLen, CK_UNAVAILABLE_INFORMATION,
+        ul_value_len, CK_UNAVAILABLE_INFORMATION,
         "sentinel must be the client-width all-ones value"
     );
 

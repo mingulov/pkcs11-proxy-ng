@@ -1,3 +1,6 @@
+#![cfg(unix)]
+// Unix-domain-socket + SO_PEERCRED transport tests; UDS does not exist on Windows (mTLS-TCP-only).
+
 //! End-to-end Unix-domain-socket transport tests (C1).
 //!
 //! Verifies the full local-IPC path: the client's `unix:` connector dials the

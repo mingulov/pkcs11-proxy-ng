@@ -173,6 +173,41 @@ that keeps using its pre-crash handles keeps failing.
 trust-domain, or per high-value consumer, so one consumer's crash-inducing input cannot
 affect another's. The cost is N× backend `C_Initialize` and N× resource use.
 
+## 4b. Windows daemon operations (x64/MSVC)
+
+The Windows daemon (`pkcs11-proxy-ng.exe` from the deterministic ZIP bundle,
+`scripts/release-windows.sh`) runs Windows provider DLLs behind mTLS-over-TCP
+only. Evidenced on real Windows Server 2022; receipts at workspace-root
+`artifacts/v020-tail-windows-2026-09-16/leg-A-daemon-win/` unless noted.
+
+- **Listener: `[listener.remote]` with mTLS, no `[listener.local]`.** Unix
+  sockets + peer-cred auth do not exist on Windows; the leg-A daemon config
+  (`proxy-config-legA.toml`) carries only `[listener.remote]`. A config that
+  includes `[listener.local]` fails fast at startup, exit 1:
+  `"[listener.local] (unix socket + peer-cred) is not supported on this OS;
+  configure [listener.remote] with auth = 'mtls' instead"` (exact stderr in
+  `leg-B-shim-win/listener-local-negative.utf8.log`).
+- **No SIGHUP reload — restart to apply.** Mechanism-registry or config changes
+  require a daemon restart; there is no signal reload on Windows. The leg-A
+  run used a scheduled-task launcher (`run-daemon-legA.ps1`) because
+  session-owned processes die with the SSH session — prefer a
+  service/scheduled-task supervisor over ad-hoc shells.
+- **MSVC CRT prerequisite.** The guest needs the MSVC C runtime
+  (`vcruntime140.dll` present in System32 on the Server 2022 receipt host);
+  a missing CRT fails the binary before any proxy log line.
+- **Token provisioning via the guest `softhsm2-util.exe`.** Initialize the
+  token on the guest with the provider's own tool, with `SOFTHSM2_CONF`
+  pointed at the guest config and the SoftHSM2 `lib/` dir prepended to
+  `Path` (the leg-A run hit the PATH gotcha: without it the util cannot find
+  its DLLs). `--version` output is not proof — re-run a slot/token listing
+  and keep it (`token-show-slots.utf8.log` shows slot 1513421618, label
+  `png-t6-legA`, `Initialized: yes`).
+- **Abnormal stop is whole-process, status 70.** Same contract as Linux, via
+  `TerminateProcess(GetCurrentProcess(), 70)`; supervise with
+  `Restart=on-failure` semantics (see the stop section at the top of this
+  runbook and the
+  [native ownership contract](../release/native-mechanism-ownership.md)).
+
 ## 5. Updating mechanism registry (vendor extensions, e.g. CloudHSM)
 
 ```bash

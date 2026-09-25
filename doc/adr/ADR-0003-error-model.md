@@ -387,12 +387,23 @@ require a modeled configured shape.
 
 ### Staged implementation limits
 
-The Phase A checkpoint covers byte/attribute/KEM exact results, structured
-Encrypt/Decrypt one-shot/Begin/Next, and authenticated exact wrap. Classic cached
-Encrypt and ordinary Wrap mechanism-output error effects still require a
-separate Phase B change after the common mechanism-backing provenance fix.
-The intentionally ignored classic-GCM regression records that remaining defect;
-Phase A is not completion of the full exact-output correction.
+The Phase B completion (2026-09-16) ships classic cached-Encrypt and ordinary
+Wrap mechanism-output error effects on top of the independently accepted C3M
+provenance prerequisite. The shipped rules are: Rule B-E1 (one-shot
+`call_bytes_exact_with_mechanism_output`, used by ordinary Wrap): keep the mode
+gate `(buffer_present || length_pointer_null)`; on `OK` surface
+`output_params()` (unchanged); on non-OK surface post-call `output_params()`
+iff it differs from the pre-call snapshot (`CkMechanismParams: PartialEq`
+exists), else `None`; size query always `None`. Rule B-E2 (cached
+`ffi_encrypt_exact_with_output`): same gating with pre/post cached reads. Rule
+B-M: missing-length behaves as a data call for effect gating (effects allowed on
+OK and on changed-error); size query suppresses always. Rule B-I: a failed Init
+publishes nothing — no `mech_cache` insert, no `last_init_family` change — and
+surfaces no attempted-owner output. The formerly ignored regression is
+un-ignored as `classic_gcm_initialized_error_iv_effect`. Verification: Miri
+under both Stacked Borrows (default) and Tree Borrows
+(`MIRIFLAGS=-Zmiri-tree-borrows`), native backend lib suites on x86_64 and
+i686-unknown-linux-gnu, and MSRV 1.88, plus clippy `-D warnings` and fmt gates.
 
 Backend-only structured AEAD `sign_message_exact_msg` and
 `sign_message_next_exact_msg` retain legacy helpers. They are not called by the

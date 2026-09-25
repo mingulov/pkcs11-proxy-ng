@@ -156,7 +156,9 @@ fn x3dh_respond_four_pointees_keep_native_width_after_owner_move() {
     owners.push(*boxed_owner);
     owners.reserve(8);
     let moved_owner = owners.pop().expect("moved owner remains present");
-    assert_eq!(moved_owner.ck_mechanism().pParameter, parameter_pointer);
+    // E0793: CK_MECHANISM is packed on Windows; assert on a by-value copy.
+    let moved_p_parameter = moved_owner.ck_mechanism().pParameter;
+    assert_eq!(moved_p_parameter, parameter_pointer);
     assert_native_readback(&moved_owner, values);
 }
 

@@ -28,6 +28,13 @@ defines exact cfg/environment gates, checked Wait widths and all four required
 Linux topology receipts. Earlier bridge/Wine results do not qualify this new
 native lifetime/stop implementation, which remains unimplemented.
 
+[Tail-stretch closure, 2026-09-17: the Windows-daemon-host deferral in this
+amendment is closed — [ADR-0014](./ADR-0014-v020-tail-platform-stretch.md) is
+Implemented, with real-Windows (non-Wine) daemon-host receipts in
+workspace-root `artifacts/v020-tail-windows-2026-09-16/` legs A and C, and
+shim-direction receipts in leg B. The wine smokes below remain dev-only
+smokes, never conformance evidence.]
+
 Support **narrow-`CK_ULONG` clients** — clients whose native `CK_ULONG` is
 32-bit (`i686-unknown-linux-gnu`, `armv7-unknown-linux-gnueabihf`, and
 `x86_64-pc-windows-msvc`/LLP64) — talking to a 64-bit Linux server+backend, via a
@@ -556,6 +563,12 @@ assumption.
   portable and mock-only builds remain. Existing client exclusions remain:
   `pc-windows-gnu`, 32-bit Windows, big-/mixed-endian. Native-host exclusions
   additionally include x32, other architectures/environments and non-Linux.
+  [2026-09-17: the Windows-daemon-host deferral is closed by the T6
+  real-Windows conformance pass (workspace-root
+  `artifacts/v020-tail-windows-2026-09-16/` legs A + C); the Windows-shim
+  direction is evidenced by leg B. The client exclusions
+  (`pc-windows-gnu`, 32-bit Windows, big-/mixed-endian) and the remaining
+  native-host exclusions stand.]
 - **D4 — Overflow: checked, value-preserving narrowing.** Convert the integer
   value with a checked `CK_ULONG::try_from`; reject (`CKR_FUNCTION_FAILED`) on a
   genuine `> u32::MAX` value rather than silently truncate. Guarantees `1 → 1`
@@ -690,6 +703,8 @@ assumption.
     wine (LLP64: `CK_ULONG` 4 / pointers 8 / packed structs) <-> Linux
     daemon, loaded through the public C ABI (`LoadLibrary` +
     `C_GetFunctionList`), plus a native dlopen control leg.
+    [2026-09-17: retained as a dev-only smoke, never conformance evidence;
+    the Windows-shim conformance evidence is T6 leg B on real Windows.]
 
 **Historical D3 execution record (2026-07-02):** narrow-`CK_ULONG` Linux daemon
 and Windows daemon bridge runs were recorded below. The Windows native-provider
@@ -704,12 +719,19 @@ native owner/termination contract:
   width 4): native Linux client (8) exercises the reverse bridge + D4
   through a genuine Windows PKCS#11 DLL, and an all-Windows LLP64
   client/daemon pairing passes as well.
+  [2026-09-17: superseded for the daemon host by the T6 real-Windows legs
+  (A: SoftHSM2-win; C: BouncyHsm-win) — Wine is no longer the daemon-host
+  evidence. The wine smokes stay as dev-only smokes, never evidence.]
 - The per-PR i686 CI gate additionally runs the server lib suite and
   builds the i686 daemon.
 
 **Remaining:**
 - v0.2 checked Wait input/output/RV, common domain and platform/stop enforcement,
   all four Linux loaded-shim topologies and native GNU/musl stop receipts.
-- Windows native-provider daemon support is deferred; restoring it requires a
-  separately reviewed whole-process stop and native tests, not just the former
-  real-Windows (non-Wine) conformance sign-off.
+- Windows native-provider daemon support — CLOSED 2026-09-17: restored with a
+  separately reviewed whole-process stop (Windows
+  `TerminateProcess(GetCurrentProcess(), 70)` arm; Linux `exit_group(70)`
+  backstop) plus real-Windows (non-Wine) conformance receipts:
+  workspace-root `artifacts/v020-tail-windows-2026-09-16/` leg A (Windows
+  daemon + SoftHSM2-win DLL over mTLS, Linux client), leg B (Windows shim
+  DLL vs Linux daemon), and leg C (BouncyHsm-win second provider).

@@ -2607,7 +2607,7 @@ mod tests {
         functions.C_EncryptMessageBegin = Some(counted_encrypt_message_begin);
         functions.C_DecryptMessageBegin = Some(counted_encrypt_message_begin);
         let backend = FfiBackend {
-            _lib: libloading::os::unix::Library::this().into(),
+            _lib: crate::ffi::loading::test_library_handle(),
             func_list: base.as_mut(),
             func_list_3_0: Some(functions.as_ref()),
             func_list_3_2: None,
@@ -2621,6 +2621,8 @@ mod tests {
             // consuming it; never backs production dispatch (C3M.4).
             construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
             lifecycle: Default::default(),
+            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
+            ),
         };
         (backend, base, functions)
     }
@@ -2638,7 +2640,7 @@ mod tests {
         functions.C_VerifyMessageBegin = Some(counted_verify_message_begin);
         functions.C_VerifyMessageNext = Some(counted_verify_message_next);
         let backend = FfiBackend {
-            _lib: libloading::os::unix::Library::this().into(),
+            _lib: crate::ffi::loading::test_library_handle(),
             func_list: base.as_mut(),
             func_list_3_0: Some(functions.as_ref()),
             func_list_3_2: None,
@@ -2652,6 +2654,8 @@ mod tests {
             // consuming it; never backs production dispatch (C3M.4).
             construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
             lifecycle: Default::default(),
+            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
+            ),
         };
         (backend, base, functions)
     }
@@ -2671,7 +2675,7 @@ mod tests {
         functions.C_DecryptMessageBegin = Some(counted_structured_decrypt_begin);
         functions.C_DecryptMessageNext = Some(counted_structured_decrypt_next);
         let backend = FfiBackend {
-            _lib: libloading::os::unix::Library::this().into(),
+            _lib: crate::ffi::loading::test_library_handle(),
             func_list: base.as_mut(),
             func_list_3_0: Some(functions.as_ref()),
             func_list_3_2: None,
@@ -2685,6 +2689,8 @@ mod tests {
             // consuming it; never backs production dispatch (C3M.4).
             construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
             lifecycle: Default::default(),
+            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
+            ),
         };
         (backend, base, functions)
     }
@@ -2698,7 +2704,7 @@ mod tests {
         functions.C_MessageEncryptInit = Some(mutating_encrypt_init);
         functions.C_MessageDecryptInit = Some(mutating_decrypt_init);
         let backend = FfiBackend {
-            _lib: libloading::os::unix::Library::this().into(),
+            _lib: crate::ffi::loading::test_library_handle(),
             func_list: base.as_mut(),
             func_list_3_0: Some(functions.as_ref()),
             func_list_3_2: None,
@@ -2712,6 +2718,8 @@ mod tests {
             // consuming it; never backs production dispatch (C3M.4).
             construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
             lifecycle: Default::default(),
+            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
+            ),
         };
         (backend, base, functions)
     }
@@ -3630,7 +3638,9 @@ mod tests {
             &*(init.ck_mechanism.pParameter as *const cryptoki_sys::CK_GCM_MESSAGE_PARAMS)
         };
         assert_eq!(p.ulIvLen as usize, iv.len());
-        assert_eq!(p.ulTagBits, 128);
+        // E0793: params structs are packed on Windows; assert on by-value copies.
+        let ul_tag_bits = p.ulTagBits;
+        assert_eq!(ul_tag_bits, 128);
         assert!(!p.pIv.is_null());
         // Tag buffer is zero-padded to ceil(tag_bits/8) so the token has room.
         assert!(!p.pTag.is_null());
@@ -3664,9 +3674,11 @@ mod tests {
         let p = unsafe {
             &*(init.ck_mechanism.pParameter as *const cryptoki_sys::CK_CCM_MESSAGE_PARAMS)
         };
-        assert_eq!(p.ulDataLen, 64);
+        // E0793: params structs are packed on Windows; assert on by-value copies.
+        let (ul_data_len, ul_mac_len) = (p.ulDataLen, p.ulMACLen);
+        assert_eq!(ul_data_len, 64);
         assert_eq!(p.ulNonceLen as usize, nonce.len());
-        assert_eq!(p.ulMACLen, 16);
+        assert_eq!(ul_mac_len, 16);
         assert!(!p.pMAC.is_null(), "MAC buffer must be allocated for the token to write");
     }
 
@@ -3734,10 +3746,9 @@ mod tests {
             holders.push(*boxed);
             holders.reserve(8);
             let moved_holder = holders.pop().expect("moved holder remains present");
-            assert_eq!(
-                moved_holder.ck_mechanism.pParameter, root,
-                "owner move preserves the retained envelope root"
-            );
+            // E0793: CK_MECHANISM is packed on Windows; assert on a by-value copy.
+            let moved_p_parameter = moved_holder.ck_mechanism.pParameter;
+            assert_eq!(moved_p_parameter, root, "owner move preserves the retained envelope root");
             assert_eq!(
                 moved_holder.ck_mechanism.ulParameterLen as usize, expected_len,
                 "owner move preserves the advertised size"
@@ -3763,6 +3774,7 @@ mod tests {
     /// leaves `mech_cache` and the last-Init marker empty.
     /// Already-green invariant kept as a named regression.
     #[cfg(unix)]
+    #[cfg_attr(miri, ignore = "Miri cannot dlopen; covered natively")]
     #[test]
     fn native_owner_message_envelopes_use_private_owner() {
         let mut base = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
@@ -3770,7 +3782,7 @@ mod tests {
         functions_3_0.C_MessageEncryptInit = Some(message_init_ok);
         functions_3_0.C_MessageDecryptInit = Some(message_init_ok);
         let backend = FfiBackend {
-            _lib: libloading::os::unix::Library::this().into(),
+            _lib: crate::ffi::loading::test_library_handle(),
             func_list: base.as_mut(),
             func_list_3_0: Some(functions_3_0.as_ref()),
             func_list_3_2: None,
@@ -3784,6 +3796,8 @@ mod tests {
             // consuming it; never backs production dispatch (C3M.4).
             construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
             lifecycle: Default::default(),
+            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
+            ),
         };
 
         let gcm_mech = CkMechanism { mechanism_type: CkMechanismType::AES_GCM, params: None };

@@ -100,4 +100,6 @@ skip = [
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+# pkcs11-module/pkcs11-abi moved to pkcs11-components; the backend consumes
+# them as a rev-pinned git dependency (see crates/backend/Cargo.toml).
+allow-git = ["https://github.com/mingulov/pkcs11-components"]

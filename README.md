@@ -62,10 +62,16 @@ constructor domain with lifecycle-honest retirement, and wire widths are
 checked with rejection proven on i686 hardware. Still pending: DONT_BLOCK-only
 slot waits with shared native event flags, the qualified Linux
 whole-process lifetime stop, session operation slots, subprocess/topology
-qualification, and the provider parity round. Windows native
-daemon support is committed v0.2.0 tail stretch (low priority, see ADR-0014);
-portable Windows clients and mock-only builds
-remain. This is not a v0.2 parity/support receipt.
+qualification, and the provider parity round. The v0.2.0 tail stretch (see
+[ADR-0014](./doc/adr/ADR-0014-v020-tail-platform-stretch.md), Implemented
+2026-09-17) evidences Windows x64/MSVC daemon + shim in both interoperation
+directions on real Windows Server 2022
+(`artifacts/v020-tail-windows-2026-09-16/` legs A/B/C at the workspace root),
+the 32-bit/mixed width claim (four Linux legs plus the NSS-i386 second
+provider, `scripts/run-cross-width-*-live-test.sh` in nightly), the per-PR
+Tier 0f `windows-client-llp64` `--all-targets` gate, and the deterministic
+Windows ZIP bundle (`scripts/release-windows.sh`, `SHA256SUMS-windows`).
+This is not a v0.2 parity/support receipt.
 
 **Public `v0.1.0` support**
 
@@ -79,8 +85,7 @@ remain. This is not a v0.2 parity/support receipt.
 **Explicitly not claimed for this beta**
 
 - General production-readiness / operational guarantees
-- 32-bit or mixed 32/64-bit deployments (deferred — see
-  [ADR-0006](./doc/adr/ADR-0006-32-64-bit-cross-platform-compatibility.md))
+- Windows GNU, 32-bit Windows (PE32), and macOS/ARM/big-endian runtime claims
 - Plain TCP **without** mTLS as a public-supported mode (undecided)
 - Backends beyond the validated matrix (others may work but are unvalidated)
 

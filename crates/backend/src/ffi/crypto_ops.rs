@@ -488,6 +488,7 @@ impl FfiBackend {
         data: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<(CkOutputBufferResult, Option<CkMechanismParams>)> {
+        let before = self.cached_mechanism_output_params_for(session, OperationFamily::Encrypt);
         let result = Self::call_bytes_exact(
             unsafe { (*self.func_list).C_Encrypt },
             spec,
@@ -495,12 +496,17 @@ impl FfiBackend {
                 session_bytes_input!(session, data, function, output, output_len)
             },
         )?;
-        let mechanism_out =
-            if (spec.buffer_present || spec.length_pointer_null) && result.ck_rv == CkRv::OK {
-                self.cached_mechanism_output_params_for(session, OperationFamily::Encrypt)
-            } else {
-                None
-            };
+        // Cached mirror of the one-shot rule (B-E2): data/missing-length
+        // calls surface the retained params on OK, and on error only when
+        // the provider actually changed them. Size queries suppress always.
+        let after = self.cached_mechanism_output_params_for(session, OperationFamily::Encrypt);
+        let mechanism_out = if !(spec.buffer_present || spec.length_pointer_null) {
+            None
+        } else if result.ck_rv == CkRv::OK || after != before {
+            after
+        } else {
+            None
+        };
         Ok((result, mechanism_out))
     }
 
@@ -581,6 +587,11 @@ impl FfiBackend {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicPtr, Ordering};
+
+    static LOCK: Mutex<()> = Mutex::new(());
+    static ENCRYPT_ERROR_IV_TARGET: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
 
     unsafe extern "C" fn encrypt_ok(
         _session: cryptoki_sys::CK_SESSION_HANDLE,
@@ -600,7 +611,7 @@ mod tests {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
         functions.C_Encrypt = Some(encrypt_ok);
         let backend = FfiBackend {
-            _lib: libloading::os::unix::Library::this().into(),
+            _lib: crate::ffi::loading::test_library_handle(),
             func_list: functions.as_mut(),
             func_list_3_0: None,
             func_list_3_2: None,
@@ -614,6 +625,8 @@ mod tests {
             // consuming it; never backs production dispatch (C3M.4).
             construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
             lifecycle: Default::default(),
+            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
+            ),
         };
         let session = CkSessionHandle(7);
         let mechanism = CkMechanism {
@@ -658,6 +671,171 @@ mod tests {
         assert_eq!(size_output, None);
     }
 
+    unsafe extern "C" fn encrypt_fails_after_mutating_cached_iv(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _data: cryptoki_sys::CK_BYTE_PTR,
+        _data_len: cryptoki_sys::CK_ULONG,
+        _output: cryptoki_sys::CK_BYTE_PTR,
+        output_len: cryptoki_sys::CK_ULONG_PTR,
+    ) -> cryptoki_sys::CK_RV {
+        // Benign native-provider effect: write within the initialized
+        // retained IV published by the test (C_Encrypt carries no mechanism
+        // pointer, so the stub reaches retained storage through the static).
+        let target = ENCRYPT_ERROR_IV_TARGET.load(Ordering::SeqCst);
+        if !target.is_null() {
+            unsafe { target.write(0x42) };
+        }
+        if !output_len.is_null() {
+            unsafe { *output_len = 7 };
+        }
+        cryptoki_sys::CKR_FUNCTION_FAILED
+    }
+
+    unsafe extern "C" fn encrypt_fails_without_mutation(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _data: cryptoki_sys::CK_BYTE_PTR,
+        _data_len: cryptoki_sys::CK_ULONG,
+        _output: cryptoki_sys::CK_BYTE_PTR,
+        output_len: cryptoki_sys::CK_ULONG_PTR,
+    ) -> cryptoki_sys::CK_RV {
+        if !output_len.is_null() {
+            unsafe { *output_len = 7 };
+        }
+        cryptoki_sys::CKR_FUNCTION_FAILED
+    }
+
+    fn encrypt_backend_with(
+        encrypt: unsafe extern "C" fn(
+            cryptoki_sys::CK_SESSION_HANDLE,
+            cryptoki_sys::CK_BYTE_PTR,
+            cryptoki_sys::CK_ULONG,
+            cryptoki_sys::CK_BYTE_PTR,
+            cryptoki_sys::CK_ULONG_PTR,
+        ) -> cryptoki_sys::CK_RV,
+    ) -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_Encrypt = Some(encrypt);
+        let backend = FfiBackend {
+            _lib: crate::ffi::loading::test_library_handle(),
+            func_list: functions.as_mut(),
+            func_list_3_0: None,
+            func_list_3_2: None,
+            initialize_args: None,
+            mech_cache: dashmap::DashMap::new(),
+            last_init_family: dashmap::DashMap::new(),
+            session_slot_map: dashmap::DashMap::new(),
+            slot_sessions: dashmap::DashMap::new(),
+            object_cleanup: Default::default(),
+            // Test-local backend: bypasses the process reservation without
+            // consuming it; never backs production dispatch (C3M.4).
+            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
+            lifecycle: Default::default(),
+            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
+            ),
+        };
+        (backend, functions)
+    }
+
+    fn seed_encrypt_gcm_cache(backend: &FfiBackend, session: CkSessionHandle) {
+        let mechanism = CkMechanism {
+            mechanism_type: CkMechanismType::AES_GCM,
+            params: Some(CkMechanismParams::Gcm(GcmParams {
+                iv: vec![0x11; 12],
+                iv_bits: 96,
+                iv_buffer_len: 12,
+                aad: Vec::new(),
+                tag_bits: 128,
+            })),
+        };
+        let ffi_mech = super::super::ffi_conversion::mechanism_to_ffi(&mechanism).unwrap();
+        // Publish the retained IV root for the stub before inserting: the
+        // owned IV buffer address is stable across the move into the slot.
+        let outer = ffi_mech.ck_mechanism();
+        let iv_root = unsafe { (*outer.pParameter.cast::<cryptoki_sys::CK_GCM_PARAMS>()).pIv };
+        ENCRYPT_ERROR_IV_TARGET.store(iv_root, Ordering::SeqCst);
+        backend.mech_cache.insert((session.0, OperationFamily::Encrypt), ffi_mech);
+    }
+
+    #[cfg_attr(miri, ignore)] // Miri: backend instance needs dlopen + DashMap; helper-level matrix covers the rule under Miri
+    #[test]
+    fn encrypt_error_effect_requires_changed_cached_iv() {
+        let _guard = LOCK.lock().unwrap();
+        let data_spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 4, length_pointer_null: false };
+        let (backend, _functions) = encrypt_backend_with(encrypt_fails_after_mutating_cached_iv);
+        let session = CkSessionHandle(21);
+        seed_encrypt_gcm_cache(&backend, session);
+        let (output, effects) = backend
+            .ffi_encrypt_exact_with_output(session, CkInBuf::Bytes(b"data"), &data_spec)
+            .unwrap();
+        assert_eq!(output.ck_rv, CkRv::FUNCTION_FAILED);
+        let Some(CkMechanismParams::Gcm(gcm)) = effects else {
+            panic!("failed encrypt must surface the mutated cached GCM IV");
+        };
+        assert_eq!(gcm.iv[0], 0x42);
+
+        let (plain_backend, _plain_functions) =
+            encrypt_backend_with(encrypt_fails_without_mutation);
+        let plain_session = CkSessionHandle(22);
+        seed_encrypt_gcm_cache(&plain_backend, plain_session);
+        let (output, effects) = plain_backend
+            .ffi_encrypt_exact_with_output(plain_session, CkInBuf::Bytes(b"data"), &data_spec)
+            .unwrap();
+        assert_eq!(output.ck_rv, CkRv::FUNCTION_FAILED);
+        assert_eq!(effects, None);
+    }
+
+    #[cfg_attr(miri, ignore)] // Miri: backend instance needs dlopen + DashMap; helper-level matrix covers the rule under Miri
+    #[test]
+    fn encrypt_error_size_query_suppresses_cached_output() {
+        let _guard = LOCK.lock().unwrap();
+        let (backend, _functions) = encrypt_backend_with(encrypt_fails_after_mutating_cached_iv);
+        let session = CkSessionHandle(23);
+        seed_encrypt_gcm_cache(&backend, session);
+        let (output, effects) = backend
+            .ffi_encrypt_exact_with_output(
+                session,
+                CkInBuf::Bytes(b"data"),
+                &CkOutputBufferSpec {
+                    buffer_present: false,
+                    buffer_len: 0,
+                    length_pointer_null: false,
+                },
+            )
+            .unwrap();
+        assert_eq!(output.ck_rv, CkRv::FUNCTION_FAILED);
+        assert_eq!(effects, None);
+    }
+
+    #[cfg_attr(miri, ignore)] // Miri: backend instance needs dlopen + DashMap; helper-level matrix covers the rule under Miri
+    #[test]
+    fn encrypt_error_missing_length_surfaces_changed_cached_iv() {
+        let _guard = LOCK.lock().unwrap();
+        let missing_spec =
+            CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: true };
+        let (backend, _functions) = encrypt_backend_with(encrypt_fails_after_mutating_cached_iv);
+        let session = CkSessionHandle(24);
+        seed_encrypt_gcm_cache(&backend, session);
+        let (output, effects) = backend
+            .ffi_encrypt_exact_with_output(session, CkInBuf::Bytes(b"data"), &missing_spec)
+            .unwrap();
+        assert_eq!(output.ck_rv, CkRv::FUNCTION_FAILED);
+        let Some(CkMechanismParams::Gcm(gcm)) = effects else {
+            panic!("failed missing-length encrypt must surface the mutated cached GCM IV");
+        };
+        assert_eq!(gcm.iv[0], 0x42);
+
+        let (plain_backend, _plain_functions) =
+            encrypt_backend_with(encrypt_fails_without_mutation);
+        let plain_session = CkSessionHandle(25);
+        seed_encrypt_gcm_cache(&plain_backend, plain_session);
+        let (output, effects) = plain_backend
+            .ffi_encrypt_exact_with_output(plain_session, CkInBuf::Bytes(b"data"), &missing_spec)
+            .unwrap();
+        assert_eq!(output.ck_rv, CkRv::FUNCTION_FAILED);
+        assert_eq!(effects, None);
+    }
+
     unsafe extern "C" fn encrypt_init_ok(
         _session: cryptoki_sys::CK_SESSION_HANDLE,
         _mechanism: *mut cryptoki_sys::CK_MECHANISM,
@@ -681,13 +859,14 @@ mod tests {
         cryptoki_sys::CKR_FUNCTION_FAILED
     }
 
+    #[cfg_attr(miri, ignore = "Miri cannot dlopen; covered natively")]
     #[test]
     fn native_owner_dual_families_and_cancel_are_independent() {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
         functions.C_EncryptInit = Some(encrypt_init_ok);
         functions.C_DigestInit = Some(digest_init_ok);
         let backend = FfiBackend {
-            _lib: libloading::os::unix::Library::this().into(),
+            _lib: crate::ffi::loading::test_library_handle(),
             func_list: functions.as_mut(),
             func_list_3_0: None,
             func_list_3_2: None,
@@ -701,6 +880,8 @@ mod tests {
             // consuming it; never backs production dispatch (C3M.4).
             construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
             lifecycle: Default::default(),
+            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
+            ),
         };
         let session = CkSessionHandle(11);
         let gcm = CkMechanism {
@@ -740,12 +921,13 @@ mod tests {
         );
     }
 
+    #[cfg_attr(miri, ignore = "Miri cannot dlopen; covered natively")]
     #[test]
     fn native_owner_init_failure_preserves_active() {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
         functions.C_EncryptInit = Some(encrypt_init_ok);
         let backend = FfiBackend {
-            _lib: libloading::os::unix::Library::this().into(),
+            _lib: crate::ffi::loading::test_library_handle(),
             func_list: functions.as_mut(),
             func_list_3_0: None,
             func_list_3_2: None,
@@ -759,6 +941,8 @@ mod tests {
             // consuming it; never backs production dispatch (C3M.4).
             construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
             lifecycle: Default::default(),
+            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
+            ),
         };
         let session = CkSessionHandle(12);
         let gcm = CkMechanism {
@@ -783,6 +967,110 @@ mod tests {
         assert_eq!(
             backend.cached_mechanism_output_params_for(session, OperationFamily::Encrypt),
             gcm.params
+        );
+        assert_eq!(
+            backend.last_init_family.get(&session.0).as_deref(),
+            Some(&OperationFamily::Encrypt)
+        );
+    }
+
+    #[cfg_attr(miri, ignore)] // Miri: backend instance needs dlopen + DashMap; helper-level matrix covers the rule under Miri
+    #[test]
+    fn native_owner_first_init_failure_publishes_nothing() {
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_EncryptInit = Some(encrypt_init_fails);
+        let backend = FfiBackend {
+            _lib: crate::ffi::loading::test_library_handle(),
+            func_list: functions.as_mut(),
+            func_list_3_0: None,
+            func_list_3_2: None,
+            initialize_args: None,
+            mech_cache: dashmap::DashMap::new(),
+            last_init_family: dashmap::DashMap::new(),
+            session_slot_map: dashmap::DashMap::new(),
+            slot_sessions: dashmap::DashMap::new(),
+            object_cleanup: Default::default(),
+            // Test-local backend: bypasses the process reservation without
+            // consuming it; never backs production dispatch (C3M.4).
+            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
+            lifecycle: Default::default(),
+            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
+            ),
+        };
+        let session = CkSessionHandle(25);
+        let gcm = CkMechanism {
+            mechanism_type: CkMechanismType::AES_GCM,
+            params: Some(CkMechanismParams::Gcm(GcmParams {
+                iv: vec![0xA5; 12],
+                iv_bits: 96,
+                iv_buffer_len: 12,
+                aad: Vec::new(),
+                tag_bits: 128,
+            })),
+        };
+        // A failed FIRST Init on an empty slot publishes nothing: no cache
+        // entry, no last-Init marker.
+        assert_eq!(
+            backend.ffi_encrypt_init_with_output(session, &gcm, CkObjectHandle(1)).unwrap_err(),
+            CkRv::FUNCTION_FAILED
+        );
+        assert!(
+            !backend.mech_cache.iter().any(|entry| entry.key().0 == session.0),
+            "failed first Init must not publish any mech_cache entry"
+        );
+        assert!(backend.last_init_family.get(&session.0).is_none());
+    }
+
+    #[cfg_attr(miri, ignore)] // Miri: backend instance needs dlopen + DashMap; helper-level matrix covers the rule under Miri
+    #[test]
+    fn native_owner_failed_reinit_keeps_marker_and_graph() {
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_EncryptInit = Some(encrypt_init_ok);
+        let backend = FfiBackend {
+            _lib: crate::ffi::loading::test_library_handle(),
+            func_list: functions.as_mut(),
+            func_list_3_0: None,
+            func_list_3_2: None,
+            initialize_args: None,
+            mech_cache: dashmap::DashMap::new(),
+            last_init_family: dashmap::DashMap::new(),
+            session_slot_map: dashmap::DashMap::new(),
+            slot_sessions: dashmap::DashMap::new(),
+            object_cleanup: Default::default(),
+            // Test-local backend: bypasses the process reservation without
+            // consuming it; never backs production dispatch (C3M.4).
+            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
+            lifecycle: Default::default(),
+            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
+            ),
+        };
+        let session = CkSessionHandle(26);
+        let gcm = CkMechanism {
+            mechanism_type: CkMechanismType::AES_GCM,
+            params: Some(CkMechanismParams::Gcm(GcmParams {
+                iv: vec![0xA5; 12],
+                iv_bits: 96,
+                iv_buffer_len: 12,
+                aad: Vec::new(),
+                tag_bits: 128,
+            })),
+        };
+        let first = backend.ffi_encrypt_init_with_output(session, &gcm, CkObjectHandle(1)).unwrap();
+        assert_eq!(first, gcm.params);
+        // Two consecutive failed re-Inits must still preserve the original
+        // graph bytes and the last-Init marker.
+        functions.C_EncryptInit = Some(encrypt_init_fails);
+        assert_eq!(
+            backend.ffi_encrypt_init_with_output(session, &gcm, CkObjectHandle(1)).unwrap_err(),
+            CkRv::FUNCTION_FAILED
+        );
+        assert_eq!(
+            backend.ffi_encrypt_init_with_output(session, &gcm, CkObjectHandle(1)).unwrap_err(),
+            CkRv::FUNCTION_FAILED
+        );
+        assert_eq!(
+            backend.cached_mechanism_output_params_for(session, OperationFamily::Encrypt),
+            first
         );
         assert_eq!(
             backend.last_init_family.get(&session.0).as_deref(),

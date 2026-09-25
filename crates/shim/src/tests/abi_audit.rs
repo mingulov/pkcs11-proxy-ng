@@ -110,67 +110,435 @@ fn all_function_list_pointers_are_non_null() {
     assert!(!p.is_null());
 
     let fl = unsafe { &*p };
-    assert!(fl.C_Initialize.is_some(), "C_Initialize must be non-null");
-    assert!(fl.C_Finalize.is_some(), "C_Finalize must be non-null");
-    assert!(fl.C_GetInfo.is_some(), "C_GetInfo must be non-null");
-    assert!(fl.C_GetSlotList.is_some(), "C_GetSlotList must be non-null");
-    assert!(fl.C_GetSlotInfo.is_some(), "C_GetSlotInfo must be non-null");
-    assert!(fl.C_GetTokenInfo.is_some(), "C_GetTokenInfo must be non-null");
-    assert!(fl.C_GetMechanismList.is_some(), "C_GetMechanismList must be non-null");
-    assert!(fl.C_GetMechanismInfo.is_some(), "C_GetMechanismInfo must be non-null");
-    assert!(fl.C_OpenSession.is_some(), "C_OpenSession must be non-null");
-    assert!(fl.C_CloseSession.is_some(), "C_CloseSession must be non-null");
-    assert!(fl.C_CloseAllSessions.is_some(), "C_CloseAllSessions must be non-null");
-    assert!(fl.C_GetSessionInfo.is_some(), "C_GetSessionInfo must be non-null");
-    assert!(fl.C_Login.is_some(), "C_Login must be non-null");
-    assert!(fl.C_Logout.is_some(), "C_Logout must be non-null");
-    assert!(fl.C_InitToken.is_some(), "C_InitToken must be non-null");
-    assert!(fl.C_InitPIN.is_some(), "C_InitPIN must be non-null");
-    assert!(fl.C_SetPIN.is_some(), "C_SetPIN must be non-null");
-    assert!(fl.C_FindObjectsInit.is_some(), "C_FindObjectsInit must be non-null");
-    assert!(fl.C_FindObjects.is_some(), "C_FindObjects must be non-null");
-    assert!(fl.C_FindObjectsFinal.is_some(), "C_FindObjectsFinal must be non-null");
-    assert!(fl.C_GetAttributeValue.is_some(), "C_GetAttributeValue must be non-null");
-    assert!(fl.C_SetAttributeValue.is_some(), "C_SetAttributeValue must be non-null");
-    assert!(fl.C_SignInit.is_some(), "C_SignInit must be non-null");
-    assert!(fl.C_Sign.is_some(), "C_Sign must be non-null");
-    assert!(fl.C_SignUpdate.is_some(), "C_SignUpdate must be non-null");
-    assert!(fl.C_SignFinal.is_some(), "C_SignFinal must be non-null");
-    assert!(fl.C_VerifyInit.is_some(), "C_VerifyInit must be non-null");
-    assert!(fl.C_Verify.is_some(), "C_Verify must be non-null");
-    assert!(fl.C_VerifyUpdate.is_some(), "C_VerifyUpdate must be non-null");
-    assert!(fl.C_VerifyFinal.is_some(), "C_VerifyFinal must be non-null");
-    assert!(fl.C_EncryptInit.is_some(), "C_EncryptInit must be non-null");
-    assert!(fl.C_Encrypt.is_some(), "C_Encrypt must be non-null");
-    assert!(fl.C_EncryptUpdate.is_some(), "C_EncryptUpdate must be non-null");
-    assert!(fl.C_EncryptFinal.is_some(), "C_EncryptFinal must be non-null");
-    assert!(fl.C_DecryptInit.is_some(), "C_DecryptInit must be non-null");
-    assert!(fl.C_Decrypt.is_some(), "C_Decrypt must be non-null");
-    assert!(fl.C_DecryptUpdate.is_some(), "C_DecryptUpdate must be non-null");
-    assert!(fl.C_DecryptFinal.is_some(), "C_DecryptFinal must be non-null");
-    assert!(fl.C_DigestInit.is_some(), "C_DigestInit must be non-null");
-    assert!(fl.C_Digest.is_some(), "C_Digest must be non-null");
-    assert!(fl.C_DigestUpdate.is_some(), "C_DigestUpdate must be non-null");
-    assert!(fl.C_DigestKey.is_some(), "C_DigestKey must be non-null");
-    assert!(fl.C_DigestFinal.is_some(), "C_DigestFinal must be non-null");
-    assert!(fl.C_GenerateKey.is_some(), "C_GenerateKey must be non-null");
-    assert!(fl.C_GenerateKeyPair.is_some(), "C_GenerateKeyPair must be non-null");
-    assert!(fl.C_GenerateRandom.is_some(), "C_GenerateRandom must be non-null");
-    assert!(fl.C_SeedRandom.is_some(), "C_SeedRandom must be non-null");
-    assert!(fl.C_CreateObject.is_some(), "C_CreateObject must be non-null");
-    assert!(fl.C_CopyObject.is_some(), "C_CopyObject must be non-null");
-    assert!(fl.C_DestroyObject.is_some(), "C_DestroyObject must be non-null");
-    assert!(fl.C_GetObjectSize.is_some(), "C_GetObjectSize must be non-null");
-    assert!(fl.C_WrapKey.is_some(), "C_WrapKey must be non-null");
-    assert!(fl.C_UnwrapKey.is_some(), "C_UnwrapKey must be non-null");
-    assert!(fl.C_DeriveKey.is_some(), "C_DeriveKey must be non-null");
-    assert!(fl.C_WaitForSlotEvent.is_some(), "C_WaitForSlotEvent must be non-null");
-    assert!(fl.C_GetOperationState.is_some(), "C_GetOperationState must be non-null");
-    assert!(fl.C_SetOperationState.is_some(), "C_SetOperationState must be non-null");
-    assert!(fl.C_SignRecoverInit.is_some(), "C_SignRecoverInit must be non-null");
-    assert!(fl.C_SignRecover.is_some(), "C_SignRecover must be non-null");
-    assert!(fl.C_VerifyRecoverInit.is_some(), "C_VerifyRecoverInit must be non-null");
-    assert!(fl.C_VerifyRecover.is_some(), "C_VerifyRecover must be non-null");
+    // E0793: CK_FUNCTION_LIST is packed on Windows; each `is_some()` below runs
+    // on a by-value copy of its `Option<fn>` field, never on a field reference.
+    assert!(
+        {
+            let f = fl.C_Initialize;
+            f.is_some()
+        },
+        "C_Initialize must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_Finalize;
+            f.is_some()
+        },
+        "C_Finalize must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_GetInfo;
+            f.is_some()
+        },
+        "C_GetInfo must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_GetSlotList;
+            f.is_some()
+        },
+        "C_GetSlotList must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_GetSlotInfo;
+            f.is_some()
+        },
+        "C_GetSlotInfo must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_GetTokenInfo;
+            f.is_some()
+        },
+        "C_GetTokenInfo must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_GetMechanismList;
+            f.is_some()
+        },
+        "C_GetMechanismList must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_GetMechanismInfo;
+            f.is_some()
+        },
+        "C_GetMechanismInfo must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_OpenSession;
+            f.is_some()
+        },
+        "C_OpenSession must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_CloseSession;
+            f.is_some()
+        },
+        "C_CloseSession must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_CloseAllSessions;
+            f.is_some()
+        },
+        "C_CloseAllSessions must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_GetSessionInfo;
+            f.is_some()
+        },
+        "C_GetSessionInfo must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_Login;
+            f.is_some()
+        },
+        "C_Login must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_Logout;
+            f.is_some()
+        },
+        "C_Logout must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_InitToken;
+            f.is_some()
+        },
+        "C_InitToken must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_InitPIN;
+            f.is_some()
+        },
+        "C_InitPIN must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_SetPIN;
+            f.is_some()
+        },
+        "C_SetPIN must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_FindObjectsInit;
+            f.is_some()
+        },
+        "C_FindObjectsInit must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_FindObjects;
+            f.is_some()
+        },
+        "C_FindObjects must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_FindObjectsFinal;
+            f.is_some()
+        },
+        "C_FindObjectsFinal must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_GetAttributeValue;
+            f.is_some()
+        },
+        "C_GetAttributeValue must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_SetAttributeValue;
+            f.is_some()
+        },
+        "C_SetAttributeValue must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_SignInit;
+            f.is_some()
+        },
+        "C_SignInit must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_Sign;
+            f.is_some()
+        },
+        "C_Sign must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_SignUpdate;
+            f.is_some()
+        },
+        "C_SignUpdate must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_SignFinal;
+            f.is_some()
+        },
+        "C_SignFinal must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_VerifyInit;
+            f.is_some()
+        },
+        "C_VerifyInit must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_Verify;
+            f.is_some()
+        },
+        "C_Verify must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_VerifyUpdate;
+            f.is_some()
+        },
+        "C_VerifyUpdate must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_VerifyFinal;
+            f.is_some()
+        },
+        "C_VerifyFinal must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_EncryptInit;
+            f.is_some()
+        },
+        "C_EncryptInit must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_Encrypt;
+            f.is_some()
+        },
+        "C_Encrypt must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_EncryptUpdate;
+            f.is_some()
+        },
+        "C_EncryptUpdate must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_EncryptFinal;
+            f.is_some()
+        },
+        "C_EncryptFinal must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_DecryptInit;
+            f.is_some()
+        },
+        "C_DecryptInit must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_Decrypt;
+            f.is_some()
+        },
+        "C_Decrypt must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_DecryptUpdate;
+            f.is_some()
+        },
+        "C_DecryptUpdate must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_DecryptFinal;
+            f.is_some()
+        },
+        "C_DecryptFinal must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_DigestInit;
+            f.is_some()
+        },
+        "C_DigestInit must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_Digest;
+            f.is_some()
+        },
+        "C_Digest must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_DigestUpdate;
+            f.is_some()
+        },
+        "C_DigestUpdate must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_DigestKey;
+            f.is_some()
+        },
+        "C_DigestKey must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_DigestFinal;
+            f.is_some()
+        },
+        "C_DigestFinal must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_GenerateKey;
+            f.is_some()
+        },
+        "C_GenerateKey must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_GenerateKeyPair;
+            f.is_some()
+        },
+        "C_GenerateKeyPair must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_GenerateRandom;
+            f.is_some()
+        },
+        "C_GenerateRandom must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_SeedRandom;
+            f.is_some()
+        },
+        "C_SeedRandom must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_CreateObject;
+            f.is_some()
+        },
+        "C_CreateObject must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_CopyObject;
+            f.is_some()
+        },
+        "C_CopyObject must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_DestroyObject;
+            f.is_some()
+        },
+        "C_DestroyObject must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_GetObjectSize;
+            f.is_some()
+        },
+        "C_GetObjectSize must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_WrapKey;
+            f.is_some()
+        },
+        "C_WrapKey must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_UnwrapKey;
+            f.is_some()
+        },
+        "C_UnwrapKey must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_DeriveKey;
+            f.is_some()
+        },
+        "C_DeriveKey must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_WaitForSlotEvent;
+            f.is_some()
+        },
+        "C_WaitForSlotEvent must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_GetOperationState;
+            f.is_some()
+        },
+        "C_GetOperationState must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_SetOperationState;
+            f.is_some()
+        },
+        "C_SetOperationState must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_SignRecoverInit;
+            f.is_some()
+        },
+        "C_SignRecoverInit must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_SignRecover;
+            f.is_some()
+        },
+        "C_SignRecover must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_VerifyRecoverInit;
+            f.is_some()
+        },
+        "C_VerifyRecoverInit must be non-null"
+    );
+    assert!(
+        {
+            let f = fl.C_VerifyRecover;
+            f.is_some()
+        },
+        "C_VerifyRecover must be non-null"
+    );
 }
 
 #[test]
