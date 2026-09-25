@@ -150,8 +150,7 @@ pub struct PolicyEntry {
 /// ```
 ///
 /// The two forms can be mixed inside the same list.
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug)]
 pub enum GrantSpec {
     /// A bare token-selector string; equivalent to a rich grant with
     /// `classes = None`, `mechanisms = None`, `extract = "allow"`.
@@ -160,8 +159,56 @@ pub enum GrantSpec {
     Rich(RichGrantConfig),
 }
 
+// Manual `Deserialize` (in place of `#[serde(untagged)]`) so a malformed rich
+// table — e.g. an unknown key rejected by `deny_unknown_fields` — surfaces
+// the inner error naming the key. A derived untagged impl discards
+// per-variant errors and reports only "data did not match any variant",
+// which would hide the typo'd key. Accepted shapes are unchanged: a string
+// or a table.
+impl<'de> Deserialize<'de> for GrantSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct GrantSpecVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for GrantSpecVisitor {
+            type Value = GrantSpec;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a token selector string or a rich grant table")
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(GrantSpec::Bare(v.to_owned()))
+            }
+
+            fn visit_string<E>(self, v: String) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(GrantSpec::Bare(v))
+            }
+
+            fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                RichGrantConfig::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(GrantSpec::Rich)
+            }
+        }
+
+        deserializer.deserialize_any(GrantSpecVisitor)
+    }
+}
+
 /// Rich grant table element for `tokens = [{ token = "...", ... }]`.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RichGrantConfig {
     /// Token selector string (same syntax as bare strings: `"label:X"`, `"serial:Y"`, etc.)
     pub token: String,
@@ -197,8 +244,7 @@ pub enum ExtractPolicyConfig {
 /// Two forms accepted in TOML:
 /// - Bare hex string: `"a1b2c3"` — inherits grant-level extract policy.
 /// - Rich table: `{ id = "a1b2c3", extract = "deny" }` — per-object override.
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug)]
 pub enum ObjectAclSpec {
     /// A bare CKA_UNIQUE_ID hex string; inherits grant-level extract policy.
     Bare(String),
@@ -206,8 +252,53 @@ pub enum ObjectAclSpec {
     Rich(ObjectAclRichConfig),
 }
 
+// Manual `Deserialize` (in place of `#[serde(untagged)]`); same rationale as
+// `GrantSpec` above — unknown keys must surface naming the key. Accepted
+// shapes are unchanged: a string or a table.
+impl<'de> Deserialize<'de> for ObjectAclSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct ObjectAclSpecVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for ObjectAclSpecVisitor {
+            type Value = ObjectAclSpec;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a CKA_UNIQUE_ID hex string or a rich objects entry")
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(ObjectAclSpec::Bare(v.to_owned()))
+            }
+
+            fn visit_string<E>(self, v: String) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(ObjectAclSpec::Bare(v))
+            }
+
+            fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                ObjectAclRichConfig::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(ObjectAclSpec::Rich)
+            }
+        }
+
+        deserializer.deserialize_any(ObjectAclSpecVisitor)
+    }
+}
+
 /// Rich form of an `objects` allow-list entry.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ObjectAclRichConfig {
     /// CKA_UNIQUE_ID as a hex byte string (e.g. `"a1b2c3"`).
     pub id: String,
@@ -224,11 +315,55 @@ pub struct ObjectAclRichConfig {
 /// - `tokens = ["label:X", "serial:Y"]` — list of bare selector strings.
 /// - `tokens = [{ token = "label:X", classes = [...], mechanisms = [...], extract = "deny" }]`
 ///   — list of rich grant tables (may be mixed with bare strings).
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug)]
 pub enum TokenAccessSpec {
     All(String),
     Specific(Vec<GrantSpec>),
+}
+
+// Manual `Deserialize` (in place of `#[serde(untagged)]`); same rationale as
+// `GrantSpec` above — this is the outer layer wrapping rich grants, so a
+// derived untagged impl here would swallow the key-naming error from the
+// inner grant layer. Accepted shapes are unchanged: a string or an array.
+impl<'de> Deserialize<'de> for TokenAccessSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct TokenAccessSpecVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for TokenAccessSpecVisitor {
+            type Value = TokenAccessSpec;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("`\"all\"` or a list of token selectors / rich grant tables")
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(TokenAccessSpec::All(v.to_owned()))
+            }
+
+            fn visit_string<E>(self, v: String) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(TokenAccessSpec::All(v))
+            }
+
+            fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                Vec::<GrantSpec>::deserialize(serde::de::value::SeqAccessDeserializer::new(seq))
+                    .map(TokenAccessSpec::Specific)
+            }
+        }
+
+        deserializer.deserialize_any(TokenAccessSpecVisitor)
+    }
 }
 
 #[derive(Deserialize)]
@@ -355,6 +490,27 @@ pub struct ProxyConfig {
     /// shared slots. Default 10 seconds.
     #[serde(default = "default_login_lock_timeout_secs")]
     pub login_lock_timeout_secs: u64,
+    /// Maximum concurrent in-flight gRPC requests per transport connection
+    /// (W1-L6-20; tonic `concurrency_limit_per_connection`). Bounds the
+    /// per-connection tower buffer so a transport flood cannot queue
+    /// unboundedly; requests past the limit are rejected immediately with
+    /// `RESOURCE_EXHAUSTED` when `grpc_load_shed` is on (the default).
+    /// Applies to both the TCP and Unix listeners. Default 256 — far above
+    /// plausible per-process concurrency; the global backend breaker
+    /// (`max_concurrent_backend_calls`) remains the primary gate.
+    #[serde(default = "default_grpc_concurrency_limit_per_connection")]
+    pub grpc_concurrency_limit_per_connection: usize,
+    /// HTTP/2 `SETTINGS_MAX_CONCURRENT_STREAMS` per connection (W1-L6-20;
+    /// tonic `max_concurrent_streams`). Caps multiplexed streams at the
+    /// protocol layer, complementing the request limit above. Default 256.
+    #[serde(default = "default_grpc_max_concurrent_streams")]
+    pub grpc_max_concurrent_streams: u32,
+    /// Reject (vs buffer) requests past
+    /// `grpc_concurrency_limit_per_connection` (W1-L6-20; tonic
+    /// `load_shed`). Default true — buffering a flood only delays the
+    /// rejection while burning memory.
+    #[serde(default = "default_grpc_load_shed")]
+    pub grpc_load_shed: bool,
 }
 
 /// Whether the daemon should self-exit given the stuck-call gauge and the
@@ -385,6 +541,9 @@ impl Default for ProxyConfig {
             sanitize_inputs: false,
             max_stuck_backend_calls: None,
             login_lock_timeout_secs: default_login_lock_timeout_secs(),
+            grpc_concurrency_limit_per_connection: default_grpc_concurrency_limit_per_connection(),
+            grpc_max_concurrent_streams: default_grpc_max_concurrent_streams(),
+            grpc_load_shed: default_grpc_load_shed(),
         }
     }
 }
@@ -436,6 +595,15 @@ fn default_backend_health_consecutive_failures() -> u32 {
 fn default_login_lock_timeout_secs() -> u64 {
     10
 }
+fn default_grpc_concurrency_limit_per_connection() -> usize {
+    256
+}
+fn default_grpc_max_concurrent_streams() -> u32 {
+    256
+}
+fn default_grpc_load_shed() -> bool {
+    true
+}
 
 #[derive(Debug, Deserialize, Default)]
 pub struct ListenerGroup {
@@ -449,6 +617,9 @@ pub struct ListenerGroup {
 pub struct ResilienceConfig {
     /// If set, a `C_FindObjects` result larger than this is counted as a
     /// pathological-population event and logged. Count-only: NO extra backend calls.
+    /// The same value also bounds each `find_objects` filter scan (W1-C1-07):
+    /// past the bound the scan stops with a loud failure instead of draining
+    /// an adversarial population unboundedly. Unset = unbounded, as before.
     pub find_result_warn_threshold: Option<usize>,
     /// If set, a Unix-domain metrics endpoint (mode 0600) is bound here, serving
     /// Prometheus text on `GET /metrics`.
@@ -553,6 +724,19 @@ impl AuditConfig {
     /// Validate derived invariants.  Returns `Err` if the configuration is
     /// self-inconsistent; the message is human-readable for operator display.
     pub fn validate(&self) -> Result<(), String> {
+        // W1-C2-05: zero rotation knobs are never valid — 0 keep disables
+        // pruning (unbounded disk growth) and 0 max-bytes rotates on every
+        // record (fsync+rename storm). Reject loudly at load, not silently.
+        if self.rotate_max_bytes == 0 {
+            return Err("audit.rotate_max_bytes must be > 0 \
+                 (0 would rotate the audit log on every record)"
+                .into());
+        }
+        if self.rotate_keep_files == 0 {
+            return Err("audit.rotate_keep_files must be > 0 \
+                 (0 disables pruning; audit logs would grow without bound)"
+                .into());
+        }
         if self.channel_capacity == 0 {
             return Err("audit.channel_capacity must be > 0 \
                  (tokio::sync::mpsc::channel(0) panics at startup)"
@@ -670,6 +854,22 @@ impl TcpAuthMode {
     }
 }
 
+/// Canonicalize a `[[auth.policy]]` identity for rules-map storage (W1-C3-06).
+///
+/// Runtime peer-cred keys render canonically (`uid=1000`), but TOML accepts
+/// any `u32`-parseable spelling — `uid=01000`, `uid=+1000` — which would
+/// then never match at runtime (a silently dead grant). Parsing and
+/// re-rendering here makes every accepted uid identity matchable.
+/// Non-uid identities pass through unchanged.
+pub(crate) fn normalize_policy_identity(identity: &str) -> String {
+    if let Some(uid) = identity.strip_prefix("uid=")
+        && let Ok(n) = uid.parse::<u32>()
+    {
+        return format!("uid={n}");
+    }
+    identity.to_string()
+}
+
 #[derive(Clone, Copy)]
 enum PolicyIdentitySource {
     PeerCred,
@@ -696,7 +896,11 @@ impl PolicyIdentitySource {
     fn can_produce(self, identity: &str) -> bool {
         match self {
             Self::PeerCred => {
-                identity.strip_prefix("uid=").is_some_and(|uid| uid.parse::<u32>().is_ok())
+                // W1-C3-06: judge the normalized form so every accepted
+                // identity matches a runtime key (uid=01000 → uid=1000).
+                normalize_policy_identity(identity)
+                    .strip_prefix("uid=")
+                    .is_some_and(|uid| uid.parse::<u32>().is_ok())
             }
             Self::Mtls => {
                 // New SPKI-keyed form: x509:spki=<hash> (short) or x509:spki=<hash>;issuer=...;subject=... (enriched)
@@ -753,7 +957,7 @@ impl DaemonConfig {
             .map_err(|e| format!("Failed to read config '{}': {e}", path.display()))?;
         let mut config: Self = toml::from_str(&content)
             .map_err(|e| format!("Failed to parse config '{}': {e}", path.display()))?;
-        config.apply_env_overrides();
+        config.apply_env_overrides()?;
         // Security: refuse to start if config file or backend module is group/world-writable
         // — a writable code-execution surface reachable by unprivileged users.
         check_not_group_or_world_writable(path, "config file")?;
@@ -779,22 +983,34 @@ impl DaemonConfig {
     /// - `PKCS11_PROXY_BACKEND_MODULE`                → `backend.module`
     /// - `PKCS11_PROXY_BACKEND_ARGS`                  → `backend.initialize_args`
     /// - `PKCS11_PROXY_MECHANISMS_CONFIG`             → `mechanisms.config_path`
+    /// - `PKCS11_PROXY_ALLOW_INSECURE`                → `listener.remote.allow_insecure_tcp`
     /// - `PKCS11_PROXY_RESILIENCE_METRICS_SOCKET`     → `resilience.metrics_socket`
     /// - `PKCS11_PROXY_RESILIENCE_FIND_THRESHOLD`     → `resilience.find_result_warn_threshold`
     /// - `PKCS11_PROXY_TEST_HOOKS_CONTROL_SOCKET`     → `test_hooks.control_socket`
-    pub fn apply_env_overrides(&mut self) {
+    pub fn apply_env_overrides(&mut self) -> Result<(), String> {
+        self.apply_env_overrides_with(|key| std::env::var(key).ok())
+    }
+
+    /// Same as [`DaemonConfig::apply_env_overrides`] but reads from `get`
+    /// instead of the process environment, so tests can exercise the override
+    /// logic hermetically without `set_var` (which would race parallel tests
+    /// in the same binary that call `load()`).
+    fn apply_env_overrides_with(
+        &mut self,
+        get: impl Fn(&str) -> Option<String>,
+    ) -> Result<(), String> {
         // Keep this list in sync with env_var_help() below — both surface the
         // same canonical env-var → TOML-field mapping.
-        if let Ok(v) = std::env::var("PKCS11_PROXY_BACKEND_MODULE") {
+        if let Some(v) = get("PKCS11_PROXY_BACKEND_MODULE") {
             self.backend.module = std::path::PathBuf::from(v);
         }
-        if let Ok(v) = std::env::var("PKCS11_PROXY_BACKEND_ARGS") {
+        if let Some(v) = get("PKCS11_PROXY_BACKEND_ARGS") {
             self.backend.initialize_args = Some(v);
         }
-        if let Ok(v) = std::env::var("PKCS11_PROXY_MECHANISMS_CONFIG") {
+        if let Some(v) = get("PKCS11_PROXY_MECHANISMS_CONFIG") {
             self.mechanisms.config_path = Some(std::path::PathBuf::from(v));
         }
-        if let Ok(v) = std::env::var("PKCS11_PROXY_BIND") {
+        if let Some(v) = get("PKCS11_PROXY_BIND") {
             // Bind override applies to whichever TCP listener is already
             // configured; if there's no [listener.remote] block, the env var
             // creates an unauthenticated TCP listener — but only when
@@ -803,9 +1019,18 @@ impl DaemonConfig {
             // provision an open listener. Tighter listener semantics (auth,
             // TLS) still have to come from the TOML.
             match self.listener.remote.as_mut() {
-                Some(tcp) => tcp.bind = v,
+                Some(tcp) => {
+                    tcp.bind = v;
+                    // W1-L8-01: honor the documented PKCS11_PROXY_ALLOW_INSECURE
+                    // override here too (env > TOML). Unset => the TOML value
+                    // is kept, so this can never silently enable an insecure
+                    // listener. Parse matches the `None` branch below.
+                    if let Some(val) = get("PKCS11_PROXY_ALLOW_INSECURE") {
+                        tcp.allow_insecure_tcp = val == "1" || val.eq_ignore_ascii_case("true");
+                    }
+                }
                 None => {
-                    let allow_insecure_tcp = std::env::var("PKCS11_PROXY_ALLOW_INSECURE")
+                    let allow_insecure_tcp = get("PKCS11_PROXY_ALLOW_INSECURE")
                         .map(|val| val == "1" || val.eq_ignore_ascii_case("true"))
                         .unwrap_or(false);
                     self.listener.remote = Some(TcpListenerConfig {
@@ -819,17 +1044,27 @@ impl DaemonConfig {
                 }
             }
         }
-        if let Ok(v) = std::env::var("PKCS11_PROXY_RESILIENCE_METRICS_SOCKET") {
+        if let Some(v) = get("PKCS11_PROXY_RESILIENCE_METRICS_SOCKET") {
             self.resilience.metrics_socket = Some(std::path::PathBuf::from(v));
         }
-        if let Ok(v) = std::env::var("PKCS11_PROXY_RESILIENCE_FIND_THRESHOLD")
-            && let Ok(n) = v.parse::<usize>()
-        {
-            self.resilience.find_result_warn_threshold = Some(n);
+        if let Some(v) = get("PKCS11_PROXY_RESILIENCE_FIND_THRESHOLD") {
+            // W1-C3-08: error loudly on unparseable values instead of
+            // silently keeping the TOML value (the operator would believe
+            // the override applied).
+            match v.parse::<usize>() {
+                Ok(n) => self.resilience.find_result_warn_threshold = Some(n),
+                Err(_) => {
+                    return Err(format!(
+                        "PKCS11_PROXY_RESILIENCE_FIND_THRESHOLD='{v}' is not a valid \
+                         non-negative integer for resilience.find_result_warn_threshold"
+                    ));
+                }
+            }
         }
-        if let Ok(v) = std::env::var("PKCS11_PROXY_TEST_HOOKS_CONTROL_SOCKET") {
+        if let Some(v) = get("PKCS11_PROXY_TEST_HOOKS_CONTROL_SOCKET") {
             self.test_hooks.control_socket = Some(std::path::PathBuf::from(v));
         }
+        Ok(())
     }
 
     fn validate(&self) -> Result<(), String> {
@@ -883,6 +1118,15 @@ impl DaemonConfig {
                  omit the field to disable the limit (0 would block all requests)"
                 .into());
         }
+        // W1-L8-16: a zero cooldown arms an already-expired lockout, so
+        // the budget counts failures without ever locking out — a
+        // silently neutered budget. Omit the field for the 60 s default.
+        if self.rate_limit.per_slot_failed_login_cooldown_secs == Some(0) {
+            return Err("rate_limit.per_slot_failed_login_cooldown_secs must be > 0; \
+                 omit the field to use the 60 s default (0 expires the cooldown \
+                 immediately, so the budget never locks out)"
+                .into());
+        }
         if self.proxy.max_concurrent_backend_calls > self.proxy.max_blocking_threads {
             return Err(format!(
                 "proxy.max_concurrent_backend_calls ({}) must be <= proxy.max_blocking_threads ({}). \
@@ -893,6 +1137,20 @@ impl DaemonConfig {
         // Validate eviction_interval_secs
         if self.proxy.eviction_interval_secs == 0 {
             return Err("proxy.eviction_interval_secs must be > 0".into());
+        }
+        // W1-L8-16: a zero rate window resets on every call, so the
+        // per-peer limiter never trips while appearing configured.
+        if self.proxy.rate_limit_window_secs == 0 {
+            return Err("proxy.rate_limit_window_secs must be > 0 (0 resets the window \
+                 on every call, so the per-peer limiter never trips)"
+                .into());
+        }
+        // W1-L8-16: a zero login-lock timeout elapses immediately, so
+        // every login/logout/close-session lock acquisition fails.
+        if self.proxy.login_lock_timeout_secs == 0 {
+            return Err("proxy.login_lock_timeout_secs must be > 0 (0 fails every \
+                 login-lock acquisition immediately)"
+                .into());
         }
         // Refuse to start if backend.module is still the shipped
         // placeholder — fail loud at startup rather than at first call.
@@ -923,6 +1181,12 @@ impl DaemonConfig {
             return Err("proxy.backend_health_consecutive_failures must be > 0 \
                  (the readiness gate cannot trip on zero failures)"
                 .into());
+        }
+        if self.proxy.grpc_concurrency_limit_per_connection == 0 {
+            return Err("proxy.grpc_concurrency_limit_per_connection must be > 0".into());
+        }
+        if self.proxy.grpc_max_concurrent_streams == 0 {
+            return Err("proxy.grpc_max_concurrent_streams must be > 0".into());
         }
         // Validate the mechanism-registry config path if set.
         if let Some(path) = &self.mechanisms.config_path
@@ -957,10 +1221,15 @@ impl DaemonConfig {
                     }
                 }
             }
-            // Validate bind address has host:port format
-            if !tcp.bind.contains(':') {
+            // W1-C3-13: validate the bind as a real SocketAddr. A mere
+            // contains(':') check lets "localhost:50051" pass here only to
+            // die later in main.rs's `parse::<SocketAddr>()` with a confusing
+            // error. Hostnames are rejected (use an IP:port); the daemon does
+            // not resolve DNS for its listen address.
+            if let Err(e) = tcp.bind.parse::<std::net::SocketAddr>() {
                 return Err(format!(
-                    "listener.remote.bind must be in host:port format, got '{}'",
+                    "listener.remote.bind must be an IP:port SocketAddr in host:port format \
+                     (hostnames are not resolved), got '{}': {e}",
                     tcp.bind
                 ));
             }
@@ -977,11 +1246,41 @@ impl DaemonConfig {
                 "No listeners configured. Set [listener.local] and/or [listener.remote].".into()
             );
         }
-        // An authorization policy cannot apply to an unauthenticated peer: refuse
-        // to start if any listener uses auth = "none" while [auth.policy] is set.
         let has_unauthenticated_listener =
             self.listener.local.as_ref().is_some_and(|l| !l.auth.is_authenticated())
                 || self.listener.remote.as_ref().is_some_and(|r| !r.auth.is_authenticated());
+        // M3: a per-object `objects` grant on an auth="none" listener is silently
+        // inert — `allows_object_use` returns true for Unauthenticated, so the
+        // per-object restriction is bypassed entirely. Refuse to start to prevent
+        // false security.
+        //
+        // W1-C3-04: this check MUST precede the generic policy+auth=none reject
+        // below: every M3 combo also satisfies that guard, so placing this
+        // after it would shadow the M3 error forever. Order is load-bearing;
+        // do not move this below the generic reject. All current rejects are
+        // preserved: M3 combos now hit this specific error, everything else
+        // falls through to the generic one.
+        if has_unauthenticated_listener {
+            for (index, entry) in self.auth.policy.iter().enumerate() {
+                if let TokenAccessSpec::Specific(ref grants) = entry.tokens {
+                    for grant in grants {
+                        if let GrantSpec::Rich(rich) = grant
+                            && rich.objects.is_some()
+                        {
+                            return Err(format!(
+                                "auth.policy[{index}]: per-object `objects` grant with an \
+                                 auth=\"none\" listener is silently inert — unauthenticated \
+                                 peers bypass per-object authz (allows_object_use returns \
+                                 true for Unauthenticated). Use an authenticated listener \
+                                 (peer_cred / mtls) or remove the `objects` restriction."
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        // An authorization policy cannot apply to an unauthenticated peer: refuse
+        // to start if any listener uses auth = "none" while [auth.policy] is set.
         if !self.auth.policy.is_empty() && has_unauthenticated_listener {
             return Err("[auth.policy] is set but a listener uses auth = \"none\"; an \
                  authorization policy cannot apply to unauthenticated peers. Use an \
@@ -1031,29 +1330,6 @@ impl DaemonConfig {
                  and allow_all_authenticated is false. Either add [auth.policy] \
                  entries or set auth.allow_all_authenticated = true."
                 .into());
-        }
-        // M3: a per-object `objects` grant on an auth="none" listener is silently
-        // inert — `allows_object_use` returns true for Unauthenticated, so the
-        // per-object restriction is bypassed entirely. Refuse to start to prevent
-        // false security (mirror of the existing policy+auth=none guard above).
-        if has_unauthenticated_listener {
-            for (index, entry) in self.auth.policy.iter().enumerate() {
-                if let TokenAccessSpec::Specific(ref grants) = entry.tokens {
-                    for grant in grants {
-                        if let GrantSpec::Rich(rich) = grant
-                            && rich.objects.is_some()
-                        {
-                            return Err(format!(
-                                "auth.policy[{index}]: per-object `objects` grant with an \
-                                 auth=\"none\" listener is silently inert — unauthenticated \
-                                 peers bypass per-object authz (allows_object_use returns \
-                                 true for Unauthenticated). Use an authenticated listener \
-                                 (peer_cred / mtls) or remove the `objects` restriction."
-                            ));
-                        }
-                    }
-                }
-            }
         }
         // NOTE: per-mechanism (`mechanisms`) enforcement is now wired (G3 Task 3)
         // and the startup refuse-to-start guard has been removed. Mechanism grants

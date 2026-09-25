@@ -550,7 +550,7 @@ fn validate_structured_wire_params(
 pub fn validate_structured_wire_parameter(
     parameter: &v1_proto::MessageParameter,
 ) -> Result<(), pkcs11_proxy_ng_types::CkRv> {
-    let params = parameter.params.as_ref().ok_or(pkcs11_proxy_ng_types::CkRv::ARGUMENTS_BAD)?;
+    let params = parameter.params.as_ref().ok_or(super::ABSENT_MESSAGE_ONEOF_RV)?;
     validate_structured_wire_params(params)
 }
 
@@ -577,7 +577,7 @@ impl TryFrom<&v1_proto::MessageParameter> for MessageParameter {
                 let parameter = MessageParameter::SalaChacha(p.into());
                 Ok(parameter)
             }
-            None => Err(pkcs11_proxy_ng_types::CkRv::ARGUMENTS_BAD),
+            None => Err(super::ABSENT_MESSAGE_ONEOF_RV),
         }
     }
 }
@@ -787,9 +787,16 @@ mod tests {
 
     #[test]
     fn message_parameter_none_returns_error() {
+        // W1-C8-03: absent oneof must report the documented sibling-wide RV.
         let proto = v1_proto::MessageParameter { params: None };
-        let result = MessageParameter::try_from(&proto);
-        assert!(result.is_err());
+        assert_eq!(
+            MessageParameter::try_from(&proto),
+            Err(crate::convert::ABSENT_MESSAGE_ONEOF_RV),
+        );
+        assert_eq!(
+            MessageParameter::try_from(&proto),
+            Err(pkcs11_proxy_ng_types::CkRv::ARGUMENTS_BAD),
+        );
     }
 
     #[test]

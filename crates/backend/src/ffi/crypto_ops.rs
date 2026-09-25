@@ -755,26 +755,7 @@ mod tests {
     fn encrypt_missing_length_surfaces_cached_mechanism_output_but_size_query_does_not() {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
         functions.C_Encrypt = Some(encrypt_ok);
-        let backend = FfiBackend {
-            _lib: crate::ffi::loading::test_library_handle(),
-            func_list: functions.as_mut(),
-            func_list_3_0: None,
-            func_list_3_2: None,
-            initialize_args: None,
-            mech_cache: dashmap::DashMap::new(),
-            last_init_family: dashmap::DashMap::new(),
-            session_slot_map: dashmap::DashMap::new(),
-            slot_sessions: dashmap::DashMap::new(),
-            object_cleanup: Default::default(),
-            // Test-local backend: bypasses the process reservation without
-            // consuming it; never backs production dispatch (C3M.4).
-            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-            lifecycle: Default::default(),
-            lifecycle_domain: Default::default(),
-            session_fences: Default::default(),
-            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
-            ),
-        };
+        let backend = FfiBackend::test_backend_with_tables(functions.as_mut(), None, None);
         // Exact paths are ordinary: establish post-Initialize state.
         backend.lifecycle_domain.open_for_tests();
         let session = CkSessionHandle(7);
@@ -867,26 +848,7 @@ mod tests {
     ) -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
         functions.C_Encrypt = Some(encrypt);
-        let backend = FfiBackend {
-            _lib: crate::ffi::loading::test_library_handle(),
-            func_list: functions.as_mut(),
-            func_list_3_0: None,
-            func_list_3_2: None,
-            initialize_args: None,
-            mech_cache: dashmap::DashMap::new(),
-            last_init_family: dashmap::DashMap::new(),
-            session_slot_map: dashmap::DashMap::new(),
-            slot_sessions: dashmap::DashMap::new(),
-            object_cleanup: Default::default(),
-            // Test-local backend: bypasses the process reservation without
-            // consuming it; never backs production dispatch (C3M.4).
-            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-            lifecycle: Default::default(),
-            lifecycle_domain: Default::default(),
-            session_fences: Default::default(),
-            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
-            ),
-        };
+        let backend = FfiBackend::test_backend_with_tables(functions.as_mut(), None, None);
         // Exact paths are ordinary: establish post-Initialize state.
         backend.lifecycle_domain.open_for_tests();
         (backend, functions)
@@ -1024,26 +986,7 @@ mod tests {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
         functions.C_EncryptInit = Some(encrypt_init_ok);
         functions.C_DigestInit = Some(digest_init_ok);
-        let backend = FfiBackend {
-            _lib: crate::ffi::loading::test_library_handle(),
-            func_list: functions.as_mut(),
-            func_list_3_0: None,
-            func_list_3_2: None,
-            initialize_args: None,
-            mech_cache: dashmap::DashMap::new(),
-            last_init_family: dashmap::DashMap::new(),
-            session_slot_map: dashmap::DashMap::new(),
-            slot_sessions: dashmap::DashMap::new(),
-            object_cleanup: Default::default(),
-            // Test-local backend: bypasses the process reservation without
-            // consuming it; never backs production dispatch (C3M.4).
-            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-            lifecycle: Default::default(),
-            lifecycle_domain: Default::default(),
-            session_fences: Default::default(),
-            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
-            ),
-        };
+        let backend = FfiBackend::test_backend_with_tables(functions.as_mut(), None, None);
         // Cancel paths are ordinary: establish post-Initialize state.
         backend.lifecycle_domain.open_for_tests();
         let session = CkSessionHandle(11);
@@ -1092,26 +1035,7 @@ mod tests {
     fn native_owner_init_failure_preserves_active() {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
         functions.C_EncryptInit = Some(encrypt_init_ok);
-        let backend = FfiBackend {
-            _lib: crate::ffi::loading::test_library_handle(),
-            func_list: functions.as_mut(),
-            func_list_3_0: None,
-            func_list_3_2: None,
-            initialize_args: None,
-            mech_cache: dashmap::DashMap::new(),
-            last_init_family: dashmap::DashMap::new(),
-            session_slot_map: dashmap::DashMap::new(),
-            slot_sessions: dashmap::DashMap::new(),
-            object_cleanup: Default::default(),
-            // Test-local backend: bypasses the process reservation without
-            // consuming it; never backs production dispatch (C3M.4).
-            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-            lifecycle: Default::default(),
-            lifecycle_domain: Default::default(),
-            session_fences: Default::default(),
-            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
-            ),
-        };
+        let backend = FfiBackend::test_backend_with_tables(functions.as_mut(), None, None);
         // Init paths are ordinary: establish post-Initialize state.
         backend.lifecycle_domain.open_for_tests();
         let session = CkSessionHandle(12);
@@ -1152,26 +1076,7 @@ mod tests {
     fn native_owner_first_init_failure_publishes_nothing() {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
         functions.C_EncryptInit = Some(encrypt_init_fails);
-        let backend = FfiBackend {
-            _lib: crate::ffi::loading::test_library_handle(),
-            func_list: functions.as_mut(),
-            func_list_3_0: None,
-            func_list_3_2: None,
-            initialize_args: None,
-            mech_cache: dashmap::DashMap::new(),
-            last_init_family: dashmap::DashMap::new(),
-            session_slot_map: dashmap::DashMap::new(),
-            slot_sessions: dashmap::DashMap::new(),
-            object_cleanup: Default::default(),
-            // Test-local backend: bypasses the process reservation without
-            // consuming it; never backs production dispatch (C3M.4).
-            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-            lifecycle: Default::default(),
-            lifecycle_domain: Default::default(),
-            session_fences: Default::default(),
-            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
-            ),
-        };
+        let backend = FfiBackend::test_backend_with_tables(functions.as_mut(), None, None);
         // Init paths are ordinary: establish post-Initialize state.
         backend.lifecycle_domain.open_for_tests();
         let session = CkSessionHandle(25);
@@ -1206,26 +1111,7 @@ mod tests {
     fn native_owner_failed_reinit_keeps_marker_and_graph() {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
         functions.C_EncryptInit = Some(encrypt_init_ok);
-        let backend = FfiBackend {
-            _lib: crate::ffi::loading::test_library_handle(),
-            func_list: functions.as_mut(),
-            func_list_3_0: None,
-            func_list_3_2: None,
-            initialize_args: None,
-            mech_cache: dashmap::DashMap::new(),
-            last_init_family: dashmap::DashMap::new(),
-            session_slot_map: dashmap::DashMap::new(),
-            slot_sessions: dashmap::DashMap::new(),
-            object_cleanup: Default::default(),
-            // Test-local backend: bypasses the process reservation without
-            // consuming it; never backs production dispatch (C3M.4).
-            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-            lifecycle: Default::default(),
-            lifecycle_domain: Default::default(),
-            session_fences: Default::default(),
-            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
-            ),
-        };
+        let backend = FfiBackend::test_backend_with_tables(functions.as_mut(), None, None);
         // Init paths are ordinary: establish post-Initialize state.
         backend.lifecycle_domain.open_for_tests();
         let session = CkSessionHandle(26);
@@ -1281,26 +1167,7 @@ mod tests {
     fn backend_with_sign_stub() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
         functions.C_Sign = Some(sign_ok);
-        let backend = FfiBackend {
-            _lib: crate::ffi::loading::test_library_handle(),
-            func_list: functions.as_mut(),
-            func_list_3_0: None,
-            func_list_3_2: None,
-            initialize_args: None,
-            mech_cache: dashmap::DashMap::new(),
-            last_init_family: dashmap::DashMap::new(),
-            session_slot_map: dashmap::DashMap::new(),
-            slot_sessions: dashmap::DashMap::new(),
-            object_cleanup: Default::default(),
-            // Test-local backend: bypasses the process reservation without
-            // consuming it; never backs production dispatch (C3M.4).
-            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-            lifecycle: Default::default(),
-            lifecycle_domain: Default::default(),
-            session_fences: Default::default(),
-            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
-            ),
-        };
+        let backend = FfiBackend::test_backend_with_tables(functions.as_mut(), None, None);
         (backend, functions)
     }
 
@@ -1324,6 +1191,87 @@ mod tests {
         assert_eq!(signature.len(), 4);
     }
 
+    // -- W1-L11-03 characterization pins (pass before AND after) --------
+    // Each pin drives one of the five session-handle prologue macros
+    // through its `ffi_*` entry with stubs, proving the narrowed
+    // session (and object, where applicable) reaches the provider.
+    // `session_bytes_input` and `mechanism_key_init` are already pinned
+    // by `sign_admitted_after_lifecycle_open` and
+    // `sign_recover_init_admitted_after_lifecycle_open`.
+    static PIN_UPDATE_SESSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static PIN_FINAL_SESSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static PIN_DIGEST_SESSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static PIN_DIGEST_KEY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    unsafe extern "C" fn pin_sign_update_ok(
+        session: cryptoki_sys::CK_SESSION_HANDLE,
+        _part: cryptoki_sys::CK_BYTE_PTR,
+        _part_len: cryptoki_sys::CK_ULONG,
+    ) -> cryptoki_sys::CK_RV {
+        PIN_UPDATE_SESSION.store(session as u64, std::sync::atomic::Ordering::SeqCst);
+        cryptoki_sys::CKR_OK
+    }
+
+    unsafe extern "C" fn pin_sign_final_ok(
+        session: cryptoki_sys::CK_SESSION_HANDLE,
+        _signature: cryptoki_sys::CK_BYTE_PTR,
+        signature_len: cryptoki_sys::CK_ULONG_PTR,
+    ) -> cryptoki_sys::CK_RV {
+        PIN_FINAL_SESSION.store(session as u64, std::sync::atomic::Ordering::SeqCst);
+        if !signature_len.is_null() {
+            unsafe { *signature_len = 4 };
+        }
+        cryptoki_sys::CKR_OK
+    }
+
+    unsafe extern "C" fn pin_digest_key_ok(
+        session: cryptoki_sys::CK_SESSION_HANDLE,
+        key: cryptoki_sys::CK_OBJECT_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        PIN_DIGEST_SESSION.store(session as u64, std::sync::atomic::Ordering::SeqCst);
+        PIN_DIGEST_KEY.store(key as u64, std::sync::atomic::Ordering::SeqCst);
+        cryptoki_sys::CKR_OK
+    }
+
+    fn backend_with_pin_stubs() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_SignUpdate = Some(pin_sign_update_ok);
+        functions.C_SignFinal = Some(pin_sign_final_ok);
+        functions.C_DigestKey = Some(pin_digest_key_ok);
+        let backend = FfiBackend::test_backend_with_tables(functions.as_mut(), None, None);
+        (backend, functions)
+    }
+
+    #[test]
+    fn pin_session_unit_input_forwards_narrowed_session() {
+        PIN_UPDATE_SESSION.store(0, std::sync::atomic::Ordering::SeqCst);
+        let (backend, _functions) = backend_with_pin_stubs();
+        backend.lifecycle_domain.open_for_tests();
+        backend.ffi_sign_update(CkSessionHandle(7), CkInBuf::Bytes(b"part")).unwrap();
+        assert_eq!(PIN_UPDATE_SESSION.load(std::sync::atomic::Ordering::SeqCst), 7);
+    }
+
+    #[test]
+    fn pin_session_bytes_final_forwards_narrowed_session() {
+        PIN_FINAL_SESSION.store(0, std::sync::atomic::Ordering::SeqCst);
+        let (backend, _functions) = backend_with_pin_stubs();
+        backend.lifecycle_domain.open_for_tests();
+        let signature = backend.ffi_sign_final(CkSessionHandle(7)).unwrap();
+        assert_eq!(signature.len(), 4);
+        assert_eq!(PIN_FINAL_SESSION.load(std::sync::atomic::Ordering::SeqCst), 7);
+    }
+
+    #[test]
+    fn pin_session_object_unit_forwards_narrowed_session_and_key() {
+        PIN_DIGEST_SESSION.store(0, std::sync::atomic::Ordering::SeqCst);
+        PIN_DIGEST_KEY.store(0, std::sync::atomic::Ordering::SeqCst);
+        let (backend, _functions) = backend_with_pin_stubs();
+        backend.lifecycle_domain.open_for_tests();
+        backend.ffi_digest_key(CkSessionHandle(7), CkObjectHandle(9)).unwrap();
+        assert_eq!(PIN_DIGEST_SESSION.load(std::sync::atomic::Ordering::SeqCst), 7);
+        assert_eq!(PIN_DIGEST_KEY.load(std::sync::atomic::Ordering::SeqCst), 9);
+    }
+
     unsafe extern "C" fn sign_init_ok(
         _session: cryptoki_sys::CK_SESSION_HANDLE,
         _mechanism: *mut cryptoki_sys::CK_MECHANISM,
@@ -1345,26 +1293,7 @@ mod tests {
         functions.C_SignInit = Some(sign_init_ok);
         functions.C_SignRecoverInit = Some(sign_recover_init_ok);
         functions.C_EncryptInit = Some(encrypt_init_ok);
-        let backend = FfiBackend {
-            _lib: crate::ffi::loading::test_library_handle(),
-            func_list: functions.as_mut(),
-            func_list_3_0: None,
-            func_list_3_2: None,
-            initialize_args: None,
-            mech_cache: dashmap::DashMap::new(),
-            last_init_family: dashmap::DashMap::new(),
-            session_slot_map: dashmap::DashMap::new(),
-            slot_sessions: dashmap::DashMap::new(),
-            object_cleanup: Default::default(),
-            // Test-local backend: bypasses the process reservation without
-            // consuming it; never backs production dispatch (C3M.4).
-            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-            lifecycle: Default::default(),
-            lifecycle_domain: Default::default(),
-            session_fences: Default::default(),
-            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
-            ),
-        };
+        let backend = FfiBackend::test_backend_with_tables(functions.as_mut(), None, None);
         (backend, functions)
     }
 

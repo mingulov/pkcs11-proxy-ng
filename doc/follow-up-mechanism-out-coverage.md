@@ -114,17 +114,14 @@ them.
 
 ## Remaining items (not bugs)
 
-### 5. `panic!()` for oversized buffers in shim helpers (style only)
+### 5. ✅ `panic!()` for oversized buffers in shim helpers — closed by W1-L11-10
 
-`crates/shim/src/dispatch/general/helpers/mod.rs` (`read_input_slice`/`write_output_slice`) panics when the
-caller passes a buffer length above `MAX_SERIALIZABLE_BYTES` (512 MiB).
-The panic is caught by `catch_panics` and converted to
-`CKR_GENERAL_ERROR`, so there's no UB risk despite the red-team
-agent's initial concern.  Cleaner style would be to return
-`CKR_ARGUMENTS_BAD` directly.
-
-**Impact:** none — purely stylistic.  Left as documented hygiene
-item; safe to refactor if anyone touches that file.
+The panicking `read_input_slice` in
+`crates/shim/src/dispatch/general/helpers/mod.rs` was removed once every
+call site (PIN/username/label readers) migrated to the fallible
+`classify_input` / `try_read_optional_bytes` paths, which return
+`CKR_ARGUMENTS_BAD` directly for lengths above `MAX_SERIALIZABLE_BYTES`
+(512 MiB). No TooLarge panic arm remains.
 
 ## False positives confirmed during triage
 
@@ -142,3 +139,17 @@ For the record so future audits don't re-flag these:
 | Re-init after Finalize reuses registry (R2#12) | Intentional design — `OnceLock`-backed; documented |
 | Session slot map race (R2#13) | PKCS#11 serialization handles it |
 | `u64 → usize` panic risk (R2#14) | Already uses `try_from()` correctly |
+
+## Addendum 2026-09-20 (W1-C6-01): delayed GCM writeback removed
+
+The R2#3 and R2#7 rows above predate the P0 fix that removed the shim's
+delayed GCM writeback entirely (`remember/take/clear_delayed_gcm_writeback`
+and the `C_Encrypt`-time write through the retained `pParameter` address are
+gone). R2#3 dismissed a *concurrent-access race*, which session serialization
+does address; W1-C6-01 was the distinct *sequential* defect — the caller may
+legally free its `CK_GCM_PARAMS` between `C_EncryptInit` and `C_Encrypt`,
+making any retained-address write use-after-scope. No `usize` caller address
+now crosses from one `extern "C"` call into another on this path: the
+generated IV is delivered only inside `C_EncryptInit`, while the caller's
+memory is live. The R2#7 eviction row is moot — there is no delayed entry left
+to evict.

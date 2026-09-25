@@ -1204,6 +1204,22 @@ mod tests {
         assert!(good.validate().is_ok(), "reserve < capacity must pass validate()");
     }
 
+    /// Config validation: zero rotation knobs must be rejected loudly.
+    /// `rotate_keep_files = 0` disables pruning (unbounded disk growth) and
+    /// `rotate_max_bytes = 0` rotates on every record (W1-C2-05).
+    #[test]
+    fn config_validate_rejects_zero_rotation_knobs() {
+        let zero_bytes = AuditConfig { rotate_max_bytes: 0, ..Default::default() };
+        let err = zero_bytes.validate().expect_err("rotate_max_bytes=0 must fail validate()");
+        assert!(err.contains("rotate_max_bytes"), "error must name the field: {err}");
+
+        let zero_keep = AuditConfig { rotate_keep_files: 0, ..Default::default() };
+        let err = zero_keep.validate().expect_err("rotate_keep_files=0 must fail validate()");
+        assert!(err.contains("rotate_keep_files"), "error must name the field: {err}");
+
+        assert!(AuditConfig::default().validate().is_ok(), "defaults must pass validate()");
+    }
+
     /// Gap sentinel: after fail-open drops, the next flushed record is preceded
     /// by a `__AUDIT_GAP__` System record with `dropped_count = Some(n)`.
     /// The overall chain must still verify.

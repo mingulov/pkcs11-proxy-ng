@@ -15,7 +15,8 @@ pkcs11-proxy-ng-types = { path = "../types" }
 pkcs11-proxy-ng-client = { path = "../client" }
 pkcs11-proxy-ng-audit = { path = "../audit" }
 clap.workspace = true
-tokio.workspace = true
+# W1-L16-15: #[tokio::main] (multi-thread) + client async surface.
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time", "net"] }
 # CLI is a gRPC client: `channel` transport + `codegen` + `tls-ring`. No server.
 tonic = { workspace = true, features = ["channel", "codegen", "tls-ring"] }
 tonic-health.workspace = true
@@ -23,4 +24,19 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 hex = "0.4"
 base64 = "0.22"
+serde_json.workspace = true
 x509-parser.workspace = true
+
+# Test-only: spin an in-process mock daemon so handler tests cover the full
+# client -> gRPC -> backend path. Never linked into the shipped CLI binary.
+[dev-dependencies]
+pkcs11-proxy-ng = { path = "../server" }
+pkcs11-proxy-ng-backend = { path = "../backend" }
+pkcs11-proxy-ng-proto = { path = "../proto" }
+tokio-stream = "0.1"
+tonic = { workspace = true, features = ["server"] }
+tempfile = "3"
+rcgen = "0.14"
+
+[lints]
+workspace = true

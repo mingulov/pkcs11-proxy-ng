@@ -62,15 +62,135 @@ fn parse_log_format(raw: Option<&str>) -> LogFormat {
     }
 }
 
+/// Warning text when `RUST_LOG` is set but fails to parse (W1-L8-15).
+/// Emitted via `eprintln!` (tracing is not initialized yet) naming the
+/// var and the offending value; the filter still falls back to "info".
+fn invalid_rust_log_warning(value: &str) -> String {
+    format!("RUST_LOG={value:?} is not a valid tracing filter; using default \"info\"")
+}
+
+/// Warning text when `LOG_FORMAT` is set to an unrecognized value
+/// (W1-L8-15). `None` when unset or a documented value (`plain`/`json`,
+/// case-insensitive); the fallback format itself is unchanged (JSON).
+fn log_format_warning(raw: Option<&str>) -> Option<String> {
+    match raw {
+        None => None,
+        Some(value) => match value.trim().to_lowercase().as_str() {
+            "plain" | "json" => None,
+            _ => Some(format!(
+                "LOG_FORMAT={value:?} is not a recognized log format \
+                 (expected \"plain\" or \"json\"); using default \"json\""
+            )),
+        },
+    }
+}
+
+/// Outcome of the daemon's startup memory-lock attempt (W1-L2-07).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MemoryLockOutcome {
+    /// `mlockall(MCL_CURRENT | MCL_FUTURE)` succeeded: PIN/key pages are
+    /// pinned in RAM and cannot be swapped to disk.
+    Locked,
+    /// The lock was denied (typical cause: unprivileged process without
+    /// `CAP_IPC_LOCK`, or a restrictive `RLIMIT_MEMLOCK`). Carries the
+    /// errno description. The daemon still starts — loudly warned.
+    Denied(String),
+    /// Non-Unix platform: no `mlockall` equivalent. Loudly warned.
+    /// (Constructed only by the non-Unix `lock_process_memory` and by
+    /// tests, hence the Unix-only dead-code allow.)
+    #[cfg_attr(unix, allow(dead_code))]
+    Unsupported,
+}
+
+/// Attempt to lock all current and future process pages against swap
+/// (W1-L2-07). Called once at daemon startup, after tracing init (so the
+/// outcome is logged) and before the backend loads (so key material is
+/// covered from the start; `MCL_FUTURE` pins later allocations too).
+/// Never fails the startup: denial is reported, not fatal.
+#[cfg(unix)]
+fn lock_process_memory() -> MemoryLockOutcome {
+    use nix::sys::mman::{MlockAllFlags, mlockall};
+    match mlockall(MlockAllFlags::MCL_CURRENT | MlockAllFlags::MCL_FUTURE) {
+        Ok(()) => MemoryLockOutcome::Locked,
+        Err(errno) => MemoryLockOutcome::Denied(errno.to_string()),
+    }
+}
+
+/// Non-Unix: no `mlockall` equivalent exists.
+#[cfg(not(unix))]
+fn lock_process_memory() -> MemoryLockOutcome {
+    MemoryLockOutcome::Unsupported
+}
+
+/// Loud operator guidance for a denied or unsupported memory lock
+/// (W1-L2-07). `None` when locked.
+///
+/// Swap-residual note: without the lock, PIN/key pages the daemon holds
+/// (request buffers, backend argument frames, allocator freelists) can be
+/// paged to disk under memory pressure and survive there past process
+/// exit. The `SecretBytes`/`ZeroizeOnDrop` wiping still clears the live
+/// copies on drop — it cannot reach already-swapped pages. Operators who
+/// need the guarantee should grant `CAP_IPC_LOCK` (e.g. systemd
+/// `LimitMEMLOCK=infinity` + `CapabilityBoundingSet=CAP_IPC_LOCK`, or
+/// `setcap cap_ipc_lock+ep` on the binary) and confirm the startup log
+/// shows the pages-locked line.
+fn memory_lock_warning(outcome: &MemoryLockOutcome) -> Option<String> {
+    match outcome {
+        MemoryLockOutcome::Locked => None,
+        MemoryLockOutcome::Denied(errno) => Some(format!(
+            "mlockall failed ({errno}): daemon memory is NOT locked — PIN/key pages can swap \
+             to disk under memory pressure and survive past process exit (swap residual). \
+             Grant the process privilege to lock memory (CAP_IPC_LOCK, e.g. systemd \
+             LimitMEMLOCK=infinity) and restart to clear this warning"
+        )),
+        MemoryLockOutcome::Unsupported => Some(
+            "mlockall is unavailable on this platform: daemon memory is NOT locked — PIN/key \
+             pages can swap to disk under memory pressure (swap residual). Prefer a Unix \
+             deployment with memory locking for secret-handling workloads"
+                .to_string(),
+        ),
+    }
+}
+
+/// Log the startup memory-lock outcome: info when locked, loud warn
+/// otherwise. The daemon starts either way.
+fn report_memory_lock(outcome: &MemoryLockOutcome) {
+    match memory_lock_warning(outcome) {
+        None => tracing::info!("mlockall: daemon pages locked against swap"),
+        Some(warning) => tracing::warn!("{warning}"),
+    }
+}
+
+// W1-L12-03: pre-tracing warnings — tracing is not initialized yet, so
+// stderr is the only channel (the two `eprintln!`s below are the only
+// print sinks in production daemon code).
+#[allow(clippy::print_stderr)]
 fn init_tracing() {
     // Default to INFO when RUST_LOG is unset: from_default_env() falls
     // back to ERROR, which suppressed every startup line and left a
     // healthy daemon with a 0-byte log. An explicit RUST_LOG still wins.
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // W1-L8-15: a set-but-invalid RUST_LOG warns loudly on stderr
+    // (tracing is not up yet) instead of silently falling back.
+    let rust_log_raw = std::env::var("RUST_LOG").ok();
+    let filter = match EnvFilter::try_from_default_env() {
+        Ok(filter) => filter,
+        Err(_) => {
+            if let Some(value) = rust_log_raw.as_deref() {
+                eprintln!("pkcs11-proxy-ng: {}", invalid_rust_log_warning(value));
+            }
+            EnvFilter::new("info")
+        }
+    };
     // LOG_FORMAT=plain selects human-readable lines (README dev flow);
     // unset or anything else keeps the historical JSON default that the
     // prod/staging examples and compose files already set explicitly.
-    match parse_log_format(std::env::var("LOG_FORMAT").ok().as_deref()) {
+    // W1-L8-15: an unrecognized value warns loudly on stderr instead of
+    // silently falling back.
+    let log_format_raw = std::env::var("LOG_FORMAT").ok();
+    if let Some(warning) = log_format_warning(log_format_raw.as_deref()) {
+        eprintln!("pkcs11-proxy-ng: {warning}");
+    }
+    match parse_log_format(log_format_raw.as_deref()) {
         LogFormat::Plain => {
             tracing_subscriber::fmt().with_env_filter(filter).init();
         }
@@ -189,6 +309,18 @@ async fn build_service(
     Ok((grpc_service, context_manager, registry_source))
 }
 
+/// Apply the configured transport concurrency limits to a tonic server
+/// builder (W1-L6-20). Shared by every listener so TCP and Unix get
+/// identical flood bounds: per-connection request cap + HTTP/2 max
+/// concurrent streams + load shedding (reject-over-limit with
+/// `RESOURCE_EXHAUSTED` instead of buffering unboundedly).
+fn apply_transport_limits(builder: Server, config: &config::DaemonConfig) -> Server {
+    builder
+        .concurrency_limit_per_connection(config.proxy.grpc_concurrency_limit_per_connection)
+        .max_concurrent_streams(config.proxy.grpc_max_concurrent_streams)
+        .load_shed(config.proxy.grpc_load_shed)
+}
+
 /// Apply the configured HTTP/2 keepalive settings to a tonic server builder.
 /// Shared by every listener so TCP and Unix get identical keepalive behaviour.
 fn apply_http2_keepalive(builder: Server, config: &config::DaemonConfig) -> Server {
@@ -209,6 +341,63 @@ fn apply_http2_keepalive(builder: Server, config: &config::DaemonConfig) -> Serv
 /// Resolves when the OS-signal task flips the watch value (or drops the sender).
 async fn listener_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
     let _ = rx.changed().await;
+}
+
+type ServeFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<(), tonic::transport::Error>> + Send>,
+>;
+
+/// Serve until the shutdown signal, then drain bounded by
+/// `proxy.shutdown_grace_secs` (W1-L6-07).
+///
+/// The grace clock starts at **signal receipt**, not at startup: the join
+/// over the serve futures races the `signal` future, and only the
+/// post-signal drain runs under `timeout(grace, …)`. Pre-signal serve
+/// time is unbounded (a listener that never exits and no signal means
+/// the daemon keeps serving); a join that completes on its own
+/// (listener error exit) propagates immediately without waiting for
+/// the signal.
+///
+/// Returns `Some(outcome)` when the join finishes — either before the
+/// signal or inside the post-signal grace (errors propagate unchanged);
+/// returns `None` when the post-signal grace expires first — the serve
+/// futures are then dropped, aborting in-flight connections, and the
+/// caller proceeds with forced shutdown (socket cleanup, audit flush,
+/// backend finalize) instead of pinning SIGTERM forever on a wedged
+/// backend.
+async fn serve_with_grace(
+    serve_futures: Vec<ServeFuture>,
+    signal: impl std::future::Future<Output = ()>,
+    grace: std::time::Duration,
+) -> Option<Result<Vec<()>, tonic::transport::Error>> {
+    let mut drain = Box::pin(futures::future::try_join_all(serve_futures));
+    tokio::pin!(signal);
+    // Phase 1 (unbounded): serve until the listeners exit on their own
+    // or the shutdown signal arrives, whichever comes first. Biased
+    // toward the listener outcome so a concurrent listener error still
+    // propagates as the exit cause.
+    let pre_signal_outcome = tokio::select! {
+        biased;
+        outcome = &mut drain => Some(outcome),
+        () = &mut signal => None,
+    };
+    // Phase 2 (bounded): only after the signal, drain under the grace.
+    // (A separate step rather than a third select branch so `drain`
+    // moves into the timeout cleanly once the phase-1 borrows end.)
+    match pre_signal_outcome {
+        Some(outcome) => Some(outcome),
+        None => match tokio::time::timeout(grace, drain).await {
+            Ok(outcome) => Some(outcome),
+            Err(_elapsed) => {
+                tracing::error!(
+                    grace_secs = grace.as_secs(),
+                    "shutdown grace expired with listeners still draining; \
+                     forcing shutdown (in-flight connections aborted)"
+                );
+                None
+            }
+        },
+    }
 }
 
 /// G3-PR1: refuse to start when per-object authorization is configured but the
@@ -415,10 +604,20 @@ fn main() -> Result<(), BoxError> {
     // Parse early so --print-env-vars doesn't pull in JSON tracing.
     let args = Args::parse();
     if args.print_env_vars {
-        print!("{}", config::env_var_help());
+        // W1-L12-03: `--print-env-vars` help text goes to stdout by design
+        // (the allow sits on the block: attributes on the `print!`
+        // invocation itself are ignored).
+        #[allow(clippy::print_stdout)]
+        {
+            print!("{}", config::env_var_help());
+        }
         return Ok(());
     }
     init_tracing();
+
+    // W1-L2-07: pin daemon pages against swap when permitted; denial is
+    // loud but never fatal.
+    report_memory_lock(&lock_process_memory());
 
     let config = config::DaemonConfig::load(&args.config)?;
     validate_runtime_listener_support(&config)?;
@@ -462,6 +661,8 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
     // Configure per-peer rate limiter for GetBackendInterfaces.
     // Disabled by default (max_per_window=0); production deployments
     // can set proxy.rate_limit_get_backend_interfaces to enable.
+    // (Unauthenticated Initialize has its own always-on per-IP budget —
+    // W1-L7-03 — which needs no configuration.)
     server::rate_limit::configure(
         std::time::Duration::from_secs(config.proxy.rate_limit_window_secs),
         config.proxy.rate_limit_get_backend_interfaces,
@@ -563,9 +764,6 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
     // probe report SERVING but their connect was refused because tonic hadn't
     // bound yet. Binding here makes the SERVING flip below truthful: by the
     // time external probes can see it, accept() is already running.
-    type ServeFuture = std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<(), tonic::transport::Error>> + Send>,
-    >;
     let mut serve_futures: Vec<ServeFuture> = Vec::new();
 
     // TCP listener (mTLS / insecure-tcp), when [listener.remote] is configured.
@@ -579,7 +777,7 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
         {
             builder = builder.tls_config(tls_config)?;
         }
-        let router = apply_http2_keepalive(builder, &config)
+        let router = apply_transport_limits(apply_http2_keepalive(builder, &config), &config)
             .layer(server::trace_id::TraceIdLayer)
             // ADR-0013 pre-decode validation inside the trace layer so
             // rejections inherit the request_id span. First `.layer()` is
@@ -602,15 +800,16 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
     #[cfg(unix)]
     if let Some(ref uds_cfg) = config.listener.local {
         let listener = server::transport::bind_unix_listener(&uds_cfg.path)?;
-        let router = apply_http2_keepalive(Server::builder(), &config)
-            .layer(server::trace_id::TraceIdLayer)
-            // ADR-0013 pre-decode validation (see the TCP listener above for
-            // the layer-order rationale).
-            .layer(server::protected_decode::ProtectedDecodeLayer::new(
-                config.proxy.max_message_bytes,
-            ))
-            .add_service(health_service.clone())
-            .add_service(svc.clone());
+        let router =
+            apply_transport_limits(apply_http2_keepalive(Server::builder(), &config), &config)
+                .layer(server::trace_id::TraceIdLayer)
+                // ADR-0013 pre-decode validation (see the TCP listener above for
+                // the layer-order rationale).
+                .layer(server::protected_decode::ProtectedDecodeLayer::new(
+                    config.proxy.max_message_bytes,
+                ))
+                .add_service(health_service.clone())
+                .add_service(svc.clone());
         let incoming = tokio_stream::wrappers::UnixListenerStream::new(listener);
         let shutdown = listener_shutdown(shutdown_rx.clone());
         tracing::info!(path = %uds_cfg.path.display(), auth = ?uds_cfg.auth, "listening on unix socket");
@@ -637,13 +836,27 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
         max_contexts = config.proxy.max_contexts,
         http2_keepalive_interval_secs = config.proxy.http2_keepalive_interval_secs,
         http2_keepalive_timeout_secs = config.proxy.http2_keepalive_timeout_secs,
+        grpc_concurrency_limit_per_connection = config.proxy.grpc_concurrency_limit_per_connection,
+        grpc_max_concurrent_streams = config.proxy.grpc_max_concurrent_streams,
+        grpc_load_shed = config.proxy.grpc_load_shed,
         "Starting gRPC server"
     );
     // NOTE: No tonic server-level .timeout() — request timeouts are handled
     // inside spawn_backend() via tokio::time::timeout. A tonic-level timeout
     // would cancel the handler Future before spawn_backend can decrement
     // IN_FLIGHT, causing circuit breaker leaks under heavy load.
-    let serve_result = futures::future::try_join_all(serve_futures).await;
+    // W1-L6-07: the post-signal drain honors proxy.shutdown_grace_secs
+    // (previously the validated knob was never read and a wedged backend
+    // pinned SIGTERM forever). The grace clock starts when the shared
+    // signal channel flips — pre-signal serve time is unbounded — and on
+    // expiry the serve futures are dropped (aborting in-flight
+    // connections) and shutdown proceeds forced.
+    let serve_result = serve_with_grace(
+        serve_futures,
+        listener_shutdown(shutdown_rx),
+        std::time::Duration::from_secs(config.proxy.shutdown_grace_secs),
+    )
+    .await;
 
     // Best-effort: remove the Unix socket file on shutdown so a restart can
     // rebind cleanly (the path persists in the filesystem after the fd closes).
@@ -651,7 +864,9 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
     if let Some(ref uds_cfg) = config.listener.local {
         let _ = std::fs::remove_file(&uds_cfg.path);
     }
-    serve_result?;
+    if let Some(result) = serve_result {
+        result?;
+    }
 
     // Flush the audit log before finalising the backend.
     if let Some(ref s) = audit_sink
@@ -833,6 +1048,39 @@ auth = "peer_cred"
         assert_eq!(parse_log_format(Some("")), LogFormat::Json);
     }
 
+    // W1-L8-15: an invalid RUST_LOG falls back to "info" (unchanged), but
+    // the fallback must be loud — the warning names the var and value.
+    #[test]
+    fn invalid_rust_log_warning_names_var_and_value() {
+        let warning = invalid_rust_log_warning("!!!not-a-filter!!!");
+        assert!(
+            warning.contains("RUST_LOG") && warning.contains("!!!not-a-filter!!!"),
+            "warning must name the var and the value, got: {warning}"
+        );
+    }
+
+    // W1-L8-15: an unrecognized LOG_FORMAT still falls back to JSON
+    // (pinned above), but the fallback must be loud. Unset/plain/json
+    // stay silent.
+    #[test]
+    fn log_format_warning_names_invalid_value() {
+        let warning = log_format_warning(Some("xml")).expect("invalid LOG_FORMAT must warn");
+        assert!(
+            warning.contains("LOG_FORMAT") && warning.contains("xml"),
+            "warning must name the var and the value, got: {warning}"
+        );
+        assert!(log_format_warning(Some("")).is_some(), "empty LOG_FORMAT must warn");
+    }
+
+    #[test]
+    fn log_format_warning_silent_when_valid_or_unset() {
+        assert_eq!(log_format_warning(None), None);
+        assert_eq!(log_format_warning(Some("json")), None);
+        assert_eq!(log_format_warning(Some("plain")), None);
+        assert_eq!(log_format_warning(Some("  PLAIN  ")), None);
+        assert_eq!(log_format_warning(Some("JSON")), None);
+    }
+
     #[test]
     fn startup_allows_v240_backend_without_per_object_policy() {
         // When no `objects` grants are configured, the version check is skipped
@@ -846,5 +1094,152 @@ auth = "peer_cred"
         let policy = no_objects_policy();
         check_per_object_version_requirement(&policy, &mock)
             .expect("v2.40 backend without per-object policy must start");
+    }
+
+    /// W1-L6-07: listeners that exit on their own (pre-signal) return
+    /// their `try_join_all` outcome unchanged, without waiting for the
+    /// signal.
+    #[tokio::test]
+    async fn serve_with_grace_returns_outcome_when_drained_in_time() {
+        let futures: Vec<ServeFuture> =
+            vec![Box::pin(async { Ok(()) }), Box::pin(async { Ok(()) })];
+        let outcome =
+            serve_with_grace(futures, std::future::pending(), std::time::Duration::from_secs(30))
+                .await;
+        assert!(matches!(outcome, Some(Ok(_))), "drained listeners must propagate Ok");
+    }
+
+    /// W1-L6-07: after the signal, a wedged listener (never resolves)
+    /// must not pin SIGTERM forever — the grace bounds the post-signal
+    /// drain, then the serve futures are dropped (aborting in-flight
+    /// connections) and shutdown proceeds.
+    #[tokio::test]
+    async fn serve_with_grace_bounds_a_wedged_listener() {
+        let futures: Vec<ServeFuture> =
+            vec![Box::pin(async { Ok(()) }), Box::pin(std::future::pending())];
+        let start = std::time::Instant::now();
+        let outcome =
+            serve_with_grace(futures, std::future::ready(()), std::time::Duration::from_millis(50))
+                .await;
+        assert!(outcome.is_none(), "wedged listeners must time out to forced shutdown");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "grace wait must be bounded, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    /// W1-L6-07: a pre-signal serve error propagates immediately (the
+    /// daemon must exit on listener failure without waiting for a
+    /// signal that may never come).
+    #[tokio::test]
+    async fn serve_with_grace_propagates_serve_errors() {
+        // try_join_all short-circuits on the first error; a ready error
+        // must surface even with ample grace left. (A malformed endpoint
+        // URI is the cheapest way to fabricate a transport::Error.)
+        let err = tonic::transport::Endpoint::from_shared("http://exa mple.com").unwrap_err();
+        let futures: Vec<ServeFuture> = vec![Box::pin(async move { Err(err) })];
+        let outcome =
+            serve_with_grace(futures, std::future::pending(), std::time::Duration::from_secs(30))
+                .await;
+        assert!(matches!(outcome, Some(Err(_))), "serve errors must propagate");
+    }
+
+    /// W1-L6-07 fix round: the grace clock must start at signal receipt,
+    /// not at startup. With no signal and no listener exit, the helper
+    /// stays pending far past the grace (pre-signal serve time is
+    /// unbounded) — the daemon must not force-exit `grace` after boot.
+    #[tokio::test]
+    async fn serve_with_grace_does_not_bound_pre_signal_uptime() {
+        let futures: Vec<ServeFuture> = vec![Box::pin(std::future::pending())];
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            serve_with_grace(futures, std::future::pending(), std::time::Duration::from_millis(50)),
+        )
+        .await;
+        assert!(
+            outcome.is_err(),
+            "pre-signal serve must stay pending past the grace (10x overrun)"
+        );
+    }
+
+    /// W1-L6-07 fix round: post-signal drain obeys the grace the other
+    /// way — a drain that finishes inside the grace returns its outcome
+    /// (the wedged-listener test above pins the expiry way).
+    #[tokio::test]
+    async fn serve_with_grace_returns_post_signal_drain_outcome() {
+        let (tx, mut signal_rx) = tokio::sync::watch::channel(false);
+        let mut serve_rx = tx.subscribe();
+        // Signal future: resolves when the "SIGTERM" flips the channel.
+        let signal = async move {
+            let _ = signal_rx.changed().await;
+        };
+        // Serve future: drains only after the signal, then succeeds
+        // inside the grace.
+        let serve: ServeFuture = Box::pin(async move {
+            let _ = serve_rx.changed().await;
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            Ok(())
+        });
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            let _ = tx.send(true);
+        });
+        let outcome =
+            serve_with_grace(vec![serve], signal, std::time::Duration::from_secs(5)).await;
+        assert!(
+            matches!(outcome, Some(Ok(_))),
+            "post-signal drain inside the grace must propagate Ok"
+        );
+    }
+
+    #[test]
+    fn memory_lock_warning_locked_is_silent() {
+        // W1-L2-07: a successful lock reports nothing.
+        assert_eq!(memory_lock_warning(&MemoryLockOutcome::Locked), None);
+    }
+
+    #[test]
+    fn memory_lock_warning_denied_is_loud_about_swap_residual() {
+        // W1-L2-07: denial must name the cause, the swap residual, and the
+        // privilege remedy — the daemon keeps running, so the operator
+        // must see exactly what protection was lost.
+        let warning = memory_lock_warning(&MemoryLockOutcome::Denied(
+            "EPERM: Operation not permitted".into(),
+        ))
+        .expect("denial must warn");
+        for needle in ["mlock", "swap", "CAP_IPC_LOCK", "privileg"] {
+            assert!(warning.contains(needle), "denial warning must mention {needle:?}: {warning}");
+        }
+    }
+
+    #[test]
+    fn memory_lock_warning_unsupported_names_residual() {
+        // W1-L2-07: platforms without mlockall get the same loud residual.
+        let warning =
+            memory_lock_warning(&MemoryLockOutcome::Unsupported).expect("unsupported must warn");
+        for needle in ["mlock", "swap"] {
+            assert!(
+                warning.contains(needle),
+                "unsupported warning must mention {needle:?}: {warning}"
+            );
+        }
+    }
+
+    #[test]
+    fn lock_process_memory_reports_a_well_formed_outcome() {
+        // W1-L2-07: the syscall wrapper never panics; on Unix it reports
+        // Locked when privileged or Denied when not (the common
+        // unprivileged-container case — this exercises the real denied
+        // path end to end wherever the test runs unprivileged).
+        let outcome = lock_process_memory();
+        let _ = memory_lock_warning(&outcome);
+        #[cfg(unix)]
+        assert!(
+            matches!(outcome, MemoryLockOutcome::Locked | MemoryLockOutcome::Denied(_)),
+            "unexpected outcome: {outcome:?}"
+        );
+        #[cfg(not(unix))]
+        assert_eq!(outcome, MemoryLockOutcome::Unsupported);
     }
 }

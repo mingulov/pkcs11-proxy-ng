@@ -2,16 +2,14 @@ use super::*;
 
 #[test]
 fn derive_key_with_sp800_108_rejects_unsupported_prf_type() {
-    const CKM_SP800_108_COUNTER_KDF: CkMechanismType = CkMechanismType(0x0000_03AC);
-
-    let backend = MockBackend::new(vec![CkSlotId(0)], vec![CKM_SP800_108_COUNTER_KDF]);
+    let backend = MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::SP800_108_COUNTER_KDF]);
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
     let base_key = live_key(&backend, session);
     let mechanism = CkMechanism {
-        mechanism_type: CKM_SP800_108_COUNTER_KDF,
+        mechanism_type: CkMechanismType::SP800_108_COUNTER_KDF,
         params: Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-            prf_type: CkMechanismType::SHA256.0,
+            prf_type: CkMechanismType::SHA256,
             data_params: vec![sp800_108_counter_iteration_param()],
             additional_derived_keys: Vec::new(),
         })),
@@ -42,12 +40,12 @@ fn derive_key_validates_source_grounded_signal_parameter_handles() {
         |peer_identity_handle, peer_prekey_handle, own_identity_handle, own_ephemeral_handle| {
             CkMechanismParams::X3dhInitiate(X3dhInitiateParams {
                 kdf: 1,
-                peer_identity_handle,
-                peer_prekey_handle,
+                peer_identity_handle: CkObjectHandle(peer_identity_handle),
+                peer_prekey_handle: CkObjectHandle(peer_prekey_handle),
                 prekey_signature: vec![0xA5; 64],
-                onetime_key_handle: invalid,
-                own_identity_handle,
-                own_ephemeral_handle,
+                onetime_key_handle: CkObjectHandle(invalid),
+                own_identity_handle: CkObjectHandle(own_identity_handle),
+                own_ephemeral_handle: CkObjectHandle(own_ephemeral_handle),
             })
         };
     for (label, params) in [
@@ -83,11 +81,11 @@ fn derive_key_validates_source_grounded_signal_parameter_handles() {
         CkMechanismType::X3DH_RESPOND,
         CkMechanismParams::X3dhRespond(X3dhRespondParams {
             kdf: 1,
-            identity_handle: invalid,
-            prekey_handle: invalid,
-            onetime_key_handle: invalid,
-            initiator_identity_handle: invalid,
-            initiator_ephemeral_handle: invalid,
+            identity_handle: CkObjectHandle(invalid),
+            prekey_handle: CkObjectHandle(invalid),
+            onetime_key_handle: CkObjectHandle(invalid),
+            initiator_identity_handle: CkObjectHandle(invalid),
+            initiator_ephemeral_handle: CkObjectHandle(invalid),
         }),
         "CK_X3DH_RESPOND_PARAMS.pInitiator_identity",
     );
@@ -96,13 +94,13 @@ fn derive_key_validates_source_grounded_signal_parameter_handles() {
         |peer_public_prekey_handle, peer_public_identity_handle, own_public_identity_handle| {
             CkMechanismParams::X2RatchetInitialize(X2RatchetInitializeParams {
                 sk: vec![0x42; 32].into(),
-                peer_public_prekey_handle,
-                peer_public_identity_handle,
-                own_public_identity_handle,
+                peer_public_prekey_handle: CkObjectHandle(peer_public_prekey_handle),
+                peer_public_identity_handle: CkObjectHandle(peer_public_identity_handle),
+                own_public_identity_handle: CkObjectHandle(own_public_identity_handle),
                 encrypted_header: true,
                 curve: 255,
-                aead_mechanism: CkMechanismType::AES_GCM.0,
-                kdf_mechanism: 1,
+                aead_mechanism: CkMechanismType::AES_GCM,
+                kdf_mechanism: CkKdf(1),
             })
         };
     for (label, params) in [
@@ -131,13 +129,13 @@ fn derive_key_validates_source_grounded_signal_parameter_handles() {
     let x2_respond = |own_prekey_handle, initiator_identity_handle, own_identity_handle| {
         CkMechanismParams::X2RatchetRespond(X2RatchetRespondParams {
             sk: vec![0x24; 32].into(),
-            own_prekey_handle,
-            initiator_identity_handle,
-            own_identity_handle,
+            own_prekey_handle: CkObjectHandle(own_prekey_handle),
+            initiator_identity_handle: CkObjectHandle(initiator_identity_handle),
+            own_identity_handle: CkObjectHandle(own_identity_handle),
             encrypted_header: false,
             curve: 255,
-            aead_mechanism: CkMechanismType::AES_GCM.0,
-            kdf_mechanism: 1,
+            aead_mechanism: CkMechanismType::AES_GCM,
+            kdf_mechanism: CkKdf(1),
         })
     };
     for (label, params) in [
@@ -177,23 +175,23 @@ fn derive_key_leaves_lengthless_signal_byte_fields_unvalidated() {
         mechanism_type: CkMechanismType::X3DH_INITIALIZE,
         params: Some(CkMechanismParams::X3dhInitiate(X3dhInitiateParams {
             kdf: 1,
-            peer_identity_handle: handles[0].0,
-            peer_prekey_handle: handles[1].0,
+            peer_identity_handle: CkObjectHandle(handles[0].0),
+            peer_prekey_handle: CkObjectHandle(handles[1].0),
             prekey_signature: Vec::new(),
-            onetime_key_handle: invalid,
-            own_identity_handle: handles[2].0,
-            own_ephemeral_handle: handles[3].0,
+            onetime_key_handle: CkObjectHandle(invalid),
+            own_identity_handle: CkObjectHandle(handles[2].0),
+            own_ephemeral_handle: CkObjectHandle(handles[3].0),
         })),
     };
     let respond = CkMechanism {
         mechanism_type: CkMechanismType::X3DH_RESPOND,
         params: Some(CkMechanismParams::X3dhRespond(X3dhRespondParams {
             kdf: 1,
-            identity_handle: invalid,
-            prekey_handle: invalid,
-            onetime_key_handle: invalid,
-            initiator_identity_handle: handles[4].0,
-            initiator_ephemeral_handle: invalid,
+            identity_handle: CkObjectHandle(invalid),
+            prekey_handle: CkObjectHandle(invalid),
+            onetime_key_handle: CkObjectHandle(invalid),
+            initiator_identity_handle: CkObjectHandle(handles[4].0),
+            initiator_ephemeral_handle: CkObjectHandle(invalid),
         })),
     };
 
@@ -265,7 +263,9 @@ fn derive_key_validates_concatenate_base_and_key_parameter_handle() {
 
     let invalid_mechanism = CkMechanism {
         mechanism_type: CkMechanismType::CONCATENATE_BASE_AND_KEY,
-        params: Some(CkMechanismParams::ObjectHandle(ObjectHandleParam { handle: invalid })),
+        params: Some(CkMechanismParams::ObjectHandle(ObjectHandleParam {
+            handle: CkObjectHandle(invalid),
+        })),
     };
     assert_eq!(
         backend
@@ -287,7 +287,7 @@ fn derive_key_validates_concatenate_base_and_key_parameter_handle() {
 
     let valid_mechanism = CkMechanism {
         mechanism_type: CkMechanismType::CONCATENATE_BASE_AND_KEY,
-        params: Some(CkMechanismParams::ObjectHandle(ObjectHandleParam { handle: other_key.0 })),
+        params: Some(CkMechanismParams::ObjectHandle(ObjectHandleParam { handle: other_key })),
     };
     assert_ne!(
         backend
@@ -391,11 +391,11 @@ fn derive_key_validates_dual_ec_and_x942_parameter_handles() {
 
     let ecdh2 = |private_data_handle| {
         CkMechanismParams::Ecdh2Derive(Ecdh2DeriveParams {
-            kdf: 1,
+            kdf: CkKdf(1),
             shared_data: b"shared".to_vec().into(),
             public_data: b"peer-public-1".to_vec(),
             private_data_len: 32,
-            private_data_handle,
+            private_data_handle: CkObjectHandle(private_data_handle),
             public_data2: b"peer-public-2".to_vec(),
         })
     };
@@ -409,13 +409,13 @@ fn derive_key_validates_dual_ec_and_x942_parameter_handles() {
 
     let ecmqv = |private_data_handle, public_key_handle| {
         CkMechanismParams::EcmqvDerive(EcmqvDeriveParams {
-            kdf: 1,
+            kdf: CkKdf(1),
             shared_data: b"shared".to_vec().into(),
             public_data: b"peer-public-1".to_vec(),
             private_data_len: 32,
-            private_data_handle,
+            private_data_handle: CkObjectHandle(private_data_handle),
             public_data2: b"peer-public-2".to_vec(),
-            public_key_handle,
+            public_key_handle: CkObjectHandle(public_key_handle),
         })
     };
     expect_derive_param_handle_invalid(
@@ -435,11 +435,11 @@ fn derive_key_validates_dual_ec_and_x942_parameter_handles() {
 
     let x942_dh2 = |private_data_handle| {
         CkMechanismParams::X942Dh2Derive(X942Dh2DeriveParams {
-            kdf: 1,
+            kdf: CkKdf(1),
             other_info: b"other".to_vec().into(),
             public_data: b"dh-public-1".to_vec(),
             private_data_len: 32,
-            private_data_handle,
+            private_data_handle: CkObjectHandle(private_data_handle),
             public_data2: b"dh-public-2".to_vec(),
         })
     };
@@ -453,13 +453,13 @@ fn derive_key_validates_dual_ec_and_x942_parameter_handles() {
 
     let x942_mqv = |private_data_handle, public_key_handle| {
         CkMechanismParams::X942MqvDerive(X942MqvDeriveParams {
-            kdf: 1,
+            kdf: CkKdf(1),
             other_info: b"other".to_vec().into(),
             public_data: b"dh-public-1".to_vec(),
             private_data_len: 32,
-            private_data_handle,
+            private_data_handle: CkObjectHandle(private_data_handle),
             public_data2: b"dh-public-2".to_vec(),
-            public_key_handle,
+            public_key_handle: CkObjectHandle(public_key_handle),
         })
     };
     expect_derive_param_handle_invalid(
@@ -506,7 +506,7 @@ fn derive_key_with_output_returns_configured_tls_output_params() {
         random_info: SslRandomData { client_random: vec![0x11; 32], server_random: vec![0x22; 32] },
         version_major: 3,
         version_minor: 3,
-        prf_hash_mechanism: CkMechanismType::SHA256.0,
+        prf_hash_mechanism: CkMechanismType::SHA256,
     });
     backend.set_derive_key_output(Some(output.clone()));
     let base_key = live_key(&backend, session);
@@ -542,15 +542,13 @@ fn derive_key_with_output_returns_configured_pbe_iv_output_params() {
 
 #[test]
 fn derive_key_with_sp800_108_additional_keys_allocates_output_handles() {
-    const CKM_SP800_108_COUNTER_KDF: CkMechanismType = CkMechanismType(0x0000_03AC);
-
-    let backend = MockBackend::new(vec![CkSlotId(0)], vec![CKM_SP800_108_COUNTER_KDF]);
+    let backend = MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::SP800_108_COUNTER_KDF]);
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
     let mechanism = CkMechanism {
-        mechanism_type: CKM_SP800_108_COUNTER_KDF,
+        mechanism_type: CkMechanismType::SP800_108_COUNTER_KDF,
         params: Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-            prf_type: CKM_SHA256_HMAC,
+            prf_type: CkMechanismType(CKM_SHA256_HMAC),
             data_params: vec![sp800_108_counter_iteration_param()],
             additional_derived_keys: vec![
                 Sp800108DerivedKey {
@@ -558,14 +556,14 @@ fn derive_key_with_sp800_108_additional_keys_allocates_output_handles() {
                         attr_type: CkAttributeType::VALUE_LEN,
                         value: Some(CkAttributeValue::Ulong(32)),
                     }],
-                    key_handle: 0,
+                    key_handle: CkObjectHandle(0),
                 },
                 Sp800108DerivedKey {
                     template: vec![CkAttribute {
                         attr_type: CkAttributeType::LABEL,
                         value: Some(CkAttributeValue::String("extra".to_string().into())),
                     }],
-                    key_handle: 0,
+                    key_handle: CkObjectHandle(0),
                 },
             ],
         })),
@@ -580,8 +578,8 @@ fn derive_key_with_sp800_108_additional_keys_allocates_output_handles() {
     };
     assert_ne!(primary, CkObjectHandle(0));
     assert_eq!(output.additional_derived_keys.len(), 2);
-    assert_ne!(output.additional_derived_keys[0].key_handle, 0);
-    assert_ne!(output.additional_derived_keys[1].key_handle, 0);
+    assert_ne!(output.additional_derived_keys[0].key_handle.0, 0);
+    assert_ne!(output.additional_derived_keys[1].key_handle.0, 0);
     assert_ne!(
         output.additional_derived_keys[0].key_handle,
         output.additional_derived_keys[1].key_handle
@@ -591,14 +589,11 @@ fn derive_key_with_sp800_108_additional_keys_allocates_output_handles() {
 
 #[test]
 fn derive_key_with_sp800_108_additional_key_handles_preserves_templates() {
-    const CKM_SP800_108_COUNTER_KDF: CkMechanismType = CkMechanismType(0x0000_03AC);
-    const CKM_SP800_108_FEEDBACK_KDF: CkMechanismType = CkMechanismType(0x0000_03AD);
-
     for (mechanism_type, params) in [
         (
-            CKM_SP800_108_COUNTER_KDF,
+            CkMechanismType::SP800_108_COUNTER_KDF,
             CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-                prf_type: CKM_SHA256_HMAC,
+                prf_type: CkMechanismType(CKM_SHA256_HMAC),
                 data_params: vec![sp800_108_counter_iteration_param()],
                 additional_derived_keys: vec![Sp800108DerivedKey {
                     template: vec![
@@ -611,14 +606,14 @@ fn derive_key_with_sp800_108_additional_key_handles_preserves_templates() {
                             value: Some(CkAttributeValue::String("sp800 extra".to_string().into())),
                         },
                     ],
-                    key_handle: 0,
+                    key_handle: CkObjectHandle(0),
                 }],
             }),
         ),
         (
-            CKM_SP800_108_FEEDBACK_KDF,
+            CkMechanismType::SP800_108_FEEDBACK_KDF,
             CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
-                prf_type: CKM_SHA256_HMAC,
+                prf_type: CkMechanismType(CKM_SHA256_HMAC),
                 data_params: vec![sp800_108_null_iteration_param()],
                 iv: vec![0xA5; 16],
                 additional_derived_keys: vec![Sp800108DerivedKey {
@@ -632,7 +627,7 @@ fn derive_key_with_sp800_108_additional_key_handles_preserves_templates() {
                             value: Some(CkAttributeValue::String("sp800 extra".to_string().into())),
                         },
                     ],
-                    key_handle: 0,
+                    key_handle: CkObjectHandle(0),
                 }],
             }),
         ),
@@ -647,10 +642,10 @@ fn derive_key_with_sp800_108_additional_key_handles_preserves_templates() {
             backend.derive_key_with_output(session, &mechanism, base_key, Some(&[])).unwrap();
         let additional_key = match mechanism_out {
             Some(CkMechanismParams::Sp800108Kdf(output)) => {
-                CkObjectHandle(output.additional_derived_keys[0].key_handle)
+                output.additional_derived_keys[0].key_handle
             }
             Some(CkMechanismParams::Sp800108FeedbackKdf(output)) => {
-                CkObjectHandle(output.additional_derived_keys[0].key_handle)
+                output.additional_derived_keys[0].key_handle
             }
             other => panic!("expected SP800-108 output params, got {other:?}"),
         };
@@ -713,27 +708,24 @@ fn derive_key_with_sp800_108_additional_key_handles_preserves_templates() {
 
 #[test]
 fn derive_key_with_sp800_108_enforces_mode_data_param_rules() {
-    const CKM_SP800_108_COUNTER_KDF: CkMechanismType = CkMechanismType(0x0000_03AC);
-    const CKM_SP800_108_FEEDBACK_KDF: CkMechanismType = CkMechanismType(0x0000_03AD);
-    const CKM_SP800_108_DOUBLE_PIPELINE_KDF: CkMechanismType = CkMechanismType(0x0000_03AE);
     const CK_SP800_108_COUNTER: u64 = 0x0000_0002;
 
     let counter_field = PrfDataParam { type_: CK_SP800_108_COUNTER, value: vec![0; 16].into() };
     for (name, mechanism_type, params) in [
         (
             "counter mode missing iteration variable",
-            CKM_SP800_108_COUNTER_KDF,
+            CkMechanismType::SP800_108_COUNTER_KDF,
             CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-                prf_type: CKM_SHA256_HMAC,
+                prf_type: CkMechanismType(CKM_SHA256_HMAC),
                 data_params: Vec::new(),
                 additional_derived_keys: Vec::new(),
             }),
         ),
         (
             "feedback mode missing iteration variable",
-            CKM_SP800_108_FEEDBACK_KDF,
+            CkMechanismType::SP800_108_FEEDBACK_KDF,
             CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
-                prf_type: CKM_SHA256_HMAC,
+                prf_type: CkMechanismType(CKM_SHA256_HMAC),
                 data_params: Vec::new(),
                 iv: vec![0xA5; 16],
                 additional_derived_keys: Vec::new(),
@@ -741,18 +733,18 @@ fn derive_key_with_sp800_108_enforces_mode_data_param_rules() {
         ),
         (
             "double-pipeline mode missing iteration variable",
-            CKM_SP800_108_DOUBLE_PIPELINE_KDF,
+            CkMechanismType::SP800_108_DOUBLE_PIPELINE_KDF,
             CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-                prf_type: CKM_SHA256_HMAC,
+                prf_type: CkMechanismType(CKM_SHA256_HMAC),
                 data_params: Vec::new(),
                 additional_derived_keys: Vec::new(),
             }),
         ),
         (
             "counter mode rejects CK_SP800_108_COUNTER",
-            CKM_SP800_108_COUNTER_KDF,
+            CkMechanismType::SP800_108_COUNTER_KDF,
             CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-                prf_type: CKM_SHA256_HMAC,
+                prf_type: CkMechanismType(CKM_SHA256_HMAC),
                 data_params: vec![sp800_108_counter_iteration_param(), counter_field.clone()],
                 additional_derived_keys: Vec::new(),
             }),
@@ -778,9 +770,6 @@ fn derive_key_with_sp800_108_enforces_mode_data_param_rules() {
 
 #[test]
 fn derive_key_with_sp800_108_validates_data_param_payload_shapes_and_singletons() {
-    const CKM_SP800_108_COUNTER_KDF: CkMechanismType = CkMechanismType(0x0000_03AC);
-    const CKM_SP800_108_FEEDBACK_KDF: CkMechanismType = CkMechanismType(0x0000_03AD);
-    const CKM_SP800_108_DOUBLE_PIPELINE_KDF: CkMechanismType = CkMechanismType(0x0000_03AE);
     const CK_SP800_108_ITERATION_VARIABLE: u64 = 0x0000_0001;
     const CK_SP800_108_COUNTER: u64 = 0x0000_0002;
     const CK_SP800_108_DKM_LENGTH: u64 = 0x0000_0003;
@@ -794,9 +783,9 @@ fn derive_key_with_sp800_108_validates_data_param_payload_shapes_and_singletons(
     let cases = vec![
         (
             "counter mode iteration variable requires counter-format payload",
-            CKM_SP800_108_COUNTER_KDF,
+            CkMechanismType::SP800_108_COUNTER_KDF,
             CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-                prf_type: CKM_SHA256_HMAC,
+                prf_type: CkMechanismType(CKM_SHA256_HMAC),
                 data_params: vec![PrfDataParam {
                     type_: CK_SP800_108_ITERATION_VARIABLE,
                     value: Vec::new().into(),
@@ -806,9 +795,9 @@ fn derive_key_with_sp800_108_validates_data_param_payload_shapes_and_singletons(
         ),
         (
             "feedback counter data field requires counter-format payload",
-            CKM_SP800_108_FEEDBACK_KDF,
+            CkMechanismType::SP800_108_FEEDBACK_KDF,
             CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
-                prf_type: CKM_SHA256_HMAC,
+                prf_type: CkMechanismType(CKM_SHA256_HMAC),
                 data_params: vec![
                     sp800_108_null_iteration_param(),
                     PrfDataParam {
@@ -822,9 +811,9 @@ fn derive_key_with_sp800_108_validates_data_param_payload_shapes_and_singletons(
         ),
         (
             "double-pipeline DKM length data field requires DKM-format payload",
-            CKM_SP800_108_DOUBLE_PIPELINE_KDF,
+            CkMechanismType::SP800_108_DOUBLE_PIPELINE_KDF,
             CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-                prf_type: CKM_SHA256_HMAC,
+                prf_type: CkMechanismType(CKM_SHA256_HMAC),
                 data_params: vec![
                     sp800_108_null_iteration_param(),
                     PrfDataParam {
@@ -837,9 +826,9 @@ fn derive_key_with_sp800_108_validates_data_param_payload_shapes_and_singletons(
         ),
         (
             "BYTE_ARRAY data field requires non-empty payload",
-            CKM_SP800_108_COUNTER_KDF,
+            CkMechanismType::SP800_108_COUNTER_KDF,
             CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-                prf_type: CKM_SHA256_HMAC,
+                prf_type: CkMechanismType(CKM_SHA256_HMAC),
                 data_params: vec![
                     sp800_108_counter_iteration_param(),
                     PrfDataParam { type_: CK_SP800_108_BYTE_ARRAY, value: Vec::new().into() },
@@ -849,9 +838,9 @@ fn derive_key_with_sp800_108_validates_data_param_payload_shapes_and_singletons(
         ),
         (
             "feedback counter data field is single-instance",
-            CKM_SP800_108_FEEDBACK_KDF,
+            CkMechanismType::SP800_108_FEEDBACK_KDF,
             CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
-                prf_type: CKM_SHA256_HMAC,
+                prf_type: CkMechanismType(CKM_SHA256_HMAC),
                 data_params: vec![
                     sp800_108_null_iteration_param(),
                     PrfDataParam {
@@ -866,9 +855,9 @@ fn derive_key_with_sp800_108_validates_data_param_payload_shapes_and_singletons(
         ),
         (
             "DKM length data field is single-instance",
-            CKM_SP800_108_COUNTER_KDF,
+            CkMechanismType::SP800_108_COUNTER_KDF,
             CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-                prf_type: CKM_SHA256_HMAC,
+                prf_type: CkMechanismType(CKM_SHA256_HMAC),
                 data_params: vec![
                     sp800_108_counter_iteration_param(),
                     PrfDataParam {
@@ -885,9 +874,9 @@ fn derive_key_with_sp800_108_validates_data_param_payload_shapes_and_singletons(
         ),
         (
             "DKM length data field rejects unknown method",
-            CKM_SP800_108_COUNTER_KDF,
+            CkMechanismType::SP800_108_COUNTER_KDF,
             CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-                prf_type: CKM_SHA256_HMAC,
+                prf_type: CkMechanismType(CKM_SHA256_HMAC),
                 data_params: vec![
                     sp800_108_counter_iteration_param(),
                     PrfDataParam {
@@ -921,13 +910,11 @@ fn derive_key_with_sp800_108_validates_data_param_payload_shapes_and_singletons(
 
 #[test]
 fn derive_key_with_sp800_108_key_handle_data_param_requires_live_input_key() {
-    const CKM_SP800_108_COUNTER_KDF: CkMechanismType = CkMechanismType(0x0000_03AC);
-    const CKM_SP800_108_FEEDBACK_KDF: CkMechanismType = CkMechanismType(0x0000_03AD);
     const CK_SP800_108_KEY_HANDLE: u64 = 0x0000_0005;
 
     let backend = MockBackend::new(
         vec![CkSlotId(0)],
-        vec![CKM_SP800_108_COUNTER_KDF, CKM_SP800_108_FEEDBACK_KDF],
+        vec![CkMechanismType::SP800_108_COUNTER_KDF, CkMechanismType::SP800_108_FEEDBACK_KDF],
     );
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
@@ -935,9 +922,9 @@ fn derive_key_with_sp800_108_key_handle_data_param_requires_live_input_key() {
 
     for (mechanism_type, params) in [
         (
-            CKM_SP800_108_COUNTER_KDF,
+            CkMechanismType::SP800_108_COUNTER_KDF,
             CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-                prf_type: CKM_SHA256_HMAC,
+                prf_type: CkMechanismType(CKM_SHA256_HMAC),
                 data_params: vec![
                     sp800_108_counter_iteration_param(),
                     PrfDataParam {
@@ -949,9 +936,9 @@ fn derive_key_with_sp800_108_key_handle_data_param_requires_live_input_key() {
             }),
         ),
         (
-            CKM_SP800_108_FEEDBACK_KDF,
+            CkMechanismType::SP800_108_FEEDBACK_KDF,
             CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
-                prf_type: CKM_SHA256_HMAC,
+                prf_type: CkMechanismType(CKM_SHA256_HMAC),
                 data_params: vec![
                     sp800_108_null_iteration_param(),
                     PrfDataParam {
@@ -974,13 +961,11 @@ fn derive_key_with_sp800_108_key_handle_data_param_requires_live_input_key() {
 
 #[test]
 fn derive_key_with_sp800_108_key_handle_data_param_accepts_live_input_key() {
-    const CKM_SP800_108_COUNTER_KDF: CkMechanismType = CkMechanismType(0x0000_03AC);
-    const CKM_SP800_108_FEEDBACK_KDF: CkMechanismType = CkMechanismType(0x0000_03AD);
     const CK_SP800_108_KEY_HANDLE: u64 = 0x0000_0005;
 
     let backend = MockBackend::new(
         vec![CkSlotId(0)],
-        vec![CKM_SP800_108_COUNTER_KDF, CKM_SP800_108_FEEDBACK_KDF],
+        vec![CkMechanismType::SP800_108_COUNTER_KDF, CkMechanismType::SP800_108_FEEDBACK_KDF],
     );
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
@@ -988,9 +973,9 @@ fn derive_key_with_sp800_108_key_handle_data_param_accepts_live_input_key() {
 
     for (mechanism_type, params) in [
         (
-            CKM_SP800_108_COUNTER_KDF,
+            CkMechanismType::SP800_108_COUNTER_KDF,
             CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-                prf_type: CKM_SHA256_HMAC,
+                prf_type: CkMechanismType(CKM_SHA256_HMAC),
                 data_params: vec![
                     sp800_108_counter_iteration_param(),
                     PrfDataParam {
@@ -1002,9 +987,9 @@ fn derive_key_with_sp800_108_key_handle_data_param_accepts_live_input_key() {
             }),
         ),
         (
-            CKM_SP800_108_FEEDBACK_KDF,
+            CkMechanismType::SP800_108_FEEDBACK_KDF,
             CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
-                prf_type: CKM_SHA256_HMAC,
+                prf_type: CkMechanismType(CKM_SHA256_HMAC),
                 data_params: vec![
                     sp800_108_null_iteration_param(),
                     PrfDataParam {
@@ -1067,22 +1052,20 @@ fn derive_key_preserves_primary_key_template() {
 
 #[test]
 fn derive_key_with_sp800_108_additional_key_handles_rejects_small_attribute_buffers() {
-    const CKM_SP800_108_COUNTER_KDF: CkMechanismType = CkMechanismType(0x0000_03AC);
-
-    let backend = MockBackend::new(vec![CkSlotId(0)], vec![CKM_SP800_108_COUNTER_KDF]);
+    let backend = MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::SP800_108_COUNTER_KDF]);
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
     let mechanism = CkMechanism {
-        mechanism_type: CKM_SP800_108_COUNTER_KDF,
+        mechanism_type: CkMechanismType::SP800_108_COUNTER_KDF,
         params: Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-            prf_type: CKM_SHA256_HMAC,
+            prf_type: CkMechanismType(CKM_SHA256_HMAC),
             data_params: vec![sp800_108_counter_iteration_param()],
             additional_derived_keys: vec![Sp800108DerivedKey {
                 template: vec![CkAttribute {
                     attr_type: CkAttributeType::LABEL,
                     value: Some(CkAttributeValue::String("sp800 extra".to_string().into())),
                 }],
-                key_handle: 0,
+                key_handle: CkObjectHandle(0),
             }],
         })),
     };
@@ -1093,7 +1076,7 @@ fn derive_key_with_sp800_108_additional_key_handles_rejects_small_attribute_buff
     let Some(CkMechanismParams::Sp800108Kdf(output)) = mechanism_out else {
         panic!("expected SP800-108 output params");
     };
-    let additional_key = CkObjectHandle(output.additional_derived_keys[0].key_handle);
+    let additional_key = output.additional_derived_keys[0].key_handle;
 
     let (rv, results) = backend
         .get_attribute_value_exact(
@@ -1115,27 +1098,25 @@ fn derive_key_with_sp800_108_additional_key_handles_rejects_small_attribute_buff
 
 #[test]
 fn close_session_clears_sp800_108_session_keys_but_preserves_token_keys() {
-    const CKM_SP800_108_COUNTER_KDF: CkMechanismType = CkMechanismType(0x0000_03AC);
-
-    let backend = MockBackend::new(vec![CkSlotId(0)], vec![CKM_SP800_108_COUNTER_KDF]);
+    let backend = MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::SP800_108_COUNTER_KDF]);
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
     let base_key = live_key(&backend, session);
     let session_mechanism = CkMechanism {
-        mechanism_type: CKM_SP800_108_COUNTER_KDF,
+        mechanism_type: CkMechanismType::SP800_108_COUNTER_KDF,
         params: Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-            prf_type: CKM_SHA256_HMAC,
+            prf_type: CkMechanismType(CKM_SHA256_HMAC),
             data_params: vec![sp800_108_counter_iteration_param()],
             additional_derived_keys: vec![Sp800108DerivedKey {
                 template: vec![label_attr("session-extra")],
-                key_handle: 0,
+                key_handle: CkObjectHandle(0),
             }],
         })),
     };
     let token_mechanism = CkMechanism {
-        mechanism_type: CKM_SP800_108_COUNTER_KDF,
+        mechanism_type: CkMechanismType::SP800_108_COUNTER_KDF,
         params: Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-            prf_type: CKM_SHA256_HMAC,
+            prf_type: CkMechanismType(CKM_SHA256_HMAC),
             data_params: vec![sp800_108_counter_iteration_param()],
             additional_derived_keys: vec![Sp800108DerivedKey {
                 template: vec![
@@ -1145,7 +1126,7 @@ fn close_session_clears_sp800_108_session_keys_but_preserves_token_keys() {
                     },
                     label_attr("token-extra"),
                 ],
-                key_handle: 0,
+                key_handle: CkObjectHandle(0),
             }],
         })),
     };
@@ -1160,7 +1141,7 @@ fn close_session_clears_sp800_108_session_keys_but_preserves_token_keys() {
         .unwrap();
     let session_extra = match session_output {
         Some(CkMechanismParams::Sp800108Kdf(output)) => {
-            CkObjectHandle(output.additional_derived_keys[0].key_handle)
+            output.additional_derived_keys[0].key_handle
         }
         other => panic!("expected SP800-108 output params, got {other:?}"),
     };
@@ -1180,7 +1161,7 @@ fn close_session_clears_sp800_108_session_keys_but_preserves_token_keys() {
         .unwrap();
     let token_extra = match token_output {
         Some(CkMechanismParams::Sp800108Kdf(output)) => {
-            CkObjectHandle(output.additional_derived_keys[0].key_handle)
+            output.additional_derived_keys[0].key_handle
         }
         other => panic!("expected SP800-108 output params, got {other:?}"),
     };
@@ -1220,30 +1201,27 @@ fn close_session_clears_sp800_108_session_keys_but_preserves_token_keys() {
 
 #[test]
 fn derive_key_with_sp800_108_additional_keys_does_not_partially_allocate_on_quota_failure() {
-    const CKM_SP800_108_COUNTER_KDF: CkMechanismType = CkMechanismType(0x0000_03AC);
-    const CKM_SP800_108_FEEDBACK_KDF: CkMechanismType = CkMechanismType(0x0000_03AD);
-
     for (mechanism_type, params) in [
         (
-            CKM_SP800_108_COUNTER_KDF,
+            CkMechanismType::SP800_108_COUNTER_KDF,
             CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-                prf_type: CKM_SHA256_HMAC,
+                prf_type: CkMechanismType(CKM_SHA256_HMAC),
                 data_params: vec![sp800_108_counter_iteration_param()],
                 additional_derived_keys: vec![
-                    Sp800108DerivedKey { template: Vec::new(), key_handle: 0 },
-                    Sp800108DerivedKey { template: Vec::new(), key_handle: 0 },
+                    Sp800108DerivedKey { template: Vec::new(), key_handle: CkObjectHandle(0) },
+                    Sp800108DerivedKey { template: Vec::new(), key_handle: CkObjectHandle(0) },
                 ],
             }),
         ),
         (
-            CKM_SP800_108_FEEDBACK_KDF,
+            CkMechanismType::SP800_108_FEEDBACK_KDF,
             CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
-                prf_type: CKM_SHA256_HMAC,
+                prf_type: CkMechanismType(CKM_SHA256_HMAC),
                 data_params: vec![sp800_108_null_iteration_param()],
                 iv: vec![0xA5; 16],
                 additional_derived_keys: vec![
-                    Sp800108DerivedKey { template: Vec::new(), key_handle: 0 },
-                    Sp800108DerivedKey { template: Vec::new(), key_handle: 0 },
+                    Sp800108DerivedKey { template: Vec::new(), key_handle: CkObjectHandle(0) },
+                    Sp800108DerivedKey { template: Vec::new(), key_handle: CkObjectHandle(0) },
                 ],
             }),
         ),
@@ -1273,17 +1251,16 @@ fn derive_key_with_sp800_108_additional_keys_does_not_partially_allocate_on_quot
 
 #[test]
 fn derive_key_with_sp800_108_template_failure_reports_invalid_additional_handle() {
-    const CKM_SP800_108_COUNTER_KDF: CkMechanismType = CkMechanismType(0x0000_03AC);
     const SENTINEL_HANDLE: u64 = 0xCAFE_BABE;
 
-    let backend = MockBackend::new(vec![CkSlotId(0)], vec![CKM_SP800_108_COUNTER_KDF]);
+    let backend = MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::SP800_108_COUNTER_KDF]);
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
     let base_key = live_key(&backend, session);
     let mechanism = CkMechanism {
-        mechanism_type: CKM_SP800_108_COUNTER_KDF,
+        mechanism_type: CkMechanismType::SP800_108_COUNTER_KDF,
         params: Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-            prf_type: CKM_SHA256_HMAC,
+            prf_type: CkMechanismType(CKM_SHA256_HMAC),
             data_params: vec![sp800_108_counter_iteration_param()],
             additional_derived_keys: vec![
                 Sp800108DerivedKey {
@@ -1291,14 +1268,14 @@ fn derive_key_with_sp800_108_template_failure_reports_invalid_additional_handle(
                         attr_type: CkAttributeType::VALUE_LEN,
                         value: Some(CkAttributeValue::Ulong(32)),
                     }],
-                    key_handle: SENTINEL_HANDLE,
+                    key_handle: CkObjectHandle(SENTINEL_HANDLE),
                 },
                 Sp800108DerivedKey {
                     template: vec![CkAttribute {
                         attr_type: CkAttributeType::VALUE_LEN,
                         value: Some(CkAttributeValue::Ulong(0)),
                     }],
-                    key_handle: SENTINEL_HANDLE,
+                    key_handle: CkObjectHandle(SENTINEL_HANDLE),
                 },
             ],
         })),
@@ -1313,8 +1290,8 @@ fn derive_key_with_sp800_108_template_failure_reports_invalid_additional_handle(
     let Some(CkMechanismParams::Sp800108Kdf(output)) = result.mechanism_out else {
         panic!("expected SP800-108 mechanism output on template failure");
     };
-    assert_eq!(output.additional_derived_keys[0].key_handle, SENTINEL_HANDLE);
-    assert_eq!(output.additional_derived_keys[1].key_handle, 0);
+    assert_eq!(output.additional_derived_keys[0].key_handle.0, SENTINEL_HANDLE);
+    assert_eq!(output.additional_derived_keys[1].key_handle.0, 0);
     assert_eq!(
         backend.destroy_object(session, CkObjectHandle(base_key.0 + 1)).unwrap_err(),
         CkRv::OBJECT_HANDLE_INVALID,

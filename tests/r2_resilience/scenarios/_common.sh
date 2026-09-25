@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Shared helpers for resilience scenarios.
 #
 # Conventions:
@@ -17,6 +18,22 @@ TOXIPROXY_PROXY="daemon"
 PKCS11_MODULE="${PKCS11_MODULE_PATH:-/usr/lib/pkcs11/libpkcs11_proxy_ng_shim.so}"
 TOKEN_LABEL="r2-resilience"
 USER_PIN="1234"
+
+# Per-run sign capture log (W1-L10-10): parallel scenario runs in one
+# runner container must not clobber a shared fixed path.
+SHIM_SIGN_LOG="${SHIM_SIGN_LOG:-$(mktemp /tmp/shim_sign.XXXXXX.log)}"
+export SHIM_SIGN_LOG
+
+# Millisecond wall clock (W1-L10-10) for asserted timing bounds.
+now_ms() {
+    local s n
+    s=$(date +%s)
+    n=$(date +%N 2>/dev/null)
+    case $n in
+        ''|%N|*[!0-9]*) printf '%s000' "$s" ;;
+        *) printf '%s%.3s' "$s" "$n" ;;
+    esac
+}
 
 # Wait for the toxiproxy admin endpoint to come up. The daemon is fast
 # enough that the order in docker-compose.yml is usually fine, but
@@ -74,11 +91,11 @@ shim_sign_once() {
             --login --pin "$USER_PIN" \
             --sign --mechanism SHA256-RSA-PKCS \
             --input-file /etc/hostname \
-            --output-file "$outfile" >/tmp/shim_sign.log 2>&1; then
+            --output-file "$outfile" >"$SHIM_SIGN_LOG" 2>&1; then
         rm -f "$outfile"
         return 0
     fi
-    cat /tmp/shim_sign.log >&2
+    cat "$SHIM_SIGN_LOG" >&2
     rm -f "$outfile"
     return 1
 }
@@ -103,5 +120,5 @@ ensure_test_key() {
 # (e.g. CKR_DEVICE_ERROR). Helpful for asserting scenario-specific
 # error semantics without parsing fragile pkcs11-tool exit codes.
 log_mentions_ckr() {
-    grep -q "$1" /tmp/shim_sign.log
+    grep -q "$1" "$SHIM_SIGN_LOG"
 }

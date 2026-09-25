@@ -518,7 +518,7 @@ fn finalize_clears_pending_slot_events() {
     backend.finalize().unwrap();
     backend.initialize().unwrap();
 
-    assert_eq!(backend.wait_for_slot_event(CKF_DONT_BLOCK).unwrap_err(), CkRv::NO_EVENT);
+    assert_eq!(backend.wait_for_slot_event(CkFlags::DONT_BLOCK).unwrap_err(), CkRv::NO_EVENT);
 }
 
 #[test]

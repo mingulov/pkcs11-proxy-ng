@@ -1,0 +1,16 @@
+# W1-L16-09: pinned stable toolchain for reproducible builds.
+#
+# Before this file, local builds and Dockerfiles floated on whatever
+# `stable` resolved to that day (only the CI MSRV job pinned 1.88).
+# The channel below is the reproducible default: rustup auto-installs
+# it on first use, CI repeats it in every dtolnay/rust-toolchain step
+# (the action's RUSTUP_TOOLCHAIN export overrides this file, so the
+# pin is mirrored there), and Dockerfile.test installs it via the
+# versioned rustup-init bootstrap.
+#
+# MSRV is unchanged: the workspace rust-version stays 1.88 and the CI
+# MSRV job keeps building + testing on Rust 1.88.
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

@@ -1085,8 +1085,8 @@ message LoginUserRequest {
   string client_context_id = 1;
   uint64 session_handle = 2;
   uint64 user_type = 3;
-  bytes pin = 4;
-  bytes username = 5;
+  optional bytes pin = 4;  // None = NULL pPin pointer
+  optional bytes username = 5;  // None = NULL pUsername pointer
 }
 message LoginUserResponse { uint64 ck_rv = 1; }
 

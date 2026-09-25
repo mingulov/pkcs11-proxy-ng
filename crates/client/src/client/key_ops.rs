@@ -23,7 +23,7 @@ impl Pkcs11Client {
         let req = pkcs11_proxy_ng_proto::WrapKeyRequest {
             client_context_id: ctx,
             session_handle: session.0,
-            mechanism: Some(Self::proto_mechanism(mechanism)),
+            mechanism: Some(Self::proto_mechanism(mechanism)?),
             wrapping_key_handle: wrapping_key.0,
             key_handle: key.0,
         };
@@ -44,7 +44,7 @@ impl Pkcs11Client {
         let mut req = pkcs11_proxy_ng_proto::UnwrapKeyRequest {
             client_context_id: ctx,
             session_handle: session.0,
-            mechanism: Some(Self::proto_mechanism(mechanism)),
+            mechanism: Some(Self::proto_mechanism(mechanism)?),
             unwrapping_key_handle: unwrapping_key.0,
             wrapped_key: Vec::new(),
             template: proto_template,
@@ -101,7 +101,7 @@ impl Pkcs11Client {
         let req = pkcs11_proxy_ng_proto::DeriveKeyRequest {
             client_context_id: ctx,
             session_handle: session.0,
-            mechanism: Some(Self::proto_mechanism(mechanism)),
+            mechanism: Some(Self::proto_mechanism(mechanism)?),
             base_key_handle: base_key.0,
             template: proto_template,
             template_null: template.is_none(),
@@ -144,7 +144,7 @@ impl Pkcs11Client {
         template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
         let ctx = self.context_id()?;
-        let proto_mech = Self::proto_mechanism(mechanism);
+        let proto_mech = Self::proto_mechanism(mechanism)?;
         let proto_template = Self::proto_template(template.unwrap_or(&[]));
         let req = pkcs11_proxy_ng_proto::GenerateKeyRequest {
             client_context_id: ctx,
@@ -174,7 +174,7 @@ impl Pkcs11Client {
         let req = pkcs11_proxy_ng_proto::GenerateKeyPairRequest {
             client_context_id: ctx,
             session_handle: session.0,
-            mechanism: Some(Self::proto_mechanism(mechanism)),
+            mechanism: Some(Self::proto_mechanism(mechanism)?),
             public_key_template: proto_pub,
             public_template_null: pub_template.is_none(),
             private_key_template: proto_priv,

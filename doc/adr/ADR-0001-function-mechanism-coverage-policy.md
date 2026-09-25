@@ -91,12 +91,16 @@ pointer-bearing mechanism parameters.
 Mechanisms are handled based on their parameter requirements at **operation
 time**, not by static classification alone.
 
-> **Implementation note (2026-03-15):** The mechanism-to-parameter-shape
-> mapping is now config-driven, defined in `mechanism_params.toml` and loaded
-> by the shim at `C_Initialize`. The embedded default covers all standard
-> PKCS#11 mechanisms. Vendor mechanisms are added via an override file
-> (env var `PKCS11_PROXY_MECHANISMS`). See the design spec at
-> `docs/superpowers/specs/2026-03-15-mechanism-registry-design.md`.
+> **Implementation note (2026-03-15, corrected 2026-09-21):** The
+> mechanism-to-parameter-shape mapping is config-driven, defined in
+> `mechanism_params.toml`. The **daemon** reads it at startup (the embedded
+> default applies when `[mechanisms].config_path` is unset), publishes the
+> payload on every `GetBackendInterfaces` RPC, and reloads on SIGHUP; shims
+> consume it during `interface_probe::ensure_probed()` — the shim does not
+> load registry files at `C_Initialize`. Vendor mechanisms are added via the
+> daemon override file (`PKCS11_PROXY_MECHANISMS` survives only as the shim
+> fallback override when the daemon is unreachable or omits the field). See
+> the design spec at `docs/superpowers/specs/2026-03-15-mechanism-registry-design.md`.
 
 #### Parameterless use — always forwarded
 

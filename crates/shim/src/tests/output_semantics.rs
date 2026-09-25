@@ -322,7 +322,7 @@ fn write_exact_output_rejects_value_larger_than_declared_buffer_without_copy() {
         )
     };
 
-    assert_eq!(rv, CKR_GENERAL_ERROR as CK_RV);
+    assert_eq!(rv, CKR_DEVICE_ERROR as CK_RV);
     assert_eq!(declared_len, 2);
     assert_eq!(backing, [0xAA; 4]);
 }
@@ -340,7 +340,7 @@ fn write_exact_output_validates_all_effects_before_any_store() {
     let rv = unsafe {
         dispatch::general::write_exact_output(&spec, &result, backing.as_mut_ptr(), &mut length)
     };
-    assert_eq!(rv, CKR_GENERAL_ERROR as CK_RV);
+    assert_eq!(rv, CKR_DEVICE_ERROR as CK_RV);
     assert_eq!(length, 8, "validation must precede all caller stores");
     assert_eq!(backing, [0xa5; 8]);
 }
@@ -384,7 +384,7 @@ fn write_exact_output_does_not_copy_value_on_buffer_too_small() {
         )
     };
 
-    assert_eq!(rv, CKR_GENERAL_ERROR as CK_RV);
+    assert_eq!(rv, CKR_DEVICE_ERROR as CK_RV);
     assert_eq!(declared_len, 2);
     assert_eq!(backing, [0xAA; 4]);
 }
@@ -436,6 +436,54 @@ fn shim_get_attribute_value_size_query_returns_exact_length_without_copy() {
     // E0793: CK_ATTRIBUTE is packed on Windows; assert on by-value copies.
     let ul_value_len = attr.ulValueLen;
     assert_eq!(ul_value_len, 3);
+}
+
+/// W1-C6-07: `C_LoginUser` must preserve caller-NULL pin/username as None
+/// end to end (the `C_Login` convention), not flatten them to empty
+/// slices. A protected-path login (NULL, 0) must arrive at the backend as
+/// (None, None) while an explicit empty login arrives as (Some, Some) —
+/// the two pointer classes stay distinguishable, exactly like `C_Login`.
+#[test]
+fn shim_login_user_null_vs_empty_presence_reaches_backend() {
+    let _guard = shim_state_test_guard();
+    let daemon = TestDaemon::shared();
+    let shim = ShimSession::new();
+    let observations_before = daemon.backend.login_user_presence_observations().len();
+
+    // Protected-path login: NULL pin + NULL username.
+    let null_rv = unsafe {
+        dispatch::general::c_login_user(
+            shim.session,
+            CKU_USER,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    // Explicit-empty login: non-NULL pointers with zero length.
+    let mut empty = [0u8; 1];
+    let empty_rv = unsafe {
+        dispatch::general::c_login_user(
+            shim.session,
+            CKU_USER,
+            empty.as_mut_ptr(),
+            0,
+            empty.as_mut_ptr(),
+            0,
+        )
+    };
+
+    // Both fail PIN verification (the mock only accepts "1234"), but the
+    // backend must observe distinct pointer-presence classes.
+    assert_eq!(null_rv, CKR_PIN_INCORRECT as CK_RV);
+    assert_eq!(empty_rv, CKR_PIN_INCORRECT as CK_RV);
+    let fresh = &daemon.backend.login_user_presence_observations()[observations_before..];
+    assert_eq!(
+        fresh,
+        &[(true, true), (false, false)],
+        "NULL must arrive as (None, None), empty as (Some, Some)"
+    );
 }
 
 #[test]
@@ -1264,6 +1312,7 @@ fn malformed_post_provider_ack_returns_device_error_and_clears_shim_shape() {
         )
     };
 
+    // W1-L3-05: DEVICE_ERROR is the unified exact-output violation RV.
     assert_eq!(rv, CKR_DEVICE_ERROR as CK_RV);
     assert_eq!(daemon.backend.message_parameter_call_count(), calls_before + 1);
     assert_eq!(
@@ -1294,6 +1343,43 @@ fn device_error_close_clears_authoritative_message_shapes() {
         test_message_shape(session, state::MessageOperation::Encrypt),
         None,
         "an outcome-ambiguous close must clear authoritative shape state",
+    );
+}
+
+#[test]
+fn general_error_close_preserves_authoritative_message_shapes() {
+    // W1-L3-01 fix round: a decoded (backend-origin) GENERAL_ERROR close —
+    // e.g. the daemon's per-slot login-lock refusal, which leaves the
+    // session alive and the backend untouched — must NOT evict authoritative
+    // state (evict_authoritative flips true→false vs the old DEVICE_ERROR
+    // refusal). Contrast device_error_close_... (ambiguous → evict) and
+    // panicked_close_... (transport-ambiguous GENERAL_ERROR → evict, via the
+    // origin != Backend arm).
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let session = shim.open_additional_session();
+    set_test_message_shape(session, state::MessageOperation::Encrypt, MessageParameterShape::Gcm);
+
+    let daemon = TestDaemon::shared();
+    daemon.backend.inject_close_error(CkRv::GENERAL_ERROR);
+    let rv = unsafe { dispatch::general::c_close_session(session) };
+    daemon.backend.clear_close_error();
+
+    assert_eq!(rv, CKR_GENERAL_ERROR as CK_RV);
+    assert_eq!(
+        test_message_shape(session, state::MessageOperation::Encrypt),
+        Some(MessageParameterShape::Gcm),
+        "a decoded GENERAL_ERROR close refusal must preserve authoritative shape state",
+    );
+
+    // The refusal kept the handle valid (Transient settle), so a retry
+    // succeeds and then evicts authoritative state terminally.
+    let retry_rv = unsafe { dispatch::general::c_close_session(session) };
+    assert_eq!(retry_rv, CKR_OK as CK_RV);
+    assert_eq!(
+        test_message_shape(session, state::MessageOperation::Encrypt),
+        None,
+        "a terminal close must evict authoritative shape state",
     );
 }
 
@@ -2455,10 +2541,46 @@ fn gcm_generated_iv_round_trips_through_shim_client_and_server() {
     assert_eq!(ul_iv_bits, 96, "provider IV bit length writeback");
     assert_eq!(ul_tag_bits, 128, "provider tag bit length writeback");
     assert_eq!(iv_buffer.as_slice(), generated_iv.as_slice(), "generated IV writeback");
+
+    // Single-part C_Encrypt leaves the app-visible IV exactly as C_EncryptInit
+    // delivered it: no cross-call writeback (W1-C6-01), byte-identical to a
+    // native module that generates the IV at Init time.
+    let plaintext = b"hello";
+    let mut ciphertext = [0_u8; 5];
+    let mut ciphertext_len = ciphertext.len() as CK_ULONG;
+    let encrypt_rv = unsafe {
+        dispatch::general::c_encrypt(
+            shim.session,
+            plaintext.as_ptr() as CK_BYTE_PTR,
+            plaintext.len() as CK_ULONG,
+            ciphertext.as_mut_ptr(),
+            &mut ciphertext_len,
+        )
+    };
+    assert_eq!(encrypt_rv, CKR_OK as CK_RV, "C_Encrypt(data)");
+    assert_eq!(ciphertext_len, plaintext.len() as CK_ULONG);
+    assert_eq!(ciphertext, [0x2A, 0x27, 0x2E, 0x2E, 0x2D], "mock ciphertext");
+    let ul_iv_len_after = params.ulIvLen;
+    assert_eq!(
+        ul_iv_len_after,
+        generated_iv.len() as CK_ULONG,
+        "IV length stable across C_Encrypt"
+    );
+    assert_eq!(
+        iv_buffer.as_slice(),
+        generated_iv.as_slice(),
+        "app-visible IV unchanged by C_Encrypt"
+    );
 }
 
+/// W1-C6-01: `C_Encrypt` must never write into `C_EncryptInit`-scope caller
+/// memory. (This test previously asserted the delayed writeback that retained
+/// the caller's `pParameter` address across FFI calls — a use-after-scope
+/// write the caller may legally invalidate by freeing that memory. The P0 fix
+/// removed the delayed path: the IV is delivered only at Init, while the
+/// caller's memory is live.)
 #[test]
-fn gcm_delayed_iv_round_trips_after_encrypt_data_query() {
+fn gcm_encrypt_does_not_write_back_to_init_scope_memory() {
     let _guard = shim_state_test_guard();
     let daemon = TestDaemon::shared();
     let generated_iv = vec![0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB];
@@ -2508,13 +2630,21 @@ fn gcm_delayed_iv_round_trips_after_encrypt_data_query() {
     assert_eq!(encrypt_rv, CKR_OK as CK_RV, "C_Encrypt(data)");
     assert_eq!(ciphertext_len, plaintext.len() as CK_ULONG);
     assert_eq!(ciphertext, [0x2A, 0x27, 0x2E, 0x2E, 0x2D], "mock ciphertext");
+    // The Init-scope buffer is deliberately kept alive so a cross-call write
+    // is deterministically observable: any retained-pointer writeback lands here.
     let ul_iv_len = params.ulIvLen;
-    assert_eq!(ul_iv_len, generated_iv.len() as CK_ULONG, "delayed IV length writeback");
-    assert_eq!(iv_buffer.as_slice(), generated_iv.as_slice(), "delayed IV writeback");
+    assert_eq!(ul_iv_len, 0, "W1-C6-01: C_Encrypt must not touch Init-scope params");
+    assert_eq!(
+        iv_buffer, [0; 12],
+        "W1-C6-01: C_Encrypt must not write the IV into Init-scope caller memory"
+    );
 }
 
+/// W1-C6-01: neither the size query nor the data call may write into
+/// `C_EncryptInit`-scope caller memory (renamed from the delayed-writeback
+/// assertion it replaced — see `gcm_encrypt_does_not_write_back_to_init_scope_memory`).
 #[test]
-fn gcm_delayed_iv_size_query_does_not_consume_writeback() {
+fn gcm_encrypt_size_query_leaves_init_scope_memory_untouched() {
     let _guard = shim_state_test_guard();
     let daemon = TestDaemon::shared();
     let generated_iv = vec![0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xCA, 0xCB];
@@ -2559,7 +2689,7 @@ fn gcm_delayed_iv_size_query_does_not_consume_writeback() {
     };
     assert_eq!(size_rv, CKR_OK as CK_RV, "C_Encrypt(size query)");
     assert_eq!(size_len, plaintext.len() as CK_ULONG);
-    assert_eq!(iv_buffer, [0; 12], "size query must not write or consume delayed IV");
+    assert_eq!(iv_buffer, [0; 12], "size query must not write into Init-scope memory");
 
     let mut ciphertext = [0_u8; 5];
     let mut ciphertext_len = ciphertext.len() as CK_ULONG;
@@ -2575,7 +2705,113 @@ fn gcm_delayed_iv_size_query_does_not_consume_writeback() {
 
     daemon.backend.set_encrypt_exact_output(None);
     assert_eq!(encrypt_rv, CKR_OK as CK_RV, "C_Encrypt(data)");
-    assert_eq!(iv_buffer.as_slice(), generated_iv.as_slice(), "delayed IV writeback");
+    // W1-C6-01: no cross-call writeback — the data call leaves the
+    // Init-scope buffer exactly as the size query left it (untouched).
+    let ul_iv_len = params.ulIvLen;
+    assert_eq!(ul_iv_len, 0, "W1-C6-01: C_Encrypt must not touch Init-scope params");
+    assert_eq!(
+        iv_buffer, [0; 12],
+        "W1-C6-01: C_Encrypt must not write the IV into Init-scope caller memory"
+    );
+}
+
+/// W1-C6-01 (use-after-scope leg): the `CK_GCM_PARAMS` and its `pIv` buffer
+/// live on mapped pages that become inaccessible (`PROT_NONE`) once
+/// `C_EncryptInit` returns — modelling a caller that freed that memory.
+/// `C_Encrypt` must complete without touching them (a retained-pointer
+/// writeback faults with SIGSEGV instead of returning).
+#[cfg(unix)]
+#[test]
+fn gcm_encrypt_does_not_touch_released_init_params() {
+    let _guard = shim_state_test_guard();
+    let daemon = TestDaemon::shared();
+    let generated_iv = vec![0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xEB];
+    daemon.backend.set_encrypt_exact_output(Some(CkMechanismParams::Gcm(GcmParams {
+        iv: generated_iv,
+        iv_bits: 96,
+        iv_buffer_len: 12,
+        aad: b"aad".to_vec().into(),
+        tag_bits: 128,
+
+        iv_null: false,
+        aad_null: false,
+    })));
+
+    let page_len = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+    assert!(page_len >= 4096, "suspicious page size {page_len}");
+    let region_len = page_len * 2;
+    // SAFETY: anonymous private mapping, page-aligned; checked for MAP_FAILED.
+    let region = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            region_len,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    assert_ne!(region, libc::MAP_FAILED, "mmap test region");
+    // SAFETY: region is mapped and large enough; params on page 0, IV on page 1.
+    let params_ptr = region as *mut CK_GCM_PARAMS;
+    let iv_ptr = unsafe { (region as *mut u8).add(page_len) };
+    let mut aad = *b"aad";
+    unsafe {
+        params_ptr.write(CK_GCM_PARAMS {
+            pIv: iv_ptr,
+            ulIvLen: 0,
+            ulIvBits: 96,
+            pAAD: aad.as_mut_ptr(),
+            ulAADLen: aad.len() as CK_ULONG,
+            ulTagBits: 128,
+        });
+        std::ptr::write_bytes(iv_ptr, 0, 12);
+    }
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_AES_GCM,
+        pParameter: params_ptr as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_GCM_PARAMS>() as CK_ULONG,
+    };
+
+    let shim = ShimSession::new();
+    let key = create_object(shim.session);
+    let init_rv = unsafe { dispatch::general::c_encrypt_init(shim.session, &mut mechanism, key) };
+    assert_eq!(init_rv, CKR_OK as CK_RV, "C_EncryptInit");
+
+    // The caller frees its Init-scope memory: any retained-pointer access
+    // below faults instead of silently corrupting reused memory.
+    // SAFETY: region is a live mapping of region_len bytes.
+    let protect_rv = unsafe { libc::mprotect(region, region_len, libc::PROT_NONE) };
+    assert_eq!(protect_rv, 0, "mprotect PROT_NONE test region");
+
+    let plaintext = b"hello";
+    let mut ciphertext = [0_u8; 5];
+    let mut ciphertext_len = ciphertext.len() as CK_ULONG;
+    let encrypt_rv = unsafe {
+        dispatch::general::c_encrypt(
+            shim.session,
+            plaintext.as_ptr() as CK_BYTE_PTR,
+            plaintext.len() as CK_ULONG,
+            ciphertext.as_mut_ptr(),
+            &mut ciphertext_len,
+        )
+    };
+
+    // Teardown: restore access before unmapping. Only reached when
+    // `C_Encrypt` did not touch the released pages (on a SIGSEGV the process
+    // dies here and the OS reclaims the mapping).
+    // SAFETY: region is a live mapping of region_len bytes.
+    let unprotect_rv =
+        unsafe { libc::mprotect(region, region_len, libc::PROT_READ | libc::PROT_WRITE) };
+    assert_eq!(unprotect_rv, 0, "mprotect restore test region");
+    // SAFETY: region is a live mapping of region_len bytes.
+    let unmap_rv = unsafe { libc::munmap(region, region_len) };
+    assert_eq!(unmap_rv, 0, "munmap test region");
+
+    daemon.backend.set_encrypt_exact_output(None);
+    assert_eq!(encrypt_rv, CKR_OK as CK_RV, "C_Encrypt(data)");
+    assert_eq!(ciphertext_len, plaintext.len() as CK_ULONG);
+    assert_eq!(ciphertext, [0x2A, 0x27, 0x2E, 0x2E, 0x2D], "mock ciphertext");
 }
 
 #[test]
@@ -3919,4 +4155,183 @@ fn generate_random_returns_exact_requested_length() {
     assert_eq!(rv3, CKR_OK as CK_RV, "C_GenerateRandom(0)");
 
     drop(shim);
+}
+
+#[test]
+fn generate_random_wrong_length_daemon_response_returns_general_error() {
+    // W1-L3-08: a daemon response whose length differs from the requested
+    // length is a protocol violation, not a backend failure: it must map to
+    // CKR_GENERAL_ERROR, never the CKR_DEVICE_ERROR catch-all. Recorded
+    // pre-fix state: both short and long responses returned DEVICE_ERROR.
+    let _guard = shim_state_test_guard();
+    let daemon = TestDaemon::shared();
+    let shim = ShimSession::new();
+
+    // Short response: 4 bytes for a 16-byte request.
+    daemon.backend.set_next_random_bytes(vec![0x42; 4]);
+    let mut buf = [0xA5_u8; 16];
+    let rv = unsafe {
+        dispatch::general::c_generate_random(shim.session, buf.as_mut_ptr(), buf.len() as CK_ULONG)
+    };
+    assert_eq!(rv, CKR_GENERAL_ERROR as CK_RV, "short daemon response");
+    assert_eq!(buf, [0xA5; 16], "short response must not write output");
+
+    // Long response: 20 bytes for a 16-byte request.
+    daemon.backend.set_next_random_bytes(vec![0x42; 20]);
+    let rv = unsafe {
+        dispatch::general::c_generate_random(shim.session, buf.as_mut_ptr(), buf.len() as CK_ULONG)
+    };
+    assert_eq!(rv, CKR_GENERAL_ERROR as CK_RV, "long daemon response");
+    assert_eq!(buf, [0xA5; 16], "long response must not write output");
+
+    drop(shim);
+}
+
+#[test]
+fn shim_async_complete_oversized_result_returns_buffer_too_small() {
+    // W1-C6-02: an async result larger than the caller's CK_ASYNC_DATA buffer
+    // must return CKR_BUFFER_TOO_SMALL with the required length in ulValue
+    // (standard two-call semantics) — never silently truncate with CKR_OK.
+    // The mock backend returns 8 bytes of 0xA5 for any function name.
+    let _guard = shim_state_test_guard();
+    let _daemon = TestDaemon::shared();
+    let shim = ShimSession::new();
+
+    let mut buf = [0xAA_u8; 4];
+    let mut async_data = CK_ASYNC_DATA {
+        ulVersion: 0,
+        pValue: buf.as_mut_ptr(),
+        ulValue: buf.len() as CK_ULONG,
+        hObject: CK_INVALID_HANDLE,
+        hAdditionalObject: CK_INVALID_HANDLE,
+    };
+    let name = std::ffi::CString::new("C_Encrypt").expect("function name");
+    let rv = unsafe {
+        dispatch::general::c_async_complete(
+            shim.session,
+            name.as_ptr() as *mut CK_UTF8CHAR,
+            &mut async_data,
+        )
+    };
+    assert_eq!(rv, CKR_BUFFER_TOO_SMALL as CK_RV, "C_AsyncComplete(oversized)");
+    assert_eq!(async_data.ulValue, 8, "required length must be reported");
+    assert_eq!(buf, [0xAA_u8; 4], "no bytes may be copied on BUFFER_TOO_SMALL");
+
+    drop(shim);
+}
+
+#[test]
+fn shim_async_complete_fitting_result_copies_bytes() {
+    // W1-C6-02: fitting async results stay byte-identical (CKR_OK + full copy).
+    let _guard = shim_state_test_guard();
+    let _daemon = TestDaemon::shared();
+    let shim = ShimSession::new();
+
+    let mut buf = [0xAA_u8; 8];
+    let mut async_data = CK_ASYNC_DATA {
+        ulVersion: 0,
+        pValue: buf.as_mut_ptr(),
+        ulValue: buf.len() as CK_ULONG,
+        hObject: CK_INVALID_HANDLE,
+        hAdditionalObject: CK_INVALID_HANDLE,
+    };
+    let name = std::ffi::CString::new("C_Encrypt").expect("function name");
+    let rv = unsafe {
+        dispatch::general::c_async_complete(
+            shim.session,
+            name.as_ptr() as *mut CK_UTF8CHAR,
+            &mut async_data,
+        )
+    };
+    assert_eq!(rv, CKR_OK as CK_RV, "C_AsyncComplete(fitting)");
+    assert_eq!(async_data.ulValue, 8);
+    assert_eq!(buf, [0xA5_u8; 8], "fitting value must be copied verbatim");
+
+    drop(shim);
+}
+
+#[test]
+fn shim_async_complete_null_buffer_returns_required_length() {
+    // W1-C6-02: length-query call (null pValue) still returns the required
+    // length with CKR_OK.
+    let _guard = shim_state_test_guard();
+    let _daemon = TestDaemon::shared();
+    let shim = ShimSession::new();
+
+    let mut async_data = CK_ASYNC_DATA {
+        ulVersion: 0,
+        pValue: std::ptr::null_mut(),
+        ulValue: 0,
+        hObject: CK_INVALID_HANDLE,
+        hAdditionalObject: CK_INVALID_HANDLE,
+    };
+    let name = std::ffi::CString::new("C_Encrypt").expect("function name");
+    let rv = unsafe {
+        dispatch::general::c_async_complete(
+            shim.session,
+            name.as_ptr() as *mut CK_UTF8CHAR,
+            &mut async_data,
+        )
+    };
+    assert_eq!(rv, CKR_OK as CK_RV, "C_AsyncComplete(length query)");
+    assert_eq!(async_data.ulValue, 8, "required length must be reported");
+
+    drop(shim);
+}
+
+/// W1-L6-29: a mid-session reconnect preserves the logical context — the
+/// fresh channel serves the SAME server-side context, so the session's
+/// finalize still removes it (no orphan). Without preservation the swap
+/// dropped the id, later calls (including finalize) short-circuited
+/// locally on the empty id, and the server context leaked.
+#[test]
+fn steady_state_reconnect_preserves_client_context() {
+    let _guard = shim_state_test_guard();
+    let daemon = TestDaemon::shared();
+    let shim = ShimSession::new();
+    let live_contexts = || daemon.block_on(async { daemon.context_manager.context_ids().len() });
+    assert_eq!(live_contexts(), 1, "setup: one live context for this session");
+    let ctx_before =
+        state::runtime().block_on(async { state::client().lock().await.context_id_opt() });
+    assert!(ctx_before.is_some(), "setup: client holds a context id");
+
+    // Force the steady-state reconnect path on the next data-plane call.
+    state::mark_client_reconnect_required();
+    let mut slot_count: CK_ULONG = 0;
+    let rv = unsafe {
+        dispatch::general::c_get_slot_list(CK_FALSE, std::ptr::null_mut(), &mut slot_count)
+    };
+    assert_eq!(rv, CKR_OK as CK_RV, "data call across the reconnect must succeed");
+
+    // The id survived the swap and no extra context was minted.
+    let ctx_after =
+        state::runtime().block_on(async { state::client().lock().await.context_id_opt() });
+    assert_eq!(ctx_after, ctx_before, "reconnect must preserve the context id");
+    assert_eq!(live_contexts(), 1, "reconnect must mint no extra context");
+
+    // …and the session's finalize removes that one context (no orphan).
+    drop(shim);
+    assert_eq!(live_contexts(), 0, "finalize after reconnect must remove the context");
+}
+
+/// W1-L11-11 pin: the initialize/finalize context-id lifecycle on the
+/// shared client. `c_initialize` must store the id (later data-plane
+/// calls clone it) and `c_finalize` must clear it (no released context
+/// retained). Must hold identically before AND after the
+/// clone-before-RPC migration — a naive clone without propagation would
+/// leave the shared id empty after init (breaking every later call) or
+/// stale after finalize.
+#[test]
+fn initialize_finalize_context_id_lifecycle() {
+    let _guard = shim_state_test_guard();
+    let _daemon = TestDaemon::shared();
+    {
+        let _shim = ShimSession::new();
+        let ctx =
+            state::runtime().block_on(async { state::client().lock().await.context_id_opt() });
+        assert!(ctx.is_some(), "c_initialize must store the context id on the shared client");
+    }
+    // ShimSession::drop ran c_finalize: the shared client's id is cleared.
+    let ctx = state::runtime().block_on(async { state::client().lock().await.context_id_opt() });
+    assert!(ctx.is_none(), "c_finalize must clear the context id on the shared client");
 }

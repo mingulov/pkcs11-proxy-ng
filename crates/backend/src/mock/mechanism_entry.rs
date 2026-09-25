@@ -53,7 +53,7 @@ impl MockBackend {
         entries.handles.remove(&entry);
         let params = mechanism.and_then(|m| m.params.as_ref());
         let handles = match params {
-            Some(CkMechanismParams::Hkdf(p)) => MockEmbeddedHandles::HkdfSalt(p.salt_key_handle),
+            Some(CkMechanismParams::Hkdf(p)) => MockEmbeddedHandles::HkdfSalt(p.salt_key_handle.0),
             Some(CkMechanismParams::Sp800108Kdf(p)) => {
                 MockEmbeddedHandles::Sp800108(encoded_handles(&p.data_params))
             }

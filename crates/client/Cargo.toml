@@ -12,10 +12,28 @@ pkcs11-proxy-ng-proto = { path = "../proto" }
 # Client side only: `channel` transport + `codegen` + `tls-ring` (mTLS client
 # config). No server stack.
 tonic = { workspace = true, features = ["channel", "codegen", "tls-ring"] }
-tokio.workspace = true
+# W1-L16-15: client async surface only (UnixStream dial, sync/time, spawn).
+tokio = { workspace = true, features = ["rt", "sync", "time", "net", "macros"] }
 tracing.workspace = true
 uuid.workspace = true
 # Unix-domain-socket transport (local-testing endpoint): a tower connector
 # dialing a tokio UnixStream, adapted to hyper's IO traits via TokioIo.
 tower = { version = "0.5", features = ["util"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+http = "1"
+
+[dev-dependencies]
+# In-process mock daemon for client reliability tests (W1-C10-01/02/03/08):
+# real server service + MockBackend, mirroring the CLI crypto tests. The
+# `server` feature applies to test builds only; shipped client artifacts
+# still link no server stack (workspace M11 rule).
+pkcs11-proxy-ng = { path = "../server" }
+pkcs11-proxy-ng-backend = { path = "../backend" }
+tokio-stream = "0.1"
+tonic = { workspace = true, features = ["server"] }
+# W1-L2-10: client PIN-wipe canary tests pin the `ZeroizeOnDrop` contract
+# of the request types the session methods construct.
+zeroize = { workspace = true }
+
+[lints]
+workspace = true

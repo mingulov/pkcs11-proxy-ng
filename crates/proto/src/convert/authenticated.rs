@@ -198,7 +198,8 @@ impl TryFrom<&wire::AuthenticatedMechanismOutput> for AuthenticatedOutput {
                 Ok(Self::Message(MessageParameter::try_from(message)?))
             }
             Some(Output::MessageEffects(effects)) => Ok(Self::Effects(effects.try_into()?)),
-            _ => Err(CkRv::MECHANISM_PARAM_INVALID),
+            Some(Output::Unchanged(false)) => Err(CkRv::MECHANISM_PARAM_INVALID),
+            None => Err(super::ABSENT_MESSAGE_ONEOF_RV),
         }
     }
 }
@@ -251,6 +252,29 @@ mod tests {
     }
 
     #[test]
+    fn absent_auth_output_oneof_decodes_to_unified_rv() {
+        // W1-C8-03: absent oneof must report the documented sibling-wide RV.
+        assert_eq!(
+            AuthenticatedOutput::try_from(&wire::AuthenticatedMechanismOutput { output: None }),
+            Err(crate::convert::ABSENT_MESSAGE_ONEOF_RV),
+        );
+        assert_eq!(
+            AuthenticatedOutput::try_from(&wire::AuthenticatedMechanismOutput { output: None }),
+            Err(CkRv::ARGUMENTS_BAD),
+        );
+    }
+
+    #[test]
+    fn present_but_invalid_unchanged_value_keeps_param_invalid() {
+        // W1-C8-03: only the *absent* oneof unifies; a present-but-invalid
+        // value keeps its distinct rejection.
+        let output = wire::AuthenticatedMechanismOutput {
+            output: Some(wire::authenticated_mechanism_output::Output::Unchanged(false)),
+        };
+        assert_eq!(AuthenticatedOutput::try_from(&output), Err(CkRv::MECHANISM_PARAM_INVALID),);
+    }
+
+    #[test]
     fn authenticated_conversion_rejects_raw_message_and_wrong_output_shape() {
         let mechanism = CkMechanism { mechanism_type: CkMechanismType::AES_GCM, params: None };
         let raw = wire::AuthenticatedParameters {
@@ -280,7 +304,7 @@ mod tests {
                 params: Some(CkMechanismParams::Gostr3410KeyWrap(Gostr3410KeyWrapParams {
                     wrap_oid: vec![0; 3],
                     ukm: vec![0; 8],
-                    key_handle: 17,
+                    key_handle: CkObjectHandle(17),
                 })),
             },
         ] {

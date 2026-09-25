@@ -9,9 +9,9 @@
 use pkcs11_proxy_ng_client::Pkcs11Client;
 use pkcs11_proxy_ng_types::{
     AesCbcEncryptDataParams, AesCtrParams, CkAttribute, CkAttributeType, CkAttributeValue, CkInBuf,
-    CkKeyType, CkMechanism, CkMechanismParams, CkMechanismType, CkObjectClass, CkObjectHandle,
-    CkResult, CkSessionHandle, Ecdh1DeriveParams, HkdfParams, IvParams, RsaPkcsOaepParams,
-    RsaPkcsPssParams,
+    CkKdf, CkKeyType, CkMechanism, CkMechanismParams, CkMechanismType, CkMgf, CkOaepSource,
+    CkObjectClass, CkObjectHandle, CkResult, CkSessionHandle, Ecdh1DeriveParams, HkdfParams,
+    IvParams, RsaPkcsOaepParams, RsaPkcsPssParams,
 };
 
 use super::get_attribute_bytes;
@@ -25,18 +25,6 @@ pub const CKA_DERIVE: CkAttributeType = CkAttributeType(0x0000010C);
 
 /// CKK_GENERIC_SECRET (0x00000010)
 pub const CKK_GENERIC_SECRET: u64 = 0x00000010;
-
-/// CKG_MGF1_SHA256 — mask generation function for PSS/OAEP.
-pub const CKG_MGF1_SHA256: u64 = 0x00000002;
-
-/// CKG_MGF1_SHA1 — mask generation function for OAEP with SHA-1.
-pub const CKG_MGF1_SHA1: u64 = 0x00000001;
-
-/// CKZ_DATA_SPECIFIED — OAEP source type.
-pub const CKZ_DATA_SPECIFIED: u64 = 0x00000001;
-
-/// CKD_NULL — no KDF applied in ECDH derivation.
-pub const CKD_NULL: u64 = 0x00000001;
 
 /// CKM_SHA256_RSA_PKCS_PSS (0x0043) — combined hash-and-sign PSS mechanism.
 pub const CKM_SHA256_RSA_PKCS_PSS: CkMechanismType = CkMechanismType(0x0043);
@@ -484,7 +472,7 @@ pub async fn test_rsa_pss_sign_verify(
         mechanism_type: CKM_SHA256_RSA_PKCS_PSS,
         params: Some(CkMechanismParams::RsaPkcsPss(RsaPkcsPssParams {
             hash_alg: CkMechanismType::SHA256,
-            mgf: CKG_MGF1_SHA256,
+            mgf: CkMgf::MGF1_SHA256,
             salt_len: 32,
         })),
     };
@@ -529,21 +517,24 @@ pub async fn test_rsa_pss_sign_verify(
 
 /// RSA-OAEP encrypt + decrypt with OaepParams through the proxy.
 ///
-/// Uses CKM_RSA_PKCS_OAEP with SHA-1, MGF1-SHA1, and CKZ_DATA_SPECIFIED with
-/// empty source data. SHA-1 OAEP is the universally supported combination.
+/// Uses CKM_RSA_PKCS_OAEP with SHA-1, MGF1-SHA1, and
+/// `CkOaepSource::DATA_SPECIFIED` with empty source data. SHA-1 OAEP is the
+/// universally supported combination.
 pub async fn test_rsa_oaep_encrypt_decrypt(
     client: &mut Pkcs11Client,
     session: CkSessionHandle,
     public_key: CkObjectHandle,
     private_key: CkObjectHandle,
 ) -> Result<(), String> {
+    // Empty label as (NULL, 0): SoftHSM2 rejects any non-NULL pSourceData
+    // ("pSourceData must be NULL", SoftHSM.cpp), even with zero length.
     let oaep_params = RsaPkcsOaepParams {
         hash_alg: CKM_SHA_1,
-        mgf: CKG_MGF1_SHA1,
-        source: CKZ_DATA_SPECIFIED,
+        mgf: CkMgf::MGF1_SHA1,
+        source: CkOaepSource::DATA_SPECIFIED,
         source_data: Vec::new().into(),
 
-        source_null: false,
+        source_null: true,
     };
     let oaep_mechanism = CkMechanism {
         mechanism_type: CkMechanismType::RSA_PKCS_OAEP,
@@ -617,7 +608,7 @@ pub async fn test_ecdh1_derive(
     let derive_mechanism = CkMechanism {
         mechanism_type: CkMechanismType::ECDH1_DERIVE,
         params: Some(CkMechanismParams::Ecdh1Derive(Ecdh1DeriveParams {
-            kdf: CKD_NULL,
+            kdf: CkKdf::NULL,
             shared_data: Vec::new().into(),
             public_data: bob_ec_point.clone(),
         })),
@@ -697,10 +688,10 @@ pub async fn test_hkdf_derive(
         params: Some(CkMechanismParams::Hkdf(HkdfParams {
             extract: true,
             expand: true,
-            prf_hash_mechanism: CkMechanismType::SHA256.0,
+            prf_hash_mechanism: CkMechanismType::SHA256,
             salt_type: CKF_HKDF_SALT_DATA,
             salt: salt.to_vec().into(),
-            salt_key_handle: 0, // not used with DATA salt
+            salt_key_handle: CkObjectHandle(0), // not used with DATA salt
             info: info.to_vec().into(),
         })),
     };

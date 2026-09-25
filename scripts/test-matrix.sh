@@ -6,6 +6,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 run_fast_checks=1
 run_consumers=1
 run_optional_providers=1
+run_nss_fixtures=1
 collect_bundle_on_fail=1
 fast_only=0
 
@@ -14,10 +15,11 @@ usage() {
 Usage: scripts/test-matrix.sh [options]
 
 Options:
-  --fast-only                 Run only CI Tier 0 fmt/audit/build/test/clippy checks
+  --fast-only                 Run only CI Tier 0 fmt/audit/deny/build/test/clippy checks
   --skip-fast                 Skip fmt/audit/build/test/clippy
   --skip-consumers            Skip external consumer smoke tests
   --skip-optional-providers   Skip optional NSS/Kryoptic suites
+  --skip-nss-fixtures         Skip the NSS fixture-mode lane
   --no-debug-bundle           Don't collect debug bundle on failure
   -h, --help                  Show this help
 EOF
@@ -38,6 +40,9 @@ while [[ $# -gt 0 ]]; do
             ;;
         --skip-optional-providers)
             run_optional_providers=0
+            ;;
+        --skip-nss-fixtures)
+            run_nss_fixtures=0
             ;;
         --no-debug-bundle)
             collect_bundle_on_fail=0
@@ -90,9 +95,12 @@ run_step() {
 if [[ "$run_fast_checks" -eq 1 ]]; then
     run_step "cargo fmt check" cargo fmt --all -- --check
     run_step "cargo audit" cargo audit
-    run_step "cargo build" cargo build --workspace
-    run_step "cargo test" cargo test --workspace
-    run_step "cargo clippy" cargo clippy --workspace --all-targets --all-features -- -D warnings
+    run_step "cargo deny check" cargo deny check
+    run_step "standalone audit+deny" "$ROOT_DIR/scripts/audit-test-workspaces.sh"
+    run_step "cargo build" cargo build --workspace --locked
+    run_step "cargo test" cargo test --workspace --locked
+    run_step "cargo clippy" cargo clippy --workspace --locked --all-targets --all-features -- -D warnings
+    run_step "packaging smoke" "$ROOT_DIR/scripts/packaging-smoke.sh"
 fi
 
 if [[ "$fast_only" -eq 1 ]]; then
@@ -100,21 +108,23 @@ if [[ "$fast_only" -eq 1 ]]; then
 fi
 
 run_step "concurrency tests" \
-    cargo test -p pkcs11-proxy-ng --test concurrency_and_recovery_test -- --ignored --test-threads=1
+    cargo test --locked -p pkcs11-proxy-ng --test concurrency_and_recovery_test -- --ignored --test-threads=1
 
 if [[ "$run_optional_providers" -eq 1 ]]; then
     run_step "provider backends" "$ROOT_DIR/scripts/test-provider-backends.sh"
-    # NSS fixture modes are covered by nss_mechanism_coverage_test above.
-    # The dedicated fixture script hangs in Docker (cargo recompilation issue).
-    # Run it only when explicitly requested via --run-nss-fixtures.
-    if [[ "${RUN_NSS_FIXTURES:-0}" == "1" ]]; then
+    # W1-L17-11: the NSS fixture lane runs by default. Its old hang was
+    # certutil -S spinning on an infinite -z /dev/urandom noise file (NSS
+    # reads to EOF); the fixture script now seeds from a finite noise
+    # file. The lane stays bounded by timeout 180 and exits 0 when NSS is
+    # absent. Opt out with the real --skip-nss-fixtures flag (no env-var gate).
+    if [[ "$run_nss_fixtures" -eq 1 ]]; then
         run_step "NSS fixture modes" timeout 180 "$ROOT_DIR/scripts/test-nss-fixtures.sh"
     else
-        echo "  [skip] NSS fixture modes (set RUN_NSS_FIXTURES=1 to enable)"
+        echo "  [skip] NSS fixture modes (--skip-nss-fixtures)"
     fi
 else
     run_step "integration tests" \
-        cargo test -p pkcs11-proxy-ng --test integration_test -- --ignored --test-threads=1
+        cargo test --locked -p pkcs11-proxy-ng --test integration_test -- --ignored --test-threads=1
 fi
 
 if [[ "$run_consumers" -eq 1 ]]; then

@@ -5,7 +5,7 @@ use pkcs11_proxy_ng_proto::convert::message_effects::ParameterEffectCallMode;
 
 use pkcs11_proxy_ng_proto::pkcs11_proxy_ng::v1 as v1_proto;
 use pkcs11_proxy_ng_types::{
-    ByteOutputFunction, CkAttribute, CkAttributeQuery, CkAttributeQueryResult, CkInBuf,
+    ByteOutputFunction, CkAttribute, CkAttributeQuery, CkAttributeQueryResult, CkFlags, CkInBuf,
     CkMechanism, CkMechanismParams, CkObjectHandle, CkOutputAndHandleResult, CkOutputBufferResult,
     CkOutputBufferSpec, CkParameterRoundtripResult, CkParameterRoundtripSpec, CkRv,
     CkSessionHandle, ParameterOutputFunction, SecretBytes,
@@ -91,7 +91,7 @@ fn decode_parameter_output_exact_response(
                             function,
                             ParameterOutputFunction::EncryptMessage
                                 | ParameterOutputFunction::DecryptMessage
-                        ) || flags & 1 != 0,
+                        ) || flags & CkFlags::END_OF_MESSAGE != 0,
                         rv: output.ck_rv,
                     },
                 )
@@ -256,7 +256,10 @@ impl Pkcs11Client {
             parameter: parameter.to_vec(),
             parameter_out_spec: Some(Self::proto_parameter_roundtrip_spec(param_out_spec)),
             flags,
-            mechanism: mechanism.map(pkcs11_proxy_ng_proto::Mechanism::from),
+            mechanism: mechanism
+                .map(pkcs11_proxy_ng_proto::Mechanism::try_from)
+                .transpose()
+                .map_err(MessageCallError::backend)?,
             wrapping_key_handle,
             key_handle,
             message_parameter: message_parameter.map(pkcs11_proxy_ng_proto::MessageParameter::from),
@@ -343,7 +346,7 @@ impl Pkcs11Client {
             exact_output_effects_version: 1,
             client_context_id: ctx,
             session_handle: session.0,
-            mechanism: Some(pkcs11_proxy_ng_proto::Mechanism::from(mechanism)),
+            mechanism: Some(pkcs11_proxy_ng_proto::Mechanism::try_from(mechanism)?),
             public_key_handle: public_key.0,
             template: proto_template,
             template_null: template.is_none(),
@@ -432,7 +435,7 @@ impl Pkcs11Client {
             function: pkcs11_proxy_ng_proto::convert::output::byte_output_function_to_i32(function),
             output_spec: Some(Self::proto_output_buffer_spec(spec)),
             input_data: input_bytes,
-            mechanism: mechanism.map(pkcs11_proxy_ng_proto::Mechanism::from),
+            mechanism: mechanism.map(pkcs11_proxy_ng_proto::Mechanism::try_from).transpose()?,
             wrapping_key_handle,
             key_handle,
             input_data_null_len: input_null_len,

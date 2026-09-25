@@ -42,8 +42,9 @@ use pkcs11_proxy_ng_types::{CkResult, CkRv};
 
 use super::native_stop::{StopReason, abnormal_stop_native_lifetime, shutdown_grace};
 
-/// Build-time native-FFI qualifier for v0.2: Linux GNU/musl on x86_64 with
-/// 64-bit pointers or x86 with 32-bit pointers, macOS on aarch64 or x86_64
+/// Build-time native-FFI qualifier for v0.2: Linux GNU/musl on x86_64 or
+/// aarch64 with 64-bit pointers or x86 with 32-bit pointers, macOS on
+/// aarch64 or x86_64
 /// with 64-bit pointers (LP64; libloading loads .dylib), or Windows MSVC on
 /// x86_64 with 64-bit pointers or x86 with 32-bit pointers (PE32 LLP32:
 /// 32-bit `CK_ULONG`, 32-bit pointers, `#pragma pack(1)` structs). x32,
@@ -51,7 +52,8 @@ use super::native_stop::{StopReason, abnormal_stop_native_lifetime, shutdown_gra
 pub(in crate::ffi) const NATIVE_FFI_QUALIFIED: bool = (cfg!(target_os = "linux")
     && cfg!(any(target_env = "gnu", target_env = "musl"))
     && ((cfg!(target_arch = "x86_64") && cfg!(target_pointer_width = "64"))
-        || (cfg!(target_arch = "x86") && cfg!(target_pointer_width = "32"))))
+        || (cfg!(target_arch = "x86") && cfg!(target_pointer_width = "32"))
+        || (cfg!(target_arch = "aarch64") && cfg!(target_pointer_width = "64"))))
     || (cfg!(target_os = "macos")
         && cfg!(any(target_arch = "aarch64", target_arch = "x86_64"))
         && cfg!(target_pointer_width = "64"))
@@ -84,7 +86,7 @@ impl fmt::Display for DomainError {
             DomainError::UnsupportedPlatform { detail } => write!(
                 f,
                 "native FFI unavailable on this platform ({detail}); v0.2 requires \
-                 Linux GNU/musl on x86_64 (64-bit) or x86 (32-bit), \
+                 Linux GNU/musl on x86_64 or aarch64 (64-bit) or x86 (32-bit), \
                  macOS on aarch64 or x86_64 (64-bit), or \
                  Windows MSVC on x86_64 (64-bit) or x86 (32-bit); refusing to load provider"
             ),
@@ -1579,7 +1581,7 @@ mod tests {
     #[test]
     fn t3_qualified_host_platform_check_is_ok() {
         // This test runs on a qualified native-FFI host (Linux GNU/musl
-        // x86_64/x86, macOS aarch64/x86_64, Windows MSVC x86_64/x86); the
+        // x86_64/x86/aarch64, macOS aarch64/x86_64, Windows MSVC x86_64/x86);
         // const itself is covered by
         // `native_domain_current_host_reports_qualified_or_refuses`.
         assert!(check_native_platform().is_ok());

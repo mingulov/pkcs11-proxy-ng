@@ -24,3 +24,6 @@ cryptoki-sys.workspace = true
 tracing.workspace = true
 zeroize = { workspace = true }
 dashmap = { workspace = true }
+
+[lints]
+workspace = true

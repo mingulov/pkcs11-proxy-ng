@@ -734,83 +734,351 @@ fn proto_pin_requests_debug_redacts_data() {
     assert!(!debug_output.contains("secret-pin-data"));
 }
 
-#[test]
-fn grpc_handlers_never_debug_format_requests() {
-    let handler_sources: &[(&str, &str)] = &[
-        ("session_handlers/lifecycle.rs", include_str!("../session_handlers/lifecycle.rs")),
-        ("session_handlers/auth.rs", include_str!("../session_handlers/auth.rs")),
-        ("session_handlers/management.rs", include_str!("../session_handlers/management.rs")),
-        ("key_ops/generation.rs", include_str!("../key_ops/generation.rs")),
-        ("key_ops/wrapping.rs", include_str!("../key_ops/wrapping.rs")),
-        ("object/search.rs", include_str!("../object/search.rs")),
-        ("object/attributes.rs", include_str!("../object/attributes.rs")),
-        ("object/lifecycle.rs", include_str!("../object/lifecycle.rs")),
-        ("digest_cipher/digest.rs", include_str!("../digest_cipher/digest.rs")),
-        ("digest_cipher/cipher.rs", include_str!("../digest_cipher/cipher.rs")),
-        ("sign_verify/sign.rs", include_str!("../sign_verify/sign.rs")),
-        ("sign_verify/verify.rs", include_str!("../sign_verify/verify.rs")),
-        ("combined/sign_encrypt.rs", include_str!("../combined/sign_encrypt.rs")),
-        ("combined/decrypt_digest.rs", include_str!("../combined/decrypt_digest.rs")),
-        ("general/lifecycle.rs", include_str!("../general/lifecycle.rs")),
-        ("general/info.rs", include_str!("../general/info.rs")),
-        ("slot/discovery.rs", include_str!("../slot/discovery.rs")),
-        ("slot/mechanisms.rs", include_str!("../slot/mechanisms.rs")),
-        ("state_ops/random.rs", include_str!("../state_ops/random.rs")),
-        ("state_ops/operation_state.rs", include_str!("../state_ops/operation_state.rs")),
-        ("state_ops/slot_event.rs", include_str!("../state_ops/slot_event.rs")),
-    ];
+/// Secret identifiers whose VALUE must never be captured by a log macro.
+const PIN_SECRET_IDENTS: &[&str] = &[
+    "pin", "so_pin", "old_pin", "new_pin", "user_pin", "username", "password", "secret", "pin_hash",
+];
 
-    let dbg_pattern = concat!("dbg", "!(");
-    for (name, src) in handler_sources {
-        for (lineno, line) in src.lines().enumerate() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("//") {
+/// Log macros whose invocation bodies are scanned for secret captures:
+/// tracing levels plus print sinks. (`dbg!` is banned outright by the gate
+/// below, so it needs no body scan.)
+const PIN_SCANNED_MACROS: &[&str] =
+    &["info", "warn", "debug", "error", "trace", "print", "eprint", "println", "eprintln"];
+
+/// Every `.rs` file under `grpc_service/`, walked recursively from disk so a
+/// new handler file cannot bypass the PIN gates (W1-L2-06, W1-L9-07).
+fn grpc_service_rs_files() -> Vec<String> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server/grpc_service");
+    let mut files = Vec::new();
+    collect_rs_files(&root, &mut files);
+    files.sort();
+    files.into_iter().map(|path| path.display().to_string()).collect()
+}
+
+fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let entries =
+        std::fs::read_dir(dir).unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rs_files(&path, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            out.push(path);
+        }
+    }
+}
+
+/// Secret-value captures in one file's log-macro bodies, as
+/// `file:line: ...` violations (empty when clean). Each tracing/print-macro
+/// invocation body (possibly multi-line) is checked for `ident =` fields
+/// (on string-blanked text, so `"pin = {}"` labels cannot trip), `%`/`?`
+/// sigils, and `{ident}` interpolation (on comments-only-stripped text, since
+/// interpolation lives inside string literals) over every secret ident.
+fn pin_log_violations(file: &str, src: &str) -> Vec<String> {
+    use crate::consistency_checks::{strip_rust_code, strip_rust_comments_only};
+
+    let stripped = strip_rust_code(src);
+    let with_strings = strip_rust_comments_only(src);
+    let mut violations = Vec::new();
+    for (lineno, span) in log_macro_body_spans(&stripped) {
+        let code_body = &stripped[span.clone()];
+        let text_body = &with_strings[span];
+        for ident in PIN_SECRET_IDENTS {
+            if tracing_field_captures(code_body, ident) {
+                violations.push(format!(
+                    "{file}:{lineno}: log macro captures the value of secret '{ident}' \
+                     (`{ident} =` field): {}",
+                    first_line(text_body),
+                ));
+            } else if logs_secret_sigil(text_body, ident) {
+                violations.push(format!(
+                    "{file}:{lineno}: log macro captures the value of secret '{ident}' \
+                     (%/?/{{}} form): {}",
+                    first_line(text_body),
+                ));
+            }
+        }
+    }
+    violations
+}
+
+/// `(invocation line, body span)` for every scanned log-macro call, located
+/// on comment- and string-stripped `src`. Handles `tracing::info!`-qualified
+/// and wrapped invocations; strings/comments cannot forge a match (already
+/// blanked). Spans index any same-offset stripping of the same source.
+fn log_macro_body_spans(src: &str) -> Vec<(usize, std::ops::Range<usize>)> {
+    use crate::consistency_checks::{is_ident_char, skip_ws};
+
+    let bytes = src.as_bytes();
+    let mut bodies = Vec::new();
+    for macro_name in PIN_SCANNED_MACROS {
+        let mut cursor = 0;
+        while let Some(rel) = src[cursor..].find(macro_name) {
+            let idx = cursor + rel;
+            cursor = idx + 1;
+            // Whole ident, not `my_info`/`debug_assert`/`eprintln`-inside-...:
+            // the char before must not extend the ident (start or `::` or
+            // punctuation), and after the name (plus whitespace) must come `!`.
+            if idx > 0 && is_ident_char(bytes[idx - 1]) {
                 continue;
             }
+            let bang = skip_ws(src, idx + macro_name.len());
+            if bytes.get(bang) != Some(&b'!') {
+                continue;
+            }
+            let open = skip_ws(src, bang + 1);
+            if bytes.get(open) != Some(&b'(') {
+                continue;
+            }
+            // Balanced body on stripped text (no strings/comments left).
+            let mut depth = 0usize;
+            let mut end = open;
+            for (i, b) in bytes.iter().enumerate().skip(open) {
+                if *b == b'(' {
+                    depth += 1;
+                } else if *b == b')' {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = i;
+                        break;
+                    }
+                }
+            }
+            if end == open {
+                continue;
+            }
+            let lineno = src[..open].bytes().filter(|b| *b == b'\n').count() + 1;
+            bodies.push((lineno, open + 1..end));
+        }
+    }
+    bodies.sort_by_key(|(lineno, _)| *lineno);
+    bodies
+}
+
+/// True when `body` assigns the secret's value to a tracing field
+/// (`ident = value`), with `ident` as a whole token. Comparisons
+/// (`ident == ...`), match arms (`ident => ...`), and local bindings
+/// (`let [mut] ident = ...`) are not captures.
+fn tracing_field_captures(body: &str, ident: &str) -> bool {
+    use crate::consistency_checks::{is_ident_char, skip_ws};
+
+    let bytes = body.as_bytes();
+    let mut cursor = 0;
+    while let Some(rel) = body[cursor..].find(ident) {
+        let start = cursor + rel;
+        cursor = start + 1;
+        if start > 0 && is_ident_char(bytes[start - 1]) {
+            continue;
+        }
+        let end = start + ident.len();
+        if bytes.get(end).is_some_and(|b| is_ident_char(*b)) {
+            continue;
+        }
+        let eq = skip_ws(body, end);
+        if bytes.get(eq) != Some(&b'=') {
+            continue;
+        }
+        // `==`, `=>`: comparison or match arm, not a field capture.
+        if bytes.get(eq + 1).is_some_and(|b| *b == b'=' || *b == b'>') {
+            continue;
+        }
+        // `let [mut] ident =`: a local binding inside a block argument.
+        if preceded_by_let(body, start) {
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+/// True when the ident at `start` is bound by a `let`/`let mut` immediately
+/// before it (whitespace-separated).
+fn preceded_by_let(body: &str, start: usize) -> bool {
+    use crate::consistency_checks::is_ident_char;
+
+    let bytes = body.as_bytes();
+    let mut cursor = start;
+    while cursor > 0 && bytes[cursor - 1].is_ascii_whitespace() {
+        cursor -= 1;
+    }
+    // Optional `mut`.
+    let mut word_end = cursor;
+    let mut word_start = word_end;
+    while word_start > 0 && is_ident_char(bytes[word_start - 1]) {
+        word_start -= 1;
+    }
+    if &body[word_start..word_end] == "mut" {
+        cursor = word_start;
+        while cursor > 0 && bytes[cursor - 1].is_ascii_whitespace() {
+            cursor -= 1;
+        }
+        word_end = cursor;
+        word_start = word_end;
+        while word_start > 0 && is_ident_char(bytes[word_start - 1]) {
+            word_start -= 1;
+        }
+    }
+    &body[word_start..word_end] == "let"
+        && (word_start == 0 || !is_ident_char(bytes[word_start - 1]))
+}
+
+/// True when `body` captures the value of `ident` via a tracing sigil
+/// (`?ident`, `%ident`) or interpolates it (`{ident}`, `{ident:?}`, or any
+/// other `{ident:...}` format spec), with `ident` as a whole token.
+/// (Same rule as the shim PIN gate's `logs_secret_sigil`.)
+fn logs_secret_sigil(body: &str, ident: &str) -> bool {
+    use crate::consistency_checks::is_ident_char;
+
+    let bytes = body.as_bytes();
+    for sigil in ['?', '%'] {
+        let pat = format!("{sigil}{ident}");
+        let mut from = 0;
+        while let Some(rel) = body[from..].find(&pat) {
+            let start = from + rel;
+            let end = start + pat.len();
+            if end >= bytes.len() || !is_ident_char(bytes[end]) {
+                return true;
+            }
+            from = start + 1;
+        }
+    }
+    // Inline-format interpolation, skipping `{{` escapes: `{{pin}}` prints a
+    // literal and must not trip, while `{pin}` and `{pin:?...}` capture.
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'{' {
+            if bytes.get(i + 1) == Some(&b'{') {
+                i += 2;
+                continue;
+            }
+            if body[i + 1..].starts_with(ident) {
+                let after = i + 1 + ident.len();
+                if bytes.get(after).is_some_and(|b| *b == b'}' || *b == b':') {
+                    return true;
+                }
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// First line of a macro body, for violation messages.
+fn first_line(body: &str) -> String {
+    body.lines().next().unwrap_or_default().trim().to_string()
+}
+
+#[test]
+fn grpc_handlers_never_debug_format_requests() {
+    // W1-L9-07: whole-tree walk (not a hardcoded file list) so a new handler
+    // file cannot bypass the dbg! ban; comments/strings cannot forge a match.
+    let files = grpc_service_rs_files();
+    assert!(!files.is_empty(), "no grpc_service sources found");
+
+    let dbg_pattern = concat!("dbg", "!(");
+    for name in &files {
+        let src =
+            std::fs::read_to_string(name).unwrap_or_else(|e| panic!("cannot read {name}: {e}"));
+        let stripped = crate::consistency_checks::strip_rust_code(&src);
+        for (lineno, line) in stripped.lines().enumerate() {
             assert!(
-                !trimmed.contains(dbg_pattern),
-                "{name} line {}: found debug macro that may leak secrets: {trimmed}",
+                !line.contains(dbg_pattern),
+                "{name} line {}: found debug macro that may leak secrets: {}",
                 lineno + 1,
+                line.trim(),
             );
         }
     }
 }
 
 #[test]
-fn source_code_never_logs_pin_fields() {
-    let session_sources: &[(&str, &str)] = &[
-        ("session.rs", include_str!("../session.rs")),
-        ("session_handlers/lifecycle.rs", include_str!("../session_handlers/lifecycle.rs")),
-        ("session_handlers/auth.rs", include_str!("../session_handlers/auth.rs")),
-        ("session_handlers/management.rs", include_str!("../session_handlers/management.rs")),
-    ];
-
-    for (name, source) in session_sources {
-        for (lineno, line) in source.lines().enumerate() {
-            let trimmed = line.trim();
-            if !trimmed.contains("info!(")
-                && !trimmed.contains("warn!(")
-                && !trimmed.contains("debug!(")
-                && !trimmed.contains("error!(")
-            {
-                continue;
-            }
-            if trimmed.starts_with("//")
-                || trimmed.starts_with("assert")
-                || trimmed.starts_with("let")
-            {
-                continue;
-            }
-            for forbidden in &["pin =", "so_pin =", "old_pin =", "new_pin =", "pin=", "so_pin="] {
-                assert!(
-                    !trimmed.contains(forbidden),
-                    "{name} line {}: tracing macro must not log PIN data: {}",
-                    lineno + 1,
-                    trimmed
-                );
-            }
-        }
+fn pin_gate_trips_on_every_secret_form() {
+    // W1-L10-25 negative control: every (macro, secret, form) combination the
+    // old gate missed — `trace!`, `user_pin`/`username`/`password` idents,
+    // `%`/`?` sigils, `{ident}` interpolation — must trip.
+    for (macro_name, line) in [
+        ("trace", "trace!(pin = pin, \"login\")"),
+        ("user_pin", "info!(user_pin = user_pin, \"login_user\")"),
+        ("username", "info!(username = username, \"login_user\")"),
+        ("password", "debug!(password = password, \"auth\")"),
+        ("display-sigil", "info!(pin = %pin, \"login\")"),
+        ("debug-sigil", "info!(pin = ?pin, \"login\")"),
+        ("interpolation", "info!(\"pin={pin}\")"),
+        ("debug-interpolation", "info!(\"pin={pin:?}\")"),
+        ("bare-sigil", "warn!(?so_pin)"),
+        ("multiline", "debug!(\n    old_pin = old_pin,\n    \"set_pin\"\n)"),
+    ] {
+        let violations = pin_log_violations("control.rs", line);
+        assert!(
+            !violations.is_empty(),
+            "gate must trip on {macro_name} form: {line:?} (got no violations)"
+        );
     }
+}
+
+#[test]
+fn pin_gate_covers_new_handler_files() {
+    // W1-L2-06 + W1-L9-07 negative control: the walk reaches the PIN-bearing
+    // files the hardcoded lists omitted, and a planted PIN in any of them
+    // trips the gate.
+    let files = grpc_service_rs_files();
+    for required in
+        ["session_3x.rs", "byte_output_exact.rs", "parameter_output_exact.rs", "message_crypto"]
+    {
+        assert!(
+            files.iter().any(|path| path.contains(required)),
+            "PIN-gate walk must reach {required}"
+        );
+    }
+    for name in ["session_3x.rs", "message_crypto/mod.rs", "byte_output_exact.rs", "key_ops/kem.rs"]
+    {
+        let planted =
+            "fn login_user() {\n    let pin = take_pin();\n    info!(pin = pin, \"leak\");\n}\n";
+        let violations = pin_log_violations(name, planted);
+        assert!(
+            violations.iter().any(|v| v.contains(name)),
+            "planted PIN in {name} must trip the gate (got {violations:?})"
+        );
+    }
+}
+
+#[test]
+fn pin_gate_ignores_comments_and_length_fields() {
+    // Precision control: length/metadata handling that never captures a
+    // secret value must pass — `pin_len` fields, comparisons, and commented
+    // or string-literal mentions.
+    let clean = r#"
+fn login() {
+    let pin = take_pin();
+    info!(pin_len = pin.len(), "login attempt");
+    info!(pin_ok = (pin == expected), "verify");
+    // info!(pin = pin, "disabled");
+    let _ = "info!(pin = pin)";
+    info!(context_id = %ctx_id.0, "InitPIN succeeded");
+    info!("pin = {}", pin.len());
+    info!("{{pin}} literal = {}", pin.len());
+}
+"#;
+    assert!(pin_log_violations("clean.rs", clean).is_empty());
+}
+
+#[test]
+fn source_code_never_logs_pin_fields() {
+    // W1-L10-25 + W1-L2-06 + W1-L9-07 (one coherent gate): whole-tree walk
+    // over grpc_service (session_3x.rs, message_crypto/, byte_output_exact.rs
+    // and every future handler included); every tracing/print-macro body must
+    // not capture a secret value via `ident =` fields, `%`/`?` sigils, or
+    // `{ident}` interpolation — at any level including `trace!`.
+    let files = grpc_service_rs_files();
+    assert!(!files.is_empty(), "no grpc_service sources found");
+
+    let mut violations = Vec::new();
+    for name in &files {
+        let src =
+            std::fs::read_to_string(name).unwrap_or_else(|e| panic!("cannot read {name}: {e}"));
+        violations.extend(pin_log_violations(name, &src));
+    }
+    assert!(violations.is_empty(), "PIN logging violations:\n{}", violations.join("\n"));
 }
 
 #[tokio::test]
@@ -1487,8 +1755,8 @@ async fn slot_wait_nonblocking_hang_abnormal_stop() {
         .expect("waiter task must not panic");
     assert_eq!(
         outcome.expect("no transport error").unwrap_err(),
-        CkRv::DEVICE_ERROR,
-        "a hung waiter surfaces the timeout promptly"
+        CkRv::FUNCTION_FAILED,
+        "a hung waiter surfaces the timeout promptly (W1-L3-01)"
     );
     assert_eq!(HANG_GAUGE.load(Ordering::Relaxed), 1, "the still-parked call counts as stuck");
 
@@ -1590,6 +1858,58 @@ async fn close_session_quarantines_mapping_on_device_error() {
 }
 
 #[tokio::test]
+async fn close_session_refuses_general_error_when_slot_lock_held() {
+    // W1-L3-01 fix round: close takes the same per-slot login lock under the
+    // same bound as login/logout/login_user, so a wedged lock must refuse
+    // with the same CKR_GENERAL_ERROR (was CKR_DEVICE_ERROR). Mirrors
+    // t7_login_and_logout_refuse_general_error_when_slot_lock_held: paused
+    // time fast-forwards the (seconds-long) acquisition timeout.
+    tokio::time::pause();
+    let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let backend_session = mock.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    let backend_slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
+    ctx_mgr.register_slot(backend_slot).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let session_vh = ctx_mgr
+        .get_context(&ctx_id, |ctx| {
+            ctx.register_session(
+                crate::server::handle_map::BackendHandle(backend_session.0),
+                backend_slot,
+            )
+        })
+        .await
+        .unwrap();
+
+    // Wedge the per-slot login lock; the close must time out on it.
+    let slot_lock = ctx_mgr.slot_login_lock(backend_slot);
+    let _held = slot_lock.lock().await;
+
+    let rv = super::lifecycle::close_session(
+        &ctx_mgr,
+        &backend,
+        Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session_vh.0,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv;
+    assert_eq!(rv, CkRv::GENERAL_ERROR.0, "close must refuse with GENERAL_ERROR");
+
+    // Nothing was mutated: the mapping is intact for a retry.
+    let still = ctx_mgr
+        .get_context(&ctx_id, |c| c.session_handles.resolve(VirtualHandle(session_vh.0)))
+        .await
+        .flatten();
+    assert!(still.is_some(), "a refused close must keep the session mapping for retry");
+}
+
+#[tokio::test]
 async fn timed_out_close_settles_terminal_completion_after_handler_returns() {
     let (ctx_mgr, mock, ctx_id, session) = setup_session_with_mock().await;
     let backend: Arc<dyn Pkcs11Backend> = mock.clone();
@@ -1614,7 +1934,11 @@ async fn timed_out_close_settles_terminal_completion_after_handler_returns() {
     .unwrap()
     .into_inner()
     .ck_rv;
-    assert_eq!(rv, CkRv::DEVICE_ERROR.0, "handler timeout is outcome-ambiguous");
+    assert_eq!(
+        rv,
+        CkRv::FUNCTION_FAILED.0,
+        "handler timeout is outcome-ambiguous (W1-L3-01: FUNCTION_FAILED, was DEVICE_ERROR)"
+    );
     assert_eq!(mock.close_session_call_count(), calls_before + 1);
 
     let in_flight = ctx_mgr
@@ -1693,7 +2017,11 @@ async fn timed_out_close_settles_transient_completion_after_handler_returns() {
     .unwrap()
     .into_inner()
     .ck_rv;
-    assert_eq!(rv, CkRv::DEVICE_ERROR.0, "handler timeout is outcome-ambiguous");
+    assert_eq!(
+        rv,
+        CkRv::FUNCTION_FAILED.0,
+        "handler timeout is outcome-ambiguous (W1-L3-01: FUNCTION_FAILED, was DEVICE_ERROR)"
+    );
 
     let settled = tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
@@ -1786,7 +2114,7 @@ async fn timed_out_close_holds_context_in_flight_and_reaper_cannot_close_twice()
     .unwrap()
     .into_inner()
     .ck_rv;
-    assert_eq!(rv, CkRv::DEVICE_ERROR.0);
+    assert_eq!(rv, CkRv::FUNCTION_FAILED.0, "handler timeout surfaces FUNCTION_FAILED (W1-L3-01)");
 
     let expired = ctx_mgr.evict_expired(&backend).await;
     assert!(
@@ -1850,7 +2178,7 @@ async fn production_scoped_close_reuses_one_capped_context_guard() {
     .unwrap()
     .into_inner()
     .ck_rv;
-    assert_eq!(rv, CkRv::DEVICE_ERROR.0);
+    assert_eq!(rv, CkRv::FUNCTION_FAILED.0, "handler timeout surfaces FUNCTION_FAILED (W1-L3-01)");
     assert_eq!(
         ctx_mgr
             .get_context(&ctx_id, |context| {
@@ -2331,18 +2659,19 @@ async fn generate_private_key_while_logged_out_is_refused() {
 
 /// HKDF-DERIVE proto mechanism carrying `salt_key` as the embedded salt key.
 fn hkdf_derive_mechanism(salt_key: u64) -> pkcs11_proxy_ng_proto::Mechanism {
-    pkcs11_proxy_ng_proto::Mechanism::from(&CkMechanism {
+    pkcs11_proxy_ng_proto::Mechanism::try_from(&CkMechanism {
         mechanism_type: CkMechanismType::HKDF_DERIVE,
         params: Some(CkMechanismParams::Hkdf(HkdfParams {
             extract: true,
             expand: true,
-            prf_hash_mechanism: CkMechanismType::SHA256.0,
+            prf_hash_mechanism: CkMechanismType::SHA256,
             salt_type: cryptoki_sys::CKF_HKDF_SALT_KEY as u64,
             salt: Vec::new().into(),
-            salt_key_handle: salt_key,
+            salt_key_handle: CkObjectHandle(salt_key),
             info: Vec::new().into(),
         })),
     })
+    .unwrap()
 }
 
 async fn derive_key_rv(
@@ -2768,6 +3097,513 @@ async fn concurrent_first_login_serializes_to_one_backend_login() {
         mock.login_call_count(),
         1,
         "per-slot serialization must yield exactly one real backend C_Login"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W1-L6-25: resolve-vs-close race — resolve under the slot lock, close takes
+// the login lock. A login that resolves its backend session before acquiring
+// the per-slot lock races a concurrent close: the close suspends/removes the
+// mapping, and the login then drives the backend with a stale handle and/or
+// mints LoginState for an untracked session.
+// ---------------------------------------------------------------------------
+
+/// W1-L6-25 leg 1: a close racing an in-flight backend login must serialize
+/// behind the per-slot login lock — it must NOT steal the session out from
+/// under the gated login.
+///
+/// Deterministic harness: gate client A's backend C_Login (A holds the slot
+/// lock inside the call), then race a close of the same session. Post-fix the
+/// close pends on the lock until the login finishes (login OK, close OK);
+/// pre-fix the close sails through (it takes no lock), the backend session is
+/// gone when the gate opens, and the stale backend login fails.
+#[tokio::test(flavor = "multi_thread")]
+async fn w1_l6_25_close_waits_for_inflight_login() {
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let proceed = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    mock.set_login_gate(entered_tx, proceed.clone());
+
+    let login_task = {
+        let (ctx_mgr, backend, ctx_id) = (ctx_mgr.clone(), backend.clone(), ctx_id.clone());
+        tokio::spawn(async move {
+            login(
+                &HandlerContext::for_test(&ctx_mgr, &backend),
+                Request::new(pkcs11_proxy_ng_proto::LoginRequest {
+                    client_context_id: ctx_id.0.clone(),
+                    session_handle: session,
+                    user_type: CkUserType::User as u64,
+                    pin: Some(b"1234".to_vec()),
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner()
+            .ck_rv
+        })
+    };
+    // Wait (off the executor) until the login is inside the backend call,
+    // holding the per-slot lock.
+    tokio::task::spawn_blocking(move || entered_rx.recv().unwrap()).await.unwrap();
+
+    // Close races the gated login. The gate being closed pins the login inside
+    // the backend call (holding the slot lock) until the test opens it below;
+    // the sleep lets a lock-ignoring (pre-fix) close run to completion first
+    // so the stale-handle outcome is deterministic. Post-fix the close pends
+    // on the slot lock regardless of this sleep.
+    let close_task = {
+        let (ctx_mgr, backend, ctx_id) = (ctx_mgr.clone(), backend.clone(), ctx_id.clone());
+        tokio::spawn(async move {
+            close_session(
+                &HandlerContext::for_test(&ctx_mgr, &backend),
+                Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
+                    client_context_id: ctx_id.0.clone(),
+                    session_handle: session,
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner()
+            .ck_rv
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    {
+        let (lock, cv) = &*proceed;
+        *lock.lock().unwrap() = true;
+        cv.notify_all();
+    }
+
+    let (rv_login, rv_close) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        (login_task.await.unwrap(), close_task.await.unwrap())
+    })
+    .await
+    .expect("login+close must not deadlock on the slot lock");
+
+    assert_eq!(
+        rv_login,
+        CkRv::OK.0,
+        "login gated inside the backend call must succeed once close serializes behind it \
+         (pre-fix: close stole the session mid-login, stale backend login failed)"
+    );
+    assert_eq!(rv_close, CkRv::OK.0, "close must succeed after the login releases the lock");
+    assert_eq!(mock.login_call_count(), 1, "exactly one backend C_Login");
+    // End state: session closed, and closing the last session cleared the
+    // minted login state (no mint lingering for an untracked session).
+    let held = ctx_mgr
+        .get_context(&ctx_id, |ctx| {
+            ctx.login_state.contains_key(&crate::server::slot_map::BackendSlotId(CkSlotId(0)))
+        })
+        .await
+        .unwrap();
+    assert!(!held, "no login state may linger after the last session closed");
+}
+
+/// W1-L6-25 leg 2: a login that loses the race (session closed between its
+/// pre-resolve and slot-lock acquisition) must fail cleanly with
+/// SESSION_HANDLE_INVALID WITHOUT issuing a backend login on the dead
+/// handle — the post-lock re-resolve catches it.
+///
+/// Deterministic harness modulo one generous scheduling sleep: the test holds
+/// the slot lock, spawns the login (it pre-resolves, then pends on the held
+/// lock), then races a close. Pre-fix the close ignores the held lock and
+/// completes, and the login proceeds with its stale pre-resolve (backend call
+/// on the closed handle). Post-fix both pend; whoever wins the lock after the
+/// release, the loser observes the winner — never a stale handle.
+#[tokio::test(flavor = "multi_thread")]
+async fn w1_l6_25_login_short_circuits_when_close_won() {
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    let slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
+    ctx_mgr.register_slot(slot).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+
+    // Hold the slot lock so the login is guaranteed to be parked between its
+    // pre-resolve and its locked section while the close runs.
+    let slot_lock = ctx_mgr.slot_login_lock(slot);
+    let guard = slot_lock.lock().await;
+    let login_task = {
+        let (ctx_mgr, backend, ctx_id) = (ctx_mgr.clone(), backend.clone(), ctx_id.clone());
+        tokio::spawn(async move {
+            login(
+                &HandlerContext::for_test(&ctx_mgr, &backend),
+                Request::new(pkcs11_proxy_ng_proto::LoginRequest {
+                    client_context_id: ctx_id.0.clone(),
+                    session_handle: session,
+                    user_type: CkUserType::User as u64,
+                    pin: Some(b"1234".to_vec()),
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner()
+            .ck_rv
+        })
+    };
+    // One-sided scheduling margin: the login only needs a DashMap pre-resolve
+    // plus a mutex pend. If this margin ever proves too short on a loaded box,
+    // the pre-fix run passes spuriously (close first, clean pre-resolve miss)
+    // — the post-fix invariants below hold regardless of order.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let close_task = {
+        let (ctx_mgr, backend, ctx_id) = (ctx_mgr.clone(), backend.clone(), ctx_id.clone());
+        tokio::spawn(async move {
+            close_session(
+                &HandlerContext::for_test(&ctx_mgr, &backend),
+                Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
+                    client_context_id: ctx_id.0.clone(),
+                    session_handle: session,
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner()
+            .ck_rv
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    drop(guard);
+
+    let (rv_login, rv_close) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        (login_task.await.unwrap(), close_task.await.unwrap())
+    })
+    .await
+    .expect("login+close must not deadlock on the slot lock");
+
+    assert_eq!(rv_close, CkRv::OK.0, "close of the live session must succeed");
+    assert!(
+        rv_login == CkRv::OK.0 || rv_login == CkRv::SESSION_HANDLE_INVALID.0,
+        "login must either win cleanly (OK) or short-circuit (SESSION_HANDLE_INVALID), got {rv_login:#x}"
+    );
+    // The crux: a short-circuited login must never have reached the backend.
+    // Pre-fix the close won during the hold and the login still issued its
+    // stale backend login (count == 1 with SESSION_HANDLE_INVALID).
+    assert_eq!(
+        mock.login_call_count(),
+        usize::from(rv_login == CkRv::OK.0),
+        "short-circuited login must not issue a backend login on a dead handle"
+    );
+}
+
+/// W1-L6-25 leg 3 (post-call generation verify): lock-free mapping removers
+/// (close-all, eviction) can drop the session mapping while the backend login
+/// is in flight. The proxy must then mint NO LoginState for the untracked
+/// handle and report SESSION_HANDLE_INVALID.
+///
+/// Deterministic harness: gate the backend login, remove ONLY the proxy-side
+/// mapping (the backend session stays open so the backend call succeeds —
+/// exactly the close-all remove-then-close window), open the gate.
+#[tokio::test(flavor = "multi_thread")]
+async fn w1_l6_25_login_mints_nothing_when_mapping_vanishes_mid_call() {
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    let slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
+    ctx_mgr.register_slot(slot).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let proceed = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    mock.set_login_gate(entered_tx, proceed.clone());
+
+    let login_task = {
+        let (ctx_mgr, backend, ctx_id) = (ctx_mgr.clone(), backend.clone(), ctx_id.clone());
+        tokio::spawn(async move {
+            login(
+                &HandlerContext::for_test(&ctx_mgr, &backend),
+                Request::new(pkcs11_proxy_ng_proto::LoginRequest {
+                    client_context_id: ctx_id.0.clone(),
+                    session_handle: session,
+                    user_type: CkUserType::User as u64,
+                    pin: Some(b"1234".to_vec()),
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner()
+            .ck_rv
+        })
+    };
+    tokio::task::spawn_blocking(move || entered_rx.recv().unwrap()).await.unwrap();
+
+    // Drop the proxy mapping while the backend call is in flight. The backend
+    // session itself stays open, so the backend login will succeed.
+    ctx_mgr.get_context(&ctx_id, |ctx| ctx.remove_session(VirtualHandle(session))).await.unwrap();
+    {
+        let (lock, cv) = &*proceed;
+        *lock.lock().unwrap() = true;
+        cv.notify_all();
+    }
+
+    let rv_login = tokio::time::timeout(std::time::Duration::from_secs(30), login_task)
+        .await
+        .expect("gated login must finish")
+        .unwrap();
+
+    assert_eq!(
+        mock.login_call_count(),
+        1,
+        "backend must have been reached (else this exercises the pre-call path, not the post-call verify)"
+    );
+    assert_eq!(
+        rv_login,
+        CkRv::SESSION_HANDLE_INVALID.0,
+        "mapping vanished mid-call → no mint (pre-fix: OK with LoginState minted for an unmapped session)"
+    );
+    let held =
+        ctx_mgr.get_context(&ctx_id, |ctx| ctx.login_state.contains_key(&slot)).await.unwrap();
+    assert!(!held, "no login state may be minted for an untracked session");
+}
+
+/// W1-L6-25 acceptance hammer: resolve racing close on every iteration. Each
+/// iteration opens a fresh session, races a login against its close, and
+/// asserts the race end-state invariants: close always wins-or-loses cleanly,
+/// a short-circuited login never reached the backend, and nothing deadlocks.
+#[tokio::test(flavor = "multi_thread")]
+async fn w1_l6_25_login_close_hammer_never_uses_stale_handle() {
+    const ITERS: usize = 50;
+
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+
+    for i in 0..ITERS {
+        let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+        let calls_before = mock.login_call_count();
+
+        let login_task = {
+            let (ctx_mgr, backend, ctx_id) = (ctx_mgr.clone(), backend.clone(), ctx_id.clone());
+            tokio::spawn(async move {
+                login(
+                    &HandlerContext::for_test(&ctx_mgr, &backend),
+                    Request::new(pkcs11_proxy_ng_proto::LoginRequest {
+                        client_context_id: ctx_id.0.clone(),
+                        session_handle: session,
+                        user_type: CkUserType::User as u64,
+                        pin: Some(b"1234".to_vec()),
+                    }),
+                )
+                .await
+                .unwrap()
+                .into_inner()
+                .ck_rv
+            })
+        };
+        let close_task = {
+            let (ctx_mgr, backend, ctx_id) = (ctx_mgr.clone(), backend.clone(), ctx_id.clone());
+            tokio::spawn(async move {
+                close_session(
+                    &HandlerContext::for_test(&ctx_mgr, &backend),
+                    Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
+                        client_context_id: ctx_id.0.clone(),
+                        session_handle: session,
+                    }),
+                )
+                .await
+                .unwrap()
+                .into_inner()
+                .ck_rv
+            })
+        };
+
+        let (rv_login, rv_close) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                (login_task.await.unwrap(), close_task.await.unwrap())
+            })
+            .await
+            .unwrap_or_else(|_| panic!("iter {i}: login+close deadlocked on the slot lock"));
+
+        assert_eq!(rv_close, CkRv::OK.0, "iter {i}: close of the live session must succeed");
+        assert!(
+            rv_login == CkRv::OK.0 || rv_login == CkRv::SESSION_HANDLE_INVALID.0,
+            "iter {i}: login must be OK or SESSION_HANDLE_INVALID, got {rv_login:#x}"
+        );
+        let delta = mock.login_call_count() - calls_before;
+        if rv_login == CkRv::OK.0 {
+            // F-01 reconcile may legally retry the backend login once, so OK
+            // implies >= 1 backend call, never exactly 1.
+            assert!(delta >= 1, "iter {i}: successful login must have reached the backend");
+        } else {
+            assert_eq!(
+                delta, 0,
+                "iter {i}: short-circuited login must not issue a backend login on a dead handle"
+            );
+        }
+    }
+}
+
+/// W1-L6-25 leg 5a (review I-1): the `login_user` re-resolve is a line-for-line
+/// mirror of the `login` one — pin it with the same resolve-vs-close race.
+/// Mirrors leg 2 exactly: the test holds the slot lock, spawns the login_user
+/// (it pre-resolves, then pends on the held lock), then races a close. A
+/// short-circuited login_user must fail with SESSION_HANDLE_INVALID WITHOUT
+/// issuing a backend login on the dead handle.
+#[tokio::test(flavor = "multi_thread")]
+async fn w1_l6_25_login_user_short_circuits_when_close_won() {
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    let slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
+    ctx_mgr.register_slot(slot).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+
+    // Hold the slot lock; spawn the close FIRST so it queues on the mutex
+    // ahead of the login_user — after the release the close suspends first and
+    // the login_user must observe the suspension via its re-resolve. (The
+    // post-fix invariants below hold in either order; close-first is what
+    // makes a reverted re-resolve fail deterministically.)
+    let slot_lock = ctx_mgr.slot_login_lock(slot);
+    let guard = slot_lock.lock().await;
+    let close_task = {
+        let (ctx_mgr, backend, ctx_id) = (ctx_mgr.clone(), backend.clone(), ctx_id.clone());
+        tokio::spawn(async move {
+            close_session(
+                &HandlerContext::for_test(&ctx_mgr, &backend),
+                Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
+                    client_context_id: ctx_id.0.clone(),
+                    session_handle: session,
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner()
+            .ck_rv
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let login_task = {
+        let (ctx_mgr, backend, ctx_id) = (ctx_mgr.clone(), backend.clone(), ctx_id.clone());
+        tokio::spawn(async move {
+            crate::server::grpc_service::session_3x::login_user(
+                &HandlerContext::for_test(&ctx_mgr, &backend),
+                Request::new(pkcs11_proxy_ng_proto::LoginUserRequest {
+                    client_context_id: ctx_id.0.clone(),
+                    session_handle: session,
+                    user_type: CkUserType::User as u64,
+                    pin: Some(b"1234".to_vec()),
+                    username: Some(b"operator-7".to_vec()),
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner()
+            .ck_rv
+        })
+    };
+    // One-sided scheduling margin, same as leg 2: the login_user only needs a
+    // DashMap pre-resolve plus a mutex pend before the release below.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    drop(guard);
+
+    let (rv_login, rv_close) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        (login_task.await.unwrap(), close_task.await.unwrap())
+    })
+    .await
+    .expect("login_user+close must not deadlock on the slot lock");
+
+    assert_eq!(rv_close, CkRv::OK.0, "close of the live session must succeed");
+    assert!(
+        rv_login == CkRv::OK.0 || rv_login == CkRv::SESSION_HANDLE_INVALID.0,
+        "login_user must either win cleanly (OK) or short-circuit (SESSION_HANDLE_INVALID), got {rv_login:#x}"
+    );
+    // The crux: a short-circuited login_user must never have reached the
+    // backend. (Mock login_user keeps no login state, so no F-01 retry can
+    // inflate the OK-side count — exactly 1.)
+    assert_eq!(
+        mock.login_user_call_count(),
+        usize::from(rv_login == CkRv::OK.0),
+        "short-circuited login_user must not issue a backend login on a dead handle"
+    );
+}
+
+/// W1-L6-25 leg 5b (review I-1): the `logout` re-resolve is the same mirror —
+/// a logout that loses the race must short-circuit WITHOUT issuing a backend
+/// logout.
+///
+/// Deterministic harness modulo one generous scheduling sleep (same one-sided
+/// shape as leg 2): log in, hold the slot lock, spawn the logout (it
+/// pre-resolves, then pends on the held lock), then drop ONLY the proxy-side
+/// mapping — the backend session stays open and the mock token stays logged
+/// in, so any backend logout the proxy issued would succeed and log the token
+/// out. Post-fix the logout short-circuits (SESSION_HANDLE_INVALID) and the
+/// mock token is provably still logged in; with the re-resolve reverted the
+/// stale backend logout succeeds (OK) and logs the token out.
+#[tokio::test(flavor = "multi_thread")]
+async fn w1_l6_25_logout_short_circuits_without_backend_call() {
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    let slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
+    ctx_mgr.register_slot(slot).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+    assert_eq!(
+        login_response(&ctx_mgr, &backend, &ctx_id, session).await,
+        CkRv::OK.0,
+        "setup: login must succeed"
+    );
+
+    let slot_lock = ctx_mgr.slot_login_lock(slot);
+    let guard = slot_lock.lock().await;
+    let logout_task = {
+        let (ctx_mgr, backend, ctx_id) = (ctx_mgr.clone(), backend.clone(), ctx_id.clone());
+        tokio::spawn(async move {
+            logout(
+                &HandlerContext::for_test(&ctx_mgr, &backend),
+                Request::new(pkcs11_proxy_ng_proto::LogoutRequest {
+                    client_context_id: ctx_id.0.clone(),
+                    session_handle: session,
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner()
+            .ck_rv
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // Drop the proxy mapping while the logout is parked on the held lock. The
+    // backend session itself stays open and the mock token stays logged in.
+    ctx_mgr.get_context(&ctx_id, |ctx| ctx.remove_session(VirtualHandle(session))).await.unwrap();
+    drop(guard);
+
+    let rv_logout = tokio::time::timeout(std::time::Duration::from_secs(30), logout_task)
+        .await
+        .expect("logout must not deadlock on the slot lock")
+        .unwrap();
+
+    assert_eq!(
+        rv_logout,
+        CkRv::SESSION_HANDLE_INVALID.0,
+        "mapping vanished mid-logout → short-circuit (reverted: stale backend logout succeeds with OK)"
+    );
+    // Backend proof that no C_Logout was issued: the mock token is still
+    // logged in — a fresh backend session observes USER_ALREADY_LOGGED_IN.
+    let probe = mock.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    assert_eq!(
+        mock.login(probe, CkUserType::User, None),
+        Err(CkRv::USER_ALREADY_LOGGED_IN),
+        "mock token must still be logged in (no backend logout may have been issued)"
     );
 }
 
@@ -3451,4 +4287,608 @@ async fn failed_login_budget_unset_all_reach_backend_transparently() {
             "attempt {i}: backend must be called — no fast-reject when budget is unset"
         );
     }
+}
+
+/// W1-L6-03: close-all must suspend-then-close (singular-path semantics):
+/// a transient backend failure keeps the mappings (reactivated) and the
+/// logical login, leaking no live backend sessions; a retry then closes
+/// everything. Pre-fix the mappings were dropped before the backend call,
+/// so a failure leaked the still-open backend sessions with no mappings.
+#[tokio::test]
+async fn close_all_sessions_reactivates_mappings_on_transient_failure() {
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let virtual_slot = ctx_mgr.virtual_slots().await[0];
+
+    let s1 = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+    let s2 = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+    assert_eq!(login_response(&ctx_mgr, &backend, &ctx_id, s1).await, CkRv::OK.0);
+    assert_eq!(mock.open_session_count(), 2, "setup: two backend sessions");
+
+    // Transient failure (not terminal SESSION_HANDLE_INVALID, not ambiguous
+    // DEVICE_ERROR): every close in the batch fails, nothing closes.
+    mock.inject_close_error(CkRv::FUNCTION_FAILED);
+    let failed = close_all_sessions(
+        &ctx_mgr,
+        &backend,
+        Request::new(pkcs11_proxy_ng_proto::CloseAllSessionsRequest {
+            client_context_id: ctx_id.0.clone(),
+            slot_id: virtual_slot.0,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(failed.ck_rv, CkRv::FUNCTION_FAILED.0);
+
+    // Mappings reactivated: both sessions still resolve…
+    for s in [s1, s2] {
+        assert!(
+            ctx_mgr.slot_for_session(&ctx_id, VirtualHandle(s)).await.is_some(),
+            "failed close-all must reactivate the mapping for session {s}"
+        );
+    }
+    // …the logical login is retained…
+    let login_state = ctx_mgr
+        .get_context(&ctx_id, |ctx| {
+            ctx.login_state.get(&crate::server::slot_map::BackendSlotId(CkSlotId(0))).copied()
+        })
+        .await
+        .unwrap();
+    assert_eq!(login_state, Some(LoginState::User), "failed close-all must retain the login");
+    // …and the backend sessions are still open (nothing leaked: a retry can
+    // still close them through the reactivated mappings).
+    assert_eq!(mock.open_session_count(), 2, "failed batch must close nothing");
+
+    // Retry with a healthy backend closes everything exactly once.
+    mock.clear_close_error();
+    let retry = close_all_sessions(
+        &ctx_mgr,
+        &backend,
+        Request::new(pkcs11_proxy_ng_proto::CloseAllSessionsRequest {
+            client_context_id: ctx_id.0.clone(),
+            slot_id: virtual_slot.0,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(retry.ck_rv, CkRv::OK.0);
+    for s in [s1, s2] {
+        assert!(
+            ctx_mgr.slot_for_session(&ctx_id, VirtualHandle(s)).await.is_none(),
+            "retry must remove the mapping for session {s}"
+        );
+    }
+    assert_eq!(mock.open_session_count(), 0, "retry must close every backend session");
+}
+
+/// W1-L6-03 characterization: the multi-session success path is identical
+/// (every suspended mapping settles terminal, login released).
+#[tokio::test]
+async fn close_all_sessions_multi_session_success_unchanged() {
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let virtual_slot = ctx_mgr.virtual_slots().await[0];
+
+    let s1 = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+    let s2 = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+    assert_eq!(login_response(&ctx_mgr, &backend, &ctx_id, s1).await, CkRv::OK.0);
+
+    let close_all = close_all_sessions(
+        &ctx_mgr,
+        &backend,
+        Request::new(pkcs11_proxy_ng_proto::CloseAllSessionsRequest {
+            client_context_id: ctx_id.0.clone(),
+            slot_id: virtual_slot.0,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(close_all.ck_rv, CkRv::OK.0);
+    for s in [s1, s2] {
+        assert!(ctx_mgr.slot_for_session(&ctx_id, VirtualHandle(s)).await.is_none());
+    }
+    assert_eq!(mock.open_session_count(), 0);
+    let stale_login_state = ctx_mgr
+        .get_context(&ctx_id, |ctx| {
+            ctx.login_state.get(&crate::server::slot_map::BackendSlotId(CkSlotId(0))).copied()
+        })
+        .await
+        .unwrap();
+    assert_eq!(stale_login_state, None);
+}
+
+/// W1-L6-10: a DONT_BLOCK wait must never block — even a faulty provider
+/// that parks nonblocking waiters gets a bounded grace, then NO_EVENT
+/// (no breaker slot burned, nothing stuck). Pre-fix the wait rode
+/// spawn_backend to the 30s request timeout and answered DEVICE_ERROR.
+#[tokio::test]
+async fn wait_for_slot_event_dont_block_never_blocks_on_hung_backend() {
+    use crate::server::grpc_service::state_ops::wait_for_slot_event_with_policy;
+
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let policy = crate::server::auth::policy::TokenPolicy::from_config(
+        &crate::config::AuthConfig::default(),
+    )
+    .unwrap();
+
+    mock.inject_slot_event_hang(true);
+    let start = std::time::Instant::now();
+    // Test-side bound far under the 30s request timeout: pre-fix this
+    // parks until the backend timeout (then DEVICE_ERROR).
+    // The hang flag is cleared on EVERY path below (before any assert can
+    // panic): a test panic that left the parked blocking thread stranded
+    // hangs process teardown, masking the real failure.
+    let timed = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        wait_for_slot_event_with_policy(
+            &ctx_mgr,
+            &backend,
+            &policy,
+            Request::new(pkcs11_proxy_ng_proto::WaitForSlotEventRequest {
+                client_context_id: ctx_id.0.clone(),
+                flags: 1, // CKF_DONT_BLOCK
+            }),
+        ),
+    )
+    .await;
+    // Release the abandoned parked call (clearing wakes waiters to re-check).
+    mock.inject_slot_event_hang(false);
+    let resp = timed
+        .expect("DONT_BLOCK wait must answer promptly even on a hung backend")
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        resp.ck_rv,
+        CkRv::NO_EVENT.0,
+        "an unanswerable nonblocking poll reports no-event, never blocks"
+    );
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(15),
+        "took {:?}, must be bounded",
+        start.elapsed()
+    );
+}
+
+/// W1-L6-10 characterization: a blocking wait still delivers a queued
+/// event (bypassing the breaker changes accounting, not outcomes).
+#[tokio::test]
+async fn wait_for_slot_event_blocking_delivers_queued_event() {
+    use crate::server::grpc_service::state_ops::wait_for_slot_event_with_policy;
+
+    let mock = MockBackend::default_test();
+    mock.initialize().unwrap();
+    mock.enqueue_slot_event(CkSlotId(0));
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let virtual_slot = ctx_mgr.virtual_slots().await[0];
+    let policy = crate::server::auth::policy::TokenPolicy::from_config(
+        &crate::config::AuthConfig::default(),
+    )
+    .unwrap();
+
+    let resp = wait_for_slot_event_with_policy(
+        &ctx_mgr,
+        &backend,
+        &policy,
+        Request::new(pkcs11_proxy_ng_proto::WaitForSlotEventRequest {
+            client_context_id: ctx_id.0.clone(),
+            flags: 0, // blocking
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(resp.ck_rv, CkRv::OK.0);
+    assert_eq!(resp.slot_id, virtual_slot.0);
+}
+
+/// W1-L6-10 characterization: a DONT_BLOCK wait on an empty queue
+/// answers NO_EVENT immediately on a healthy backend.
+#[tokio::test]
+async fn wait_for_slot_event_dont_block_empty_queue_is_no_event() {
+    use crate::server::grpc_service::state_ops::wait_for_slot_event_with_policy;
+
+    let mock = MockBackend::default_test();
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let policy = crate::server::auth::policy::TokenPolicy::from_config(
+        &crate::config::AuthConfig::default(),
+    )
+    .unwrap();
+
+    let start = std::time::Instant::now();
+    let resp = wait_for_slot_event_with_policy(
+        &ctx_mgr,
+        &backend,
+        &policy,
+        Request::new(pkcs11_proxy_ng_proto::WaitForSlotEventRequest {
+            client_context_id: ctx_id.0.clone(),
+            flags: 1, // CKF_DONT_BLOCK
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(resp.ck_rv, CkRv::NO_EVENT.0);
+    assert_eq!(resp.slot_id, 0);
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "healthy nonblocking wait must be immediate, took {:?}",
+        start.elapsed()
+    );
+}
+
+// --- W1-L7-05: allows_class at mint (create/copy/generate/derive) ---
+
+const MINT_MTLS_IDENTITY: &str = "x509:issuer=CN=Root CA;subject=CN=client";
+
+fn mint_policy_with_classes(classes: Vec<String>) -> crate::server::auth::policy::TokenPolicy {
+    crate::server::auth::policy::TokenPolicy::from_config(&crate::config::AuthConfig {
+        allow_all_authenticated: false,
+        anonymous_principal: None,
+        policy: vec![crate::config::PolicyEntry {
+            identity: MINT_MTLS_IDENTITY.into(),
+            tokens: crate::config::TokenAccessSpec::Specific(vec![crate::config::GrantSpec::Rich(
+                crate::config::RichGrantConfig {
+                    token: "label:MockToken".into(),
+                    classes: Some(classes),
+                    mechanisms: None,
+                    extract: crate::config::ExtractPolicyConfig::Allow,
+                    objects: None,
+                },
+            )]),
+        }],
+    })
+    .unwrap()
+}
+
+fn mint_class_attr(class: CkObjectClass) -> pkcs11_proxy_ng_proto::Attribute {
+    pkcs11_proxy_ng_proto::Attribute {
+        attr_type: CkAttributeType::CLASS.0,
+        value: Some(pkcs11_proxy_ng_proto::attribute::Value::UlongValue(class.0)),
+    }
+}
+
+/// HandlerContext carrying a class-confined policy, over an identity-bound
+/// context with one real session and a primed token cache. Returns
+/// `(ctx, ctx_id, session, mock)`. The session is registered directly
+/// (like `setup_extract_test`): the `open_session` handler path would
+/// deny the test identity under its default policy before the mint gate
+/// under test is ever reached.
+async fn setup_mint_test(
+    policy: crate::server::auth::policy::TokenPolicy,
+) -> (HandlerContext, ClientContextId, u64, Arc<MockBackend>) {
+    use crate::server::handle_map::BackendHandle;
+
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    let backend_slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
+    ctx_mgr.register_slot(backend_slot).await;
+    ctx_mgr.cache_token_info(backend_slot, "MockToken".into(), "0001".into());
+    let ctx_id = ctx_mgr.create_context(Some(MINT_MTLS_IDENTITY.into())).await.unwrap();
+    let backend_session = mock
+        .open_session(
+            CkSlotId(0),
+            CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
+        )
+        .unwrap();
+    let session = ctx_mgr
+        .get_context(&ctx_id, |ctx| {
+            ctx.register_session(BackendHandle(backend_session.0), backend_slot)
+        })
+        .await
+        .unwrap()
+        .0;
+    let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+    ctx.token_policy = Arc::new(policy);
+    (ctx, ctx_id, session, mock)
+}
+
+fn mint_public_attr() -> pkcs11_proxy_ng_proto::Attribute {
+    pkcs11_proxy_ng_proto::Attribute {
+        attr_type: CkAttributeType::PRIVATE.0,
+        value: Some(pkcs11_proxy_ng_proto::attribute::Value::BoolValue(false)),
+    }
+}
+
+#[tokio::test]
+async fn mint_gate_denies_create_object_of_denied_class() {
+    use crate::server::grpc_service::object::create_object;
+
+    // The L7-05 threat: a class-confined principal persisting a
+    // denied-class TOKEN object. Pre-fix no mint check existed, so this
+    // created the object.
+    let policy = mint_policy_with_classes(vec!["data".into()]);
+    assert!(policy.per_class_active());
+    let (ctx, ctx_id, session, mock) = setup_mint_test(policy).await;
+
+    let resp = create_object(
+        &ctx,
+        Request::new(pkcs11_proxy_ng_proto::CreateObjectRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+            template: vec![
+                mint_class_attr(CkObjectClass::SECRET_KEY),
+                pkcs11_proxy_ng_proto::Attribute {
+                    attr_type: CkAttributeType::TOKEN.0,
+                    value: Some(pkcs11_proxy_ng_proto::attribute::Value::BoolValue(true)),
+                },
+            ],
+            template_null: false,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(resp.ck_rv, CkRv::ATTRIBUTE_VALUE_INVALID.0);
+    assert_eq!(resp.object_handle, 0);
+    assert_eq!(mock.live_object_count(), 0, "denied mint must create nothing");
+}
+
+#[tokio::test]
+async fn mint_gate_allows_create_object_of_listed_class() {
+    use crate::server::grpc_service::object::create_object;
+
+    let policy = mint_policy_with_classes(vec!["secret_key".into()]);
+    let (ctx, ctx_id, session, mock) = setup_mint_test(policy).await;
+
+    let resp = create_object(
+        &ctx,
+        Request::new(pkcs11_proxy_ng_proto::CreateObjectRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+            template: vec![mint_class_attr(CkObjectClass::SECRET_KEY)],
+            template_null: false,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(resp.ck_rv, CkRv::OK.0, "allowed mints are unchanged");
+    assert_ne!(resp.object_handle, 0);
+    assert_eq!(mock.live_object_count(), 1);
+}
+
+#[tokio::test]
+async fn mint_gate_denies_copy_object_of_denied_class() {
+    use crate::server::grpc_service::object::{copy_object, create_object};
+    use pkcs11_proxy_ng_backend::mock::MockAttributeSlot;
+
+    // Source of an allowed class (USE gate passes); the copy template
+    // declares a denied class → mint denied before the backend runs.
+    // Explicitly public so privacy checks cannot mask the mint gate.
+    let policy = mint_policy_with_classes(vec!["secret_key".into()]);
+    let (ctx, ctx_id, session, mock) = setup_mint_test(policy).await;
+
+    let source = create_object(
+        &ctx,
+        Request::new(pkcs11_proxy_ng_proto::CreateObjectRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+            template: vec![mint_class_attr(CkObjectClass::SECRET_KEY), mint_public_attr()],
+            template_null: false,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .object_handle;
+    assert_ne!(source, 0, "setup: allowed source mint must succeed");
+    // The USE gate reads live metadata: stamp the source's class/token/uid.
+    let backend_object = ctx
+        .context_manager
+        .get_context(&ctx_id, |c| c.object_handles.resolve(VirtualHandle(source)))
+        .await
+        .unwrap()
+        .unwrap();
+    mock.set_attribute(
+        CkObjectHandle(backend_object.0 as u64),
+        CkAttributeType::CLASS,
+        MockAttributeSlot::Value(CkAttributeValue::Ulong(CkObjectClass::SECRET_KEY.0)),
+    );
+    mock.set_attribute(
+        CkObjectHandle(backend_object.0 as u64),
+        CkAttributeType::TOKEN,
+        MockAttributeSlot::Value(CkAttributeValue::Bool(false)),
+    );
+    mock.set_attribute(
+        CkObjectHandle(backend_object.0 as u64),
+        CkAttributeType::UNIQUE_ID,
+        MockAttributeSlot::Value(CkAttributeValue::Bytes(b"copy-src-uid".to_vec().into())),
+    );
+
+    let resp = copy_object(
+        &ctx,
+        Request::new(pkcs11_proxy_ng_proto::CopyObjectRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+            object_handle: source,
+            template: vec![mint_class_attr(CkObjectClass::DATA)],
+            template_null: false,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(resp.ck_rv, CkRv::ATTRIBUTE_VALUE_INVALID.0);
+    assert_eq!(resp.new_object_handle, 0);
+    assert_eq!(mock.live_object_count(), 1, "denied copy must create nothing");
+}
+
+#[tokio::test]
+async fn mint_gate_denies_generate_key_of_denied_class() {
+    // Empty template → implied SECRET_KEY default → denied for a
+    // data-only principal. Pre-fix the backend verdict came back instead.
+    let policy = mint_policy_with_classes(vec!["data".into()]);
+    let (ctx, ctx_id, session, _mock) = setup_mint_test(policy).await;
+
+    let resp = crate::server::grpc_service::key_ops::generate_key(
+        &ctx,
+        Request::new(pkcs11_proxy_ng_proto::GenerateKeyRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+            mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {
+                mechanism_type: CkMechanismType::AES_KEY_GEN.0,
+                params: None,
+            }),
+            template: vec![],
+            template_null: false,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(resp.ck_rv, CkRv::ATTRIBUTE_VALUE_INVALID.0);
+    assert_eq!(resp.key_handle, 0);
+}
+
+#[tokio::test]
+async fn mint_gate_allows_generate_when_class_listed() {
+    // Allowed class passes the gate; whatever the backend then verdicts
+    // (the mock does not implement AES_KEY_GEN) is not a policy denial.
+    let policy = mint_policy_with_classes(vec!["secret_key".into()]);
+    let (ctx, ctx_id, session, _mock) = setup_mint_test(policy).await;
+
+    let resp = crate::server::grpc_service::key_ops::generate_key(
+        &ctx,
+        Request::new(pkcs11_proxy_ng_proto::GenerateKeyRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+            mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {
+                mechanism_type: CkMechanismType::AES_KEY_GEN.0,
+                params: None,
+            }),
+            template: vec![],
+            template_null: false,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_ne!(
+        resp.ck_rv,
+        CkRv::ATTRIBUTE_VALUE_INVALID.0,
+        "listed class must pass the mint gate to the backend verdict"
+    );
+}
+
+#[tokio::test]
+async fn mint_gate_denies_keypair_when_private_class_denied() {
+    // Public template (implied PUBLIC_KEY) is allowed but the private
+    // template (implied PRIVATE_KEY) is not → the whole mint is denied.
+    let policy = mint_policy_with_classes(vec!["public_key".into()]);
+    let (ctx, ctx_id, session, _mock) = setup_mint_test(policy).await;
+
+    let resp = crate::server::grpc_service::key_ops::generate_key_pair(
+        &ctx,
+        Request::new(pkcs11_proxy_ng_proto::GenerateKeyPairRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+            mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {
+                mechanism_type: CkMechanismType::RSA_PKCS_KEY_PAIR_GEN.0,
+                params: None,
+            }),
+            public_key_template: vec![],
+            public_template_null: false,
+            private_key_template: vec![],
+            private_template_null: false,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(resp.ck_rv, CkRv::ATTRIBUTE_VALUE_INVALID.0);
+    assert_eq!(resp.public_key_handle, 0);
+    assert_eq!(resp.private_key_handle, 0);
+}
+
+#[tokio::test]
+async fn mint_gate_denies_derive_key_of_denied_class() {
+    use crate::server::grpc_service::object::create_object;
+    use pkcs11_proxy_ng_backend::mock::MockAttributeSlot;
+
+    // Base key of an allowed class (USE gate passes); the derived key's
+    // implied SECRET_KEY class is denied → mint denied before derive runs.
+    // Explicitly public so privacy checks cannot mask the mint gate.
+    let policy = mint_policy_with_classes(vec!["data".into()]);
+    let (ctx, ctx_id, session, mock) = setup_mint_test(policy).await;
+
+    let base = create_object(
+        &ctx,
+        Request::new(pkcs11_proxy_ng_proto::CreateObjectRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+            template: vec![mint_class_attr(CkObjectClass::DATA), mint_public_attr()],
+            template_null: false,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .object_handle;
+    assert_ne!(base, 0, "setup: allowed base mint must succeed");
+    let backend_base = ctx
+        .context_manager
+        .get_context(&ctx_id, |c| c.object_handles.resolve(VirtualHandle(base)))
+        .await
+        .unwrap()
+        .unwrap();
+    for (attr, slot) in [
+        (
+            CkAttributeType::CLASS,
+            MockAttributeSlot::Value(CkAttributeValue::Ulong(CkObjectClass::DATA.0)),
+        ),
+        (CkAttributeType::TOKEN, MockAttributeSlot::Value(CkAttributeValue::Bool(false))),
+        (
+            CkAttributeType::UNIQUE_ID,
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(b"derive-base-uid".to_vec().into())),
+        ),
+    ] {
+        mock.set_attribute(CkObjectHandle(backend_base.0 as u64), attr, slot);
+    }
+
+    let resp = crate::server::grpc_service::key_ops::derive_key(
+        &ctx,
+        Request::new(pkcs11_proxy_ng_proto::DeriveKeyRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+            mechanism: Some(hkdf_derive_mechanism(base)),
+            base_key_handle: base,
+            template: vec![],
+            template_null: false,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(resp.ck_rv, CkRv::ATTRIBUTE_VALUE_INVALID.0);
+    assert_eq!(resp.key_handle, 0);
 }

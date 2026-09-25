@@ -12,7 +12,7 @@ impl Pkcs11Client {
         let req = pkcs11_proxy_ng_proto::DigestInitRequest {
             client_context_id: ctx,
             session_handle: session.0,
-            mechanism: Some(Self::proto_mechanism(mechanism)),
+            mechanism: Some(Self::proto_mechanism(mechanism)?),
         };
         pkcs11_unary_ok!(self.grpc.digest_init(req), true)
     }
@@ -88,7 +88,7 @@ impl Pkcs11Client {
         let req = pkcs11_proxy_ng_proto::EncryptInitRequest {
             client_context_id: ctx,
             session_handle: session.0,
-            mechanism: Some(Self::proto_mechanism(mechanism)),
+            mechanism: Some(Self::proto_mechanism(mechanism)?),
             key_handle: key.0,
         };
         let response = pkcs11_unary_call!(self.grpc.encrypt_init(req), true);
@@ -213,7 +213,7 @@ impl Pkcs11Client {
         let req = pkcs11_proxy_ng_proto::DecryptInitRequest {
             client_context_id: ctx,
             session_handle: session.0,
-            mechanism: Some(Self::proto_mechanism(mechanism)),
+            mechanism: Some(Self::proto_mechanism(mechanism)?),
             key_handle: key.0,
         };
         pkcs11_unary_map!(self.grpc.decrypt_init(req), true, resp => {

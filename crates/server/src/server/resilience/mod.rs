@@ -72,6 +72,12 @@ fn is_over_threshold(count: usize, threshold: Option<usize>) -> bool {
     matches!(threshold, Some(t) if count > t)
 }
 
+/// Configured find-result threshold, if detection is on. `find_objects`
+/// reuses it as its filter-scan bound (W1-C1-07); `None` means unbounded.
+pub fn find_scan_bound() -> Option<usize> {
+    threshold()
+}
+
 /// Observe one `C_FindObjects` result size. Returns true if it crossed the
 /// configured threshold (caller may emit a structured log). Count-only.
 pub fn observe_find_result(count: usize) -> bool {

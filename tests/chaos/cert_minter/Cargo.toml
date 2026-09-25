@@ -13,7 +13,8 @@ publish = false
 description = "Sub-day X.509 cert minter for chaos scenario 6 (TLS cert expiry). Uses rcgen to mint a CA, a short-lived server cert, and a long-lived client cert with second-granular not_after."
 
 [dependencies]
-rcgen = "0.13"
+# W1-L16-14: aligned with the root workspace dev-deps (rcgen 0.14).
+rcgen = "0.14"
 time = "0.3"
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"

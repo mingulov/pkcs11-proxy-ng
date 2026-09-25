@@ -83,6 +83,17 @@ AND a tag-commit delta of receipt/CHANGELOG only. Record preserved as
 written; the step and its battery
 (`scripts/test-verify-quality-receipt.sh`) are normative.
 
+## Correction (2026-09-20): G-3 gate rule is exact `pass`, not pass-prefix
+
+[2026-09-20] The "`pass`-prefix check on every gate field" cited in the
+TX / G-3 section above is superseded: the `Verify quality receipt` step
+now requires each gate value to be exactly the single line `pass` and
+refuses anything else (including `pass-then-fail`, `pass (...)`
+suffixes, and multiline values). Gate evidence lives in adjacent
+`<gate>_evidence:` lines, which the step does not match. Record
+preserved as written; the step and its battery
+(`scripts/test-verify-quality-receipt.sh`) are normative.
+
 ## Dangling references
 
 Grep of the submodule for `forthcoming`, `release-prep`, `b28753c`,

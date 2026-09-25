@@ -87,6 +87,10 @@ pub(crate) fn object_class_name(v: u64) -> String {
         CkObjectClass::PUBLIC_KEY => "public-key",
         CkObjectClass::PRIVATE_KEY => "private-key",
         CkObjectClass::SECRET_KEY => "secret-key",
+        CkObjectClass::HW_FEATURE => "hw-feature",
+        CkObjectClass::DOMAIN_PARAMETERS => "domain-parameters",
+        CkObjectClass::MECHANISM => "mechanism",
+        CkObjectClass::OTP_KEY => "otp-key",
         _ => return format!("0x{v:08X}"),
     };
     name.to_string()
@@ -148,6 +152,74 @@ pub(crate) fn key_type_name(v: u64) -> String {
         _ => return format!("0x{v:08X}"),
     };
     name.to_string()
+}
+
+#[cfg(test)]
+mod object_class_name_tests {
+    use super::*;
+
+    #[test]
+    fn resolves_standard_and_extended_classes() {
+        assert_eq!(object_class_name(0), "data");
+        assert_eq!(object_class_name(1), "certificate");
+        assert_eq!(object_class_name(2), "public-key");
+        assert_eq!(object_class_name(3), "private-key");
+        assert_eq!(object_class_name(4), "secret-key");
+        // W1-C9-07: extended classes resolve instead of falling through to hex.
+        assert_eq!(object_class_name(5), "hw-feature");
+        assert_eq!(object_class_name(6), "domain-parameters");
+        assert_eq!(object_class_name(7), "mechanism");
+        assert_eq!(object_class_name(8), "otp-key");
+        assert_eq!(object_class_name(0x8000_0001), "0x80000001");
+    }
+}
+
+#[cfg(test)]
+mod attr_name_tests {
+    use super::*;
+
+    // W1-C11-30: every accepted attr name parses (case-insensitive)
+    // and round-trips through attr_type_name (Task 39 extends the
+    // accepted set; this test pins the current rows).
+    #[test]
+    fn attr_names_parse_and_round_trip() {
+        let names: &[(&str, CkAttributeType)] = &[
+            ("CLASS", CkAttributeType::CLASS),
+            ("TOKEN", CkAttributeType::TOKEN),
+            ("PRIVATE", CkAttributeType::PRIVATE),
+            ("LABEL", CkAttributeType::LABEL),
+            ("VALUE", CkAttributeType::VALUE),
+            ("CERTIFICATE_TYPE", CkAttributeType::CERTIFICATE_TYPE),
+            ("KEY_TYPE", CkAttributeType::KEY_TYPE),
+            ("ID", CkAttributeType::ID),
+            ("SENSITIVE", CkAttributeType::SENSITIVE),
+            ("ENCRYPT", CkAttributeType::ENCRYPT),
+            ("DECRYPT", CkAttributeType::DECRYPT),
+            ("WRAP", CkAttributeType::WRAP),
+            ("UNWRAP", CkAttributeType::UNWRAP),
+            ("SIGN", CkAttributeType::SIGN),
+            ("VERIFY", CkAttributeType::VERIFY),
+            ("EXTRACTABLE", CkAttributeType::EXTRACTABLE),
+            ("MODULUS", CkAttributeType::MODULUS),
+            ("MODULUS_BITS", CkAttributeType::MODULUS_BITS),
+            ("PUBLIC_EXPONENT", CkAttributeType::PUBLIC_EXPONENT),
+            ("EC_PARAMS", CkAttributeType::EC_PARAMS),
+            ("EC_POINT", CkAttributeType::EC_POINT),
+            ("VALUE_LEN", CkAttributeType::VALUE_LEN),
+        ];
+        assert_eq!(names.len(), 22);
+        for (name, id) in names {
+            assert_eq!(parse_attr_type(name).unwrap(), *id, "{name}");
+            assert_eq!(parse_attr_type(&name.to_lowercase()).unwrap(), *id, "{name} lower");
+            assert_eq!(attr_type_name(id.0), *name.to_string(), "0x{:X}", id.0);
+        }
+        // Hex spellings (either case prefix) and unknown handling.
+        assert_eq!(parse_attr_type("0x3").unwrap(), CkAttributeType::LABEL);
+        assert_eq!(parse_attr_type("0X3").unwrap(), CkAttributeType::LABEL);
+        let err = parse_attr_type("NO_SUCH_ATTR").unwrap_err().to_string();
+        assert!(err.contains("NO_SUCH_ATTR"), "must echo: {err}");
+        assert_eq!(attr_type_name(0xDEAD_BEEF), "0xDEADBEEF");
+    }
 }
 
 #[cfg(test)]

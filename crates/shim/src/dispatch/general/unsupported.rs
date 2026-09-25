@@ -1,8 +1,7 @@
 use cryptoki_sys::*;
 use pkcs11_proxy_ng_types::*;
 
-#[allow(unused_imports)]
-use super::*;
+use super::helpers::rv_err;
 
 // ---------------------------------------------------------------------------
 // Stubs for unsupported / out-of-scope functions
