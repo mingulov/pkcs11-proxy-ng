@@ -70,10 +70,12 @@ fn encoded_handles(params: &[PrfDataParam]) -> Vec<(u64, usize)> {
     params
         .iter()
         .filter(|p| p.type_ == CK_SP800_108_KEY_HANDLE)
-        .filter_map(|p| match p.value.len() {
-            4 => Some((u32::from_ne_bytes(p.value.as_slice().try_into().unwrap()) as u64, 4)),
-            8 => Some((u64::from_ne_bytes(p.value.as_slice().try_into().unwrap()), 8)),
-            _ => None,
+        .filter_map(|p| {
+            p.value.expose(|value| match value.len() {
+                4 => Some((u32::from_ne_bytes(value.try_into().unwrap()) as u64, 4)),
+                8 => Some((u64::from_ne_bytes(value.try_into().unwrap()), 8)),
+                _ => None,
+            })
         })
         .collect()
 }

@@ -1,17 +1,21 @@
+// ADR-0013 §5: every `secret_to_plain` use in this file is a prost wire-encoding
+// boundary (response/request construction); the standing justification lives in
+// `secret_boundary` docs. No plain copy is retained past the enclosing encode.
+use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
-use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv, CkSessionHandle};
+use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv, CkSessionHandle, SecretBytes};
 
 use super::super::super::context_manager::{ClientContextId, ContextManager, MessageOperation};
 use super::super::super::handle_map::{BackendHandle, VirtualHandle};
 use super::super::ck_result_to_rv;
 use super::super::service_utils::{
-    check_sanitize, ck_rv_only, gate_object_handle, input_from_wire, spawn_backend,
-    spawn_backend_with_optional_timeout,
+    check_sanitize, ck_rv_only, ensure_private_use_allowed, gate_object_handle, input_from_wire,
+    spawn_backend, spawn_backend_with_optional_timeout,
 };
 use crate::server::grpc_service::HandlerContext;
 
@@ -73,7 +77,7 @@ pub(super) async fn get_operation_state(
 
     Ok(Response::new(pkcs11_proxy_ng_proto::GetOperationStateResponse {
         ck_rv,
-        operation_state: operation_state.unwrap_or_default(),
+        operation_state: secret_to_plain(&operation_state.unwrap_or_default()),
     }))
 }
 
@@ -113,6 +117,29 @@ async fn set_operation_state_with_timeout(
         }
     };
 
+    // D6(1): the embedded keys are USEd here; refuse private keys while the
+    // caller is logically logged out (authn before the authz gate below).
+    for (virtual_key, backend_key) in [
+        (req.encryption_key_handle, encryption_key),
+        (req.authentication_key_handle, authentication_key),
+    ] {
+        if backend_key.0 != 0
+            && let Err(rv) = ensure_private_use_allowed(
+                ctx,
+                &ctx_id,
+                req.session_handle,
+                virtual_key,
+                session,
+                backend_key,
+            )
+            .await
+        {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::SetOperationStateResponse {
+                ck_rv: rv.0,
+            }));
+        }
+    }
+
     // Gate embedded key handles through per-object authz if active (C1).
     if ctx.token_policy.per_object_active() {
         let backend_session = BackendHandle(session.0);
@@ -140,7 +167,7 @@ async fn set_operation_state_with_timeout(
         }
     }
 
-    let operation_state = req.operation_state;
+    let operation_state = SecretBytes::new(req.operation_state);
     let operation_state_null_len = req.operation_state_null_len;
     // ADR-0010 sanitize_inputs: validate NULL operation_state pointer before backend call.
     if let Err(rv) = check_sanitize(sanitize_inputs, operation_state_null_len) {
@@ -171,12 +198,14 @@ async fn set_operation_state_with_timeout(
         for transition in &mut transitions {
             transition.mark_started();
         }
-        let result = backend.set_operation_state(
-            session,
-            input_from_wire(&operation_state, operation_state_null_len),
-            encryption_key,
-            authentication_key,
-        );
+        let result = operation_state.expose(|raw| {
+            backend.set_operation_state(
+                session,
+                input_from_wire(raw, operation_state_null_len),
+                encryption_key,
+                authentication_key,
+            )
+        });
         for transition in &mut transitions {
             transition.settle(&result, None);
         }

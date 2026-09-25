@@ -91,7 +91,7 @@ impl FfiBackend {
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
         aad: CkInBuf<'_>,
-    ) -> CkResult<(Vec<u8>, AuthenticatedOutput)> {
+    ) -> CkResult<(SecretBytes, AuthenticatedOutput)> {
         let fl = self.func_list_3_2.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_WrapKeyAuthenticated }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let (aad_ptr, aad_len) = aad.as_ptr_len();
@@ -129,7 +129,8 @@ impl FfiBackend {
                 )
             })?;
             bytes.truncate(len as usize);
-            Ok(bytes)
+            // ADR-0013 S5: adopt the provider-written buffer immediately.
+            Ok(SecretBytes::new(bytes))
         })
     }
 
@@ -196,13 +197,13 @@ impl FfiBackend {
         parameter: Option<&MessageParameter>,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
         aad: CkInBuf<'_>,
     ) -> CkResult<(CkObjectHandle, AuthenticatedOutput)> {
         self.object_cleanup.ensure_clear()?;
         let fl = self.func_list_3_2.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_UnwrapKeyAuthenticated }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
-        let attrs = FfiAttrs::from_slice(template)?;
+        let attrs = FfiAttrs::from_opt_slice(template)?;
         let (aad_ptr, aad_len) = aad.as_ptr_len();
         let aad_len = narrow_wire_ulong(aad_len)?;
         let (wrapped_ptr, wrapped_len) = wrapped_key.as_ptr_len();

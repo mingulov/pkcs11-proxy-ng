@@ -164,8 +164,8 @@ fn run(module_path: &str) -> Result<(), String> {
         "C_GetAttributeValue(CKA_CLASS data query)",
     )?;
     check(
-        CK_ULONG::from_le_bytes(class_buf) == CKO_DATA,
-        &format!("CKA_CLASS value round-trips (got {:#x})", CK_ULONG::from_le_bytes(class_buf)),
+        CK_ULONG::from_ne_bytes(class_buf) == CKO_DATA,
+        &format!("CKA_CLASS value round-trips (got {:#x})", CK_ULONG::from_ne_bytes(class_buf)),
     )?;
 
     // Too-small buffer: verbatim CKR_BUFFER_TOO_SMALL + client-width

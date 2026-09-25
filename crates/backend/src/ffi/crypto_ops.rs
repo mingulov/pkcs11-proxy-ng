@@ -34,7 +34,7 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         data: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         Self::call_bytes(
             unsafe { (*self.func_list).C_Sign },
             |function, signature, signature_len| {
@@ -53,7 +53,7 @@ impl FfiBackend {
         })
     }
 
-    pub(super) fn ffi_sign_final(&self, session: CkSessionHandle) -> CkResult<Vec<u8>> {
+    pub(super) fn ffi_sign_final(&self, session: CkSessionHandle) -> CkResult<SecretBytes> {
         Self::call_bytes(
             unsafe { (*self.func_list).C_SignFinal },
             |function, signature, signature_len| {
@@ -88,7 +88,7 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         data: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         Self::call_bytes(
             unsafe { (*self.func_list).C_SignRecover },
             |function, signature, signature_len| {
@@ -182,7 +182,7 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         signature: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         Self::call_bytes(
             unsafe { (*self.func_list).C_VerifyRecover },
             |function, data, data_len| {
@@ -291,7 +291,7 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         data: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         Self::call_bytes(unsafe { (*self.func_list).C_Digest }, |function, digest, digest_len| {
             session_bytes_input!(session, data, function, digest, digest_len)
         })
@@ -332,7 +332,7 @@ impl FfiBackend {
         })
     }
 
-    pub(super) fn ffi_digest_final(&self, session: CkSessionHandle) -> CkResult<Vec<u8>> {
+    pub(super) fn ffi_digest_final(&self, session: CkSessionHandle) -> CkResult<SecretBytes> {
         Self::call_bytes(
             unsafe { (*self.func_list).C_DigestFinal },
             |function, digest, digest_len| {
@@ -383,7 +383,7 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         data: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         Self::call_bytes(unsafe { (*self.func_list).C_Encrypt }, |function, output, output_len| {
             session_bytes_input!(session, data, function, output, output_len)
         })
@@ -393,7 +393,7 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         part: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         Self::call_bytes(
             unsafe { (*self.func_list).C_EncryptUpdate },
             |function, output, output_len| {
@@ -402,7 +402,7 @@ impl FfiBackend {
         )
     }
 
-    pub(super) fn ffi_encrypt_final(&self, session: CkSessionHandle) -> CkResult<Vec<u8>> {
+    pub(super) fn ffi_encrypt_final(&self, session: CkSessionHandle) -> CkResult<SecretBytes> {
         Self::call_bytes(
             unsafe { (*self.func_list).C_EncryptFinal },
             |function, output, output_len| {
@@ -439,7 +439,7 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         encrypted_data: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         Self::call_bytes(unsafe { (*self.func_list).C_Decrypt }, |function, output, output_len| {
             session_bytes_input!(session, encrypted_data, function, output, output_len)
         })
@@ -449,7 +449,7 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         encrypted_part: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         Self::call_bytes(
             unsafe { (*self.func_list).C_DecryptUpdate },
             |function, output, output_len| {
@@ -458,7 +458,7 @@ impl FfiBackend {
         )
     }
 
-    pub(super) fn ffi_decrypt_final(&self, session: CkSessionHandle) -> CkResult<Vec<u8>> {
+    pub(super) fn ffi_decrypt_final(&self, session: CkSessionHandle) -> CkResult<SecretBytes> {
         Self::call_bytes(
             unsafe { (*self.func_list).C_DecryptFinal },
             |function, output, output_len| {
@@ -635,8 +635,11 @@ mod tests {
                 iv: vec![0xA5; 12],
                 iv_bits: 96,
                 iv_buffer_len: 12,
-                aad: Vec::new(),
+                aad: Vec::new().into(),
                 tag_bits: 128,
+
+                iv_null: false,
+                aad_null: false,
             })),
         };
         backend.mech_cache.insert(
@@ -743,8 +746,11 @@ mod tests {
                 iv: vec![0x11; 12],
                 iv_bits: 96,
                 iv_buffer_len: 12,
-                aad: Vec::new(),
+                aad: Vec::new().into(),
                 tag_bits: 128,
+
+                iv_null: false,
+                aad_null: false,
             })),
         };
         let ffi_mech = super::super::ffi_conversion::mechanism_to_ffi(&mechanism).unwrap();
@@ -890,8 +896,11 @@ mod tests {
                 iv: vec![0xA5; 12],
                 iv_bits: 96,
                 iv_buffer_len: 12,
-                aad: Vec::new(),
+                aad: Vec::new().into(),
                 tag_bits: 128,
+
+                iv_null: false,
+                aad_null: false,
             })),
         };
         let encrypt_out =
@@ -951,8 +960,11 @@ mod tests {
                 iv: vec![0xA5; 12],
                 iv_bits: 96,
                 iv_buffer_len: 12,
-                aad: Vec::new(),
+                aad: Vec::new().into(),
                 tag_bits: 128,
+
+                iv_null: false,
+                aad_null: false,
             })),
         };
         backend.ffi_encrypt_init_with_output(session, &gcm, CkObjectHandle(1)).unwrap();
@@ -1004,8 +1016,11 @@ mod tests {
                 iv: vec![0xA5; 12],
                 iv_bits: 96,
                 iv_buffer_len: 12,
-                aad: Vec::new(),
+                aad: Vec::new().into(),
                 tag_bits: 128,
+
+                iv_null: false,
+                aad_null: false,
             })),
         };
         // A failed FIRST Init on an empty slot publishes nothing: no cache
@@ -1051,8 +1066,11 @@ mod tests {
                 iv: vec![0xA5; 12],
                 iv_bits: 96,
                 iv_buffer_len: 12,
-                aad: Vec::new(),
+                aad: Vec::new().into(),
                 tag_bits: 128,
+
+                iv_null: false,
+                aad_null: false,
             })),
         };
         let first = backend.ffi_encrypt_init_with_output(session, &gcm, CkObjectHandle(1)).unwrap();

@@ -5,10 +5,10 @@ use pkcs11_proxy_ng_types::CkRv;
 use super::super::super::context_manager::ClientContextId;
 use super::super::super::context_manager::ObjectMetadata;
 use super::super::HandlerContext;
-use super::super::convert_template;
+use super::super::convert_template_opt;
 use super::super::service_utils::{
-    ck_rv_only, register_object_handles, resolve_object_authz_context, resolve_session,
-    spawn_backend,
+    backend_object_known_public, ck_rv_only, register_object_handles, resolve_object_authz_context,
+    resolve_session, session_slot_login_state, spawn_backend,
 };
 
 pub(super) async fn find_objects_init(
@@ -27,7 +27,7 @@ pub(super) async fn find_objects_init(
         }
     };
 
-    let template = match convert_template(&req.template) {
+    let template = match convert_template_opt(&req.template, req.template_null) {
         Ok(template) => template,
         Err(error) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::FindObjectsInitResponse {
@@ -37,7 +37,8 @@ pub(super) async fn find_objects_init(
     };
 
     let backend = ctx.backend.clone();
-    let result = spawn_backend(move || backend.find_objects_init(session, &template)).await?;
+    let result =
+        spawn_backend(move || backend.find_objects_init(session, template.as_deref())).await?;
 
     Ok(Response::new(pkcs11_proxy_ng_proto::FindObjectsInitResponse { ck_rv: ck_rv_only(result) }))
 }
@@ -64,10 +65,19 @@ pub(super) async fn find_objects(
 
     let max_count = req.max_object_count;
 
+    // F-04: the QUERYING context's login state gates private-object
+    // visibility. A logged-out context must not observe private objects
+    // (bare handles or counts) even while another tenant holds the backend
+    // logged in — reads and USE already refuse; this closes the existence
+    // oracle. Logged-in behavior is bit-for-bit unchanged (no extra calls).
+    let logged_in =
+        session_slot_login_state(&ctx.context_manager, &ctx_id, virtual_session).await.is_some();
+
     // Transparency path: neither per_object_active() nor per_class_active() →
     // no grant anywhere restricts by uid or class; every principal is unrestricted.
     // Single backend call, no filter — byte-identical to pre-filter.
-    if !ctx.token_policy.per_object_active() && !ctx.token_policy.per_class_active() {
+    // (Logged-out callers take the F-04 loop below instead.)
+    if !ctx.token_policy.per_object_active() && !ctx.token_policy.per_class_active() && logged_in {
         let backend = ctx.backend.clone();
         // CkSessionHandle is Copy; the move closure copies it.
         let result = spawn_backend(move || backend.find_objects(session, max_count)).await?;
@@ -96,6 +106,65 @@ pub(super) async fn find_objects(
             }
             Err(error) => Ok(Response::new(pkcs11_proxy_ng_proto::FindObjectsResponse {
                 ck_rv: error.0,
+                object_handles: vec![],
+            })),
+        };
+    }
+
+    // F-04 logged-out transparency path: no uid/class policy is active, but
+    // the caller is logged out, so each batch is filtered to known-public
+    // objects (fail-closed: probe failure hides). Same loop contract as the
+    // authz filter below — pull past fully-filtered batches and return empty
+    // ONLY on genuine backend exhaustion, so a filtered batch is never
+    // mistaken for end-of-search. Resilience observes each backend batch
+    // (population size), never the kept subset.
+    if !ctx.token_policy.per_object_active() && !ctx.token_policy.per_class_active() {
+        let mut kept_backends = Vec::new();
+        loop {
+            let batch_backend = ctx.backend.clone();
+            // CkSessionHandle and u32 are Copy; the move closure copies them.
+            let batch = match spawn_backend(move || batch_backend.find_objects(session, max_count))
+                .await?
+            {
+                Ok(objects) => objects,
+                Err(ck_error) => {
+                    return Ok(Response::new(pkcs11_proxy_ng_proto::FindObjectsResponse {
+                        ck_rv: ck_error.0,
+                        object_handles: vec![],
+                    }));
+                }
+            };
+
+            // COUNT ONLY — never log the labels/IDs/values (design V15/D9 redaction).
+            if crate::server::resilience::observe_find_result(batch.len()) {
+                tracing::warn!(
+                    object_count = batch.len(),
+                    "pathological object population: C_FindObjects result exceeds resilience threshold"
+                );
+            }
+
+            if batch.is_empty() {
+                break;
+            }
+
+            for &backend_object in &batch {
+                if backend_object_known_public(ctx, session, backend_object).await {
+                    kept_backends.push(backend_object);
+                }
+            }
+
+            if !kept_backends.is_empty() {
+                break;
+            }
+        }
+
+        return match register_object_handles(&ctx.context_manager, &ctx_id, &kept_backends).await {
+            Some(object_handles) => Ok(Response::new(pkcs11_proxy_ng_proto::FindObjectsResponse {
+                ck_rv: CkRv::OK.0,
+                object_handles,
+            })),
+            None => Ok(Response::new(pkcs11_proxy_ng_proto::FindObjectsResponse {
+                ck_rv: CkRv::CRYPTOKI_NOT_INITIALIZED.0,
                 object_handles: vec![],
             })),
         };
@@ -160,22 +229,29 @@ pub(super) async fn find_objects(
                     .await;
             // I2 fix: keep the object only when uid check AND class check both pass.
             // M2: meta.class is Option — None is fail-closed when per_class_active().
+            // (collapsible_match is un-actionable here: the nested F-04 probe
+            // awaits, and `.await` is illegal in a match guard.)
+            #[allow(clippy::collapsible_match)]
             match meta {
                 Some(meta)
                     if !meta.unique_id.is_empty()
-                        && ctx.token_policy.allows_object_use(
-                            &identity,
-                            &label,
-                            &serial,
-                            &meta.unique_id,
-                        )
+                        && meta.unique_id.expose(|raw| {
+                            ctx.token_policy.allows_object_use(&identity, &label, &serial, raw)
+                        })
                         && (!ctx.token_policy.per_class_active()
                             || meta.class.is_some_and(|c| {
                                 ctx.token_policy.allows_class(&identity, &label, &serial, c)
                             })) =>
                 {
-                    kept_backends.push(backend_object);
-                    kept_metas.push(meta);
+                    // F-04: authz-kept objects are additionally login-filtered —
+                    // a logged-out caller sees only known-public objects (probe
+                    // failure hides). Ordered after authz so denied objects cost
+                    // no probe; logged-in callers short-circuit with no extra call.
+                    if logged_in || backend_object_known_public(ctx, session, backend_object).await
+                    {
+                        kept_backends.push(backend_object);
+                        kept_metas.push(meta);
+                    }
                 }
                 // Fail-closed: empty/absent uid, fetch failure, denied uid, denied/absent class.
                 _ => {}
@@ -248,9 +324,10 @@ mod tests {
         AuthConfig, ExtractPolicyConfig, GrantSpec, PolicyEntry, RichGrantConfig, TokenAccessSpec,
     };
     use crate::server::auth::policy::TokenPolicy;
-    use crate::server::context_manager::ContextManager;
+    use crate::server::context_manager::{ContextManager, LoginState};
     use crate::server::grpc_service::HandlerContext;
     use crate::server::handle_map::BackendHandle;
+    use crate::server::slot_map::BackendSlotId;
 
     // Object A: in the confined-principal's allowed list.
     const UID_A_HEX: &str = "aabbcc";
@@ -309,7 +386,10 @@ mod tests {
 
         // Create two objects and attach their UIDs. Also set CLASS and TOKEN so
         // fetch_object_metadata's 3-element template succeeds (conformant backend).
-        let obj_a = mock.create_object(backend_session, &[]).unwrap();
+        // F-04: both declare CKA_PRIVATE=false (the native default for objects
+        // created without it) so the logged-out login filter keeps them and
+        // these authz/transparency tests keep testing what they claim.
+        let obj_a = mock.create_object(backend_session, Some(&[])).unwrap();
         mock.set_attribute(
             obj_a,
             CkAttributeType::CLASS,
@@ -324,10 +404,15 @@ mod tests {
         );
         mock.set_attribute(
             obj_a,
-            CkAttributeType::UNIQUE_ID,
-            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_A_BYTES.to_vec())),
+            CkAttributeType::PRIVATE,
+            MockAttributeSlot::Value(CkAttributeValue::Bool(false)),
         );
-        let obj_b = mock.create_object(backend_session, &[]).unwrap();
+        mock.set_attribute(
+            obj_a,
+            CkAttributeType::UNIQUE_ID,
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_A_BYTES.to_vec().into())),
+        );
+        let obj_b = mock.create_object(backend_session, Some(&[])).unwrap();
         mock.set_attribute(
             obj_b,
             CkAttributeType::CLASS,
@@ -342,12 +427,17 @@ mod tests {
         );
         mock.set_attribute(
             obj_b,
+            CkAttributeType::PRIVATE,
+            MockAttributeSlot::Value(CkAttributeValue::Bool(false)),
+        );
+        mock.set_attribute(
+            obj_b,
             CkAttributeType::UNIQUE_ID,
-            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_B_BYTES.to_vec())),
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_B_BYTES.to_vec().into())),
         );
 
         // Prime the mock search state so find_objects_impl accepts the call.
-        mock.find_objects_init(backend_session, &[]).unwrap();
+        mock.find_objects_init(backend_session, Some(&[])).unwrap();
         mock.set_find_objects_result(vec![obj_a, obj_b]);
 
         let backend: Arc<dyn Pkcs11Backend> = mock;
@@ -476,7 +566,7 @@ mod tests {
         let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
         // Object created with CLASS and TOKEN but NO CKA_UNIQUE_ID.
-        let obj_no_uid = mock.create_object(backend_session, &[]).unwrap();
+        let obj_no_uid = mock.create_object(backend_session, Some(&[])).unwrap();
         mock.set_attribute(
             obj_no_uid,
             CkAttributeType::CLASS,
@@ -490,7 +580,7 @@ mod tests {
             MockAttributeSlot::Value(CkAttributeValue::Bool(false)),
         );
 
-        mock.find_objects_init(backend_session, &[]).unwrap();
+        mock.find_objects_init(backend_session, Some(&[])).unwrap();
         mock.set_find_objects_result(vec![obj_no_uid]);
 
         let backend: Arc<dyn Pkcs11Backend> = mock;
@@ -553,7 +643,7 @@ mod tests {
         let cached = ctx.context_manager.object_metadata(&ctx_id, virtual_id).await;
         assert_eq!(
             cached.map(|m| m.unique_id),
-            Some(UID_A_BYTES.to_vec()),
+            Some(UID_A_BYTES.to_vec().into()),
             "kept object's uid must be pre-cached under its virtual handle"
         );
     }
@@ -580,7 +670,9 @@ mod tests {
 
         // Two denied objects with uid_B, then the allowed object with uid_A.
         // Set CLASS and TOKEN on each (required by fetch_object_metadata).
-        let obj_d1 = mock.create_object(backend_session, &[]).unwrap();
+        // F-04: all three declare CKA_PRIVATE=false (native default) so the
+        // logged-out login filter keeps the authz-allowed one.
+        let obj_d1 = mock.create_object(backend_session, Some(&[])).unwrap();
         mock.set_attribute(
             obj_d1,
             CkAttributeType::CLASS,
@@ -595,10 +687,15 @@ mod tests {
         );
         mock.set_attribute(
             obj_d1,
-            CkAttributeType::UNIQUE_ID,
-            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_B_BYTES.to_vec())),
+            CkAttributeType::PRIVATE,
+            MockAttributeSlot::Value(CkAttributeValue::Bool(false)),
         );
-        let obj_d2 = mock.create_object(backend_session, &[]).unwrap();
+        mock.set_attribute(
+            obj_d1,
+            CkAttributeType::UNIQUE_ID,
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_B_BYTES.to_vec().into())),
+        );
+        let obj_d2 = mock.create_object(backend_session, Some(&[])).unwrap();
         mock.set_attribute(
             obj_d2,
             CkAttributeType::CLASS,
@@ -613,10 +710,15 @@ mod tests {
         );
         mock.set_attribute(
             obj_d2,
-            CkAttributeType::UNIQUE_ID,
-            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_B_BYTES.to_vec())),
+            CkAttributeType::PRIVATE,
+            MockAttributeSlot::Value(CkAttributeValue::Bool(false)),
         );
-        let obj_a = mock.create_object(backend_session, &[]).unwrap();
+        mock.set_attribute(
+            obj_d2,
+            CkAttributeType::UNIQUE_ID,
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_B_BYTES.to_vec().into())),
+        );
+        let obj_a = mock.create_object(backend_session, Some(&[])).unwrap();
         mock.set_attribute(
             obj_a,
             CkAttributeType::CLASS,
@@ -631,13 +733,18 @@ mod tests {
         );
         mock.set_attribute(
             obj_a,
+            CkAttributeType::PRIVATE,
+            MockAttributeSlot::Value(CkAttributeValue::Bool(false)),
+        );
+        mock.set_attribute(
+            obj_a,
             CkAttributeType::UNIQUE_ID,
-            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_A_BYTES.to_vec())),
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_A_BYTES.to_vec().into())),
         );
 
         // Prime the multi-part op and configure the cursor-based result list.
         // With max_object_count=2: batch1=[obj_d1,obj_d2], batch2=[obj_a], then [].
-        mock.find_objects_init(backend_session, &[]).unwrap();
+        mock.find_objects_init(backend_session, Some(&[])).unwrap();
         mock.set_find_objects_result(vec![obj_d1, obj_d2, obj_a]);
 
         let backend: Arc<dyn Pkcs11Backend> = mock;
@@ -712,7 +819,7 @@ mod tests {
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
 
         // No set_find_objects_result → mock default returns [] immediately (exhausted).
-        mock.find_objects_init(backend_session, &[]).unwrap();
+        mock.find_objects_init(backend_session, Some(&[])).unwrap();
 
         let backend: Arc<dyn Pkcs11Backend> = mock;
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
@@ -804,7 +911,9 @@ mod tests {
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
 
         // obj_sk: SECRET_KEY — allowed class.
-        let obj_sk = mock.create_object(backend_session, &[]).unwrap();
+        // F-04: declares CKA_PRIVATE=false (native default) so the logged-out
+        // login filter keeps it and this test keeps testing class gating.
+        let obj_sk = mock.create_object(backend_session, Some(&[])).unwrap();
         mock.set_attribute(
             obj_sk,
             CkAttributeType::CLASS,
@@ -817,12 +926,17 @@ mod tests {
         );
         mock.set_attribute(
             obj_sk,
+            CkAttributeType::PRIVATE,
+            MockAttributeSlot::Value(CkAttributeValue::Bool(false)),
+        );
+        mock.set_attribute(
+            obj_sk,
             CkAttributeType::UNIQUE_ID,
-            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_A_BYTES.to_vec())),
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_A_BYTES.to_vec().into())),
         );
 
         // obj_pk: PUBLIC_KEY — denied class; must be invisible.
-        let obj_pk = mock.create_object(backend_session, &[]).unwrap();
+        let obj_pk = mock.create_object(backend_session, Some(&[])).unwrap();
         mock.set_attribute(
             obj_pk,
             CkAttributeType::CLASS,
@@ -835,11 +949,16 @@ mod tests {
         );
         mock.set_attribute(
             obj_pk,
+            CkAttributeType::PRIVATE,
+            MockAttributeSlot::Value(CkAttributeValue::Bool(false)),
+        );
+        mock.set_attribute(
+            obj_pk,
             CkAttributeType::UNIQUE_ID,
-            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_B_BYTES.to_vec())),
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_B_BYTES.to_vec().into())),
         );
 
-        mock.find_objects_init(backend_session, &[]).unwrap();
+        mock.find_objects_init(backend_session, Some(&[])).unwrap();
         mock.set_find_objects_result(vec![obj_sk, obj_pk]);
 
         let backend: Arc<dyn Pkcs11Backend> = mock;
@@ -900,10 +1019,291 @@ mod tests {
         );
     }
 
+    // ── F-04: find-enumeration login filtering ────────────────────────────────
+
+    /// Set the F-04 privacy bit plus the CLASS/TOKEN attributes every
+    /// conformant-backend fixture object carries.
+    fn set_privacy_fixture(mock: &MockBackend, object: CkObjectHandle, is_private: bool) {
+        mock.set_attribute(
+            object,
+            CkAttributeType::CLASS,
+            MockAttributeSlot::Value(CkAttributeValue::Ulong(CkObjectClass::SECRET_KEY.0)),
+        );
+        mock.set_attribute(
+            object,
+            CkAttributeType::TOKEN,
+            MockAttributeSlot::Value(CkAttributeValue::Bool(false)),
+        );
+        mock.set_attribute(
+            object,
+            CkAttributeType::PRIVATE,
+            MockAttributeSlot::Value(CkAttributeValue::Bool(is_private)),
+        );
+    }
+
+    /// Shared F-04 setup: two backend objects — the first private, the second
+    /// public — with the mock find cursor primed to `[private, public]`.
+    /// The querying context is LOGGED OUT (no `login_state` entry), emulating
+    /// the oracle scenario where another tenant holds the backend logged in.
+    /// Returns (ctx, ctx_id, virtual_session, obj_priv, obj_pub).
+    async fn setup_privacy_find(
+        policy: Arc<TokenPolicy>,
+    ) -> (
+        HandlerContext,
+        crate::server::context_manager::ClientContextId,
+        u64,
+        CkObjectHandle,
+        CkObjectHandle,
+    ) {
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
+        mock.initialize().unwrap();
+        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
+
+        let obj_priv = mock.create_object(backend_session, Some(&[])).unwrap();
+        set_privacy_fixture(&mock, obj_priv, true);
+        let obj_pub = mock.create_object(backend_session, Some(&[])).unwrap();
+        set_privacy_fixture(&mock, obj_pub, false);
+
+        mock.find_objects_init(backend_session, Some(&[])).unwrap();
+        mock.set_find_objects_result(vec![obj_priv, obj_pub]);
+
+        let backend: Arc<dyn Pkcs11Backend> = mock;
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
+        ctx_mgr.register_slot(BackendSlotId(CkSlotId(0))).await;
+        ctx_mgr.cache_token_info(BackendSlotId(CkSlotId(0)), "MockToken".into(), "0001".into());
+        let ctx_id = ctx_mgr.create_context(Some(CONFINED_IDENTITY.into())).await.unwrap();
+
+        let virtual_session = ctx_mgr
+            .get_context(&ctx_id, |c| {
+                c.register_session(BackendHandle(backend_session.0), BackendSlotId(CkSlotId(0)))
+            })
+            .await
+            .unwrap();
+
+        let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        ctx.token_policy = policy;
+
+        (ctx, ctx_id, virtual_session.0, obj_priv, obj_pub)
+    }
+
+    /// Resolve a returned virtual handle back to its backend handle.
+    async fn resolve_virtual(
+        ctx: &HandlerContext,
+        ctx_id: &crate::server::context_manager::ClientContextId,
+        virtual_handle: u64,
+    ) -> Option<u64> {
+        ctx.context_manager
+            .get_context(ctx_id, |c| {
+                c.object_handles.resolve(crate::server::handle_map::VirtualHandle(virtual_handle))
+            })
+            .await
+            .flatten()
+            .map(|h| h.0)
+    }
+
+    /// Log the fixture context in on slot 0 (the F-04 "unchanged" control).
+    async fn log_in_fixture(
+        ctx: &HandlerContext,
+        ctx_id: &crate::server::context_manager::ClientContextId,
+    ) {
+        ctx.context_manager
+            .get_context(ctx_id, |c| {
+                c.login_state.insert(BackendSlotId(CkSlotId(0)), LoginState::User)
+            })
+            .await;
+    }
+
+    /// Helper: run find with an explicit max_count, return the inner response.
+    async fn run_find_objects_with_max(
+        ctx: &HandlerContext,
+        ctx_id: &crate::server::context_manager::ClientContextId,
+        virtual_session: u64,
+        max_object_count: u32,
+    ) -> pkcs11_proxy_ng_proto::FindObjectsResponse {
+        super::find_objects(
+            ctx,
+            Request::new(pkcs11_proxy_ng_proto::FindObjectsRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: virtual_session,
+                max_object_count,
+            }),
+        )
+        .await
+        .expect("find_objects must not return a transport error")
+        .into_inner()
+    }
+
+    // ── F-04 Test 1: logged-out transparency path hides private objects ──────
+
+    #[tokio::test]
+    async fn f04_logged_out_hides_private_objects_transparency_path() {
+        // Oracle scenario on the transparency path (no per-object/class
+        // policy): a logged-out context must observe neither the private
+        // object's bare handle nor its count. max_count=1 forces two backend
+        // batches ([priv] then [pub]) so the test also proves the filter
+        // pulls past a fully-filtered batch instead of returning a
+        // premature end-of-search 0.
+        let policy = Arc::new(TokenPolicy::from_config(&AuthConfig::default()).unwrap());
+        let (ctx, ctx_id, vs, obj_priv, obj_pub) = setup_privacy_find(policy).await;
+
+        let resp = run_find_objects_with_max(&ctx, &ctx_id, vs, 1).await;
+
+        assert_eq!(resp.ck_rv, CkRv::OK.0, "filtering must not surface an error");
+        assert_eq!(
+            resp.object_handles.len(),
+            1,
+            "logged-out context must see exactly the public object (no count oracle)"
+        );
+        assert_eq!(
+            resolve_virtual(&ctx, &ctx_id, resp.object_handles[0]).await,
+            Some(obj_pub.0),
+            "the single returned handle must map to obj_pub, never obj_priv {obj_priv:?}"
+        );
+    }
+
+    // ── F-04 Test 2: logged-in transparency path bit-for-bit unchanged ───────
+
+    #[tokio::test]
+    async fn f04_logged_in_sees_all_objects_transparency_path() {
+        // Control: the identical logged-IN enumeration returns both objects
+        // unchanged (single backend batch, no filtering).
+        let policy = Arc::new(TokenPolicy::from_config(&AuthConfig::default()).unwrap());
+        let (ctx, ctx_id, vs, obj_priv, obj_pub) = setup_privacy_find(policy).await;
+        log_in_fixture(&ctx, &ctx_id).await;
+
+        let resp = run_find_objects(&ctx, &ctx_id, vs).await;
+
+        assert_eq!(resp.ck_rv, CkRv::OK.0);
+        assert_eq!(resp.object_handles.len(), 2, "logged-in behavior must be unchanged");
+        let mut resolved = Vec::new();
+        for vh in &resp.object_handles {
+            resolved.push(resolve_virtual(&ctx, &ctx_id, *vh).await);
+        }
+        assert!(
+            resolved.contains(&Some(obj_priv.0)) && resolved.contains(&Some(obj_pub.0)),
+            "logged-in enumeration must return both objects unchanged"
+        );
+    }
+
+    // ── F-04 Test 3: probe failure hides (fail-closed) ───────────────────────
+
+    #[tokio::test]
+    async fn f04_logged_out_probe_failure_hides_object() {
+        // An object whose CKA_PRIVATE probe fails (attribute absent on a
+        // nonconformant backend) has unknown privacy: a logged-out context
+        // must not observe it. Fail-closed matches the authz filter in this
+        // same function (fetch failure drops); unlike USE there is no
+        // backend verdict to fall back to.
+        let policy = Arc::new(TokenPolicy::from_config(&AuthConfig::default()).unwrap());
+
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
+        mock.initialize().unwrap();
+        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
+        // CLASS + TOKEN only: no CKA_PRIVATE, so the probe fails with
+        // ATTRIBUTE_TYPE_INVALID.
+        let obj_unknown = mock.create_object(backend_session, Some(&[])).unwrap();
+        mock.set_attribute(
+            obj_unknown,
+            CkAttributeType::CLASS,
+            MockAttributeSlot::Value(CkAttributeValue::Ulong(CkObjectClass::SECRET_KEY.0)),
+        );
+        mock.set_attribute(
+            obj_unknown,
+            CkAttributeType::TOKEN,
+            MockAttributeSlot::Value(CkAttributeValue::Bool(false)),
+        );
+        mock.find_objects_init(backend_session, Some(&[])).unwrap();
+        mock.set_find_objects_result(vec![obj_unknown]);
+
+        let backend: Arc<dyn Pkcs11Backend> = mock;
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
+        ctx_mgr.register_slot(BackendSlotId(CkSlotId(0))).await;
+        ctx_mgr.cache_token_info(BackendSlotId(CkSlotId(0)), "MockToken".into(), "0001".into());
+        let ctx_id = ctx_mgr.create_context(Some(CONFINED_IDENTITY.into())).await.unwrap();
+        let virtual_session = ctx_mgr
+            .get_context(&ctx_id, |c| {
+                c.register_session(BackendHandle(backend_session.0), BackendSlotId(CkSlotId(0)))
+            })
+            .await
+            .unwrap();
+        let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        ctx.token_policy = policy;
+
+        let resp = run_find_objects(&ctx, &ctx_id, virtual_session.0).await;
+
+        assert_eq!(resp.ck_rv, CkRv::OK.0, "must return CKR_OK (no oracle)");
+        assert_eq!(
+            resp.object_handles.len(),
+            0,
+            "unknown-privacy object must be fail-closed (dropped) for logged-out callers"
+        );
+    }
+
+    // ── F-04 Test 4: login filter composes with the authz filter ─────────────
+
+    #[tokio::test]
+    async fn f04_logged_out_hides_private_under_authz_filter() {
+        // Authz-allowed but private objects must still be hidden from a
+        // logged-out caller: both objects carry the allowed uid_A, so the
+        // authz filter keeps both and only the login filter drops obj_priv.
+        let policy = confined_policy(CONFINED_IDENTITY, "MockToken", UID_A_HEX);
+
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
+        mock.initialize().unwrap();
+        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
+        let obj_priv = mock.create_object(backend_session, Some(&[])).unwrap();
+        set_privacy_fixture(&mock, obj_priv, true);
+        mock.set_attribute(
+            obj_priv,
+            CkAttributeType::UNIQUE_ID,
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_A_BYTES.to_vec().into())),
+        );
+        let obj_pub = mock.create_object(backend_session, Some(&[])).unwrap();
+        set_privacy_fixture(&mock, obj_pub, false);
+        mock.set_attribute(
+            obj_pub,
+            CkAttributeType::UNIQUE_ID,
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_A_BYTES.to_vec().into())),
+        );
+        mock.find_objects_init(backend_session, Some(&[])).unwrap();
+        mock.set_find_objects_result(vec![obj_priv, obj_pub]);
+
+        let backend: Arc<dyn Pkcs11Backend> = mock;
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
+        ctx_mgr.register_slot(BackendSlotId(CkSlotId(0))).await;
+        ctx_mgr.cache_token_info(BackendSlotId(CkSlotId(0)), "MockToken".into(), "0001".into());
+        let ctx_id = ctx_mgr.create_context(Some(CONFINED_IDENTITY.into())).await.unwrap();
+        let virtual_session = ctx_mgr
+            .get_context(&ctx_id, |c| {
+                c.register_session(BackendHandle(backend_session.0), BackendSlotId(CkSlotId(0)))
+            })
+            .await
+            .unwrap();
+        let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        ctx.token_policy = policy;
+
+        let resp = run_find_objects(&ctx, &ctx_id, virtual_session.0).await;
+
+        assert_eq!(resp.ck_rv, CkRv::OK.0);
+        assert_eq!(
+            resp.object_handles.len(),
+            1,
+            "logged-out caller must see only the public object even when both pass authz"
+        );
+        assert_eq!(
+            resolve_virtual(&ctx, &ctx_id, resp.object_handles[0]).await,
+            Some(obj_pub.0),
+            "the kept handle must map to obj_pub"
+        );
+    }
+
     #[tokio::test]
     async fn i2_transparent_when_neither_per_object_nor_per_class_active() {
         // Regression guard: when neither per_object_active() nor per_class_active(),
-        // the transparency path must still return all objects unchanged (no filter).
+        // the transparency path keeps both objects (login filter keeps both: fixtures are public).
         let policy = Arc::new(TokenPolicy::from_config(&AuthConfig::default()).unwrap());
         assert!(!policy.per_object_active());
         assert!(!policy.per_class_active());

@@ -127,10 +127,41 @@ exception that licenses other synthesis:
   Unmodelled class-5 layouts, over-ceiling buffers, and writable-buffer aliasing
   therefore remain acknowledged transport limits rather than faithful raw
   forwarding paths.
+  Message-Init structs are required exactly: `C_MessageEncryptInit` /
+  `C_MessageDecryptInit` must carry the message struct for the active shape
+  (`CK_GCM_MESSAGE_PARAMS`, `CK_CCM_MESSAGE_PARAMS`,
+  `CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS`); a classic struct
+  (`CK_GCM_PARAMS`, `CK_CCM_PARAMS`) on message Init is a materialized
+  unmodelled parameter and fails closed with `CKR_MECHANISM_PARAM_INVALID`
+  by design (shim `dispatch/general/message_crypto.rs`: "materialized
+  unmodelled parameters fail closed rather than falling back"). Known
+  divergence (Wave 3 §7.3, Ruling 3): kryoptic and NSS accept classic
+  structs on message Init (backend leniency), so cases that pack the
+  classic struct pass direct and fail proxied. The proxy does NOT add
+  leniency to match (rejected by ruling); the framework `ccm` recipe is
+  the correct fix owner. §7.3 stays OPEN; see the Wave 3 report erratum.
 - The constant `MAX_MECHANISM_PARAM_STRUCT_LEN` (64 KiB, renamed from
   `MAX_MECHANISM_PARAM_LEN`) bounds only parameter-STRUCT lengths; embedded
   data fields are bounded by `MAX_SERIALIZABLE_BYTES` (512 MiB). Legitimate
   AAD/seed/label/IV values larger than 64 KiB no longer hit the struct cap.
+- **(d) Unallocatable output capacities (Wave 3.5 D7):** a claimed
+  output-buffer capacity above `MAX_OUTPUT_BUFFER_BYTES` (512 MiB) on an
+  exact byte-output call. The daemon answers `CKR_ARGUMENTS_BAD` at the
+  allocation gate before native entry (stable; was: `CKR_HOST_MEMORY`).
+  The exact provider call needs the full buffer to cross, so the claim is
+  unforwardable — a bad argument, not a failed allocation. This mirrors
+  Limits-(a) for absurd inputs and the parameter-roundtrip gate, and matches
+  the `CKR_ARGUMENTS_BAD` member of the backend answer family for absurd
+  claims. A genuine allocation failure under the cap still returns
+  `CKR_HOST_MEMORY`. Residual divergences: backends that answer
+  huge-but-allocatable claims with `CKR_BUFFER_TOO_SMALL` or
+  function-specific range codes (`CKR_DATA_LEN_RANGE`,
+  `CKR_SIGNATURE_LEN_RANGE`) cannot be matched without forwarding the exact
+  call, which requires the full buffer; those stay documented limits.
+  Tracking residual (Wave 3.5 smalls #5): attribute-query absurd lengths
+  still answer `CKR_HOST_MEMORY` (shim `object/exact.rs` capacity gate,
+  daemon `ffi_conversion/attrs.rs`); out of D7/F4 scope — follow-up
+  extends Limits-(d).
 
 ## NULL output-length pointers
 
@@ -170,7 +201,10 @@ exact-output request.
   templates (class 3), and embedded mechanism-parameter pointers (class 4)
   remain deferred. For class 5, the modelled GCM, CCM, and Salsa/ChaCha message
   shapes follow the bounded structural contract above; only unmodelled layouts
-  remain deferred.
+  remain deferred. Tracking residual (Wave 3.5 smalls #6, Scope-2 class-4):
+  SP800-108 embedded-template null conflation —
+  `read_sp800_108_derived_keys` folds `pTemplate` into a `Vec` with no
+  null bit, so (NULL,0)/(ptr,0) still conflate; out of D2 scope, follow-up.
 - `sanitize_inputs` (Scope 2, daemon config, default OFF): rejects NULL
   data pointers with `len > 0` and NULL mechanisms on classic init calls with
   `CKR_ARGUMENTS_BAD` before the module is called. MessageEncrypt/MessageDecrypt

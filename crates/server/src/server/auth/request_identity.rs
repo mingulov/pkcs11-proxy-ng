@@ -37,9 +37,16 @@ fn identity_from_uds(
     match unix_auth {
         UnixAuthMode::None => Ok(AuthenticatedIdentity::Unauthenticated),
         UnixAuthMode::PeerCred => {
-            // SO_PEERCRED is captured by tonic at accept time and cannot be
+            // Peer credentials are captured by tonic at accept time
+            // (`UnixStream::peer_cred`, Linux SO_PEERCRED) and cannot be
             // forged by the peer. Its absence means the kernel did not provide
             // credentials — fail closed rather than fall through unauthenticated.
+            // macOS: supported too — pinned tokio 1.50.0 implements
+            // `get_peer_cred` for target_os = "macos" via getpeereid(2) +
+            // LOCAL_PEEREPID (`impl_macos` in tokio's net/unix/ucred.rs), and
+            // tonic sets `peer_cred: self.peer_cred().ok()`, so peer-cred mode
+            // yields Some(UCred) there. `auth = "none"` on loopback and the
+            // fail-closed None arm are unaffected on every target.
             let cred = uds.peer_cred.ok_or_else(|| {
                 Status::unauthenticated("unix peer credentials unavailable (SO_PEERCRED)")
             })?;

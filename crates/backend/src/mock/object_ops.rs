@@ -20,8 +20,8 @@ impl MockBackend {
             // backend's native CK_ULONG width — the width of the ABI this
             // mock EMULATES, not necessarily the host's.
             CkAttributeValue::Ulong(value) => self.abi().encode_ulong(*value),
-            CkAttributeValue::Bytes(bytes) => bytes.clone(),
-            CkAttributeValue::String(value) => value.as_bytes().to_vec(),
+            CkAttributeValue::Bytes(bytes) => bytes.expose(|raw| raw.to_vec()),
+            CkAttributeValue::String(value) => value.expose(|raw| raw.to_vec()),
             // Unreachable by construction: store_object_template converts
             // nested-template VALUES into MockAttributeSlot::NestedTemplate,
             // which the exact path serves structurally. Serve the backend-
@@ -182,7 +182,7 @@ impl MockBackend {
                             apply_type: false,
                             attr_type: query.attr_type,
                             returned_len,
-                            value: Some(bytes),
+                            value: Some(bytes.into()),
                             ck_rv: None,
                             nested: None,
                         }
@@ -310,7 +310,7 @@ impl MockBackend {
                             apply_type: true,
                             attr_type: *sub_type,
                             returned_len: sub_len,
-                            value: Some(bytes),
+                            value: Some(bytes.into()),
                             ck_rv: None,
                             nested: None,
                         });
@@ -359,8 +359,8 @@ impl MockBackend {
         self.allocate_session_object_with_template(&mut state, session, template)
     }
 
-    pub(super) fn wrap_key_impl(&self) -> CkResult<Vec<u8>> {
-        Ok(super::crypto_ops::MOCK_WRAP_OUTPUT.to_vec())
+    pub(super) fn wrap_key_impl(&self) -> CkResult<SecretBytes> {
+        Ok(super::crypto_ops::MOCK_WRAP_OUTPUT.to_vec().into())
     }
 
     pub(super) fn unwrap_key_impl(

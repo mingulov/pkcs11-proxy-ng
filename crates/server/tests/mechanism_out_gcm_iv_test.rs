@@ -87,8 +87,11 @@ async fn aes_gcm_aws_convention_iv_round_trip() -> Result<(), String> {
             iv: vec![0u8; 12],
             iv_bits: 0,
             iv_buffer_len: 12,
-            aad: Vec::new(),
+            aad: Vec::new().into(),
             tag_bits: 128,
+
+            iv_null: false,
+            aad_null: false,
         })),
     };
     let init_out = client
@@ -133,8 +136,11 @@ async fn aes_gcm_aws_convention_iv_round_trip() -> Result<(), String> {
             iv: iv.clone(),
             iv_bits: 96,
             iv_buffer_len: iv.len() as u64,
-            aad: Vec::new(),
+            aad: Vec::new().into(),
             tag_bits: 128,
+
+            iv_null: false,
+            aad_null: false,
         })),
     };
     client
@@ -171,8 +177,11 @@ async fn aes_gcm_strict_convention_iv_round_trip() -> Result<(), String> {
             iv: Vec::new(),
             iv_bits: 96,
             iv_buffer_len: 12,
-            aad: Vec::new(),
+            aad: Vec::new().into(),
             tag_bits: 128,
+
+            iv_null: false,
+            aad_null: false,
         })),
     };
     let init_out = client
@@ -223,7 +232,7 @@ async fn generate_aes_session_key(
         },
     ];
     client
-        .generate_key(session, &mech, &template)
+        .generate_key(session, &mech, Some(&template))
         .await
         .map_err(|rv| format!("C_GenerateKey(AES-{}) failed: CKR 0x{:08X}", key_len * 8, rv.0))
 }

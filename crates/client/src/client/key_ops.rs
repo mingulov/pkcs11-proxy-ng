@@ -37,10 +37,10 @@ impl Pkcs11Client {
         mechanism: &CkMechanism,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
         let ctx = self.context_id()?;
-        let proto_template = Self::proto_template(template);
+        let proto_template = Self::proto_template(template.unwrap_or(&[]));
         let mut req = pkcs11_proxy_ng_proto::UnwrapKeyRequest {
             client_context_id: ctx,
             session_handle: session.0,
@@ -48,6 +48,7 @@ impl Pkcs11Client {
             unwrapping_key_handle: unwrapping_key.0,
             wrapped_key: Vec::new(),
             template: proto_template,
+            template_null: template.is_none(),
             wrapped_key_null_len: None,
         };
         Self::fill_input(wrapped_key, &mut req.wrapped_key, &mut req.wrapped_key_null_len);
@@ -60,7 +61,7 @@ impl Pkcs11Client {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         base_key: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
         let (handle, _) =
             self.derive_key_with_mechanism_out(session, mechanism, base_key, template).await?;
@@ -76,7 +77,7 @@ impl Pkcs11Client {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         base_key: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
         let result = self
             .derive_key_with_mechanism_out_result(session, mechanism, base_key, template)
@@ -93,16 +94,17 @@ impl Pkcs11Client {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         base_key: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<DeriveKeyMechanismOutResult> {
         let ctx = self.context_id()?;
-        let proto_template = Self::proto_template(template);
+        let proto_template = Self::proto_template(template.unwrap_or(&[]));
         let req = pkcs11_proxy_ng_proto::DeriveKeyRequest {
             client_context_id: ctx,
             session_handle: session.0,
             mechanism: Some(Self::proto_mechanism(mechanism)),
             base_key_handle: base_key.0,
             template: proto_template,
+            template_null: template.is_none(),
         };
         let resp = self
             .grpc
@@ -126,7 +128,7 @@ impl Pkcs11Client {
         &mut self,
         session: CkSessionHandle,
         mechanism: &CkMechanism,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
         self.generate_key_with_mechanism_out(session, mechanism, template).await.map(|(h, _)| h)
     }
@@ -139,16 +141,17 @@ impl Pkcs11Client {
         &mut self,
         session: CkSessionHandle,
         mechanism: &CkMechanism,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
         let ctx = self.context_id()?;
         let proto_mech = Self::proto_mechanism(mechanism);
-        let proto_template = Self::proto_template(template);
+        let proto_template = Self::proto_template(template.unwrap_or(&[]));
         let req = pkcs11_proxy_ng_proto::GenerateKeyRequest {
             client_context_id: ctx,
             session_handle: session.0,
             mechanism: Some(proto_mech),
             template: proto_template,
+            template_null: template.is_none(),
         };
         let resp = pkcs11_unary_call!(self.grpc.generate_key(req), true);
         let mechanism_out = match resp.mechanism_out {
@@ -162,18 +165,20 @@ impl Pkcs11Client {
         &mut self,
         session: CkSessionHandle,
         mechanism: &CkMechanism,
-        pub_template: &[CkAttribute],
-        priv_template: &[CkAttribute],
+        pub_template: Option<&[CkAttribute]>,
+        priv_template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, CkObjectHandle)> {
         let ctx = self.context_id()?;
-        let proto_pub = Self::proto_template(pub_template);
-        let proto_priv = Self::proto_template(priv_template);
+        let proto_pub = Self::proto_template(pub_template.unwrap_or(&[]));
+        let proto_priv = Self::proto_template(priv_template.unwrap_or(&[]));
         let req = pkcs11_proxy_ng_proto::GenerateKeyPairRequest {
             client_context_id: ctx,
             session_handle: session.0,
             mechanism: Some(Self::proto_mechanism(mechanism)),
             public_key_template: proto_pub,
+            public_template_null: pub_template.is_none(),
             private_key_template: proto_priv,
+            private_template_null: priv_template.is_none(),
         };
         let resp = pkcs11_unary_call!(self.grpc.generate_key_pair(req), true);
         Ok((CkObjectHandle(resp.public_key_handle), CkObjectHandle(resp.private_key_handle)))

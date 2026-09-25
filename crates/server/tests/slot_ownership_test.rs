@@ -127,6 +127,12 @@ async fn mechanism_grants_follow_session_backend_slot_with_warm_and_cold_cache()
     let f = fixture_with_grants([grants(false), grants(false)]).await;
     preload_objects(&f);
     let mut client = open(&f, false).await;
+    // D6(1): USE of find-registered (unknown-privacy) keys while logged out
+    // probes CKA_PRIVATE; log into both slots so this mechanism-precedence
+    // test keeps its zero-metadata-before-gate profile. Login performs no
+    // token-info fetch, so the cold/warm assertions below are unaffected.
+    assert_eq!(login(&mut client, 0, b"pin42").await, CkRv::OK.0);
+    assert_eq!(login(&mut client, 1, b"pin1").await, CkRv::OK.0);
     let keys = find(&mut client, 0).await;
     assert_eq!(keys.len(), 2);
     for cold in [false, true] {
@@ -189,7 +195,7 @@ fn preload_objects(f: &MtlsFixture) -> [CkObjectHandle; 2] {
             .backend
             .create_object(
                 session,
-                &[
+                Some(&[
                     CkAttribute {
                         attr_type: CkAttributeType::TOKEN,
                         value: Some(CkAttributeValue::Bool(true)),
@@ -198,13 +204,21 @@ fn preload_objects(f: &MtlsFixture) -> [CkObjectHandle; 2] {
                         attr_type: CkAttributeType::CLASS,
                         value: Some(CkAttributeValue::Ulong(CkObjectClass::SECRET_KEY.0)),
                     },
-                ],
+                ]),
             )
             .unwrap();
         f.backend.set_attribute(
             object,
             CkAttributeType::UNIQUE_ID,
-            MockAttributeSlot::Value(CkAttributeValue::Bytes(vec![uid])),
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(vec![uid].into())),
+        );
+        // F-04: declare CKA_PRIVATE=false (the native default for objects
+        // created without it) so the logged-out login filter keeps these
+        // authz-policy fixtures visible.
+        f.backend.set_attribute(
+            object,
+            CkAttributeType::PRIVATE,
+            MockAttributeSlot::Value(CkAttributeValue::Bool(false)),
         );
         object
     });
@@ -221,6 +235,7 @@ async fn find(client: &mut Client, index: usize) -> Vec<u64> {
             client_context_id: context.clone(),
             session_handle,
             template: vec![],
+            template_null: false,
         })
         .await
         .unwrap()
@@ -356,7 +371,10 @@ async fn login(client: &mut Client, index: usize, pin: &[u8]) -> u64 {
 }
 
 #[tokio::test]
-async fn login_and_pin_verifiers_are_keyed_by_backend_slot_after_public_open() {
+async fn login_state_is_keyed_by_backend_slot_and_second_context_gets_already() {
+    // D6(3): per-slot logical login state is keyed by backend slot, and a
+    // second live context logging into a held slot gets the faithful
+    // USER_ALREADY_LOGGED_IN on every slot (no PIN evaluation, no minting).
     let f = fixture().await;
     let mut a = open(&f, false).await;
     let mut b = open(&f, true).await;
@@ -370,48 +388,25 @@ async fn login_and_pin_verifiers_are_keyed_by_backend_slot_after_public_open() {
             .await
             .unwrap();
         assert_eq!(state, Some(LoginState::User));
-        assert_eq!(
-            f.context_manager.verify_pin_hash(
-                BackendSlotId(CkSlotId(slot)),
-                LoginState::User,
-                &f.context_manager.hash_pin(Some(pin))
-            ),
-            Some(true)
-        );
     }
     assert_eq!(f.backend.login_call_count(), 2);
-    // The mock accepts arbitrary PINs natively; only the proxy verifier can reject these.
-    assert_eq!(login(&mut b, 0, b"slot1-pin").await, CkRv::PIN_INCORRECT.0);
-    assert_eq!(login(&mut b, 1, b"slot42-pin").await, CkRv::PIN_INCORRECT.0);
-    assert_eq!(login(&mut b, 0, b"slot42-pin").await, CkRv::OK.0);
-    assert_eq!(login(&mut b, 1, b"slot1-pin").await, CkRv::OK.0);
+    // Both slots are held by `a`: `b` gets ALREADY on both, whatever PIN it
+    // presents, and the refused logins never reach the backend.
+    assert_eq!(login(&mut b, 0, b"slot1-pin").await, CkRv::USER_ALREADY_LOGGED_IN.0);
+    assert_eq!(login(&mut b, 1, b"slot42-pin").await, CkRv::USER_ALREADY_LOGGED_IN.0);
+    assert_eq!(login(&mut b, 0, b"slot42-pin").await, CkRv::USER_ALREADY_LOGGED_IN.0);
+    assert_eq!(login(&mut b, 1, b"slot1-pin").await, CkRv::USER_ALREADY_LOGGED_IN.0);
     assert_eq!(f.backend.login_call_count(), 2);
-}
-
-#[tokio::test]
-async fn set_pin_refreshes_only_the_owning_backend_slot_verifier() {
-    let f = fixture().await;
-    let mut a = open(&f, false).await;
-    let mut b = open(&f, true).await;
-    assert_eq!(login(&mut a, 0, b"old42").await, CkRv::OK.0);
-    assert_eq!(login(&mut a, 1, b"keep1").await, CkRv::OK.0);
-    let set = a
-        .rpc
-        .set_pin(SetPinRequest {
-            client_context_id: a.context.clone(),
-            session_handle: a.sessions[0],
-            old_pin: Some(b"old42".to_vec()),
-            new_pin: Some(b"new42".to_vec()),
-        })
-        .await
-        .unwrap()
-        .into_inner();
-    assert_eq!(set.ck_rv, CkRv::OK.0);
-    assert_eq!(login(&mut b, 0, b"old42").await, CkRv::PIN_INCORRECT.0);
-    assert_eq!(login(&mut b, 0, b"new42").await, CkRv::OK.0);
-    assert_eq!(login(&mut b, 1, b"new42").await, CkRv::PIN_INCORRECT.0);
-    assert_eq!(login(&mut b, 1, b"keep1").await, CkRv::OK.0);
-    assert_eq!(f.backend.login_call_count(), 2);
+    for slot in [42, 1] {
+        let state = f
+            .context_manager
+            .get_context(&ClientContextId(b.context.clone()), |ctx| {
+                ctx.login_state.get(&BackendSlotId(CkSlotId(slot))).copied()
+            })
+            .await
+            .unwrap();
+        assert_eq!(state, None, "no logical login may be minted for the refused context");
+    }
 }
 
 #[tokio::test]

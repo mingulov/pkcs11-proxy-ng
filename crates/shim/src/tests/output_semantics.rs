@@ -28,7 +28,7 @@ use super::*;
 static TEST_DAEMON: OnceLock<TestDaemon> = OnceLock::new();
 static TEST_DAEMON_ILP32: OnceLock<TestDaemon> = OnceLock::new();
 static TEST_DAEMON_LLP64: OnceLock<TestDaemon> = OnceLock::new();
-static TEST_DAEMON_BIG_ENDIAN: OnceLock<TestDaemon> = OnceLock::new();
+static TEST_DAEMON_FOREIGN_ENDIAN: OnceLock<TestDaemon> = OnceLock::new();
 
 pub(super) struct TestDaemon {
     runtime: Runtime,
@@ -53,16 +53,20 @@ impl TestDaemon {
         }
     }
 
-    /// A daemon whose backend ADVERTISES big-endian (D6 poison config).
-    pub(super) fn shared_big_endian() -> &'static Self {
-        TEST_DAEMON_BIG_ENDIAN.get_or_init(|| Self::start_configured(MockAbi::host(), true))
+    /// A daemon whose backend ADVERTISES the byte order foreign to this
+    /// host (D6 poison config): big-endian on LE hosts, little-endian on
+    /// BE hosts — either way the client must refuse at `C_Initialize`.
+    pub(super) fn shared_foreign_endian() -> &'static Self {
+        let foreign = if cfg!(target_endian = "little") { 2 } else { 1 };
+        TEST_DAEMON_FOREIGN_ENDIAN
+            .get_or_init(|| Self::start_configured(MockAbi::host(), Some(foreign)))
     }
 
     fn start(abi: MockAbi) -> Self {
-        Self::start_configured(abi, false)
+        Self::start_configured(abi, None)
     }
 
-    fn start_configured(abi: MockAbi, big_endian: bool) -> Self {
+    fn start_configured(abi: MockAbi, advertised_order: Option<u32>) -> Self {
         let runtime = Runtime::new().expect("test runtime");
         let (endpoint, backend, context_manager, shutdown) = runtime.block_on(async {
             let mut mock = MockBackend::new(
@@ -76,8 +80,11 @@ impl TestDaemon {
                 ],
             )
             .with_abi(abi);
-            if big_endian {
-                mock = mock.with_big_endian_advertisement();
+            match advertised_order {
+                None => {}
+                Some(2) => mock = mock.with_big_endian_advertisement(),
+                Some(1) => mock = mock.with_little_endian_advertisement(),
+                Some(other) => panic!("invalid test byte-order advertisement {other}"),
             }
             let backend = Arc::new(mock);
             backend.set_interface_capabilities(InterfaceCapabilities {
@@ -303,7 +310,7 @@ fn write_exact_output_rejects_value_larger_than_declared_buffer_without_copy() {
     let result = CkOutputBufferResult {
         ck_rv: CkRv::OK,
         returned_len: Some(4),
-        value: Some(vec![1, 2, 3, 4]),
+        value: Some(vec![1, 2, 3, 4].into()),
     };
 
     let rv = unsafe {
@@ -325,8 +332,11 @@ fn write_exact_output_validates_all_effects_before_any_store() {
     let mut backing = [0xa5; 8];
     let mut length = 8;
     let spec = unsafe { dispatch::general::output_buffer_spec(backing.as_mut_ptr(), &mut length) };
-    let result =
-        CkOutputBufferResult { ck_rv: CkRv::OK, returned_len: Some(7), value: Some(vec![1; 4]) };
+    let result = CkOutputBufferResult {
+        ck_rv: CkRv::OK,
+        returned_len: Some(7),
+        value: Some(vec![1; 4].into()),
+    };
     let rv = unsafe {
         dispatch::general::write_exact_output(&spec, &result, backing.as_mut_ptr(), &mut length)
     };
@@ -362,7 +372,7 @@ fn write_exact_output_does_not_copy_value_on_buffer_too_small() {
     let result = CkOutputBufferResult {
         ck_rv: CkRv::BUFFER_TOO_SMALL,
         returned_len: Some(4),
-        value: Some(vec![1, 2, 3, 4]),
+        value: Some(vec![1, 2, 3, 4].into()),
     };
 
     let rv = unsafe {
@@ -572,7 +582,7 @@ fn raw_client_size_query_returns_length_without_bytes() {
             .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
             .await
             .expect("C_OpenSession");
-        let object = client.create_object(session, &[]).await.expect("C_CreateObject");
+        let object = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
 
         daemon.backend.set_attribute(
             object,
@@ -627,7 +637,7 @@ fn raw_client_too_small_query_preserves_backend_returned_length() {
             .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
             .await
             .expect("C_OpenSession");
-        let object = client.create_object(session, &[]).await.expect("C_CreateObject");
+        let object = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
 
         daemon.backend.set_attribute(
             object,
@@ -682,7 +692,7 @@ fn raw_client_exact_fit_query_returns_backend_bytes() {
             .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
             .await
             .expect("C_OpenSession");
-        let object = client.create_object(session, &[]).await.expect("C_CreateObject");
+        let object = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
 
         daemon.backend.set_attribute(
             object,
@@ -712,7 +722,7 @@ fn raw_client_exact_fit_query_returns_backend_bytes() {
                 apply_type: false,
                 attr_type: CkAttributeType::LABEL,
                 returned_len: 3,
-                value: Some(b"key".to_vec()),
+                value: Some(b"key".to_vec().into()),
                 ck_rv: None,
                 nested: None,
             }]
@@ -737,7 +747,7 @@ fn raw_client_mixed_sensitive_and_invalid_preserves_per_attribute_status() {
             .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
             .await
             .expect("C_OpenSession");
-        let object = client.create_object(session, &[]).await.expect("C_CreateObject");
+        let object = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
 
         daemon.backend.set_attribute(
             object,
@@ -838,7 +848,7 @@ fn legacy_client_size_query_does_not_synthesize_attribute_bytes() {
             .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
             .await
             .expect("C_OpenSession");
-        let object = client.create_object(session, &[]).await.expect("C_CreateObject");
+        let object = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
 
         daemon.backend.set_attribute(
             object,
@@ -1234,7 +1244,7 @@ fn malformed_post_provider_ack_returns_device_error_and_clears_shim_shape() {
     daemon.backend.set_next_message_parameter_ack(CkParameterRoundtripResult {
         ck_rv: CkRv::OK,
         returned_len: provider_len + 1,
-        value: Some(Vec::new()),
+        value: Some(Vec::new().into()),
     });
     let calls_before = daemon.backend.message_parameter_call_count();
     let input = [0x22_u8; 8];
@@ -2415,8 +2425,11 @@ fn gcm_generated_iv_round_trips_through_shim_client_and_server() {
         iv: generated_iv.clone(),
         iv_bits: 96,
         iv_buffer_len: generated_iv.len() as u64,
-        aad: b"aad".to_vec(),
+        aad: b"aad".to_vec().into(),
         tag_bits: 128,
+
+        iv_null: false,
+        aad_null: false,
     })));
 
     let shim = ShimSession::new();
@@ -2453,8 +2466,11 @@ fn gcm_delayed_iv_round_trips_after_encrypt_data_query() {
         iv: generated_iv.clone(),
         iv_bits: 96,
         iv_buffer_len: generated_iv.len() as u64,
-        aad: b"aad".to_vec(),
+        aad: b"aad".to_vec().into(),
         tag_bits: 128,
+
+        iv_null: false,
+        aad_null: false,
     })));
 
     let shim = ShimSession::new();
@@ -2506,8 +2522,11 @@ fn gcm_delayed_iv_size_query_does_not_consume_writeback() {
         iv: generated_iv.clone(),
         iv_bits: 96,
         iv_buffer_len: generated_iv.len() as u64,
-        aad: b"aad".to_vec(),
+        aad: b"aad".to_vec().into(),
         tag_bits: 128,
+
+        iv_null: false,
+        aad_null: false,
     })));
 
     let shim = ShimSession::new();
@@ -3024,7 +3043,7 @@ fn exact_encrypt_message_size_query_returns_length() {
             mechanism_type: CkMechanismType::AES_ECB,
             params: None,
         };
-        let key = client.create_object(session, &[]).await.expect("C_CreateObject");
+        let key = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
         client
             .message_encrypt_init(session, Some(&mechanism), None, key)
             .await
@@ -3094,15 +3113,15 @@ fn exact_wrap_key_authenticated_size_query_returns_length() {
             .await
             .expect("C_OpenSession");
 
-        let wrapping_key = client.create_object(session, &[]).await.expect("C_CreateObject");
-        let key = client.create_object(session, &[]).await.expect("C_CreateObject");
+        let wrapping_key = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
+        let key = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
 
         let output_spec =
             CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: false };
         let param_out_spec = CkParameterRoundtripSpec {
             buffer_present: true,
             buffer_len: 16,
-            value: Some(vec![0xBB; 16]),
+            value: Some(vec![0xBB; 16].into()),
         };
 
         let mechanism = pkcs11_proxy_ng_types::CkMechanism {
@@ -3165,8 +3184,8 @@ fn null_output_length_parameter_rpc_preserves_exact_provider_rv() {
             .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
             .await
             .expect("C_OpenSession");
-        let wrapping_key = client.create_object(session, &[]).await.expect("C_CreateObject");
-        let key = client.create_object(session, &[]).await.expect("C_CreateObject");
+        let wrapping_key = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
+        let key = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
         let output_spec =
             CkOutputBufferSpec { buffer_present: true, buffer_len: 0, length_pointer_null: true };
         let parameter_spec =
@@ -3450,8 +3469,8 @@ fn nested_template_attribute_data_query() {
     );
 
     // Verify sub-attribute values
-    let returned_class = CK_ULONG::from_le_bytes(class_buf[..ulong_size].try_into().unwrap());
-    let returned_key_type = CK_ULONG::from_le_bytes(key_type_buf[..ulong_size].try_into().unwrap());
+    let returned_class = CK_ULONG::from_ne_bytes(class_buf[..ulong_size].try_into().unwrap());
+    let returned_key_type = CK_ULONG::from_ne_bytes(key_type_buf[..ulong_size].try_into().unwrap());
     assert_eq!(returned_class, class_value as CK_ULONG, "CLASS value");
     assert_eq!(returned_key_type, key_type_value as CK_ULONG, "KEY_TYPE value");
 }
@@ -3565,7 +3584,7 @@ fn nested_template_attribute_sub_buffer_too_small_preserves_partial_outputs() {
     assert_eq!(sub0_type, CkAttributeType::CLASS.0 as CK_ATTRIBUTE_TYPE);
     assert_eq!(sub_attrs[0].ulValueLen as usize, ulong_size);
     assert_eq!(
-        CK_ULONG::from_le_bytes(class_buf[..ulong_size].try_into().unwrap()),
+        CK_ULONG::from_ne_bytes(class_buf[..ulong_size].try_into().unwrap()),
         class_value as CK_ULONG
     );
     let (sub1_type, sub1_len) = (sub_attrs[1].type_, sub_attrs[1].ulValueLen);
@@ -3589,7 +3608,7 @@ fn raw_client_nested_template_size_query() {
             .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
             .await
             .expect("C_OpenSession");
-        let object = client.create_object(session, &[]).await.expect("C_CreateObject");
+        let object = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
 
         daemon.backend.set_attribute(
             object,
@@ -3642,7 +3661,7 @@ fn raw_client_nested_template_data_query() {
             .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
             .await
             .expect("C_OpenSession");
-        let object = client.create_object(session, &[]).await.expect("C_CreateObject");
+        let object = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
 
         let class_value: u64 = 3;
         let key_type_value: u64 = 31;
@@ -3703,12 +3722,20 @@ fn raw_client_nested_template_data_query() {
         assert_eq!(nested[0].attr_type, CkAttributeType::CLASS);
         assert_eq!(nested[0].returned_len, ulong_size);
         let class_bytes = nested[0].value.as_ref().expect("CLASS value");
-        assert_eq!(class_bytes, &class_value.to_le_bytes()[..ulong_size as usize]);
+        assert!(class_bytes.expose(|raw| raw
+            == pkcs11_proxy_ng_types::width::encode_native_ulong(
+                class_value,
+                ulong_size as usize
+            )));
 
         assert_eq!(nested[1].attr_type, CkAttributeType::KEY_TYPE);
         assert_eq!(nested[1].returned_len, ulong_size);
         let key_type_bytes = nested[1].value.as_ref().expect("KEY_TYPE value");
-        assert_eq!(key_type_bytes, &key_type_value.to_le_bytes()[..ulong_size as usize]);
+        assert!(key_type_bytes.expose(|raw| raw
+            == pkcs11_proxy_ng_types::width::encode_native_ulong(
+                key_type_value,
+                ulong_size as usize
+            )));
 
         client.close_session(session).await.expect("C_CloseSession");
         client.finalize().await.expect("C_Finalize");

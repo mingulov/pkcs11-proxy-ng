@@ -243,3 +243,89 @@ jobs:
             -p pkcs11-proxy-ng-client \
             -p pkcs11-proxy-ng-backend \
             -p pkcs11-proxy-ng
+
+  # ── Tier 0g: musl build (x86_64-unknown-linux-musl) ──────────────────────────
+  # Release-bundle build for the musl tier (doc/release/musl-tier.md):
+  # daemon + CLI fully static, plus a musl-dynamic daemon and the shim
+  # cdylib (musl-dynamic: cdylib cannot link statically, and a static
+  # daemon cannot dlopen provider modules — musl answers "Dynamic
+  # loading not supported" — so the serving daemon stays musl-dynamic,
+  # the same shape the Alpine APKBUILD ships). Ubuntu's musl-tools
+  # ships `musl-gcc` — there is no triplet-prefixed
+  # x86_64-linux-musl-gcc, and that wrong name was the freeze-gate
+  # failure this job closes (T4). The static binaries also execute on
+  # the glibc runner, so --version doubles as a smoke test; the
+  # musl-dynamic daemon cannot execute here (no musl loader) and gets
+  # a `file` receipt only — its live proof is the Alpine stage of
+  # scripts/run-musl-test.sh. Load-bearing, not experimental.
+  # i686-musl stays intentionally absent: the musl claim is x86_64
+  # Alpine packaging only.
+  musl-x86_64:
+    name: musl build (x86_64 static + dynamic)
+    runs-on: ubuntu-24.04
+    needs: fmt
+    env:
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+      CC_x86_64_unknown_linux_musl: musl-gcc
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install system dependencies (protobuf + musl toolchain)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y protobuf-compiler musl-tools
+
+      - name: Install stable toolchain with musl target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: cargo build release daemon + CLI (musl, static)
+        run: |
+          cargo build --release --target x86_64-unknown-linux-musl \
+            -p pkcs11-proxy-ng -p pkcs11-proxy-ng-cli
+          # The dynamic daemon below overwrites release/pkcs11-proxy-ng
+          # (same output path, different fingerprint); keep the static
+          # binary for the linkage receipt.
+          mkdir -p target/x86_64-unknown-linux-musl/static-save
+          cp target/x86_64-unknown-linux-musl/release/pkcs11-proxy-ng \
+             target/x86_64-unknown-linux-musl/static-save/
+
+      - name: cargo build release shim + daemon (musl, dynamic)
+        # Flags from scripts/musl-dynamic-link-flags.sh (shared with the
+        # local docker route): -crt-static off (musl-dynamic) plus a -L
+        # redirect resolving rustc's explicit -lgcc_s, which the
+        # musl-gcc wrapper cannot resolve on its own.
+        run: |
+          export RUSTFLAGS="$(scripts/musl-dynamic-link-flags.sh "$RUNNER_TEMP/musl-dynamic-link")"
+          echo "dynamic RUSTFLAGS: $RUSTFLAGS"
+          cargo build --release --target x86_64-unknown-linux-musl \
+            -p pkcs11-proxy-ng-shim -p pkcs11-proxy-ng
+
+      - name: Verify linkage + smoke static binaries
+        run: |
+          MUSL_RELEASE="target/x86_64-unknown-linux-musl/release"
+          file "$MUSL_RELEASE/../static-save/pkcs11-proxy-ng" \
+               "$MUSL_RELEASE/pkcs11-proxy-ng-cli" \
+               "$MUSL_RELEASE/pkcs11-proxy-ng" \
+               "$MUSL_RELEASE/libpkcs11_proxy_ng_shim.so"
+          # Newer `file` says "static-pie linked", older "statically linked".
+          file "$MUSL_RELEASE/../static-save/pkcs11-proxy-ng" \
+               "$MUSL_RELEASE/pkcs11-proxy-ng-cli" \
+            | grep -Eq "statically linked|static-pie linked"
+          if file "$MUSL_RELEASE/../static-save/pkcs11-proxy-ng" \
+               "$MUSL_RELEASE/pkcs11-proxy-ng-cli" \
+             | grep -q "interpreter"; then
+            echo "::error::static daemon/CLI carry a program interpreter (not static)"
+            exit 1
+          fi
+          file "$MUSL_RELEASE/pkcs11-proxy-ng" \
+            | grep -q "interpreter /lib/ld-musl-" || {
+            echo "::error::dynamic daemon does not use the musl interpreter"
+            exit 1
+          }
+          file "$MUSL_RELEASE/libpkcs11_proxy_ng_shim.so" | grep -q "shared object"
+          # The static binaries execute on the glibc runner; the
+          # musl-dynamic daemon cannot (no musl loader here).
+          "$MUSL_RELEASE/../static-save/pkcs11-proxy-ng" --version
+          "$MUSL_RELEASE/pkcs11-proxy-ng-cli" --version

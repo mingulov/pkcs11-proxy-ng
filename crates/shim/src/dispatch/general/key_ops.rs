@@ -71,6 +71,7 @@ pub unsafe extern "C" fn c_unwrap_key(
             Ok(template) => template,
             Err(e) => return rv_err(e),
         };
+        let template_opt = null_preserving_template(&template, p_template);
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
             return rv;
@@ -87,7 +88,7 @@ pub unsafe extern "C" fn c_unwrap_key(
             &mech,
             CkObjectHandle(h_unwrapping_key as u64),
             wrapped_key,
-            &template,
+            template_opt,
         )) {
             Ok(handle) => {
                 unsafe { write_object_handle_output(handle, ph_key) };
@@ -121,6 +122,7 @@ pub unsafe extern "C" fn c_derive_key(
             Ok(template) => template,
             Err(e) => return rv_err(e),
         };
+        let template_opt = null_preserving_template(&template, p_template);
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
             return rv;
@@ -130,7 +132,7 @@ pub unsafe extern "C" fn c_derive_key(
             CkSessionHandle(h_session as u64),
             &mech,
             CkObjectHandle(h_base_key as u64),
-            &template,
+            template_opt,
         )) {
             Ok(result) => {
                 // Write HSM-mutated mechanism fields back into the caller's
@@ -176,6 +178,7 @@ pub unsafe extern "C" fn c_generate_key(
             Ok(template) => template,
             Err(e) => return rv_err(e),
         };
+        let template_opt = null_preserving_template(&template, p_template);
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
             return rv;
@@ -184,7 +187,7 @@ pub unsafe extern "C" fn c_generate_key(
         match with_client!(client => client.generate_key_with_mechanism_out(
             CkSessionHandle(h_session as u64),
             &mech,
-            &template,
+            template_opt,
         )) {
             Ok((handle, mechanism_out)) => {
                 // Write any HSM-mutated mechanism field back into the caller's
@@ -222,12 +225,14 @@ pub unsafe extern "C" fn c_generate_key_pair(
             Ok(template) => template,
             Err(e) => return rv_err(e),
         };
+        let pub_opt = null_preserving_template(&pub_tmpl, p_public_key_template);
         let priv_tmpl = match unsafe {
             ck_attrs_to_rust_checked(p_private_key_template, ul_private_key_attribute_count)
         } {
             Ok(template) => template,
             Err(e) => return rv_err(e),
         };
+        let priv_opt = null_preserving_template(&priv_tmpl, p_private_key_template);
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
             return rv;
@@ -236,8 +241,8 @@ pub unsafe extern "C" fn c_generate_key_pair(
         match with_client!(client => client.generate_key_pair(
             CkSessionHandle(h_session as u64),
             &mech,
-            &pub_tmpl,
-            &priv_tmpl,
+            pub_opt,
+            priv_opt,
         )) {
             Ok((public_handle, private_handle)) => {
                 unsafe {

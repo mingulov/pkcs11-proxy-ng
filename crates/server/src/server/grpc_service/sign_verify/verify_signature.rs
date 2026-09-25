@@ -162,7 +162,7 @@ pub(crate) async fn verify_signature(
         }
     };
 
-    let data = req.data;
+    let data = SecretBytes::new(req.data);
     let data_null_len = req.data_null_len;
     // ADR-0010 sanitize_inputs: validate NULL data pointer before backend call.
     if let Err(rv) = check_sanitize(sanitize_inputs, data_null_len) {
@@ -170,7 +170,7 @@ pub(crate) async fn verify_signature(
     }
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
-        backend.verify_signature(session, input_from_wire(&data, data_null_len))
+        data.expose(|raw| backend.verify_signature(session, input_from_wire(raw, data_null_len)))
     })
     .await?;
     Ok(Response::new(pkcs11_proxy_ng_proto::VerifySignatureResponse { ck_rv: ck_rv_only(result) }))
@@ -199,7 +199,7 @@ pub(crate) async fn verify_signature_update(
         }
     };
 
-    let data_part = req.data_part;
+    let data_part = SecretBytes::new(req.data_part);
     let data_part_null_len = req.data_part_null_len;
     // ADR-0010 sanitize_inputs: validate NULL data_part pointer before backend call.
     if let Err(rv) = check_sanitize(sanitize_inputs, data_part_null_len) {
@@ -209,7 +209,9 @@ pub(crate) async fn verify_signature_update(
     }
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
-        backend.verify_signature_update(session, input_from_wire(&data_part, data_part_null_len))
+        data_part.expose(|raw| {
+            backend.verify_signature_update(session, input_from_wire(raw, data_part_null_len))
+        })
     })
     .await?;
     Ok(Response::new(pkcs11_proxy_ng_proto::VerifySignatureUpdateResponse {

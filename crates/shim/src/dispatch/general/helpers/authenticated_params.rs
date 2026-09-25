@@ -114,7 +114,7 @@ impl AuthenticatedCall {
             let ack = CkParameterRoundtripResult {
                 ck_rv: main.ck_rv,
                 returned_len: self.parameter_spec.buffer_len,
-                value: self.parameter_spec.buffer_present.then(Vec::new),
+                value: self.parameter_spec.buffer_present.then(Vec::new).map(SecretBytes::new),
             };
             return unsafe {
                 write_exact_message_output(
@@ -138,7 +138,9 @@ impl AuthenticatedCall {
             if self.iv_target.is_null() {
                 return rv_err(CkRv::GENERAL_ERROR);
             }
-            unsafe { std::ptr::copy_nonoverlapping(iv.as_ptr(), self.iv_target, iv.len()) };
+            iv.expose(|raw| unsafe {
+                std::ptr::copy_nonoverlapping(raw.as_ptr(), self.iv_target, raw.len())
+            });
         }
         unsafe { write_exact_output(spec, main, buffer, length) }
     }

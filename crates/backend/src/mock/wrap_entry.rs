@@ -53,7 +53,7 @@ impl MockBackend {
         Ok(if let Some(parameter) = parameter {
             AuthenticatedOutput::Message(parameter.clone())
         } else if let Some(CkMechanismParams::Iv(iv)) = &mechanism.params {
-            AuthenticatedOutput::Iv(iv.iv.clone())
+            AuthenticatedOutput::Iv(iv.iv.clone().into())
         } else {
             AuthenticatedOutput::Unchanged
         })

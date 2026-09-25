@@ -1,5 +1,9 @@
 use crate::pkcs11_proxy_ng::v1 as v1_proto;
-use pkcs11_proxy_ng_types::{CkAttribute, CkAttributeType, CkAttributeValue, CkRv};
+// ADR-0013 §5: every `secret_to_plain` use in this file is a prost wire-encoding
+// boundary (response/request construction); the standing justification lives in
+// `secret_boundary` docs. No plain copy is retained past the enclosing encode.
+use crate::secret_boundary::{secret_to_plain, secret_to_plain_string};
+use pkcs11_proxy_ng_types::{CkAttribute, CkAttributeType, CkAttributeValue, CkRv, SecretBytes};
 
 impl From<&CkAttribute> for v1_proto::Attribute {
     fn from(a: &CkAttribute) -> Self {
@@ -8,10 +12,10 @@ impl From<&CkAttribute> for v1_proto::Attribute {
             Some(CkAttributeValue::Bool(b)) => Some(v1_proto::attribute::Value::BoolValue(*b)),
             Some(CkAttributeValue::Ulong(u)) => Some(v1_proto::attribute::Value::UlongValue(*u)),
             Some(CkAttributeValue::Bytes(b)) => {
-                Some(v1_proto::attribute::Value::BytesValue(b.clone()))
+                Some(v1_proto::attribute::Value::BytesValue(secret_to_plain(b)))
             }
             Some(CkAttributeValue::String(s)) => {
-                Some(v1_proto::attribute::Value::StringValue(s.clone()))
+                Some(v1_proto::attribute::Value::StringValue(secret_to_plain_string(s)))
             }
             Some(CkAttributeValue::NestedTemplate(subs)) => {
                 Some(v1_proto::attribute::Value::NestedTemplate(v1_proto::NestedAttributes {
@@ -32,10 +36,10 @@ impl TryFrom<&v1_proto::Attribute> for CkAttribute {
             Some(v1_proto::attribute::Value::BoolValue(b)) => Some(CkAttributeValue::Bool(*b)),
             Some(v1_proto::attribute::Value::UlongValue(u)) => Some(CkAttributeValue::Ulong(*u)),
             Some(v1_proto::attribute::Value::BytesValue(b)) => {
-                Some(CkAttributeValue::Bytes(b.clone()))
+                Some(CkAttributeValue::Bytes(SecretBytes::copy_from_slice(b)))
             }
             Some(v1_proto::attribute::Value::StringValue(s)) => {
-                Some(CkAttributeValue::String(s.clone()))
+                Some(CkAttributeValue::String(SecretBytes::copy_from_slice(s.as_bytes())))
             }
             Some(v1_proto::attribute::Value::NestedTemplate(nested)) => {
                 // D8: one level of nesting. A sub-attribute carrying another
@@ -114,7 +118,7 @@ mod tests {
     fn attribute_bytes_round_trip() {
         let original = CkAttribute {
             attr_type: CkAttributeType::MODULUS,
-            value: Some(CkAttributeValue::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF])),
+            value: Some(CkAttributeValue::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF].into())),
         };
         let proto: v1_proto::Attribute = (&original).into();
         let back = CkAttribute::try_from(&proto).unwrap();
@@ -127,7 +131,7 @@ mod tests {
         // the client sends attributes with None/empty value, server fills them.
         let original = CkAttribute {
             attr_type: CkAttributeType::MODULUS,
-            value: Some(CkAttributeValue::Bytes(vec![])),
+            value: Some(CkAttributeValue::Bytes(vec![].into())),
         };
         let proto: v1_proto::Attribute = (&original).into();
         let back = CkAttribute::try_from(&proto).unwrap();
@@ -138,11 +142,11 @@ mod tests {
     fn attribute_string_round_trip() {
         let original = CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String("my-key".to_string())),
+            value: Some(CkAttributeValue::String("my-key".to_string().into())),
         };
         let proto: v1_proto::Attribute = (&original).into();
         let back = CkAttribute::try_from(&proto).unwrap();
-        assert_eq!(back.value, Some(CkAttributeValue::String("my-key".to_string())));
+        assert_eq!(back.value, Some(CkAttributeValue::String("my-key".to_string().into())));
     }
 
     #[test]
@@ -194,7 +198,7 @@ mod tests {
         // Attribute types are open-ended; unknown/vendor types must pass through.
         let original = CkAttribute {
             attr_type: CkAttributeType(0x8000_0001), // hypothetical vendor attribute
-            value: Some(CkAttributeValue::Bytes(vec![1, 2, 3])),
+            value: Some(CkAttributeValue::Bytes(vec![1, 2, 3].into())),
         };
         let proto: v1_proto::Attribute = (&original).into();
         let back = CkAttribute::try_from(&proto).unwrap();
@@ -207,10 +211,10 @@ mod tests {
         let payload: Vec<u8> = (0u8..=255).chain(0u8..=255).collect(); // 512 bytes
         let original = CkAttribute {
             attr_type: CkAttributeType::MODULUS,
-            value: Some(CkAttributeValue::Bytes(payload.clone())),
+            value: Some(CkAttributeValue::Bytes(payload.clone().into())),
         };
         let proto: v1_proto::Attribute = (&original).into();
         let back = CkAttribute::try_from(&proto).unwrap();
-        assert_eq!(back.value, Some(CkAttributeValue::Bytes(payload)));
+        assert_eq!(back.value, Some(CkAttributeValue::Bytes(payload.into())));
     }
 }

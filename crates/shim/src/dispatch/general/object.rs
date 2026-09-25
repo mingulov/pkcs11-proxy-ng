@@ -18,9 +18,10 @@ pub unsafe extern "C" fn c_find_objects_init(
             Ok(template) => template,
             Err(e) => return rv_err(e),
         };
+        let template_opt = null_preserving_template(&template, p_template);
         unit_result_to_rv(with_client!(client => client.find_objects_init(
             CkSessionHandle(h_session as u64),
-            &template,
+            template_opt,
         )))
     })
 }
@@ -189,7 +190,8 @@ pub unsafe extern "C" fn c_create_object(
             Ok(template) => template,
             Err(e) => return rv_err(e),
         };
-        match with_client!(client => client.create_object(CkSessionHandle(h_session as u64), &template))
+        let template_opt = null_preserving_template(&template, p_template);
+        match with_client!(client => client.create_object(CkSessionHandle(h_session as u64), template_opt))
         {
             Ok(handle) => {
                 unsafe { write_object_handle_output(handle, ph_object) };
@@ -215,10 +217,11 @@ pub unsafe extern "C" fn c_copy_object(
             Ok(template) => template,
             Err(e) => return rv_err(e),
         };
+        let template_opt = null_preserving_template(&template, p_template);
         match with_client!(client => client.copy_object(
             CkSessionHandle(h_session as u64),
             CkObjectHandle(h_object as u64),
-            &template,
+            template_opt,
         )) {
             Ok(handle) => {
                 unsafe { write_object_handle_output(handle, ph_new_object) };
@@ -276,10 +279,11 @@ pub unsafe extern "C" fn c_set_attribute_value(
             Ok(template) => template,
             Err(e) => return rv_err(e),
         };
+        let template_opt = null_preserving_template(&template, p_template);
         unit_result_to_rv(with_client!(client => client.set_attribute_value(
             CkSessionHandle(h_session as u64),
             CkObjectHandle(h_object as u64),
-            &template,
+            template_opt,
         )))
     })
 }
@@ -294,7 +298,9 @@ mod tests {
     use std::ptr;
 
     #[test]
-    fn exact_standard_nested_query_ignores_input_type() {
+    fn exact_standard_nested_query_forwards_preset_input_type() {
+        // F7/D5: a caller-preset nested `type` is query input, not
+        // output-only — it must reach the daemon verbatim.
         let mut value = [0u8; 8];
         let mut nested =
             CK_ATTRIBUTE { type_: CKA_KEY_TYPE, pValue: value.as_mut_ptr().cast(), ulValueLen: 8 };
@@ -309,8 +315,8 @@ mod tests {
                 .unwrap();
         assert_eq!(
             query.nested.unwrap()[0].attr_type,
-            CkAttributeType(0),
-            "nested type is output-only, not an input schema hint"
+            CkAttributeType::KEY_TYPE,
+            "caller-preset nested type must be forwarded verbatim"
         );
     }
 
@@ -436,7 +442,7 @@ mod tests {
                     apply_type: false,
                     attr_type: CkAttributeType::KEY_TYPE,
                     returned_len: w as u64,
-                    value: Some(key_type_bytes.clone()),
+                    value: Some(key_type_bytes.clone().into()),
                     ck_rv: None,
                     nested: None,
                 },
@@ -445,7 +451,7 @@ mod tests {
                     apply_type: false,
                     attr_type: CkAttributeType::LABEL,
                     returned_len: 1,
-                    value: Some(b"k".to_vec()),
+                    value: Some(b"k".to_vec().into()),
                     ck_rv: None,
                     nested: None,
                 },

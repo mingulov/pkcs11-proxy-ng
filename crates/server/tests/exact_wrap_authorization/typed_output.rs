@@ -186,7 +186,7 @@ async fn authenticated_typed_sdk_roundtrips_ordinary_exact_and_unwrap_over_mtls(
         )
         .await
         .unwrap();
-    let key = client.create_object(session, &[]).await.unwrap();
+    let key = client.create_object(session, Some(&[])).await.unwrap();
     let mechanism = CkMechanism {
         mechanism_type: CkMechanismType::GOSTR3410_KEY_WRAP,
         params: Some(CkMechanismParams::Gostr3410KeyWrap(Gostr3410KeyWrapParams {
@@ -229,7 +229,7 @@ async fn authenticated_typed_sdk_roundtrips_ordinary_exact_and_unwrap_over_mtls(
             None,
             key,
             CkInBuf::Bytes(&wrapped),
-            &[],
+            Some(&[]),
             CkInBuf::Bytes(&[]),
         )
         .await

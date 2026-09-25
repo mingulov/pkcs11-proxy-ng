@@ -1,0 +1,19 @@
+# opencryptoki ECDH-X / ECDH-COF AES key-wrap mechanism extensions.
+# Use with: PKCS11_PROXY_MECHANISMS=/path/to/opencryptoki-ecdh-x-cof.toml
+# (or layer it under the daemon's mechanism_params.toml via `include`).
+#
+# CKM_ECDH_X_AES_KEY_WRAP and CKM_ECDH_COF_AES_KEY_WRAP take the same
+# CK_ECDH_AES_KEY_WRAP_PARAMS struct as CKM_ECDH_AES_KEY_WRAP (the X/COF
+# variants differ in KDF semantics, not parameter layout), so they reuse
+# the proxy's "ecdh_aes_key_wrap" shape. They stay operator opt-in (not
+# defaults) pending dedicated shapes that can attest the X/COF semantics;
+# enable per deployment where the backend offers them. Wave 3 F2.
+#
+# Reference: OASIS PKCS#11 v3.2 (ECDH-X / ECDH-COF AES key wrap).
+
+[[params]]
+shape = "ecdh_aes_key_wrap"
+mechanisms = [
+    0x4038, # CKM_ECDH_X_AES_KEY_WRAP
+    0x4039, # CKM_ECDH_COF_AES_KEY_WRAP
+]

@@ -104,7 +104,7 @@ pub(super) fn update_template_from_ffi(
 
         let bytes =
             unsafe { std::slice::from_raw_parts(src.pValue as *const u8, returned_len) }.to_vec();
-        dst.value = Some(CkAttributeValue::Bytes(bytes));
+        dst.value = Some(CkAttributeValue::Bytes(bytes.into()));
     }
 }
 

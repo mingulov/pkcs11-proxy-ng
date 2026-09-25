@@ -333,6 +333,13 @@ mechanisms = [
 
     0x0122,  # CKM_DES_CBC
     0x0125,  # CKM_DES_CBC_PAD
+    # Single-DES OFB/CFB modes take a fixed 8-byte IV (OASIS v3; no DES3
+    # CFB/OFB modes exist). Previously unmapped: the shim fail-closed with
+    # CKR_MECHANISM_PARAM_INVALID (Wave 3 F2).
+    0x0150,  # CKM_DES_OFB64
+    0x0151,  # CKM_DES_OFB8
+    0x0152,  # CKM_DES_CFB64
+    0x0153,  # CKM_DES_CFB8
     0x0133,  # CKM_DES3_CBC
     0x0136,  # CKM_DES3_CBC_PAD
     0x0142,  # CKM_CDMF_CBC
@@ -352,6 +359,12 @@ mechanisms = [
     0x0562,  # CKM_ARIA_CBC
     0x0565,  # CKM_ARIA_CBC_PAD
     0x0021,  # CKM_DH_PKCS_DERIVE (raw public value bytes)
+    # Pre-master key generation takes a 2-byte CK_VERSION (major, minor)
+    # with no pointers; the "iv" shape forwards short opaque byte strings
+    # verbatim, which is exactly this layout. These stay in `parameterless`
+    # too for the no-param call (same dual listing as CKM_EDDSA). Wave 3 F2.
+    0x0370,  # CKM_SSL3_PRE_MASTER_KEY_GEN
+    0x0374,  # CKM_TLS_PRE_MASTER_KEY_GEN
     0x1089,  # CKM_AES_CTS
     0x2104,  # CKM_AES_OFB
     0x2105,  # CKM_AES_CFB64
@@ -482,6 +495,11 @@ mechanisms = [
     0x004A,  # CKM_SHA512_224_HMAC_GENERAL
     0x004E,  # CKM_SHA512_256_HMAC_GENERAL
     0x0137,  # CKM_DES3_CMAC_GENERAL
+    # SSL3 MACs take the MAC output length in bits as a single CK_ULONG —
+    # the same layout as mac_general. Dual-listed in `parameterless` for
+    # the no-param call. Wave 3 F2.
+    0x0380,  # CKM_SSL3_MD5_MAC
+    0x0381,  # CKM_SSL3_SHA1_MAC
 ]
 
 # Object handle parameter: CK_OBJECT_HANDLE (single handle value)
@@ -510,6 +528,11 @@ mechanisms = [
     0x1100,  # CKM_DES_ECB_ENCRYPT_DATA
     0x1102,  # CKM_DES3_ECB_ENCRYPT_DATA
     0x1104,  # CKM_AES_ECB_ENCRYPT_DATA
+    # Camellia/ARIA/SEED ECB_ENCRYPT_DATA take the same
+    # CK_KEY_DERIVATION_STRING_DATA parameter (data to encrypt). Wave 3 F2.
+    0x0556,  # CKM_CAMELLIA_ECB_ENCRYPT_DATA
+    0x0566,  # CKM_ARIA_ECB_ENCRYPT_DATA
+    0x0656,  # CKM_SEED_ECB_ENCRYPT_DATA
     0x0390,  # CKM_MD5_KEY_DERIVATION
     0x0391,  # CKM_MD2_KEY_DERIVATION
     0x0392,  # CKM_SHA1_KEY_DERIVATION
@@ -647,11 +670,15 @@ mechanisms = [
 ]
 
 # SSL3 Master Key Derive: CK_SSL3_MASTER_KEY_DERIVE_PARAMS
+# CKM_TLS_MASTER_KEY_DERIVE reuses this exact struct (RandomInfo +
+# pVersion; OASIS/cryptoki-sys define no distinct TLS struct — callers
+# pack CK_SSL3_MASTER_KEY_DERIVE_PARAMS for it). Wave 3 F2.
 [[params]]
 shape = "ssl3_master_key_derive"
 mechanisms = [
     0x0371,  # CKM_SSL3_MASTER_KEY_DERIVE
     0x0373,  # CKM_SSL3_MASTER_KEY_DERIVE_DH
+    0x0375,  # CKM_TLS_MASTER_KEY_DERIVE
 ]
 
 # TLS 1.2 Extended Master Key Derive: CK_TLS12_EXTENDED_MASTER_KEY_DERIVE_PARAMS

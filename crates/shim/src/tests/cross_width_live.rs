@@ -163,7 +163,7 @@ fn live_daemon_bridges_ulong_widths_end_to_end() {
     let rv = unsafe { dispatch::general::c_get_attribute_value(session, object, &mut attr, 1) };
     assert_eq!(rv, CKR_OK as CK_RV, "CKA_CLASS data query");
     assert_eq!(attr.ulValueLen as usize, class_buf.len());
-    assert_eq!(CK_ULONG::from_le_bytes(class_buf), CKO_DATA, "CKA_CLASS value");
+    assert_eq!(CK_ULONG::from_ne_bytes(class_buf), CKO_DATA, "CKA_CLASS value");
 
     // Too-small buffer: exact/raw semantics forward the backend's
     // CKR_BUFFER_TOO_SMALL, and the CK_UNAVAILABLE_INFORMATION length

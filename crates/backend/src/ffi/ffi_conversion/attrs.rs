@@ -5,11 +5,20 @@
 use super::*;
 
 pub(in crate::ffi) struct FfiAttrs {
-    /// The ready-to-pass attribute array. Pointers inside borrow from the original
-    /// `CkAttribute` slice or from `_backing`/`_nested_backing`.
+    /// The ready-to-pass attribute array. Pointers inside borrow from
+    /// `_backing`/`_secret_backing`/`_nested_backing` (all owned by `self`).
     pub(in crate::ffi) attrs: Vec<cryptoki_sys::CK_ATTRIBUTE>,
+    /// True when the caller passed a NULL template pointer (Wave 3.5 D2):
+    /// the FFI call receives NULL, not the empty array's address.
+    pub(in crate::ffi) null_template: bool,
     /// Backing byte storage for `Ulong` values whose native size differs from `u64`.
     _backing: Vec<Vec<u8>>,
+    /// Wiping backing for `Bytes`/`String` values (ADR-0013 §5). The
+    /// `SecretBytes` source cannot serve a stored raw pointer
+    /// (closure-scoped access), so each value is copied once into a
+    /// `Zeroizing` buffer that is wiped when this owner drops. The source
+    /// `SecretBytes` is unaffected and wipes on its own drop.
+    _secret_backing: Vec<Zeroizing<Vec<u8>>>,
     /// Backing storage for nested `CK_ATTRIBUTE[]` template VALUES (the
     /// input direction of CKF_ARRAY_ATTRIBUTE attributes): each entry pins
     /// a native sub-attribute array plus its sub-value buffers.
@@ -20,9 +29,27 @@ impl FfiAttrs {
     /// `None` values produce a null `pValue` / zero `ulValueLen` (size-query pattern).
     /// `Ulong` values are converted to the correct platform-native `CK_ULONG` width;
     /// a value the native width cannot hold is rejected (D4), never truncated.
+    ///
+    /// A `None` template is the caller's NULL template pointer (Wave 3.5 D2):
+    /// the materialized array is empty AND flagged, so `ffi_attr_ptr`
+    /// passes NULL to the provider instead of (ptr, 0).
+    pub(in crate::ffi) fn from_opt_slice(template: Option<&[CkAttribute]>) -> CkResult<Self> {
+        match template {
+            None => Ok(Self {
+                attrs: Vec::new(),
+                null_template: true,
+                _backing: Vec::new(),
+                _secret_backing: Vec::new(),
+                _nested_backing: Vec::new(),
+            }),
+            Some(attrs) => Self::from_slice(attrs),
+        }
+    }
+
     pub(in crate::ffi) fn from_slice(template: &[CkAttribute]) -> CkResult<Self> {
         let mut attrs = Vec::with_capacity(template.len());
         let mut backing: Vec<Vec<u8>> = Vec::new();
+        let mut secret_backing: Vec<Zeroizing<Vec<u8>>> = Vec::new();
         let mut nested_backing: Vec<NestedTemplateBacking> = Vec::new();
 
         for attr in template {
@@ -45,19 +72,9 @@ impl FfiAttrs {
                 // slice's `as_ptr()` is a dangling non-null pointer; the
                 // same NULL+0 encoding `None` uses (and nested sub-values
                 // use below) is the backend-safe empty shape.
-                Some(CkAttributeValue::Bytes(b)) => {
-                    if b.is_empty() {
-                        (std::ptr::null_mut(), 0)
-                    } else {
-                        (b.as_ptr() as *mut _, b.len() as cryptoki_sys::CK_ULONG)
-                    }
-                }
+                Some(CkAttributeValue::Bytes(b)) => Self::push_secret_value(&mut secret_backing, b),
                 Some(CkAttributeValue::String(s)) => {
-                    if s.is_empty() {
-                        (std::ptr::null_mut(), 0)
-                    } else {
-                        (s.as_ptr() as *mut _, s.len() as cryptoki_sys::CK_ULONG)
-                    }
+                    Self::push_secret_value(&mut secret_backing, s)
                 }
                 Some(CkAttributeValue::NestedTemplate(subs)) => {
                     // Rebuild a native CK_ATTRIBUTE[] the backend can walk:
@@ -81,7 +98,31 @@ impl FfiAttrs {
             });
         }
 
-        Ok(Self { attrs, _backing: backing, _nested_backing: nested_backing })
+        Ok(Self {
+            attrs,
+            null_template: false,
+            _backing: backing,
+            _secret_backing: secret_backing,
+            _nested_backing: nested_backing,
+        })
+    }
+
+    /// Copies a secret attribute value into owned wiping backing and returns
+    /// the `(pValue, ulValueLen)` pair, preserving the T4-AUDIT NULL+0 empty
+    /// encoding. Pushing to `backing` moves only `Vec` headers; previously
+    /// captured heap pointers stay valid.
+    fn push_secret_value(
+        backing: &mut Vec<Zeroizing<Vec<u8>>>,
+        value: &SecretBytes,
+    ) -> (*mut std::ffi::c_void, cryptoki_sys::CK_ULONG) {
+        if value.is_empty() {
+            return (std::ptr::null_mut(), 0);
+        }
+        let owned = value.expose(|bytes| Zeroizing::new(bytes.to_vec()));
+        let len = owned.len() as cryptoki_sys::CK_ULONG;
+        let ptr = owned.as_ptr() as *mut _;
+        backing.push(owned);
+        (ptr, len)
     }
 }
 
@@ -93,8 +134,9 @@ impl FfiAttrs {
 struct NestedTemplateBacking {
     /// The nested `CK_ATTRIBUTE` array at a stable heap address.
     _template: std::pin::Pin<Box<[cryptoki_sys::CK_ATTRIBUTE]>>,
-    /// Sub-buffers for each nested attribute's `pValue`.
-    _sub_buffers: Vec<Vec<u8>>,
+    /// Sub-buffers for each nested attribute's `pValue`. Wiping (ADR-0013
+    /// §5): sub-values may carry secret key material.
+    _sub_buffers: Vec<Zeroizing<Vec<u8>>>,
 }
 
 impl NestedTemplateBacking {
@@ -107,15 +149,17 @@ impl NestedTemplateBacking {
 impl FfiAttrs {
     /// Build the pinned native `CK_ATTRIBUTE[]` for a nested template VALUE.
     fn materialize_nested_template(subs: &[CkAttribute]) -> CkResult<NestedTemplateBacking> {
-        let mut sub_buffers: Vec<Vec<u8>> = Vec::with_capacity(subs.len());
+        let mut sub_buffers: Vec<Zeroizing<Vec<u8>>> = Vec::with_capacity(subs.len());
         let mut native: Vec<cryptoki_sys::CK_ATTRIBUTE> = Vec::with_capacity(subs.len());
         for sub in subs {
-            let bytes: Vec<u8> = match &sub.value {
-                None => Vec::new(),
-                Some(CkAttributeValue::Bool(b)) => vec![u8::from(*b)],
-                Some(CkAttributeValue::Ulong(u)) => narrow_wire_ulong(*u)?.to_ne_bytes().to_vec(),
-                Some(CkAttributeValue::Bytes(b)) => b.clone(),
-                Some(CkAttributeValue::String(s)) => s.as_bytes().to_vec(),
+            let bytes: Zeroizing<Vec<u8>> = match &sub.value {
+                None => Zeroizing::new(Vec::new()),
+                Some(CkAttributeValue::Bool(b)) => Zeroizing::new(vec![u8::from(*b)]),
+                Some(CkAttributeValue::Ulong(u)) => {
+                    Zeroizing::new(narrow_wire_ulong(*u)?.to_ne_bytes().to_vec())
+                }
+                Some(CkAttributeValue::Bytes(b)) => b.expose(|raw| Zeroizing::new(raw.to_vec())),
+                Some(CkAttributeValue::String(s)) => s.expose(|raw| Zeroizing::new(raw.to_vec())),
                 // D8: refused at the deserialization edge; defensively
                 // reject here too rather than recurse.
                 Some(CkAttributeValue::NestedTemplate(_)) => {
@@ -151,7 +195,9 @@ pub(in crate::ffi) struct FfiAttributeQueries {
     pub(in crate::ffi) attrs: Vec<cryptoki_sys::CK_ATTRIBUTE>,
     original: Vec<cryptoki_sys::CK_ATTRIBUTE>,
     nested_originals: Vec<Vec<cryptoki_sys::CK_ATTRIBUTE>>,
-    _buffers: Vec<Vec<u8>>,
+    /// Provider-written output buffers. Wiping (ADR-0013 §5): the provider
+    /// may write key material here; leftovers are wiped on drop.
+    _buffers: Vec<Zeroizing<Vec<u8>>>,
     _nested: Vec<NestedTemplateBacking>,
 }
 
@@ -182,7 +228,7 @@ impl FfiAttributeQueries {
                 let (pvalue, len) = if query.buffer_present {
                     let buffer_len =
                         usize::try_from(query.buffer_len).map_err(|_| CkRv::HOST_MEMORY)?;
-                    let mut buffer = Vec::new();
+                    let mut buffer = Zeroizing::new(Vec::new());
                     buffer.try_reserve_exact(buffer_len).map_err(|_| CkRv::HOST_MEMORY)?;
                     buffer.resize(buffer_len, 0);
                     // T4-FIX: pass NULL for 0-length buffers. An empty Vec's
@@ -315,7 +361,7 @@ impl FfiAttributeQueries {
         }
 
         // Allocate sub-buffers first, collecting stable pointers
-        let mut sub_buffers: Vec<Vec<u8>> = Vec::with_capacity(nested_queries.len());
+        let mut sub_buffers: Vec<Zeroizing<Vec<u8>>> = Vec::with_capacity(nested_queries.len());
         let mut sub_attrs: Vec<cryptoki_sys::CK_ATTRIBUTE> =
             Vec::with_capacity(nested_queries.len());
 
@@ -331,7 +377,7 @@ impl FfiAttributeQueries {
             let (sub_pvalue, sub_len) = if sub_query.buffer_present {
                 let sub_buf_len =
                     usize::try_from(sub_query.buffer_len).map_err(|_| CkRv::HOST_MEMORY)?;
-                let mut sub_buf = Vec::new();
+                let mut sub_buf = Zeroizing::new(Vec::new());
                 sub_buf.try_reserve_exact(sub_buf_len).map_err(|_| CkRv::HOST_MEMORY)?;
                 sub_buf.resize(sub_buf_len, 0);
                 // T4-AUDIT site 2: NULL for 0-length sub buffers (same
@@ -349,8 +395,10 @@ impl FfiAttributeQueries {
             };
 
             sub_attrs.push(cryptoki_sys::CK_ATTRIBUTE {
-                // Nested type is ignored on input, never a schema hint.
-                type_: 0,
+                // F7/D5: forward the caller-preset nested query type
+                // verbatim. Backends such as SoftHSM select the sub-query
+                // by it; forcing 0 rewrites the caller's query.
+                type_: narrow_wire_ulong(sub_query.attr_type.0)?,
                 pValue: sub_pvalue,
                 ulValueLen: sub_len,
             });
@@ -389,15 +437,15 @@ impl FfiAttributeQueries {
 }
 
 fn owned_attribute_bytes(
-    buffers: &[Vec<u8>],
+    buffers: &[Zeroizing<Vec<u8>>],
     pointer: *mut std::ffi::c_void,
     length: u64,
-) -> Option<Vec<u8>> {
+) -> Option<SecretBytes> {
     let length = usize::try_from(length).ok()?;
     let buffer = buffers.iter().find(|buffer| {
         !pointer.is_null() && buffer.as_ptr().cast::<std::ffi::c_void>() == pointer
     })?;
-    buffer.get(..length).map(<[u8]>::to_vec)
+    buffer.get(..length).map(SecretBytes::copy_from_slice)
 }
 
 #[cfg(test)]
@@ -506,7 +554,7 @@ mod ffi_attrs_narrowing_tests {
         // attribute than the client named. Reject instead.
         let template = [CkAttribute {
             attr_type: CkAttributeType(0x1_0000_0000),
-            value: Some(CkAttributeValue::Bytes(vec![1])),
+            value: Some(CkAttributeValue::Bytes(vec![1].into())),
         }];
         match FfiAttrs::from_slice(&template) {
             Ok(attrs) => {
@@ -528,7 +576,7 @@ mod ffi_attrs_narrowing_tests {
         // empty-slice pointer — the same encoding `None` already uses.
         let template = [CkAttribute {
             attr_type: CkAttributeType::VALUE,
-            value: Some(CkAttributeValue::Bytes(Vec::new())),
+            value: Some(CkAttributeValue::Bytes(Vec::new().into())),
         }];
         let attrs = FfiAttrs::from_slice(&template).expect("empty bytes convert");
         assert!(attrs.attrs[0].pValue.is_null());
@@ -544,7 +592,7 @@ mod ffi_attrs_narrowing_tests {
         // pass NULL, not the dangling empty-slice pointer.
         let template = [CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(String::new())),
+            value: Some(CkAttributeValue::String(String::new().into())),
         }];
         let attrs = FfiAttrs::from_slice(&template).expect("empty string converts");
         assert!(attrs.attrs[0].pValue.is_null());

@@ -93,7 +93,9 @@ fn exact_unrepresentable_or_over_limit_capacity_rejects_before_native_call() {
         observation.calls, 0,
         "a resource cap must reject rather than alter the native call"
     );
-    assert_eq!(result, Err(CkRv::HOST_MEMORY));
+    // F4/D7 (ADR-0010 Limits-(d)): an unforwardable capacity claim is a bad
+    // argument, not a failed allocation.
+    assert_eq!(result, Err(CkRv::ARGUMENTS_BAD));
 }
 
 #[test]
@@ -257,7 +259,7 @@ fn exact_kem_error_keeps_length_and_never_publishes_output_only_handle() {
             CkSessionHandle(1),
             &CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None },
             CkObjectHandle(2),
-            &[],
+            Some(&[]),
             &CkOutputBufferSpec {
                 buffer_present: present,
                 buffer_len: 8,
@@ -467,8 +469,11 @@ fn classic_gcm_initialized_error_iv_effect() {
             iv: vec![0x11; 12],
             iv_bits: 96,
             iv_buffer_len: 12,
-            aad: vec![],
+            aad: vec![].into(),
             tag_bits: 128,
+
+            iv_null: false,
+            aad_null: false,
         })),
     };
     let (output, effects) = FfiBackend::call_bytes_exact_with_mechanism_output(
@@ -500,8 +505,11 @@ fn classic_gcm_error_effect_matrix_data_query_and_missing_length() {
         iv: vec![0x11; 12],
         iv_bits: 96,
         iv_buffer_len: 12,
-        aad: vec![],
+        aad: vec![].into(),
         tag_bits: 128,
+
+        iv_null: false,
+        aad_null: false,
     };
     let mechanism = CkMechanism {
         mechanism_type: CkMechanismType::AES_GCM,
@@ -576,7 +584,7 @@ fn classic_gcm_error_effect_matrix_data_query_and_missing_length() {
                     (None, None)
                 };
                 assert_eq!(output.returned_len, expected_len, "{cell}: returned_len");
-                assert_eq!(output.value, expected_value, "{cell}: value");
+                assert_eq!(output.value, expected_value.map(SecretBytes::new), "{cell}: value");
                 let gated = spec.buffer_present || spec.length_pointer_null;
                 if !gated {
                     assert_eq!(effects, None, "{cell}: size query suppresses effects");
@@ -606,8 +614,11 @@ fn classic_gcm_ok_effect_unchanged_data_and_missing_length() {
         iv: vec![0x11; 12],
         iv_bits: 96,
         iv_buffer_len: 12,
-        aad: vec![],
+        aad: vec![].into(),
         tag_bits: 128,
+
+        iv_null: false,
+        aad_null: false,
     };
     let mechanism = CkMechanism {
         mechanism_type: CkMechanismType::AES_GCM,

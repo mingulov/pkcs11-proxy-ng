@@ -14,6 +14,17 @@ pub(crate) unsafe fn ck_attrs_to_rust_checked(
     unsafe { ck_attrs_to_rust_result(p_template, count, true) }
 }
 
+/// Wrap a converted input template for a client call, preserving a
+/// caller-NULL template pointer (Wave 3.5 D2: (NULL, 0) must reach the
+/// daemon as NULL, not (ptr, 0)). `ck_attrs_to_rust_checked` rejects
+/// (NULL, len > 0), so a null pointer here always means (NULL, 0).
+pub(crate) fn null_preserving_template(
+    template: &[CkAttribute],
+    p_template: *const CK_ATTRIBUTE,
+) -> Option<&[CkAttribute]> {
+    if p_template.is_null() { None } else { Some(template) }
+}
+
 unsafe fn ck_attrs_to_rust_result(
     p_template: *const CK_ATTRIBUTE,
     count: CK_ULONG,
@@ -100,22 +111,23 @@ unsafe fn ck_attrs_to_rust_at_depth(
                 // differs from the backend's: re-encode each element to the
                 // backend width here, then send as opaque bytes the server writes
                 // verbatim (ADR-0011). Same-width arrays fall through to the
-                // raw-bytes path below, byte-identical to before.
+                // raw-bytes path below, byte-identical to before. D6 guarantees
+                // both edges share this client's native order.
                 let bytes = unsafe { std::slice::from_raw_parts(attr.pValue as *const u8, len) };
                 match pkcs11_proxy_ng_types::width::reencode_ulong(
                     bytes,
                     client_ulong_width,
                     backend_ulong_width,
-                    pkcs11_proxy_ng_types::width::ByteOrder::Little,
+                    pkcs11_proxy_ng_types::width::ByteOrder::native(),
                 ) {
-                    Ok(reencoded) => Some(CkAttributeValue::Bytes(reencoded)),
+                    Ok(reencoded) => Some(CkAttributeValue::Bytes(reencoded.into())),
                     // D4: an element exceeds the backend's CK_ULONG range.
                     Err(_) => return Err(CkRv::ATTRIBUTE_VALUE_INVALID),
                 }
             } else {
                 let bytes =
                     unsafe { std::slice::from_raw_parts(attr.pValue as *const u8, len) }.to_vec();
-                Some(CkAttributeValue::Bytes(bytes))
+                Some(CkAttributeValue::Bytes(bytes.into()))
             }
         };
         result.push(CkAttribute { attr_type: ck_type, value });

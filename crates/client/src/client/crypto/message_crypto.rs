@@ -29,7 +29,7 @@ fn decode_message_init_contract_response(
         .ok_or_else(MessageCallError::protocol)?;
     if parameter_result.ck_rv != CkRv::OK
         || parameter_result.returned_len != envelope.buffer_len
-        || parameter_result.value != envelope.buffer_present.then(Vec::new)
+        || parameter_result.value != envelope.buffer_present.then(SecretBytes::default)
     {
         return Err(MessageCallError::protocol());
     }
@@ -87,7 +87,7 @@ fn decode_message_begin_contract_response(
         .ok_or_else(MessageCallError::protocol)?;
     if parameter_result.ck_rv != rv
         || parameter_result.returned_len != envelope.buffer_len
-        || parameter_result.value != envelope.buffer_present.then(Vec::new)
+        || parameter_result.value != envelope.buffer_present.then(SecretBytes::default)
     {
         return Err(MessageCallError::protocol());
     }
@@ -134,7 +134,7 @@ fn decode_empty_message_parameter_response(
         .ok_or_else(MessageCallError::protocol)?;
     if result.ck_rv != CkRv::OK
         || result.returned_len != envelope.buffer_len
-        || result.value != envelope.buffer_present.then(Vec::new)
+        || result.value != envelope.buffer_present.then(SecretBytes::default)
     {
         return Err(MessageCallError::protocol());
     }

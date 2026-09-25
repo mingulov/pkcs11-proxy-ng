@@ -1,18 +1,23 @@
+// ADR-0013 §5: every `secret_to_plain` use in this file is a prost wire-encoding
+// boundary (response/request construction); the standing justification lives in
+// `secret_boundary` docs. No plain copy is retained past the enclosing encode.
+use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
 use std::sync::Arc;
 use std::time::Instant;
 
 use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_audit::EventClass;
-use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv};
+use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv, SecretBytes};
 
 use super::super::authorization::mechanism_permitted;
 use super::super::ck_result_to_rv;
-use super::super::convert_template;
+use super::super::convert_template_opt;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
-    check_sanitize, input_from_wire, parse_mechanism, register_session_object_handle,
-    resolve_session_and_object, spawn_backend, template_declares_token_object,
+    check_sanitize, ensure_private_mint_allowed, input_from_wire, parse_mechanism,
+    register_session_object_handle, resolve_session_and_object, spawn_backend,
+    template_declares_private_object, template_declares_token_object,
 };
 use crate::server::context_manager::ClientContextId;
 use crate::server::grpc_service::audit_events::emit_auth_event;
@@ -59,7 +64,7 @@ pub(crate) async fn wrap_key(
     let (ck_rv, wrapped_key) = ck_result_to_rv(result);
     Ok(Response::new(pkcs11_proxy_ng_proto::WrapKeyResponse {
         ck_rv,
-        wrapped_key: wrapped_key.unwrap_or_default(),
+        wrapped_key: secret_to_plain(&wrapped_key.unwrap_or_default()),
     }))
 }
 
@@ -151,7 +156,7 @@ async fn unwrap_key_impl(
         }));
     }
 
-    let template = match convert_template(&req.template) {
+    let template = match convert_template_opt(&req.template, req.template_null) {
         Ok(template) => template,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyResponse {
@@ -161,10 +166,27 @@ async fn unwrap_key_impl(
         }
     };
 
-    // An unwrapped key is a session object unless CKA_TOKEN is set (B2).
-    let is_token = template_declares_token_object(&template);
+    // A NULL template carries no attributes; classification treats it as empty.
+    let template_view = template.as_deref().unwrap_or(&[]);
+
+    // D6(1): refuse minting a private object while logically logged out.
+    // (The private unwrapping key itself is refused by the USE check inside
+    // resolve_session_and_object above.)
+    if let Err(rv) =
+        ensure_private_mint_allowed(ctx_mgr, &ctx_id, req.session_handle, template_view).await
+    {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyResponse {
+            ck_rv: rv.0,
+            key_handle: 0,
+        }));
+    }
+
+    // An unwrapped key is a session object unless CKA_TOKEN is set (B2). The
+    // privacy bit is recorded for the D6(1) USE enforcement.
+    let is_token = template_declares_token_object(template_view);
+    let is_private = template_declares_private_object(template_view);
     let virtual_session = VirtualHandle(req.session_handle);
-    let wrapped_key = req.wrapped_key;
+    let wrapped_key = SecretBytes::new(req.wrapped_key);
     let wrapped_key_null_len = req.wrapped_key_null_len;
     // ADR-0010 sanitize_inputs: validate NULL wrapped_key pointer before backend call.
     if let Err(rv) = check_sanitize(sanitize_inputs, wrapped_key_null_len) {
@@ -175,13 +197,15 @@ async fn unwrap_key_impl(
     }
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
-        backend.unwrap_key(
-            session,
-            &mechanism,
-            unwrapping_key,
-            input_from_wire(&wrapped_key, wrapped_key_null_len),
-            &template,
-        )
+        wrapped_key.expose(|raw| {
+            backend.unwrap_key(
+                session,
+                &mechanism,
+                unwrapping_key,
+                input_from_wire(raw, wrapped_key_null_len),
+                template.as_deref(),
+            )
+        })
     })
     .await?;
 
@@ -193,6 +217,7 @@ async fn unwrap_key_impl(
                 virtual_session,
                 CkObjectHandle(object.0 as u64),
                 is_token,
+                Some(is_private),
             )
             .await;
             Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyResponse {
@@ -422,7 +447,7 @@ mod tests {
                 &ctx_id,
                 object_vh.0,
                 ObjectMetadata {
-                    unique_id: object_uid,
+                    unique_id: object_uid.into(),
                     class: Some(CkObjectClass::SECRET_KEY),
                     is_token: false,
                 },

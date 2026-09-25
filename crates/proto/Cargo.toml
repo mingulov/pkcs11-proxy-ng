@@ -17,3 +17,6 @@ prost.workspace = true
 
 [build-dependencies]
 tonic-prost-build.workspace = true
+
+[dev-dependencies]
+toml = { workspace = true }

@@ -8,12 +8,19 @@ use pkcs11_proxy_ng_types::*;
 /// LP64 Linux x86_64 (8-byte ulong, 24-byte stride), ILP32 Linux i686
 /// (4, 12), and LLP64 Windows x64 with `#pragma pack(1)` (4, 16 — the
 /// stride is NOT 3x the width, which is exactly why it must be modeled
-/// separately).
+/// separately). 32-bit Windows (PE32) needs no fourth profile: the
+/// two numbers this profile models are identical on win32 — `CK_ULONG`
+/// width 4 and `CK_ATTRIBUTE` stride 12 (4+4+4, layout-identical) — so
+/// `Ilp32` models win32 exactly for these two numbers. This is NOT a
+/// general pack(1)≡ILP32 theorem, which is false: e.g. `CK_INFO` is 76
+/// bytes naturally vs 72 packed, and `CK_FUNCTION_LIST` fn fields shift
+/// by 2 (see task-t6b-review.md I1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MockAbi {
     /// 64-bit Unix: `CK_ULONG` = 8, `CK_ATTRIBUTE` = 8+8+8.
     Lp64,
-    /// 32-bit Unix: `CK_ULONG` = 4, `CK_ATTRIBUTE` = 4+4+4.
+    /// 32-bit Unix, and 32-bit Windows (win32 shares both modeled numbers):
+    /// `CK_ULONG` = 4, `CK_ATTRIBUTE` = 4+4+4.
     Ilp32,
     /// Windows x64, packed(1): `CK_ULONG` = 4, `CK_ATTRIBUTE` = 4+8+4.
     Llp64,
@@ -25,7 +32,7 @@ impl MockAbi {
     pub fn host() -> Self {
         match std::mem::size_of::<cryptoki_sys::CK_ULONG>() {
             8 => Self::Lp64,
-            _ if cfg!(windows) => Self::Llp64,
+            _ if cfg!(all(windows, target_pointer_width = "64")) => Self::Llp64,
             _ => Self::Ilp32,
         }
     }
@@ -47,7 +54,12 @@ impl MockAbi {
         }
     }
 
-    /// Encode a value as this ABI's native `CK_ULONG` bytes (LE).
+    /// Encode a value as this ABI's native `CK_ULONG` bytes.
+    ///
+    /// The byte order follows the host: the mock emulates a same-endian
+    /// backend (consistent with its default order advertisement), so a
+    /// big-endian host gets big-endian bytes. Cross-endian peers stay
+    /// covered by the D6-refusal advertisement knob, never by values.
     ///
     /// Mock fixture values are small by construction; a value that does
     /// not fit the emulated width is a fixture bug, not a runtime case.
@@ -57,7 +69,7 @@ impl MockAbi {
             width == 8 || v <= u32::MAX as u64,
             "mock fixture value {v:#x} does not fit a {width}-byte CK_ULONG"
         );
-        v.to_le_bytes()[..width].to_vec()
+        pkcs11_proxy_ng_types::width::encode_native_ulong(v, width)
     }
 }
 
@@ -104,9 +116,16 @@ mod mock_abi_tests {
 
     #[test]
     fn mock_abi_encode_ulong_matches_width() {
-        assert_eq!(MockAbi::Lp64.encode_ulong(3), vec![3, 0, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(MockAbi::Ilp32.encode_ulong(3), vec![3, 0, 0, 0]);
-        assert_eq!(MockAbi::Llp64.encode_ulong(0x0102_0304), vec![4, 3, 2, 1]);
+        // Native-order pins: identical bytes on little-endian hosts, the
+        // byte-reversed form on big-endian ones.
+        let le = cfg!(target_endian = "little");
+        let wide3: Vec<u8> =
+            if le { vec![3, 0, 0, 0, 0, 0, 0, 0] } else { vec![0, 0, 0, 0, 0, 0, 0, 3] };
+        let narrow3: Vec<u8> = if le { vec![3, 0, 0, 0] } else { vec![0, 0, 0, 3] };
+        let word: Vec<u8> = if le { vec![4, 3, 2, 1] } else { vec![1, 2, 3, 4] };
+        assert_eq!(MockAbi::Lp64.encode_ulong(3), wide3);
+        assert_eq!(MockAbi::Ilp32.encode_ulong(3), narrow3);
+        assert_eq!(MockAbi::Llp64.encode_ulong(0x0102_0304), word);
     }
 }
 

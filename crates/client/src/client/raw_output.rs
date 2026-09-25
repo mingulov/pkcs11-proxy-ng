@@ -8,7 +8,7 @@ use pkcs11_proxy_ng_types::{
     ByteOutputFunction, CkAttribute, CkAttributeQuery, CkAttributeQueryResult, CkInBuf,
     CkMechanism, CkMechanismParams, CkObjectHandle, CkOutputAndHandleResult, CkOutputBufferResult,
     CkOutputBufferSpec, CkParameterRoundtripResult, CkParameterRoundtripSpec, CkRv,
-    CkSessionHandle, ParameterOutputFunction,
+    CkSessionHandle, ParameterOutputFunction, SecretBytes,
 };
 
 use super::Pkcs11Client;
@@ -64,7 +64,7 @@ fn decode_parameter_output_exact_response(
             })
     } else {
         parameter.returned_len == parameter_spec.buffer_len
-            && parameter.value == parameter_spec.buffer_present.then(Vec::new)
+            && parameter.value == parameter_spec.buffer_present.then(SecretBytes::default)
     };
     if parameter.ck_rv != output.ck_rv || !valid_parameter {
         return Err(CkRv::FUNCTION_NOT_SUPPORTED);
@@ -332,13 +332,13 @@ impl Pkcs11Client {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         public_key: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
         spec: &CkOutputBufferSpec,
     ) -> Result<CkOutputAndHandleResult, CkRv> {
         self.require_exact_output_effects().await?;
         let ctx = self.context_id()?;
         let proto_template: Vec<pkcs11_proxy_ng_proto::Attribute> =
-            template.iter().map(pkcs11_proxy_ng_proto::Attribute::from).collect();
+            template.unwrap_or(&[]).iter().map(pkcs11_proxy_ng_proto::Attribute::from).collect();
         let req = pkcs11_proxy_ng_proto::EncapsulateKeyExactRequest {
             exact_output_effects_version: 1,
             client_context_id: ctx,
@@ -346,6 +346,7 @@ impl Pkcs11Client {
             mechanism: Some(pkcs11_proxy_ng_proto::Mechanism::from(mechanism)),
             public_key_handle: public_key.0,
             template: proto_template,
+            template_null: template.is_none(),
             output_spec: Some(Self::proto_output_buffer_spec(spec)),
         };
         let resp = self
@@ -574,7 +575,7 @@ mod message_contract_tests {
             0,
         )
         .expect("genuine parameter output");
-        assert_eq!(parameter.value, Some(vec![1, 0xA5, 3]));
+        assert_eq!(parameter.value, Some(SecretBytes::new(vec![1, 0xA5, 3])));
     }
 
     #[test]
@@ -612,7 +613,7 @@ mod message_contract_tests {
 
         assert_eq!(output.ck_rv, CkRv::BUFFER_TOO_SMALL);
         assert_eq!(parameter.ck_rv, CkRv::BUFFER_TOO_SMALL);
-        assert_eq!(parameter.value, Some(vec![1, 0xA5, 3]));
+        assert_eq!(parameter.value, Some(SecretBytes::new(vec![1, 0xA5, 3])));
     }
 
     #[test]
@@ -819,7 +820,7 @@ mod message_contract_tests {
         .expect("actual mechanism parameter size within caller capacity is valid");
 
         assert_eq!(parameter.returned_len, 0);
-        assert_eq!(parameter.value, Some(Vec::new()));
+        assert_eq!(parameter.value, Some(SecretBytes::new(Vec::new())));
         assert!(message.is_none());
     }
 }

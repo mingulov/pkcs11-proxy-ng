@@ -25,6 +25,13 @@ Windows native-provider daemon work is re-admitted as committed v0.2.0 tail
 stretch (low priority, before the comprehensive matrix gate) per
 [ADR-0014](../adr/ADR-0014-v020-tail-platform-stretch.md); until that tail
 work lands, the constructor refusal below stays in force.
+macOS native-provider daemon work is likewise in progress: the code
+load-qualifies macOS on aarch64/x86_64 with 64-bit pointers (the macOS
+leg of `NATIVE_FFI_QUALIFIED`) and implements the macOS stop arm below,
+but macOS is NOT runtime-qualified — the macOS-leg compile proof and
+any live stop receipt ride the cross-platform CI macOS leg (T2run; see
+the pending proof in the macOS stop section). Until that proof lands,
+macOS load/stop behavior is code-complete but unqualified.
 
 Portable Windows client/shim/proto/types builds and their existing contracts
 remain; a Windows client may interoperate with a qualified Linux daemon.
@@ -304,8 +311,9 @@ placement and pre-entry publication are part of the implementation proof.
 
 ### Windows abnormal-stop contract
 
-On qualified Windows (MSVC, x86_64, 64-bit pointers — the Windows leg of
-`NATIVE_FFI_QUALIFIED`), the backstop's one raw attempt is
+On qualified Windows (MSVC, x86_64 with 64-bit pointers or x86 with
+32-bit pointers — the Windows leg of `NATIVE_FFI_QUALIFIED`), the
+backstop's one raw attempt is
 `TerminateProcess(GetCurrentProcess(), 70)` via a hand-declared
 `#[link(name = "kernel32")] unsafe extern "system"` block with
 `type HANDLE = *mut c_void` (no new crate; see the Windows `mod arch`
@@ -334,6 +342,89 @@ Receipt criteria (supervisor side, no in-process observation): the
 process dies (reaped, no lingering threads); no hang (a supervisor
 timeout bounds the stop); exit-70 evidence is captured from the
 supervisor side (exit code 70 observed by the parent via wait status).
+
+### macOS abnormal-stop contract
+
+On qualified macOS (aarch64 or x86_64 with 64-bit pointers — the macOS
+leg of `NATIVE_FFI_QUALIFIED`), the backstop's one raw attempt is
+libSystem `_exit(70)` via a hand-declared `unsafe extern "C"` block (no
+new crate; see the macOS `mod arch` arm in
+`crates/backend/src/ffi/native_stop.rs`). The call diverges (`__dead2`):
+a return is unrepresentable, so no spin loop is needed — the Windows
+arm's trailing `loop {}` exists only because `TerminateProcess` returns
+`BOOL`. This is the faithful `exit_group` analog macOS allows:
+whole-process, immediate, with no atexit handlers, stdio flush,
+dyld-registered terminators, or Rust destructors running, and it
+preserves status 70 for supervisor handling with identical receipt
+criteria. Raw macOS syscalls
+were ruled out (no stable ABI — libSystem is the stable interface);
+`std::process::exit` was ruled out (runs atexit handlers and flushes
+stdio); `abort()` was ruled out (loses the 70 channel, same Q3 reasoning
+as Windows).
+
+This arm is strictly weaker than the Linux contract above and claims
+less. Non-claims, each explicit: the stop traverses libSystem userspace
+(a thin wrapper, but not a raw trap — a hostile in-process provider
+could interpose it, in the same class as the documented no-protection
+rule); no seccomp or per-thread permission model applies on macOS; no
+memory wiping is performed; no audit tail is flushed or promised (status
+70 is the terminal status channel, as on Linux); no core-dump
+suppression is configured. The shutdown-deadline controller and the
+final-owner guard predicate keep their Linux semantics (lock-free, no
+registry or lifecycle waits); only the raw attempt differs.
+
+Tested/untested boundary (same precedent as the Windows arm): the stub
+itself never runs in-process in unit tests — it would end the test
+process. What is tested is the supervisor-side record: the existing
+STOP-C1 child scenarios plus the S8 controller-deadline child exercise
+the real arm in a re-spawned child and assert normal exit 70, no
+signal/core, pipe EOF, and reaping. Those tests are `cfg(unix)`, so they
+compile on macOS; executing them there rides the T2run carry below.
+
+Status: IMPLEMENTED, NOT runtime-qualified. No live macOS execution
+exists. Qualification needs the T2run carry: (1) macOS-leg compile
+proof — the cross-platform CI macOS leg (aarch64) building the backend
+and shim touched crates; (2) live-stop receipts — the STOP-C1/S8 child
+tests executing on that leg, which requires the leg to run the backend
+lib suite (it currently only builds plus runs the comparison script).
+The x86_64 arch rides a macos-15-intel leg if T2run adds one
+(GitHub-hosted Intel runner, at macOS-minute cost, supported until the
+macOS 15 image retires ~Fall 2027); otherwise its compile proof is a
+local cargo check --target x86_64-apple-darwin recorded — never claimed
+as CI evidence.
+
+Receipt criteria (supervisor side, no in-process observation): the
+process dies (reaped, no lingering threads); no hang (a supervisor
+timeout bounds the stop); exit-70 evidence is captured from the
+supervisor side (exit code 70 observed by the parent via wait status).
+
+### Controller and guard on unqualified targets
+
+Where no stop arm exists, the final-owner guard cfg-compiles out and
+the `Drop` body keeps the poison path (retain ownership, deny new loads
+until restart). The fallback `unimplemented!()` in `native_stop.rs` has
+no production path to it: `check_native_platform` refuses construction
+before any deadline can arm. Its only reachability is test-only
+unmanaged backends arming an expired deadline, in which case the
+controller thread panics loudly on the fallback. That panic is
+contained to the controller thread (the default hook prints, the thread
+unwinds to its start; no FFI crossing, no UB); the process survives
+with the deadline unenforced — the same best-effort posture as a
+controller spawn failure.
+
+Since the macOS arm landed, the stop arms cover exactly the
+load-qualified set, so no load-qualified-but-stop-unqualified target
+remains; the residual unqualified set is precisely the complement of
+`NATIVE_FFI_QUALIFIED`, enumerated from code:
+
+- Linux with a non-GNU/musl `target_env` (any arch), or with an
+  arch/width outside x86_64-64/x86-32 — s390x, aarch64, riscv64, ... (the
+  s390x BE tier stays load-refused; live-BE-FFI remains BLOCKED-scope);
+- Windows with a non-MSVC `target_env`, or with an arch/width outside
+  x86_64-64/x86-32 (notably aarch64 Windows);
+- macOS with an arch outside aarch64/x86_64 or non-64-bit pointers (no
+  such Rust target in practice);
+- every other `target_os`.
 
 ## Required acceptance evidence
 

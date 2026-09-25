@@ -12,7 +12,7 @@ use pkcs11_proxy_ng_types::*;
 
 use super::super::auth::identity::AuthenticatedIdentity;
 use super::super::context_manager::{
-    ClientContextId, ContextManager, ObjectMetadata, OperationGuard,
+    ClientContextId, ContextManager, LoginState, ObjectMetadata, OperationGuard,
 };
 use super::super::handle_map::{BackendHandle, VirtualHandle};
 use super::HandlerContext;
@@ -730,7 +730,10 @@ pub(super) async fn gate_object_handle(
 
     // --- 4. Policy checks ---
     // Per-object uid check (opt-in; pass-through when no objects grant configured).
-    if !ctx.token_policy.allows_object_use(&identity, &label, &serial, &meta.unique_id) {
+    if !meta
+        .unique_id
+        .expose(|raw| ctx.token_policy.allows_object_use(&identity, &label, &serial, raw))
+    {
         // Constant-work deny: substitute the NOT-FOUND sentinel. The handler
         // forwards handle 0 to the backend which returns CKR_OBJECT_HANDLE_INVALID,
         // IDENTICAL to a genuinely-nonexistent object. No log, no audit, no metric.
@@ -773,6 +776,21 @@ pub(super) async fn resolve_session_and_key(
     // backend decides the error priority (e.g., CKR_FUNCTION_NOT_SUPPORTED
     // vs CKR_KEY_HANDLE_INVALID).
     let backend_key = key.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0 as u64));
+    // D6(1): a logically-logged-out caller must not USE a private object even
+    // when the shared backend token is logged in by other tenants. Unknown
+    // handles (0) skip the check — the backend decides their error. Authn
+    // runs before the authz gate below.
+    if backend_key.0 != 0 {
+        ensure_private_use_allowed(
+            ctx,
+            ctx_id,
+            session_handle,
+            key_handle,
+            CkSessionHandle(backend_session.0),
+            backend_key,
+        )
+        .await?;
+    }
     // Per-object / per-class gate: enter when any object or class grant is
     // active AND the key resolved to a real handle. When both flags are false
     // (no policy configured) this is a zero-overhead transparent pass-through.
@@ -811,6 +829,19 @@ pub(super) async fn resolve_session_and_object(
     // Forward CK_INVALID_HANDLE to backend when object is unknown — see
     // resolve_session_and_key for rationale.
     let backend_object = object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0 as u64));
+    // D6(1): refuse private-object USE while logically logged out (authn
+    // before authz; unknown handles skip — the backend decides their error).
+    if backend_object.0 != 0 {
+        ensure_private_use_allowed(
+            ctx,
+            ctx_id,
+            session_handle,
+            object_handle,
+            CkSessionHandle(backend_session.0),
+            backend_object,
+        )
+        .await?;
+    }
     // Per-object / per-class gate: see gate_object_handle for the invisible-denial
     // contract. Zero-overhead when both per_object_active() and per_class_active()
     // are false.
@@ -862,6 +893,23 @@ pub(super) async fn resolve_session_and_two_objects(
         first_object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0 as u64));
     let second_backend_object =
         second_object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0 as u64));
+    // D6(1): refuse private-object USE while logically logged out (each
+    // handle independently; unknown handles skip — the backend decides).
+    for (virtual_object, backend_object) in
+        [(first_object_handle, first_backend_object), (second_object_handle, second_backend_object)]
+    {
+        if backend_object.0 != 0 {
+            ensure_private_use_allowed(
+                ctx,
+                ctx_id,
+                session_handle,
+                virtual_object,
+                CkSessionHandle(backend_session.0),
+                backend_object,
+            )
+            .await?;
+        }
+    }
     // Per-object / per-class gate: gate each object independently (the two-object
     // operations are wrapping/unwrapping where BOTH handles must be authorized).
     // Zero-overhead when both per_object_active() and per_class_active() are false.
@@ -901,17 +949,6 @@ pub(super) async fn resolve_session_and_two_objects(
     Ok((CkSessionHandle(backend_session.0 as u64), first_backend_object, second_backend_object))
 }
 
-pub(super) async fn register_object_handle(
-    ctx_mgr: &Arc<ContextManager>,
-    ctx_id: &ClientContextId,
-    backend_handle: CkObjectHandle,
-) -> u64 {
-    ctx_mgr
-        .get_context(ctx_id, |ctx| ctx.object_handles.insert(BackendHandle(backend_handle.0)).0)
-        .await
-        .unwrap_or(0)
-}
-
 /// True when `template` declares `CKA_TOKEN` as a true value — i.e. a token
 /// object, whose handle persists across the application's sessions and must NOT
 /// be evicted on session close. The bool may arrive as a typed `Bool`, a raw
@@ -921,28 +958,218 @@ pub(super) fn template_declares_token_object(template: &[CkAttribute]) -> bool {
         attr.attr_type == CkAttributeType::TOKEN
             && match &attr.value {
                 Some(CkAttributeValue::Bool(b)) => *b,
-                Some(CkAttributeValue::Bytes(bytes)) => bytes.first().is_some_and(|&b| b != 0),
+                Some(CkAttributeValue::Bytes(bytes)) => {
+                    bytes.expose(|raw| raw.first().is_some_and(|&b| b != 0))
+                }
                 Some(CkAttributeValue::Ulong(u)) => *u != 0,
                 _ => false,
             }
     })
 }
 
+/// True when `template` declares `CKA_PRIVATE` as a true value — i.e. a private
+/// object, which natively requires the calling application to be logged in.
+/// Accepts every bool encoding (`Bool`, raw `CK_BBOOL` byte, ulong) exactly
+/// like [`template_declares_token_object`] (D6(1)).
+pub(super) fn template_declares_private_object(template: &[CkAttribute]) -> bool {
+    template.iter().any(|attr| {
+        attr.attr_type == CkAttributeType::PRIVATE
+            && match &attr.value {
+                Some(CkAttributeValue::Bool(b)) => *b,
+                Some(CkAttributeValue::Bytes(bytes)) => {
+                    bytes.expose(|raw| raw.first().is_some_and(|&b| b != 0))
+                }
+                Some(CkAttributeValue::Ulong(u)) => *u != 0,
+                _ => false,
+            }
+    })
+}
+
+/// True when `template` carries any `CKA_PRIVATE` attribute, whatever its value
+/// (presence check for copy-inheritance: an explicit `False` makes a public
+/// copy even of a private source).
+pub(super) fn template_has_private_attr(template: &[CkAttribute]) -> bool {
+    template.iter().any(|attr| attr.attr_type == CkAttributeType::PRIVATE)
+}
+
+/// Logical login state of `ctx_id` for the slot owning `virtual_session`
+/// (`None` = logically logged out, or the session is unknown to the context).
+pub(super) async fn session_slot_login_state(
+    ctx_mgr: &Arc<ContextManager>,
+    ctx_id: &ClientContextId,
+    virtual_session: u64,
+) -> Option<LoginState> {
+    ctx_mgr
+        .get_context(ctx_id, |ctx| {
+            ctx.session_slots
+                .get(&VirtualHandle(virtual_session))
+                .copied()
+                .and_then(|slot| ctx.login_state.get(&slot).copied())
+        })
+        .await
+        .flatten()
+}
+
+/// D6(1) enforcement for object-MINTING operations (create/copy/generate/
+/// derive/unwrap): when the calling context is logically logged out on the
+/// session's slot and `template` declares the new object private, refuse with
+/// `CKR_USER_NOT_LOGGED_IN` without reaching the backend — regardless of the
+/// backend's own login state (which other live tenants may hold). Pure
+/// logical-layer check; never disturbs other tenants' backend state.
+pub(super) async fn ensure_private_mint_allowed(
+    ctx_mgr: &Arc<ContextManager>,
+    ctx_id: &ClientContextId,
+    virtual_session: u64,
+    template: &[CkAttribute],
+) -> Result<(), CkRv> {
+    if template_declares_private_object(template)
+        && session_slot_login_state(ctx_mgr, ctx_id, virtual_session).await.is_none()
+    {
+        return Err(CkRv::USER_NOT_LOGGED_IN);
+    }
+    Ok(())
+}
+
+/// Three-state `CKA_PRIVATE` probe for one backend object: `Some(true)` is
+/// known private, `Some(false)` is known public, `None` is probe failure
+/// (backend error, transport failure, absent/unparseable value). A read-only
+/// probe that never disturbs other tenants. Callers choose the failure
+/// polarity: USE fails open to the backend's own faithful verdict
+/// ([`backend_object_is_private`]); find-enumeration fails closed
+/// ([`backend_object_known_public`]).
+async fn probe_backend_object_private(
+    ctx: &HandlerContext,
+    backend_session: CkSessionHandle,
+    backend_object: CkObjectHandle,
+) -> Option<bool> {
+    let backend = ctx.backend.clone();
+    let fetched = spawn_backend(move || {
+        let mut template = [CkAttribute {
+            attr_type: CkAttributeType::PRIVATE,
+            value: Some(CkAttributeValue::Bool(false)),
+        }];
+        let privacy =
+            match backend.get_attribute_value(backend_session, backend_object, &mut template) {
+                Ok(()) => template.first().and_then(|attr| attr.value.as_ref()).and_then(|value| {
+                    match value {
+                        CkAttributeValue::Bool(b) => Some(*b),
+                        CkAttributeValue::Bytes(bytes) => {
+                            Some(bytes.expose(|raw| raw.first().is_some_and(|&b| b != 0)))
+                        }
+                        CkAttributeValue::Ulong(u) => Some(*u != 0),
+                        _ => None,
+                    }
+                }),
+                Err(_) => None,
+            };
+        Ok(privacy)
+    })
+    .await;
+    match fetched {
+        Ok(Ok(privacy)) => privacy,
+        _ => None,
+    }
+}
+
+/// Read `CKA_PRIVATE` for one backend object. Returns `true` only on a
+/// positive True; any backend error, transport failure, or absent/unparseable
+/// value returns `false` so the caller falls through to the real operation
+/// and the backend's own faithful verdict (fail-open to the backend — the
+/// D6(1) refusal only fires for known-private objects).
+async fn backend_object_is_private(
+    ctx: &HandlerContext,
+    backend_session: CkSessionHandle,
+    backend_object: CkObjectHandle,
+) -> bool {
+    probe_backend_object_private(ctx, backend_session, backend_object).await == Some(true)
+}
+
+/// F-04: known-public probe for find-enumeration filtering. Returns `true`
+/// only when the probe positively reports public; unknown privacy hides the
+/// object (fail-closed — unlike USE there is no backend verdict to fall back
+/// to, and a logged-out context must not observe private objects).
+pub(super) async fn backend_object_known_public(
+    ctx: &HandlerContext,
+    backend_session: CkSessionHandle,
+    backend_object: CkObjectHandle,
+) -> bool {
+    probe_backend_object_private(ctx, backend_session, backend_object).await == Some(false)
+}
+
+/// D6(1) enforcement for object/key USE (sign/verify/encrypt/decrypt/digest
+/// init, get/set attributes, wrap/unwrap/derive keys, ...): when the calling
+/// context is logically logged out on the session's slot and the object is
+/// private, refuse with `CKR_USER_NOT_LOGGED_IN` without performing the
+/// operation.
+///
+/// Cost: the logged-in path costs one in-memory map read. The logged-out path
+/// decides from the mint-recorded privacy bit when known (still no backend
+/// call, so cache-hit and coalescer semantics are unchanged) and probes
+/// `CKA_PRIVATE` from the backend — a read-only probe that never disturbs
+/// other tenants — only for unknown (find-registered / backend-minted)
+/// objects.
+/// Privacy bit for one object: the mint-recorded bit when known, else a
+/// single backend `CKA_PRIVATE` probe (fail-open `false` — the caller falls
+/// through to the backend's own faithful verdict).
+pub(super) async fn object_is_private(
+    ctx: &HandlerContext,
+    ctx_id: &ClientContextId,
+    virtual_object: u64,
+    backend_session: CkSessionHandle,
+    backend_object: CkObjectHandle,
+) -> bool {
+    let known = ctx
+        .context_manager
+        .get_context(ctx_id, |c| c.object_private.get(&VirtualHandle(virtual_object)).copied())
+        .await
+        .flatten();
+    match known {
+        Some(private) => private,
+        None => backend_object_is_private(ctx, backend_session, backend_object).await,
+    }
+}
+
+pub(super) async fn ensure_private_use_allowed(
+    ctx: &HandlerContext,
+    ctx_id: &ClientContextId,
+    virtual_session: u64,
+    virtual_object: u64,
+    backend_session: CkSessionHandle,
+    backend_object: CkObjectHandle,
+) -> Result<(), CkRv> {
+    if session_slot_login_state(&ctx.context_manager, ctx_id, virtual_session).await.is_some() {
+        return Ok(());
+    }
+    if object_is_private(ctx, ctx_id, virtual_object, backend_session, backend_object).await {
+        return Err(CkRv::USER_NOT_LOGGED_IN);
+    }
+    Ok(())
+}
+
 /// Register a backend object handle and, when it is a session object, record it
 /// under `session` so it is evicted when that session closes (B2). Returns the
 /// virtual object handle (0 if the context is gone).
 ///
-/// This is a MINTING registration (generate/create/unwrap path). The new
-/// virtual handle is inserted into `created_objects` so the per-object gate
-/// (`gate_object_handle`) allows the creating context to use this key even
-/// when its backend-assigned `CKA_UNIQUE_ID` is not in the pre-configured
-/// `objects` grant (G3-PR3 Task 2).
+/// This is a MINTING registration (generate/create/unwrap/derive path,
+/// including SP800-108 additional derived keys and SSL3/TLS/WTLS key-mat
+/// OUT handles virtualized out of a successful derive's `mechanism_out`).
+/// The new virtual handle is inserted into `created_objects` so the
+/// per-object gate (`gate_object_handle`) allows the creating context to
+/// use this key even when its backend-assigned `CKA_UNIQUE_ID` is not in
+/// the pre-configured `objects` grant (G3-PR3 Task 2).
+///
+/// `is_private` records the template-declared `CKA_PRIVATE` bit for the D6(1)
+/// logical-login enforcement. Production mint sites always pass
+/// `Some(declared)`; `None` leaves the bit unknown so logged-out USE probes
+/// the backend once per operation (used by test fixtures that bypass real
+/// minting).
 pub(super) async fn register_session_object_handle(
     ctx_mgr: &Arc<ContextManager>,
     ctx_id: &ClientContextId,
     session: VirtualHandle,
     backend_handle: CkObjectHandle,
     is_token_object: bool,
+    is_private: Option<bool>,
 ) -> u64 {
     ctx_mgr
         .get_context(ctx_id, |ctx| {
@@ -952,6 +1179,9 @@ pub(super) async fn register_session_object_handle(
             }
             // Minting: the creating context can always use what it generated.
             ctx.created_objects.insert(virtual_object);
+            if let Some(private) = is_private {
+                ctx.object_private.insert(virtual_object, private);
+            }
             virtual_object.0
         })
         .await
@@ -965,14 +1195,20 @@ pub(super) async fn register_session_object_handle(
 /// virtual handles are inserted into `created_objects` so the creating context
 /// can use them immediately even when their backend-assigned `CKA_UNIQUE_ID`s
 /// are not in the pre-configured `objects` grant (G3-PR3 Task 2).
+///
+/// `first_is_private` / `second_is_private` record each key's
+/// template-declared `CKA_PRIVATE` bit for the D6(1) enforcement (see
+/// [`register_session_object_handle`]).
 pub(super) async fn register_session_object_pair(
     ctx_mgr: &Arc<ContextManager>,
     ctx_id: &ClientContextId,
     session: VirtualHandle,
     first_backend_handle: CkObjectHandle,
     first_is_token: bool,
+    first_is_private: bool,
     second_backend_handle: CkObjectHandle,
     second_is_token: bool,
+    second_is_private: bool,
 ) -> Option<(u64, u64)> {
     ctx_mgr
         .get_context(ctx_id, |ctx| {
@@ -987,6 +1223,8 @@ pub(super) async fn register_session_object_pair(
             // Minting: the creating context can always use both generated keys.
             ctx.created_objects.insert(first);
             ctx.created_objects.insert(second);
+            ctx.object_private.insert(first, first_is_private);
+            ctx.object_private.insert(second, second_is_private);
             (first.0, second.0)
         })
         .await
@@ -1047,13 +1285,75 @@ mod tests {
     use pkcs11_proxy_ng_types::{GcmParams, SslRandomData, Tls12MasterKeyDeriveParams};
 
     #[test]
+    fn template_declares_private_object_accepts_every_bool_encoding() {
+        // D6(1): the mint refusal must fire however the client encoded
+        // CKA_PRIVATE=true (typed Bool, raw CK_BBOOL byte, ulong) and must
+        // stay silent for false/absent/other attributes.
+        let cases: Vec<(Vec<CkAttribute>, bool)> = vec![
+            (
+                vec![CkAttribute {
+                    attr_type: CkAttributeType::PRIVATE,
+                    value: Some(CkAttributeValue::Bool(true)),
+                }],
+                true,
+            ),
+            (
+                vec![CkAttribute {
+                    attr_type: CkAttributeType::PRIVATE,
+                    value: Some(CkAttributeValue::Bytes(vec![1u8].into())),
+                }],
+                true,
+            ),
+            (
+                vec![CkAttribute {
+                    attr_type: CkAttributeType::PRIVATE,
+                    value: Some(CkAttributeValue::Ulong(1)),
+                }],
+                true,
+            ),
+            (
+                vec![CkAttribute {
+                    attr_type: CkAttributeType::PRIVATE,
+                    value: Some(CkAttributeValue::Bool(false)),
+                }],
+                false,
+            ),
+            (
+                vec![CkAttribute {
+                    attr_type: CkAttributeType::PRIVATE,
+                    value: Some(CkAttributeValue::Bytes(vec![0u8].into())),
+                }],
+                false,
+            ),
+            (vec![], false),
+            (
+                vec![CkAttribute {
+                    attr_type: CkAttributeType::TOKEN,
+                    value: Some(CkAttributeValue::Bool(true)),
+                }],
+                false,
+            ),
+        ];
+        for (template, expected) in cases {
+            assert_eq!(
+                template_declares_private_object(&template),
+                expected,
+                "template {template:?}"
+            );
+        }
+    }
+
+    #[test]
     fn mechanism_output_to_proto_handles_gcm() {
         let params = CkMechanismParams::Gcm(GcmParams {
             iv: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
             iv_bits: 96,
             iv_buffer_len: 12,
-            aad: Vec::new(),
+            aad: Vec::new().into(),
             tag_bits: 128,
+
+            iv_null: false,
+            aad_null: false,
         });
         let proto_mech = mechanism_output_to_proto(params).expect("gcm should convert");
         // The proto Mechanism's type field should match AES_GCM.
@@ -1081,7 +1381,7 @@ mod tests {
         // should return None so the response carries no mech_out rather
         // than panicking or sending wrong type info.
         let params = CkMechanismParams::Raw(pkcs11_proxy_ng_types::RawMechanismParams {
-            data: vec![1, 2, 3],
+            data: vec![1, 2, 3].into(),
         });
         assert!(mechanism_output_to_proto(params).is_none());
     }
@@ -1485,7 +1785,7 @@ mod tests {
         mock.initialize().unwrap();
         let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
-        let backend_object = mock.create_object(backend_session, &[]).unwrap();
+        let backend_object = mock.create_object(backend_session, Some(&[])).unwrap();
 
         // Always set CLASS and TOKEN (required by fetch_object_metadata's 3-element
         // template — all conformant PKCS#11 backends expose these on every object).
@@ -1503,7 +1803,7 @@ mod tests {
             mock.set_attribute(
                 backend_object,
                 CkAttributeType::UNIQUE_ID,
-                MockAttributeSlot::Value(CkAttributeValue::Bytes(uid)),
+                MockAttributeSlot::Value(CkAttributeValue::Bytes(uid.into())),
             );
         }
 
@@ -1733,7 +2033,7 @@ mod tests {
         mock.initialize().unwrap();
         let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
-        let backend_object = mock.create_object(backend_session, &[]).unwrap();
+        let backend_object = mock.create_object(backend_session, Some(&[])).unwrap();
 
         // Mark as TOKEN object.
         mock.set_attribute(
@@ -1750,7 +2050,7 @@ mod tests {
         mock.set_attribute(
             backend_object,
             CkAttributeType::UNIQUE_ID,
-            MockAttributeSlot::Value(CkAttributeValue::Bytes(uid.clone())),
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(uid.clone().into())),
         );
 
         let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock.clone();
@@ -1811,7 +2111,7 @@ mod tests {
         mock.initialize().unwrap();
         let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
-        let backend_object = mock.create_object(backend_session, &[]).unwrap();
+        let backend_object = mock.create_object(backend_session, Some(&[])).unwrap();
         mock.set_attribute(
             backend_object,
             CkAttributeType::CLASS,
@@ -1826,7 +2126,7 @@ mod tests {
         mock.set_attribute(
             backend_object,
             CkAttributeType::UNIQUE_ID,
-            MockAttributeSlot::Value(CkAttributeValue::Bytes(OTHER_UID_BYTES.to_vec())),
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(OTHER_UID_BYTES.to_vec().into())),
         );
 
         let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock;
@@ -1857,6 +2157,7 @@ mod tests {
             virtual_session,
             backend_object,
             false, // session object
+            None,  // privacy unknown (fixture bypasses real minting)
         )
         .await;
         assert_ne!(virtual_object_raw, 0, "minting registration must return a non-zero handle");
@@ -1912,7 +2213,7 @@ mod tests {
         mock.initialize().unwrap();
         let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
-        let backend_object = mock.create_object(backend_session, &[]).unwrap();
+        let backend_object = mock.create_object(backend_session, Some(&[])).unwrap();
         mock.set_attribute(
             backend_object,
             CkAttributeType::CLASS,
@@ -1926,7 +2227,7 @@ mod tests {
         mock.set_attribute(
             backend_object,
             CkAttributeType::UNIQUE_ID,
-            MockAttributeSlot::Value(CkAttributeValue::Bytes(OTHER_UID_BYTES.to_vec())),
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(OTHER_UID_BYTES.to_vec().into())),
         );
 
         let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock;
@@ -1950,7 +2251,8 @@ mod tests {
             .await
             .unwrap();
         let vo_a_raw =
-            register_session_object_handle(&ctx_mgr, &ctx_id_a, vs_a, backend_object, false).await;
+            register_session_object_handle(&ctx_mgr, &ctx_id_a, vs_a, backend_object, false, None)
+                .await;
 
         // Context B: uid=9999 sees the SAME backend object (e.g. via an out-of-band
         // find) but did NOT mint it — registered via direct insert, not minting.
@@ -2000,7 +2302,7 @@ mod tests {
         mock.initialize().unwrap();
         let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
-        let backend_object = mock.create_object(backend_session, &[]).unwrap();
+        let backend_object = mock.create_object(backend_session, Some(&[])).unwrap();
         mock.set_attribute(
             backend_object,
             CkAttributeType::CLASS,
@@ -2028,7 +2330,8 @@ mod tests {
             .unwrap();
 
         let vo_raw =
-            register_session_object_handle(&ctx_mgr, &ctx_id, vs, backend_object, false).await;
+            register_session_object_handle(&ctx_mgr, &ctx_id, vs, backend_object, false, None)
+                .await;
 
         // Verify the object is in the created set before session close.
         let created_before = ctx_mgr.object_was_created_here(&ctx_id, vo_raw).await;
@@ -2064,7 +2367,7 @@ mod tests {
         mock.initialize().unwrap();
         let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
-        let backend_object = mock.create_object(backend_session, &[]).unwrap();
+        let backend_object = mock.create_object(backend_session, Some(&[])).unwrap();
         // PRIVATE_KEY — denied class.
         mock.set_attribute(
             backend_object,
@@ -2079,7 +2382,7 @@ mod tests {
         mock.set_attribute(
             backend_object,
             CkAttributeType::UNIQUE_ID,
-            MockAttributeSlot::Value(CkAttributeValue::Bytes(OTHER_UID_BYTES.to_vec())),
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(OTHER_UID_BYTES.to_vec().into())),
         );
 
         let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock;
@@ -2109,6 +2412,7 @@ mod tests {
             virtual_session,
             backend_object,
             false,
+            None,
         )
         .await;
 
@@ -2134,7 +2438,7 @@ mod tests {
         mock.initialize().unwrap();
         let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
-        let backend_object = mock.create_object(backend_session, &[]).unwrap();
+        let backend_object = mock.create_object(backend_session, Some(&[])).unwrap();
         // SECRET_KEY — allowed class.
         mock.set_attribute(
             backend_object,
@@ -2149,7 +2453,7 @@ mod tests {
         mock.set_attribute(
             backend_object,
             CkAttributeType::UNIQUE_ID,
-            MockAttributeSlot::Value(CkAttributeValue::Bytes(OTHER_UID_BYTES.to_vec())),
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(OTHER_UID_BYTES.to_vec().into())),
         );
 
         let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock;
@@ -2178,6 +2482,7 @@ mod tests {
             virtual_session,
             backend_object,
             false,
+            None,
         )
         .await;
 
@@ -2211,7 +2516,7 @@ mod tests {
         mock.initialize().unwrap();
         let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
-        let backend_object = mock.create_object(backend_session, &[]).unwrap();
+        let backend_object = mock.create_object(backend_session, Some(&[])).unwrap();
         // Intentionally NO attributes (CLASS, TOKEN, UNIQUE_ID). If the gate fetches
         // metadata, the MockBackend returns ATTRIBUTE_TYPE_INVALID for all three →
         // fetch_object_metadata returns None → gate returns 0 (fail-closed).
@@ -2244,6 +2549,7 @@ mod tests {
             virtual_session,
             backend_object,
             false,
+            None,
         )
         .await;
 

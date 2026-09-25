@@ -354,6 +354,19 @@ fn native_domain_global_serial_release_drop_recycles_after_full_retirement() {
 }
 
 #[test]
+fn native_domain_unsupported_platform_display_names_macos_hosts() {
+    // M-3: macOS aarch64/x86_64 joined the v0.2 native-FFI qualification
+    // boundary; the refusal message must name it alongside the Linux and
+    // Windows arms.
+    let msg = DomainError::UnsupportedPlatform { detail: "test-detail" }.to_string();
+    assert!(
+        msg.contains("macOS on aarch64 or x86_64"),
+        "Display must name macOS hosts, got: {msg}"
+    );
+    assert!(msg.contains("test-detail"), "Display must carry the detail, got: {msg}");
+}
+
+#[test]
 fn native_domain_current_host_reports_qualified_or_refuses() {
     let reported = check_native_platform();
     assert_eq!(

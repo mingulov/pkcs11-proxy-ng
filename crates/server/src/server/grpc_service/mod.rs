@@ -4,6 +4,7 @@ use crate::config::{AuthConfig, TcpAuthMode, UnixAuthMode};
 use crate::mechanism_registry_source::MechanismRegistrySource;
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_proto::Pkcs11Proxy;
+use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
 use pkcs11_proxy_ng_types::*;
 use tonic::{Request, Response, Status};
 
@@ -135,19 +136,40 @@ pub(super) fn convert_template(
     attrs.iter().map(|a| CkAttribute::try_from(a).map_err(|e| e.0)).collect()
 }
 
+/// `convert_template` with Wave 3.5 D2 NULL-template preservation: a set
+/// `template_null` bit yields `None` (the caller's NULL template pointer),
+/// which the FFI backend materializes as NULL instead of (ptr, 0). A NULL
+/// bit with a non-empty attribute list is a malformed request.
+pub(super) fn convert_template_opt(
+    attrs: &[pkcs11_proxy_ng_proto::Attribute],
+    template_null: bool,
+) -> Result<Option<Vec<CkAttribute>>, u64> {
+    if template_null {
+        if !attrs.is_empty() {
+            return Err(CkRv::ARGUMENTS_BAD.0);
+        }
+        Ok(None)
+    } else {
+        convert_template(attrs).map(Some)
+    }
+}
+
 /// Encode a `CkAttributeValue` into the on-wire `bytes` representation
 /// the proto uses for `AttributeResult.value`.
 ///
-/// Consumes the value by move: the `Bytes` and `String` variants return
-/// their inner allocation directly (no clone). The two scalar variants
-/// (`Bool`, `Ulong`) construct a fresh small `Vec` because there's no
-/// owned buffer to move out of an integer.
+/// Consumes the value by move. The `Bytes`/`String` variants copy through
+/// the [`secret_to_plain`] ADR-0013 §5 boundary (the owned `SecretBytes`
+/// is dropped and wiped afterwards); the scalar variants (`Bool`, `Ulong`)
+/// construct a fresh small `Vec`.
 pub(super) fn attr_value_to_bytes(v: CkAttributeValue) -> Vec<u8> {
     match v {
         CkAttributeValue::Bool(b) => vec![u8::from(b)],
-        CkAttributeValue::Ulong(u) => u.to_le_bytes().to_vec(),
-        CkAttributeValue::Bytes(b) => b,
-        CkAttributeValue::String(s) => s.into_bytes(),
+        // Native order (not LE): this path shares the attr_cache key space
+        // with the exact path's raw backend bytes, so both encodings must
+        // agree on every host order (see the M1 encoding notes).
+        CkAttributeValue::Ulong(u) => u.to_ne_bytes().to_vec(),
+        CkAttributeValue::Bytes(b) => secret_to_plain(&b),
+        CkAttributeValue::String(s) => secret_to_plain(&s),
         // Nested templates never travel through AttributeResult's flat
         // bytes field — the exact path carries them structurally. Empty
         // rather than fabricated struct bytes.

@@ -133,7 +133,7 @@ fn bench_sign(c: &mut Criterion) {
         c.initialize().await.unwrap();
         let slots = c.get_slot_list(false).await.unwrap();
         let session = c.open_session(slots[0], CKF_SERIAL).await.unwrap();
-        let key = c.create_object(session, &[]).await.unwrap();
+        let key = c.create_object(session, Some(&[])).await.unwrap();
         Arc::new(Mutex::new((c, session, key)))
     });
     let mech = CkMechanism { mechanism_type: CkMechanismType(0x00000001), params: None };
@@ -158,7 +158,7 @@ fn bench_encrypt_decrypt(c: &mut Criterion) {
         c.initialize().await.unwrap();
         let slots = c.get_slot_list(false).await.unwrap();
         let session = c.open_session(slots[0], CKF_SERIAL).await.unwrap();
-        let key = c.create_object(session, &[]).await.unwrap();
+        let key = c.create_object(session, Some(&[])).await.unwrap();
         Arc::new(Mutex::new((c, session, key)))
     });
     let mech = CkMechanism { mechanism_type: CkMechanismType(0x00000001), params: None };

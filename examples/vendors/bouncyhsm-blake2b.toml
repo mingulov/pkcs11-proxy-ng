@@ -1,0 +1,22 @@
+# BouncyHSM BLAKE2B HMAC vendor mechanism extensions.
+# Use with: PKCS11_PROXY_MECHANISMS=/path/to/bouncyhsm-blake2b.toml
+# (or layer it under the daemon's mechanism_params.toml via `include`).
+#
+# BouncyHSM advertises keyed BLAKE2B HMAC (_GENERAL) mechanisms that take
+# the truncated MAC length as a single CK_ULONG — the same layout as the
+# proxy's "mac_general" shape. The 0x40xx IDs ARE OASIS v3.2 standard
+# (CKM_BLAKE2B_160/256/384/512_HMAC_GENERAL, pkcs11t.h:1156/1161/1166/
+# 1171); they stay operator opt-in (not defaults) per the Wave 3 F2
+# sketch, which prescribed opt-in — promotion to defaults is defensible
+# follow-up. Wave 3 F2.
+#
+# Reference: OASIS PKCS#11 v3.2 (BLAKE2B_*_HMAC_GENERAL).
+
+[[params]]
+shape = "mac_general"
+mechanisms = [
+    0x400E, # CKM_BLAKE2B_160_HMAC_GENERAL (BouncyHSM)
+    0x4013, # CKM_BLAKE2B_256_HMAC_GENERAL (BouncyHSM)
+    0x4018, # CKM_BLAKE2B_384_HMAC_GENERAL (BouncyHSM)
+    0x401D, # CKM_BLAKE2B_512_HMAC_GENERAL (BouncyHSM)
+]
