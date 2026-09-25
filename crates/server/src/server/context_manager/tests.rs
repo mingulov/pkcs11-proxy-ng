@@ -484,3 +484,268 @@ fn teardown_returns_correct_backend_session_handles() {
         "teardown must return backend session handles for caller to close"
     );
 }
+
+// --- per-object ObjectMetadata cache (G3, I2) ---
+
+fn make_session_meta(uid: Vec<u8>) -> super::ObjectMetadata {
+    super::ObjectMetadata {
+        unique_id: uid,
+        class: Some(pkcs11_proxy_ng_types::CkObjectClass::SECRET_KEY),
+        is_token: false,
+    }
+}
+
+fn make_token_meta(uid: Vec<u8>) -> super::ObjectMetadata {
+    super::ObjectMetadata {
+        unique_id: uid,
+        class: Some(pkcs11_proxy_ng_types::CkObjectClass::SECRET_KEY),
+        is_token: true,
+    }
+}
+
+#[tokio::test]
+async fn object_metadata_miss_returns_none() {
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let ctx_id = mgr.create_context(None).await.unwrap();
+    assert_eq!(
+        mgr.object_metadata(&ctx_id, 42).await.map(|m| m.unique_id),
+        None,
+        "a virtual object that was never cached must return None"
+    );
+}
+
+#[tokio::test]
+async fn object_metadata_session_object_round_trip() {
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let ctx_id = mgr.create_context(None).await.unwrap();
+    let uid = vec![0xde, 0xad, 0xbe, 0xef];
+    mgr.cache_object_metadata(&ctx_id, 7, make_session_meta(uid.clone())).await;
+    assert_eq!(
+        mgr.object_metadata(&ctx_id, 7).await.map(|m| m.unique_id),
+        Some(uid),
+        "a cached session-object metadata must be returned by object_metadata"
+    );
+}
+
+#[tokio::test]
+async fn object_metadata_token_object_not_cached() {
+    // I2 fix: token objects (is_token=true) must never be stored in the cache.
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let ctx_id = mgr.create_context(None).await.unwrap();
+    let uid = vec![0xde, 0xad, 0xbe, 0xef];
+    mgr.cache_object_metadata(&ctx_id, 9, make_token_meta(uid)).await;
+    assert_eq!(
+        mgr.object_metadata(&ctx_id, 9).await.map(|m| m.unique_id),
+        None,
+        "token object metadata must not be cached (I2 fix: re-fetched every gate call)"
+    );
+}
+
+#[tokio::test]
+async fn object_metadata_evicted_on_session_close() {
+    // When a virtual session closes, its session objects (and their cached
+    // metadata) must be evicted so a recycled virtual handle cannot return
+    // stale metadata (G3, B2).
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let ctx_id = mgr.create_context(None).await.unwrap();
+
+    // Register a virtual session and a session object within it.
+    let (session_vh, obj_vh) = mgr
+        .get_context(&ctx_id, |ctx| {
+            let s = ctx.session_handles.insert(BackendHandle(1));
+            let o = ctx.object_handles.insert(BackendHandle(100));
+            ctx.record_session_object(s, o);
+            (s, o)
+        })
+        .await
+        .unwrap();
+
+    // Cache the metadata for the session object.
+    mgr.cache_object_metadata(&ctx_id, obj_vh.0, make_session_meta(vec![1, 2, 3])).await;
+    assert!(
+        mgr.object_metadata(&ctx_id, obj_vh.0).await.is_some(),
+        "metadata should be cached before session close"
+    );
+
+    // Close the session — its session objects are evicted.
+    mgr.get_context(&ctx_id, |ctx| ctx.remove_session(session_vh)).await;
+
+    assert_eq!(
+        mgr.object_metadata(&ctx_id, obj_vh.0).await.map(|m| m.unique_id),
+        None,
+        "metadata must be evicted when the owning session closes"
+    );
+}
+
+#[tokio::test]
+async fn cache_object_metadata_noop_for_missing_context() {
+    // Caching metadata for a non-existent context must not panic.
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let gone = ClientContextId("nonexistent".into());
+    mgr.cache_object_metadata(&gone, 1, make_session_meta(vec![0xff])).await; // must not panic
+    assert_eq!(mgr.object_metadata(&gone, 1).await.map(|m| m.unique_id), None);
+}
+
+// --- per-object attribute cache (R2 coalescer, Task 1) ---
+
+fn make_cached_attr(value: Vec<u8>, rv: u64) -> super::CachedAttr {
+    super::CachedAttr { value, ck_rv: rv }
+}
+
+#[tokio::test]
+async fn attr_cache_put_then_get_round_trips() {
+    // attr_cache_put followed by attr_cache_get must return an entry with the
+    // exact same value bytes and ck_rv (R2, Task 1).
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let ctx_id = mgr.create_context(None).await.unwrap();
+    let object: u64 = 42;
+    let attr = CkAttributeType::CLASS;
+    let entry = make_cached_attr(vec![0x03, 0x00, 0x00, 0x00], 0);
+
+    mgr.attr_cache_put(&ctx_id, object, attr, entry.clone()).await;
+    let result = mgr.attr_cache_get(&ctx_id, object, attr).await;
+
+    let result = result.expect("a cached entry must be returned on a hit");
+    assert_eq!(result.value, entry.value, "round-tripped value bytes must match");
+    assert_eq!(result.ck_rv, entry.ck_rv, "round-tripped ck_rv must match");
+}
+
+#[tokio::test]
+async fn attr_cache_miss_returns_none() {
+    // A get for an object/attr pair that was never put must return None.
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let ctx_id = mgr.create_context(None).await.unwrap();
+    let result = mgr.attr_cache_get(&ctx_id, 99, CkAttributeType::TOKEN).await;
+    assert!(result.is_none(), "a cache miss must return None");
+}
+
+#[tokio::test]
+async fn attr_cache_invalidate_object_drops_only_that_object() {
+    // attr_cache_invalidate_object(O) must drop only entries whose key is O;
+    // a different object's entries must remain (R2, Task 1).
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let ctx_id = mgr.create_context(None).await.unwrap();
+
+    let obj_a: u64 = 10;
+    let obj_b: u64 = 20;
+    let attr = CkAttributeType::CLASS;
+
+    mgr.attr_cache_put(&ctx_id, obj_a, attr, make_cached_attr(vec![1], 0)).await;
+    mgr.attr_cache_put(&ctx_id, obj_b, attr, make_cached_attr(vec![2], 0)).await;
+
+    mgr.attr_cache_invalidate_object(&ctx_id, obj_a).await;
+
+    assert!(
+        mgr.attr_cache_get(&ctx_id, obj_a, attr).await.is_none(),
+        "invalidated object's entries must be gone"
+    );
+    assert!(
+        mgr.attr_cache_get(&ctx_id, obj_b, attr).await.is_some(),
+        "other object's entries must survive invalidate_object"
+    );
+}
+
+#[test]
+fn attr_cache_cleared_on_teardown() {
+    // teardown() must clear attr_cache so no stale entries survive context
+    // destruction (R2, Task 1).
+    let mut ctx = LogicalClientInstance::new(None);
+    let obj = VirtualHandle(55);
+    let attr = CkAttributeType::CLASS;
+    ctx.attr_cache.insert((obj, attr), super::CachedAttr { value: vec![0xff], ck_rv: 0 });
+    let _ = ctx.teardown();
+    assert!(ctx.attr_cache.is_empty(), "teardown must clear the attribute cache");
+}
+
+#[test]
+fn attr_cache_evicted_on_session_close_via_remove_session() {
+    // When remove_session() evicts a session object, that object's attr_cache
+    // entries must also be evicted so a recycled virtual handle cannot serve
+    // stale cached attributes (R2, Task 1, mirrors object_metadata eviction).
+    let mut ctx = LogicalClientInstance::new(None);
+    let session = ctx.session_handles.insert(BackendHandle(10));
+    let obj = ctx.object_handles.insert(BackendHandle(100));
+    ctx.record_session_object(session, obj);
+
+    let attr = CkAttributeType::CLASS;
+    ctx.attr_cache.insert((obj, attr), super::CachedAttr { value: vec![1, 2, 3], ck_rv: 0 });
+
+    ctx.remove_session(session);
+
+    assert!(
+        !ctx.attr_cache.contains_key(&(obj, attr)),
+        "attr_cache entries for a closed session's objects must be evicted"
+    );
+}
+
+#[test]
+fn attr_cache_evicted_on_session_close_via_remove_sessions_for_slot() {
+    // When remove_sessions_for_slot() evicts session objects, their attr_cache
+    // entries must also be evicted (R2, Task 1).
+    let mut ctx = LogicalClientInstance::new(None);
+    let session = ctx.session_handles.insert(BackendHandle(11));
+    ctx.session_slots.insert(session, CkSlotId(7));
+    let obj = ctx.object_handles.insert(BackendHandle(111));
+    ctx.record_session_object(session, obj);
+
+    let attr = CkAttributeType::TOKEN;
+    ctx.attr_cache.insert((obj, attr), super::CachedAttr { value: vec![0x01], ck_rv: 0 });
+
+    ctx.remove_sessions_for_slot(CkSlotId(7));
+
+    assert!(
+        !ctx.attr_cache.contains_key(&(obj, attr)),
+        "attr_cache entries evicted by remove_sessions_for_slot"
+    );
+}
+
+#[tokio::test]
+async fn attr_cache_put_noop_for_missing_context() {
+    // attr_cache_put on a gone context must not panic.
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let gone = ClientContextId("nonexistent".into());
+    mgr.attr_cache_put(&gone, 1, CkAttributeType::CLASS, make_cached_attr(vec![0xff], 0)).await; // must not panic
+    assert!(mgr.attr_cache_get(&gone, 1, CkAttributeType::CLASS).await.is_none());
+}
+
+#[tokio::test]
+async fn attr_cache_clear_empties_all_entries_for_context() {
+    // C1: attr_cache_clear must drop ALL entries for the target context, leaving
+    // other contexts' entries untouched (used by the C_Logout handler).
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let ctx_a = mgr.create_context(None).await.unwrap();
+    let ctx_b = mgr.create_context(None).await.unwrap();
+
+    // Populate ctx_a with two attrs across two different objects.
+    mgr.attr_cache_put(&ctx_a, 10, CkAttributeType::CLASS, make_cached_attr(vec![1], 0)).await;
+    mgr.attr_cache_put(&ctx_a, 20, CkAttributeType::TOKEN, make_cached_attr(vec![1], 0)).await;
+    // Populate ctx_b with one attr (must survive ctx_a's clear).
+    mgr.attr_cache_put(&ctx_b, 10, CkAttributeType::CLASS, make_cached_attr(vec![2], 0)).await;
+
+    // Clear ctx_a's entire cache.
+    mgr.attr_cache_clear(&ctx_a).await;
+
+    // ctx_a's entries must be gone.
+    assert!(
+        mgr.attr_cache_get(&ctx_a, 10, CkAttributeType::CLASS).await.is_none(),
+        "attr_cache_clear must remove all entries for ctx_a (object 10)"
+    );
+    assert!(
+        mgr.attr_cache_get(&ctx_a, 20, CkAttributeType::TOKEN).await.is_none(),
+        "attr_cache_clear must remove all entries for ctx_a (object 20)"
+    );
+
+    // ctx_b's entry must be untouched.
+    assert!(
+        mgr.attr_cache_get(&ctx_b, 10, CkAttributeType::CLASS).await.is_some(),
+        "attr_cache_clear for ctx_a must not affect ctx_b's entries"
+    );
+}
+
+#[tokio::test]
+async fn attr_cache_clear_noop_for_missing_context() {
+    // attr_cache_clear on a non-existent context must not panic (no-op).
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let gone = ClientContextId("nonexistent".into());
+    mgr.attr_cache_clear(&gone).await; // must not panic
+}

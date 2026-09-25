@@ -1,5 +1,22 @@
 use super::*;
 
+/// Verify that both resilience env vars introduced in the metrics-endpoint
+/// feature appear in the help table. This test enforces the "keep in sync"
+/// invariant stated at `apply_env_overrides` so that adding a new env var
+/// without updating `env_var_help()` is caught immediately.
+#[test]
+fn env_var_help_contains_resilience_vars() {
+    let help = env_var_help();
+    assert!(
+        help.contains("PKCS11_PROXY_RESILIENCE_METRICS_SOCKET"),
+        "env_var_help must list PKCS11_PROXY_RESILIENCE_METRICS_SOCKET: {help}"
+    );
+    assert!(
+        help.contains("PKCS11_PROXY_RESILIENCE_FIND_THRESHOLD"),
+        "env_var_help must list PKCS11_PROXY_RESILIENCE_FIND_THRESHOLD: {help}"
+    );
+}
+
 #[test]
 fn parse_minimal_config() {
     let toml = r#"
@@ -467,13 +484,15 @@ tokens = ["label:local-token"]
 "#;
     let config: DaemonConfig = toml::from_str(toml).unwrap();
     let err = config.validate().unwrap_err();
+    // The policy+unauthenticated check fires before validate_policy_identities,
+    // giving a dedicated startup-refusal message.
     assert!(
-        err.contains("no authenticated listeners"),
+        err.contains("[auth.policy]") || err.contains("auth.policy"),
         "error should explain policy cannot apply: {err}"
     );
     assert!(
-        err.contains("auth = 'none' bypasses auth policy"),
-        "error should mention bypass: {err}"
+        err.contains("unauthenticated") || err.to_lowercase().contains("auth = \"none\""),
+        "error should mention unauthenticated access: {err}"
     );
 }
 
@@ -684,4 +703,612 @@ module = "/dev/null"
     assert_eq!(config.proxy.max_contexts, 1000);
     assert_eq!(config.proxy.http2_keepalive_interval_secs, 15);
     assert_eq!(config.proxy.http2_keepalive_timeout_secs, 5);
+}
+
+#[test]
+fn max_stuck_backend_calls_defaults_to_none() {
+    let toml = r#"
+[backend]
+module = "/dev/null"
+"#;
+    let config: DaemonConfig = toml::from_str(toml).unwrap();
+    assert_eq!(config.proxy.max_stuck_backend_calls, None);
+}
+
+#[test]
+fn max_stuck_backend_calls_parses_when_set() {
+    let toml = r#"
+[backend]
+module = "/dev/null"
+
+[proxy]
+max_stuck_backend_calls = 16
+
+[listener.remote]
+bind = "127.0.0.1:7512"
+auth = "none"
+allow_insecure_tcp = true
+"#;
+    let config: DaemonConfig = toml::from_str(toml).unwrap();
+    assert_eq!(config.proxy.max_stuck_backend_calls, Some(16));
+    config.validate().expect("positive limit is valid");
+}
+
+#[test]
+fn max_stuck_backend_calls_zero_is_rejected() {
+    let toml = r#"
+[backend]
+module = "/dev/null"
+
+[proxy]
+max_stuck_backend_calls = 0
+"#;
+    let config: DaemonConfig = toml::from_str(toml).unwrap();
+    let err = config.validate().unwrap_err();
+    assert!(err.contains("max_stuck_backend_calls"), "{err}");
+}
+
+#[test]
+fn should_exit_on_stuck_calls_policy() {
+    // Disabled: never exit.
+    assert!(!should_exit_on_stuck_calls(0, None));
+    assert!(!should_exit_on_stuck_calls(1_000_000, None));
+    // Enabled: exit strictly above the limit.
+    assert!(!should_exit_on_stuck_calls(3, Some(3)));
+    assert!(should_exit_on_stuck_calls(4, Some(3)));
+    assert!(!should_exit_on_stuck_calls(0, Some(1)));
+}
+
+#[test]
+fn resilience_absent_defaults_to_inert() {
+    let toml = "[backend]\nmodule = \"/dev/null\"\n";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    assert!(cfg.resilience.find_result_warn_threshold.is_none());
+    assert!(cfg.resilience.metrics_socket.is_none());
+}
+
+#[test]
+fn resilience_section_parses() {
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[resilience]
+find_result_warn_threshold = 500
+metrics_socket = \"/run/pkcs11-proxy/metrics.sock\"
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    assert_eq!(cfg.resilience.find_result_warn_threshold, Some(500));
+    assert_eq!(
+        cfg.resilience.metrics_socket.as_deref(),
+        Some(std::path::Path::new("/run/pkcs11-proxy/metrics.sock"))
+    );
+}
+
+#[test]
+fn audit_absent_defaults_to_off() {
+    let cfg: DaemonConfig = toml::from_str("[backend]\nmodule = \"/dev/null\"\n").unwrap();
+    assert!(cfg.audit.dir.is_none());
+    assert!(cfg.audit.signing_key.is_none());
+    assert_eq!(cfg.audit.rotate_max_bytes, 64 * 1024 * 1024);
+    assert_eq!(cfg.audit.rotate_keep_files, 10);
+}
+
+#[test]
+fn audit_section_parses() {
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[audit]
+dir = \"/var/log/pkcs11-proxy/audit\"
+signing_key = \"/etc/pkcs11-proxy/audit-ed25519.key\"
+rotate_max_bytes = 1048576
+rotate_keep_files = 3
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    assert_eq!(cfg.audit.dir.as_deref(), Some(std::path::Path::new("/var/log/pkcs11-proxy/audit")));
+    assert_eq!(cfg.audit.rotate_max_bytes, 1_048_576);
+    assert_eq!(cfg.audit.rotate_keep_files, 3);
+}
+
+#[test]
+fn policy_with_unauthenticated_listener_is_rejected() {
+    // A policy entry + a local listener with auth = "none" must refuse to start:
+    // an authorization policy cannot meaningfully apply to an unauthenticated peer.
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[[auth.policy]]
+identity = \"uid=1000\"
+tokens = \"all\"
+[listener.local]
+path = \"/run/p.sock\"
+auth = \"none\"
+allow_insecure_unix = true
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(err.contains("auth") && err.to_lowercase().contains("policy"), "got: {err}");
+}
+
+#[test]
+fn policy_with_authenticated_listener_is_allowed() {
+    // peer_cred is an authenticated mode; uid= identities match peer_cred.
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[[auth.policy]]
+identity = \"uid=1000\"
+tokens = \"all\"
+[listener.local]
+path = \"/run/p.sock\"
+auth = \"peer_cred\"
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    assert!(cfg.validate().is_ok());
+}
+
+#[test]
+#[cfg(unix)]
+fn check_not_group_or_world_writable_enforces_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let path = std::path::PathBuf::from(format!(
+        "/tmp/pkcs11-proxy-ng-perm-test-{}.tmp",
+        std::process::id()
+    ));
+    std::fs::write(&path, b"test").expect("write temp file");
+    // Group+world writable (mode 0662) must be rejected.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o662)).expect("chmod 0662");
+    let err = check_not_group_or_world_writable(&path, "test file").unwrap_err();
+    assert!(err.contains("group/world-writable"), "got: {err}");
+    assert!(err.contains("chmod go-w"), "got: {err}");
+    // Mode 0644 (not writable by group/world) must be accepted.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod 0644");
+    assert!(check_not_group_or_world_writable(&path, "test file").is_ok());
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn login_lock_timeout_secs_defaults_to_10() {
+    let toml = "[backend]\nmodule = \"/dev/null\"\n";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    assert_eq!(cfg.proxy.login_lock_timeout_secs, 10);
+}
+
+#[test]
+fn allow_all_authenticated_with_unauthenticated_listener_is_rejected() {
+    // H1: allow_all_authenticated=true + auth="none" listener must refuse to start.
+    // TokenPolicy::allows short-circuits to true for any identity including
+    // Unauthenticated, so this combo blanket-authorizes no-auth peers.
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[auth]
+allow_all_authenticated = true
+[listener.local]
+path = \"/run/p.sock\"
+auth = \"none\"
+allow_insecure_unix = true
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(
+        err.contains("allow_all_authenticated"),
+        "error must mention allow_all_authenticated, got: {err}"
+    );
+}
+
+#[test]
+fn audit_with_unauthenticated_listener_is_rejected() {
+    // H2: [audit] dir + auth="none" listener must refuse to start.
+    // Every operation would be recorded with identity=None, giving false
+    // compliance assurance.
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[audit]
+dir = \"/var/log/pkcs11-proxy/audit\"
+[listener.local]
+path = \"/run/p.sock\"
+auth = \"none\"
+allow_insecure_unix = true
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(err.contains("audit"), "error must mention audit, got: {err}");
+}
+
+#[test]
+fn audit_with_authenticated_listener_is_allowed() {
+    // Positive control: [audit] + peer_cred listener is a valid config.
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[audit]
+dir = \"/var/log/pkcs11-proxy/audit\"
+[auth]
+allow_all_authenticated = true
+[listener.local]
+path = \"/run/p.sock\"
+auth = \"peer_cred\"
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    assert!(cfg.validate().is_ok());
+}
+
+// --- G2-PR2: anonymous_principal config tests ---
+
+#[test]
+fn anonymous_principal_parses() {
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[auth]
+anonymous_principal = \"anon-client\"
+[listener.local]
+path = \"/run/p.sock\"
+auth = \"none\"
+allow_insecure_unix = true
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    assert_eq!(cfg.auth.anonymous_principal.as_deref(), Some("anon-client"));
+}
+
+#[test]
+fn anonymous_principal_absent_defaults_to_none() {
+    let cfg: DaemonConfig = toml::from_str("[backend]\nmodule = \"/dev/null\"\n").unwrap();
+    assert!(cfg.auth.anonymous_principal.is_none());
+}
+
+#[test]
+fn anonymous_principal_also_in_policy_is_rejected() {
+    // anonymous_principal is audit-only; it must not also appear as a grant key.
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[auth]
+anonymous_principal = \"uid=1000\"
+[[auth.policy]]
+identity = \"uid=1000\"
+tokens = \"all\"
+[listener.local]
+path = \"/run/p.sock\"
+auth = \"peer_cred\"
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(
+        err.contains("anonymous_principal") && err.contains("uid=1000"),
+        "error must mention anonymous_principal and the conflicting identity, got: {err}"
+    );
+}
+
+#[test]
+fn audit_with_unauthenticated_listener_and_anonymous_principal_is_allowed() {
+    // H2 guard is RELAXED when anonymous_principal is set: the operator has named
+    // the audit identity for unauthenticated peers, so the compliance gap is addressed.
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[audit]
+dir = \"/var/log/pkcs11-proxy/audit\"
+[auth]
+anonymous_principal = \"anon-client\"
+[listener.local]
+path = \"/run/p.sock\"
+auth = \"none\"
+allow_insecure_unix = true
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    assert!(
+        cfg.validate().is_ok(),
+        "audit + auth=none + anonymous_principal must be allowed (H2 guard relaxed)"
+    );
+}
+
+// --- G3 Task 1: per-class grants now accepted; per-mechanism still rejected ---
+
+#[test]
+fn validate_accepts_grant_with_classes_field() {
+    // Classes enforcement is now wired (G3 Task 1). A rich grant with `classes`
+    // must be accepted by validate() — operators can now safely restrict by class.
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[listener.local]
+path = \"/tmp/test.sock\"
+auth = \"peer_cred\"
+[auth]
+allow_all_authenticated = false
+[[auth.policy]]
+identity = \"uid=1000\"
+tokens = [{ token = \"label:MyToken\", classes = [\"secret_key\"], extract = \"deny\" }]
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    assert!(
+        cfg.validate().is_ok(),
+        "grant with classes field must be accepted now that per-class enforcement is wired"
+    );
+}
+
+#[test]
+fn validate_accepts_grant_with_mechanisms_field() {
+    // A rich grant with `mechanisms` set is now fully enforced at every
+    // crypto-init RPC (G3 Task 3). Validate must accept it.
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[listener.local]
+path = \"/tmp/test.sock\"
+auth = \"peer_cred\"
+[auth]
+allow_all_authenticated = false
+[[auth.policy]]
+identity = \"uid=1000\"
+tokens = [{ token = \"label:MyToken\", mechanisms = [\"CKM_AES_GCM\"] }]
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    assert!(
+        cfg.validate().is_ok(),
+        "rich grant with mechanisms field must now validate successfully (G3 Task 3 enforcement wired)"
+    );
+}
+
+#[test]
+fn validate_accepts_rich_grant_with_extract_deny_only() {
+    // A rich grant that uses only `extract = "deny"` (no classes/mechanisms)
+    // is fully enforced today and must pass validate().
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[listener.local]
+path = \"/tmp/test.sock\"
+auth = \"peer_cred\"
+[auth]
+allow_all_authenticated = false
+[[auth.policy]]
+identity = \"uid=1000\"
+tokens = [{ token = \"label:MyToken\", extract = \"deny\" }]
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    assert!(cfg.validate().is_ok(), "rich grant with extract=deny only must validate successfully");
+}
+
+#[test]
+fn validate_accepts_rich_grant_with_objects_field() {
+    // A rich grant with `objects` set is the G3 per-object allow-list feature.
+    // Unlike classes/mechanisms (blocked by the I2 guard until Task 3 enforcement
+    // is wired), objects has a functional allows_object_use() policy method and
+    // must NOT be rejected at validate().
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[listener.local]
+path = \"/tmp/test.sock\"
+auth = \"peer_cred\"
+[auth]
+allow_all_authenticated = false
+[[auth.policy]]
+identity = \"uid=1000\"
+tokens = [{ token = \"label:MyToken\", objects = [\"a1b2\"] }]
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    assert!(cfg.validate().is_ok(), "rich grant with objects field must validate successfully");
+}
+
+#[test]
+fn validate_rejects_rich_grant_with_objects_bad_hex() {
+    // Malformed hex in the objects list must produce an Err at validate() time.
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[listener.local]
+path = \"/tmp/test.sock\"
+auth = \"peer_cred\"
+[auth]
+allow_all_authenticated = false
+[[auth.policy]]
+identity = \"uid=1000\"
+tokens = [{ token = \"label:MyToken\", objects = [\"xyz\"] }]
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(err.contains("xyz"), "error must name the bad hex value: {err}");
+}
+
+#[test]
+fn audit_with_unauthenticated_listener_without_anonymous_principal_is_rejected() {
+    // H2 guard: audit + auth=none WITHOUT anonymous_principal still refused.
+    // (The existing `audit_with_unauthenticated_listener_is_rejected` test covers
+    // the same code path; this test names the negative case explicitly for clarity.)
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[audit]
+dir = \"/var/log/pkcs11-proxy/audit\"
+[listener.local]
+path = \"/run/p.sock\"
+auth = \"none\"
+allow_insecure_unix = true
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(err.contains("audit"), "error must mention audit, got: {err}");
+}
+
+// --- G2-PR3: rate_limit Some(0) footgun tests ---
+
+/// Helper that builds a minimal valid config string with an optional `[rate_limit]` block
+/// and an insecure unix listener (so everything except the tested field validates).
+fn rate_limit_toml(rate_limit_block: &str) -> String {
+    format!(
+        "\
+[backend]
+module = \"/dev/null\"
+[listener.local]
+path = \"/tmp/test.sock\"
+auth = \"none\"
+allow_insecure_unix = true
+{rate_limit_block}"
+    )
+}
+
+#[test]
+fn rate_limit_per_principal_max_in_flight_zero_is_rejected() {
+    let toml = rate_limit_toml("[rate_limit]\nper_principal_max_in_flight = 0\n");
+    let cfg: DaemonConfig = toml::from_str(&toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(err.contains("per_principal_max_in_flight"), "error must name the field, got: {err}");
+    assert!(err.contains("> 0"), "error must say must be > 0, got: {err}");
+}
+
+#[test]
+fn rate_limit_per_principal_max_sessions_zero_is_rejected() {
+    let toml = rate_limit_toml("[rate_limit]\nper_principal_max_sessions = 0\n");
+    let cfg: DaemonConfig = toml::from_str(&toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(err.contains("per_principal_max_sessions"), "error must name the field, got: {err}");
+    assert!(err.contains("> 0"), "error must say must be > 0, got: {err}");
+}
+
+#[test]
+fn rate_limit_per_slot_failed_login_budget_zero_is_rejected() {
+    let toml = rate_limit_toml("[rate_limit]\nper_slot_failed_login_budget = 0\n");
+    let cfg: DaemonConfig = toml::from_str(&toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(err.contains("per_slot_failed_login_budget"), "error must name the field, got: {err}");
+    assert!(err.contains("> 0"), "error must say must be > 0, got: {err}");
+}
+
+#[test]
+fn rate_limit_absent_fields_validate_ok() {
+    // All rate_limit fields absent (None) is the opt-out default; must be valid.
+    let toml = rate_limit_toml("");
+    let cfg: DaemonConfig = toml::from_str(&toml).unwrap();
+    assert!(cfg.validate().is_ok(), "absent rate_limit fields must validate OK");
+    assert!(cfg.rate_limit.per_principal_max_in_flight.is_none());
+    assert!(cfg.rate_limit.per_principal_max_sessions.is_none());
+    assert!(cfg.rate_limit.per_slot_failed_login_budget.is_none());
+}
+
+#[test]
+fn rate_limit_some_nonzero_fields_validate_ok() {
+    // Some(5) for each field is a valid positive limit.
+    let toml = rate_limit_toml(
+        "[rate_limit]\nper_principal_max_in_flight = 5\nper_principal_max_sessions = 5\nper_slot_failed_login_budget = 5\n",
+    );
+    let cfg: DaemonConfig = toml::from_str(&toml).unwrap();
+    assert!(cfg.validate().is_ok(), "positive rate_limit fields must validate OK");
+    assert_eq!(cfg.rate_limit.per_principal_max_in_flight, Some(5));
+    assert_eq!(cfg.rate_limit.per_principal_max_sessions, Some(5));
+    assert_eq!(cfg.rate_limit.per_slot_failed_login_budget, Some(5));
+}
+
+// ---------------------------------------------------------------------------
+// M3: `objects` grant + auth="none" listener must be rejected at startup
+// ---------------------------------------------------------------------------
+
+#[test]
+fn objects_grant_with_unauthenticated_listener_is_rejected() {
+    // M3: allows_object_use() returns true for Unauthenticated, so an `objects`
+    // grant combined with auth="none" is silently inert (false security).
+    // The daemon must refuse to start.
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[listener.local]
+path = \"/run/p.sock\"
+auth = \"none\"
+allow_insecure_unix = true
+[auth]
+allow_all_authenticated = false
+[[auth.policy]]
+identity = \"uid=1000\"
+tokens = [{ token = \"label:MyToken\", objects = [\"aabbcc\"] }]
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(
+        err.contains("objects") || err.contains("auth"),
+        "error must mention 'objects' or 'auth', got: {err}"
+    );
+}
+
+#[test]
+fn objects_grant_with_authenticated_listener_accepted() {
+    // M3 positive case: per-object grant + peer_cred auth must be accepted.
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[listener.local]
+path = \"/run/p.sock\"
+auth = \"peer_cred\"
+[auth]
+allow_all_authenticated = false
+[[auth.policy]]
+identity = \"uid=1000\"
+tokens = [{ token = \"label:MyToken\", objects = [\"aabbcc\"] }]
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    assert!(cfg.validate().is_ok(), "objects grant + peer_cred must be accepted");
+}
+
+// ---------------------------------------------------------------------------
+// FIX #1: AuditConfig::validate() wired into DaemonConfig::validate()
+// ---------------------------------------------------------------------------
+
+/// Helper: minimal valid DaemonConfig string with an insecure unix listener so
+/// all other fields pass — only the [audit] block is varied by the caller.
+fn audit_validate_toml(audit_block: &str) -> String {
+    format!(
+        "\
+[backend]
+module = \"/dev/null\"
+[listener.local]
+path = \"/tmp/test.sock\"
+auth = \"none\"
+allow_insecure_unix = true
+{audit_block}"
+    )
+}
+
+#[test]
+fn daemon_validate_rejects_audit_channel_capacity_zero() {
+    // channel_capacity = 0 panics at runtime (tokio channel(0) panics);
+    // DaemonConfig::validate() must catch it before startup.
+    // No `dir` here: audit.validate() runs unconditionally regardless of dir;
+    // omitting dir avoids the H2 guard (audit+auth=none without anonymous_principal)
+    // which would fire first and mask the channel_capacity error.
+    let toml = audit_validate_toml("[audit]\nchannel_capacity = 0\n");
+    let cfg: DaemonConfig = toml::from_str(&toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(err.contains("channel_capacity"), "error must mention channel_capacity, got: {err}");
+    assert!(err.contains("> 0"), "error must say must be > 0, got: {err}");
+}
+
+#[test]
+fn daemon_validate_rejects_fail_closed_reserve_ge_channel_capacity() {
+    // fail_closed_reserve >= channel_capacity means 100% of data-plane records
+    // would be silently dropped; DaemonConfig::validate() must refuse to start.
+    // No `dir`: avoids H2 guard masking the error (see above).
+    let toml = audit_validate_toml("[audit]\nchannel_capacity = 10\nfail_closed_reserve = 10\n");
+    let cfg: DaemonConfig = toml::from_str(&toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(
+        err.contains("fail_closed_reserve"),
+        "error must mention fail_closed_reserve, got: {err}"
+    );
+    assert!(err.contains("channel_capacity"), "error must mention channel_capacity, got: {err}");
+}
+
+#[test]
+fn daemon_validate_accepts_audit_defaults() {
+    // The shipped defaults (channel_capacity=4096, fail_closed_reserve=256)
+    // must pass DaemonConfig::validate() without error.
+    // No `dir`: avoids H2 guard (see above); the invariant checks are on the
+    // capacity/reserve fields which are validated regardless of whether dir is set.
+    let toml = audit_validate_toml("[audit]\n");
+    let cfg: DaemonConfig = toml::from_str(&toml).unwrap();
+    assert_eq!(cfg.audit.channel_capacity, 4096);
+    assert_eq!(cfg.audit.fail_closed_reserve, 256);
+    assert!(cfg.validate().is_ok(), "audit defaults must validate OK");
 }

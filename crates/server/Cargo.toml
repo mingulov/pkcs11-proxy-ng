@@ -13,6 +13,8 @@ path = "src/main.rs"
 pkcs11-proxy-ng-types = { path = "../types" }
 pkcs11-proxy-ng-proto = { path = "../proto" }
 pkcs11-proxy-ng-backend = { path = "../backend" }
+pkcs11-proxy-ng-audit = { path = "../audit" }
+serde_json.workspace = true
 clap.workspace = true
 # Daemon: server-side transport (`Server::builder().add_service`) needs `server`
 # + `router`; `codegen` for the generated service trait; `tls-ring` for mTLS.
@@ -28,6 +30,7 @@ dashmap.workspace = true
 x509-parser.workspace = true
 tonic-health.workspace = true
 sha2.workspace = true
+hex.workspace = true
 zeroize.workspace = true
 tokio-stream = "0.1"
 tower = "0.5"

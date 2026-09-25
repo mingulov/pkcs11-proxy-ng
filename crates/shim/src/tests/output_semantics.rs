@@ -71,6 +71,7 @@ impl TestDaemon {
                     CkMechanismType::RSA_PKCS,
                     CkMechanismType::AES_ECB,
                     CkMechanismType::AES_GCM,
+                    CkMechanismType::AES_KEY_GEN,
                 ],
             )
             .with_abi(abi);
@@ -214,10 +215,15 @@ fn rsa_pkcs_mechanism() -> CK_MECHANISM {
     CK_MECHANISM { mechanism: CKM_RSA_PKCS, pParameter: std::ptr::null_mut(), ulParameterLen: 0 }
 }
 
-fn expected_mock_digest(data: &[u8]) -> [u8; 4] {
-    pkcs11_proxy_ng_backend::mock::echo::echo_bytes("digest", &[data], 4)
+/// SHA-256 digest length — the mechanism these digest tests initialize
+/// with (`sha256_mechanism`). The mock now sizes digest output by
+/// mechanism (mock::output_lengths), so the expectation follows suit.
+const SHA256_DIGEST_LEN: usize = 32;
+
+fn expected_mock_digest(data: &[u8]) -> [u8; SHA256_DIGEST_LEN] {
+    pkcs11_proxy_ng_backend::mock::echo::echo_bytes("digest", &[data], SHA256_DIGEST_LEN)
         .try_into()
-        .expect("4 bytes")
+        .expect("SHA-256 length")
 }
 
 fn expected_mock_sign(data: &[u8]) -> [u8; 2] {
@@ -230,10 +236,10 @@ fn expected_mock_sign_final() -> [u8; 2] {
         .expect("2 bytes")
 }
 
-fn expected_mock_digest_final() -> [u8; 4] {
-    pkcs11_proxy_ng_backend::mock::echo::echo_bytes("digest-final", &[], 4)
+fn expected_mock_digest_final() -> [u8; SHA256_DIGEST_LEN] {
+    pkcs11_proxy_ng_backend::mock::echo::echo_bytes("digest-final", &[], SHA256_DIGEST_LEN)
         .try_into()
-        .expect("4 bytes")
+        .expect("SHA-256 length")
 }
 
 pub(super) fn create_object(session: CK_SESSION_HANDLE) -> CK_OBJECT_HANDLE {
@@ -765,9 +771,9 @@ fn cached_size_query_result_is_not_reused_after_digest_reinit() {
         )
     };
     assert_eq!(first_rv, CKR_OK as CK_RV);
-    assert_eq!(first_len, 4);
+    assert_eq!(first_len as usize, SHA256_DIGEST_LEN);
 
-    let mut first_out = [0_u8; 4];
+    let mut first_out = [0_u8; SHA256_DIGEST_LEN];
     let mut first_out_len = first_out.len() as CK_ULONG;
     let first_data_rv = unsafe {
         dispatch::general::c_digest(
@@ -784,7 +790,7 @@ fn cached_size_query_result_is_not_reused_after_digest_reinit() {
     assert_eq!(reinit_rv, CKR_OK as CK_RV);
 
     let second = b"bb";
-    let mut out = [0_u8; 4];
+    let mut out = [0_u8; SHA256_DIGEST_LEN];
     let mut out_len = out.len() as CK_ULONG;
     let second_rv = unsafe {
         dispatch::general::c_digest(
@@ -821,7 +827,7 @@ fn digest_init_null_mechanism_cancels_active_digest_operation() {
     let cancel_rv = unsafe { dispatch::general::c_digest_init(shim.session, std::ptr::null_mut()) };
     assert_eq!(cancel_rv, CKR_OK as CK_RV, "C_DigestInit(NULL_PTR)");
 
-    let mut out = [0_u8; 4];
+    let mut out = [0_u8; SHA256_DIGEST_LEN];
     let mut out_len = out.len() as CK_ULONG;
     let final_rv =
         unsafe { dispatch::general::c_digest_final(shim.session, out.as_mut_ptr(), &mut out_len) };
@@ -985,9 +991,9 @@ fn one_shot_digest_output_is_not_replayed_through_digest_final() {
         )
     };
     assert_eq!(digest_rv, CKR_OK as CK_RV);
-    assert_eq!(len, 4);
+    assert_eq!(len as usize, SHA256_DIGEST_LEN);
 
-    let mut digest_out = [0_u8; 4];
+    let mut digest_out = [0_u8; SHA256_DIGEST_LEN];
     let mut digest_out_len = digest_out.len() as CK_ULONG;
     let digest_data_rv = unsafe {
         dispatch::general::c_digest(
@@ -1000,7 +1006,7 @@ fn one_shot_digest_output_is_not_replayed_through_digest_final() {
     };
     assert_eq!(digest_data_rv, CKR_OK as CK_RV);
 
-    let mut out = [0_u8; 4];
+    let mut out = [0_u8; SHA256_DIGEST_LEN];
     let mut out_len = out.len() as CK_ULONG;
     let final_rv =
         unsafe { dispatch::general::c_digest_final(shim.session, out.as_mut_ptr(), &mut out_len) };
@@ -1038,7 +1044,7 @@ fn cached_operation_state_is_not_reused_after_set_operation_state() {
     assert_eq!(close_rv, CKR_OK as CK_RV);
 
     let data = b"digest";
-    let mut digest_out = [0_u8; 4];
+    let mut digest_out = [0_u8; SHA256_DIGEST_LEN];
     let mut digest_len = digest_out.len() as CK_ULONG;
     let digest_rv = unsafe {
         dispatch::general::c_digest(
@@ -1088,9 +1094,9 @@ fn restored_operation_clears_stale_output_byte_caches() {
         )
     };
     assert_eq!(stale_rv, CKR_OK as CK_RV);
-    assert_eq!(stale_len, 4);
+    assert_eq!(stale_len as usize, SHA256_DIGEST_LEN);
 
-    let mut stale_out = [0_u8; 4];
+    let mut stale_out = [0_u8; SHA256_DIGEST_LEN];
     let mut stale_out_len = stale_out.len() as CK_ULONG;
     let stale_data_rv = unsafe {
         dispatch::general::c_digest(
@@ -1135,7 +1141,7 @@ fn restored_operation_clears_stale_output_byte_caches() {
     assert_eq!(restore_rv, CKR_OK as CK_RV);
 
     let fresh_data = b"fresh";
-    let mut digest_out = [0_u8; 4];
+    let mut digest_out = [0_u8; SHA256_DIGEST_LEN];
     let mut digest_len = digest_out.len() as CK_ULONG;
     let digest_rv = unsafe {
         dispatch::general::c_digest(
@@ -1218,7 +1224,7 @@ fn cached_operation_state_is_not_reused_after_operation_reinit() {
     assert_eq!(cached_len, 3);
 
     let data = b"digest";
-    let mut digest_out = [0_u8; 4];
+    let mut digest_out = [0_u8; SHA256_DIGEST_LEN];
     let mut digest_len = digest_out.len() as CK_ULONG;
     let digest_rv = unsafe {
         dispatch::general::c_digest(
@@ -1266,7 +1272,7 @@ fn exact_digest_size_query_returns_length_without_copy() {
     };
     assert_eq!(size_rv, CKR_OK as CK_RV, "C_Digest(size query)");
     // Mock digest returns 4 bytes (sum of input bytes as u32 big-endian)
-    assert_eq!(out_len, 4, "returned_len should be 4");
+    assert_eq!(out_len as usize, SHA256_DIGEST_LEN, "returned_len is the SHA-256 length");
 
     let mut too_small = [0_u8; 1];
     let mut too_small_len = too_small.len() as CK_ULONG;
@@ -1280,9 +1286,12 @@ fn exact_digest_size_query_returns_length_without_copy() {
         )
     };
     assert_eq!(too_small_rv, CKR_BUFFER_TOO_SMALL as CK_RV, "C_Digest(too small)");
-    assert_eq!(too_small_len, 4, "too-small call should return required length");
+    assert_eq!(
+        too_small_len as usize, SHA256_DIGEST_LEN,
+        "too-small call returns the required length"
+    );
 
-    let mut out = [0_u8; 4];
+    let mut out = [0_u8; SHA256_DIGEST_LEN];
     let mut data_len = out.len() as CK_ULONG;
     let data_rv = unsafe {
         dispatch::general::c_digest(
@@ -1294,7 +1303,7 @@ fn exact_digest_size_query_returns_length_without_copy() {
         )
     };
     assert_eq!(data_rv, CKR_OK as CK_RV, "C_Digest(data query)");
-    assert_eq!(data_len, 4, "data query returned_len should be 4");
+    assert_eq!(data_len as usize, SHA256_DIGEST_LEN, "data query returned_len");
     assert_eq!(out, expected_mock_digest(data), "mock digest output is the echo bytes");
 }
 
@@ -1324,7 +1333,7 @@ fn exact_digest_final_size_query_does_not_consume_state() {
         dispatch::general::c_digest_final(shim.session, std::ptr::null_mut(), &mut out_len)
     };
     assert_eq!(size_rv, CKR_OK as CK_RV, "C_DigestFinal(size query)");
-    assert_eq!(out_len, 4, "size query returned_len should be 4");
+    assert_eq!(out_len as usize, SHA256_DIGEST_LEN, "size query returned_len");
 
     let mut too_small = [0_u8; 1];
     let mut too_small_len = too_small.len() as CK_ULONG;
@@ -1332,14 +1341,17 @@ fn exact_digest_final_size_query_does_not_consume_state() {
         dispatch::general::c_digest_final(shim.session, too_small.as_mut_ptr(), &mut too_small_len)
     };
     assert_eq!(too_small_rv, CKR_BUFFER_TOO_SMALL as CK_RV, "C_DigestFinal(too small)");
-    assert_eq!(too_small_len, 4, "too-small call should return required length");
+    assert_eq!(
+        too_small_len as usize, SHA256_DIGEST_LEN,
+        "too-small call returns the required length"
+    );
 
-    let mut out = [0_u8; 4];
+    let mut out = [0_u8; SHA256_DIGEST_LEN];
     let mut data_len = out.len() as CK_ULONG;
     let data_rv =
         unsafe { dispatch::general::c_digest_final(shim.session, out.as_mut_ptr(), &mut data_len) };
     assert_eq!(data_rv, CKR_OK as CK_RV, "C_DigestFinal(data query)");
-    assert_eq!(data_len, 4, "data query returned_len should be 4");
+    assert_eq!(data_len as usize, SHA256_DIGEST_LEN, "data query returned_len");
     assert_eq!(out, expected_mock_digest_final(), "mock digest_final output is the echo bytes");
 }
 
@@ -2741,9 +2753,9 @@ fn mechanism_list_count_reflects_filtered_count() {
         dispatch::general::c_get_mechanism_list(shim.slot_id, std::ptr::null_mut(), &mut count)
     };
     assert_eq!(rv, CKR_OK as CK_RV, "C_GetMechanismList(count-only)");
-    // MockBackend has 4 mechanisms: SHA256, RSA_PKCS, AES_ECB, AES_GCM.
+    // MockBackend has 5 mechanisms: SHA256, RSA_PKCS, AES_ECB, AES_GCM, AES_KEY_GEN.
     // Default registry is Transparent mode, so all 4 pass through.
-    assert_eq!(count, 4, "expected 4 mechanisms from MockBackend (transparent mode)");
+    assert_eq!(count, 5, "expected 5 mechanisms from MockBackend (transparent mode)");
 
     // Fetch into a correctly sized buffer.
     let mut mechs = vec![0 as CK_MECHANISM_TYPE; count as usize];

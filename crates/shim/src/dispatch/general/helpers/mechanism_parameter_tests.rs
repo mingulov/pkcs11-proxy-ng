@@ -238,7 +238,7 @@ fn reads_signature_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::Xeddsa(params) => {
-            assert_eq!(params.hash, CkMechanismType::SHA256.0 as _);
+            assert_eq!(params.hash, CkMechanismType::SHA256.0 as u64);
         }
         other => panic!("unexpected XEdDSA params: {other:?}"),
     }
@@ -392,7 +392,7 @@ fn wrap_key_reader_uses_v32_aead_wrap_shapes() {
     match unsafe { read_wrap_key_mechanism(&mechanism) }.params.expect("params") {
         CkMechanismParams::GcmWrap(GcmWrapParams { iv, iv_generator, aad, .. }) => {
             assert_eq!(iv, [0x11; 12]);
-            assert_eq!(iv_generator, CKG_GENERATE as _);
+            assert_eq!(iv_generator, CKG_GENERATE as u64);
             assert_eq!(aad, [0xA1, 0xA2]);
         }
         other => panic!("unexpected GCM wrap-key params: {other:?}"),
@@ -426,7 +426,7 @@ fn wrap_key_reader_uses_v32_aead_wrap_shapes() {
         }) => {
             assert_eq!(data_len, 16);
             assert_eq!(nonce, [0x22; 12]);
-            assert_eq!(nonce_generator, CKG_GENERATE as _);
+            assert_eq!(nonce_generator, CKG_GENERATE as u64);
             assert_eq!(aad, [0xB1, 0xB2, 0xB3]);
             assert_eq!(mac_len, 16);
         }
@@ -983,7 +983,7 @@ fn reads_tls_ssl_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::TlsMac(params) => {
-            assert_eq!(params.prf_hash_mechanism, CkMechanismType::SHA256.0 as _);
+            assert_eq!(params.prf_hash_mechanism, CkMechanismType::SHA256.0 as u64);
             assert_eq!(params.mac_length, 32);
             assert_eq!(params.server_or_client, 1);
         }
@@ -1046,7 +1046,7 @@ fn reads_tls_ssl_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::TlsKdf(params) => {
-            assert_eq!(params.prf_mechanism, CkMechanismType::SHA384.0 as _);
+            assert_eq!(params.prf_mechanism, CkMechanismType::SHA384.0 as u64);
             assert_eq!(params.label, vec![0x33, 0x34]);
             assert_eq!(params.random_info.client_random, vec![0x11; 4]);
             assert_eq!(params.random_info.server_random, vec![0x22; 4]);
@@ -1104,7 +1104,7 @@ fn reads_tls_ssl_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::Tls12ExtendedMasterKeyDerive(params) => {
-            assert_eq!(params.prf_hash_mechanism, CkMechanismType::SHA512.0 as _);
+            assert_eq!(params.prf_hash_mechanism, CkMechanismType::SHA512.0 as u64);
             assert_eq!(params.session_hash, vec![0x61; 8]);
             assert_eq!(params.version_major, 3);
             assert_eq!(params.version_minor, 3);
@@ -1146,7 +1146,7 @@ fn reads_kdf_and_legacy_agreement_parameter_structs() {
         CkMechanismParams::Hkdf(params) => {
             assert!(params.extract);
             assert!(params.expand);
-            assert_eq!(params.prf_hash_mechanism, CkMechanismType::SHA256.0 as _);
+            assert_eq!(params.prf_hash_mechanism, CkMechanismType::SHA256.0 as u64);
             assert_eq!(params.salt_type, 1);
             assert_eq!(params.salt, vec![0xA1, 0xA2, 0xA3]);
             assert_eq!(params.salt_key_handle, 0x1234);
@@ -1490,7 +1490,7 @@ fn reads_ike_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::IkePrfDerive(params) => {
-            assert_eq!(params.prf_mechanism, CkMechanismType::SHA256.0 as _);
+            assert_eq!(params.prf_mechanism, CkMechanismType::SHA256.0 as u64);
             assert!(params.data_as_key);
             assert!(!params.rekey);
             assert_eq!(params.ni, vec![0xA1, 0xA2, 0xA3]);
@@ -1523,7 +1523,7 @@ fn reads_ike_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::Ike1PrfDerive(params) => {
-            assert_eq!(params.prf_mechanism, CkMechanismType::SHA384.0 as _);
+            assert_eq!(params.prf_mechanism, CkMechanismType::SHA384.0 as u64);
             assert!(params.has_prev_key);
             assert_eq!(params.keygxy_handle, 0x2345);
             assert_eq!(params.prev_key_handle, 0x3456);
@@ -1552,7 +1552,7 @@ fn reads_ike_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::Ike1ExtendedDerive(params) => {
-            assert_eq!(params.prf_mechanism, CkMechanismType::SHA512.0 as _);
+            assert_eq!(params.prf_mechanism, CkMechanismType::SHA512.0 as u64);
             assert!(params.has_keygxy);
             assert_eq!(params.keygxy_handle, 0x4567);
             assert_eq!(params.extra_data, vec![0xE1, 0xE2, 0xE3, 0xE4]);
@@ -1578,7 +1578,7 @@ fn reads_ike_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::Ike2PrfPlusDerive(params) => {
-            assert_eq!(params.prf_mechanism, CkMechanismType::SHA256.0 as _);
+            assert_eq!(params.prf_mechanism, CkMechanismType::SHA256.0 as u64);
             assert!(params.has_seed_key);
             assert_eq!(params.seed_key_handle, 0x5678);
             assert_eq!(params.seed_data, vec![0xF1, 0xF2, 0xF3]);
@@ -1615,7 +1615,7 @@ fn reads_wtls_prf_and_x942_mqv_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::WtlsPrf(params) => {
-            assert_eq!(params.digest_mechanism, CkMechanismType::SHA256.0 as _);
+            assert_eq!(params.digest_mechanism, CkMechanismType::SHA256.0 as u64);
             assert_eq!(params.seed, vec![0xA1, 0xA2, 0xA3]);
             assert_eq!(params.label, vec![0xB1, 0xB2]);
             assert_eq!(params.output_len, 12);
@@ -2217,7 +2217,7 @@ fn sp800_108_feedback_reads_additional_keys_and_writes_handles_back() {
 
     match unsafe { read_ck_mechanism(&mechanism) } {
         CkMechanismParams::Sp800108FeedbackKdf(params) => {
-            assert_eq!(params.prf_type, CKM_SHA256_HMAC as _);
+            assert_eq!(params.prf_type, CKM_SHA256_HMAC as u64);
             assert_eq!(params.iv, vec![0xA5; 16]);
             assert_eq!(params.additional_derived_keys.len(), 1);
             let derived = &params.additional_derived_keys[0];
