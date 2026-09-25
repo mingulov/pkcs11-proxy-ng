@@ -45,6 +45,18 @@ harness_locate_softhsm32() {
         /usr/lib32/softhsm/libsofthsm2.so)"
 }
 
+# Sets NSS_MODULE_32 ("" when absent). Probes a system i386 install
+# first, then the nightly extract path (/opt: the i386 NSS closure is
+# extracted beside the system, like the i386 SoftHSM2 copy). A
+# pre-exported non-empty NSS_MODULE_32 is honoured as-is (non-root
+# extracted copies).
+harness_locate_nss32() {
+    [[ -n "${NSS_MODULE_32:-}" ]] && return 0
+    NSS_MODULE_32="$(harness_first_existing \
+        /usr/lib/i386-linux-gnu/libsoftokn3.so \
+        /opt/nss32-i386/usr/lib/i386-linux-gnu/libsoftokn3.so)"
+}
+
 # ── Workspace, token, cleanup ────────────────────────────────────────
 DAEMON_PID=""
 

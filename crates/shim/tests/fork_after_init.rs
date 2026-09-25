@@ -1,3 +1,6 @@
+#![cfg(unix)]
+// fork(2)/waitpid(2) test with no Windows equivalent; excluded from the Windows compile lane.
+
 //! Concurrency-audit test for fork-after-C_Initialize.
 //!
 //! PKCS#11 v3.0 §5.4 says behaviour after `fork()` is undefined.

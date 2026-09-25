@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Windows x64/MSVC native daemon consuming Windows provider DLLs, with the
+  Windows x64 PKCS#11 client shim, in both interoperation directions —
+  qualified on real Windows Server 2022 (T6 legs A/B/C receipts).
+- Per-PR Tier 0f `windows-client-llp64` Windows compile gate
+  (`cargo xwin build --target x86_64-pc-windows-msvc --all-targets`).
+- Deterministic Windows ZIP bundle via `scripts/release-windows.sh`
+  (`pkcs11-proxy-ng-v0.2.0-x86_64-pc-windows-msvc.zip` + `SHA256SUMS-windows`),
+  appended to the tag release by the `release-windows` job.
+- 32-bit NSS-i386 second-provider width leg
+  (`scripts/run-cross-width-nss32-live-test.sh`, nightly) alongside the four
+  Linux legs in `scripts/run-cross-width-live-test.sh`.
+- Windows abnormal-stop contract: `TerminateProcess(GetCurrentProcess(), 70)`
+  backstop arm on the qualified Windows host (see the native ownership
+  contract); `abort()` ruled out.
+
+### Changed
+
+- `pkcs11-module` is now consumed as a rev-pinned git dependency from
+  `https://github.com/mingulov/pkcs11-components` (which also provides the
+  `pkcs11-abi` layout catalog) instead of the nested `crates/module`; the
+  nested crate is removed. The backend keeps using the same
+  `pkcs11_module::{function_list, tables::{...}}` API via the upstream
+  re-export, so runtime behavior is unchanged. `pkcs11-proxy-ng-types` stays
+  nested: it carries proxy-specific exact-output contracts and registry
+  policy (effect validation, apply flags, operator exclusion, wiping secret
+  owners) that the generic upstream `pkcs11-types` does not provide.
+
+### Fixed
+
+- Daemon SIGSEGV on 0-length attribute buffers: empty exact-output buffers now
+  cross FFI as NULL `pValue`, and the daemon synthesizes
+  `CKR_BUFFER_TOO_SMALL` for lenient backends instead of crashing.
+- Remaining empty-buffer FFI conversion sites hardened to the same NULL
+  convention.
+
 ## [0.2.0] - 2026-09-15
 
 ### Added
@@ -77,7 +114,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   discovery in every discovery mode — unlike a filtered allowlist,
   which only hides. Exclusions travel to shims in the new
   `MechanismRegistryPayload.excluded` field (absent from older
-  daemons, treated as empty). The FIPS example hard-excludes 73
+  daemons, treated as empty). The FIPS example hard-excludes 74
   historical mechanisms (MD2/MD5, RC2/RC4, single-DES, CAST, IDEA,
   SEED, Camellia, ARIA, including parameterized variants) so a FIPS
   deployment no longer forwards them on direct invocation.

@@ -68,3 +68,48 @@ impl FfiBackend {
         InterfaceCapabilities { interfaces }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use pkcs11_module::tables::{
+        FUNCTION_LIST_3_0_EXTRA_FIELDS, FUNCTION_LIST_3_2_EXTRA_FIELDS, FUNCTION_LIST_FIELDS,
+        Surface, TableSet, tables_for,
+    };
+
+    fn walked_field_count(set: TableSet) -> Option<usize> {
+        match set {
+            TableSet::Walk(spans) | TableSet::WalkKnownPrefix(spans) => {
+                Some(spans.iter().map(|span| span.fields().len()).sum())
+            }
+            TableSet::Refuse => None,
+        }
+    }
+
+    #[test]
+    fn upstream_function_tables_expose_104_standard_fields() {
+        // Pinned contract with the pkcs11-components git dependency: the
+        // capability scan and the OASIS inventory both assume the
+        // 68 + 24 + 12 standard catalog.
+        assert_eq!(FUNCTION_LIST_FIELDS.len(), 68);
+        assert_eq!(FUNCTION_LIST_3_0_EXTRA_FIELDS.len(), 24);
+        assert_eq!(FUNCTION_LIST_3_2_EXTRA_FIELDS.len(), 12);
+    }
+
+    #[test]
+    fn capability_scan_surfaces_walk_known_prefixes() {
+        let legacy = Surface::LegacyFunctionList {
+            version: cryptoki_sys::CK_VERSION { major: 2, minor: 40 },
+        };
+        assert_eq!(walked_field_count(tables_for(legacy)), Some(68));
+        for (major, minor, expected) in [(3u8, 0u8, 92), (3, 1, 92), (3, 2, 104)] {
+            let surface =
+                Surface::StandardInterface { version: cryptoki_sys::CK_VERSION { major, minor } };
+            assert_eq!(walked_field_count(tables_for(surface)), Some(expected));
+        }
+        // Unknown 2.x standard interfaces are refused, never walked.
+        let bogus = Surface::StandardInterface {
+            version: cryptoki_sys::CK_VERSION { major: 2, minor: 30 },
+        };
+        assert_eq!(walked_field_count(tables_for(bogus)), None);
+    }
+}

@@ -3327,8 +3327,8 @@ fn oasis_inventory_tracks_digest_xof_as_explicit_abi_decision() {
                 .as_array()
                 .expect("XOF ABI decision evidence should be an array")
                 .iter()
-                .any(|source| source == "crates/module/src/tables.rs"),
-            "{function} should cite the local function-list field table checked for ABI exposure"
+                .any(|source| source == "pkcs11-abi:crates/abi/src/layout.rs"),
+            "{function} should cite the upstream pkcs11-abi field catalog checked for ABI exposure"
         );
         assert!(
             entry["spec_sources"]

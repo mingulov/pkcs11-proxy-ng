@@ -26,7 +26,7 @@ fn backend_with_oracle_provider() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_
     functions.C_EncryptInit = Some(oracle::provider::encrypt_init);
     functions.C_Encrypt = Some(oracle::provider::encrypt);
     let backend = FfiBackend {
-        _lib: libloading::os::unix::Library::this().into(),
+        _lib: crate::ffi::loading::test_library_handle(),
         func_list: functions.as_mut(),
         func_list_3_0: None,
         func_list_3_2: None,
@@ -40,6 +40,7 @@ fn backend_with_oracle_provider() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_
         // consuming it; never backs production dispatch (C3M.4).
         construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
         lifecycle: Default::default(),
+        retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(),
     };
     (backend, functions)
 }
@@ -259,6 +260,7 @@ fn oracle_gate_holds_native_entry_until_released() {
     }
 }
 
+#[cfg_attr(miri, ignore = "Miri cannot dlopen; covered natively")]
 #[test]
 fn native_owner_call_readback_is_one_transaction() {
     let _guard = oracle::acquire_test_serial();

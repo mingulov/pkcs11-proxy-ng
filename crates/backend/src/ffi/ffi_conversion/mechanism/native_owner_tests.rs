@@ -29,9 +29,11 @@ fn native_owner_pss_retained_root_survives_moves_and_snapshots() {
     assert!(!parameter_pointer.is_null(), "PSS keeps a live parameter root");
     // SAFETY: the owner is alive and unchanged; read once before the move.
     let before = unsafe { (parameter_pointer.cast::<CK_RSA_PKCS_PSS_PARAMS>()).read_unaligned() };
-    assert_eq!(before.hashAlg, CkMechanismType::SHA256.0 as cryptoki_sys::CK_MECHANISM_TYPE);
-    assert_eq!(before.mgf, 1);
-    assert_eq!(before.sLen, 32);
+    // E0793: params structs are packed on Windows; assert on by-value copies.
+    let (before_hash_alg, before_mgf, before_s_len) = (before.hashAlg, before.mgf, before.sLen);
+    assert_eq!(before_hash_alg, CkMechanismType::SHA256.0 as cryptoki_sys::CK_MECHANISM_TYPE);
+    assert_eq!(before_mgf, 1);
+    assert_eq!(before_s_len, 32);
 
     // Move the owner the way session caches do: Box, then Vec growth.
     let boxed_owner = Box::new(ffi);
@@ -40,16 +42,17 @@ fn native_owner_pss_retained_root_survives_moves_and_snapshots() {
     owners.reserve(8);
     let moved_owner = owners.pop().expect("moved owner remains present");
 
+    let moved_p_parameter = moved_owner.ck_mechanism().pParameter;
     assert_eq!(
-        moved_owner.ck_mechanism().pParameter,
-        parameter_pointer,
+        moved_p_parameter, parameter_pointer,
         "owner move preserves the retained native root address"
     );
     // SAFETY: the moved owner is alive; the snapshot must read the same root.
     let after = unsafe {
         (moved_owner.ck_mechanism().pParameter.cast::<CK_RSA_PKCS_PSS_PARAMS>()).read_unaligned()
     };
-    assert_eq!(after.hashAlg, before.hashAlg, "snapshot survives the owner move");
-    assert_eq!(after.mgf, before.mgf, "snapshot survives the owner move");
-    assert_eq!(after.sLen, before.sLen, "snapshot survives the owner move");
+    let (after_hash_alg, after_mgf, after_s_len) = (after.hashAlg, after.mgf, after.sLen);
+    assert_eq!(after_hash_alg, before_hash_alg, "snapshot survives the owner move");
+    assert_eq!(after_mgf, before_mgf, "snapshot survives the owner move");
+    assert_eq!(after_s_len, before_s_len, "snapshot survives the owner move");
 }
