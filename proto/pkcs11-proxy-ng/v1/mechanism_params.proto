@@ -13,6 +13,8 @@ message RsaPkcsOaepParams {
   uint64 mgf = 2;
   uint64 source = 3;
   bytes source_data = 4;
+  // Wave 3.5 D2: true => caller passed (NULL, 0) for pSourceData.
+  bool source_null = 5;
 }
 
 // CK_GCM_PARAMS — AES-GCM authenticated encryption parameters.
@@ -27,6 +29,9 @@ message GcmParams {
   bytes aad = 3;
   uint64 tag_bits = 4;
   uint64 iv_buffer_len = 5;
+  // Wave 3.5 D2: true => caller passed (NULL, 0) for pIv / pAAD.
+  bool iv_null = 6;
+  bool aad_null = 7;
 }
 
 // CK_ECDH1_DERIVE_PARAMS — ECDH key derivation parameters (PKCS#11 §2.3.3).

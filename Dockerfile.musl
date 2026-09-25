@@ -1,0 +1,48 @@
+# Dockerfile.musl — static musl build image (T4).
+#
+# x86_64 builder that compiles the release bundle (daemon,
+# `pkcs11-proxy-ng-cli`, shim cdylib) for
+# `x86_64-unknown-linux-musl`. The workspace is mounted at /workspace
+# at run time (see scripts/run-musl-test.sh); nothing is copied at
+# build time, so this image never goes stale.
+#
+# The Alpine execution proof runs in a stock `alpine:` container, not
+# here — this image only carries the cross toolchain.
+#
+# Usage (via the script):
+#   scripts/run-musl-test.sh
+#
+# Manual equivalent:
+#   docker build -f Dockerfile.musl -t pkcs11-proxy-ng-musl .
+#   docker run --rm -v "$PWD:/workspace:ro" -v musl-cargo-cache:/root/.cargo \
+#     -e CARGO_TARGET_DIR=/tmp/musl-target pkcs11-proxy-ng-musl \
+#     cargo build --release --target x86_64-unknown-linux-musl \
+#       -p pkcs11-proxy-ng -p pkcs11-proxy-ng-cli
+
+FROM debian:13.6
+
+# Pinned to the receipted toolchain (see doc/release/musl-tier.md); override with
+# --build-arg RUST_TOOLCHAIN=<version> to re-validate against a newer rustc.
+ARG RUST_TOOLCHAIN=1.98.1
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        ca-certificates curl git pkg-config python3 \
+        gcc libc6-dev musl-tools \
+        protobuf-compiler file \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain "${RUST_TOOLCHAIN}" --profile minimal \
+        --target x86_64-unknown-linux-musl
+
+ENV PATH="/root/.cargo/bin:${PATH}"
+# musl-tools ships `musl-gcc` (there is no triplet-prefixed
+# x86_64-linux-musl-gcc on Debian/Ubuntu — that name was the freeze-gate
+# failure): it is both the Rust target linker and the C compiler that
+# ring's build script needs (via the CC_<target> env). Set here so the
+# CI leg and manual runs share the exact same settings.
+ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="musl-gcc"
+ENV CC_x86_64_unknown_linux_musl="musl-gcc"
+
+WORKDIR /workspace

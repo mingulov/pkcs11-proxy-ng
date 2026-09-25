@@ -268,8 +268,11 @@ fn ordinary_wrap_error_iv_effect_matches_one_shot_rule() {
             iv: vec![0x11; 12],
             iv_bits: 96,
             iv_buffer_len: 12,
-            aad: vec![],
+            aad: vec![].into(),
             tag_bits: 128,
+
+            iv_null: false,
+            aad_null: false,
         })),
     };
     let (output, effects) = b

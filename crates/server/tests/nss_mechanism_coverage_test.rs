@@ -309,21 +309,22 @@ async fn nss_aes_cbc_encrypt_decrypt_parameterized() -> Result<(), String> {
         },
     ];
 
-    let aes_key = match client.generate_key(session, &aes_keygen_mechanism, &aes_template).await {
-        Ok(key) => key,
-        Err(rv) => {
-            record_skip!(support::SkipReason::MechanismUnsupported {
-                provider: "nss-softokn",
-                mechanism: "CKM_AES_KEY_GEN",
-            });
-            eprintln!("AES key generation not supported on this slot: {rv}");
-            client.logout(session).await.map_err(|rv| rv.to_string())?;
-            client.close_session(session).await.map_err(|rv| rv.to_string())?;
-            client.finalize().await.map_err(|rv| rv.to_string())?;
-            daemon.shutdown().await?;
-            return Ok(());
-        }
-    };
+    let aes_key =
+        match client.generate_key(session, &aes_keygen_mechanism, Some(&aes_template)).await {
+            Ok(key) => key,
+            Err(rv) => {
+                record_skip!(support::SkipReason::MechanismUnsupported {
+                    provider: "nss-softokn",
+                    mechanism: "CKM_AES_KEY_GEN",
+                });
+                eprintln!("AES key generation not supported on this slot: {rv}");
+                client.logout(session).await.map_err(|rv| rv.to_string())?;
+                client.close_session(session).await.map_err(|rv| rv.to_string())?;
+                client.finalize().await.map_err(|rv| rv.to_string())?;
+                daemon.shutdown().await?;
+                return Ok(());
+            }
+        };
 
     // Build CKM_AES_CBC mechanism with a 16-byte IV.
     let iv = vec![
@@ -431,21 +432,22 @@ async fn nss_aes_gcm_encrypt_decrypt_parameterized() -> Result<(), String> {
         },
     ];
 
-    let aes_key = match client.generate_key(session, &aes_keygen_mechanism, &aes_template).await {
-        Ok(key) => key,
-        Err(rv) => {
-            record_skip!(support::SkipReason::MechanismUnsupported {
-                provider: "nss-softokn",
-                mechanism: "CKM_AES_KEY_GEN",
-            });
-            eprintln!("AES key generation not supported on this slot: {rv}");
-            client.logout(session).await.map_err(|rv| rv.to_string())?;
-            client.close_session(session).await.map_err(|rv| rv.to_string())?;
-            client.finalize().await.map_err(|rv| rv.to_string())?;
-            daemon.shutdown().await?;
-            return Ok(());
-        }
-    };
+    let aes_key =
+        match client.generate_key(session, &aes_keygen_mechanism, Some(&aes_template)).await {
+            Ok(key) => key,
+            Err(rv) => {
+                record_skip!(support::SkipReason::MechanismUnsupported {
+                    provider: "nss-softokn",
+                    mechanism: "CKM_AES_KEY_GEN",
+                });
+                eprintln!("AES key generation not supported on this slot: {rv}");
+                client.logout(session).await.map_err(|rv| rv.to_string())?;
+                client.close_session(session).await.map_err(|rv| rv.to_string())?;
+                client.finalize().await.map_err(|rv| rv.to_string())?;
+                daemon.shutdown().await?;
+                return Ok(());
+            }
+        };
 
     // Build CKM_AES_GCM mechanism with GcmParams.
     let iv = vec![0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B]; // 12 bytes
@@ -456,8 +458,11 @@ async fn nss_aes_gcm_encrypt_decrypt_parameterized() -> Result<(), String> {
             iv: iv.clone(),
             iv_bits: 96, // 12 bytes * 8
             iv_buffer_len: iv.len() as u64,
-            aad: aad.clone(),
+            aad: aad.clone().into(),
             tag_bits: 128,
+
+            iv_null: false,
+            aad_null: false,
         })),
     };
 
@@ -509,8 +514,11 @@ async fn nss_aes_gcm_encrypt_decrypt_parameterized() -> Result<(), String> {
             iv,
             iv_bits: 96,
             iv_buffer_len: 12,
-            aad,
+            aad: aad.into(),
             tag_bits: 128,
+
+            iv_null: false,
+            aad_null: false,
         })),
     };
     client

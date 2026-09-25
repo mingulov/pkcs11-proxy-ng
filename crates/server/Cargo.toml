@@ -45,9 +45,14 @@ tower-layer = "0.3"
 tower-service = "0.3"
 futures = "0.3"
 http = "1"
+bytes = "1"
+http-body = "1"
+http-body-util = "0.1"
 
 [dev-dependencies]
 pkcs11-proxy-ng-client = { path = "../client" }
+hyper = { version = "1", features = ["client", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 libloading.workspace = true
 tempfile = "3"
 rcgen = "0.14"

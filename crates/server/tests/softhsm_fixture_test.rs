@@ -247,15 +247,15 @@ async fn token_object_persists_across_sessions() -> Result<(), String> {
         },
         CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(label.to_string())),
+            value: Some(CkAttributeValue::String(label.to_string().into())),
         },
         CkAttribute {
             attr_type: CkAttributeType::VALUE,
-            value: Some(CkAttributeValue::Bytes(b"persistent payload".to_vec())),
+            value: Some(CkAttributeValue::Bytes(b"persistent payload".to_vec().into())),
         },
     ];
     client
-        .create_object(session1, &template)
+        .create_object(session1, Some(&template))
         .await
         .map_err(|rv| format!("C_CreateObject failed: {rv}"))?;
 
@@ -345,7 +345,7 @@ async fn persistent_key_survives_session_close() -> Result<(), String> {
         value: Some(CkAttributeValue::Ulong(CkObjectClass::PRIVATE_KEY.0)),
     }];
     client
-        .find_objects_init(session2, &template)
+        .find_objects_init(session2, Some(&template))
         .await
         .map_err(|rv| format!("FindObjectsInit failed: {rv}"))?;
     let keys = client
@@ -369,7 +369,7 @@ async fn persistent_key_survives_session_close() -> Result<(), String> {
         value: Some(CkAttributeValue::Ulong(CkObjectClass::PUBLIC_KEY.0)),
     }];
     client
-        .find_objects_init(session2, &pub_template)
+        .find_objects_init(session2, Some(&pub_template))
         .await
         .map_err(|rv| format!("FindObjectsInit failed: {rv}"))?;
     let pub_keys = client

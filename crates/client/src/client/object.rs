@@ -6,14 +6,15 @@ impl Pkcs11Client {
     pub async fn find_objects_init(
         &mut self,
         session: CkSessionHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<()> {
         let ctx = self.context_id()?;
-        let proto_template = Self::proto_template(template);
+        let proto_template = Self::proto_template(template.unwrap_or(&[]));
         let req = pkcs11_proxy_ng_proto::FindObjectsInitRequest {
             client_context_id: ctx,
             session_handle: session.0,
             template: proto_template,
+            template_null: template.is_none(),
         };
         pkcs11_unary_ok!(self.grpc.find_objects_init(req), true)
     }
@@ -45,14 +46,15 @@ impl Pkcs11Client {
     pub async fn create_object(
         &mut self,
         session: CkSessionHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
         let ctx = self.context_id()?;
-        let proto_template = Self::proto_template(template);
+        let proto_template = Self::proto_template(template.unwrap_or(&[]));
         let req = pkcs11_proxy_ng_proto::CreateObjectRequest {
             client_context_id: ctx,
             session_handle: session.0,
             template: proto_template,
+            template_null: template.is_none(),
         };
         let resp = pkcs11_unary_call!(self.grpc.create_object(req), true);
         Ok(CkObjectHandle(resp.object_handle))
@@ -62,15 +64,16 @@ impl Pkcs11Client {
         &mut self,
         session: CkSessionHandle,
         object: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
         let ctx = self.context_id()?;
-        let proto_template = Self::proto_template(template);
+        let proto_template = Self::proto_template(template.unwrap_or(&[]));
         let req = pkcs11_proxy_ng_proto::CopyObjectRequest {
             client_context_id: ctx,
             session_handle: session.0,
             object_handle: object.0,
             template: proto_template,
+            template_null: template.is_none(),
         };
         let resp = pkcs11_unary_call!(self.grpc.copy_object(req), true);
         Ok(CkObjectHandle(resp.new_object_handle))
@@ -109,15 +112,16 @@ impl Pkcs11Client {
         &mut self,
         session: CkSessionHandle,
         object: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<()> {
         let ctx = self.context_id()?;
-        let proto_template = Self::proto_template(template);
+        let proto_template = Self::proto_template(template.unwrap_or(&[]));
         let req = pkcs11_proxy_ng_proto::SetAttributeValueRequest {
             client_context_id: ctx,
             session_handle: session.0,
             object_handle: object.0,
             template: proto_template,
+            template_null: template.is_none(),
         };
         pkcs11_unary_ok!(self.grpc.set_attribute_value(req), true)
     }

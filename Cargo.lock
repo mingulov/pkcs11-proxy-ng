@@ -1340,6 +1340,7 @@ dependencies = [
 name = "pkcs11-proxy-ng"
 version = "0.2.0"
 dependencies = [
+ "bytes",
  "clap",
  "criterion",
  "cryptoki-sys",
@@ -1348,6 +1349,10 @@ dependencies = [
  "hdrhistogram",
  "hex",
  "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "libc",
  "libloading",
  "nix",
@@ -1441,6 +1446,7 @@ version = "0.2.0"
 dependencies = [
  "pkcs11-proxy-ng-types",
  "prost",
+ "toml",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",

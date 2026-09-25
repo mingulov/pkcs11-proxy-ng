@@ -95,6 +95,22 @@ This creates potential compatibility issues when:
 
 ## Current Architecture Assessment
 
+### Shared target-layout facts
+
+Target-memory layout facts live in the rev-pinned upstream `pkcs11-abi`
+crate (consumed from `pkcs11-components` via `crates/backend/Cargo.toml`),
+not in this repository. Its default `native` feature provides
+compiler-derived offsets from the `cryptoki-sys` bindings; with default
+features disabled it is `no_std` and dependency-free and exposes
+allocation-free facts for conventional little-endian Linux LP64 and ILP32
+function lists and `CK_INTERFACE` entries. One ordered 104-name catalog
+generates both the native offset tables and pure name/ordinal lookup, and the
+shared version/provenance selector feeds the native `tables_for` adapter, so
+the layout facts do not change which legacy or standard-interface versions
+may be walked. This is a layout primitive for consumers that read another
+process. It does not itself identify a process ABI, authorize a provider
+interface, read process memory, or establish 32-bit runtime support.
+
 ### ✅ Strengths
 
 1. **Wire Protocol Uses u64 Exclusively**

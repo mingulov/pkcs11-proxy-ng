@@ -8,9 +8,9 @@
 //! [`pkcs11_proxy_ng_types::width`] so the full cross-width matrix is unit
 //! tested here without any FFI; the `extern "C"` entry point is a thin wrapper.
 //!
-//! The wire carries the backend's native-width ulong bytes in little-endian
-//! (the byte order is asserted compatible at probe — ADR-0011 D6), so both
-//! edges encode/decode as little-endian.
+//! The wire carries the backend's native-width ulong bytes in the backend's
+//! native byte order (asserted compatible with this client at probe —
+//! ADR-0011 D6), so both edges encode/decode in the shared native order.
 
 use pkcs11_proxy_ng_types::CkAttributeType;
 use pkcs11_proxy_ng_types::width::{self, ByteOrder, WidthError};
@@ -42,7 +42,8 @@ pub fn bridge_request_buffer_len(
 /// Outer `CKA_*_TEMPLATE` buffer length, client layout -> backend layout.
 ///
 /// Template byte lengths count whole `CK_ATTRIBUTE` structs, whose size is
-/// an ABI property of each edge (24 LP64 / 12 ILP32 / 16 LLP64-packed).
+/// an ABI property of each edge (24 LP64 / 12 ILP32 / 16 LLP64-packed;
+/// 32-bit Windows packs to 12, sharing the ILP32 stride).
 /// Rescale by entry count; a zero stride (defensive) passes through.
 #[cfg(test)]
 pub fn bridge_template_request_len(
@@ -91,7 +92,8 @@ pub fn bridge_output_value(
     let client_len = width::translate_ulong_len(returned_len, backend_width, client_width);
     let client_value = match value {
         Some(bytes) => {
-            Some(width::reencode_ulong(bytes, backend_width, client_width, ByteOrder::Little)?)
+            // D6 guarantees both edges share this client's native order.
+            Some(width::reencode_ulong(bytes, backend_width, client_width, ByteOrder::native())?)
         }
         None => None,
     };
@@ -182,31 +184,37 @@ mod tests {
         assert_eq!(len, 5);
     }
 
+    /// Backend-native ulong bytes for `v` at `width` on this host.
+    fn native_bytes(v: u64, width: usize) -> Vec<u8> {
+        width::encode_native_ulong(v, width)
+    }
+
     #[test]
     fn output_narrows_scalar_value_and_len_64_to_32() {
-        // CKK_RSA = 0 on the wire as an 8-byte LE ulong -> 4-byte LE on a 32-bit client.
-        let backend = 3u64.to_le_bytes().to_vec(); // value 3
+        // Value 3 on the wire as an 8-byte native ulong -> 4-byte native on a 32-bit client.
+        let backend = native_bytes(3, 8);
         let (out, len) = bridge_output_value(SCALAR, Some(&backend), 8, 8, 4).unwrap();
-        assert_eq!(out, Some(vec![3, 0, 0, 0]));
+        assert_eq!(out, Some(native_bytes(3, 4)));
         assert_eq!(len, 4);
     }
 
     #[test]
     fn output_widens_scalar_value_and_len_32_to_64() {
-        let backend = 7u32.to_le_bytes().to_vec();
+        let backend = native_bytes(7, 4);
         let (out, len) = bridge_output_value(SCALAR, Some(&backend), 4, 4, 8).unwrap();
-        assert_eq!(out, Some(7u64.to_le_bytes().to_vec()));
+        assert_eq!(out, Some(native_bytes(7, 8)));
         assert_eq!(len, 8);
     }
 
     #[test]
     fn output_reencodes_array_each_element() {
-        // [1,2] as 8-byte LE elements -> 4-byte LE elements, len 16 -> 8.
-        let mut backend = Vec::new();
-        backend.extend_from_slice(&1u64.to_le_bytes());
-        backend.extend_from_slice(&2u64.to_le_bytes());
+        // [1,2] as 8-byte native elements -> 4-byte native elements, len 16 -> 8.
+        let mut backend = native_bytes(1, 8);
+        backend.extend_from_slice(&native_bytes(2, 8));
         let (out, len) = bridge_output_value(ARRAY, Some(&backend), 16, 8, 4).unwrap();
-        assert_eq!(out, Some(vec![1, 0, 0, 0, 2, 0, 0, 0]));
+        let mut want = native_bytes(1, 4);
+        want.extend_from_slice(&native_bytes(2, 4));
+        assert_eq!(out, Some(want));
         assert_eq!(len, 8);
     }
 
@@ -224,7 +232,7 @@ mod tests {
     #[test]
     fn output_rejects_value_exceeding_client_width() {
         // A genuine 64-bit value that does not fit a 32-bit client's CK_ULONG.
-        let backend = 0x1_0000_0001u64.to_le_bytes().to_vec();
+        let backend = native_bytes(0x1_0000_0001, 8);
         assert_eq!(bridge_output_value(SCALAR, Some(&backend), 8, 8, 4), Err(WidthError::Overflow));
     }
 }
@@ -281,7 +289,7 @@ mod law_tests {
             let values: Vec<u64> = (0..n).map(|_| rng.next() & 0xFFFF_FFFF).collect();
             // Backend width 4 -> client width 8 (the widening direction).
             let backend_bytes: Vec<u8> =
-                values.iter().flat_map(|v| (*v as u32).to_le_bytes()).collect();
+                values.iter().flat_map(|v| width::encode_native_ulong(*v, 4)).collect();
             let (out, len) = bridge_output_value(
                 CkAttributeType::ALLOWED_MECHANISMS,
                 Some(&backend_bytes),
@@ -293,7 +301,7 @@ mod law_tests {
             assert_eq!(len, (n * 8) as u64);
             let out = out.expect("value present");
             for (i, v) in values.iter().enumerate() {
-                let got = u64::from_le_bytes(out[i * 8..(i + 1) * 8].try_into().expect("8"));
+                let got = u64::from_ne_bytes(out[i * 8..(i + 1) * 8].try_into().expect("8"));
                 assert_eq!(got, *v, "element {i}");
             }
         }

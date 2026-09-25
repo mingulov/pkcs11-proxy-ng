@@ -1,10 +1,13 @@
+use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
 use std::time::Instant;
 
 use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_audit::EventClass;
 use pkcs11_proxy_ng_types::attribute::is_value_bearing_secret;
-use pkcs11_proxy_ng_types::{CkAttributeQuery, CkAttributeQueryResult, CkAttributeType, CkRv};
+use pkcs11_proxy_ng_types::{
+    CkAttributeQuery, CkAttributeQueryResult, CkAttributeType, CkRv, SecretBytes,
+};
 
 use super::super::super::context_manager::{CachedAttr, ClientContextId};
 use super::super::HandlerContext;
@@ -14,7 +17,7 @@ use super::super::service_utils::{
     ExactCompletion, ck_rv_only, resolve_session_and_object, spawn_backend, spawn_backend_exact,
     spawn_task,
 };
-use super::super::{attr_value_to_bytes, ck_result_to_rv, convert_template};
+use super::super::{attr_value_to_bytes, ck_result_to_rv, convert_template, convert_template_opt};
 use super::attribute_results;
 
 // ── R2 coalescer helpers ──────────────────────────────────────────────────────
@@ -29,9 +32,12 @@ fn proto_result_from_cache(
     cached: CachedAttr,
 ) -> pkcs11_proxy_ng_proto::AttributeResult {
     let actual_length = cached.value.len() as u64;
+    // ADR-0013 §5: the prost response owns a plain `Vec<u8>`; the cached
+    // `SecretBytes` is borrowed for the copy and wiped when `cached` drops.
+    let value = secret_to_plain(&cached.value);
     pkcs11_proxy_ng_proto::AttributeResult {
         attr_type: attr_type.0,
-        result: Some(pkcs11_proxy_ng_proto::attribute_result::Result::Value(cached.value)),
+        result: Some(pkcs11_proxy_ng_proto::attribute_result::Result::Value(value)),
         actual_length,
     }
 }
@@ -263,15 +269,17 @@ pub(super) async fn get_attribute_value(
             //              (sensitive-denial or invalid-type — we can't tell which, so skip).
             //
             // M1 encoding note: this non-exact path encodes values via
-            // `attr_value_to_bytes` (e.g. CK_ULONG → 8-byte LE on LP64), while the
-            // exact path (get_attribute_value_exact) stores raw backend bytes (4-byte
-            // on an ILP32 backend). Both use the SAME attr_cache key space.  The two
-            // encodings are identical on LP64 (native platform) and diverge only on a
-            // cross-ABI ILP32 backend — which the shim does not use (the shim reaches
-            // the exact RPC exclusively).  This is therefore safe today and on all
-            // planned platforms.  If a non-LP64 backend is ever added, the non-exact
-            // path must be excluded from cache reads/writes to avoid serving an
-            // LP64-encoded value in response to an exact (raw-byte) query.
+            // `attr_value_to_bytes` (e.g. CK_ULONG → 8-byte native-order on LP64),
+            // while the exact path (get_attribute_value_exact) stores raw backend
+            // bytes (4-byte on an ILP32 backend). Both use the SAME attr_cache key
+            // space.  The two encodings are identical on LP64 (native platform) —
+            // native order on both sides keeps them identical on big-endian LP64
+            // too — and diverge only on a cross-ABI ILP32 backend, which the shim
+            // does not use (the shim reaches the exact RPC exclusively).  This is
+            // therefore safe today and on all planned platforms.  If a non-LP64
+            // backend is ever added, the non-exact path must be excluded from cache
+            // reads/writes to avoid serving an LP64-encoded value in response to
+            // an exact (raw-byte) query.
             if !is_value_bearing_secret(fetched_attr.attr_type)
                 && let Some(bytes) = &value_bytes
             {
@@ -280,7 +288,8 @@ pub(super) async fn get_attribute_value(
                         &ctx_id,
                         object_handle,
                         fetched_attr.attr_type,
-                        CachedAttr { value: bytes.clone(), ck_rv: CkRv::OK.0 },
+                        // ADR-0013 §5: adopt-via-copy; `bytes` also feeds the response below.
+                        CachedAttr { value: SecretBytes::new(bytes.clone()), ck_rv: CkRv::OK.0 },
                     )
                     .await;
             }
@@ -456,10 +465,10 @@ pub(super) async fn get_attribute_value_exact(
                     //
                     // M1 encoding note: this exact path stores raw backend bytes (e.g.
                     // CK_ULONG → 4-byte on ILP32). The non-exact path (get_attribute_value)
-                    // uses `attr_value_to_bytes` (8-byte LE on LP64). The two encodings
-                    // are identical on LP64 (current and planned platform) and share
-                    // the same attr_cache key space — safe today (see full note at the
-                    // non-exact put site above).
+                    // uses `attr_value_to_bytes` (8-byte native-order on LP64). The two
+                    // encodings are identical on LP64 (current and planned platform,
+                    // either byte order) and share the same attr_cache key space — safe
+                    // today (see full note at the non-exact put site above).
                     if !is_value_bearing_secret(fetched_result.attr_type)
                         && fetched_result.ck_rv.is_none()
                         && let Some(bytes) = &fetched_result.value
@@ -526,7 +535,7 @@ pub(super) async fn set_attribute_value(
             }
         };
 
-    let template = match convert_template(&req.template) {
+    let template = match convert_template_opt(&req.template, req.template_null) {
         Ok(template) => template,
         Err(error) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::SetAttributeValueResponse {
@@ -537,7 +546,8 @@ pub(super) async fn set_attribute_value(
 
     let backend = ctx.backend.clone();
     let result =
-        spawn_backend(move || backend.set_attribute_value(session, object, &template)).await?;
+        spawn_backend(move || backend.set_attribute_value(session, object, template.as_deref()))
+            .await?;
     let ck_rv = ck_rv_only(result);
 
     // On a successful set, drop all cached attribute entries for this object so
@@ -593,6 +603,7 @@ mod tests {
     use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
     use pkcs11_proxy_ng_types::*;
 
+    use super::super::attr_value_to_bytes;
     use super::validate_exact_attribute_results;
     use crate::config::{
         AuthConfig, ExtractPolicyConfig, GrantSpec, PolicyEntry, RichGrantConfig, TokenAccessSpec,
@@ -600,7 +611,7 @@ mod tests {
     use crate::server::auth::policy::TokenPolicy;
     use crate::server::context_manager::{ClientContextId, ContextManager};
     use crate::server::grpc_service::HandlerContext;
-    use crate::server::handle_map::BackendHandle;
+    use crate::server::handle_map::{BackendHandle, VirtualHandle};
     use tonic::Code;
 
     // --- existing alignment tests ---
@@ -641,7 +652,7 @@ mod tests {
                 apply_type: false,
                 attr_type: CkAttributeType::LABEL,
                 returned_len: 3,
-                value: Some(b"key".to_vec()),
+                value: Some(b"key".to_vec().into()),
                 ck_rv: None,
                 nested: None,
             }],
@@ -826,17 +837,17 @@ mod tests {
         // Create backend session 1 and object 1 in the mock's live state.
         // `open_session_impl` doesn't require initialize(); session handle starts at 1.
         let session = mock.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-        mock.create_object(session, &[]).unwrap(); // CkObjectHandle(1)
+        mock.create_object(session, Some(&[])).unwrap(); // CkObjectHandle(1)
 
         mock.set_attribute(
             CkObjectHandle(1),
             CkAttributeType::ID,
-            MockAttributeSlot::Value(CkAttributeValue::Bytes(b"my-id".to_vec())),
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(b"my-id".to_vec().into())),
         );
         mock.set_attribute(
             CkObjectHandle(1),
             CkAttributeType::LABEL,
-            MockAttributeSlot::Value(CkAttributeValue::String("my-label".to_owned())),
+            MockAttributeSlot::Value(CkAttributeValue::String("my-label".to_owned().into())),
         );
         // CKA_VALUE is registered as secret (VALUE_BEARING_SECRET); no need to
         // set it — the backend will return no value for unregistered attrs by default.
@@ -863,6 +874,10 @@ mod tests {
         ctx.context_manager
             .get_context(&ctx_id, |c| {
                 c.object_handles.insert(BackendHandle(1)); // virtual = 1
+                // D6(1) fixture provisioning: the mock object carries no
+                // CKA_PRIVATE (public by default), mirroring what mint
+                // registration records, so USE needs no backend probe.
+                c.object_private.insert(VirtualHandle(1), false);
             })
             .await;
         let object_handle = 1u64; // virtual handle
@@ -915,6 +930,10 @@ mod tests {
         ctx.context_manager
             .get_context(&ctx_id, |c| {
                 c.object_handles.insert(BackendHandle(1));
+                // D6(1) fixture provisioning: the mock object carries no
+                // CKA_PRIVATE (public by default), mirroring what mint
+                // registration records, so USE needs no backend probe.
+                c.object_private.insert(VirtualHandle(1), false);
             })
             .await;
         let object_handle = 1u64;
@@ -987,6 +1006,10 @@ mod tests {
         ctx.context_manager
             .get_context(&ctx_id, |c| {
                 c.object_handles.insert(BackendHandle(1));
+                // D6(1) fixture provisioning: the mock object carries no
+                // CKA_PRIVATE (public by default), mirroring what mint
+                // registration records, so USE needs no backend probe.
+                c.object_private.insert(VirtualHandle(1), false);
             })
             .await;
 
@@ -1020,6 +1043,10 @@ mod tests {
         ctx.context_manager
             .get_context(&ctx_id, |c| {
                 c.object_handles.insert(BackendHandle(1));
+                // D6(1) fixture provisioning: the mock object carries no
+                // CKA_PRIVATE (public by default), mirroring what mint
+                // registration records, so USE needs no backend probe.
+                c.object_private.insert(VirtualHandle(1), false);
             })
             .await;
 
@@ -1055,6 +1082,10 @@ mod tests {
         ctx.context_manager
             .get_context(&ctx_id, |c| {
                 c.object_handles.insert(BackendHandle(1));
+                // D6(1) fixture provisioning: the mock object carries no
+                // CKA_PRIVATE (public by default), mirroring what mint
+                // registration records, so USE needs no backend probe.
+                c.object_private.insert(VirtualHandle(1), false);
             })
             .await;
         let object_handle = 1u64;
@@ -1087,6 +1118,8 @@ mod tests {
                     attr_type: CkAttributeType::LABEL.0,
                     value: None,
                 }],
+
+                template_null: false,
             }),
         )
         .await
@@ -1375,5 +1408,20 @@ mod tests {
             u64::MAX,
             "M3(b): buffer-too-small cache hit must set returned_len to CK_UNAVAILABLE_INFORMATION"
         );
+    }
+
+    #[test]
+    fn ulong_encodes_native_order_for_cache_coherence() {
+        // The non-exact path shares the attr_cache key space with the exact
+        // path's raw backend bytes: both must be native-order on every host.
+        // 0x0102_0304_0506_0708 distinguishes LE from BE absolutely.
+        // (Lives here, not in grpc_service/mod.rs, because the consistency
+        // scanner parses every `(...)` after `impl_proxy_service!` there as
+        // a handler tuple.)
+        assert_eq!(
+            attr_value_to_bytes(CkAttributeValue::Ulong(0x0102_0304_0506_0708)),
+            0x0102_0304_0506_0708u64.to_ne_bytes().to_vec()
+        );
+        assert_eq!(attr_value_to_bytes(CkAttributeValue::Bool(true)), vec![1]);
     }
 }

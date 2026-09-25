@@ -13,14 +13,30 @@ use pkcs11_proxy_ng_types::{CkResult, CkRv};
 use super::*;
 
 // cryptoki-sys mirrors the platform ABI: LP64 Linux uses a 48-byte GCM
-// message envelope, i686 ILP32 uses 24, and Windows x64 LLP64 is packed to 32.
-// Structured transport must never reinterpret one of these sizes as another.
+// message envelope, i686 ILP32 uses 24, Windows x64 LLP64 is packed to 32,
+// and 32-bit Windows is packed to 24 (4-byte pointers/ulongs: the same
+// bytes as ILP32). Structured transport must never reinterpret one of
+// these sizes as another. s390x is LP64 too, so it shares the 48-byte
+// envelope (BE receipt: this assertion compiles the s390x layout into the
+// build). macOS is LP64 on both aarch64 and x86_64 (`CK_ULONG` and
+// `CK_GENERATOR_FUNCTION` are 8-byte `c_ulong`, pointers 8 bytes): six
+// naturally aligned fields at 0/8/16/24/32/40, zero padding, so the same
+// 48-byte envelope as Linux-64 (TC1; derivation pinned by
+// `gcm_message_params_lp64_layout_derives_48`).
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const _: [(); 48] = [(); std::mem::size_of::<CK_GCM_MESSAGE_PARAMS>()];
+#[cfg(all(target_os = "linux", target_arch = "s390x"))]
 const _: [(); 48] = [(); std::mem::size_of::<CK_GCM_MESSAGE_PARAMS>()];
 #[cfg(all(target_os = "linux", target_arch = "x86"))]
 const _: [(); 24] = [(); std::mem::size_of::<CK_GCM_MESSAGE_PARAMS>()];
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 const _: [(); 32] = [(); std::mem::size_of::<CK_GCM_MESSAGE_PARAMS>()];
+#[cfg(all(target_os = "windows", target_arch = "x86"))]
+const _: [(); 24] = [(); std::mem::size_of::<CK_GCM_MESSAGE_PARAMS>()];
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const _: [(); 48] = [(); std::mem::size_of::<CK_GCM_MESSAGE_PARAMS>()];
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const _: [(); 48] = [(); std::mem::size_of::<CK_GCM_MESSAGE_PARAMS>()];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MessageParameterDirection {
@@ -662,7 +678,9 @@ pub(crate) unsafe fn write_exact_message_output(
     if let Some(value) = output_result.value.as_ref()
         && !value.is_empty()
     {
-        unsafe { std::ptr::copy_nonoverlapping(value.as_ptr(), p_output, value.len()) };
+        value.expose(|raw| unsafe {
+            std::ptr::copy_nonoverlapping(raw.as_ptr(), p_output, raw.len())
+        });
     }
     if let Some(returned_len) = returned_len {
         unsafe { pul_output_len.write(returned_len) };

@@ -119,64 +119,29 @@ pub(super) async fn login(
 
     // Hold PIN bytes in `SecretBytes`: the backing buffer is overwritten
     // when dropped, and Debug redacts the secret (audit/log safety net).
-    // Read it up-front and pre-hash it so the logical-login path can
-    // validate the PIN and the verifier can be stored after the PIN is moved
-    // into the backend call.
     let pin = req.pin.map(SecretBytes::new);
-    let pin_hash = match &pin {
-        Some(secret) => secret.expose(|bytes| ctx_mgr.hash_pin(Some(bytes))),
-        None => ctx_mgr.hash_pin(None),
-    };
 
+    // D6(3) reconciliation (Wave 3.5 tenancy ruling; supersedes ADR-0008): when
+    // another live context already holds a login on this slot, the shared
+    // backend token is logged in and would answer a second backend C_Login
+    // with USER_ALREADY_LOGGED_IN *without* checking the PIN. The daemon
+    // therefore cannot PIN-verify this login against the token, so it returns
+    // the backend's answer faithfully and mints NO logical login — never a
+    // login on an unverified PIN. The caller retries after the holder releases
+    // the slot (last-context-out backend logout, D6(2), bounds the window).
     if current_login_state.is_none()
         && let Some(requested) = requested_login_state
         && let Some(other_login_state) = ctx_mgr.first_login_state_for_slot_excluding(slot, &ctx_id)
     {
-        if other_login_state == requested {
-            // The shared backend token is already logged in (another logical
-            // client holds this state), so a second backend C_Login would
-            // answer USER_ALREADY_LOGGED_IN WITHOUT checking the PIN. Validate
-            // against the verifier captured at the first successful login so a
-            // wrong PIN is rejected rather than synthesized OK (A1; ADR-0008).
-            match ctx_mgr.verify_pin_hash(slot, requested, &pin_hash) {
-                Some(true) => {
-                    let _ = ctx_mgr
-                        .get_context(&ctx_id, |ctx| {
-                            ctx.login_state.insert(slot, requested);
-                        })
-                        .await;
-                    info!(
-                        context_id = %ctx_id.0,
-                        user_type = req.user_type,
-                        "Login completed logically"
-                    );
-                    return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse {
-                        ck_rv: CkRv::OK.0,
-                    }));
-                }
-                Some(false) => {
-                    warn!(
-                        context_id = %ctx_id.0,
-                        user_type = req.user_type,
-                        "Logical login rejected: PIN does not match"
-                    );
-                    return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse {
-                        ck_rv: CkRv::PIN_INCORRECT.0,
-                    }));
-                }
-                // No verifier recorded (e.g. the original login used the
-                // protected-auth path): cannot validate, so fall through to a
-                // real backend login rather than synthesize an unvalidated OK.
-                None => {}
-            }
-        } else {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse {
-                ck_rv: already_logged_in_rv(other_login_state, requested).0,
-            }));
-        }
+        return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse {
+            ck_rv: already_logged_in_rv(other_login_state, requested).0,
+        }));
     }
 
     let user_type_raw = req.user_type;
+    // A second wiping copy for a possible F-01 reconcile retry below; both
+    // copies are wiped on drop.
+    let pin_retry = pin.clone();
     let backend = backend_ref.clone();
     let result = spawn_backend(move || {
         // Transfer into a wiping owner for the FFI boundary; the moved
@@ -186,15 +151,48 @@ pub(super) async fn login(
     })
     .await?;
 
+    // F-01 reconcile-on-ALREADY: the backend answers ALREADY but — rechecked
+    // under the already-held slot lock — NO live context holds this slot, so
+    // the backend login is orphaned (a best-effort last-holder logout was
+    // skipped or failed). Without this the slot bricks: every future login
+    // gets ALREADY with no state minted, and no path ever logs out. Reconcile
+    // with one backend logout through this session, then retry the login
+    // exactly once so the PIN verifies against a logged-out token.
+    let result = match result {
+        Err(rv)
+            if (rv == CkRv::USER_ALREADY_LOGGED_IN
+                || rv == CkRv::USER_ANOTHER_ALREADY_LOGGED_IN)
+                && !ctx_mgr.any_login_state_for_slot(slot) =>
+        {
+            warn!(
+                context_id = %ctx_id.0,
+                user_type = user_type_raw,
+                "Login reconciling holderless-but-logged-in backend"
+            );
+            let backend = backend_ref.clone();
+            if let Err(rv) = spawn_backend(move || backend.logout(session)).await? {
+                warn!(
+                    context_id = %ctx_id.0,
+                    rv = rv.0,
+                    "Login reconcile logout failed; retrying login once anyway"
+                );
+            }
+            let backend = backend_ref.clone();
+            spawn_backend(move || {
+                let pin = pin_retry.map(SecretBytes::into_zeroizing);
+                backend.login(session, user_type, pin.as_deref().map(Vec::as_slice))
+            })
+            .await?
+        }
+        other => other,
+    };
+
     let ck_rv = match &result {
         Ok(()) => {
             // G2-PR3: backend accepted the PIN → reset the slot's failure counter
             // so the budget window starts fresh on the next wrong-PIN attempt.
             crate::server::rate_quota::record_login_success(slot);
             if let Some(login_state) = requested_login_state {
-                // Capture the verifier so co-located logical clients can be
-                // PIN-validated (A1) without a second backend login.
-                ctx_mgr.store_pin_verifier_hash(slot, login_state, pin_hash);
                 let _ = ctx_mgr
                     .get_context(&ctx_id, |ctx| {
                         ctx.login_state.insert(slot, login_state);
@@ -287,11 +285,6 @@ pub(super) async fn logout(
 
     let ck_rv = match result {
         Ok(()) => {
-            // Last holder logged out: the shared token is now logged out, so
-            // drop the per-slot PIN verifier (a fresh login re-captures it).
-            if let Some(state) = current_login_state {
-                ctx_mgr.clear_pin_verifier(slot, state);
-            }
             let _ = ctx_mgr
                 .get_context(&ctx_id, |ctx| {
                     ctx.login_state.remove(&slot);
@@ -364,7 +357,7 @@ mod tests {
                 &ctx_id,
                 42,
                 CkAttributeType::ID,
-                CachedAttr { value: b"cached-id".to_vec(), ck_rv: CkRv::OK.0 },
+                CachedAttr { value: SecretBytes::new(b"cached-id".to_vec()), ck_rv: CkRv::OK.0 },
             )
             .await;
         assert!(
@@ -436,7 +429,7 @@ mod tests {
                 &ctx_a,
                 7,
                 CkAttributeType::LABEL,
-                CachedAttr { value: b"my-label".to_vec(), ck_rv: CkRv::OK.0 },
+                CachedAttr { value: SecretBytes::new(b"my-label".to_vec()), ck_rv: CkRv::OK.0 },
             )
             .await;
         assert!(
@@ -469,7 +462,7 @@ mod tests {
                 &ctx_b,
                 7,
                 CkAttributeType::LABEL,
-                CachedAttr { value: b"other".to_vec(), ck_rv: CkRv::OK.0 },
+                CachedAttr { value: SecretBytes::new(b"other".to_vec()), ck_rv: CkRv::OK.0 },
             )
             .await;
         assert!(
@@ -507,7 +500,7 @@ mod tests {
                 &ctx_id,
                 5,
                 CkAttributeType::TOKEN,
-                CachedAttr { value: vec![0x01], ck_rv: CkRv::OK.0 },
+                CachedAttr { value: SecretBytes::new(vec![0x01]), ck_rv: CkRv::OK.0 },
             )
             .await;
 

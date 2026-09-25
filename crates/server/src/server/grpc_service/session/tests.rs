@@ -6,7 +6,10 @@ use crate::server::context_manager::{
 };
 use crate::server::grpc_service::{HandlerContext, Pkcs11ProxyService};
 use crate::server::handle_map::VirtualHandle;
-use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend, mock::MockMessageLifecycleAction};
+use pkcs11_proxy_ng_backend::{
+    MockBackend, Pkcs11Backend,
+    mock::{MockEmbeddedHandles, MockMechanismEntry, MockMessageLifecycleAction},
+};
 use pkcs11_proxy_ng_proto::Pkcs11Proxy;
 use pkcs11_proxy_ng_proto::convert::message_params::MessageParameterShape;
 use pkcs11_proxy_ng_types::*;
@@ -176,7 +179,13 @@ async fn logout_response(
 }
 
 #[tokio::test]
-async fn login_state_is_logical_client_scoped_when_backend_is_already_logged_in() {
+async fn second_context_login_returns_backend_already_faithfully_without_minting_login() {
+    // D6(3): while one live context holds the slot login, the shared backend
+    // token is logged in and would answer a second backend C_Login with
+    // USER_ALREADY_LOGGED_IN without checking the PIN. The daemon cannot
+    // PIN-verify such a login, so it returns ALREADY faithfully and mints NO
+    // logical login for the second context — never a login on an unverified
+    // PIN (Wave 3.5 tenancy ruling; supersedes the ADR-0008 verifier).
     let mock = Arc::new(MockBackend::default_test());
     mock.initialize().unwrap();
     let backend: Arc<dyn Pkcs11Backend> = mock.clone();
@@ -192,32 +201,30 @@ async fn login_state_is_logical_client_scoped_when_backend_is_already_logged_in(
     assert_eq!(login_response(&ctx_mgr, &backend, &ctx_a, session_a).await, CkRv::OK.0);
     assert_eq!(
         login_response(&ctx_mgr, &backend, &ctx_b, session_b).await,
-        CkRv::OK.0,
-        "a fresh logical client should not inherit backend USER_ALREADY_LOGGED_IN"
-    );
-    assert_eq!(
-        login_response(&ctx_mgr, &backend, &ctx_b, session_b).await,
         CkRv::USER_ALREADY_LOGGED_IN.0,
-        "repeat login in the same logical client should still report already logged in"
+        "a second live context must see the backend's ALREADY faithfully, even with the correct PIN"
     );
     assert_eq!(
         mock.login_call_count(),
-        2,
-        "repeat login after a logical login must be answered by the backend, not synthesized"
+        1,
+        "the refused second login must not reach the backend at all"
     );
 
-    let logout_b = logout(
-        &HandlerContext::for_test(&ctx_mgr, &backend),
-        Request::new(pkcs11_proxy_ng_proto::LogoutRequest {
-            client_context_id: ctx_b.0.clone(),
-            session_handle: session_b,
-        }),
-    )
-    .await
-    .unwrap()
-    .into_inner();
-    assert_eq!(logout_b.ck_rv, CkRv::OK.0);
+    // No logical login may be minted for ctx_b.
+    let b_login_state = ctx_mgr
+        .get_context(&ctx_b, |ctx| {
+            ctx.login_state.get(&crate::server::slot_map::BackendSlotId(CkSlotId(0))).copied()
+        })
+        .await
+        .unwrap();
+    assert_eq!(b_login_state, None, "no logical login may be minted on an unverified PIN");
 
+    // ctx_b was never logged in, so its logout reports NOT_LOGGED_IN while
+    // ctx_a's backend login is undisturbed.
+    assert_eq!(
+        logout_response(&ctx_mgr, &backend, &ctx_b, session_b).await,
+        CkRv::USER_NOT_LOGGED_IN.0
+    );
     let backend_session_a = ctx_mgr
         .get_context(&ctx_a, |ctx| ctx.session_handles.resolve(VirtualHandle(session_a)))
         .await
@@ -227,7 +234,16 @@ async fn login_state_is_logical_client_scoped_when_backend_is_already_logged_in(
     assert_eq!(
         info.state,
         CkSessionState::RwUser,
-        "logging out ctx_b must not physically log out ctx_a"
+        "refusing ctx_b must not disturb ctx_a's backend login"
+    );
+
+    // After ctx_a logs out (last holder → real backend logout), ctx_b can log
+    // in normally.
+    assert_eq!(logout_response(&ctx_mgr, &backend, &ctx_a, session_a).await, CkRv::OK.0);
+    assert_eq!(
+        login_response(&ctx_mgr, &backend, &ctx_b, session_b).await,
+        CkRv::OK.0,
+        "after the holder releases the slot the next login must succeed"
     );
 }
 
@@ -334,6 +350,116 @@ async fn close_all_sessions_clears_logical_login_state_for_slot() {
     assert_eq!(
         stale_login_state, None,
         "closing all logical sessions for a slot must clear that context's login state"
+    );
+}
+
+#[tokio::test]
+async fn close_all_sessions_releases_backend_login_before_close() {
+    // m-5: an ordinary logged-in close-all must attempt the last-holder
+    // backend logout BEFORE the batch close, using one of the closing
+    // sessions as the preferred carrier (ADR-0002 §7: "the logout rides a
+    // still-open session ... and runs before that context's backend
+    // sessions close"). Pre-fix the logout ran after the closes, found no
+    // carrier single-tenant, WARNed, and left the backend logged in.
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let virtual_slot = ctx_mgr.virtual_slots().await[0];
+
+    let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+    assert_eq!(login_response(&ctx_mgr, &backend, &ctx_id, session).await, CkRv::OK.0);
+
+    // A spare backend session held outside the context manager: it keeps the
+    // mock token from auto-logging-out on last close (so the test observes
+    // the daemon's own logout, not the mock's), while staying invisible to
+    // the daemon's carrier scan (which reads context maps only).
+    let spare = mock
+        .open_session(
+            CkSlotId(0),
+            CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
+        )
+        .unwrap();
+
+    let close_all = close_all_sessions(
+        &ctx_mgr,
+        &backend,
+        Request::new(pkcs11_proxy_ng_proto::CloseAllSessionsRequest {
+            client_context_id: ctx_id.0.clone(),
+            slot_id: virtual_slot.0,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(close_all.ck_rv, CkRv::OK.0);
+
+    // The backend token must be logged out: a logout on the spare answers
+    // USER_NOT_LOGGED_IN. (Pre-fix the backend stayed logged in and this
+    // logout succeeded.) The success path emits no WARN, so the routine
+    // "logout skipped" warning is gone with it.
+    assert_eq!(
+        mock.logout(spare),
+        Err(CkRv::USER_NOT_LOGGED_IN),
+        "close-all must release the backend login via its own pre-close carrier"
+    );
+}
+
+#[tokio::test]
+async fn close_session_releases_backend_login_before_close() {
+    // T5F (singular-path analogue of m-5): an ordinary logged-in singular
+    // close of the last own session must attempt the last-holder backend
+    // logout BEFORE the backend close, using the closing session as the
+    // preferred carrier (ADR-0002 §7: "the logout rides a still-open
+    // session"). Pre-fix the logout ran after the close, found no carrier
+    // single-tenant, WARNed, and left the backend logged in.
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+
+    let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+    assert_eq!(login_response(&ctx_mgr, &backend, &ctx_id, session).await, CkRv::OK.0);
+
+    // A spare backend session held outside the context manager: it keeps the
+    // mock token from auto-logging-out on last close (so the test observes
+    // the daemon's own logout, not the mock's), while staying invisible to
+    // the daemon's carrier scan (which reads context maps only).
+    let spare = mock
+        .open_session(
+            CkSlotId(0),
+            CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
+        )
+        .unwrap();
+
+    let close = close_session(
+        &HandlerContext::for_test(&ctx_mgr, &backend),
+        Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(close.ck_rv, CkRv::OK.0);
+
+    // The backend token must be logged out: a logout on the spare answers
+    // USER_NOT_LOGGED_IN. (Pre-fix the backend stayed logged in and this
+    // logout succeeded.) The success path emits no WARN, so the routine
+    // "logout skipped" warning is gone with it — verified via an isolated
+    // log-capture probe, not committed (shared-message captures flake under
+    // suite parallelism, same as m-5).
+    assert_eq!(
+        mock.logout(spare),
+        Err(CkRv::USER_NOT_LOGGED_IN),
+        "singular close must release the backend login via its own pre-close carrier"
     );
 }
 
@@ -594,7 +720,9 @@ async fn logout_produces_audit_log() {
 }
 
 #[test]
-fn proto_pin_requests_debug_exposes_data() {
+fn proto_pin_requests_debug_redacts_data() {
+    // ADR-0013 §7: secret-bearing wire messages print only
+    // `TypeName([REDACTED])` — neither the PIN payload nor its field name.
     let login = pkcs11_proxy_ng_proto::LoginRequest {
         client_context_id: "ctx-test".into(),
         session_handle: 1,
@@ -602,7 +730,8 @@ fn proto_pin_requests_debug_exposes_data() {
         pin: Some(b"secret-pin-data".to_vec()),
     };
     let debug_output = format!("{:?}", login);
-    assert!(debug_output.contains("pin"));
+    assert_eq!(debug_output, "LoginRequest([REDACTED])");
+    assert!(!debug_output.contains("secret-pin-data"));
 }
 
 #[test]
@@ -706,6 +835,8 @@ async fn closing_a_session_evicts_session_objects_not_token_objects() {
                     client_context_id: ctx,
                     session_handle: session,
                     template,
+
+                    template_null: false,
                 }),
             )
             .await
@@ -773,6 +904,8 @@ async fn destroy_object_evicts_the_virtual_handle() {
             client_context_id: ctx_id.0.clone(),
             session_handle: session,
             template: vec![],
+
+            template_null: false,
         }),
     )
     .await
@@ -837,6 +970,8 @@ async fn object_handles_are_isolated_per_context() {
             client_context_id: ctx_a.0.clone(),
             session_handle: session_a,
             template: vec![],
+
+            template_null: false,
         }),
     )
     .await
@@ -1562,13 +1697,13 @@ async fn close_session_drops_mapping_for_every_terminal_already_gone_result() {
 }
 
 #[tokio::test]
-async fn cross_client_login_with_wrong_pin_is_rejected() {
-    // A1: when a fresh logical client logs in to a slot another client already
-    // holds, the shared backend token is logged in, so a second backend
-    // C_Login returns USER_ALREADY_LOGGED_IN without validating the PIN. The
-    // proxy must therefore validate the presented PIN against the verifier
-    // captured at the first successful login — never synthesize CKR_OK for an
-    // unvalidated/incorrect PIN.
+async fn cross_client_login_while_slot_held_is_already_regardless_of_pin() {
+    // D6(3): when a slot is held logged-in by another live context, the daemon
+    // cannot PIN-verify a new login (the token would just answer ALREADY), so
+    // the PIN is never evaluated: wrong and correct PINs alike get the
+    // faithful USER_ALREADY_LOGGED_IN, and no logical login is minted either
+    // way. (Supersedes the ADR-0008 verifier contract, which answered
+    // PIN_INCORRECT/OK from a cached hash.)
     let mock = MockBackend::default_test();
     mock.initialize().unwrap();
     let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
@@ -1582,7 +1717,7 @@ async fn cross_client_login_with_wrong_pin_is_rejected() {
     // ctx_a logs in with the correct PIN ("1234" per login_response).
     assert_eq!(login_response(&ctx_mgr, &backend, &ctx_a, session_a).await, CkRv::OK.0);
 
-    // ctx_b attempts a logical login with a WRONG PIN.
+    // ctx_b attempts a login with a WRONG PIN.
     let wrong = login(
         &HandlerContext::for_test(&ctx_mgr, &backend),
         Request::new(pkcs11_proxy_ng_proto::LoginRequest {
@@ -1598,30 +1733,754 @@ async fn cross_client_login_with_wrong_pin_is_rejected() {
     .ck_rv;
     assert_eq!(
         wrong,
-        CkRv::PIN_INCORRECT.0,
-        "cross-client login with a wrong PIN must be CKR_PIN_INCORRECT, not synthesized OK"
+        CkRv::USER_ALREADY_LOGGED_IN.0,
+        "a held slot must answer ALREADY without evaluating the PIN"
     );
 
-    // ctx_b with the CORRECT PIN still succeeds (feature preserved).
+    // ctx_b with the CORRECT PIN gets the same faithful answer — no minting.
+    assert_eq!(
+        login_response(&ctx_mgr, &backend, &ctx_b, session_b).await,
+        CkRv::USER_ALREADY_LOGGED_IN.0,
+        "a held slot must answer ALREADY even for the correct PIN (no unverified logins)"
+    );
+    let b_login_state = ctx_mgr
+        .get_context(&ctx_b, |ctx| {
+            ctx.login_state.get(&crate::server::slot_map::BackendSlotId(CkSlotId(0))).copied()
+        })
+        .await
+        .unwrap();
+    assert_eq!(b_login_state, None, "no logical login may be minted while the slot is held");
+}
+
+#[tokio::test]
+async fn login_reconciles_holderless_logged_in_backend() {
+    // F-01: a holderless-but-logged-in backend (every best-effort
+    // last-holder logout skipped or failed) must not brick slot logins: the
+    // first login reconciles with one backend logout plus a single retry, so
+    // the PIN verifies against a logged-out token. Pre-fix, the backend's
+    // ALREADY was returned as-is with no state minted — every future login
+    // on the slot bricked until daemon restart.
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+
+    // The backend token is logged in behind the proxy's back: no logical
+    // holder exists anywhere.
+    let backend_session = ctx_mgr
+        .get_context(&ctx_id, |ctx| ctx.session_handles.resolve(VirtualHandle(session)))
+        .await
+        .unwrap()
+        .unwrap();
+    mock.login(CkSessionHandle(backend_session.0), CkUserType::User, None).unwrap();
+    assert!(
+        !ctx_mgr.any_login_state_for_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))),
+        "setup: no logical holder may exist"
+    );
+
+    // The proxy login reconciles and succeeds, minting the logical login.
+    assert_eq!(
+        login_response(&ctx_mgr, &backend, &ctx_id, session).await,
+        CkRv::OK.0,
+        "login must reconcile a holderless-but-logged-in backend"
+    );
+    let state = ctx_mgr
+        .get_context(&ctx_id, |ctx| {
+            ctx.login_state.get(&crate::server::slot_map::BackendSlotId(CkSlotId(0))).copied()
+        })
+        .await
+        .unwrap();
+    assert_eq!(state, Some(LoginState::User), "reconciled login must mint logical state");
+    // Exactly one retry: setup login + first attempt + reconcile retry.
+    assert_eq!(mock.login_call_count(), 3, "reconcile must retry the backend login exactly once");
+    // The backend is genuinely logged in again by the retried login.
+    assert_eq!(
+        mock.login(CkSessionHandle(backend_session.0), CkUserType::User, None).unwrap_err(),
+        CkRv::USER_ALREADY_LOGGED_IN,
+        "backend must be logged in after reconcile"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// D6(1): object-path logical-login enforcement
+// ---------------------------------------------------------------------------
+
+/// A `CKA_PRIVATE=true` template attribute (proto encoding).
+fn private_true_attr() -> pkcs11_proxy_ng_proto::Attribute {
+    pkcs11_proxy_ng_proto::Attribute {
+        attr_type: CkAttributeType::PRIVATE.0,
+        value: Some(pkcs11_proxy_ng_proto::attribute::Value::BoolValue(true)),
+    }
+}
+
+async fn create_object_outcome(
+    ctx_mgr: &Arc<ContextManager>,
+    backend: &Arc<dyn Pkcs11Backend>,
+    ctx_id: &ClientContextId,
+    session: u64,
+    template: Vec<pkcs11_proxy_ng_proto::Attribute>,
+) -> (u64, u64) {
+    let resp = crate::server::grpc_service::object::create_object(
+        &HandlerContext::for_test(ctx_mgr, backend),
+        Request::new(pkcs11_proxy_ng_proto::CreateObjectRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+            template,
+
+            template_null: false,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    (resp.ck_rv, resp.object_handle)
+}
+
+async fn copy_object_outcome(
+    ctx_mgr: &Arc<ContextManager>,
+    backend: &Arc<dyn Pkcs11Backend>,
+    ctx_id: &ClientContextId,
+    session: u64,
+    object: u64,
+    template: Vec<pkcs11_proxy_ng_proto::Attribute>,
+) -> (u64, u64) {
+    let resp = crate::server::grpc_service::object::copy_object(
+        &HandlerContext::for_test(ctx_mgr, backend),
+        Request::new(pkcs11_proxy_ng_proto::CopyObjectRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+            object_handle: object,
+            template,
+
+            template_null: false,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    (resp.ck_rv, resp.new_object_handle)
+}
+
+async fn sign_init_rv(
+    ctx_mgr: &Arc<ContextManager>,
+    backend: &Arc<dyn Pkcs11Backend>,
+    ctx_id: &ClientContextId,
+    session: u64,
+    key: u64,
+) -> u64 {
+    crate::server::grpc_service::sign_verify::sign_init(
+        &HandlerContext::for_test(ctx_mgr, backend),
+        Request::new(pkcs11_proxy_ng_proto::SignInitRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+            mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {
+                mechanism_type: CkMechanismType::RSA_PKCS.0,
+                params: None,
+            }),
+            key_handle: key,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv
+}
+
+#[tokio::test]
+async fn create_private_object_while_logged_out_is_refused_when_backend_held_logged_in() {
+    // D6(1): the mock backend enforces NO login checks (like the kryoptic
+    // backend held logged-in in F1), so without the proxy's logical-layer
+    // refusal the private mint below would succeed.
+    let mock = MockBackend::default_test();
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_holder = ctx_mgr.create_context(None).await.unwrap();
+    let ctx_out = ctx_mgr.create_context(None).await.unwrap();
+    let session_holder = open_test_session(&ctx_mgr, &backend, &ctx_holder).await;
+    let session_out = open_test_session(&ctx_mgr, &backend, &ctx_out).await;
+
+    // Holder logs in: the shared backend token is now logged in.
+    assert_eq!(login_response(&ctx_mgr, &backend, &ctx_holder, session_holder).await, CkRv::OK.0);
+
+    // Logged-out context minting a private object → refused.
+    let (rv, handle) =
+        create_object_outcome(&ctx_mgr, &backend, &ctx_out, session_out, vec![private_true_attr()])
+            .await;
+    assert_eq!(
+        rv,
+        CkRv::USER_NOT_LOGGED_IN.0,
+        "private mint while logically logged out must be refused despite the logged-in backend"
+    );
+    assert_eq!(handle, 0);
+
+    // Logged-out context minting a public object → fine.
+    let (rv, handle) =
+        create_object_outcome(&ctx_mgr, &backend, &ctx_out, session_out, vec![]).await;
+    assert_eq!(rv, CkRv::OK.0, "public mint while logged out must still succeed");
+    assert_ne!(handle, 0);
+
+    // Logged-in holder minting a private object → fine.
+    let (rv, handle) = create_object_outcome(
+        &ctx_mgr,
+        &backend,
+        &ctx_holder,
+        session_holder,
+        vec![private_true_attr()],
+    )
+    .await;
+    assert_eq!(rv, CkRv::OK.0, "private mint while logged in must still succeed");
+    assert_ne!(handle, 0);
+}
+
+#[tokio::test]
+async fn copy_object_to_private_after_logout_is_refused_kryoptic_shape() {
+    // F1 repro shape (kryoptic `test_public_cannot_copy_to_private_object`):
+    // C_Logout, then public-session C_CopyObject to CKA_PRIVATE=True. Under
+    // the D6(3) contract the victim cannot hold a login while another tenant
+    // does, so its logout is a no-op NOT_LOGGED_IN and the backend stays
+    // logged in via the holder — exactly the window the F1 report observed
+    // (logical-only logout, backend still logged in). The copy must be
+    // refused; pre-fix it succeeded (direct/native: USER_NOT_LOGGED_IN).
+    let mock = MockBackend::default_test();
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_holder = ctx_mgr.create_context(None).await.unwrap();
+    let ctx_victim = ctx_mgr.create_context(None).await.unwrap();
+    let session_holder = open_test_session(&ctx_mgr, &backend, &ctx_holder).await;
+    let session_victim = open_test_session(&ctx_mgr, &backend, &ctx_victim).await;
+
+    // Victim owns a public object; holder then logs the backend token in.
+    let (rv, public_obj) =
+        create_object_outcome(&ctx_mgr, &backend, &ctx_victim, session_victim, vec![]).await;
+    assert_eq!(rv, CkRv::OK.0, "setup: public create must succeed");
+    assert_eq!(
+        login_response(&ctx_mgr, &backend, &ctx_holder, session_holder).await,
+        CkRv::OK.0,
+        "setup: holder login must succeed"
+    );
+
+    // Victim cannot log in (slot held) and its logout is a no-op.
+    assert_eq!(
+        login_response(&ctx_mgr, &backend, &ctx_victim, session_victim).await,
+        CkRv::USER_ALREADY_LOGGED_IN.0
+    );
+    assert_eq!(
+        logout_response(&ctx_mgr, &backend, &ctx_victim, session_victim).await,
+        CkRv::USER_NOT_LOGGED_IN.0
+    );
+
+    // The kryoptic copy: public session, CKA_PRIVATE=True template → refused.
+    let (rv, handle) = copy_object_outcome(
+        &ctx_mgr,
+        &backend,
+        &ctx_victim,
+        session_victim,
+        public_obj,
+        vec![private_true_attr()],
+    )
+    .await;
+    assert_eq!(
+        rv,
+        CkRv::USER_NOT_LOGGED_IN.0,
+        "copy to CKA_PRIVATE=True after logout must be refused (kryoptic F1 shape)"
+    );
+    assert_eq!(handle, 0);
+
+    // Public-to-public copy while logged out → fine.
+    let (rv, handle) =
+        copy_object_outcome(&ctx_mgr, &backend, &ctx_victim, session_victim, public_obj, vec![])
+            .await;
+    assert_eq!(rv, CkRv::OK.0, "public copy while logged out must still succeed");
+    assert_ne!(handle, 0);
+}
+
+#[tokio::test]
+async fn private_object_use_after_logout_is_refused_while_backend_held_logged_in() {
+    // Back-to-back tenants: B logs in, mints a private object, logs out (last
+    // holder → real backend logout); H then logs in (backend logged in
+    // again). B's handle to its private object must now be unusable — both
+    // copy-from and crypto USE refuse with USER_NOT_LOGGED_IN. Pre-fix, the
+    // logged-in backend accepted both.
+    let mock = MockBackend::default_test();
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_b = ctx_mgr.create_context(None).await.unwrap();
+    let ctx_h = ctx_mgr.create_context(None).await.unwrap();
+    let session_b = open_test_session(&ctx_mgr, &backend, &ctx_b).await;
+    let session_h = open_test_session(&ctx_mgr, &backend, &ctx_h).await;
+
+    // B holds the login and mints a private key object.
+    assert_eq!(login_response(&ctx_mgr, &backend, &ctx_b, session_b).await, CkRv::OK.0);
+    let (rv, priv_key) =
+        create_object_outcome(&ctx_mgr, &backend, &ctx_b, session_b, vec![private_true_attr()])
+            .await;
+    assert_eq!(rv, CkRv::OK.0, "setup: private mint while logged in must succeed");
+
+    // While logged in, B can USE the key.
+    assert_eq!(
+        sign_init_rv(&ctx_mgr, &backend, &ctx_b, session_b, priv_key).await,
+        CkRv::OK.0,
+        "setup: key use while logged in must reach the backend"
+    );
+
+    // B logs out; H logs in (backend logged in again, B logically out).
+    assert_eq!(logout_response(&ctx_mgr, &backend, &ctx_b, session_b).await, CkRv::OK.0);
+    assert_eq!(login_response(&ctx_mgr, &backend, &ctx_h, session_h).await, CkRv::OK.0);
+
+    // Copy FROM the private source while logged out → refused.
+    let (rv, _) =
+        copy_object_outcome(&ctx_mgr, &backend, &ctx_b, session_b, priv_key, vec![]).await;
+    assert_eq!(
+        rv,
+        CkRv::USER_NOT_LOGGED_IN.0,
+        "copy from a private source while logged out must be refused"
+    );
+
+    // Crypto USE of the private key while logged out → refused.
+    assert_eq!(
+        sign_init_rv(&ctx_mgr, &backend, &ctx_b, session_b, priv_key).await,
+        CkRv::USER_NOT_LOGGED_IN.0,
+        "private-key use while logged out must be refused despite the logged-in backend"
+    );
+}
+
+#[tokio::test]
+async fn generate_private_key_while_logged_out_is_refused() {
+    // The create-family mint check covers key generation too: a logged-out
+    // context must not generate a CKA_PRIVATE key through a held-logged-in
+    // backend. (Refusal precedes the backend call, so the mock's mechanism
+    // table is irrelevant on the refused path.)
+    let mock = MockBackend::default_test();
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_holder = ctx_mgr.create_context(None).await.unwrap();
+    let ctx_out = ctx_mgr.create_context(None).await.unwrap();
+    let session_holder = open_test_session(&ctx_mgr, &backend, &ctx_holder).await;
+    let session_out = open_test_session(&ctx_mgr, &backend, &ctx_out).await;
+    assert_eq!(
+        login_response(&ctx_mgr, &backend, &ctx_holder, session_holder).await,
+        CkRv::OK.0,
+        "setup: holder login must succeed"
+    );
+
+    let generate = |session: u64,
+                    ctx_id: &ClientContextId,
+                    template: Vec<pkcs11_proxy_ng_proto::Attribute>| {
+        let (ctx_mgr, backend) = (ctx_mgr.clone(), backend.clone());
+        let ctx_id = ctx_id.0.clone();
+        async move {
+            crate::server::grpc_service::key_ops::generate_key(
+                &HandlerContext::for_test(&ctx_mgr, &backend),
+                Request::new(pkcs11_proxy_ng_proto::GenerateKeyRequest {
+                    client_context_id: ctx_id,
+                    session_handle: session,
+                    mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {
+                        mechanism_type: CkMechanismType::AES_KEY_GEN.0,
+                        params: None,
+                    }),
+                    template,
+
+                    template_null: false,
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner()
+            .ck_rv
+        }
+    };
+
+    assert_eq!(
+        generate(session_out, &ctx_out, vec![private_true_attr()]).await,
+        CkRv::USER_NOT_LOGGED_IN.0,
+        "private GenerateKey while logged out must be refused"
+    );
+    // A public-template GenerateKey passes the enforcement (whatever the
+    // backend then verdicts — the mock does not implement AES_KEY_GEN).
+    assert_ne!(
+        generate(session_out, &ctx_out, vec![]).await,
+        CkRv::USER_NOT_LOGGED_IN.0,
+        "public GenerateKey must pass the logical-login enforcement"
+    );
+}
+
+/// HKDF-DERIVE proto mechanism carrying `salt_key` as the embedded salt key.
+fn hkdf_derive_mechanism(salt_key: u64) -> pkcs11_proxy_ng_proto::Mechanism {
+    pkcs11_proxy_ng_proto::Mechanism::from(&CkMechanism {
+        mechanism_type: CkMechanismType::HKDF_DERIVE,
+        params: Some(CkMechanismParams::Hkdf(HkdfParams {
+            extract: true,
+            expand: true,
+            prf_hash_mechanism: CkMechanismType::SHA256.0,
+            salt_type: cryptoki_sys::CKF_HKDF_SALT_KEY as u64,
+            salt: Vec::new().into(),
+            salt_key_handle: salt_key,
+            info: Vec::new().into(),
+        })),
+    })
+}
+
+async fn derive_key_rv(
+    ctx_mgr: &Arc<ContextManager>,
+    backend: &Arc<dyn Pkcs11Backend>,
+    ctx_id: &ClientContextId,
+    session: u64,
+    base_key: u64,
+    salt_key: u64,
+) -> u64 {
+    crate::server::grpc_service::key_ops::derive_key(
+        &HandlerContext::for_test(ctx_mgr, backend),
+        Request::new(pkcs11_proxy_ng_proto::DeriveKeyRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+            mechanism: Some(hkdf_derive_mechanism(salt_key)),
+            base_key_handle: base_key,
+            template: vec![],
+            template_null: false,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv
+}
+
+#[tokio::test]
+async fn derive_with_private_embedded_key_while_logged_out_is_refused() {
+    // F-02: D6(1) USE enforcement covers mechanism-embedded auxiliary
+    // handles (the HKDF salt key here): a logged-out context must not USE a
+    // private embedded key through a backend held logged-in by another
+    // tenant. Pre-fix, embedded handles were remapped with no login check
+    // and the derive reached the backend.
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_out = ctx_mgr.create_context(None).await.unwrap();
+    let ctx_holder = ctx_mgr.create_context(None).await.unwrap();
+    let session_out = open_test_session(&ctx_mgr, &backend, &ctx_out).await;
+    let session_holder = open_test_session(&ctx_mgr, &backend, &ctx_holder).await;
+
+    // ctx_out mints a public base key and a private salt key while logged in.
+    assert_eq!(login_response(&ctx_mgr, &backend, &ctx_out, session_out).await, CkRv::OK.0);
+    let (rv, base_key) =
+        create_object_outcome(&ctx_mgr, &backend, &ctx_out, session_out, vec![]).await;
+    assert_eq!(rv, CkRv::OK.0, "setup: public base key mint must succeed");
+    let (rv, salt_key) =
+        create_object_outcome(&ctx_mgr, &backend, &ctx_out, session_out, vec![private_true_attr()])
+            .await;
+    assert_eq!(rv, CkRv::OK.0, "setup: private salt key mint must succeed");
+    let native_salt = ctx_mgr
+        .get_context(&ctx_out, |ctx| ctx.object_handles.resolve(VirtualHandle(salt_key)))
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+    assert_eq!(logout_response(&ctx_mgr, &backend, &ctx_out, session_out).await, CkRv::OK.0);
+
+    // The holder keeps the shared backend token logged in.
+    assert_eq!(
+        login_response(&ctx_mgr, &backend, &ctx_holder, session_holder).await,
+        CkRv::OK.0,
+        "setup: holder login must succeed"
+    );
+
+    // Logged-out derive USE-ing a private embedded salt key → refused, and
+    // the backend is never reached.
+    assert_eq!(
+        derive_key_rv(&ctx_mgr, &backend, &ctx_out, session_out, base_key, salt_key).await,
+        CkRv::USER_NOT_LOGGED_IN.0,
+        "derive USE-ing a private embedded key while logged out must be refused"
+    );
+    assert_eq!(
+        mock.mechanism_entry_count(MockMechanismEntry::DeriveKey),
+        0,
+        "refused derive must not reach the backend"
+    );
+
+    // Logged-in derive with the same keys → reaches the backend, salt remapped.
+    assert_eq!(logout_response(&ctx_mgr, &backend, &ctx_holder, session_holder).await, CkRv::OK.0);
+    assert_eq!(login_response(&ctx_mgr, &backend, &ctx_out, session_out).await, CkRv::OK.0);
+    assert_ne!(
+        derive_key_rv(&ctx_mgr, &backend, &ctx_out, session_out, base_key, salt_key).await,
+        CkRv::USER_NOT_LOGGED_IN.0,
+        "derive while logged in must pass the logical-login enforcement"
+    );
+    assert_eq!(
+        mock.last_embedded_handles(MockMechanismEntry::DeriveKey),
+        Some(MockEmbeddedHandles::HkdfSalt(native_salt)),
+        "logged-in derive must reach the backend with the remapped salt handle"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// D6(2)/D9-proxy: last-context-out backend logout + refcounted teardown
+// ---------------------------------------------------------------------------
+
+async fn finalize_rv(
+    ctx_mgr: &Arc<ContextManager>,
+    backend: &Arc<dyn Pkcs11Backend>,
+    ctx_id: &ClientContextId,
+) -> u64 {
+    crate::server::grpc_service::general::finalize(
+        &HandlerContext::for_test(ctx_mgr, backend),
+        Request::new(pkcs11_proxy_ng_proto::FinalizeRequest {
+            client_context_id: ctx_id.0.clone(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv
+}
+
+async fn close_session_rv(
+    ctx_mgr: &Arc<ContextManager>,
+    backend: &Arc<dyn Pkcs11Backend>,
+    ctx_id: &ClientContextId,
+    session: u64,
+) -> u64 {
+    close_session(
+        &HandlerContext::for_test(ctx_mgr, backend),
+        Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv
+}
+
+#[tokio::test]
+async fn finalize_while_holding_login_releases_backend_login() {
+    // D6(2): a context that tears down holding the last logical login must
+    // release the shared backend login, so the next login PIN-verifies
+    // against a logged-out token. Pre-fix, finalize closed sessions without
+    // logging out: with another tenant's session keeping the token alive,
+    // the backend stayed logged in and the next login got a spurious
+    // USER_ALREADY_LOGGED_IN.
+    let mock = MockBackend::default_test();
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_a = ctx_mgr.create_context(None).await.unwrap();
+    let ctx_b = ctx_mgr.create_context(None).await.unwrap();
+    let session_a = open_test_session(&ctx_mgr, &backend, &ctx_a).await;
+    // B holds a bare session so the backend token would stay logged in on a
+    // logout-less teardown (no last-close auto-logout to mask the bug).
+    let _session_b = open_test_session(&ctx_mgr, &backend, &ctx_b).await;
+
+    assert_eq!(login_response(&ctx_mgr, &backend, &ctx_a, session_a).await, CkRv::OK.0);
+    let backend_session_a = ctx_mgr
+        .get_context(&ctx_a, |ctx| ctx.session_handles.resolve(VirtualHandle(session_a)))
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+
+    // A finalizes WITHOUT logging out.
+    assert_eq!(finalize_rv(&ctx_mgr, &backend, &ctx_a).await, CkRv::OK.0);
+
+    // A's backend session is reaped...
+    assert_eq!(
+        backend.get_session_info(CkSessionHandle(backend_session_a)).unwrap_err(),
+        CkRv::SESSION_HANDLE_INVALID,
+        "departed context's backend session must be closed"
+    );
+    // ...and the backend login is released: a fresh login succeeds.
+    let ctx_h = ctx_mgr.create_context(None).await.unwrap();
+    let session_h = open_test_session(&ctx_mgr, &backend, &ctx_h).await;
+    assert_eq!(
+        login_response(&ctx_mgr, &backend, &ctx_h, session_h).await,
+        CkRv::OK.0,
+        "last-context-out teardown must release the backend login"
+    );
+}
+
+#[tokio::test]
+async fn close_last_session_while_holding_login_releases_backend_login() {
+    // D6(2) via session close: closing the last session drops the context's
+    // logical login (existing semantics); last-context-out must then release
+    // the backend login too. B's bare session again blocks last-close
+    // auto-logout so the test discriminates the fix.
+    let mock = MockBackend::default_test();
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_a = ctx_mgr.create_context(None).await.unwrap();
+    let ctx_b = ctx_mgr.create_context(None).await.unwrap();
+    let session_a = open_test_session(&ctx_mgr, &backend, &ctx_a).await;
+    let _session_b = open_test_session(&ctx_mgr, &backend, &ctx_b).await;
+
+    assert_eq!(login_response(&ctx_mgr, &backend, &ctx_a, session_a).await, CkRv::OK.0);
+    assert_eq!(close_session_rv(&ctx_mgr, &backend, &ctx_a, session_a).await, CkRv::OK.0);
+
+    let ctx_h = ctx_mgr.create_context(None).await.unwrap();
+    let session_h = open_test_session(&ctx_mgr, &backend, &ctx_h).await;
+    assert_eq!(
+        login_response(&ctx_mgr, &backend, &ctx_h, session_h).await,
+        CkRv::OK.0,
+        "closing the last logged-in session must release the backend login"
+    );
+}
+
+#[tokio::test]
+async fn close_session_without_login_does_not_release_backend_login() {
+    // Guard against over-eager logout: closing a session that holds no login
+    // must leave another tenant's backend login undisturbed.
+    let mock = MockBackend::default_test();
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_a = ctx_mgr.create_context(None).await.unwrap();
+    let ctx_b = ctx_mgr.create_context(None).await.unwrap();
+    let session_a = open_test_session(&ctx_mgr, &backend, &ctx_a).await;
+    let session_b = open_test_session(&ctx_mgr, &backend, &ctx_b).await;
+
+    assert_eq!(login_response(&ctx_mgr, &backend, &ctx_a, session_a).await, CkRv::OK.0);
+    assert_eq!(close_session_rv(&ctx_mgr, &backend, &ctx_b, session_b).await, CkRv::OK.0);
+
+    let backend_session_a = ctx_mgr
+        .get_context(&ctx_a, |ctx| ctx.session_handles.resolve(VirtualHandle(session_a)))
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+    let info = backend.get_session_info(CkSessionHandle(backend_session_a)).unwrap();
+    assert_eq!(
+        info.state,
+        CkSessionState::RwUser,
+        "closing a logged-out session must not disturb the holder's backend login"
+    );
+}
+
+#[tokio::test]
+async fn evict_expired_context_holding_login_releases_backend_login() {
+    // D9 lease-expiry path through the same shared teardown: an expired
+    // context holding the last login releases the backend login on reap.
+    let mock = MockBackend::default_test();
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_millis(20), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_a = ctx_mgr.create_context(None).await.unwrap();
+    let session_a = open_test_session(&ctx_mgr, &backend, &ctx_a).await;
+    assert_eq!(login_response(&ctx_mgr, &backend, &ctx_a, session_a).await, CkRv::OK.0);
+
+    // Let A expire, then create B fresh (B stays live: its session blocks
+    // last-close auto-logout so the test discriminates the fix).
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let ctx_b = ctx_mgr.create_context(None).await.unwrap();
+    let _session_b = open_test_session(&ctx_mgr, &backend, &ctx_b).await;
+
+    let evicted = ctx_mgr.evict_expired(&backend).await;
+    assert!(evicted.contains(&ctx_a), "the expired holder must be reaped");
+    assert!(!evicted.contains(&ctx_b), "the fresh context must survive");
+
+    let ctx_h = ctx_mgr.create_context(None).await.unwrap();
+    let session_h = open_test_session(&ctx_mgr, &backend, &ctx_h).await;
+    assert_eq!(
+        login_response(&ctx_mgr, &backend, &ctx_h, session_h).await,
+        CkRv::OK.0,
+        "reaping an expired holder must release the backend login"
+    );
+}
+
+#[tokio::test]
+async fn teardown_of_one_tenant_does_not_disturb_other_tenant() {
+    // D9 two-tenant test: A holds the slot login; B lives beside it with a
+    // session and objects but no login. A departs via finalize. B must
+    // observe no state change: its context, sessions, and objects stay
+    // intact, its backend sessions stay open, and it can take over the
+    // released backend login and keep operating. Pre-fix, the backend login
+    // leaked (B's fresh login got ALREADY).
+    let mock = MockBackend::default_test();
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_a = ctx_mgr.create_context(None).await.unwrap();
+    let ctx_b = ctx_mgr.create_context(None).await.unwrap();
+    let session_a = open_test_session(&ctx_mgr, &backend, &ctx_a).await;
+    let session_b = open_test_session(&ctx_mgr, &backend, &ctx_b).await;
+
+    assert_eq!(login_response(&ctx_mgr, &backend, &ctx_a, session_a).await, CkRv::OK.0);
+    let (rv, object_b) = create_object_outcome(&ctx_mgr, &backend, &ctx_b, session_b, vec![]).await;
+    assert_eq!(rv, CkRv::OK.0, "setup: B's public create must succeed");
+    let backend_session_a = ctx_mgr
+        .get_context(&ctx_a, |ctx| ctx.session_handles.resolve(VirtualHandle(session_a)))
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+    let backend_session_b = ctx_mgr
+        .get_context(&ctx_b, |ctx| ctx.session_handles.resolve(VirtualHandle(session_b)))
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+
+    // A departs holding the login.
+    assert_eq!(finalize_rv(&ctx_mgr, &backend, &ctx_a).await, CkRv::OK.0);
+
+    // A's backend session is reaped; B's stays open and usable.
+    assert_eq!(
+        backend.get_session_info(CkSessionHandle(backend_session_a)).unwrap_err(),
+        CkRv::SESSION_HANDLE_INVALID,
+        "departed tenant's backend session must be closed"
+    );
+    backend
+        .get_session_info(CkSessionHandle(backend_session_b))
+        .expect("surviving tenant's backend session must stay open");
+    // B's logical state is untouched.
+    let b_intact = ctx_mgr
+        .get_context(&ctx_b, |ctx| {
+            ctx.session_handles.resolve(VirtualHandle(session_b)).is_some()
+                && ctx.object_handles.resolve(VirtualHandle(object_b)).is_some()
+        })
+        .await
+        .unwrap();
+    assert!(b_intact, "surviving tenant's sessions and objects must stay mapped");
+    // And B takes over the released backend login and keeps operating.
     assert_eq!(
         login_response(&ctx_mgr, &backend, &ctx_b, session_b).await,
         CkRv::OK.0,
-        "cross-client login with the correct PIN must still succeed"
+        "surviving tenant must be able to log in after the holder departs"
     );
+    let (rv, _) = create_object_outcome(&ctx_mgr, &backend, &ctx_b, session_b, vec![]).await;
+    assert_eq!(rv, CkRv::OK.0, "surviving tenant must keep operating");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_first_login_serializes_to_one_backend_login() {
     // M5: two clients racing the FIRST login on the same shared token must not
     // both take the real-login path. Per-slot login serialization makes the
-    // first do the real C_Login (capturing the verifier) and the second take
-    // the logical path (verifier-validated OK) — exactly one backend C_Login.
+    // first do the real C_Login and the second — after blocking on the lock and
+    // seeing A's state — take the faithful-ALREADY path (D6(3)): exactly one
+    // backend C_Login.
     //
     // Deterministic harness: a login gate holds client A inside the backend
     // C_Login (still holding the per-slot lock) while client B starts, so B is
     // guaranteed to race. Without the lock, B would scan "no other login" before
     // A inserts its state and issue a SECOND backend login (count == 2); with it,
-    // B blocks on the lock, then sees A's state and takes the logical path.
+    // B blocks on the lock, then sees A's state and answers ALREADY faithfully.
     let mock = Arc::new(MockBackend::default_test());
     mock.initialize().unwrap();
     let backend: Arc<dyn Pkcs11Backend> = mock.clone();
@@ -1674,8 +2533,8 @@ async fn concurrent_first_login_serializes_to_one_backend_login() {
         })
     };
 
-    // Release A; it finishes the real login, captures the verifier, drops the
-    // lock; B then sees A's login state and takes the logical path.
+    // Release A; it finishes the real login, records its login state, and drops
+    // the lock; B then sees A's login state and answers ALREADY faithfully.
     {
         let (lock, cv) = &*proceed;
         *lock.lock().unwrap() = true;
@@ -1688,66 +2547,13 @@ async fn concurrent_first_login_serializes_to_one_backend_login() {
     assert_eq!(rv_a, CkRv::OK.0, "the first login should succeed");
     assert_eq!(
         rv_b,
-        CkRv::OK.0,
-        "the raced second login must be a logical OK, not USER_ALREADY_LOGGED_IN"
+        CkRv::USER_ALREADY_LOGGED_IN.0,
+        "the raced second login must be a faithful ALREADY (D6(3)), not a minted login"
     );
     assert_eq!(
         mock.login_call_count(),
         1,
         "per-slot serialization must yield exactly one real backend C_Login"
-    );
-}
-
-#[tokio::test]
-async fn set_pin_refreshes_the_cross_client_login_verifier() {
-    // A1 follow-up (ADR-0008): after a PIN change, a co-located logical login
-    // with the NEW PIN must be accepted — the verifier is refreshed, not left
-    // failing closed against the old PIN.
-    let mock = MockBackend::default_test();
-    mock.initialize().unwrap();
-    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
-    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
-    let ctx_a = ctx_mgr.create_context(None).await.unwrap();
-    let ctx_b = ctx_mgr.create_context(None).await.unwrap();
-    let session_a = open_test_session(&ctx_mgr, &backend, &ctx_a).await;
-    let session_b = open_test_session(&ctx_mgr, &backend, &ctx_b).await;
-
-    // ctx_a logs in with "1234" (verifier captured), then changes it to "5678".
-    assert_eq!(login_response(&ctx_mgr, &backend, &ctx_a, session_a).await, CkRv::OK.0);
-    let set_rv = set_pin(
-        &HandlerContext::for_test(&ctx_mgr, &backend),
-        Request::new(pkcs11_proxy_ng_proto::SetPinRequest {
-            client_context_id: ctx_a.0.clone(),
-            session_handle: session_a,
-            old_pin: Some(b"1234".to_vec()),
-            new_pin: Some(b"5678".to_vec()),
-        }),
-    )
-    .await
-    .unwrap()
-    .into_inner()
-    .ck_rv;
-    assert_eq!(set_rv, CkRv::OK.0, "SetPIN should succeed");
-
-    // ctx_b's logical login with the NEW PIN must now be accepted.
-    let rv = login(
-        &HandlerContext::for_test(&ctx_mgr, &backend),
-        Request::new(pkcs11_proxy_ng_proto::LoginRequest {
-            client_context_id: ctx_b.0.clone(),
-            session_handle: session_b,
-            user_type: CkUserType::User as u64,
-            pin: Some(b"5678".to_vec()),
-        }),
-    )
-    .await
-    .unwrap()
-    .into_inner()
-    .ck_rv;
-    assert_eq!(
-        rv,
-        CkRv::OK.0,
-        "a logical login with the new PIN must be accepted after SetPIN refreshes the verifier"
     );
 }
 
@@ -1952,6 +2758,8 @@ async fn audit_generate_key_emits_key_mgmt_record() {
                 params: None,
             }),
             template: vec![],
+
+            template_null: false,
         }),
     )
     .await
@@ -1972,6 +2780,81 @@ async fn audit_generate_key_emits_key_mgmt_record() {
     assert!(jsonl.contains("\"ck_rv\":0"), "successful keygen must record ck_rv 0");
 
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Fail-closed-after-side-effect (ADR-0012): with a saturated audit sink, a
+/// `KeyMgmt` op that already committed on the backend must still report
+/// `CKR_FUNCTION_FAILED` with zeroed outputs rather than confirm an unaudited
+/// security action. Setup mirrors `audit_generate_key_emits_key_mgmt_record`;
+/// the saturated sink mirrors `sign_fail_open_saturated_sink`.
+#[tokio::test]
+async fn fail_closed_generate_key_saturated_sink_reports_function_failed() {
+    // Build a backend that advertises AES_KEY_GEN so the op commits.
+    let mock = pkcs11_proxy_ng_backend::MockBackend::new(
+        vec![CkSlotId(0)],
+        vec![CkMechanismType::AES_KEY_GEN],
+    );
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+
+    // Saturated sink: every fail-closed emit is rejected immediately.
+    let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+    ctx.audit = Some(crate::server::audit::AuditSink::new_saturated_for_test());
+
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let session_handle = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+
+    // Resolve the backend session so the committed side effect is observed
+    // directly on the backend, independent of the (zeroed) handler response.
+    let backend_session = ctx_mgr
+        .get_context(&ctx_id, |ctx| ctx.session_handles.resolve(VirtualHandle(session_handle)))
+        .await
+        .unwrap()
+        .unwrap();
+    let backend_session = CkSessionHandle(backend_session.0 as u64);
+
+    // Negative control: a fresh MockBackend allocates object handles from 1
+    // and setup creates no objects, so handle 1 must be invalid before the call.
+    let generated = CkObjectHandle(1);
+    assert_eq!(
+        backend.get_object_size(backend_session, generated),
+        Err(CkRv::OBJECT_HANDLE_INVALID),
+        "no key must exist before the call"
+    );
+
+    use crate::server::grpc_service::key_ops::generate_key;
+    let resp = generate_key(
+        &ctx,
+        Request::new(pkcs11_proxy_ng_proto::GenerateKeyRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle,
+            mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {
+                mechanism_type: CkMechanismType::AES_KEY_GEN.0,
+                params: None,
+            }),
+            template: vec![],
+
+            template_null: false,
+        }),
+    )
+    .await
+    .expect("handler must return Ok(Response), never a Status error")
+    .into_inner();
+    assert_eq!(
+        resp.ck_rv,
+        CkRv::FUNCTION_FAILED.0,
+        "saturated sink must fail the op closed with FUNCTION_FAILED"
+    );
+    assert_eq!(resp.key_handle, 0, "key handle must be zeroed on audit rejection");
+    assert!(resp.mechanism_out.is_none(), "mechanism_out must be dropped on audit rejection");
+
+    // Committed side effect persists: the backend op ran before emission, so
+    // the key exists on the backend even though the client saw FUNCTION_FAILED.
+    backend
+        .get_object_size(backend_session, generated)
+        .expect("fail-closed-after-side-effect: committed key must persist on the backend");
 }
 
 /// G1-PR3 audit-off: when `ctx.audit` is `None`, `generate_key` behaves
@@ -2003,6 +2886,8 @@ async fn audit_off_generate_key_byte_identical() {
                 params: None,
             }),
             template: vec![],
+
+            template_null: false,
         }),
     )
     .await

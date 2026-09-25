@@ -15,7 +15,7 @@ impl FfiBackend {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         public_key: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputAndHandleResult> {
         use super::ffi_conversion::FfiAttrs;
@@ -24,7 +24,7 @@ impl FfiBackend {
         let function = unsafe { (*fl).C_EncapsulateKey }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
-        let ffi_attrs = FfiAttrs::from_slice(template)?;
+        let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
 
         let h_session = Self::session_handle(session)?;
         let h_public_key = Self::object_handle(public_key)?;
@@ -55,15 +55,15 @@ impl FfiBackend {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         public_key: CkObjectHandle,
-        template: &[CkAttribute],
-    ) -> CkResult<(Vec<u8>, CkObjectHandle)> {
+        template: Option<&[CkAttribute]>,
+    ) -> CkResult<(SecretBytes, CkObjectHandle)> {
         use super::ffi_conversion::FfiAttrs;
 
         let fl = self.func_list_3_2.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let function = unsafe { (*fl).C_EncapsulateKey }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
-        let ffi_attrs = FfiAttrs::from_slice(template)?;
+        let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
 
         // Two-call pattern: first call with pCiphertext=null to get size.
         let mut ciphertext_len: cryptoki_sys::CK_ULONG = 0;
@@ -99,7 +99,7 @@ impl FfiBackend {
         })?;
         ciphertext.truncate(ciphertext_len as usize);
 
-        Ok((ciphertext, CkObjectHandle(key_handle as u64)))
+        Ok((ciphertext.into(), CkObjectHandle(key_handle as u64)))
     }
 
     pub(super) fn ffi_decapsulate_key(
@@ -107,12 +107,12 @@ impl FfiBackend {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         private_key: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
         ciphertext: CkInBuf<'_>,
     ) -> CkResult<CkObjectHandle> {
         use super::ffi_conversion::FfiAttrs;
 
-        let ffi_attrs = FfiAttrs::from_slice(template)?;
+        let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
         let (ct_ptr, ct_len) = ciphertext.as_ptr_len();
         let mut key_handle: cryptoki_sys::CK_OBJECT_HANDLE = 0;
@@ -207,7 +207,7 @@ mod tests {
                 CkSessionHandle(1),
                 &mechanism,
                 CkObjectHandle(2),
-                &[],
+                Some(&[]),
                 &output_spec,
             )
             .expect("provider result envelope");

@@ -1,0 +1,39 @@
+# Dockerfile.be-qemu — big-endian cross-test image (T6a).
+#
+# x86_64 builder that compiles the workspace for s390x-unknown-linux-gnu
+# (big-endian) and runs the test binaries under qemu-s390x. The workspace
+# is mounted at /workspace at run time (see scripts/run-be-qemu-test.sh);
+# nothing is copied at build time, so this image never goes stale.
+#
+# Usage (via the script):
+#   scripts/run-be-qemu-test.sh
+#
+# Manual equivalent:
+#   docker build -f Dockerfile.be-qemu -t pkcs11-proxy-ng-be-qemu .
+#   docker run --rm -v "$PWD:/workspace:ro" -v be-cargo-cache:/root/.cargo \
+#     -e CARGO_TARGET_DIR=/tmp/be-target pkcs11-proxy-ng-be-qemu \
+#     cargo test --target s390x-unknown-linux-gnu -p pkcs11-proxy-ng-types
+
+FROM debian:13.6
+
+# Pinned to the receipted toolchain (see task-t6a-report.md); override with
+# --build-arg RUST_TOOLCHAIN=<version> to re-validate against a newer rustc.
+ARG RUST_TOOLCHAIN=1.98.1
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        ca-certificates curl git pkg-config python3 \
+        gcc libc6-dev gcc-s390x-linux-gnu libc6-dev-s390x-cross \
+        qemu-user-static protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain "${RUST_TOOLCHAIN}" --profile minimal \
+        --target s390x-unknown-linux-gnu
+
+ENV PATH="/root/.cargo/bin:${PATH}"
+ENV CARGO_TARGET_S390X_UNKNOWN_LINUX_GNU_LINKER="s390x-linux-gnu-gcc"
+# qemu needs the cross sysroot so s390x glibc binaries find their loader/libc.
+ENV CARGO_TARGET_S390X_UNKNOWN_LINUX_GNU_RUNNER="qemu-s390x-static -L /usr/s390x-linux-gnu"
+
+WORKDIR /workspace

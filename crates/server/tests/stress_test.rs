@@ -39,7 +39,7 @@ async fn concurrent_clients_sign_workload() {
             let mut client = init_client(&ep).await;
             let slots = client.get_slot_list(false).await.unwrap();
             let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
-            let key = client.create_object(session, &[]).await.unwrap();
+            let key = client.create_object(session, Some(&[])).await.unwrap();
             let mech = CkMechanism { mechanism_type: CkMechanismType(0x00000001), params: None };
 
             for _ in 0..20 {
@@ -70,7 +70,7 @@ async fn concurrent_clients_encrypt_decrypt_workload() {
             let mut client = init_client(&ep).await;
             let slots = client.get_slot_list(false).await.unwrap();
             let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
-            let key = client.create_object(session, &[]).await.unwrap();
+            let key = client.create_object(session, Some(&[])).await.unwrap();
             let mech = CkMechanism { mechanism_type: CkMechanismType(0x00000001), params: None };
             let plaintext = b"encrypt-me-please";
 
@@ -157,12 +157,12 @@ async fn object_handle_churn_no_leaked_handles() {
 
     // Rapidly create and destroy 100 objects
     for _ in 0..100 {
-        let obj = client.create_object(session, &[]).await.unwrap();
+        let obj = client.create_object(session, Some(&[])).await.unwrap();
         client.destroy_object(session, obj).await.unwrap();
     }
 
     // Should still be able to create objects
-    let obj = client.create_object(session, &[]).await.unwrap();
+    let obj = client.create_object(session, Some(&[])).await.unwrap();
     client.destroy_object(session, obj).await.unwrap();
 
     client.close_session(session).await.unwrap();
@@ -278,7 +278,7 @@ async fn mixed_operations_concurrent() {
             let mut client = init_client(&ep).await;
             let slots = client.get_slot_list(false).await.unwrap();
             let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
-            let key = client.create_object(session, &[]).await.unwrap();
+            let key = client.create_object(session, Some(&[])).await.unwrap();
             let mech = CkMechanism { mechanism_type: CkMechanismType(0x00000001), params: None };
 
             for _ in 0..10 {

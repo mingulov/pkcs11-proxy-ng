@@ -255,12 +255,17 @@ pub fn is_value_bearing_secret(t: CkAttributeType) -> bool {
 }
 
 /// A typed attribute value (ADR-0001: known attributes use typed serialization).
+///
+/// `Bytes`/`String` hold `SecretBytes` (ADR-0013): attribute fields are
+/// polymorphic — `Attribute.bytes_value`/`string_value` are classified secret
+/// and fail closed — so every value is a wiping, redacted owner. Text must be
+/// decoded inside `SecretBytes::expose`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CkAttributeValue {
     Bool(bool),
     Ulong(u64),
-    Bytes(Vec<u8>),
-    String(String),
+    Bytes(crate::secret::SecretBytes),
+    String(crate::secret::SecretBytes),
     /// A nested `CK_ATTRIBUTE[]` template value (the input direction of
     /// CKF_ARRAY_ATTRIBUTE attributes, e.g. CKA_WRAP_TEMPLATE inside a
     /// C_CreateObject template). Carried structurally: raw client

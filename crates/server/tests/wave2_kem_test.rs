@@ -27,7 +27,7 @@ async fn setup_session_with_key(client: &mut Pkcs11Client) -> (CkSessionHandle, 
         attr_type: CkAttributeType::CLASS,
         value: Some(CkAttributeValue::Ulong(3)), // CKO_SECRET_KEY
     }];
-    let key = client.create_object(session, &template).await.unwrap();
+    let key = client.create_object(session, Some(&template)).await.unwrap();
     (session, key)
 }
 
@@ -50,7 +50,7 @@ async fn encapsulate_key_returns_synthetic_result_through_full_stack() {
     let (session, key) = setup_session_with_key(&mut client).await;
 
     let (ciphertext, encapsulated_key) =
-        client.encapsulate_key(session, &test_mechanism(), key, &[]).await.unwrap();
+        client.encapsulate_key(session, &test_mechanism(), key, Some(&[])).await.unwrap();
 
     assert_eq!(ciphertext, vec![0xCA, 0xFE, 0xBA, 0xBE, 0xDE, 0xAD, 0xBE, 0xEF]);
     assert_ne!(encapsulated_key, CkObjectHandle(0));
@@ -70,7 +70,7 @@ async fn encapsulate_key_with_template_returns_synthetic_result() {
         value: Some(CkAttributeValue::Ulong(3)),
     }];
     let (ciphertext, encapsulated_key) =
-        client.encapsulate_key(session, &test_mechanism(), key, &template).await.unwrap();
+        client.encapsulate_key(session, &test_mechanism(), key, Some(&template)).await.unwrap();
 
     assert_eq!(ciphertext, vec![0xCA, 0xFE, 0xBA, 0xBE, 0xDE, 0xAD, 0xBE, 0xEF]);
     assert_ne!(encapsulated_key, CkObjectHandle(0));
@@ -89,7 +89,7 @@ async fn decapsulate_key_returns_synthetic_handle_through_full_stack() {
     let (session, key) = setup_session_with_key(&mut client).await;
 
     let decapsulated_key = client
-        .decapsulate_key(session, &test_mechanism(), key, &[], CkInBuf::Bytes(&[0xAA, 0xBB]))
+        .decapsulate_key(session, &test_mechanism(), key, Some(&[]), CkInBuf::Bytes(&[0xAA, 0xBB]))
         .await
         .unwrap();
 
@@ -106,7 +106,7 @@ async fn decapsulate_key_with_empty_ciphertext() {
 
     // Empty ciphertext should still reach the backend.
     let decapsulated_key = client
-        .decapsulate_key(session, &test_mechanism(), key, &[], CkInBuf::Bytes(&[]))
+        .decapsulate_key(session, &test_mechanism(), key, Some(&[]), CkInBuf::Bytes(&[]))
         .await
         .unwrap();
 
@@ -126,7 +126,7 @@ async fn encapsulate_key_rejects_invalid_session() {
     // Use a session handle that was never opened.
     let bad_session = CkSessionHandle(999_999);
     let err = client
-        .encapsulate_key(bad_session, &test_mechanism(), CkObjectHandle(1), &[])
+        .encapsulate_key(bad_session, &test_mechanism(), CkObjectHandle(1), Some(&[]))
         .await
         .unwrap_err();
 
@@ -149,7 +149,7 @@ async fn decapsulate_key_rejects_invalid_session() {
             bad_session,
             &test_mechanism(),
             CkObjectHandle(1),
-            &[],
+            Some(&[]),
             CkInBuf::Bytes(&[0xCC]),
         )
         .await
@@ -178,7 +178,7 @@ async fn encapsulate_key_returns_backend_error_for_unknown_key_handle() {
     // Key handle 999_999 was never created. The proxy forwards CK_INVALID_HANDLE
     // to the backend, and MockBackend now reports that as an invalid object.
     let err = client
-        .encapsulate_key(session, &test_mechanism(), CkObjectHandle(999_999), &[])
+        .encapsulate_key(session, &test_mechanism(), CkObjectHandle(999_999), Some(&[]))
         .await
         .unwrap_err();
 
@@ -199,7 +199,7 @@ async fn decapsulate_key_returns_backend_error_for_unknown_key_handle() {
             session,
             &test_mechanism(),
             CkObjectHandle(999_999),
-            &[],
+            Some(&[]),
             CkInBuf::Bytes(&[0xAA]),
         )
         .await

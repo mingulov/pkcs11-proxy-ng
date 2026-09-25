@@ -88,6 +88,15 @@ Service + `maxSurge: 1, maxUnavailable: 0` rollout strategy, the
 SRE/ops audit observed **zero application-visible failures** through
 a ~22-second rolling restart at 10 rps.
 
+**Shim/daemon lockstep.** The shim and daemon must be upgraded together
+(same release) — mixed-version peers are not supported. An old shim
+sends no `iv_null`/`aad_null`/`source_null` bits, so a new daemon
+materializes empty GCM/OAEP fields as non-NULL where the old daemon
+forced NULL (templates are unaffected — the default matches old
+behavior). Lockstep peers are exact; on backends that distinguish the
+shapes the skew only flips between two reject codes, never
+accept↔reject. (Wave 3.5 D2/F3 review Finding 2.)
+
 **If consumer reports unrecoverable errors during the rollout:**
 
 1. Check pod readiness: `kubectl -n <ns> get pods -l app=<daemon-deploy>`.
@@ -237,6 +246,24 @@ kubectl -n <ns> logs deploy/<daemon-deploy> | jq -c 'select(.fields.message=="me
 The `revision` field is a SHA-256-prefix of the loaded TOML. New
 contents produce a new revision.
 
+### Shipped vendor overlays
+
+`examples/vendors/` carries ready-to-layer overlays for mechanisms the
+proxy understands structurally but keeps operator opt-in rather than
+enabling by default:
+
+- `bouncyhsm-blake2b.toml` — `BLAKE2B_*_HMAC_GENERAL`
+  (OASIS v3.2 standard `0x400E/0x4013/0x4018/0x401D`, single-`CK_ULONG`
+  `mac_general` shape; kept opt-in per the Wave 3 F2 sketch, promotion
+  to defaults is defensible follow-up).
+- `opencryptoki-ecdh-x-cof.toml` — `CKM_ECDH_X_AES_KEY_WRAP` /
+  `CKM_ECDH_COF_AES_KEY_WRAP` (`0x4038/0x4039`, `ecdh_aes_key_wrap`
+  shape; kept opt-in pending dedicated X/COF shapes).
+
+Point `[mechanisms].config_path` (or `PKCS11_PROXY_MECHANISMS` for a
+local shim) at the overlay, or `include` it from the daemon's registry
+file, then reload per §5.
+
 ### ConfigMap `subPath` caveat
 
 K8s ConfigMaps mounted with `subPath` **do not auto-update** when the
@@ -347,6 +374,43 @@ down — see the SRE/ops audit's "shared backend storage" finding.
 in the daemon deployment is mounted from a shared backend (PVC,
 hostPath that's actually shared, or a network HSM endpoint). NEVER
 use `emptyDir` for the backend tokens in a multi-replica setup.
+
+### CKR_USER_ALREADY_LOGGED_IN on a consumer that never logged in (0x100)
+
+**Expected behavior — one logical login holder per slot.** All logical
+clients of a daemon share one backend token per slot (ADR-0002 §6). While
+**any** live context holds the slot login, the backend token is logged in
+and would answer a second `C_Login` with `CKR_USER_ALREADY_LOGGED_IN`
+*without checking the PIN* — so the daemon cannot PIN-verify the new login
+and returns that answer faithfully instead of minting a login on an
+unverified PIN (Wave 3.5 D6(3); a different user type gets
+`CKR_USER_ANOTHER_ALREADY_LOGGED_IN`). The presented PIN is not evaluated
+at all on this path.
+
+**Triage.**
+
+1. This is contention, not corruption: another live consumer (or a previous
+   test case whose context lease has not expired yet) holds the slot login.
+   Find it via daemon logs (`Login succeeded` with a different context id).
+2. The window is bounded: `C_Logout`, last-session close, `C_Finalize`, and
+   lease expiry each release the backend login as soon as no live context
+   holds it (D6(2)/D9). Retry the login after the holder releases.
+3. If logins starve, the holder is leaking its login (never logs out and
+   holds sessions open past its useful life). Fix the holder; do not share
+   one daemon across tenants that need concurrent independent logins on the
+   same token — partition daemons per tenant (§4a).
+4. A `Login reconciling holderless-but-logged-in backend` warning means an
+   earlier best-effort last-holder logout was skipped or failed (find the
+   cause in the matching `last-holder backend logout` warning); the login
+   self-heals with one backend logout plus a single retry. Occasional
+   reconciles after teardown races are benign; repeated ones point at a
+   token that never auto-logs-out or a wedged logout path — investigate.
+
+**Test-harness note.** Back-to-back cases sharing one daemon (e.g. the ncli
+suites) routinely hit this when a prior case's context is still within its
+lease: treat `ALREADY` after a prior login as "slot still held", rotate to a
+fresh daemon for pristine-state cases (see §9), and never work around it by
+retrying with a different PIN — the PIN is not the problem.
 
 ## 7. On-call flowchart
 
@@ -499,6 +563,60 @@ encounter; they are scope of follow-up rounds:
 | --- | --- | --- |
 | FOLLOWUP-fork-safety: forked children of a `C_Initialize`d shim must `C_Finalize`+`C_Initialize` to recover | Use fork-then-exec in consumer apps | Application code (not daemon-side) |
 | Backend crash blast radius: a vendor-`.so` SIGSEGV downs the whole daemon process (backend is in-process; A2/in-process-worker deferred) | Run **multiple instances + sticky routing** (§4a); consumers reconnect + re-open (§6) | Deployment + application code |
+| Multiplexed daemon vs pristine token: N logical clients share one backend instance per slot — no per-context pristine state (see below) | Rotate/restart the daemon for pristine-state cases; partition daemons per tenant (§4a) | Test harness / deployment |
+| Message-Init struct strictness: classic param structs on message Init fail closed (`CKR_MECHANISM_PARAM_INVALID`); lenient backends accept them direct (see below) | Pack the `CK_*_MESSAGE_PARAMS` struct for the mechanism on message Init | Application code |
+
+### Multiplexed daemon vs pristine token (in-memory backends)
+
+One daemon = one loaded backend module = **one token state per slot shared
+by every logical client** (ADR-0002 §6, ADR-0007). The proxy multiplexes
+handles, sessions, and login scoping, but it does **not** give each context a
+pristine token. In-memory backends (kryoptic, jcardsim, non-persistent
+SoftHSM) make this visible: token objects, backend login state, and
+find-enumeration all accumulate across tenants sharing the daemon.
+
+What the daemon does and does not reset between tenants:
+
+* **Per-context cleanup (always):** a departing context's backend sessions
+  are closed (only when unreferenced by live contexts), its virtual handles
+  invalidated, its session objects destroyed with their sessions.
+* **Shared state (by design, persists):** the backend login while any live
+  context holds it (released on last-context-out, D6(2)/D9); token objects
+  any tenant created; anything the backend itself remembers (jcardsim
+  key files, kryoptic in-memory tables).
+* **Consequences for assertions:** a case that logs in while a prior case's
+  context still lives gets `CKR_USER_ALREADY_LOGGED_IN` (§6) — correct
+  multiplexed behavior, not a bug. A case asserting an empty token, a
+  logged-out token, or a private-object population it did not create is
+  asserting **pristine** state and is invalid against a shared daemon.
+* **Find-enumeration login filtering (F-04, fixed):**
+  `C_FindObjects` results are filtered by the querying context's login
+  state: a logged-out context observes only known-public objects' bare
+  (virtual) handles/counts, even while another tenant holds the backend
+  logged in (unknown privacy hides fail-closed). Attribute reads, every
+  use path, and private-object create/copy/generate still refuse with
+  `CKR_USER_NOT_LOGGED_IN` as before.
+
+**Rule for harnesses:** cases needing pristine state must rotate to a fresh
+daemon (restart, or a per-case backend namespace/volume) — the D9-harness
+rotation option. Cases tolerant of multiplexing may share, but must treat
+`ALREADY` as "slot held" and must scope their assertions to objects they
+created. For strict tenant isolation in production, partition daemons per
+tenant exactly as for crash containment (§4a).
+
+### Message-Init struct strictness (classic structs fail closed)
+
+`C_MessageEncryptInit` / `C_MessageDecryptInit` must carry the message
+parameter struct for the mechanism (`CK_GCM_MESSAGE_PARAMS`,
+`CK_CCM_MESSAGE_PARAMS`, `CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS`).
+Passing the classic struct (`CK_GCM_PARAMS`, `CK_CCM_PARAMS`) fails
+closed with `CKR_MECHANISM_PARAM_INVALID` by design (ADR-0010
+Limits-(c)) — the call never reaches the backend. kryoptic and NSS
+leniently accept classic structs on message Init, so such calls pass
+direct and fail proxied; that is a documented strictness divergence, not
+a proxy bug (Wave 3 §7.3, Ruling 3 — see the report erratum). If a
+consumer hits `CKR_MECHANISM_PARAM_INVALID` on message Init only through
+the proxy, check the packed struct first.
 
 Earlier follow-ups (DNS re-resolve, slow-backend test, per-RPC
 trace ID, gRPC health probe, rate-limiter) are closed.
