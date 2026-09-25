@@ -107,15 +107,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plus both Miri models (C3M Task 6, no waiver).
 - Mechanism-registry coverage for the Wave 3 gaps: single-DES CFB/OFB IV
   shapes, SSL3/TLS keygen and MAC version/length shapes, CAMELLIA/ARIA/SEED
-  `ECB_ENCRYPT_DATA` derivation, and documented vendor overlays (BouncyHSM
-  BLAKE2B, opencryptoki ECDH-X/COF) as operator opt-ins.
-- Tenancy model: object-path logical-login enforcement, last-context-out
-  backend logout, faithful `ALREADY_LOGGED_IN` mapping, and refcounted
-  teardown reaping (ADR-0002 rewrite; ADR-0008 superseded).
-- Release evidence: 30-provider pooled transparency matrix (~3.39M tests
-  through the proxy at `bd95ffa`), verdict DONE_WITH_CONCERNS; see the
-  umbrella release-record pack `2026-09-16-v020-release-execution-plan`
-  (`c3m-wave3-report-final.md`, review, erratum, `c3m-35-reverification.md`).
+  `ECB_ENCRYPT_DATA` derivation. Standard BLAKE2B HMAC_GENERAL and ECDH-X/COF
+  AES-wrap parameter layouts are now in the default registry; existing
+  operator overlays remain compatible.
+- Context/login infrastructure: object-path checks, last-context-out backend
+  logout, backend-authoritative login and refcounted teardown reaping
+  (ADR-0002; ADR-0008 superseded). These mechanisms do not establish
+  multi-client isolation for the v0.2 testing baseline.
+- Historical provider testing at `bd95ffa`: a 30-provider pooled run recorded
+  DONE_WITH_CONCERNS. This historical development result does not qualify the
+  current candidate. The last 30-provider comparison run ended with all 30 comparisons incomplete;
+  see the [candidate notes](doc/release/v0.2.0-release-notes.md).
 
 ### Changed
 
@@ -140,14 +142,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   module (no behavior change).
 - tonic features are now selected per-crate, so client-side artifacts
   no longer pull in the server stack.
-- Workspace builds clippy-clean under `-D warnings`.
-- `C_Login` on a slot held by another live context returns
-  `CKR_USER_ALREADY_LOGGED_IN` faithfully and mints no logical login; the
-  cached-PIN verifier is removed (ADR-0008 superseded by the ADR-0002
-  rewrite). One-login-holder-per-slot is the mandated trade-off, bounded by
-  the last-context-out and refcounted-teardown release paths. Login also
-  self-heals a holderless-but-logged-in backend (F-01 reconcile: one logout
-  + single retry → `OK`).
+- v0.2.0 is an unreleased single-logical-client testing baseline in one trusted
+  security domain per daemon/provider. Restart both before changing independent
+  clients or domains. `max_contexts = 1` is only an admission guardrail;
+  multi-client authentication-state and privacy isolation remain
+  [v0.3 work](doc/release/v0.3.0-scope.md).
+- Admitted `C_Login`/`C_LoginUser` attempts reach the backend even when the
+  same or another context holds the slot login. Provider return values,
+  including PIN errors and `ALREADY` variants, are preserved; `ALREADY` does
+  not establish logical login. The holderless-backend reconciliation path
+  remains one logout plus one login retry. See ADR-0002.
 - `pkcs11-module` is now consumed as a rev-pinned git dependency from
   `https://github.com/mingulov/pkcs11-components` (which also provides the
   `pkcs11-abi` layout catalog) instead of the nested `crates/module`; the
@@ -227,11 +231,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   silently truncating (same fail-loud doctrine as the existing
   `narrow_wire_ulong` conversions). No behavior change on 64-bit
   hosts, where the checks are pass-throughs.
-- Daemon SIGSEGV on 0-length attribute buffers: empty exact-output buffers now
-  cross FFI as NULL `pValue`, and the daemon synthesizes
-  `CKR_BUFFER_TOO_SMALL` for lenient backends instead of crashing.
-- Remaining empty-buffer FFI conversion sites hardened to the same NULL
-  convention.
 - C3M review findings: `Retiring` occupancy across dependent retirement and
   dlclose (F-02); failed `C_Initialize` poisons instead of recycling the
   reservation (F-03); checked lifecycle generation plus refusal of re-init
@@ -249,13 +248,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of being forced to 0 (D5/F7).
 - Absurd output capacities answer `CKR_ARGUMENTS_BAD` at the output-spec
   boundary instead of `CKR_HOST_MEMORY` (D7/F4; ADR-0010 Limits-(d)).
-- Find-enumeration login filtering (tenancy F-04): `C_FindObjects` results
-  are filtered by the querying context's login state — a logged-out context
-  observes only known-public objects' handles and counts, closing the
-  existence oracle that leaked private objects' bare handles while another
-  tenant held the backend logged in. Unknown privacy hides fail-closed;
-  logged-in behavior is unchanged.
-- Logged-out USE of virtualized key-mat/SP800-108 handles now refuses: the handles are recorded private at registration, closing the fail-open hole on failing backend probes (review-A m-1).
+- `C_FindObjects` filtering uses the querying context's login state and object
+  classification. For logged-out queries, storage objects with unknown privacy
+  are hidden; recognized non-storage metadata classes have separate visibility
+  rules. This find-filter behavior does not establish multi-client privacy or
+  authorization isolation, which remains v0.3 work.
+- Virtualized key-material/SP800-108 handles are recorded private at registration.
+  Their use follows the private-object admission checks; this metadata does not
+  by itself establish cross-client isolation.
 - `C_CloseAllSessions` releases the last-holder backend login before the batch close, silencing the routine operator WARN on ordinary logged-in close-all (review-A m-5).
 - `C_CloseSession` of the last session releases the last-holder backend login before the backend close via the closing session as carrier, silencing the same routine operator WARN on the singular path (T5F follow-up to review-A m-5).
 - Lifecycle read exclusion for retained native roots (C3M F-01): every
@@ -268,10 +268,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lifecycle-exclusion clause is implemented; the ownership-doc clause is
   marked IMPLEMENTED.
 
+- Present zero-capacity attribute buffers retain their original native capacity
+  and output-length semantics; fixed-size scalar scratch storage does not
+  promote them into larger caller buffers. Focused same-width SoftHSM2 checks
+  cover this correction; cross-ABI and live NSS coverage are not established
+  by those checks.
+- Successful `C_CopyObject` results use the copied object's actual `CKA_TOKEN`
+  value when available, including inherited defaults and explicit overrides.
+  If lifetime cannot be established from provider metadata or an explicit
+  valid template value, native success is preserved with a session-scoped
+  virtual handle that may expire on copying-session close even when the native
+  object persists. See the candidate notes for this metadata limit.
+
+- Derivation with an explicitly destroyed base-key handle returns the
+  key-specific `CKR_KEY_HANDLE_INVALID` through the key resolver, preserving
+  the distinction from object-handle errors.
+- Credential NULL pointers with nonzero lengths are refused locally with
+  `CKR_ARGUMENTS_BAD` because the credential wire representation cannot preserve
+  that shape. This is a supported-input limit, not a universal PKCS#11
+  invalidity rule; protected-authentication paths may ignore a NULL PIN's length.
+
 ### Security
 
-- Completed the 2026-06-04 full-project review remediation (67 verified
-  findings, all closed). Highlights: cross-client logical-login PIN validation and
+- Historical 2026-06-04 review remediation recorded 67 findings closed at its
+  reviewed source. This is not a current-candidate security completion claim.
+  Highlights: cross-client logical-login PIN validation and
   per-request context ownership enforcement (ADR-0009); object handles
   virtualized everywhere, including handles embedded in mechanism
   parameters; injective mTLS identity keys and validation of every
@@ -292,15 +313,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ABI with 0 waivers; secret wire messages carry redacted `Debug`; and a
   descriptor-aware pre-decode tower layer rejects duplicate fields, repeated
   oneof members, groups, truncation, and depth bombs before prost allocates.
-  Independent 7.4 security review ACCEPT (0 Critical); all findings addressed.
+  The historical 7.4 review recorded ACCEPT for its reviewed source; this is
+  not qualification of the current candidate's multi-client isolation.
 - Privacy verification evidence (C3M Task 8): audit suites, 6-canary 0-leak
   checks, 5-drop sentinels, exit-70 honesty, and 34/34 + 32/32 static audits
   re-derived by the reviewer, mapped in `privacy.md`; plus a handler-level
   fail-closed-after-side-effect regression test.
-- Closed the Wave 3 F1 authorization hole: a logically logged-out context's
-  private-object create/copy/use is refused with `CKR_USER_NOT_LOGGED_IN`
-  even when another tenant holds the backend logged in (D6; re-verified live
-  on kryoptic, regressions 1→0).
+- Added private-object create/copy/use checks against cross-context borrowing
+  of a live backend login. The current candidate forwards to the backend when
+  no other live context holds that login. Review findings about default
+  attributes and native-lifetime login synchronization are deferred to v0.3;
+  this entry is not a claim that multi-client isolation is repaired or verified.
 
 ### Known limitations
 
@@ -311,10 +334,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   observed through deliberate proxy strictness (report erratum E1; framework
   fix drafted upstream, and the strictness is now documented in ADR-0010
   Limits-(c) and the runbook). No proxy-leniency diff in v0.2.0 (Ruling 3).
-- Windows guest re-validation at the freeze HEAD is a follow-up: v0.2.0 ships
-  on the Wave-1 T6 real-Windows receipts plus a green Windows-target compile
-  check at freeze (Ruling 4). Pooled pkcs11-check suites on Windows have no
-  plan-defined runner yet.
+- Windows historical interoperation receipts and compile gates do not
+  establish qualification of the final candidate. Retain the scope of each
+  runtime comparison and the separate win32 stub-provider tier; no general
+  Windows provider-matrix claim is made.
 - Static musl proxy binaries are proven: the musl release build runs in the
   per-PR Tier 0g `musl-x86_64` CI job (musl target + `musl-gcc` linker; the
   freeze-gate failure was the nonexistent `x86_64-linux-musl-gcc` name) and
@@ -330,13 +353,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   opencryptoki AES-KWP heap overflow (F8, CVE-candidate), wolf curve-less EC
   crash (F9), opensc ECDH crash (F10), NSS ML-DSA short-signature accept with
   an open mechanism (F11 — no ML-DSA verify soundness claim shippable).
-  Drafts live under `doc/vendors/upstream-drafts/` in the umbrella.
-- D2 null-fidelity scope (m-2/m-3): class-4 null-bit coverage is GCM/OAEP
-  only (classic GCM proven; CCM empty-field behavior untested — CCM/wrap
-  shapes still conflate (NULL,0)/(ptr,0) at daemon materialization).
-  `GetAttributeValue` query probes likewise still collapse (NULL,0) to
-  (ptr,0) (no `template_null` bit on the query path). Disclosure only; no
-  wire expansion.
+  These historical findings are retained in private development records;
+  this repository does not claim that upstream reports were submitted.
+- Classic CCM IV/AAD NULL flags now travel through the mechanism conversion
+  paths. A real Kryoptic client → gRPC → server → FFI AES-CCM check exercised
+  encrypt/decrypt with a valid 12-byte nonce and empty AAD supplied as either
+  NULL or a present pointer: both round trips recovered the plaintext and
+  produced ciphertext with a 16-byte MAC. Kryoptic accepts both forms, so
+  those live operations do not distinguish native pointer identity; separate
+  shim/protobuf/FFI structural tests check pointer presence. This does not
+  qualify other CCM pointer shapes, CCM/wrap layouts, or providers. The local NSS and SoftHSM2
+  modules do not advertise CCM; no CCM result is claimed for them.
+- Pointer-fidelity limits remain for unqualified mechanism/wrap shapes.
+  `GetAttributeValue` query probes still collapse (NULL,0) to (ptr,0)
+  (no `template_null` bit on the query path). Mixed-version shim/daemon peers
+  remain unsupported; pointer-shape differences can change acceptance as well
+  as returned errors. See the runbook's lockstep warning.
+
 ## [0.1.0] - 2026-05-15
 
 Initial release of the Rust PKCS#11 remote proxy.

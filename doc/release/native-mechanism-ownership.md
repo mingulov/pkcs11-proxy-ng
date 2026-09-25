@@ -1,39 +1,47 @@
 # Native Ownership and v0.2 FFI Contract
 
-**Status (2026-09-13): selected contract; implementation and qualification
-pending.** This amendment specifies the v0.2 native-owner correction. It does
-not describe completed production enforcement or establish provider parity.
-Independent contract review, the complete owner migration, native receipts and
-independent implementation review remain release gates. Historical width-bridge
-and provider tests do not qualify this new lifetime/termination contract.
+**Status: implemented in the unreleased v0.2 testing candidate; current-candidate
+qualification incomplete.** The acceptance records below describe historical
+source revisions and environments. They do not establish provider parity or
+qualify every later revision. Final acceptance requires evidence bound to the
+selected candidate and the claimed target/environment.
+
+v0.2.0 is a **single-logical-client testing baseline**: use one trusted
+security domain per daemon and provider instance. Do not connect mutually
+untrusted clients or share a daemon/provider between independent domains.
+Restart the daemon and its provider instance before changing to an independent
+client or security domain. `[proxy] max_contexts = 1` is an admission guardrail,
+not a repair for isolation or residual native authentication state.
+Multi-client isolation is deferred to the [v0.3 scope](v0.3.0-scope.md).
+
+The one-client scope supplements the native ownership requirements below; it
+does not weaken lifetime, stop, or return-value invariants.
 
 ## Supported deployment boundary
 
-Production live FFI for v0.2 is limited to qualified targets:
+The implementation admits the following target configurations. This is the
+native-construction boundary, not production qualification of the v0.2 testing
+candidate. Historical evidence retains its original source/environment scope:
 
-- Linux GNU/musl on x86_64 (64-bit) or x86 (32-bit);
-- Linux GNU/musl on aarch64 (64-bit) — cross-platform
-  ubuntu-26.04-arm leg enabled, blocking (full direct-vs-proxied
-  compare; stop stub compile- and review-proven, stop-fire not
-  natively executed);
-- Windows MSVC on x86_64 (64-bit) — tail stretch landed (T6 legs A/B/C)
-  and T2run's windows-2022 compare leg green;
-- Windows MSVC on x86 (32-bit) at the stub tier — T2run's win32 leg
-  green (i686 build, WOW64 suites, stub C provider live-load); no
-  production 32-bit provider runs in CI, so live-provider behavior past
-  the stub boundary is unqualified; and
-- macOS on aarch64 (64-bit) — T2run's macOS leg green (compare plus
-  backend/shim lib suites, STOP child receipts included).
+- Linux GNU/musl x86_64 (64-bit) and x86 (32-bit): historical native width and
+  stop coverage;
+- Linux GNU/musl aarch64 (64-bit): historical runtime comparison, with the
+  `ubuntu-26.04-arm` CI leg configured as blocking; stop-arm compile/review
+  evidence exists, but native stop-fire was not executed;
+- Windows MSVC x86_64 (64-bit): historical T6 interoperation and T2run
+  Windows comparison evidence;
+- Windows MSVC x86 (32-bit): historical build, WOW64 suites and stub-provider
+  live load; production 32-bit provider behavior remains unqualified;
+- macOS aarch64 (64-bit): historical runtime comparison, backend/shim library
+  suites and stop tests; and
+- macOS x86_64 (64-bit): load coverage only, with no runtime qualification.
 
-Excluded: Windows GNU; macOS x86_64 runtime (the code
-admits it, but load-qualification only — no CI runtime leg); x32,
-big-/mixed-endian, and other architectures/environments. The v0.2 tail
-stretch ([ADR-0014](../adr/ADR-0014-v020-tail-platform-stretch.md)) has
-landed, so Windows x64 native-provider daemon support is re-admitted
-(the [ADR-0011](../adr/ADR-0011-narrow-ck-ulong-client-width-bridging.md) /
-[ADR-0006](../adr/ADR-0006-32-64-bit-cross-platform-compatibility.md)
-deferral stands only for the still-excluded hosts above); the
-constructor refusal below stays in force for those hosts.
+Windows GNU, x32, big-/mixed-endian and other target configurations remain
+outside the admitted native-FFI set. Constructor refusal applies before native
+loading on those targets. The [platform decision](../adr/ADR-0014-v020-tail-platform-stretch.md)
+records the superseded Windows deferral and historical implementation work.
+The admitted set does not expand the one-client scope or substitute for fresh
+candidate-bound provider, platform and stop evidence.
 
 Portable Windows client/shim/proto/types builds and their existing contracts
 remain; a Windows client may interoperate with a qualified Linux daemon.
@@ -42,8 +50,9 @@ Nonqualified-host FfiBackend construction must return a local platform-support
 error before loading, discovery or provider entry. Retain meaningful Windows
 compile CI and add constructor-refusal/no-loader-attempt coverage. Do not
 globally gate portable crates, remove all Windows CI, or introduce an unsafe
-legacy-FFI feature or portable abort fallback. Platform enforcement is part of
-the pending implementation, not supplied by this document.
+legacy-FFI feature or portable abort fallback. Platform enforcement is
+implemented; the coverage limits above remain explicit, and final-candidate
+qualification requires fresh evidence.
 
 ## One provider chain per embedding process
 

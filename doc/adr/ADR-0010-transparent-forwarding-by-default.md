@@ -163,6 +163,31 @@ exception that licenses other synthesis:
   daemon `ffi_conversion/attrs.rs`); out of D7/F4 scope — follow-up
   extends Limits-(d).
 
+### Credential pointer/length support limit
+
+The credential wire representation cannot carry a NULL pointer together with
+its nonzero length. The shim therefore returns `CKR_ARGUMENTS_BAD` before RPC
+for that shape on PIN inputs to `C_Login`, `C_LoginUser`, `C_InitToken`,
+`C_InitPIN` and either PIN in `C_SetPIN`, and on the username in `C_LoginUser`.
+NULL with length zero remains representable; non-NULL inputs retain their
+existing size and caller-memory requirements.
+
+This is an explicit proxy transport/input limit. It is not a universal PKCS#11
+validity rule: a protected authentication path can use a NULL PIN without the
+specification requiring its length to be zero. A provider may therefore accept
+a direct call that the shim refuses here. The proxy does not silently replace
+the caller's NULL/nonzero shape with a different credential.
+
+### Copied-object metadata and virtual-handle lifetime
+
+A successful native `C_CopyObject` is followed by a read of the copied object's
+actual `CKA_TOKEN`, covering inherited defaults and explicit overrides. When
+that value is unavailable, a valid explicit template value remains usable.
+If lifetime still cannot be established, the proxy preserves native success
+and records a session-scoped virtual handle. The virtual handle can therefore expire on
+copying-session close even if the native object persists. This is a metadata
+limit of handle-lifetime virtualization, not a provider conformance correction.
+
 ## NULL output-length pointers
 
 Output-bearing calls preserve all three native caller shapes through the
