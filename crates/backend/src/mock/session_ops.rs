@@ -159,14 +159,6 @@ impl MockBackend {
     }
 
     pub(super) fn close_session_impl(&self, session: CkSessionHandle) -> CkResult<()> {
-        self.close_session_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        if let Some(result) = self.run_message_lifecycle_action() {
-            return result;
-        }
-        let delay = *self.close_session_delay.lock().unwrap();
-        if let Some(delay) = delay {
-            std::thread::sleep(delay);
-        }
         if let Some(rv) = *self.injected_close_error.lock().unwrap() {
             return Err(rv);
         }

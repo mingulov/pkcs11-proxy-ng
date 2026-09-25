@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `sanitize_inputs` daemon config option (default `false`). When enabled, the
+  daemon rejects NULL data pointers with non-zero length and NULL mechanism
+  pointers on init with `CKR_ARGUMENTS_BAD` before they reach the backend
+  module, trading transparency for availability. See ADR-0010 for the
+  accepted divergence (a sanitize-mode reject does not terminate the active
+  backend operation). Configure via `[proxy] sanitize_inputs = true`.
 - Server-driven mechanism registry. The daemon now reads
   `mechanism_params.toml` (or the embedded default) at startup,
   computes a SHA-256-truncated revision string, and publishes the
@@ -64,11 +70,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BackendProbe` is re-exported from the client crate.
 - `Pkcs11ProxyService::new()` gains a `MechanismRegistrySource`
   argument; test helpers use the embedded default.
+- Split the shim's 6078-line `helpers.rs` into a `helpers/` directory
+  module (no behavior change).
+- tonic features are now selected per-crate, so client-side artifacts
+  no longer pull in the server stack.
+- Workspace builds clippy-clean under `-D warnings`.
 
 ### Removed
 
 - `state::init_mechanism_registry` (the back-compat wrapper) — all
   callers migrated to `replace_mechanism_registry`.
+
+### Fixed
+
+- NULL data-input pointers now reach the backend module verbatim (Bug B;
+  ADR-0010 Scope 2). The shim serializes `(NULL pointer, claimed length N)`
+  as distinct from an empty byte slice via additive `*_null_len` proto fields;
+  the daemon reconstructs the exact `(NULL, N)` FFI call. Null-argument
+  rejection RVs and operation termination semantics now come from the module
+  rather than being synthesized by the shim.
+- Unreadable data-input lengths (valid pointer, byte size > 512 MiB
+  `MAX_SERIALIZABLE_BYTES` or overflowing) now return stable
+  `CKR_ARGUMENTS_BAD` instead of `CKR_GENERAL_ERROR` (the previous panic-guard
+  path). This is the documented transport-impossible limit per ADR-0010.
+- Absurd lengths on embedded mechanism-parameter payload fields (GCM/CCM AAD,
+  PBE salt, GOST IV/UKM, IKE/KEA public data, derived-key nonce/tag, and ~25
+  others) no longer cause a wild memory read that crashed the client process.
+  The shim now guards all ~30 previously unguarded embedded payload reads;
+  the daemon rejects oversized embedded params with
+  `CKR_MECHANISM_PARAM_INVALID` at the FFI reconstruction boundary.
+- Legitimate embedded mechanism-parameter payloads larger than 64 KiB (e.g.
+  valid GCM/CCM AAD) are no longer rejected. The constant
+  `MAX_MECHANISM_PARAM_STRUCT_LEN` (renamed from `MAX_MECHANISM_PARAM_LEN`)
+  now bounds only the parameter-STRUCT length; embedded data fields are
+  bounded by `MAX_SERIALIZABLE_BYTES` (512 MiB).
+- `C_VerifyInit`/`C_DigestInit` with a NULL mechanism pointer are now
+  forwarded verbatim to the backend module, like the five sibling init
+  paths, so the module's native `CK_RV` (`CKR_ARGUMENTS_BAD`,
+  `CKR_MECHANISM_INVALID`, or a native digest cancel) reaches the
+  client instead of a `C_SessionCancel`-derived result
+  (`CKR_FUNCTION_NOT_SUPPORTED` on 2.40 modules, `CKR_OK` on 3.0
+  modules). Establishes the transparent-forwarding-by-default policy;
+  see ADR-0010 for the decision and the accepted crash trade-off.
+- Shim two-call session caches are now evicted on the close attempt for
+  `C_CloseSession` / `C_CloseAllSessions`, regardless of the returned
+  `CK_RV`, matching the documented eviction contract. Failed closes no
+  longer leave stale per-session cache entries behind.
+- The OASIS coverage inventory script, the source-scan quality gates,
+  and ADR-0006 were updated for the `helpers.rs` → `helpers/` module
+  split, which had left them pointing at the removed file.
+- The CI MSRV job now installs Rust 1.88 to match the declared
+  `rust-version` (it previously built with 1.94, leaving the declared
+  MSRV unverified). The declared MSRV itself moved 1.85 → 1.88 for
+  let-chains; see `AGENTS.md` rule 5.
+
+### Security
+
+- Completed the 2026-06 security review remediation (52 findings, all
+  closed). Highlights: cross-client logical-login PIN validation and
+  per-request context ownership enforcement (ADR-0009); object handles
+  virtualized everywhere, including handles embedded in mechanism
+  parameters; injective mTLS identity keys and validation of every
+  certificate in a PEM bundle; zeroization of password material held in
+  FFI parameter backings; fork-safe current-thread runtime in the shim;
+  per-context concurrency caps; per-slot login/logout serialization
+  closing a first-login race; bind-time umask for UDS socket
+  permissions; `C_WaitForSlotEvent` authorization with unauthorized
+  slot events suppressed; strict `cargo-deny` policy.
 
 ## [0.1.0] - 2026-05-15
 

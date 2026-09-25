@@ -8,14 +8,16 @@ use std::time::Instant;
 
 use tonic::{Request, Response, Status};
 
-use pkcs11_proxy_ng_proto::convert::authenticated::{
-    decode_parameters, legacy_parameter_supported,
+use pkcs11_proxy_ng_backend::Pkcs11Backend;
+use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv};
+
+use super::super::convert_template;
+use super::super::service_utils::{
+    check_sanitize, input_from_wire, parse_mechanism, register_session_object_handle,
+    resolve_session_and_two_objects, spawn_backend, template_declares_token_object,
 };
-// ADR-0013 §5: every `secret_to_plain` use in this file is a prost wire-encoding
-// boundary (response/request construction); the standing justification lives in
-// `secret_boundary` docs. No plain copy is retained past the enclosing encode.
-use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
-use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv, SecretBytes};
+use crate::server::context_manager::{ClientContextId, ContextManager};
+use crate::server::handle_map::VirtualHandle;
 
 use super::super::authorization::mechanism_permitted;
 use super::super::convert_template_opt;
@@ -33,7 +35,9 @@ use crate::server::grpc_service::HandlerContext;
 
 /// Shared wrapping admission followed by adapter-local AAD validation.
 pub(crate) async fn wrap_key_authenticated(
-    ctx: &HandlerContext,
+    ctx_mgr: &Arc<ContextManager>,
+    backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::WrapKeyAuthenticatedRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::WrapKeyAuthenticatedResponse>, Status> {
     let started = Instant::now();
@@ -121,35 +125,59 @@ pub(crate) async fn wrap_key_authenticated(
     }))
 }
 
-pub(crate) async fn unwrap_key_authenticated(
-    ctx: &HandlerContext,
-    request: Request<pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedRequest>,
-) -> Result<Response<pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse>, Status> {
-    let started = Instant::now();
-    let ctx_id = ClientContextId(request.get_ref().client_context_id.clone());
-    let session = request.get_ref().session_handle;
-    let outcome = unwrap_key_authenticated_impl(ctx, request).await.map(Ok);
-    match audit_key_outcome(
-        ctx,
-        &ctx_id,
-        "C_UnwrapKeyAuthenticated",
-        session,
-        started,
-        outcome,
-        |r| CkRv(r.get_ref().ck_rv),
-    )? {
-        Ok(response) => Ok(response),
-        Err(rv) => Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
-            authenticated_output: None,
+    let mechanism = match parse_mechanism(req.mechanism) {
+        Ok(mechanism) => mechanism,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::WrapKeyAuthenticatedResponse {
+                ck_rv: rv.0,
+                wrapped_key: Vec::new(),
+                mechanism_parameter_out: Vec::new(),
+            }));
+        }
+    };
+
+    let aad = req.associated_data;
+    let aad_null_len = req.associated_data_null_len;
+    // ADR-0010 sanitize_inputs: validate NULL aad pointer before backend call.
+    if let Err(rv) = check_sanitize(sanitize_inputs, aad_null_len) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::WrapKeyAuthenticatedResponse {
             ck_rv: rv.0,
-            key_handle: 0,
+            wrapped_key: Vec::new(),
+            mechanism_parameter_out: Vec::new(),
+        }));
+    }
+    let backend = Arc::clone(backend_ref);
+    let result = spawn_backend(move || {
+        backend.wrap_key_authenticated(
+            session,
+            &mechanism,
+            wrapping_key,
+            key,
+            input_from_wire(&aad, aad_null_len),
+        )
+    })
+    .await?;
+
+    match result {
+        Ok((wrapped_key, mechanism_parameter_out)) => {
+            Ok(Response::new(pkcs11_proxy_ng_proto::WrapKeyAuthenticatedResponse {
+                ck_rv: CkRv::OK.0,
+                wrapped_key,
+                mechanism_parameter_out,
+            }))
+        }
+        Err(error) => Ok(Response::new(pkcs11_proxy_ng_proto::WrapKeyAuthenticatedResponse {
+            ck_rv: error.0,
+            wrapped_key: Vec::new(),
             mechanism_parameter_out: Vec::new(),
         })),
     }
 }
 
-async fn unwrap_key_authenticated_impl(
-    ctx: &HandlerContext,
+pub(crate) async fn unwrap_key_authenticated(
+    ctx_mgr: &Arc<ContextManager>,
+    backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
@@ -223,29 +251,13 @@ async fn unwrap_key_authenticated_impl(
         }
     };
 
-    // A NULL template carries no attributes; classification treats it as empty.
-    let template_view = template.as_deref().unwrap_or(&[]);
-
-    // D6(1): refuse minting a private object while logically logged out.
-    if let Err(rv) =
-        ensure_private_mint_allowed(ctx_mgr, &ctx_id, req.session_handle, template_view).await
-    {
-        return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
-            authenticated_output: None,
-            ck_rv: rv.0,
-            key_handle: 0,
-            mechanism_parameter_out: Vec::new(),
-        }));
-    }
-
-    let wrapped_key = SecretBytes::new(req.wrapped_key);
+    let wrapped_key = req.wrapped_key;
     let wrapped_key_null_len = req.wrapped_key_null_len;
-    let aad = SecretBytes::new(req.associated_data);
+    let aad = req.associated_data;
     let aad_null_len = req.associated_data_null_len;
     // ADR-0010 sanitize_inputs: validate NULL wrapped_key/aad pointers before backend call.
     if let Err(rv) = check_sanitize(sanitize_inputs, wrapped_key_null_len) {
         return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
-            authenticated_output: None,
             ck_rv: rv.0,
             key_handle: 0,
             mechanism_parameter_out: Vec::new(),
@@ -253,90 +265,36 @@ async fn unwrap_key_authenticated_impl(
     }
     if let Err(rv) = check_sanitize(sanitize_inputs, aad_null_len) {
         return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
-            authenticated_output: None,
             ck_rv: rv.0,
             key_handle: 0,
             mechanism_parameter_out: Vec::new(),
         }));
     }
     // An authenticated-unwrapped key is a session object unless CKA_TOKEN is set (B2).
-    let parameter = match req.authenticated_parameters.as_ref() {
-        Some(envelope) => match decode_parameters(&mechanism, envelope) {
-            Ok(parameter) => Some(parameter),
-            Err(rv) => {
-                return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
-                    ck_rv: rv.0,
-                    ..Default::default()
-                }));
-            }
-        },
-        None if legacy_parameter_supported(&mechanism) => None,
-        None => {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
-                ck_rv: CkRv::FUNCTION_NOT_SUPPORTED.0,
-                ..Default::default()
-            }));
-        }
-    };
-    let is_token = template_declares_token_object(template_view);
-    let is_private = template_declares_private_object(template_view);
+    let is_token = template_declares_token_object(&template);
     let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
     let object_cleanup = Arc::clone(&ctx.object_cleanup);
     let result = spawn_backend(move || {
-        wrapped_key.expose(|wrapped_raw| {
-            aad.expose(|aad_raw| {
-                object_cleanup.ensure_clear()?;
-                if let Some(parameter) = parameter {
-                    let (key, output) = backend.unwrap_key_authenticated_typed(
-                        session,
-                        &mechanism,
-                        parameter.as_ref(),
-                        unwrapping_key,
-                        input_from_wire(wrapped_raw, wrapped_key_null_len),
-                        template.as_deref(),
-                        input_from_wire(aad_raw, aad_null_len),
-                    )?;
-                    let created = pkcs11_proxy_ng_backend::object_cleanup::PendingNativeObject::new(
-                        &*backend,
-                        &object_cleanup,
-                        session,
-                        key,
-                    );
-                    output
-                        .validate_for(&mechanism, parameter.as_ref())
-                        .map_err(|_| CkRv::DEVICE_ERROR)?;
-                    let wire_output = Some((&output).try_into()?);
-                    Ok((created.transfer(), Vec::new(), wire_output))
-                } else {
-                    backend
-                        .unwrap_key_authenticated(
-                            session,
-                            &mechanism,
-                            unwrapping_key,
-                            input_from_wire(wrapped_raw, wrapped_key_null_len),
-                            template.as_deref(),
-                            input_from_wire(aad_raw, aad_null_len),
-                        )
-                        // ADR-0013 §5 (per-site): converted inside the `expose` closure, so the
-                        // plain `mechanism_parameter_out` crosses thread + await back to the
-                        // handler; transient (response construction → encode → drop), never logged.
-                        .map(|(key, raw)| (key, secret_to_plain(&raw), None))
-                }
-            })
-        })
+        backend.unwrap_key_authenticated(
+            session,
+            &mechanism,
+            unwrapping_key,
+            input_from_wire(&wrapped_key, wrapped_key_null_len),
+            &template,
+            input_from_wire(&aad, aad_null_len),
+        )
     })
     .await?;
 
     match result {
-        Ok((key, mechanism_parameter_out, authenticated_output)) => {
+        Ok((key, mechanism_parameter_out)) => {
             let key_handle = register_session_object_handle(
                 ctx_mgr,
                 &ctx_id,
                 virtual_session,
-                CkObjectHandle(key.0 as u64),
+                CkObjectHandle(key.0),
                 is_token,
-                Some(is_private),
             )
             .await;
             Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {

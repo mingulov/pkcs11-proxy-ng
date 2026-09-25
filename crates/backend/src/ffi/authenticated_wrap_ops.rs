@@ -28,11 +28,59 @@ impl FfiBackend {
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
         aad: CkInBuf<'_>,
-    ) -> CkResult<(SecretBytes, SecretBytes)> {
-        require_legacy_parameter(mechanism)?;
-        let (bytes, output) =
-            self.ffi_wrap_authenticated_typed(session, mechanism, None, wrapping_key, key, aad)?;
-        Ok((bytes.into(), legacy_bytes(output)?))
+    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+        let fl = self.func_list_3_2.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
+        let f = unsafe { (*fl).C_WrapKeyAuthenticated }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
+
+        let mut ffi_mech = mechanism_to_ffi(mechanism)?;
+
+        // Save the original parameter pointer and length for read-back after the call.
+        let param_ptr = ffi_mech.ck_mechanism.pParameter as *mut u8;
+        let param_len = ffi_mech.ck_mechanism.ulParameterLen as usize;
+
+        let (aad_ptr, aad_len) = aad.as_ptr_len();
+
+        // Two-call pattern: first call with pWrappedKey = null to get size.
+        let mut wrapped_key_len: cryptoki_sys::CK_ULONG = 0;
+        Self::ck_result(unsafe {
+            f(
+                Self::session_handle(session),
+                &mut ffi_mech.ck_mechanism,
+                Self::object_handle(wrapping_key),
+                Self::object_handle(key),
+                aad_ptr as *mut cryptoki_sys::CK_BYTE,
+                Self::ulong_len_u64(aad_len),
+                std::ptr::null_mut(),
+                &mut wrapped_key_len,
+            )
+        })?;
+
+        // Second call: allocate buffer and get wrapped key (capped to prevent OOM).
+        let capped_len = (wrapped_key_len as u64).min(super::call_helpers::MAX_OUTPUT_BUFFER_BYTES);
+        wrapped_key_len = capped_len as cryptoki_sys::CK_ULONG;
+        let mut wrapped_key = vec![0u8; capped_len as usize];
+        Self::ck_result(unsafe {
+            f(
+                Self::session_handle(session),
+                &mut ffi_mech.ck_mechanism,
+                Self::object_handle(wrapping_key),
+                Self::object_handle(key),
+                aad_ptr as *mut cryptoki_sys::CK_BYTE,
+                Self::ulong_len_u64(aad_len),
+                wrapped_key.as_mut_ptr(),
+                &mut wrapped_key_len,
+            )
+        })?;
+        wrapped_key.truncate(wrapped_key_len as usize);
+
+        // Read back mechanism parameter (tag/IV write-back).
+        let mechanism_parameter_out = if !param_ptr.is_null() && param_len > 0 {
+            unsafe { std::slice::from_raw_parts(param_ptr, param_len) }.to_vec()
+        } else {
+            Vec::new()
+        };
+
+        Ok((wrapped_key, mechanism_parameter_out))
     }
 
     pub(super) fn ffi_unwrap_key_authenticated(
@@ -41,20 +89,47 @@ impl FfiBackend {
         mechanism: &CkMechanism,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
-        template: Option<&[CkAttribute]>,
+        template: &[CkAttribute],
         aad: CkInBuf<'_>,
-    ) -> CkResult<(CkObjectHandle, SecretBytes)> {
-        require_legacy_parameter(mechanism)?;
-        let (key, output) = self.ffi_unwrap_authenticated_typed(
-            session,
-            mechanism,
-            None,
-            unwrapping_key,
-            wrapped_key,
-            template,
-            aad,
-        )?;
-        Ok((key, legacy_bytes(output)?))
+    ) -> CkResult<(CkObjectHandle, Vec<u8>)> {
+        let fl = self.func_list_3_2.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
+        let f = unsafe { (*fl).C_UnwrapKeyAuthenticated }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
+
+        let ffi_attrs = FfiAttrs::from_slice(template);
+        let mut ffi_mech = mechanism_to_ffi(mechanism)?;
+
+        // Save the original parameter pointer and length for read-back after the call.
+        let param_ptr = ffi_mech.ck_mechanism.pParameter as *mut u8;
+        let param_len = ffi_mech.ck_mechanism.ulParameterLen as usize;
+
+        let (wk_ptr, wk_len) = wrapped_key.as_ptr_len();
+        let (aad_ptr, aad_len) = aad.as_ptr_len();
+
+        let mut key_handle: cryptoki_sys::CK_OBJECT_HANDLE = 0;
+
+        Self::ck_result(unsafe {
+            f(
+                Self::session_handle(session),
+                &mut ffi_mech.ck_mechanism,
+                Self::object_handle(unwrapping_key),
+                wk_ptr as *mut cryptoki_sys::CK_BYTE,
+                Self::ulong_len_u64(wk_len),
+                Self::ffi_attr_ptr(&ffi_attrs),
+                Self::ffi_attr_len(&ffi_attrs),
+                aad_ptr as *mut cryptoki_sys::CK_BYTE,
+                Self::ulong_len_u64(aad_len),
+                &mut key_handle,
+            )
+        })?;
+
+        // Read back mechanism parameter (tag/IV write-back).
+        let mechanism_parameter_out = if !param_ptr.is_null() && param_len > 0 {
+            unsafe { std::slice::from_raw_parts(param_ptr, param_len) }.to_vec()
+        } else {
+            Vec::new()
+        };
+
+        Ok((CkObjectHandle(key_handle as u64), mechanism_parameter_out))
     }
 
     /// Preserve the legacy parameter-envelope semantics using typed owned IV
@@ -69,35 +144,64 @@ impl FfiBackend {
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
-        require_legacy_parameter(mechanism)?;
-        let (main, output) = self.ffi_wrap_authenticated_exact_typed(
-            session,
-            mechanism,
-            None,
-            wrapping_key,
-            key,
-            aad,
-            output_spec,
-        )?;
-        let bytes = match legacy_bytes(output) {
-            Ok(bytes) => bytes,
-            Err(_) => {
-                tracing::warn!(
-                    provider_rv = main.ck_rv.0,
-                    "native exact parameter contract violation"
-                );
-                return Ok((
-                    CkOutputBufferResult::no_effects(CkRv::DEVICE_ERROR),
-                    CkParameterRoundtripResult {
-                        ck_rv: CkRv::DEVICE_ERROR,
-                        returned_len: 0,
-                        value: None,
-                    },
-                ));
+        let fl = self.func_list_3_2.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
+        let f = unsafe { (*fl).C_WrapKeyAuthenticated }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
+
+        let mut ffi_mech = mechanism_to_ffi(mechanism)?;
+
+        // The mechanism parameter acts as the "parameter" input/output channel.
+        // Extract pointer/len from the mechanism for use as the parameter buffer.
+        let mech_param_ptr = ffi_mech.ck_mechanism.pParameter as *mut u8;
+        let mech_param_len = ffi_mech.ck_mechanism.ulParameterLen as usize;
+        // C_WrapKeyAuthenticated passes pParameter via the mechanism struct,
+        // not as separate args. We use a direct single-call approach.
+        let (aad_ptr, aad_len) = aad.as_ptr_len();
+        let mut out_len: cryptoki_sys::CK_ULONG = 0;
+
+        if !output_spec.buffer_present {
+            // Size query: pass NULL for pWrappedKey.
+            let rv = unsafe {
+                f(
+                    Self::session_handle(session),
+                    &mut ffi_mech.ck_mechanism,
+                    Self::object_handle(wrapping_key),
+                    Self::object_handle(key),
+                    aad_ptr as *mut cryptoki_sys::CK_BYTE,
+                    Self::ulong_len_u64(aad_len),
+                    std::ptr::null_mut(),
+                    &mut out_len,
+                )
+            };
+            if rv == CkRv::OK.0 {
+                // Read back mechanism parameter.
+                let param_value = if param_out_spec.buffer_present
+                    && !mech_param_ptr.is_null()
+                    && mech_param_len > 0
+                {
+                    Some(
+                        unsafe { std::slice::from_raw_parts(mech_param_ptr, mech_param_len) }
+                            .to_vec(),
+                    )
+                } else {
+                    None
+                };
+                let output_result = CkOutputBufferResult {
+                    ck_rv: CkRv::OK,
+                    returned_len: out_len as u64,
+                    value: None,
+                };
+                let param_result = CkParameterRoundtripResult {
+                    ck_rv: CkRv::OK,
+                    returned_len: mech_param_len as u64,
+                    value: param_value,
+                };
+                Ok((output_result, param_result))
+            } else {
+                Err(CkRv(rv))
             }
         } else {
             // Data query: allocate caller-specified buffer.
-            let capped = super::call_helpers::capped_output_len(output_spec.buffer_len as u64);
+            let capped = super::call_helpers::capped_output_len(output_spec.buffer_len);
             out_len = capped as cryptoki_sys::CK_ULONG;
             let mut buf = vec![0u8; capped];
             let rv = unsafe {
@@ -106,8 +210,8 @@ impl FfiBackend {
                     &mut ffi_mech.ck_mechanism,
                     Self::object_handle(wrapping_key),
                     Self::object_handle(key),
-                    aad.as_ptr() as *mut cryptoki_sys::CK_BYTE,
-                    Self::ulong_len(aad.len()),
+                    aad_ptr as *mut cryptoki_sys::CK_BYTE,
+                    Self::ulong_len_u64(aad_len),
                     buf.as_mut_ptr(),
                     &mut out_len,
                 )

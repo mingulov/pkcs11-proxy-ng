@@ -23,7 +23,7 @@ pub(super) use exact_completion::{ExactCompletion, spawn_backend_exact};
 static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 static BACKEND_TIMEOUT: OnceLock<Duration> = OnceLock::new();
 static MAX_BACKEND_CALLS: OnceLock<usize> = OnceLock::new();
-static HEALTH_EVENT_TX: OnceLock<mpsc::UnboundedSender<BackendHealthEvent>> = OnceLock::new();
+static HEALTH_EVENT_TX: OnceLock<mpsc::Sender<BackendHealthEvent>> = OnceLock::new();
 /// Tracks whether the LAST sent health event was `Success`. Initialized
 /// to `true` because the health-gate task assumes the daemon starts in
 /// `SERVING`. Used by [`report_backend_outcome`] to suppress
@@ -54,28 +54,27 @@ pub fn configure_backend_guard(timeout_secs: u64, max_calls: usize) {
 /// to the health-gating task. Called once at startup. If never called,
 /// backend outcomes are silently dropped — health gating is disabled
 /// and `tonic-health` stays at whatever startup last set it to.
-pub fn configure_backend_health_events(tx: mpsc::UnboundedSender<BackendHealthEvent>) {
+pub fn configure_backend_health_events(tx: mpsc::Sender<BackendHealthEvent>) {
     HEALTH_EVENT_TX.set(tx).ok();
 }
 
 fn report_backend_outcome(success: bool) {
     let Some(tx) = HEALTH_EVENT_TX.get() else { return };
+    // The channel is BOUNDED (L11): use non-blocking try_send from this sync
+    // data-plane path. Dropping on a full buffer is safe — Success events are
+    // already coalesced to unhealthy->healthy transitions (rare; the buffer is
+    // draining by then), and a dropped Failure is harmless because a full buffer
+    // already holds far more consecutive failures than the gate's flip threshold.
     if success {
-        // Coalesce: only send a Success event when transitioning from
-        // a previously-unhealthy state. The gate's only use for
-        // Success is to reset its consecutive_failures counter; once
-        // reset, repeated Success events do nothing. Suppressing them
-        // removes one MPSC push (+ allocation) from every successful
-        // data-plane RPC.
+        // Only signal Success on a transition from a previously-unhealthy state:
+        // the gate uses it solely to reset its consecutive-failure counter, so
+        // repeated successes are noise on every data-plane RPC.
         if !LAST_SENT_HEALTHY.swap(true, Ordering::Relaxed) {
-            let _ = tx.send(BackendHealthEvent::Success);
+            let _ = tx.try_send(BackendHealthEvent::Success);
         }
     } else {
-        // Failures always go through: the gate counts consecutive
-        // failures toward its threshold. Coalescing would make the
-        // counter never advance.
         LAST_SENT_HEALTHY.store(false, Ordering::Relaxed);
-        let _ = tx.send(BackendHealthEvent::Failure);
+        let _ = tx.try_send(BackendHealthEvent::Failure);
     }
 }
 
@@ -334,22 +333,23 @@ where
 fn classify_backend_outcome<T>(result: &Result<CkResult<T>, Status>) -> bool {
     match result {
         Ok(Ok(_)) => true,
-        // CkRv values that indicate the backend ITSELF is unhealthy
-        // (not just that the application's request was malformed).
-        // After N consecutive of these, the daemon flips
-        // tonic-health to NOT_SERVING so k8s pulls the pod out of
-        // the Service endpoint pool. Chaos scenario 2 verifies this.
-        Ok(Err(rv))
-            if *rv == CkRv::DEVICE_ERROR        // timeout / breaker trip
-                || *rv == CkRv::HOST_MEMORY     // HSM resource exhaustion
-                || *rv == CkRv::DEVICE_REMOVED  // HSM disconnected
-                || *rv == CkRv::TOKEN_NOT_PRESENT =>
-        {
+        // Genuine backend/HSM-down signals: the device reports that it is gone
+        // or out of memory. A single client's request shape cannot induce these,
+        // so repeated occurrences remain a daemon-readiness signal.
+        Ok(Err(rv)) if *rv == CkRv::DEVICE_REMOVED || *rv == CkRv::HOST_MEMORY => {
             tracing::debug!(?rv, "backend outcome: unhealthy");
             false
         }
-        Ok(Err(_)) => true, // normal application-level PKCS#11 error
-        Err(_) => false,    // blocking-pool panic / transport break
+        // Any OTHER backend-RETURNED CK_RV is a per-request response, NOT daemon
+        // health — including the `CKR_DEVICE_ERROR` catch-all (kryoptic & other
+        // backends return it for many request-specific conditions) and
+        // `CKR_TOKEN_NOT_PRESENT`. Letting these flip readiness would let one
+        // noisy client evict the pod for every tenant (M1). The daemon's own
+        // transport failures — timeout, circuit-breaker trip, blocking-pool
+        // panic — are reported separately and are the only request-path inputs
+        // that flip readiness.
+        Ok(Err(_)) => true,
+        Err(_) => false, // blocking-pool panic / transport break
     }
 }
 
@@ -1107,27 +1107,54 @@ pub(super) async fn register_session_object_handle(
         .unwrap_or(0)
 }
 
+/// True when `template` declares `CKA_TOKEN` as a true value — i.e. a token
+/// object, whose handle persists across the application's sessions and must NOT
+/// be evicted on session close. The bool may arrive as a typed `Bool`, a raw
+/// `CK_BBOOL` byte, or a ulong, so all encodings are accepted (B2).
+pub(super) fn template_declares_token_object(template: &[CkAttribute]) -> bool {
+    template.iter().any(|attr| {
+        attr.attr_type == CkAttributeType::TOKEN
+            && match &attr.value {
+                Some(CkAttributeValue::Bool(b)) => *b,
+                Some(CkAttributeValue::Bytes(bytes)) => bytes.first().is_some_and(|&b| b != 0),
+                Some(CkAttributeValue::Ulong(u)) => *u != 0,
+                _ => false,
+            }
+    })
+}
+
+/// Register a backend object handle and, when it is a session object, record it
+/// under `session` so it is evicted when that session closes (B2). Returns the
+/// virtual object handle (0 if the context is gone).
+pub(super) async fn register_session_object_handle(
+    ctx_mgr: &Arc<ContextManager>,
+    ctx_id: &ClientContextId,
+    session: VirtualHandle,
+    backend_handle: CkObjectHandle,
+    is_token_object: bool,
+) -> u64 {
+    ctx_mgr
+        .get_context(ctx_id, |ctx| {
+            let virtual_object = ctx.object_handles.insert(BackendHandle(backend_handle.0));
+            if !is_token_object {
+                ctx.record_session_object(session, virtual_object);
+            }
+            virtual_object.0
+        })
+        .await
+        .unwrap_or(0)
+}
+
 /// Register a generated key pair, recording each key as a session object under
 /// `session` unless its own template marks it a token object (B2).
-///
-/// This is a MINTING registration (C_GenerateKeyPair / C_DeriveKey path). Both
-/// virtual handles are inserted into `created_objects` so the creating context
-/// can use them immediately even when their backend-assigned `CKA_UNIQUE_ID`s
-/// are not in the pre-configured `objects` grant (G3-PR3 Task 2).
-///
-/// `first_is_private` / `second_is_private` record each key's
-/// template-declared `CKA_PRIVATE` bit for the D6(1) enforcement (see
-/// [`register_session_object_handle`]).
 pub(super) async fn register_session_object_pair(
     ctx_mgr: &Arc<ContextManager>,
     ctx_id: &ClientContextId,
     session: VirtualHandle,
     first_backend_handle: CkObjectHandle,
     first_is_token: bool,
-    first_is_private: bool,
     second_backend_handle: CkObjectHandle,
     second_is_token: bool,
-    second_is_private: bool,
 ) -> Option<(u64, u64)> {
     ctx_mgr
         .get_context(ctx_id, |ctx| {
@@ -1139,11 +1166,6 @@ pub(super) async fn register_session_object_pair(
             if !second_is_token {
                 ctx.record_session_object(session, second);
             }
-            // Minting: the creating context can always use both generated keys.
-            ctx.created_objects.insert(first);
-            ctx.created_objects.insert(second);
-            ctx.object_private.insert(first, first_is_private);
-            ctx.object_private.insert(second, second_is_private);
             (first.0, second.0)
         })
         .await
@@ -1501,24 +1523,28 @@ mod tests {
     }
 
     #[test]
-    fn classify_device_error_is_unhealthy() {
-        // CKR_DEVICE_ERROR is what spawn_backend produces on the
-        // timeout and circuit-breaker-trip paths. PKCS#11
-        // application errors must NOT use CKR_DEVICE_ERROR — that
-        // invariant is enforced by the proto layer (see
-        // ADR-0003 §3).
-        let result: Result<CkResult<()>, Status> = Ok(Err(CkRv::DEVICE_ERROR));
-        assert!(!classify_backend_outcome(&result));
+    fn classify_backend_returned_device_error_and_token_not_present_are_healthy() {
+        // M1: a backend-RETURNED CKR_DEVICE_ERROR (kryoptic's request-specific
+        // catch-all) or CKR_TOKEN_NOT_PRESENT is a per-request response, not a
+        // daemon-health signal — they must NOT flip readiness, or one noisy
+        // client could evict the pod. The daemon's own timeout/breaker DEVICE_ERROR
+        // is reported separately in spawn_backend before classification.
+        for rv in [CkRv::DEVICE_ERROR, CkRv::TOKEN_NOT_PRESENT] {
+            let result: Result<CkResult<()>, Status> = Ok(Err(rv));
+            assert!(
+                classify_backend_outcome(&result),
+                "backend-returned CkRv {:?} must be classified as healthy",
+                rv
+            );
+        }
     }
 
     #[test]
-    fn classify_resource_exhaustion_is_unhealthy() {
-        // Chaos scenario 2: persistent CKR_HOST_MEMORY (HSM out of
-        // memory), CKR_DEVICE_REMOVED (HSM disconnected), or
-        // CKR_TOKEN_NOT_PRESENT (token gone) are backend-health
-        // signals, not application errors. Repeated occurrences
-        // flip readiness so k8s pulls the pod out of the Service.
-        for rv in [CkRv::HOST_MEMORY, CkRv::DEVICE_REMOVED, CkRv::TOKEN_NOT_PRESENT] {
+    fn classify_genuine_hsm_down_signals_are_unhealthy() {
+        // CKR_HOST_MEMORY (HSM out of memory) and CKR_DEVICE_REMOVED (HSM
+        // disconnected) report that the device itself is down — not inducible
+        // by one client's request shape — so they remain readiness signals.
+        for rv in [CkRv::HOST_MEMORY, CkRv::DEVICE_REMOVED] {
             let result: Result<CkResult<()>, Status> = Ok(Err(rv));
             assert!(
                 !classify_backend_outcome(&result),

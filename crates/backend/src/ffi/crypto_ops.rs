@@ -39,9 +39,7 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         data: CkInBuf<'_>,
-    ) -> CkResult<SecretBytes> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
+    ) -> CkResult<Vec<u8>> {
         Self::call_bytes(
             &admission,
             unsafe { (*self.func_list).C_Sign },
@@ -56,9 +54,7 @@ impl FfiBackend {
         session: CkSessionHandle,
         part: CkInBuf<'_>,
     ) -> CkResult<()> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
-        Self::call_unit(&admission, unsafe { (*self.func_list).C_SignUpdate }, |function| {
+        Self::call_unit(unsafe { (*self.func_list).C_SignUpdate }, |function| {
             session_unit_input!(session, part, function)
         })
     }
@@ -108,9 +104,7 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         data: CkInBuf<'_>,
-    ) -> CkResult<SecretBytes> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
+    ) -> CkResult<Vec<u8>> {
         Self::call_bytes(
             &admission,
             unsafe { (*self.func_list).C_SignRecover },
@@ -224,9 +218,7 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         signature: CkInBuf<'_>,
-    ) -> CkResult<SecretBytes> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
+    ) -> CkResult<Vec<u8>> {
         Self::call_bytes(
             &admission,
             unsafe { (*self.func_list).C_VerifyRecover },
@@ -255,7 +247,13 @@ impl FfiBackend {
     }
 
     pub(super) fn ffi_verify_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
-        self.ffi_session_cancel(session, CkFlags(cryptoki_sys::CKF_VERIFY as u64))?;
+        // Forward C_VerifyInit(NULL mechanism) verbatim, like the five sibling
+        // init-cancel paths, so the module's native RV reaches the client
+        // (ADR-0010 transparent forwarding). A module that SEGVs on it crashes
+        // the daemon — its direct-load behavior, accepted by ADR-0010.
+        Self::call_unit(unsafe { (*self.func_list).C_VerifyInit }, |function| unsafe {
+            function(Self::session_handle(session), std::ptr::null_mut(), 0)
+        })?;
         self.drop_mech_cache(session);
         Ok(())
     }
@@ -266,14 +264,11 @@ impl FfiBackend {
         data: CkInBuf<'_>,
         signature: CkInBuf<'_>,
     ) -> CkResult<()> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
         let (data_ptr, data_len) = data.as_ptr_len();
         let (sig_ptr, sig_len) = signature.as_ptr_len();
-        let h_session = Self::session_handle(session)?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
-        Self::call_unit(&admission, unsafe { (*self.func_list).C_Verify }, |function| unsafe {
+        Self::call_unit(unsafe { (*self.func_list).C_Verify }, |function| unsafe {
             function(
-                h_session,
+                Self::session_handle(session),
                 data_ptr as *mut _,
                 Self::ulong_len_u64(data_len),
                 sig_ptr as *mut _,
@@ -287,9 +282,7 @@ impl FfiBackend {
         session: CkSessionHandle,
         part: CkInBuf<'_>,
     ) -> CkResult<()> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
-        Self::call_unit(&admission, unsafe { (*self.func_list).C_VerifyUpdate }, |function| {
+        Self::call_unit(unsafe { (*self.func_list).C_VerifyUpdate }, |function| {
             session_unit_input!(session, part, function)
         })
     }
@@ -325,7 +318,13 @@ impl FfiBackend {
     }
 
     pub(super) fn ffi_digest_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
-        self.ffi_session_cancel(session, CkFlags(cryptoki_sys::CKF_DIGEST as u64))?;
+        // Forward C_DigestInit(NULL mechanism) verbatim (ADR-0010): the module
+        // decides — softhsm2/kryoptic cancel the active digest, others reject.
+        // NSS softokn SEGVs on it; that is its direct-load behavior and an
+        // accepted shared-daemon trade-off per ADR-0010.
+        Self::call_unit(unsafe { (*self.func_list).C_DigestInit }, |function| unsafe {
+            function(Self::session_handle(session), std::ptr::null_mut())
+        })?;
         self.drop_mech_cache(session);
         Ok(())
     }
@@ -334,16 +333,10 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         data: CkInBuf<'_>,
-    ) -> CkResult<SecretBytes> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
-        Self::call_bytes(
-            &admission,
-            unsafe { (*self.func_list).C_Digest },
-            |function, digest, digest_len| {
-                session_bytes_input!(session, data, function, digest, digest_len)
-            },
-        )
+    ) -> CkResult<Vec<u8>> {
+        Self::call_bytes(unsafe { (*self.func_list).C_Digest }, |function, digest, digest_len| {
+            session_bytes_input!(session, data, function, digest, digest_len)
+        })
     }
 
     pub(super) fn ffi_digest_exact(
@@ -369,9 +362,7 @@ impl FfiBackend {
         session: CkSessionHandle,
         part: CkInBuf<'_>,
     ) -> CkResult<()> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
-        Self::call_unit(&admission, unsafe { (*self.func_list).C_DigestUpdate }, |function| {
+        Self::call_unit(unsafe { (*self.func_list).C_DigestUpdate }, |function| {
             session_unit_input!(session, part, function)
         })
     }
@@ -452,25 +443,17 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         data: CkInBuf<'_>,
-    ) -> CkResult<SecretBytes> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
-        Self::call_bytes(
-            &admission,
-            unsafe { (*self.func_list).C_Encrypt },
-            |function, output, output_len| {
-                session_bytes_input!(session, data, function, output, output_len)
-            },
-        )
+    ) -> CkResult<Vec<u8>> {
+        Self::call_bytes(unsafe { (*self.func_list).C_Encrypt }, |function, output, output_len| {
+            session_bytes_input!(session, data, function, output, output_len)
+        })
     }
 
     pub(super) fn ffi_encrypt_update(
         &self,
         session: CkSessionHandle,
         part: CkInBuf<'_>,
-    ) -> CkResult<SecretBytes> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
+    ) -> CkResult<Vec<u8>> {
         Self::call_bytes(
             &admission,
             unsafe { (*self.func_list).C_EncryptUpdate },
@@ -527,25 +510,17 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         encrypted_data: CkInBuf<'_>,
-    ) -> CkResult<SecretBytes> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
-        Self::call_bytes(
-            &admission,
-            unsafe { (*self.func_list).C_Decrypt },
-            |function, output, output_len| {
-                session_bytes_input!(session, encrypted_data, function, output, output_len)
-            },
-        )
+    ) -> CkResult<Vec<u8>> {
+        Self::call_bytes(unsafe { (*self.func_list).C_Decrypt }, |function, output, output_len| {
+            session_bytes_input!(session, encrypted_data, function, output, output_len)
+        })
     }
 
     pub(super) fn ffi_decrypt_update(
         &self,
         session: CkSessionHandle,
         encrypted_part: CkInBuf<'_>,
-    ) -> CkResult<SecretBytes> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
+    ) -> CkResult<Vec<u8>> {
         Self::call_bytes(
             &admission,
             unsafe { (*self.func_list).C_DecryptUpdate },

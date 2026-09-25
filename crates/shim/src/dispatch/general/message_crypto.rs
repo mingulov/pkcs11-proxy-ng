@@ -341,12 +341,6 @@ pub unsafe extern "C" fn c_encrypt_message(
         if let Some(rv) = pointer_safe_message_capability_error() {
             return rv;
         }
-        let operation = state::message_operation_state(h_session, state::MessageOperation::Encrypt);
-        let mut operation = operation.lock().expect("message encrypt state poisoned");
-        let shape = match operation.shape {
-            Some(shape) => shape,
-            None => return rv_err(CkRv::OPERATION_NOT_INITIALIZED),
-        };
         let aad = match input_buf_to_ck_in_buf(unsafe {
             classify_input(p_associated_data, ul_associated_data_len)
         }) {
@@ -444,38 +438,12 @@ pub unsafe extern "C" fn c_encrypt_message_begin(
     ul_associated_data_len: CK_ULONG,
 ) -> CK_RV {
     catch_panics(|| {
-        if let Some(rv) = pointer_safe_message_capability_error() {
-            return rv;
-        }
-        let operation = state::message_operation_state(h_session, state::MessageOperation::Encrypt);
-        let mut operation = operation.lock().expect("message encrypt state poisoned");
-        let shape = match operation.shape {
-            Some(shape) => shape,
-            None => return rv_err(CkRv::OPERATION_NOT_INITIALIZED),
-        };
+        let parameter = unsafe { read_input_slice(p_parameter as *const u8, ul_parameter_len) };
         let aad = match input_buf_to_ck_in_buf(unsafe {
             classify_input(p_associated_data, ul_associated_data_len)
         }) {
             Ok(buf) => buf,
             Err(e) => return rv_err(e),
-        };
-        let envelope =
-            match unsafe { message_parameter_roundtrip_spec(p_parameter, ul_parameter_len) } {
-                Ok(spec) => spec,
-                Err(error) => return rv_err(error),
-            };
-        let parameter_call = match unsafe {
-            read_message_parameter_call_for_shape_with_memory(
-                p_parameter.cast_const(),
-                ul_parameter_len,
-                shape,
-                MessageParameterDirection::Encrypt,
-                MessageParameterStage::Begin,
-                MessageCallMemory::begin(p_associated_data, ul_associated_data_len),
-            )
-        } {
-            Ok(call) => call,
-            Err(error) => return rv_err(error),
         };
 
         let result = with_client!(client => client.encrypt_message_begin_contract(
@@ -532,12 +500,6 @@ pub unsafe extern "C" fn c_encrypt_message_next(
         if let Some(rv) = pointer_safe_message_capability_error() {
             return rv;
         }
-        let operation = state::message_operation_state(h_session, state::MessageOperation::Encrypt);
-        let mut operation = operation.lock().expect("message encrypt state poisoned");
-        let shape = match operation.shape {
-            Some(shape) => shape,
-            None => return rv_err(CkRv::OPERATION_NOT_INITIALIZED),
-        };
         let plaintext_part = match input_buf_to_ck_in_buf(unsafe {
             classify_input(p_plaintext_part, ul_plaintext_part_len)
         }) {
@@ -636,12 +598,6 @@ pub unsafe extern "C" fn c_decrypt_message(
         if let Some(rv) = pointer_safe_message_capability_error() {
             return rv;
         }
-        let operation = state::message_operation_state(h_session, state::MessageOperation::Decrypt);
-        let mut operation = operation.lock().expect("message decrypt state poisoned");
-        let shape = match operation.shape {
-            Some(shape) => shape,
-            None => return rv_err(CkRv::OPERATION_NOT_INITIALIZED),
-        };
         let aad = match input_buf_to_ck_in_buf(unsafe {
             classify_input(p_associated_data, ul_associated_data_len)
         }) {
@@ -739,38 +695,12 @@ pub unsafe extern "C" fn c_decrypt_message_begin(
     ul_associated_data_len: CK_ULONG,
 ) -> CK_RV {
     catch_panics(|| {
-        if let Some(rv) = pointer_safe_message_capability_error() {
-            return rv;
-        }
-        let operation = state::message_operation_state(h_session, state::MessageOperation::Decrypt);
-        let mut operation = operation.lock().expect("message decrypt state poisoned");
-        let shape = match operation.shape {
-            Some(shape) => shape,
-            None => return rv_err(CkRv::OPERATION_NOT_INITIALIZED),
-        };
+        let parameter = unsafe { read_input_slice(p_parameter as *const u8, ul_parameter_len) };
         let aad = match input_buf_to_ck_in_buf(unsafe {
             classify_input(p_associated_data, ul_associated_data_len)
         }) {
             Ok(buf) => buf,
             Err(e) => return rv_err(e),
-        };
-        let envelope =
-            match unsafe { message_parameter_roundtrip_spec(p_parameter, ul_parameter_len) } {
-                Ok(spec) => spec,
-                Err(error) => return rv_err(error),
-            };
-        let parameter_call = match unsafe {
-            read_message_parameter_call_for_shape_with_memory(
-                p_parameter.cast_const(),
-                ul_parameter_len,
-                shape,
-                MessageParameterDirection::Decrypt,
-                MessageParameterStage::Begin,
-                MessageCallMemory::begin(p_associated_data, ul_associated_data_len),
-            )
-        } {
-            Ok(call) => call,
-            Err(error) => return rv_err(error),
         };
 
         let result = with_client!(client => client.decrypt_message_begin_contract(
@@ -827,12 +757,6 @@ pub unsafe extern "C" fn c_decrypt_message_next(
         if let Some(rv) = pointer_safe_message_capability_error() {
             return rv;
         }
-        let operation = state::message_operation_state(h_session, state::MessageOperation::Decrypt);
-        let mut operation = operation.lock().expect("message decrypt state poisoned");
-        let shape = match operation.shape {
-            Some(shape) => shape,
-            None => return rv_err(CkRv::OPERATION_NOT_INITIALIZED),
-        };
         let ciphertext_part = match input_buf_to_ck_in_buf(unsafe {
             classify_input(p_ciphertext_part, ul_ciphertext_part_len)
         }) {
@@ -929,13 +853,18 @@ pub unsafe extern "C" fn c_sign_message(
         if let Some(rv) = pointer_safe_message_capability_error() {
             return rv;
         }
-        let operation = state::message_operation_state(h_session, state::MessageOperation::Sign);
-        let mut operation = operation.lock().expect("message sign state poisoned");
-        if operation.shape.is_none() {
-            return rv_err(CkRv::OPERATION_NOT_INITIALIZED);
-        }
-        let param_out_spec = match unsafe {
-            empty_message_parameter_roundtrip_spec(p_parameter, ul_parameter_len)
+        let data = match input_buf_to_ck_in_buf(unsafe { classify_input(p_data, ul_data_len) }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
+        let output_spec = unsafe { output_buffer_spec(p_signature, pul_signature_len) };
+        let param_out_spec =
+            match unsafe { message_parameter_roundtrip_spec(p_parameter, ul_parameter_len) } {
+                Ok(spec) => spec,
+                Err(error) => return rv_err(error),
+            };
+        let msg_param = match unsafe {
+            try_read_message_parameter(p_parameter as *const _, ul_parameter_len)
         } {
             Ok(spec) => spec,
             Err(error) => return rv_err(error),
@@ -1066,20 +995,7 @@ pub unsafe extern "C" fn c_sign_message_next(
     pul_signature_len: *mut CK_ULONG,
 ) -> CK_RV {
     catch_panics(|| {
-        if let Some(rv) = pointer_safe_message_capability_error() {
-            return rv;
-        }
-        let operation = state::message_operation_state(h_session, state::MessageOperation::Sign);
-        let mut operation = operation.lock().expect("message sign state poisoned");
-        if operation.shape.is_none() {
-            return rv_err(CkRv::OPERATION_NOT_INITIALIZED);
-        }
-        let envelope = match unsafe {
-            empty_message_parameter_roundtrip_spec(p_parameter, ul_parameter_len)
-        } {
-            Ok(spec) => spec,
-            Err(error) => return rv_err(error),
-        };
+        let parameter = unsafe { read_input_slice(p_parameter as *const u8, ul_parameter_len) };
         let data_part = match input_buf_to_ck_in_buf(unsafe {
             classify_input(p_data_part, ul_data_part_len)
         }) {
@@ -1141,7 +1057,7 @@ pub unsafe extern "C" fn c_sign_message_next(
             data_part,
             CkInBuf::Bytes(&[]),
             &[],
-            &envelope,
+            &param_out_spec,
             0,
             None,
             0,
@@ -1194,20 +1110,7 @@ pub unsafe extern "C" fn c_verify_message(
     ul_signature_len: CK_ULONG,
 ) -> CK_RV {
     catch_panics(|| {
-        if let Some(rv) = pointer_safe_message_capability_error() {
-            return rv;
-        }
-        let operation = state::message_operation_state(h_session, state::MessageOperation::Verify);
-        let mut operation = operation.lock().expect("message verify state poisoned");
-        if operation.shape.is_none() {
-            return rv_err(CkRv::OPERATION_NOT_INITIALIZED);
-        }
-        let envelope = match unsafe {
-            empty_message_parameter_roundtrip_spec(p_parameter, ul_parameter_len)
-        } {
-            Ok(spec) => spec,
-            Err(error) => return rv_err(error),
-        };
+        let parameter = unsafe { read_input_slice(p_parameter as *const u8, ul_parameter_len) };
         let data = match input_buf_to_ck_in_buf(unsafe { classify_input(p_data, ul_data_len) }) {
             Ok(buf) => buf,
             Err(e) => return rv_err(e),
@@ -1294,20 +1197,7 @@ pub unsafe extern "C" fn c_verify_message_next(
     ul_signature_len: CK_ULONG,
 ) -> CK_RV {
     catch_panics(|| {
-        if let Some(rv) = pointer_safe_message_capability_error() {
-            return rv;
-        }
-        let operation = state::message_operation_state(h_session, state::MessageOperation::Verify);
-        let mut operation = operation.lock().expect("message verify state poisoned");
-        if operation.shape.is_none() {
-            return rv_err(CkRv::OPERATION_NOT_INITIALIZED);
-        }
-        let envelope = match unsafe {
-            empty_message_parameter_roundtrip_spec(p_parameter, ul_parameter_len)
-        } {
-            Ok(spec) => spec,
-            Err(error) => return rv_err(error),
-        };
+        let parameter = unsafe { read_input_slice(p_parameter as *const u8, ul_parameter_len) };
         let data_part = match input_buf_to_ck_in_buf(unsafe {
             classify_input(p_data_part, ul_data_part_len)
         }) {

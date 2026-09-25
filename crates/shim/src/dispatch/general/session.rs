@@ -34,29 +34,15 @@ pub unsafe extern "C" fn c_close_session(h_session: CK_SESSION_HANDLE) -> CK_RV 
         let result = with_client!(client => client.close_session_stateful(
             CkSessionHandle(h_session as u64)
         ));
-        // Disposable two-call output is attempt-scoped.  Authoritative
-        // session/message state survives only a decoded transient provider
-        // failure, so a still-valid handle can safely retry or continue.
-        crate::state::evict_session_output_caches(h_session);
-        let evict_authoritative = match &result {
-            Ok(()) => true,
-            Err(error) if error.origin != MessageCallErrorOrigin::Backend => true,
-            Err(error) => {
-                error.ck_rv == CkRv::DEVICE_ERROR
-                    || error.ck_rv == CkRv::SESSION_CLOSED
-                    || error.ck_rv == CkRv::SESSION_HANDLE_INVALID
-            }
-        };
-        if evict_authoritative {
-            crate::state::evict_session_authoritative_state(h_session);
-        }
-        unit_result_to_rv(result.map_err(|error| error.ck_rv))
+        // Evicted on the attempt, regardless of CK_RV (see evict_session_caches).
+        crate::state::evict_session_caches(h_session);
+        unit_result_to_rv(result)
     })
 }
 
 pub unsafe extern "C" fn c_close_all_sessions(slot_id: CK_SLOT_ID) -> CK_RV {
     catch_panics(|| {
-        let result = with_client!(client => client.close_all_sessions(CkSlotId(slot_id as u64)));
+        let result = with_client!(client => client.close_all_sessions(CkSlotId(slot_id)));
         // Evicted on the attempt, regardless of CK_RV (see evict_slot_session_caches).
         crate::state::evict_slot_session_caches(slot_id);
         unit_result_to_rv(result)

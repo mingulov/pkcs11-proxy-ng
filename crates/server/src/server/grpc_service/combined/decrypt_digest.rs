@@ -47,7 +47,7 @@ pub(super) async fn decrypt_digest_update(
         };
 
     let encrypted_part = req.encrypted_part;
-    let backend = ctx.backend.clone();
+    let backend = backend_ref.clone();
     let result = spawn_backend(move || {
         backend.decrypt_digest_update(session, CkInBuf::Bytes(&encrypted_part))
     })
@@ -78,7 +78,7 @@ pub(super) async fn decrypt_verify_update(
         };
 
     let encrypted_part = req.encrypted_part;
-    let backend = ctx.backend.clone();
+    let backend = backend_ref.clone();
     let result = spawn_backend(move || {
         backend.decrypt_verify_update(session, CkInBuf::Bytes(&encrypted_part))
     })

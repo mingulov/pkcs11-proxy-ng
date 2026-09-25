@@ -138,87 +138,45 @@ pub(super) async fn close_session_with_timeout(
     let ctx_id = ClientContextId(req.client_context_id);
 
     let vh = VirtualHandle(req.session_handle);
-    // D6(2) snapshot: when this close drops the context's last logical login
-    // for its slot, the backend login must be released too (last-context-out)
-    // so a later login PIN-verifies against a logged-out token.
-    let held_login_slot = ctx_mgr
-        .get_context(&ctx_id, |ctx| {
-            let vh = VirtualHandle(req.session_handle);
-            ctx.remove_session(vh)
-        })
-        .await
-        .flatten();
-    let mut transition = match ctx_mgr.begin_close_session_with_guard(
-        &ctx_id,
-        vh,
-        current_context_operation_guard(),
-    ) {
-        Ok(transition) => transition,
-        Err(CloseSessionBeginError::ContextMissing) => {
+    // Resolve WITHOUT removing the mapping: removing it before the backend close
+    // (as the old code did) orphans the backend session if the close fails — the
+    // virtual handle is gone, so the client can neither retry nor reach it (M3).
+    let resolved = ctx_mgr.get_context(&ctx_id, |ctx| ctx.session_handles.resolve(vh)).await;
+
+    let backend_handle = match resolved {
+        None => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::CloseSessionResponse {
                 ck_rv: CkRv::CRYPTOKI_NOT_INITIALIZED.0,
             }));
         }
-        Err(CloseSessionBeginError::SessionMissing) => {
+        Some(None) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::CloseSessionResponse {
                 ck_rv: CkRv::SESSION_HANDLE_INVALID.0,
             }));
         }
+        Some(Some(backend_handle)) => backend_handle,
     };
 
-    let session = CkSessionHandle(transition.backend_handle().0);
-    // T5F: attempt the last-holder logout BEFORE the backend close, using
-    // the closing session as the preferred carrier (singular-path analogue
-    // of the m-5 close-all ordering, ADR-0002 §7: the logout rides a
-    // still-open session). Runs only when this close drops the context's
-    // last own session for a held-login slot; the excluding-self check
-    // observes only other live contexts. Own login stays held across the
-    // close so transient failures retain it (transition semantics). No
-    // routine WARN on the ordinary logged-in singular close.
-    let pre_close_logout_done = match held_login_slot {
-        Some(slot)
-            if ctx_mgr
-                .get_context(&ctx_id, |ctx| {
-                    !ctx.session_slots.iter().any(|(other, s)| *s == slot && *other != vh)
-                })
-                .await
-                .unwrap_or(false) =>
-        {
-            ctx_mgr
-                .backend_logout_if_last_holder_out_excluding(
-                    backend_ref,
-                    slot,
-                    Some(transition.backend_handle().0),
-                    &ctx_id,
-                )
-                .await
-        }
-        _ => false,
-    };
+    let session = CkSessionHandle(backend_handle.0);
     let backend = backend_ref.clone();
-    let operation = move || {
-        transition.mark_started();
-        let result = backend.close_session(session);
-        transition.settle(&result);
-        result
-    };
-    let result = spawn_backend_with_optional_timeout(timeout_override, operation).await?;
+    let result = spawn_backend(move || backend.close_session(session)).await?;
 
-    let ck_rv = ck_rv_only(result);
-    if ck_rv == CkRv::OK.0 {
-        debug!(context_id = %ctx_id.0, virtual_handle = req.session_handle, "Session closed");
-    }
-    // D6(2): release the backend login when this close dropped the last
-    // logical login for the slot. Best-effort and self-guarded: no-ops when
-    // the close failed transiently (login retained), when sibling sessions
-    // keep the login, or when another live context holds it. Skipped when
-    // the pre-close attempt already released the login — a second backend
-    // logout would answer USER_NOT_LOGGED_IN and WARN.
-    if let Some(slot) = held_login_slot
-        && !pre_close_logout_done
-    {
-        ctx_mgr.backend_logout_if_last_holder_out(backend_ref, slot, None).await;
-    }
+    // Drop the virtual handle (and its session-scoped state — B2 eviction, login
+    // state) only on a TERMINAL result: a clean close, or the backend reporting
+    // the session already gone. A transient backend failure keeps the mapping so
+    // the client can retry and the backend session is not orphaned (M3).
+    let ck_rv = match result {
+        Ok(()) => {
+            let _ = ctx_mgr.get_context(&ctx_id, |ctx| ctx.remove_session(vh)).await;
+            debug!(context_id = %ctx_id.0, virtual_handle = req.session_handle, "Session closed");
+            CkRv::OK.0
+        }
+        Err(error) if error == CkRv::SESSION_HANDLE_INVALID || error == CkRv::SESSION_CLOSED => {
+            let _ = ctx_mgr.get_context(&ctx_id, |ctx| ctx.remove_session(vh)).await;
+            error.0
+        }
+        Err(error) => error.0,
+    };
     Ok(Response::new(pkcs11_proxy_ng_proto::CloseSessionResponse { ck_rv }))
 }
 

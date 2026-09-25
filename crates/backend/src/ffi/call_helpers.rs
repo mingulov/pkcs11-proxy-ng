@@ -374,17 +374,9 @@ impl FfiBackend {
         let generation = self.lifecycle.current_generation();
         let function = Self::require_fn(function)?;
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
-        Self::ck_result(call(function, ffi_mech.ck_mechanism_mut()))?;
-        // Row-10 stale-completion guard: if re-initialization advanced the
-        // generation while the native call ran, this completion belongs to
-        // a dead incarnation. Retire its owner instead of publishing it —
-        // the slot may already belong to a reused handle in the new one.
-        if self.lifecycle.current_generation() != generation {
-            return Err(CkRv::SESSION_HANDLE_INVALID);
-        }
-        // Keep the mechanism's backing memory alive in this family's slot.
-        self.mech_cache.insert((session.0, family), ffi_mech);
-        self.last_init_family.insert(session.0, family);
+        Self::ck_result(call(function, &mut ffi_mech.ck_mechanism))?;
+        // Keep the mechanism's backing memory alive for the session.
+        self.mech_cache.insert(session.0, ffi_mech);
         Ok(())
     }
 
@@ -406,32 +398,14 @@ impl FfiBackend {
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
         Self::ck_result(call(function, ffi_mech.ck_mechanism_mut()))?;
         let output_params = ffi_mech.output_params();
-        // Row-10 stale-completion guard: same dead-incarnation refusal as
-        // `call_init_with_mechanism` — never publish into a reused slot.
-        if self.lifecycle.current_generation() != generation {
-            return Err(CkRv::SESSION_HANDLE_INVALID);
-        }
-        // Keep the mechanism's backing memory alive in this family's slot.
-        self.mech_cache.insert((session.0, family), ffi_mech);
-        self.last_init_family.insert(session.0, family);
+        // Keep the mechanism's backing memory alive for the session.
+        self.mech_cache.insert(session.0, ffi_mech);
         Ok(output_params)
     }
 
-    /// Retire one family's cached mechanism (called on that family's Init
-    /// cancel). Sibling families' slots and the last-Init marker are
-    /// untouched: a cancel proves nothing about other families' owners.
-    /// If the marker names the retired family, the unscoped read below
-    /// yields None rather than a sibling's graph — matching the pre-slot
-    /// observable behavior where cancel emptied the whole cache.
-    pub(super) fn drop_mech_cache_family(&self, session: CkSessionHandle, family: OperationFamily) {
-        self.mech_cache.remove(&(session.0, family));
-    }
-
-    /// Drop every cached mechanism of the given session, plus its last-Init
-    /// marker (called on session close).
-    pub(super) fn drop_mech_cache_session(&self, session: CkSessionHandle) {
-        self.mech_cache.retain(|key, _| key.0 != session.0);
-        self.last_init_family.remove(&session.0);
+    /// Drop any cached mechanism for the given session (called on session close).
+    pub(super) fn drop_mech_cache(&self, session: CkSessionHandle) {
+        self.mech_cache.remove(&session.0);
     }
 
     /// Record `session -> slot` for later per-slot eviction in
@@ -463,15 +437,13 @@ impl FfiBackend {
     /// is reflected in our Rust-owned caches.
     pub(super) fn drop_mech_cache_for_slot(&self, slot_id: CkSlotId) {
         // O(sessions-on-slot): take the slot's session set from the reverse
-        // index, then evict exactly those sessions' entries — every family
-        // slot plus the last-Init marker — from the mechanism cache and
+        // index, then evict exactly those entries from the mechanism cache and
         // the forward map — no full scan of every open session (L4).
         let Some((_, sessions)) = self.slot_sessions.remove(&slot_id.0) else {
             return;
         };
         for session in sessions {
-            self.mech_cache.retain(|key, _| key.0 != session);
-            self.last_init_family.remove(&session);
+            self.mech_cache.remove(&session);
             self.session_slot_map.remove(&session);
         }
     }
@@ -485,10 +457,8 @@ impl FfiBackend {
     /// holder — can exist under the publish write that runs this).
     pub(super) fn drop_all_mech_cache(&self) {
         self.mech_cache.clear();
-        self.last_init_family.clear();
         self.session_slot_map.clear();
         self.slot_sessions.clear();
-        self.session_fences.clear();
     }
 
     /// Read one family's retained `output_params()`. Returns None when the
@@ -499,7 +469,7 @@ impl FfiBackend {
         session: CkSessionHandle,
         family: OperationFamily,
     ) -> Option<CkMechanismParams> {
-        self.mech_cache.get(&(session.0, family)).and_then(|mechanism| mechanism.output_params())
+        self.mech_cache.get(&session.0).and_then(|mechanism| mechanism.output_params())
     }
 
     pub(super) fn call_bytes_with_mechanism<TFunction, F>(

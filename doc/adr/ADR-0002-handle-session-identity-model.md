@@ -136,6 +136,24 @@ Login state is scoped to **logical client instance + token**:
   instance's sessions, even if both are authenticated by the same mTLS
   certificate.
 
+**Per-slot login serialization (M5).** The cross-context check for an existing
+per-slot login, the backend `C_Login`/`C_Logout`, and the recording of the new
+login state are performed under a **per-slot login lock** (`ContextManager::
+slot_login_lock`, one `tokio::sync::Mutex` keyed by slot id). Without it, two
+logical clients logging into the *same* slot concurrently both observed "no
+other login", both took the real-login path, and the second was answered
+`CKR_USER_ALREADY_LOGGED_IN` by the already-logged-in shared token instead of
+the synthesised logical `CKR_OK` — a transparency defect in the multi-client
+model (each logical client expects its own login to succeed over the shared
+backend). The lock makes the first client perform the real `C_Login` (capturing
+the PIN verifier, ADR-0008) and the second take the logical, verifier-validated
+path, so exactly one backend `C_Login` occurs. The lock is held across the
+backend call but is per-slot, so logins on different slots proceed concurrently;
+the shared token already serialises same-slot logins internally, so no real
+concurrency is lost. Verified by a deterministic concurrency test
+(`concurrent_first_login_serializes_to_one_backend_login`) that gates the first
+client inside the backend `C_Login` while the second races in.
+
 ### 7. Session Cleanup
 
 `C_CloseAllSessions(slotID)` closes only the sessions opened by the calling

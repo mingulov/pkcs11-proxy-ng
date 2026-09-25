@@ -8,13 +8,11 @@ use pkcs11_proxy_ng_types::{
     CkMechanismParams, CkObjectHandle, CkRv, CkSessionHandle, Sp800108DerivedKey,
 };
 
-use super::super::authorization::mechanism_permitted;
-use super::super::convert_template_opt;
+use super::super::convert_template;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
-    ensure_private_mint_allowed, ensure_private_use_allowed, gate_object_handle, parse_mechanism,
-    register_session_object_handle, register_session_object_pair, resolve_session,
-    resolve_session_and_object, spawn_backend, template_declares_private_object,
+    parse_mechanism, register_object_handle, register_session_object_handle,
+    register_session_object_pair, resolve_session, resolve_session_and_object, spawn_backend,
     template_declares_token_object,
 };
 use crate::server::context_manager::{ClientContextId, ContextManager};
@@ -52,7 +50,9 @@ macro_rules! audit_key_mgmt {
 /// Outer dispatcher: captures timing + identity, delegates to the impl, then
 /// emits a fail-closed `KeyMgmt` audit record.
 pub(crate) async fn generate_key_pair(
-    ctx: &HandlerContext,
+    ctx_mgr: &Arc<ContextManager>,
+    backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::GenerateKeyPairRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GenerateKeyPairResponse>, Status> {
     let started = Instant::now();
@@ -168,11 +168,8 @@ async fn generate_key_pair_impl(
 
     // Each generated key is a session object unless its template marks
     // CKA_TOKEN; classify before the templates move into the backend call (B2).
-    // Privacy bits are recorded alongside for the D6(1) USE enforcement.
-    let public_is_token = template_declares_token_object(public_view);
-    let private_is_token = template_declares_token_object(private_view);
-    let public_is_private = template_declares_private_object(public_view);
-    let private_is_private = template_declares_private_object(private_view);
+    let public_is_token = template_declares_token_object(&public_key_template);
+    let private_is_token = template_declares_token_object(&private_key_template);
     let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
@@ -191,12 +188,10 @@ async fn generate_key_pair_impl(
                 ctx_mgr,
                 &ctx_id,
                 virtual_session,
-                CkObjectHandle(public_key.0 as u64),
+                CkObjectHandle(public_key.0),
                 public_is_token,
-                public_is_private,
-                CkObjectHandle(private_key.0 as u64),
+                CkObjectHandle(private_key.0),
                 private_is_token,
-                private_is_private,
             )
             .await;
             match virtual_handles {
@@ -225,7 +220,9 @@ async fn generate_key_pair_impl(
 /// Outer dispatcher: captures timing + identity, delegates to the impl, then
 /// emits a fail-closed `KeyMgmt` audit record.
 pub(crate) async fn generate_key(
-    ctx: &HandlerContext,
+    ctx_mgr: &Arc<ContextManager>,
+    backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::GenerateKeyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GenerateKeyResponse>, Status> {
     let started = Instant::now();
@@ -310,6 +307,10 @@ async fn generate_key_impl(
     };
 
     let mechanism_type = mechanism.mechanism_type;
+    // A generated key is a session object unless its template marks CKA_TOKEN;
+    // classify before the template moves into the backend call (B2).
+    let is_token = template_declares_token_object(&template);
+    let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
     let result =
         spawn_backend(move || backend.generate_key_with_output(session, &mechanism, &template))
@@ -317,8 +318,14 @@ async fn generate_key_impl(
 
     match result {
         Ok((object, mechanism_out_params)) => {
-            let key_handle =
-                register_object_handle(ctx_mgr, &ctx_id, CkObjectHandle(object.0)).await;
+            let key_handle = register_session_object_handle(
+                ctx_mgr,
+                &ctx_id,
+                virtual_session,
+                CkObjectHandle(object.0),
+                is_token,
+            )
+            .await;
             let mechanism_out = mechanism_out_params.map(|params| {
                 pkcs11_proxy_ng_proto::Mechanism::from(&pkcs11_proxy_ng_types::CkMechanism {
                     mechanism_type,
@@ -342,7 +349,9 @@ async fn generate_key_impl(
 /// Outer dispatcher: captures timing + identity, delegates to the impl, then
 /// emits a fail-closed `KeyMgmt` audit record.
 pub(crate) async fn derive_key(
-    ctx: &HandlerContext,
+    ctx_mgr: &Arc<ContextManager>,
+    backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::DeriveKeyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DeriveKeyResponse>, Status> {
     let started = Instant::now();
@@ -398,11 +407,14 @@ async fn derive_key_impl(
         }
     };
 
-    // Mechanism policy gate (G3-PR3 Task 3): deny before backend call when the
-    // principal's grant does not include this derive mechanism.
-    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+    // Translate every embedded object handle carried inside the mechanism
+    // parameters (HKDF salt key, ECDH/MQV private-data keys, TLS key-material
+    // secrets, CKM_CONCATENATE_BASE_AND_KEY handle, …) from the caller's
+    // virtual handle space to the backend's (B1). SP800-108's byte-encoded
+    // input key handles are handled separately just below.
+    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
         return Ok(Response::new(pkcs11_proxy_ng_proto::DeriveKeyResponse {
-            ck_rv: CkRv::MECHANISM_INVALID.0,
+            ck_rv: rv.0,
             key_handle: 0,
             mechanism_out: None,
         }));
@@ -469,10 +481,8 @@ async fn derive_key_impl(
     }
 
     let mechanism_type = mechanism.mechanism_type;
-    // A derived key is a session object unless CKA_TOKEN is set (B2). The
-    // privacy bit is recorded for the D6(1) USE enforcement.
-    let is_token = template_declares_token_object(template_view);
-    let is_private = template_declares_private_object(template_view);
+    // A derived key is a session object unless CKA_TOKEN is set (B2).
+    let is_token = template_declares_token_object(&template);
     let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
@@ -491,7 +501,6 @@ async fn derive_key_impl(
                             virtual_session,
                             object,
                             is_token,
-                            Some(is_private),
                         )
                         .await
                     }

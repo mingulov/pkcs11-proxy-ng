@@ -24,5 +24,8 @@ pkcs11-proxy-ng-backend = { path = "../backend" }
 pkcs11-proxy-ng = { path = "../server" }
 pkcs11-proxy-ng-proto = { path = "../proto" }
 tokio-stream = "0.1"
-tonic.workspace = true
+# Dev-only: the output-semantics test spins up an in-process `Server` and dials
+# it, so the test harness needs the full transport (server + channel). The shim
+# release cdylib does not depend on tonic — it talks to the daemon via `client`.
+tonic = { workspace = true, features = ["transport", "router", "codegen", "tls-ring"] }
 libc = "0.2"

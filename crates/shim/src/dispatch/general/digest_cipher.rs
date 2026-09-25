@@ -46,6 +46,9 @@ pub unsafe extern "C" fn c_digest(
     pul_digest_len: CK_ULONG_PTR,
 ) -> CK_RV {
     catch_panics(|| {
+        if pul_digest_len.is_null() {
+            return rv_err(CkRv::ARGUMENTS_BAD);
+        }
         let data = match input_buf_to_ck_in_buf(unsafe { classify_input(p_data, ul_data_len) }) {
             Ok(buf) => buf,
             Err(e) => return rv_err(e),
@@ -174,6 +177,9 @@ pub unsafe extern "C" fn c_encrypt(
     pul_encrypted_data_len: CK_ULONG_PTR,
 ) -> CK_RV {
     catch_panics(|| {
+        if pul_encrypted_data_len.is_null() {
+            return rv_err(CkRv::ARGUMENTS_BAD);
+        }
         let data = match input_buf_to_ck_in_buf(unsafe { classify_input(p_data, ul_data_len) }) {
             Ok(buf) => buf,
             Err(e) => return rv_err(e),
@@ -250,6 +256,9 @@ pub unsafe extern "C" fn c_encrypt_update(
     pul_encrypted_part_len: CK_ULONG_PTR,
 ) -> CK_RV {
     catch_panics(|| {
+        if pul_encrypted_part_len.is_null() {
+            return rv_err(CkRv::ARGUMENTS_BAD);
+        }
         let part = match input_buf_to_ck_in_buf(unsafe { classify_input(p_part, ul_part_len) }) {
             Ok(buf) => buf,
             Err(e) => return rv_err(e),
@@ -339,6 +348,9 @@ pub unsafe extern "C" fn c_decrypt(
     pul_data_len: CK_ULONG_PTR,
 ) -> CK_RV {
     catch_panics(|| {
+        if pul_data_len.is_null() {
+            return rv_err(CkRv::ARGUMENTS_BAD);
+        }
         let encrypted_data = match input_buf_to_ck_in_buf(unsafe {
             classify_input(p_encrypted_data, ul_encrypted_data_len)
         }) {
@@ -370,6 +382,9 @@ pub unsafe extern "C" fn c_decrypt_update(
     pul_part_len: CK_ULONG_PTR,
 ) -> CK_RV {
     catch_panics(|| {
+        if pul_part_len.is_null() {
+            return rv_err(CkRv::ARGUMENTS_BAD);
+        }
         let encrypted_part = match input_buf_to_ck_in_buf(unsafe {
             classify_input(p_encrypted_part, ul_encrypted_part_len)
         }) {

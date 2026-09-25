@@ -3,10 +3,12 @@ use std::time::Instant;
 
 use tonic::{Request, Response, Status};
 
-use pkcs11_proxy_ng_audit::EventClass;
-use pkcs11_proxy_ng_types::attribute::is_value_bearing_secret;
-use pkcs11_proxy_ng_types::{
-    CkAttributeQuery, CkAttributeQueryResult, CkAttributeType, CkRv, SecretBytes,
+use pkcs11_proxy_ng_backend::Pkcs11Backend;
+use pkcs11_proxy_ng_types::{CkAttributeQuery, CkAttributeType};
+
+use super::super::super::context_manager::{ClientContextId, ContextManager};
+use super::super::service_utils::{
+    ck_rv_only, resolve_session_and_object, spawn_backend, spawn_task,
 };
 
 use super::super::super::context_manager::{CachedAttr, ClientContextId};
@@ -113,7 +115,7 @@ fn exact_result_rv(r: &CkAttributeQueryResult) -> CkRv {
 
 fn validate_exact_attribute_results(
     query_types: &[CkAttributeType],
-    results: &[CkAttributeQueryResult],
+    results: &[pkcs11_proxy_ng_types::CkAttributeQueryResult],
 ) -> Result<(), Status> {
     if results.len() != query_types.len() {
         return Err(Status::internal(
@@ -344,10 +346,13 @@ pub(super) async fn get_attribute_value_exact(
     // then move the full query vector into the backend call — avoids cloning the
     // whole query vector on this hot read path (M8).
     let query_types: Vec<CkAttributeType> = queries.iter().map(|q| q.attr_type).collect();
+    let backend = backend_ref.clone();
+    let result =
+        spawn_backend(move || backend.get_attribute_value_exact(session, object, &queries)).await?;
 
     match result {
         Ok((ck_rv, results)) => {
-            validate_exact_attribute_results(&queries, &results)?;
+            validate_exact_attribute_results(&query_types, &results)?;
             Ok(Response::new(pkcs11_proxy_ng_proto::GetAttributeValueExactResponse {
                 ck_rv: ck_rv.0,
                 // Consume `results` by value so each attribute's owned
@@ -595,13 +600,7 @@ mod tests {
 
     use super::super::attr_value_to_bytes;
     use super::validate_exact_attribute_results;
-    use crate::config::{
-        AuthConfig, ExtractPolicyConfig, GrantSpec, PolicyEntry, RichGrantConfig, TokenAccessSpec,
-    };
-    use crate::server::auth::policy::TokenPolicy;
-    use crate::server::context_manager::{ClientContextId, ContextManager};
-    use crate::server::grpc_service::HandlerContext;
-    use crate::server::handle_map::{BackendHandle, VirtualHandle};
+    use pkcs11_proxy_ng_types::{CkAttributeQueryResult, CkAttributeType};
     use tonic::Code;
 
     // --- existing alignment tests ---

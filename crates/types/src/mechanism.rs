@@ -1724,42 +1724,50 @@ mod tests {
         assert!(b.new_password.iter().all(|&n| n == 0));
     }
 
+    // Witness whose Zeroize impl records that it ran, so ZeroizeOnDrop's
+    // generated Drop can be observed WITHOUT reading freed memory (the old
+    // pbe_params_drop_runs_zeroize_on_drop test was a use-after-free).
+    use zeroize::{Zeroize, ZeroizeOnDrop};
+    struct ZeroizeWitness(std::sync::Arc<std::sync::atomic::AtomicBool>);
+    impl Zeroize for ZeroizeWitness {
+        fn zeroize(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    #[derive(Zeroize, ZeroizeOnDrop)]
+    struct ZeroizeHolder {
+        secret: ZeroizeWitness,
+    }
+
     #[test]
-    fn pbe_params_drop_runs_zeroize_on_drop() {
-        // ZeroizeOnDrop derives Drop that calls Zeroize::zeroize().
-        // We confirm Drop is invoked by witnessing the inner password
-        // buffer is cleared right before destruction via a probe vec
-        // we read back from a raw ptr we recorded before drop. This is
-        // best-effort: heap allocations may be re-used by the allocator,
-        // but ZeroizeOnDrop is documented to write zeros first.
-        let probe_ptr;
-        let probe_len;
+    fn zeroize_on_drop_invokes_zeroize_without_uaf() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let flag = Arc::new(AtomicBool::new(false));
         {
-            let p = PbeParams {
-                init_vector: vec![],
-                password: vec![0x42u8; 64],
-                salt: vec![],
-                iteration: 0,
-            };
-            probe_ptr = p.password.as_ptr();
-            probe_len = p.password.len();
-            // p drops here, ZeroizeOnDrop should write zeros to *probe_ptr.
+            let _holder = ZeroizeHolder { secret: ZeroizeWitness(flag.clone()) };
+            // _holder drops here; ZeroizeOnDrop's Drop must call zeroize().
         }
-        // SAFETY: the allocation may have been freed, but reading the
-        // bytes is documented use-of-deallocated-memory. We accept this
-        // best-effort and only assert the values are NOT the original
-        // 0x42 pattern. This is the standard zeroize crate pattern for
-        // smoke-testing ZeroizeOnDrop.
-        let mut still_secret = false;
-        unsafe {
-            for i in 0..probe_len {
-                if *probe_ptr.add(i) == 0x42 {
-                    still_secret = true;
-                    break;
-                }
-            }
-        }
-        assert!(!still_secret, "ZeroizeOnDrop did not clear password buffer");
+        assert!(flag.load(Ordering::SeqCst), "ZeroizeOnDrop must call zeroize() on drop");
+    }
+
+    #[test]
+    fn zeroize_on_drop_runs_during_panic_unwind() {
+        // AGENTS.md §4: secret structs rely on ZeroizeOnDrop running during
+        // stack UNWINDING — which is why the release profile must stay
+        // panic="unwind". This would fail under panic="abort".
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_for_panic = flag.clone();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _holder = ZeroizeHolder { secret: ZeroizeWitness(flag_for_panic) };
+            panic!("boom");
+        }));
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "ZeroizeOnDrop must run during stack unwinding (panic=unwind invariant)"
+        );
     }
 
     #[test]

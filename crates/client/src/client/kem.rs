@@ -34,18 +34,17 @@ impl Pkcs11Client {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         private_key: CkObjectHandle,
-        template: Option<&[CkAttribute]>,
+        template: &[CkAttribute],
         ciphertext: CkInBuf<'_>,
     ) -> CkResult<CkObjectHandle> {
         let ctx = self.context_id()?;
-        let proto_template = Self::proto_template(template.unwrap_or(&[]));
+        let proto_template = Self::proto_template(template);
         let mut req = pkcs11_proxy_ng_proto::DecapsulateKeyRequest {
             client_context_id: ctx,
             session_handle: session.0,
             mechanism: Some(Self::proto_mechanism(mechanism)),
             private_key_handle: private_key.0,
             template: proto_template,
-            template_null: template.is_none(),
             ciphertext: Vec::new(),
             ciphertext_null_len: None,
         };

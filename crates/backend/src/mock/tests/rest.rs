@@ -679,14 +679,7 @@ fn set_op_state_restores_sign_on_same_session() {
     let blob = backend.get_operation_state(session).unwrap();
     let blob_bytes = blob.expose(|raw| raw.to_vec());
     backend.sign_final(session).unwrap();
-    backend
-        .set_operation_state(
-            session,
-            CkInBuf::Bytes(&blob_bytes),
-            CkObjectHandle(0),
-            CkObjectHandle(0),
-        )
-        .unwrap();
+    backend.set_operation_state(session, CkInBuf::Bytes(&blob), CkObjectHandle(0), CkObjectHandle(0)).unwrap();
     backend.sign_final(session).unwrap();
 }
 
@@ -697,24 +690,14 @@ fn set_op_state_transfers_to_different_session() {
     let mech = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
     backend.sign_init(session_a, &mech, CkObjectHandle(1)).unwrap();
     let blob = backend.get_operation_state(session_a).unwrap();
-    let blob_bytes = blob.expose(|raw| raw.to_vec());
-    backend
-        .set_operation_state(
-            session_b,
-            CkInBuf::Bytes(&blob_bytes),
-            CkObjectHandle(0),
-            CkObjectHandle(0),
-        )
-        .unwrap();
+    backend.set_operation_state(session_b, CkInBuf::Bytes(&blob), CkObjectHandle(0), CkObjectHandle(0)).unwrap();
     backend.sign_final(session_b).unwrap();
 }
 
 #[test]
 fn set_op_state_empty_blob_returns_saved_state_invalid() {
     let (backend, session) = setup_with_session();
-    let rv = backend
-        .set_operation_state(session, CkInBuf::Bytes(&[]), CkObjectHandle(0), CkObjectHandle(0))
-        .unwrap_err();
+    let rv = backend.set_operation_state(session, CkInBuf::Bytes(&[]), CkObjectHandle(0), CkObjectHandle(0)).unwrap_err();
     assert_eq!(rv, CkRv::SAVED_STATE_INVALID);
 }
 
@@ -722,12 +705,7 @@ fn set_op_state_empty_blob_returns_saved_state_invalid() {
 fn set_op_state_wrong_magic_returns_saved_state_invalid() {
     let (backend, session) = setup_with_session();
     let rv = backend
-        .set_operation_state(
-            session,
-            CkInBuf::Bytes(&[0xFF, 0xFF, 0x01]),
-            CkObjectHandle(0),
-            CkObjectHandle(0),
-        )
+        .set_operation_state(session, CkInBuf::Bytes(&[0xFF, 0xFF, 0x01]), CkObjectHandle(0), CkObjectHandle(0))
         .unwrap_err();
     assert_eq!(rv, CkRv::SAVED_STATE_INVALID);
 }
@@ -736,12 +714,7 @@ fn set_op_state_wrong_magic_returns_saved_state_invalid() {
 fn set_op_state_unknown_op_byte_returns_saved_state_invalid() {
     let (backend, session) = setup_with_session();
     let rv = backend
-        .set_operation_state(
-            session,
-            CkInBuf::Bytes(&[0xC9, 0xEA, 0xFF]),
-            CkObjectHandle(0),
-            CkObjectHandle(0),
-        )
+        .set_operation_state(session, CkInBuf::Bytes(&[0xC9, 0xEA, 0xFF]), CkObjectHandle(0), CkObjectHandle(0))
         .unwrap_err();
     assert_eq!(rv, CkRv::SAVED_STATE_INVALID);
 }
@@ -800,11 +773,7 @@ fn get_set_op_state_all_op_types_roundtrip() {
                 backend.sign_recover(session, CkInBuf::Bytes(b"data")).unwrap();
             }
             Verify => {
-                let _ = backend.verify(
-                    session,
-                    CkInBuf::Bytes(&[0xDE, 0xAD]),
-                    CkInBuf::Bytes(&[0xDE, 0xAD]),
-                );
+                let _ = backend.verify(session, CkInBuf::Bytes(&[0xDE, 0xAD]), CkInBuf::Bytes(&[0xDE, 0xAD]));
             }
             VerifyRecover => {
                 backend.verify_recover(session, CkInBuf::Bytes(&[0xDE, 0xAD])).unwrap();
@@ -820,14 +789,7 @@ fn get_set_op_state_all_op_types_roundtrip() {
             }
             FindObjects => unreachable!("object search state is not cryptographic operation state"),
         }
-        backend
-            .set_operation_state(
-                session,
-                CkInBuf::Bytes(&blob_bytes),
-                CkObjectHandle(0),
-                CkObjectHandle(0),
-            )
-            .unwrap();
+        backend.set_operation_state(session, CkInBuf::Bytes(&blob), CkObjectHandle(0), CkObjectHandle(0)).unwrap();
         let blob2 = backend.get_operation_state(session).unwrap();
         assert_eq!(blob, blob2);
     }

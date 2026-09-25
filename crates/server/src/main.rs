@@ -152,21 +152,6 @@ async fn build_service(
         );
     }
 
-    // Load mechanism registry from configured file (or embedded default).
-    // Logged so the operator can see the served revision at startup.
-    let registry_source = MechanismRegistrySource::load(config.mechanisms.config_path.as_deref())
-        .map_err(|e| format!("Mechanism registry load failed: {e}"))?;
-    {
-        let payload = registry_source.current();
-        tracing::info!(
-            revision = %payload.revision,
-            discovery_mode = %payload.discovery_mode,
-            parameterless = payload.parameterless.len(),
-            param_shapes = payload.params.len(),
-            "mechanism registry ready"
-        );
-    }
-
     // The authorization (token) policy is loaded ONCE at startup and is NOT
     // reloaded on SIGHUP (unlike the mechanism registry — see
     // spawn_sighup_handler). Changing `[auth.policy]` therefore requires a
@@ -184,14 +169,18 @@ async fn build_service(
         config.listener.remote.as_ref().map_or(config::TcpAuthMode::None, |tcp| tcp.auth);
     let unix_auth_mode =
         config.listener.local.as_ref().map_or(config::UnixAuthMode::PeerCred, |uds| uds.auth);
-    let service = server::grpc_service::Pkcs11ProxyService::new(
-        context_manager.clone(),
-        backend.clone(),
-        tcp_auth_mode,
-        unix_auth_mode,
-        token_policy,
-        registry_source.clone(),
-    );
+    let sanitize_inputs = config.proxy.sanitize_inputs;
+    let service = {
+        let svc = server::grpc_service::Pkcs11ProxyService::new(
+            context_manager.clone(),
+            backend.clone(),
+            tcp_auth_mode,
+            unix_auth_mode,
+            token_policy,
+            registry_source.clone(),
+        );
+        if sanitize_inputs { svc.with_sanitize_inputs() } else { svc }
+    };
     let grpc_service = pkcs11_proxy_ng_proto::Pkcs11ProxyServer::new(service)
         .max_decoding_message_size(config.proxy.max_message_bytes)
         .max_encoding_message_size(config.proxy.max_message_bytes);
@@ -224,11 +213,12 @@ async fn listener_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
 /// Bind a Unix-domain-socket listener for the local transport.
 ///
 /// Security (ADR-0005): a stale socket from a prior run is removed, but a path
-/// that exists and is *not* a socket is never clobbered. The socket is pinned to
-/// `0600` (owner-only) immediately after bind — this is a local-user transport
-/// (peer-cred records the connecting uid; broadening access is out of scope).
-/// The accept loop only starts later in `serve_*`, so no peer is processed
-/// before the permissions are tightened.
+/// that exists and is *not* a socket is never clobbered. The socket is created
+/// `0600` (owner-only) atomically via a restrictive umask around `bind()`
+/// (D3 — no umask-default window), with an explicit `chmod` as defense in depth.
+/// This is a local-user transport (peer-cred records the connecting uid;
+/// broadening access is out of scope). The accept loop only starts later in
+/// `serve_*`, so no peer is processed before the socket exists.
 fn bind_unix_listener(path: &std::path::Path) -> Result<tokio::net::UnixListener, BoxError> {
     use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 
@@ -251,8 +241,18 @@ fn bind_unix_listener(path: &std::path::Path) -> Result<tokio::net::UnixListener
         }
     }
 
-    let listener = tokio::net::UnixListener::bind(path)
-        .map_err(|e| format!("failed to bind unix socket {}: {e}", path.display()))?;
+    // D3: create the socket with a restrictive umask so it is 0600 from the
+    // instant of bind(), closing the brief window between bind() and the chmod
+    // below where the socket would otherwise carry umask-default (possibly
+    // group/other-accessible) permissions. Restore the prior umask immediately,
+    // even if bind() fails.
+    let prev_umask = nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o177));
+    let bind_result = tokio::net::UnixListener::bind(path);
+    nix::sys::stat::umask(prev_umask);
+    let listener =
+        bind_result.map_err(|e| format!("failed to bind unix socket {}: {e}", path.display()))?;
+    // Defense in depth: assert 0600 explicitly (a no-op given the umask above,
+    // but it guarantees the result even if the process umask is unusual).
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
         .map_err(|e| format!("failed to chmod unix socket {} to 0600: {e}", path.display()))?;
     Ok(listener)
@@ -282,6 +282,10 @@ fn validate_runtime_listener_support(config: &config::DaemonConfig) -> Result<()
 /// served payload atomically. Reload failures retain the current
 /// registry — the daemon must never crash because the operator pushed
 /// a malformed TOML file mid-rollout.
+///
+/// NOTE: only the mechanism registry is reloaded. The `[auth.policy]`
+/// authorization policy is load-once (see `token_policy` in `main`); changing
+/// it requires a daemon restart.
 #[cfg(unix)]
 fn spawn_sighup_handler(registry_source: MechanismRegistrySource) {
     tokio::spawn(async move {
@@ -318,9 +322,7 @@ fn spawn_sighup_handler(registry_source: MechanismRegistrySource) {
 /// reaches `threshold`, and flips it back to `SERVING` on the next
 /// successful backend call. Driven by `proxy.backend_health_consecutive_failures`.
 fn spawn_backend_health_gate(
-    mut rx: tokio::sync::mpsc::UnboundedReceiver<
-        server::grpc_service::service_utils::BackendHealthEvent,
-    >,
+    mut rx: tokio::sync::mpsc::Receiver<server::grpc_service::service_utils::BackendHealthEvent>,
     mut reporter: tonic_health::server::HealthReporter,
     threshold: u32,
 ) {
@@ -661,10 +663,14 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
     }
 
     // Wire backend-health gating: spawn_backend reports each outcome
-    // through an unbounded channel; this task counts consecutive
-    // transport-level failures and flips tonic-health to NOT_SERVING
-    // once `proxy.backend_health_consecutive_failures` is exceeded.
-    let (health_tx, health_rx) = tokio::sync::mpsc::unbounded_channel();
+    // through a BOUNDED channel (L11 — never grows without bound under a failure
+    // storm); this task counts consecutive transport-level failures and flips
+    // tonic-health to NOT_SERVING once
+    // `proxy.backend_health_consecutive_failures` is exceeded. The producer uses
+    // try_send, dropping on a full buffer (safe: Success is coalesced to rare
+    // transitions, and a full buffer already holds far more failures than the
+    // flip threshold).
+    let (health_tx, health_rx) = tokio::sync::mpsc::channel(256);
     server::grpc_service::service_utils::configure_backend_health_events(health_tx);
     spawn_backend_health_gate(
         health_rx,

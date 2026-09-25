@@ -97,11 +97,6 @@ pub unsafe extern "C" fn c_decapsulate_key(
         if p_mechanism.is_null() || ph_key.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
-        // NULL pCiphertext with non-zero length is invalid — reject it
-        // at the shim rather than losing the NULL distinction over gRPC.
-        if p_ciphertext.is_null() && ul_ciphertext_len != 0 {
-            return rv_err(CkRv::ARGUMENTS_BAD);
-        }
         let template = match unsafe { ck_attrs_to_rust_checked(p_template, ul_count) } {
             Ok(template) => template,
             Err(e) => return rv_err(e),
@@ -111,7 +106,12 @@ pub unsafe extern "C" fn c_decapsulate_key(
             return rv;
         }
         let mech = unsafe { read_mechanism(p_mechanism) };
-        let ciphertext = unsafe { read_input_slice(p_ciphertext, ul_ciphertext_len) };
+        let ciphertext = match input_buf_to_ck_in_buf(unsafe {
+            classify_input(p_ciphertext, ul_ciphertext_len)
+        }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
         match with_client!(client => client.decapsulate_key(
             CkSessionHandle(h_session as u64),
             &mech,

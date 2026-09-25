@@ -20,7 +20,6 @@ impl Pkcs11Client {
         }
         let ctx = self.context_id()?;
         let mut req = pkcs11_proxy_ng_proto::WrapKeyAuthenticatedRequest {
-            authenticated_parameters: None,
             client_context_id: ctx,
             session_handle: session.0,
             mechanism: Some(Self::proto_mechanism(mechanism)),
@@ -42,23 +41,21 @@ impl Pkcs11Client {
         mechanism: &CkMechanism,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
-        template: Option<&[CkAttribute]>,
+        template: &[CkAttribute],
         aad: CkInBuf<'_>,
     ) -> CkResult<(CkObjectHandle, Vec<u8>)> {
         if !pkcs11_proxy_ng_proto::convert::authenticated::legacy_parameter_supported(mechanism) {
             return Err(CkRv::FUNCTION_NOT_SUPPORTED);
         }
         let ctx = self.context_id()?;
-        let proto_template = Self::proto_template(template.unwrap_or(&[]));
+        let proto_template = Self::proto_template(template);
         let mut req = pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedRequest {
-            authenticated_parameters: None,
             client_context_id: ctx,
             session_handle: session.0,
             mechanism: Some(Self::proto_mechanism(mechanism)),
             unwrapping_key_handle: unwrapping_key.0,
             wrapped_key: Vec::new(),
             template: proto_template,
-            template_null: template.is_none(),
             associated_data: Vec::new(),
             wrapped_key_null_len: None,
             associated_data_null_len: None,

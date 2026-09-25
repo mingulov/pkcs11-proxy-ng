@@ -13,17 +13,16 @@ impl FfiBackend {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         match mechanism {
             Some(mech) => {
-                let ffi_mech = mechanism_to_ffi(mech)?;
+                let mut ffi_mech = mechanism_to_ffi(mech)?;
                 let (sig_ptr, sig_len) = signature.as_ptr_len();
-                let _session_fence = self.session_fences.enter(&admission, session)?;
                 call_3x_fn!(
                     &admission,
                     self,
                     func_list_3_2,
                     C_VerifySignatureInit,
-                    Self::session_handle(session)?,
-                    ffi_mech.ck_mechanism_ptr(),
-                    Self::object_handle(key)?,
+                    Self::session_handle(session),
+                    &mut ffi_mech.ck_mechanism as *mut cryptoki_sys::CK_MECHANISM,
+                    Self::object_handle(key),
                     sig_ptr as *mut cryptoki_sys::CK_BYTE,
                     Self::ulong_len_u64(sig_len)
                 )
@@ -50,15 +49,13 @@ impl FfiBackend {
         session: CkSessionHandle,
         data: CkInBuf<'_>,
     ) -> CkResult<()> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
         let (data_ptr, data_len) = data.as_ptr_len();
-        let _session_fence = self.session_fences.enter(&admission, session)?;
         call_3x_fn!(
             &admission,
             self,
             func_list_3_2,
             C_VerifySignature,
-            Self::session_handle(session)?,
+            Self::session_handle(session),
             data_ptr as *mut cryptoki_sys::CK_BYTE,
             Self::ulong_len_u64(data_len)
         )
@@ -69,15 +66,13 @@ impl FfiBackend {
         session: CkSessionHandle,
         data_part: CkInBuf<'_>,
     ) -> CkResult<()> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
         let (dp_ptr, dp_len) = data_part.as_ptr_len();
-        let _session_fence = self.session_fences.enter(&admission, session)?;
         call_3x_fn!(
             &admission,
             self,
             func_list_3_2,
             C_VerifySignatureUpdate,
-            Self::session_handle(session)?,
+            Self::session_handle(session),
             dp_ptr as *mut cryptoki_sys::CK_BYTE,
             Self::ulong_len_u64(dp_len)
         )

@@ -77,16 +77,10 @@ use mapping::{
 
 macro_rules! session_bytes_input {
     ($session:expr, $input:expr, $function:ident, $output:ident, $output_len:ident) => {{
-        // The macro always expands as the tail of a CK_RV-returning closure:
-        // an unrepresentable handle fails the call loudly, never truncates.
-        let _ck_session = match Self::session_handle($session) {
-            Ok(h) => h,
-            Err(_) => return CkRv::FUNCTION_FAILED.0 as cryptoki_sys::CK_RV,
-        };
         let (_ck_in_ptr, _ck_in_len) = $input.as_ptr_len();
         unsafe {
             $function(
-                _ck_session,
+                Self::session_handle($session),
                 _ck_in_ptr as *mut _,
                 Self::ulong_len_u64(_ck_in_len),
                 $output,
@@ -99,13 +93,14 @@ pub(crate) use session_bytes_input;
 
 macro_rules! session_unit_input {
     ($session:expr, $input:expr, $function:ident) => {{
-        // See session_bytes_input: fail loudly, never truncate.
-        let _ck_session = match Self::session_handle($session) {
-            Ok(h) => h,
-            Err(_) => return CkRv::FUNCTION_FAILED.0 as cryptoki_sys::CK_RV,
-        };
         let (_ck_in_ptr, _ck_in_len) = $input.as_ptr_len();
-        unsafe { $function(_ck_session, _ck_in_ptr as *mut _, Self::ulong_len_u64(_ck_in_len)) }
+        unsafe {
+            $function(
+                Self::session_handle($session),
+                _ck_in_ptr as *mut _,
+                Self::ulong_len_u64(_ck_in_len),
+            )
+        }
     }};
 }
 pub(crate) use session_unit_input;
@@ -218,25 +213,16 @@ pub struct FfiBackend {
     /// PKCS#11 3.2 function list, if the module supports `C_GetInterface`.
     func_list_3_2: Option<*const cryptoki_sys::CK_FUNCTION_LIST_3_2>,
     initialize_args: Option<CString>,
-    /// Per-session, per-family mechanism parameter cache.  Some backends
-    /// (OpenCryptoki) store pointers from the mechanism struct passed to
-    /// *Init calls and dereference them during the subsequent operation
-    /// (Encrypt/Decrypt/…).  The spec says backends should copy, but for
-    /// compatibility we keep the FfiMechanism (and its backing buffers)
-    /// alive until the same family's next Init, cancel, or session close
-    /// replaces it.  Keying by [`OperationFamily`] (C3M.3) means a later
-    /// `*Init` of another family — e.g. Digest after Encrypt, per the pinned
-    /// OASIS dual-operation example — never evicts the first family's
-    /// retained graph, and a cancel retires only its own family's slot.
+    /// Per-session mechanism parameter cache.  Some backends (OpenCryptoki)
+    /// store pointers from the mechanism struct passed to *Init calls and
+    /// dereference them during the subsequent operation (Encrypt/Decrypt/…).
+    /// The spec says backends should copy, but for compatibility we keep the
+    /// FfiMechanism (and its backing `Vec<u8>` buffers) alive until the next
+    /// Init call or session close replaces it.
     ///
     /// Sharded (`DashMap`) so concurrent sessions doing crypto `*Init` calls on
     /// the shared backend do not serialise on one global lock (L4).
-    mech_cache: DashMap<(u64, OperationFamily), ffi_conversion::FfiMechanism>,
-    /// Per-session marker naming the family stored by the last `*Init` call.
-    /// Preserves the documented [`Pkcs11Backend::session_output_mechanism_params`]
-    /// contract ("set by the last `*_init` call") now that retention slots
-    /// are per-family: the unscoped read resolves through this marker.
-    last_init_family: DashMap<u64, OperationFamily>,
+    mech_cache: DashMap<u64, ffi_conversion::FfiMechanism>,
     /// Map of session handle -> slot id. Lets a per-session close path find the
     /// owning slot in O(1) to keep [`slot_sessions`](Self::slot_sessions)
     /// consistent. Populated on successful `ffi_open_session`, drained on close.
@@ -245,28 +231,6 @@ pub struct FfiBackend {
     /// `C_CloseAllSessions` evict exactly the sessions on one slot in
     /// O(sessions-on-slot) instead of scanning every session (L4).
     slot_sessions: DashMap<u64, HashSet<u64>>,
-    /// Proof that this instance owns the process construction slot (C3M.4).
-    /// The reservation is released when the last owner drops; stale handles
-    /// can never free another epoch's slot.
-    construction: native_domain::ConstructionPermit,
-    /// Locally observed init/finalize/session lifecycle driving the honest
-    /// retirement decision in `Drop` (C3M.4).
-    lifecycle: native_domain::LifecycleTracker,
-    /// F-01 lifecycle domain: module state machine + ordinary admission
-    /// (TF01a). Starts `LoadedUninitialized`; the first successful
-    /// `C_Initialize` publishes `Open`, which admits ordinary work.
-    lifecycle_domain: native_domain::LifecycleDomain,
-    /// Per-session generation fences (TF01b/I4): every session-bearing
-    /// ordinary path enters its fence under its admission; closes mark.
-    session_fences: session_fence::SessionFenceTable,
-    /// Last-field retirement sentinel (C3M step 7). MUST stay the last
-    /// field: field drops run in declaration order, so its `Drop`
-    /// publishes the next `Vacant` only after every other field —
-    /// dependent graphs, the `Library` (`dlclose`), the permit and the
-    /// lifecycle — has retired. The `Drop` body publishes only `Retiring`
-    /// on the Release path. Never read: its only role is its `Drop`.
-    #[allow(dead_code)]
-    retirement_sentinel: native_domain::RetirementSentinel,
 }
 
 // Safety: PKCS#11 spec requires modules loaded with CKF_OS_LOCKING_OK to be
@@ -556,7 +520,7 @@ impl Pkcs11Backend for FfiBackend {
         self.ffi_sign_init_cancel(session)
     }
 
-    fn sign(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<SecretBytes> {
+    fn sign(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<Vec<u8>> {
         self.ffi_sign(session, data)
     }
 
@@ -581,7 +545,7 @@ impl Pkcs11Backend for FfiBackend {
         self.ffi_sign_recover_init_cancel(session)
     }
 
-    fn sign_recover(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<SecretBytes> {
+    fn sign_recover(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<Vec<u8>> {
         self.ffi_sign_recover(session, data)
     }
 
@@ -637,7 +601,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         signature: CkInBuf<'_>,
-    ) -> CkResult<SecretBytes> {
+    ) -> CkResult<Vec<u8>> {
         self.ffi_verify_recover(session, signature)
     }
 
@@ -679,7 +643,7 @@ impl Pkcs11Backend for FfiBackend {
         self.ffi_digest_init_cancel(session)
     }
 
-    fn digest(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<SecretBytes> {
+    fn digest(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<Vec<u8>> {
         self.ffi_digest(session, data)
     }
 
@@ -725,11 +689,11 @@ impl Pkcs11Backend for FfiBackend {
         self.ffi_encrypt_init_cancel(session)
     }
 
-    fn encrypt(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<SecretBytes> {
+    fn encrypt(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<Vec<u8>> {
         self.ffi_encrypt(session, data)
     }
 
-    fn encrypt_update(&self, session: CkSessionHandle, part: CkInBuf<'_>) -> CkResult<SecretBytes> {
+    fn encrypt_update(&self, session: CkSessionHandle, part: CkInBuf<'_>) -> CkResult<Vec<u8>> {
         self.ffi_encrypt_update(session, part)
     }
 
@@ -762,11 +726,7 @@ impl Pkcs11Backend for FfiBackend {
             .and_then(|family| self.cached_mechanism_output_params_for(session, *family))
     }
 
-    fn decrypt(
-        &self,
-        session: CkSessionHandle,
-        encrypted_data: CkInBuf<'_>,
-    ) -> CkResult<SecretBytes> {
+    fn decrypt(&self, session: CkSessionHandle, encrypted_data: CkInBuf<'_>) -> CkResult<Vec<u8>> {
         self.ffi_decrypt(session, encrypted_data)
     }
 
@@ -774,7 +734,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         encrypted_part: CkInBuf<'_>,
-    ) -> CkResult<SecretBytes> {
+    ) -> CkResult<Vec<u8>> {
         self.ffi_decrypt_update(session, encrypted_part)
     }
 
@@ -911,7 +871,7 @@ impl Pkcs11Backend for FfiBackend {
         mechanism: &CkMechanism,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
-        template: Option<&[CkAttribute]>,
+        template: &[CkAttribute],
     ) -> CkResult<CkObjectHandle> {
         self.ffi_unwrap_key(session, mechanism, unwrapping_key, wrapped_key, template)
     }
@@ -1031,7 +991,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         part: CkInBuf<'_>,
-    ) -> CkResult<SecretBytes> {
+    ) -> CkResult<Vec<u8>> {
         self.ffi_digest_encrypt_update(session, part)
     }
 
@@ -1048,7 +1008,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         encrypted_part: CkInBuf<'_>,
-    ) -> CkResult<SecretBytes> {
+    ) -> CkResult<Vec<u8>> {
         self.ffi_decrypt_digest_update(session, encrypted_part)
     }
 
@@ -1065,7 +1025,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         part: CkInBuf<'_>,
-    ) -> CkResult<SecretBytes> {
+    ) -> CkResult<Vec<u8>> {
         self.ffi_sign_encrypt_update(session, part)
     }
 
@@ -1082,7 +1042,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         encrypted_part: CkInBuf<'_>,
-    ) -> CkResult<SecretBytes> {
+    ) -> CkResult<Vec<u8>> {
         self.ffi_decrypt_verify_update(session, encrypted_part)
     }
 
@@ -1145,7 +1105,7 @@ impl Pkcs11Backend for FfiBackend {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         private_key: CkObjectHandle,
-        template: Option<&[CkAttribute]>,
+        template: &[CkAttribute],
         ciphertext: CkInBuf<'_>,
     ) -> CkResult<CkObjectHandle> {
         self.ffi_decapsulate_key(session, mechanism, private_key, template, ciphertext)
@@ -1215,7 +1175,7 @@ impl Pkcs11Backend for FfiBackend {
         parameter: &mut [u8],
         aad: CkInBuf<'_>,
         plaintext: CkInBuf<'_>,
-    ) -> CkResult<(SecretBytes, SecretBytes)> {
+    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
         self.ffi_encrypt_message(session, parameter, aad, plaintext)
     }
 
@@ -1224,7 +1184,7 @@ impl Pkcs11Backend for FfiBackend {
         session: CkSessionHandle,
         parameter: &mut [u8],
         aad: CkInBuf<'_>,
-    ) -> CkResult<SecretBytes> {
+    ) -> CkResult<Vec<u8>> {
         self.ffi_encrypt_message_begin(session, parameter, aad)
     }
 
@@ -1253,7 +1213,7 @@ impl Pkcs11Backend for FfiBackend {
         parameter: &mut [u8],
         aad: CkInBuf<'_>,
         ciphertext: CkInBuf<'_>,
-    ) -> CkResult<(SecretBytes, SecretBytes)> {
+    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
         self.ffi_decrypt_message(session, parameter, aad, ciphertext)
     }
 
@@ -1262,7 +1222,7 @@ impl Pkcs11Backend for FfiBackend {
         session: CkSessionHandle,
         parameter: &mut [u8],
         aad: CkInBuf<'_>,
-    ) -> CkResult<SecretBytes> {
+    ) -> CkResult<Vec<u8>> {
         self.ffi_decrypt_message_begin(session, parameter, aad)
     }
 
@@ -1290,7 +1250,7 @@ impl Pkcs11Backend for FfiBackend {
         session: CkSessionHandle,
         parameter: &mut [u8],
         data: CkInBuf<'_>,
-    ) -> CkResult<(SecretBytes, SecretBytes)> {
+    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
         self.ffi_sign_message(session, parameter, data)
     }
 
@@ -1420,7 +1380,7 @@ impl Pkcs11Backend for FfiBackend {
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
         aad: CkInBuf<'_>,
-    ) -> CkResult<(SecretBytes, SecretBytes)> {
+    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
         self.ffi_wrap_key_authenticated(session, mechanism, wrapping_key, key, aad)
     }
 
@@ -1491,9 +1451,9 @@ impl Pkcs11Backend for FfiBackend {
         mechanism: &CkMechanism,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
-        template: Option<&[CkAttribute]>,
+        template: &[CkAttribute],
         aad: CkInBuf<'_>,
-    ) -> CkResult<(CkObjectHandle, SecretBytes)> {
+    ) -> CkResult<(CkObjectHandle, Vec<u8>)> {
         self.ffi_unwrap_key_authenticated(
             session,
             mechanism,
@@ -1837,18 +1797,8 @@ mod tests {
             func_list_3_2: None,
             initialize_args: None,
             mech_cache: DashMap::new(),
-            last_init_family: DashMap::new(),
             session_slot_map: DashMap::new(),
             slot_sessions: DashMap::new(),
-            object_cleanup: Default::default(),
-            // Test-local backend: bypasses the process reservation without
-            // consuming it; never backs production dispatch (C3M.4).
-            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-            lifecycle: Default::default(),
-            lifecycle_domain: Default::default(),
-            session_fences: Default::default(),
-            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
-            ),
         };
 
         (backend, functions)
@@ -1891,140 +1841,9 @@ mod tests {
     fn seed_cache(backend: &FfiBackend) {
         let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
         let ffi_mechanism = ffi_conversion::mechanism_to_ffi(&mechanism).unwrap();
-        backend.mech_cache.insert((7, OperationFamily::Sign), ffi_mechanism);
-        backend.last_init_family.insert(7, OperationFamily::Sign);
+        backend.mech_cache.insert(7, ffi_mechanism);
         // Use the public path so the forward map and reverse index stay in sync.
         backend.remember_session_slot(CkSessionHandle(7), CkSlotId(11));
-    }
-
-    #[test]
-    fn reinit_purge_never_visible_to_admitted_readers() {
-        // I2 settling test: the re-Initialize incarnation purge runs INSIDE
-        // the publish write section, so no admitted reader can ever observe
-        // a live incarnation's bindings after the generation moved. Spinner
-        // threads admit continuously across finalize/re-initialize cycles;
-        // a (admitted, new generation, stale entry present) triple is the
-        // exact race the subsystem exists to close.
-        //
-        // Each spinner triple is atomic w.r.t. the domain write lock (the
-        // held guard blocks begin/publish mid-check), so post-fix the count
-        // is deterministically zero; pre-fix the publish-then-purge gap lets
-        // spinners catch the stale entry (red evidence: violations > 0).
-        // Bulk seeding widens that gap (a 2000-entry clear holds the purge
-        // window open while 4 hot spinners check it), so the red is reliable
-        // instead of a coin flip per cycle.
-        use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-        let (backend, _functions) =
-            backend_with_init_and_finalize(Some(initialize_ok), Some(finalize_ok));
-        backend.initialize().expect("first initialize opens the incarnation");
-        let violations = AtomicUsize::new(0);
-        // Counting gate: only the current cycle's NEW generation judges.
-        // Admits before the cycle (old generation, pre-purge bindings
-        // legitimately present) and reseeds between cycles never count.
-        let target_generation = AtomicU64::new(0);
-        let observing = AtomicBool::new(false);
-        let done = AtomicBool::new(false);
-        let ready = AtomicUsize::new(0);
-        // Whole-struct borrow: closures must capture `&FfiBackend` (covered
-        // by its `unsafe impl Sync`), never `&mech_cache` directly (the
-        // `FfiMechanism` values are !Send/!Sync by design).
-        let backend = &backend;
-        std::thread::scope(|scope| {
-            for _ in 0..4 {
-                scope.spawn(|| {
-                    ready.fetch_add(1, Ordering::SeqCst);
-                    while !done.load(Ordering::SeqCst) {
-                        if let Ok(_guard) = backend.lifecycle_domain.admit_ordinary() {
-                            let generation = backend.lifecycle.current_generation();
-                            let stale_present =
-                                backend.mech_cache.contains_key(&(7, OperationFamily::Sign));
-                            if observing.load(Ordering::SeqCst)
-                                && generation == target_generation.load(Ordering::SeqCst)
-                                && stale_present
-                            {
-                                violations.fetch_add(1, Ordering::SeqCst);
-                            }
-                        }
-                    }
-                });
-            }
-            // All spinners hot before the first cycle: without this the
-            // main thread can finish every cycle before a spinner is even
-            // scheduled, hiding the race the test exists to catch.
-            while ready.load(Ordering::SeqCst) < 4 {
-                std::thread::yield_now();
-            }
-            for _ in 0..30 {
-                backend.finalize().expect("finalize between cycles");
-                // Each loop cycle is new (finalized_ok set): the generation
-                // advances exactly once per initialize below.
-                target_generation
-                    .store(backend.lifecycle.current_generation() + 1, Ordering::SeqCst);
-                seed_cache(backend);
-                seed_bulk_cache(backend);
-                observing.store(true, Ordering::SeqCst);
-                backend.initialize().expect("re-initialize with generation change");
-                observing.store(false, Ordering::SeqCst);
-            }
-            done.store(true, Ordering::SeqCst);
-        });
-        assert_eq!(
-            violations.load(Ordering::SeqCst),
-            0,
-            "admitted readers must never observe stale bindings at a new generation"
-        );
-    }
-
-    /// Bulk `mech_cache` ballast for the re-init race test: 2000 extra
-    /// entries (cache-only, no slot-map bookkeeping — the purge clears every
-    /// map unconditionally) so the purge window stays open long enough for
-    /// spinning readers to observe it pre-fix.
-    fn seed_bulk_cache(backend: &FfiBackend) {
-        let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
-        for session in 1000..3000u64 {
-            let ffi_mechanism = ffi_conversion::mechanism_to_ffi(&mechanism).unwrap();
-            backend.mech_cache.insert((session, OperationFamily::Sign), ffi_mechanism);
-        }
-    }
-
-    #[test]
-    fn ffi_attr_ptr_passes_null_for_null_templates() {
-        // F3/D2: a caller-NULL template reaches the provider as NULL; an
-        // empty non-NULL template keeps the (dangling) array address.
-        let none = FfiAttrs::from_opt_slice(None).unwrap();
-        assert!(FfiBackend::ffi_attr_ptr(&none).is_null());
-        let empty = FfiAttrs::from_opt_slice(Some(&[])).unwrap();
-        assert!(!FfiBackend::ffi_attr_ptr(&empty).is_null());
-    }
-
-    #[test]
-    fn failed_initialize_poisons_instead_of_recycling() {
-        // C3M steps 4-5: a failed `C_Initialize` ran native code, so the
-        // reservation must never recycle — the retirement decision is
-        // Poison (retain ownership), never Vacant.
-        let (backend, _functions) =
-            backend_with_init_and_finalize(Some(initialize_fails), Some(finalize_ok));
-        assert_eq!(backend.initialize().unwrap_err(), CkRv::GENERAL_ERROR);
-        assert_eq!(
-            backend.lifecycle.retirement_decision(),
-            crate::ffi::native_domain::RetirementDecision::Poison,
-            "failed Initialize must poison, never recycle"
-        );
-        assert_eq!(backend.lifecycle.open_session_count_for_tests(), 0);
-        assert_eq!(backend.lifecycle.current_generation(), 0);
-    }
-
-    #[test]
-    fn never_attempted_initialize_releases() {
-        // Control leg: a backend whose `C_Initialize` was never attempted
-        // stays on the Release path (C1 at the decision level).
-        let (backend, _functions) =
-            backend_with_init_and_finalize(Some(initialize_fails), Some(finalize_ok));
-        assert_eq!(
-            backend.lifecycle.retirement_decision(),
-            crate::ffi::native_domain::RetirementDecision::Release,
-            "never-attempted backend must stay on the Release path"
-        );
     }
 
     #[test]
@@ -2039,8 +1858,7 @@ mod tests {
 
         assert_eq!(backend.finalize().unwrap_err(), CkRv::GENERAL_ERROR);
 
-        assert!(backend.mech_cache.contains_key(&(7, OperationFamily::Sign)));
-        assert_eq!(backend.last_init_family.get(&7).as_deref(), Some(&OperationFamily::Sign));
+        assert!(backend.mech_cache.contains_key(&7));
         assert_eq!(backend.session_slot_map.get(&7).as_deref(), Some(&11));
     }
 
@@ -2057,174 +1875,8 @@ mod tests {
         backend.finalize().unwrap();
 
         assert!(backend.mech_cache.is_empty());
-        assert!(backend.last_init_family.is_empty());
         assert!(backend.session_slot_map.is_empty());
         assert!(backend.slot_sessions.is_empty());
-    }
-
-    #[test]
-    fn initialize_after_failed_finalize_is_refused() {
-        // F-08/MISS 2 (re-review-blessed rewrite of
-        // `initialize_after_failed_finalize_starts_a_clean_incarnation`,
-        // which pinned the violating behavior): re-initialization after a
-        // failed Finalize is REFUSED — the provider state is unknown, so no
-        // new generation opens, nothing purges, and the retained-session
-        // evidence (open count) is not reset. The refusal lands before
-        // native entry: the provider's C_Initialize is never called.
-        let (backend, _functions) =
-            backend_with_init_and_finalize(Some(initialize_counting_ok), Some(finalize_fails));
-        backend.initialize().expect("first initialization succeeds");
-        assert_eq!(backend.lifecycle.current_generation(), 1);
-        assert_eq!(initialize_call_count(), 1);
-        backend.remember_session_slot(CkSessionHandle(7), CkSlotId(11));
-        backend.lifecycle.note_session_opened();
-        backend.lifecycle.note_session_opened();
-        assert_eq!(backend.finalize().unwrap_err(), CkRv::GENERAL_ERROR);
-        // Failed Finalize retains everything (existing contract).
-        assert!(backend.session_slot_map.contains_key(&7));
-        assert_eq!(backend.lifecycle.open_session_count_for_tests(), 2);
-
-        assert_eq!(
-            backend.initialize().unwrap_err(),
-            CkRv::CRYPTOKI_ALREADY_INITIALIZED,
-            "re-init after failed Finalize must be refused"
-        );
-        assert_eq!(backend.lifecycle.current_generation(), 1);
-        assert_eq!(initialize_call_count(), 1, "refused re-init must not reach the provider");
-        assert_eq!(backend.session_slot_map.get(&7).as_deref(), Some(&11));
-        assert!(!backend.slot_sessions.is_empty());
-        assert_eq!(backend.lifecycle.open_session_count_for_tests(), 2);
-        assert_eq!(
-            backend.lifecycle.retirement_decision(),
-            crate::ffi::native_domain::RetirementDecision::Poison,
-            "unresolved failed Finalize still poisons"
-        );
-    }
-
-    #[test]
-    fn initialize_at_generation_exhaustion_is_refused_before_native_entry() {
-        // F-08/MISS 1 at the dispatch boundary: with no fresh generation
-        // left, initialize() is refused with zero provider contact and zero
-        // lifecycle side effects — not even the init-attempt marker, so the
-        // refusal itself records no exposure.
-        let (backend, _functions) =
-            backend_with_init_and_finalize(Some(initialize_counting_ok), Some(finalize_ok));
-        backend.lifecycle.set_generation_for_tests(u64::MAX);
-        assert_eq!(backend.initialize().unwrap_err(), CkRv::GENERAL_ERROR);
-        assert_eq!(initialize_call_count(), 0, "exhausted init must not reach the provider");
-        assert_eq!(backend.lifecycle.current_generation(), u64::MAX);
-        assert_eq!(
-            backend.lifecycle.retirement_decision(),
-            crate::ffi::native_domain::RetirementDecision::Release,
-            "pre-native refusal records no attempt"
-        );
-    }
-
-    #[test]
-    fn initialize_after_successful_finalize_starts_a_clean_incarnation() {
-        // Interplay control for F-08/MISS 2: re-init after a SUCCESSFUL
-        // Finalize still opens a fresh generation and purges dead bindings.
-        // The stale residue planted between Finalize and re-init proves the
-        // new-cycle purge runs on the legitimate path.
-        let (backend, _functions) =
-            backend_with_init_and_finalize(Some(initialize_ok), Some(finalize_ok));
-        backend.initialize().expect("first initialization succeeds");
-        assert_eq!(backend.lifecycle.current_generation(), 1);
-        backend.finalize().expect("finalize succeeds");
-        seed_cache(&backend);
-        backend.lifecycle.note_session_opened();
-        backend.lifecycle.note_session_opened();
-
-        backend.initialize().expect("re-initialization after successful finalize succeeds");
-        assert_eq!(backend.lifecycle.current_generation(), 2);
-        assert!(backend.session_slot_map.is_empty());
-        assert!(backend.slot_sessions.is_empty());
-        assert!(backend.mech_cache.is_empty());
-        assert!(backend.last_init_family.is_empty());
-        assert_eq!(backend.lifecycle.open_session_count_for_tests(), 0);
-    }
-
-    #[test]
-    fn stale_init_completion_does_not_publish_into_new_incarnation() {
-        // C3M.4/row 10: an Init whose native call ran under a dead
-        // incarnation must not publish its owner into the new one, even
-        // when the numeric session handle was reused and the native call
-        // itself succeeded.
-        let (backend, _functions) =
-            backend_with_init_and_finalize(Some(initialize_ok), Some(finalize_ok));
-        backend.initialize().expect("first initialization succeeds");
-        let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
-        // Ordinary choke under test: admit like the `ffi_*` boundary would.
-        let admission = backend.lifecycle_domain.admit_ordinary().expect("open domain admits");
-        let err = backend
-            .call_init_with_mechanism(
-                &admission,
-                CkSessionHandle(7),
-                OperationFamily::Sign,
-                Some(0u8),
-                &mechanism,
-                |_, _| {
-                    // Deterministic race simulation: the incarnation turns
-                    // over while the native Init runs (successful Finalize,
-                    // then a new Initialize — a failed Finalize can no
-                    // longer turn the incarnation over, F-08).
-                    backend.lifecycle.note_finalized();
-                    backend.lifecycle.note_initialized().expect("legitimate turnover opens");
-                    cryptoki_sys::CKR_OK
-                },
-            )
-            .unwrap_err();
-        assert_eq!(err, CkRv::SESSION_HANDLE_INVALID);
-        assert!(backend.mech_cache.is_empty());
-        assert!(backend.last_init_family.is_empty());
-    }
-
-    #[test]
-    fn stale_init_completion_with_output_does_not_publish() {
-        // Same dead-incarnation refusal through the output-bearing Init
-        // choke point: extracted native output is discarded with the
-        // retired owner, never published.
-        let (backend, _functions) =
-            backend_with_init_and_finalize(Some(initialize_ok), Some(finalize_ok));
-        backend.initialize().expect("first initialization succeeds");
-        let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
-        // Ordinary choke under test: admit like the `ffi_*` boundary would.
-        let admission = backend.lifecycle_domain.admit_ordinary().expect("open domain admits");
-        let err = backend
-            .call_init_with_mechanism_output(
-                &admission,
-                CkSessionHandle(7),
-                OperationFamily::Sign,
-                Some(0u8),
-                &mechanism,
-                |_, _| {
-                    // Same legitimate turnover as above (F-08: failed
-                    // Finalize can no longer open a new cycle).
-                    backend.lifecycle.note_finalized();
-                    backend.lifecycle.note_initialized().expect("legitimate turnover opens");
-                    cryptoki_sys::CKR_OK
-                },
-            )
-            .unwrap_err();
-        assert_eq!(err, CkRv::SESSION_HANDLE_INVALID);
-        assert!(backend.mech_cache.is_empty());
-        assert!(backend.last_init_family.is_empty());
-    }
-
-    #[test]
-    fn double_initialize_without_finalize_keeps_current_incarnation() {
-        // Re-affirming an already-open incarnation must not evict its live
-        // session bindings or reset its open count.
-        let (backend, _functions) =
-            backend_with_init_and_finalize(Some(initialize_ok), Some(finalize_fails));
-        backend.initialize().expect("first initialization succeeds");
-        backend.remember_session_slot(CkSessionHandle(7), CkSlotId(11));
-        backend.lifecycle.note_session_opened();
-
-        backend.initialize().expect("second initialization succeeds");
-        assert_eq!(backend.lifecycle.current_generation(), 1);
-        assert_eq!(backend.session_slot_map.get(&7).as_deref(), Some(&11));
-        assert_eq!(backend.lifecycle.open_session_count_for_tests(), 1);
     }
 
     #[test]
@@ -2234,31 +1886,19 @@ mod tests {
         let (backend, _functions) = backend_with_finalize(Some(finalize_ok));
         for (session, slot) in [(7u64, 11u64), (8, 11), (9, 22)] {
             let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
-            backend.mech_cache.insert(
-                (session, OperationFamily::Sign),
-                ffi_conversion::mechanism_to_ffi(&mechanism).unwrap(),
-            );
-            backend.remember_session_slot(CkSessionHandle(session as u64), CkSlotId(slot as u64));
+            backend
+                .mech_cache
+                .insert(session, ffi_conversion::mechanism_to_ffi(&mechanism).unwrap());
+            backend.remember_session_slot(CkSessionHandle(session), CkSlotId(slot));
         }
-        // Session 7 holds a second family slot: per-slot eviction must drop
-        // every family of the evicted sessions, not just one entry.
-        backend.mech_cache.insert(
-            (7, OperationFamily::Encrypt),
-            ffi_conversion::mechanism_to_ffi(&CkMechanism {
-                mechanism_type: CkMechanismType::RSA_PKCS,
-                params: None,
-            })
-            .unwrap(),
-        );
 
         backend.drop_mech_cache_for_slot(CkSlotId(11));
 
         for evicted in [7u64, 8] {
-            assert!(!backend.mech_cache.contains_key(&(evicted, OperationFamily::Sign)));
+            assert!(!backend.mech_cache.contains_key(&evicted));
             assert!(backend.session_slot_map.get(&evicted).is_none());
         }
-        assert!(!backend.mech_cache.contains_key(&(7, OperationFamily::Encrypt)));
-        assert!(backend.mech_cache.contains_key(&(9, OperationFamily::Sign)));
+        assert!(backend.mech_cache.contains_key(&9));
         assert_eq!(backend.session_slot_map.get(&9).as_deref(), Some(&22));
         // The emptied slot-11 reverse entry is pruned; slot 22 still maps to {9}.
         assert!(backend.slot_sessions.get(&11).is_none());
@@ -2280,190 +1920,5 @@ mod tests {
         backend.forget_session_slot(CkSessionHandle(8));
         assert!(backend.slot_sessions.get(&11).is_none());
         assert!(backend.session_slot_map.is_empty());
-    }
-
-    // --- TF01b Finalize seal/drain (I3), backend level ---
-    //
-    // The seal tests share one process-wide finalize counter: every test
-    // asserting absolute counts holds the lock from reset through final
-    // read (repo-wide TEST_LOCK convention).
-    static SEAL_FINALIZE_CALLS: std::sync::atomic::AtomicUsize =
-        std::sync::atomic::AtomicUsize::new(0);
-    static SEAL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    unsafe extern "C" fn finalize_counting_ok(_: *mut std::ffi::c_void) -> cryptoki_sys::CK_RV {
-        SEAL_FINALIZE_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        cryptoki_sys::CKR_OK
-    }
-
-    #[test]
-    fn finalize_seals_new_admissions_after_success() {
-        // I3: a successful Finalize seals the domain — new ordinary
-        // admissions deny, and a second Finalize is refused without a
-        // second provider entry.
-        use std::sync::atomic::Ordering;
-        let _lock = SEAL_TEST_LOCK.lock().unwrap();
-        SEAL_FINALIZE_CALLS.store(0, Ordering::SeqCst);
-        let (backend, _functions) =
-            backend_with_init_and_finalize(Some(initialize_ok), Some(finalize_counting_ok));
-        backend.initialize().expect("initialize opens the incarnation");
-        backend.lifecycle_domain.admit_ordinary().expect("open domain admits");
-        backend.finalize().expect("finalize succeeds");
-        assert_eq!(SEAL_FINALIZE_CALLS.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            backend.lifecycle_domain.admit_ordinary().unwrap_err(),
-            CkRv::CRYPTOKI_NOT_INITIALIZED,
-            "sealed domain denies new ordinary admissions"
-        );
-        assert_eq!(
-            backend.finalize().unwrap_err(),
-            CkRv::CRYPTOKI_NOT_INITIALIZED,
-            "second Finalize refused without provider contact"
-        );
-        assert_eq!(SEAL_FINALIZE_CALLS.load(Ordering::SeqCst), 1, "refused cycle never re-enters");
-    }
-
-    #[test]
-    fn finalize_denied_without_open_incarnation_never_reaches_provider() {
-        // I3: with no live incarnation there is nothing to seal — the
-        // denial lands before native entry with the same RV a compliant
-        // provider reports.
-        use std::sync::atomic::Ordering;
-        let _lock = SEAL_TEST_LOCK.lock().unwrap();
-        SEAL_FINALIZE_CALLS.store(0, Ordering::SeqCst);
-        let (backend, _functions) = backend_with_finalize(Some(finalize_counting_ok));
-        assert_eq!(backend.finalize().unwrap_err(), CkRv::CRYPTOKI_NOT_INITIALIZED);
-        assert_eq!(SEAL_FINALIZE_CALLS.load(Ordering::SeqCst), 0, "denied seal never enters");
-    }
-
-    #[test]
-    fn failed_finalize_restores_open_incarnation() {
-        // Behavior parity pin (not red-able: restore matches the pre-seal
-        // shape by design): a failed native Finalize abandons the seal —
-        // the live incarnation keeps admitting, nothing purges, the
-        // native RV propagates exactly.
-        let (backend, _functions) =
-            backend_with_init_and_finalize(Some(initialize_ok), Some(finalize_fails));
-        backend.initialize().expect("initialize opens the incarnation");
-        seed_cache(&backend);
-        assert_eq!(backend.finalize().unwrap_err(), CkRv::GENERAL_ERROR);
-        backend.lifecycle_domain.admit_ordinary().expect("live incarnation still admits");
-        assert!(
-            backend.mech_cache.contains_key(&(7, OperationFamily::Sign)),
-            "failed Finalize purges nothing"
-        );
-    }
-
-    #[test]
-    fn finalize_drains_parked_ordinary_before_native_entry() {
-        // Blocked-stub exclusion shape for the seal: a parked ordinary
-        // holder (standing in for a thread inside a provider call) blocks
-        // the seal until release; the native Finalize is not entered
-        // while the holder is parked and runs promptly after.
-        use std::sync::atomic::Ordering;
-        let _lock = SEAL_TEST_LOCK.lock().unwrap();
-        SEAL_FINALIZE_CALLS.store(0, Ordering::SeqCst);
-        let (backend, _functions) =
-            backend_with_init_and_finalize(Some(initialize_ok), Some(finalize_counting_ok));
-        backend.initialize().expect("initialize opens the incarnation");
-        let parked = backend.lifecycle_domain.admit_ordinary().expect("admits while open");
-        let backend = &backend;
-        std::thread::scope(|scope| {
-            let sealer = scope.spawn(|| backend.finalize());
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            assert_eq!(
-                SEAL_FINALIZE_CALLS.load(Ordering::SeqCst),
-                0,
-                "native Finalize must not run while ordinary work is parked"
-            );
-            drop(parked);
-            sealer.join().expect("sealer joins").expect("seal completes after release");
-            assert_eq!(SEAL_FINALIZE_CALLS.load(Ordering::SeqCst), 1);
-        });
-        assert_eq!(
-            backend.lifecycle_domain.admit_ordinary().unwrap_err(),
-            CkRv::CRYPTOKI_NOT_INITIALIZED,
-            "sealed domain denies after the drained Finalize"
-        );
-    }
-
-    #[test]
-    fn finalize_under_continuous_ordinary_load_completes_and_seals() {
-        // I3 termination pin: Finalize under continuous ordinary load
-        // completes — the suite itself would die at the shutdown deadline
-        // otherwise — and the domain is sealed afterwards. Spinners stay
-        // hot across the seal window (ready gate + done-after-finalize),
-        // so the drain genuinely overlaps live admissions.
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-        let _lock = SEAL_TEST_LOCK.lock().unwrap();
-        SEAL_FINALIZE_CALLS.store(0, Ordering::SeqCst);
-        let (backend, _functions) =
-            backend_with_init_and_finalize(Some(initialize_ok), Some(finalize_counting_ok));
-        backend.initialize().expect("initialize opens the incarnation");
-        let done = AtomicBool::new(false);
-        let ready = AtomicUsize::new(0);
-        let admitted: [AtomicUsize; 4] = Default::default();
-        let backend = &backend;
-        std::thread::scope(|scope| {
-            for spinner in admitted.iter() {
-                scope.spawn(|| {
-                    ready.fetch_add(1, Ordering::SeqCst);
-                    // Publish admissions live (each spinner owns its slot,
-                    // so no inter-spinner contention): the seal loop reads
-                    // the running total to prove overlap on any scheduler.
-                    while !done.load(Ordering::SeqCst) {
-                        if backend.lifecycle_domain.admit_ordinary().is_ok() {
-                            spinner.fetch_add(1, Ordering::SeqCst);
-                        }
-                    }
-                });
-            }
-            while ready.load(Ordering::SeqCst) < 4 {
-                std::thread::yield_now();
-            }
-            // Count-boxed ping-pong with an overlap floor, not a fixed
-            // time window. A bare 300 ms window fits 1 seal on an
-            // oversubscribed CI runner (T2run: 6/7 CI executions red with
-            // "got 1"), while a bare fixed count can finish before a
-            // descheduled spinner runs once on a quiet box. Loop until 6
-            // seals AND 5000 spinner admissions overlap them, so both the
-            // seal count and the genuine-load overlap hold on any
-            // scheduler. The 60 s assert bounds the loop between
-            // iterations only — a hang inside finalize() itself never
-            // reaches it and dies at the shutdown deadline instead
-            // (see the test header), so either way a true stall fails
-            // loud instead of hanging the suite.
-            let start = std::time::Instant::now();
-            let mut seals = 0usize;
-            while seals < 6
-                || admitted.iter().map(|spinner| spinner.load(Ordering::SeqCst)).sum::<usize>()
-                    < 5_000
-            {
-                assert!(
-                    start.elapsed() < std::time::Duration::from_secs(60),
-                    "seal window stalled under load after {seals} seals"
-                );
-                backend.finalize().expect("finalize completes under load");
-                backend.initialize().expect("re-initialize reopens");
-                seals += 1;
-            }
-            backend.finalize().expect("final seal completes under load");
-            done.store(true, Ordering::SeqCst);
-            assert!(seals > 5, "sanity: many seals completed under load, got {seals}");
-            assert_eq!(SEAL_FINALIZE_CALLS.load(Ordering::SeqCst), seals + 1);
-        });
-        // Aggregate, not per-spinner: a descheduled spinner may sit out
-        // whole windows (the I2 test trusts scheduling the same way). The
-        // sum proves live admissions overlapped the seals.
-        let total: usize = admitted.iter().map(|spinner| spinner.load(Ordering::SeqCst)).sum();
-        assert!(
-            total > 5_000,
-            "spinners must observe genuine load across the seal windows, got {total}"
-        );
-        assert_eq!(
-            backend.lifecycle_domain.admit_ordinary().unwrap_err(),
-            CkRv::CRYPTOKI_NOT_INITIALIZED,
-            "sealed domain denies after Finalize under load"
-        );
     }
 }

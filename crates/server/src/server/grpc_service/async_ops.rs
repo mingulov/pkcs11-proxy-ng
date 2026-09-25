@@ -24,7 +24,9 @@ use super::service_utils::{resolve_session, spawn_backend};
 
 use crate::server::grpc_service::HandlerContext;
 pub(crate) async fn async_complete(
-    ctx: &HandlerContext,
+    ctx_mgr: &Arc<ContextManager>,
+    backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::AsyncCompleteRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::AsyncCompleteResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
@@ -76,7 +78,9 @@ pub(crate) async fn async_complete(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn async_get_id(
-    _ctx: &HandlerContext,
+    _ctx_mgr: &Arc<ContextManager>,
+    _backend: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     _request: Request<pkcs11_proxy_ng_proto::AsyncGetIdRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::AsyncGetIdResponse>, Status> {
     Ok(Response::new(pkcs11_proxy_ng_proto::AsyncGetIdResponse {
@@ -90,7 +94,9 @@ pub(crate) async fn async_get_id(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn async_join(
-    _ctx: &HandlerContext,
+    _ctx_mgr: &Arc<ContextManager>,
+    _backend: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     _request: Request<pkcs11_proxy_ng_proto::AsyncJoinRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::AsyncJoinResponse>, Status> {
     Ok(Response::new(pkcs11_proxy_ng_proto::AsyncJoinResponse {

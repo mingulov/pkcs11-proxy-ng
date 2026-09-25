@@ -434,16 +434,14 @@ fn evict_disposable_output_caches_for_session(h_session: CK_SESSION_HANDLE) {
     clear_delayed_gcm_writeback(h_session);
 }
 
-/// Drop only retryable/two-call output material, without changing session
-/// ownership or authoritative message-operation discriminators.
-pub(crate) fn evict_session_output_caches(h_session: CK_SESSION_HANDLE) {
-    evict_disposable_output_caches_for_session(h_session);
-}
-
-/// Forget session ownership and all message-operation discriminators without
-/// touching the disposable output caches.  Close uses this only for terminal
-/// or outcome-ambiguous results; decoded transient failures keep it intact.
-pub(crate) fn evict_session_authoritative_state(h_session: CK_SESSION_HANDLE) {
+/// Remove all cached two-call-pattern data for the given session handle.
+///
+/// Called from `c_close_session` on the close *attempt*, unconditionally — the
+/// caches are dropped regardless of the server's `CK_RV`, so stale entries do
+/// not accumulate and leak memory. (If a close fails and the caller
+/// legitimately retries on the same handle, the next two-call sequence simply
+/// re-primes the caches.)
+pub(crate) fn evict_session_caches(h_session: CK_SESSION_HANDLE) {
     forget_session_slot(h_session);
     evict_message_operations(h_session);
 }
@@ -482,30 +480,12 @@ pub fn runtime() -> &'static Runtime {
     // multi-thread executor. (Per PKCS#11, a forked child must still call
     // C_Initialize again before reusing the module; the daemon connection is
     // re-established by the shim's reconnect path.)
-    //
-    // Fork generation: a child whose pid differs from RUNTIME_PID leaks a
-    // fresh runtime instead of inheriting the parent's dead I/O driver
-    // (see RUNTIME_PTR). No lock: races are benign (each builder's
-    // runtime is valid for its user), and a lock could wedge a child
-    // forked mid-build.
-    reclaim_after_fork();
-    let pid = std::process::id();
-    let ptr = RUNTIME_PTR.load(Ordering::Acquire);
-    if !ptr.is_null() && RUNTIME_PID.load(Ordering::Acquire) == pid {
-        // SAFETY: the pointer is either null or a leaked `Box<Runtime>`
-        // that is never mutated or freed; sharing it is sound, and the
-        // pid tag proves it was built for this process.
-        return unsafe { &*ptr };
-    }
-    let fresh = Box::leak(Box::new(
+    RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("Failed to create tokio runtime"),
-    ));
-    RUNTIME_PTR.store(fresh as *mut Runtime, Ordering::Release);
-    RUNTIME_PID.store(pid, Ordering::Release);
-    fresh
+            .expect("Failed to create tokio runtime")
+    })
 }
 
 fn connect_client_from_env() -> Result<Pkcs11Client, CkRv> {

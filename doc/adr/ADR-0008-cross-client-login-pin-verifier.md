@@ -1,39 +1,7 @@
 # ADR-0008: Cross-client logical-login PIN verifier
 
-**Status:** SUPERSEDED (2026-09-18, Wave 3.5 D6(3)) — the verifier is removed;
-see "Superseded by" below. Kept as history.
+**Status:** Accepted (2026-06-04)
 **Relates to:** ADR-0002 §6 (logical client login), ADR-0007 / A2 (backend process isolation)
-
-## Superseded by (2026-09-18, Wave 3.5 D6 finding F1, ruling R1.3)
-
-The Wave 3 campaign proved the shared-backend login model needs a tenancy-wide
-contract, not a per-login synthesis: a backend token held logged-in by other
-live contexts answers any further `C_Login` with
-`CKR_USER_ALREADY_LOGGED_IN` without checking the PIN, so the daemon **cannot**
-PIN-verify the new login against the token. The Wave 3.5 controller ruling
-therefore adopts the alternative this ADR had rejected — **(a)
-backend-authoritative login**:
-
-- When another live context holds the slot login, `C_Login` returns the
-  backend's answer faithfully (`CKR_USER_ALREADY_LOGGED_IN`, or
-  `CKR_USER_ANOTHER_ALREADY_LOGGED_IN` across user types) and mints **no**
-  logical login — never a login on an unverified PIN. The PIN is not evaluated
-  at all on this path.
-- The per-`(slot, state)` salted-hash verifier, its capture/refresh/clear
-  paths, and the `CKR_PIN_INCORRECT`-from-cache response are **removed**.
-- The resulting exclusivity window (one logical holder per slot at a time) is
-  bounded by last-context-out backend logout (D6(2)) and refcounted teardown
-  reaping (D9-proxy): logout, session close, and context teardown release the
-  backend login as soon as no live context holds it, so the next login
-  PIN-verifies against the token normally.
-
-Rationale for the reversal: a cached-hash match is comparison against a
-previously accepted secret, not token verification — it cannot see PIN changes
-made outside the daemon's view (protected-auth-path logins, administrative
-resets) and it kept the backend-logged-in window open indefinitely across
-back-to-back tenants. Faithful `ALREADY` keeps PIN authentication entirely
-token-side at the cost of one-holder-at-a-time login multiplexing, which the
-D6(2)/D9 release paths keep short. ADR-0002 §6 now records this contract.
 
 ## Context
 

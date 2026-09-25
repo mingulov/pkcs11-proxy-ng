@@ -64,7 +64,7 @@ impl FfiBackend {
             }
         } else {
             // Data query: allocate caller-specified buffer
-            let capped = super::call_helpers::capped_output_len(spec.buffer_len as u64);
+            let capped = super::call_helpers::capped_output_len(spec.buffer_len);
             out_len = capped as cryptoki_sys::CK_ULONG;
             let mut buf = vec![0u8; capped];
             let rv = unsafe {
@@ -164,7 +164,7 @@ impl FfiBackend {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         private_key: CkObjectHandle,
-        template: Option<&[CkAttribute]>,
+        template: &[CkAttribute],
         ciphertext: CkInBuf<'_>,
     ) -> CkResult<CkObjectHandle> {
         let admission = self.lifecycle_domain.admit_ordinary()?;

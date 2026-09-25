@@ -46,12 +46,11 @@ pub(super) async fn digest_encrypt_update(
             }
         };
 
-    let part = SecretBytes::new(req.part);
-    let backend = ctx.backend.clone();
-    let result = spawn_backend(move || {
-        part.expose(|raw| backend.digest_encrypt_update(session, CkInBuf::Bytes(raw)))
-    })
-    .await?;
+    let part = req.part;
+    let backend = backend_ref.clone();
+    let result =
+        spawn_backend(move || backend.digest_encrypt_update(session, CkInBuf::Bytes(&part)))
+            .await?;
     let (ck_rv, encrypted_part) = ck_result_to_rv(result);
     Ok(Response::new(pkcs11_proxy_ng_proto::DigestEncryptUpdateResponse {
         ck_rv,
@@ -77,12 +76,10 @@ pub(super) async fn sign_encrypt_update(
             }
         };
 
-    let part = SecretBytes::new(req.part);
-    let backend = ctx.backend.clone();
-    let result = spawn_backend(move || {
-        part.expose(|raw| backend.sign_encrypt_update(session, CkInBuf::Bytes(raw)))
-    })
-    .await?;
+    let part = req.part;
+    let backend = backend_ref.clone();
+    let result =
+        spawn_backend(move || backend.sign_encrypt_update(session, CkInBuf::Bytes(&part))).await?;
     let (ck_rv, encrypted_part) = ck_result_to_rv(result);
     Ok(Response::new(pkcs11_proxy_ng_proto::SignEncryptUpdateResponse {
         ck_rv,

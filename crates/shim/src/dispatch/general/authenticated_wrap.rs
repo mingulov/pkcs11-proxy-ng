@@ -29,6 +29,18 @@ pub unsafe extern "C" fn c_wrap_key_authenticated(
         if p_mechanism.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
+        let rv = unsafe { validate_mechanism(p_mechanism) };
+        if rv != rv_ok() {
+            return rv;
+        }
+        let mech = unsafe { read_mechanism(p_mechanism) };
+        let aad = match input_buf_to_ck_in_buf(unsafe { classify_input(p_aad, ul_aad_len) }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
+
+        // The mechanism's pParameter is the dual-purpose buffer for write-back
+        let c_mech = unsafe { &*p_mechanism };
         let output_spec = unsafe { output_buffer_spec(p_wrapped_key, pul_wrapped_key_len) };
         let call = match unsafe {
             AuthenticatedCall::read(
@@ -53,12 +65,11 @@ pub unsafe extern "C" fn c_wrap_key_authenticated(
             Err(e) => return rv_err(e),
         };
 
-        let result = with_client!(client => client.wrap_key_authenticated_exact_typed(
-            CkSessionHandle(h_session as u64),
-            &call.mechanism,
-            call.parameter(),
-            CkObjectHandle(h_wrapping_key as u64),
-            CkObjectHandle(h_key as u64),
+        let result = with_client!(client => client.parameter_output_exact(
+            CkSessionHandle(h_session),
+            ParameterOutputFunction::WrapKeyAuthenticated,
+            &output_spec,
+            CkInBuf::Bytes(&[]),
             aad,
             &output_spec,
         ));
@@ -107,8 +118,16 @@ pub unsafe extern "C" fn c_unwrap_key_authenticated(
             return rv;
         }
         let mech = unsafe { read_mechanism(p_mechanism) };
-        let wrapped_key = unsafe { read_input_slice(p_wrapped_key, ul_wrapped_key_len) };
-        let aad = unsafe { read_input_slice(p_aad, ul_aad_len) };
+        let wrapped_key = match input_buf_to_ck_in_buf(unsafe {
+            classify_input(p_wrapped_key, ul_wrapped_key_len)
+        }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
+        let aad = match input_buf_to_ck_in_buf(unsafe { classify_input(p_aad, ul_aad_len) }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
 
         match with_client!(client => client.unwrap_key_authenticated_typed(
             CkSessionHandle(h_session as u64),

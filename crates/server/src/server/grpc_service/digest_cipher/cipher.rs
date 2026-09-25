@@ -10,7 +10,9 @@ use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_types::{CkInBuf, CkMechanism, CkRv, SecretBytes};
 use tonic::{Request, Response, Status};
 
-use super::super::authorization::mechanism_permitted;
+use pkcs11_proxy_ng_backend::Pkcs11Backend;
+use pkcs11_proxy_ng_types::{CkInBuf, CkMechanism, CkRv};
+
 use super::super::ck_result_to_rv;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
@@ -22,7 +24,9 @@ use crate::server::grpc_service::audit_events::emit_auth_event;
 
 use crate::server::grpc_service::HandlerContext;
 pub(crate) async fn encrypt_init(
-    ctx: &HandlerContext,
+    ctx_mgr: &Arc<ContextManager>,
+    backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::EncryptInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptInitResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
@@ -78,11 +82,8 @@ pub(crate) async fn encrypt_init(
         }
     };
 
-    // B1: remap object handles embedded in the mechanism parameters;
-    // gate each through per-object authz when active (C1).
-    if let Err(rv) =
-        remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
-    {
+    // B1: remap object handles embedded in the mechanism parameters.
+    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
         return Ok(Response::new(pkcs11_proxy_ng_proto::EncryptInitResponse {
             ck_rv: rv.0,
             mechanism_out: None,
@@ -113,7 +114,9 @@ pub(crate) async fn encrypt_init(
 
 // NOTE: legacy per-op RPC — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
 pub(crate) async fn encrypt(
-    ctx: &HandlerContext,
+    ctx_mgr: &Arc<ContextManager>,
+    backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::EncryptRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptResponse>, Status> {
     let started = Instant::now();
@@ -135,9 +138,7 @@ pub(crate) async fn encrypt(
 
     let data = SecretBytes::new(req.data);
     let backend = Arc::clone(backend_ref);
-    let result =
-        spawn_backend(move || data.expose(|raw| backend.encrypt(session, CkInBuf::Bytes(raw))))
-            .await?;
+    let result = spawn_backend(move || backend.encrypt(session, CkInBuf::Bytes(&data))).await?;
     let (ck_rv, encrypted_data) = ck_result_to_rv(result);
     let mechanism_out = session_mechanism_out_if_ok(backend_ref, session, ck_rv);
     // Opt-in data-plane audit: emit fail-open; never reject the op on a dropped record.
@@ -162,7 +163,9 @@ pub(crate) async fn encrypt(
 
 // NOTE: legacy per-op RPC — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
 pub(crate) async fn encrypt_update(
-    ctx: &HandlerContext,
+    ctx_mgr: &Arc<ContextManager>,
+    backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::EncryptUpdateRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptUpdateResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
@@ -183,10 +186,8 @@ pub(crate) async fn encrypt_update(
 
     let part = SecretBytes::new(req.part);
     let backend = Arc::clone(backend_ref);
-    let result = spawn_backend(move || {
-        part.expose(|raw| backend.encrypt_update(session, CkInBuf::Bytes(raw)))
-    })
-    .await?;
+    let result =
+        spawn_backend(move || backend.encrypt_update(session, CkInBuf::Bytes(&part))).await?;
     let (ck_rv, encrypted_part) = ck_result_to_rv(result);
     let mechanism_out = session_mechanism_out_if_ok(backend_ref, session, ck_rv);
     Ok(Response::new(pkcs11_proxy_ng_proto::EncryptUpdateResponse {
@@ -197,7 +198,9 @@ pub(crate) async fn encrypt_update(
 }
 
 pub(crate) async fn encrypt_final(
-    ctx: &HandlerContext,
+    ctx_mgr: &Arc<ContextManager>,
+    backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::EncryptFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptFinalResponse>, Status> {
     let started = Instant::now();
@@ -242,7 +245,9 @@ pub(crate) async fn encrypt_final(
 }
 
 pub(crate) async fn decrypt_init(
-    ctx: &HandlerContext,
+    ctx_mgr: &Arc<ContextManager>,
+    backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::DecryptInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecryptInitResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
@@ -298,11 +303,8 @@ pub(crate) async fn decrypt_init(
         }
     };
 
-    // B1: remap object handles embedded in the mechanism parameters;
-    // gate each through per-object authz when active (C1).
-    if let Err(rv) =
-        remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
-    {
+    // B1: remap object handles embedded in the mechanism parameters.
+    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
         return Ok(Response::new(pkcs11_proxy_ng_proto::DecryptInitResponse {
             ck_rv: rv.0,
             mechanism_out: None,
@@ -332,7 +334,9 @@ pub(crate) async fn decrypt_init(
 
 // NOTE: legacy per-op RPC — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
 pub(crate) async fn decrypt(
-    ctx: &HandlerContext,
+    ctx_mgr: &Arc<ContextManager>,
+    backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::DecryptRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecryptResponse>, Status> {
     let started = Instant::now();
@@ -380,7 +384,9 @@ pub(crate) async fn decrypt(
 
 // NOTE: legacy per-op RPC — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
 pub(crate) async fn decrypt_update(
-    ctx: &HandlerContext,
+    ctx_mgr: &Arc<ContextManager>,
+    backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::DecryptUpdateRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecryptUpdateResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
@@ -414,7 +420,9 @@ pub(crate) async fn decrypt_update(
 }
 
 pub(crate) async fn decrypt_final(
-    ctx: &HandlerContext,
+    ctx_mgr: &Arc<ContextManager>,
+    backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::DecryptFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecryptFinalResponse>, Status> {
     let started = Instant::now();

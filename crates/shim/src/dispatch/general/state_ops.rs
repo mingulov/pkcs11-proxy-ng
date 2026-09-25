@@ -90,30 +90,14 @@ pub unsafe extern "C" fn c_set_operation_state(
         if p_operation_state.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
-        let operation_states = [
-            state::MessageOperation::Encrypt,
-            state::MessageOperation::Decrypt,
-            state::MessageOperation::Sign,
-            state::MessageOperation::Verify,
-        ]
-        .map(|operation| state::message_operation_state(h_session, operation));
-        let mut operation_guards = Vec::with_capacity(operation_states.len());
-        for operation_state in &operation_states {
-            let Ok(guard) = operation_state.lock() else {
-                return rv_err(CkRv::GENERAL_ERROR);
-            };
-            operation_guards.push(guard);
-        }
         let state_bytes = match input_buf_to_ck_in_buf(unsafe {
             classify_input(p_operation_state, ul_operation_state_len)
         }) {
             Ok(buf) => buf,
             Err(e) => return rv_err(e),
         };
-        let saved_shapes =
-            operation_guards.iter_mut().map(|operation| operation.shape.take()).collect::<Vec<_>>();
-        let result = with_client!(client => client.set_operation_state_stateful(
-            CkSessionHandle(h_session as u64),
+        let result = with_client!(client => client.set_operation_state(
+            CkSessionHandle(h_session),
             state_bytes,
             CkObjectHandle(h_encryption_key as u64),
             CkObjectHandle(h_authentication_key as u64),

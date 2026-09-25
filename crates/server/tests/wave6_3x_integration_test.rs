@@ -173,7 +173,7 @@ async fn encapsulate_decapsulate_round_trip() {
 
     // Decapsulate
     let dec_key = client
-        .decapsulate_key(session, &test_mechanism(), key, Some(&[]), CkInBuf::Bytes(&capsule))
+        .decapsulate_key(session, &test_mechanism(), key, &[], CkInBuf::Bytes(&capsule))
         .await
         .unwrap();
     assert_ne!(dec_key, CkObjectHandle(0), "decapsulated key handle should be nonzero");
@@ -201,7 +201,6 @@ async fn message_encrypt_decrypt_round_trip() {
         .encrypt_message(session, parameter, CkInBuf::Bytes(&[]), CkInBuf::Bytes(plaintext))
         .await
         .unwrap();
-    assert!(param_out.is_empty());
     assert_ne!(ciphertext, plaintext.to_vec(), "ciphertext should differ from plaintext");
 
     // Finalize encrypt
@@ -235,7 +234,8 @@ async fn message_encrypt_decrypt_begin_next_round_trip() {
     let part2 = b"message begin-next";
 
     client.message_encrypt_init(session, Some(&mechanism), None, key).await.unwrap();
-    let encrypt_parameter = client.encrypt_message_begin(session, parameter, aad).await.unwrap();
+    let encrypt_parameter =
+        client.encrypt_message_begin(session, parameter, CkInBuf::Bytes(aad)).await.unwrap();
     assert_eq!(encrypt_parameter, parameter);
 
     let (encrypt_parameter, ciphertext1) = client
@@ -246,14 +246,16 @@ async fn message_encrypt_decrypt_begin_next_round_trip() {
         .encrypt_message_next(session, &encrypt_parameter, CkInBuf::Bytes(part2), CkFlags(0))
         .await
         .unwrap();
-    assert!(encrypt_parameter.is_empty());
+    assert_eq!(encrypt_parameter, parameter);
     assert_ne!(ciphertext1, part1);
     assert_ne!(ciphertext2, part2);
     client.message_encrypt_final(session).await.unwrap();
 
     client.message_decrypt_init(session, Some(&mechanism), None, key).await.unwrap();
-    let decrypt_parameter =
-        client.decrypt_message_begin(session, &encrypt_parameter, aad).await.unwrap();
+    let decrypt_parameter = client
+        .decrypt_message_begin(session, &encrypt_parameter, CkInBuf::Bytes(aad))
+        .await
+        .unwrap();
     assert_eq!(decrypt_parameter, parameter);
 
     let (decrypt_parameter, recovered1) = client
@@ -707,7 +709,6 @@ async fn message_sign_verify_round_trip() {
     // Sign message
     let (param_out, signature) =
         client.sign_message(session, parameter, CkInBuf::Bytes(data)).await.unwrap();
-    assert!(param_out.is_empty());
     assert!(!signature.is_empty(), "signature should not be empty");
 
     // Finalize sign
@@ -746,7 +747,7 @@ async fn message_sign_verify_begin_next_round_trip() {
         .sign_message_next(session, &sign_parameter, CkInBuf::Bytes(nonfinal_data), false)
         .await
         .unwrap();
-    assert!(sign_parameter.is_empty());
+    assert_eq!(sign_parameter, parameter);
     assert!(nonfinal_signature.is_empty());
 
     let (sign_parameter, signature) = client
@@ -954,7 +955,7 @@ async fn wrap_unwrap_key_authenticated_round_trip() {
             &test_mechanism(),
             wrapping_key,
             CkInBuf::Bytes(&wrapped_key),
-            Some(&[]),
+            &[],
             CkInBuf::Bytes(&[]),
         )
         .await

@@ -13,20 +13,20 @@ use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_types::{CkObjectHandle, CkOutputBufferSpec, CkRv};
 
-use super::super::authorization::mechanism_permitted;
-use super::super::convert_template_opt;
+use super::super::convert_template;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
-    ExactCompletion, check_sanitize, ensure_private_mint_allowed, input_from_wire, parse_mechanism,
-    register_session_object_handle, resolve_session_and_key, spawn_backend, spawn_backend_exact,
-    template_declares_private_object, template_declares_token_object,
+    check_sanitize, input_from_wire, parse_mechanism, register_session_object_handle,
+    resolve_session_and_key, spawn_backend, template_declares_token_object,
 };
-use crate::server::context_manager::ClientContextId;
+use crate::server::context_manager::{ClientContextId, ContextManager};
 use crate::server::handle_map::VirtualHandle;
 
 use crate::server::grpc_service::HandlerContext;
 pub(crate) async fn encapsulate_key(
-    ctx: &HandlerContext,
+    ctx_mgr: &Arc<ContextManager>,
+    backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::EncapsulateKeyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncapsulateKeyResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
@@ -63,19 +63,8 @@ pub(crate) async fn encapsulate_key(
         }
     };
 
-    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
-        return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyResponse {
-            ck_rv: CkRv::MECHANISM_INVALID.0,
-            ciphertext: Vec::new(),
-            key_handle: 0,
-        }));
-    }
-
-    // B1: remap object handles embedded in the mechanism parameters;
-    // gate each through per-object authz when active (C1).
-    if let Err(rv) =
-        remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
-    {
+    // B1: remap object handles embedded in the mechanism parameters.
+    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
         return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyResponse {
             ck_rv: rv.0,
             ciphertext: Vec::new(),
@@ -83,7 +72,7 @@ pub(crate) async fn encapsulate_key(
         }));
     }
 
-    let template = match convert_template_opt(&req.template, req.template_null) {
+    let template = match convert_template(&req.template) {
         Ok(template) => template,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyResponse {
@@ -94,24 +83,8 @@ pub(crate) async fn encapsulate_key(
         }
     };
 
-    // A NULL template carries no attributes; classification treats it as empty.
-    let template_view = template.as_deref().unwrap_or(&[]);
-
-    // D6(1): refuse minting a private object while logically logged out.
-    if let Err(rv) =
-        ensure_private_mint_allowed(ctx_mgr, &ctx_id, req.session_handle, template_view).await
-    {
-        return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyResponse {
-            ck_rv: rv.0,
-            ciphertext: Vec::new(),
-            key_handle: 0,
-        }));
-    }
-
     // An encapsulated key is a session object unless CKA_TOKEN is set (B2).
-    // The privacy bit is recorded for the D6(1) USE enforcement.
-    let is_token = template_declares_token_object(template_view);
-    let is_private = template_declares_private_object(template_view);
+    let is_token = template_declares_token_object(&template);
     let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
@@ -125,9 +98,8 @@ pub(crate) async fn encapsulate_key(
                 ctx_mgr,
                 &ctx_id,
                 virtual_session,
-                CkObjectHandle(key.0 as u64),
+                CkObjectHandle(key.0),
                 is_token,
-                Some(is_private),
             )
             .await;
             Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyResponse {
@@ -145,7 +117,9 @@ pub(crate) async fn encapsulate_key(
 }
 
 pub(crate) async fn decapsulate_key(
-    ctx: &HandlerContext,
+    ctx_mgr: &Arc<ContextManager>,
+    backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::DecapsulateKeyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecapsulateKeyResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
@@ -177,25 +151,15 @@ pub(crate) async fn decapsulate_key(
         }
     };
 
-    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
-        return Ok(Response::new(pkcs11_proxy_ng_proto::DecapsulateKeyResponse {
-            ck_rv: CkRv::MECHANISM_INVALID.0,
-            key_handle: 0,
-        }));
-    }
-
-    // B1: remap object handles embedded in the mechanism parameters;
-    // gate each through per-object authz when active (C1).
-    if let Err(rv) =
-        remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
-    {
+    // B1: remap object handles embedded in the mechanism parameters.
+    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
         return Ok(Response::new(pkcs11_proxy_ng_proto::DecapsulateKeyResponse {
             ck_rv: rv.0,
             key_handle: 0,
         }));
     }
 
-    let template = match convert_template_opt(&req.template, req.template_null) {
+    let template = match convert_template(&req.template) {
         Ok(template) => template,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::DecapsulateKeyResponse {
@@ -205,25 +169,8 @@ pub(crate) async fn decapsulate_key(
         }
     };
 
-    // A NULL template carries no attributes; classification treats it as empty.
-    let template_view = template.as_deref().unwrap_or(&[]);
-
-    // D6(1): refuse minting a private object while logically logged out.
-    // (The private KEM key itself is refused by the USE check inside
-    // resolve_session_and_key above.)
-    if let Err(rv) =
-        ensure_private_mint_allowed(ctx_mgr, &ctx_id, req.session_handle, template_view).await
-    {
-        return Ok(Response::new(pkcs11_proxy_ng_proto::DecapsulateKeyResponse {
-            ck_rv: rv.0,
-            key_handle: 0,
-        }));
-    }
-
     // A decapsulated key is a session object unless CKA_TOKEN is set (B2).
-    // The privacy bit is recorded for the D6(1) USE enforcement.
-    let is_token = template_declares_token_object(template_view);
-    let is_private = template_declares_private_object(template_view);
+    let is_token = template_declares_token_object(&template);
     let virtual_session = VirtualHandle(req.session_handle);
     let ciphertext = req.ciphertext;
     let ciphertext_null_len = req.ciphertext_null_len;
@@ -240,7 +187,7 @@ pub(crate) async fn decapsulate_key(
             session,
             &mechanism,
             private_key,
-            template.as_deref(),
+            &template,
             input_from_wire(&ciphertext, ciphertext_null_len),
         )
     })
@@ -252,9 +199,8 @@ pub(crate) async fn decapsulate_key(
                 ctx_mgr,
                 &ctx_id,
                 virtual_session,
-                CkObjectHandle(key.0 as u64),
+                CkObjectHandle(key.0),
                 is_token,
-                Some(is_private),
             )
             .await;
             Ok(Response::new(pkcs11_proxy_ng_proto::DecapsulateKeyResponse {
@@ -270,7 +216,9 @@ pub(crate) async fn decapsulate_key(
 }
 
 pub(crate) async fn encapsulate_key_exact(
-    ctx: &HandlerContext,
+    ctx_mgr: &Arc<ContextManager>,
+    backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::EncapsulateKeyExactRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
@@ -281,28 +229,22 @@ pub(crate) async fn encapsulate_key_exact(
     }
     let ctx_id = ClientContextId(req.client_context_id);
 
-    let (session, public_key) = match resolve_session_and_key(
-        ctx,
-        &ctx_id,
-        req.session_handle,
-        req.public_key_handle,
-    )
-    .await
-    {
-        Ok(handles) => handles,
-        Err(rv) => {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
-                result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
-                    apply_returned_len: Some(false),
-                    apply_object_handle: Some(false),
-                    ck_rv: rv.0,
-                    returned_len: 0,
-                    value: None,
-                    object_handle: 0,
-                }),
-            }));
-        }
-    };
+    let (session, public_key) =
+        match resolve_session_and_key(ctx_mgr, &ctx_id, req.session_handle, req.public_key_handle)
+            .await
+        {
+            Ok(handles) => handles,
+            Err(rv) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
+                    result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
+                        ck_rv: rv.0,
+                        returned_len: 0,
+                        value: None,
+                        object_handle: 0,
+                    }),
+                }));
+            }
+        };
 
     let mut mechanism = match parse_mechanism(req.mechanism) {
         Ok(mechanism) => mechanism,
@@ -320,28 +262,10 @@ pub(crate) async fn encapsulate_key_exact(
         }
     };
 
-    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+    // B1: remap object handles embedded in the mechanism parameters.
+    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
         return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
             result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
-                apply_returned_len: Some(false),
-                apply_object_handle: Some(false),
-                ck_rv: CkRv::MECHANISM_INVALID.0,
-                returned_len: 0,
-                value: None,
-                object_handle: 0,
-            }),
-        }));
-    }
-
-    // B1: remap object handles embedded in the mechanism parameters;
-    // gate each through per-object authz when active (C1).
-    if let Err(rv) =
-        remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
-    {
-        return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
-            result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
-                apply_returned_len: Some(false),
-                apply_object_handle: Some(false),
                 ck_rv: rv.0,
                 returned_len: 0,
                 value: None,
@@ -350,7 +274,7 @@ pub(crate) async fn encapsulate_key_exact(
         }));
     }
 
-    let template = match convert_template_opt(&req.template, req.template_null) {
+    let template = match convert_template(&req.template) {
         Ok(template) => template,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
@@ -369,33 +293,8 @@ pub(crate) async fn encapsulate_key_exact(
     // A NULL template carries no attributes; classification treats it as empty.
     let template_view = template.as_deref().unwrap_or(&[]);
 
-    // D6(1): refuse minting a private object while logically logged out.
-    if let Err(rv) =
-        ensure_private_mint_allowed(ctx_mgr, &ctx_id, req.session_handle, template_view).await
-    {
-        return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
-            result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
-                apply_returned_len: Some(false),
-                apply_object_handle: Some(false),
-                ck_rv: rv.0,
-                returned_len: 0,
-                value: None,
-                object_handle: 0,
-            }),
-        }));
-    }
-
-    let spec =
-        req.output_spec.as_ref().map(CkOutputBufferSpec::from).unwrap_or(CkOutputBufferSpec {
-            buffer_present: false,
-            buffer_len: 0,
-            length_pointer_null: false,
-        });
-
     // The exact-encapsulated key is a session object unless CKA_TOKEN is set (B2).
-    // The privacy bit is recorded for the D6(1) USE enforcement.
-    let is_token = template_declares_token_object(template_view);
-    let is_private = template_declares_private_object(template_view);
+    let is_token = template_declares_token_object(&template);
     let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend_exact(move || {
@@ -412,16 +311,13 @@ pub(crate) async fn encapsulate_key_exact(
     match result {
         Ok(r) => {
             // Register the returned object handle through the context manager
-            let virtual_handle = if r.ck_rv == CkRv::OK
-                && let Some(handle) = r.object_handle.filter(|h| h.0 != 0)
-            {
+            let virtual_handle = if r.ck_rv == CkRv::OK && r.object_handle.0 != 0 {
                 register_session_object_handle(
                     ctx_mgr,
                     &ctx_id,
                     virtual_session,
-                    handle,
+                    r.object_handle,
                     is_token,
-                    Some(is_private),
                 )
                 .await
             } else {

@@ -3,19 +3,21 @@ use tonic::{Request, Response, Status};
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_proto::convert::output::byte_output_function_from_i32;
 use pkcs11_proxy_ng_types::{
-    ByteOutputFunction, CkOutputBufferResult, CkOutputBufferSpec, CkResult, CkRv,
+    ByteOutputFunction, CkInBuf, CkOutputBufferResult, CkOutputBufferSpec, CkResult, CkRv,
 };
 
 use super::super::context_manager::ClientContextId;
 use super::service_utils::{
-    ExactCompletion, check_sanitize, input_from_wire, mechanism_output_to_proto, resolve_session,
-    spawn_backend_exact,
+    check_sanitize, input_from_wire, mechanism_output_to_proto, parse_mechanism, resolve_session,
+    resolve_session_and_two_objects, spawn_backend,
 };
 
 use crate::server::grpc_service::HandlerContext;
 
 pub(super) async fn byte_output_exact(
-    ctx: &HandlerContext,
+    ctx_mgr: &Arc<ContextManager>,
+    backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::ByteOutputExactRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::ByteOutputExactResponse>, Status> {
     let started = std::time::Instant::now();
@@ -55,15 +57,7 @@ pub(super) async fn byte_output_exact(
         .map(|s| CkOutputBufferSpec { buffer_present: s.buffer_present, buffer_len: s.buffer_len })
         .unwrap_or(CkOutputBufferSpec { buffer_present: false, buffer_len: 0 });
 
-    // Build the output buffer spec
-    let spec =
-        req.output_spec.as_ref().map(CkOutputBufferSpec::from).unwrap_or(CkOutputBufferSpec {
-            buffer_present: false,
-            buffer_len: 0,
-            length_pointer_null: false,
-        });
-
-    let input_data = SecretBytes::new(req.input_data);
+    let input_data = req.input_data;
     let input_data_null_len = req.input_data_null_len;
 
     match function {
@@ -138,15 +132,11 @@ pub(super) async fn byte_output_exact(
                 return Ok(Response::new(error_response(rv)));
             }
 
-            let backend = ctx.backend.clone();
+            let backend = backend_ref.clone();
             let (result, mechanism_out) = if function == ByteOutputFunction::Encrypt {
-                let result = spawn_backend_exact(move || {
-                    input_data.expose(|raw| {
-                        let buf = input_from_wire(raw, input_data_null_len);
-                        ExactCompletion::capture(
-                            backend.encrypt_exact_with_output(session, buf, &spec),
-                        )
-                    })
+                let result = spawn_backend(move || {
+                    let buf = input_from_wire(&input_data, input_data_null_len);
+                    backend.encrypt_exact_with_output(session, buf, &spec)
                 })
                 .await?;
                 match result {
@@ -154,13 +144,9 @@ pub(super) async fn byte_output_exact(
                     Err(error) => (Err(error), None),
                 }
             } else {
-                let result = spawn_backend_exact(move || {
-                    input_data.expose(|raw| {
-                        let buf = input_from_wire(raw, input_data_null_len);
-                        ExactCompletion::capture(dispatch_session_data(
-                            function, &*backend, session, buf, &spec,
-                        ))
-                    })
+                let result = spawn_backend(move || {
+                    let buf = input_from_wire(&input_data, input_data_null_len);
+                    dispatch_session_data(function, &*backend, session, buf, &spec)
                 })
                 .await?;
                 (result, None)
@@ -258,7 +244,7 @@ mod sanitize_inputs_tests {
     use super::super::digest_cipher::{decrypt_init, encrypt_init};
     use super::byte_output_exact;
     use crate::server::context_manager::{ClientContextId, ContextManager};
-    use crate::server::grpc_service::{HandlerContext, Pkcs11ProxyService, session::open_session};
+    use crate::server::grpc_service::{Pkcs11ProxyService, session::open_session};
 
     // -----------------------------------------------------------------------
     // Fixture helpers
@@ -270,7 +256,7 @@ mod sanitize_inputs_tests {
         let backend: Arc<dyn Pkcs11Backend> = mock.clone();
 
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
-        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        ctx_mgr.register_slot(CkSlotId(0)).await;
         let ctx_id = ctx_mgr.create_context(None).await.unwrap();
         let virtual_slot = ctx_mgr.virtual_slots().await[0];
 
@@ -299,7 +285,9 @@ mod sanitize_inputs_tests {
     ) {
         // Generate a key first so we have a valid key handle.
         let key_resp = crate::server::grpc_service::key_ops::generate_key(
-            &HandlerContext::for_test(ctx_mgr, backend),
+            ctx_mgr,
+            backend,
+            false,
             Request::new(pkcs11_proxy_ng_proto::GenerateKeyRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -308,8 +296,6 @@ mod sanitize_inputs_tests {
                     params: None,
                 }),
                 template: vec![],
-
-                template_null: false,
             }),
         )
         .await
@@ -318,7 +304,9 @@ mod sanitize_inputs_tests {
         // Ignore the RV — just init decrypt with key_handle=0 (mock ignores key validity for
         // decrypt_init) and any mechanism that the mock supports.
         let _ = decrypt_init(
-            &HandlerContext::for_test(ctx_mgr, backend),
+            ctx_mgr,
+            backend,
+            false,
             Request::new(pkcs11_proxy_ng_proto::DecryptInitRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -361,9 +349,10 @@ mod sanitize_inputs_tests {
         let service = make_service_sanitize_on(ctx_mgr.clone(), backend.clone());
 
         let resp = byte_output_exact(
-            &service.ctx,
+            &service.context_manager,
+            &service.backend,
+            service.sanitize_inputs,
             Request::new(pkcs11_proxy_ng_proto::ByteOutputExactRequest {
-                exact_output_effects_version: 1,
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
                 function: pkcs11_proxy_ng_proto::ByteOutputFunction::Decrypt as i32,
@@ -373,7 +362,6 @@ mod sanitize_inputs_tests {
                 output_spec: Some(pkcs11_proxy_ng_proto::OutputBufferSpec {
                     buffer_present: true,
                     buffer_len: 64,
-                    length_pointer_null: false,
                 }),
                 ..Default::default()
             }),
@@ -410,9 +398,10 @@ mod sanitize_inputs_tests {
         let service = make_service_sanitize_off(ctx_mgr.clone(), backend.clone());
 
         let _resp = byte_output_exact(
-            &service.ctx,
+            &service.context_manager,
+            &service.backend,
+            service.sanitize_inputs,
             Request::new(pkcs11_proxy_ng_proto::ByteOutputExactRequest {
-                exact_output_effects_version: 1,
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
                 function: pkcs11_proxy_ng_proto::ByteOutputFunction::Decrypt as i32,
@@ -421,7 +410,6 @@ mod sanitize_inputs_tests {
                 output_spec: Some(pkcs11_proxy_ng_proto::OutputBufferSpec {
                     buffer_present: true,
                     buffer_len: 64,
-                    length_pointer_null: false,
                 }),
                 ..Default::default()
             }),
@@ -433,41 +421,6 @@ mod sanitize_inputs_tests {
             mock.data_op_call_count() > before,
             "sanitize OFF: backend must be called even for NULL input (transparent forwarding)"
         );
-    }
-
-    #[tokio::test]
-    async fn missing_output_length_is_forwarded_to_byte_output_backend_once() {
-        let (ctx_mgr, mock, ctx_id, session) = setup_mock_session().await;
-        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
-        setup_decrypt(&ctx_mgr, &backend, &ctx_id, session).await;
-        let before = mock.data_op_call_count();
-
-        let response = byte_output_exact(
-            &HandlerContext::for_test(&ctx_mgr, &backend),
-            Request::new(pkcs11_proxy_ng_proto::ByteOutputExactRequest {
-                exact_output_effects_version: 1,
-                client_context_id: ctx_id.0.clone(),
-                session_handle: session,
-                function: pkcs11_proxy_ng_proto::ByteOutputFunction::Decrypt as i32,
-                input_data: b"data".to_vec(),
-                output_spec: Some(pkcs11_proxy_ng_proto::OutputBufferSpec {
-                    buffer_present: true,
-                    buffer_len: 0,
-                    length_pointer_null: true,
-                }),
-                ..Default::default()
-            }),
-        )
-        .await
-        .unwrap()
-        .into_inner()
-        .result
-        .unwrap();
-
-        assert_eq!(response.ck_rv, CkRv::ARGUMENTS_BAD.0);
-        assert_eq!(response.returned_len, 0);
-        assert_eq!(response.value, None);
-        assert_eq!(mock.data_op_call_count(), before + 1);
     }
 
     // -----------------------------------------------------------------------
@@ -485,7 +438,9 @@ mod sanitize_inputs_tests {
         let service = make_service_sanitize_on(ctx_mgr.clone(), backend.clone());
 
         let resp = encrypt_init(
-            &service.ctx,
+            &service.context_manager,
+            &service.backend,
+            service.sanitize_inputs,
             Request::new(pkcs11_proxy_ng_proto::EncryptInitRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -519,7 +474,9 @@ mod sanitize_inputs_tests {
         let service = make_service_sanitize_off(ctx_mgr.clone(), backend.clone());
 
         let resp = encrypt_init(
-            &service.ctx,
+            &service.context_manager,
+            &service.backend,
+            service.sanitize_inputs,
             Request::new(pkcs11_proxy_ng_proto::EncryptInitRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -550,7 +507,9 @@ mod sanitize_inputs_tests {
         let service = make_service_sanitize_on(ctx_mgr.clone(), backend.clone());
 
         let resp = super::super::sign_verify::sign(
-            &service.ctx,
+            &service.context_manager,
+            &service.backend,
+            service.sanitize_inputs,
             Request::new(pkcs11_proxy_ng_proto::SignRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -582,7 +541,9 @@ mod sanitize_inputs_tests {
 
         // data is valid (non-null), signature_null_len makes the second field NULL
         let resp = super::super::sign_verify::verify(
-            &service.ctx,
+            &service.context_manager,
+            &service.backend,
+            service.sanitize_inputs,
             Request::new(pkcs11_proxy_ng_proto::VerifyRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -615,7 +576,9 @@ mod sanitize_inputs_tests {
         let service = make_service_sanitize_on(ctx_mgr.clone(), backend.clone());
 
         let resp = super::super::sign_verify::sign_init(
-            &service.ctx,
+            &service.context_manager,
+            &service.backend,
+            service.sanitize_inputs,
             Request::new(pkcs11_proxy_ng_proto::SignInitRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -645,7 +608,9 @@ mod sanitize_inputs_tests {
         let service = make_service_sanitize_off(ctx_mgr.clone(), backend.clone());
 
         let resp = super::super::sign_verify::sign_init(
-            &service.ctx,
+            &service.context_manager,
+            &service.backend,
+            service.sanitize_inputs,
             Request::new(pkcs11_proxy_ng_proto::SignInitRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,

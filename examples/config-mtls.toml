@@ -40,11 +40,6 @@ max_blocking_threads = 512
 # Reject NULL data pointers (len>0) and NULL mechanisms before the backend module.
 # OFF by default (ADR-0010 transparent forwarding). Enable for modules that crash on them.
 # sanitize_inputs = true
-# Self-exit (nonzero) once this many backend calls are wedged past their
-# request_timeout_secs — recovery for a PERMANENTLY stuck token under a
-# supervisor (systemd Restart=, k8s). Unset (default) = never self-exit;
-# the daemon keeps serving and self-recovers if the token unsticks.
-# max_stuck_backend_calls = 16
 
 [listener.remote]
 bind = "0.0.0.0:50051"

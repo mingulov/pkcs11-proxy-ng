@@ -34,7 +34,9 @@ pub(super) async fn initialize(
 /// and avoid a TOCTOU between lookup and removal, we accept `identity: None` for
 /// `C_Finalize` records.
 pub(super) async fn finalize(
-    ctx: &HandlerContext,
+    ctx_mgr: &Arc<ContextManager>,
+    backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::FinalizeRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::FinalizeResponse>, Status> {
     let started = Instant::now();
@@ -55,7 +57,9 @@ pub(super) async fn finalize(
 }
 
 pub(super) async fn get_info(
-    ctx: &HandlerContext,
+    ctx_mgr: &Arc<ContextManager>,
+    backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::GetInfoRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GetInfoResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;

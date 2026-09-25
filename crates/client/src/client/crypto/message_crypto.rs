@@ -518,14 +518,11 @@ impl Pkcs11Client {
     ) -> CkResult<Vec<u8>> {
         let ctx = self.context_id()?;
         let mut req = pkcs11_proxy_ng_proto::EncryptMessageBeginRequest {
-            exact_output_effects_version: 1,
             client_context_id: ctx,
             session_handle: session.0,
             parameter: parameter.to_vec(),
             associated_data: Vec::new(),
             associated_data_null_len: None,
-            parameter_out_spec: None,
-            message_parameter: None,
         };
         Self::fill_input(aad, &mut req.associated_data, &mut req.associated_data_null_len);
         let resp = pkcs11_unary_call!(self.grpc.encrypt_message_begin(req), true);
@@ -633,14 +630,11 @@ impl Pkcs11Client {
     ) -> CkResult<Vec<u8>> {
         let ctx = self.context_id()?;
         let mut req = pkcs11_proxy_ng_proto::DecryptMessageBeginRequest {
-            exact_output_effects_version: 1,
             client_context_id: ctx,
             session_handle: session.0,
             parameter: parameter.to_vec(),
             associated_data: Vec::new(),
             associated_data_null_len: None,
-            parameter_out_spec: None,
-            message_parameter: None,
         };
         Self::fill_input(aad, &mut req.associated_data, &mut req.associated_data_null_len);
         let resp = pkcs11_unary_call!(self.grpc.decrypt_message_begin(req), true);
@@ -799,7 +793,6 @@ impl Pkcs11Client {
             data_part: Vec::new(),
             request_signature,
             data_part_null_len: None,
-            parameter_out_spec: None,
         };
         Self::fill_input(data_part, &mut req.data_part, &mut req.data_part_null_len);
         let resp = pkcs11_unary_call!(self.grpc.sign_message_next(req), true);
@@ -858,7 +851,6 @@ impl Pkcs11Client {
             signature: Vec::new(),
             data_null_len: None,
             signature_null_len: None,
-            parameter_out_spec: None,
         };
         Self::fill_input(data, &mut req.data, &mut req.data_null_len);
         Self::fill_input(signature, &mut req.signature, &mut req.signature_null_len);
@@ -968,7 +960,6 @@ impl Pkcs11Client {
             signature: Vec::new(),
             data_part_null_len: None,
             signature_null_len: None,
-            parameter_out_spec: None,
         };
         Self::fill_input(data_part, &mut req.data_part, &mut req.data_part_null_len);
         Self::fill_input(signature, &mut req.signature, &mut req.signature_null_len);

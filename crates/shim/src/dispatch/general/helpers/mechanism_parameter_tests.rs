@@ -7,8 +7,7 @@ use pkcs11_proxy_ng_types::{
     CcmParams, CcmWrapParams, ChaCha20Params, CkAttributeType, CkAttributeValue, CkMechanismParams,
     CkMechanismType, CkRv, ExtractParams, GcmParams, GcmWrapParams, KeyWrapSetOaepParams,
     KmacParams, MechanismRegistry, MuGenParams, RsaAesKeyWrapParams, RsaPkcsOaepParams,
-    RsaPkcsPssParams, Salsa20ChaCha20Poly1305Params, SecretBytes, Sp800108DerivedKey,
-    Sp800108FeedbackKdfParams,
+    RsaPkcsPssParams, Salsa20ChaCha20Poly1305Params, Sp800108DerivedKey, Sp800108FeedbackKdfParams,
 };
 
 fn ensure_registry() {
@@ -66,7 +65,7 @@ fn reads_common_mechanism_parameter_structs() {
     };
     match unsafe { read_ck_mechanism(&mechanism) } {
         CkMechanismParams::RsaPkcsOaep(RsaPkcsOaepParams { source_data, .. }) => {
-            assert_eq!(source_data, SecretBytes::copy_from_slice(&[0xA0, 0xA1, 0xA2]));
+            assert_eq!(source_data, [0xA0, 0xA1, 0xA2]);
         }
         other => panic!("unexpected OAEP params: {other:?}"),
     }
@@ -105,11 +104,11 @@ fn reads_common_mechanism_parameter_structs() {
         ulParameterLen: std::mem::size_of::<CK_GCM_PARAMS>() as CK_ULONG,
     };
     match unsafe { read_ck_mechanism(&mechanism) } {
-        CkMechanismParams::Gcm(GcmParams { iv, iv_bits, iv_buffer_len, aad, tag_bits, .. }) => {
+        CkMechanismParams::Gcm(GcmParams { iv, iv_bits, iv_buffer_len, aad, tag_bits }) => {
             assert_eq!(iv, [0x10; 12]);
             assert_eq!(iv_bits, 96);
             assert_eq!(iv_buffer_len, 12);
-            assert_eq!(aad, SecretBytes::copy_from_slice(&[0xAA, 0xBB, 0xCC]));
+            assert_eq!(aad, [0xAA, 0xBB, 0xCC]);
             assert_eq!(tag_bits, 128);
         }
         other => panic!("unexpected GCM params: {other:?}"),
@@ -169,7 +168,7 @@ fn reads_handle_string_and_sign_context_parameter_structs() {
     };
     match unsafe { read_mechanism_with_shape(&mechanism, Some("key_derivation_string")) }.params {
         Some(CkMechanismParams::KeyDerivationString(params)) => {
-            assert_eq!(params.data, SecretBytes::copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]));
+            assert_eq!(params.data, [0xDE, 0xAD, 0xBE, 0xEF]);
         }
         other => panic!("unexpected key derivation string params: {other:?}"),
     }
@@ -195,7 +194,7 @@ fn reads_handle_string_and_sign_context_parameter_structs() {
     match unsafe { read_mechanism_with_shape(&mechanism, Some("sign_additional_context")) }.params {
         Some(CkMechanismParams::SignAdditionalContext(params)) => {
             assert_eq!(params.hedge_variant, 1);
-            assert_eq!(params.context, SecretBytes::copy_from_slice(&[0xA1, 0xA2, 0xA3]));
+            assert_eq!(params.context, [0xA1, 0xA2, 0xA3]);
         }
         other => panic!("unexpected sign additional context params: {other:?}"),
     }
@@ -223,12 +222,12 @@ fn reads_signature_parameter_structs() {
     {
         CkMechanismParams::Eddsa(params) => {
             assert!(params.ph_flag);
-            assert_eq!(params.context_data, vec![0xA1, 0xA2, 0xA3].into());
+            assert_eq!(params.context_data, vec![0xA1, 0xA2, 0xA3]);
         }
         other => panic!("unexpected EdDSA params: {other:?}"),
     }
 
-    let mut xeddsa = CK_XEDDSA_PARAMS { hash: CkMechanismType::SHA256.0 as _ };
+    let mut xeddsa = CK_XEDDSA_PARAMS { hash: CkMechanismType::SHA256.0 };
     let mechanism = CK_MECHANISM {
         mechanism: CKM_TEST_XEDDSA,
         pParameter: &mut xeddsa as *mut _ as CK_VOID_PTR,
@@ -239,7 +238,7 @@ fn reads_signature_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::Xeddsa(params) => {
-            assert_eq!(params.hash, CkMechanismType::SHA256.0 as u64);
+            assert_eq!(params.hash, CkMechanismType::SHA256.0);
         }
         other => panic!("unexpected XEdDSA params: {other:?}"),
     }
@@ -267,7 +266,7 @@ fn reads_rsa_wrap_parameter_structs() {
             assert_eq!(oaep_params.hash_alg, CkMechanismType::SHA256);
             assert_eq!(oaep_params.mgf, 1);
             assert_eq!(oaep_params.source, 1);
-            assert_eq!(oaep_params.source_data, SecretBytes::copy_from_slice(&[0xA0, 0xA1, 0xA2]));
+            assert_eq!(oaep_params.source_data, [0xA0, 0xA1, 0xA2]);
         }
         other => panic!("unexpected RSA-AES key wrap params: {other:?}"),
     }
@@ -283,7 +282,7 @@ fn reads_rsa_wrap_parameter_structs() {
     match unsafe { read_ck_mechanism(&mechanism) } {
         CkMechanismParams::KeyWrapSetOaep(KeyWrapSetOaepParams { bc, x }) => {
             assert_eq!(bc, 7);
-            assert_eq!(x, SecretBytes::copy_from_slice(&[0x51, 0x52, 0x53, 0x54]));
+            assert_eq!(x, [0x51, 0x52, 0x53, 0x54]);
         }
         other => panic!("unexpected SET OAEP key wrap params: {other:?}"),
     }
@@ -324,7 +323,7 @@ fn reads_authenticated_wrap_parameter_structs() {
             assert_eq!(iv, [0x11; 12]);
             assert_eq!(iv_fixed_bits, 32);
             assert_eq!(iv_generator, 1);
-            assert_eq!(aad, SecretBytes::copy_from_slice(&[0xA1, 0xA2]));
+            assert_eq!(aad, [0xA1, 0xA2]);
             assert_eq!(tag_bits, 128);
         }
         other => panic!("unexpected GCM wrap params: {other:?}"),
@@ -363,7 +362,7 @@ fn reads_authenticated_wrap_parameter_structs() {
             assert_eq!(nonce, [0x22; 7]);
             assert_eq!(nonce_fixed_bits, 24);
             assert_eq!(nonce_generator, 2);
-            assert_eq!(aad, SecretBytes::copy_from_slice(&[0xB1, 0xB2, 0xB3]));
+            assert_eq!(aad, [0xB1, 0xB2, 0xB3]);
             assert_eq!(mac_len, 16);
         }
         other => panic!("unexpected CCM wrap params: {other:?}"),
@@ -380,7 +379,7 @@ fn wrap_key_reader_uses_v32_aead_wrap_shapes() {
         pIv: iv.as_mut_ptr(),
         ulIvLen: iv.len() as CK_ULONG,
         ulIvFixedBits: 32,
-        ivGenerator: CKG_GENERATE as _,
+        ivGenerator: CKG_GENERATE,
         pAAD: gcm_aad.as_mut_ptr(),
         ulAADLen: gcm_aad.len() as CK_ULONG,
         ulTagBits: 128,
@@ -393,8 +392,8 @@ fn wrap_key_reader_uses_v32_aead_wrap_shapes() {
     match unsafe { read_wrap_key_mechanism(&mechanism) }.params.expect("params") {
         CkMechanismParams::GcmWrap(GcmWrapParams { iv, iv_generator, aad, .. }) => {
             assert_eq!(iv, [0x11; 12]);
-            assert_eq!(iv_generator, CKG_GENERATE as u64);
-            assert_eq!(aad, SecretBytes::copy_from_slice(&[0xA1, 0xA2]));
+            assert_eq!(iv_generator, CKG_GENERATE);
+            assert_eq!(aad, [0xA1, 0xA2]);
         }
         other => panic!("unexpected GCM wrap-key params: {other:?}"),
     }
@@ -406,7 +405,7 @@ fn wrap_key_reader_uses_v32_aead_wrap_shapes() {
         pNonce: nonce.as_mut_ptr(),
         ulNonceLen: nonce.len() as CK_ULONG,
         ulNonceFixedBits: 0,
-        nonceGenerator: CKG_GENERATE as _,
+        nonceGenerator: CKG_GENERATE,
         pAAD: ccm_aad.as_mut_ptr(),
         ulAADLen: ccm_aad.len() as CK_ULONG,
         ulMACLen: 16,
@@ -427,8 +426,8 @@ fn wrap_key_reader_uses_v32_aead_wrap_shapes() {
         }) => {
             assert_eq!(data_len, 16);
             assert_eq!(nonce, [0x22; 12]);
-            assert_eq!(nonce_generator, CKG_GENERATE as u64);
-            assert_eq!(aad, SecretBytes::copy_from_slice(&[0xB1, 0xB2, 0xB3]));
+            assert_eq!(nonce_generator, CKG_GENERATE);
+            assert_eq!(aad, [0xB1, 0xB2, 0xB3]);
             assert_eq!(mac_len, 16);
         }
         other => panic!("unexpected CCM wrap-key params: {other:?}"),
@@ -475,7 +474,7 @@ fn wrap_key_reader_uses_wrap_shapes_only_on_exact_v32_size() {
     match unsafe { read_wrap_key_mechanism(&mechanism) }.params.expect("params") {
         CkMechanismParams::Gcm(GcmParams { iv, aad, tag_bits, .. }) => {
             assert_eq!(iv, [0x33; 12]);
-            assert_eq!(aad, SecretBytes::copy_from_slice(&[0xC1, 0xC2]));
+            assert_eq!(aad, [0xC1, 0xC2]);
             assert_eq!(tag_bits, 128);
         }
         other => panic!("larger non-wrap GCM params must not be parsed as wrap: {other:?}"),
@@ -503,7 +502,7 @@ fn wrap_key_reader_uses_wrap_shapes_only_on_exact_v32_size() {
         CkMechanismParams::Ccm(CcmParams { data_len, nonce, aad, mac_len, .. }) => {
             assert_eq!(data_len, 16);
             assert_eq!(nonce, [0x44; 12]);
-            assert_eq!(aad, SecretBytes::copy_from_slice(&[0xD1, 0xD2]));
+            assert_eq!(aad, [0xD1, 0xD2]);
             assert_eq!(mac_len, 16);
         }
         other => panic!("larger non-wrap CCM params must not be parsed as wrap: {other:?}"),
@@ -517,7 +516,7 @@ fn write_mechanism_output_params_writes_aead_wrap_generated_fields() {
         pIv: iv.as_mut_ptr(),
         ulIvLen: iv.len() as CK_ULONG,
         ulIvFixedBits: 0,
-        ivGenerator: CKG_GENERATE as _,
+        ivGenerator: CKG_GENERATE,
         pAAD: std::ptr::null_mut(),
         ulAADLen: 0,
         ulTagBits: 128,
@@ -530,16 +529,14 @@ fn write_mechanism_output_params_writes_aead_wrap_generated_fields() {
     let output = CkMechanismParams::GcmWrap(GcmWrapParams {
         iv: vec![1, 2, 3, 4],
         iv_fixed_bits: 0,
-        iv_generator: CKG_GENERATE as _,
-        aad: Vec::new().into(),
+        iv_generator: CKG_GENERATE,
+        aad: Vec::new(),
         tag_bits: 96,
     });
     unsafe { write_mechanism_output_params(&mut mechanism, &output) };
     assert_eq!(&iv[..4], &[1, 2, 3, 4]);
-    // E0793: params structs are packed on Windows; assert on by-value copies.
-    let (gcm_iv_len, gcm_tag_bits) = (gcm_wrap.ulIvLen, gcm_wrap.ulTagBits);
-    assert_eq!(gcm_iv_len, 4);
-    assert_eq!(gcm_tag_bits, 96);
+    assert_eq!(gcm_wrap.ulIvLen, 4);
+    assert_eq!(gcm_wrap.ulTagBits, 96);
 
     let mut nonce = [0u8; 12];
     let mut ccm_wrap = CK_CCM_WRAP_PARAMS {
@@ -547,7 +544,7 @@ fn write_mechanism_output_params_writes_aead_wrap_generated_fields() {
         pNonce: nonce.as_mut_ptr(),
         ulNonceLen: nonce.len() as CK_ULONG,
         ulNonceFixedBits: 0,
-        nonceGenerator: CKG_GENERATE as _,
+        nonceGenerator: CKG_GENERATE,
         pAAD: std::ptr::null_mut(),
         ulAADLen: 0,
         ulMACLen: 16,
@@ -561,15 +558,14 @@ fn write_mechanism_output_params_writes_aead_wrap_generated_fields() {
         data_len: 16,
         nonce: vec![9, 8, 7, 6],
         nonce_fixed_bits: 0,
-        nonce_generator: CKG_GENERATE as _,
-        aad: Vec::new().into(),
+        nonce_generator: CKG_GENERATE,
+        aad: Vec::new(),
         mac_len: 12,
     });
     unsafe { write_mechanism_output_params(&mut mechanism, &output) };
     assert_eq!(&nonce[..4], &[9, 8, 7, 6]);
-    let (ccm_nonce_len, ccm_mac_len) = (ccm_wrap.ulNonceLen, ccm_wrap.ulMACLen);
-    assert_eq!(ccm_nonce_len, 4);
-    assert_eq!(ccm_mac_len, 12);
+    assert_eq!(ccm_wrap.ulNonceLen, 4);
+    assert_eq!(ccm_wrap.ulMACLen, 12);
 }
 
 #[test]
@@ -600,7 +596,7 @@ fn reads_aead_and_chacha_parameter_structs() {
         CkMechanismParams::Ccm(CcmParams { data_len, nonce, aad, mac_len }) => {
             assert_eq!(data_len, 2048);
             assert_eq!(nonce, [0x31; 11]);
-            assert_eq!(aad, SecretBytes::copy_from_slice(&[0xC1, 0xC2]));
+            assert_eq!(aad, [0xC1, 0xC2]);
             assert_eq!(mac_len, 12);
         }
         other => panic!("unexpected CCM params: {other:?}"),
@@ -659,7 +655,7 @@ fn reads_aead_and_chacha_parameter_structs() {
             aad,
         }) => {
             assert_eq!(nonce, [0x51; 12]);
-            assert_eq!(aad, SecretBytes::copy_from_slice(&[0x52, 0x53, 0x54]));
+            assert_eq!(aad, [0x52, 0x53, 0x54]);
         }
         other => panic!("unexpected Salsa20/ChaCha20-Poly1305 params: {other:?}"),
     }
@@ -726,7 +722,7 @@ fn reads_counter_and_encrypt_data_parameter_structs() {
     {
         CkMechanismParams::AesCbcEncryptData(params) => {
             assert_eq!(params.iv, [0xA5; 16]);
-            assert_eq!(params.data, SecretBytes::copy_from_slice(&[0xA2, 0xA3, 0xA4]));
+            assert_eq!(params.data, [0xA2, 0xA3, 0xA4]);
         }
         other => panic!("unexpected AES CBC encrypt-data params: {other:?}"),
     }
@@ -748,7 +744,7 @@ fn reads_counter_and_encrypt_data_parameter_structs() {
     {
         CkMechanismParams::DesCbcEncryptData(params) => {
             assert_eq!(params.iv, [0xD5; 8]);
-            assert_eq!(params.data, SecretBytes::copy_from_slice(&[0xD2, 0xD3]));
+            assert_eq!(params.data, [0xD2, 0xD3]);
         }
         other => panic!("unexpected DES CBC encrypt-data params: {other:?}"),
     }
@@ -770,7 +766,7 @@ fn reads_counter_and_encrypt_data_parameter_structs() {
     {
         CkMechanismParams::AriaCbcEncryptData(params) => {
             assert_eq!(params.iv, [0x15; 16]);
-            assert_eq!(params.data, SecretBytes::copy_from_slice(&[0x12, 0x13, 0x14, 0x15]));
+            assert_eq!(params.data, [0x12, 0x13, 0x14, 0x15]);
         }
         other => panic!("unexpected ARIA CBC encrypt-data params: {other:?}"),
     }
@@ -792,7 +788,7 @@ fn reads_counter_and_encrypt_data_parameter_structs() {
     {
         CkMechanismParams::CamelliaCbcEncryptData(params) => {
             assert_eq!(params.iv, [0x25; 16]);
-            assert_eq!(params.data, SecretBytes::copy_from_slice(&[0x22, 0x23, 0x24]));
+            assert_eq!(params.data, [0x22, 0x23, 0x24]);
         }
         other => panic!("unexpected Camellia CBC encrypt-data params: {other:?}"),
     }
@@ -814,7 +810,7 @@ fn reads_counter_and_encrypt_data_parameter_structs() {
     {
         CkMechanismParams::SeedCbcEncryptData(params) => {
             assert_eq!(params.iv, [0x35; 16]);
-            assert_eq!(params.data, SecretBytes::copy_from_slice(&[0x32, 0x33]));
+            assert_eq!(params.data, [0x32, 0x33]);
         }
         other => panic!("unexpected SEED CBC encrypt-data params: {other:?}"),
     }
@@ -987,7 +983,7 @@ fn reads_tls_ssl_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::TlsMac(params) => {
-            assert_eq!(params.prf_hash_mechanism, CkMechanismType::SHA256.0 as u64);
+            assert_eq!(params.prf_hash_mechanism, CkMechanismType::SHA256.0);
             assert_eq!(params.mac_length, 32);
             assert_eq!(params.server_or_client, 1);
         }
@@ -1016,8 +1012,8 @@ fn reads_tls_ssl_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::TlsPrf(params) => {
-            assert_eq!(params.seed, vec![0xA1, 0xA2, 0xA3].into());
-            assert_eq!(params.label, vec![0xB1, 0xB2].into());
+            assert_eq!(params.seed, vec![0xA1, 0xA2, 0xA3]);
+            assert_eq!(params.label, vec![0xB1, 0xB2]);
             assert_eq!(params.output_len, 12);
         }
         other => panic!("unexpected TLS PRF params: {other:?}"),
@@ -1050,11 +1046,11 @@ fn reads_tls_ssl_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::TlsKdf(params) => {
-            assert_eq!(params.prf_mechanism, CkMechanismType::SHA384.0 as u64);
-            assert_eq!(params.label, vec![0x33, 0x34].into());
+            assert_eq!(params.prf_mechanism, CkMechanismType::SHA384.0);
+            assert_eq!(params.label, vec![0x33, 0x34]);
             assert_eq!(params.random_info.client_random, vec![0x11; 4]);
             assert_eq!(params.random_info.server_random, vec![0x22; 4]);
-            assert_eq!(params.context_data, vec![0x44, 0x45, 0x46].into());
+            assert_eq!(params.context_data, vec![0x44, 0x45, 0x46]);
         }
         other => panic!("unexpected TLS KDF params: {other:?}"),
     }
@@ -1108,7 +1104,7 @@ fn reads_tls_ssl_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::Tls12ExtendedMasterKeyDerive(params) => {
-            assert_eq!(params.prf_hash_mechanism, CkMechanismType::SHA512.0 as u64);
+            assert_eq!(params.prf_hash_mechanism, CkMechanismType::SHA512.0);
             assert_eq!(params.session_hash, vec![0x61; 8]);
             assert_eq!(params.version_major, 3);
             assert_eq!(params.version_minor, 3);
@@ -1150,11 +1146,11 @@ fn reads_kdf_and_legacy_agreement_parameter_structs() {
         CkMechanismParams::Hkdf(params) => {
             assert!(params.extract);
             assert!(params.expand);
-            assert_eq!(params.prf_hash_mechanism, CkMechanismType::SHA256.0 as u64);
+            assert_eq!(params.prf_hash_mechanism, CkMechanismType::SHA256.0);
             assert_eq!(params.salt_type, 1);
-            assert_eq!(params.salt, vec![0xA1, 0xA2, 0xA3].into());
+            assert_eq!(params.salt, vec![0xA1, 0xA2, 0xA3]);
             assert_eq!(params.salt_key_handle, 0x1234);
-            assert_eq!(params.info, vec![0xB1, 0xB2].into());
+            assert_eq!(params.info, vec![0xB1, 0xB2]);
         }
         other => panic!("unexpected HKDF params: {other:?}"),
     }
@@ -1265,11 +1261,11 @@ fn reads_kdf_and_legacy_agreement_parameter_structs() {
     {
         CkMechanismParams::Pkcs5Pbkd2(params) => {
             assert_eq!(params.salt_source, 1);
-            assert_eq!(params.salt_source_data, vec![0x41, 0x42].into());
+            assert_eq!(params.salt_source_data, vec![0x41, 0x42]);
             assert_eq!(params.iterations, 600_000);
             assert_eq!(params.prf, 2);
-            assert_eq!(params.prf_data, vec![0x51].into());
-            assert_eq!(params.password, SecretBytes::copy_from_slice(b"secret"));
+            assert_eq!(params.prf_data, vec![0x51]);
+            assert_eq!(params.password, b"secret");
         }
         other => panic!("unexpected PKCS#5 PBKD2 params: {other:?}"),
     }
@@ -1304,7 +1300,7 @@ fn reads_ecdh_and_x942_parameter_structs() {
     {
         CkMechanismParams::Ecdh1Derive(params) => {
             assert_eq!(params.kdf, 7);
-            assert_eq!(params.shared_data, vec![0xA1, 0xA2].into());
+            assert_eq!(params.shared_data, vec![0xA1, 0xA2]);
             assert_eq!(params.public_data, vec![0xB1, 0xB2, 0xB3]);
         }
         other => panic!("unexpected ECDH1 derive params: {other:?}"),
@@ -1335,7 +1331,7 @@ fn reads_ecdh_and_x942_parameter_structs() {
     {
         CkMechanismParams::Ecdh2Derive(params) => {
             assert_eq!(params.kdf, 8);
-            assert_eq!(params.shared_data, vec![0xC1, 0xC2, 0xC3].into());
+            assert_eq!(params.shared_data, vec![0xC1, 0xC2, 0xC3]);
             assert_eq!(params.public_data, vec![0xD1, 0xD2]);
             assert_eq!(params.private_data_len, 32);
             assert_eq!(params.private_data_handle, 0x1234);
@@ -1370,7 +1366,7 @@ fn reads_ecdh_and_x942_parameter_structs() {
     {
         CkMechanismParams::EcmqvDerive(params) => {
             assert_eq!(params.kdf, 9);
-            assert_eq!(params.shared_data, vec![0x11, 0x12].into());
+            assert_eq!(params.shared_data, vec![0x11, 0x12]);
             assert_eq!(params.public_data, vec![0x21, 0x22, 0x23]);
             assert_eq!(params.private_data_len, 48);
             assert_eq!(params.private_data_handle, 0x2345);
@@ -1399,7 +1395,7 @@ fn reads_ecdh_and_x942_parameter_structs() {
         CkMechanismParams::EcdhAesKeyWrap(params) => {
             assert_eq!(params.aes_key_bits, 256);
             assert_eq!(params.kdf, 10);
-            assert_eq!(params.shared_data, vec![0x41, 0x42, 0x43].into());
+            assert_eq!(params.shared_data, vec![0x41, 0x42, 0x43]);
         }
         other => panic!("unexpected ECDH AES key-wrap params: {other:?}"),
     }
@@ -1424,7 +1420,7 @@ fn reads_ecdh_and_x942_parameter_structs() {
     {
         CkMechanismParams::X942Dh1Derive(params) => {
             assert_eq!(params.kdf, 11);
-            assert_eq!(params.other_info, vec![0x51, 0x52].into());
+            assert_eq!(params.other_info, vec![0x51, 0x52]);
             assert_eq!(params.public_data, vec![0x61, 0x62, 0x63]);
         }
         other => panic!("unexpected X9.42 DH1 derive params: {other:?}"),
@@ -1455,7 +1451,7 @@ fn reads_ecdh_and_x942_parameter_structs() {
     {
         CkMechanismParams::X942Dh2Derive(params) => {
             assert_eq!(params.kdf, 12);
-            assert_eq!(params.other_info, vec![0x71, 0x72, 0x73].into());
+            assert_eq!(params.other_info, vec![0x71, 0x72, 0x73]);
             assert_eq!(params.public_data, vec![0x81, 0x82]);
             assert_eq!(params.private_data_len, 64);
             assert_eq!(params.private_data_handle, 0x4567);
@@ -1494,11 +1490,11 @@ fn reads_ike_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::IkePrfDerive(params) => {
-            assert_eq!(params.prf_mechanism, CkMechanismType::SHA256.0 as u64);
+            assert_eq!(params.prf_mechanism, CkMechanismType::SHA256.0);
             assert!(params.data_as_key);
             assert!(!params.rekey);
-            assert_eq!(params.ni, vec![0xA1, 0xA2, 0xA3].into());
-            assert_eq!(params.nr, vec![0xB1, 0xB2].into());
+            assert_eq!(params.ni, vec![0xA1, 0xA2, 0xA3]);
+            assert_eq!(params.nr, vec![0xB1, 0xB2]);
             assert_eq!(params.new_key_handle, 0x1234);
         }
         other => panic!("unexpected IKE PRF derive params: {other:?}"),
@@ -1527,12 +1523,12 @@ fn reads_ike_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::Ike1PrfDerive(params) => {
-            assert_eq!(params.prf_mechanism, CkMechanismType::SHA384.0 as u64);
+            assert_eq!(params.prf_mechanism, CkMechanismType::SHA384.0);
             assert!(params.has_prev_key);
             assert_eq!(params.keygxy_handle, 0x2345);
             assert_eq!(params.prev_key_handle, 0x3456);
-            assert_eq!(params.ckyi, vec![0xC1, 0xC2].into());
-            assert_eq!(params.ckyr, vec![0xD1, 0xD2, 0xD3].into());
+            assert_eq!(params.ckyi, vec![0xC1, 0xC2]);
+            assert_eq!(params.ckyr, vec![0xD1, 0xD2, 0xD3]);
             assert_eq!(params.key_number, 3);
         }
         other => panic!("unexpected IKE1 PRF derive params: {other:?}"),
@@ -1556,10 +1552,10 @@ fn reads_ike_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::Ike1ExtendedDerive(params) => {
-            assert_eq!(params.prf_mechanism, CkMechanismType::SHA512.0 as u64);
+            assert_eq!(params.prf_mechanism, CkMechanismType::SHA512.0);
             assert!(params.has_keygxy);
             assert_eq!(params.keygxy_handle, 0x4567);
-            assert_eq!(params.extra_data, vec![0xE1, 0xE2, 0xE3, 0xE4].into());
+            assert_eq!(params.extra_data, vec![0xE1, 0xE2, 0xE3, 0xE4]);
         }
         other => panic!("unexpected IKE1 extended derive params: {other:?}"),
     }
@@ -1582,10 +1578,10 @@ fn reads_ike_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::Ike2PrfPlusDerive(params) => {
-            assert_eq!(params.prf_mechanism, CkMechanismType::SHA256.0 as u64);
+            assert_eq!(params.prf_mechanism, CkMechanismType::SHA256.0);
             assert!(params.has_seed_key);
             assert_eq!(params.seed_key_handle, 0x5678);
-            assert_eq!(params.seed_data, vec![0xF1, 0xF2, 0xF3].into());
+            assert_eq!(params.seed_data, vec![0xF1, 0xF2, 0xF3]);
         }
         other => panic!("unexpected IKE2 PRF-plus derive params: {other:?}"),
     }
@@ -1619,9 +1615,9 @@ fn reads_wtls_prf_and_x942_mqv_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::WtlsPrf(params) => {
-            assert_eq!(params.digest_mechanism, CkMechanismType::SHA256.0 as u64);
-            assert_eq!(params.seed, vec![0xA1, 0xA2, 0xA3].into());
-            assert_eq!(params.label, vec![0xB1, 0xB2].into());
+            assert_eq!(params.digest_mechanism, CkMechanismType::SHA256.0);
+            assert_eq!(params.seed, vec![0xA1, 0xA2, 0xA3]);
+            assert_eq!(params.label, vec![0xB1, 0xB2]);
             assert_eq!(params.output_len, 12);
         }
         other => panic!("unexpected WTLS PRF params: {other:?}"),
@@ -1653,7 +1649,7 @@ fn reads_wtls_prf_and_x942_mqv_parameter_structs() {
     {
         CkMechanismParams::X942MqvDerive(params) => {
             assert_eq!(params.kdf, 7);
-            assert_eq!(params.other_info, vec![0xC1, 0xC2].into());
+            assert_eq!(params.other_info, vec![0xC1, 0xC2]);
             assert_eq!(params.public_data, vec![0xD1, 0xD2, 0xD3]);
             assert_eq!(params.private_data_len, 32);
             assert_eq!(params.private_data_handle, 77);
@@ -1698,9 +1694,9 @@ fn reads_otp_and_skipjack_parameter_structs() {
         CkMechanismParams::Otp(params) => {
             assert_eq!(params.params.len(), 2);
             assert_eq!(params.params[0].type_, 0);
-            assert_eq!(params.params[0].value, vec![0x11, 0x12, 0x13].into());
+            assert_eq!(params.params[0].value, vec![0x11, 0x12, 0x13]);
             assert_eq!(params.params[1].type_, 1);
-            assert_eq!(params.params[1].value, vec![0x21, 0x22].into());
+            assert_eq!(params.params[1].value, vec![0x21, 0x22]);
         }
         other => panic!("unexpected OTP params: {other:?}"),
     }
@@ -1734,7 +1730,7 @@ fn reads_otp_and_skipjack_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::SkipjackPrivateWrap(params) => {
-            assert_eq!(params.password, vec![0x31, 0x32].into());
+            assert_eq!(params.password, vec![0x31, 0x32]);
             assert_eq!(params.password_length, 2);
             assert_eq!(params.public_data, vec![0x41, 0x42, 0x43]);
             assert_eq!(params.random_a, vec![0x51, 0x52, 0x53, 0x54]);
@@ -1778,13 +1774,13 @@ fn reads_otp_and_skipjack_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::SkipjackRelayx(params) => {
-            assert_eq!(params.old_wrapped_x, vec![0x91, 0x92].into());
-            assert_eq!(params.old_password, vec![0xA1, 0xA2, 0xA3].into());
-            assert_eq!(params.old_public_data, vec![0xB1].into());
-            assert_eq!(params.old_random_a, vec![0xC1, 0xC2].into());
-            assert_eq!(params.new_password, vec![0xD1, 0xD2, 0xD3, 0xD4].into());
-            assert_eq!(params.new_public_data, vec![0xE1, 0xE2].into());
-            assert_eq!(params.new_random_a, vec![0xF1, 0xF2, 0xF3].into());
+            assert_eq!(params.old_wrapped_x, vec![0x91, 0x92]);
+            assert_eq!(params.old_password, vec![0xA1, 0xA2, 0xA3]);
+            assert_eq!(params.old_public_data, vec![0xB1]);
+            assert_eq!(params.old_random_a, vec![0xC1, 0xC2]);
+            assert_eq!(params.new_password, vec![0xD1, 0xD2, 0xD3, 0xD4]);
+            assert_eq!(params.new_public_data, vec![0xE1, 0xE2]);
+            assert_eq!(params.new_random_a, vec![0xF1, 0xF2, 0xF3]);
         }
         other => panic!("unexpected Skipjack relayx params: {other:?}"),
     }
@@ -1821,7 +1817,7 @@ fn reads_kip_parameter_struct_with_nested_mechanism() {
             assert_eq!(params.mechanism.mechanism_type, CkMechanismType::SHA256);
             assert!(params.mechanism.params.is_none());
             assert_eq!(params.key_handle, 99);
-            assert_eq!(params.seed, vec![0x44, 0x45, 0x46].into());
+            assert_eq!(params.seed, vec![0x44, 0x45, 0x46]);
         }
         other => panic!("unexpected KIP params: {other:?}"),
     }
@@ -1893,7 +1889,7 @@ fn gcm_generated_iv_buffer_is_preserved_and_written_back() {
     };
 
     match unsafe { read_ck_mechanism(&mechanism) } {
-        CkMechanismParams::Gcm(GcmParams { iv, iv_bits, iv_buffer_len, aad, tag_bits, .. }) => {
+        CkMechanismParams::Gcm(GcmParams { iv, iv_bits, iv_buffer_len, aad, tag_bits }) => {
             assert!(iv.is_empty());
             assert_eq!(iv_bits, 96);
             assert_eq!(iv_buffer_len, 12);
@@ -1911,19 +1907,15 @@ fn gcm_generated_iv_buffer_is_preserved_and_written_back() {
                 iv: generated.clone(),
                 iv_bits: 96,
                 iv_buffer_len: 12,
-                aad: Vec::new().into(),
+                aad: Vec::new(),
                 tag_bits: 128,
-
-                iv_null: false,
-                aad_null: false,
             }),
         );
     }
 
     assert_eq!(iv, generated.as_slice());
-    let (gcm_iv_len, gcm_iv_bits) = (gcm.ulIvLen, gcm.ulIvBits);
-    assert_eq!(gcm_iv_len, 12);
-    assert_eq!(gcm_iv_bits, 96);
+    assert_eq!(gcm.ulIvLen, 12);
+    assert_eq!(gcm.ulIvBits, 96);
 }
 
 #[test]
@@ -1969,7 +1961,7 @@ fn kmac_params_reads_key_length_and_customization_string() {
         CkMechanismParams::Kmac(KmacParams { key_handle, mac_length, customization_string }) => {
             assert_eq!(key_handle, 0xCAFE);
             assert_eq!(mac_length, 64);
-            assert_eq!(customization_string, SecretBytes::copy_from_slice(b"custom"));
+            assert_eq!(customization_string, b"custom");
         }
         other => panic!("unexpected KMAC params: {other:?}"),
     }
@@ -2000,8 +1992,8 @@ fn mu_gen_params_reads_key_tr_and_context() {
     {
         CkMechanismParams::MuGen(MuGenParams { key_handle, tr, context }) => {
             assert_eq!(key_handle, 0xA11CE);
-            assert_eq!(tr, SecretBytes::copy_from_slice(b"precomputed-tr"));
-            assert_eq!(context, SecretBytes::copy_from_slice(b"context"));
+            assert_eq!(tr, b"precomputed-tr");
+            assert_eq!(context, b"context");
         }
         other => panic!("unexpected mu-gen params: {other:?}"),
     }
@@ -2013,7 +2005,7 @@ fn sp800_108_kdf_null_data_params_with_nonzero_count_stays_raw() {
     const CKM_SHA256_HMAC: CK_MECHANISM_TYPE = 0x0000_0251;
 
     let mut params = CK_SP800_108_KDF_PARAMS {
-        prfType: CKM_SHA256_HMAC as _,
+        prfType: CKM_SHA256_HMAC,
         ulNumberOfDataParams: 1,
         pDataParams: std::ptr::null_mut(),
         ulAdditionalDerivedKeys: 0,
@@ -2039,7 +2031,7 @@ fn sp800_108_kdf_null_additional_keys_with_nonzero_count_stays_raw() {
     const CKM_SHA256_HMAC: CK_MECHANISM_TYPE = 0x0000_0251;
 
     let mut params = CK_SP800_108_KDF_PARAMS {
-        prfType: CKM_SHA256_HMAC as _,
+        prfType: CKM_SHA256_HMAC,
         ulNumberOfDataParams: 0,
         pDataParams: std::ptr::null_mut(),
         ulAdditionalDerivedKeys: 1,
@@ -2071,7 +2063,7 @@ fn sp800_108_kdf_null_data_value_with_nonzero_len_stays_raw() {
         ulValueLen: 4,
     }];
     let mut params = CK_SP800_108_KDF_PARAMS {
-        prfType: CKM_SHA256_HMAC as _,
+        prfType: CKM_SHA256_HMAC,
         ulNumberOfDataParams: data_params.len() as CK_ULONG,
         pDataParams: data_params.as_mut_ptr(),
         ulAdditionalDerivedKeys: 0,
@@ -2103,7 +2095,7 @@ fn sp800_108_kdf_null_template_with_nonzero_attr_count_stays_raw() {
         phKey: &mut output_handle,
     }];
     let mut params = CK_SP800_108_KDF_PARAMS {
-        prfType: CKM_SHA256_HMAC as _,
+        prfType: CKM_SHA256_HMAC,
         ulNumberOfDataParams: 0,
         pDataParams: std::ptr::null_mut(),
         ulAdditionalDerivedKeys: additional_keys.len() as CK_ULONG,
@@ -2134,7 +2126,7 @@ fn sp800_108_kdf_null_output_handle_stays_raw() {
         phKey: std::ptr::null_mut(),
     }];
     let mut params = CK_SP800_108_KDF_PARAMS {
-        prfType: CKM_SHA256_HMAC as _,
+        prfType: CKM_SHA256_HMAC,
         ulNumberOfDataParams: 0,
         pDataParams: std::ptr::null_mut(),
         ulAdditionalDerivedKeys: additional_keys.len() as CK_ULONG,
@@ -2160,7 +2152,7 @@ fn sp800_108_feedback_null_iv_with_nonzero_len_stays_raw() {
     const CKM_SHA256_HMAC: CK_MECHANISM_TYPE = 0x0000_0251;
 
     let mut params = CK_SP800_108_FEEDBACK_KDF_PARAMS {
-        prfType: CKM_SHA256_HMAC as _,
+        prfType: CKM_SHA256_HMAC,
         ulNumberOfDataParams: 0,
         pDataParams: std::ptr::null_mut(),
         ulIVLen: 16,
@@ -2191,12 +2183,12 @@ fn sp800_108_feedback_reads_additional_keys_and_writes_handles_back() {
     let mut value_len = 32 as CK_ULONG;
     let mut template = [
         CK_ATTRIBUTE {
-            type_: CkAttributeType::LABEL.0 as _,
+            type_: CkAttributeType::LABEL.0,
             pValue: label.as_mut_ptr() as CK_VOID_PTR,
             ulValueLen: label.len() as CK_ULONG,
         },
         CK_ATTRIBUTE {
-            type_: CkAttributeType::VALUE_LEN.0 as _,
+            type_: CkAttributeType::VALUE_LEN.0,
             pValue: &mut value_len as *mut _ as CK_VOID_PTR,
             ulValueLen: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
         },
@@ -2209,7 +2201,7 @@ fn sp800_108_feedback_reads_additional_keys_and_writes_handles_back() {
     }];
     let mut iv = [0xA5u8; 16];
     let mut params = CK_SP800_108_FEEDBACK_KDF_PARAMS {
-        prfType: CKM_SHA256_HMAC as _,
+        prfType: CKM_SHA256_HMAC,
         ulNumberOfDataParams: 0,
         pDataParams: std::ptr::null_mut(),
         ulIVLen: iv.len() as CK_ULONG,
@@ -2225,16 +2217,13 @@ fn sp800_108_feedback_reads_additional_keys_and_writes_handles_back() {
 
     match unsafe { read_ck_mechanism(&mechanism) } {
         CkMechanismParams::Sp800108FeedbackKdf(params) => {
-            assert_eq!(params.prf_type, CKM_SHA256_HMAC as u64);
+            assert_eq!(params.prf_type, CKM_SHA256_HMAC);
             assert_eq!(params.iv, vec![0xA5; 16]);
             assert_eq!(params.additional_derived_keys.len(), 1);
             let derived = &params.additional_derived_keys[0];
             assert_eq!(derived.key_handle, 0);
             assert_eq!(derived.template.len(), 2);
-            assert_eq!(
-                derived.template[0].value,
-                Some(CkAttributeValue::Bytes(b"extra".to_vec().into()))
-            );
+            assert_eq!(derived.template[0].value, Some(CkAttributeValue::Bytes(b"extra".to_vec())));
             assert_eq!(derived.template[1].value, Some(CkAttributeValue::Ulong(32)));
         }
         other => panic!("unexpected SP800-108 feedback params: {other:?}"),
@@ -2244,7 +2233,7 @@ fn sp800_108_feedback_reads_additional_keys_and_writes_handles_back() {
         write_mechanism_output_params(
             &mut mechanism,
             &CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
-                prf_type: CKM_SHA256_HMAC as _,
+                prf_type: CKM_SHA256_HMAC,
                 data_params: Vec::new(),
                 iv: vec![0xA5; 16],
                 additional_derived_keys: vec![Sp800108DerivedKey {
@@ -2380,68 +2369,5 @@ fn salsa20_nonce_unmaterializable_bits_rejected_not_wild_read() {
     match result.params.expect("params") {
         CkMechanismParams::Raw(_) => {} // expected: safe Raw fallback
         other => panic!("expected Raw fallback for unmaterializable nonce bits, got {other:?}"),
-    }
-}
-
-#[test]
-fn gcm_null_vs_empty_iv_aad_survive_the_read() {
-    // F3/D2: (NULL, 0) vs (ptr, 0) for pIv/pAAD must remain distinguishable
-    // after the shim read so the daemon can materialize the caller's shape.
-    for (p_iv, iv_null, p_aad, aad_null) in [
-        (std::ptr::null_mut(), true, std::ptr::null_mut(), true),
-        (std::ptr::null_mut(), true, std::ptr::dangling_mut(), false),
-        (std::ptr::dangling_mut(), false, std::ptr::null_mut(), true),
-        (std::ptr::dangling_mut(), false, std::ptr::dangling_mut(), false),
-    ] {
-        let mut gcm = CK_GCM_PARAMS {
-            pIv: p_iv,
-            ulIvLen: 0,
-            ulIvBits: 0,
-            pAAD: p_aad,
-            ulAADLen: 0,
-            ulTagBits: 128,
-        };
-        let mechanism = CK_MECHANISM {
-            mechanism: CkMechanismType::AES_GCM.0 as CK_MECHANISM_TYPE,
-            pParameter: &mut gcm as *mut _ as CK_VOID_PTR,
-            ulParameterLen: std::mem::size_of::<CK_GCM_PARAMS>() as CK_ULONG,
-        };
-        match unsafe { read_ck_mechanism(&mechanism) } {
-            CkMechanismParams::Gcm(gcm) => {
-                assert!(gcm.iv.is_empty());
-                assert!(gcm.aad.expose(|b| b.is_empty()));
-                assert_eq!(gcm.iv_null, iv_null, "pIv nullness must survive");
-                assert_eq!(gcm.aad_null, aad_null, "pAAD nullness must survive");
-            }
-            other => panic!("unexpected GCM params: {other:?}"),
-        }
-    }
-}
-
-#[test]
-fn oaep_null_vs_empty_source_survives_the_read() {
-    // F3/D2: (NULL, 0) vs (ptr, 0) for pSourceData must remain
-    // distinguishable after the shim read.
-    for (p_source, source_null) in [(std::ptr::null_mut(), true), (std::ptr::dangling_mut(), false)]
-    {
-        let mut oaep = CK_RSA_PKCS_OAEP_PARAMS {
-            hashAlg: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
-            mgf: 1,
-            source: 1,
-            pSourceData: p_source,
-            ulSourceDataLen: 0,
-        };
-        let mechanism = CK_MECHANISM {
-            mechanism: CkMechanismType::RSA_PKCS_OAEP.0 as CK_MECHANISM_TYPE,
-            pParameter: &mut oaep as *mut _ as CK_VOID_PTR,
-            ulParameterLen: std::mem::size_of::<CK_RSA_PKCS_OAEP_PARAMS>() as CK_ULONG,
-        };
-        match unsafe { read_ck_mechanism(&mechanism) } {
-            CkMechanismParams::RsaPkcsOaep(oaep) => {
-                assert!(oaep.source_data.expose(|b| b.is_empty()));
-                assert_eq!(oaep.source_null, source_null, "pSourceData nullness must survive");
-            }
-            other => panic!("unexpected OAEP params: {other:?}"),
-        }
     }
 }

@@ -844,8 +844,6 @@ message UnwrapKeyRequest {
   repeated Attribute template = 6;
   // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; wrapped_key is then empty.
   optional uint64 wrapped_key_null_len = 7;
-  // Wave 3.5 D2: true => caller passed (NULL, 0); template is then empty.
-  bool template_null = 8;
 }
 message UnwrapKeyResponse {
   uint64 ck_rv = 1;
@@ -1135,8 +1133,6 @@ message DecapsulateKeyRequest {
   bytes ciphertext = 6;
   // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; ciphertext is then empty.
   optional uint64 ciphertext_null_len = 7;
-  // Wave 3.5 D2: true => caller passed (NULL, 0); template is then empty.
-  bool template_null = 8;
 }
 message DecapsulateKeyResponse {
   uint64 ck_rv = 1;
@@ -1182,8 +1178,6 @@ message EncryptMessageBeginRequest {
   bytes associated_data = 4;
   // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; associated_data is then empty.
   optional uint64 associated_data_null_len = 5;
-  optional ParameterRoundtripSpec parameter_out_spec = 6;
-  optional MessageParameter message_parameter = 7;
 }
 message EncryptMessageBeginResponse {
   optional MessageParameterEffects message_effects = 5;
@@ -1254,8 +1248,6 @@ message DecryptMessageBeginRequest {
   bytes associated_data = 4;
   // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; associated_data is then empty.
   optional uint64 associated_data_null_len = 5;
-  optional ParameterRoundtripSpec parameter_out_spec = 6;
-  optional MessageParameter message_parameter = 7;
 }
 message DecryptMessageBeginResponse {
   optional MessageParameterEffects message_effects = 5;
@@ -1334,7 +1326,6 @@ message SignMessageNextRequest {
   bool request_signature = 5;  // true = final part, return signature
   // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; data_part is then empty.
   optional uint64 data_part_null_len = 6;
-  optional ParameterRoundtripSpec parameter_out_spec = 7;
 }
 message SignMessageNextResponse {
   uint64 ck_rv = 1;
@@ -1370,11 +1361,6 @@ message VerifyMessageRequest {
   optional uint64 data_null_len = 6;
   // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; signature is then empty.
   optional uint64 signature_null_len = 7;
-  optional ParameterRoundtripSpec parameter_out_spec = 8;
-}
-message VerifyMessageResponse {
-  uint64 ck_rv = 1;
-  optional ParameterRoundtripResult parameter_result = 2;
 }
 
 // C_VerifyMessageBegin
@@ -1402,11 +1388,6 @@ message VerifyMessageNextRequest {
   optional uint64 data_part_null_len = 7;
   // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; signature is then empty.
   optional uint64 signature_null_len = 8;
-  optional ParameterRoundtripSpec parameter_out_spec = 9;
-}
-message VerifyMessageNextResponse {
-  uint64 ck_rv = 1;
-  optional ParameterRoundtripResult parameter_result = 2;
 }
 
 // C_MessageVerifyFinal
@@ -1465,8 +1446,6 @@ message WrapKeyAuthenticatedRequest {
   bytes associated_data = 6;
   // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; associated_data is then empty.
   optional uint64 associated_data_null_len = 7;
-  // Presence acknowledges the pointer-safe authenticated contract.
-  AuthenticatedParameters authenticated_parameters = 8;
 }
 message WrapKeyAuthenticatedResponse {
   uint64 ck_rv = 1;
@@ -1488,9 +1467,6 @@ message UnwrapKeyAuthenticatedRequest {
   optional uint64 wrapped_key_null_len = 8;
   // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; associated_data is then empty.
   optional uint64 associated_data_null_len = 9;
-  AuthenticatedParameters authenticated_parameters = 10;
-  // Wave 3.5 D2: true => caller passed (NULL, 0); template is then empty.
-  bool template_null = 11;
 }
 message UnwrapKeyAuthenticatedResponse {
   uint64 ck_rv = 1;
@@ -1564,7 +1540,6 @@ message ByteOutputExactRequest {
   // ADR-0010 Scope 2: present => caller passed a NULL input pointer with this
   // claimed length; input_data is then empty. Absent => input_data is the input.
   optional uint64 input_data_null_len = 9;
-  uint32 exact_output_effects_version = 10;
 }
 message ByteOutputExactResponse {
   OutputBufferResult result = 1;
@@ -1604,8 +1579,6 @@ message ParameterOutputExactRequest {
   optional uint64 input_data_null_len = 14;
   // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; associated_data is then empty.
   optional uint64 associated_data_null_len = 15;
-  AuthenticatedParameters authenticated_parameters = 16;
-  uint32 exact_output_effects_version = 17;
 }
 
 message ParameterOutputExactResponse {

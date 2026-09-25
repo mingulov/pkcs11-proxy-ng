@@ -161,7 +161,7 @@ impl Pkcs11Backend for TestBackend3x {
     fn sign_init(&self, s: CkSessionHandle, m: &CkMechanism, k: CkObjectHandle) -> CkResult<()> {
         self.inner.sign_init(s, m, k)
     }
-    fn sign(&self, s: CkSessionHandle, d: CkInBuf<'_>) -> CkResult<SecretBytes> {
+    fn sign(&self, s: CkSessionHandle, d: CkInBuf<'_>) -> CkResult<Vec<u8>> {
         self.inner.sign(s, d)
     }
     fn sign_update(&self, s: CkSessionHandle, p: CkInBuf<'_>) -> CkResult<()> {
@@ -178,7 +178,7 @@ impl Pkcs11Backend for TestBackend3x {
     ) -> CkResult<()> {
         self.inner.sign_recover_init(s, m, k)
     }
-    fn sign_recover(&self, s: CkSessionHandle, d: CkInBuf<'_>) -> CkResult<SecretBytes> {
+    fn sign_recover(&self, s: CkSessionHandle, d: CkInBuf<'_>) -> CkResult<Vec<u8>> {
         self.inner.sign_recover(s, d)
     }
     fn verify_recover_init(
@@ -189,7 +189,7 @@ impl Pkcs11Backend for TestBackend3x {
     ) -> CkResult<()> {
         self.inner.verify_recover_init(s, m, k)
     }
-    fn verify_recover(&self, s: CkSessionHandle, sig: CkInBuf<'_>) -> CkResult<SecretBytes> {
+    fn verify_recover(&self, s: CkSessionHandle, sig: CkInBuf<'_>) -> CkResult<Vec<u8>> {
         self.inner.verify_recover(s, sig)
     }
     fn verify_init(&self, s: CkSessionHandle, m: &CkMechanism, k: CkObjectHandle) -> CkResult<()> {
@@ -207,7 +207,7 @@ impl Pkcs11Backend for TestBackend3x {
     fn digest_init(&self, s: CkSessionHandle, m: &CkMechanism) -> CkResult<()> {
         self.inner.digest_init(s, m)
     }
-    fn digest(&self, s: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<SecretBytes> {
+    fn digest(&self, s: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<Vec<u8>> {
         self.inner.digest(s, data)
     }
     fn digest_update(&self, s: CkSessionHandle, p: CkInBuf<'_>) -> CkResult<()> {
@@ -227,10 +227,10 @@ impl Pkcs11Backend for TestBackend3x {
     ) -> CkResult<Option<CkMechanismParams>> {
         self.inner.encrypt_init(s, m, k)
     }
-    fn encrypt(&self, s: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<SecretBytes> {
+    fn encrypt(&self, s: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<Vec<u8>> {
         self.inner.encrypt(s, data)
     }
-    fn encrypt_update(&self, s: CkSessionHandle, part: CkInBuf<'_>) -> CkResult<SecretBytes> {
+    fn encrypt_update(&self, s: CkSessionHandle, part: CkInBuf<'_>) -> CkResult<Vec<u8>> {
         self.inner.encrypt_update(s, part)
     }
     fn encrypt_final(&self, s: CkSessionHandle) -> CkResult<SecretBytes> {
@@ -244,14 +244,10 @@ impl Pkcs11Backend for TestBackend3x {
     ) -> CkResult<Option<CkMechanismParams>> {
         self.inner.decrypt_init(s, m, k)
     }
-    fn decrypt(&self, s: CkSessionHandle, encrypted_data: CkInBuf<'_>) -> CkResult<SecretBytes> {
+    fn decrypt(&self, s: CkSessionHandle, encrypted_data: CkInBuf<'_>) -> CkResult<Vec<u8>> {
         self.inner.decrypt(s, encrypted_data)
     }
-    fn decrypt_update(
-        &self,
-        s: CkSessionHandle,
-        encrypted_part: CkInBuf<'_>,
-    ) -> CkResult<SecretBytes> {
+    fn decrypt_update(&self, s: CkSessionHandle, encrypted_part: CkInBuf<'_>) -> CkResult<Vec<u8>> {
         self.inner.decrypt_update(s, encrypted_part)
     }
     fn decrypt_final(&self, s: CkSessionHandle) -> CkResult<SecretBytes> {
@@ -281,7 +277,7 @@ impl Pkcs11Backend for TestBackend3x {
         m: &CkMechanism,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
-        template: Option<&[CkAttribute]>,
+        template: &[CkAttribute],
     ) -> CkResult<CkObjectHandle> {
         self.inner.unwrap_key(s, m, unwrapping_key, wrapped_key, template)
     }
@@ -352,28 +348,24 @@ impl Pkcs11Backend for TestBackend3x {
     fn generate_random(&self, s: CkSessionHandle, len: u32) -> CkResult<SecretBytes> {
         self.inner.generate_random(s, len)
     }
-    fn digest_encrypt_update(
-        &self,
-        s: CkSessionHandle,
-        part: CkInBuf<'_>,
-    ) -> CkResult<SecretBytes> {
+    fn digest_encrypt_update(&self, s: CkSessionHandle, part: CkInBuf<'_>) -> CkResult<Vec<u8>> {
         self.inner.digest_encrypt_update(s, part)
     }
     fn decrypt_digest_update(
         &self,
         s: CkSessionHandle,
         encrypted_part: CkInBuf<'_>,
-    ) -> CkResult<SecretBytes> {
+    ) -> CkResult<Vec<u8>> {
         self.inner.decrypt_digest_update(s, encrypted_part)
     }
-    fn sign_encrypt_update(&self, s: CkSessionHandle, part: CkInBuf<'_>) -> CkResult<SecretBytes> {
+    fn sign_encrypt_update(&self, s: CkSessionHandle, part: CkInBuf<'_>) -> CkResult<Vec<u8>> {
         self.inner.sign_encrypt_update(s, part)
     }
     fn decrypt_verify_update(
         &self,
         s: CkSessionHandle,
         encrypted_part: CkInBuf<'_>,
-    ) -> CkResult<SecretBytes> {
+    ) -> CkResult<Vec<u8>> {
         self.inner.decrypt_verify_update(s, encrypted_part)
     }
 
@@ -422,7 +414,7 @@ impl Pkcs11Backend for TestBackend3x {
         _session: CkSessionHandle,
         _mechanism: &CkMechanism,
         _private_key: CkObjectHandle,
-        _template: Option<&[CkAttribute]>,
+        _template: &[CkAttribute],
         ciphertext: CkInBuf<'_>,
     ) -> CkResult<CkObjectHandle> {
         let _ = resolve_input(ciphertext)?;
@@ -447,7 +439,7 @@ impl Pkcs11Backend for TestBackend3x {
         parameter: &mut [u8],
         aad: CkInBuf<'_>,
         plaintext: CkInBuf<'_>,
-    ) -> CkResult<(SecretBytes, SecretBytes)> {
+    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
         let _ = resolve_input(aad)?;
         let plaintext = resolve_input(plaintext)?;
         let ciphertext = Self::xor_aa(plaintext);
@@ -460,9 +452,9 @@ impl Pkcs11Backend for TestBackend3x {
         _session: CkSessionHandle,
         parameter: &mut [u8],
         aad: CkInBuf<'_>,
-    ) -> CkResult<SecretBytes> {
+    ) -> CkResult<Vec<u8>> {
         let _ = resolve_input(aad)?;
-        Ok(parameter.to_vec().into())
+        Ok(parameter.to_vec())
     }
 
     fn encrypt_message_next(
@@ -471,7 +463,7 @@ impl Pkcs11Backend for TestBackend3x {
         parameter: &mut [u8],
         plaintext_part: CkInBuf<'_>,
         _flags: CkFlags,
-    ) -> CkResult<(SecretBytes, SecretBytes)> {
+    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
         let plaintext_part = resolve_input(plaintext_part)?;
         let ciphertext_part = Self::xor_aa(plaintext_part);
         // Return order: (parameter_out, ciphertext_part)
@@ -500,7 +492,7 @@ impl Pkcs11Backend for TestBackend3x {
         parameter: &mut [u8],
         aad: CkInBuf<'_>,
         ciphertext: CkInBuf<'_>,
-    ) -> CkResult<(SecretBytes, SecretBytes)> {
+    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
         let _ = resolve_input(aad)?;
         // XOR with 0xAA is self-inverse
         let plaintext = Self::xor_aa(resolve_input(ciphertext)?);
@@ -513,9 +505,9 @@ impl Pkcs11Backend for TestBackend3x {
         _session: CkSessionHandle,
         parameter: &mut [u8],
         aad: CkInBuf<'_>,
-    ) -> CkResult<SecretBytes> {
+    ) -> CkResult<Vec<u8>> {
         let _ = resolve_input(aad)?;
-        Ok(parameter.to_vec().into())
+        Ok(parameter.to_vec())
     }
 
     fn decrypt_message_next(
@@ -524,7 +516,7 @@ impl Pkcs11Backend for TestBackend3x {
         parameter: &mut [u8],
         ciphertext_part: CkInBuf<'_>,
         _flags: CkFlags,
-    ) -> CkResult<(SecretBytes, SecretBytes)> {
+    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
         let plaintext_part = Self::xor_aa(resolve_input(ciphertext_part)?);
         // Return order: (parameter_out, plaintext_part)
         Ok((parameter.to_vec().into(), plaintext_part.into()))
@@ -550,7 +542,7 @@ impl Pkcs11Backend for TestBackend3x {
         _session: CkSessionHandle,
         parameter: &mut [u8],
         data: CkInBuf<'_>,
-    ) -> CkResult<(SecretBytes, SecretBytes)> {
+    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
         let signature = Self::reverse_sign(resolve_input(data)?);
         // Return order: (parameter_out, signature)
         Ok((parameter.to_vec().into(), signature.into()))
@@ -570,7 +562,7 @@ impl Pkcs11Backend for TestBackend3x {
         parameter: &mut [u8],
         data_part: CkInBuf<'_>,
         request_signature: bool,
-    ) -> CkResult<(SecretBytes, SecretBytes)> {
+    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
         let data_part = resolve_input(data_part)?;
         let signature = if request_signature { Self::reverse_sign(data_part) } else { Vec::new() };
         // Return order: (parameter_out, signature)
@@ -680,9 +672,9 @@ impl Pkcs11Backend for TestBackend3x {
         _wrapping_key: CkObjectHandle,
         _key: CkObjectHandle,
         aad: CkInBuf<'_>,
-    ) -> CkResult<(SecretBytes, SecretBytes)> {
+    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
         let _ = resolve_input(aad)?;
-        Ok((vec![0xBB; 16].into(), vec![0xCC; 12].into()))
+        Ok((vec![0xBB; 16], vec![0xCC; 12]))
     }
 
     fn unwrap_key_authenticated(
@@ -691,12 +683,12 @@ impl Pkcs11Backend for TestBackend3x {
         _mechanism: &CkMechanism,
         _unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
-        _template: Option<&[CkAttribute]>,
+        _template: &[CkAttribute],
         aad: CkInBuf<'_>,
-    ) -> CkResult<(CkObjectHandle, SecretBytes)> {
+    ) -> CkResult<(CkObjectHandle, Vec<u8>)> {
         let _ = resolve_input(wrapped_key)?;
         let _ = resolve_input(aad)?;
-        Ok((CkObjectHandle(9003), vec![0xCC; 12].into()))
+        Ok((CkObjectHandle(9003), vec![0xCC; 12]))
     }
 
     // ---- Wave 5: Async (Option B) ----
@@ -780,7 +772,7 @@ mod tests {
                 CkSessionHandle(1),
                 &mech,
                 CkObjectHandle(1),
-                Some(&[]),
+                &[],
                 CkInBuf::Bytes(&[0xCA; 32]),
             )
             .unwrap();
@@ -801,8 +793,7 @@ mod tests {
                 CkInBuf::Bytes(plaintext),
             )
             .unwrap();
-        let ciphertext_bytes = ciphertext.expose(|raw| raw.to_vec());
-        assert!(ciphertext.expose(|raw| raw != plaintext));
+        assert_ne!(ciphertext, plaintext.to_vec());
 
         let mut param2 = vec![0u8; 4];
         let (_param_out, recovered) = backend
@@ -810,10 +801,10 @@ mod tests {
                 CkSessionHandle(1),
                 &mut param2,
                 CkInBuf::Bytes(&[]),
-                CkInBuf::Bytes(&ciphertext_bytes),
+                CkInBuf::Bytes(&ciphertext),
             )
             .unwrap();
-        assert_eq!(recovered, plaintext.to_vec().into());
+        assert_eq!(recovered, plaintext.to_vec());
     }
 
     #[test]
@@ -824,13 +815,12 @@ mod tests {
 
         let (_param_out, signature) =
             backend.sign_message(CkSessionHandle(1), &mut param, CkInBuf::Bytes(data)).unwrap();
-        let signature_bytes = signature.expose(|raw| raw.to_vec());
 
         let result = backend.verify_message(
             CkSessionHandle(1),
             &param,
             CkInBuf::Bytes(data),
-            CkInBuf::Bytes(&signature_bytes),
+            CkInBuf::Bytes(&signature),
         );
         assert_eq!(result, Ok(()));
     }

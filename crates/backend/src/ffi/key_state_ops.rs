@@ -194,14 +194,10 @@ impl FfiBackend {
         mechanism: &CkMechanism,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
-        template: Option<&[CkAttribute]>,
+        template: &[CkAttribute],
     ) -> CkResult<CkObjectHandle> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
-        let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
+        let ffi_attrs = FfiAttrs::from_slice(template);
         let (wk_ptr, wk_len) = wrapped_key.as_ptr_len();
-        let h_session = Self::session_handle(session)?;
-        let h_unwrapping_key = Self::object_handle(unwrapping_key)?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_object_with_mechanism(
             &admission,
             unsafe { (*self.func_list).C_UnwrapKey },
@@ -210,7 +206,7 @@ impl FfiBackend {
                 function(
                     h_session,
                     mech,
-                    h_unwrapping_key,
+                    Self::object_handle(unwrapping_key),
                     wk_ptr as *mut _,
                     Self::ulong_len_u64(wk_len),
                     Self::ffi_attr_ptr(&ffi_attrs),
@@ -408,25 +404,16 @@ impl FfiBackend {
         enc_key: CkObjectHandle,
         auth_key: CkObjectHandle,
     ) -> CkResult<()> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
         let (state_ptr, state_len) = state.as_ptr_len();
-        let h_session = Self::session_handle(session)?;
-        let h_enc_key = Self::object_handle(enc_key)?;
-        let h_auth_key = Self::object_handle(auth_key)?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
-        Self::call_unit(
-            &admission,
-            unsafe { (*self.func_list).C_SetOperationState },
-            |function| unsafe {
-                function(
-                    h_session,
-                    state_ptr as *mut _,
-                    Self::ulong_len_u64(state_len),
-                    h_enc_key,
-                    h_auth_key,
-                )
-            },
-        )
+        Self::call_unit(unsafe { (*self.func_list).C_SetOperationState }, |function| unsafe {
+            function(
+                Self::session_handle(session),
+                state_ptr as *mut _,
+                Self::ulong_len_u64(state_len),
+                Self::object_handle(enc_key),
+                Self::object_handle(auth_key),
+            )
+        })
     }
 
     pub(super) fn ffi_seed_random(
@@ -434,12 +421,13 @@ impl FfiBackend {
         session: CkSessionHandle,
         seed: CkInBuf<'_>,
     ) -> CkResult<()> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
         let (seed_ptr, seed_len) = seed.as_ptr_len();
-        let h_session = Self::session_handle(session)?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
-        Self::call_unit(&admission, unsafe { (*self.func_list).C_SeedRandom }, |function| unsafe {
-            function(h_session, seed_ptr as *mut _, Self::ulong_len_u64(seed_len))
+        Self::call_unit(unsafe { (*self.func_list).C_SeedRandom }, |function| unsafe {
+            function(
+                Self::session_handle(session),
+                seed_ptr as *mut _,
+                Self::ulong_len_u64(seed_len),
+            )
         })
     }
 
@@ -463,17 +451,14 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         part: CkInBuf<'_>,
-    ) -> CkResult<SecretBytes> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
+    ) -> CkResult<Vec<u8>> {
         let (part_ptr, part_len) = part.as_ptr_len();
-        let h_session = Self::session_handle(session)?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_bytes(
             &admission,
             unsafe { (*self.func_list).C_DigestEncryptUpdate },
             |function, output, output_len| unsafe {
                 function(
-                    h_session,
+                    Self::session_handle(session),
                     part_ptr as *mut _,
                     Self::ulong_len_u64(part_len),
                     output,
@@ -505,17 +490,14 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         encrypted_part: CkInBuf<'_>,
-    ) -> CkResult<SecretBytes> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
+    ) -> CkResult<Vec<u8>> {
         let (ep_ptr, ep_len) = encrypted_part.as_ptr_len();
-        let h_session = Self::session_handle(session)?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_bytes(
             &admission,
             unsafe { (*self.func_list).C_DecryptDigestUpdate },
             |function, output, output_len| unsafe {
                 function(
-                    h_session,
+                    Self::session_handle(session),
                     ep_ptr as *mut _,
                     Self::ulong_len_u64(ep_len),
                     output,
@@ -547,17 +529,14 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         part: CkInBuf<'_>,
-    ) -> CkResult<SecretBytes> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
+    ) -> CkResult<Vec<u8>> {
         let (part_ptr, part_len) = part.as_ptr_len();
-        let h_session = Self::session_handle(session)?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_bytes(
             &admission,
             unsafe { (*self.func_list).C_SignEncryptUpdate },
             |function, output, output_len| unsafe {
                 function(
-                    h_session,
+                    Self::session_handle(session),
                     part_ptr as *mut _,
                     Self::ulong_len_u64(part_len),
                     output,
@@ -589,17 +568,14 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         encrypted_part: CkInBuf<'_>,
-    ) -> CkResult<SecretBytes> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
+    ) -> CkResult<Vec<u8>> {
         let (ep_ptr, ep_len) = encrypted_part.as_ptr_len();
-        let h_session = Self::session_handle(session)?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_bytes(
             &admission,
             unsafe { (*self.func_list).C_DecryptVerifyUpdate },
             |function, output, output_len| unsafe {
                 function(
-                    h_session,
+                    Self::session_handle(session),
                     ep_ptr as *mut _,
                     Self::ulong_len_u64(ep_len),
                     output,

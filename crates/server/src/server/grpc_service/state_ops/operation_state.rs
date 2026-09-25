@@ -13,11 +13,7 @@ use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv, CkSessionHandle, SecretBytes};
 use super::super::super::context_manager::{ClientContextId, ContextManager, MessageOperation};
 use super::super::super::handle_map::{BackendHandle, VirtualHandle};
 use super::super::ck_result_to_rv;
-use super::super::service_utils::{
-    check_sanitize, ck_rv_only, ensure_private_use_allowed, gate_object_handle, input_from_wire,
-    spawn_backend, spawn_backend_with_optional_timeout,
-};
-use crate::server::grpc_service::HandlerContext;
+use super::super::service_utils::{check_sanitize, ck_rv_only, input_from_wire, spawn_backend};
 
 async fn resolve_state_handles(
     ctx_mgr: &Arc<ContextManager>,
@@ -82,7 +78,8 @@ pub(super) async fn get_operation_state(
 }
 
 pub(super) async fn set_operation_state(
-    ctx: &HandlerContext,
+    ctx_mgr: &Arc<ContextManager>,
+    backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::SetOperationStateRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SetOperationStateResponse>, Status> {
@@ -117,99 +114,20 @@ async fn set_operation_state_with_timeout(
         }
     };
 
-    // D6(1): the embedded keys are USEd here; refuse private keys while the
-    // caller is logically logged out (authn before the authz gate below).
-    for (virtual_key, backend_key) in [
-        (req.encryption_key_handle, encryption_key),
-        (req.authentication_key_handle, authentication_key),
-    ] {
-        if backend_key.0 != 0
-            && let Err(rv) = ensure_private_use_allowed(
-                ctx,
-                &ctx_id,
-                req.session_handle,
-                virtual_key,
-                session,
-                backend_key,
-            )
-            .await
-        {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::SetOperationStateResponse {
-                ck_rv: rv.0,
-            }));
-        }
-    }
-
-    // Gate embedded key handles through per-object authz if active (C1).
-    if ctx.token_policy.per_object_active() {
-        let backend_session = BackendHandle(session.0);
-        if encryption_key.0 != 0 {
-            encryption_key = gate_object_handle(
-                ctx,
-                &ctx_id,
-                req.session_handle,
-                req.encryption_key_handle,
-                backend_session,
-                encryption_key,
-            )
-            .await;
-        }
-        if authentication_key.0 != 0 {
-            authentication_key = gate_object_handle(
-                ctx,
-                &ctx_id,
-                req.session_handle,
-                req.authentication_key_handle,
-                backend_session,
-                authentication_key,
-            )
-            .await;
-        }
-    }
-
-    let operation_state = SecretBytes::new(req.operation_state);
+    let operation_state = req.operation_state;
     let operation_state_null_len = req.operation_state_null_len;
     // ADR-0010 sanitize_inputs: validate NULL operation_state pointer before backend call.
     if let Err(rv) = check_sanitize(sanitize_inputs, operation_state_null_len) {
         return Ok(Response::new(pkcs11_proxy_ng_proto::SetOperationStateResponse { ck_rv: rv.0 }));
     }
-    let mut transitions = match ctx_mgr
-        .begin_message_operation_transitions(
-            &ctx_id,
-            VirtualHandle(req.session_handle),
-            &[
-                MessageOperation::Encrypt,
-                MessageOperation::Decrypt,
-                MessageOperation::Sign,
-                MessageOperation::Verify,
-            ],
-        )
-        .await
-    {
-        Ok(transitions) => transitions,
-        Err(error) => {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::SetOperationStateResponse {
-                ck_rv: error.0,
-            }));
-        }
-    };
     let backend = backend_ref.clone();
-    let result = spawn_backend_with_optional_timeout(timeout_override, move || {
-        for transition in &mut transitions {
-            transition.mark_started();
-        }
-        let result = operation_state.expose(|raw| {
-            backend.set_operation_state(
-                session,
-                input_from_wire(raw, operation_state_null_len),
-                encryption_key,
-                authentication_key,
-            )
-        });
-        for transition in &mut transitions {
-            transition.settle(&result, None);
-        }
-        result
+    let result = spawn_backend(move || {
+        backend.set_operation_state(
+            session,
+            input_from_wire(&operation_state, operation_state_null_len),
+            encryption_key,
+            authentication_key,
+        )
     })
     .await?;
 

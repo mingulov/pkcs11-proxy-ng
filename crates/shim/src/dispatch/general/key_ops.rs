@@ -76,7 +76,12 @@ pub unsafe extern "C" fn c_unwrap_key(
             return rv;
         }
         let mech = unsafe { read_mechanism(p_mechanism) };
-        let wrapped_key = unsafe { read_input_slice(p_wrapped_key, ul_wrapped_key_len) };
+        let wrapped_key = match input_buf_to_ck_in_buf(unsafe {
+            classify_input(p_wrapped_key, ul_wrapped_key_len)
+        }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
         match with_client!(client => client.unwrap_key(
             CkSessionHandle(h_session as u64),
             &mech,

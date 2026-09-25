@@ -26,7 +26,9 @@ use super::super::service_utils::{
 
 use crate::server::grpc_service::HandlerContext;
 pub(crate) async fn verify_signature_init(
-    ctx: &HandlerContext,
+    ctx_mgr: &Arc<ContextManager>,
+    backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::VerifySignatureInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifySignatureInitResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
@@ -144,7 +146,9 @@ pub(crate) async fn verify_signature_init(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn verify_signature(
-    ctx: &HandlerContext,
+    ctx_mgr: &Arc<ContextManager>,
+    backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::VerifySignatureRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifySignatureResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
@@ -162,7 +166,7 @@ pub(crate) async fn verify_signature(
         }
     };
 
-    let data = SecretBytes::new(req.data);
+    let data = req.data;
     let data_null_len = req.data_null_len;
     // ADR-0010 sanitize_inputs: validate NULL data pointer before backend call.
     if let Err(rv) = check_sanitize(sanitize_inputs, data_null_len) {
@@ -170,7 +174,7 @@ pub(crate) async fn verify_signature(
     }
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
-        data.expose(|raw| backend.verify_signature(session, input_from_wire(raw, data_null_len)))
+        backend.verify_signature(session, input_from_wire(&data, data_null_len))
     })
     .await?;
     Ok(Response::new(pkcs11_proxy_ng_proto::VerifySignatureResponse { ck_rv: ck_rv_only(result) }))
@@ -181,7 +185,9 @@ pub(crate) async fn verify_signature(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn verify_signature_update(
-    ctx: &HandlerContext,
+    ctx_mgr: &Arc<ContextManager>,
+    backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::VerifySignatureUpdateRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifySignatureUpdateResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
@@ -199,7 +205,7 @@ pub(crate) async fn verify_signature_update(
         }
     };
 
-    let data_part = SecretBytes::new(req.data_part);
+    let data_part = req.data_part;
     let data_part_null_len = req.data_part_null_len;
     // ADR-0010 sanitize_inputs: validate NULL data_part pointer before backend call.
     if let Err(rv) = check_sanitize(sanitize_inputs, data_part_null_len) {
@@ -209,9 +215,7 @@ pub(crate) async fn verify_signature_update(
     }
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
-        data_part.expose(|raw| {
-            backend.verify_signature_update(session, input_from_wire(raw, data_part_null_len))
-        })
+        backend.verify_signature_update(session, input_from_wire(&data_part, data_part_null_len))
     })
     .await?;
     Ok(Response::new(pkcs11_proxy_ng_proto::VerifySignatureUpdateResponse {
@@ -224,7 +228,9 @@ pub(crate) async fn verify_signature_update(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn verify_signature_final(
-    ctx: &HandlerContext,
+    ctx_mgr: &Arc<ContextManager>,
+    backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::VerifySignatureFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifySignatureFinalResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;

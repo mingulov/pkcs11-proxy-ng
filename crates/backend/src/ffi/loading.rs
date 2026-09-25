@@ -171,15 +171,8 @@ impl FfiBackend {
             func_list_3_2,
             initialize_args,
             mech_cache: dashmap::DashMap::new(),
-            last_init_family: dashmap::DashMap::new(),
             session_slot_map: dashmap::DashMap::new(),
             slot_sessions: dashmap::DashMap::new(),
-            object_cleanup: Default::default(),
-            retirement_sentinel: super::native_domain::RetirementSentinel::for_permit(&permit),
-            construction: permit,
-            lifecycle: super::native_domain::LifecycleTracker::default(),
-            lifecycle_domain: super::native_domain::LifecycleDomain::new(),
-            session_fences: super::session_fence::SessionFenceTable::default(),
         })
     }
 

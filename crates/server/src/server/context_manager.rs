@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Instant;
-use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
+use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 /// Opaque context identifier (ADR-0002 §3).
@@ -210,8 +210,14 @@ pub struct LogicalClientInstance {
     pub session_handles: HandleMap, // virtual session → backend session
     pub session_slots: HashMap<VirtualHandle, CkSlotId>, // session → slot ownership (ADR-0002 §7)
     pub object_handles: HandleMap,  // virtual object → backend object
+    /// Virtual object handles created as SESSION objects (CKA_TOKEN=false) in
+    /// each virtual session. Evicted when that session closes so a recycled
+    /// backend object number can never alias a stale handle (B2). Token objects
+    /// are intentionally absent — their handles persist across the application's
+    /// sessions.
+    pub session_objects: HashMap<VirtualHandle, Vec<VirtualHandle>>,
     pub login_state: HashMap<CkSlotId, LoginState>, // per-token login
-    pub authenticated_identity: Option<String>, // bound at creation (ADR-0005 §4)
+    pub authenticated_identity: Option<String>,     // bound at creation (ADR-0005 §4)
     /// Count of backend operations currently in flight for this context.
     /// Eviction never reaps a context with `in_flight > 0`, so a single
     /// long backend call (DH/RSA keygen, slow-HSM op) is not evicted MID-CALL
@@ -230,11 +236,7 @@ impl LogicalClientInstance {
             session_handles: HandleMap::new(),
             session_slots: HashMap::new(),
             object_handles: HandleMap::new(),
-            object_metadata: HashMap::new(),
             session_objects: HashMap::new(),
-            created_objects: HashSet::new(),
-            object_private: HashMap::new(),
-            attr_cache: HashMap::new(),
             login_state: HashMap::new(),
             authenticated_identity: identity,
             in_flight: Arc::new(AtomicI64::new(0)),
@@ -264,21 +266,10 @@ impl LogicalClientInstance {
         let mut backend_handles = Vec::with_capacity(to_remove.len());
         for vh in to_remove {
             self.session_slots.remove(&vh);
-            self.message_operations.retain(|(session, _), _| *session != vh);
-            // Evict each closed session's session objects (B2) together with
-            // their cached unique IDs so recycled virtual handles cannot return
-            // stale ids. Also evict the created-set entries so a recycled
-            // virtual handle cannot inherit created-status.
+            // Evict each closed session's session objects (B2).
             if let Some(objects) = self.session_objects.remove(&vh) {
                 for object in objects {
                     self.object_handles.remove(object);
-                    self.object_metadata.remove(&object);
-                    self.created_objects.remove(&object);
-                    self.object_private.remove(&object);
-                    // Evict all cached attribute entries for this object (R2). Mirrors
-                    // the object_metadata + created_objects eviction so a recycled
-                    // virtual handle cannot return stale cached attributes.
-                    self.attr_cache.retain(|(attr_vh, _), _| *attr_vh != object);
                 }
             }
             if let Some(bh) = self.session_handles.remove(vh) {
@@ -289,11 +280,25 @@ impl LogicalClientInstance {
         backend_handles
     }
 
+    /// Record `object` as a session object (CKA_TOKEN=false) created in
+    /// `session`, so its virtual handle is evicted when that session closes (B2).
+    pub fn record_session_object(&mut self, session: VirtualHandle, object: VirtualHandle) {
+        self.session_objects.entry(session).or_default().push(object);
+    }
+
     /// Remove one session. If it was the final session this logical client
     /// held for the slot, clear the corresponding logical login state.
     pub fn remove_session(&mut self, session: VirtualHandle) -> Option<BackendHandle> {
         let slot = self.session_slots.remove(&session);
         let backend_handle = self.session_handles.remove(session);
+        // Evict the session's session objects: the backend destroys them on
+        // close, so the virtual handles must not linger and alias a recycled
+        // backend object number (B2).
+        if let Some(objects) = self.session_objects.remove(&session) {
+            for object in objects {
+                self.object_handles.remove(object);
+            }
+        }
         if let Some(slot) = slot {
             let has_remaining_session_for_slot = self.session_slots.values().any(|s| *s == slot);
             if !has_remaining_session_for_slot {
@@ -313,11 +318,7 @@ impl LogicalClientInstance {
         self.session_handles.clear();
         self.session_slots.clear();
         self.object_handles.clear();
-        self.object_metadata.clear();
         self.session_objects.clear();
-        self.created_objects.clear();
-        self.object_private.clear();
-        self.attr_cache.clear();
         self.login_state.clear();
         self.message_operations.clear();
         backend_sessions
@@ -362,6 +363,14 @@ pub struct ContextManager {
     slot_map: Arc<RwLock<SlotMap>>,
     lease_duration: std::time::Duration,
     max_contexts: usize,
+    /// Per-(slot, login state) PIN verifiers (salted SHA-256), captured at the
+    /// first successful backend login so a co-located logical client can be
+    /// PIN-validated without a second backend `C_Login` (which the shared,
+    /// already-logged-in token answers `USER_ALREADY_LOGGED_IN` without
+    /// checking the PIN). Stores a salted hash, never the raw PIN. See ADR-0008.
+    pin_verifiers: Arc<DashMap<(CkSlotId, LoginState), [u8; 32]>>,
+    /// Random per-process salt for the PIN-verifier hashes.
+    pin_salt: [u8; 16],
     /// Cache of `(label, serial)` per backend slot, captured when the daemon
     /// last read `C_GetTokenInfo` for an authorization check (M9). Authorization
     /// is otherwise a blocking backend call on every discovery/open. Entries are
@@ -369,7 +378,7 @@ pub struct ContextManager {
     /// `TOKEN_INFO_CACHE_TTL`, so a token swapped without a re-registration is
     /// re-read within at most the TTL — the cache never authorizes against a
     /// token-identity older than that.
-    token_info_cache: Arc<DashMap<BackendSlotId, (Instant, String, String)>>,
+    token_info_cache: Arc<DashMap<CkSlotId, (Instant, String, String)>>,
     /// Per-slot serialization lock for login/logout (M5). The cross-context
     /// login-state scan, the backend `C_Login`, and the `login_state` insert
     /// must be atomic per slot. Without it, two clients racing the FIRST login
@@ -377,50 +386,13 @@ pub struct ContextManager {
     /// `C_Login` path, and the second is answered `USER_ALREADY_LOGGED_IN` by
     /// the already-logged-in token instead of the synthesized logical OK. One
     /// lock per slot id; different slots log in concurrently.
-    login_locks: Arc<DashMap<BackendSlotId, Arc<Mutex<()>>>>,
+    login_locks: Arc<DashMap<CkSlotId, Arc<Mutex<()>>>>,
 }
 
 /// Maximum age of a cached `(label, serial)` before an authorization check
 /// re-reads `C_GetTokenInfo`. Bounds the staleness of token-policy decisions
 /// after an undetected runtime token change (M9).
 const TOKEN_INFO_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// RAII guard marking a backend operation in flight for one context. While it
-/// lives, eviction skips that context (see `ContextManager::begin_operation`).
-#[derive(Clone)]
-pub struct OperationGuard {
-    inner: Arc<OperationGuardInner>,
-}
-
-struct OperationGuardInner {
-    manager: Arc<ContextManager>,
-    id: ClientContextId,
-    counter: Arc<AtomicI64>,
-}
-
-impl OperationGuard {
-    fn new(manager: Arc<ContextManager>, id: ClientContextId, counter: Arc<AtomicI64>) -> Self {
-        Self { inner: Arc::new(OperationGuardInner { manager, id, counter }) }
-    }
-
-    pub(crate) fn belongs_to(&self, manager: &Arc<ContextManager>, id: &ClientContextId) -> bool {
-        Arc::ptr_eq(&self.inner.manager, manager) && self.inner.id == *id
-    }
-}
-
-impl Drop for OperationGuardInner {
-    fn drop(&mut self) {
-        // Refresh last_active before publishing in_flight=0 and hold the DashMap
-        // shard lock through the decrement.  Otherwise the reaper can remove the
-        // context in the decrement-to-touch window after a long backend call.
-        if let Some(mut ctx) = self.manager.contexts.get_mut(&self.id) {
-            ctx.touch();
-            self.counter.fetch_sub(1, Ordering::Relaxed);
-        } else {
-            self.counter.fetch_sub(1, Ordering::Relaxed);
-        }
-    }
-}
 
 /// RAII guard marking a backend operation in flight for one context. While it
 /// lives, eviction skips that context (see `ContextManager::begin_operation`).
@@ -448,6 +420,8 @@ impl ContextManager {
             slot_map: Arc::new(RwLock::new(SlotMap::new())),
             lease_duration,
             max_contexts,
+            pin_verifiers: Arc::new(DashMap::new()),
+            pin_salt: *Uuid::new_v4().as_bytes(),
             token_info_cache: Arc::new(DashMap::new()),
             login_locks: Arc::new(DashMap::new()),
         }
@@ -458,284 +432,19 @@ impl ContextManager {
     /// scan, the backend `C_Login`/`C_Logout`, and the `login_state` mutation, so
     /// concurrent logins on the same shared token cannot both take the real-login
     /// path. The lock is keyed by slot, so different slots are unaffected.
-    pub fn slot_login_lock(&self, slot: BackendSlotId) -> Arc<Mutex<()>> {
+    pub fn slot_login_lock(&self, slot: CkSlotId) -> Arc<Mutex<()>> {
         self.login_locks.entry(slot).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
-    }
-
-    pub(crate) async fn message_operation_lock(
-        &self,
-        ctx_id: &ClientContextId,
-        virtual_session: VirtualHandle,
-        operation: MessageOperation,
-    ) -> CkResult<Arc<Mutex<MessageOperationState>>> {
-        match self
-            .get_context(ctx_id, |ctx| {
-                if ctx.session_handles.resolve(virtual_session).is_none() {
-                    return Err(CkRv::SESSION_HANDLE_INVALID);
-                }
-                Ok(ctx
-                    .message_operations
-                    .entry((virtual_session, operation))
-                    .or_insert_with(|| Arc::new(Mutex::new(MessageOperationState::default())))
-                    .clone())
-            })
-            .await
-        {
-            Some(result) => result,
-            None => Err(CkRv::CRYPTOKI_NOT_INITIALIZED),
-        }
-    }
-
-    /// Begin several message-operation transitions in caller-supplied fixed
-    /// order.  The returned guards can move into the blocking provider closure
-    /// so timeout/cancellation of the async handler cannot release them early.
-    pub(crate) async fn begin_message_operation_transitions(
-        &self,
-        ctx_id: &ClientContextId,
-        virtual_session: VirtualHandle,
-        operations: &[MessageOperation],
-    ) -> CkResult<Vec<MessageOperationTransition>> {
-        let mut transitions = Vec::with_capacity(operations.len());
-        for operation in operations {
-            let state = self.message_operation_lock(ctx_id, virtual_session, *operation).await?;
-            transitions.push(MessageOperationTransition::begin(state.lock_owned().await));
-        }
-        Ok(transitions)
-    }
-
-    /// Atomically suspend an active virtual session and return a completion
-    /// token.  Suspended handles cannot be resolved by later RPCs.
-    #[cfg(test)]
-    pub(crate) fn begin_close_session(
-        self: &Arc<Self>,
-        ctx_id: &ClientContextId,
-        virtual_session: VirtualHandle,
-    ) -> Result<CloseSessionTransition, CloseSessionBeginError> {
-        self.begin_close_session_with_guard(ctx_id, virtual_session, None)
-    }
-
-    pub(crate) fn begin_close_session_with_guard(
-        self: &Arc<Self>,
-        ctx_id: &ClientContextId,
-        virtual_session: VirtualHandle,
-        inherited_guard: Option<OperationGuard>,
-    ) -> Result<CloseSessionTransition, CloseSessionBeginError> {
-        let operation_guard = match inherited_guard {
-            Some(guard) if guard.belongs_to(self, ctx_id) => guard,
-            _ => self.begin_operation(ctx_id).ok_or(CloseSessionBeginError::ContextMissing)?,
-        };
-        let backend_handle = {
-            let mut context =
-                self.contexts.get_mut(ctx_id).ok_or(CloseSessionBeginError::ContextMissing)?;
-            context
-                .session_handles
-                .suspend(virtual_session)
-                .ok_or(CloseSessionBeginError::SessionMissing)?
-        };
-        Ok(CloseSessionTransition {
-            manager: Arc::clone(self),
-            context_id: ctx_id.clone(),
-            virtual_session,
-            backend_handle,
-            _operation_guard: operation_guard,
-            started: false,
-            settled: false,
-        })
-    }
-
-    /// Synchronous completion path used from a blocking provider thread.
-    /// Mutate only the expected suspended tuple; stale completions are no-ops.
-    fn complete_close_session(
-        &self,
-        ctx_id: &ClientContextId,
-        virtual_session: VirtualHandle,
-        expected_backend: BackendHandle,
-        completion: CloseSessionCompletion,
-    ) {
-        let Some(mut context) = self.contexts.get_mut(ctx_id) else {
-            return;
-        };
-        if context.session_handles.suspended_backend(virtual_session) != Some(expected_backend) {
-            return;
-        }
-
-        match completion {
-            CloseSessionCompletion::Terminal => {
-                context.remove_session(virtual_session);
-            }
-            CloseSessionCompletion::Transient => {
-                if !context.session_handles.reactivate_suspended(virtual_session, expected_backend)
-                {
-                    // The raw handle has been rebound to a newer virtual id.
-                    // Keep the old mapping quarantined and discard stale shape.
-                    context
-                        .message_operations
-                        .retain(|(session, _), _| *session != virtual_session);
-                }
-            }
-            CloseSessionCompletion::Ambiguous => {
-                context.message_operations.retain(|(session, _), _| *session != virtual_session);
-            }
-        }
     }
 
     /// Cached `(label, serial)` for `backend_slot` if it was read within
     /// `TOKEN_INFO_CACHE_TTL`; otherwise `None` (the caller must re-read it).
-    pub fn cached_token_info(&self, backend_slot: BackendSlotId) -> Option<(String, String)> {
+    pub fn cached_token_info(&self, backend_slot: CkSlotId) -> Option<(String, String)> {
         self.cached_token_info_within(backend_slot, TOKEN_INFO_CACHE_TTL)
-    }
-
-    /// Look up the backend slot that owns `virtual_session` within context
-    /// `ctx_id`. Returns `None` when the context does not exist or the session
-    /// is not registered in `session_slots`.
-    pub async fn slot_for_session(
-        &self,
-        ctx_id: &ClientContextId,
-        virtual_session: VirtualHandle,
-    ) -> Option<BackendSlotId> {
-        self.get_context(ctx_id, |ctx| ctx.session_slots.get(&virtual_session).copied())
-            .await
-            .flatten()
-    }
-
-    /// Return the cached [`ObjectMetadata`] for `virtual_object` within context
-    /// `ctx_id`, or `None` on a cache miss.
-    ///
-    /// A `None` result means either the object has never been fetched, OR it is
-    /// a token object (token objects are never cached — see `cache_object_metadata`).
-    /// The caller must fetch from the backend via `fetch_object_metadata` when
-    /// this returns `None`.
-    pub async fn object_metadata(
-        &self,
-        ctx_id: &ClientContextId,
-        virtual_object: u64,
-    ) -> Option<ObjectMetadata> {
-        self.get_context(ctx_id, |ctx| {
-            ctx.object_metadata.get(&VirtualHandle(virtual_object)).cloned()
-        })
-        .await
-        .flatten()
-    }
-
-    /// Cache [`ObjectMetadata`] for `virtual_object` within context `ctx_id`.
-    ///
-    /// **I2 fix:** token objects (`meta.is_token == true`) are NEVER cached.
-    /// They are re-fetched on every gate call so a cross-client backend handle
-    /// recycling event cannot cause a stale authorization decision.
-    ///
-    /// Session objects (`!meta.is_token`) are cached and evicted together with
-    /// the virtual object handle (on `C_DestroyObject`, session close, or
-    /// context teardown) so a recycled virtual handle can never return stale
-    /// metadata within one context.
-    ///
-    /// No-ops silently when the context no longer exists.
-    pub async fn cache_object_metadata(
-        &self,
-        ctx_id: &ClientContextId,
-        virtual_object: u64,
-        meta: ObjectMetadata,
-    ) {
-        if meta.is_token {
-            return; // Never cache token objects (I2 fix).
-        }
-        let _ = self
-            .get_context(ctx_id, |ctx| {
-                ctx.object_metadata.insert(VirtualHandle(virtual_object), meta);
-            })
-            .await;
-    }
-
-    // --- R2 attribute coalescer accessors ---
-
-    /// Return the cached [`CachedAttr`] for `(object, attr)` within context `ctx_id`,
-    /// or `None` on a cache miss.
-    ///
-    /// A `None` result means either the attribute has never been cached for this object,
-    /// or the object's cache entries were evicted (session close / context teardown).
-    /// The caller should forward the request to the backend and then call
-    /// [`attr_cache_put`](Self::attr_cache_put) when the coalescer is enabled.
-    pub async fn attr_cache_get(
-        &self,
-        ctx_id: &ClientContextId,
-        object: u64,
-        attr: CkAttributeType,
-    ) -> Option<CachedAttr> {
-        self.get_context(ctx_id, |ctx| ctx.attr_cache.get(&(VirtualHandle(object), attr)).cloned())
-            .await
-            .flatten()
-    }
-
-    /// Store a [`CachedAttr`] for `(object, attr)` within context `ctx_id`.
-    ///
-    /// No-ops silently when the context no longer exists (the backend result is
-    /// still forwarded to the caller; only the caching step is skipped).
-    pub async fn attr_cache_put(
-        &self,
-        ctx_id: &ClientContextId,
-        object: u64,
-        attr: CkAttributeType,
-        entry: CachedAttr,
-    ) {
-        let _ = self
-            .get_context(ctx_id, |ctx| {
-                ctx.attr_cache.insert((VirtualHandle(object), attr), entry);
-            })
-            .await;
-    }
-
-    /// Drop ALL cached attribute entries for `object` within context `ctx_id`.
-    ///
-    /// Called when a virtual object handle is invalidated (e.g. `C_DestroyObject`)
-    /// so a reused virtual handle cannot serve stale cached attributes from a prior
-    /// object. No-ops silently when the context is gone.
-    pub async fn attr_cache_invalidate_object(&self, ctx_id: &ClientContextId, object: u64) {
-        let _ = self
-            .get_context(ctx_id, |ctx| {
-                ctx.attr_cache.retain(|(vh, _), _| *vh != VirtualHandle(object));
-            })
-            .await;
-    }
-
-    /// Clear ALL cached attribute entries for context `ctx_id` (e.g. after `C_Logout`).
-    ///
-    /// Per PKCS#11, `C_Logout` invalidates an application's handles to private objects
-    /// on the token; the coalescer must not serve cached attributes of those handles
-    /// after logout. Evicting the entire cache is conservative and correct: it also
-    /// clears public-object entries, which is only a performance miss, not a correctness
-    /// issue. Distinguishing private vs. public would require `CKA_PRIVATE` to be
-    /// tracked per handle — which the cache does not do. No-ops silently when the
-    /// context is gone.
-    pub async fn attr_cache_clear(&self, ctx_id: &ClientContextId) {
-        let _ = self
-            .get_context(ctx_id, |ctx| {
-                ctx.attr_cache.clear();
-            })
-            .await;
-    }
-
-    /// Return `true` when `virtual_object` was minted (generated, created,
-    /// unwrapped) by context `ctx_id` in this session — i.e. it is present in
-    /// the context's `created_objects` set.
-    ///
-    /// Used by `gate_object_handle` to allow a confined principal to use keys
-    /// it just generated even when the backend-assigned `CKA_UNIQUE_ID` is not
-    /// in its pre-configured `objects` grant.
-    ///
-    /// Returns `false` when the context is gone (fail-safe: treat absence as
-    /// not-created so the gate does not skip its normal policy check).
-    pub async fn object_was_created_here(
-        &self,
-        ctx_id: &ClientContextId,
-        virtual_object: u64,
-    ) -> bool {
-        self.get_context(ctx_id, |ctx| ctx.created_objects.contains(&VirtualHandle(virtual_object)))
-            .await
-            .unwrap_or(false)
     }
 
     fn cached_token_info_within(
         &self,
-        backend_slot: BackendSlotId,
+        backend_slot: CkSlotId,
         ttl: std::time::Duration,
     ) -> Option<(String, String)> {
         self.token_info_cache.get(&backend_slot).and_then(|entry| {
@@ -745,13 +454,52 @@ impl ContextManager {
     }
 
     /// Record the `(label, serial)` read for `backend_slot`.
-    pub fn cache_token_info(&self, backend_slot: BackendSlotId, label: String, serial: String) {
+    pub fn cache_token_info(&self, backend_slot: CkSlotId, label: String, serial: String) {
         self.token_info_cache.insert(backend_slot, (Instant::now(), label, serial));
     }
 
     /// Drop any cached token info for `backend_slot` (the token may have changed).
-    pub fn invalidate_token_info(&self, backend_slot: BackendSlotId) {
+    pub fn invalidate_token_info(&self, backend_slot: CkSlotId) {
         self.token_info_cache.remove(&backend_slot);
+    }
+
+    /// Salted hash of a PIN for verifier storage/comparison. A `None` PIN
+    /// (protected-auth path) hashes to a value distinct from an empty PIN.
+    pub fn hash_pin(&self, pin: Option<&[u8]>) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(self.pin_salt);
+        match pin {
+            Some(p) => {
+                hasher.update([1u8]);
+                hasher.update(p);
+            }
+            None => hasher.update([0u8]),
+        }
+        hasher.finalize().into()
+    }
+
+    /// Capture the PIN verifier for `(slot, state)` after a successful backend
+    /// login so later co-located logical logins can be PIN-validated.
+    pub fn store_pin_verifier_hash(&self, slot: CkSlotId, state: LoginState, hash: [u8; 32]) {
+        self.pin_verifiers.insert((slot, state), hash);
+    }
+
+    /// Validate a presented PIN's hash against the stored verifier for
+    /// `(slot, state)`. `None` means no verifier is recorded — the caller must
+    /// not synthesize a login (it cannot validate the PIN).
+    pub fn verify_pin_hash(
+        &self,
+        slot: CkSlotId,
+        state: LoginState,
+        hash: &[u8; 32],
+    ) -> Option<bool> {
+        self.pin_verifiers.get(&(slot, state)).map(|stored| *stored == *hash)
+    }
+
+    /// Drop the PIN verifier for `(slot, state)` (on the last real logout).
+    pub fn clear_pin_verifier(&self, slot: CkSlotId, state: LoginState) {
+        self.pin_verifiers.remove(&(slot, state));
     }
 
     /// Populate slot map from backend's C_GetSlotList.
@@ -771,7 +519,7 @@ impl ContextManager {
     }
 
     /// Register a single backend slot discovered at runtime.
-    pub async fn register_slot(&self, backend_slot: BackendSlotId) {
+    pub async fn register_slot(&self, backend_slot: CkSlotId) {
         // A (re-)registration may reflect a changed token in the slot, so drop
         // any cached token info for it (M9).
         self.invalidate_token_info(backend_slot);
@@ -800,12 +548,20 @@ impl ContextManager {
         // transiently by the number of racing creators — acceptable
         // because the limit is a soft cap, not a correctness gate.
         if self.max_contexts > 0 && self.contexts.len() >= self.max_contexts {
-            // Try evicting expired contexts first.
+            // Try evicting expired contexts first — but ONLY those holding no
+            // open backend sessions. This path has no backend handle and so
+            // cannot close backend sessions; dropping a context that holds them
+            // would leak them. Contexts with open sessions are reclaimed by the
+            // background reaper (`evict_expired`), which closes them properly
+            // (M4).
             let now = std::time::Instant::now();
             let expired: Vec<_> = self
                 .contexts
                 .iter()
-                .filter(|entry| self.is_reapable(entry.value(), now))
+                .filter(|entry| {
+                    self.is_reapable(entry.value(), now)
+                        && entry.value().session_handles.virtual_handles().next().is_none()
+                })
                 .map(|entry| entry.key().clone())
                 .collect();
             for id in &expired {
@@ -829,12 +585,14 @@ impl ContextManager {
     }
 
     /// Returns the current number of active contexts.
-    pub async fn context_count(&self) -> usize {
+    // Not `async`: a DashMap read needs no `.await` (L5).
+    pub fn context_count(&self) -> usize {
         self.contexts.len()
     }
 
     /// Returns the currently active context IDs.
-    pub async fn context_ids(&self) -> Vec<ClientContextId> {
+    // Not `async`: a DashMap read needs no `.await` (L5).
+    pub fn context_ids(&self) -> Vec<ClientContextId> {
         self.contexts.iter().map(|entry| entry.key().clone()).collect()
     }
 
@@ -874,17 +632,68 @@ impl ContextManager {
     /// `last_active` so a long op that just finished isn't evicted before the
     /// client's next call. Returns `None` when the context doesn't exist — the
     /// caller then errors out normally and no guard is needed.
+    /// Like [`begin_operation`](Self::begin_operation) but enforces a
+    /// per-context in-flight cap (M2): `Ok(Some(guard))` when the context exists
+    /// and is under `max_in_flight`, `Ok(None)` when the context is gone (the
+    /// handler then returns the right CK_RV), and `Err(())` when the context is
+    /// at its cap (the caller should reject the request so one client cannot
+    /// monopolise the shared backend-call budget).
+    ///
+    /// `pub(crate)`: a crate-internal helper, so the `Err(())` at-capacity signal
+    /// needs no richer error type (it would otherwise trip `result_unit_err`).
+    pub(crate) fn begin_operation_capped(
+        self: &Arc<Self>,
+        id: &ClientContextId,
+        max_in_flight: i64,
+    ) -> Result<Option<OperationGuard>, ()> {
+        let counter = {
+            let Some(entry) = self.contexts.get(id) else { return Ok(None) };
+            // Reserve a slot with a CAS so the cap is exact even under concurrent
+            // reservations on the same context (all under this shard read lock).
+            loop {
+                let current = entry.in_flight.load(Ordering::Relaxed);
+                if max_in_flight > 0 && current >= max_in_flight {
+                    return Err(());
+                }
+                if entry
+                    .in_flight
+                    .compare_exchange_weak(
+                        current,
+                        current + 1,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    )
+                    .is_ok()
+                {
+                    break;
+                }
+            }
+            entry.in_flight.clone()
+        };
+        Ok(Some(OperationGuard { manager: Arc::clone(self), id: id.clone(), counter }))
+    }
+
     pub fn begin_operation(self: &Arc<Self>, id: &ClientContextId) -> Option<OperationGuard> {
-        let counter = self.contexts.get(id)?.in_flight.clone();
-        counter.fetch_add(1, Ordering::Relaxed);
+        // Increment in_flight WHILE holding the shard lock (the `get` guard), so
+        // the eviction path's `remove_if` — which takes the shard write lock and
+        // is therefore mutually exclusive with this read lock — cannot observe
+        // in_flight==0 and reap this context between the read and the increment
+        // (L10). The Arc is cloned for the guard before the lock is released.
+        let counter = {
+            let entry = self.contexts.get(id)?;
+            entry.in_flight.fetch_add(1, Ordering::Relaxed);
+            entry.in_flight.clone()
+        };
         Some(OperationGuard { manager: Arc::clone(self), id: id.clone(), counter })
     }
 
-    pub async fn context_identity(&self, id: &ClientContextId) -> Option<String> {
+    // Not `async`: a DashMap read needs no `.await` (L5).
+    pub fn context_identity(&self, id: &ClientContextId) -> Option<String> {
         self.contexts.get(id).and_then(|ctx| ctx.authenticated_identity.clone())
     }
 
-    pub async fn remove_context(&self, id: &ClientContextId) -> Option<LogicalClientInstance> {
+    // Not `async`: a DashMap remove needs no `.await` (L5).
+    pub fn remove_context(&self, id: &ClientContextId) -> Option<LogicalClientInstance> {
         self.contexts.remove(id).map(|(_k, v)| v)
     }
 
@@ -1191,19 +1000,18 @@ impl ContextManager {
     }
 
     fn drain_expired_contexts(&self, expired: &[ClientContextId]) -> Vec<u64> {
-        // Re-check expiry under the per-shard lock so a context that
-        // got touched between `collect_expired_context_ids` and here
-        // is not evicted on stale data. The first scan is best-effort
-        // (no lock held across shards); this scan is authoritative.
+        // Re-check expiry and remove ATOMICALLY under the per-shard write lock:
+        // `remove_if` evaluates the predicate while holding the lock, so a
+        // context touched (last_active bumped) or that started an operation
+        // (in_flight incremented under the read lock) since the best-effort first
+        // scan is not evicted on stale data — closing the get-then-remove TOCTOU
+        // (L10). The first scan is just a cheap candidate filter.
         let now = Instant::now();
         let mut backend_sessions = Vec::new();
         for id in expired {
-            let still_expired =
-                self.contexts.get(id).is_some_and(|entry| self.is_reapable(&entry, now));
-            if !still_expired {
-                continue;
-            }
-            if let Some((_, mut ctx)) = self.contexts.remove(id) {
+            if let Some((_, mut ctx)) =
+                self.contexts.remove_if(id, |_, ctx| self.is_reapable(ctx, now))
+            {
                 backend_sessions.extend(ctx.teardown());
             }
         }

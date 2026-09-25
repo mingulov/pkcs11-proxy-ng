@@ -233,18 +233,8 @@ impl Pkcs11Client {
         (CkOutputBufferResult, CkParameterRoundtripResult, Option<MessageEffects>),
         MessageCallError,
     > {
-        self.require_exact_output_effects().await.map_err(|_| MessageCallError::protocol())?;
-        let ctx = self.context_id().map_err(MessageCallError::backend)?;
-        if function == ParameterOutputFunction::WrapKeyAuthenticated
-            && mechanism.is_some_and(|m| {
-                !pkcs11_proxy_ng_proto::convert::authenticated::legacy_parameter_supported(m)
-            })
-        {
-            return Err(MessageCallError::backend(CkRv::FUNCTION_NOT_SUPPORTED));
-        }
+        let ctx = self.context_id()?;
         let mut req = pkcs11_proxy_ng_proto::ParameterOutputExactRequest {
-            exact_output_effects_version: 1,
-            authenticated_parameters: None,
             client_context_id: ctx,
             session_handle: session.0,
             function: pkcs11_proxy_ng_proto::convert::output::parameter_output_function_to_i32(
