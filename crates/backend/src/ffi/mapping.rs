@@ -10,7 +10,7 @@ pub(super) fn info_from_ck(info: &cryptoki_sys::CK_INFO) -> CkInfo {
     CkInfo {
         cryptoki_version: (info.cryptokiVersion.major, info.cryptokiVersion.minor),
         manufacturer_id: utf8_trim(&info.manufacturerID),
-        flags: info.flags,
+        flags: info.flags as u64,
         library_description: utf8_trim(&info.libraryDescription),
         library_version: (info.libraryVersion.major, info.libraryVersion.minor),
     }
@@ -20,29 +20,38 @@ pub(super) fn slot_info_from_ck(info: &cryptoki_sys::CK_SLOT_INFO) -> CkSlotInfo
     CkSlotInfo {
         slot_description: utf8_trim(&info.slotDescription),
         manufacturer_id: utf8_trim(&info.manufacturerID),
-        flags: CkSlotFlags(info.flags),
+        flags: CkSlotFlags(info.flags as u64),
         hardware_version: (info.hardwareVersion.major, info.hardwareVersion.minor),
         firmware_version: (info.firmwareVersion.major, info.firmwareVersion.minor),
     }
 }
 
 pub(super) fn token_info_from_ck(info: &cryptoki_sys::CK_TOKEN_INFO) -> CkTokenInfo {
+    // The session-count and memory fields may be CK_UNAVAILABLE_INFORMATION
+    // (all-ones of the backend's CK_ULONG width). Canonicalise that sentinel to
+    // the width-independent wire form so an any-width client recognises it
+    // (ADR-0011); the PIN-length, version, and string fields are never the
+    // sentinel and pass through unchanged.
+    let backend_width = std::mem::size_of::<cryptoki_sys::CK_ULONG>();
+    let canon = |v: cryptoki_sys::CK_ULONG| {
+        pkcs11_proxy_ng_types::width::canonicalize_ulong(v as u64, backend_width)
+    };
     CkTokenInfo {
         label: utf8_trim(&info.label),
         manufacturer_id: utf8_trim(&info.manufacturerID),
         model: utf8_trim(&info.model),
         serial_number: utf8_trim(&info.serialNumber),
-        flags: CkTokenFlags(info.flags),
-        max_session_count: info.ulMaxSessionCount,
-        session_count: info.ulSessionCount,
-        max_rw_session_count: info.ulMaxRwSessionCount,
-        rw_session_count: info.ulRwSessionCount,
-        max_pin_len: info.ulMaxPinLen,
-        min_pin_len: info.ulMinPinLen,
-        total_public_memory: info.ulTotalPublicMemory,
-        free_public_memory: info.ulFreePublicMemory,
-        total_private_memory: info.ulTotalPrivateMemory,
-        free_private_memory: info.ulFreePrivateMemory,
+        flags: CkTokenFlags(info.flags as u64),
+        max_session_count: canon(info.ulMaxSessionCount),
+        session_count: canon(info.ulSessionCount),
+        max_rw_session_count: canon(info.ulMaxRwSessionCount),
+        rw_session_count: canon(info.ulRwSessionCount),
+        max_pin_len: info.ulMaxPinLen as u64,
+        min_pin_len: info.ulMinPinLen as u64,
+        total_public_memory: canon(info.ulTotalPublicMemory),
+        free_public_memory: canon(info.ulFreePublicMemory),
+        total_private_memory: canon(info.ulTotalPrivateMemory),
+        free_private_memory: canon(info.ulFreePrivateMemory),
         hardware_version: (info.hardwareVersion.major, info.hardwareVersion.minor),
         firmware_version: (info.firmwareVersion.major, info.firmwareVersion.minor),
         utc_time: utf8_trim(&info.utcTime),
@@ -51,18 +60,18 @@ pub(super) fn token_info_from_ck(info: &cryptoki_sys::CK_TOKEN_INFO) -> CkTokenI
 
 pub(super) fn mechanism_info_from_ck(info: &cryptoki_sys::CK_MECHANISM_INFO) -> CkMechanismInfo {
     CkMechanismInfo {
-        min_key_size: info.ulMinKeySize,
-        max_key_size: info.ulMaxKeySize,
-        flags: CkMechanismFlags(info.flags),
+        min_key_size: info.ulMinKeySize as u64,
+        max_key_size: info.ulMaxKeySize as u64,
+        flags: CkMechanismFlags(info.flags as u64),
     }
 }
 
 pub(super) fn session_info_from_ck(info: &cryptoki_sys::CK_SESSION_INFO) -> CkSessionInfo {
     CkSessionInfo {
-        slot_id: CkSlotId(info.slotID),
+        slot_id: CkSlotId(info.slotID as u64),
         state: session_state_from_ck(info.state),
-        flags: CkSessionFlags(info.flags),
-        device_error: info.ulDeviceError,
+        flags: CkSessionFlags(info.flags as u64),
+        device_error: info.ulDeviceError as u64,
     }
 }
 
@@ -82,6 +91,9 @@ pub(super) fn update_template_from_ffi(
             Some(CkAttributeValue::Ulong(_)) => Some(std::mem::size_of::<cryptoki_sys::CK_ULONG>()),
             Some(CkAttributeValue::Bytes(bytes)) => Some(bytes.len()),
             Some(CkAttributeValue::String(value)) => Some(value.len()),
+            // The legacy C_GetAttributeValue path does not carry nested
+            // templates (the exact path does); treat as absent.
+            Some(CkAttributeValue::NestedTemplate(_)) => None,
         };
         let returned_len = src.ulValueLen as usize;
 
@@ -110,8 +122,15 @@ pub(super) fn exact_attribute_results_from_ffi(
                 return nested_attribute_result_from_ffi(query, attr, overall_rv);
             }
 
-            let returned_len = attr.ulValueLen as u64;
             let unavailable = attr.ulValueLen == cryptoki_sys::CK_UNAVAILABLE_INFORMATION;
+            // Canonicalise the platform-sized CK_UNAVAILABLE_INFORMATION sentinel
+            // to a width-independent wire value (ADR-0011) so any-width client
+            // recognises it; non-sentinel lengths stay native for width rescaling.
+            let returned_len = if unavailable {
+                pkcs11_proxy_ng_types::width::CANONICAL_UNAVAILABLE
+            } else {
+                attr.ulValueLen as u64
+            };
             let too_small = query.buffer_present && returned_len > query.buffer_len;
             let single_query_unavailable_status = if queries.len() == 1 && unavailable {
                 match overall_rv {
@@ -170,8 +189,12 @@ fn nested_attribute_result_from_ffi(
     attr: &cryptoki_sys::CK_ATTRIBUTE,
     _overall_rv: CkRv,
 ) -> CkAttributeQueryResult {
-    let returned_len = attr.ulValueLen as u64;
     let unavailable = attr.ulValueLen == cryptoki_sys::CK_UNAVAILABLE_INFORMATION;
+    let returned_len = if unavailable {
+        pkcs11_proxy_ng_types::width::CANONICAL_UNAVAILABLE
+    } else {
+        attr.ulValueLen as u64
+    };
 
     if unavailable {
         return CkAttributeQueryResult {
@@ -196,8 +219,12 @@ fn nested_attribute_result_from_ffi(
         .enumerate()
         .map(|(i, sub_attr)| {
             let sub_query = nested_queries.get(i);
-            let sub_returned_len = sub_attr.ulValueLen as u64;
             let sub_unavailable = sub_attr.ulValueLen == cryptoki_sys::CK_UNAVAILABLE_INFORMATION;
+            let sub_returned_len = if sub_unavailable {
+                pkcs11_proxy_ng_types::width::CANONICAL_UNAVAILABLE
+            } else {
+                sub_attr.ulValueLen as u64
+            };
             let sub_buffer_present = sub_query.is_some_and(|q| q.buffer_present);
             let sub_too_small =
                 sub_buffer_present && sub_returned_len > sub_query.map_or(0, |q| q.buffer_len);
@@ -225,7 +252,7 @@ fn nested_attribute_result_from_ffi(
             };
 
             CkAttributeQueryResult {
-                attr_type: CkAttributeType(sub_attr.type_),
+                attr_type: CkAttributeType(sub_attr.type_ as u64),
                 returned_len: sub_returned_len,
                 value: sub_value,
                 ck_rv: sub_ck_rv,
@@ -258,7 +285,7 @@ mod tests {
                 nested: None,
             }],
             &[cryptoki_sys::CK_ATTRIBUTE {
-                type_: CkAttributeType::LABEL.0,
+                type_: CkAttributeType::LABEL.0 as _,
                 pValue: std::ptr::null_mut(),
                 ulValueLen: 3,
             }],
@@ -278,6 +305,59 @@ mod tests {
     }
 
     #[test]
+    fn token_info_canonicalizes_unavailable_sentinel_fields() {
+        // The eight CK_TOKEN_INFO fields the spec allows to be
+        // CK_UNAVAILABLE_INFORMATION must reach the wire as the canonical,
+        // width-independent sentinel (u64::MAX) so an any-width client
+        // recognises them. On a 32-bit backend the native sentinel is
+        // 0xFFFF_FFFF, which a 64-bit client would otherwise read as a literal
+        // ~4-billion value rather than "no information available".
+        let mut info = cryptoki_sys::CK_TOKEN_INFO::default();
+        let unavail = cryptoki_sys::CK_UNAVAILABLE_INFORMATION;
+        info.ulMaxSessionCount = unavail;
+        info.ulSessionCount = unavail;
+        info.ulMaxRwSessionCount = unavail;
+        info.ulRwSessionCount = unavail;
+        info.ulTotalPublicMemory = unavail;
+        info.ulFreePublicMemory = unavail;
+        info.ulTotalPrivateMemory = unavail;
+        info.ulFreePrivateMemory = unavail;
+        // PIN-length fields are never the sentinel; they must pass through.
+        info.ulMaxPinLen = 32;
+        info.ulMinPinLen = 4;
+
+        let out = super::token_info_from_ck(&info);
+
+        let canon = pkcs11_proxy_ng_types::width::CANONICAL_UNAVAILABLE;
+        assert_eq!(out.max_session_count, canon);
+        assert_eq!(out.session_count, canon);
+        assert_eq!(out.max_rw_session_count, canon);
+        assert_eq!(out.rw_session_count, canon);
+        assert_eq!(out.total_public_memory, canon);
+        assert_eq!(out.free_public_memory, canon);
+        assert_eq!(out.total_private_memory, canon);
+        assert_eq!(out.free_private_memory, canon);
+        assert_eq!(out.max_pin_len, 32);
+        assert_eq!(out.min_pin_len, 4);
+    }
+
+    #[test]
+    fn token_info_passes_through_real_values_and_effectively_infinite() {
+        let info = cryptoki_sys::CK_TOKEN_INFO {
+            ulMaxSessionCount: 0, // CK_EFFECTIVELY_INFINITE — a real value
+            ulSessionCount: 3,
+            ulTotalPublicMemory: 4096,
+            ..Default::default()
+        };
+
+        let out = super::token_info_from_ck(&info);
+
+        assert_eq!(out.max_session_count, 0);
+        assert_eq!(out.session_count, 3);
+        assert_eq!(out.total_public_memory, 4096);
+    }
+
+    #[test]
     fn exact_results_recover_single_query_sensitive_status_from_overall_rv() {
         let results = exact_attribute_results_from_ffi(
             &[CkAttributeQuery {
@@ -287,7 +367,7 @@ mod tests {
                 nested: None,
             }],
             &[cryptoki_sys::CK_ATTRIBUTE {
-                type_: CkAttributeType::VALUE.0,
+                type_: CkAttributeType::VALUE.0 as _,
                 pValue: std::ptr::null_mut(),
                 ulValueLen: cryptoki_sys::CK_UNAVAILABLE_INFORMATION,
             }],
@@ -316,7 +396,7 @@ mod tests {
                 nested: None,
             }],
             &[cryptoki_sys::CK_ATTRIBUTE {
-                type_: CkAttributeType::VALUE.0,
+                type_: CkAttributeType::VALUE.0 as _,
                 pValue: std::ptr::null_mut(),
                 ulValueLen: cryptoki_sys::CK_UNAVAILABLE_INFORMATION,
             }],
@@ -354,12 +434,12 @@ mod tests {
             ],
             &[
                 cryptoki_sys::CK_ATTRIBUTE {
-                    type_: CkAttributeType::VALUE.0,
+                    type_: CkAttributeType::VALUE.0 as _,
                     pValue: std::ptr::null_mut(),
                     ulValueLen: cryptoki_sys::CK_UNAVAILABLE_INFORMATION,
                 },
                 cryptoki_sys::CK_ATTRIBUTE {
-                    type_: CkAttributeType::LABEL.0,
+                    type_: CkAttributeType::LABEL.0 as _,
                     pValue: std::ptr::null_mut(),
                     ulValueLen: cryptoki_sys::CK_UNAVAILABLE_INFORMATION,
                 },
@@ -398,7 +478,7 @@ mod tests {
                 nested: None,
             }],
             &[cryptoki_sys::CK_ATTRIBUTE {
-                type_: CkAttributeType::VALUE.0,
+                type_: CkAttributeType::VALUE.0 as _,
                 pValue: std::ptr::null_mut(),
                 ulValueLen: cryptoki_sys::CK_UNAVAILABLE_INFORMATION,
             }],

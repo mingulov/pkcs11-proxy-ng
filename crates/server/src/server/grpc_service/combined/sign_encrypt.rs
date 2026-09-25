@@ -20,7 +20,7 @@ async fn resolve_backend_session(
     match backend_session {
         None => Err(CkRv::CRYPTOKI_NOT_INITIALIZED),
         Some(None) => Err(CkRv::SESSION_HANDLE_INVALID),
-        Some(Some(handle)) => Ok(CkSessionHandle(handle.0)),
+        Some(Some(handle)) => Ok(CkSessionHandle(handle.0 as u64)),
     }
 }
 

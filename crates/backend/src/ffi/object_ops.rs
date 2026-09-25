@@ -20,7 +20,7 @@ impl FfiBackend {
         session: CkSessionHandle,
         template: &[CkAttribute],
     ) -> CkResult<()> {
-        let ffi_attrs = FfiAttrs::from_slice(template);
+        let ffi_attrs = FfiAttrs::from_slice(template)?;
         let ck_attrs = &ffi_attrs.attrs;
         Self::call_unit(unsafe { (*self.func_list).C_FindObjectsInit }, |function| unsafe {
             function(
@@ -50,7 +50,7 @@ impl FfiBackend {
         // A conformant backend writes at most `cap` handles; clamp `found`
         // defensively so a buggy backend cannot drive an out-of-bounds slice.
         let n = (found as usize).min(cap);
-        Ok(handles[..n].iter().map(|&h| CkObjectHandle(h)).collect())
+        Ok(handles[..n].iter().map(|&h| CkObjectHandle(h as u64)).collect())
     }
 
     pub(super) fn ffi_find_objects_final(&self, session: CkSessionHandle) -> CkResult<()> {
@@ -65,7 +65,7 @@ impl FfiBackend {
         object: CkObjectHandle,
         template: &mut [CkAttribute],
     ) -> CkResult<()> {
-        let mut ffi_attrs = FfiAttrs::from_slice(template);
+        let mut ffi_attrs = FfiAttrs::from_slice(template)?;
         let rv =
             Self::call_raw(unsafe { (*self.func_list).C_GetAttributeValue }, |function| unsafe {
                 function(
@@ -95,7 +95,7 @@ impl FfiBackend {
                     Self::ulong_len(ffi_queries.attrs.len()),
                 )
             })?;
-        let rv = CkRv(rv);
+        let rv = CkRv(rv as u64);
         Ok((rv, exact_attribute_results_from_ffi(queries, &ffi_queries.attrs, rv)))
     }
 
@@ -104,7 +104,7 @@ impl FfiBackend {
         session: CkSessionHandle,
         template: &[CkAttribute],
     ) -> CkResult<CkObjectHandle> {
-        let ffi_attrs = FfiAttrs::from_slice(template);
+        let ffi_attrs = FfiAttrs::from_slice(template)?;
         Self::call_object_output(
             unsafe { (*self.func_list).C_CreateObject },
             |function, handle| unsafe {
@@ -124,7 +124,7 @@ impl FfiBackend {
         object: CkObjectHandle,
         template: &[CkAttribute],
     ) -> CkResult<CkObjectHandle> {
-        let ffi_attrs = FfiAttrs::from_slice(template);
+        let ffi_attrs = FfiAttrs::from_slice(template)?;
         Self::call_object_output(
             unsafe { (*self.func_list).C_CopyObject },
             |function, new_handle| unsafe {
@@ -168,7 +168,7 @@ impl FfiBackend {
         object: CkObjectHandle,
         template: &[CkAttribute],
     ) -> CkResult<()> {
-        let ffi_attrs = FfiAttrs::from_slice(template);
+        let ffi_attrs = FfiAttrs::from_slice(template)?;
         Self::call_unit(unsafe { (*self.func_list).C_SetAttributeValue }, |function| unsafe {
             function(
                 Self::session_handle(session),
@@ -199,6 +199,9 @@ mod find_objects_cap_tests {
     #[test]
     fn bound_is_a_tiny_fraction_of_u32_max() {
         assert!(MAX_FIND_OBJECTS_PER_CALL < u32::MAX as usize);
-        assert_eq!(MAX_FIND_OBJECTS_PER_CALL, 512 * 1024 * 1024 / 8);
+        assert_eq!(
+            MAX_FIND_OBJECTS_PER_CALL,
+            512 * 1024 * 1024 / std::mem::size_of::<cryptoki_sys::CK_OBJECT_HANDLE>()
+        );
     }
 }

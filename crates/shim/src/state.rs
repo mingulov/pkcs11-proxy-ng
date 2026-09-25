@@ -612,14 +612,28 @@ fn apply_jitter(base: Duration, jitter_pct: u32) -> Duration {
 /// `MAX_ATTEMPTS` failures. Each attempt's connect call is itself
 /// bounded by `timeout_secs` so a hung TCP handshake cannot block the
 /// retry loop indefinitely.
+///
+/// `PKCS11_PROXY_CONNECT_ATTEMPTS` lowers the attempt cap (clamped to
+/// `1..=MAX_ATTEMPTS`) for deployments — and the test suite — that
+/// must fail fast on an unreachable daemon. It cannot raise the cap:
+/// the resilience contract's bound on how long `C_Initialize` can
+/// block stays intact.
+pub(crate) fn connect_attempts_from_value(raw: Option<&str>) -> u32 {
+    raw.and_then(|s| s.trim().parse::<u32>().ok())
+        .map(|n| n.clamp(1, MAX_ATTEMPTS))
+        .unwrap_or(MAX_ATTEMPTS)
+}
+
 async fn connect_with_retry(
     endpoint: &str,
     tls_files: Option<pkcs11_proxy_ng_client::tls::ClientTlsFiles>,
     timeout_secs: u64,
 ) -> Result<Pkcs11Client, String> {
     let connect_timeout = Duration::from_secs(timeout_secs);
+    let max_attempts =
+        connect_attempts_from_value(std::env::var("PKCS11_PROXY_CONNECT_ATTEMPTS").ok().as_deref());
 
-    for attempt in 0..MAX_ATTEMPTS {
+    for attempt in 0..max_attempts {
         let delay = backoff_for_attempt(attempt);
         if !delay.is_zero() {
             tracing::debug!(
@@ -641,7 +655,7 @@ async fn connect_with_retry(
             Ok(Err(e)) => {
                 tracing::warn!(
                     attempt = attempt + 1,
-                    max_attempts = MAX_ATTEMPTS,
+                    max_attempts,
                     error = %e,
                     "gRPC connect failed, retrying"
                 );
@@ -649,14 +663,14 @@ async fn connect_with_retry(
             Err(_) => {
                 tracing::warn!(
                     attempt = attempt + 1,
-                    max_attempts = MAX_ATTEMPTS,
+                    max_attempts,
                     timeout_secs,
                     "gRPC connect timed out, retrying"
                 );
             }
         }
     }
-    Err(format!("all {MAX_ATTEMPTS} connect attempts failed"))
+    Err(format!("all {max_attempts} connect attempts failed"))
 }
 
 #[cfg(test)]
@@ -715,6 +729,34 @@ mod backoff_tests {
     #[test]
     fn jitter_on_zero_delay_stays_zero() {
         assert_eq!(apply_jitter(Duration::ZERO, JITTER_PCT), Duration::ZERO);
+    }
+
+    #[test]
+    fn connect_attempts_defaults_to_max() {
+        assert_eq!(connect_attempts_from_value(None), MAX_ATTEMPTS);
+    }
+
+    #[test]
+    fn connect_attempts_accepts_lower_values() {
+        assert_eq!(connect_attempts_from_value(Some("1")), 1);
+        assert_eq!(connect_attempts_from_value(Some("3")), 3);
+    }
+
+    #[test]
+    fn connect_attempts_clamps_zero_to_one() {
+        assert_eq!(connect_attempts_from_value(Some("0")), 1);
+    }
+
+    #[test]
+    fn connect_attempts_cannot_exceed_contract_cap() {
+        assert_eq!(connect_attempts_from_value(Some("50")), MAX_ATTEMPTS);
+    }
+
+    #[test]
+    fn connect_attempts_ignores_unparseable_values() {
+        assert_eq!(connect_attempts_from_value(Some("junk")), MAX_ATTEMPTS);
+        assert_eq!(connect_attempts_from_value(Some("")), MAX_ATTEMPTS);
+        assert_eq!(connect_attempts_from_value(Some("-2")), MAX_ATTEMPTS);
     }
 
     #[test]

@@ -87,7 +87,7 @@ pub(crate) async fn encapsulate_key(
                 ctx_mgr,
                 &ctx_id,
                 virtual_session,
-                CkObjectHandle(key.0),
+                CkObjectHandle(key.0 as u64),
                 is_token,
             )
             .await;
@@ -185,7 +185,7 @@ pub(crate) async fn decapsulate_key(
                 ctx_mgr,
                 &ctx_id,
                 virtual_session,
-                CkObjectHandle(key.0),
+                CkObjectHandle(key.0 as u64),
                 is_token,
             )
             .await;

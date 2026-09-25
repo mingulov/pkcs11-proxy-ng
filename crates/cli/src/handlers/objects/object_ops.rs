@@ -181,6 +181,9 @@ pub(crate) async fn get_attribute(
             Some(CkAttributeValue::Ulong(value)) => println!("  {}: {}", name, value),
             Some(CkAttributeValue::Bool(value)) => println!("  {}: {}", name, value),
             Some(CkAttributeValue::String(value)) => println!("  {}: \"{}\"", name, value),
+            Some(CkAttributeValue::NestedTemplate(subs)) => {
+                println!("  {}: <nested template, {} attributes>", name, subs.len());
+            }
             None => println!("  {}: <unavailable>", name),
         }
     }

@@ -2,14 +2,12 @@
 // intentional for cross-platform PKCS#11 portability.
 #![allow(clippy::unnecessary_cast)]
 
-use std::mem::size_of;
-
 use pkcs11_proxy_ng_types::*;
 
 use super::{MockAttributeSlot, MockBackend, MultiPartOp};
 
 impl MockBackend {
-    fn attribute_bytes(value: &CkAttributeValue) -> Vec<u8> {
+    fn attribute_bytes(&self, value: &CkAttributeValue) -> Vec<u8> {
         match value {
             CkAttributeValue::Bool(flag) => {
                 if *flag {
@@ -18,9 +16,19 @@ impl MockBackend {
                     vec![0]
                 }
             }
-            CkAttributeValue::Ulong(value) => value.to_le_bytes().to_vec(),
+            // Wire contract (ADR-0011): attribute value bytes carry the
+            // backend's native CK_ULONG width — the width of the ABI this
+            // mock EMULATES, not necessarily the host's.
+            CkAttributeValue::Ulong(value) => self.abi().encode_ulong(*value),
             CkAttributeValue::Bytes(bytes) => bytes.clone(),
             CkAttributeValue::String(value) => value.as_bytes().to_vec(),
+            // Unreachable by construction: store_object_template converts
+            // nested-template VALUES into MockAttributeSlot::NestedTemplate,
+            // which the exact path serves structurally. Serve the backend-
+            // layout byte length equivalent defensively.
+            CkAttributeValue::NestedTemplate(subs) => {
+                vec![0; subs.len() * self.abi().attribute_stride()]
+            }
         }
     }
 
@@ -117,7 +125,7 @@ impl MockBackend {
             .iter()
             .map(|query| match obj_map.get(&query.attr_type.0) {
                 Some(MockAttributeSlot::Value(value)) => {
-                    let bytes = Self::attribute_bytes(value);
+                    let bytes = self.attribute_bytes(value);
                     let returned_len = bytes.len() as u64;
                     if !query.buffer_present {
                         CkAttributeQueryResult {
@@ -131,7 +139,7 @@ impl MockBackend {
                         overall_rv = CkRv::BUFFER_TOO_SMALL;
                         CkAttributeQueryResult {
                             attr_type: query.attr_type,
-                            returned_len: cryptoki_sys::CK_UNAVAILABLE_INFORMATION as u64,
+                            returned_len: u64::MAX,
                             value: None,
                             ck_rv: Some(CkRv::BUFFER_TOO_SMALL),
                             nested: None,
@@ -147,7 +155,7 @@ impl MockBackend {
                     }
                 }
                 Some(MockAttributeSlot::NestedTemplate(sub_slots)) => {
-                    Self::nested_template_result(query, sub_slots, &mut overall_rv)
+                    self.nested_template_result(query, sub_slots, &mut overall_rv)
                 }
                 Some(MockAttributeSlot::Sensitive) => {
                     if overall_rv == CkRv::OK {
@@ -155,7 +163,7 @@ impl MockBackend {
                     }
                     CkAttributeQueryResult {
                         attr_type: query.attr_type,
-                        returned_len: cryptoki_sys::CK_UNAVAILABLE_INFORMATION as u64,
+                        returned_len: u64::MAX,
                         value: None,
                         ck_rv: Some(CkRv::ATTRIBUTE_SENSITIVE),
                         nested: None,
@@ -167,7 +175,7 @@ impl MockBackend {
                     }
                     CkAttributeQueryResult {
                         attr_type: query.attr_type,
-                        returned_len: cryptoki_sys::CK_UNAVAILABLE_INFORMATION as u64,
+                        returned_len: u64::MAX,
                         value: None,
                         ck_rv: Some(CkRv::ATTRIBUTE_TYPE_INVALID),
                         nested: None,
@@ -187,11 +195,13 @@ impl MockBackend {
     /// - Data query with nested sub-queries: returns nested `CkAttributeQueryResult` items
     ///   for each sub-attribute, honoring sub-buffer sizes.
     fn nested_template_result(
+        &self,
         query: &CkAttributeQuery,
         sub_slots: &[(CkAttributeType, MockAttributeSlot)],
         overall_rv: &mut CkRv,
     ) -> CkAttributeQueryResult {
-        let template_byte_len = (sub_slots.len() * size_of::<cryptoki_sys::CK_ATTRIBUTE>()) as u64;
+        // Backend-layout template size: the emulated ABI's CK_ATTRIBUTE stride.
+        let template_byte_len = (sub_slots.len() * self.abi().attribute_stride()) as u64;
 
         // Size query: caller passes pValue=NULL
         if !query.buffer_present {
@@ -209,7 +219,7 @@ impl MockBackend {
             *overall_rv = CkRv::BUFFER_TOO_SMALL;
             return CkAttributeQueryResult {
                 attr_type: query.attr_type,
-                returned_len: cryptoki_sys::CK_UNAVAILABLE_INFORMATION as u64,
+                returned_len: u64::MAX,
                 value: None,
                 ck_rv: Some(CkRv::BUFFER_TOO_SMALL),
                 nested: None,
@@ -228,7 +238,7 @@ impl MockBackend {
 
             match sub_slot {
                 MockAttributeSlot::Value(value) => {
-                    let bytes = Self::attribute_bytes(value);
+                    let bytes = self.attribute_bytes(value);
                     let sub_len = bytes.len() as u64;
                     if !sub_buffer_present {
                         // Sub size query: pValue=NULL inside the nested template
@@ -243,7 +253,7 @@ impl MockBackend {
                         has_sub_too_small = true;
                         nested_results.push(CkAttributeQueryResult {
                             attr_type: *sub_type,
-                            returned_len: cryptoki_sys::CK_UNAVAILABLE_INFORMATION as u64,
+                            returned_len: u64::MAX,
                             value: None,
                             ck_rv: Some(CkRv::BUFFER_TOO_SMALL),
                             nested: None,
@@ -263,7 +273,7 @@ impl MockBackend {
                     // are not expected in normal usage; treat as invalid type.
                     nested_results.push(CkAttributeQueryResult {
                         attr_type: *sub_type,
-                        returned_len: cryptoki_sys::CK_UNAVAILABLE_INFORMATION as u64,
+                        returned_len: u64::MAX,
                         value: None,
                         ck_rv: Some(CkRv::ATTRIBUTE_TYPE_INVALID),
                         nested: None,

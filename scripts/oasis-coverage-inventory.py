@@ -1462,7 +1462,9 @@ def mock_backend_source(root: Path) -> Path:
 
 
 def backend_ffi_conversion(root: Path) -> Path:
-    return root / "crates/backend/src/ffi/ffi_conversion.rs"
+    # Split 2026-07-04: the CkMechanismParams match (mechanism_to_ffi) lives
+    # in the mechanism.rs child of the ffi_conversion directory module.
+    return root / "crates/backend/src/ffi/ffi_conversion/mechanism.rs"
 
 
 def backend_ffi_message_ops(root: Path) -> Path:
@@ -1490,7 +1492,16 @@ def shim_interface_tests(root: Path) -> Path:
 
 
 def shim_helpers(root: Path) -> Path:
-    return root / "crates/shim/src/dispatch/general/helpers/mod.rs"
+    # Split 2026-07-04: the per-shape reader match lives in mechanism_read.rs.
+    return root / "crates/shim/src/dispatch/general/helpers/mechanism_read.rs"
+
+
+def shim_mechanism_writeback(root: Path) -> Path:
+    return root / "crates/shim/src/dispatch/general/helpers/mechanism_writeback.rs"
+
+
+def shim_message_params(root: Path) -> Path:
+    return root / "crates/shim/src/dispatch/general/helpers/message_params.rs"
 
 
 def provider_artifacts_root(root: Path) -> Path:
@@ -2352,7 +2363,7 @@ def build_parameter_shape_matrix(
     proto_oneof_fields = parse_mechanism_proto_oneof(types_proto(root))
     backend_variants = parse_ck_mechanism_param_variants(backend_ffi_conversion(root))
     shim_variants = parse_ck_mechanism_param_variants(shim_helpers(root))
-    writeback_variants = parse_writeback_variants(shim_helpers(root))
+    writeback_variants = parse_writeback_variants(shim_mechanism_writeback(root))
     shim_helper_source = shim_helpers(root).relative_to(root).as_posix()
 
     matrix: list[dict[str, Any]] = []
@@ -2530,7 +2541,7 @@ def build_message_parameter_shape_matrix(
     proto_messages = parse_proto_messages([mechanism_params_proto(root), types_proto(root)])
     proto_oneof_fields = parse_message_parameter_proto_oneof(types_proto(root))
     message_ops_text = backend_ffi_message_ops(root).read_text(encoding="utf-8")
-    shim_text = shim_helpers(root).read_text(encoding="utf-8")
+    shim_text = shim_message_params(root).read_text(encoding="utf-8")
 
     rows: list[dict[str, Any]] = []
     for shape in rust_shapes:

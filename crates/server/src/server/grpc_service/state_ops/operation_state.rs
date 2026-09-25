@@ -34,11 +34,11 @@ async fn resolve_state_handles(
 
     let backend_session = session.ok_or(CkRv::SESSION_HANDLE_INVALID)?;
     let encryption_key =
-        encryption_key.map_or(CkObjectHandle(0), |handle| CkObjectHandle(handle.0));
+        encryption_key.map_or(CkObjectHandle(0), |handle| CkObjectHandle(handle.0 as u64));
     let authentication_key =
-        authentication_key.map_or(CkObjectHandle(0), |handle| CkObjectHandle(handle.0));
+        authentication_key.map_or(CkObjectHandle(0), |handle| CkObjectHandle(handle.0 as u64));
 
-    Ok((CkSessionHandle(backend_session.0), encryption_key, authentication_key))
+    Ok((CkSessionHandle(backend_session.0 as u64), encryption_key, authentication_key))
 }
 
 pub(super) async fn get_operation_state(
