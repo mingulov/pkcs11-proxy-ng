@@ -1,0 +1,45 @@
+# Reference: Local Unix-domain-socket configuration
+#
+# Single-user, same-host testing. The daemon listens ONLY on a Unix socket and
+# authenticates the connecting process by its kernel-verified uid (SO_PEERCRED)
+# -- the local-IPC equivalent of mutual auth. There is no TLS: a Unix socket has
+# no network to secure, and SO_PEERCRED cannot be forged by the peer.
+#
+# When to use this vs. alternatives:
+#   * Local testing / a single developer box -> this file.
+#   * Off-box access -> forward the socket over SSH (e.g. `ssh -L`); the daemon
+#     still sees a local Unix connection (the ssh process's uid).
+#   * Real production / network access -> use [listener.remote] with mTLS
+#     instead (see config-mtls.toml). Do NOT expose key material over an
+#     unauthenticated network transport.
+#
+# The socket is created owner-only (0600): the daemon and its clients run as the
+# same uid. Multi-uid access (a socket group/mode knob) is intentionally out of
+# scope for this local transport.
+#
+# The shim connects by pointing the canonical endpoint at the socket:
+#   PKCS11_PROXY_ENDPOINT=unix:/tmp/pkcs11-proxy-ng.sock
+#
+# Usage:
+#   cargo run --bin pkcs11-proxy-ng -- examples/config-unix-local.toml
+#
+# Backend: SoftHSM2 (adjust path for your distribution)
+#   softhsm2-util --init-token --slot 0 --label test --pin 1234 --so-pin 5678
+
+[backend]
+module = "/usr/lib/softhsm/libsofthsm2.so"
+
+[proxy]
+mechanism_discovery = "transparent"
+lease_seconds = 600
+request_timeout_secs = 60
+
+[listener.local]
+path = "/tmp/pkcs11-proxy-ng.sock"
+auth = "peer_cred"   # default for unix; identifies the peer by SO_PEERCRED uid
+
+# Single-user box: allow any uid that can reach the (0600) socket. To restrict
+# specific uids to specific tokens, drop allow_all_authenticated and add
+# [[auth.policy]] entries keyed by "uid=<N>" instead (see config-multi-user.toml).
+[auth]
+allow_all_authenticated = true

@@ -141,6 +141,33 @@ async fn evict_expired_keeps_recently_active_context() {
 }
 
 #[tokio::test]
+async fn evict_expired_skips_context_with_in_flight_operation() {
+    use pkcs11_proxy_ng_backend::MockBackend;
+    use pkcs11_proxy_ng_types::CkMechanismType;
+
+    let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> =
+        Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+    // Zero lease: the context is "expired" the instant any time elapses, so this
+    // isolates the in-flight guard as the only thing keeping it alive.
+    let mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(0), 0));
+    let id = mgr.create_context(None).await.unwrap();
+
+    // Long backend op in flight → must NOT be reaped mid-call (the bug this fixes:
+    // DH/RSA keygen longer than the lease was evicted out from under itself).
+    let guard = mgr.begin_operation(&id).expect("context exists");
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    let evicted = mgr.evict_expired(&backend).await;
+    assert!(!evicted.contains(&id), "in-flight context must not be evicted mid-call");
+    assert!(mgr.get_context(&id, |_| ()).await.is_some());
+
+    // Once the op finishes, the context is reapable again.
+    drop(guard);
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    let evicted = mgr.evict_expired(&backend).await;
+    assert!(evicted.contains(&id), "context reapable after the in-flight op ends");
+}
+
+#[tokio::test]
 async fn slot_registration_and_resolution() {
     let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
     mgr.register_slot(CkSlotId(7)).await;

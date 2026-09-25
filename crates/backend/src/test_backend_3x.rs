@@ -415,6 +415,7 @@ impl Pkcs11Backend for TestBackend3x {
         &self,
         _session: CkSessionHandle,
         _mechanism: Option<&CkMechanism>,
+        _init_param: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         _key: CkObjectHandle,
     ) -> CkResult<()> {
         Ok(())
@@ -463,6 +464,7 @@ impl Pkcs11Backend for TestBackend3x {
         &self,
         _session: CkSessionHandle,
         _mechanism: Option<&CkMechanism>,
+        _init_param: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         _key: CkObjectHandle,
     ) -> CkResult<()> {
         Ok(())

@@ -88,6 +88,58 @@ fn c_get_session_info_null_p_info_returns_bad_args() {
 }
 
 #[test]
+fn c_find_objects_init_null_template_nonzero_count_returns_bad_args() {
+    let _guard = shim_state_test_guard();
+    state::mark_finalized();
+    let rv = unsafe { dispatch::general::c_find_objects_init(0, std::ptr::null_mut(), 5) };
+    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
+}
+
+#[test]
+fn c_create_object_null_template_nonzero_count_returns_bad_args() {
+    let _guard = shim_state_test_guard();
+    state::mark_finalized();
+    let mut object = CK_INVALID_HANDLE;
+    let rv = unsafe { dispatch::general::c_create_object(0, std::ptr::null_mut(), 5, &mut object) };
+    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
+}
+
+#[test]
+fn c_generate_key_null_template_nonzero_count_returns_bad_args() {
+    let _guard = shim_state_test_guard();
+    state::mark_finalized();
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_AES_KEY_GEN,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut key = CK_INVALID_HANDLE;
+    let rv = unsafe {
+        dispatch::general::c_generate_key(0, &mut mechanism, std::ptr::null_mut(), 5, &mut key)
+    };
+    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
+}
+
+#[test]
+fn c_find_objects_init_null_attr_value_nonzero_len_returns_bad_args() {
+    let _guard = shim_state_test_guard();
+    state::mark_finalized();
+    let mut attr = CK_ATTRIBUTE { type_: CKA_LABEL, pValue: std::ptr::null_mut(), ulValueLen: 1 };
+    let rv = unsafe { dispatch::general::c_find_objects_init(0, &mut attr, 1) };
+    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
+}
+
+#[test]
+fn c_create_object_null_attr_value_nonzero_len_returns_bad_args() {
+    let _guard = shim_state_test_guard();
+    state::mark_finalized();
+    let mut attr = CK_ATTRIBUTE { type_: CKA_LABEL, pValue: std::ptr::null_mut(), ulValueLen: 1 };
+    let mut object = CK_INVALID_HANDLE;
+    let rv = unsafe { dispatch::general::c_create_object(0, &mut attr, 1, &mut object) };
+    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
+}
+
+#[test]
 fn c_wait_for_slot_event_nonnull_reserved_returns_bad_args() {
     let _guard = shim_state_test_guard();
     let mut slot = 0;

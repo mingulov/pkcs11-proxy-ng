@@ -1,9 +1,54 @@
 use cryptoki_sys::*;
+use pkcs11_proxy_ng_proto::convert::message_params::MessageParameter;
 use pkcs11_proxy_ng_types::*;
 
 use crate::state;
 
 use super::helpers::*;
+
+/// Read a message-based encrypt/decrypt init mechanism.
+///
+/// PKCS#11 v3.0 passes the AEAD parameters (`CK_GCM_MESSAGE_PARAMS`,
+/// `CK_CCM_MESSAGE_PARAMS`, …) to `C_Message{Encrypt,Decrypt}Init` — but the
+/// same mechanism type (`CKM_AES_GCM`, …) is also used by classic single-shot
+/// encryption with a *different* parameter struct, so the param shape cannot be
+/// inferred from the mechanism type via the registry. In the message-init path
+/// we therefore interpret the params as the message variant: when a recognised
+/// `CK_*_MESSAGE_PARAMS` struct is present we send the mechanism TYPE only plus
+/// the structured `MessageParameter`, which the backend reconstructs into the
+/// correct C struct. A NULL mechanism is the cancel path; a parameterless or
+/// unrecognised param falls back to the classic `read_mechanism` behaviour.
+///
+/// Returns the mechanism (None = cancel) and the optional structured init param,
+/// or a `CK_RV` to return directly.
+///
+/// # Safety
+/// `p_mechanism` is either NULL or a valid `CK_MECHANISM`.
+unsafe fn read_message_init_mechanism(
+    p_mechanism: CK_MECHANISM_PTR,
+) -> Result<(Option<CkMechanism>, Option<MessageParameter>), CK_RV> {
+    if p_mechanism.is_null() {
+        return Ok((None, None)); // cancel path
+    }
+    let rv = unsafe { validate_mechanism(p_mechanism) };
+    if rv != rv_ok() {
+        return Err(rv);
+    }
+    let c_mech = unsafe { &*p_mechanism };
+    let msg_param =
+        unsafe { try_read_message_parameter(c_mech.pParameter as *const _, c_mech.ulParameterLen) }
+            .map_err(rv_err)?;
+    match msg_param {
+        // Recognised AEAD message params: ship the mechanism type only and let
+        // the backend rebuild the CK_*_MESSAGE_PARAMS struct from this.
+        Some(mp) if !matches!(mp, MessageParameter::Raw(_)) => Ok((
+            Some(CkMechanism { mechanism_type: CkMechanismType(c_mech.mechanism), params: None }),
+            Some(mp),
+        )),
+        // Parameterless / unrecognised: preserve the classic shim behaviour.
+        _ => Ok((Some(unsafe { read_mechanism(p_mechanism) }), None)),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // C_MessageEncryptInit — mechanism is nullable (NULL = cancel active state)
@@ -15,18 +60,14 @@ pub unsafe extern "C" fn c_message_encrypt_init(
     h_key: CK_OBJECT_HANDLE,
 ) -> CK_RV {
     catch_panics(|| {
-        let mech = if p_mechanism.is_null() {
-            None // cancel path
-        } else {
-            let rv = unsafe { validate_mechanism(p_mechanism) };
-            if rv != rv_ok() {
-                return rv;
-            }
-            Some(unsafe { read_mechanism(p_mechanism) })
+        let (mech, init_param) = match unsafe { read_message_init_mechanism(p_mechanism) } {
+            Ok(parts) => parts,
+            Err(rv) => return rv,
         };
         let result = with_client!(client => client.message_encrypt_init(
             CkSessionHandle(h_session),
             mech.as_ref(),
+            init_param.as_ref(),
             CkObjectHandle(h_key),
         ));
         if result.is_ok() {
@@ -59,18 +100,14 @@ pub unsafe extern "C" fn c_message_decrypt_init(
     h_key: CK_OBJECT_HANDLE,
 ) -> CK_RV {
     catch_panics(|| {
-        let mech = if p_mechanism.is_null() {
-            None // cancel path
-        } else {
-            let rv = unsafe { validate_mechanism(p_mechanism) };
-            if rv != rv_ok() {
-                return rv;
-            }
-            Some(unsafe { read_mechanism(p_mechanism) })
+        let (mech, init_param) = match unsafe { read_message_init_mechanism(p_mechanism) } {
+            Ok(parts) => parts,
+            Err(rv) => return rv,
         };
         let result = with_client!(client => client.message_decrypt_init(
             CkSessionHandle(h_session),
             mech.as_ref(),
+            init_param.as_ref(),
             CkObjectHandle(h_key),
         ));
         if result.is_ok() {

@@ -38,6 +38,7 @@ async fn start_daemon(
         context_manager,
         backend,
         TcpAuthMode::None,
+        pkcs11_proxy_ng::config::UnixAuthMode::None,
         Arc::new(token_policy),
         pkcs11_proxy_ng::mechanism_registry_source::MechanismRegistrySource::load(None).unwrap(),
     );

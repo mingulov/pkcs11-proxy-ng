@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
-use pkcs11_proxy_ng_types::{CkRv, CkSlotId};
+use pkcs11_proxy_ng_types::CkRv;
 
 use super::super::super::context_manager::{ClientContextId, ContextManager};
 use super::super::service_utils::spawn_backend;
@@ -29,13 +29,22 @@ pub(super) async fn wait_for_slot_event(
     let result = spawn_backend(move || backend.wait_for_slot_event(flags)).await?;
 
     match result {
-        Ok(backend_slot) => {
-            let backend_slot: CkSlotId = backend_slot;
-            Ok(Response::new(pkcs11_proxy_ng_proto::WaitForSlotEventResponse {
-                ck_rv: CkRv::OK.0,
-                slot_id: ctx_mgr.to_virtual_slot(backend_slot).await.unwrap_or(backend_slot).0,
-            }))
-        }
+        Ok(backend_slot) => match ctx_mgr.to_virtual_slot(backend_slot).await {
+            Some(virtual_slot) => {
+                Ok(Response::new(pkcs11_proxy_ng_proto::WaitForSlotEventResponse {
+                    ck_rv: CkRv::OK.0,
+                    slot_id: virtual_slot.0,
+                }))
+            }
+            // No virtual mapping for this client: never leak the raw backend
+            // slot id. Report no event rather than disclosing an unmapped slot.
+            // (TODO M13 follow-up: also run slot_is_authorized to suppress
+            // events for mapped-but-unauthorized tokens.)
+            None => Ok(Response::new(pkcs11_proxy_ng_proto::WaitForSlotEventResponse {
+                ck_rv: CkRv::NO_EVENT.0,
+                slot_id: 0,
+            })),
+        },
         Err(error) => Ok(Response::new(pkcs11_proxy_ng_proto::WaitForSlotEventResponse {
             ck_rv: error.0,
             slot_id: 0,

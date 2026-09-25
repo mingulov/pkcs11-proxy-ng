@@ -117,6 +117,40 @@ auth = "none"
 }
 
 #[test]
+fn validate_unix_insecure_requires_opt_in() {
+    let toml = r#"
+[backend]
+module = "/dev/null"
+
+[listener.local]
+path = "/tmp/pkcs11-proxy-ng-test.sock"
+auth = "none"
+"#;
+    let config: DaemonConfig = toml::from_str(toml).unwrap();
+    let err = config.validate().unwrap_err();
+    assert!(err.contains("auth='none'"), "error should mention disabled auth: {err}");
+    assert!(
+        err.contains("allow_insecure_unix=true"),
+        "error should mention explicit insecure Unix opt-in: {err}"
+    );
+}
+
+#[test]
+fn validate_unix_insecure_with_opt_in_accepted() {
+    let toml = r#"
+[backend]
+module = "/dev/null"
+
+[listener.local]
+path = "/tmp/pkcs11-proxy-ng-test.sock"
+auth = "none"
+allow_insecure_unix = true
+"#;
+    let config: DaemonConfig = toml::from_str(toml).unwrap();
+    assert!(config.validate().is_ok(), "explicit opt-in should validate");
+}
+
+#[test]
 fn validate_invalid_mechanism_discovery() {
     let toml = r#"
 [backend]
@@ -178,6 +212,7 @@ mechanism_discovery = "transparent"
 [listener.local]
 path = "/tmp/test.sock"
 auth = "none"
+allow_insecure_unix = true
 "#;
     let config: DaemonConfig = toml::from_str(toml).unwrap();
     assert!(config.validate().is_ok());
@@ -451,6 +486,7 @@ module = "/dev/null"
 [listener.local]
 path = "/tmp/test.sock"
 auth = "none"
+allow_insecure_unix = true
 "#;
     let config: DaemonConfig = toml::from_str(toml).unwrap();
     assert!(config.validate().is_ok());
@@ -542,6 +578,7 @@ max_message_bytes = 67108864
 [listener.local]
 path = "/tmp/test.sock"
 auth = "none"
+allow_insecure_unix = true
 "#;
     let config: DaemonConfig = toml::from_str(toml).unwrap();
     assert!(config.validate().is_ok());

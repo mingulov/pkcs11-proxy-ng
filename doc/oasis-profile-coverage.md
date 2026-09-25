@@ -10,10 +10,10 @@ coverage. This is a living document updated as test coverage expands.
 ## Source-Derived Inventory
 
 Use `scripts/oasis-coverage-inventory.py` for the optional source-grounded
-function, interface, and mechanism matrix. When an OASIS tree is already
-supplied through `PKCS11_PROXY_NG_OASIS_ROOT` or the umbrella workspace
-(`../doc/oasis-tcs-pkcs11/working/doc/spec/`), the script reads that Markdown
-and the matching published headers
+function, interface, and mechanism matrix. When an OASIS spec tree is
+supplied through `PKCS11_PROXY_NG_OASIS_ROOT`
+(pointing at a checkout containing `working/doc/spec/`), the script reads that
+Markdown and the matching published headers
 (`../doc/oasis-tcs-pkcs11/published/{2-40-errata-1,3-00,3-01,3-02}/pkcs11t.h`).
 It compares those optional sources with local function-list tables, proto RPCs,
 backend trait methods, client methods, shim dispatch functions, the generated

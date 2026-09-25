@@ -37,19 +37,17 @@ macro_rules! with_client {
             let mut $client = crate::state::client().lock().await.clone();
             $call.await
         });
-        // FOLLOWUP-dns-reresolve: if the call surfaced a
-        // transport-level failure (CkRv::DEVICE_ERROR from a session-
-        // scoped RPC or CkRv::GENERAL_ERROR from a lifecycle RPC),
-        // mark the client for reconnect. The next call rebuilds the
-        // channel via `Endpoint::from_shared`, which re-resolves the
-        // hostname — this is what lets a shim follow a daemon whose
-        // DNS A-record changed (k8s rolling deploy, blue/green).
-        if let Err(rv) = &__result {
-            use pkcs11_proxy_ng_types::CkRv;
-            if matches!(*rv, CkRv::DEVICE_ERROR | CkRv::GENERAL_ERROR) {
-                crate::state::mark_client_reconnect_required();
-            }
-        }
+        // FOLLOWUP-dns-reresolve: reconnect-on-transport-failure is driven
+        // by the client crate's transport-failure hook (registered in
+        // c_initialize), which fires ONLY when a gRPC transport `Status` is
+        // mapped to a CK_RV — never on a backend `ck_rv`. The next call then
+        // rebuilds the channel via `Endpoint::from_shared`, re-resolving the
+        // hostname, letting a shim follow a daemon whose DNS A-record changed
+        // (k8s rolling deploy / blue-green). We deliberately do NOT key the
+        // reconnect off the returned CK_RV here: kryoptic uses
+        // CKR_DEVICE_ERROR (OpenSSL catch-all) and CKR_GENERAL_ERROR
+        // (internal catch-all) as ordinary results, so doing so churned the
+        // channel on every routine backend error.
         __result
     }};
 }
@@ -411,6 +409,18 @@ pub(crate) unsafe fn read_mechanism(p_mechanism: *const CK_MECHANISM) -> CkMecha
     // below would leave a dangling reference.
     let registry = crate::state::mechanism_registry();
     let shape = registry.param_shape(c_mech.mechanism);
+    unsafe { read_mechanism_with_shape(c_mech, shape) }
+}
+
+pub(crate) unsafe fn read_wrap_key_mechanism(p_mechanism: *const CK_MECHANISM) -> CkMechanism {
+    let c_mech = unsafe { &*p_mechanism };
+    let param_len = c_mech.ulParameterLen as usize;
+    let registry = crate::state::mechanism_registry();
+    let shape = match c_mech.mechanism {
+        CKM_AES_GCM if param_len == std::mem::size_of::<CK_GCM_WRAP_PARAMS>() => Some("gcm_wrap"),
+        CKM_AES_CCM if param_len == std::mem::size_of::<CK_CCM_WRAP_PARAMS>() => Some("ccm_wrap"),
+        _ => registry.param_shape(c_mech.mechanism),
+    };
     unsafe { read_mechanism_with_shape(c_mech, shape) }
 }
 
@@ -1137,11 +1147,16 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
         }
 
         Some("sign_additional_context") => {
-            // CK_SIGN_ADDITIONAL_CONTEXT: { CK_ULONG hedgeVariant, CK_BYTE_PTR pContext, CK_ULONG ulContextLen }
-            let min_size = std::mem::size_of::<CK_ULONG>()
+            // Accept both CK_SIGN_ADDITIONAL_CONTEXT
+            //   { CK_ULONG hedgeVariant, CK_BYTE_PTR pContext, CK_ULONG ulContextLen }
+            // and CK_HASH_SIGN_ADDITIONAL_CONTEXT (the same, plus a trailing
+            //   CK_MECHANISM_TYPE hash) used by the generic CKM_HASH_ML_DSA /
+            // CKM_HASH_SLH_DSA. The larger struct is detected by ulParameterLen.
+            let base_size = std::mem::size_of::<CK_ULONG>()
                 + std::mem::size_of::<*mut u8>()
                 + std::mem::size_of::<CK_ULONG>();
-            if param_len < min_size {
+            let hash_size = base_size + std::mem::size_of::<CK_ULONG>();
+            if param_len < base_size {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
                     data: unsafe { read_raw_bytes(param_ptr, param_len) },
                 }))
@@ -1156,9 +1171,16 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                 } else {
                     unsafe { std::slice::from_raw_parts(ctx_ptr, ctx_len as usize) }.to_vec()
                 };
+                let hash = if param_len >= hash_size {
+                    let hash_offset = len_offset + std::mem::size_of::<CK_ULONG>();
+                    unsafe { *(param_ptr.add(hash_offset) as *const CK_ULONG) as u64 }
+                } else {
+                    0
+                };
                 Some(CkMechanismParams::SignAdditionalContext(SignAdditionalContext {
                     hedge_variant: hedge_variant as u64,
                     context,
+                    hash,
                 }))
             }
         }
@@ -2656,6 +2678,51 @@ pub(crate) unsafe fn write_mechanism_output_params(
             gcm.ulIvBits = gcm_out.iv_bits as CK_ULONG;
             gcm.ulTagBits = gcm_out.tag_bits as CK_ULONG;
         }
+        CkMechanismParams::GcmWrap(gcm_out) => {
+            if mechanism.ulParameterLen < std::mem::size_of::<CK_GCM_WRAP_PARAMS>() as CK_ULONG
+                || mechanism.pParameter.is_null()
+            {
+                return;
+            }
+
+            let gcm = unsafe { &mut *(mechanism.pParameter as *mut CK_GCM_WRAP_PARAMS) };
+            if !gcm.pIv.is_null() {
+                let capacity = gcm.ulIvLen as usize;
+                let copy_len = gcm_out.iv.len().min(capacity);
+                if copy_len > 0 {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(gcm_out.iv.as_ptr(), gcm.pIv, copy_len);
+                    }
+                }
+                gcm.ulIvLen = copy_len as CK_ULONG;
+            }
+            gcm.ulIvFixedBits = gcm_out.iv_fixed_bits as CK_ULONG;
+            gcm.ivGenerator = gcm_out.iv_generator as CK_GENERATOR_FUNCTION;
+            gcm.ulTagBits = gcm_out.tag_bits as CK_ULONG;
+        }
+        CkMechanismParams::CcmWrap(ccm_out) => {
+            if mechanism.ulParameterLen < std::mem::size_of::<CK_CCM_WRAP_PARAMS>() as CK_ULONG
+                || mechanism.pParameter.is_null()
+            {
+                return;
+            }
+
+            let ccm = unsafe { &mut *(mechanism.pParameter as *mut CK_CCM_WRAP_PARAMS) };
+            if !ccm.pNonce.is_null() {
+                let capacity = ccm.ulNonceLen as usize;
+                let copy_len = ccm_out.nonce.len().min(capacity);
+                if copy_len > 0 {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(ccm_out.nonce.as_ptr(), ccm.pNonce, copy_len);
+                    }
+                }
+                ccm.ulNonceLen = copy_len as CK_ULONG;
+            }
+            ccm.ulDataLen = ccm_out.data_len as CK_ULONG;
+            ccm.ulNonceFixedBits = ccm_out.nonce_fixed_bits as CK_ULONG;
+            ccm.nonceGenerator = ccm_out.nonce_generator as CK_GENERATOR_FUNCTION;
+            ccm.ulMACLen = ccm_out.mac_len as CK_ULONG;
+        }
         CkMechanismParams::Tls12MasterKeyDerive(tls12_out) => {
             // `CK_TLS12_MASTER_KEY_DERIVE_PARAMS.pVersion` is OUT — the
             // HSM writes the negotiated CK_VERSION here when pVersion
@@ -2796,6 +2863,25 @@ pub(crate) unsafe fn write_mechanism_output_params(
                     sp800.ulAdditionalDerivedKeys,
                     &sp800_out.additional_derived_keys,
                 );
+            }
+        }
+        CkMechanismParams::Pbe(pbe_out) => {
+            // CK_PBE_PARAMS.pInitVector is OUT — the HSM writes the generated
+            // 8-byte IV here during PBE key generation. Only the IV is written
+            // back; pPassword/pSalt are caller-supplied inputs and are left
+            // untouched (the backend never echoes them back).
+            if mechanism.ulParameterLen < std::mem::size_of::<CK_PBE_PARAMS>() as CK_ULONG
+                || mechanism.pParameter.is_null()
+            {
+                return;
+            }
+            let pbe = unsafe { &*(mechanism.pParameter as *const CK_PBE_PARAMS) };
+            if !pbe.pInitVector.is_null() && !pbe_out.init_vector.is_empty() {
+                // PBE IV is 8 bytes; copy no more than the caller's buffer holds.
+                let n = pbe_out.init_vector.len().min(8);
+                unsafe {
+                    std::ptr::copy_nonoverlapping(pbe_out.init_vector.as_ptr(), pbe.pInitVector, n);
+                }
             }
         }
         _ => {}
@@ -3141,18 +3227,42 @@ pub(crate) unsafe fn ck_attrs_to_rust(
     p_template: *const CK_ATTRIBUTE,
     count: CK_ULONG,
 ) -> Vec<CkAttribute> {
-    if p_template.is_null() || count == 0 {
-        return Vec::new();
+    unsafe { ck_attrs_to_rust_result(p_template, count, false) }
+        .unwrap_or_else(|_| panic!("attribute template exceeds serializable limits"))
+}
+
+pub(crate) unsafe fn ck_attrs_to_rust_checked(
+    p_template: *const CK_ATTRIBUTE,
+    count: CK_ULONG,
+) -> CkResult<Vec<CkAttribute>> {
+    unsafe { ck_attrs_to_rust_result(p_template, count, true) }
+}
+
+unsafe fn ck_attrs_to_rust_result(
+    p_template: *const CK_ATTRIBUTE,
+    count: CK_ULONG,
+    reject_null_nonzero_count: bool,
+) -> CkResult<Vec<CkAttribute>> {
+    if p_template.is_null() {
+        return if count == 0 || !reject_null_nonzero_count {
+            Ok(Vec::new())
+        } else {
+            Err(CkRv::ARGUMENTS_BAD)
+        };
     }
-    let n = count as usize;
-    if n > MAX_TEMPLATE_COUNT {
-        panic!("template count {n} exceeds limit");
+    if count as usize > MAX_TEMPLATE_COUNT {
+        return Err(CkRv::ARGUMENTS_BAD);
     }
-    let slice = unsafe { std::slice::from_raw_parts(p_template, n) };
+    let slice = unsafe { std::slice::from_raw_parts(p_template, count as usize) };
     let mut result = Vec::with_capacity(count as usize);
     for attr in slice {
         let ck_type = CkAttributeType(attr.type_);
-        let value = if attr.pValue.is_null() || attr.ulValueLen == 0 {
+        let value = if attr.pValue.is_null() {
+            if attr.ulValueLen != 0 && reject_null_nonzero_count {
+                return Err(CkRv::ARGUMENTS_BAD);
+            }
+            None
+        } else if attr.ulValueLen == 0 {
             None
         } else {
             let len = attr.ulValueLen as usize;
@@ -3161,15 +3271,9 @@ pub(crate) unsafe fn ck_attrs_to_rust(
                 Some(CkAttributeValue::Bool(v != 0))
             } else if ck_type.is_ulong() && len == std::mem::size_of::<CK_ULONG>() {
                 let v = unsafe { *(attr.pValue as *const CK_ULONG) };
-                // Reject absurd allocation-size attributes (VALUE_LEN, MODULUS_BITS).
-                // Backends may use these as Vec capacities inside extern "C" functions
-                // where a capacity-overflow panic aborts the daemon process.
-                if ck_type.is_allocation_size() && (v as usize) > MAX_SERIALIZABLE_BYTES {
-                    panic!("attribute {:#x} value {v:#x} exceeds allocation limit", ck_type.0);
-                }
                 Some(CkAttributeValue::Ulong(v))
             } else if len > MAX_SERIALIZABLE_BYTES {
-                panic!("attribute ulValueLen {len} exceeds limit");
+                return Err(CkRv::ARGUMENTS_BAD);
             } else {
                 let bytes =
                     unsafe { std::slice::from_raw_parts(attr.pValue as *const u8, len) }.to_vec();
@@ -3178,7 +3282,7 @@ pub(crate) unsafe fn ck_attrs_to_rust(
         };
         result.push(CkAttribute { attr_type: ck_type, value });
     }
-    result
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -3244,7 +3348,7 @@ mod tests {
 #[cfg(test)]
 mod mechanism_parameter_tests {
     use super::{
-        read_mechanism, read_mechanism_with_shape, validate_mechanism,
+        read_mechanism, read_mechanism_with_shape, read_wrap_key_mechanism, validate_mechanism,
         write_mechanism_output_params,
     };
     use cryptoki_sys::*;
@@ -3617,6 +3721,205 @@ mod mechanism_parameter_tests {
             }
             other => panic!("unexpected CCM wrap params: {other:?}"),
         }
+    }
+
+    #[test]
+    fn wrap_key_reader_uses_v32_aead_wrap_shapes() {
+        ensure_registry();
+
+        let mut iv = [0x11u8; 12];
+        let mut gcm_aad = [0xA1u8, 0xA2];
+        let mut gcm_wrap = CK_GCM_WRAP_PARAMS {
+            pIv: iv.as_mut_ptr(),
+            ulIvLen: iv.len() as CK_ULONG,
+            ulIvFixedBits: 32,
+            ivGenerator: CKG_GENERATE,
+            pAAD: gcm_aad.as_mut_ptr(),
+            ulAADLen: gcm_aad.len() as CK_ULONG,
+            ulTagBits: 128,
+        };
+        let mechanism = CK_MECHANISM {
+            mechanism: CKM_AES_GCM,
+            pParameter: &mut gcm_wrap as *mut _ as CK_VOID_PTR,
+            ulParameterLen: std::mem::size_of::<CK_GCM_WRAP_PARAMS>() as CK_ULONG,
+        };
+        match unsafe { read_wrap_key_mechanism(&mechanism) }.params.expect("params") {
+            CkMechanismParams::GcmWrap(GcmWrapParams { iv, iv_generator, aad, .. }) => {
+                assert_eq!(iv, [0x11; 12]);
+                assert_eq!(iv_generator, CKG_GENERATE);
+                assert_eq!(aad, [0xA1, 0xA2]);
+            }
+            other => panic!("unexpected GCM wrap-key params: {other:?}"),
+        }
+
+        let mut nonce = [0x22u8; 12];
+        let mut ccm_aad = [0xB1u8, 0xB2, 0xB3];
+        let mut ccm_wrap = CK_CCM_WRAP_PARAMS {
+            ulDataLen: 16,
+            pNonce: nonce.as_mut_ptr(),
+            ulNonceLen: nonce.len() as CK_ULONG,
+            ulNonceFixedBits: 0,
+            nonceGenerator: CKG_GENERATE,
+            pAAD: ccm_aad.as_mut_ptr(),
+            ulAADLen: ccm_aad.len() as CK_ULONG,
+            ulMACLen: 16,
+        };
+        let mechanism = CK_MECHANISM {
+            mechanism: CKM_AES_CCM,
+            pParameter: &mut ccm_wrap as *mut _ as CK_VOID_PTR,
+            ulParameterLen: std::mem::size_of::<CK_CCM_WRAP_PARAMS>() as CK_ULONG,
+        };
+        match unsafe { read_wrap_key_mechanism(&mechanism) }.params.expect("params") {
+            CkMechanismParams::CcmWrap(CcmWrapParams {
+                data_len,
+                nonce,
+                nonce_generator,
+                aad,
+                mac_len,
+                ..
+            }) => {
+                assert_eq!(data_len, 16);
+                assert_eq!(nonce, [0x22; 12]);
+                assert_eq!(nonce_generator, CKG_GENERATE);
+                assert_eq!(aad, [0xB1, 0xB2, 0xB3]);
+                assert_eq!(mac_len, 16);
+            }
+            other => panic!("unexpected CCM wrap-key params: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wrap_key_reader_uses_wrap_shapes_only_on_exact_v32_size() {
+        ensure_registry();
+
+        #[repr(C)]
+        struct GcmWithPadding {
+            params: CK_GCM_PARAMS,
+            padding: [CK_ULONG; 4],
+        }
+
+        #[repr(C)]
+        struct CcmWithPadding {
+            params: CK_CCM_PARAMS,
+            padding: [CK_ULONG; 4],
+        }
+
+        assert!(std::mem::size_of::<GcmWithPadding>() > std::mem::size_of::<CK_GCM_WRAP_PARAMS>());
+        assert!(std::mem::size_of::<CcmWithPadding>() > std::mem::size_of::<CK_CCM_WRAP_PARAMS>());
+
+        let mut iv = [0x33u8; 12];
+        let mut gcm_aad = [0xC1u8, 0xC2];
+        let mut gcm_padded = GcmWithPadding {
+            params: CK_GCM_PARAMS {
+                pIv: iv.as_mut_ptr(),
+                ulIvLen: iv.len() as CK_ULONG,
+                ulIvBits: 96,
+                pAAD: gcm_aad.as_mut_ptr(),
+                ulAADLen: gcm_aad.len() as CK_ULONG,
+                ulTagBits: 128,
+            },
+            padding: [0; 4],
+        };
+        let mechanism = CK_MECHANISM {
+            mechanism: CKM_AES_GCM,
+            pParameter: &mut gcm_padded as *mut _ as CK_VOID_PTR,
+            ulParameterLen: std::mem::size_of::<GcmWithPadding>() as CK_ULONG,
+        };
+        match unsafe { read_wrap_key_mechanism(&mechanism) }.params.expect("params") {
+            CkMechanismParams::Gcm(GcmParams { iv, aad, tag_bits, .. }) => {
+                assert_eq!(iv, [0x33; 12]);
+                assert_eq!(aad, [0xC1, 0xC2]);
+                assert_eq!(tag_bits, 128);
+            }
+            other => panic!("larger non-wrap GCM params must not be parsed as wrap: {other:?}"),
+        }
+
+        let mut nonce = [0x44u8; 12];
+        let mut ccm_aad = [0xD1u8, 0xD2];
+        let mut ccm_padded = CcmWithPadding {
+            params: CK_CCM_PARAMS {
+                ulDataLen: 16,
+                pNonce: nonce.as_mut_ptr(),
+                ulNonceLen: nonce.len() as CK_ULONG,
+                pAAD: ccm_aad.as_mut_ptr(),
+                ulAADLen: ccm_aad.len() as CK_ULONG,
+                ulMACLen: 16,
+            },
+            padding: [0; 4],
+        };
+        let mechanism = CK_MECHANISM {
+            mechanism: CKM_AES_CCM,
+            pParameter: &mut ccm_padded as *mut _ as CK_VOID_PTR,
+            ulParameterLen: std::mem::size_of::<CcmWithPadding>() as CK_ULONG,
+        };
+        match unsafe { read_wrap_key_mechanism(&mechanism) }.params.expect("params") {
+            CkMechanismParams::Ccm(CcmParams { data_len, nonce, aad, mac_len, .. }) => {
+                assert_eq!(data_len, 16);
+                assert_eq!(nonce, [0x44; 12]);
+                assert_eq!(aad, [0xD1, 0xD2]);
+                assert_eq!(mac_len, 16);
+            }
+            other => panic!("larger non-wrap CCM params must not be parsed as wrap: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn write_mechanism_output_params_writes_aead_wrap_generated_fields() {
+        let mut iv = [0u8; 12];
+        let mut gcm_wrap = CK_GCM_WRAP_PARAMS {
+            pIv: iv.as_mut_ptr(),
+            ulIvLen: iv.len() as CK_ULONG,
+            ulIvFixedBits: 0,
+            ivGenerator: CKG_GENERATE,
+            pAAD: std::ptr::null_mut(),
+            ulAADLen: 0,
+            ulTagBits: 128,
+        };
+        let mut mechanism = CK_MECHANISM {
+            mechanism: CKM_AES_GCM,
+            pParameter: &mut gcm_wrap as *mut _ as CK_VOID_PTR,
+            ulParameterLen: std::mem::size_of::<CK_GCM_WRAP_PARAMS>() as CK_ULONG,
+        };
+        let output = CkMechanismParams::GcmWrap(GcmWrapParams {
+            iv: vec![1, 2, 3, 4],
+            iv_fixed_bits: 0,
+            iv_generator: CKG_GENERATE,
+            aad: Vec::new(),
+            tag_bits: 96,
+        });
+        unsafe { write_mechanism_output_params(&mut mechanism, &output) };
+        assert_eq!(&iv[..4], &[1, 2, 3, 4]);
+        assert_eq!(gcm_wrap.ulIvLen, 4);
+        assert_eq!(gcm_wrap.ulTagBits, 96);
+
+        let mut nonce = [0u8; 12];
+        let mut ccm_wrap = CK_CCM_WRAP_PARAMS {
+            ulDataLen: 16,
+            pNonce: nonce.as_mut_ptr(),
+            ulNonceLen: nonce.len() as CK_ULONG,
+            ulNonceFixedBits: 0,
+            nonceGenerator: CKG_GENERATE,
+            pAAD: std::ptr::null_mut(),
+            ulAADLen: 0,
+            ulMACLen: 16,
+        };
+        let mut mechanism = CK_MECHANISM {
+            mechanism: CKM_AES_CCM,
+            pParameter: &mut ccm_wrap as *mut _ as CK_VOID_PTR,
+            ulParameterLen: std::mem::size_of::<CK_CCM_WRAP_PARAMS>() as CK_ULONG,
+        };
+        let output = CkMechanismParams::CcmWrap(CcmWrapParams {
+            data_len: 16,
+            nonce: vec![9, 8, 7, 6],
+            nonce_fixed_bits: 0,
+            nonce_generator: CKG_GENERATE,
+            aad: Vec::new(),
+            mac_len: 12,
+        });
+        unsafe { write_mechanism_output_params(&mut mechanism, &output) };
+        assert_eq!(&nonce[..4], &[9, 8, 7, 6]);
+        assert_eq!(ccm_wrap.ulNonceLen, 4);
+        assert_eq!(ccm_wrap.ulMACLen, 12);
     }
 
     #[test]
@@ -5422,6 +5725,79 @@ mod message_parameter_tests {
 
         assert_eq!(version.major, 3);
         assert_eq!(version.minor, 3);
+    }
+
+    #[test]
+    fn write_mechanism_output_params_writes_pbe_init_vector() {
+        // C2: the HSM-generated CK_PBE_PARAMS.pInitVector must be written back
+        // into the caller's buffer after PBE key generation. Only the IV is
+        // written; pPassword/pSalt are left untouched.
+        use pkcs11_proxy_ng_types::{CkMechanismParams, CkMechanismType, PbeParams};
+
+        let mut iv_buf = [0u8; 8];
+        let password = *b"secret";
+        let salt = *b"saltsalt";
+        let mut params = CK_PBE_PARAMS {
+            pInitVector: iv_buf.as_mut_ptr(),
+            pPassword: password.as_ptr() as *mut _,
+            ulPasswordLen: password.len() as CK_ULONG,
+            pSalt: salt.as_ptr() as *mut _,
+            ulSaltLen: salt.len() as CK_ULONG,
+            ulIteration: 1000,
+        };
+        let mut mechanism = CK_MECHANISM {
+            mechanism: CkMechanismType::PBE_SHA1_DES3_EDE_CBC.0,
+            pParameter: &mut params as *mut _ as CK_VOID_PTR,
+            ulParameterLen: std::mem::size_of::<CK_PBE_PARAMS>() as CK_ULONG,
+        };
+
+        let generated_iv = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
+        let mech_out = CkMechanismParams::Pbe(PbeParams {
+            init_vector: generated_iv.clone(),
+            password: Vec::new(),
+            salt: Vec::new(),
+            iteration: 1000,
+        });
+
+        unsafe {
+            super::write_mechanism_output_params(&mut mechanism, &mech_out);
+        }
+
+        // The generated IV landed in the caller's buffer; password/salt intact.
+        assert_eq!(&iv_buf[..], generated_iv.as_slice());
+        assert_eq!(&password[..], b"secret");
+        assert_eq!(&salt[..], b"saltsalt");
+    }
+
+    #[test]
+    fn write_mechanism_output_params_pbe_safe_when_init_vector_null() {
+        // PBA (HMAC key gen) passes pInitVector = NULL — the writeback must be a
+        // no-op rather than dereferencing NULL.
+        use pkcs11_proxy_ng_types::{CkMechanismParams, CkMechanismType, PbeParams};
+
+        let mut params = CK_PBE_PARAMS {
+            pInitVector: std::ptr::null_mut(),
+            pPassword: std::ptr::null_mut(),
+            ulPasswordLen: 0,
+            pSalt: std::ptr::null_mut(),
+            ulSaltLen: 0,
+            ulIteration: 1,
+        };
+        let mut mechanism = CK_MECHANISM {
+            mechanism: CkMechanismType::PBA_SHA1_WITH_SHA1_HMAC.0,
+            pParameter: &mut params as *mut _ as CK_VOID_PTR,
+            ulParameterLen: std::mem::size_of::<CK_PBE_PARAMS>() as CK_ULONG,
+        };
+        let mech_out = CkMechanismParams::Pbe(PbeParams {
+            init_vector: vec![9u8; 8],
+            password: Vec::new(),
+            salt: Vec::new(),
+            iteration: 1,
+        });
+        // Must not panic / deref NULL.
+        unsafe {
+            super::write_mechanism_output_params(&mut mechanism, &mech_out);
+        }
     }
 
     #[test]

@@ -340,6 +340,7 @@ impl From<&CkMechanism> for v1_proto::Mechanism {
                     v1_proto::SignAdditionalContext {
                         hedge_variant: p.hedge_variant,
                         context: p.context.clone(),
+                        hash: p.hash,
                     },
                 ))
             }
@@ -707,6 +708,7 @@ impl TryFrom<&v1_proto::Mechanism> for CkMechanism {
                 Some(CkMechanismParams::SignAdditionalContext(SignAdditionalContext {
                     hedge_variant: p.hedge_variant,
                     context: p.context.clone(),
+                    hash: p.hash,
                 }))
             }
             Some(v1_proto::mechanism::Params::KmacParams(p)) => {

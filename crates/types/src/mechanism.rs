@@ -1083,11 +1083,16 @@ pub struct KeyDerivationStringData {
     pub data: Vec<u8>,
 }
 
-/// CK_SIGN_ADDITIONAL_CONTEXT — hedge mode for ML-DSA/SLH-DSA signatures.
+/// CK_SIGN_ADDITIONAL_CONTEXT (`hash == 0`) or, for the generic
+/// CKM_HASH_ML_DSA / CKM_HASH_SLH_DSA, CK_HASH_SIGN_ADDITIONAL_CONTEXT
+/// (`hash` = the hash mechanism). One Rust type covers both, the way
+/// `Ssl3KeyMatParams` covers SSL3 and TLS12.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignAdditionalContext {
     pub hedge_variant: u64,
     pub context: Vec<u8>,
+    /// 0 = plain CK_SIGN_ADDITIONAL_CONTEXT; non-zero = CK_HASH_SIGN_ADDITIONAL_CONTEXT.
+    pub hash: u64,
 }
 
 /// CK_KMAC_PARAMS — keyed MAC output length and optional customization string.

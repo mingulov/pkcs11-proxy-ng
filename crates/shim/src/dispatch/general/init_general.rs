@@ -17,9 +17,10 @@ use std::path::PathBuf;
 ///   (per §5.4, library may ignore callbacks and use OS locking; this is
 ///   the combination used by GnuTLS/p11-kit)
 /// - `CKF_OS_LOCKING_OK` set, no custom callbacks → accepted
-/// - `CKF_LIBRARY_CANT_CREATE_OS_THREADS` → accepted (tokio threads are
-///   started at library load time, not at initialize time; the flag
-///   arrives too late to change runtime behavior in Phase 1)
+/// - `CKF_LIBRARY_CANT_CREATE_OS_THREADS` → rejected with
+///   `CKR_NEED_TO_CREATE_THREADS` (the shim's tokio runtime spawns OS worker
+///   threads on first use, so a caller forbidding library threads cannot be
+///   honored)
 /// - null pInitArgs → accepted (spec allows, treated as OS-locking default)
 ///
 /// Returns `None` on success, `Some(rv)` on error.
@@ -49,6 +50,12 @@ unsafe fn parse_init_args(p_init_args: CK_VOID_PTR) -> Option<CK_RV> {
     }
     // If all_mutex && CKF_OS_LOCKING_OK: accept, we'll use OS locking (tokio).
 
+    // The shim's tokio runtime spawns OS worker threads (lazily, on first use),
+    // so a caller that forbids library threads cannot be honored.
+    if (args.flags & CKF_LIBRARY_CANT_CREATE_OS_THREADS) != 0 {
+        return Some(CKR_NEED_TO_CREATE_THREADS as CK_RV);
+    }
+
     None // Accept everything else.
 }
 
@@ -63,6 +70,17 @@ pub unsafe extern "C" fn c_initialize(p_init_args: CK_VOID_PTR) -> CK_RV {
         if !state::mark_initialized() {
             return rv_err(CkRv::CRYPTOKI_ALREADY_INITIALIZED);
         }
+
+        // Mark the cached gRPC channel for reconnect ONLY on genuine
+        // transport failures (FOLLOWUP-dns-reresolve: follow a daemon whose
+        // address changed). Registered before any RPC; idempotent. The hook
+        // fires inside the client's transport-Status mapping, so a backend
+        // `ck_rv` — e.g. kryoptic's CKR_DEVICE_ERROR (OpenSSL catch-all) or
+        // CKR_GENERAL_ERROR (internal catch-all), which arrive as ordinary
+        // results — never triggers a spurious reconnect.
+        pkcs11_proxy_ng_client::set_transport_failure_hook(|| {
+            state::mark_client_reconnect_required()
+        });
 
         // Seed the mechanism registry from the embedded default (plus
         // the optional PKCS11_PROXY_MECHANISMS override). The probe in
@@ -88,7 +106,10 @@ pub unsafe extern "C" fn c_initialize(p_init_args: CK_VOID_PTR) -> CK_RV {
         if state::ensure_client_connected().is_err() {
             tracing::error!("Failed to connect to proxy daemon");
             state::mark_finalized();
-            return rv_err(CkRv::DEVICE_ERROR);
+            // CKR_DEVICE_ERROR is not in the OASIS-permitted return set for
+            // C_Initialize; use the lifecycle-class CKR_GENERAL_ERROR so the
+            // shim matches a native module's error contract (AGENTS.md §2).
+            return rv_err(CkRv::GENERAL_ERROR);
         }
 
         let rt = state::runtime();

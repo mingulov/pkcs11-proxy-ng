@@ -12,8 +12,6 @@ pub unsafe extern "C" fn c_wrap_key(
     p_wrapped_key: CK_BYTE_PTR,
     pul_wrapped_key_len: CK_ULONG_PTR,
 ) -> CK_RV {
-    use super::digest_cipher::{delayed_gcm_parameter_addr, write_delayed_gcm_output_params};
-
     catch_panics(|| {
         if p_mechanism.is_null() || pul_wrapped_key_len.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
@@ -23,14 +21,8 @@ pub unsafe extern "C" fn c_wrap_key(
             return rv;
         }
 
-        let mech = unsafe { read_mechanism(p_mechanism) };
+        let mech = unsafe { read_wrap_key_mechanism(p_mechanism) };
         let spec = unsafe { output_buffer_spec(p_wrapped_key, pul_wrapped_key_len) };
-        // Capture the caller's mechanism param address so we can write any
-        // HSM-mutated fields (the AES-GCM IV when wrapping with CKM_AES_GCM
-        // on CloudHSM / a similar HSM-IV provider) back into it after the
-        // wrap completes. WrapKey is single-shot, so this lives on the
-        // local stack — no cross-RPC slot needed.
-        let mech_writeback_addr = unsafe { delayed_gcm_parameter_addr(p_mechanism) };
         let result = with_client!(client => client.byte_output_exact_with_mechanism_out(
             CkSessionHandle(h_session),
             ByteOutputFunction::WrapKey,
@@ -48,9 +40,9 @@ pub unsafe extern "C" fn c_wrap_key(
                 // generation on most providers, so there's nothing to copy.
                 if rv == rv_ok()
                     && spec.buffer_present
-                    && let (Some(addr), Some(params)) = (mech_writeback_addr, mechanism_out)
+                    && let Some(params) = mechanism_out
                 {
-                    unsafe { write_delayed_gcm_output_params(addr, &params) };
+                    unsafe { write_mechanism_output_params(p_mechanism, &params) };
                 }
                 rv
             }
@@ -73,13 +65,16 @@ pub unsafe extern "C" fn c_unwrap_key(
         if p_mechanism.is_null() || ph_key.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
+        let template = match unsafe { ck_attrs_to_rust_checked(p_template, ul_count) } {
+            Ok(template) => template,
+            Err(e) => return rv_err(e),
+        };
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
             return rv;
         }
         let mech = unsafe { read_mechanism(p_mechanism) };
         let wrapped_key = unsafe { read_input_slice(p_wrapped_key, ul_wrapped_key_len) };
-        let template = unsafe { ck_attrs_to_rust(p_template, ul_count) };
         match with_client!(client => client.unwrap_key(
             CkSessionHandle(h_session),
             &mech,
@@ -115,12 +110,15 @@ pub unsafe extern "C" fn c_derive_key(
         if p_mechanism.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
+        let template = match unsafe { ck_attrs_to_rust_checked(p_template, ul_count) } {
+            Ok(template) => template,
+            Err(e) => return rv_err(e),
+        };
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
             return rv;
         }
         let mech = unsafe { read_mechanism(p_mechanism) };
-        let template = unsafe { ck_attrs_to_rust(p_template, ul_count) };
         match with_client!(client => client.derive_key_with_mechanism_out_result(
             CkSessionHandle(h_session),
             &mech,
@@ -167,15 +165,28 @@ pub unsafe extern "C" fn c_generate_key(
         if p_mechanism.is_null() || ph_key.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
+        let template = match unsafe { ck_attrs_to_rust_checked(p_template, ul_count) } {
+            Ok(template) => template,
+            Err(e) => return rv_err(e),
+        };
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
             return rv;
         }
         let mech = unsafe { read_mechanism(p_mechanism) };
-        let template = unsafe { ck_attrs_to_rust(p_template, ul_count) };
-        match with_client!(client => client.generate_key(CkSessionHandle(h_session), &mech, &template))
-        {
-            Ok(handle) => {
+        match with_client!(client => client.generate_key_with_mechanism_out(
+            CkSessionHandle(h_session),
+            &mech,
+            &template,
+        )) {
+            Ok((handle, mechanism_out)) => {
+                // Write any HSM-mutated mechanism field back into the caller's
+                // CK_MECHANISM — for PBE key generation this is the generated
+                // CK_PBE_PARAMS.pInitVector. A no-op for mechanisms without
+                // output params.
+                if let Some(params) = mechanism_out {
+                    unsafe { write_mechanism_output_params(p_mechanism, &params) };
+                }
                 unsafe { write_object_handle_output(handle, ph_key) };
                 rv_ok()
             }
@@ -198,15 +209,23 @@ pub unsafe extern "C" fn c_generate_key_pair(
         if p_mechanism.is_null() || ph_public_key.is_null() || ph_private_key.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
+        let pub_tmpl = match unsafe {
+            ck_attrs_to_rust_checked(p_public_key_template, ul_public_key_attribute_count)
+        } {
+            Ok(template) => template,
+            Err(e) => return rv_err(e),
+        };
+        let priv_tmpl = match unsafe {
+            ck_attrs_to_rust_checked(p_private_key_template, ul_private_key_attribute_count)
+        } {
+            Ok(template) => template,
+            Err(e) => return rv_err(e),
+        };
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
             return rv;
         }
         let mech = unsafe { read_mechanism(p_mechanism) };
-        let pub_tmpl =
-            unsafe { ck_attrs_to_rust(p_public_key_template, ul_public_key_attribute_count) };
-        let priv_tmpl =
-            unsafe { ck_attrs_to_rust(p_private_key_template, ul_private_key_attribute_count) };
         match with_client!(client => client.generate_key_pair(
             CkSessionHandle(h_session),
             &mech,

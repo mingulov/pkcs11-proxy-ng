@@ -103,13 +103,18 @@ AI agents, automation, and human contributors.
 ## 8. Documentation Rules
 
 - Update docs when behavior, scope, interfaces, or contributor workflow changes.
-- Keep planning material in the root repo; keep implementation guidance in this
-  submodule.
+- Public-facing docs (PRD, ADRs, architecture overview, runbooks, release docs)
+  live in this repository's `doc/` tree and must stay current with the code.
+- Do not vendor or fetch OASIS specification sources into this repository.
+  Source-grounded OASIS inventory checks read an externally supplied spec tree
+  via `PKCS11_PROXY_NG_OASIS_ROOT` and skip cleanly when it is absent, so the
+  repo builds and tests standalone from its own sources plus `cryptoki-sys` /
+  provider headers.
 - Do not add project documents under vendored spec directories.
 
 ## 9. Git Rules
 
-- Commit in this submodule first; update the root submodule pointer afterward.
+- Keep each commit focused and self-contained; do not mix unrelated changes.
 - Do not rewrite unrelated user changes.
 - Do not use destructive Git commands unless explicitly requested.
 
@@ -130,7 +135,7 @@ When a task spans multiple concerns, use this order:
 2. Implement the code change in the smallest coherent scope.
 3. Update tests and consistency checks.
 4. Run formatting and validation.
-5. Commit the submodule change.
+5. Commit the change.
 
 If a proposed change conflicts with these rules, stop and resolve the conflict
 explicitly instead of proceeding by assumption.
