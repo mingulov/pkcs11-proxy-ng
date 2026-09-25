@@ -635,7 +635,7 @@ pub trait Pkcs11Backend: Send + Sync {
     ) -> CkResult<(
         CkOutputBufferResult,
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
     )> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -651,7 +651,7 @@ pub trait Pkcs11Backend: Send + Sync {
     ) -> CkResult<(
         CkOutputBufferResult,
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
     )> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -664,7 +664,7 @@ pub trait Pkcs11Backend: Send + Sync {
         _provider_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
     )> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -677,7 +677,7 @@ pub trait Pkcs11Backend: Send + Sync {
         _provider_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
     )> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -706,7 +706,7 @@ pub trait Pkcs11Backend: Send + Sync {
     ) -> CkResult<(
         CkOutputBufferResult,
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
     )> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -722,7 +722,7 @@ pub trait Pkcs11Backend: Send + Sync {
     ) -> CkResult<(
         CkOutputBufferResult,
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
     )> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -1119,7 +1119,54 @@ pub trait Pkcs11Backend: Send + Sync {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
 
-    // Wave 5: Authenticated wrap — returns (wrapped_key, mechanism_parameter_out)
+    // Pointer-safe authenticated output. Defaults fail before native dispatch;
+    // implementations must not adapt arbitrary legacy structure bytes.
+    fn wrap_key_authenticated_typed(
+        &self,
+        _session: CkSessionHandle,
+        _mechanism: &CkMechanism,
+        _parameter: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
+        _wrapping_key: CkObjectHandle,
+        _key: CkObjectHandle,
+        _aad: CkInBuf<'_>,
+    ) -> CkResult<(Vec<u8>, pkcs11_proxy_ng_proto::convert::authenticated::AuthenticatedOutput)>
+    {
+        Err(CkRv::FUNCTION_NOT_SUPPORTED)
+    }
+
+    fn wrap_key_authenticated_exact_typed(
+        &self,
+        _session: CkSessionHandle,
+        _mechanism: &CkMechanism,
+        _parameter: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
+        _wrapping_key: CkObjectHandle,
+        _key: CkObjectHandle,
+        _aad: CkInBuf<'_>,
+        _output_spec: &CkOutputBufferSpec,
+    ) -> CkResult<(
+        CkOutputBufferResult,
+        pkcs11_proxy_ng_proto::convert::authenticated::AuthenticatedOutput,
+    )> {
+        Err(CkRv::FUNCTION_NOT_SUPPORTED)
+    }
+
+    fn unwrap_key_authenticated_typed(
+        &self,
+        _session: CkSessionHandle,
+        _mechanism: &CkMechanism,
+        _parameter: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
+        _unwrapping_key: CkObjectHandle,
+        _wrapped_key: CkInBuf<'_>,
+        _template: &[CkAttribute],
+        _aad: CkInBuf<'_>,
+    ) -> CkResult<(
+        CkObjectHandle,
+        pkcs11_proxy_ng_proto::convert::authenticated::AuthenticatedOutput,
+    )> {
+        Err(CkRv::FUNCTION_NOT_SUPPORTED)
+    }
+
+    // Wave 5: Authenticated wrap — legacy pointer-free outputs only.
 
     fn wrap_key_authenticated(
         &self,

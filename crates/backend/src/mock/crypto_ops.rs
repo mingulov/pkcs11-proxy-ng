@@ -351,7 +351,7 @@ impl MockBackend {
             ck_rv: output.ck_rv,
             returned_len: output.returned_len,
             value: output.value,
-            object_handle,
+            object_handle: (object_handle.0 != 0).then_some(object_handle),
         })
     }
 
@@ -415,7 +415,7 @@ impl MockBackend {
             return Ok(None);
         }
         self.state.lock().unwrap().end_op(session, op)?;
-        Ok(Some(CkOutputBufferResult { ck_rv: CkRv::ARGUMENTS_BAD, returned_len: 0, value: None }))
+        Ok(Some(CkOutputBufferResult::no_effects(CkRv::ARGUMENTS_BAD)))
     }
 
     pub(super) fn sign_exact_impl(

@@ -13,6 +13,8 @@ use tracing::{info, warn};
 use pkcs11_proxy_ng_types::*;
 
 use super::super::super::context_manager::ClientContextId;
+use super::super::authorization::mechanism_permitted;
+use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
     check_sanitize, ck_rv_only, input_from_wire, parse_mechanism, resolve_session,
     resolve_session_and_key, spawn_backend,
@@ -52,7 +54,7 @@ pub(crate) async fn verify_signature_init(
                 }
             };
 
-        let mechanism = match parse_mechanism(req.mechanism) {
+        let mut mechanism = match parse_mechanism(req.mechanism) {
             Ok(m) => m,
             Err(rv) => {
                 return Ok(Response::new(pkcs11_proxy_ng_proto::VerifySignatureInitResponse {
@@ -60,6 +62,21 @@ pub(crate) async fn verify_signature_init(
                 }));
             }
         };
+
+        if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::VerifySignatureInitResponse {
+                ck_rv: CkRv::MECHANISM_INVALID.0,
+            }));
+        }
+
+        if let Err(rv) =
+            remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism)
+                .await
+        {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::VerifySignatureInitResponse {
+                ck_rv: rv.0,
+            }));
+        }
 
         let signature = req.signature;
         let signature_null_len = req.signature_null_len;

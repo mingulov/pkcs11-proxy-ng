@@ -1,3 +1,4 @@
+use crate::server::slot_map::BackendSlotId;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -85,12 +86,11 @@ pub(super) async fn open_session(
 
     let flags = CkSessionFlags(req.flags as u64);
     let backend = backend_ref.clone();
-    let result = spawn_backend(move || backend.open_session(backend_slot, flags)).await?;
+    let result = spawn_backend(move || backend.open_session(backend_slot.0, flags)).await?;
 
     match result {
         Ok(backend_session) => {
-            let slot_id = CkSlotId(req.slot_id as u64);
-            match register_session_handle(ctx_mgr, &ctx_id, backend_session, slot_id).await {
+            match register_session_handle(ctx_mgr, &ctx_id, backend_session, backend_slot).await {
                 Some(virtual_handle) => {
                     debug!(
                         context_id = %ctx_id.0,
@@ -189,7 +189,7 @@ pub(super) async fn close_all_sessions(
     }
 
     // Validate the slot ID (maps virtual→backend).
-    let _backend_slot = match resolve_slot(ctx_mgr, req.slot_id).await {
+    let backend_slot = match resolve_slot(ctx_mgr, req.slot_id).await {
         Ok(slot) => slot,
         Err(error) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::CloseAllSessionsResponse {
@@ -203,7 +203,7 @@ pub(super) async fn close_all_sessions(
         backend_ref,
         token_policy,
         &ctx_id,
-        _backend_slot,
+        backend_slot,
     )
     .await?
     {
@@ -223,9 +223,8 @@ pub(super) async fn close_all_sessions(
     // ADR-0002 §7: close only THIS client's sessions for the target slot.
     // We MUST NOT call backend.close_all_sessions() — that would close
     // sessions belonging to other logical client instances.
-    let slot_id = CkSlotId(req.slot_id as u64);
     let backend_sessions = ctx_mgr
-        .get_context(&ctx_id, |ctx| ctx.remove_sessions_for_slot(slot_id))
+        .get_context(&ctx_id, |ctx| ctx.remove_sessions_for_slot(backend_slot))
         .await
         .unwrap_or_default();
 
@@ -277,9 +276,16 @@ pub(super) async fn get_session_info(
 
     match result {
         Ok(mut info) => {
-            if let Some(virtual_slot) = ctx_mgr.to_virtual_slot(info.slot_id).await {
-                info.slot_id = virtual_slot;
+            let reported_slot = BackendSlotId(info.slot_id);
+            let owner = ctx_mgr.slot_for_session(&ctx_id, VirtualHandle(req.session_handle)).await;
+            let virtual_slot = ctx_mgr.to_virtual_slot(reported_slot).await;
+            if owner != Some(reported_slot) || virtual_slot.is_none() {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::GetSessionInfoResponse {
+                    ck_rv: CkRv::DEVICE_ERROR.0,
+                    info: None,
+                }));
             }
+            info.slot_id = CkSlotId(virtual_slot.expect("mapping checked above").0);
             Ok(Response::new(pkcs11_proxy_ng_proto::GetSessionInfoResponse {
                 ck_rv: CkRv::OK.0,
                 info: Some(pkcs11_proxy_ng_proto::SessionInfo::from(&info)),

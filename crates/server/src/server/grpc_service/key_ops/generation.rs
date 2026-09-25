@@ -4,7 +4,9 @@ use std::time::Instant;
 use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_audit::EventClass;
-use pkcs11_proxy_ng_types::{CkMechanismParams, CkObjectHandle, CkRv, Sp800108DerivedKey};
+use pkcs11_proxy_ng_types::{
+    CkMechanismParams, CkObjectHandle, CkRv, CkSessionHandle, Sp800108DerivedKey,
+};
 
 use super::super::authorization::mechanism_permitted;
 use super::super::convert_template;
@@ -91,7 +93,7 @@ async fn generate_key_pair_impl(
         }
     };
 
-    let mechanism = match parse_mechanism(req.mechanism) {
+    let mut mechanism = match parse_mechanism(req.mechanism) {
         Ok(mechanism) => mechanism,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyPairResponse {
@@ -107,6 +109,16 @@ async fn generate_key_pair_impl(
     if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
         return Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyPairResponse {
             ck_rv: CkRv::MECHANISM_INVALID.0,
+            public_key_handle: 0,
+            private_key_handle: 0,
+        }));
+    }
+
+    if let Err(rv) =
+        remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
+    {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyPairResponse {
+            ck_rv: rv.0,
             public_key_handle: 0,
             private_key_handle: 0,
         }));
@@ -225,7 +237,7 @@ async fn generate_key_impl(
         }
     };
 
-    let mechanism = match parse_mechanism(req.mechanism) {
+    let mut mechanism = match parse_mechanism(req.mechanism) {
         Ok(mechanism) => mechanism,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyResponse {
@@ -241,6 +253,16 @@ async fn generate_key_impl(
     if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
         return Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyResponse {
             ck_rv: CkRv::MECHANISM_INVALID.0,
+            key_handle: 0,
+            mechanism_out: None,
+        }));
+    }
+
+    if let Err(rv) =
+        remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
+    {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyResponse {
+            ck_rv: rv.0,
             key_handle: 0,
             mechanism_out: None,
         }));
@@ -383,8 +405,14 @@ async fn derive_key_impl(
     }
 
     if let Some(ref mut params) = mechanism.params
-        && let Err(rv) =
-            resolve_sp800_108_key_handle_data_params(ctx, &ctx_id, req.session_handle, params).await
+        && let Err(rv) = resolve_sp800_108_key_handle_data_params(
+            ctx,
+            &ctx_id,
+            req.session_handle,
+            session,
+            params,
+        )
+        .await
     {
         return Ok(Response::new(pkcs11_proxy_ng_proto::DeriveKeyResponse {
             ck_rv: rv.0,
@@ -459,11 +487,13 @@ async fn derive_key_impl(
 }
 
 /// Resolve SP800-108 byte-encoded key handles in KDF params, gating each
-/// through per-object authz when active (C1).
+/// through object/class authorization when active. The native session is kept
+/// separate from the embedded object, since metadata reads require both.
 async fn resolve_sp800_108_key_handle_data_params(
     ctx: &HandlerContext,
     ctx_id: &ClientContextId,
     virtual_session_handle: u64,
+    backend_session: CkSessionHandle,
     params: &mut CkMechanismParams,
 ) -> Result<(), CkRv> {
     match params {
@@ -472,6 +502,7 @@ async fn resolve_sp800_108_key_handle_data_params(
                 ctx,
                 ctx_id,
                 virtual_session_handle,
+                backend_session,
                 &mut params.data_params,
             )
             .await
@@ -481,6 +512,7 @@ async fn resolve_sp800_108_key_handle_data_params(
                 ctx,
                 ctx_id,
                 virtual_session_handle,
+                backend_session,
                 &mut params.data_params,
             )
             .await
@@ -493,6 +525,7 @@ async fn resolve_sp800_108_key_handle_data_param_list(
     ctx: &HandlerContext,
     ctx_id: &ClientContextId,
     virtual_session_handle: u64,
+    backend_session: CkSessionHandle,
     data_params: &mut [pkcs11_proxy_ng_types::PrfDataParam],
 ) -> Result<(), CkRv> {
     for data_param in data_params {
@@ -508,14 +541,16 @@ async fn resolve_sp800_108_key_handle_data_param_list(
             .and_then(|resolved| resolved)
             .ok_or(CkRv::OBJECT_HANDLE_INVALID)?;
 
-        // Gate the resolved handle through per-object authz if active (C1).
-        let final_handle = if ctx.token_policy.per_object_active() && backend_handle.0 != 0 {
+        let final_handle = if (ctx.token_policy.per_object_active()
+            || ctx.token_policy.per_class_active())
+            && backend_handle.0 != 0
+        {
             gate_object_handle(
                 ctx,
                 ctx_id,
                 virtual_session_handle,
                 virtual_handle,
-                BackendHandle(backend_handle.0),
+                BackendHandle(backend_session.0),
                 CkObjectHandle(backend_handle.0),
             )
             .await
@@ -523,6 +558,11 @@ async fn resolve_sp800_108_key_handle_data_param_list(
             CkObjectHandle(backend_handle.0)
         };
 
+        // A denied nonzero key must not become a different parameter (zero).
+        // Match shared embedded-handle denial before any provider dispatch.
+        if virtual_handle != 0 && final_handle.0 == 0 {
+            return Err(CkRv::OBJECT_HANDLE_INVALID);
+        }
         data_param.value = write_sp800_108_key_handle_value(final_handle.0, width)?;
     }
     Ok(())
@@ -630,7 +670,9 @@ mod tests {
 
         // Virtual session handle = 0 is fine; per_object_active() is false so it
         // is not used for gate lookup.
-        resolve_sp800_108_key_handle_data_params(&ctx, &ctx_id, 0, &mut params).await.unwrap();
+        resolve_sp800_108_key_handle_data_params(&ctx, &ctx_id, 0, CkSessionHandle(0), &mut params)
+            .await
+            .unwrap();
 
         let CkMechanismParams::Sp800108FeedbackKdf(params) = params else {
             panic!("expected SP800-108 feedback KDF params");
@@ -652,10 +694,52 @@ mod tests {
             additional_derived_keys: Vec::new(),
         });
 
-        let err = resolve_sp800_108_key_handle_data_params(&ctx, &ctx_id, 0, &mut params)
-            .await
-            .unwrap_err();
+        let err = resolve_sp800_108_key_handle_data_params(
+            &ctx,
+            &ctx_id,
+            0,
+            CkSessionHandle(0),
+            &mut params,
+        )
+        .await
+        .unwrap_err();
 
         assert_eq!(err, CkRv::MECHANISM_PARAM_INVALID);
+    }
+
+    #[tokio::test]
+    async fn rejects_sp800_108_backend_handle_that_cannot_fit_encoded_width() {
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 16));
+        let ctx = make_ctx(&ctx_mgr);
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+        let virtual_key = ctx_mgr
+            .get_context(&ctx_id, |c| c.object_handles.insert(BackendHandle(u32::MAX as u64 + 1)))
+            .await
+            .unwrap();
+        let input = (virtual_key.0 as u32).to_ne_bytes().to_vec();
+        let mut params = CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
+            prf_type: cryptoki_sys::CKM_SHA256_HMAC as u64,
+            data_params: vec![PrfDataParam {
+                type_: CK_SP800_108_KEY_HANDLE,
+                value: input.clone(),
+            }],
+            additional_derived_keys: vec![],
+        });
+        assert_eq!(
+            resolve_sp800_108_key_handle_data_params(
+                &ctx,
+                &ctx_id,
+                0,
+                CkSessionHandle(0),
+                &mut params,
+            )
+            .await,
+            Err(CkRv::OBJECT_HANDLE_INVALID)
+        );
+        let CkMechanismParams::Sp800108Kdf(params) = params else { unreachable!() };
+        assert_eq!(
+            params.data_params[0].value, input,
+            "failure must not serialize a truncated handle"
+        );
     }
 }

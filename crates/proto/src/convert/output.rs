@@ -36,10 +36,11 @@ fn attribute_query_results_into_proto(
     }
 }
 
+#[cfg(test)]
 fn attribute_query_results_from_proto(
     results: &v1_proto::AttributeQueryResultList,
-) -> Vec<CkAttributeQueryResult> {
-    results.results.iter().map(CkAttributeQueryResult::from).collect()
+) -> Result<Vec<CkAttributeQueryResult>, CkRv> {
+    results.results.iter().map(CkAttributeQueryResult::try_from).collect()
 }
 
 impl From<&CkOutputBufferSpec> for v1_proto::OutputBufferSpec {
@@ -66,19 +67,25 @@ impl From<&CkOutputBufferResult> for v1_proto::OutputBufferResult {
     fn from(result: &CkOutputBufferResult) -> Self {
         Self {
             ck_rv: result.ck_rv.0,
-            returned_len: result.returned_len,
+            returned_len: result.returned_len.unwrap_or(0),
             value: result.value.clone(),
+            apply_returned_len: Some(result.returned_len.is_some()),
         }
     }
 }
 
-impl From<&v1_proto::OutputBufferResult> for CkOutputBufferResult {
-    fn from(result: &v1_proto::OutputBufferResult) -> Self {
-        Self {
-            ck_rv: CkRv(result.ck_rv),
-            returned_len: result.returned_len,
-            value: result.value.clone(),
+impl TryFrom<&v1_proto::OutputBufferResult> for CkOutputBufferResult {
+    type Error = CkRv;
+    fn try_from(result: &v1_proto::OutputBufferResult) -> Result<Self, CkRv> {
+        let apply = result.apply_returned_len.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
+        if !apply && (result.returned_len != 0 || result.value.is_some()) {
+            return Err(CkRv::FUNCTION_NOT_SUPPORTED);
         }
+        Ok(Self {
+            ck_rv: CkRv(result.ck_rv),
+            returned_len: apply.then_some(result.returned_len),
+            value: result.value.clone(),
+        })
     }
 }
 
@@ -126,21 +133,32 @@ impl From<&CkOutputAndHandleResult> for v1_proto::OutputAndHandleResult {
     fn from(result: &CkOutputAndHandleResult) -> Self {
         Self {
             ck_rv: result.ck_rv.0,
-            returned_len: result.returned_len,
+            returned_len: result.returned_len.unwrap_or(0),
             value: result.value.clone(),
-            object_handle: result.object_handle.0,
+            object_handle: result.object_handle.map_or(0, |handle| handle.0),
+            apply_returned_len: Some(result.returned_len.is_some()),
+            apply_object_handle: Some(result.object_handle.is_some()),
         }
     }
 }
 
-impl From<&v1_proto::OutputAndHandleResult> for CkOutputAndHandleResult {
-    fn from(result: &v1_proto::OutputAndHandleResult) -> Self {
-        Self {
-            ck_rv: CkRv(result.ck_rv),
-            returned_len: result.returned_len,
-            value: result.value.clone(),
-            object_handle: CkObjectHandle(result.object_handle),
+impl TryFrom<&v1_proto::OutputAndHandleResult> for CkOutputAndHandleResult {
+    type Error = CkRv;
+    fn try_from(result: &v1_proto::OutputAndHandleResult) -> Result<Self, CkRv> {
+        let apply = result.apply_returned_len.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
+        let handle = result.apply_object_handle.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
+        if (!apply && (result.returned_len != 0 || result.value.is_some()))
+            || (!handle && result.object_handle != 0)
+            || (handle && result.ck_rv != CkRv::OK.0)
+        {
+            return Err(CkRv::FUNCTION_NOT_SUPPORTED);
         }
+        Ok(Self {
+            ck_rv: CkRv(result.ck_rv),
+            returned_len: apply.then_some(result.returned_len),
+            value: result.value.clone(),
+            object_handle: handle.then_some(CkObjectHandle(result.object_handle)),
+        })
     }
 }
 
@@ -169,6 +187,8 @@ impl From<&v1_proto::AttributeQuery> for CkAttributeQuery {
 impl From<&CkAttributeQueryResult> for v1_proto::AttributeQueryResult {
     fn from(result: &CkAttributeQueryResult) -> Self {
         Self {
+            apply_returned_len: Some(result.apply_returned_len),
+            apply_type: Some(result.apply_type),
             attr_type: result.attr_type.0,
             returned_len: result.returned_len,
             value: result.value.clone(),
@@ -181,6 +201,8 @@ impl From<&CkAttributeQueryResult> for v1_proto::AttributeQueryResult {
 impl From<CkAttributeQueryResult> for v1_proto::AttributeQueryResult {
     fn from(result: CkAttributeQueryResult) -> Self {
         Self {
+            apply_returned_len: Some(result.apply_returned_len),
+            apply_type: Some(result.apply_type),
             attr_type: result.attr_type.0,
             returned_len: result.returned_len,
             value: result.value,
@@ -190,16 +212,45 @@ impl From<CkAttributeQueryResult> for v1_proto::AttributeQueryResult {
     }
 }
 
-impl From<&v1_proto::AttributeQueryResult> for CkAttributeQueryResult {
-    fn from(result: &v1_proto::AttributeQueryResult) -> Self {
-        Self {
-            attr_type: CkAttributeType(result.attr_type),
-            returned_len: result.returned_len,
-            value: result.value.clone(),
-            ck_rv: result.ck_rv.map(CkRv),
-            nested: result.nested.as_ref().map(attribute_query_results_from_proto),
-        }
+impl TryFrom<&v1_proto::AttributeQueryResult> for CkAttributeQueryResult {
+    type Error = CkRv;
+    fn try_from(result: &v1_proto::AttributeQueryResult) -> Result<Self, CkRv> {
+        decode_attribute_result(result, 0)
     }
+}
+
+fn decode_attribute_result(
+    result: &v1_proto::AttributeQueryResult,
+    depth: usize,
+) -> Result<CkAttributeQueryResult, CkRv> {
+    let apply_returned_len = result.apply_returned_len.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
+    let apply_type = result.apply_type.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
+    if !apply_returned_len
+        && (result.returned_len != 0 || result.value.is_some() || result.nested.is_some())
+    {
+        return Err(CkRv::FUNCTION_NOT_SUPPORTED);
+    }
+    if depth > 1 {
+        return Err(CkRv::FUNCTION_NOT_SUPPORTED);
+    }
+    Ok(CkAttributeQueryResult {
+        apply_returned_len,
+        apply_type,
+        attr_type: CkAttributeType(result.attr_type),
+        returned_len: result.returned_len,
+        value: result.value.clone(),
+        ck_rv: result.ck_rv.map(CkRv),
+        nested: result
+            .nested
+            .as_ref()
+            .map(|list| {
+                list.results
+                    .iter()
+                    .map(|sub| decode_attribute_result(sub, depth + 1))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?,
+    })
 }
 
 impl From<ByteOutputFunction> for v1_proto::ByteOutputFunction {
@@ -322,6 +373,34 @@ mod tests {
     use prost::Message;
     use std::fmt::Debug;
 
+    #[test]
+    fn exact_effect_legacy_or_missing_ack_is_rejected_without_writeback() {
+        let legacy = v1_proto::OutputBufferResult {
+            ck_rv: CkRv::DEVICE_ERROR.0,
+            returned_len: 0,
+            value: None,
+            apply_returned_len: None,
+        };
+        assert!(
+            CkOutputBufferResult::try_from(&legacy).is_err(),
+            "absence is not an effects acknowledgement"
+        );
+    }
+
+    #[test]
+    fn exact_effect_wire_round_trip_distinguishes_absent_zero_and_all_ones() {
+        for length in [None, Some(0), Some(u64::MAX)] {
+            let original = CkOutputBufferResult {
+                ck_rv: CkRv::DEVICE_ERROR,
+                returned_len: length,
+                value: None,
+            };
+            let wire = wire_round_trip(&v1_proto::OutputBufferResult::from(&original));
+            assert_eq!(wire.apply_returned_len, Some(length.is_some()));
+            assert_eq!(CkOutputBufferResult::try_from(&wire).unwrap(), original);
+        }
+    }
+
     fn wire_round_trip<M>(message: &M) -> M
     where
         M: Message + Default + PartialEq + Debug,
@@ -362,6 +441,7 @@ mod tests {
     #[test]
     fn exact_output_wire_round_trip_preserves_optional_empty_bytes() {
         let output = v1_proto::OutputBufferResult {
+            apply_returned_len: Some(true),
             ck_rv: CkRv::OK.0,
             returned_len: 0,
             value: Some(Vec::new()),
@@ -383,6 +463,8 @@ mod tests {
         assert_eq!(wire_round_trip(&parameter_result).value, Some(Vec::new()));
 
         let output_and_handle = v1_proto::OutputAndHandleResult {
+            apply_returned_len: Some(true),
+            apply_object_handle: Some(true),
             ck_rv: CkRv::OK.0,
             returned_len: 0,
             value: Some(Vec::new()),
@@ -391,6 +473,8 @@ mod tests {
         assert_eq!(wire_round_trip(&output_and_handle).value, Some(Vec::new()));
 
         let attribute_result = v1_proto::AttributeQueryResult {
+            apply_returned_len: Some(true),
+            apply_type: Some(false),
             attr_type: CkAttributeType::VALUE.0,
             returned_len: 0,
             value: Some(Vec::new()),
@@ -409,6 +493,7 @@ mod tests {
     #[test]
     fn exact_request_decode_ignores_unknown_future_fields() {
         let request = v1_proto::ByteOutputExactRequest {
+            exact_output_effects_version: 1,
             client_context_id: "ctx".to_string(),
             session_handle: 11,
             function: byte_output_function_to_i32(ByteOutputFunction::Sign),
@@ -435,10 +520,13 @@ mod tests {
 
     #[test]
     fn output_buffer_result_round_trip_preserves_absent_value() {
-        let original =
-            CkOutputBufferResult { ck_rv: CkRv::BUFFER_TOO_SMALL, returned_len: 512, value: None };
+        let original = CkOutputBufferResult {
+            ck_rv: CkRv::BUFFER_TOO_SMALL,
+            returned_len: Some(512),
+            value: None,
+        };
         let proto = v1_proto::OutputBufferResult::from(&original);
-        let back = CkOutputBufferResult::from(&proto);
+        let back = CkOutputBufferResult::try_from(&proto).unwrap();
         assert_eq!(back, original);
     }
 
@@ -470,12 +558,12 @@ mod tests {
     fn output_and_handle_result_round_trip() {
         let original = CkOutputAndHandleResult {
             ck_rv: CkRv::OK,
-            returned_len: 3,
+            returned_len: Some(3),
             value: Some(vec![0xAA, 0xBB, 0xCC]),
-            object_handle: CkObjectHandle(41),
+            object_handle: Some(CkObjectHandle(41)),
         };
         let proto = v1_proto::OutputAndHandleResult::from(&original);
-        let back = CkOutputAndHandleResult::from(&proto);
+        let back = CkOutputAndHandleResult::try_from(&proto).unwrap();
         assert_eq!(back, original);
     }
 
@@ -508,11 +596,15 @@ mod tests {
     #[test]
     fn attribute_query_result_round_trip_preserves_nested_per_attribute_status() {
         let original = CkAttributeQueryResult {
+            apply_returned_len: true,
+            apply_type: false,
             attr_type: CkAttributeType::VALUE,
             returned_len: u64::MAX,
             value: None,
             ck_rv: Some(CkRv::ATTRIBUTE_SENSITIVE),
             nested: Some(vec![CkAttributeQueryResult {
+                apply_returned_len: true,
+                apply_type: false,
                 attr_type: CkAttributeType::LABEL,
                 returned_len: 4,
                 value: Some(b"test".to_vec()),
@@ -521,7 +613,7 @@ mod tests {
             }]),
         };
         let proto = v1_proto::AttributeQueryResult::from(&original);
-        let back = CkAttributeQueryResult::from(&proto);
+        let back = CkAttributeQueryResult::try_from(&proto).unwrap();
         assert_eq!(back, original);
     }
 
@@ -542,6 +634,8 @@ mod tests {
     fn attribute_query_result_list_round_trip_preserves_absent_and_empty_values() {
         let original = vec![
             CkAttributeQueryResult {
+                apply_returned_len: true,
+                apply_type: false,
                 attr_type: CkAttributeType::VALUE,
                 returned_len: 0,
                 value: Some(Vec::new()),
@@ -549,6 +643,8 @@ mod tests {
                 nested: None,
             },
             CkAttributeQueryResult {
+                apply_returned_len: true,
+                apply_type: false,
                 attr_type: CkAttributeType::SUBJECT,
                 returned_len: 12,
                 value: None,
@@ -557,7 +653,7 @@ mod tests {
             },
         ];
         let proto = attribute_query_results_to_proto(&original);
-        let back = attribute_query_results_from_proto(&proto);
+        let back = attribute_query_results_from_proto(&proto).unwrap();
         assert_eq!(back, original);
     }
 
@@ -652,6 +748,7 @@ mod tests {
     #[test]
     fn byte_output_exact_request_null_len_roundtrip() {
         let req = v1_proto::ByteOutputExactRequest {
+            exact_output_effects_version: 1,
             input_data_null_len: Some(42),
             ..Default::default()
         };
@@ -682,8 +779,11 @@ mod tests {
     fn null_len_present_with_zero_is_distinct_from_absent() {
         // NULL pointer with claimed length 0 is a real client input class; the
         // wire must distinguish Some(0) (NULL, len 0) from None (valid pointer).
-        let req =
-            v1_proto::ByteOutputExactRequest { input_data_null_len: Some(0), ..Default::default() };
+        let req = v1_proto::ByteOutputExactRequest {
+            exact_output_effects_version: 1,
+            input_data_null_len: Some(0),
+            ..Default::default()
+        };
         let bytes = prost::Message::encode_to_vec(&req);
         let back = v1_proto::ByteOutputExactRequest::decode(&bytes[..]).unwrap();
         assert_eq!(back.input_data_null_len, Some(0));

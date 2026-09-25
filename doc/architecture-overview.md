@@ -67,8 +67,9 @@ Full details in `doc/adr/`:
   handles never exposed.
 - Login state scoped to logical client instance + token.
 - Lease-based reconnect preserves state across transient transport interruptions.
-- Backend isolation fallback ladder: shared process → separate module instance
-  → separate worker process (Phase 1 implements shared-process tier).
+- v0.2 selects one managed provider chain per embedding process, with separate
+  daemons for independent chains. Another loader handle is not isolation.
+  Worker isolation and independent per-client event streams remain deferred.
 
 **ADR-0003 — Error Model**
 - `ck_rv` field (uint64) in every protobuf response carries the exact PKCS#11
@@ -84,7 +85,9 @@ Full details in `doc/adr/`:
 - Primary implementation: direct FFI via `dlopen` (`libloading` crate).
 - Any PKCS#11 `.so` is a valid backend: vendor HSM libs, SoftHSM2, p11-kit.
 - p11-kit is just one example module path, not an architectural dependency.
-- Single backend module per daemon instance in Phase 1.
+- One managed chain per embedding process, including aggregator dependencies
+  and direct-backend users. Share through Arc; one linked backend runtime and
+  exclusive provider access are required.
 
 **ADR-0005 — Phase 1 Authorization Model**
 - Three auth modes per listener: `none` (dev only), `peer_cred` (Unix
@@ -135,7 +138,34 @@ TCP and authenticated Unix sockets, represented PKCS#11 2.40/3.x function-list
 coverage, explicitly modeled mechanisms, exact-output semantics, SoftHSM2/NSS
 integration, and optional gateway/audit controls.
 
-**Out of scope:** Windows/macOS runtime targets, automatic support for future
+**Out of scope:** Windows/macOS native-provider daemon targets, automatic support for future
 PKCS#11 versions or unmodeled parameter layouts, backend worker-process
 isolation, callbacks, and multi-module aggregation within a single daemon.
 The proxy is a forwarding layer; provider conformance is validated externally.
+
+### Selected v0.2 native contract (implementation/qualification pending)
+
+The [native ownership contract](release/native-mechanism-ownership.md)
+requires constructor reservation before loading/discovery, epoch-qualified
+workers/frames and explicit retirement before storage/library destruction.
+Slot waiting supports DONT_BLOCK only; blocking mode returns local
+FUNCTION_NOT_SUPPORTED without polling. One waiter keeps ordinary lifecycle
+exclusion through settlement and cannot overlap native Finalize. Checked
+input/output/RV widths and the specified local-refusal order are mandatory.
+Logical clients compete for shared native pending flags; logical Initialize
+creates no independent bitmap or full native per-application event equivalence.
+
+Live FFI qualification is Linux GNU/musl x86_64/64-bit and x86/32-bit only.
+This supersedes ADR-0011/0006's Windows native-provider daemon scope for v0.2.
+Portable Windows client/shim/proto/types, mock-only backend/server builds and
+Windows-client/Linux-daemon interoperation remain. Native Windows is deferred,
+lower priority/stretch. Nonqualified hosts must refuse construction before
+loading; all four Linux width pairs need native loaded-shim receipts.
+
+Unresolved shutdown or final-domain Drop without private quiescence proof
+selects return-aware raw Linux `exit_group(70)` for the whole embedding thread
+group. Its target/seccomp/environment contract is explicit; it promises no
+wiping, complete audit tail, cleanup, token deletion, strict disappearance
+deadline or global no-core policy. The controller must progress without stalled
+native/session/registry locks. These are required future enforcement and test
+gates, not claims that this documentation amendment implements them.

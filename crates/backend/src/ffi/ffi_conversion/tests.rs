@@ -127,6 +127,30 @@ mod mechanism_to_ffi_tests {
     }
 
     #[test]
+    fn official_pqc_mechanisms_flow_parameterless_to_null_ffi() {
+        // OASIS v3.2 (ml-kem.md): CKM_ML_KEM keygen/encaps/decaps take no
+        // parameters; ML-DSA/SLH-DSA likewise (hash variants take only an
+        // optional additional context). The transparent path must deliver
+        // them with NULL params — this is what CloudHSM PQC rides on, and
+        // it must keep working while vendor shapes are gated.
+        let pqc_ids = [
+            (0x0000_000F, "CKM_ML_KEM_KEY_PAIR_GEN"),
+            (0x0000_0017, "CKM_ML_KEM"),
+            (0x0000_001C, "CKM_ML_DSA_KEY_PAIR_GEN"),
+            (0x0000_001D, "CKM_ML_DSA"),
+            (0x0000_002D, "CKM_SLH_DSA_KEY_PAIR_GEN"),
+            (0x0000_002E, "CKM_SLH_DSA"),
+        ];
+        for (id, name) in pqc_ids {
+            let mech = CkMechanism { mechanism_type: CkMechanismType(id), params: None };
+            let ffi = mechanism_to_ffi(&mech).expect("official PQC flows parameterless");
+            let native = ffi.ck_mechanism();
+            assert!(native.pParameter.is_null(), "{name}: NULL params on the wire");
+            assert_eq!(native.ulParameterLen, 0, "{name}: zero param length");
+        }
+    }
+
+    #[test]
     fn pss_params_reconstruct_c_struct() {
         let ffi = convert(
             CkMechanismType::RSA_PKCS_PSS,
@@ -138,11 +162,11 @@ mod mechanism_to_ffi_tests {
         );
 
         assert_eq!(
-            ffi.ck_mechanism.ulParameterLen,
+            ffi.ck_mechanism().ulParameterLen,
             std::mem::size_of::<cryptoki_sys::CK_RSA_PKCS_PSS_PARAMS>() as cryptoki_sys::CK_ULONG
         );
         let pss = unsafe {
-            &*(ffi.ck_mechanism.pParameter as *const cryptoki_sys::CK_RSA_PKCS_PSS_PARAMS)
+            &*(ffi.ck_mechanism().pParameter as *const cryptoki_sys::CK_RSA_PKCS_PSS_PARAMS)
         };
         assert_eq!(pss.hashAlg, CkMechanismType::SHA256.0 as cryptoki_sys::CK_MECHANISM_TYPE);
         assert_eq!(pss.mgf, 1);
@@ -162,11 +186,11 @@ mod mechanism_to_ffi_tests {
         );
 
         assert_eq!(
-            ffi.ck_mechanism.ulParameterLen,
+            ffi.ck_mechanism().ulParameterLen,
             std::mem::size_of::<cryptoki_sys::CK_RSA_PKCS_OAEP_PARAMS>() as cryptoki_sys::CK_ULONG
         );
         let oaep = unsafe {
-            &*(ffi.ck_mechanism.pParameter as *const cryptoki_sys::CK_RSA_PKCS_OAEP_PARAMS)
+            &*(ffi.ck_mechanism().pParameter as *const cryptoki_sys::CK_RSA_PKCS_OAEP_PARAMS)
         };
         assert_eq!(oaep.hashAlg, CkMechanismType::SHA256.0 as cryptoki_sys::CK_MECHANISM_TYPE);
         assert_eq!(oaep.mgf, 1);
@@ -192,10 +216,11 @@ mod mechanism_to_ffi_tests {
         );
 
         assert_eq!(
-            ffi.ck_mechanism.ulParameterLen,
+            ffi.ck_mechanism().ulParameterLen,
             std::mem::size_of::<cryptoki_sys::CK_GCM_PARAMS>() as cryptoki_sys::CK_ULONG
         );
-        let gcm = unsafe { &*(ffi.ck_mechanism.pParameter as *const cryptoki_sys::CK_GCM_PARAMS) };
+        let gcm =
+            unsafe { &*(ffi.ck_mechanism().pParameter as *const cryptoki_sys::CK_GCM_PARAMS) };
         assert_eq!(gcm.ulIvLen, 12);
         assert_eq!(gcm.ulIvBits, 96);
         assert_eq!(gcm.ulAADLen, 3);
@@ -204,6 +229,64 @@ mod mechanism_to_ffi_tests {
         let aad = unsafe { std::slice::from_raw_parts(gcm.pAAD, gcm.ulAADLen as usize) };
         assert_eq!(iv, [0x10; 12]);
         assert_eq!(aad, [0xAA, 0xBB, 0xCC]);
+    }
+
+    // Row 7 (C3M.6 order item 7): classic-GCM IV lengths must round-trip
+    // exactly — the provider-visible ulIvLen always names the caller input
+    // length (zero selects provider-generated IVs) while the retained buffer
+    // keeps max(input, iv_buffer_len) writable bytes. Lengths here span
+    // sub-block, block, and multi-block IVs on every topology.
+    #[test]
+    fn gcm_iv_length_sweep_preserves_lengths_and_buffer_capacity() {
+        for (iv_len, buffer_len) in
+            [(0usize, 12), (1, 1), (7, 8), (8, 8), (12, 12), (16, 16), (24, 32)]
+        {
+            let ffi = convert(
+                CkMechanismType::AES_GCM,
+                CkMechanismParams::Gcm(GcmParams {
+                    iv: vec![0x5A; iv_len],
+                    iv_bits: 96,
+                    iv_buffer_len: buffer_len as u64,
+                    aad: Vec::new(),
+                    tag_bits: 128,
+                }),
+            );
+            let gcm =
+                unsafe { &*(ffi.ck_mechanism().pParameter as *const cryptoki_sys::CK_GCM_PARAMS) };
+            assert_eq!(gcm.ulIvLen as usize, iv_len, "provider-visible IV length");
+            let retained = match ffi.output_params() {
+                Some(CkMechanismParams::Gcm(params)) => params,
+                other => panic!("unexpected output params: {other:?}"),
+            };
+            assert_eq!(retained.iv.len(), iv_len, "output IV names the input bytes");
+            assert_eq!(
+                retained.iv_buffer_len as usize,
+                iv_len.max(buffer_len),
+                "retained buffer keeps generated-IV capacity"
+            );
+            if iv_len == 0 {
+                assert!(gcm.pIv.is_null() == (buffer_len == 0));
+            } else {
+                assert!(!gcm.pIv.is_null());
+            }
+        }
+    }
+
+    // Row 7: an absurd iv_buffer_len must reject before any backing buffer is
+    // allocated, on every width topology.
+    #[test]
+    fn gcm_absurd_iv_buffer_len_rejects_without_allocating() {
+        let result = mechanism_to_ffi(&CkMechanism {
+            mechanism_type: CkMechanismType::AES_GCM,
+            params: Some(CkMechanismParams::Gcm(GcmParams {
+                iv: Vec::new(),
+                iv_bits: 96,
+                iv_buffer_len: u64::MAX,
+                aad: Vec::new(),
+                tag_bits: 128,
+            })),
+        });
+        assert_eq!(result.err(), Some(CkRv::MECHANISM_PARAM_INVALID));
     }
 
     // E1: the PBE/PBKDF2 password is held in the FFI backing via `Zeroizing`
@@ -222,7 +305,8 @@ mod mechanism_to_ffi_tests {
                 iteration: 1000,
             }),
         );
-        let pbe = unsafe { &*(ffi.ck_mechanism.pParameter as *const cryptoki_sys::CK_PBE_PARAMS) };
+        let pbe =
+            unsafe { &*(ffi.ck_mechanism().pParameter as *const cryptoki_sys::CK_PBE_PARAMS) };
         assert_eq!(pbe.ulPasswordLen, password.len() as cryptoki_sys::CK_ULONG);
         assert_eq!(pbe.ulIteration, 1000);
         let pass = unsafe { std::slice::from_raw_parts(pbe.pPassword, pbe.ulPasswordLen as usize) };
@@ -244,7 +328,7 @@ mod mechanism_to_ffi_tests {
             }),
         );
         let p = unsafe {
-            &*(ffi.ck_mechanism.pParameter as *const cryptoki_sys::CK_PKCS5_PBKD2_PARAMS2)
+            &*(ffi.ck_mechanism().pParameter as *const cryptoki_sys::CK_PKCS5_PBKD2_PARAMS2)
         };
         assert_eq!(p.ulPasswordLen, password.len() as cryptoki_sys::CK_ULONG);
         let pass = unsafe { std::slice::from_raw_parts(p.pPassword, p.ulPasswordLen as usize) };
@@ -265,7 +349,7 @@ mod mechanism_to_ffi_tests {
         );
 
         let gcm =
-            unsafe { &mut *(ffi.ck_mechanism.pParameter as *mut cryptoki_sys::CK_GCM_PARAMS) };
+            unsafe { &mut *(ffi.ck_mechanism().pParameter as *mut cryptoki_sys::CK_GCM_PARAMS) };
         assert!(!gcm.pIv.is_null());
         assert_eq!(gcm.ulIvLen, 0);
         assert_eq!(gcm.ulIvBits, 96);
@@ -304,7 +388,7 @@ mod mechanism_to_ffi_tests {
         );
 
         let wtls = unsafe {
-            &mut *(ffi.ck_mechanism.pParameter
+            &mut *(ffi.ck_mechanism().pParameter
                 as *mut cryptoki_sys::CK_WTLS_MASTER_KEY_DERIVE_PARAMS)
         };
         assert!(!wtls.pVersion.is_null());
@@ -347,7 +431,7 @@ mod mechanism_to_ffi_tests {
         );
 
         let wtls = unsafe {
-            &mut *(ffi.ck_mechanism.pParameter as *mut cryptoki_sys::CK_WTLS_KEY_MAT_PARAMS)
+            &mut *(ffi.ck_mechanism().pParameter as *mut cryptoki_sys::CK_WTLS_KEY_MAT_PARAMS)
         };
         let key_mat_out = unsafe { &mut *wtls.pReturnedKeyMaterial };
         assert!(!key_mat_out.pIV.is_null());
@@ -401,7 +485,7 @@ mod mechanism_to_ffi_tests {
         );
 
         let ssl3 = unsafe {
-            &mut *(ffi.ck_mechanism.pParameter as *mut cryptoki_sys::CK_SSL3_KEY_MAT_PARAMS)
+            &mut *(ffi.ck_mechanism().pParameter as *mut cryptoki_sys::CK_SSL3_KEY_MAT_PARAMS)
         };
         let key_mat_out = unsafe { &mut *ssl3.pReturnedKeyMaterial };
         key_mat_out.hClientMacSecret = 101;
@@ -467,7 +551,7 @@ mod mechanism_to_ffi_tests {
         );
 
         let tls12 = unsafe {
-            &mut *(ffi.ck_mechanism.pParameter as *mut cryptoki_sys::CK_TLS12_KEY_MAT_PARAMS)
+            &mut *(ffi.ck_mechanism().pParameter as *mut cryptoki_sys::CK_TLS12_KEY_MAT_PARAMS)
         };
         let key_mat_out = unsafe { &mut *tls12.pReturnedKeyMaterial };
         key_mat_out.hClientMacSecret = 111;
@@ -510,11 +594,11 @@ mod mechanism_to_ffi_tests {
             CkMechanismParams::Iv(IvParams { iv: vec![0x55; 16] }),
         );
 
-        assert_eq!(ffi.ck_mechanism.ulParameterLen, 16);
+        assert_eq!(ffi.ck_mechanism().ulParameterLen, 16);
         let iv = unsafe {
             std::slice::from_raw_parts(
-                ffi.ck_mechanism.pParameter as *const u8,
-                ffi.ck_mechanism.ulParameterLen as usize,
+                ffi.ck_mechanism().pParameter as *const u8,
+                ffi.ck_mechanism().ulParameterLen as usize,
             )
         };
         assert_eq!(iv, [0x55; 16]);
@@ -528,11 +612,11 @@ mod mechanism_to_ffi_tests {
         );
 
         assert_eq!(
-            ffi.ck_mechanism.ulParameterLen,
+            ffi.ck_mechanism().ulParameterLen,
             std::mem::size_of::<cryptoki_sys::CK_AES_CTR_PARAMS>() as cryptoki_sys::CK_ULONG
         );
         let ctr =
-            unsafe { &*(ffi.ck_mechanism.pParameter as *const cryptoki_sys::CK_AES_CTR_PARAMS) };
+            unsafe { &*(ffi.ck_mechanism().pParameter as *const cryptoki_sys::CK_AES_CTR_PARAMS) };
         assert_eq!(ctr.ulCounterBits, 128);
         assert_eq!(ctr.cb, [0x33; 16]);
     }
@@ -545,11 +629,11 @@ mod mechanism_to_ffi_tests {
         );
 
         assert_eq!(
-            ffi.ck_mechanism.ulParameterLen,
+            ffi.ck_mechanism().ulParameterLen,
             std::mem::size_of::<cryptoki_sys::CK_EXTRACT_PARAMS>() as cryptoki_sys::CK_ULONG
         );
         let bit_position =
-            unsafe { *(ffi.ck_mechanism.pParameter as *const cryptoki_sys::CK_EXTRACT_PARAMS) };
+            unsafe { *(ffi.ck_mechanism().pParameter as *const cryptoki_sys::CK_EXTRACT_PARAMS) };
         assert_eq!(bit_position, 21);
     }
 
@@ -561,11 +645,11 @@ mod mechanism_to_ffi_tests {
         );
 
         assert_eq!(
-            ffi.ck_mechanism.ulParameterLen,
+            ffi.ck_mechanism().ulParameterLen,
             std::mem::size_of::<cryptoki_sys::CK_OBJECT_HANDLE>() as cryptoki_sys::CK_ULONG
         );
         let handle =
-            unsafe { *(ffi.ck_mechanism.pParameter as *const cryptoki_sys::CK_OBJECT_HANDLE) };
+            unsafe { *(ffi.ck_mechanism().pParameter as *const cryptoki_sys::CK_OBJECT_HANDLE) };
         assert_eq!(handle, 0xCAFE);
     }
 
@@ -579,12 +663,12 @@ mod mechanism_to_ffi_tests {
         );
 
         assert_eq!(
-            ffi.ck_mechanism.ulParameterLen,
+            ffi.ck_mechanism().ulParameterLen,
             std::mem::size_of::<cryptoki_sys::CK_KEY_DERIVATION_STRING_DATA>()
                 as cryptoki_sys::CK_ULONG
         );
         let params = unsafe {
-            &*(ffi.ck_mechanism.pParameter as *const cryptoki_sys::CK_KEY_DERIVATION_STRING_DATA)
+            &*(ffi.ck_mechanism().pParameter as *const cryptoki_sys::CK_KEY_DERIVATION_STRING_DATA)
         };
         assert_eq!(params.ulLen, 4);
         let data = unsafe { std::slice::from_raw_parts(params.pData, params.ulLen as usize) };
@@ -603,11 +687,11 @@ mod mechanism_to_ffi_tests {
         );
 
         assert_eq!(
-            ffi.ck_mechanism.ulParameterLen,
+            ffi.ck_mechanism().ulParameterLen,
             std::mem::size_of::<super::FfiSignAdditionalContext>() as cryptoki_sys::CK_ULONG
         );
         let params =
-            unsafe { &*(ffi.ck_mechanism.pParameter as *const super::FfiSignAdditionalContext) };
+            unsafe { &*(ffi.ck_mechanism().pParameter as *const super::FfiSignAdditionalContext) };
         assert_eq!(params.hedge_variant, 1);
         assert_eq!(params.ul_context_len, 3);
         let context =
@@ -629,11 +713,11 @@ mod mechanism_to_ffi_tests {
         );
 
         assert_eq!(
-            ffi.ck_mechanism.ulParameterLen,
+            ffi.ck_mechanism().ulParameterLen,
             std::mem::size_of::<super::FfiHashSignAdditionalContext>() as cryptoki_sys::CK_ULONG
         );
         let params = unsafe {
-            &*(ffi.ck_mechanism.pParameter as *const super::FfiHashSignAdditionalContext)
+            &*(ffi.ck_mechanism().pParameter as *const super::FfiHashSignAdditionalContext)
         };
         assert_eq!(params.hedge_variant, 1);
         assert_eq!(params.ul_context_len, 2);
@@ -655,10 +739,10 @@ mod mechanism_to_ffi_tests {
         );
 
         assert_eq!(
-            ffi.ck_mechanism.ulParameterLen,
+            ffi.ck_mechanism().ulParameterLen,
             std::mem::size_of::<super::FfiKmacParams>() as cryptoki_sys::CK_ULONG
         );
-        let kmac = unsafe { &*(ffi.ck_mechanism.pParameter as *const super::FfiKmacParams) };
+        let kmac = unsafe { &*(ffi.ck_mechanism().pParameter as *const super::FfiKmacParams) };
         assert_eq!(kmac.h_key, 0xCAFE);
         assert_eq!(kmac.ul_mac_length, 64);
         assert_eq!(kmac.ul_customization_string_len, 6);
@@ -683,10 +767,10 @@ mod mechanism_to_ffi_tests {
         );
 
         assert_eq!(
-            ffi.ck_mechanism.ulParameterLen,
+            ffi.ck_mechanism().ulParameterLen,
             std::mem::size_of::<super::FfiMuGenParams>() as cryptoki_sys::CK_ULONG
         );
-        let mu_gen = unsafe { &*(ffi.ck_mechanism.pParameter as *const super::FfiMuGenParams) };
+        let mu_gen = unsafe { &*(ffi.ck_mechanism().pParameter as *const super::FfiMuGenParams) };
         assert_eq!(mu_gen.h_key, 0xA11CE);
         assert_eq!(mu_gen.ul_tr_len, 14);
         assert_eq!(mu_gen.ul_ctx_len, 7);
@@ -844,7 +928,7 @@ mod attribute_query_tests {
     use pkcs11_proxy_ng_types::{CkAttributeQuery, CkAttributeType, CkRv};
 
     #[test]
-    fn raw_attribute_queries_preserve_null_buffer_len() {
+    fn raw_attribute_queries_zero_output_only_null_buffer_len_without_reading_caller() {
         let ffi = FfiAttributeQueries::from_queries(&[CkAttributeQuery {
             attr_type: CkAttributeType::LABEL,
             buffer_present: false,
@@ -855,7 +939,7 @@ mod attribute_query_tests {
 
         assert_eq!(ffi.attrs.len(), 1);
         assert!(ffi.attrs[0].pValue.is_null());
-        assert_eq!(ffi.attrs[0].ulValueLen, 17);
+        assert_eq!(ffi.attrs[0].ulValueLen, 0);
     }
 
     #[test]

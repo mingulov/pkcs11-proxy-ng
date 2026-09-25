@@ -9,11 +9,13 @@ use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_types::{CkObjectHandle, CkOutputBufferSpec, CkRv};
 
+use super::super::authorization::mechanism_permitted;
 use super::super::convert_template;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
-    check_sanitize, input_from_wire, parse_mechanism, register_session_object_handle,
-    resolve_session_and_key, spawn_backend, template_declares_token_object,
+    ExactCompletion, check_sanitize, input_from_wire, parse_mechanism,
+    register_session_object_handle, resolve_session_and_key, spawn_backend, spawn_backend_exact,
+    template_declares_token_object,
 };
 use crate::server::context_manager::ClientContextId;
 use crate::server::handle_map::VirtualHandle;
@@ -56,6 +58,14 @@ pub(crate) async fn encapsulate_key(
             }));
         }
     };
+
+    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyResponse {
+            ck_rv: CkRv::MECHANISM_INVALID.0,
+            ciphertext: Vec::new(),
+            key_handle: 0,
+        }));
+    }
 
     // B1: remap object handles embedded in the mechanism parameters;
     // gate each through per-object authz when active (C1).
@@ -145,6 +155,13 @@ pub(crate) async fn decapsulate_key(
         }
     };
 
+    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::DecapsulateKeyResponse {
+            ck_rv: CkRv::MECHANISM_INVALID.0,
+            key_handle: 0,
+        }));
+    }
+
     // B1: remap object handles embedded in the mechanism parameters;
     // gate each through per-object authz when active (C1).
     if let Err(rv) =
@@ -219,6 +236,9 @@ pub(crate) async fn encapsulate_key_exact(
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
     let req = request.into_inner();
+    if req.exact_output_effects_version != 1 {
+        return Err(Status::failed_precondition("exact output effects version 1 required"));
+    }
     let ctx_id = ClientContextId(req.client_context_id);
 
     let (session, public_key) = match resolve_session_and_key(
@@ -233,6 +253,8 @@ pub(crate) async fn encapsulate_key_exact(
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
                 result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
+                    apply_returned_len: Some(false),
+                    apply_object_handle: Some(false),
                     ck_rv: rv.0,
                     returned_len: 0,
                     value: None,
@@ -247,6 +269,8 @@ pub(crate) async fn encapsulate_key_exact(
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
                 result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
+                    apply_returned_len: Some(false),
+                    apply_object_handle: Some(false),
                     ck_rv: rv.0,
                     returned_len: 0,
                     value: None,
@@ -256,6 +280,19 @@ pub(crate) async fn encapsulate_key_exact(
         }
     };
 
+    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
+            result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
+                apply_returned_len: Some(false),
+                apply_object_handle: Some(false),
+                ck_rv: CkRv::MECHANISM_INVALID.0,
+                returned_len: 0,
+                value: None,
+                object_handle: 0,
+            }),
+        }));
+    }
+
     // B1: remap object handles embedded in the mechanism parameters;
     // gate each through per-object authz when active (C1).
     if let Err(rv) =
@@ -263,6 +300,8 @@ pub(crate) async fn encapsulate_key_exact(
     {
         return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
             result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
+                apply_returned_len: Some(false),
+                apply_object_handle: Some(false),
                 ck_rv: rv.0,
                 returned_len: 0,
                 value: None,
@@ -276,6 +315,8 @@ pub(crate) async fn encapsulate_key_exact(
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
                 result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
+                    apply_returned_len: Some(false),
+                    apply_object_handle: Some(false),
                     ck_rv: rv,
                     returned_len: 0,
                     value: None,
@@ -296,30 +337,30 @@ pub(crate) async fn encapsulate_key_exact(
     let is_token = template_declares_token_object(&template);
     let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
-    let result = spawn_backend(move || {
-        backend.encapsulate_key_exact(session, &mechanism, public_key, &template, &spec)
+    let result = spawn_backend_exact(move || {
+        ExactCompletion::capture(
+            backend.encapsulate_key_exact(session, &mechanism, public_key, &template, &spec),
+        )
     })
     .await?;
 
     match result {
         Ok(r) => {
             // Register the returned object handle through the context manager
-            let virtual_handle = if r.ck_rv == CkRv::OK && r.object_handle.0 != 0 {
-                register_session_object_handle(
-                    ctx_mgr,
-                    &ctx_id,
-                    virtual_session,
-                    r.object_handle,
-                    is_token,
-                )
-                .await
+            let virtual_handle = if r.ck_rv == CkRv::OK
+                && let Some(handle) = r.object_handle.filter(|h| h.0 != 0)
+            {
+                register_session_object_handle(ctx_mgr, &ctx_id, virtual_session, handle, is_token)
+                    .await
             } else {
                 0
             };
             Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
                 result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
+                    apply_returned_len: Some(r.returned_len.is_some()),
+                    apply_object_handle: Some(virtual_handle != 0),
                     ck_rv: r.ck_rv.0,
-                    returned_len: r.returned_len,
+                    returned_len: r.returned_len.unwrap_or(0),
                     value: r.value,
                     object_handle: virtual_handle,
                 }),
@@ -327,6 +368,8 @@ pub(crate) async fn encapsulate_key_exact(
         }
         Err(error) => Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
             result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
+                apply_returned_len: Some(false),
+                apply_object_handle: Some(false),
                 ck_rv: error.0,
                 returned_len: 0,
                 value: None,
@@ -358,12 +401,16 @@ mod tests {
         let public_key = mock.create_object(backend_session, &[]).unwrap();
         let backend: Arc<dyn Pkcs11Backend> = mock;
         let manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
-        manager.register_slot(CkSlotId(0)).await;
+        manager.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
         let context_id = manager.create_context(None).await.unwrap();
-        let virtual_session =
-            register_session_handle(&manager, &context_id, backend_session, CkSlotId(0))
-                .await
-                .unwrap();
+        let virtual_session = register_session_handle(
+            &manager,
+            &context_id,
+            backend_session,
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+        )
+        .await
+        .unwrap();
         let virtual_session = VirtualHandle(virtual_session);
         let virtual_public_key = register_session_object_handle(
             &manager,
@@ -377,6 +424,7 @@ mod tests {
         let result = encapsulate_key_exact(
             &HandlerContext::for_test(&manager, &backend),
             Request::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactRequest {
+                exact_output_effects_version: 1,
                 client_context_id: context_id.0,
                 session_handle: virtual_session.0,
                 mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {

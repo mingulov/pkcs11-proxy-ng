@@ -1,5 +1,23 @@
 use crate::{CkAttributeType, CkObjectHandle, CkRv};
 
+/// C_GetAttributeValue's partial-success statuses define every safely readable
+/// attribute's type, length (including zero), and value, not just overall OK.
+pub fn attribute_outputs_defined(rv: CkRv) -> bool {
+    matches!(
+        rv,
+        CkRv::OK
+            | CkRv::ATTRIBUTE_SENSITIVE
+            | CkRv::ATTRIBUTE_TYPE_INVALID
+            | CkRv::BUFFER_TOO_SMALL
+    )
+}
+
+/// Redacted native-completion metadata. Never contains pointers or native images.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputContractViolation {
+    ParameterIntegrity,
+}
+
 /// Exact caller-side shape for a simple output byte buffer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CkOutputBufferSpec {
@@ -12,11 +30,35 @@ pub struct CkOutputBufferSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CkOutputBufferResult {
     pub ck_rv: CkRv,
-    pub returned_len: u64,
+    /// A safely observable scalar effect, not a claim that a native store occurred.
+    pub returned_len: Option<u64>,
     pub value: Option<Vec<u8>>,
 }
 
 impl CkOutputBufferResult {
+    pub fn no_effects(ck_rv: CkRv) -> Self {
+        Self { ck_rv, returned_len: None, value: None }
+    }
+
+    /// Validate every byte/scalar effect before any caller memory is changed.
+    /// Generic lengths are integers: all-ones is not an attribute sentinel here.
+    pub fn validate_for(&self, spec: &CkOutputBufferSpec, ulong_max: u64) -> Result<(), CkRv> {
+        if self.ck_rv.0 > ulong_max
+            || self.returned_len.is_some_and(|n| n > ulong_max)
+            || (spec.length_pointer_null && (self.returned_len.is_some() || self.value.is_some()))
+        {
+            return Err(CkRv::GENERAL_ERROR);
+        }
+        if let Some(value) = &self.value
+            && (!spec.buffer_present
+                || self.ck_rv != CkRv::OK
+                || self.returned_len != Some(value.len() as u64)
+                || value.len() as u64 > spec.buffer_len)
+        {
+            return Err(CkRv::GENERAL_ERROR);
+        }
+        Ok(())
+    }
     /// Build an exact result from convenience bytes (for mock backends).
     ///
     /// Simulates PKCS#11 two-call semantics:
@@ -25,13 +67,21 @@ impl CkOutputBufferResult {
     /// - Otherwise, returns `CKR_BUFFER_TOO_SMALL` with the required length.
     pub fn from_convenience_bytes(bytes: &[u8], spec: &CkOutputBufferSpec) -> Self {
         if spec.length_pointer_null {
-            Self { ck_rv: CkRv::ARGUMENTS_BAD, returned_len: 0, value: None }
+            Self::no_effects(CkRv::ARGUMENTS_BAD)
         } else if !spec.buffer_present {
-            Self { ck_rv: CkRv::OK, returned_len: bytes.len() as u64, value: None }
+            Self { ck_rv: CkRv::OK, returned_len: Some(bytes.len() as u64), value: None }
         } else if spec.buffer_len >= bytes.len() as u64 {
-            Self { ck_rv: CkRv::OK, returned_len: bytes.len() as u64, value: Some(bytes.to_vec()) }
+            Self {
+                ck_rv: CkRv::OK,
+                returned_len: Some(bytes.len() as u64),
+                value: Some(bytes.to_vec()),
+            }
         } else {
-            Self { ck_rv: CkRv::BUFFER_TOO_SMALL, returned_len: bytes.len() as u64, value: None }
+            Self {
+                ck_rv: CkRv::BUFFER_TOO_SMALL,
+                returned_len: Some(bytes.len() as u64),
+                value: None,
+            }
         }
     }
 }
@@ -109,9 +159,9 @@ pub struct CkParameterRoundtripResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CkOutputAndHandleResult {
     pub ck_rv: CkRv,
-    pub returned_len: u64,
+    pub returned_len: Option<u64>,
     pub value: Option<Vec<u8>>,
-    pub object_handle: CkObjectHandle,
+    pub object_handle: Option<CkObjectHandle>,
 }
 
 /// Discriminator for the 7 parameter-output PKCS#11 functions that share
@@ -161,6 +211,10 @@ pub struct CkAttributeQuery {
 pub struct CkAttributeQueryResult {
     pub attr_type: CkAttributeType,
     pub returned_len: u64,
+    /// Explicit scalar-effect presence. A zero value alone is not evidence.
+    pub apply_returned_len: bool,
+    /// Nested array types are output-only and only valid on defined output RVs.
+    pub apply_type: bool,
     pub value: Option<Vec<u8>>,
     pub ck_rv: Option<CkRv>,
     pub nested: Option<Vec<CkAttributeQueryResult>>,

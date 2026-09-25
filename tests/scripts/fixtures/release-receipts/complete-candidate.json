@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "kind": "proxy-provider",
+  "classification": "candidate-bound",
+  "source": {
+    "commit": "1111111111111111111111111111111111111111",
+    "tree": "2222222222222222222222222222222222222222",
+    "lock": {"path": "Cargo.lock", "sha256": "083791b01c1a67ae66aca99070c9ee48082d04307473d494376e6de7cf9a654a"}
+  },
+  "toolchain": {"rustc": "rustc 1.88.0", "cargo": "cargo 1.88.0", "target": "x86_64-unknown-linux-gnu"},
+  "binaries": {
+    "daemon": {"path": "daemon.bin", "sha256": "30ef527c7a3e9bc9eb78b13fdc053f410eff7f2c0096b8dd2daf3415b0c7c0be"}
+  },
+  "identities": {
+    "framework": {"path": "framework.json", "sha256": "24afc63c05659b2e89c142da7e9c301a6193c056aa873930c944d49536ca9c91"},
+    "corpora": {"path": "corpora.json", "sha256": "cc08227234f83feb683912f62f78da0d450ca13e3862cc8d807322f826f4f441"},
+    "provider": {"path": "provider.json", "sha256": "b185b2fd61f1ccaf9e3ddad2ab0489de34823b4af2b9972a078ed827f89dc567"},
+    "config": {"path": "config.json", "sha256": "c7fc60affbcecbf3c0485e77ecb03ec605be73d04cba471542b269e5b83c81c9"},
+    "selection": {"path": "selection.json", "sha256": "c4897f0bb0d76f762c02cba3b3378fff6aaeaaa4fbc7f0e01a6f00c5096c7d0a"}
+  },
+  "completion": {"complete": true, "outcome": "passed"},
+  "artifacts": {
+    "comparison": {"path": "comparison.json", "sha256": "ef5f3cb4e4a04866403e54e128aa2c2777f6ef94c1bf76d11dba36c27245c31e"}
+  }
+}

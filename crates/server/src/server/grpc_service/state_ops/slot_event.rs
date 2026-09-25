@@ -1,3 +1,4 @@
+use crate::server::slot_map::BackendSlotId;
 use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
@@ -39,7 +40,7 @@ pub(super) async fn wait_for_slot_event(
     let result = spawn_backend(move || backend.wait_for_slot_event(flags)).await?;
 
     let backend_slot = match result {
-        Ok(backend_slot) => backend_slot,
+        Ok(backend_slot) => BackendSlotId(backend_slot),
         Err(error) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::WaitForSlotEventResponse {
                 ck_rv: error.0,

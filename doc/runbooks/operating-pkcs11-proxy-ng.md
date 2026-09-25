@@ -10,6 +10,32 @@
 | Reference k8s manifests | [`examples/k8s/`](../../examples/k8s/) |
 | Example configs (dev/staging/prod) | [`examples/configs/`](../../examples/configs/) |
 
+## v0.2 native-lifetime stop (pending implementation and qualification)
+
+The selected [native ownership contract](../release/native-mechanism-ownership.md)
+uses qualified Linux GNU/musl x86_64/64-bit and x86/32-bit raw `exit_group(70)`
+for unresolved native shutdown or unsafe final-owner Drop. It ends the whole
+daemon thread group, affecting every co-located client. Direct embedders also
+accept termination of unrelated application threads. One managed provider chain
+per process is required; partition independent chains into separate daemons.
+
+The supervisor must observe the actual daemon's ordinary nonzero status:
+systemd on-failure/always can cover 70, on-abnormal/on-abort alone cannot.
+Success/restart-prevention settings, rate limits and manual stops still apply;
+container entrypoints must propagate status and Docker needs an appropriate
+restart policy. Namespace PID 1 termination affects other container processes;
+global host init is excluded. No strict disappearance deadline is promised.
+
+All potential invoking threads and later filters must allow exit_group(70).
+Arbitrary seccomp denial, tracing or syscall interception is unsupported; the
+return-aware loop prevents fallthrough but cannot force a denied group exit.
+The stop runs no cleanup, wiping or audit flush, so the audit tail and token
+effects may remain unresolved. It does not intentionally trigger a core or
+enforce global dump suppression: operators own dump/collector/storage policy,
+including piped collectors not disabled by RLIMIT_CORE=0 alone. Read the linked
+contract before enabling native embeddings; these are future enforcement gates,
+not capabilities supplied by this documentation change.
+
 ## 0. Prerequisites
 
 * Kubernetes cluster ≥ 1.28 (k3s / kind / EKS / GKE / AKS / on-prem).
@@ -397,6 +423,38 @@ error.
 | `PKCS11_PROXY_MECHANISMS` | Path to a TOML override file the shim layers on top of its embedded default registry at `C_Initialize`. Used only until the server-published registry arrives via `GetBackendInterfaces`. |
 | `PKCS11_PROXY_DISABLE_SERVER_REGISTRY` | If set to any value, the shim ignores the server-published registry and uses only the embedded default + `PKCS11_PROXY_MECHANISMS` override. Test/debug use only — production should leave this unset so vendor mechanisms picked up by the daemon's `[mechanisms].config_path` are honoured. |
 
+## 8c. Private diagnostic bundles
+
+Run `scripts/collect-debug-bundle.sh` to create a small diagnostic archive under
+`target/debug-bundles/`, or select an owned output directory with
+`--output-dir`. The final output directory must be owned by the invoking user
+and must not be group- or world-writable; missing components are created with
+mode `0700`. The collector retains a no-follow descriptor for that directory,
+uses a unique create-only archive name for concurrent runs, and creates the
+archive with mode `0600`. Directories and regular files represented inside the
+archive have modes `0700` and `0600` respectively. If the validated path is
+replaced while collection is running, collection fails and removes only the
+partial archive inode it created.
+
+The archive contains only explicitly allowlisted metadata: normalized system
+and tool versions, the Git commit and dirty-state boolean, presence of known
+provider/build artifacts, and whether selected environment variables are set.
+It does not contain environment values, raw logs, configuration files, command
+errors, arbitrary paths, or workspace file contents. `--include-logs` is
+intentionally rejected because arbitrary logs cannot be generically sanitized.
+Archive construction uses Python's standard-library `tarfile` and `gzip`
+implementations with fixed member names, types, modes, timestamps, numeric
+owners, and no gzip filename. It does not invoke `tar`, `gzip`, or `mktemp`, and
+does not consume `TAR_OPTIONS` or `GZIP`. The shell entrypoint therefore needs
+only Bash and Python 3.9 or newer; the collector is intended for the project's
+supported Linux environment.
+
+The private mode protects the archive on the machine where it is created; it
+does not make the contents anonymous or suitable for automatic publication.
+Always extract and review every file before sharing. If logs or configuration
+details are essential, review and redact them separately and attach only the
+minimum necessary excerpt.
+
 ## 9. Known limitations
 
 These are documented limitations that an on-call engineer may
@@ -415,10 +473,13 @@ trace ID, gRPC health probe, rate-limiter) are closed.
 If the daemon is repeatedly crashing or returning errors and this
 runbook does not resolve the issue:
 
-1. Collect daemon + consumer logs:
-   `kubectl -n <ns> logs -l app=<daemon> --all-containers --tail=1000 > daemon.log`
-2. Capture the rendered configmaps:
-   `kubectl -n <ns> get configmap <daemon-config> -o yaml > config.yaml`
-3. Open an issue with the above attached, plus a description of the
-   change that preceded the symptoms (image bump, config edit, scale
-   change, backend HSM rotation, …).
+1. Run `scripts/collect-debug-bundle.sh`, extract the resulting archive, and
+   review every file before attaching it.
+2. If the allowlisted bundle is insufficient, collect only the relevant daemon
+   or consumer log interval. Review it for PINs, key material, credentials,
+   object values, and identifying metadata before sharing it. The bundle
+   collector does not sanitize or include logs.
+3. Describe the non-secret configuration fields and the change that preceded
+   the symptoms (image bump, config edit, scale change, backend HSM rotation,
+   and so on). Do not attach a rendered ConfigMap or full environment dump by
+   default; these commonly contain credentials.

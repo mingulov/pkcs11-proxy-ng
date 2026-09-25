@@ -1,0 +1,18 @@
+[package]
+name = "pkcs11-exact-output-oracle"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# A separate test artifact exercises pre-native missing-function rejection.
+missing-message-begin = []
+
+[dependencies]
+cryptoki-sys = "=0.5.0"

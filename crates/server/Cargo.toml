@@ -10,6 +10,12 @@ publish = false
 name = "pkcs11-proxy-ng"
 path = "src/main.rs"
 
+[features]
+# C3M.6 row 18: hook-gated daemon control plane + backend test-hook
+# surface. Default-off; normal builds observe no control listener and
+# fail closed if [test_hooks] is configured.
+native-owner-test-hooks = ["pkcs11-proxy-ng-backend/native-owner-test-hooks"]
+
 [dependencies]
 pkcs11-proxy-ng-types = { path = "../types" }
 pkcs11-proxy-ng-proto = { path = "../proto" }
@@ -33,7 +39,6 @@ x509-parser.workspace = true
 tonic-health.workspace = true
 sha2.workspace = true
 hex.workspace = true
-zeroize.workspace = true
 tokio-stream = "0.1"
 tower = "0.5"
 tower-layer = "0.3"

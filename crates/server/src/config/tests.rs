@@ -785,6 +785,28 @@ metrics_socket = \"/run/pkcs11-proxy/metrics.sock\"
 }
 
 #[test]
+fn test_hooks_absent_defaults_to_inert() {
+    let toml = "[backend]\nmodule = \"/dev/null\"\n";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    assert!(cfg.test_hooks.control_socket.is_none());
+}
+
+#[test]
+fn test_hooks_section_parses() {
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[test_hooks]
+control_socket = \"/run/pkcs11-proxy/control.sock\"
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    assert_eq!(
+        cfg.test_hooks.control_socket.as_deref(),
+        Some(std::path::Path::new("/run/pkcs11-proxy/control.sock"))
+    );
+}
+
+#[test]
 fn audit_absent_defaults_to_off() {
     let cfg: DaemonConfig = toml::from_str("[backend]\nmodule = \"/dev/null\"\n").unwrap();
     assert!(cfg.audit.dir.is_none());

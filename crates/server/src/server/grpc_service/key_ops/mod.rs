@@ -1,6 +1,7 @@
 mod authenticated_wrap;
 mod generation;
 mod kem;
+pub(super) mod wrap_preparation;
 mod wrapping;
 
 pub(super) use authenticated_wrap::{unwrap_key_authenticated, wrap_key_authenticated};

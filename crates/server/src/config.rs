@@ -41,6 +41,11 @@ pub fn env_var_help() -> String {
             "resilience.find_result_warn_threshold",
             "C_FindObjects result size above which a pathological-population event is counted and logged.",
         ),
+        (
+            "PKCS11_PROXY_TEST_HOOKS_CONTROL_SOCKET",
+            "test_hooks.control_socket",
+            "Hook-gated control endpoint path (mode 0600); requires a native-owner-test-hooks build, default builds fail closed.",
+        ),
     ];
     let var_w = rows.iter().map(|r| r.0.len()).max().unwrap_or(0);
     let field_w = rows.iter().map(|r| r.1.len()).max().unwrap_or(0);
@@ -70,6 +75,22 @@ pub struct DaemonConfig {
     pub audit: AuditConfig,
     #[serde(default)]
     pub rate_limit: RateLimitConfig,
+    #[serde(default)]
+    pub test_hooks: TestHooksConfig,
+}
+
+/// Hook-gated daemon control plane (C3M.6 row 18). Absent section => all
+/// fields `None` => inert (byte-identical to today). A configured control
+/// socket requires a `native-owner-test-hooks` build; default builds fail
+/// closed at startup (see `server::validate_test_hooks_config`) instead of
+/// silently ignoring it.
+#[derive(Debug, Deserialize, Default)]
+pub struct TestHooksConfig {
+    /// If set, a Unix-domain control endpoint (mode 0600) is bound here,
+    /// serving the hook surface (`GET /hooks/instance`,
+    /// `GET /hooks/last-mechanism`, `POST /hooks/fail-next-close`) for
+    /// subprocess/topology fault-injection tests.
+    pub control_socket: Option<PathBuf>,
 }
 
 /// Mechanism registry source. The daemon loads the file at startup and
@@ -760,6 +781,7 @@ impl DaemonConfig {
     /// - `PKCS11_PROXY_MECHANISMS_CONFIG`             → `mechanisms.config_path`
     /// - `PKCS11_PROXY_RESILIENCE_METRICS_SOCKET`     → `resilience.metrics_socket`
     /// - `PKCS11_PROXY_RESILIENCE_FIND_THRESHOLD`     → `resilience.find_result_warn_threshold`
+    /// - `PKCS11_PROXY_TEST_HOOKS_CONTROL_SOCKET`     → `test_hooks.control_socket`
     pub fn apply_env_overrides(&mut self) {
         // Keep this list in sync with env_var_help() below — both surface the
         // same canonical env-var → TOML-field mapping.
@@ -804,6 +826,9 @@ impl DaemonConfig {
             && let Ok(n) = v.parse::<usize>()
         {
             self.resilience.find_result_warn_threshold = Some(n);
+        }
+        if let Ok(v) = std::env::var("PKCS11_PROXY_TEST_HOOKS_CONTROL_SOCKET") {
+            self.test_hooks.control_socket = Some(std::path::PathBuf::from(v));
         }
     }
 

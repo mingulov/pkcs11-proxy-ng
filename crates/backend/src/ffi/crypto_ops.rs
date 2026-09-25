@@ -10,21 +10,23 @@ impl FfiBackend {
         mechanism: &CkMechanism,
         key: CkObjectHandle,
     ) -> CkResult<()> {
+        let h_session = Self::session_handle(session)?;
+        let h_key = Self::object_handle(key)?;
         self.call_init_with_mechanism(
             session,
+            OperationFamily::Sign,
             unsafe { (*self.func_list).C_SignInit },
             mechanism,
-            |function, mech| unsafe {
-                function(Self::session_handle(session), mech, Self::object_handle(key))
-            },
+            |function, mech| unsafe { function(h_session, mech, h_key) },
         )
     }
 
     pub(super) fn ffi_sign_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
+        let h_session = Self::session_handle(session)?;
         Self::call_unit(unsafe { (*self.func_list).C_SignInit }, |function| unsafe {
-            function(Self::session_handle(session), std::ptr::null_mut(), 0)
+            function(h_session, std::ptr::null_mut(), 0)
         })?;
-        self.drop_mech_cache(session);
+        self.drop_mech_cache_family(session, OperationFamily::Sign);
         Ok(())
     }
 
@@ -74,10 +76,11 @@ impl FfiBackend {
     }
 
     pub(super) fn ffi_sign_recover_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
+        let h_session = Self::session_handle(session)?;
         Self::call_unit(unsafe { (*self.func_list).C_SignRecoverInit }, |function| unsafe {
-            function(Self::session_handle(session), std::ptr::null_mut(), 0)
+            function(h_session, std::ptr::null_mut(), 0)
         })?;
-        self.drop_mech_cache(session);
+        self.drop_mech_cache_family(session, OperationFamily::SignRecover);
         Ok(())
     }
 
@@ -167,10 +170,11 @@ impl FfiBackend {
     }
 
     pub(super) fn ffi_verify_recover_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
+        let h_session = Self::session_handle(session)?;
         Self::call_unit(unsafe { (*self.func_list).C_VerifyRecoverInit }, |function| unsafe {
-            function(Self::session_handle(session), std::ptr::null_mut(), 0)
+            function(h_session, std::ptr::null_mut(), 0)
         })?;
-        self.drop_mech_cache(session);
+        self.drop_mech_cache_family(session, OperationFamily::VerifyRecover);
         Ok(())
     }
 
@@ -195,6 +199,7 @@ impl FfiBackend {
     ) -> CkResult<()> {
         self.call_init_with_mechanism(
             session,
+            OperationFamily::Verify,
             unsafe { (*self.func_list).C_VerifyInit },
             mechanism,
             |function, mech| mechanism_key_init!(session, mechanism, key, function, mech),
@@ -206,10 +211,11 @@ impl FfiBackend {
         // init-cancel paths, so the module's native RV reaches the client
         // (ADR-0010 transparent forwarding). A module that SEGVs on it crashes
         // the daemon — its direct-load behavior, accepted by ADR-0010.
+        let h_session = Self::session_handle(session)?;
         Self::call_unit(unsafe { (*self.func_list).C_VerifyInit }, |function| unsafe {
-            function(Self::session_handle(session), std::ptr::null_mut(), 0)
+            function(h_session, std::ptr::null_mut(), 0)
         })?;
-        self.drop_mech_cache(session);
+        self.drop_mech_cache_family(session, OperationFamily::Verify);
         Ok(())
     }
 
@@ -221,9 +227,10 @@ impl FfiBackend {
     ) -> CkResult<()> {
         let (data_ptr, data_len) = data.as_ptr_len();
         let (sig_ptr, sig_len) = signature.as_ptr_len();
+        let h_session = Self::session_handle(session)?;
         Self::call_unit(unsafe { (*self.func_list).C_Verify }, |function| unsafe {
             function(
-                Self::session_handle(session),
+                h_session,
                 data_ptr as *mut _,
                 Self::ulong_len_u64(data_len),
                 sig_ptr as *mut _,
@@ -257,11 +264,13 @@ impl FfiBackend {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
     ) -> CkResult<()> {
+        let h_session = Self::session_handle(session)?;
         self.call_init_with_mechanism(
             session,
+            OperationFamily::Digest,
             unsafe { (*self.func_list).C_DigestInit },
             mechanism,
-            |function, mech| unsafe { function(Self::session_handle(session), mech) },
+            |function, mech| unsafe { function(h_session, mech) },
         )
     }
 
@@ -270,10 +279,11 @@ impl FfiBackend {
         // decides — softhsm2/kryoptic cancel the active digest, others reject.
         // NSS softokn SEGVs on it; that is its direct-load behavior and an
         // accepted shared-daemon trade-off per ADR-0010.
+        let h_session = Self::session_handle(session)?;
         Self::call_unit(unsafe { (*self.func_list).C_DigestInit }, |function| unsafe {
-            function(Self::session_handle(session), std::ptr::null_mut())
+            function(h_session, std::ptr::null_mut())
         })?;
-        self.drop_mech_cache(session);
+        self.drop_mech_cache_family(session, OperationFamily::Digest);
         Ok(())
     }
 
@@ -353,6 +363,7 @@ impl FfiBackend {
     ) -> CkResult<Option<CkMechanismParams>> {
         self.call_init_with_mechanism_output(
             session,
+            OperationFamily::Encrypt,
             unsafe { (*self.func_list).C_EncryptInit },
             mechanism,
             |function, mech| mechanism_key_init!(session, mechanism, key, function, mech),
@@ -360,10 +371,11 @@ impl FfiBackend {
     }
 
     pub(super) fn ffi_encrypt_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
+        let h_session = Self::session_handle(session)?;
         Self::call_unit(unsafe { (*self.func_list).C_EncryptInit }, |function| unsafe {
-            function(Self::session_handle(session), std::ptr::null_mut(), 0)
+            function(h_session, std::ptr::null_mut(), 0)
         })?;
-        self.drop_mech_cache(session);
+        self.drop_mech_cache_family(session, OperationFamily::Encrypt);
         Ok(())
     }
 
@@ -407,6 +419,7 @@ impl FfiBackend {
     ) -> CkResult<Option<CkMechanismParams>> {
         self.call_init_with_mechanism_output(
             session,
+            OperationFamily::Decrypt,
             unsafe { (*self.func_list).C_DecryptInit },
             mechanism,
             |function, mech| mechanism_key_init!(session, mechanism, key, function, mech),
@@ -414,10 +427,11 @@ impl FfiBackend {
     }
 
     pub(super) fn ffi_decrypt_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
+        let h_session = Self::session_handle(session)?;
         Self::call_unit(unsafe { (*self.func_list).C_DecryptInit }, |function| unsafe {
-            function(Self::session_handle(session), std::ptr::null_mut(), 0)
+            function(h_session, std::ptr::null_mut(), 0)
         })?;
-        self.drop_mech_cache(session);
+        self.drop_mech_cache_family(session, OperationFamily::Decrypt);
         Ok(())
     }
 
@@ -483,7 +497,7 @@ impl FfiBackend {
         )?;
         let mechanism_out =
             if (spec.buffer_present || spec.length_pointer_null) && result.ck_rv == CkRv::OK {
-                self.cached_mechanism_output_params(session)
+                self.cached_mechanism_output_params_for(session, OperationFamily::Encrypt)
             } else {
                 None
             };
@@ -592,8 +606,14 @@ mod tests {
             func_list_3_2: None,
             initialize_args: None,
             mech_cache: dashmap::DashMap::new(),
+            last_init_family: dashmap::DashMap::new(),
             session_slot_map: dashmap::DashMap::new(),
             slot_sessions: dashmap::DashMap::new(),
+            object_cleanup: Default::default(),
+            // Test-local backend: bypasses the process reservation without
+            // consuming it; never backs production dispatch (C3M.4).
+            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
+            lifecycle: Default::default(),
         };
         let session = CkSessionHandle(7);
         let mechanism = CkMechanism {
@@ -606,9 +626,10 @@ mod tests {
                 tag_bits: 128,
             })),
         };
-        backend
-            .mech_cache
-            .insert(session.0, super::super::ffi_conversion::mechanism_to_ffi(&mechanism).unwrap());
+        backend.mech_cache.insert(
+            (session.0, OperationFamily::Encrypt),
+            super::super::ffi_conversion::mechanism_to_ffi(&mechanism).unwrap(),
+        );
 
         let (_, missing_output) = backend
             .ffi_encrypt_exact_with_output(
@@ -635,5 +656,137 @@ mod tests {
             )
             .unwrap();
         assert_eq!(size_output, None);
+    }
+
+    unsafe extern "C" fn encrypt_init_ok(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _mechanism: *mut cryptoki_sys::CK_MECHANISM,
+        _key: cryptoki_sys::CK_OBJECT_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        cryptoki_sys::CKR_OK
+    }
+
+    unsafe extern "C" fn digest_init_ok(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _mechanism: *mut cryptoki_sys::CK_MECHANISM,
+    ) -> cryptoki_sys::CK_RV {
+        cryptoki_sys::CKR_OK
+    }
+
+    unsafe extern "C" fn encrypt_init_fails(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _mechanism: *mut cryptoki_sys::CK_MECHANISM,
+        _key: cryptoki_sys::CK_OBJECT_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        cryptoki_sys::CKR_FUNCTION_FAILED
+    }
+
+    #[test]
+    fn native_owner_dual_families_and_cancel_are_independent() {
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_EncryptInit = Some(encrypt_init_ok);
+        functions.C_DigestInit = Some(digest_init_ok);
+        let backend = FfiBackend {
+            _lib: libloading::os::unix::Library::this().into(),
+            func_list: functions.as_mut(),
+            func_list_3_0: None,
+            func_list_3_2: None,
+            initialize_args: None,
+            mech_cache: dashmap::DashMap::new(),
+            last_init_family: dashmap::DashMap::new(),
+            session_slot_map: dashmap::DashMap::new(),
+            slot_sessions: dashmap::DashMap::new(),
+            object_cleanup: Default::default(),
+            // Test-local backend: bypasses the process reservation without
+            // consuming it; never backs production dispatch (C3M.4).
+            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
+            lifecycle: Default::default(),
+        };
+        let session = CkSessionHandle(11);
+        let gcm = CkMechanism {
+            mechanism_type: CkMechanismType::AES_GCM,
+            params: Some(CkMechanismParams::Gcm(GcmParams {
+                iv: vec![0xA5; 12],
+                iv_bits: 96,
+                iv_buffer_len: 12,
+                aad: Vec::new(),
+                tag_bits: 128,
+            })),
+        };
+        let encrypt_out =
+            backend.ffi_encrypt_init_with_output(session, &gcm, CkObjectHandle(1)).unwrap();
+        assert_eq!(encrypt_out, gcm.params);
+        backend
+            .ffi_digest_init(
+                session,
+                &CkMechanism { mechanism_type: CkMechanismType::SHA256, params: None },
+            )
+            .unwrap();
+        // The later DigestInit must not evict the Encrypt family graph.
+        assert!(backend.mech_cache.contains_key(&(session.0, OperationFamily::Encrypt)));
+        assert!(backend.mech_cache.contains_key(&(session.0, OperationFamily::Digest)));
+        assert_eq!(
+            backend.cached_mechanism_output_params_for(session, OperationFamily::Encrypt),
+            gcm.params
+        );
+        // Cancelling Digest retires only the Digest slot: the Encrypt graph
+        // stays live and still yields its retained IV output.
+        backend.ffi_digest_init_cancel(session).unwrap();
+        assert!(!backend.mech_cache.contains_key(&(session.0, OperationFamily::Digest)));
+        assert!(backend.mech_cache.contains_key(&(session.0, OperationFamily::Encrypt)));
+        assert_eq!(
+            backend.cached_mechanism_output_params_for(session, OperationFamily::Encrypt),
+            gcm.params
+        );
+    }
+
+    #[test]
+    fn native_owner_init_failure_preserves_active() {
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_EncryptInit = Some(encrypt_init_ok);
+        let backend = FfiBackend {
+            _lib: libloading::os::unix::Library::this().into(),
+            func_list: functions.as_mut(),
+            func_list_3_0: None,
+            func_list_3_2: None,
+            initialize_args: None,
+            mech_cache: dashmap::DashMap::new(),
+            last_init_family: dashmap::DashMap::new(),
+            session_slot_map: dashmap::DashMap::new(),
+            slot_sessions: dashmap::DashMap::new(),
+            object_cleanup: Default::default(),
+            // Test-local backend: bypasses the process reservation without
+            // consuming it; never backs production dispatch (C3M.4).
+            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
+            lifecycle: Default::default(),
+        };
+        let session = CkSessionHandle(12);
+        let gcm = CkMechanism {
+            mechanism_type: CkMechanismType::AES_GCM,
+            params: Some(CkMechanismParams::Gcm(GcmParams {
+                iv: vec![0xA5; 12],
+                iv_bits: 96,
+                iv_buffer_len: 12,
+                aad: Vec::new(),
+                tag_bits: 128,
+            })),
+        };
+        backend.ffi_encrypt_init_with_output(session, &gcm, CkObjectHandle(1)).unwrap();
+        // A failed re-Init must not disturb the live owner: same slot,
+        // same output, same last-Init marker.
+        functions.C_EncryptInit = Some(encrypt_init_fails);
+        assert_eq!(
+            backend.ffi_encrypt_init_with_output(session, &gcm, CkObjectHandle(1)).unwrap_err(),
+            CkRv::FUNCTION_FAILED
+        );
+        assert!(backend.mech_cache.contains_key(&(session.0, OperationFamily::Encrypt)));
+        assert_eq!(
+            backend.cached_mechanism_output_params_for(session, OperationFamily::Encrypt),
+            gcm.params
+        );
+        assert_eq!(
+            backend.last_init_family.get(&session.0).as_deref(),
+            Some(&OperationFamily::Encrypt)
+        );
     }
 }
