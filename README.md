@@ -66,8 +66,7 @@ The v0.2 [native ownership contract](./doc/release/native-mechanism-ownership.md
 is implemented: persistent native allocations, one managed provider chain per
 process, lifecycle retirement, checked widths, nonblocking slot waits, operation
 slots, and platform-specific abnormal stops. Historical ownership and topology
-evidence is described in that contract and
-[ADR-0014](./doc/adr/ADR-0014-v020-tail-platform-stretch.md).
+evidence is described in that contract.
 
 These records do not qualify every later source revision. The current candidate
 still needs fresh validation of its claimed scope; the last 30-provider comparison run
@@ -105,11 +104,6 @@ candidate [release notes](./doc/release/v0.2.0-release-notes.md) are satisfied.
 
 - [`doc/development.md`](./doc/development.md) — native tools, optional mise
   setup, MSRV, and local validation commands
-- [`prd.md`](./prd.md) — product requirements
-- [`doc/architecture-overview.md`](./doc/architecture-overview.md) — how the
-  shim, daemon, and backend fit together
-- [`doc/adr/`](./doc/adr/) — architecture decision records (error model, handle
-  identity, authorization, backend integration, …)
 - [`doc/error-reference.md`](./doc/error-reference.md) — every `CK_RV` the proxy
   can return, with cause + operator action + application action
 - [`doc/runbooks/operating-pkcs11-proxy-ng.md`](./doc/runbooks/operating-pkcs11-proxy-ng.md)
@@ -121,8 +115,12 @@ candidate [release notes](./doc/release/v0.2.0-release-notes.md) are satisfied.
   validation methodology, and the `0.x` release checklist. Scope rule for
   every direct-vs-proxied mismatch: proxy bugs get fixed here,
   provider-conformance issues go upstream — never normalized by the proxy
-  ([ADR-0010](./doc/adr/ADR-0010-transparent-forwarding-by-default.md),
-  [parity triage](./doc/release/parity-validation.md#triage-of-mismatches))
+  ([parity triage](./doc/release/parity-validation.md#triage-of-mismatches))
+
+The PRD, ADRs, architecture overview, audits, and follow-up notes are maintained
+in the separate `pkcs11-proxy-ng-ws` planning workspace. This repository builds,
+tests, and packages releases independently. See the
+[script inventory](./scripts/README.md) for CI, release, and manual tooling.
 
 ## Release dry run
 

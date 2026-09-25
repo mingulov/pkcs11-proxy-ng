@@ -38,8 +38,8 @@ candidate. Historical evidence retains its original source/environment scope:
 
 Windows GNU, x32, big-/mixed-endian and other target configurations remain
 outside the admitted native-FFI set. Constructor refusal applies before native
-loading on those targets. The [platform decision](../adr/ADR-0014-v020-tail-platform-stretch.md)
-records the superseded Windows deferral and historical implementation work.
+loading on those targets. Windows MSVC support supersedes the earlier Windows
+deferral, with historical coverage limited to the tiers listed above.
 The admitted set does not expand the one-client scope or substitute for fresh
 candidate-bound provider, platform and stop evidence.
 
@@ -150,8 +150,7 @@ Verify) keep separate owners. Dual operations retain both. Message, recovery,
 VerifySignature and one-shot migration does not claim new arbitrary post-Init
 retention support. A `CKR_PENDING` result, unknown entry or unwind after entry
 keeps the complete frame and affected owners; zero running counters or empty
-maps are insufficient. Native AsyncComplete support remains unimplemented;
-see [the async decision](../adr/async-persistence-decision.md).
+maps are insufficient. Native AsyncComplete support remains unimplemented.
 
 Normal teardown issues a private epoch-qualified destruction proof only for a
 safe never-initialized/unentered loading state under the loading contract, or

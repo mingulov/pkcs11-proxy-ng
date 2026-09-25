@@ -15,8 +15,7 @@ RUN --mount=type=bind,from=pkcs11ng,source=/apk,target=/apk \
         pkcs11-proxy-ng-shim \
         pkcs11-proxy-ng-cli
 
-# Scenario scripts (mounted at /scenarios via docker-compose? No — we
-# bake them in so the image is self-contained).
+# Copy scenario scripts into the image so the runner is self-contained.
 COPY pkcs11-proxy-ng/tests/r2_resilience/scenarios /scenarios
 RUN chmod +x /scenarios/*.sh /scenarios/run_scenario.sh
 

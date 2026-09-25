@@ -49,8 +49,8 @@ RUN <<EOF
   dnf -y install gcc make rpm-build rpmdevtools tar gzip protobuf-compiler systemd-rpm-macros
   # AL2023's stock rust/cargo (typically 1.86) is below transitive
   # dependency MSRV (libloading 0.9, time 0.3.47 require 1.88+). The
-  # design's "use stock Rust" preference yields to "AL2023 must be in
-  # Phase 1" — see doc/audit/r1-implementation.md for the deviation.
+  # build therefore uses rustup; see doc/development.md for the
+  # supported toolchain and MSRV checks.
   # The toolchain version is pinned (RUST_TOOLCHAIN) and the rustup-init
   # binary is SHA-verified (RUSTUP_VERSION + RUSTUP_SHA256_*).
   ARCH="$(uname -m)"

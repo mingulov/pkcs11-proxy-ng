@@ -11,8 +11,8 @@
 # `proxy.request_timeout_secs` (default 60), reporting CKR_OK.
 #
 # Usage:
-#   tests/r2_resilience must have been built so the daemon image
-#   exists. Then:
+#   Build the consumer fixture images as described in
+#   tests/consumers/README.md. Then:
 #     scripts/perf/cold_start_storm.sh [N=100]
 #
 # Output:
@@ -34,7 +34,7 @@ echo "=== Cold-start storm: $N shims ==="
 # 1. Bring up daemon-softhsm2 + a single consumer-shell container we
 #    can exec into to spawn shim processes.
 $COMPOSE --profile softhsm2 up -d daemon-softhsm2 consumer-shell >/dev/null
-sleep 5  # workaround for FOLLOWUP-shim-startup-race; remove when fixed.
+sleep 5  # Fixed startup wait for the Compose services before sampling.
 
 # 2. Find the daemon's PID (inside the container) for CPU+RSS sampling.
 daemon_pid=$(docker inspect --format '{{.State.Pid}}' consumer-matrix-daemon)

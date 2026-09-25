@@ -21,8 +21,10 @@ Usage:
 
 The OASIS root must contain:
     pkcs11-hist/v3.0/pkcs11-hist-v3.0.html         (function table)
-    (numeric values come from the 2.40 published header, resolved via
-     the vendored doc/oasis-tcs-pkcs11/published/2-40-errata-1/pkcs11t.h)
+
+Numeric values come from the umbrella workspace's 2.40 published header at
+../doc/oasis-tcs-pkcs11/published/2-40-errata-1/pkcs11t.h, relative to this
+repository. These external specification inputs are not vendored here.
 """
 
 import os

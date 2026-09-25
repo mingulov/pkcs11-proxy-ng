@@ -99,7 +99,7 @@ pub(crate) fn invalidate_pointer_safe_message_parameters() {
 /// that predates the D2 advertisement (D9 graceful fallback — correct for every
 /// supported x86_64 Linux server). Compare against the shim's own
 /// `size_of::<CK_ULONG>()`: the bridge engages only when they differ.
-// Consumed by the attribute-value width bridge (ADR-0011 task #4), wired next.
+// Used by attribute-value and template-input width conversion (ADR-0011).
 #[allow(dead_code)]
 pub fn backend_ulong_size() -> usize {
     match BACKEND_ULONG_SIZE.load(Ordering::Relaxed) {

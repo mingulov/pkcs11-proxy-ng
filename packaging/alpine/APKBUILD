@@ -27,8 +27,8 @@ depends=""
 # cargo/rust are NOT listed: the Dockerfile installs a rustup-managed
 # toolchain so the build satisfies transitive dep MSRVs that Alpine's
 # stock cargo/rust would not (libloading 0.9, time 0.3.47 require
-# 1.88+, but Alpine 3.22 ships 1.87). See doc/audit/r1-implementation.md
-# for the deviation rationale.
+# 1.88+, but Alpine 3.22 ships 1.87). See doc/development.md for
+# the supported toolchain and MSRV checks.
 makedepends="protoc protobuf-dev"
 install="$pkgname-shim.post-install
         $pkgname-shim.post-deinstall

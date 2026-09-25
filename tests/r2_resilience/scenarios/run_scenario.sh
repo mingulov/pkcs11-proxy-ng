@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Dispatcher: `run_scenario.sh N` runs scenario N (1..6) and prints
-# pass/fail/skip lines. The fixture's docker-compose.yml mounts this
-# script into the runner image.
+# pass/fail/skip lines. Dockerfile.runner copies this script into
+# /scenarios; invoke it inside the Compose runner service.
 
 set -euo pipefail
 n="${1:-}"

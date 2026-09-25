@@ -33,7 +33,7 @@ echo "=== Soak: ${DURATION}s @ ${RPS}rps ==="
 
 # 1. Bring up daemon + consumer.
 $COMPOSE --profile softhsm2 up -d daemon-softhsm2 consumer-shell >/dev/null
-sleep 5  # FOLLOWUP-shim-startup-race workaround
+sleep 5  # Fixed startup wait for the Compose services before sampling.
 
 daemon_pid=$(docker inspect --format '{{.State.Pid}}' consumer-matrix-daemon)
 echo "daemon PID (host): $daemon_pid"
