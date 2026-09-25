@@ -339,12 +339,13 @@ fn unsettled_ticket_drops_safely_when_poisoned() {
 
 #[test]
 fn queued_writer_stalls_new_admissions() {
-    // I1 fairness pin: `std::sync::RwLock` is writer-preferring — while a
-    // control write is queued behind a parked reader, NEW ordinary
+    // I1 fairness pin: writer preference is ENFORCED (`writer_waiting`) —
+    // while a control write is queued behind a parked reader, NEW ordinary
     // admissions stall behind it instead of barging ahead. TF01b's Finalize
     // drain relies on this for termination (see the Finalize paragraph in
-    // the design block); if a platform ever stops preferring writers, this
-    // test fails loudly instead of the drain hanging silently.
+    // the design block); the OS lock alone does NOT guarantee it
+    // (Windows SRWLOCK barges — T2run run-6 win32 failed loudly here
+    // before enforcement), so this test pins the enforcement itself.
     let domain = open_domain();
     let guard = domain.admit_ordinary().expect("admits while open");
     let (began_tx, began_rx) = mpsc::channel();

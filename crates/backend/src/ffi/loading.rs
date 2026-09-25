@@ -598,6 +598,73 @@ mod tests {
         assert!(backend.has_3_2_interface(), "BouncyHSM advertises a 3.2 interface");
     }
 
+    /// win32 stub live-load proof (T2-5): `LoadLibrary` a real PE32 provider
+    /// stub, resolve `C_GetFunctionList`, and cross the FFI boundary with
+    /// u32 `CK_ULONG` + pack(1) structs.
+    ///
+    /// The stub (`tests/win32-stub/p11win32stub.c`, built with x86 `cl.exe`
+    /// by the `win32` CI job) exports only `C_GetFunctionList`, returning a
+    /// static 2.40 list with live `C_Initialize`/`C_GetInfo` and NULL
+    /// everywhere else. This test asserts the 2.40 version, non-null live
+    /// pointers, the 3.x absence (legacy path), and one `C_GetInfo` call
+    /// observed through `ffi_get_info` with the stub's marker strings —
+    /// proving the call crossed into the DLL and the packed layout reads
+    /// correctly (`flags` sits at a packed offset, so a layout mismatch
+    /// would surface as garbage).
+    ///
+    /// Gated like the BouncyHSM test above: win32-only (`windows` + 32-bit
+    /// pointers) and skipped unless `PKCS11_PROXY_NG_WIN32_STUB_MODULE`
+    /// points at the stub DLL. When the variable IS set the DLL must exist
+    /// — CI always sets it, so a green win32 leg proves this test ran
+    /// (fail-loud, never a silent skip). Never calls `C_Initialize`:
+    /// initializing would arm the lifecycle and turn the final `Drop` into
+    /// an abnormal-stop test exit.
+    #[cfg(all(windows, target_pointer_width = "32"))]
+    #[test]
+    fn win32_stub_live_load() {
+        use std::path::Path;
+
+        // Serialized with the constructor-domain tests: like the BouncyHSM
+        // test above, this is a real `FfiBackend::load` touching the
+        // process-global construction reservation.
+        let _serial = crate::ffi::native_domain::serial_domain_test_guard();
+
+        let Ok(module) = std::env::var("PKCS11_PROXY_NG_WIN32_STUB_MODULE") else {
+            eprintln!("skipping: PKCS11_PROXY_NG_WIN32_STUB_MODULE is not set");
+            return;
+        };
+        assert!(
+            Path::new(&module).exists(),
+            "PKCS11_PROXY_NG_WIN32_STUB_MODULE is set but missing: {module}"
+        );
+
+        let backend = super::FfiBackend::load(Path::new(&module))
+            .expect("win32 stub DLL should load via C_GetFunctionList");
+
+        // 2.40 legacy path: no C_GetInterface export, so no 3.x lists.
+        assert!(!backend.has_3_0_interface(), "stub is 2.40-only: no 3.0 list");
+        assert!(!backend.has_3_2_interface(), "stub is 2.40-only: no 3.2 list");
+
+        // Version + non-null pointers, read by value (the win32 list is
+        // packed — never borrow its fields).
+        let version = unsafe { (*backend.func_list).version };
+        assert_eq!((version.major, version.minor), (2, 40), "stub list version");
+        let c_initialize: cryptoki_sys::CK_C_Initialize =
+            unsafe { (*backend.func_list).C_Initialize };
+        assert!(c_initialize.is_some(), "stub C_Initialize must be non-null");
+        let c_get_info: cryptoki_sys::CK_C_GetInfo = unsafe { (*backend.func_list).C_GetInfo };
+        assert!(c_get_info.is_some(), "stub C_GetInfo must be non-null");
+
+        // One live call across the boundary.
+        let info = backend.ffi_get_info().expect("stub C_GetInfo should succeed");
+        assert_eq!(info.cryptoki_version, (2, 40));
+        assert_eq!(info.manufacturer_id, "T2RUN WIN32 STUB");
+        assert_eq!(info.flags, 0);
+        assert_eq!(info.library_description, "PE32 stub provider");
+        assert_eq!(info.library_version, (2, 40));
+        eprintln!("win32-stub-live-load: ok (2.40, markers verified)");
+    }
+
     use super::{InterfaceAnswer, select_primary, select_versioned};
 
     fn dangling_list() -> *mut cryptoki_sys::CK_FUNCTION_LIST {

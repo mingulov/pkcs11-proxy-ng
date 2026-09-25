@@ -7,7 +7,8 @@ use super::super::super::context_manager::ObjectMetadata;
 use super::super::HandlerContext;
 use super::super::convert_template_opt;
 use super::super::service_utils::{
-    backend_object_known_public, ck_rv_only, register_object_handles, resolve_object_authz_context,
+    backend_object_known_public, ck_rv_only, context_maps_backend_object,
+    find_result_visible_to_context, register_object_handles, resolve_object_authz_context,
     resolve_session, session_slot_login_state, spawn_backend,
 };
 
@@ -75,37 +76,59 @@ pub(super) async fn find_objects(
 
     // Transparency path: neither per_object_active() nor per_class_active() →
     // no grant anywhere restricts by uid or class; every principal is unrestricted.
-    // Single backend call, no filter — byte-identical to pre-filter.
+    // CROSS-PROC-001: still filters by session-object ownership (a context
+    // must not observe another context's session objects — the backend
+    // application is shared, so unfiltered enumeration leaks across
+    // tenants). Same loop contract as below: pull past fully-filtered
+    // batches, return empty ONLY on genuine backend exhaustion.
     // (Logged-out callers take the F-04 loop below instead.)
     if !ctx.token_policy.per_object_active() && !ctx.token_policy.per_class_active() && logged_in {
-        let backend = ctx.backend.clone();
-        // CkSessionHandle is Copy; the move closure copies it.
-        let result = spawn_backend(move || backend.find_objects(session, max_count)).await?;
-        return match result {
-            Ok(backend_objects) => {
-                // COUNT ONLY — never log the labels/IDs/values (design V15/D9 redaction).
-                if crate::server::resilience::observe_find_result(backend_objects.len()) {
-                    tracing::warn!(
-                        object_count = backend_objects.len(),
-                        "pathological object population: C_FindObjects result exceeds resilience threshold"
-                    );
-                }
-                match register_object_handles(&ctx.context_manager, &ctx_id, &backend_objects).await
-                {
-                    Some(object_handles) => {
-                        Ok(Response::new(pkcs11_proxy_ng_proto::FindObjectsResponse {
-                            ck_rv: CkRv::OK.0,
-                            object_handles,
-                        }))
-                    }
-                    None => Ok(Response::new(pkcs11_proxy_ng_proto::FindObjectsResponse {
-                        ck_rv: CkRv::CRYPTOKI_NOT_INITIALIZED.0,
+        let mut kept_backends = Vec::new();
+        loop {
+            let batch_backend = ctx.backend.clone();
+            // CkSessionHandle and u32 are Copy; the move closure copies them.
+            let batch = match spawn_backend(move || batch_backend.find_objects(session, max_count))
+                .await?
+            {
+                Ok(objects) => objects,
+                Err(ck_error) => {
+                    return Ok(Response::new(pkcs11_proxy_ng_proto::FindObjectsResponse {
+                        ck_rv: ck_error.0,
                         object_handles: vec![],
-                    })),
+                    }));
+                }
+            };
+
+            // COUNT ONLY — never log the labels/IDs/values (design V15/D9 redaction).
+            if crate::server::resilience::observe_find_result(batch.len()) {
+                tracing::warn!(
+                    object_count = batch.len(),
+                    "pathological object population: C_FindObjects result exceeds resilience threshold"
+                );
+            }
+
+            if batch.is_empty() {
+                break;
+            }
+
+            for &backend_object in &batch {
+                if find_result_visible_to_context(ctx, &ctx_id, session, backend_object).await {
+                    kept_backends.push(backend_object);
                 }
             }
-            Err(error) => Ok(Response::new(pkcs11_proxy_ng_proto::FindObjectsResponse {
-                ck_rv: error.0,
+
+            if !kept_backends.is_empty() {
+                break;
+            }
+        }
+
+        return match register_object_handles(&ctx.context_manager, &ctx_id, &kept_backends).await {
+            Some(object_handles) => Ok(Response::new(pkcs11_proxy_ng_proto::FindObjectsResponse {
+                ck_rv: CkRv::OK.0,
+                object_handles,
+            })),
+            None => Ok(Response::new(pkcs11_proxy_ng_proto::FindObjectsResponse {
+                ck_rv: CkRv::CRYPTOKI_NOT_INITIALIZED.0,
                 object_handles: vec![],
             })),
         };
@@ -148,7 +171,12 @@ pub(super) async fn find_objects(
             }
 
             for &backend_object in &batch {
-                if backend_object_known_public(ctx, session, backend_object).await {
+                // CROSS-PROC-001 first (ownership is the cheaper check for
+                // mapped handles and hides foreign session objects before
+                // the privacy probe spends a backend call on them).
+                if find_result_visible_to_context(ctx, &ctx_id, session, backend_object).await
+                    && backend_object_known_public(ctx, session, backend_object).await
+                {
                     kept_backends.push(backend_object);
                 }
             }
@@ -243,11 +271,25 @@ pub(super) async fn find_objects(
                                 ctx.token_policy.allows_class(&identity, &label, &serial, c)
                             })) =>
                 {
+                    // CROSS-PROC-001: authz-kept session objects additionally
+                    // require context ownership (no extra probe: meta already
+                    // carries is_token; mapped handles were minted or vetted
+                    // here). Ordered before the login probe so foreign
+                    // session objects cost no privacy call.
+                    let owned_or_token = meta.is_token
+                        || context_maps_backend_object(
+                            &ctx.context_manager,
+                            &ctx_id,
+                            backend_object,
+                        )
+                        .await;
                     // F-04: authz-kept objects are additionally login-filtered —
                     // a logged-out caller sees only known-public objects (probe
                     // failure hides). Ordered after authz so denied objects cost
                     // no probe; logged-in callers short-circuit with no extra call.
-                    if logged_in || backend_object_known_public(ctx, session, backend_object).await
+                    if owned_or_token
+                        && (logged_in
+                            || backend_object_known_public(ctx, session, backend_object).await)
                     {
                         kept_backends.push(backend_object);
                         kept_metas.push(meta);
@@ -459,6 +501,17 @@ mod tests {
             })
             .await
             .unwrap();
+
+        // CROSS-PROC-001: these fixtures model same-context objects, so
+        // pre-register them (unmapped session objects are now hidden as
+        // foreign-owned; these tests target authz/login filtering, not
+        // ownership).
+        ctx_mgr
+            .get_context(&ctx_id, |c| {
+                c.object_handles.insert(BackendHandle(obj_a.0));
+                c.object_handles.insert(BackendHandle(obj_b.0));
+            })
+            .await;
 
         let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
         ctx.token_policy = policy;
@@ -765,6 +818,15 @@ mod tests {
             })
             .await
             .unwrap();
+        // CROSS-PROC-001: fixtures model same-context objects (this test
+        // targets authz pull-past, not ownership).
+        ctx_mgr
+            .get_context(&ctx_id, |c| {
+                c.object_handles.insert(BackendHandle(obj_d1.0));
+                c.object_handles.insert(BackendHandle(obj_d2.0));
+                c.object_handles.insert(BackendHandle(obj_a.0));
+            })
+            .await;
         let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
         ctx.token_policy = policy;
 
@@ -980,6 +1042,14 @@ mod tests {
             })
             .await
             .unwrap();
+        // CROSS-PROC-001: fixtures model same-context objects (this test
+        // targets per-class authz, not ownership).
+        ctx_mgr
+            .get_context(&ctx_id, |c| {
+                c.object_handles.insert(BackendHandle(obj_sk.0));
+                c.object_handles.insert(BackendHandle(obj_pk.0));
+            })
+            .await;
 
         let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
         ctx.token_policy = policy;
@@ -1080,6 +1150,16 @@ mod tests {
             })
             .await
             .unwrap();
+
+        // CROSS-PROC-001: these fixtures model same-context objects, so
+        // pre-register them (unmapped session objects are now hidden as
+        // foreign-owned; these tests target login filtering, not ownership).
+        ctx_mgr
+            .get_context(&ctx_id, |c| {
+                c.object_handles.insert(BackendHandle(obj_priv.0));
+                c.object_handles.insert(BackendHandle(obj_pub.0));
+            })
+            .await;
 
         let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
         ctx.token_policy = policy;
@@ -1228,6 +1308,13 @@ mod tests {
             })
             .await
             .unwrap();
+        // CROSS-PROC-001: pre-register so the object passes ownership — this
+        // test targets the F-04 privacy-probe filter, not ownership.
+        ctx_mgr
+            .get_context(&ctx_id, |c| {
+                c.object_handles.insert(BackendHandle(obj_unknown.0));
+            })
+            .await;
         let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
         ctx.token_policy = policy;
 
@@ -1282,6 +1369,13 @@ mod tests {
             })
             .await
             .unwrap();
+        // CROSS-PROC-001: fixtures model same-context objects (see above).
+        ctx_mgr
+            .get_context(&ctx_id, |c| {
+                c.object_handles.insert(BackendHandle(obj_priv.0));
+                c.object_handles.insert(BackendHandle(obj_pub.0));
+            })
+            .await;
         let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
         ctx.token_policy = policy;
 
@@ -1317,6 +1411,199 @@ mod tests {
             resp.object_handles.len(),
             2,
             "transparency path: neither gate active → all objects pass through"
+        );
+    }
+
+    // ── CROSS-PROC-001: cross-context session-object isolation ──────────────
+
+    /// Set CLASS + TOKEN + PRIVATE + UNIQUE_ID on a fixture object
+    /// (conformant-backend shape; both fixtures carry the allowed uid so
+    /// authz is not a factor and only ownership filters).
+    fn set_ownership_fixture(mock: &MockBackend, object: CkObjectHandle, is_token: bool) {
+        mock.set_attribute(
+            object,
+            CkAttributeType::CLASS,
+            MockAttributeSlot::Value(CkAttributeValue::Ulong(CkObjectClass::DATA.0)),
+        );
+        mock.set_attribute(
+            object,
+            CkAttributeType::TOKEN,
+            MockAttributeSlot::Value(CkAttributeValue::Bool(is_token)),
+        );
+        mock.set_attribute(
+            object,
+            CkAttributeType::PRIVATE,
+            MockAttributeSlot::Value(CkAttributeValue::Bool(false)),
+        );
+        mock.set_attribute(
+            object,
+            CkAttributeType::UNIQUE_ID,
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_A_BYTES.to_vec().into())),
+        );
+    }
+
+    /// Shared ownership setup: two backend objects UNKNOWN to the querying
+    /// context — one session-scoped, one token-scoped (both public, so the
+    /// login filter is not a factor) — cursor primed to [session, token].
+    /// Returns (ctx, ctx_id, virtual_session, obj_sess, obj_tok).
+    async fn setup_ownership_find(
+        policy: Arc<TokenPolicy>,
+        identity: Option<String>,
+    ) -> (
+        HandlerContext,
+        crate::server::context_manager::ClientContextId,
+        u64,
+        CkObjectHandle,
+        CkObjectHandle,
+    ) {
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
+        mock.initialize().unwrap();
+        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
+
+        let obj_sess = mock.create_object(backend_session, Some(&[])).unwrap();
+        set_ownership_fixture(&mock, obj_sess, false);
+        let obj_tok = mock.create_object(backend_session, Some(&[])).unwrap();
+        set_ownership_fixture(&mock, obj_tok, true);
+
+        mock.find_objects_init(backend_session, Some(&[])).unwrap();
+        mock.set_find_objects_result(vec![obj_sess, obj_tok]);
+
+        let backend: Arc<dyn Pkcs11Backend> = mock;
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
+        ctx_mgr.register_slot(BackendSlotId(CkSlotId(0))).await;
+        ctx_mgr.cache_token_info(BackendSlotId(CkSlotId(0)), "MockToken".into(), "0001".into());
+        let ctx_id = ctx_mgr.create_context(identity).await.unwrap();
+
+        let virtual_session = ctx_mgr
+            .get_context(&ctx_id, |c| {
+                c.register_session(BackendHandle(backend_session.0), BackendSlotId(CkSlotId(0)))
+            })
+            .await
+            .unwrap();
+
+        let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        ctx.token_policy = policy;
+
+        (ctx, ctx_id, virtual_session.0, obj_sess, obj_tok)
+    }
+
+    /// Pre-register a backend object in the context (models "minted here").
+    async fn register_owned(
+        ctx: &HandlerContext,
+        ctx_id: &crate::server::context_manager::ClientContextId,
+        backend_object: CkObjectHandle,
+    ) {
+        ctx.context_manager
+            .get_context(ctx_id, |c| {
+                c.object_handles.insert(BackendHandle(backend_object.0));
+            })
+            .await;
+    }
+
+    fn default_policy() -> Arc<TokenPolicy> {
+        Arc::new(TokenPolicy::from_config(&AuthConfig::default()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn ownership_transparency_hides_foreign_session_object() {
+        // Logged-in, no policy: the unknown session object belongs to
+        // another context and must be hidden; the token object is shown.
+        let (ctx, ctx_id, vs, _sess, obj_tok) =
+            setup_ownership_find(default_policy(), Some(CONFINED_IDENTITY.into())).await;
+        log_in_fixture(&ctx, &ctx_id).await;
+
+        let resp = run_find_objects(&ctx, &ctx_id, vs).await;
+
+        assert_eq!(resp.ck_rv, CkRv::OK.0);
+        assert_eq!(resp.object_handles.len(), 1, "foreign session object must be hidden");
+        assert_eq!(
+            resolve_virtual(&ctx, &ctx_id, resp.object_handles[0]).await,
+            Some(obj_tok.0),
+            "the kept handle must map to the token object"
+        );
+    }
+
+    #[tokio::test]
+    async fn ownership_transparency_pulls_past_fully_filtered_batch() {
+        // max_count=1: first backend batch is [foreign session] (filtered),
+        // so the transparency path must pull the next batch ([token])
+        // instead of returning 0 (which the client would read as
+        // end-of-search).
+        let (ctx, ctx_id, vs, _sess, obj_tok) =
+            setup_ownership_find(default_policy(), Some(CONFINED_IDENTITY.into())).await;
+        log_in_fixture(&ctx, &ctx_id).await;
+
+        let resp = run_find_objects_with_max(&ctx, &ctx_id, vs, 1).await;
+
+        assert_eq!(resp.ck_rv, CkRv::OK.0);
+        assert_eq!(resp.object_handles.len(), 1, "must pull past the filtered batch");
+        assert_eq!(
+            resolve_virtual(&ctx, &ctx_id, resp.object_handles[0]).await,
+            Some(obj_tok.0),
+            "the kept handle must map to the token object"
+        );
+    }
+
+    #[tokio::test]
+    async fn ownership_transparency_shows_own_session_object() {
+        // Same-context session objects (any session) stay visible:
+        // pre-registered session object + unknown token object → both shown.
+        let (ctx, ctx_id, vs, obj_sess, _tok) =
+            setup_ownership_find(default_policy(), Some(CONFINED_IDENTITY.into())).await;
+        register_owned(&ctx, &ctx_id, obj_sess).await;
+        log_in_fixture(&ctx, &ctx_id).await;
+
+        let resp = run_find_objects(&ctx, &ctx_id, vs).await;
+
+        assert_eq!(resp.ck_rv, CkRv::OK.0);
+        assert_eq!(resp.object_handles.len(), 2, "own session object must stay visible");
+    }
+
+    #[tokio::test]
+    async fn ownership_logged_out_hides_foreign_public_session_object() {
+        // Logged-out, no policy: both fixtures are public (login filter
+        // keeps both), but the foreign session object must still hide.
+        let (ctx, ctx_id, vs, _sess, obj_tok) =
+            setup_ownership_find(default_policy(), Some(CONFINED_IDENTITY.into())).await;
+
+        let resp = run_find_objects(&ctx, &ctx_id, vs).await;
+
+        assert_eq!(resp.ck_rv, CkRv::OK.0);
+        assert_eq!(
+            resp.object_handles.len(),
+            1,
+            "foreign session object must hide even when public"
+        );
+        assert_eq!(
+            resolve_virtual(&ctx, &ctx_id, resp.object_handles[0]).await,
+            Some(obj_tok.0),
+            "the kept handle must map to the token object"
+        );
+    }
+
+    #[tokio::test]
+    async fn ownership_authz_hides_unmapped_session_object() {
+        // Authz path: both fixtures carry the allowed uid (authz keeps
+        // both), logged in (login filter keeps both) — only ownership
+        // drops the unmapped session object, with no extra probe (meta).
+        let policy = confined_policy(CONFINED_IDENTITY, "MockToken", UID_A_HEX);
+        let (ctx, ctx_id, vs, _sess, obj_tok) =
+            setup_ownership_find(policy, Some(CONFINED_IDENTITY.into())).await;
+        log_in_fixture(&ctx, &ctx_id).await;
+
+        let resp = run_find_objects(&ctx, &ctx_id, vs).await;
+
+        assert_eq!(resp.ck_rv, CkRv::OK.0);
+        assert_eq!(
+            resp.object_handles.len(),
+            1,
+            "unmapped session object must hide under the authz filter"
+        );
+        assert_eq!(
+            resolve_virtual(&ctx, &ctx_id, resp.object_handles[0]).await,
+            Some(obj_tok.0),
+            "the kept handle must map to the token object"
         );
     }
 }
