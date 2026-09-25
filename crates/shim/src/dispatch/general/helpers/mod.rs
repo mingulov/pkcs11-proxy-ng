@@ -179,6 +179,29 @@ pub(crate) unsafe fn try_read_optional_bytes<'a>(
     }
 }
 
+/// Fail-closed reader for credential inputs (PIN/username).
+///
+/// The credential wire format cannot preserve a nonzero length alongside a
+/// NULL pointer. Refuse that unsupported shape with `ARGUMENTS_BAD` rather
+/// than silently changing what a backend evaluates. This is a documented
+/// transport limit, not a claim that PKCS#11 forbids every such input:
+/// protected authentication paths may ignore the length of a NULL PIN.
+/// (NULL, 0) still maps to `None` per the `c_login` convention. Other input
+/// readers keep their separate contracts (ADR-0010).
+///
+/// # Safety
+///
+/// Same contract as `try_read_optional_bytes`.
+pub(crate) unsafe fn try_read_credential_bytes<'a>(
+    ptr: *const u8,
+    len: CK_ULONG,
+) -> Result<Option<&'a [u8]>, CkRv> {
+    if ptr.is_null() && len != 0 {
+        return Err(CkRv::ARGUMENTS_BAD);
+    }
+    unsafe { try_read_optional_bytes(ptr, len) }
+}
+
 /// Validate caller-memory extent arithmetic before constructing any slice or
 /// performing any multi-byte unaligned copy (T03).
 ///
@@ -863,6 +886,23 @@ mod tests {
         let buf = super::InputBuf::Null { len: 42 };
         let result = super::input_buf_to_ck_in_buf(buf).unwrap();
         assert!(matches!(result, pkcs11_proxy_ng_types::CkInBuf::Null { len: 42 }));
+    }
+
+    #[test]
+    fn credential_null_with_nonzero_len_is_rejected() {
+        // Proxy-vs-direct finding (pkcs11-check 0.2.1rc1, nss-main,
+        // test_login_null_pin_nonzero_length): collapsing (NULL, len>0) to
+        // the empty credential let a no-PIN token answer CKR_OK. Fail
+        // closed instead; (NULL, 0) still maps to None.
+        let err = unsafe { super::try_read_credential_bytes(std::ptr::null(), 8) }.unwrap_err();
+        assert_eq!(err, CkRv::ARGUMENTS_BAD);
+        assert_eq!(unsafe { super::try_read_credential_bytes(std::ptr::null(), 0) }.unwrap(), None);
+        let pin = b"1234";
+        assert_eq!(
+            unsafe { super::try_read_credential_bytes(pin.as_ptr(), pin.len() as CK_ULONG) }
+                .unwrap(),
+            Some(pin.as_slice())
+        );
     }
 
     #[test]
