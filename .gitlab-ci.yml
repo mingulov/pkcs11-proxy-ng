@@ -7,11 +7,16 @@
 # four version mirrors to the Cargo workspace version and checks the
 # APKBUILD/spec shape, so version drift and packaging-file breakage fail
 # fast on every PR without a second full build farm.
+# Deferred T22 F6: docker images pinned by digest (tag kept for
+# readability; the digest is what the runner pulls; resolved live
+# 2026-09-22). Both tags share a digest — the plain tag is the dind
+# image. Re-pin with the registry's current digest when moving Docker
+# versions.
 default:
-  image: docker:latest
+  image: docker:28.5.2@sha256:2a232a42256f70d78e3cc5d2b5d6b3276710a0de0596c145f627ecfae90282ac
 
 services:
-  - docker:dind
+  - docker:28.5.2-dind@sha256:2a232a42256f70d78e3cc5d2b5d6b3276710a0de0596c145f627ecfae90282ac
 
 stages:
   - build
@@ -45,7 +50,7 @@ workflow:
       echo "Image will be tagged as: ${image_name}"
       echo "$CI_REGISTRY_PASSWORD" | docker login $CI_REGISTRY -u $CI_REGISTRY_USER --password-stdin
       docker build --progress=plain \
-        --build-arg ALPINE_VER=${ALPINE_VERSION} \
+        --build-arg ALPINE_BUILD_IMAGE=${ALPINE_BUILD_IMAGE} \
         --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --build-arg GIT_COMMIT="${CI_COMMIT_SHA}" \
         -f packaging/alpine/Dockerfile.alpine \
@@ -64,7 +69,7 @@ workflow:
       echo "Image will be tagged as: ${image_name}"
       echo "$CI_REGISTRY_PASSWORD" | docker login $CI_REGISTRY -u $CI_REGISTRY_USER --password-stdin
       docker build --progress=plain \
-        --build-arg AMAZON_VER=${AMAZON_VERSION} \
+        --build-arg AMAZON_BUILD_IMAGE=${AMAZON_BUILD_IMAGE} \
         --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --build-arg GIT_COMMIT="${CI_COMMIT_SHA}" \
         -f packaging/amazon/Dockerfile.amazon \
@@ -80,13 +85,16 @@ alpine_3_22:
   extends: .alpine_build_template
   variables:
     ALPINE_VERSION: "3.22"
+    ALPINE_BUILD_IMAGE: "alpine:3.22@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8"
 
 alpine_3_23:
   extends: .alpine_build_template
   variables:
     ALPINE_VERSION: "3.23"
+    ALPINE_BUILD_IMAGE: "alpine:3.23@sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0"
 
 amazon_2023:
   extends: .amazon_build_template
   variables:
     AMAZON_VERSION: "2023"
+    AMAZON_BUILD_IMAGE: "amazonlinux:2023@sha256:74c545e3e04db388b00bd31d7cc5640d4e9c12058a6d72af938d113da3c82893"

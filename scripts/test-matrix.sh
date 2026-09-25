@@ -16,7 +16,7 @@ Usage: scripts/test-matrix.sh [options]
 
 Options:
   --fast-only                 Run only CI Tier 0 fmt/audit/deny/build/test/clippy checks
-  --skip-fast                 Skip fmt/audit/build/test/clippy
+  --skip-fast                 Skip fmt/audit/deny/build/test/clippy
   --skip-consumers            Skip external consumer smoke tests
   --skip-optional-providers   Skip optional NSS/Kryoptic suites
   --skip-nss-fixtures         Skip the NSS fixture-mode lane

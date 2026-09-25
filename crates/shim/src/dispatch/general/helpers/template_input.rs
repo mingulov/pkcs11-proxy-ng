@@ -7,6 +7,16 @@ use super::*;
 /// template has more than 64 K attributes.
 pub(crate) const MAX_TEMPLATE_COUNT: usize = 65_536;
 
+/// Parse a caller `CK_ATTRIBUTE` template into Rust values, rejecting
+/// malformed input loudly (W1-L1-04). Elements are read unaligned; a
+/// null pointer is legal only with a zero count.
+///
+/// # Safety
+///
+/// A non-null `p_template` must point to `count` readable `CK_ATTRIBUTE`
+/// entries (alignment not required); each entry's `pValue`, when
+/// non-null with nonzero length, must be readable for `ulValueLen`
+/// bytes. A null pointer with nonzero count errors without dereference.
 pub(crate) unsafe fn ck_attrs_to_rust_checked(
     p_template: *const CK_ATTRIBUTE,
     count: CK_ULONG,
@@ -25,6 +35,11 @@ pub(crate) fn null_preserving_template(
     if p_template.is_null() { None } else { Some(template) }
 }
 
+/// Depth-zero entry point for the template parser (W1-L1-04).
+///
+/// # Safety
+///
+/// Same contract as [`ck_attrs_to_rust_checked`].
 unsafe fn ck_attrs_to_rust_result(
     p_template: *const CK_ATTRIBUTE,
     count: CK_ULONG,
@@ -33,6 +48,14 @@ unsafe fn ck_attrs_to_rust_result(
     unsafe { ck_attrs_to_rust_at_depth(p_template, count, reject_null_nonzero_count, 0) }
 }
 
+/// Recursive template parser with bounded nesting depth (ADR-0011 D8;
+/// W1-L1-04).
+///
+/// # Safety
+///
+/// Same pointer contract as [`ck_attrs_to_rust_checked`]; `depth`
+/// tracks nesting internally (callers start at 0, deeper nesting
+/// errors rather than recursing).
 unsafe fn ck_attrs_to_rust_at_depth(
     p_template: *const CK_ATTRIBUTE,
     count: CK_ULONG,
@@ -120,11 +143,11 @@ unsafe fn ck_attrs_to_rust_at_depth(
                 // raw-bytes path below, byte-identical to before. D6 guarantees
                 // both edges share this client's native order.
                 let bytes = unsafe { std::slice::from_raw_parts(attr.pValue as *const u8, len) };
-                match pkcs11_proxy_ng_types::width::reencode_ulong(
+                match pkcs11_proxy_ng_types::reencode_ulong(
                     bytes,
                     client_ulong_width,
                     backend_ulong_width,
-                    pkcs11_proxy_ng_types::width::ByteOrder::native(),
+                    pkcs11_proxy_ng_types::ByteOrder::native(),
                 ) {
                     Ok(reencoded) => Some(CkAttributeValue::Bytes(reencoded.into())),
                     // D4: an element exceeds the backend's CK_ULONG range.

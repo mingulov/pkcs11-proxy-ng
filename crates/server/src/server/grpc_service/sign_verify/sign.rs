@@ -66,19 +66,21 @@ pub(crate) async fn sign_init(
         }
     };
 
+    // Mechanism policy gate (G3-PR3 Task 3).
+    // W1-C1-13: the gate runs before remap on every init handler so identical
+    // dual-defect requests yield the same RV regardless of op.
+    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::SignInitResponse {
+            ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
+        }));
+    }
+
     // B1: remap object handles embedded in the mechanism parameters;
     // gate each through per-object authz when active (C1).
     if let Err(rv) =
         remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
     {
         return Ok(Response::new(pkcs11_proxy_ng_proto::SignInitResponse { ck_rv: rv.0 }));
-    }
-
-    // Mechanism policy gate (G3-PR3 Task 3).
-    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
-        return Ok(Response::new(pkcs11_proxy_ng_proto::SignInitResponse {
-            ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
-        }));
     }
 
     let backend = Arc::clone(backend_ref);
@@ -268,19 +270,21 @@ pub(crate) async fn sign_recover_init(
         }
     };
 
+    // Mechanism policy gate (G3-PR3 Task 3).
+    // W1-C1-13: the gate runs before remap on every init handler so identical
+    // dual-defect requests yield the same RV regardless of op.
+    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::SignRecoverInitResponse {
+            ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
+        }));
+    }
+
     // B1: remap object handles embedded in the mechanism parameters;
     // gate each through per-object authz when active (C1).
     if let Err(rv) =
         remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
     {
         return Ok(Response::new(pkcs11_proxy_ng_proto::SignRecoverInitResponse { ck_rv: rv.0 }));
-    }
-
-    // Mechanism policy gate (G3-PR3 Task 3).
-    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
-        return Ok(Response::new(pkcs11_proxy_ng_proto::SignRecoverInitResponse {
-            ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
-        }));
     }
 
     let backend = Arc::clone(backend_ref);
@@ -345,7 +349,11 @@ mod tests {
     use tonic::Request;
 
     use crate::config::AuditConfig;
+    use crate::config::{
+        AuthConfig, ExtractPolicyConfig, GrantSpec, PolicyEntry, RichGrantConfig, TokenAccessSpec,
+    };
     use crate::server::audit::{AuditSink, spawn_audit_sink};
+    use crate::server::auth::policy::TokenPolicy;
     use crate::server::context_manager::{ClientContextId, ContextManager};
     use crate::server::grpc_service::HandlerContext;
     use crate::server::handle_map::BackendHandle;
@@ -482,5 +490,85 @@ mod tests {
 
         // The ck_rv is whatever the backend returned — never overridden by a drop.
         let _ = resp.into_inner().ck_rv;
+    }
+
+    const PEER_IDENTITY: &str = "uid=1000";
+
+    fn mechanism_grant_policy(allowed_mechs: Vec<String>) -> TokenPolicy {
+        TokenPolicy::from_config(&AuthConfig {
+            allow_all_authenticated: false,
+            anonymous_principal: None,
+            policy: vec![PolicyEntry {
+                identity: PEER_IDENTITY.into(),
+                tokens: TokenAccessSpec::Specific(vec![GrantSpec::Rich(RichGrantConfig {
+                    token: "label:MockToken".into(),
+                    classes: None,
+                    mechanisms: Some(allowed_mechs),
+                    extract: ExtractPolicyConfig::Allow,
+                    objects: None,
+                })]),
+            }],
+        })
+        .unwrap()
+    }
+
+    async fn setup_with_policy(policy: TokenPolicy) -> (HandlerContext, ClientContextId, u64) {
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+        let backend: Arc<dyn Pkcs11Backend> = mock;
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let ctx_id = ctx_mgr.create_context(Some(PEER_IDENTITY.into())).await.unwrap();
+        let session_vh = ctx_mgr
+            .get_context(&ctx_id, |ctx| {
+                ctx.register_session(
+                    BackendHandle(1),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                )
+            })
+            .await
+            .unwrap();
+        ctx_mgr.cache_token_info(
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+            "MockToken".into(),
+            "0001".into(),
+        );
+        let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        ctx.token_policy = Arc::new(policy);
+        (ctx, ctx_id, session_vh.0)
+    }
+
+    /// W1-C1-13 (cross-op pin): same dual defect as the encrypt_init pin —
+    /// denied mechanism + unresolvable embedded handle — must answer
+    /// CKR_MECHANISM_INVALID on sign_init too.
+    #[tokio::test]
+    async fn c1_13_dual_defect_returns_mechanism_invalid_on_sign_init() {
+        let (ctx, ctx_id, session) =
+            setup_with_policy(mechanism_grant_policy(vec!["CKM_RSA_PKCS".into()])).await;
+        let ck = CkMechanism {
+            mechanism_type: CkMechanismType::HKDF_DERIVE,
+            params: Some(CkMechanismParams::Hkdf(HkdfParams {
+                extract: true,
+                expand: true,
+                prf_hash_mechanism: CkMechanismType(0),
+                salt_type: 0,
+                salt: Vec::new().into(),
+                salt_key_handle: CkObjectHandle(0xDEAD_BEEF),
+                info: Vec::new().into(),
+            })),
+        };
+        let req = pkcs11_proxy_ng_proto::SignInitRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+            mechanism: Some(
+                pkcs11_proxy_ng_proto::Mechanism::try_from(&ck).expect("HKDF must convert"),
+            ),
+            key_handle: 0,
+        };
+        let resp = super::sign_init(&ctx, Request::new(req)).await.unwrap().into_inner();
+        assert_eq!(
+            resp.ck_rv,
+            CkRv::MECHANISM_INVALID.0,
+            "denied mechanism must win over the bad embedded handle (permitted-before-remap)"
+        );
     }
 }

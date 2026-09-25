@@ -21,7 +21,25 @@ use tokio::net::TcpListener;
 use tonic::transport::Server;
 
 pub fn mock_backend() -> MockBackend {
-    MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType(0x00000001)])
+    MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS])
+}
+
+/// Wait until the spawned daemon accepts TCP connections (W1-C3-23).
+/// Polling replaces the old fixed 50 ms sleep, which slow CI runners
+/// could race and fast ones paid every run. Panics past the timeout —
+/// a bench-harness failure, not a daemon verdict.
+async fn wait_for_readiness(addr: std::net::SocketAddr) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if tokio::net::TcpStream::connect(addr).await.is_ok() {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "bench daemon at {addr} never became ready"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 /// Start an insecure in-process daemon over loopback TCP and return its
@@ -46,7 +64,7 @@ pub async fn start_daemon() -> (String, tokio::sync::watch::Sender<bool>) {
             })
             .await;
     });
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    wait_for_readiness(addr).await;
     let _keep_alive_rx = rx;
     (endpoint, tx)
 }

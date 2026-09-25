@@ -39,13 +39,25 @@ impl MechanismRegistrySource {
 
     /// Return a cheap clone of the current payload — suitable for
     /// returning in a gRPC response.
-    pub fn current(&self) -> Arc<MechanismRegistryPayload> {
-        self.snapshot.read().expect("MechanismRegistrySource RwLock poisoned").payload.clone()
+    ///
+    /// W1-C3-26: a poisoned lock fails closed with an error, never an
+    /// expect-panic on the request path.
+    pub fn current(&self) -> Result<Arc<MechanismRegistryPayload>, String> {
+        self.snapshot
+            .read()
+            .map(|snapshot| snapshot.payload.clone())
+            .map_err(|_| "mechanism registry lock poisoned; failing closed".to_string())
     }
 
     /// Return the parsed registry from the same atomic snapshot as `current`.
-    pub fn current_registry(&self) -> Arc<MechanismRegistry> {
-        self.snapshot.read().expect("MechanismRegistrySource RwLock poisoned").registry.clone()
+    ///
+    /// W1-C3-26: a poisoned lock fails closed with an error, never an
+    /// expect-panic on the request path.
+    pub fn current_registry(&self) -> Result<Arc<MechanismRegistry>, String> {
+        self.snapshot
+            .read()
+            .map(|snapshot| snapshot.registry.clone())
+            .map_err(|_| "mechanism registry lock poisoned; failing closed".to_string())
     }
 
     /// Reload the registry from disk. Used by the daemon's SIGHUP
@@ -55,7 +67,12 @@ impl MechanismRegistrySource {
     pub fn reload(&self) -> Result<Arc<MechanismRegistryPayload>, String> {
         let snapshot = Arc::new(load_snapshot(self.config_path.as_deref())?);
         let payload = snapshot.payload.clone();
-        *self.snapshot.write().expect("poisoned") = snapshot;
+        // W1-C3-26: a poisoned lock fails closed with an error, never a panic.
+        let mut guard = self
+            .snapshot
+            .write()
+            .map_err(|_| "mechanism registry lock poisoned; failing closed".to_string())?;
+        *guard = snapshot;
         Ok(payload)
     }
 
@@ -114,7 +131,7 @@ mod tests {
     #[test]
     fn embedded_default_when_no_path() {
         let src = MechanismRegistrySource::load(None).unwrap();
-        let payload = src.current();
+        let payload = src.current().unwrap();
         assert_eq!(payload.revision, EMBEDDED_DEFAULT_REVISION);
         assert!(!payload.parameterless.is_empty());
         assert!(!payload.params.is_empty());
@@ -134,7 +151,7 @@ mod tests {
         )
         .unwrap();
         let src = MechanismRegistrySource::load(Some(f.path())).unwrap();
-        let payload = src.current();
+        let payload = src.current().unwrap();
         assert_eq!(payload.revision.len(), 16);
         assert_ne!(payload.revision, EMBEDDED_DEFAULT_REVISION);
         assert_eq!(payload.discovery_mode, "filtered");
@@ -153,7 +170,7 @@ mod tests {
         )
         .unwrap();
         let src = MechanismRegistrySource::load(Some(f.path())).unwrap();
-        let first_rev = src.current().revision.clone();
+        let first_rev = src.current().unwrap().revision.clone();
 
         // Overwrite with new content.
         let path = f.path().to_path_buf();
@@ -231,7 +248,7 @@ mod tests {
                 // mask a pairing violation, so fail loudly instead of skipping.
                 Err(e) => panic!("load must succeed on atomically-swapped valid files: {e}"),
             };
-            let payload = src.current();
+            let payload = src.current().unwrap();
             let has_a = payload.params.iter().any(|e| e.mechanisms.contains(&0x8000C302));
             let has_b = payload.params.iter().any(|e| e.mechanisms.contains(&0x8000C303));
             if payload.revision == rev_a {
@@ -254,12 +271,33 @@ mod tests {
         assert_eq!(checked, ITERATIONS);
     }
 
+    // W1-C3-26: a poisoned registry lock fails closed with an error on
+    // every accessor — never an expect-panic on the request path.
+    #[test]
+    fn poisoned_lock_fails_closed_without_panic() {
+        let src = MechanismRegistrySource::load(None).unwrap();
+        // Poison the RwLock: panic while holding the write guard.
+        let snapshot = src.snapshot.clone();
+        let poisoning = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = snapshot.write().expect("write guard");
+            panic!("intentional poison for W1-C3-26");
+        }));
+        assert!(poisoning.is_err(), "poisoning panic must have fired");
+        assert!(src.snapshot.is_poisoned());
+        let err = src.current().unwrap_err();
+        assert!(err.contains("poisoned"), "current() must fail closed: {err}");
+        let err = src.current_registry().unwrap_err();
+        assert!(err.contains("poisoned"), "current_registry() must fail closed: {err}");
+        let err = src.reload().unwrap_err();
+        assert!(err.contains("poisoned"), "reload() must fail closed: {err}");
+    }
+
     #[test]
     fn reload_failure_retains_current_payload() {
         let mut f = NamedTempFile::new().unwrap();
         writeln!(f, "[[params]]\nshape=\"gcm\"\nmechanisms=[1]\n").unwrap();
         let src = MechanismRegistrySource::load(Some(f.path())).unwrap();
-        let before = src.current();
+        let before = src.current().unwrap();
 
         // Delete the file so reload fails.
         let path = f.path().to_path_buf();
@@ -271,7 +309,7 @@ mod tests {
         let err = src.reload().expect_err("reload must fail without file");
         assert!(err.contains("failed to read mechanism registry"), "actual: {err}");
 
-        let after = src.current();
+        let after = src.current().unwrap();
         // Same Arc instance: payload was not replaced on failure.
         assert!(Arc::ptr_eq(&before, &after), "payload must not change on reload failure");
     }

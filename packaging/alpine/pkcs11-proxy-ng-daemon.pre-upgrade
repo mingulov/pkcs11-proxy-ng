@@ -1,0 +1,16 @@
+#!/bin/sh
+# W1-L14-23: apk has no %config(noreplace) equivalent — it overwrites
+# every packaged file on upgrade. Save the operator-edited daemon TOMLs
+# aside so post-upgrade can restore them. See the upgrade-behavior
+# comment in APKBUILD daemon() for the full story.
+set -e
+
+CFG="/etc/pkcs11-proxy-ng"
+
+for f in proxy.toml mechanism_params.toml; do
+    if [ -f "$CFG/$f" ]; then
+        cp -p "$CFG/$f" "$CFG/.$f.apk-upgrade-save"
+    fi
+done
+
+exit 0

@@ -8,6 +8,8 @@
 use cryptoki_sys::*;
 use pkcs11_proxy_ng_types::*;
 
+use crate::state;
+
 use super::helpers::*;
 
 // ---------------------------------------------------------------------------
@@ -23,8 +25,17 @@ pub unsafe extern "C" fn c_verify_signature_init(
 ) -> CK_RV {
     catch_panics(|| {
         let mech = if p_mechanism.is_null() {
-            None // cancel path
+            None // cancel path (bypasses the precedence guard, like the digest/cipher inits)
         } else {
+            // T29 M3: same native precedence as the digest/cipher inits
+            // (W1-L3-11) — uninitialized cryptoki first, then session
+            // resolution before mechanism validation.
+            if !state::is_initialized() {
+                return rv_err(CkRv::CRYPTOKI_NOT_INITIALIZED);
+            }
+            if !state::is_session_known(h_session) {
+                return rv_err(CkRv::SESSION_HANDLE_INVALID);
+            }
             let rv = unsafe { validate_mechanism(p_mechanism) };
             if rv != rv_ok() {
                 return rv;

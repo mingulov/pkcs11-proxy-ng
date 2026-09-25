@@ -184,9 +184,12 @@ impl Pkcs11Client {
         Ok((CkObjectHandle(resp.public_key_handle), CkObjectHandle(resp.private_key_handle)))
     }
 
-    pub async fn wait_for_slot_event(&mut self, flags: u64) -> CkResult<CkSlotId> {
+    pub async fn wait_for_slot_event(&mut self, flags: CkFlags) -> CkResult<CkSlotId> {
         let ctx = self.context_id()?;
-        let req = pkcs11_proxy_ng_proto::WaitForSlotEventRequest { client_context_id: ctx, flags };
+        let req = pkcs11_proxy_ng_proto::WaitForSlotEventRequest {
+            client_context_id: ctx,
+            flags: flags.0,
+        };
         let resp = pkcs11_unary_call!(self.grpc.wait_for_slot_event(req), true);
         Ok(CkSlotId(resp.slot_id))
     }
@@ -271,5 +274,22 @@ impl Pkcs11Client {
         };
         let resp = pkcs11_unary_call!(self.grpc.generate_random(req), true);
         Ok(resp.random_data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // W1-C10-11: the client takes typed CkFlags (sibling convention);
+    // transport failure stays session-scoped (DEVICE_ERROR, per the
+    // crate taxonomy pin in mod.rs).
+    #[tokio::test]
+    async fn t32_wait_for_slot_event_takes_ck_flags() {
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
+        let mut client = Pkcs11Client::from_channel(channel);
+        client.restore_context_id(Some("t32-slot-event".into()));
+        let err = client.wait_for_slot_event(CkFlags::DONT_BLOCK).await.unwrap_err();
+        assert_eq!(err, CkRv::DEVICE_ERROR);
     }
 }

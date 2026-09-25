@@ -56,7 +56,7 @@ impl MockBackend {
         session: CkSessionHandle,
         mechanism: Option<&CkMechanism>,
         key: CkObjectHandle,
-        required_flag: u64,
+        required_flag: CkMechanismFlags,
     ) -> CkResult<()> {
         if !state.has_session(session) {
             return Err(CkRv::SESSION_HANDLE_INVALID);

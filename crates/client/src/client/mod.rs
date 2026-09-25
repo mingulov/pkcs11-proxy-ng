@@ -7,11 +7,7 @@ pub use deadline::DEFAULT_RPC_TIMEOUT;
 use deadline::RpcDeadline;
 // W1-C10-06: downstream crates name these from the crate root.
 pub use key_ops::DeriveKeyMechanismOutResult;
-pub use lifecycle::{BackendProbe, ConnectError};
-
-macro_rules! pkcs11_template {
-    ($template:expr) => {{ $template.iter().map(pkcs11_proxy_ng_proto::Attribute::from).collect::<Vec<_>>() }};
-}
+pub use lifecycle::{BackendInterface, BackendProbe, ConnectError, ConnectTimeouts};
 
 macro_rules! pkcs11_unary_call {
     ($call:expr, $is_session_scoped:expr) => {{ $crate::client::unary_prologue($call, $is_session_scoped, |response| response.ck_rv).await? }};
@@ -129,11 +125,17 @@ pub struct Pkcs11Client {
     context_id: Option<String>,
     source: ConnectionSource,
     rpc_timeout: std::time::Duration,
+    connect_timeouts: lifecycle::ConnectTimeouts,
 }
 
 impl Pkcs11Client {
-    fn proto_template(template: &[CkAttribute]) -> Vec<pkcs11_proxy_ng_proto::Attribute> {
-        pkcs11_template!(template)
+    /// Convert a caller template to proto attributes (W1-L11-15: a
+    /// generic fn, not a macro — the single-expression single-use
+    /// `pkcs11_template!` macro is gone per AGENTS.md §5).
+    fn proto_template<'a>(
+        template: impl IntoIterator<Item = &'a CkAttribute>,
+    ) -> Vec<pkcs11_proxy_ng_proto::Attribute> {
+        template.into_iter().map(pkcs11_proxy_ng_proto::Attribute::from).collect()
     }
 
     fn proto_mechanism(mechanism: &CkMechanism) -> CkResult<pkcs11_proxy_ng_proto::Mechanism> {
@@ -348,6 +350,26 @@ mod tests {
         for method in FALSE_FAMILY {
             assert!(false_seen.contains(method), "slot-scoped pin for {method} must be exercised");
         }
+    }
+
+    // W1-L11-15: `proto_template` is a generic fn over any
+    // `IntoIterator<Item = &CkAttribute>` — slices and iterators alike
+    // (a `&[CkAttribute]`-only signature would reject the iterator).
+    #[test]
+    fn proto_template_accepts_slices_and_iterators() {
+        let attrs = [
+            CkAttribute { attr_type: CkAttributeType::LABEL, value: None },
+            CkAttribute {
+                attr_type: CkAttributeType::TOKEN,
+                value: Some(CkAttributeValue::Bool(true)),
+            },
+        ];
+        let from_slice = Pkcs11Client::proto_template(&attrs[..]);
+        let from_iter = Pkcs11Client::proto_template(attrs.iter());
+        assert_eq!(from_slice.len(), 2);
+        assert_eq!(from_iter.len(), 2);
+        assert_eq!(from_slice, from_iter);
+        assert!(Pkcs11Client::proto_template(&[][..]).is_empty());
     }
 
     // W1-L3-06: a backend-RETURNED DEVICE_ERROR must still pass through

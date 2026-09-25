@@ -6,6 +6,11 @@ use tonic::transport::{Certificate, ClientTlsConfig, Identity};
 use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
 use pkcs11_proxy_ng_types::SecretBytes;
 
+/// Default mTLS handshake timeout (W1-C10-12): 10 s, matching the
+/// previously hardcoded value. Override per-connection with
+/// [`ClientTlsFiles::into_tonic_config_with_handshake_timeout`].
+pub const DEFAULT_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientTlsFiles {
     pub ca_cert: PathBuf,
@@ -42,6 +47,16 @@ impl ClientTlsFiles {
     }
 
     pub fn into_tonic_config(self) -> Result<ClientTlsConfig, String> {
+        self.into_tonic_config_with_handshake_timeout(DEFAULT_TLS_HANDSHAKE_TIMEOUT)
+    }
+
+    /// Build the tonic TLS config with an explicit handshake timeout
+    /// (W1-C10-12 operator knob). [`into_tonic_config`][Self::into_tonic_config]
+    /// delegates here with [`DEFAULT_TLS_HANDSHAKE_TIMEOUT`].
+    pub fn into_tonic_config_with_handshake_timeout(
+        self,
+        handshake_timeout: Duration,
+    ) -> Result<ClientTlsConfig, String> {
         let ca = std::fs::read(&self.ca_cert).map_err(|e| {
             format!("failed to read PKCS11_PROXY_TLS_CA_CERT '{}': {e}", self.ca_cert.display())
         })?;
@@ -66,7 +81,7 @@ impl ClientTlsFiles {
         let mut config = ClientTlsConfig::new()
             .ca_certificate(Certificate::from_pem(ca))
             .identity(Identity::from_pem(cert, secret_to_plain(&key)))
-            .timeout(Duration::from_secs(10));
+            .timeout(handshake_timeout);
         if let Some(domain_name) = self.domain_name {
             config = config.domain_name(domain_name);
         }
@@ -96,6 +111,71 @@ mod tests {
         .unwrap_err();
 
         assert!(err.contains("PKCS11_PROXY_TLS_CLIENT_CERT"), "error: {err}");
+    }
+
+    /// W1-C10-12: the TLS handshake timeout is an operator knob, not a
+    /// hardcoded literal — both constructors build a tonic TLS config
+    /// from the same files, the default with the documented 10 s value.
+    ///
+    /// Limitation (deferred T32 M1): this pins the constructor path, not
+    /// the threaded value. tonic 0.14 `ClientTlsConfig` keeps its fields
+    /// private with no accessor and no `PartialEq` (only `Debug`/`Clone`/
+    /// `Default` derives; the timeout is consumed by its `pub(crate)`
+    /// connector), so no stable assertion can observe the value inside
+    /// the built config. A `Debug`-format assertion could read it back
+    /// but is deliberately not used: derived-`Debug` output is not a
+    /// stable API and would couple this test to tonic's internals.
+    /// Value threading is verified by inspection: the constructor applies
+    /// `.timeout(handshake_timeout)` here
+    /// (`into_tonic_config_with_handshake_timeout`) and `connect_channel`
+    /// passes `timeouts.tls_handshake` (`client/lifecycle.rs`). The pins
+    /// below are the nearest stable behavior: the documented default
+    /// value, plus acceptance of distinct timeout values through the
+    /// constructor path.
+    #[test]
+    fn t32_tls_handshake_timeout_is_configurable() {
+        use std::time::Duration;
+        assert_eq!(
+            super::DEFAULT_TLS_HANDSHAKE_TIMEOUT,
+            Duration::from_secs(10),
+            "documented default handshake timeout"
+        );
+        let dir = std::env::temp_dir().join(format!("t32-tls-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ca = dir.join("ca.pem");
+        let cert = dir.join("client.pem");
+        let key = dir.join("client-key.pem");
+        std::fs::write(&ca, b"dummy-ca").unwrap();
+        std::fs::write(&cert, b"dummy-cert").unwrap();
+        std::fs::write(&key, b"dummy-key").unwrap();
+        let files = || ClientTlsFiles {
+            ca_cert: ca.clone(),
+            client_cert: cert.clone(),
+            client_key: key.clone(),
+            domain_name: None,
+        };
+        assert!(files().into_tonic_config().is_ok());
+        assert!(
+            files()
+                .into_tonic_config_with_handshake_timeout(super::DEFAULT_TLS_HANDSHAKE_TIMEOUT)
+                .is_ok()
+        );
+        // Nearest stable pin: distinct timeout values are all accepted
+        // through the constructor path (no validation/clamping rejects
+        // any of them). Distinctness of the built configs themselves is
+        // not observable — see the doc comment above.
+        for timeout in [
+            Duration::from_millis(1),
+            Duration::from_secs(3),
+            Duration::from_secs(7),
+            Duration::from_secs(60),
+        ] {
+            assert!(
+                files().into_tonic_config_with_handshake_timeout(timeout).is_ok(),
+                "constructor should accept a {timeout:?} handshake timeout"
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

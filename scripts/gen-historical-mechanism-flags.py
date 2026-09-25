@@ -125,7 +125,10 @@ def main() -> int:
         if not fl:
             expr = "0"
         else:
+            # CkMechanismFlags consts are Self-typed (W1-C9-13); unwrap the
+            # combined value to the u64 this table returns.
             expr = " | ".join(f"CkMechanismFlags::{f}" for f in fl)
+            expr = f"({expr}).0"
         print(f"        // {name}")
         print(f"        {value:#010x} => {expr},")
     print("        _ => return None,")

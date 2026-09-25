@@ -189,23 +189,27 @@ async fn unwrap_key_authenticated_impl(
         }
     };
 
+    // Mechanism policy gate (G3-PR3 Task 3): deny before backend call when the
+    // principal's grant does not include this unwrapping mechanism.
+    // W1-C1-13: the gate runs before remap on every init handler so identical
+    // dual-defect requests yield the same RV regardless of op.
+    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
+            authenticated_output: None,
+            ck_rv: CkRv::MECHANISM_INVALID.0,
+            key_handle: 0,
+            mechanism_parameter_out: Vec::new(),
+        }));
+    }
+
+    // B1: remap object handles embedded in the mechanism parameters;
+    // gate each through per-object authz when active (C1).
     if let Err(rv) =
         remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
     {
         return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
             authenticated_output: None,
             ck_rv: rv.0,
-            key_handle: 0,
-            mechanism_parameter_out: Vec::new(),
-        }));
-    }
-
-    // Mechanism policy gate (G3-PR3 Task 3): deny before backend call when the
-    // principal's grant does not include this unwrapping mechanism.
-    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
-        return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
-            authenticated_output: None,
-            ck_rv: CkRv::MECHANISM_INVALID.0,
             key_handle: 0,
             mechanism_parameter_out: Vec::new(),
         }));

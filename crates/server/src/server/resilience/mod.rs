@@ -2,7 +2,7 @@
 //! snapshot for the local metrics endpoint. Pure in-process observation: never
 //! issues a backend call and never changes client-visible behaviour (design V15).
 
-use std::sync::OnceLock;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 #[cfg(unix)]
@@ -18,12 +18,40 @@ pub async fn spawn_metrics_endpoint(_path: std::path::PathBuf) -> Result<(), Str
 #[cfg(test)]
 mod tests;
 
-/// Configured find-result threshold. `None` => detection off. Set once at startup.
-static FIND_WARN_THRESHOLD: OnceLock<Option<usize>> = OnceLock::new();
+/// Process-global resilience configuration, installed once at startup.
+/// `None` => unconfigured (detection off, coalescer disabled).
+///
+/// W1-C2-11: a `Mutex<Option<…>>` (not `OnceLock`) so tests can reset to a
+/// known baseline under `CONFIG_TEST_GUARD` (test-only). Production
+/// semantics are unchanged: [`configure`] is still first-wins.
+static CONFIG: Mutex<Option<ResilienceConfig>> = Mutex::new(None);
 
-/// Whether the session-scoped attribute coalescer is enabled (R2). Set once at startup.
-/// Defaults to `false` when not configured — the coalescer is opt-in.
-static COALESCE_ENABLED: OnceLock<bool> = OnceLock::new();
+#[derive(Clone, Copy)]
+struct ResilienceConfig {
+    /// Configured find-result threshold. `None` => detection off.
+    find_warn_threshold: Option<usize>,
+    /// Whether the session-scoped attribute coalescer is enabled (R2).
+    coalesce_attributes: bool,
+}
+
+/// Serializes all tests that mutate the process-global [`CONFIG`] (W1-C2-11).
+///
+/// Every configure-touching test holds this guard across its whole body:
+/// the holder's `configure` value cannot be reset mid-test by another
+/// test. An async mutex: awaiting it never blocks an executor thread, so
+/// holding it across `.await` in async tests is safe (each test runs on
+/// its own thread/runtime; sync tests use `blocking_lock`).
+#[cfg(test)]
+pub(crate) static CONFIG_TEST_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Clear [`CONFIG`] back to unconfigured (test only).
+///
+/// Call with [`CONFIG_TEST_GUARD`] held; reconfigure afterwards so tests
+/// that never call `configure` keep observing the ambient state.
+#[cfg(test)]
+pub(crate) fn reset_config_for_test() {
+    *CONFIG.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
 
 static FIND_OBJECTS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static FIND_OBJECTS_OVER_THRESHOLD_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -42,14 +70,23 @@ static ATTR_COALESCE_MISSES: AtomicU64 = AtomicU64::new(0);
 
 /// Install the configured thresholds and feature flags once at startup. First call wins.
 pub fn configure(find_result_warn_threshold: Option<usize>, coalesce_attributes: bool) {
-    let _ = FIND_WARN_THRESHOLD.set(find_result_warn_threshold);
-    let _ = COALESCE_ENABLED.set(coalesce_attributes);
+    let mut guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.is_none() {
+        *guard = Some(ResilienceConfig {
+            find_warn_threshold: find_result_warn_threshold,
+            coalesce_attributes,
+        });
+    }
 }
 
 /// Whether the session-scoped attribute coalescer is active (R2).
 /// Returns `false` when [`configure`] has not been called (safe default: no caching).
+///
+/// T28-M4: reads take the `Mutex` (not lock-free `OnceLock` reads) so tests can
+/// reset to a known baseline under `CONFIG_TEST_GUARD` while production keeps
+/// first-wins semantics; the uncontended lock cost on the data plane is negligible.
 pub fn coalesce_enabled() -> bool {
-    COALESCE_ENABLED.get().copied().unwrap_or(false)
+    CONFIG.lock().unwrap_or_else(|e| e.into_inner()).map(|c| c.coalesce_attributes).unwrap_or(false)
 }
 
 /// Record one attribute coalescer cache hit (R2). Called by the serving path.
@@ -62,8 +99,10 @@ pub fn record_attr_coalesce_miss() {
     ATTR_COALESCE_MISSES.fetch_add(1, Ordering::Relaxed);
 }
 
+/// T28-M4: same `Mutex`-per-read trade-off as [`coalesce_enabled`] (test
+/// isolation via reset under `CONFIG_TEST_GUARD`; negligible uncontended cost).
 fn threshold() -> Option<usize> {
-    FIND_WARN_THRESHOLD.get().copied().flatten()
+    CONFIG.lock().unwrap_or_else(|e| e.into_inner()).and_then(|c| c.find_warn_threshold)
 }
 
 /// Pure: is `count` strictly greater than a configured `threshold`?

@@ -37,28 +37,54 @@ pub(crate) struct Cli {
     #[arg(long, env = "PKCS11_PROXY_TLS_DOMAIN")]
     pub(crate) tls_domain: Option<String>,
 
+    /// Silence log output below ERROR level (overrides RUST_LOG).
+    #[arg(long, conflicts_with = "verbose")]
+    pub(crate) quiet: bool,
+
+    /// Enable DEBUG log output (overrides RUST_LOG).
+    #[arg(long, conflicts_with = "quiet")]
+    pub(crate) verbose: bool,
+
     #[command(subcommand)]
     pub(crate) command: Commands,
 }
 
+/// Slot selection convention (W1-C11-17): every command that operates
+/// on a slot takes `--slot-id` (no positionals), so slot-taking
+/// invocations all share one spelling.
 #[derive(Debug, Subcommand)]
 pub(crate) enum Commands {
+    /// List available slots.
     ListSlots {
+        /// Only list slots with a token present.
         #[arg(long)]
         token_present: bool,
     },
+    /// Print CK_SLOT_INFO for a slot.
     SlotInfo {
-        slot_id: u64,
-    },
-    TokenInfo {
-        slot_id: u64,
-    },
-    ListMechanisms {
-        slot_id: u64,
-    },
-    FindObjects {
+        /// Slot id (daemon-assigned virtual slot number).
         #[arg(long)]
         slot_id: u64,
+    },
+    /// Print the full CK_TOKEN_INFO for the token in a slot.
+    TokenInfo {
+        /// Slot id (daemon-assigned virtual slot number).
+        #[arg(long)]
+        slot_id: u64,
+    },
+    /// List the mechanisms a token supports (live daemon query for
+    /// the slot; contrast list-mechanism-names, the static table).
+    ListMechanisms {
+        /// Slot id (daemon-assigned virtual slot number).
+        #[arg(long)]
+        slot_id: u64,
+    },
+    /// Find objects on a slot, optionally filtered by label.
+    FindObjects {
+        /// Slot id (daemon-assigned virtual slot number).
+        #[arg(long)]
+        slot_id: u64,
+        /// User PIN (use --pin-stdin to avoid exposing it on argv).
         #[arg(
             long,
             env = "PKCS11_PROXY_PIN",
@@ -69,14 +95,19 @@ pub(crate) enum Commands {
         /// Read the user PIN from stdin instead of `--pin`.
         #[arg(long)]
         pin_stdin: bool,
+        /// Only list objects with this CKA_LABEL.
         #[arg(long)]
         label: Option<String>,
+        /// Print label/class/key-type per object (extra attribute reads).
         #[arg(long)]
         verbose: bool,
     },
+    /// Sign hex input with a labeled key; prints the hex signature.
     Sign {
+        /// Slot id (daemon-assigned virtual slot number).
         #[arg(long)]
         slot_id: u64,
+        /// User PIN (use --pin-stdin to avoid exposing it on argv).
         #[arg(
             long,
             env = "PKCS11_PROXY_PIN",
@@ -87,8 +118,10 @@ pub(crate) enum Commands {
         /// Read the user PIN from stdin instead of `--pin`.
         #[arg(long)]
         pin_stdin: bool,
+        /// CKA_LABEL of the signing key.
         #[arg(long)]
         key_label: String,
+        /// Mechanism name (e.g. SHA256_RSA_PKCS, AES_GCM), 0x<hex>, or decimal.
         #[arg(long)]
         mechanism: String,
         /// JSON mechanism parameters for AES_GCM, RSA_PKCS_OAEP and the
@@ -96,6 +129,7 @@ pub(crate) enum Commands {
         /// for GCM). Required for those mechanisms; rejected otherwise.
         #[arg(long, value_hint = clap::ValueHint::FilePath)]
         params_file: Option<PathBuf>,
+        /// Hex-encoded bytes to sign.
         #[arg(long, env = "PKCS11_PROXY_INPUT", hide_env_values = true)]
         input: Option<String>,
         /// Read the hex input from a file instead of `--input`.
@@ -105,9 +139,12 @@ pub(crate) enum Commands {
         #[arg(long)]
         input_stdin: bool,
     },
+    /// Digest hex input; prints the hex digest (no login required).
     Digest {
+        /// Slot id (daemon-assigned virtual slot number).
         #[arg(long)]
         slot_id: u64,
+        /// Mechanism name (e.g. SHA256, SHA_1), 0x<hex>, or decimal.
         #[arg(long)]
         mechanism: String,
         /// JSON mechanism parameters for AES_GCM, RSA_PKCS_OAEP and the
@@ -115,6 +152,7 @@ pub(crate) enum Commands {
         /// for GCM). Required for those mechanisms; rejected otherwise.
         #[arg(long, value_hint = clap::ValueHint::FilePath)]
         params_file: Option<PathBuf>,
+        /// Hex-encoded bytes to digest.
         #[arg(long, env = "PKCS11_PROXY_INPUT", hide_env_values = true)]
         input: Option<String>,
         /// Read the hex input from a file instead of `--input`.
@@ -124,9 +162,12 @@ pub(crate) enum Commands {
         #[arg(long)]
         input_stdin: bool,
     },
+    /// Encrypt hex input with a labeled key; prints hex ciphertext.
     Encrypt {
+        /// Slot id (daemon-assigned virtual slot number).
         #[arg(long)]
         slot_id: u64,
+        /// User PIN (use --pin-stdin to avoid exposing it on argv).
         #[arg(
             long,
             env = "PKCS11_PROXY_PIN",
@@ -137,8 +178,10 @@ pub(crate) enum Commands {
         /// Read the user PIN from stdin instead of `--pin`.
         #[arg(long)]
         pin_stdin: bool,
+        /// CKA_LABEL of the encryption key.
         #[arg(long)]
         key_label: String,
+        /// Mechanism name (e.g. AES_GCM, RSA_PKCS_OAEP), 0x<hex>, or decimal.
         #[arg(long)]
         mechanism: String,
         /// JSON mechanism parameters for AES_GCM, RSA_PKCS_OAEP and the
@@ -146,6 +189,7 @@ pub(crate) enum Commands {
         /// for GCM). Required for those mechanisms; rejected otherwise.
         #[arg(long, value_hint = clap::ValueHint::FilePath)]
         params_file: Option<PathBuf>,
+        /// Hex-encoded bytes to encrypt.
         #[arg(long, env = "PKCS11_PROXY_INPUT", hide_env_values = true)]
         input: Option<String>,
         /// Read the hex input from a file instead of `--input`.
@@ -155,9 +199,12 @@ pub(crate) enum Commands {
         #[arg(long)]
         input_stdin: bool,
     },
+    /// Decrypt hex input with a labeled key; prints hex plaintext.
     Decrypt {
+        /// Slot id (daemon-assigned virtual slot number).
         #[arg(long)]
         slot_id: u64,
+        /// User PIN (use --pin-stdin to avoid exposing it on argv).
         #[arg(
             long,
             env = "PKCS11_PROXY_PIN",
@@ -168,8 +215,10 @@ pub(crate) enum Commands {
         /// Read the user PIN from stdin instead of `--pin`.
         #[arg(long)]
         pin_stdin: bool,
+        /// CKA_LABEL of the decryption key.
         #[arg(long)]
         key_label: String,
+        /// Mechanism name (e.g. AES_GCM, RSA_PKCS_OAEP), 0x<hex>, or decimal.
         #[arg(long)]
         mechanism: String,
         /// JSON mechanism parameters for AES_GCM, RSA_PKCS_OAEP and the
@@ -177,6 +226,7 @@ pub(crate) enum Commands {
         /// for GCM). Required for those mechanisms; rejected otherwise.
         #[arg(long, value_hint = clap::ValueHint::FilePath)]
         params_file: Option<PathBuf>,
+        /// Hex-encoded bytes to decrypt.
         #[arg(long, env = "PKCS11_PROXY_INPUT", hide_env_values = true)]
         input: Option<String>,
         /// Read the hex input from a file instead of `--input`.
@@ -185,10 +235,18 @@ pub(crate) enum Commands {
         /// Read the hex input from stdin instead of `--input`.
         #[arg(long)]
         input_stdin: bool,
+        /// Redact the hex plaintext (prints a sized [redacted] marker
+        /// instead). Off by default: explicitly requested output prints;
+        /// pass --redact when stdout is captured, logged, or shared.
+        #[arg(long)]
+        redact: bool,
     },
+    /// Destroy an object by handle (irreversible).
     DestroyObject {
+        /// Slot id (daemon-assigned virtual slot number).
         #[arg(long)]
         slot_id: u64,
+        /// User PIN (use --pin-stdin to avoid exposing it on argv).
         #[arg(
             long,
             env = "PKCS11_PROXY_PIN",
@@ -196,15 +254,23 @@ pub(crate) enum Commands {
             value_parser = parse_wiping_pin
         )]
         pin: Option<SecretBytes>,
-        /// Read the user PIN from stdin instead of `--pin`.
+        /// Read the user PIN from stdin instead of `--pin` (the
+        /// destruction confirmation is prompted first).
         #[arg(long)]
         pin_stdin: bool,
+        /// Object handle (decimal, from find-objects).
         #[arg(long)]
         object_handle: u64,
+        /// Skip the interactive destruction confirmation prompt.
+        #[arg(long)]
+        force: bool,
     },
+    /// Print an object's size in bytes.
     GetObjectSize {
+        /// Slot id (daemon-assigned virtual slot number).
         #[arg(long)]
         slot_id: u64,
+        /// User PIN (use --pin-stdin to avoid exposing it on argv).
         #[arg(
             long,
             env = "PKCS11_PROXY_PIN",
@@ -215,12 +281,16 @@ pub(crate) enum Commands {
         /// Read the user PIN from stdin instead of `--pin`.
         #[arg(long)]
         pin_stdin: bool,
+        /// Object handle (decimal, from find-objects).
         #[arg(long)]
         object_handle: u64,
     },
+    /// Create a data object with a label and optional hex value.
     CreateObject {
+        /// Slot id (daemon-assigned virtual slot number).
         #[arg(long)]
         slot_id: u64,
+        /// User PIN (use --pin-stdin to avoid exposing it on argv).
         #[arg(
             long,
             env = "PKCS11_PROXY_PIN",
@@ -231,8 +301,10 @@ pub(crate) enum Commands {
         /// Read the user PIN from stdin instead of `--pin`.
         #[arg(long)]
         pin_stdin: bool,
+        /// CKA_LABEL for the new object.
         #[arg(long)]
         label: String,
+        /// Hex-encoded CKA_VALUE bytes.
         #[arg(long, env = "PKCS11_PROXY_VALUE", hide_env_values = true)]
         value: Option<String>,
         /// Read the hex value from a file instead of `--value`.
@@ -242,9 +314,12 @@ pub(crate) enum Commands {
         #[arg(long)]
         value_stdin: bool,
     },
+    /// Wrap a key; prints the hex wrapped bytes.
     WrapKey {
+        /// Slot id (daemon-assigned virtual slot number).
         #[arg(long)]
         slot_id: u64,
+        /// User PIN (use --pin-stdin to avoid exposing it on argv).
         #[arg(
             long,
             env = "PKCS11_PROXY_PIN",
@@ -255,6 +330,7 @@ pub(crate) enum Commands {
         /// Read the user PIN from stdin instead of `--pin`.
         #[arg(long)]
         pin_stdin: bool,
+        /// Mechanism name (e.g. AES_KEY_WRAP), 0x<hex>, or decimal.
         #[arg(long)]
         mechanism: String,
         /// JSON mechanism parameters for AES_GCM, RSA_PKCS_OAEP and the
@@ -262,14 +338,19 @@ pub(crate) enum Commands {
         /// for GCM). Required for those mechanisms; rejected otherwise.
         #[arg(long, value_hint = clap::ValueHint::FilePath)]
         params_file: Option<PathBuf>,
+        /// Handle of the wrapping key (decimal).
         #[arg(long)]
         wrapping_key_handle: u64,
+        /// Handle of the key to wrap (decimal).
         #[arg(long)]
         key_handle: u64,
     },
+    /// Unwrap hex wrapped bytes into a new key object.
     UnwrapKey {
+        /// Slot id (daemon-assigned virtual slot number).
         #[arg(long)]
         slot_id: u64,
+        /// User PIN (use --pin-stdin to avoid exposing it on argv).
         #[arg(
             long,
             env = "PKCS11_PROXY_PIN",
@@ -280,6 +361,7 @@ pub(crate) enum Commands {
         /// Read the user PIN from stdin instead of `--pin`.
         #[arg(long)]
         pin_stdin: bool,
+        /// Mechanism name (e.g. AES_KEY_WRAP), 0x<hex>, or decimal.
         #[arg(long)]
         mechanism: String,
         /// JSON mechanism parameters for AES_GCM, RSA_PKCS_OAEP and the
@@ -287,8 +369,10 @@ pub(crate) enum Commands {
         /// for GCM). Required for those mechanisms; rejected otherwise.
         #[arg(long, value_hint = clap::ValueHint::FilePath)]
         params_file: Option<PathBuf>,
+        /// Handle of the unwrapping key (decimal).
         #[arg(long)]
         unwrapping_key_handle: u64,
+        /// Hex-encoded wrapped key bytes.
         #[arg(long, env = "PKCS11_PROXY_WRAPPED_KEY", hide_env_values = true)]
         wrapped_key: Option<String>,
         /// Read the hex wrapped key from a file instead of `--wrapped-key`.
@@ -297,12 +381,16 @@ pub(crate) enum Commands {
         /// Read the hex wrapped key from stdin instead of `--wrapped-key`.
         #[arg(long)]
         wrapped_key_stdin: bool,
+        /// CKA_LABEL for the unwrapped key.
         #[arg(long)]
         label: Option<String>,
     },
+    /// Derive a new key from a base key.
     DeriveKey {
+        /// Slot id (daemon-assigned virtual slot number).
         #[arg(long)]
         slot_id: u64,
+        /// User PIN (use --pin-stdin to avoid exposing it on argv).
         #[arg(
             long,
             env = "PKCS11_PROXY_PIN",
@@ -313,6 +401,7 @@ pub(crate) enum Commands {
         /// Read the user PIN from stdin instead of `--pin`.
         #[arg(long)]
         pin_stdin: bool,
+        /// Mechanism name (e.g. SHA256_KEY_DERIVATION), 0x<hex>, or decimal.
         #[arg(long)]
         mechanism: String,
         /// JSON mechanism parameters for AES_GCM, RSA_PKCS_OAEP and the
@@ -320,14 +409,19 @@ pub(crate) enum Commands {
         /// for GCM). Required for those mechanisms; rejected otherwise.
         #[arg(long, value_hint = clap::ValueHint::FilePath)]
         params_file: Option<PathBuf>,
+        /// Handle of the base key (decimal).
         #[arg(long)]
         base_key_handle: u64,
+        /// CKA_LABEL for the derived key.
         #[arg(long)]
         label: Option<String>,
     },
+    /// Generate a secret key object.
     GenerateKey {
+        /// Slot id (daemon-assigned virtual slot number).
         #[arg(long)]
         slot_id: u64,
+        /// User PIN (use --pin-stdin to avoid exposing it on argv).
         #[arg(
             long,
             env = "PKCS11_PROXY_PIN",
@@ -338,6 +432,7 @@ pub(crate) enum Commands {
         /// Read the user PIN from stdin instead of `--pin`.
         #[arg(long)]
         pin_stdin: bool,
+        /// Mechanism name (e.g. AES_KEY_GEN), 0x<hex>, or decimal.
         #[arg(long)]
         mechanism: String,
         /// JSON mechanism parameters for AES_GCM, RSA_PKCS_OAEP and the
@@ -345,6 +440,7 @@ pub(crate) enum Commands {
         /// for GCM). Required for those mechanisms; rejected otherwise.
         #[arg(long, value_hint = clap::ValueHint::FilePath)]
         params_file: Option<PathBuf>,
+        /// CKA_LABEL for the new key.
         #[arg(long)]
         label: String,
         /// Key size in bits (must be a multiple of 8); sent as
@@ -352,9 +448,12 @@ pub(crate) enum Commands {
         #[arg(long)]
         key_size: Option<u64>,
     },
+    /// Generate a public/private key pair.
     GenerateKeyPair {
+        /// Slot id (daemon-assigned virtual slot number).
         #[arg(long)]
         slot_id: u64,
+        /// User PIN (use --pin-stdin to avoid exposing it on argv).
         #[arg(
             long,
             env = "PKCS11_PROXY_PIN",
@@ -365,6 +464,7 @@ pub(crate) enum Commands {
         /// Read the user PIN from stdin instead of `--pin`.
         #[arg(long)]
         pin_stdin: bool,
+        /// Mechanism name (e.g. RSA_PKCS_KEY_PAIR_GEN, EC_KEY_PAIR_GEN), 0x<hex>, or decimal.
         #[arg(long)]
         mechanism: String,
         /// JSON mechanism parameters for AES_GCM, RSA_PKCS_OAEP and the
@@ -372,6 +472,7 @@ pub(crate) enum Commands {
         /// for GCM). Required for those mechanisms; rejected otherwise.
         #[arg(long, value_hint = clap::ValueHint::FilePath)]
         params_file: Option<PathBuf>,
+        /// CKA_LABEL for the new key pair.
         #[arg(long)]
         label: String,
         /// Key size in bits for RSA (sent as CKA_MODULUS_BITS);
@@ -385,9 +486,9 @@ pub(crate) enum Commands {
         ec_params: Option<String>,
     },
     /// Probe the daemon's gRPC health endpoint. Exits 0 if SERVING,
-    /// non-zero otherwise. Use as an `exec`-based k8s readiness probe
-    /// (closes FOLLOWUP-grpc-health-probe — TCP-only probes don't
-    /// honour the daemon's backend-health gating).
+    /// 1 if NOT_SERVING, 2 if the probe itself fails. Use as an
+    /// `exec`-based k8s readiness probe (TCP-only probes don't honour
+    /// the daemon's backend-health gating).
     Health {
         /// gRPC service name to check. The daemon only flips the
         /// status of its own service when the backend-health gate
@@ -397,9 +498,12 @@ pub(crate) enum Commands {
         #[arg(long, default_value = "pkcs11_proxy_ng.v1.Pkcs11Proxy")]
         service: String,
     },
+    /// Initialize a token: set the SO PIN and label (erases token contents).
     InitToken {
+        /// Slot id (daemon-assigned virtual slot number).
         #[arg(long)]
         slot_id: u64,
+        /// Security Officer PIN to set.
         #[arg(
             long,
             env = "PKCS11_PROXY_SO_PIN",
@@ -407,12 +511,19 @@ pub(crate) enum Commands {
             value_parser = parse_wiping_pin
         )]
         so_pin: SecretBytes,
+        /// Label to assign the token.
         #[arg(long)]
         label: String,
+        /// Skip the interactive erasure confirmation prompt.
+        #[arg(long)]
+        force: bool,
     },
+    /// Initialize the user PIN (requires the SO PIN).
     InitPin {
+        /// Slot id (daemon-assigned virtual slot number).
         #[arg(long)]
         slot_id: u64,
+        /// Security Officer PIN.
         #[arg(
             long,
             env = "PKCS11_PROXY_SO_PIN",
@@ -420,6 +531,7 @@ pub(crate) enum Commands {
             value_parser = parse_wiping_pin
         )]
         so_pin: SecretBytes,
+        /// New user PIN to set.
         #[arg(
             long,
             env = "PKCS11_PROXY_NEW_PIN",
@@ -428,9 +540,12 @@ pub(crate) enum Commands {
         )]
         new_pin: SecretBytes,
     },
+    /// Seed the token RNG with hex bytes.
     SeedRandom {
+        /// Slot id (daemon-assigned virtual slot number).
         #[arg(long)]
         slot_id: u64,
+        /// User PIN (use --pin-stdin to avoid exposing it on argv).
         #[arg(
             long,
             env = "PKCS11_PROXY_PIN",
@@ -441,12 +556,16 @@ pub(crate) enum Commands {
         /// Read the user PIN from stdin instead of `--pin`.
         #[arg(long)]
         pin_stdin: bool,
+        /// Hex-encoded seed bytes.
         #[arg(long, env = "PKCS11_PROXY_SEED", hide_env_values = true)]
         seed: String,
     },
+    /// Change the user PIN (old-PIN login required).
     SetPin {
+        /// Slot id (daemon-assigned virtual slot number).
         #[arg(long)]
         slot_id: u64,
+        /// User PIN (use --pin-stdin to avoid exposing it on argv).
         #[arg(
             long,
             env = "PKCS11_PROXY_PIN",
@@ -457,6 +576,7 @@ pub(crate) enum Commands {
         /// Read the user PIN from stdin instead of `--pin`.
         #[arg(long)]
         pin_stdin: bool,
+        /// New user PIN to set.
         #[arg(
             long,
             env = "PKCS11_PROXY_NEW_PIN",
@@ -465,11 +585,17 @@ pub(crate) enum Commands {
         )]
         new_pin: SecretBytes,
     },
+    /// Print the CLI's built-in static table of known CKM_ mechanism
+    /// names and values (offline; no daemon query, no slot needed).
     ListMechanismNames,
+    /// Print CK_INFO (Cryptoki and library versions).
     GetInfo,
+    /// Open a session and print its state, flags, and device error.
     SessionInfo {
+        /// Slot id (daemon-assigned virtual slot number).
         #[arg(long)]
         slot_id: u64,
+        /// User PIN (use --pin-stdin to avoid exposing it on argv).
         #[arg(
             long,
             env = "PKCS11_PROXY_PIN",
@@ -481,9 +607,12 @@ pub(crate) enum Commands {
         #[arg(long)]
         pin_stdin: bool,
     },
+    /// Verify a hex signature over hex data (prints VALID/INVALID; exit 2 when INVALID).
     Verify {
+        /// Slot id (daemon-assigned virtual slot number).
         #[arg(long)]
         slot_id: u64,
+        /// User PIN (use --pin-stdin to avoid exposing it on argv).
         #[arg(
             long,
             env = "PKCS11_PROXY_PIN",
@@ -494,8 +623,10 @@ pub(crate) enum Commands {
         /// Read the user PIN from stdin instead of `--pin`.
         #[arg(long)]
         pin_stdin: bool,
+        /// CKA_LABEL of the verification key.
         #[arg(long)]
         key_label: String,
+        /// Mechanism name (e.g. SHA256_RSA_PKCS), 0x<hex>, or decimal.
         #[arg(long)]
         mechanism: String,
         /// JSON mechanism parameters for AES_GCM, RSA_PKCS_OAEP and the
@@ -503,6 +634,7 @@ pub(crate) enum Commands {
         /// for GCM). Required for those mechanisms; rejected otherwise.
         #[arg(long, value_hint = clap::ValueHint::FilePath)]
         params_file: Option<PathBuf>,
+        /// Hex-encoded signed data.
         #[arg(long, env = "PKCS11_PROXY_DATA", hide_env_values = true)]
         data: Option<String>,
         /// Read the hex data from a file instead of `--data`.
@@ -511,6 +643,7 @@ pub(crate) enum Commands {
         /// Read the hex data from stdin instead of `--data`.
         #[arg(long)]
         data_stdin: bool,
+        /// Hex-encoded signature bytes.
         #[arg(long, env = "PKCS11_PROXY_SIGNATURE", hide_env_values = true)]
         signature: Option<String>,
         /// Read the hex signature from a file instead of `--signature`.
@@ -520,17 +653,24 @@ pub(crate) enum Commands {
         #[arg(long)]
         signature_stdin: bool,
     },
+    /// Generate random bytes from the token RNG.
     Random {
+        /// Slot id (daemon-assigned virtual slot number).
         #[arg(long)]
         slot_id: u64,
+        /// Number of random bytes to generate.
         #[arg(long)]
         len: u32,
+        /// Output encoding: hex or base64.
         #[arg(long, default_value = "hex")]
         format: String,
     },
+    /// Read attributes of an object by handle.
     GetAttribute {
+        /// Slot id (daemon-assigned virtual slot number).
         #[arg(long)]
         slot_id: u64,
+        /// User PIN (use --pin-stdin to avoid exposing it on argv).
         #[arg(
             long,
             env = "PKCS11_PROXY_PIN",
@@ -541,14 +681,24 @@ pub(crate) enum Commands {
         /// Read the user PIN from stdin instead of `--pin`.
         #[arg(long)]
         pin_stdin: bool,
+        /// Object handle (decimal, from find-objects).
         #[arg(long)]
         object_handle: u64,
-        #[arg(long)]
+        /// Attribute to read: name (LABEL, SUBJECT, ...), 0x<hex>, or decimal id. Repeatable (at least one required).
+        #[arg(long, required = true)]
         attr: Vec<String>,
+        /// Redact key-material values ([redacted]) instead of printing
+        /// them. Off by default: explicitly requested output prints;
+        /// pass --redact when stdout is captured, logged, or shared.
+        #[arg(long)]
+        redact: bool,
     },
+    /// Import an X.509 certificate object from a file.
     ImportCertificate {
+        /// Slot id (daemon-assigned virtual slot number).
         #[arg(long)]
         slot_id: u64,
+        /// User PIN (use --pin-stdin to avoid exposing it on argv).
         #[arg(
             long,
             env = "PKCS11_PROXY_PIN",
@@ -559,8 +709,10 @@ pub(crate) enum Commands {
         /// Read the user PIN from stdin instead of `--pin`.
         #[arg(long)]
         pin_stdin: bool,
+        /// CKA_LABEL for the imported certificate.
         #[arg(long)]
         label: String,
+        /// Path to a PEM or DER X.509 certificate file.
         #[arg(long)]
         file: std::path::PathBuf,
     },
@@ -903,6 +1055,106 @@ mod tests {
         });
     }
 
+    // W1-C11-22: the health --service default must equal the
+    // daemon's SERVICE_NAME. The CLI cannot depend on the server crate
+    // at runtime, so this drift test (via the dev-dependency) pins the
+    // value instead of a shared const.
+    #[test]
+    fn health_default_service_matches_server_const() {
+        with_env_vars(&[], || {
+            let cli = Cli::try_parse_from(["pkcs11-proxy-ng-cli", "health"]).unwrap();
+            match cli.command {
+                Commands::Health { service } => assert_eq!(
+                    service,
+                    pkcs11_proxy_ng::server::health::SERVICE_NAME,
+                    "health default drifted from daemon SERVICE_NAME"
+                ),
+                _ => panic!("expected health command"),
+            }
+        });
+    }
+
+    // W1-C11-21: --quiet/--verbose exist as global flags and conflict.
+    #[test]
+    fn quiet_and_verbose_flags_parse_and_conflict() {
+        with_env_vars(&[], || {
+            let cli = Cli::try_parse_from(["pkcs11-proxy-ng-cli", "--quiet", "get-info"]).unwrap();
+            assert!(cli.quiet);
+            assert!(!cli.verbose);
+            let cli =
+                Cli::try_parse_from(["pkcs11-proxy-ng-cli", "--verbose", "get-info"]).unwrap();
+            assert!(cli.verbose);
+            assert!(!cli.quiet);
+            assert!(
+                Cli::try_parse_from(["pkcs11-proxy-ng-cli", "--quiet", "--verbose", "get-info"])
+                    .is_err(),
+                "--quiet and --verbose must conflict"
+            );
+        });
+    }
+
+    // W1-C11-26: every subcommand and arg carries help text documenting
+    // units and encodings (hex inputs, bits, bytes).
+    #[test]
+    fn every_subcommand_and_arg_has_help_text() {
+        use clap::CommandFactory;
+        fn check(cmd: &clap::Command, path: &str) {
+            for arg in cmd.get_arguments() {
+                let id = arg.get_id();
+                if id == "help" || id == "version" {
+                    continue;
+                }
+                assert!(
+                    arg.get_help().is_some() || arg.get_long_help().is_some(),
+                    "{path}: --{id} has no help text"
+                );
+            }
+            for sub in cmd.get_subcommands() {
+                let name = format!("{path} {}", sub.get_name());
+                assert!(
+                    sub.get_about().is_some() || sub.get_long_about().is_some(),
+                    "{name}: subcommand has no about text"
+                );
+                check(sub, &name);
+            }
+        }
+        check(&Cli::command(), "pkcs11-proxy-ng-cli");
+    }
+
+    // W1-C11-28: list-mechanisms (live per-slot backend query) vs
+    // list-mechanism-names (static compiled-in table) help must make
+    // the source difference obvious.
+    #[test]
+    fn mechanism_list_commands_are_disambiguated() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let live = cmd
+            .find_subcommand("list-mechanisms")
+            .expect("list-mechanisms exists")
+            .get_about()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let static_table = cmd
+            .find_subcommand("list-mechanism-names")
+            .expect("list-mechanism-names exists")
+            .get_about()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        assert!(
+            live.contains("daemon")
+                || live.contains("token")
+                || live.contains("live")
+                || live.contains("slot"),
+            "list-mechanisms help must name the live source: {live}"
+        );
+        assert!(
+            static_table.contains("static")
+                || static_table.contains("built-in")
+                || static_table.contains("compiled"),
+            "list-mechanism-names help must name the static source: {static_table}"
+        );
+    }
+
     #[test]
     fn version_flag_reports_package_version_without_requiring_command() {
         let err = match Cli::try_parse_from(["pkcs11-proxy-ng-cli", "--version"]) {
@@ -916,5 +1168,220 @@ mod tests {
             rendered.contains(env!("CARGO_PKG_VERSION")),
             "version output should include crate version: {rendered}"
         );
+    }
+
+    // W1-C11-17: slot selection is `--slot-id` on every slot command —
+    // the former slot-info/token-info/list-mechanisms positionals are gone.
+    #[test]
+    fn slot_selection_uses_long_slot_id_everywhere() {
+        with_env_vars(&[], || {
+            let cli = Cli::try_parse_from(["pkcs11-proxy-ng-cli", "slot-info", "--slot-id", "3"])
+                .unwrap();
+            assert!(matches!(cli.command, Commands::SlotInfo { slot_id: 3 }));
+            let cli = Cli::try_parse_from(["pkcs11-proxy-ng-cli", "token-info", "--slot-id", "3"])
+                .unwrap();
+            assert!(matches!(cli.command, Commands::TokenInfo { slot_id: 3 }));
+            let cli =
+                Cli::try_parse_from(["pkcs11-proxy-ng-cli", "list-mechanisms", "--slot-id", "3"])
+                    .unwrap();
+            assert!(matches!(cli.command, Commands::ListMechanisms { slot_id: 3 }));
+            for cmd in ["slot-info", "token-info", "list-mechanisms"] {
+                assert!(
+                    Cli::try_parse_from(["pkcs11-proxy-ng-cli", cmd, "3"]).is_err(),
+                    "{cmd} must not take a positional slot id"
+                );
+            }
+        });
+    }
+
+    // W1-C11-18: user-facing Health help must not leak internal tracker
+    // references.
+    #[test]
+    fn health_help_has_no_tracker_references() {
+        use clap::CommandFactory;
+        let about = Cli::command()
+            .find_subcommand("health")
+            .expect("health exists")
+            .get_about()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        assert!(
+            !about.to_lowercase().contains("followup"),
+            "health help leaks tracker text: {about}"
+        );
+    }
+
+    // W1-C11-19: Health help documents the 0/1/2 exit codes.
+    #[test]
+    fn health_help_documents_exit_codes() {
+        use clap::CommandFactory;
+        let about = Cli::command()
+            .find_subcommand("health")
+            .expect("health exists")
+            .get_about()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        assert!(
+            about.contains("Exits 0 if SERVING, 1 if NOT_SERVING, 2"),
+            "health help must document 0/1/2: {about}"
+        );
+    }
+
+    // W1-C11-27: destructive commands accept --force (default pinned
+    // once the field exists).
+    #[test]
+    fn destructive_commands_accept_force_flag() {
+        with_env_vars(&[("PKCS11_PROXY_SO_PIN", "so")], || {
+            Cli::try_parse_from([
+                "pkcs11-proxy-ng-cli",
+                "destroy-object",
+                "--slot-id",
+                "1",
+                "--object-handle",
+                "9",
+                "--force",
+            ])
+            .unwrap();
+            Cli::try_parse_from([
+                "pkcs11-proxy-ng-cli",
+                "init-token",
+                "--slot-id",
+                "1",
+                "--label",
+                "t",
+                "--force",
+            ])
+            .unwrap();
+        });
+    }
+
+    // W1-C11-31: get-attribute with zero --attr is a loud usage error,
+    // never a silent-Ok empty query.
+    #[test]
+    fn get_attribute_rejects_zero_attr() {
+        with_env_vars(&[], || {
+            let err = match Cli::try_parse_from([
+                "pkcs11-proxy-ng-cli",
+                "get-attribute",
+                "--slot-id",
+                "1",
+                "--object-handle",
+                "9",
+            ]) {
+                Ok(_) => panic!("zero --attr must fail to parse"),
+                Err(err) => err,
+            };
+            assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+            Cli::try_parse_from([
+                "pkcs11-proxy-ng-cli",
+                "get-attribute",
+                "--slot-id",
+                "1",
+                "--object-handle",
+                "9",
+                "--attr",
+                "LABEL",
+            ])
+            .unwrap();
+        });
+    }
+
+    // W1-C11-27: --force defaults off (confirmation required).
+    #[test]
+    fn force_flag_defaults_off() {
+        with_env_vars(&[("PKCS11_PROXY_SO_PIN", "so")], || {
+            let cli = Cli::try_parse_from([
+                "pkcs11-proxy-ng-cli",
+                "destroy-object",
+                "--slot-id",
+                "1",
+                "--object-handle",
+                "9",
+            ])
+            .unwrap();
+            assert!(matches!(cli.command, Commands::DestroyObject { force: false, .. }));
+            let cli = Cli::try_parse_from([
+                "pkcs11-proxy-ng-cli",
+                "init-token",
+                "--slot-id",
+                "1",
+                "--label",
+                "t",
+            ])
+            .unwrap();
+            assert!(matches!(cli.command, Commands::InitToken { force: false, .. }));
+        });
+    }
+
+    // W1-L2-12: get-attribute and decrypt accept --redact (default pinned
+    // once the field exists).
+    #[test]
+    fn secret_printing_commands_accept_redact_flag() {
+        with_env_vars(&[], || {
+            Cli::try_parse_from([
+                "pkcs11-proxy-ng-cli",
+                "get-attribute",
+                "--slot-id",
+                "1",
+                "--object-handle",
+                "9",
+                "--attr",
+                "LABEL",
+                "--redact",
+            ])
+            .unwrap();
+            Cli::try_parse_from([
+                "pkcs11-proxy-ng-cli",
+                "decrypt",
+                "--slot-id",
+                "1",
+                "--pin",
+                "x",
+                "--key-label",
+                "k",
+                "--mechanism",
+                "AES_ECB",
+                "--input",
+                "aa",
+                "--redact",
+            ])
+            .unwrap();
+        });
+    }
+
+    // W1-L2-12: --redact defaults off: explicitly requested output prints
+    // (intended UX per W2-V6); --redact opts into redaction.
+    #[test]
+    fn redact_flag_defaults_off() {
+        with_env_vars(&[], || {
+            let cli = Cli::try_parse_from([
+                "pkcs11-proxy-ng-cli",
+                "get-attribute",
+                "--slot-id",
+                "1",
+                "--object-handle",
+                "9",
+                "--attr",
+                "LABEL",
+            ])
+            .unwrap();
+            assert!(matches!(cli.command, Commands::GetAttribute { redact: false, .. }));
+            let cli = Cli::try_parse_from([
+                "pkcs11-proxy-ng-cli",
+                "decrypt",
+                "--slot-id",
+                "1",
+                "--pin",
+                "x",
+                "--key-label",
+                "k",
+                "--mechanism",
+                "AES_ECB",
+                "--input",
+                "aa",
+            ])
+            .unwrap();
+            assert!(matches!(cli.command, Commands::Decrypt { redact: false, .. }));
+        });
     }
 }

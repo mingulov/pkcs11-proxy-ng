@@ -136,6 +136,15 @@ BUNDLE="pkcs11-proxy-ng-v${release_version}-${TARGET_TRIPLE}"
 
 cleanup_dir=""
 DIST_COPY=""
+# W1-L17-14: remove the mktemp staging dir on ANY exit, not just the
+# success path — under `set -euo pipefail` a failing check above the
+# old tail cleanup leaked /tmp dirs. No-op for --prefix runs.
+cleanup_staging_dir() {
+    if [[ -n "${cleanup_dir:-}" ]]; then
+        rm -rf "$cleanup_dir"
+    fi
+}
+trap cleanup_staging_dir EXIT
 if [[ -z "$PREFIX" ]]; then
     cleanup_dir="$(mktemp -d)"
     PREFIX="$cleanup_dir/stage"
@@ -152,6 +161,11 @@ install -m 0755 "$CLI_BIN" "$STAGE/bin/pkcs11-proxy-ng-cli.exe"
 install -m 0755 "$SMOKE_BIN" "$STAGE/bin/cross_width_smoke.exe"
 install -m 0755 "$SHIM_DLL" "$STAGE/lib/pkcs11_proxy_ng_shim.dll"
 install -m 0644 README.md CHANGELOG.md LICENSE-APACHE LICENSE-MIT "$STAGE/"
+# W1-L14-24: the ZIP must be operable on its own — ship the config
+# template and the restart-on-failure supervisor the runbook (§4b)
+# requires, so Windows operators start from the bundle, not from zero.
+install -m 0644 packaging/windows/proxy.toml.template "$STAGE/proxy.toml.template"
+install -m 0644 packaging/windows/Run-Pkcs11ProxyNg.ps1 "$STAGE/Run-Pkcs11ProxyNg.ps1"
 
 ZIP_DATE="$(git log -1 --format=%cI)"
 
@@ -178,6 +192,8 @@ entries = [
     ("CHANGELOG.md", 0o644),
     ("LICENSE-APACHE", 0o644),
     ("LICENSE-MIT", 0o644),
+    ("proxy.toml.template", 0o644),
+    ("Run-Pkcs11ProxyNg.ps1", 0o644),
 ]
 
 with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
@@ -235,6 +251,8 @@ Install layout:
   $STAGE/CHANGELOG.md
   $STAGE/LICENSE-APACHE
   $STAGE/LICENSE-MIT
+  $STAGE/proxy.toml.template
+  $STAGE/Run-Pkcs11ProxyNg.ps1
 
 Bundle:
   $ZIP_PATH
@@ -243,7 +261,3 @@ EOF
 
 ls -la "$(dirname "$ZIP_PATH")"
 cat "$SUMS_PATH"
-
-if [[ -n "$cleanup_dir" ]]; then
-    rm -rf "$cleanup_dir"
-fi

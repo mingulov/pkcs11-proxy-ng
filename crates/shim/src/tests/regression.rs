@@ -58,7 +58,7 @@ fn regression_nested_template_lengths_rescale_by_stride() {
     // on an LP64 client.
     assert_eq!(bridge_template_output_len(32, 16, 24), 48);
     // The LLP64 stride is not derivable from the ulong width.
-    assert_ne!(16, 3 * 4 as usize);
+    assert_ne!(16, 3 * 4_usize);
 }
 
 /// cfd5d06: the salsa20/chacha/gcm bits-derived length guards were dead on

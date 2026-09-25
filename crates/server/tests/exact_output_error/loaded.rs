@@ -186,6 +186,14 @@ impl Drop for Harness {
     }
 }
 
+/// Drive the loaded shim's `*Init` entry points for one byte-call slot.
+///
+/// # Safety
+///
+/// `functions` must be the live loaded-shim function list with every
+/// `*Init` entry point selected by `index` non-null; `session`/`key` must
+/// be a live session and key usable for those inits. The caller must hold
+/// the test-global `LOCK`, serializing against harness teardown.
 unsafe fn prepare_byte(
     functions: &CK_FUNCTION_LIST_3_2,
     session: CK_SESSION_HANDLE,
@@ -219,6 +227,15 @@ unsafe fn prepare_byte(
         unsafe { assert_eq!(functions.C_DigestInit.unwrap()(session, &mut mechanism), CKR_OK) };
     }
 }
+
+/// Dispatch one byte-call entry point through the loaded shim.
+///
+/// # Safety
+///
+/// Same loaded-shim/session/key/`LOCK` contract as `prepare_byte`, plus
+/// the called entry point's output contract: `length` must be non-null
+/// and writable, and when `out` is non-null it must be writable for the
+/// `*length` capacity.
 unsafe fn byte_call(
     functions: &CK_FUNCTION_LIST_3_2,
     session: CK_SESSION_HANDLE,

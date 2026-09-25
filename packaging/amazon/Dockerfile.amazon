@@ -10,8 +10,12 @@
 #   RUN --mount=type=bind,from=pkcs11ng,source=/rpm,target=/rpm \
 #       dnf install -y /rpm/pkcs11-proxy-ng-shim-*.rpm
 
-ARG AMAZON_VER=2023
-ARG AMAZON_BUILD_IMAGE=amazonlinux:${AMAZON_VER}
+# Deferred T22 F6: base pinned by digest (tag kept for readability; the
+# digest is what Docker pulls; resolved live 2026-09-22). CI passes the
+# same image explicitly (.gitlab-ci.yml); local builds override with
+# --build-arg AMAZON_BUILD_IMAGE=<pinned image>. Re-pin with the
+# registry's current digest when moving Amazon Linux versions.
+ARG AMAZON_BUILD_IMAGE=amazonlinux:2023@sha256:74c545e3e04db388b00bd31d7cc5640d4e9c12058a6d72af938d113da3c82893
 ARG READY_IMAGE=scratch
 ARG APP_VERSION=0.2.0
 ARG BUILD_DATE=unknown
@@ -20,6 +24,15 @@ ARG GIT_COMMIT=unknown
 # ─── Stage 1: build RPMs using rustup-managed Rust toolchain ──────────────────
 
 FROM ${AMAZON_BUILD_IMAGE} AS buildrpm
+
+# Deferred T22 F6: versioned rustup bootstrap (not the floating
+# install pipe) installing the receipted toolchain, with the init
+# binary's SHA256 verified before execute. Hashes below are the
+# published static.rust-lang.org rustup-init.sha256 values for 1.29.1.
+ARG RUSTUP_VERSION=1.29.1
+ARG RUST_TOOLCHAIN=1.98.1
+ARG RUSTUP_SHA256_AMD64=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
+ARG RUSTUP_SHA256_ARM64=15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433
 
 ARG APP_VERSION
 
@@ -38,8 +51,19 @@ RUN <<EOF
   # dependency MSRV (libloading 0.9, time 0.3.47 require 1.88+). The
   # design's "use stock Rust" preference yields to "AL2023 must be in
   # Phase 1" — see doc/audit/r1-implementation.md for the deviation.
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-      sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path
+  # The toolchain version is pinned (RUST_TOOLCHAIN) and the rustup-init
+  # binary is SHA-verified (RUSTUP_VERSION + RUSTUP_SHA256_*).
+  ARCH="$(uname -m)"
+  case "$ARCH" in
+    x86_64)  RUST_TRIPLE=x86_64-unknown-linux-gnu;  RUSTUP_SHA256="${RUSTUP_SHA256_AMD64}" ;;
+    aarch64) RUST_TRIPLE=aarch64-unknown-linux-gnu; RUSTUP_SHA256="${RUSTUP_SHA256_ARM64}" ;;
+    *) echo "unsupported arch $ARCH" >&2; exit 1 ;;
+  esac
+  curl --proto '=https' --tlsv1.2 -sSf "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${RUST_TRIPLE}/rustup-init" -o /tmp/rustup-init
+  echo "${RUSTUP_SHA256}  /tmp/rustup-init" | sha256sum -c -
+  chmod +x /tmp/rustup-init
+  /tmp/rustup-init -y --default-toolchain "${RUST_TOOLCHAIN}" --profile minimal --no-modify-path
+  rm /tmp/rustup-init
   . "$HOME/.cargo/env"
   rpmdev-setuptree
   mkdir -p /rpm

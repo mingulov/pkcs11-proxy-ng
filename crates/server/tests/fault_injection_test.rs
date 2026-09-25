@@ -20,7 +20,7 @@ async fn mock_daemon(backend: Arc<MockBackend>) -> (String, tokio::sync::watch::
     mock_daemon_with_lease(backend, Duration::from_secs(300), Duration::from_millis(100)).await
 }
 
-const CKF_SERIAL: CkSessionFlags = CkSessionFlags(CkSessionFlags::SERIAL_SESSION);
+const CKF_SERIAL: CkSessionFlags = CkSessionFlags::SERIAL_SESSION;
 
 // ────────────────────────────────────────────────────────────────────
 // Backend error injection tests
@@ -165,7 +165,7 @@ async fn session_lifecycle_sequence_covers_login_logout_finalize_and_reinitializ
     let mut client = init_client(&endpoint).await;
 
     let slots = client.get_slot_list(false).await.unwrap();
-    let rw_flags = CkSessionFlags(CkSessionFlags::SERIAL_SESSION | CkSessionFlags::RW_SESSION);
+    let rw_flags = CkSessionFlags::SERIAL_SESSION | CkSessionFlags::RW_SESSION;
 
     let session = client.open_session(slots[0], rw_flags).await.unwrap();
     let info = client.get_session_info(session).await.unwrap();

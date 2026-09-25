@@ -31,13 +31,14 @@ impl FfiBackend {
         let h_public_key = Self::object_handle(public_key)?;
         let mut key_handle: cryptoki_sys::CK_OBJECT_HANDLE = 0;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let ck_attr_len = Self::ffi_attr_len(&ffi_attrs)?;
         let output = Self::single_call_bytes_exact(&admission, spec, |buffer, length| unsafe {
             function(
                 h_session,
                 ffi_mech.ck_mechanism_mut(),
                 h_public_key,
                 Self::ffi_attr_ptr(&ffi_attrs),
-                Self::ffi_attr_len(&ffi_attrs),
+                ck_attr_len,
                 buffer,
                 length,
                 &mut key_handle,
@@ -77,13 +78,14 @@ impl FfiBackend {
         // (pure, evaluated once instead of twice with identical outcome).
         let mut ciphertext_len: cryptoki_sys::CK_ULONG = 0;
         let mut key_handle: cryptoki_sys::CK_OBJECT_HANDLE = 0;
+        let ck_attr_len = Self::ffi_attr_len(&ffi_attrs)?;
         Self::call_unit(&admission, Some(function), |function| unsafe {
             function(
                 h_session,
                 ffi_mech.ck_mechanism_mut(),
                 h_pubkey,
                 Self::ffi_attr_ptr(&ffi_attrs),
-                Self::ffi_attr_len(&ffi_attrs),
+                ck_attr_len,
                 std::ptr::null_mut(),
                 &mut ciphertext_len,
                 &mut key_handle,
@@ -100,7 +102,7 @@ impl FfiBackend {
                 ffi_mech.ck_mechanism_mut(),
                 h_pubkey,
                 Self::ffi_attr_ptr(&ffi_attrs),
-                Self::ffi_attr_len(&ffi_attrs),
+                ck_attr_len,
                 ciphertext.as_mut_ptr(),
                 &mut ciphertext_len,
                 &mut key_handle,
@@ -137,9 +139,9 @@ impl FfiBackend {
             ffi_mech.ck_mechanism_mut(),
             Self::object_handle(private_key)?,
             Self::ffi_attr_ptr(&ffi_attrs),
-            Self::ffi_attr_len(&ffi_attrs),
+            Self::ffi_attr_len(&ffi_attrs)?,
             ct_ptr as *mut cryptoki_sys::CK_BYTE,
-            Self::ulong_len_u64(ct_len),
+            Self::ulong_len_u64(ct_len)?,
             &mut key_handle
         )?;
 

@@ -15,7 +15,7 @@ use pkcs11_proxy_ng_types::*;
 mod common_3x;
 use common_3x::{init_client, mock, mock_daemon};
 
-const CKF_SERIAL: CkSessionFlags = CkSessionFlags(CkSessionFlags::SERIAL_SESSION);
+const CKF_SERIAL: CkSessionFlags = CkSessionFlags::SERIAL_SESSION;
 
 // ────────────────────────────────────────────────────────────────────
 // LoginUser round-trip
@@ -133,7 +133,7 @@ async fn session_cancel_with_flags() {
     let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
 
     // Non-zero flags should propagate correctly.
-    client.session_cancel(session, CkFlags(0x0000_0001)).await.unwrap();
+    client.session_cancel(session, CkFlags::DONT_BLOCK).await.unwrap();
 }
 
 // ────────────────────────────────────────────────────────────────────
