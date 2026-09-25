@@ -23,7 +23,7 @@ pub unsafe extern "C" fn c_init_token(
             let raw = unsafe { read_input_slice(p_label, 32) };
             String::from_utf8_lossy(raw).trim_end().to_string()
         };
-        match with_client!(client => client.init_token(CkSlotId(slot_id), so_pin, &label)) {
+        match with_client!(client => client.init_token(CkSlotId(slot_id as u64), so_pin, &label)) {
             Ok(()) => rv_ok(),
             Err(e) => rv_err(e),
         }
@@ -41,7 +41,7 @@ pub unsafe extern "C" fn c_init_pin(
         } else {
             Some(unsafe { read_input_slice(p_pin, ul_pin_len) })
         };
-        match with_client!(client => client.init_pin(CkSessionHandle(h_session), pin)) {
+        match with_client!(client => client.init_pin(CkSessionHandle(h_session as u64), pin)) {
             Ok(()) => rv_ok(),
             Err(e) => rv_err(e),
         }
@@ -66,7 +66,8 @@ pub unsafe extern "C" fn c_set_pin(
         } else {
             Some(unsafe { read_input_slice(p_new_pin, ul_new_len) })
         };
-        match with_client!(client => client.set_pin(CkSessionHandle(h_session), old_pin, new_pin)) {
+        match with_client!(client => client.set_pin(CkSessionHandle(h_session as u64), old_pin, new_pin))
+        {
             Ok(()) => rv_ok(),
             Err(e) => rv_err(e),
         }

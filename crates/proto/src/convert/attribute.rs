@@ -13,6 +13,11 @@ impl From<&CkAttribute> for v1_proto::Attribute {
             Some(CkAttributeValue::String(s)) => {
                 Some(v1_proto::attribute::Value::StringValue(s.clone()))
             }
+            Some(CkAttributeValue::NestedTemplate(subs)) => {
+                Some(v1_proto::attribute::Value::NestedTemplate(v1_proto::NestedAttributes {
+                    attributes: subs.iter().map(v1_proto::Attribute::from).collect(),
+                }))
+            }
         };
         v1_proto::Attribute { attr_type: a.attr_type.0, value }
     }
@@ -31,6 +36,23 @@ impl TryFrom<&v1_proto::Attribute> for CkAttribute {
             }
             Some(v1_proto::attribute::Value::StringValue(s)) => {
                 Some(CkAttributeValue::String(s.clone()))
+            }
+            Some(v1_proto::attribute::Value::NestedTemplate(nested)) => {
+                // D8: one level of nesting. A sub-attribute carrying another
+                // nested template is refused at the deserialization edge so
+                // neither the daemon nor the backend ever sees deeper trees.
+                let subs: Vec<CkAttribute> = nested
+                    .attributes
+                    .iter()
+                    .map(CkAttribute::try_from)
+                    .collect::<Result<_, _>>()?;
+                if subs
+                    .iter()
+                    .any(|sub| matches!(sub.value, Some(CkAttributeValue::NestedTemplate(_))))
+                {
+                    return Err(CkRv::ATTRIBUTE_VALUE_INVALID);
+                }
+                Some(CkAttributeValue::NestedTemplate(subs))
             }
         };
         Ok(CkAttribute { attr_type: CkAttributeType(a.attr_type), value })
@@ -130,6 +152,41 @@ mod tests {
         let back = CkAttribute::try_from(&proto).unwrap();
         assert_eq!(back.attr_type, original.attr_type);
         assert!(back.value.is_none());
+    }
+
+    #[test]
+    fn attribute_nested_template_round_trip() {
+        let original = CkAttribute {
+            attr_type: CkAttributeType::WRAP_TEMPLATE,
+            value: Some(CkAttributeValue::NestedTemplate(vec![
+                CkAttribute {
+                    attr_type: CkAttributeType::CLASS,
+                    value: Some(CkAttributeValue::Ulong(4)),
+                },
+                CkAttribute {
+                    attr_type: CkAttributeType::EXTRACTABLE,
+                    value: Some(CkAttributeValue::Bool(false)),
+                },
+            ])),
+        };
+        let proto: v1_proto::Attribute = (&original).into();
+        let back = CkAttribute::try_from(&proto).unwrap();
+        assert_eq!(back.value, original.value);
+    }
+
+    #[test]
+    fn attribute_nested_template_depth_two_is_refused() {
+        // D8: sub-attributes must not themselves be templates.
+        let inner = CkAttribute {
+            attr_type: CkAttributeType::WRAP_TEMPLATE,
+            value: Some(CkAttributeValue::NestedTemplate(vec![])),
+        };
+        let outer = CkAttribute {
+            attr_type: CkAttributeType::WRAP_TEMPLATE,
+            value: Some(CkAttributeValue::NestedTemplate(vec![inner])),
+        };
+        let proto: v1_proto::Attribute = (&outer).into();
+        assert_eq!(CkAttribute::try_from(&proto).unwrap_err(), CkRv::ATTRIBUTE_VALUE_INVALID);
     }
 
     #[test]

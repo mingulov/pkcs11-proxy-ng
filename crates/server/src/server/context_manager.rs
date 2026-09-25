@@ -551,7 +551,7 @@ impl ContextManager {
         let backend = backend.clone();
         let _ = tokio::task::spawn_blocking(move || {
             for handle in backend_sessions {
-                let _ = backend.close_session(CkSessionHandle(handle));
+                let _ = backend.close_session(CkSessionHandle(handle as u64));
             }
         })
         .await;

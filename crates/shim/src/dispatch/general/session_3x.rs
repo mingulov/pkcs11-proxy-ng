@@ -18,14 +18,14 @@ pub unsafe extern "C" fn c_login_user(
     ul_username_len: CK_ULONG,
 ) -> CK_RV {
     catch_panics(|| {
-        let ut = match CkUserType::from_raw(user_type) {
+        let ut = match CkUserType::from_raw(user_type.into()) {
             Some(ut) => ut,
             None => return rv_err(CkRv::USER_TYPE_INVALID),
         };
         let pin = unsafe { read_input_slice(p_pin, ul_pin_len) };
         let username = unsafe { read_input_slice(p_username, ul_username_len) };
         unit_result_to_rv(
-            with_client!(client => client.login_user(CkSessionHandle(h_session), ut, username, pin)),
+            with_client!(client => client.login_user(CkSessionHandle(h_session as u64), ut, username, pin)),
         )
     })
 }
@@ -33,7 +33,7 @@ pub unsafe extern "C" fn c_login_user(
 pub unsafe extern "C" fn c_session_cancel(h_session: CK_SESSION_HANDLE, flags: CK_FLAGS) -> CK_RV {
     catch_panics(|| {
         unit_result_to_rv(
-            with_client!(client => client.session_cancel(CkSessionHandle(h_session), CkFlags(flags))),
+            with_client!(client => client.session_cancel(CkSessionHandle(h_session as u64), CkFlags(flags as u64))),
         )
     })
 }
@@ -48,10 +48,12 @@ pub unsafe extern "C" fn c_get_session_validation_flags(
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
         match with_client!(client => client.get_session_validation_flags(
-            CkSessionHandle(h_session), flags_type
+            CkSessionHandle(h_session as u64), flags_type.into()
         )) {
             Ok(flags) => {
-                unsafe { *p_flags = flags };
+                // CK_FLAGS is u32 on narrow-CK_ULONG targets; flags are 32-bit
+                // bitmasks per spec, so the wire u64 narrows losslessly.
+                unsafe { *p_flags = flags as CK_FLAGS };
                 rv_ok()
             }
             Err(e) => rv_err(e),

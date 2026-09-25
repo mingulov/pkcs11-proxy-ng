@@ -133,3 +133,109 @@ jobs:
           cargo build --workspace
           cargo test --workspace
           cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  # ── Live cross-width topology matrix ─────────────────────────────────────
+  # Runs the real-binary width harness (ADR-0011): daemons + SoftHSM2 over
+  # localhost TCP. The runner gets both the 64-bit SoftHSM2 package and the
+  # extracted i386 library, so all four Linux legs run (32c/64b, 64/64,
+  # 64c/32b reverse bridge + D4, 32/32). The wine smokes skip cleanly here
+  # (no wine image on the runner) and remain host-run scripts.
+  cross-width-live:
+    name: Live cross-width matrix (SoftHSM2)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y protobuf-compiler softhsm2 \
+            gcc-multilib libc6-dev-i386
+          # The i386 SoftHSM2 library conflicts with the amd64 package on
+          # the compat symlink; extract it beside the system instead.
+          sudo dpkg --add-architecture i386
+          sudo apt-get update -qq
+          apt-get download libsofthsm2:i386
+          sudo mkdir -p /opt/softhsm2-i386
+          sudo dpkg -x libsofthsm2_*i386.deb /opt/softhsm2-i386/
+
+      - name: Install stable toolchain with i686 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-unknown-linux-gnu
+
+      - name: Run live tier
+        run: scripts/run-test-tiers.sh live
+
+  # ── Coverage report ───────────────────────────────────────────────────────
+  # Report-only (no hard threshold yet): measures line coverage across the
+  # workspace lib suites and uploads the lcov + summary as artifacts so
+  # coverage drift is visible run to run.
+  coverage:
+    name: Coverage (cargo-llvm-cov)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Install stable toolchain with llvm-tools
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: cargo llvm-cov (workspace)
+        run: |
+          cargo llvm-cov --workspace --lcov --output-path lcov.info
+          cargo llvm-cov report --summary-only | tee coverage-summary.txt
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: |
+            lcov.info
+            coverage-summary.txt
+
+  # ── Miri (undefined-behavior interpreter) ─────────────────────────────────
+  # Runs the pure width/translation logic and the shim's unsafe parse paths
+  # (mechanism/message param readers, template input parsing) under Miri.
+  # Tests that need real time/FFI are already `cfg_attr(miri, ignore)`d.
+  miri:
+    name: Miri (types + shim parse paths)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Install nightly toolchain with miri
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      # Scope notes (measured 2026-07-04): the FULL types suite takes ~2.5 h
+      # under Miri (TOML/serde interpretation dominates) and its registry
+      # tests use real fs (cfg_attr(miri, ignore)). The width/attribute
+      # modules are the UB-relevant pure logic. On the shim, the daemon-based
+      # tests:: modules need real sockets and are compiled out under Miri
+      # (lib.rs cfg); the raw-pointer parse paths below are the point.
+      - name: cargo miri test (width/attribute logic + shim parse paths)
+        run: |
+          cargo +nightly miri test -p pkcs11-proxy-ng-types -- width attribute
+          cargo +nightly miri test -p pkcs11-proxy-ng-shim --lib -- \
+            dispatch::general::width_bridge \
+            dispatch::general::helpers::nested_template_input \
+            not_wild_read

@@ -25,6 +25,44 @@ daemon↔backend boundary, not on the wire to the client.
 
 ---
 
+## Amendment (2026-06-29): narrow-`CK_ULONG` bridging & the three ABIs → see ADR-0011
+
+This ADR's original analysis modelled two ABIs on a single axis (LP64 vs ILP32,
+where pointer width and `CK_ULONG` width move *together*). That is incomplete:
+**Windows x64 is LLP64** — `CK_ULONG` is 32-bit while pointers are 64-bit and
+structs are `pack(1)` — so **`CK_ULONG` width is independent of pointer width**.
+
+[ADR-0011](./ADR-0011-narrow-ck-ulong-client-width-bridging.md) supersedes the
+"NOT SUPPORTED" rows of the matrix below for the **bridged** cases. Key results:
+
+- The gRPC wire is width-agnostic (`u64`); the only properties that cross the
+  wire are each edge's **`CK_ULONG` width + byte order**. **Pointer width and
+  struct packing are purely local** to each edge (handled by `cryptoki-sys`
+  per-target bindings), so they never reach the wire.
+- A width bridge translates `CK_ULONG`-semantic *attribute values* (the only
+  outputs carried as raw native-width bytes) to the destination width — **both
+  directions** — with checked narrowing and explicit sentinel handling. The
+  narrowing/reject edge moves with direction (client-output for a narrow client;
+  server-*input* for a narrow backend). Handles remain virtualised (per ADR-0002).
+- Three ABIs (LP64 / ILP32 / **LLP64**) may appear on **either** edge; one bridge
+  covers all combinations. A 32-bit-`CK_ULONG` **server** is therefore possible —
+  notably a **Windows x64 (LLP64) server** proxying a Windows-only PKCS#11 `.dll`.
+
+**Updated support intent** (still beta-gated on the standard x86_64 Linux build):
+
+| Topology | Status |
+|---|---|
+| 64-bit client ↔ 64-bit Linux server/backend | Supported (beta) |
+| **32-bit-`CK_ULONG` client** (i686, armv7, Windows x64) ↔ 64-bit server | **Designed (ADR-0011); the narrow-client shipping track** |
+| 64-bit client ↔ **32-bit-`CK_ULONG` server/backend** (i686 or **Windows x64/LLP64**) | **Designed; deployment-gated** on a 32-bit/Windows server port |
+| mixed / big-endian | Out of scope — detected & refused at probe (D6) |
+
+The `CK_UNAVAILABLE_INFORMATION` sentinel analysis below remains the reference for
+*why* widths matter; ADR-0011 specifies the bidirectional handling (narrow = free
+truncation; widen = explicit all-ones mapping).
+
+---
+
 ## Context
 
 The pkcs11-proxy-ng project implements PKCS#11 remote proxying over gRPC. PKCS#11 uses platform-dependent types:

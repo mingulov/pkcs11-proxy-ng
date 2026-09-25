@@ -75,7 +75,7 @@ impl MockBackend {
         Ok(CkSlotInfo {
             slot_description: format!("Mock Slot {}", slot_id.0),
             manufacturer_id: "Mock".into(),
-            flags: CkSlotFlags(flags),
+            flags: CkSlotFlags(flags as u64),
             hardware_version: (1, 0),
             firmware_version: (1, 0),
         })
@@ -144,7 +144,7 @@ impl MockBackend {
         if self.max_sessions > 0 && state.open_sessions.len() as u64 >= self.max_sessions {
             return Err(CkRv::SESSION_COUNT);
         }
-        let handle = CkSessionHandle(state.next_session);
+        let handle = CkSessionHandle(state.next_session as u64);
         state.next_session += 1;
         state.open_sessions.push((handle, slot_id, flags));
         Ok(handle)

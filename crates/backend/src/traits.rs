@@ -24,6 +24,26 @@ impl CkDeriveKeyOutputResult {
 /// All methods are synchronous — the daemon bridges to async at the gRPC layer
 /// via tokio::task::spawn_blocking.
 pub trait Pkcs11Backend: Send + Sync {
+    /// The backend's native `sizeof(CK_ULONG)` for the D2 advertisement
+    /// (ADR-0011). The FFI backend runs in this process, so the host
+    /// values are correct defaults; emulating backends override.
+    fn abi_ulong_size(&self) -> u32 {
+        crate::host_abi::host_ulong_size()
+    }
+
+    /// The backend's `CK_ULONG` byte order for the wire: 1 = little-endian,
+    /// 2 = big-endian (D6).
+    fn abi_byte_order(&self) -> u32 {
+        crate::host_abi::host_byte_order()
+    }
+
+    /// The backend's native `sizeof(CK_ATTRIBUTE)` — the stride of nested
+    /// `CKA_*_TEMPLATE` byte lengths on the wire (D2 extension; on LLP64
+    /// the packed stride is not derivable from the ulong width).
+    fn abi_attribute_stride(&self) -> u32 {
+        std::mem::size_of::<cryptoki_sys::CK_ATTRIBUTE>() as u32
+    }
+
     fn initialize(&self) -> CkResult<()>;
     fn finalize(&self) -> CkResult<()>;
     fn get_info(&self) -> CkResult<CkInfo>;

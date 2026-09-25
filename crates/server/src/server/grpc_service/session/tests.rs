@@ -224,7 +224,7 @@ async fn login_state_is_logical_client_scoped_when_backend_is_already_logged_in(
         .await
         .unwrap()
         .unwrap();
-    let info = backend.get_session_info(CkSessionHandle(backend_session_a.0)).unwrap();
+    let info = backend.get_session_info(CkSessionHandle(backend_session_a.0 as u64)).unwrap();
     assert_eq!(
         info.state,
         CkSessionState::RwUser,
@@ -355,7 +355,7 @@ async fn failed_physical_logout_preserves_logical_login_state() {
         .await
         .unwrap()
         .unwrap();
-    mock.close_session(CkSessionHandle(backend_session.0)).unwrap();
+    mock.close_session(CkSessionHandle(backend_session.0 as u64)).unwrap();
 
     assert_eq!(
         logout_response(&ctx_mgr, &backend, &ctx_id, session).await,

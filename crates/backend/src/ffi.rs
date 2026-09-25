@@ -12,7 +12,7 @@ mod authenticated_wrap_ops;
 mod call_helpers;
 #[path = "ffi/crypto_ops.rs"]
 mod crypto_ops;
-#[path = "ffi/ffi_conversion.rs"]
+#[path = "ffi/ffi_conversion/mod.rs"]
 mod ffi_conversion;
 #[path = "ffi/function_field_tables.rs"]
 mod function_field_tables;
@@ -1431,7 +1431,7 @@ mod tests {
             backend
                 .mech_cache
                 .insert(session, ffi_conversion::mechanism_to_ffi(&mechanism).unwrap());
-            backend.remember_session_slot(CkSessionHandle(session), CkSlotId(slot));
+            backend.remember_session_slot(CkSessionHandle(session as u64), CkSlotId(slot as u64));
         }
 
         backend.drop_mech_cache_for_slot(CkSlotId(11));

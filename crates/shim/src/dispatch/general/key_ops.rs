@@ -24,13 +24,13 @@ pub unsafe extern "C" fn c_wrap_key(
         let mech = unsafe { read_wrap_key_mechanism(p_mechanism) };
         let spec = unsafe { output_buffer_spec(p_wrapped_key, pul_wrapped_key_len) };
         let result = with_client!(client => client.byte_output_exact_with_mechanism_out(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             ByteOutputFunction::WrapKey,
             &spec,
             CkInBuf::Bytes(&[]),
             Some(&mech),
-            h_wrapping_key,
-            h_key,
+            h_wrapping_key.into(),
+            h_key.into(),
         ));
         match result {
             Ok((r, mechanism_out)) => {
@@ -81,9 +81,9 @@ pub unsafe extern "C" fn c_unwrap_key(
             Err(e) => return rv_err(e),
         };
         match with_client!(client => client.unwrap_key(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             &mech,
-            CkObjectHandle(h_unwrapping_key),
+            CkObjectHandle(h_unwrapping_key as u64),
             wrapped_key,
             &template,
         )) {
@@ -125,9 +125,9 @@ pub unsafe extern "C" fn c_derive_key(
         }
         let mech = unsafe { read_mechanism(p_mechanism) };
         match with_client!(client => client.derive_key_with_mechanism_out_result(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             &mech,
-            CkObjectHandle(h_base_key),
+            CkObjectHandle(h_base_key as u64),
             &template,
         )) {
             Ok(result) => {
@@ -180,7 +180,7 @@ pub unsafe extern "C" fn c_generate_key(
         }
         let mech = unsafe { read_mechanism(p_mechanism) };
         match with_client!(client => client.generate_key_with_mechanism_out(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             &mech,
             &template,
         )) {
@@ -232,7 +232,7 @@ pub unsafe extern "C" fn c_generate_key_pair(
         }
         let mech = unsafe { read_mechanism(p_mechanism) };
         match with_client!(client => client.generate_key_pair(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             &mech,
             &pub_tmpl,
             &priv_tmpl,
@@ -264,7 +264,7 @@ pub unsafe extern "C" fn c_seed_random(
             Err(e) => return rv_err(e),
         };
         unit_result_to_rv(
-            with_client!(client => client.seed_random(CkSessionHandle(h_session), seed)),
+            with_client!(client => client.seed_random(CkSessionHandle(h_session as u64), seed)),
         )
     })
 }
@@ -278,7 +278,7 @@ pub unsafe extern "C" fn c_generate_random(
         if p_random_data.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
-        match with_client!(client => client.generate_random(CkSessionHandle(h_session), ul_random_len as u32))
+        match with_client!(client => client.generate_random(CkSessionHandle(h_session as u64), ul_random_len as u32))
         {
             Ok(data) => {
                 if data.len() != ul_random_len as usize {

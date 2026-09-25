@@ -59,6 +59,9 @@ pub(super) async fn get_backend_interfaces(
             return Ok(Response::new(pkcs11_proxy_ng_proto::GetBackendInterfacesResponse {
                 interfaces: vec![],
                 mechanism_registry: Some((*registry_payload).clone()),
+                backend_ulong_size: Some(backend.abi_ulong_size()),
+                backend_byte_order: Some(backend.abi_byte_order()),
+                backend_attribute_stride: Some(backend.abi_attribute_stride()),
             }));
         }
     };
@@ -76,5 +79,8 @@ pub(super) async fn get_backend_interfaces(
     Ok(Response::new(pkcs11_proxy_ng_proto::GetBackendInterfacesResponse {
         interfaces,
         mechanism_registry: Some((*registry_payload).clone()),
+        backend_ulong_size: Some(backend.abi_ulong_size()),
+        backend_byte_order: Some(backend.abi_byte_order()),
+        backend_attribute_stride: Some(backend.abi_attribute_stride()),
     }))
 }

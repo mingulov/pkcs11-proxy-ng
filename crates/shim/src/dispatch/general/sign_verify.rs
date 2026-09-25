@@ -14,7 +14,7 @@ pub unsafe extern "C" fn c_sign_init(
     catch_panics(|| {
         if p_mechanism.is_null() {
             let result =
-                with_client!(client => client.sign_init_cancel(CkSessionHandle(h_session)));
+                with_client!(client => client.sign_init_cancel(CkSessionHandle(h_session as u64)));
             if result.is_ok() {
                 state::clear_sign_output_caches(h_session);
                 state::clear_operation_state_cache(h_session);
@@ -27,9 +27,9 @@ pub unsafe extern "C" fn c_sign_init(
         }
         let mech = unsafe { read_mechanism(p_mechanism) };
         let result = with_client!(client => client.sign_init(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             &mech,
-            CkObjectHandle(h_key),
+            CkObjectHandle(h_key as u64),
         ));
         if result.is_ok() {
             state::clear_sign_output_caches(h_session);
@@ -56,7 +56,7 @@ pub unsafe extern "C" fn c_sign(
         };
         let spec = unsafe { output_buffer_spec(p_signature, pul_signature_len) };
         let result = with_client!(client => client.byte_output_exact(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             ByteOutputFunction::Sign,
             &spec,
             data,
@@ -82,7 +82,7 @@ pub unsafe extern "C" fn c_sign_update(
             Err(e) => return rv_err(e),
         };
         unit_result_to_rv(
-            with_client!(client => client.sign_update(CkSessionHandle(h_session), part)),
+            with_client!(client => client.sign_update(CkSessionHandle(h_session as u64), part)),
         )
     })
 }
@@ -98,7 +98,7 @@ pub unsafe extern "C" fn c_sign_final(
         }
         let spec = unsafe { output_buffer_spec(p_signature, pul_signature_len) };
         let result = with_client!(client => client.byte_output_exact(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             ByteOutputFunction::SignFinal,
             &spec,
             CkInBuf::Bytes(&[]),
@@ -124,8 +124,7 @@ pub unsafe extern "C" fn c_verify_init(
 ) -> CK_RV {
     catch_panics(|| {
         if p_mechanism.is_null() {
-            let result =
-                with_client!(client => client.verify_init_cancel(CkSessionHandle(h_session)));
+            let result = with_client!(client => client.verify_init_cancel(CkSessionHandle(h_session as u64)));
             if result.is_ok() {
                 state::clear_operation_state_cache(h_session);
             }
@@ -137,9 +136,9 @@ pub unsafe extern "C" fn c_verify_init(
         }
         let mech = unsafe { read_mechanism(p_mechanism) };
         unit_result_to_rv(with_client!(client => client.verify_init(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             &mech,
-            CkObjectHandle(h_key),
+            CkObjectHandle(h_key as u64),
         )))
     })
 }
@@ -163,7 +162,7 @@ pub unsafe extern "C" fn c_verify(
             Err(e) => return rv_err(e),
         };
         unit_result_to_rv(with_client!(client => client.verify(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             data,
             signature,
         )))
@@ -181,7 +180,7 @@ pub unsafe extern "C" fn c_verify_update(
             Err(e) => return rv_err(e),
         };
         unit_result_to_rv(with_client!(client => client.verify_update(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             part,
         )))
     })
@@ -200,7 +199,7 @@ pub unsafe extern "C" fn c_verify_final(
             Err(e) => return rv_err(e),
         };
         unit_result_to_rv(with_client!(client => client.verify_final(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             signature,
         )))
     })
@@ -217,8 +216,7 @@ pub unsafe extern "C" fn c_sign_recover_init(
 ) -> CK_RV {
     catch_panics(|| {
         if p_mechanism.is_null() {
-            let result =
-                with_client!(client => client.sign_recover_init_cancel(CkSessionHandle(h_session)));
+            let result = with_client!(client => client.sign_recover_init_cancel(CkSessionHandle(h_session as u64)));
             if result.is_ok() {
                 state::clear_sign_recover_output_cache(h_session);
                 state::clear_operation_state_cache(h_session);
@@ -231,9 +229,9 @@ pub unsafe extern "C" fn c_sign_recover_init(
         }
         let mech = unsafe { read_mechanism(p_mechanism) };
         let result = with_client!(client => client.sign_recover_init(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             &mech,
-            CkObjectHandle(h_key),
+            CkObjectHandle(h_key as u64),
         ));
         if result.is_ok() {
             state::clear_sign_recover_output_cache(h_session);
@@ -260,7 +258,7 @@ pub unsafe extern "C" fn c_sign_recover(
         };
         let spec = unsafe { output_buffer_spec(p_signature, pul_signature_len) };
         let result = with_client!(client => client.byte_output_exact(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             ByteOutputFunction::SignRecover,
             &spec,
             data,
@@ -283,7 +281,7 @@ pub unsafe extern "C" fn c_verify_recover_init(
     catch_panics(|| {
         if p_mechanism.is_null() {
             let result = with_client!(client => client.verify_recover_init_cancel(
-                CkSessionHandle(h_session)
+                CkSessionHandle(h_session as u64)
             ));
             if result.is_ok() {
                 state::clear_verify_recover_output_cache(h_session);
@@ -297,9 +295,9 @@ pub unsafe extern "C" fn c_verify_recover_init(
         }
         let mech = unsafe { read_mechanism(p_mechanism) };
         let result = with_client!(client => client.verify_recover_init(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             &mech,
-            CkObjectHandle(h_key),
+            CkObjectHandle(h_key as u64),
         ));
         if result.is_ok() {
             state::clear_verify_recover_output_cache(h_session);
@@ -328,7 +326,7 @@ pub unsafe extern "C" fn c_verify_recover(
         };
         let spec = unsafe { output_buffer_spec(p_data, pul_data_len) };
         let result = with_client!(client => client.byte_output_exact(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             ByteOutputFunction::VerifyRecover,
             &spec,
             signature,

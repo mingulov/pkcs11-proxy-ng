@@ -4,7 +4,10 @@ use std::time::Duration;
 use pkcs11_proxy_ng::server::context_manager::ContextManager;
 use pkcs11_proxy_ng::server::grpc_service::Pkcs11ProxyService;
 use pkcs11_proxy_ng::server::handle_map::VirtualHandle;
-use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend, mock::MockAttributeSlot};
+use pkcs11_proxy_ng_backend::{
+    MockBackend, Pkcs11Backend,
+    mock::{MockAbi, MockAttributeSlot},
+};
 use pkcs11_proxy_ng_client::Pkcs11Client;
 use pkcs11_proxy_ng_proto::Pkcs11ProxyServer;
 use pkcs11_proxy_ng_types::{
@@ -22,24 +25,46 @@ use tonic::transport::Server;
 use super::*;
 
 static TEST_DAEMON: OnceLock<TestDaemon> = OnceLock::new();
+static TEST_DAEMON_ILP32: OnceLock<TestDaemon> = OnceLock::new();
+static TEST_DAEMON_LLP64: OnceLock<TestDaemon> = OnceLock::new();
+static TEST_DAEMON_BIG_ENDIAN: OnceLock<TestDaemon> = OnceLock::new();
 
-struct TestDaemon {
+pub(super) struct TestDaemon {
     runtime: Runtime,
-    endpoint: String,
-    backend: Arc<MockBackend>,
+    pub(super) endpoint: String,
+    pub(super) backend: Arc<MockBackend>,
     context_manager: Arc<ContextManager>,
     _shutdown: watch::Sender<bool>,
 }
 
 impl TestDaemon {
-    fn shared() -> &'static Self {
-        TEST_DAEMON.get_or_init(Self::start)
+    pub(super) fn shared() -> &'static Self {
+        TEST_DAEMON.get_or_init(|| Self::start(MockAbi::host()))
     }
 
-    fn start() -> Self {
+    /// A daemon whose MockBackend emulates the given ABI profile
+    /// (ADR-0011): one in-process singleton per profile.
+    pub(super) fn shared_with_abi(abi: MockAbi) -> &'static Self {
+        match abi {
+            MockAbi::Ilp32 => TEST_DAEMON_ILP32.get_or_init(|| Self::start(abi)),
+            MockAbi::Llp64 => TEST_DAEMON_LLP64.get_or_init(|| Self::start(abi)),
+            _ => Self::shared(),
+        }
+    }
+
+    /// A daemon whose backend ADVERTISES big-endian (D6 poison config).
+    pub(super) fn shared_big_endian() -> &'static Self {
+        TEST_DAEMON_BIG_ENDIAN.get_or_init(|| Self::start_configured(MockAbi::host(), true))
+    }
+
+    fn start(abi: MockAbi) -> Self {
+        Self::start_configured(abi, false)
+    }
+
+    fn start_configured(abi: MockAbi, big_endian: bool) -> Self {
         let runtime = Runtime::new().expect("test runtime");
         let (endpoint, backend, context_manager, shutdown) = runtime.block_on(async {
-            let backend = Arc::new(MockBackend::new(
+            let mut mock = MockBackend::new(
                 vec![CkSlotId(0), CkSlotId(1)],
                 vec![
                     CkMechanismType::SHA256,
@@ -47,7 +72,12 @@ impl TestDaemon {
                     CkMechanismType::AES_ECB,
                     CkMechanismType::AES_GCM,
                 ],
-            ));
+            )
+            .with_abi(abi);
+            if big_endian {
+                mock = mock.with_big_endian_advertisement();
+            }
+            let backend = Arc::new(mock);
             backend.set_interface_capabilities(InterfaceCapabilities {
                 interfaces: vec![
                     InterfaceInfo { version_major: 2, version_minor: 40, null_functions: vec![] },
@@ -89,9 +119,9 @@ impl TestDaemon {
     }
 }
 
-struct ShimSession {
-    session: CK_SESSION_HANDLE,
-    slot_id: CK_SLOT_ID,
+pub(super) struct ShimSession {
+    pub(super) session: CK_SESSION_HANDLE,
+    pub(super) slot_id: CK_SLOT_ID,
 }
 
 impl ShimSession {
@@ -100,7 +130,7 @@ impl ShimSession {
         Self::with_endpoint(&daemon.endpoint)
     }
 
-    fn with_endpoint(endpoint: &str) -> Self {
+    pub(super) fn with_endpoint(endpoint: &str) -> Self {
         unsafe {
             std::env::set_var("PKCS11_PROXY_ENDPOINT", endpoint);
         }
@@ -185,10 +215,28 @@ fn rsa_pkcs_mechanism() -> CK_MECHANISM {
 }
 
 fn expected_mock_digest(data: &[u8]) -> [u8; 4] {
-    data.iter().fold(0_u32, |sum, byte| sum + u32::from(*byte)).to_be_bytes()
+    pkcs11_proxy_ng_backend::mock::echo::echo_bytes("digest", &[data], 4)
+        .try_into()
+        .expect("4 bytes")
 }
 
-fn create_object(session: CK_SESSION_HANDLE) -> CK_OBJECT_HANDLE {
+fn expected_mock_sign(data: &[u8]) -> [u8; 2] {
+    pkcs11_proxy_ng_backend::mock::echo::echo_bytes("sign", &[data], 2).try_into().expect("2 bytes")
+}
+
+fn expected_mock_sign_final() -> [u8; 2] {
+    pkcs11_proxy_ng_backend::mock::echo::echo_bytes("sign-final", &[], 2)
+        .try_into()
+        .expect("2 bytes")
+}
+
+fn expected_mock_digest_final() -> [u8; 4] {
+    pkcs11_proxy_ng_backend::mock::echo::echo_bytes("digest-final", &[], 4)
+        .try_into()
+        .expect("4 bytes")
+}
+
+pub(super) fn create_object(session: CK_SESSION_HANDLE) -> CK_OBJECT_HANDLE {
     let mut object = CK_INVALID_HANDLE;
     let rv = unsafe {
         dispatch::general::c_create_object(session, std::ptr::null_mut(), 0, &mut object)
@@ -197,13 +245,18 @@ fn create_object(session: CK_SESSION_HANDLE) -> CK_OBJECT_HANDLE {
     object
 }
 
-fn backend_object_handle(daemon: &TestDaemon, object: CK_OBJECT_HANDLE) -> CkObjectHandle {
+pub(super) fn backend_object_handle(
+    daemon: &TestDaemon,
+    object: CK_OBJECT_HANDLE,
+) -> CkObjectHandle {
     daemon.block_on(async {
         let context_ids = daemon.context_manager.context_ids();
         assert_eq!(context_ids.len(), 1, "expected one active shim context");
         let backend_handle = daemon
             .context_manager
-            .get_context(&context_ids[0], |ctx| ctx.object_handles.resolve(VirtualHandle(object)))
+            .get_context(&context_ids[0], |ctx| {
+                ctx.object_handles.resolve(VirtualHandle(object as _))
+            })
             .await
             .flatten()
             .expect("backend object handle");
@@ -391,7 +444,7 @@ fn shim_get_attribute_value_preserves_fatal_server_rv_when_results_are_empty() {
 #[test]
 fn raw_client_size_query_returns_length_without_bytes() {
     let _guard = shim_state_test_guard();
-    let daemon = TestDaemon::start();
+    let daemon = TestDaemon::start(MockAbi::host());
 
     daemon.block_on(async {
         let mut client = Pkcs11Client::connect(&daemon.endpoint).await.expect("connect client");
@@ -450,7 +503,7 @@ fn raw_client_size_query_returns_length_without_bytes() {
 #[test]
 fn raw_client_too_small_query_preserves_backend_returned_length() {
     let _guard = shim_state_test_guard();
-    let daemon = TestDaemon::start();
+    let daemon = TestDaemon::start(MockAbi::host());
 
     daemon.block_on(async {
         let mut client = Pkcs11Client::connect(&daemon.endpoint).await.expect("connect client");
@@ -503,7 +556,7 @@ fn raw_client_too_small_query_preserves_backend_returned_length() {
 #[test]
 fn raw_client_exact_fit_query_returns_backend_bytes() {
     let _guard = shim_state_test_guard();
-    let daemon = TestDaemon::start();
+    let daemon = TestDaemon::start(MockAbi::host());
 
     daemon.block_on(async {
         let mut client = Pkcs11Client::connect(&daemon.endpoint).await.expect("connect client");
@@ -556,7 +609,7 @@ fn raw_client_exact_fit_query_returns_backend_bytes() {
 #[test]
 fn raw_client_mixed_sensitive_and_invalid_preserves_per_attribute_status() {
     let _guard = shim_state_test_guard();
-    let daemon = TestDaemon::start();
+    let daemon = TestDaemon::start(MockAbi::host());
 
     daemon.block_on(async {
         let mut client = Pkcs11Client::connect(&daemon.endpoint).await.expect("connect client");
@@ -645,7 +698,7 @@ fn raw_client_mixed_sensitive_and_invalid_preserves_per_attribute_status() {
 #[test]
 fn legacy_client_size_query_does_not_synthesize_attribute_bytes() {
     let _guard = shim_state_test_guard();
-    let daemon = TestDaemon::start();
+    let daemon = TestDaemon::start(MockAbi::host());
 
     daemon.block_on(async {
         let mut client = Pkcs11Client::connect(&daemon.endpoint).await.expect("connect client");
@@ -1242,7 +1295,7 @@ fn exact_digest_size_query_returns_length_without_copy() {
     };
     assert_eq!(data_rv, CKR_OK as CK_RV, "C_Digest(data query)");
     assert_eq!(data_len, 4, "data query returned_len should be 4");
-    assert_eq!(out, [0, 0, 2, 20], "mock digest output should match input sum");
+    assert_eq!(out, expected_mock_digest(data), "mock digest output is the echo bytes");
 }
 
 #[test]
@@ -1287,7 +1340,7 @@ fn exact_digest_final_size_query_does_not_consume_state() {
         unsafe { dispatch::general::c_digest_final(shim.session, out.as_mut_ptr(), &mut data_len) };
     assert_eq!(data_rv, CKR_OK as CK_RV, "C_DigestFinal(data query)");
     assert_eq!(data_len, 4, "data query returned_len should be 4");
-    assert_eq!(out, [0u8; 4], "mock digest_final output should be all zeros");
+    assert_eq!(out, expected_mock_digest_final(), "mock digest_final output is the echo bytes");
 }
 
 #[test]
@@ -1313,7 +1366,7 @@ fn exact_sign_size_query_returns_length_without_copy() {
         )
     };
     assert_eq!(size_rv, CKR_OK as CK_RV, "C_Sign(size query)");
-    // MockBackend returns MOCK_SIGN_OUTPUT = [0xDE, 0xAD] = 2 bytes
+    // MockBackend returns a 2-byte deterministic echo signature
     assert_eq!(out_len, 2, "returned_len should be 2 for mock sign output");
 
     let mut too_small = [0_u8; 1];
@@ -1343,7 +1396,7 @@ fn exact_sign_size_query_returns_length_without_copy() {
     };
     assert_eq!(data_rv, CKR_OK as CK_RV, "C_Sign(data query)");
     assert_eq!(data_len, 2, "data query returned_len should be 2");
-    assert_eq!(out, [0xDE, 0xAD], "mock sign output should be [0xDE, 0xAD]");
+    assert_eq!(out, expected_mock_sign(data), "mock sign output is the echo bytes");
 }
 
 #[test]
@@ -1363,7 +1416,7 @@ fn exact_sign_final_size_query_does_not_consume_state() {
         dispatch::general::c_sign_final(shim.session, std::ptr::null_mut(), &mut out_len)
     };
     assert_eq!(size_rv, CKR_OK as CK_RV, "C_SignFinal(size query)");
-    // MockBackend sign_final returns MOCK_SIGN_OUTPUT = [0xDE, 0xAD] = 2 bytes
+    // MockBackend sign_final returns a 2-byte deterministic echo
     assert_eq!(out_len, 2, "size query returned_len should be 2");
 
     let mut too_small = [0_u8; 1];
@@ -1380,7 +1433,7 @@ fn exact_sign_final_size_query_does_not_consume_state() {
         unsafe { dispatch::general::c_sign_final(shim.session, out.as_mut_ptr(), &mut data_len) };
     assert_eq!(data_rv, CKR_OK as CK_RV, "C_SignFinal(data query)");
     assert_eq!(data_len, 2, "data query returned_len should be 2");
-    assert_eq!(out, [0xDE, 0xAD], "mock sign_final output should be [0xDE, 0xAD]");
+    assert_eq!(out, expected_mock_sign_final(), "mock sign_final output is the echo bytes");
 }
 
 #[test]
@@ -1986,7 +2039,7 @@ fn exact_encrypt_message_size_query_returns_length() {
     // encrypt_impl requires an active Encrypt operation, so first we call
     // encrypt_init, then verify the exact RPC returns a size-query result.
     let _guard = shim_state_test_guard();
-    let daemon = TestDaemon::start();
+    let daemon = TestDaemon::start(MockAbi::host());
 
     daemon.block_on(async {
         let mut client = Pkcs11Client::connect(&daemon.endpoint).await.expect("connect client");
@@ -2060,7 +2113,7 @@ fn exact_wrap_key_authenticated_size_query_returns_length() {
     // MockBackend now implements wrap_key_authenticated_exact (delegates to wrap_key_impl).
     // Size query should return OK with the wrapped-key length.
     let _guard = shim_state_test_guard();
-    let daemon = TestDaemon::start();
+    let daemon = TestDaemon::start(MockAbi::host());
 
     daemon.block_on(async {
         let mut client = Pkcs11Client::connect(&daemon.endpoint).await.expect("connect client");
@@ -2237,7 +2290,7 @@ fn exact_encapsulate_key_too_small_buffer() {
 // =========================================================================
 
 /// The raw CKA_WRAP_TEMPLATE constant (CKF_ARRAY_ATTRIBUTE | 0x211).
-const CKA_WRAP_TEMPLATE_RAW: CK_ATTRIBUTE_TYPE = 0x4000_0211;
+pub(super) const CKA_WRAP_TEMPLATE_RAW: CK_ATTRIBUTE_TYPE = 0x4000_0211;
 
 #[test]
 fn nested_template_attribute_size_query() {
@@ -2474,7 +2527,7 @@ fn nested_template_attribute_sub_buffer_too_small_preserves_partial_outputs() {
 fn raw_client_nested_template_size_query() {
     // Test the raw client path for nested template size query
     let _guard = shim_state_test_guard();
-    let daemon = TestDaemon::start();
+    let daemon = TestDaemon::start(MockAbi::host());
 
     daemon.block_on(async {
         let mut client = Pkcs11Client::connect(&daemon.endpoint).await.expect("connect client");
@@ -2527,7 +2580,7 @@ fn raw_client_nested_template_size_query() {
 fn raw_client_nested_template_data_query() {
     // Test the raw client path for nested template data query with sub-buffers
     let _guard = shim_state_test_guard();
-    let daemon = TestDaemon::start();
+    let daemon = TestDaemon::start(MockAbi::host());
 
     daemon.block_on(async {
         let mut client = Pkcs11Client::connect(&daemon.endpoint).await.expect("connect client");
@@ -2664,7 +2717,7 @@ fn slot_list_too_small_buffer_returns_buffer_too_small() {
     assert!(count >= 1, "need at least 1 slot for this test");
 
     // Now call with a buffer that is too small (size 0).
-    let mut slots = vec![0_u64; 0];
+    let mut slots = vec![0 as CK_SLOT_ID; 0];
     let mut too_small_count: CK_ULONG = 0;
     let rv2 = unsafe {
         dispatch::general::c_get_slot_list(CK_FALSE, slots.as_mut_ptr(), &mut too_small_count)
@@ -2693,7 +2746,7 @@ fn mechanism_list_count_reflects_filtered_count() {
     assert_eq!(count, 4, "expected 4 mechanisms from MockBackend (transparent mode)");
 
     // Fetch into a correctly sized buffer.
-    let mut mechs = vec![0_u64; count as usize];
+    let mut mechs = vec![0 as CK_MECHANISM_TYPE; count as usize];
     let mut fill_count = count;
     let rv2 = unsafe {
         dispatch::general::c_get_mechanism_list(shim.slot_id, mechs.as_mut_ptr(), &mut fill_count)
@@ -2702,7 +2755,7 @@ fn mechanism_list_count_reflects_filtered_count() {
     assert_eq!(fill_count, count, "fill count should match count-only count");
 
     // Buffer-too-small: pass a buffer smaller than the actual count.
-    let mut small_mechs = vec![0_u64; 0];
+    let mut small_mechs = vec![0 as CK_MECHANISM_TYPE; 0];
     let mut small_count: CK_ULONG = 0;
     let rv3 = unsafe {
         dispatch::general::c_get_mechanism_list(

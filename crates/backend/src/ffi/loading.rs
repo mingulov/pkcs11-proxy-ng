@@ -294,6 +294,25 @@ mod tests {
             return;
         }
 
+        // The module must match the test process's architecture. `dlopen` of a
+        // 64-bit `.so` into a 32-bit process (e.g. the i686 cross-build) fails
+        // with a "wrong ELF class" error that is unrelated to the
+        // C_GetInterface fallback this test exercises. The ELF identification
+        // byte at offset 4 is 1 for ELFCLASS32 and 2 for ELFCLASS64; skip when
+        // it does not match the running process.
+        if let Ok(bytes) = std::fs::read(&module) {
+            let module_is_64 = bytes.get(4) == Some(&2u8);
+            let process_is_64 = cfg!(target_pointer_width = "64");
+            if module_is_64 != process_is_64 {
+                eprintln!(
+                    "skipping: BouncyHSM module ELF class does not match the \
+                     test process (module 64-bit={module_is_64}, process \
+                     64-bit={process_is_64})"
+                );
+                return;
+            }
+        }
+
         let backend = super::FfiBackend::load(Path::new(&module))
             .expect("BouncyHSM module should load via C_GetInterface");
         // The fallback must surface a usable 3.0 list even though the explicit

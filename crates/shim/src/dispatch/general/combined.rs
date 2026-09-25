@@ -21,7 +21,7 @@ pub unsafe extern "C" fn c_digest_encrypt_update(
         };
         let spec = unsafe { output_buffer_spec(p_encrypted_part, pul_encrypted_part_len) };
         let result = with_client!(client => client.byte_output_exact(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             ByteOutputFunction::DigestEncryptUpdate,
             &spec,
             part,
@@ -55,7 +55,7 @@ pub unsafe extern "C" fn c_decrypt_digest_update(
         };
         let spec = unsafe { output_buffer_spec(p_part, pul_part_len) };
         let result = with_client!(client => client.byte_output_exact(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             ByteOutputFunction::DecryptDigestUpdate,
             &spec,
             encrypted_part,
@@ -87,7 +87,7 @@ pub unsafe extern "C" fn c_sign_encrypt_update(
         };
         let spec = unsafe { output_buffer_spec(p_encrypted_part, pul_encrypted_part_len) };
         let result = with_client!(client => client.byte_output_exact(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             ByteOutputFunction::SignEncryptUpdate,
             &spec,
             part,
@@ -121,7 +121,7 @@ pub unsafe extern "C" fn c_decrypt_verify_update(
         };
         let spec = unsafe { output_buffer_spec(p_part, pul_part_len) };
         let result = with_client!(client => client.byte_output_exact(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             ByteOutputFunction::DecryptVerifyUpdate,
             &spec,
             encrypted_part,

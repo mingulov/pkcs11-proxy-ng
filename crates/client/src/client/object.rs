@@ -143,6 +143,11 @@ impl Pkcs11Client {
                     Some(CkAttributeValue::Ulong(_)) => (true, std::mem::size_of::<usize>() as u64),
                     Some(CkAttributeValue::Bytes(bytes)) => (true, bytes.len() as u64),
                     Some(CkAttributeValue::String(value)) => (true, value.len() as u64),
+                    // This convenience read path sizes buffers from the input
+                    // value; a nested template's read size is its native
+                    // template byte length, which only the shim's exact path
+                    // computes. Treat as a size query here.
+                    Some(CkAttributeValue::NestedTemplate(_)) => (false, 0),
                     None => (false, 0),
                 };
                 CkAttributeQuery {

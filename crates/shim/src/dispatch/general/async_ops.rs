@@ -32,7 +32,7 @@ pub unsafe extern "C" fn c_async_complete(
         };
 
         let result = with_client!(client => client.async_complete(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             function_name,
         ));
 

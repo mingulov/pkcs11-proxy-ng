@@ -908,6 +908,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "exercises real filesystem I/O, unsupported under miri isolation")]
     fn include_relative_paths_resolves_and_merges() {
         use std::io::Write;
 
@@ -958,6 +959,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "exercises real filesystem I/O, unsupported under miri isolation")]
     fn include_absolute_path_works() {
         use std::io::Write;
 
@@ -982,6 +984,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "exercises real filesystem I/O, unsupported under miri isolation")]
     fn include_missing_file_returns_error() {
         use std::io::Write;
 
@@ -1000,6 +1003,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "exercises real filesystem I/O, unsupported under miri isolation")]
     fn include_merge_order_later_overrides_earlier() {
         use std::io::Write;
 
@@ -1038,6 +1042,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "exercises real filesystem I/O, unsupported under miri isolation")]
     fn local_entries_override_includes() {
         use std::io::Write;
 
@@ -1074,6 +1079,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "exercises real filesystem I/O, unsupported under miri isolation")]
     fn empty_include_is_noop() {
         use std::io::Write;
 
@@ -1096,6 +1102,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "exercises real filesystem I/O, unsupported under miri isolation")]
     fn include_in_included_file_is_ignored() {
         use std::io::Write;
 
@@ -1126,6 +1133,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "exercises real filesystem I/O, unsupported under miri isolation")]
     fn multiple_includes_compose_parameterless_and_shapes() {
         use std::io::Write;
 
@@ -1176,6 +1184,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "exercises real filesystem I/O, unsupported under miri isolation")]
     fn include_toml_parse_error_returns_error() {
         let dir = tempfile::tempdir().unwrap();
         let bad = dir.path().join("bad.toml");
@@ -1188,6 +1197,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "exercises real filesystem I/O, unsupported under miri isolation")]
     fn cloudhsm_vendor_overlay_via_include() {
         use std::io::Write;
 

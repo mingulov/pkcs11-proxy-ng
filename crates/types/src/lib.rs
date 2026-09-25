@@ -10,6 +10,7 @@ pub mod object;
 pub mod output;
 pub mod session;
 pub mod slot;
+pub mod width;
 
 pub use attribute::{CkAttribute, CkAttributeType, CkAttributeValue};
 pub use error::{CkResult, CkRv};

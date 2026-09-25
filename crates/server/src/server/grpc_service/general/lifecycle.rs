@@ -53,7 +53,7 @@ pub(super) async fn finalize(
                 let backend = backend_ref.clone();
                 tokio::task::spawn_blocking(move || {
                     for backend_handle in backend_sessions {
-                        let _ = backend.close_session(CkSessionHandle(backend_handle));
+                        let _ = backend.close_session(CkSessionHandle(backend_handle as u64));
                     }
                 })
                 .await

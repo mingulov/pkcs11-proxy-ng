@@ -40,10 +40,18 @@ unsafe fn parse_init_args(p_init_args: CK_VOID_PTR) -> Option<CK_RV> {
     // also set, the library may ignore the custom callbacks and use OS locking.
     // GnuTLS/p11-kit passes all four callbacks + CKF_OS_LOCKING_OK; rejecting
     // that combination breaks consumer compatibility.
-    let all_mutex = args.CreateMutex.is_some()
-        && args.DestroyMutex.is_some()
-        && args.LockMutex.is_some()
-        && args.UnlockMutex.is_some();
+    // Copy each Option<fn> field by value before calling `.is_some()` (which
+    // takes `&self`): on Windows (LLP64) CK_C_INITIALIZE_ARGS is `#[repr(packed)]`
+    // in the cryptoki-sys binding, so referencing a field in place is E0793. The
+    // fields are Copy, so the by-value reads are sound and a no-op elsewhere.
+    let create_mutex = args.CreateMutex;
+    let destroy_mutex = args.DestroyMutex;
+    let lock_mutex = args.LockMutex;
+    let unlock_mutex = args.UnlockMutex;
+    let all_mutex = create_mutex.is_some()
+        && destroy_mutex.is_some()
+        && lock_mutex.is_some()
+        && unlock_mutex.is_some();
     if all_mutex && (args.flags & CKF_OS_LOCKING_OK) == 0 {
         // Caller demands custom mutexes without allowing OS locking — reject.
         return Some(CKR_CANT_LOCK as CK_RV);
@@ -126,8 +134,26 @@ pub unsafe extern "C" fn c_initialize(p_init_args: CK_VOID_PTR) -> CK_RV {
             state::mark_finalized();
         } else {
             // Re-probe the backend so function lists reflect actual
-            // capabilities (BUG-001).
-            crate::interface_probe::reprobe();
+            // capabilities (BUG-001). A transient probe failure is
+            // tolerated (previous/fallback state stays in use); an ABI
+            // refusal (D6 byte-order mismatch) is fatal — every ulong
+            // byte from this daemon would be unparseable, so fail the
+            // initialization instead of connecting-and-corrupting.
+            if let Err(e) = crate::interface_probe::reprobe() {
+                tracing::error!(error = %e, "C_Initialize refused: incompatible backend ABI");
+                // Best-effort: release the daemon-side context we created.
+                let _ = state::runtime().block_on(async {
+                    let mut client = state::client().lock().await;
+                    client.finalize().await
+                });
+                state::mark_finalized();
+                // The cached channel points at the refused daemon; force the
+                // next C_Initialize to re-read the environment and reconnect,
+                // and drop any probe state captured from it.
+                state::mark_client_reconnect_required();
+                crate::interface_probe::clear_cache();
+                return rv_err(CkRv::GENERAL_ERROR);
+            }
         }
         rv
     })

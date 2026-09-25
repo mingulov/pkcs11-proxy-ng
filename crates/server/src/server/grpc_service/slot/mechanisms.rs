@@ -127,7 +127,7 @@ pub(super) async fn get_mechanism_info(
         }
     }
 
-    let mechanism_type = CkMechanismType(req.mechanism_type);
+    let mechanism_type = CkMechanismType(req.mechanism_type as u64);
     let backend = backend_ref.clone();
     let result =
         spawn_backend(move || backend.get_mechanism_info(backend_slot, mechanism_type)).await?;

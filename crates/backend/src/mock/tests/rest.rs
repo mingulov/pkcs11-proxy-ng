@@ -1,3 +1,5 @@
+use super::*;
+
 #[test]
 fn finalize_with_open_sessions_clears_all() {
     let backend = MockBackend::default_test();
@@ -96,9 +98,7 @@ fn get_attribute_value_exact_unknown_handle_returns_error() {
         nested: None,
     };
     assert_eq!(
-        backend
-            .get_attribute_value_exact(session, CkObjectHandle(42), &[query])
-            .unwrap_err(),
+        backend.get_attribute_value_exact(session, CkObjectHandle(42), &[query]).unwrap_err(),
         CkRv::OBJECT_HANDLE_INVALID
     );
 }
@@ -265,7 +265,8 @@ fn so_login_transitions_rw_session_to_rw_so() {
 fn login_returns_user_already_logged_in_on_double_login() {
     let backend = MockBackend::default_test();
     backend.initialize().unwrap();
-    let session = backend.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::RW_SESSION)).unwrap();
+    let session =
+        backend.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::RW_SESSION)).unwrap();
     backend.login(session, CkUserType::User, Some(b"1234".as_ref())).unwrap();
     let err = backend.login(session, CkUserType::User, Some(b"1234".as_ref())).unwrap_err();
     assert_eq!(err, CkRv::USER_ALREADY_LOGGED_IN);
@@ -334,7 +335,8 @@ fn login_state_is_per_slot_independent() {
 fn login_with_invalid_session_returns_session_handle_invalid() {
     let backend = MockBackend::default_test();
     backend.initialize().unwrap();
-    let err = backend.login(CkSessionHandle(9999), CkUserType::User, Some(b"1234".as_ref())).unwrap_err();
+    let err =
+        backend.login(CkSessionHandle(9999), CkUserType::User, Some(b"1234".as_ref())).unwrap_err();
     assert_eq!(err, CkRv::SESSION_HANDLE_INVALID);
 }
 
@@ -363,11 +365,13 @@ fn so_login_can_be_followed_by_user_login_on_different_slot() {
 fn finalize_clears_login_state() {
     let backend = MockBackend::default_test();
     backend.initialize().unwrap();
-    let session = backend.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::RW_SESSION)).unwrap();
+    let session =
+        backend.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::RW_SESSION)).unwrap();
     backend.login(session, CkUserType::User, Some(b"1234".as_ref())).unwrap();
     backend.finalize().unwrap();
     backend.initialize().unwrap();
-    let session2 = backend.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::RW_SESSION)).unwrap();
+    let session2 =
+        backend.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::RW_SESSION)).unwrap();
     let err = backend.logout(session2).unwrap_err();
     assert_eq!(err, CkRv::USER_NOT_LOGGED_IN);
 }
@@ -664,7 +668,9 @@ fn set_op_state_restores_sign_on_same_session() {
     backend.sign_init(session, &mech, CkObjectHandle(1)).unwrap();
     let blob = backend.get_operation_state(session).unwrap();
     backend.sign_final(session).unwrap();
-    backend.set_operation_state(session, CkInBuf::Bytes(&blob), CkObjectHandle(0), CkObjectHandle(0)).unwrap();
+    backend
+        .set_operation_state(session, CkInBuf::Bytes(&blob), CkObjectHandle(0), CkObjectHandle(0))
+        .unwrap();
     backend.sign_final(session).unwrap();
 }
 
@@ -675,14 +681,18 @@ fn set_op_state_transfers_to_different_session() {
     let mech = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
     backend.sign_init(session_a, &mech, CkObjectHandle(1)).unwrap();
     let blob = backend.get_operation_state(session_a).unwrap();
-    backend.set_operation_state(session_b, CkInBuf::Bytes(&blob), CkObjectHandle(0), CkObjectHandle(0)).unwrap();
+    backend
+        .set_operation_state(session_b, CkInBuf::Bytes(&blob), CkObjectHandle(0), CkObjectHandle(0))
+        .unwrap();
     backend.sign_final(session_b).unwrap();
 }
 
 #[test]
 fn set_op_state_empty_blob_returns_saved_state_invalid() {
     let (backend, session) = setup_with_session();
-    let rv = backend.set_operation_state(session, CkInBuf::Bytes(&[]), CkObjectHandle(0), CkObjectHandle(0)).unwrap_err();
+    let rv = backend
+        .set_operation_state(session, CkInBuf::Bytes(&[]), CkObjectHandle(0), CkObjectHandle(0))
+        .unwrap_err();
     assert_eq!(rv, CkRv::SAVED_STATE_INVALID);
 }
 
@@ -690,7 +700,12 @@ fn set_op_state_empty_blob_returns_saved_state_invalid() {
 fn set_op_state_wrong_magic_returns_saved_state_invalid() {
     let (backend, session) = setup_with_session();
     let rv = backend
-        .set_operation_state(session, CkInBuf::Bytes(&[0xFF, 0xFF, 0x01]), CkObjectHandle(0), CkObjectHandle(0))
+        .set_operation_state(
+            session,
+            CkInBuf::Bytes(&[0xFF, 0xFF, 0x01]),
+            CkObjectHandle(0),
+            CkObjectHandle(0),
+        )
         .unwrap_err();
     assert_eq!(rv, CkRv::SAVED_STATE_INVALID);
 }
@@ -699,7 +714,12 @@ fn set_op_state_wrong_magic_returns_saved_state_invalid() {
 fn set_op_state_unknown_op_byte_returns_saved_state_invalid() {
     let (backend, session) = setup_with_session();
     let rv = backend
-        .set_operation_state(session, CkInBuf::Bytes(&[0xC9, 0xEA, 0xFF]), CkObjectHandle(0), CkObjectHandle(0))
+        .set_operation_state(
+            session,
+            CkInBuf::Bytes(&[0xC9, 0xEA, 0xFF]),
+            CkObjectHandle(0),
+            CkObjectHandle(0),
+        )
         .unwrap_err();
     assert_eq!(rv, CkRv::SAVED_STATE_INVALID);
 }
@@ -757,7 +777,11 @@ fn get_set_op_state_all_op_types_roundtrip() {
                 backend.sign_recover(session, CkInBuf::Bytes(b"data")).unwrap();
             }
             Verify => {
-                let _ = backend.verify(session, CkInBuf::Bytes(&[0xDE, 0xAD]), CkInBuf::Bytes(&[0xDE, 0xAD]));
+                let _ = backend.verify(
+                    session,
+                    CkInBuf::Bytes(&[0xDE, 0xAD]),
+                    CkInBuf::Bytes(&[0xDE, 0xAD]),
+                );
             }
             VerifyRecover => {
                 backend.verify_recover(session, CkInBuf::Bytes(&[0xDE, 0xAD])).unwrap();
@@ -773,7 +797,14 @@ fn get_set_op_state_all_op_types_roundtrip() {
             }
             FindObjects => unreachable!("object search state is not cryptographic operation state"),
         }
-        backend.set_operation_state(session, CkInBuf::Bytes(&blob), CkObjectHandle(0), CkObjectHandle(0)).unwrap();
+        backend
+            .set_operation_state(
+                session,
+                CkInBuf::Bytes(&blob),
+                CkObjectHandle(0),
+                CkObjectHandle(0),
+            )
+            .unwrap();
         let blob2 = backend.get_operation_state(session).unwrap();
         assert_eq!(blob, blob2);
     }
@@ -794,7 +825,10 @@ fn open_session_quota_freed_after_close() {
     let backend = MockBackend::default_test().with_quotas(1, 0);
     backend.initialize().unwrap();
     let s1 = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-    assert_eq!(backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap_err(), CkRv::SESSION_COUNT);
+    assert_eq!(
+        backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap_err(),
+        CkRv::SESSION_COUNT
+    );
     backend.close_session(s1).unwrap();
     backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
 }

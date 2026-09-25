@@ -16,7 +16,7 @@ impl FfiBackend {
             unsafe { (*self.func_list).C_GetSlotList },
             |function, slots, count| unsafe { function(token_present_flag, slots, count) },
         )?;
-        Ok(slots.into_iter().map(CkSlotId).collect())
+        Ok(slots.into_iter().map(|x| CkSlotId(x as u64)).collect())
     }
 
     pub(super) fn ffi_get_slot_info(&self, slot_id: CkSlotId) -> CkResult<CkSlotInfo> {
@@ -45,7 +45,7 @@ impl FfiBackend {
                 function(Self::slot_id(slot_id), mechanisms, count)
             },
         )?;
-        Ok(mechanisms.into_iter().map(CkMechanismType).collect())
+        Ok(mechanisms.into_iter().map(|x| CkMechanismType(x as u64)).collect())
     }
 
     pub(super) fn ffi_get_mechanism_info(
