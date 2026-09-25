@@ -14,7 +14,7 @@ use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
     ensure_private_mint_allowed, ensure_private_use_allowed, gate_object_handle, parse_mechanism,
     register_session_object_handle, register_session_object_pair, resolve_session,
-    resolve_session_and_object, spawn_backend, template_declares_private_object,
+    resolve_session_and_key, spawn_backend, template_declares_private_object,
     template_declares_token_object,
 };
 use crate::server::context_manager::{ClientContextId, ContextManager};
@@ -452,19 +452,25 @@ async fn derive_key_impl(
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
-    let (session, base_key) =
-        match resolve_session_and_object(ctx, &ctx_id, req.session_handle, req.base_key_handle)
-            .await
-        {
-            Ok(handles) => handles,
-            Err(rv) => {
-                return Ok(Response::new(pkcs11_proxy_ng_proto::DeriveKeyResponse {
-                    ck_rv: rv.0,
-                    key_handle: 0,
-                    mechanism_out: None,
-                }));
-            }
-        };
+    // The base-key position is key-typed: a destroyed base key must answer
+    // CKR_KEY_HANDLE_INVALID (0x60), matching every other key-taking path.
+    let (session, base_key) = match resolve_session_and_key(
+        ctx,
+        &ctx_id,
+        req.session_handle,
+        req.base_key_handle,
+    )
+    .await
+    {
+        Ok(handles) => handles,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::DeriveKeyResponse {
+                ck_rv: rv.0,
+                key_handle: 0,
+                mechanism_out: None,
+            }));
+        }
+    };
 
     let mut mechanism = match parse_mechanism(req.mechanism) {
         Ok(mechanism) => mechanism,
@@ -536,7 +542,7 @@ async fn derive_key_impl(
 
     // D6(1): refuse minting a private object while logically logged out.
     // (The private base key itself is refused by the USE check inside
-    // resolve_session_and_object above.)
+    // resolve_session_and_key above.)
     if let Err(rv) =
         ensure_private_mint_allowed(ctx_mgr, &ctx_id, req.session_handle, template_view).await
     {
@@ -875,6 +881,7 @@ mod tests {
 
     use super::*;
     use crate::server::grpc_service::HandlerContext;
+    use crate::server::grpc_service::service_utils::resolve_session_and_object;
     use crate::server::handle_map::BackendHandle;
     use pkcs11_proxy_ng_backend::MockBackend;
     use pkcs11_proxy_ng_types::{
@@ -1415,6 +1422,54 @@ mod tests {
             resolve_session_and_object(&ctx, &ctx_id, fresh_session.0, v_token_key.0).await,
             Err(CkRv::USER_NOT_LOGGED_IN),
             "surviving private token key must refuse while another tenant holds the login"
+        );
+    }
+
+    #[tokio::test]
+    async fn derive_with_destroyed_base_key_answers_key_handle_invalid() {
+        // Proxy-vs-direct finding (pkcs11-check 0.2.1rc1, nss-main,
+        // test_derive_after_destroy_does_not_crash): the UAF probe passes
+        // only on CKR_KEY_HANDLE_INVALID for a destroyed DeriveKey base
+        // key. The base-key position is key-typed, so derive must use the
+        // key-flavored resolver like every other key-taking Init path —
+        // never the object flavor (CKR_OBJECT_HANDLE_INVALID).
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 16));
+        let ctx = make_ctx(&ctx_mgr);
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+        let (session_vh, obj_vh) = ctx_mgr
+            .get_context(&ctx_id, |c| {
+                let svh = c.register_session(
+                    BackendHandle(77),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                );
+                let ovh = c.object_handles.insert(BackendHandle(42));
+                // Mirror destroy_object's bookkeeping for the two maps that
+                // matter here (fresh fixture: metadata/created/privacy
+                // entries and cached attributes are all empty).
+                c.object_handles.remove(ovh);
+                c.destroyed_objects.insert(ovh);
+                (svh, ovh)
+            })
+            .await
+            .unwrap();
+        let response = derive_key_impl(
+            &ctx,
+            Request::new(pkcs11_proxy_ng_proto::DeriveKeyRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: session_vh.0,
+                mechanism: None,
+                base_key_handle: obj_vh.0,
+                template: vec![],
+                template_null: true,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(
+            response.ck_rv,
+            CkRv::KEY_HANDLE_INVALID.0,
+            "destroyed DeriveKey base key must answer CKR_KEY_HANDLE_INVALID"
         );
     }
 }
