@@ -70,7 +70,7 @@ fn main() {
         let slots = c.get_slot_list(false).await.unwrap();
         let session =
             c.open_session(slots[0], CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await.unwrap();
-        let key = c.create_object(session, &[]).await.unwrap();
+        let key = c.create_object(session, Some(&[])).await.unwrap();
         (c, session, key)
     });
     let mech = CkMechanism { mechanism_type: CkMechanismType(0x00000001), params: None };

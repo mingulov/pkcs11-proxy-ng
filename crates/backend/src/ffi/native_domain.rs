@@ -19,17 +19,22 @@ use std::sync::Mutex;
 use std::sync::atomic::Ordering::SeqCst;
 
 /// Build-time native-FFI qualifier for v0.2: Linux GNU/musl on x86_64 with
-/// 64-bit pointers or x86 with 32-bit pointers, or Windows MSVC on x86_64
-/// with 64-bit pointers. x32, other architectures/environments and other
-/// operating systems are excluded.
+/// 64-bit pointers or x86 with 32-bit pointers, macOS on aarch64 or x86_64
+/// with 64-bit pointers (LP64; libloading loads .dylib), or Windows MSVC on
+/// x86_64 with 64-bit pointers or x86 with 32-bit pointers (PE32 LLP32:
+/// 32-bit `CK_ULONG`, 32-bit pointers, `#pragma pack(1)` structs). x32,
+/// other architectures/environments and other operating systems are excluded.
 pub(in crate::ffi) const NATIVE_FFI_QUALIFIED: bool = (cfg!(target_os = "linux")
     && cfg!(any(target_env = "gnu", target_env = "musl"))
     && ((cfg!(target_arch = "x86_64") && cfg!(target_pointer_width = "64"))
         || (cfg!(target_arch = "x86") && cfg!(target_pointer_width = "32"))))
+    || (cfg!(target_os = "macos")
+        && cfg!(any(target_arch = "aarch64", target_arch = "x86_64"))
+        && cfg!(target_pointer_width = "64"))
     || (cfg!(target_os = "windows")
         && cfg!(target_env = "msvc")
-        && cfg!(target_arch = "x86_64")
-        && cfg!(target_pointer_width = "64"));
+        && ((cfg!(target_arch = "x86_64") && cfg!(target_pointer_width = "64"))
+            || (cfg!(target_arch = "x86") && cfg!(target_pointer_width = "32"))));
 
 /// Local constructor-domain failure. These are never fabricated provider
 /// `CK_RV` values; [`super::FfiBackend::load`] surfaces them as `Err(String)`.
@@ -55,8 +60,9 @@ impl fmt::Display for DomainError {
             DomainError::UnsupportedPlatform { detail } => write!(
                 f,
                 "native FFI unavailable on this platform ({detail}); v0.2 requires \
-                 Linux GNU/musl on x86_64 (64-bit) or x86 (32-bit), or \
-                 Windows MSVC x86_64 (64-bit); refusing to load provider"
+                 Linux GNU/musl on x86_64 (64-bit) or x86 (32-bit), \
+                 macOS on aarch64 or x86_64 (64-bit), or \
+                 Windows MSVC on x86_64 (64-bit) or x86 (32-bit); refusing to load provider"
             ),
             DomainError::AlreadyReserved { epoch } => write!(
                 f,
@@ -230,9 +236,11 @@ pub(in crate::ffi) fn check_native_platform() -> Result<(), DomainError> {
         return Ok(());
     }
     let detail = if cfg!(target_os = "windows") {
-        "non-MSVC/non-x86_64 Windows target"
+        "non-MSVC or non-x86-family Windows target"
+    } else if cfg!(target_os = "macos") {
+        "non-aarch64/x86_64 macOS target"
     } else if !cfg!(target_os = "linux") {
-        "non-Linux target_os"
+        "non-Linux/macOS target_os"
     } else if !cfg!(any(target_env = "gnu", target_env = "musl")) {
         "non-GNU/musl target_env"
     } else {
@@ -260,8 +268,8 @@ pub(in crate::ffi) struct ConstructionPermit {
     /// no lock, no registry read — so the final-owner guard can scope itself
     /// to managed permits on the lock-free stop path.
     //
-    // The guard (cfg-gated to the qualified Linux and Windows arms) is
-    // the only non-test reader.
+    // The guard (cfg-gated to the stop arms) is the only non-test
+    // reader.
     managed: bool,
 }
 
@@ -310,8 +318,8 @@ impl ConstructionPermit {
     /// lock-free, so the final-owner guard may call it on the stop path.
     /// False only for the `cfg(test)` unmanaged sentinel.
     //
-    // The guard (cfg-gated to the qualified Linux and Windows arms) is
-    // the only non-test caller.
+    // The guard (cfg-gated to the stop arms) is the only non-test
+    // caller.
     pub(in crate::ffi) fn holds_registry_slot(&self) -> bool {
         self.managed
     }
@@ -557,7 +565,8 @@ mod tests {
     #[test]
     fn t3_qualified_host_platform_check_is_ok() {
         // This test runs on a qualified native-FFI host (Linux GNU/musl
-        // x86_64/x86); the const itself is covered by
+        // x86_64/x86, macOS aarch64/x86_64, Windows MSVC x86_64/x86); the
+        // const itself is covered by
         // `native_domain_current_host_reports_qualified_or_refuses`.
         assert!(check_native_platform().is_ok());
     }
@@ -567,8 +576,8 @@ mod tests {
         let msg = DomainError::UnsupportedPlatform { detail: "test-detail" }.to_string();
         assert!(msg.contains("Linux GNU/musl"), "Display must name Linux hosts, got: {msg}");
         assert!(
-            msg.contains("Windows MSVC x86_64"),
-            "Display must name Windows MSVC x86_64 hosts, got: {msg}"
+            msg.contains("Windows MSVC on x86_64 (64-bit) or x86 (32-bit)"),
+            "Display must name Windows MSVC x86_64/x86 hosts, got: {msg}"
         );
     }
 }

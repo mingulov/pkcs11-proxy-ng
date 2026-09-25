@@ -13,8 +13,9 @@ mod mechanism_to_ffi_tests {
         CkRv, DilithiumParams, EciesParams, ExtractParams, GcmParams, HdKeyDeriveParams, IvParams,
         KeyDerivationStringData, KmacParams, KyberParams, MuGenParams, ObjectHandleParam,
         PbeParams, Pkcs5Pbkd2Params, RawMechanismParams, RsaPkcsOaepParams, RsaPkcsPssParams,
-        SignAdditionalContext, Ssl3KeyMatParams, SslRandomData, VendorObjectExtractParams,
-        VendorObjectInsertParams, WtlsKeyMatParams, WtlsMasterKeyDeriveParams, WtlsRandomData,
+        SecretBytes, SignAdditionalContext, Ssl3KeyMatParams, SslRandomData,
+        VendorObjectExtractParams, VendorObjectInsertParams, WtlsKeyMatParams,
+        WtlsMasterKeyDeriveParams, WtlsRandomData,
     };
 
     fn convert(mechanism_type: CkMechanismType, params: CkMechanismParams) -> super::FfiMechanism {
@@ -62,21 +63,21 @@ mod mechanism_to_ffi_tests {
     fn unsupported_mechanism_params_are_rejected_by_backend_ffi() {
         let parameterless = CkMechanism { mechanism_type: CkMechanismType::SHA256, params: None };
         let cases = [
-            ("Raw", CkMechanismParams::Raw(RawMechanismParams { data: vec![0x01, 0x02] })),
+            ("Raw", CkMechanismParams::Raw(RawMechanismParams { data: vec![0x01, 0x02].into() })),
             (
                 "Ecies",
                 CkMechanismParams::Ecies(EciesParams {
                     derivation_mechanism: Box::new(parameterless.clone()),
                     encryption_mechanism: Box::new(parameterless.clone()),
                     mac_mechanism: Box::new(parameterless.clone()),
-                    shared_data: vec![0x03],
+                    shared_data: vec![0x03].into(),
                 }),
             ),
             (
                 "AesCmacKeyDerivation",
                 CkMechanismParams::AesCmacKeyDerivation(AesCmacKeyDerivationParams {
-                    context: vec![0x04],
-                    label: vec![0x05],
+                    context: vec![0x04].into(),
+                    label: vec![0x05].into(),
                 }),
             ),
             ("Dilithium", CkMechanismParams::Dilithium(DilithiumParams { version: 1, mode: 2 })),
@@ -86,8 +87,8 @@ mod mechanism_to_ffi_tests {
                     version: 3,
                     mode: 4,
                     secret_handle: 5,
-                    shared_data: vec![0x06],
-                    blob: vec![0x07],
+                    shared_data: vec![0x06].into(),
+                    blob: vec![0x07].into(),
                 }),
             ),
             (
@@ -95,7 +96,7 @@ mod mechanism_to_ffi_tests {
                 CkMechanismParams::HdKeyDerive(HdKeyDeriveParams {
                     derive_type: 8,
                     child_key_index: 9,
-                    chain_code: vec![0x0A],
+                    chain_code: vec![0x0A].into(),
                     version: 10,
                 }),
             ),
@@ -103,15 +104,15 @@ mod mechanism_to_ffi_tests {
                 "VendorObjectExtract",
                 CkMechanismParams::VendorObjectExtract(VendorObjectExtractParams {
                     format: 11,
-                    context: vec![0x0C],
+                    context: vec![0x0C].into(),
                 }),
             ),
             (
                 "VendorObjectInsert",
                 CkMechanismParams::VendorObjectInsert(VendorObjectInsertParams {
                     format: 12,
-                    context: vec![0x0D],
-                    object_data: vec![0x0E],
+                    context: vec![0x0D].into(),
+                    object_data: vec![0x0E].into(),
                 }),
             ),
         ];
@@ -186,7 +187,9 @@ mod mechanism_to_ffi_tests {
                 hash_alg: CkMechanismType::SHA256,
                 mgf: 1,
                 source: 1,
-                source_data: vec![0xA0, 0xA1, 0xA2],
+                source_data: vec![0xA0, 0xA1, 0xA2].into(),
+
+                source_null: false,
             }),
         );
 
@@ -219,8 +222,11 @@ mod mechanism_to_ffi_tests {
                 iv: vec![0x10; 12],
                 iv_bits: 96,
                 iv_buffer_len: 12,
-                aad: vec![0xAA, 0xBB, 0xCC],
+                aad: vec![0xAA, 0xBB, 0xCC].into(),
                 tag_bits: 128,
+
+                iv_null: false,
+                aad_null: false,
             }),
         );
 
@@ -260,8 +266,11 @@ mod mechanism_to_ffi_tests {
                     iv: vec![0x5A; iv_len],
                     iv_bits: 96,
                     iv_buffer_len: buffer_len as u64,
-                    aad: Vec::new(),
+                    aad: Vec::new().into(),
                     tag_bits: 128,
+
+                    iv_null: false,
+                    aad_null: false,
                 }),
             );
             // SAFETY: the owner is alive and unchanged; snapshot once per
@@ -301,8 +310,11 @@ mod mechanism_to_ffi_tests {
                 iv: Vec::new(),
                 iv_bits: 96,
                 iv_buffer_len: u64::MAX,
-                aad: Vec::new(),
+                aad: Vec::new().into(),
                 tag_bits: 128,
+
+                iv_null: false,
+                aad_null: false,
             })),
         });
         assert_eq!(result.err(), Some(CkRv::MECHANISM_PARAM_INVALID));
@@ -318,9 +330,9 @@ mod mechanism_to_ffi_tests {
         let ffi = convert(
             CkMechanismType(0x0000_03A1), // CKM_PBE_MD5_DES_CBC
             CkMechanismParams::Pbe(PbeParams {
-                init_vector: vec![0x01; 8],
-                password: password.clone(),
-                salt: vec![0x02; 4],
+                init_vector: vec![0x01; 8].into(),
+                password: password.clone().into(),
+                salt: vec![0x02; 4].into(),
                 iteration: 1000,
             }),
         );
@@ -341,11 +353,11 @@ mod mechanism_to_ffi_tests {
             CkMechanismType(0x0000_03B0), // CKM_PKCS5_PBKD2
             CkMechanismParams::Pkcs5Pbkd2(Pkcs5Pbkd2Params {
                 salt_source: 1,
-                salt_source_data: vec![0x09; 8],
+                salt_source_data: vec![0x09; 8].into(),
                 iterations: 2048,
                 prf: 2,
-                prf_data: vec![],
-                password: password.clone(),
+                prf_data: vec![].into(),
+                password: password.clone().into(),
             }),
         );
         let p = unsafe {
@@ -366,8 +378,11 @@ mod mechanism_to_ffi_tests {
                 iv: Vec::new(),
                 iv_bits: 96,
                 iv_buffer_len: 12,
-                aad: Vec::new(),
+                aad: Vec::new().into(),
                 tag_bits: 128,
+
+                iv_null: false,
+                aad_null: false,
             }),
         );
 
@@ -504,8 +519,8 @@ mod mechanism_to_ffi_tests {
                 server_mac_secret_handle: 0,
                 client_key_handle: 0,
                 server_key_handle: 0,
-                client_iv: Vec::new(),
-                server_iv: Vec::new(),
+                client_iv: Vec::new().into(),
+                server_iv: Vec::new().into(),
             }),
         );
 
@@ -543,8 +558,14 @@ mod mechanism_to_ffi_tests {
                 assert_eq!(params.server_mac_secret_handle, 102);
                 assert_eq!(params.client_key_handle, 201);
                 assert_eq!(params.server_key_handle, 202);
-                assert_eq!(params.client_iv, [0xA1, 0xA2, 0xA3, 0xA4]);
-                assert_eq!(params.server_iv, [0xB1, 0xB2, 0xB3, 0xB4]);
+                assert_eq!(
+                    params.client_iv,
+                    SecretBytes::copy_from_slice(&[0xA1, 0xA2, 0xA3, 0xA4])
+                );
+                assert_eq!(
+                    params.server_iv,
+                    SecretBytes::copy_from_slice(&[0xB1, 0xB2, 0xB3, 0xB4])
+                );
             }
             other => panic!("unexpected output params: {other:?}"),
         }
@@ -570,8 +591,8 @@ mod mechanism_to_ffi_tests {
                 server_mac_secret_handle: 0,
                 client_key_handle: 0,
                 server_key_handle: 0,
-                client_iv: Vec::new(),
-                server_iv: Vec::new(),
+                client_iv: Vec::new().into(),
+                server_iv: Vec::new().into(),
             }),
         );
 
@@ -605,8 +626,14 @@ mod mechanism_to_ffi_tests {
                 assert_eq!(params.server_mac_secret_handle, 112);
                 assert_eq!(params.client_key_handle, 211);
                 assert_eq!(params.server_key_handle, 212);
-                assert_eq!(params.client_iv, [0xC1, 0xC2, 0xC3, 0xC4]);
-                assert_eq!(params.server_iv, [0xD1, 0xD2, 0xD3, 0xD4]);
+                assert_eq!(
+                    params.client_iv,
+                    SecretBytes::copy_from_slice(&[0xC1, 0xC2, 0xC3, 0xC4])
+                );
+                assert_eq!(
+                    params.server_iv,
+                    SecretBytes::copy_from_slice(&[0xD1, 0xD2, 0xD3, 0xD4])
+                );
             }
             other => panic!("unexpected output params: {other:?}"),
         }
@@ -692,7 +719,7 @@ mod mechanism_to_ffi_tests {
         let ffi = convert(
             CkMechanismType(0x0000_0501),
             CkMechanismParams::KeyDerivationString(KeyDerivationStringData {
-                data: vec![0xDE, 0xAD, 0xBE, 0xEF],
+                data: vec![0xDE, 0xAD, 0xBE, 0xEF].into(),
             }),
         );
 
@@ -718,7 +745,7 @@ mod mechanism_to_ffi_tests {
             CkMechanismType(0x0000_0502),
             CkMechanismParams::SignAdditionalContext(SignAdditionalContext {
                 hedge_variant: 1,
-                context: vec![0xA1, 0xA2, 0xA3],
+                context: vec![0xA1, 0xA2, 0xA3].into(),
                 hash: 0,
             }),
         );
@@ -747,7 +774,7 @@ mod mechanism_to_ffi_tests {
             CkMechanismType(0x0000_001F), // CKM_HASH_ML_DSA
             CkMechanismParams::SignAdditionalContext(SignAdditionalContext {
                 hedge_variant: 1,
-                context: vec![0xB1, 0xB2],
+                context: vec![0xB1, 0xB2].into(),
                 hash: 0x0000_0250, // CKM_SHA256
             }),
         );
@@ -778,7 +805,7 @@ mod mechanism_to_ffi_tests {
             CkMechanismParams::Kmac(KmacParams {
                 key_handle: 0xCAFE,
                 mac_length: 64,
-                customization_string: b"custom".to_vec(),
+                customization_string: b"custom".to_vec().into(),
             }),
         );
 
@@ -809,8 +836,8 @@ mod mechanism_to_ffi_tests {
             CkMechanismType(0x8000_0002),
             CkMechanismParams::MuGen(MuGenParams {
                 key_handle: 0xA11CE,
-                tr: b"precomputed-tr".to_vec(),
-                context: b"context".to_vec(),
+                tr: b"precomputed-tr".to_vec().into(),
+                context: b"context".to_vec().into(),
             }),
         );
 
@@ -830,6 +857,64 @@ mod mechanism_to_ffi_tests {
             unsafe { std::slice::from_raw_parts(mu_gen.p_ctx, mu_gen.ul_ctx_len as usize) };
         assert_eq!(tr, b"precomputed-tr");
         assert_eq!(context, b"context");
+    }
+
+    #[test]
+    fn gcm_null_flags_materialize_null_pointers() {
+        // F3/D2: only caller-NULL fields materialize NULL; empty non-NULL
+        // fields keep a non-NULL pointer with len 0.
+        for (iv_null, aad_null) in [(true, true), (true, false), (false, true), (false, false)] {
+            let ffi = convert(
+                CkMechanismType::AES_GCM,
+                CkMechanismParams::Gcm(GcmParams {
+                    iv: Vec::new(),
+                    iv_bits: 0,
+                    iv_buffer_len: 0,
+                    aad: Vec::new().into(),
+                    tag_bits: 128,
+                    iv_null,
+                    aad_null,
+                }),
+            );
+            // E0793: CK structs are packed on Windows; assert on by-value copies.
+            let gcm = unsafe {
+                ffi.ck_mechanism().pParameter.cast::<cryptoki_sys::CK_GCM_PARAMS>().read_unaligned()
+            };
+            let (p_iv, ul_iv_len, p_aad, ul_aad_len) =
+                (gcm.pIv, gcm.ulIvLen, gcm.pAAD, gcm.ulAADLen);
+            assert_eq!(p_iv.is_null(), iv_null, "pIv nullness");
+            assert_eq!(ul_iv_len, 0);
+            assert_eq!(p_aad.is_null(), aad_null, "pAAD nullness");
+            assert_eq!(ul_aad_len, 0);
+        }
+    }
+
+    #[test]
+    fn oaep_source_null_materializes_null_pointer() {
+        // F3/D2: only a caller-NULL source materializes NULL; an empty
+        // non-NULL source keeps a non-NULL pointer with len 0.
+        for source_null in [true, false] {
+            let ffi = convert(
+                CkMechanismType::RSA_PKCS_OAEP,
+                CkMechanismParams::RsaPkcsOaep(RsaPkcsOaepParams {
+                    hash_alg: CkMechanismType::SHA256,
+                    mgf: 1,
+                    source: 1,
+                    source_data: Vec::new().into(),
+                    source_null,
+                }),
+            );
+            // E0793: CK structs are packed on Windows; assert on by-value copies.
+            let oaep = unsafe {
+                ffi.ck_mechanism()
+                    .pParameter
+                    .cast::<cryptoki_sys::CK_RSA_PKCS_OAEP_PARAMS>()
+                    .read_unaligned()
+            };
+            let (p_source_data, ul_source_data_len) = (oaep.pSourceData, oaep.ulSourceDataLen);
+            assert_eq!(p_source_data.is_null(), source_null, "pSourceData nullness");
+            assert_eq!(ul_source_data_len, 0);
+        }
     }
 }
 
@@ -1052,6 +1137,35 @@ mod attribute_query_tests {
     }
 
     #[test]
+    fn nested_preset_sub_query_type_is_reconstructed_verbatim() {
+        // F7/D5: a caller-preset nested query type (shim: sub CK_ATTRIBUTE
+        // with type_ set, e.g. CKA_SENSITIVE inside CKA_UNWRAP_TEMPLATE)
+        // must reach the backend verbatim — forcing type 0 rewrites the
+        // caller's query and SoftHSM answers CKR_GENERAL_ERROR.
+        let stride = std::mem::size_of::<cryptoki_sys::CK_ATTRIBUTE>() as u64;
+        let ffi = FfiAttributeQueries::from_queries(&[CkAttributeQuery {
+            attr_type: CkAttributeType::UNWRAP_TEMPLATE,
+            buffer_present: true,
+            buffer_len: stride,
+            nested: Some(vec![CkAttributeQuery {
+                attr_type: CkAttributeType::SENSITIVE,
+                buffer_present: true,
+                buffer_len: 1,
+                nested: None,
+            }]),
+        }])
+        .expect("ffi queries");
+
+        assert_eq!(ffi.attrs.len(), 1);
+        // E0793: CK_ATTRIBUTE is packed on Windows; sub type by-value copy.
+        let sub_type = unsafe {
+            std::slice::from_raw_parts(ffi.attrs[0].pValue as *const cryptoki_sys::CK_ATTRIBUTE, 1)
+        }[0]
+        .type_;
+        assert_eq!(sub_type, CkAttributeType::SENSITIVE.0 as cryptoki_sys::CK_ATTRIBUTE_TYPE);
+    }
+
+    #[test]
     fn empty_nested_template_query_yields_null_parent_pvalue() {
         // T4-AUDIT site 5: a degenerate nested template query (shim: template
         // attr with non-null pValue + ulValueLen 0 → nested `Some(vec![])`,
@@ -1101,5 +1215,22 @@ mod attribute_query_tests {
         };
 
         assert_eq!(err, CkRv::HOST_MEMORY);
+    }
+}
+
+#[cfg(test)]
+mod null_template_tests {
+    use super::FfiAttrs;
+
+    #[test]
+    fn opt_slice_none_flags_null_template() {
+        // F3/D2: a caller-NULL template is flagged so the FFI call
+        // receives NULL, not the empty array's address.
+        let none = FfiAttrs::from_opt_slice(None).expect("none template converts");
+        assert!(none.null_template);
+        assert!(none.attrs.is_empty());
+        let empty = FfiAttrs::from_opt_slice(Some(&[])).expect("empty template converts");
+        assert!(!empty.null_template);
+        assert!(empty.attrs.is_empty());
     }
 }

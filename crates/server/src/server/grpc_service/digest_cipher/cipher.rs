@@ -1,9 +1,13 @@
+// ADR-0013 §5: every `secret_to_plain` use in this file is a prost wire-encoding
+// boundary (response/request construction); the standing justification lives in
+// `secret_boundary` docs. No plain copy is retained past the enclosing encode.
+use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
 use std::sync::Arc;
 use std::time::Instant;
 
 use pkcs11_proxy_ng_audit::EventClass;
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
-use pkcs11_proxy_ng_types::{CkInBuf, CkMechanism, CkRv};
+use pkcs11_proxy_ng_types::{CkInBuf, CkMechanism, CkRv, SecretBytes};
 use tonic::{Request, Response, Status};
 
 use super::super::authorization::mechanism_permitted;
@@ -129,9 +133,11 @@ pub(crate) async fn encrypt(
         }
     };
 
-    let data = req.data;
+    let data = SecretBytes::new(req.data);
     let backend = Arc::clone(backend_ref);
-    let result = spawn_backend(move || backend.encrypt(session, CkInBuf::Bytes(&data))).await?;
+    let result =
+        spawn_backend(move || data.expose(|raw| backend.encrypt(session, CkInBuf::Bytes(raw))))
+            .await?;
     let (ck_rv, encrypted_data) = ck_result_to_rv(result);
     let mechanism_out = session_mechanism_out_if_ok(backend_ref, session, ck_rv);
     // Opt-in data-plane audit: emit fail-open; never reject the op on a dropped record.
@@ -149,7 +155,7 @@ pub(crate) async fn encrypt(
     }
     Ok(Response::new(pkcs11_proxy_ng_proto::EncryptResponse {
         ck_rv,
-        encrypted_data: encrypted_data.unwrap_or_default(),
+        encrypted_data: secret_to_plain(&encrypted_data.unwrap_or_default()),
         mechanism_out,
     }))
 }
@@ -175,15 +181,17 @@ pub(crate) async fn encrypt_update(
         }
     };
 
-    let part = req.part;
+    let part = SecretBytes::new(req.part);
     let backend = Arc::clone(backend_ref);
-    let result =
-        spawn_backend(move || backend.encrypt_update(session, CkInBuf::Bytes(&part))).await?;
+    let result = spawn_backend(move || {
+        part.expose(|raw| backend.encrypt_update(session, CkInBuf::Bytes(raw)))
+    })
+    .await?;
     let (ck_rv, encrypted_part) = ck_result_to_rv(result);
     let mechanism_out = session_mechanism_out_if_ok(backend_ref, session, ck_rv);
     Ok(Response::new(pkcs11_proxy_ng_proto::EncryptUpdateResponse {
         ck_rv,
-        encrypted_part: encrypted_part.unwrap_or_default(),
+        encrypted_part: secret_to_plain(&encrypted_part.unwrap_or_default()),
         mechanism_out,
     }))
 }
@@ -228,7 +236,7 @@ pub(crate) async fn encrypt_final(
     }
     Ok(Response::new(pkcs11_proxy_ng_proto::EncryptFinalResponse {
         ck_rv,
-        last_encrypted_part: last_encrypted_part.unwrap_or_default(),
+        last_encrypted_part: secret_to_plain(&last_encrypted_part.unwrap_or_default()),
         mechanism_out,
     }))
 }
@@ -365,7 +373,7 @@ pub(crate) async fn decrypt(
     }
     Ok(Response::new(pkcs11_proxy_ng_proto::DecryptResponse {
         ck_rv,
-        data: data.unwrap_or_default(),
+        data: secret_to_plain(&data.unwrap_or_default()),
         mechanism_out,
     }))
 }
@@ -400,7 +408,7 @@ pub(crate) async fn decrypt_update(
     let mechanism_out = session_mechanism_out_if_ok(backend_ref, session, ck_rv);
     Ok(Response::new(pkcs11_proxy_ng_proto::DecryptUpdateResponse {
         ck_rv,
-        part: part.unwrap_or_default(),
+        part: secret_to_plain(&part.unwrap_or_default()),
         mechanism_out,
     }))
 }
@@ -445,7 +453,7 @@ pub(crate) async fn decrypt_final(
     }
     Ok(Response::new(pkcs11_proxy_ng_proto::DecryptFinalResponse {
         ck_rv,
-        last_part: last_part.unwrap_or_default(),
+        last_part: secret_to_plain(&last_part.unwrap_or_default()),
         mechanism_out,
     }))
 }

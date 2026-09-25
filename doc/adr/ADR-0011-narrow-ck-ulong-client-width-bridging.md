@@ -569,6 +569,11 @@ assumption.
   direction is evidenced by leg B. The client exclusions
   (`pc-windows-gnu`, 32-bit Windows, big-/mixed-endian) and the remaining
   native-host exclusions stand.]
+  [2026-09-18 T6b staging: the 32-bit Windows client exclusion is now
+  code-complete (width bridge, probe, `host_abi`, FFI paths, native-FFI
+  qualification) with local `i686-pc-windows-msvc` cross-compile/link
+  proof, and the win32 CI leg exists; the exclusion lifts only when
+  T2run's first green win32 run lands, which finishes this doc move.]
 - **D4 — Overflow: checked, value-preserving narrowing.** Convert the integer
   value with a checked `CK_ULONG::try_from`; reject (`CKR_FUNCTION_FAILED`) on a
   genuine `> u32::MAX` value rather than silently truncate. Guarantees `1 → 1`
@@ -587,6 +592,8 @@ assumption.
 - **D6 — Endianness guard.** The D2 advertisement also carries backend byte
   order; the client refuses at probe on an LE/BE mismatch rather than silently
   corrupting. All supported targets are LE; this guards a future BE backend.
+  (BE since proven at the build+QEMU tier — see [be-qemu-tier.md](../release/be-qemu-tier.md);
+  live mixed-endian bridging remains refused by design.)
 - **D7 — Vendor / unknown attributes: opaque-bytes by default; operator-declared
   types later.** The proxy cannot infer a `CKA_VENDOR_DEFINED`/unknown
   attribute's value type, so it passes such attributes through as opaque bytes

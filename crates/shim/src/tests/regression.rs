@@ -27,18 +27,19 @@ fn regression_connect_retry_cap_is_tunable_downward_only() {
     assert_eq!(crate::state::connect_attempts_from_value(Some("junk")), 10);
 }
 
-/// This series: the D6 resolver always refused a big-endian backend, but
+/// This series: the D6 resolver always refused a foreign-order backend, but
 /// nothing ACTED on the refusal at C_Initialize (reprobe warned and
 /// carried on). The resolver contract stays pinned here; the end-to-end
-/// enforcement is `cross_abi::big_endian_backend_is_refused_at_initialize`.
+/// enforcement is `cross_abi::foreign_byte_order_backend_is_refused_at_initialize`.
 #[test]
 fn regression_byte_order_mismatch_is_resolver_refused() {
-    assert!(crate::interface_probe::resolve_backend_ulong_size(Some(8), Some(2)).is_err());
-    assert!(crate::interface_probe::resolve_backend_ulong_size(Some(4), Some(2)).is_err());
-    assert_eq!(
-        crate::interface_probe::resolve_backend_ulong_size(Some(4), Some(1)),
-        Ok((4, false))
-    );
+    // The foreign order for this host (BE on LE, LE on BE) is refused at
+    // both widths; the native order passes through.
+    let foreign = Some(if cfg!(target_endian = "little") { 2 } else { 1 });
+    let native = Some(if cfg!(target_endian = "little") { 1 } else { 2 });
+    assert!(crate::interface_probe::resolve_backend_ulong_size(Some(8), foreign).is_err());
+    assert!(crate::interface_probe::resolve_backend_ulong_size(Some(4), foreign).is_err());
+    assert_eq!(crate::interface_probe::resolve_backend_ulong_size(Some(4), native), Ok((4, false)));
 }
 
 /// This series: nested CKA_*_TEMPLATE byte lengths crossed the wire in

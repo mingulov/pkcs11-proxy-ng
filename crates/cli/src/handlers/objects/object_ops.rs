@@ -20,12 +20,12 @@ pub(crate) async fn find_objects(
     if let Some(label) = label {
         template.push(CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(label)),
+            value: Some(CkAttributeValue::String(label.into())),
         });
     }
 
     client
-        .find_objects_init(session, &template)
+        .find_objects_init(session, Some(&template))
         .await
         .map_err(crate::handlers::cli_err("C_FindObjectsInit"))?;
     let objects = client
@@ -115,7 +115,7 @@ pub(crate) async fn create_object(
         },
         CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(label)),
+            value: Some(CkAttributeValue::String(label.into())),
         },
         CkAttribute {
             attr_type: CkAttributeType::TOKEN,
@@ -126,12 +126,12 @@ pub(crate) async fn create_object(
         let bytes = hex::decode(&value).map_err(|e| format!("Invalid hex value: {e}"))?;
         template.push(CkAttribute {
             attr_type: CkAttributeType::VALUE,
-            value: Some(CkAttributeValue::Bytes(bytes)),
+            value: Some(CkAttributeValue::Bytes(bytes.into())),
         });
     }
 
     let handle = client
-        .create_object(session, &template)
+        .create_object(session, Some(&template))
         .await
         .map_err(crate::handlers::cli_err("C_CreateObject"))?;
     println!("Created object with handle: {}", handle.0);
@@ -171,16 +171,18 @@ pub(crate) async fn get_attribute(
     for attribute in &results {
         let name = attr_type_name(attribute.attr_type.0);
         match &attribute.value {
-            Some(CkAttributeValue::Bytes(bytes)) => {
-                if bytes.iter().all(|byte| byte.is_ascii_graphic() || *byte == b' ') {
-                    println!("  {}: \"{}\"", name, String::from_utf8_lossy(bytes));
+            Some(CkAttributeValue::Bytes(bytes)) => bytes.expose(|raw| {
+                if raw.iter().all(|byte| byte.is_ascii_graphic() || *byte == b' ') {
+                    println!("  {}: \"{}\"", name, String::from_utf8_lossy(raw));
                 } else {
-                    println!("  {}: 0x{}", name, hex::encode(bytes));
+                    println!("  {}: 0x{}", name, hex::encode(raw));
                 }
-            }
+            }),
             Some(CkAttributeValue::Ulong(value)) => println!("  {}: {}", name, value),
             Some(CkAttributeValue::Bool(value)) => println!("  {}: {}", name, value),
-            Some(CkAttributeValue::String(value)) => println!("  {}: \"{}\"", name, value),
+            Some(CkAttributeValue::String(value)) => {
+                value.expose(|raw| println!("  {}: \"{}\"", name, String::from_utf8_lossy(raw)))
+            }
             Some(CkAttributeValue::NestedTemplate(subs)) => {
                 println!("  {}: <nested template, {} attributes>", name, subs.len());
             }

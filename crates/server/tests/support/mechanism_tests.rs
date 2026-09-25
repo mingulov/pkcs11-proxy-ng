@@ -108,7 +108,7 @@ pub async fn generate_aes_key(
         // Note: WRAP attribute is included for SoftHSM2 compatibility
         CkAttribute { attr_type: CkAttributeType::WRAP, value: Some(CkAttributeValue::Bool(true)) },
     ];
-    client.generate_key(session, &mechanism, &template).await
+    client.generate_key(session, &mechanism, Some(&template)).await
 }
 
 /// Generate a generic secret key for HKDF derivation tests.
@@ -138,7 +138,7 @@ pub async fn generate_generic_secret_key(
         },
         CkAttribute { attr_type: CKA_DERIVE, value: Some(CkAttributeValue::Bool(true)) },
     ];
-    client.generate_key(session, &mechanism, &template).await
+    client.generate_key(session, &mechanism, Some(&template)).await
 }
 
 /// Generate an EC P-256 key pair for ECDH derivation and ECDSA tests.
@@ -161,7 +161,7 @@ pub async fn generate_ec_key_pair(
         },
         CkAttribute {
             attr_type: CkAttributeType::EC_PARAMS,
-            value: Some(CkAttributeValue::Bytes(ec_params_p256.clone())),
+            value: Some(CkAttributeValue::Bytes(ec_params_p256.clone().into())),
         },
         CkAttribute {
             attr_type: CkAttributeType::TOKEN,
@@ -173,7 +173,7 @@ pub async fn generate_ec_key_pair(
         },
         CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(format!("{label_prefix}-pub"))),
+            value: Some(CkAttributeValue::String(format!("{label_prefix}-pub").into())),
         },
     ];
 
@@ -198,13 +198,13 @@ pub async fn generate_ec_key_pair(
         CkAttribute { attr_type: CKA_DERIVE, value: Some(CkAttributeValue::Bool(true)) },
         CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(format!("{label_prefix}-priv"))),
+            value: Some(CkAttributeValue::String(format!("{label_prefix}-priv").into())),
         },
     ];
 
     let mechanism = CkMechanism { mechanism_type: CkMechanismType::EC_KEY_PAIR_GEN, params: None };
     client
-        .generate_key_pair(session, &mechanism, &pub_template, &priv_template)
+        .generate_key_pair(session, &mechanism, Some(&pub_template), Some(&priv_template))
         .await
         .map_err(|rv| format!("EC key pair generation failed: {rv}"))
 }
@@ -231,7 +231,7 @@ pub async fn generate_rsa_key_pair(
         },
         CkAttribute {
             attr_type: CkAttributeType::PUBLIC_EXPONENT,
-            value: Some(CkAttributeValue::Bytes(vec![0x01, 0x00, 0x01])),
+            value: Some(CkAttributeValue::Bytes(vec![0x01, 0x00, 0x01].into())),
         },
         CkAttribute {
             attr_type: CkAttributeType::TOKEN,
@@ -243,7 +243,7 @@ pub async fn generate_rsa_key_pair(
         },
         CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(format!("{label_prefix}-pub"))),
+            value: Some(CkAttributeValue::String(format!("{label_prefix}-pub").into())),
         },
         CkAttribute {
             attr_type: CkAttributeType::ENCRYPT,
@@ -273,7 +273,7 @@ pub async fn generate_rsa_key_pair(
         },
         CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(format!("{label_prefix}-priv"))),
+            value: Some(CkAttributeValue::String(format!("{label_prefix}-priv").into())),
         },
         CkAttribute {
             attr_type: CkAttributeType::DECRYPT,
@@ -292,7 +292,7 @@ pub async fn generate_rsa_key_pair(
     let mechanism =
         CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS_KEY_PAIR_GEN, params: None };
     client
-        .generate_key_pair(session, &mechanism, &public_template, &private_template)
+        .generate_key_pair(session, &mechanism, Some(&public_template), Some(&private_template))
         .await
         .map_err(|rv| format!("RSA key pair generation failed: {rv}"))
 }
@@ -541,7 +541,9 @@ pub async fn test_rsa_oaep_encrypt_decrypt(
         hash_alg: CKM_SHA_1,
         mgf: CKG_MGF1_SHA1,
         source: CKZ_DATA_SPECIFIED,
-        source_data: Vec::new(),
+        source_data: Vec::new().into(),
+
+        source_null: false,
     };
     let oaep_mechanism = CkMechanism {
         mechanism_type: CkMechanismType::RSA_PKCS_OAEP,
@@ -616,7 +618,7 @@ pub async fn test_ecdh1_derive(
         mechanism_type: CkMechanismType::ECDH1_DERIVE,
         params: Some(CkMechanismParams::Ecdh1Derive(Ecdh1DeriveParams {
             kdf: CKD_NULL,
-            shared_data: Vec::new(),
+            shared_data: Vec::new().into(),
             public_data: bob_ec_point.clone(),
         })),
     };
@@ -649,7 +651,7 @@ pub async fn test_ecdh1_derive(
     ];
 
     let alice_derived = client
-        .derive_key(session, &derive_mechanism, alice_priv, &derived_key_template)
+        .derive_key(session, &derive_mechanism, alice_priv, Some(&derived_key_template))
         .await
         .map_err(|rv| format!("C_DeriveKey(ECDH1, Alice) failed: {rv}"))?;
 
@@ -697,9 +699,9 @@ pub async fn test_hkdf_derive(
             expand: true,
             prf_hash_mechanism: CkMechanismType::SHA256.0,
             salt_type: CKF_HKDF_SALT_DATA,
-            salt: salt.to_vec(),
+            salt: salt.to_vec().into(),
             salt_key_handle: 0, // not used with DATA salt
-            info: info.to_vec(),
+            info: info.to_vec().into(),
         })),
     };
 
@@ -731,7 +733,7 @@ pub async fn test_hkdf_derive(
     ];
 
     let derived_key = client
-        .derive_key(session, &hkdf_mechanism, base_key, &derived_key_template)
+        .derive_key(session, &hkdf_mechanism, base_key, Some(&derived_key_template))
         .await
         .map_err(|rv| format!("C_DeriveKey(HKDF) failed: {rv}"))?;
 
@@ -778,7 +780,8 @@ pub async fn test_aes_cbc_encrypt_data_derive(
                 .iter()
                 .copied()
                 .chain(std::iter::repeat_n(0u8, 8))
-                .collect(), // 32 bytes (multiple of 16)
+                .collect::<Vec<u8>>()
+                .into(), // 32 bytes (multiple of 16)
         })),
     };
 
@@ -807,7 +810,7 @@ pub async fn test_aes_cbc_encrypt_data_derive(
     ];
 
     let derived_key = client
-        .derive_key(session, &derive_mechanism, base_key, &derived_key_template)
+        .derive_key(session, &derive_mechanism, base_key, Some(&derived_key_template))
         .await
         .map_err(|rv| format!("C_DeriveKey(AES-CBC-ENCRYPT-DATA) failed: {rv}"))?;
 

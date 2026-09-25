@@ -73,7 +73,7 @@ async fn injected_error_during_sign_init() {
     let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
 
     // Create an object so we have a valid key handle
-    let key = client.create_object(session, &[]).await.unwrap();
+    let key = client.create_object(session, Some(&[])).await.unwrap();
 
     // Inject error for sign_init
     mock.inject_error(CkRv::DEVICE_ERROR);
@@ -95,7 +95,7 @@ async fn error_recovery_full_sign_workflow() {
 
     let slots = client.get_slot_list(false).await.unwrap();
     let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
-    let key = client.create_object(session, &[]).await.unwrap();
+    let key = client.create_object(session, Some(&[])).await.unwrap();
     let mech = CkMechanism { mechanism_type: CkMechanismType(0x00000001), params: None };
 
     // 1) Normal sign workflow
@@ -337,11 +337,11 @@ async fn multiple_clients_independent_fault_isolation() {
 
     // Both clients open sessions and create objects for key handles
     let session_a = client_a.open_session(slots[0], CKF_SERIAL).await.unwrap();
-    let key_a = client_a.create_object(session_a, &[]).await.unwrap();
+    let key_a = client_a.create_object(session_a, Some(&[])).await.unwrap();
 
     let slots_b = client_b.get_slot_list(false).await.unwrap();
     let session_b = client_b.open_session(slots_b[0], CKF_SERIAL).await.unwrap();
-    let key_b = client_b.create_object(session_b, &[]).await.unwrap();
+    let key_b = client_b.create_object(session_b, Some(&[])).await.unwrap();
 
     let mech = CkMechanism { mechanism_type: CkMechanismType(0x00000001), params: None };
 
@@ -373,7 +373,7 @@ async fn close_session_succeeds_after_backend_error_recovery() {
 
     let slots = client.get_slot_list(false).await.unwrap();
     let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
-    let key = client.create_object(session, &[]).await.unwrap();
+    let key = client.create_object(session, Some(&[])).await.unwrap();
 
     // Inject error
     mock.inject_error(CkRv::DEVICE_ERROR);

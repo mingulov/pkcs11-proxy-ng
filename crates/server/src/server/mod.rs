@@ -7,6 +7,7 @@ pub mod control;
 pub mod grpc_service;
 pub mod handle_map;
 pub mod health;
+pub mod protected_decode;
 pub mod rate_limit;
 pub mod rate_quota;
 pub mod resilience;

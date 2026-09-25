@@ -33,9 +33,10 @@ mod tests {
     }
 
     #[test]
-    fn byte_order_is_little_on_supported_targets() {
-        // All supported targets are little-endian; the function still encodes
-        // big-endian as 2 for a hypothetical future BE backend.
-        assert_eq!(host_byte_order(), 1);
+    fn byte_order_matches_target_endianness() {
+        // 1 = little-endian, 2 = big-endian per ADR-0011 D6: the compiled
+        // target's own order, pinned here so a BE build proves the BE arm.
+        let want = if cfg!(target_endian = "little") { 1 } else { 2 };
+        assert_eq!(host_byte_order(), want);
     }
 }

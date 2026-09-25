@@ -1048,10 +1048,15 @@ mod backend_abi_tests {
         assert!(resolve_backend_attribute_stride(Some(300), 8).is_err());
     }
 
+    /// This client's own D2 byte-order code: 1 on LE, 2 on BE.
+    fn native_order() -> Option<u32> {
+        Some(if cfg!(target_endian = "little") { 1 } else { 2 })
+    }
+
     #[test]
     fn valid_advertised_widths_pass_through() {
-        assert_eq!(resolve_backend_ulong_size(Some(4), Some(1)), Ok((4, false)));
-        assert_eq!(resolve_backend_ulong_size(Some(8), Some(1)), Ok((8, false)));
+        assert_eq!(resolve_backend_ulong_size(Some(4), native_order()), Ok((4, false)));
+        assert_eq!(resolve_backend_ulong_size(Some(8), native_order()), Ok((8, false)));
         // Byte order may be unspecified (older daemon set the size only).
         assert_eq!(resolve_backend_ulong_size(Some(8), None), Ok((8, false)));
     }
@@ -1060,14 +1065,15 @@ mod backend_abi_tests {
     fn absent_width_falls_back_to_eight_d9() {
         // D9: no advertisement → assume 8 (LP64), flagged so the caller can warn.
         assert_eq!(resolve_backend_ulong_size(None, None), Ok((8, true)));
-        assert_eq!(resolve_backend_ulong_size(None, Some(1)), Ok((8, true)));
+        assert_eq!(resolve_backend_ulong_size(None, native_order()), Ok((8, true)));
     }
 
     #[test]
     fn invalid_width_is_refused() {
-        assert!(resolve_backend_ulong_size(Some(2), Some(1)).is_err());
-        assert!(resolve_backend_ulong_size(Some(16), Some(1)).is_err());
-        assert!(resolve_backend_ulong_size(Some(0), Some(1)).is_err());
+        // Native order throughout so these pin the WIDTH refusal, not D6.
+        assert!(resolve_backend_ulong_size(Some(2), native_order()).is_err());
+        assert!(resolve_backend_ulong_size(Some(16), native_order()).is_err());
+        assert!(resolve_backend_ulong_size(Some(0), native_order()).is_err());
     }
 
     #[test]
@@ -1078,6 +1084,16 @@ mod backend_abi_tests {
         assert!(resolve_backend_ulong_size(Some(8), Some(2)).is_err());
         // A little-endian or unspecified order is accepted.
         assert!(resolve_backend_ulong_size(Some(8), Some(1)).is_ok());
+        assert!(resolve_backend_ulong_size(Some(8), None).is_ok());
+    }
+
+    #[test]
+    #[cfg(target_endian = "big")]
+    fn little_endian_backend_refused_on_be_client_d6() {
+        // D6 mirror: on a BE client it is the LE advertisement that must be
+        // refused, while BE (native) and unspecified pass.
+        assert!(resolve_backend_ulong_size(Some(8), Some(1)).is_err());
+        assert!(resolve_backend_ulong_size(Some(8), Some(2)).is_ok());
         assert!(resolve_backend_ulong_size(Some(8), None).is_ok());
     }
 }

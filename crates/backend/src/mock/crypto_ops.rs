@@ -115,18 +115,18 @@ impl MockBackend {
         self.begin_keyed_op_with_mechanism(session, mechanism, key, MultiPartOp::Sign)
     }
 
-    pub(super) fn sign_impl(&self, session: CkSessionHandle, data: &[u8]) -> CkResult<Vec<u8>> {
+    pub(super) fn sign_impl(&self, session: CkSessionHandle, data: &[u8]) -> CkResult<SecretBytes> {
         self.state.lock().unwrap().end_op(session, MultiPartOp::Sign)?;
-        Ok(super::echo::echo_bytes("sign", &[data], MOCK_SIGN_LEN))
+        Ok(super::echo::echo_bytes("sign", &[data], MOCK_SIGN_LEN).into())
     }
 
     pub(super) fn sign_update_impl(&self, session: CkSessionHandle) -> CkResult<()> {
         self.state.lock().unwrap().require_op(session, MultiPartOp::Sign)
     }
 
-    pub(super) fn sign_final_impl(&self, session: CkSessionHandle) -> CkResult<Vec<u8>> {
+    pub(super) fn sign_final_impl(&self, session: CkSessionHandle) -> CkResult<SecretBytes> {
         self.state.lock().unwrap().end_op(session, MultiPartOp::Sign)?;
-        Ok(super::echo::echo_bytes("sign-final", &[], MOCK_SIGN_LEN))
+        Ok(super::echo::echo_bytes("sign-final", &[], MOCK_SIGN_LEN).into())
     }
 
     pub(super) fn verify_init_impl(
@@ -160,9 +160,9 @@ impl MockBackend {
         session: CkSessionHandle,
         data: &[u8],
         len: usize,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         self.state.lock().unwrap().end_op(session, MultiPartOp::Digest)?;
-        Ok(super::echo::echo_bytes("digest", &[data], len))
+        Ok(super::echo::echo_bytes("digest", &[data], len).into())
     }
 
     pub(super) fn digest_update_impl(&self, session: CkSessionHandle) -> CkResult<()> {
@@ -186,9 +186,9 @@ impl MockBackend {
         &self,
         session: CkSessionHandle,
         len: usize,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         self.state.lock().unwrap().end_op(session, MultiPartOp::Digest)?;
-        Ok(super::echo::echo_bytes("digest-final", &[], len))
+        Ok(super::echo::echo_bytes("digest-final", &[], len).into())
     }
 
     pub(super) fn encrypt_init_impl(
@@ -200,26 +200,30 @@ impl MockBackend {
         self.begin_keyed_op(session, key, MultiPartOp::Encrypt)
     }
 
-    pub(super) fn encrypt_impl(&self, session: CkSessionHandle, data: &[u8]) -> CkResult<Vec<u8>> {
+    pub(super) fn encrypt_impl(
+        &self,
+        session: CkSessionHandle,
+        data: &[u8],
+    ) -> CkResult<SecretBytes> {
         self.state.lock().unwrap().end_op(session, MultiPartOp::Encrypt)?;
         self.record_encrypt_operation_output(session);
-        Ok(Self::xor_bytes(data))
+        Ok(Self::xor_bytes(data).into())
     }
 
     pub(super) fn encrypt_update_impl(
         &self,
         session: CkSessionHandle,
         part: &[u8],
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         self.state.lock().unwrap().require_op(session, MultiPartOp::Encrypt)?;
         self.record_encrypt_operation_output(session);
-        Ok(Self::xor_bytes(part))
+        Ok(Self::xor_bytes(part).into())
     }
 
-    pub(super) fn encrypt_final_impl(&self, session: CkSessionHandle) -> CkResult<Vec<u8>> {
+    pub(super) fn encrypt_final_impl(&self, session: CkSessionHandle) -> CkResult<SecretBytes> {
         self.state.lock().unwrap().end_op(session, MultiPartOp::Encrypt)?;
         self.record_encrypt_operation_output(session);
-        Ok(vec![])
+        Ok(vec![].into())
     }
 
     fn record_encrypt_operation_output(&self, session: CkSessionHandle) {
@@ -241,26 +245,26 @@ impl MockBackend {
         &self,
         session: CkSessionHandle,
         encrypted_data: &[u8],
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         self.state.lock().unwrap().end_op(session, MultiPartOp::Decrypt)?;
-        Ok(Self::xor_bytes(encrypted_data))
+        Ok(Self::xor_bytes(encrypted_data).into())
     }
 
     pub(super) fn decrypt_update_impl(
         &self,
         session: CkSessionHandle,
         encrypted_part: &[u8],
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         self.state.lock().unwrap().require_op(session, MultiPartOp::Decrypt)?;
-        Ok(Self::xor_bytes(encrypted_part))
+        Ok(Self::xor_bytes(encrypted_part).into())
     }
 
-    pub(super) fn decrypt_final_impl(&self, session: CkSessionHandle) -> CkResult<Vec<u8>> {
+    pub(super) fn decrypt_final_impl(&self, session: CkSessionHandle) -> CkResult<SecretBytes> {
         self.state.lock().unwrap().end_op(session, MultiPartOp::Decrypt)?;
-        Ok(vec![])
+        Ok(vec![].into())
     }
 
-    pub(super) fn operation_state(&self, session: CkSessionHandle) -> CkResult<Vec<u8>> {
+    pub(super) fn operation_state(&self, session: CkSessionHandle) -> CkResult<SecretBytes> {
         let state = self.state.lock().unwrap();
         if !state.has_session(session) {
             return Err(CkRv::SESSION_HANDLE_INVALID);
@@ -268,7 +272,7 @@ impl MockBackend {
         match state.active_ops.get(&session.0) {
             None => Err(CkRv::OPERATION_NOT_INITIALIZED),
             Some(op) => match self.encode_op(*op) {
-                Some(op_byte) => Ok([MOCK_STATE_PREFIX.as_slice(), &[op_byte]].concat()),
+                Some(op_byte) => Ok([MOCK_STATE_PREFIX.as_slice(), &[op_byte]].concat().into()),
                 None => Err(CkRv::OPERATION_NOT_INITIALIZED),
             },
         }
@@ -295,20 +299,20 @@ impl MockBackend {
         Ok(())
     }
 
-    pub(super) fn generate_random_impl(&self, len: u32) -> CkResult<Vec<u8>> {
+    pub(super) fn generate_random_impl(&self, len: u32) -> CkResult<SecretBytes> {
         self.check_injected()?;
         if len > Self::MAX_RANDOM_BYTES {
             return Err(CkRv::DATA_LEN_RANGE);
         }
-        Ok(vec![MOCK_RANDOM_BYTE; len as usize])
+        Ok(vec![MOCK_RANDOM_BYTE; len as usize].into())
     }
 
-    pub(super) fn combined_update(&self, part: &[u8]) -> CkResult<Vec<u8>> {
-        Ok(Self::xor_bytes(part))
+    pub(super) fn combined_update(&self, part: &[u8]) -> CkResult<SecretBytes> {
+        Ok(Self::xor_bytes(part).into())
     }
 
-    pub(super) fn verify_recover_impl(&self) -> CkResult<Vec<u8>> {
-        Ok(MOCK_VERIFY_RECOVER_OUTPUT.to_vec())
+    pub(super) fn verify_recover_impl(&self) -> CkResult<SecretBytes> {
+        Ok(MOCK_VERIFY_RECOVER_OUTPUT.to_vec().into())
     }
 
     pub(super) fn encapsulate_key_impl(
@@ -317,14 +321,14 @@ impl MockBackend {
         _mechanism: &CkMechanism,
         public_key: CkObjectHandle,
         template: &[CkAttribute],
-    ) -> CkResult<(Vec<u8>, CkObjectHandle)> {
+    ) -> CkResult<(SecretBytes, CkObjectHandle)> {
         self.check_injected()?;
         let mut state = self.state.lock().unwrap();
         self.require_live_key(&state, session, public_key)?;
         let ciphertext = MOCK_ENCAPSULATE_OUTPUT.to_vec();
         let key_handle =
             self.allocate_session_object_with_template(&mut state, session, template)?;
-        Ok((ciphertext, key_handle))
+        Ok((ciphertext.into(), key_handle))
     }
 
     pub(super) fn encapsulate_key_exact_impl(
@@ -453,7 +457,9 @@ impl MockBackend {
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         let bytes = self.verify_recover_impl()?;
-        self.exact_terminal_output(session, MultiPartOp::VerifyRecover, &bytes, spec)
+        bytes.expose(|raw| {
+            self.exact_terminal_output(session, MultiPartOp::VerifyRecover, raw, spec)
+        })
     }
 
     /// Active digest output length for `session` (mechanism-defined, or
@@ -513,7 +519,7 @@ impl MockBackend {
             return Ok(result);
         }
         let bytes = self.encrypt_update_impl(session, part)?;
-        Ok(CkOutputBufferResult::from_convenience_bytes(&bytes, spec))
+        Ok(bytes.expose(|raw| CkOutputBufferResult::from_convenience_bytes(raw, spec)))
     }
 
     pub(super) fn encrypt_final_exact_impl(
@@ -552,7 +558,7 @@ impl MockBackend {
             return Ok(result);
         }
         let bytes = self.decrypt_update_impl(session, encrypted_part)?;
-        Ok(CkOutputBufferResult::from_convenience_bytes(&bytes, spec))
+        Ok(bytes.expose(|raw| CkOutputBufferResult::from_convenience_bytes(raw, spec)))
     }
 
     pub(super) fn decrypt_final_exact_impl(
@@ -570,7 +576,7 @@ impl MockBackend {
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         let bytes = self.combined_update(part)?;
-        Ok(CkOutputBufferResult::from_convenience_bytes(&bytes, spec))
+        Ok(bytes.expose(|raw| CkOutputBufferResult::from_convenience_bytes(raw, spec)))
     }
 
     pub(super) fn decrypt_digest_update_exact_impl(
@@ -579,7 +585,7 @@ impl MockBackend {
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         let bytes = self.combined_update(encrypted_part)?;
-        Ok(CkOutputBufferResult::from_convenience_bytes(&bytes, spec))
+        Ok(bytes.expose(|raw| CkOutputBufferResult::from_convenience_bytes(raw, spec)))
     }
 
     pub(super) fn sign_encrypt_update_exact_impl(
@@ -588,7 +594,7 @@ impl MockBackend {
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         let bytes = self.combined_update(part)?;
-        Ok(CkOutputBufferResult::from_convenience_bytes(&bytes, spec))
+        Ok(bytes.expose(|raw| CkOutputBufferResult::from_convenience_bytes(raw, spec)))
     }
 
     pub(super) fn decrypt_verify_update_exact_impl(
@@ -597,7 +603,7 @@ impl MockBackend {
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         let bytes = self.combined_update(encrypted_part)?;
-        Ok(CkOutputBufferResult::from_convenience_bytes(&bytes, spec))
+        Ok(bytes.expose(|raw| CkOutputBufferResult::from_convenience_bytes(raw, spec)))
     }
 
     pub(super) fn wrap_key_exact_impl(
@@ -605,7 +611,7 @@ impl MockBackend {
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         let bytes = self.wrap_key_impl()?;
-        Ok(CkOutputBufferResult::from_convenience_bytes(&bytes, spec))
+        Ok(bytes.expose(|raw| CkOutputBufferResult::from_convenience_bytes(raw, spec)))
     }
 
     pub(super) fn get_operation_state_exact_impl(
@@ -614,7 +620,7 @@ impl MockBackend {
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         let bytes = self.operation_state(session)?;
-        Ok(CkOutputBufferResult::from_convenience_bytes(&bytes, spec))
+        Ok(bytes.expose(|raw| CkOutputBufferResult::from_convenience_bytes(raw, spec)))
     }
 
     // --- Track C: Exact parameter-output mock implementations ---
@@ -634,7 +640,11 @@ impl MockBackend {
             } else {
                 parameter.len() as u64
             },
-            value: if param_out_spec.buffer_present { Some(parameter.to_vec()) } else { None },
+            value: if param_out_spec.buffer_present {
+                Some(parameter.to_vec().into())
+            } else {
+                None
+            },
         }
     }
 
@@ -925,12 +935,13 @@ impl MockBackend {
         param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
         let bytes = self.wrap_key_impl()?;
-        let output_result = CkOutputBufferResult::from_convenience_bytes(&bytes, output_spec);
+        let output_result =
+            bytes.expose(|raw| CkOutputBufferResult::from_convenience_bytes(raw, output_spec));
         // Authenticated wrap has no input parameter in the mock — return empty.
         let param_result = CkParameterRoundtripResult {
             ck_rv: output_result.ck_rv,
             returned_len: 0,
-            value: if param_out_spec.buffer_present { Some(Vec::new()) } else { None },
+            value: if param_out_spec.buffer_present { Some(Vec::new().into()) } else { None },
         };
         Ok((output_result, param_result))
     }

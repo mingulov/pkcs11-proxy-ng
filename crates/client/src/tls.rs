@@ -3,6 +3,9 @@ use std::time::Duration;
 
 use tonic::transport::{Certificate, ClientTlsConfig, Identity};
 
+use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
+use pkcs11_proxy_ng_types::SecretBytes;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientTlsFiles {
     pub ca_cert: PathBuf,
@@ -48,16 +51,21 @@ impl ClientTlsFiles {
                 self.client_cert.display()
             )
         })?;
-        let key = std::fs::read(&self.client_key).map_err(|e| {
+        // ADR-0013 §5: the PEM key file is adopted into the wiping owner
+        // immediately; only the copy forced by tonic's `Vec<u8>` API is
+        // plain, built at the call with no retained duplicate. (rustls
+        // retains its own parsed copy past this point, outside the wiping
+        // guarantee, like tonic/prost transport buffers.)
+        let key = SecretBytes::new(std::fs::read(&self.client_key).map_err(|e| {
             format!(
                 "failed to read PKCS11_PROXY_TLS_CLIENT_KEY '{}': {e}",
                 self.client_key.display()
             )
-        })?;
+        })?);
 
         let mut config = ClientTlsConfig::new()
             .ca_certificate(Certificate::from_pem(ca))
-            .identity(Identity::from_pem(cert, key))
+            .identity(Identity::from_pem(cert, secret_to_plain(&key)))
             .timeout(Duration::from_secs(10));
         if let Some(domain_name) = self.domain_name {
             config = config.domain_name(domain_name);

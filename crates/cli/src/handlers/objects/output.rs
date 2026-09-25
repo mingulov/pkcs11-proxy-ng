@@ -24,7 +24,9 @@ pub(super) async fn print_verbose_object(
         .find(|attr| attr.attr_type == CkAttributeType::LABEL)
         .and_then(|attr| attr.value.as_ref())
         .and_then(|value| match value {
-            CkAttributeValue::Bytes(bytes) => String::from_utf8(bytes.clone()).ok(),
+            CkAttributeValue::Bytes(bytes) => {
+                bytes.expose(|raw| String::from_utf8(raw.to_vec()).ok())
+            }
             _ => None,
         })
         .unwrap_or_else(|| "<no label>".to_string());
@@ -33,7 +35,7 @@ pub(super) async fn print_verbose_object(
         .find(|attr| attr.attr_type == CkAttributeType::CLASS)
         .and_then(|attr| attr.value.as_ref())
         .and_then(|value| match value {
-            CkAttributeValue::Bytes(bytes) => bytes_to_u64(bytes),
+            CkAttributeValue::Bytes(bytes) => bytes.expose(bytes_to_u64),
             _ => None,
         })
         .map(object_class_name)
@@ -43,7 +45,7 @@ pub(super) async fn print_verbose_object(
         .find(|attr| attr.attr_type == CkAttributeType::KEY_TYPE)
         .and_then(|attr| attr.value.as_ref())
         .and_then(|value| match value {
-            CkAttributeValue::Bytes(bytes) => bytes_to_u64(bytes),
+            CkAttributeValue::Bytes(bytes) => bytes.expose(bytes_to_u64),
             _ => None,
         })
         .map(key_type_name)

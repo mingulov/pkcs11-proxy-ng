@@ -67,7 +67,7 @@ pub(crate) async fn unwrap_key(
     if let Some(label) = label {
         template.push(CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(label)),
+            value: Some(CkAttributeValue::String(label.into())),
         });
     }
 
@@ -77,7 +77,7 @@ pub(crate) async fn unwrap_key(
             &mechanism,
             CkObjectHandle(unwrapping_key_handle),
             CkInBuf::Bytes(&wrapped_key),
-            &template,
+            Some(&template),
         )
         .await
         .map_err(crate::handlers::cli_err("C_UnwrapKey"))?;
@@ -110,12 +110,12 @@ pub(crate) async fn derive_key(
     if let Some(label) = label {
         template.push(CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(label)),
+            value: Some(CkAttributeValue::String(label.into())),
         });
     }
 
     let handle = client
-        .derive_key(session, &mechanism, CkObjectHandle(base_key_handle), &template)
+        .derive_key(session, &mechanism, CkObjectHandle(base_key_handle), Some(&template))
         .await
         .map_err(crate::handlers::cli_err("C_DeriveKey"))?;
     println!("Derived key handle: {}", handle.0);
@@ -143,7 +143,7 @@ pub(crate) async fn generate_key(
     let mut template = vec![
         CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(label)),
+            value: Some(CkAttributeValue::String(label.into())),
         },
         CkAttribute {
             attr_type: CkAttributeType::TOKEN,
@@ -166,7 +166,7 @@ pub(crate) async fn generate_key(
     }
 
     let key_handle = client
-        .generate_key(session, &mechanism, &template)
+        .generate_key(session, &mechanism, Some(&template))
         .await
         .map_err(crate::handlers::cli_err("C_GenerateKey"))?;
     println!("Generated key handle: {}", key_handle.0);
@@ -194,7 +194,7 @@ pub(crate) async fn generate_key_pair(
     let mut public_template = vec![
         CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(label.clone())),
+            value: Some(CkAttributeValue::String(label.clone().into())),
         },
         CkAttribute {
             attr_type: CkAttributeType::VERIFY,
@@ -215,7 +215,7 @@ pub(crate) async fn generate_key_pair(
     let private_template = vec![
         CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(label)),
+            value: Some(CkAttributeValue::String(label.into())),
         },
         CkAttribute { attr_type: CkAttributeType::SIGN, value: Some(CkAttributeValue::Bool(true)) },
         CkAttribute {
@@ -225,7 +225,7 @@ pub(crate) async fn generate_key_pair(
     ];
 
     let (public_key, private_key) = client
-        .generate_key_pair(session, &mechanism, &public_template, &private_template)
+        .generate_key_pair(session, &mechanism, Some(&public_template), Some(&private_template))
         .await
         .map_err(crate::handlers::cli_err("C_GenerateKeyPair"))?;
     println!("Public key handle:  {}", public_key.0);

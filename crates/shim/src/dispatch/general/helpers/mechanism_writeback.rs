@@ -168,25 +168,17 @@ pub(crate) unsafe fn write_mechanism_output_params(
             if !output.pIVClient.is_null() {
                 let copy_len = ssl3_out.client_iv.len().min(capacity);
                 if copy_len > 0 {
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            ssl3_out.client_iv.as_ptr(),
-                            output.pIVClient,
-                            copy_len,
-                        );
-                    }
+                    ssl3_out.client_iv.expose(|raw| unsafe {
+                        std::ptr::copy_nonoverlapping(raw.as_ptr(), output.pIVClient, copy_len);
+                    });
                 }
             }
             if !output.pIVServer.is_null() {
                 let copy_len = ssl3_out.server_iv.len().min(capacity);
                 if copy_len > 0 {
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            ssl3_out.server_iv.as_ptr(),
-                            output.pIVServer,
-                            copy_len,
-                        );
-                    }
+                    ssl3_out.server_iv.expose(|raw| unsafe {
+                        std::ptr::copy_nonoverlapping(raw.as_ptr(), output.pIVServer, copy_len);
+                    });
                 }
             }
         }
@@ -236,9 +228,9 @@ pub(crate) unsafe fn write_mechanism_output_params(
             if !pbe.pInitVector.is_null() && !pbe_out.init_vector.is_empty() {
                 // PBE IV is 8 bytes; copy no more than the caller's buffer holds.
                 let n = pbe_out.init_vector.len().min(8);
-                unsafe {
-                    std::ptr::copy_nonoverlapping(pbe_out.init_vector.as_ptr(), pbe.pInitVector, n);
-                }
+                pbe_out.init_vector.expose(|raw| unsafe {
+                    std::ptr::copy_nonoverlapping(raw.as_ptr(), pbe.pInitVector, n);
+                });
             }
         }
         _ => {}

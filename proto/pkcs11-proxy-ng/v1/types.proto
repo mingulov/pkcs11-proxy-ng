@@ -463,6 +463,9 @@ message FindObjectsInitRequest {
   string client_context_id = 1;
   uint64 session_handle = 2;
   repeated Attribute template = 3;
+  // Wave 3.5 D2: true => caller passed (NULL, 0); template is then empty.
+  // The daemon materializes a NULL template pointer instead of (ptr, 0).
+  bool template_null = 4;
 }
 message FindObjectsInitResponse {
   uint64 ck_rv = 1;
@@ -604,6 +607,9 @@ message CreateObjectRequest {
   string client_context_id = 1;
   uint64 session_handle = 2;
   repeated Attribute template = 3;
+  // Wave 3.5 D2: true => caller passed (NULL, 0); template is then empty.
+  // The daemon materializes a NULL template pointer instead of (ptr, 0).
+  bool template_null = 4;
 }
 message CreateObjectResponse {
   uint64 ck_rv = 1;
@@ -615,6 +621,8 @@ message CopyObjectRequest {
   uint64 session_handle = 2;
   uint64 object_handle = 3;
   repeated Attribute template = 4;
+  // Wave 3.5 D2: true => caller passed (NULL, 0); template is then empty.
+  bool template_null = 5;
 }
 message CopyObjectResponse {
   uint64 ck_rv = 1;
@@ -645,6 +653,8 @@ message SetAttributeValueRequest {
   uint64 session_handle = 2;
   uint64 object_handle = 3;
   repeated Attribute template = 4;
+  // Wave 3.5 D2: true => caller passed (NULL, 0); template is then empty.
+  bool template_null = 5;
 }
 message SetAttributeValueResponse {
   uint64 ck_rv = 1;
@@ -804,6 +814,8 @@ message DeriveKeyRequest {
   Mechanism mechanism = 3;
   uint64 base_key_handle = 4;
   repeated Attribute template = 5;
+  // Wave 3.5 D2: true => caller passed (NULL, 0); template is then empty.
+  bool template_null = 6;
 }
 message DeriveKeyResponse {
   uint64 ck_rv = 1;
@@ -832,6 +844,8 @@ message UnwrapKeyRequest {
   repeated Attribute template = 6;
   // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; wrapped_key is then empty.
   optional uint64 wrapped_key_null_len = 7;
+  // Wave 3.5 D2: true => caller passed (NULL, 0); template is then empty.
+  bool template_null = 8;
 }
 message UnwrapKeyResponse {
   uint64 ck_rv = 1;
@@ -843,6 +857,8 @@ message GenerateKeyRequest {
   uint64 session_handle = 2;
   Mechanism mechanism = 3;
   repeated Attribute template = 4;
+  // Wave 3.5 D2: true => caller passed (NULL, 0); template is then empty.
+  bool template_null = 5;
 }
 message GenerateKeyResponse {
   uint64 ck_rv = 1;
@@ -859,6 +875,9 @@ message GenerateKeyPairRequest {
   Mechanism mechanism = 3;
   repeated Attribute public_key_template = 4;
   repeated Attribute private_key_template = 5;
+  // Wave 3.5 D2: true => caller passed (NULL, 0) for that template.
+  bool public_template_null = 6;
+  bool private_template_null = 7;
 }
 message GenerateKeyPairResponse {
   uint64 ck_rv = 1;
@@ -1097,6 +1116,8 @@ message EncapsulateKeyRequest {
   Mechanism mechanism = 3;
   uint64 public_key_handle = 4;
   repeated Attribute template = 5;
+  // Wave 3.5 D2: true => caller passed (NULL, 0); template is then empty.
+  bool template_null = 6;
 }
 message EncapsulateKeyResponse {
   uint64 ck_rv = 1;
@@ -1114,6 +1135,8 @@ message DecapsulateKeyRequest {
   bytes ciphertext = 6;
   // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; ciphertext is then empty.
   optional uint64 ciphertext_null_len = 7;
+  // Wave 3.5 D2: true => caller passed (NULL, 0); template is then empty.
+  bool template_null = 8;
 }
 message DecapsulateKeyResponse {
   uint64 ck_rv = 1;
@@ -1482,6 +1505,8 @@ message UnwrapKeyAuthenticatedRequest {
   // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; associated_data is then empty.
   optional uint64 associated_data_null_len = 9;
   AuthenticatedParameters authenticated_parameters = 10;
+  // Wave 3.5 D2: true => caller passed (NULL, 0); template is then empty.
+  bool template_null = 11;
 }
 message UnwrapKeyAuthenticatedResponse {
   uint64 ck_rv = 1;
@@ -1636,6 +1661,8 @@ message EncapsulateKeyExactRequest {
   repeated Attribute template = 5;
   OutputBufferSpec output_spec = 6;
   uint32 exact_output_effects_version = 7;
+  // Wave 3.5 D2: true => caller passed (NULL, 0); template is then empty.
+  bool template_null = 8;
 }
 
 message EncapsulateKeyExactResponse {
