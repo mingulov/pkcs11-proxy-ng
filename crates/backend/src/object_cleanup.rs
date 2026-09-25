@@ -73,7 +73,7 @@ impl Drop for PendingNativeObject<'_> {
             .unwrap_or_else(|e| e.into_inner())
             .push(Arc::clone(&pending));
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.backend.destroy_object(pending.session, pending.object)
+            self.backend.destroy_quarantined_object(pending.session, pending.object)
         }))
         .unwrap_or(Err(CkRv::DEVICE_ERROR));
         match outcome {

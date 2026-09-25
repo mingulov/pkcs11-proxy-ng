@@ -16,14 +16,36 @@ pub unsafe extern "C" fn c_wait_for_slot_event(
         if p_slot.is_null() || !p_reserved.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
+        // Ownership §"Slot-event scope": the response RV and — on success —
+        // the virtual slot are checked against the CALLER width before
+        // anything is written. Unrepresentable values answer local
+        // FUNCTION_FAILED with pSlot untouched; a nonzero wide error is
+        // never truncated into CKR_OK, and a wide slot never into a wrong
+        // slot. Error paths never touch the output-only caller buffer.
         match with_client!(client => client.wait_for_slot_event(flags.into())) {
             Ok(slot) => {
+                let Some(narrow) = pkcs11_proxy_ng_types::width::checked_narrow_to_width(
+                    slot.0,
+                    std::mem::size_of::<CK_SLOT_ID>(),
+                ) else {
+                    return rv_err(CkRv::FUNCTION_FAILED);
+                };
                 unsafe {
-                    *p_slot = slot.0 as CK_SLOT_ID;
+                    *p_slot = narrow as CK_SLOT_ID;
                 }
                 rv_ok()
             }
-            Err(e) => rv_err(e),
+            Err(e) => {
+                if pkcs11_proxy_ng_types::width::checked_narrow_to_width(
+                    e.0,
+                    std::mem::size_of::<CK_RV>(),
+                )
+                .is_none()
+                {
+                    return rv_err(CkRv::FUNCTION_FAILED);
+                }
+                rv_err(e)
+            }
         }
     })
 }

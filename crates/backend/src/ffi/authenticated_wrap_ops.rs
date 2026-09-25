@@ -240,6 +240,8 @@ mod tests {
         use pkcs11_proxy_ng_proto::convert::authenticated::AuthenticatedOutput;
         let _guard = TEST_LOCK.lock().unwrap();
         let (backend, _base, mut functions) = backend_with_missing_length_wrap();
+        // Authenticated paths are ordinary: establish post-Initialize state.
+        backend.lifecycle_domain.open_for_tests();
         functions.C_WrapKeyAuthenticated = Some(pointer_bearing_wrap);
         functions.C_UnwrapKeyAuthenticated = Some(pointer_bearing_unwrap);
         let mechanism = CkMechanism {
@@ -473,6 +475,8 @@ mod tests {
     fn reviewer_authenticated_unwrap_retains_cleanup_ownership_on_invalid_output() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (backend, mut base, mut functions) = backend_with_missing_length_wrap();
+        // Authenticated paths are ordinary: establish post-Initialize state.
+        backend.lifecycle_domain.open_for_tests();
         functions.C_UnwrapKeyAuthenticated = Some(created_key_and_invalid_parameter);
         base.C_DestroyObject = Some(destroy_created_key);
         CALLS.store(0, Ordering::SeqCst);
@@ -504,6 +508,8 @@ mod tests {
     fn reviewer_authenticated_unwrap_quarantines_failed_destroy_and_blocks_new_creates() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (backend, mut base, mut functions) = backend_with_missing_length_wrap();
+        // Authenticated paths are ordinary: establish post-Initialize state.
+        backend.lifecycle_domain.open_for_tests();
         functions.C_UnwrapKeyAuthenticated = Some(created_key_and_invalid_parameter);
         base.C_DestroyObject = Some(destroy_created_key);
         CALLS.store(0, Ordering::SeqCst);
@@ -879,9 +885,13 @@ mod tests {
             // consuming it; never backs production dispatch (C3M.4).
             construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
             lifecycle: Default::default(),
+            lifecycle_domain: Default::default(),
+            session_fences: Default::default(),
             retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
             ),
         };
+        // Wrap/unwrap/destroy are ordinary: establish post-Initialize state.
+        backend.lifecycle_domain.open_for_tests();
         (backend, base, functions)
     }
 
@@ -934,6 +944,8 @@ mod tests {
         CALLS.store(0, Ordering::SeqCst);
         RETURN_RV.store(cryptoki_sys::CKR_BUFFER_TOO_SMALL as usize, Ordering::SeqCst);
         let (backend, _base, _functions) = backend_with_missing_length_wrap();
+        // Authenticated paths are ordinary: establish post-Initialize state.
+        backend.lifecycle_domain.open_for_tests();
         let mechanism = CkMechanism {
             mechanism_type: CkMechanismType::AES_CBC,
             params: Some(CkMechanismParams::Iv(IvParams { iv: vec![0x11; 16] })),

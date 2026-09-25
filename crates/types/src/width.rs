@@ -186,6 +186,16 @@ pub fn narrow_info_field(wire: u64, dst_width: usize) -> u64 {
     if wire == CANONICAL_UNAVAILABLE || wire > ones { ones } else { wire }
 }
 
+/// Check a wire `CK_RV`/`CK_SLOT_ID` against a caller width (TO26b group 2:
+/// ownership §"Slot-event scope"). Returns the value unchanged when it fits
+/// `dst_width` bytes, else `None` — the caller maps that to local
+/// `CKR_FUNCTION_FAILED` without writing output. Never truncates: a
+/// nonzero wide error must not become `CKR_OK`, and a wide slot must not
+/// become a wrong slot.
+pub fn checked_narrow_to_width(wire: u64, dst_width: usize) -> Option<u64> {
+    if wire > all_ones(dst_width) { None } else { Some(wire) }
+}
+
 /// Translate a `CK_ULONG`-typed attribute's `ulValueLen` from the source edge's
 /// width to the destination edge's width.
 ///
@@ -373,6 +383,24 @@ mod tests {
         // is exactly what that sentinel means.
         assert_eq!(narrow_info_field(0x1_0000_0000, 4), 0xFFFF_FFFF);
         assert_eq!(narrow_info_field(5_000_000_000, 4), 0xFFFF_FFFF);
+    }
+
+    #[test]
+    fn checked_narrow_to_width_matrix() {
+        // TO26b group 2: representable values pass through unchanged in
+        // either width; unrepresentable values fail instead of truncating.
+        for width in [4, 8] {
+            assert_eq!(checked_narrow_to_width(0, width), Some(0));
+            assert_eq!(checked_narrow_to_width(1, width), Some(1));
+            assert_eq!(checked_narrow_to_width(0xFFFF_FFFF, width), Some(0xFFFF_FFFF));
+        }
+        assert_eq!(checked_narrow_to_width(0x1_0000_0000, 8), Some(0x1_0000_0000));
+        assert_eq!(checked_narrow_to_width(u64::MAX, 8), Some(u64::MAX));
+        // A wide nonzero value that a narrow caller cannot represent —
+        // including one whose truncation would be CKR_OK — fails loudly.
+        assert_eq!(checked_narrow_to_width(0x1_0000_0000, 4), None);
+        assert_eq!(checked_narrow_to_width(0xDEAD_BEEF_0000_0000, 4), None);
+        assert_eq!(checked_narrow_to_width(u64::MAX, 4), None);
     }
 
     #[test]

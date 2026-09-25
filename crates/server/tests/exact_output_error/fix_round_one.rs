@@ -48,6 +48,7 @@ async fn fix_round_one_attribute_ordinary_error_zero_ambiguity_is_absent() {
             }
         }
     }
+    harness.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -164,6 +165,7 @@ async fn fix_round_one_generated_outputs_respect_query_vs_begin() {
             }
         }
     }
+    harness.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -323,6 +325,7 @@ async fn fix_round_one_typed_parameter_query_data_mode_matrix() {
     }
     println!("typed query/data matrix: {cases} direct/proxy cases, {} mismatches", failures.len());
     assert!(failures.is_empty(), "typed call-mode mismatches: {failures:?}");
+    harness.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -392,6 +395,7 @@ async fn fix_round_one_legal_mixed_empty_attribute_queries() {
         }
     }
     assert!(failures.is_empty(), "legal empty-query effect mismatches: {failures:?}");
+    harness.shutdown().await;
 }
 
 #[ignore = "requires explicit production shim and exact native oracle library paths"]
@@ -448,6 +452,7 @@ async fn fix_round_one_partial_attribute_zero_query_effects() {
         }
     }
     assert!(failures.is_empty(), "defined zero query effects lost: {failures:?}");
+    harness.shutdown().await;
 }
 
 #[ignore = "requires explicit production shim and exact native oracle library paths"]
@@ -724,6 +729,7 @@ async fn fix_round_one_exact_completion_health_classification() {
         !matches!(results[2].2, Some(BackendHealthEvent::Success)),
         "native HOST_MEMORY must not signal recovery (repeated failures may be coalesced)"
     );
+    harness.shutdown().await;
 }
 
 #[ignore = "requires explicit production shim and exact native oracle library paths"]
@@ -847,4 +853,5 @@ async fn fix_round_one_successful_size_query_does_not_fabricate_parameter_output
         }
     }
     assert!(failures.is_empty(), "size query invented parameter output writes: {failures:?}");
+    harness.shutdown().await;
 }

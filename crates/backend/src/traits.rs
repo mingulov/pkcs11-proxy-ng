@@ -218,6 +218,19 @@ pub trait Pkcs11Backend: Send + Sync {
         template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle>;
     fn destroy_object(&self, session: CkSessionHandle, object: CkObjectHandle) -> CkResult<()>;
+    /// Destroy a quarantined native object from `Drop` (`PendingNativeObject`
+    /// cleanup) WITHOUT ordinary admission. The `FfiBackend` override rides
+    /// the enclosing op's exclusion via the control choke (admitting would
+    /// nest under the live guard and deadlock behind a queued writer —
+    /// Drop-may-never-admit, pinned by the nesting tripwire). Backends
+    /// without a lifecycle domain (mocks) destroy normally.
+    fn destroy_quarantined_object(
+        &self,
+        session: CkSessionHandle,
+        object: CkObjectHandle,
+    ) -> CkResult<()> {
+        self.destroy_object(session, object)
+    }
     fn get_object_size(&self, session: CkSessionHandle, object: CkObjectHandle) -> CkResult<u64>;
     fn set_attribute_value(
         &self,
@@ -353,6 +366,16 @@ pub trait Pkcs11Backend: Send + Sync {
     ) -> CkResult<(CkObjectHandle, CkObjectHandle)>;
     /// Wait for a slot event. `flags == 1` means non-blocking (CKF_DONT_BLOCK).
     /// Returns the slot ID where the event occurred.
+    ///
+    /// Native backends enforce the ownership wait boundary
+    /// (`doc/release/native-mechanism-ownership.md` §"Slot-event scope"):
+    /// checked widths, `DONT_BLOCK`-only mode, and the sole waiter
+    /// reservation, in that order after lifecycle admission. The service
+    /// performs no early mode/width refusal of its own, so the backend's
+    /// ordering is the system's ordering. [`MockBackend`](crate::mock::MockBackend)
+    /// deliberately models faulty/legacy providers instead (blocking
+    /// calls park; hangs are injectable) for abort/timeout coverage — it
+    /// is test-only and never the deployed backend.
     fn wait_for_slot_event(&self, flags: u64) -> CkResult<CkSlotId>;
     fn get_operation_state(&self, session: CkSessionHandle) -> CkResult<SecretBytes>;
     fn set_operation_state(

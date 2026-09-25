@@ -148,6 +148,8 @@ impl FfiBackend {
             retirement_sentinel: super::native_domain::RetirementSentinel::for_permit(&permit),
             construction: permit,
             lifecycle: super::native_domain::LifecycleTracker::default(),
+            lifecycle_domain: super::native_domain::LifecycleDomain::new(),
+            session_fences: super::session_fence::SessionFenceTable::default(),
         })
     }
 
@@ -280,6 +282,40 @@ impl Drop for FfiBackend {
             )
         ))]
         if stop_fire_condition(decision, self.construction.holds_registry_slot()) {
+            super::native_stop::abnormal_stop_native_lifetime(
+                super::native_stop::StopReason::UnprovenFinalOwner,
+            );
+        }
+        // TF01b/I4 Drop integration (same stop-qualified gate): stop-fire
+        // when the lifecycle domain is poisoned — the sole `Drop`-time
+        // signal. The probe is a non-blocking `try_write` (never blocks
+        // in `Drop`); contention deliberately has no arm (`WouldBlock` is
+        // unreachable — a live guard would keep its `Arc` owner alive).
+        // Elsewhere this block cfg-compiles out, bit-for-bit.
+        #[cfg(any(
+            all(
+                target_os = "linux",
+                any(target_env = "gnu", target_env = "musl"),
+                any(
+                    all(target_arch = "x86_64", target_pointer_width = "64"),
+                    all(target_arch = "x86", target_pointer_width = "32")
+                )
+            ),
+            all(
+                target_os = "windows",
+                target_env = "msvc",
+                any(
+                    all(target_arch = "x86_64", target_pointer_width = "64"),
+                    all(target_arch = "x86", target_pointer_width = "32")
+                )
+            ),
+            all(
+                target_os = "macos",
+                any(target_arch = "aarch64", target_arch = "x86_64"),
+                target_pointer_width = "64"
+            )
+        ))]
+        if self.lifecycle_domain.quiescence_poisoned() {
             super::native_stop::abnormal_stop_native_lifetime(
                 super::native_stop::StopReason::UnprovenFinalOwner,
             );

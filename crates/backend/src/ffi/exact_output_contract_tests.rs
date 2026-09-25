@@ -19,7 +19,11 @@ fn invoke(
         });
     }
     ExactOracle_ResetObservation();
-    let result = FfiBackend::single_call_bytes_exact(spec, |out, len| unsafe {
+    // Direct-leaf oracle: admit on a throwaway test domain.
+    let choke_domain = crate::ffi::native_domain::LifecycleDomain::new();
+    choke_domain.open_for_tests();
+    let choke_admission = choke_domain.admit_ordinary().expect("test domain admits");
+    let result = FfiBackend::single_call_bytes_exact(&choke_admission, spec, |out, len| unsafe {
         ExactOracle_ByteOutput(out, len)
     });
     let mut observation = ExactOracleObservation::default();
@@ -243,8 +247,12 @@ fn exact_kem_error_keeps_length_and_never_publishes_output_only_handle() {
         // consuming it; never backs production dispatch (C3M.4).
         construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
         lifecycle: Default::default(),
+        lifecycle_domain: Default::default(),
+        session_fences: Default::default(),
         retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(),
     };
+    // Exact paths are ordinary: establish post-Initialize state.
+    backend.lifecycle_domain.open_for_tests();
     for (present, missing) in [(true, false), (false, false), (true, true), (false, true)] {
         unsafe {
             ExactOracle_SetScenario(&ExactOracleScenario {
@@ -318,8 +326,12 @@ fn exact_parameter_error_preserves_only_defined_initialized_effects() {
         // consuming it; never backs production dispatch (C3M.4).
         construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
         lifecycle: Default::default(),
+        lifecycle_domain: Default::default(),
+        session_fences: Default::default(),
         retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(),
     };
+    // Exact paths are ordinary: establish post-Initialize state.
+    backend.lifecycle_domain.open_for_tests();
     let parameter = MessageParameter::GcmMessage(GcmMessageParams {
         iv: vec![0x11; 12],
         iv_null_len: None,
@@ -406,8 +418,12 @@ fn exact_begin_error_preserves_native_completion_and_initialized_iv() {
         // consuming it; never backs production dispatch (C3M.4).
         construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
         lifecycle: Default::default(),
+        lifecycle_domain: Default::default(),
+        session_fences: Default::default(),
         retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(),
     };
+    // Exact paths are ordinary: establish post-Initialize state.
+    backend.lifecycle_domain.open_for_tests();
     let parameter = MessageParameter::GcmMessage(GcmMessageParams {
         iv: vec![0x11; 12],
         iv_null_len: None,
@@ -476,7 +492,12 @@ fn classic_gcm_initialized_error_iv_effect() {
             aad_null: false,
         })),
     };
+    // Direct-choke unit test: admit on a throwaway test domain.
+    let choke_domain = crate::ffi::native_domain::LifecycleDomain::new();
+    choke_domain.open_for_tests();
+    let choke_admission = choke_domain.admit_ordinary().expect("test domain admits");
     let (output, effects) = FfiBackend::call_bytes_exact_with_mechanism_output(
+        &choke_admission,
         Some(()),
         &mechanism,
         &CkOutputBufferSpec { buffer_present: true, buffer_len: 4, length_pointer_null: false },
@@ -545,7 +566,12 @@ fn classic_gcm_error_effect_matrix_data_query_and_missing_length() {
         for (rv, native_rv) in &rvs {
             for write in [true, false] {
                 let cell = format!("{mode_name} {rv:?} write={write}");
+                // Direct-choke unit test: admit on a throwaway test domain.
+                let choke_domain = crate::ffi::native_domain::LifecycleDomain::new();
+                choke_domain.open_for_tests();
+                let choke_admission = choke_domain.admit_ordinary().expect("test domain admits");
                 let (output, effects) = FfiBackend::call_bytes_exact_with_mechanism_output(
+                    &choke_admission,
                     Some(()),
                     &mechanism,
                     spec,
@@ -647,7 +673,12 @@ fn classic_gcm_ok_effect_unchanged_data_and_missing_length() {
         ),
     ];
     for (mode_name, spec, expect_echo) in &modes {
+        // Direct-choke unit test: admit on a throwaway test domain.
+        let choke_domain = crate::ffi::native_domain::LifecycleDomain::new();
+        choke_domain.open_for_tests();
+        let choke_admission = choke_domain.admit_ordinary().expect("test domain admits");
         let (output, effects) = FfiBackend::call_bytes_exact_with_mechanism_output(
+            &choke_admission,
             Some(()),
             &mechanism,
             spec,

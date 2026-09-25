@@ -65,6 +65,18 @@ pub(super) async fn wait_for_slot_event(
             ck_rv: CkRv::OK.0,
             slot_id: virtual_slot.0,
         })),
+        // Ownership §"Slot-event scope": a policy follow-up refused by a
+        // sealed backend (or a context that disappeared mid-call) answers
+        // local NOT_INITIALIZED with no slot output — the wait's actual OK
+        // observation is retained, never published as an event and never
+        // downgraded to NO_EVENT. Every other denial or backend error
+        // still suppresses to no-event.
+        Err(error) if error == CkRv::CRYPTOKI_NOT_INITIALIZED => {
+            Ok(Response::new(pkcs11_proxy_ng_proto::WaitForSlotEventResponse {
+                ck_rv: CkRv::CRYPTOKI_NOT_INITIALIZED.0,
+                slot_id: 0,
+            }))
+        }
         _ => Ok(no_event()),
     }
 }

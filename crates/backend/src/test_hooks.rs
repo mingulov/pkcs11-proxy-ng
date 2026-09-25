@@ -70,9 +70,12 @@ pub fn take_last_mechanism() -> Option<MechanismEcho> {
 
 /// Fault-injection switch for native-owner closes.
 ///
-/// When `true`, hook-aware close paths fail closed with `false` instead
-/// of calling into the native owner, letting topology tests exercise the
-/// retire-on-failed-close path without a hostile provider.
+/// When armed, the next FFI `C_CloseSession` fails with the transient
+/// `FUNCTION_FAILED` WITHOUT native entry, settling its fence exactly
+/// like a native close failure (reopen — owners, marker and mapping
+/// kept, session remains usable and retryable). Lets topology tests
+/// drive the control channel end to end without a hostile provider.
+/// One-shot; normal builds compile the check out entirely.
 pub fn set_fail_next_close(fail: bool) {
     FAIL_NEXT_CLOSE.store(fail, Ordering::SeqCst);
 }

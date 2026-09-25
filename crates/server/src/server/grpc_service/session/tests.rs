@@ -1096,6 +1096,220 @@ async fn wait_for_slot_event_suppresses_events_for_unauthorized_slots() {
 }
 
 #[tokio::test]
+async fn wait_for_slot_event_absent_context_never_enters_backend() {
+    // TO26b group 2: absent logical context refuses before backend entry.
+    use crate::server::grpc_service::state_ops::wait_for_slot_event_with_policy;
+
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    let policy = crate::server::auth::policy::TokenPolicy::from_config(
+        &crate::config::AuthConfig::default(),
+    )
+    .unwrap();
+
+    let resp = wait_for_slot_event_with_policy(
+        &ctx_mgr,
+        &backend,
+        &policy,
+        Request::new(pkcs11_proxy_ng_proto::WaitForSlotEventRequest {
+            client_context_id: "no-such-context".to_string(),
+            flags: 1,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+
+    assert_eq!(resp.ck_rv, CkRv::CRYPTOKI_NOT_INITIALIZED.0);
+    assert_eq!(resp.slot_id, 0, "no slot output on refusal");
+    assert_eq!(mock.wait_call_count(), 0, "zero backend wait attempts");
+    assert_eq!(mock.token_info_call_count(), 0, "zero backend policy attempts");
+}
+
+#[tokio::test]
+async fn wait_for_slot_event_backend_error_passes_through_with_zero_slot() {
+    // TO26b group 2: backend wait errors (contention, sentinel RVs) pass
+    // through verbatim with no slot output and no policy follow-up.
+    use crate::server::grpc_service::state_ops::wait_for_slot_event_with_policy;
+
+    for scripted in [CkRv::FUNCTION_FAILED, CkRv(0xDEAD_BEEF)] {
+        let mock = Arc::new(MockBackend::default_test());
+        mock.initialize().unwrap();
+        mock.set_next_wait_outcome(Err(scripted));
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+
+        let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+        let policy = crate::server::auth::policy::TokenPolicy::from_config(
+            &crate::config::AuthConfig::default(),
+        )
+        .unwrap();
+
+        let resp = wait_for_slot_event_with_policy(
+            &ctx_mgr,
+            &backend,
+            &policy,
+            Request::new(pkcs11_proxy_ng_proto::WaitForSlotEventRequest {
+                client_context_id: ctx_id.0.clone(),
+                flags: 1,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+
+        assert_eq!(resp.ck_rv, scripted.0, "backend error passes through verbatim");
+        assert_eq!(resp.slot_id, 0, "no slot output on backend error");
+        assert_eq!(mock.wait_call_count(), 1);
+        assert_eq!(mock.token_info_call_count(), 0, "no policy query on backend error");
+    }
+}
+
+#[tokio::test]
+async fn wait_for_slot_event_policy_query_after_seal_returns_not_initialized() {
+    // TO26b group 2: an otherwise successful wait whose policy follow-up
+    // finds the backend sealed answers local NOT_INITIALIZED with no slot
+    // output. The seal is simulated by an injected NOT_INIT on token-info
+    // (the FFI layer refuses such a query at admission with zero native
+    // attempts — see the backend seal test — so no policy query crosses
+    // the seal either way); the wait itself ignores injected errors.
+    use crate::server::grpc_service::state_ops::wait_for_slot_event_with_policy;
+
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    mock.enqueue_slot_event(CkSlotId(0));
+    mock.inject_error(CkRv::CRYPTOKI_NOT_INITIALIZED);
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    // Authenticated: an unauthenticated context short-circuits the policy
+    // without the token-info fetch this test seals against.
+    let ctx_id =
+        ctx_mgr.create_context(Some("x509:issuer=CN=CA;subject=CN=allowed".into())).await.unwrap();
+    let policy =
+        crate::server::auth::policy::TokenPolicy::from_config(&crate::config::AuthConfig {
+            allow_all_authenticated: true,
+            anonymous_principal: None,
+            policy: vec![],
+        })
+        .unwrap();
+
+    let resp = wait_for_slot_event_with_policy(
+        &ctx_mgr,
+        &backend,
+        &policy,
+        Request::new(pkcs11_proxy_ng_proto::WaitForSlotEventRequest {
+            client_context_id: ctx_id.0.clone(),
+            flags: 1,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+
+    assert_eq!(
+        resp.ck_rv,
+        CkRv::CRYPTOKI_NOT_INITIALIZED.0,
+        "sealed policy follow-up must answer NOT_INITIALIZED, not NO_EVENT"
+    );
+    assert_eq!(resp.slot_id, 0, "no slot output when the policy query seals");
+    assert_eq!(mock.wait_call_count(), 1, "the wait itself succeeded");
+    assert_eq!(mock.token_info_call_count(), 1, "the policy query ran and sealed");
+}
+
+#[tokio::test]
+async fn wait_for_slot_event_token_not_present_suppresses_to_no_event() {
+    // TO26b group 2 (existing-behavior pin): a token that left between
+    // the wait and the policy follow-up suppresses to no-event.
+    use crate::server::grpc_service::state_ops::wait_for_slot_event_with_policy;
+
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    mock.enqueue_slot_event(CkSlotId(0));
+    mock.set_token_present(CkSlotId(0), false);
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_id =
+        ctx_mgr.create_context(Some("x509:issuer=CN=CA;subject=CN=allowed".into())).await.unwrap();
+    let policy =
+        crate::server::auth::policy::TokenPolicy::from_config(&crate::config::AuthConfig {
+            allow_all_authenticated: true,
+            anonymous_principal: None,
+            policy: vec![],
+        })
+        .unwrap();
+
+    let resp = wait_for_slot_event_with_policy(
+        &ctx_mgr,
+        &backend,
+        &policy,
+        Request::new(pkcs11_proxy_ng_proto::WaitForSlotEventRequest {
+            client_context_id: ctx_id.0.clone(),
+            flags: 1,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+
+    assert_eq!(resp.ck_rv, CkRv::NO_EVENT.0);
+    assert_eq!(resp.slot_id, 0);
+    assert_eq!(mock.token_info_call_count(), 1, "the policy query ran");
+}
+
+#[tokio::test]
+async fn wait_for_slot_event_authorized_event_maps_to_virtual_slot() {
+    // TO26b group 2: an authorized event publishes OK with the mapped
+    // virtual slot (never the raw backend id).
+    use crate::server::grpc_service::state_ops::wait_for_slot_event_with_policy;
+
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    mock.enqueue_slot_event(CkSlotId(0));
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_id =
+        ctx_mgr.create_context(Some("x509:issuer=CN=CA;subject=CN=allowed".into())).await.unwrap();
+    let policy =
+        crate::server::auth::policy::TokenPolicy::from_config(&crate::config::AuthConfig {
+            allow_all_authenticated: true,
+            anonymous_principal: None,
+            policy: vec![],
+        })
+        .unwrap();
+
+    let resp = wait_for_slot_event_with_policy(
+        &ctx_mgr,
+        &backend,
+        &policy,
+        Request::new(pkcs11_proxy_ng_proto::WaitForSlotEventRequest {
+            client_context_id: ctx_id.0.clone(),
+            flags: 1,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+
+    let expected_virtual = ctx_mgr
+        .to_virtual_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0)))
+        .await
+        .expect("slot 0 is mapped")
+        .0;
+    assert_eq!(resp.ck_rv, CkRv::OK.0);
+    assert_eq!(resp.slot_id, expected_virtual, "authorized event maps to its virtual slot");
+}
+
+#[tokio::test]
 async fn slot_wait_server_abort_retains_ordinary_owner() {
     // C3M.6 row 14: aborting the gRPC waiter while the native call is
     // stuck must not strand or corrupt anything. The blocking worker

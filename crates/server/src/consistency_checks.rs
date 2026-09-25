@@ -324,6 +324,10 @@ fn backend_methods_have_proto_rpcs() {
         "verify_message_exact",
         "verify_message_begin_exact",
         "verify_message_next_exact",
+        // Drop-path destroy (F-01 Drop-may-never-admit): destructor cleanup
+        // rides the enclosing op's exclusion and RPC; never itself on the
+        // wire, so no proto method exists for it.
+        "destroy_quarantined_object",
     ];
 
     let mut missing = Vec::new();

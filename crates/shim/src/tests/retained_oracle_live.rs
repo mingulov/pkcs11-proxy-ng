@@ -33,6 +33,21 @@ fn oracle_leg() -> String {
     std::env::var("RETAINED_ORACLE_LEG").unwrap_or_else(|_| "roundtrip".into())
 }
 
+/// TO26b group 3: the caller process must not load the oracle itself —
+/// the oracle lives in the daemon (the runner proves that side via the
+/// daemon's maps); a caller-side copy would pretend to control it.
+#[cfg(target_os = "linux")]
+fn assert_caller_has_no_oracle_loaded() {
+    let maps = std::fs::read_to_string("/proc/self/maps").expect("read own maps");
+    assert!(
+        !maps.contains("retained_mechanism_oracle"),
+        "caller must not load the oracle; it lives in the daemon process"
+    );
+}
+
+#[cfg(not(target_os = "linux"))]
+fn assert_caller_has_no_oracle_loaded() {}
+
 #[test]
 #[ignore = "needs a live oracle daemon; run via the row-12 runner"]
 fn live_retained_oracle_encrypt_roundtrip() {
@@ -42,6 +57,7 @@ fn live_retained_oracle_encrypt_roundtrip() {
     // Marker for the runner (--nocapture): distinguishes a real execution
     // from a leg-gated early return, which also reports ok.
     eprintln!("retained-oracle-executed=roundtrip");
+    assert_caller_has_no_oracle_loaded();
     let _guard = shim_state_test_guard();
 
     let rv = unsafe { dispatch::general::c_initialize(std::ptr::null_mut()) };
@@ -146,6 +162,7 @@ fn live_retained_oracle_error_effects_and_cleanup() {
     // Marker for the runner (--nocapture): distinguishes a real execution
     // from a leg-gated early return, which also reports ok.
     eprintln!("retained-oracle-executed=error");
+    assert_caller_has_no_oracle_loaded();
     let _guard = shim_state_test_guard();
 
     let rv = unsafe { dispatch::general::c_initialize(std::ptr::null_mut()) };

@@ -11,6 +11,7 @@
 
 use super::FfiBackend;
 use super::native_domain::*;
+use pkcs11_proxy_ng_types::CkRv;
 
 fn fresh() -> DomainRegistry {
     DomainRegistry::fresh_for_tests()
@@ -102,6 +103,207 @@ fn native_domain_global_serial_second_load_rejected_and_rollback() {
     );
 }
 
+/// TO26a group 1: every pathname spelling of a second load — identical,
+/// relative, symlink, hardlink and genuinely different paths — fails with
+/// the local AlreadyReserved refusal BEFORE any loader attempt. Proof is by
+/// error identity: a loader attempt on these (mostly nonexistent or
+/// non-ELF) paths would fail as "native module load failed", and the
+/// loadable-lib control (libc, refused identically) proves refusal
+/// precedes even a `dlopen` that would succeed. Discovery is unreachable
+/// past this refusal for the same reason: any discovery attempt would
+/// surface its own error, never AlreadyReserved.
+#[test]
+fn native_domain_global_serial_path_variants_refused_before_loader() {
+    let _serial = serial_domain_test_guard();
+    let first = reserve_for_construction().expect("first reservation succeeds");
+    let missing = std::path::Path::new("/nonexistent-pkcs11-proxy-ng-test-module.so");
+    let other_missing = std::path::Path::new("/nonexistent-pkcs11-proxy-ng-other-module.so");
+    let relative = std::path::Path::new("relative-pkcs11-proxy-ng-test-module.so");
+    let mut variants: Vec<std::path::PathBuf> =
+        vec![missing.into(), missing.into(), relative.into(), other_missing.into()];
+    // A loadable library is refused identically: refusal precedes `dlopen`.
+    #[cfg(all(unix, target_env = "gnu"))]
+    variants.push(std::path::PathBuf::from("libc.so.6"));
+    #[cfg(all(unix, target_env = "musl"))]
+    variants.push(std::path::PathBuf::from("libc.musl-x86_64.so.1"));
+    // Unix link spellings: a symlink to a missing target and a hardlink to
+    // a (non-ELF) temp file. Both would fail differently past the refusal
+    // (missing target / ELF error), so AlreadyReserved proves pre-loader
+    // denial for every spelling.
+    #[cfg(unix)]
+    let link_dir = {
+        let dir = std::env::temp_dir().join(format!(
+            "pkcs11-path-variants-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("wall clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create link dir");
+        let target = dir.join("target.txt");
+        std::fs::write(&target, b"not an elf module").expect("write link target");
+        let hardlink = dir.join("hardlink.so");
+        std::fs::hard_link(&target, &hardlink).expect("create hardlink");
+        variants.push(hardlink);
+        let symlink = dir.join("symlink.so");
+        std::os::unix::fs::symlink(dir.join("missing-target.so"), &symlink)
+            .expect("create symlink");
+        variants.push(symlink);
+        dir
+    };
+    for path in &variants {
+        let err = FfiBackend::load(path).map(|_| ()).expect_err("held slot rejects every spelling");
+        assert!(
+            err.contains("already reserved"),
+            "path {} must be refused before any loader attempt, got: {err}",
+            path.display()
+        );
+    }
+    first.rollback_before_native();
+    #[cfg(unix)]
+    let _ = std::fs::remove_dir_all(&link_dir);
+    let retry_err =
+        FfiBackend::load(missing).map(|_| ()).expect_err("retry after rollback still fails");
+    assert!(
+        retry_err.contains("native module load failed"),
+        "rolled-back registry must attempt loading again, got: {retry_err}"
+    );
+}
+
+/// TO26a group 1: an Active slot refuses a second constructor before any
+/// loader attempt. Restores Vacant afterwards so later serial tests start
+/// clean (Retiring window, then exact-epoch release).
+#[test]
+fn native_domain_global_serial_active_contention_denies_load() {
+    let _serial = serial_domain_test_guard();
+    let first = reserve_for_construction().expect("first reservation succeeds");
+    first.activate().expect("owner activates");
+    let missing = std::path::Path::new("/nonexistent-pkcs11-proxy-ng-test-module.so");
+    let err = FfiBackend::load(missing).map(|_| ()).expect_err("Active slot rejects load");
+    assert!(
+        err.contains("already reserved"),
+        "Active contention must refuse before any loader attempt, got: {err}"
+    );
+    assert!(first.begin_retirement(), "owner enters Retiring");
+    assert!(ConstructionPermit::release_if_owner(first.epoch), "completed unload publishes Vacant");
+    first.rollback_before_native();
+    reserve_for_construction().expect("slot reusable").rollback_before_native();
+}
+
+/// TO26a group 1: a Retiring slot (dependent retirement / library close
+/// window) still refuses a second constructor before any loader attempt.
+/// Restores Vacant afterwards.
+#[test]
+fn native_domain_global_serial_retiring_contention_denies_load() {
+    let _serial = serial_domain_test_guard();
+    let first = reserve_for_construction().expect("first reservation succeeds");
+    first.activate().expect("owner activates");
+    assert!(first.begin_retirement(), "owner enters Retiring");
+    let missing = std::path::Path::new("/nonexistent-pkcs11-proxy-ng-test-module.so");
+    let err = FfiBackend::load(missing).map(|_| ()).expect_err("Retiring slot rejects load");
+    assert!(
+        err.contains("already reserved"),
+        "Retiring contention must refuse before any loader attempt, got: {err}"
+    );
+    assert!(ConstructionPermit::release_if_owner(first.epoch), "completed unload publishes Vacant");
+    first.rollback_before_native();
+    reserve_for_construction().expect("slot reusable").rollback_before_native();
+}
+
+/// TO26a group 1: racing constructors admit exactly one winner; every
+/// loser reports AlreadyReserved for the live epoch (never a second
+/// reservation, never a loader attempt — losers never reach `dlopen`
+/// because `reserve_for_construction` is the gate `load` checks first).
+#[test]
+fn native_domain_global_serial_constructor_race_exactly_one_wins() {
+    let _serial = serial_domain_test_guard();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+    let mut winners = 0u32;
+    std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let gate = barrier.clone();
+            handles.push(scope.spawn(move || {
+                gate.wait();
+                reserve_for_construction()
+            }));
+        }
+        // Join every racer BEFORE rolling the winner back: an early
+        // rollback would reopen Vacant and admit a second winner.
+        let mut outcomes = Vec::new();
+        for handle in handles {
+            outcomes.push(handle.join().expect("racer joins"));
+        }
+        let mut winner_epochs = Vec::new();
+        let mut loser_epochs = Vec::new();
+        for outcome in outcomes {
+            match outcome {
+                Ok(permit) => {
+                    winners += 1;
+                    winner_epochs.push(permit.epoch);
+                    permit.rollback_before_native();
+                }
+                Err(DomainError::AlreadyReserved { epoch }) => loser_epochs.push(epoch),
+                Err(other) => panic!("losers must report AlreadyReserved, got {other:?}"),
+            }
+        }
+        // TO26b Integrity-Minor-1: every loser names the winner's epoch,
+        // pinned independently of join order (even when the winner
+        // sorts last — unreachable by construction, pinned anyway).
+        assert_eq!(winner_epochs.len(), 1, "exactly one winner epoch recorded");
+        for epoch in &loser_epochs {
+            assert_eq!(*epoch, winner_epochs[0], "losers name the winner's epoch");
+        }
+    });
+    assert_eq!(winners, 1, "exactly one racing constructor wins");
+    reserve_for_construction().expect("slot reusable after race").rollback_before_native();
+}
+
+/// TO26a group 1: `Arc` clones share the one native domain — the same
+/// lifecycle state, session count and generation are visible through every
+/// handle (multiple logical clients, one native domain/epoch).
+#[test]
+fn native_domain_arc_clones_share_one_lifecycle_domain() {
+    let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+    let backend = FfiBackend {
+        _lib: super::loading::test_library_handle(),
+        func_list: functions.as_mut() as *mut cryptoki_sys::CK_FUNCTION_LIST,
+        func_list_3_0: None,
+        func_list_3_2: None,
+        initialize_args: None,
+        mech_cache: dashmap::DashMap::new(),
+        last_init_family: dashmap::DashMap::new(),
+        session_slot_map: dashmap::DashMap::new(),
+        slot_sessions: dashmap::DashMap::new(),
+        object_cleanup: Default::default(),
+        retirement_sentinel: RetirementSentinel::unmanaged_test_only(),
+        construction: ConstructionPermit::unmanaged_test_only(),
+        lifecycle: Default::default(),
+        lifecycle_domain: Default::default(),
+        session_fences: Default::default(),
+    };
+    let first = std::sync::Arc::new(backend);
+    let second = std::sync::Arc::clone(&first);
+    assert!(std::sync::Arc::ptr_eq(&first, &second), "clones share one allocation");
+    first.lifecycle.note_initialized().expect("cycle opens through the first clone");
+    first.lifecycle.note_session_opened();
+    assert_eq!(second.lifecycle.current_generation(), 1, "generation shared across clones");
+    assert_eq!(second.lifecycle.open_session_count_for_tests(), 1, "session count shared");
+    assert_eq!(
+        second.lifecycle.retirement_decision(),
+        RetirementDecision::Poison,
+        "retirement view shared across clones"
+    );
+    second.lifecycle.note_sessions_closed(1);
+    second.lifecycle.note_finalized();
+    assert_eq!(
+        first.lifecycle.retirement_decision(),
+        RetirementDecision::Release,
+        "settlement through one clone visible through the other"
+    );
+}
+
 #[test]
 fn native_domain_holds_registry_slot_scopes_guard_to_managed() {
     let mut registry = fresh();
@@ -135,6 +337,31 @@ fn native_domain_lifecycle_init_attempt_without_success_poisons() {
     );
     tracker.note_finalized();
     assert_eq!(tracker.retirement_decision(), RetirementDecision::Release);
+}
+
+/// TO26a group 4 (proof invalidation): a new Initialize attempt after a
+/// clean Finalize invalidates the destruction proof FIRST — even when the
+/// attempt then fails natively, the reservation never recycles (ownership
+/// step 5: failed/unknown initialization never recycles; new native
+/// exposure invalidates the proof first).
+#[test]
+fn native_domain_lifecycle_init_attempt_after_finalize_invalidates_proof() {
+    let tracker = LifecycleTracker::default();
+    tracker.note_initialized().expect("cycle opens");
+    tracker.note_finalized();
+    assert_eq!(tracker.retirement_decision(), RetirementDecision::Release);
+    tracker.note_init_attempted();
+    assert_eq!(
+        tracker.retirement_decision(),
+        RetirementDecision::Poison,
+        "new native exposure invalidates the finalized proof first"
+    );
+    tracker.note_finalized();
+    assert_eq!(
+        tracker.retirement_decision(),
+        RetirementDecision::Release,
+        "a later successful Finalize re-earns release"
+    );
 }
 
 #[test]
@@ -345,6 +572,8 @@ fn native_domain_global_serial_release_drop_recycles_after_full_retirement() {
             retirement_sentinel: RetirementSentinel::for_permit(&permit),
             construction: permit,
             lifecycle: Default::default(),
+            lifecycle_domain: Default::default(),
+            session_fences: Default::default(),
         };
         drop(backend);
     }
@@ -364,6 +593,180 @@ fn native_domain_unsupported_platform_display_names_macos_hosts() {
         "Display must name macOS hosts, got: {msg}"
     );
     assert!(msg.contains("test-detail"), "Display must carry the detail, got: {msg}");
+}
+
+/// TO26b group 2: the domain holds exactly one waiter reservation — a
+/// second admission's reservation fails locally (FUNCTION_FAILED) while
+/// the first is outstanding, and the slot frees on settlement.
+#[test]
+fn native_domain_waiter_second_reservation_refused_until_settled() {
+    use std::sync::mpsc::channel;
+    let domain = LifecycleDomain::default();
+    domain.open_for_tests();
+    assert!(!domain.waiter_held_for_tests(), "no waiter outstanding initially");
+
+    // Contention is cross-thread in production (one thread cannot hold
+    // two admissions — the conc-M2 tripwire — so the holder lives on a
+    // scoped worker while this thread races it).
+    std::thread::scope(|scope| {
+        let (reserved_tx, reserved_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let domain_ref = &domain;
+        scope.spawn(move || {
+            let first = domain_ref.admit_ordinary().expect("first admission");
+            let waiter = domain_ref.reserve_waiter(&first, 1).expect("sole reservation granted");
+            assert_eq!(waiter.phase_for_tests(), WaiterPhase::Reserved);
+            reserved_tx.send(()).expect("signal reservation held");
+            release_rx.recv().expect("wait for release");
+            drop(waiter);
+        });
+        reserved_rx.recv().expect("holder reserved");
+        assert!(domain.waiter_held_for_tests(), "reservation held through settlement");
+
+        // A second waiter is refused locally — never queued, never a
+        // second native wait.
+        let second = domain.admit_ordinary().expect("second admission");
+        assert_eq!(
+            domain.reserve_waiter(&second, 1).unwrap_err(),
+            CkRv::FUNCTION_FAILED,
+            "waiter contention must refuse locally"
+        );
+        assert!(domain.waiter_held_for_tests(), "refusal keeps the first waiter");
+        release_tx.send(()).expect("release holder");
+    });
+    assert!(!domain.waiter_held_for_tests(), "settlement frees the slot");
+    let third = domain.admit_ordinary().expect("third admission");
+    let _reuse = domain.reserve_waiter(&third, 1).expect("slot reusable after settlement");
+}
+
+/// TO26b group 2: the commit check bars stale epochs and sealed states —
+/// the linearization point between admission and native entry. Held
+/// ordinary exclusion makes seal-win-after-admission unreachable through
+/// the public path (the sealer drains instead of overtaking), so the
+/// stale/sealed arms are pinned directly on the pure helper.
+#[test]
+fn native_domain_waiter_commit_bars_stale_and_sealed() {
+    use ModuleState::*;
+    assert!(waiter_commit_allowed(Open, 5, 5).is_ok(), "fresh Open reservation commits");
+    assert_eq!(
+        waiter_commit_allowed(Open, 6, 5).unwrap_err(),
+        CkRv::CRYPTOKI_NOT_INITIALIZED,
+        "stale epoch cannot enter native"
+    );
+    assert_eq!(
+        waiter_commit_allowed(Draining, 5, 5).unwrap_err(),
+        CkRv::CRYPTOKI_NOT_INITIALIZED,
+        "sealed state cannot enter native"
+    );
+    assert_eq!(
+        waiter_commit_allowed(Finalizing, 5, 5).unwrap_err(),
+        CkRv::CRYPTOKI_NOT_INITIALIZED,
+        "sealed state cannot enter native"
+    );
+    assert_eq!(
+        waiter_commit_allowed(Finalized, 5, 5).unwrap_err(),
+        CkRv::CRYPTOKI_NOT_INITIALIZED,
+        "sealed state cannot enter native"
+    );
+    assert_eq!(
+        waiter_commit_allowed(Uncertain, 5, 5).unwrap_err(),
+        CkRv::DEVICE_ERROR,
+        "uncertain domain fails closed with DEVICE_ERROR"
+    );
+    assert_eq!(
+        waiter_commit_allowed(LoadedUninitialized, 5, 5).unwrap_err(),
+        CkRv::CRYPTOKI_NOT_INITIALIZED,
+        "sealed state cannot enter native"
+    );
+    assert_eq!(
+        waiter_commit_allowed(Initializing, 5, 5).unwrap_err(),
+        CkRv::CRYPTOKI_NOT_INITIALIZED,
+        "sealed state cannot enter native"
+    );
+}
+
+/// TO26b-fix1 F1: the commit re-check fails closed behind a queued
+/// sealer write instead of self-deadlocking (the blocking `read` it
+/// replaced would hang here: this thread holds the admission read, and
+/// the queued writer cannot drain until that same read releases).
+/// Deterministic with no timing assumption: the poll proves the sealer
+/// is queued (a queued writer blocks new readers, so the failed
+/// `try_read` IS the proof), and the writer cannot drain until the
+/// explicit drops below, so the commit races a queued writer.
+/// Linux-only: the proof rests on writer-preference; the fix itself
+/// (`try_read`, never blocking `read`) is unconditional.
+#[test]
+#[cfg(target_os = "linux")]
+fn native_domain_waiter_commit_queued_writer_fails_closed() {
+    let domain = LifecycleDomain::default();
+    domain.open_for_tests();
+    std::thread::scope(|scope| {
+        let admission = domain.admit_ordinary().expect("admission");
+        let mut waiter = domain.reserve_waiter(&admission, 1).expect("reservation");
+        // A sealer queuing its blocking write behind the live admission
+        // (the Finalize arm-2 shape); it drains once the test releases.
+        scope.spawn(|| {
+            domain.set_state_for_tests(ModuleState::Finalized, 9);
+        });
+        let start = std::time::Instant::now();
+        while domain.try_state_for_tests().is_some() {
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(10),
+                "sealer must queue behind the live admission"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            waiter.commit_native().unwrap_err(),
+            CkRv::GENERAL_ERROR,
+            "a commit racing a queued writer must fail closed, never block"
+        );
+        assert!(!domain.waiter_held_for_tests(), "refusal frees the reservation");
+        let observed =
+            domain.last_waiter_observation_for_tests().expect("refusal publishes an observation");
+        assert_eq!(observed.native_rv, None, "no native return happened");
+        assert!(!observed.slot_written, "no slot value was produced");
+        drop(waiter);
+        drop(admission);
+    });
+    // The sealer drained on scope exit: the write it queued landed.
+    assert_eq!(domain.state_for_tests(), ModuleState::Finalized);
+}
+
+/// TO26b group 2: settlement publishes the completion observation —
+/// wait ID, epoch, original flags, original provider RV — and IDs never
+/// wrap or repeat.
+#[test]
+fn native_domain_waiter_settlement_publishes_observation() {
+    let domain = LifecycleDomain::default();
+    domain.open_for_tests();
+    assert_eq!(domain.last_waiter_observation_for_tests(), None);
+
+    let first = domain.admit_ordinary().expect("admission");
+    let epoch = first.epoch_for_tests();
+    let mut waiter = domain.reserve_waiter(&first, 0x8000_0001).expect("reservation");
+    waiter.commit_native().expect("fresh Open reservation commits");
+    waiter.note_returned(0x12, false);
+    assert_eq!(waiter.phase_for_tests(), WaiterPhase::Returned);
+    drop(waiter);
+
+    let observed =
+        domain.last_waiter_observation_for_tests().expect("settlement publishes the observation");
+    assert_eq!(observed.id, 0, "wait IDs start at zero");
+    assert_eq!(observed.epoch, epoch);
+    assert_eq!(observed.flags, 0x8000_0001, "original flag bits preserved");
+    assert_eq!(observed.native_rv, Some(0x12), "original provider RV preserved");
+    assert!(!observed.slot_written, "error return writes no slot");
+
+    // A second cycle advances the ID and overwrites the observation.
+    let mut second = domain.reserve_waiter(&first, 1).expect("slot reusable");
+    second.commit_native().expect("commit");
+    second.note_returned(0, true);
+    drop(second);
+    let observed = domain.last_waiter_observation_for_tests().expect("second observation");
+    assert_eq!(observed.id, 1, "wait IDs advance monotonically");
+    assert_eq!(observed.native_rv, Some(0));
+    assert!(observed.slot_written);
 }
 
 #[test]
