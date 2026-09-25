@@ -1096,6 +1096,95 @@ pub(super) async fn backend_object_known_public(
     probe_backend_object_private(ctx, backend_session, backend_object).await == Some(false)
 }
 
+/// Three-state `CKA_TOKEN` probe for one backend object: `Some(true)` is a
+/// token object, `Some(false)` is session-scoped, `None` is probe failure.
+/// Read-only; mirrors [`probe_backend_object_private`].
+async fn probe_backend_object_token(
+    ctx: &HandlerContext,
+    backend_session: CkSessionHandle,
+    backend_object: CkObjectHandle,
+) -> Option<bool> {
+    let backend = ctx.backend.clone();
+    let fetched = spawn_backend(move || {
+        let mut template = [CkAttribute {
+            attr_type: CkAttributeType::TOKEN,
+            value: Some(CkAttributeValue::Bool(false)),
+        }];
+        let token =
+            match backend.get_attribute_value(backend_session, backend_object, &mut template) {
+                Ok(()) => template.first().and_then(|attr| attr.value.as_ref()).and_then(|value| {
+                    match value {
+                        CkAttributeValue::Bool(b) => Some(*b),
+                        CkAttributeValue::Bytes(bytes) => {
+                            Some(bytes.expose(|raw| raw.first().is_some_and(|&b| b != 0)))
+                        }
+                        CkAttributeValue::Ulong(u) => Some(*u != 0),
+                        _ => None,
+                    }
+                }),
+                Err(_) => None,
+            };
+        Ok(token)
+    })
+    .await;
+    match fetched {
+        Ok(Ok(token)) => token,
+        _ => None,
+    }
+}
+
+/// CROSS-PROC-001: known-token probe for find-enumeration filtering.
+/// Returns `true` only when the probe positively reports a token object;
+/// session-scoped or probe failure returns `false` (fail-closed — an
+/// unknown session object belongs to another context and must hide).
+pub(super) async fn backend_object_known_token(
+    ctx: &HandlerContext,
+    backend_session: CkSessionHandle,
+    backend_object: CkObjectHandle,
+) -> bool {
+    probe_backend_object_token(ctx, backend_session, backend_object).await == Some(true)
+}
+
+/// CROSS-PROC-001: true when `backend_object` already maps in the calling
+/// context — minted here, or admitted by an earlier vetted find. Such
+/// handles skip the token probe (their visibility was already decided).
+///
+/// Residual (T2run-fix1 prod M3, flagged 2026-09-19): handle-recycling ABA —
+/// if the provider deletes an object out-of-band and recycles its handle for
+/// a foreign session object, a stale mapping shows it without re-probing.
+/// Narrow (destroy paths remove mappings, so staleness needs provider-side
+/// deletion + handle reuse) and fail-closed everywhere else — accepted.
+pub(super) async fn context_maps_backend_object(
+    ctx_mgr: &Arc<ContextManager>,
+    ctx_id: &ClientContextId,
+    backend_object: CkObjectHandle,
+) -> bool {
+    ctx_mgr
+        .get_context(ctx_id, |c| {
+            c.object_handles.resolve_backend(BackendHandle(backend_object.0)).is_some()
+        })
+        .await
+        .unwrap_or(false)
+}
+
+/// CROSS-PROC-001: cross-context session-object isolation for find.
+/// Session objects are visible to every backend session of the daemon's
+/// single backend application — including other tenants' contexts — so a
+/// find result is shown only when this context already maps it (minted
+/// here or vetted by an earlier find) or it probes as a token object
+/// (app-global by design). Fail-closed throughout: probe failure hides.
+pub(super) async fn find_result_visible_to_context(
+    ctx: &HandlerContext,
+    ctx_id: &ClientContextId,
+    backend_session: CkSessionHandle,
+    backend_object: CkObjectHandle,
+) -> bool {
+    if context_maps_backend_object(&ctx.context_manager, ctx_id, backend_object).await {
+        return true;
+    }
+    backend_object_known_token(ctx, backend_session, backend_object).await
+}
+
 /// D6(1) enforcement for object/key USE (sign/verify/encrypt/decrypt/digest
 /// init, get/set attributes, wrap/unwrap/derive keys, ...): when the calling
 /// context is logically logged out on the session's slot and the object is

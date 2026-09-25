@@ -1,0 +1,6 @@
+; Undecorated exports for the win32 CI stub provider.
+; x86 __cdecl decorates the object symbol as _C_GetFunctionList; the daemon
+; resolves the plain name, so the export table must carry it verbatim.
+LIBRARY p11win32stub
+EXPORTS
+    C_GetFunctionList

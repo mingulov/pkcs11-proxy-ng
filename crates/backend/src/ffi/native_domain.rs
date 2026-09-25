@@ -638,9 +638,13 @@ impl LifecycleTracker {
 // I1 contention decision (blocking is INTENDED — decided, not assumed):
 // the detached ticket only avoids HOLDING write across the native call;
 // ACQUIRING write in begin/publish/abandon blocks until in-flight readers
-// drain, and `std::sync::RwLock` is writer-preferring, so a queued control
-// op additionally stalls NEW ordinary admissions until the drain completes
-// (pinned by `queued_writer_stalls_new_admissions`). Blocking is chosen
+// drain, and the queued-writer count (`writer_waiting`, raised in
+// `lock_write` across the blocking acquisition) additionally stalls NEW
+// ordinary admissions until the drain completes (pinned by
+// `queued_writer_stalls_new_admissions`). Preference is ENFORCED, not
+// assumed: `std::sync::RwLock` itself is not writer-preferring on
+// Windows (SRWLOCK lets readers barge; T2run run-6 win32 failed the
+// pin before enforcement). Blocking is chosen
 // over try_write-plus-fail-fast because (a) the daemon calls `initialize()`
 // once at startup before serving (`crates/server/src/main.rs:88`) and
 // per-client Initialize never touches the backend
@@ -666,9 +670,9 @@ impl LifecycleTracker {
 // and on expiry the sealer itself calls `abnormal_stop_native_lifetime`
 // (suicide — it never returns failure, never proceeds unsealed); (2) past
 // N misses, ONE blocking write acquisition under the already-armed
-// shutdown deadline — the queued writer stalls new admissions
-// (writer-preferring: probed and pinned, so the drain terminates modulo a
-// truly stuck provider), and the external deadline arm owns the bound.
+// shutdown deadline — the queued writer counts itself and new admissions
+// spin, so the drain terminates modulo a truly stuck provider (enforced
+// preference, pinned), and the external deadline arm owns the bound.
 // Overrun on either arm is `abnormal_stop_native_lifetime` — PROCESS DEATH
 // (`exit_group(70)`; `native_stop.rs`) — acceptable ONLY because
 // `backend.finalize()` runs at post-traffic shutdown
@@ -676,7 +680,7 @@ impl LifecycleTracker {
 // drained. Landed TF01b test
 // `finalize_under_continuous_ordinary_load_completes_and_seals`: Finalize
 // under continuous ordinary load completes without hitting the death
-// deadline (pins writer-preferring drain termination).
+// deadline (pins enforced-preference drain termination).
 //
 // TF01b session fences (I4 — landed per this text, with one recorded
 // mechanism deviation). For close(S) to exclude in-flight ordinary ops on
@@ -782,6 +786,15 @@ struct LifecycleInner {
 pub(in crate::ffi) struct LifecycleDomain {
     inner: RwLock<LifecycleInner>,
     waiter: WaiterDomain,
+    /// Queued-writer count (T2run: enforced writer preference).
+    /// `std::sync::RwLock` is NOT writer-preferring on Windows
+    /// (SRWLOCK lets readers barge; run-6 win32 failed the I1 pin),
+    /// so [`LifecycleDomain::lock_write`] counts itself queued while
+    /// acquiring and [`LifecycleDomain::admit_ordinary`] spins on the
+    /// count first. Once raised, the in-flight set can only shrink,
+    /// so the queued writer always acquires: provable drain
+    /// termination on every platform, modulo a truly stuck provider.
+    writer_waiting: std::sync::atomic::AtomicUsize,
 }
 
 /// Proof of ordinary admission: holds lifecycle read exclusion. Dropping
@@ -865,6 +878,7 @@ impl LifecycleDomain {
                 epoch: 0,
             }),
             waiter: WaiterDomain::default(),
+            writer_waiting: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -888,6 +902,15 @@ impl LifecycleDomain {
             "nested ordinary admission: a second admit under a live OrdinaryGuard \
              deadlocks behind a queued writer; thread the guard down instead"
         );
+        // Enforced writer preference (T2run): stall new admissions while
+        // a control write is queued (count, not flag: concurrent begins
+        // each hold one). Bounded: spinners hold no read, so the in-flight
+        // set only shrinks and the queued writer always acquires; a
+        // stuck in-flight guard stalls exactly as it would queued on the
+        // lock itself (accepted residual, same as before).
+        while self.writer_waiting.load(SeqCst) > 0 {
+            std::thread::yield_now();
+        }
         let read = self.inner.read().map_err(|_| CkRv::GENERAL_ERROR)?;
         let (state, epoch) = (read.state, read.epoch);
         match state {
@@ -1090,7 +1113,14 @@ impl LifecycleDomain {
             "lifecycle write under a live OrdinaryGuard: write behind own read \
              self-deadlocks; settle outside admitted scopes"
         );
-        self.inner.write().map_err(|_| CkRv::GENERAL_ERROR)
+        // Raise the queued-writer count across the blocking acquisition
+        // (T2run: enforced writer preference); the decrement runs on ALL
+        // exits — acquired, poisoned, or otherwise — so admissions can
+        // never spin on a writer that already left.
+        self.writer_waiting.fetch_add(1, SeqCst);
+        let acquired = self.inner.write();
+        self.writer_waiting.fetch_sub(1, SeqCst);
+        acquired.map_err(|_| CkRv::GENERAL_ERROR)
     }
 
     /// Test-only state injection for TF01b-state denial coverage.

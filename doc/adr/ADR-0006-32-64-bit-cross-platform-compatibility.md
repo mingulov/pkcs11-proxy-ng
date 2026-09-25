@@ -41,6 +41,15 @@ native-width/slot-event and evidence rules in the
 [native ownership contract](../release/native-mechanism-ownership.md).
 The ABI analysis below does not itself qualify any v0.2 native runtime.
 
+[Tail-stretch closure, 2026-09-17: the Windows-native-loading deferral in
+this amendment — and the "Deferred for v0.2" Windows x64/LLP64
+native-provider-server row in the support-intent table below — is closed:
+[ADR-0014](./ADR-0014-v020-tail-platform-stretch.md) is Implemented, with
+real-Windows daemon-host receipts in workspace-root
+`artifacts/v020-tail-windows-2026-09-16/` legs A and C, and shim-direction
+receipts in leg B. The amendment text and bridge analysis are retained as
+history.]
+
 This ADR's original analysis modelled two ABIs on a single axis (LP64 vs ILP32,
 where pointer width and `CK_ULONG` width move *together*). That is incomplete:
 **Windows x64 is LLP64** — `CK_ULONG` is 32-bit while pointers are 64-bit and

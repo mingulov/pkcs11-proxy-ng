@@ -55,6 +55,8 @@ Usage (after ``cargo build --release``)::
 
 import argparse
 import hashlib
+import glob
+import json
 import os
 import shlex
 import shutil
@@ -84,6 +86,11 @@ SOFTHSM_UNIX_LIB_CANDIDATES = [
     "/usr/local/lib/softhsm/libsofthsm2.so",
     "/opt/homebrew/lib/softhsm/libsofthsm2.dylib",
     "/usr/local/lib/softhsm/libsofthsm2.dylib",
+    # T2run: brew softhsm 2.7.0 installs the module flat in lib/ as .so
+    # (upstream .so naming on all platforms; proven by run-3 macOS
+    # diagnostic -- lib/softhsm/ carries no loadable module there).
+    "/opt/homebrew/lib/libsofthsm2.so",
+    "/usr/local/lib/libsofthsm2.so",
 ]
 
 DAEMON_LOG_TCP_WARN = "listening on tcp without authentication"
@@ -104,6 +111,32 @@ def run(cmd, env=None, cwd=None):
         merged.update(env)
     log("+ " + shlex.join(str(c) for c in cmd))
     return subprocess.run(cmd, env=merged, cwd=cwd)
+
+
+def p11check_cwd():
+    # T2run: on Windows, pytest emits EMPTY node-id paths when the CWD and
+    # the collected tree sit on different drives (workflow checkout on D:,
+    # installed package on C:) — and the KAT-scope differential matches on
+    # the path portion, so it finds 0 comparable KATs (exit 2) even though
+    # both phases pass. Run from the installed package dir (same drive as
+    # the collected tree, located via this same interpreter) so node-ids
+    # carry testcases/... paths. Unix untouched: green legs stay
+    # bit-identical. Selection is unaffected (pytest -k matches names,
+    # not node-id paths).
+    if os.name != "nt":
+        return None
+    out = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import os, pkcs11_check; "
+            "print(os.path.dirname(os.path.abspath(pkcs11_check.__file__)))",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return out.stdout.strip()
 
 
 def sha256_file(path):
@@ -216,6 +249,36 @@ def differential_argv(direct_jsonl, proxied_jsonl):
     ]
 
 
+def differential_jsonl(report_jsonl):
+    """Sibling copy of ``report.jsonl`` the framework differential parses.
+
+    T2run: pkcs11-check 0.2.0's own report writer emits per-unit
+    session-collection ``CollectReport`` records with a blank nodeid,
+    which its differential reader rejects ("invalid CollectReport",
+    exit 2 -- run-4 ubuntu proved exit-0x2 plus identical summaries
+    while the differential died on line 239). Those records carry no
+    test verdicts (the KAT scope compares TestReport node-ids only),
+    so drop exactly them into a same-directory copy (sibling
+    results.json provenance still resolves) and compare the copies.
+    Verdict scope is unchanged; the count is logged for the record.
+    """
+    out = os.path.join(os.path.dirname(report_jsonl), "report.differential.jsonl")
+    dropped = 0
+    with open(report_jsonl, encoding="utf-8") as src, open(out, "w", encoding="utf-8") as dst:
+        for line in src:
+            record = json.loads(line) if line.strip() else None
+            if (
+                isinstance(record, dict)
+                and record.get("$report_type") == "CollectReport"
+                and not str(record.get("nodeid") or "").strip()
+            ):
+                dropped += 1
+                continue
+            dst.write(line)
+    log(f"differential input {os.path.basename(report_jsonl)}: dropped {dropped} blank CollectReports")
+    return out
+
+
 def provision_softhsm_windows(workdir):
     """Fetch the pinned disig portable zip (hash-verified) and unpack it."""
     dl_dir = os.path.join(workdir, "dl")
@@ -234,11 +297,58 @@ def provision_softhsm_windows(workdir):
         raise SystemExit(f"expected {lib} after extraction")
     if not os.path.isfile(util):
         raise SystemExit(f"expected {util} after extraction")
+    # T2run: the portable README requires the lib/ dir on PATH --
+    # softhsm2-util.exe LoadLibrary()s "softhsm2.dll" by bare name
+    # (run-5 win64: 0x7E without it, despite a correct desktop CRT).
+    os.environ["PATH"] = os.path.join(root, "lib") + os.pathsep + os.environ.get("PATH", "")
     return lib, util
+
+
+def _resolve_brew_softhsm():
+    """Locate the brew SoftHSM module without hard-coding its layout.
+
+    T2run: brew's softhsm layout varies by version (2.7.0 keeps the
+    module under lib/softhsm/ reached via the lib/softhsm symlink;
+    older layouts used lib/softhsm/*.dylib), so glob the live
+    prefixes and the versioned Cellar instead of trusting one path.
+    Static archives (.a) are never loadable modules and are skipped
+    (run-5 macOS picked libsofthsm2.a first). Returns the first
+    loadable-looking module or None.
+    """
+    prefixes = ["/opt/homebrew", "/usr/local"]
+    brew = shutil.which("brew")
+    if brew is not None:
+        try:
+            out = subprocess.run(
+                [brew, "--prefix", "softhsm"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if out.returncode == 0 and out.stdout.strip():
+                prefixes.insert(0, out.stdout.strip())
+        except (OSError, subprocess.SubprocessError):
+            pass
+    patterns = []
+    for prefix in prefixes:
+        patterns.append(os.path.join(prefix, "lib", "libsofthsm2.*"))
+        patterns.append(os.path.join(prefix, "lib", "softhsm", "libsofthsm2.*"))
+    for cellar in ("/opt/homebrew/Cellar/softhsm", "/usr/local/Cellar/softhsm"):
+        patterns.append(os.path.join(cellar, "*", "lib", "libsofthsm2.*"))
+        patterns.append(os.path.join(cellar, "*", "lib", "softhsm", "libsofthsm2.*"))
+    for pattern in patterns:
+        for hit in sorted(glob.glob(pattern)):
+            if hit.lower().endswith(".a"):
+                continue  # static archive: never dlopenable
+            if os.path.isfile(hit):  # follows links; drops dangling ones
+                return hit
+    return None
 
 
 def provision_softhsm_unix():
     lib = next((c for c in SOFTHSM_UNIX_LIB_CANDIDATES if os.path.isfile(c)), None)
+    if lib is None and sys.platform == "darwin":
+        lib = _resolve_brew_softhsm()
     if lib is None:
         raise SystemExit("SoftHSM2 module not found; install softhsm2 first")
     util = shutil.which("softhsm2-util")
@@ -299,10 +409,14 @@ def main():
     port = free_port()
     endpoint = f"http://127.0.0.1:{port}"
     proxy_toml = os.path.join(workdir, "proxy.toml")
+    # T2run: escape backslashes for the TOML basic string — a raw Windows
+    # path (D:\a\...) fails to parse (`\a` is an invalid escape) and the
+    # daemon never binds. No-op on Unix (no backslashes in the path).
+    module_toml = softhsm_lib.replace("\\", "\\\\")
     with open(proxy_toml, "w", encoding="utf-8") as f:
         f.write(
             "[backend]\n"
-            f'module = "{softhsm_lib}"\n'
+            f'module = "{module_toml}"\n'
             "\n[proxy]\n"
             "request_timeout_secs = 30\n"
             "startup_timeout_secs = 30\n"
@@ -329,6 +443,9 @@ def main():
 
     direct_dir = os.path.join(workdir, "direct")
     os.makedirs(direct_dir, exist_ok=True)
+    p11_cwd = p11check_cwd()
+    if p11_cwd:
+        log(f"pkcs11-check cwd (Windows node-id paths): {p11_cwd}")
     log("[2/6] pkcs11-check DIRECT against SoftHSM")
     direct = run(
         [
@@ -339,7 +456,8 @@ def main():
             "--output-file",
             os.path.join(direct_dir, "results.json"),
         ]
-        + common_p11
+        + common_p11,
+        cwd=p11_cwd,
     )
     log(f"direct exit: {direct.returncode}")
 
@@ -385,6 +503,7 @@ def main():
                 "PKCS11_PROXY_ENDPOINT": endpoint,
                 "PKCS11_PROXY_CONNECT_TIMEOUT": "10",
             },
+            cwd=p11_cwd,
         )
         log(f"proxied exit: {proxied.returncode}")
     finally:
@@ -398,7 +517,11 @@ def main():
     direct_jsonl = os.path.join(direct_dir, "report.jsonl")
     proxied_jsonl = os.path.join(proxied_dir, "report.jsonl")
     log("[6/6] differential comparison (deterministic-KAT scope)")
-    diff = run(differential_argv(direct_jsonl, proxied_jsonl))
+    diff = run(
+        differential_argv(
+            differential_jsonl(direct_jsonl), differential_jsonl(proxied_jsonl)
+        )
+    )
     log(f"differential exit: {diff.returncode}")
 
     print(f"workdir: {workdir}")

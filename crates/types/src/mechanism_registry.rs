@@ -1151,7 +1151,10 @@ mod tests {
 
         let main_path = dir.path().join("mechanisms.toml");
         let mut f = std::fs::File::create(&main_path).unwrap();
-        write!(f, r#"include = ["{}"]"#, included_path.display()).unwrap();
+        // T2run: TOML literal string -- an absolute Windows path carries
+        // backslashes, which are escapes (and `\U` errors) in a basic
+        // string (run-5 win32 red). Bare paths elsewhere stay as-is.
+        write!(f, "include = ['{}']", included_path.display()).unwrap();
 
         let reg = MechanismRegistry::load(Some(&main_path)).unwrap();
         assert!(reg.is_parameterless(0x80EE0001));

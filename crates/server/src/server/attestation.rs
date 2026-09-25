@@ -204,12 +204,16 @@ mod tests {
 
     /// Parse a minimal DaemonConfig from TOML with a given module path.
     fn config_with_module(module: &Path) -> DaemonConfig {
+        // T2run win32: forward-slash the path — a raw Windows temp path
+        // (`C:\Users\...`) inside a TOML basic string parses `\U` as a
+        // unicode escape and fails to parse.
+        let module_toml = module.display().to_string().replace('\\', "/");
         let toml = format!(
             r#"
 [backend]
 module = "{}"
 "#,
-            module.display()
+            module_toml
         );
         toml::from_str(&toml).expect("test config should parse")
     }

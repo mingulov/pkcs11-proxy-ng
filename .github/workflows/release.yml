@@ -12,10 +12,12 @@
 #   git tag -a vX.Y.Z -m "..."
 #   git push origin vX.Y.Z
 #
-# The release-windows job cross-compiles the Windows x64 (MSVC) bundle with
-# cargo-xwin (no Windows runner) and appends the deterministic ZIP +
-# SHA256SUMS-windows to the same tag release via a second softprops step; the Linux
-# job below is left untouched.
+# Topology: the build job compiles and packages the Linux bundle, the
+# build-windows job cross-compiles the Windows x64 (MSVC) bundle with
+# cargo-xwin (no Windows runner), and the publish job (gated on the
+# `release` environment) attaches both jobs' dist/ artifacts to the tag
+# release via the two softprops steps. Preparation and publication are
+# separate jobs so a reviewer must approve before anything publishes.
 #
 # Security notes:
 #   - GITHUB_REF_NAME is read directly as a shell env var; no `${{ }}`
@@ -37,12 +39,16 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  release:
-    name: Build and publish release
+  build:
+    name: Build Linux release
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          # The receipt step compares against HEAD~1 and diffs HEAD~1..HEAD,
+          # so the checkout must contain at least the tag commit and its parent.
+          fetch-depth: 2
 
       - name: Validate tag format
         run: |
@@ -52,6 +58,47 @@ jobs:
             exit 1
           fi
           echo "tag $GITHUB_REF_NAME validated"
+
+      - name: Verify release subject
+        run: scripts/verify-release-subject.sh "$GITHUB_REF_NAME"
+
+      - name: Verify quality receipt
+        run: |
+          set -euo pipefail
+          RECEIPT="doc/release/v0.2.0-quality-receipt.md"
+          if [[ ! -f "$RECEIPT" ]]; then
+            echo "::error::quality receipt $RECEIPT is missing; refusing to release."
+            exit 1
+          fi
+          SUBJECT_SHA="$(sed -nE 's/^subject_sha: ([0-9a-fA-F]+)$/\1/p' "$RECEIPT")"
+          SUBJECT_COMMIT="$(git rev-parse HEAD~1)"
+          TAG_COMMIT="$(git rev-parse HEAD)"
+          if [[ "$SUBJECT_SHA" != "$SUBJECT_COMMIT" ]]; then
+            echo "::error::quality receipt subject_sha '$SUBJECT_SHA' does not equal frozen subject '$SUBJECT_COMMIT' (HEAD~1 of tag commit '$TAG_COMMIT'); refusing to release."
+            exit 1
+          fi
+          for gate in fmt check test clippy msrv audit deny release_dry_run; do
+            value="$(sed -nE "s/^${gate}: (.*)$/\1/p" "$RECEIPT")"
+            case "$value" in
+              pass*) ;;
+              *)
+                echo "::error::quality receipt gate '$gate' is not pass-prefixed (got '$value'); refusing to release."
+                exit 1
+                ;;
+            esac
+          done
+          DELTA_PATHS="$(git diff --name-only "$SUBJECT_COMMIT" "$TAG_COMMIT")"
+          while IFS= read -r path; do
+            if [[ -z "$path" ]]; then continue; fi
+            case "$path" in
+              doc/release/v0.2.0-quality-receipt.md|CHANGELOG.md) ;;
+              *)
+                echo "::error::tag commit '$TAG_COMMIT' changes '$path', outside the receipt/CHANGELOG bookkeeping delta; refusing to release."
+                exit 1
+                ;;
+            esac
+          done <<<"$DELTA_PATHS"
+          echo "quality receipt verified for subject $SUBJECT_COMMIT at tag commit $TAG_COMMIT"
 
       - name: Install system dependencies
         run: |
@@ -90,11 +137,14 @@ jobs:
           TARGET="$(rustc -vV | awk '/^host:/ {print $2}')"
           BUNDLE="pkcs11-proxy-ng-${GITHUB_REF_NAME}-${TARGET}"
 
-          mkdir -p "dist/${BUNDLE}/bin" "dist/${BUNDLE}/lib/pkcs11"
+          mkdir -p "dist/${BUNDLE}/bin" "dist/${BUNDLE}/lib/pkcs11" "dist/${BUNDLE}/doc"
           cp target/release/pkcs11-proxy-ng           "dist/${BUNDLE}/bin/"
           cp target/release/pkcs11-proxy-ng-cli       "dist/${BUNDLE}/bin/"
           cp target/release/libpkcs11_proxy_ng_shim.so "dist/${BUNDLE}/lib/pkcs11/"
           cp README.md CHANGELOG.md LICENSE-APACHE LICENSE-MIT "dist/${BUNDLE}/"
+          cp doc/release/beta-support-matrix.md doc/release/mtls-setup.md \
+             doc/release/parity-validation.md doc/release/v0.2.0-release-notes.md \
+             "dist/${BUNDLE}/doc/"
 
           strip "dist/${BUNDLE}/bin/"* "dist/${BUNDLE}/lib/pkcs11/"*.so
 
@@ -125,20 +175,19 @@ jobs:
           echo "--- release notes ---"
           cat dist/RELEASE_NOTES.md
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Upload Linux dist artifact
+        uses: actions/upload-artifact@v5
         with:
-          name: pkcs11-proxy-ng ${{ github.ref_name }}
-          body_path: dist/RELEASE_NOTES.md
-          files: |
+          name: linux-dist
+          path: |
             dist/*.tar.gz
             dist/SHA256SUMS
-          fail_on_unmatched_files: true
+            dist/RELEASE_NOTES.md
+          if-no-files-found: error
 
-  release-windows:
-    name: Build and publish Windows release bundle
+  build-windows:
+    name: Build Windows release bundle
     runs-on: ubuntu-24.04
-    needs: release
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -172,6 +221,46 @@ jobs:
         run: |
           set -euo pipefail
           ( cd dist/win-stage && sha256sum -c SHA256SUMS-windows )
+
+      - name: Upload Windows dist artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: windows-dist
+          path: |
+            dist/win-stage/*.zip
+            dist/win-stage/SHA256SUMS-windows
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    runs-on: ubuntu-24.04
+    needs: [build, build-windows]
+    environment: release
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    steps:
+      - name: Download Linux dist artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: linux-dist
+          path: dist/
+
+      - name: Download Windows dist artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: windows-dist
+          path: dist/win-stage/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: pkcs11-proxy-ng ${{ github.ref_name }}
+          body_path: dist/RELEASE_NOTES.md
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          fail_on_unmatched_files: true
 
       - name: Append Windows assets to GitHub Release
         uses: softprops/action-gh-release@v2

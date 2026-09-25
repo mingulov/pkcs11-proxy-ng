@@ -9,29 +9,28 @@ and provider tests do not qualify this new lifetime/termination contract.
 
 ## Supported deployment boundary
 
-Production live FFI for v0.2 is limited to qualified targets satisfying all of:
+Production live FFI for v0.2 is limited to qualified targets:
 
-- `target_os = "linux"`;
-- `target_env = "gnu"` or `"musl"`; and
-- `target_arch = "x86_64"` with `target_pointer_width = "64"`, or
-  `target_arch = "x86"` with `target_pointer_width = "32"` (i686).
+- Linux GNU/musl on x86_64 (64-bit) or x86 (32-bit);
+- Windows MSVC on x86_64 (64-bit) — tail stretch landed (T6 legs A/B/C)
+  and T2run's windows-2022 compare leg green;
+- Windows MSVC on x86 (32-bit) at the stub tier — T2run's win32 leg
+  green (i686 build, WOW64 suites, stub C provider live-load); no
+  production 32-bit provider runs in CI, so live-provider behavior past
+  the stub boundary is unqualified; and
+- macOS on aarch64 (64-bit) — T2run's macOS leg green (compare plus
+  backend/shim lib suites, STOP child receipts included).
 
-These are qualification targets until the native evidence below exists. x32,
-other architectures/environments and non-Linux native loading are excluded.
-This explicitly supersedes Windows native-provider daemon support in
-[ADR-0011](../adr/ADR-0011-narrow-ck-ulong-client-width-bridging.md) and
-[ADR-0006](../adr/ADR-0006-32-64-bit-cross-platform-compatibility.md) for v0.2.
-Windows native-provider daemon work is re-admitted as committed v0.2.0 tail
-stretch (low priority, before the comprehensive matrix gate) per
-[ADR-0014](../adr/ADR-0014-v020-tail-platform-stretch.md); until that tail
-work lands, the constructor refusal below stays in force.
-macOS native-provider daemon work is likewise in progress: the code
-load-qualifies macOS on aarch64/x86_64 with 64-bit pointers (the macOS
-leg of `NATIVE_FFI_QUALIFIED`) and implements the macOS stop arm below,
-but macOS is NOT runtime-qualified — the macOS-leg compile proof and
-any live stop receipt ride the cross-platform CI macOS leg (T2run; see
-the pending proof in the macOS stop section). Until that proof lands,
-macOS load/stop behavior is code-complete but unqualified.
+Excluded: Windows GNU; Linux ARM64/aarch64 (the constructor refuses —
+native FFI fail-closes by design); macOS x86_64 runtime (the code
+admits it, but load-qualification only — no CI runtime leg); x32,
+big-/mixed-endian, and other architectures/environments. The v0.2 tail
+stretch ([ADR-0014](../adr/ADR-0014-v020-tail-platform-stretch.md)) has
+landed, so Windows x64 native-provider daemon support is re-admitted
+(the [ADR-0011](../adr/ADR-0011-narrow-ck-ulong-client-width-bridging.md) /
+[ADR-0006](../adr/ADR-0006-32-64-bit-cross-platform-compatibility.md)
+deferral stands only for the still-excluded hosts above); the
+constructor refusal below stays in force for those hosts.
 
 Portable Windows client/shim/proto/types builds and their existing contracts
 remain; a Windows client may interoperate with a qualified Linux daemon.
@@ -381,19 +380,15 @@ process. What is tested is the supervisor-side record: the existing
 STOP-C1 child scenarios plus the S8 controller-deadline child exercise
 the real arm in a re-spawned child and assert normal exit 70, no
 signal/core, pipe EOF, and reaping. Those tests are `cfg(unix)`, so they
-compile on macOS; executing them there rides the T2run carry below.
+compile on macOS, and T2run's macOS leg executes them (see Status below).
 
-Status: IMPLEMENTED, NOT runtime-qualified. No live macOS execution
-exists. Qualification needs the T2run carry: (1) macOS-leg compile
-proof — the cross-platform CI macOS leg (aarch64) building the backend
-and shim touched crates; (2) live-stop receipts — the STOP-C1/S8 child
-tests executing on that leg, which requires the leg to run the backend
-lib suite (it currently only builds plus runs the comparison script).
-The x86_64 arch rides a macos-15-intel leg if T2run adds one
-(GitHub-hosted Intel runner, at macOS-minute cost, supported until the
-macOS 15 image retires ~Fall 2027); otherwise its compile proof is a
-local cargo check --target x86_64-apple-darwin recorded — never claimed
-as CI evidence.
+Status: IMPLEMENTED, runtime-qualified on aarch64. T2run landed both
+proofs on the cross-platform macOS leg (aarch64): (1) compile proof —
+the leg builds the backend and shim crates; (2) live-stop receipts —
+the STOP-C1/S8 child tests execute in the backend lib suite there, all
+green. The x86_64 arch has no CI runtime leg (T2run did not add a
+macos-15-intel leg); it stays load-qualified only — never claimed as
+runtime evidence.
 
 Receipt criteria (supervisor side, no in-process observation): the
 process dies (reaped, no lingering threads); no hang (a supervisor

@@ -522,11 +522,17 @@ fn generated_support_table_is_complete() {
     );
 }
 
-fn example_config_with_existing_placeholder_paths(content: &str) -> String {
+fn example_config_with_existing_placeholder_paths(content: &str, stub_path: &str) -> String {
     let mut value: toml::Value = toml::from_str(content).expect("example config TOML");
+    // T2run win32: the caller passes a freshly-created 0600 stub file —
+    // `/dev/null` does not exist on Windows and red-lined this test there,
+    // and `load()` perm-guards the module path (with a `/dev/null`-only
+    // exemption), so the stub must be a tight-permissioned real file.
+    // Serialization re-escapes Windows backslashes automatically.
+    let existing_stub = || toml::Value::String(stub_path.to_string());
 
     if let Some(backend) = value.get_mut("backend").and_then(toml::Value::as_table_mut) {
-        backend.insert("module".to_string(), toml::Value::String("/dev/null".to_string()));
+        backend.insert("module".to_string(), existing_stub());
     }
 
     if let Some(remote) = value
@@ -537,7 +543,7 @@ fn example_config_with_existing_placeholder_paths(content: &str) -> String {
     {
         for key in ["ca_cert", "server_cert", "server_key"] {
             if remote.contains_key(key) {
-                remote.insert(key.to_string(), toml::Value::String("/dev/null".to_string()));
+                remote.insert(key.to_string(), existing_stub());
             }
         }
     }
@@ -550,6 +556,18 @@ fn example_configs_parse_and_validate_without_errors() {
     let examples_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
     assert!(examples_dir.exists(), "examples/ directory must exist: {}", examples_dir.display());
     let tempdir = tempfile::tempdir().expect("tempdir for normalized example configs");
+    // Tight-permissioned stub satisfying both the existence check in
+    // `validate()` and the perm guard in `load()` on every platform.
+    let stub_path = tempdir.path().join("module.stub");
+    std::fs::write(&stub_path, b"T2run existing-path stub")
+        .unwrap_or_else(|e| panic!("cannot write {}: {e}", stub_path.display()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stub_path, std::fs::Permissions::from_mode(0o600))
+            .unwrap_or_else(|e| panic!("cannot chmod {}: {e}", stub_path.display()));
+    }
+    let stub_path = stub_path.to_str().expect("stub path must be UTF-8").to_string();
     let mut count = 0;
     for entry in std::fs::read_dir(&examples_dir).expect("cannot read examples/") {
         let entry = entry.expect("dir entry");
@@ -562,7 +580,7 @@ fn example_configs_parse_and_validate_without_errors() {
             }
             let content = std::fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
-            let normalized = example_config_with_existing_placeholder_paths(&content);
+            let normalized = example_config_with_existing_placeholder_paths(&content, &stub_path);
             let normalized_path = tempdir
                 .path()
                 .join(std::path::Path::new(path.file_name().expect("example config file name")));

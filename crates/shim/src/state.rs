@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
@@ -9,7 +9,24 @@ use pkcs11_proxy_ng_proto::convert::message_params::MessageParameterShape;
 use pkcs11_proxy_ng_types::{CkRv, MechanismRegistry};
 use tokio::runtime::Runtime;
 
-static RUNTIME: OnceLock<Runtime> = OnceLock::new();
+/// Fork-aware tokio runtime cell (T2run: macOS run-6). A `OnceLock`
+/// runtime is inherited across `fork()` with a dead I/O driver (the
+/// kqueue fd does not survive; the first post-fork `block_on` panics
+/// with EBADF and aborts the child). The pid tag detects the fork: a
+/// process whose pid differs from the tag leaks a fresh runtime and
+/// claims the cell. Leaked runtimes are never dropped, so no
+/// destructor ever touches a dead driver.
+///
+/// Lock-free by design: a mutex here could be inherited
+/// locked-by-a-dead-thread after a fork inside a build. Races are
+/// benign — every racer builds a valid runtime for the current pid
+/// and uses its own; the losers' runtimes leak but stay valid.
+static RUNTIME_PTR: AtomicPtr<Runtime> = AtomicPtr::new(std::ptr::null_mut());
+/// Pid the current `RUNTIME_PTR` was built for (0 = unbuilt).
+static RUNTIME_PID: AtomicU32 = AtomicU32::new(0);
+/// Pid whose lifecycle flags (`INITIALIZED`, `CLIENT_RECONNECT_REQUIRED`)
+/// are live (0 = unclaimed). Claimed by [`reclaim_after_fork`].
+static SHIM_PID: AtomicU32 = AtomicU32::new(0);
 static CLIENT: OnceLock<tokio::sync::Mutex<Pkcs11Client>> = OnceLock::new();
 /// Guards the one-time CLIENT initialization so that concurrent callers
 /// wait rather than racing to connect, and so that a failed init is
@@ -81,14 +98,48 @@ pub fn replace_mechanism_registry(reg: MechanismRegistry) {
 /// without a network round-trip.
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
+/// Reset fork-unsafe lifecycle flags when the process forked since the
+/// shim state was claimed. After this, the child's `C_Initialize` runs
+/// the full path (fresh runtime via [`runtime`], reconnected channel
+/// via the reconnect flag) instead of inheriting the parent's dead
+/// I/O driver and sockets. No-op fast path: one atomic load when the
+/// pid already matches.
+///
+/// Residual (T2run-fix1 prod M2, flagged 2026-09-19): the child keeps the
+/// parent's SESSION_SLOTS/message-state entries (`c_initialize` never
+/// clears them; only `c_finalize` does), so a recycled server-side handle
+/// could collide with a stale entry. Narrow (needs open parent sessions
+/// at fork + handle collision + slot mismatch), pre-existing class, within
+/// this file's documented liveness bar — accepted, not fixed.
+fn reclaim_after_fork() {
+    let pid = std::process::id();
+    if SHIM_PID.load(Ordering::Relaxed) == pid {
+        return;
+    }
+    if SHIM_PID
+        .compare_exchange_weak(
+            SHIM_PID.load(Ordering::Relaxed),
+            pid,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        )
+        .is_ok()
+    {
+        INITIALIZED.store(false, Ordering::Release);
+        CLIENT_RECONNECT_REQUIRED.store(true, Ordering::Release);
+    }
+}
+
 /// Returns `true` if `C_Initialize` has completed successfully.
 pub fn is_initialized() -> bool {
+    reclaim_after_fork();
     INITIALIZED.load(Ordering::Acquire)
 }
 
 /// Transition from uninitialized → initialized.
 /// Returns `true` if the transition succeeded (i.e., was not already set).
 pub fn mark_initialized() -> bool {
+    reclaim_after_fork();
     INITIALIZED.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok()
 }
 
@@ -473,12 +524,30 @@ pub fn runtime() -> &'static Runtime {
     // multi-thread executor. (Per PKCS#11, a forked child must still call
     // C_Initialize again before reusing the module; the daemon connection is
     // re-established by the shim's reconnect path.)
-    RUNTIME.get_or_init(|| {
+    //
+    // Fork generation: a child whose pid differs from RUNTIME_PID leaks a
+    // fresh runtime instead of inheriting the parent's dead I/O driver
+    // (see RUNTIME_PTR). No lock: races are benign (each builder's
+    // runtime is valid for its user), and a lock could wedge a child
+    // forked mid-build.
+    reclaim_after_fork();
+    let pid = std::process::id();
+    let ptr = RUNTIME_PTR.load(Ordering::Acquire);
+    if !ptr.is_null() && RUNTIME_PID.load(Ordering::Acquire) == pid {
+        // SAFETY: the pointer is either null or a leaked `Box<Runtime>`
+        // that is never mutated or freed; sharing it is sound, and the
+        // pid tag proves it was built for this process.
+        return unsafe { &*ptr };
+    }
+    let fresh = Box::leak(Box::new(
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("Failed to create tokio runtime")
-    })
+            .expect("Failed to create tokio runtime"),
+    ));
+    RUNTIME_PTR.store(fresh as *mut Runtime, Ordering::Release);
+    RUNTIME_PID.store(pid, Ordering::Release);
+    fresh
 }
 
 fn connect_client_from_env() -> Result<Pkcs11Client, CkRv> {
@@ -558,6 +627,9 @@ fn resolve_endpoint_from_env() -> String {
 /// Uses `CLIENT_INIT` mutex so that concurrent callers serialize, and a
 /// failed init is retried on the next call (not cached).
 pub fn ensure_client_connected() -> Result<(), CkRv> {
+    // Reclaim first so a forked child takes the reconnect path below
+    // (fresh channel) instead of the fast path (dead sockets).
+    reclaim_after_fork();
     // Fast path: already connected.
     if CLIENT.get().is_some() && !CLIENT_RECONNECT_REQUIRED.load(Ordering::Acquire) {
         return Ok(());
