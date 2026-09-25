@@ -32,8 +32,17 @@ impl FfiBackend {
         session: CkSessionHandle,
         flags: CkFlags,
     ) -> CkResult<()> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let flags = narrow_wire_ulong(flags.0)?;
-        call_3x_fn!(self, func_list_3_0, C_SessionCancel, Self::session_handle(session)?, flags)
+        let _session_fence = self.session_fences.enter(&admission, session)?;
+        call_3x_fn!(
+            &admission,
+            self,
+            func_list_3_0,
+            C_SessionCancel,
+            Self::session_handle(session)?,
+            flags
+        )
     }
 
     pub(super) fn ffi_get_session_validation_flags(
@@ -63,6 +72,10 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static SESSION_CANCEL_PROVIDER_CALLS: AtomicUsize = AtomicUsize::new(0);
+    // The cancel counter is process-wide while tests run on parallel
+    // threads: every test asserting absolute counts holds this lock from
+    // reset through final read (repo-wide TEST_LOCK convention).
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     unsafe extern "C" fn counted_session_cancel(
         _session: cryptoki_sys::CK_SESSION_HANDLE,
@@ -72,12 +85,24 @@ mod tests {
         cryptoki_sys::CKR_OK
     }
 
+    unsafe extern "C" fn login_user_ok(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _user_type: cryptoki_sys::CK_USER_TYPE,
+        _pin: cryptoki_sys::CK_UTF8CHAR_PTR,
+        _pin_len: cryptoki_sys::CK_ULONG,
+        _username: cryptoki_sys::CK_UTF8CHAR_PTR,
+        _username_len: cryptoki_sys::CK_ULONG,
+    ) -> cryptoki_sys::CK_RV {
+        cryptoki_sys::CKR_OK
+    }
+
     fn backend_with_session_cancel()
     -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>, Box<cryptoki_sys::CK_FUNCTION_LIST_3_0>)
     {
         let mut base = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_0::default());
         functions.C_SessionCancel = Some(counted_session_cancel);
+        functions.C_LoginUser = Some(login_user_ok);
         let backend = FfiBackend {
             _lib: crate::ffi::loading::test_library_handle(),
             func_list: base.as_mut(),
@@ -93,6 +118,8 @@ mod tests {
             // consuming it; never backs production dispatch (C3M.4).
             construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
             lifecycle: Default::default(),
+            lifecycle_domain: Default::default(),
+            session_fences: Default::default(),
             retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
             ),
         };
@@ -101,8 +128,12 @@ mod tests {
 
     #[test]
     fn session_cancel_flags_wider_than_native_are_rejected_before_provider_call() {
+        let _lock = TEST_LOCK.lock().unwrap();
         SESSION_CANCEL_PROVIDER_CALLS.store(0, Ordering::SeqCst);
         let (backend, _base, _functions) = backend_with_session_cancel();
+        // Cancel paths are ordinary: establish post-Initialize state
+        // (admission precedes checked narrowing at the boundary).
+        backend.lifecycle_domain.open_for_tests();
         let over_u32 = u32::MAX as u64 + 1;
 
         let result = backend.ffi_session_cancel(CkSessionHandle(7), CkFlags(over_u32));
@@ -114,5 +145,51 @@ mod tests {
             assert_eq!(result, Ok(()));
             assert_eq!(SESSION_CANCEL_PROVIDER_CALLS.load(Ordering::SeqCst), 1);
         }
+    }
+
+    #[test]
+    fn login_user_denied_before_lifecycle_open() {
+        // TF01b `call_3x_fn!` ordinary proof (3.0 session op): no admission
+        // pre-Init.
+        let (backend, _base, _functions) = backend_with_session_cancel();
+        assert_eq!(
+            backend
+                .ffi_login_user(CkSessionHandle(7), CkUserType::User, b"name", b"1234")
+                .unwrap_err(),
+            CkRv::CRYPTOKI_NOT_INITIALIZED
+        );
+    }
+
+    #[test]
+    fn login_user_admitted_after_lifecycle_open() {
+        // Control: the same call reaches the stub once the domain is open.
+        let (backend, _base, _functions) = backend_with_session_cancel();
+        backend.lifecycle_domain.open_for_tests();
+        backend.ffi_login_user(CkSessionHandle(7), CkUserType::User, b"name", b"1234").unwrap();
+    }
+
+    #[test]
+    fn session_cancel_denied_before_lifecycle_open() {
+        // TF01b cancel re-home (fence-read session activity): no admission
+        // pre-Init.
+        let _lock = TEST_LOCK.lock().unwrap();
+        SESSION_CANCEL_PROVIDER_CALLS.store(0, Ordering::SeqCst);
+        let (backend, _base, _functions) = backend_with_session_cancel();
+        assert_eq!(
+            backend.ffi_session_cancel(CkSessionHandle(7), CkFlags(0)).unwrap_err(),
+            CkRv::CRYPTOKI_NOT_INITIALIZED
+        );
+        assert_eq!(SESSION_CANCEL_PROVIDER_CALLS.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn session_cancel_admitted_after_lifecycle_open() {
+        // Control: the same call reaches the stub once the domain is open.
+        let _lock = TEST_LOCK.lock().unwrap();
+        SESSION_CANCEL_PROVIDER_CALLS.store(0, Ordering::SeqCst);
+        let (backend, _base, _functions) = backend_with_session_cancel();
+        backend.lifecycle_domain.open_for_tests();
+        backend.ffi_session_cancel(CkSessionHandle(7), CkFlags(0)).unwrap();
+        assert_eq!(SESSION_CANCEL_PROVIDER_CALLS.load(Ordering::SeqCst), 1);
     }
 }

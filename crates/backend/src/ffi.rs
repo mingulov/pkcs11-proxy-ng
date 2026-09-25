@@ -252,6 +252,13 @@ pub struct FfiBackend {
     /// Locally observed init/finalize/session lifecycle driving the honest
     /// retirement decision in `Drop` (C3M.4).
     lifecycle: native_domain::LifecycleTracker,
+    /// F-01 lifecycle domain: module state machine + ordinary admission
+    /// (TF01a). Starts `LoadedUninitialized`; the first successful
+    /// `C_Initialize` publishes `Open`, which admits ordinary work.
+    lifecycle_domain: native_domain::LifecycleDomain,
+    /// Per-session generation fences (TF01b/I4): every session-bearing
+    /// ordinary path enters its fence under its admission; closes mark.
+    session_fences: session_fence::SessionFenceTable,
     /// Last-field retirement sentinel (C3M step 7). MUST stay the last
     /// field: field drops run in declaration order, so its `Drop`
     /// publishes the next `Vacant` only after every other field —
@@ -323,13 +330,32 @@ impl Pkcs11Backend for FfiBackend {
         // provider and records nothing — not even the attempt marker — so
         // the retained-session evidence stays intact.
         self.lifecycle.check_reinitialize().map_err(lifecycle_refusal_rv)?;
+        // F-01 control transition (TF01a): short write entering
+        // `Initializing`. Never holds read (this path admits nothing), and
+        // the ticket is detached — the write is not HELD across the native
+        // call below. ACQUIRING write still blocks until in-flight readers
+        // drain (a queued writer also stalls new admissions); that blocking
+        // is intended (I1 decision — see the design block), unreachable in
+        // the daemon flow (init-once-at-startup; per-client Initialize never
+        // touches the backend).
+        let init_control = self.lifecycle_domain.begin_initialize()?;
         // Fail-closed attempt marker BEFORE native entry (C3M steps 4-5):
         // a failed `C_Initialize` ran provider code, so the reservation
         // must poison instead of recycling.
         self.lifecycle.note_init_attempted();
-        Self::call_unit(unsafe { (*self.func_list).C_Initialize }, |function| unsafe {
-            function(&mut args as *mut _ as cryptoki_sys::CK_VOID_PTR)
-        })?;
+        // Control choke: Initialize takes the write lock (above) while
+        // holding no read — the choke takes no guard, structurally.
+        let outcome =
+            Self::call_control_unit(unsafe { (*self.func_list).C_Initialize }, |function| unsafe {
+                function(&mut args as *mut _ as cryptoki_sys::CK_VOID_PTR)
+            });
+        if outcome.is_err() {
+            // Native failure restores the prior domain state (behavior
+            // parity: a failed re-Initialize leaves a live incarnation
+            // usable, exactly as before the domain existed).
+            self.lifecycle_domain.abandon_initialize(init_control);
+            return outcome;
+        }
         // A new initialization cycle starts a clean incarnation (C3M.4/row
         // 10): session bindings cached under a dead generation must not
         // survive, or a reused numeric handle would alias stale owners.
@@ -337,33 +363,72 @@ impl Pkcs11Backend for FfiBackend {
         let generation_before = self.lifecycle.current_generation();
         // Checked record: the residual refusal (a Finalize failed, or the
         // last generation was claimed, after the gate passed) propagates
-        // before the purge, so a refused cycle purges nothing.
+        // before the purge, so a refused cycle purges nothing. (The `?`
+        // also drops the control ticket, abandoning the domain transition.)
         self.lifecycle.note_initialized().map_err(lifecycle_refusal_rv)?;
-        if self.lifecycle.current_generation() != generation_before {
-            self.drop_all_mech_cache();
-        }
+        // Publish `Open` with the incarnation purge INSIDE the publish
+        // write section (I2): the write acquisition drains pre-publish
+        // in-flight readers, and post-publish admissions wait until the
+        // purge completes — no admitted reader ever observes a live
+        // incarnation's stale bindings. Failure here (poison/epoch
+        // exhaustion — practically unreachable) fails closed without
+        // purging, like a refused cycle.
+        let generation_changed = self.lifecycle.current_generation() != generation_before;
+        self.lifecycle_domain.publish_open_with_purge(init_control, || {
+            if generation_changed {
+                self.drop_all_mech_cache();
+            }
+        })?;
         Ok(())
     }
 
     fn finalize(&self) -> CkResult<()> {
         let _deadline = native_stop::arm_shutdown_deadline(native_stop::shutdown_grace());
-        let outcome = Self::call_unit(unsafe { (*self.func_list).C_Finalize }, |function| unsafe {
-            function(std::ptr::null_mut())
-        });
+        // TF01b seal/drain (I3): the two-arm acquisition drains in-flight
+        // ordinary work and seals admission (`Draining`) before native
+        // entry. Deadline overrun suicides inside `begin_finalize` — this
+        // path never runs native unsealed. Denial (no live incarnation,
+        // concurrent control, poison, exhaustion) returns WITHOUT native
+        // entry; the RV matches what a compliant provider reports outside
+        // a live incarnation, so out-of-incarnation callers observe no
+        // new RV.
+        let seal = self.lifecycle_domain.begin_finalize()?;
+        // Exclusive native call on this thread, which holds the armed
+        // `DeadlineGuard` (no spawned worker; the ticket is detached —
+        // write is NOT held across native entry, mirroring Initialize).
+        // An `enter_finalizing` failure drops the seal through the Drop
+        // backstop, abandoning the seal before the error propagates.
+        seal.enter_finalizing()?;
+        // Control choke: Finalize holds no read (the seal above took short
+        // writes only, never read) — the choke takes no guard, structurally.
+        let outcome =
+            Self::call_control_unit(unsafe { (*self.func_list).C_Finalize }, |function| unsafe {
+                function(std::ptr::null_mut())
+            });
         if outcome.is_err() {
-            // The failure proves nothing about provider state, so every
+            // The failure proves nothing about provider state, so the seal
+            // is abandoned (the live incarnation keeps admitting) and every
             // binding stays — but the incarnation is now uncertain, and a
             // later re-initialization is refused until a successful
             // C_Finalize (F-08).
+            self.lifecycle_domain.abandon_finalize(seal);
             self.lifecycle.note_finalize_failed();
             return outcome;
         }
+        // Record the clean close BEFORE publishing: a (practically
+        // unreachable) publish failure must not leave C3M believing an
+        // incarnation is live after its provider finalized.
+        self.lifecycle.note_finalized();
+        // Publish `Finalized` with the incarnation purge INSIDE the publish
+        // write section (I2 mirror): `Finalized` implies purged, so a racing
+        // re-Initialize observes no dead bindings.
         // This is the daemon/backend finalizer, not the per-client gRPC
         // Finalize path. Per-client Finalize removes only that client context
         // and closes its sessions. Once the underlying module accepts
         // C_Finalize, every cached session binding is out of scope.
-        self.drop_all_mech_cache();
-        self.lifecycle.note_finalized();
+        self.lifecycle_domain.publish_finalized_with_purge(seal, || {
+            self.drop_all_mech_cache();
+        })?;
         Ok(())
     }
 
@@ -1802,6 +1867,8 @@ mod tests {
             // consuming it; never backs production dispatch (C3M.4).
             construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
             lifecycle: Default::default(),
+            lifecycle_domain: Default::default(),
+            session_fences: Default::default(),
             retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
             ),
         };
@@ -1850,6 +1917,96 @@ mod tests {
         backend.last_init_family.insert(7, OperationFamily::Sign);
         // Use the public path so the forward map and reverse index stay in sync.
         backend.remember_session_slot(CkSessionHandle(7), CkSlotId(11));
+    }
+
+    #[test]
+    fn reinit_purge_never_visible_to_admitted_readers() {
+        // I2 settling test: the re-Initialize incarnation purge runs INSIDE
+        // the publish write section, so no admitted reader can ever observe
+        // a live incarnation's bindings after the generation moved. Spinner
+        // threads admit continuously across finalize/re-initialize cycles;
+        // a (admitted, new generation, stale entry present) triple is the
+        // exact race the subsystem exists to close.
+        //
+        // Each spinner triple is atomic w.r.t. the domain write lock (the
+        // held guard blocks begin/publish mid-check), so post-fix the count
+        // is deterministically zero; pre-fix the publish-then-purge gap lets
+        // spinners catch the stale entry (red evidence: violations > 0).
+        // Bulk seeding widens that gap (a 2000-entry clear holds the purge
+        // window open while 4 hot spinners check it), so the red is reliable
+        // instead of a coin flip per cycle.
+        use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+        let (backend, _functions) =
+            backend_with_init_and_finalize(Some(initialize_ok), Some(finalize_ok));
+        backend.initialize().expect("first initialize opens the incarnation");
+        let violations = AtomicUsize::new(0);
+        // Counting gate: only the current cycle's NEW generation judges.
+        // Admits before the cycle (old generation, pre-purge bindings
+        // legitimately present) and reseeds between cycles never count.
+        let target_generation = AtomicU64::new(0);
+        let observing = AtomicBool::new(false);
+        let done = AtomicBool::new(false);
+        let ready = AtomicUsize::new(0);
+        // Whole-struct borrow: closures must capture `&FfiBackend` (covered
+        // by its `unsafe impl Sync`), never `&mech_cache` directly (the
+        // `FfiMechanism` values are !Send/!Sync by design).
+        let backend = &backend;
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    ready.fetch_add(1, Ordering::SeqCst);
+                    while !done.load(Ordering::SeqCst) {
+                        if let Ok(_guard) = backend.lifecycle_domain.admit_ordinary() {
+                            let generation = backend.lifecycle.current_generation();
+                            let stale_present =
+                                backend.mech_cache.contains_key(&(7, OperationFamily::Sign));
+                            if observing.load(Ordering::SeqCst)
+                                && generation == target_generation.load(Ordering::SeqCst)
+                                && stale_present
+                            {
+                                violations.fetch_add(1, Ordering::SeqCst);
+                            }
+                        }
+                    }
+                });
+            }
+            // All spinners hot before the first cycle: without this the
+            // main thread can finish every cycle before a spinner is even
+            // scheduled, hiding the race the test exists to catch.
+            while ready.load(Ordering::SeqCst) < 4 {
+                std::thread::yield_now();
+            }
+            for _ in 0..30 {
+                backend.finalize().expect("finalize between cycles");
+                // Each loop cycle is new (finalized_ok set): the generation
+                // advances exactly once per initialize below.
+                target_generation
+                    .store(backend.lifecycle.current_generation() + 1, Ordering::SeqCst);
+                seed_cache(backend);
+                seed_bulk_cache(backend);
+                observing.store(true, Ordering::SeqCst);
+                backend.initialize().expect("re-initialize with generation change");
+                observing.store(false, Ordering::SeqCst);
+            }
+            done.store(true, Ordering::SeqCst);
+        });
+        assert_eq!(
+            violations.load(Ordering::SeqCst),
+            0,
+            "admitted readers must never observe stale bindings at a new generation"
+        );
+    }
+
+    /// Bulk `mech_cache` ballast for the re-init race test: 2000 extra
+    /// entries (cache-only, no slot-map bookkeeping — the purge clears every
+    /// map unconditionally) so the purge window stays open long enough for
+    /// spinning readers to observe it pre-fix.
+    fn seed_bulk_cache(backend: &FfiBackend) {
+        let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
+        for session in 1000..3000u64 {
+            let ffi_mechanism = ffi_conversion::mechanism_to_ffi(&mechanism).unwrap();
+            backend.mech_cache.insert((session, OperationFamily::Sign), ffi_mechanism);
+        }
     }
 
     #[test]
@@ -2019,8 +2176,11 @@ mod tests {
             backend_with_init_and_finalize(Some(initialize_ok), Some(finalize_ok));
         backend.initialize().expect("first initialization succeeds");
         let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
+        // Ordinary choke under test: admit like the `ffi_*` boundary would.
+        let admission = backend.lifecycle_domain.admit_ordinary().expect("open domain admits");
         let err = backend
             .call_init_with_mechanism(
+                &admission,
                 CkSessionHandle(7),
                 OperationFamily::Sign,
                 Some(0u8),
@@ -2050,8 +2210,11 @@ mod tests {
             backend_with_init_and_finalize(Some(initialize_ok), Some(finalize_ok));
         backend.initialize().expect("first initialization succeeds");
         let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
+        // Ordinary choke under test: admit like the `ffi_*` boundary would.
+        let admission = backend.lifecycle_domain.admit_ordinary().expect("open domain admits");
         let err = backend
             .call_init_with_mechanism_output(
+                &admission,
                 CkSessionHandle(7),
                 OperationFamily::Sign,
                 Some(0u8),
@@ -2139,5 +2302,174 @@ mod tests {
         backend.forget_session_slot(CkSessionHandle(8));
         assert!(backend.slot_sessions.get(&11).is_none());
         assert!(backend.session_slot_map.is_empty());
+    }
+
+    // --- TF01b Finalize seal/drain (I3), backend level ---
+    //
+    // The seal tests share one process-wide finalize counter: every test
+    // asserting absolute counts holds the lock from reset through final
+    // read (repo-wide TEST_LOCK convention).
+    static SEAL_FINALIZE_CALLS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    static SEAL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    unsafe extern "C" fn finalize_counting_ok(_: *mut std::ffi::c_void) -> cryptoki_sys::CK_RV {
+        SEAL_FINALIZE_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        cryptoki_sys::CKR_OK
+    }
+
+    #[test]
+    fn finalize_seals_new_admissions_after_success() {
+        // I3: a successful Finalize seals the domain — new ordinary
+        // admissions deny, and a second Finalize is refused without a
+        // second provider entry.
+        use std::sync::atomic::Ordering;
+        let _lock = SEAL_TEST_LOCK.lock().unwrap();
+        SEAL_FINALIZE_CALLS.store(0, Ordering::SeqCst);
+        let (backend, _functions) =
+            backend_with_init_and_finalize(Some(initialize_ok), Some(finalize_counting_ok));
+        backend.initialize().expect("initialize opens the incarnation");
+        backend.lifecycle_domain.admit_ordinary().expect("open domain admits");
+        backend.finalize().expect("finalize succeeds");
+        assert_eq!(SEAL_FINALIZE_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            backend.lifecycle_domain.admit_ordinary().unwrap_err(),
+            CkRv::CRYPTOKI_NOT_INITIALIZED,
+            "sealed domain denies new ordinary admissions"
+        );
+        assert_eq!(
+            backend.finalize().unwrap_err(),
+            CkRv::CRYPTOKI_NOT_INITIALIZED,
+            "second Finalize refused without provider contact"
+        );
+        assert_eq!(SEAL_FINALIZE_CALLS.load(Ordering::SeqCst), 1, "refused cycle never re-enters");
+    }
+
+    #[test]
+    fn finalize_denied_without_open_incarnation_never_reaches_provider() {
+        // I3: with no live incarnation there is nothing to seal — the
+        // denial lands before native entry with the same RV a compliant
+        // provider reports.
+        use std::sync::atomic::Ordering;
+        let _lock = SEAL_TEST_LOCK.lock().unwrap();
+        SEAL_FINALIZE_CALLS.store(0, Ordering::SeqCst);
+        let (backend, _functions) = backend_with_finalize(Some(finalize_counting_ok));
+        assert_eq!(backend.finalize().unwrap_err(), CkRv::CRYPTOKI_NOT_INITIALIZED);
+        assert_eq!(SEAL_FINALIZE_CALLS.load(Ordering::SeqCst), 0, "denied seal never enters");
+    }
+
+    #[test]
+    fn failed_finalize_restores_open_incarnation() {
+        // Behavior parity pin (not red-able: restore matches the pre-seal
+        // shape by design): a failed native Finalize abandons the seal —
+        // the live incarnation keeps admitting, nothing purges, the
+        // native RV propagates exactly.
+        let (backend, _functions) =
+            backend_with_init_and_finalize(Some(initialize_ok), Some(finalize_fails));
+        backend.initialize().expect("initialize opens the incarnation");
+        seed_cache(&backend);
+        assert_eq!(backend.finalize().unwrap_err(), CkRv::GENERAL_ERROR);
+        backend.lifecycle_domain.admit_ordinary().expect("live incarnation still admits");
+        assert!(
+            backend.mech_cache.contains_key(&(7, OperationFamily::Sign)),
+            "failed Finalize purges nothing"
+        );
+    }
+
+    #[test]
+    fn finalize_drains_parked_ordinary_before_native_entry() {
+        // Blocked-stub exclusion shape for the seal: a parked ordinary
+        // holder (standing in for a thread inside a provider call) blocks
+        // the seal until release; the native Finalize is not entered
+        // while the holder is parked and runs promptly after.
+        use std::sync::atomic::Ordering;
+        let _lock = SEAL_TEST_LOCK.lock().unwrap();
+        SEAL_FINALIZE_CALLS.store(0, Ordering::SeqCst);
+        let (backend, _functions) =
+            backend_with_init_and_finalize(Some(initialize_ok), Some(finalize_counting_ok));
+        backend.initialize().expect("initialize opens the incarnation");
+        let parked = backend.lifecycle_domain.admit_ordinary().expect("admits while open");
+        let backend = &backend;
+        std::thread::scope(|scope| {
+            let sealer = scope.spawn(|| backend.finalize());
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            assert_eq!(
+                SEAL_FINALIZE_CALLS.load(Ordering::SeqCst),
+                0,
+                "native Finalize must not run while ordinary work is parked"
+            );
+            drop(parked);
+            sealer.join().expect("sealer joins").expect("seal completes after release");
+            assert_eq!(SEAL_FINALIZE_CALLS.load(Ordering::SeqCst), 1);
+        });
+        assert_eq!(
+            backend.lifecycle_domain.admit_ordinary().unwrap_err(),
+            CkRv::CRYPTOKI_NOT_INITIALIZED,
+            "sealed domain denies after the drained Finalize"
+        );
+    }
+
+    #[test]
+    fn finalize_under_continuous_ordinary_load_completes_and_seals() {
+        // I3 termination pin: Finalize under continuous ordinary load
+        // completes — the suite itself would die at the shutdown deadline
+        // otherwise — and the domain is sealed afterwards. Spinners stay
+        // hot across the seal window (ready gate + done-after-finalize),
+        // so the drain genuinely overlaps live admissions.
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let _lock = SEAL_TEST_LOCK.lock().unwrap();
+        SEAL_FINALIZE_CALLS.store(0, Ordering::SeqCst);
+        let (backend, _functions) =
+            backend_with_init_and_finalize(Some(initialize_ok), Some(finalize_counting_ok));
+        backend.initialize().expect("initialize opens the incarnation");
+        let done = AtomicBool::new(false);
+        let ready = AtomicUsize::new(0);
+        let admitted: [AtomicUsize; 4] = Default::default();
+        let backend = &backend;
+        std::thread::scope(|scope| {
+            for spinner in admitted.iter() {
+                scope.spawn(|| {
+                    ready.fetch_add(1, Ordering::SeqCst);
+                    let mut count = 0usize;
+                    while !done.load(Ordering::SeqCst) {
+                        if backend.lifecycle_domain.admit_ordinary().is_ok() {
+                            count += 1;
+                        }
+                    }
+                    spinner.store(count, Ordering::SeqCst);
+                });
+            }
+            while ready.load(Ordering::SeqCst) < 4 {
+                std::thread::yield_now();
+            }
+            // Time-boxed ping-pong, not a fixed cycle count: one seal
+            // window is microseconds wide, so a fixed count can finish
+            // before a descheduled spinner runs once. Over 300 ms every
+            // hot spinner is scheduled many times over.
+            let start = std::time::Instant::now();
+            let mut seals = 0usize;
+            while start.elapsed() < std::time::Duration::from_millis(300) {
+                backend.finalize().expect("finalize completes under load");
+                backend.initialize().expect("re-initialize reopens");
+                seals += 1;
+            }
+            backend.finalize().expect("final seal completes under load");
+            done.store(true, Ordering::SeqCst);
+            assert!(seals > 5, "sanity: many seals completed under load, got {seals}");
+            assert_eq!(SEAL_FINALIZE_CALLS.load(Ordering::SeqCst), seals + 1);
+        });
+        // Aggregate, not per-spinner: a descheduled spinner may sit out
+        // whole windows (the I2 test trusts scheduling the same way). The
+        // sum proves live admissions overlapped the seals.
+        let total: usize = admitted.iter().map(|spinner| spinner.load(Ordering::SeqCst)).sum();
+        assert!(
+            total > 5_000,
+            "spinners must observe genuine load across the seal windows, got {total}"
+        );
+        assert_eq!(
+            backend.lifecycle_domain.admit_ordinary().unwrap_err(),
+            CkRv::CRYPTOKI_NOT_INITIALIZED,
+            "sealed domain denies after Finalize under load"
+        );
     }
 }

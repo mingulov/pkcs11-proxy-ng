@@ -20,6 +20,8 @@ fn shim_state_test_guard() -> MutexGuard<'static, ()> {
 
 mod abi_audit;
 mod attribute_classification;
+#[cfg(unix)]
+mod control_channel_live;
 mod cross_abi;
 mod cross_width_live;
 mod init_args;
@@ -29,6 +31,7 @@ mod output_semantics;
 mod regression;
 mod resource_limits;
 mod retained_oracle_live;
+mod wait_matrix;
 
 fn empty_interface() -> CK_INTERFACE {
     CK_INTERFACE {
