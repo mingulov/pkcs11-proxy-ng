@@ -1,15 +1,20 @@
 # Vendor Mechanism Override Examples
 
-These TOML files configure the proxy to support vendor-specific PKCS#11
-mechanisms from various HSM manufacturers.
+These TOML files provide example parameter definitions for vendor mechanisms.
+Check mechanism numbers and parameter layouts against your provider before
+using them.
 
 ## Usage
 
-Set the environment variable to load a vendor override:
-    PKCS11_PROXY_MECHANISMS=/path/to/vendor-file.toml
+Set the daemon's `[mechanisms].config_path` to an override file so it can
+publish the registry to shims. For a local shim fallback, set:
 
-The override is additive — it merges on top of the embedded default
-configuration. Only add the vendor mechanisms you need.
+```bash
+export PKCS11_PROXY_MECHANISMS=/path/to/vendor-file.toml
+```
+
+Overrides merge with the embedded defaults. Add only mechanisms your provider
+supports. Restart clients after updating the daemon's registry.
 
 ## Available vendor configs
 
@@ -29,5 +34,5 @@ configuration. Only add the vendor mechanisms you need.
 - Hex values are approximate for some vendors (nShield, Yubico).
   Run C_GetMechanismList on your actual HSM to verify exact values.
 - nShield uses a non-standard vendor base (0xDE436972), not 0x80000000.
-- Multiple override files cannot be loaded simultaneously. Combine
-  entries into a single file if you need mechanisms from multiple vendors.
+- Load one override file at a time. Combine entries if you need mechanisms
+  from multiple vendors.
