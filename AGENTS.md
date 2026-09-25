@@ -5,11 +5,14 @@ AI agents, automation, and human contributors.
 
 ## 1. Follow The Existing Design
 
-- Treat the PRD, ADRs, and current code as the active design contract.
+- Treat the current code and in-tree user/release docs as the active standalone
+  contract. The PRD, ADRs, and architecture overview live in the private
+  `pkcs11-proxy-ng-ws` planning workspace; consult them for design work there.
 - Do not change handle semantics, error semantics, authorization semantics, or
   mechanism-policy behavior implicitly.
 - If a change alters architecture or externally visible behavior, update the
-  relevant ADR or add a new one before or alongside the code change.
+  relevant ADR in that planning workspace before or alongside the code change,
+  and document the resulting public behavior here.
 
 ## 2. Preserve PKCS#11 Semantics
 
@@ -36,8 +39,7 @@ AI agents, automation, and human contributors.
   **provider** matter, not a proxy bug — triage every direct-vs-proxied
   mismatch per [parity-validation](./doc/release/parity-validation.md),
   fix proxy bugs in the proxy, and report provider-conformance issues
-  upstream. Never normalize provider behavior inside the proxy (see
-  [ADR-0010](./doc/adr/ADR-0010-transparent-forwarding-by-default.md)):
+  upstream. Never normalize provider behavior inside the proxy:
   provider conformance fixes are out of proxy scope.
 - Do not invent compatibility claims such as “full PKCS#11 support”.
 - Keep the current discovery and mechanism policy intact unless a design change
@@ -134,8 +136,12 @@ AI agents, automation, and human contributors.
 ## 8. Documentation Rules
 
 - Update docs when behavior, scope, interfaces, or contributor workflow changes.
-- Public-facing docs (PRD, ADRs, architecture overview, runbooks, release docs)
-  live in this repository's `doc/` tree and must stay current with the code.
+- User-facing docs (development setup, support references, runbooks, and release
+  docs) live in this repository's `doc/` tree and must stay current with the code.
+- Planning/design docs (PRD, ADRs, architecture overview, audits, and follow-up
+  notes) live in `pkcs11-proxy-ng-ws`. Do not duplicate them here or make this
+  repository's builds, tests, release packaging, or public links depend on that
+  private workspace. Its `scripts/test_planning_docs.py` checks the design docs.
 - Do not vendor or fetch OASIS specification sources into this repository.
   Source-grounded OASIS inventory checks read an externally supplied spec tree
   via `PKCS11_PROXY_NG_OASIS_ROOT` and skip cleanly when it is absent, so the

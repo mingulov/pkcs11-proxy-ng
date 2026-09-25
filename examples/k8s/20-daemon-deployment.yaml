@@ -137,11 +137,10 @@ spec:
           configMap:
             name: daemon-config
         - name: tokens
-          # hostPath stands in for a shared HSM backend. In a real
-          # multi-replica deployment, this is the shared HSM device
-          # / CloudHSM client / network HSM mount that every daemon
-          # replica connects to. emptyDir does NOT work here — see
-          # doc/audit/pkcs11-proxy-demo-ops.md.
+          # In this single-node demo, hostPath lets replicas share token
+          # storage. A per-pod emptyDir would give each replica a separate
+          # store. Multi-node deployments need a shared HSM/service or
+          # storage suitable for the provider; hostPath is node-local.
           hostPath:
             path: /var/lib/example-softhsm-tokens
             type: DirectoryOrCreate
