@@ -30,11 +30,11 @@ pub unsafe extern "C" fn c_login_user(
         // backend as NULL, not as an empty slice. W1-L11-10: the
         // fallible reader keeps that mapping and answers TooLarge with
         // ARGUMENTS_BAD instead of panicking.
-        let pin = match unsafe { try_read_optional_bytes(p_pin, ul_pin_len) } {
+        let pin = match unsafe { try_read_credential_bytes(p_pin, ul_pin_len) } {
             Ok(pin) => pin,
             Err(e) => return rv_err(e),
         };
-        let username = match unsafe { try_read_optional_bytes(p_username, ul_username_len) } {
+        let username = match unsafe { try_read_credential_bytes(p_username, ul_username_len) } {
             Ok(username) => username,
             Err(e) => return rv_err(e),
         };
