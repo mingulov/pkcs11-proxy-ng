@@ -69,7 +69,7 @@ pub unsafe extern "C" fn c_get_attribute_value(
     ul_count: CK_ULONG,
 ) -> CK_RV {
     catch_panics(|| {
-        if p_template.is_null() {
+        if p_template.is_null() && ul_count != 0 {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
         let n = ul_count as usize;

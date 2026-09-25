@@ -17,6 +17,8 @@ Current ADRs:
 | [ADR-0008](ADR-0008-cross-client-login-pin-verifier.md) | Cross-client logical-login PIN verifier for the shared backend login state |
 | [ADR-0009](ADR-0009-per-request-context-ownership.md) | Per-request context ownership; handles validated against the owning client context |
 | [ADR-0010](ADR-0010-transparent-forwarding-by-default.md) | Transparent forwarding by default — parameters cross the wire verbatim (NULL stays NULL), backend's native `CK_RV` untranslated; daemon-side `sanitize_inputs` opt-in |
+| [ADR-0011](ADR-0011-narrow-ck-ulong-client-width-bridging.md) | Narrow-`CK_ULONG` client support and width bridging |
+| [ADR-0012](ADR-0012-gateway-and-resilience-modes.md) | Opt-in gateway, authorization, resilience, audit, and attestation modes |
 
 Each ADR records its own status (Proposed / Accepted / Deferred) in its
 **Status** section.

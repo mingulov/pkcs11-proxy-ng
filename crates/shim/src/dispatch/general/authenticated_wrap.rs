@@ -29,7 +29,7 @@ pub unsafe extern "C" fn c_wrap_key_authenticated(
     pul_wrapped_key_len: CK_ULONG_PTR,
 ) -> CK_RV {
     catch_panics(|| {
-        if p_mechanism.is_null() || pul_wrapped_key_len.is_null() {
+        if p_mechanism.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
         let rv = unsafe { validate_mechanism(p_mechanism) };
@@ -66,6 +66,7 @@ pub unsafe extern "C" fn c_wrap_key_authenticated(
         match result {
             Ok((output_result, param_result, _)) => unsafe {
                 write_exact_parameter_output(
+                    &output_spec,
                     &output_result,
                     &param_result,
                     p_wrapped_key,

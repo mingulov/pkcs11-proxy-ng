@@ -1,10 +1,15 @@
-# Beta Support Matrix (`0.x`)
+# Beta Support Matrix (`v0.1.0` public release)
 
-This is the authoritative statement of what the `0.x` public beta supports. It
+This is the authoritative statement of what public `v0.1.0` supports. It
 is intentionally narrow and evidence-backed: claims here are tied to repeatable
 direct-vs-proxied validation, not to aspiration. Anything not listed as
 **Supported** is out of scope for the beta support claim, even if it happens to
 work.
+
+The local `v0.2.0` target is unreleased. Its gateway, authorization, resilience,
+and audit work is implemented locally and partially covered, but local unit and
+integration coverage is not a provenance-complete transparency matrix. Therefore
+this document makes no `v0.2.0` parity or public support claim.
 
 ## Platform
 
@@ -52,7 +57,7 @@ Outcome classes compared: `passed`, `failed`, `skipped`, `xfailed`, `xpassed`,
 caused by test-harness/environment drift or by provider-specific behavior that is
 also present without the proxy.
 
-## Explicit non-goals for the beta
+## Explicit non-goals for the public beta
 
 These remain valuable but do **not** block or qualify the beta:
 

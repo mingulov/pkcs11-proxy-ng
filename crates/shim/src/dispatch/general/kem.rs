@@ -8,6 +8,27 @@ use pkcs11_proxy_ng_types::*;
 
 use super::helpers::*;
 
+unsafe fn write_exact_kem_output(
+    spec: &CkOutputBufferSpec,
+    result: CkOutputAndHandleResult,
+    p_ciphertext: CK_BYTE_PTR,
+    pul_ciphertext_len: CK_ULONG_PTR,
+    ph_key: CK_OBJECT_HANDLE_PTR,
+) -> CK_RV {
+    let buf_result = CkOutputBufferResult {
+        ck_rv: result.ck_rv,
+        returned_len: result.returned_len,
+        value: result.value,
+    };
+    let output_rv =
+        unsafe { write_exact_output(spec, &buf_result, p_ciphertext, pul_ciphertext_len) };
+    // Commit the handle only after the main output envelope validates.
+    if output_rv == rv_ok() {
+        unsafe { *ph_key = result.object_handle.0 as CK_OBJECT_HANDLE };
+    }
+    output_rv
+}
+
 pub unsafe extern "C" fn c_encapsulate_key(
     h_session: CK_SESSION_HANDLE,
     p_mechanism: CK_MECHANISM_PTR,
@@ -19,7 +40,7 @@ pub unsafe extern "C" fn c_encapsulate_key(
     ph_key: CK_OBJECT_HANDLE_PTR,
 ) -> CK_RV {
     catch_panics(|| {
-        if p_mechanism.is_null() || pul_ciphertext_len.is_null() || ph_key.is_null() {
+        if p_mechanism.is_null() || ph_key.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
         let template = match unsafe { ck_attrs_to_rust_checked(p_template, ul_count) } {
@@ -42,20 +63,9 @@ pub unsafe extern "C" fn c_encapsulate_key(
         ));
 
         match result {
-            Ok(r) => {
-                let buf_result = CkOutputBufferResult {
-                    ck_rv: r.ck_rv,
-                    returned_len: r.returned_len,
-                    value: r.value,
-                };
-                let output_rv =
-                    unsafe { write_exact_output(&buf_result, p_ciphertext, pul_ciphertext_len) };
-                // Write key handle only on success
-                if r.ck_rv == CkRv::OK {
-                    unsafe { *ph_key = r.object_handle.0 as CK_OBJECT_HANDLE };
-                }
-                output_rv
-            }
+            Ok(r) => unsafe {
+                write_exact_kem_output(&spec, r, p_ciphertext, pul_ciphertext_len, ph_key)
+            },
             Err(e) => rv_err(e),
         }
     })
@@ -104,4 +114,38 @@ pub unsafe extern "C" fn c_decapsulate_key(
             Err(e) => rv_err(e),
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn malformed_missing_length_success_does_not_commit_kem_outputs() {
+        let spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 0, length_pointer_null: true };
+        let result = CkOutputAndHandleResult {
+            ck_rv: CkRv::OK,
+            returned_len: 1,
+            value: None,
+            object_handle: CkObjectHandle(0x44),
+        };
+        let mut ciphertext_canary = 0xa5;
+        let handle_canary = 0xa5a5 as CK_OBJECT_HANDLE;
+        let mut key_handle = handle_canary;
+
+        let rv = unsafe {
+            write_exact_kem_output(
+                &spec,
+                result,
+                &mut ciphertext_canary,
+                std::ptr::null_mut(),
+                &mut key_handle,
+            )
+        };
+
+        assert_eq!(rv, CKR_GENERAL_ERROR as CK_RV);
+        assert_eq!(ciphertext_canary, 0xa5);
+        assert_eq!(key_handle, handle_canary);
+    }
 }
