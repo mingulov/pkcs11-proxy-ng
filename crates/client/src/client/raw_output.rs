@@ -4,8 +4,8 @@ use crate::error::grpc_status_to_ck_rv;
 
 use pkcs11_proxy_ng_proto::pkcs11_proxy_ng::v1 as v1_proto;
 use pkcs11_proxy_ng_types::{
-    ByteOutputFunction, CkAttribute, CkAttributeQuery, CkAttributeQueryResult, CkMechanism,
-    CkMechanismParams, CkObjectHandle, CkOutputAndHandleResult, CkOutputBufferResult,
+    ByteOutputFunction, CkAttribute, CkAttributeQuery, CkAttributeQueryResult, CkInBuf,
+    CkMechanism, CkMechanismParams, CkObjectHandle, CkOutputAndHandleResult, CkOutputBufferResult,
     CkOutputBufferSpec, CkParameterRoundtripResult, CkParameterRoundtripSpec, CkRv,
     CkSessionHandle, ParameterOutputFunction,
 };
@@ -90,8 +90,8 @@ impl Pkcs11Client {
         session: CkSessionHandle,
         function: ParameterOutputFunction,
         output_spec: &CkOutputBufferSpec,
-        input_data: &[u8],
-        associated_data: &[u8],
+        input_data: CkInBuf<'_>,
+        associated_data: CkInBuf<'_>,
         parameter: &[u8],
         param_out_spec: &CkParameterRoundtripSpec,
         flags: u64,
@@ -110,15 +110,15 @@ impl Pkcs11Client {
         CkRv,
     > {
         let ctx = self.context_id()?;
-        let req = pkcs11_proxy_ng_proto::ParameterOutputExactRequest {
+        let mut req = pkcs11_proxy_ng_proto::ParameterOutputExactRequest {
             client_context_id: ctx,
             session_handle: session.0,
             function: pkcs11_proxy_ng_proto::convert::output::parameter_output_function_to_i32(
                 function,
             ),
             output_spec: Some(Self::proto_output_buffer_spec(output_spec)),
-            input_data: input_data.to_vec(),
-            associated_data: associated_data.to_vec(),
+            input_data: Vec::new(),
+            associated_data: Vec::new(),
             parameter: parameter.to_vec(),
             parameter_out_spec: Some(Self::proto_parameter_roundtrip_spec(param_out_spec)),
             flags,
@@ -126,7 +126,15 @@ impl Pkcs11Client {
             wrapping_key_handle,
             key_handle,
             message_parameter: message_parameter.map(pkcs11_proxy_ng_proto::MessageParameter::from),
+            input_data_null_len: None,
+            associated_data_null_len: None,
         };
+        Self::fill_input(input_data, &mut req.input_data, &mut req.input_data_null_len);
+        Self::fill_input(
+            associated_data,
+            &mut req.associated_data,
+            &mut req.associated_data_null_len,
+        );
         let resp = self
             .grpc
             .parameter_output_exact(req)
@@ -179,13 +187,37 @@ impl Pkcs11Client {
         }
     }
 
+    /// Serialize a `CkInBuf` into the two wire fields of `ByteOutputExactRequest`.
+    ///
+    /// When the caller holds `Bytes(b)`, the bytes are placed in `input_data`
+    /// and `input_data_null_len` is left `None`.  When the caller holds
+    /// `Null { len }` (a NULL pointer with a claimed length), the bytes field
+    /// is left empty and `input_data_null_len` is set to `Some(len)` so the
+    /// server can reconstruct the original pointer class faithfully.
+    pub(crate) fn fill_input(
+        data: CkInBuf<'_>,
+        bytes_field: &mut Vec<u8>,
+        null_len_field: &mut Option<u64>,
+    ) {
+        match data {
+            CkInBuf::Bytes(b) => {
+                *bytes_field = b.to_vec();
+                *null_len_field = None;
+            }
+            CkInBuf::Null { len } => {
+                bytes_field.clear();
+                *null_len_field = Some(len);
+            }
+        }
+    }
+
     /// Send a `ByteOutputExact` RPC for any of the 18 byte-output functions.
     pub async fn byte_output_exact(
         &mut self,
         session: CkSessionHandle,
         function: ByteOutputFunction,
         spec: &CkOutputBufferSpec,
-        input_data: &[u8],
+        input_data: CkInBuf<'_>,
         mechanism: Option<&CkMechanism>,
         wrapping_key_handle: u64,
         key_handle: u64,
@@ -209,21 +241,25 @@ impl Pkcs11Client {
         session: CkSessionHandle,
         function: ByteOutputFunction,
         spec: &CkOutputBufferSpec,
-        input_data: &[u8],
+        input_data: CkInBuf<'_>,
         mechanism: Option<&CkMechanism>,
         wrapping_key_handle: u64,
         key_handle: u64,
     ) -> Result<(CkOutputBufferResult, Option<CkMechanismParams>), CkRv> {
         let ctx = self.context_id()?;
+        let mut input_bytes = Vec::new();
+        let mut input_null_len = None;
+        Self::fill_input(input_data, &mut input_bytes, &mut input_null_len);
         let req = pkcs11_proxy_ng_proto::ByteOutputExactRequest {
             client_context_id: ctx,
             session_handle: session.0,
             function: pkcs11_proxy_ng_proto::convert::output::byte_output_function_to_i32(function),
             output_spec: Some(Self::proto_output_buffer_spec(spec)),
-            input_data: input_data.to_vec(),
+            input_data: input_bytes,
             mechanism: mechanism.map(pkcs11_proxy_ng_proto::Mechanism::from),
             wrapping_key_handle,
             key_handle,
+            input_data_null_len: input_null_len,
         };
         let resp = self
             .grpc

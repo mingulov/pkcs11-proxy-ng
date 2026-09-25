@@ -7,15 +7,19 @@ use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv};
 
 use super::super::ck_result_to_rv;
 use super::super::convert_template;
+use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
-    parse_mechanism, register_object_handle, resolve_session_and_object,
-    resolve_session_and_two_objects, spawn_backend,
+    check_sanitize, input_from_wire, parse_mechanism, register_session_object_handle,
+    resolve_session_and_object, resolve_session_and_two_objects, spawn_backend,
+    template_declares_token_object,
 };
 use crate::server::context_manager::{ClientContextId, ContextManager};
+use crate::server::handle_map::VirtualHandle;
 
 pub(crate) async fn wrap_key(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::WrapKeyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::WrapKeyResponse>, Status> {
     let req = request.into_inner();
@@ -39,7 +43,7 @@ pub(crate) async fn wrap_key(
         }
     };
 
-    let mechanism = match parse_mechanism(req.mechanism) {
+    let mut mechanism = match parse_mechanism(req.mechanism) {
         Ok(mechanism) => mechanism,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::WrapKeyResponse {
@@ -48,6 +52,14 @@ pub(crate) async fn wrap_key(
             }));
         }
     };
+
+    // B1: remap object handles embedded in the mechanism parameters.
+    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::WrapKeyResponse {
+            ck_rv: rv.0,
+            wrapped_key: Vec::new(),
+        }));
+    }
 
     let backend = Arc::clone(backend_ref);
     let result =
@@ -62,6 +74,7 @@ pub(crate) async fn wrap_key(
 pub(crate) async fn unwrap_key(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::UnwrapKeyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::UnwrapKeyResponse>, Status> {
     let req = request.into_inner();
@@ -84,7 +97,7 @@ pub(crate) async fn unwrap_key(
         }
     };
 
-    let mechanism = match parse_mechanism(req.mechanism) {
+    let mut mechanism = match parse_mechanism(req.mechanism) {
         Ok(mechanism) => mechanism,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyResponse {
@@ -93,6 +106,14 @@ pub(crate) async fn unwrap_key(
             }));
         }
     };
+
+    // B1: remap object handles embedded in the mechanism parameters.
+    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyResponse {
+            ck_rv: rv.0,
+            key_handle: 0,
+        }));
+    }
 
     let template = match convert_template(&req.template) {
         Ok(template) => template,
@@ -104,17 +125,40 @@ pub(crate) async fn unwrap_key(
         }
     };
 
+    // An unwrapped key is a session object unless CKA_TOKEN is set (B2).
+    let is_token = template_declares_token_object(&template);
+    let virtual_session = VirtualHandle(req.session_handle);
     let wrapped_key = req.wrapped_key;
+    let wrapped_key_null_len = req.wrapped_key_null_len;
+    // ADR-0010 sanitize_inputs: validate NULL wrapped_key pointer before backend call.
+    if let Err(rv) = check_sanitize(sanitize_inputs, wrapped_key_null_len) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyResponse {
+            ck_rv: rv.0,
+            key_handle: 0,
+        }));
+    }
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
-        backend.unwrap_key(session, &mechanism, unwrapping_key, &wrapped_key, &template)
+        backend.unwrap_key(
+            session,
+            &mechanism,
+            unwrapping_key,
+            input_from_wire(&wrapped_key, wrapped_key_null_len),
+            &template,
+        )
     })
     .await?;
 
     match result {
         Ok(object) => {
-            let key_handle =
-                register_object_handle(ctx_mgr, &ctx_id, CkObjectHandle(object.0)).await;
+            let key_handle = register_session_object_handle(
+                ctx_mgr,
+                &ctx_id,
+                virtual_session,
+                CkObjectHandle(object.0),
+                is_token,
+            )
+            .await;
             Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyResponse {
                 ck_rv: CkRv::OK.0,
                 key_handle,

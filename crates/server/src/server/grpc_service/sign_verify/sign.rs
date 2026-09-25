@@ -5,18 +5,28 @@ use tonic::{Request, Response, Status};
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 
 use super::super::ck_result_to_rv;
+use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
-    ck_rv_only, parse_mechanism, resolve_session, resolve_session_and_key, spawn_backend,
+    check_sanitize, ck_rv_only, input_from_wire, parse_mechanism, resolve_session,
+    resolve_session_and_key, spawn_backend,
 };
 use crate::server::context_manager::{ClientContextId, ContextManager};
 
 pub(crate) async fn sign_init(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::SignInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SignInitResponse>, Status> {
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
+
+    // ADR-0010 sanitize_inputs: reject NULL mechanism before reaching the module.
+    if sanitize_inputs && req.mechanism.is_none() {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::SignInitResponse {
+            ck_rv: pkcs11_proxy_ng_types::CkRv::ARGUMENTS_BAD.0,
+        }));
+    }
 
     if req.mechanism.is_none() {
         let session = match resolve_session(ctx_mgr, &ctx_id, req.session_handle).await {
@@ -40,12 +50,17 @@ pub(crate) async fn sign_init(
             }
         };
 
-    let mechanism = match parse_mechanism(req.mechanism) {
+    let mut mechanism = match parse_mechanism(req.mechanism) {
         Ok(mechanism) => mechanism,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::SignInitResponse { ck_rv: rv.0 }));
         }
     };
+
+    // B1: remap object handles embedded in the mechanism parameters.
+    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::SignInitResponse { ck_rv: rv.0 }));
+    }
 
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || backend.sign_init(session, &mechanism, key)).await?;
@@ -55,6 +70,7 @@ pub(crate) async fn sign_init(
 pub(crate) async fn sign(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::SignRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SignResponse>, Status> {
     let req = request.into_inner();
@@ -71,8 +87,17 @@ pub(crate) async fn sign(
     };
 
     let data = req.data;
+    let data_null_len = req.data_null_len;
+    // ADR-0010 sanitize_inputs: validate NULL data pointer before backend call.
+    if let Err(rv) = check_sanitize(sanitize_inputs, data_null_len) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::SignResponse {
+            ck_rv: rv.0,
+            signature: Vec::new(),
+        }));
+    }
     let backend = Arc::clone(backend_ref);
-    let result = spawn_backend(move || backend.sign(session, &data)).await?;
+    let result =
+        spawn_backend(move || backend.sign(session, input_from_wire(&data, data_null_len))).await?;
     let (ck_rv, signature) = ck_result_to_rv(result);
     Ok(Response::new(pkcs11_proxy_ng_proto::SignResponse {
         ck_rv,
@@ -83,6 +108,7 @@ pub(crate) async fn sign(
 pub(crate) async fn sign_update(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::SignUpdateRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SignUpdateResponse>, Status> {
     let req = request.into_inner();
@@ -96,14 +122,22 @@ pub(crate) async fn sign_update(
     };
 
     let part = req.part;
+    let part_null_len = req.part_null_len;
+    // ADR-0010 sanitize_inputs: validate NULL data pointer before backend call.
+    if let Err(rv) = check_sanitize(sanitize_inputs, part_null_len) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::SignUpdateResponse { ck_rv: rv.0 }));
+    }
     let backend = Arc::clone(backend_ref);
-    let result = spawn_backend(move || backend.sign_update(session, &part)).await?;
+    let result =
+        spawn_backend(move || backend.sign_update(session, input_from_wire(&part, part_null_len)))
+            .await?;
     Ok(Response::new(pkcs11_proxy_ng_proto::SignUpdateResponse { ck_rv: ck_rv_only(result) }))
 }
 
 pub(crate) async fn sign_final(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::SignFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SignFinalResponse>, Status> {
     let req = request.into_inner();
@@ -131,10 +165,18 @@ pub(crate) async fn sign_final(
 pub(crate) async fn sign_recover_init(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::SignRecoverInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SignRecoverInitResponse>, Status> {
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
+
+    // ADR-0010 sanitize_inputs: reject NULL mechanism before reaching the module.
+    if sanitize_inputs && req.mechanism.is_none() {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::SignRecoverInitResponse {
+            ck_rv: pkcs11_proxy_ng_types::CkRv::ARGUMENTS_BAD.0,
+        }));
+    }
 
     if req.mechanism.is_none() {
         let session = match resolve_session(ctx_mgr, &ctx_id, req.session_handle).await {
@@ -162,7 +204,7 @@ pub(crate) async fn sign_recover_init(
             }
         };
 
-    let mechanism = match parse_mechanism(req.mechanism) {
+    let mut mechanism = match parse_mechanism(req.mechanism) {
         Ok(mechanism) => mechanism,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::SignRecoverInitResponse {
@@ -170,6 +212,11 @@ pub(crate) async fn sign_recover_init(
             }));
         }
     };
+
+    // B1: remap object handles embedded in the mechanism parameters.
+    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::SignRecoverInitResponse { ck_rv: rv.0 }));
+    }
 
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || backend.sign_recover_init(session, &mechanism, key)).await?;
@@ -179,6 +226,7 @@ pub(crate) async fn sign_recover_init(
 pub(crate) async fn sign_recover(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::SignRecoverRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SignRecoverResponse>, Status> {
     let req = request.into_inner();
@@ -195,8 +243,18 @@ pub(crate) async fn sign_recover(
     };
 
     let data = req.data;
+    let data_null_len = req.data_null_len;
+    // ADR-0010 sanitize_inputs: validate NULL data pointer before backend call.
+    if let Err(rv) = check_sanitize(sanitize_inputs, data_null_len) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::SignRecoverResponse {
+            ck_rv: rv.0,
+            signature: Vec::new(),
+        }));
+    }
     let backend = Arc::clone(backend_ref);
-    let result = spawn_backend(move || backend.sign_recover(session, &data)).await?;
+    let result =
+        spawn_backend(move || backend.sign_recover(session, input_from_wire(&data, data_null_len)))
+            .await?;
     let (ck_rv, signature) = ck_result_to_rv(result);
     Ok(Response::new(pkcs11_proxy_ng_proto::SignRecoverResponse {
         ck_rv,

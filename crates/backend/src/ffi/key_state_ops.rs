@@ -170,10 +170,11 @@ impl FfiBackend {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         unwrapping_key: CkObjectHandle,
-        wrapped_key: &[u8],
+        wrapped_key: CkInBuf<'_>,
         template: &[CkAttribute],
     ) -> CkResult<CkObjectHandle> {
         let ffi_attrs = FfiAttrs::from_slice(template);
+        let (wk_ptr, wk_len) = wrapped_key.as_ptr_len();
         Self::call_object_with_mechanism(
             unsafe { (*self.func_list).C_UnwrapKey },
             mechanism,
@@ -182,8 +183,8 @@ impl FfiBackend {
                     Self::session_handle(session),
                     mech,
                     Self::object_handle(unwrapping_key),
-                    wrapped_key.as_ptr() as *mut _,
-                    Self::ulong_len(wrapped_key.len()),
+                    wk_ptr as *mut _,
+                    Self::ulong_len_u64(wk_len),
                     Self::ffi_attr_ptr(&ffi_attrs),
                     Self::ffi_attr_len(&ffi_attrs),
                     handle,
@@ -300,27 +301,33 @@ impl FfiBackend {
     pub(super) fn ffi_set_operation_state(
         &self,
         session: CkSessionHandle,
-        state: &[u8],
+        state: CkInBuf<'_>,
         enc_key: CkObjectHandle,
         auth_key: CkObjectHandle,
     ) -> CkResult<()> {
+        let (state_ptr, state_len) = state.as_ptr_len();
         Self::call_unit(unsafe { (*self.func_list).C_SetOperationState }, |function| unsafe {
             function(
                 Self::session_handle(session),
-                state.as_ptr() as *mut _,
-                Self::ulong_len(state.len()),
+                state_ptr as *mut _,
+                Self::ulong_len_u64(state_len),
                 Self::object_handle(enc_key),
                 Self::object_handle(auth_key),
             )
         })
     }
 
-    pub(super) fn ffi_seed_random(&self, session: CkSessionHandle, seed: &[u8]) -> CkResult<()> {
+    pub(super) fn ffi_seed_random(
+        &self,
+        session: CkSessionHandle,
+        seed: CkInBuf<'_>,
+    ) -> CkResult<()> {
+        let (seed_ptr, seed_len) = seed.as_ptr_len();
         Self::call_unit(unsafe { (*self.func_list).C_SeedRandom }, |function| unsafe {
             function(
                 Self::session_handle(session),
-                seed.as_ptr() as *mut _,
-                Self::ulong_len(seed.len()),
+                seed_ptr as *mut _,
+                Self::ulong_len_u64(seed_len),
             )
         })
     }
@@ -343,15 +350,16 @@ impl FfiBackend {
     pub(super) fn ffi_digest_encrypt_update(
         &self,
         session: CkSessionHandle,
-        part: &[u8],
+        part: CkInBuf<'_>,
     ) -> CkResult<Vec<u8>> {
+        let (part_ptr, part_len) = part.as_ptr_len();
         Self::call_bytes(
             unsafe { (*self.func_list).C_DigestEncryptUpdate },
             |function, output, output_len| unsafe {
                 function(
                     Self::session_handle(session),
-                    part.as_ptr() as *mut _,
-                    Self::ulong_len(part.len()),
+                    part_ptr as *mut _,
+                    Self::ulong_len_u64(part_len),
                     output,
                     output_len,
                 )
@@ -362,7 +370,7 @@ impl FfiBackend {
     pub(super) fn ffi_digest_encrypt_update_exact(
         &self,
         session: CkSessionHandle,
-        part: &[u8],
+        part: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         Self::call_bytes_exact(
@@ -377,15 +385,16 @@ impl FfiBackend {
     pub(super) fn ffi_decrypt_digest_update(
         &self,
         session: CkSessionHandle,
-        encrypted_part: &[u8],
+        encrypted_part: CkInBuf<'_>,
     ) -> CkResult<Vec<u8>> {
+        let (ep_ptr, ep_len) = encrypted_part.as_ptr_len();
         Self::call_bytes(
             unsafe { (*self.func_list).C_DecryptDigestUpdate },
             |function, output, output_len| unsafe {
                 function(
                     Self::session_handle(session),
-                    encrypted_part.as_ptr() as *mut _,
-                    Self::ulong_len(encrypted_part.len()),
+                    ep_ptr as *mut _,
+                    Self::ulong_len_u64(ep_len),
                     output,
                     output_len,
                 )
@@ -396,7 +405,7 @@ impl FfiBackend {
     pub(super) fn ffi_decrypt_digest_update_exact(
         &self,
         session: CkSessionHandle,
-        encrypted_part: &[u8],
+        encrypted_part: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         Self::call_bytes_exact(
@@ -411,15 +420,16 @@ impl FfiBackend {
     pub(super) fn ffi_sign_encrypt_update(
         &self,
         session: CkSessionHandle,
-        part: &[u8],
+        part: CkInBuf<'_>,
     ) -> CkResult<Vec<u8>> {
+        let (part_ptr, part_len) = part.as_ptr_len();
         Self::call_bytes(
             unsafe { (*self.func_list).C_SignEncryptUpdate },
             |function, output, output_len| unsafe {
                 function(
                     Self::session_handle(session),
-                    part.as_ptr() as *mut _,
-                    Self::ulong_len(part.len()),
+                    part_ptr as *mut _,
+                    Self::ulong_len_u64(part_len),
                     output,
                     output_len,
                 )
@@ -430,7 +440,7 @@ impl FfiBackend {
     pub(super) fn ffi_sign_encrypt_update_exact(
         &self,
         session: CkSessionHandle,
-        part: &[u8],
+        part: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         Self::call_bytes_exact(
@@ -445,15 +455,16 @@ impl FfiBackend {
     pub(super) fn ffi_decrypt_verify_update(
         &self,
         session: CkSessionHandle,
-        encrypted_part: &[u8],
+        encrypted_part: CkInBuf<'_>,
     ) -> CkResult<Vec<u8>> {
+        let (ep_ptr, ep_len) = encrypted_part.as_ptr_len();
         Self::call_bytes(
             unsafe { (*self.func_list).C_DecryptVerifyUpdate },
             |function, output, output_len| unsafe {
                 function(
                     Self::session_handle(session),
-                    encrypted_part.as_ptr() as *mut _,
-                    Self::ulong_len(encrypted_part.len()),
+                    ep_ptr as *mut _,
+                    Self::ulong_len_u64(ep_len),
                     output,
                     output_len,
                 )
@@ -464,7 +475,7 @@ impl FfiBackend {
     pub(super) fn ffi_decrypt_verify_update_exact(
         &self,
         session: CkSessionHandle,
-        encrypted_part: &[u8],
+        encrypted_part: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         Self::call_bytes_exact(

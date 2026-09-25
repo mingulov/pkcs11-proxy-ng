@@ -110,34 +110,47 @@ pub(super) async fn close_session(
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
-    let resolved = ctx_mgr
-        .get_context(&ctx_id, |ctx| {
-            let vh = VirtualHandle(req.session_handle);
-            ctx.remove_session(vh)
-        })
-        .await;
+    let vh = VirtualHandle(req.session_handle);
+    // Resolve WITHOUT removing the mapping: removing it before the backend close
+    // (as the old code did) orphans the backend session if the close fails — the
+    // virtual handle is gone, so the client can neither retry nor reach it (M3).
+    let resolved = ctx_mgr.get_context(&ctx_id, |ctx| ctx.session_handles.resolve(vh)).await;
 
-    match resolved {
-        None => Ok(Response::new(pkcs11_proxy_ng_proto::CloseSessionResponse {
-            ck_rv: CkRv::CRYPTOKI_NOT_INITIALIZED.0,
-        })),
-        Some(None) => Ok(Response::new(pkcs11_proxy_ng_proto::CloseSessionResponse {
-            ck_rv: CkRv::SESSION_HANDLE_INVALID.0,
-        })),
-        Some(Some(backend_handle)) => {
-            let session = CkSessionHandle(backend_handle.0);
-            let backend = backend_ref.clone();
-            let result = spawn_backend(move || backend.close_session(session)).await?;
-            let ck_rv = match result {
-                Ok(()) => {
-                    debug!(context_id = %ctx_id.0, virtual_handle = req.session_handle, "Session closed");
-                    CkRv::OK.0
-                }
-                Err(error) => error.0,
-            };
-            Ok(Response::new(pkcs11_proxy_ng_proto::CloseSessionResponse { ck_rv }))
+    let backend_handle = match resolved {
+        None => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::CloseSessionResponse {
+                ck_rv: CkRv::CRYPTOKI_NOT_INITIALIZED.0,
+            }));
         }
-    }
+        Some(None) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::CloseSessionResponse {
+                ck_rv: CkRv::SESSION_HANDLE_INVALID.0,
+            }));
+        }
+        Some(Some(backend_handle)) => backend_handle,
+    };
+
+    let session = CkSessionHandle(backend_handle.0);
+    let backend = backend_ref.clone();
+    let result = spawn_backend(move || backend.close_session(session)).await?;
+
+    // Drop the virtual handle (and its session-scoped state — B2 eviction, login
+    // state) only on a TERMINAL result: a clean close, or the backend reporting
+    // the session already gone. A transient backend failure keeps the mapping so
+    // the client can retry and the backend session is not orphaned (M3).
+    let ck_rv = match result {
+        Ok(()) => {
+            let _ = ctx_mgr.get_context(&ctx_id, |ctx| ctx.remove_session(vh)).await;
+            debug!(context_id = %ctx_id.0, virtual_handle = req.session_handle, "Session closed");
+            CkRv::OK.0
+        }
+        Err(error) if error == CkRv::SESSION_HANDLE_INVALID || error == CkRv::SESSION_CLOSED => {
+            let _ = ctx_mgr.get_context(&ctx_id, |ctx| ctx.remove_session(vh)).await;
+            error.0
+        }
+        Err(error) => error.0,
+    };
+    Ok(Response::new(pkcs11_proxy_ng_proto::CloseSessionResponse { ck_rv }))
 }
 
 pub(super) async fn close_all_sessions(

@@ -27,23 +27,31 @@ impl Pkcs11Client {
         pkcs11_unary_ok!(self.grpc.digest_init(req), true)
     }
 
+    // NOTE: legacy per-op RPC — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
     pub async fn digest(&mut self, session: CkSessionHandle, data: &[u8]) -> CkResult<Vec<u8>> {
         let ctx = self.context_id()?;
         let req = pkcs11_proxy_ng_proto::DigestRequest {
             client_context_id: ctx,
             session_handle: session.0,
             data: data.to_vec(),
+            data_null_len: None,
         };
         pkcs11_unary_map!(self.grpc.digest(req), true, resp => resp.digest)
     }
 
-    pub async fn digest_update(&mut self, session: CkSessionHandle, part: &[u8]) -> CkResult<()> {
+    pub async fn digest_update(
+        &mut self,
+        session: CkSessionHandle,
+        part: CkInBuf<'_>,
+    ) -> CkResult<()> {
         let ctx = self.context_id()?;
-        let req = pkcs11_proxy_ng_proto::DigestUpdateRequest {
+        let mut req = pkcs11_proxy_ng_proto::DigestUpdateRequest {
             client_context_id: ctx,
             session_handle: session.0,
-            part: part.to_vec(),
+            part: Vec::new(),
+            part_null_len: None,
         };
+        Self::fill_input(part, &mut req.part, &mut req.part_null_len);
         pkcs11_unary_ok!(self.grpc.digest_update(req), true)
     }
 
@@ -109,6 +117,7 @@ impl Pkcs11Client {
         Ok(bytes)
     }
 
+    // NOTE: legacy per-op RPC — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
     /// `C_Encrypt` returning ciphertext plus any HSM-mutated mechanism
     /// params (e.g. AES-GCM IV).  Backwards-compatible sibling of
     /// [`Self::encrypt`].
@@ -122,6 +131,7 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
             data: data.to_vec(),
+            data_null_len: None,
         };
         pkcs11_unary_map!(self.grpc.encrypt(req), true, resp => {
             (resp.encrypted_data, Self::parse_mech_out(resp.mechanism_out)?)
@@ -137,6 +147,7 @@ impl Pkcs11Client {
         Ok(bytes)
     }
 
+    // NOTE: legacy per-op RPC — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
     /// `C_EncryptUpdate` returning the partial ciphertext plus any
     /// HSM-mutated mechanism params.  Backwards-compatible sibling of
     /// [`Self::encrypt_update`].
@@ -150,6 +161,7 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
             part: part.to_vec(),
+            part_null_len: None,
         };
         pkcs11_unary_map!(self.grpc.encrypt_update(req), true, resp => {
             (resp.encrypted_part, Self::parse_mech_out(resp.mechanism_out)?)
@@ -229,6 +241,7 @@ impl Pkcs11Client {
         Ok(bytes)
     }
 
+    // NOTE: legacy per-op RPC — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
     /// `C_Decrypt` returning plaintext plus any HSM-mutated mechanism
     /// params.  Backwards-compatible sibling of [`Self::decrypt`].
     pub async fn decrypt_with_mechanism_out(
@@ -241,6 +254,7 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
             encrypted_data: encrypted_data.to_vec(),
+            encrypted_data_null_len: None,
         };
         pkcs11_unary_map!(self.grpc.decrypt(req), true, resp => {
             (resp.data, Self::parse_mech_out(resp.mechanism_out)?)
@@ -256,6 +270,7 @@ impl Pkcs11Client {
         Ok(bytes)
     }
 
+    // NOTE: legacy per-op RPC — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
     /// `C_DecryptUpdate` returning the partial plaintext plus any
     /// HSM-mutated mechanism params.  Backwards-compatible sibling of
     /// [`Self::decrypt_update`].
@@ -269,6 +284,7 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
             encrypted_part: encrypted_part.to_vec(),
+            encrypted_part_null_len: None,
         };
         pkcs11_unary_map!(self.grpc.decrypt_update(req), true, resp => {
             (resp.part, Self::parse_mech_out(resp.mechanism_out)?)

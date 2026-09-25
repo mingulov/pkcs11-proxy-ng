@@ -105,10 +105,10 @@ jobs:
 
   # ── Tier 0d: MSRV check ────────────────────────────────────────────────────
   # Validates that the workspace compiles on the minimum Rust version declared
-  # in the workspace Cargo.toml (currently 1.94).  Separate job so MSRV
+  # in the workspace Cargo.toml (currently 1.88).  Separate job so MSRV
   # failures don't block the main test feedback.
   msrv:
-    name: MSRV (1.94)
+    name: MSRV (1.88)
     runs-on: ubuntu-24.04
     needs: fmt
     steps:
@@ -121,8 +121,8 @@ jobs:
 
       # Hard-coded to match rust-version in workspace Cargo.toml.
       # Update both places when the MSRV is bumped.
-      - name: Install Rust 1.94 (MSRV)
-        uses: dtolnay/rust-toolchain@1.94
+      - name: Install Rust 1.88 (MSRV)
+        uses: dtolnay/rust-toolchain@1.88
 
       - name: cargo build --workspace (MSRV)
         run: cargo build --workspace

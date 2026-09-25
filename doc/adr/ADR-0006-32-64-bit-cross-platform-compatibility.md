@@ -210,7 +210,7 @@ debug_assert!(
 );
 ```
 
-**Location:** `crates/pkcs11-proxy-ng-shim/src/dispatch/general/helpers.rs`  
+**Location:** `crates/shim/src/dispatch/general/helpers/mod.rs`  
 **Impact:** Developer experience — clear error message when truncation would occur
 
 #### 3. Document Handle Range Requirements

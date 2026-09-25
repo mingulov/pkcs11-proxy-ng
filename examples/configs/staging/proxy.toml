@@ -30,6 +30,9 @@ lease_seconds = 30
 # HTTP/2 keepalive — staging tests rolling-restart behaviour.
 http2_keepalive_interval_secs = 15
 http2_keepalive_timeout_secs = 5
+# Reject NULL data pointers (len>0) and NULL mechanisms before the backend module.
+# OFF by default (ADR-0010 transparent forwarding). Enable for modules that crash on them.
+# sanitize_inputs = true
 
 [listener.remote]
 bind = "0.0.0.0:7512"

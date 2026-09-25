@@ -397,7 +397,7 @@ pub async fn rsa_sign_and_verify(
         .await
         .map_err(|rv| format!("C_VerifyInit failed: {rv}"))?;
     client
-        .verify(session, data, &signature)
+        .verify(session, CkInBuf::Bytes(data), CkInBuf::Bytes(&signature))
         .await
         .map_err(|rv| format!("C_Verify failed: {rv}"))?;
     Ok(signature)
@@ -506,11 +506,11 @@ pub async fn sha256_digest_matches(
         .map_err(|rv| format!("C_DigestInit(2) failed: {rv}"))?;
     let split_at = std::cmp::max(1, data.len() / 2);
     client
-        .digest_update(session, &data[..split_at])
+        .digest_update(session, CkInBuf::Bytes(&data[..split_at]))
         .await
         .map_err(|rv| format!("C_DigestUpdate(1) failed: {rv}"))?;
     client
-        .digest_update(session, &data[split_at..])
+        .digest_update(session, CkInBuf::Bytes(&data[split_at..]))
         .await
         .map_err(|rv| format!("C_DigestUpdate(2) failed: {rv}"))?;
     let incremental =

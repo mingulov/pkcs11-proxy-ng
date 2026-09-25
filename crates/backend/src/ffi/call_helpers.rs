@@ -38,6 +38,11 @@ impl FfiBackend {
         len as cryptoki_sys::CK_ULONG
     }
 
+    #[inline]
+    pub(super) const fn ulong_len_u64(len: u64) -> cryptoki_sys::CK_ULONG {
+        len as cryptoki_sys::CK_ULONG
+    }
+
     /// Map a cryptoki_sys CK_RV to CkResult.
     #[inline]
     pub(super) fn ck_result(rv: cryptoki_sys::CK_RV) -> CkResult<()> {
@@ -290,9 +295,7 @@ impl FfiBackend {
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
         Self::ck_result(call(function, &mut ffi_mech.ck_mechanism))?;
         // Keep the mechanism's backing memory alive for the session.
-        if let Ok(mut cache) = self.mech_cache.lock() {
-            cache.insert(session.0, ffi_mech);
-        }
+        self.mech_cache.insert(session.0, ffi_mech);
         Ok(())
     }
 
@@ -312,31 +315,35 @@ impl FfiBackend {
         Self::ck_result(call(function, &mut ffi_mech.ck_mechanism))?;
         let output_params = ffi_mech.output_params();
         // Keep the mechanism's backing memory alive for the session.
-        if let Ok(mut cache) = self.mech_cache.lock() {
-            cache.insert(session.0, ffi_mech);
-        }
+        self.mech_cache.insert(session.0, ffi_mech);
         Ok(output_params)
     }
 
     /// Drop any cached mechanism for the given session (called on session close).
     pub(super) fn drop_mech_cache(&self, session: CkSessionHandle) {
-        if let Ok(mut cache) = self.mech_cache.lock() {
-            cache.remove(&session.0);
-        }
+        self.mech_cache.remove(&session.0);
     }
 
     /// Record `session -> slot` for later per-slot eviction in
-    /// `C_CloseAllSessions`. Called after a successful `C_OpenSession`.
+    /// `C_CloseAllSessions`. Called after a successful `C_OpenSession`. Updates
+    /// both the forward map and the `slot -> sessions` reverse index.
     pub(super) fn remember_session_slot(&self, session: CkSessionHandle, slot: CkSlotId) {
-        if let Ok(mut map) = self.session_slot_map.lock() {
-            map.insert(session.0, slot.0);
-        }
+        self.session_slot_map.insert(session.0, slot.0);
+        self.slot_sessions.entry(slot.0).or_default().insert(session.0);
     }
 
-    /// Forget `session -> slot` mapping. Called from per-session close paths.
+    /// Forget the `session -> slot` mapping. Called from per-session close paths.
     pub(super) fn forget_session_slot(&self, session: CkSessionHandle) {
-        if let Ok(mut map) = self.session_slot_map.lock() {
-            map.remove(&session.0);
+        // Remove the forward mapping and, via the slot it pointed to, drop the
+        // session from the reverse index. The `get_mut` guard is dropped before
+        // `remove_if`, which re-checks emptiness under the shard lock so a
+        // concurrent `remember_session_slot` on the same slot is not lost to a
+        // stale empty-set removal.
+        if let Some((_, slot)) = self.session_slot_map.remove(&session.0) {
+            if let Some(mut sessions) = self.slot_sessions.get_mut(&slot) {
+                sessions.remove(&session.0);
+            }
+            self.slot_sessions.remove_if(&slot, |_, sessions| sessions.is_empty());
         }
     }
 
@@ -345,23 +352,15 @@ impl FfiBackend {
     /// `C_CloseAllSessions` so the underlying lib's session invalidation
     /// is reflected in our Rust-owned caches.
     pub(super) fn drop_mech_cache_for_slot(&self, slot_id: CkSlotId) {
-        let sessions: Vec<u64> = if let Ok(mut map) = self.session_slot_map.lock() {
-            let evicted: Vec<u64> =
-                map.iter().filter_map(|(s, slot)| (*slot == slot_id.0).then_some(*s)).collect();
-            for s in &evicted {
-                map.remove(s);
-            }
-            evicted
-        } else {
-            Vec::new()
+        // O(sessions-on-slot): take the slot's session set from the reverse
+        // index, then evict exactly those entries from the mechanism cache and
+        // the forward map — no full scan of every open session (L4).
+        let Some((_, sessions)) = self.slot_sessions.remove(&slot_id.0) else {
+            return;
         };
-
-        if !sessions.is_empty()
-            && let Ok(mut cache) = self.mech_cache.lock()
-        {
-            for s in &sessions {
-                cache.remove(s);
-            }
+        for session in sessions {
+            self.mech_cache.remove(&session);
+            self.session_slot_map.remove(&session);
         }
     }
 
@@ -369,22 +368,16 @@ impl FfiBackend {
     /// successful `C_Finalize` so Rust-owned mechanism backing memory is
     /// released even when the caller doesn't close sessions individually first.
     pub(super) fn drop_all_mech_cache(&self) {
-        if let Ok(mut cache) = self.mech_cache.lock() {
-            cache.clear();
-        }
-        if let Ok(mut map) = self.session_slot_map.lock() {
-            map.clear();
-        }
+        self.mech_cache.clear();
+        self.session_slot_map.clear();
+        self.slot_sessions.clear();
     }
 
     pub(super) fn cached_mechanism_output_params(
         &self,
         session: CkSessionHandle,
     ) -> Option<CkMechanismParams> {
-        self.mech_cache
-            .lock()
-            .ok()
-            .and_then(|cache| cache.get(&session.0).and_then(|mechanism| mechanism.output_params()))
+        self.mech_cache.get(&session.0).and_then(|mechanism| mechanism.output_params())
     }
 
     pub(super) fn call_bytes_with_mechanism<TFunction, F>(

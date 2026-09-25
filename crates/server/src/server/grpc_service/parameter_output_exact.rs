@@ -5,17 +5,19 @@ use tonic::{Request, Response, Status};
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_proto::convert::output::parameter_output_function_from_i32;
 use pkcs11_proxy_ng_types::{
-    CkFlags, CkOutputBufferSpec, CkParameterRoundtripSpec, ParameterOutputFunction,
+    CkFlags, CkInBuf, CkOutputBufferSpec, CkParameterRoundtripSpec, ParameterOutputFunction,
 };
 
 use super::super::context_manager::{ClientContextId, ContextManager};
 use super::service_utils::{
-    parse_mechanism, resolve_session, resolve_session_and_two_objects, spawn_backend,
+    check_sanitize, input_from_wire, parse_mechanism, resolve_session,
+    resolve_session_and_two_objects, spawn_backend,
 };
 
 pub(super) async fn parameter_output_exact(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::ParameterOutputExactRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::ParameterOutputExactResponse>, Status> {
     let req = request.into_inner();
@@ -52,7 +54,9 @@ pub(super) async fn parameter_output_exact(
         .unwrap_or(CkParameterRoundtripSpec { buffer_present: false, buffer_len: 0, value: None });
 
     let input_data = req.input_data;
+    let input_data_null_len = req.input_data_null_len;
     let associated_data = req.associated_data;
+    let associated_data_null_len = req.associated_data_null_len;
     let parameter = req.parameter;
     let flags = CkFlags(req.flags);
 
@@ -80,6 +84,10 @@ pub(super) async fn parameter_output_exact(
                 }
             };
 
+            // ADR-0010 sanitize_inputs: validate NULL aad pointer before backend call.
+            if let Err(rv) = check_sanitize(sanitize_inputs, associated_data_null_len) {
+                return Ok(Response::new(error_response(rv)));
+            }
             let backend = backend_ref.clone();
             let result = spawn_backend(move || {
                 backend.wrap_key_authenticated_exact(
@@ -87,7 +95,7 @@ pub(super) async fn parameter_output_exact(
                     &mechanism,
                     wrapping_key,
                     key,
-                    &associated_data,
+                    input_from_wire(&associated_data, associated_data_null_len),
                     &output_spec,
                     &param_out_spec,
                 )
@@ -108,6 +116,14 @@ pub(super) async fn parameter_output_exact(
                 }
             };
 
+            // ADR-0010 sanitize_inputs: validate NULL aad/input_data pointers before backend call.
+            if let Err(rv) = check_sanitize(sanitize_inputs, associated_data_null_len) {
+                return Ok(Response::new(error_response(rv)));
+            }
+            if let Err(rv) = check_sanitize(sanitize_inputs, input_data_null_len) {
+                return Ok(Response::new(error_response(rv)));
+            }
+
             // If a structured message_parameter is present, use the safe _msg path
             // that reconstructs the C struct with local pointers.
             let msg_param = req.message_parameter.as_ref().and_then(|mp| {
@@ -122,8 +138,8 @@ pub(super) async fn parameter_output_exact(
                         &*backend,
                         session,
                         &mp,
-                        &associated_data,
-                        &input_data,
+                        input_from_wire(&associated_data, associated_data_null_len),
+                        input_from_wire(&input_data, input_data_null_len),
                         &output_spec,
                     )
                 })
@@ -139,8 +155,8 @@ pub(super) async fn parameter_output_exact(
                     &*backend,
                     session,
                     &parameter,
-                    &associated_data,
-                    &input_data,
+                    input_from_wire(&associated_data, associated_data_null_len),
+                    input_from_wire(&input_data, input_data_null_len),
                     &output_spec,
                     &param_out_spec,
                 )
@@ -161,6 +177,11 @@ pub(super) async fn parameter_output_exact(
                 }
             };
 
+            // ADR-0010 sanitize_inputs: validate NULL input_data pointer before backend call.
+            if let Err(rv) = check_sanitize(sanitize_inputs, input_data_null_len) {
+                return Ok(Response::new(error_response(rv)));
+            }
+
             let msg_param = req.message_parameter.as_ref().and_then(|mp| {
                 pkcs11_proxy_ng_proto::convert::message_params::MessageParameter::try_from(mp).ok()
             });
@@ -173,7 +194,7 @@ pub(super) async fn parameter_output_exact(
                         &*backend,
                         session,
                         &mp,
-                        &input_data,
+                        input_from_wire(&input_data, input_data_null_len),
                         flags,
                         &output_spec,
                     )
@@ -189,7 +210,7 @@ pub(super) async fn parameter_output_exact(
                     &*backend,
                     session,
                     &parameter,
-                    &input_data,
+                    input_from_wire(&input_data, input_data_null_len),
                     flags,
                     &output_spec,
                     &param_out_spec,
@@ -207,8 +228,8 @@ fn dispatch_message_oneshot(
     backend: &dyn Pkcs11Backend,
     session: pkcs11_proxy_ng_types::CkSessionHandle,
     parameter: &[u8],
-    associated_data: &[u8],
-    input_data: &[u8],
+    associated_data: CkInBuf<'_>,
+    input_data: CkInBuf<'_>,
     output_spec: &CkOutputBufferSpec,
     param_out_spec: &CkParameterRoundtripSpec,
 ) -> pkcs11_proxy_ng_types::CkResult<(
@@ -247,7 +268,7 @@ fn dispatch_message_next(
     backend: &dyn Pkcs11Backend,
     session: pkcs11_proxy_ng_types::CkSessionHandle,
     parameter: &[u8],
-    input_data: &[u8],
+    input_data: CkInBuf<'_>,
     flags: CkFlags,
     output_spec: &CkOutputBufferSpec,
     param_out_spec: &CkParameterRoundtripSpec,
@@ -289,8 +310,8 @@ fn dispatch_message_oneshot_msg(
     backend: &dyn Pkcs11Backend,
     session: pkcs11_proxy_ng_types::CkSessionHandle,
     msg_param: &pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
-    associated_data: &[u8],
-    input_data: &[u8],
+    associated_data: CkInBuf<'_>,
+    input_data: CkInBuf<'_>,
     output_spec: &CkOutputBufferSpec,
 ) -> pkcs11_proxy_ng_types::CkResult<(
     pkcs11_proxy_ng_types::CkOutputBufferResult,
@@ -326,7 +347,7 @@ fn dispatch_message_next_msg(
     backend: &dyn Pkcs11Backend,
     session: pkcs11_proxy_ng_types::CkSessionHandle,
     msg_param: &pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
-    input_data: &[u8],
+    input_data: CkInBuf<'_>,
     flags: CkFlags,
     output_spec: &CkOutputBufferSpec,
 ) -> pkcs11_proxy_ng_types::CkResult<(

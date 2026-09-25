@@ -278,10 +278,8 @@ pub fn encapsulate_cache() -> &'static SessionEncapsulateCacheMap {
     ENCAPSULATE_CACHE.get()
 }
 
-/// Remove all cached two-call-pattern data for the given session handle.
-///
-/// Called from `c_close_session` after the server confirms the close,
-/// so that stale entries do not accumulate and leak memory.
+/// Run `f` against each per-session byte cache (input and output) so callers
+/// can query or evict entries across all of them.
 fn with_all_byte_caches(mut f: impl FnMut(&SessionByteCacheMap)) {
     let byte_caches: &[&SessionByteCacheMap] = &[
         sig_cache(),
@@ -386,8 +384,11 @@ fn evict_output_caches_for_session(h_session: CK_SESSION_HANDLE) {
 
 /// Remove all cached two-call-pattern data for the given session handle.
 ///
-/// Called from `c_close_session` after the server confirms the close,
-/// so that stale entries do not accumulate and leak memory.
+/// Called from `c_close_session` on the close *attempt*, unconditionally — the
+/// caches are dropped regardless of the server's `CK_RV`, so stale entries do
+/// not accumulate and leak memory. (If a close fails and the caller
+/// legitimately retries on the same handle, the next two-call sequence simply
+/// re-primes the caches.)
 pub(crate) fn evict_session_caches(h_session: CK_SESSION_HANDLE) {
     forget_session_slot(h_session);
     evict_output_caches_for_session(h_session);
@@ -395,7 +396,8 @@ pub(crate) fn evict_session_caches(h_session: CK_SESSION_HANDLE) {
 
 /// Remove all cached two-call-pattern data for sessions opened on one slot.
 ///
-/// Called from `c_close_all_sessions` after the server confirms the close.
+/// Called from `c_close_all_sessions` on the close attempt, unconditionally
+/// (dropped regardless of the server's `CK_RV`).
 pub(crate) fn evict_slot_session_caches(slot_id: CK_SLOT_ID) {
     let sessions = if let Ok(mut map) = SESSION_SLOTS.lock() {
         let sessions: Vec<_> =
@@ -414,7 +416,23 @@ pub(crate) fn evict_slot_session_caches(slot_id: CK_SLOT_ID) {
 }
 
 pub fn runtime() -> &'static Runtime {
-    RUNTIME.get_or_init(|| Runtime::new().expect("Failed to create tokio runtime"))
+    // F3: a CURRENT-THREAD runtime, not the multi-thread default of
+    // `Runtime::new()`. This shim is loaded into arbitrary host applications as
+    // a `cdylib`, and PKCS#11 applications commonly `fork()`. A multi-thread
+    // runtime keeps worker threads and an internal blocking pool whose mutexes,
+    // if held at the moment of `fork()`, are inherited locked-by-a-dead-thread in
+    // the child and deadlock the next runtime call. A current-thread runtime owns
+    // no background worker threads, so it cannot deadlock that way; the shim only
+    // ever drives it via `block_on` (one request at a time), so it needs no
+    // multi-thread executor. (Per PKCS#11, a forked child must still call
+    // C_Initialize again before reusing the module; the daemon connection is
+    // re-established by the shim's reconnect path.)
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create tokio runtime")
+    })
 }
 
 fn connect_client_from_env() -> Result<Pkcs11Client, CkRv> {

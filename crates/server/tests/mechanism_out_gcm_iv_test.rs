@@ -19,8 +19,14 @@
 //!     --test mechanism_out_gcm_iv_test -- --ignored --nocapture
 //! ```
 //!
-//! Without the env var the test is skipped (printing the reason) so
-//! CI on hosts that don't have the patched library still passes.
+//! Both tests are `#[ignore]`, so default CI runs do not execute them and stay
+//! green. If you opt in with `--ignored` but have not set the env var, the test
+//! panics with instructions rather than passing silently (L14): an explicit run
+//! that cannot actually run is a failure, not a no-op pass.
+//!
+//! Follow-up (L14, env-dependent): add a mechanism-out round-trip that runs
+//! against STOCK SoftHSM2/NSS so default CI exercises the mechanism-out path
+//! without the patched library.
 
 mod support;
 
@@ -38,18 +44,18 @@ fn patched_softhsm_path() -> Option<PathBuf> {
     std::env::var_os("SOFTHSM2_GCM_IV_SIM_LIB").map(PathBuf::from)
 }
 
-fn skip_if_no_patched_lib() -> Option<PathBuf> {
-    match patched_softhsm_path() {
-        Some(p) => Some(p),
-        None => {
-            eprintln!(
-                "[mechanism_out_gcm_iv_test] SOFTHSM2_GCM_IV_SIM_LIB not set — skipping. \
-                 Build the patched SoftHSM2 from pkcs11-check/docker/softhsm2/patches/ \
-                 and re-run with the env var pointing at the resulting libsofthsm2.so."
-            );
-            None
-        }
-    }
+/// These tests are `#[ignore]`, so reaching this code means a developer ran them
+/// explicitly (e.g. `cargo test -- --ignored`). A missing patched library is then
+/// a real error, not a silent skip — panic loudly rather than returning `Ok(())`,
+/// which libtest would report as a misleading green "pass" (L14).
+fn require_patched_lib() -> PathBuf {
+    patched_softhsm_path().unwrap_or_else(|| {
+        panic!(
+            "SOFTHSM2_GCM_IV_SIM_LIB not set — this #[ignore] test requires the patched \
+             SoftHSM2. Build it from pkcs11-check/docker/softhsm2/patches/ and point the env \
+             var at the resulting libsofthsm2.so. (Refusing to pass silently — L14.)"
+        )
+    })
 }
 
 /// Caller passes a 12-byte zeroed `pIv` buffer with `ulIvLen=12,
@@ -61,10 +67,7 @@ fn skip_if_no_patched_lib() -> Option<PathBuf> {
 #[tokio::test]
 #[ignore] // requires patched SoftHSM2
 async fn aes_gcm_aws_convention_iv_round_trip() -> Result<(), String> {
-    let lib = match skip_if_no_patched_lib() {
-        Some(p) => p,
-        None => return Ok(()),
-    };
+    let lib = require_patched_lib();
     let fixture = ProviderFixture::soft_hsm_with_module(Some(lib)).await?;
     let harness = DaemonHarness::start(&fixture).await?;
     let mut client = initialized_client(harness.endpoint()).await?;
@@ -153,10 +156,7 @@ async fn aes_gcm_aws_convention_iv_round_trip() -> Result<(), String> {
 #[tokio::test]
 #[ignore] // requires patched SoftHSM2
 async fn aes_gcm_strict_convention_iv_round_trip() -> Result<(), String> {
-    let lib = match skip_if_no_patched_lib() {
-        Some(p) => p,
-        None => return Ok(()),
-    };
+    let lib = require_patched_lib();
     let fixture = ProviderFixture::soft_hsm_with_module(Some(lib)).await?;
     let harness = DaemonHarness::start(&fixture).await?;
     let mut client = initialized_client(harness.endpoint()).await?;

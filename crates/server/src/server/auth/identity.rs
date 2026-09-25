@@ -8,6 +8,67 @@ pub enum AuthenticatedIdentity {
     Unauthenticated,
 }
 
+/// Escape an mTLS identity component (issuer or subject DN) so the `;subject=`
+/// join delimiter is unambiguous: a literal `\` becomes `\\` and a literal `;`
+/// becomes `\;`. After escaping, the only *unescaped* `;` in the encoded
+/// identity is the structural separator, which makes [`AuthenticatedIdentity`]'s
+/// string form injective (G1: distinct DN pairs can no longer collide).
+fn escape_identity_component(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            ';' => out.push_str("\\;"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Inverse of [`escape_identity_component`].
+fn unescape_identity_component(value: &str) -> Result<String, String> {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('\\') => out.push('\\'),
+                Some(';') => out.push(';'),
+                Some(other) => return Err(format!("invalid escape '\\{other}' in mTLS identity")),
+                None => return Err("trailing escape in mTLS identity".into()),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    Ok(out)
+}
+
+/// Split an escaped `issuer;subject=subject` body at the structural separator —
+/// the first `;` preceded by an even number of backslashes (i.e. unescaped),
+/// which must be immediately followed by `subject=`. Returns the still-escaped
+/// issuer and subject halves, or `None` if the body is malformed/ambiguous.
+fn split_escaped_identity_body(rest: &str) -> Option<(&str, &str)> {
+    let bytes = rest.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b != b';' {
+            continue;
+        }
+        let mut backslashes = 0;
+        let mut j = i;
+        while j > 0 && bytes[j - 1] == b'\\' {
+            backslashes += 1;
+            j -= 1;
+        }
+        if backslashes % 2 != 0 {
+            continue; // this ';' is escaped — part of a value
+        }
+        // ';' is ASCII, so byte index i is a char boundary.
+        return rest[i..].strip_prefix(";subject=").map(|subject| (&rest[..i], subject));
+    }
+    None
+}
+
 impl std::str::FromStr for AuthenticatedIdentity {
     type Err = String;
 
@@ -24,10 +85,12 @@ impl std::str::FromStr for AuthenticatedIdentity {
         }
 
         if let Some(rest) = value.strip_prefix("x509:issuer=") {
-            let (issuer, subject) = rest
-                .split_once(";subject=")
+            let (issuer, subject) = split_escaped_identity_body(rest)
                 .ok_or_else(|| format!("invalid mTLS identity '{value}'"))?;
-            return Ok(Self::Mtls { issuer: issuer.into(), subject: subject.into() });
+            return Ok(Self::Mtls {
+                issuer: unescape_identity_component(issuer)?,
+                subject: unescape_identity_component(subject)?,
+            });
         }
 
         Err(format!("unknown authenticated identity format '{value}'"))
@@ -38,9 +101,12 @@ impl std::fmt::Display for AuthenticatedIdentity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::PeerCred { uid } => write!(f, "uid={uid}"),
-            Self::Mtls { issuer, subject } => {
-                write!(f, "x509:issuer={issuer};subject={subject}")
-            }
+            Self::Mtls { issuer, subject } => write!(
+                f,
+                "x509:issuer={};subject={}",
+                escape_identity_component(issuer),
+                escape_identity_component(subject),
+            ),
             Self::Unauthenticated => write!(f, "unauthenticated"),
         }
     }
@@ -153,5 +219,53 @@ mod tests {
     #[test]
     fn parse_identity_rejects_unknown_format() {
         assert!("client1".parse::<AuthenticatedIdentity>().is_err());
+    }
+
+    // --- G1: the identity key must be injective and round-trip exactly ---
+
+    #[test]
+    fn mtls_identity_with_join_delimiter_in_issuer_round_trips() {
+        // An issuer DN whose text contains the literal join delimiter must not
+        // be confused with the issuer/subject boundary.
+        let id = AuthenticatedIdentity::Mtls {
+            issuer: "CN=x;subject=evil".into(),
+            subject: "CN=client".into(),
+        };
+        assert_eq!(id.to_string().parse::<AuthenticatedIdentity>().unwrap(), id);
+    }
+
+    #[test]
+    fn distinct_dn_pairs_never_collide_on_the_same_key() {
+        // These two distinct certificate identities previously produced the
+        // SAME string ("...issuer=A;subject=B;subject=C"), letting one match the
+        // other's policy entry / spoof it past the A2 ownership check.
+        let a = AuthenticatedIdentity::Mtls { issuer: "A;subject=B".into(), subject: "C".into() };
+        let b = AuthenticatedIdentity::Mtls { issuer: "A".into(), subject: "B;subject=C".into() };
+        assert_ne!(a.to_string(), b.to_string());
+        assert_eq!(a.to_string().parse::<AuthenticatedIdentity>().unwrap(), a);
+        assert_eq!(b.to_string().parse::<AuthenticatedIdentity>().unwrap(), b);
+    }
+
+    #[test]
+    fn mtls_identity_with_backslash_round_trips() {
+        let id =
+            AuthenticatedIdentity::Mtls { issuer: "CN=a\\b".into(), subject: "CN=c\\;d".into() };
+        assert_eq!(id.to_string().parse::<AuthenticatedIdentity>().unwrap(), id);
+    }
+
+    #[test]
+    fn mtls_identity_with_equals_and_plus_round_trips() {
+        // '=' and '+' appear in multi-valued RDNs; they are not delimiters here
+        // and must round-trip untouched.
+        let id =
+            AuthenticatedIdentity::Mtls { issuer: "CN=a+OU=b".into(), subject: "CN=c=d".into() };
+        assert_eq!(id.to_string().parse::<AuthenticatedIdentity>().unwrap(), id);
+    }
+
+    #[test]
+    fn parse_rejects_mtls_with_stray_unescaped_delimiter() {
+        // A bare unescaped ';' that is not the structural ";subject=" is
+        // ambiguous and must be rejected rather than silently mis-parsed.
+        assert!("x509:issuer=A;B".parse::<AuthenticatedIdentity>().is_err());
     }
 }

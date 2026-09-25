@@ -394,6 +394,7 @@ mod tests {
             mechanism: None,
             wrapping_key_handle: 0,
             key_handle: 0,
+            input_data_null_len: None,
         };
 
         let mut encoded = Vec::new();
@@ -617,5 +618,47 @@ mod tests {
     #[test]
     fn parameter_output_function_rejects_out_of_range() {
         assert!(parameter_output_function_from_i32(99).is_none());
+    }
+
+    // ADR-0010 Scope 2: *_null_len companion field round-trip tests.
+
+    #[test]
+    fn byte_output_exact_request_null_len_roundtrip() {
+        let req = v1_proto::ByteOutputExactRequest {
+            input_data_null_len: Some(42),
+            ..Default::default()
+        };
+        let bytes = prost::Message::encode_to_vec(&req);
+        let back = v1_proto::ByteOutputExactRequest::decode(&bytes[..]).unwrap();
+        assert_eq!(back.input_data_null_len, Some(42));
+        assert!(back.input_data.is_empty());
+    }
+
+    /// Decoding bytes encoded WITHOUT input_data_null_len (old-shim wire format)
+    /// must yield None — verifies additive backward compatibility.
+    #[test]
+    fn decrypt_request_null_len_absent_on_old_wire() {
+        // Encode a DecryptRequest that never had the null_len field.
+        let old = v1_proto::DecryptRequest {
+            client_context_id: "ctx".to_string(),
+            session_handle: 1,
+            encrypted_data: b"ciphertext".to_vec(),
+            encrypted_data_null_len: None,
+        };
+        let bytes = prost::Message::encode_to_vec(&old);
+        let decoded = v1_proto::DecryptRequest::decode(&bytes[..]).unwrap();
+        assert_eq!(decoded.encrypted_data_null_len, None);
+        assert_eq!(decoded.encrypted_data, b"ciphertext");
+    }
+
+    #[test]
+    fn null_len_present_with_zero_is_distinct_from_absent() {
+        // NULL pointer with claimed length 0 is a real client input class; the
+        // wire must distinguish Some(0) (NULL, len 0) from None (valid pointer).
+        let req =
+            v1_proto::ByteOutputExactRequest { input_data_null_len: Some(0), ..Default::default() };
+        let bytes = prost::Message::encode_to_vec(&req);
+        let back = v1_proto::ByteOutputExactRequest::decode(&bytes[..]).unwrap();
+        assert_eq!(back.input_data_null_len, Some(0));
     }
 }

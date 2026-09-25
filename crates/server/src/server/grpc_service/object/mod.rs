@@ -15,6 +15,7 @@ mod search;
 pub(super) async fn find_objects_init(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::FindObjectsInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::FindObjectsInitResponse>, Status> {
     search::find_objects_init(ctx_mgr, backend_ref, request).await
@@ -23,6 +24,7 @@ pub(super) async fn find_objects_init(
 pub(super) async fn find_objects(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::FindObjectsRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::FindObjectsResponse>, Status> {
     search::find_objects(ctx_mgr, backend_ref, request).await
@@ -31,6 +33,7 @@ pub(super) async fn find_objects(
 pub(super) async fn find_objects_final(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::FindObjectsFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::FindObjectsFinalResponse>, Status> {
     search::find_objects_final(ctx_mgr, backend_ref, request).await
@@ -39,6 +42,7 @@ pub(super) async fn find_objects_final(
 pub(super) async fn get_attribute_value(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::GetAttributeValueRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GetAttributeValueResponse>, Status> {
     attributes::get_attribute_value(ctx_mgr, backend_ref, request).await
@@ -47,6 +51,7 @@ pub(super) async fn get_attribute_value(
 pub(super) async fn get_attribute_value_exact(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::GetAttributeValueExactRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GetAttributeValueExactResponse>, Status> {
     attributes::get_attribute_value_exact(ctx_mgr, backend_ref, request).await
@@ -55,6 +60,7 @@ pub(super) async fn get_attribute_value_exact(
 pub(super) async fn set_attribute_value(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::SetAttributeValueRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SetAttributeValueResponse>, Status> {
     attributes::set_attribute_value(ctx_mgr, backend_ref, request).await
@@ -63,6 +69,7 @@ pub(super) async fn set_attribute_value(
 pub(super) async fn get_object_size(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::GetObjectSizeRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GetObjectSizeResponse>, Status> {
     attributes::get_object_size(ctx_mgr, backend_ref, request).await
@@ -71,6 +78,7 @@ pub(super) async fn get_object_size(
 pub(super) async fn create_object(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::CreateObjectRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::CreateObjectResponse>, Status> {
     lifecycle::create_object(ctx_mgr, backend_ref, request).await
@@ -79,6 +87,7 @@ pub(super) async fn create_object(
 pub(super) async fn copy_object(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::CopyObjectRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::CopyObjectResponse>, Status> {
     lifecycle::copy_object(ctx_mgr, backend_ref, request).await
@@ -87,6 +96,7 @@ pub(super) async fn copy_object(
 pub(super) async fn destroy_object(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::DestroyObjectRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DestroyObjectResponse>, Status> {
     lifecycle::destroy_object(ctx_mgr, backend_ref, request).await

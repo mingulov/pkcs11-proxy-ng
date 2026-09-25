@@ -34,18 +34,20 @@ impl Pkcs11Client {
         mechanism: &CkMechanism,
         private_key: CkObjectHandle,
         template: &[CkAttribute],
-        ciphertext: &[u8],
+        ciphertext: CkInBuf<'_>,
     ) -> CkResult<CkObjectHandle> {
         let ctx = self.context_id()?;
         let proto_template = Self::proto_template(template);
-        let req = pkcs11_proxy_ng_proto::DecapsulateKeyRequest {
+        let mut req = pkcs11_proxy_ng_proto::DecapsulateKeyRequest {
             client_context_id: ctx,
             session_handle: session.0,
             mechanism: Some(Self::proto_mechanism(mechanism)),
             private_key_handle: private_key.0,
             template: proto_template,
-            ciphertext: ciphertext.to_vec(),
+            ciphertext: Vec::new(),
+            ciphertext_null_len: None,
         };
+        Self::fill_input(ciphertext, &mut req.ciphertext, &mut req.ciphertext_null_len);
         let resp = pkcs11_unary_call!(self.grpc.decapsulate_key(req), true);
         Ok(CkObjectHandle(resp.key_handle))
     }

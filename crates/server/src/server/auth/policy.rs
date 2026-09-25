@@ -47,19 +47,6 @@ impl TokenPolicy {
         }
     }
 
-    /// Filter a list of tokens to only those the identity is authorized to see.
-    ///
-    /// Used for discovery filtering (ADR-0005 §3): `C_GetSlotList`,
-    /// `C_GetTokenInfo`, etc. return only tokens the caller may access.
-    /// Each token is represented as `(label, serial)`.
-    pub fn visible_tokens<'a>(
-        &self,
-        identity: &AuthenticatedIdentity,
-        tokens: &'a [(String, String)],
-    ) -> Vec<&'a (String, String)> {
-        tokens.iter().filter(|(label, serial)| self.allows(identity, label, serial)).collect()
-    }
-
     fn parse_access(
         identity: &str,
         access: &crate::config::TokenAccessSpec,
