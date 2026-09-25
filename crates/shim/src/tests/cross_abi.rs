@@ -12,6 +12,7 @@
 //! `scripts/run-*-wine-smoke.sh`) remain the real-binary proof; this
 //! module is the fast, deterministic everyday coverage.
 
+use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_backend::mock::{MockAbi, MockAttributeSlot};
 use pkcs11_proxy_ng_types::{CkAttributeType, CkAttributeValue, CkObjectHandle};
 
@@ -29,6 +30,42 @@ fn session_on(abi: MockAbi) -> (&'static TestDaemon, ShimSession) {
 
 fn foreign_profiles() -> [MockAbi; 2] {
     [MockAbi::Ilp32, MockAbi::Llp64]
+}
+
+// Input-template width bridging remains supported. Inspect its stored typed
+// value through the daemon API when the C ABI cannot safely pre-type an output
+// nested materialization across widths.
+fn assert_backend_nested_class(abi: MockAbi, object: CK_OBJECT_HANDLE, expected: CK_ULONG) {
+    use pkcs11_proxy_ng_types::{CkAttributeQuery, CkSessionFlags, CkSlotId};
+    let daemon = TestDaemon::shared_with_abi(abi);
+    let object = backend_object_handle(daemon, object);
+    let session = daemon
+        .backend
+        .open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
+        .unwrap();
+    let (rv, results) = daemon
+        .backend
+        .get_attribute_value_exact(
+            session,
+            object,
+            &[CkAttributeQuery {
+                attr_type: CkAttributeType::WRAP_TEMPLATE,
+                buffer_present: true,
+                buffer_len: abi.attribute_stride() as u64,
+                nested: Some(vec![CkAttributeQuery {
+                    attr_type: CkAttributeType(0),
+                    buffer_present: true,
+                    buffer_len: abi.ulong_width() as u64,
+                    nested: None,
+                }]),
+            }],
+        )
+        .unwrap();
+    daemon.backend.close_session(session).unwrap();
+    assert_eq!(rv, pkcs11_proxy_ng_types::CkRv::OK);
+    let result = &results[0].nested.as_ref().unwrap()[0];
+    assert_eq!(result.attr_type, CkAttributeType::CLASS);
+    assert_eq!(result.value.as_ref().unwrap(), &abi.encode_ulong(expected as u64));
 }
 
 #[test]
@@ -217,6 +254,16 @@ fn nested_template_data_query_bridges_sub_values() {
         };
         let rv =
             unsafe { dispatch::general::c_get_attribute_value(shim.session, object, &mut attr, 1) };
+        if abi.ulong_width() != w {
+            assert_eq!(
+                rv, CKR_FUNCTION_NOT_SUPPORTED,
+                "{abi:?} unknown nested output type cannot be width-bridged"
+            );
+            assert_eq!(class_buf, vec![0; w]);
+            assert_eq!(key_type_buf, vec![0; w]);
+            assert_eq!(sub_attrs[0].ulValueLen, w as CK_ULONG);
+            continue;
+        }
         assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} nested data query");
         let class_bytes: [u8; std::mem::size_of::<CK_ULONG>()] =
             class_buf.as_slice().try_into().expect("class width");
@@ -259,6 +306,13 @@ fn nested_template_sub_too_small_yields_client_width_sentinel() {
         };
         let rv =
             unsafe { dispatch::general::c_get_attribute_value(shim.session, object, &mut attr, 1) };
+        if abi.ulong_width() != w {
+            assert_eq!(rv, CKR_FUNCTION_NOT_SUPPORTED);
+            assert_eq!(sub_attrs[0].ulValueLen, (w / 2) as CK_ULONG);
+            assert_eq!(small, vec![0; w / 2]);
+            assert_eq!(ok_buf, vec![0; w]);
+            continue;
+        }
         assert_eq!(rv, CKR_BUFFER_TOO_SMALL as CK_RV, "{abi:?} sub-too-small overall rv");
         assert_eq!(
             sub_attrs[0].ulValueLen, CK_UNAVAILABLE_INFORMATION,
@@ -418,6 +472,12 @@ fn nested_template_input_round_trips_across_abis() {
         };
         let rv =
             unsafe { dispatch::general::c_get_attribute_value(shim.session, object, &mut attr, 1) };
+        if abi.ulong_width() != w {
+            assert_eq!(rv, CKR_FUNCTION_NOT_SUPPORTED);
+            assert_eq!(class_buf, vec![0; w]);
+            assert_backend_nested_class(abi, object, 4);
+            continue;
+        }
         assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} nested data query");
         assert_eq!(out_subs[0].type_, CKA_CLASS, "{abi:?}: sub type");
         let class_bytes: [u8; std::mem::size_of::<CK_ULONG>()] =
@@ -453,6 +513,12 @@ fn assert_wrap_template_holds_class(
         ulValueLen: std::mem::size_of_val(&out_subs) as CK_ULONG,
     };
     let rv = unsafe { dispatch::general::c_get_attribute_value(session, object, &mut attr, 1) };
+    if abi.ulong_width() != w {
+        assert_eq!(rv, CKR_FUNCTION_NOT_SUPPORTED);
+        assert_eq!(class_buf, vec![0; w]);
+        assert_backend_nested_class(abi, object, expected_class);
+        return;
+    }
     assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} {context}: nested read-back");
     assert_eq!(out_subs[0].type_, CKA_CLASS, "{abi:?} {context}: sub type");
     let bytes: [u8; std::mem::size_of::<CK_ULONG>()] =

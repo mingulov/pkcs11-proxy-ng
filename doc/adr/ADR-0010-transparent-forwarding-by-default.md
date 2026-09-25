@@ -26,7 +26,8 @@ PKCS#11 providers genuinely differ on edge inputs. Any return value the proxy
 synthesizes — including a "spec-correct" `CKR_ARGUMENTS_BAD` — is wrong for
 some provider, and per-call translation policy accretes without bound. This
 conflicts with the primary correctness requirement (Contributor Rules §2): an
-application must not be able to distinguish the shim from the real module.
+application must not be able to distinguish the shim from the real module
+within the explicitly documented support/transport limits.
 
 The hard case is a module that crashes on such input: NSS softokn dereferences
 a NULL `pMechanism` in `C_DigestInit` and SEGVs. Loaded directly, that crash
@@ -40,8 +41,9 @@ other clients' sessions.
    wire (NULL-mechanism init already travels as `mechanism: None` on the
    existing Init RPCs), never coerced to an empty or default value — and the
    daemon reconstructs the exact call against the backend module. The module's
-   native `CK_RV` is returned untranslated. This applies in both directions,
-   including error values.
+   native `CK_RV` is preserved when representable at the caller edge. This
+   applies in both directions, including error values, subject to the explicit
+   support/width limits below.
 2. **All seven `ffi_*_init_cancel` paths forward the original `C_*Init(NULL)`**
    to the module. The `C_SessionCancel` mapping for verify/digest is removed.
    A source-level quality gate (`local_quality_gate_test.rs::
@@ -62,6 +64,36 @@ other clients' sessions.
    because that is the trust boundary the operator controls; a shim-side
    option would not protect the daemon from non-cooperating clients. Enabling
    it deliberately trades transparency for availability.
+
+## v0.2 slot-event amendment (2026-09-13)
+
+**Selected contract; implementation and native qualification pending.** v0.2
+supports `C_WaitForSlotEvent` only with `CKF_DONT_BLOCK`. Blocking mode returns
+local `CKR_FUNCTION_NOT_SUPPORTED` with zero provider attempts and no slot
+output. Retain its ABI/function-list entry; do not implement a polling facade
+or silently change flags/call counts. This is an explicit default-path support
+limit, not a transparent refactor or an opt-in `sanitize_inputs` behavior.
+
+The [native ownership contract](../release/native-mechanism-ownership.md)
+defines the exact precedence: pointer/authentication/context checks, module
+lifecycle, checked native flag width, mode, then sole-waiter contention.
+Non-Open states refuse locally; overflow and supported-wait contention use
+`CKR_FUNCTION_FAILED`. Representable DONT_BLOCK requests preserve every flag
+bit for one native call under ordinary lifecycle exclusion through settlement.
+No native wait overlaps native Finalize. Caller RV and successful virtual-slot
+widths are checked; no truncation is allowed. Errors/NO_EVENT/local refusals
+leave `pSlot` unchanged, even if native output was modified; successful slot
+zero is valid when authorized/mapped.
+
+Logical clients compete for one native application's pending-event flags;
+logical Initialize does not create a new per-client bitmap. This is not full
+native per-application event equivalence. Policy-suppressed/unmapped events
+retain NO_EVENT. If a successful wait still needs a native authorization query
+after seal, suppress output and return local NOT_INITIALIZED while retaining
+its actual native OK observation; never issue a late native query. Already
+safely authorized/mapped output may publish without another native call.
+Disappeared contexts receive NOT_INITIALIZED. These rules apply to old clients
+and custom service backends as well as direct FfiBackend calls.
 
 ## Limits — transport-impossible inputs
 
@@ -160,11 +192,76 @@ exact-output request.
   `// NOTE: legacy per-op RPC — not used by the shim` and are unreachable from
   normal shim use (the shim routes via `ByteOutputExact`); they are on the
   follow-up cleanup roster.
-- Future "compatibility" fixes that would synthesize or translate a `CK_RV` on
-  the default path are rejected by policy; they belong behind `sanitize_inputs`
-  or in the backend module itself.
+- Further "compatibility" fixes that synthesize or translate a default-path
+  `CK_RV` require an explicit contract amendment like the bounded slot-event
+  decision above, or belong behind `sanitize_inputs` or in the backend module.
 
 ## Rolling upgrade contract for pointer-safe message parameters
+
+Authenticated wrap/unwrap use a distinct `authenticated_parameters` request
+acknowledgment and `authenticated_output` response. The
+`pointer_safe_authenticated_parameters` capability must be true before a new
+client issues these calls. Upgrade daemons first. Old requests accept only
+parameterless mechanisms and the explicitly modeled pointer-free IV byte
+array; any structure requires the new contract and fails with
+`CKR_FUNCTION_NOT_SUPPORTED` before native entry. No native structure image is
+ever an output format. GOST key-wrap inputs retain their virtual caller handles
+and pointers; their native input-only fields are never echoed.
+
+Authenticated AES-GCM/CCM use `CK_*_MESSAGE_PARAMS` (including separate tag/MAC
+buffers), as required by the PKCS#11 authenticated-function contract. The
+classic `CK_*_WRAP_PARAMS` layouts cannot represent those outputs. The typed
+path reuses bounded message-parameter conversion and writes only allowed
+IV/tag or nonce/MAC buffers through caller pointer snapshots. Other materialized
+authenticated shapes currently fail closed with `CKR_MECHANISM_PARAM_INVALID`.
+The initial allowlist binds standard AEAD message shapes to their mechanism
+identifiers, standard GOST key wrap to its input-only structure, and byte-array
+IVs to the embedded inventory. Runtime vendor extensions require a reviewed
+authenticated-output mapping; they cannot opt into native-image transport by
+claiming an IV shape.
+Extending that allowlist requires a source-grounded output-field contract.
+Rejecting every pointer-bearing shape is the containment alternative; it would
+also disable modeled AEAD and GOST forwarding. ABI-shaped sanitized blobs are
+rejected because pointer widths, padding, and input handles are not portable
+outputs. Native error effects beyond the existing exact-output contract and
+completion-owned auditing after cancellation remain separate work.
+
+Authenticated native readback validates an immutable fieldwise input snapshot
+before extracting output or making a second convenience-call invocation. This
+includes the mechanism identifier and outer pointer/length even for parameterless
+and byte-array inputs, every GOST pointer/length/handle and OID/UKM input byte,
+and AEAD input fields and fixed nonce/IV prefixes. Only explicitly permitted
+owned IV/nonce and tag/MAC effects survive sizing. Native padding is never
+compared. Rebuilding parameters between calls is an alternative, but requires
+the same precise output-effect allowlist and additional allocations.
+
+A successful authenticated unwrap gains a pending native-object cleanup owner
+before fallible ancillary output validation, both inside the FFI adapter and at
+the server's custom-backend result boundary. Valid success transfers ownership;
+rejection attempts `C_DestroyObject` once. Failed destruction retains the native
+identity and cleanup outcome in a private backend/service-lifetime quarantine
+and blocks further authenticated unwrap creation with `CKR_DEVICE_ERROR`.
+Quarantine is not exposed as a virtual handle or logged payload. It is in-memory
+state, not a durable recovery journal; restarting does not establish that a
+possibly persistent token object was removed. Operator/provider reconciliation
+is required before restoring service. Automatic retries are deliberately absent
+because session/object handles can become stale. Accepting mutated unwrap input
+fields without validation would avoid this particular rejection, but would not
+cover invalid output from arbitrary backends; explicit cleanup ownership covers
+both boundaries without weakening validation. General cancellation and audit
+divergence remain separate lifecycle work.
+
+**Selected owner-migration amendment (2026-09-13; not yet implemented):**
+Preallocate the created-object claim before Unwrap, record a defined successful
+handle infallibly before readback, and perform rejection cleanup explicitly
+under the existing session guard. Claim Drop makes no native call or allocation;
+unwind parks the claim/frame for controlled settlement, without retrying an
+uncertain destruction. FFI valid-result handoff disarms its claim once before
+the server/custom-backend boundary assumes cleanup ownership outside those
+guards. No recursive public-backend call or double destruction is permitted.
+The original cleanup guarantee remains; unwind cleanup timing changes from
+implicit Drop to explicit settlement. Native memory retirement still does not
+prove persistent token-object deletion.
 
 - Upgrade daemons before shims/clients. A new daemon accepts an old client's
   omitted shape only for the genuinely legacy-safe case: no outer envelope, no

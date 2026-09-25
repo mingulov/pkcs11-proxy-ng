@@ -1,0 +1,4 @@
+# Optional native development tools; Rust remains managed by rustup.
+[tools]
+protoc = "36.1"
+shellcheck = "0.11.0"

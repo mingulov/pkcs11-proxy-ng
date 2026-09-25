@@ -1,3 +1,4 @@
+use crate::server::slot_map::BackendSlotId;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -35,7 +36,7 @@ pub(super) async fn slot_is_authorized(
     backend_ref: &Arc<dyn Pkcs11Backend>,
     token_policy: &TokenPolicy,
     ctx_id: &ClientContextId,
-    backend_slot: CkSlotId,
+    backend_slot: BackendSlotId,
 ) -> Result<CkResult<bool>, Status> {
     let identity = match context_identity(ctx_mgr, ctx_id).await {
         Ok(identity) => identity,
@@ -57,7 +58,7 @@ pub(super) async fn slot_is_authorized(
         Some(cached) => cached,
         None => {
             let backend = backend_ref.clone();
-            match spawn_backend(move || backend.get_token_info(backend_slot)).await? {
+            match spawn_backend(move || backend.get_token_info(backend_slot.0)).await? {
                 Ok(info) => {
                     ctx_mgr.cache_token_info(
                         backend_slot,
@@ -131,7 +132,7 @@ pub(super) async fn extract_is_permitted(
         Some(info) => info,
         None => {
             let backend = ctx.backend.clone();
-            match spawn_backend(move || backend.get_token_info(backend_slot)).await? {
+            match spawn_backend(move || backend.get_token_info(backend_slot.0)).await? {
                 Ok(info) => {
                     ctx.context_manager.cache_token_info(
                         backend_slot,
@@ -465,10 +466,16 @@ mod tests {
         let ctx_id = ctx_mgr.create_context(None).await.unwrap();
         let policy = TokenPolicy::from_config(&AuthConfig::default()).unwrap();
 
-        let authorized = slot_is_authorized(&ctx_mgr, &backend(), &policy, &ctx_id, CkSlotId(999))
-            .await
-            .unwrap()
-            .unwrap();
+        let authorized = slot_is_authorized(
+            &ctx_mgr,
+            &backend(),
+            &policy,
+            &ctx_id,
+            crate::server::slot_map::BackendSlotId(CkSlotId(999)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
 
         assert!(authorized);
     }
@@ -479,10 +486,16 @@ mod tests {
         let ctx_id = ctx_mgr.create_context(Some(MTLS_IDENTITY.into())).await.unwrap();
         let policy = TokenPolicy::from_config(&AuthConfig::default()).unwrap();
 
-        let authorized = slot_is_authorized(&ctx_mgr, &backend(), &policy, &ctx_id, CkSlotId(0))
-            .await
-            .unwrap()
-            .unwrap();
+        let authorized = slot_is_authorized(
+            &ctx_mgr,
+            &backend(),
+            &policy,
+            &ctx_id,
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
 
         assert!(!authorized);
     }
@@ -493,10 +506,16 @@ mod tests {
         let ctx_id = ctx_mgr.create_context(Some(MTLS_IDENTITY.into())).await.unwrap();
         let policy = policy_for_identity(MTLS_IDENTITY);
 
-        let authorized = slot_is_authorized(&ctx_mgr, &backend(), &policy, &ctx_id, CkSlotId(0))
-            .await
-            .unwrap()
-            .unwrap();
+        let authorized = slot_is_authorized(
+            &ctx_mgr,
+            &backend(),
+            &policy,
+            &ctx_id,
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
 
         assert!(authorized);
     }
@@ -513,18 +532,30 @@ mod tests {
         let policy = policy_for_identity(MTLS_IDENTITY);
 
         for _ in 0..3 {
-            slot_is_authorized(&ctx_mgr, &backend, &policy, &ctx_id, CkSlotId(0))
-                .await
-                .unwrap()
-                .unwrap();
-        }
-        assert_eq!(mock.token_info_call_count(), 1, "repeat checks must hit the cache");
-
-        ctx_mgr.register_slot(CkSlotId(0)).await; // invalidates the cached token info
-        slot_is_authorized(&ctx_mgr, &backend, &policy, &ctx_id, CkSlotId(0))
+            slot_is_authorized(
+                &ctx_mgr,
+                &backend,
+                &policy,
+                &ctx_id,
+                crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+            )
             .await
             .unwrap()
             .unwrap();
+        }
+        assert_eq!(mock.token_info_call_count(), 1, "repeat checks must hit the cache");
+
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await; // invalidates the cached token info
+        slot_is_authorized(
+            &ctx_mgr,
+            &backend,
+            &policy,
+            &ctx_id,
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(mock.token_info_call_count(), 2, "re-registration must re-read token info");
     }
 
@@ -616,15 +647,24 @@ mod tests {
     ) -> (HandlerContext, ClientContextId, u64) {
         let backend = backend();
         let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-        ctx_mgr.register_slot(CkSlotId(0)).await;
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
         let ctx_id = ctx_mgr.create_context(identity).await.unwrap();
         let session_vh = ctx_mgr
-            .get_context(&ctx_id, |ctx| ctx.register_session(BackendHandle(1), CkSlotId(0)))
+            .get_context(&ctx_id, |ctx| {
+                ctx.register_session(
+                    BackendHandle(1),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                )
+            })
             .await
             .unwrap();
         // Prime the token-info cache so extract_is_permitted can resolve without
         // a backend call.
-        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+        ctx_mgr.cache_token_info(
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+            "MockToken".into(),
+            "0001".into(),
+        );
 
         let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
         ctx.token_policy = Arc::new(policy);
@@ -677,10 +717,15 @@ mod tests {
         let policy = policy_with_extract_deny(MTLS_IDENTITY);
         let backend = backend();
         let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-        ctx_mgr.register_slot(CkSlotId(0)).await;
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
         let ctx_id = ctx_mgr.create_context(Some(MTLS_IDENTITY.into())).await.unwrap();
         let session_vh = ctx_mgr
-            .get_context(&ctx_id, |ctx| ctx.register_session(BackendHandle(1), CkSlotId(0)))
+            .get_context(&ctx_id, |ctx| {
+                ctx.register_session(
+                    BackendHandle(1),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                )
+            })
             .await
             .unwrap();
         // No cache_token_info call — intentional cache miss; backend fetch is
@@ -748,15 +793,22 @@ mod tests {
 
         let backend: Arc<dyn Pkcs11Backend> = mock;
         let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-        ctx_mgr.register_slot(CkSlotId(0)).await;
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
         let ctx_id = ctx_mgr.create_context(Some(MTLS_IDENTITY.into())).await.unwrap();
         let session_vh = ctx_mgr
             .get_context(&ctx_id, |ctx| {
-                ctx.register_session(BackendHandle(backend_session.0), CkSlotId(0))
+                ctx.register_session(
+                    BackendHandle(backend_session.0),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                )
             })
             .await
             .unwrap();
-        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+        ctx_mgr.cache_token_info(
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+            "MockToken".into(),
+            "0001".into(),
+        );
 
         // Register the object virtual handle.
         let object_vh = ctx_mgr
@@ -803,13 +855,22 @@ mod tests {
         let policy = policy_with_per_object_extract_deny(MTLS_IDENTITY);
         let backend = backend();
         let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-        ctx_mgr.register_slot(CkSlotId(0)).await;
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
         let ctx_id = ctx_mgr.create_context(Some(MTLS_IDENTITY.into())).await.unwrap();
         let session_vh = ctx_mgr
-            .get_context(&ctx_id, |ctx| ctx.register_session(BackendHandle(1), CkSlotId(0)))
+            .get_context(&ctx_id, |ctx| {
+                ctx.register_session(
+                    BackendHandle(1),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                )
+            })
             .await
             .unwrap();
-        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+        ctx_mgr.cache_token_info(
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+            "MockToken".into(),
+            "0001".into(),
+        );
         let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
         ctx.token_policy = Arc::new(policy);
 

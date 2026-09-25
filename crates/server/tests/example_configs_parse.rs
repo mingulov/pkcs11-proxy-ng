@@ -137,12 +137,123 @@ fn example_fips_mechanism_params_parses() {
             "{name} ({mech:#010x}) must be in the FIPS registry"
         );
     }
-    // Note: the registry is additive (FIPS override appends to the
-    // embedded default). Disallowed mechanisms like CKM_MD5 / CKM_RC4
-    // are still in the union — the FIPS interlock relies on the
-    // backend (e.g., NSS softokn in FIPS mode) not advertising them
-    // plus the operator's policy layer, not on the registry
-    // filtering them out.
+    // Operation-time gate: the FIPS file hard-excludes historical
+    // mechanisms via `exclude`, so direct invocations are rejected even
+    // though the additive merge keeps the embedded default's shapes.
+    // (Filtered discovery alone only hides them from C_GetMechanismList.)
+    for (mech, name) in &[(0x0111u64, "CKM_RC4"), (0x0210, "CKM_MD5"), (0x0122, "CKM_DES_CBC")] {
+        assert_eq!(
+            registry.check_operation(*mech, false),
+            Err(pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID),
+            "{name} ({mech:#010x}) must be hard-excluded by the FIPS registry"
+        );
+    }
+    // Exclusion wins over the default's shapes, so parameterized
+    // invocations are rejected too.
+    assert_eq!(
+        registry.check_operation(0x0122, true),
+        Err(pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID),
+        "CKM_DES_CBC with params must be hard-excluded"
+    );
+    // Excluded mechanisms stay out of discovery as well.
+    assert!(
+        registry.filter_mechanisms(&[0x0111, 0x1087]).iter().all(|m| *m != 0x0111),
+        "CKM_RC4 must not be advertised by the FIPS registry"
+    );
+}
+
+/// FIPS example: every `[[params]]` shape must resolve to a known shim
+/// arm, and historically mislabeled entries must stay fixed. The file
+/// once used PascalCase shape names (which never match the snake_case
+/// arms, silently degrading those mechanisms to Raw-then-rejected via
+/// the override-wins merge) and listed real PQC hash IDs as HKDF.
+#[test]
+fn example_fips_mechanism_shapes_resolve() {
+    use pkcs11_proxy_ng_types::MechanismRegistry;
+    use std::collections::HashSet;
+    let default = MechanismRegistry::load(None).expect("embedded default must load");
+    let known: HashSet<&str> = default.param_shapes_view().values().map(|s| s.as_str()).collect();
+    let p = submodule_root().join("examples/configs/fips/mechanism_params.toml");
+    let src = std::fs::read_to_string(&p).expect("read fips mechanism toml");
+    let fips = MechanismRegistry::load(Some(&p)).expect("fips must parse");
+    for (mech, shape) in fips.param_shapes_view() {
+        assert!(
+            known.contains(shape.as_str()),
+            "FIPS shape {shape} for {mech:#x} must resolve to a known arm"
+        );
+    }
+    // Spot-check the previously-PascalCase mappings (override wins, so
+    // these must equal the default's correct snake_case names).
+    assert_eq!(fips.param_shape(0x000Du64), Some("rsa_pss"));
+    assert_eq!(fips.param_shape(0x1087u64), Some("gcm"));
+    assert_eq!(fips.param_shape(0x0021u64), Some("iv"));
+    assert_eq!(fips.param_shape(0x0031u64), Some("x942_dh1_derive"));
+    // Real HKDF IDs per OASIS pkcs11t.h 3.02 (0x402A/B/C) — never the
+    // 0x0028-0x002A values, which are PQC hash mechanisms.
+    assert_eq!(fips.param_shape(0x402Au64), Some("hkdf"));
+    assert!(src.contains("0x402A"), "FIPS file must reference real HKDF IDs");
+    assert!(
+        !src.contains("0x0028,  # CKM_HKDF"),
+        "FIPS file must not mislabel PQC hash IDs as HKDF"
+    );
+    // Parameterized AES modes must not sit in the file's own
+    // parameterless list (section ends at the first [[params]]).
+    let head = src.split("[[params]]").next().unwrap_or("");
+    for id in ["0x1086", "0x108B", "0x108E"] {
+        assert!(!head.contains(id), "FIPS parameterless must not list parameterized {id}");
+    }
+}
+
+/// Vendor/example TOMLs: every `shape = "..."` literal (commented or
+/// not — templates are meant to be uncommented) must either resolve to
+/// a known registry shape, or the file must carry an explicit
+/// `# NOT-YET-IMPLEMENTED(<shape>): <reason>` marker. This keeps
+/// shipped examples honest: an unresolvable shape without a marker is
+/// a typo-grade trap (it degrades to Raw-then-rejected at runtime).
+#[test]
+fn example_vendor_shape_names_resolve_or_marked() {
+    use pkcs11_proxy_ng_types::MechanismRegistry;
+    use std::collections::HashSet;
+    let default = MechanismRegistry::load(None).expect("embedded default must load");
+    let known: HashSet<&str> = default.param_shapes_view().values().map(|s| s.as_str()).collect();
+    let root = submodule_root();
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(root.join("examples/vendors"))
+        .expect("vendors dir must exist")
+        .map(|e| e.expect("vendor entry must read").path())
+        .filter(|p| p.extension().is_some_and(|e| e == "toml"))
+        .collect();
+    files.push(root.join("packaging/config/mechanism_params.cloudhsm.toml.example"));
+    files.push(root.join("examples/k8s/10-configmap.yaml"));
+    assert!(!files.is_empty(), "must scan at least one example file");
+    for path in &files {
+        let src = std::fs::read_to_string(path)
+            .unwrap_or_else(|_| panic!("example file must read: {}", path.display()));
+        let mut shapes = HashSet::new();
+        for line in src.lines() {
+            let t = line.trim().trim_start_matches('#').trim();
+            let rest = match t.strip_prefix("shape") {
+                Some(r) => r.trim(),
+                None => continue,
+            };
+            let rest = match rest.strip_prefix('=') {
+                Some(r) => r.trim(),
+                None => continue,
+            };
+            if let Some(name) = rest.strip_prefix('"').and_then(|r| r.strip_suffix('"')) {
+                shapes.insert(name.to_string());
+            }
+        }
+        for shape in &shapes {
+            if known.contains(shape.as_str()) {
+                continue;
+            }
+            assert!(
+                src.contains(&format!("NOT-YET-IMPLEMENTED({shape})")),
+                "{}: shape {shape} resolves nowhere and carries no NOT-YET-IMPLEMENTED marker",
+                path.display()
+            );
+        }
+    }
 }
 
 /// Forward-compat: an older shipped proxy.toml (the one used by the

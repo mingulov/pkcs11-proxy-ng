@@ -166,8 +166,9 @@ flag.
 different matter: if the backend module returns a vendor-defined `CK_RV`, the
 proxy passes it through unchanged in the `ck_rv` response field. The proxy does
 not interpret, filter, or remap vendor-defined return values from the backend.
-This is safe because CKR values are plain integers with no pointer or
-serialization hazard.
+At a narrower C-ABI edge, representability must still be checked; the v0.2
+slot-event amendment below forbids truncating a wide provider error into a
+different result.
 
 Note that vendor-defined **mechanisms** are handled separately by ADR-0001: they
 are not exposed in `C_GetMechanismList` unless their parameter structures have
@@ -222,9 +223,10 @@ The following table summarizes which error path is used for each error source:
 ### Design principle
 
 A PKCS#11 application using the client shim should see exactly the same
-`CK_RV` values it would see with a local module, except when the transport
-itself fails. Transport failures map to the most semantically appropriate
-existing `CK_RV` value. If the proxy can determine a correct standard `CK_RV`,
+`CK_RV` values it would see with a local module within the documented support
+and width limits, except when the transport itself fails. Transport failures
+map to the most semantically appropriate existing `CK_RV` value. If the proxy
+can determine a correct standard `CK_RV`,
 it should return `grpc::OK` plus `ck_rv` rather than forcing the client to infer
 one from gRPC status. The application should never receive an error code that
 would be impossible from a local PKCS#11 module.
@@ -261,6 +263,142 @@ transport `Status` is mapped to a CK_RV (client crate `grpc_status_to_ck_rv[_kin
 kryoptic's `DEVICE_ERROR`/`GENERAL_ERROR` catch-alls) from being mistaken for a
 transport failure. (The reconnect flag itself is consumed at `C_Initialize`/interface-
 probe time, so this is a correctness/clarity change, not a runtime-performance one.)
+
+## v0.2 P0 error amendment (2026-09-13)
+
+**Selected contract; implementation pending.** The
+[native ownership contract](../release/native-mechanism-ownership.md) defines
+the complete slot-event precedence and caller-output rules. Preserve existing
+pointer/authentication/ownership/context checks before module admission.
+LoadedUninitialized/Initializing/Draining/Finalizing/Finalized return local
+`CKR_CRYPTOKI_NOT_INITIALIZED`; Uncertain returns local `CKR_DEVICE_ERROR`.
+For Open, native-width overflow returns local `CKR_FUNCTION_FAILED` before
+mode refusal; representable blocking mode returns local
+`CKR_FUNCTION_NOT_SUPPORTED` before supported-wait contention, which returns
+local `CKR_FUNCTION_FAILED`. Each pre-entry refusal has zero provider attempts
+and absent slot effects. Missing-function refusal remains local too.
+
+Supported DONT_BLOCK calls preserve original flags and actual native RVs in
+their completion observations. Caller RV/authorized virtual-slot overflow
+returns local FUNCTION_FAILED without a `pSlot` write; representable provider
+errors pass through. NO_EVENT and every error leave caller output unchanged.
+If native OK cannot complete a required policy query after seal, local
+NOT_INITIALIZED/no output coexists with the original native OK observation.
+Unmapped/policy-suppressed events retain NO_EVENT. Do not classify local support,
+state, contention or width failure as a provider attempt or health failure.
+
+Constructor exclusivity/platform errors use the local constructor `Result`,
+not fabricated provider RVs. The selected abnormal Linux native-lifetime stop
+has process status 70 and produces no successful Finalize response: interrupted
+clients observe the existing transport-failure mapping. Completed observations
+do not guarantee a delivered response or a complete audit tail after that stop.
+
+## Decision update (2026-09-13): observable exact-output effects
+
+The exact-output boundary distinguishes preparation failure from native
+completion. `Err(CkRv)` means no native call occurred; a completed call returns
+its provider RV inside the result, including ordinary errors. An optional
+returned length denotes a safely observable effect, not proof of a native store.
+
+- For a non-NULL byte buffer, the daemon initializes its length from the exact
+  checked caller capacity and retains the post-call scalar on every RV.
+- For a NULL-output query, neither shim nor daemon reads the caller's incoming
+  length. The daemon initializes its own cell to zero and reports the length on
+  success or when a nonzero post-value proves a store. On arbitrary errors,
+  store-zero and no-store are indistinguishable; neither produces writeback.
+  Production uses no instrumentation, sentinel guessing, or second native call.
+- NULL length pointers have no length effect. Unrepresentable or over-budget
+  capacities reject before native entry; they are never silently capped.
+- Main bytes are copied only for defined, successful, bounded output. Undefined
+  error-buffer bytes are not reconstructed from caller storage or daemon zeros.
+  Attribute partial-error RVs retain their defined per-attribute outputs.
+
+Message effects are typed by field, direction, stage, call mode, and RV. The
+shared mode distinguishes size query, data, Begin, and missing length pointer.
+A present zero-capacity destination remains a data call. Successful size
+queries and missing-length calls do not define output-only tag/MAC or generated
+IV/nonce stores; zeroed proxy backing must not be echoed into those fields.
+Begin is an explicit generation stage despite having no main output argument.
+Initialized
+COUNTER_XOR IV/nonce effects can survive errors at Encrypt one-shot/Begin;
+output-only generated values and authentication tags require their defined
+successful stages. Decrypt does not write input IV/nonce/tag fields. The
+authenticated-wrap path reuses the typed C2B output model, never native structure
+images. A NULL IV/nonce backing with a partial fixed prefix does not cause a
+read of nonexistent bytes, but pointer/scalar integrity checks still apply.
+
+A post-native parameter-contract violation is a typed internal `Invalid` effect,
+not a pre-native `Err`. The completion retains the native RV, while the service
+returns effective `CKR_DEVICE_ERROR` with **all** channels absent. Only redacted
+numeric completion metadata may be logged. Operation settlement treats this as
+executed but unsafe (clear/quarantine); it does not misclassify the call as
+rejected before native entry. Policy, handle remapping, and fail-closed audit
+suppression remain authoritative before caller-visible effects are released.
+
+Every exact service adapter captures completion origin and the original provider
+RV before fallible effect validation or settlement. Preparatory request, width,
+capacity and allocation rejection emits no backend health transition (neither
+failure nor recovery). Completed `CKR_DEVICE_REMOVED` and `CKR_HOST_MEMORY` retain
+their backend-down classification, including when invalid effects replace the
+caller-visible RV with `CKR_DEVICE_ERROR`. Other provider RVs retain the existing
+per-request health policy. Timeout, panic, and circuit-breaker failures remain
+separate transport/infrastructure events; no provisional Success is published
+before classification. This shared wrapper avoids per-function RV conditionals.
+
+The public Encrypt/DecryptMessageBegin RPCs use that same completion path even
+when a legacy client supplies neither a parameter specification nor a message
+envelope. After validating that the legacy parameter is empty, the service uses
+a present-empty native parameter (non-NULL pointer, length zero), preserving
+the original pointer class and making exactly one native call. Such requests
+retain their legacy empty response without an exact acknowledgement, including
+version-zero clients. A missing native Begin function is a pre-native rejection,
+not evidence of backend recovery; operation settlement still uses the embedded
+native RV when a call completes.
+
+Attribute effect definition uses one shared predicate for `CKR_OK`,
+`CKR_ATTRIBUTE_SENSITIVE`, `CKR_ATTRIBUTE_TYPE_INVALID`, and
+`CKR_BUFFER_TOO_SMALL`. Zero-length readable attributes in flat or nested mixed
+templates retain their length effects on all four statuses. Only ordinary-error
+query zero/no-store remains ambiguous; the defined partial statuses are not
+treated as arbitrary errors.
+
+The wire advertises `exact_output_effects_version = 1`. Exact requests and
+structured Begin requests acknowledge that version; result length/handle/type
+effect markers have explicit presence. Missing or inconsistent acknowledgements
+are rejected, not inferred from zero or RV. The shim captures destinations and
+capacities once, validates every scalar width, handle, byte bound and parameter
+effect, then commits transactionally. It never rereads caller length cells.
+
+Nested output-query types are output-only for the fixed standard
+`is_attribute_template()` whitelist. Capture reads only initialized pointer and
+non-NULL capacity fields, supplies neutral native input types, and writes defined
+returned types transactionally. Same-width materialized queries and mixed-width
+nested size queries work. Mixed-width standard nested queries with any materialized
+sub-value reject with `CKR_FUNCTION_NOT_SUPPORTED` before native entry: no input
+type exists to justify a width bridge. A negotiated typed schema could remove
+this limitation but needs explicit provenance and mismatch rules.
+
+Unknown/vendor attributes remain bounded opaque bytes across widths and are not
+classified as nested by a vendor bit pattern. No vendor attribute-schema registry
+is introduced here. Known vendor nested/typed attributes require a reviewed
+schema declaring field directions and widths. Mechanism registry behavior is
+unchanged: parameterless vendor mechanisms can pass; pointer-bearing parameters
+require a modeled configured shape.
+
+### Staged implementation limits
+
+The Phase A checkpoint covers byte/attribute/KEM exact results, structured
+Encrypt/Decrypt one-shot/Begin/Next, and authenticated exact wrap. Classic cached
+Encrypt and ordinary Wrap mechanism-output error effects still require a
+separate Phase B change after the common mechanism-backing provenance fix.
+The intentionally ignored classic-GCM regression records that remaining defect;
+Phase A is not completion of the full exact-output correction.
+
+Backend-only structured AEAD `sign_message_exact_msg` and
+`sign_message_next_exact_msg` retain legacy helpers. They are not called by the
+server: exported standard message-sign paths require empty parameters and reject
+structured/nonempty input before native dispatch. Their direct Rust backend API
+cleanup is a named follow-up, not an exactness claim for those methods.
 
 ## Consequences
 

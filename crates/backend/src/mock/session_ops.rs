@@ -85,11 +85,18 @@ impl MockBackend {
         self.check_injected()?;
         self.require_known_slot(slot_id)?;
         self.require_token_present(slot_id)?;
+        let (label, serial_number) = self
+            .token_identities
+            .lock()
+            .unwrap()
+            .get(&slot_id)
+            .cloned()
+            .unwrap_or_else(|| ("MockToken".into(), "0001".into()));
         Ok(CkTokenInfo {
-            label: "MockToken".into(),
+            label,
             manufacturer_id: "Mock".into(),
             model: "Software".into(),
-            serial_number: "0001".into(),
+            serial_number,
             flags: CkTokenFlags(CkTokenFlags::TOKEN_INITIALIZED),
             max_session_count: 256,
             session_count: 0,
@@ -205,7 +212,13 @@ impl MockBackend {
         if let Some((slot_id, flags)) = state.session_record(session) {
             let login_user = state.login_state.get(&slot_id).copied();
             Ok(CkSessionInfo {
-                slot_id,
+                slot_id: self
+                    .session_info_slot_overrides
+                    .lock()
+                    .unwrap()
+                    .get(&session)
+                    .copied()
+                    .unwrap_or(slot_id),
                 state: compute_session_state(flags, login_user),
                 flags: CkSessionFlags(flags.0 | CkSessionFlags::SERIAL_SESSION),
                 device_error: 0,
@@ -255,7 +268,11 @@ impl MockBackend {
             if let Some(slot) = queue.pop_front() {
                 return Ok(slot);
             }
-            if dont_block {
+            // A faulty hanging provider parks even nonblocking waiters;
+            // injectable for abnormal-stop coverage (row 14). Clearing the
+            // flag wakes parked waiters so they re-check instead of
+            // stranding.
+            if dont_block && !*self.hang_slot_event.lock().unwrap() {
                 return Err(CkRv::NO_EVENT);
             }
             queue = self.slot_event_condvar.wait(queue).unwrap();

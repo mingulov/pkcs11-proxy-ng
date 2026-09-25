@@ -204,6 +204,7 @@ message OutputBufferResult {
   uint64 ck_rv = 1;
   uint64 returned_len = 2;
   optional bytes value = 3;
+  optional bool apply_returned_len = 4;
 }
 
 message ParameterRoundtripSpec {
@@ -223,6 +224,8 @@ message OutputAndHandleResult {
   uint64 returned_len = 2;
   optional bytes value = 3;
   uint64 object_handle = 4;
+  optional bool apply_returned_len = 5;
+  optional bool apply_object_handle = 6;
 }
 
 message AttributeQueryList {
@@ -246,6 +249,8 @@ message AttributeQueryResult {
   optional bytes value = 3;
   optional uint64 ck_rv = 4;
   optional AttributeQueryResultList nested = 5;
+  optional bool apply_returned_len = 6;
+  optional bool apply_type = 7;
 }
 
 message SessionInfo {
@@ -497,10 +502,12 @@ message GetAttributeValueExactRequest {
   uint64 session_handle = 2;
   uint64 object_handle = 3;
   repeated AttributeQuery queries = 4;
+  uint32 exact_output_effects_version = 5;
 }
 message GetAttributeValueExactResponse {
   uint64 ck_rv = 1;
   repeated AttributeQueryResult results = 2;
+  uint32 exact_output_effects_version = 3;
 }
 
 message SignInitRequest {
@@ -1153,6 +1160,7 @@ message EncryptMessageResponse {
 
 // C_EncryptMessageBegin
 message EncryptMessageBeginRequest {
+  uint32 exact_output_effects_version = 8;
   string client_context_id = 1;
   uint64 session_handle = 2;
   bytes parameter = 3;
@@ -1163,6 +1171,7 @@ message EncryptMessageBeginRequest {
   optional MessageParameter message_parameter = 7;
 }
 message EncryptMessageBeginResponse {
+  optional MessageParameterEffects message_effects = 5;
   uint64 ck_rv = 1;
   bytes parameter_out = 2;
   optional ParameterRoundtripResult parameter_result = 3;
@@ -1231,6 +1240,7 @@ message DecryptMessageResponse {
 
 // C_DecryptMessageBegin
 message DecryptMessageBeginRequest {
+  uint32 exact_output_effects_version = 8;
   string client_context_id = 1;
   uint64 session_handle = 2;
   bytes parameter = 3;
@@ -1241,6 +1251,7 @@ message DecryptMessageBeginRequest {
   optional MessageParameter message_parameter = 7;
 }
 message DecryptMessageBeginResponse {
+  optional MessageParameterEffects message_effects = 5;
   uint64 ck_rv = 1;
   bytes parameter_out = 2;
   optional ParameterRoundtripResult parameter_result = 3;
@@ -1447,11 +1458,14 @@ message WrapKeyAuthenticatedRequest {
   bytes associated_data = 6;
   // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; associated_data is then empty.
   optional uint64 associated_data_null_len = 7;
+  // Presence acknowledges the pointer-safe authenticated contract.
+  AuthenticatedParameters authenticated_parameters = 8;
 }
 message WrapKeyAuthenticatedResponse {
   uint64 ck_rv = 1;
   bytes wrapped_key = 2;
   bytes mechanism_parameter_out = 3;
+  AuthenticatedMechanismOutput authenticated_output = 4;
 }
 
 // C_UnwrapKeyAuthenticated
@@ -1467,11 +1481,29 @@ message UnwrapKeyAuthenticatedRequest {
   optional uint64 wrapped_key_null_len = 8;
   // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; associated_data is then empty.
   optional uint64 associated_data_null_len = 9;
+  AuthenticatedParameters authenticated_parameters = 10;
 }
 message UnwrapKeyAuthenticatedResponse {
   uint64 ck_rv = 1;
   uint64 key_handle = 2;
   bytes mechanism_parameter_out = 3;
+  AuthenticatedMechanismOutput authenticated_output = 4;
+}
+
+// Authenticated AES-GCM/CCM use CK_*_MESSAGE_PARAMS, not classic/wrap structs.
+// An empty envelope selects the separately typed Mechanism input.
+message AuthenticatedParameters {
+  MessageParameter message_parameter = 1;
+}
+
+// Output-only allowlist. No native structures, input handles, or addresses.
+message AuthenticatedMechanismOutput {
+  oneof output {
+    bool unchanged = 1;
+    bytes iv = 2;
+    MessageParameter message_parameter = 3;
+    MessageParameterEffects message_effects = 4;
+  }
 }
 
 // C_AsyncComplete
@@ -1523,6 +1555,7 @@ message ByteOutputExactRequest {
   // ADR-0010 Scope 2: present => caller passed a NULL input pointer with this
   // claimed length; input_data is then empty. Absent => input_data is the input.
   optional uint64 input_data_null_len = 9;
+  uint32 exact_output_effects_version = 10;
 }
 message ByteOutputExactResponse {
   OutputBufferResult result = 1;
@@ -1562,12 +1595,36 @@ message ParameterOutputExactRequest {
   optional uint64 input_data_null_len = 14;
   // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; associated_data is then empty.
   optional uint64 associated_data_null_len = 15;
+  AuthenticatedParameters authenticated_parameters = 16;
+  uint32 exact_output_effects_version = 17;
 }
 
 message ParameterOutputExactResponse {
   OutputBufferResult output_result = 1;
   ParameterRoundtripResult parameter_result = 2;
   optional MessageParameter message_parameter_out = 3; // modified message param after backend call
+  AuthenticatedMechanismOutput authenticated_output = 4;
+  MessageParameterEffects message_effects = 5;
+}
+
+// Output-only transport. No input scalars, pointers, or native structure images.
+message MessageParameterEffects {
+  oneof effect {
+    GcmMessageEffects gcm = 1;
+    CcmMessageEffects ccm = 2;
+    SalsaMessageEffects salsa = 3;
+  }
+}
+message GcmMessageEffects {
+  optional bytes iv = 1;
+  optional bytes tag = 2;
+}
+message CcmMessageEffects {
+  optional bytes nonce = 1;
+  optional bytes mac = 2;
+}
+message SalsaMessageEffects {
+  optional bytes tag = 1;
 }
 
 // Track C Task 2: C_EncapsulateKey with exact output semantics
@@ -1578,6 +1635,7 @@ message EncapsulateKeyExactRequest {
   uint64 public_key_handle = 4;
   repeated Attribute template = 5;
   OutputBufferSpec output_spec = 6;
+  uint32 exact_output_effects_version = 7;
 }
 
 message EncapsulateKeyExactResponse {
@@ -1621,6 +1679,8 @@ message GetBackendInterfacesResponse {
   // True only when the daemon implements the shape-bound message-parameter
   // contract. Absent from older daemons and therefore treated as false.
   optional bool pointer_safe_message_parameters = 6;
+  optional bool pointer_safe_authenticated_parameters = 7;
+  optional uint32 exact_output_effects_version = 8;
 }
 
 // Server-driven mechanism parameter registry payload. Carries the
@@ -1640,6 +1700,11 @@ message MechanismRegistryPayload {
   repeated uint64 parameterless = 3;
   // shape -> mechanisms mapping (one entry per known shape name).
   repeated MechanismParamEntry params = 4;
+  // CK_MECHANISM_TYPE values the operator hard-disabled via the registry
+  // `exclude` list. The shim rejects these at operation time (even without
+  // params) and hides them from discovery in every discovery mode.
+  // Absent from older daemons and therefore treated as empty.
+  repeated uint64 excluded = 5;
 }
 
 message MechanismParamEntry {

@@ -1,7 +1,16 @@
 # Async Persistence Decision Record
 
 **Date:** 2026-03-14
-**Status:** Decided (Phase 1: Option B — polling only)
+**Status:** Option B remains design intent; native polling is unimplemented
+(v0.2 reconciliation, 2026-09-13).
+
+The live FfiBackend inherits `CKR_FUNCTION_NOT_SUPPORTED` for AsyncComplete.
+Mock polling/trait support is not native implementation evidence. The selected
+[native ownership contract](../release/native-mechanism-ownership.md) requires
+complete frames and affected owners to survive CKR_PENDING, logical context
+teardown and uncertain cleanup until supported terminal proof. It does not
+implement AsyncComplete, cross-finalize persistence or slot-event polling.
+The intended Option B behavior below is future work, not a current FFI claim.
 
 ## Context
 
@@ -53,9 +62,10 @@ from the context to the detached store. `C_AsyncJoin` moves them back.
 
 ## Decision
 
-**Option B** for the current phase. This provides the real-world value
-(polling for `CKR_PENDING` on slow operations) without the architectural
-complexity of cross-finalize persistence.
+**Option B** remains the future polling design, without cross-finalize
+persistence. Native implementation and terminal-memory proofs are separate
+gates. Logical removal cannot be treated as native cancellation or permission
+to free pending storage.
 
 ### ADR-0002 Amendment
 
@@ -63,8 +73,9 @@ Add to ADR-0002 Section 8 (Multi-Part Operation State):
 
 > Async operation state (`CKR_PENDING` results) is stored server-side within
 > the logical client instance's session. Pending operations are polled via
-> `C_AsyncComplete`. Async operations do NOT survive `C_Finalize` or context
-> teardown — they are cancelled. `C_AsyncGetID` returns
+> `C_AsyncComplete` only after native support exists. No persisted logical
+> operation survives Finalize/context teardown, but its native frame remains
+> owned until actual supported termination is proved. `C_AsyncGetID` returns
 > `CKR_STATE_UNSAVEABLE` because the proxy does not support persistent async
 > operations in this phase.
 
@@ -72,7 +83,7 @@ Add to ADR-0002 Section 8 (Multi-Part Operation State):
 
 | Function | Return | Rationale |
 |----------|--------|-----------|
-| `C_AsyncComplete` | Real result or `CKR_PENDING` | Transparent proxy passthrough |
+| `C_AsyncComplete` | Current FFI: `CKR_FUNCTION_NOT_SUPPORTED`; intended future result or `CKR_PENDING` | Native polling is not implemented by v0.2 P0 |
 | `C_AsyncGetID` | `CKR_STATE_UNSAVEABLE` | The proxy does not support persistent async operations in this phase |
 | `C_AsyncJoin` | `CKR_SAVED_STATE_INVALID` | For a well-formed call: no persisted async state can exist under this design |
 

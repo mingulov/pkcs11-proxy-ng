@@ -26,6 +26,8 @@ use crate::server::context_manager::ContextManager;
 /// gRPC handler. See the module docs for the rationale.
 #[derive(Clone)]
 pub(crate) struct HandlerContext {
+    pub(crate) object_cleanup:
+        Arc<pkcs11_proxy_ng_backend::object_cleanup::ObjectCleanupQuarantine>,
     pub(crate) context_manager: Arc<ContextManager>,
     pub(crate) backend: Arc<dyn Pkcs11Backend>,
     pub(crate) token_policy: Arc<TokenPolicy>,
@@ -65,6 +67,7 @@ impl HandlerContext {
         let mechanism_registry_source = MechanismRegistrySource::load(None)
             .expect("embedded mechanism registry must always load");
         Self {
+            object_cleanup: Arc::default(),
             context_manager: Arc::clone(context_manager),
             backend: Arc::clone(backend),
             token_policy,

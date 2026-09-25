@@ -44,8 +44,40 @@ async fn shutdown_signal() {
     }
 }
 
+/// Log line format selected by the `LOG_FORMAT` environment variable.
+/// Only `Plain` deviates from the historical JSON default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogFormat {
+    Json,
+    Plain,
+}
+
+/// Parse `LOG_FORMAT`: only `plain` (case-insensitive, surrounding
+/// whitespace ignored) selects human-readable output; unset or any other
+/// value keeps the historical JSON default.
+fn parse_log_format(raw: Option<&str>) -> LogFormat {
+    match raw.map(str::trim).map(str::to_lowercase).as_deref() {
+        Some("plain") => LogFormat::Plain,
+        _ => LogFormat::Json,
+    }
+}
+
 fn init_tracing() {
-    tracing_subscriber::fmt().with_env_filter(EnvFilter::from_default_env()).json().init();
+    // Default to INFO when RUST_LOG is unset: from_default_env() falls
+    // back to ERROR, which suppressed every startup line and left a
+    // healthy daemon with a 0-byte log. An explicit RUST_LOG still wins.
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // LOG_FORMAT=plain selects human-readable lines (README dev flow);
+    // unset or anything else keeps the historical JSON default that the
+    // prod/staging examples and compose files already set explicitly.
+    match parse_log_format(std::env::var("LOG_FORMAT").ok().as_deref()) {
+        LogFormat::Plain => {
+            tracing_subscriber::fmt().with_env_filter(filter).init();
+        }
+        LogFormat::Json => {
+            tracing_subscriber::fmt().with_env_filter(filter).json().init();
+        }
+    }
 }
 
 fn load_backend(config: &config::DaemonConfig) -> Result<Backend, BoxError> {
@@ -442,6 +474,17 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
         tracing::info!(path = %sock.display(), "resilience metrics endpoint bound");
     }
 
+    // Hook-gated control plane (C3M.6 row 18): fail closed when configured
+    // without a hook-enabled build, otherwise bind the control socket.
+    server::validate_test_hooks_config(&config).map_err(std::io::Error::other)?;
+    #[cfg(feature = "native-owner-test-hooks")]
+    if let Some(ref sock) = config.test_hooks.control_socket {
+        server::control::spawn_control_endpoint(sock.clone())
+            .await
+            .map_err(|e| format!("failed to bind control socket {}: {e}", sock.display()))?;
+        tracing::info!(path = %sock.display(), "test-hooks control endpoint bound");
+    }
+
     let (svc, context_manager, registry_source) =
         build_service(&config, &backend, audit_sink.clone()).await?;
 
@@ -753,6 +796,21 @@ auth = "peer_cred"
         let policy = per_object_policy();
         check_per_object_version_requirement(&policy, &mock)
             .expect("v3.0 backend with per-object policy must start");
+    }
+
+    /// `LOG_FORMAT` selects the daemon's log line format. Only `plain`
+    /// (case-insensitive, surrounding whitespace ignored) selects
+    /// human-readable output; unset or any other value keeps the
+    /// historical JSON default — so existing `LOG_FORMAT=json`
+    /// deployments and the hardcoded-JSON past behave identically.
+    #[test]
+    fn log_format_parses_documented_values() {
+        assert_eq!(parse_log_format(None), LogFormat::Json);
+        assert_eq!(parse_log_format(Some("json")), LogFormat::Json);
+        assert_eq!(parse_log_format(Some("plain")), LogFormat::Plain);
+        assert_eq!(parse_log_format(Some("  PLAIN  ")), LogFormat::Plain);
+        assert_eq!(parse_log_format(Some("xml")), LogFormat::Json);
+        assert_eq!(parse_log_format(Some("")), LogFormat::Json);
     }
 
     #[test]

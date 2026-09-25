@@ -2,7 +2,8 @@
 //! Salsa-ChaCha message params from caller memory and write results
 //! back (incl. the bits-derived-length wild-read guards).
 
-use cryptoki_sys::*;
+use pkcs11_proxy_ng_proto::convert::message_effects::ParameterEffectCallMode;
+use pkcs11_proxy_ng_proto::convert::message_effects::{MessageEffectContext, MessageEffects};
 use pkcs11_proxy_ng_proto::convert::message_params::{
     CcmMessageParams, GcmMessageParams, MessageParameter, MessageParameterShape,
     Salsa20ChaCha20Poly1305MessageParams,
@@ -69,6 +70,9 @@ pub(crate) struct MessageCallMemory {
 }
 
 impl MessageCallMemory {
+    pub(crate) const fn with_mechanism(self, mechanism: CK_MECHANISM_PTR) -> Self {
+        Self { mechanism_outer: mechanism.cast(), ..self }
+    }
     pub(crate) const fn none() -> Self {
         Self {
             mechanism_outer: std::ptr::null(),
@@ -141,7 +145,7 @@ fn allowed_in_place_pair(left: CallerRange, right: CallerRange) -> bool {
     ) && left.start == right.start
 }
 
-fn validate_message_caller_ranges(
+pub(super) fn validate_message_caller_ranges(
     memory: MessageCallMemory,
     parameter_outer: *const std::ffi::c_void,
     parameter_outer_len: u64,
@@ -519,43 +523,11 @@ fn parameter_result_matches_request(
         }
 }
 
-fn validate_exact_output_result(
+pub(super) fn validate_exact_output_result(
     result: &CkOutputBufferResult,
     spec: &CkOutputBufferSpec,
 ) -> CkResult<()> {
-    if spec.length_pointer_null {
-        return if result.returned_len == 0 && result.value.is_none() {
-            Ok(())
-        } else {
-            Err(CkRv::GENERAL_ERROR)
-        };
-    }
-    match result.ck_rv {
-        CkRv::OK if !spec.buffer_present => {
-            if result.value.is_none() {
-                Ok(())
-            } else {
-                Err(CkRv::GENERAL_ERROR)
-            }
-        }
-        CkRv::OK => {
-            let value = result.value.as_ref().ok_or(CkRv::GENERAL_ERROR)?;
-            if value.len() as u64 == result.returned_len && result.returned_len <= spec.buffer_len {
-                Ok(())
-            } else {
-                Err(CkRv::GENERAL_ERROR)
-            }
-        }
-        CkRv::BUFFER_TOO_SMALL if spec.buffer_present => {
-            if result.value.is_none() && result.returned_len > spec.buffer_len {
-                Ok(())
-            } else {
-                Err(CkRv::GENERAL_ERROR)
-            }
-        }
-        CkRv::BUFFER_TOO_SMALL => Err(CkRv::GENERAL_ERROR),
-        _ => Ok(()),
-    }
+    result.validate_for(spec, CK_ULONG::MAX as u64)
 }
 
 unsafe fn copy_message_bytes(target: *mut CK_BYTE, capacity: usize, value: &[u8]) {
@@ -566,47 +538,61 @@ unsafe fn copy_message_bytes(target: *mut CK_BYTE, capacity: usize, value: &[u8]
     unsafe { std::ptr::copy_nonoverlapping(value.as_ptr(), target, value.len()) };
 }
 
+pub(super) fn effect_context(
+    call: &MessageParameterCall,
+    rv: CkRv,
+    output_spec: &CkOutputBufferSpec,
+) -> MessageEffectContext {
+    MessageEffectContext {
+        mode: if call.stage == MessageParameterStage::Begin {
+            ParameterEffectCallMode::Begin
+        } else {
+            ParameterEffectCallMode::from_output_spec(output_spec)
+        },
+        encrypt: call.direction == MessageParameterDirection::Encrypt,
+        generated_stage: matches!(
+            call.stage,
+            MessageParameterStage::OneShot | MessageParameterStage::Begin
+        ),
+        auth_stage: matches!(
+            call.stage,
+            MessageParameterStage::OneShot | MessageParameterStage::Next { final_part: true }
+        ),
+        rv,
+    }
+}
+
 unsafe fn commit_message_parameter_writeback(
     call: &MessageParameterCall,
-    response: &MessageParameter,
+    response: &MessageEffects,
 ) {
-    if call.direction != MessageParameterDirection::Encrypt {
-        return;
-    }
-    let write_generated =
-        matches!(call.stage, MessageParameterStage::OneShot | MessageParameterStage::Begin);
-    let write_auth = matches!(
-        call.stage,
-        MessageParameterStage::OneShot | MessageParameterStage::Next { final_part: true }
-    );
-
     match (call.writeback, response) {
         (
             Some(MessageParameterWriteback::Gcm { iv, iv_len, tag, tag_len }),
-            MessageParameter::GcmMessage(result),
+            MessageEffects::Gcm { iv: first, tag: second },
         ) => {
-            if write_generated {
-                unsafe { copy_message_bytes(iv, iv_len, &result.iv) };
+            if let Some(value) = first {
+                unsafe { copy_message_bytes(iv, iv_len, value) };
             }
-            if write_auth {
-                unsafe { copy_message_bytes(tag, tag_len, &result.tag) };
+            if let Some(value) = second {
+                unsafe { copy_message_bytes(tag, tag_len, value) };
             }
         }
         (
             Some(MessageParameterWriteback::Ccm { nonce, nonce_len, mac, mac_len }),
-            MessageParameter::CcmMessage(result),
+            MessageEffects::Ccm { nonce: first, mac: second },
         ) => {
-            if write_generated {
-                unsafe { copy_message_bytes(nonce, nonce_len, &result.nonce) };
+            if let Some(value) = first {
+                unsafe { copy_message_bytes(nonce, nonce_len, value) };
             }
-            if write_auth {
-                unsafe { copy_message_bytes(mac, mac_len, &result.mac) };
+            if let Some(value) = second {
+                unsafe { copy_message_bytes(mac, mac_len, value) };
             }
         }
         (
             Some(MessageParameterWriteback::SalsaChacha { tag, tag_len }),
-            MessageParameter::SalaChacha(result),
-        ) if write_auth => unsafe { copy_message_bytes(tag, tag_len, &result.tag) },
+            MessageEffects::Salsa { tag: Some(value) },
+        ) => unsafe { copy_message_bytes(tag, tag_len, value) },
         _ => {}
     }
 }
@@ -627,7 +613,7 @@ pub(crate) unsafe fn write_exact_message_output(
     call: &MessageParameterCall,
     output_result: &CkOutputBufferResult,
     parameter_result: &CkParameterRoundtripResult,
-    response_parameter: Option<&MessageParameter>,
+    response_parameter: Option<&MessageEffects>,
     p_output: CK_BYTE_PTR,
     pul_output_len: CK_ULONG_PTR,
 ) -> CK_RV {
@@ -639,7 +625,12 @@ pub(crate) unsafe fn write_exact_message_output(
     if validate_exact_output_result(output_result, output_spec).is_err() {
         return rv_err(CkRv::GENERAL_ERROR);
     }
-    if output_result.ck_rv != CkRv::OK && output_result.ck_rv != CkRv::BUFFER_TOO_SMALL {
+    if output_result.ck_rv != CkRv::OK
+        && output_result.ck_rv != CkRv::BUFFER_TOO_SMALL
+        && output_result.returned_len.is_none()
+        && output_result.value.is_none()
+        && response_parameter.is_none()
+    {
         return rv_err(output_result.ck_rv);
     }
     if !parameter_result_matches_request(parameter_result, parameter_spec, output_result.ck_rv) {
@@ -648,11 +639,9 @@ pub(crate) unsafe fn write_exact_message_output(
 
     let response_parameter = match (call.parameter(), response_parameter) {
         (Some(request), Some(response))
-            if request.validate_structured().is_ok()
-                && response.validate_structured().is_ok()
-                && request.same_layout_and_scalars(response)
-                && (call.direction != MessageParameterDirection::Decrypt
-                    || request == response) =>
+            if response
+                .validate_for(request, effect_context(call, output_result.ck_rv, output_spec))
+                .is_ok() =>
         {
             Some(response)
         }
@@ -660,7 +649,7 @@ pub(crate) unsafe fn write_exact_message_output(
         _ => return rv_err(CkRv::GENERAL_ERROR),
     };
 
-    let returned_len = match CK_ULONG::try_from(output_result.returned_len) {
+    let returned_len = match output_result.returned_len.map(CK_ULONG::try_from).transpose() {
         Ok(len) => len,
         Err(_) => return rv_err(CkRv::GENERAL_ERROR),
     };
@@ -675,7 +664,9 @@ pub(crate) unsafe fn write_exact_message_output(
     {
         unsafe { std::ptr::copy_nonoverlapping(value.as_ptr(), p_output, value.len()) };
     }
-    unsafe { *pul_output_len = returned_len };
+    if let Some(returned_len) = returned_len {
+        unsafe { pul_output_len.write(returned_len) };
+    }
     rv_err(output_result.ck_rv)
 }
 
@@ -687,11 +678,12 @@ pub(crate) unsafe fn write_message_begin_output(
     parameter_spec: &CkParameterRoundtripSpec,
     call: &MessageParameterCall,
     parameter_result: &CkParameterRoundtripResult,
-    response_parameter: Option<&MessageParameter>,
+    effects: Option<&MessageEffects>,
 ) -> CK_RV {
     let output_spec =
         CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: false };
-    let output_result = CkOutputBufferResult { ck_rv: CkRv::OK, returned_len: 0, value: None };
+    let output_result =
+        CkOutputBufferResult { ck_rv: parameter_result.ck_rv, returned_len: Some(0), value: None };
     let mut output_len = 0;
     unsafe {
         write_exact_message_output(
@@ -700,7 +692,7 @@ pub(crate) unsafe fn write_message_begin_output(
             call,
             &output_result,
             parameter_result,
-            response_parameter,
+            effects,
             std::ptr::null_mut(),
             &mut output_len,
         )

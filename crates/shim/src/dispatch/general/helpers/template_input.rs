@@ -1,9 +1,6 @@
 //! Input CK_ATTRIBUTE[] template parsing at the C-ABI edge —
 //! structural nested-template handling (ADR-0011 D8) included.
 
-use cryptoki_sys::*;
-use pkcs11_proxy_ng_types::*;
-
 use super::*;
 
 /// Maximum template entry count we will serialize.  No real PKCS#11

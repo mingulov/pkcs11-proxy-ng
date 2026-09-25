@@ -121,6 +121,16 @@ const IGNORED_TEST_TAXONOMY: &[IgnoredTestLane] = &[
         ],
     },
     IgnoredTestLane {
+        file: "crates/server/tests/noncontract_begin_health_test.rs",
+        reason: "Native-oracle legacy Begin completion-health coverage",
+        commands: &[
+            "cargo test -p pkcs11-proxy-ng --test noncontract_begin_health_test -- --ignored --test-threads=1",
+        ],
+        requirements: &[
+            "Normal and missing-message-begin oracle builds via PKCS11_PROXY_EXACT_ORACLE_LIB and PKCS11_PROXY_MISSING_BEGIN_ORACLE_LIB",
+        ],
+    },
+    IgnoredTestLane {
         file: "crates/server/tests/nss_mechanism_coverage_test.rs",
         reason: "NSS softokn mechanism coverage",
         commands: &[
@@ -163,6 +173,18 @@ const IGNORED_TEST_TAXONOMY: &[IgnoredTestLane] = &[
             "cargo test -p pkcs11-proxy-ng --test template_compat_test -- --ignored --test-threads=1",
         ],
         requirements: &["SoftHSM2 module and softhsm2-util"],
+    },
+    IgnoredTestLane {
+        file: "crates/server/tests/test_hooks_topology_test.rs",
+        reason: "Hook-gated control-plane topology coverage (real daemon subprocess)",
+        commands: &[
+            "cargo test -p pkcs11-proxy-ng --features native-owner-test-hooks --test test_hooks_topology_test -- --ignored --test-threads=1",
+        ],
+        requirements: &[
+            "SoftHSM2 module and softhsm2-util",
+            "native-owner-test-hooks feature build",
+            "built workspace binaries",
+        ],
     },
 ];
 
@@ -486,50 +508,20 @@ fn shim_raw_slice_construction_stays_centralized() {
 }
 
 #[test]
-fn debug_bundle_redacts_sensitive_pkcs11_proxy_environment() {
-    let root = workspace_root();
-    let script = fs::read_to_string(root.join("scripts/collect-debug-bundle.sh"))
-        .expect("scripts/collect-debug-bundle.sh should be readable");
-
-    assert!(
-        !script.contains("env | grep -i \"^PKCS11_PROXY\" | sort"),
-        "debug bundle must not write raw PKCS11_PROXY_* environment variables"
-    );
-    assert!(
-        script.contains("redact_pkcs11_proxy_env"),
-        "debug bundle should centralize PKCS11_PROXY_* redaction"
-    );
-    for sensitive_name in [
-        "PKCS11_PROXY_PIN",
-        "PKCS11_PROXY_SO_PIN",
-        "PKCS11_PROXY_NEW_PIN",
-        "PKCS11_PROXY_SEED",
-        "PKCS11_PROXY_KRYOPTIC_USER_PIN",
-        "PKCS11_PROXY_KRYOPTIC_SO_PIN",
-        "PKCS11_PROXY_KRYOPTIC_INIT_ARGS",
-        "PKCS11_PROXY_NSS_USER_PIN",
-        "PKCS11_PROXY_NSS_SO_PIN",
-        "PKCS11_PROXY_NSS_INIT_ARGS",
-        "PKCS11_PROXY_TLS_CLIENT_KEY",
-    ] {
-        assert!(
-            script.contains(sensitive_name),
-            "debug bundle redaction should cover {sensitive_name}"
-        );
-    }
-}
-
-#[test]
-fn debug_bundle_archive_redacts_sensitive_environment_values() {
+fn debug_bundle_archive_omits_environment_values() {
     let root = workspace_root();
     let output_dir = tempfile::tempdir().expect("temp output dir should be created");
+    let extraction_dir = tempfile::tempdir().expect("temp extraction dir should be created");
+    let pin_canary = "secret-pin-value";
+    let registry_canary = "secret-registry-token";
+    let endpoint_canary = "http://user:secret-endpoint@example.invalid";
 
     let status = Command::new(root.join("scripts/collect-debug-bundle.sh"))
         .arg("--output-dir")
         .arg(output_dir.path())
-        .env("PKCS11_PROXY_PIN", "secret-pin-value")
-        .env("PKCS11_PROXY_TLS_CLIENT_KEY", "/tmp/client-key.pem")
-        .env("PKCS11_PROXY_ENDPOINT", "http://127.0.0.1:7512")
+        .env("PKCS11_PROXY_PIN", pin_canary)
+        .env("CARGO_REGISTRIES_PRIVATE_TOKEN", registry_canary)
+        .env("PKCS11_PROXY_ENDPOINT", endpoint_canary)
         .status()
         .expect("debug bundle script should run");
     assert!(status.success(), "debug bundle script should exit successfully");
@@ -541,20 +533,35 @@ fn debug_bundle_archive_redacts_sensitive_environment_values() {
         .expect("debug bundle archive should exist");
 
     let output = Command::new("tar")
-        .arg("-xOzf")
+        .arg("-xzf")
         .arg(&archive)
-        .arg("--wildcards")
-        .arg("*/environment.txt")
+        .arg("-C")
+        .arg(extraction_dir.path())
         .output()
-        .expect("tar should extract environment.txt");
-    assert!(output.status.success(), "tar should read environment.txt from bundle");
+        .expect("tar should extract the debug bundle");
+    assert!(output.status.success(), "tar should extract the debug bundle");
 
-    let environment = String::from_utf8(output.stdout).expect("environment.txt should be UTF-8");
-    assert!(!environment.contains("secret-pin-value"), "PIN value must not be archived");
-    assert!(!environment.contains("/tmp/client-key.pem"), "TLS key path must not be archived");
-    assert!(environment.contains("PKCS11_PROXY_PIN=<redacted>"));
-    assert!(environment.contains("PKCS11_PROXY_TLS_CLIENT_KEY=<redacted>"));
-    assert!(environment.contains("PKCS11_PROXY_ENDPOINT=http://127.0.0.1:7512"));
+    let mut pending = vec![extraction_dir.path().to_path_buf()];
+    let mut files_seen = 0;
+    while let Some(path) = pending.pop() {
+        for entry in fs::read_dir(path).expect("extracted directory should be readable") {
+            let entry = entry.expect("extracted entry should be readable");
+            if entry.file_type().expect("entry type should be readable").is_dir() {
+                pending.push(entry.path());
+                continue;
+            }
+            let contents = fs::read(entry.path()).expect("bundle file should be readable");
+            for canary in [pin_canary, registry_canary, endpoint_canary] {
+                assert!(
+                    !contents.windows(canary.len()).any(|window| window == canary.as_bytes()),
+                    "environment value must not be archived: {}",
+                    entry.path().display()
+                );
+            }
+            files_seen += 1;
+        }
+    }
+    assert!(files_seen > 0, "the extracted archive should contain metadata files");
 }
 
 fn json_array_field_contains(json: &str, field: &str, value: &str) -> bool {
@@ -4293,9 +4300,7 @@ fn oasis_inventory_tracks_mechanism_info_flag_semantic_gaps() {
     );
     assert!(
         no_source["local_tests"].as_array().expect("local_tests should be an array").iter().any(
-            |candidate| {
-                candidate == "loaded_shim_preserves_no_source_mechanism_info_zero_flags"
-            }
+            |candidate| { candidate == "loaded_shim_preserves_provider_mechanism_info_flags" }
         ),
         "no-source mechanism-info rows should cite the loaded-shim C ABI zero-flag test"
     );
@@ -4819,7 +4824,7 @@ fn oasis_inventory_markdown_exposes_human_readable_matrices() {
          no_source_workflow_flags_available | \
          `mock_mechanism_info_leaves_flags_empty_without_source_workflow_evidence`, \
          `grpc_mechanism_info_preserves_zero_flags_without_source_workflow_evidence`, \
-         `loaded_shim_preserves_no_source_mechanism_info_zero_flags`, \
+         `loaded_shim_preserves_provider_mechanism_info_flags`, \
          `official_source_grounded_mock_rejects_all_no_source_workflow_mechanisms` |"
     ));
     assert!(markdown.contains("## Mechanism Matrix"));
