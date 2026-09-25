@@ -110,6 +110,13 @@ impl MockBackend {
         self.require_live_object(&state, object)?;
         drop(state);
 
+        if let [attr] = template
+            && let Some((attr_type, result)) = &*self.attribute_read_override.lock().unwrap()
+            && attr.attr_type == *attr_type
+        {
+            attr.value = Some(result.clone()?);
+            return Ok(());
+        }
         let store = self.attribute_store.lock().unwrap();
         let obj_map = match store.get(&object.0) {
             None => return Ok(()),
