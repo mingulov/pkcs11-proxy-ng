@@ -35,6 +35,11 @@ mod native_domain;
 #[cfg(test)]
 #[path = "ffi/native_domain_tests.rs"]
 mod native_domain_tests;
+#[path = "ffi/native_stop.rs"]
+mod native_stop;
+#[cfg(all(test, unix))]
+#[path = "ffi/native_stop_tests.rs"]
+mod native_stop_tests;
 #[path = "ffi/object_ops.rs"]
 mod object_ops;
 #[path = "ffi/session_3x_ops.rs"]
@@ -232,6 +237,14 @@ pub struct FfiBackend {
     /// Locally observed init/finalize/session lifecycle driving the honest
     /// retirement decision in `Drop` (C3M.4).
     lifecycle: native_domain::LifecycleTracker,
+    /// Last-field retirement sentinel (C3M step 7). MUST stay the last
+    /// field: field drops run in declaration order, so its `Drop`
+    /// publishes the next `Vacant` only after every other field —
+    /// dependent graphs, the `Library` (`dlclose`), the permit and the
+    /// lifecycle — has retired. The `Drop` body publishes only `Retiring`
+    /// on the Release path. Never read: its only role is its `Drop`.
+    #[allow(dead_code)]
+    retirement_sentinel: native_domain::RetirementSentinel,
 }
 
 // Safety: PKCS#11 spec requires modules loaded with CKF_OS_LOCKING_OK to be
@@ -253,6 +266,24 @@ impl FfiBackend {
     }
 }
 
+/// Map a local lifecycle refusal to its caller-visible `CK_RV` (F-08).
+/// Neither value is a provider observation; both are fail-closed local
+/// denials that reach the caller without any provider contact:
+/// - `FailedFinalizeUnresolved` → `CRYPTOKI_ALREADY_INITIALIZED`: after a
+///   failed Finalize the old incarnation may still be live, and PKCS#11
+///   reports Initialize-against-live as already-initialized. Precedent:
+///   `MockBackend::initialize_backend` refuses re-init the same way.
+/// - `GenerationExhausted` → `GENERAL_ERROR`: no standard `CK_RV` covers
+///   local identifier-space exhaustion, so the generic local failure stands.
+fn lifecycle_refusal_rv(refusal: native_domain::LifecycleRefusal) -> CkRv {
+    match refusal {
+        native_domain::LifecycleRefusal::FailedFinalizeUnresolved => {
+            CkRv::CRYPTOKI_ALREADY_INITIALIZED
+        }
+        native_domain::LifecycleRefusal::GenerationExhausted => CkRv::GENERAL_ERROR,
+    }
+}
+
 impl Pkcs11Backend for FfiBackend {
     fn initialize(&self) -> CkResult<()> {
         let mut args = cryptoki_sys::CK_C_INITIALIZE_ARGS {
@@ -267,6 +298,14 @@ impl Pkcs11Backend for FfiBackend {
                 .map(|s| s.as_ptr() as *mut std::ffi::c_void)
                 .unwrap_or(std::ptr::null_mut()),
         };
+        // F-08 gate BEFORE native entry: a refused cycle never touches the
+        // provider and records nothing — not even the attempt marker — so
+        // the retained-session evidence stays intact.
+        self.lifecycle.check_reinitialize().map_err(lifecycle_refusal_rv)?;
+        // Fail-closed attempt marker BEFORE native entry (C3M steps 4-5):
+        // a failed `C_Initialize` ran provider code, so the reservation
+        // must poison instead of recycling.
+        self.lifecycle.note_init_attempted();
         Self::call_unit(unsafe { (*self.func_list).C_Initialize }, |function| unsafe {
             function(&mut args as *mut _ as cryptoki_sys::CK_VOID_PTR)
         })?;
@@ -275,7 +314,10 @@ impl Pkcs11Backend for FfiBackend {
         // survive, or a reused numeric handle would alias stale owners.
         // Re-affirming an already-open incarnation keeps its live bindings.
         let generation_before = self.lifecycle.current_generation();
-        self.lifecycle.note_initialized();
+        // Checked record: the residual refusal (a Finalize failed, or the
+        // last generation was claimed, after the gate passed) propagates
+        // before the purge, so a refused cycle purges nothing.
+        self.lifecycle.note_initialized().map_err(lifecycle_refusal_rv)?;
         if self.lifecycle.current_generation() != generation_before {
             self.drop_all_mech_cache();
         }
@@ -283,13 +325,15 @@ impl Pkcs11Backend for FfiBackend {
     }
 
     fn finalize(&self) -> CkResult<()> {
+        let _deadline = native_stop::arm_shutdown_deadline(native_stop::shutdown_grace());
         let outcome = Self::call_unit(unsafe { (*self.func_list).C_Finalize }, |function| unsafe {
             function(std::ptr::null_mut())
         });
         if outcome.is_err() {
             // The failure proves nothing about provider state, so every
             // binding stays — but the incarnation is now uncertain, and a
-            // later re-initialization must open a new cycle (C3M.4/row 10).
+            // later re-initialization is refused until a successful
+            // C_Finalize (F-08).
             self.lifecycle.note_finalize_failed();
             return outcome;
         }
@@ -1676,6 +1720,27 @@ mod tests {
         cryptoki_sys::CKR_OK
     }
 
+    std::thread_local! {
+        static INITIALIZE_CALL_COUNT: std::cell::Cell<usize> =
+            const { std::cell::Cell::new(0) };
+    }
+
+    /// Counting `C_Initialize` stub: proves refused cycles never reach the
+    /// provider. Thread-local because libtest runs each `#[test]` on its own
+    /// thread, so parallel tests cannot pollute each other's count.
+    unsafe extern "C" fn initialize_counting_ok(_: *mut std::ffi::c_void) -> cryptoki_sys::CK_RV {
+        INITIALIZE_CALL_COUNT.with(|count| count.set(count.get() + 1));
+        cryptoki_sys::CKR_OK
+    }
+
+    fn initialize_call_count() -> usize {
+        INITIALIZE_CALL_COUNT.with(|count| count.get())
+    }
+
+    unsafe extern "C" fn initialize_fails(_: *mut std::ffi::c_void) -> cryptoki_sys::CK_RV {
+        cryptoki_sys::CKR_GENERAL_ERROR
+    }
+
     fn backend_with_finalize(
         finalize: cryptoki_sys::CK_C_Finalize,
     ) -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
@@ -1691,7 +1756,7 @@ mod tests {
         functions.C_Finalize = finalize;
 
         let backend = FfiBackend {
-            _lib: libloading::os::unix::Library::this().into(),
+            _lib: crate::ffi::loading::test_library_handle(),
             func_list: functions.as_mut(),
             func_list_3_0: None,
             func_list_3_2: None,
@@ -1705,6 +1770,8 @@ mod tests {
             // consuming it; never backs production dispatch (C3M.4).
             construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
             lifecycle: Default::default(),
+            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
+            ),
         };
 
         (backend, functions)
@@ -1717,6 +1784,36 @@ mod tests {
         backend.last_init_family.insert(7, OperationFamily::Sign);
         // Use the public path so the forward map and reverse index stay in sync.
         backend.remember_session_slot(CkSessionHandle(7), CkSlotId(11));
+    }
+
+    #[test]
+    fn failed_initialize_poisons_instead_of_recycling() {
+        // C3M steps 4-5: a failed `C_Initialize` ran native code, so the
+        // reservation must never recycle — the retirement decision is
+        // Poison (retain ownership), never Vacant.
+        let (backend, _functions) =
+            backend_with_init_and_finalize(Some(initialize_fails), Some(finalize_ok));
+        assert_eq!(backend.initialize().unwrap_err(), CkRv::GENERAL_ERROR);
+        assert_eq!(
+            backend.lifecycle.retirement_decision(),
+            crate::ffi::native_domain::RetirementDecision::Poison,
+            "failed Initialize must poison, never recycle"
+        );
+        assert_eq!(backend.lifecycle.open_session_count_for_tests(), 0);
+        assert_eq!(backend.lifecycle.current_generation(), 0);
+    }
+
+    #[test]
+    fn never_attempted_initialize_releases() {
+        // Control leg: a backend whose `C_Initialize` was never attempted
+        // stays on the Release path (C1 at the decision level).
+        let (backend, _functions) =
+            backend_with_init_and_finalize(Some(initialize_fails), Some(finalize_ok));
+        assert_eq!(
+            backend.lifecycle.retirement_decision(),
+            crate::ffi::native_domain::RetirementDecision::Release,
+            "never-attempted backend must stay on the Release path"
+        );
     }
 
     #[test]
@@ -1745,15 +1842,19 @@ mod tests {
     }
 
     #[test]
-    fn initialize_after_failed_finalize_starts_a_clean_incarnation() {
-        // C3M.4/row 10: a re-initialization after a failed Finalize is a new
-        // lifecycle generation. Stale session bindings and the stale open
-        // count must not leak into it, or a reused numeric handle would alias
-        // a dead incarnation's owners.
+    fn initialize_after_failed_finalize_is_refused() {
+        // F-08/MISS 2 (re-review-blessed rewrite of
+        // `initialize_after_failed_finalize_starts_a_clean_incarnation`,
+        // which pinned the violating behavior): re-initialization after a
+        // failed Finalize is REFUSED — the provider state is unknown, so no
+        // new generation opens, nothing purges, and the retained-session
+        // evidence (open count) is not reset. The refusal lands before
+        // native entry: the provider's C_Initialize is never called.
         let (backend, _functions) =
-            backend_with_init_and_finalize(Some(initialize_ok), Some(finalize_fails));
+            backend_with_init_and_finalize(Some(initialize_counting_ok), Some(finalize_fails));
         backend.initialize().expect("first initialization succeeds");
         assert_eq!(backend.lifecycle.current_generation(), 1);
+        assert_eq!(initialize_call_count(), 1);
         backend.remember_session_slot(CkSessionHandle(7), CkSlotId(11));
         backend.lifecycle.note_session_opened();
         backend.lifecycle.note_session_opened();
@@ -1762,7 +1863,58 @@ mod tests {
         assert!(backend.session_slot_map.contains_key(&7));
         assert_eq!(backend.lifecycle.open_session_count_for_tests(), 2);
 
-        backend.initialize().expect("re-initialization succeeds");
+        assert_eq!(
+            backend.initialize().unwrap_err(),
+            CkRv::CRYPTOKI_ALREADY_INITIALIZED,
+            "re-init after failed Finalize must be refused"
+        );
+        assert_eq!(backend.lifecycle.current_generation(), 1);
+        assert_eq!(initialize_call_count(), 1, "refused re-init must not reach the provider");
+        assert_eq!(backend.session_slot_map.get(&7).as_deref(), Some(&11));
+        assert!(!backend.slot_sessions.is_empty());
+        assert_eq!(backend.lifecycle.open_session_count_for_tests(), 2);
+        assert_eq!(
+            backend.lifecycle.retirement_decision(),
+            crate::ffi::native_domain::RetirementDecision::Poison,
+            "unresolved failed Finalize still poisons"
+        );
+    }
+
+    #[test]
+    fn initialize_at_generation_exhaustion_is_refused_before_native_entry() {
+        // F-08/MISS 1 at the dispatch boundary: with no fresh generation
+        // left, initialize() is refused with zero provider contact and zero
+        // lifecycle side effects — not even the init-attempt marker, so the
+        // refusal itself records no exposure.
+        let (backend, _functions) =
+            backend_with_init_and_finalize(Some(initialize_counting_ok), Some(finalize_ok));
+        backend.lifecycle.set_generation_for_tests(u64::MAX);
+        assert_eq!(backend.initialize().unwrap_err(), CkRv::GENERAL_ERROR);
+        assert_eq!(initialize_call_count(), 0, "exhausted init must not reach the provider");
+        assert_eq!(backend.lifecycle.current_generation(), u64::MAX);
+        assert_eq!(
+            backend.lifecycle.retirement_decision(),
+            crate::ffi::native_domain::RetirementDecision::Release,
+            "pre-native refusal records no attempt"
+        );
+    }
+
+    #[test]
+    fn initialize_after_successful_finalize_starts_a_clean_incarnation() {
+        // Interplay control for F-08/MISS 2: re-init after a SUCCESSFUL
+        // Finalize still opens a fresh generation and purges dead bindings.
+        // The stale residue planted between Finalize and re-init proves the
+        // new-cycle purge runs on the legitimate path.
+        let (backend, _functions) =
+            backend_with_init_and_finalize(Some(initialize_ok), Some(finalize_ok));
+        backend.initialize().expect("first initialization succeeds");
+        assert_eq!(backend.lifecycle.current_generation(), 1);
+        backend.finalize().expect("finalize succeeds");
+        seed_cache(&backend);
+        backend.lifecycle.note_session_opened();
+        backend.lifecycle.note_session_opened();
+
+        backend.initialize().expect("re-initialization after successful finalize succeeds");
         assert_eq!(backend.lifecycle.current_generation(), 2);
         assert!(backend.session_slot_map.is_empty());
         assert!(backend.slot_sessions.is_empty());
@@ -1778,7 +1930,7 @@ mod tests {
         // when the numeric session handle was reused and the native call
         // itself succeeded.
         let (backend, _functions) =
-            backend_with_init_and_finalize(Some(initialize_ok), Some(finalize_fails));
+            backend_with_init_and_finalize(Some(initialize_ok), Some(finalize_ok));
         backend.initialize().expect("first initialization succeeds");
         let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
         let err = backend
@@ -1789,10 +1941,11 @@ mod tests {
                 &mechanism,
                 |_, _| {
                     // Deterministic race simulation: the incarnation turns
-                    // over while the native Init runs (failed Finalize,
-                    // then a new Initialize).
-                    backend.lifecycle.note_finalize_failed();
-                    backend.lifecycle.note_initialized();
+                    // over while the native Init runs (successful Finalize,
+                    // then a new Initialize — a failed Finalize can no
+                    // longer turn the incarnation over, F-08).
+                    backend.lifecycle.note_finalized();
+                    backend.lifecycle.note_initialized().expect("legitimate turnover opens");
                     cryptoki_sys::CKR_OK
                 },
             )
@@ -1808,7 +1961,7 @@ mod tests {
         // choke point: extracted native output is discarded with the
         // retired owner, never published.
         let (backend, _functions) =
-            backend_with_init_and_finalize(Some(initialize_ok), Some(finalize_fails));
+            backend_with_init_and_finalize(Some(initialize_ok), Some(finalize_ok));
         backend.initialize().expect("first initialization succeeds");
         let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
         let err = backend
@@ -1818,8 +1971,10 @@ mod tests {
                 Some(0u8),
                 &mechanism,
                 |_, _| {
-                    backend.lifecycle.note_finalize_failed();
-                    backend.lifecycle.note_initialized();
+                    // Same legitimate turnover as above (F-08: failed
+                    // Finalize can no longer open a new cycle).
+                    backend.lifecycle.note_finalized();
+                    backend.lifecycle.note_initialized().expect("legitimate turnover opens");
                     cryptoki_sys::CKR_OK
                 },
             )

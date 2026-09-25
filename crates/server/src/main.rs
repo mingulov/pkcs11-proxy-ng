@@ -644,7 +644,11 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
         tracing::error!(error = %e, "audit flush on shutdown failed");
     }
 
-    backend.finalize().map_err(|rv| format!("C_Finalize failed: {rv}"))?;
+    let finalize_outcome = backend.finalize();
+    if let Err(rv) = &finalize_outcome {
+        tracing::error!(error = %rv, "C_Finalize failed; backend drop follows");
+    }
+    finalize_outcome.map_err(|rv| format!("C_Finalize failed: {rv}"))?;
     tracing::info!("Daemon stopped");
     Ok(())
 }

@@ -1,6 +1,6 @@
 # ADR-0014: Re-admit Windows native and 32-bit/mixed scope to the v0.2.0 tail stretch
 
-- **Status:** Accepted (2026-09-14, user scope decision)
+- **Status:** Implemented (2026-09-17)
 - **Reverses (in part):** the 2026-09-13 P0 amendment deferral of Windows
   native-provider daemon support (ADR-0011/ADR-0006) and of the 32-bit/mixed
   support claim (`doc/release/beta-support-matrix.md`).
@@ -45,3 +45,44 @@ not scope items.
   named receipts per leg, no generalization beyond named providers.
 - The staged gate list gains a committed tail gate; gate 5 is no longer
   droppable.
+
+## Implementation (2026-09-17)
+
+Accepted 2026-09-14 (user scope decision); all four decision items are now
+implemented with named receipts — no item was waived or handed off:
+
+1. Windows x64/MSVC native daemon — T6 leg A (Windows daemon + SoftHSM2-win
+   DLL over mTLS, Linux client) and leg C (BouncyHsm-win second provider),
+   workspace-root `artifacts/v020-tail-windows-2026-09-16/`.
+2. Windows x64 client shim — T6 leg B (Windows shim DLL +
+   `cross_width_smoke.exe` vs Linux daemon, exit 0, LLP64 width line).
+3. Both W2 directions — legs A and B above, including the `[listener.local]`
+   rejection negative (leg B) and the `[listener.local]`-absent mTLS config
+   (leg A).
+4. 32-bit/mixed claim — `scripts/run-cross-width-live-test.sh` legs 1–4 plus
+   the NSS-i386 second-provider legs in
+   `scripts/run-cross-width-nss32-live-test.sh`, both run in nightly via
+   `scripts/run-test-tiers.sh live`; the §9 "single `softhsm2-i386` lane"
+   proviso is discharged by the second provider.
+
+§9 ABI-topology → script-leg mapping (leg numbers verified against
+`scripts/run-cross-width-live-test.sh`; the script runs the narrow-client
+leg first):
+
+| §9 row (client / daemon) | Script leg |
+|---|---|
+| x86_64 / x86_64 | leg 2 (same-width control) |
+| i686 / x86_64 (32c/64b) | leg 1 (narrow-client bridge) |
+| x86_64 / i686 (64c/32b) | leg 3 (reverse bridge + D4 narrowing) |
+| i686 / i686 (32/32) | leg 4 (narrow-native control) |
+
+The Consequences interim rule is discharged: tail implementation has landed,
+so nonqualified-host refusal now applies only to the still-excluded hosts
+(Windows GNU, PE32, macOS/ARM/big-endian), and Windows compile CI continues
+via the per-PR Tier 0f `windows-client-llp64` job.
+
+Note: the Context section's
+`doc/plans/2026-09-13-v0.2.0-release-program-design.md` reference is dangling
+— no `doc/plans/` directory exists in this repo. It is superseded by the
+release program plan and the Windows tail plan held at the workspace root;
+the §9 row order above is quoted from that program design.

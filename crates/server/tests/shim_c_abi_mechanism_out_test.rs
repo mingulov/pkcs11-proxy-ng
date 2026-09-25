@@ -12,6 +12,10 @@
 //! Encrypt/Decrypt stack structs and the separate empty-only Sign/Verify
 //! pointer-class contract.
 
+// CK_MECHANISM_TYPE is u64 on LP64 but u32 on Windows LLP64/ILP32, so the
+// `as u64` casts below are live on some targets and vacuous on others.
+#![allow(clippy::unnecessary_cast)]
+
 mod common_3x;
 
 use std::mem;
@@ -141,8 +145,10 @@ async fn loaded_shim_reinitializes_against_current_endpoint_after_finalize() {
         let c_get_function_list: Symbol<CGetFunctionList> =
             lib.get(b"C_GetFunctionList\0").expect("C_GetFunctionList symbol");
 
-        let backend1 =
-            Arc::new(MockBackend::new(vec![CkSlotId(0x11)], vec![CkMechanismType(CKM_AES_GCM)]));
+        let backend1 = Arc::new(MockBackend::new(
+            vec![CkSlotId(0x11)],
+            vec![CkMechanismType(CKM_AES_GCM as u64)],
+        ));
         let (endpoint1, _shutdown1) = common_3x::mock_daemon(backend1).await;
         let endpoint_guard1 = EnvRestore::set("PKCS11_PROXY_ENDPOINT", &endpoint1);
 
@@ -186,8 +192,10 @@ async fn loaded_shim_reinitializes_against_current_endpoint_after_finalize() {
         assert_eq!(c_finalize_3_2(std::ptr::null_mut()), CKR_OK as CK_RV, "first C_Finalize");
         drop(endpoint_guard1);
 
-        let backend2 =
-            Arc::new(MockBackend::new(vec![CkSlotId(0x22)], vec![CkMechanismType(CKM_AES_CBC)]));
+        let backend2 = Arc::new(MockBackend::new(
+            vec![CkSlotId(0x22)],
+            vec![CkMechanismType(CKM_AES_CBC as u64)],
+        ));
         let (endpoint2, _shutdown2) = common_3x::mock_daemon(backend2).await;
         let _endpoint_guard2 = EnvRestore::set("PKCS11_PROXY_ENDPOINT", &endpoint2);
 
@@ -250,15 +258,15 @@ async fn loaded_shim_preserves_provider_mechanism_info_flags() {
     let backend = Arc::new(MockBackend::new(
         vec![CkSlotId(0)],
         vec![
-            CkMechanismType(CKM_BATON_KEY_GEN),
-            CkMechanismType(CKM_CAMELLIA_CTR),
-            CkMechanismType(CKM_DES_CBC),
+            CkMechanismType(CKM_BATON_KEY_GEN as u64),
+            CkMechanismType(CKM_CAMELLIA_CTR as u64),
+            CkMechanismType(CKM_DES_CBC as u64),
         ],
     ));
     let expected: Vec<_> = [CKM_BATON_KEY_GEN, CKM_CAMELLIA_CTR, CKM_DES_CBC]
         .into_iter()
         .map(|mechanism| {
-            backend.get_mechanism_info(CkSlotId(0), CkMechanismType(mechanism)).unwrap()
+            backend.get_mechanism_info(CkSlotId(0), CkMechanismType(mechanism as u64)).unwrap()
         })
         .collect();
     // BATON and DES now have a source-grounded historical registry; Camellia
@@ -528,8 +536,8 @@ async fn loaded_shim_writes_mechanism_out_to_caller_stack_after_encrypt_wrap_and
         vec![CkSlotId(0)],
         vec![
             CkMechanismType::AES_GCM,
-            CkMechanismType(CKM_SP800_108_COUNTER_KDF),
-            CkMechanismType(CKM_BATON_KEY_GEN),
+            CkMechanismType(CKM_SP800_108_COUNTER_KDF as u64),
+            CkMechanismType(CKM_BATON_KEY_GEN as u64),
         ],
     ));
     backend.set_encrypt_exact_output(Some(CkMechanismParams::Gcm(GcmParams {
@@ -610,10 +618,13 @@ async fn loaded_shim_writes_mechanism_out_to_caller_stack_after_encrypt_wrap_and
             CKR_OK as CK_RV,
             "C_GetMechanismInfo(CKM_BATON_KEY_GEN)"
         );
-        assert_eq!(baton_info.ulMinKeySize, 2048, "no-source min key size");
-        assert_eq!(baton_info.ulMaxKeySize, 4096, "no-source max key size");
+        // E0793: CK structs are packed on Windows; assert on by-value copies.
+        let (min_key_size, max_key_size, flags) =
+            (baton_info.ulMinKeySize, baton_info.ulMaxKeySize, baton_info.flags);
+        assert_eq!(min_key_size, 2048, "no-source min key size");
+        assert_eq!(max_key_size, 4096, "no-source max key size");
         assert_eq!(
-            baton_info.flags,
+            flags,
             CKF_GENERATE | CKF_GENERATE_KEY_PAIR,
             "source-grounded historical BATON flags preserved"
         );
@@ -702,12 +713,13 @@ async fn loaded_shim_writes_mechanism_out_to_caller_stack_after_encrypt_wrap_and
         let expected_ciphertext = plaintext.iter().map(|byte| byte ^ 0x42).collect::<Vec<_>>();
         ciphertext.truncate(ciphertext_len as usize);
         assert_eq!(ciphertext, expected_ciphertext, "mock ciphertext");
+        let (encrypt_iv_len, encrypt_iv_bits) = (encrypt_gcm.ulIvLen, encrypt_gcm.ulIvBits);
         assert_eq!(
-            encrypt_gcm.ulIvLen,
+            encrypt_iv_len,
             encrypt_generated_iv.len() as CK_ULONG,
             "delayed encrypt IV length"
         );
-        assert_eq!(encrypt_gcm.ulIvBits, 96, "delayed encrypt IV bits");
+        assert_eq!(encrypt_iv_bits, 96, "delayed encrypt IV bits");
         assert_eq!(
             encrypt_iv_buffer.as_slice(),
             encrypt_generated_iv.as_slice(),
@@ -762,8 +774,9 @@ async fn loaded_shim_writes_mechanism_out_to_caller_stack_after_encrypt_wrap_and
 
         wrapped.truncate(wrapped_len as usize);
         assert_eq!(wrapped, vec![0xDE, 0xAD, 0xBE, 0xEF], "mock wrapped-key bytes");
-        assert_eq!(wrap_gcm.ulIvLen, wrap_generated_iv.len() as CK_ULONG, "delayed wrap IV length");
-        assert_eq!(wrap_gcm.ulIvBits, 96, "delayed wrap IV bits");
+        let (wrap_iv_len, wrap_iv_bits) = (wrap_gcm.ulIvLen, wrap_gcm.ulIvBits);
+        assert_eq!(wrap_iv_len, wrap_generated_iv.len() as CK_ULONG, "delayed wrap IV length");
+        assert_eq!(wrap_iv_bits, 96, "delayed wrap IV bits");
         assert_eq!(
             wrap_iv_buffer.as_slice(),
             wrap_generated_iv.as_slice(),
@@ -943,8 +956,10 @@ async fn loaded_shim_message_begin_next_round_trips_c_stack_params() {
 
     const CKM_SYNTHETIC_MESSAGE: CK_MECHANISM_TYPE = CKM_AES_GCM;
 
-    let backend =
-        Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType(CKM_SYNTHETIC_MESSAGE)]));
+    let backend = Arc::new(MockBackend::new(
+        vec![CkSlotId(0)],
+        vec![CkMechanismType(CKM_SYNTHETIC_MESSAGE as u64)],
+    ));
     let server_backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = backend.clone();
     let (endpoint, _shutdown) = common_3x::mock_daemon(server_backend).await;
     let _endpoint_guard = EnvRestore::set("PKCS11_PROXY_ENDPOINT", &endpoint);
@@ -1285,14 +1300,10 @@ async fn loaded_shim_message_begin_next_round_trips_c_stack_params() {
                     init_calls + 1,
                     "{direction} Init {class} reaches the backend exactly once",
                 );
-                assert_eq!(
-                    mechanism.pParameter, parameter,
-                    "{direction} Init {class} pointer echo"
-                );
-                assert_eq!(
-                    mechanism.ulParameterLen, parameter_len,
-                    "{direction} Init {class} length echo",
-                );
+                let (p_parameter, ul_parameter_len) =
+                    (mechanism.pParameter, mechanism.ulParameterLen);
+                assert_eq!(p_parameter, parameter, "{direction} Init {class} pointer echo");
+                assert_eq!(ul_parameter_len, parameter_len, "{direction} Init {class} length echo",);
 
                 let input = [0x31_u8];
                 let mut output = [0_u8];
@@ -1533,7 +1544,8 @@ async fn loaded_shim_sign_verify_message_preserves_empty_parameter_classes_once_
         return;
     };
 
-    let backend = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType(CKM_AES_GCM)]));
+    let backend =
+        Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType(CKM_AES_GCM as u64)]));
     let server_backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = backend.clone();
     let (endpoint, _shutdown) = common_3x::mock_daemon(server_backend).await;
     let _endpoint_guard = EnvRestore::set("PKCS11_PROXY_ENDPOINT", &endpoint);
