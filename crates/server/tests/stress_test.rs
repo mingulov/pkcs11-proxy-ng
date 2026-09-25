@@ -1,8 +1,16 @@
 //! Stress, soak, and leak detection tests (Item 95).
 //!
 //! Multi-client workloads against MockBackend to detect leaked sessions,
-//! handles, tasks, or file descriptors under sustained load. All tests
-//! run without external PKCS#11 modules.
+//! handles, or file descriptors under sustained load. All tests run
+//! without external PKCS#11 modules.
+//!
+//! Leak accounting (W1-C2-07): each test snapshots backend session/object
+//! gauges plus the process FD count before its workload and asserts they
+//! return to baseline afterwards — liveness alone ("a new session still
+//! opens") cannot catch slow leaks. Tokio task counts are not observable
+//! on stable Rust (a task census needs `tokio_unstable` runtime metrics);
+//! leaked tasks that pin blocking threads or sockets surface via the FD
+//! gauge instead.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,13 +32,85 @@ async fn mock_daemon(backend: Arc<MockBackend>) -> (String, tokio::sync::watch::
 const CKF_SERIAL: CkSessionFlags = CkSessionFlags(CkSessionFlags::SERIAL_SESSION);
 
 // ────────────────────────────────────────────────────────────────────
+// Leak accounting (W1-C2-07)
+// ────────────────────────────────────────────────────────────────────
+
+/// Serializes FD-accounted tests: FD counts are process-global, so two
+/// tests running on libtest threads at once would pollute each other's
+/// baseline. Concurrency *within* a test is unaffected.
+static LEAK_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Open file-descriptor count for this process (Linux only).
+#[cfg(target_os = "linux")]
+fn open_fd_count() -> usize {
+    std::fs::read_dir("/proc/self/fd").map(|entries| entries.count()).unwrap_or(0)
+}
+
+/// Resource baseline captured before a workload.
+struct LeakSnapshot {
+    backend_sessions: usize,
+    backend_objects: usize,
+    #[cfg(target_os = "linux")]
+    fds: usize,
+}
+
+impl LeakSnapshot {
+    fn capture(mock: &MockBackend) -> Self {
+        Self {
+            backend_sessions: mock.open_session_count(),
+            backend_objects: mock.live_object_count(),
+            #[cfg(target_os = "linux")]
+            fds: open_fd_count(),
+        }
+    }
+
+    /// Backend gauges must return exactly to baseline (mock calls settle
+    /// synchronously once their RPC completes). FDs close asynchronously
+    /// after the client drops, so settle-poll before asserting.
+    async fn assert_no_growth(&self, mock: &MockBackend, what: &str) {
+        assert_eq!(
+            mock.open_session_count(),
+            self.backend_sessions,
+            "{what}: leaked backend sessions (baseline {}, now {})",
+            self.backend_sessions,
+            mock.open_session_count()
+        );
+        assert_eq!(
+            mock.live_object_count(),
+            self.backend_objects,
+            "{what}: leaked backend objects (baseline {}, now {})",
+            self.backend_objects,
+            mock.live_object_count()
+        );
+        #[cfg(target_os = "linux")]
+        {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                let now = open_fd_count();
+                if now <= self.fds || std::time::Instant::now() >= deadline {
+                    assert!(
+                        now <= self.fds,
+                        "{what}: leaked file descriptors (baseline {}, now {now})",
+                        self.fds
+                    );
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────
 // Multi-client concurrent workload
 // ────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn concurrent_clients_sign_workload() {
+    let _leak_guard = LEAK_GUARD.lock().await;
     let mock = Arc::new(mock_backend(&[0], &[0x00000001]));
-    let (endpoint, _shutdown) = mock_daemon(mock).await;
+    let (endpoint, _shutdown) = mock_daemon(Arc::clone(&mock)).await;
+    let baseline = LeakSnapshot::capture(&mock);
 
     let mut handles = Vec::new();
     for _ in 0..8 {
@@ -56,12 +136,15 @@ async fn concurrent_clients_sign_workload() {
     for h in handles {
         h.await.unwrap();
     }
+    baseline.assert_no_growth(&mock, "concurrent_sign").await;
 }
 
 #[tokio::test]
 async fn concurrent_clients_encrypt_decrypt_workload() {
+    let _leak_guard = LEAK_GUARD.lock().await;
     let mock = Arc::new(mock_backend(&[0], &[0x00000001]));
-    let (endpoint, _shutdown) = mock_daemon(mock).await;
+    let (endpoint, _shutdown) = mock_daemon(Arc::clone(&mock)).await;
+    let baseline = LeakSnapshot::capture(&mock);
 
     let mut handles = Vec::new();
     for _ in 0..6 {
@@ -92,6 +175,7 @@ async fn concurrent_clients_encrypt_decrypt_workload() {
     for h in handles {
         h.await.unwrap();
     }
+    baseline.assert_no_growth(&mock, "concurrent_encrypt_decrypt").await;
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -100,8 +184,10 @@ async fn concurrent_clients_encrypt_decrypt_workload() {
 
 #[tokio::test]
 async fn session_churn_no_leaked_sessions() {
+    let _leak_guard = LEAK_GUARD.lock().await;
     let mock = Arc::new(mock_backend(&[0], &[0x00000001]));
-    let (endpoint, _shutdown) = mock_daemon(mock).await;
+    let (endpoint, _shutdown) = mock_daemon(Arc::clone(&mock)).await;
+    let baseline = LeakSnapshot::capture(&mock);
     let mut client = init_client(&endpoint).await;
 
     let slots = client.get_slot_list(false).await.unwrap();
@@ -117,12 +203,16 @@ async fn session_churn_no_leaked_sessions() {
     let session = client.open_session(slot, CKF_SERIAL).await.unwrap();
     client.close_session(session).await.unwrap();
     client.finalize().await.unwrap();
+    drop(client);
+    baseline.assert_no_growth(&mock, "session_churn").await;
 }
 
 #[tokio::test]
 async fn close_all_sessions_churn() {
+    let _leak_guard = LEAK_GUARD.lock().await;
     let mock = Arc::new(mock_backend(&[0], &[0x00000001]));
-    let (endpoint, _shutdown) = mock_daemon(mock).await;
+    let (endpoint, _shutdown) = mock_daemon(Arc::clone(&mock)).await;
+    let baseline = LeakSnapshot::capture(&mock);
     let mut client = init_client(&endpoint).await;
 
     let slots = client.get_slot_list(false).await.unwrap();
@@ -140,6 +230,8 @@ async fn close_all_sessions_churn() {
     let session = client.open_session(slot, CKF_SERIAL).await.unwrap();
     client.close_session(session).await.unwrap();
     client.finalize().await.unwrap();
+    drop(client);
+    baseline.assert_no_growth(&mock, "close_all_churn").await;
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -148,8 +240,10 @@ async fn close_all_sessions_churn() {
 
 #[tokio::test]
 async fn object_handle_churn_no_leaked_handles() {
+    let _leak_guard = LEAK_GUARD.lock().await;
     let mock = Arc::new(mock_backend(&[0], &[0x00000001]));
-    let (endpoint, _shutdown) = mock_daemon(mock).await;
+    let (endpoint, _shutdown) = mock_daemon(Arc::clone(&mock)).await;
+    let baseline = LeakSnapshot::capture(&mock);
     let mut client = init_client(&endpoint).await;
 
     let slots = client.get_slot_list(false).await.unwrap();
@@ -167,6 +261,8 @@ async fn object_handle_churn_no_leaked_handles() {
 
     client.close_session(session).await.unwrap();
     client.finalize().await.unwrap();
+    drop(client);
+    baseline.assert_no_growth(&mock, "object_churn").await;
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -175,8 +271,10 @@ async fn object_handle_churn_no_leaked_handles() {
 
 #[tokio::test]
 async fn initialize_finalize_churn() {
+    let _leak_guard = LEAK_GUARD.lock().await;
     let mock = Arc::new(mock_backend(&[0], &[0x00000001]));
-    let (endpoint, _shutdown) = mock_daemon(mock).await;
+    let (endpoint, _shutdown) = mock_daemon(Arc::clone(&mock)).await;
+    let baseline = LeakSnapshot::capture(&mock);
 
     let mut client = Pkcs11Client::connect(&endpoint).await.unwrap();
 
@@ -186,6 +284,8 @@ async fn initialize_finalize_churn() {
         assert!(!slots.is_empty());
         client.finalize().await.unwrap();
     }
+    drop(client);
+    baseline.assert_no_growth(&mock, "init_finalize_churn").await;
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -194,9 +294,15 @@ async fn initialize_finalize_churn() {
 
 #[tokio::test]
 async fn concurrent_clients_with_lease_expiry() {
+    let _leak_guard = LEAK_GUARD.lock().await;
     let mock = Arc::new(mock_backend(&[0], &[0x00000001]));
-    let (endpoint, _shutdown) =
-        mock_daemon_with_lease(mock, Duration::from_millis(200), Duration::from_millis(30)).await;
+    let (endpoint, _shutdown) = mock_daemon_with_lease(
+        Arc::clone(&mock),
+        Duration::from_millis(200),
+        Duration::from_millis(30),
+    )
+    .await;
+    let baseline = LeakSnapshot::capture(&mock);
 
     let mut handles = Vec::new();
     for _ in 0..4 {
@@ -228,6 +334,7 @@ async fn concurrent_clients_with_lease_expiry() {
     for h in handles {
         h.await.unwrap();
     }
+    baseline.assert_no_growth(&mock, "lease_expiry").await;
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -236,8 +343,10 @@ async fn concurrent_clients_with_lease_expiry() {
 
 #[tokio::test]
 async fn concurrent_reconnect_stress() {
+    let _leak_guard = LEAK_GUARD.lock().await;
     let mock = Arc::new(mock_backend(&[0], &[0x00000001]));
-    let (endpoint, _shutdown) = mock_daemon(mock).await;
+    let (endpoint, _shutdown) = mock_daemon(Arc::clone(&mock)).await;
+    let baseline = LeakSnapshot::capture(&mock);
 
     // 10 clients each connecting, doing work, disconnecting, reconnecting
     let mut handles = Vec::new();
@@ -258,6 +367,7 @@ async fn concurrent_reconnect_stress() {
     for h in handles {
         h.await.unwrap();
     }
+    baseline.assert_no_growth(&mock, "reconnect").await;
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -266,8 +376,10 @@ async fn concurrent_reconnect_stress() {
 
 #[tokio::test]
 async fn mixed_operations_concurrent() {
+    let _leak_guard = LEAK_GUARD.lock().await;
     let mock = Arc::new(mock_backend(&[0], &[0x00000001]));
-    let (endpoint, _shutdown) = mock_daemon(mock).await;
+    let (endpoint, _shutdown) = mock_daemon(Arc::clone(&mock)).await;
+    let baseline = LeakSnapshot::capture(&mock);
 
     let mut handles = Vec::new();
 
@@ -328,4 +440,5 @@ async fn mixed_operations_concurrent() {
     for h in handles {
         h.await.unwrap();
     }
+    baseline.assert_no_growth(&mock, "mixed").await;
 }

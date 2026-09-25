@@ -25,7 +25,12 @@ NSS_MODULE="$(find_nss_module)" || { echo "NSS softokn not found"; exit 0; }
 echo "==> NSS fixture: SQL DB with custom token description"
 dir1="$(mktemp -d)"
 certutil -N -d "sql:$dir1" --empty-password
-certutil -S -d "sql:$dir1" -n test-cert -s "CN=fixture-test" -x -t "CT,," -z /dev/urandom --keyUsage digitalSignature -2 <<< $'n\nn\nn' 2>/dev/null || true
+# W1-L17-11: -S must get a FINITE noise file — NSS reads -z to EOF, and
+# /dev/urandom never EOFs, so the old form spun at 100% CPU forever (the
+# "hangs in Docker" the matrix comment cited). Answers: not-a-CA, skip
+# the path-length constraint, non-critical extension.
+head -c 2048 /dev/urandom >"$dir1/noise.bin"
+certutil -S -d "sql:$dir1" -n test-cert -s "CN=fixture-test" -x -t "CT,," -z "$dir1/noise.bin" --keyUsage digitalSignature -2 <<< $'n\n\nn' 2>/dev/null || true
 
 export PKCS11_PROXY_NSS_MODULE="$NSS_MODULE"
 export PKCS11_PROXY_NSS_INIT_ARGS="configDir='sql:$dir1' tokenDescription='custom-desc-token'"

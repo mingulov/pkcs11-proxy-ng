@@ -30,7 +30,15 @@ async fn login_user_succeeds_through_full_stack() {
     let slots = client.get_slot_list(false).await.unwrap();
     let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
 
-    client.login_user(session, CkUserType::User, b"testuser", b"1234").await.unwrap();
+    client
+        .login_user(
+            session,
+            CkUserType::User,
+            Some(b"testuser".as_slice()),
+            Some(b"1234".as_slice()),
+        )
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -44,9 +52,41 @@ async fn login_user_with_empty_credentials_reaches_backend() {
 
     // Empty username and pin should still reach the backend and fail as a
     // backend PIN decision, not as unsupported wiring.
-    let err = client.login_user(session, CkUserType::So, b"", b"").await.unwrap_err();
+    let err = client
+        .login_user(session, CkUserType::So, Some(b"".as_slice()), Some(b"".as_slice()))
+        .await
+        .unwrap_err();
 
     assert_eq!(err, CkRv::PIN_INCORRECT);
+}
+
+/// W1-C6-07: NULL pin/username must survive the client → gRPC → server →
+/// backend stack as None (the `C_Login` convention), staying
+/// distinguishable from explicit-empty credentials. The proto `optional`
+/// presence round-trips: None arrives as (None, None), Some-empty as
+/// (Some, Some).
+#[tokio::test]
+async fn login_user_null_vs_empty_presence_survives_full_stack() {
+    let backend = Arc::new(mock(&[0], &[0x00000001]));
+    let (endpoint, _shutdown) = mock_daemon(backend.clone()).await;
+    let mut client = init_client(&endpoint).await;
+
+    let slots = client.get_slot_list(false).await.unwrap();
+    let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
+
+    let err = client.login_user(session, CkUserType::User, None, None).await.unwrap_err();
+    assert_eq!(err, CkRv::PIN_INCORRECT);
+    let err = client
+        .login_user(session, CkUserType::User, Some(b"".as_slice()), Some(b"".as_slice()))
+        .await
+        .unwrap_err();
+    assert_eq!(err, CkRv::PIN_INCORRECT);
+
+    assert_eq!(
+        backend.login_user_presence_observations().as_slice(),
+        &[(true, true), (false, false)],
+        "None must arrive as (None, None), Some-empty as (Some, Some)"
+    );
 }
 
 #[tokio::test]
@@ -60,7 +100,10 @@ async fn login_user_all_user_types() {
 
     // All valid CkUserType variants should reach the backend.
     for user_type in [CkUserType::So, CkUserType::User, CkUserType::ContextSpecific] {
-        client.login_user(session, user_type, b"user", b"1234").await.unwrap();
+        client
+            .login_user(session, user_type, Some(b"user".as_slice()), Some(b"1234".as_slice()))
+            .await
+            .unwrap();
     }
 }
 
@@ -138,7 +181,15 @@ async fn login_user_rejects_invalid_session() {
 
     // Use a session handle that was never opened
     let bad_session = CkSessionHandle(999_999);
-    let err = client.login_user(bad_session, CkUserType::User, b"user", b"pin").await.unwrap_err();
+    let err = client
+        .login_user(
+            bad_session,
+            CkUserType::User,
+            Some(b"user".as_slice()),
+            Some(b"pin".as_slice()),
+        )
+        .await
+        .unwrap_err();
 
     assert_eq!(
         err,

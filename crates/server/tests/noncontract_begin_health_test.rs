@@ -5,6 +5,9 @@
 //! PKCS11_PROXY_MISSING_BEGIN_ORACLE_LIB, then run this ignored integration gate.
 #![cfg(unix)]
 #![allow(clippy::unnecessary_cast)]
+// W1-L12-03: test report lines go to stdout by design; the workspace
+// lint table denies this sink elsewhere.
+#![allow(clippy::print_stdout)]
 
 use cryptoki_sys::*;
 use libloading::Library;

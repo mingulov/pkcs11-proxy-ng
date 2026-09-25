@@ -1,17 +1,24 @@
-//! Per-peer rate limiter for `GetBackendInterfaces`.
+//! Per-peer rate limiters for the unauthenticated surface:
+//! `GetBackendInterfaces` (discovery) and `Initialize` (context creation).
 //!
-//! Closes `FOLLOWUP-rate-limit`. The threat is unauthenticated TCP
-//! peers fanning out registry probes at high QPS; though the trust
-//! model already requires intra-VPC network isolation, defence in
-//! depth caps the per-peer rate to a configurable budget.
+//! The discovery limiter closes `FOLLOWUP-rate-limit`. The threat is
+//! unauthenticated TCP peers fanning out registry probes at high QPS;
+//! though the trust model already requires intra-VPC network isolation,
+//! defence in depth caps the per-peer rate to a configurable budget.
+//!
+//! The initialize limiter (W1-L7-03) is a SEPARATE, always-on budget:
+//! a default-config flood must not reach the `max_contexts` cap, so the
+//! throttle cannot share the discovery limiter's opt-in (default-off)
+//! state. The budget is a fixed generous constant — legitimate clients
+//! initialize once per process, while a flood trips it loudly.
 //!
 //! Implementation: a simple fixed-window counter per peer IP. Memory
 //! is bounded — entries idle for > 5× the window are GC'd lazily by
-//! the next caller. Not for high-throughput general traffic; this is
-//! a knob to throttle a single noisy peer's discovery RPC.
+//! the next caller. Not for high-throughput general traffic; these are
+//! knobs to throttle a single noisy peer's discovery/initialize RPCs.
 
 use std::net::IpAddr;
-use std::sync::OnceLock;
+use std::sync::{LazyLock, OnceLock};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -59,6 +66,34 @@ pub fn configure(window: Duration, max_per_window: u32) {
 /// the peer is over budget.
 pub fn check(peer: IpAddr) -> Result<(), Duration> {
     check_against(STATE.get(), peer, Instant::now())
+}
+
+/// Fixed-window length for the always-on initialize budget (W1-L7-03).
+pub(crate) const INIT_THROTTLE_WINDOW: Duration = Duration::from_secs(60);
+/// Max unauthenticated `Initialize` calls per peer IP per
+/// [`INIT_THROTTLE_WINDOW`] (W1-L7-03). Generous on purpose: legitimate
+/// clients initialize once per process, so 10/s sustained from one IP
+/// still passes deploy herds while a context-creation flood trips the
+/// throttle loudly long before the `max_contexts` cap.
+pub(crate) const INIT_THROTTLE_MAX_PER_WINDOW: u32 = 600;
+
+/// Always-on per-IP state for the initialize throttle (W1-L7-03).
+/// Separate from the opt-in discovery `STATE` above: initialize
+/// throttling engages under default configuration with no operator
+/// setup and never shares budget with discovery probes.
+static INIT_STATE: LazyLock<State> = LazyLock::new(|| State {
+    window: INIT_THROTTLE_WINDOW,
+    max_per_window: INIT_THROTTLE_MAX_PER_WINDOW,
+    peers: DashMap::new(),
+    last_gc: std::sync::Mutex::new(Instant::now()),
+});
+
+/// Check whether a peer may issue another unauthenticated `Initialize`.
+/// Always on (no `configure` needed); returns `Ok(())` if allowed (and
+/// consumes one budget unit), `Err(retry_after)` if the peer is over
+/// budget.
+pub fn check_init(peer: IpAddr) -> Result<(), Duration> {
+    check_against(Some(&INIT_STATE), peer, Instant::now())
 }
 
 /// Pure check against an explicit `State` reference at a given `now`.
@@ -182,5 +217,21 @@ mod tests {
         assert!(check_against(Some(&state), peer(5), now).is_ok());
         assert!(check_against(Some(&state), peer(4), now).is_err());
         assert!(check_against(Some(&state), peer(5), now).is_err());
+    }
+
+    #[test]
+    fn init_throttle_is_always_on_under_default_config() {
+        // W1-L7-03 fix round: the initialize budget engages with no
+        // `configure` call (decoupled from the opt-in discovery
+        // limiter). Uses a dedicated TEST-NET IP so the shared global
+        // cannot interact with other tests touching INIT_STATE.
+        let p = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 47));
+        for _ in 0..INIT_THROTTLE_MAX_PER_WINDOW {
+            assert!(check_init(p).is_ok(), "in-budget initialize checks must pass");
+        }
+        let retry_after =
+            check_init(p).expect_err("over-budget initialize check must be throttled");
+        assert!(retry_after > Duration::ZERO);
+        assert!(retry_after <= INIT_THROTTLE_WINDOW);
     }
 }

@@ -1,3 +1,6 @@
+// W1-L12-03: test diagnostics (skip notices, progress, summaries) go to
+// stderr by design; the workspace lint table denies this sink elsewhere.
+#![allow(clippy::print_stderr)]
 //! Retention observations through a deliberately retaining native provider.
 //!
 //! The oracle crate (`tests/ffi_oracles/retained_mechanisms`) is a dual
@@ -25,25 +28,7 @@ fn backend_with_oracle_provider() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_
     functions.C_CloseSession = Some(oracle::provider::close_session);
     functions.C_EncryptInit = Some(oracle::provider::encrypt_init);
     functions.C_Encrypt = Some(oracle::provider::encrypt);
-    let backend = FfiBackend {
-        _lib: crate::ffi::loading::test_library_handle(),
-        func_list: functions.as_mut(),
-        func_list_3_0: None,
-        func_list_3_2: None,
-        initialize_args: None,
-        mech_cache: dashmap::DashMap::new(),
-        last_init_family: dashmap::DashMap::new(),
-        session_slot_map: dashmap::DashMap::new(),
-        slot_sessions: dashmap::DashMap::new(),
-        object_cleanup: Default::default(),
-        // Test-local backend: bypasses the process reservation without
-        // consuming it; never backs production dispatch (C3M.4).
-        construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-        lifecycle: Default::default(),
-        lifecycle_domain: Default::default(),
-        session_fences: Default::default(),
-        retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(),
-    };
+    let backend = FfiBackend::test_backend_with_tables(functions.as_mut(), None, None);
     (backend, functions)
 }
 
@@ -140,9 +125,18 @@ fn oracle_retains_init_root_across_native_calls() {
 #[ignore = "C3M.6: requires the built retained-mechanism oracle cdylib, run serially"]
 fn native_owner_oracle_retains_init_root_across_calls() {
     let _guard = oracle::acquire_test_serial();
+    // W1-L10-11: this test is `#[ignore]`, so reaching this code means an
+    // explicit opt-in run. A missing oracle library is then a real error,
+    // not a silent skip — fail loudly rather than returning a misleading
+    // green pass (same L14 rule as the GCM-IV `require_patched_lib` gate).
     let Some(lib) = std::env::var_os("PKCS11_PROXY_RETAINED_ORACLE_LIB") else {
-        eprintln!("SKIP: PKCS11_PROXY_RETAINED_ORACLE_LIB is not set");
-        return;
+        panic!(
+            "PKCS11_PROXY_RETAINED_ORACLE_LIB is not set — this #[ignore] test requires the \
+             built retained-mechanism oracle cdylib. Build it with `cargo build --locked \
+             --manifest-path tests/ffi_oracles/retained_mechanisms/Cargo.toml` and point the \
+             env var at the resulting .so, then re-run serially (--test-threads=1). \
+             (Refusing to pass silently — W1-L10-11.)"
+        );
     };
     // Same assertions as the in-process test, through a real dlopen-loaded
     // provider: proves the cdylib artifact serves the retention contract.

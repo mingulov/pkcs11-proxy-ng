@@ -17,7 +17,9 @@ pkcs11-proxy-ng-types = { path = "../types" }
 pkcs11-proxy-ng-client = { path = "../client" }
 pkcs11-proxy-ng-proto = { path = "../proto" }
 cryptoki-sys.workspace = true
-tokio.workspace = true
+# W1-L16-15: minimal cdylib closure — current-thread runtime + sync/time/net.
+# No signal/process (verified via `cargo tree -p pkcs11-proxy-ng-shim`).
+tokio = { workspace = true, features = ["rt", "sync", "time", "net", "macros"] }
 tracing.workspace = true
 
 [dev-dependencies]
@@ -30,6 +32,16 @@ tokio-stream = "0.1"
 # release cdylib does not depend on tonic — it talks to the daemon via `client`.
 tonic = { workspace = true, features = ["transport", "router", "codegen", "tls-ring"] }
 libc = "0.2"
+# Dev-only: the registry-drift test captures WARN output via a fmt subscriber.
+tracing-subscriber.workspace = true
+# Dev-only: the stock-SoftHSM2 test provisions an isolated token dir + config.
+tempfile = "3"
 # Dev-only: the cross_width_smoke example loads the built shim module through
 # the public C ABI (C_GetFunctionList), exactly like a host application.
 libloading.workspace = true
+# Dev-only: the ABI audit walks the served function-list tables with the
+# shared module-FFI offset facts (W1-L10-14). Same pinned rev as the backend.
+pkcs11-module = { git = "https://github.com/mingulov/pkcs11-components", rev = "d0a47c71d34294466bc41100ae6b5a5a329029d2" }
+
+[lints]
+workspace = true

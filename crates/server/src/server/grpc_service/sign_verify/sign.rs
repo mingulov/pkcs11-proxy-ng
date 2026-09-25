@@ -86,6 +86,7 @@ pub(crate) async fn sign_init(
     Ok(Response::new(pkcs11_proxy_ng_proto::SignInitResponse { ck_rv: ck_rv_only(result) }))
 }
 
+// NOTE: legacy per-op RPC (W1-L11-21 retention; see service.proto) — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
 pub(crate) async fn sign(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::SignRequest>,
@@ -172,6 +173,7 @@ pub(crate) async fn sign_update(
     Ok(Response::new(pkcs11_proxy_ng_proto::SignUpdateResponse { ck_rv: ck_rv_only(result) }))
 }
 
+// NOTE: legacy per-op RPC (W1-L11-21 retention; see service.proto) — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
 pub(crate) async fn sign_final(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::SignFinalRequest>,
@@ -286,6 +288,7 @@ pub(crate) async fn sign_recover_init(
     Ok(Response::new(pkcs11_proxy_ng_proto::SignRecoverInitResponse { ck_rv: ck_rv_only(result) }))
 }
 
+// NOTE: legacy per-op RPC (W1-L11-21 retention; see service.proto) — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
 pub(crate) async fn sign_recover(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::SignRecoverRequest>,

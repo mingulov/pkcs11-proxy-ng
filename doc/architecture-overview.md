@@ -13,7 +13,8 @@ see the individual ADRs in `doc/adr/`.
 │  CLI ──► pkcs11-proxy-ng-client│───►│     ├── context manager      │
 │          (Rust gRPC client) │gRPC│     ├── session manager       │
 │                             │    │     ├── handle virtualization │
-│                             │    │     ├── mechanism filter      │
+│                             │    │     ├── mechanism discovery   │
+│                             │    │     │   (pure proxy, no filter)│
 │                             │    │     └── auth layer            │
 │                             │    │            │                  │
 │                             │    │     Pkcs11Backend trait       │

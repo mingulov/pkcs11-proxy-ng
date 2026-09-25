@@ -81,7 +81,13 @@ Live production FFI is limited to qualified Linux GNU/musl x86_64/64-bit and
 x86/32-bit (i686). This supersedes Windows native-provider daemon support in
 ADR-0011/0006 for this release. Portable Windows client/shim/proto/types and
 mock-only backend/server builds remain, including Windows clients using a
-qualified Linux daemon. Native Windows support is lower priority/stretch work.
+qualified Linux daemon.
+
+[Tail-stretch closure, 2026-09-17: the Windows deferral above was the
+2026-09-13 posture — ADR-0014 is Implemented, re-admitting the Windows
+x64/MSVC native daemon and the Windows client shim to the v0.2.0 tail
+stretch, qualified on real Windows Server 2022 (T6 legs A/B/C receipts in
+workspace-root `artifacts/v020-tail-windows-2026-09-16/`).]
 
 One managed provider chain per embedding process, reserved before loading or
 discovery, owns lifecycle and retirement. Callers share one backend via Arc;
@@ -159,7 +165,11 @@ To avoid unsafe or brittle forwarding of unknown structures:
 - classify mechanisms by parameter behavior
 - reject unsupported or unknown mechanisms instead of forwarding opaque data blindly
 - serialize only explicitly modeled parameter structures
-- intersect backend mechanism discovery with the allow-list before exposing remote capability
+- enforce the allow-list at operation time (the no-raw-forward rule):
+  discovery defaults to **transparent** (full backend list, including the
+  shim) while unmodeled parameterized calls are rejected with
+  `CKR_MECHANISM_PARAM_INVALID`; `mechanism_discovery = "filtered"` is the
+  opt-in strict-discovery mode (ADR-0001 §4)
 
 This policy is a core design principle, not an implementation detail.
 

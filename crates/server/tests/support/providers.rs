@@ -28,6 +28,34 @@ fn find_first_existing_path(candidates: &[&str]) -> Option<PathBuf> {
     candidates.iter().map(Path::new).find(|path| path.exists()).map(Path::to_path_buf)
 }
 
+const SOFTHSM2_LIB_CANDIDATES: &[&str] = &[
+    "/usr/lib/softhsm/libsofthsm2.so",
+    "/usr/lib/x86_64-linux-gnu/softhsm/libsofthsm2.so",
+    "/usr/local/lib/softhsm/libsofthsm2.so",
+    "/usr/lib64/softhsm/libsofthsm2.so",
+    "/usr/lib64/pkcs11/libsofthsm2.so",
+    "/usr/lib64/libsofthsm2.so",
+];
+
+/// True when a SoftHSM2 module library AND `softhsm2-util` are both present.
+///
+/// Default-run SoftHSM2 lanes probe this after a fixture failure and record an
+/// honest [`super::SkipReason::ProviderMissing`] skip only when the provider
+/// is genuinely absent; any other fixture failure stays a hard error.
+pub fn softhsm2_present() -> bool {
+    softhsm2_present_with(SOFTHSM2_LIB_CANDIDATES, "softhsm2-util")
+}
+
+/// Predicate behind [`softhsm2_present`] with injectable inputs so the
+/// absent-provider logic is unit-testable in every environment (see
+/// `softhsm2_presence_probe_logic` in `parameterized_mechanism_test.rs`).
+pub fn softhsm2_present_with(candidates: &[&str], tool: &str) -> bool {
+    if find_first_existing_path(candidates).is_none() {
+        return false;
+    }
+    super::tool_available(tool)
+}
+
 fn required_provider_env(prefix: &str, suffix: &str) -> Result<String, String> {
     let key = format!("{prefix}_{suffix}");
     std::env::var(&key).map_err(|err| match err {
@@ -99,15 +127,8 @@ impl ProviderFixture {
                 }
                 p
             }
-            None => find_first_existing_path(&[
-                "/usr/lib/softhsm/libsofthsm2.so",
-                "/usr/lib/x86_64-linux-gnu/softhsm/libsofthsm2.so",
-                "/usr/local/lib/softhsm/libsofthsm2.so",
-                "/usr/lib64/softhsm/libsofthsm2.so",
-                "/usr/lib64/pkcs11/libsofthsm2.so",
-                "/usr/lib64/libsofthsm2.so",
-            ])
-            .ok_or_else(|| "libsofthsm2.so not found".to_string())?,
+            None => find_first_existing_path(SOFTHSM2_LIB_CANDIDATES)
+                .ok_or_else(|| "libsofthsm2.so not found".to_string())?,
         };
 
         let temp_dir = tempfile::tempdir().map_err(|e| format!("tempdir failed: {e}"))?;
@@ -167,15 +188,8 @@ impl ProviderFixture {
 
     pub async fn soft_hsm_multi_slot(slot_count: usize) -> Result<Self, String> {
         let guard = real_backend_lock().lock_owned().await;
-        let module_path = find_first_existing_path(&[
-            "/usr/lib/softhsm/libsofthsm2.so",
-            "/usr/lib/x86_64-linux-gnu/softhsm/libsofthsm2.so",
-            "/usr/local/lib/softhsm/libsofthsm2.so",
-            "/usr/lib64/softhsm/libsofthsm2.so",
-            "/usr/lib64/pkcs11/libsofthsm2.so",
-            "/usr/lib64/libsofthsm2.so",
-        ])
-        .ok_or_else(|| "libsofthsm2.so not found".to_string())?;
+        let module_path = find_first_existing_path(SOFTHSM2_LIB_CANDIDATES)
+            .ok_or_else(|| "libsofthsm2.so not found".to_string())?;
 
         let temp_dir = tempfile::tempdir().map_err(|e| format!("tempdir failed: {e}"))?;
         let conf_path = temp_dir.path().join("softhsm2.conf");

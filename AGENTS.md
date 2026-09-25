@@ -162,11 +162,20 @@ When adding a new mechanism parameter shape:
 5. Add the C struct reconstruction in `mechanism_to_ffi()` (`ffi/ffi_conversion.rs`)
 6. Add to `mechanism_params_default.toml` for spec-defined mechanisms.
    Vendor-defined mechanisms (e.g. CloudHSM, Thales) belong in the
-   daemon's runtime registry file
-   (`/etc/pkcs11-proxy-ng/mechanism_params.toml` by default, configurable
-   via `[mechanisms].config_path`) and are served to shims over gRPC.
+   daemon's runtime registry file (point `[mechanisms].config_path` at
+   it; the embedded default applies when `[mechanisms].config_path` is
+   unset) and are served to shims over gRPC.
    Vendor mechanisms that reuse an existing parameter shape need no code
    changes — only a TOML entry. New shapes still require steps 1–5 above.
+   Exception — intentionally undocumented mechanisms need no TOML entry:
+   `CK_CMS_SIG_PARAMS` / `CK_X3DH_*` / `CK_X2RATCHET_*` shapes carry
+   unbounded caller pointers the shim must not parse
+   (`do_not_parse_unbounded_caller_pointers_in_shim`), and working-spec
+   names without published `CKM_*` values (`CKM_KMAC128/256`,
+   `CKM_ML_DSA_EXTERNAL_MU[_GEN]`, `CKM_SHAKE_128/256`) must not get
+   project-local numbers (`do_not_assign_project_local_ckm_values`).
+   Record any new intentional omission in
+   `doc/oasis-profile-coverage.md` instead of adding a TOML shape.
 7. Add a round-trip unit test in `proto`
 8. Add a real-backend integration test if possible
 
@@ -192,7 +201,8 @@ fail silently at the FFI boundary with `CKR_MECHANISM_PARAM_INVALID`.
   consumed externally (pkcs11-scope's discover helper) via git dependency.
   Interface-*selection* policy stays in the backend.
 - **Config**: server publishes `MechanismRegistry` over `GetBackendInterfaces`
-  RPC from `/etc/pkcs11-proxy-ng/mechanism_params.toml`. The shim consumes
+  RPC from the file at `[mechanisms].config_path` (the embedded default
+  when `[mechanisms].config_path` is unset). The shim consumes
   it during `interface_probe::ensure_probed()` and falls back to the
   embedded `mechanism_params_default.toml` plus `PKCS11_PROXY_MECHANISMS`
   env override only when the daemon is unreachable or omits the field.

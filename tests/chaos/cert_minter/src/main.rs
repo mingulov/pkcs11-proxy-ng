@@ -17,8 +17,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
 use rcgen::{
-    BasicConstraints, CertificateParams, DistinguishedName, DnType,
-    ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType,
+    BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
+    Issuer, KeyPair, KeyUsagePurpose, SanType,
 };
 use time::{Duration, OffsetDateTime};
 
@@ -72,6 +72,8 @@ fn main() -> Result<()> {
     let ca_cert = ca_params.self_signed(&ca_key)?;
     let ca_pem = ca_cert.pem();
     let ca_key_pem = ca_key.serialize_pem();
+    // rcgen 0.14 signs via an Issuer handle instead of (cert, key) pairs.
+    let ca_issuer = Issuer::from_params(&ca_params, ca_key);
 
     let server_sans = build_sans(&args.server_dns, &args.server_ip)?;
     let mut server_params = CertificateParams::new(Vec::new())?;
@@ -79,36 +81,26 @@ fn main() -> Result<()> {
     server_params.not_before = now;
     server_params.not_after = now + Duration::seconds(args.server_expires_in_seconds);
     server_params.distinguished_name = DistinguishedName::new();
-    server_params
-        .distinguished_name
-        .push(DnType::CommonName, "chaos-daemon");
+    server_params.distinguished_name.push(DnType::CommonName, "chaos-daemon");
     server_params.use_authority_key_identifier_extension = true;
-    server_params.key_usages = vec![
-        KeyUsagePurpose::DigitalSignature,
-        KeyUsagePurpose::KeyEncipherment,
-    ];
-    server_params.extended_key_usages = vec![
-        ExtendedKeyUsagePurpose::ServerAuth,
-        ExtendedKeyUsagePurpose::ClientAuth,
-    ];
+    server_params.key_usages =
+        vec![KeyUsagePurpose::DigitalSignature, KeyUsagePurpose::KeyEncipherment];
+    server_params.extended_key_usages =
+        vec![ExtendedKeyUsagePurpose::ServerAuth, ExtendedKeyUsagePurpose::ClientAuth];
     let server_key = KeyPair::generate()?;
-    let server_cert = server_params.signed_by(&server_key, &ca_cert, &ca_key)?;
+    let server_cert = server_params.signed_by(&server_key, &ca_issuer)?;
 
     let mut client_params = CertificateParams::new(Vec::new())?;
     client_params.not_before = now;
     client_params.not_after = now + Duration::seconds(args.client_expires_in_seconds);
     client_params.distinguished_name = DistinguishedName::new();
-    client_params
-        .distinguished_name
-        .push(DnType::CommonName, "r8-test-client");
+    client_params.distinguished_name.push(DnType::CommonName, "r8-test-client");
     client_params.use_authority_key_identifier_extension = true;
-    client_params.key_usages = vec![
-        KeyUsagePurpose::DigitalSignature,
-        KeyUsagePurpose::KeyEncipherment,
-    ];
+    client_params.key_usages =
+        vec![KeyUsagePurpose::DigitalSignature, KeyUsagePurpose::KeyEncipherment];
     client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
     let client_key = KeyPair::generate()?;
-    let client_cert = client_params.signed_by(&client_key, &ca_cert, &ca_key)?;
+    let client_cert = client_params.signed_by(&client_key, &ca_issuer)?;
 
     write_pem(&args.out_dir, "ca.crt", &ca_pem, 0o644)?;
     write_pem(&args.out_dir, "ca.key", &ca_key_pem, 0o600)?;

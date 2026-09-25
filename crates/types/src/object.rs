@@ -14,6 +14,13 @@ impl CkObjectClass {
     pub const PUBLIC_KEY: Self = Self(0x00000002);
     pub const PRIVATE_KEY: Self = Self(0x00000003);
     pub const SECRET_KEY: Self = Self(0x00000004);
+    // Extended classes: OASIS PKCS#11 v3.2 CKO_* object classes
+    // (pkcs11t.h; values verified against cryptoki-sys 0.5.0). The proxy
+    // already models attributes of HW_FEATURE/MECHANISM/OTP objects.
+    pub const HW_FEATURE: Self = Self(0x00000005);
+    pub const DOMAIN_PARAMETERS: Self = Self(0x00000006);
+    pub const MECHANISM: Self = Self(0x00000007);
+    pub const OTP_KEY: Self = Self(0x00000008);
 
     pub const fn from_vendor(offset: u32) -> Self {
         Self(Self::VENDOR_DEFINED.0 | offset as u64)
@@ -98,6 +105,22 @@ impl CkKeyType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // W1-C9-07: the class table extends past SECRET_KEY(4) for the
+    // HW_FEATURE/DOMAIN_PARAMETERS/MECHANISM/OTP_KEY classes whose
+    // attributes the proxy already models.
+    #[test]
+    fn object_class_table_covers_extended_classes() {
+        assert_eq!(CkObjectClass::DATA.0, 0x00000000);
+        assert_eq!(CkObjectClass::CERTIFICATE.0, 0x00000001);
+        assert_eq!(CkObjectClass::PUBLIC_KEY.0, 0x00000002);
+        assert_eq!(CkObjectClass::PRIVATE_KEY.0, 0x00000003);
+        assert_eq!(CkObjectClass::SECRET_KEY.0, 0x00000004);
+        assert_eq!(CkObjectClass::HW_FEATURE.0, 0x00000005);
+        assert_eq!(CkObjectClass::DOMAIN_PARAMETERS.0, 0x00000006);
+        assert_eq!(CkObjectClass::MECHANISM.0, 0x00000007);
+        assert_eq!(CkObjectClass::OTP_KEY.0, 0x00000008);
+    }
 
     #[test]
     fn object_class_vendor_helpers() {

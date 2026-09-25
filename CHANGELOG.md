@@ -7,8 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-09-20
-
 ### Added
 
 - Local-only, unreleased opt-in gateway authorization: leaf-SPKI identity
@@ -255,8 +253,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- Completed the 2026-06 security review remediation (52 findings, all
-  closed). Highlights: cross-client logical-login PIN validation and
+- Completed the 2026-06-04 full-project review remediation (67 verified
+  findings, all closed). Highlights: cross-client logical-login PIN validation and
   per-request context ownership enforcement (ADR-0009); object handles
   virtualized everywhere, including handles embedded in mechanism
   parameters; injective mTLS identity keys and validation of every

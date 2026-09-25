@@ -27,6 +27,17 @@ pub fn server_tls_config(tcp: &TcpListenerConfig) -> Result<Option<ServerTlsConf
             check_public_file_perms(ca_path, "listener.remote.ca_cert")?;
             check_public_file_perms(cert_path, "listener.remote.server_cert")?;
             check_key_perms(key_path)?;
+            // W1-C3-03: refuse expired / not-yet-valid certificates at
+            // startup. Without this the daemon would serve (or trust) with
+            // bad material indefinitely. The private key is not a
+            // certificate and is intentionally not passed through cert
+            // validation.
+            let ca_subject = super::auth::mtls::validate_cert_file(ca_path)
+                .map_err(|e| format!("listener.remote.ca_cert invalid: {e}"))?;
+            tracing::debug!(subject = %ca_subject, "validated listener.remote.ca_cert");
+            let server_subject = super::auth::mtls::validate_cert_file(cert_path)
+                .map_err(|e| format!("listener.remote.server_cert invalid: {e}"))?;
+            tracing::debug!(subject = %server_subject, "validated listener.remote.server_cert");
             let ca = read_file(ca_path, "listener.remote.ca_cert")?;
             let cert = read_file(cert_path, "listener.remote.server_cert")?;
             // ADR-0013 §5: the PEM key file is adopted into the wiping owner
@@ -194,6 +205,31 @@ mod tests {
 
     use crate::config::{TcpAuthMode, TcpListenerConfig};
 
+    // W1-C3-03 helpers: generate real PEM certificates so the startup path
+    // can validate their validity periods (dummy PEM text cannot).
+    fn gen_pem_with_validity(
+        cn: &str,
+        not_before: ::time::OffsetDateTime,
+        not_after: ::time::OffsetDateTime,
+    ) -> String {
+        use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair};
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, cn);
+        let mut params = CertificateParams::default();
+        params.distinguished_name = dn;
+        params.not_before = not_before;
+        params.not_after = not_after;
+        let key = KeyPair::generate().unwrap();
+        params.self_signed(&key).unwrap().pem()
+    }
+
+    fn write_temp(content: &[u8]) -> tempfile::NamedTempFile {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(content).unwrap();
+        f.flush().unwrap();
+        f
+    }
+
     #[test]
     fn insecure_tcp_has_no_tls_config() {
         let tcp = TcpListenerConfig {
@@ -225,12 +261,22 @@ mod tests {
 
     #[test]
     fn mtls_reads_certificate_files() {
-        let mut ca = tempfile::NamedTempFile::new().unwrap();
-        let mut cert = tempfile::NamedTempFile::new().unwrap();
-        let mut key = tempfile::NamedTempFile::new().unwrap();
-        ca.write_all(b"-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n").unwrap();
-        cert.write_all(b"-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n").unwrap();
-        key.write_all(b"-----BEGIN PRIVATE KEY-----\n-----END PRIVATE KEY-----\n").unwrap();
+        // W1-C3-03: startup validates the certs, so this positive-path test
+        // needs real, currently-valid certificates (not dummy PEM text).
+        let now = ::time::OffsetDateTime::now_utc();
+        let ca_pem = gen_pem_with_validity(
+            "test-ca",
+            now - ::time::Duration::days(30),
+            now + ::time::Duration::days(365),
+        );
+        let cert_pem = gen_pem_with_validity(
+            "test-server",
+            now - ::time::Duration::days(1),
+            now + ::time::Duration::days(365),
+        );
+        let ca = write_temp(ca_pem.as_bytes());
+        let cert = write_temp(cert_pem.as_bytes());
+        let key = write_temp(b"-----BEGIN PRIVATE KEY-----\n-----END PRIVATE KEY-----\n");
 
         // tempfile defaults to 0600 — that's what we need for mTLS keys.
         #[cfg(unix)]
@@ -338,12 +384,22 @@ mod tests {
     #[test]
     fn mtls_allows_world_readable_cert_and_ca() {
         use std::os::unix::fs::PermissionsExt;
-        let mut ca = tempfile::NamedTempFile::new().unwrap();
-        let mut cert = tempfile::NamedTempFile::new().unwrap();
-        let mut key = tempfile::NamedTempFile::new().unwrap();
-        ca.write_all(b"-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n").unwrap();
-        cert.write_all(b"-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n").unwrap();
-        key.write_all(b"-----BEGIN PRIVATE KEY-----\n-----END PRIVATE KEY-----\n").unwrap();
+        // W1-C3-03: startup validates the certs, so this positive-path test
+        // needs real, currently-valid certificates (not dummy PEM text).
+        let now = ::time::OffsetDateTime::now_utc();
+        let ca_pem = gen_pem_with_validity(
+            "test-ca",
+            now - ::time::Duration::days(30),
+            now + ::time::Duration::days(365),
+        );
+        let cert_pem = gen_pem_with_validity(
+            "test-server",
+            now - ::time::Duration::days(1),
+            now + ::time::Duration::days(365),
+        );
+        let ca = write_temp(ca_pem.as_bytes());
+        let cert = write_temp(cert_pem.as_bytes());
+        let key = write_temp(b"-----BEGIN PRIVATE KEY-----\n-----END PRIVATE KEY-----\n");
         // Public material — world-readable is the expected default.
         std::fs::set_permissions(ca.path(), std::fs::Permissions::from_mode(0o644)).unwrap();
         std::fs::set_permissions(cert.path(), std::fs::Permissions::from_mode(0o644)).unwrap();
@@ -358,6 +414,109 @@ mod tests {
             allow_insecure_tcp: false,
         };
 
+        assert!(super::server_tls_config(&tcp).unwrap().is_some());
+    }
+
+    // W1-C3-03: the production startup path (server_tls_config) must
+    // refuse expired / not-yet-valid certificates loudly instead of
+    // starting with them.
+    #[test]
+    fn mtls_startup_refuses_expired_server_cert() {
+        let now = ::time::OffsetDateTime::now_utc();
+        let ca_pem = gen_pem_with_validity(
+            "test-ca",
+            now - ::time::Duration::days(30),
+            now + ::time::Duration::days(365),
+        );
+        let expired_pem = gen_pem_with_validity(
+            "expired-server",
+            now - ::time::Duration::days(365),
+            now - ::time::Duration::hours(1),
+        );
+        let ca = write_temp(ca_pem.as_bytes());
+        let cert = write_temp(expired_pem.as_bytes());
+        let key = write_temp(b"-----BEGIN PRIVATE KEY-----\n-----END PRIVATE KEY-----\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(key.path(), std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let tcp = TcpListenerConfig {
+            bind: "127.0.0.1:7512".into(),
+            auth: TcpAuthMode::Mtls,
+            ca_cert: Some(ca.path().to_path_buf()),
+            server_cert: Some(cert.path().to_path_buf()),
+            server_key: Some(key.path().to_path_buf()),
+            allow_insecure_tcp: false,
+        };
+        let err = super::server_tls_config(&tcp).unwrap_err();
+        assert!(err.contains("expired"), "expired cert must fail startup: {err}");
+        assert!(err.contains("server_cert"), "error must name the field: {err}");
+    }
+
+    #[test]
+    fn mtls_startup_refuses_not_yet_valid_ca_cert() {
+        let now = ::time::OffsetDateTime::now_utc();
+        let future_ca = gen_pem_with_validity(
+            "future-ca",
+            now + ::time::Duration::hours(1),
+            now + ::time::Duration::days(365),
+        );
+        let cert_pem = gen_pem_with_validity(
+            "test-server",
+            now - ::time::Duration::days(1),
+            now + ::time::Duration::days(365),
+        );
+        let ca = write_temp(future_ca.as_bytes());
+        let cert = write_temp(cert_pem.as_bytes());
+        let key = write_temp(b"-----BEGIN PRIVATE KEY-----\n-----END PRIVATE KEY-----\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(key.path(), std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let tcp = TcpListenerConfig {
+            bind: "127.0.0.1:7512".into(),
+            auth: TcpAuthMode::Mtls,
+            ca_cert: Some(ca.path().to_path_buf()),
+            server_cert: Some(cert.path().to_path_buf()),
+            server_key: Some(key.path().to_path_buf()),
+            allow_insecure_tcp: false,
+        };
+        let err = super::server_tls_config(&tcp).unwrap_err();
+        assert!(err.contains("not yet valid"), "future cert must fail startup: {err}");
+        assert!(err.contains("ca_cert"), "error must name the field: {err}");
+    }
+
+    #[test]
+    fn mtls_startup_accepts_valid_bundle() {
+        let now = ::time::OffsetDateTime::now_utc();
+        let ca_pem = gen_pem_with_validity(
+            "test-ca",
+            now - ::time::Duration::days(30),
+            now + ::time::Duration::days(365),
+        );
+        let cert_pem = gen_pem_with_validity(
+            "test-server",
+            now - ::time::Duration::days(1),
+            now + ::time::Duration::days(365),
+        );
+        let ca = write_temp(ca_pem.as_bytes());
+        let cert = write_temp(cert_pem.as_bytes());
+        let key = write_temp(b"-----BEGIN PRIVATE KEY-----\n-----END PRIVATE KEY-----\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(key.path(), std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let tcp = TcpListenerConfig {
+            bind: "127.0.0.1:7512".into(),
+            auth: TcpAuthMode::Mtls,
+            ca_cert: Some(ca.path().to_path_buf()),
+            server_cert: Some(cert.path().to_path_buf()),
+            server_key: Some(key.path().to_path_buf()),
+            allow_insecure_tcp: false,
+        };
         assert!(super::server_tls_config(&tcp).unwrap().is_some());
     }
 

@@ -27,7 +27,9 @@ clap.workspace = true
 # Daemon: server-side transport (`Server::builder().add_service`) needs `server`
 # + `router`; `codegen` for the generated service trait; `tls-ring` for mTLS.
 tonic = { workspace = true, features = ["server", "router", "codegen", "tls-ring"] }
-tokio.workspace = true
+# W1-L16-15: daemon surface — multi-thread runtime + net/io-util + signal
+# (ctrl_c/sigterm/sighup shutdown in main.rs). process is dev-only (below).
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time", "net", "io-util", "signal"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 serde.workspace = true
@@ -50,6 +52,9 @@ http-body = "1"
 http-body-util = "0.1"
 
 [dev-dependencies]
+# W1-L16-15: process only for integration tests (child-process harness);
+# never linked into the shipped daemon.
+tokio = { workspace = true, features = ["test-util", "process"] }
 pkcs11-proxy-ng-client = { path = "../client" }
 hyper = { version = "1", features = ["client", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
@@ -78,3 +83,6 @@ harness = false
 [[bench]]
 name = "registry_payload_size"
 harness = false
+
+[lints]
+workspace = true

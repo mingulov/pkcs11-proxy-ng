@@ -1,3 +1,6 @@
+// W1-L12-03: test diagnostics (skip notices, progress, summaries) go to
+// stderr by design; the workspace lint table denies this sink elsewhere.
+#![allow(clippy::print_stderr)]
 //! End-to-end shim C ABI coverage for HSM-mutated mechanism parameters.
 //!
 //! This test loads `libpkcs11_proxy_ng_shim.so` with `dlopen`, calls through
@@ -17,6 +20,7 @@
 #![allow(clippy::unnecessary_cast)]
 
 mod common_3x;
+mod support;
 
 use std::mem;
 use std::path::{Path, PathBuf};
@@ -27,6 +31,7 @@ use libloading::{Library, Symbol};
 use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
 use pkcs11_proxy_ng_proto::convert::message_params::MessageParameter;
 use pkcs11_proxy_ng_types::{CkMechanismParams, CkMechanismType, CkSlotId, GcmParams};
+use support::{DaemonHarness, ProviderFixture};
 use tokio::sync::Mutex;
 
 type CGetFunctionList = unsafe extern "C" fn(CK_FUNCTION_LIST_PTR_PTR) -> CK_RV;
@@ -253,7 +258,8 @@ async fn loaded_shim_preserves_provider_mechanism_info_flags() {
 
     const CKM_BATON_KEY_GEN: CK_MECHANISM_TYPE = 0x0000_1030;
     const CKM_CAMELLIA_CTR: CK_MECHANISM_TYPE = 0x0000_0558;
-    const CKM_DES_CBC: CK_MECHANISM_TYPE = 0x0000_0122;
+    // W1-C9-06: bridge the canonical types const (no local hex).
+    const CKM_DES_CBC: CK_MECHANISM_TYPE = CkMechanismType::DES_CBC.0 as CK_MECHANISM_TYPE;
 
     let backend = Arc::new(MockBackend::new(
         vec![CkSlotId(0)],
@@ -1848,4 +1854,283 @@ async fn loaded_shim_sign_verify_message_preserves_empty_parameter_classes_once_
         assert_eq!(c_close_session(session), CKR_OK as CK_RV);
         assert_eq!(c_finalize(std::ptr::null_mut()), CKR_OK as CK_RV);
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a built libpkcs11_proxy_ng_shim.so and the patched SoftHSM2 GCM-IV sim lib (SOFTHSM2_GCM_IV_SIM_LIB)"]
+#[allow(clippy::unnecessary_cast)] // CK_ULONG is 32 or 64 bits across supported ABIs.
+async fn loaded_shim_writes_back_real_backend_gcm_iv_to_caller_stack() -> Result<(), String> {
+    // W1-L9-12: the GCM generated-IV writeback path proven against a REAL
+    // backend (the patched-SoftHSM2 simulator from mechanism_out_gcm_iv_test),
+    // not MockBackend-only. The caller's stack-owned CK_GCM_PARAMS.pIv must
+    // receive the provider-generated IV, asserted byte-identical to native:
+    // the written-back bytes must decrypt the ciphertext (GCM authentication
+    // fails on any single-bit difference, so a successful round-trip proves
+    // the shim forwarded the exact native bytes without reconstruction).
+    let _guard = SHIM_C_ABI_LOCK.get_or_init(|| Mutex::new(())).lock().await;
+    let Some(shim_path) = find_shim_library() else {
+        eprintln!(
+            "[shim_c_abi_mechanism_out_test] shim library not found; \
+             run cargo build -p pkcs11-proxy-ng-shim first"
+        );
+        return Ok(());
+    };
+    let Some(sim_lib) = std::env::var_os("SOFTHSM2_GCM_IV_SIM_LIB") else {
+        eprintln!(
+            "[shim_c_abi_mechanism_out_test] SOFTHSM2_GCM_IV_SIM_LIB not set; \
+             this test needs the patched SoftHSM2 GCM-IV simulator (see \
+             mechanism_out_gcm_iv_test.rs header for build instructions)"
+        );
+        return Ok(());
+    };
+
+    let fixture = ProviderFixture::soft_hsm_with_module(Some(PathBuf::from(sim_lib))).await?;
+    let daemon = DaemonHarness::start(&fixture).await?;
+    let _endpoint_guard = EnvRestore::set("PKCS11_PROXY_ENDPOINT", daemon.endpoint());
+
+    unsafe {
+        let lib = Library::new(&shim_path).expect("dlopen shim library");
+        let c_get_function_list: Symbol<CGetFunctionList> =
+            lib.get(b"C_GetFunctionList\0").expect("C_GetFunctionList symbol");
+        let mut function_list: CK_FUNCTION_LIST_PTR = std::ptr::null_mut();
+        assert_eq!(c_get_function_list(&mut function_list), CKR_OK as CK_RV, "C_GetFunctionList");
+        assert!(!function_list.is_null(), "C_GetFunctionList returned null");
+        let functions = &*function_list;
+
+        let c_initialize = functions.C_Initialize.expect("C_Initialize");
+        let c_finalize = functions.C_Finalize.expect("C_Finalize");
+        let _finalize_on_drop = FinalizeOnDrop(c_finalize);
+        let c_get_slot_list = functions.C_GetSlotList.expect("C_GetSlotList");
+        let c_open_session = functions.C_OpenSession.expect("C_OpenSession");
+        let c_close_session = functions.C_CloseSession.expect("C_CloseSession");
+        let c_login = functions.C_Login.expect("C_Login");
+        let c_logout = functions.C_Logout.expect("C_Logout");
+        let c_generate_key = functions.C_GenerateKey.expect("C_GenerateKey");
+        let c_encrypt_init = functions.C_EncryptInit.expect("C_EncryptInit");
+        let c_encrypt = functions.C_Encrypt.expect("C_Encrypt");
+        let c_decrypt_init = functions.C_DecryptInit.expect("C_DecryptInit");
+        let c_decrypt = functions.C_Decrypt.expect("C_Decrypt");
+
+        assert_eq!(c_initialize(std::ptr::null_mut()), CKR_OK as CK_RV, "C_Initialize");
+
+        let mut slot_count: CK_ULONG = 0;
+        assert_eq!(
+            c_get_slot_list(CK_TRUE, std::ptr::null_mut(), &mut slot_count),
+            CKR_OK as CK_RV,
+            "C_GetSlotList(size)"
+        );
+        assert!(slot_count > 0, "sim fixture must expose a token slot");
+        let mut slots = vec![0 as CK_SLOT_ID; slot_count as usize];
+        assert_eq!(
+            c_get_slot_list(CK_TRUE, slots.as_mut_ptr(), &mut slot_count),
+            CKR_OK as CK_RV,
+            "C_GetSlotList(data)"
+        );
+
+        let mut session: CK_SESSION_HANDLE = 0;
+        assert_eq!(
+            c_open_session(
+                slots[0],
+                CKF_SERIAL_SESSION | CKF_RW_SESSION,
+                std::ptr::null_mut(),
+                None,
+                &mut session,
+            ),
+            CKR_OK as CK_RV,
+            "C_OpenSession"
+        );
+        let user_pin = fixture.user_pin.as_bytes();
+        assert_eq!(
+            c_login(
+                session,
+                CKU_USER,
+                user_pin.as_ptr() as CK_UTF8CHAR_PTR,
+                user_pin.len() as CK_ULONG
+            ),
+            CKR_OK as CK_RV,
+            "C_Login(USER)"
+        );
+
+        // Session AES-128 key for the GCM round-trip.
+        let mut class = CKO_SECRET_KEY;
+        let mut key_type = CKK_AES;
+        let mut value_len: CK_ULONG = 16;
+        let mut encrypt_flag = CK_TRUE;
+        let mut decrypt_flag = CK_TRUE;
+        let mut token_flag = CK_FALSE;
+        let mut key_template = [
+            CK_ATTRIBUTE {
+                type_: CKA_CLASS,
+                pValue: &mut class as *mut CK_OBJECT_CLASS as CK_VOID_PTR,
+                ulValueLen: mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
+            },
+            CK_ATTRIBUTE {
+                type_: CKA_KEY_TYPE,
+                pValue: &mut key_type as *mut CK_KEY_TYPE as CK_VOID_PTR,
+                ulValueLen: mem::size_of::<CK_KEY_TYPE>() as CK_ULONG,
+            },
+            CK_ATTRIBUTE {
+                type_: CKA_VALUE_LEN,
+                pValue: &mut value_len as *mut CK_ULONG as CK_VOID_PTR,
+                ulValueLen: mem::size_of::<CK_ULONG>() as CK_ULONG,
+            },
+            CK_ATTRIBUTE {
+                type_: CKA_TOKEN,
+                pValue: &mut token_flag as *mut CK_BBOOL as CK_VOID_PTR,
+                ulValueLen: mem::size_of::<CK_BBOOL>() as CK_ULONG,
+            },
+            CK_ATTRIBUTE {
+                type_: CKA_ENCRYPT,
+                pValue: &mut encrypt_flag as *mut CK_BBOOL as CK_VOID_PTR,
+                ulValueLen: mem::size_of::<CK_BBOOL>() as CK_ULONG,
+            },
+            CK_ATTRIBUTE {
+                type_: CKA_DECRYPT,
+                pValue: &mut decrypt_flag as *mut CK_BBOOL as CK_VOID_PTR,
+                ulValueLen: mem::size_of::<CK_BBOOL>() as CK_ULONG,
+            },
+        ];
+        let mut keygen_mechanism = CK_MECHANISM {
+            mechanism: CKM_AES_KEY_GEN,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        let mut key: CK_OBJECT_HANDLE = 0;
+        assert_eq!(
+            c_generate_key(
+                session,
+                &mut keygen_mechanism,
+                key_template.as_mut_ptr(),
+                key_template.len() as CK_ULONG,
+                &mut key,
+            ),
+            CKR_OK as CK_RV,
+            "C_GenerateKey(AES-128)"
+        );
+
+        // AWS convention: 12-byte zeroed pIv buffer, ulIvLen = capacity,
+        // ulIvBits = 0. The simulator generates the IV and the shim must
+        // write it back into this caller-stack buffer.
+        let mut iv_buffer = [0_u8; 12];
+        let mut gcm = CK_GCM_PARAMS {
+            pIv: iv_buffer.as_mut_ptr(),
+            ulIvLen: iv_buffer.len() as CK_ULONG,
+            ulIvBits: 0,
+            pAAD: std::ptr::null_mut(),
+            ulAADLen: 0,
+            ulTagBits: 128,
+        };
+        let mut mechanism = CK_MECHANISM {
+            mechanism: CKM_AES_GCM,
+            pParameter: &mut gcm as *mut CK_GCM_PARAMS as CK_VOID_PTR,
+            ulParameterLen: mem::size_of::<CK_GCM_PARAMS>() as CK_ULONG,
+        };
+        assert_eq!(
+            c_encrypt_init(session, &mut mechanism, key),
+            CKR_OK as CK_RV,
+            "C_EncryptInit(GCM generated-IV)"
+        );
+
+        let plaintext = b"real-backend caller-stack IV proof";
+        let mut ciphertext_len: CK_ULONG = 0;
+        assert_eq!(
+            c_encrypt(
+                session,
+                plaintext.as_ptr() as CK_BYTE_PTR,
+                plaintext.len() as CK_ULONG,
+                std::ptr::null_mut(),
+                &mut ciphertext_len,
+            ),
+            CKR_OK as CK_RV,
+            "C_Encrypt(size)"
+        );
+        let mut ciphertext = vec![0_u8; ciphertext_len as usize];
+        assert_eq!(
+            c_encrypt(
+                session,
+                plaintext.as_ptr() as CK_BYTE_PTR,
+                plaintext.len() as CK_ULONG,
+                ciphertext.as_mut_ptr(),
+                &mut ciphertext_len,
+            ),
+            CKR_OK as CK_RV,
+            "C_Encrypt(data)"
+        );
+        ciphertext.truncate(ciphertext_len as usize);
+        assert_eq!(
+            ciphertext.len(),
+            plaintext.len() + 16,
+            "GCM ciphertext = plaintext + 16-byte tag"
+        );
+
+        // Caller-stack assertion: the provider-generated IV reached the
+        // caller's buffer (not zeros, full length reported).
+        assert_ne!(iv_buffer, [0_u8; 12], "real-backend IV must reach the caller stack");
+        let (iv_len, iv_bits) = (gcm.ulIvLen, gcm.ulIvBits);
+        assert_eq!(iv_len, 12, "written-back IV length");
+        assert!(
+            iv_bits == 96 || iv_bits == 0,
+            "written-back IV bits must be 96 (or 0 when the provider reports length only), got {iv_bits}"
+        );
+
+        // Byte-identical-to-native proof: decrypt with the exact
+        // written-back caller-stack bytes. GCM authentication fails on any
+        // single-bit difference, so a successful round-trip proves the shim
+        // forwarded the native bytes without reconstruction.
+        let mut decrypt_gcm = CK_GCM_PARAMS {
+            pIv: iv_buffer.as_mut_ptr(),
+            ulIvLen: iv_buffer.len() as CK_ULONG,
+            ulIvBits: 96,
+            pAAD: std::ptr::null_mut(),
+            ulAADLen: 0,
+            ulTagBits: 128,
+        };
+        let mut decrypt_mechanism = CK_MECHANISM {
+            mechanism: CKM_AES_GCM,
+            pParameter: &mut decrypt_gcm as *mut CK_GCM_PARAMS as CK_VOID_PTR,
+            ulParameterLen: mem::size_of::<CK_GCM_PARAMS>() as CK_ULONG,
+        };
+        assert_eq!(
+            c_decrypt_init(session, &mut decrypt_mechanism, key),
+            CKR_OK as CK_RV,
+            "C_DecryptInit(written-back IV)"
+        );
+        let mut recovered_len: CK_ULONG = 0;
+        assert_eq!(
+            c_decrypt(
+                session,
+                ciphertext.as_ptr() as CK_BYTE_PTR,
+                ciphertext.len() as CK_ULONG,
+                std::ptr::null_mut(),
+                &mut recovered_len,
+            ),
+            CKR_OK as CK_RV,
+            "C_Decrypt(size)"
+        );
+        let mut recovered = vec![0_u8; recovered_len as usize];
+        assert_eq!(
+            c_decrypt(
+                session,
+                ciphertext.as_ptr() as CK_BYTE_PTR,
+                ciphertext.len() as CK_ULONG,
+                recovered.as_mut_ptr(),
+                &mut recovered_len,
+            ),
+            CKR_OK as CK_RV,
+            "C_Decrypt(data)"
+        );
+        recovered.truncate(recovered_len as usize);
+        assert_eq!(
+            recovered.as_slice(),
+            plaintext.as_slice(),
+            "written-back IV must decrypt the ciphertext byte-identically"
+        );
+
+        assert_eq!(c_logout(session), CKR_OK as CK_RV, "C_Logout");
+        assert_eq!(c_close_session(session), CKR_OK as CK_RV, "C_CloseSession");
+        assert_eq!(c_finalize(std::ptr::null_mut()), CKR_OK as CK_RV, "C_Finalize");
+    }
+
+    daemon.shutdown().await?;
+    Ok(())
 }

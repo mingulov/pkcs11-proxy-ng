@@ -1,3 +1,6 @@
+// W1-L12-03: test diagnostics (skip notices, progress, summaries) go to
+// stderr by design; the workspace lint table denies this sink elsewhere.
+#![allow(clippy::print_stderr)]
 //! Consumer interoperability tests using OpenSC `pkcs11-tool`.
 //!
 //! These tests start a real SoftHSM2-backed daemon, point `pkcs11-tool`

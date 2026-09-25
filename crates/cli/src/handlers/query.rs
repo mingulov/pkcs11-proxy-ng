@@ -81,11 +81,14 @@ pub(crate) async fn get_info(client: &mut Pkcs11Client) -> CliResult {
 pub(crate) async fn session_info(
     client: &mut Pkcs11Client,
     slot_id: u64,
-    pin: Option<String>,
+    pin: Option<SecretBytes>,
 ) -> CliResult {
     let session =
         open_session(client, slot_id, CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await?;
-    login_if_present(client, session, pin.as_deref()).await?;
+    // By-value PIN (W1-L2-11): consume it into login, keep only the
+    // logged-in flag for session teardown.
+    let logged_in = pin.is_some();
+    login_if_present(client, session, pin).await?;
     let info = client
         .get_session_info(session)
         .await
@@ -102,8 +105,25 @@ pub(crate) async fn session_info(
     println!("  State:        {state_name}");
     println!("  Flags:        0x{:08X}", info.flags.0);
     println!("  Device error: 0x{:08X}", info.device_error);
-    close_session(client, session, pin.is_some()).await;
+    close_session(client, session, logged_in).await;
     Ok(())
+}
+
+/// Output encodings for `random` (W1-C11-06).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RandomFormat {
+    Hex,
+    Base64,
+}
+
+/// Parse `--format`, rejecting unknown values loudly instead of
+/// falling through to hex.
+pub(super) fn parse_random_format(format: &str) -> Result<RandomFormat, String> {
+    match format.to_lowercase().as_str() {
+        "hex" => Ok(RandomFormat::Hex),
+        "base64" => Ok(RandomFormat::Base64),
+        other => Err(format!("unknown --format '{other}' (valid: hex, base64)")),
+    }
 }
 
 pub(crate) async fn random(
@@ -112,21 +132,48 @@ pub(crate) async fn random(
     len: u32,
     format: String,
 ) -> CliResult {
+    // W1-C11-06: validate before any session/RPC work so a typo'd
+    // format fails fast with the valid list.
+    let format =
+        parse_random_format(&format).map_err(|e| -> Box<dyn core::error::Error> { e.into() })?;
     let session =
         open_session(client, slot_id, CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await?;
     let data = client
         .generate_random(session, len)
         .await
         .map_err(crate::handlers::cli_err("C_GenerateRandom"))?;
-    match format.to_lowercase().as_str() {
-        "base64" => {
+    match format {
+        RandomFormat::Base64 => {
             use std::io::Write;
             let encoded = BASE64_STANDARD.encode(&data);
             std::io::stdout().write_all(encoded.as_bytes()).ok();
             println!();
         }
-        _ => println!("{}", hex::encode(&data)),
+        RandomFormat::Hex => println!("{}", hex::encode(&data)),
     }
     close_session(client, session, false).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_random_format;
+
+    // W1-C11-06: valid formats (case-insensitive) parse; anything else
+    // errors loudly listing the valid values instead of silent-hex.
+    #[test]
+    fn random_format_accepts_hex_and_base64() {
+        assert!(parse_random_format("hex").is_ok());
+        assert!(parse_random_format("HEX").is_ok());
+        assert!(parse_random_format("base64").is_ok());
+        assert!(parse_random_format("Base64").is_ok());
+    }
+
+    #[test]
+    fn random_format_rejects_unknown_values_loudly() {
+        let err = parse_random_format("b64").unwrap_err();
+        assert!(err.contains("b64"), "must echo the bad value: {err}");
+        assert!(err.contains("hex"), "must list valid formats: {err}");
+        assert!(err.contains("base64"), "must list valid formats: {err}");
+    }
 }

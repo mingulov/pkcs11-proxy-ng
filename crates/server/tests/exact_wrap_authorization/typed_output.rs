@@ -192,7 +192,7 @@ async fn authenticated_typed_sdk_roundtrips_ordinary_exact_and_unwrap_over_mtls(
         params: Some(CkMechanismParams::Gostr3410KeyWrap(Gostr3410KeyWrapParams {
             wrap_oid: vec![1; 3],
             ukm: vec![2; 8],
-            key_handle: key.0,
+            key_handle: key,
         })),
     };
     let (wrapped, output) = client

@@ -296,6 +296,7 @@ pub(crate) async fn verify_recover_init(
     }))
 }
 
+// NOTE: legacy per-op RPC (W1-L11-21 retention; see service.proto) — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
 pub(crate) async fn verify_recover(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::VerifyRecoverRequest>,

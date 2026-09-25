@@ -396,6 +396,87 @@ async fn evict_expired_keeps_recently_active_context() {
 }
 
 #[tokio::test]
+async fn evict_expired_bounded_under_wedged_backend() {
+    // W1-C2-03: a backend wedged on logout AND close must not stall lease
+    // reaping — eviction completes within the teardown bound and the
+    // context does not accumulate.
+    use pkcs11_proxy_ng_backend::MockBackend;
+    use pkcs11_proxy_ng_backend::Pkcs11Backend as _;
+
+    let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+    mock.initialize().unwrap();
+    // Wedge both teardown calls far beyond the test timeout. (The test
+    // runtime waits for parked blocking threads, so keep the wedge short.)
+    mock.set_close_session_delay(std::time::Duration::from_secs(3));
+    mock.set_logout_delay(std::time::Duration::from_secs(3));
+    let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = Arc::clone(&mock) as _;
+
+    let mgr = ContextManager::new(std::time::Duration::from_secs(0), 0);
+    mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let id = mgr.create_context(None).await.unwrap();
+    // Give the context a backend session and a login so teardown has both
+    // a session to close and a last-holder logout to attempt.
+    let session =
+        mock.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).unwrap();
+    mock.login(session, CkUserType::User, Some(b"1234")).unwrap();
+    mgr.get_context(&id, |ctx| {
+        ctx.register_session(
+            BackendHandle(session.0),
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+        );
+        ctx.login_state
+            .insert(crate::server::slot_map::BackendSlotId(CkSlotId(0)), LoginState::User);
+    })
+    .await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    let start = std::time::Instant::now();
+    let evicted =
+        mgr.evict_expired_with_timeout(&backend, std::time::Duration::from_millis(100)).await;
+    let elapsed = start.elapsed();
+
+    assert!(evicted.contains(&id), "wedged context must still be reaped");
+    assert!(mgr.get_context(&id, |_| ()).await.is_none(), "reaped context must not accumulate");
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "eviction must be bounded, took {elapsed:?} against a 3s-wedged backend"
+    );
+    mock.clear_close_session_delay();
+    mock.clear_logout_delay();
+}
+
+#[tokio::test]
+async fn evict_expired_closes_backend_sessions() {
+    // W1-C2-03 (no-regression): bounded teardown still reaps backend
+    // sessions on a healthy backend.
+    use pkcs11_proxy_ng_backend::MockBackend;
+    use pkcs11_proxy_ng_backend::Pkcs11Backend as _;
+
+    let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+    mock.initialize().unwrap();
+    let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = Arc::clone(&mock) as _;
+
+    let mgr = ContextManager::new(std::time::Duration::from_secs(0), 0);
+    mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let id = mgr.create_context(None).await.unwrap();
+    let session =
+        mock.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).unwrap();
+    mgr.get_context(&id, |ctx| {
+        ctx.register_session(
+            BackendHandle(session.0),
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+        );
+    })
+    .await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    let evicted = mgr.evict_expired(&backend).await;
+    assert!(evicted.contains(&id));
+    assert_eq!(mock.open_session_count(), 0, "backend session must be reaped");
+    assert_eq!(mock.close_session_call_count(), 1);
+}
+
+#[tokio::test]
 async fn evict_expired_skips_context_with_in_flight_operation() {
     use pkcs11_proxy_ng_backend::MockBackend;
     use pkcs11_proxy_ng_types::CkMechanismType;
@@ -664,16 +745,35 @@ async fn object_metadata_session_object_round_trip() {
 }
 
 #[tokio::test]
-async fn object_metadata_token_object_not_cached() {
-    // I2 fix: token objects (is_token=true) must never be stored in the cache.
+async fn object_metadata_token_object_cached_within_generation() {
+    // W1-L13-18: token objects (is_token=true) ARE cached, gated by the
+    // authz generation — reuse within the generation avoids a backend
+    // round-trip; revocation invalidates. Session-object entries are
+    // generation-independent and survive revocation.
     let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
     let ctx_id = mgr.create_context(None).await.unwrap();
     let uid = vec![0xde, 0xad, 0xbe, 0xef];
-    mgr.cache_object_metadata(&ctx_id, 9, make_token_meta(uid)).await;
+    mgr.cache_object_metadata(&ctx_id, 9, make_token_meta(uid.clone())).await;
+    assert_eq!(
+        mgr.object_metadata(&ctx_id, 9).await.map(|m| m.unique_id),
+        Some(SecretBytes::new(uid)),
+        "token object metadata must be cached within the authz generation"
+    );
+
+    // A session-object entry in the same context is generation-independent.
+    mgr.cache_object_metadata(&ctx_id, 7, make_session_meta(vec![0xaa])).await;
+
+    // Revocation invalidates the token entry (eagerly dropped: reads as a
+    // miss) while the session entry survives.
+    mgr.revoke_authz_generation();
     assert_eq!(
         mgr.object_metadata(&ctx_id, 9).await.map(|m| m.unique_id),
         None,
-        "token object metadata must not be cached (I2 fix: re-fetched every gate call)"
+        "revoking the authz generation must invalidate cached token metadata"
+    );
+    assert!(
+        mgr.object_metadata(&ctx_id, 7).await.is_some(),
+        "revocation must not evict session-object entries"
     );
 }
 
@@ -1117,4 +1217,89 @@ async fn terminal_old_close_completion_cannot_remove_recycled_session_binding() 
         .await
         .unwrap();
     assert_eq!(state, (None, None, Some(backend), Some(new)));
+}
+
+/// W1-L6-04: concurrent reservers cannot exceed the cap — the
+/// check-and-reserve is atomic under one lock.
+#[tokio::test(flavor = "multi_thread")]
+async fn session_quota_reservation_hammer_never_exceeds_cap() {
+    let mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    let ctx_id = mgr.create_context(Some("hammer-principal".to_owned())).await.unwrap();
+    let _ctx_id = ctx_id;
+
+    const MAX: usize = 8;
+    const RACERS: usize = 32;
+    let barrier = Arc::new(tokio::sync::Barrier::new(RACERS));
+    let handles: Vec<_> = (0..RACERS)
+        .map(|_| {
+            let mgr = Arc::clone(&mgr);
+            let barrier = Arc::clone(&barrier);
+            tokio::spawn(async move {
+                barrier.wait().await;
+                mgr.try_reserve_session_for_principal("hammer-principal", MAX)
+            })
+        })
+        .collect();
+    let mut granted = Vec::new();
+    for handle in handles {
+        if let Some(reservation) = handle.await.unwrap() {
+            granted.push(reservation);
+        }
+    }
+    assert_eq!(granted.len(), MAX, "exactly MAX concurrent reservations must be granted, no more");
+    // Still at cap while all are held.
+    assert!(
+        mgr.try_reserve_session_for_principal("hammer-principal", MAX).is_none(),
+        "cap must hold while every reservation is outstanding"
+    );
+    drop(granted);
+    // Released reservations free the cap again.
+    assert!(
+        mgr.try_reserve_session_for_principal("hammer-principal", MAX).is_some(),
+        "dropping reservations must free quota"
+    );
+}
+
+/// W1-L6-04: live sessions count toward the same cap as reservations.
+#[tokio::test]
+async fn session_quota_reservation_accounts_live_sessions() {
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let ctx_id = mgr.create_context(Some("live-principal".to_owned())).await.unwrap();
+    let slot = BackendSlotId(CkSlotId(0));
+    mgr.get_context(&ctx_id, |ctx| {
+        ctx.register_session(BackendHandle(11), slot);
+        ctx.register_session(BackendHandle(12), slot);
+    })
+    .await
+    .unwrap();
+
+    // Two live sessions: max=2 admits nothing further…
+    assert!(
+        mgr.try_reserve_session_for_principal("live-principal", 2).is_none(),
+        "live sessions must count toward the cap"
+    );
+    // …max=3 admits exactly one reservation…
+    let reservation =
+        mgr.try_reserve_session_for_principal("live-principal", 3).expect("one slot free");
+    assert!(mgr.try_reserve_session_for_principal("live-principal", 3).is_none());
+    // …and releasing it re-opens that slot.
+    drop(reservation);
+    assert!(mgr.try_reserve_session_for_principal("live-principal", 3).is_some());
+}
+
+/// W1-L6-04: reservations are per-principal — one principal at cap does
+/// not affect another.
+#[tokio::test]
+async fn session_quota_reservations_are_per_principal() {
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let _a = mgr.create_context(Some("quota-alice".to_owned())).await.unwrap();
+    let _b = mgr.create_context(Some("quota-bob".to_owned())).await.unwrap();
+
+    let held = mgr.try_reserve_session_for_principal("quota-alice", 1).expect("alice slot");
+    assert!(mgr.try_reserve_session_for_principal("quota-alice", 1).is_none());
+    assert!(
+        mgr.try_reserve_session_for_principal("quota-bob", 1).is_some(),
+        "bob must be unaffected by alice's exhausted quota"
+    );
+    drop(held);
 }

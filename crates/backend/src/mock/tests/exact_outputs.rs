@@ -333,7 +333,7 @@ fn encapsulate_key_returns_live_key_with_template_attributes() {
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
     let public_key = live_key(&backend, session);
-    let mechanism = CkMechanism { mechanism_type: CkMechanismType(0x0000_0017), params: None };
+    let mechanism = CkMechanism { mechanism_type: CkMechanismType::ML_KEM, params: None };
 
     let (ciphertext, encapsulated_key) = backend
         .encapsulate_key(
@@ -370,7 +370,7 @@ fn encapsulate_key_exact_data_query_returns_live_key_with_template_attributes() 
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
     let public_key = live_key(&backend, session);
-    let mechanism = CkMechanism { mechanism_type: CkMechanismType(0x0000_0017), params: None };
+    let mechanism = CkMechanism { mechanism_type: CkMechanismType::ML_KEM, params: None };
 
     let result = backend
         .encapsulate_key_exact(
@@ -410,7 +410,7 @@ fn encapsulate_key_exact_non_data_queries_do_not_allocate_key() {
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
     let public_key = live_key(&backend, session);
-    let mechanism = CkMechanism { mechanism_type: CkMechanismType(0x0000_0017), params: None };
+    let mechanism = CkMechanism { mechanism_type: CkMechanismType::ML_KEM, params: None };
 
     let size_query = backend
         .encapsulate_key_exact(

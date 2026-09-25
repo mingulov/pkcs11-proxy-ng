@@ -28,8 +28,8 @@ fn official_mechanism_mock_advertises_provider_gap_mechanisms() {
     let advertised = backend.get_mechanism_list(CkSlotId(0)).unwrap();
 
     assert_eq!(advertised, pkcs11_3_2_official_mechanisms());
-    assert!(advertised.contains(&CkMechanismType(0x0000_001F))); // CKM_HASH_ML_DSA
-    assert!(advertised.contains(&CkMechanismType(0x0000_002E))); // CKM_SLH_DSA
+    assert!(advertised.contains(&CkMechanismType::HASH_ML_DSA)); // CKM_HASH_ML_DSA
+    assert!(advertised.contains(&CkMechanismType::SLH_DSA)); // CKM_SLH_DSA
     assert!(advertised.contains(&CkMechanismType(0x0000_03D5))); // CKM_WTLS_CLIENT_KEY_AND_MAC_DERIVE
     assert!(advertised.contains(&CkMechanismType(0x0000_4037))); // CKM_XMSSMT
 }
@@ -404,7 +404,7 @@ fn gcm_wrap_iv_generation_is_deterministic_and_preserves_fixed_prefix() {
         params: Some(CkMechanismParams::GcmWrap(GcmWrapParams {
             iv: vec![0xA1, 0xA2, 0xA3, 0xA4, 0, 0, 0, 0, 0, 0, 0, 0],
             iv_fixed_bits: 32,
-            iv_generator: 4, // CKG_GENERATE_RANDOM
+            iv_generator: CkGeneratorFunction::GENERATE_COUNTER_XOR, // CKG_GENERATE_COUNTER_XOR (4)
             aad: vec![].into(),
             tag_bits: 128,
         })),
@@ -430,7 +430,7 @@ fn gcm_wrap_iv_generation_is_deterministic_and_preserves_fixed_prefix() {
         params: Some(CkMechanismParams::GcmWrap(GcmWrapParams {
             iv: vec![0; 12],
             iv_fixed_bits: 0,
-            iv_generator: 1, // CKG_NO_GENERATE
+            iv_generator: CkGeneratorFunction::GENERATE, // CKG_GENERATE (1)
             aad: vec![].into(),
             tag_bits: 128,
         })),

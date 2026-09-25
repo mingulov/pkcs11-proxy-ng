@@ -1,6 +1,9 @@
 # ADR-0014: Re-admit Windows native and 32-bit/mixed scope to the v0.2.0 tail stretch
 
 - **Status:** Implemented (2026-09-17)
+- **Amended (in part):** 2026-09-20 — Linux ARM64 runtime claims
+  re-admitted (native-FFI qualification extended to Linux aarch64;
+  cross-platform ubuntu-26.04-arm leg blocking with full compare).
 - **Reverses (in part):** the 2026-09-13 P0 amendment deferral of Windows
   native-provider daemon support (ADR-0011/ADR-0006) and of the 32-bit/mixed
   support claim (`doc/release/beta-support-matrix.md`).
@@ -30,9 +33,9 @@ full matrix validates the new legs), with publication last:
 4. **32-bit/mixed support claim**: Linux i686 runtime qualification beyond
    the single `softhsm2-i386` lane plus the four §9 ABI topologies.
 
-Still excluded from v0.2.0: Windows GNU, Linux ARM64 runtime claims
-(native FFI fail-closes on aarch64 by design; the cross-platform leg
-stays experimental there), and Wine as conformance evidence. 32-bit
+Still excluded from v0.2.0: Windows GNU and Wine as conformance
+evidence (Linux ARM64 runtime claims were re-admitted 2026-09-20:
+qualification extended, ARM leg blocking). 32-bit
 Windows (PE32) is qualified at the win32 CI tier: `i686-pc-windows-msvc`
 build, lib suites executed on WOW64, and a stub C provider compiled
 with x86 `cl.exe` live-loaded through `FfiBackend::load`

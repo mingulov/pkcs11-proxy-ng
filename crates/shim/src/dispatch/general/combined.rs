@@ -1,8 +1,7 @@
 use cryptoki_sys::*;
 use pkcs11_proxy_ng_types::*;
 
-#[allow(unused_imports)]
-use super::*;
+use super::helpers::{catch_panics, dispatch_byte_output_exact};
 
 pub unsafe extern "C" fn c_digest_encrypt_update(
     h_session: CK_SESSION_HANDLE,
@@ -11,27 +10,15 @@ pub unsafe extern "C" fn c_digest_encrypt_update(
     p_encrypted_part: CK_BYTE_PTR,
     pul_encrypted_part_len: CK_ULONG_PTR,
 ) -> CK_RV {
-    catch_panics(|| {
-        let part = match input_buf_to_ck_in_buf(unsafe { classify_input(p_part, ul_part_len) }) {
-            Ok(buf) => buf,
-            Err(e) => return rv_err(e),
-        };
-        let spec = unsafe { output_buffer_spec(p_encrypted_part, pul_encrypted_part_len) };
-        let result = with_client!(client => client.byte_output_exact(
-            CkSessionHandle(h_session as u64),
+    catch_panics(|| unsafe {
+        dispatch_byte_output_exact(
+            h_session,
             ByteOutputFunction::DigestEncryptUpdate,
-            &spec,
-            part,
-            None,
-            0,
-            0,
-        ));
-        match result {
-            Ok(r) => unsafe {
-                write_exact_output(&spec, &r, p_encrypted_part, pul_encrypted_part_len)
-            },
-            Err(e) => rv_err(e),
-        }
+            p_part,
+            ul_part_len,
+            p_encrypted_part,
+            pul_encrypted_part_len,
+        )
     })
 }
 
@@ -42,27 +29,15 @@ pub unsafe extern "C" fn c_decrypt_digest_update(
     p_part: CK_BYTE_PTR,
     pul_part_len: CK_ULONG_PTR,
 ) -> CK_RV {
-    catch_panics(|| {
-        let encrypted_part = match input_buf_to_ck_in_buf(unsafe {
-            classify_input(p_encrypted_part, ul_encrypted_part_len)
-        }) {
-            Ok(buf) => buf,
-            Err(e) => return rv_err(e),
-        };
-        let spec = unsafe { output_buffer_spec(p_part, pul_part_len) };
-        let result = with_client!(client => client.byte_output_exact(
-            CkSessionHandle(h_session as u64),
+    catch_panics(|| unsafe {
+        dispatch_byte_output_exact(
+            h_session,
             ByteOutputFunction::DecryptDigestUpdate,
-            &spec,
-            encrypted_part,
-            None,
-            0,
-            0,
-        ));
-        match result {
-            Ok(r) => unsafe { write_exact_output(&spec, &r, p_part, pul_part_len) },
-            Err(e) => rv_err(e),
-        }
+            p_encrypted_part,
+            ul_encrypted_part_len,
+            p_part,
+            pul_part_len,
+        )
     })
 }
 
@@ -73,27 +48,15 @@ pub unsafe extern "C" fn c_sign_encrypt_update(
     p_encrypted_part: CK_BYTE_PTR,
     pul_encrypted_part_len: CK_ULONG_PTR,
 ) -> CK_RV {
-    catch_panics(|| {
-        let part = match input_buf_to_ck_in_buf(unsafe { classify_input(p_part, ul_part_len) }) {
-            Ok(buf) => buf,
-            Err(e) => return rv_err(e),
-        };
-        let spec = unsafe { output_buffer_spec(p_encrypted_part, pul_encrypted_part_len) };
-        let result = with_client!(client => client.byte_output_exact(
-            CkSessionHandle(h_session as u64),
+    catch_panics(|| unsafe {
+        dispatch_byte_output_exact(
+            h_session,
             ByteOutputFunction::SignEncryptUpdate,
-            &spec,
-            part,
-            None,
-            0,
-            0,
-        ));
-        match result {
-            Ok(r) => unsafe {
-                write_exact_output(&spec, &r, p_encrypted_part, pul_encrypted_part_len)
-            },
-            Err(e) => rv_err(e),
-        }
+            p_part,
+            ul_part_len,
+            p_encrypted_part,
+            pul_encrypted_part_len,
+        )
     })
 }
 
@@ -104,26 +67,14 @@ pub unsafe extern "C" fn c_decrypt_verify_update(
     p_part: CK_BYTE_PTR,
     pul_part_len: CK_ULONG_PTR,
 ) -> CK_RV {
-    catch_panics(|| {
-        let encrypted_part = match input_buf_to_ck_in_buf(unsafe {
-            classify_input(p_encrypted_part, ul_encrypted_part_len)
-        }) {
-            Ok(buf) => buf,
-            Err(e) => return rv_err(e),
-        };
-        let spec = unsafe { output_buffer_spec(p_part, pul_part_len) };
-        let result = with_client!(client => client.byte_output_exact(
-            CkSessionHandle(h_session as u64),
+    catch_panics(|| unsafe {
+        dispatch_byte_output_exact(
+            h_session,
             ByteOutputFunction::DecryptVerifyUpdate,
-            &spec,
-            encrypted_part,
-            None,
-            0,
-            0,
-        ));
-        match result {
-            Ok(r) => unsafe { write_exact_output(&spec, &r, p_part, pul_part_len) },
-            Err(e) => rv_err(e),
-        }
+            p_encrypted_part,
+            ul_encrypted_part_len,
+            p_part,
+            pul_part_len,
+        )
     })
 }
