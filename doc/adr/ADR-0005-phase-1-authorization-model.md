@@ -1,7 +1,7 @@
 # ADR-0005: Phase 1 Authorization Model
 
 ## Status
-Proposed
+Implemented
 
 ## Context
 
@@ -188,6 +188,7 @@ allow_insecure_unix = true  # required opt-in for auth = "none" on unix
 [auth.policy]
 # Keys are authenticated identity strings.
 # Values specify which tokens the identity may access.
+# tokens = "*" is an accepted alias of tokens = "all".
 
 "x509:issuer=CN=Example Root,O=Example;subject=CN=pki-service,O=Example" = { tokens = "all" }
 "x509:issuer=CN=Example Root,O=Example;subject=CN=audit-reader,O=Example" = { tokens = ["label:Audit", "serial:1234"] }

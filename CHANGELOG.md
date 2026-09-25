@@ -332,7 +332,7 @@ Initial release of the Rust PKCS#11 remote proxy.
   for managing daemon configuration, auth policy, and provider backends.
 - **`libpkcs11_proxy_ng_shim.so`**: loadable PKCS#11 v2.40 / v3.0 / v3.2 shim
   library that consumers (NSS, OpenSC, GnuTLS, application code) link against
-  to talk to the daemon. 105 functions implemented across all three interface
+  to talk to the daemon. 104 functions implemented across all three interface
   versions.
 - mTLS-authenticated transport with configurable authorization policy and
   identity-based access control.

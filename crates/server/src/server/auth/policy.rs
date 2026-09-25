@@ -658,8 +658,8 @@ impl TokenPolicy {
                 } else {
                     Err(format!(
                         "policy for '{identity}': invalid scalar tokens value '{keyword}'; \
-                         use tokens = \"all\" for broad access or tokens = [\"label:...\"] \
-                         for token selectors"
+                         use tokens = \"all\" (or \"*\") for broad access or tokens = \
+                         [\"label:...\"] for token selectors"
                     ))
                 }
             }

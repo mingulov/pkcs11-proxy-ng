@@ -256,6 +256,14 @@ impl MessageParameterStage {
     }
 }
 
+/// Capture one embedded message-parameter buffer, optionally reading the
+/// caller's bytes (W1-L1-04).
+///
+/// # Safety
+///
+/// A null `pointer` is legal (length-only); otherwise it must be
+/// readable for `byte_len` bytes, which must also pass the
+/// caller-range alias check.
 unsafe fn embedded_bytes(
     pointer: *mut CK_BYTE,
     byte_len: u64,
@@ -290,6 +298,14 @@ fn generating_prefix_len(generator: u64, fixed_bits: u64, total_len: u64) -> CkR
     }
 }
 
+/// Capture a generator-shaped embedded buffer, copying only the fixed
+/// prefix the generator leaves caller-defined (W1-L1-04).
+///
+/// # Safety
+///
+/// A null `pointer` is legal (length-only); otherwise it must be
+/// readable for `total_len` bytes, which must also pass the
+/// caller-range alias check.
 unsafe fn generated_input_bytes(
     pointer: *mut CK_BYTE,
     total_len: u64,
@@ -546,6 +562,13 @@ pub(super) fn validate_exact_output_result(
     result.validate_for(spec, CK_ULONG::MAX as u64)
 }
 
+/// Copy one validated message effect into its caller buffer (W1-L1-04).
+///
+/// # Safety
+///
+/// A null `target` (or empty `value`) is a no-op; otherwise `target`
+/// must be writable for `value.len()` bytes, and `capacity` must equal
+/// `value.len()` (the pre-RPC captured extent, debug-asserted).
 unsafe fn copy_message_bytes(target: *mut CK_BYTE, capacity: usize, value: &[u8]) {
     if target.is_null() || value.is_empty() {
         return;
@@ -578,6 +601,14 @@ pub(super) fn effect_context(
     }
 }
 
+/// Commit validated message effects into the pre-RPC embedded-pointer
+/// snapshot — the caller's outer struct is never re-read (W1-L1-04).
+///
+/// # Safety
+///
+/// `call` must be the live snapshot for this PKCS#11 call (its
+/// embedded pointers still writable for their captured extents), and
+/// `response` must have validated for `call.parameter()`.
 unsafe fn commit_message_parameter_writeback(
     call: &MessageParameterCall,
     response: &MessageEffects,
@@ -692,6 +723,11 @@ pub(crate) unsafe fn write_exact_message_output(
 /// one-shot/Next. Begin has no main output buffer, so a local zero-length size
 /// query stands in for that part of the contract while generated IV/nonce
 /// writeback still uses the pre-RPC embedded-pointer snapshot.
+///
+/// # Safety
+///
+/// Embedded pointers inside `call` must remain writable for their
+/// source-declared extents for the duration of the PKCS#11 call.
 pub(crate) unsafe fn write_message_begin_output(
     parameter_spec: &CkParameterRoundtripSpec,
     call: &MessageParameterCall,

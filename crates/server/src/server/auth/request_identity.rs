@@ -79,6 +79,7 @@ fn identity_from_tcp<T>(
 
 #[cfg(test)]
 mod tests {
+    use super::super::identity::AuthenticatedIdentity;
     use crate::config::{TcpAuthMode, UnixAuthMode};
     #[cfg(unix)]
     use tonic::transport::server::UdsConnectInfo;
@@ -124,5 +125,27 @@ mod tests {
         let err = super::identity_from_request(&request, TcpAuthMode::None, UnixAuthMode::PeerCred)
             .unwrap_err();
         assert_eq!(err.code(), Code::Unauthenticated);
+    }
+
+    // W1-C3-31: the populated (Some) peer_cred arm, end to end through
+    // identity_from_request. The UCred is kernel-issued (a socket pair's
+    // peer_cred is our own uid); the expected uid is read independently
+    // from the other end of the pair.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_peer_cred_populated_yields_uid_identity() {
+        let (a, b) = tokio::net::UnixStream::pair().expect("socket pair");
+        let expected_uid = b.peer_cred().expect("peer cred").uid();
+        let presented = a.peer_cred().expect("peer cred");
+        assert_eq!(presented.uid(), expected_uid);
+        let mut request = Request::new(());
+        request
+            .extensions_mut()
+            .insert(UdsConnectInfo { peer_addr: None, peer_cred: Some(presented) });
+        let identity =
+            super::identity_from_request(&request, TcpAuthMode::None, UnixAuthMode::PeerCred)
+                .unwrap();
+        assert_eq!(identity, AuthenticatedIdentity::PeerCred { uid: expected_uid });
+        assert_eq!(identity.to_string(), format!("uid={expected_uid}"));
     }
 }

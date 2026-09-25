@@ -789,7 +789,7 @@ impl FfiBackend {
             [
                 Self::session_handle(session)?,
                 parameter.as_mut_ptr() as *mut _,
-                Self::ulong_len(parameter.len()),
+                Self::ulong_len(parameter.len())?,
                 aad_ptr as *mut _,
                 aad_len,
                 pt_ptr as *mut _,
@@ -814,11 +814,12 @@ impl FfiBackend {
         let (aad_ptr, aad_len) = native_message_input(aad)?;
         let h_session = Self::session_handle(session)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let ck_parameter_len = Self::ulong_len(parameter.len())?;
         Self::call_unit(&admission, Some(f), |function| unsafe {
             function(
                 h_session,
                 parameter.as_mut_ptr() as *mut _,
-                Self::ulong_len(parameter.len()),
+                ck_parameter_len,
                 aad_ptr as *mut _,
                 aad_len,
             )
@@ -869,7 +870,7 @@ impl FfiBackend {
             [
                 Self::session_handle(session)?,
                 parameter.as_mut_ptr() as *mut _,
-                Self::ulong_len(parameter.len()),
+                Self::ulong_len(parameter.len())?,
                 pt_ptr as *mut _,
                 pt_len,
             ],
@@ -899,7 +900,7 @@ impl FfiBackend {
             [
                 Self::session_handle(session)?,
                 parameter.as_mut_ptr() as *mut _,
-                Self::ulong_len(parameter.len()),
+                Self::ulong_len(parameter.len())?,
                 aad_ptr as *mut _,
                 aad_len,
                 ct_ptr as *mut _,
@@ -924,11 +925,12 @@ impl FfiBackend {
         let (aad_ptr, aad_len) = native_message_input(aad)?;
         let h_session = Self::session_handle(session)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let ck_parameter_len = Self::ulong_len(parameter.len())?;
         Self::call_unit(&admission, Some(f), |function| unsafe {
             function(
                 h_session,
                 parameter.as_mut_ptr() as *mut _,
-                Self::ulong_len(parameter.len()),
+                ck_parameter_len,
                 aad_ptr as *mut _,
                 aad_len,
             )
@@ -979,7 +981,7 @@ impl FfiBackend {
             [
                 Self::session_handle(session)?,
                 parameter.as_mut_ptr() as *mut _,
-                Self::ulong_len(parameter.len()),
+                Self::ulong_len(parameter.len())?,
                 ct_ptr as *mut _,
                 ct_len,
             ],
@@ -1007,7 +1009,7 @@ impl FfiBackend {
             [
                 Self::session_handle(session)?,
                 parameter.as_mut_ptr() as *mut _,
-                Self::ulong_len(parameter.len()),
+                Self::ulong_len(parameter.len())?,
                 data_ptr as *mut _,
                 data_len,
             ]
@@ -1028,8 +1030,9 @@ impl FfiBackend {
 
         let h_session = Self::session_handle(session)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let ck_parameter_len = Self::ulong_len(parameter.len())?;
         Self::call_unit(&admission, Some(f), |function| unsafe {
-            function(h_session, parameter.as_mut_ptr() as *mut _, Self::ulong_len(parameter.len()))
+            function(h_session, parameter.as_mut_ptr() as *mut _, ck_parameter_len)
         })?;
         Ok(parameter.to_vec().into())
     }
@@ -1072,11 +1075,12 @@ impl FfiBackend {
             // Feed data — pSignature is NULL, pulSignatureLen is NULL
             let h_session = Self::session_handle(session)?;
             let _session_fence = self.session_fences.enter(&admission, session)?;
+            let ck_parameter_len = Self::ulong_len(parameter.len())?;
             Self::call_unit(&admission, Some(f), |function| unsafe {
                 function(
                     h_session,
                     parameter.as_mut_ptr() as *mut _,
-                    Self::ulong_len(parameter.len()),
+                    ck_parameter_len,
                     dp_ptr as *mut _,
                     dp_len,
                     std::ptr::null_mut(),
@@ -1097,7 +1101,7 @@ impl FfiBackend {
             [
                 Self::session_handle(session)?,
                 parameter.as_mut_ptr() as *mut _,
-                Self::ulong_len(parameter.len()),
+                Self::ulong_len(parameter.len())?,
                 dp_ptr as *mut _,
                 dp_len,
             ]
@@ -1152,7 +1156,7 @@ impl FfiBackend {
             C_VerifyMessage,
             Self::session_handle(session)?,
             parameter.as_ptr() as *mut _,
-            Self::ulong_len(parameter.len()),
+            Self::ulong_len(parameter.len())?,
             data_ptr as *mut _,
             data_len,
             sig_ptr as *mut _,
@@ -1206,7 +1210,7 @@ impl FfiBackend {
             C_VerifyMessageBegin,
             Self::session_handle(session)?,
             parameter.as_ptr() as *mut _,
-            Self::ulong_len(parameter.len())
+            Self::ulong_len(parameter.len())?
         )
     }
 
@@ -1254,11 +1258,12 @@ impl FfiBackend {
 
         let h_session = Self::session_handle(session)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let ck_parameter_len = Self::ulong_len(parameter.len())?;
         Self::call_unit(&admission, Some(f), |function| unsafe {
             function(
                 h_session,
                 parameter.as_ptr() as *mut _,
-                Self::ulong_len(parameter.len()),
+                ck_parameter_len,
                 dp_ptr as *mut _,
                 dp_len,
                 sig_ptr,
@@ -2434,6 +2439,13 @@ mod tests {
         STRUCTURED_PROVIDER_PARAMETER_VALID.store(usize::from(valid), Ordering::SeqCst);
     }
 
+    /// Test-oracle two-call writeback (W1-L1-04).
+    ///
+    /// # Safety
+    ///
+    /// `output_len` must be non-null and writable; when `input_len > 0`
+    /// and `output` is non-null, `input` must be readable for `input_len`
+    /// bytes and `output` writable for the `*output_len` capacity.
     unsafe fn finish_structured_provider_output(
         input: cryptoki_sys::CK_BYTE_PTR,
         input_len: cryptoki_sys::CK_ULONG,
@@ -2459,6 +2471,12 @@ mod tests {
         cryptoki_sys::CKR_OK
     }
 
+    /// Test-oracle init recorder (W1-L1-04).
+    ///
+    /// # Safety
+    ///
+    /// A non-null `mechanism` must point to a valid `CK_MECHANISM`; a
+    /// null pointer is recorded as absent (test-only helper).
     unsafe fn structured_message_init(
         operation: usize,
         mechanism: cryptoki_sys::CK_MECHANISM_PTR,
@@ -2496,6 +2514,12 @@ mod tests {
         unsafe { structured_message_init(PROVIDER_DECRYPT_INIT, mechanism) }
     }
 
+    /// Test-oracle init mutator (W1-L1-04).
+    ///
+    /// # Safety
+    ///
+    /// A non-null `mechanism` must point to a valid, uniquely borrowed
+    /// `CK_MECHANISM` the test owns; a null pointer is rejected loudly.
     unsafe fn mutate_message_init_mechanism(
         mechanism: cryptoki_sys::CK_MECHANISM_PTR,
     ) -> cryptoki_sys::CK_RV {
@@ -2654,6 +2678,13 @@ mod tests {
         SIGN_VERIFY_PARAMETER_LEN.store(parameter_len as usize, Ordering::SeqCst);
     }
 
+    /// Test-oracle one-byte signature writeback (W1-L1-04).
+    ///
+    /// # Safety
+    ///
+    /// `signature_len` must be non-null and writable when the length is
+    /// reported; a non-null `signature` with positive capacity must be
+    /// writable for one byte.
     unsafe fn write_test_signature(
         signature: cryptoki_sys::CK_BYTE_PTR,
         signature_len: cryptoki_sys::CK_ULONG_PTR,

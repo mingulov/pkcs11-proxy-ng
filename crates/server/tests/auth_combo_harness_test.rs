@@ -95,7 +95,11 @@ async fn assert_tls_identity_rejected(endpoint: &str, tls: ClientTlsConfig, what
     match channel {
         Ok(channel) => {
             let status = Pkcs11ProxyClient::new(channel)
-                .initialize(InitializeRequest { client_context_id: String::new() })
+                .initialize(InitializeRequest {
+                    client_context_id: String::new(),
+                    client_effects_version_min: None,
+                    client_effects_version_max: None,
+                })
                 .await
                 .unwrap_err();
             assert!(

@@ -9,7 +9,7 @@ errors at the FFI boundary.
 
 ```bash
 # 1. Build the chaos daemon image (one-time):
-docker build --build-arg ALPINE_VER=3.23 \
+docker build --build-arg ALPINE_BUILD_IMAGE=alpine:3.23@sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0 \
     -f packaging/alpine/Dockerfile.alpine \
     -t pkcs11-proxy-ng:test-alpine3.23 .
 (cd tests/r2_resilience/slow_backend && cargo build --release)

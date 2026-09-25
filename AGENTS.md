@@ -186,7 +186,7 @@ fail silently at the FFI boundary with `CKR_MECHANISM_PARAM_INVALID`.
 
 - **Shim** (`crates/shim`, package `pkcs11-proxy-ng-shim`): C ABI → client → gRPC. Loads
   `MechanismRegistry` from config. Does mechanism filtering and
-  param validation. Uses `catch_panics` + `with_client!` macros.
+  param validation. Uses the `catch_panics` fn + `with_client!` macro.
 - **Server** (`crates/server`, package `pkcs11-proxy-ng`): gRPC → backend. Pure proxy for mechanism
   discovery (no filtering). Backend calls via `spawn_backend()` with
   timeout + circuit breaker.

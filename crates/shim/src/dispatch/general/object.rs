@@ -146,6 +146,13 @@ fn build_attribute_query(
     .map(|call| call.query)
 }
 
+/// Test-only nested-result writeback driver (W1-L1-04).
+///
+/// # Safety
+///
+/// `c_attr` must be a valid caller-style attribute the test owns;
+/// `result` must match its captured query, and the widths must be the
+/// real client/backend `CK_ULONG` widths under test.
 #[cfg(test)]
 unsafe fn write_nested_result_to_ffi(
     c_attr: &mut CK_ATTRIBUTE,

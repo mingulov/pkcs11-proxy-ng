@@ -505,8 +505,15 @@ impl MockBackend {
     ///
     /// This enables multi-batch test scenarios (e.g. batch1=[denied], batch2=[allowed])
     /// by configuring a list larger than `max_count` and using a small `max_object_count`.
+    ///
+    /// W1-C5-03: installing a new list resets the cursor, so a mid-search
+    /// swap serves from the new list's start with defined behavior instead
+    /// of slicing at a stale offset. The override and cursor locks are
+    /// never held simultaneously here or in `find_objects_impl`, so there
+    /// is no lock-ordering hazard.
     pub fn set_find_objects_result(&self, objects: Vec<CkObjectHandle>) {
         *self.find_objects_override.lock().unwrap() = Some(objects);
+        *self.find_objects_cursor.lock().unwrap() = 0;
     }
 
     /// Install a gate so `find_objects` serves the override list only when
@@ -1179,7 +1186,7 @@ impl MockBackend {
         Ok(())
     }
 
-    fn require_open_session(&self, session: CkSessionHandle) -> CkResult<()> {
+    pub(crate) fn require_open_session(&self, session: CkSessionHandle) -> CkResult<()> {
         if self.state.lock().unwrap().has_session(session) {
             Ok(())
         } else {
@@ -1226,12 +1233,13 @@ impl MockBackend {
         state: &MockState,
         session: CkSessionHandle,
         mechanism: &CkMechanism,
-        required_flag: u64,
+        required_flag: CkMechanismFlags,
     ) -> CkResult<()> {
         self.require_supported_mechanism_for_state(state, session, mechanism)?;
         self.validate_mechanism_param_presence(mechanism)?;
         if self.enforce_source_grounded_workflows
-            && session_ops::mock_mechanism_workflow_flags(mechanism.mechanism_type) & required_flag
+            && session_ops::mock_mechanism_workflow_flags(mechanism.mechanism_type)
+                & required_flag.0
                 == 0
         {
             return Err(CkRv::MECHANISM_INVALID);
@@ -1243,7 +1251,7 @@ impl MockBackend {
         &self,
         session: CkSessionHandle,
         mechanism: &CkMechanism,
-        required_flag: u64,
+        required_flag: CkMechanismFlags,
     ) -> CkResult<()> {
         let state = self.state.lock().unwrap();
         self.require_mechanism_workflow_for_state(&state, session, mechanism, required_flag)
@@ -2702,7 +2710,7 @@ impl Pkcs11Backend for MockBackend {
                 mode: ParameterEffectCallMode::from_output_spec(output_spec),
                 encrypt: true,
                 generated_stage: false,
-                auth_stage: flags.0 & CkFlags::END_OF_MESSAGE != 0,
+                auth_stage: flags.0 & CkFlags::END_OF_MESSAGE.0 != 0,
                 rv: output.ck_rv,
             },
         );
@@ -2744,7 +2752,7 @@ impl Pkcs11Backend for MockBackend {
                 mode: ParameterEffectCallMode::from_output_spec(output_spec),
                 encrypt: false,
                 generated_stage: false,
-                auth_stage: flags.0 & CkFlags::END_OF_MESSAGE != 0,
+                auth_stage: flags.0 & CkFlags::END_OF_MESSAGE.0 != 0,
                 rv: output.ck_rv,
             },
         );

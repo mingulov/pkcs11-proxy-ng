@@ -90,6 +90,14 @@ fn exact_query_parameter_effect_rejection_is_transactional() {
 // Preserve the pre-C3 shape/stage fixtures while invoking the production typed
 // commit helper. New effect-contract tests construct their effects explicitly.
 #[allow(clippy::too_many_arguments)]
+/// Test fixture wrapper capturing effects before the production commit.
+///
+/// # Safety
+///
+/// Same contract as the production `write_exact_message_output`:
+/// `pointer`/`length` must be the writable output pointers captured in
+/// `output_spec`, and embedded pointers inside `call` must remain writable
+/// for their source-declared extents.
 unsafe fn write_exact_message_output(
     output_spec: &pkcs11_proxy_ng_types::CkOutputBufferSpec,
     parameter_spec: &pkcs11_proxy_ng_types::CkParameterRoundtripSpec,
@@ -121,6 +129,15 @@ unsafe fn write_exact_message_output(
     }
 }
 
+/// Test read of a message-parameter call with empty call memory.
+///
+/// # Safety
+///
+/// Same contract as `read_message_parameter_call_for_shape_with_memory`
+/// with `MessageCallMemory::none()`: a non-null, positive-length
+/// `p_parameter` must designate the exact outer struct selected by
+/// `shape`, and every non-null embedded pointer must satisfy its PKCS#11
+/// caller contract.
 unsafe fn read_message_parameter_call_for_shape(
     p_parameter: *const std::ffi::c_void,
     ul_parameter_len: CK_ULONG,
@@ -140,6 +157,11 @@ unsafe fn read_message_parameter_call_for_shape(
     }
 }
 
+/// Test read of a message parameter via `read_message_parameter_call_for_shape`.
+///
+/// # Safety
+///
+/// Same contract as `read_message_parameter_call_for_shape`.
 unsafe fn read_message_parameter_for_shape(
     p_parameter: *const std::ffi::c_void,
     ul_parameter_len: CK_ULONG,
@@ -1670,7 +1692,7 @@ fn wtls_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
             assert_eq!(params.random_info.server_random, server_random);
             assert_eq!(params.mac_secret_handle.0, 0);
             assert_eq!(params.key_handle.0, 0);
-            assert_eq!(params.iv, [0u8; 4]);
+            assert_eq!(params.iv, SecretBytes::copy_from_slice(&[0u8; 4]));
         }
         other => panic!("unexpected WTLS key material params: {other:?}"),
     }
@@ -1688,7 +1710,7 @@ fn wtls_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
         },
         mac_secret_handle: CkObjectHandle(101),
         key_handle: CkObjectHandle(202),
-        iv: vec![0xA1, 0xA2, 0xA3, 0xA4],
+        iv: vec![0xA1, 0xA2, 0xA3, 0xA4].into(),
     });
     unsafe {
         super::write_mechanism_output_params(&mut mechanism, &mech_out);

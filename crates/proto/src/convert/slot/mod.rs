@@ -1,6 +1,6 @@
 use crate::pkcs11_proxy_ng::v1 as v1_proto;
 use pkcs11_proxy_ng_types::{
-    CkInfo, CkResult, CkRv, CkSlotFlags, CkSlotInfo, CkTokenFlags, CkTokenInfo,
+    CkFlags, CkInfo, CkResult, CkRv, CkSlotFlags, CkSlotInfo, CkTokenFlags, CkTokenInfo,
 };
 
 /// W1-C8-06: PKCS#11 version components are single bytes. A wire value above
@@ -109,7 +109,7 @@ impl From<&CkInfo> for v1_proto::CryptokiInfo {
             cryptoki_version_major: i.cryptoki_version.0 as u32,
             cryptoki_version_minor: i.cryptoki_version.1 as u32,
             manufacturer_id: i.manufacturer_id.clone(),
-            flags: i.flags,
+            flags: i.flags.0,
             library_description: i.library_description.clone(),
             library_version_major: i.library_version.0 as u32,
             library_version_minor: i.library_version.1 as u32,
@@ -126,7 +126,7 @@ impl TryFrom<&v1_proto::CryptokiInfo> for CkInfo {
                 version_byte(i.cryptoki_version_minor)?,
             ),
             manufacturer_id: i.manufacturer_id.clone(),
-            flags: i.flags,
+            flags: CkFlags(i.flags),
             library_description: i.library_description.clone(),
             library_version: (
                 version_byte(i.library_version_major)?,

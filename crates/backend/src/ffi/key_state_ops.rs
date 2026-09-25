@@ -24,6 +24,7 @@ impl FfiBackend {
         let h_session = Self::session_handle(session)?;
         let h_base_key = Self::object_handle(base_key)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let ck_attr_len = Self::ffi_attr_len(&ffi_attrs)?;
         Self::call_object_with_mechanism(
             &admission,
             unsafe { (*self.func_list).C_DeriveKey },
@@ -34,7 +35,7 @@ impl FfiBackend {
                     mech,
                     h_base_key,
                     Self::ffi_attr_ptr(&ffi_attrs),
-                    Self::ffi_attr_len(&ffi_attrs),
+                    ck_attr_len,
                     handle,
                 )
             },
@@ -57,6 +58,7 @@ impl FfiBackend {
         let h_session = Self::session_handle(session)?;
         let h_base_key = Self::object_handle(base_key)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let ck_attr_len = Self::ffi_attr_len(&ffi_attrs)?;
         Self::call_object_with_mechanism_output(
             &admission,
             unsafe { (*self.func_list).C_DeriveKey },
@@ -67,7 +69,7 @@ impl FfiBackend {
                     mech,
                     h_base_key,
                     Self::ffi_attr_ptr(&ffi_attrs),
-                    Self::ffi_attr_len(&ffi_attrs),
+                    ck_attr_len,
                     handle,
                 )
             },
@@ -86,6 +88,7 @@ impl FfiBackend {
         let h_session = Self::session_handle(session)?;
         let h_base_key = Self::object_handle(base_key)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let ck_attr_len = Self::ffi_attr_len(&ffi_attrs)?;
         Self::call_object_with_mechanism_output_result(
             &admission,
             unsafe { (*self.func_list).C_DeriveKey },
@@ -96,7 +99,7 @@ impl FfiBackend {
                     mech,
                     h_base_key,
                     Self::ffi_attr_ptr(&ffi_attrs),
-                    Self::ffi_attr_len(&ffi_attrs),
+                    ck_attr_len,
                     handle,
                 )
             },
@@ -191,6 +194,8 @@ impl FfiBackend {
         let h_session = Self::session_handle(session)?;
         let h_unwrapping_key = Self::object_handle(unwrapping_key)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let ck_wk_len = Self::ulong_len_u64(wk_len)?;
+        let ck_attr_len = Self::ffi_attr_len(&ffi_attrs)?;
         Self::call_object_with_mechanism(
             &admission,
             unsafe { (*self.func_list).C_UnwrapKey },
@@ -201,9 +206,9 @@ impl FfiBackend {
                     mech,
                     h_unwrapping_key,
                     wk_ptr as *mut _,
-                    Self::ulong_len_u64(wk_len),
+                    ck_wk_len,
                     Self::ffi_attr_ptr(&ffi_attrs),
-                    Self::ffi_attr_len(&ffi_attrs),
+                    ck_attr_len,
                     handle,
                 )
             },
@@ -220,18 +225,13 @@ impl FfiBackend {
         let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let h_session = Self::session_handle(session)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let ck_attr_len = Self::ffi_attr_len(&ffi_attrs)?;
         Self::call_object_with_mechanism(
             &admission,
             unsafe { (*self.func_list).C_GenerateKey },
             mechanism,
             |function, mech, handle| unsafe {
-                function(
-                    h_session,
-                    mech,
-                    Self::ffi_attr_ptr(&ffi_attrs),
-                    Self::ffi_attr_len(&ffi_attrs),
-                    handle,
-                )
+                function(h_session, mech, Self::ffi_attr_ptr(&ffi_attrs), ck_attr_len, handle)
             },
         )
     }
@@ -248,18 +248,13 @@ impl FfiBackend {
         let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let h_session = Self::session_handle(session)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let ck_attr_len = Self::ffi_attr_len(&ffi_attrs)?;
         Self::call_object_with_mechanism_output(
             &admission,
             unsafe { (*self.func_list).C_GenerateKey },
             mechanism,
             |function, mech, handle| unsafe {
-                function(
-                    h_session,
-                    mech,
-                    Self::ffi_attr_ptr(&ffi_attrs),
-                    Self::ffi_attr_len(&ffi_attrs),
-                    handle,
-                )
+                function(h_session, mech, Self::ffi_attr_ptr(&ffi_attrs), ck_attr_len, handle)
             },
         )
     }
@@ -276,6 +271,8 @@ impl FfiBackend {
         let priv_ffi = FfiAttrs::from_opt_slice(priv_template)?;
         let h_session = Self::session_handle(session)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let ck_pub_attr_len = Self::ffi_attr_len(&pub_ffi)?;
+        let ck_priv_attr_len = Self::ffi_attr_len(&priv_ffi)?;
         Self::call_object_pair_with_mechanism(
             &admission,
             unsafe { (*self.func_list).C_GenerateKeyPair },
@@ -285,9 +282,9 @@ impl FfiBackend {
                     h_session,
                     mech,
                     Self::ffi_attr_ptr(&pub_ffi),
-                    Self::ffi_attr_len(&pub_ffi),
+                    ck_pub_attr_len,
                     Self::ffi_attr_ptr(&priv_ffi),
-                    Self::ffi_attr_len(&priv_ffi),
+                    ck_priv_attr_len,
                     public_handle,
                     private_handle,
                 )
@@ -379,17 +376,12 @@ impl FfiBackend {
         let h_enc_key = Self::object_handle(enc_key)?;
         let h_auth_key = Self::object_handle(auth_key)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let ck_state_len = Self::ulong_len_u64(state_len)?;
         Self::call_unit(
             &admission,
             unsafe { (*self.func_list).C_SetOperationState },
             |function| unsafe {
-                function(
-                    h_session,
-                    state_ptr as *mut _,
-                    Self::ulong_len_u64(state_len),
-                    h_enc_key,
-                    h_auth_key,
-                )
+                function(h_session, state_ptr as *mut _, ck_state_len, h_enc_key, h_auth_key)
             },
         )
     }
@@ -403,8 +395,9 @@ impl FfiBackend {
         let (seed_ptr, seed_len) = seed.as_ptr_len();
         let h_session = Self::session_handle(session)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let ck_seed_len = Self::ulong_len_u64(seed_len)?;
         Self::call_unit(&admission, unsafe { (*self.func_list).C_SeedRandom }, |function| unsafe {
-            function(h_session, seed_ptr as *mut _, Self::ulong_len_u64(seed_len))
+            function(h_session, seed_ptr as *mut _, ck_seed_len)
         })
     }
 
@@ -434,17 +427,12 @@ impl FfiBackend {
         let (part_ptr, part_len) = part.as_ptr_len();
         let h_session = Self::session_handle(session)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let ck_part_len = Self::ulong_len_u64(part_len)?;
         Self::call_bytes(
             &admission,
             unsafe { (*self.func_list).C_DigestEncryptUpdate },
             |function, output, output_len| unsafe {
-                function(
-                    h_session,
-                    part_ptr as *mut _,
-                    Self::ulong_len_u64(part_len),
-                    output,
-                    output_len,
-                )
+                function(h_session, part_ptr as *mut _, ck_part_len, output, output_len)
             },
         )
     }
@@ -476,17 +464,12 @@ impl FfiBackend {
         let (ep_ptr, ep_len) = encrypted_part.as_ptr_len();
         let h_session = Self::session_handle(session)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let ck_ep_len = Self::ulong_len_u64(ep_len)?;
         Self::call_bytes(
             &admission,
             unsafe { (*self.func_list).C_DecryptDigestUpdate },
             |function, output, output_len| unsafe {
-                function(
-                    h_session,
-                    ep_ptr as *mut _,
-                    Self::ulong_len_u64(ep_len),
-                    output,
-                    output_len,
-                )
+                function(h_session, ep_ptr as *mut _, ck_ep_len, output, output_len)
             },
         )
     }
@@ -518,17 +501,12 @@ impl FfiBackend {
         let (part_ptr, part_len) = part.as_ptr_len();
         let h_session = Self::session_handle(session)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let ck_part_len = Self::ulong_len_u64(part_len)?;
         Self::call_bytes(
             &admission,
             unsafe { (*self.func_list).C_SignEncryptUpdate },
             |function, output, output_len| unsafe {
-                function(
-                    h_session,
-                    part_ptr as *mut _,
-                    Self::ulong_len_u64(part_len),
-                    output,
-                    output_len,
-                )
+                function(h_session, part_ptr as *mut _, ck_part_len, output, output_len)
             },
         )
     }
@@ -560,17 +538,12 @@ impl FfiBackend {
         let (ep_ptr, ep_len) = encrypted_part.as_ptr_len();
         let h_session = Self::session_handle(session)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let ck_ep_len = Self::ulong_len_u64(ep_len)?;
         Self::call_bytes(
             &admission,
             unsafe { (*self.func_list).C_DecryptVerifyUpdate },
             |function, output, output_len| unsafe {
-                function(
-                    h_session,
-                    ep_ptr as *mut _,
-                    Self::ulong_len_u64(ep_len),
-                    output,
-                    output_len,
-                )
+                function(h_session, ep_ptr as *mut _, ck_ep_len, output, output_len)
             },
         )
     }

@@ -250,8 +250,17 @@ pub struct LogicalClientInstance {
     /// are intentionally absent — their handles persist across the application's
     /// sessions.
     pub session_objects: HashMap<VirtualHandle, Vec<VirtualHandle>>,
-    pub login_state: HashMap<BackendSlotId, LoginState>, // per-token login
-    pub authenticated_identity: Option<String>,          // bound at creation (ADR-0005 §4)
+    /// Per-token login. Production mutations must sync the holder index
+    /// via `note_login_acquired` / `note_login_released` (W1-L13-17).
+    pub login_state: HashMap<BackendSlotId, LoginState>,
+    pub authenticated_identity: Option<String>, // bound at creation (ADR-0005 §4)
+    /// Last TCP peer IP seen opening a session on this context (W1-L7-02).
+    /// Recorded only for unauthenticated contexts while the session quota
+    /// is active, so [`ContextManager::session_count_for_principal`] can
+    /// attribute live sessions to a peer-IP quota key. Last-wins; a
+    /// context used from several IPs counts under each attributable key
+    /// (conservative — see the counter).
+    pub last_peer_ip: Option<std::net::IpAddr>,
     /// Virtual object handles minted by this context (via generate/wrap/create,
     /// NOT via find). Used by `gate_object_handle` to allow a principal to use
     /// keys it generated, even when its `objects` grant does not list the new
@@ -322,6 +331,7 @@ impl LogicalClientInstance {
             attr_cache: HashMap::new(),
             login_state: HashMap::new(),
             authenticated_identity: identity,
+            last_peer_ip: None,
             in_flight: Arc::new(AtomicI64::new(0)),
             message_operations: HashMap::new(),
         }
@@ -491,6 +501,18 @@ pub struct ContextManager {
     /// the already-logged-in token instead of the synthesized logical OK. One
     /// lock per slot id; different slots log in concurrently.
     login_locks: Arc<DashMap<BackendSlotId, Arc<Mutex<()>>>>,
+    /// Per-slot login-holder index (W1-L13-17): the context ids holding
+    /// logical `login_state` for each slot, so the login fast path finds
+    /// other holders in O(holders) instead of scanning all contexts O(N)
+    /// under the per-slot login lock.
+    ///
+    /// The index is a HINT, never authoritative: candidates are
+    /// live-verified against their context's actual `login_state`,
+    /// stale ids are pruned on verified miss, and the holderless-backend
+    /// reconcile + teardown paths use the authoritative full scan.
+    /// Maintained at every production `login_state` mutation site
+    /// (login/logout/close/teardown); both notes are idempotent.
+    slot_login_holders: Arc<DashMap<BackendSlotId, HashSet<ClientContextId>>>,
     /// Daemon-wide authz generation (W1-L13-18). Cached token-object metadata
     /// is tagged with the generation at fetch time and reusable only while
     /// current. Revoked (bumped) by every daemon-wide object mutation —
@@ -593,6 +615,7 @@ impl ContextManager {
             max_contexts,
             token_info_cache: Arc::new(DashMap::new()),
             login_locks: Arc::new(DashMap::new()),
+            slot_login_holders: Arc::new(DashMap::new()),
             authz_generation: AtomicU64::new(0),
             session_quota_reservations: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
@@ -720,7 +743,15 @@ impl ContextManager {
 
         match completion {
             CloseSessionCompletion::Terminal => {
+                // W1-L13-17: keep the holder index exact — `remove_session`
+                // drops the slot's login when its last session closes.
+                let slot = context.session_slots.get(&virtual_session).copied();
                 context.remove_session(virtual_session);
+                if let Some(slot) = slot
+                    && !context.session_slots.values().any(|s| *s == slot)
+                {
+                    self.note_login_released(ctx_id, slot);
+                }
             }
             CloseSessionCompletion::Transient => {
                 if !context.session_handles.reactivate_suspended(virtual_session, expected_backend)
@@ -1018,7 +1049,15 @@ impl ContextManager {
                 .map(|entry| entry.key().clone())
                 .collect();
             for id in &expired {
-                self.contexts.remove(id);
+                if let Some((_, ctx)) = self.contexts.remove(id) {
+                    // W1-L13-17: purge holder-index entries (sessionless
+                    // evictees hold no login by invariant; the purge is a
+                    // no-op then, and future-proofs the index if that ever
+                    // changes).
+                    for slot in ctx.login_state.keys() {
+                        self.note_login_released(id, *slot);
+                    }
+                }
             }
             // Still at capacity? Reject.
             if self.contexts.len() >= self.max_contexts {
@@ -1068,7 +1107,71 @@ impl ContextManager {
         })
     }
 
+    /// Record that `id` holds logical login for `slot` (W1-L13-17).
+    /// Called after every production `login_state` insert. Idempotent.
+    pub(crate) fn note_login_acquired(&self, id: &ClientContextId, slot: BackendSlotId) {
+        self.slot_login_holders.entry(slot).or_default().insert(id.clone());
+    }
+
+    /// Snapshot the current holder ids for `slot` (W1-L13-17). Split out
+    /// so the map read guard is confined to this call: callers
+    /// live-verify candidates and prune stale ids afterwards, and
+    /// pruning takes index write locks that would self-deadlock against
+    /// a still-held read guard on the same shard. (A named guard binding
+    /// in the caller body hung exactly that way; keep this split.)
+    fn slot_login_holder_ids(&self, slot: BackendSlotId) -> Option<Vec<ClientContextId>> {
+        self.slot_login_holders.get(&slot).map(|holders| holders.iter().cloned().collect())
+    }
+
+    /// Drop `id` from `slot`'s holder set (W1-L13-17). Called after every
+    /// production `login_state` removal and at every context-removal
+    /// site. Idempotent; vacated sets are dropped to bound memory.
+    pub(crate) fn note_login_released(&self, id: &ClientContextId, slot: BackendSlotId) {
+        self.slot_login_holders.entry(slot).and_modify(|holders| {
+            holders.remove(id);
+        });
+        self.slot_login_holders.remove_if(&slot, |_, holders| holders.is_empty());
+    }
+
+    /// First logical login state held for `slot` by a context other than
+    /// `excluded_id` — the login fast path (W1-L13-17).
+    ///
+    /// Consults the per-slot holder index instead of scanning all
+    /// contexts, so login costs O(holders) rather than O(contexts)
+    /// under the per-slot login lock. Candidates are live-verified: an
+    /// id whose context is gone or no longer holds the slot is skipped
+    /// and pruned. A missed holder only costs a backend round-trip —
+    /// the F-01 reconcile rechecks holderlessness with the
+    /// authoritative full scan before any logout+retry.
     pub fn first_login_state_for_slot_excluding(
+        &self,
+        slot: BackendSlotId,
+        excluded_id: &ClientContextId,
+    ) -> Option<LoginState> {
+        let candidates: Vec<ClientContextId> = self.slot_login_holder_ids(slot)?;
+        let mut stale = Vec::new();
+        for id in candidates {
+            match self.contexts.get(&id).and_then(|ctx| ctx.login_state.get(&slot).copied()) {
+                // Live holder: return it unless it is the excluded id.
+                // (The excluded id is still verified so a stale entry
+                // for it is pruned like any other.)
+                Some(state) if &id != excluded_id => return Some(state),
+                Some(_) => {}
+                None => stale.push(id),
+            }
+        }
+        for id in stale {
+            self.note_login_released(&id, slot);
+        }
+        None
+    }
+
+    /// Authoritative full-scan variant of
+    /// [`Self::first_login_state_for_slot_excluding`]: visits every live
+    /// context regardless of the holder index. Used where a missed
+    /// holder would be incorrect rather than merely slow — logout,
+    /// teardown planning, and the last-holder recheck.
+    pub fn first_login_state_for_slot_excluding_authoritative(
         &self,
         slot: BackendSlotId,
         excluded_id: &ClientContextId,
@@ -1175,11 +1278,15 @@ impl ContextManager {
         })
     }
 
-    /// Sum of open sessions across ALL contexts whose principal key equals
-    /// `principal_key`. A context's principal key is its `authenticated_identity`
-    /// when set; otherwise the context-id string itself (mirrors the derivation
-    /// used at the dispatch seam so authenticated principals aggregate across
-    /// their contexts and unauthenticated contexts are counted individually).
+    /// Sum of open sessions across ALL contexts attributable to
+    /// `principal_key`. A context matches when ANY of its keys equals the
+    /// requested one: its `authenticated_identity` when set, its recorded
+    /// peer IP ([`LogicalClientInstance::last_peer_ip`], W1-L7-02), or its
+    /// context-id string. Match-any (rather than a single derived key)
+    /// keeps peer-keyed quotas whole: live sessions always count under
+    /// the peer key even for mixed-transport contexts, and counting a
+    /// session under several keys is conservative (fail-closed for
+    /// quotas). Peerless/identity-bound counting is unchanged.
     ///
     /// Counts LIVE sessions only; in-flight opens hold
     /// [`SessionQuotaReservation`]s which count toward the same cap (W1-L6-04).
@@ -1193,16 +1300,24 @@ impl ContextManager {
             .iter()
             .map(|entry| {
                 let ctx = entry.value();
-                let key =
-                    ctx.authenticated_identity.as_deref().unwrap_or_else(|| entry.key().0.as_str());
-                if key == principal_key { ctx.session_slots.len() } else { 0 }
+                let identity_match = ctx.authenticated_identity.as_deref() == Some(principal_key);
+                let peer_match = ctx.last_peer_ip.is_some_and(|ip| ip.to_string() == principal_key);
+                let id_match = entry.key().0.as_str() == principal_key;
+                if identity_match || peer_match || id_match { ctx.session_slots.len() } else { 0 }
             })
             .sum()
     }
 
     // Not `async`: a DashMap remove needs no `.await` (L5).
     pub fn remove_context(&self, id: &ClientContextId) -> Option<LogicalClientInstance> {
-        self.contexts.remove(id).map(|(_k, v)| v)
+        let removed = self.contexts.remove(id).map(|(_k, v)| v);
+        if let Some(ref ctx) = removed {
+            // W1-L13-17: purge holder-index entries with the context.
+            for slot in ctx.login_state.keys() {
+                self.note_login_released(id, *slot);
+            }
+        }
+        removed
     }
 
     /// Remove `id` only when no FOREIGN backend operation is in flight
@@ -1283,7 +1398,8 @@ impl ContextManager {
             .collect();
         let mut slot_logouts = Vec::new();
         for slot in departed.login_state.keys().copied().collect::<Vec<_>>() {
-            if self.first_login_state_for_slot_excluding(slot, &departed.id).is_some() {
+            if self.first_login_state_for_slot_excluding_authoritative(slot, &departed.id).is_some()
+            {
                 continue;
             }
             // Last holder out: prefer one of the departed context's own still-
@@ -1301,6 +1417,12 @@ impl ContextManager {
             if let Some(via_session) = carrier {
                 slot_logouts.push(SlotLogout { slot, via_session });
             }
+        }
+        // W1-L13-17: purge the departed context's slots from the holder
+        // index (it is already out of the live map; live verification
+        // absorbs any race with a concurrent indexed scan).
+        for slot in departed.login_state.keys() {
+            self.note_login_released(&departed.id, *slot);
         }
         let _ = departed.teardown();
         ContextTeardownPlan { sessions_to_close, slot_logouts }
@@ -1454,7 +1576,9 @@ impl ContextManager {
     /// excluding one departing context's own login (T5F pre-close check).
     fn slot_login_held(&self, slot: BackendSlotId, exclude: Option<&ClientContextId>) -> bool {
         match exclude {
-            Some(id) => self.first_login_state_for_slot_excluding(slot, id).is_some(),
+            // W1-L13-17: the last-holder recheck guards a real backend
+            // logout — it needs the authoritative scan, not the hint.
+            Some(id) => self.first_login_state_for_slot_excluding_authoritative(slot, id).is_some(),
             None => self.any_login_state_for_slot(slot),
         }
     }

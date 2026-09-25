@@ -8,7 +8,7 @@ fn slot_info_round_trip() {
     let original = CkSlotInfo {
         slot_description: "Test Slot".into(),
         manufacturer_id: "Test".into(),
-        flags: CkSlotFlags(0x01),
+        flags: CkSlotFlags::TOKEN_PRESENT,
         hardware_version: (1, 2),
         firmware_version: (3, 4),
     };
@@ -24,7 +24,7 @@ fn token_info_round_trip() {
         manufacturer_id: "Test".into(),
         model: "Model".into(),
         serial_number: "0001".into(),
-        flags: CkTokenFlags(0x0404),
+        flags: CkTokenFlags::TOKEN_INITIALIZED | CkTokenFlags::LOGIN_REQUIRED,
         max_session_count: 256,
         session_count: 1,
         max_rw_session_count: 128,
@@ -49,7 +49,7 @@ fn cryptoki_info_round_trip() {
     let original = CkInfo {
         cryptoki_version: (3, 0),
         manufacturer_id: "Test".into(),
-        flags: 0,
+        flags: CkFlags(0),
         library_description: "Test Library".into(),
         library_version: (1, 0),
     };
@@ -178,7 +178,7 @@ fn token_info_single_char_fields_round_trip() {
         manufacturer_id: "B".into(),
         model: "C".into(),
         serial_number: "D".into(),
-        flags: CkTokenFlags(1),
+        flags: CkTokenFlags::RNG,
         max_session_count: 2,
         session_count: 3,
         max_rw_session_count: 4,
@@ -230,7 +230,7 @@ fn cryptoki_info_all_flag_bits_round_trip() {
     let original = CkInfo {
         cryptoki_version: (3, 2),
         manufacturer_id: "Test".into(),
-        flags: u64::MAX,
+        flags: CkFlags(u64::MAX),
         library_description: "Library".into(),
         library_version: (255, 255),
     };
@@ -319,7 +319,7 @@ fn cryptoki_info_version_narrowing_rejects_above_255() {
     let base = CkInfo {
         cryptoki_version: (3, 0),
         manufacturer_id: "Test".into(),
-        flags: 0,
+        flags: CkFlags(0),
         library_description: "Test Library".into(),
         library_version: (1, 0),
     };
@@ -347,7 +347,7 @@ fn cryptoki_info_empty_description_round_trip() {
     let original = CkInfo {
         cryptoki_version: (2, 40),
         manufacturer_id: String::new(),
-        flags: 0,
+        flags: CkFlags(0),
         library_description: String::new(),
         library_version: (0, 0),
     };

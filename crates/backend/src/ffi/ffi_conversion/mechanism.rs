@@ -6,6 +6,14 @@
 use super::*;
 use crate::ffi::native_allocation::NativeAllocation;
 
+// Thread-local `output_params()` call count (W1-C4-04). Thread-local —
+// not global — so parallel tests cannot perturb each other's deltas;
+// each `#[test]` runs on its own thread and observes only its calls.
+#[cfg(test)]
+std::thread_local! {
+    static OUTPUT_PARAMS_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 #[cfg(test)]
 mod native_owner_tests;
 #[cfg(test)]
@@ -181,7 +189,251 @@ impl FfiMechanism {
         Self::with_param(mech_type, ptr, len, make_backing(allocation))
     }
 
+    /// Allocation-free equality probe against [`Self::output_params`].
+    ///
+    /// Returns whether `output_params()` would return a value equal to
+    /// `expected`, without cloning any backing bytes. W1-C4-04:
+    /// `call_bytes_exact_with_mechanism_output` reuses its pre-call
+    /// snapshot when this probe reports unchanged, so the common path
+    /// snapshots once per call instead of twice. Every arm below mirrors
+    /// its `output_params()` counterpart field for field (including the
+    /// clamping, null-guards, and empty-set guards); the
+    /// `output_params_equal_tests` battery pins agreement on every arm
+    /// plus provider-write flips.
+    ///
+    /// This probe allocates nothing: it compares scalars and byte slices
+    /// in place and never builds an owned `CkMechanismParams`.
+    pub(in crate::ffi) fn output_params_equal(&self, expected: &Option<CkMechanismParams>) -> bool {
+        match &self._backing {
+            FfiParamBacking::Gcm(gcm, iv, aad) => {
+                let Some(CkMechanismParams::Gcm(e)) = expected else { return false };
+                // SAFETY: backing is borrowed alive; the copy carries no provenance.
+                let gcm = unsafe { gcm.snapshot() };
+                let iv_len = (gcm.ulIvLen as usize).min(iv.len());
+                let aad_len = (gcm.ulAADLen as usize).min(aad.len());
+                e.iv_bits == gcm.ulIvBits as u64
+                    && e.iv_buffer_len == iv.len() as u64
+                    && e.tag_bits == gcm.ulTagBits as u64
+                    && e.iv_null == gcm.pIv.is_null()
+                    && e.aad_null == gcm.pAAD.is_null()
+                    && e.iv.as_slice() == &iv[..iv_len]
+                    && e.aad.expose(|b| b == &aad[..aad_len])
+            }
+            FfiParamBacking::Tls12MasterKeyDerive(tls12, client_random, server_random, version) => {
+                let Some(CkMechanismParams::Tls12MasterKeyDerive(e)) = expected else {
+                    return false;
+                };
+                // SAFETY: backing is borrowed alive; the copy carries no provenance.
+                let tls12 = unsafe { tls12.snapshot() };
+                // SAFETY: backing is borrowed alive; the copy carries no provenance.
+                let version = unsafe { version.snapshot() };
+                e.random_info.client_random.as_slice() == client_random.as_slice()
+                    && e.random_info.server_random.as_slice() == server_random.as_slice()
+                    && e.version_major == version.major as u32
+                    && e.version_minor == version.minor as u32
+                    && e.prf_hash_mechanism == CkMechanismType(tls12.prfHashMechanism as u64)
+            }
+            FfiParamBacking::WtlsMasterKeyDerive(wtls, client_random, server_random, version) => {
+                let Some(CkMechanismParams::WtlsMasterKeyDerive(e)) = expected else {
+                    return false;
+                };
+                // SAFETY: backing is borrowed alive; the copy carries no provenance.
+                let wtls = unsafe { wtls.snapshot() };
+                e.digest_mechanism == CkMechanismType(wtls.DigestMechanism as u64)
+                    && e.random_info.client_random.as_slice() == client_random.as_slice()
+                    && e.random_info.server_random.as_slice() == server_random.as_slice()
+                    && e.version == version.first().copied().unwrap_or_default() as u32
+            }
+            FfiParamBacking::WtlsKeyMat(wtls, client_random, server_random, key_mat_out, iv) => {
+                let Some(CkMechanismParams::WtlsKeyMat(e)) = expected else { return false };
+                // SAFETY: backing is borrowed alive; the copy carries no provenance.
+                let wtls = unsafe { wtls.snapshot() };
+                // SAFETY: backing is borrowed alive; the copy carries no provenance.
+                let key_mat_out = unsafe { key_mat_out.snapshot() };
+                let iv_len = (((wtls.ulIVSizeInBits as usize).saturating_add(7)) / 8).min(iv.len());
+                let iv_matches =
+                    key_mat_iv_equal(&e.iv, key_mat_out.pIV.is_null(), iv.as_slice(), iv_len);
+                e.digest_mechanism == CkMechanismType(wtls.DigestMechanism as u64)
+                    && e.mac_size_bits == wtls.ulMacSizeInBits as u64
+                    && e.key_size_bits == wtls.ulKeySizeInBits as u64
+                    && e.iv_size_bits == wtls.ulIVSizeInBits as u64
+                    && e.sequence_number == wtls.ulSequenceNumber as u64
+                    && e.is_export == (wtls.bIsExport != 0)
+                    && e.random_info.client_random.as_slice() == client_random.as_slice()
+                    && e.random_info.server_random.as_slice() == server_random.as_slice()
+                    && e.mac_secret_handle == CkObjectHandle(key_mat_out.hMacSecret as u64)
+                    && e.key_handle == CkObjectHandle(key_mat_out.hKey as u64)
+                    && iv_matches
+            }
+            FfiParamBacking::Ssl3KeyMat(
+                ssl3,
+                client_random,
+                server_random,
+                key_mat_out,
+                client_iv,
+                server_iv,
+            ) => {
+                let Some(CkMechanismParams::Ssl3KeyMat(e)) = expected else { return false };
+                // SAFETY: backing is borrowed alive; the copy carries no provenance.
+                let ssl3 = unsafe { ssl3.snapshot() };
+                // SAFETY: backing is borrowed alive; the copy carries no provenance.
+                let key_mat_out = unsafe { key_mat_out.snapshot() };
+                let iv_len =
+                    (((ssl3.ulIVSizeInBits as usize).saturating_add(7)) / 8).min(client_iv.len());
+                e.mac_size_bits == ssl3.ulMacSizeInBits as u64
+                    && e.key_size_bits == ssl3.ulKeySizeInBits as u64
+                    && e.iv_size_bits == ssl3.ulIVSizeInBits as u64
+                    && e.is_export == (ssl3.bIsExport != 0)
+                    && e.random_info.client_random.as_slice() == client_random.as_slice()
+                    && e.random_info.server_random.as_slice() == server_random.as_slice()
+                    && e.prf_hash_mechanism == CkMechanismType(0)
+                    && e.client_mac_secret_handle
+                        == CkObjectHandle(key_mat_out.hClientMacSecret as u64)
+                    && e.server_mac_secret_handle
+                        == CkObjectHandle(key_mat_out.hServerMacSecret as u64)
+                    && e.client_key_handle == CkObjectHandle(key_mat_out.hClientKey as u64)
+                    && e.server_key_handle == CkObjectHandle(key_mat_out.hServerKey as u64)
+                    && key_mat_iv_equal(
+                        &e.client_iv,
+                        key_mat_out.pIVClient.is_null(),
+                        client_iv.as_slice(),
+                        iv_len,
+                    )
+                    && key_mat_iv_equal(
+                        &e.server_iv,
+                        key_mat_out.pIVServer.is_null(),
+                        server_iv.as_slice(),
+                        iv_len.min(server_iv.len()),
+                    )
+            }
+            FfiParamBacking::Tls12KeyMat(
+                tls12,
+                client_random,
+                server_random,
+                key_mat_out,
+                client_iv,
+                server_iv,
+            ) => {
+                let Some(CkMechanismParams::Ssl3KeyMat(e)) = expected else { return false };
+                // SAFETY: backing is borrowed alive; the copy carries no provenance.
+                let tls12 = unsafe { tls12.snapshot() };
+                // SAFETY: backing is borrowed alive; the copy carries no provenance.
+                let key_mat_out = unsafe { key_mat_out.snapshot() };
+                let iv_len =
+                    (((tls12.ulIVSizeInBits as usize).saturating_add(7)) / 8).min(client_iv.len());
+                e.mac_size_bits == tls12.ulMacSizeInBits as u64
+                    && e.key_size_bits == tls12.ulKeySizeInBits as u64
+                    && e.iv_size_bits == tls12.ulIVSizeInBits as u64
+                    && e.is_export == (tls12.bIsExport != 0)
+                    && e.random_info.client_random.as_slice() == client_random.as_slice()
+                    && e.random_info.server_random.as_slice() == server_random.as_slice()
+                    && e.prf_hash_mechanism == CkMechanismType(tls12.prfHashMechanism as u64)
+                    && e.client_mac_secret_handle
+                        == CkObjectHandle(key_mat_out.hClientMacSecret as u64)
+                    && e.server_mac_secret_handle
+                        == CkObjectHandle(key_mat_out.hServerMacSecret as u64)
+                    && e.client_key_handle == CkObjectHandle(key_mat_out.hClientKey as u64)
+                    && e.server_key_handle == CkObjectHandle(key_mat_out.hServerKey as u64)
+                    && key_mat_iv_equal(
+                        &e.client_iv,
+                        key_mat_out.pIVClient.is_null(),
+                        client_iv.as_slice(),
+                        iv_len,
+                    )
+                    && key_mat_iv_equal(
+                        &e.server_iv,
+                        key_mat_out.pIVServer.is_null(),
+                        server_iv.as_slice(),
+                        iv_len.min(server_iv.len()),
+                    )
+            }
+            FfiParamBacking::Sp800108Kdf(sp800, data_params, data_buffers, derived_keys) => {
+                // Mirror the `!derived_keys.is_empty()` guard: an empty set
+                // falls through to `_ => None` on both sides.
+                if derived_keys.is_empty() {
+                    return expected.is_none();
+                }
+                let Some(CkMechanismParams::Sp800108Kdf(e)) = expected else { return false };
+                // SAFETY: backing is borrowed alive; the copy carries no provenance.
+                let sp800 = unsafe { sp800.snapshot() };
+                e.prf_type == CkMechanismType(sp800.prfType as u64)
+                    && sp800_108_data_params_equal(data_params, data_buffers, &e.data_params)
+                    && sp800_108_derived_keys_equal(derived_keys, &e.additional_derived_keys)
+            }
+            FfiParamBacking::Sp800108FeedbackKdf(
+                sp800,
+                data_params,
+                data_buffers,
+                iv,
+                derived_keys,
+            ) => {
+                if derived_keys.is_empty() {
+                    return expected.is_none();
+                }
+                let Some(CkMechanismParams::Sp800108FeedbackKdf(e)) = expected else {
+                    return false;
+                };
+                // SAFETY: backing is borrowed alive; the copy carries no provenance.
+                let sp800 = unsafe { sp800.snapshot() };
+                e.prf_type == CkMechanismType(sp800.prfType as u64)
+                    && sp800_108_data_params_equal(data_params, data_buffers, &e.data_params)
+                    && e.iv.as_slice() == &iv[..(sp800.ulIVLen as usize).min(iv.len())]
+                    && sp800_108_derived_keys_equal(derived_keys, &e.additional_derived_keys)
+            }
+            FfiParamBacking::TlsPrf(_tls, seed, label, output, output_len) => {
+                let Some(CkMechanismParams::TlsPrf(e)) = expected else { return false };
+                // SAFETY: backing is borrowed alive; the copies carry no provenance.
+                let output_len = unsafe { output_len.snapshot() };
+                let written = (output_len as usize).min(output.len());
+                e.seed.expose(|b| b == seed.as_slice())
+                    && e.label.expose(|b| b == label.as_slice())
+                    && e.output_len == written as u64
+                    && e.output.expose(|b| b == &output[..written])
+            }
+            FfiParamBacking::WtlsPrf(wtls, seed, label, output, output_len) => {
+                let Some(CkMechanismParams::WtlsPrf(e)) = expected else { return false };
+                // SAFETY: backing is borrowed alive; the copies carry no provenance.
+                let wtls = unsafe { wtls.snapshot() };
+                let output_len = unsafe { output_len.snapshot() };
+                let written = (output_len as usize).min(output.len());
+                e.digest_mechanism == CkMechanismType(wtls.DigestMechanism as u64)
+                    && e.seed.expose(|b| b == seed.as_slice())
+                    && e.label.expose(|b| b == label.as_slice())
+                    && e.output_len == written as u64
+                    && e.output.expose(|b| b == &output[..written])
+            }
+            FfiParamBacking::Ssl3MasterKeyDerive(_ssl3, client_random, server_random, version) => {
+                let Some(CkMechanismParams::Ssl3MasterKeyDerive(e)) = expected else {
+                    return false;
+                };
+                // SAFETY: backing is borrowed alive; the copy carries no provenance.
+                let version = unsafe { version.snapshot() };
+                e.random_info.client_random.as_slice() == client_random.as_slice()
+                    && e.random_info.server_random.as_slice() == server_random.as_slice()
+                    && e.version_major == version.major as u32
+                    && e.version_minor == version.minor as u32
+            }
+            FfiParamBacking::Pbe(pbe, init_vector, _password, _salt) => {
+                // SAFETY: backing is borrowed alive; the copy carries no provenance.
+                let pbe = unsafe { pbe.snapshot() };
+                if pbe.pInitVector.is_null() {
+                    return expected.is_none();
+                }
+                let Some(CkMechanismParams::Pbe(e)) = expected else { return false };
+                // `output_params()` surfaces ONLY the IV (full backing
+                // copy); password and salt are always rebuilt empty.
+                e.init_vector.expose(|b| b == init_vector.as_slice())
+                    && e.password.is_empty()
+                    && e.salt.is_empty()
+                    && e.iteration == pbe.ulIteration as u64
+            }
+            _ => expected.is_none(),
+        }
+    }
+
     pub(in crate::ffi) fn output_params(&self) -> Option<CkMechanismParams> {
+        #[cfg(test)]
+        OUTPUT_PARAMS_CALLS.with(|c| c.set(c.get().saturating_add(1)));
         match &self._backing {
             FfiParamBacking::Gcm(gcm, iv, aad) => {
                 // SAFETY: backing is borrowed alive; the copy carries no provenance.
@@ -213,8 +465,8 @@ impl FfiMechanism {
                 // fields are caller-supplied inputs).
                 Some(CkMechanismParams::Tls12MasterKeyDerive(Tls12MasterKeyDeriveParams {
                     random_info: pkcs11_proxy_ng_types::SslRandomData {
-                        client_random: client_random.clone().to_vec(),
-                        server_random: server_random.clone().to_vec(),
+                        client_random: client_random.to_vec(),
+                        server_random: server_random.to_vec(),
                     },
                     version_major: version.major as u32,
                     version_minor: version.minor as u32,
@@ -227,8 +479,8 @@ impl FfiMechanism {
                 Some(CkMechanismParams::WtlsMasterKeyDerive(WtlsMasterKeyDeriveParams {
                     digest_mechanism: CkMechanismType(wtls.DigestMechanism as u64),
                     random_info: WtlsRandomData {
-                        client_random: client_random.clone().to_vec(),
-                        server_random: server_random.clone().to_vec(),
+                        client_random: client_random.to_vec(),
+                        server_random: server_random.to_vec(),
                     },
                     version: version.first().copied().unwrap_or_default() as u32,
                 }))
@@ -239,8 +491,6 @@ impl FfiMechanism {
                 // SAFETY: backing is borrowed alive; the copy carries no provenance.
                 let key_mat_out = unsafe { key_mat_out.snapshot() };
                 let iv_len = (((wtls.ulIVSizeInBits as usize).saturating_add(7)) / 8).min(iv.len());
-                let output_iv =
-                    if key_mat_out.pIV.is_null() { Vec::new() } else { iv[..iv_len].to_vec() };
                 Some(CkMechanismParams::WtlsKeyMat(WtlsKeyMatParams {
                     digest_mechanism: CkMechanismType(wtls.DigestMechanism as u64),
                     mac_size_bits: wtls.ulMacSizeInBits as u64,
@@ -249,12 +499,16 @@ impl FfiMechanism {
                     sequence_number: wtls.ulSequenceNumber as u64,
                     is_export: wtls.bIsExport != 0,
                     random_info: WtlsRandomData {
-                        client_random: client_random.clone().to_vec(),
-                        server_random: server_random.clone().to_vec(),
+                        client_random: client_random.to_vec(),
+                        server_random: server_random.to_vec(),
                     },
                     mac_secret_handle: CkObjectHandle(key_mat_out.hMacSecret as u64),
                     key_handle: CkObjectHandle(key_mat_out.hKey as u64),
-                    iv: output_iv,
+                    iv: if key_mat_out.pIV.is_null() {
+                        Vec::new().into()
+                    } else {
+                        iv[..iv_len].to_vec().into()
+                    },
                 }))
             }
             FfiParamBacking::Ssl3KeyMat(
@@ -277,8 +531,8 @@ impl FfiMechanism {
                     iv_size_bits: ssl3.ulIVSizeInBits as u64,
                     is_export: ssl3.bIsExport != 0,
                     random_info: pkcs11_proxy_ng_types::SslRandomData {
-                        client_random: client_random.clone().to_vec(),
-                        server_random: server_random.clone().to_vec(),
+                        client_random: client_random.to_vec(),
+                        server_random: server_random.to_vec(),
                     },
                     prf_hash_mechanism: CkMechanismType(0),
                     client_mac_secret_handle: CkObjectHandle(key_mat_out.hClientMacSecret as u64),
@@ -317,8 +571,8 @@ impl FfiMechanism {
                     iv_size_bits: tls12.ulIVSizeInBits as u64,
                     is_export: tls12.bIsExport != 0,
                     random_info: pkcs11_proxy_ng_types::SslRandomData {
-                        client_random: client_random.clone().to_vec(),
-                        server_random: server_random.clone().to_vec(),
+                        client_random: client_random.to_vec(),
+                        server_random: server_random.to_vec(),
                     },
                     prf_hash_mechanism: CkMechanismType(tls12.prfHashMechanism as u64),
                     client_mac_secret_handle: CkObjectHandle(key_mat_out.hClientMacSecret as u64),
@@ -399,8 +653,8 @@ impl FfiMechanism {
                 // (W1-C5-01; mirrors the TLS 1.2 arm above).
                 Some(CkMechanismParams::Ssl3MasterKeyDerive(Ssl3MasterKeyDeriveParams {
                     random_info: pkcs11_proxy_ng_types::SslRandomData {
-                        client_random: client_random.clone().to_vec(),
-                        server_random: server_random.clone().to_vec(),
+                        client_random: client_random.to_vec(),
+                        server_random: server_random.to_vec(),
                     },
                     version_major: version.major as u32,
                     version_minor: version.minor as u32,
@@ -440,6 +694,63 @@ fn sp800_108_data_params_from_ffi(
             value: value.clone().into(),
         })
         .collect()
+}
+
+impl FfiMechanism {
+    /// Thread-local `output_params()` call count for W1-C4-04
+    /// snapshot-count tests.
+    #[cfg(test)]
+    pub(in crate::ffi) fn output_params_calls_for_tests() -> u64 {
+        OUTPUT_PARAMS_CALLS.with(|c| c.get())
+    }
+
+    #[cfg(test)]
+    pub(in crate::ffi) fn reset_output_params_calls_for_tests() {
+        OUTPUT_PARAMS_CALLS.with(|c| c.set(0));
+    }
+}
+
+/// Key-material IV comparison for [`FfiMechanism::output_params_equal`]:
+/// mirrors the `output_params()` null-means-empty / clamped-copy rule
+/// without allocating.
+fn key_mat_iv_equal(
+    expected: &pkcs11_proxy_ng_types::SecretBytes,
+    out_ptr_null: bool,
+    backing: &[u8],
+    len: usize,
+) -> bool {
+    if out_ptr_null { expected.is_empty() } else { expected.expose(|b| b == &backing[..len]) }
+}
+
+/// SP800-108 data-params comparison for
+/// [`FfiMechanism::output_params_equal`]: mirrors
+/// `sp800_108_data_params_from_ffi` without allocating.
+fn sp800_108_data_params_equal(
+    params: &[cryptoki_sys::CK_PRF_DATA_PARAM],
+    buffers: &[Zeroizing<Vec<u8>>],
+    expected: &[PrfDataParam],
+) -> bool {
+    params.len() == expected.len()
+        && buffers.len() == expected.len()
+        && params.iter().zip(buffers.iter()).zip(expected.iter()).all(|((param, value), e)| {
+            e.type_ == param.type_ as u64 && e.value.expose(|b| b == value.as_slice())
+        })
+}
+
+/// SP800-108 derived-keys comparison for
+/// [`FfiMechanism::output_params_equal`]: mirrors `output_keys`
+/// without allocating.
+fn sp800_108_derived_keys_equal(
+    derived_keys: &FfiSp800108DerivedKeys,
+    expected: &[Sp800108DerivedKey],
+) -> bool {
+    derived_keys.original.len() == expected.len()
+        && derived_keys.handles.len() == expected.len()
+        && derived_keys.original.iter().zip(derived_keys.handles.iter()).zip(expected.iter()).all(
+            |((original, handle), e)| {
+                e.template == original.template && e.key_handle == CkObjectHandle(*handle as u64)
+            },
+        )
 }
 
 struct FfiSp800108DerivedKeys {
@@ -895,6 +1206,20 @@ pub(in crate::ffi) struct FfiMuGenParams {
 /// that is already dominated by the protobuf decode which copied the same
 /// fields a few microseconds earlier. Revisit only if profiling shows mechanism
 /// backing copies as a hotspot (e.g. very large-AAD AEAD workloads).
+///
+/// W1-C5-B06/W1-L13-05 measured note: every remaining per-call clone on
+/// this path was audited and is load-bearing — the C structs hold raw
+/// pointers into the backing, so the backing must own stable storage,
+/// and `Zeroizing` (wipe-on-drop per AGENTS.md §4) requires owned
+/// buffers; borrowing from `&CkMechanism` would thread lifetimes
+/// through `FfiMechanism` into every retained owner AND forfeit the
+/// wipe for buffers whose source is not itself wiping. The per-arm
+/// copies are single (no `clone().to_vec()` doubles remain — pinned by
+/// `output_params_has_no_double_copy`). Measured
+/// `mechanism_clone_hotspot_measured`: `mechanism_to_ffi` (GCM, 12 B
+/// IV + 8 B AAD) + `output_params` + `output_params_equal` ≈ 1 µs/iter
+/// (debug build, 2000 iters) — noise next to one protobuf decode plus
+/// one backend round-trip per `*Init`.
 pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism> {
     let mech_type = narrow_wire_ulong(mechanism.mechanism_type.0)?;
 
@@ -1468,8 +1793,6 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
         // fields. Unknown mechanisms must be added to the TOML registry.
         CkMechanismParams::Raw(_) => Err(CkRv::MECHANISM_PARAM_INVALID),
 
-        // -- Unsupported variants: reject at the FFI boundary ---------------
-        // These require nested CK_MECHANISM pointers, complex multi-struct
         // -- TLS 1.2 Master Key Derive: nested SSL3_RANDOM_DATA + pVersion ---
         CkMechanismParams::Tls12MasterKeyDerive(p) => {
             let mut client_random = Zeroizing::new(p.random_info.client_random.clone());
@@ -2202,7 +2525,7 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
             let mut iv_buf = if p.iv.is_empty() {
                 Zeroizing::new(vec![0u8; iv_bytes])
             } else {
-                let mut iv = Zeroizing::new(p.iv.clone());
+                let mut iv = p.iv.expose(|b| Zeroizing::new(b.to_vec()));
                 iv.resize(iv_bytes, 0);
                 iv
             };

@@ -243,11 +243,16 @@ async fn login_user_inner(
                     // counter so the budget window starts fresh.
                     crate::server::rate_quota::record_login_success(slot);
                     if let Some(login_state) = requested_login_state {
-                        let _ = ctx_mgr
+                        let inserted = ctx_mgr
                             .get_context(&ctx_id, |ctx| {
                                 ctx.login_state.insert(slot, login_state);
                             })
-                            .await;
+                            .await
+                            .is_some();
+                        if inserted {
+                            // W1-L13-17: sync the holder index with the mint.
+                            ctx_mgr.note_login_acquired(&ctx_id, slot);
+                        }
                     }
                     info!(context_id = %ctx_id.0, user_type = user_type_raw, "LoginUser succeeded");
                     CkRv::OK.0

@@ -1,14 +1,11 @@
+#[path = "src/oneof_check.rs"]
+mod oneof_check;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=../../proto/pkcs11-proxy-ng/v1/service.proto");
     println!("cargo:rerun-if-changed=../../proto/pkcs11-proxy-ng/v1/types.proto");
     println!("cargo:rerun-if-changed=../../proto/pkcs11-proxy-ng/v1/mechanism_params.proto");
     println!("cargo:rerun-if-changed=secret-fields.toml");
-
-    let redacted = redacted_messages();
-    emit_redacted_debug(&redacted)?;
-
-    let schema = parse_schema();
-    emit_protected_decode_tables(&schema)?;
 
     // FOLLOWUP-proto-bytes (deferred, multi-PR project)
     //
@@ -22,7 +19,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // (IVs, nonces, AADs, handles, mechanism IDs).
     //
     // ------------------------------------------------------------------
-    // SECURITY: 11 `bytes` fields hold PIN / password material and are
+    // SECURITY: 13 `bytes` fields hold PIN / password material and are
     // wrapped in `Zeroizing<Vec<u8>>` on the server, or live inside
     // `ZeroizeOnDrop`-deriving Rust types in `crates/types`. The
     // `bytes::Bytes` type has NO `Zeroize` impl, and its backing buffer
@@ -40,9 +37,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //   * mechanism_params.proto: SkipjackPrivateWrapParams.password
     //   * mechanism_params.proto: SkipjackRelayxParams.{old_password,
     //                                                     new_password}
+    //   * mechanism_params.proto: OtpParam.value (W1-L2-09)
     //
     // A global `.bytes(".")` flip would silently regress all of these.
     // That is NOT the destination of this migration.
+    //
+    // W1-L2-09 residual (documented, not derived): only the `pin_auth`
+    // owners above wipe. The remaining `[secret]` manifest categories
+    // (key material, plaintext, seeds, vendor blobs) are still freed
+    // plain after the borrow-based conversions copy out of them — the
+    // same single-free the PIN messages had before Task 5. Widening the
+    // derive set would forbid field moves in dozens of handlers; that
+    // sweep stays future work (FOLLOWUP-zeroize-broader-coverage in the
+    // Task 5 report), and the `pin_zeroize` manifest test fails if a new
+    // `pin_auth` field lands without its owner's derive.
     // ------------------------------------------------------------------
     //
     // The right shape of the migration:
@@ -88,6 +96,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //
     // Until that PR series lands, keep `Vec<u8>` everywhere — the
     // consistency is more valuable than a half-measure.
+    let redacted = redacted_messages();
     tonic_prost_build::configure()
         .build_server(true)
         .build_client(true)
@@ -119,6 +128,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ".pkcs11_proxy_ng.v1.Pkcs5Pbkd2Params",
             "#[derive(::zeroize::Zeroize, ::zeroize::ZeroizeOnDrop)]",
         )
+        // W1-L2-09: `OtpParam.value` is `pin_auth`-classified
+        // (`secret-fields.toml`) and copied out by the borrow-based OTP
+        // conversion, so it gets the same treatment. Its `OtpParams`
+        // wrapper needs no derive: dropping the `Vec<OtpParam>` runs each
+        // element's `ZeroizeOnDrop`.
+        .type_attribute(
+            ".pkcs11_proxy_ng.v1.OtpParam",
+            "#[derive(::zeroize::Zeroize, ::zeroize::ZeroizeOnDrop)]",
+        )
         .type_attribute(
             ".pkcs11_proxy_ng.v1.LoginRequest",
             "#[derive(::zeroize::Zeroize, ::zeroize::ZeroizeOnDrop)]",
@@ -148,6 +166,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ],
             &["../../proto"],
         )?;
+
+    // W1-C8-07: the oneof cross-validation reads prost's output, so it runs
+    // after codegen and before the redacted-`Debug` emission it protects.
+    cross_validate_oneofs_against_prost();
+    emit_redacted_debug(&redacted)?;
+
+    let schema = parse_schema();
+    emit_protected_decode_tables(&schema)?;
     Ok(())
 }
 
@@ -219,112 +245,53 @@ fn redacted_messages() -> Vec<String> {
 /// Parses `message Parent { ... oneof name { ... } ... }` from the schema.
 /// Messages are top-level only; nested messages fail the build so the
 /// generator (and its prost module-path mapping) is extended deliberately.
+/// The per-file tokenizer lives in `oneof_check` so unit tests pin the same
+/// core the build runs (W1-C8-07).
 fn message_oneofs() -> Vec<(String, String)> {
     let mut oneofs = Vec::new();
     for path in PROTO_FILES {
         let source = std::fs::read_to_string(path).unwrap_or_else(|_| panic!("read {path}"));
-        let mut tokens = Vec::new();
-        for line in source.lines() {
-            let mut word = String::new();
-            for ch in line.split("//").next().unwrap_or_default().chars() {
-                if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' {
-                    word.push(ch);
-                    continue;
-                }
-                if !word.is_empty() {
-                    tokens.push(std::mem::take(&mut word));
-                }
-                if ch == '{' || ch == '}' || ch == ';' || ch == '=' {
-                    tokens.push(ch.to_string());
-                }
-            }
-            if !word.is_empty() {
-                tokens.push(word);
-            }
-        }
-        let mut depth = 0_usize;
-        let mut enclosing: Vec<(String, usize)> = Vec::new();
-        let mut index = 0;
-        while index < tokens.len() {
-            match tokens[index].as_str() {
-                "message" => {
-                    let name = tokens
-                        .get(index + 1)
-                        .unwrap_or_else(|| panic!("invalid message declaration in {path}"));
-                    assert!(
-                        !is_message_context(&enclosing),
-                        "nested message {name} in {path}: extend the redaction generator first"
-                    );
-                    enclosing.push((format!("message:{name}"), depth + 1));
-                    index += 2;
-                }
-                "oneof" => {
-                    let name = tokens
-                        .get(index + 1)
-                        .unwrap_or_else(|| panic!("invalid oneof declaration in {path}"));
-                    let parent = enclosing
-                        .iter()
-                        .rev()
-                        .find_map(|(context, _)| context.strip_prefix("message:"));
-                    let parent = parent
-                        .unwrap_or_else(|| panic!("oneof {name} outside a message in {path}"));
-                    oneofs.push((parent.to_owned(), name.clone()));
-                    index += 2;
-                }
-                "{" => {
-                    depth += 1;
-                    index += 1;
-                }
-                "}" => {
-                    depth = depth.checked_sub(1).expect("unbalanced closing brace");
-                    enclosing.retain(|(_, message_depth)| *message_depth <= depth);
-                    index += 1;
-                }
-                _ => index += 1,
-            }
-        }
-        assert_eq!(depth, 0, "unbalanced opening brace in {path}");
+        oneofs.extend(oneof_check::parse_oneofs_in_source(&source, path));
     }
     oneofs.sort();
     oneofs.dedup();
     oneofs
 }
 
-fn is_message_context(enclosing: &[(String, usize)]) -> bool {
-    enclosing.iter().any(|(context, _)| context.starts_with("message:"))
-}
-
-/// prost module for a message (`AuthenticatedMechanismOutput` ->
-/// `authenticated_mechanism_output`) and enum name for a oneof
-/// (`output` -> `Output`).
-fn prost_oneof_path(parent: &str, oneof: &str) -> String {
-    let mut module = String::new();
-    let chars: Vec<char> = parent.chars().collect();
-    for (index, ch) in chars.iter().enumerate() {
-        if ch.is_ascii_uppercase() {
-            let prev_lower_or_digit = index > 0
-                && (chars[index - 1].is_ascii_lowercase() || chars[index - 1].is_ascii_digit());
-            let next_lower = chars.get(index + 1).is_some_and(|next| next.is_ascii_lowercase());
-            let prev_upper = index > 0 && chars[index - 1].is_ascii_uppercase();
-            if prev_lower_or_digit || (prev_upper && next_lower) {
-                module.push('_');
-            }
-            module.push(ch.to_ascii_lowercase());
-        } else {
-            module.push(*ch);
-        }
-    }
-    let enumeration: String = oneof
-        .split('_')
-        .map(|word| {
-            let mut chars = word.chars();
-            match chars.next() {
-                Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
-                None => String::new(),
-            }
-        })
-        .collect();
-    format!("{module}::{enumeration}")
+/// W1-C8-07: cross-validates the schema oneof tokenizer against prost's
+/// actual output. A tokenizer miss would silently leave a payload-printing
+/// derived `Debug` on the missed oneof enum (no redacted impl is emitted
+/// for it), so any drift fails the build loudly instead.
+fn cross_validate_oneofs_against_prost() {
+    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR must be set for the build script");
+    let generated_path = std::path::Path::new(&out_dir).join("pkcs11_proxy_ng.v1.rs");
+    let generated = std::fs::read_to_string(&generated_path).unwrap_or_else(|_| {
+        panic!(
+            "read {}: build.rs must compile the protos before validating oneofs",
+            generated_path.display()
+        )
+    });
+    let enums = oneof_check::parse_prost_oneof_enums(&generated);
+    assert!(
+        !enums.is_empty(),
+        "oneof cross-validation found no prost oneof enums in {}: extend the scanner deliberately, do not pass vacuously",
+        generated_path.display()
+    );
+    let oneofs = message_oneofs();
+    assert!(
+        !oneofs.is_empty(),
+        "schema tokenizer found no oneofs: extend the tokenizer deliberately, do not pass vacuously"
+    );
+    let missing = oneof_check::missing_oneofs(&oneofs, &enums);
+    assert!(
+        missing.is_empty(),
+        "message_oneofs() missed oneof enums prost generated: {missing:?}: extend the redaction tokenizer first (a missed oneof keeps payload-printing derived Debug)"
+    );
+    let stale = oneof_check::stale_oneofs(&oneofs, &enums);
+    assert!(
+        stale.is_empty(),
+        "schema tokenizer lists oneofs prost did not generate: {stale:?}: extend the cross-validation deliberately"
+    );
 }
 
 /// Emits whole-message `TypeName([REDACTED])` impls for every redacted
@@ -365,7 +332,7 @@ fn emit_redacted_debug(redacted: &[String]) -> Result<(), Box<dyn std::error::Er
     for (parent, oneof) in
         message_oneofs().into_iter().filter(|(parent, _)| redacted_set.contains(parent.as_str()))
     {
-        let path = prost_oneof_path(&parent, &oneof);
+        let path = oneof_check::prost_oneof_path(&parent, &oneof);
         let rendered = path.replace("::", ".");
         out.push_str(&format!(
             "\nimpl ::std::fmt::Debug for crate::pkcs11_proxy_ng::v1::{path} {{\n\

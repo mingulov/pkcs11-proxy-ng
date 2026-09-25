@@ -99,8 +99,7 @@ pub(crate) async fn wrap_key(
     key_handle: u64,
 ) -> CliResult {
     let mechanism = cli_mechanism(&mechanism, params_file.as_deref())?;
-    let session =
-        open_session(client, slot_id, CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await?;
+    let session = open_session(client, slot_id, CkSessionFlags::SERIAL_SESSION).await?;
     login_user(client, session, pin).await?;
     let wrapped = client
         .wrap_key(
@@ -127,12 +126,9 @@ pub(crate) async fn unwrap_key(
     label: Option<String>,
 ) -> CliResult {
     let mechanism = cli_mechanism(&mechanism, params_file.as_deref())?;
-    let session = open_session(
-        client,
-        slot_id,
-        CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
-    )
-    .await?;
+    let session =
+        open_session(client, slot_id, CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION)
+            .await?;
     login_user(client, session, pin).await?;
 
     let wrapped_key = hex::decode(&wrapped_key).map_err(|e| format!("Invalid hex: {e}"))?;
@@ -178,12 +174,9 @@ pub(crate) async fn derive_key(
     label: Option<String>,
 ) -> CliResult {
     let mechanism = cli_mechanism(&mechanism, params_file.as_deref())?;
-    let session = open_session(
-        client,
-        slot_id,
-        CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
-    )
-    .await?;
+    let session =
+        open_session(client, slot_id, CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION)
+            .await?;
     login_user(client, session, pin).await?;
 
     let mut template = vec![CkAttribute {
@@ -216,12 +209,9 @@ pub(crate) async fn generate_key(
     key_size: Option<u64>,
 ) -> CliResult {
     let mechanism = cli_mechanism(&mechanism, params_file.as_deref())?;
-    let session = open_session(
-        client,
-        slot_id,
-        CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
-    )
-    .await?;
+    let session =
+        open_session(client, slot_id, CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION)
+            .await?;
     login_user(client, session, pin).await?;
 
     let mut template = vec![
@@ -269,12 +259,9 @@ pub(crate) async fn generate_key_pair(
     ec_params: Option<String>,
 ) -> CliResult {
     let mechanism = cli_mechanism(&mechanism, params_file.as_deref())?;
-    let session = open_session(
-        client,
-        slot_id,
-        CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
-    )
-    .await?;
+    let session =
+        open_session(client, slot_id, CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION)
+            .await?;
     login_user(client, session, pin).await?;
 
     let mut public_template = vec![

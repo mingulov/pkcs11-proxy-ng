@@ -11,6 +11,8 @@ impl CkAttributeType {
     pub const LABEL: Self = Self(0x00000003);
     pub const VALUE: Self = Self(0x00000011);
     pub const CERTIFICATE_TYPE: Self = Self(0x00000080);
+    pub const ISSUER: Self = Self(0x00000081);
+    pub const SERIAL_NUMBER: Self = Self(0x00000082);
     pub const SUBJECT: Self = Self(0x00000101);
     pub const KEY_TYPE: Self = Self(0x00000100);
     pub const SENSITIVE: Self = Self(0x00000103);
@@ -397,6 +399,15 @@ mod tests {
     #[test]
     fn subject_attribute_has_standard_id() {
         assert_eq!(CkAttributeType::SUBJECT.0, 0x0000_0101);
+    }
+
+    // W1-C11-25: certificate ISSUER/SERIAL_NUMBER consts (OASIS ids
+    // 0x81/0x82, matching cryptoki-sys 0.5 CKA_ISSUER=129,
+    // CKA_SERIAL_NUMBER=130) so the CLI name table stays typed.
+    #[test]
+    fn issuer_and_serial_number_have_standard_ids() {
+        assert_eq!(CkAttributeType::ISSUER.0, 0x0000_0081);
+        assert_eq!(CkAttributeType::SERIAL_NUMBER.0, 0x0000_0082);
     }
 
     #[test]

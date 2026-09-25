@@ -18,11 +18,16 @@ pub unsafe extern "C" fn c_sign_init(
         if p_mechanism.is_null() {
             let result =
                 with_client!(client => client.sign_init_cancel(CkSessionHandle(h_session as u64)));
-            if result.is_ok() {
-                state::clear_sign_output_caches(h_session);
-                state::clear_operation_state_cache(h_session);
-            }
             return unit_result_to_rv(result);
+        }
+        // T29 M3: same native precedence as the digest/cipher inits
+        // (W1-L3-11) — uninitialized cryptoki first, then session
+        // resolution before mechanism validation.
+        if !state::is_initialized() {
+            return rv_err(CkRv::CRYPTOKI_NOT_INITIALIZED);
+        }
+        if !state::is_session_known(h_session) {
+            return rv_err(CkRv::SESSION_HANDLE_INVALID);
         }
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
@@ -37,10 +42,6 @@ pub unsafe extern "C" fn c_sign_init(
             &mech,
             CkObjectHandle(h_key as u64),
         ));
-        if result.is_ok() {
-            state::clear_sign_output_caches(h_session);
-            state::clear_operation_state_cache(h_session);
-        }
         unit_result_to_rv(result)
     })
 }
@@ -107,10 +108,16 @@ pub unsafe extern "C" fn c_verify_init(
     catch_panics(|| {
         if p_mechanism.is_null() {
             let result = with_client!(client => client.verify_init_cancel(CkSessionHandle(h_session as u64)));
-            if result.is_ok() {
-                state::clear_operation_state_cache(h_session);
-            }
             return unit_result_to_rv(result);
+        }
+        // T29 M3: same native precedence as the digest/cipher inits
+        // (W1-L3-11) — uninitialized cryptoki first, then session
+        // resolution before mechanism validation.
+        if !state::is_initialized() {
+            return rv_err(CkRv::CRYPTOKI_NOT_INITIALIZED);
+        }
+        if !state::is_session_known(h_session) {
+            return rv_err(CkRv::SESSION_HANDLE_INVALID);
         }
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
@@ -202,11 +209,16 @@ pub unsafe extern "C" fn c_sign_recover_init(
     catch_panics(|| {
         if p_mechanism.is_null() {
             let result = with_client!(client => client.sign_recover_init_cancel(CkSessionHandle(h_session as u64)));
-            if result.is_ok() {
-                state::clear_sign_recover_output_cache(h_session);
-                state::clear_operation_state_cache(h_session);
-            }
             return unit_result_to_rv(result);
+        }
+        // T29 M3: same native precedence as the digest/cipher inits
+        // (W1-L3-11) — uninitialized cryptoki first, then session
+        // resolution before mechanism validation.
+        if !state::is_initialized() {
+            return rv_err(CkRv::CRYPTOKI_NOT_INITIALIZED);
+        }
+        if !state::is_session_known(h_session) {
+            return rv_err(CkRv::SESSION_HANDLE_INVALID);
         }
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
@@ -221,10 +233,6 @@ pub unsafe extern "C" fn c_sign_recover_init(
             &mech,
             CkObjectHandle(h_key as u64),
         ));
-        if result.is_ok() {
-            state::clear_sign_recover_output_cache(h_session);
-            state::clear_operation_state_cache(h_session);
-        }
         unit_result_to_rv(result)
     })
 }
@@ -258,11 +266,16 @@ pub unsafe extern "C" fn c_verify_recover_init(
             let result = with_client!(client => client.verify_recover_init_cancel(
                 CkSessionHandle(h_session as u64)
             ));
-            if result.is_ok() {
-                state::clear_verify_recover_output_cache(h_session);
-                state::clear_operation_state_cache(h_session);
-            }
             return unit_result_to_rv(result);
+        }
+        // T29 M3: same native precedence as the digest/cipher inits
+        // (W1-L3-11) — uninitialized cryptoki first, then session
+        // resolution before mechanism validation.
+        if !state::is_initialized() {
+            return rv_err(CkRv::CRYPTOKI_NOT_INITIALIZED);
+        }
+        if !state::is_session_known(h_session) {
+            return rv_err(CkRv::SESSION_HANDLE_INVALID);
         }
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
@@ -277,10 +290,6 @@ pub unsafe extern "C" fn c_verify_recover_init(
             &mech,
             CkObjectHandle(h_key as u64),
         ));
-        if result.is_ok() {
-            state::clear_verify_recover_output_cache(h_session);
-            state::clear_operation_state_cache(h_session);
-        }
         unit_result_to_rv(result)
     })
 }

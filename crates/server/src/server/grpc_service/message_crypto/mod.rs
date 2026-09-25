@@ -26,6 +26,9 @@ use pkcs11_proxy_ng_proto::convert::message_params::{
 // boundary (response/request construction); the standing justification lives in
 // `secret_boundary` docs. No plain copy is retained past the enclosing encode.
 use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
+use pkcs11_proxy_ng_proto::version::{
+    exact_effects_version_rejected, exact_output_effects_version_supported,
+};
 use pkcs11_proxy_ng_types::*;
 
 use super::super::context_manager::{
@@ -142,7 +145,10 @@ fn validate_message_init_contract(
     let requested_shape = MessageParameterShape::try_from_proto_i32(
         wire_shape.ok_or(CkRv::MECHANISM_PARAM_INVALID)?,
     )?;
-    let registry = ctx.mechanism_registry_source.current_registry();
+    // W1-C3-26: a poisoned registry lock fails closed with
+    // DEVICE_ERROR (internal daemon fault), never a panic.
+    let registry =
+        ctx.mechanism_registry_source.current_registry().map_err(|_| CkRv::DEVICE_ERROR)?;
     let derived_shape =
         MessageParameterShape::from_registry_name(registry.param_shape(mechanism_type.0));
     if requested_shape != derived_shape {
@@ -521,6 +527,16 @@ async fn message_encrypt_init_with_timeout(
             }
         };
 
+        // Mechanism policy gate (G3-PR3 Task 3).
+        // W1-C1-13: the gate runs before remap on every init handler so identical
+        // dual-defect requests yield the same RV regardless of op.
+        if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageEncryptInitResponse {
+                ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
+                ..Default::default()
+            }));
+        }
+
         // B1: remap object handles embedded in the mechanism parameters;
         // gate each through per-object authz when active (C1).
         if let Err(rv) =
@@ -533,26 +549,30 @@ async fn message_encrypt_init_with_timeout(
             }));
         }
 
-        // Mechanism policy gate (G3-PR3 Task 3).
-        if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageEncryptInitResponse {
-                ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
-                ..Default::default()
-            }));
-        }
-
         let backend = Arc::clone(backend_ref);
         let init_param_for_response = init_param.clone();
-        let installed_shape = contract.as_ref().map_or_else(
-            || {
+        // W1-C3-26: a poisoned registry lock fails closed with
+        // DEVICE_ERROR (internal daemon fault), never a panic. The lock
+        // is still only acquired when no contract supplied the shape.
+        let installed_shape = match contract.as_ref() {
+            Some(contract) => contract.shape,
+            None => {
+                let registry = match ctx.mechanism_registry_source.current_registry() {
+                    Ok(registry) => registry,
+                    Err(_) => {
+                        return Ok(Response::new(
+                            pkcs11_proxy_ng_proto::MessageEncryptInitResponse {
+                                ck_rv: CkRv::DEVICE_ERROR.0,
+                                ..Default::default()
+                            },
+                        ));
+                    }
+                };
                 MessageParameterShape::from_registry_name(
-                    ctx.mechanism_registry_source
-                        .current_registry()
-                        .param_shape(mechanism.mechanism_type.0),
+                    registry.param_shape(mechanism.mechanism_type.0),
                 )
-            },
-            |contract| contract.shape,
-        );
+            }
+        };
         let mut transition = MessageOperationTransition::begin(operation);
         let result = if let Some(ref contract) = contract {
             let provider_spec = contract.provider_spec.clone();
@@ -852,6 +872,16 @@ async fn message_decrypt_init_with_timeout(
             }
         };
 
+        // Mechanism policy gate (G3-PR3 Task 3).
+        // W1-C1-13: the gate runs before remap on every init handler so identical
+        // dual-defect requests yield the same RV regardless of op.
+        if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageDecryptInitResponse {
+                ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
+                ..Default::default()
+            }));
+        }
+
         // B1: remap object handles embedded in the mechanism parameters;
         // gate each through per-object authz when active (C1).
         if let Err(rv) =
@@ -864,26 +894,30 @@ async fn message_decrypt_init_with_timeout(
             }));
         }
 
-        // Mechanism policy gate (G3-PR3 Task 3).
-        if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageDecryptInitResponse {
-                ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
-                ..Default::default()
-            }));
-        }
-
         let backend = Arc::clone(backend_ref);
         let init_param_for_response = init_param.clone();
-        let installed_shape = contract.as_ref().map_or_else(
-            || {
+        // W1-C3-26: a poisoned registry lock fails closed with
+        // DEVICE_ERROR (internal daemon fault), never a panic. The lock
+        // is still only acquired when no contract supplied the shape.
+        let installed_shape = match contract.as_ref() {
+            Some(contract) => contract.shape,
+            None => {
+                let registry = match ctx.mechanism_registry_source.current_registry() {
+                    Ok(registry) => registry,
+                    Err(_) => {
+                        return Ok(Response::new(
+                            pkcs11_proxy_ng_proto::MessageDecryptInitResponse {
+                                ck_rv: CkRv::DEVICE_ERROR.0,
+                                ..Default::default()
+                            },
+                        ));
+                    }
+                };
                 MessageParameterShape::from_registry_name(
-                    ctx.mechanism_registry_source
-                        .current_registry()
-                        .param_shape(mechanism.mechanism_type.0),
+                    registry.param_shape(mechanism.mechanism_type.0),
                 )
-            },
-            |contract| contract.shape,
-        );
+            }
+        };
         let mut transition = MessageOperationTransition::begin(operation);
         let result = if let Some(ref contract) = contract {
             let provider_spec = contract.provider_spec.clone();
@@ -1138,6 +1172,15 @@ pub(crate) async fn message_sign_init(
             }
         };
 
+        // Mechanism policy gate (G3-PR3 Task 3).
+        // W1-C1-13: the gate runs before remap on every init handler so identical
+        // dual-defect requests yield the same RV regardless of op.
+        if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageSignInitResponse {
+                ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
+            }));
+        }
+
         // B1: remap object handles embedded in the mechanism parameters;
         // gate each through per-object authz when active (C1).
         if let Err(rv) =
@@ -1146,13 +1189,6 @@ pub(crate) async fn message_sign_init(
         {
             return Ok(Response::new(pkcs11_proxy_ng_proto::MessageSignInitResponse {
                 ck_rv: rv.0,
-            }));
-        }
-
-        // Mechanism policy gate (G3-PR3 Task 3).
-        if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageSignInitResponse {
-                ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
             }));
         }
 
@@ -1319,6 +1355,15 @@ pub(crate) async fn message_verify_init(
             }
         };
 
+        // Mechanism policy gate (G3-PR3 Task 3).
+        // W1-C1-13: the gate runs before remap on every init handler so identical
+        // dual-defect requests yield the same RV regardless of op.
+        if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageVerifyInitResponse {
+                ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
+            }));
+        }
+
         // B1: remap object handles embedded in the mechanism parameters;
         // gate each through per-object authz when active (C1).
         if let Err(rv) =
@@ -1327,13 +1372,6 @@ pub(crate) async fn message_verify_init(
         {
             return Ok(Response::new(pkcs11_proxy_ng_proto::MessageVerifyInitResponse {
                 ck_rv: rv.0,
-            }));
-        }
-
-        // Mechanism policy gate (G3-PR3 Task 3).
-        if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageVerifyInitResponse {
-                ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
             }));
         }
 
@@ -1578,8 +1616,11 @@ pub(crate) async fn encrypt_message_begin(
     request: Request<pkcs11_proxy_ng_proto::EncryptMessageBeginRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptMessageBeginResponse>, Status> {
     let req = request.into_inner();
-    if req.parameter_out_spec.is_some() && req.exact_output_effects_version != 1 {
-        return Err(Status::failed_precondition("exact output effects version 1 is required"));
+    // W1-L5-04: compatibility-range gate, never an equality literal.
+    if req.parameter_out_spec.is_some()
+        && !exact_output_effects_version_supported(req.exact_output_effects_version)
+    {
+        return Err(exact_effects_version_rejected(req.exact_output_effects_version));
     }
     let ctx_id = ClientContextId(req.client_context_id);
     let result = execute_message_begin(
@@ -1830,8 +1871,11 @@ pub(crate) async fn decrypt_message_begin(
     request: Request<pkcs11_proxy_ng_proto::DecryptMessageBeginRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecryptMessageBeginResponse>, Status> {
     let req = request.into_inner();
-    if req.parameter_out_spec.is_some() && req.exact_output_effects_version != 1 {
-        return Err(Status::failed_precondition("exact output effects version 1 is required"));
+    // W1-L5-04: compatibility-range gate, never an equality literal.
+    if req.parameter_out_spec.is_some()
+        && !exact_output_effects_version_supported(req.exact_output_effects_version)
+    {
+        return Err(exact_effects_version_rejected(req.exact_output_effects_version));
     }
     let ctx_id = ClientContextId(req.client_context_id);
     let result = execute_message_begin(
@@ -2834,8 +2878,7 @@ mod lifecycle_transition_tests {
         let manager = Arc::new(ContextManager::new(lease_duration, 0));
         manager.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
         let context_id = manager.create_context(None).await.unwrap();
-        let raw_session =
-            mock.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).unwrap();
+        let raw_session = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
         let virtual_session = register_session_handle(
             &manager,
             &context_id,
@@ -2868,8 +2911,7 @@ mod lifecycle_transition_tests {
         let manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
         manager.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
         let context_id = manager.create_context(None).await.unwrap();
-        let raw_session =
-            mock.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).unwrap();
+        let raw_session = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
         let virtual_session = register_session_handle(
             &manager,
             &context_id,
@@ -2894,7 +2936,7 @@ mod lifecycle_transition_tests {
         let mock = Arc::new(MockBackend::default_test());
         mock.initialize().unwrap();
         let backend_session =
-            mock.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).unwrap();
+            mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
         let backend: Arc<dyn Pkcs11Backend> = mock.clone();
         let manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
         manager.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
@@ -4184,12 +4226,9 @@ mod lifecycle_transition_tests {
         let context_a = manager.create_context(None).await.unwrap();
         let context_b = manager.create_context(None).await.unwrap();
 
-        let backend_a1 =
-            mock.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).unwrap();
-        let backend_a2 =
-            mock.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).unwrap();
-        let backend_b1 =
-            mock.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).unwrap();
+        let backend_a1 = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
+        let backend_a2 = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
+        let backend_b1 = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
         let session_a1 = register_session_handle(
             &manager,
             &context_a,

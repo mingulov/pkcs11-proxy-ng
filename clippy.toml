@@ -2,4 +2,11 @@
 # in the root Cargo.toml (print_stdout/print_stderr/dbg_macro = "deny"),
 # not here — clippy.toml holds only per-lint configuration values.
 # `crates/server/tests/print_sink_gate.rs` audits the allow set.
+# W1-L12-12 rationale: the default threshold of 7 would flag the
+# PKCS#11 FFI-shape helpers, whose arity mirrors fixed C signatures
+# (e.g. multi-pointer dispatch/admin entry points and mechanism
+# readers) rather than a decomposable design — splitting them would
+# obscure the 1:1 mapping to the native function lists. 10 keeps the
+# lint live for ordinary helpers while exempting only the widest
+# FFI-faithful shapes; revisit if non-FFI code approaches the cap.
 too-many-arguments-threshold = 10

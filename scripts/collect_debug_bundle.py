@@ -36,12 +36,29 @@ ENVIRONMENT_NAMES = (
     "PKCS11_PROXY_TLS_CLIENT_CERT",
     "PKCS11_PROXY_TLS_CLIENT_KEY",
     "PKCS11_PROXY_TLS_DOMAIN",
+    # Shim connection tuning (W1-L14-22).
+    "PKCS11_PROXY_CONNECT_TIMEOUT",
+    "PKCS11_PROXY_CONNECT_ATTEMPTS",
+    # Shim registry selection (W1-L14-22).
+    "PKCS11_PROXY_MECHANISMS",
+    "PKCS11_PROXY_DISABLE_SERVER_REGISTRY",
+    # Daemon env overrides (the --print-env-vars set; W1-L14-22).
+    "PKCS11_PROXY_BIND",
     "PKCS11_PROXY_BACKEND_MODULE",
+    "PKCS11_PROXY_BACKEND_ARGS",
     "PKCS11_PROXY_MECHANISMS_CONFIG",
+    "PKCS11_PROXY_ALLOW_INSECURE",
+    "PKCS11_PROXY_RESILIENCE_METRICS_SOCKET",
+    "PKCS11_PROXY_RESILIENCE_FIND_THRESHOLD",
+    "PKCS11_PROXY_TEST_HOOKS_CONTROL_SOCKET",
     "SOFTHSM2_CONF",
     "CARGO_TARGET_DIR",
     "RUST_BACKTRACE",
 )
+# NOTE: secret-bearing vars (PKCS11_PROXY_PIN/SO_PIN/NEW_PIN/INPUT/
+# WRAPPED_KEY/VALUE/DATA/SIGNATURE/SEED) must never join this list —
+# presence-only recording keeps this bundle shareable, and naming a
+# secret var here would still invite value capture by future edits.
 KNOWN_KERNELS = {"Linux", "FreeBSD", "Darwin"}
 KNOWN_MACHINES = {
     "x86_64",

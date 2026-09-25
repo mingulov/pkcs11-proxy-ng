@@ -1107,7 +1107,7 @@ mod tests {
             random_info: WtlsRandomData { client_random: vec![3; 16], server_random: vec![4; 16] },
             mac_secret_handle: CkObjectHandle(0xB1),
             key_handle: CkObjectHandle(0),
-            iv: Vec::new(),
+            iv: Vec::new().into(),
         });
         virtualize_key_mat_out_handles(&ctx_mgr, &ctx_id, virtual_session, false, &mut wtls).await;
         let CkMechanismParams::WtlsKeyMat(wtls) = &wtls else { unreachable!() };

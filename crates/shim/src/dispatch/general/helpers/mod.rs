@@ -2,6 +2,8 @@
 // for cross-platform PKCS#11 portability.
 #![allow(clippy::unnecessary_cast)]
 
+use std::ffi::CStr;
+
 use cryptoki_sys::*;
 use pkcs11_proxy_ng_types::*;
 
@@ -20,6 +22,21 @@ pub(crate) fn unit_result_to_rv(result: Result<(), CkRv>) -> CK_RV {
     }
 }
 
+/// Run a data-plane call against the shared gRPC client (W1-L11-01).
+///
+/// Looks like a plain call, but the expansion carries hidden control flow —
+/// every expansion site (all shim data-plane entries) shares this shape:
+/// - an early `return CKR_CRYPTOKI_NOT_INITIALIZED` when the shim is not
+///   initialized (callers must be `CK_RV`-returning `catch_panics` closures);
+/// - a best-effort `state::ensure_client_connected` reconnect-flag
+///   consumption outside the runtime (fast path: two atomic loads);
+/// - a `runtime().block_on` around the whole call: `$call` is an async
+///   expression awaited on the shim's current-thread runtime;
+/// - a clone-before-RPC of the shared client (the `Mutex` guard is dropped
+///   before the RPC; `$client` binds the owned clone for `$call`).
+///
+/// Evaluates to the awaited `$call` value (`__result`); transport failures
+/// surface through it, never through the flag-consumption step.
 macro_rules! with_client {
     ($client:ident => $call:expr) => {{
         if !crate::state::is_initialized() {
@@ -88,13 +105,8 @@ pub(crate) const MAX_SERIALIZABLE_BYTES: usize = 512 * 1024 * 1024;
 #[derive(Debug)]
 pub(crate) enum InputBuf<'a> {
     Bytes(&'a [u8]),
-    Null {
-        len: u64,
-    },
-    TooLarge {
-        #[allow(dead_code)]
-        len: u64,
-    },
+    Null { len: u64 },
+    TooLarge { len: u64 },
 }
 
 /// Classify a raw C input-pointer pair into a typed `InputBuf`.
@@ -124,11 +136,16 @@ pub(crate) unsafe fn classify_input<'a>(ptr: *const u8, len: CK_ULONG) -> InputB
 
 /// Convert a classified input to the backend-facing type. TooLarge is the
 /// transport-impossible class: documented stable RV (ADR-0010 Limits).
+/// The rejected length is logged (lengths carry no secret content) so the
+/// field is read at conversion, not kept by `allow(dead_code)` (W1-L12-09).
 pub(crate) fn input_buf_to_ck_in_buf(buf: InputBuf<'_>) -> Result<CkInBuf<'_>, CkRv> {
     match buf {
         InputBuf::Bytes(b) => Ok(CkInBuf::Bytes(b)),
         InputBuf::Null { len } => Ok(CkInBuf::Null { len }),
-        InputBuf::TooLarge { .. } => Err(CkRv::ARGUMENTS_BAD),
+        InputBuf::TooLarge { len } => {
+            tracing::debug!(rejected_len = len, "oversize input rejected as ARGUMENTS_BAD");
+            Err(CkRv::ARGUMENTS_BAD)
+        }
     }
 }
 
@@ -155,7 +172,10 @@ pub(crate) unsafe fn try_read_optional_bytes<'a>(
     match unsafe { classify_input(ptr, len) } {
         InputBuf::Bytes(b) => Ok(Some(b)),
         InputBuf::Null { .. } => Ok(None),
-        InputBuf::TooLarge { .. } => Err(CkRv::ARGUMENTS_BAD),
+        InputBuf::TooLarge { len } => {
+            tracing::debug!(rejected_len = len, "oversize input rejected as ARGUMENTS_BAD");
+            Err(CkRv::ARGUMENTS_BAD)
+        }
     }
 }
 
@@ -183,6 +203,61 @@ pub(crate) unsafe fn output_buffer_spec(
         },
         length_pointer_null,
     }
+}
+
+/// Caller C-string scan window, in bytes (W1-C6-06): at most 255 content
+/// bytes plus the NUL fit inside — a NUL at index 256 is already outside
+/// the window, so 256 content bytes are rejected. Interface and async
+/// function names are short literals (`"PKCS 11"`, `"C_Sign"`); anything
+/// without a NUL inside this bound is a buggy caller, answered loudly
+/// instead of scanned unboundedly.
+/// Mirrors the backend's `MAX_INTERFACE_NAME_LEN` (W1-C4-06).
+pub(crate) const MAX_C_STRING_LEN: usize = 256;
+
+/// Read a NUL-terminated caller string with a bounded scan (W1-C6-06).
+///
+/// Returns `Err(CkRv::ARGUMENTS_BAD)` when no NUL appears within the
+/// [`MAX_C_STRING_LEN`]-byte scan window (at most 255 content bytes plus
+/// the NUL) — the loud error for an unterminated or overlong caller string.
+/// Never `CStr::from_ptr`: it would scan unboundedly into caller memory.
+///
+/// # Safety
+///
+/// `ptr` must be non-null, and the bytes from `ptr` up to and including
+/// the first NUL (or [`MAX_C_STRING_LEN`] bytes when no NUL appears
+/// sooner) must be readable for the returned borrow's lifetime.
+pub(crate) unsafe fn read_bounded_cstr<'a>(ptr: *const std::ffi::c_char) -> Result<&'a CStr, CkRv> {
+    let mut len = 0usize;
+    while len < MAX_C_STRING_LEN {
+        // SAFETY: non-null per the contract; the scan stays within the
+        // readable prefix it guarantees.
+        if unsafe { *ptr.add(len) } == 0 {
+            break;
+        }
+        len += 1;
+    }
+    if len == MAX_C_STRING_LEN {
+        return Err(CkRv::ARGUMENTS_BAD);
+    }
+    // SAFETY: the `len` bytes before the NUL were just scanned readable
+    // one by one; `from_bytes_with_nul` re-validates the terminator.
+    let bytes = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), len + 1) };
+    std::ffi::CStr::from_bytes_with_nul(bytes).map_err(|_| CkRv::ARGUMENTS_BAD)
+}
+
+/// Decide the host-width mapping for a 64-bit wire `ck_rv` (W1-L3-13).
+///
+/// Returns `None` when `rv` fits `host_max` (the path every real backend
+/// takes: all genuine PKCS#11 RVs are small). Returns
+/// `Some(CkRv::GENERAL_ERROR)` when the value is unrepresentable — reachable
+/// only on hosts where `CK_ULONG` is 32 bits (ILP32, Windows LLP64) meeting
+/// a peer that emits a >32-bit RV. `GENERAL_ERROR` is the documented
+/// proxy-originated fallback (no PKCS#11 RV names "unrepresentable"; cause
+/// recorded in error-reference.md); the caller logs the saturation loudly.
+/// Split out as a pure decision so the 32-bit mapping is pinnable on 64-bit
+/// CI by simulating `host_max = u32::MAX`.
+pub(crate) fn ck_rv_width_fallback(rv: u64, host_max: u64) -> Option<CkRv> {
+    (rv > host_max).then_some(CkRv::GENERAL_ERROR)
 }
 
 /// Write an exact `CkOutputBufferResult` back to the C caller.
@@ -215,7 +290,20 @@ pub(crate) unsafe fn write_exact_output(
     }
     // The validated request snapshot is the capacity authority. In particular,
     // a NULL-output query may have an uninitialized incoming length cell.
-    let rv = CK_RV::try_from(result.ck_rv.0).unwrap_or(CKR_GENERAL_ERROR);
+    // W1-L3-13: loud, documented narrowing — a 64-bit wire ck_rv the host
+    // CK_RV cannot represent (32-bit CK_ULONG hosts only) saturates to
+    // GENERAL_ERROR with a warn, never silently.
+    let rv = match ck_rv_width_fallback(result.ck_rv.0, CK_ULONG::MAX as u64) {
+        Some(fallback) => {
+            tracing::warn!(
+                wire_ck_rv = result.ck_rv.0,
+                "ck_rv unrepresentable in host CK_RV; saturating to CKR_GENERAL_ERROR"
+            );
+            rv_err(fallback)
+        }
+        // `result.ck_rv.0 <= CK_ULONG::MAX`, so the narrowing cast is exact.
+        None => result.ck_rv.0 as CK_RV,
+    };
     let length = result.returned_len.map(|n| CK_ULONG::try_from(n).expect("validated width"));
     if let Some(value) = &result.value
         && !value.is_empty()
@@ -320,6 +408,44 @@ unsafe fn byte_output_exact_with_input(
 mod exact_scalar_tests {
     use super::*;
 
+    /// W1-L3-13: the 32-bit saturation mapping, pinned via a simulated host
+    /// width (real 32-bit-CK_ULONG hosts — ILP32, Windows LLP64 — cannot run
+    /// in 64-bit CI, so the pure decision is tested with `host_max = u32::MAX`).
+    #[test]
+    fn ck_rv_width_fallback_pins_32bit_saturation_mapping() {
+        let max32 = u32::MAX as u64;
+        assert_eq!(super::ck_rv_width_fallback(0, max32), None);
+        assert_eq!(super::ck_rv_width_fallback(CKR_GENERAL_ERROR as u64, max32), None);
+        assert_eq!(super::ck_rv_width_fallback(max32, max32), None);
+        assert_eq!(
+            super::ck_rv_width_fallback(max32 + 1, max32),
+            Some(CkRv::GENERAL_ERROR),
+            "first unrepresentable value must saturate loudly to GENERAL_ERROR"
+        );
+        assert_eq!(super::ck_rv_width_fallback(u64::MAX, max32), Some(CkRv::GENERAL_ERROR));
+        // 64-bit host: everything fits, never saturates.
+        assert_eq!(super::ck_rv_width_fallback(u64::MAX, u64::MAX), None);
+        assert_eq!(super::ck_rv_width_fallback(0x150, u64::MAX), None);
+    }
+
+    /// W1-L3-13: no silent narrowing fallback to CKR_GENERAL_ERROR may
+    /// remain — the 32-bit path must saturate through the loud helper.
+    #[test]
+    fn ck_rv_narrowing_has_no_silent_general_error_fallback() {
+        let src = include_str!("mod.rs");
+        // Built via concat so the assertions do not match their own source text.
+        let silent = ["unwrap_or", "(CKR_GENERAL_ERROR)"].concat();
+        assert!(
+            !src.contains(&silent),
+            "silent ck_rv narrowing must be replaced by the loud W1-L3-13 helper"
+        );
+        let loud = ["unrepresentable in host ", "CK_RV"].concat();
+        assert!(
+            src.contains(&loud),
+            "the 32-bit saturation must log loudly (W1-L3-13 warn marker)"
+        );
+    }
+
     #[test]
     fn write_exact_output_size_query_never_reads_incoming_length() {
         let mut length = std::mem::MaybeUninit::<CK_ULONG>::uninit();
@@ -353,6 +479,11 @@ mod exact_scalar_tests {
     }
 }
 
+/// Store a session handle into the caller's out-pointer (W1-L1-04).
+///
+/// # Safety
+///
+/// `p_handle` must be non-null and writable for one handle.
 pub(crate) unsafe fn write_session_handle_output(
     handle: CkSessionHandle,
     p_handle: CK_SESSION_HANDLE_PTR,
@@ -360,6 +491,11 @@ pub(crate) unsafe fn write_session_handle_output(
     unsafe { *p_handle = handle.0 as CK_SESSION_HANDLE };
 }
 
+/// Store an object handle into the caller's out-pointer (W1-L1-04).
+///
+/// # Safety
+///
+/// `p_handle` must be non-null and writable for one handle.
 pub(crate) unsafe fn write_object_handle_output(
     handle: CkObjectHandle,
     p_handle: CK_OBJECT_HANDLE_PTR,
@@ -367,6 +503,11 @@ pub(crate) unsafe fn write_object_handle_output(
     unsafe { *p_handle = handle.0 as CK_OBJECT_HANDLE };
 }
 
+/// Store a generated key pair into the caller's out-pointers (W1-L1-04).
+///
+/// # Safety
+///
+/// Both out-pointers must be non-null and writable for one handle each.
 pub(crate) unsafe fn write_object_handle_pair_output(
     public_handle: CkObjectHandle,
     private_handle: CkObjectHandle,
@@ -388,7 +529,7 @@ pub(crate) unsafe fn write_object_handle_pair_output(
 /// If `p_parameter` is non-null and `ul_parameter_len > 0`, it must point to
 /// a readable buffer of at least `ul_parameter_len` bytes.
 pub(crate) unsafe fn message_parameter_roundtrip_spec(
-    p_parameter: *mut ::std::os::raw::c_void,
+    p_parameter: *mut ::std::ffi::c_void,
     ul_parameter_len: CK_ULONG,
 ) -> pkcs11_proxy_ng_types::CkResult<pkcs11_proxy_ng_types::CkParameterRoundtripSpec> {
     Ok(pkcs11_proxy_ng_types::CkParameterRoundtripSpec {
@@ -401,8 +542,13 @@ pub(crate) unsafe fn message_parameter_roundtrip_spec(
 /// Sign/Verify message parameters are empty-only. Reject a positive length
 /// before touching the caller address, then preserve the two legal zero-length
 /// pointer classes in the shared roundtrip envelope.
+///
+/// # Safety
+///
+/// No caller memory is dereferenced — `p_parameter` is only null-tested
+/// (the shared spec constructor records presence/length without reading).
 pub(crate) unsafe fn empty_message_parameter_roundtrip_spec(
-    p_parameter: *mut ::std::os::raw::c_void,
+    p_parameter: *mut ::std::ffi::c_void,
     ul_parameter_len: CK_ULONG,
 ) -> pkcs11_proxy_ng_types::CkResult<pkcs11_proxy_ng_types::CkParameterRoundtripSpec> {
     if ul_parameter_len > 0 {
@@ -471,8 +617,8 @@ pub(crate) use template_input::*;
 
 #[cfg(test)]
 mod tests {
-    use cryptoki_sys::{CK_RV, CK_ULONG};
-    use pkcs11_proxy_ng_types::space_pad_into;
+    use cryptoki_sys::{CK_RV, CK_TOKEN_INFO, CK_ULONG};
+    use pkcs11_proxy_ng_types::{PKCS11_TOKEN_LABEL_LEN, space_pad_into};
 
     #[test]
     fn short_src_pads_remainder_with_spaces() {
@@ -505,6 +651,32 @@ mod tests {
     }
 
     #[test]
+    fn bounded_cstr_accepts_short_and_boundary_names() {
+        // W1-C6-06: NUL-terminated names within the 256-content-byte bound
+        // read back verbatim, including the empty string and the exact
+        // 255-content-byte boundary.
+        for content in [b"".as_slice(), b"PKCS 11".as_slice(), [b'A'; 255].as_slice()] {
+            let mut owned = content.to_vec();
+            owned.push(0);
+            let read =
+                unsafe { super::read_bounded_cstr(owned.as_ptr() as *const std::ffi::c_char) };
+            assert_eq!(read.expect("in-bound name must parse").to_bytes(), content);
+        }
+    }
+
+    #[test]
+    fn bounded_cstr_rejects_names_without_nul_in_bound() {
+        // W1-C6-06: no NUL within 256 content bytes is a loud
+        // ARGUMENTS_BAD. The trailing NUL at byte 300 keeps the buffer
+        // itself well-formed; only the bound refuses it.
+        let mut owned = vec![b'A'; 300];
+        owned.push(0);
+        let err = unsafe { super::read_bounded_cstr(owned.as_ptr() as *const std::ffi::c_char) }
+            .expect_err("overlong name must be refused");
+        assert_eq!(err, pkcs11_proxy_ng_types::CkRv::ARGUMENTS_BAD);
+    }
+
+    #[test]
     fn longer_src_truncated_to_dest_len() {
         let mut buf = [0u8; 4];
         space_pad_into(&mut buf, "ABCDEFGH");
@@ -531,7 +703,11 @@ mod tests {
 
     #[test]
     fn full_32_byte_token_label_field() {
-        let mut label = [0u8; 32];
+        // W1-L12-08 pin: the named width matches the authoritative
+        // `CK_TOKEN_INFO.label` field, not just the literal 32.
+        let info: CK_TOKEN_INFO = unsafe { std::mem::zeroed() };
+        assert_eq!(info.label.len(), PKCS11_TOKEN_LABEL_LEN);
+        let mut label = [0u8; PKCS11_TOKEN_LABEL_LEN];
         space_pad_into(&mut label, "My Test Token");
         assert_eq!(&label[..13], b"My Test Token");
         assert!(label[13..].iter().all(|&b| b == b' '));
@@ -539,7 +715,7 @@ mod tests {
 
     #[test]
     fn overlong_label_truncated_at_32_bytes() {
-        let mut label = [0u8; 32];
+        let mut label = [0u8; PKCS11_TOKEN_LABEL_LEN];
         let long = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABBBBBB";
         space_pad_into(&mut label, long);
         assert!(label.iter().all(|&b| b == b'A'));

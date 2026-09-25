@@ -78,6 +78,19 @@ pub(crate) async fn encrypt_init(
         }
     };
 
+    let mechanism_type = mechanism.mechanism_type;
+    // Mechanism policy gate (G3-PR3 Task 3): deny before backend call when the
+    // principal's grant does not include this mechanism type. Transparent (zero
+    // overhead) when per_mechanism_active() is false.
+    // W1-C1-13: the gate runs before remap on every init handler so identical
+    // dual-defect requests yield the same RV regardless of op.
+    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism_type).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::EncryptInitResponse {
+            ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
+            mechanism_out: None,
+        }));
+    }
+
     // B1: remap object handles embedded in the mechanism parameters;
     // gate each through per-object authz when active (C1).
     if let Err(rv) =
@@ -85,17 +98,6 @@ pub(crate) async fn encrypt_init(
     {
         return Ok(Response::new(pkcs11_proxy_ng_proto::EncryptInitResponse {
             ck_rv: rv.0,
-            mechanism_out: None,
-        }));
-    }
-
-    let mechanism_type = mechanism.mechanism_type;
-    // Mechanism policy gate (G3-PR3 Task 3): deny before backend call when the
-    // principal's grant does not include this mechanism type. Transparent (zero
-    // overhead) when per_mechanism_active() is false.
-    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism_type).await {
-        return Ok(Response::new(pkcs11_proxy_ng_proto::EncryptInitResponse {
-            ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
             mechanism_out: None,
         }));
     }
@@ -314,6 +316,18 @@ pub(crate) async fn decrypt_init(
         }
     };
 
+    let mechanism_type = mechanism.mechanism_type;
+    // Mechanism policy gate (G3-PR3 Task 3): deny before backend call when the
+    // principal's grant does not include this mechanism type.
+    // W1-C1-13: the gate runs before remap on every init handler so identical
+    // dual-defect requests yield the same RV regardless of op.
+    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism_type).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::DecryptInitResponse {
+            ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
+            mechanism_out: None,
+        }));
+    }
+
     // B1: remap object handles embedded in the mechanism parameters;
     // gate each through per-object authz when active (C1).
     if let Err(rv) =
@@ -321,16 +335,6 @@ pub(crate) async fn decrypt_init(
     {
         return Ok(Response::new(pkcs11_proxy_ng_proto::DecryptInitResponse {
             ck_rv: rv.0,
-            mechanism_out: None,
-        }));
-    }
-
-    let mechanism_type = mechanism.mechanism_type;
-    // Mechanism policy gate (G3-PR3 Task 3): deny before backend call when the
-    // principal's grant does not include this mechanism type.
-    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism_type).await {
-        return Ok(Response::new(pkcs11_proxy_ng_proto::DecryptInitResponse {
-            ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
             mechanism_out: None,
         }));
     }
@@ -759,5 +763,47 @@ mod tests {
         assert!(!has_dp, "no DataPlane records must appear when data_plane=false");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// W1-C1-13: a dual-defect init (mechanism denied by policy AND an
+    /// unresolvable embedded handle) must answer CKR_MECHANISM_INVALID —
+    /// the mechanism gate runs before handle remapping, consistently
+    /// across all init handlers (kem.rs order is canonical).
+    fn denied_hkdf_mechanism_with_bogus_handle() -> pkcs11_proxy_ng_proto::Mechanism {
+        let ck = CkMechanism {
+            mechanism_type: CkMechanismType::HKDF_DERIVE,
+            params: Some(CkMechanismParams::Hkdf(HkdfParams {
+                extract: true,
+                expand: true,
+                prf_hash_mechanism: CkMechanismType(0),
+                salt_type: 0,
+                salt: Vec::new().into(),
+                salt_key_handle: CkObjectHandle(0xDEAD_BEEF),
+                info: Vec::new().into(),
+            })),
+        };
+        pkcs11_proxy_ng_proto::Mechanism::try_from(&ck).expect("HKDF must convert to proto")
+    }
+
+    #[tokio::test]
+    async fn c1_13_dual_defect_returns_mechanism_invalid_on_encrypt_init() {
+        // Grant lists only RSA_PKCS, so HKDF_DERIVE is denied; the embedded
+        // salt handle 0xDEAD_BEEF resolves nowhere, so remapping would fail
+        // with OBJECT_HANDLE_INVALID if it ran first.
+        let (ctx, ctx_id, session) =
+            setup(mechanism_grant_policy(vec!["CKM_RSA_PKCS".into()]), Some(PEER_IDENTITY.into()))
+                .await;
+        let req = pkcs11_proxy_ng_proto::EncryptInitRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+            mechanism: Some(denied_hkdf_mechanism_with_bogus_handle()),
+            key_handle: 0,
+        };
+        let resp = super::encrypt_init(&ctx, Request::new(req)).await.unwrap().into_inner();
+        assert_eq!(
+            resp.ck_rv,
+            CkRv::MECHANISM_INVALID.0,
+            "denied mechanism must win over the bad embedded handle (permitted-before-remap)"
+        );
     }
 }

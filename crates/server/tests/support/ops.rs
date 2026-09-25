@@ -117,9 +117,9 @@ pub async fn open_user_session(
     user_pin: &str,
     read_write: bool,
 ) -> Result<CkSessionHandle, String> {
-    let mut flags = CkSessionFlags(CkSessionFlags::SERIAL_SESSION);
+    let mut flags = CkSessionFlags::SERIAL_SESSION;
     if read_write {
-        flags = CkSessionFlags(flags.0 | CkSessionFlags::RW_SESSION);
+        flags |= CkSessionFlags::RW_SESSION;
     }
     let session = client
         .open_session(slot, flags)
@@ -137,9 +137,9 @@ pub async fn open_public_session(
     slot: CkSlotId,
     read_write: bool,
 ) -> Result<CkSessionHandle, String> {
-    let mut flags = CkSessionFlags(CkSessionFlags::SERIAL_SESSION);
+    let mut flags = CkSessionFlags::SERIAL_SESSION;
     if read_write {
-        flags = CkSessionFlags(flags.0 | CkSessionFlags::RW_SESSION);
+        flags |= CkSessionFlags::RW_SESSION;
     }
     client.open_session(slot, flags).await.map_err(|rv| format!("C_OpenSession failed: {rv}"))
 }

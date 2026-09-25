@@ -15,8 +15,8 @@ use super::super::super::context_manager::{
 use super::super::super::handle_map::{BackendHandle, VirtualHandle};
 use super::super::authorization;
 use super::super::service_utils::{
-    ck_rv_only, context_exists, current_context_operation_guard, login_lock_timeout,
-    register_session_handle, resolve_session, resolve_slot, spawn_backend,
+    ck_rv_only, context_exists, current_context_operation_guard, current_peer, login_lock_timeout,
+    principal_quota_key, register_session_handle, resolve_session, resolve_slot, spawn_backend,
     spawn_backend_with_optional_timeout,
 };
 
@@ -78,23 +78,47 @@ pub(super) async fn open_session(
     // the reservation counts toward the cap until the session registers
     // (released on every failure path by drop), so concurrent opens cannot
     // exceed the cap.
-    let quota_reservation = if let Some(max) =
-        crate::server::rate_quota::per_principal_max_sessions()
-    {
-        let principal_key = ctx_mgr.context_identity(&ctx_id).unwrap_or_else(|| ctx_id.0.clone());
-        match ctx_mgr.try_reserve_session_for_principal(&principal_key, max) {
-            Some(reservation) => Some(reservation),
-            None => {
-                crate::server::resilience::record_session_quota_rejected();
-                return Ok(Response::new(pkcs11_proxy_ng_proto::OpenSessionResponse {
-                    ck_rv: CkRv::SESSION_COUNT.0,
-                    session_handle: 0,
-                }));
+    let quota_reservation =
+        if let Some(max) = crate::server::rate_quota::per_principal_max_sessions() {
+            // W1-L7-02: shared key with the in-flight guard — unauthenticated
+            // contexts key on the peer IP, not the context id.
+            let principal_key = principal_quota_key(ctx_mgr, &ctx_id);
+            // Bind a peer-keyed context to its peer BEFORE reserving, so the
+            // live-session counter attributes this context's sessions to the
+            // shared key. Identity-bound and peerless contexts record
+            // nothing — their counting is unchanged.
+            // Deferred T30 M3: record-before-reserve is deliberate — even a
+            // REJECTED open re-keys `last_peer_ip`. Zero-sum at the moment:
+            // the rewrite moves this context's live sessions from the old
+            // key to the new key (total live unchanged; freed capacity
+            // under the old key is exactly the capacity consumed under the
+            // new key, which may read over max — conservative, fail-closed
+            // there). Absent attribution changes every key holds at most
+            // max and live total stays within k*max for k source IPs; a
+            // re-key frees the old key (re-admittable) while charging the
+            // new key, so repeated cross-IP re-keys can push total live
+            // past k*max — inherent to last-peer attribution. The rejected
+            // open itself creates no session and holds no slot. Pinned by
+            // `open_session_quota_rejected_open_rekeys_without_creating_quota`.
+            if ctx_mgr.context_identity(&ctx_id).is_none()
+                && let Some(peer) = current_peer()
+            {
+                let ip = peer.ip();
+                ctx_mgr.get_context(&ctx_id, |ctx| ctx.last_peer_ip = Some(ip)).await;
             }
-        }
-    } else {
-        None
-    };
+            match ctx_mgr.try_reserve_session_for_principal(&principal_key, max) {
+                Some(reservation) => Some(reservation),
+                None => {
+                    crate::server::resilience::record_session_quota_rejected();
+                    return Ok(Response::new(pkcs11_proxy_ng_proto::OpenSessionResponse {
+                        ck_rv: CkRv::SESSION_COUNT.0,
+                        session_handle: 0,
+                    }));
+                }
+            }
+        } else {
+            None
+        };
 
     let flags = CkSessionFlags(req.flags as u64);
     let backend = backend_ref.clone();

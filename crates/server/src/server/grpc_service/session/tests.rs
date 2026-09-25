@@ -105,7 +105,7 @@ async fn setup_session() -> (Arc<ContextManager>, Arc<dyn Pkcs11Backend>, Client
         Request::new(pkcs11_proxy_ng_proto::OpenSessionRequest {
             client_context_id: ctx_id.0.clone(),
             slot_id: virtual_slot.0,
-            flags: CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION,
+            flags: (CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION).0,
         }),
     )
     .await
@@ -128,7 +128,7 @@ async fn open_test_session(
         Request::new(pkcs11_proxy_ng_proto::OpenSessionRequest {
             client_context_id: ctx_id.0.clone(),
             slot_id: virtual_slot.0,
-            flags: CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION,
+            flags: (CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION).0,
         }),
     )
     .await
@@ -247,8 +247,13 @@ async fn second_context_login_returns_backend_already_faithfully_without_minting
     );
 }
 
+/// W1-L13-11 + W1-L7-15: a same-client re-login short-circuits locally —
+/// ALREADY with no redundant backend C_Login. (The old
+/// backend-authoritative expectation — every re-login reaches the
+/// provider — was challenged and rejected in adjudication; the re-login
+/// RV itself is unchanged.)
 #[tokio::test]
-async fn repeated_login_in_same_logical_client_reaches_backend() {
+async fn repeated_login_in_same_logical_client_short_circuits_locally() {
     let mock = Arc::new(MockBackend::default_test());
     mock.initialize().unwrap();
     let backend: Arc<dyn Pkcs11Backend> = mock.clone();
@@ -265,8 +270,8 @@ async fn repeated_login_in_same_logical_client_reaches_backend() {
     );
     assert_eq!(
         mock.login_call_count(),
-        2,
-        "same logical client repeat login must preserve backend/provider behavior"
+        1,
+        "same-client re-login must short-circuit locally without a backend call (W1-L13-11)"
     );
 }
 
@@ -378,10 +383,7 @@ async fn close_all_sessions_releases_backend_login_before_close() {
     // the daemon's own logout, not the mock's), while staying invisible to
     // the daemon's carrier scan (which reads context maps only).
     let spare = mock
-        .open_session(
-            CkSlotId(0),
-            CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
-        )
+        .open_session(CkSlotId(0), CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION)
         .unwrap();
 
     let close_all = close_all_sessions(
@@ -432,10 +434,7 @@ async fn close_session_releases_backend_login_before_close() {
     // the daemon's own logout, not the mock's), while staying invisible to
     // the daemon's carrier scan (which reads context maps only).
     let spare = mock
-        .open_session(
-            CkSlotId(0),
-            CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
-        )
+        .open_session(CkSlotId(0), CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION)
         .unwrap();
 
     let close = close_session(
@@ -3978,7 +3977,7 @@ async fn try_open_session(
         Request::new(pkcs11_proxy_ng_proto::OpenSessionRequest {
             client_context_id: ctx_id.0.clone(),
             slot_id: virtual_slot.0,
-            flags: CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION,
+            flags: (CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION).0,
         }),
     )
     .await
@@ -4176,7 +4175,7 @@ async fn open_session_quota_enforced_end_to_end() {
             svc.open_session(Request::new(pkcs11_proxy_ng_proto::OpenSessionRequest {
                 client_context_id: cid,
                 slot_id: slot,
-                flags: CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION,
+                flags: (CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION).0,
             }))
             .await
             .unwrap()
@@ -4218,6 +4217,195 @@ async fn open_session_quota_enforced_end_to_end() {
     assert_eq!(ro2.ck_rv, CkRv::OK.0, "other context 2nd open must succeed");
     let ro3 = open(ctx_other.0.clone()).await;
     assert_eq!(ro3.ck_rv, CkRv::SESSION_COUNT.0, "other context hits own quota independently");
+}
+
+/// W1-L7-02 end-to-end: unauthenticated contexts from one TCP peer IP
+/// share a single session quota — N contexts cannot multiply the cap.
+/// Same `configure` values as `open_session_quota_enforced_end_to_end`
+/// (identical cfg, same `quota_mutex`) so the two tests agree
+/// whichever wins the OnceLock race.
+#[tokio::test]
+async fn open_session_quota_shared_per_peer_ip_for_unauthenticated() {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    let _guard = quota_mutex().lock().await;
+
+    let cfg = crate::config::RateLimitConfig {
+        per_principal_max_in_flight: None,
+        per_principal_max_sessions: Some(2),
+        per_slot_failed_login_budget: None,
+        per_slot_failed_login_cooldown_secs: None,
+    };
+    crate::server::rate_quota::configure(&cfg);
+    if crate::server::rate_quota::per_principal_max_sessions() != Some(2) {
+        // OnceLock already set otherwise by another caller — skip gracefully.
+        return;
+    }
+
+    let mock = MockBackend::default_test();
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+
+    let svc = Pkcs11ProxyService::insecure_for_tests(ctx_mgr.clone(), backend.clone());
+    let virtual_slot = ctx_mgr.virtual_slots().await[0];
+
+    let open_as = |cid: String, peer: SocketAddr| {
+        let svc = svc.clone();
+        let slot = virtual_slot.0;
+        async move {
+            let mut req = Request::new(pkcs11_proxy_ng_proto::OpenSessionRequest {
+                client_context_id: cid,
+                slot_id: slot,
+                flags: (CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION).0,
+            });
+            req.extensions_mut().insert(tonic::transport::server::TcpConnectInfo {
+                local_addr: None,
+                remote_addr: Some(peer),
+            });
+            svc.open_session(req).await.unwrap().into_inner()
+        }
+    };
+
+    // Two contexts from the SAME peer IP (different ports — the key is
+    // IP-only) share one quota of 2.
+    let peer_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)), 1111);
+    let peer_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)), 2222);
+    let ctx_a = ctx_mgr.create_context(None).await.unwrap();
+    let ctx_b = ctx_mgr.create_context(None).await.unwrap();
+
+    let r1 = open_as(ctx_a.0.clone(), peer_a).await;
+    assert_eq!(r1.ck_rv, CkRv::OK.0, "peer 1st open must succeed");
+    let r2 = open_as(ctx_a.0.clone(), peer_b).await;
+    assert_eq!(r2.ck_rv, CkRv::OK.0, "peer 2nd open must succeed");
+    let r3 = open_as(ctx_b.0.clone(), peer_a).await;
+    assert_eq!(
+        r3.ck_rv,
+        CkRv::SESSION_COUNT.0,
+        "second context from the same peer IP must share the quota (3rd open rejected)"
+    );
+    assert_eq!(r3.session_handle, 0, "rejected open must return handle 0");
+
+    // A different peer IP gets its own independent quota of 2.
+    let peer_c = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 20)), 3333);
+    let ctx_c = ctx_mgr.create_context(None).await.unwrap();
+    let c1 = open_as(ctx_c.0.clone(), peer_c).await;
+    assert_eq!(c1.ck_rv, CkRv::OK.0, "other peer 1st open must succeed");
+    let c2 = open_as(ctx_c.0.clone(), peer_c).await;
+    assert_eq!(c2.ck_rv, CkRv::OK.0, "other peer 2nd open must succeed");
+    let c3 = open_as(ctx_c.0.clone(), peer_c).await;
+    assert_eq!(c3.ck_rv, CkRv::SESSION_COUNT.0, "other peer hits own quota independently");
+}
+
+/// Deferred T30 M3: `last_peer_ip` records before reserve, so even a
+/// REJECTED open re-keys attribution — pinned here with the zero-sum
+/// bound: the re-key moves the context's live sessions from the old key
+/// to the new key (per-key counts shift, total live unchanged), creates
+/// no session, and holds no slot. Same `configure` values as the quota
+/// e2e tests above (identical cfg, same `quota_mutex`) so all agree
+/// whichever wins the OnceLock race.
+#[tokio::test]
+async fn open_session_quota_rejected_open_rekeys_without_creating_quota() {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    let _guard = quota_mutex().lock().await;
+
+    let cfg = crate::config::RateLimitConfig {
+        per_principal_max_in_flight: None,
+        per_principal_max_sessions: Some(2),
+        per_slot_failed_login_budget: None,
+        per_slot_failed_login_cooldown_secs: None,
+    };
+    crate::server::rate_quota::configure(&cfg);
+    if crate::server::rate_quota::per_principal_max_sessions() != Some(2) {
+        // OnceLock already set otherwise by another caller — skip gracefully.
+        return;
+    }
+    const MAX: usize = 2;
+
+    let mock = MockBackend::default_test();
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+
+    let svc = Pkcs11ProxyService::insecure_for_tests(ctx_mgr.clone(), backend.clone());
+    let virtual_slot = ctx_mgr.virtual_slots().await[0];
+
+    let open_as = |cid: String, peer: SocketAddr| {
+        let svc = svc.clone();
+        let slot = virtual_slot.0;
+        async move {
+            let mut req = Request::new(pkcs11_proxy_ng_proto::OpenSessionRequest {
+                client_context_id: cid,
+                slot_id: slot,
+                flags: (CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION).0,
+            });
+            req.extensions_mut().insert(tonic::transport::server::TcpConnectInfo {
+                local_addr: None,
+                remote_addr: Some(peer),
+            });
+            svc.open_session(req).await.unwrap().into_inner()
+        }
+    };
+
+    let ip_x = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+    let ip_y = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 20));
+    let peer_x = SocketAddr::new(ip_x, 1111);
+    let peer_y = SocketAddr::new(ip_y, 2222);
+    let key_x = ip_x.to_string();
+    let key_y = ip_y.to_string();
+
+    // Fill both peer quotas to cap: ctx_a holds 2 live under X, ctx_c 2 under Y.
+    let ctx_a = ctx_mgr.create_context(None).await.unwrap();
+    let ctx_c = ctx_mgr.create_context(None).await.unwrap();
+    for (ctx, peer, label) in
+        [(&ctx_a, peer_x, "X"), (&ctx_a, peer_x, "X"), (&ctx_c, peer_y, "Y"), (&ctx_c, peer_y, "Y")]
+    {
+        let r = open_as(ctx.0.clone(), peer).await;
+        assert_eq!(r.ck_rv, CkRv::OK.0, "{label} fill open must succeed");
+    }
+    assert_eq!(ctx_mgr.session_count_for_principal(&key_x), MAX);
+    assert_eq!(ctx_mgr.session_count_for_principal(&key_y), MAX);
+
+    // Rejected open: ctx_a (2 live, keyed X) opens from Y, which is at cap.
+    let rejected = open_as(ctx_a.0.clone(), peer_y).await;
+    assert_eq!(rejected.ck_rv, CkRv::SESSION_COUNT.0, "open past Y's cap must be rejected");
+    assert_eq!(rejected.session_handle, 0, "rejected open must return handle 0");
+
+    // ...but the rejection still re-keyed ctx_a's attribution to Y.
+    let recorded = ctx_mgr.get_context(&ctx_a, |ctx| ctx.last_peer_ip).await;
+    assert_eq!(recorded, Some(Some(ip_y)), "rejected open must still record last_peer_ip");
+
+    // Zero-sum move: X freed exactly what Y absorbed; total live unchanged
+    // at 4 = k*max (k=2 source IPs) — the bound holds tight at rejection.
+    assert_eq!(ctx_mgr.session_count_for_principal(&key_x), 0, "X freed by the re-key");
+    assert_eq!(
+        ctx_mgr.session_count_for_principal(&key_y),
+        2 * MAX,
+        "Y absorbed ctx_a's live sessions (conservative over-cap)"
+    );
+    let live: usize =
+        [&key_x, &key_y].iter().map(|key| ctx_mgr.session_count_for_principal(key)).sum();
+    assert_eq!(live, 2 * MAX, "total live unchanged by the rejected open");
+    assert!(live <= 2 * MAX, "live sessions stay within k*max at rejection");
+
+    // No slot created or held by the rejection: Y (over cap via moved
+    // attribution) still rejects a fresh context...
+    let ctx_e = ctx_mgr.create_context(None).await.unwrap();
+    let r = open_as(ctx_e.0.clone(), peer_y).await;
+    assert_eq!(r.ck_rv, CkRv::SESSION_COUNT.0, "moved attribution must keep consuming Y's quota");
+    // ...while X (freed) admits one — the freed slot is usable quota, not a
+    // leak. Disclosed limitation: this re-admission pushes total live to 5,
+    // past k*max = 4 — inherent to last-peer attribution (see the T30 M3
+    // site comment); each key stays gated at admission.
+    let ctx_d = ctx_mgr.create_context(None).await.unwrap();
+    let r = open_as(ctx_d.0.clone(), peer_x).await;
+    assert_eq!(r.ck_rv, CkRv::OK.0, "X must admit after the re-key freed it");
+    let live: usize =
+        [&key_x, &key_y].iter().map(|key| ctx_mgr.session_count_for_principal(key)).sum();
+    assert_eq!(live, 2 * MAX + 1, "re-admission under the freed key is ordinary quota operation");
 }
 
 // ---------------------------------------------------------------------------
@@ -4595,10 +4783,7 @@ async fn setup_mint_test(
     ctx_mgr.cache_token_info(backend_slot, "MockToken".into(), "0001".into());
     let ctx_id = ctx_mgr.create_context(Some(MINT_MTLS_IDENTITY.into())).await.unwrap();
     let backend_session = mock
-        .open_session(
-            CkSlotId(0),
-            CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
-        )
+        .open_session(CkSlotId(0), CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION)
         .unwrap();
     let session = ctx_mgr
         .get_context(&ctx_id, |ctx| {

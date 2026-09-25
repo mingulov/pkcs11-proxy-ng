@@ -217,6 +217,39 @@ mod tests {
         HOOK_FIRES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// W1-L3-02: the taxonomy doc must agree with the `C_OpenSession`
+    /// transport mapping — Session-scoped (DEVICE_ERROR on Unavailable).
+    /// Task 10 (C10-04) moved the behavior to Session with review approval;
+    /// this pins the doc-vs-code agreement so neither side can drift.
+    #[test]
+    fn t32_open_session_taxonomy_doc_matches_mapping() {
+        let src = include_str!("error.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let lifecycle_idx = prod.find("Lifecycle,").expect("RpcKind::Lifecycle must exist");
+        let slot_idx = prod.find("SlotOrToken,").expect("RpcKind::SlotOrToken must exist");
+        let session_idx = prod.find("Session,").expect("RpcKind::Session must exist");
+        assert!(
+            prod[slot_idx..session_idx].contains("C_OpenSession"),
+            "RpcKind::Session doc must name C_OpenSession (doc side of the agreement)"
+        );
+        assert!(
+            !prod[lifecycle_idx..slot_idx].contains("C_OpenSession"),
+            "C_OpenSession must not be claimed by the SlotOrToken doc"
+        );
+        // ... and the mapping agrees: Session + Unavailable = DEVICE_ERROR.
+        assert_eq!(
+            grpc_status_to_ck_rv_kind(Code::Unavailable, RpcKind::Session),
+            CkRv::DEVICE_ERROR
+        );
+        // ... and open_session actually passes the session-scoped flag.
+        let session_src = include_str!("client/session.rs");
+        let session_prod = session_src.split("#[cfg(test)]").next().unwrap_or(session_src);
+        assert!(
+            session_prod.contains("self.grpc.open_session(req), true"),
+            "open_session must pass the session-scoped flag (code side of the agreement)"
+        );
+    }
+
     #[test]
     fn transport_failure_hook_fires_when_status_is_mapped() {
         use std::sync::atomic::Ordering;

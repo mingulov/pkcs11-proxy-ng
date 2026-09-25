@@ -71,10 +71,7 @@ async fn per_slot_failed_login_budget_end_to_end() {
         let slots = client.get_slot_list(false).await.unwrap();
         assert!(!slots.is_empty(), "setup: daemon must expose at least one slot");
         let session = client
-            .open_session(
-                slots[0],
-                CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
-            )
+            .open_session(slots[0], CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION)
             .await
             .unwrap();
 
@@ -131,10 +128,7 @@ async fn per_slot_failed_login_budget_end_to_end() {
 
         let slots = client.get_slot_list(false).await.unwrap();
         let session = client
-            .open_session(
-                slots[0],
-                CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
-            )
+            .open_session(slots[0], CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION)
             .await
             .unwrap();
 
@@ -202,10 +196,7 @@ async fn per_slot_failed_login_budget_end_to_end() {
 
         let slots = client.get_slot_list(false).await.unwrap();
         let session = client
-            .open_session(
-                slots[0],
-                CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
-            )
+            .open_session(slots[0], CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION)
             .await
             .unwrap();
 
@@ -258,10 +249,7 @@ async fn per_slot_failed_login_budget_end_to_end() {
 
         let slots = client.get_slot_list(false).await.unwrap();
         let session = client
-            .open_session(
-                slots[0],
-                CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
-            )
+            .open_session(slots[0], CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION)
             .await
             .unwrap();
 
@@ -327,10 +315,7 @@ async fn per_slot_failed_login_budget_end_to_end() {
 
         let slots = client.get_slot_list(false).await.unwrap();
         let session = client
-            .open_session(
-                slots[0],
-                CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
-            )
+            .open_session(slots[0], CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION)
             .await
             .unwrap();
 
@@ -420,10 +405,7 @@ async fn per_slot_failed_login_budget_end_to_end() {
 
         let slots = client.get_slot_list(false).await.unwrap();
         let session = client
-            .open_session(
-                slots[0],
-                CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
-            )
+            .open_session(slots[0], CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION)
             .await
             .unwrap();
 

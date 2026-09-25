@@ -20,7 +20,7 @@ const CKM_TLS12_KEY_AND_MAC_DERIVE: CkMechanismType = CkMechanismType(0x0000_03E
 const CKM_SHA256_HMAC: u64 = 0x0000_0251;
 const CK_SP800_108_ITERATION_VARIABLE: u64 = 0x0000_0001;
 const CK_SP800_108_KEY_HANDLE: u64 = 0x0000_0005;
-const CKF_SERIAL: CkSessionFlags = CkSessionFlags(CkSessionFlags::SERIAL_SESSION);
+const CKF_SERIAL: CkSessionFlags = CkSessionFlags::SERIAL_SESSION;
 
 fn sp800_108_counter_iteration_param() -> PrfDataParam {
     PrfDataParam { type_: CK_SP800_108_ITERATION_VARIABLE, value: vec![0; 16].into() }
@@ -109,7 +109,7 @@ async fn derive_key_mechanism_out_surfaces_wtls_key_material_through_mock_grpc_s
         },
         mac_secret_handle: CkObjectHandle(101),
         key_handle: CkObjectHandle(202),
-        iv: vec![0xA1, 0xA2, 0xA3, 0xA4],
+        iv: vec![0xA1, 0xA2, 0xA3, 0xA4].into(),
     });
     backend.set_derive_key_output(Some(expected_output.clone()));
     let (endpoint, _shutdown) = mock_daemon(backend).await;
@@ -133,7 +133,7 @@ async fn derive_key_mechanism_out_surfaces_wtls_key_material_through_mock_grpc_s
             },
             mac_secret_handle: CkObjectHandle(0),
             key_handle: CkObjectHandle(0),
-            iv: vec![0; 4],
+            iv: vec![0; 4].into(),
         })),
     };
 

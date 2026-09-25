@@ -193,6 +193,36 @@ fn get_interface_unknown_name_returns_null_ok() {
 }
 
 #[test]
+fn get_interface_overlong_name_returns_arguments_bad() {
+    // W1-C6-06: the caller name scan is bounded (256 bytes); a name with no
+    // NUL inside the bound is a loud ARGUMENTS_BAD, never an unbounded read.
+    let _guard = shim_state_test_guard();
+    let mut name = vec![b'A'; 300];
+    name.push(0);
+    let mut pp: *mut CK_INTERFACE = std::ptr::null_mut();
+    let rv = unsafe {
+        C_GetInterface(name.as_ptr() as *mut CK_UTF8CHAR, std::ptr::null_mut(), &mut pp, 0)
+    };
+    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
+    assert!(pp.is_null());
+}
+
+#[test]
+fn get_interface_boundary_length_name_still_resolves() {
+    // W1-C6-06: 255 content bytes + NUL fits the 256 bound, so lookup
+    // proceeds (unknown name → OK + NULL per the no-match contract).
+    let _guard = shim_state_test_guard();
+    let mut name = vec![b'B'; 255];
+    name.push(0);
+    let mut pp: *mut CK_INTERFACE = std::ptr::null_mut();
+    let rv = unsafe {
+        C_GetInterface(name.as_ptr() as *mut CK_UTF8CHAR, std::ptr::null_mut(), &mut pp, 0)
+    };
+    assert_eq!(rv, CKR_OK as CK_RV);
+    assert!(pp.is_null());
+}
+
+#[test]
 fn get_interface_unknown_version_returns_null_ok() {
     let _guard = shim_state_test_guard();
     let name = b"PKCS 11\0";
@@ -1293,6 +1323,46 @@ fn server_registry_ignored_when_disable_env_set() {
     );
 }
 
+/// W1-C8-10: a duplicate-ID server payload is ignored (the previous
+/// registry stays) and the refusal is logged loudly, naming the
+/// offending mechanism ID — never silently last-winning.
+#[test]
+fn server_registry_with_duplicate_id_is_ignored_and_logged() {
+    let _guard = shim_state_test_guard();
+    let _saved = SavedDisableRegistry::capture();
+    SavedDisableRegistry::set(None);
+    ensure_registry_installed();
+    crate::interface_probe::reset_registry_revision_for_test();
+    let mut payload = registry_payload_with_revision("c8-10-dup-must-not-install");
+    // Repeat a real mechanism ID under a second shape entry.
+    let duplicated = payload
+        .params
+        .iter()
+        .find_map(|entry| entry.mechanisms.first().copied())
+        .expect("embedded payload has params");
+    payload.params.push(pkcs11_proxy_ng_proto::MechanismParamEntry {
+        shape: "c8-10-dup-shape".to_string(),
+        mechanisms: vec![duplicated],
+    });
+    // State assertion first, retrying past concurrent unguarded
+    // `ensure_registry()` clobbers (see install_and_read_back_revision):
+    // a broken install would surface the dup revision at least once.
+    for _ in 0..100 {
+        crate::interface_probe::maybe_install_server_registry(Some(&payload));
+        let after = crate::state::mechanism_registry().revision().to_string();
+        assert!(after != "c8-10-dup-must-not-install", "duplicate-ID payload must never install");
+    }
+    let output = capture_logs(|| {
+        crate::interface_probe::maybe_install_server_registry(Some(&payload));
+    });
+    assert!(
+        output.contains("ignoring server-published registry"),
+        "refusal must be logged: {output:?}"
+    );
+    let id = format!("{duplicated:#X}");
+    assert!(output.contains(&id), "refusal must name the duplicate ID {id}: {output:?}");
+}
+
 /// W1-C7-06: consecutive installs with different revisions emit the
 /// registry-drift WARN naming both revisions (HA-daemon drift signal).
 #[test]
@@ -1349,4 +1419,196 @@ fn absent_registry_payload_keeps_current_registry() {
             "absent payload must not install anything (env={env:?}): {before} -> {after}"
         );
     }
+}
+
+/// W1-L8-19: explicit falsy values re-enable the server registry —
+/// `=0`/`=false`/`=no`/`=off` must behave like unset, not like `=1`.
+#[test]
+fn server_registry_installs_when_disable_env_is_falsy() {
+    let _guard = shim_state_test_guard();
+    let _saved = SavedDisableRegistry::capture();
+    ensure_registry_installed();
+    crate::interface_probe::reset_registry_revision_for_test();
+    for value in ["0", "false", "FALSE", "no", "off"] {
+        SavedDisableRegistry::set(Some(value));
+        let rev = format!("l8-19-falsy-{value}");
+        let payload = registry_payload_with_revision(&rev);
+        let output = capture_logs(|| {
+            crate::interface_probe::maybe_install_server_registry(Some(&payload));
+        });
+        // The install logs either the install INFO (first revision) or the
+        // drift WARN (later revisions) — both name the payload revision.
+        assert!(
+            output.contains(&rev) && !output.contains("ignoring server-published registry"),
+            "disable env ={value} must re-enable install, got: {output:?}"
+        );
+        assert_eq!(install_and_read_back_revision(&payload), rev);
+    }
+}
+
+/// W1-L8-19: truthy or unrecognized values keep the legacy disable
+/// (presence semantics) — only explicit falsy values re-enable, and only
+/// unset keeps the pure default.
+#[test]
+fn server_registry_ignored_for_truthy_disable_values() {
+    let _guard = shim_state_test_guard();
+    let _saved = SavedDisableRegistry::capture();
+    ensure_registry_installed();
+    crate::interface_probe::reset_registry_revision_for_test();
+    for (i, value) in ["1", "true", "TRUE", "yes", "banana", ""].into_iter().enumerate() {
+        SavedDisableRegistry::set(Some(value));
+        let rev = format!("l8-19-truthy-{i}");
+        let ignored = registry_payload_with_revision(&rev);
+        // State assertion first, retrying past concurrent unguarded
+        // `ensure_registry()` clobbers (see install_and_read_back_revision).
+        for _ in 0..100 {
+            let before = crate::state::mechanism_registry().revision().to_string();
+            crate::interface_probe::maybe_install_server_registry(Some(&ignored));
+            let after = crate::state::mechanism_registry().revision().to_string();
+            assert!(after != rev, "disable env ={value:?} must never install the server payload");
+            if after == before {
+                break;
+            }
+        }
+        let output = capture_logs(|| {
+            crate::interface_probe::maybe_install_server_registry(Some(&ignored));
+        });
+        assert!(
+            output.contains("ignoring server-published registry"),
+            "disable env ={value:?} must log the fallback: {output:?}"
+        );
+    }
+}
+
+/// W1-L8-19 / deferred T31 m1: a non-UTF8 DISABLE value keeps the legacy
+/// disable (fail-legacy) rather than silently re-enabling the install.
+/// Direct pin of `server_registry_disabled`; the install-level truthy test
+/// above covers the UTF-8 fail-legacy values.
+#[cfg(unix)]
+#[test]
+fn server_registry_disabled_for_non_utf8_disable_value() {
+    use std::os::unix::ffi::OsStrExt;
+    let _guard = shim_state_test_guard();
+    // SavedDisableRegistry only round-trips UTF-8, so save/restore the raw
+    // OsString here (restored on drop even when the assertion fails).
+    struct SavedOs {
+        saved: Option<std::ffi::OsString>,
+    }
+    impl Drop for SavedOs {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.saved {
+                    Some(v) => std::env::set_var("PKCS11_PROXY_DISABLE_SERVER_REGISTRY", v),
+                    None => std::env::remove_var("PKCS11_PROXY_DISABLE_SERVER_REGISTRY"),
+                }
+            }
+        }
+    }
+    let _saved = SavedOs { saved: std::env::var_os("PKCS11_PROXY_DISABLE_SERVER_REGISTRY") };
+    let non_utf8 = std::ffi::OsStr::from_bytes(b"\xff\xfe");
+    unsafe {
+        std::env::set_var("PKCS11_PROXY_DISABLE_SERVER_REGISTRY", non_utf8);
+    }
+    assert!(
+        crate::interface_probe::server_registry_disabled(),
+        "non-UTF8 DISABLE value must keep the legacy disable (fail-legacy)"
+    );
+}
+
+/// W1-C7-11: `clear_cache` (the C_Finalize path) resets the registry
+/// revision tracker, so a re-Initialize against a different daemon logs
+/// a fresh install INFO — not a spurious drift WARN.
+#[test]
+fn clear_cache_resets_revision_tracker_no_spurious_drift_warn() {
+    let _guard = shim_state_test_guard();
+    let _saved = SavedDisableRegistry::capture();
+    SavedDisableRegistry::set(None);
+    ensure_registry_installed();
+    crate::interface_probe::reset_registry_revision_for_test();
+    let first = registry_payload_with_revision("c7-11-first-daemon");
+    let second = registry_payload_with_revision("c7-11-second-daemon");
+    let output = capture_logs(|| {
+        crate::interface_probe::maybe_install_server_registry(Some(&first));
+        crate::interface_probe::clear_cache();
+        crate::interface_probe::maybe_install_server_registry(Some(&second));
+    });
+    assert!(
+        output.contains("mechanism registry installed from server")
+            && output.contains("c7-11-second-daemon"),
+        "re-install after clear_cache must log a fresh install INFO: {output:?}"
+    );
+    assert!(
+        !output.contains("changed between probes"),
+        "clear_cache must reset the revision tracker — no spurious drift WARN: {output:?}"
+    );
+}
+
+/// W1-C7-12: direct `copy_catalog` misuse with a null buffer fails safe
+/// (0, nothing written) instead of faulting. Complements W1-L1-02 (the
+/// `unsafe` marker + short-buffer fail-safe): null is now an in-callee
+/// refusal, not a caller-upheld precondition.
+#[test]
+fn copy_catalog_null_buf_fails_safe() {
+    let _guard = shim_state_test_guard();
+    crate::interface_probe::clear_cache();
+    // buf_len above the catalog count so only the null check can save us.
+    let n = unsafe { crate::interface_probe::copy_catalog(std::ptr::null_mut(), 4) };
+    assert_eq!(n, 0, "null buffer must fail safe with 0");
+}
+
+/// W1-C7-10: concurrent `ensure_probed` calls cannot mix registry/ABI
+/// across winners — every caller either fails or observes the single
+/// installed state, and the installed catalog is self-consistent
+/// (count matches the copied entries, no null function lists).
+#[test]
+fn concurrent_ensure_probed_installs_consistent_state() {
+    use super::output_semantics::TestDaemon;
+    let _guard = shim_state_test_guard();
+    let _saved = SavedConnectEnv::capture();
+    let daemon = TestDaemon::shared();
+    unsafe {
+        std::env::set_var("PKCS11_PROXY_ENDPOINT", &daemon.endpoint);
+        std::env::remove_var("PKCS11_PROXY_SOCKET");
+    }
+    crate::state::mark_finalized();
+    crate::interface_probe::clear_cache();
+    let handles: Vec<_> =
+        (0..8).map(|_| std::thread::spawn(crate::interface_probe::ensure_probed)).collect();
+    for handle in handles {
+        handle.join().expect("probe thread must not panic").expect("probe must succeed");
+    }
+    let n = crate::interface_probe::interface_count();
+    assert!((1..=4).contains(&n), "installed count must be sane: {n}");
+    let mut buf = [super::empty_interface(); 4];
+    let written = unsafe { crate::interface_probe::copy_catalog(buf.as_mut_ptr(), 4) };
+    assert_eq!(written, n, "copied entries must match the installed count");
+    for entry in &buf[..n as usize] {
+        assert!(
+            !entry.pFunctionList.is_null(),
+            "installed catalog entries must have function lists"
+        );
+    }
+}
+
+/// W1-L5-03: the pre-probe fallback catalog is an intentional optimistic
+/// transient — count 3 with entries [2.40, 3.0, 3.2] — used until the
+/// first successful probe installs the backend's actual shape, which may
+/// legitimately differ (fewer entries, or a 3.1 entry with no 3.0 alias).
+#[test]
+fn pre_probe_fallback_catalog_shape_is_pinned_transient() {
+    let _guard = shim_state_test_guard();
+    crate::interface_probe::clear_cache();
+    assert_eq!(crate::interface_probe::interface_count(), 3, "pre-probe fallback count");
+    let mut buf = [super::empty_interface(); 4];
+    let n = unsafe { crate::interface_probe::copy_catalog(buf.as_mut_ptr(), 4) };
+    assert_eq!(n, 3, "pre-probe fallback catalog entries");
+    let versions: Vec<(u8, u8)> = buf[..3]
+        .iter()
+        .map(|entry| {
+            assert!(!entry.pFunctionList.is_null(), "fallback entries must have function lists");
+            let ver = unsafe { *(entry.pFunctionList as *const CK_VERSION) };
+            (ver.major, ver.minor)
+        })
+        .collect();
+    assert_eq!(versions, [(2, 40), (3, 0), (3, 2)], "fallback shape is the optimistic transient");
 }

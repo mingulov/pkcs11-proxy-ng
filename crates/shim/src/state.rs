@@ -155,6 +155,27 @@ pub fn replace_mechanism_registry(reg: MechanismRegistry) {
 /// without a network round-trip.
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
+/// Claim `slot` for `pid`, retrying `compare_exchange_weak` until the claim
+/// lands or another claimant's pid is observed.
+///
+/// Returns `true` exactly when this call performed the claim (i.e. the
+/// caller owns the reset). A single weak CAS can fail spuriously (W1-C6-05),
+/// which previously skipped the child's lifecycle reset for that call; the
+/// loop retries on any observed value other than `pid`, so a spurious
+/// failure can no longer drop the reset.
+fn claim_pid_slot(slot: &AtomicU32, pid: u32) -> bool {
+    let mut current = slot.load(Ordering::Relaxed);
+    loop {
+        if current == pid {
+            return false;
+        }
+        match slot.compare_exchange_weak(current, pid, Ordering::AcqRel, Ordering::Relaxed) {
+            Ok(_) => return true,
+            Err(actual) => current = actual,
+        }
+    }
+}
+
 /// Reset fork-unsafe lifecycle flags when the process forked since the
 /// shim state was claimed. After this, the child's `C_Initialize` runs
 /// the full path (fresh runtime via [`runtime`], reconnected channel
@@ -170,18 +191,7 @@ static INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// this file's documented liveness bar — accepted, not fixed.
 fn reclaim_after_fork() {
     let pid = std::process::id();
-    if SHIM_PID.load(Ordering::Relaxed) == pid {
-        return;
-    }
-    if SHIM_PID
-        .compare_exchange_weak(
-            SHIM_PID.load(Ordering::Relaxed),
-            pid,
-            Ordering::AcqRel,
-            Ordering::Relaxed,
-        )
-        .is_ok()
-    {
+    if claim_pid_slot(&SHIM_PID, pid) {
         INITIALIZED.store(false, Ordering::Release);
         CLIENT_RECONNECT_REQUIRED.store(true, Ordering::Release);
     }
@@ -212,7 +222,6 @@ pub fn mark_client_reconnect_required() {
     clear_pre_init_connect_failure();
 }
 
-pub type SessionByteCacheMap = Mutex<HashMap<CK_SESSION_HANDLE, Vec<u8>>>;
 pub type SessionSlotMap = Mutex<HashMap<CK_SESSION_HANDLE, CK_SLOT_ID>>;
 
 static SESSION_SLOTS: LazyLock<SessionSlotMap> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -262,257 +271,40 @@ pub(crate) fn remember_session_slot(h_session: CK_SESSION_HANDLE, slot_id: CK_SL
     }
 }
 
+/// Whether `h_session` was opened through this shim and not since closed
+/// (W1-L3-11: native error precedence needs session resolution before
+/// mechanism validation). Every live session in this process passed through
+/// `c_open_session` (which remembers it) and every close/evict path forgets
+/// it, so "unknown" means the server would answer `SESSION_HANDLE_INVALID`
+/// (or the handle never existed). Fail-open on a poisoned map: proceeding
+/// preserves correctness (the server still resolves the session), degrading
+/// only the precedence nicety.
+pub(crate) fn is_session_known(h_session: CK_SESSION_HANDLE) -> bool {
+    match SESSION_SLOTS.lock() {
+        Ok(map) => map.contains_key(&h_session),
+        Err(_) => true,
+    }
+}
+
 fn forget_session_slot(h_session: CK_SESSION_HANDLE) {
     if let Ok(mut map) = SESSION_SLOTS.lock() {
         map.remove(&h_session);
     }
 }
 
-/// Lazily-initialised holder for a per-session byte-output cache, used
-/// by the two-call `C_*` patterns (`C_Sign`, `C_SignFinal`, `C_Digest`,
-/// etc.). The macro `byte_cache!` below declares one static per
-/// PKCS#11 op so each op gets its own cache.
-pub struct ByteResultCache(LazyLock<SessionByteCacheMap>);
-
-impl ByteResultCache {
-    pub const fn new() -> Self {
-        Self(LazyLock::new(|| Mutex::new(HashMap::new())))
-    }
-
-    pub fn get(&self) -> &SessionByteCacheMap {
-        &self.0
-    }
-}
-
-macro_rules! byte_cache {
-    ($(#[$meta:meta])* $name:ident, $static_name:ident) => {
-        $(#[$meta])*
-        static $static_name: ByteResultCache = ByteResultCache::new();
-
-        pub fn $name() -> &'static SessionByteCacheMap {
-            $static_name.get()
-        }
-    };
-}
-
-byte_cache!(
-    /// Two-call pattern cache for one-shot `C_Sign`.
-    sig_cache,
-    SIG_CACHE
-);
-byte_cache!(
-    /// Two-call pattern cache for `C_SignFinal`.
-    sig_final_cache,
-    SIG_FINAL_CACHE
-);
-byte_cache!(
-    /// Two-call pattern cache for one-shot `C_Digest`.
-    dig_cache,
-    DIG_CACHE
-);
-byte_cache!(
-    /// Two-call pattern cache for `C_DigestFinal`.
-    dig_final_cache,
-    DIG_FINAL_CACHE
-);
-byte_cache!(
-    /// Two-call pattern cache for one-shot `C_Encrypt`.
-    enc_cache,
-    ENC_CACHE
-);
-byte_cache!(
-    /// Two-call pattern cache for `C_EncryptFinal`.
-    enc_final_cache,
-    ENC_FINAL_CACHE
-);
-byte_cache!(
-    /// Two-call pattern cache for one-shot `C_Decrypt`.
-    dec_cache,
-    DEC_CACHE
-);
-byte_cache!(
-    /// Two-call pattern cache for `C_DecryptFinal`.
-    dec_final_cache,
-    DEC_FINAL_CACHE
-);
-byte_cache!(
-    /// Two-call pattern cache for `C_WrapKey`.
-    wrap_cache,
-    WRAP_CACHE
-);
-byte_cache!(
-    /// Two-call pattern cache for `C_GetOperationState`.
-    op_state_cache,
-    OP_STATE_CACHE
-);
-byte_cache!(
-    /// Two-call pattern cache for `C_SignRecover`.
-    sign_recover_cache,
-    SIGN_RECOVER_CACHE
-);
-byte_cache!(
-    /// Two-call pattern cache for `C_VerifyRecover`.
-    verify_recover_cache,
-    VERIFY_RECOVER_CACHE
-);
-byte_cache!(
-    /// Two-call pattern cache for message encrypt output:
-    /// `C_EncryptMessage` and `C_EncryptMessageNext`.
-    msg_enc_cache,
-    MSG_ENC_CACHE
-);
-byte_cache!(
-    /// Two-call pattern cache for message decrypt output:
-    /// `C_DecryptMessage` and `C_DecryptMessageNext`.
-    msg_dec_cache,
-    MSG_DEC_CACHE
-);
-byte_cache!(
-    /// Two-call pattern cache for message sign output:
-    /// `C_SignMessage` and `C_SignMessageNext`.
-    msg_sign_cache,
-    MSG_SIGN_CACHE
-);
-byte_cache!(
-    /// Two-call pattern cache for `C_WrapKeyAuthenticated`.
-    wrap_auth_cache,
-    WRAP_AUTH_CACHE
-);
-
-/// Cache type for `C_EncapsulateKey`: stores `(ciphertext, key_handle)` atomically.
+/// Clear every per-session cache across all sessions.
 ///
-/// Unlike the byte-only `SessionByteCacheMap`, this caches the full result tuple
-/// so that the second call of the two-call pattern returns both the ciphertext
-/// and the key handle without creating a duplicate key on the backend.
-pub type SessionEncapsulateCacheMap =
-    Mutex<HashMap<CK_SESSION_HANDLE, (Vec<u8>, cryptoki_sys::CK_OBJECT_HANDLE)>>;
-
-pub struct EncapsulateResultCache(OnceLock<SessionEncapsulateCacheMap>);
-
-impl EncapsulateResultCache {
-    pub const fn new() -> Self {
-        Self(OnceLock::new())
-    }
-
-    pub fn get(&self) -> &SessionEncapsulateCacheMap {
-        self.0.get_or_init(|| Mutex::new(HashMap::new()))
-    }
-}
-
-static ENCAPSULATE_CACHE: EncapsulateResultCache = EncapsulateResultCache::new();
-
-/// Two-call pattern cache for `C_EncapsulateKey`: stores `(ciphertext, key_handle)`.
-pub fn encapsulate_cache() -> &'static SessionEncapsulateCacheMap {
-    ENCAPSULATE_CACHE.get()
-}
-
-/// Run `f` against each per-session byte cache (input and output) so callers
-/// can query or evict entries across all of them.
-fn with_all_byte_caches(mut f: impl FnMut(&SessionByteCacheMap)) {
-    let byte_caches: &[&SessionByteCacheMap] = &[
-        sig_cache(),
-        sig_final_cache(),
-        dig_cache(),
-        dig_final_cache(),
-        enc_cache(),
-        enc_final_cache(),
-        dec_cache(),
-        dec_final_cache(),
-        wrap_cache(),
-        op_state_cache(),
-        sign_recover_cache(),
-        verify_recover_cache(),
-        msg_enc_cache(),
-        msg_dec_cache(),
-        msg_sign_cache(),
-        wrap_auth_cache(),
-    ];
-    for cache in byte_caches {
-        f(cache);
-    }
-}
-
-fn clear_session_byte_caches(h_session: CK_SESSION_HANDLE, caches: &[&SessionByteCacheMap]) {
-    for cache in caches {
-        if let Ok(mut map) = cache.lock() {
-            map.remove(&h_session);
-        }
-    }
-}
-
-pub(crate) fn clear_sign_output_caches(h_session: CK_SESSION_HANDLE) {
-    clear_session_byte_caches(h_session, &[sig_cache(), sig_final_cache()]);
-}
-
-pub(crate) fn clear_digest_output_caches(h_session: CK_SESSION_HANDLE) {
-    clear_session_byte_caches(h_session, &[dig_cache(), dig_final_cache()]);
-}
-
-pub(crate) fn clear_encrypt_output_caches(h_session: CK_SESSION_HANDLE) {
-    clear_session_byte_caches(h_session, &[enc_cache(), enc_final_cache()]);
-}
-
-pub(crate) fn clear_decrypt_output_caches(h_session: CK_SESSION_HANDLE) {
-    clear_session_byte_caches(h_session, &[dec_cache(), dec_final_cache()]);
-}
-
-pub(crate) fn clear_sign_recover_output_cache(h_session: CK_SESSION_HANDLE) {
-    clear_session_byte_caches(h_session, &[sign_recover_cache()]);
-}
-
-pub(crate) fn clear_verify_recover_output_cache(h_session: CK_SESSION_HANDLE) {
-    clear_session_byte_caches(h_session, &[verify_recover_cache()]);
-}
-
-pub(crate) fn clear_message_encrypt_output_cache(h_session: CK_SESSION_HANDLE) {
-    clear_session_byte_caches(h_session, &[msg_enc_cache()]);
-}
-
-pub(crate) fn clear_message_decrypt_output_cache(h_session: CK_SESSION_HANDLE) {
-    clear_session_byte_caches(h_session, &[msg_dec_cache()]);
-}
-
-pub(crate) fn clear_message_sign_output_cache(h_session: CK_SESSION_HANDLE) {
-    clear_session_byte_caches(h_session, &[msg_sign_cache()]);
-}
-
-pub(crate) fn clear_operation_state_cache(h_session: CK_SESSION_HANDLE) {
-    clear_session_byte_caches(h_session, &[op_state_cache()]);
-}
-
-/// Clear every output cache across all sessions.
+/// W1-C6-04: the 16 two-call byte caches plus the encapsulate cache were
+/// dead state (production only evicted them, never inserted or read), so
+/// they are gone; only session ownership and message-operation
+/// discriminators remain.
 pub(crate) fn clear_all_caches() {
-    with_all_byte_caches(|cache| {
-        if let Ok(mut map) = cache.lock() {
-            map.clear();
-        }
-    });
-    if let Ok(mut map) = encapsulate_cache().lock() {
-        map.clear();
-    }
     if let Ok(mut map) = SESSION_SLOTS.lock() {
         map.clear();
     }
     if let Ok(mut map) = MESSAGE_OPERATION_STATES.lock() {
         map.clear();
     }
-}
-
-fn evict_disposable_output_caches_for_session(h_session: CK_SESSION_HANDLE) {
-    with_all_byte_caches(|cache| {
-        if let Ok(mut map) = cache.lock() {
-            map.remove(&h_session);
-        }
-    });
-    if let Ok(mut map) = encapsulate_cache().lock() {
-        map.remove(&h_session);
-    }
-}
-
-/// Drop only retryable/two-call output material, without changing session
-/// ownership or authoritative message-operation discriminators.
-pub(crate) fn evict_session_output_caches(h_session: CK_SESSION_HANDLE) {
-    evict_disposable_output_caches_for_session(h_session);
 }
 
 /// Forget session ownership and all message-operation discriminators without
@@ -523,7 +315,8 @@ pub(crate) fn evict_session_authoritative_state(h_session: CK_SESSION_HANDLE) {
     evict_message_operations(h_session);
 }
 
-/// Remove all cached two-call-pattern data for sessions opened on one slot.
+/// Forget session ownership and message-operation discriminators for sessions
+/// opened on one slot.
 ///
 /// Called from `c_close_all_sessions` on the close attempt, unconditionally
 /// (dropped regardless of the server's `CK_RV`).
@@ -540,7 +333,6 @@ pub(crate) fn evict_slot_session_caches(slot_id: CK_SLOT_ID) {
     };
 
     for session in sessions {
-        evict_disposable_output_caches_for_session(session);
         evict_message_operations(session);
     }
 }
@@ -1033,5 +825,50 @@ mod env_warning_tests {
         assert_eq!(connect_attempts_warning(Some("3")), None);
         assert_eq!(connect_attempts_warning(Some("0")), None);
         assert_eq!(connect_attempts_warning(Some("50")), None);
+    }
+
+    // W1-C6-05: the pid-claim loop retries a spuriously-failing weak CAS
+    // instead of skipping the fork reset for that call.
+    #[test]
+    fn claim_pid_slot_claims_once_then_observes() {
+        use std::sync::atomic::AtomicU32;
+        let slot = AtomicU32::new(0);
+        assert!(super::claim_pid_slot(&slot, 123), "first claim must win");
+        assert_eq!(slot.load(std::sync::atomic::Ordering::Relaxed), 123);
+        assert!(
+            !super::claim_pid_slot(&slot, 123),
+            "re-claim for the same pid observes, not resets"
+        );
+    }
+
+    #[test]
+    fn claim_pid_slot_concurrent_claims_terminate() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let slot = Arc::new(AtomicU32::new(0));
+        let wins = Arc::new(AtomicU32::new(0));
+        std::thread::scope(|scope| {
+            for thread in 0..8 {
+                let slot = Arc::clone(&slot);
+                let wins = Arc::clone(&wins);
+                scope.spawn(move || {
+                    // Distinct pids per thread; every call must either win
+                    // the claim or observe a winner — never spin forever and
+                    // never report a win it did not perform.
+                    for round in 0..50 {
+                        let pid = 1000 + thread * 100 + round;
+                        if super::claim_pid_slot(&slot, pid) {
+                            wins.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                });
+            }
+        });
+        let final_pid = slot.load(Ordering::Relaxed);
+        assert!(
+            (1000..1800).contains(&final_pid),
+            "slot must hold exactly one claimant's pid, got {final_pid}"
+        );
+        assert!(wins.load(Ordering::Relaxed) > 0, "some claim must have won");
     }
 }

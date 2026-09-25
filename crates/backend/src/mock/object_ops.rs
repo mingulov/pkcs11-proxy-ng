@@ -74,7 +74,10 @@ impl MockBackend {
                 return Ok(vec![]);
             }
             let mut cursor = self.find_objects_cursor.lock().unwrap();
-            let start = *cursor;
+            // W1-C5-03: clamp to the current list length — a swap racing
+            // this read can leave the cursor past the new end, and
+            // slicing there would panic instead of yielding an empty batch.
+            let start = (*cursor).min(objects.len());
             let remaining = objects.len().saturating_sub(start);
             let take = (max_count as usize).min(remaining);
             let batch = objects[start..start + take].to_vec();

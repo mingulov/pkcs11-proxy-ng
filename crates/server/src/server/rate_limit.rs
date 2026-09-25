@@ -16,6 +16,28 @@
 //! is bounded — entries idle for > 5× the window are GC'd lazily by
 //! the next caller. Not for high-throughput general traffic; these are
 //! knobs to throttle a single noisy peer's discovery/initialize RPCs.
+//!
+//! ## Limiter scope (W1-C2-B08)
+//!
+//! This module covers per-peer fixed-window budgets for the two
+//! unauthenticated RPCs only (`check` for discovery, `check_init` for
+//! context creation, with independent budgets). Every other layer is
+//! owned elsewhere — deliberately distinct, never overlapping:
+//!
+//! - Authenticated/general RPC load: the global `IN_FLIGHT` breaker plus
+//!   the per-context cap in `grpc_service/service_utils.rs`.
+//! - One noisy connection hogging the breaker: the per-connection
+//!   `PEER_IN_FLIGHT` admission in `service_utils.rs` (W1-L7-28).
+//! - Transport floods: the tonic `concurrency_limit_per_connection` /
+//!   `max_concurrent_streams` / `load_shed` knobs in `main.rs`
+//!   (W1-L6-20), which bound buffering above the breaker.
+//! - Per-principal quotas and login budgets: `rate_quota.rs` (opt-in).
+//!
+//! A general per-connection token bucket is DEFERRED by adjudication
+//! (group-36: per-peer + breaker coverage is sufficient); this module
+//! must not grow one without revisiting that decision. Adjacent future
+//! work (W1-L7-02 peer-keyed unauthenticated quota, Task 30) extends the
+//! quota layer, not this module.
 
 use std::net::IpAddr;
 use std::sync::{LazyLock, OnceLock};
@@ -206,6 +228,31 @@ mod tests {
         assert!(check_against(Some(&state), p, t0).is_err());
         let t1 = t0 + Duration::from_millis(150);
         assert!(check_against(Some(&state), p, t1).is_ok());
+    }
+
+    #[test]
+    fn limiter_scope_discovery_and_initialize_budgets_are_independent() {
+        // W1-C2-B08 scope pin: each unauthenticated RPC family has its own
+        // per-peer budget — exhausting discovery for a peer never throttles
+        // its initialize calls, and vice versa.
+        let discovery = fresh_state(Duration::from_secs(60), 1);
+        let init = fresh_state(Duration::from_secs(60), 1);
+        let now = Instant::now();
+        let p = peer(6);
+        assert!(check_against(Some(&discovery), p, now).is_ok());
+        assert!(
+            check_against(Some(&discovery), p, now).is_err(),
+            "second discovery call must exhaust the budget of 1"
+        );
+        assert!(
+            check_against(Some(&init), p, now).is_ok(),
+            "exhausted discovery budget must not throttle initialize"
+        );
+        assert!(check_against(Some(&init), p, now).is_err());
+        assert!(
+            check_against(Some(&discovery), p, now).is_err(),
+            "budgets stay independent in both directions"
+        );
     }
 
     #[test]

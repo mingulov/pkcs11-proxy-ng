@@ -216,10 +216,8 @@ mod tests {
     async fn open_session_transport_failure_is_session_scoped() {
         let mut client = dead_channel_client();
         client.restore_context_id(Some("c10-04-open-session".into()));
-        let err = client
-            .open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-            .await
-            .unwrap_err();
+        let err =
+            client.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).await.unwrap_err();
         assert_eq!(err, CkRv::DEVICE_ERROR);
     }
 

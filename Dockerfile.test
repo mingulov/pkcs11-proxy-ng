@@ -104,6 +104,10 @@ COPY proto/ proto/
 COPY crates/types/Cargo.toml crates/types/Cargo.toml
 COPY crates/proto/Cargo.toml crates/proto/Cargo.toml
 COPY crates/proto/build.rs crates/proto/build.rs
+# build.rs compiles src/oneof_check.rs via #[path] (std-only, self-contained)
+# and reads secret-fields.toml at build time.
+COPY crates/proto/src/oneof_check.rs crates/proto/src/oneof_check.rs
+COPY crates/proto/secret-fields.toml crates/proto/secret-fields.toml
 COPY crates/backend/Cargo.toml crates/backend/Cargo.toml
 COPY crates/audit/Cargo.toml crates/audit/Cargo.toml
 COPY crates/server/Cargo.toml crates/server/Cargo.toml
@@ -112,14 +116,24 @@ COPY crates/shim/Cargo.toml crates/shim/Cargo.toml
 COPY crates/cli/Cargo.toml crates/cli/Cargo.toml
 
 # Stub source files for dependency pre-compilation
+# (bench names must match the [[bench]] targets in crates/server/Cargo.toml;
+# cargo resolves declared targets at manifest-parse time, so a missing stub
+# fails this layer loudly rather than poisoning the cache silently.)
 RUN for crate in types proto backend audit client shim; do \
         mkdir -p "crates/$crate/src" && echo "" > "crates/$crate/src/lib.rs"; \
     done && \
     mkdir -p crates/server/src && echo "fn main(){}" > crates/server/src/main.rs && echo "" > crates/server/src/lib.rs && \
+    mkdir -p crates/server/benches && \
+    for bench in proxy_benchmark proxy_latency_histogram proxy_throughput registry_payload_size; do \
+        echo "fn main(){}" > "crates/server/benches/$bench.rs"; \
+    done && \
     mkdir -p crates/cli/src && echo "fn main(){}" > crates/cli/src/main.rs
 
-# Pre-compile dependencies (cached layer — only re-runs when Cargo.toml changes)
-RUN cargo build --locked --workspace 2>/dev/null || true
+# Pre-compile dependencies (cached layer — only re-runs when Cargo.toml changes).
+# W1-L17-19: failures fail the image with output — masking them here (the
+# old `2>/dev/null || true`) misattributed broken manifests to the source
+# build below as if they were source problems.
+RUN cargo build --locked --workspace
 
 # Copy actual source (invalidates from here on source changes)
 COPY . .

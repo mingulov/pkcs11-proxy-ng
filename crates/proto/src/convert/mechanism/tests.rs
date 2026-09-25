@@ -277,7 +277,7 @@ fn mechanism_info_sign_verify_round_trip() {
     let original = CkMechanismInfo {
         min_key_size: 512,
         max_key_size: 4096,
-        flags: CkMechanismFlags(CkMechanismFlags::SIGN | CkMechanismFlags::VERIFY),
+        flags: CkMechanismFlags::SIGN | CkMechanismFlags::VERIFY,
     };
     let proto: v1_proto::MechanismInfo = (&original).into();
     let back = CkMechanismInfo::from(&proto);
@@ -290,12 +290,14 @@ fn mechanism_info_sign_recover_flags_round_trip() {
         | CkMechanismFlags::SIGN_RECOVER
         | CkMechanismFlags::VERIFY
         | CkMechanismFlags::VERIFY_RECOVER;
-    let original =
-        CkMechanismInfo { min_key_size: 2048, max_key_size: 2048, flags: CkMechanismFlags(flags) };
+    let original = CkMechanismInfo { min_key_size: 2048, max_key_size: 2048, flags };
     let proto: v1_proto::MechanismInfo = (&original).into();
     let back = CkMechanismInfo::from(&proto);
-    assert_eq!(back.flags.0 & CkMechanismFlags::SIGN_RECOVER, CkMechanismFlags::SIGN_RECOVER);
-    assert_eq!(back.flags.0 & CkMechanismFlags::VERIFY_RECOVER, CkMechanismFlags::VERIFY_RECOVER);
+    assert_eq!(back.flags.0 & CkMechanismFlags::SIGN_RECOVER.0, CkMechanismFlags::SIGN_RECOVER.0);
+    assert_eq!(
+        back.flags.0 & CkMechanismFlags::VERIFY_RECOVER.0,
+        CkMechanismFlags::VERIFY_RECOVER.0
+    );
     assert_eq!(back, original);
 }
 
@@ -312,11 +314,10 @@ fn mechanism_info_all_known_flags_round_trip() {
         | CkMechanismFlags::WRAP
         | CkMechanismFlags::UNWRAP
         | CkMechanismFlags::DERIVE;
-    let original =
-        CkMechanismInfo { min_key_size: 0, max_key_size: u64::MAX, flags: CkMechanismFlags(flags) };
+    let original = CkMechanismInfo { min_key_size: 0, max_key_size: u64::MAX, flags };
     let proto: v1_proto::MechanismInfo = (&original).into();
     let back = CkMechanismInfo::from(&proto);
-    assert_eq!(back.flags.0, flags);
+    assert_eq!(back.flags, flags);
     // W1-C8-05: full-field assertions; a dropped field must fail.
     assert_eq!(back.min_key_size, 0);
     assert_eq!(back.max_key_size, u64::MAX);
@@ -1468,7 +1469,7 @@ fn wtls_key_mat_params_round_trip() {
         },
         mac_secret_handle: CkObjectHandle(101),
         key_handle: CkObjectHandle(202),
-        iv: vec![0xA1; 8],
+        iv: vec![0xA1; 8].into(),
     }));
     match p {
         CkMechanismParams::WtlsKeyMat(v) => {
@@ -1483,7 +1484,7 @@ fn wtls_key_mat_params_round_trip() {
             assert_eq!(v.random_info.server_random, vec![0xDD; 16]);
             assert_eq!(v.mac_secret_handle.0, 101);
             assert_eq!(v.key_handle.0, 202);
-            assert_eq!(v.iv, vec![0xA1; 8]);
+            assert_eq!(v.iv, vec![0xA1; 8].into());
         }
         _ => panic!("wrong variant"),
     }

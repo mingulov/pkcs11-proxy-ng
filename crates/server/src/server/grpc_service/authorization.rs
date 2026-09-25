@@ -101,7 +101,9 @@ pub(super) async fn slot_is_authorized(
 ///   grant-level `extract_allowed` decision (an unconfined principal must NOT
 ///   be over-denied on a transient uid-fetch failure).
 ///
-/// Returns `true` (permissive) on unknown context or unregistered session.
+/// Returns `false` (fail-closed) on unknown context or unregistered
+/// session (W1-C1-15): a close racing an attribute read must deny
+/// instead of skipping an extract-deny via a permissive default.
 /// Returns `false` (fail-closed) when the backend reports `TOKEN_NOT_PRESENT`
 /// or another error. Unauthenticated principals always return `true`
 /// (extract-deny is opt-in for authenticated identities only).
@@ -113,7 +115,7 @@ pub(super) async fn extract_is_permitted(
 ) -> Result<bool, Status> {
     let identity = match context_identity(&ctx.context_manager, ctx_id).await {
         Ok(identity) => identity,
-        Err(_) => return Ok(true), // context gone → permissive
+        Err(_) => return Ok(false), // context gone → deny (W1-C1-15)
     };
 
     // Unauthenticated peers: extract_allowed always returns true; skip
@@ -125,7 +127,7 @@ pub(super) async fn extract_is_permitted(
     let Some(backend_slot) =
         ctx.context_manager.slot_for_session(ctx_id, VirtualHandle(virtual_session)).await
     else {
-        return Ok(true); // session not registered → permissive
+        return Ok(false); // session not registered → deny (W1-C1-15)
     };
 
     // Resolve the token (label, serial) from cache when available. On a miss,
@@ -823,7 +825,7 @@ mod tests {
 
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
         mock.initialize().unwrap();
-        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
         let backend_object = mock.create_object(backend_session, Some(&[])).unwrap();
         // Make UNIQUE_ID ATTRIBUTE_SENSITIVE so uid resolution returns None.
@@ -1137,6 +1139,27 @@ mod tests {
         );
     }
 
+    /// W1-C1-15: a context that vanishes mid-request (close racing an
+    /// attribute read) must DENY extraction, not skip the extract-deny
+    /// via a permissive default.
+    #[tokio::test]
+    async fn c1_15_extract_denies_when_context_vanished() {
+        let policy = policy_for_identity(MTLS_IDENTITY);
+        let (ctx, _ctx_id, session) = setup_extract_test(policy, Some(MTLS_IDENTITY.into())).await;
+        let gone = ClientContextId("c1-15-vanished-context".into());
+        let permitted = extract_is_permitted(&ctx, &gone, session, 0).await.unwrap();
+        assert!(!permitted, "vanished context must deny extraction (fail-closed), not permit");
+    }
+
+    /// W1-C1-15: a session that vanishes mid-request must DENY extraction.
+    #[tokio::test]
+    async fn c1_15_extract_denies_when_session_vanished() {
+        let policy = policy_for_identity(MTLS_IDENTITY);
+        let (ctx, ctx_id, _session) = setup_extract_test(policy, Some(MTLS_IDENTITY.into())).await;
+        let permitted = extract_is_permitted(&ctx, &ctx_id, 0xDEAD_BEEF, 0).await.unwrap();
+        assert!(!permitted, "vanished session must deny extraction (fail-closed), not permit");
+    }
+
     // --- fetch_object_metadata ---
 
     mod fetch_object_metadata_tests {
@@ -1149,7 +1172,7 @@ mod tests {
         fn mock_with_session_and_object() -> (Arc<MockBackend>, CkSessionHandle, CkObjectHandle) {
             let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
             mock.initialize().unwrap();
-            let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+            let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
             let session = mock.open_session(CkSlotId(0), flags).unwrap();
             let object = mock.create_object(session, Some(&[])).unwrap();
             // CLASS and TOKEN are mandatory in conformant backends; set them so the

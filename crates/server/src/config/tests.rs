@@ -1207,6 +1207,31 @@ fn rate_limit_per_slot_failed_login_budget_zero_is_rejected() {
     assert!(err.contains("> 0"), "error must say must be > 0, got: {err}");
 }
 
+// W1-C3-21: per_slot_failed_login_cooldown_secs=Some(0) arms an
+// already-expired lockout, silently neutering the failed-login budget —
+// reject it like the other three rate_limit fields. (Pin: the validate()
+// rejection predates this task via Task 9 W1-L8-16; the regression test
+// was missing.)
+#[test]
+fn rate_limit_per_slot_failed_login_cooldown_zero_is_rejected() {
+    let toml = rate_limit_toml("[rate_limit]\nper_slot_failed_login_cooldown_secs = 0\n");
+    let cfg: DaemonConfig = toml::from_str(&toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(
+        err.contains("per_slot_failed_login_cooldown_secs"),
+        "error must name the field, got: {err}"
+    );
+    assert!(err.contains("> 0"), "error must say must be > 0, got: {err}");
+}
+
+#[test]
+fn rate_limit_per_slot_failed_login_cooldown_nonzero_validates_ok() {
+    let toml = rate_limit_toml("[rate_limit]\nper_slot_failed_login_cooldown_secs = 5\n");
+    let cfg: DaemonConfig = toml::from_str(&toml).unwrap();
+    assert!(cfg.validate().is_ok(), "positive cooldown must validate OK");
+    assert_eq!(cfg.rate_limit.per_slot_failed_login_cooldown_secs, Some(5));
+}
+
 #[test]
 fn rate_limit_absent_fields_validate_ok() {
     // All rate_limit fields absent (None) is the opt-out default; must be valid.
@@ -1548,6 +1573,26 @@ fn generic_policy_with_none_listener_still_rejected() {
     );
 }
 
+// W1-C3-16: a policy with no authenticated listener behind it must hit
+// the generic policy+auth=none reject above — the "no authenticated
+// listeners" arm inside validate_policy_identities is unreachable (every
+// such config trips an earlier return) and must never surface.
+#[test]
+fn policy_with_no_authenticated_listeners_hits_generic_reject() {
+    let toml = "\
+[backend]\nmodule = \".\"\n[listener.local]\npath = \"/run/p.sock\"\nauth = \"none\"\nallow_insecure_unix = true\n[auth]\nallow_all_authenticated = false\n[[auth.policy]]\nidentity = \"uid=1000\"\ntokens = [\"label:MyToken\"]\n";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(
+        err.contains("cannot apply to unauthenticated peers"),
+        "must hit the generic reject, got: {err}"
+    );
+    assert!(
+        !err.contains("no authenticated listeners"),
+        "unreachable dead-branch message must never surface, got: {err}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // W1-C3-06: policy identity uid forms must be normalized so accepted
 // identities can match runtime keys (uid=01000 vs uid=1000).
@@ -1774,6 +1819,73 @@ fn documented_env_vars() -> Vec<(String, String)> {
         }
     }
     vars
+}
+
+// ---------------------------------------------------------------------------
+// W1-C3-15: the apply_env_overrides doc list must name every var the body
+// reads, including PKCS11_PROXY_ALLOW_INSECURE (it drives
+// listener.remote.allow_insecure_tcp in both listener branches). (Pin:
+// the entry itself predates this task via P0/P1 W1-L8-01.)
+// ---------------------------------------------------------------------------
+
+/// This crate's own `config.rs` source, for doc-sync pins.
+fn own_config_source() -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/config.rs");
+    std::fs::read_to_string(&path).expect("read own src/config.rs")
+}
+
+#[test]
+fn env_override_doc_list_names_allow_insecure() {
+    let text = own_config_source();
+    let doc = section_between(&text, "/// Documented env vars:", "pub fn apply_env_overrides");
+    assert!(
+        doc.contains("PKCS11_PROXY_ALLOW_INSECURE"),
+        "env doc list must name PKCS11_PROXY_ALLOW_INSECURE:\n{doc}"
+    );
+    assert!(
+        doc.contains("listener.remote.allow_insecure_tcp"),
+        "env doc list must map ALLOW_INSECURE to listener.remote.allow_insecure_tcp:\n{doc}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W1-C3-19: tokens = "*" is accepted as an alias of "all" (pinned by
+// from_config_with_all_access); the TokenAccessSpec schema docs must say so.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tokens_star_alias_documented_in_schema_docs() {
+    let text = own_config_source();
+    let doc = section_between(&text, "Three valid forms:", "pub enum TokenAccessSpec");
+    assert!(doc.contains("\"all\""), "schema docs must document tokens = \"all\":\n{doc}");
+    assert!(doc.contains("\"*\""), "schema docs must document the tokens = \"*\" alias:\n{doc}");
+}
+
+// ---------------------------------------------------------------------------
+// T27-m1: the TokenAccessSpec type-mismatch error must name both accepted
+// scalar forms ("all" and its "*" alias) so it agrees with the schema docs.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tokens_type_mismatch_error_names_all_and_star() {
+    let toml = r#"
+[backend]
+module = "."
+
+[listener.local]
+path = "/tmp/test.sock"
+auth = "peer_cred"
+
+[auth]
+allow_all_authenticated = false
+
+[[auth.policy]]
+identity = "uid=1000"
+tokens = 42
+"#;
+    let err = toml::from_str::<DaemonConfig>(toml).unwrap_err().to_string();
+    assert!(err.contains("\"all\""), "type-mismatch error must name \"all\": {err}");
+    assert!(err.contains("\"*\""), "type-mismatch error must name the \"*\" alias: {err}");
 }
 
 // ---------------------------------------------------------------------------
@@ -2083,4 +2195,95 @@ tokens = ["label:Prod"]
 "#;
     let cfg: DaemonConfig = toml::from_str(toml).unwrap();
     cfg.validate().expect("taught SPKI policy identity must validate");
+}
+
+// ---------------------------------------------------------------------------
+// W1-L8-18: 'host:badport' must fail at validate with a friendly,
+// value-naming error (confirms the W1-C3-13 SocketAddr-grade check holds).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn host_colon_badport_bind_rejected_with_friendly_error() {
+    let toml = r#"
+[backend]
+module = "."
+
+[listener.remote]
+bind = "host:badport"
+auth = "none"
+allow_insecure_tcp = true
+"#;
+    let config: DaemonConfig = toml::from_str(toml).unwrap();
+    let err = config.validate().unwrap_err();
+    assert!(err.contains("host:badport"), "error must name the offending value, got: {err}");
+    assert!(
+        err.contains("IP:port") || err.contains("SocketAddr"),
+        "error must steer toward IP:port, got: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W1-L8-20: the k8s ConfigMap's mechanism stub must teach merge semantics
+// (an override merged over the shipped embedded default), not claim to BE
+// the embedded default.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn k8s_configmap_teaches_registry_merge_not_replace() {
+    let yaml = submodule_file("examples/k8s/10-configmap.yaml");
+    assert!(
+        !yaml.contains("Shipped embedded default"),
+        "stub must not claim to be the embedded default:\n{yaml}"
+    );
+    assert!(
+        yaml.to_ascii_lowercase().contains("merge"),
+        "stub comment must teach merge semantics:\n{yaml}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W1-L8-21: the apply_env_overrides doc list, env_var_help(), and the
+// override body must agree on the full env-var set (all 8 incl.
+// ALLOW_INSECURE) — an omission in any surface is a doc/behavior lie, and
+// in test ALL_VARS it is an env-bleed risk.
+// ---------------------------------------------------------------------------
+
+/// Every `PKCS11_PROXY_*` var token on `///` doc lines between markers.
+fn doc_listed_env_vars(source: &str, start: &str, end: &str) -> Vec<String> {
+    let doc = section_between(source, start, end);
+    let mut vars = Vec::new();
+    for line in doc.lines() {
+        let mut rest = line;
+        while let Some(i) = rest.find("PKCS11_PROXY_") {
+            let token: String = rest[i..]
+                .chars()
+                .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_')
+                .collect();
+            if token.len() > "PKCS11_PROXY_".len() && !vars.contains(&token) {
+                vars.push(token);
+            }
+            rest = &rest[i + "PKCS11_PROXY_".len()..];
+        }
+    }
+    vars
+}
+
+#[test]
+fn env_var_surfaces_agree_on_all_vars() {
+    let source = own_config_source();
+    let doc_vars =
+        doc_listed_env_vars(&source, "/// Documented env vars:", "pub fn apply_env_overrides");
+    assert_eq!(doc_vars.len(), 8, "doc list must name all 8 daemon env vars: {doc_vars:?}");
+    let help = env_var_help();
+    for var in &doc_vars {
+        assert!(help.contains(var), "env_var_help() must list {var}:\n{help}");
+        assert!(source.contains(&format!("get(\"{var}\")")), "override body must read {var}");
+    }
+    // And help must not advertise vars the body ignores.
+    for (var, _field) in documented_env_vars() {
+        assert!(
+            source.contains(&format!("get(\"{var}\")")),
+            "help-advertised {var} must be read by the override body"
+        );
+    }
 }

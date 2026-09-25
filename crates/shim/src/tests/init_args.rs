@@ -25,7 +25,7 @@ fn initialize_p_reserved_nonnull_returns_bad_args() {
         LockMutex: None,
         UnlockMutex: None,
         flags: 0,
-        pReserved: std::ptr::dangling_mut::<std::os::raw::c_void>(),
+        pReserved: std::ptr::dangling_mut::<std::ffi::c_void>(),
     };
     let rv = unsafe { dispatch::general::c_initialize(&mut args as *mut _ as CK_VOID_PTR) };
     assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);

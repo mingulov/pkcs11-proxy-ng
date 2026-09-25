@@ -68,6 +68,14 @@ fn main() {
         let payload: pkcs11_proxy_ng_proto::MechanismRegistryPayload = (&reg).into();
         let bytes = payload.encoded_len();
         let total_mechs = reg.parameterless_view().len() + reg.param_shapes_view().len();
+        // W1-C3-22: the <16KiB-for-100-vendor-entries target is a gate,
+        // not a comment — a payload regression fails the bench run.
+        if n == 100 {
+            assert!(
+                bytes < 16384,
+                "registry payload for 100 vendor entries is {bytes} bytes, target is < 16384"
+            );
+        }
         println!("{n:>4}        {total_mechs:>4}         {bytes}");
         if !first {
             out_json.push(',');

@@ -150,6 +150,16 @@ unsafe extern "C" fn wrap(
     unsafe { ExactOracle_ByteOutput(out, length) }
 }
 
+/// Oracle parameter writeback for message calls (test-only native provider).
+///
+/// # Safety
+///
+/// When non-null with an active parameter action, `pointer` must designate
+/// a writable message-params struct of `length` bytes matching the loaded
+/// `MECHANISM` (`CK_GCM_MESSAGE_PARAMS` / `CK_CCM_MESSAGE_PARAMS` /
+/// `CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS`); its embedded `pIv`/`pTag` /
+/// `pNonce`/`pMAC` pointers, when dereferenced, must be writable for their
+/// declared extents. A null `pointer` (or action 0) is a no-op.
 unsafe fn parameter(
     pointer: CK_VOID_PTR,
     length: CK_ULONG,
@@ -586,34 +596,40 @@ static V320: LazyLock<CK_FUNCTION_LIST_3_2> =
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_GetFunctionList(out: CK_FUNCTION_LIST_PTR_PTR) -> CK_RV {
-    if out.is_null() {
-        return CKR_ARGUMENTS_BAD;
-    }
-    unsafe { out.write((&*V240 as *const CK_FUNCTION_LIST_3_2).cast_mut().cast()) };
-    CKR_OK
+    // W1-L1-05: no panic across `extern "C"` even in the test harness.
+    catch_or_general_error(|| {
+        if out.is_null() {
+            return CKR_ARGUMENTS_BAD;
+        }
+        unsafe { out.write((&*V240 as *const CK_FUNCTION_LIST_3_2).cast_mut().cast()) };
+        CKR_OK
+    })
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_GetInterfaceList(out: CK_INTERFACE_PTR, count: CK_ULONG_PTR) -> CK_RV {
-    if count.is_null() {
-        return CKR_ARGUMENTS_BAD;
-    }
-    if !out.is_null() {
-        if unsafe { count.read() } < 3 {
-            unsafe { count.write(3) };
-            return CKR_BUFFER_TOO_SMALL;
+    // W1-L1-05: no panic across `extern "C"` even in the test harness.
+    catch_or_general_error(|| {
+        if count.is_null() {
+            return CKR_ARGUMENTS_BAD;
         }
-        for (i, table) in [&*V240, &*V300, &*V320].into_iter().enumerate() {
-            unsafe {
-                out.add(i).write(CK_INTERFACE {
-                    pInterfaceName: c"PKCS 11".as_ptr().cast_mut().cast(),
-                    pFunctionList: (table as *const CK_FUNCTION_LIST_3_2).cast_mut().cast(),
-                    flags: 0,
-                })
-            };
+        if !out.is_null() {
+            if unsafe { count.read() } < 3 {
+                unsafe { count.write(3) };
+                return CKR_BUFFER_TOO_SMALL;
+            }
+            for (i, table) in [&*V240, &*V300, &*V320].into_iter().enumerate() {
+                unsafe {
+                    out.add(i).write(CK_INTERFACE {
+                        pInterfaceName: c"PKCS 11".as_ptr().cast_mut().cast(),
+                        pFunctionList: (table as *const CK_FUNCTION_LIST_3_2).cast_mut().cast(),
+                        flags: 0,
+                    })
+                };
+            }
         }
-    }
-    unsafe { count.write(3) };
-    CKR_OK
+        unsafe { count.write(3) };
+        CKR_OK
+    })
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_GetInterface(
@@ -622,38 +638,41 @@ pub unsafe extern "C" fn C_GetInterface(
     out: CK_INTERFACE_PTR_PTR,
     _: CK_FLAGS,
 ) -> CK_RV {
-    if out.is_null() {
-        return CKR_ARGUMENTS_BAD;
-    }
-    let version = if version.is_null() {
-        CK_VERSION { major: 3, minor: 2 }
-    } else {
-        unsafe { version.read() }
-    };
-    let table = match (version.major, version.minor) {
-        (2, 40) => &*V240,
-        (3, 0) => &*V300,
-        (3, 2) => &*V320,
-        _ => return CKR_ARGUMENTS_BAD,
-    };
-    // Process-lifetime interface descriptors model a real static provider table.
-    static INTERFACES: std::sync::OnceLock<[usize; 3]> = std::sync::OnceLock::new();
-    let interfaces = INTERFACES.get_or_init(|| {
-        [&*V240, &*V300, &*V320].map(|table| {
-            Box::into_raw(Box::new(CK_INTERFACE {
-                pInterfaceName: c"PKCS 11".as_ptr().cast_mut().cast(),
-                pFunctionList: (table as *const CK_FUNCTION_LIST_3_2).cast_mut().cast(),
-                flags: 0,
-            })) as usize
-        })
-    });
-    let index = if table.version.major == 2 {
-        0
-    } else if table.version.minor == 0 {
-        1
-    } else {
-        2
-    };
-    unsafe { out.write(interfaces[index] as CK_INTERFACE_PTR) };
-    CKR_OK
+    // W1-L1-05: no panic across `extern "C"` even in the test harness.
+    catch_or_general_error(|| {
+        if out.is_null() {
+            return CKR_ARGUMENTS_BAD;
+        }
+        let version = if version.is_null() {
+            CK_VERSION { major: 3, minor: 2 }
+        } else {
+            unsafe { version.read() }
+        };
+        let table = match (version.major, version.minor) {
+            (2, 40) => &*V240,
+            (3, 0) => &*V300,
+            (3, 2) => &*V320,
+            _ => return CKR_ARGUMENTS_BAD,
+        };
+        // Process-lifetime interface descriptors model a real static provider table.
+        static INTERFACES: std::sync::OnceLock<[usize; 3]> = std::sync::OnceLock::new();
+        let interfaces = INTERFACES.get_or_init(|| {
+            [&*V240, &*V300, &*V320].map(|table| {
+                Box::into_raw(Box::new(CK_INTERFACE {
+                    pInterfaceName: c"PKCS 11".as_ptr().cast_mut().cast(),
+                    pFunctionList: (table as *const CK_FUNCTION_LIST_3_2).cast_mut().cast(),
+                    flags: 0,
+                })) as usize
+            })
+        });
+        let index = if table.version.major == 2 {
+            0
+        } else if table.version.minor == 0 {
+            1
+        } else {
+            2
+        };
+        unsafe { out.write(interfaces[index] as CK_INTERFACE_PTR) };
+        CKR_OK
+    })
 }

@@ -309,6 +309,14 @@ struct AnchorFile {
     /// The NEXT seq to assign (== the last written record's seq + 1), matching
     /// [`ChainState::last_seq`].
     last_seq: u64,
+    /// W1-C2-09: byte length of the active file covered by this anchor. The
+    /// anchor is written between records, so bytes `[0, active_bytes)` hold
+    /// exactly the anchor-covered records and recovery only scans forward
+    /// from this offset instead of parsing the whole (up to 64MiB) file.
+    /// `#[serde(default)]` keeps pre-upgrade anchors readable: offset 0 is
+    /// the full-scan fallback, i.e. the pre-fix behavior.
+    #[serde(default)]
+    active_bytes: u64,
 }
 
 /// Deterministically reconstruct the chain tip at startup (Critical #2).
@@ -317,17 +325,30 @@ struct AnchorFile {
 /// crash it may lag behind the records already durable in `audit.jsonl`. Trusting
 /// the anchor for the resume seq would then **re-issue** sequence numbers. Resume
 /// order:
-/// 1. If `audit.jsonl` is non-empty, take the LAST valid record `r` and resume at
-///    `last_seq = r.seq + 1`, `last_hash = record_hash(&r.prev_hash, &r)`. The
-///    active file tail is authoritative.
-/// 2. Else if `audit.anchor.json` exists, resume from it — this covers the "just
-///    rotated, new active file empty" case, where the anchor holds the last
-///    rotated file's head.
+/// 1. Seek the active file to the anchor's persisted `active_bytes` tail
+///    pointer (W1-C2-09; 0 for legacy/missing anchors) and take the LAST
+///    valid record `r` at/after the offset, resuming at `last_seq = r.seq + 1`,
+///    `last_hash = record_hash(&r.prev_hash, &r)`. The active file tail is
+///    authoritative. Recovery reads only the post-checkpoint suffix —
+///    O(records since the last checkpoint), not O(active file).
+/// 2. Else if a usable anchor exists, resume from it — this covers the "just
+///    rotated, new active file empty" case (where the anchor holds the last
+///    rotated file's head) and the "no post-anchor records" case (where the
+///    anchor-covered prefix is the tip).
 /// 3. Else start from genesis.
 fn reconstruct_chain_state(active_path: &Path, dir: &Path) -> io::Result<ChainState> {
-    if let Ok(content) = std::fs::read_to_string(active_path) {
+    let (offset, anchored) = read_anchor_tail(dir);
+    // T28-M1: an offset past EOF is only reachable via out-of-band
+    // truncate/replace of the active file (in-band, offset <= len always).
+    // Clamp to the full-scan fallback instead of returning the stale
+    // anchor without scanning the real content.
+    let offset = match std::fs::metadata(active_path) {
+        Ok(meta) if offset > meta.len() => 0,
+        _ => offset,
+    };
+    if let Ok(suffix) = read_active_suffix(active_path, offset) {
         let mut last_valid: Option<AuditRecord> = None;
-        for line in content.lines() {
+        for line in suffix.lines() {
             if line.trim().is_empty() {
                 continue;
             }
@@ -341,8 +362,52 @@ fn reconstruct_chain_state(active_path: &Path, dir: &Path) -> io::Result<ChainSt
             let last_hash = record_hash(&r.prev_hash, &r);
             return Ok(ChainState { last_hash, last_seq: r.seq + 1 });
         }
+        // No valid record at/after the offset: with a real anchor the
+        // anchor-covered prefix is the tip (records only append; the anchor
+        // is written between records), matching the full scan's outcome.
+        if let Some(chain) = anchored {
+            return Ok(chain);
+        }
     }
     load_chain_state(dir)
+}
+
+/// Read only the active-file bytes at/after `offset` (W1-C2-09).
+///
+/// A missing active file yields an empty tail (the caller falls through to
+/// the anchor/genesis path, as before); a seek past EOF (truncated or
+/// replaced file) likewise yields nothing. Other I/O and UTF-8 errors
+/// propagate so the caller takes the loud anchor/genesis fallback.
+fn read_active_suffix(active_path: &Path, offset: u64) -> io::Result<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = match std::fs::File::open(active_path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(e) => return Err(e),
+    };
+    file.seek(SeekFrom::Start(offset))?;
+    let mut suffix = String::new();
+    file.read_to_string(&mut suffix)?;
+    Ok(suffix)
+}
+
+/// Best-effort tail pointer plus the anchor's chain tip (W1-C2-09).
+///
+/// Returns `(0, None)` when the anchor is absent or unparseable — recovery
+/// then scans from the start and [`load_chain_state`] stays the fail-loud
+/// path for a corrupt anchor, exactly as before. Deliberately separate
+/// from [`load_chain_state`]: that path errors loudly, this one must not.
+fn read_anchor_tail(dir: &Path) -> (u64, Option<ChainState>) {
+    let data = match std::fs::read(dir.join("audit.anchor.json")) {
+        Ok(d) => d,
+        Err(_) => return (0, None),
+    };
+    let anchor: AnchorFile = match serde_json::from_slice(&data) {
+        Ok(a) => a,
+        Err(_) => return (0, None),
+    };
+    let chain = ChainState { last_hash: anchor.last_hash, last_seq: anchor.last_seq };
+    (anchor.active_bytes, Some(chain))
 }
 
 /// Anchor fallback for the resume path (empty/absent active file): resume the
@@ -375,8 +440,9 @@ fn fsync_dir(dir: &Path) -> io::Result<()> {
 
 /// Atomically update the anchor file: write to `.tmp` → fsync file → rename →
 /// fsync directory (so the rename survives power loss).
-fn write_anchor(dir: &Path, chain: &ChainState) -> io::Result<()> {
-    let anchor = AnchorFile { last_hash: chain.last_hash.clone(), last_seq: chain.last_seq };
+fn write_anchor(dir: &Path, chain: &ChainState, active_bytes: u64) -> io::Result<()> {
+    let anchor =
+        AnchorFile { last_hash: chain.last_hash.clone(), last_seq: chain.last_seq, active_bytes };
     let data = serde_json::to_vec(&anchor).map_err(|e| io::Error::other(e.to_string()))?;
     let tmp_path = dir.join("audit.anchor.json.tmp");
     {
@@ -623,7 +689,7 @@ impl WriterState {
             .open(self.dir.join("audit.jsonl"))?;
         self.file_bytes = 0;
         prune_rotated_files(&self.dir, self.rotate_keep_files)?;
-        write_anchor(&self.dir, &self.chain)?;
+        write_anchor(&self.dir, &self.chain, self.file_bytes)?;
         Ok(())
     }
 
@@ -640,7 +706,7 @@ impl WriterState {
             )?;
         }
         self.records_since_checkpoint = 0;
-        write_anchor(&self.dir, &self.chain)?;
+        write_anchor(&self.dir, &self.chain, self.file_bytes)?;
         Ok(())
     }
 
@@ -656,7 +722,7 @@ impl WriterState {
         if self.records_since_checkpoint > 0 {
             self.do_checkpoint()?; // do_checkpoint writes the anchor
         } else {
-            write_anchor(&self.dir, &self.chain)?;
+            write_anchor(&self.dir, &self.chain, self.file_bytes)?;
         }
         Ok(())
     }
@@ -931,14 +997,19 @@ mod tests {
 
         let mut st = ChainState::genesis();
         let mut lines = String::new();
-        let mut stale = AnchorFile { last_hash: String::new(), last_seq: 0 };
+        let mut stale = AnchorFile { last_hash: String::new(), last_seq: 0, active_bytes: 0 };
         for i in 0..150u64 {
             let mut r = make_record(EventClass::DataPlane);
             st.append(&mut r);
             lines.push_str(&to_jsonl(&r));
             if i == 99 {
-                // Anchor as it would stand right after the seq-99 checkpoint.
-                stale = AnchorFile { last_hash: st.last_hash.clone(), last_seq: st.last_seq };
+                // Anchor as it would stand right after the seq-99 checkpoint
+                // (W1-C2-09: including its active-file tail offset).
+                stale = AnchorFile {
+                    last_hash: st.last_hash.clone(),
+                    last_seq: st.last_seq,
+                    active_bytes: lines.len() as u64,
+                };
             }
         }
         std::fs::write(dir.join("audit.jsonl"), lines).unwrap();
@@ -1340,6 +1411,182 @@ mod tests {
         // Chain must still verify.
         let report = pkcs11_proxy_ng_audit::verify::verify_dir(&dir, None).unwrap();
         assert!(report.chain_ok, "chain must verify after flush-sealed sentinel: {report:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// W1-C2-09: the anchor must persist the active-file byte offset so a
+    /// restart seeks to the tail instead of parsing the whole active file.
+    #[test]
+    fn anchor_persists_active_tail_offset() {
+        let dir = temp_dir("tailptr");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 110 records force a checkpoint at 100, which writes the anchor.
+        let dropped = Arc::new(AtomicU64::new(0));
+        let mut writer =
+            WriterState::open(dir.clone(), None, 64 * 1024 * 1024, 10, dropped).unwrap();
+        for _ in 0..110 {
+            writer.write_record(make_record(EventClass::DataPlane)).unwrap();
+        }
+        drop(writer);
+
+        let anchor_data = std::fs::read(dir.join("audit.anchor.json")).unwrap();
+        let anchor_json: serde_json::Value = serde_json::from_slice(&anchor_data).unwrap();
+        let active_bytes = anchor_json
+            .get("active_bytes")
+            .expect("W1-C2-09: anchor must persist the active-file tail offset");
+        // The checkpoint fired at record 100, so the offset is a positive
+        // prefix of the final 110-record file.
+        let active_len = std::fs::metadata(dir.join("audit.jsonl")).unwrap().len();
+        assert!(active_bytes.as_u64().unwrap() > 0, "offset must be positive");
+        assert!(
+            active_bytes.as_u64().unwrap() < active_len,
+            "offset must precede the post-checkpoint tail"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// W1-C2-09: the tail reader returns only the bytes from the persisted
+    /// offset (structural proof that recovery never reads the prefix).
+    #[test]
+    fn read_active_suffix_returns_bytes_from_offset() {
+        let dir = temp_dir("suffix");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("audit.jsonl");
+        std::fs::write(&path, b"aaa\nbbbbb\ncc\n").unwrap();
+        assert_eq!(read_active_suffix(&path, 0).unwrap(), "aaa\nbbbbb\ncc\n");
+        assert_eq!(read_active_suffix(&path, 4).unwrap(), "bbbbb\ncc\n");
+        // An offset past EOF (truncated/replaced file) yields an empty tail.
+        assert_eq!(read_active_suffix(&path, 999).unwrap(), "");
+        // A missing active file yields an empty tail (genesis/anchor path).
+        assert_eq!(read_active_suffix(&dir.join("absent.jsonl"), 0).unwrap(), "");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// W1-C2-09: restart recovery through the tail pointer resumes the exact
+    /// chain tip, tolerating a torn final line from a crash.
+    #[test]
+    fn restart_recovery_through_tail_pointer_resumes_tip() {
+        let dir = temp_dir("tailtip");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let dropped = Arc::new(AtomicU64::new(0));
+        let mut writer =
+            WriterState::open(dir.clone(), None, 64 * 1024 * 1024, 10, dropped).unwrap();
+        for _ in 0..250 {
+            writer.write_record(make_record(EventClass::DataPlane)).unwrap();
+        }
+        drop(writer);
+
+        // Simulate a crash-torn final line: unparseable bytes past the last
+        // complete record must not move the resume point.
+        let active_path = dir.join("audit.jsonl");
+        let mut f = std::fs::OpenOptions::new().append(true).open(&active_path).unwrap();
+        f.write_all(b"{\"torn\": ").unwrap();
+        drop(f);
+
+        let chain = reconstruct_chain_state(&active_path, &dir).unwrap();
+        assert_eq!(chain.last_seq, 250, "250 records carry seqs 0..249");
+
+        // The tip hash must match the last complete record's chain head.
+        let content = std::fs::read_to_string(&active_path).unwrap();
+        let mut last_valid: Option<AuditRecord> = None;
+        for line in content.lines() {
+            if let Ok(rec) = from_jsonl(line) {
+                last_valid = Some(rec);
+            }
+        }
+        let last = last_valid.expect("records must parse");
+        assert_eq!(last.seq, 249);
+        assert_eq!(chain.last_hash, record_hash(&last.prev_hash, &last));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// T28-M1: an anchor offset past EOF (only reachable via out-of-band
+    /// truncate/replace of the active file) must fall back to scanning the
+    /// real content, not return the stale anchor.
+    #[test]
+    fn anchor_offset_past_eof_falls_back_to_full_scan() {
+        let dir = temp_dir("stale-anchor-clamp");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Establish an anchor with a large offset: 110 records force a
+        // checkpoint at 100, which persists active_bytes > 0.
+        let dropped = Arc::new(AtomicU64::new(0));
+        let mut writer =
+            WriterState::open(dir.clone(), None, 64 * 1024 * 1024, 10, dropped).unwrap();
+        for _ in 0..110 {
+            writer.write_record(make_record(EventClass::DataPlane)).unwrap();
+        }
+        drop(writer);
+
+        let anchor_data = std::fs::read(dir.join("audit.anchor.json")).unwrap();
+        let anchor_json: serde_json::Value = serde_json::from_slice(&anchor_data).unwrap();
+        let anchor_offset = anchor_json.get("active_bytes").unwrap().as_u64().unwrap();
+        assert!(anchor_offset > 0, "anchor must persist a positive tail offset");
+
+        // Out-of-band replace: swap the active file for short content whose
+        // length is below the persisted anchor offset.
+        let active_path = dir.join("audit.jsonl");
+        let mut chain = ChainState::genesis();
+        let mut text = String::new();
+        for _ in 0..3 {
+            let mut rec = make_record(EventClass::Auth);
+            chain.append(&mut rec);
+            text.push_str(&to_jsonl(&rec));
+        }
+        std::fs::write(&active_path, &text).unwrap();
+        assert!(
+            std::fs::metadata(&active_path).unwrap().len() < anchor_offset,
+            "replacement must be shorter than the stale anchor offset"
+        );
+
+        // Recovery must scan the real content (3 records, seqs 0..2) and
+        // resume at 3 — not return the stale anchor tip (last_seq 100).
+        let resumed = reconstruct_chain_state(&active_path, &dir).unwrap();
+        assert_eq!(resumed.last_seq, 3);
+        assert_eq!(resumed.last_hash, chain.last_hash);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// W1-C2-09: a pre-upgrade anchor without the offset field still resumes
+    /// correctly via the full-scan fallback.
+    #[test]
+    fn legacy_anchor_without_offset_falls_back_to_full_scan() {
+        let dir = temp_dir("legacyanchor");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Hand-roll 5 chained records so no new-format anchor exists.
+        let active_path = dir.join("audit.jsonl");
+        let mut chain = ChainState::genesis();
+        let mut text = String::new();
+        for _ in 0..5 {
+            let mut rec = make_record(EventClass::Auth);
+            chain.append(&mut rec);
+            text.push_str(&to_jsonl(&rec));
+        }
+        std::fs::write(&active_path, &text).unwrap();
+        // Legacy anchor shape: no `active_bytes` field.
+        std::fs::write(
+            dir.join("audit.anchor.json"),
+            serde_json::json!({"last_hash": ChainState::genesis().last_hash, "last_seq": 0})
+                .to_string(),
+        )
+        .unwrap();
+
+        let resumed = reconstruct_chain_state(&active_path, &dir).unwrap();
+        assert_eq!(resumed.last_seq, 5);
+        assert_eq!(resumed.last_hash, chain.last_hash);
 
         std::fs::remove_dir_all(&dir).ok();
     }

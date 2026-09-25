@@ -42,7 +42,7 @@ impl MockBackend {
         Ok(CkInfo {
             cryptoki_version: self.cryptoki_version,
             manufacturer_id: "MockBackend".into(),
-            flags: 0,
+            flags: CkFlags(0),
             library_description: "Mock PKCS#11 for testing".into(),
             library_version: (0, 1),
         })
@@ -75,7 +75,7 @@ impl MockBackend {
         Ok(CkSlotInfo {
             slot_description: format!("Mock Slot {}", slot_id.0),
             manufacturer_id: "Mock".into(),
-            flags: CkSlotFlags(flags as u64),
+            flags,
             hardware_version: (1, 0),
             firmware_version: (1, 0),
         })
@@ -97,7 +97,7 @@ impl MockBackend {
             manufacturer_id: "Mock".into(),
             model: "Software".into(),
             serial_number,
-            flags: CkTokenFlags(CkTokenFlags::TOKEN_INITIALIZED),
+            flags: CkTokenFlags::TOKEN_INITIALIZED,
             max_session_count: 256,
             session_count: 0,
             max_rw_session_count: 256,
@@ -220,8 +220,8 @@ impl MockBackend {
                     .copied()
                     .unwrap_or(slot_id),
                 state: compute_session_state(flags, login_user),
-                flags: CkSessionFlags(flags.0 | CkSessionFlags::SERIAL_SESSION),
-                device_error: 0,
+                flags: CkSessionFlags(flags.0 | CkSessionFlags::SERIAL_SESSION.0),
+                device_error: CkRv::OK,
             })
         } else {
             Err(CkRv::SESSION_HANDLE_INVALID)
@@ -270,7 +270,7 @@ impl MockBackend {
         if let Some(outcome) = self.next_wait_outcome.lock().unwrap().take() {
             return outcome;
         }
-        let dont_block = flags & CkFlags::DONT_BLOCK != 0;
+        let dont_block = flags & CkFlags::DONT_BLOCK.0 != 0;
         let mut queue = self.slot_event_queue.lock().unwrap();
 
         loop {
@@ -354,8 +354,8 @@ pub(super) fn mock_mechanism_key_sizes(mech: CkMechanismType) -> Option<(u64, u6
 
 pub(super) fn mock_mechanism_workflow_flags(mech: CkMechanismType) -> u64 {
     let primary = mock_mechanism_workflow_flags_current(mech);
-    if primary != 0 {
-        return primary;
+    if primary.0 != 0 {
+        return primary.0;
     }
     // Legacy mechanisms dropped from the current working spec are grounded
     // from the historical-mechanisms spec (pkcs11-hist) instead — see
@@ -363,7 +363,7 @@ pub(super) fn mock_mechanism_workflow_flags(mech: CkMechanismType) -> u64 {
     super::historical_flags::historical_workflow_flags(mech).unwrap_or(0)
 }
 
-fn mock_mechanism_workflow_flags_current(mech: CkMechanismType) -> u64 {
+fn mock_mechanism_workflow_flags_current(mech: CkMechanismType) -> CkMechanismFlags {
     let encrypt_decrypt = CkMechanismFlags::ENCRYPT | CkMechanismFlags::DECRYPT;
     let sign_verify = CkMechanismFlags::SIGN | CkMechanismFlags::VERIFY;
     let sign_recover_verify_recover =
@@ -760,6 +760,6 @@ fn mock_mechanism_workflow_flags_current(mech: CkMechanismType) -> u64 {
         | CkMechanismType(0x0000_02B3)
         | CkMechanismType(0x0000_02C3)
         | CkMechanismType(0x0000_02D3) => CkMechanismFlags::GENERATE,
-        _ => 0,
+        _ => CkMechanismFlags(0),
     }
 }

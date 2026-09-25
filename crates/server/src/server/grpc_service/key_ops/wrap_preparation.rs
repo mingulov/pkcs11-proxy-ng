@@ -43,13 +43,15 @@ pub(in crate::server::grpc_service) async fn prepare_wrap(
         Ok(mechanism) => mechanism,
         Err(rv) => return Ok(Err(rv)),
     };
+    // W1-C1-13: the mechanism gate runs before remap on every init handler
+    // so identical dual-defect requests yield the same RV regardless of op.
+    if !mechanism_permitted(ctx, context_id, virtual_session, mechanism.mechanism_type).await {
+        return Ok(Err(CkRv::MECHANISM_INVALID));
+    }
     if let Err(rv) =
         remap_mechanism_handles(ctx, context_id, virtual_session, session.0, &mut mechanism).await
     {
         return Ok(Err(rv));
-    }
-    if !mechanism_permitted(ctx, context_id, virtual_session, mechanism.mechanism_type).await {
-        return Ok(Err(CkRv::MECHANISM_INVALID));
     }
     if !extract_is_permitted(ctx, context_id, virtual_session, virtual_key).await? {
         return Ok(Err(CkRv::KEY_FUNCTION_NOT_PERMITTED));

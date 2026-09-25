@@ -1,7 +1,8 @@
 # Daemon image for the resilience fixture. Bundles SoftHSM2 plus
 # the pkcs11-proxy-ng-daemon APK from the alpine3.23 carrier image we
 # build separately (`docker build -f packaging/alpine/Dockerfile.alpine
-# --build-arg ALPINE_VER=3.23 -t pkcs11-proxy-ng:test-alpine3.23 .`).
+# --build-arg ALPINE_BUILD_IMAGE=alpine:3.23@sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0
+# -t pkcs11-proxy-ng:test-alpine3.23 .`).
 # Using musl-compatible binaries that match the runtime environment.
 
 FROM pkcs11-proxy-ng:test-alpine3.23 AS pkcs11ng

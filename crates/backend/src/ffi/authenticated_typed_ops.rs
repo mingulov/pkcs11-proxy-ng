@@ -223,6 +223,7 @@ impl FfiBackend {
         let h_session = Self::session_handle(session)?;
         let h_unwrapping_key = Self::object_handle(unwrapping_key)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let ck_attr_len = Self::ffi_attr_len(&attrs)?;
         let handle =
             Self::call_object_output(&admission, Some(f), |function, handle_out| unsafe {
                 function(
@@ -232,7 +233,7 @@ impl FfiBackend {
                     wrapped_ptr.cast_mut(),
                     wrapped_len,
                     Self::ffi_attr_ptr(&attrs),
-                    Self::ffi_attr_len(&attrs),
+                    ck_attr_len,
                     aad_ptr.cast_mut(),
                     aad_len,
                     handle_out,

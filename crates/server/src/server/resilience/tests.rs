@@ -2,16 +2,30 @@ use super::*;
 
 #[test]
 fn coalesce_enabled_reflects_configure() {
-    // configure() sets the OnceLock; first call wins for the process lifetime.
-    // We call configure(true) here; since no other test in this binary calls
-    // configure(), this is the first call and coalesce_enabled() must be true.
-    // The record_attr_coalesce_{hit,miss} functions must also be callable
-    // without panicking (they are reserved for Task 2/3).
+    // W1-C2-11: hold the serial guard and reset first — no reliance on
+    // "no other test calls configure()" (attributes/auth tests call it
+    // too). configure() is first-wins; with a reset baseline this test
+    // owns the value it asserts regardless of order/parallelism.
+    let _guard = CONFIG_TEST_GUARD.blocking_lock();
+    reset_config_for_test();
     configure(None, true);
     assert!(coalesce_enabled(), "coalesce_enabled must be true after configure(…, true)");
     // Smoke-test the reserved record fns (no assertion — they just must not panic).
     record_attr_coalesce_hit();
     record_attr_coalesce_miss();
+}
+
+#[test]
+fn configure_test_isolation_reset_restores_defaults() {
+    // W1-C2-11: per-test reset restores the unconfigured defaults, then
+    // reconfigures the all-tests-agree state — the suite never depends
+    // on which test configured first.
+    let _guard = CONFIG_TEST_GUARD.blocking_lock();
+    reset_config_for_test();
+    assert!(!coalesce_enabled(), "reset must restore the coalesce default (false)");
+    assert_eq!(threshold(), None, "reset must restore the threshold default (None)");
+    configure(None, true);
+    assert!(coalesce_enabled(), "reconfigure after reset must take effect");
 }
 
 #[test]

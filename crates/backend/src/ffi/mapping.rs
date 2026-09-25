@@ -10,7 +10,7 @@ pub(super) fn info_from_ck(info: &cryptoki_sys::CK_INFO) -> CkInfo {
     CkInfo {
         cryptoki_version: (info.cryptokiVersion.major, info.cryptokiVersion.minor),
         manufacturer_id: utf8_trim(&info.manufacturerID),
-        flags: info.flags as u64,
+        flags: CkFlags(info.flags as u64),
         library_description: utf8_trim(&info.libraryDescription),
         library_version: (info.libraryVersion.major, info.libraryVersion.minor),
     }
@@ -33,9 +33,7 @@ pub(super) fn token_info_from_ck(info: &cryptoki_sys::CK_TOKEN_INFO) -> CkTokenI
     // (ADR-0011); the PIN-length, version, and string fields are never the
     // sentinel and pass through unchanged.
     let backend_width = std::mem::size_of::<cryptoki_sys::CK_ULONG>();
-    let canon = |v: cryptoki_sys::CK_ULONG| {
-        pkcs11_proxy_ng_types::width::canonicalize_ulong(v as u64, backend_width)
-    };
+    let canon = |v: cryptoki_sys::CK_ULONG| canonicalize_ulong(v as u64, backend_width);
     CkTokenInfo {
         label: utf8_trim(&info.label),
         manufacturer_id: utf8_trim(&info.manufacturerID),
@@ -71,7 +69,7 @@ pub(super) fn session_info_from_ck(info: &cryptoki_sys::CK_SESSION_INFO) -> CkSe
         slot_id: CkSlotId(info.slotID as u64),
         state: session_state_from_ck(info.state),
         flags: CkSessionFlags(info.flags as u64),
-        device_error: info.ulDeviceError as u64,
+        device_error: CkRv(info.ulDeviceError as u64),
     }
 }
 
@@ -121,11 +119,8 @@ pub(super) fn exact_attribute_results_from_ffi(
             // Canonicalise the platform-sized CK_UNAVAILABLE_INFORMATION sentinel
             // to a width-independent wire value (ADR-0011) so any-width client
             // recognises it; non-sentinel lengths stay native for width rescaling.
-            let returned_len = if unavailable {
-                pkcs11_proxy_ng_types::width::CANONICAL_UNAVAILABLE
-            } else {
-                attr.ulValueLen as u64
-            };
+            let returned_len =
+                if unavailable { CANONICAL_UNAVAILABLE } else { attr.ulValueLen as u64 };
             let too_small = query.buffer_present && returned_len > query.buffer_len;
             let single_query_unavailable_status = if queries.len() == 1 && unavailable {
                 match overall_rv {
@@ -168,7 +163,9 @@ pub(super) fn exact_attribute_results_from_ffi(
 #[cfg(test)]
 mod tests {
     use super::exact_attribute_results_from_ffi;
-    use pkcs11_proxy_ng_types::{CkAttributeQuery, CkAttributeQueryResult, CkAttributeType, CkRv};
+    use pkcs11_proxy_ng_types::{
+        CANONICAL_UNAVAILABLE, CkAttributeQuery, CkAttributeQueryResult, CkAttributeType, CkRv,
+    };
 
     #[test]
     fn exact_results_do_not_synthesize_bytes_for_null_pvalue() {
@@ -225,7 +222,7 @@ mod tests {
 
         let out = super::token_info_from_ck(&info);
 
-        let canon = pkcs11_proxy_ng_types::width::CANONICAL_UNAVAILABLE;
+        let canon = CANONICAL_UNAVAILABLE;
         assert_eq!(out.max_session_count, canon);
         assert_eq!(out.session_count, canon);
         assert_eq!(out.max_rw_session_count, canon);

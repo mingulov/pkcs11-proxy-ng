@@ -203,6 +203,10 @@ struct ReplayOutcome {
 /// - [`AuditError::Malformed`] — a JSONL line cannot be parsed, a record's
 ///   `schema_version` skews from [`AUDIT_SCHEMA_VERSION`], or the anchor's
 ///   next-seq overflows at `last_seq == u64::MAX`.
+///
+/// Every error names the file it came from, and line-grained errors also
+/// carry the 1-based line number (`path:line: ...`), so a corrupt line is
+/// locatable from the error alone (W1-C12-15).
 pub fn verify_dir(dir: &Path, public_key_hex: Option<&str>) -> Result<VerifyReport, AuditError> {
     let log_files = collect_log_files(dir)?;
     let files = log_files.len();
@@ -215,9 +219,9 @@ pub fn verify_dir(dir: &Path, public_key_hex: Option<&str>) -> Result<VerifyRepo
     // Single-pass streaming replay: one line in flight at a time.
     for path in &log_files {
         for item in stream_file_records(path)? {
-            let rec = item?;
-            check_schema_version(&rec)?;
-            replay.push(&rec);
+            let located = item?;
+            check_schema_version(path, located.line_no, &located.rec)?;
+            replay.push(&located.rec);
         }
     }
     let outcome = replay.finish();
@@ -269,11 +273,14 @@ pub fn verify_dir(dir: &Path, public_key_hex: Option<&str>) -> Result<VerifyRepo
 /// `record.rs` promises that verifiers detect format skew by comparing the
 /// value they read against this constant; a version the verifier was not
 /// built for must fail loudly rather than replay under a guessed shape.
-fn check_schema_version(rec: &AuditRecord) -> Result<(), AuditError> {
+fn check_schema_version(path: &Path, line_no: u64, rec: &AuditRecord) -> Result<(), AuditError> {
     if rec.schema_version != AUDIT_SCHEMA_VERSION {
         return Err(AuditError::Malformed(format!(
-            "schema version skew at seq {}: found {}, expected {}",
-            rec.seq, rec.schema_version, AUDIT_SCHEMA_VERSION
+            "{}:{line_no}: schema version skew at seq {}: found {}, expected {}",
+            path.display(),
+            rec.seq,
+            rec.schema_version,
+            AUDIT_SCHEMA_VERSION
         )));
     }
     Ok(())
@@ -282,10 +289,11 @@ fn check_schema_version(rec: &AuditRecord) -> Result<(), AuditError> {
 /// Returns the paths of all audit log files in `dir`, ordered oldest→newest
 /// for single-pass streaming replay (W1-C12-12).
 fn collect_log_files(dir: &Path) -> Result<Vec<std::path::PathBuf>, AuditError> {
-    let entries = fs::read_dir(dir).map_err(|e| AuditError::Io(e.to_string()))?;
+    let entries =
+        fs::read_dir(dir).map_err(|e| AuditError::Io(format!("{}: {e}", dir.display())))?;
     let mut logs: Vec<(String, std::path::PathBuf)> = Vec::new();
     for entry in entries {
-        let entry = entry.map_err(|e| AuditError::Io(e.to_string()))?;
+        let entry = entry.map_err(|e| AuditError::Io(format!("{}: {e}", dir.display())))?;
         let name = entry.file_name().to_string_lossy().into_owned();
         if is_audit_log(&name) {
             logs.push((name, entry.path()));
@@ -323,25 +331,59 @@ fn log_file_order_key(name: &str) -> (u8, usize, &str) {
     (0, digits.len(), digits)
 }
 
+/// A parsed log record plus its 1-based physical line number in the source
+/// file, so skew errors can point at the offending line (W1-C12-15).
+struct LocatedRecord {
+    line_no: u64,
+    rec: AuditRecord,
+}
+
+/// Prefixes a `path:line:` location onto an [`AuditError`] message
+/// (W1-C12-15), rebuilding the variant so the `Display` prefix is not
+/// duplicated.
+fn located(path: &Path, line_no: u64, err: AuditError) -> AuditError {
+    let at = format!("{}:{line_no}", path.display());
+    match err {
+        AuditError::Malformed(msg) => AuditError::Malformed(format!("{at}: {msg}")),
+        AuditError::BadSignature(msg) => AuditError::BadSignature(format!("{at}: {msg}")),
+        AuditError::Io(msg) => AuditError::Io(format!("{at}: {msg}")),
+    }
+}
+
 /// Streams the lines of one file through a bounded `BufReader` buffer instead
 /// of `fs::read_to_string` (W1-C12-12): peak I/O buffering is O(line),
 /// never O(file).
+///
+/// Each item carries its 1-based physical line number, and every error names
+/// the file (W1-C12-15): an open failure names the path, a mid-stream read
+/// failure names `path:line`.
 fn stream_lines(
     path: &Path,
-) -> Result<impl Iterator<Item = Result<String, AuditError>>, AuditError> {
-    let file = fs::File::open(path).map_err(|e| AuditError::Io(e.to_string()))?;
-    Ok(std::io::BufReader::new(file).lines().map(|r| r.map_err(|e| AuditError::Io(e.to_string()))))
+) -> Result<impl Iterator<Item = (u64, Result<String, AuditError>)>, AuditError> {
+    let file =
+        fs::File::open(path).map_err(|e| AuditError::Io(format!("{}: {e}", path.display())))?;
+    let path = path.to_path_buf();
+    Ok(std::io::BufReader::new(file).lines().enumerate().map(move |(idx, r)| {
+        let line_no = idx as u64 + 1;
+        (line_no, r.map_err(|e| AuditError::Io(format!("{}:{line_no}: {e}", path.display()))))
+    }))
 }
 
 /// Streams the [`AuditRecord`]s of one log file, skipping blank lines.
-/// The first malformed line aborts the stream with [`AuditError::Malformed`].
+/// The first malformed line aborts the stream with [`AuditError::Malformed`]
+/// naming the file and the 1-based line number (W1-C12-15).
 fn stream_file_records(
     path: &Path,
-) -> Result<impl Iterator<Item = Result<AuditRecord, AuditError>>, AuditError> {
-    Ok(stream_lines(path)?.filter_map(|item| match item {
+) -> Result<impl Iterator<Item = Result<LocatedRecord, AuditError>>, AuditError> {
+    let path_buf = path.to_path_buf();
+    Ok(stream_lines(path)?.filter_map(move |(line_no, item)| match item {
         Err(e) => Some(Err(e)),
         Ok(line) if line.is_empty() => None,
-        Ok(line) => Some(from_jsonl(&line)),
+        Ok(line) => Some(
+            from_jsonl(&line)
+                .map(|rec| LocatedRecord { line_no, rec })
+                .map_err(|e| located(&path_buf, line_no, e)),
+        ),
     }))
 }
 
@@ -456,10 +498,12 @@ impl StreamReplay {
         }
         self.expected_prev = Some(h);
 
-        // Tally dropped data-plane records from gap-sentinel entries: any
-        // record whose `dropped_count` is `Some(n)` (matching on the field is
-        // more robust than matching the `method` string).
-        if let Some(n) = rec.dropped_count {
+        // Tally dropped data-plane records from gap-sentinel entries
+        // (W1-C12-08): only records matching the full ADR-0012 contract
+        // (sentinel method + System class + count) tally. Matching on
+        // `dropped_count.is_some()` alone would also tally a non-sentinel
+        // record carrying the field.
+        if let Some(n) = rec.sentinel_dropped_count() {
             self.dropped_records = self.dropped_records.saturating_add(n);
         }
     }
@@ -535,14 +579,15 @@ fn read_checkpoint_sidecar(
     let signature_checked = verifier.is_some();
 
     let mut lines = Vec::new();
-    for item in stream_lines(&cp_path)? {
+    for (line_no, item) in stream_lines(&cp_path)? {
         let line = item?;
         if line.is_empty() {
             continue;
         }
         lines.push(
-            serde_json::from_str::<CheckpointLine>(&line)
-                .map_err(|e| AuditError::Malformed(e.to_string()))?,
+            serde_json::from_str::<CheckpointLine>(&line).map_err(|e| {
+                AuditError::Malformed(format!("{}:{line_no}: {e}", cp_path.display()))
+            })?,
         );
     }
 
@@ -653,9 +698,10 @@ fn check_anchor(
     if !anchor_path.exists() {
         return Ok(records_empty);
     }
-    let data = fs::read(&anchor_path).map_err(|e| AuditError::Io(e.to_string()))?;
-    let anchor: AnchorFile =
-        serde_json::from_slice(&data).map_err(|e| AuditError::Malformed(e.to_string()))?;
+    let data = fs::read(&anchor_path)
+        .map_err(|e| AuditError::Io(format!("{}: {e}", anchor_path.display())))?;
+    let anchor: AnchorFile = serde_json::from_slice(&data)
+        .map_err(|e| AuditError::Malformed(format!("{}: {e}", anchor_path.display())))?;
 
     if records_empty {
         // No retained records: the only self-consistent anchor is genesis.
@@ -1917,5 +1963,178 @@ mod tests {
         assert_eq!(report.dropped_records, 8, "4 sentinels x dropped_count 2");
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // W1-C12-08: tally sentinels by the ADR-0012 method+class contract
+    // -----------------------------------------------------------------------
+
+    /// A normal record smuggling `dropped_count = Some(n)` must NOT tally:
+    /// only full-contract sentinels (method + class + count) contribute to
+    /// `dropped_records`.
+    #[test]
+    fn non_sentinel_dropped_count_not_tallied() {
+        let dir = temp_dir("c12-08-nonsentinel");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut st = ChainState::genesis();
+        let mut r0 = rec("C_Login", 0);
+        let mut r1 = rec("C_Logout", 0);
+        r1.dropped_count = Some(100); // smuggled onto a normal Auth record
+        let mut r2 = rec("C_Sign", 0);
+        st.append(&mut r0);
+        st.append(&mut r1);
+        st.append(&mut r2);
+        fs::write(
+            dir.join("audit.jsonl"),
+            format!("{}{}{}", to_jsonl(&r0), to_jsonl(&r1), to_jsonl(&r2)),
+        )
+        .unwrap();
+        write_test_anchor(&dir, &st.last_hash, st.last_seq);
+
+        let report = verify_dir(&dir, None).unwrap();
+        assert!(report.chain_ok, "chain must stay ok; got: {report:?}");
+        assert_eq!(
+            report.dropped_records, 0,
+            "non-sentinel dropped_count must not tally; got: {report:?}"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Partial-contract records (sentinel method with a non-System class, or
+    /// System class with a non-sentinel method) must NOT tally.
+    #[test]
+    fn partial_contract_records_not_tallied() {
+        let dir = temp_dir("c12-08-partial");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut st = ChainState::genesis();
+        let mut r0 = rec("C_Login", 0);
+        let mut stripped_class = sentinel(5);
+        stripped_class.class = EventClass::Auth; // method right, class wrong
+        let mut stripped_method = sentinel(7);
+        stripped_method.method = "C_Login".into(); // class right, method wrong
+        st.append(&mut r0);
+        st.append(&mut stripped_class);
+        st.append(&mut stripped_method);
+        fs::write(
+            dir.join("audit.jsonl"),
+            format!("{}{}{}", to_jsonl(&r0), to_jsonl(&stripped_class), to_jsonl(&stripped_method)),
+        )
+        .unwrap();
+        write_test_anchor(&dir, &st.last_hash, st.last_seq);
+
+        let report = verify_dir(&dir, None).unwrap();
+        assert!(report.chain_ok, "well-formed chain must stay ok; got: {report:?}");
+        assert_eq!(
+            report.dropped_records, 0,
+            "partial-contract records must not tally; got: {report:?}"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // W1-C12-15: Io/Malformed errors carry file path + line number
+    // -----------------------------------------------------------------------
+
+    /// A malformed log line must be locatable from the error alone: the
+    /// error carries the file path and the 1-based line number.
+    #[test]
+    fn malformed_line_error_carries_path_and_line() {
+        let dir = temp_dir("c12-15-malformed");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut st = ChainState::genesis();
+        let mut r0 = rec("C_Login", 0);
+        st.append(&mut r0);
+        let mut content = to_jsonl(&r0);
+        content.push_str("{bad json\n"); // line 2
+        fs::write(dir.join("audit.jsonl"), content).unwrap();
+
+        let err = verify_dir(&dir, None).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("audit.jsonl"), "error must name the file; got: {msg}");
+        assert!(msg.contains(":2:"), "error must carry the 1-based line number; got: {msg}");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A schema-skewed record must be locatable from the error alone: the
+    /// error carries the file path and the 1-based line number.
+    #[test]
+    fn schema_skew_error_carries_path_and_line() {
+        let dir = temp_dir("c12-15-skew");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut st = ChainState::genesis();
+        let mut r0 = rec("C_Login", 0);
+        let mut r1 = rec("C_Logout", 0);
+        st.append(&mut r0);
+        st.append(&mut r1);
+        r1.schema_version = 999; // skew introduced after chaining
+        fs::write(dir.join("audit.jsonl"), format!("{}{}", to_jsonl(&r0), to_jsonl(&r1))).unwrap();
+
+        let err = verify_dir(&dir, None).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("audit.jsonl"), "error must name the file; got: {msg}");
+        assert!(msg.contains(":2:"), "error must carry the 1-based line number; got: {msg}");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A malformed checkpoint-sidecar line must be locatable from the error
+    /// alone. Line numbers are physical (the blank first line still counts).
+    #[test]
+    fn checkpoint_parse_error_carries_path_and_line() {
+        let dir = temp_dir("c12-15-checkpoint");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        fs::write(dir.join("audit.checkpoints.jsonl"), "\n{bad json\n").unwrap();
+
+        let err = verify_dir(&dir, None).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("audit.checkpoints.jsonl"), "error must name the sidecar; got: {msg}");
+        assert!(msg.contains(":2:"), "error must carry the 1-based line number; got: {msg}");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A malformed anchor file must name the file in the error (a whole-file
+    /// JSON blob has no meaningful line number).
+    #[test]
+    fn anchor_parse_error_carries_path() {
+        let dir = temp_dir("c12-15-anchor");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut st = ChainState::genesis();
+        let mut r0 = rec("C_Login", 0);
+        st.append(&mut r0);
+        fs::write(dir.join("audit.jsonl"), to_jsonl(&r0)).unwrap();
+        fs::write(dir.join("audit.anchor.json"), "{bad json\n").unwrap();
+
+        let err = verify_dir(&dir, None).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("audit.anchor.json"), "error must name the anchor file; got: {msg}");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An unreadable directory must surface its path in the Io error.
+    #[test]
+    fn unreadable_dir_error_carries_path() {
+        let dir = temp_dir("c12-15-missing");
+        let _ = fs::remove_dir_all(&dir); // ensure absent
+
+        let err = verify_dir(&dir, None).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("c12-15-missing"), "Io error must carry the dir path; got: {msg}");
     }
 }

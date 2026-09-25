@@ -101,9 +101,12 @@ mod tests {
     // absent-payload site ANYWHERE in the client maps to DEVICE_ERROR
     // (which collides with backend errors); all 10 use
     // FUNCTION_NOT_SUPPORTED (4 discovery + 1 session_info + 3
-    // authenticated-output + 2 exact-path). The reconnect-redial
-    // `.map_err(|_| CkRv::DEVICE_ERROR)` in lifecycle.rs is a transport
-    // failure, not an absent payload, and is intentionally out of scope.
+    // authenticated-output + 2 exact-path), plus 1 init-negotiation
+    // site (W1-L5-05 `negotiate_init_version` in lifecycle.rs: disjoint
+    // version ranges fail loudly, not an absent payload). The
+    // reconnect-redial `.map_err(|_| CkRv::DEVICE_ERROR)` in
+    // lifecycle.rs is a transport failure, not an absent payload, and
+    // is intentionally out of scope.
     // Must not revert Task 8: the per-file L3-06 pins above stay untouched.
     #[test]
     fn no_absent_payload_site_maps_to_device_error_crate_wide() {
@@ -137,6 +140,9 @@ mod tests {
             );
             fns_sites += prod.matches("ok_or(CkRv::FUNCTION_NOT_SUPPORTED)").count();
         }
-        assert_eq!(fns_sites, 10, "all 10 absent-payload sites must map to FUNCTION_NOT_SUPPORTED");
+        assert_eq!(
+            fns_sites, 11,
+            "10 absent-payload + 1 init-negotiation sites must map to FUNCTION_NOT_SUPPORTED"
+        );
     }
 }

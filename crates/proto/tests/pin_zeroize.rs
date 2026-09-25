@@ -10,7 +10,7 @@
 //! bound per message.
 
 use pkcs11_proxy_ng_proto::{
-    InitPinRequest, InitTokenRequest, LoginRequest, LoginUserRequest, SetPinRequest,
+    InitPinRequest, InitTokenRequest, LoginRequest, LoginUserRequest, OtpParam, SetPinRequest,
 };
 use zeroize::Zeroize;
 
@@ -98,4 +98,67 @@ fn pin_request_messages_wipe_on_drop() {
     assert_wiped_on_drop::<InitTokenRequest>();
     assert_wiped_on_drop::<InitPinRequest>();
     assert_wiped_on_drop::<SetPinRequest>();
+}
+
+/// W1-L2-09: `OtpParam.value` is `pin_auth`-classified and copied out by
+/// the borrow-based OTP conversion, so the message gets the same
+/// codegen treatment as the other PIN/password messages. Unlike the
+/// request messages above, `value` is a bare (non-`optional`) `bytes`
+/// field, so `zeroize` wipes the buffer in place rather than clearing
+/// presence. The `OtpParams` wrapper needs no derive: dropping its
+/// `Vec<OtpParam>` runs each element's `ZeroizeOnDrop`.
+#[test]
+fn otp_param_value_zeroizes_and_wipes_on_drop() {
+    fn assert_wiped_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+    assert_wiped_on_drop::<OtpParam>();
+
+    let mut otp = OtpParam { r#type: 1, value: vec![0xA5u8; 8] };
+    assert_canary_nonempty("OtpParam.value", &otp.value);
+    otp.zeroize();
+    assert!(otp.value.iter().all(|byte| *byte == 0), "OtpParam.value must not survive zeroize");
+}
+
+/// W1-L2-09: every `pin_auth` field's owner message must be a
+/// `ZeroizeOnDrop` prost message (each pinned individually by the canary
+/// bounds above). A new PIN/password field lands here automatically via
+/// the manifest parse and fails until its owner gains the build.rs derive
+/// plus a canary bound. (`LoginUserRequest.username` is secret-classified
+/// under `unknown_vendor` but wipes with its whole-message derive; the
+/// broader secret classes stay future work per the build.rs residual note.)
+const PIN_AUTH_ZEROIZED_MESSAGES: &[&str] = &[
+    "InitPinRequest",
+    "InitTokenRequest",
+    "LoginRequest",
+    "LoginUserRequest",
+    "OtpParam",
+    "PbeParams",
+    "Pkcs5Pbkd2Params",
+    "SetPinRequest",
+    "SkipjackPrivateWrapParams",
+    "SkipjackRelayxParams",
+];
+
+#[test]
+fn pin_auth_manifest_owners_match_zeroized_set_exactly() {
+    let manifest: toml::Value =
+        include_str!("../secret-fields.toml").parse().expect("secret-fields.toml must parse");
+    let pin_auth = manifest
+        .get("secret")
+        .and_then(|secret| secret.get("pin_auth"))
+        .and_then(toml::Value::as_array)
+        .expect("missing [secret].pin_auth array");
+    let mut owners = std::collections::BTreeSet::new();
+    for field in pin_auth {
+        let field = field.as_str().expect("manifest entries must be strings");
+        let mut parts = field.split('.');
+        match (parts.next(), parts.next(), parts.next(), parts.next(), parts.next()) {
+            (Some("pkcs11_proxy_ng"), Some("v1"), Some(message), Some(_), None) => {
+                owners.insert(message.to_owned());
+            }
+            _ => panic!("malformed manifest entry {field:?}"),
+        }
+    }
+    let expected: std::collections::BTreeSet<String> =
+        PIN_AUTH_ZEROIZED_MESSAGES.iter().map(ToString::to_string).collect();
+    assert_eq!(owners, expected, "pin_auth owner set drifted");
 }

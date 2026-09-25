@@ -109,10 +109,8 @@ async fn fixture_with_count(object_class: CkObjectClass, label: &str, count: usi
     let mut client = Pkcs11Client::connect(&endpoint).await.unwrap();
     client.initialize().await.unwrap();
     let slots = client.get_slot_list(false).await.unwrap();
-    let setup_session = client
-        .open_session(slots[0], CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-        .await
-        .unwrap();
+    let setup_session =
+        client.open_session(slots[0], CkSessionFlags::SERIAL_SESSION).await.unwrap();
     let mut keys = Vec::with_capacity(count);
     for _ in 0..count {
         keys.push(
@@ -157,10 +155,8 @@ async fn fixture_with_mechanisms(
     let mut client = Pkcs11Client::connect(&endpoint).await.unwrap();
     client.initialize().await.unwrap();
     let slots = client.get_slot_list(false).await.unwrap();
-    let setup_session = client
-        .open_session(slots[0], CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-        .await
-        .unwrap();
+    let setup_session =
+        client.open_session(slots[0], CkSessionFlags::SERIAL_SESSION).await.unwrap();
     let key = client
         .create_object(
             setup_session,
@@ -237,10 +233,31 @@ async fn decrypt_resolves_secret_key_by_label() {
         "AES_ECB".to_string(),
         None,
         DATA_HEX.to_string(),
+        false,
     )
     .await
     .expect("decrypt must resolve a SECRET_KEY object by label");
     assert_fallback_search_order(&fx.backend, CkObjectClass::PRIVATE_KEY);
+}
+
+// W1-L2-12: the redacted decrypt path runs end to end (the marker shape
+// is pinned by `format_decrypt_output`'s unit test; stdout is not
+// captured here).
+#[tokio::test]
+async fn decrypt_with_redact_succeeds() {
+    let mut fx = fixture(CkObjectClass::SECRET_KEY, SECRET_LABEL).await;
+    decrypt(
+        &mut fx.client,
+        fx.slot,
+        SecretBytes::from(PIN),
+        SECRET_LABEL.to_string(),
+        "AES_ECB".to_string(),
+        None,
+        DATA_HEX.to_string(),
+        true,
+    )
+    .await
+    .expect("redacted decrypt must succeed");
 }
 
 #[tokio::test]
@@ -309,6 +326,7 @@ async fn run_op(op: CryptoOp, client: &mut Pkcs11Client, slot: u64, label: &str)
                 "AES_ECB".to_string(),
                 None,
                 DATA_HEX.to_string(),
+                false,
             )
             .await
         }

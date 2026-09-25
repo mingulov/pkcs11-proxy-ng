@@ -8,6 +8,7 @@
 use crate::mock::MockBackend;
 use crate::traits::Pkcs11Backend;
 use pkcs11_proxy_ng_types::*;
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 /// Validate a `CkInBuf` for use in test_backend_3x handlers: same rules as
@@ -21,8 +22,8 @@ fn resolve_input(input: CkInBuf<'_>) -> CkResult<&'_ [u8]> {
     }
 }
 
-/// Test-only 3.x backend state.
-struct State3x {
+/// Test-only 3.x verify state for one session.
+struct VerifySessionState {
     /// Stored signature for VerifySignatureInit → VerifySignature flow.
     stored_signature: Vec<u8>,
     /// Accumulated data for VerifySignatureUpdate → VerifySignatureFinal flow.
@@ -33,20 +34,28 @@ struct State3x {
 /// overrides all 3.0/3.2 trait methods with simple deterministic logic.
 pub struct TestBackend3x {
     inner: MockBackend,
-    state_3x: Mutex<State3x>,
+    /// W1-C5-04: verify state scoped per session (keyed by handle), so one
+    /// session's init/updates can never leak into another session.
+    state_3x: Mutex<HashMap<u64, VerifySessionState>>,
 }
 
 impl TestBackend3x {
     /// Create a `TestBackend3x` wrapping a fresh `MockBackend` with the given
     /// slots and mechanisms.
     pub fn new(slots: Vec<CkSlotId>, mechanisms: Vec<CkMechanismType>) -> Self {
-        Self {
-            inner: MockBackend::new(slots, mechanisms),
-            state_3x: Mutex::new(State3x {
-                stored_signature: Vec::new(),
-                accumulated_data: Vec::new(),
-            }),
-        }
+        Self { inner: MockBackend::new(slots, mechanisms), state_3x: Mutex::new(HashMap::new()) }
+    }
+
+    /// W1-C5-04: validate a session against the wrapped mock before running
+    /// a 3.x method, matching the mock surface's `SESSION_HANDLE_INVALID`.
+    fn require_session(&self, session: CkSessionHandle) -> CkResult<()> {
+        self.inner.require_open_session(session)
+    }
+
+    /// Number of sessions holding verify state (W1-C5-04 close-cleanup pin).
+    #[cfg(test)]
+    fn verify_session_count_for_tests(&self) -> usize {
+        self.state_3x.lock().unwrap().len()
     }
 
     /// Simple default test backend: one slot, one mechanism.
@@ -114,9 +123,16 @@ impl Pkcs11Backend for TestBackend3x {
         self.inner.open_session(slot_id, flags)
     }
     fn close_session(&self, session: CkSessionHandle) -> CkResult<()> {
-        self.inner.close_session(session)
+        // W1-C5-04: drop this session's verify state with the session.
+        self.inner.close_session(session)?;
+        self.state_3x.lock().unwrap().remove(&session.0);
+        Ok(())
     }
     fn close_all_sessions(&self, slot_id: CkSlotId) -> CkResult<()> {
+        // W1-C5-04: entries are keyed by handle, and handles are never
+        // reused, so a slot close-all leaves other slots' live entries
+        // untouched; closed sessions' entries become unreachable but stay
+        // bounded by the test's session count.
         self.inner.close_all_sessions(slot_id)
     }
     fn get_session_info(&self, session: CkSessionHandle) -> CkResult<CkSessionInfo> {
@@ -385,23 +401,26 @@ impl Pkcs11Backend for TestBackend3x {
 
     fn login_user(
         &self,
-        _session: CkSessionHandle,
+        session: CkSessionHandle,
         _user_type: CkUserType,
         _username: Option<&[u8]>,
         pin: Option<&[u8]>,
     ) -> CkResult<()> {
+        self.require_session(session)?;
         if pin.is_some_and(|p| p == b"1234") { Ok(()) } else { Err(CkRv::PIN_INCORRECT) }
     }
 
-    fn session_cancel(&self, _session: CkSessionHandle, _flags: CkFlags) -> CkResult<()> {
+    fn session_cancel(&self, session: CkSessionHandle, _flags: CkFlags) -> CkResult<()> {
+        self.require_session(session)?;
         Ok(())
     }
 
     fn get_session_validation_flags(
         &self,
-        _session: CkSessionHandle,
+        session: CkSessionHandle,
         _flags_type: u64,
     ) -> CkResult<u64> {
+        self.require_session(session)?;
         Ok(0)
     }
 
@@ -409,22 +428,24 @@ impl Pkcs11Backend for TestBackend3x {
 
     fn encapsulate_key(
         &self,
-        _session: CkSessionHandle,
+        session: CkSessionHandle,
         _mechanism: &CkMechanism,
         _public_key: CkObjectHandle,
         _template: Option<&[CkAttribute]>,
     ) -> CkResult<(SecretBytes, CkObjectHandle)> {
+        self.require_session(session)?;
         Ok((vec![0xCA; 32].into(), CkObjectHandle(9001)))
     }
 
     fn decapsulate_key(
         &self,
-        _session: CkSessionHandle,
+        session: CkSessionHandle,
         _mechanism: &CkMechanism,
         _private_key: CkObjectHandle,
         _template: Option<&[CkAttribute]>,
         ciphertext: CkInBuf<'_>,
     ) -> CkResult<CkObjectHandle> {
+        self.require_session(session)?;
         let _ = resolve_input(ciphertext)?;
         Ok(CkObjectHandle(9002))
     }
@@ -635,38 +656,50 @@ impl Pkcs11Backend for TestBackend3x {
 
     fn verify_signature_init(
         &self,
-        _session: CkSessionHandle,
+        session: CkSessionHandle,
         _mechanism: Option<&CkMechanism>,
         _key: CkObjectHandle,
         signature: CkInBuf<'_>,
     ) -> CkResult<()> {
+        self.require_session(session)?;
         let signature = resolve_input(signature)?;
-        let mut state = self.state_3x.lock().unwrap();
-        state.stored_signature = signature.to_vec();
-        state.accumulated_data.clear();
+        let mut states = self.state_3x.lock().unwrap();
+        states.insert(
+            session.0,
+            VerifySessionState {
+                stored_signature: signature.to_vec(),
+                accumulated_data: Vec::new(),
+            },
+        );
         Ok(())
     }
 
-    fn verify_signature(&self, _session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<()> {
+    fn verify_signature(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<()> {
+        self.require_session(session)?;
         let data = resolve_input(data)?;
-        let state = self.state_3x.lock().unwrap();
+        let states = self.state_3x.lock().unwrap();
+        let state = states.get(&session.0).ok_or(CkRv::OPERATION_NOT_INITIALIZED)?;
         let expected: Vec<u8> = state.stored_signature.iter().rev().copied().collect();
         if data == expected.as_slice() { Ok(()) } else { Err(CkRv::SIGNATURE_INVALID) }
     }
 
     fn verify_signature_update(
         &self,
-        _session: CkSessionHandle,
+        session: CkSessionHandle,
         data_part: CkInBuf<'_>,
     ) -> CkResult<()> {
+        self.require_session(session)?;
         let data_part = resolve_input(data_part)?;
-        let mut state = self.state_3x.lock().unwrap();
+        let mut states = self.state_3x.lock().unwrap();
+        let state = states.get_mut(&session.0).ok_or(CkRv::OPERATION_NOT_INITIALIZED)?;
         state.accumulated_data.extend_from_slice(data_part);
         Ok(())
     }
 
-    fn verify_signature_final(&self, _session: CkSessionHandle) -> CkResult<()> {
-        let state = self.state_3x.lock().unwrap();
+    fn verify_signature_final(&self, session: CkSessionHandle) -> CkResult<()> {
+        self.require_session(session)?;
+        let states = self.state_3x.lock().unwrap();
+        let state = states.get(&session.0).ok_or(CkRv::OPERATION_NOT_INITIALIZED)?;
         let expected: Vec<u8> = state.stored_signature.iter().rev().copied().collect();
         if state.accumulated_data == expected { Ok(()) } else { Err(CkRv::SIGNATURE_INVALID) }
     }
@@ -734,8 +767,8 @@ mod tests {
     fn login_user_correct_pin() {
         let backend = TestBackend3x::default_test();
         backend.initialize().unwrap();
-        let result =
-            backend.login_user(CkSessionHandle(1), CkUserType::User, Some(b"alice"), Some(b"1234"));
+        let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+        let result = backend.login_user(session, CkUserType::User, Some(b"alice"), Some(b"1234"));
         assert_eq!(result, Ok(()));
     }
 
@@ -743,36 +776,37 @@ mod tests {
     fn login_user_wrong_pin() {
         let backend = TestBackend3x::default_test();
         backend.initialize().unwrap();
-        let result = backend.login_user(
-            CkSessionHandle(1),
-            CkUserType::User,
-            Some(b"alice"),
-            Some(b"wrong"),
-        );
+        let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+        let result = backend.login_user(session, CkUserType::User, Some(b"alice"), Some(b"wrong"));
         assert_eq!(result, Err(CkRv::PIN_INCORRECT));
     }
 
     #[test]
     fn session_cancel_always_ok() {
         let backend = TestBackend3x::default_test();
-        let result = backend.session_cancel(CkSessionHandle(1), CkFlags(0));
+        backend.initialize().unwrap();
+        let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+        let result = backend.session_cancel(session, CkFlags(0));
         assert_eq!(result, Ok(()));
     }
 
     #[test]
     fn get_session_validation_flags_returns_zero() {
         let backend = TestBackend3x::default_test();
-        let result = backend.get_session_validation_flags(CkSessionHandle(1), 0);
+        backend.initialize().unwrap();
+        let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+        let result = backend.get_session_validation_flags(session, 0);
         assert_eq!(result, Ok(0));
     }
 
     #[test]
     fn encapsulate_key_returns_synthetic() {
         let backend = TestBackend3x::default_test();
+        backend.initialize().unwrap();
+        let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
         let mech = CkMechanism { mechanism_type: CkMechanismType(1), params: None };
-        let (capsule, key) = backend
-            .encapsulate_key(CkSessionHandle(1), &mech, CkObjectHandle(1), Some(&[]))
-            .unwrap();
+        let (capsule, key) =
+            backend.encapsulate_key(session, &mech, CkObjectHandle(1), Some(&[])).unwrap();
         assert_eq!(capsule, vec![0xCA; 32].into());
         assert_eq!(key, CkObjectHandle(9001));
     }
@@ -780,10 +814,12 @@ mod tests {
     #[test]
     fn decapsulate_key_returns_synthetic() {
         let backend = TestBackend3x::default_test();
+        backend.initialize().unwrap();
+        let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
         let mech = CkMechanism { mechanism_type: CkMechanismType(1), params: None };
         let key = backend
             .decapsulate_key(
-                CkSessionHandle(1),
+                session,
                 &mech,
                 CkObjectHandle(1),
                 Some(&[]),
@@ -844,42 +880,36 @@ mod tests {
     #[test]
     fn verify_signature_single_part() {
         let backend = TestBackend3x::default_test();
+        backend.initialize().unwrap();
+        let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
         let data = b"abcdef";
         let signature: Vec<u8> = data.iter().rev().copied().collect(); // reverse
 
         backend
-            .verify_signature_init(
-                CkSessionHandle(1),
-                None,
-                CkObjectHandle(1),
-                CkInBuf::Bytes(&signature),
-            )
+            .verify_signature_init(session, None, CkObjectHandle(1), CkInBuf::Bytes(&signature))
             .unwrap();
 
         // data should match signature reversed
-        let result = backend.verify_signature(CkSessionHandle(1), CkInBuf::Bytes(data));
+        let result = backend.verify_signature(session, CkInBuf::Bytes(data));
         assert_eq!(result, Ok(()));
     }
 
     #[test]
     fn verify_signature_multi_part() {
         let backend = TestBackend3x::default_test();
+        backend.initialize().unwrap();
+        let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
         let data = b"abcdef";
         let signature: Vec<u8> = data.iter().rev().copied().collect();
 
         backend
-            .verify_signature_init(
-                CkSessionHandle(1),
-                None,
-                CkObjectHandle(1),
-                CkInBuf::Bytes(&signature),
-            )
+            .verify_signature_init(session, None, CkObjectHandle(1), CkInBuf::Bytes(&signature))
             .unwrap();
 
-        backend.verify_signature_update(CkSessionHandle(1), CkInBuf::Bytes(b"abc")).unwrap();
-        backend.verify_signature_update(CkSessionHandle(1), CkInBuf::Bytes(b"def")).unwrap();
+        backend.verify_signature_update(session, CkInBuf::Bytes(b"abc")).unwrap();
+        backend.verify_signature_update(session, CkInBuf::Bytes(b"def")).unwrap();
 
-        let result = backend.verify_signature_final(CkSessionHandle(1));
+        let result = backend.verify_signature_final(session);
         assert_eq!(result, Ok(()));
     }
 
@@ -907,5 +937,100 @@ mod tests {
         let backend = TestBackend3x::default_test();
         let result = backend.async_join(CkSessionHandle(1), "C_Sign", 0, 256);
         assert_eq!(result, Err(CkRv::SAVED_STATE_INVALID));
+    }
+
+    #[test]
+    fn cited_3x_methods_reject_unknown_session() {
+        // W1-C5-04: the cited 3.x methods must validate the session like
+        // the MockBackend surface does, not silently accept any handle.
+        let backend = TestBackend3x::default_test();
+        backend.initialize().unwrap();
+        let bogus = CkSessionHandle(999);
+        let mech = CkMechanism { mechanism_type: CkMechanismType(1), params: None };
+        assert_eq!(
+            backend.login_user(bogus, CkUserType::User, Some(b"alice"), Some(b"1234")),
+            Err(CkRv::SESSION_HANDLE_INVALID)
+        );
+        assert_eq!(backend.session_cancel(bogus, CkFlags(0)), Err(CkRv::SESSION_HANDLE_INVALID));
+        assert_eq!(
+            backend.get_session_validation_flags(bogus, 0),
+            Err(CkRv::SESSION_HANDLE_INVALID)
+        );
+        assert_eq!(
+            backend.encapsulate_key(bogus, &mech, CkObjectHandle(1), Some(&[])).unwrap_err(),
+            CkRv::SESSION_HANDLE_INVALID
+        );
+        assert_eq!(
+            backend
+                .decapsulate_key(
+                    bogus,
+                    &mech,
+                    CkObjectHandle(1),
+                    Some(&[]),
+                    CkInBuf::Bytes(&[0xCA; 32]),
+                )
+                .unwrap_err(),
+            CkRv::SESSION_HANDLE_INVALID
+        );
+        assert_eq!(
+            backend
+                .verify_signature_init(bogus, None, CkObjectHandle(1), CkInBuf::Bytes(b"sig"))
+                .unwrap_err(),
+            CkRv::SESSION_HANDLE_INVALID
+        );
+        assert_eq!(
+            backend.verify_signature(bogus, CkInBuf::Bytes(b"data")).unwrap_err(),
+            CkRv::SESSION_HANDLE_INVALID
+        );
+        assert_eq!(
+            backend.verify_signature_update(bogus, CkInBuf::Bytes(b"data")).unwrap_err(),
+            CkRv::SESSION_HANDLE_INVALID
+        );
+        assert_eq!(
+            backend.verify_signature_final(bogus).unwrap_err(),
+            CkRv::SESSION_HANDLE_INVALID
+        );
+    }
+
+    #[test]
+    fn verify_state_isolated_per_session() {
+        // W1-C5-04: verify state initialized on one session must not leak
+        // into another session.
+        let backend = TestBackend3x::default_test();
+        backend.initialize().unwrap();
+        let s1 = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+        let s2 = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+        let data = b"abcdef";
+        let signature: Vec<u8> = data.iter().rev().copied().collect();
+        backend
+            .verify_signature_init(s1, None, CkObjectHandle(1), CkInBuf::Bytes(&signature))
+            .unwrap();
+        // s1 verifies against its own init.
+        assert_eq!(backend.verify_signature(s1, CkInBuf::Bytes(data)), Ok(()));
+        // s2 never initialized: no leaked state to verify against.
+        assert_eq!(
+            backend.verify_signature(s2, CkInBuf::Bytes(data)).unwrap_err(),
+            CkRv::OPERATION_NOT_INITIALIZED
+        );
+        // Multi-part accumulation is per-session too.
+        backend.verify_signature_update(s1, CkInBuf::Bytes(b"abc")).unwrap();
+        backend.verify_signature_update(s1, CkInBuf::Bytes(b"def")).unwrap();
+        assert_eq!(backend.verify_signature_final(s1), Ok(()));
+        assert_eq!(
+            backend.verify_signature_final(s2).unwrap_err(),
+            CkRv::OPERATION_NOT_INITIALIZED
+        );
+    }
+
+    #[test]
+    fn verify_state_cleared_on_close_session() {
+        // W1-C5-04: closing a session drops its verify state.
+        let backend = TestBackend3x::default_test();
+        backend.initialize().unwrap();
+        let s1 = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+        backend.verify_signature_init(s1, None, CkObjectHandle(1), CkInBuf::Bytes(b"sig")).unwrap();
+        assert_eq!(backend.verify_session_count_for_tests(), 1);
+        backend.close_session(s1).unwrap();
+        assert_eq!(backend.verify_session_count_for_tests(), 0);
     }
 }

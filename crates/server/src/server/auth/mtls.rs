@@ -22,10 +22,13 @@ pub const CERT_ROTATION_POLICY: &str = "restart";
 /// Checks:
 /// 1. File exists and is readable
 /// 2. Contains at least one valid PEM-encoded certificate
-/// 3. The first certificate is not expired (not-after is in the future)
-/// 4. The first certificate's not-before is in the past
+/// 3. Every certificate is not expired (each not-after is in the future)
+/// 4. Every certificate is already valid (each not-before is in the past)
 ///
-/// Returns the subject DN string on success for logging.
+/// A bundle carrying a chain (leaf + intermediate(s) + CA) is rejected when
+/// ANY entry is expired or not-yet-valid. Non-certificate PEM blocks are
+/// ignored. Returns the leaf (first) certificate's subject DN on success
+/// for logging.
 pub fn validate_cert_file(path: &Path) -> Result<String, String> {
     let pem_data = std::fs::read(path)
         .map_err(|e| format!("cannot read certificate file '{}': {e}", path.display()))?;

@@ -305,7 +305,7 @@ impl From<&WtlsKeyMatParams> for v1_proto::WtlsKeyMatParams {
             random_info: Some(wtls_random_to_proto(&p.random_info)),
             mac_secret_handle: p.mac_secret_handle.0,
             key_handle: p.key_handle.0,
-            iv: p.iv.clone(),
+            iv: secret_to_plain(&p.iv),
         }
     }
 }
@@ -324,7 +324,7 @@ impl TryFrom<&v1_proto::WtlsKeyMatParams> for WtlsKeyMatParams {
             random_info: required_wtls_random_from_option(&p.random_info)?,
             mac_secret_handle: CkObjectHandle(p.mac_secret_handle),
             key_handle: CkObjectHandle(p.key_handle),
-            iv: p.iv.clone(),
+            iv: SecretBytes::copy_from_slice(&p.iv),
         })
     }
 }

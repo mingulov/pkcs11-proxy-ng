@@ -123,6 +123,15 @@ require_executable "$CLI_BIN"
 require_file "$SHIM_LIB"
 
 cleanup_dir=""
+# W1-L17-14: remove the mktemp staging dir on ANY exit, not just the
+# success path — under `set -euo pipefail` a failing check above the
+# old tail cleanup leaked /tmp dirs. No-op for --prefix runs.
+cleanup_staging_dir() {
+    if [[ -n "${cleanup_dir:-}" ]]; then
+        rm -rf "$cleanup_dir"
+    fi
+}
+trap cleanup_staging_dir EXIT
 if [[ -z "$PREFIX" ]]; then
     cleanup_dir="$(mktemp -d)"
     PREFIX="$cleanup_dir/prefix"
@@ -150,7 +159,3 @@ Install layout:
   $PREFIX/bin/pkcs11-proxy-ng-cli
   $PREFIX/lib/pkcs11/libpkcs11_proxy_ng_shim.so
 EOF
-
-if [[ -n "$cleanup_dir" ]]; then
-    rm -rf "$cleanup_dir"
-fi

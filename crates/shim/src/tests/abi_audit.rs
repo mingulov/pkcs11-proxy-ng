@@ -80,8 +80,8 @@ fn ck_attribute_layout() {
     // W1-L10-14: offsets + alignment, not sizeof-only: a field swap that
     // preserves total size must trip this gate.
     let ulong = std::mem::size_of::<CK_ULONG>();
-    let ptr = std::mem::size_of::<*mut std::os::raw::c_void>();
-    let ptr_align = std::mem::align_of::<*mut std::os::raw::c_void>();
+    let ptr = std::mem::size_of::<*mut std::ffi::c_void>();
+    let ptr_align = std::mem::align_of::<*mut std::ffi::c_void>();
     let ulong_align = std::mem::align_of::<CK_ULONG>();
     let (off, align, size) = expected_3field_layout(
         std::mem::align_of::<CK_ATTRIBUTE>(),
@@ -99,8 +99,8 @@ fn ck_attribute_layout() {
 fn ck_mechanism_layout() {
     // W1-L10-14: offsets + alignment, not sizeof-only.
     let ulong = std::mem::size_of::<CK_ULONG>();
-    let ptr = std::mem::size_of::<*mut std::os::raw::c_void>();
-    let ptr_align = std::mem::align_of::<*mut std::os::raw::c_void>();
+    let ptr = std::mem::size_of::<*mut std::ffi::c_void>();
+    let ptr_align = std::mem::align_of::<*mut std::ffi::c_void>();
     let ulong_align = std::mem::align_of::<CK_ULONG>();
     let (off, align, size) = expected_3field_layout(
         std::mem::align_of::<CK_MECHANISM>(),
@@ -117,9 +117,9 @@ fn ck_mechanism_layout() {
 #[test]
 fn ck_interface_layout() {
     // W1-L10-14: offsets + alignment, not sizeof-only.
-    let ptr = std::mem::size_of::<*mut std::os::raw::c_void>();
+    let ptr = std::mem::size_of::<*mut std::ffi::c_void>();
     let ulong = std::mem::size_of::<CK_ULONG>();
-    let ptr_align = std::mem::align_of::<*mut std::os::raw::c_void>();
+    let ptr_align = std::mem::align_of::<*mut std::ffi::c_void>();
     let ulong_align = std::mem::align_of::<CK_ULONG>();
     let (off, align, size) = expected_3field_layout(
         std::mem::align_of::<CK_INTERFACE>(),

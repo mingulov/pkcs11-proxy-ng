@@ -19,7 +19,10 @@
 #     cargo build --release --target x86_64-unknown-linux-musl \
 #       -p pkcs11-proxy-ng -p pkcs11-proxy-ng-cli
 
-FROM debian:13.6
+# Deferred T22 F6: base pinned by digest (tag kept for readability; the
+# digest is what Docker pulls). Re-pin with the registry's current digest
+# when moving Debian versions.
+FROM debian:13.6@sha256:f324c7ff54321e8d9c588493a20244965938ce0aa50bbd1022d38010e9ffc4b1
 
 # Pinned to the receipted toolchain (see doc/release/musl-tier.md); override with
 # --build-arg RUST_TOOLCHAIN=<version> to re-validate against a newer rustc.
@@ -32,9 +35,26 @@ RUN apt-get update \
         protobuf-compiler file \
     && rm -rf /var/lib/apt/lists/*
 
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --default-toolchain "${RUST_TOOLCHAIN}" --profile minimal \
-        --target x86_64-unknown-linux-musl
+# Deferred T22 F6: versioned rustup bootstrap (not the floating
+# install pipe) installing RUST_TOOLCHAIN, with the init binary's
+# SHA256 verified before execute. Hashes below are the published
+# static.rust-lang.org rustup-init.sha256 values for 1.29.1.
+ARG RUSTUP_VERSION=1.29.1
+ARG RUSTUP_SHA256_AMD64=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
+ARG RUSTUP_SHA256_ARM64=15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433
+RUN set -eu; \
+    ARCH="$(uname -m)"; \
+    case "$ARCH" in \
+        x86_64)  RUST_TRIPLE=x86_64-unknown-linux-gnu;  RUSTUP_SHA256="${RUSTUP_SHA256_AMD64}" ;; \
+        aarch64) RUST_TRIPLE=aarch64-unknown-linux-gnu; RUSTUP_SHA256="${RUSTUP_SHA256_ARM64}" ;; \
+        *) echo "unsupported arch $ARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${RUST_TRIPLE}/rustup-init" -o /tmp/rustup-init; \
+    echo "${RUSTUP_SHA256}  /tmp/rustup-init" | sha256sum -c -; \
+    chmod +x /tmp/rustup-init; \
+    /tmp/rustup-init -y --default-toolchain "${RUST_TOOLCHAIN}" --profile minimal \
+        --target x86_64-unknown-linux-musl; \
+    rm /tmp/rustup-init
 
 ENV PATH="/root/.cargo/bin:${PATH}"
 # musl-tools ships `musl-gcc` (there is no triplet-prefixed

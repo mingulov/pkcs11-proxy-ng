@@ -34,6 +34,8 @@ install="$pkgname-shim.post-install
         $pkgname-shim.post-deinstall
         $pkgname-daemon.post-install
         $pkgname-daemon.post-deinstall
+        $pkgname-daemon.pre-upgrade
+        $pkgname-daemon.post-upgrade
         $pkgname-cli.post-install
         $pkgname-compat.post-install
         $pkgname-compat.post-deinstall"
@@ -76,10 +78,26 @@ shim() {
 
 daemon() {
     pkgdesc="$pkgdesc (gRPC server daemon)"
+    # Upgrade behavior (W1-L14-23): apk has no %config(noreplace)
+    # equivalent — it overwrites every packaged file on upgrade, unlike
+    # the RPM spec which marks both TOMLs %config(noreplace). So the
+    # daemon subpackage preserves operator edits with upgrade hooks:
+    # pre-upgrade copies proxy.toml + mechanism_params.toml aside and
+    # post-upgrade restores them over the freshly unpacked files, then
+    # prints a note. Consequences:
+    #   * Fresh install: live TOMLs come from the packaged defaults.
+    #   * Upgrade: operator edits always win; packaged default changes
+    #     never propagate to the live files. Diff the live files against
+    #     proxy.toml.default (shipped below as a reference copy) to adopt
+    #     new defaults by hand.
+    #   * Uninstall/reinstall is NOT an upgrade: reinstall resets both
+    #     TOMLs to packaged defaults. Back up /etc/pkcs11-proxy-ng first.
     install -Dm0755 "$builddir/target/release/pkcs11-proxy-ng" \
         "$subpkgdir/usr/bin/pkcs11-proxy-ng"
     install -Dm0644 "$builddir/packaging/config/proxy.toml.default" \
         "$subpkgdir/etc/pkcs11-proxy-ng/proxy.toml"
+    install -Dm0644 "$builddir/packaging/config/proxy.toml.default" \
+        "$subpkgdir/etc/pkcs11-proxy-ng/proxy.toml.default"
     # Ship the current embedded default as the operator-editable
     # mechanism registry. SIGHUP reloads this file at runtime.
     install -Dm0644 "$builddir/crates/types/src/mechanism_params_default.toml" \

@@ -62,28 +62,61 @@ static STATE: Mutex<(ExactOracleScenario, ExactOracleObservation)> = Mutex::new(
     },
 ));
 
+/// Serializes every test that touches the process-global [`STATE`]
+/// (W1-L1-05).
+///
+/// This file is compiled TWICE for tests: once as the standalone oracle
+/// crate and once via `#[path]` inside the backend's
+/// `exact_output_contract_tests`. Both binaries' tests share their own
+/// copy of `STATE`, so both must serialize on this single lock —
+/// including the backend contract tests, which take it as
+/// `oracle::ORACLE_TEST_LOCK`. (`pub(crate)` resolves to whichever crate
+/// is being built; the lock is `cfg(test)`-only in both.)
+#[cfg(test)]
+pub(crate) static ORACLE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Run a u32 control export without ever unwinding across `extern "C"`
+/// (W1-L1-05): a poisoned [`STATE`] surfaces as the export's documented
+/// error return (1, mirroring the null-pointer refusal).
+fn catch_or_1(f: impl FnOnce() -> u32 + std::panic::UnwindSafe) -> u32 {
+    std::panic::catch_unwind(f).unwrap_or(1)
+}
+
+/// Run a CK_RV export without ever unwinding across `extern "C"`
+/// (W1-L1-05): a poisoned [`STATE`] surfaces as `CKR_GENERAL_ERROR`,
+/// the shim `catch_panics` convention.
+fn catch_or_general_error(f: impl FnOnce() -> CK_RV + std::panic::UnwindSafe) -> CK_RV {
+    std::panic::catch_unwind(f).unwrap_or(CKR_GENERAL_ERROR)
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ExactOracle_SetScenario(scenario: *const ExactOracleScenario) -> u32 {
-    if scenario.is_null() {
-        return 1;
-    }
-    STATE.lock().unwrap().0 = unsafe { *scenario };
-    0
+    catch_or_1(|| {
+        if scenario.is_null() {
+            return 1;
+        }
+        STATE.lock().unwrap().0 = unsafe { *scenario };
+        0
+    })
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn ExactOracle_ResetObservation() -> u32 {
-    STATE.lock().unwrap().1 = ExactOracleObservation::default();
-    0
+    catch_or_1(|| {
+        STATE.lock().unwrap().1 = ExactOracleObservation::default();
+        0
+    })
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ExactOracle_GetObservation(
     observation: *mut ExactOracleObservation,
 ) -> u32 {
-    if observation.is_null() {
-        return 1;
-    }
-    unsafe { observation.write(STATE.lock().unwrap().1) };
-    0
+    catch_or_1(|| {
+        if observation.is_null() {
+            return 1;
+        }
+        unsafe { observation.write(STATE.lock().unwrap().1) };
+        0
+    })
 }
 
 /// Never reads the incoming output-only query cell or writes past a capacity.
@@ -106,6 +139,17 @@ pub unsafe extern "C" fn ExactOracle_ByteOutput(
     output: CK_BYTE_PTR,
     length: CK_ULONG_PTR,
 ) -> CK_RV {
+    catch_or_general_error(|| unsafe { exact_oracle_byte_output_inner(output, length) })
+}
+
+/// Leaf body of [`ExactOracle_ByteOutput`], factored out so the `extern "C"`
+/// export itself is only the [`catch_or_general_error`] boundary (W1-L1-05).
+///
+/// # Safety
+///
+/// Same contract as the export: `output`/`length` must be null or valid for
+/// the access the scenario performs.
+unsafe fn exact_oracle_byte_output_inner(output: CK_BYTE_PTR, length: CK_ULONG_PTR) -> CK_RV {
     let mut state = STATE.lock().unwrap();
     let scenario = state.0;
     let observation = &mut state.1;
@@ -159,4 +203,79 @@ pub unsafe extern "C" fn ExactOracle_ByteOutput(
         }
     }
     scenario.rv as CK_RV
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    fn default_state() -> (ExactOracleScenario, ExactOracleObservation) {
+        (
+            ExactOracleScenario {
+                rv: 0,
+                length_action: 0,
+                returned_length: 0,
+                parameter_action: 0,
+                output_action: 0,
+                handle_action: 0,
+            },
+            ExactOracleObservation::default(),
+        )
+    }
+
+    fn poison_state() {
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _held = STATE.lock().unwrap();
+            panic!("W1-L1-05: intentional STATE poison");
+        }));
+        assert!(STATE.is_poisoned(), "STATE must be poisoned for this test");
+    }
+
+    fn restore_state() {
+        STATE.clear_poison();
+        *STATE.lock().unwrap() = default_state();
+    }
+
+    #[test]
+    fn poisoned_state_set_scenario_returns_error() {
+        let _guard = ORACLE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        restore_state();
+        poison_state();
+        let scenario = default_state().0;
+        let rc = unsafe { ExactOracle_SetScenario(&scenario) };
+        restore_state();
+        assert_eq!(rc, 1, "poisoned STATE must yield an error, never unwind");
+    }
+
+    #[test]
+    fn poisoned_state_reset_observation_returns_error() {
+        let _guard = ORACLE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        restore_state();
+        poison_state();
+        let rc = ExactOracle_ResetObservation();
+        restore_state();
+        assert_eq!(rc, 1, "poisoned STATE must yield an error, never unwind");
+    }
+
+    #[test]
+    fn poisoned_state_get_observation_returns_error() {
+        let _guard = ORACLE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        restore_state();
+        poison_state();
+        let mut out = ExactOracleObservation::default();
+        let rc = unsafe { ExactOracle_GetObservation(&mut out) };
+        restore_state();
+        assert_eq!(rc, 1, "poisoned STATE must yield an error, never unwind");
+    }
+
+    #[test]
+    fn poisoned_state_byte_output_returns_error() {
+        let _guard = ORACLE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        restore_state();
+        poison_state();
+        let rc = unsafe { ExactOracle_ByteOutput(std::ptr::null_mut(), std::ptr::null_mut()) };
+        restore_state();
+        assert_eq!(rc, CKR_GENERAL_ERROR, "poisoned STATE must yield an error, never unwind");
+    }
 }

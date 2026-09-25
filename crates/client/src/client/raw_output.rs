@@ -4,6 +4,7 @@ use crate::error::{MessageCallError, grpc_status_to_ck_rv};
 use pkcs11_proxy_ng_proto::convert::message_effects::ParameterEffectCallMode;
 
 use pkcs11_proxy_ng_proto::pkcs11_proxy_ng::v1 as v1_proto;
+use pkcs11_proxy_ng_proto::version::exact_output_effects_version_supported;
 use pkcs11_proxy_ng_types::{
     ByteOutputFunction, CkAttribute, CkAttributeQuery, CkAttributeQueryResult, CkFlags, CkInBuf,
     CkMechanism, CkMechanismParams, CkObjectHandle, CkOutputAndHandleResult, CkOutputBufferResult,
@@ -91,7 +92,7 @@ fn decode_parameter_output_exact_response(
                             function,
                             ParameterOutputFunction::EncryptMessage
                                 | ParameterOutputFunction::DecryptMessage
-                        ) || flags & CkFlags::END_OF_MESSAGE != 0,
+                        ) || flags & CkFlags::END_OF_MESSAGE.0 != 0,
                         rv: output.ck_rv,
                     },
                 )
@@ -125,26 +126,31 @@ fn decode_parameter_output_exact_contract_response(
     Ok(decoded)
 }
 
-// Task 2 stops at shared scaffolding; Task 3 wires these helpers into concrete RPCs.
 impl Pkcs11Client {
     pub(crate) async fn require_exact_output_effects(&mut self) -> Result<(), CkRv> {
-        if self.exact_effects_version.load(std::sync::atomic::Ordering::Acquire) != 1 {
+        // W1-L5-04: compatibility-range gates, never equality literals. An
+        // absent probe version (legacy daemon) still fails closed here —
+        // only the init negotiation (W1-L5-05) treats absence as v1.
+        if !exact_output_effects_version_supported(
+            self.exact_effects_version.load(std::sync::atomic::Ordering::Acquire),
+        ) {
             let probe =
                 self.get_backend_interfaces().await.map_err(|_| CkRv::FUNCTION_NOT_SUPPORTED)?;
-            if probe.exact_output_effects_version != Some(1) {
+            if !probe
+                .exact_output_effects_version
+                .is_some_and(exact_output_effects_version_supported)
+            {
                 return Err(CkRv::FUNCTION_NOT_SUPPORTED);
             }
         }
         Ok(())
     }
-    #[allow(dead_code)]
     pub(crate) fn proto_output_buffer_spec(
         spec: &CkOutputBufferSpec,
     ) -> v1_proto::OutputBufferSpec {
         spec.into()
     }
 
-    #[allow(dead_code)]
     pub(crate) fn proto_parameter_roundtrip_spec(
         spec: &CkParameterRoundtripSpec,
     ) -> v1_proto::ParameterRoundtripSpec {
@@ -157,21 +163,12 @@ impl Pkcs11Client {
         queries.iter().map(v1_proto::AttributeQuery::from).collect()
     }
 
-    #[allow(dead_code)]
     pub(crate) fn output_buffer_result_from_proto(
         result: &v1_proto::OutputBufferResult,
     ) -> Result<CkOutputBufferResult, CkRv> {
         result.try_into()
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn parameter_roundtrip_result_from_proto(
-        result: &v1_proto::ParameterRoundtripResult,
-    ) -> CkParameterRoundtripResult {
-        result.into()
-    }
-
-    #[allow(dead_code)]
     pub(crate) fn output_and_handle_result_from_proto(
         result: &v1_proto::OutputAndHandleResult,
     ) -> Result<CkOutputAndHandleResult, CkRv> {
@@ -205,7 +202,7 @@ impl Pkcs11Client {
             .await
             .map_err(|status| grpc_status_to_ck_rv(status.code(), true))?
             .into_inner();
-        if resp.exact_output_effects_version != 1 {
+        if !exact_output_effects_version_supported(resp.exact_output_effects_version) {
             return Err(CkRv::FUNCTION_NOT_SUPPORTED);
         }
         Ok((CkRv(resp.ck_rv), Self::attribute_query_results_from_proto(&resp.results)?))
@@ -463,6 +460,102 @@ mod message_contract_tests {
     use pkcs11_proxy_ng_proto::convert::message_params::{
         CcmMessageParams, GcmMessageParams, MessageParameter,
     };
+
+    /// W1-L5-04: a supported cached version needs no re-probe. The channel
+    /// is dead, so `Ok` proves no I/O happened (characterization: the range
+    /// accepts v1 exactly like the old equality gate).
+    #[tokio::test]
+    async fn require_supported_cached_version_needs_no_probe() {
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
+        let mut client = Pkcs11Client::from_channel(channel);
+        client.note_backend_probe(1, true);
+        assert!(client.require_exact_output_effects().await.is_ok());
+    }
+
+    /// W1-L5-04: an out-of-range cached version fails closed (the re-probe
+    /// hits the dead channel and maps to FUNCTION_NOT_SUPPORTED).
+    #[tokio::test]
+    async fn require_unsupported_cached_version_fails_closed() {
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
+        let mut client = Pkcs11Client::from_channel(channel);
+        client.note_backend_probe(99, true);
+        assert_eq!(client.require_exact_output_effects().await, Err(CkRv::FUNCTION_NOT_SUPPORTED));
+    }
+
+    /// W1-L5-04: no equality-gate literal may remain on any version line —
+    /// every gate delegates to the compatibility-range helper.
+    #[test]
+    fn exact_effects_gates_use_the_compatibility_range() {
+        let src = include_str!("raw_output.rs");
+        // Concat-built so the patterns cannot match their own source text.
+        let pats = [
+            ["!= ", "1"].concat(),
+            ["== ", "1"].concat(),
+            ["!= ", "Some(1)"].concat(),
+            ["== ", "Some(1)"].concat(),
+        ];
+        for (index, line) in src.lines().enumerate() {
+            if line.contains("effects_version") && !line.trim_start().starts_with("//") {
+                for pat in &pats {
+                    assert!(
+                        !line.contains(pat),
+                        "line {}: gate must use the range helper, not `{pat}`: {line}",
+                        index + 1
+                    );
+                }
+            }
+        }
+        let helper = ["exact_output_effects_version_", "supported"].concat();
+        assert_eq!(
+            src.matches(&helper).count(),
+            4,
+            "one import + three gate calls (cached, probe, response) must name the range helper"
+        );
+    }
+
+    /// W1-C10-09: no dead from-proto helper, no stale dead-code allows,
+    /// and no stale Task scaffolding comment may remain in this module —
+    /// every remaining helper is wired into an RPC.
+    #[test]
+    fn t32_no_dead_helpers_or_stale_allows_or_task_comment() {
+        let src = include_str!("raw_output.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        // Concat-built so the patterns cannot match their own source text.
+        let dead_fn = ["parameter_roundtrip_result", "_from_proto"].concat();
+        assert!(!src.contains(&dead_fn), "dead helper `{dead_fn}` must be deleted, not kept");
+        let allow = ["allow(dead", "_code)"].concat();
+        assert!(!prod.contains(&allow), "stale allows must go — the helpers are all live");
+        assert!(
+            !prod.lines().any(|line| {
+                let trimmed = line.trim_start();
+                trimmed.starts_with("// Task ") || trimmed.starts_with("//Task ")
+            }),
+            "stale scaffolding comment must go — the wiring it promises long landed"
+        );
+    }
+
+    /// W1-C10-11 (const half, landed by Task 6 W1-C9-09): the message
+    /// auth-stage bit test must use the named constant — never a magic bit.
+    #[test]
+    fn t32_end_of_message_bit_uses_named_const() {
+        fn has_magic_bit(line: &str) -> bool {
+            line.contains("flags & 1")
+        }
+        // The detector itself, pinned both ways (negative control).
+        assert!(has_magic_bit(") || flags & 1 != 0,"));
+        assert!(!has_magic_bit(") || flags & CkFlags::END_OF_MESSAGE != 0,"));
+        let src = include_str!("raw_output.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        for (index, line) in prod.lines().enumerate() {
+            assert!(
+                !has_magic_bit(line),
+                "line {}: magic bit — use the named const: {line}",
+                index + 1
+            );
+        }
+        let named = ["CkFlags::END", "_OF_MESSAGE"].concat();
+        assert!(prod.contains(&named), "the flags-bit test must name the const");
+    }
 
     fn gcm_parameter() -> MessageParameter {
         MessageParameter::GcmMessage(GcmMessageParams {

@@ -8,21 +8,45 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use super::{render_prometheus, snapshot};
+
+/// Max concurrent metrics connections (W1-L6-09). Past the cap, newly
+/// accepted connections are dropped loudly instead of spawning
+/// unbounded tasks. 32 is ample for a local debug endpoint; each
+/// admitted task is small (one 1KiB read + one render).
+const MAX_CONCURRENT_METRICS_CONNS: usize = 32;
 
 /// Bind a mode-0600 Unix metrics socket and serve on a spawned task.
 /// Returns once bound. Uses [`crate::server::transport::bind_unix_listener`]
 /// for atomic 0600 creation (umask guard + is_socket stale-path check).
 pub async fn spawn_metrics_endpoint(path: PathBuf) -> Result<(), String> {
     let listener = crate::server::transport::bind_unix_listener(&path)?;
+    let admission = std::sync::Arc::new(Semaphore::new(MAX_CONCURRENT_METRICS_CONNS));
     tokio::spawn(async move {
         let mut consecutive_failures: u32 = 0;
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
                     consecutive_failures = 0;
+                    // W1-L6-09: bound concurrent connection tasks. The
+                    // permit is acquired synchronously in the accept
+                    // loop (never queued) and held by the serving task
+                    // until the connection closes, so socket-spam
+                    // cannot spawn unbounded tasks/FDs.
+                    let permit: OwnedSemaphorePermit = match admission.clone().try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            tracing::warn!(
+                                max = MAX_CONCURRENT_METRICS_CONNS,
+                                "metrics connection dropped: too many concurrent connections"
+                            );
+                            continue;
+                        }
+                    };
                     tokio::spawn(async move {
+                        let _permit = permit;
                         if let Err(e) = serve_conn(stream).await {
                             tracing::debug!(error = %e, "metrics connection error");
                         }
@@ -162,6 +186,72 @@ mod tests {
         assert!(resp.contains("pkcs11_proxy_login_budget_tripped_total"));
         assert!(resp.contains("pkcs11_proxy_attr_coalesce_hits_total"));
         assert!(resp.contains("pkcs11_proxy_attr_coalesce_misses_total"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// W1-L6-09: socket-spam must not spawn unbounded tasks. With the
+    /// cap held by silent connections, an over-cap connection is dropped
+    /// (peer sees EOF) instead of spawning another task. The holder
+    /// count must exceed `MAX_CONCURRENT_METRICS_CONNS`.
+    #[tokio::test]
+    async fn metrics_endpoint_drops_connections_past_cap() {
+        let path = temp_sock("cap");
+        let _ = std::fs::remove_file(&path);
+        spawn_metrics_endpoint(path.clone()).await.expect("bind");
+
+        // Silent holders: each admitted connection blocks its server task
+        // in the 2s request-read, holding one admission permit.
+        let mut holders = Vec::new();
+        for _ in 0..64 {
+            holders.push(UnixStream::connect(&path).await.expect("connect holder"));
+        }
+        // Let the accept loop drain the backlog and fill the cap.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Over-cap: dropped — the GET is never answered (clean EOF or
+        // RST, depending on whether the GET bytes were still queued when
+        // the server closed), and no task spawns.
+        let mut extra = UnixStream::connect(&path).await.expect("connect extra");
+        let _ = extra.write_all(b"GET /metrics HTTP/1.1\r\n\r\n").await;
+        let mut resp = Vec::new();
+        let outcome = tokio::time::timeout(Duration::from_secs(5), extra.read_to_end(&mut resp))
+            .await
+            .expect("dropped connection must terminate promptly");
+        match outcome {
+            Ok(_) => assert!(
+                resp.is_empty(),
+                "over-cap connection must be dropped (EOF), got: {}",
+                String::from_utf8_lossy(&resp)
+            ),
+            Err(e) if e.kind() == io::ErrorKind::ConnectionReset => {}
+            Err(e) => panic!("over-cap connection read must EOF or reset, got: {e}"),
+        }
+        drop(holders);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// W1-L6-09: admission permits must release when a connection
+    /// closes — sequential connections well past the cap must all be
+    /// served (a leaked permit would start dropping at cap+1).
+    #[tokio::test]
+    async fn metrics_permits_release_after_each_connection() {
+        let path = temp_sock("caprelease");
+        let _ = std::fs::remove_file(&path);
+        spawn_metrics_endpoint(path.clone()).await.expect("bind");
+
+        for _ in 0..48 {
+            let mut s = UnixStream::connect(&path).await.expect("connect");
+            s.write_all(b"GET /metrics HTTP/1.1\r\n\r\n").await.unwrap();
+            let mut resp = Vec::new();
+            tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut resp))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                String::from_utf8_lossy(&resp).starts_with("HTTP/1.1 200 OK"),
+                "sequential connection must be served (permits must release)"
+            );
+        }
         let _ = std::fs::remove_file(&path);
     }
 

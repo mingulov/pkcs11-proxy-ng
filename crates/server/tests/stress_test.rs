@@ -29,7 +29,7 @@ async fn mock_daemon(backend: Arc<MockBackend>) -> (String, tokio::sync::watch::
     mock_daemon_with_lease(backend, Duration::from_secs(300), Duration::from_millis(100)).await
 }
 
-const CKF_SERIAL: CkSessionFlags = CkSessionFlags(CkSessionFlags::SERIAL_SESSION);
+const CKF_SERIAL: CkSessionFlags = CkSessionFlags::SERIAL_SESSION;
 
 // ────────────────────────────────────────────────────────────────────
 // Leak accounting (W1-C2-07)

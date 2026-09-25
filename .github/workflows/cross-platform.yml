@@ -214,7 +214,7 @@ jobs:
 
       - name: Upload comparison artifacts
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: xplat-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
           path: |
@@ -332,21 +332,26 @@ jobs:
 
       # Explicit receipt: the stub test also runs inside the backend suite
       # above, but that suite's pass would not distinguish "ran green" from
-      # "silently skipped". This step re-runs exactly that test and asserts
-      # both the pass count and the test's own marker line.
+      # "silently skipped". This step re-runs exactly that test; the pass
+      # signal is the exit code (pipefail) plus the test's own
+      # machine-readable receipt line — never the harness summary.
+      # W1-L17-18: --format json is nightly-only (stable libtest rejects
+      # it), so instead of parsing the human-readable pass-count summary
+      # the step pins the filter with --exact and asserts the test's own
+      # `win32-stub-live-load: ok` line, which prints only on the
+      # success path (any skip or failure leaves no receipt).
       - name: Win32 stub live-load proof
         run: |
           set -o pipefail
           # T2run: same GNU-link.exe shadowing as the lib suites above.
           export PATH="$(dirname "$(which cl)"):$PATH"
-          cargo test --locked --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng-backend --lib ffi::loading::tests::win32_stub_live_load -- --nocapture 2>&1 | tee stub-proof.log
-          grep -q "1 passed" stub-proof.log
+          cargo test --locked --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng-backend --lib ffi::loading::tests::win32_stub_live_load -- --exact --nocapture 2>&1 | tee stub-proof.log
           grep -q "win32-stub-live-load: ok" stub-proof.log
         shell: bash
 
       - name: Upload win32 binaries
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: xplat-win32-${{ github.run_id }}
           path: |

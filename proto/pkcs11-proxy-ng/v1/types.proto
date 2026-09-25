@@ -337,12 +337,23 @@ message AsyncData {
 message InitializeRequest {
   // client_context_id is empty on first call; daemon assigns one and returns it.
   string client_context_id = 1;
+  // W1-L5-05: the client's exact-output effects compatibility range
+  // [min, max] (proto version module). Absent = legacy client = v1-only.
+  // The daemon negotiates the highest mutual version and rejects disjoint
+  // ranges loudly at init instead of failing per-RPC.
+  optional uint32 client_effects_version_min = 2;
+  optional uint32 client_effects_version_max = 3;
 }
 message InitializeResponse {
   uint64 ck_rv = 1;
   // The logical client instance ID assigned by the daemon (ADR-0002 §3).
   // Client must include this in all subsequent requests.
   string client_context_id = 2;
+  // W1-L5-05: the daemon's exact-output effects compatibility range.
+  // Absent = legacy daemon = v1-only. The client validates overlap before
+  // storing the context; disjoint ranges fail loudly at init.
+  optional uint32 daemon_effects_version_min = 3;
+  optional uint32 daemon_effects_version_max = 4;
 }
 
 message FinalizeRequest {

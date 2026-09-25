@@ -102,6 +102,14 @@ pub(crate) unsafe fn read_mechanism(p_mechanism: *const CK_MECHANISM) -> CkResul
     unsafe { read_mechanism_with_shape(c_mech, shape) }
 }
 
+/// Read a wrap-key `CK_MECHANISM`, selecting the GCM/CCM wrap shape by
+/// parameter length before falling back to the registry shape (W1-L1-04).
+///
+/// # Safety
+///
+/// Same contract as [`read_mechanism`]: `p_mechanism` must point to a
+/// valid `CK_MECHANISM`, and a non-null `pParameter` must designate
+/// `ulParameterLen` readable bytes.
 pub(crate) unsafe fn read_wrap_key_mechanism(
     p_mechanism: *const CK_MECHANISM,
 ) -> CkResult<CkMechanism> {
@@ -116,6 +124,14 @@ pub(crate) unsafe fn read_wrap_key_mechanism(
     unsafe { read_mechanism_with_shape(c_mech, shape) }
 }
 
+/// Parse `c_mech` per the registry `shape`, preserving unmodeled params
+/// as Raw bytes (W1-L1-04).
+///
+/// # Safety
+///
+/// `c_mech` is borrowed (always safe); its `pParameter`, when non-null
+/// with nonzero length, must designate `ulParameterLen` readable bytes.
+/// Short reads stay Raw, never UB.
 pub(crate) unsafe fn read_mechanism_with_shape(
     c_mech: &CK_MECHANISM,
     shape: Option<&str>,
@@ -1321,7 +1337,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                             random_info: WtlsRandomData { client_random, server_random },
                             mac_secret_handle: CkObjectHandle(output.hMacSecret as u64),
                             key_handle: CkObjectHandle(output.hKey as u64),
-                            iv,
+                            iv: iv.into(),
                         }))
                     }
                 }
@@ -2570,7 +2586,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                             read_sp800_108_derived_keys(
                                 p.pAdditionalDerivedKeys,
                                 p.ulAdditionalDerivedKeys,
-                            )
+                            )?
                         },
                     }))
                 }
@@ -2611,7 +2627,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                             read_sp800_108_derived_keys(
                                 p.pAdditionalDerivedKeys,
                                 p.ulAdditionalDerivedKeys,
-                            )
+                            )?
                         },
                     }))
                 }
@@ -2638,6 +2654,13 @@ pub(crate) fn gcm_iv_buffer_len(gcm: &CK_GCM_PARAMS) -> u64 {
     }
 }
 
+/// Read SP800-108 `CK_PRF_DATA_PARAM` entries into owned values (W1-L1-04).
+///
+/// # Safety
+///
+/// A null `data_params` (or zero `count`) yields empty; otherwise the
+/// pointer must designate `count` valid entries, and each non-null
+/// `pValue` must be readable for `ulValueLen` bytes.
 unsafe fn read_sp800_108_data_params(
     data_params: *mut CK_PRF_DATA_PARAM,
     count: CK_ULONG,
@@ -2661,6 +2684,14 @@ unsafe fn read_sp800_108_data_params(
         .collect()
 }
 
+/// Pre-validate SP800-108 data params: null/overlong shapes stay Raw
+/// (W1-L1-04).
+///
+/// # Safety
+///
+/// Same read contract as [`read_sp800_108_data_params`] (the validator
+/// only inspects pointer/length fields, never the payload bytes beyond
+/// their declared extents).
 unsafe fn sp800_108_data_params_invalid(
     data_params: *mut CK_PRF_DATA_PARAM,
     count: CK_ULONG,
@@ -2681,29 +2712,46 @@ unsafe fn sp800_108_data_params_invalid(
     })
 }
 
+/// Read SP800-108 derived keys, surfacing template errors loudly
+/// instead of defaulting them away (W1-L1-04).
+///
+/// # Safety
+///
+/// A null `derived_keys` (or zero `count`) yields empty; otherwise the
+/// pointer must designate `count` valid entries, each `pTemplate`
+/// satisfying the [`ck_attrs_to_rust_checked`] contract for its
+/// `ulAttributeCount`, and each non-null `phKey` readable for one
+/// handle.
 unsafe fn read_sp800_108_derived_keys(
     derived_keys: *mut CK_DERIVED_KEY,
     count: CK_ULONG,
-) -> Vec<Sp800108DerivedKey> {
+) -> CkResult<Vec<Sp800108DerivedKey>> {
     if derived_keys.is_null() || count == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     unsafe { std::slice::from_raw_parts(derived_keys, count as usize) }
         .iter()
         .map(|derived| {
-            // Inputs are pre-validated by `sp800_108_derived_keys_invalid`, so
-            // the fallible path is unreachable here; use the checked variant
-            // (empty template on the impossible error) rather than panicking.
+            // W1-L12-10: surface template errors instead of swallowing them
+            // into an empty vec. The completed pre-validator routes these
+            // inputs to the Raw fallback first, so this arm is unreachable
+            // in practice — but if it ever fires, the error propagates
+            // loudly rather than corrupting the structured params.
             let template =
-                unsafe { ck_attrs_to_rust_checked(derived.pTemplate, derived.ulAttributeCount) }
-                    .unwrap_or_default();
+                unsafe { ck_attrs_to_rust_checked(derived.pTemplate, derived.ulAttributeCount) }?;
             let key_handle =
                 if derived.phKey.is_null() { 0 } else { unsafe { *derived.phKey as u64 } };
-            Sp800108DerivedKey { template, key_handle: CkObjectHandle(key_handle) }
+            Ok(Sp800108DerivedKey { template, key_handle: CkObjectHandle(key_handle) })
         })
         .collect()
 }
 
+/// Pre-validate SP800-108 derived keys, including template CONTENT
+/// the checked reader would reject (W1-L1-04).
+///
+/// # Safety
+///
+/// Same read contract as [`read_sp800_108_derived_keys`].
 unsafe fn sp800_108_derived_keys_invalid(
     derived_keys: *mut CK_DERIVED_KEY,
     count: CK_ULONG,
@@ -2722,6 +2770,12 @@ unsafe fn sp800_108_derived_keys_invalid(
         missing_embedded_pointer(derived.pTemplate, derived.ulAttributeCount)
             || (derived.ulAttributeCount as usize) > MAX_TEMPLATE_COUNT
             || derived.phKey.is_null()
+            // W1-L12-10: complete the pre-validator — template CONTENT the
+            // checked reader would reject (NULL value with nonzero length,
+            // overlong payloads, malformed nesting) also stays Raw. Costs
+            // one extra template parse per derived key; KDF params are small.
+            || unsafe { ck_attrs_to_rust_checked(derived.pTemplate, derived.ulAttributeCount) }
+                .is_err()
     })
 }
 

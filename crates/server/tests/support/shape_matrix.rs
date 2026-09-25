@@ -735,7 +735,7 @@ pub fn all_shape_cases() -> Vec<ShapeCase> {
                     },
                     mac_secret_handle: CkObjectHandle(101),
                     key_handle: CkObjectHandle(202),
-                    iv: vec![0xA1; 8],
+                    iv: vec![0xA1; 8].into(),
                 })),
             },
             key: ShapeKeyHint::GenericSecret,

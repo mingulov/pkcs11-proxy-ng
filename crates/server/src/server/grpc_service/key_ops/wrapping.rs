@@ -137,6 +137,17 @@ async fn unwrap_key_impl(
         }
     };
 
+    // Mechanism policy gate (G3-PR3 Task 3): deny before backend call when the
+    // principal's grant does not include this unwrapping mechanism.
+    // W1-C1-13: the gate runs before remap on every init handler so identical
+    // dual-defect requests yield the same RV regardless of op.
+    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyResponse {
+            ck_rv: CkRv::MECHANISM_INVALID.0,
+            key_handle: 0,
+        }));
+    }
+
     // B1: remap object handles embedded in the mechanism parameters;
     // gate each through per-object authz when active (C1).
     if let Err(rv) =
@@ -144,15 +155,6 @@ async fn unwrap_key_impl(
     {
         return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyResponse {
             ck_rv: rv.0,
-            key_handle: 0,
-        }));
-    }
-
-    // Mechanism policy gate (G3-PR3 Task 3): deny before backend call when the
-    // principal's grant does not include this unwrapping mechanism.
-    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
-        return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyResponse {
-            ck_rv: CkRv::MECHANISM_INVALID.0,
             key_handle: 0,
         }));
     }
@@ -605,6 +607,61 @@ mod tests {
             response.into_inner().ck_rv,
             CkRv::KEY_FUNCTION_NOT_PERMITTED.0,
             "unauthenticated peer must bypass per-object extract deny"
+        );
+    }
+
+    fn mechanism_grant_policy(allowed_mechs: Vec<String>) -> TokenPolicy {
+        TokenPolicy::from_config(&AuthConfig {
+            allow_all_authenticated: false,
+            anonymous_principal: None,
+            policy: vec![PolicyEntry {
+                identity: MTLS_IDENTITY.into(),
+                tokens: TokenAccessSpec::Specific(vec![GrantSpec::Rich(RichGrantConfig {
+                    token: "label:MockToken".into(),
+                    classes: None,
+                    mechanisms: Some(allowed_mechs),
+                    extract: ExtractPolicyConfig::Allow,
+                    objects: None,
+                })]),
+            }],
+        })
+        .unwrap()
+    }
+
+    /// W1-C1-13 (wrap pin): the shared `prepare_wrap` admission must also
+    /// answer CKR_MECHANISM_INVALID for a dual defect (denied mechanism +
+    /// unresolvable embedded handle), matching every other init handler.
+    #[tokio::test]
+    async fn c1_13_dual_defect_returns_mechanism_invalid_on_wrap_key() {
+        let (ctx, ctx_id, session_handle) =
+            setup(mechanism_grant_policy(vec!["CKM_RSA_PKCS".into()]), Some(MTLS_IDENTITY.into()))
+                .await;
+        let ck = CkMechanism {
+            mechanism_type: CkMechanismType::HKDF_DERIVE,
+            params: Some(CkMechanismParams::Hkdf(HkdfParams {
+                extract: true,
+                expand: true,
+                prf_hash_mechanism: CkMechanismType(0),
+                salt_type: 0,
+                salt: Vec::new().into(),
+                salt_key_handle: CkObjectHandle(0xDEAD_BEEF),
+                info: Vec::new().into(),
+            })),
+        };
+        let req = pkcs11_proxy_ng_proto::WrapKeyRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle,
+            mechanism: Some(
+                pkcs11_proxy_ng_proto::Mechanism::try_from(&ck).expect("HKDF must convert"),
+            ),
+            wrapping_key_handle: 0,
+            key_handle: 0,
+        };
+        let response = super::wrap_key(&ctx, Request::new(req)).await.unwrap().into_inner();
+        assert_eq!(
+            response.ck_rv,
+            CkRv::MECHANISM_INVALID.0,
+            "denied mechanism must win over the bad embedded handle (permitted-before-remap)"
         );
     }
 }

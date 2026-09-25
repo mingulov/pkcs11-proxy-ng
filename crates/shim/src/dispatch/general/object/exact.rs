@@ -17,6 +17,12 @@ pub(super) struct AttributeCall {
 /// caller input when preset (F7/D5): backends such as SoftHSM select the
 /// sub-query by it, so it is forwarded verbatim like a direct call instead
 /// of being forced to 0.
+///
+/// # Safety
+///
+/// `pointer` must be non-null and point to a readable `CK_ATTRIBUTE`
+/// (field reads are unaligned-safe); nested child arrays, when present,
+/// must satisfy the same contract per element.
 pub(super) unsafe fn capture(
     pointer: CK_ATTRIBUTE_PTR,
     nested: bool,
@@ -105,7 +111,7 @@ pub(super) struct AttributeWrite {
 }
 
 fn checked_length(value: u64) -> CkResult<CK_ULONG> {
-    if value == pkcs11_proxy_ng_types::width::CANONICAL_UNAVAILABLE {
+    if value == pkcs11_proxy_ng_types::CANONICAL_UNAVAILABLE {
         return Ok(CK_UNAVAILABLE_INFORMATION);
     }
     CK_ULONG::try_from(value).map_err(|_| CkRv::GENERAL_ERROR)
@@ -143,9 +149,7 @@ fn prepare_one(
         if result.value.is_some() {
             return Err(CkRv::GENERAL_ERROR);
         }
-        if result.apply_returned_len
-            && length != pkcs11_proxy_ng_types::width::CANONICAL_UNAVAILABLE
-        {
+        if result.apply_returned_len && length != pkcs11_proxy_ng_types::CANONICAL_UNAVAILABLE {
             if backend_stride == 0 || !length.is_multiple_of(backend_stride as u64) {
                 return Err(CkRv::GENERAL_ERROR);
             }
@@ -215,8 +219,8 @@ fn prepare_one(
             // bytes, unsupported widths) fail the whole call.
             (value, length) = match outcome {
                 Ok(pair) => pair,
-                Err(pkcs11_proxy_ng_types::width::WidthError::Overflow) => {
-                    (None, pkcs11_proxy_ng_types::width::CANONICAL_UNAVAILABLE)
+                Err(pkcs11_proxy_ng_types::WidthError::Overflow) => {
+                    (None, pkcs11_proxy_ng_types::CANONICAL_UNAVAILABLE)
                 }
                 Err(_) => return Err(CkRv::GENERAL_ERROR),
             };
@@ -271,6 +275,12 @@ pub(super) fn prepare(
 
 /// The prepared plan owns validated bytes and captured destinations. No caller
 /// field is re-read; validation failure therefore cannot produce a partial store.
+///
+/// # Safety
+///
+/// `writes` must be the validated plan for still-live caller structs:
+/// every captured destination writable for its recorded extent, with no
+/// aliasing writes since capture.
 pub(super) unsafe fn commit(writes: Vec<AttributeWrite>) {
     for write in writes {
         if let Some(value) = write.value {
@@ -433,7 +443,7 @@ mod tests {
                 unsafe { capture(attrs.as_mut_ptr().add(i), false, host, host, stride) }.unwrap()
             })
             .collect();
-        let big = pkcs11_proxy_ng_types::width::encode_native_ulong(0x1_0000_0001, 8);
+        let big = pkcs11_proxy_ng_types::encode_native_ulong(0x1_0000_0001, 8);
         let results = [
             CkAttributeQueryResult {
                 attr_type: CkAttributeType::CLASS,

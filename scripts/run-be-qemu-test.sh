@@ -204,6 +204,7 @@ be_cargo test --target "$TARGET" -p pkcs11-proxy-ng
 echo "[be-qemu] (6/6) C-ABI suite against the s390x shim cdylib ..."
 be_cargo build --target "$TARGET" -p pkcs11-proxy-ng-shim
 if [[ "$RUN_MODE" == "docker" ]]; then
+    # shellcheck disable=SC2086
     docker run --rm \
         -v "$ROOT_DIR:/workspace:ro" \
         -v "$CARGO_VOLUME:/root/.cargo" \

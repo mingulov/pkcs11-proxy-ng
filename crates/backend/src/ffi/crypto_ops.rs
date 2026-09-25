@@ -281,15 +281,11 @@ impl FfiBackend {
         let (data_ptr, data_len) = data.as_ptr_len();
         let (sig_ptr, sig_len) = signature.as_ptr_len();
         let h_session = Self::session_handle(session)?;
+        let ck_data_len = Self::ulong_len_u64(data_len)?;
+        let ck_sig_len = Self::ulong_len_u64(sig_len)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_unit(&admission, unsafe { (*self.func_list).C_Verify }, |function| unsafe {
-            function(
-                h_session,
-                data_ptr as *mut _,
-                Self::ulong_len_u64(data_len),
-                sig_ptr as *mut _,
-                Self::ulong_len_u64(sig_len),
-            )
+            function(h_session, data_ptr as *mut _, ck_data_len, sig_ptr as *mut _, ck_sig_len)
         })
     }
 

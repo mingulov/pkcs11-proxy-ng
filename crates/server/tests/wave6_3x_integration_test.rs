@@ -18,7 +18,7 @@ use pkcs11_proxy_ng_types::*;
 mod common_3x;
 use common_3x::{init_client, mock_daemon};
 
-const CKF_SERIAL: CkSessionFlags = CkSessionFlags(CkSessionFlags::SERIAL_SESSION);
+const CKF_SERIAL: CkSessionFlags = CkSessionFlags::SERIAL_SESSION;
 
 fn test_mechanism() -> CkMechanism {
     CkMechanism { mechanism_type: CkMechanismType(0x00000001), params: None }

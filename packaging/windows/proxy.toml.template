@@ -1,0 +1,42 @@
+# pkcs11-proxy-ng Windows daemon config template.
+#
+# Shipped in the deterministic Windows ZIP (scripts/release-windows.sh).
+# Copy to proxy.toml next to the extracted bundle and edit the four
+# REQUIRED paths below, then start the daemon under the bundled
+# Run-Pkcs11ProxyNg.ps1 supervisor (see its header for the
+# scheduled-task registration). Runbook: doc/runbooks/operating-
+# pkcs11-proxy-ng.md §4b (Windows daemon operations).
+#
+# Windows constraints (fail-fast at startup if violated):
+#   * [listener.remote] with auth = "mtls" ONLY. There is no
+#     [listener.local] on Windows (no unix sockets / peer creds).
+#   * No SIGHUP reload: config or registry changes need a restart.
+#   * Backslashes in TOML basic strings must be escaped (\\).
+
+[backend]
+# REQUIRED. Path to the backend PKCS#11 module on the guest
+# (e.g. the SoftHSM2 or vendor HSM driver DLL).
+module = "C:\\CHANGE_ME\\path\\to\\backend.dll"
+
+[proxy]
+# Backend-call timeout (also gRPC request timeout).
+request_timeout_secs = 60
+# Backend probe timeout at daemon startup.
+startup_timeout_secs = 30
+
+[listener.remote]
+bind = "127.0.0.1:7512"
+auth = "mtls"
+# REQUIRED. PEM paths for the mTLS server identity + client CA.
+ca_cert = "C:\\CHANGE_ME\\tls\\ca.pem"
+server_cert = "C:\\CHANGE_ME\\tls\\server.pem"
+server_key = "C:\\CHANGE_ME\\tls\\server-key.pem"
+
+[auth]
+# All mTLS-authenticated clients may use all tokens. For per-client
+# token ACLs, set allow_all_authenticated = false and add
+# [[auth.policy]] entries keyed by client SPKI fingerprint:
+#   [[auth.policy]]
+#   identity = "x509:spki=<hex-sha256-of-client-public-key>"
+#   tokens = "all"
+allow_all_authenticated = true

@@ -76,8 +76,7 @@ pub unsafe extern "C" fn c_get_slot_info(slot_id: CK_SLOT_ID, p_info: CK_SLOT_IN
 /// backend value exceeding 32-bit range surfaces as "no information available"
 /// rather than a silently truncated, misleading number.
 fn token_info_field(wire: u64) -> CK_ULONG {
-    pkcs11_proxy_ng_types::width::narrow_info_field(wire, std::mem::size_of::<CK_ULONG>())
-        as CK_ULONG
+    narrow_info_field(wire, std::mem::size_of::<CK_ULONG>()) as CK_ULONG
 }
 
 pub unsafe extern "C" fn c_get_token_info(slot_id: CK_SLOT_ID, p_info: CK_TOKEN_INFO_PTR) -> CK_RV {
@@ -194,7 +193,7 @@ pub unsafe extern "C" fn c_get_mechanism_info(
 mod token_info_field_tests {
     use super::token_info_field;
     use cryptoki_sys::{CK_ULONG, CK_UNAVAILABLE_INFORMATION};
-    use pkcs11_proxy_ng_types::width::CANONICAL_UNAVAILABLE;
+    use pkcs11_proxy_ng_types::CANONICAL_UNAVAILABLE;
 
     #[test]
     fn maps_canonical_sentinel_to_native_unavailable() {

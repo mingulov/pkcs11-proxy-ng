@@ -26,13 +26,15 @@ pub(crate) fn parse_mechanism(name: &str) -> Result<u64, Box<dyn core::error::Er
     let upper = name.to_uppercase();
     let key = upper.strip_prefix("CKM_").unwrap_or(&upper);
 
-    // Also accept common aliases
+    // Also accept common aliases (W1-C11-24: SHA_224/SHA1_HMAC get
+    // the same leniency as SHA_256/SHA1).
     let key = match key {
         "SHA1" => "SHA_1",
+        "SHA1_HMAC" => "SHA_1_HMAC",
         "SHA256" | "SHA_256" => "SHA256",
         "SHA384" | "SHA_384" => "SHA384",
         "SHA512" | "SHA_512" => "SHA512",
-        "SHA224" => "SHA224",
+        "SHA224" | "SHA_224" => "SHA224",
         other => other,
     };
 
@@ -267,6 +269,9 @@ mod tests {
             ("SHA512", 0x270),
             ("SHA_512", 0x270),
             ("SHA224", 0x255),
+            // W1-C11-24: same leniency as SHA_256/SHA1.
+            ("SHA_224", 0x255),
+            ("SHA1_HMAC", 0x221),
         ];
         for (alias, id) in aliases {
             assert_eq!(parse_mechanism(alias).unwrap(), *id, "{alias}");

@@ -128,9 +128,12 @@ fn mtls_identity_display_format() {
 }
 
 #[test]
-fn uri_selector_deferred() {
-    let selector = TokenSelector::Uri("pkcs11:token=foo".into());
-    assert!(!selector.matches("foo", "bar"));
+fn pkcs11_uri_selectors_rejected_at_parse() {
+    // W1-C3-17: the unconstructible TokenSelector::Uri variant is gone
+    // (there is no matches() arm left to hardcode); pkcs11: URIs fail
+    // loudly at parse — use label:/serial:.
+    let err = TokenSelector::parse("pkcs11:token=foo").unwrap_err();
+    assert!(err.contains("not yet supported"), "error: {err}");
 }
 
 #[test]
@@ -344,9 +347,18 @@ fn parse_unrecognized_prefix_rejected() {
 }
 
 #[test]
-fn parse_trims_whitespace() {
-    let s = TokenSelector::parse("  label:  Token  ").unwrap();
+fn parse_trims_trailing_padding_only() {
+    // W1-C3-37 reverses the old trim-everything behavior this test
+    // pinned: leading characters are significant per backend semantics
+    // (blank-padded fields pad only the trailing end), so leading
+    // whitespace is preserved in values, and a leading-whitespace
+    // prefix is rejected loudly instead of silently matching the
+    // unpadded label (the old direction was over-permissive).
+    let s = TokenSelector::parse("label:Token  ").unwrap();
     assert_eq!(s, TokenSelector::Label("Token".into()));
+    let s = TokenSelector::parse("label:  Token").unwrap();
+    assert_eq!(s, TokenSelector::Label("  Token".into()));
+    assert!(TokenSelector::parse("  label:Token").is_err());
 }
 
 #[test]
@@ -1184,6 +1196,19 @@ fn parse_class_unknown_name_returns_error() {
     assert!(err.contains("not_a_class"), "error: {err}");
 }
 
+// W1-C3-20: the unknown-class error must list every accepted name,
+// including vendor_defined (which parses successfully).
+#[test]
+fn parse_class_error_lists_vendor_defined() {
+    assert_eq!(parse_class("vendor_defined").unwrap(), CkObjectClass::VENDOR_DEFINED);
+    assert_eq!(parse_class("CKO_VENDOR_DEFINED").unwrap(), CkObjectClass::VENDOR_DEFINED);
+    let err = parse_class("not_a_class").unwrap_err();
+    for name in ["data", "certificate", "public_key", "private_key", "secret_key", "vendor_defined"]
+    {
+        assert!(err.contains(name), "error must list '{name}': {err}");
+    }
+}
+
 #[test]
 fn parse_mechanism_named_forms() {
     assert_eq!(parse_mechanism("CKM_AES_GCM").unwrap(), CkMechanismType::AES_GCM);
@@ -1942,6 +1967,29 @@ fn sustained_unique_spki_peers_keep_logged_set_bounded() {
         super::logged_spki_len() <= super::LOG_DEDUP_CAP,
         "LOGGED_SPKI must stay bounded under sustained unique peers"
     );
+}
+
+/// W1-L7-06 (residual pin on the W1-C3-10 eviction): eviction must log
+/// at debug and never warn-spam. Pinned by source scan rather than a
+/// tracing capture: callsite-interest caching is process-global, so a
+/// capture races sibling tests emitting from the same callsite
+/// unscoped in full parallel runs (observed flake), while the scan is
+/// deterministic. Eviction *behavior* (FIFO past the cap) is covered
+/// functionally by `log_dedup_set_evicts_oldest_past_cap`; only the
+/// log-level property stays structural (a tracing capture flaked — see
+/// the T30 report — so there is no cheap deterministic functional pin).
+#[test]
+fn l7_06_log_dedup_eviction_logs_at_debug_never_warn() {
+    // Deferred T30 M2: intentionally refactor-brittle/fail-closed — update this pin if the pinned structure moves deliberately.
+    let src = include_str!("../policy.rs");
+    let insert = src
+        .split("fn insert(&mut self, key: String) -> bool")
+        .nth(1)
+        .expect("LogDedupSet::insert must exist");
+    let body = insert.split("\n    }\n").next().unwrap_or(insert);
+    assert!(body.contains("tracing::debug!"), "eviction must log at debug");
+    assert!(!body.contains("tracing::warn!"), "eviction must never warn-spam");
+    assert!(!body.contains("tracing::error!"), "eviction must never error-spam");
 }
 
 #[test]

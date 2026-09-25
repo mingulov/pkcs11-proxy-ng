@@ -49,14 +49,21 @@ impl FfiBackend {
         narrow_wire_ulong(mech.0)
     }
 
+    /// Checked narrowing for byte/element counts crossing into native
+    /// calls (W1-C4-05): same doctrine as [`narrow_wire_ulong`] — an
+    /// unrepresentable count on a narrow-`CK_ULONG` host fails loudly
+    /// with `CKR_FUNCTION_FAILED`, never truncates. On 64-bit hosts
+    /// these are infallible pass-throughs. No longer `const`: narrowing
+    /// can fail.
     #[inline]
-    pub(super) const fn ulong_len(len: usize) -> cryptoki_sys::CK_ULONG {
-        len as cryptoki_sys::CK_ULONG
+    #[allow(clippy::unnecessary_fallible_conversions)] // width-generic: fallible only on narrow hosts
+    pub(super) fn ulong_len(len: usize) -> CkResult<cryptoki_sys::CK_ULONG> {
+        narrow_wire_ulong(u64::try_from(len).map_err(|_| CkRv::FUNCTION_FAILED)?)
     }
 
     #[inline]
-    pub(super) const fn ulong_len_u64(len: u64) -> cryptoki_sys::CK_ULONG {
-        len as cryptoki_sys::CK_ULONG
+    pub(super) fn ulong_len_u64(len: u64) -> CkResult<cryptoki_sys::CK_ULONG> {
+        narrow_wire_ulong(len)
     }
 
     /// Map a cryptoki_sys CK_RV to CkResult.
@@ -230,7 +237,8 @@ impl FfiBackend {
     {
         let function = Self::require_fn(function)?;
         let mut bytes = vec![0u8; len];
-        Self::ck_result(call(function, bytes.as_mut_ptr(), Self::ulong_len(len)))?;
+        let ck_len = Self::ulong_len(len)?;
+        Self::ck_result(call(function, bytes.as_mut_ptr(), ck_len))?;
         // ADR-0013 S5: adopt the provider-written buffer immediately.
         Ok(SecretBytes::new(bytes))
     }
@@ -764,13 +772,17 @@ impl FfiBackend {
         // Surface post-call params on data and genuine missing-length calls:
         // always on OK, and on errors iff the params changed since the
         // pre-call snapshot. Ordinary NULL-output size queries suppress them.
-        let after = ffi_mech.output_params();
+        // W1-C4-04: reuse the pre-call snapshot when the allocation-free
+        // probe reports the provider wrote nothing, so the common path
+        // snapshots once per call instead of twice; outputs are identical.
         let mechanism_out = if !(spec.buffer_present || spec.length_pointer_null) {
             None
-        } else if result.ck_rv == CkRv::OK || after != before {
-            after
-        } else {
+        } else if result.ck_rv == CkRv::OK {
+            if ffi_mech.output_params_equal(&before) { before } else { ffi_mech.output_params() }
+        } else if ffi_mech.output_params_equal(&before) {
             None
+        } else {
+            ffi_mech.output_params()
         };
         Ok((result, mechanism_out))
     }
@@ -1292,6 +1304,23 @@ mod output_cap_tests {
                 Err(CkRv::FUNCTION_FAILED)
             );
             assert_eq!(FfiBackend::slot_id(CkSlotId(u64::MAX)), Err(CkRv::FUNCTION_FAILED));
+        }
+    }
+
+    #[test]
+    fn ulong_len_checked_narrowing_matches_sibling_convention() {
+        // W1-C4-05: ulong_len/ulong_len_u64 must narrow via the checked
+        // sibling convention (FUNCTION_FAILED on narrow hosts), never a
+        // truncating `as` cast. Small values pass through on every host.
+        assert_eq!(FfiBackend::ulong_len(7).unwrap(), 7);
+        assert_eq!(FfiBackend::ulong_len_u64(7).unwrap(), 7);
+        assert_eq!(FfiBackend::ulong_len(usize::MAX).unwrap(), cryptoki_sys::CK_ULONG::MAX);
+        let too_big = u64::from(u32::MAX) + 1;
+        if size_of::<cryptoki_sys::CK_ULONG>() >= size_of::<u64>() {
+            assert_eq!(FfiBackend::ulong_len_u64(u64::MAX).unwrap(), cryptoki_sys::CK_ULONG::MAX);
+        } else {
+            assert_eq!(FfiBackend::ulong_len_u64(too_big), Err(CkRv::FUNCTION_FAILED));
+            assert_eq!(FfiBackend::ulong_len_u64(u64::MAX), Err(CkRv::FUNCTION_FAILED));
         }
     }
 }

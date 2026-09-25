@@ -87,10 +87,10 @@ impl FfiBackend {
     ) -> CkResult<()> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         // W1-L11-12: the shared types helper is the single padding impl.
-        let mut label_buf = [0u8; 32];
+        let mut label_buf = [0u8; pkcs11_proxy_ng_types::PKCS11_TOKEN_LABEL_LEN];
         pkcs11_proxy_ng_types::space_pad_into(&mut label_buf, label);
         let (pin_ptr, pin_len) = match so_pin {
-            Some(p) => (p.as_ptr() as *mut _, Self::ulong_len(p.len())),
+            Some(p) => (p.as_ptr() as *mut _, Self::ulong_len(p.len())?),
             None => (std::ptr::null_mut(), 0),
         };
         let h_slot = Self::slot_id(slot_id)?;
@@ -106,7 +106,7 @@ impl FfiBackend {
     ) -> CkResult<()> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let (pin_ptr, pin_len) = match pin {
-            Some(p) => (p.as_ptr() as *mut _, Self::ulong_len(p.len())),
+            Some(p) => (p.as_ptr() as *mut _, Self::ulong_len(p.len())?),
             None => (std::ptr::null_mut(), 0),
         };
         let h_session = Self::session_handle(session)?;
@@ -124,11 +124,11 @@ impl FfiBackend {
     ) -> CkResult<()> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let (old_ptr, old_len) = match old_pin {
-            Some(p) => (p.as_ptr() as *mut _, Self::ulong_len(p.len())),
+            Some(p) => (p.as_ptr() as *mut _, Self::ulong_len(p.len())?),
             None => (std::ptr::null_mut(), 0),
         };
         let (new_ptr, new_len) = match new_pin {
-            Some(p) => (p.as_ptr() as *mut _, Self::ulong_len(p.len())),
+            Some(p) => (p.as_ptr() as *mut _, Self::ulong_len(p.len())?),
             None => (std::ptr::null_mut(), 0),
         };
         let h_session = Self::session_handle(session)?;
@@ -276,7 +276,7 @@ impl FfiBackend {
     ) -> CkResult<()> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let (pin_ptr, pin_len) = match pin {
-            Some(p) => (p.as_ptr() as *mut _, Self::ulong_len(p.len())),
+            Some(p) => (p.as_ptr() as *mut _, Self::ulong_len(p.len())?),
             None => (std::ptr::null_mut(), 0),
         };
         let h_session = Self::session_handle(session)?;
@@ -531,9 +531,7 @@ mod tests {
         // TF01b `call_session_output` ordinary proof: no admission pre-Init.
         let (backend, _functions) = backend_with_open_session();
         assert_eq!(
-            backend
-                .ffi_open_session(CkSlotId(11), CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-                .unwrap_err(),
+            backend.ffi_open_session(CkSlotId(11), CkSessionFlags::SERIAL_SESSION).unwrap_err(),
             CkRv::CRYPTOKI_NOT_INITIALIZED
         );
     }
@@ -647,9 +645,7 @@ mod tests {
         let (backend, _functions) = backend_with_open_session();
         backend.lifecycle_domain.open_for_tests();
         assert_eq!(
-            backend
-                .ffi_open_session(CkSlotId(11), CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-                .unwrap(),
+            backend.ffi_open_session(CkSlotId(11), CkSessionFlags::SERIAL_SESSION).unwrap(),
             CkSessionHandle(41)
         );
     }

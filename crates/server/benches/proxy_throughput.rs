@@ -28,14 +28,13 @@ async fn build_signing_state(endpoint: &str) -> (Pkcs11Client, CkSessionHandle, 
     let mut c = Pkcs11Client::connect(endpoint).await.unwrap();
     c.initialize().await.unwrap();
     let slots = c.get_slot_list(false).await.unwrap();
-    let session =
-        c.open_session(slots[0], CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await.unwrap();
+    let session = c.open_session(slots[0], CkSessionFlags::SERIAL_SESSION).await.unwrap();
     let key = c.create_object(session, Some(&[])).await.unwrap();
     (c, session, key)
 }
 
 async fn run_qd(endpoint: &str, qd: usize, duration: Duration) -> (u64, Histogram<u64>) {
-    let mech = Arc::new(CkMechanism { mechanism_type: CkMechanismType(0x00000001), params: None });
+    let mech = Arc::new(CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None });
     let counter = Arc::new(AtomicU64::new(0));
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let payload = Arc::new(vec![0xABu8; 256]);

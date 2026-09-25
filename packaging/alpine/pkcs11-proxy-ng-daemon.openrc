@@ -12,6 +12,18 @@ description="Rust PKCS#11 remote proxy daemon"
 command="/usr/bin/pkcs11-proxy-ng"
 command_args="/etc/pkcs11-proxy-ng/proxy.toml"
 command_user="root"
+# Privilege drop (mirrors the systemd unit's User=/Group= stanza in
+# packaging/amazon/pkcs11-proxy-ng.service). To run as a dedicated
+# user instead of root:
+#   1. adduser -S -H -D pkcs11-proxy-ng
+#   2. switch the line above to:
+#        command_user="pkcs11-proxy-ng:pkcs11-proxy-ng"
+#   3. grant that user read access to /etc/pkcs11-proxy-ng and the
+#      backend .so, plus read access to any HSM device nodes it needs.
+# The pidfile and log stay root-managed (start-stop-daemon opens them
+# before dropping privileges), so no pid/log re-chown is needed.
+# Operators with HSM hardware that needs root access (e.g. /dev/cardx)
+# should keep command_user="root" — same guidance as the systemd unit.
 command_background="yes"
 pidfile="/run/${name}.pid"
 output_log="/var/log/${name}.log"

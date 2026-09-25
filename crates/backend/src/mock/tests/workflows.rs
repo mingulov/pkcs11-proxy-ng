@@ -1000,7 +1000,7 @@ fn mock_mechanism_info_uses_source_grounded_workflow_flags() {
 
     for (mechanism, expected_flags) in cases {
         let info = backend.get_mechanism_info(CkSlotId(0), mechanism).unwrap();
-        assert_eq!(info.flags, CkMechanismFlags(expected_flags as u64), "mechanism {mechanism:?}");
+        assert_eq!(info.flags, expected_flags, "mechanism {mechanism:?}");
     }
 }
 
@@ -2017,14 +2017,14 @@ fn mock_encrypt_decrypt_roundtrip() {
 fn wait_for_slot_event_no_event_when_empty() {
     let backend = MockBackend::default_test();
     backend.initialize().unwrap();
-    assert_eq!(backend.wait_for_slot_event(CkFlags::DONT_BLOCK).unwrap_err(), CkRv::NO_EVENT);
+    assert_eq!(backend.wait_for_slot_event(CkFlags::DONT_BLOCK.0).unwrap_err(), CkRv::NO_EVENT);
 }
 
 #[test]
 fn wait_for_slot_event_before_initialize_returns_cryptoki_not_initialized() {
     let backend = MockBackend::default_test();
     assert_eq!(
-        backend.wait_for_slot_event(CkFlags::DONT_BLOCK).unwrap_err(),
+        backend.wait_for_slot_event(CkFlags::DONT_BLOCK.0).unwrap_err(),
         CkRv::CRYPTOKI_NOT_INITIALIZED
     );
 }
@@ -2034,7 +2034,7 @@ fn wait_for_slot_event_returns_queued_event() {
     let backend = MockBackend::default_test();
     backend.initialize().unwrap();
     backend.enqueue_slot_event(CkSlotId(3));
-    let slot = backend.wait_for_slot_event(CkFlags::DONT_BLOCK).unwrap();
+    let slot = backend.wait_for_slot_event(CkFlags::DONT_BLOCK.0).unwrap();
     assert_eq!(slot, CkSlotId(3));
 }
 
@@ -2045,10 +2045,10 @@ fn wait_for_slot_event_fifo_order() {
     backend.enqueue_slot_event(CkSlotId(1));
     backend.enqueue_slot_event(CkSlotId(2));
     backend.enqueue_slot_event(CkSlotId(3));
-    assert_eq!(backend.wait_for_slot_event(CkFlags::DONT_BLOCK).unwrap(), CkSlotId(1));
-    assert_eq!(backend.wait_for_slot_event(CkFlags::DONT_BLOCK).unwrap(), CkSlotId(2));
-    assert_eq!(backend.wait_for_slot_event(CkFlags::DONT_BLOCK).unwrap(), CkSlotId(3));
-    assert_eq!(backend.wait_for_slot_event(CkFlags::DONT_BLOCK).unwrap_err(), CkRv::NO_EVENT);
+    assert_eq!(backend.wait_for_slot_event(CkFlags::DONT_BLOCK.0).unwrap(), CkSlotId(1));
+    assert_eq!(backend.wait_for_slot_event(CkFlags::DONT_BLOCK.0).unwrap(), CkSlotId(2));
+    assert_eq!(backend.wait_for_slot_event(CkFlags::DONT_BLOCK.0).unwrap(), CkSlotId(3));
+    assert_eq!(backend.wait_for_slot_event(CkFlags::DONT_BLOCK.0).unwrap_err(), CkRv::NO_EVENT);
 }
 
 #[test]
@@ -2081,7 +2081,7 @@ fn initialize_clears_pending_slot_events() {
     backend.enqueue_slot_event(CkSlotId(3));
     backend.initialize().unwrap();
 
-    assert_eq!(backend.wait_for_slot_event(CkFlags::DONT_BLOCK).unwrap_err(), CkRv::NO_EVENT);
+    assert_eq!(backend.wait_for_slot_event(CkFlags::DONT_BLOCK.0).unwrap_err(), CkRv::NO_EVENT);
 }
 
 #[test]
@@ -2089,7 +2089,7 @@ fn wait_for_slot_event_event_slots_need_not_be_in_slot_list() {
     let backend = MockBackend::default_test();
     backend.initialize().unwrap();
     backend.enqueue_slot_event(CkSlotId(99));
-    let slot = backend.wait_for_slot_event(CkFlags::DONT_BLOCK).unwrap();
+    let slot = backend.wait_for_slot_event(CkFlags::DONT_BLOCK.0).unwrap();
     assert_eq!(slot, CkSlotId(99));
 }
 

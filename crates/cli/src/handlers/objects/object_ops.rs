@@ -16,6 +16,46 @@ fn format_ulong_attribute(attr_type: CkAttributeType, value: u64) -> String {
     }
 }
 
+/// Attribute types whose values are key material (W1-L2-12): the
+/// secret-key/private-key blobs `get-attribute --redact` replaces with
+/// `[redacted]`. Public halves (MODULUS, PUBLIC_EXPONENT, EC_POINT,
+/// ...) and metadata are never secret.
+///
+/// Delegates to the canonical types-crate classifier (review M2) so the
+/// redaction list cannot drift from the extract gate's.
+fn is_secret_attribute(attr_type: CkAttributeType) -> bool {
+    is_value_bearing_secret(attr_type)
+}
+
+/// Render one `get-attribute` output line (W1-L2-12): with `redact`, a
+/// present secret value prints as `[redacted]`; everything else keeps
+/// its exact historical shape.
+fn format_attribute_value(name: &str, attribute: &CkAttribute, redact: bool) -> String {
+    if redact && attribute.value.is_some() && is_secret_attribute(attribute.attr_type) {
+        return format!("  {name}: [redacted]");
+    }
+    match &attribute.value {
+        Some(CkAttributeValue::Bytes(bytes)) => bytes.expose(|raw| {
+            if raw.iter().all(|byte| byte.is_ascii_graphic() || *byte == b' ') {
+                format!("  {name}: \"{}\"", String::from_utf8_lossy(raw))
+            } else {
+                format!("  {name}: 0x{}", hex::encode(raw))
+            }
+        }),
+        Some(CkAttributeValue::Ulong(value)) => {
+            format!("  {name}: {}", format_ulong_attribute(attribute.attr_type, *value))
+        }
+        Some(CkAttributeValue::Bool(value)) => format!("  {name}: {value}"),
+        Some(CkAttributeValue::String(value)) => {
+            value.expose(|raw| format!("  {name}: \"{}\"", String::from_utf8_lossy(raw)))
+        }
+        Some(CkAttributeValue::NestedTemplate(subs)) => {
+            format!("  {name}: <nested template, {} attributes>", subs.len())
+        }
+        None => format!("  {name}: <unavailable>"),
+    }
+}
+
 pub(crate) async fn find_objects(
     client: &mut Pkcs11Client,
     slot_id: u64,
@@ -23,8 +63,7 @@ pub(crate) async fn find_objects(
     label: Option<String>,
     verbose: bool,
 ) -> CliResult {
-    let session =
-        open_session(client, slot_id, CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await?;
+    let session = open_session(client, slot_id, CkSessionFlags::SERIAL_SESSION).await?;
     // By-value PIN (W1-L2-11): consume it into login, keep only the
     // logged-in flag for session teardown.
     let logged_in = pin.is_some();
@@ -71,12 +110,9 @@ pub(crate) async fn destroy_object(
     pin: Option<SecretBytes>,
     object_handle: u64,
 ) -> CliResult {
-    let session = open_session(
-        client,
-        slot_id,
-        CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
-    )
-    .await?;
+    let session =
+        open_session(client, slot_id, CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION)
+            .await?;
     let logged_in = pin.is_some();
     login_if_present(client, session, pin).await?;
     client
@@ -94,8 +130,7 @@ pub(crate) async fn get_object_size(
     pin: Option<SecretBytes>,
     object_handle: u64,
 ) -> CliResult {
-    let session =
-        open_session(client, slot_id, CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await?;
+    let session = open_session(client, slot_id, CkSessionFlags::SERIAL_SESSION).await?;
     let logged_in = pin.is_some();
     login_if_present(client, session, pin).await?;
     let size = client
@@ -114,12 +149,9 @@ pub(crate) async fn create_object(
     label: String,
     value: Option<String>,
 ) -> CliResult {
-    let session = open_session(
-        client,
-        slot_id,
-        CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
-    )
-    .await?;
+    let session =
+        open_session(client, slot_id, CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION)
+            .await?;
     login_user(client, session, pin).await?;
 
     let mut template = vec![
@@ -159,9 +191,15 @@ pub(crate) async fn get_attribute(
     pin: Option<SecretBytes>,
     object_handle: u64,
     attr: Vec<String>,
+    redact: bool,
 ) -> CliResult {
-    let session =
-        open_session(client, slot_id, CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await?;
+    // W1-C11-31: an empty query prints nothing and would exit 0 — reject
+    // it loudly before any session/RPC work (clap also requires --attr,
+    // this guards programmatic callers).
+    if attr.is_empty() {
+        return Err("get-attribute requires at least one --attr (e.g. --attr LABEL)".into());
+    }
+    let session = open_session(client, slot_id, CkSessionFlags::SERIAL_SESSION).await?;
     let logged_in = pin.is_some();
     login_if_present(client, session, pin).await?;
 
@@ -177,34 +215,12 @@ pub(crate) async fn get_attribute(
         .await
         .map_err(crate::handlers::cli_err("C_GetAttributeValue"))?;
     if get_rv.is_err() {
-        eprintln!(
-            "warning: C_GetAttributeValue returned CKR 0x{:08X} (partial results follow)",
-            get_rv.0
-        );
+        eprintln!("warning: C_GetAttributeValue returned {get_rv} (partial results follow)");
     }
 
     for attribute in &results {
         let name = attr_type_name(attribute.attr_type.0);
-        match &attribute.value {
-            Some(CkAttributeValue::Bytes(bytes)) => bytes.expose(|raw| {
-                if raw.iter().all(|byte| byte.is_ascii_graphic() || *byte == b' ') {
-                    println!("  {}: \"{}\"", name, String::from_utf8_lossy(raw));
-                } else {
-                    println!("  {}: 0x{}", name, hex::encode(raw));
-                }
-            }),
-            Some(CkAttributeValue::Ulong(value)) => {
-                println!("  {}: {}", name, format_ulong_attribute(attribute.attr_type, *value))
-            }
-            Some(CkAttributeValue::Bool(value)) => println!("  {}: {}", name, value),
-            Some(CkAttributeValue::String(value)) => {
-                value.expose(|raw| println!("  {}: \"{}\"", name, String::from_utf8_lossy(raw)))
-            }
-            Some(CkAttributeValue::NestedTemplate(subs)) => {
-                println!("  {}: <nested template, {} attributes>", name, subs.len());
-            }
-            None => println!("  {}: <unavailable>", name),
-        }
+        println!("{}", format_attribute_value(&name, attribute, redact));
     }
 
     close_session(client, session, logged_in).await;
@@ -213,8 +229,8 @@ pub(crate) async fn get_attribute(
 
 #[cfg(test)]
 mod tests {
-    use super::format_ulong_attribute;
-    use pkcs11_proxy_ng_types::CkAttributeType;
+    use super::{format_attribute_value, format_ulong_attribute, is_secret_attribute};
+    use pkcs11_proxy_ng_types::{CkAttribute, CkAttributeType, CkAttributeValue};
 
     // W1-C11-07: CLASS renders symbolically from the now-typed Ulong
     // value; other ulong attrs render decoded (no raw-LE-hex fallback).
@@ -226,5 +242,100 @@ mod tests {
     #[test]
     fn non_class_ulong_renders_decoded_number() {
         assert_eq!(format_ulong_attribute(CkAttributeType::VALUE_LEN, 32), "32".to_string());
+    }
+
+    // W1-L2-12: exactly the key-material attributes count as secret
+    // (public halves and metadata never redact).
+    #[test]
+    fn is_secret_attribute_pins_key_material() {
+        use CkAttributeType as T;
+        for secret in [
+            T::VALUE,
+            T::PRIVATE_EXPONENT,
+            T::PRIME_1,
+            T::PRIME_2,
+            T::EXPONENT_1,
+            T::EXPONENT_2,
+            T::COEFFICIENT,
+        ] {
+            assert!(is_secret_attribute(secret), "{secret:?} must be secret");
+        }
+        for public in [
+            T::LABEL,
+            T::CLASS,
+            T::KEY_TYPE,
+            T::MODULUS,
+            T::MODULUS_BITS,
+            T::PUBLIC_EXPONENT,
+            T::EC_PARAMS,
+            T::EC_POINT,
+            T::ID,
+            T::SUBJECT,
+            T::ISSUER,
+            T::SERIAL_NUMBER,
+            T::VALUE_LEN,
+        ] {
+            assert!(!is_secret_attribute(public), "{public:?} must not be secret");
+        }
+    }
+
+    // W1-L2-12: --redact hides secret values only; public values still
+    // print, and unredacted secrets still print (explicitly requested).
+    #[test]
+    fn format_attribute_redacts_secrets_only_when_asked() {
+        let secret = CkAttribute {
+            attr_type: CkAttributeType::VALUE,
+            value: Some(CkAttributeValue::Bytes(vec![0xab, 0xcd].into())),
+        };
+        let redacted = format_attribute_value("VALUE", &secret, true);
+        assert!(redacted.contains("[redacted]"), "must redact: {redacted}");
+        assert!(!redacted.contains("abcd"), "must not leak hex: {redacted}");
+        let shown = format_attribute_value("VALUE", &secret, false);
+        assert!(shown.contains("abcd"), "explicit request prints: {shown}");
+
+        let label = CkAttribute {
+            attr_type: CkAttributeType::LABEL,
+            value: Some(CkAttributeValue::String("my-key".to_string().into())),
+        };
+        let line = format_attribute_value("LABEL", &label, true);
+        assert!(line.contains("my-key"), "public values print under --redact: {line}");
+
+        let missing = CkAttribute { attr_type: CkAttributeType::PRIVATE_EXPONENT, value: None };
+        let line = format_attribute_value("PRIVATE_EXPONENT", &missing, true);
+        assert!(line.contains("unavailable"), "missing stays missing: {line}");
+    }
+
+    // Task-40 fix round 1 (review M2): the CLI redaction classifier must
+    // reuse the canonical types-crate list, not carry a duplicate
+    // 7-member list that can drift from the extract gate's.
+    #[test]
+    fn secret_classifier_reuses_types_crate() {
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let src =
+            std::fs::read_to_string(manifest.join("src/handlers/objects/object_ops.rs")).unwrap();
+        let code = src.split("#[cfg(test)]").next().unwrap();
+        let mut uses = 0;
+        for line in code.lines() {
+            let line_code = line.split("//").next().unwrap_or("");
+            if line_code.contains("is_value_bearing_secret") {
+                uses += 1;
+            }
+        }
+        assert!(uses >= 1, "is_secret_attribute must delegate to the types-crate classifier");
+    }
+
+    // Task-40 fix round 1 (review M2): the redaction classifier agrees
+    // with the canonical list on every attribute type in range, so a
+    // future local list cannot silently drift.
+    #[test]
+    fn secret_classifier_agrees_with_types_crate() {
+        use pkcs11_proxy_ng_types::{CkAttributeType, is_value_bearing_secret};
+        for raw in 0..0x400u64 {
+            assert_eq!(
+                super::is_secret_attribute(CkAttributeType(raw)),
+                is_value_bearing_secret(CkAttributeType(raw)),
+                "classifier must agree with canonical list at 0x{raw:X}"
+            );
+        }
     }
 }

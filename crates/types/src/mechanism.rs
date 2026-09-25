@@ -416,37 +416,50 @@ pub struct CkMechanismInfo {
 pub struct CkMechanismFlags(pub u64);
 
 impl CkMechanismFlags {
-    pub const HW: u64 = 0x00000001;
-    pub const MESSAGE_ENCRYPT: u64 = 0x00000002;
-    pub const MESSAGE_DECRYPT: u64 = 0x00000004;
-    pub const MESSAGE_SIGN: u64 = 0x00000008;
-    pub const MESSAGE_VERIFY: u64 = 0x00000010;
-    pub const MULTI_MESSAGE: u64 = 0x00000020;
-    pub const MULTI_MESSGE: u64 = Self::MULTI_MESSAGE;
-    pub const FIND_OBJECTS: u64 = 0x00000040;
-    pub const ENCRYPT: u64 = 0x00000100;
-    pub const DECRYPT: u64 = 0x00000200;
-    pub const DIGEST: u64 = 0x00000400;
-    pub const SIGN: u64 = 0x00000800;
-    pub const SIGN_RECOVER: u64 = 0x00001000;
-    pub const VERIFY: u64 = 0x00002000;
-    pub const VERIFY_RECOVER: u64 = 0x00004000;
-    pub const GENERATE: u64 = 0x00008000;
-    pub const GENERATE_KEY_PAIR: u64 = 0x00010000;
-    pub const WRAP: u64 = 0x00020000;
-    pub const UNWRAP: u64 = 0x00040000;
-    pub const DERIVE: u64 = 0x00080000;
-    pub const EC_F_P: u64 = 0x00100000;
-    pub const EC_F_2M: u64 = 0x00200000;
-    pub const EC_ECPARAMETERS: u64 = 0x00400000;
-    pub const EC_OID: u64 = 0x00800000;
-    pub const EC_NAMEDCURVE: u64 = Self::EC_OID;
-    pub const EC_UNCOMPRESS: u64 = 0x01000000;
-    pub const EC_COMPRESS: u64 = 0x02000000;
-    pub const EC_CURVENAME: u64 = 0x04000000;
-    pub const ENCAPSULATE: u64 = 0x10000000;
-    pub const DECAPSULATE: u64 = 0x20000000;
-    pub const EXTENSION: u64 = 0x80000000;
+    pub const HW: Self = Self(0x00000001);
+    pub const MESSAGE_ENCRYPT: Self = Self(0x00000002);
+    pub const MESSAGE_DECRYPT: Self = Self(0x00000004);
+    pub const MESSAGE_SIGN: Self = Self(0x00000008);
+    pub const MESSAGE_VERIFY: Self = Self(0x00000010);
+    pub const MULTI_MESSAGE: Self = Self(0x00000020);
+    pub const MULTI_MESSGE: Self = Self::MULTI_MESSAGE;
+    pub const FIND_OBJECTS: Self = Self(0x00000040);
+    pub const ENCRYPT: Self = Self(0x00000100);
+    pub const DECRYPT: Self = Self(0x00000200);
+    pub const DIGEST: Self = Self(0x00000400);
+    pub const SIGN: Self = Self(0x00000800);
+    pub const SIGN_RECOVER: Self = Self(0x00001000);
+    pub const VERIFY: Self = Self(0x00002000);
+    pub const VERIFY_RECOVER: Self = Self(0x00004000);
+    pub const GENERATE: Self = Self(0x00008000);
+    pub const GENERATE_KEY_PAIR: Self = Self(0x00010000);
+    pub const WRAP: Self = Self(0x00020000);
+    pub const UNWRAP: Self = Self(0x00040000);
+    pub const DERIVE: Self = Self(0x00080000);
+    pub const EC_F_P: Self = Self(0x00100000);
+    pub const EC_F_2M: Self = Self(0x00200000);
+    pub const EC_ECPARAMETERS: Self = Self(0x00400000);
+    pub const EC_OID: Self = Self(0x00800000);
+    pub const EC_NAMEDCURVE: Self = Self::EC_OID;
+    pub const EC_UNCOMPRESS: Self = Self(0x01000000);
+    pub const EC_COMPRESS: Self = Self(0x02000000);
+    pub const EC_CURVENAME: Self = Self(0x04000000);
+    pub const ENCAPSULATE: Self = Self(0x10000000);
+    pub const DECAPSULATE: Self = Self(0x20000000);
+    pub const EXTENSION: Self = Self(0x80000000);
+}
+
+impl std::ops::BitOr for CkMechanismFlags {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl std::ops::BitOrAssign for CkMechanismFlags {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
 }
 
 // --- Mechanism parameter structs (ADR-0001 §2: explicitly modeled) ---
@@ -979,7 +992,7 @@ pub struct WtlsKeyMatParams {
     pub random_info: WtlsRandomData,
     pub mac_secret_handle: CkObjectHandle,
     pub key_handle: CkObjectHandle,
-    pub iv: Vec<u8>,
+    pub iv: SecretBytes,
 }
 
 // ---------------------------------------------------------------------------
@@ -1563,7 +1576,7 @@ mod tests {
             random_info: WtlsRandomData { client_random: vec![], server_random: vec![] },
             mac_secret_handle: CkObjectHandle(5),
             key_handle: CkObjectHandle(6),
-            iv: vec![],
+            iv: empty.clone(),
         };
         assert_eq!((p.mac_secret_handle.0, p.key_handle.0), (5, 6));
 
@@ -1786,7 +1799,7 @@ mod tests {
             random_info: WtlsRandomData { client_random: vec![], server_random: vec![] },
             mac_secret_handle: CkObjectHandle(0),
             key_handle: CkObjectHandle(0),
-            iv: vec![],
+            iv: empty.clone(),
         };
         assert_eq!(p.digest_mechanism.0, 0x250);
 
@@ -2397,7 +2410,7 @@ mod tests {
         ];
 
         for (actual, expected) in flags {
-            assert_eq!(actual, expected);
+            assert_eq!(actual.0, expected);
         }
     }
 
@@ -2566,5 +2579,54 @@ mod tests {
         let bf = format!("{b:?}");
         assert!(!bf.contains("old-pw"));
         assert!(!bf.contains("new-pw"));
+    }
+
+    // W1-C9-13: mechanism flag consts are Self-typed (CkMechanismType
+    // convention), combine with `|`, and keep their spec aliases.
+    #[test]
+    fn w1_c9_13_mechanism_flag_consts_are_self_typed() {
+        let digest: CkMechanismFlags = CkMechanismFlags::DIGEST;
+        assert_eq!(digest.0, 0x0000_0400);
+        let combined: CkMechanismFlags = CkMechanismFlags::SIGN | CkMechanismFlags::VERIFY;
+        assert_eq!(combined.0, 0x0000_2800);
+        assert_eq!(CkMechanismFlags::MULTI_MESSGE, CkMechanismFlags::MULTI_MESSAGE);
+        assert_eq!(CkMechanismFlags::EC_NAMEDCURVE, CkMechanismFlags::EC_OID);
+    }
+
+    // W1-C9-17: WtlsKeyMatParams.iv is SecretBytes (Ssl3KeyMatParams
+    // convention); Debug never prints the IV bytes.
+    #[test]
+    fn w1_c9_17_wtls_iv_is_secret_bytes() {
+        let p = WtlsKeyMatParams {
+            digest_mechanism: CkMechanismType(0),
+            mac_size_bits: 0,
+            key_size_bits: 0,
+            iv_size_bits: 64,
+            sequence_number: 0,
+            is_export: false,
+            random_info: WtlsRandomData { client_random: vec![], server_random: vec![] },
+            mac_secret_handle: CkObjectHandle(0),
+            key_handle: CkObjectHandle(0),
+            iv: SecretBytes::copy_from_slice(b"super-secret-iv"),
+        };
+        assert_eq!(p.iv.len(), 15);
+        let dbg = format!("{p:?}");
+        assert!(!dbg.contains("super-secret-iv"), "IV leaked into Debug: {dbg}");
+        // Sibling convention: same redacted shape as the SSL3 IVs.
+        let ssl3 = Ssl3KeyMatParams {
+            mac_size_bits: 0,
+            key_size_bits: 0,
+            iv_size_bits: 0,
+            is_export: false,
+            random_info: SslRandomData { client_random: vec![], server_random: vec![] },
+            prf_hash_mechanism: CkMechanismType(0),
+            client_mac_secret_handle: CkObjectHandle(0),
+            server_mac_secret_handle: CkObjectHandle(0),
+            client_key_handle: CkObjectHandle(0),
+            server_key_handle: CkObjectHandle(0),
+            client_iv: SecretBytes::copy_from_slice(b"super-secret-iv"),
+            server_iv: SecretBytes::default(),
+        };
+        assert!(!format!("{ssl3:?}").contains("super-secret-iv"));
     }
 }

@@ -1,6 +1,10 @@
 // W1-L12-03: test diagnostics (skip notices, progress, summaries) go to
 // stderr by design; the workspace lint table denies this sink elsewhere.
 #![allow(clippy::print_stderr)]
+// CK_ULONG is u32 on narrow targets (i686, armv7, Windows x64), so the
+// `as u64` widens below are no-ops here but required there; scoped
+// allow keeps the width conversions explicit (ADR-0011, W1-L12-07).
+#![allow(clippy::unnecessary_cast)]
 //! Live cross-width topology test (ADR-0011 Phase A).
 //!
 //! Runs the shim against an **out-of-process** daemon so the client and

@@ -1,5 +1,5 @@
 use crate::pkcs11_proxy_ng::v1 as v1_proto;
-use pkcs11_proxy_ng_types::{CkSessionFlags, CkSessionInfo, CkSessionState, CkSlotId};
+use pkcs11_proxy_ng_types::{CkRv, CkSessionFlags, CkSessionInfo, CkSessionState, CkSlotId};
 
 impl From<&CkSessionInfo> for v1_proto::SessionInfo {
     fn from(s: &CkSessionInfo) -> Self {
@@ -7,7 +7,7 @@ impl From<&CkSessionInfo> for v1_proto::SessionInfo {
             slot_id: s.slot_id.0,
             state: s.state as u64,
             flags: s.flags.0,
-            device_error: s.device_error,
+            device_error: s.device_error.0,
         }
     }
 }
@@ -28,7 +28,7 @@ impl From<&v1_proto::SessionInfo> for CkSessionInfo {
             slot_id: CkSlotId(s.slot_id),
             state,
             flags: CkSessionFlags(s.flags),
-            device_error: s.device_error,
+            device_error: CkRv(s.device_error),
         }
     }
 }
@@ -42,8 +42,8 @@ mod tests {
         let original = CkSessionInfo {
             slot_id: CkSlotId(0),
             state: CkSessionState::RwPublic,
-            flags: CkSessionFlags(0x06),
-            device_error: 0,
+            flags: CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION,
+            device_error: CkRv::OK,
         };
         let proto: v1_proto::SessionInfo = (&original).into();
         let back = CkSessionInfo::from(&proto);
@@ -67,8 +67,8 @@ mod tests {
         let original = CkSessionInfo {
             slot_id: CkSlotId(1),
             state: CkSessionState::RwUser,
-            flags: CkSessionFlags(0x06),
-            device_error: 0,
+            flags: CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION,
+            device_error: CkRv::OK,
         };
         let proto: v1_proto::SessionInfo = (&original).into();
         let back = CkSessionInfo::from(&proto);
@@ -80,8 +80,8 @@ mod tests {
         let original = CkSessionInfo {
             slot_id: CkSlotId(0),
             state: CkSessionState::RoPublic,
-            flags: CkSessionFlags(0x04), // CKF_SERIAL_SESSION
-            device_error: 0,
+            flags: CkSessionFlags::SERIAL_SESSION,
+            device_error: CkRv::OK,
         };
         let proto: v1_proto::SessionInfo = (&original).into();
         let back = CkSessionInfo::from(&proto);
@@ -93,8 +93,8 @@ mod tests {
         let original = CkSessionInfo {
             slot_id: CkSlotId(0),
             state: CkSessionState::RoUser,
-            flags: CkSessionFlags(0x04),
-            device_error: 0,
+            flags: CkSessionFlags::SERIAL_SESSION,
+            device_error: CkRv::OK,
         };
         let proto: v1_proto::SessionInfo = (&original).into();
         let back = CkSessionInfo::from(&proto);
@@ -106,8 +106,8 @@ mod tests {
         let original = CkSessionInfo {
             slot_id: CkSlotId(0),
             state: CkSessionState::RwSo,
-            flags: CkSessionFlags(0x06),
-            device_error: 0,
+            flags: CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION,
+            device_error: CkRv::OK,
         };
         let proto: v1_proto::SessionInfo = (&original).into();
         let back = CkSessionInfo::from(&proto);
@@ -120,12 +120,12 @@ mod tests {
         let original = CkSessionInfo {
             slot_id: CkSlotId(0),
             state: CkSessionState::RwPublic,
-            flags: CkSessionFlags(0x06),
-            device_error: 0xDEAD,
+            flags: CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION,
+            device_error: CkRv(0xDEAD),
         };
         let proto: v1_proto::SessionInfo = (&original).into();
         let back = CkSessionInfo::from(&proto);
-        assert_eq!(back.device_error, 0xDEAD);
+        assert_eq!(back.device_error, CkRv(0xDEAD));
     }
 
     #[test]
@@ -135,8 +135,8 @@ mod tests {
         let original = CkSessionInfo {
             slot_id: CkSlotId(u64::MAX),
             state: CkSessionState::RwPublic,
-            flags: CkSessionFlags(0x06),
-            device_error: 0,
+            flags: CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION,
+            device_error: CkRv::OK,
         };
         let proto: v1_proto::SessionInfo = (&original).into();
         let back = CkSessionInfo::from(&proto);

@@ -40,14 +40,17 @@ for cand in \
     /usr/local/lib/softhsm/libsofthsm2.so; do
     [[ -f "$cand" ]] && SOFTHSM2_LIB="$cand" && break
 done
-[[ -z "$SOFTHSM2_LIB" ]] && { echo "SoftHSM2 .so not found" >&2; exit 1; }
+[[ -z "$SOFTHSM2_LIB" ]] && { echo "SKIP: SoftHSM2 .so not found"; exit 0; }
 
 for cmd in softhsm2-util pkcs11-tool; do
-    command -v "$cmd" >/dev/null 2>&1 || { echo "missing: $cmd" >&2; exit 1; }
+    command -v "$cmd" >/dev/null 2>&1 || { echo "SKIP: missing: $cmd"; exit 0; }
 done
+# W1-L17-22: skip-clean (not fail-loud) when the release binaries are
+# absent, per the live-tier contract — every other live leg skips when
+# its tooling is absent.
 [[ -x "$DAEMON_BIN" && -f "$SHIM_LIB" ]] || {
-    echo "binaries missing; run scripts/release-dry-run.sh first" >&2
-    exit 1
+    echo "SKIP: release binaries missing; run scripts/release-dry-run.sh first to run this leg"
+    exit 0
 }
 
 WORKDIR="$(mktemp -d)"

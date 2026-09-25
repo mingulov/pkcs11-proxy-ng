@@ -105,7 +105,7 @@ pub unsafe extern "C" fn c_message_encrypt_init(
             return rv;
         }
         let operation = state::message_operation_state(h_session, state::MessageOperation::Encrypt);
-        let mut operation = operation.lock().expect("message encrypt state poisoned");
+        let mut operation = operation.lock().unwrap_or_else(|e| e.into_inner());
         let (mech, init_param, envelope, shape) = match unsafe {
             read_message_init_mechanism(p_mechanism, MessageParameterDirection::Encrypt)
         } {
@@ -142,10 +142,6 @@ pub unsafe extern "C" fn c_message_encrypt_init(
                 Err(error) => Err(settle_message_init_error(&mut operation, saved_shape, &error)),
             }
         };
-        if result.is_ok() {
-            state::clear_message_encrypt_output_cache(h_session);
-            state::clear_operation_state_cache(h_session);
-        }
         unit_result_to_rv(result)
     })
 }
@@ -160,18 +156,14 @@ pub unsafe extern "C" fn c_message_encrypt_final(h_session: CK_SESSION_HANDLE) -
             return rv;
         }
         let operation = state::message_operation_state(h_session, state::MessageOperation::Encrypt);
-        let mut operation = operation.lock().expect("message encrypt state poisoned");
+        let mut operation = operation.lock().unwrap_or_else(|e| e.into_inner());
         if operation.shape.is_none() {
             return rv_err(CkRv::OPERATION_NOT_INITIALIZED);
         }
         let saved_shape = operation.shape.take();
         match with_client!(client => client.message_encrypt_final_stateful(CkSessionHandle(h_session as u64)))
         {
-            Ok(()) => {
-                state::clear_message_encrypt_output_cache(h_session);
-                state::clear_operation_state_cache(h_session);
-                rv_ok()
-            }
+            Ok(()) => rv_ok(),
             Err(error) => {
                 if error.origin == MessageCallErrorOrigin::Backend
                     && error.ck_rv != CkRv::DEVICE_ERROR
@@ -198,7 +190,7 @@ pub unsafe extern "C" fn c_message_decrypt_init(
             return rv;
         }
         let operation = state::message_operation_state(h_session, state::MessageOperation::Decrypt);
-        let mut operation = operation.lock().expect("message decrypt state poisoned");
+        let mut operation = operation.lock().unwrap_or_else(|e| e.into_inner());
         let (mech, init_param, envelope, shape) = match unsafe {
             read_message_init_mechanism(p_mechanism, MessageParameterDirection::Decrypt)
         } {
@@ -235,10 +227,6 @@ pub unsafe extern "C" fn c_message_decrypt_init(
                 Err(error) => Err(settle_message_init_error(&mut operation, saved_shape, &error)),
             }
         };
-        if result.is_ok() {
-            state::clear_message_decrypt_output_cache(h_session);
-            state::clear_operation_state_cache(h_session);
-        }
         unit_result_to_rv(result)
     })
 }
@@ -253,18 +241,14 @@ pub unsafe extern "C" fn c_message_decrypt_final(h_session: CK_SESSION_HANDLE) -
             return rv;
         }
         let operation = state::message_operation_state(h_session, state::MessageOperation::Decrypt);
-        let mut operation = operation.lock().expect("message decrypt state poisoned");
+        let mut operation = operation.lock().unwrap_or_else(|e| e.into_inner());
         if operation.shape.is_none() {
             return rv_err(CkRv::OPERATION_NOT_INITIALIZED);
         }
         let saved_shape = operation.shape.take();
         match with_client!(client => client.message_decrypt_final_stateful(CkSessionHandle(h_session as u64)))
         {
-            Ok(()) => {
-                state::clear_message_decrypt_output_cache(h_session);
-                state::clear_operation_state_cache(h_session);
-                rv_ok()
-            }
+            Ok(()) => rv_ok(),
             Err(error) => rv_err(settle_message_init_error(&mut operation, saved_shape, &error)),
         }
     })
@@ -284,7 +268,7 @@ pub unsafe extern "C" fn c_message_sign_init(
             return rv;
         }
         let operation = state::message_operation_state(h_session, state::MessageOperation::Sign);
-        let mut operation = operation.lock().expect("message sign state poisoned");
+        let mut operation = operation.lock().unwrap_or_else(|e| e.into_inner());
         let mech = if p_mechanism.is_null() {
             None // cancel path
         } else {
@@ -307,8 +291,6 @@ pub unsafe extern "C" fn c_message_sign_init(
         match result {
             Ok(()) => {
                 operation.shape = successful_shape;
-                state::clear_message_sign_output_cache(h_session);
-                state::clear_operation_state_cache(h_session);
                 rv_ok()
             }
             Err(error) => rv_err(settle_message_init_error(&mut operation, saved_shape, &error)),
@@ -326,7 +308,7 @@ pub unsafe extern "C" fn c_message_sign_final(h_session: CK_SESSION_HANDLE) -> C
             return rv;
         }
         let operation = state::message_operation_state(h_session, state::MessageOperation::Sign);
-        let mut operation = operation.lock().expect("message sign state poisoned");
+        let mut operation = operation.lock().unwrap_or_else(|e| e.into_inner());
         if operation.shape.is_none() {
             return rv_err(CkRv::OPERATION_NOT_INITIALIZED);
         }
@@ -360,7 +342,7 @@ pub unsafe extern "C" fn c_message_verify_init(
             return rv;
         }
         let operation = state::message_operation_state(h_session, state::MessageOperation::Verify);
-        let mut operation = operation.lock().expect("message verify state poisoned");
+        let mut operation = operation.lock().unwrap_or_else(|e| e.into_inner());
         let mech = if p_mechanism.is_null() {
             None // cancel path
         } else {
@@ -382,7 +364,6 @@ pub unsafe extern "C" fn c_message_verify_init(
         )) {
             Ok(()) => {
                 operation.shape = successful_shape;
-                state::clear_operation_state_cache(h_session);
                 rv_ok()
             }
             Err(error) => {
@@ -407,7 +388,7 @@ pub unsafe extern "C" fn c_message_verify_final(h_session: CK_SESSION_HANDLE) ->
             return rv;
         }
         let operation = state::message_operation_state(h_session, state::MessageOperation::Verify);
-        let mut operation = operation.lock().expect("message verify state poisoned");
+        let mut operation = operation.lock().unwrap_or_else(|e| e.into_inner());
         if operation.shape.is_none() {
             return rv_err(CkRv::OPERATION_NOT_INITIALIZED);
         }
@@ -437,7 +418,7 @@ pub unsafe extern "C" fn c_message_verify_final(h_session: CK_SESSION_HANDLE) ->
 
 pub unsafe extern "C" fn c_encrypt_message(
     h_session: CK_SESSION_HANDLE,
-    p_parameter: *mut ::std::os::raw::c_void,
+    p_parameter: *mut ::std::ffi::c_void,
     ul_parameter_len: CK_ULONG,
     p_associated_data: *mut CK_BYTE,
     ul_associated_data_len: CK_ULONG,
@@ -451,7 +432,7 @@ pub unsafe extern "C" fn c_encrypt_message(
             return rv;
         }
         let operation = state::message_operation_state(h_session, state::MessageOperation::Encrypt);
-        let mut operation = operation.lock().expect("message encrypt state poisoned");
+        let mut operation = operation.lock().unwrap_or_else(|e| e.into_inner());
         let shape = match operation.shape {
             Some(shape) => shape,
             None => return rv_err(CkRv::OPERATION_NOT_INITIALIZED),
@@ -547,7 +528,7 @@ pub unsafe extern "C" fn c_encrypt_message(
 
 pub unsafe extern "C" fn c_encrypt_message_begin(
     h_session: CK_SESSION_HANDLE,
-    p_parameter: *mut ::std::os::raw::c_void,
+    p_parameter: *mut ::std::ffi::c_void,
     ul_parameter_len: CK_ULONG,
     p_associated_data: *mut CK_BYTE,
     ul_associated_data_len: CK_ULONG,
@@ -557,7 +538,7 @@ pub unsafe extern "C" fn c_encrypt_message_begin(
             return rv;
         }
         let operation = state::message_operation_state(h_session, state::MessageOperation::Encrypt);
-        let mut operation = operation.lock().expect("message encrypt state poisoned");
+        let mut operation = operation.lock().unwrap_or_else(|e| e.into_inner());
         let shape = match operation.shape {
             Some(shape) => shape,
             None => return rv_err(CkRv::OPERATION_NOT_INITIALIZED),
@@ -629,7 +610,7 @@ pub unsafe extern "C" fn c_encrypt_message_begin(
 
 pub unsafe extern "C" fn c_encrypt_message_next(
     h_session: CK_SESSION_HANDLE,
-    p_parameter: *mut ::std::os::raw::c_void,
+    p_parameter: *mut ::std::ffi::c_void,
     ul_parameter_len: CK_ULONG,
     p_plaintext_part: *mut CK_BYTE,
     ul_plaintext_part_len: CK_ULONG,
@@ -642,7 +623,7 @@ pub unsafe extern "C" fn c_encrypt_message_next(
             return rv;
         }
         let operation = state::message_operation_state(h_session, state::MessageOperation::Encrypt);
-        let mut operation = operation.lock().expect("message encrypt state poisoned");
+        let mut operation = operation.lock().unwrap_or_else(|e| e.into_inner());
         let shape = match operation.shape {
             Some(shape) => shape,
             None => return rv_err(CkRv::OPERATION_NOT_INITIALIZED),
@@ -732,7 +713,7 @@ pub unsafe extern "C" fn c_encrypt_message_next(
 
 pub unsafe extern "C" fn c_decrypt_message(
     h_session: CK_SESSION_HANDLE,
-    p_parameter: *mut ::std::os::raw::c_void,
+    p_parameter: *mut ::std::ffi::c_void,
     ul_parameter_len: CK_ULONG,
     p_associated_data: *mut CK_BYTE,
     ul_associated_data_len: CK_ULONG,
@@ -746,7 +727,7 @@ pub unsafe extern "C" fn c_decrypt_message(
             return rv;
         }
         let operation = state::message_operation_state(h_session, state::MessageOperation::Decrypt);
-        let mut operation = operation.lock().expect("message decrypt state poisoned");
+        let mut operation = operation.lock().unwrap_or_else(|e| e.into_inner());
         let shape = match operation.shape {
             Some(shape) => shape,
             None => return rv_err(CkRv::OPERATION_NOT_INITIALIZED),
@@ -842,7 +823,7 @@ pub unsafe extern "C" fn c_decrypt_message(
 
 pub unsafe extern "C" fn c_decrypt_message_begin(
     h_session: CK_SESSION_HANDLE,
-    p_parameter: *mut ::std::os::raw::c_void,
+    p_parameter: *mut ::std::ffi::c_void,
     ul_parameter_len: CK_ULONG,
     p_associated_data: *mut CK_BYTE,
     ul_associated_data_len: CK_ULONG,
@@ -852,7 +833,7 @@ pub unsafe extern "C" fn c_decrypt_message_begin(
             return rv;
         }
         let operation = state::message_operation_state(h_session, state::MessageOperation::Decrypt);
-        let mut operation = operation.lock().expect("message decrypt state poisoned");
+        let mut operation = operation.lock().unwrap_or_else(|e| e.into_inner());
         let shape = match operation.shape {
             Some(shape) => shape,
             None => return rv_err(CkRv::OPERATION_NOT_INITIALIZED),
@@ -924,7 +905,7 @@ pub unsafe extern "C" fn c_decrypt_message_begin(
 
 pub unsafe extern "C" fn c_decrypt_message_next(
     h_session: CK_SESSION_HANDLE,
-    p_parameter: *mut ::std::os::raw::c_void,
+    p_parameter: *mut ::std::ffi::c_void,
     ul_parameter_len: CK_ULONG,
     p_ciphertext_part: *mut CK_BYTE,
     ul_ciphertext_part_len: CK_ULONG,
@@ -937,7 +918,7 @@ pub unsafe extern "C" fn c_decrypt_message_next(
             return rv;
         }
         let operation = state::message_operation_state(h_session, state::MessageOperation::Decrypt);
-        let mut operation = operation.lock().expect("message decrypt state poisoned");
+        let mut operation = operation.lock().unwrap_or_else(|e| e.into_inner());
         let shape = match operation.shape {
             Some(shape) => shape,
             None => return rv_err(CkRv::OPERATION_NOT_INITIALIZED),
@@ -1027,7 +1008,7 @@ pub unsafe extern "C" fn c_decrypt_message_next(
 
 pub unsafe extern "C" fn c_sign_message(
     h_session: CK_SESSION_HANDLE,
-    p_parameter: *mut ::std::os::raw::c_void,
+    p_parameter: *mut ::std::ffi::c_void,
     ul_parameter_len: CK_ULONG,
     p_data: *mut CK_BYTE,
     ul_data_len: CK_ULONG,
@@ -1039,7 +1020,7 @@ pub unsafe extern "C" fn c_sign_message(
             return rv;
         }
         let operation = state::message_operation_state(h_session, state::MessageOperation::Sign);
-        let mut operation = operation.lock().expect("message sign state poisoned");
+        let mut operation = operation.lock().unwrap_or_else(|e| e.into_inner());
         if operation.shape.is_none() {
             return rv_err(CkRv::OPERATION_NOT_INITIALIZED);
         }
@@ -1111,7 +1092,7 @@ pub unsafe extern "C" fn c_sign_message(
 
 pub unsafe extern "C" fn c_sign_message_begin(
     h_session: CK_SESSION_HANDLE,
-    p_parameter: *mut ::std::os::raw::c_void,
+    p_parameter: *mut ::std::ffi::c_void,
     ul_parameter_len: CK_ULONG,
 ) -> CK_RV {
     catch_panics(|| {
@@ -1119,7 +1100,7 @@ pub unsafe extern "C" fn c_sign_message_begin(
             return rv;
         }
         let operation = state::message_operation_state(h_session, state::MessageOperation::Sign);
-        let mut operation = operation.lock().expect("message sign state poisoned");
+        let mut operation = operation.lock().unwrap_or_else(|e| e.into_inner());
         if operation.shape.is_none() {
             return rv_err(CkRv::OPERATION_NOT_INITIALIZED);
         }
@@ -1167,7 +1148,7 @@ pub unsafe extern "C" fn c_sign_message_begin(
 
 pub unsafe extern "C" fn c_sign_message_next(
     h_session: CK_SESSION_HANDLE,
-    p_parameter: *mut ::std::os::raw::c_void,
+    p_parameter: *mut ::std::ffi::c_void,
     ul_parameter_len: CK_ULONG,
     p_data_part: *mut CK_BYTE,
     ul_data_part_len: CK_ULONG,
@@ -1179,7 +1160,7 @@ pub unsafe extern "C" fn c_sign_message_next(
             return rv;
         }
         let operation = state::message_operation_state(h_session, state::MessageOperation::Sign);
-        let mut operation = operation.lock().expect("message sign state poisoned");
+        let mut operation = operation.lock().unwrap_or_else(|e| e.into_inner());
         if operation.shape.is_none() {
             return rv_err(CkRv::OPERATION_NOT_INITIALIZED);
         }
@@ -1295,7 +1276,7 @@ pub unsafe extern "C" fn c_sign_message_next(
 
 pub unsafe extern "C" fn c_verify_message(
     h_session: CK_SESSION_HANDLE,
-    p_parameter: *mut ::std::os::raw::c_void,
+    p_parameter: *mut ::std::ffi::c_void,
     ul_parameter_len: CK_ULONG,
     p_data: *mut CK_BYTE,
     ul_data_len: CK_ULONG,
@@ -1307,7 +1288,7 @@ pub unsafe extern "C" fn c_verify_message(
             return rv;
         }
         let operation = state::message_operation_state(h_session, state::MessageOperation::Verify);
-        let mut operation = operation.lock().expect("message verify state poisoned");
+        let mut operation = operation.lock().unwrap_or_else(|e| e.into_inner());
         if operation.shape.is_none() {
             return rv_err(CkRv::OPERATION_NOT_INITIALIZED);
         }
@@ -1353,7 +1334,7 @@ pub unsafe extern "C" fn c_verify_message(
 
 pub unsafe extern "C" fn c_verify_message_begin(
     h_session: CK_SESSION_HANDLE,
-    p_parameter: *mut ::std::os::raw::c_void,
+    p_parameter: *mut ::std::ffi::c_void,
     ul_parameter_len: CK_ULONG,
 ) -> CK_RV {
     catch_panics(|| {
@@ -1361,7 +1342,7 @@ pub unsafe extern "C" fn c_verify_message_begin(
             return rv;
         }
         let operation = state::message_operation_state(h_session, state::MessageOperation::Verify);
-        let mut operation = operation.lock().expect("message verify state poisoned");
+        let mut operation = operation.lock().unwrap_or_else(|e| e.into_inner());
         if operation.shape.is_none() {
             return rv_err(CkRv::OPERATION_NOT_INITIALIZED);
         }
@@ -1395,7 +1376,7 @@ pub unsafe extern "C" fn c_verify_message_begin(
 
 pub unsafe extern "C" fn c_verify_message_next(
     h_session: CK_SESSION_HANDLE,
-    p_parameter: *mut ::std::os::raw::c_void,
+    p_parameter: *mut ::std::ffi::c_void,
     ul_parameter_len: CK_ULONG,
     p_data_part: *mut CK_BYTE,
     ul_data_part_len: CK_ULONG,
@@ -1407,7 +1388,7 @@ pub unsafe extern "C" fn c_verify_message_next(
             return rv;
         }
         let operation = state::message_operation_state(h_session, state::MessageOperation::Verify);
-        let mut operation = operation.lock().expect("message verify state poisoned");
+        let mut operation = operation.lock().unwrap_or_else(|e| e.into_inner());
         if operation.shape.is_none() {
             return rv_err(CkRv::OPERATION_NOT_INITIALIZED);
         }

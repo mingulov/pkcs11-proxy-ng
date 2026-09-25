@@ -15,7 +15,7 @@ use pkcs11_proxy_ng_types::{
     CkAttributeQuery, CkAttributeQueryResult, CkAttributeType, CkAttributeValue, CkInBuf,
     CkMechanismParams, CkMechanismType, CkObjectHandle, CkOutputBufferResult, CkOutputBufferSpec,
     CkParameterRoundtripResult, CkParameterRoundtripSpec, CkRv, CkSessionFlags, CkSlotId,
-    GcmParams, InterfaceCapabilities, InterfaceInfo, ParameterOutputFunction,
+    GcmParams, InterfaceCapabilities, InterfaceInfo, ParameterOutputFunction, encode_native_ulong,
 };
 use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
@@ -626,10 +626,8 @@ fn raw_client_size_query_returns_length_without_bytes() {
             .into_iter()
             .next()
             .expect("slot");
-        let session = client
-            .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-            .await
-            .expect("C_OpenSession");
+        let session =
+            client.open_session(slot, CkSessionFlags::SERIAL_SESSION).await.expect("C_OpenSession");
         let object = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
 
         daemon.backend.set_attribute(
@@ -681,10 +679,8 @@ fn raw_client_too_small_query_preserves_backend_returned_length() {
         client.initialize().await.expect("C_Initialize");
 
         let slot = client.get_slot_list(false).await.expect("C_GetSlotList")[0];
-        let session = client
-            .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-            .await
-            .expect("C_OpenSession");
+        let session =
+            client.open_session(slot, CkSessionFlags::SERIAL_SESSION).await.expect("C_OpenSession");
         let object = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
 
         daemon.backend.set_attribute(
@@ -736,10 +732,8 @@ fn raw_client_exact_fit_query_returns_backend_bytes() {
         client.initialize().await.expect("C_Initialize");
 
         let slot = client.get_slot_list(false).await.expect("C_GetSlotList")[0];
-        let session = client
-            .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-            .await
-            .expect("C_OpenSession");
+        let session =
+            client.open_session(slot, CkSessionFlags::SERIAL_SESSION).await.expect("C_OpenSession");
         let object = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
 
         daemon.backend.set_attribute(
@@ -791,10 +785,8 @@ fn raw_client_mixed_sensitive_and_invalid_preserves_per_attribute_status() {
         client.initialize().await.expect("C_Initialize");
 
         let slot = client.get_slot_list(false).await.expect("C_GetSlotList")[0];
-        let session = client
-            .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-            .await
-            .expect("C_OpenSession");
+        let session =
+            client.open_session(slot, CkSessionFlags::SERIAL_SESSION).await.expect("C_OpenSession");
         let object = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
 
         daemon.backend.set_attribute(
@@ -892,10 +884,8 @@ fn legacy_client_size_query_does_not_synthesize_attribute_bytes() {
             .into_iter()
             .next()
             .expect("slot");
-        let session = client
-            .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-            .await
-            .expect("C_OpenSession");
+        let session =
+            client.open_session(slot, CkSessionFlags::SERIAL_SESSION).await.expect("C_OpenSession");
         let object = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
 
         daemon.backend.set_attribute(
@@ -1016,7 +1006,7 @@ fn digest_init_null_mechanism_cancels_active_digest_operation() {
 }
 
 #[test]
-fn finalize_clears_cached_output_state() {
+fn finalize_clears_message_operation_shapes() {
     let _guard = shim_state_test_guard();
     let shim = ShimSession::new();
     let mut mechanism = sha256_mechanism();
@@ -1037,10 +1027,6 @@ fn finalize_clears_cached_output_state() {
     };
     assert_eq!(digest_rv, CKR_OK as CK_RV);
 
-    {
-        state::wrap_cache().lock().unwrap().insert(shim.session, vec![0xAA]);
-        state::encapsulate_cache().lock().unwrap().insert(shim.session, (vec![0xBB], 77));
-    }
     set_test_message_shape(
         shim.session,
         state::MessageOperation::Encrypt,
@@ -1050,9 +1036,6 @@ fn finalize_clears_cached_output_state() {
     let finalize_rv = unsafe { dispatch::general::c_finalize(std::ptr::null_mut()) };
     assert_eq!(finalize_rv, CKR_OK as CK_RV);
 
-    assert!(state::dig_cache().lock().unwrap().is_empty());
-    assert!(state::wrap_cache().lock().unwrap().is_empty());
-    assert!(state::encapsulate_cache().lock().unwrap().is_empty());
     assert_eq!(
         test_message_shape(shim.session, state::MessageOperation::Encrypt),
         None,
@@ -1063,7 +1046,7 @@ fn finalize_clears_cached_output_state() {
 }
 
 #[test]
-fn close_all_sessions_evicts_only_target_slot_output_caches() {
+fn close_all_sessions_evicts_only_target_slot_state() {
     let _guard = shim_state_test_guard();
     let shim = ShimSession::new();
 
@@ -1085,12 +1068,6 @@ fn close_all_sessions_evicts_only_target_slot_output_caches() {
     let target_session = shim.open_session_on_slot(target_slot);
     let other_session = shim.open_session_on_slot(other_slot);
 
-    state::dig_cache().lock().unwrap().insert(target_session, vec![0xAA]);
-    state::wrap_cache().lock().unwrap().insert(target_session, vec![0xBB]);
-    state::encapsulate_cache().lock().unwrap().insert(target_session, (vec![0xCC], 7));
-    state::dig_cache().lock().unwrap().insert(other_session, vec![0xDD]);
-    state::wrap_cache().lock().unwrap().insert(other_session, vec![0xEE]);
-    state::encapsulate_cache().lock().unwrap().insert(other_session, (vec![0xFF], 9));
     set_test_message_shape(
         target_session,
         state::MessageOperation::Encrypt,
@@ -1105,12 +1082,6 @@ fn close_all_sessions_evicts_only_target_slot_output_caches() {
     let close_all_rv = unsafe { dispatch::general::c_close_all_sessions(target_slot) };
     assert_eq!(close_all_rv, CKR_OK as CK_RV);
 
-    assert!(!state::dig_cache().lock().unwrap().contains_key(&target_session));
-    assert!(!state::wrap_cache().lock().unwrap().contains_key(&target_session));
-    assert!(!state::encapsulate_cache().lock().unwrap().contains_key(&target_session));
-    assert!(state::dig_cache().lock().unwrap().contains_key(&other_session));
-    assert!(state::wrap_cache().lock().unwrap().contains_key(&other_session));
-    assert!(state::encapsulate_cache().lock().unwrap().contains_key(&other_session));
     assert_eq!(
         test_message_shape(target_session, state::MessageOperation::Encrypt),
         None,
@@ -1120,6 +1091,10 @@ fn close_all_sessions_evicts_only_target_slot_output_caches() {
         test_message_shape(other_session, state::MessageOperation::Encrypt),
         Some(MessageParameterShape::Ccm),
         "close-all must preserve shapes for another slot",
+    );
+    assert!(
+        state::is_session_known(other_session),
+        "close-all must preserve session ownership for another slot",
     );
 
     let mut info = std::mem::MaybeUninit::uninit();
@@ -1132,13 +1107,11 @@ fn close_all_sessions_evicts_only_target_slot_output_caches() {
 }
 
 #[test]
-fn failed_close_session_still_evicts_session_output_caches() {
+fn failed_close_session_preserves_shape_until_terminal_close() {
     let _guard = shim_state_test_guard();
     let shim = ShimSession::new();
     let session = shim.open_additional_session();
 
-    state::dig_cache().lock().unwrap().insert(session, vec![0xAA]);
-    state::wrap_cache().lock().unwrap().insert(session, vec![0xBB]);
     set_test_message_shape(session, state::MessageOperation::Encrypt, MessageParameterShape::Gcm);
 
     let daemon = TestDaemon::shared();
@@ -1147,18 +1120,13 @@ fn failed_close_session_still_evicts_session_output_caches() {
     daemon.backend.clear_close_error();
     assert_eq!(failed_rv, CKR_FUNCTION_FAILED as CK_RV);
 
-    // Disposable output caches are dropped on the close attempt, regardless
-    // of the server's CK_RV.
-    assert!(!state::dig_cache().lock().unwrap().contains_key(&session));
-    assert!(!state::wrap_cache().lock().unwrap().contains_key(&session));
     assert_eq!(
         test_message_shape(session, state::MessageOperation::Encrypt),
         Some(MessageParameterShape::Gcm),
         "a decoded transient close failure must preserve authoritative shape state",
     );
 
-    // The transient failure kept the handle valid (M3), so a retry succeeds
-    // and simply finds the caches already evicted.
+    // The transient failure kept the handle valid (M3), so a retry succeeds.
     let retry_rv = unsafe { dispatch::general::c_close_session(session) };
     assert_eq!(retry_rv, CKR_OK as CK_RV);
     assert_eq!(
@@ -1176,14 +1144,16 @@ fn failed_close_all_sessions_still_evicts_slot_session_caches() {
     let unknown_slot: CK_SLOT_ID = 999;
     let phantom_session: CK_SESSION_HANDLE = 0xDEAD_BEEF;
     state::remember_session_slot(phantom_session, unknown_slot);
-    state::dig_cache().lock().unwrap().insert(phantom_session, vec![0xCC]);
 
     let close_all_rv = unsafe { dispatch::general::c_close_all_sessions(unknown_slot) };
     assert_ne!(close_all_rv, CKR_OK as CK_RV);
 
     // `state::evict_slot_session_caches` contract: dropped on the attempt,
     // regardless of the server's CK_RV.
-    assert!(!state::dig_cache().lock().unwrap().contains_key(&phantom_session));
+    assert!(
+        !state::is_session_known(phantom_session),
+        "close-all must forget the slot's sessions even on failure"
+    );
 }
 
 fn set_test_message_shape(
@@ -1256,6 +1226,35 @@ fn message_encrypt_decrypt_final_require_and_clear_only_their_active_shape() {
             "successful MessageFinal must clear its authoritative operation shape",
         );
     }
+}
+
+#[test]
+fn message_op_state_poison_recovers_without_bricking_session() {
+    // W1-C6-11: a poisoned op-state lock must recover via the into_inner
+    // pattern (the OPERATION_NOT_INITIALIZED below proves the final path
+    // ran), not panic to GENERAL_ERROR and brick the session+op.
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+
+    let op = state::message_operation_state(shim.session, state::MessageOperation::Encrypt);
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _held = op.lock().unwrap();
+        panic!("poison the message op-state mutex");
+    }));
+    assert!(op.is_poisoned(), "setup: op-state mutex must be poisoned");
+
+    assert_eq!(
+        unsafe { dispatch::general::c_message_encrypt_final(shim.session) },
+        CKR_OPERATION_NOT_INITIALIZED as CK_RV,
+        "poisoned op-state lock must recover, not panic",
+    );
+
+    // The session is not bricked: the cancel path still runs end to end.
+    assert_eq!(
+        unsafe { dispatch::general::c_message_encrypt_init(shim.session, std::ptr::null_mut(), 0) },
+        CKR_OK as CK_RV,
+        "session must stay usable after op-state poison",
+    );
 }
 
 #[test]
@@ -1544,7 +1543,7 @@ fn pointer_safe_message_every_entrypoint_requires_capability_before_pointer_stat
     }
 
     let poison_mechanism: CK_MECHANISM_PTR = std::ptr::dangling_mut();
-    let poison_parameter: *mut ::std::os::raw::c_void = std::ptr::dangling_mut();
+    let poison_parameter: *mut ::std::ffi::c_void = std::ptr::dangling_mut();
     let poison_bytes: CK_BYTE_PTR = std::ptr::dangling_mut();
     let poison_len: *mut CK_ULONG = std::ptr::dangling_mut();
 
@@ -1975,7 +1974,7 @@ fn cached_operation_state_is_not_reused_after_set_operation_state() {
 }
 
 #[test]
-fn restored_operation_clears_stale_output_byte_caches() {
+fn restored_operation_clears_prior_digest_operation() {
     let _guard = shim_state_test_guard();
     let shim = ShimSession::new();
     let mut digest_mechanism = sha256_mechanism();
@@ -2058,7 +2057,7 @@ fn restored_operation_clears_stale_output_byte_caches() {
 }
 
 #[test]
-fn restored_operation_evicts_other_session_scoped_output_caches() {
+fn restored_operation_clears_message_operation_shapes() {
     let _guard = shim_state_test_guard();
     let shim = ShimSession::new();
 
@@ -2082,11 +2081,13 @@ fn restored_operation_evicts_other_session_scoped_output_caches() {
     let close_rv = unsafe { dispatch::general::c_close_session(second_session) };
     assert_eq!(close_rv, CKR_OK as CK_RV);
 
-    {
-        state::wrap_cache().lock().unwrap().insert(shim.session, vec![0xAA, 0xBB]);
-        state::msg_enc_cache().lock().unwrap().insert(shim.session, vec![0xCC, 0xDD]);
-        state::encapsulate_cache().lock().unwrap().insert(shim.session, (vec![0xEE], 42));
-    }
+    // W1-C6-04: the dead two-call output caches are gone; a successful
+    // restore still clears the session's message-operation shapes.
+    set_test_message_shape(
+        shim.session,
+        state::MessageOperation::Encrypt,
+        MessageParameterShape::Gcm,
+    );
 
     let restore_rv = unsafe {
         dispatch::general::c_set_operation_state(
@@ -2099,9 +2100,11 @@ fn restored_operation_evicts_other_session_scoped_output_caches() {
     };
     assert_eq!(restore_rv, CKR_OK as CK_RV);
 
-    assert!(!state::wrap_cache().lock().unwrap().contains_key(&shim.session));
-    assert!(!state::msg_enc_cache().lock().unwrap().contains_key(&shim.session));
-    assert!(!state::encapsulate_cache().lock().unwrap().contains_key(&shim.session));
+    assert_eq!(
+        test_message_shape(shim.session, state::MessageOperation::Encrypt),
+        None,
+        "a successful restore must clear message-operation shapes",
+    );
 }
 
 #[test]
@@ -3269,10 +3272,8 @@ fn exact_encrypt_message_size_query_returns_length() {
         client.initialize().await.expect("C_Initialize");
 
         let slot = client.get_slot_list(false).await.expect("C_GetSlotList")[0];
-        let session = client
-            .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-            .await
-            .expect("C_OpenSession");
+        let session =
+            client.open_session(slot, CkSessionFlags::SERIAL_SESSION).await.expect("C_OpenSession");
 
         // Set up an active message-encrypt operation so the mock can process the call.
         let mechanism = pkcs11_proxy_ng_types::CkMechanism {
@@ -3344,10 +3345,8 @@ fn exact_wrap_key_authenticated_size_query_returns_length() {
         client.initialize().await.expect("C_Initialize");
 
         let slot = client.get_slot_list(false).await.expect("C_GetSlotList")[0];
-        let session = client
-            .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-            .await
-            .expect("C_OpenSession");
+        let session =
+            client.open_session(slot, CkSessionFlags::SERIAL_SESSION).await.expect("C_OpenSession");
 
         let wrapping_key = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
         let key = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
@@ -3416,10 +3415,8 @@ fn null_output_length_parameter_rpc_preserves_exact_provider_rv() {
         let mut client = Pkcs11Client::connect(&daemon.endpoint).await.expect("connect client");
         client.initialize().await.expect("C_Initialize");
         let slot = client.get_slot_list(false).await.expect("C_GetSlotList")[0];
-        let session = client
-            .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-            .await
-            .expect("C_OpenSession");
+        let session =
+            client.open_session(slot, CkSessionFlags::SERIAL_SESSION).await.expect("C_OpenSession");
         let wrapping_key = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
         let key = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
         let output_spec =
@@ -3840,10 +3837,8 @@ fn raw_client_nested_template_size_query() {
         client.initialize().await.expect("C_Initialize");
 
         let slot = client.get_slot_list(false).await.expect("C_GetSlotList")[0];
-        let session = client
-            .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-            .await
-            .expect("C_OpenSession");
+        let session =
+            client.open_session(slot, CkSessionFlags::SERIAL_SESSION).await.expect("C_OpenSession");
         let object = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
 
         daemon.backend.set_attribute(
@@ -3893,10 +3888,8 @@ fn raw_client_nested_template_data_query() {
         client.initialize().await.expect("C_Initialize");
 
         let slot = client.get_slot_list(false).await.expect("C_GetSlotList")[0];
-        let session = client
-            .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-            .await
-            .expect("C_OpenSession");
+        let session =
+            client.open_session(slot, CkSessionFlags::SERIAL_SESSION).await.expect("C_OpenSession");
         let object = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
 
         let class_value: u64 = 3;
@@ -3958,20 +3951,17 @@ fn raw_client_nested_template_data_query() {
         assert_eq!(nested[0].attr_type, CkAttributeType::CLASS);
         assert_eq!(nested[0].returned_len, ulong_size);
         let class_bytes = nested[0].value.as_ref().expect("CLASS value");
-        assert!(class_bytes.expose(|raw| raw
-            == pkcs11_proxy_ng_types::width::encode_native_ulong(
-                class_value,
-                ulong_size as usize
-            )));
+        assert!(
+            class_bytes.expose(|raw| raw == encode_native_ulong(class_value, ulong_size as usize))
+        );
 
         assert_eq!(nested[1].attr_type, CkAttributeType::KEY_TYPE);
         assert_eq!(nested[1].returned_len, ulong_size);
         let key_type_bytes = nested[1].value.as_ref().expect("KEY_TYPE value");
-        assert!(key_type_bytes.expose(|raw| raw
-            == pkcs11_proxy_ng_types::width::encode_native_ulong(
-                key_type_value,
-                ulong_size as usize
-            )));
+        assert!(
+            key_type_bytes
+                .expose(|raw| raw == encode_native_ulong(key_type_value, ulong_size as usize))
+        );
 
         client.close_session(session).await.expect("C_CloseSession");
         client.finalize().await.expect("C_Finalize");
@@ -4275,6 +4265,37 @@ fn shim_async_complete_null_buffer_returns_required_length() {
     };
     assert_eq!(rv, CKR_OK as CK_RV, "C_AsyncComplete(length query)");
     assert_eq!(async_data.ulValue, 8, "required length must be reported");
+
+    drop(shim);
+}
+
+#[test]
+fn shim_async_complete_overlong_function_name_returns_arguments_bad() {
+    // W1-C6-06: the function-name scan is bounded (256 bytes); a name with
+    // no NUL inside the bound is a loud ARGUMENTS_BAD, never an unbounded
+    // read. The NUL at byte 300 keeps this in-bounds either way.
+    let _guard = shim_state_test_guard();
+    let _daemon = TestDaemon::shared();
+    let shim = ShimSession::new();
+
+    let mut buf = [0xAA_u8; 8];
+    let mut async_data = CK_ASYNC_DATA {
+        ulVersion: 0,
+        pValue: buf.as_mut_ptr(),
+        ulValue: buf.len() as CK_ULONG,
+        hObject: CK_INVALID_HANDLE,
+        hAdditionalObject: CK_INVALID_HANDLE,
+    };
+    let mut name = vec![b'A'; 300];
+    name.push(0);
+    let rv = unsafe {
+        dispatch::general::c_async_complete(
+            shim.session,
+            name.as_ptr() as *mut CK_UTF8CHAR,
+            &mut async_data,
+        )
+    };
+    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV, "C_AsyncComplete(overlong name)");
 
     drop(shim);
 }

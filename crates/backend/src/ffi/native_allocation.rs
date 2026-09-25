@@ -52,10 +52,15 @@ impl<T> NativeAllocation<T> {
         self.root.as_ptr()
     }
 
-    // SAFETY: valid initialized T; caller holds the lifecycle read exclusion
-    // (`OrdinaryGuard`); no native writer or live reference aliases this
-    // storage during the read.
     // Production readback lands with the P2 guard API; unit tests cover it now.
+    /// Bitwise-copy the rooted record (W1-L1-04).
+    ///
+    /// # Safety
+    ///
+    /// The root must hold a valid initialized `T`; the caller must hold
+    /// the lifecycle read exclusion (`OrdinaryGuard` from
+    /// `admit_ordinary`); no native writer or live reference may alias
+    /// this storage during the read.
     #[allow(dead_code)]
     pub(in crate::ffi) unsafe fn snapshot(&self) -> T
     where
@@ -97,6 +102,11 @@ mod tests {
 
     /// Fieldwise raw projection: read one `Copy` field of a Drop-guarded
     /// record without copying (and later double-dropping) the record itself.
+    ///
+    /// # Safety
+    ///
+    /// `root` must point to a live, unmoved `Counted` owned by the test;
+    /// only the `value` field is copied, never the `Drop` guard.
     unsafe fn field_value(root: *mut Counted<'_>) -> u64 {
         // SAFETY: caller proves the owner is alive and unchanged; the
         // projection copies only the `u64` field, never the Drop guard.

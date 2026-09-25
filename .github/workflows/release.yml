@@ -32,8 +32,10 @@ on:
     tags:
       - 'v*'
 
+# W1-L17-21: least privilege — the default token reads (checkout); only
+# the publish job (softprops/action-gh-release) gets contents:write.
 permissions:
-  contents: write   # required to create the GitHub Release
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -176,8 +178,14 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
-          awk -v ver="$VERSION" '
-            $0 ~ "^## \\[" ver "\\]" { flag=1; next }
+          # W1-L17-17: dot-escape so the version matches literally in the
+          # awk regex (same rule as verify-release-subject.sh BASE_ESCAPED;
+          # the tag-format validation above guarantees the remaining
+          # charset is regex-literal). Passed via the environment because
+          # awk -v would process the backslash escapes itself.
+          VER_ESCAPED="${VERSION//./\\.}"
+          VER_ESCAPED="$VER_ESCAPED" awk '
+            $0 ~ "^## \\[" ENVIRON["VER_ESCAPED"] "\\]" { flag=1; next }
             /^## \[/ && flag           { flag=0 }
             flag                       { print }
           ' CHANGELOG.md > dist/RELEASE_NOTES.md
@@ -259,6 +267,8 @@ jobs:
     runs-on: ubuntu-24.04
     needs: [build, build-windows]
     environment: release
+    permissions:
+      contents: write   # required to create the GitHub Release
     concurrency:
       group: release
       cancel-in-progress: false

@@ -81,16 +81,15 @@ where
         // Non-service traffic (health checks, probes) bypasses validation
         // entirely so tonic's behavior for it is bit-for-bit unchanged.
         if !is_protected_path(req.uri().path()) {
+            // W1-C3-18: cloning the inner service for the async block is
+            // sufficient; the old replace-then-restore was a net no-op
+            // plus a wasted clone.
             let mut inner = self.inner.clone();
-            let std_inner = std::mem::replace(&mut self.inner, inner.clone());
-            self.inner = std_inner;
             return Box::pin(async move { inner.call(req).await.map_err(Into::into) });
         }
 
         let max_message_bytes = self.max_message_bytes;
         let mut inner = self.inner.clone();
-        let std_inner = std::mem::replace(&mut self.inner, inner.clone());
-        self.inner = std_inner;
         Box::pin(async move {
             let (parts, body) = req.into_parts();
             let path = parts.uri.path().to_owned();

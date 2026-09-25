@@ -2,7 +2,7 @@ use crate::pkcs11_proxy_ng::v1 as v1_proto;
 // ADR-0013 §5: every `secret_to_plain` use in this file is a prost wire-encoding
 // boundary (response/request construction); the standing justification lives in
 // `secret_boundary` docs. No plain copy is retained past the enclosing encode.
-use crate::secret_boundary::secret_to_plain;
+use crate::secret_boundary::{secret_into_plain, secret_to_plain};
 use pkcs11_proxy_ng_types::{
     ByteOutputFunction, CkAttributeQuery, CkAttributeQueryResult, CkAttributeType, CkObjectHandle,
     CkOutputAndHandleResult, CkOutputBufferResult, CkOutputBufferSpec, CkParameterRoundtripResult,
@@ -29,9 +29,11 @@ fn attribute_query_results_to_proto(
 
 /// Owned-input variant of `attribute_query_results_to_proto`. Moves the
 /// `Vec<u8>` of each result's `value` straight into the proto buffer
-/// without cloning. Mirrors the consume-by-value optimization applied
-/// to `attribute_results` for `C_GetAttributeValue` so the exact path
-/// (`C_GetAttributeValue_exact`) has the same allocation profile.
+/// without cloning (the wiping owner's allocation is transferred via
+/// `secret_into_plain`; the borrowed `From<&CkAttributeQueryResult>` still
+/// copies via `secret_to_plain`). Mirrors the consume-by-value optimization
+/// applied to `attribute_results` for `C_GetAttributeValue` so the exact
+/// path (`C_GetAttributeValue_exact`) has the same allocation profile.
 fn attribute_query_results_into_proto(
     results: Vec<CkAttributeQueryResult>,
 ) -> v1_proto::AttributeQueryResultList {
@@ -203,13 +205,13 @@ impl From<&CkAttributeQueryResult> for v1_proto::AttributeQueryResult {
 }
 
 impl From<CkAttributeQueryResult> for v1_proto::AttributeQueryResult {
-    fn from(result: CkAttributeQueryResult) -> Self {
+    fn from(mut result: CkAttributeQueryResult) -> Self {
         Self {
             apply_returned_len: Some(result.apply_returned_len),
             apply_type: Some(result.apply_type),
             attr_type: result.attr_type.0,
             returned_len: result.returned_len,
-            value: result.value.as_ref().map(secret_to_plain),
+            value: result.value.take().map(secret_into_plain),
             ck_rv: result.ck_rv.map(|rv| rv.0),
             nested: result.nested.map(attribute_query_results_into_proto),
         }
@@ -777,6 +779,79 @@ mod tests {
         let decoded = v1_proto::DecryptRequest::decode(&bytes[..]).unwrap();
         assert_eq!(decoded.encrypted_data_null_len, None);
         assert_eq!(decoded.encrypted_data, b"ciphertext");
+    }
+
+    /// W1-C8-09 pin: the owned conversion moves each result's value
+    /// allocation into the proto message without cloning — the output
+    /// buffer is the same allocation, so the pointers must match exactly
+    /// (top-level and nested).
+    #[test]
+    fn owned_attribute_result_conversion_moves_value_buffer_without_copy() {
+        fn canary_result(
+            value: Vec<u8>,
+            nested: Option<Vec<CkAttributeQueryResult>>,
+        ) -> CkAttributeQueryResult {
+            CkAttributeQueryResult {
+                apply_returned_len: true,
+                apply_type: false,
+                attr_type: CkAttributeType::VALUE,
+                returned_len: value.len() as u64,
+                value: Some(value.into()),
+                ck_rv: None,
+                nested,
+            }
+        }
+
+        let nested = canary_result(vec![0xBBu8; 32], None);
+        let nested_ptr =
+            nested.value.as_ref().expect("nested canary").expose(|bytes| bytes.as_ptr());
+        let original = canary_result(vec![0xAAu8; 64], Some(vec![nested]));
+        let top_ptr = original.value.as_ref().expect("top canary").expose(|bytes| bytes.as_ptr());
+
+        let proto = v1_proto::AttributeQueryResult::from(original);
+        assert_eq!(
+            proto.value.as_ref().expect("proto value").as_ptr(),
+            top_ptr,
+            "owned conversion must move the value allocation, not clone it"
+        );
+        let nested_proto = proto
+            .nested
+            .as_ref()
+            .expect("proto nested")
+            .results
+            .first()
+            .expect("one nested result");
+        assert_eq!(
+            nested_proto.value.as_ref().expect("nested proto value").as_ptr(),
+            nested_ptr,
+            "owned conversion must move nested value allocations too"
+        );
+    }
+
+    /// Contrast pin: the borrowed `From<&CkAttributeQueryResult>` cannot
+    /// move out of a borrow, so it must copy — equal bytes, distinct
+    /// allocation, source still usable afterwards.
+    #[test]
+    fn borrowed_attribute_result_conversion_copies_value_buffer() {
+        let original = CkAttributeQueryResult {
+            apply_returned_len: true,
+            apply_type: false,
+            attr_type: CkAttributeType::VALUE,
+            returned_len: 64,
+            value: Some(vec![0xAAu8; 64].into()),
+            ck_rv: None,
+            nested: None,
+        };
+        let before = original.value.as_ref().expect("canary").expose(|bytes| bytes.as_ptr());
+        let proto = v1_proto::AttributeQueryResult::from(&original);
+        let after = proto.value.as_ref().expect("proto value");
+        assert_eq!(after.as_slice(), &[0xAAu8; 64]);
+        assert_ne!(
+            after.as_ptr(),
+            before,
+            "borrowed conversion must copy (it cannot move out of a borrow)"
+        );
+        assert!(original.value.is_some(), "borrowed conversion must not consume the source");
     }
 
     #[test]

@@ -147,6 +147,14 @@ const IGNORED_TEST_TAXONOMY: &[IgnoredTestLane] = &[
         requirements: &["NSS softokn libsoftokn3.so and certutil"],
     },
     IgnoredTestLane {
+        file: "crates/server/tests/nss_tls_mkd_mechanism_out_test.rs",
+        reason: "NSS softokn SSL3 master-key-derive mechanism-output coverage",
+        commands: &[
+            "cargo test -p pkcs11-proxy-ng --test nss_tls_mkd_mechanism_out_test -- --ignored --test-threads=1",
+        ],
+        requirements: &["NSS softokn libsoftokn3.so and certutil"],
+    },
+    IgnoredTestLane {
         file: "crates/server/tests/provider_matrix_test.rs",
         reason: "Optional NSS and Kryoptic provider matrix smoke coverage",
         commands: &[
@@ -330,6 +338,273 @@ fn supply_chain_pins_are_consistent() {
 }
 
 #[test]
+fn packaging_and_aux_images_are_pinned() {
+    // Deferred T22 F6: packaging + aux Dockerfiles pin bases by digest
+    // (tag kept for readability; the digest is what Docker pulls) and
+    // install a pinned Rust toolchain via the versioned, SHA-verified
+    // rustup-init bootstrap (the Dockerfile.test convention); GitLab
+    // pins its docker images the same way. `scratch` needs no digest
+    // (not a registry ref). Digests are format-checked here; values
+    // were resolved live at pin time (see the group-T22 report).
+    let root = workspace_root();
+    let toolchain_file = fs::read_to_string(root.join("rust-toolchain.toml"))
+        .expect("rust-toolchain.toml should exist");
+    let channel = toolchain_file
+        .lines()
+        .find_map(|line| line.strip_prefix("channel = \"")?.strip_suffix('"'))
+        .expect("rust-toolchain.toml should pin a channel");
+
+    for dockerfile_rel in [
+        "packaging/alpine/Dockerfile.alpine",
+        "packaging/amazon/Dockerfile.amazon",
+        "Dockerfile.be-qemu",
+        "Dockerfile.musl",
+    ] {
+        let path = root.join(dockerfile_rel);
+        let dockerfile = fs::read_to_string(&path).expect("Dockerfile should be readable");
+        assert!(
+            !dockerfile.contains("sh.rustup.rs"),
+            "{dockerfile_rel} should use the versioned rustup-init bootstrap, not sh.rustup.rs"
+        );
+        assert!(
+            !dockerfile.contains("--default-toolchain stable"),
+            "{dockerfile_rel} should pin a toolchain version, not stable"
+        );
+        assert!(
+            dockerfile.contains(&format!("ARG RUST_TOOLCHAIN={channel}")),
+            "{dockerfile_rel} toolchain should match rust-toolchain.toml ({channel})"
+        );
+        assert!(
+            dockerfile.contains("RUSTUP_VERSION=") && dockerfile.contains("sha256sum -c"),
+            "{dockerfile_rel} should verify the rustup-init download by SHA256"
+        );
+        for line in dockerfile.lines().map(str::trim) {
+            if !line.starts_with("FROM ") {
+                continue;
+            }
+            let reference = line.split_whitespace().nth(1).unwrap_or("");
+            if reference == "scratch" || reference.starts_with('$') {
+                continue;
+            }
+            assert!(
+                reference.contains("@sha256:"),
+                "{dockerfile_rel}: FROM `{reference}` should be digest-pinned"
+            );
+        }
+        for line in dockerfile.lines().map(str::trim) {
+            if line.starts_with("ARG ALPINE_BUILD_IMAGE=")
+                || line.starts_with("ARG AMAZON_BUILD_IMAGE=")
+            {
+                let digest = line.split("@sha256:").nth(1).unwrap_or("");
+                assert!(
+                    digest.len() == 64 && digest.chars().all(|c| c.is_ascii_hexdigit()),
+                    "{dockerfile_rel}: `{line}` should default to a digest-pinned image"
+                );
+            }
+        }
+    }
+
+    let gitlab =
+        fs::read_to_string(root.join(".gitlab-ci.yml")).expect(".gitlab-ci.yml should be readable");
+    for line in gitlab.lines().map(str::trim) {
+        if line.starts_with("image:") && line.contains("docker:") || line.starts_with("- docker:") {
+            assert!(line.contains("@sha256:"), ".gitlab-ci.yml: `{line}` should be digest-pinned");
+        }
+        if line.contains("ALPINE_BUILD_IMAGE:") || line.contains("AMAZON_BUILD_IMAGE:") {
+            assert!(
+                line.contains("@sha256:"),
+                ".gitlab-ci.yml: `{line}` should pass a digest-pinned image"
+            );
+        }
+    }
+    assert!(!gitlab.contains("docker:latest"), ".gitlab-ci.yml should not float on docker:latest");
+    assert!(
+        gitlab.contains("--build-arg ALPINE_BUILD_IMAGE="),
+        ".gitlab-ci.yml should pass the pinned Alpine build image"
+    );
+    assert!(
+        gitlab.contains("--build-arg AMAZON_BUILD_IMAGE="),
+        ".gitlab-ci.yml should pass the pinned Amazon build image"
+    );
+}
+
+#[test]
+fn shim_cdylib_tokio_closure_stays_minimal() {
+    // W1-L6-11: confirm Task 22 (W1-L16-15) tokio scoping still covers
+    // the shim cdylib — the server-only surface (signal/process, plus
+    // full/rt-multi-thread/fs per the Task 22 cargo-tree check) must
+    // not creep into the first-party manifests whose feature union
+    // forms the cdylib build. Only `[dependencies]` is scanned:
+    // dev/build deps (shim test harness, proto codegen) never link
+    // into the shipped cdylib. Manifests are parsed as TOML (T30 M1),
+    // not line-matched, so multi-line declarations cannot evade the
+    // scan. Third-party unions (tonic/hyper) are verified out-of-band
+    // via `cargo tree -p pkcs11-proxy-ng-shim -e normal` (no
+    // signal/process/full — recheck when adding client-side deps).
+    let root = workspace_root();
+
+    // Workspace base must stay featureless.
+    let workspace = fs::read_to_string(root.join("Cargo.toml")).expect("Cargo.toml readable");
+    let violations = workspace_tokio_base_violations(&workspace);
+    assert!(violations.is_empty(), "workspace tokio violations:\n{}", violations.join("\n"));
+
+    // First-party crates feeding the cdylib (shim + its path deps).
+    for member in [
+        "crates/shim/Cargo.toml",
+        "crates/client/Cargo.toml",
+        "crates/proto/Cargo.toml",
+        "crates/types/Cargo.toml",
+    ] {
+        let manifest = fs::read_to_string(root.join(member)).expect("member manifest readable");
+        let violations = tokio_manifest_violations(&manifest, member);
+        assert!(violations.is_empty(), "{member} tokio violations:\n{}", violations.join("\n"));
+    }
+}
+
+const BANNED_TOKIO_FEATURES: &[&str] = &["full", "signal", "process", "rt-multi-thread", "fs"];
+
+/// Deferred T30 M1: violations of the cdylib tokio rules in one member
+/// manifest's `[dependencies]` tokio entry (empty = clean). Split out so
+/// synthetic fixtures can drive the gate directly. Parsed as TOML (not
+/// line-matched), so multi-line declarations (array continuations,
+/// `[dependencies.tokio]` sections) cannot evade the banned-feature
+/// scan. Unparseable manifests fail closed (reported, never skipped).
+fn tokio_manifest_violations(manifest_text: &str, member: &str) -> Vec<String> {
+    let manifest: toml::Value = match manifest_text.parse() {
+        Ok(value) => value,
+        Err(err) => return vec![format!("{member}: manifest must parse as TOML: {err}")],
+    };
+    let tokio = manifest.get("dependencies").and_then(|deps| deps.get("tokio"));
+    let Some(tokio) = tokio else { return Vec::new() };
+    let Some(table) = tokio.as_table() else {
+        // Bare `tokio = "1"` enables default features (the banned surface).
+        return vec![format!(
+            "{member}: tokio must inherit the featureless workspace base (bare version enables default features)"
+        )];
+    };
+    let mut violations = Vec::new();
+    let inherits_base = table.get("workspace").and_then(toml::Value::as_bool).unwrap_or(false)
+        || table.get("default-features").and_then(toml::Value::as_bool) == Some(false);
+    if !inherits_base {
+        violations
+            .push(format!("{member}: tokio must inherit the featureless workspace base: {tokio}"));
+    }
+    if let Some(features) = table.get("features").and_then(toml::Value::as_array) {
+        for feature in features.iter().filter_map(toml::Value::as_str) {
+            if BANNED_TOKIO_FEATURES.contains(&feature) {
+                violations.push(format!(
+                    "{member}: banned tokio feature \"{feature}\" in the cdylib closure"
+                ));
+            }
+        }
+    }
+    violations
+}
+
+/// Deferred T30 M1: violations of the workspace tokio-base rule (empty =
+/// clean). The shared base must stay featureless so inheriting members
+/// cannot pull the server-only surface through the workspace. Parsed as
+/// TOML so a multi-line base declaration is scanned whole.
+fn workspace_tokio_base_violations(workspace_text: &str) -> Vec<String> {
+    let manifest: toml::Value = match workspace_text.parse() {
+        Ok(value) => value,
+        Err(err) => return vec![format!("workspace Cargo.toml must parse as TOML: {err}")],
+    };
+    let tokio = manifest
+        .get("workspace")
+        .and_then(|ws| ws.get("dependencies"))
+        .and_then(|deps| deps.get("tokio"));
+    let Some(table) = tokio.and_then(toml::Value::as_table) else {
+        return vec!["workspace must declare shared tokio as a featureless table".to_string()];
+    };
+    let mut violations = Vec::new();
+    if table.get("default-features").and_then(toml::Value::as_bool) != Some(false) {
+        violations.push(format!("workspace tokio must keep default-features = false: {tokio:?}"));
+    }
+    if let Some(features) = table.get("features").and_then(toml::Value::as_array) {
+        for feature in features.iter().filter_map(toml::Value::as_str) {
+            if BANNED_TOKIO_FEATURES.contains(&feature) {
+                violations.push(format!(
+                    "workspace tokio base must not enable banned feature \"{feature}\""
+                ));
+            }
+        }
+    }
+    violations
+}
+
+#[test]
+fn tokio_gate_catches_multiline_banned_feature() {
+    // Deferred T30 M1: a banned feature on a continuation line of a
+    // multi-line inline table must not evade the scan.
+    let manifest = "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+        \n[dependencies]\ntokio = { workspace = true, features = [\n  \"rt\",\n  \"signal\",\n] }\n";
+    let violations = tokio_manifest_violations(manifest, "fixture/Cargo.toml");
+    assert!(
+        violations.iter().any(|v| v.contains("signal")),
+        "multi-line banned feature must be caught, got: {violations:?}"
+    );
+    // The workspace base was line-parsed too — a multi-line base with a
+    // banned feature must be caught as well (newline inside the features
+    // array: valid TOML 1.0, invisible to the old line matcher).
+    let workspace = "[workspace]\n[workspace.dependencies]\ntokio = { version = \"1\", default-features = false, features = [\n  \"process\"\n] }\n";
+    let ws_violations = workspace_tokio_base_violations(workspace);
+    assert!(
+        ws_violations.iter().any(|v| v.contains("process")),
+        "multi-line workspace base must be scanned whole, got: {ws_violations:?}"
+    );
+}
+
+#[test]
+fn tokio_gate_catches_dependency_table_section() {
+    // Deferred T30 M1: the `[dependencies.tokio]` table form is
+    // inherently multi-line and must be scanned too.
+    let manifest = "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+        \n[dependencies.tokio]\nversion = \"1\"\ndefault-features = false\nfeatures = [\"full\"]\n";
+    let violations = tokio_manifest_violations(manifest, "fixture/Cargo.toml");
+    assert!(
+        violations.iter().any(|v| v.contains("full")),
+        "table-section banned feature must be caught, got: {violations:?}"
+    );
+}
+
+#[test]
+fn tokio_gate_accepts_clean_manifests() {
+    // Deferred T30 M1: clean declarations — single-line, multi-line, or
+    // absent tokio — must stay green.
+    for manifest in [
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+        \n[dependencies]\ntokio = { workspace = true, features = [\"rt\", \"sync\"] }\n",
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+        \n[dependencies]\ntokio = { workspace = true, features = [\n  \"rt\",\n  \"sync\",\n] }\n",
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nserde = \"1\"\n",
+    ] {
+        assert!(
+            tokio_manifest_violations(manifest, "fixture/Cargo.toml").is_empty(),
+            "clean manifest must stay green: {manifest:?}"
+        );
+    }
+    assert!(
+        workspace_tokio_base_violations(
+            "[workspace.dependencies]\ntokio = { version = \"1\", default-features = false }\n"
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn tokio_gate_catches_bare_version_enabling_default_features() {
+    // Deferred T30 M1: parity with the pre-change gate — a bare
+    // `tokio = "1"` (default features on) never inherits the
+    // featureless base.
+    let manifest = "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\ntokio = \"1\"\n";
+    assert!(
+        !tokio_manifest_violations(manifest, "fixture/Cargo.toml").is_empty(),
+        "bare tokio version must be flagged"
+    );
+}
+
+#[test]
 fn test_matrix_fast_only_matches_ci_tier0_commands() {
     let root = workspace_root();
     let test_matrix = fs::read_to_string(root.join("scripts/test-matrix.sh"))
@@ -360,6 +635,34 @@ fn test_matrix_fast_only_matches_ci_tier0_commands() {
             "local test matrix should run Tier 0 commands in CI order"
         );
         previous_position = position;
+    }
+}
+
+#[test]
+fn test_matrix_usage_names_fast_check_set_consistently() {
+    // Deferred T22 F5: --skip-fast skips exactly the fast set --fast-only
+    // runs, so both usage lines must name the same checks.
+    let root = workspace_root();
+    let test_matrix = fs::read_to_string(root.join("scripts/test-matrix.sh"))
+        .expect("scripts/test-matrix.sh should be readable");
+    let usage_line = |flag: &str| {
+        test_matrix
+            .lines()
+            .find(|line| line.trim_start().starts_with(&format!("{flag} ")))
+            .unwrap_or_else(|| panic!("test-matrix.sh usage should document {flag}"))
+            .to_string()
+    };
+    let fast_only = usage_line("--fast-only");
+    let skip_fast = usage_line("--skip-fast");
+    for check in ["fmt", "audit", "deny", "build", "test", "clippy"] {
+        assert!(
+            fast_only.contains(check),
+            "--fast-only usage should name `{check}`: `{fast_only}`"
+        );
+        assert!(
+            skip_fast.contains(check),
+            "--skip-fast usage should name `{check}`: `{skip_fast}`"
+        );
     }
 }
 
@@ -546,6 +849,39 @@ fn ci_locked_builds_match_documented_gate_set() {
         }
         if GATED_VERBS.iter().any(|verb| trimmed.contains(verb)) {
             assert!(trimmed.contains("--locked"), "CI cargo line should run --locked: `{trimmed}`");
+        }
+    }
+
+    // Deferred T22 F3: nightly's llvm-cov/miri lines run --locked too
+    // (same lockfile, no nightly conflict). `cargo llvm-cov report`
+    // accepts --locked (listed in its --help alongside the other
+    // subcommands) and `cargo miri test` supports the same flags as
+    // `cargo test`, so every cargo line here carries it.
+    const NIGHTLY_GATED_VERBS: &[&str] = &[
+        "cargo build",
+        "cargo test",
+        "cargo check",
+        "cargo clippy",
+        "cargo xwin",
+        "cargo install",
+        "cargo llvm-cov",
+        "miri test",
+    ];
+    let nightly = fs::read_to_string(root.join(".github/workflows/nightly.yml"))
+        .expect(".github/workflows/nightly.yml should be readable");
+    for line in nightly.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#')
+            || trimmed.starts_with("- name:")
+            || trimmed.starts_with("name:")
+        {
+            continue;
+        }
+        if NIGHTLY_GATED_VERBS.iter().any(|verb| trimmed.contains(verb)) {
+            assert!(
+                trimmed.contains("--locked"),
+                "nightly cargo line should run --locked: `{trimmed}`"
+            );
         }
     }
 
@@ -2409,7 +2745,9 @@ fn oasis_inventory_tracks_mechanism_parameter_shape_layers() {
     assert_eq!(wtls_prf["proto_oneof_field"], "wtls_prf_params");
     assert_eq!(wtls_prf["backend_ffi_conversion"], true);
     assert_eq!(wtls_prf["shim_read_support"], true);
-    assert_eq!(wtls_prf["shim_writeback_support"], false);
+    // W1-C5-01: the CkMechanismParams::WtlsPrf writeback arm exists
+    // (mechanism_writeback.rs), so the inventory reports support.
+    assert_eq!(wtls_prf["shim_writeback_support"], true);
     for expected_test in
         ["wtls_prf_params_round_trip", "reads_wtls_prf_and_x942_mqv_parameter_structs"]
     {
@@ -5753,4 +6091,338 @@ fn legacy_per_function_rpcs_have_documented_retention() {
             "{file} handler for legacy rpc {rpc} must carry the uniform legacy marker"
         );
     }
+}
+
+// ── W1-L17/L16 (Task 44): CI hygiene (shellcheck, versions, perms, wiring) ──
+
+#[test]
+fn ci_runs_pinned_shellcheck_over_all_scripts() {
+    // W1-L17-12: a CI job runs the mise-pinned shellcheck (0.11.0) over
+    // every scripts/**/*.sh; failures block CI. The step enumerates via
+    // find so newly added scripts are covered without a workflow edit.
+    let root = workspace_root();
+    let mise = fs::read_to_string(root.join("mise.toml")).expect("mise.toml should be readable");
+    assert!(
+        mise.contains("shellcheck = \"0.11.0\""),
+        "mise.toml should pin shellcheck 0.11.0 (single version everywhere)"
+    );
+    let ci_workflow = fs::read_to_string(root.join(".github/workflows/ci.yml"))
+        .expect(".github/workflows/ci.yml should be readable");
+    assert!(
+        ci_workflow.contains("  shellcheck:"),
+        "ci.yml should carry a shellcheck job so script regressions block CI"
+    );
+    let install = workflow_step_body(&ci_workflow, "Install shellcheck (pinned)");
+    assert!(
+        install.contains("0.11.0") && install.contains("sha256sum"),
+        "shellcheck install step should pin 0.11.0 with hash verification"
+    );
+    let run = workflow_step_body(&ci_workflow, "shellcheck all scripts");
+    assert!(
+        run.contains("find scripts") && run.contains("shellcheck"),
+        "shellcheck step should enumerate scripts via find, not a hardcoded list"
+    );
+    let scripts: Vec<PathBuf> = {
+        fn visit(path: &Path, output: &mut Vec<PathBuf>) {
+            for entry in fs::read_dir(path).expect("scripts dir should be readable") {
+                let path = entry.expect("entry should be readable").path();
+                if path.is_dir() {
+                    visit(&path, output);
+                } else if path.extension().is_some_and(|ext| ext == "sh") {
+                    output.push(path);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        visit(&root.join("scripts"), &mut out);
+        out
+    };
+    assert!(
+        scripts.len() >= 30,
+        "expected at least the 30 audited shell scripts, found {len}",
+        len = scripts.len()
+    );
+}
+
+#[test]
+fn artifact_action_versions_are_uniform() {
+    // W1-L17-13: every actions/upload-artifact site pins the same v5 SHA
+    // (nightly/xplat lagged on v4 while release/cache used v5).
+    let root = workspace_root();
+    let mut pins: Vec<(String, String)> = Vec::new();
+    for workflow in ["ci.yml", "nightly.yml", "release.yml", "cross-platform.yml"] {
+        let text = fs::read_to_string(root.join(format!(".github/workflows/{workflow}")))
+            .expect("workflow should be readable");
+        for line in text.lines() {
+            let Some(at) = line.find("actions/upload-artifact@") else {
+                continue;
+            };
+            let rest = &line[at + "actions/upload-artifact@".len()..];
+            let sha: String = rest.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
+            assert_eq!(sha.len(), 40, "upload-artifact pin should be a full SHA: `{line}`");
+            pins.push((workflow.to_string(), sha));
+            assert!(
+                line.contains("# v5"),
+                "{workflow} upload-artifact pin should be tagged v5: `{line}`"
+            );
+        }
+    }
+    assert!(!pins.is_empty(), "expected upload-artifact sites");
+    for (workflow, sha) in &pins {
+        assert_eq!(
+            sha, &pins[0].1,
+            "{workflow} upload-artifact SHA should match the single pinned version"
+        );
+    }
+}
+
+#[test]
+fn deny_blocks_main_leg_with_standalone_coverage() {
+    // W1-L17-15: Task 22 put deny on the build-and-test needs edge; this
+    // gate confirms that coverage holds and closes the nightly residual
+    // (Tier-0 sanity ran `cargo deny check` but skipped the standalone
+    // test-workspace locks that ci.yml covers).
+    let root = workspace_root();
+    let ci_workflow = fs::read_to_string(root.join(".github/workflows/ci.yml"))
+        .expect(".github/workflows/ci.yml should be readable");
+    assert!(
+        ci_workflow.contains("needs: [fmt, audit, deny]"),
+        "build-and-test should wait on the deny job, not report green-then-red"
+    );
+    let nightly = fs::read_to_string(root.join(".github/workflows/nightly.yml"))
+        .expect(".github/workflows/nightly.yml should be readable");
+    assert!(
+        nightly.contains("scripts/audit-test-workspaces.sh deny"),
+        "nightly Tier-0 sanity should cover the standalone test-workspace locks like ci.yml"
+    );
+}
+
+#[test]
+fn release_notes_awk_matches_version_literally() {
+    // W1-L17-17: the release-notes awk interpolated the version as regex,
+    // so 0.2.0 also matched a hypothetical ## [0x2x0] heading. The version
+    // is dot-escaped before interpolation (same rule as
+    // verify-release-subject.sh BASE_ESCAPED); the tag-format validation
+    // above it guarantees the remaining charset is regex-literal.
+    let root = workspace_root();
+    let release = fs::read_to_string(root.join(".github/workflows/release.yml"))
+        .expect(".github/workflows/release.yml should be readable");
+    let step = workflow_step_body(&release, "Extract release notes from CHANGELOG.md");
+    assert!(
+        step.contains("${VERSION//./"),
+        "extraction step should dot-escape the version before awk interpolation"
+    );
+    assert!(
+        !step.contains("-v ver=\"$VERSION\""),
+        "awk should receive the escaped version, not the raw dotted one"
+    );
+    #[cfg(unix)]
+    {
+        // Fixture proof: execute the workflow's own script text with a
+        // decoy heading that the old regex matched.
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("CHANGELOG.md"),
+            "# Changelog\n\n## [0x2x0] - 2000-01-01\n\nDECOY notes.\n\n\
+             ## [0.2.0] - 2026-01-01\n\nReal notes.\n",
+        )
+        .expect("fixture CHANGELOG");
+        fs::create_dir(dir.path().join("dist")).expect("dist dir");
+        let status = Command::new("bash")
+            .arg("-c")
+            .arg(&step)
+            .current_dir(dir.path())
+            .env("GITHUB_REF_NAME", "v0.2.0")
+            .status()
+            .expect("bash should run the extraction step");
+        assert!(status.success(), "extraction step should succeed on the fixture");
+        let notes = fs::read_to_string(dir.path().join("dist/RELEASE_NOTES.md"))
+            .expect("RELEASE_NOTES.md should be written");
+        assert!(
+            notes.contains("Real notes.") && !notes.contains("DECOY"),
+            "extraction should match only the literal heading, got: {notes:?}"
+        );
+    }
+}
+
+#[test]
+fn win32_stub_proof_uses_machine_readable_assertion() {
+    // W1-L17-18: the stub proof keyed on libtest's human-readable
+    // "1 passed" summary. --format json is nightly-only (stable libtest
+    // rejects it), so the pass signal is the exit code (pipefail) plus
+    // the test's own machine-readable receipt line, with --exact pinning
+    // the filter so a rename/typo cannot silently match zero tests.
+    let root = workspace_root();
+    let xplat = fs::read_to_string(root.join(".github/workflows/cross-platform.yml"))
+        .expect(".github/workflows/cross-platform.yml should be readable");
+    let step = workflow_step_body(&xplat, "Win32 stub live-load proof");
+    assert!(step.contains("--exact"), "stub proof should pin the filter with --exact");
+    assert!(step.contains("pipefail"), "stub proof should fail on the cargo exit code");
+    assert!(
+        !step.contains("1 passed"),
+        "stub proof should not depend on the human-readable summary"
+    );
+    assert!(
+        step.contains("win32-stub-live-load: ok"),
+        "stub proof should assert the test's own receipt line"
+    );
+}
+
+#[test]
+fn dockerfile_test_surfaces_precompile_errors() {
+    // W1-L17-19: the dependency-cache layer discarded stderr and forced
+    // success, misattributing broken manifests to the later source build.
+    // (Base-image digest pinning landed in Task 22; this closes the
+    // masking residual only.)
+    let root = workspace_root();
+    let dockerfile = fs::read_to_string(root.join("Dockerfile.test"))
+        .expect("Dockerfile.test should be readable");
+    let mut cargo_builds = 0;
+    for line in dockerfile.lines() {
+        if line.contains("cargo build") {
+            cargo_builds += 1;
+            assert!(
+                !line.contains("|| true"),
+                "Dockerfile.test cargo build should fail the image, not force success: `{line}`"
+            );
+            assert!(
+                !line.contains("2>/dev/null"),
+                "Dockerfile.test cargo build should surface stderr: `{line}`"
+            );
+        }
+    }
+    assert!(cargo_builds >= 2, "expected the cache + source cargo builds");
+    // The unmasked cache layer resolves declared targets at
+    // manifest-parse time, so every [[bench]] in server/Cargo.toml needs
+    // a stub here (see the Dockerfile comment); pin the correspondence
+    // per-PR since the image itself builds only in nightly.
+    let server_manifest =
+        fs::read_to_string(root.join("crates/server/Cargo.toml")).expect("server manifest");
+    let mut in_bench = false;
+    let mut benches = 0;
+    for line in server_manifest.lines() {
+        if line == "[[bench]]" {
+            in_bench = true;
+            continue;
+        }
+        if line.starts_with('[') {
+            in_bench = false;
+            continue;
+        }
+        if in_bench && let Some(name) = line.strip_prefix("name = ") {
+            let name = name.trim_matches('"');
+            benches += 1;
+            assert!(
+                dockerfile.contains(name),
+                "Dockerfile.test should stub the `{name}` bench target"
+            );
+        }
+    }
+    assert!(benches >= 1, "expected [[bench]] targets in server/Cargo.toml");
+}
+
+#[test]
+fn ci_cancels_superseded_pr_runs() {
+    // W1-L17-20: rapid PR pushes stacked full matrices behind superseded
+    // runs; cancel-in-progress is scoped to pull_request so main/dev
+    // pushes are never cancelled.
+    let root = workspace_root();
+    let ci_workflow = fs::read_to_string(root.join(".github/workflows/ci.yml"))
+        .expect(".github/workflows/ci.yml should be readable");
+    let head = ci_workflow.split("\njobs:").next().expect("ci.yml should have a jobs section");
+    assert!(head.contains("concurrency:"), "ci.yml should set top-level concurrency");
+    assert!(
+        head.contains("cancel-in-progress:"),
+        "ci.yml concurrency should cancel superseded runs"
+    );
+    assert!(head.contains("pull_request"), "cancel-in-progress should be scoped to PR pushes");
+}
+
+#[test]
+fn release_write_permission_scoped_to_publish() {
+    // W1-L17-21: contents:write sat at workflow scope though only the
+    // publish job (softprops/action-gh-release) needs it; build jobs run
+    // least-privilege read.
+    let root = workspace_root();
+    let release = fs::read_to_string(root.join(".github/workflows/release.yml"))
+        .expect(".github/workflows/release.yml should be readable");
+    let mut parts = release.splitn(2, "\njobs:");
+    let head = parts.next().expect("release.yml should have a preamble");
+    let jobs = parts.next().expect("release.yml should have a jobs section");
+    assert!(
+        !head.contains("contents: write"),
+        "workflow-scope permissions should not grant contents:write"
+    );
+    assert!(
+        head.contains("contents: read"),
+        "workflow-scope permissions should grant least-privilege read for checkout"
+    );
+    let mut job_parts = jobs.splitn(2, "  publish:");
+    let pre_publish = job_parts.next().expect("release.yml should have build jobs");
+    let publish = job_parts.next().expect("release.yml should have a publish job");
+    assert!(!pre_publish.contains("contents: write"), "build jobs should not carry contents:write");
+    assert!(
+        publish.contains("contents: write"),
+        "publish job should carry the contents:write it needs for the release"
+    );
+}
+
+#[test]
+fn live_tier_wires_retained_oracle_and_sigterm() {
+    // W1-L17-22: the retained-oracle topology proof and the SIGTERM
+    // mid-call drain proof ran only by hand; both are live-tier legs now
+    // (each skips cleanly when its tooling is absent), executed by the
+    // nightly cross-width job.
+    let root = workspace_root();
+    let tiers = fs::read_to_string(root.join("scripts/run-test-tiers.sh"))
+        .expect("scripts/run-test-tiers.sh should be readable");
+    let live = shell_function_body(&tiers, "run_live");
+    for script in ["run-retained-oracle-live-test.sh", "test-sigterm-mid-call.sh"] {
+        assert!(live.contains(script), "live tier should wire {script}");
+        assert!(root.join("scripts").join(script).is_file(), "scripts/{script} should exist");
+    }
+    let nightly = fs::read_to_string(root.join(".github/workflows/nightly.yml"))
+        .expect(".github/workflows/nightly.yml should be readable");
+    assert!(
+        nightly.contains("scripts/run-test-tiers.sh live"),
+        "nightly should execute the live tier"
+    );
+}
+
+#[test]
+fn deny_allows_no_unused_licenses() {
+    // W1-L17-27: Unicode-DFS-2016 was allowlisted-but-unused (the quality
+    // receipt's own unmatched-allowance note), and tree drift had orphaned
+    // BSD-2-Clause / MPL-2.0 / CC0-1.0 the same way (`cargo deny check`
+    // reported all four as license-not-encountered). The allowlist carries
+    // only encountered licenses now; each removal was verified unused in
+    // the root tree and all four standalone test-workspace trees.
+    let root = workspace_root();
+    let deny = fs::read_to_string(root.join("deny.toml")).expect("deny.toml should be readable");
+    for unused in ["Unicode-DFS-2016", "BSD-2-Clause", "MPL-2.0", "CC0-1.0"] {
+        for line in deny.lines() {
+            let code = line.split('#').next().unwrap_or("");
+            assert!(
+                !code.contains(unused),
+                "deny.toml should not allowlist the unused {unused} license: `{line}`"
+            );
+        }
+    }
+}
+
+#[test]
+fn pkcs11_module_dep_documents_single_maintainer_residual() {
+    // W1-L16-17 (P2→P3): the backend's pkcs11-module git dependency tracks
+    // a single-maintainer fork with no vendor mirror. Downgraded to an
+    // explicit residual: the dependency site records the concentration
+    // risk and the fallback plan (hash-addressed mirror + vendor path).
+    let root = workspace_root();
+    let backend = fs::read_to_string(root.join("crates/backend/Cargo.toml"))
+        .expect("crates/backend/Cargo.toml should be readable");
+    let lowered = backend.to_lowercase();
+    assert!(
+        lowered.contains("single-maintainer"),
+        "backend Cargo.toml should name the single-maintainer residual"
+    );
+    assert!(lowered.contains("fallback"), "backend Cargo.toml should record the fallback plan");
 }

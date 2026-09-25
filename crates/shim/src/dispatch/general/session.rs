@@ -36,10 +36,9 @@ pub unsafe extern "C" fn c_close_session(h_session: CK_SESSION_HANDLE) -> CK_RV 
         let result = with_client!(client => client.close_session_stateful(
             CkSessionHandle(h_session as u64)
         ));
-        // Disposable two-call output is attempt-scoped.  Authoritative
-        // session/message state survives only a decoded transient provider
-        // failure, so a still-valid handle can safely retry or continue.
-        crate::state::evict_session_output_caches(h_session);
+        // Authoritative session/message state survives only a decoded
+        // transient provider failure, so a still-valid handle can safely
+        // retry or continue. (W1-C6-04: no disposable output caches remain.)
         let evict_authoritative = match &result {
             Ok(()) => true,
             Err(error) if error.origin != MessageCallErrorOrigin::Backend => true,
@@ -80,7 +79,7 @@ pub unsafe extern "C" fn c_get_session_info(
                     out.slotID = info.slot_id.0 as CK_SLOT_ID;
                     out.state = info.state as CK_STATE;
                     out.flags = info.flags.0 as CK_FLAGS;
-                    out.ulDeviceError = info.device_error as CK_ULONG;
+                    out.ulDeviceError = info.device_error.0 as CK_ULONG;
                 }
                 rv_ok()
             }

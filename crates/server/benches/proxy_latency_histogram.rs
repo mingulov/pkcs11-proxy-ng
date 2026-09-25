@@ -40,12 +40,11 @@ fn main() {
         let mut c = Pkcs11Client::connect(&endpoint).await.unwrap();
         c.initialize().await.unwrap();
         let slots = c.get_slot_list(false).await.unwrap();
-        let session =
-            c.open_session(slots[0], CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await.unwrap();
+        let session = c.open_session(slots[0], CkSessionFlags::SERIAL_SESSION).await.unwrap();
         let key = c.create_object(session, Some(&[])).await.unwrap();
         (c, session, key)
     });
-    let mech = CkMechanism { mechanism_type: CkMechanismType(0x00000001), params: None };
+    let mech = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
 
     let payload = vec![0xABu8; 256];
     let mut hist: Histogram<u64> = Histogram::new(3).unwrap();

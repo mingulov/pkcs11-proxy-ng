@@ -229,37 +229,16 @@ fn stop_fire_condition(
     matches!(decision, super::native_domain::RetirementDecision::Poison) && holds_slot
 }
 
-/// Test-only `cfg!` mirror of the `Drop`-guard predicate below (Linux
-/// x86_64/x86/aarch64, Windows x86_64/x86, macOS aarch64/x86_64 — leg for
-/// leg with
-/// `NATIVE_STOP_QUALIFIED`). The `cfg` on the guard is the source of
-/// truth; this mirror lets the coherence test assert the guard arms
-/// exactly where stop arms exist.
-#[cfg(test)]
-pub(in crate::ffi) const DROP_GUARD_STOP_ARMED: bool = cfg!(any(
-    all(
-        target_os = "linux",
-        any(target_env = "gnu", target_env = "musl"),
-        any(
-            all(target_arch = "x86_64", target_pointer_width = "64"),
-            all(target_arch = "x86", target_pointer_width = "32"),
-            all(target_arch = "aarch64", target_pointer_width = "64")
-        )
-    ),
-    all(
-        target_os = "windows",
-        target_env = "msvc",
-        any(
-            all(target_arch = "x86_64", target_pointer_width = "64"),
-            all(target_arch = "x86", target_pointer_width = "32")
-        )
-    ),
-    all(
-        target_os = "macos",
-        any(target_arch = "aarch64", target_arch = "x86_64"),
-        target_pointer_width = "64"
-    )
-));
+/// Single stop-qualification predicate for the `Drop` guard legs
+/// below (W1-C4-08). Both legs consult this one helper — the
+/// `NATIVE_STOP_QUALIFIED` legs in `native_stop` — instead of
+/// repeating the target `cfg`, so a leg edit cannot desync the gate.
+/// The value is `const`, so the branch folds away on unqualified
+/// targets exactly as the old `#[cfg]` gating did.
+#[inline]
+fn stop_target_qualified() -> bool {
+    super::native_stop::NATIVE_STOP_QUALIFIED
+}
 
 impl Drop for FfiBackend {
     /// Retire the construction reservation honestly: enter `Retiring` for the
@@ -279,33 +258,13 @@ impl Drop for FfiBackend {
         // when the managed final owner cannot prove quiescence. First
         // statement and lock-free (atomic-only decision plus a plain-bool
         // slot check), so it precedes the lock-taking poison path and all
-        // dependent field drops. Elsewhere this block cfg-compiles out and
-        // the arms below keep today's behavior bit-for-bit.
-        #[cfg(any(
-            all(
-                target_os = "linux",
-                any(target_env = "gnu", target_env = "musl"),
-                any(
-                    all(target_arch = "x86_64", target_pointer_width = "64"),
-                    all(target_arch = "x86", target_pointer_width = "32"),
-                    all(target_arch = "aarch64", target_pointer_width = "64")
-                )
-            ),
-            all(
-                target_os = "windows",
-                target_env = "msvc",
-                any(
-                    all(target_arch = "x86_64", target_pointer_width = "64"),
-                    all(target_arch = "x86", target_pointer_width = "32")
-                )
-            ),
-            all(
-                target_os = "macos",
-                any(target_arch = "aarch64", target_arch = "x86_64"),
-                target_pointer_width = "64"
-            )
-        ))]
-        if stop_fire_condition(decision, self.construction.holds_registry_slot()) {
+        // dependent field drops. The qualification is the shared
+        // `stop_target_qualified()` const (W1-C4-08): on unqualified
+        // targets the branch folds away and the arms below keep today's
+        // behavior bit-for-bit.
+        if stop_target_qualified()
+            && stop_fire_condition(decision, self.construction.holds_registry_slot())
+        {
             super::native_stop::abnormal_stop_native_lifetime(
                 super::native_stop::StopReason::UnprovenFinalOwner,
             );
@@ -315,32 +274,8 @@ impl Drop for FfiBackend {
         // signal. The probe is a non-blocking `try_write` (never blocks
         // in `Drop`); contention deliberately has no arm (`WouldBlock` is
         // unreachable — a live guard would keep its `Arc` owner alive).
-        // Elsewhere this block cfg-compiles out, bit-for-bit.
-        #[cfg(any(
-            all(
-                target_os = "linux",
-                any(target_env = "gnu", target_env = "musl"),
-                any(
-                    all(target_arch = "x86_64", target_pointer_width = "64"),
-                    all(target_arch = "x86", target_pointer_width = "32"),
-                    all(target_arch = "aarch64", target_pointer_width = "64")
-                )
-            ),
-            all(
-                target_os = "windows",
-                target_env = "msvc",
-                any(
-                    all(target_arch = "x86_64", target_pointer_width = "64"),
-                    all(target_arch = "x86", target_pointer_width = "32")
-                )
-            ),
-            all(
-                target_os = "macos",
-                any(target_arch = "aarch64", target_arch = "x86_64"),
-                target_pointer_width = "64"
-            )
-        ))]
-        if self.lifecycle_domain.quiescence_poisoned() {
+        // Same shared gate; folds away on unqualified targets, bit-for-bit.
+        if stop_target_qualified() && self.lifecycle_domain.quiescence_poisoned() {
             super::native_stop::abnormal_stop_native_lifetime(
                 super::native_stop::StopReason::UnprovenFinalOwner,
             );
@@ -546,13 +481,52 @@ mod tests {
     }
 
     #[test]
-    fn drop_guard_cfg_matches_stop_arms() {
-        // TC1: the `Drop` guard must fire exactly where stop arms exist;
-        // the guard predicate mirrors `NATIVE_STOP_QUALIFIED` leg for leg.
+    fn stop_qualification_single_predicate_covers_all_legs() {
+        // W1-C4-08: both `Drop` stop legs consult one helper — the
+        // `NATIVE_STOP_QUALIFIED` legs in `native_stop` — instead of
+        // repeating the target cfg. Each leg is pinned individually so
+        // a leg edit trips this test instead of desyncing a mirror.
+        let linux_x86_64 = cfg!(all(
+            target_os = "linux",
+            any(target_env = "gnu", target_env = "musl"),
+            target_arch = "x86_64",
+            target_pointer_width = "64"
+        ));
+        let linux_x86 = cfg!(all(
+            target_os = "linux",
+            any(target_env = "gnu", target_env = "musl"),
+            target_arch = "x86",
+            target_pointer_width = "32"
+        ));
+        let linux_aarch64 = cfg!(all(
+            target_os = "linux",
+            any(target_env = "gnu", target_env = "musl"),
+            target_arch = "aarch64",
+            target_pointer_width = "64"
+        ));
+        let windows_msvc = cfg!(all(
+            target_os = "windows",
+            target_env = "msvc",
+            any(
+                all(target_arch = "x86_64", target_pointer_width = "64"),
+                all(target_arch = "x86", target_pointer_width = "32")
+            )
+        ));
+        let macos = cfg!(all(
+            target_os = "macos",
+            any(target_arch = "aarch64", target_arch = "x86_64"),
+            target_pointer_width = "64"
+        ));
+        let any_leg = linux_x86_64 || linux_x86 || linux_aarch64 || windows_msvc || macos;
         assert_eq!(
-            super::DROP_GUARD_STOP_ARMED,
+            super::stop_target_qualified(),
             crate::ffi::native_stop::NATIVE_STOP_QUALIFIED,
-            "Drop guard cfg must arm exactly where stop arms exist"
+            "single predicate must be the native_stop source of truth"
+        );
+        assert_eq!(
+            super::stop_target_qualified(),
+            any_leg,
+            "single predicate must arm exactly on the five qualified legs"
         );
     }
 

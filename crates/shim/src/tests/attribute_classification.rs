@@ -1,3 +1,7 @@
+// CK_ULONG is u32 on narrow targets (i686, armv7, Windows x64), so the
+// `as u64` widens below are no-ops here but required there; scoped
+// allow keeps the width conversions explicit (ADR-0011, W1-L12-07).
+#![allow(clippy::unnecessary_cast)]
 //! Consistency guard for the width-bridge attribute classifier (ADR-0011 D10).
 //!
 //! `CkAttributeType` (in the `types` crate, which does not depend on
