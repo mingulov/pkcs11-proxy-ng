@@ -5,6 +5,10 @@
 #
 # Only ONE daemon profile runs at a time; the consumer containers
 # resolve `daemon` to the active one. run_matrix.sh cycles them.
+#
+# Requires a checkout directory named pkcs11-proxy-ng: build contexts are its
+# parent directory, and Dockerfile/COPY paths include that checkout name.
+# Build the Alpine APK carrier first; see tests/consumers/README.md.
 
 services:
   # ---- Daemons (mutually exclusive; selected by --profile) ----

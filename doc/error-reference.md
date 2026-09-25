@@ -347,14 +347,14 @@ These surface as process-startup errors before any PKCS#11 call is served:
 |---|---|---|
 | `already reserved (epoch N)` | A second backend provider chain was registered in this process | Run one provider chain per daemon process (see `doc/release/native-mechanism-ownership.md`, "One provider chain per embedding process") |
 | `constructor registry poisoned` / `constructor registry lock poisoned` | A constructor panicked during registration, or the registry mutex was poisoned | Restart the daemon; if it recurs, inspect the panic backtrace and fix the backend module |
-| `native FFI unavailable on this platform` | A native constructor was used off supported Linux targets | Run the daemon on Linux GNU/musl x86_64 or x86, or use a portable/mock constructor |
+| `native FFI unavailable on this platform` | A native constructor was used on an unqualified target | Use a target admitted by the [native ownership contract](release/native-mechanism-ownership.md), or use a portable/mock constructor |
 | `constructor epoch exhausted` | Internal epoch counter overflow (defensive; not expected in service) | Restart the daemon and report the incident |
 
 ## Related docs
 
-- Runbook §6 (Troubleshooting common CK_RV codes) — surfaces the
+- [Runbook §6](runbooks/operating-pkcs11-proxy-ng.md#6-troubleshooting-common-ck_rv-codes) — surfaces the
   three highest-frequency codes with concrete `kubectl` commands.
-- `doc/audit/r3-spec-conformance.md` — proves the shim returns
-  spec-compliant CK_RV under transport/lifecycle failures.
-- `doc/audit/r8-chaos.md` scenario 2 — end-to-end proof that
-  persistent `HOST_MEMORY` flips the health gate.
+- [Transport-error mapping](../crates/client/src/error.rs) — implementation and
+  unit tests for transport/lifecycle return codes.
+- [Chaos scenario 2](../tests/chaos/scenarios/scenario2_backend_oom.sh) — the
+  end-to-end harness for the health-gate transition under persistent `HOST_MEMORY`.

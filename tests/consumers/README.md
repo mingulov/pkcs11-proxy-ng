@@ -25,8 +25,20 @@ tests/consumers/
 
 ## Quick start
 
+Run from the repository root. The checkout directory must be named
+`pkcs11-proxy-ng`: this fixture uses its parent as the Docker build context
+and prefixes Dockerfile and `COPY` paths with `pkcs11-proxy-ng/`.
+
+Build the Alpine APK carrier image first; each fixture image installs the
+proxy packages from it. Build one backend profile at a time: the mutually
+exclusive daemon services share a container name.
+
 ```bash
-docker compose -f tests/consumers/docker-compose.yml build
+docker build -f packaging/alpine/Dockerfile.alpine \
+  -t pkcs11-proxy-ng:test-alpine3.23 .
+for backend in softhsm2 softhsm2-patched nss p11kit kryoptic; do
+  docker compose -f tests/consumers/docker-compose.yml --profile "$backend" build
+done
 tests/consumers/run_matrix.sh
 cat tests/consumers/results.txt
 ```

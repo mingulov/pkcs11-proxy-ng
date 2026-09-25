@@ -639,7 +639,8 @@ mechanisms = [
 # case; when called WITH a parameter the proxy uses this shape. The hash-specific
 # ML-DSA / SLH-DSA mechanisms use the PLAIN CK_SIGN_ADDITIONAL_CONTEXT (the hash
 # is implied by the mechanism) — only the generic CKM_HASH_ML_DSA / CKM_HASH_SLH_DSA
-# use CK_HASH_SIGN_ADDITIONAL_CONTEXT (separate shape, not yet wired). OASIS
+# use CK_HASH_SIGN_ADDITIONAL_CONTEXT, represented by the same shape with an
+# explicit hash field (see the generic entries below). OASIS
 # PKCS#11 v3.2 ml_dsa.md §"CKM_HASH_ML_DSA_*" / slh_dsa.md.
 [[params]]
 shape = "sign_additional_context"
@@ -667,8 +668,9 @@ mechanisms = [
     0x003E,  # CKM_HASH_SLH_DSA_SHAKE128
     0x003F,  # CKM_HASH_SLH_DSA_SHAKE256
     # Generic hash-DSA: the parameter is CK_HASH_SIGN_ADDITIONAL_CONTEXT (the
-    # plain struct PLUS an explicit `hash` mechanism). The shim/FFI select the
-    # larger struct by the non-zero hash; one shape entry, size-aware handling.
+    # plain struct PLUS an explicit `hash` mechanism). The shim detects the
+    # larger struct by ulParameterLen; backend FFI selects it by a nonzero hash.
+    # Both structs use this shared parameter shape.
     0x001F,  # CKM_HASH_ML_DSA  (generic — hash carried in the param)
     0x0034,  # CKM_HASH_SLH_DSA (generic — hash carried in the param)
 ]

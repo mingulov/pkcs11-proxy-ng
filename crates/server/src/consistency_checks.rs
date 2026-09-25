@@ -1240,10 +1240,9 @@ fn config_proxy_fields_all_have_defaults() {
     assert!(config.max_concurrent_backend_calls <= config.max_blocking_threads);
 }
 
-// Public docs ship INSIDE this repository (doc/, prd.md, README.md). These
-// checks verify the released repo is self-describing: they resolve paths from
-// the repo root and no longer reach into any outer planning workspace, so they
-// pass in a standalone clone of this repository.
+// User and release docs ship inside this repository. Planning/design docs live
+// in the umbrella workspace, where scripts/test_planning_docs.py checks them.
+// Standalone checks resolve only in-repo paths.
 
 /// Repo root, derived from the server crate's manifest dir
 /// (`<repo>/crates/server`).
@@ -1254,21 +1253,17 @@ fn repo_root() -> std::path::PathBuf {
 #[test]
 fn public_docs_present() {
     let root = repo_root();
-    for rel in ["README.md", "prd.md", "doc/architecture-overview.md", "doc/adr/README.md"] {
+    for rel in [
+        "README.md",
+        "doc/development.md",
+        "doc/error-reference.md",
+        "doc/runbooks/operating-pkcs11-proxy-ng.md",
+        "doc/release/beta-support-matrix.md",
+        "doc/release/parity-validation.md",
+        "scripts/README.md",
+    ] {
         let path = root.join(rel);
         assert!(path.exists(), "public doc missing: {} (expected at {})", rel, path.display());
-    }
-}
-
-#[test]
-fn adr_index_covers_every_numbered_adr() {
-    let root = repo_root();
-    let index = std::fs::read_to_string(root.join("doc/adr/README.md")).unwrap();
-    for entry in std::fs::read_dir(root.join("doc/adr")).unwrap() {
-        let name = entry.unwrap().file_name().to_string_lossy().into_owned();
-        if name.starts_with("ADR-") && name.ends_with(".md") {
-            assert!(index.contains(&format!("]({name})")), "ADR index does not link {name}");
-        }
     }
 }
 
