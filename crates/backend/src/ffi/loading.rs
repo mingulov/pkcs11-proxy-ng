@@ -727,7 +727,7 @@ mod tests {
         let info = backend.ffi_get_info().expect("stub C_GetInfo should succeed");
         assert_eq!(info.cryptoki_version, (2, 40));
         assert_eq!(info.manufacturer_id, "T2RUN WIN32 STUB");
-        assert_eq!(info.flags, 0);
+        assert_eq!(info.flags, pkcs11_proxy_ng_types::CkFlags(0));
         assert_eq!(info.library_description, "PE32 stub provider");
         assert_eq!(info.library_version, (2, 40));
         eprintln!("win32-stub-live-load: ok (2.40, markers verified)");
