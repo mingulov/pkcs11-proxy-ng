@@ -32,6 +32,17 @@ struct IgnoredTestLane {
 
 const IGNORED_TEST_TAXONOMY: &[IgnoredTestLane] = &[
     IgnoredTestLane {
+        file: "crates/server/tests/ccm_pointer_presence_test.rs",
+        reason: "Kryoptic AES-CCM empty-AAD round trips",
+        commands: &[
+            "cargo test -p pkcs11-proxy-ng --test ccm_pointer_presence_test -- --ignored --test-threads=1",
+        ],
+        requirements: &[
+            "Kryoptic module via PKCS11_PROXY_KRYOPTIC_MODULE",
+            "initialized token and PKCS11_PROXY_KRYOPTIC_* settings",
+        ],
+    },
+    IgnoredTestLane {
         file: "crates/server/tests/cli_hardening_test.rs",
         reason: "SoftHSM2-backed CLI subprocess coverage",
         commands: &[
