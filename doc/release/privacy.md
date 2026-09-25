@@ -1,28 +1,17 @@
 # Privacy and Secret-Lifetime Contract
 
-`pkcs11-proxy-ng` transports data that can include PINs, key material, and
-application plaintext. The v0.2.0 privacy contract is data minimization: do not
-log secret payloads, keep project-owned secret copies short-lived, and wipe
-their current allocations before normal or proven-quiescent deallocation.
-Ordinary permitted unwinding retains this wiping behavior; unresolved native
-retention follows the abnormal-stop exception below.
-
-This is a memory-hygiene guarantee, not a claim that the process is resistant
-to memory inspection by a privileged attacker.
+The proxy handles PINs, keys, and application plaintext. It avoids logging
+secret payloads and wipes project-owned secret buffers on normal release.
+Memory held by native code during an unsafe shutdown follows the exception
+below. These measures do not protect against a privileged process inspector.
 
 ## Client isolation scope
 
-v0.2.0 is a **single-logical-client testing baseline**: use one trusted
-security domain per daemon and provider instance. Do not connect mutually
-untrusted clients or share a daemon/provider between independent domains.
-Restart the daemon and its provider instance before changing to an independent
-client or security domain. `[proxy] max_contexts = 1` is an admission guardrail,
-not a repair for isolation or residual native authentication state.
-Multi-client isolation is deferred to the [v0.3 scope](v0.3.0-scope.md).
-
-Secret-buffer wiping and log minimization do not establish cross-client
-object privacy or independence of native authentication state. Those
-multi-client guarantees require the deferred v0.3 work and adversarial evidence.
+Use one logical client in one trusted security domain per daemon/provider
+instance. Restart both before an independent client or domain takes over.
+`[proxy] max_contexts = 1` limits admission but does not clear native login
+state or establish cross-client object privacy. Multi-client isolation is
+deferred to the [v0.3 scope](v0.3.0-scope.md).
 
 ## Classification
 
@@ -67,25 +56,19 @@ vector allocation is freed. Code should allocate the final capacity before
 copying secret data: zeroization cannot erase an older allocation abandoned by
 a prior reallocation.
 
-The classification and `SecretBytes` definition are the first stage of the
-v0.2.0 work. Generated protobuf requests and responses must not be treated as
-protected merely because a handler later wraps one of their fields. The release
-gate includes migrating all classified secret owners and validating protobuf
-wire input before secret-bearing generated messages are allocated.
+This classification and `SecretBytes` type alone do not protect generated
+protobuf requests and responses. Release qualification also requires
+migration of classified secret owners and validation of protobuf wire input
+before secret-bearing generated messages are allocated.
 
 ## Diagnostics
 
 - Never derive or implement content-bearing `Debug` for a secret owner.
 - Never log request or response bodies, attribute values, mechanism parameters,
   PINs, keys, plaintext, decrypted output, or raw provider values.
-- Errors and trace spans contain operation metadata, not request/response
-  payload fragments. A valid textual peer `x-request-id` is currently retained
-  for cross-service correlation; otherwise the daemon generates a UUID. A
-  retained peer value is untrusted diagnostic metadata and is not proof that
-  the identifier was generated locally. The preferred later hardening is to
-  always generate a local diagnostic identifier and, where cross-service
-  correlation is required, retain a validated peer identifier in a separate,
-  explicitly untrusted field.
+- Errors and trace spans contain operation metadata, not request or response
+  payloads. The daemon may retain a valid textual peer `x-request-id` for
+  correlation; treat it as untrusted metadata. Otherwise it generates a UUID.
 - Debug bundles are private and allowlist-driven. They do not promise to
   sanitize arbitrary logs or configuration files after secrets were written.
 - “Safe metadata” values remain absent from diagnostics unless a separate,
@@ -93,25 +76,21 @@ wire input before secret-bearing generated messages are allocated.
 
 ## Boundary of the guarantee
 
-The selected v0.2 [native ownership contract](native-mechanism-ownership.md)
-requires a private return-aware raw Linux `exit_group(70)` when shutdown cannot
-establish native quiescence or final-domain Drop lacks its proof. This contract
-is implemented (`crates/backend/src/ffi/native_stop.rs`, Tasks 3–4) and
-natively qualified (stop-topology-oracle receipt, 2026-09-17: GNU/musl stop
-suites green 32/32 native on both widths). Still-retained roots
-must not be wiped or freed first. The path initiates no unwinding, user-space
-destruction, provider cleanup, native Finalize, logging or audit flush. It
-promises no wiping, token deletion or complete audit tail. The release panic
-strategy remains unwinding for ordinary panics.
+The [native ownership contract](native-mechanism-ownership.md) requires an
+attempted whole-process stop with status 70 when shutdown cannot prove native
+code has released its references. If the Linux syscall is denied or
+intercepted, a return-aware loop prevents unsafe fallthrough but cannot force
+termination. There is no strict disappearance deadline. Still-retained memory
+must not be wiped or freed first. This path does not unwind, clean up the
+provider, finalize PKCS#11, or flush logs and audits. Token effects and audit
+records may remain unresolved. Ordinary panics retain the normal unwinding
+strategy.
 
-The normal-exit syscall does not intentionally trigger a core, but no global
-no-dumps guarantee follows. External signals, other crash paths, tracing and
-system collectors can still capture secrets; a piped core handler is not
-disabled by `RLIMIT_CORE=0` alone. Operators must manage the complete
-dump/storage/inspection policy. Direct backend users must accept termination
-of the whole embedding application's thread group under the Linux/seccomp
-environment, including unrelated threads; there is no strict disappearance
-deadline or support for arbitrary syscall-denial/interception policies.
+The stop does not intentionally trigger a core dump, but other crashes,
+signals, tracing, and collectors may capture secrets. `RLIMIT_CORE=0` alone
+does not disable piped core collectors. Operators must control dump storage,
+swap, and process inspection. A direct embedding can terminate unrelated
+threads in its process; syscall filters must permit the stop.
 
 The proxy can wipe only memory that it owns and can still address. The wiping
 guarantee does not cover:
@@ -120,9 +99,8 @@ guarantee does not cover:
 - tonic/prost borrowed frames, encoder scratch space, kernel socket buffers,
   TLS-library internals, or remote peer memory;
 - copies created by an allocator, operating system, hypervisor, swap, core
-  dump, hibernation image, or crash collector; or
+  dump, hibernation image, or crash collector;
 - secret values copied through an API that does not preserve wiping ownership;
-  or
 - abnormal native-lifetime stopping while project memory remains retained.
 
 TLS or mTLS protects bytes in transit but does not replace memory hygiene.

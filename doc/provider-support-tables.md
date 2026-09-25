@@ -1,8 +1,13 @@
-# Per-Provider Support Tables
+# Provider test snapshot — March 2026
 
-Last updated: 2026-03-13
+Recorded: 2026-03-13
 
-This document distinguishes three levels of support for each PKCS#11 operation:
+These tables preserve an early test snapshot. Some limitations below, including
+fork handling and output caching, have since changed. For release support, see
+the [support matrix](release/beta-support-matrix.md); for the current candidate,
+see the [release notes](release/v0.2.0-release-notes.md).
+
+The snapshot distinguishes three levels for each PKCS#11 operation:
 
 - **Backend** — the provider module reports the mechanism or operation
 - **Proxy** — the proxy models, forwards, and handles the operation
@@ -107,7 +112,7 @@ Legend: Y = yes | N = no | P = partial | — = not applicable | ? = unknown
 | All tests | Skip | Requires PKCS11_PROXY_KRYOPTIC_MODULE env var |
 | Fork test | Xfail | Tokio runtime does not survive fork() |
 
-## Cross-Provider Notes
+## Cross-provider notes from that snapshot
 
 1. **Fork safety**: No provider works with fork() due to the tokio async
    runtime limitation. This is fundamental, not provider-specific.

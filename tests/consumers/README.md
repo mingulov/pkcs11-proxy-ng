@@ -1,7 +1,7 @@
-# PKCS#11 Consumer Compatibility Matrix
+# PKCS#11 consumer tests
 
-Fixture for the SRE/Compat consumer matrix. Runs every supported
-consumer toolchain through the shim against every supported backend.
+This Docker fixture runs the listed consumer tools through the shim against the
+listed software backends. It records each consumer and backend result.
 
 ## Layout
 
@@ -43,9 +43,9 @@ tests/consumers/run_matrix.sh
 cat tests/consumers/results.txt
 ```
 
-The matrix runs each consumer × backend cell sequentially (consumers
-share container instances; the daemon changes per backend). Results
-go to `results.txt` as `consumer/backend: PASS|FAIL <notes>`.
+The matrix runs consumer and backend combinations sequentially because the
+consumers share containers and the daemon changes for each backend. It writes
+`results.txt` entries as `consumer/backend: PASS|FAIL <notes>`.
 
 ## Backends
 

@@ -1,11 +1,13 @@
-# Test Matrix
+# Server integration tests
 
-This crate now uses a layered test strategy instead of a single broad ignored test.
+These Rust tests exercise the proxy with SoftHSM2, NSS softokn, Kryoptic, and
+test providers. Provider tests run with one test thread because PKCS#11 modules
+can use process-wide state and environment variables.
 
 ## Rust integration suites
 
 - `integration_test.rs`
-  - SoftHSM2-backed end-to-end smoke workflow
+  - end-to-end smoke workflow using SoftHSM2
   - SHA-256 digest coverage
   - RSA-PSS and RSA-OAEP coverage when supported by the backend
 - `concurrency_and_recovery_test.rs`
@@ -22,8 +24,7 @@ This crate now uses a layered test strategy instead of a single broad ignored te
   - attribute round-trips (`CKA_LABEL`, `CKA_ID`)
   - modeled parameterized mechanisms when the backend advertises them
 
-Run them individually because real PKCS#11 modules often depend on process-global
-state and environment variables:
+Run these suites individually:
 
 ```bash
 cargo test -p pkcs11-proxy-ng --test integration_test -- --ignored --test-threads=1
@@ -31,15 +32,15 @@ cargo test -p pkcs11-proxy-ng --test concurrency_and_recovery_test -- --ignored 
 cargo test -p pkcs11-proxy-ng --test provider_matrix_test -- --ignored --test-threads=1
 ```
 
-## Default-run SoftHSM2 lanes
+## Tests using SoftHSM2 in default `cargo test`
 
 `crates/server/tests/parameterized_mechanism_test.rs` runs in default
-`cargo test` (W1-L9-09). When SoftHSM2 (`libsofthsm2.so` + `softhsm2-util`)
-is present, all 10 mechanism tests plus the 79-shape matrix driver execute
-for real; when it is absent, each test records an honest
-`record_skip!(ProviderMissing)` line and passes without executing. A
-present-but-broken provider still fails loudly. The shape-matrix driver
-asserts `executed + skipped == 79` with zero transport failures.
+`cargo test`. With `libsofthsm2.so` and `softhsm2-util` installed, it runs
+mechanism tests against SoftHSM2, including a matrix covering all 79 modeled
+parameter shapes. If SoftHSM2 is unavailable, the tests report
+`record_skip!(ProviderMissing)` and pass without running provider calls. If it
+is available but fails, the tests fail. The matrix checks that each shape was
+either exercised or skipped and that no transport call failed.
 
 ```bash
 cargo test -p pkcs11-proxy-ng --test parameterized_mechanism_test -- --test-threads=1
@@ -47,9 +48,8 @@ cargo test -p pkcs11-proxy-ng --test parameterized_mechanism_test -- --test-thre
 
 ## Ignored test taxonomy
 
-All ignored Rust integration lanes are ignored because they need real PKCS#11
-providers, process-global provider state, or external consumer tools. No stale
-ignores are currently safe to remove from these lanes.
+These Rust tests are ignored by default because they need a provider,
+process-wide provider state, or an external tool.
 
 Run `cargo build --workspace` first for lanes that require built workspace
 binaries or the shim library. To run a consumer lane against an existing shim
@@ -58,21 +58,21 @@ build, set `PKCS11_PROXY_SHIM_LIB=/path/to/libpkcs11_proxy_ng_shim.so`.
 | File | Reason | Requirements | Command |
 |------|--------|--------------|---------|
 | `crates/server/tests/ccm_pointer_presence_test.rs` | Kryoptic AES-CCM empty-AAD round trips | Kryoptic module via PKCS11_PROXY_KRYOPTIC_MODULE; initialized token and PKCS11_PROXY_KRYOPTIC_* settings | `cargo test -p pkcs11-proxy-ng --test ccm_pointer_presence_test -- --ignored --test-threads=1` |
-| `crates/server/tests/cli_hardening_test.rs` | SoftHSM2-backed CLI subprocess coverage | SoftHSM2 module and softhsm2-util; built workspace binaries | `cargo test -p pkcs11-proxy-ng --test cli_hardening_test -- --ignored --test-threads=1` |
-| `crates/server/tests/concurrency_and_recovery_test.rs` | SoftHSM2-backed multi-client and recovery coverage | SoftHSM2 module and softhsm2-util | `cargo test -p pkcs11-proxy-ng --test concurrency_and_recovery_test -- --ignored --test-threads=1` |
-| `crates/server/tests/consumer_p11tool_test.rs` | SoftHSM2-backed GnuTLS p11tool consumer coverage | SoftHSM2 module and softhsm2-util; GnuTLS p11tool; built workspace binaries | `cargo test -p pkcs11-proxy-ng --test consumer_p11tool_test -- --ignored --test-threads=1` |
-| `crates/server/tests/consumer_pkcs11_tool_test.rs` | SoftHSM2-backed OpenSC pkcs11-tool consumer coverage | SoftHSM2 module and softhsm2-util; OpenSC pkcs11-tool; built workspace binaries | `cargo test -p pkcs11-proxy-ng --test consumer_pkcs11_tool_test -- --ignored --test-threads=1` |
-| `crates/server/tests/consumer_python_test.rs` | SoftHSM2-backed Python PyKCS11 consumer coverage | SoftHSM2 module and softhsm2-util; python3 with PyKCS11; built workspace binaries | `cargo test -p pkcs11-proxy-ng --test consumer_python_test -- --ignored --test-threads=1` |
-| `crates/server/tests/integration_test.rs` | Split SoftHSM2 and NSS real-backend smoke coverage | SoftHSM2 module and softhsm2-util; NSS softokn libsoftokn3.so and certutil | `cargo test -p pkcs11-proxy-ng --test integration_test softhsm_smoke_workflow -- --ignored --test-threads=1`<br>`cargo test -p pkcs11-proxy-ng --test integration_test nss_sign_recover_and_verify_recover -- --ignored --test-threads=1` |
+| `crates/server/tests/cli_hardening_test.rs` | CLI subprocess tests using SoftHSM2 | SoftHSM2 module and softhsm2-util; built workspace binaries | `cargo test -p pkcs11-proxy-ng --test cli_hardening_test -- --ignored --test-threads=1` |
+| `crates/server/tests/concurrency_and_recovery_test.rs` | Multi-client and recovery tests using SoftHSM2 | SoftHSM2 module and softhsm2-util | `cargo test -p pkcs11-proxy-ng --test concurrency_and_recovery_test -- --ignored --test-threads=1` |
+| `crates/server/tests/consumer_p11tool_test.rs` | GnuTLS p11tool tests using SoftHSM2 | SoftHSM2 module and softhsm2-util; GnuTLS p11tool; built workspace binaries | `cargo test -p pkcs11-proxy-ng --test consumer_p11tool_test -- --ignored --test-threads=1` |
+| `crates/server/tests/consumer_pkcs11_tool_test.rs` | OpenSC pkcs11-tool tests using SoftHSM2 | SoftHSM2 module and softhsm2-util; OpenSC pkcs11-tool; built workspace binaries | `cargo test -p pkcs11-proxy-ng --test consumer_pkcs11_tool_test -- --ignored --test-threads=1` |
+| `crates/server/tests/consumer_python_test.rs` | Python PyKCS11 tests using SoftHSM2 | SoftHSM2 module and softhsm2-util; python3 with PyKCS11; built workspace binaries | `cargo test -p pkcs11-proxy-ng --test consumer_python_test -- --ignored --test-threads=1` |
+| `crates/server/tests/integration_test.rs` | Smoke tests using SoftHSM2 and NSS softokn | SoftHSM2 module and softhsm2-util; NSS softokn libsoftokn3.so and certutil | `cargo test -p pkcs11-proxy-ng --test integration_test softhsm_smoke_workflow -- --ignored --test-threads=1`<br>`cargo test -p pkcs11-proxy-ng --test integration_test nss_sign_recover_and_verify_recover -- --ignored --test-threads=1` |
 | `crates/server/tests/kryoptic_mechanism_test.rs` | Kryoptic provider mechanism coverage | Kryoptic module via PKCS11_PROXY_KRYOPTIC_MODULE | `cargo test -p pkcs11-proxy-ng --test kryoptic_mechanism_test -- --ignored --test-threads=1` |
-| `crates/server/tests/mechanism_out_gcm_iv_test.rs` | Patched-SoftHSM2-backed AES-GCM init-time generated-IV coverage for the Wave 1 + Wave 2 mechanism_out work | Patched libsofthsm2.so built from pkcs11-check/docker/softhsm2/patches/ with SOFTHSM2_GCM_IV_SIM_LIB pointing at it; softhsm2-util | `SOFTHSM2_GCM_IV_SIM_LIB=/path/to/patched/libsofthsm2.so cargo test -p pkcs11-proxy-ng --test mechanism_out_gcm_iv_test -- --ignored --test-threads=1` |
+| `crates/server/tests/mechanism_out_gcm_iv_test.rs` | AES-GCM generated-IV output using patched SoftHSM2 | Patched libsofthsm2.so built from [pkcs11-check](https://github.com/mingulov/pkcs11-check) `docker/softhsm2/patches/`; set SOFTHSM2_GCM_IV_SIM_LIB to its path; softhsm2-util | `SOFTHSM2_GCM_IV_SIM_LIB=/path/to/patched/libsofthsm2.so cargo test -p pkcs11-proxy-ng --test mechanism_out_gcm_iv_test -- --ignored --test-threads=1` |
 | `crates/server/tests/shim_c_abi_mechanism_out_test.rs` | Loaded-shim C ABI mechanism-output, C_GetMechanismInfo zero-flag, and C_WaitForSlotEvent lifecycle coverage | Built shim shared library from cargo build -p pkcs11-proxy-ng-shim or PKCS11_PROXY_SHIM_LIB | `cargo build -p pkcs11-proxy-ng-shim && cargo test -p pkcs11-proxy-ng --test shim_c_abi_mechanism_out_test -- --ignored --test-threads=1` |
 | `crates/server/tests/noncontract_begin_health_test.rs` | Native-oracle legacy Begin completion-health coverage | Normal and missing-message-begin oracle builds via PKCS11_PROXY_EXACT_ORACLE_LIB and PKCS11_PROXY_MISSING_BEGIN_ORACLE_LIB | `cargo test -p pkcs11-proxy-ng --test noncontract_begin_health_test -- --ignored --test-threads=1` |
 | `crates/server/tests/nss_mechanism_coverage_test.rs` | NSS softokn mechanism coverage | NSS softokn libsoftokn3.so and certutil | `cargo test -p pkcs11-proxy-ng --test nss_mechanism_coverage_test -- --ignored --test-threads=1` |
 | `crates/server/tests/nss_tls_mkd_mechanism_out_test.rs` | NSS softokn SSL3 master-key-derive mechanism-output coverage | NSS softokn libsoftokn3.so and certutil | `cargo test -p pkcs11-proxy-ng --test nss_tls_mkd_mechanism_out_test -- --ignored --test-threads=1` |
 | `crates/server/tests/provider_matrix_test.rs` | Optional NSS and Kryoptic provider matrix smoke coverage | NSS softokn libsoftokn3.so and certutil; Kryoptic module via PKCS11_PROXY_KRYOPTIC_MODULE | `cargo test -p pkcs11-proxy-ng --test provider_matrix_test nss_softokn_smoke_suite -- --ignored --test-threads=1`<br>`cargo test -p pkcs11-proxy-ng --test provider_matrix_test kryoptic_smoke_suite -- --ignored --test-threads=1` |
 | `crates/server/tests/softhsm_fixture_test.rs` | SoftHSM2 fixture variant coverage | SoftHSM2 module and softhsm2-util | `cargo test -p pkcs11-proxy-ng --test softhsm_fixture_test -- --ignored --test-threads=1` |
-| `crates/server/tests/template_compat_test.rs` | SoftHSM2-backed template compatibility coverage | SoftHSM2 module and softhsm2-util | `cargo test -p pkcs11-proxy-ng --test template_compat_test -- --ignored --test-threads=1` |
+| `crates/server/tests/template_compat_test.rs` | Template compatibility tests using SoftHSM2 | SoftHSM2 module and softhsm2-util | `cargo test -p pkcs11-proxy-ng --test template_compat_test -- --ignored --test-threads=1` |
 | `crates/server/tests/test_hooks_topology_test.rs` | Hook-gated control-plane topology coverage (real daemon subprocess) | SoftHSM2 module and softhsm2-util; native-owner-test-hooks feature build; built workspace binaries | `cargo test -p pkcs11-proxy-ng --features native-owner-test-hooks --test test_hooks_topology_test -- --ignored --test-threads=1` |
 
 ## Environment variables for optional providers
@@ -137,7 +137,7 @@ scripts/test-matrix.sh
 
 That script runs:
 - fast workspace checks
-- SoftHSM2 Rust suites
+- Rust tests using SoftHSM2
 - optional provider suites when env vars are present
 - external consumer smoke tests via `scripts/test-consumers.sh`
   - direct OpenSC `pkcs11-tool` against SoftHSM2

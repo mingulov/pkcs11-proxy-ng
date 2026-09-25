@@ -1,9 +1,11 @@
-# Native ownership inventory (TO26b trailing paragraph)
+# Native ownership inventory
 
-Per-variant/consumer inventory of who owns native provider lifetime —
-the trailing-paragraph item alongside the P0 battery. Compiled
-2026-09-19 at `f6920ff` (plus the TO26b battery commits); refresh when
-the stop-arm matrix or consumer set changes.
+Historical inventory of native provider owners and stop coverage, compiled
+2026-09-19 at `f6920ff` (plus the TO26b battery commits). The tables retain
+that review's evidence and verdicts; they do not qualify later source revisions.
+Refresh the inventory when the stop-arm matrix or consumer set changes. See
+[native-mechanism-ownership.md](native-mechanism-ownership.md) for the current
+contract and target-admission boundary.
 
 ## Consumers (who can own native lifetime)
 
@@ -64,3 +66,37 @@ or a provider's own unsupported Wait proves no event path."
   failed-close keeps-owners), server close taxonomy tests
   (transient-keep / quarantine / terminal-drop), mock cancel tests.
 - Receipts: full-suite runs recorded in the TO26b report.
+
+## Historical acceptance records
+
+These records identify the development revisions tested on 2026-09-19.
+They are retained for traceability and do not qualify later source revisions.
+
+Historical receipts cover the cases below (TO26a groups 1+4+5+6,
+`cd0b6e7f4cbafd38536d00407a195b85c2b392ae..d57d2cdfda608406c7619acf475d7bc178034ff4`;
+TO26b groups 2+3+7 plus carry items and the trailing paragraph,
+`0ae0effd78e9d4ff7ab9e0da2700e2267c3ec6a7..1519ed3e5beb14dfabd6f0b054b97d5961861675`;
+recorded 2026-09-19). Every new run must use synthetic canaries,
+deterministic gates, actual production owner seams and immutable
+same-source binaries, hashes, ELF widths, commands/test counts,
+toolchains, libc/kernel/environment records and child wait/marker
+results. Per-group evidence map:
+
+- Group 1 (constructor battery): TO26a report + `native_domain_tests`,
+  `constructor_child_tests`.
+- Group 2 (wait matrices): `WaiterDomain` + `slot_wait_tests`
+  (direct-backend), `session/tests.rs` wait cases (gRPC),
+  `shim/tests/wait_matrix.rs` (loaded shim), `types::width` helper
+  matrix; live legs in the group-3 runners.
+- Group 3 (width pairs): `run-retained-oracle-live-test.sh` (12 legs:
+  retention ×8 + control-loop ×4, hook daemons, maps/width/instance
+  receipts, production-build negative) and
+  `run-cross-width-live-test.sh` + `run-cross-width-nss32-live-test.sh`
+  (SoftHSM all four pairs + NSS32, bridging + live-wait receipts).
+- Groups 4–6 (stop/markers/signals): TO26a report (S1–S16, M1–M11,
+  N1); the group-4 gated-waiter case is S17 (TO26b I1), which
+  supersedes S11's parked-thread analog as waiter coverage.
+- Group 7 (codegen + native exec + classification):
+  `doc/release/native-stop-codegen-review.md` (8 codegen/final-link
+  variants, 4 native execution variants) and the wait-scope table in
+  `doc/release/native-ownership-inventory.md`.

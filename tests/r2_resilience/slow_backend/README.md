@@ -1,21 +1,22 @@
-# slow-backend — stub PKCS#11 `.so` with configurable delays
+# Slow backend test module
 
-Closes `FOLLOWUP-slow-backend` (cross-references
-`FOLLOWUP-mock-backend`).
-
-The resilience fixture can simulate network slowness via toxiproxy
-but cannot simulate slow backends. This stub `.so` exposes a minimal
-PKCS#11 v2.40 surface and reads three env vars on each call:
+This PKCS#11 2.40 test module injects delays and errors inside the daemon's
+backend calls. The network resilience fixture uses toxiproxy for faults between
+the shim and daemon.
 
 | Env var | Effect |
 | --- | --- |
-| `SLOW_BACKEND_SIGN_DELAY_MS` | Sleep this long in `C_Sign` / `C_SignFinal` before returning OK |
+| `SLOW_BACKEND_SIGN_DELAY_MS` | Delay `C_Sign` and `C_SignFinal` by this many milliseconds |
 | `SLOW_BACKEND_INIT_DELAY_MS` | Sleep this long in `C_Initialize` |
 | `SLOW_BACKEND_INIT_HANG=1` | Block forever in `C_Initialize` (kill-only recovery) |
+| `SLOW_BACKEND_SIGN_RV_HEX` | Return this hex `CK_RV` from `C_Sign` after any delay |
+| `SLOW_BACKEND_BREAK_AFTER_CALLS` | After this many calls, make subsequent backend calls fail |
+| `SLOW_BACKEND_BREAK_RV_HEX` | Hex `CK_RV` after the break; defaults to `0x2` (`CKR_HOST_MEMORY`) |
+| `SLOW_BACKEND_VERBOSE=1` | Print per-call diagnostic output |
 
-Everything cryptographic returns
-`CKR_FUNCTION_NOT_SUPPORTED` — the backend is for lifecycle / timeout
-testing only.
+The module returns a fixed, noncryptographic signature for `C_Sign`. Other
+operations provide only enough behavior for lifecycle and timeout tests. Do
+not use its output as a real signature.
 
 ## Build
 
@@ -32,9 +33,8 @@ docker run --rm -v "$PWD:/src" -w /src --entrypoint sh \
 # → target/release/libslow_backend.so (musl, for Alpine daemon)
 ```
 
-The crate is intentionally NOT a workspace member (`[workspace]`
-sentinel in its Cargo.toml) so `cargo build --workspace` at the
-submodule root doesn't pay its build cost.
+The crate has its own `[workspace]` in `Cargo.toml`, so build it separately
+from the main workspace.
 
 ## Use with the daemon
 
@@ -51,17 +51,16 @@ request_timeout_secs = 2   # short so the backend timeout fires fast
 SLOW_BACKEND_SIGN_DELAY_MS=5000 pkcs11-proxy-ng /etc/proxy.toml
 ```
 
-Then drive any shim consumer that calls `C_Sign`. Each call sleeps 5
-seconds in the backend; the daemon's `spawn_backend()` timeout (2 s
-above) trips and the consumer sees `CKR_DEVICE_ERROR`, the daemon's
-circuit-breaker counter advances, and after
-`backend_health_consecutive_failures` consecutive failures
-`tonic-health` flips to `NOT_SERVING`.
+Then use a shim consumer to call `C_Sign`. With this configuration, the backend
+waits five seconds while the daemon's two-second request timeout expires. The
+consumer receives `CKR_FUNCTION_FAILED`; the native call may still complete.
+The daemon counts consecutive backend failures and reports `NOT_SERVING` once
+`backend_health_consecutive_failures` is reached.
 
-## Smoke test
+## Load check
 
-A minimal C program that confirms the `.so` dlopens and
-`C_GetFunctionList` returns OK:
+This minimal C program checks that the library loads and
+`C_GetFunctionList` returns success:
 
 ```c
 #include <dlfcn.h>
@@ -76,12 +75,7 @@ int main() {
 }
 ```
 
-## Scope
-
-Sufficient for: lifecycle timeout testing, circuit-breaker testing,
-SIGTERM-during-slow-call testing.
-
-NOT sufficient for: any consumer test that actually needs valid
-signature output, mechanism advertising, or working session state.
-For that, use SoftHSM2 / NSS softokn / Kryoptic from
-`tests/consumers/`.
+Use this module for lifecycle timeouts, circuit-breaker behavior, and shutdown
+during a slow call. Use SoftHSM2, NSS softokn, or Kryoptic from
+`tests/consumers/` for tests that require real cryptographic output, advertised
+mechanisms, or working session state.

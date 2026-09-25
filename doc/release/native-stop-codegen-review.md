@@ -1,11 +1,11 @@
-# Native stop codegen + final-link review (TO26b group 7)
+# Native stop code generation and final-link review
 
-Point-in-time review of the abnormal-stop machine code in the FINAL
-LINKED daemon binaries: exact debug/release/MSRV codegen plus the
-release GNU/musl variants on x86_64 and i686. Battery item: "Exact
-debug/release/MSRV code-generation and final-link review ...
-narrowed to the compiled stop stubs/loop/predicate contract, with
-receipts recorded".
+Historical review of abnormal-stop machine code in the final linked daemon
+binaries: debug, release and MSRV builds, including the release GNU/musl
+variants on x86_64 and i686 (TO26b group 7). The review covers the compiled
+stop stubs, retry loop and predicate contract. Its verdicts apply to the
+recorded source and binaries, not to later candidates. A dated addendum below
+records the subsequent re-verification.
 
 - Reviewed commit: `f6920ff` (tree clean; every binary verified newer
   than all sources it was built from).
@@ -189,7 +189,7 @@ subset on the T10 tree (this commit) with the SAME toolchain as the
 original review (stable rustc 1.98.1 `48a229cea`, GNU objdump 2.46),
 so the bytes below are directly comparable.
 
-Source checklist (current `native_stop.rs`):
+Source checklist (`native_stop.rs` at this addendum's revision):
 
 - `core::arch::asm!` blocks: exactly 3 (x86_64 + i686 + aarch64;
   the +1 is the `b19ca20` arm, pre-T10).
@@ -252,7 +252,7 @@ an unlinked object). Native execution still impossible on x86_64
 hosts. VERDICT: pass (object-level; link + exec remain out of
 scope).
 
-Native execution (current tree):
+Native execution (the addendum's source revision):
 
 | Variant | Command | Result |
 |---|---|---|

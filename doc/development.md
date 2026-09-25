@@ -1,10 +1,8 @@
 # Development environment
 
-Use the pinned Rust toolchain through rustup (`rust-toolchain.toml`
-selects it automatically), with `rustfmt` and `clippy`. The minimum
-supported Rust version is **1.88.0**, including when updating dependencies.
-The repository builds independently of the umbrella workspace and OASIS
-specification checkout.
+Use rustup with the toolchain in `rust-toolchain.toml`. The minimum supported
+Rust version is **1.88.0**. This repository builds on its own; no planning
+workspace or OASIS checkout is needed.
 
 ## Ubuntu 24.04 / 26.04
 
@@ -19,10 +17,9 @@ rustup toolchain install 1.88.0 --profile minimal
 cargo install cargo-audit cargo-deny --locked
 ```
 
-Alternatively, [mise](https://mise.jdx.dev/dev-tools/) can supply `protoc` and
-ShellCheck using the versions in `mise.toml`. The native provider packages
-above are still needed for tests that discover libraries in system paths.
-Rust remains managed by rustup:
+You can also install `protoc` and ShellCheck with
+[mise](https://mise.jdx.dev/dev-tools/). Install the provider packages above
+separately.
 
 ```bash
 mise trust
@@ -31,8 +28,7 @@ mise exec -- protoc --version
 mise exec -- cargo check --workspace --all-targets --locked
 ```
 
-Use `mise exec --` in CI, editors, or noninteractive shells without mise shell
-activation. With mise activated, ordinary `cargo` commands also find `protoc`.
+Use `mise exec --` when mise is not activated in your shell.
 
 ## Core checks
 
@@ -51,13 +47,8 @@ cargo +1.88.0 test --workspace --locked
 scripts/release-dry-run.sh
 ```
 
-On a memory-constrained machine, set `CARGO_BUILD_JOBS=2`. Dependencies are
-locked deliberately. Before refreshing the lockfile, preview the change with
-`cargo update --dry-run --config 'resolver.incompatible-rust-versions="fallback"'`.
-Prefer a targeted `cargo update -p <crate>` for an advisory or compatibility
-fix, and repeat the advisory, policy, test, and MSRV checks afterward.
-Cargo's [Rust-version resolver](https://doc.rust-lang.org/cargo/reference/resolver.html#rust-version)
-helps choose compatible versions; the actual Rust 1.88 build remains the gate.
+Set `CARGO_BUILD_JOBS=2` if memory is limited. After updating dependencies,
+repeat these checks, including the Rust 1.88 build and tests.
 
 ## Provider tests
 
@@ -69,26 +60,18 @@ scripts/test-shim-parameterized.sh
 scripts/test-provider-backends.sh
 ```
 
-The first two accept `PKCS11_PROXY_BACKEND_MODULE=/absolute/path/to/libsofthsm2.so`
-for a user-local provider installation. Their consumer executables must be
-on `PATH`. The Rust SoftHSM2 fixtures and the release smoke script search
-system library locations, so install the system SoftHSM2 package to run those
-lanes. NSS tests additionally need `certutil` from `libnss3-tools`. Kryoptic
-uses `PKCS11_PROXY_KRYOPTIC_MODULE`; see
-[`crates/server/tests/README.md`](../crates/server/tests/README.md).
+The first two accept `PKCS11_PROXY_BACKEND_MODULE=/absolute/path/to/libsofthsm2.so`.
+Keep consumer executables on `PATH`. Other tests search system library paths,
+so install your distribution's SoftHSM2 package. NSS tests need `certutil`;
+Kryoptic tests use `PKCS11_PROXY_KRYOPTIC_MODULE`.
 
-Keep Python packages in uv-managed environments, separate from apt's native
-libraries and executables. The `pkcs11-check` framework manages its own
-dependencies and does not require PyKCS11. Only the optional
-`scripts/test-python-consumer.py` needs PyKCS11; provide it through a separate
-[uv script environment](https://docs.astral.sh/uv/guides/scripts/#running-a-script-with-dependencies)
-when using that consumer. Do not expose distro Python packages through a
-user-site `.pth` file or add them to an unrelated project environment.
+See the [test guide](../crates/server/tests/README.md) for individual suites
+and prerequisites. For broader provider testing, see
+[pkcs11-check](https://github.com/mingulov/pkcs11-check).
 
-The system SoftHSM token store may be restricted to the `softhsm` group.
-The scripts above use temporary user-owned configurations and need no access
-to that shared store. For manual token work, explicitly set `SOFTHSM2_CONF`
-to a user-owned configuration rather than changing shared-store permissions.
+For manual SoftHSM2 tests, set `SOFTHSM2_CONF` to a configuration with a
+user-owned token directory. The scripts above create temporary configurations
+and do not need access to the system token store.
 
 ## Additional CI lanes
 
@@ -115,7 +98,6 @@ cargo install cargo-llvm-cov --locked
 rustup toolchain install nightly --component miri --component rust-src
 ```
 
-The exact target-specific commands are in `.github/workflows/ci.yml` and
-`.github/workflows/nightly.yml`. Some live tests need additional provider
-images, 32-bit provider libraries, or Wine; their prerequisites are separate
-from the native Linux development environment.
+Target-specific commands are in [ci.yml](../.github/workflows/ci.yml) and
+[nightly.yml](../.github/workflows/nightly.yml). Live tests may also need
+provider images, 32-bit libraries, or Wine; see the [test guide](../crates/server/tests/README.md).
