@@ -92,3 +92,62 @@ fn child_can_call_pre_init_after_parent_fork() {
     let st = std::process::ExitStatus::from_raw(status);
     assert!(st.success(), "child did not exit cleanly: status = {:?} ({})", st, status);
 }
+
+/// Bounded waitpid helper shared by the fork tests below: waits up to
+/// ~5 s for `pid`, panics on wait errors, and returns the raw status.
+fn wait_child(pid: i32) -> std::process::ExitStatus {
+    let mut status: i32 = 0;
+    for _ in 0..50 {
+        let r = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        if r == pid {
+            break;
+        }
+        if r == -1 {
+            panic!("waitpid error");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    std::process::ExitStatus::from_raw(status)
+}
+
+/// T2run (macOS run-6): a forked child must NOT inherit the parent's
+/// tokio runtime — its I/O driver (kqueue fd) is dead post-fork and
+/// the first `block_on` use panics with EBADF (SIGABRT in the
+/// cross-process isolation test). The child must get a freshly built
+/// runtime instead. Red-before: child observes the parent's pointer.
+#[test]
+#[ignore]
+fn child_gets_fresh_runtime_after_fork() {
+    use pkcs11_proxy_ng_shim::__test_api::runtime;
+
+    let parent_ptr = runtime() as *const _ as usize;
+    let pid = unsafe { libc::fork() };
+    if pid == 0 {
+        let child_ptr = runtime() as *const _ as usize;
+        unsafe { libc::_exit(i32::from(child_ptr == parent_ptr)) };
+    }
+    assert!(pid > 0, "fork() failed: {pid}");
+    let st = wait_child(pid);
+    assert!(st.success(), "child inherited the parent runtime: {st:?} ({st})");
+}
+
+/// T2run (macOS run-6): the initialized flag must not leak across
+/// fork — the child's `C_Initialize` must run the full path (fresh
+/// runtime + reconnected channel) instead of short-circuiting on the
+/// parent's state. Red-before: child observes initialized == true.
+#[test]
+#[ignore]
+fn child_init_flag_reset_after_fork() {
+    use pkcs11_proxy_ng_shim::__test_api::{is_initialized, mark_finalized, mark_initialized};
+
+    assert!(mark_initialized(), "parent must transition to initialized");
+    let pid = unsafe { libc::fork() };
+    if pid == 0 {
+        let observed = is_initialized();
+        unsafe { libc::_exit(i32::from(observed)) };
+    }
+    assert!(pid > 0, "fork() failed: {pid}");
+    let st = wait_child(pid);
+    mark_finalized(); // restore the parent for the rest of the suite
+    assert!(st.success(), "child inherited initialized == true: {st:?} ({st})");
+}

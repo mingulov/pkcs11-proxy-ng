@@ -17,7 +17,7 @@ The [native ownership contract](native-mechanism-ownership.md) qualifies live
 production FFI on Linux GNU/musl x86_64/64-bit and x86/32-bit (i686), and —
 via the implemented tail stretch
 ([ADR-0014](../adr/ADR-0014-v020-tail-platform-stretch.md)) — on Windows x64
-MSVC (`NATIVE_FFI_QUALIFIED` includes the Windows MSVC x86_64 host;
+MSVC (`NATIVE_FFI_QUALIFIED` includes the Windows MSVC x86_64 and x86 hosts;
 `crates/backend/src/ffi/native_domain.rs`). All four Linux caller/daemon
 width combinations run as loaded-shim legs in
 `scripts/run-cross-width-live-test.sh` (legs 1–4: 32c/64b, 64/64, 64c/32b,
@@ -33,10 +33,14 @@ DLL + smoke client vs a Linux daemon, plus the `[listener.local]` rejection
 negative), and leg C (BouncyHsm-win second provider, full set green).
 Windows compile coverage is the per-PR Tier 0f `windows-client-llp64` job
 (`cargo xwin build --target x86_64-pc-windows-msvc --all-targets`).
-Still excluded: Windows GNU, 32-bit Windows (PE32), and macOS/ARM
-runtime claims. (T6b staging: for PE32 the code and local
-`i686-pc-windows-msvc` cross-compile/link proof are done and the win32 CI
-leg exists; the exclusion lifts only with T2run's first green win32 run.)
+Still excluded: Windows GNU and Linux ARM64 runtime claims (native FFI
+fail-closes on aarch64 by design). 32-bit Windows (PE32) is qualified
+at the win32 CI tier: `i686-pc-windows-msvc` build, lib suites executed
+on WOW64, and a stub C provider live-loaded through `FfiBackend::load`
+— the stub boundary (no production 32-bit provider runs in CI). macOS
+aarch64 is runtime-qualified (T2run first green macOS leg: compare plus
+backend/shim lib suites, STOP receipts included); macOS x86_64 is
+load-qualified only (no CI runtime leg).
 Big-endian is proven one tier below a runtime claim —
 s390x build plus the QEMU suites in
 [be-qemu-tier.md](be-qemu-tier.md) are green; live native FFI on BE

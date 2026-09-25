@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
@@ -524,12 +524,30 @@ pub fn runtime() -> &'static Runtime {
     // multi-thread executor. (Per PKCS#11, a forked child must still call
     // C_Initialize again before reusing the module; the daemon connection is
     // re-established by the shim's reconnect path.)
-    RUNTIME.get_or_init(|| {
+    //
+    // Fork generation: a child whose pid differs from RUNTIME_PID leaks a
+    // fresh runtime instead of inheriting the parent's dead I/O driver
+    // (see RUNTIME_PTR). No lock: races are benign (each builder's
+    // runtime is valid for its user), and a lock could wedge a child
+    // forked mid-build.
+    reclaim_after_fork();
+    let pid = std::process::id();
+    let ptr = RUNTIME_PTR.load(Ordering::Acquire);
+    if !ptr.is_null() && RUNTIME_PID.load(Ordering::Acquire) == pid {
+        // SAFETY: the pointer is either null or a leaked `Box<Runtime>`
+        // that is never mutated or freed; sharing it is sound, and the
+        // pid tag proves it was built for this process.
+        return unsafe { &*ptr };
+    }
+    let fresh = Box::leak(Box::new(
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("Failed to create tokio runtime")
-    })
+            .expect("Failed to create tokio runtime"),
+    ));
+    RUNTIME_PTR.store(fresh as *mut Runtime, Ordering::Release);
+    RUNTIME_PID.store(pid, Ordering::Release);
+    fresh
 }
 
 fn connect_client_from_env() -> Result<Pkcs11Client, CkRv> {

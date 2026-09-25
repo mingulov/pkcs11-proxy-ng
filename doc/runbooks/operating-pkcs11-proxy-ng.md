@@ -225,7 +225,7 @@ kubectl -n <ns> edit configmap <daemon-config>
 # (Or update your Helm values and apply.)
 
 # 2) The daemon reloads the registry on SIGHUP. The simplest way
-#    to deliver SIGHUP across all replicas is a rolling restart.
+#    to get the new registry live across all replicas is a rolling restart.
 #    Alternatively, exec into each pod and `kill -HUP 1`.
 kubectl -n <ns> rollout restart deploy/<daemon-deploy>
 

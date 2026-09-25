@@ -2430,25 +2430,41 @@ mod tests {
             for spinner in admitted.iter() {
                 scope.spawn(|| {
                     ready.fetch_add(1, Ordering::SeqCst);
-                    let mut count = 0usize;
+                    // Publish admissions live (each spinner owns its slot,
+                    // so no inter-spinner contention): the seal loop reads
+                    // the running total to prove overlap on any scheduler.
                     while !done.load(Ordering::SeqCst) {
                         if backend.lifecycle_domain.admit_ordinary().is_ok() {
-                            count += 1;
+                            spinner.fetch_add(1, Ordering::SeqCst);
                         }
                     }
-                    spinner.store(count, Ordering::SeqCst);
                 });
             }
             while ready.load(Ordering::SeqCst) < 4 {
                 std::thread::yield_now();
             }
-            // Time-boxed ping-pong, not a fixed cycle count: one seal
-            // window is microseconds wide, so a fixed count can finish
-            // before a descheduled spinner runs once. Over 300 ms every
-            // hot spinner is scheduled many times over.
+            // Count-boxed ping-pong with an overlap floor, not a fixed
+            // time window. A bare 300 ms window fits 1 seal on an
+            // oversubscribed CI runner (T2run: 6/7 CI executions red with
+            // "got 1"), while a bare fixed count can finish before a
+            // descheduled spinner runs once on a quiet box. Loop until 6
+            // seals AND 5000 spinner admissions overlap them, so both the
+            // seal count and the genuine-load overlap hold on any
+            // scheduler. The 60 s assert bounds the loop between
+            // iterations only — a hang inside finalize() itself never
+            // reaches it and dies at the shutdown deadline instead
+            // (see the test header), so either way a true stall fails
+            // loud instead of hanging the suite.
             let start = std::time::Instant::now();
             let mut seals = 0usize;
-            while start.elapsed() < std::time::Duration::from_millis(300) {
+            while seals < 6
+                || admitted.iter().map(|spinner| spinner.load(Ordering::SeqCst)).sum::<usize>()
+                    < 5_000
+            {
+                assert!(
+                    start.elapsed() < std::time::Duration::from_secs(60),
+                    "seal window stalled under load after {seals} seals"
+                );
                 backend.finalize().expect("finalize completes under load");
                 backend.initialize().expect("re-initialize reopens");
                 seals += 1;
