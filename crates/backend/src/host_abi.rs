@@ -4,9 +4,9 @@
 //! `cryptoki_sys::CK_ULONG` width and the host byte order are the *backend's*
 //! width and order. The server advertises these to narrow clients (via
 //! `GetBackendInterfacesResponse`) so a client whose `CK_ULONG` differs can
-//! bridge ulong-typed attribute values and lengths. This module lives in the
-//! backend crate because the daemon's compiled CK_ULONG width and byte order
-//! define the backend's ABI.
+//! bridge ulong-typed attribute values and lengths. This lives in the backend
+//! crate because it is the only crate that links `cryptoki-sys` as a normal
+//! (non-dev) dependency.
 
 /// The daemon's backend `sizeof(CK_ULONG)` in bytes: 4 on a narrow
 /// (ILP32 / LLP64) build, 8 on an LP64 build.
@@ -33,10 +33,9 @@ mod tests {
     }
 
     #[test]
-    fn byte_order_matches_target_endianness() {
-        // 1 = little-endian, 2 = big-endian per ADR-0011 D6: the compiled
-        // target's own order, pinned here so a BE build proves the BE arm.
-        let want = if cfg!(target_endian = "little") { 1 } else { 2 };
-        assert_eq!(host_byte_order(), want);
+    fn byte_order_is_little_on_supported_targets() {
+        // All supported targets are little-endian; the function still encodes
+        // big-endian as 2 for a hypothetical future BE backend.
+        assert_eq!(host_byte_order(), 1);
     }
 }

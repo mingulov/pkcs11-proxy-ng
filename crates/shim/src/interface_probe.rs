@@ -7,6 +7,7 @@
 //! get the static (all-non-null) function lists; post-`C_Initialize`
 //! callers get the patched versions.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, RwLock};
 
 use cryptoki_sys::*;
@@ -55,25 +56,6 @@ static INTERFACE_STATE: RwLock<Option<&'static InterfaceState>> = RwLock::new(No
 /// back to 8 bytes (D9).
 static BACKEND_ULONG_SIZE: AtomicUsize = AtomicUsize::new(0);
 static BACKEND_ATTRIBUTE_STRIDE: AtomicUsize = AtomicUsize::new(0);
-static POINTER_SAFE_MESSAGE_PARAMETERS: AtomicBool = AtomicBool::new(false);
-
-/// Whether the daemon acknowledged the shape-bound message-parameter contract.
-/// Absence and an in-progress/failed reprobe are both fail-closed.
-pub fn pointer_safe_message_parameters() -> bool {
-    POINTER_SAFE_MESSAGE_PARAMETERS.load(Ordering::Acquire)
-}
-
-fn record_pointer_safe_message_parameters(advertised: bool) {
-    POINTER_SAFE_MESSAGE_PARAMETERS.store(advertised, Ordering::Release);
-}
-
-fn clear_pointer_safe_message_parameters() {
-    record_pointer_safe_message_parameters(false);
-}
-
-pub(crate) fn invalidate_pointer_safe_message_parameters() {
-    clear_pointer_safe_message_parameters();
-}
 
 /// The backend's `CK_ULONG` width in bytes for the value bridge (ADR-0011).
 ///
@@ -553,18 +535,50 @@ fn build_patched_function_list_3_2(null_names: &[String]) -> CK_FUNCTION_LIST_3_
 
 /// Contact the backend and build an `InterfaceState` with patched function
 /// lists reflecting the backend's capabilities. Also pulls the server's
+/// Why a probe failed — the two classes propagate differently.
+///
+/// A transient failure (transport, daemon restart) keeps the previous
+/// state and is retried later. An ABI refusal (D6 byte-order mismatch,
+/// hostile advertisement) is a hard incompatibility: every ulong byte
+/// the daemon would send is unparseable, so `C_Initialize` must fail.
+pub(crate) enum ProbeFailure {
+    Transient(String),
+    AbiMismatch(String),
+}
+
+impl std::fmt::Display for ProbeFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transient(e) => write!(f, "{e}"),
+            Self::AbiMismatch(e) => write!(f, "incompatible backend ABI: {e}"),
+        }
+    }
+}
+
 /// mechanism registry payload (when provided) and atomically swaps the
 /// shim's in-memory registry to match.
-fn probe_backend() -> Result<InterfaceState, String> {
+fn probe_backend() -> Result<InterfaceState, ProbeFailure> {
     // Ensure the gRPC channel is up (returns Err(CkRv) on failure).
     state::ensure_client_connected()
         .map_err(|e| ProbeFailure::Transient(format!("connect failed: {e:?}")))?;
 
     let rt = state::runtime();
-    let probe = rt.block_on(async {
-        let mut client = state::client().lock().await;
-        client.get_backend_interfaces().await
-    })?;
+    let probe = rt
+        .block_on(async {
+            let mut client = state::client().lock().await;
+            client.get_backend_interfaces().await
+        })
+        .map_err(ProbeFailure::Transient)?;
+
+    // Record the backend CK_ULONG width/byte order for the value bridge
+    // (ADR-0011 D2/D6) before anything else uses it. A refusal here is
+    // FATAL: the wire representation itself is incompatible.
+    record_backend_abi(
+        probe.backend_ulong_size,
+        probe.backend_byte_order,
+        probe.backend_attribute_stride,
+    )
+    .map_err(ProbeFailure::AbiMismatch)?;
 
     // Install the server-published registry whenever the daemon
     // includes one. Older daemons predate the field — in that case we
@@ -729,16 +743,10 @@ pub fn ensure_probed() -> Result<(), String> {
 /// Called from `C_Initialize` after a successful server init so that the
 /// function lists reflect the current backend.
 pub fn reprobe() -> Result<(), String> {
-    // A reprobe can be talking to a restarted or downgraded daemon. Do not let
-    // a transient failure retain permission for stateful message operations.
-    clear_pointer_safe_message_parameters();
     match probe_backend() {
         Ok(st) => {
             let mut guard = INTERFACE_STATE.write().unwrap_or_else(|e| e.into_inner());
             *guard = Some(leak_fixed_state(st));
-            record_pointer_safe_message_parameters(
-                guard.as_ref().is_some_and(|state| state.pointer_safe_message_parameters),
-            );
             Ok(())
         }
         Err(ProbeFailure::Transient(e)) => {
@@ -943,57 +951,7 @@ unsafe impl Sync for FallbackCatalog {}
 
 #[cfg(test)]
 mod backend_abi_tests {
-    use cryptoki_sys::{CK_INTERFACE, CK_VERSION};
-
-    use super::{
-        clear_pointer_safe_message_parameters, find_interface_in_catalog,
-        pointer_safe_message_parameters, record_pointer_safe_message_parameters,
-        resolve_backend_attribute_stride, resolve_backend_ulong_size,
-    };
-
-    fn synthetic_catalog() -> [CK_INTERFACE; 2] {
-        static NAME: &[u8] = b"PKCS 11\0";
-        [
-            CK_INTERFACE {
-                pInterfaceName: NAME.as_ptr() as *mut _,
-                pFunctionList: crate::function_list_3_0::get_function_list_3_0() as *mut _,
-                flags: 0b0011,
-            },
-            CK_INTERFACE {
-                pInterfaceName: NAME.as_ptr() as *mut _,
-                pFunctionList: crate::function_list_3_2::get_function_list_3_2() as *mut _,
-                flags: 0b0011,
-            },
-        ]
-    }
-
-    #[test]
-    fn synthetic_interface_catalog_applies_flag_subset_to_all_selectors() {
-        let catalog = synthetic_catalog();
-        let name = c"PKCS 11";
-        let version = CK_VERSION { major: 3, minor: 0 };
-
-        for flags in [0, 0b0001, 0b0011] {
-            assert!(find_interface_in_catalog(&catalog, Some(name), None, flags).is_some());
-            assert!(find_interface_in_catalog(&catalog, None, None, flags).is_some());
-            assert!(
-                find_interface_in_catalog(&catalog, Some(name), Some(&version), flags).is_some()
-            );
-            assert!(find_interface_in_catalog(&catalog, None, Some(&version), flags).is_some());
-        }
-        for (name, version) in
-            [(Some(name), None), (None, None), (Some(name), Some(&version)), (None, Some(&version))]
-        {
-            assert!(find_interface_in_catalog(&catalog, name, version, 0b0100).is_none());
-        }
-    }
-
-    #[test]
-    fn message_parameter_capability_is_cleared_before_reprobe() {
-        record_pointer_safe_message_parameters(true);
-        clear_pointer_safe_message_parameters();
-        assert!(!pointer_safe_message_parameters());
-    }
+    use super::{resolve_backend_attribute_stride, resolve_backend_ulong_size};
 
     #[test]
     fn stride_absent_falls_back_to_three_ulongs() {
@@ -1015,15 +973,10 @@ mod backend_abi_tests {
         assert!(resolve_backend_attribute_stride(Some(300), 8).is_err());
     }
 
-    /// This client's own D2 byte-order code: 1 on LE, 2 on BE.
-    fn native_order() -> Option<u32> {
-        Some(if cfg!(target_endian = "little") { 1 } else { 2 })
-    }
-
     #[test]
     fn valid_advertised_widths_pass_through() {
-        assert_eq!(resolve_backend_ulong_size(Some(4), native_order()), Ok((4, false)));
-        assert_eq!(resolve_backend_ulong_size(Some(8), native_order()), Ok((8, false)));
+        assert_eq!(resolve_backend_ulong_size(Some(4), Some(1)), Ok((4, false)));
+        assert_eq!(resolve_backend_ulong_size(Some(8), Some(1)), Ok((8, false)));
         // Byte order may be unspecified (older daemon set the size only).
         assert_eq!(resolve_backend_ulong_size(Some(8), None), Ok((8, false)));
     }
@@ -1032,15 +985,14 @@ mod backend_abi_tests {
     fn absent_width_falls_back_to_eight_d9() {
         // D9: no advertisement → assume 8 (LP64), flagged so the caller can warn.
         assert_eq!(resolve_backend_ulong_size(None, None), Ok((8, true)));
-        assert_eq!(resolve_backend_ulong_size(None, native_order()), Ok((8, true)));
+        assert_eq!(resolve_backend_ulong_size(None, Some(1)), Ok((8, true)));
     }
 
     #[test]
     fn invalid_width_is_refused() {
-        // Native order throughout so these pin the WIDTH refusal, not D6.
-        assert!(resolve_backend_ulong_size(Some(2), native_order()).is_err());
-        assert!(resolve_backend_ulong_size(Some(16), native_order()).is_err());
-        assert!(resolve_backend_ulong_size(Some(0), native_order()).is_err());
+        assert!(resolve_backend_ulong_size(Some(2), Some(1)).is_err());
+        assert!(resolve_backend_ulong_size(Some(16), Some(1)).is_err());
+        assert!(resolve_backend_ulong_size(Some(0), Some(1)).is_err());
     }
 
     #[test]
@@ -1051,16 +1003,6 @@ mod backend_abi_tests {
         assert!(resolve_backend_ulong_size(Some(8), Some(2)).is_err());
         // A little-endian or unspecified order is accepted.
         assert!(resolve_backend_ulong_size(Some(8), Some(1)).is_ok());
-        assert!(resolve_backend_ulong_size(Some(8), None).is_ok());
-    }
-
-    #[test]
-    #[cfg(target_endian = "big")]
-    fn little_endian_backend_refused_on_be_client_d6() {
-        // D6 mirror: on a BE client it is the LE advertisement that must be
-        // refused, while BE (native) and unspecified pass.
-        assert!(resolve_backend_ulong_size(Some(8), Some(1)).is_err());
-        assert!(resolve_backend_ulong_size(Some(8), Some(2)).is_ok());
         assert!(resolve_backend_ulong_size(Some(8), None).is_ok());
     }
 }

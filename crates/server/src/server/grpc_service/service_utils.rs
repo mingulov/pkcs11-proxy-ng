@@ -474,8 +474,8 @@ pub(super) async fn context_exists(
 pub(super) async fn resolve_slot(
     ctx_mgr: &Arc<ContextManager>,
     slot_id: u64,
-) -> Result<BackendSlotId, CkRv> {
-    ctx_mgr.resolve_slot(VirtualSlotId(slot_id)).await.ok_or(CkRv::SLOT_ID_INVALID)
+) -> Result<CkSlotId, CkRv> {
+    ctx_mgr.resolve_slot(CkSlotId(slot_id as u64)).await.ok_or(CkRv::SLOT_ID_INVALID)
 }
 
 pub(super) fn parse_mechanism(
@@ -499,198 +499,6 @@ pub(super) async fn resolve_session(
 
     let backend_session = session.ok_or(CkRv::SESSION_HANDLE_INVALID)?;
     Ok(CkSessionHandle(backend_session.0 as u64))
-}
-
-/// Resolve the caller's identity and the token `(label, serial)` for the
-/// session that owns `virtual_session`.
-///
-/// This is the shared identity + slot-info prologue for the per-object
-/// authorization gate (`gate_object_handle`, USE-time) and the
-/// `find_objects` enumeration filter (G3-PR2). Extracting it here keeps
-/// the two call sites DRY — neither duplicates the identity lookup, slot
-/// lookup, or token-info cache logic.
-///
-/// Returns `None` (fail-closed) when:
-/// - the context is gone,
-/// - the session is not registered in `session_slots`,
-/// - the slot's token info is unavailable (`TOKEN_NOT_PRESENT`, backend
-///   error, or transport failure).
-pub(super) async fn resolve_object_authz_context(
-    ctx: &HandlerContext,
-    ctx_id: &ClientContextId,
-    virtual_session: u64,
-) -> Option<(AuthenticatedIdentity, String, String)> {
-    // Step 1: Resolve the caller's identity from the context.
-    let identity =
-        super::authorization::context_identity(&ctx.context_manager, ctx_id).await.ok()?;
-
-    // Step 2: Resolve the slot that owns this session → (label, serial).
-    let backend_slot =
-        ctx.context_manager.slot_for_session(ctx_id, VirtualHandle(virtual_session)).await?;
-
-    let (label, serial) = match ctx.context_manager.cached_token_info(backend_slot) {
-        Some(cached) => cached,
-        None => {
-            let backend_ref = ctx.backend.clone();
-            match spawn_backend(move || backend_ref.get_token_info(backend_slot.0)).await {
-                Ok(Ok(info)) => {
-                    ctx.context_manager.cache_token_info(
-                        backend_slot,
-                        info.label.clone(),
-                        info.serial_number.clone(),
-                    );
-                    (info.label, info.serial_number)
-                }
-                // TOKEN_NOT_PRESENT, backend CkRv error, or transport failure.
-                _ => return None, // fail-closed
-            }
-        }
-    };
-
-    Some((identity, label, serial))
-}
-
-/// Per-object authorization gate (G3-PR1, ADR-0012).
-///
-/// Called when `ctx.token_policy.per_object_active()` is `true` AND
-/// the object resolved to a real backend handle (non-zero).  Returns the
-/// original `backend_object` when the identity is allowed to use it;
-/// returns `CkObjectHandle(0)` (the NOT-FOUND sentinel) otherwise.
-///
-/// **Invisible-denial contract (ADR-0012 §G3):** a denied object must
-/// appear byte-for-byte identical to a non-existent one on the **RV**,
-/// **audit**, and **metric** axes.  The caller substitutes the denied handle
-/// with 0, exactly as the not-found path does.  No early return with a
-/// different RV; no distinct audit record; no metric.  The backend returns
-/// the operation's own handle-invalid code (`CKR_OBJECT_HANDLE_INVALID` for
-/// object ops, `CKR_KEY_HANDLE_INVALID` for key ops); since both paths use
-/// handle 0, the deny and not-found codes converge automatically.
-///
-/// **Timing note (I1):** the denial is NOT constant-latency.  A not-found
-/// virtual handle (never registered) skips the backend entirely; a denied
-/// handle (registered but policy-blocked) incurs a `get_token_info` +
-/// `C_GetAttributeValue` (`CKA_UNIQUE_ID`) round-trip on first use (the
-/// cache eliminates these on subsequent uses of the same handle).  This
-/// first-use timing side-channel is accepted; a constant-latency denial
-/// path (padding the not-found path with phantom backend calls) is tracked
-/// as a future refinement.
-///
-/// **Fail-closed semantics:**
-/// - Identity unavailable → deny (handle 0).
-/// - Session's slot unknown → deny.
-/// - Token info fetch fails → deny.
-/// - `CKA_UNIQUE_ID` absent or empty → deny.
-/// - `allows_object_use` returns false → deny.
-///
-/// NOTE: enumeration-time filtering of `find_objects` results is implemented
-/// by G3-PR2 (`find_objects` in `object/search.rs`).  This gate covers
-/// USE-time only; objects that pass the enumeration filter have their
-/// `CKA_UNIQUE_ID` pre-cached so this gate avoids a re-fetch.
-pub(super) async fn gate_object_handle(
-    ctx: &HandlerContext,
-    ctx_id: &ClientContextId,
-    virtual_session: u64,
-    virtual_object: u64,
-    backend_session: BackendHandle,
-    backend_object: CkObjectHandle,
-) -> CkObjectHandle {
-    let backend_session = CkSessionHandle(backend_session.0 as u64);
-
-    // --- 1+2: Resolve identity and (label, serial) via shared helper ---
-    let Some((identity, label, serial)) =
-        resolve_object_authz_context(ctx, ctx_id, virtual_session).await
-    else {
-        return CkObjectHandle(0); // fail-closed
-    };
-
-    // --- 2. Early creator bypass (I3/M1 fix) ---
-    // A principal can always use an object it minted this session (generate /
-    // create / unwrap), even when its backend-assigned CKA_UNIQUE_ID is not in
-    // the pre-configured `objects` grant. This is the minimal, correct ACL
-    // inheritance: creator-owns-what-it-mints.
-    //
-    // The check is EARLY (before the metadata fetch) so that uid-only deployments
-    // avoid the entire C_GetAttributeValue round-trip for created objects (M1).
-    //
-    // The check is per-context: context B's created_objects set is independent
-    // of A's, so B is still gated by its own policy for any object it did NOT
-    // mint. A recycled virtual handle cannot inherit created-status because the
-    // removal hooks that evict object_metadata also evict created_objects.
-    if ctx.context_manager.object_was_created_here(ctx_id, virtual_object).await {
-        if !ctx.token_policy.per_class_active() {
-            // No class gate: creator bypass is unconditional. No metadata fetch
-            // needed for uid-only deployments (M1 — no overhead for creators).
-            return backend_object;
-        }
-        // Class gate is active (I3 fix): fetch metadata for the class check only;
-        // the uid check is still skipped (creator-owns-what-it-mints for uid).
-        let fetched =
-            super::authorization::fetch_object_metadata(ctx, backend_session, backend_object).await;
-        if let Some(ref m) = fetched {
-            ctx.context_manager.cache_object_metadata(ctx_id, virtual_object, m.clone()).await;
-        }
-        return match fetched {
-            Some(meta)
-                if meta.class.is_some_and(|c| {
-                    ctx.token_policy.allows_class(&identity, &label, &serial, c)
-                }) =>
-            {
-                backend_object
-            }
-            // fail-closed: class denied, class unknown (None), or metadata fetch failed
-            _ => CkObjectHandle(0),
-        };
-    }
-
-    // --- 3. Resolve ObjectMetadata from cache or backend (non-created objects) ---
-    // Token objects (is_token=true) are never cached (I2 fix: cross-client backend
-    // handle recycling immunity). Session objects are cached for the lifetime of
-    // the virtual handle.
-    let meta: Option<ObjectMetadata> =
-        ctx.context_manager.object_metadata(ctx_id, virtual_object).await;
-    let meta = match meta {
-        Some(cached) => cached,
-        None => {
-            // Cache miss: fetch uid + class + token in one C_GetAttributeValue call.
-            let fetched =
-                super::authorization::fetch_object_metadata(ctx, backend_session, backend_object)
-                    .await;
-            // cache_object_metadata internally skips token objects (I2 fix).
-            if let Some(ref m) = fetched {
-                ctx.context_manager.cache_object_metadata(ctx_id, virtual_object, m.clone()).await;
-            }
-            match fetched {
-                Some(m) => m,
-                None => return CkObjectHandle(0), // fail-closed
-            }
-        }
-    };
-
-    // Fail-closed: absent or empty CKA_UNIQUE_ID on a real object → deny.
-    if meta.unique_id.is_empty() {
-        return CkObjectHandle(0);
-    }
-
-    // --- 4. Policy checks ---
-    // Per-object uid check (opt-in; pass-through when no objects grant configured).
-    if !meta
-        .unique_id
-        .expose(|raw| ctx.token_policy.allows_object_use(&identity, &label, &serial, raw))
-    {
-        // Constant-work deny: substitute the NOT-FOUND sentinel. The handler
-        // forwards handle 0 to the backend which returns CKR_OBJECT_HANDLE_INVALID,
-        // IDENTICAL to a genuinely-nonexistent object. No log, no audit, no metric.
-        return CkObjectHandle(0);
-    }
-    // Per-class check (opt-in; skipped when no classes grant is configured).
-    // M2: class is Option — None is fail-closed when per_class_active() (deny).
-    if ctx.token_policy.per_class_active()
-        && !meta.class.is_some_and(|c| ctx.token_policy.allows_class(&identity, &label, &serial, c))
-    {
-        return CkObjectHandle(0);
-    }
-
-    backend_object
 }
 
 pub(super) async fn resolve_session_and_key(
@@ -718,8 +526,8 @@ pub(super) async fn resolve_session_and_key(
     // CKR_KEY_HANDLE_INVALID locally.  This preserves transparency: the
     // backend decides the error priority (e.g., CKR_FUNCTION_NOT_SUPPORTED
     // vs CKR_KEY_HANDLE_INVALID).
-    let backend_key = key.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0));
-    Ok((CkSessionHandle(backend_session.0), backend_key))
+    let backend_key = key.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0 as u64));
+    Ok((CkSessionHandle(backend_session.0 as u64), backend_key))
 }
 
 pub(super) async fn resolve_session_and_object(
@@ -744,8 +552,8 @@ pub(super) async fn resolve_session_and_object(
     let backend_session = session.ok_or(CkRv::SESSION_HANDLE_INVALID)?;
     // Forward CK_INVALID_HANDLE to backend when object is unknown — see
     // resolve_session_and_key for rationale.
-    let backend_object = object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0));
-    Ok((CkSessionHandle(backend_session.0), backend_object))
+    let backend_object = object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0 as u64));
+    Ok((CkSessionHandle(backend_session.0 as u64), backend_object))
 }
 
 pub(super) async fn resolve_session_and_two_objects(
@@ -773,8 +581,10 @@ pub(super) async fn resolve_session_and_two_objects(
     // Forward CK_INVALID_HANDLE to backend when either object is unknown; see
     // resolve_session_and_key for rationale. Local context/session validation
     // remains explicit; backend-visible object handle priority stays backend-owned.
-    let first_backend_object = first_object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0));
-    let second_backend_object = second_object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0));
+    let first_backend_object =
+        first_object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0 as u64));
+    let second_backend_object =
+        second_object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0 as u64));
 
     Ok((CkSessionHandle(backend_session.0 as u64), first_backend_object, second_backend_object))
 }

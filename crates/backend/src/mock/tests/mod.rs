@@ -28,20 +28,20 @@ fn unsupported_mechanism_fixture()
 fn label_attr(label: &str) -> CkAttribute {
     CkAttribute {
         attr_type: CkAttributeType::LABEL,
-        value: Some(CkAttributeValue::String(label.to_string().into())),
+        value: Some(CkAttributeValue::String(label.to_string())),
     }
 }
 
 fn live_key(backend: &MockBackend, session: CkSessionHandle) -> CkObjectHandle {
-    backend.create_object(session, Some(&[label_attr("key")])).unwrap()
+    backend.create_object(session, &[label_attr("key")]).unwrap()
 }
 
 fn exact_size_spec() -> CkOutputBufferSpec {
-    CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: false }
+    CkOutputBufferSpec { buffer_present: false, buffer_len: 0 }
 }
 
 fn exact_data_spec() -> CkOutputBufferSpec {
-    CkOutputBufferSpec { buffer_present: true, buffer_len: 1024, length_pointer_null: false }
+    CkOutputBufferSpec { buffer_present: true, buffer_len: 1024 }
 }
 
 fn exact_param_size_spec() -> CkParameterRoundtripSpec {
@@ -64,7 +64,7 @@ fn assert_exact_byte_result(
             panic!("{workflow} data query value for 0x{:08X}", mechanism_type.0)
         });
         assert_eq!(
-            result.returned_len.expect("successful byte output length") as usize,
+            result.returned_len as usize,
             value.len(),
             "{workflow} data query length for 0x{:08X}",
             mechanism_type.0
@@ -141,7 +141,8 @@ where
     assert_eq!(size_result.ck_rv, CkRv::OK, "{workflow} size rv for 0x{:08X}", mechanism_type.0);
     assert!(size_result.value.is_none(), "{workflow} size value for 0x{:08X}", mechanism_type.0);
     assert_eq!(
-        size_result.object_handle, None,
+        size_result.object_handle,
+        CkObjectHandle(0),
         "{workflow} size query handle for 0x{:08X}",
         mechanism_type.0
     );
@@ -152,13 +153,14 @@ where
         .value
         .unwrap_or_else(|| panic!("{workflow} data value for 0x{:08X}", mechanism_type.0));
     assert_eq!(
-        data_result.returned_len.expect("successful ciphertext length") as usize,
+        data_result.returned_len as usize,
         value.len(),
         "{workflow} data length for 0x{:08X}",
         mechanism_type.0
     );
     assert_ne!(
-        data_result.object_handle, None,
+        data_result.object_handle,
+        CkObjectHandle(0),
         "{workflow} data query handle for 0x{:08X}",
         mechanism_type.0
     );
@@ -167,16 +169,13 @@ where
 fn sp800_108_counter_iteration_param() -> PrfDataParam {
     const CK_SP800_108_ITERATION_VARIABLE: u64 = 0x0000_0001;
 
-    PrfDataParam {
-        type_: CK_SP800_108_ITERATION_VARIABLE,
-        value: sp800_108_counter_format_bytes().into(),
-    }
+    PrfDataParam { type_: CK_SP800_108_ITERATION_VARIABLE, value: sp800_108_counter_format_bytes() }
 }
 
 fn sp800_108_null_iteration_param() -> PrfDataParam {
     const CK_SP800_108_ITERATION_VARIABLE: u64 = 0x0000_0001;
 
-    PrfDataParam { type_: CK_SP800_108_ITERATION_VARIABLE, value: Vec::new().into() }
+    PrfDataParam { type_: CK_SP800_108_ITERATION_VARIABLE, value: Vec::new() }
 }
 
 fn sp800_108_counter_format_bytes() -> Vec<u8> {
@@ -218,7 +217,7 @@ fn assert_mock_label(
         )
         .unwrap();
     assert_eq!(rv, CkRv::OK);
-    assert_eq!(results[0].value, Some(SecretBytes::new(expected.as_bytes().to_vec())));
+    assert_eq!(results[0].value, Some(expected.as_bytes().to_vec()));
 }
 
 fn assert_invalid_session_does_not_allocate_object<R: std::fmt::Debug>(
@@ -260,15 +259,13 @@ fn expect_signal_derive_param_invalid(
     let mechanism = CkMechanism { mechanism_type, params: Some(params) };
 
     assert_eq!(
-        backend
-            .derive_key(session, &mechanism, base_key, Some(&[label_attr("derived")]))
-            .unwrap_err(),
+        backend.derive_key(session, &mechanism, base_key, &[label_attr("derived")]).unwrap_err(),
         CkRv::OBJECT_HANDLE_INVALID,
         "{label} should reject invalid source-defined handle fields"
     );
     assert_eq!(
         backend
-            .derive_key_with_output(session, &mechanism, base_key, Some(&[label_attr("derived")]))
+            .derive_key_with_output(session, &mechanism, base_key, &[label_attr("derived")])
             .unwrap_err(),
         CkRv::OBJECT_HANDLE_INVALID,
         "{label} exact/output path should reject invalid source-defined handle fields"
@@ -289,8 +286,8 @@ fn cms_sig_mechanism(certificate_handle: CkObjectHandle) -> CkMechanism {
                 params: None,
             }),
             content_type: "application/octet-stream".to_string(),
-            requested_attributes: Vec::new().into(),
-            required_attributes: Vec::new().into(),
+            requested_attributes: Vec::new(),
+            required_attributes: Vec::new(),
         })),
     }
 }
@@ -304,7 +301,7 @@ fn kip_mechanism(mechanism_type: CkMechanismType, key_handle: CkObjectHandle) ->
                 params: None,
             }),
             key_handle: key_handle.0,
-            seed: b"seed".to_vec().into(),
+            seed: b"seed".to_vec(),
         })),
     }
 }
@@ -320,15 +317,13 @@ fn expect_derive_param_handle_invalid(
     let mechanism = CkMechanism { mechanism_type, params: Some(params) };
 
     assert_eq!(
-        backend
-            .derive_key(session, &mechanism, base_key, Some(&[label_attr("derived")]))
-            .unwrap_err(),
+        backend.derive_key(session, &mechanism, base_key, &[label_attr("derived")]).unwrap_err(),
         CkRv::OBJECT_HANDLE_INVALID,
         "{label} should reject an invalid source-defined handle"
     );
     assert_eq!(
         backend
-            .derive_key_with_output(session, &mechanism, base_key, Some(&[label_attr("derived")]))
+            .derive_key_with_output(session, &mechanism, base_key, &[label_attr("derived")])
             .unwrap_err(),
         CkRv::OBJECT_HANDLE_INVALID,
         "{label} exact/output path should reject an invalid source-defined handle"
@@ -340,11 +335,8 @@ fn gcm_mechanism_output() -> CkMechanismParams {
         iv: vec![0xA5; 12],
         iv_bits: 96,
         iv_buffer_len: 12,
-        aad: b"mock-aad".to_vec().into(),
+        aad: b"mock-aad".to_vec(),
         tag_bits: 128,
-
-        iv_null: false,
-        aad_null: false,
     })
 }
 

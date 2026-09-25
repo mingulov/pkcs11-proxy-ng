@@ -17,8 +17,6 @@ struct LoginGate {
 
 mod crypto_ops;
 pub mod echo;
-mod historical_flags;
-mod mechanism_entry;
 mod mock_types;
 mod object_ops;
 pub mod output_lengths;
@@ -26,7 +24,6 @@ mod session_ops;
 mod state;
 mod wrap_entry;
 
-pub use self::mechanism_entry::{MockEmbeddedHandles, MockMechanismEntry};
 pub use self::mock_types::{MockAbi, MockAttributeSlot, MultiPartOp};
 use self::state::{MockState, compute_session_state};
 pub use self::wrap_entry::{MockWrapAction, MockWrapEntry, MockWrapObservation};
@@ -199,6 +196,24 @@ pub struct MockBackend {
     /// Test-only gate (M5 harness): when `Some`, each real backend `login`
     /// signals + blocks on it. `None` (default) makes `login` a no-op gate.
     login_gate: Mutex<Option<LoginGate>>,
+    /// The backend ABI this mock emulates on the wire (ADR-0011): ulong
+    /// width for values/lengths, CK_ATTRIBUTE stride for nested templates.
+    abi: MockAbi,
+    /// When set, the D2 byte-order advertisement claims big-endian so the
+    /// client's D6 refusal path can be exercised.
+    advertise_big_endian: bool,
+    /// Mechanism-parameter presence rules captured from a registry at
+    /// construction (`with_mechanism_registry`); `None` (plain `new`)
+    /// keeps the mock permissive for existing suites.
+    param_presence: Option<ParamPresence>,
+}
+
+/// Which mechanisms require parameters and which forbid them, snapshot
+/// from a `MechanismRegistry`. Mechanisms in neither set (vendor,
+/// unregistered) are not validated.
+struct ParamPresence {
+    parameterless: std::collections::HashSet<u64>,
+    shaped: std::collections::HashSet<u64>,
 }
 
 impl MockBackend {
@@ -257,6 +272,9 @@ impl MockBackend {
             token_info_calls: AtomicUsize::new(0),
             data_op_calls: AtomicUsize::new(0),
             login_gate: Mutex::new(None),
+            abi: MockAbi::host(),
+            advertise_big_endian: false,
+            param_presence: None,
         }
     }
 
@@ -537,25 +555,10 @@ impl MockBackend {
     }
 
     /// Advertise big-endian byte order (D2) so tests can pin the client's
-    /// D6 refusal path. Values are still emitted in host order: a correct
+    /// D6 refusal path. Values are still emitted little-endian: a correct
     /// client must refuse before ever parsing one.
     pub fn with_big_endian_advertisement(mut self) -> Self {
-        self.advertised_byte_order = Some(2);
-        self
-    }
-
-    /// Advertise little-endian byte order (D2): the mirror knob for
-    /// big-endian hosts, where the big-endian advertisement matches the
-    /// client and it is the little-endian one the client must refuse.
-    pub fn with_little_endian_advertisement(mut self) -> Self {
-        self.advertised_byte_order = Some(1);
-        self
-    }
-
-    /// Override the PKCS#11 cryptoki version reported by `get_info`.
-    /// Used by startup-guard tests to simulate a pre-3.0 backend.
-    pub fn with_cryptoki_version(mut self, major: u8, minor: u8) -> Self {
-        self.cryptoki_version = (major, minor);
+        self.advertise_big_endian = true;
         self
     }
 
@@ -631,60 +634,9 @@ impl MockBackend {
         if template.is_empty() {
             return;
         }
-        let mut attrs =
+        let attrs =
             template.iter().filter_map(Self::template_entry_to_slot).collect::<HashMap<_, _>>();
-        Self::synthesize_value_from_value_len(handle, &mut attrs);
         self.attribute_store.lock().unwrap().insert(handle.0, attrs);
-    }
-
-    /// A key created with CKA_VALUE_LEN but no explicit CKA_VALUE gets a
-    /// deterministic CKA_VALUE of exactly that many bytes — matching a
-    /// real token, where generate/derive produce key material of the
-    /// requested length and it reads back at that size.
-    fn synthesize_value_from_value_len(
-        handle: CkObjectHandle,
-        attrs: &mut HashMap<u64, MockAttributeSlot>,
-    ) {
-        if attrs.contains_key(&CkAttributeType::VALUE.0) {
-            return;
-        }
-        let Some(MockAttributeSlot::Value(CkAttributeValue::Ulong(len))) =
-            attrs.get(&CkAttributeType::VALUE_LEN.0)
-        else {
-            return;
-        };
-        let len = *len as usize;
-        let value = echo::echo_bytes("key-value", &[&handle.0.to_le_bytes()], len);
-        attrs.insert(
-            CkAttributeType::VALUE.0,
-            MockAttributeSlot::Value(CkAttributeValue::Bytes(value.into())),
-        );
-    }
-
-    /// Set CKA_CLASS/CKA_KEY_TYPE (+CKA_LOCAL = true) on a freshly
-    /// generated key from the mechanism, unless the template already
-    /// provided them — matching a real token, so read-after-generate
-    /// shows an authentic object. Creates the store entry if the object
-    /// was generated with an empty template.
-    fn synthesize_default_key_attributes(
-        &self,
-        handle: CkObjectHandle,
-        class: u64,
-        key_type: Option<u64>,
-    ) {
-        let mut store = self.attribute_store.lock().unwrap();
-        let attrs = store.entry(handle.0).or_default();
-        attrs
-            .entry(CkAttributeType::CLASS.0)
-            .or_insert_with(|| MockAttributeSlot::Value(CkAttributeValue::Ulong(class)));
-        if let Some(kt) = key_type {
-            attrs
-                .entry(CkAttributeType::KEY_TYPE.0)
-                .or_insert_with(|| MockAttributeSlot::Value(CkAttributeValue::Ulong(kt)));
-        }
-        attrs
-            .entry(CkAttributeType::LOCAL.0)
-            .or_insert_with(|| MockAttributeSlot::Value(CkAttributeValue::Bool(true)));
     }
 
     /// C_SetAttributeValue semantics: merge the template into the object's
@@ -921,6 +873,12 @@ impl MockBackend {
         data.iter().map(|byte| byte ^ 0x42).collect()
     }
 
+    fn digest_bytes(data: &[u8]) -> Vec<u8> {
+        // Deterministic, input-derived, domain-separated (see mock::echo);
+        // 4 bytes to keep two-call buffer tests simple.
+        echo::echo_bytes("digest", &[data], 4)
+    }
+
     fn reverse_bytes(data: &[u8]) -> Vec<u8> {
         data.iter().rev().copied().collect()
     }
@@ -1063,7 +1021,7 @@ impl MockBackend {
                     return Err(CkRv::MECHANISM_PARAM_INVALID);
                 }
                 CK_SP800_108_KEY_HANDLE => {
-                    let handle = data_param.value.expose(read_sp800_108_key_handle_value)?;
+                    let handle = read_sp800_108_key_handle_value(&data_param.value)?;
                     self.require_live_object(state, CkObjectHandle(handle as u64))?;
                 }
                 _ => {}
@@ -1222,7 +1180,7 @@ impl Pkcs11Backend for MockBackend {
     }
 
     fn abi_byte_order(&self) -> u32 {
-        self.advertised_byte_order.unwrap_or_else(crate::host_abi::host_byte_order)
+        if self.advertise_big_endian { 2 } else { 1 }
     }
 
     fn abi_attribute_stride(&self) -> u32 {
@@ -1376,8 +1334,8 @@ impl Pkcs11Backend for MockBackend {
         self.init_cancel_impl(s, MultiPartOp::Sign)
     }
     fn sign(&self, s: CkSessionHandle, d: CkInBuf<'_>) -> CkResult<Vec<u8>> {
-        let _ = self.resolve_input(d)?;
-        self.sign_impl(s)
+        let data = self.resolve_input(d)?;
+        self.sign_impl(s, data)
     }
     fn sign_update(&self, s: CkSessionHandle, p: CkInBuf<'_>) -> CkResult<()> {
         let _ = self.resolve_input(p)?;
@@ -1399,9 +1357,9 @@ impl Pkcs11Backend for MockBackend {
         self.init_cancel_impl(s, MultiPartOp::SignRecover)
     }
     fn sign_recover(&self, s: CkSessionHandle, d: CkInBuf<'_>) -> CkResult<Vec<u8>> {
-        let _ = self.resolve_input(d)?;
+        let data = self.resolve_input(d)?;
         self.state.lock().unwrap().end_op(s, MultiPartOp::SignRecover)?;
-        Ok(echo::echo_bytes("sign-recover", &[data], 2).into())
+        Ok(echo::echo_bytes("sign-recover", &[data], 2))
     }
     fn verify_recover_init(
         &self,
@@ -1668,12 +1626,12 @@ impl Pkcs11Backend for MockBackend {
         &self,
         session: CkSessionHandle,
         object: CkObjectHandle,
-        template: Option<&[CkAttribute]>,
+        template: &[CkAttribute],
     ) -> CkResult<()> {
         self.set_attribute_value_impl(session, object)?;
         // The template was previously discarded: C_SetAttributeValue merges
         // into the stored attributes so set-then-read round-trips.
-        self.merge_object_template(object, template.unwrap_or(&[]));
+        self.merge_object_template(object, template);
         Ok(())
     }
     fn generate_key_pair(
@@ -1736,8 +1694,7 @@ impl Pkcs11Backend for MockBackend {
         data: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
-        let _ = self.resolve_input(data)?;
-        self.sign_exact_impl(s, spec)
+        self.sign_exact_impl(s, self.resolve_input(data)?, spec)
     }
 
     fn sign_final_exact(
@@ -1754,8 +1711,7 @@ impl Pkcs11Backend for MockBackend {
         data: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
-        let _ = self.resolve_input(data)?;
-        self.sign_recover_exact_impl(s, spec)
+        self.sign_recover_exact_impl(s, self.resolve_input(data)?, spec)
     }
 
     fn verify_recover_exact(

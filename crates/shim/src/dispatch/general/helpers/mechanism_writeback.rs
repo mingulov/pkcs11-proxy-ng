@@ -2,6 +2,9 @@
 //! output params (generated GCM IVs, SP800-108 derived-key handles)
 //! back into the caller's parameter structs.
 
+use cryptoki_sys::*;
+use pkcs11_proxy_ng_types::*;
+
 use super::*;
 
 pub(crate) unsafe fn write_mechanism_output_params(
@@ -168,17 +171,25 @@ pub(crate) unsafe fn write_mechanism_output_params(
             if !output.pIVClient.is_null() {
                 let copy_len = ssl3_out.client_iv.len().min(capacity);
                 if copy_len > 0 {
-                    ssl3_out.client_iv.expose(|raw| unsafe {
-                        std::ptr::copy_nonoverlapping(raw.as_ptr(), output.pIVClient, copy_len);
-                    });
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            ssl3_out.client_iv.as_ptr(),
+                            output.pIVClient,
+                            copy_len,
+                        );
+                    }
                 }
             }
             if !output.pIVServer.is_null() {
                 let copy_len = ssl3_out.server_iv.len().min(capacity);
                 if copy_len > 0 {
-                    ssl3_out.server_iv.expose(|raw| unsafe {
-                        std::ptr::copy_nonoverlapping(raw.as_ptr(), output.pIVServer, copy_len);
-                    });
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            ssl3_out.server_iv.as_ptr(),
+                            output.pIVServer,
+                            copy_len,
+                        );
+                    }
                 }
             }
         }
@@ -228,9 +239,9 @@ pub(crate) unsafe fn write_mechanism_output_params(
             if !pbe.pInitVector.is_null() && !pbe_out.init_vector.is_empty() {
                 // PBE IV is 8 bytes; copy no more than the caller's buffer holds.
                 let n = pbe_out.init_vector.len().min(8);
-                pbe_out.init_vector.expose(|raw| unsafe {
-                    std::ptr::copy_nonoverlapping(raw.as_ptr(), pbe.pInitVector, n);
-                });
+                unsafe {
+                    std::ptr::copy_nonoverlapping(pbe_out.init_vector.as_ptr(), pbe.pInitVector, n);
+                }
             }
         }
         _ => {}

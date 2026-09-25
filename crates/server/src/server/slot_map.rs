@@ -36,7 +36,7 @@ impl SlotMap {
         if let Some(&existing) = self.backend_to_virtual.get(&backend_slot) {
             return existing;
         }
-        let virtual_id = VirtualSlotId(self.next_virtual);
+        let virtual_id = CkSlotId(self.next_virtual as u64);
         self.next_virtual += 1;
         self.virtual_to_backend.insert(virtual_id, backend_slot);
         self.backend_to_virtual.insert(backend_slot, virtual_id);

@@ -20,8 +20,8 @@ impl MockBackend {
             // backend's native CK_ULONG width — the width of the ABI this
             // mock EMULATES, not necessarily the host's.
             CkAttributeValue::Ulong(value) => self.abi().encode_ulong(*value),
-            CkAttributeValue::Bytes(bytes) => bytes.expose(|raw| raw.to_vec()),
-            CkAttributeValue::String(value) => value.expose(|raw| raw.to_vec()),
+            CkAttributeValue::Bytes(bytes) => bytes.clone(),
+            CkAttributeValue::String(value) => value.as_bytes().to_vec(),
             // Unreachable by construction: store_object_template converts
             // nested-template VALUES into MockAttributeSlot::NestedTemplate,
             // which the exact path serves structurally. Serve the backend-

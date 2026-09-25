@@ -11,36 +11,13 @@
 
 /// Byte order of an edge's `CK_ULONG` encoding.
 ///
-/// The variants exist so a big-endian edge is *detected* (and refused at
-/// probe when it mismatches the peer — ADR-0011 D6) rather than silently
+/// All currently supported targets are little-endian; the variant exists so a
+/// big-endian backend is *detected* (and refused at probe) rather than silently
 /// mis-decoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ByteOrder {
     Little,
     Big,
-}
-
-impl ByteOrder {
-    /// The byte order of `CK_ULONG` on this build target.
-    ///
-    /// D6 refuses mismatched peers at probe, so past the probe both edges
-    /// share the client's native order — bridge code must use this, never a
-    /// hardcoded order, when (re-)encoding ulong values.
-    pub fn native() -> Self {
-        if cfg!(target_endian = "little") { Self::Little } else { Self::Big }
-    }
-}
-
-/// Encode `v` as native-order `CK_ULONG` bytes of `width` (4 or 8).
-///
-/// The single source of truth for "emulated/native ulong bytes" outside
-/// the FFI edge itself (the mock backend, bridge tests). Panics on any
-/// other width; callers must ensure `v` fits `width` (a truncated value
-/// here is a fixture bug, not a runtime case).
-pub fn encode_native_ulong(v: u64, width: usize) -> Vec<u8> {
-    assert!(width == 4 || width == 8, "CK_ULONG width must be 4 or 8, got {width}");
-    let full = v.to_ne_bytes();
-    if cfg!(target_endian = "little") { full[..width].to_vec() } else { full[8 - width..].to_vec() }
 }
 
 /// Why a width translation could not be performed.
@@ -186,16 +163,6 @@ pub fn narrow_info_field(wire: u64, dst_width: usize) -> u64 {
     if wire == CANONICAL_UNAVAILABLE || wire > ones { ones } else { wire }
 }
 
-/// Check a wire `CK_RV`/`CK_SLOT_ID` against a caller width (TO26b group 2:
-/// ownership §"Slot-event scope"). Returns the value unchanged when it fits
-/// `dst_width` bytes, else `None` — the caller maps that to local
-/// `CKR_FUNCTION_FAILED` without writing output. Never truncates: a
-/// nonzero wide error must not become `CKR_OK`, and a wide slot must not
-/// become a wrong slot.
-pub fn checked_narrow_to_width(wire: u64, dst_width: usize) -> Option<u64> {
-    if wire > all_ones(dst_width) { None } else { Some(wire) }
-}
-
 /// Translate a `CK_ULONG`-typed attribute's `ulValueLen` from the source edge's
 /// width to the destination edge's width.
 ///
@@ -287,36 +254,6 @@ mod tests {
     }
 
     #[test]
-    fn native_order_matches_target_endianness() {
-        let want = if cfg!(target_endian = "little") { LE } else { BE };
-        assert_eq!(ByteOrder::native(), want);
-    }
-
-    #[test]
-    fn native_encode_decodes_to_value_at_both_widths() {
-        // Order-independent pin: whatever this host's order is, the native
-        // encoding must decode back to the value in the native order.
-        for width in [4usize, 8] {
-            let bytes = encode_native_ulong(0x0102_0304, width);
-            assert_eq!(bytes.len(), width);
-            let back = reencode_ulong(&bytes, width, 8, ByteOrder::native()).unwrap();
-            let int_bytes: [u8; 8] = back.try_into().unwrap();
-            let v = if cfg!(target_endian = "little") {
-                u64::from_le_bytes(int_bytes)
-            } else {
-                u64::from_be_bytes(int_bytes)
-            };
-            assert_eq!(v, 0x0102_0304, "round-trip at width {width}");
-        }
-    }
-
-    #[test]
-    #[should_panic(expected = "CK_ULONG width must be 4 or 8")]
-    fn native_encode_rejects_bad_width() {
-        let _ = encode_native_ulong(1, 2);
-    }
-
-    #[test]
     fn reencode_big_endian_roundtrip() {
         // value 1, 8-byte BE -> 4-byte BE
         let out = reencode_ulong(&1u64.to_be_bytes(), 8, 4, BE).unwrap();
@@ -383,24 +320,6 @@ mod tests {
         // is exactly what that sentinel means.
         assert_eq!(narrow_info_field(0x1_0000_0000, 4), 0xFFFF_FFFF);
         assert_eq!(narrow_info_field(5_000_000_000, 4), 0xFFFF_FFFF);
-    }
-
-    #[test]
-    fn checked_narrow_to_width_matrix() {
-        // TO26b group 2: representable values pass through unchanged in
-        // either width; unrepresentable values fail instead of truncating.
-        for width in [4, 8] {
-            assert_eq!(checked_narrow_to_width(0, width), Some(0));
-            assert_eq!(checked_narrow_to_width(1, width), Some(1));
-            assert_eq!(checked_narrow_to_width(0xFFFF_FFFF, width), Some(0xFFFF_FFFF));
-        }
-        assert_eq!(checked_narrow_to_width(0x1_0000_0000, 8), Some(0x1_0000_0000));
-        assert_eq!(checked_narrow_to_width(u64::MAX, 8), Some(u64::MAX));
-        // A wide nonzero value that a narrow caller cannot represent —
-        // including one whose truncation would be CKR_OK — fails loudly.
-        assert_eq!(checked_narrow_to_width(0x1_0000_0000, 4), None);
-        assert_eq!(checked_narrow_to_width(0xDEAD_BEEF_0000_0000, 4), None);
-        assert_eq!(checked_narrow_to_width(u64::MAX, 4), None);
     }
 
     #[test]

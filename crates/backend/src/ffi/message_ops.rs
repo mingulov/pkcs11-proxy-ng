@@ -1364,19 +1364,11 @@ impl FfiBackend {
 
         let mut out_len: cryptoki_sys::CK_ULONG = 0;
 
-        if output_spec.length_pointer_null {
-            let output = if output_spec.buffer_present {
-                std::ptr::NonNull::<cryptoki_sys::CK_BYTE>::dangling().as_ptr()
-            } else {
-                std::ptr::null_mut()
-            };
-            let rv = CkRv(call(&mut ck_params, output, std::ptr::null_mut()) as u64);
-            if rv != CkRv::OK && rv != CkRv::BUFFER_TOO_SMALL {
-                return Err(rv);
-            }
-            return Ok((
-                CkOutputBufferResult { ck_rv: rv, returned_len: Some(0), value: None },
-                MessageParameter::GcmMessage(GcmMessageParams {
+        if !output_spec.buffer_present {
+            // Size query
+            let rv = call(&mut ck_params, std::ptr::null_mut(), &mut out_len);
+            if rv == CkRv::OK.0 as cryptoki_sys::CK_RV {
+                let result_gcm = GcmMessageParams {
                     iv: iv_buf,
                     iv_null_len: gcm.iv_null_len,
                     iv_fixed_bits: gcm.iv_fixed_bits,

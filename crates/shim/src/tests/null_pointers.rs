@@ -744,14 +744,14 @@ mod decrypt_null_e2e {
         let rv = unsafe { dispatch::general::c_initialize(std::ptr::null_mut()) };
         assert_eq!(rv, CKR_OK as CK_RV, "C_Initialize");
 
-        let mut slot_count = 0u64;
+        let mut slot_count: CK_ULONG = 0;
         let rv = unsafe {
             dispatch::general::c_get_slot_list(CK_FALSE, std::ptr::null_mut(), &mut slot_count)
         };
         assert_eq!(rv, CKR_OK as CK_RV, "GetSlotList count");
         assert!(slot_count > 0);
 
-        let mut slots = vec![0u64; slot_count as usize];
+        let mut slots = vec![0 as CK_SLOT_ID; slot_count as usize];
         let rv = unsafe {
             dispatch::general::c_get_slot_list(CK_FALSE, slots.as_mut_ptr(), &mut slot_count)
         };

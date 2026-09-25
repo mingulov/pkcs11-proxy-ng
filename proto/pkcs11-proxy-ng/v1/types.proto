@@ -1644,6 +1644,22 @@ message GetBackendInterfacesResponse {
   // emit it. Field number 2 is permanently reserved; do not reuse if
   // ever removed.
   optional MechanismRegistryPayload mechanism_registry = 2;
+  // Backend `sizeof(CK_ULONG)` in bytes (4 or 8) — ADR-0011 D2. The narrow
+  // client uses this to bridge ulong-typed attribute values/lengths between
+  // its own width and the backend's. Absent from older daemons; a client that
+  // sees it absent falls back to 8 with a warning (D9).
+  optional uint32 backend_ulong_size = 3;
+  // Backend `CK_ULONG` byte order — ADR-0011 D6: 1 = little-endian,
+  // 2 = big-endian (0/absent = unspecified). The client refuses at probe on a
+  // byte-order mismatch rather than silently mis-decoding ulong value bytes.
+  // All supported targets are little-endian; this guards a future BE backend.
+  optional uint32 backend_byte_order = 4;
+
+  // The backend's native sizeof(CK_ATTRIBUTE) — the stride of nested
+  // CKA_*_TEMPLATE byte lengths on the wire (ADR-0011 D2 extension).
+  // On LLP64 backends the packed stride (16) is not derivable from the
+  // ulong width; absent => client falls back to 3 * backend_ulong_size.
+  optional uint32 backend_attribute_stride = 5;
 }
 
 // Server-driven mechanism parameter registry payload. Carries the

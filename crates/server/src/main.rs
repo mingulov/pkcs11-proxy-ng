@@ -219,6 +219,7 @@ async fn listener_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
 /// This is a local-user transport (peer-cred records the connecting uid;
 /// broadening access is out of scope). The accept loop only starts later in
 /// `serve_*`, so no peer is processed before the socket exists.
+#[cfg(unix)]
 fn bind_unix_listener(path: &std::path::Path) -> Result<tokio::net::UnixListener, BoxError> {
     use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 
@@ -263,6 +264,14 @@ fn bind_unix_listener(path: &std::path::Path) -> Result<tokio::net::UnixListener
 /// when the configured socket's parent directory does not exist, rather than
 /// failing deep inside `bind()`.
 fn validate_runtime_listener_support(config: &config::DaemonConfig) -> Result<(), BoxError> {
+    // The Unix-socket transport (and its SO_PEERCRED authentication) does not
+    // exist on non-Unix hosts; a Windows daemon serves mTLS TCP only.
+    #[cfg(not(unix))]
+    if config.listener.local.is_some() {
+        return Err("[listener.local] (unix socket + peer-cred) is not supported on this OS; \
+             configure [listener.remote] with auth = 'mtls' instead"
+            .into());
+    }
     if let Some(ref uds) = config.listener.local
         && let Some(parent) = uds.path.parent()
         && !parent.as_os_str().is_empty()
@@ -683,6 +692,10 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
     // the current registry and logs an error rather than crashing.
     #[cfg(unix)]
     spawn_sighup_handler(registry_source.clone());
+    // No SIGHUP on non-Unix hosts: the registry stays as loaded at startup;
+    // a registry change requires a daemon restart there.
+    #[cfg(not(unix))]
+    let _ = &registry_source;
     // One OS-signal future fans out to every listener via a watch channel so
     // the TCP and Unix listeners shut down together on SIGINT/SIGTERM.
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -724,6 +737,9 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
 
     // Unix-domain-socket listener (peer-cred / none), when [listener.local] is
     // configured. No TLS: SO_PEERCRED is the local-IPC authentication (ADR-0005).
+    // Not compiled on non-Unix hosts — validate_runtime_listener_support has
+    // already rejected a [listener.local] config there.
+    #[cfg(unix)]
     if let Some(ref uds_cfg) = config.listener.local {
         let listener = bind_unix_listener(&uds_cfg.path)?;
         let router = apply_http2_keepalive(Server::builder(), &config)
@@ -766,6 +782,7 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
 
     // Best-effort: remove the Unix socket file on shutdown so a restart can
     // rebind cleanly (the path persists in the filesystem after the fd closes).
+    #[cfg(unix)]
     if let Some(ref uds_cfg) = config.listener.local {
         let _ = std::fs::remove_file(&uds_cfg.path);
     }

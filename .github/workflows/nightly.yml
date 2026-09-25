@@ -138,9 +138,8 @@ jobs:
   # Runs the real-binary width harness (ADR-0011): daemons + SoftHSM2 over
   # localhost TCP. The runner gets both the 64-bit SoftHSM2 package and the
   # extracted i386 library, so all four Linux legs run (32c/64b, 64/64,
-  # 64c/32b reverse bridge + D4, 32/32), plus the two NSS32 legs below
-  # (64c/32b + 32/32 against i386 softokn). The wine smokes skip cleanly
-  # here (no wine image on the runner) and remain host-run scripts.
+  # 64c/32b reverse bridge + D4, 32/32). The wine smokes skip cleanly here
+  # (no wine image on the runner) and remain host-run scripts.
   cross-width-live:
     name: Live cross-width matrix (SoftHSM2)
     runs-on: ubuntu-24.04
@@ -152,7 +151,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y protobuf-compiler softhsm2 \
-            gcc-multilib libc6-dev-i386 libnss3-tools
+            gcc-multilib libc6-dev-i386
           # The i386 SoftHSM2 library conflicts with the amd64 package on
           # the compat symlink; extract it beside the system instead.
           sudo dpkg --add-architecture i386
@@ -160,23 +159,11 @@ jobs:
           apt-get download libsofthsm2:i386
           sudo mkdir -p /opt/softhsm2-i386
           sudo dpkg -x libsofthsm2_*i386.deb /opt/softhsm2-i386/
-          # Second 32-bit provider leg (NSS i386): libsoftokn3 needs its
-          # i386 closure (libnspr4 for libnspr4/libplc4/libplds4,
-          # libsqlite3-0 for libsqlite3) extracted beside it, and the
-          # NSS32 script builds its fixture DB with certutil (above).
-          apt-get download libnss3:i386 libnspr4:i386 libsqlite3-0:i386
-          sudo mkdir -p /opt/nss32-i386
-          sudo dpkg -x libnss3_*i386.deb /opt/nss32-i386/
-          sudo dpkg -x libnspr4_*i386.deb /opt/nss32-i386/
-          sudo dpkg -x libsqlite3-0_*i386.deb /opt/nss32-i386/
 
       - name: Install stable toolchain with i686 target
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: i686-unknown-linux-gnu
-
-      - name: Build release daemon
-        run: cargo build --release -p pkcs11-proxy-ng
 
       - name: Run live tier
         run: scripts/run-test-tiers.sh live

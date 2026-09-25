@@ -9,7 +9,7 @@ use pkcs11_proxy_ng_types::{CkOutputBufferResult, CkParameterRoundtripResult};
 const MOCK_STATE_PREFIX: [u8; 2] = [0xC9, 0xEA];
 /// Mock signature length (a real token's length depends on the key; the
 /// mock keeps it fixed so two-call buffer tests stay simple).
-pub(super) const MOCK_SIGN_LEN: usize = 2;
+const MOCK_SIGN_LEN: usize = 2;
 pub(super) const MOCK_VERIFY_RECOVER_OUTPUT: [u8; 2] = [0xBE, 0xEF];
 pub(super) const MOCK_WRAP_OUTPUT: [u8; 4] = [0xDE, 0xAD, 0xBE, 0xEF];
 pub(super) const MOCK_ENCAPSULATE_OUTPUT: [u8; 8] =
@@ -115,9 +115,9 @@ impl MockBackend {
         self.begin_keyed_op_with_mechanism(session, mechanism, key, MultiPartOp::Sign)
     }
 
-    pub(super) fn sign_impl(&self, session: CkSessionHandle, data: &[u8]) -> CkResult<SecretBytes> {
+    pub(super) fn sign_impl(&self, session: CkSessionHandle, data: &[u8]) -> CkResult<Vec<u8>> {
         self.state.lock().unwrap().end_op(session, MultiPartOp::Sign)?;
-        Ok(super::echo::echo_bytes("sign", &[data], MOCK_SIGN_LEN).into())
+        Ok(super::echo::echo_bytes("sign", &[data], MOCK_SIGN_LEN))
     }
 
     pub(super) fn sign_update_impl(&self, session: CkSessionHandle) -> CkResult<()> {
@@ -126,7 +126,7 @@ impl MockBackend {
 
     pub(super) fn sign_final_impl(&self, session: CkSessionHandle) -> CkResult<SecretBytes> {
         self.state.lock().unwrap().end_op(session, MultiPartOp::Sign)?;
-        Ok(super::echo::echo_bytes("sign-final", &[], MOCK_SIGN_LEN).into())
+        Ok(super::echo::echo_bytes("sign-final", &[], MOCK_SIGN_LEN))
     }
 
     pub(super) fn verify_init_impl(
@@ -488,7 +488,7 @@ impl MockBackend {
         session: CkSessionHandle,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
-        let bytes = super::echo::echo_bytes("digest-final", &[], self.active_digest_len(session));
+        let bytes = super::echo::echo_bytes("digest-final", &[], MOCK_DIGEST_FINAL_LEN);
         self.exact_terminal_output(session, MultiPartOp::Digest, &bytes, spec)
     }
 
@@ -871,8 +871,7 @@ impl MockBackend {
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
-        self.require_open_session(session)?;
-        let bytes = Self::reverse_bytes(data);
+        let bytes = self.sign_impl(session, data)?;
         let output_result = CkOutputBufferResult::from_convenience_bytes(&bytes, output_spec);
         let mut param_result = Self::mock_param_roundtrip(parameter, param_out_spec);
         param_result.ck_rv = output_result.ck_rv;
@@ -921,8 +920,7 @@ impl MockBackend {
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
-        self.require_open_session(session)?;
-        let bytes = Self::reverse_bytes(data_part);
+        let bytes = self.sign_impl(session, data_part)?;
         let output_result = CkOutputBufferResult::from_convenience_bytes(&bytes, output_spec);
         let mut param_result = Self::mock_param_roundtrip(parameter, param_out_spec);
         param_result.ck_rv = output_result.ck_rv;

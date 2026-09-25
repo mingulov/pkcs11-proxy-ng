@@ -130,7 +130,7 @@ pub unsafe extern "C" fn c_derive_key(
             CkSessionHandle(h_session as u64),
             &mech,
             CkObjectHandle(h_base_key as u64),
-            template_opt,
+            &template,
         )) {
             Ok(result) => {
                 // Write HSM-mutated mechanism fields back into the caller's
@@ -182,7 +182,7 @@ pub unsafe extern "C" fn c_generate_key(
         }
         let mech = unsafe { read_mechanism(p_mechanism) };
         match with_client!(client => client.generate_key_with_mechanism_out(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             &mech,
             &template,
         )) {
@@ -280,11 +280,7 @@ pub unsafe extern "C" fn c_generate_random(
         if p_random_data.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
-        let random_len = match u32::try_from(ul_random_len) {
-            Ok(len) => len,
-            Err(_) => return rv_err(CkRv::DATA_LEN_RANGE),
-        };
-        match with_client!(client => client.generate_random(CkSessionHandle(h_session as u64), random_len))
+        match with_client!(client => client.generate_random(CkSessionHandle(h_session as u64), ul_random_len as u32))
         {
             Ok(data) => {
                 if data.len() != random_len as usize {

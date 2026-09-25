@@ -188,9 +188,9 @@ async fn generate_key_pair_impl(
                 ctx_mgr,
                 &ctx_id,
                 virtual_session,
-                CkObjectHandle(public_key.0),
+                CkObjectHandle(public_key.0 as u64),
                 public_is_token,
-                CkObjectHandle(private_key.0),
+                CkObjectHandle(private_key.0 as u64),
                 private_is_token,
             )
             .await;
@@ -322,7 +322,7 @@ async fn generate_key_impl(
                 ctx_mgr,
                 &ctx_id,
                 virtual_session,
-                CkObjectHandle(object.0),
+                CkObjectHandle(object.0 as u64),
                 is_token,
             )
             .await;
@@ -698,60 +698,10 @@ async fn virtualize_derived_key_handles(
 ) {
     for derived_key in derived_keys {
         if derived_key.key_handle != 0 {
-            // m-1: derived keys are always private secret keys. Each key is
-            // bound to the derive session per its own template (B2), so a
-            // session additional key evicts — mapping and privacy bit — when
-            // the owner session closes instead of lingering as a stale
-            // mapping that over-refuses with CKR_USER_NOT_LOGGED_IN.
-            derived_key.key_handle = register_session_object_handle(
+            derived_key.key_handle = register_object_handle(
                 ctx_mgr,
                 ctx_id,
-                virtual_session,
                 CkObjectHandle(derived_key.key_handle as u64),
-                template_declares_token_object(&derived_key.template),
-                Some(true),
-            )
-            .await;
-        }
-    }
-}
-
-/// Register + rewrite each non-zero OUT handle in SSL3/TLS/WTLS key-material
-/// `mechanism_out` (F6/D4). Without this the key-mat handles flow back native
-/// and unresolvable (`CKR_OBJECT_HANDLE_INVALID` on readback). Mirrors
-/// [`virtualize_sp800_108_additional_handles`]; `Ssl3KeyMatParams` covers the
-/// TLS12 layout as well.
-async fn virtualize_key_mat_out_handles(
-    ctx_mgr: &Arc<ContextManager>,
-    ctx_id: &ClientContextId,
-    virtual_session: VirtualHandle,
-    is_token_object: bool,
-    params: &mut CkMechanismParams,
-) {
-    let handles: &mut [&mut u64] = match params {
-        CkMechanismParams::Ssl3KeyMat(p) => &mut [
-            &mut p.client_mac_secret_handle,
-            &mut p.server_mac_secret_handle,
-            &mut p.client_key_handle,
-            &mut p.server_key_handle,
-        ],
-        CkMechanismParams::WtlsKeyMat(p) => &mut [&mut p.mac_secret_handle, &mut p.key_handle],
-        _ => return,
-    };
-    for handle in handles {
-        if **handle != 0 {
-            // m-1: key-mat OUT handles are always private secret keys. Key-mat
-            // params carry no per-key template, so the outputs inherit the
-            // derive template's token classification (like the primary
-            // derived key) and bind to the derive session (B2): a session
-            // output's mapping and privacy bit evict on owner-session close.
-            **handle = register_session_object_handle(
-                ctx_mgr,
-                ctx_id,
-                virtual_session,
-                CkObjectHandle(**handle),
-                is_token_object,
-                Some(true),
             )
             .await;
         }

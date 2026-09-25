@@ -3,120 +3,24 @@
 //! per-shape match, kept flat by design for auditability (see the
 //! contributor rules).
 
-use super::*;
-use crate::ffi::native_allocation::NativeAllocation;
+use pkcs11_proxy_ng_types::*;
 
-#[cfg(test)]
-mod native_owner_tests;
-#[cfg(test)]
-mod x3dh_tests;
+use super::*;
 
 /// Owns the `CK_MECHANISM` and any backing storage that `pParameter` points
 /// into.  The C struct fields reference heap allocations inside `_backing`,
 /// which stay at a stable address as long as `FfiMechanism` is alive.
 ///
-/// The outer struct itself is heap-allocated too (C3M uniform outer): the
-/// address handed to native code must stay valid not only for the call but
-/// for every later operation while the owner is retained, because backends
-/// may retain the Init root (proven by the retained-mechanism oracle on
-/// i686, where a frame-local outer is observably clobbered).  Readers get
-/// owned copies only, never a live reference into retained storage.
-///
 /// **Safety contract:** callers must not move the byte buffers inside
-/// `_backing` (no realloc) while the outer is in use.  Since all fields
-/// are private and we never push to a Vec after construction, this is
-/// upheld automatically.
+/// `_backing` (no realloc) while `ck_mechanism` is in use.  Since all fields
+/// are private except `ck_mechanism`, and we never push to a Vec after
+/// construction, this is upheld automatically.
 pub(crate) struct FfiMechanism {
-    outer: NativeAllocation<cryptoki_sys::CK_MECHANISM>,
+    pub ck_mechanism: cryptoki_sys::CK_MECHANISM,
     _backing: FfiParamBacking,
 }
 
 impl FfiMechanism {
-    /// Owned copy of the heap-allocated outer `CK_MECHANISM`.
-    ///
-    /// Copies only: no live `&CK_MECHANISM` into retained storage escapes,
-    /// per the [`NativeAllocation`] discipline.
-    pub(in crate::ffi) fn ck_mechanism(&self) -> cryptoki_sys::CK_MECHANISM {
-        // SAFETY: the outer is a valid initialized CK_MECHANISM owned by
-        // this allocation; the copy carries no provenance.
-        unsafe { self.outer.snapshot() }
-    }
-
-    /// Raw pointer to the heap-allocated outer for native entry.
-    ///
-    /// The address is stable for as long as this owner (and its session
-    /// family slot) is alive, across owner moves and later native calls.
-    pub(in crate::ffi) fn ck_mechanism_ptr(&self) -> *mut cryptoki_sys::CK_MECHANISM {
-        self.outer.root()
-    }
-
-    /// Exclusive access to the heap-allocated outer for native entry and
-    /// pre/post-call fixups (e.g. the message fallback NULL/empty
-    /// acknowledgement).
-    ///
-    /// Like [`NativeAllocation::root`], the caller must hold the lifecycle
-    /// read exclusion (`OrdinaryGuard`). The borrow is live across the
-    /// provider call itself — it is the native-call argument at the migrated
-    /// entry sites (e.g. `call_helpers::call_unit_with_mechanism`,
-    /// `call_init_with_mechanism`, `kem_ops::ffi_encapsulate_key`) — but
-    /// no borrow is retained afterwards: the heap address stays stable
-    /// while the owner (and its session family slot) is alive, so the
-    /// provider's later reads address stable storage with no Rust
-    /// borrow outstanding.
-    pub(in crate::ffi) fn ck_mechanism_mut(&mut self) -> &mut cryptoki_sys::CK_MECHANISM {
-        // SAFETY: owned allocation, valid initialized CK_MECHANISM, unique
-        // borrow of the owner; no other reference aliases this storage.
-        unsafe { &mut *self.outer.root() }
-    }
-    pub(in crate::ffi) fn validate_authenticated_inputs(
-        &self,
-        input: &CkMechanism,
-    ) -> CkResult<()> {
-        let valid = match (&self._backing, input.params.as_ref()) {
-            (FfiParamBacking::None, None) => true,
-            (FfiParamBacking::Bytes(bytes), Some(CkMechanismParams::Iv(iv))) => {
-                bytes.len() == iv.iv.len()
-            }
-            (
-                FfiParamBacking::Gostr3410KeyWrap(native, oid, ukm),
-                Some(CkMechanismParams::Gostr3410KeyWrap(input)),
-            ) => {
-                // SAFETY: backing is borrowed alive; the copy carries no provenance.
-                let native = unsafe { native.snapshot() };
-                let pointer_matches = |pointer: *mut u8, bytes: &[u8]| {
-                    if bytes.is_empty() {
-                        pointer.is_null()
-                    } else {
-                        std::ptr::eq(pointer, bytes.as_ptr())
-                    }
-                };
-                pointer_matches(native.pWrapOID, oid)
-                    && pointer_matches(native.pUKM, ukm)
-                    && native.ulWrapOIDLen as u64 == input.wrap_oid.len() as u64
-                    && native.ulUKMLen as u64 == input.ukm.len() as u64
-                    && native.hKey as u64 == input.key_handle
-                    && oid.as_slice() == input.wrap_oid.as_slice()
-                    && ukm.as_slice() == input.ukm.as_slice()
-            }
-            _ => false,
-        };
-        if valid { Ok(()) } else { Err(CkRv::DEVICE_ERROR) }
-    }
-
-    /// Read owned IV bytes only. Never read the native parameter structure as
-    /// bytes or return the typed input, which may contain remapped handles.
-    pub(in crate::ffi) fn authenticated_output(
-        &self,
-    ) -> CkResult<pkcs11_proxy_ng_proto::convert::authenticated::AuthenticatedOutput> {
-        use pkcs11_proxy_ng_proto::convert::authenticated::AuthenticatedOutput;
-        match &self._backing {
-            FfiParamBacking::None | FfiParamBacking::Gostr3410KeyWrap(..) => {
-                Ok(AuthenticatedOutput::Unchanged)
-            }
-            FfiParamBacking::Bytes(iv) => Ok(AuthenticatedOutput::Iv(iv.clone().into())),
-            _ => Err(CkRv::MECHANISM_PARAM_INVALID),
-        }
-    }
     /// Build an `FfiMechanism` from a parameter pointer, length, and backing.
     ///
     /// **SAFETY INVARIANT (callers must uphold):** `ptr` must point into the
@@ -132,14 +36,14 @@ impl FfiMechanism {
         len: usize,
         backing: FfiParamBacking,
     ) -> Self {
-        // The outer is heap-allocated (uniform outer): its address must
-        // survive the constructing frame for retained providers.
-        let outer = NativeAllocation::from_box(Box::new(cryptoki_sys::CK_MECHANISM {
-            mechanism: mech_type,
-            pParameter: ptr,
-            ulParameterLen: len as cryptoki_sys::CK_ULONG,
-        }));
-        Self { outer, _backing: backing }
+        Self {
+            ck_mechanism: cryptoki_sys::CK_MECHANISM {
+                mechanism: mech_type,
+                pParameter: ptr,
+                ulParameterLen: len as cryptoki_sys::CK_ULONG,
+            },
+            _backing: backing,
+        }
     }
 
     /// Build an `FfiMechanism` with no parameter (`pParameter = NULL`).
@@ -153,58 +57,38 @@ impl FfiMechanism {
     /// The caller passes a closure that constructs the matching
     /// `FfiParamBacking` variant from the same box; this keeps the
     /// box and the pointer-into-box tied together in one expression
-    /// and removes the `Box::into_raw` / `std::mem::size_of::<...>()`
-    /// boilerplate that repeated at 60+ sites in `mechanism_to_ffi`.
+    /// and removes the `&mut *boxed as *mut _ as *mut c_void` /
+    /// `std::mem::size_of::<...>()` boilerplate that repeated at 60+
+    /// sites in `mechanism_to_ffi`.
     ///
-    /// **Provenance (C3M.2, defect I1):** the raw root is projected from
-    /// the persistent [`NativeAllocation`] established by a single
-    /// `Box::into_raw`, never from a reborrow (`&mut *boxed`) of a box
-    /// that is subsequently moved into backing: that reborrow pattern
-    /// invalidates pointer provenance under Miri's borrow models as soon
-    /// as the box moves. Ownership transfers exactly once into backing,
-    /// so one allocation keeps one owner and one final `Drop`.
-    ///
-    /// **SAFETY INVARIANT:** `make_backing(a)` MUST move `a` into a
-    /// variant of `FfiParamBacking` so that the C struct's allocation
+    /// **SAFETY INVARIANT:** `make_backing(b)` MUST move `b` into a
+    /// variant of `FfiParamBacking` so that the C struct's pointer
     /// (and any pointers the struct itself holds into side-data) stay
-    /// live for as long as the returned `FfiMechanism`. The allocation
-    /// moves as a [`NativeAllocation`]: its raw root never reborrows, so
-    /// later owner moves cannot strand the stored `pParameter`.
+    /// live for as long as the returned `FfiMechanism`.
     fn from_box<T>(
         mech_type: cryptoki_sys::CK_MECHANISM_TYPE,
-        boxed: Box<T>,
-        make_backing: impl FnOnce(NativeAllocation<T>) -> FfiParamBacking,
+        mut boxed: Box<T>,
+        make_backing: impl FnOnce(Box<T>) -> FfiParamBacking,
     ) -> Self {
+        let ptr = &mut *boxed as *mut T as *mut std::ffi::c_void;
         let len = std::mem::size_of::<T>();
-        let allocation = NativeAllocation::from_box(boxed);
-        let ptr = allocation.root() as *mut std::ffi::c_void;
-        Self::with_param(mech_type, ptr, len, make_backing(allocation))
+        Self::with_param(mech_type, ptr, len, make_backing(boxed))
     }
 
     pub(in crate::ffi) fn output_params(&self) -> Option<CkMechanismParams> {
         match &self._backing {
             FfiParamBacking::Gcm(gcm, iv, aad) => {
-                // SAFETY: backing is borrowed alive; the copy carries no provenance.
-                let gcm = unsafe { gcm.snapshot() };
                 let iv_len = (gcm.ulIvLen as usize).min(iv.len());
                 let aad_len = (gcm.ulAADLen as usize).min(aad.len());
                 Some(CkMechanismParams::Gcm(GcmParams {
                     iv: iv[..iv_len].to_vec(),
                     iv_bits: gcm.ulIvBits as u64,
                     iv_buffer_len: iv.len() as u64,
-                    aad: aad[..aad_len].to_vec().into(),
+                    aad: aad[..aad_len].to_vec(),
                     tag_bits: gcm.ulTagBits as u64,
-                    // F3/D2: input pointers are provider-untouched, so the
-                    // post-call pointer class still reports the caller's.
-                    iv_null: gcm.pIv.is_null(),
-                    aad_null: gcm.pAAD.is_null(),
                 }))
             }
             FfiParamBacking::Tls12MasterKeyDerive(tls12, client_random, server_random, version) => {
-                // SAFETY: backing is borrowed alive; the copy carries no provenance.
-                let tls12 = unsafe { tls12.snapshot() };
-                // SAFETY: backing is borrowed alive; the copy carries no provenance.
-                let version = unsafe { version.snapshot() };
                 // CK_TLS12_MASTER_KEY_DERIVE_PARAMS.pVersion is OUT —
                 // the HSM writes the negotiated CK_VERSION here when
                 // pVersion is non-NULL. Surface the version_major /
@@ -213,8 +97,8 @@ impl FfiMechanism {
                 // fields are caller-supplied inputs).
                 Some(CkMechanismParams::Tls12MasterKeyDerive(Tls12MasterKeyDeriveParams {
                     random_info: pkcs11_proxy_ng_types::SslRandomData {
-                        client_random: client_random.clone().to_vec(),
-                        server_random: server_random.clone().to_vec(),
+                        client_random: client_random.clone(),
+                        server_random: server_random.clone(),
                     },
                     version_major: version.major as u32,
                     version_minor: version.minor as u32,
@@ -222,22 +106,16 @@ impl FfiMechanism {
                 }))
             }
             FfiParamBacking::WtlsMasterKeyDerive(wtls, client_random, server_random, version) => {
-                // SAFETY: backing is borrowed alive; the copy carries no provenance.
-                let wtls = unsafe { wtls.snapshot() };
                 Some(CkMechanismParams::WtlsMasterKeyDerive(WtlsMasterKeyDeriveParams {
                     digest_mechanism: wtls.DigestMechanism as u64,
                     random_info: WtlsRandomData {
-                        client_random: client_random.clone().to_vec(),
-                        server_random: server_random.clone().to_vec(),
+                        client_random: client_random.clone(),
+                        server_random: server_random.clone(),
                     },
                     version: version.first().copied().unwrap_or_default() as u32,
                 }))
             }
             FfiParamBacking::WtlsKeyMat(wtls, client_random, server_random, key_mat_out, iv) => {
-                // SAFETY: backing is borrowed alive; the copy carries no provenance.
-                let wtls = unsafe { wtls.snapshot() };
-                // SAFETY: backing is borrowed alive; the copy carries no provenance.
-                let key_mat_out = unsafe { key_mat_out.snapshot() };
                 let iv_len = (((wtls.ulIVSizeInBits as usize).saturating_add(7)) / 8).min(iv.len());
                 let output_iv =
                     if key_mat_out.pIV.is_null() { Vec::new() } else { iv[..iv_len].to_vec() };
@@ -249,8 +127,8 @@ impl FfiMechanism {
                     sequence_number: wtls.ulSequenceNumber as u64,
                     is_export: wtls.bIsExport != 0,
                     random_info: WtlsRandomData {
-                        client_random: client_random.clone().to_vec(),
-                        server_random: server_random.clone().to_vec(),
+                        client_random: client_random.clone(),
+                        server_random: server_random.clone(),
                     },
                     mac_secret_handle: key_mat_out.hMacSecret as u64,
                     key_handle: key_mat_out.hKey as u64,
@@ -265,10 +143,6 @@ impl FfiMechanism {
                 client_iv,
                 server_iv,
             ) => {
-                // SAFETY: backing is borrowed alive; the copy carries no provenance.
-                let ssl3 = unsafe { ssl3.snapshot() };
-                // SAFETY: backing is borrowed alive; the copy carries no provenance.
-                let key_mat_out = unsafe { key_mat_out.snapshot() };
                 let iv_len =
                     (((ssl3.ulIVSizeInBits as usize).saturating_add(7)) / 8).min(client_iv.len());
                 Some(CkMechanismParams::Ssl3KeyMat(Ssl3KeyMatParams {
@@ -277,8 +151,8 @@ impl FfiMechanism {
                     iv_size_bits: ssl3.ulIVSizeInBits as u64,
                     is_export: ssl3.bIsExport != 0,
                     random_info: pkcs11_proxy_ng_types::SslRandomData {
-                        client_random: client_random.clone().to_vec(),
-                        server_random: server_random.clone().to_vec(),
+                        client_random: client_random.clone(),
+                        server_random: server_random.clone(),
                     },
                     prf_hash_mechanism: 0,
                     client_mac_secret_handle: key_mat_out.hClientMacSecret as u64,
@@ -286,14 +160,14 @@ impl FfiMechanism {
                     client_key_handle: key_mat_out.hClientKey as u64,
                     server_key_handle: key_mat_out.hServerKey as u64,
                     client_iv: if key_mat_out.pIVClient.is_null() {
-                        Vec::new().into()
+                        Vec::new()
                     } else {
-                        client_iv[..iv_len].to_vec().into()
+                        client_iv[..iv_len].to_vec()
                     },
                     server_iv: if key_mat_out.pIVServer.is_null() {
-                        Vec::new().into()
+                        Vec::new()
                     } else {
-                        server_iv[..iv_len.min(server_iv.len())].to_vec().into()
+                        server_iv[..iv_len.min(server_iv.len())].to_vec()
                     },
                 }))
             }
@@ -305,10 +179,6 @@ impl FfiMechanism {
                 client_iv,
                 server_iv,
             ) => {
-                // SAFETY: backing is borrowed alive; the copy carries no provenance.
-                let tls12 = unsafe { tls12.snapshot() };
-                // SAFETY: backing is borrowed alive; the copy carries no provenance.
-                let key_mat_out = unsafe { key_mat_out.snapshot() };
                 let iv_len =
                     (((tls12.ulIVSizeInBits as usize).saturating_add(7)) / 8).min(client_iv.len());
                 Some(CkMechanismParams::Ssl3KeyMat(Ssl3KeyMatParams {
@@ -317,8 +187,8 @@ impl FfiMechanism {
                     iv_size_bits: tls12.ulIVSizeInBits as u64,
                     is_export: tls12.bIsExport != 0,
                     random_info: pkcs11_proxy_ng_types::SslRandomData {
-                        client_random: client_random.clone().to_vec(),
-                        server_random: server_random.clone().to_vec(),
+                        client_random: client_random.clone(),
+                        server_random: server_random.clone(),
                     },
                     prf_hash_mechanism: tls12.prfHashMechanism as u64,
                     client_mac_secret_handle: key_mat_out.hClientMacSecret as u64,
@@ -326,22 +196,20 @@ impl FfiMechanism {
                     client_key_handle: key_mat_out.hClientKey as u64,
                     server_key_handle: key_mat_out.hServerKey as u64,
                     client_iv: if key_mat_out.pIVClient.is_null() {
-                        Vec::new().into()
+                        Vec::new()
                     } else {
-                        client_iv[..iv_len].to_vec().into()
+                        client_iv[..iv_len].to_vec()
                     },
                     server_iv: if key_mat_out.pIVServer.is_null() {
-                        Vec::new().into()
+                        Vec::new()
                     } else {
-                        server_iv[..iv_len.min(server_iv.len())].to_vec().into()
+                        server_iv[..iv_len.min(server_iv.len())].to_vec()
                     },
                 }))
             }
             FfiParamBacking::Sp800108Kdf(sp800, data_params, data_buffers, derived_keys)
                 if !derived_keys.is_empty() =>
             {
-                // SAFETY: backing is borrowed alive; the copy carries no provenance.
-                let sp800 = unsafe { sp800.snapshot() };
                 Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
                     prf_type: sp800.prfType as u64,
                     data_params: sp800_108_data_params_from_ffi(data_params, data_buffers),
@@ -355,8 +223,6 @@ impl FfiMechanism {
                 iv,
                 derived_keys,
             ) if !derived_keys.is_empty() => {
-                // SAFETY: backing is borrowed alive; the copy carries no provenance.
-                let sp800 = unsafe { sp800.snapshot() };
                 Some(CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
                     prf_type: sp800.prfType as u64,
                     data_params: sp800_108_data_params_from_ffi(data_params, data_buffers),
@@ -364,20 +230,17 @@ impl FfiMechanism {
                     additional_derived_keys: derived_keys.output_keys(),
                 }))
             }
-            FfiParamBacking::Pbe(pbe, init_vector, _password, _salt) => {
-                // SAFETY: backing is borrowed alive; the copy carries no provenance.
-                let pbe = unsafe { pbe.snapshot() };
-                if pbe.pInitVector.is_null() {
-                    return None;
-                }
+            FfiParamBacking::Pbe(pbe, init_vector, _password, _salt)
+                if !pbe.pInitVector.is_null() =>
+            {
                 // CK_PBE_PARAMS.pInitVector is OUT — the HSM writes the generated
                 // 8-byte IV here during PBE key generation. Surface ONLY the IV;
                 // the password and salt are caller-supplied secrets/inputs and
                 // must never be echoed back over the wire (AGENTS.md §4).
                 Some(CkMechanismParams::Pbe(PbeParams {
-                    init_vector: init_vector.clone().into(),
-                    password: Vec::new().into(),
-                    salt: Vec::new().into(),
+                    init_vector: init_vector.clone(),
+                    password: Vec::new(),
+                    salt: Vec::new(),
                     iteration: pbe.ulIteration as u64,
                 }))
             }
@@ -388,15 +251,12 @@ impl FfiMechanism {
 
 fn sp800_108_data_params_from_ffi(
     params: &[cryptoki_sys::CK_PRF_DATA_PARAM],
-    buffers: &[Zeroizing<Vec<u8>>],
+    buffers: &[Vec<u8>],
 ) -> Vec<PrfDataParam> {
     params
         .iter()
         .zip(buffers.iter())
-        .map(|(param, value)| PrfDataParam {
-            type_: param.type_ as u64,
-            value: value.clone().into(),
-        })
+        .map(|(param, value)| PrfDataParam { type_: param.type_ as u64, value: value.clone() })
         .collect()
 }
 
@@ -466,322 +326,185 @@ impl FfiSp800108DerivedKeys {
 
 /// Backing storage variants.  Each variant holds the C param struct and any
 /// heap buffers whose addresses are embedded in that struct.
-///
-/// Every byte buffer is `Zeroizing` (ADR-0013 §5): the retained-owner design
-/// embeds raw pointers into these buffers, so they cannot hold `SecretBytes`
-/// (closure-scoped access cannot serve a stored pointer). `SecretBytes` is
-/// transferred here with `expose`-and-copy at each construction site; the
-/// copy is wiped when the owner drops. Safe-metadata buffers (IVs, nonces)
-/// are wiped too — uniform and fail-closed, at the cost of one memset per
-/// native call.
 #[allow(dead_code)]
 enum FfiParamBacking {
     /// Parameterless mechanism — no backing needed.
     None,
     /// Raw byte buffer (IV params, raw params, MacGeneral ulong, etc.)
-    Bytes(Zeroizing<Vec<u8>>),
+    Bytes(Vec<u8>),
     /// Scalar-only C struct stored as a pinned Box (PSS, RC5, RC2MacGeneral, etc.)
-    Pss(NativeAllocation<cryptoki_sys::CK_RSA_PKCS_PSS_PARAMS>),
-    Rc5(NativeAllocation<cryptoki_sys::CK_RC5_PARAMS>),
-    Rc5MacGeneral(NativeAllocation<cryptoki_sys::CK_RC5_MAC_GENERAL_PARAMS>),
-    Rc2MacGeneral(NativeAllocation<cryptoki_sys::CK_RC2_MAC_GENERAL_PARAMS>),
-    Xeddsa(NativeAllocation<cryptoki_sys::CK_XEDDSA_PARAMS>),
-    TlsMac(NativeAllocation<cryptoki_sys::CK_TLS_MAC_PARAMS>),
-    Rc2Cbc(NativeAllocation<cryptoki_sys::CK_RC2_CBC_PARAMS>),
-    AesCtr(NativeAllocation<cryptoki_sys::CK_AES_CTR_PARAMS>),
-    CamelliaCtr(NativeAllocation<cryptoki_sys::CK_CAMELLIA_CTR_PARAMS>),
+    Pss(Box<cryptoki_sys::CK_RSA_PKCS_PSS_PARAMS>),
+    Rc5(Box<cryptoki_sys::CK_RC5_PARAMS>),
+    Rc5MacGeneral(Box<cryptoki_sys::CK_RC5_MAC_GENERAL_PARAMS>),
+    Rc2MacGeneral(Box<cryptoki_sys::CK_RC2_MAC_GENERAL_PARAMS>),
+    Xeddsa(Box<cryptoki_sys::CK_XEDDSA_PARAMS>),
+    TlsMac(Box<cryptoki_sys::CK_TLS_MAC_PARAMS>),
+    Rc2Cbc(Box<cryptoki_sys::CK_RC2_CBC_PARAMS>),
+    AesCtr(Box<cryptoki_sys::CK_AES_CTR_PARAMS>),
+    CamelliaCtr(Box<cryptoki_sys::CK_CAMELLIA_CTR_PARAMS>),
     /// Struct with pointer fields — struct + borrowed buffers.
-    Oaep(NativeAllocation<cryptoki_sys::CK_RSA_PKCS_OAEP_PARAMS>, Zeroizing<Vec<u8>>),
-    Gcm(NativeAllocation<cryptoki_sys::CK_GCM_PARAMS>, Zeroizing<Vec<u8>>, Zeroizing<Vec<u8>>),
-    Ccm(NativeAllocation<cryptoki_sys::CK_CCM_PARAMS>, Zeroizing<Vec<u8>>, Zeroizing<Vec<u8>>),
-    Ecdh1(
-        NativeAllocation<cryptoki_sys::CK_ECDH1_DERIVE_PARAMS>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-    ),
-    Rc5Cbc(NativeAllocation<cryptoki_sys::CK_RC5_CBC_PARAMS>, Zeroizing<Vec<u8>>),
-    Eddsa(NativeAllocation<cryptoki_sys::CK_EDDSA_PARAMS>, Zeroizing<Vec<u8>>),
-    Hkdf(NativeAllocation<cryptoki_sys::CK_HKDF_PARAMS>, Zeroizing<Vec<u8>>, Zeroizing<Vec<u8>>),
-    KeyDerivationString(
-        NativeAllocation<cryptoki_sys::CK_KEY_DERIVATION_STRING_DATA>,
-        Zeroizing<Vec<u8>>,
-    ),
-    AesCbcEncryptData(
-        NativeAllocation<cryptoki_sys::CK_AES_CBC_ENCRYPT_DATA_PARAMS>,
-        Zeroizing<Vec<u8>>,
-    ),
-    DesCbcEncryptData(
-        NativeAllocation<cryptoki_sys::CK_DES_CBC_ENCRYPT_DATA_PARAMS>,
-        Zeroizing<Vec<u8>>,
-    ),
-    AriaCbcEncryptData(
-        NativeAllocation<cryptoki_sys::CK_ARIA_CBC_ENCRYPT_DATA_PARAMS>,
-        Zeroizing<Vec<u8>>,
-    ),
-    CamelliaCbcEncryptData(
-        NativeAllocation<cryptoki_sys::CK_CAMELLIA_CBC_ENCRYPT_DATA_PARAMS>,
-        Zeroizing<Vec<u8>>,
-    ),
-    SeedCbcEncryptData(
-        NativeAllocation<cryptoki_sys::CK_SEED_CBC_ENCRYPT_DATA_PARAMS>,
-        Zeroizing<Vec<u8>>,
-    ),
-    GcmWrap(
-        NativeAllocation<cryptoki_sys::CK_GCM_WRAP_PARAMS>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-    ),
-    CcmWrap(
-        NativeAllocation<cryptoki_sys::CK_CCM_WRAP_PARAMS>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-    ),
-    ChaCha20(
-        NativeAllocation<cryptoki_sys::CK_CHACHA20_PARAMS>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-    ),
-    Salsa20(
-        NativeAllocation<cryptoki_sys::CK_SALSA20_PARAMS>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-    ),
+    Oaep(Box<cryptoki_sys::CK_RSA_PKCS_OAEP_PARAMS>, Vec<u8>),
+    Gcm(Box<cryptoki_sys::CK_GCM_PARAMS>, Vec<u8>, Vec<u8>),
+    Ccm(Box<cryptoki_sys::CK_CCM_PARAMS>, Vec<u8>, Vec<u8>),
+    Ecdh1(Box<cryptoki_sys::CK_ECDH1_DERIVE_PARAMS>, Vec<u8>, Vec<u8>),
+    Rc5Cbc(Box<cryptoki_sys::CK_RC5_CBC_PARAMS>, Vec<u8>),
+    Eddsa(Box<cryptoki_sys::CK_EDDSA_PARAMS>, Vec<u8>),
+    Hkdf(Box<cryptoki_sys::CK_HKDF_PARAMS>, Vec<u8>, Vec<u8>),
+    KeyDerivationString(Box<cryptoki_sys::CK_KEY_DERIVATION_STRING_DATA>, Vec<u8>),
+    AesCbcEncryptData(Box<cryptoki_sys::CK_AES_CBC_ENCRYPT_DATA_PARAMS>, Vec<u8>),
+    DesCbcEncryptData(Box<cryptoki_sys::CK_DES_CBC_ENCRYPT_DATA_PARAMS>, Vec<u8>),
+    AriaCbcEncryptData(Box<cryptoki_sys::CK_ARIA_CBC_ENCRYPT_DATA_PARAMS>, Vec<u8>),
+    CamelliaCbcEncryptData(Box<cryptoki_sys::CK_CAMELLIA_CBC_ENCRYPT_DATA_PARAMS>, Vec<u8>),
+    SeedCbcEncryptData(Box<cryptoki_sys::CK_SEED_CBC_ENCRYPT_DATA_PARAMS>, Vec<u8>),
+    GcmWrap(Box<cryptoki_sys::CK_GCM_WRAP_PARAMS>, Vec<u8>, Vec<u8>),
+    CcmWrap(Box<cryptoki_sys::CK_CCM_WRAP_PARAMS>, Vec<u8>, Vec<u8>),
+    ChaCha20(Box<cryptoki_sys::CK_CHACHA20_PARAMS>, Vec<u8>, Vec<u8>),
+    Salsa20(Box<cryptoki_sys::CK_SALSA20_PARAMS>, Vec<u8>, Vec<u8>),
     Salsa20ChaCha20Poly1305(
-        NativeAllocation<cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_PARAMS>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
+        Box<cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_PARAMS>,
+        Vec<u8>,
+        Vec<u8>,
     ),
-    RsaAesKeyWrap(
-        NativeAllocation<FfiRsaAesKeyWrapParams>,
-        NativeAllocation<cryptoki_sys::CK_RSA_PKCS_OAEP_PARAMS>,
-        Zeroizing<Vec<u8>>,
-    ),
-    SignAdditionalContext(NativeAllocation<FfiSignAdditionalContext>, Zeroizing<Vec<u8>>),
-    HashSignAdditionalContext(NativeAllocation<FfiHashSignAdditionalContext>, Zeroizing<Vec<u8>>),
-    Kmac(NativeAllocation<FfiKmacParams>, Zeroizing<Vec<u8>>),
-    MuGen(NativeAllocation<FfiMuGenParams>, Zeroizing<Vec<u8>>, Zeroizing<Vec<u8>>),
+    RsaAesKeyWrap(Box<FfiRsaAesKeyWrapParams>, Box<cryptoki_sys::CK_RSA_PKCS_OAEP_PARAMS>, Vec<u8>),
+    SignAdditionalContext(Box<FfiSignAdditionalContext>, Vec<u8>),
+    HashSignAdditionalContext(Box<FfiHashSignAdditionalContext>, Vec<u8>),
+    Kmac(Box<FfiKmacParams>, Vec<u8>),
+    MuGen(Box<FfiMuGenParams>, Vec<u8>, Vec<u8>),
     // Last field is the caller password — wiped on drop (E1).
-    Pkcs5Pbkd2(
-        NativeAllocation<cryptoki_sys::CK_PKCS5_PBKD2_PARAMS2>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-    ),
+    Pkcs5Pbkd2(Box<cryptoki_sys::CK_PKCS5_PBKD2_PARAMS2>, Vec<u8>, Vec<u8>, Zeroizing<Vec<u8>>),
     Tls12MasterKeyDerive(
-        NativeAllocation<cryptoki_sys::CK_TLS12_MASTER_KEY_DERIVE_PARAMS>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-        NativeAllocation<cryptoki_sys::CK_VERSION>,
+        Box<cryptoki_sys::CK_TLS12_MASTER_KEY_DERIVE_PARAMS>,
+        Vec<u8>,
+        Vec<u8>,
+        Box<cryptoki_sys::CK_VERSION>,
     ),
     TlsPrf(
-        NativeAllocation<cryptoki_sys::CK_TLS_PRF_PARAMS>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-        NativeAllocation<cryptoki_sys::CK_ULONG>,
+        Box<cryptoki_sys::CK_TLS_PRF_PARAMS>,
+        Vec<u8>,
+        Vec<u8>,
+        Vec<u8>,
+        Box<cryptoki_sys::CK_ULONG>,
     ),
-    TlsKdf(
-        NativeAllocation<cryptoki_sys::CK_TLS_KDF_PARAMS>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-    ),
+    TlsKdf(Box<cryptoki_sys::CK_TLS_KDF_PARAMS>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>),
     Ssl3MasterKeyDerive(
-        NativeAllocation<cryptoki_sys::CK_SSL3_MASTER_KEY_DERIVE_PARAMS>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-        NativeAllocation<cryptoki_sys::CK_VERSION>,
+        Box<cryptoki_sys::CK_SSL3_MASTER_KEY_DERIVE_PARAMS>,
+        Vec<u8>,
+        Vec<u8>,
+        Box<cryptoki_sys::CK_VERSION>,
     ),
     Tls12ExtendedMasterKeyDerive(
-        NativeAllocation<cryptoki_sys::CK_TLS12_EXTENDED_MASTER_KEY_DERIVE_PARAMS>,
-        Zeroizing<Vec<u8>>,
-        NativeAllocation<cryptoki_sys::CK_VERSION>,
+        Box<cryptoki_sys::CK_TLS12_EXTENDED_MASTER_KEY_DERIVE_PARAMS>,
+        Vec<u8>,
+        Box<cryptoki_sys::CK_VERSION>,
     ),
     Ssl3KeyMat(
-        NativeAllocation<cryptoki_sys::CK_SSL3_KEY_MAT_PARAMS>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-        NativeAllocation<cryptoki_sys::CK_SSL3_KEY_MAT_OUT>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
+        Box<cryptoki_sys::CK_SSL3_KEY_MAT_PARAMS>,
+        Vec<u8>,
+        Vec<u8>,
+        Box<cryptoki_sys::CK_SSL3_KEY_MAT_OUT>,
+        Vec<u8>,
+        Vec<u8>,
     ),
     Tls12KeyMat(
-        NativeAllocation<cryptoki_sys::CK_TLS12_KEY_MAT_PARAMS>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-        NativeAllocation<cryptoki_sys::CK_SSL3_KEY_MAT_OUT>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
+        Box<cryptoki_sys::CK_TLS12_KEY_MAT_PARAMS>,
+        Vec<u8>,
+        Vec<u8>,
+        Box<cryptoki_sys::CK_SSL3_KEY_MAT_OUT>,
+        Vec<u8>,
+        Vec<u8>,
     ),
     // Middle field is the caller password — wiped on drop (E1).
-    Pbe(
-        NativeAllocation<cryptoki_sys::CK_PBE_PARAMS>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-    ),
-    EcdhAesKeyWrap(NativeAllocation<cryptoki_sys::CK_ECDH_AES_KEY_WRAP_PARAMS>, Zeroizing<Vec<u8>>),
-    Ecdh2Derive(
-        NativeAllocation<cryptoki_sys::CK_ECDH2_DERIVE_PARAMS>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-    ),
-    EcmqvDerive(
-        NativeAllocation<cryptoki_sys::CK_ECMQV_DERIVE_PARAMS>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-    ),
-    X942Dh1Derive(
-        NativeAllocation<cryptoki_sys::CK_X9_42_DH1_DERIVE_PARAMS>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-    ),
-    X942Dh2Derive(
-        NativeAllocation<cryptoki_sys::CK_X9_42_DH2_DERIVE_PARAMS>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-    ),
-    X942MqvDerive(
-        NativeAllocation<cryptoki_sys::CK_X9_42_MQV_DERIVE_PARAMS>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-    ),
-    Gostr3410Derive(
-        NativeAllocation<cryptoki_sys::CK_GOSTR3410_DERIVE_PARAMS>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-    ),
-    Gostr3410KeyWrap(
-        NativeAllocation<cryptoki_sys::CK_GOSTR3410_KEY_WRAP_PARAMS>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-    ),
-    KeyWrapSetOaep(NativeAllocation<cryptoki_sys::CK_KEY_WRAP_SET_OAEP_PARAMS>, Zeroizing<Vec<u8>>),
-    KeaDerive(
-        NativeAllocation<cryptoki_sys::CK_KEA_DERIVE_PARAMS>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-    ),
-    IkePrfDerive(
-        NativeAllocation<cryptoki_sys::CK_IKE_PRF_DERIVE_PARAMS>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-    ),
-    Ike1PrfDerive(
-        NativeAllocation<cryptoki_sys::CK_IKE1_PRF_DERIVE_PARAMS>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-    ),
-    Ike1ExtendedDerive(
-        NativeAllocation<cryptoki_sys::CK_IKE1_EXTENDED_DERIVE_PARAMS>,
-        Zeroizing<Vec<u8>>,
-    ),
-    Ike2PrfPlusDerive(
-        NativeAllocation<cryptoki_sys::CK_IKE2_PRF_PLUS_DERIVE_PARAMS>,
-        Zeroizing<Vec<u8>>,
-    ),
+    Pbe(Box<cryptoki_sys::CK_PBE_PARAMS>, Vec<u8>, Zeroizing<Vec<u8>>, Vec<u8>),
+    EcdhAesKeyWrap(Box<cryptoki_sys::CK_ECDH_AES_KEY_WRAP_PARAMS>, Vec<u8>),
+    Ecdh2Derive(Box<cryptoki_sys::CK_ECDH2_DERIVE_PARAMS>, Vec<u8>, Vec<u8>, Vec<u8>),
+    EcmqvDerive(Box<cryptoki_sys::CK_ECMQV_DERIVE_PARAMS>, Vec<u8>, Vec<u8>, Vec<u8>),
+    X942Dh1Derive(Box<cryptoki_sys::CK_X9_42_DH1_DERIVE_PARAMS>, Vec<u8>, Vec<u8>),
+    X942Dh2Derive(Box<cryptoki_sys::CK_X9_42_DH2_DERIVE_PARAMS>, Vec<u8>, Vec<u8>, Vec<u8>),
+    X942MqvDerive(Box<cryptoki_sys::CK_X9_42_MQV_DERIVE_PARAMS>, Vec<u8>, Vec<u8>, Vec<u8>),
+    Gostr3410Derive(Box<cryptoki_sys::CK_GOSTR3410_DERIVE_PARAMS>, Vec<u8>, Vec<u8>),
+    Gostr3410KeyWrap(Box<cryptoki_sys::CK_GOSTR3410_KEY_WRAP_PARAMS>, Vec<u8>, Vec<u8>),
+    KeyWrapSetOaep(Box<cryptoki_sys::CK_KEY_WRAP_SET_OAEP_PARAMS>, Vec<u8>),
+    KeaDerive(Box<cryptoki_sys::CK_KEA_DERIVE_PARAMS>, Vec<u8>, Vec<u8>, Vec<u8>),
+    IkePrfDerive(Box<cryptoki_sys::CK_IKE_PRF_DERIVE_PARAMS>, Vec<u8>, Vec<u8>),
+    Ike1PrfDerive(Box<cryptoki_sys::CK_IKE1_PRF_DERIVE_PARAMS>, Vec<u8>, Vec<u8>),
+    Ike1ExtendedDerive(Box<cryptoki_sys::CK_IKE1_EXTENDED_DERIVE_PARAMS>, Vec<u8>),
+    Ike2PrfPlusDerive(Box<cryptoki_sys::CK_IKE2_PRF_PLUS_DERIVE_PARAMS>, Vec<u8>),
     WtlsMasterKeyDerive(
-        NativeAllocation<cryptoki_sys::CK_WTLS_MASTER_KEY_DERIVE_PARAMS>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
+        Box<cryptoki_sys::CK_WTLS_MASTER_KEY_DERIVE_PARAMS>,
+        Vec<u8>,
+        Vec<u8>,
+        Vec<u8>,
     ),
     WtlsPrf(
-        NativeAllocation<cryptoki_sys::CK_WTLS_PRF_PARAMS>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-        NativeAllocation<cryptoki_sys::CK_ULONG>,
+        Box<cryptoki_sys::CK_WTLS_PRF_PARAMS>,
+        Vec<u8>,
+        Vec<u8>,
+        Vec<u8>,
+        Box<cryptoki_sys::CK_ULONG>,
     ),
     WtlsKeyMat(
-        NativeAllocation<cryptoki_sys::CK_WTLS_KEY_MAT_PARAMS>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-        NativeAllocation<cryptoki_sys::CK_WTLS_KEY_MAT_OUT>,
-        Zeroizing<Vec<u8>>,
+        Box<cryptoki_sys::CK_WTLS_KEY_MAT_PARAMS>,
+        Vec<u8>,
+        Vec<u8>,
+        Box<cryptoki_sys::CK_WTLS_KEY_MAT_OUT>,
+        Vec<u8>,
     ),
     Sp800108Kdf(
-        NativeAllocation<cryptoki_sys::CK_SP800_108_KDF_PARAMS>,
+        Box<cryptoki_sys::CK_SP800_108_KDF_PARAMS>,
         Vec<cryptoki_sys::CK_PRF_DATA_PARAM>,
-        Vec<Zeroizing<Vec<u8>>>,
+        Vec<Vec<u8>>,
         FfiSp800108DerivedKeys,
     ),
     Sp800108FeedbackKdf(
-        NativeAllocation<cryptoki_sys::CK_SP800_108_FEEDBACK_KDF_PARAMS>,
+        Box<cryptoki_sys::CK_SP800_108_FEEDBACK_KDF_PARAMS>,
         Vec<cryptoki_sys::CK_PRF_DATA_PARAM>,
-        Vec<Zeroizing<Vec<u8>>>,
-        Zeroizing<Vec<u8>>,
+        Vec<Vec<u8>>,
+        Vec<u8>,
         FfiSp800108DerivedKeys,
     ),
-    X3dhInitiate(
-        NativeAllocation<cryptoki_sys::CK_X3DH_INITIATE_PARAMS>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-    ),
-    X3dhRespond(
-        NativeAllocation<cryptoki_sys::CK_X3DH_RESPOND_PARAMS>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-    ),
-    X2RatchetInitialize(
-        NativeAllocation<cryptoki_sys::CK_X2RATCHET_INITIALIZE_PARAMS>,
-        Zeroizing<Vec<u8>>,
-    ),
-    X2RatchetRespond(
-        NativeAllocation<cryptoki_sys::CK_X2RATCHET_RESPOND_PARAMS>,
-        Zeroizing<Vec<u8>>,
-    ),
-    Otp(
-        NativeAllocation<cryptoki_sys::CK_OTP_PARAMS>,
-        Vec<cryptoki_sys::CK_OTP_PARAM>,
-        Vec<Zeroizing<Vec<u8>>>,
-    ),
+    X3dhInitiate(Box<cryptoki_sys::CK_X3DH_INITIATE_PARAMS>, Vec<u8>, Vec<u8>),
+    X3dhRespond(Box<cryptoki_sys::CK_X3DH_RESPOND_PARAMS>, Vec<u8>, Vec<u8>, Vec<u8>),
+    X2RatchetInitialize(Box<cryptoki_sys::CK_X2RATCHET_INITIALIZE_PARAMS>, Vec<u8>),
+    X2RatchetRespond(Box<cryptoki_sys::CK_X2RATCHET_RESPOND_PARAMS>, Vec<u8>),
+    Otp(Box<cryptoki_sys::CK_OTP_PARAMS>, Vec<cryptoki_sys::CK_OTP_PARAM>, Vec<Vec<u8>>),
     // Last field keeps the inner mechanism's own parameter backing alive for as
     // long as the KIP params reference its C struct (L8 — replaces a mem::forget
     // that permanently leaked the inner backing).
     Kip(
-        NativeAllocation<cryptoki_sys::CK_KIP_PARAMS>,
-        NativeAllocation<cryptoki_sys::CK_MECHANISM>,
-        Zeroizing<Vec<u8>>,
-        NativeAllocation<FfiParamBacking>,
+        Box<cryptoki_sys::CK_KIP_PARAMS>,
+        Box<cryptoki_sys::CK_MECHANISM>,
+        Vec<u8>,
+        Box<FfiParamBacking>,
     ),
     CmsSig(
-        NativeAllocation<cryptoki_sys::CK_CMS_SIG_PARAMS>,
-        NativeAllocation<cryptoki_sys::CK_MECHANISM>,
-        NativeAllocation<cryptoki_sys::CK_MECHANISM>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
+        Box<cryptoki_sys::CK_CMS_SIG_PARAMS>,
+        Box<cryptoki_sys::CK_MECHANISM>,
+        Box<cryptoki_sys::CK_MECHANISM>,
+        Vec<u8>,
+        Vec<u8>,
+        Vec<u8>,
         // Inner signing/digest mechanism backings, kept alive (L8).
-        NativeAllocation<FfiParamBacking>,
-        NativeAllocation<FfiParamBacking>,
+        Box<FfiParamBacking>,
+        Box<FfiParamBacking>,
     ),
     SkipjackPrivateWrap(
-        NativeAllocation<cryptoki_sys::CK_SKIPJACK_PRIVATE_WRAP_PARAMS>,
+        Box<cryptoki_sys::CK_SKIPJACK_PRIVATE_WRAP_PARAMS>,
         Zeroizing<Vec<u8>>, // password — wiped on drop (E1)
-        Zeroizing<Vec<u8>>, // public_data
-        Zeroizing<Vec<u8>>, // random_a
-        Zeroizing<Vec<u8>>, // prime_p
-        Zeroizing<Vec<u8>>, // base_g
-        Zeroizing<Vec<u8>>, // subprime_q
+        Vec<u8>,            // public_data
+        Vec<u8>,            // random_a
+        Vec<u8>,            // prime_p
+        Vec<u8>,            // base_g
+        Vec<u8>,            // subprime_q
     ),
     SkipjackRelayx(
-        NativeAllocation<cryptoki_sys::CK_SKIPJACK_RELAYX_PARAMS>,
-        Zeroizing<Vec<u8>>, // old_wrapped_x
+        Box<cryptoki_sys::CK_SKIPJACK_RELAYX_PARAMS>,
+        Vec<u8>,            // old_wrapped_x
         Zeroizing<Vec<u8>>, // old_password — wiped on drop (E1)
-        Zeroizing<Vec<u8>>, // old_public_data
-        Zeroizing<Vec<u8>>, // old_random_a
+        Vec<u8>,            // old_public_data
+        Vec<u8>,            // old_random_a
         Zeroizing<Vec<u8>>, // new_password — wiped on drop (E1)
-        Zeroizing<Vec<u8>>, // new_public_data
-        Zeroizing<Vec<u8>>, // new_random_a
+        Vec<u8>,            // new_public_data
+        Vec<u8>,            // new_random_a
     ),
 }
 
@@ -864,7 +587,7 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
     match params {
         // -- IV: raw bytes as the parameter ---------------------------------
         CkMechanismParams::Iv(iv_params) => {
-            let mut buf = Zeroizing::new(iv_params.iv.clone());
+            let mut buf = iv_params.iv.clone();
             let ptr = buf.as_mut_ptr() as *mut std::ffi::c_void;
             let len = buf.len();
             Ok(FfiMechanism::with_param(mech_type, ptr, len, FfiParamBacking::Bytes(buf)))
@@ -882,13 +605,9 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- RSA-OAEP: struct with pointer to source_data -------------------
         CkMechanismParams::RsaPkcsOaep(p) => {
-            let mut source_data = p.source_data.expose(|b| Zeroizing::new(b.to_vec()));
-            // F3/D2: only a caller-NULL source materializes NULL; an empty
-            // non-NULL source keeps a (dangling) non-NULL pointer with len 0.
-            let (src_ptr, src_len) = if p.source_null {
+            let mut source_data = p.source_data.clone();
+            let (src_ptr, src_len) = if source_data.is_empty() {
                 (std::ptr::null_mut(), 0)
-            } else if source_data.is_empty() {
-                (std::ptr::NonNull::<u8>::dangling().as_ptr() as *mut std::ffi::c_void, 0)
             } else {
                 (source_data.as_mut_ptr() as *mut std::ffi::c_void, source_data.len())
             };
@@ -906,17 +625,13 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
         CkMechanismParams::Gcm(p) => {
             let iv_capacity = gcm_iv_capacity(p)?;
             let input_iv_len = p.iv.len();
-            let mut iv = Zeroizing::new(p.iv.clone());
+            let mut iv = p.iv.clone();
             if iv_capacity > iv.len() {
                 iv.resize(iv_capacity, 0);
             }
-            let mut aad = p.aad.expose(|b| Zeroizing::new(b.to_vec()));
-            // F3/D2: only caller-NULL fields materialize NULL; empty non-NULL
-            // fields keep a (dangling) non-NULL pointer with len 0, mirroring
-            // message_ops::message_pointer. (After the capacity resize above,
-            // `as_mut_ptr` on an empty vec is exactly that dangling pointer.)
-            let iv_ptr = if p.iv_null { std::ptr::null_mut() } else { iv.as_mut_ptr() };
-            let aad_ptr = if p.aad_null { std::ptr::null_mut() } else { aad.as_mut_ptr() };
+            let mut aad = p.aad.clone();
+            let iv_ptr = if iv.is_empty() { std::ptr::null_mut() } else { iv.as_mut_ptr() };
+            let aad_ptr = if aad.is_empty() { std::ptr::null_mut() } else { aad.as_mut_ptr() };
             let gcm = Box::new(cryptoki_sys::CK_GCM_PARAMS {
                 pIv: iv_ptr,
                 ulIvLen: input_iv_len as cryptoki_sys::CK_ULONG,
@@ -930,8 +645,8 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- CCM: struct with pointers to nonce and AAD ---------------------
         CkMechanismParams::Ccm(p) => {
-            let mut nonce = Zeroizing::new(p.nonce.clone());
-            let mut aad = p.aad.expose(|b| Zeroizing::new(b.to_vec()));
+            let mut nonce = p.nonce.clone();
+            let mut aad = p.aad.clone();
             let nonce_ptr =
                 if nonce.is_empty() { std::ptr::null_mut() } else { nonce.as_mut_ptr() };
             let aad_ptr = if aad.is_empty() { std::ptr::null_mut() } else { aad.as_mut_ptr() };
@@ -948,8 +663,8 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- ECDH1 Derive: struct with pointers to shared + public data -----
         CkMechanismParams::Ecdh1Derive(p) => {
-            let mut shared = p.shared_data.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut public = Zeroizing::new(p.public_data.clone());
+            let mut shared = p.shared_data.clone();
+            let mut public = p.public_data.clone();
             let shared_ptr =
                 if shared.is_empty() { std::ptr::null_mut() } else { shared.as_mut_ptr() };
             let public_ptr =
@@ -1004,7 +719,7 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- RC5-CBC: scalars + pointer to IV -------------------------------
         CkMechanismParams::Rc5Cbc(p) => {
-            let mut iv_buf = Zeroizing::new(p.iv.clone());
+            let mut iv_buf = p.iv.clone();
             let iv_ptr = if iv_buf.is_empty() { std::ptr::null_mut() } else { iv_buf.as_mut_ptr() };
             let rc5 = Box::new(cryptoki_sys::CK_RC5_CBC_PARAMS {
                 ulWordsize: narrow_wire_ulong(p.word_size)?,
@@ -1057,7 +772,7 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- CBC encrypt data variants (fixed IV + pointer to data) ---------
         CkMechanismParams::AesCbcEncryptData(p) => {
-            let mut data = p.data.expose(|b| Zeroizing::new(b.to_vec()));
+            let mut data = p.data.clone();
             let data_ptr = if data.is_empty() { std::ptr::null_mut() } else { data.as_mut_ptr() };
             let mut iv = [0u8; 16];
             let copy_len = p.iv.len().min(16);
@@ -1073,7 +788,7 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
         }
 
         CkMechanismParams::DesCbcEncryptData(p) => {
-            let mut data = p.data.expose(|b| Zeroizing::new(b.to_vec()));
+            let mut data = p.data.clone();
             let data_ptr = if data.is_empty() { std::ptr::null_mut() } else { data.as_mut_ptr() };
             let mut iv = [0u8; 8];
             let copy_len = p.iv.len().min(8);
@@ -1089,7 +804,7 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
         }
 
         CkMechanismParams::AriaCbcEncryptData(p) => {
-            let mut data = p.data.expose(|b| Zeroizing::new(b.to_vec()));
+            let mut data = p.data.clone();
             let data_ptr = if data.is_empty() { std::ptr::null_mut() } else { data.as_mut_ptr() };
             let mut iv = [0u8; 16];
             let copy_len = p.iv.len().min(16);
@@ -1105,7 +820,7 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
         }
 
         CkMechanismParams::CamelliaCbcEncryptData(p) => {
-            let mut data = p.data.expose(|b| Zeroizing::new(b.to_vec()));
+            let mut data = p.data.clone();
             let data_ptr = if data.is_empty() { std::ptr::null_mut() } else { data.as_mut_ptr() };
             let mut iv = [0u8; 16];
             let copy_len = p.iv.len().min(16);
@@ -1121,7 +836,7 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
         }
 
         CkMechanismParams::SeedCbcEncryptData(p) => {
-            let mut data = p.data.expose(|b| Zeroizing::new(b.to_vec()));
+            let mut data = p.data.clone();
             let data_ptr = if data.is_empty() { std::ptr::null_mut() } else { data.as_mut_ptr() };
             let mut iv = [0u8; 16];
             let copy_len = p.iv.len().min(16);
@@ -1138,8 +853,8 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- HKDF: struct with pointers to salt and info --------------------
         CkMechanismParams::Hkdf(p) => {
-            let mut salt = p.salt.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut info = p.info.expose(|b| Zeroizing::new(b.to_vec()));
+            let mut salt = p.salt.clone();
+            let mut info = p.info.clone();
             let salt_ptr = if salt.is_empty() { std::ptr::null_mut() } else { salt.as_mut_ptr() };
             let info_ptr = if info.is_empty() { std::ptr::null_mut() } else { info.as_mut_ptr() };
             let hkdf = Box::new(cryptoki_sys::CK_HKDF_PARAMS {
@@ -1158,7 +873,7 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- EdDSA: struct with pointer to context data ---------------------
         CkMechanismParams::Eddsa(p) => {
-            let mut ctx = p.context_data.expose(|b| Zeroizing::new(b.to_vec()));
+            let mut ctx = p.context_data.clone();
             let ctx_ptr = if ctx.is_empty() { std::ptr::null_mut() } else { ctx.as_mut_ptr() };
             let eddsa = Box::new(cryptoki_sys::CK_EDDSA_PARAMS {
                 phFlag: if p.ph_flag { cryptoki_sys::CK_TRUE } else { cryptoki_sys::CK_FALSE },
@@ -1170,8 +885,8 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- GCM Wrap: struct with pointers to IV and AAD -------------------
         CkMechanismParams::GcmWrap(p) => {
-            let mut iv = Zeroizing::new(p.iv.clone());
-            let mut aad = p.aad.expose(|b| Zeroizing::new(b.to_vec()));
+            let mut iv = p.iv.clone();
+            let mut aad = p.aad.clone();
             let iv_ptr = if iv.is_empty() { std::ptr::null_mut() } else { iv.as_mut_ptr() };
             let aad_ptr = if aad.is_empty() { std::ptr::null_mut() } else { aad.as_mut_ptr() };
             let gw = Box::new(cryptoki_sys::CK_GCM_WRAP_PARAMS {
@@ -1188,8 +903,8 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- CCM Wrap: struct with pointers to nonce and AAD ----------------
         CkMechanismParams::CcmWrap(p) => {
-            let mut nonce = Zeroizing::new(p.nonce.clone());
-            let mut aad = p.aad.expose(|b| Zeroizing::new(b.to_vec()));
+            let mut nonce = p.nonce.clone();
+            let mut aad = p.aad.clone();
             let nonce_ptr =
                 if nonce.is_empty() { std::ptr::null_mut() } else { nonce.as_mut_ptr() };
             let aad_ptr = if aad.is_empty() { std::ptr::null_mut() } else { aad.as_mut_ptr() };
@@ -1208,8 +923,8 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- ChaCha20: struct with pointers to block counter and nonce ------
         CkMechanismParams::ChaCha20(p) => {
-            let mut bc = Zeroizing::new(p.block_counter.clone());
-            let mut nonce = Zeroizing::new(p.nonce.clone());
+            let mut bc = p.block_counter.clone();
+            let mut nonce = p.nonce.clone();
             let bc_ptr = if bc.is_empty() { std::ptr::null_mut() } else { bc.as_mut_ptr() };
             let nonce_ptr =
                 if nonce.is_empty() { std::ptr::null_mut() } else { nonce.as_mut_ptr() };
@@ -1224,8 +939,8 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- Salsa20: struct with pointers to block counter and nonce -------
         CkMechanismParams::Salsa20(p) => {
-            let mut bc = Zeroizing::new(p.block_counter.clone());
-            let mut nonce = Zeroizing::new(p.nonce.clone());
+            let mut bc = p.block_counter.clone();
+            let mut nonce = p.nonce.clone();
             let bc_ptr = if bc.is_empty() { std::ptr::null_mut() } else { bc.as_mut_ptr() };
             let nonce_ptr =
                 if nonce.is_empty() { std::ptr::null_mut() } else { nonce.as_mut_ptr() };
@@ -1239,8 +954,8 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- Salsa20/ChaCha20-Poly1305: struct with pointers to nonce + AAD -
         CkMechanismParams::Salsa20ChaCha20Poly1305(p) => {
-            let mut nonce = Zeroizing::new(p.nonce.clone());
-            let mut aad = p.aad.expose(|b| Zeroizing::new(b.to_vec()));
+            let mut nonce = p.nonce.clone();
+            let mut aad = p.aad.clone();
             let nonce_ptr =
                 if nonce.is_empty() { std::ptr::null_mut() } else { nonce.as_mut_ptr() };
             let aad_ptr = if aad.is_empty() { std::ptr::null_mut() } else { aad.as_mut_ptr() };
@@ -1261,12 +976,7 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
             let mut buf = val.to_ne_bytes().to_vec();
             let ptr = buf.as_mut_ptr() as *mut std::ffi::c_void;
             let len = buf.len();
-            Ok(FfiMechanism::with_param(
-                mech_type,
-                ptr,
-                len,
-                FfiParamBacking::Bytes(Zeroizing::new(buf)),
-            ))
+            Ok(FfiMechanism::with_param(mech_type, ptr, len, FfiParamBacking::Bytes(buf)))
         }
 
         // -- Extract: single CK_ULONG bit position --------------------------
@@ -1275,17 +985,12 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
             let mut buf = val.to_ne_bytes().to_vec();
             let ptr = buf.as_mut_ptr() as *mut std::ffi::c_void;
             let len = buf.len();
-            Ok(FfiMechanism::with_param(
-                mech_type,
-                ptr,
-                len,
-                FfiParamBacking::Bytes(Zeroizing::new(buf)),
-            ))
+            Ok(FfiMechanism::with_param(mech_type, ptr, len, FfiParamBacking::Bytes(buf)))
         }
 
         // -- KeyDerivationStringData: struct with pointer to data -----------
         CkMechanismParams::KeyDerivationString(p) => {
-            let mut data = p.data.expose(|b| Zeroizing::new(b.to_vec()));
+            let mut data = p.data.clone();
             let data_ptr = if data.is_empty() { std::ptr::null_mut() } else { data.as_mut_ptr() };
             let kds = Box::new(cryptoki_sys::CK_KEY_DERIVATION_STRING_DATA {
                 pData: data_ptr,
@@ -1299,36 +1004,32 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
         // -- RSA-AES key wrap: nested OAEP params pointer ---------------------
         CkMechanismParams::RsaAesKeyWrap(p) => {
             // Build the nested OAEP params first (same pattern as the Oaep arm)
-            let mut source_data = p.oaep_params.source_data.expose(|b| Zeroizing::new(b.to_vec()));
+            let mut source_data = p.oaep_params.source_data.clone();
             let (src_ptr, src_len) = if source_data.is_empty() {
                 (std::ptr::null_mut(), 0)
             } else {
                 (source_data.as_mut_ptr() as *mut std::ffi::c_void, source_data.len())
             };
-            let oaep =
-                NativeAllocation::from_box(Box::new(cryptoki_sys::CK_RSA_PKCS_OAEP_PARAMS {
-                    hashAlg: narrow_wire_ulong(p.oaep_params.hash_alg.0)?,
-                    mgf: narrow_wire_ulong(p.oaep_params.mgf)?,
-                    source: narrow_wire_ulong(p.oaep_params.source)?,
-                    pSourceData: src_ptr,
-                    ulSourceDataLen: src_len as cryptoki_sys::CK_ULONG,
-                }));
-            let oaep_ptr = oaep.root() as *mut cryptoki_sys::CK_RSA_PKCS_OAEP_PARAMS;
+            let mut oaep = Box::new(cryptoki_sys::CK_RSA_PKCS_OAEP_PARAMS {
+                hashAlg: narrow_wire_ulong(p.oaep_params.hash_alg.0)?,
+                mgf: narrow_wire_ulong(p.oaep_params.mgf)?,
+                source: narrow_wire_ulong(p.oaep_params.source)?,
+                pSourceData: src_ptr,
+                ulSourceDataLen: src_len as cryptoki_sys::CK_ULONG,
+            });
+            let oaep_ptr = &mut *oaep as *mut cryptoki_sys::CK_RSA_PKCS_OAEP_PARAMS;
 
-            let wrap = Box::new(FfiRsaAesKeyWrapParams {
+            let mut wrap = Box::new(FfiRsaAesKeyWrapParams {
                 ul_aes_key_bits: narrow_wire_ulong(p.aes_key_bits)?,
                 p_oaep_params: oaep_ptr,
             });
-            // C3M.2: project the outer root from the persistent allocation,
-            // never from a reborrow of the moved box.
-            let wrap_allocation = NativeAllocation::from_box(wrap);
-            let ptr = wrap_allocation.root() as *mut std::ffi::c_void;
+            let ptr = &mut *wrap as *mut FfiRsaAesKeyWrapParams as *mut std::ffi::c_void;
             let len = std::mem::size_of::<FfiRsaAesKeyWrapParams>();
             Ok(FfiMechanism::with_param(
                 mech_type,
                 ptr,
                 len,
-                FfiParamBacking::RsaAesKeyWrap(wrap_allocation, oaep, source_data),
+                FfiParamBacking::RsaAesKeyWrap(wrap, oaep, source_data),
             ))
         }
 
@@ -1338,19 +1039,14 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
             let mut buf = val.to_ne_bytes().to_vec();
             let ptr = buf.as_mut_ptr() as *mut std::ffi::c_void;
             let len = buf.len();
-            Ok(FfiMechanism::with_param(
-                mech_type,
-                ptr,
-                len,
-                FfiParamBacking::Bytes(Zeroizing::new(buf)),
-            ))
+            Ok(FfiMechanism::with_param(mech_type, ptr, len, FfiParamBacking::Bytes(buf)))
         }
 
         // -- SignAdditionalContext: CK_SIGN_ADDITIONAL_CONTEXT (hash == 0) or
         //    CK_HASH_SIGN_ADDITIONAL_CONTEXT (hash != 0, generic CKM_HASH_*_DSA).
         //    `from_box` sets the exact ulParameterLen from the chosen struct.
         CkMechanismParams::SignAdditionalContext(p) => {
-            let mut ctx = p.context.expose(|b| Zeroizing::new(b.to_vec()));
+            let mut ctx = p.context.clone();
             let ctx_ptr = if ctx.is_empty() { std::ptr::null_mut() } else { ctx.as_mut_ptr() };
             let hedge = narrow_wire_ulong(p.hedge_variant)?;
             let ctx_len = ctx.len() as cryptoki_sys::CK_ULONG;
@@ -1378,8 +1074,7 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- KMAC: CK_KMAC_PARAMS -----------------------------------------
         CkMechanismParams::Kmac(p) => {
-            let mut customization_string =
-                p.customization_string.expose(|b| Zeroizing::new(b.to_vec()));
+            let mut customization_string = p.customization_string.clone();
             let customization_ptr = if customization_string.is_empty() {
                 std::ptr::null_mut()
             } else {
@@ -1398,8 +1093,8 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- ML-DSA external mu generation: CK_MU_GEN_PARAMS ---------------
         CkMechanismParams::MuGen(p) => {
-            let mut tr = p.tr.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut ctx = p.context.expose(|b| Zeroizing::new(b.to_vec()));
+            let mut tr = p.tr.clone();
+            let mut ctx = p.context.clone();
             let tr_ptr = if tr.is_empty() { std::ptr::null_mut() } else { tr.as_mut_ptr() };
             let ctx_ptr = if ctx.is_empty() { std::ptr::null_mut() } else { ctx.as_mut_ptr() };
             let mu_gen = Box::new(FfiMuGenParams {
@@ -1425,14 +1120,14 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
         // These require nested CK_MECHANISM pointers, complex multi-struct
         // -- TLS 1.2 Master Key Derive: nested SSL3_RANDOM_DATA + pVersion ---
         CkMechanismParams::Tls12MasterKeyDerive(p) => {
-            let mut client_random = Zeroizing::new(p.random_info.client_random.clone());
-            let mut server_random = Zeroizing::new(p.random_info.server_random.clone());
+            let mut client_random = p.random_info.client_random.clone();
+            let mut server_random = p.random_info.server_random.clone();
             // pVersion = NULL for DH variants (version is 0.0 sentinel)
             let version_is_null = p.version_major == 0 && p.version_minor == 0;
-            let version = NativeAllocation::from_box(Box::new(cryptoki_sys::CK_VERSION {
+            let mut version = Box::new(cryptoki_sys::CK_VERSION {
                 major: p.version_major as cryptoki_sys::CK_BYTE,
                 minor: p.version_minor as cryptoki_sys::CK_BYTE,
-            }));
+            });
             let client_ptr = if client_random.is_empty() {
                 std::ptr::null_mut()
             } else {
@@ -1444,7 +1139,7 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
                 server_random.as_mut_ptr()
             };
             let version_ptr =
-                if version_is_null { std::ptr::null_mut() } else { version.root() as *mut _ };
+                if version_is_null { std::ptr::null_mut() } else { &mut *version as *mut _ };
             let tls12 = Box::new(cryptoki_sys::CK_TLS12_MASTER_KEY_DERIVE_PARAMS {
                 RandomInfo: cryptoki_sys::CK_SSL3_RANDOM_DATA {
                     pClientRandom: client_ptr,
@@ -1462,9 +1157,9 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- PKCS#5 PBKDF2: struct with 3 embedded pointers ----------------
         CkMechanismParams::Pkcs5Pbkd2(p) => {
-            let mut salt = p.salt_source_data.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut prf_data = p.prf_data.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut password = p.password.expose(|b| Zeroizing::new(b.to_vec()));
+            let mut salt = p.salt_source_data.clone();
+            let mut prf_data = p.prf_data.clone();
+            let mut password = Zeroizing::new(p.password.clone());
             let salt_ptr =
                 if salt.is_empty() { std::ptr::null_mut() } else { salt.as_mut_ptr() as *mut _ };
             let prf_ptr = if prf_data.is_empty() {
@@ -1492,10 +1187,10 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- TLS PRF: struct with 4 pointers (seed, label, output, outputLen) --
         CkMechanismParams::TlsPrf(p) => {
-            let mut seed = p.seed.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut label = p.label.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut output = Zeroizing::new(vec![0u8; p.output_len as usize]);
-            let output_len = NativeAllocation::from_box(Box::new(narrow_wire_ulong(p.output_len)?));
+            let mut seed = p.seed.clone();
+            let mut label = p.label.clone();
+            let mut output = vec![0u8; p.output_len as usize];
+            let mut output_len = Box::new(narrow_wire_ulong(p.output_len)?);
             let seed_ptr = if seed.is_empty() { std::ptr::null_mut() } else { seed.as_mut_ptr() };
             let label_ptr =
                 if label.is_empty() { std::ptr::null_mut() } else { label.as_mut_ptr() };
@@ -1507,7 +1202,7 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
                 pLabel: label_ptr,
                 ulLabelLen: label.len() as cryptoki_sys::CK_ULONG,
                 pOutput: output_ptr,
-                pulOutputLen: output_len.root() as *mut _,
+                pulOutputLen: &mut *output_len as *mut _,
             });
             Ok(FfiMechanism::from_box(mech_type, tls, |b| {
                 FfiParamBacking::TlsPrf(b, seed, label, output, output_len)
@@ -1516,10 +1211,10 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- TLS KDF: PRF mechanism + label + nested SSL3_RANDOM_DATA + context --
         CkMechanismParams::TlsKdf(p) => {
-            let mut label = p.label.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut client_random = Zeroizing::new(p.random_info.client_random.clone());
-            let mut server_random = Zeroizing::new(p.random_info.server_random.clone());
-            let mut context_data = p.context_data.expose(|b| Zeroizing::new(b.to_vec()));
+            let mut label = p.label.clone();
+            let mut client_random = p.random_info.client_random.clone();
+            let mut server_random = p.random_info.server_random.clone();
+            let mut context_data = p.context_data.clone();
             let label_ptr =
                 if label.is_empty() { std::ptr::null_mut() } else { label.as_mut_ptr() };
             let client_ptr = if client_random.is_empty() {
@@ -1557,13 +1252,13 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- SSL3 Master Key Derive: nested SSL3_RANDOM_DATA + pVersion ----------
         CkMechanismParams::Ssl3MasterKeyDerive(p) => {
-            let mut client_random = Zeroizing::new(p.random_info.client_random.clone());
-            let mut server_random = Zeroizing::new(p.random_info.server_random.clone());
+            let mut client_random = p.random_info.client_random.clone();
+            let mut server_random = p.random_info.server_random.clone();
             let version_is_null = p.version_major == 0 && p.version_minor == 0;
-            let version = NativeAllocation::from_box(Box::new(cryptoki_sys::CK_VERSION {
+            let mut version = Box::new(cryptoki_sys::CK_VERSION {
                 major: p.version_major as cryptoki_sys::CK_BYTE,
                 minor: p.version_minor as cryptoki_sys::CK_BYTE,
-            }));
+            });
             let client_ptr = if client_random.is_empty() {
                 std::ptr::null_mut()
             } else {
@@ -1584,7 +1279,7 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
                 pVersion: if version_is_null {
                     std::ptr::null_mut()
                 } else {
-                    version.root() as *mut _
+                    &mut *version as *mut _
                 },
             });
             Ok(FfiMechanism::from_box(mech_type, ssl3, |b| {
@@ -1594,19 +1289,19 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- TLS 1.2 Extended Master Key Derive: PRF + session hash + pVersion ----
         CkMechanismParams::Tls12ExtendedMasterKeyDerive(p) => {
-            let mut session_hash = Zeroizing::new(p.session_hash.clone());
+            let mut session_hash = p.session_hash.clone();
             let version_is_null = p.version_major == 0 && p.version_minor == 0;
-            let version = NativeAllocation::from_box(Box::new(cryptoki_sys::CK_VERSION {
+            let mut version = Box::new(cryptoki_sys::CK_VERSION {
                 major: p.version_major as cryptoki_sys::CK_BYTE,
                 minor: p.version_minor as cryptoki_sys::CK_BYTE,
-            }));
+            });
             let hash_ptr = if session_hash.is_empty() {
                 std::ptr::null_mut()
             } else {
                 session_hash.as_mut_ptr()
             };
             let version_ptr =
-                if version_is_null { std::ptr::null_mut() } else { version.root() as *mut _ };
+                if version_is_null { std::ptr::null_mut() } else { &mut *version as *mut _ };
             let ext = Box::new(cryptoki_sys::CK_TLS12_EXTENDED_MASTER_KEY_DERIVE_PARAMS {
                 prfHashMechanism: narrow_wire_ulong(p.prf_hash_mechanism)?,
                 pSessionHash: hash_ptr,
@@ -1620,8 +1315,8 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- SSL3/TLS Key Mat: nested random data + output key material -----------
         CkMechanismParams::Ssl3KeyMat(p) => {
-            let mut client_random = Zeroizing::new(p.random_info.client_random.clone());
-            let mut server_random = Zeroizing::new(p.random_info.server_random.clone());
+            let mut client_random = p.random_info.client_random.clone();
+            let mut server_random = p.random_info.server_random.clone();
             let client_ptr = if client_random.is_empty() {
                 std::ptr::null_mut()
             } else {
@@ -1634,16 +1329,16 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
             };
             let iv_bytes = ((p.iv_size_bits as usize).saturating_add(7)) / 8;
             let mut iv_client = if p.client_iv.is_empty() {
-                Zeroizing::new(vec![0u8; iv_bytes])
+                vec![0u8; iv_bytes]
             } else {
-                let mut iv = p.client_iv.expose(|b| Zeroizing::new(b.to_vec()));
+                let mut iv = p.client_iv.clone();
                 iv.resize(iv_bytes, 0);
                 iv
             };
             let mut iv_server = if p.server_iv.is_empty() {
-                Zeroizing::new(vec![0u8; iv_bytes])
+                vec![0u8; iv_bytes]
             } else {
-                let mut iv = p.server_iv.expose(|b| Zeroizing::new(b.to_vec()));
+                let mut iv = p.server_iv.clone();
                 iv.resize(iv_bytes, 0);
                 iv
             };
@@ -1651,15 +1346,14 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
                 if iv_client.is_empty() { std::ptr::null_mut() } else { iv_client.as_mut_ptr() };
             let iv_server_ptr =
                 if iv_server.is_empty() { std::ptr::null_mut() } else { iv_server.as_mut_ptr() };
-            let key_mat_out =
-                NativeAllocation::from_box(Box::new(cryptoki_sys::CK_SSL3_KEY_MAT_OUT {
-                    hClientMacSecret: narrow_wire_ulong(p.client_mac_secret_handle)?,
-                    hServerMacSecret: narrow_wire_ulong(p.server_mac_secret_handle)?,
-                    hClientKey: narrow_wire_ulong(p.client_key_handle)?,
-                    hServerKey: narrow_wire_ulong(p.server_key_handle)?,
-                    pIVClient: iv_client_ptr,
-                    pIVServer: iv_server_ptr,
-                }));
+            let mut key_mat_out = Box::new(cryptoki_sys::CK_SSL3_KEY_MAT_OUT {
+                hClientMacSecret: narrow_wire_ulong(p.client_mac_secret_handle)?,
+                hServerMacSecret: narrow_wire_ulong(p.server_mac_secret_handle)?,
+                hClientKey: narrow_wire_ulong(p.client_key_handle)?,
+                hServerKey: narrow_wire_ulong(p.server_key_handle)?,
+                pIVClient: iv_client_ptr,
+                pIVServer: iv_server_ptr,
+            });
             // Decide whether to use SSL3 or TLS12 key mat based on prf_hash_mechanism:
             // if prf_hash_mechanism == 0, use CK_SSL3_KEY_MAT_PARAMS; else TLS12.
             if p.prf_hash_mechanism == 0 {
@@ -1678,7 +1372,7 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
                         pServerRandom: server_ptr,
                         ulServerRandomLen: server_random.len() as cryptoki_sys::CK_ULONG,
                     },
-                    pReturnedKeyMaterial: key_mat_out.root() as *mut _,
+                    pReturnedKeyMaterial: &mut *key_mat_out as *mut _,
                 });
                 Ok(FfiMechanism::from_box(mech_type, km, |b| {
                     FfiParamBacking::Ssl3KeyMat(
@@ -1707,7 +1401,7 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
                         pServerRandom: server_ptr,
                         ulServerRandomLen: server_random.len() as cryptoki_sys::CK_ULONG,
                     },
-                    pReturnedKeyMaterial: key_mat_out.root() as *mut _,
+                    pReturnedKeyMaterial: &mut *key_mat_out as *mut _,
                     prfHashMechanism: narrow_wire_ulong(p.prf_hash_mechanism)?,
                 });
                 Ok(FfiMechanism::from_box(mech_type, km, |b| {
@@ -1725,9 +1419,9 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- PBE: struct with 3 pointers (init_vector, password, salt) -----------
         CkMechanismParams::Pbe(p) => {
-            let mut init_vector = p.init_vector.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut password = p.password.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut salt = p.salt.expose(|b| Zeroizing::new(b.to_vec()));
+            let mut init_vector = p.init_vector.clone();
+            let mut password = Zeroizing::new(p.password.clone());
+            let mut salt = p.salt.clone();
             let iv_ptr = if init_vector.is_empty() {
                 std::ptr::null_mut()
             } else {
@@ -1751,7 +1445,7 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- ECDH-AES Key Wrap: struct with 1 pointer ---------------------------
         CkMechanismParams::EcdhAesKeyWrap(p) => {
-            let mut shared = p.shared_data.expose(|b| Zeroizing::new(b.to_vec()));
+            let mut shared = p.shared_data.clone();
             let shared_ptr =
                 if shared.is_empty() { std::ptr::null_mut() } else { shared.as_mut_ptr() };
             let ew = Box::new(cryptoki_sys::CK_ECDH_AES_KEY_WRAP_PARAMS {
@@ -1767,9 +1461,9 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- ECDH2 Derive: struct with 3 pointers -------------------------------
         CkMechanismParams::Ecdh2Derive(p) => {
-            let mut shared = p.shared_data.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut public = Zeroizing::new(p.public_data.clone());
-            let mut public2 = Zeroizing::new(p.public_data2.clone());
+            let mut shared = p.shared_data.clone();
+            let mut public = p.public_data.clone();
+            let mut public2 = p.public_data2.clone();
             let shared_ptr =
                 if shared.is_empty() { std::ptr::null_mut() } else { shared.as_mut_ptr() };
             let public_ptr =
@@ -1794,9 +1488,9 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- ECMQV Derive: struct with 3 pointers + handle ---------------------
         CkMechanismParams::EcmqvDerive(p) => {
-            let mut shared = p.shared_data.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut public = Zeroizing::new(p.public_data.clone());
-            let mut public2 = Zeroizing::new(p.public_data2.clone());
+            let mut shared = p.shared_data.clone();
+            let mut public = p.public_data.clone();
+            let mut public2 = p.public_data2.clone();
             let shared_ptr =
                 if shared.is_empty() { std::ptr::null_mut() } else { shared.as_mut_ptr() };
             let public_ptr =
@@ -1822,8 +1516,8 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- X9.42 DH1 Derive: struct with 2 pointers ---------------------------
         CkMechanismParams::X942Dh1Derive(p) => {
-            let mut other_info = p.other_info.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut public_data = Zeroizing::new(p.public_data.clone());
+            let mut other_info = p.other_info.clone();
+            let mut public_data = p.public_data.clone();
             let oi_ptr =
                 if other_info.is_empty() { std::ptr::null_mut() } else { other_info.as_mut_ptr() };
             let pub_ptr = if public_data.is_empty() {
@@ -1845,9 +1539,9 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- X9.42 DH2 Derive: struct with 3 pointers + handle ------------------
         CkMechanismParams::X942Dh2Derive(p) => {
-            let mut other_info = p.other_info.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut public_data = Zeroizing::new(p.public_data.clone());
-            let mut public_data2 = Zeroizing::new(p.public_data2.clone());
+            let mut other_info = p.other_info.clone();
+            let mut public_data = p.public_data.clone();
+            let mut public_data2 = p.public_data2.clone();
             let oi_ptr =
                 if other_info.is_empty() { std::ptr::null_mut() } else { other_info.as_mut_ptr() };
             let pub_ptr = if public_data.is_empty() {
@@ -1878,9 +1572,9 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- X9.42 MQV Derive: struct with 3 pointers + 2 handles ---------------
         CkMechanismParams::X942MqvDerive(p) => {
-            let mut other_info = p.other_info.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut public_data = Zeroizing::new(p.public_data.clone());
-            let mut public_data2 = Zeroizing::new(p.public_data2.clone());
+            let mut other_info = p.other_info.clone();
+            let mut public_data = p.public_data.clone();
+            let mut public_data2 = p.public_data2.clone();
             let oi_ptr =
                 if other_info.is_empty() { std::ptr::null_mut() } else { other_info.as_mut_ptr() };
             let pub_ptr = if public_data.is_empty() {
@@ -1912,8 +1606,8 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- GOSTR3410 Derive: struct with 2 pointers ---------------------------
         CkMechanismParams::Gostr3410Derive(p) => {
-            let mut public_data = Zeroizing::new(p.public_data.clone());
-            let mut ukm = Zeroizing::new(p.ukm.clone());
+            let mut public_data = p.public_data.clone();
+            let mut ukm = p.ukm.clone();
             let pub_ptr = if public_data.is_empty() {
                 std::ptr::null_mut()
             } else {
@@ -1934,8 +1628,8 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- GOSTR3410 Key Wrap: struct with 2 pointers + handle ----------------
         CkMechanismParams::Gostr3410KeyWrap(p) => {
-            let mut wrap_oid = Zeroizing::new(p.wrap_oid.clone());
-            let mut ukm = Zeroizing::new(p.ukm.clone());
+            let mut wrap_oid = p.wrap_oid.clone();
+            let mut ukm = p.ukm.clone();
             let oid_ptr =
                 if wrap_oid.is_empty() { std::ptr::null_mut() } else { wrap_oid.as_mut_ptr() };
             let ukm_ptr = if ukm.is_empty() { std::ptr::null_mut() } else { ukm.as_mut_ptr() };
@@ -1953,7 +1647,7 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- Key Wrap Set OAEP: struct with 1 pointer ---------------------------
         CkMechanismParams::KeyWrapSetOaep(p) => {
-            let mut x = p.x.expose(|b| Zeroizing::new(b.to_vec()));
+            let mut x = p.x.clone();
             let x_ptr = if x.is_empty() { std::ptr::null_mut() } else { x.as_mut_ptr() };
             let kw = Box::new(cryptoki_sys::CK_KEY_WRAP_SET_OAEP_PARAMS {
                 bBC: p.bc as cryptoki_sys::CK_BYTE,
@@ -1965,9 +1659,9 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- KEA Derive: struct with 3 pointers ---------------------------------
         CkMechanismParams::KeaDerive(p) => {
-            let mut random_a = Zeroizing::new(p.random_a.clone());
-            let mut random_b = Zeroizing::new(p.random_b.clone());
-            let mut public_data = Zeroizing::new(p.public_data.clone());
+            let mut random_a = p.random_a.clone();
+            let mut random_b = p.random_b.clone();
+            let mut public_data = p.public_data.clone();
             let ra_ptr =
                 if random_a.is_empty() { std::ptr::null_mut() } else { random_a.as_mut_ptr() };
             let rb_ptr =
@@ -1994,8 +1688,8 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- IKE PRF Derive: struct with 2 pointers -----------------------------
         CkMechanismParams::IkePrfDerive(p) => {
-            let mut ni = p.ni.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut nr = p.nr.expose(|b| Zeroizing::new(b.to_vec()));
+            let mut ni = p.ni.clone();
+            let mut nr = p.nr.clone();
             let ni_ptr = if ni.is_empty() { std::ptr::null_mut() } else { ni.as_mut_ptr() };
             let nr_ptr = if nr.is_empty() { std::ptr::null_mut() } else { nr.as_mut_ptr() };
             let ike = Box::new(cryptoki_sys::CK_IKE_PRF_DERIVE_PARAMS {
@@ -2017,8 +1711,8 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- IKE1 PRF Derive: struct with 2 pointers + handles ------------------
         CkMechanismParams::Ike1PrfDerive(p) => {
-            let mut ckyi = p.ckyi.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut ckyr = p.ckyr.expose(|b| Zeroizing::new(b.to_vec()));
+            let mut ckyi = p.ckyi.clone();
+            let mut ckyr = p.ckyr.clone();
             let ckyi_ptr = if ckyi.is_empty() { std::ptr::null_mut() } else { ckyi.as_mut_ptr() };
             let ckyr_ptr = if ckyr.is_empty() { std::ptr::null_mut() } else { ckyr.as_mut_ptr() };
             let ike = Box::new(cryptoki_sys::CK_IKE1_PRF_DERIVE_PARAMS {
@@ -2043,7 +1737,7 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- IKE1 Extended Derive: struct with 1 pointer + handle ---------------
         CkMechanismParams::Ike1ExtendedDerive(p) => {
-            let mut extra = p.extra_data.expose(|b| Zeroizing::new(b.to_vec()));
+            let mut extra = p.extra_data.clone();
             let extra_ptr =
                 if extra.is_empty() { std::ptr::null_mut() } else { extra.as_mut_ptr() };
             let ike = Box::new(cryptoki_sys::CK_IKE1_EXTENDED_DERIVE_PARAMS {
@@ -2064,7 +1758,7 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- IKE2 PRF Plus Derive: struct with 1 pointer + handle ---------------
         CkMechanismParams::Ike2PrfPlusDerive(p) => {
-            let mut seed = p.seed_data.expose(|b| Zeroizing::new(b.to_vec()));
+            let mut seed = p.seed_data.clone();
             let seed_ptr = if seed.is_empty() { std::ptr::null_mut() } else { seed.as_mut_ptr() };
             let ike = Box::new(cryptoki_sys::CK_IKE2_PRF_PLUS_DERIVE_PARAMS {
                 prfMechanism: narrow_wire_ulong(p.prf_mechanism)?,
@@ -2084,9 +1778,9 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- WTLS Master Key Derive: digest mechanism + WTLS random data + pVersion --
         CkMechanismParams::WtlsMasterKeyDerive(p) => {
-            let mut client_random = Zeroizing::new(p.random_info.client_random.clone());
-            let mut server_random = Zeroizing::new(p.random_info.server_random.clone());
-            let mut version_buf = Zeroizing::new(vec![p.version as u8]);
+            let mut client_random = p.random_info.client_random.clone();
+            let mut server_random = p.random_info.server_random.clone();
+            let mut version_buf = vec![p.version as u8];
             let client_ptr = if client_random.is_empty() {
                 std::ptr::null_mut()
             } else {
@@ -2114,10 +1808,10 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- WTLS PRF: digest mechanism + seed + label + output -----------------
         CkMechanismParams::WtlsPrf(p) => {
-            let mut seed = p.seed.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut label = p.label.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut output = Zeroizing::new(vec![0u8; p.output_len as usize]);
-            let output_len = NativeAllocation::from_box(Box::new(narrow_wire_ulong(p.output_len)?));
+            let mut seed = p.seed.clone();
+            let mut label = p.label.clone();
+            let mut output = vec![0u8; p.output_len as usize];
+            let mut output_len = Box::new(narrow_wire_ulong(p.output_len)?);
             let seed_ptr = if seed.is_empty() { std::ptr::null_mut() } else { seed.as_mut_ptr() };
             let label_ptr =
                 if label.is_empty() { std::ptr::null_mut() } else { label.as_mut_ptr() };
@@ -2130,7 +1824,7 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
                 pLabel: label_ptr,
                 ulLabelLen: label.len() as cryptoki_sys::CK_ULONG,
                 pOutput: output_ptr,
-                pulOutputLen: output_len.root() as *mut _,
+                pulOutputLen: &mut *output_len as *mut _,
             });
             Ok(FfiMechanism::from_box(mech_type, wtls, |b| {
                 FfiParamBacking::WtlsPrf(b, seed, label, output, output_len)
@@ -2139,8 +1833,8 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- WTLS Key Mat: digest mechanism + nested random data + output -------
         CkMechanismParams::WtlsKeyMat(p) => {
-            let mut client_random = Zeroizing::new(p.random_info.client_random.clone());
-            let mut server_random = Zeroizing::new(p.random_info.server_random.clone());
+            let mut client_random = p.random_info.client_random.clone();
+            let mut server_random = p.random_info.server_random.clone();
             let client_ptr = if client_random.is_empty() {
                 std::ptr::null_mut()
             } else {
@@ -2153,18 +1847,18 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
             };
             let iv_bytes = ((p.iv_size_bits as usize).saturating_add(7)) / 8;
             let mut iv_buf = if p.iv.is_empty() {
-                Zeroizing::new(vec![0u8; iv_bytes])
+                vec![0u8; iv_bytes]
             } else {
-                let mut iv = Zeroizing::new(p.iv.clone());
+                let mut iv = p.iv.clone();
                 iv.resize(iv_bytes, 0);
                 iv
             };
             let iv_ptr = if iv_buf.is_empty() { std::ptr::null_mut() } else { iv_buf.as_mut_ptr() };
-            let kmo = NativeAllocation::from_box(Box::new(cryptoki_sys::CK_WTLS_KEY_MAT_OUT {
+            let mut kmo = Box::new(cryptoki_sys::CK_WTLS_KEY_MAT_OUT {
                 hMacSecret: narrow_wire_ulong(p.mac_secret_handle)?,
                 hKey: narrow_wire_ulong(p.key_handle)?,
                 pIV: iv_ptr,
-            }));
+            });
             let wtls = Box::new(cryptoki_sys::CK_WTLS_KEY_MAT_PARAMS {
                 DigestMechanism: narrow_wire_ulong(p.digest_mechanism)?,
                 ulMacSizeInBits: narrow_wire_ulong(p.mac_size_bits)?,
@@ -2178,7 +1872,7 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
                     pServerRandom: server_ptr,
                     ulServerRandomLen: server_random.len() as cryptoki_sys::CK_ULONG,
                 },
-                pReturnedKeyMaterial: kmo.root() as *mut _,
+                pReturnedKeyMaterial: &mut *kmo as *mut _,
             });
             Ok(FfiMechanism::from_box(mech_type, wtls, |b| {
                 FfiParamBacking::WtlsKeyMat(b, client_random, server_random, kmo, iv_buf)
@@ -2188,11 +1882,11 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
         // -- SP800-108 KDF: PRF type + data params array -------------------------
         CkMechanismParams::Sp800108Kdf(p) => {
             // Build CK_PRF_DATA_PARAM array and backing buffers
-            let mut buffers: Vec<Zeroizing<Vec<u8>>> = Vec::with_capacity(p.data_params.len());
+            let mut buffers: Vec<Vec<u8>> = Vec::with_capacity(p.data_params.len());
             let mut c_params: Vec<cryptoki_sys::CK_PRF_DATA_PARAM> =
                 Vec::with_capacity(p.data_params.len());
             for dp in &p.data_params {
-                let mut buf = dp.value.expose(|b| Zeroizing::new(b.to_vec()));
+                let mut buf = dp.value.clone();
                 let buf_ptr = if buf.is_empty() {
                     std::ptr::null_mut()
                 } else {
@@ -2222,11 +1916,11 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- SP800-108 Feedback KDF: same + IV ----------------------------------
         CkMechanismParams::Sp800108FeedbackKdf(p) => {
-            let mut buffers: Vec<Zeroizing<Vec<u8>>> = Vec::with_capacity(p.data_params.len());
+            let mut buffers: Vec<Vec<u8>> = Vec::with_capacity(p.data_params.len());
             let mut c_params: Vec<cryptoki_sys::CK_PRF_DATA_PARAM> =
                 Vec::with_capacity(p.data_params.len());
             for dp in &p.data_params {
-                let mut buf = dp.value.expose(|b| Zeroizing::new(b.to_vec()));
+                let mut buf = dp.value.clone();
                 let buf_ptr = if buf.is_empty() {
                     std::ptr::null_mut()
                 } else {
@@ -2241,7 +1935,7 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
             }
             let data_ptr =
                 if c_params.is_empty() { std::ptr::null_mut() } else { c_params.as_mut_ptr() };
-            let mut iv = Zeroizing::new(p.iv.clone());
+            let mut iv = p.iv.clone();
             let iv_ptr = if iv.is_empty() { std::ptr::null_mut() } else { iv.as_mut_ptr() };
             let mut derived_keys = FfiSp800108DerivedKeys::new(&p.additional_derived_keys)?;
             let sp = Box::new(cryptoki_sys::CK_SP800_108_FEEDBACK_KDF_PARAMS {
@@ -2260,14 +1954,13 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- X3DH Initiate: struct with 2 pointers + 4 handles ------------------
         CkMechanismParams::X3dhInitiate(p) => {
-            let mut prekey_sig = Zeroizing::new(p.prekey_signature.clone());
+            let mut prekey_sig = p.prekey_signature.clone();
             let sig_ptr =
                 if prekey_sig.is_empty() { std::ptr::null_mut() } else { prekey_sig.as_mut_ptr() };
             // pOnetime_key is a pointer in the C struct — but it represents an
             // object handle packed as a pointer. In PKCS#11, CK_X3DH_INITIATE_PARAMS
             // has pOnetime_key as *mut CK_BYTE. We pass the handle as a pointer.
-            let mut onetime_buf =
-                Zeroizing::new((narrow_wire_ulong(p.onetime_key_handle)?).to_ne_bytes().to_vec());
+            let mut onetime_buf = (narrow_wire_ulong(p.onetime_key_handle)?).to_ne_bytes().to_vec();
             let onetime_ptr = onetime_buf.as_mut_ptr();
             let x3dh = Box::new(cryptoki_sys::CK_X3DH_INITIATE_PARAMS {
                 kdf: narrow_wire_ulong(p.kdf)?,
@@ -2283,20 +1976,14 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
             }))
         }
 
-        // -- X3DH Respond: struct with 4 pointers + 2 scalars -------------------
+        // -- X3DH Respond: struct with 3 pointers + 2 handles -------------------
         CkMechanismParams::X3dhRespond(p) => {
-            let mut identity_buf =
-                Zeroizing::new((narrow_wire_ulong(p.identity_handle)?).to_ne_bytes().to_vec());
-            let mut prekey_buf =
-                Zeroizing::new((narrow_wire_ulong(p.prekey_handle)?).to_ne_bytes().to_vec());
-            let mut onetime_buf =
-                Zeroizing::new((narrow_wire_ulong(p.onetime_key_handle)?).to_ne_bytes().to_vec());
+            let mut identity_buf = (narrow_wire_ulong(p.identity_handle)?).to_ne_bytes().to_vec();
+            let mut prekey_buf = (narrow_wire_ulong(p.prekey_handle)?).to_ne_bytes().to_vec();
+            let mut onetime_buf = (narrow_wire_ulong(p.onetime_key_handle)?).to_ne_bytes().to_vec();
             // pInitiator_ephemeral is also a *mut CK_BYTE in the C struct
-            let mut ephem_buf = Zeroizing::new(
-                (narrow_wire_ulong(p.initiator_ephemeral_handle)?).to_ne_bytes().to_vec(),
-            );
-            // All four buffers have their final size before pointer capture.
-            // Each is retained unchanged in the owner until the native call ends.
+            let mut ephem_buf =
+                (narrow_wire_ulong(p.initiator_ephemeral_handle)?).to_ne_bytes().to_vec();
             let x3dh = Box::new(cryptoki_sys::CK_X3DH_RESPOND_PARAMS {
                 kdf: narrow_wire_ulong(p.kdf)?,
                 pIdentity_id: identity_buf.as_mut_ptr(),
@@ -2305,14 +1992,18 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
                 pInitiator_identity: narrow_wire_ulong(p.initiator_identity_handle)?,
                 pInitiator_ephemeral: ephem_buf.as_mut_ptr(),
             });
+            // Merge identity_buf and prekey_buf and onetime_buf into fewer vecs
+            // to match backing variant shape (3 Vecs).
+            // Store ephem_buf separately would need 4 vecs. Let's append ephem to onetime.
+            onetime_buf.extend_from_slice(&ephem_buf);
             Ok(FfiMechanism::from_box(mech_type, x3dh, |b| {
-                FfiParamBacking::X3dhRespond(b, identity_buf, prekey_buf, onetime_buf, ephem_buf)
+                FfiParamBacking::X3dhRespond(b, identity_buf, prekey_buf, onetime_buf)
             }))
         }
 
         // -- X2Ratchet Initialize: struct with 1 pointer + handles --------------
         CkMechanismParams::X2RatchetInitialize(p) => {
-            let mut sk = p.sk.expose(|b| Zeroizing::new(b.to_vec()));
+            let mut sk = p.sk.clone();
             let sk_ptr = if sk.is_empty() { std::ptr::null_mut() } else { sk.as_mut_ptr() };
             let x2r = Box::new(cryptoki_sys::CK_X2RATCHET_INITIALIZE_PARAMS {
                 sk: sk_ptr,
@@ -2335,7 +2026,7 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- X2Ratchet Respond: struct with 1 pointer + handles -----------------
         CkMechanismParams::X2RatchetRespond(p) => {
-            let mut sk = p.sk.expose(|b| Zeroizing::new(b.to_vec()));
+            let mut sk = p.sk.clone();
             let sk_ptr = if sk.is_empty() { std::ptr::null_mut() } else { sk.as_mut_ptr() };
             let x2r = Box::new(cryptoki_sys::CK_X2RATCHET_RESPOND_PARAMS {
                 sk: sk_ptr,
@@ -2356,10 +2047,10 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- OTP: array of CK_OTP_PARAM ----------------------------------------
         CkMechanismParams::Otp(p) => {
-            let mut buffers: Vec<Zeroizing<Vec<u8>>> = Vec::with_capacity(p.params.len());
+            let mut buffers: Vec<Vec<u8>> = Vec::with_capacity(p.params.len());
             let mut c_params: Vec<cryptoki_sys::CK_OTP_PARAM> = Vec::with_capacity(p.params.len());
             for op in &p.params {
-                let mut buf = op.value.expose(|b| Zeroizing::new(b.to_vec()));
+                let mut buf = op.value.clone();
                 let buf_ptr = if buf.is_empty() {
                     std::ptr::null_mut()
                 } else {
@@ -2386,11 +2077,11 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
         // -- KIP: nested mechanism pointer + seed + handle ----------------------
         CkMechanismParams::Kip(p) => {
             let inner_ffi = mechanism_to_ffi(&p.mechanism)?;
-            let inner_mech = NativeAllocation::from_box(Box::new(inner_ffi.ck_mechanism()));
-            let mut seed = p.seed.expose(|b| Zeroizing::new(b.to_vec()));
+            let mut inner_mech = Box::new(inner_ffi.ck_mechanism);
+            let mut seed = p.seed.clone();
             let seed_ptr = if seed.is_empty() { std::ptr::null_mut() } else { seed.as_mut_ptr() };
             let kip = Box::new(cryptoki_sys::CK_KIP_PARAMS {
-                pMechanism: inner_mech.root() as *mut _,
+                pMechanism: &mut *inner_mech as *mut _,
                 hKey: narrow_wire_ulong(p.key_handle)?,
                 pSeed: seed_ptr,
                 ulSeedLen: seed.len() as cryptoki_sys::CK_ULONG,
@@ -2400,12 +2091,7 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
             // stay valid for the call and are freed afterwards (L8 — was a
             // mem::forget that leaked it permanently).
             Ok(FfiMechanism::from_box(mech_type, kip, |b| {
-                FfiParamBacking::Kip(
-                    b,
-                    inner_mech,
-                    seed,
-                    NativeAllocation::from_box(Box::new(inner_ffi._backing)),
-                )
+                FfiParamBacking::Kip(b, inner_mech, seed, Box::new(inner_ffi._backing))
             }))
         }
 
@@ -2413,12 +2099,12 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
         CkMechanismParams::CmsSig(p) => {
             let sign_ffi = mechanism_to_ffi(&p.signing_mechanism)?;
             let digest_ffi = mechanism_to_ffi(&p.digest_mechanism)?;
-            let sign_mech = NativeAllocation::from_box(Box::new(sign_ffi.ck_mechanism()));
-            let digest_mech = NativeAllocation::from_box(Box::new(digest_ffi.ck_mechanism()));
-            let mut content_type = Zeroizing::new(p.content_type.as_bytes().to_vec());
+            let mut sign_mech = Box::new(sign_ffi.ck_mechanism);
+            let mut digest_mech = Box::new(digest_ffi.ck_mechanism);
+            let mut content_type = p.content_type.as_bytes().to_vec();
             content_type.push(0); // null-terminate
-            let mut req_attrs = p.requested_attributes.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut reqd_attrs = p.required_attributes.expose(|b| Zeroizing::new(b.to_vec()));
+            let mut req_attrs = p.requested_attributes.clone();
+            let mut reqd_attrs = p.required_attributes.clone();
             let ct_ptr = content_type.as_mut_ptr();
             let req_ptr =
                 if req_attrs.is_empty() { std::ptr::null_mut() } else { req_attrs.as_mut_ptr() };
@@ -2426,8 +2112,8 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
                 if reqd_attrs.is_empty() { std::ptr::null_mut() } else { reqd_attrs.as_mut_ptr() };
             let cms = Box::new(cryptoki_sys::CK_CMS_SIG_PARAMS {
                 certificateHandle: narrow_wire_ulong(p.certificate_handle)?,
-                pSigningMechanism: sign_mech.root() as *mut _,
-                pDigestMechanism: digest_mech.root() as *mut _,
+                pSigningMechanism: &mut *sign_mech as *mut _,
+                pDigestMechanism: &mut *digest_mech as *mut _,
                 pContentType: ct_ptr,
                 pRequestedAttributes: req_ptr,
                 ulRequestedAttributesLen: req_attrs.len() as cryptoki_sys::CK_ULONG,
@@ -2444,20 +2130,20 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
                     content_type,
                     req_attrs,
                     reqd_attrs,
-                    NativeAllocation::from_box(Box::new(sign_ffi._backing)),
-                    NativeAllocation::from_box(Box::new(digest_ffi._backing)),
+                    Box::new(sign_ffi._backing),
+                    Box::new(digest_ffi._backing),
                 )
             }))
         }
 
         // -- Skipjack Private Wrap: struct with many pointers -------------------
         CkMechanismParams::SkipjackPrivateWrap(p) => {
-            let mut password = p.password.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut public_data = Zeroizing::new(p.public_data.clone());
-            let mut random_a = Zeroizing::new(p.random_a.clone());
-            let mut prime_p = Zeroizing::new(p.prime_p.clone());
-            let mut base_g = Zeroizing::new(p.base_g.clone());
-            let mut subprime_q = Zeroizing::new(p.subprime_q.clone());
+            let mut password = Zeroizing::new(p.password.clone());
+            let mut public_data = p.public_data.clone();
+            let mut random_a = p.random_a.clone();
+            let mut prime_p = p.prime_p.clone();
+            let mut base_g = p.base_g.clone();
+            let mut subprime_q = p.subprime_q.clone();
             let pass_ptr =
                 if password.is_empty() { std::ptr::null_mut() } else { password.as_mut_ptr() };
             let pub_ptr = if public_data.is_empty() {
@@ -2504,13 +2190,13 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- Skipjack Relayx: struct with 7 pointers ----------------------------
         CkMechanismParams::SkipjackRelayx(p) => {
-            let mut old_wrapped_x = p.old_wrapped_x.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut old_password = p.old_password.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut old_public_data = p.old_public_data.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut old_random_a = p.old_random_a.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut new_password = p.new_password.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut new_public_data = p.new_public_data.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut new_random_a = p.new_random_a.expose(|b| Zeroizing::new(b.to_vec()));
+            let mut old_wrapped_x = p.old_wrapped_x.clone();
+            let mut old_password = Zeroizing::new(p.old_password.clone());
+            let mut old_public_data = p.old_public_data.clone();
+            let mut old_random_a = p.old_random_a.clone();
+            let mut new_password = Zeroizing::new(p.new_password.clone());
+            let mut new_public_data = p.new_public_data.clone();
+            let mut new_random_a = p.new_random_a.clone();
             let owx_ptr = if old_wrapped_x.is_empty() {
                 std::ptr::null_mut()
             } else {

@@ -2,10 +2,7 @@
 # Tiered test runner (mock-ABI test infrastructure design, 2026-07-02).
 #
 # Tiers (module/naming convention — no cargo features):
-#   unit         pure logic: every workspace package's non-live tests
-#                (types, proto, backend + server libs, client, cli, audit,
-#                shim dispatch units; pkcs11-module now lives upstream in
-#                pkcs11-components and is covered by that repo's own CI)
+#   unit         pure logic: types + backend libs, shim dispatch units
 #   integration  in-process TestDaemon suites (shim tests::), incl. the
 #                cross-ABI topology suite (tests::cross_abi)
 #   regression   named defect pins: tests::regression plus the canonical
@@ -28,10 +25,6 @@ run_unit() {
     cargo test -p pkcs11-proxy-ng-types
     cargo test -p pkcs11-proxy-ng-backend --lib
     cargo test -p pkcs11-proxy-ng --lib
-    cargo test -p pkcs11-proxy-ng-proto
-    cargo test -p pkcs11-proxy-ng-client
-    cargo test -p pkcs11-proxy-ng-cli
-    cargo test -p pkcs11-proxy-ng-audit
     cargo test -p pkcs11-proxy-ng-shim --lib dispatch::
 }
 
@@ -51,10 +44,7 @@ run_regression() {
 
 run_live() {
     echo "=== tier: live (skip-clean when tooling is absent) ==="
-    scripts/test-daemon-startup-logging.sh
-    scripts/test-live-harness-locators.sh
     scripts/run-cross-width-live-test.sh
-    scripts/run-cross-width-nss32-live-test.sh
     scripts/run-llp64-wine-smoke.sh
     scripts/run-windows-daemon-wine-smoke.sh
 }

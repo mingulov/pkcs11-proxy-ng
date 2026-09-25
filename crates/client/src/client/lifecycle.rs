@@ -31,6 +31,15 @@ fn new_grpc_client(channel: Channel) -> GrpcClient<Channel> {
 pub struct BackendProbe {
     pub interfaces: Vec<(u8, u8, Vec<String>)>,
     pub mechanism_registry: Option<MechanismRegistryPayload>,
+    /// Backend `sizeof(CK_ULONG)` in bytes (4 or 8), advertised for the width
+    /// bridge (ADR-0011 D2). `None` against an older daemon that predates the
+    /// field — the caller falls back to 8 with a warning (D9).
+    pub backend_ulong_size: Option<u32>,
+    /// Backend `CK_ULONG` byte order (1 = little, 2 = big; ADR-0011 D6).
+    /// `None` against an older daemon.
+    pub backend_byte_order: Option<u32>,
+    /// The backend's native sizeof(CK_ATTRIBUTE) (D2 extension), if advertised.
+    pub backend_attribute_stride: Option<u32>,
 }
 
 async fn connect_channel(
@@ -40,12 +49,25 @@ async fn connect_channel(
     // Unix-domain-socket endpoint (`unix:/abs/path` or `unix:///abs/path`):
     // dial the local socket. No TLS — a Unix socket carries no network to
     // secure; the daemon authenticates the peer via SO_PEERCRED. Intended for
-    // local-user / ssh-forwarded use.
+    // local-user / ssh-forwarded use. Windows has no UDS peer-cred path, so a
+    // Windows client is tcp/mTLS-only (ADR-0011 Bucket 3, client side).
     if let Some(path) = endpoint.strip_prefix("unix:") {
-        if tls_files.is_some() {
-            tracing::debug!("TLS configuration ignored for unix-socket endpoint (peer-cred auth)");
+        #[cfg(unix)]
+        {
+            if tls_files.is_some() {
+                tracing::debug!(
+                    "TLS configuration ignored for unix-socket endpoint (peer-cred auth)"
+                );
+            }
+            return connect_unix_channel(path).await;
         }
-        return connect_unix_channel(path).await;
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            return Err("unix-domain-socket endpoints are not supported on this platform; \
+                        use a tcp/mTLS endpoint such as https://host:port"
+                .to_string());
+        }
     }
 
     let mut builder = tonic::transport::Endpoint::from_shared(endpoint.to_owned())
@@ -67,6 +89,7 @@ async fn connect_channel(
 }
 
 /// Connect a gRPC channel over a Unix-domain socket at `raw_path`.
+#[cfg(unix)]
 async fn connect_unix_channel(raw_path: &str) -> Result<Channel, String> {
     // Tolerate the authority form `unix://<path>` by dropping a leading "//".
     let path = raw_path.strip_prefix("//").unwrap_or(raw_path).to_owned();
@@ -201,7 +224,13 @@ impl Pkcs11Client {
             .map(|info| (info.version_major as u8, info.version_minor as u8, info.null_functions))
             .collect();
 
-        Ok(BackendProbe { interfaces, mechanism_registry: resp.mechanism_registry })
+        Ok(BackendProbe {
+            interfaces,
+            mechanism_registry: resp.mechanism_registry,
+            backend_ulong_size: resp.backend_ulong_size,
+            backend_byte_order: resp.backend_byte_order,
+            backend_attribute_stride: resp.backend_attribute_stride,
+        })
     }
 
     /// Re-dial the endpoint (if it was created via `connect`) and probe the

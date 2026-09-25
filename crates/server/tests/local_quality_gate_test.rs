@@ -479,7 +479,10 @@ fn env_driven_provider_fixtures_do_not_synthesize_shared_credentials() {
 #[test]
 fn shim_raw_slice_construction_stays_centralized() {
     let root = workspace_root();
-    let allowed = root.join("crates/shim/src/dispatch/general/helpers/mod.rs");
+    // The audited raw-slice constructions live in the helpers module family
+    // (split from the former single helpers/mod.rs in 2026-07); everything
+    // else in the shim must go through those helpers.
+    let allowed_dir = root.join("crates/shim/src/dispatch/general/helpers");
     let mut offenders = Vec::new();
 
     for source in rust_sources_under(&root.join("crates/shim/src")) {
@@ -500,7 +503,7 @@ fn shim_raw_slice_construction_stays_centralized() {
 
     assert!(
         offenders.is_empty(),
-        "raw FFI slice construction should stay in helpers/mod.rs; offenders: {offenders:?}"
+        "raw FFI slice construction should stay in the helpers module; offenders: {offenders:?}"
     );
 }
 
@@ -3213,7 +3216,9 @@ fn oasis_inventory_classifies_unsafe_shim_parameter_read_gaps() {
                 .as_array()
                 .expect("shim read decision evidence should be an array")
                 .iter()
-                .any(|source| source == "crates/shim/src/dispatch/general/helpers/mod.rs"),
+                .any(|source| {
+                    source == "crates/shim/src/dispatch/general/helpers/mechanism_read.rs"
+                }),
             "{variant} should cite the shim reader implementation"
         );
     }

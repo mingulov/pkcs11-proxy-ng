@@ -1549,7 +1549,16 @@ def shim_interface_tests(root: Path) -> Path:
 
 
 def shim_helpers(root: Path) -> Path:
-    return root / "crates/shim/src/dispatch/general/helpers/mod.rs"
+    # Split 2026-07-04: the per-shape reader match lives in mechanism_read.rs.
+    return root / "crates/shim/src/dispatch/general/helpers/mechanism_read.rs"
+
+
+def shim_mechanism_writeback(root: Path) -> Path:
+    return root / "crates/shim/src/dispatch/general/helpers/mechanism_writeback.rs"
+
+
+def shim_message_params(root: Path) -> Path:
+    return root / "crates/shim/src/dispatch/general/helpers/message_params.rs"
 
 
 def provider_artifacts_root(root: Path) -> Path:

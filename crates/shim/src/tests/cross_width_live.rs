@@ -27,7 +27,6 @@ fn live_probe_records_backend_ulong_width() {
     if !cross_test_enabled() {
         return;
     }
-    eprintln!("cross-width-executed=probe-width");
     let _guard = shim_state_test_guard();
     let rv = unsafe { dispatch::general::c_initialize(std::ptr::null_mut()) };
     assert_eq!(rv, CKR_OK as CK_RV, "C_Initialize against the live daemon");
@@ -50,7 +49,6 @@ fn live_daemon_bridges_ulong_widths_end_to_end() {
     if !cross_test_enabled() {
         return;
     }
-    eprintln!("cross-width-executed=bridge-end-to-end");
     let _guard = shim_state_test_guard();
 
     let rv = unsafe { dispatch::general::c_initialize(std::ptr::null_mut()) };
@@ -165,7 +163,7 @@ fn live_daemon_bridges_ulong_widths_end_to_end() {
     let rv = unsafe { dispatch::general::c_get_attribute_value(session, object, &mut attr, 1) };
     assert_eq!(rv, CKR_OK as CK_RV, "CKA_CLASS data query");
     assert_eq!(attr.ulValueLen as usize, class_buf.len());
-    assert_eq!(CK_ULONG::from_ne_bytes(class_buf), CKO_DATA, "CKA_CLASS value");
+    assert_eq!(CK_ULONG::from_le_bytes(class_buf), CKO_DATA, "CKA_CLASS value");
 
     // Too-small buffer: exact/raw semantics forward the backend's
     // CKR_BUFFER_TOO_SMALL, and the CK_UNAVAILABLE_INFORMATION length
@@ -178,55 +176,13 @@ fn live_daemon_bridges_ulong_widths_end_to_end() {
     };
     let rv = unsafe { dispatch::general::c_get_attribute_value(session, object, &mut attr, 1) };
     assert_eq!(rv, CKR_BUFFER_TOO_SMALL as CK_RV, "too-small CKA_CLASS query");
-    // E0793: CK_ATTRIBUTE is packed on Windows; assert on a by-value copy.
-    let ul_value_len = attr.ulValueLen;
     assert_eq!(
-        ul_value_len, CK_UNAVAILABLE_INFORMATION,
+        attr.ulValueLen, CK_UNAVAILABLE_INFORMATION,
         "sentinel must be the client-width all-ones value"
     );
 
     let rv = unsafe { dispatch::general::c_close_session(session) };
     assert_eq!(rv, CKR_OK as CK_RV, "C_CloseSession");
-    let rv = unsafe { dispatch::general::c_finalize(std::ptr::null_mut()) };
-    assert_eq!(rv, CKR_OK as CK_RV, "C_Finalize");
-}
-
-#[test]
-#[ignore = "needs a live daemon; run via scripts/run-cross-width-live-test.sh"]
-fn live_wait_nonblocking_event_path() {
-    // TO26b groups 3+7: the nonblocking event path against a REAL provider
-    // at this leg's widths — a genuine `C_WaitForSlotEvent` round trip,
-    // not a status echo. Per-provider classification (ownership §7 rule):
-    // SoftHSM2 serves NO_EVENT when idle (event path qualified); NSS
-    // softokn natively answers FUNCTION_NOT_SUPPORTED (its own
-    // unsupported Wait proves no event path — inferred from end-to-end
-    // passthrough + mapped-module receipt).
-    // Either way the caller cell keeps its canary. The runner declares
-    // the provider via PKCS11_PROXY_CROSS_PROVIDER; anything else fails
-    // loudly (no silent default — an unclassified provider proves nothing).
-    if !cross_test_enabled() {
-        return;
-    }
-    eprintln!("cross-width-executed=wait-no-event");
-    let _guard = shim_state_test_guard();
-    let expected: CK_RV = match std::env::var("PKCS11_PROXY_CROSS_PROVIDER").as_deref() {
-        Ok("softhsm2") => CKR_NO_EVENT as CK_RV,
-        Ok("nss") => CKR_FUNCTION_NOT_SUPPORTED as CK_RV,
-        other => panic!(
-            "unclassified wait provider (runner must set PKCS11_PROXY_CROSS_PROVIDER): {other:?}"
-        ),
-    };
-
-    let rv = unsafe { dispatch::general::c_initialize(std::ptr::null_mut()) };
-    assert_eq!(rv, CKR_OK as CK_RV, "C_Initialize against the live daemon");
-
-    let mut slot: CK_SLOT_ID = CK_SLOT_ID::MAX - 3;
-    let rv = unsafe {
-        dispatch::general::c_wait_for_slot_event(CKF_DONT_BLOCK, &mut slot, std::ptr::null_mut())
-    };
-    assert_eq!(rv, expected, "classified nonblocking wait outcome");
-    assert_eq!(slot, CK_SLOT_ID::MAX - 3, "a non-OK wait must not write the caller slot");
-
     let rv = unsafe { dispatch::general::c_finalize(std::ptr::null_mut()) };
     assert_eq!(rv, CKR_OK as CK_RV, "C_Finalize");
 }

@@ -95,7 +95,7 @@ impl FfiBackend {
         let fl = self.func_list_3_2.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_UnwrapKeyAuthenticated }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
-        let ffi_attrs = FfiAttrs::from_slice(template);
+        let ffi_attrs = FfiAttrs::from_slice(template)?;
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
 
         // Save the original parameter pointer and length for read-back after the call.
@@ -172,7 +172,7 @@ impl FfiBackend {
                     &mut out_len,
                 )
             };
-            if rv == CkRv::OK.0 {
+            if rv == CkRv::OK.0 as cryptoki_sys::CK_RV {
                 // Read back mechanism parameter.
                 let param_value = if param_out_spec.buffer_present
                     && !mech_param_ptr.is_null()
@@ -197,7 +197,7 @@ impl FfiBackend {
                 };
                 Ok((output_result, param_result))
             } else {
-                Err(CkRv(rv))
+                Err(CkRv(rv as u64))
             }
         } else {
             // Data query: allocate caller-specified buffer.
@@ -217,81 +217,16 @@ impl FfiBackend {
                 )
             };
 
-#[cfg(all(test, unix))]
-mod tests {
-    use super::*;
-    use crate::Pkcs11Backend;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    static CALLS: AtomicUsize = AtomicUsize::new(0);
-    static OUTPUT_PRESENT: AtomicUsize = AtomicUsize::new(0);
-    static LENGTH_NULL: AtomicUsize = AtomicUsize::new(0);
-    static RETURN_RV: AtomicUsize = AtomicUsize::new(cryptoki_sys::CKR_OK as usize);
-    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    // Break caught: any authenticated adapter copying a native GOST structure
-    // into bytes discloses pointer/handle fields, including native padding.
-    // Assertions deliberately never format the returned byte buffer.
-    unsafe extern "C" fn pointer_bearing_wrap(
-        _: cryptoki_sys::CK_SESSION_HANDLE,
-        _: cryptoki_sys::CK_MECHANISM_PTR,
-        _: cryptoki_sys::CK_OBJECT_HANDLE,
-        _: cryptoki_sys::CK_OBJECT_HANDLE,
-        _: cryptoki_sys::CK_BYTE_PTR,
-        _: cryptoki_sys::CK_ULONG,
-        output: cryptoki_sys::CK_BYTE_PTR,
-        length: cryptoki_sys::CK_ULONG_PTR,
-    ) -> cryptoki_sys::CK_RV {
-        CALLS.fetch_add(1, Ordering::SeqCst);
-        if !length.is_null() {
-            unsafe { *length = 1 };
-            if !output.is_null() {
-                unsafe { *output = 0 };
-            }
-        }
-        cryptoki_sys::CKR_OK
-    }
-
-    unsafe extern "C" fn pointer_bearing_unwrap(
-        _: cryptoki_sys::CK_SESSION_HANDLE,
-        _: cryptoki_sys::CK_MECHANISM_PTR,
-        _: cryptoki_sys::CK_OBJECT_HANDLE,
-        _: cryptoki_sys::CK_BYTE_PTR,
-        _: cryptoki_sys::CK_ULONG,
-        _: cryptoki_sys::CK_ATTRIBUTE_PTR,
-        _: cryptoki_sys::CK_ULONG,
-        _: cryptoki_sys::CK_BYTE_PTR,
-        _: cryptoki_sys::CK_ULONG,
-        key: cryptoki_sys::CK_OBJECT_HANDLE_PTR,
-    ) -> cryptoki_sys::CK_RV {
-        CALLS.fetch_add(1, Ordering::SeqCst);
-        unsafe { *key = 1 };
-        cryptoki_sys::CKR_OK
-    }
-
-    fn assert_legacy_rejects_native_structure(route: u32) {
-        let _guard = TEST_LOCK.lock().unwrap();
-        let (backend, _base, mut functions) = backend_with_missing_length_wrap();
-        functions.C_WrapKeyAuthenticated = Some(pointer_bearing_wrap);
-        functions.C_UnwrapKeyAuthenticated = Some(pointer_bearing_unwrap);
-        let mechanism = CkMechanism {
-            mechanism_type: CkMechanismType::GOSTR3410_KEY_WRAP,
-            params: Some(CkMechanismParams::Gostr3410KeyWrap(Gostr3410KeyWrapParams {
-                wrap_oid: vec![1; 3],
-                ukm: vec![2; 8],
-                key_handle: 7,
-            })),
-        };
-        {
-            CALLS.store(0, Ordering::SeqCst);
-            let result = match route {
-                0 => backend
-                    .ffi_wrap_key_authenticated(
-                        CkSessionHandle(1),
-                        &mechanism,
-                        CkObjectHandle(2),
-                        CkObjectHandle(3),
-                        CkInBuf::Bytes(&[]),
+            if rv == CkRv::OK.0 as cryptoki_sys::CK_RV {
+                buf.truncate(out_len as usize);
+                // Read back mechanism parameter.
+                let param_value = if param_out_spec.buffer_present
+                    && !mech_param_ptr.is_null()
+                    && mech_param_len > 0
+                {
+                    Some(
+                        unsafe { std::slice::from_raw_parts(mech_param_ptr, mech_param_len) }
+                            .to_vec(),
                     )
                     .map(|(_, output)| output.is_empty()),
                 1 => backend
@@ -759,79 +694,33 @@ mod tests {
                 mechanism_type: if ccm {
                     CkMechanismType::AES_CCM
                 } else {
-                    CkMechanismType::AES_GCM
-                },
-                params: None,
-            },
-            parameter,
-        )
-    }
-
-    #[test]
-    fn authenticated_typed_aead_exact_roundtrips_only_owned_buffers_once_for_every_output_shape() {
-        use crate::Pkcs11Backend;
-        use pkcs11_proxy_ng_proto::convert::{
-            authenticated::AuthenticatedOutput, message_effects::MessageEffects,
-        };
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let (backend, _base, mut functions) = backend_with_missing_length_wrap();
-        functions.C_WrapKeyAuthenticated = Some(aead_wrap);
-        CORRUPT_PARAMETER.store(0, Ordering::SeqCst);
-        RETURN_RV.store(cryptoki_sys::CKR_OK as usize, Ordering::SeqCst);
-        for ccm in [false, true] {
-            let (mechanism, parameter) = aead_parameter(ccm);
-            for (present, len, null, expected_rv, expected_len) in [
-                (false, 0, false, CkRv::OK, 8),
-                (true, 0, false, CkRv::BUFFER_TOO_SMALL, 8),
-                (true, 2, false, CkRv::BUFFER_TOO_SMALL, 8),
-                (true, 8, false, CkRv::OK, 8),
-                (true, 32, false, CkRv::OK, 8),
-                (false, 0, true, CkRv::OK, 0),
-                (true, 0, true, CkRv::OK, 0),
-            ] {
-                CALLS.store(0, Ordering::SeqCst);
-                let result = backend.wrap_key_authenticated_exact_typed(
-                    CkSessionHandle(1),
-                    &mechanism,
-                    Some(&parameter),
-                    CkObjectHandle(2),
-                    CkObjectHandle(3),
-                    CkInBuf::Bytes(&[]),
-                    &CkOutputBufferSpec {
-                        buffer_present: present,
-                        buffer_len: len,
-                        length_pointer_null: null,
-                    },
-                );
-                assert!(
-                    result.is_ok(),
-                    "typed AEAD exact operation must support its legal native shape"
-                );
-                let (main, output) = result.unwrap();
-                assert_eq!(
-                    (main.ck_rv, main.returned_len),
-                    (expected_rv, (!null).then_some(expected_len))
-                );
-                assert_eq!(CALLS.load(Ordering::SeqCst), 1);
-                assert_eq!(OUTPUT_PRESENT.load(Ordering::SeqCst), usize::from(present));
-                assert_eq!(LENGTH_NULL.load(Ordering::SeqCst), usize::from(null));
-                let wire =
-                    pkcs11_proxy_ng_proto::AuthenticatedMechanismOutput::try_from(&output).unwrap();
-                let decoded = AuthenticatedOutput::try_from(&wire).unwrap();
-                // This fixture deliberately writes output-only storage even for
-                // query/missing-length calls; those writes are not defined effects.
-                let data_completed = present && !null && expected_rv == CkRv::OK;
-                match decoded {
-                    AuthenticatedOutput::Effects(MessageEffects::Gcm { iv, tag }) => {
-                        assert_eq!(iv, data_completed.then(|| vec![0xa5; 12]));
-                        assert_eq!(tag, data_completed.then(|| vec![0x5a; 16]));
-                    }
-                    AuthenticatedOutput::Effects(MessageEffects::Ccm { nonce, mac }) => {
-                        assert_eq!(nonce, data_completed.then(|| vec![0xa5; 12]));
-                        assert_eq!(mac, data_completed.then(|| vec![0x5a; 16]));
-                    }
-                    _ => panic!("expected output-only AEAD transport"),
-                }
+                    None
+                };
+                let output_result = CkOutputBufferResult {
+                    ck_rv: CkRv::OK,
+                    returned_len: out_len as u64,
+                    value: Some(buf),
+                };
+                let param_result = CkParameterRoundtripResult {
+                    ck_rv: CkRv::OK,
+                    returned_len: mech_param_len as u64,
+                    value: param_value,
+                };
+                Ok((output_result, param_result))
+            } else if rv == CkRv::BUFFER_TOO_SMALL.0 as cryptoki_sys::CK_RV {
+                let output_result = CkOutputBufferResult {
+                    ck_rv: CkRv::BUFFER_TOO_SMALL,
+                    returned_len: out_len as u64,
+                    value: None,
+                };
+                let param_result = CkParameterRoundtripResult {
+                    ck_rv: CkRv::BUFFER_TOO_SMALL,
+                    returned_len: mech_param_len as u64,
+                    value: None,
+                };
+                Ok((output_result, param_result))
+            } else {
+                Err(CkRv(rv as u64))
             }
         }
     }

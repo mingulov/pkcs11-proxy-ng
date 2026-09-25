@@ -12,7 +12,6 @@
 //! `scripts/run-*-wine-smoke.sh`) remain the real-binary proof; this
 //! module is the fast, deterministic everyday coverage.
 
-use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_backend::mock::{MockAbi, MockAttributeSlot};
 use pkcs11_proxy_ng_types::{CkAttributeType, CkAttributeValue, CkObjectHandle};
 
@@ -30,42 +29,6 @@ fn session_on(abi: MockAbi) -> (&'static TestDaemon, ShimSession) {
 
 fn foreign_profiles() -> [MockAbi; 2] {
     [MockAbi::Ilp32, MockAbi::Llp64]
-}
-
-// Input-template width bridging remains supported. Inspect its stored typed
-// value through the daemon API when the C ABI cannot safely pre-type an output
-// nested materialization across widths.
-fn assert_backend_nested_class(abi: MockAbi, object: CK_OBJECT_HANDLE, expected: CK_ULONG) {
-    use pkcs11_proxy_ng_types::{CkAttributeQuery, CkSessionFlags, CkSlotId};
-    let daemon = TestDaemon::shared_with_abi(abi);
-    let object = backend_object_handle(daemon, object);
-    let session = daemon
-        .backend
-        .open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-        .unwrap();
-    let (rv, results) = daemon
-        .backend
-        .get_attribute_value_exact(
-            session,
-            object,
-            &[CkAttributeQuery {
-                attr_type: CkAttributeType::WRAP_TEMPLATE,
-                buffer_present: true,
-                buffer_len: abi.attribute_stride() as u64,
-                nested: Some(vec![CkAttributeQuery {
-                    attr_type: CkAttributeType(0),
-                    buffer_present: true,
-                    buffer_len: abi.ulong_width() as u64,
-                    nested: None,
-                }]),
-            }],
-        )
-        .unwrap();
-    daemon.backend.close_session(session).unwrap();
-    assert_eq!(rv, pkcs11_proxy_ng_types::CkRv::OK);
-    let result = &results[0].nested.as_ref().unwrap()[0];
-    assert_eq!(result.attr_type, CkAttributeType::CLASS);
-    assert!(result.value.as_ref().unwrap().expose(|raw| raw == abi.encode_ulong(expected as u64)));
 }
 
 #[test]
@@ -122,7 +85,7 @@ fn scalar_ulong_attribute_bridges_both_directions() {
         let rv =
             unsafe { dispatch::general::c_get_attribute_value(shim.session, object, &mut attr, 1) };
         assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} data query");
-        assert_eq!(CK_ULONG::from_ne_bytes(buf), 3, "{abi:?}: value round-trip");
+        assert_eq!(CK_ULONG::from_le_bytes(buf), 3, "{abi:?}: value round-trip");
 
         // Too-small buffer: verbatim CKR_BUFFER_TOO_SMALL and the D10
         // sentinel arrives at the CLIENT's width.
@@ -135,9 +98,7 @@ fn scalar_ulong_attribute_bridges_both_directions() {
         let rv =
             unsafe { dispatch::general::c_get_attribute_value(shim.session, object, &mut attr, 1) };
         assert_eq!(rv, CKR_BUFFER_TOO_SMALL as CK_RV, "{abi:?} too-small");
-        // E0793: CK_ATTRIBUTE is packed on Windows; assert on a by-value copy.
-        let ul_value_len = attr.ulValueLen;
-        assert_eq!(ul_value_len, CK_UNAVAILABLE_INFORMATION, "{abi:?}: client-width sentinel");
+        assert_eq!(attr.ulValueLen, CK_UNAVAILABLE_INFORMATION, "{abi:?}: client-width sentinel");
     }
 }
 
@@ -154,7 +115,7 @@ fn ulong_array_attribute_bridges_element_wise() {
         daemon.backend.set_attribute(
             backend_object,
             CkAttributeType::ALLOWED_MECHANISMS,
-            MockAttributeSlot::Value(CkAttributeValue::Bytes(backend_bytes.into())),
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(backend_bytes)),
         );
 
         let mut attr = CK_ATTRIBUTE {
@@ -182,7 +143,7 @@ fn ulong_array_attribute_bridges_element_wise() {
         assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} array data query");
         for (i, expected) in mechs.iter().enumerate() {
             let w = std::mem::size_of::<CK_ULONG>();
-            let got = CK_ULONG::from_ne_bytes(buf[i * w..(i + 1) * w].try_into().expect("element"));
+            let got = CK_ULONG::from_le_bytes(buf[i * w..(i + 1) * w].try_into().expect("element"));
             assert_eq!(got as u64, *expected, "{abi:?}: array element {i}");
         }
     }
@@ -256,24 +217,13 @@ fn nested_template_data_query_bridges_sub_values() {
         };
         let rv =
             unsafe { dispatch::general::c_get_attribute_value(shim.session, object, &mut attr, 1) };
-        if abi.ulong_width() != w {
-            assert_eq!(
-                rv, CKR_FUNCTION_NOT_SUPPORTED,
-                "{abi:?} unknown nested output type cannot be width-bridged"
-            );
-            assert_eq!(class_buf, vec![0; w]);
-            assert_eq!(key_type_buf, vec![0; w]);
-            let ul_value_len = sub_attrs[0].ulValueLen;
-            assert_eq!(ul_value_len, w as CK_ULONG);
-            continue;
-        }
         assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} nested data query");
         let class_bytes: [u8; std::mem::size_of::<CK_ULONG>()] =
             class_buf.as_slice().try_into().expect("class width");
         let key_bytes: [u8; std::mem::size_of::<CK_ULONG>()] =
             key_type_buf.as_slice().try_into().expect("key width");
-        assert_eq!(CK_ULONG::from_ne_bytes(class_bytes), 3, "{abi:?}: CLASS sub-value");
-        assert_eq!(CK_ULONG::from_ne_bytes(key_bytes), 31, "{abi:?}: KEY_TYPE sub-value");
+        assert_eq!(CK_ULONG::from_le_bytes(class_bytes), 3, "{abi:?}: CLASS sub-value");
+        assert_eq!(CK_ULONG::from_le_bytes(key_bytes), 31, "{abi:?}: KEY_TYPE sub-value");
         assert_eq!(sub_attrs[0].ulValueLen as usize, w, "{abi:?}: sub length at client width");
     }
 }
@@ -309,24 +259,15 @@ fn nested_template_sub_too_small_yields_client_width_sentinel() {
         };
         let rv =
             unsafe { dispatch::general::c_get_attribute_value(shim.session, object, &mut attr, 1) };
-        if abi.ulong_width() != w {
-            assert_eq!(rv, CKR_FUNCTION_NOT_SUPPORTED);
-            let ul_value_len = sub_attrs[0].ulValueLen;
-            assert_eq!(ul_value_len, (w / 2) as CK_ULONG);
-            assert_eq!(small, vec![0; w / 2]);
-            assert_eq!(ok_buf, vec![0; w]);
-            continue;
-        }
         assert_eq!(rv, CKR_BUFFER_TOO_SMALL as CK_RV, "{abi:?} sub-too-small overall rv");
-        let ul_value_len = sub_attrs[0].ulValueLen;
         assert_eq!(
-            ul_value_len, CK_UNAVAILABLE_INFORMATION,
+            sub_attrs[0].ulValueLen, CK_UNAVAILABLE_INFORMATION,
             "{abi:?}: too-small sub gets the client-width sentinel"
         );
         let ok_bytes: [u8; std::mem::size_of::<CK_ULONG>()] =
             ok_buf.as_slice().try_into().expect("width");
         assert_eq!(
-            CK_ULONG::from_ne_bytes(ok_bytes),
+            CK_ULONG::from_le_bytes(ok_bytes),
             31,
             "{abi:?}: the adequately-sized sub still round-trips"
         );
@@ -334,14 +275,13 @@ fn nested_template_sub_too_small_yields_client_width_sentinel() {
 }
 
 #[test]
-fn foreign_byte_order_backend_is_refused_at_initialize() {
+fn big_endian_backend_is_refused_at_initialize() {
     // D6: the wire carries backend-native ulong bytes, so a byte-order
     // mismatch would corrupt every multi-byte value. The shim must refuse
     // at C_Initialize — loudly, before any value can be parsed — with the
-    // lifecycle-class error, never connect-and-corrupt. The poison daemon
-    // advertises the order foreign to this host (BE on LE, LE on BE).
+    // lifecycle-class error, never connect-and-corrupt.
     let _guard = shim_state_test_guard();
-    let daemon = TestDaemon::shared_foreign_endian();
+    let daemon = TestDaemon::shared_big_endian();
     unsafe {
         std::env::set_var("PKCS11_PROXY_ENDPOINT", &daemon.endpoint);
     }
@@ -399,7 +339,7 @@ fn create_with_template_round_trips_across_abis() {
         let rv =
             unsafe { dispatch::general::c_get_attribute_value(shim.session, object, &mut attr, 1) };
         assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} CLASS read-back");
-        assert_eq!(CK_ULONG::from_ne_bytes(class_buf), CKO_DATA, "{abi:?} CLASS value");
+        assert_eq!(CK_ULONG::from_le_bytes(class_buf), CKO_DATA, "{abi:?} CLASS value");
 
         // The vendor attribute's bytes are untouched by any width bridge.
         let mut vendor_buf = [0u8; 3];
@@ -412,8 +352,7 @@ fn create_with_template_round_trips_across_abis() {
             unsafe { dispatch::general::c_get_attribute_value(shim.session, object, &mut attr, 1) };
         assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} vendor read-back");
         assert_eq!(vendor_buf, [9, 8, 7], "{abi:?}: vendor bytes are opaque (D7)");
-        let ul_value_len = attr.ulValueLen;
-        assert_eq!(ul_value_len, 3, "{abi:?}: vendor length is byte-addressed");
+        assert_eq!(attr.ulValueLen, 3, "{abi:?}: vendor length is byte-addressed");
     }
 }
 
@@ -479,19 +418,12 @@ fn nested_template_input_round_trips_across_abis() {
         };
         let rv =
             unsafe { dispatch::general::c_get_attribute_value(shim.session, object, &mut attr, 1) };
-        if abi.ulong_width() != w {
-            assert_eq!(rv, CKR_FUNCTION_NOT_SUPPORTED);
-            assert_eq!(class_buf, vec![0; w]);
-            assert_backend_nested_class(abi, object, 4);
-            continue;
-        }
         assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} nested data query");
-        let sub_type = out_subs[0].type_;
-        assert_eq!(sub_type, CKA_CLASS, "{abi:?}: sub type");
+        assert_eq!(out_subs[0].type_, CKA_CLASS, "{abi:?}: sub type");
         let class_bytes: [u8; std::mem::size_of::<CK_ULONG>()] =
             class_buf.as_slice().try_into().expect("width");
         assert_eq!(
-            CK_ULONG::from_ne_bytes(class_bytes),
+            CK_ULONG::from_le_bytes(class_bytes),
             4,
             "{abi:?}: sub-value round-trips through input AND output bridging"
         );
@@ -521,19 +453,12 @@ fn assert_wrap_template_holds_class(
         ulValueLen: std::mem::size_of_val(&out_subs) as CK_ULONG,
     };
     let rv = unsafe { dispatch::general::c_get_attribute_value(session, object, &mut attr, 1) };
-    if abi.ulong_width() != w {
-        assert_eq!(rv, CKR_FUNCTION_NOT_SUPPORTED);
-        assert_eq!(class_buf, vec![0; w]);
-        assert_backend_nested_class(abi, object, expected_class);
-        return;
-    }
     assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} {context}: nested read-back");
-    let sub_type = out_subs[0].type_;
-    assert_eq!(sub_type, CKA_CLASS, "{abi:?} {context}: sub type");
+    assert_eq!(out_subs[0].type_, CKA_CLASS, "{abi:?} {context}: sub type");
     let bytes: [u8; std::mem::size_of::<CK_ULONG>()] =
         class_buf.as_slice().try_into().expect("width");
     assert_eq!(
-        CK_ULONG::from_ne_bytes(bytes),
+        CK_ULONG::from_le_bytes(bytes),
         expected_class,
         "{abi:?} {context}: sub-value at client width"
     );
@@ -624,140 +549,5 @@ fn nested_template_input_round_trips_via_every_template_call() {
         };
         assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} C_SetAttributeValue");
         assert_wrap_template_holds_class(abi, shim.session, target, 4, "set_attribute_value");
-    }
-}
-
-#[test]
-fn sign_then_verify_round_trips_through_the_proxy_cross_abi() {
-    // A2 lossless-loop: the mock now VERIFIES (signature must reproduce
-    // the sign echo of the data). A sign->verify round-trip through the
-    // full shim->gRPC->daemon stack therefore proves no byte was lost or
-    // corrupted in either direction — on foreign-ABI daemons too.
-    let _guard = shim_state_test_guard();
-    for abi in foreign_profiles() {
-        let (_daemon, shim) = session_on(abi);
-        let key = create_object(shim.session);
-        let mut mechanism = CK_MECHANISM {
-            mechanism: CKM_RSA_PKCS,
-            pParameter: std::ptr::null_mut(),
-            ulParameterLen: 0,
-        };
-        let data = b"cross-abi integrity";
-
-        assert_eq!(
-            unsafe { dispatch::general::c_sign_init(shim.session, &mut mechanism, key) },
-            CKR_OK as CK_RV,
-            "{abi:?} C_SignInit"
-        );
-        let mut sig_len: CK_ULONG = 0;
-        assert_eq!(
-            unsafe {
-                dispatch::general::c_sign(
-                    shim.session,
-                    data.as_ptr() as CK_BYTE_PTR,
-                    data.len() as CK_ULONG,
-                    std::ptr::null_mut(),
-                    &mut sig_len,
-                )
-            },
-            CKR_OK as CK_RV,
-            "{abi:?} C_Sign size query"
-        );
-        let mut signature = vec![0u8; sig_len as usize];
-        assert_eq!(
-            unsafe {
-                dispatch::general::c_sign(
-                    shim.session,
-                    data.as_ptr() as CK_BYTE_PTR,
-                    data.len() as CK_ULONG,
-                    signature.as_mut_ptr(),
-                    &mut sig_len,
-                )
-            },
-            CKR_OK as CK_RV,
-            "{abi:?} C_Sign"
-        );
-
-        // The genuine signature verifies.
-        assert_eq!(
-            unsafe { dispatch::general::c_verify_init(shim.session, &mut mechanism, key) },
-            CKR_OK as CK_RV,
-            "{abi:?} C_VerifyInit"
-        );
-        assert_eq!(
-            unsafe {
-                dispatch::general::c_verify(
-                    shim.session,
-                    data.as_ptr() as CK_BYTE_PTR,
-                    data.len() as CK_ULONG,
-                    signature.as_ptr() as CK_BYTE_PTR,
-                    sig_len,
-                )
-            },
-            CKR_OK as CK_RV,
-            "{abi:?} genuine signature verifies through the proxy"
-        );
-
-        // A tampered signature is rejected — the loop actually checks.
-        let mut tampered = signature.clone();
-        tampered[0] ^= 0x01;
-        assert_eq!(
-            unsafe { dispatch::general::c_verify_init(shim.session, &mut mechanism, key) },
-            CKR_OK as CK_RV,
-        );
-        assert_eq!(
-            unsafe {
-                dispatch::general::c_verify(
-                    shim.session,
-                    data.as_ptr() as CK_BYTE_PTR,
-                    data.len() as CK_ULONG,
-                    tampered.as_ptr() as CK_BYTE_PTR,
-                    sig_len,
-                )
-            },
-            CKR_SIGNATURE_INVALID as CK_RV,
-            "{abi:?} a corrupted signature is rejected"
-        );
-    }
-}
-
-#[test]
-fn generated_key_default_attributes_bridge_cross_abi() {
-    // Synthesized CKA_CLASS/CKA_KEY_TYPE are ulong attributes, so they
-    // must read back at the client width through the bridge on foreign
-    // ABIs — a client reading a generated key sees an authentic object.
-    let _guard = shim_state_test_guard();
-    for abi in foreign_profiles() {
-        let (_daemon, shim) = session_on(abi);
-        let mut mechanism = CK_MECHANISM {
-            mechanism: CKM_AES_KEY_GEN,
-            pParameter: std::ptr::null_mut(),
-            ulParameterLen: 0,
-        };
-        let mut key = CK_INVALID_HANDLE;
-        let rv = unsafe {
-            dispatch::general::c_generate_key(
-                shim.session,
-                &mut mechanism,
-                std::ptr::null_mut(),
-                0,
-                &mut key,
-            )
-        };
-        assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} C_GenerateKey");
-
-        let w = std::mem::size_of::<CK_ULONG>();
-        let mut class_buf = vec![0u8; w];
-        let mut attr = CK_ATTRIBUTE {
-            type_: CKA_CLASS,
-            pValue: class_buf.as_mut_ptr() as CK_VOID_PTR,
-            ulValueLen: w as CK_ULONG,
-        };
-        let rv =
-            unsafe { dispatch::general::c_get_attribute_value(shim.session, key, &mut attr, 1) };
-        assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} read CKA_CLASS");
-        let bytes: [u8; std::mem::size_of::<CK_ULONG>()] =
-            class_buf.as_slice().try_into().expect("width");
-        assert_eq!(CK_ULONG::from_ne_bytes(bytes), CKO_SECRET_KEY as CK_ULONG, "{abi:?} CKA_CLASS");
     }
 }

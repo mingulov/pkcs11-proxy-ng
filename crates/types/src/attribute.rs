@@ -264,8 +264,8 @@ pub fn is_value_bearing_secret(t: CkAttributeType) -> bool {
 pub enum CkAttributeValue {
     Bool(bool),
     Ulong(u64),
-    Bytes(crate::secret::SecretBytes),
-    String(crate::secret::SecretBytes),
+    Bytes(Vec<u8>),
+    String(String),
     /// A nested `CK_ATTRIBUTE[]` template value (the input direction of
     /// CKF_ARRAY_ATTRIBUTE attributes, e.g. CKA_WRAP_TEMPLATE inside a
     /// C_CreateObject template). Carried structurally: raw client

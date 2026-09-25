@@ -36,8 +36,7 @@ fn official_mechanism_mock_advertises_provider_gap_mechanisms() {
 
 #[test]
 fn mechanism_bearing_workflows_reject_unadvertised_mechanisms() {
-    let output_spec =
-        CkOutputBufferSpec { buffer_present: true, buffer_len: 64, length_pointer_null: false };
+    let output_spec = CkOutputBufferSpec { buffer_present: true, buffer_len: 64 };
     let param_spec = CkParameterRoundtripSpec { buffer_present: true, buffer_len: 16, value: None };
 
     let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
@@ -75,13 +74,13 @@ fn mechanism_bearing_workflows_reject_unadvertised_mechanisms() {
 
     let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
     assert_eq!(
-        backend.derive_key(session, &mechanism, key, Some(&[])).unwrap_err(),
+        backend.derive_key(session, &mechanism, key, &[]).unwrap_err(),
         CkRv::MECHANISM_INVALID
     );
 
     let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
     assert_eq!(
-        backend.derive_key_with_output(session, &mechanism, key, Some(&[])).unwrap_err(),
+        backend.derive_key_with_output(session, &mechanism, key, &[]).unwrap_err(),
         CkRv::MECHANISM_INVALID
     );
 
@@ -93,21 +92,19 @@ fn mechanism_bearing_workflows_reject_unadvertised_mechanisms() {
 
     let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
     assert_eq!(
-        backend
-            .unwrap_key(session, &mechanism, key, CkInBuf::Bytes(b"wrapped"), Some(&[]))
-            .unwrap_err(),
+        backend.unwrap_key(session, &mechanism, key, CkInBuf::Bytes(b"wrapped"), &[]).unwrap_err(),
         CkRv::MECHANISM_INVALID
     );
 
     let (backend, session, _, _, mechanism) = unsupported_mechanism_fixture();
     assert_eq!(
-        backend.generate_key(session, &mechanism, Some(&[])).unwrap_err(),
+        backend.generate_key(session, &mechanism, &[]).unwrap_err(),
         CkRv::MECHANISM_INVALID
     );
 
     let (backend, session, _, _, mechanism) = unsupported_mechanism_fixture();
     assert_eq!(
-        backend.generate_key_pair(session, &mechanism, Some(&[]), Some(&[])).unwrap_err(),
+        backend.generate_key_pair(session, &mechanism, &[], &[]).unwrap_err(),
         CkRv::MECHANISM_INVALID
     );
 
@@ -127,22 +124,20 @@ fn mechanism_bearing_workflows_reject_unadvertised_mechanisms() {
 
     let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
     assert_eq!(
-        backend.encapsulate_key(session, &mechanism, key, Some(&[])).unwrap_err(),
+        backend.encapsulate_key(session, &mechanism, key, &[]).unwrap_err(),
+        CkRv::MECHANISM_INVALID
+    );
+
+    let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
+    assert_eq!(
+        backend.encapsulate_key_exact(session, &mechanism, key, &[], &output_spec).unwrap_err(),
         CkRv::MECHANISM_INVALID
     );
 
     let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
     assert_eq!(
         backend
-            .encapsulate_key_exact(session, &mechanism, key, Some(&[]), &output_spec)
-            .unwrap_err(),
-        CkRv::MECHANISM_INVALID
-    );
-
-    let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
-    assert_eq!(
-        backend
-            .decapsulate_key(session, &mechanism, key, Some(&[]), CkInBuf::Bytes(b"ciphertext"))
+            .decapsulate_key(session, &mechanism, key, &[], CkInBuf::Bytes(b"ciphertext"))
             .unwrap_err(),
         CkRv::MECHANISM_INVALID
     );
@@ -195,7 +190,7 @@ fn mechanism_bearing_workflows_reject_unadvertised_mechanisms() {
                 &mechanism,
                 key,
                 CkInBuf::Bytes(b"wrapped"),
-                Some(&[]),
+                &[],
                 CkInBuf::Bytes(b"aad")
             )
             .unwrap_err(),
@@ -224,7 +219,7 @@ fn ilp32_profile_emits_4_byte_ulongs() {
     let backend = MockBackend::default_test().with_abi(MockAbi::Ilp32);
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-    let object = backend.create_object(session, Some(&[])).unwrap();
+    let object = backend.create_object(session, &[]).unwrap();
     backend.set_attribute(
         object,
         CkAttributeType::CLASS,
@@ -249,11 +244,7 @@ fn ilp32_profile_emits_4_byte_ulongs() {
     }];
     let (rv, results) = backend.get_attribute_value_exact(session, object, &data_query).unwrap();
     assert_eq!(rv, CkRv::OK);
-    assert_eq!(
-        results[0].value,
-        Some(SecretBytes::new(MockAbi::Ilp32.encode_ulong(3))),
-        "value bytes at emulated width"
-    );
+    assert_eq!(results[0].value, Some(vec![3, 0, 0, 0]), "value bytes at emulated width");
 }
 
 #[test]
@@ -261,7 +252,7 @@ fn llp64_profile_reports_16_byte_attribute_stride() {
     let backend = MockBackend::default_test().with_abi(MockAbi::Llp64);
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-    let object = backend.create_object(session, Some(&[])).unwrap();
+    let object = backend.create_object(session, &[]).unwrap();
     backend.set_attribute(
         object,
         CkAttributeType::WRAP_TEMPLATE,
@@ -305,8 +296,8 @@ fn llp64_profile_reports_16_byte_attribute_stride() {
     let (rv, results) = backend.get_attribute_value_exact(session, object, &data_query).unwrap();
     assert_eq!(rv, CkRv::OK);
     let nested = results[0].nested.as_ref().expect("nested results");
-    assert_eq!(nested[0].value, Some(SecretBytes::new(MockAbi::Llp64.encode_ulong(3))));
-    assert_eq!(nested[1].value, Some(SecretBytes::new(MockAbi::Llp64.encode_ulong(31))));
+    assert_eq!(nested[0].value, Some(vec![3, 0, 0, 0]));
+    assert_eq!(nested[1].value, Some(vec![31, 0, 0, 0]));
 }
 
 #[test]
@@ -314,20 +305,14 @@ fn mock_advertises_its_profile_not_the_host() {
     let narrow = MockBackend::default_test().with_abi(MockAbi::Ilp32);
     assert_eq!(narrow.abi_ulong_size(), 4);
     assert_eq!(narrow.abi_attribute_stride(), 12);
-    // Byte order has no profile dimension: the default advertisement is the
-    // host's own order, consistent with the same-endian encoded values.
-    let host_order = if cfg!(target_endian = "little") { 1 } else { 2 };
-    assert_eq!(narrow.abi_byte_order(), host_order, "advertises host order by default");
+    assert_eq!(narrow.abi_byte_order(), 1, "advertises little-endian by default");
 
     let llp64 = MockBackend::default_test().with_abi(MockAbi::Llp64);
     assert_eq!(llp64.abi_ulong_size(), 4);
     assert_eq!(llp64.abi_attribute_stride(), 16);
-    assert_eq!(llp64.abi_byte_order(), host_order);
 
     let be = MockBackend::default_test().with_big_endian_advertisement();
     assert_eq!(be.abi_byte_order(), 2, "the D6-refusal knob claims big-endian");
-    let le = MockBackend::default_test().with_little_endian_advertisement();
-    assert_eq!(le.abi_byte_order(), 1, "the mirror knob claims little-endian");
 }
 
 #[test]
@@ -337,7 +322,7 @@ fn registry_backed_mock_validates_mechanism_param_presence() {
         .with_param_presence_validation(&registry);
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-    let key = backend.create_object(session, Some(&[])).unwrap();
+    let key = backend.create_object(session, &[]).unwrap();
 
     // A shaped mechanism without its parameters must be rejected like a
     // real token would reject it.
@@ -370,11 +355,8 @@ fn registry_backed_mock_validates_mechanism_param_presence() {
             iv: vec![0; 12],
             iv_bits: 96,
             iv_buffer_len: 12,
-            aad: vec![].into(),
+            aad: vec![],
             tag_bits: 128,
-
-            iv_null: false,
-            aad_null: false,
         })),
     };
     backend.encrypt_init(session, &gcm, key).expect("GCM with params");
@@ -388,7 +370,7 @@ fn registryless_mock_stays_permissive_about_params() {
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
     let gcm_no_params = CkMechanism { mechanism_type: CkMechanismType::AES_GCM, params: None };
-    let key = backend.create_object(session, Some(&[])).unwrap();
+    let key = backend.create_object(session, &[]).unwrap();
     backend.encrypt_init(session, &gcm_no_params, key).expect("no registry, no validation");
 }
 
@@ -397,7 +379,7 @@ fn gcm_wrap_iv_generation_is_deterministic_and_preserves_fixed_prefix() {
     let backend = MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::AES_GCM]);
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-    let key = backend.create_object(session, Some(&[])).unwrap();
+    let key = backend.create_object(session, &[]).unwrap();
 
     let mech = CkMechanism {
         mechanism_type: CkMechanismType::AES_GCM,
@@ -405,7 +387,7 @@ fn gcm_wrap_iv_generation_is_deterministic_and_preserves_fixed_prefix() {
             iv: vec![0xA1, 0xA2, 0xA3, 0xA4, 0, 0, 0, 0, 0, 0, 0, 0],
             iv_fixed_bits: 32,
             iv_generator: 4, // CKG_GENERATE_RANDOM
-            aad: vec![].into(),
+            aad: vec![],
             tag_bits: 128,
         })),
     };
@@ -431,7 +413,7 @@ fn gcm_wrap_iv_generation_is_deterministic_and_preserves_fixed_prefix() {
             iv: vec![0; 12],
             iv_fixed_bits: 0,
             iv_generator: 1, // CKG_NO_GENERATE
-            aad: vec![].into(),
+            aad: vec![],
             tag_bits: 128,
         })),
     };
@@ -458,10 +440,10 @@ fn create_object_stores_template_attributes_for_read_back() {
         // Vendor attribute: opaque bytes, D7 passthrough at ANY width.
         CkAttribute {
             attr_type: CkAttributeType(VENDOR_ATTR),
-            value: Some(CkAttributeValue::Bytes(vec![9, 8, 7].into())),
+            value: Some(CkAttributeValue::Bytes(vec![9, 8, 7])),
         },
     ];
-    let object = backend.create_object(session, Some(&template)).unwrap();
+    let object = backend.create_object(session, &template).unwrap();
 
     let query = |attr_type: CkAttributeType, buffer_len: u64| CkAttributeQuery {
         attr_type,
@@ -482,146 +464,8 @@ fn create_object_stores_template_attributes_for_read_back() {
         )
         .unwrap();
     assert_eq!(rv, CkRv::OK);
-    assert_eq!(
-        results[0].value,
-        Some(SecretBytes::new(MockAbi::Ilp32.encode_ulong(4))),
-        "ulong at the emulated width"
-    );
-    assert_eq!(results[1].value, Some(SecretBytes::new(vec![0])), "bool as one byte");
-    assert_eq!(results[2].value, Some(SecretBytes::new(b"probe".to_vec())), "string bytes");
-    assert_eq!(
-        results[3].value,
-        Some(SecretBytes::new(vec![9, 8, 7])),
-        "vendor bytes pass through opaquely"
-    );
-}
-
-#[test]
-fn generated_secret_key_value_has_requested_value_len() {
-    // A real token generating an n-byte secret key sets CKA_VALUE to n
-    // bytes; the mock synthesizes deterministic echo bytes of exactly
-    // CKA_VALUE_LEN so read-after-generate looks authentic.
-    let backend = MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::AES_KEY_GEN]);
-    backend.initialize().unwrap();
-    let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-    let mech = CkMechanism { mechanism_type: CkMechanismType::AES_KEY_GEN, params: None };
-    let template = [CkAttribute {
-        attr_type: CkAttributeType::VALUE_LEN,
-        value: Some(CkAttributeValue::Ulong(32)),
-    }];
-    let key = backend.generate_key(session, &mech, Some(&template)).unwrap();
-
-    let (rv, results) = backend
-        .get_attribute_value_exact(
-            session,
-            key,
-            &[CkAttributeQuery {
-                attr_type: CkAttributeType::VALUE,
-                buffer_present: false,
-                buffer_len: 0,
-                nested: None,
-            }],
-        )
-        .unwrap();
-    assert_eq!(rv, CkRv::OK);
-    assert_eq!(results[0].returned_len, 32, "CKA_VALUE length matches CKA_VALUE_LEN");
-}
-
-#[test]
-fn explicit_value_wins_over_value_len_synthesis() {
-    let backend = MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::AES_KEY_GEN]);
-    backend.initialize().unwrap();
-    let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-    let mech = CkMechanism { mechanism_type: CkMechanismType::AES_KEY_GEN, params: None };
-    let template = [
-        CkAttribute {
-            attr_type: CkAttributeType::VALUE_LEN,
-            value: Some(CkAttributeValue::Ulong(16)),
-        },
-        CkAttribute {
-            attr_type: CkAttributeType::VALUE,
-            value: Some(CkAttributeValue::Bytes(vec![0xAB; 4].into())),
-        },
-    ];
-    let key = backend.generate_key(session, &mech, Some(&template)).unwrap();
-    let (_rv, results) = backend
-        .get_attribute_value_exact(
-            session,
-            key,
-            &[CkAttributeQuery {
-                attr_type: CkAttributeType::VALUE,
-                buffer_present: false,
-                buffer_len: 0,
-                nested: None,
-            }],
-        )
-        .unwrap();
-    assert_eq!(results[0].returned_len, 4, "an explicit CKA_VALUE is not overridden");
-}
-
-#[test]
-fn generate_key_synthesizes_class_and_key_type() {
-    // A real token sets CKA_CLASS/CKA_KEY_TYPE (and CKA_LOCAL) on a
-    // generated key from the mechanism, unless the template overrides.
-    let backend = MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::AES_KEY_GEN]);
-    backend.initialize().unwrap();
-    let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-    let mech = CkMechanism { mechanism_type: CkMechanismType::AES_KEY_GEN, params: None };
-    let key = backend.generate_key(session, &mech, Some(&[])).unwrap();
-
-    let query = |t: CkAttributeType| CkAttributeQuery {
-        attr_type: t,
-        buffer_present: true,
-        buffer_len: 8,
-        nested: None,
-    };
-    let (rv, results) = backend
-        .get_attribute_value_exact(
-            session,
-            key,
-            &[query(CkAttributeType::CLASS), query(CkAttributeType::KEY_TYPE)],
-        )
-        .unwrap();
-    assert_eq!(rv, CkRv::OK);
-    // CKO_SECRET_KEY = 4, CKK_AES = 0x1F, at the mock's emulated width.
-    assert_eq!(
-        results[0].value,
-        Some(SecretBytes::new(MockAbi::host().encode_ulong(4))),
-        "CKA_CLASS"
-    );
-    assert_eq!(
-        results[1].value,
-        Some(SecretBytes::new(MockAbi::host().encode_ulong(0x1F))),
-        "CKA_KEY_TYPE"
-    );
-}
-
-#[test]
-fn generate_key_template_overrides_synthesized_class() {
-    let backend = MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::AES_KEY_GEN]);
-    backend.initialize().unwrap();
-    let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-    let mech = CkMechanism { mechanism_type: CkMechanismType::AES_KEY_GEN, params: None };
-    let template = [CkAttribute {
-        attr_type: CkAttributeType::CLASS,
-        value: Some(CkAttributeValue::Ulong(0x99)),
-    }];
-    let key = backend.generate_key(session, &mech, Some(&template)).unwrap();
-    let (_rv, results) = backend
-        .get_attribute_value_exact(
-            session,
-            key,
-            &[CkAttributeQuery {
-                attr_type: CkAttributeType::CLASS,
-                buffer_present: true,
-                buffer_len: 8,
-                nested: None,
-            }],
-        )
-        .unwrap();
-    assert_eq!(
-        results[0].value,
-        Some(SecretBytes::new(MockAbi::host().encode_ulong(0x99))),
-        "template CKA_CLASS wins"
-    );
+    assert_eq!(results[0].value, Some(vec![4, 0, 0, 0]), "ulong at the emulated width");
+    assert_eq!(results[1].value, Some(vec![0]), "bool as one byte");
+    assert_eq!(results[2].value, Some(b"probe".to_vec()), "string bytes");
+    assert_eq!(results[3].value, Some(vec![9, 8, 7]), "vendor bytes pass through opaquely");
 }

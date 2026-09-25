@@ -25,7 +25,7 @@ impl FfiBackend {
         let function = unsafe { (*fl).C_EncapsulateKey }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
-        let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
+        let ffi_attrs = FfiAttrs::from_slice(template)?;
 
         let h_session = Self::session_handle(session)?;
         let h_public_key = Self::object_handle(public_key)?;
@@ -45,22 +45,24 @@ impl FfiBackend {
                     &mut key_handle,
                 )
             };
-            if rv == CkRv::OK.0 || rv == CkRv::BUFFER_TOO_SMALL.0 {
+            if rv == CkRv::OK.0 as cryptoki_sys::CK_RV
+                || rv == CkRv::BUFFER_TOO_SMALL.0 as cryptoki_sys::CK_RV
+            {
                 // Both CKR_OK and CKR_BUFFER_TOO_SMALL are valid size-query
                 // responses (NSS returns BUFFER_TOO_SMALL). Propagate the
                 // returned length so the caller can allocate correctly.
                 Ok(CkOutputAndHandleResult {
-                    ck_rv: CkRv(rv),
+                    ck_rv: CkRv(rv as u64),
                     returned_len: out_len as u64,
                     value: None,
-                    object_handle: CkObjectHandle(if rv == CkRv::OK.0 {
+                    object_handle: CkObjectHandle(if rv == CkRv::OK.0 as cryptoki_sys::CK_RV {
                         key_handle as u64
                     } else {
                         0
                     }),
                 })
             } else {
-                Err(CkRv(rv))
+                Err(CkRv(rv as u64))
             }
         } else {
             // Data query: allocate caller-specified buffer
@@ -79,7 +81,7 @@ impl FfiBackend {
                     &mut key_handle,
                 )
             };
-            if rv == CkRv::OK.0 {
+            if rv == CkRv::OK.0 as cryptoki_sys::CK_RV {
                 buf.truncate(out_len as usize);
                 Ok(CkOutputAndHandleResult {
                     ck_rv: CkRv::OK,
@@ -87,7 +89,7 @@ impl FfiBackend {
                     value: Some(buf),
                     object_handle: CkObjectHandle(key_handle as u64),
                 })
-            } else if rv == CkRv::BUFFER_TOO_SMALL.0 {
+            } else if rv == CkRv::BUFFER_TOO_SMALL.0 as cryptoki_sys::CK_RV {
                 Ok(CkOutputAndHandleResult {
                     ck_rv: CkRv::BUFFER_TOO_SMALL,
                     returned_len: out_len as u64,
@@ -95,7 +97,7 @@ impl FfiBackend {
                     object_handle: CkObjectHandle(0),
                 })
             } else {
-                Err(CkRv(rv))
+                Err(CkRv(rv as u64))
             }
         }
     }
@@ -114,10 +116,7 @@ impl FfiBackend {
         let function = unsafe { (*fl).C_EncapsulateKey }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
-        let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
-        let h_session = Self::session_handle(session)?;
-        let h_pubkey = Self::object_handle(public_key)?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
+        let ffi_attrs = FfiAttrs::from_slice(template)?;
 
         // Two-call pattern: first call with pCiphertext=null to get size.
         // Each leg routes through the unit choke (single call, no retry —
@@ -170,7 +169,7 @@ impl FfiBackend {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         use super::ffi_conversion::FfiAttrs;
 
-        let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
+        let ffi_attrs = FfiAttrs::from_slice(template)?;
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
         let (ct_ptr, ct_len) = ciphertext.as_ptr_len();
         let mut key_handle: cryptoki_sys::CK_OBJECT_HANDLE = 0;

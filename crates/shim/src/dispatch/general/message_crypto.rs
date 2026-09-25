@@ -42,7 +42,10 @@ unsafe fn read_message_init_mechanism(
         // Recognised AEAD message params: ship the mechanism type only and let
         // the backend rebuild the CK_*_MESSAGE_PARAMS struct from this.
         Some(mp) if !matches!(mp, MessageParameter::Raw(_)) => Ok((
-            Some(CkMechanism { mechanism_type: CkMechanismType(c_mech.mechanism), params: None }),
+            Some(CkMechanism {
+                mechanism_type: CkMechanismType(c_mech.mechanism as u64),
+                params: None,
+            }),
             Some(mp),
         )),
         // Parameterless / unrecognised: preserve the classic shim behaviour.
@@ -65,10 +68,10 @@ pub unsafe extern "C" fn c_message_encrypt_init(
             Err(rv) => return rv,
         };
         let result = with_client!(client => client.message_encrypt_init(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             mech.as_ref(),
             init_param.as_ref(),
-            CkObjectHandle(h_key),
+            CkObjectHandle(h_key as u64),
         ));
         if result.is_ok() {
             state::clear_message_encrypt_output_cache(h_session);
@@ -84,31 +87,9 @@ pub unsafe extern "C" fn c_message_encrypt_init(
 
 pub unsafe extern "C" fn c_message_encrypt_final(h_session: CK_SESSION_HANDLE) -> CK_RV {
     catch_panics(|| {
-        if let Some(rv) = pointer_safe_message_capability_error() {
-            return rv;
-        }
-        let operation = state::message_operation_state(h_session, state::MessageOperation::Encrypt);
-        let mut operation = operation.lock().expect("message encrypt state poisoned");
-        if operation.shape.is_none() {
-            return rv_err(CkRv::OPERATION_NOT_INITIALIZED);
-        }
-        let saved_shape = operation.shape.take();
-        match with_client!(client => client.message_encrypt_final_stateful(CkSessionHandle(h_session as u64)))
-        {
-            Ok(()) => {
-                state::clear_message_encrypt_output_cache(h_session);
-                state::clear_operation_state_cache(h_session);
-                rv_ok()
-            }
-            Err(error) => {
-                if error.origin == MessageCallErrorOrigin::Backend
-                    && error.ck_rv != CkRv::DEVICE_ERROR
-                {
-                    operation.shape = saved_shape;
-                }
-                rv_err(error.ck_rv)
-            }
-        }
+        unit_result_to_rv(
+            with_client!(client => client.message_encrypt_final(CkSessionHandle(h_session as u64))),
+        )
     })
 }
 
@@ -127,10 +108,10 @@ pub unsafe extern "C" fn c_message_decrypt_init(
             Err(rv) => return rv,
         };
         let result = with_client!(client => client.message_decrypt_init(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             mech.as_ref(),
             init_param.as_ref(),
-            CkObjectHandle(h_key),
+            CkObjectHandle(h_key as u64),
         ));
         if result.is_ok() {
             state::clear_message_decrypt_output_cache(h_session);
@@ -146,24 +127,9 @@ pub unsafe extern "C" fn c_message_decrypt_init(
 
 pub unsafe extern "C" fn c_message_decrypt_final(h_session: CK_SESSION_HANDLE) -> CK_RV {
     catch_panics(|| {
-        if let Some(rv) = pointer_safe_message_capability_error() {
-            return rv;
-        }
-        let operation = state::message_operation_state(h_session, state::MessageOperation::Decrypt);
-        let mut operation = operation.lock().expect("message decrypt state poisoned");
-        if operation.shape.is_none() {
-            return rv_err(CkRv::OPERATION_NOT_INITIALIZED);
-        }
-        let saved_shape = operation.shape.take();
-        match with_client!(client => client.message_decrypt_final_stateful(CkSessionHandle(h_session as u64)))
-        {
-            Ok(()) => {
-                state::clear_message_decrypt_output_cache(h_session);
-                state::clear_operation_state_cache(h_session);
-                rv_ok()
-            }
-            Err(error) => rv_err(settle_message_init_error(&mut operation, saved_shape, &error)),
-        }
+        unit_result_to_rv(
+            with_client!(client => client.message_decrypt_final(CkSessionHandle(h_session as u64))),
+        )
     })
 }
 
@@ -191,9 +157,7 @@ pub unsafe extern "C" fn c_message_sign_init(
             }
             Some(unsafe { read_mechanism(p_mechanism) })
         };
-        let successful_shape = mech.as_ref().map(|_| MessageParameterShape::Unmodeled);
-        let saved_shape = operation.shape.take();
-        let result = with_client!(client => client.message_sign_init_stateful(
+        let result = with_client!(client => client.message_sign_init(
             CkSessionHandle(h_session as u64),
             mech.as_ref(),
             CkObjectHandle(h_key as u64),
@@ -216,27 +180,9 @@ pub unsafe extern "C" fn c_message_sign_init(
 
 pub unsafe extern "C" fn c_message_sign_final(h_session: CK_SESSION_HANDLE) -> CK_RV {
     catch_panics(|| {
-        if let Some(rv) = pointer_safe_message_capability_error() {
-            return rv;
-        }
-        let operation = state::message_operation_state(h_session, state::MessageOperation::Sign);
-        let mut operation = operation.lock().expect("message sign state poisoned");
-        if operation.shape.is_none() {
-            return rv_err(CkRv::OPERATION_NOT_INITIALIZED);
-        }
-        let saved_shape = operation.shape.take();
-        match with_client!(client => client.message_sign_final_stateful(CkSessionHandle(h_session as u64)))
-        {
-            Ok(()) => rv_ok(),
-            Err(error) => {
-                if error.origin == MessageCallErrorOrigin::Backend
-                    && error.ck_rv != CkRv::DEVICE_ERROR
-                {
-                    operation.shape = saved_shape;
-                }
-                rv_err(error.ck_rv)
-            }
-        }
+        unit_result_to_rv(
+            with_client!(client => client.message_sign_final(CkSessionHandle(h_session as u64))),
+        )
     })
 }
 
@@ -264,27 +210,11 @@ pub unsafe extern "C" fn c_message_verify_init(
             }
             Some(unsafe { read_mechanism(p_mechanism) })
         };
-        let successful_shape = mech.as_ref().map(|_| MessageParameterShape::Unmodeled);
-        let saved_shape = operation.shape.take();
-        match with_client!(client => client.message_verify_init_stateful(
+        unit_result_to_rv(with_client!(client => client.message_verify_init(
             CkSessionHandle(h_session as u64),
             mech.as_ref(),
             CkObjectHandle(h_key as u64),
-        )) {
-            Ok(()) => {
-                operation.shape = successful_shape;
-                state::clear_operation_state_cache(h_session);
-                rv_ok()
-            }
-            Err(error) => {
-                if error.origin == MessageCallErrorOrigin::Backend
-                    && error.ck_rv != CkRv::DEVICE_ERROR
-                {
-                    operation.shape = saved_shape;
-                }
-                rv_err(error.ck_rv)
-            }
-        }
+        )))
     })
 }
 
@@ -294,27 +224,9 @@ pub unsafe extern "C" fn c_message_verify_init(
 
 pub unsafe extern "C" fn c_message_verify_final(h_session: CK_SESSION_HANDLE) -> CK_RV {
     catch_panics(|| {
-        if let Some(rv) = pointer_safe_message_capability_error() {
-            return rv;
-        }
-        let operation = state::message_operation_state(h_session, state::MessageOperation::Verify);
-        let mut operation = operation.lock().expect("message verify state poisoned");
-        if operation.shape.is_none() {
-            return rv_err(CkRv::OPERATION_NOT_INITIALIZED);
-        }
-        let saved_shape = operation.shape.take();
-        match with_client!(client => client.message_verify_final_stateful(CkSessionHandle(h_session as u64)))
-        {
-            Ok(()) => rv_ok(),
-            Err(error) => {
-                if error.origin == MessageCallErrorOrigin::Backend
-                    && error.ck_rv != CkRv::DEVICE_ERROR
-                {
-                    operation.shape = saved_shape;
-                }
-                rv_err(error.ck_rv)
-            }
-        }
+        unit_result_to_rv(
+            with_client!(client => client.message_verify_final(CkSessionHandle(h_session as u64))),
+        )
     })
 }
 
@@ -380,7 +292,8 @@ pub unsafe extern "C" fn c_encrypt_message(
             Ok(call) => call,
             Err(error) => return rv_err(error),
         };
-        let result = with_client!(client => client.parameter_output_exact_contract(
+
+        let result = with_client!(client => client.parameter_output_exact(
             CkSessionHandle(h_session as u64),
             ParameterOutputFunction::EncryptMessage,
             &output_spec,
@@ -446,10 +359,9 @@ pub unsafe extern "C" fn c_encrypt_message_begin(
             Err(e) => return rv_err(e),
         };
 
-        let result = with_client!(client => client.encrypt_message_begin_contract(
+        let result = with_client!(client => client.encrypt_message_begin(
             CkSessionHandle(h_session as u64),
-            &envelope,
-            parameter_call.parameter(),
+            parameter,
             aad,
         ));
 
@@ -533,7 +445,8 @@ pub unsafe extern "C" fn c_encrypt_message_next(
             Ok(call) => call,
             Err(error) => return rv_err(error),
         };
-        let result = with_client!(client => client.parameter_output_exact_contract(
+
+        let result = with_client!(client => client.parameter_output_exact(
             CkSessionHandle(h_session as u64),
             ParameterOutputFunction::EncryptMessageNext,
             &output_spec,
@@ -637,7 +550,8 @@ pub unsafe extern "C" fn c_decrypt_message(
             Ok(call) => call,
             Err(error) => return rv_err(error),
         };
-        let result = with_client!(client => client.parameter_output_exact_contract(
+
+        let result = with_client!(client => client.parameter_output_exact(
             CkSessionHandle(h_session as u64),
             ParameterOutputFunction::DecryptMessage,
             &output_spec,
@@ -703,10 +617,9 @@ pub unsafe extern "C" fn c_decrypt_message_begin(
             Err(e) => return rv_err(e),
         };
 
-        let result = with_client!(client => client.decrypt_message_begin_contract(
+        let result = with_client!(client => client.decrypt_message_begin(
             CkSessionHandle(h_session as u64),
-            &envelope,
-            parameter_call.parameter(),
+            parameter,
             aad,
         ));
 
@@ -790,7 +703,8 @@ pub unsafe extern "C" fn c_decrypt_message_next(
             Ok(call) => call,
             Err(error) => return rv_err(error),
         };
-        let result = with_client!(client => client.parameter_output_exact_contract(
+
+        let result = with_client!(client => client.parameter_output_exact(
             CkSessionHandle(h_session as u64),
             ParameterOutputFunction::DecryptMessageNext,
             &output_spec,
@@ -879,7 +793,7 @@ pub unsafe extern "C" fn c_sign_message(
             MessageParameterStage::OneShot,
         );
 
-        let result = with_client!(client => client.parameter_output_exact_contract(
+        let result = with_client!(client => client.parameter_output_exact(
             CkSessionHandle(h_session as u64),
             ParameterOutputFunction::SignMessage,
             &output_spec,
@@ -954,9 +868,9 @@ pub unsafe extern "C" fn c_sign_message_begin(
             MessageParameterStage::Begin,
         );
 
-        let result = with_client!(client => client.sign_message_begin_contract(
+        let result = with_client!(client => client.sign_message_begin(
             CkSessionHandle(h_session as u64),
-            &envelope,
+            parameter,
         ));
 
         match result {
@@ -1007,9 +921,10 @@ pub unsafe extern "C" fn c_sign_message_next(
         let request_signature = !pul_signature_len.is_null();
 
         if !request_signature {
-            let result = with_client!(client => client.sign_message_next_feed_contract(
+            // Feed more data — no output. Use existing convenience path.
+            let result = with_client!(client => client.sign_message_next(
                 CkSessionHandle(h_session as u64),
-                &envelope,
+                parameter,
                 data_part,
             ));
 
@@ -1050,7 +965,7 @@ pub unsafe extern "C" fn c_sign_message_next(
             MessageParameterStage::Next { final_part: true },
         );
 
-        let result = with_client!(client => client.parameter_output_exact_contract(
+        let result = with_client!(client => client.parameter_output_exact(
             CkSessionHandle(h_session as u64),
             ParameterOutputFunction::SignMessageNext,
             &output_spec,
@@ -1122,9 +1037,9 @@ pub unsafe extern "C" fn c_verify_message(
             Err(e) => return rv_err(e),
         };
 
-        match with_client!(client => client.verify_message_contract(
+        unit_result_to_rv(with_client!(client => client.verify_message(
             CkSessionHandle(h_session as u64),
-            &envelope,
+            parameter,
             data,
             signature,
         )) {
@@ -1166,20 +1081,10 @@ pub unsafe extern "C" fn c_verify_message_begin(
             Err(error) => return rv_err(error),
         };
 
-        match with_client!(client => client.verify_message_begin_contract(
+        unit_result_to_rv(with_client!(client => client.verify_message_begin(
             CkSessionHandle(h_session as u64),
-            &envelope,
-        )) {
-            Ok(_) => rv_ok(),
-            Err(error) => {
-                if error.origin != MessageCallErrorOrigin::Backend
-                    || error.ck_rv == CkRv::DEVICE_ERROR
-                {
-                    operation.shape = None;
-                }
-                rv_err(error.ck_rv)
-            }
-        }
+            parameter,
+        )))
     })
 }
 
@@ -1216,9 +1121,9 @@ pub unsafe extern "C" fn c_verify_message_next(
             CkInBuf::Bytes(&[])
         };
 
-        match with_client!(client => client.verify_message_next_contract(
+        unit_result_to_rv(with_client!(client => client.verify_message_next(
             CkSessionHandle(h_session as u64),
-            &envelope,
+            parameter,
             data_part,
             is_final,
             signature,

@@ -69,28 +69,14 @@ pub(super) async fn open_session(
         }
     }
 
-    // G2-PR3: per-principal session quota (opt-in; zero-cost when unset).
-    // principal_key is derived only when the quota is active to avoid an
-    // unconditional DashMap lookup + String clone on every open_session call
-    // in the common (limit-unset) path.
-    if let Some(max) = crate::server::rate_quota::per_principal_max_sessions() {
-        let principal_key = ctx_mgr.context_identity(&ctx_id).unwrap_or_else(|| ctx_id.0.clone());
-        if ctx_mgr.session_count_for_principal(&principal_key) >= max {
-            crate::server::resilience::record_session_quota_rejected();
-            return Ok(Response::new(pkcs11_proxy_ng_proto::OpenSessionResponse {
-                ck_rv: CkRv::SESSION_COUNT.0,
-                session_handle: 0,
-            }));
-        }
-    }
-
     let flags = CkSessionFlags(req.flags as u64);
     let backend = backend_ref.clone();
     let result = spawn_backend(move || backend.open_session(backend_slot.0, flags)).await?;
 
     match result {
         Ok(backend_session) => {
-            match register_session_handle(ctx_mgr, &ctx_id, backend_session, backend_slot).await {
+            let slot_id = CkSlotId(req.slot_id as u64);
+            match register_session_handle(ctx_mgr, &ctx_id, backend_session, slot_id).await {
                 Some(virtual_handle) => {
                     debug!(
                         context_id = %ctx_id.0,
@@ -157,7 +143,7 @@ pub(super) async fn close_session_with_timeout(
         Some(Some(backend_handle)) => backend_handle,
     };
 
-    let session = CkSessionHandle(backend_handle.0);
+    let session = CkSessionHandle(backend_handle.0 as u64);
     let backend = backend_ref.clone();
     let result = spawn_backend(move || backend.close_session(session)).await?;
 
@@ -230,12 +216,7 @@ pub(super) async fn close_all_sessions(
     // ADR-0002 §7: close only THIS client's sessions for the target slot.
     // We MUST NOT call backend.close_all_sessions() — that would close
     // sessions belonging to other logical client instances.
-    // D6(2): snapshot the held login first — remove_sessions_for_slot drops
-    // it, and last-context-out must then release the backend login too.
-    let held_login = ctx_mgr
-        .get_context(&ctx_id, |ctx| ctx.login_state.contains_key(&backend_slot))
-        .await
-        .unwrap_or(false);
+    let slot_id = CkSlotId(req.slot_id as u64);
     let backend_sessions = ctx_mgr
         .get_context(&ctx_id, |ctx| ctx.remove_sessions_for_slot(backend_slot))
         .await

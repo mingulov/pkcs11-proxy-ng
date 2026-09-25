@@ -30,11 +30,7 @@ impl FfiBackend {
         base_key: CkObjectHandle,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
-        let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
-        let h_session = Self::session_handle(session)?;
-        let h_base_key = Self::object_handle(base_key)?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
+        let ffi_attrs = FfiAttrs::from_slice(template)?;
         Self::call_object_with_mechanism(
             &admission,
             unsafe { (*self.func_list).C_DeriveKey },
@@ -63,11 +59,7 @@ impl FfiBackend {
         base_key: CkObjectHandle,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
-        let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
-        let h_session = Self::session_handle(session)?;
-        let h_base_key = Self::object_handle(base_key)?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
+        let ffi_attrs = FfiAttrs::from_slice(template)?;
         Self::call_object_with_mechanism_output(
             &admission,
             unsafe { (*self.func_list).C_DeriveKey },
@@ -92,11 +84,7 @@ impl FfiBackend {
         base_key: CkObjectHandle,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<crate::traits::CkDeriveKeyOutputResult> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
-        let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
-        let h_session = Self::session_handle(session)?;
-        let h_base_key = Self::object_handle(base_key)?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
+        let ffi_attrs = FfiAttrs::from_slice(template)?;
         Self::call_object_with_mechanism_output_result(
             &admission,
             unsafe { (*self.func_list).C_DeriveKey },
@@ -196,7 +184,7 @@ impl FfiBackend {
         wrapped_key: CkInBuf<'_>,
         template: &[CkAttribute],
     ) -> CkResult<CkObjectHandle> {
-        let ffi_attrs = FfiAttrs::from_slice(template);
+        let ffi_attrs = FfiAttrs::from_slice(template)?;
         let (wk_ptr, wk_len) = wrapped_key.as_ptr_len();
         Self::call_object_with_mechanism(
             &admission,
@@ -223,10 +211,7 @@ impl FfiBackend {
         mechanism: &CkMechanism,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
-        let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
-        let h_session = Self::session_handle(session)?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
+        let ffi_attrs = FfiAttrs::from_slice(template)?;
         Self::call_object_with_mechanism(
             &admission,
             unsafe { (*self.func_list).C_GenerateKey },
@@ -279,7 +264,7 @@ impl FfiBackend {
         mechanism: &CkMechanism,
         template: &[CkAttribute],
     ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
-        let ffi_attrs = FfiAttrs::from_slice(template);
+        let ffi_attrs = FfiAttrs::from_slice(template)?;
         Self::call_object_with_mechanism_output(
             unsafe { (*self.func_list).C_GenerateKey },
             mechanism,
@@ -302,11 +287,8 @@ impl FfiBackend {
         pub_template: Option<&[CkAttribute]>,
         priv_template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, CkObjectHandle)> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
-        let pub_ffi = FfiAttrs::from_opt_slice(pub_template)?;
-        let priv_ffi = FfiAttrs::from_opt_slice(priv_template)?;
-        let h_session = Self::session_handle(session)?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
+        let pub_ffi = FfiAttrs::from_slice(pub_template)?;
+        let priv_ffi = FfiAttrs::from_slice(priv_template)?;
         Self::call_object_pair_with_mechanism(
             &admission,
             unsafe { (*self.func_list).C_GenerateKeyPair },

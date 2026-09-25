@@ -121,22 +121,6 @@ async fn session_cancel_with_timeout(
     };
 
     let flags = CkFlags(req.flags as u64);
-    let operations = cancelled_message_operations(flags.0);
-    let mut transitions = match ctx_mgr
-        .begin_message_operation_transitions(
-            &ctx_id,
-            VirtualHandle(req.session_handle),
-            &operations,
-        )
-        .await
-    {
-        Ok(transitions) => transitions,
-        Err(error) => {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::SessionCancelResponse {
-                ck_rv: error.0,
-            }));
-        }
-    };
     let backend = backend_ref.clone();
     let result = spawn_backend_with_optional_timeout(timeout_override, move || {
         for transition in &mut transitions {

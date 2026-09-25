@@ -31,7 +31,7 @@ pub unsafe extern "C" fn c_open_session(
 
 pub unsafe extern "C" fn c_close_session(h_session: CK_SESSION_HANDLE) -> CK_RV {
     catch_panics(|| {
-        let result = with_client!(client => client.close_session_stateful(
+        let result = with_client!(client => client.close_session(
             CkSessionHandle(h_session as u64)
         ));
         // Evicted on the attempt, regardless of CK_RV (see evict_session_caches).
@@ -42,7 +42,7 @@ pub unsafe extern "C" fn c_close_session(h_session: CK_SESSION_HANDLE) -> CK_RV 
 
 pub unsafe extern "C" fn c_close_all_sessions(slot_id: CK_SLOT_ID) -> CK_RV {
     catch_panics(|| {
-        let result = with_client!(client => client.close_all_sessions(CkSlotId(slot_id)));
+        let result = with_client!(client => client.close_all_sessions(CkSlotId(slot_id as u64)));
         // Evicted on the attempt, regardless of CK_RV (see evict_slot_session_caches).
         crate::state::evict_slot_session_caches(slot_id);
         unit_result_to_rv(result)

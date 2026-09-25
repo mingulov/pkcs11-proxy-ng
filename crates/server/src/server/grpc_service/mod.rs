@@ -151,6 +151,10 @@ pub(super) fn attr_value_to_bytes(v: CkAttributeValue) -> Vec<u8> {
         CkAttributeValue::Ulong(u) => u.to_le_bytes().to_vec(),
         CkAttributeValue::Bytes(b) => b,
         CkAttributeValue::String(s) => s.into_bytes(),
+        // Nested templates never travel through AttributeResult's flat
+        // bytes field — the exact path carries them structurally. Empty
+        // rather than fabricated struct bytes.
+        CkAttributeValue::NestedTemplate(_) => Vec::new(),
     }
 }
 

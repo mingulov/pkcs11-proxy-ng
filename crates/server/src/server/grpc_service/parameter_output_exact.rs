@@ -136,7 +136,7 @@ pub(super) async fn parameter_output_exact(
     let associated_data = req.associated_data;
     let associated_data_null_len = req.associated_data_null_len;
     let parameter = req.parameter;
-    let flags = CkFlags(req.flags);
+    let flags = CkFlags(req.flags as u64);
 
     match function {
         ParameterOutputFunction::WrapKeyAuthenticated => {

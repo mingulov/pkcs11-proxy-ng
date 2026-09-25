@@ -1463,7 +1463,7 @@ pub(crate) async fn encrypt_message_next(
     let mut parameter = req.parameter;
     let plaintext_part = req.plaintext_part;
     let plaintext_part_null_len = req.plaintext_part_null_len;
-    let flags = CkFlags(req.flags);
+    let flags = CkFlags(req.flags as u64);
     // ADR-0010 sanitize_inputs: validate NULL plaintext_part pointer before backend call.
     if let Err(rv) = check_sanitize(sanitize_inputs, plaintext_part_null_len) {
         return Ok(Response::new(pkcs11_proxy_ng_proto::EncryptMessageNextResponse {
@@ -1745,7 +1745,7 @@ pub(crate) async fn decrypt_message_next(
 
     let ciphertext_part = req.ciphertext_part;
     let ciphertext_part_null_len = req.ciphertext_part_null_len;
-    let flags = CkFlags(req.flags);
+    let flags = CkFlags(req.flags as u64);
     // ADR-0010 sanitize_inputs: validate NULL ciphertext_part pointer before backend call.
     if let Err(rv) = check_sanitize(sanitize_inputs, ciphertext_part_null_len) {
         return Ok(Response::new(pkcs11_proxy_ng_proto::DecryptMessageNextResponse {

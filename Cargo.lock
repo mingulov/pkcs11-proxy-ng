@@ -1426,6 +1426,7 @@ version = "0.2.0"
 dependencies = [
  "cryptoki-sys",
  "libc",
+ "libloading",
  "pkcs11-proxy-ng",
  "pkcs11-proxy-ng-backend",
  "pkcs11-proxy-ng-client",

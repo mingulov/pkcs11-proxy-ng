@@ -6,7 +6,7 @@ use pkcs11_proxy_ng::server::grpc_service::Pkcs11ProxyService;
 use pkcs11_proxy_ng::server::handle_map::VirtualHandle;
 use pkcs11_proxy_ng_backend::{
     MockBackend, Pkcs11Backend,
-    mock::{MockAbi, MockAttributeSlot, MockMessageLifecycleAction},
+    mock::{MockAbi, MockAttributeSlot},
 };
 use pkcs11_proxy_ng_client::Pkcs11Client;
 use pkcs11_proxy_ng_proto::Pkcs11ProxyServer;
@@ -28,7 +28,7 @@ use super::*;
 static TEST_DAEMON: OnceLock<TestDaemon> = OnceLock::new();
 static TEST_DAEMON_ILP32: OnceLock<TestDaemon> = OnceLock::new();
 static TEST_DAEMON_LLP64: OnceLock<TestDaemon> = OnceLock::new();
-static TEST_DAEMON_FOREIGN_ENDIAN: OnceLock<TestDaemon> = OnceLock::new();
+static TEST_DAEMON_BIG_ENDIAN: OnceLock<TestDaemon> = OnceLock::new();
 
 pub(super) struct TestDaemon {
     runtime: Runtime,
@@ -53,20 +53,16 @@ impl TestDaemon {
         }
     }
 
-    /// A daemon whose backend ADVERTISES the byte order foreign to this
-    /// host (D6 poison config): big-endian on LE hosts, little-endian on
-    /// BE hosts — either way the client must refuse at `C_Initialize`.
-    pub(super) fn shared_foreign_endian() -> &'static Self {
-        let foreign = if cfg!(target_endian = "little") { 2 } else { 1 };
-        TEST_DAEMON_FOREIGN_ENDIAN
-            .get_or_init(|| Self::start_configured(MockAbi::host(), Some(foreign)))
+    /// A daemon whose backend ADVERTISES big-endian (D6 poison config).
+    pub(super) fn shared_big_endian() -> &'static Self {
+        TEST_DAEMON_BIG_ENDIAN.get_or_init(|| Self::start_configured(MockAbi::host(), true))
     }
 
     fn start(abi: MockAbi) -> Self {
-        Self::start_configured(abi, None)
+        Self::start_configured(abi, false)
     }
 
-    fn start_configured(abi: MockAbi, advertised_order: Option<u32>) -> Self {
+    fn start_configured(abi: MockAbi, big_endian: bool) -> Self {
         let runtime = Runtime::new().expect("test runtime");
         let (endpoint, backend, context_manager, shutdown) = runtime.block_on(async {
             let mut mock = MockBackend::new(
@@ -80,11 +76,8 @@ impl TestDaemon {
                 ],
             )
             .with_abi(abi);
-            match advertised_order {
-                None => {}
-                Some(2) => mock = mock.with_big_endian_advertisement(),
-                Some(1) => mock = mock.with_little_endian_advertisement(),
-                Some(other) => panic!("invalid test byte-order advertisement {other}"),
+            if big_endian {
+                mock = mock.with_big_endian_advertisement();
             }
             let backend = Arc::new(mock);
             backend.set_interface_capabilities(InterfaceCapabilities {
@@ -223,15 +216,10 @@ fn rsa_pkcs_mechanism() -> CK_MECHANISM {
     CK_MECHANISM { mechanism: CKM_RSA_PKCS, pParameter: std::ptr::null_mut(), ulParameterLen: 0 }
 }
 
-/// SHA-256 digest length — the mechanism these digest tests initialize
-/// with (`sha256_mechanism`). The mock now sizes digest output by
-/// mechanism (mock::output_lengths), so the expectation follows suit.
-const SHA256_DIGEST_LEN: usize = 32;
-
-fn expected_mock_digest(data: &[u8]) -> [u8; SHA256_DIGEST_LEN] {
-    pkcs11_proxy_ng_backend::mock::echo::echo_bytes("digest", &[data], SHA256_DIGEST_LEN)
+fn expected_mock_digest(data: &[u8]) -> [u8; 4] {
+    pkcs11_proxy_ng_backend::mock::echo::echo_bytes("digest", &[data], 4)
         .try_into()
-        .expect("SHA-256 length")
+        .expect("4 bytes")
 }
 
 fn expected_mock_sign(data: &[u8]) -> [u8; 2] {
@@ -244,10 +232,10 @@ fn expected_mock_sign_final() -> [u8; 2] {
         .expect("2 bytes")
 }
 
-fn expected_mock_digest_final() -> [u8; SHA256_DIGEST_LEN] {
-    pkcs11_proxy_ng_backend::mock::echo::echo_bytes("digest-final", &[], SHA256_DIGEST_LEN)
+fn expected_mock_digest_final() -> [u8; 4] {
+    pkcs11_proxy_ng_backend::mock::echo::echo_bytes("digest-final", &[], 4)
         .try_into()
-        .expect("SHA-256 length")
+        .expect("4 bytes")
 }
 
 pub(super) fn create_object(session: CK_SESSION_HANDLE) -> CK_OBJECT_HANDLE {
@@ -1460,7 +1448,7 @@ fn exact_digest_size_query_returns_length_without_copy() {
         )
     };
     assert_eq!(data_rv, CKR_OK as CK_RV, "C_Digest(data query)");
-    assert_eq!(data_len as usize, SHA256_DIGEST_LEN, "data query returned_len");
+    assert_eq!(data_len, 4, "data query returned_len should be 4");
     assert_eq!(out, expected_mock_digest(data), "mock digest output is the echo bytes");
 }
 
@@ -1508,7 +1496,7 @@ fn exact_digest_final_size_query_does_not_consume_state() {
     let data_rv =
         unsafe { dispatch::general::c_digest_final(shim.session, out.as_mut_ptr(), &mut data_len) };
     assert_eq!(data_rv, CKR_OK as CK_RV, "C_DigestFinal(data query)");
-    assert_eq!(data_len as usize, SHA256_DIGEST_LEN, "data query returned_len");
+    assert_eq!(data_len, 4, "data query returned_len should be 4");
     assert_eq!(out, expected_mock_digest_final(), "mock digest_final output is the echo bytes");
 }
 

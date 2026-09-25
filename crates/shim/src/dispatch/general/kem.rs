@@ -70,7 +70,7 @@ pub unsafe extern "C" fn c_encapsulate_key(
             CkSessionHandle(h_session as u64),
             &mech,
             CkObjectHandle(h_public_key as u64),
-            template_opt,
+            &template,
             &spec,
         ));
 
@@ -116,7 +116,7 @@ pub unsafe extern "C" fn c_decapsulate_key(
             CkSessionHandle(h_session as u64),
             &mech,
             CkObjectHandle(h_private_key as u64),
-            template_opt,
+            &template,
             ciphertext,
         )) {
             Ok(key_handle) => {

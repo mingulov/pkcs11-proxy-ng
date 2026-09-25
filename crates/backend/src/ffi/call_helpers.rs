@@ -530,53 +530,47 @@ impl FfiBackend {
     where
         F: FnOnce(*mut cryptoki_sys::CK_BYTE, *mut cryptoki_sys::CK_ULONG) -> cryptoki_sys::CK_RV,
     {
-        // Preparation is complete before invoking the FnOnce. A resource limit
-        // must never change the caller's native capacity.
-        let capacity = if spec.buffer_present && !spec.length_pointer_null {
-            if spec.buffer_len > MAX_OUTPUT_BUFFER_BYTES {
-                // F4/D7: a claimed output capacity above the daemon's
-                // materialization ceiling is unforwardable (the exact
-                // provider call needs the full buffer to cross), so it is
-                // a bad argument, not a failed allocation: answer
-                // CKR_ARGUMENTS_BAD per ADR-0010 Limits-(d), mirroring
-                // Limits-(a) for absurd inputs and the parameter-roundtrip
-                // gate below. A genuine allocation failure under the cap
-                // still returns CKR_HOST_MEMORY.
-                return Err(CkRv::ARGUMENTS_BAD);
+        let mut out_len: cryptoki_sys::CK_ULONG = 0;
+
+        if !spec.buffer_present {
+            // Size query: pass NULL buffer
+            let rv = call(std::ptr::null_mut(), &mut out_len);
+            if rv == CkRv::OK.0 as cryptoki_sys::CK_RV {
+                Ok(CkOutputBufferResult {
+                    ck_rv: CkRv::OK,
+                    returned_len: out_len as u64,
+                    value: None,
+                })
+            } else {
+                // Propagate exact CK_RV from backend
+                Err(CkRv(rv as u64))
             }
             usize::try_from(spec.buffer_len).map_err(|_| CkRv::HOST_MEMORY)?
         } else {
-            0
-        };
-        let mut length = if spec.buffer_present && !spec.length_pointer_null {
-            cryptoki_sys::CK_ULONG::try_from(spec.buffer_len).map_err(|_| CkRv::HOST_MEMORY)?
-        } else {
-            0
-        };
-        let mut bytes = Vec::new();
-        bytes.try_reserve_exact(capacity).map_err(|_| CkRv::HOST_MEMORY)?;
-        bytes.resize(capacity, 0);
-        let output = if spec.buffer_present { bytes.as_mut_ptr() } else { std::ptr::null_mut() };
-        let length_pointer =
-            if spec.length_pointer_null { std::ptr::null_mut() } else { &mut length };
-        let rv = CkRv(call(output, length_pointer) as u64);
-        // In/out cells are initialized. Query cells are output-only: OK defines
-        // the length, otherwise only a changed initialized value proves a store.
-        // An error store of zero and no store remain observationally ambiguous.
-        let returned_len = (!spec.length_pointer_null
-            && (spec.buffer_present || rv == CkRv::OK || length != 0))
-            .then_some(length as u64);
-        let value = if rv == CkRv::OK
-            && !spec.length_pointer_null
-            && spec.buffer_present
-            && (length as u64) <= capacity as u64
-        {
-            bytes.truncate(length as usize);
-            Some(bytes)
-        } else {
-            None
-        };
-        Ok(CkOutputBufferResult { ck_rv: rv, returned_len, value: value.map(SecretBytes::new) })
+            // Data query: allocate caller-specified buffer, capped to prevent
+            // OOM/panic from absurd client-supplied lengths.
+            let capped_len = spec.buffer_len.min(MAX_OUTPUT_BUFFER_BYTES);
+            out_len = capped_len as cryptoki_sys::CK_ULONG;
+            let mut buf = vec![0u8; capped_len as usize];
+            let rv = call(buf.as_mut_ptr(), &mut out_len);
+
+            if rv == CkRv::OK.0 as cryptoki_sys::CK_RV {
+                buf.truncate(out_len as usize);
+                Ok(CkOutputBufferResult {
+                    ck_rv: CkRv::OK,
+                    returned_len: out_len as u64,
+                    value: Some(buf),
+                })
+            } else if rv == CkRv::BUFFER_TOO_SMALL.0 as cryptoki_sys::CK_RV {
+                Ok(CkOutputBufferResult {
+                    ck_rv: CkRv::BUFFER_TOO_SMALL,
+                    returned_len: out_len as u64,
+                    value: None,
+                })
+            } else {
+                Err(CkRv(rv as u64))
+            }
+        }
     }
 
     /// Resolve a function pointer then call `single_call_bytes_exact`.
@@ -675,7 +669,7 @@ impl FfiBackend {
             Err(rv) => return Ok(CkDeriveKeyOutputResult::error(rv, None)),
         };
         let mut handle: cryptoki_sys::CK_OBJECT_HANDLE = 0;
-        let rv = CkRv(call(function, ffi_mech.ck_mechanism_mut(), &mut handle) as u64);
+        let rv = CkRv(call(function, &mut ffi_mech.ck_mechanism, &mut handle) as u64);
         let mechanism_out = ffi_mech.output_params();
         if rv.is_ok() {
             Ok(CkDeriveKeyOutputResult::ok(CkObjectHandle(handle as u64), mechanism_out))
@@ -777,26 +771,66 @@ impl FfiBackend {
         if copy_len > 0 {
             param_buf[..copy_len].copy_from_slice(&parameter_input[..copy_len]);
         }
-        let param_ptr = if !param_out_spec.buffer_present {
-            std::ptr::null_mut()
-        } else if param_buf_len == 0 {
-            std::ptr::NonNull::<u8>::dangling().as_ptr()
+        let param_ptr =
+            if param_buf_len > 0 { param_buf.as_mut_ptr() } else { std::ptr::null_mut() };
+        let param_ck_len = param_buf_len as cryptoki_sys::CK_ULONG;
+
+        // Prepare the main output buffer.
+        let mut out_len: cryptoki_sys::CK_ULONG = 0;
+
+        if !output_spec.buffer_present {
+            // Size query: pass NULL buffer for main output.
+            let rv = call(param_ptr, param_ck_len, std::ptr::null_mut(), &mut out_len);
+            if rv == CkRv::OK.0 as cryptoki_sys::CK_RV {
+                let output_result = CkOutputBufferResult {
+                    ck_rv: CkRv::OK,
+                    returned_len: out_len as u64,
+                    value: None,
+                };
+                let param_result = CkParameterRoundtripResult {
+                    ck_rv: CkRv::OK,
+                    returned_len: param_buf_len as u64,
+                    value: if param_out_spec.buffer_present { Some(param_buf) } else { None },
+                };
+                Ok((output_result, param_result))
+            } else {
+                Err(CkRv(rv as u64))
+            }
         } else {
             param_buf.as_mut_ptr()
         };
         let param_ck_len = cryptoki_sys::CK_ULONG::try_from(param_out_spec.buffer_len)
             .map_err(|_| CkRv::ARGUMENTS_BAD)?;
 
-        let output = Self::single_call_bytes_exact(_admission, output_spec, |buffer, length| {
-            call(param_ptr, param_ck_len, buffer, length)
-        })?;
-        let defined = output.ck_rv == CkRv::OK || parameter_input.len() == param_buf_len;
-        let parameter = CkParameterRoundtripResult {
-            ck_rv: output.ck_rv,
-            returned_len: param_out_spec.buffer_len,
-            value: (param_out_spec.buffer_present && defined).then_some(param_buf.into()),
-        };
-        Ok((output, parameter))
+            if rv == CkRv::OK.0 as cryptoki_sys::CK_RV {
+                buf.truncate(out_len as usize);
+                let output_result = CkOutputBufferResult {
+                    ck_rv: CkRv::OK,
+                    returned_len: out_len as u64,
+                    value: Some(buf),
+                };
+                let param_result = CkParameterRoundtripResult {
+                    ck_rv: CkRv::OK,
+                    returned_len: param_buf_len as u64,
+                    value: if param_out_spec.buffer_present { Some(param_buf) } else { None },
+                };
+                Ok((output_result, param_result))
+            } else if rv == CkRv::BUFFER_TOO_SMALL.0 as cryptoki_sys::CK_RV {
+                let output_result = CkOutputBufferResult {
+                    ck_rv: CkRv::BUFFER_TOO_SMALL,
+                    returned_len: out_len as u64,
+                    value: None,
+                };
+                let param_result = CkParameterRoundtripResult {
+                    ck_rv: CkRv::BUFFER_TOO_SMALL,
+                    returned_len: param_buf_len as u64,
+                    value: None,
+                };
+                Ok((output_result, param_result))
+            } else {
+                Err(CkRv(rv as u64))
+            }
+        }
     }
 
     pub(super) fn call_object_pair_with_mechanism<TFunction, F>(

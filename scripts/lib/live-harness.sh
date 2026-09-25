@@ -8,53 +8,30 @@
 # `harness_extra_cleanup()` before calling `harness_init_workspace`.
 
 # ── SoftHSM2 discovery ───────────────────────────────────────────────
-# Prints the first candidate that exists (nothing when absent).
-# Absence is a normal outcome (caller prints SKIP); always returns 0
-# so callers under `set -e` survive it.
-harness_first_existing() {
-    local candidate
-    for candidate in "$@"; do
-        if [[ -f "$candidate" ]]; then
-            printf '%s' "$candidate"
-            return 0
-        fi
-    done
-    return 0
-}
-
-# Sets SOFTHSM_MODULE_64 ("" when absent). A pre-exported non-empty
-# SOFTHSM_MODULE_64 is honoured as-is (non-root extracted copies).
+# Sets SOFTHSM_MODULE_64 ("" when absent).
 harness_locate_softhsm64() {
-    [[ -n "${SOFTHSM_MODULE_64:-}" ]] && return 0
-    SOFTHSM_MODULE_64="$(harness_first_existing \
+    SOFTHSM_MODULE_64=""
+    local candidate
+    for candidate in \
         /usr/lib/softhsm/libsofthsm2.so \
         /usr/lib/x86_64-linux-gnu/softhsm/libsofthsm2.so \
         /usr/lib64/pkcs11/libsofthsm2.so \
-        /usr/local/lib/softhsm/libsofthsm2.so)"
+        /usr/local/lib/softhsm/libsofthsm2.so; do
+        [[ -f "$candidate" ]] && SOFTHSM_MODULE_64="$candidate" && break
+    done
 }
 
 # Sets SOFTHSM_MODULE_32 ("" when absent). The i386 package conflicts with
-# the amd64 one, so an extracted copy under /opt is probed too. A
-# pre-exported non-empty SOFTHSM_MODULE_32 is honoured as-is (non-root
-# extracted copies).
+# the amd64 one, so an extracted copy under /opt is probed too.
 harness_locate_softhsm32() {
-    [[ -n "${SOFTHSM_MODULE_32:-}" ]] && return 0
-    SOFTHSM_MODULE_32="$(harness_first_existing \
+    SOFTHSM_MODULE_32=""
+    local candidate
+    for candidate in \
         /usr/lib/i386-linux-gnu/softhsm/libsofthsm2.so \
         /opt/softhsm2-i386/usr/lib/i386-linux-gnu/softhsm/libsofthsm2.so \
-        /usr/lib32/softhsm/libsofthsm2.so)"
-}
-
-# Sets NSS_MODULE_32 ("" when absent). Probes a system i386 install
-# first, then the nightly extract path (/opt: the i386 NSS closure is
-# extracted beside the system, like the i386 SoftHSM2 copy). A
-# pre-exported non-empty NSS_MODULE_32 is honoured as-is (non-root
-# extracted copies).
-harness_locate_nss32() {
-    [[ -n "${NSS_MODULE_32:-}" ]] && return 0
-    NSS_MODULE_32="$(harness_first_existing \
-        /usr/lib/i386-linux-gnu/libsoftokn3.so \
-        /opt/nss32-i386/usr/lib/i386-linux-gnu/libsoftokn3.so)"
+        /usr/lib32/softhsm/libsofthsm2.so; do
+        [[ -f "$candidate" ]] && SOFTHSM_MODULE_32="$candidate" && break
+    done
 }
 
 # ── Workspace, token, cleanup ────────────────────────────────────────
