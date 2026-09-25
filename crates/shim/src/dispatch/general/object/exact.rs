@@ -99,21 +99,6 @@ pub(super) unsafe fn capture(
             pkcs11_proxy_ng_types::WidthError::LengthOverflow => CkRv::HOST_MEMORY,
             _ => CkRv::GENERAL_ERROR,
         })?;
-        // A present caller buffer must never request zero backend bytes: a
-        // sub-element ulong length rescales to 0 (likewise a genuinely
-        // empty buffer), and the backend edge maps empty buffers to NULL
-        // (T4-FIX) — reframing the too-small data query as a size query,
-        // which wrongly answers OK. One byte preserves the too-small
-        // shape so the backend reports BUFFER_TOO_SMALL exactly like a
-        // direct undersized call (live cross-width proof; SoftHSM2
-        // answers BTS + CK_UNAVAILABLE_INFORMATION for it at both
-        // widths). True NULL size queries (buffer absent) still send 0.
-        // T20: when the promoted byte suffices (1-byte attrs), the
-        // backend OKs and writeback accounts for the promotion
-        // (BUFFER_TOO_SMALL + observed required length, no value write).
-        if !value.is_null() && query.buffer_len == 0 {
-            query.buffer_len = 1;
-        }
     }
     Ok(AttributeCall {
         query,
@@ -146,12 +131,11 @@ fn prepare_one(
     result: &CkAttributeQueryResult,
     nested: bool,
     values_defined: bool,
-    backend_ok: bool,
     client_width: usize,
     backend_width: usize,
     backend_stride: usize,
     writes: &mut Vec<AttributeWrite>,
-) -> CkResult<bool> {
+) -> CkResult<()> {
     if (!nested && result.attr_type != call.query.attr_type)
         || (!result.apply_returned_len
             && (result.returned_len != 0 || result.value.is_some() || result.nested.is_some()))
@@ -170,9 +154,6 @@ fn prepare_one(
     }
     let mut length = result.returned_len;
     let mut value = None;
-    // T20: set only by the flat arm's promotion accounting below; the
-    // template arm never synthesizes (nested-exotic, no pressure).
-    let mut caller_too_small = false;
     if call.query.attr_type.is_attribute_template() && !nested {
         if result.value.is_some() {
             return Err(CkRv::GENERAL_ERROR);
@@ -198,7 +179,6 @@ fn prepare_one(
                     result,
                     true,
                     values_defined,
-                    false,
                     client_width,
                     backend_width,
                     backend_stride,
@@ -255,24 +235,7 @@ fn prepare_one(
                 Err(_) => return Err(CkRv::GENERAL_ERROR),
             };
         }
-        // T20 promotion accounting: the 0→1 capture promotion (and the
-        // cross-width rescale-to-0→1) lets the backend OK a call whose
-        // observed required length exceeds the caller's true capacity —
-        // e.g. (buf, 0) on a 1-byte bool. The required length is
-        // backend-observed, never fabricated; answer BUFFER_TOO_SMALL
-        // with that length and no value write, exactly what the backend
-        // would have said to the true caller shape. Size queries (NULL
-        // buffer) never synthesize: capacity 0 with no buffer is a
-        // legitimate OK. The D4 overflow sentinel is not a length.
-        if length != pkcs11_proxy_ng_types::CANONICAL_UNAVAILABLE
-            && length > call.capacity
-            && !nested
-            && backend_ok
-            && !call.value.is_null()
-        {
-            value = None;
-            caller_too_small = true;
-        } else if value.as_ref().is_some_and(|bytes| bytes.len() as u64 > call.capacity) {
+        if value.as_ref().is_some_and(|bytes| bytes.len() as u64 > call.capacity) {
             return Err(CkRv::GENERAL_ERROR);
         }
     }
@@ -284,15 +247,12 @@ fn prepare_one(
         type_pointer: call.attr_type,
         attr_type: type_effect,
     });
-    Ok(caller_too_small)
+    Ok(())
 }
 
 /// Prepare the validated writeback plan plus the caller-visible RV.
 ///
-/// The RV is the backend's RV, except when promotion accounting fires
-/// (see `prepare_one`): a backend OK the caller's true capacity cannot
-/// hold becomes `BUFFER_TOO_SMALL`, with required lengths already in
-/// the plan and no value bytes written.
+/// The RV remains the backend's RV; only validated effects are committed.
 pub(super) fn prepare(
     calls: &[AttributeCall],
     results: &[CkAttributeQueryResult],
@@ -310,23 +270,19 @@ pub(super) fn prepare(
         return Err(CkRv::GENERAL_ERROR);
     }
     let defined = pkcs11_proxy_ng_types::attribute_outputs_defined(rv);
-    let backend_ok = rv == CkRv::OK;
     let mut writes = Vec::new();
-    let mut caller_too_small = false;
     for (call, result) in calls.iter().zip(results) {
-        caller_too_small |= prepare_one(
+        prepare_one(
             call,
             result,
             false,
             defined,
-            backend_ok,
             client_width,
             backend_width,
             backend_stride,
             &mut writes,
         )?;
     }
-    let rv = if caller_too_small { CkRv::BUFFER_TOO_SMALL } else { rv };
     Ok((writes, rv))
 }
 
@@ -589,8 +545,7 @@ mod tests {
         ];
         let (writes, rv) = prepare(&calls, &results, CkRv::OK, client_width, backend_width, stride)
             .expect("bridge overflow must be per-attribute, not a whole-call failure");
-        // T20: the D4 sentinel is not a length — promotion accounting must
-        // not reframe this backend OK as BUFFER_TOO_SMALL.
+        // D4 changes only the overflowing attribute, never the overall backend RV.
         assert_eq!(rv, CkRv::OK);
         unsafe { commit(writes) };
         // E0793: CK_ATTRIBUTE is packed on Windows; assert on by-value copies.
@@ -603,30 +558,22 @@ mod tests {
     }
 
     #[test]
-    fn exact_present_buffer_never_requests_zero_backend_bytes() {
-        // Live-leg regression (32c/64b sub-element request): a present
-        // caller buffer that rescales to zero backend bytes (a 2-byte
-        // buffer for a ulong attribute, or a genuinely empty buffer)
-        // must still request one byte. A 0-byte request reaches the
-        // backend edge as NULL (T4-FIX), reframing the too-small data
-        // query as a size query and wrongly answering OK; one byte
-        // preserves the too-small shape so the backend reports
-        // BUFFER_TOO_SMALL like a direct undersized call. True NULL
-        // size queries still request 0, and whole-element rescales are
-        // unchanged.
+    fn exact_present_buffer_preserves_zero_and_sub_element_capacities() {
+        // Width bridging counts whole ulong elements; a partial element maps
+        // to zero bytes without changing the independently carried presence bit.
         let stride = std::mem::size_of::<CK_ATTRIBUTE>();
         let class = CkAttributeType::CLASS.0 as CK_ATTRIBUTE_TYPE;
         let array = CkAttributeType::ALLOWED_MECHANISMS.0 as CK_ATTRIBUTE_TYPE;
         let mut tiny = [0xa5u8; 2];
         // (present, capacity, attr_type, client_width, backend_width, want_len)
         let cases: [(bool, u64, CK_ATTRIBUTE_TYPE, usize, usize, u64); 9] = [
-            // Sub-element ulong requests both directions: clamped to 1.
-            (true, 2, class, 4, 8, 1),
-            (true, 2, class, 8, 4, 1),
-            (true, 2, array, 4, 8, 1),
-            // Genuinely empty present buffers: clamped to 1 (ulong + opaque).
-            (true, 0, class, 4, 8, 1),
-            (true, 0, CKA_LABEL, 8, 8, 1),
+            // Sub-element ulong requests both directions: zero complete elements.
+            (true, 2, class, 4, 8, 0),
+            (true, 2, class, 8, 4, 0),
+            (true, 2, array, 4, 8, 0),
+            // Genuinely empty present buffers remain zero (ulong + opaque).
+            (true, 0, class, 4, 8, 0),
+            (true, 0, CKA_LABEL, 8, 8, 0),
             // True size query: still 0.
             (false, 0, class, 4, 8, 0),
             // Whole-element rescales: unchanged.
@@ -651,36 +598,59 @@ mod tests {
     }
 
     #[test]
-    fn exact_promoted_zero_buffer_accounts_as_buffer_too_small() {
-        // T20: (buf, 0) on a 1-byte bool promotes to a 1-byte backend
-        // query, which the backend OKs. The backend-observed required
-        // length (1) exceeds the caller's true capacity (0): answer
-        // BUFFER_TOO_SMALL with that length and no value write — what
-        // the backend would have said to the true caller shape. Was
-        // GENERAL_ERROR (15 lanes).
-        let width = std::mem::size_of::<CK_ULONG>();
+    fn exact_present_zero_buffer_preserves_backend_rv_and_length() {
         let stride = std::mem::size_of::<CK_ATTRIBUTE>();
-        let mut buf = [0xaau8; 64];
-        let mut attr =
-            CK_ATTRIBUTE { type_: CKA_SENSITIVE, pValue: buf.as_mut_ptr().cast(), ulValueLen: 0 };
-        let call = unsafe { capture(&mut attr, false, width, width, stride) }.unwrap();
-        assert_eq!(call.query.buffer_len, 1, "zero capacity must promote to one backend byte");
-        let result = CkAttributeQueryResult {
-            attr_type: CkAttributeType::SENSITIVE,
-            returned_len: 1,
-            apply_returned_len: true,
-            apply_type: false,
-            value: Some(vec![0x01].into()),
-            ck_rv: None,
-            nested: None,
-        };
-        let (writes, rv) = prepare(&[call], &[result], CkRv::OK, width, width, stride).unwrap();
-        assert_eq!(rv, CkRv::BUFFER_TOO_SMALL);
-        unsafe { commit(writes) };
-        assert_eq!(buf, [0xaa; 64], "too-small writeback must not touch the buffer");
-        // E0793: CK_ATTRIBUTE is packed on Windows; assert on by-value copies.
-        let len = attr.ulValueLen;
-        assert_eq!(len, 1, "required length comes from the backend observation");
+        for (client_width, backend_width) in [(4, 4), (4, 8), (8, 4), (8, 8)] {
+            for (backend_rv, length) in [
+                (CkRv::BUFFER_TOO_SMALL, pkcs11_proxy_ng_types::CANONICAL_UNAVAILABLE),
+                (CkRv::OK, 1),
+                (CkRv::ATTRIBUTE_SENSITIVE, pkcs11_proxy_ng_types::CANONICAL_UNAVAILABLE),
+            ] {
+                let mut buf = [0xaau8; 8];
+                let mut attr = CK_ATTRIBUTE {
+                    type_: CKA_PRIVATE,
+                    pValue: buf.as_mut_ptr().cast(),
+                    ulValueLen: 0,
+                };
+                let call =
+                    unsafe { capture(&mut attr, false, client_width, backend_width, stride) }
+                        .unwrap();
+                let result = CkAttributeQueryResult {
+                    attr_type: CkAttributeType::PRIVATE,
+                    returned_len: length,
+                    apply_returned_len: true,
+                    apply_type: false,
+                    value: None,
+                    ck_rv: None,
+                    nested: None,
+                };
+                // Padding never permits a byte of caller-visible output at zero capacity.
+                let malformed = CkAttributeQueryResult {
+                    returned_len: 1,
+                    value: Some(vec![1].into()),
+                    ..result.clone()
+                };
+                assert!(matches!(
+                    prepare(
+                        std::slice::from_ref(&call),
+                        &[malformed],
+                        CkRv::OK,
+                        client_width,
+                        backend_width,
+                        stride
+                    ),
+                    Err(CkRv::GENERAL_ERROR)
+                ));
+                let (writes, rv) =
+                    prepare(&[call], &[result], backend_rv, client_width, backend_width, stride)
+                        .unwrap();
+                assert_eq!(rv, backend_rv);
+                unsafe { commit(writes) };
+                assert_eq!(buf, [0xaa; 8]);
+                let len = attr.ulValueLen;
+                assert_eq!(len, if length == u64::MAX { CK_UNAVAILABLE_INFORMATION } else { 1 });
+            }
+        }
     }
 
     #[test]
@@ -709,10 +679,8 @@ mod tests {
     }
 
     #[test]
-    fn exact_mixed_fit_and_promoted_reports_bts_with_fitting_value_written() {
-        // T20: mixed call — one fitting attribute is written normally
-        // while a promoted (buf, 0) attribute takes the length-only
-        // path; the overall RV is BUFFER_TOO_SMALL.
+    fn exact_mixed_fit_and_zero_preserves_provider_error_with_fitting_value_written() {
+        // Preserve the provider error and sentinel while writing the fitting attribute.
         let width = std::mem::size_of::<CK_ULONG>();
         let stride = std::mem::size_of::<CK_ATTRIBUTE>();
         let mut label_buf = [0u8; 4];
@@ -742,22 +710,23 @@ mod tests {
             },
             CkAttributeQueryResult {
                 attr_type: CkAttributeType::SENSITIVE,
-                returned_len: 1,
+                returned_len: pkcs11_proxy_ng_types::CANONICAL_UNAVAILABLE,
                 apply_returned_len: true,
                 apply_type: false,
-                value: Some(vec![0x01].into()),
+                value: None,
                 ck_rv: None,
                 nested: None,
             },
         ];
-        let (writes, rv) = prepare(&calls, &results, CkRv::OK, width, width, stride).unwrap();
-        assert_eq!(rv, CkRv::BUFFER_TOO_SMALL);
+        let (writes, rv) =
+            prepare(&calls, &results, CkRv::ATTRIBUTE_SENSITIVE, width, width, stride).unwrap();
+        assert_eq!(rv, CkRv::ATTRIBUTE_SENSITIVE);
         unsafe { commit(writes) };
         assert_eq!(label_buf, *b"test");
         assert_eq!(bool_buf, [0xaa; 64]);
         // E0793: CK_ATTRIBUTE is packed on Windows; assert on by-value copies.
         let label_len = attrs[0].ulValueLen;
         let bool_len = attrs[1].ulValueLen;
-        assert_eq!([label_len, bool_len], [4, 1]);
+        assert_eq!([label_len, bool_len], [4, CK_UNAVAILABLE_INFORMATION]);
     }
 }

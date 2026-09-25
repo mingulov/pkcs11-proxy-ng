@@ -1596,11 +1596,8 @@ mod attribute_query_tests {
     }
 
     #[test]
-    fn raw_attribute_queries_zero_length_exact_query_yields_null_pvalue() {
-        // T4-FIX: a 0-length exact query (buffer_present=true, buffer_len=0 —
-        // e.g. a sub-element cross-width buffer mapped to 0) must pass NULL
-        // pValue, not the dangling Vec::new() pointer (0x1): backends that
-        // null-check pValue and then write (NSS softokn) segfault the daemon.
+    fn raw_attribute_queries_zero_length_exact_query_preserves_present_pvalue() {
+        // Present zero-capacity output must stay distinct from a NULL size query.
         let ffi = FfiAttributeQueries::from_queries(&[CkAttributeQuery {
             attr_type: CkAttributeType::CLASS,
             buffer_present: true,
@@ -1610,18 +1607,15 @@ mod attribute_query_tests {
         .expect("ffi queries");
 
         assert_eq!(ffi.attrs.len(), 1);
-        assert!(ffi.attrs[0].pValue.is_null());
+        assert!(!ffi.attrs[0].pValue.is_null());
         // E0793: CK_ATTRIBUTE is packed on Windows; assert on a by-value copy.
         let ul_value_len = ffi.attrs[0].ulValueLen;
         assert_eq!(ul_value_len, 0);
     }
 
     #[test]
-    fn nested_zero_length_sub_query_yields_null_sub_pvalue() {
-        // T4-AUDIT site 2: a nested exact sub-query with a 0-length buffer
-        // (shim: sub CK_ATTRIBUTE with non-null pValue + ulValueLen 0 — the
-        // nested capture path has no zero-length reject) must pass NULL for
-        // the sub pValue, not the dangling empty-Vec pointer.
+    fn nested_zero_length_sub_query_preserves_present_pvalue() {
+        // Present zero-capacity output must stay distinct from a NULL size query.
         let stride = std::mem::size_of::<cryptoki_sys::CK_ATTRIBUTE>() as u64;
         let ffi = FfiAttributeQueries::from_queries(&[CkAttributeQuery {
             attr_type: CkAttributeType::WRAP_TEMPLATE,
@@ -1647,7 +1641,7 @@ mod attribute_query_tests {
             std::slice::from_raw_parts(ffi.attrs[0].pValue as *const cryptoki_sys::CK_ATTRIBUTE, 1)
         }[0]
         .ulValueLen;
-        assert!(sub_pvalue.is_null());
+        assert!(!sub_pvalue.is_null());
         assert_eq!(sub_len, 0);
     }
 
@@ -1681,11 +1675,8 @@ mod attribute_query_tests {
     }
 
     #[test]
-    fn empty_nested_template_query_yields_null_parent_pvalue() {
-        // T4-AUDIT site 5: a degenerate nested template query (shim: template
-        // attr with non-null pValue + ulValueLen 0 → nested `Some(vec![])`,
-        // buffer_len 0) must pass NULL for the parent pValue, not the dangling
-        // empty-box-slice pointer.
+    fn empty_nested_template_query_preserves_present_parent_pvalue() {
+        // Present zero-capacity output must stay distinct from a NULL size query.
         let ffi = FfiAttributeQueries::from_queries(&[CkAttributeQuery {
             attr_type: CkAttributeType::WRAP_TEMPLATE,
             buffer_present: true,
@@ -1695,7 +1686,7 @@ mod attribute_query_tests {
         .expect("ffi queries");
 
         assert_eq!(ffi.attrs.len(), 1);
-        assert!(ffi.attrs[0].pValue.is_null());
+        assert!(!ffi.attrs[0].pValue.is_null());
         // E0793: CK_ATTRIBUTE is packed on Windows; assert on a by-value copy.
         let ul_value_len = ffi.attrs[0].ulValueLen;
         assert_eq!(ul_value_len, 0);
