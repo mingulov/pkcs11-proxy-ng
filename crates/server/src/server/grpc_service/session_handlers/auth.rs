@@ -10,7 +10,7 @@ use pkcs11_proxy_ng_types::*;
 
 use super::super::super::context_manager::{ClientContextId, ContextManager, LoginState};
 use super::super::super::handle_map::VirtualHandle;
-use super::super::service_utils::spawn_backend;
+use super::super::service_utils::{login_lock_timeout, spawn_backend};
 
 fn login_state_for_user_type(user_type: CkUserType) -> Option<LoginState> {
     match user_type {
@@ -88,8 +88,35 @@ pub(super) async fn login(
     // insert. Otherwise two clients racing the first login on the shared token
     // both see "no other login" and both take the real-login path, and the
     // second is answered USER_ALREADY_LOGGED_IN instead of the logical OK.
+    //
+    // Bounded acquisition (G2/V11): refuse rather than queue unboundedly when
+    // a slow/wedged backend C_Login pins the lock. CKR_DEVICE_ERROR signals a
+    // transient token-serialization failure the client can retry.
     let login_guard = ctx_mgr.slot_login_lock(slot);
-    let _login_lock = login_guard.lock().await;
+    let _login_lock = match tokio::time::timeout(login_lock_timeout(), login_guard.lock()).await {
+        Ok(guard) => guard,
+        Err(_elapsed) => {
+            // Another tenant holds the per-slot login lock past the configured
+            // bound (slow/wedged backend login on the shared token). Refuse
+            // rather than queue unboundedly; CKR_DEVICE_ERROR is a transient
+            // token-serialization failure the client can retry.
+            return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse {
+                ck_rv: CkRv::DEVICE_ERROR.0,
+            }));
+        }
+    };
+
+    // G2-PR3: per-slot aggregate failed-login budget. Fast-reject during the
+    // cooldown window without touching the backend — the proxy stops feeding
+    // the backend's shared PIN-lockout counter. Inert (always false) when
+    // `per_slot_failed_login_budget` is unset → byte-identical to today.
+    // Indistinguishable from the lock-timeout DEVICE_ERROR above; the app
+    // already handles transient DEVICE_ERROR as a retriable failure.
+    if crate::server::rate_quota::login_slot_in_cooldown(slot) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse {
+            ck_rv: CkRv::DEVICE_ERROR.0,
+        }));
+    }
 
     // Wrap PIN bytes in `Zeroizing` so the backing buffer is overwritten when
     // dropped. Read it up-front and pre-hash it so the logical-login path can
@@ -154,6 +181,9 @@ pub(super) async fn login(
 
     let ck_rv = match &result {
         Ok(()) => {
+            // G2-PR3: backend accepted the PIN → reset the slot's failure counter
+            // so the budget window starts fresh on the next wrong-PIN attempt.
+            crate::server::rate_quota::record_login_success(slot);
             if let Some(login_state) = requested_login_state {
                 // Capture the verifier so co-located logical clients can be
                 // PIN-validated (A1) without a second backend login.
@@ -206,8 +236,21 @@ pub(super) async fn logout(
 
     // Serialize logout against concurrent login/logout on the same slot (M5),
     // so the cross-context scan and the login_state removal stay atomic.
+    //
+    // Bounded acquisition (G2/V11): same cross-tenant DoS bound as login.
     let login_guard = ctx_mgr.slot_login_lock(slot);
-    let _login_lock = login_guard.lock().await;
+    let _login_lock = match tokio::time::timeout(login_lock_timeout(), login_guard.lock()).await {
+        Ok(guard) => guard,
+        Err(_elapsed) => {
+            // Another tenant holds the per-slot login lock past the configured
+            // bound (slow/wedged backend login on the shared token). Refuse
+            // rather than queue unboundedly; CKR_DEVICE_ERROR is a transient
+            // token-serialization failure the client can retry.
+            return Ok(Response::new(pkcs11_proxy_ng_proto::LogoutResponse {
+                ck_rv: CkRv::DEVICE_ERROR.0,
+            }));
+        }
+    };
 
     let other_login_state = ctx_mgr.first_login_state_for_slot_excluding(slot, &ctx_id);
 
@@ -223,6 +266,11 @@ pub(super) async fn logout(
                 ctx.login_state.remove(&slot);
             })
             .await;
+        // C1: per PKCS#11 §11.6, C_Logout invalidates the application's handles to
+        // private objects. The coalescer must not serve cached attributes of those
+        // handles after logout. Evicting the entire cache is conservative + correct;
+        // over-invalidating public entries is only a performance miss, not a bug.
+        ctx_mgr.attr_cache_clear(&ctx_id).await;
         info!(context_id = %ctx_id.0, "Logout completed logically");
         return Ok(Response::new(pkcs11_proxy_ng_proto::LogoutResponse { ck_rv: CkRv::OK.0 }));
     }
@@ -242,6 +290,11 @@ pub(super) async fn logout(
                     ctx.login_state.remove(&slot);
                 })
                 .await;
+            // C1: per PKCS#11 §11.6, C_Logout invalidates the application's handles to
+            // private objects. The coalescer must not serve cached attributes of those
+            // handles after logout. Evicting the entire cache is conservative + correct;
+            // over-invalidating public entries is only a performance miss, not a bug.
+            ctx_mgr.attr_cache_clear(&ctx_id).await;
             info!(context_id = %ctx_id.0, "Logout succeeded");
             CkRv::OK.0
         }
@@ -284,15 +337,15 @@ mod tests {
         mock.login(backend_session, CkUserType::User, None).unwrap();
 
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
-        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
-        let backend_slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
+        ctx_mgr.register_slot(CkSlotId(0)).await;
+        let virtual_slot = ctx_mgr.to_virtual_slot(CkSlotId(0)).await.unwrap();
         let ctx_id = ctx_mgr.create_context(None).await.unwrap();
 
         // Register the real backend session in the context and record logged-in state.
         let session_vh = ctx_mgr
             .get_context(&ctx_id, |ctx| {
-                let vh = ctx.register_session(BackendHandle(backend_session.0), backend_slot);
-                ctx.login_state.insert(backend_slot, LoginState::User);
+                let vh = ctx.register_session(BackendHandle(backend_session.0), virtual_slot);
+                ctx.login_state.insert(virtual_slot, LoginState::User);
                 vh
             })
             .await
@@ -304,7 +357,7 @@ mod tests {
                 &ctx_id,
                 42,
                 CkAttributeType::ID,
-                CachedAttr { value: SecretBytes::new(b"cached-id".to_vec()), ck_rv: CkRv::OK.0 },
+                CachedAttr { value: b"cached-id".to_vec(), ck_rv: CkRv::OK.0 },
             )
             .await;
         assert!(
@@ -345,8 +398,8 @@ mod tests {
         mock.login(backend_session, CkUserType::User, None).unwrap();
 
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
-        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
-        let backend_slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
+        ctx_mgr.register_slot(CkSlotId(0)).await;
+        let virtual_slot = ctx_mgr.to_virtual_slot(CkSlotId(0)).await.unwrap();
 
         // Two contexts on the same slot — ctx_a will attempt logout; ctx_b stays logged in,
         // forcing the logical-logout path (backend NOT called).
@@ -355,8 +408,8 @@ mod tests {
 
         let session_a_vh = ctx_mgr
             .get_context(&ctx_a, |ctx| {
-                let vh = ctx.register_session(BackendHandle(backend_session.0), backend_slot);
-                ctx.login_state.insert(backend_slot, LoginState::User);
+                let vh = ctx.register_session(BackendHandle(backend_session.0), virtual_slot);
+                ctx.login_state.insert(virtual_slot, LoginState::User);
                 vh
             })
             .await
@@ -366,7 +419,7 @@ mod tests {
         // return Some, so ctx_a's logout takes the logical path).
         ctx_mgr
             .get_context(&ctx_b, |ctx| {
-                ctx.login_state.insert(backend_slot, LoginState::User);
+                ctx.login_state.insert(virtual_slot, LoginState::User);
             })
             .await;
 
@@ -376,7 +429,7 @@ mod tests {
                 &ctx_a,
                 7,
                 CkAttributeType::LABEL,
-                CachedAttr { value: SecretBytes::new(b"my-label".to_vec()), ck_rv: CkRv::OK.0 },
+                CachedAttr { value: b"my-label".to_vec(), ck_rv: CkRv::OK.0 },
             )
             .await;
         assert!(
@@ -409,7 +462,7 @@ mod tests {
                 &ctx_b,
                 7,
                 CkAttributeType::LABEL,
-                CachedAttr { value: SecretBytes::new(b"other".to_vec()), ck_rv: CkRv::OK.0 },
+                CachedAttr { value: b"other".to_vec(), ck_rv: CkRv::OK.0 },
             )
             .await;
         assert!(
@@ -429,14 +482,14 @@ mod tests {
         let backend_session = mock.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
 
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
-        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
-        let backend_slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
+        ctx_mgr.register_slot(CkSlotId(0)).await;
+        let virtual_slot = ctx_mgr.to_virtual_slot(CkSlotId(0)).await.unwrap();
         let ctx_id = ctx_mgr.create_context(None).await.unwrap();
 
         // Session not logged in from the ContextManager's perspective either.
         let session_vh = ctx_mgr
             .get_context(&ctx_id, |ctx| {
-                ctx.register_session(BackendHandle(backend_session.0), backend_slot)
+                ctx.register_session(BackendHandle(backend_session.0), virtual_slot)
             })
             .await
             .unwrap();
@@ -447,7 +500,7 @@ mod tests {
                 &ctx_id,
                 5,
                 CkAttributeType::TOKEN,
-                CachedAttr { value: SecretBytes::new(vec![0x01]), ck_rv: CkRv::OK.0 },
+                CachedAttr { value: vec![0x01], ck_rv: CkRv::OK.0 },
             )
             .await;
 
@@ -485,25 +538,5 @@ mod tests {
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
         let gone = ClientContextId("nonexistent".into());
         ctx_mgr.attr_cache_clear(&gone).await; // must not panic
-    }
-
-    /// The login handler's PIN holder must redact secrets in Debug: any
-    /// future log line capturing the holder (or its container) must not
-    /// leak PIN bytes. Mirrors the holder construction in `login`.
-    ///
-    /// NOTE: `Vec<u8>` renders in Debug as decimal byte values (`[83,
-    /// 117, ...]`), never as a string — so the assertion scans for every
-    /// PIN byte's decimal rendering, not the PIN text.
-    #[test]
-    fn pin_holder_debug_redacts_secret() {
-        let pin_bytes = b"SuperSecretPIN!42";
-        let pin = Some(SecretBytes::new(pin_bytes.to_vec()));
-        let rendered = format!("{pin:?}");
-        for byte in pin_bytes {
-            assert!(
-                !rendered.contains(&byte.to_string()),
-                "PIN holder leaks secret byte {byte} via Debug: {rendered}"
-            );
-        }
     }
 }

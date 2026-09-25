@@ -108,10 +108,9 @@ async fn per_slot_failed_login_budget_end_to_end() {
     }
 
     // Reset rate_quota state for the next scenario: a successful login clears
-    // native slot's failure counter and cooldown. Both fixtures use backend slot 0.
-    rate_quota::record_login_success(::pkcs11_proxy_ng::server::slot_map::BackendSlotId(CkSlotId(
-        0,
-    )));
+    // the slot's failure counter and cooldown. Virtual slot 1 is always the
+    // first slot mapped by a fresh ContextManager (next_virtual starts at 1).
+    rate_quota::record_login_success(CkSlotId(1));
 
     // ── Scenario B: a successful login resets the failure counter ────────────
     //
@@ -183,9 +182,7 @@ async fn per_slot_failed_login_budget_end_to_end() {
     }
 
     // Reset again for the cooldown-expiry scenario.
-    rate_quota::record_login_success(::pkcs11_proxy_ng::server::slot_map::BackendSlotId(CkSlotId(
-        0,
-    )));
+    rate_quota::record_login_success(CkSlotId(1));
 
     // ── Scenario C: cooldown expiry allows logins through again ─────────────
     //

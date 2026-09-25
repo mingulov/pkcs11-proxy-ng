@@ -24,10 +24,10 @@ pub enum EventClass {
     Admin,
     DataPlane,
     System,
-    /// Reserved for authorization-enforcement deny records; currently not emitted.
+    /// Reserved for G2 authorization-enforcement deny records.
     ///
-    /// Retained so that future emission is not a chain-format change (no
-    /// schema-version bump needed).
+    /// Not emitted until G2 lands; reserved now so that adding it later is
+    /// not a chain-format change (no schema_version bump needed for G2).
     Deny,
 }
 
@@ -37,7 +37,7 @@ impl EventClass {
     ///
     /// `DataPlane` is fail-open; all other classes are fail-closed.
     /// `Deny` records are fail-closed: a denial that cannot be recorded must
-    /// not be silently ignored (reserved and currently not emitted).
+    /// not be silently ignored (reserved; not emitted until G2).
     pub fn fail_closed(self) -> bool {
         !matches!(self, EventClass::DataPlane)
     }

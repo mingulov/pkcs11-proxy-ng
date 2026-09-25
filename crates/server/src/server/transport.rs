@@ -77,6 +77,35 @@ fn read_file(path: &Path, field: &str) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|e| format!("failed to read {field} '{}': {e}", path.display()))
 }
 
+/// Refuse to load a PRIVATE key file that is accessible to group or other.
+///
+/// Unlike [`check_public_file_perms`] (which permits world/group *readable*
+/// public material), private key material — such as the Ed25519 audit signing
+/// seed — must be owner-only. On unix, rejects any file whose mode has any
+/// group/other bit set (`mode & 0o077 != 0`). Non-unix platforms are a no-op
+/// since file modes don't map cleanly.
+pub(crate) fn check_private_file_perms(path: &Path, field: &str) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let meta = std::fs::metadata(path)
+            .map_err(|e| format!("failed to stat {field} '{}': {e}", path.display()))?;
+        let mode = meta.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            return Err(format!(
+                "refuse to load private key {field} '{}': group/other-accessible \
+                 (mode {:04o}); private key material must be owner-only. \
+                 Fix with: chmod 600 {}",
+                path.display(),
+                mode,
+                path.display()
+            ));
+        }
+    }
+    let _ = (path, field);
+    Ok(())
+}
+
 /// Refuse to start when a public certificate file (CA root or server
 /// cert) is world-writable. The contents are not secret, but any
 /// process able to swap them silently changes the proxy's trust
@@ -84,7 +113,7 @@ fn read_file(path: &Path, field: &str) -> Result<Vec<u8>, String> {
 ///
 /// World-readable is allowed (these are public material). Group-
 /// writable is allowed for kubernetes-style group-shared mounts.
-fn check_public_file_perms(path: &Path, field: &str) -> Result<(), String> {
+pub(crate) fn check_public_file_perms(path: &Path, field: &str) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -104,6 +133,54 @@ fn check_public_file_perms(path: &Path, field: &str) -> Result<(), String> {
     }
     let _ = (path, field);
     Ok(())
+}
+
+/// Bind a Unix-domain-socket listener for the local transport.
+///
+/// Security (ADR-0005): a stale socket from a prior run is removed, but a path
+/// that exists and is *not* a socket is never clobbered. The socket is created
+/// `0600` (owner-only) atomically via a restrictive umask around `bind()`
+/// (D3 — no umask-default window), with an explicit `chmod` as defense in depth.
+/// This is a local-user transport (peer-cred records the connecting uid;
+/// broadening access is out of scope). The accept loop only starts later in
+/// `serve_*`, so no peer is processed before the socket exists.
+#[cfg(unix)]
+pub fn bind_unix_listener(path: &std::path::Path) -> Result<tokio::net::UnixListener, String> {
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_socket() => {
+            std::fs::remove_file(path).map_err(|e| {
+                format!("failed to remove stale unix socket {}: {e}", path.display())
+            })?;
+        }
+        Ok(_) => {
+            return Err(format!(
+                "refusing to bind unix socket: {} exists and is not a socket",
+                path.display()
+            ));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(format!("cannot stat unix socket path {}: {e}", path.display()));
+        }
+    }
+
+    // D3: create the socket with a restrictive umask so it is 0600 from the
+    // instant of bind(), closing the brief window between bind() and the chmod
+    // below where the socket would otherwise carry umask-default (possibly
+    // group/other-accessible) permissions. Restore the prior umask immediately,
+    // even if bind() fails.
+    let prev_umask = nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o177));
+    let bind_result = tokio::net::UnixListener::bind(path);
+    nix::sys::stat::umask(prev_umask);
+    let listener =
+        bind_result.map_err(|e| format!("failed to bind unix socket {}: {e}", path.display()))?;
+    // Defense in depth: assert 0600 explicitly (a no-op given the umask above,
+    // but it guarantees the result even if the process umask is unusual).
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("failed to chmod unix socket {} to 0600: {e}", path.display()))?;
+    Ok(listener)
 }
 
 #[cfg(test)]

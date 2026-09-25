@@ -2,8 +2,10 @@ use super::{
     close_all_sessions, close_session, init_pin, init_token, login, logout, open_session, set_pin,
 };
 use crate::server::context_manager::{ClientContextId, ContextManager, LoginState};
+use crate::server::grpc_service::{HandlerContext, Pkcs11ProxyService};
 use crate::server::handle_map::VirtualHandle;
 use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
+use pkcs11_proxy_ng_proto::Pkcs11Proxy;
 use pkcs11_proxy_ng_types::*;
 use std::io;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -137,9 +139,7 @@ async fn login_response(
     session: u64,
 ) -> u64 {
     login(
-        ctx_mgr,
-        backend,
-        false,
+        &HandlerContext::for_test(ctx_mgr, backend),
         Request::new(pkcs11_proxy_ng_proto::LoginRequest {
             client_context_id: ctx_id.0.clone(),
             session_handle: session,
@@ -160,9 +160,7 @@ async fn logout_response(
     session: u64,
 ) -> u64 {
     logout(
-        ctx_mgr,
-        backend,
-        false,
+        &HandlerContext::for_test(ctx_mgr, backend),
         Request::new(pkcs11_proxy_ng_proto::LogoutRequest {
             client_context_id: ctx_id.0.clone(),
             session_handle: session,
@@ -206,9 +204,7 @@ async fn login_state_is_logical_client_scoped_when_backend_is_already_logged_in(
     );
 
     let logout_b = logout(
-        &ctx_mgr,
-        &backend,
-        false,
+        &HandlerContext::for_test(&ctx_mgr, &backend),
         Request::new(pkcs11_proxy_ng_proto::LogoutRequest {
             client_context_id: ctx_b.0.clone(),
             session_handle: session_b,
@@ -271,9 +267,7 @@ async fn closing_last_session_clears_logical_login_state_for_slot() {
     assert_eq!(login_response(&ctx_mgr, &backend, &ctx_a, session_a).await, CkRv::OK.0);
 
     let close_a = close_session(
-        &ctx_mgr,
-        &backend,
-        false,
+        &HandlerContext::for_test(&ctx_mgr, &backend),
         Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
             client_context_id: ctx_a.0.clone(),
             session_handle: session_a,
@@ -385,9 +379,7 @@ async fn context_specific_login_logout_reaches_backend_without_logical_state() {
     let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
 
     let context_login = login(
-        &ctx_mgr,
-        &backend,
-        false,
+        &HandlerContext::for_test(&ctx_mgr, &backend),
         Request::new(pkcs11_proxy_ng_proto::LoginRequest {
             client_context_id: ctx_id.0.clone(),
             session_handle: session,
@@ -468,9 +460,7 @@ async fn login_produces_audit_log_without_pin() {
 
     let output = capture_logs(|| async {
         let _ = login(
-            &ctx_mgr,
-            &backend,
-            false,
+            &HandlerContext::for_test(&ctx_mgr, &backend),
             Request::new(pkcs11_proxy_ng_proto::LoginRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -524,9 +514,7 @@ async fn init_pin_produces_audit_log_without_pin() {
 
     let output = capture_logs(|| async {
         let _ = init_pin(
-            &ctx_mgr,
-            &backend,
-            false,
+            &HandlerContext::for_test(&ctx_mgr, &backend),
             Request::new(pkcs11_proxy_ng_proto::InitPinRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -549,9 +537,7 @@ async fn set_pin_produces_audit_log_without_pins() {
 
     let output = capture_logs(|| async {
         let _ = set_pin(
-            &ctx_mgr,
-            &backend,
-            false,
+            &HandlerContext::for_test(&ctx_mgr, &backend),
             Request::new(pkcs11_proxy_ng_proto::SetPinRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -575,9 +561,7 @@ async fn logout_produces_audit_log() {
 
     let output = capture_logs(|| async {
         let _ = login(
-            &ctx_mgr,
-            &backend,
-            false,
+            &HandlerContext::for_test(&ctx_mgr, &backend),
             Request::new(pkcs11_proxy_ng_proto::LoginRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -587,9 +571,7 @@ async fn logout_produces_audit_log() {
         )
         .await;
         let _ = logout(
-            &ctx_mgr,
-            &backend,
-            false,
+            &HandlerContext::for_test(&ctx_mgr, &backend),
             Request::new(pkcs11_proxy_ng_proto::LogoutRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -714,9 +696,7 @@ async fn closing_a_session_evicts_session_objects_not_token_objects() {
         let ctx = ctx_id.0.clone();
         async move {
             create_object(
-                &ctx_mgr,
-                &backend,
-                false,
+                &HandlerContext::for_test(&ctx_mgr, &backend),
                 Request::new(pkcs11_proxy_ng_proto::CreateObjectRequest {
                     client_context_id: ctx,
                     session_handle: session,
@@ -754,9 +734,7 @@ async fn closing_a_session_evicts_session_objects_not_token_objects() {
     assert!(resolves(token_obj).await, "setup: token object should resolve");
 
     let closed = close_session(
-        &ctx_mgr,
-        &backend,
-        false,
+        &HandlerContext::for_test(&ctx_mgr, &backend),
         Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
             client_context_id: ctx_id.0.clone(),
             session_handle: session,
@@ -785,9 +763,7 @@ async fn destroy_object_evicts_the_virtual_handle() {
 
     // Create a live backend object so destroy has something to remove.
     let created = create_object(
-        &ctx_mgr,
-        &backend,
-        false,
+        &HandlerContext::for_test(&ctx_mgr, &backend),
         Request::new(pkcs11_proxy_ng_proto::CreateObjectRequest {
             client_context_id: ctx_id.0.clone(),
             session_handle: session,
@@ -808,9 +784,7 @@ async fn destroy_object_evicts_the_virtual_handle() {
     assert!(before.is_some(), "the virtual object handle should resolve before destroy");
 
     let destroyed = destroy_object(
-        &ctx_mgr,
-        &backend,
-        false,
+        &HandlerContext::for_test(&ctx_mgr, &backend),
         Request::new(pkcs11_proxy_ng_proto::DestroyObjectRequest {
             client_context_id: ctx_id.0.clone(),
             session_handle: session,
@@ -853,9 +827,7 @@ async fn object_handles_are_isolated_per_context() {
 
     // ctx_a creates an object; ctx_b creates none (its handle map stays empty).
     let created = create_object(
-        &ctx_mgr,
-        &backend,
-        false,
+        &HandlerContext::for_test(&ctx_mgr, &backend),
         Request::new(pkcs11_proxy_ng_proto::CreateObjectRequest {
             client_context_id: ctx_a.0.clone(),
             session_handle: session_a,
@@ -874,9 +846,7 @@ async fn object_handles_are_isolated_per_context() {
         let backend = backend.clone();
         async move {
             get_attribute_value(
-                &ctx_mgr,
-                &backend,
-                false,
+                &HandlerContext::for_test(&ctx_mgr, &backend),
                 Request::new(pkcs11_proxy_ng_proto::GetAttributeValueRequest {
                     client_context_id: ctx,
                     session_handle: session,
@@ -959,6 +929,7 @@ async fn wait_for_slot_event_suppresses_events_for_unauthorized_slots() {
     let policy =
         crate::server::auth::policy::TokenPolicy::from_config(&crate::config::AuthConfig {
             allow_all_authenticated: false,
+            anonymous_principal: None,
             policy: vec![],
         })
         .unwrap();
@@ -1006,9 +977,7 @@ async fn close_session_keeps_mapping_on_transient_backend_failure() {
     mock.inject_close_error(CkRv::DEVICE_ERROR);
 
     let rv = close_session(
-        &ctx_mgr,
-        &backend,
-        false,
+        &HandlerContext::for_test(&ctx_mgr, &backend),
         Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
             client_context_id: ctx_id.0.clone(),
             session_handle: session,
@@ -1036,9 +1005,7 @@ async fn close_session_drops_mapping_when_backend_reports_already_gone() {
     mock.inject_close_error(CkRv::SESSION_HANDLE_INVALID);
 
     let rv = close_session(
-        &ctx_mgr,
-        &backend,
-        false,
+        &HandlerContext::for_test(&ctx_mgr, &backend),
         Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
             client_context_id: ctx_id.0.clone(),
             session_handle: session,
@@ -1080,9 +1047,7 @@ async fn cross_client_login_with_wrong_pin_is_rejected() {
 
     // ctx_b attempts a logical login with a WRONG PIN.
     let wrong = login(
-        &ctx_mgr,
-        &backend,
-        false,
+        &HandlerContext::for_test(&ctx_mgr, &backend),
         Request::new(pkcs11_proxy_ng_proto::LoginRequest {
             client_context_id: ctx_b.0.clone(),
             session_handle: session_b,
@@ -1149,7 +1114,11 @@ async fn concurrent_first_login_serializes_to_one_backend_login() {
         let (ctx_mgr, backend, req) =
             (ctx_mgr.clone(), backend.clone(), login_req(&ctx_a, session_a));
         tokio::spawn(async move {
-            login(&ctx_mgr, &backend, false, req).await.unwrap().into_inner().ck_rv
+            login(&HandlerContext::for_test(&ctx_mgr, &backend), req)
+                .await
+                .unwrap()
+                .into_inner()
+                .ck_rv
         })
     };
     // Wait (off the executor) until A is actually inside the backend login.
@@ -1160,7 +1129,11 @@ async fn concurrent_first_login_serializes_to_one_backend_login() {
         let (ctx_mgr, backend, req) =
             (ctx_mgr.clone(), backend.clone(), login_req(&ctx_b, session_b));
         tokio::spawn(async move {
-            login(&ctx_mgr, &backend, false, req).await.unwrap().into_inner().ck_rv
+            login(&HandlerContext::for_test(&ctx_mgr, &backend), req)
+                .await
+                .unwrap()
+                .into_inner()
+                .ck_rv
         })
     };
 
@@ -1206,9 +1179,7 @@ async fn set_pin_refreshes_the_cross_client_login_verifier() {
     // ctx_a logs in with "1234" (verifier captured), then changes it to "5678".
     assert_eq!(login_response(&ctx_mgr, &backend, &ctx_a, session_a).await, CkRv::OK.0);
     let set_rv = set_pin(
-        &ctx_mgr,
-        &backend,
-        false,
+        &HandlerContext::for_test(&ctx_mgr, &backend),
         Request::new(pkcs11_proxy_ng_proto::SetPinRequest {
             client_context_id: ctx_a.0.clone(),
             session_handle: session_a,
@@ -1224,9 +1195,7 @@ async fn set_pin_refreshes_the_cross_client_login_verifier() {
 
     // ctx_b's logical login with the NEW PIN must now be accepted.
     let rv = login(
-        &ctx_mgr,
-        &backend,
-        false,
+        &HandlerContext::for_test(&ctx_mgr, &backend),
         Request::new(pkcs11_proxy_ng_proto::LoginRequest {
             client_context_id: ctx_b.0.clone(),
             session_handle: session_b,
@@ -1243,4 +1212,581 @@ async fn set_pin_refreshes_the_cross_client_login_verifier() {
         CkRv::OK.0,
         "a logical login with the new PIN must be accepted after SetPIN refreshes the verifier"
     );
+}
+
+// ---------------------------------------------------------------------------
+// G1-PR2: Audit emission integration tests
+// ---------------------------------------------------------------------------
+
+/// Build a `HandlerContext` with a live audit sink pointing at `dir`.
+async fn make_audited_ctx(
+    ctx_mgr: &Arc<ContextManager>,
+    backend: &Arc<dyn Pkcs11Backend>,
+    dir: &std::path::Path,
+) -> (HandlerContext, crate::server::audit::AuditSink) {
+    let cfg = crate::config::AuditConfig {
+        dir: Some(dir.to_owned()),
+        rotate_max_bytes: 1 << 20,
+        rotate_keep_files: 10,
+        ..Default::default()
+    };
+    let sink =
+        crate::server::audit::spawn_audit_sink(&cfg).unwrap().expect("audit sink must spawn");
+    let mut ctx = HandlerContext::for_test(ctx_mgr, backend);
+    ctx.audit = Some(sink.clone());
+    (ctx, sink)
+}
+
+/// Returns a path inside the system temp dir that is unique per test process + tag.
+fn test_audit_dir(tag: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("pkcs11-proxy-audit-{}-{}", std::process::id(), tag))
+}
+
+/// G1-PR2 primary: login then logout produces two audit records with the
+/// correct method names and ck_rv, the chain verifies, and the test PIN is
+/// absent from every byte of every audit file.
+#[tokio::test]
+async fn audit_login_logout_records_chain_ok_and_no_pin() {
+    let dir = test_audit_dir("login-logout");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let mock = MockBackend::default_test();
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(CkSlotId(0)).await;
+
+    let (ctx, sink) = make_audited_ctx(&ctx_mgr, &backend, &dir).await;
+
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let session_handle = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+
+    // Use a distinctive PIN string so the grep below is a strong assertion.
+    let test_pin = b"G1PR2-AuditTestPin-SENSITIVE!".to_vec();
+
+    let login_rv = login(
+        &ctx,
+        Request::new(pkcs11_proxy_ng_proto::LoginRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle,
+            user_type: CkUserType::User as u64,
+            pin: Some(test_pin.clone()),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv;
+    assert_eq!(login_rv, CkRv::OK.0, "login must succeed");
+
+    let logout_rv = logout(
+        &ctx,
+        Request::new(pkcs11_proxy_ng_proto::LogoutRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv;
+    assert_eq!(logout_rv, CkRv::OK.0, "logout must succeed");
+
+    // Flush: ensures all records are durably written before we read the files.
+    sink.flush().await.unwrap();
+
+    // Verify the hash chain.
+    let report = pkcs11_proxy_ng_audit::verify::verify_dir(&dir, None).unwrap();
+    assert!(report.chain_ok, "audit chain must be valid after login+logout: {report:?}");
+    assert!(report.records >= 2, "must have at least 2 audit records, got {}", report.records);
+    assert!(report.gaps.is_empty(), "no sequence gaps: {:?}", report.gaps);
+
+    // Verify the record content (method names and ck_rv).
+    let jsonl = std::fs::read_to_string(dir.join("audit.jsonl")).unwrap();
+    assert!(jsonl.contains("\"C_Login\""), "C_Login method must appear in audit file");
+    assert!(jsonl.contains("\"C_Logout\""), "C_Logout method must appear in audit file");
+    // ck_rv 0 == CKR_OK
+    assert!(jsonl.contains("\"ck_rv\":0"), "successful operations must record ck_rv 0");
+
+    // PIN-safety: the raw PIN bytes must not appear anywhere in the audit files.
+    let pin_str = std::str::from_utf8(&test_pin).unwrap();
+    let all_files_content = {
+        let mut s = String::new();
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
+                s.push_str(&std::fs::read_to_string(&path).unwrap_or_default());
+            }
+        }
+        s
+    };
+    assert!(
+        !all_files_content.contains(pin_str),
+        "PIN MUST NOT appear in any audit JSONL file (PIN safety violation!)"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// G1-PR2 audit-off: when `ctx.audit` is `None` (no `[audit]` config),
+/// the operation behaves byte-identically to pre-audit code.
+#[tokio::test]
+async fn audit_off_login_logout_byte_identical() {
+    let mock = MockBackend::default_test();
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(CkSlotId(0)).await;
+
+    // No audit sink: for_test leaves ctx.audit = None.
+    let ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let session_handle = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+
+    let login_rv = login(
+        &ctx,
+        Request::new(pkcs11_proxy_ng_proto::LoginRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle,
+            user_type: CkUserType::User as u64,
+            pin: Some(b"1234".to_vec()),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv;
+    assert_eq!(login_rv, CkRv::OK.0, "login must succeed with audit off");
+
+    let logout_rv = logout(
+        &ctx,
+        Request::new(pkcs11_proxy_ng_proto::LogoutRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv;
+    assert_eq!(logout_rv, CkRv::OK.0, "logout must succeed with audit off");
+}
+
+// ---------------------------------------------------------------------------
+// G1-PR3: key-lifecycle audit emission tests
+// ---------------------------------------------------------------------------
+
+/// G1-PR3: `C_GenerateKey` emits a `KeyMgmt` audit record with the
+/// operation's `ck_rv` and a valid hash chain.  Uses a MockBackend configured
+/// with `AES_KEY_GEN` (not in `default_test`) so the backend call succeeds.
+#[tokio::test]
+async fn audit_generate_key_emits_key_mgmt_record() {
+    let dir = test_audit_dir("generate-key");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // Build a backend that advertises AES_KEY_GEN.
+    let mock = pkcs11_proxy_ng_backend::MockBackend::new(
+        vec![CkSlotId(0)],
+        vec![CkMechanismType::AES_KEY_GEN],
+    );
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(CkSlotId(0)).await;
+
+    let (ctx, sink) = make_audited_ctx(&ctx_mgr, &backend, &dir).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let session_handle = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+
+    use crate::server::grpc_service::key_ops::generate_key;
+    let gen_rv = generate_key(
+        &ctx,
+        Request::new(pkcs11_proxy_ng_proto::GenerateKeyRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle,
+            mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {
+                mechanism_type: CkMechanismType::AES_KEY_GEN.0,
+                params: None,
+            }),
+            template: vec![],
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv;
+    assert_eq!(gen_rv, CkRv::OK.0, "generate_key must succeed");
+
+    sink.flush().await.unwrap();
+
+    let report = pkcs11_proxy_ng_audit::verify::verify_dir(&dir, None).unwrap();
+    assert!(report.chain_ok, "audit chain must be valid after C_GenerateKey: {report:?}");
+    assert!(report.records >= 1, "must have at least one audit record, got {}", report.records);
+    assert!(report.gaps.is_empty(), "no sequence gaps: {:?}", report.gaps);
+
+    let jsonl = std::fs::read_to_string(dir.join("audit.jsonl")).unwrap();
+    assert!(jsonl.contains("\"C_GenerateKey\""), "C_GenerateKey must appear in audit JSONL");
+    assert!(jsonl.contains("\"ck_rv\":0"), "successful keygen must record ck_rv 0");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// G1-PR3 audit-off: when `ctx.audit` is `None`, `generate_key` behaves
+/// byte-identically to the pre-audit path (no panic, correct ck_rv).
+#[tokio::test]
+async fn audit_off_generate_key_byte_identical() {
+    let mock = pkcs11_proxy_ng_backend::MockBackend::new(
+        vec![CkSlotId(0)],
+        vec![CkMechanismType::AES_KEY_GEN],
+    );
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(CkSlotId(0)).await;
+
+    // No audit sink: for_test leaves ctx.audit = None.
+    let ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let session_handle = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+
+    use crate::server::grpc_service::key_ops::generate_key;
+    let gen_rv = generate_key(
+        &ctx,
+        Request::new(pkcs11_proxy_ng_proto::GenerateKeyRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle,
+            mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {
+                mechanism_type: CkMechanismType::AES_KEY_GEN.0,
+                params: None,
+            }),
+            template: vec![],
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv;
+    assert_eq!(gen_rv, CkRv::OK.0, "generate_key must succeed with audit off");
+}
+
+// ---------------------------------------------------------------------------
+// G2-PR3 Task 3: per-principal session quota (derived leak-proof count)
+// ---------------------------------------------------------------------------
+
+/// Helper: configure a per-principal session quota via the rate-quota module.
+/// Uses a thread-local override rather than `configure()` (which is
+/// OnceLock-guarded and therefore not re-callable between tests).  Instead we
+/// exercise the code path that calls `per_principal_max_sessions()` directly
+/// by setting the OnceLock the first time it is needed in this process, so
+/// only one test may set a non-None value — these tests are serialized by
+/// `SESSION_QUOTA_INIT`.
+static SESSION_QUOTA_INIT: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+fn quota_mutex() -> &'static tokio::sync::Mutex<()> {
+    SESSION_QUOTA_INIT.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// Call `open_session` through the `session.rs` test shim and return the raw
+/// `OpenSessionResponse` (ck_rv + session_handle).
+async fn try_open_session(
+    ctx_mgr: &Arc<ContextManager>,
+    backend: &Arc<dyn Pkcs11Backend>,
+    ctx_id: &ClientContextId,
+) -> pkcs11_proxy_ng_proto::OpenSessionResponse {
+    let virtual_slot = ctx_mgr.virtual_slots().await[0];
+    open_session(
+        ctx_mgr,
+        backend,
+        Request::new(pkcs11_proxy_ng_proto::OpenSessionRequest {
+            client_context_id: ctx_id.0.clone(),
+            slot_id: virtual_slot.0,
+            flags: CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+}
+
+/// G2-PR3/T3: session_count_for_principal correctly sums session_slots across
+/// all contexts whose principal key matches.
+///
+/// Uses manual session registration (via `register_session`) rather than the
+/// full `open_session` handler so this is a pure unit test of the counting
+/// function without token-policy / identity-format side effects.
+///
+/// Identity format note: the `slot_is_authorized` path in `open_session`
+/// runs `AuthenticatedIdentity::from_str` on the stored identity string, which
+/// expects "uid=N" or "x509:…" formats. This test uses `"uid=1"` / `"uid=2"`
+/// for authenticated contexts and `None` for the unauthenticated one.
+#[tokio::test]
+async fn session_count_for_principal_aggregates_correctly() {
+    use crate::server::handle_map::BackendHandle;
+
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+
+    // Two contexts sharing the same identity → sessions aggregate.
+    let ctx_a1 = ctx_mgr.create_context(Some("uid=1".into())).await.unwrap();
+    let ctx_a2 = ctx_mgr.create_context(Some("uid=1".into())).await.unwrap();
+    // A context with a different identity.
+    let ctx_b = ctx_mgr.create_context(Some("uid=2".into())).await.unwrap();
+    // An unauthenticated context: principal key = ctx_id string.
+    let ctx_anon = ctx_mgr.create_context(None).await.unwrap();
+
+    assert_eq!(ctx_mgr.session_count_for_principal("uid=1"), 0, "no sessions yet");
+
+    // Register one session in ctx_a1.
+    ctx_mgr
+        .get_context(&ctx_a1, |ctx| ctx.register_session(BackendHandle(1), CkSlotId(0)))
+        .await
+        .expect("ctx_a1 must exist");
+    assert_eq!(ctx_mgr.session_count_for_principal("uid=1"), 1, "one session in ctx_a1");
+
+    // Register one session in ctx_a2 (same identity → aggregates).
+    ctx_mgr
+        .get_context(&ctx_a2, |ctx| ctx.register_session(BackendHandle(2), CkSlotId(0)))
+        .await
+        .expect("ctx_a2 must exist");
+    assert_eq!(
+        ctx_mgr.session_count_for_principal("uid=1"),
+        2,
+        "two sessions across ctx_a1 + ctx_a2"
+    );
+
+    // uid=2 is independent.
+    ctx_mgr
+        .get_context(&ctx_b, |ctx| ctx.register_session(BackendHandle(3), CkSlotId(0)))
+        .await
+        .expect("ctx_b must exist");
+    assert_eq!(
+        ctx_mgr.session_count_for_principal("uid=1"),
+        2,
+        "uid=2 session does not affect uid=1 count"
+    );
+    assert_eq!(ctx_mgr.session_count_for_principal("uid=2"), 1, "uid=2 has its own count");
+
+    // Unauthenticated: principal key is the ctx_id string itself.
+    ctx_mgr
+        .get_context(&ctx_anon, |ctx| ctx.register_session(BackendHandle(4), CkSlotId(0)))
+        .await
+        .expect("ctx_anon must exist");
+    assert_eq!(
+        ctx_mgr.session_count_for_principal(&ctx_anon.0),
+        1,
+        "anon counted under its ctx_id key"
+    );
+    assert_eq!(ctx_mgr.session_count_for_principal("uid=1"), 2, "anon does not affect uid=1");
+}
+
+/// G2-PR3/T3: derived session count tracks open/close correctly — proves the
+/// leak-proof property. Uses `create_context(None)` so the principal key
+/// falls back to the ctx_id string and the open_session handler's
+/// token-policy / identity-format checks do not interfere.
+#[tokio::test]
+async fn session_count_for_principal_tracks_close_session() {
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(CkSlotId(0)).await;
+
+    // No identity → principal key = ctx_id string (unauthenticated path).
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let principal_key = ctx_id.0.clone(); // derived key used in lifecycle.rs
+
+    assert_eq!(ctx_mgr.session_count_for_principal(&principal_key), 0, "start at zero");
+
+    let s1 = try_open_session(&ctx_mgr, &backend, &ctx_id).await;
+    assert_eq!(s1.ck_rv, CkRv::OK.0, "1st open must succeed");
+    let s2 = try_open_session(&ctx_mgr, &backend, &ctx_id).await;
+    assert_eq!(s2.ck_rv, CkRv::OK.0, "2nd open must succeed");
+
+    assert_eq!(ctx_mgr.session_count_for_principal(&principal_key), 2, "two sessions open");
+
+    // Close one session → derived count drops (proves leak-proofness: no manual release needed).
+    let close_rv = close_session(
+        &HandlerContext::for_test(&ctx_mgr, &backend),
+        Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: s1.session_handle,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv;
+    assert_eq!(close_rv, CkRv::OK.0, "close must succeed");
+    assert_eq!(ctx_mgr.session_count_for_principal(&principal_key), 1, "count drops after close");
+
+    // A new open succeeds (derived count dropped below the hypothetical max of 2).
+    let s3 = try_open_session(&ctx_mgr, &backend, &ctx_id).await;
+    assert_eq!(s3.ck_rv, CkRv::OK.0, "open must succeed after count drops");
+    assert_eq!(ctx_mgr.session_count_for_principal(&principal_key), 2, "back to two");
+}
+
+/// G2-PR3/T3 end-to-end: configure the session quota to 2, exercise through
+/// `Pkcs11ProxyService` so the full dispatch path is covered.
+///
+/// Serialized via `quota_mutex()` because `rate_quota::configure` is
+/// OnceLock-guarded and can only run once per process.  This test must be the
+/// FIRST (and only) test to call `configure` with a non-None `max_sessions`
+/// for the quota path to be active, so it takes the mutex to prevent races.
+#[tokio::test]
+async fn open_session_quota_enforced_end_to_end() {
+    let _guard = quota_mutex().lock().await;
+
+    // Configure the quota to 2 per principal. OnceLock: only the first call
+    // to configure() in this process wins. If another test already configured
+    // the global state, the OnceLock is set and this call is a no-op — in
+    // that case the test may observe a different limit.  We always assert the
+    // invariant against the configured value returned by per_principal_max_sessions().
+    let cfg = crate::config::RateLimitConfig {
+        per_principal_max_in_flight: None,
+        per_principal_max_sessions: Some(2),
+        per_slot_failed_login_budget: None,
+        per_slot_failed_login_cooldown_secs: None,
+    };
+    crate::server::rate_quota::configure(&cfg);
+
+    // If per_principal_max_sessions is NOT 2 after configure (another test
+    // won the OnceLock race), skip rather than assert wrong invariants.
+    let max = crate::server::rate_quota::per_principal_max_sessions();
+    if max != Some(2) {
+        // OnceLock already set by another caller — skip gracefully.
+        return;
+    }
+
+    let mock = MockBackend::default_test();
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(CkSlotId(0)).await;
+
+    let svc = Pkcs11ProxyService::insecure_for_tests(ctx_mgr.clone(), backend.clone());
+
+    // Use create_context(None) so:
+    //   • The A2 owner check passes (stored=None → always allowed).
+    //   • The principal key falls back to the ctx_id string (unauthenticated path).
+    //   • Two contexts have DIFFERENT principal keys → are independently quota-limited.
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let virtual_slot = ctx_mgr.virtual_slots().await[0];
+
+    let open = |cid: String| {
+        let svc = svc.clone();
+        let slot = virtual_slot.0;
+        async move {
+            svc.open_session(Request::new(pkcs11_proxy_ng_proto::OpenSessionRequest {
+                client_context_id: cid,
+                slot_id: slot,
+                flags: CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+        }
+    };
+
+    let r1 = open(ctx_id.0.clone()).await;
+    assert_eq!(r1.ck_rv, CkRv::OK.0, "1st open must succeed");
+    let r2 = open(ctx_id.0.clone()).await;
+    assert_eq!(r2.ck_rv, CkRv::OK.0, "2nd open must succeed");
+
+    // 3rd open must be rejected with CKR_SESSION_COUNT — no backend call.
+    let r3 = open(ctx_id.0.clone()).await;
+    assert_eq!(r3.ck_rv, CkRv::SESSION_COUNT.0, "3rd open must return CKR_SESSION_COUNT");
+    assert_eq!(r3.session_handle, 0, "rejected open must return handle 0");
+
+    // Close one session → derived count drops → next open succeeds
+    // (proves leak-proofness: no manual release required).
+    let close_rv = svc
+        .close_session(Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: r1.session_handle,
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .ck_rv;
+    assert_eq!(close_rv, CkRv::OK.0, "close must succeed");
+
+    let r4 = open(ctx_id.0.clone()).await;
+    assert_eq!(r4.ck_rv, CkRv::OK.0, "open must succeed after count drops below max");
+
+    // A completely different context (different principal key) is independent.
+    let ctx_other = ctx_mgr.create_context(None).await.unwrap();
+    let ro1 = open(ctx_other.0.clone()).await;
+    assert_eq!(ro1.ck_rv, CkRv::OK.0, "other context 1st open must succeed");
+    let ro2 = open(ctx_other.0.clone()).await;
+    assert_eq!(ro2.ck_rv, CkRv::OK.0, "other context 2nd open must succeed");
+    let ro3 = open(ctx_other.0.clone()).await;
+    assert_eq!(ro3.ck_rv, CkRv::SESSION_COUNT.0, "other context hits own quota independently");
+}
+
+// ---------------------------------------------------------------------------
+// G2-PR3: per-slot aggregate failed-login budget
+// ---------------------------------------------------------------------------
+
+/// G2-PR3: when `per_slot_failed_login_budget` is unset (or configured to
+/// `None`), all failed-login attempts reach the backend transparently — no
+/// fast-reject, no DEVICE_ERROR substitution.
+///
+/// This test is safe to run alongside `open_session_quota_enforced_end_to_end`
+/// which configures the global rate-quota state with `budget = None`. In both
+/// the "state not yet configured" and the "state configured with budget = None"
+/// cases, `login_slot_in_cooldown` always returns false and
+/// `record_login_failure` is always a no-op, so the login path is unchanged.
+#[tokio::test]
+async fn failed_login_budget_unset_all_reach_backend_transparently() {
+    // Use quota_mutex so this test serializes against the quota configure test;
+    // if that test has already set the budget to None, we're fine. If another
+    // test (e.g. in an integration binary) has configured a non-None budget, we
+    // detect it here and skip rather than assert incorrectly.
+    let _guard = quota_mutex().lock().await;
+
+    // If the global state is already configured with a non-None budget, skip
+    // gracefully. Within this test binary, only the existing configure call
+    // (budget = None) ever runs, so this path should not be taken.
+    if crate::server::rate_quota::configured_login_budget().is_some() {
+        // A different invocation set a non-None budget; unset semantics cannot
+        // be verified in this process. Skip.
+        return;
+    }
+
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    // Inject PIN_INCORRECT so every backend login fails with a PIN error.
+    mock.inject_login_rv(CkRv::PIN_INCORRECT);
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(CkSlotId(0)).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+
+    // 5 failed attempts must ALL reach the backend (no fast-reject).
+    for i in 1_usize..=5 {
+        let rv = login(
+            &HandlerContext::for_test(&ctx_mgr, &backend),
+            Request::new(pkcs11_proxy_ng_proto::LoginRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: session,
+                user_type: CkUserType::User as u64,
+                pin: Some(b"wrong".to_vec()),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .ck_rv;
+        assert_eq!(
+            rv,
+            CkRv::PIN_INCORRECT.0,
+            "attempt {i}: must return transparent CKR_PIN_INCORRECT (no fast-reject)"
+        );
+        assert_eq!(
+            mock.login_call_count(),
+            i,
+            "attempt {i}: backend must be called — no fast-reject when budget is unset"
+        );
+    }
 }

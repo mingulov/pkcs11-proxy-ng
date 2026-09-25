@@ -227,6 +227,356 @@ impl TokenPolicy {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Grant-level query methods (Task 6 enforcement + G3 future use)
+    // -----------------------------------------------------------------------
+    //
+    // These methods are called AFTER `allows()` returns true (token-level
+    // gate already passed). They inspect the matching `TokenGrant`(s) for
+    // sub-token restrictions.
+    //
+    // Semantics for `Specific` grants when multiple grants match the token:
+    //   extract_allowed   — false if ANY matching grant has `extract = Deny`
+    //   allows_mechanism  — true if ANY matching grant has `mechanisms = None`
+    //                        OR contains the given mechanism
+    //   allows_class      — true if ANY matching grant has `classes = None`
+    //                        OR contains the given class
+    //
+    // For `TokenAccess::All`, unauthenticated peers, and `allow_all_authenticated`
+    // all three methods return `true` (no sub-token restrictions).
+
+    /// Whether the identity is allowed to extract sensitive key material from the
+    /// matched token.
+    ///
+    /// Returns `true` by default; `false` only when a matching grant explicitly
+    /// sets `extract = "deny"`. `TokenAccess::All` / no matching grant / unauthenticated
+    /// → always `true` (extract-deny is opt-in).
+    pub fn extract_allowed(
+        &self,
+        identity: &AuthenticatedIdentity,
+        token_label: &str,
+        token_serial: &str,
+    ) -> bool {
+        if matches!(identity, AuthenticatedIdentity::Unauthenticated) {
+            return true;
+        }
+        if self.allow_all_authenticated {
+            return true;
+        }
+        match self.resolve_access(identity) {
+            None | Some(TokenAccess::All) => true,
+            Some(TokenAccess::Specific(grants)) => !grants
+                .iter()
+                .filter(|g| g.matches_token(token_label, token_serial))
+                .any(|g| g.extract == ExtractPolicy::Deny),
+        }
+    }
+
+    /// Whether extraction of key material is permitted for a specific object identified
+    /// by its `CKA_UNIQUE_ID` byte value.
+    ///
+    /// This is the per-object extract gate (Task 4): it refines the grant-level
+    /// `extract_allowed` decision with object-level overrides from `ObjectAcl::extract`.
+    ///
+    /// Decision order for each matching grant that has `Some(objects)` list:
+    /// 1. If the object appears with `extract = Some(Deny)` → vote deny.
+    /// 2. If the object appears with `extract = Some(Allow)` → vote allow.
+    /// 3. If the object appears with `extract = None` → inherit grant-level.
+    ///
+    /// When multiple grants conflict, deny beats allow (security-conservative).
+    /// If no grant has a per-object override, falls back to the grant-level
+    /// `extract_allowed` decision.
+    ///
+    /// **Transparent when inactive:** callers should check `per_object_active()`
+    /// first and skip this method when `false` (no objects lists in any grant).
+    ///
+    /// Returns `true` (permissive) for: unauthenticated, `allow_all_authenticated`,
+    /// `TokenAccess::All`, no matching grant, object not in any list.
+    pub fn extract_allowed_for_object(
+        &self,
+        identity: &AuthenticatedIdentity,
+        token_label: &str,
+        token_serial: &str,
+        unique_id: &[u8],
+    ) -> bool {
+        if matches!(identity, AuthenticatedIdentity::Unauthenticated) {
+            return true;
+        }
+        if self.allow_all_authenticated {
+            return true;
+        }
+        match self.resolve_access(identity) {
+            None | Some(TokenAccess::All) => true,
+            Some(TokenAccess::Specific(grants)) => {
+                let matching: Vec<&TokenGrant> =
+                    grants.iter().filter(|g| g.matches_token(token_label, token_serial)).collect();
+                if matching.is_empty() {
+                    return true; // no grants matched → no restriction
+                }
+
+                // Scan for per-object overrides across all matching grants.
+                // Security-conservative: explicit deny beats explicit allow.
+                let mut has_explicit_deny = false;
+                let mut has_explicit_allow = false;
+
+                for grant in &matching {
+                    if let Some(list) = &grant.objects {
+                        for acl in list {
+                            if acl.unique_id.as_slice() == unique_id {
+                                match acl.extract {
+                                    Some(ExtractPolicy::Deny) => has_explicit_deny = true,
+                                    Some(ExtractPolicy::Allow) => has_explicit_allow = true,
+                                    None => {} // inherit grant-level; handled below
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if has_explicit_deny {
+                    return false; // deny beats allow
+                }
+                if has_explicit_allow {
+                    return true; // explicit per-object allow
+                }
+
+                // No per-object override found; fall back to grant-level extract policy.
+                !matching.iter().any(|g| g.extract == ExtractPolicy::Deny)
+            }
+        }
+    }
+
+    /// Whether the identity is allowed to use the given mechanism on the matched token.
+    ///
+    /// Returns `true` when `mechanisms = None` in all matching grants (no restriction)
+    /// or at least one matching grant explicitly lists this mechanism.
+    /// `TokenAccess::All` / no matching grant → `true`.
+    pub fn allows_mechanism(
+        &self,
+        identity: &AuthenticatedIdentity,
+        token_label: &str,
+        token_serial: &str,
+        mech: CkMechanismType,
+    ) -> bool {
+        if matches!(identity, AuthenticatedIdentity::Unauthenticated) {
+            return true;
+        }
+        if self.allow_all_authenticated {
+            return true;
+        }
+        match self.resolve_access(identity) {
+            None | Some(TokenAccess::All) => true,
+            Some(TokenAccess::Specific(grants)) => {
+                let matching: Vec<&TokenGrant> =
+                    grants.iter().filter(|g| g.matches_token(token_label, token_serial)).collect();
+                if matching.is_empty() {
+                    return true; // no grants matched → no restriction
+                }
+                matching.iter().any(|g| match &g.mechanisms {
+                    None => true,
+                    Some(list) => list.contains(&mech),
+                })
+            }
+        }
+    }
+
+    /// Whether the identity is allowed to access objects of the given class on the
+    /// matched token.
+    ///
+    /// Returns `true` when `classes = None` in all matching grants (no restriction)
+    /// or at least one matching grant explicitly lists this class.
+    /// `TokenAccess::All` / no matching grant → `true`.
+    pub fn allows_class(
+        &self,
+        identity: &AuthenticatedIdentity,
+        token_label: &str,
+        token_serial: &str,
+        class: CkObjectClass,
+    ) -> bool {
+        if matches!(identity, AuthenticatedIdentity::Unauthenticated) {
+            return true;
+        }
+        if self.allow_all_authenticated {
+            return true;
+        }
+        match self.resolve_access(identity) {
+            None | Some(TokenAccess::All) => true,
+            Some(TokenAccess::Specific(grants)) => {
+                let matching: Vec<&TokenGrant> =
+                    grants.iter().filter(|g| g.matches_token(token_label, token_serial)).collect();
+                if matching.is_empty() {
+                    return true; // no grants matched → no restriction
+                }
+                matching.iter().any(|g| match &g.classes {
+                    None => true,
+                    Some(list) => list.contains(&class),
+                })
+            }
+        }
+    }
+
+    /// Whether any grant in any policy rule has a non-`None` `objects` list.
+    ///
+    /// When `false`, the per-object authorization layer is entirely dormant and
+    /// the `allows_object_use` check can be skipped. When `true`, at least one
+    /// grant restricts access to specific objects by `CKA_UNIQUE_ID`, so the
+    /// enforcement path must be consulted.
+    ///
+    /// This is an opt-in feature: the value is `false` when no `objects` field
+    /// appears anywhere in the loaded config (i.e., all existing deployments
+    /// until they explicitly add an `objects` list to a grant).
+    ///
+    /// The result is pre-computed at `from_config` (M1) so that per-object gate
+    /// callers pay only a single `bool` load per RPC, not a full grant scan.
+    pub fn per_object_active(&self) -> bool {
+        self.per_object_active_cache
+    }
+
+    /// Whether any grant in any policy rule has a non-`None` `classes` list.
+    ///
+    /// When `false`, the per-class authorization check inside the object gate
+    /// is skipped entirely (transparent). When `true`, at least one grant
+    /// restricts access by `CKA_CLASS`, so the `allows_class` check is enforced
+    /// after the unique-id check passes.
+    ///
+    /// Like `per_object_active`, this is opt-in and pre-computed at `from_config`
+    /// (M1) for zero-cost when no class grants are configured.
+    pub fn per_class_active(&self) -> bool {
+        self.per_class_active_cache
+    }
+
+    /// Whether any grant in any policy rule has a non-`None` `mechanisms` list.
+    ///
+    /// When `false`, the per-mechanism enforcement layer is entirely dormant and
+    /// `mechanism_permitted` returns `true` immediately (transparent). When
+    /// `true`, at least one grant restricts which mechanisms the identity may use,
+    /// so the enforcement path must be consulted on every crypto-init RPC.
+    ///
+    /// This is opt-in and pre-computed at `from_config` (M1): `false` for all
+    /// existing deployments until they explicitly add a `mechanisms` list to a
+    /// grant, giving zero overhead on the critical crypto-init path.
+    pub fn per_mechanism_active(&self) -> bool {
+        self.per_mechanism_active_cache
+    }
+
+    /// Whether the principal's matching grant has any `ObjectAcl` entry with an
+    /// explicit per-object extract override (`extract.is_some()`).
+    ///
+    /// Used by `extract_is_permitted` to decide what to do when the uid cannot
+    /// be resolved (transient fetch failure or `ATTRIBUTE_SENSITIVE`):
+    /// - `true` → at least one per-object extract override exists for this token;
+    ///   the uid is needed to evaluate it, so fail-closed (DENY) to prevent
+    ///   exporting a key that may be covered by a per-object extract=Deny.
+    /// - `false` → no per-object overrides exist; fall through to the grant-level
+    ///   `extract_allowed` decision (do NOT over-deny on transient fetch failure).
+    ///
+    /// Returns `false` for unauthenticated, `allow_all_authenticated`, and
+    /// `TokenAccess::All` (those paths have no per-object ACL lists).
+    pub fn has_object_extract_override(
+        &self,
+        identity: &AuthenticatedIdentity,
+        token_label: &str,
+        token_serial: &str,
+    ) -> bool {
+        if matches!(identity, AuthenticatedIdentity::Unauthenticated) {
+            return false;
+        }
+        if self.allow_all_authenticated {
+            return false;
+        }
+        match self.resolve_access(identity) {
+            None | Some(TokenAccess::All) => false,
+            Some(TokenAccess::Specific(grants)) => {
+                grants.iter().filter(|g| g.matches_token(token_label, token_serial)).any(|g| {
+                    g.objects
+                        .as_ref()
+                        .is_some_and(|list| list.iter().any(|acl| acl.extract.is_some()))
+                })
+            }
+        }
+    }
+
+    /// Whether the identity is allowed to use an object with the given
+    /// `CKA_UNIQUE_ID` value on the matched token.
+    ///
+    /// Per-object authorization is **opt-in** (an additive refinement of the
+    /// token-level grant): a grant without an `objects` list permits all objects,
+    /// preserving backward compatibility. Principals without a matching grant,
+    /// `TokenAccess::All`, `allow_all_authenticated`, and unauthenticated peers
+    /// all receive `true` — per-object is never a new denial for principals
+    /// who have no `objects` restriction configured.
+    ///
+    /// When a grant DOES have `Some(list)`, only objects whose `unique_id`
+    /// byte slice appears in `list` are permitted by that grant.
+    pub fn allows_object_use(
+        &self,
+        identity: &AuthenticatedIdentity,
+        token_label: &str,
+        token_serial: &str,
+        unique_id: &[u8],
+    ) -> bool {
+        if matches!(identity, AuthenticatedIdentity::Unauthenticated) {
+            return true;
+        }
+        if self.allow_all_authenticated {
+            return true;
+        }
+        match self.resolve_access(identity) {
+            None | Some(TokenAccess::All) => true,
+            Some(TokenAccess::Specific(grants)) => {
+                let matching: Vec<&TokenGrant> =
+                    grants.iter().filter(|g| g.matches_token(token_label, token_serial)).collect();
+                if matching.is_empty() {
+                    return true; // no grants matched → no restriction
+                }
+                matching.iter().any(|g| match &g.objects {
+                    None => true, // unrestricted grant permits all objects
+                    Some(list) => list.iter().any(|acl| acl.unique_id.as_slice() == unique_id),
+                })
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Private helpers
+    // -----------------------------------------------------------------------
+
+    /// Resolve the `TokenAccess` for an authenticated identity without side
+    /// effects (no logging, no deprecation warnings). Used by the query methods
+    /// (`extract_allowed`, `allows_mechanism`, `allows_class`).
+    fn resolve_access(&self, identity: &AuthenticatedIdentity) -> Option<&TokenAccess> {
+        match identity {
+            AuthenticatedIdentity::Unauthenticated => None,
+            AuthenticatedIdentity::Mtls { spki_sha256, .. } => {
+                if !spki_sha256.is_empty() {
+                    let spki_key = format!("x509:spki={spki_sha256}");
+                    if let Some(access) = self.rules.get(&spki_key) {
+                        return Some(access);
+                    }
+                }
+                if let Some(legacy_key) = identity.legacy_dn_key()
+                    && let Some(access) = self.rules.get(&legacy_key)
+                {
+                    return Some(access);
+                }
+                None
+            }
+            _ => {
+                let key = identity.to_string();
+                self.rules.get(&key)
+            }
+        }
+    }
+
+    fn check_access(access: &TokenAccess, token_label: &str, token_serial: &str) -> bool {
+        match access {
+            TokenAccess::All => true,
+            TokenAccess::Specific(grants) => {
+                grants.iter().any(|g| g.matches_token(token_label, token_serial))
+            }
+        }
+    }
+
     fn parse_access(
         identity: &str,
         access: &crate::config::TokenAccessSpec,

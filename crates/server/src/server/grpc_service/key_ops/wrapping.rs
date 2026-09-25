@@ -8,9 +8,9 @@ use std::time::Instant;
 use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_audit::EventClass;
-use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv, SecretBytes};
+use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv};
 
-use super::super::authorization::mechanism_permitted;
+use super::super::authorization::{extract_is_permitted, mechanism_permitted};
 use super::super::ck_result_to_rv;
 use super::super::convert_template;
 use super::super::mechanism_handles::remap_mechanism_handles;
@@ -19,41 +19,52 @@ use super::super::service_utils::{
     resolve_session_and_object, resolve_session_and_two_objects, spawn_backend,
     template_declares_token_object,
 };
-use crate::server::context_manager::{ClientContextId, ContextManager};
+use crate::server::context_manager::ClientContextId;
+use crate::server::grpc_service::audit_events::emit_auth_event;
 use crate::server::handle_map::VirtualHandle;
 
 use crate::server::grpc_service::HandlerContext;
 
-/// Share preparation and outcome auditing with both exact wrapping adapters.
+/// Outer dispatcher: captures timing + identity, delegates to the impl, then
+/// emits a fail-closed `KeyMgmt` audit record.
 pub(crate) async fn wrap_key(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::WrapKeyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::WrapKeyResponse>, Status> {
     let started = Instant::now();
+    let ctx_id = ClientContextId(request.get_ref().client_context_id.clone());
+    let session_for_audit = Some(request.get_ref().session_handle);
+    let response = wrap_key_impl(ctx, request).await?;
+    let ck_rv = response.get_ref().ck_rv;
+    if emit_auth_event(
+        ctx,
+        &ctx_id,
+        "C_WrapKey",
+        EventClass::KeyMgmt,
+        None,
+        session_for_audit,
+        ck_rv,
+        started,
+    )
+    .is_err()
+    {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::WrapKeyResponse {
+            ck_rv: CkRv::FUNCTION_FAILED.0,
+            wrapped_key: Vec::new(),
+        }));
+    }
+    Ok(response)
+}
+
+async fn wrap_key_impl(
+    ctx: &HandlerContext,
+    request: Request<pkcs11_proxy_ng_proto::WrapKeyRequest>,
+) -> Result<Response<pkcs11_proxy_ng_proto::WrapKeyResponse>, Status> {
+    let backend_ref = &ctx.backend;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
-    let outcome = async {
-        let p = match super::wrap_preparation::prepare_wrap(
-            ctx,
-            &ctx_id,
-            req.session_handle,
-            req.wrapping_key_handle,
-            req.key_handle,
-            req.mechanism,
-        )
-        .await?
-        {
-            Ok(p) => p,
-            Err(rv) => return Ok(Err(rv)),
-        };
-        let backend = Arc::clone(&ctx.backend);
-        spawn_backend(move || backend.wrap_key(p.session, &p.mechanism, p.wrapping_key, p.key))
-            .await
-    }
-    .await;
-    let result = super::super::audit_events::audit_key_outcome(
+
+    let (session, wrapping_key, key) = match resolve_session_and_two_objects(
         ctx,
         &ctx_id,
         "C_WrapKey",
@@ -82,10 +93,33 @@ pub(crate) async fn wrap_key(
         }
     };
 
-    // B1: remap object handles embedded in the mechanism parameters.
-    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+    // B1: remap object handles embedded in the mechanism parameters;
+    // gate each through per-object authz when active (C1).
+    if let Err(rv) =
+        remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
+    {
         return Ok(Response::new(pkcs11_proxy_ng_proto::WrapKeyResponse {
             ck_rv: rv.0,
+            wrapped_key: Vec::new(),
+        }));
+    }
+
+    // Mechanism policy gate (G3-PR3 Task 3): deny before backend call when the
+    // principal's grant does not include this wrapping mechanism.
+    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::WrapKeyResponse {
+            ck_rv: CkRv::MECHANISM_INVALID.0,
+            wrapped_key: Vec::new(),
+        }));
+    }
+
+    // Extract-deny gate (G2-PR2): wrapping a key exports its material; if the
+    // principal's grant for this token has extract=Deny, reject before calling
+    // the backend. The outer `wrap_key` dispatcher will still emit a KeyMgmt
+    // audit record for this denied attempt (ck_rv is KEY_FUNCTION_NOT_PERMITTED).
+    if !extract_is_permitted(ctx, &ctx_id, req.session_handle, req.key_handle).await? {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::WrapKeyResponse {
+            ck_rv: CkRv::KEY_FUNCTION_NOT_PERMITTED.0,
             wrapped_key: Vec::new(),
         }));
     }
@@ -103,9 +137,7 @@ pub(crate) async fn wrap_key(
 /// Outer dispatcher: captures timing + identity, delegates to the impl, then
 /// emits a fail-closed `KeyMgmt` audit record.
 pub(crate) async fn unwrap_key(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::UnwrapKeyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::UnwrapKeyResponse>, Status> {
     let started = Instant::now();
@@ -170,10 +202,22 @@ async fn unwrap_key_impl(
         }
     };
 
-    // B1: remap object handles embedded in the mechanism parameters.
-    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+    // B1: remap object handles embedded in the mechanism parameters;
+    // gate each through per-object authz when active (C1).
+    if let Err(rv) =
+        remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
+    {
         return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyResponse {
             ck_rv: rv.0,
+            key_handle: 0,
+        }));
+    }
+
+    // Mechanism policy gate (G3-PR3 Task 3): deny before backend call when the
+    // principal's grant does not include this unwrapping mechanism.
+    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyResponse {
+            ck_rv: CkRv::MECHANISM_INVALID.0,
             key_handle: 0,
         }));
     }
@@ -292,22 +336,13 @@ mod tests {
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
         let backend: Arc<dyn Pkcs11Backend> = mock;
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
-        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        ctx_mgr.register_slot(CkSlotId(0)).await;
         let ctx_id = ctx_mgr.create_context(identity).await.unwrap();
         let session_vh = ctx_mgr
-            .get_context(&ctx_id, |ctx| {
-                ctx.register_session(
-                    BackendHandle(1),
-                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
-                )
-            })
+            .get_context(&ctx_id, |ctx| ctx.register_session(BackendHandle(1), CkSlotId(0)))
             .await
             .unwrap();
-        ctx_mgr.cache_token_info(
-            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
-            "MockToken".into(),
-            "0001".into(),
-        );
+        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
 
         let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
         ctx.token_policy = Arc::new(policy);
@@ -421,22 +456,13 @@ mod tests {
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
         let backend: Arc<dyn Pkcs11Backend> = mock;
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
-        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        ctx_mgr.register_slot(CkSlotId(0)).await;
         let ctx_id = ctx_mgr.create_context(identity).await.unwrap();
         let session_vh = ctx_mgr
-            .get_context(&ctx_id, |ctx| {
-                ctx.register_session(
-                    BackendHandle(1),
-                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
-                )
-            })
+            .get_context(&ctx_id, |ctx| ctx.register_session(BackendHandle(1), CkSlotId(0)))
             .await
             .unwrap();
-        ctx_mgr.cache_token_info(
-            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
-            "MockToken".into(),
-            "0001".into(),
-        );
+        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
 
         // Register a virtual object handle and cache its metadata so
         // `resolve_uid_for_extract` can resolve it without a backend round-trip.
@@ -449,7 +475,7 @@ mod tests {
                 &ctx_id,
                 object_vh.0,
                 ObjectMetadata {
-                    unique_id: object_uid.into(),
+                    unique_id: object_uid,
                     class: Some(CkObjectClass::SECRET_KEY),
                     is_token: false,
                 },

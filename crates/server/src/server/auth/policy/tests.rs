@@ -20,19 +20,6 @@ fn specific(selectors: Vec<TokenSelector>) -> TokenAccess {
     TokenAccess::Specific(selectors.into_iter().map(TokenGrant::simple).collect())
 }
 
-/// Test-local discovery filter. The production server filters tokens per-slot
-/// via `slot_is_authorized`, so this mirrors that intent over the public
-/// `allows` to exercise the real authorization path against multi-token
-/// matrices (L9: the former `TokenPolicy::visible_tokens` was production dead
-/// code referenced only by these tests).
-fn visible_tokens<'a>(
-    policy: &TokenPolicy,
-    identity: &AuthenticatedIdentity,
-    tokens: &'a [(String, String)],
-) -> Vec<&'a (String, String)> {
-    tokens.iter().filter(|(label, serial)| policy.allows(identity, label, serial)).collect()
-}
-
 #[test]
 fn unauthenticated_always_allowed() {
     let policy = TokenPolicy {

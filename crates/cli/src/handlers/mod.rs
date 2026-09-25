@@ -33,6 +33,11 @@ pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) ->
         Commands::ListMechanismNames => Ok(()),
         // Handled in main() before we initialize the PKCS#11 client.
         Commands::Health { .. } => Ok(()),
+        // Audit subcommands are intercepted in main() before the PKCS#11 client
+        // is initialized, so this arm is never reached.
+        Commands::Audit { .. } => {
+            unreachable!("audit subcommands are dispatched in main before client init")
+        }
         Commands::FindObjects { slot_id, pin, label, verbose } => {
             objects::find_objects(client, slot_id, pin, label, verbose).await
         }

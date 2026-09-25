@@ -1,4 +1,15 @@
-use pkcs11_proxy_ng::config::{GrantSpec, TokenAccessSpec};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use pkcs11_proxy_ng::config::{
+    AuthConfig, GrantSpec, PolicyEntry, TcpAuthMode, TcpListenerConfig, TokenAccessSpec,
+};
+use pkcs11_proxy_ng::server::auth::mtls;
+use pkcs11_proxy_ng::server::auth::policy::TokenPolicy;
+use pkcs11_proxy_ng::server::context_manager::ContextManager;
+use pkcs11_proxy_ng::server::grpc_service::Pkcs11ProxyService;
+use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_backend::mock::MockBackend;
 use pkcs11_proxy_ng_client::Pkcs11Client;
 use pkcs11_proxy_ng_proto::{InitializeRequest, Pkcs11ProxyClient};
@@ -87,13 +98,14 @@ async fn start_mtls_daemon() -> MtlsFixture {
     let client_b_cert = write_file(&temp, "client-b.pem", &client_b.cert_pem);
     let client_b_key = write_file(&temp, "client-b-key.pem", &client_b.key_pem);
 
-    let (issuer, subject) = mtls::extract_identity(&client_a.der).unwrap();
-    let client_a_identity = format!("x509:issuer={issuer};subject={subject}");
+    let (_, _, spki_sha256) = mtls::extract_identity(&client_a.der).unwrap();
+    let client_a_identity = format!("x509:spki={spki_sha256}");
     let token_policy = TokenPolicy::from_config(&AuthConfig {
         allow_all_authenticated: false,
+        anonymous_principal: None,
         policy: vec![PolicyEntry {
             identity: client_a_identity,
-            tokens: TokenAccessSpec::Specific(vec!["label:MockToken".into()]),
+            tokens: TokenAccessSpec::Specific(vec![GrantSpec::Bare("label:MockToken".into())]),
         }],
     })
     .unwrap();
@@ -109,6 +121,7 @@ async fn start_mtls_daemon() -> MtlsFixture {
         pkcs11_proxy_ng::config::UnixAuthMode::None,
         Arc::new(token_policy),
         pkcs11_proxy_ng::mechanism_registry_source::MechanismRegistrySource::load(None).unwrap(),
+        None, // audit: not needed for transport tests
     );
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

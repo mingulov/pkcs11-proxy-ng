@@ -216,10 +216,15 @@ fn rsa_pkcs_mechanism() -> CK_MECHANISM {
     CK_MECHANISM { mechanism: CKM_RSA_PKCS, pParameter: std::ptr::null_mut(), ulParameterLen: 0 }
 }
 
-fn expected_mock_digest(data: &[u8]) -> [u8; 4] {
-    pkcs11_proxy_ng_backend::mock::echo::echo_bytes("digest", &[data], 4)
+/// SHA-256 digest length — the mechanism these digest tests initialize
+/// with (`sha256_mechanism`). The mock now sizes digest output by
+/// mechanism (mock::output_lengths), so the expectation follows suit.
+const SHA256_DIGEST_LEN: usize = 32;
+
+fn expected_mock_digest(data: &[u8]) -> [u8; SHA256_DIGEST_LEN] {
+    pkcs11_proxy_ng_backend::mock::echo::echo_bytes("digest", &[data], SHA256_DIGEST_LEN)
         .try_into()
-        .expect("4 bytes")
+        .expect("SHA-256 length")
 }
 
 fn expected_mock_sign(data: &[u8]) -> [u8; 2] {
@@ -232,10 +237,10 @@ fn expected_mock_sign_final() -> [u8; 2] {
         .expect("2 bytes")
 }
 
-fn expected_mock_digest_final() -> [u8; 4] {
-    pkcs11_proxy_ng_backend::mock::echo::echo_bytes("digest-final", &[], 4)
+fn expected_mock_digest_final() -> [u8; SHA256_DIGEST_LEN] {
+    pkcs11_proxy_ng_backend::mock::echo::echo_bytes("digest-final", &[], SHA256_DIGEST_LEN)
         .try_into()
-        .expect("4 bytes")
+        .expect("SHA-256 length")
 }
 
 pub(super) fn create_object(session: CK_SESSION_HANDLE) -> CK_OBJECT_HANDLE {
@@ -1448,7 +1453,7 @@ fn exact_digest_size_query_returns_length_without_copy() {
         )
     };
     assert_eq!(data_rv, CKR_OK as CK_RV, "C_Digest(data query)");
-    assert_eq!(data_len, 4, "data query returned_len should be 4");
+    assert_eq!(data_len as usize, SHA256_DIGEST_LEN, "data query returned_len");
     assert_eq!(out, expected_mock_digest(data), "mock digest output is the echo bytes");
 }
 
@@ -1496,7 +1501,7 @@ fn exact_digest_final_size_query_does_not_consume_state() {
     let data_rv =
         unsafe { dispatch::general::c_digest_final(shim.session, out.as_mut_ptr(), &mut data_len) };
     assert_eq!(data_rv, CKR_OK as CK_RV, "C_DigestFinal(data query)");
-    assert_eq!(data_len, 4, "data query returned_len should be 4");
+    assert_eq!(data_len as usize, SHA256_DIGEST_LEN, "data query returned_len");
     assert_eq!(out, expected_mock_digest_final(), "mock digest_final output is the echo bytes");
 }
 

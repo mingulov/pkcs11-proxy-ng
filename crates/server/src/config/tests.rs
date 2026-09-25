@@ -1,11 +1,5 @@
 use super::*;
 
-// NOTE (T2run win32): `module`/`ca_cert`/`server_cert`/`server_key` stubs
-// below use `"."` (the test-process cwd, which always exists) rather than
-// `/dev/null`, which does not exist on Windows and red-lined the win32
-// lib suites (validation existence-checks these paths). Intent unchanged:
-// every stub means "an existing path whose content is irrelevant here".
-
 /// Verify that both resilience env vars introduced in the metrics-endpoint
 /// feature appear in the help table. This test enforces the "keep in sync"
 /// invariant stated at `apply_env_overrides` so that adding a new env var
@@ -715,7 +709,7 @@ module = "."
 fn max_stuck_backend_calls_defaults_to_none() {
     let toml = r#"
 [backend]
-module = "."
+module = "/dev/null"
 "#;
     let config: DaemonConfig = toml::from_str(toml).unwrap();
     assert_eq!(config.proxy.max_stuck_backend_calls, None);
@@ -725,7 +719,7 @@ module = "."
 fn max_stuck_backend_calls_parses_when_set() {
     let toml = r#"
 [backend]
-module = "."
+module = "/dev/null"
 
 [proxy]
 max_stuck_backend_calls = 16
@@ -744,7 +738,7 @@ allow_insecure_tcp = true
 fn max_stuck_backend_calls_zero_is_rejected() {
     let toml = r#"
 [backend]
-module = "."
+module = "/dev/null"
 
 [proxy]
 max_stuck_backend_calls = 0
@@ -767,7 +761,7 @@ fn should_exit_on_stuck_calls_policy() {
 
 #[test]
 fn resilience_absent_defaults_to_inert() {
-    let toml = "[backend]\nmodule = \".\"\n";
+    let toml = "[backend]\nmodule = \"/dev/null\"\n";
     let cfg: DaemonConfig = toml::from_str(toml).unwrap();
     assert!(cfg.resilience.find_result_warn_threshold.is_none());
     assert!(cfg.resilience.metrics_socket.is_none());
@@ -777,7 +771,7 @@ fn resilience_absent_defaults_to_inert() {
 fn resilience_section_parses() {
     let toml = "\
 [backend]
-module = \".\"
+module = \"/dev/null\"
 [resilience]
 find_result_warn_threshold = 500
 metrics_socket = \"/run/pkcs11-proxy/metrics.sock\"
@@ -791,30 +785,8 @@ metrics_socket = \"/run/pkcs11-proxy/metrics.sock\"
 }
 
 #[test]
-fn test_hooks_absent_defaults_to_inert() {
-    let toml = "[backend]\nmodule = \".\"\n";
-    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
-    assert!(cfg.test_hooks.control_socket.is_none());
-}
-
-#[test]
-fn test_hooks_section_parses() {
-    let toml = "\
-[backend]
-module = \".\"
-[test_hooks]
-control_socket = \"/run/pkcs11-proxy/control.sock\"
-";
-    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
-    assert_eq!(
-        cfg.test_hooks.control_socket.as_deref(),
-        Some(std::path::Path::new("/run/pkcs11-proxy/control.sock"))
-    );
-}
-
-#[test]
 fn audit_absent_defaults_to_off() {
-    let cfg: DaemonConfig = toml::from_str("[backend]\nmodule = \".\"\n").unwrap();
+    let cfg: DaemonConfig = toml::from_str("[backend]\nmodule = \"/dev/null\"\n").unwrap();
     assert!(cfg.audit.dir.is_none());
     assert!(cfg.audit.signing_key.is_none());
     assert_eq!(cfg.audit.rotate_max_bytes, 64 * 1024 * 1024);
@@ -825,7 +797,7 @@ fn audit_absent_defaults_to_off() {
 fn audit_section_parses() {
     let toml = "\
 [backend]
-module = \".\"
+module = \"/dev/null\"
 [audit]
 dir = \"/var/log/pkcs11-proxy/audit\"
 signing_key = \"/etc/pkcs11-proxy/audit-ed25519.key\"
@@ -844,7 +816,7 @@ fn policy_with_unauthenticated_listener_is_rejected() {
     // an authorization policy cannot meaningfully apply to an unauthenticated peer.
     let toml = "\
 [backend]
-module = \".\"
+module = \"/dev/null\"
 [[auth.policy]]
 identity = \"uid=1000\"
 tokens = \"all\"
@@ -863,7 +835,7 @@ fn policy_with_authenticated_listener_is_allowed() {
     // peer_cred is an authenticated mode; uid= identities match peer_cred.
     let toml = "\
 [backend]
-module = \".\"
+module = \"/dev/null\"
 [[auth.policy]]
 identity = \"uid=1000\"
 tokens = \"all\"
@@ -897,7 +869,7 @@ fn check_not_group_or_world_writable_enforces_permissions() {
 
 #[test]
 fn login_lock_timeout_secs_defaults_to_10() {
-    let toml = "[backend]\nmodule = \".\"\n";
+    let toml = "[backend]\nmodule = \"/dev/null\"\n";
     let cfg: DaemonConfig = toml::from_str(toml).unwrap();
     assert_eq!(cfg.proxy.login_lock_timeout_secs, 10);
 }
@@ -909,7 +881,7 @@ fn allow_all_authenticated_with_unauthenticated_listener_is_rejected() {
     // Unauthenticated, so this combo blanket-authorizes no-auth peers.
     let toml = "\
 [backend]
-module = \".\"
+module = \"/dev/null\"
 [auth]
 allow_all_authenticated = true
 [listener.local]
@@ -932,7 +904,7 @@ fn audit_with_unauthenticated_listener_is_rejected() {
     // compliance assurance.
     let toml = "\
 [backend]
-module = \".\"
+module = \"/dev/null\"
 [audit]
 dir = \"/var/log/pkcs11-proxy/audit\"
 [listener.local]
@@ -950,7 +922,7 @@ fn audit_with_authenticated_listener_is_allowed() {
     // Positive control: [audit] + peer_cred listener is a valid config.
     let toml = "\
 [backend]
-module = \".\"
+module = \"/dev/null\"
 [audit]
 dir = \"/var/log/pkcs11-proxy/audit\"
 [auth]
@@ -969,7 +941,7 @@ auth = \"peer_cred\"
 fn anonymous_principal_parses() {
     let toml = "\
 [backend]
-module = \".\"
+module = \"/dev/null\"
 [auth]
 anonymous_principal = \"anon-client\"
 [listener.local]
@@ -983,7 +955,7 @@ allow_insecure_unix = true
 
 #[test]
 fn anonymous_principal_absent_defaults_to_none() {
-    let cfg: DaemonConfig = toml::from_str("[backend]\nmodule = \".\"\n").unwrap();
+    let cfg: DaemonConfig = toml::from_str("[backend]\nmodule = \"/dev/null\"\n").unwrap();
     assert!(cfg.auth.anonymous_principal.is_none());
 }
 
@@ -992,7 +964,7 @@ fn anonymous_principal_also_in_policy_is_rejected() {
     // anonymous_principal is audit-only; it must not also appear as a grant key.
     let toml = "\
 [backend]
-module = \".\"
+module = \"/dev/null\"
 [auth]
 anonymous_principal = \"uid=1000\"
 [[auth.policy]]
@@ -1016,7 +988,7 @@ fn audit_with_unauthenticated_listener_and_anonymous_principal_is_allowed() {
     // the audit identity for unauthenticated peers, so the compliance gap is addressed.
     let toml = "\
 [backend]
-module = \".\"
+module = \"/dev/null\"
 [audit]
 dir = \"/var/log/pkcs11-proxy/audit\"
 [auth]
@@ -1041,7 +1013,7 @@ fn validate_accepts_grant_with_classes_field() {
     // must be accepted by validate() — operators can now safely restrict by class.
     let toml = "\
 [backend]
-module = \".\"
+module = \"/dev/null\"
 [listener.local]
 path = \"/tmp/test.sock\"
 auth = \"peer_cred\"
@@ -1064,7 +1036,7 @@ fn validate_accepts_grant_with_mechanisms_field() {
     // crypto-init RPC (G3 Task 3). Validate must accept it.
     let toml = "\
 [backend]
-module = \".\"
+module = \"/dev/null\"
 [listener.local]
 path = \"/tmp/test.sock\"
 auth = \"peer_cred\"
@@ -1087,7 +1059,7 @@ fn validate_accepts_rich_grant_with_extract_deny_only() {
     // is fully enforced today and must pass validate().
     let toml = "\
 [backend]
-module = \".\"
+module = \"/dev/null\"
 [listener.local]
 path = \"/tmp/test.sock\"
 auth = \"peer_cred\"
@@ -1109,7 +1081,7 @@ fn validate_accepts_rich_grant_with_objects_field() {
     // must NOT be rejected at validate().
     let toml = "\
 [backend]
-module = \".\"
+module = \"/dev/null\"
 [listener.local]
 path = \"/tmp/test.sock\"
 auth = \"peer_cred\"
@@ -1128,7 +1100,7 @@ fn validate_rejects_rich_grant_with_objects_bad_hex() {
     // Malformed hex in the objects list must produce an Err at validate() time.
     let toml = "\
 [backend]
-module = \".\"
+module = \"/dev/null\"
 [listener.local]
 path = \"/tmp/test.sock\"
 auth = \"peer_cred\"
@@ -1150,7 +1122,7 @@ fn audit_with_unauthenticated_listener_without_anonymous_principal_is_rejected()
     // the same code path; this test names the negative case explicitly for clarity.)
     let toml = "\
 [backend]
-module = \".\"
+module = \"/dev/null\"
 [audit]
 dir = \"/var/log/pkcs11-proxy/audit\"
 [listener.local]
@@ -1171,7 +1143,7 @@ fn rate_limit_toml(rate_limit_block: &str) -> String {
     format!(
         "\
 [backend]
-module = \".\"
+module = \"/dev/null\"
 [listener.local]
 path = \"/tmp/test.sock\"
 auth = \"none\"
@@ -1242,7 +1214,7 @@ fn objects_grant_with_unauthenticated_listener_is_rejected() {
     // The daemon must refuse to start.
     let toml = "\
 [backend]
-module = \".\"
+module = \"/dev/null\"
 [listener.local]
 path = \"/run/p.sock\"
 auth = \"none\"
@@ -1266,7 +1238,7 @@ fn objects_grant_with_authenticated_listener_accepted() {
     // M3 positive case: per-object grant + peer_cred auth must be accepted.
     let toml = "\
 [backend]
-module = \".\"
+module = \"/dev/null\"
 [listener.local]
 path = \"/run/p.sock\"
 auth = \"peer_cred\"
@@ -1290,7 +1262,7 @@ fn audit_validate_toml(audit_block: &str) -> String {
     format!(
         "\
 [backend]
-module = \".\"
+module = \"/dev/null\"
 [listener.local]
 path = \"/tmp/test.sock\"
 auth = \"none\"

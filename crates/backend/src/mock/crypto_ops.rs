@@ -9,7 +9,7 @@ use pkcs11_proxy_ng_types::{CkOutputBufferResult, CkParameterRoundtripResult};
 const MOCK_STATE_PREFIX: [u8; 2] = [0xC9, 0xEA];
 /// Mock signature length (a real token's length depends on the key; the
 /// mock keeps it fixed so two-call buffer tests stay simple).
-const MOCK_SIGN_LEN: usize = 2;
+pub(super) const MOCK_SIGN_LEN: usize = 2;
 pub(super) const MOCK_VERIFY_RECOVER_OUTPUT: [u8; 2] = [0xBE, 0xEF];
 pub(super) const MOCK_WRAP_OUTPUT: [u8; 4] = [0xDE, 0xAD, 0xBE, 0xEF];
 pub(super) const MOCK_ENCAPSULATE_OUTPUT: [u8; 8] =
@@ -160,9 +160,9 @@ impl MockBackend {
         session: CkSessionHandle,
         data: &[u8],
         len: usize,
-    ) -> CkResult<SecretBytes> {
+    ) -> CkResult<Vec<u8>> {
         self.state.lock().unwrap().end_op(session, MultiPartOp::Digest)?;
-        Ok(super::echo::echo_bytes("digest", &[data], len).into())
+        Ok(super::echo::echo_bytes("digest", &[data], len))
     }
 
     pub(super) fn digest_update_impl(&self, session: CkSessionHandle) -> CkResult<()> {
@@ -186,9 +186,9 @@ impl MockBackend {
         &self,
         session: CkSessionHandle,
         len: usize,
-    ) -> CkResult<SecretBytes> {
+    ) -> CkResult<Vec<u8>> {
         self.state.lock().unwrap().end_op(session, MultiPartOp::Digest)?;
-        Ok(super::echo::echo_bytes("digest-final", &[], len).into())
+        Ok(super::echo::echo_bytes("digest-final", &[], len))
     }
 
     pub(super) fn encrypt_init_impl(
@@ -473,6 +473,17 @@ impl MockBackend {
             .unwrap_or(MOCK_DEFAULT_DIGEST_LEN)
     }
 
+    /// Active digest output length for `session` (mechanism-defined, or
+    /// the legacy compact default). Captured at C_DigestInit.
+    pub(super) fn active_digest_len(&self, session: CkSessionHandle) -> usize {
+        self.session_digest_mechanism
+            .lock()
+            .unwrap()
+            .get(&session.0)
+            .and_then(|m| super::output_lengths::digest_len(*m))
+            .unwrap_or(MOCK_DEFAULT_DIGEST_LEN)
+    }
+
     pub(super) fn digest_exact_impl(
         &self,
         session: CkSessionHandle,
@@ -488,7 +499,7 @@ impl MockBackend {
         session: CkSessionHandle,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
-        let bytes = super::echo::echo_bytes("digest-final", &[], MOCK_DIGEST_FINAL_LEN);
+        let bytes = super::echo::echo_bytes("digest-final", &[], self.active_digest_len(session));
         self.exact_terminal_output(session, MultiPartOp::Digest, &bytes, spec)
     }
 

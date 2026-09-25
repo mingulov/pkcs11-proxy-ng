@@ -4,14 +4,13 @@ use std::time::Instant;
 use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_audit::EventClass;
-use pkcs11_proxy_ng_types::{
-    CkMechanismParams, CkObjectHandle, CkRv, CkSessionHandle, Sp800108DerivedKey,
-};
+use pkcs11_proxy_ng_types::{CkMechanismParams, CkObjectHandle, CkRv, Sp800108DerivedKey};
 
+use super::super::authorization::mechanism_permitted;
 use super::super::convert_template;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
-    parse_mechanism, register_object_handle, register_session_object_handle,
+    gate_object_handle, parse_mechanism, register_object_handle, register_session_object_handle,
     register_session_object_pair, resolve_session, resolve_session_and_object, spawn_backend,
     template_declares_token_object,
 };
@@ -50,9 +49,7 @@ macro_rules! audit_key_mgmt {
 /// Outer dispatcher: captures timing + identity, delegates to the impl, then
 /// emits a fail-closed `KeyMgmt` audit record.
 pub(crate) async fn generate_key_pair(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::GenerateKeyPairRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GenerateKeyPairResponse>, Status> {
     let started = Instant::now();
@@ -114,6 +111,17 @@ async fn generate_key_pair_impl(
             private_key_handle: 0,
         }));
     }
+
+    let public_key_template = match convert_template(&req.public_key_template) {
+        Ok(template) => template,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyPairResponse {
+                ck_rv: rv,
+                public_key_handle: 0,
+                private_key_handle: 0,
+            }));
+        }
+    };
 
     if let Err(rv) =
         remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
@@ -220,9 +228,7 @@ async fn generate_key_pair_impl(
 /// Outer dispatcher: captures timing + identity, delegates to the impl, then
 /// emits a fail-closed `KeyMgmt` audit record.
 pub(crate) async fn generate_key(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::GenerateKeyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GenerateKeyResponse>, Status> {
     let started = Instant::now();
@@ -285,17 +291,7 @@ async fn generate_key_impl(
         }));
     }
 
-    if let Err(rv) =
-        remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
-    {
-        return Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyResponse {
-            ck_rv: rv.0,
-            key_handle: 0,
-            mechanism_out: None,
-        }));
-    }
-
-    let template = match convert_template_opt(&req.template, req.template_null) {
+    let template = match convert_template(&req.template) {
         Ok(template) => template,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyResponse {
@@ -349,9 +345,7 @@ async fn generate_key_impl(
 /// Outer dispatcher: captures timing + identity, delegates to the impl, then
 /// emits a fail-closed `KeyMgmt` audit record.
 pub(crate) async fn derive_key(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DeriveKeyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DeriveKeyResponse>, Status> {
     let started = Instant::now();
@@ -407,14 +401,11 @@ async fn derive_key_impl(
         }
     };
 
-    // Translate every embedded object handle carried inside the mechanism
-    // parameters (HKDF salt key, ECDH/MQV private-data keys, TLS key-material
-    // secrets, CKM_CONCATENATE_BASE_AND_KEY handle, …) from the caller's
-    // virtual handle space to the backend's (B1). SP800-108's byte-encoded
-    // input key handles are handled separately just below.
-    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+    // Mechanism policy gate (G3-PR3 Task 3): deny before backend call when the
+    // principal's grant does not include this derive mechanism.
+    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
         return Ok(Response::new(pkcs11_proxy_ng_proto::DeriveKeyResponse {
-            ck_rv: rv.0,
+            ck_rv: CkRv::MECHANISM_INVALID.0,
             key_handle: 0,
             mechanism_out: None,
         }));
@@ -428,6 +419,17 @@ async fn derive_key_impl(
     // handled separately just below.
     if let Err(rv) =
         remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
+    {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::DeriveKeyResponse {
+            ck_rv: rv.0,
+            key_handle: 0,
+            mechanism_out: None,
+        }));
+    }
+
+    if let Some(ref mut params) = mechanism.params
+        && let Err(rv) =
+            resolve_sp800_108_key_handle_data_params(ctx, &ctx_id, req.session_handle, params).await
     {
         return Ok(Response::new(pkcs11_proxy_ng_proto::DeriveKeyResponse {
             ck_rv: rv.0,
@@ -538,13 +540,11 @@ async fn derive_key_impl(
 }
 
 /// Resolve SP800-108 byte-encoded key handles in KDF params, gating each
-/// through object/class authorization when active. The native session is kept
-/// separate from the embedded object, since metadata reads require both.
+/// through per-object authz when active (C1).
 async fn resolve_sp800_108_key_handle_data_params(
     ctx: &HandlerContext,
     ctx_id: &ClientContextId,
     virtual_session_handle: u64,
-    backend_session: CkSessionHandle,
     params: &mut CkMechanismParams,
 ) -> Result<(), CkRv> {
     match params {
@@ -553,7 +553,6 @@ async fn resolve_sp800_108_key_handle_data_params(
                 ctx,
                 ctx_id,
                 virtual_session_handle,
-                backend_session,
                 &mut params.data_params,
             )
             .await
@@ -563,7 +562,6 @@ async fn resolve_sp800_108_key_handle_data_params(
                 ctx,
                 ctx_id,
                 virtual_session_handle,
-                backend_session,
                 &mut params.data_params,
             )
             .await
@@ -576,7 +574,6 @@ async fn resolve_sp800_108_key_handle_data_param_list(
     ctx: &HandlerContext,
     ctx_id: &ClientContextId,
     virtual_session_handle: u64,
-    backend_session: CkSessionHandle,
     data_params: &mut [pkcs11_proxy_ng_types::PrfDataParam],
 ) -> Result<(), CkRv> {
     for data_param in data_params {
@@ -584,7 +581,7 @@ async fn resolve_sp800_108_key_handle_data_param_list(
             continue;
         }
 
-        let (virtual_handle, width) = data_param.value.expose(read_sp800_108_key_handle_value)?;
+        let (virtual_handle, width) = read_sp800_108_key_handle_value(&data_param.value)?;
         let backend_handle = ctx
             .context_manager
             .get_context(ctx_id, |lci| lci.object_handles.resolve(VirtualHandle(virtual_handle)))
@@ -592,31 +589,14 @@ async fn resolve_sp800_108_key_handle_data_param_list(
             .and_then(|resolved| resolved)
             .ok_or(CkRv::OBJECT_HANDLE_INVALID)?;
 
-        // D6(1): the byte-encoded input key is a USE of the embedded key —
-        // refuse while the caller is logically logged out (before the
-        // per-object gate below, like the primary-handle chokepoints).
-        if backend_handle.0 != 0 {
-            ensure_private_use_allowed(
-                ctx,
-                ctx_id,
-                virtual_session_handle,
-                virtual_handle,
-                backend_session,
-                CkObjectHandle(backend_handle.0),
-            )
-            .await?;
-        }
-
-        let final_handle = if (ctx.token_policy.per_object_active()
-            || ctx.token_policy.per_class_active())
-            && backend_handle.0 != 0
-        {
+        // Gate the resolved handle through per-object authz if active (C1).
+        let final_handle = if ctx.token_policy.per_object_active() && backend_handle.0 != 0 {
             gate_object_handle(
                 ctx,
                 ctx_id,
                 virtual_session_handle,
                 virtual_handle,
-                BackendHandle(backend_session.0),
+                BackendHandle(backend_handle.0),
                 CkObjectHandle(backend_handle.0),
             )
             .await
@@ -624,12 +604,7 @@ async fn resolve_sp800_108_key_handle_data_param_list(
             CkObjectHandle(backend_handle.0)
         };
 
-        // A denied nonzero key must not become a different parameter (zero).
-        // Match shared embedded-handle denial before any provider dispatch.
-        if virtual_handle != 0 && final_handle.0 == 0 {
-            return Err(CkRv::OBJECT_HANDLE_INVALID);
-        }
-        data_param.value = write_sp800_108_key_handle_value(final_handle.0, width)?.into();
+        data_param.value = write_sp800_108_key_handle_value(final_handle.0, width)?;
     }
     Ok(())
 }
@@ -748,9 +723,7 @@ mod tests {
 
         // Virtual session handle = 0 is fine; per_object_active() is false so it
         // is not used for gate lookup.
-        resolve_sp800_108_key_handle_data_params(&ctx, &ctx_id, 0, CkSessionHandle(0), &mut params)
-            .await
-            .unwrap();
+        resolve_sp800_108_key_handle_data_params(&ctx, &ctx_id, 0, &mut params).await.unwrap();
 
         let CkMechanismParams::Sp800108FeedbackKdf(params) = params else {
             panic!("expected SP800-108 feedback KDF params");
@@ -772,15 +745,9 @@ mod tests {
             additional_derived_keys: Vec::new(),
         });
 
-        let err = resolve_sp800_108_key_handle_data_params(
-            &ctx,
-            &ctx_id,
-            0,
-            CkSessionHandle(0),
-            &mut params,
-        )
-        .await
-        .unwrap_err();
+        let err = resolve_sp800_108_key_handle_data_params(&ctx, &ctx_id, 0, &mut params)
+            .await
+            .unwrap_err();
 
         assert_eq!(err, CkRv::MECHANISM_PARAM_INVALID);
     }

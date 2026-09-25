@@ -13,7 +13,10 @@ use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv, CkSessionHandle, SecretBytes};
 use super::super::super::context_manager::{ClientContextId, ContextManager, MessageOperation};
 use super::super::super::handle_map::{BackendHandle, VirtualHandle};
 use super::super::ck_result_to_rv;
-use super::super::service_utils::{check_sanitize, ck_rv_only, input_from_wire, spawn_backend};
+use super::super::service_utils::{
+    check_sanitize, ck_rv_only, gate_object_handle, input_from_wire, spawn_backend,
+};
+use crate::server::grpc_service::HandlerContext;
 
 async fn resolve_state_handles(
     ctx_mgr: &Arc<ContextManager>,
@@ -78,19 +81,9 @@ pub(super) async fn get_operation_state(
 }
 
 pub(super) async fn set_operation_state(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
-    request: Request<pkcs11_proxy_ng_proto::SetOperationStateRequest>,
-) -> Result<Response<pkcs11_proxy_ng_proto::SetOperationStateResponse>, Status> {
-    set_operation_state_with_timeout(ctx, sanitize_inputs, request, None).await
-}
-
-async fn set_operation_state_with_timeout(
     ctx: &HandlerContext,
     sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::SetOperationStateRequest>,
-    timeout_override: Option<Duration>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SetOperationStateResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
@@ -113,6 +106,33 @@ async fn set_operation_state_with_timeout(
             }));
         }
     };
+
+    // Gate embedded key handles through per-object authz if active (C1).
+    if ctx.token_policy.per_object_active() {
+        let backend_session = BackendHandle(session.0);
+        if encryption_key.0 != 0 {
+            encryption_key = gate_object_handle(
+                ctx,
+                &ctx_id,
+                req.session_handle,
+                req.encryption_key_handle,
+                backend_session,
+                encryption_key,
+            )
+            .await;
+        }
+        if authentication_key.0 != 0 {
+            authentication_key = gate_object_handle(
+                ctx,
+                &ctx_id,
+                req.session_handle,
+                req.authentication_key_handle,
+                backend_session,
+                authentication_key,
+            )
+            .await;
+        }
+    }
 
     let operation_state = req.operation_state;
     let operation_state_null_len = req.operation_state_null_len;

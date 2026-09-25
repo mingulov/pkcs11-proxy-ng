@@ -5,41 +5,18 @@
 //! - `C_SessionCancel`
 //! - `C_GetSessionValidationFlags`
 
-use std::time::Duration;
-
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 use zeroize::Zeroizing;
 
 use pkcs11_proxy_ng_types::*;
 
-use super::super::context_manager::{ClientContextId, MessageOperation};
-use super::super::handle_map::VirtualHandle;
-use super::service_utils::{resolve_session, spawn_backend, spawn_backend_with_optional_timeout};
+use super::super::context_manager::ClientContextId;
+use super::service_utils::{resolve_session, spawn_backend};
 
 use crate::server::grpc_service::HandlerContext;
-
-const CKF_MESSAGE_ENCRYPT: u64 = 0x0000_0002;
-const CKF_MESSAGE_DECRYPT: u64 = 0x0000_0004;
-const CKF_MESSAGE_SIGN: u64 = 0x0000_0008;
-const CKF_MESSAGE_VERIFY: u64 = 0x0000_0010;
-
-fn cancelled_message_operations(flags: u64) -> Vec<MessageOperation> {
-    [
-        (CKF_MESSAGE_ENCRYPT, MessageOperation::Encrypt),
-        (CKF_MESSAGE_DECRYPT, MessageOperation::Decrypt),
-        (CKF_MESSAGE_SIGN, MessageOperation::Sign),
-        (CKF_MESSAGE_VERIFY, MessageOperation::Verify),
-    ]
-    .into_iter()
-    .filter_map(|(flag, operation)| (flags & flag != 0).then_some(operation))
-    .collect()
-}
-
 pub(super) async fn login_user(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::LoginUserRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::LoginUserResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
@@ -93,18 +70,8 @@ pub(super) async fn login_user(
 }
 
 pub(super) async fn session_cancel(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
-    request: Request<pkcs11_proxy_ng_proto::SessionCancelRequest>,
-) -> Result<Response<pkcs11_proxy_ng_proto::SessionCancelResponse>, Status> {
-    session_cancel_with_timeout(ctx, request, None).await
-}
-
-async fn session_cancel_with_timeout(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::SessionCancelRequest>,
-    timeout_override: Option<Duration>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SessionCancelResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
@@ -149,9 +116,7 @@ async fn session_cancel_with_timeout(
 }
 
 pub(super) async fn get_session_validation_flags(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::GetSessionValidationFlagsRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GetSessionValidationFlagsResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;

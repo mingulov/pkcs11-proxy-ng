@@ -19,11 +19,11 @@ use std::time::Duration;
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
-use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_proto::convert::message_params::MessageParameter;
 use pkcs11_proxy_ng_types::*;
 
-use super::super::context_manager::{ClientContextId, ContextManager};
+use super::super::context_manager::ClientContextId;
+use super::authorization::mechanism_permitted;
 use super::mechanism_handles::remap_mechanism_handles;
 use super::service_utils::{
     check_sanitize, ck_rv_only, input_from_wire, parse_mechanism, resolve_session,
@@ -35,405 +35,13 @@ use super::service_utils::{
 // ---------------------------------------------------------------------------
 
 use crate::server::grpc_service::HandlerContext;
-
-async fn execute_empty_legacy_message_output<F>(
-    mut transition: MessageOperationTransition,
-    installed_shape: MessageParameterShape,
-    operation: F,
-) -> Result<CkResult<SecretBytes>, Status>
-where
-    F: FnOnce() -> CkResult<(SecretBytes, SecretBytes)> + Send + 'static,
-{
-    spawn_backend(move || {
-        transition.mark_started();
-        match operation() {
-            Ok((parameter_out, output)) if parameter_out.is_empty() => {
-                let outcome = Ok(());
-                transition.settle(&outcome, Some(installed_shape));
-                Ok(output)
-            }
-            Ok(_) => {
-                transition.settle_ambiguous();
-                Err(CkRv::DEVICE_ERROR)
-            }
-            Err(error) => {
-                let outcome: CkResult<()> = Err(error);
-                transition.settle(&outcome, Some(installed_shape));
-                Err(error)
-            }
-        }
-    })
-    .await
-}
-
-struct MessageInitContract {
-    shape: MessageParameterShape,
-    caller_spec: CkParameterRoundtripSpec,
-    provider_spec: CkParameterRoundtripSpec,
-}
-
-fn decode_structured_message_parameter(
-    wire: Option<&pkcs11_proxy_ng_proto::MessageParameter>,
-) -> CkResult<Option<MessageParameter>> {
-    wire.map(|parameter| {
-        validate_structured_wire_parameter(parameter)?;
-        MessageParameter::try_from(parameter)
-    })
-    .transpose()
-}
-
-fn message_parameter_has_null_positive(parameter: &MessageParameter) -> bool {
-    match parameter {
-        MessageParameter::Raw(_) => true,
-        MessageParameter::GcmMessage(params) => {
-            params.iv_null_len.is_some_and(|len| len > 0)
-                || (params.tag_null_len.is_some() && params.tag_bits > 0)
-        }
-        MessageParameter::CcmMessage(params) => {
-            params.nonce_null_len.is_some_and(|len| len > 0)
-                || (params.mac_null_len.is_some() && params.mac_len > 0)
-        }
-        MessageParameter::SalaChacha(params) => {
-            params.nonce_null_len.is_some() && params.nonce_bits > 0
-                || params.tag_null_len.is_some()
-        }
-    }
-}
-
-fn native_message_parameter_len(parameter: &MessageParameter) -> u64 {
-    match parameter {
-        MessageParameter::GcmMessage(_) => {
-            std::mem::size_of::<cryptoki_sys::CK_GCM_MESSAGE_PARAMS>() as u64
-        }
-        MessageParameter::CcmMessage(_) => {
-            std::mem::size_of::<cryptoki_sys::CK_CCM_MESSAGE_PARAMS>() as u64
-        }
-        MessageParameter::SalaChacha(_) => {
-            std::mem::size_of::<cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS>() as u64
-        }
-        MessageParameter::Raw(_) => 0,
-    }
-}
-
-fn validate_message_init_contract(
-    ctx: &HandlerContext,
-    mechanism_type: CkMechanismType,
-    mechanism_had_params: bool,
-    wire_shape: Option<i32>,
-    wire_spec: Option<&pkcs11_proxy_ng_proto::ParameterRoundtripSpec>,
-    init_param: Option<&MessageParameter>,
-) -> CkResult<Option<MessageInitContract>> {
-    if mechanism_had_params {
-        return Err(CkRv::MECHANISM_PARAM_INVALID);
-    }
-    let uses_contract = wire_shape.is_some() || wire_spec.is_some() || init_param.is_some();
-    if !uses_contract {
-        return Ok(None);
-    }
-    let requested_shape = MessageParameterShape::try_from_proto_i32(
-        wire_shape.ok_or(CkRv::MECHANISM_PARAM_INVALID)?,
-    )?;
-    let registry = ctx.mechanism_registry_source.current_registry();
-    let derived_shape =
-        MessageParameterShape::from_registry_name(registry.param_shape(mechanism_type.0));
-    if requested_shape != derived_shape {
-        return Err(CkRv::MECHANISM_PARAM_INVALID);
-    }
-    let wire_spec = wire_spec.ok_or(CkRv::MECHANISM_PARAM_INVALID)?;
-    if wire_spec.value.is_some() {
-        return Err(CkRv::MECHANISM_PARAM_INVALID);
-    }
-    let caller_spec = CkParameterRoundtripSpec {
-        buffer_present: wire_spec.buffer_present,
-        buffer_len: wire_spec.buffer_len,
-        value: None,
-    };
-    let provider_spec = if let Some(parameter) = init_param {
-        parameter.validate_structured_shape(derived_shape)?;
-        if !caller_spec.buffer_present || caller_spec.buffer_len == 0 {
-            return Err(CkRv::MECHANISM_PARAM_INVALID);
-        }
-        if ctx.sanitize_inputs && message_parameter_has_null_positive(parameter) {
-            return Err(CkRv::ARGUMENTS_BAD);
-        }
-        CkParameterRoundtripSpec {
-            buffer_present: true,
-            buffer_len: native_message_parameter_len(parameter),
-            value: None,
-        }
-    } else {
-        if caller_spec.buffer_present && caller_spec.buffer_len > 0 {
-            return Err(CkRv::MECHANISM_PARAM_INVALID);
-        }
-        if ctx.sanitize_inputs && !caller_spec.buffer_present && caller_spec.buffer_len > 0 {
-            return Err(CkRv::ARGUMENTS_BAD);
-        }
-        caller_spec.clone()
-    };
-    Ok(Some(MessageInitContract { shape: derived_shape, caller_spec, provider_spec }))
-}
-
-fn parameter_result_matches_spec(
-    result: &CkParameterRoundtripResult,
-    spec: &CkParameterRoundtripSpec,
-) -> bool {
-    result.ck_rv == CkRv::OK
-        && result.returned_len == spec.buffer_len
-        && result.value == spec.buffer_present.then(Vec::new).map(SecretBytes::new)
-}
-
-fn parameter_ack(
-    spec: &CkParameterRoundtripSpec,
-) -> pkcs11_proxy_ng_proto::ParameterRoundtripResult {
-    (&CkParameterRoundtripResult {
-        ck_rv: CkRv::OK,
-        returned_len: spec.buffer_len,
-        value: spec.buffer_present.then(Vec::new).map(SecretBytes::new),
-    })
-        .into()
-}
-
-fn validate_empty_message_parameter_contract(
-    legacy_parameter: &[u8],
-    wire_spec: Option<&pkcs11_proxy_ng_proto::ParameterRoundtripSpec>,
-) -> CkResult<Option<CkParameterRoundtripSpec>> {
-    if !legacy_parameter.is_empty() {
-        return Err(CkRv::MECHANISM_PARAM_INVALID);
-    }
-    let Some(wire_spec) = wire_spec else {
-        return Ok(None);
-    };
-    let spec = CkParameterRoundtripSpec {
-        buffer_present: wire_spec.buffer_present,
-        buffer_len: wire_spec.buffer_len,
-        value: wire_spec.value.clone().map(SecretBytes::new),
-    };
-    if spec.buffer_len > 0 || spec.value.is_some() {
-        return Err(CkRv::MECHANISM_PARAM_INVALID);
-    }
-    Ok(Some(spec))
-}
-
-struct MessageBeginContract {
-    caller_spec: CkParameterRoundtripSpec,
-    provider_spec: CkParameterRoundtripSpec,
-    parameter: Option<MessageParameter>,
-}
-
-#[derive(Default)]
-struct MessageBeginWireResult {
-    ck_rv: u64,
-    parameter_out: Vec<u8>,
-    parameter_result: Option<pkcs11_proxy_ng_proto::ParameterRoundtripResult>,
-    message_parameter_out: Option<pkcs11_proxy_ng_proto::MessageParameter>,
-    message_effects: Option<pkcs11_proxy_ng_proto::pkcs11_proxy_ng::v1::MessageParameterEffects>,
-}
-
-fn message_begin_error(error: CkRv) -> MessageBeginWireResult {
-    MessageBeginWireResult { ck_rv: error.0, ..Default::default() }
-}
-
-fn validate_message_begin_contract(
-    sanitize_inputs: bool,
-    installed_shape: MessageParameterShape,
-    legacy_parameter: &[u8],
-    wire_spec: Option<&pkcs11_proxy_ng_proto::ParameterRoundtripSpec>,
-    wire_parameter: Option<&pkcs11_proxy_ng_proto::MessageParameter>,
-) -> CkResult<Option<MessageBeginContract>> {
-    if !legacy_parameter.is_empty() {
-        return Err(CkRv::MECHANISM_PARAM_INVALID);
-    }
-    if wire_spec.is_none() && wire_parameter.is_none() {
-        return Ok(None);
-    }
-    let wire_spec = wire_spec.ok_or(CkRv::MECHANISM_PARAM_INVALID)?;
-    if wire_spec.value.is_some() {
-        return Err(CkRv::MECHANISM_PARAM_INVALID);
-    }
-    let caller_spec = CkParameterRoundtripSpec {
-        buffer_present: wire_spec.buffer_present,
-        buffer_len: wire_spec.buffer_len,
-        value: None,
-    };
-    let parameter = decode_structured_message_parameter(wire_parameter)?;
-    let provider_spec = if let Some(parameter) = parameter.as_ref() {
-        parameter.validate_structured_shape(installed_shape)?;
-        if !caller_spec.buffer_present || caller_spec.buffer_len == 0 {
-            return Err(CkRv::MECHANISM_PARAM_INVALID);
-        }
-        if sanitize_inputs && message_parameter_has_null_positive(parameter) {
-            return Err(CkRv::ARGUMENTS_BAD);
-        }
-        CkParameterRoundtripSpec {
-            buffer_present: true,
-            buffer_len: native_message_parameter_len(parameter),
-            value: None,
-        }
-    } else {
-        if caller_spec.buffer_present && caller_spec.buffer_len > 0 {
-            return Err(CkRv::MECHANISM_PARAM_INVALID);
-        }
-        if sanitize_inputs && !caller_spec.buffer_present && caller_spec.buffer_len > 0 {
-            return Err(CkRv::ARGUMENTS_BAD);
-        }
-        caller_spec.clone()
-    };
-    Ok(Some(MessageBeginContract { caller_spec, provider_spec, parameter }))
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn execute_message_begin(
-    ctx: &HandlerContext,
-    ctx_id: ClientContextId,
-    virtual_session: u64,
-    operation_kind: ServerMessageOperation,
-    legacy_parameter: SecretBytes,
-    aad: SecretBytes,
-    aad_null_len: Option<u64>,
-    wire_spec: Option<pkcs11_proxy_ng_proto::ParameterRoundtripSpec>,
-    wire_parameter: Option<pkcs11_proxy_ng_proto::MessageParameter>,
-) -> Result<MessageBeginWireResult, Status> {
-    let operation_lock = match ctx
-        .context_manager
-        .message_operation_lock(&ctx_id, VirtualHandle(virtual_session), operation_kind)
-        .await
-    {
-        Ok(lock) => lock,
-        Err(error) => return Ok(message_begin_error(error)),
-    };
-    let operation = operation_lock.lock_owned().await;
-    let session = match resolve_session(&ctx.context_manager, &ctx_id, virtual_session).await {
-        Ok(session) => session,
-        Err(error) => return Ok(message_begin_error(error)),
-    };
-    if let Err(error) = check_sanitize(ctx.sanitize_inputs, aad_null_len) {
-        return Ok(message_begin_error(error));
-    }
-    let installed_shape = match operation.shape {
-        Some(shape) => shape,
-        None => return Ok(message_begin_error(CkRv::OPERATION_NOT_INITIALIZED)),
-    };
-    let contract = match legacy_parameter.expose(|legacy_raw| {
-        validate_message_begin_contract(
-            ctx.sanitize_inputs,
-            installed_shape,
-            legacy_raw,
-            wire_spec.as_ref(),
-            wire_parameter.as_ref(),
-        )
-    }) {
-        Ok(contract) => contract,
-        Err(error) => return Ok(message_begin_error(error)),
-    };
-
-    let acknowledge_contract = contract.is_some();
-    let contract = contract.unwrap_or_else(|| {
-        // The validated empty legacy Vec previously supplied a non-NULL,
-        // zero-length parameter. Preserve that pointer class without losing
-        // native completion origin through the legacy CkResult adapter.
-        let spec = CkParameterRoundtripSpec { buffer_present: true, buffer_len: 0, value: None };
-        MessageBeginContract { caller_spec: spec.clone(), provider_spec: spec, parameter: None }
-    });
-    let backend = Arc::clone(&ctx.backend);
-    let mut transition = MessageOperationTransition::begin(operation);
-    let result = super::service_utils::spawn_backend_exact(move || {
-        aad.expose(|aad_raw| {
-            transition.mark_started();
-            let request_parameter = contract.parameter.clone();
-            let provider_result = match (operation_kind, contract.parameter.as_ref()) {
-                (ServerMessageOperation::Encrypt, Some(parameter)) => backend
-                    .encrypt_message_begin_msg(
-                        session,
-                        parameter,
-                        input_from_wire(aad_raw, aad_null_len),
-                        &contract.provider_spec,
-                    )
-                    .map(|(ack, parameter)| (ack, Some(parameter))),
-                (ServerMessageOperation::Decrypt, Some(parameter)) => backend
-                    .decrypt_message_begin_msg(
-                        session,
-                        parameter,
-                        input_from_wire(aad_raw, aad_null_len),
-                        &contract.provider_spec,
-                    )
-                    .map(|(ack, parameter)| (ack, Some(parameter))),
-                (ServerMessageOperation::Encrypt, None) => backend
-                    .encrypt_message_begin_exact(
-                        session,
-                        input_from_wire(aad_raw, aad_null_len),
-                        &contract.provider_spec,
-                    )
-                    .map(|ack| (ack, None)),
-                (ServerMessageOperation::Decrypt, None) => backend
-                    .decrypt_message_begin_exact(
-                        session,
-                        input_from_wire(aad_raw, aad_null_len),
-                        &contract.provider_spec,
-                    )
-                    .map(|ack| (ack, None)),
-                _ => Err(CkRv::FUNCTION_NOT_SUPPORTED),
-            };
-            super::service_utils::ExactCompletion::capture(provider_result).map_result(|provider_result| match provider_result {
-                Ok((provider_ack, returned_parameter)) => {
-                    let native_rv = provider_ack.ck_rv;
-                    let valid_parameter =
-                        match (request_parameter.as_ref(), returned_parameter.as_ref()) {
-                            (Some(request), Some(returned)) => {
-                                returned.validate_for(request, pkcs11_proxy_ng_proto::convert::message_effects::MessageEffectContext { mode: ParameterEffectCallMode::Begin,
-                                    encrypt: operation_kind == ServerMessageOperation::Encrypt,
-                                    generated_stage: true, auth_stage: false, rv: native_rv,
-                                }).is_ok()
-                            }
-                            (None, None) => true,
-                            _ => false,
-                        };
-                    if provider_ack.returned_len != contract.provider_spec.buffer_len
-                        || provider_ack.value != contract.provider_spec.buffer_present.then(Vec::new).map(SecretBytes::new)
-                        || !valid_parameter
-                    {
-                        tracing::warn!(provider_rv = native_rv.0, "native Begin output contract violation; suppressing all effects");
-                        transition.settle_ambiguous();
-                        return Ok(message_begin_error(CkRv::DEVICE_ERROR));
-                    }
-                    let outcome = if native_rv == CkRv::OK { Ok(()) } else { Err(native_rv) };
-                    transition.settle(&outcome, Some(installed_shape));
-                    Ok(MessageBeginWireResult {
-                        ck_rv: native_rv.0,
-                        parameter_out: Vec::new(),
-                        parameter_result: acknowledge_contract.then(|| (&CkParameterRoundtripResult { ck_rv: native_rv, returned_len: contract.caller_spec.buffer_len, value: contract.caller_spec.buffer_present.then(Vec::new).map(SecretBytes::new) }).into()),
-                        message_parameter_out: None,
-                        message_effects: returned_parameter.as_ref().map(TryInto::try_into).transpose()?,
-                    })
-                }
-                Err(error) => {
-                    let outcome: CkResult<()> = Err(error);
-                    transition.settle(&outcome, Some(installed_shape));
-                    Ok(message_begin_error(error))
-                }
-            })
-        })
-        }).await?;
-    Ok(match result {
-        Ok(result) => result,
-        Err(error) => message_begin_error(error),
-    })
-}
 pub(crate) async fn message_encrypt_init(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
-    request: Request<pkcs11_proxy_ng_proto::MessageEncryptInitRequest>,
-) -> Result<Response<pkcs11_proxy_ng_proto::MessageEncryptInitResponse>, Status> {
-    message_encrypt_init_with_timeout(ctx, request, None).await
-}
-
-async fn message_encrypt_init_with_timeout(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::MessageEncryptInitRequest>,
-    timeout_override: Option<Duration>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::MessageEncryptInitResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -447,9 +55,7 @@ async fn message_encrypt_init_with_timeout(
     if req.mechanism.is_some() {
         // Normal init path: resolve session + key, parse mechanism.
         let (session, key) =
-            match resolve_session_and_key(ctx_mgr, &ctx_id, req.session_handle, req.key_handle)
-                .await
-            {
+            match resolve_session_and_key(ctx, &ctx_id, req.session_handle, req.key_handle).await {
                 Ok(handles) => handles,
                 Err(rv) => {
                     return Ok(Response::new(pkcs11_proxy_ng_proto::MessageEncryptInitResponse {
@@ -469,10 +75,21 @@ async fn message_encrypt_init_with_timeout(
             }
         };
 
-        // B1: remap object handles embedded in the mechanism parameters.
-        if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+        // B1: remap object handles embedded in the mechanism parameters;
+        // gate each through per-object authz when active (C1).
+        if let Err(rv) =
+            remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism)
+                .await
+        {
             return Ok(Response::new(pkcs11_proxy_ng_proto::MessageEncryptInitResponse {
                 ck_rv: rv.0,
+            }));
+        }
+
+        // Mechanism policy gate (G3-PR3 Task 3).
+        if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageEncryptInitResponse {
+                ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
             }));
         }
 
@@ -584,18 +201,8 @@ async fn message_encrypt_init_with_timeout(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn message_encrypt_final(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
-    request: Request<pkcs11_proxy_ng_proto::MessageEncryptFinalRequest>,
-) -> Result<Response<pkcs11_proxy_ng_proto::MessageEncryptFinalResponse>, Status> {
-    message_encrypt_final_with_timeout(ctx, request, None).await
-}
-
-async fn message_encrypt_final_with_timeout(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::MessageEncryptFinalRequest>,
-    timeout_override: Option<Duration>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::MessageEncryptFinalResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
@@ -653,21 +260,12 @@ async fn message_encrypt_final_with_timeout(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn message_decrypt_init(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
-    request: Request<pkcs11_proxy_ng_proto::MessageDecryptInitRequest>,
-) -> Result<Response<pkcs11_proxy_ng_proto::MessageDecryptInitResponse>, Status> {
-    message_decrypt_init_with_timeout(ctx, request, None).await
-}
-
-async fn message_decrypt_init_with_timeout(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::MessageDecryptInitRequest>,
-    timeout_override: Option<Duration>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::MessageDecryptInitResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -681,9 +279,7 @@ async fn message_decrypt_init_with_timeout(
     if req.mechanism.is_some() {
         // Normal init path: resolve session + key, parse mechanism.
         let (session, key) =
-            match resolve_session_and_key(ctx_mgr, &ctx_id, req.session_handle, req.key_handle)
-                .await
-            {
+            match resolve_session_and_key(ctx, &ctx_id, req.session_handle, req.key_handle).await {
                 Ok(handles) => handles,
                 Err(rv) => {
                     return Ok(Response::new(pkcs11_proxy_ng_proto::MessageDecryptInitResponse {
@@ -703,10 +299,21 @@ async fn message_decrypt_init_with_timeout(
             }
         };
 
-        // B1: remap object handles embedded in the mechanism parameters.
-        if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+        // B1: remap object handles embedded in the mechanism parameters;
+        // gate each through per-object authz when active (C1).
+        if let Err(rv) =
+            remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism)
+                .await
+        {
             return Ok(Response::new(pkcs11_proxy_ng_proto::MessageDecryptInitResponse {
                 ck_rv: rv.0,
+            }));
+        }
+
+        // Mechanism policy gate (G3-PR3 Task 3).
+        if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageDecryptInitResponse {
+                ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
             }));
         }
 
@@ -818,18 +425,8 @@ async fn message_decrypt_init_with_timeout(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn message_decrypt_final(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
-    request: Request<pkcs11_proxy_ng_proto::MessageDecryptFinalRequest>,
-) -> Result<Response<pkcs11_proxy_ng_proto::MessageDecryptFinalResponse>, Status> {
-    message_decrypt_final_with_timeout(ctx, request, None).await
-}
-
-async fn message_decrypt_final_with_timeout(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::MessageDecryptFinalRequest>,
-    timeout_override: Option<Duration>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::MessageDecryptFinalResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
@@ -887,13 +484,12 @@ async fn message_decrypt_final_with_timeout(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn message_sign_init(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::MessageSignInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::MessageSignInitResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -925,10 +521,21 @@ pub(crate) async fn message_sign_init(
             }
         };
 
-        // B1: remap object handles embedded in the mechanism parameters.
-        if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+        // B1: remap object handles embedded in the mechanism parameters;
+        // gate each through per-object authz when active (C1).
+        if let Err(rv) =
+            remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism)
+                .await
+        {
             return Ok(Response::new(pkcs11_proxy_ng_proto::MessageSignInitResponse {
                 ck_rv: rv.0,
+            }));
+        }
+
+        // Mechanism policy gate (G3-PR3 Task 3).
+        if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageSignInitResponse {
+                ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
             }));
         }
 
@@ -993,9 +600,7 @@ pub(crate) async fn message_sign_init(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn message_sign_final(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::MessageSignFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::MessageSignFinalResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
@@ -1051,13 +656,12 @@ pub(crate) async fn message_sign_final(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn message_verify_init(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::MessageVerifyInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::MessageVerifyInitResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -1089,10 +693,21 @@ pub(crate) async fn message_verify_init(
             }
         };
 
-        // B1: remap object handles embedded in the mechanism parameters.
-        if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+        // B1: remap object handles embedded in the mechanism parameters;
+        // gate each through per-object authz when active (C1).
+        if let Err(rv) =
+            remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism)
+                .await
+        {
             return Ok(Response::new(pkcs11_proxy_ng_proto::MessageVerifyInitResponse {
                 ck_rv: rv.0,
+            }));
+        }
+
+        // Mechanism policy gate (G3-PR3 Task 3).
+        if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageVerifyInitResponse {
+                ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
             }));
         }
 
@@ -1157,9 +772,7 @@ pub(crate) async fn message_verify_init(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn message_verify_final(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::MessageVerifyFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::MessageVerifyFinalResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
@@ -1221,9 +834,7 @@ pub(crate) async fn message_verify_final(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn encrypt_message(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::EncryptMessageRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptMessageResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
@@ -1329,11 +940,12 @@ pub(crate) async fn encrypt_message(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn encrypt_message_begin(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::EncryptMessageBeginRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptMessageBeginResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -1402,9 +1014,7 @@ pub(crate) async fn encrypt_message_begin(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn encrypt_message_next(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::EncryptMessageNextRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptMessageNextResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
@@ -1504,9 +1114,7 @@ pub(crate) async fn encrypt_message_next(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn decrypt_message(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DecryptMessageRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecryptMessageResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
@@ -1612,11 +1220,12 @@ pub(crate) async fn decrypt_message(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn decrypt_message_begin(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DecryptMessageBeginRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecryptMessageBeginResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -1685,9 +1294,7 @@ pub(crate) async fn decrypt_message_begin(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn decrypt_message_next(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DecryptMessageNextRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecryptMessageNextResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
@@ -1786,9 +1393,7 @@ pub(crate) async fn decrypt_message_next(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn sign_message(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::SignMessageRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SignMessageResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
@@ -1880,9 +1485,7 @@ pub(crate) async fn sign_message(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn sign_message_begin(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::SignMessageBeginRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SignMessageBeginResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
@@ -2009,9 +1612,7 @@ pub(crate) async fn sign_message_begin(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn sign_message_next(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::SignMessageNextRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SignMessageNextResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
@@ -2218,9 +1819,7 @@ pub(crate) async fn sign_message_next(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn verify_message(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::VerifyMessageRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifyMessageResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
@@ -2288,9 +1887,7 @@ pub(crate) async fn verify_message(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn verify_message_begin(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::VerifyMessageBeginRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifyMessageBeginResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
@@ -2402,9 +1999,7 @@ pub(crate) async fn verify_message_begin(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn verify_message_next(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::VerifyMessageNextRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifyMessageNextResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;

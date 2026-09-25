@@ -73,6 +73,30 @@ fn split_escaped_identity_body(rest: &str) -> Option<(&str, &str)> {
     None
 }
 
+impl AuthenticatedIdentity {
+    /// Returns the legacy DN-keyed identity string (`x509:issuer=...;subject=...`) when
+    /// the identity carries a non-empty issuer or subject DN.
+    ///
+    /// Used by the policy engine for dual-accept fallback: during the transition from DN-keyed
+    /// to SPKI-keyed policy entries, existing `x509:issuer=...;subject=...` policy entries
+    /// still authorize clients whose freshly-extracted identity carries both SPKI and DN.
+    ///
+    /// Returns `None` for SPKI-only identities (both DN components empty), PeerCred, and
+    /// Unauthenticated — those have no meaningful legacy DN key to look up.
+    pub fn legacy_dn_key(&self) -> Option<String> {
+        match self {
+            Self::Mtls { issuer, subject, .. } if !issuer.is_empty() || !subject.is_empty() => {
+                Some(format!(
+                    "x509:issuer={};subject={}",
+                    escape_identity_component(issuer),
+                    escape_identity_component(subject)
+                ))
+            }
+            _ => None,
+        }
+    }
+}
+
 impl std::str::FromStr for AuthenticatedIdentity {
     type Err = String;
 
@@ -121,6 +145,7 @@ impl std::str::FromStr for AuthenticatedIdentity {
             return Ok(Self::Mtls {
                 issuer: unescape_identity_component(issuer)?,
                 subject: unescape_identity_component(subject)?,
+                spki_sha256: "".into(),
             });
         }
 
@@ -132,12 +157,29 @@ impl std::fmt::Display for AuthenticatedIdentity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::PeerCred { uid } => write!(f, "uid={uid}"),
-            Self::Mtls { issuer, subject } => write!(
-                f,
-                "x509:issuer={};subject={}",
-                escape_identity_component(issuer),
-                escape_identity_component(subject),
-            ),
+            Self::Mtls { issuer, subject, spki_sha256 } => {
+                if spki_sha256.is_empty() {
+                    // Legacy identity (no SPKI): use the old DN-keyed format for backward compat.
+                    // This is also the display for identities parsed from legacy stored strings.
+                    write!(
+                        f,
+                        "x509:issuer={};subject={}",
+                        escape_identity_component(issuer),
+                        escape_identity_component(subject),
+                    )
+                } else if issuer.is_empty() && subject.is_empty() {
+                    // SPKI-only: short form
+                    write!(f, "x509:spki={spki_sha256}")
+                } else {
+                    // Enriched: SPKI primary key + DN for human readability
+                    write!(
+                        f,
+                        "x509:spki={spki_sha256};issuer={};subject={}",
+                        escape_identity_component(issuer),
+                        escape_identity_component(subject),
+                    )
+                }
+            }
             Self::Unauthenticated => write!(f, "unauthenticated"),
         }
     }
@@ -286,6 +328,7 @@ mod tests {
         let id = AuthenticatedIdentity::Mtls {
             issuer: "CN=x;subject=evil".into(),
             subject: "CN=client".into(),
+            spki_sha256: "".into(),
         };
         assert_eq!(id.to_string().parse::<AuthenticatedIdentity>().unwrap(), id);
     }
@@ -295,8 +338,16 @@ mod tests {
         // These two distinct certificate identities previously produced the
         // SAME string ("...issuer=A;subject=B;subject=C"), letting one match the
         // other's policy entry / spoof it past the A2 ownership check.
-        let a = AuthenticatedIdentity::Mtls { issuer: "A;subject=B".into(), subject: "C".into() };
-        let b = AuthenticatedIdentity::Mtls { issuer: "A".into(), subject: "B;subject=C".into() };
+        let a = AuthenticatedIdentity::Mtls {
+            issuer: "A;subject=B".into(),
+            subject: "C".into(),
+            spki_sha256: "".into(),
+        };
+        let b = AuthenticatedIdentity::Mtls {
+            issuer: "A".into(),
+            subject: "B;subject=C".into(),
+            spki_sha256: "".into(),
+        };
         assert_ne!(a.to_string(), b.to_string());
         assert_eq!(a.to_string().parse::<AuthenticatedIdentity>().unwrap(), a);
         assert_eq!(b.to_string().parse::<AuthenticatedIdentity>().unwrap(), b);
@@ -304,8 +355,11 @@ mod tests {
 
     #[test]
     fn mtls_identity_with_backslash_round_trips() {
-        let id =
-            AuthenticatedIdentity::Mtls { issuer: "CN=a\\b".into(), subject: "CN=c\\;d".into() };
+        let id = AuthenticatedIdentity::Mtls {
+            issuer: "CN=a\\b".into(),
+            subject: "CN=c\\;d".into(),
+            spki_sha256: "".into(),
+        };
         assert_eq!(id.to_string().parse::<AuthenticatedIdentity>().unwrap(), id);
     }
 
@@ -313,8 +367,11 @@ mod tests {
     fn mtls_identity_with_equals_and_plus_round_trips() {
         // '=' and '+' appear in multi-valued RDNs; they are not delimiters here
         // and must round-trip untouched.
-        let id =
-            AuthenticatedIdentity::Mtls { issuer: "CN=a+OU=b".into(), subject: "CN=c=d".into() };
+        let id = AuthenticatedIdentity::Mtls {
+            issuer: "CN=a+OU=b".into(),
+            subject: "CN=c=d".into(),
+            spki_sha256: "".into(),
+        };
         assert_eq!(id.to_string().parse::<AuthenticatedIdentity>().unwrap(), id);
     }
 
@@ -323,5 +380,66 @@ mod tests {
         // A bare unescaped ';' that is not the structural ";subject=" is
         // ambiguous and must be rejected rather than silently mis-parsed.
         assert!("x509:issuer=A;B".parse::<AuthenticatedIdentity>().is_err());
+    }
+
+    // --- SPKI identity tests ---
+
+    #[test]
+    fn spki_identity_display_starts_with_x509_spki() {
+        let id = AuthenticatedIdentity::Mtls {
+            issuer: "CN=Root CA".into(),
+            subject: "CN=client".into(),
+            spki_sha256: "aabbccddeeff0011aabbccddeeff001122334455667788990011223344556677".into(),
+        };
+        assert!(id.to_string().starts_with("x509:spki="), "display: {id}");
+    }
+
+    #[test]
+    fn spki_only_identity_round_trips() {
+        let id = AuthenticatedIdentity::Mtls {
+            issuer: "".into(),
+            subject: "".into(),
+            spki_sha256: "deadbeef12345678deadbeef12345678deadbeef12345678deadbeef12345678".into(),
+        };
+        let s = id.to_string();
+        assert_eq!(s, "x509:spki=deadbeef12345678deadbeef12345678deadbeef12345678deadbeef12345678");
+        assert_eq!(s.parse::<AuthenticatedIdentity>().unwrap(), id);
+    }
+
+    #[test]
+    fn enriched_spki_identity_round_trips() {
+        let id = AuthenticatedIdentity::Mtls {
+            issuer: "CN=Root CA".into(),
+            subject: "CN=client".into(),
+            spki_sha256: "deadbeef12345678deadbeef12345678deadbeef12345678deadbeef12345678".into(),
+        };
+        let s = id.to_string();
+        assert!(s.starts_with("x509:spki="), "display: {s}");
+        assert!(s.contains(";issuer="), "display: {s}");
+        assert!(s.contains(";subject="), "display: {s}");
+        assert_eq!(s.parse::<AuthenticatedIdentity>().unwrap(), id);
+    }
+
+    #[test]
+    fn legacy_dn_key_returns_none_for_empty_dn() {
+        let id = AuthenticatedIdentity::Mtls {
+            issuer: "".into(),
+            subject: "".into(),
+            spki_sha256: "deadbeef".into(),
+        };
+        assert_eq!(id.legacy_dn_key(), None);
+    }
+
+    #[test]
+    fn legacy_dn_key_returns_dn_form_for_non_empty_dn() {
+        let id = AuthenticatedIdentity::Mtls {
+            issuer: "CN=Root CA".into(),
+            subject: "CN=client".into(),
+            spki_sha256: "deadbeef".into(),
+        };
+        assert_eq!(
+            id.legacy_dn_key(),
+            Some("x509:issuer=CN=Root CA;subject=CN=client".to_string())
+        );
     }
 }

@@ -80,9 +80,7 @@ pub(super) async fn open_session(
 }
 
 pub(super) async fn close_session(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::CloseSessionRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::CloseSessionResponse>, Status> {
     let started = Instant::now();
@@ -94,11 +92,8 @@ pub(super) async fn close_session(
         .context_manager
         .get_context(&ctx_id, |c| c.session_slots.get(&vh).copied())
         .await
-        .flatten();
-    let slot_for_audit = match slot_for_audit {
-        Some(slot) => ctx.context_manager.to_virtual_slot(slot).await.map(|slot| slot.0),
-        None => None,
-    };
+        .flatten()
+        .map(|s| s.0);
 
     let response = lifecycle::close_session(&ctx.context_manager, &ctx.backend, request).await?;
     let ck_rv = response.get_ref().ck_rv;
@@ -144,9 +139,7 @@ pub(super) async fn close_all_sessions_with_policy(
 }
 
 pub(super) async fn get_session_info(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::GetSessionInfoRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GetSessionInfoResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
@@ -155,9 +148,7 @@ pub(super) async fn get_session_info(
 }
 
 pub(super) async fn login(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::LoginRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::LoginResponse>, Status> {
     let started = Instant::now();
@@ -171,11 +162,8 @@ pub(super) async fn login(
         .context_manager
         .get_context(&ctx_id, |c| c.session_slots.get(&vh).copied())
         .await
-        .flatten();
-    let slot_for_audit = match slot_for_audit {
-        Some(slot) => ctx.context_manager.to_virtual_slot(slot).await.map(|slot| slot.0),
-        None => None,
-    };
+        .flatten()
+        .map(|s| s.0);
 
     let response = auth::login(&ctx.context_manager, &ctx.backend, request).await?;
     let ck_rv = response.get_ref().ck_rv;
@@ -201,9 +189,7 @@ pub(super) async fn login(
 }
 
 pub(super) async fn logout(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::LogoutRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::LogoutResponse>, Status> {
     let started = Instant::now();
@@ -214,11 +200,8 @@ pub(super) async fn logout(
         .context_manager
         .get_context(&ctx_id, |c| c.session_slots.get(&vh).copied())
         .await
-        .flatten();
-    let slot_for_audit = match slot_for_audit {
-        Some(slot) => ctx.context_manager.to_virtual_slot(slot).await.map(|slot| slot.0),
-        None => None,
-    };
+        .flatten()
+        .map(|s| s.0);
 
     let response = auth::logout(&ctx.context_manager, &ctx.backend, request).await?;
     let ck_rv = response.get_ref().ck_rv;
@@ -293,9 +276,7 @@ pub(super) async fn init_token(
 }
 
 pub(super) async fn init_pin(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::InitPinRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::InitPinResponse>, Status> {
     let started = Instant::now();
@@ -306,11 +287,8 @@ pub(super) async fn init_pin(
         .context_manager
         .get_context(&ctx_id, |c| c.session_slots.get(&vh).copied())
         .await
-        .flatten();
-    let slot_for_audit = match slot_for_audit {
-        Some(slot) => ctx.context_manager.to_virtual_slot(slot).await.map(|slot| slot.0),
-        None => None,
-    };
+        .flatten()
+        .map(|s| s.0);
 
     let response = management::init_pin(&ctx.context_manager, &ctx.backend, request).await?;
     let ck_rv = response.get_ref().ck_rv;
@@ -336,9 +314,7 @@ pub(super) async fn init_pin(
 }
 
 pub(super) async fn set_pin(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::SetPinRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SetPinResponse>, Status> {
     let started = Instant::now();
@@ -349,11 +325,8 @@ pub(super) async fn set_pin(
         .context_manager
         .get_context(&ctx_id, |c| c.session_slots.get(&vh).copied())
         .await
-        .flatten();
-    let slot_for_audit = match slot_for_audit {
-        Some(slot) => ctx.context_manager.to_virtual_slot(slot).await.map(|slot| slot.0),
-        None => None,
-    };
+        .flatten()
+        .map(|s| s.0);
 
     let response = management::set_pin(&ctx.context_manager, &ctx.backend, request).await?;
     let ck_rv = response.get_ref().ck_rv;
@@ -379,9 +352,7 @@ pub(super) async fn set_pin(
 }
 
 pub(super) async fn get_function_status(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::GetFunctionStatusRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GetFunctionStatusResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
@@ -390,9 +361,7 @@ pub(super) async fn get_function_status(
 }
 
 pub(super) async fn cancel_function(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::CancelFunctionRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::CancelFunctionResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;

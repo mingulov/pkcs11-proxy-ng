@@ -6,10 +6,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use pkcs11_proxy_ng_audit::EventClass;
-use pkcs11_proxy_ng_types::SecretBytes;
 use tonic::{Request, Response, Status};
 
-use super::super::authorization::mechanism_permitted;
 use super::super::ck_result_to_rv;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
@@ -21,9 +19,7 @@ use crate::server::grpc_service::audit_events::emit_auth_event;
 
 use crate::server::grpc_service::HandlerContext;
 pub(crate) async fn digest_init(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DigestInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DigestInitResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
@@ -79,9 +75,7 @@ pub(crate) async fn digest_init(
 }
 
 pub(crate) async fn digest(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DigestRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DigestResponse>, Status> {
     let started = Instant::now();
@@ -135,9 +129,7 @@ pub(crate) async fn digest(
 }
 
 pub(crate) async fn digest_update(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DigestUpdateRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DigestUpdateResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
@@ -168,9 +160,7 @@ pub(crate) async fn digest_update(
 }
 
 pub(crate) async fn digest_key(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DigestKeyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DigestKeyResponse>, Status> {
     let backend_ref = &ctx.backend;
@@ -191,9 +181,7 @@ pub(crate) async fn digest_key(
 }
 
 pub(crate) async fn digest_final(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DigestFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DigestFinalResponse>, Status> {
     let started = Instant::now();

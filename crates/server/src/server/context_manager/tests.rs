@@ -662,7 +662,7 @@ fn teardown_returns_correct_backend_session_handles() {
 
 fn make_session_meta(uid: Vec<u8>) -> super::ObjectMetadata {
     super::ObjectMetadata {
-        unique_id: uid.into(),
+        unique_id: uid,
         class: Some(pkcs11_proxy_ng_types::CkObjectClass::SECRET_KEY),
         is_token: false,
     }
@@ -670,7 +670,7 @@ fn make_session_meta(uid: Vec<u8>) -> super::ObjectMetadata {
 
 fn make_token_meta(uid: Vec<u8>) -> super::ObjectMetadata {
     super::ObjectMetadata {
-        unique_id: uid.into(),
+        unique_id: uid,
         class: Some(pkcs11_proxy_ng_types::CkObjectClass::SECRET_KEY),
         is_token: true,
     }
@@ -695,7 +695,7 @@ async fn object_metadata_session_object_round_trip() {
     mgr.cache_object_metadata(&ctx_id, 7, make_session_meta(uid.clone())).await;
     assert_eq!(
         mgr.object_metadata(&ctx_id, 7).await.map(|m| m.unique_id),
-        Some(SecretBytes::new(uid)),
+        Some(uid),
         "a cached session-object metadata must be returned by object_metadata"
     );
 }
@@ -762,7 +762,7 @@ async fn cache_object_metadata_noop_for_missing_context() {
 // --- per-object attribute cache (R2 coalescer, Task 1) ---
 
 fn make_cached_attr(value: Vec<u8>, rv: u64) -> super::CachedAttr {
-    super::CachedAttr { value: SecretBytes::new(value), ck_rv: rv }
+    super::CachedAttr { value, ck_rv: rv }
 }
 
 #[tokio::test]
@@ -825,8 +825,7 @@ fn attr_cache_cleared_on_teardown() {
     let mut ctx = LogicalClientInstance::new(None);
     let obj = VirtualHandle(55);
     let attr = CkAttributeType::CLASS;
-    ctx.attr_cache
-        .insert((obj, attr), super::CachedAttr { value: SecretBytes::new(vec![0xff]), ck_rv: 0 });
+    ctx.attr_cache.insert((obj, attr), super::CachedAttr { value: vec![0xff], ck_rv: 0 });
     let _ = ctx.teardown();
     assert!(ctx.attr_cache.is_empty(), "teardown must clear the attribute cache");
 }
@@ -842,10 +841,7 @@ fn attr_cache_evicted_on_session_close_via_remove_session() {
     ctx.record_session_object(session, obj);
 
     let attr = CkAttributeType::CLASS;
-    ctx.attr_cache.insert(
-        (obj, attr),
-        super::CachedAttr { value: SecretBytes::new(vec![1, 2, 3]), ck_rv: 0 },
-    );
+    ctx.attr_cache.insert((obj, attr), super::CachedAttr { value: vec![1, 2, 3], ck_rv: 0 });
 
     ctx.remove_session(session);
 
@@ -861,15 +857,14 @@ fn attr_cache_evicted_on_session_close_via_remove_sessions_for_slot() {
     // entries must also be evicted (R2, Task 1).
     let mut ctx = LogicalClientInstance::new(None);
     let session = ctx.session_handles.insert(BackendHandle(11));
-    ctx.session_slots.insert(session, crate::server::slot_map::BackendSlotId(CkSlotId(7)));
+    ctx.session_slots.insert(session, CkSlotId(7));
     let obj = ctx.object_handles.insert(BackendHandle(111));
     ctx.record_session_object(session, obj);
 
     let attr = CkAttributeType::TOKEN;
-    ctx.attr_cache
-        .insert((obj, attr), super::CachedAttr { value: SecretBytes::new(vec![0x01]), ck_rv: 0 });
+    ctx.attr_cache.insert((obj, attr), super::CachedAttr { value: vec![0x01], ck_rv: 0 });
 
-    ctx.remove_sessions_for_slot(crate::server::slot_map::BackendSlotId(CkSlotId(7)));
+    ctx.remove_sessions_for_slot(CkSlotId(7));
 
     assert!(
         !ctx.attr_cache.contains_key(&(obj, attr)),
@@ -926,232 +921,4 @@ async fn attr_cache_clear_noop_for_missing_context() {
     let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
     let gone = ClientContextId("nonexistent".into());
     mgr.attr_cache_clear(&gone).await; // must not panic
-}
-
-#[tokio::test]
-async fn message_transition_restores_shape_when_dropped_before_provider_invocation() {
-    let state =
-        Arc::new(Mutex::new(MessageOperationState { shape: Some(MessageParameterShape::Gcm) }));
-
-    let guard = Arc::clone(&state).lock_owned().await;
-    drop(MessageOperationTransition::begin(guard));
-
-    assert_eq!(state.lock().await.shape, Some(MessageParameterShape::Gcm));
-}
-
-#[tokio::test]
-async fn message_transition_commits_success_and_restores_explicit_failure() {
-    let state =
-        Arc::new(Mutex::new(MessageOperationState { shape: Some(MessageParameterShape::Gcm) }));
-
-    {
-        let guard = Arc::clone(&state).lock_owned().await;
-        let mut transition = MessageOperationTransition::begin(guard);
-        transition.mark_started();
-        transition.settle(&Ok(()), Some(MessageParameterShape::Ccm));
-    }
-    assert_eq!(state.lock().await.shape, Some(MessageParameterShape::Ccm));
-
-    {
-        let guard = Arc::clone(&state).lock_owned().await;
-        let mut transition = MessageOperationTransition::begin(guard);
-        transition.mark_started();
-        transition.settle::<()>(&Err(CkRv::FUNCTION_FAILED), None);
-    }
-    assert_eq!(state.lock().await.shape, Some(MessageParameterShape::Ccm));
-}
-
-#[tokio::test]
-async fn message_transition_clears_shape_when_provider_panics_after_invocation() {
-    let state =
-        Arc::new(Mutex::new(MessageOperationState { shape: Some(MessageParameterShape::Gcm) }));
-
-    let guard = Arc::clone(&state).lock_owned().await;
-    let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut transition = MessageOperationTransition::begin(guard);
-        transition.mark_started();
-        panic!("simulated provider panic");
-    }));
-
-    assert!(unwind.is_err());
-    assert_eq!(state.lock().await.shape, None);
-}
-
-#[tokio::test]
-async fn message_transition_clears_shape_for_ambiguous_provider_result() {
-    let state =
-        Arc::new(Mutex::new(MessageOperationState { shape: Some(MessageParameterShape::Gcm) }));
-
-    {
-        let guard = Arc::clone(&state).lock_owned().await;
-        let mut transition = MessageOperationTransition::begin(guard);
-        transition.mark_started();
-        transition.settle_ambiguous();
-    }
-
-    assert_eq!(state.lock().await.shape, None);
-}
-
-#[tokio::test]
-async fn close_transition_drop_before_invocation_reactivates_session() {
-    let mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-    let ctx_id = mgr.create_context(None).await.unwrap();
-    let backend = BackendHandle(77);
-    let session = mgr
-        .get_context(&ctx_id, |ctx| {
-            ctx.register_session(backend, crate::server::slot_map::BackendSlotId(CkSlotId(1)))
-        })
-        .await
-        .unwrap();
-
-    let transition = mgr.begin_close_session(&ctx_id, session).unwrap();
-    assert_eq!(transition.backend_handle(), backend);
-    assert_eq!(
-        mgr.get_context(&ctx_id, |ctx| ctx.session_handles.resolve(session)).await,
-        Some(None)
-    );
-    drop(transition);
-
-    assert_eq!(
-        mgr.get_context(&ctx_id, |ctx| ctx.session_handles.resolve(session)).await,
-        Some(Some(backend))
-    );
-}
-
-#[tokio::test]
-async fn close_transition_terminal_result_removes_session_and_shapes() {
-    let mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-    let ctx_id = mgr.create_context(None).await.unwrap();
-    let backend = BackendHandle(77);
-    let session = mgr
-        .get_context(&ctx_id, |ctx| {
-            ctx.register_session(backend, crate::server::slot_map::BackendSlotId(CkSlotId(1)))
-        })
-        .await
-        .unwrap();
-    let operation =
-        mgr.message_operation_lock(&ctx_id, session, MessageOperation::Encrypt).await.unwrap();
-    operation.lock().await.shape = Some(MessageParameterShape::Gcm);
-
-    let mut transition = mgr.begin_close_session(&ctx_id, session).unwrap();
-    transition.mark_started();
-    transition.settle(&Ok(()));
-
-    let state = mgr
-        .get_context(&ctx_id, |ctx| {
-            (
-                ctx.session_handles.resolve(session),
-                ctx.session_handles.suspended_backend(session),
-                ctx.message_operations.keys().any(|(owned_session, _)| *owned_session == session),
-            )
-        })
-        .await
-        .unwrap();
-    assert_eq!(state, (None, None, false));
-}
-
-#[tokio::test]
-async fn close_transition_panic_after_invocation_quarantines_session_and_clears_shapes() {
-    let mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-    let ctx_id = mgr.create_context(None).await.unwrap();
-    let backend = BackendHandle(77);
-    let session = mgr
-        .get_context(&ctx_id, |ctx| {
-            ctx.register_session(backend, crate::server::slot_map::BackendSlotId(CkSlotId(1)))
-        })
-        .await
-        .unwrap();
-    let operation =
-        mgr.message_operation_lock(&ctx_id, session, MessageOperation::Encrypt).await.unwrap();
-    operation.lock().await.shape = Some(MessageParameterShape::Gcm);
-
-    let mut transition = mgr.begin_close_session(&ctx_id, session).unwrap();
-    transition.mark_started();
-    drop(transition);
-
-    let state = mgr
-        .get_context(&ctx_id, |ctx| {
-            (
-                ctx.session_handles.resolve(session),
-                ctx.session_handles.suspended_backend(session),
-                ctx.message_operations.keys().any(|(owned_session, _)| *owned_session == session),
-            )
-        })
-        .await
-        .unwrap();
-    assert_eq!(state, (None, Some(backend), false));
-}
-
-#[tokio::test]
-async fn transient_old_close_completion_cannot_steal_recycled_session_binding() {
-    let mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-    let ctx_id = mgr.create_context(None).await.unwrap();
-    let backend = BackendHandle(77);
-    let old = mgr
-        .get_context(&ctx_id, |ctx| {
-            ctx.register_session(backend, crate::server::slot_map::BackendSlotId(CkSlotId(1)))
-        })
-        .await
-        .unwrap();
-    let mut transition = mgr.begin_close_session(&ctx_id, old).unwrap();
-    transition.mark_started();
-
-    let new = mgr
-        .get_context(&ctx_id, |ctx| {
-            ctx.register_session(backend, crate::server::slot_map::BackendSlotId(CkSlotId(1)))
-        })
-        .await
-        .unwrap();
-    assert_ne!(new, old);
-    transition.settle(&Err(CkRv::FUNCTION_FAILED));
-
-    let state = mgr
-        .get_context(&ctx_id, |ctx| {
-            (
-                ctx.session_handles.resolve(old),
-                ctx.session_handles.suspended_backend(old),
-                ctx.session_handles.resolve(new),
-                ctx.session_handles.resolve_backend(backend),
-            )
-        })
-        .await
-        .unwrap();
-    assert_eq!(state, (None, Some(backend), Some(backend), Some(new)));
-}
-
-#[tokio::test]
-async fn terminal_old_close_completion_cannot_remove_recycled_session_binding() {
-    let mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-    let ctx_id = mgr.create_context(None).await.unwrap();
-    let backend = BackendHandle(77);
-    let old = mgr
-        .get_context(&ctx_id, |ctx| {
-            ctx.register_session(backend, crate::server::slot_map::BackendSlotId(CkSlotId(1)))
-        })
-        .await
-        .unwrap();
-    let mut transition = mgr.begin_close_session(&ctx_id, old).unwrap();
-    transition.mark_started();
-
-    let new = mgr
-        .get_context(&ctx_id, |ctx| {
-            ctx.register_session(backend, crate::server::slot_map::BackendSlotId(CkSlotId(1)))
-        })
-        .await
-        .unwrap();
-    assert_ne!(new, old);
-    transition.settle(&Ok(()));
-
-    let state = mgr
-        .get_context(&ctx_id, |ctx| {
-            (
-                ctx.session_handles.resolve(old),
-                ctx.session_handles.suspended_backend(old),
-                ctx.session_handles.resolve(new),
-                ctx.session_handles.resolve_backend(backend),
-            )
-        })
-        .await
-        .unwrap();
-    assert_eq!(state, (None, None, Some(backend), Some(new)));
 }

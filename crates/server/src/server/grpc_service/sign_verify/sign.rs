@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use pkcs11_proxy_ng_audit::EventClass;
-use pkcs11_proxy_ng_types::SecretBytes;
 use tonic::{Request, Response, Status};
 
 use super::super::authorization::mechanism_permitted;
@@ -21,9 +20,7 @@ use crate::server::grpc_service::audit_events::emit_auth_event;
 
 use crate::server::grpc_service::HandlerContext;
 pub(crate) async fn sign_init(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::SignInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SignInitResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
@@ -68,9 +65,19 @@ pub(crate) async fn sign_init(
         }
     };
 
-    // B1: remap object handles embedded in the mechanism parameters.
-    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+    // B1: remap object handles embedded in the mechanism parameters;
+    // gate each through per-object authz when active (C1).
+    if let Err(rv) =
+        remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
+    {
         return Ok(Response::new(pkcs11_proxy_ng_proto::SignInitResponse { ck_rv: rv.0 }));
+    }
+
+    // Mechanism policy gate (G3-PR3 Task 3).
+    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::SignInitResponse {
+            ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
+        }));
     }
 
     let backend = Arc::clone(backend_ref);
@@ -79,9 +86,7 @@ pub(crate) async fn sign_init(
 }
 
 pub(crate) async fn sign(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::SignRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SignResponse>, Status> {
     let started = Instant::now();
@@ -134,9 +139,7 @@ pub(crate) async fn sign(
 }
 
 pub(crate) async fn sign_update(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::SignUpdateRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SignUpdateResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
@@ -166,9 +169,7 @@ pub(crate) async fn sign_update(
 }
 
 pub(crate) async fn sign_final(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::SignFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SignFinalResponse>, Status> {
     let started = Instant::now();
@@ -210,9 +211,7 @@ pub(crate) async fn sign_final(
 }
 
 pub(crate) async fn sign_recover_init(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::SignRecoverInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SignRecoverInitResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
@@ -263,9 +262,19 @@ pub(crate) async fn sign_recover_init(
         }
     };
 
-    // B1: remap object handles embedded in the mechanism parameters.
-    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+    // B1: remap object handles embedded in the mechanism parameters;
+    // gate each through per-object authz when active (C1).
+    if let Err(rv) =
+        remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
+    {
         return Ok(Response::new(pkcs11_proxy_ng_proto::SignRecoverInitResponse { ck_rv: rv.0 }));
+    }
+
+    // Mechanism policy gate (G3-PR3 Task 3).
+    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::SignRecoverInitResponse {
+            ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
+        }));
     }
 
     let backend = Arc::clone(backend_ref);
@@ -274,9 +283,7 @@ pub(crate) async fn sign_recover_init(
 }
 
 pub(crate) async fn sign_recover(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::SignRecoverRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SignRecoverResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
@@ -343,22 +350,13 @@ mod tests {
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
         let backend: Arc<dyn Pkcs11Backend> = mock;
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
-        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        ctx_mgr.register_slot(CkSlotId(0)).await;
         let ctx_id = ctx_mgr.create_context(None).await.unwrap();
         let session_vh = ctx_mgr
-            .get_context(&ctx_id, |ctx| {
-                ctx.register_session(
-                    BackendHandle(1),
-                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
-                )
-            })
+            .get_context(&ctx_id, |ctx| ctx.register_session(BackendHandle(1), CkSlotId(0)))
             .await
             .unwrap();
-        ctx_mgr.cache_token_info(
-            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
-            "MockToken".into(),
-            "0001".into(),
-        );
+        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
         let ctx = HandlerContext::for_test(&ctx_mgr, &backend);
         (ctx, ctx_id, session_vh.0)
     }
