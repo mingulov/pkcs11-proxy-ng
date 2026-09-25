@@ -1,0 +1,175 @@
+# FIPS 140-3-flavored mechanism registry.
+#
+# Used together with examples/configs/fips/proxy.toml when the backend
+# (e.g. NSS softokn in FIPS mode, or a FIPS-validated HSM) advertises a
+# superset that the proxy then filters down to only FIPS-approved
+# mechanisms.
+#
+# Sources:
+#   - NIST SP 800-131A Rev. 2  (cipher / hash / signature transitions)
+#   - NIST SP 800-140C Rev. 2  (approved-security-functions list)
+#   - PKCS #11 v3.02 pkcs11t.h
+#
+# CAVEAT: a real FIPS audit goes through CMVP certificate language for
+# the *specific* module being used. This list is the OS-neutral
+# intersection — operators MUST cross-check against their CMVP cert
+# (e.g. NSS softokn FIPS 140-3 cert 4644).
+#
+# Mechanisms NOT included here on purpose:
+#   - MD2 / MD4 / MD5 family (digest + signature)
+#   - SHA-1 for digital signature (still allowed for HMAC pre-2030)
+#   - RC2 / RC4 / single-DES
+#   - Skipjack, CAST, IDEA, Camellia, ARIA, SEED, GOST
+#   - DSA <2048-bit, DH <2048-bit
+#   - Wrap/derive mechanisms that have no SP 800-56A/C approval
+
+discovery_mode = "filtered"
+
+# ─── Parameterless mechanisms (FIPS-approved subset) ──────────────────
+
+parameterless = [
+    # ── RSA (key gen + signature primitives) ──
+    0x0000,  # CKM_RSA_PKCS_KEY_PAIR_GEN
+    0x0001,  # CKM_RSA_PKCS                  (key transport; legacy)
+    0x0040,  # CKM_SHA256_RSA_PKCS
+    0x0041,  # CKM_SHA384_RSA_PKCS
+    0x0042,  # CKM_SHA512_RSA_PKCS
+    0x0046,  # CKM_SHA224_RSA_PKCS
+    0x0060,  # CKM_SHA3_256_RSA_PKCS
+    0x0061,  # CKM_SHA3_384_RSA_PKCS
+    0x0062,  # CKM_SHA3_512_RSA_PKCS
+    0x0066,  # CKM_SHA3_224_RSA_PKCS
+
+    # ── DSA (only with ≥SHA-224 hash, key size policed by backend) ──
+    0x0010,  # CKM_DSA_KEY_PAIR_GEN
+    0x0013,  # CKM_DSA_SHA224
+    0x0014,  # CKM_DSA_SHA256
+    0x0015,  # CKM_DSA_SHA384
+    0x0016,  # CKM_DSA_SHA512
+    0x0018,  # CKM_DSA_SHA3_224
+    0x0019,  # CKM_DSA_SHA3_256
+    0x001A,  # CKM_DSA_SHA3_384
+    0x001B,  # CKM_DSA_SHA3_512
+    0x2000,  # CKM_DSA_PARAMETER_GEN
+    0x2003,  # CKM_DSA_PROBABILISTIC_PARAMETER_GEN
+    0x2004,  # CKM_DSA_SHAWE_TAYLOR_PARAMETER_GEN
+    0x2005,  # CKM_DSA_FIPS_G_GEN
+
+    # ── DH (≥2048-bit policed by backend) ──
+    0x0020,  # CKM_DH_PKCS_KEY_PAIR_GEN
+    0x2001,  # CKM_DH_PKCS_PARAMETER_GEN
+    0x0030,  # CKM_X9_42_DH_KEY_PAIR_GEN
+    0x2002,  # CKM_X9_42_DH_PARAMETER_GEN
+
+    # ── ECDSA / ECDH on NIST curves ──
+    0x1040,  # CKM_EC_KEY_PAIR_GEN
+    0x1043,  # CKM_ECDSA_SHA224
+    0x1044,  # CKM_ECDSA_SHA256
+    0x1045,  # CKM_ECDSA_SHA384
+    0x1046,  # CKM_ECDSA_SHA512
+    0x1047,  # CKM_ECDSA_SHA3_224
+    0x1048,  # CKM_ECDSA_SHA3_256
+    0x1049,  # CKM_ECDSA_SHA3_384
+    0x104A,  # CKM_ECDSA_SHA3_512
+
+    # ── SHA-2 / SHA-3 digests ──
+    0x0250,  # CKM_SHA256
+    0x0251,  # CKM_SHA256_HMAC
+    0x0252,  # CKM_SHA256_HMAC_GENERAL
+    0x0260,  # CKM_SHA384
+    0x0261,  # CKM_SHA384_HMAC
+    0x0262,  # CKM_SHA384_HMAC_GENERAL
+    0x0270,  # CKM_SHA512
+    0x0271,  # CKM_SHA512_HMAC
+    0x0272,  # CKM_SHA512_HMAC_GENERAL
+    0x0255,  # CKM_SHA224
+    0x0256,  # CKM_SHA224_HMAC
+    0x0257,  # CKM_SHA224_HMAC_GENERAL
+    0x02B0,  # CKM_SHA3_256
+    0x02B1,  # CKM_SHA3_256_HMAC
+    0x02B5,  # CKM_SHA3_224
+    0x02C0,  # CKM_SHA3_384
+    0x02C1,  # CKM_SHA3_384_HMAC
+    0x02D0,  # CKM_SHA3_512
+    0x02D1,  # CKM_SHA3_512_HMAC
+
+    # ── AES (block + AEAD + key transport) ──
+    0x1080,  # CKM_AES_KEY_GEN
+    0x1081,  # CKM_AES_ECB
+    0x1082,  # CKM_AES_CBC
+    0x1085,  # CKM_AES_CBC_PAD
+    0x1086,  # CKM_AES_CTR
+    0x108A,  # CKM_AES_CMAC
+    0x108B,  # CKM_AES_CMAC_GENERAL
+    0x108E,  # CKM_AES_GMAC
+    0x2109,  # CKM_AES_KEY_WRAP
+    0x210A,  # CKM_AES_KEY_WRAP_PAD
+    0x210B,  # CKM_AES_KEY_WRAP_KWP
+
+    # ── TDEA (3-key only; backend should reject 2-key keys) ──
+    0x0131,  # CKM_DES3_KEY_GEN
+    0x0132,  # CKM_DES3_ECB
+    0x0133,  # CKM_DES3_CBC
+    0x0136,  # CKM_DES3_CBC_PAD
+    0x0134,  # CKM_DES3_MAC
+    0x0138,  # CKM_DES3_CMAC
+
+    # ── KDF / KBKDF ──
+    0x0028,  # CKM_HKDF_DERIVE
+    0x0029,  # CKM_HKDF_DATA
+    0x002A,  # CKM_HKDF_KEY_GEN
+]
+
+# ─── Parameterized mechanisms (FIPS-approved parameter shapes) ────────
+
+[[params]]
+shape = "RsaPkcsPss"
+mechanisms = [
+    0x000D,  # CKM_RSA_PKCS_PSS
+    0x0043,  # CKM_SHA256_RSA_PKCS_PSS
+    0x0044,  # CKM_SHA384_RSA_PKCS_PSS
+    0x0045,  # CKM_SHA512_RSA_PKCS_PSS
+    0x0047,  # CKM_SHA224_RSA_PKCS_PSS
+    0x0063,  # CKM_SHA3_256_RSA_PKCS_PSS
+    0x0064,  # CKM_SHA3_384_RSA_PKCS_PSS
+    0x0065,  # CKM_SHA3_512_RSA_PKCS_PSS
+    0x0067,  # CKM_SHA3_224_RSA_PKCS_PSS
+]
+
+[[params]]
+shape = "RsaPkcsOaep"
+mechanisms = [
+    0x0009,  # CKM_RSA_PKCS_OAEP
+]
+
+[[params]]
+shape = "AesGcm"
+mechanisms = [
+    0x1087,  # CKM_AES_GCM
+]
+
+[[params]]
+shape = "AesCcm"
+mechanisms = [
+    0x1088,  # CKM_AES_CCM
+]
+
+[[params]]
+shape = "Ecdh1Derive"
+mechanisms = [
+    0x1050,  # CKM_ECDH1_DERIVE
+    0x1051,  # CKM_ECDH1_COFACTOR_DERIVE
+]
+
+[[params]]
+shape = "DhPkcsDerive"
+mechanisms = [
+    0x0021,  # CKM_DH_PKCS_DERIVE
+    0x0031,  # CKM_X9_42_DH_DERIVE
+]
+
+[[params]]
+shape = "Pkcs5Pbkd2"
+mechanisms = [
+    0x03B0,  # CKM_PKCS5_PBKD2
+]

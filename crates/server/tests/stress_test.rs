@@ -7,79 +7,18 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use pkcs11_proxy_ng::server::context_manager::ContextManager;
-use pkcs11_proxy_ng::server::grpc_service::Pkcs11ProxyService;
-use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_backend::mock::MockBackend;
 use pkcs11_proxy_ng_client::Pkcs11Client;
 use pkcs11_proxy_ng_types::*;
 
-use tokio::net::TcpListener;
-use tonic::transport::Server;
+mod common_3x;
+use common_3x::{init_client, mock as mock_backend, mock_daemon_with_lease};
 
-fn mock_backend(slots: &[u64], mechs: &[u64]) -> MockBackend {
-    MockBackend::new(
-        slots.iter().copied().map(CkSlotId).collect(),
-        mechs.iter().copied().map(CkMechanismType).collect(),
-    )
-}
-
+/// Spin up a mock daemon with this test file's default lease (300s) and
+/// eviction interval (100ms). For non-default leases call
+/// `common_3x::mock_daemon_with_lease` directly.
 async fn mock_daemon(backend: Arc<MockBackend>) -> (String, tokio::sync::watch::Sender<bool>) {
     mock_daemon_with_lease(backend, Duration::from_secs(300), Duration::from_millis(100)).await
-}
-
-async fn mock_daemon_with_lease(
-    backend: Arc<MockBackend>,
-    lease: Duration,
-    eviction_interval: Duration,
-) -> (String, tokio::sync::watch::Sender<bool>) {
-    let backend_trait: Arc<dyn Pkcs11Backend> = backend.clone();
-    let ctx = Arc::new(ContextManager::new(lease, 0));
-    ctx.populate_slots(&backend_trait).await.expect("populate_slots");
-
-    let svc = Pkcs11ProxyService::insecure_for_tests(ctx.clone(), backend_trait);
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let endpoint = format!("http://127.0.0.1:{}", addr.port());
-
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-
-    let evict_ctx = ctx.clone();
-    let evict_backend: Arc<dyn Pkcs11Backend> = backend;
-    let mut evict_shutdown = shutdown_rx.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(eviction_interval);
-        loop {
-            tokio::select! {
-                _ = interval.tick() => {
-                    evict_ctx.evict_expired(&evict_backend).await;
-                }
-                _ = evict_shutdown.changed() => break,
-            }
-        }
-    });
-
-    let server_shutdown = shutdown_rx.clone();
-    tokio::spawn(async move {
-        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
-        let _ = Server::builder()
-            .add_service(pkcs11_proxy_ng_proto::Pkcs11ProxyServer::new(svc))
-            .serve_with_incoming_shutdown(incoming, async move {
-                let mut rx = server_shutdown;
-                let _ = rx.changed().await;
-            })
-            .await;
-    });
-
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    (endpoint, shutdown_tx)
-}
-
-async fn init_client(endpoint: &str) -> Pkcs11Client {
-    let mut client = Pkcs11Client::connect(endpoint).await.unwrap();
-    client.initialize().await.unwrap();
-    client
 }
 
 const CKF_SERIAL: CkSessionFlags = CkSessionFlags(CkSessionFlags::SERIAL_SESSION);

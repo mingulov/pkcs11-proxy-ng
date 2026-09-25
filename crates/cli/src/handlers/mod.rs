@@ -9,7 +9,14 @@ use pkcs11_proxy_ng_types::*;
 use crate::cli::Commands;
 use crate::pkcs11_names::object_class_name;
 
-pub(crate) type CliResult = Result<(), Box<dyn std::error::Error>>;
+pub(crate) type CliResult = Result<(), Box<dyn core::error::Error>>;
+
+/// Format a `CkRv` from a named PKCS#11 entry point as a CLI-facing error.
+/// Use with `.map_err(cli_err("C_FooName"))?`. Centralises the
+/// `"C_FooName failed: CKR 0x{...}"` shape that was copy-pasted at 37+ sites.
+pub(crate) fn cli_err(fn_name: &'static str) -> impl FnOnce(CkRv) -> Box<dyn core::error::Error> {
+    move |e| format!("{fn_name} failed: CKR 0x{:08X}", e.0).into()
+}
 
 pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) -> CliResult {
     match command {
@@ -23,6 +30,8 @@ pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) ->
             query::random(client, slot_id, len, format).await
         }
         Commands::ListMechanismNames => Ok(()),
+        // Handled in main() before we initialize the PKCS#11 client.
+        Commands::Health { .. } => Ok(()),
         Commands::FindObjects { slot_id, pin, label, verbose } => {
             objects::find_objects(client, slot_id, pin, label, verbose).await
         }
@@ -107,29 +116,23 @@ pub(crate) async fn open_session(
     client: &mut Pkcs11Client,
     slot_id: u64,
     flags: CkSessionFlags,
-) -> Result<CkSessionHandle, Box<dyn std::error::Error>> {
-    client
-        .open_session(CkSlotId(slot_id), flags)
-        .await
-        .map_err(|e| format!("C_OpenSession failed: CKR 0x{:08X}", e.0).into())
+) -> Result<CkSessionHandle, Box<dyn core::error::Error>> {
+    client.open_session(CkSlotId(slot_id), flags).await.map_err(cli_err("C_OpenSession"))
 }
 
 pub(crate) async fn login_user(
     client: &mut Pkcs11Client,
     session: CkSessionHandle,
     pin: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    client
-        .login(session, CkUserType::User, Some(pin.as_bytes()))
-        .await
-        .map_err(|e| format!("C_Login failed: CKR 0x{:08X}", e.0).into())
+) -> Result<(), Box<dyn core::error::Error>> {
+    client.login(session, CkUserType::User, Some(pin.as_bytes())).await.map_err(cli_err("C_Login"))
 }
 
 pub(crate) async fn login_if_present(
     client: &mut Pkcs11Client,
     session: CkSessionHandle,
     pin: Option<&str>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn core::error::Error>> {
     if let Some(pin) = pin {
         login_user(client, session, pin).await?;
     }
@@ -152,7 +155,7 @@ pub(crate) async fn find_key_by_label(
     session: CkSessionHandle,
     key_label: &str,
     class: CkObjectClass,
-) -> Result<CkObjectHandle, Box<dyn std::error::Error>> {
+) -> Result<CkObjectHandle, Box<dyn core::error::Error>> {
     let template = vec![
         CkAttribute {
             attr_type: CkAttributeType::LABEL,
@@ -166,15 +169,13 @@ pub(crate) async fn find_key_by_label(
     client
         .find_objects_init(session, &template)
         .await
-        .map_err(|e| format!("C_FindObjectsInit failed: CKR 0x{:08X}", e.0))?;
-    let objects = client
-        .find_objects(session, 1)
-        .await
-        .map_err(|e| format!("C_FindObjects failed: CKR 0x{:08X}", e.0))?;
+        .map_err(crate::handlers::cli_err("C_FindObjectsInit"))?;
+    let objects =
+        client.find_objects(session, 1).await.map_err(crate::handlers::cli_err("C_FindObjects"))?;
     client
         .find_objects_final(session)
         .await
-        .map_err(|e| format!("C_FindObjectsFinal failed: CKR 0x{:08X}", e.0))?;
+        .map_err(crate::handlers::cli_err("C_FindObjectsFinal"))?;
 
     objects.into_iter().next().ok_or_else(|| {
         format!("No {} found with label '{key_label}'", object_class_name(class.0)).into()

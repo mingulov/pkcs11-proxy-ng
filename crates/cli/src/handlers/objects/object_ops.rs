@@ -27,15 +27,15 @@ pub(crate) async fn find_objects(
     client
         .find_objects_init(session, &template)
         .await
-        .map_err(|e| format!("C_FindObjectsInit failed: CKR 0x{:08X}", e.0))?;
+        .map_err(crate::handlers::cli_err("C_FindObjectsInit"))?;
     let objects = client
         .find_objects(session, 100)
         .await
-        .map_err(|e| format!("C_FindObjects failed: CKR 0x{:08X}", e.0))?;
+        .map_err(crate::handlers::cli_err("C_FindObjects"))?;
     client
         .find_objects_final(session)
         .await
-        .map_err(|e| format!("C_FindObjectsFinal failed: CKR 0x{:08X}", e.0))?;
+        .map_err(crate::handlers::cli_err("C_FindObjectsFinal"))?;
 
     if objects.is_empty() {
         println!("No objects found.");
@@ -69,7 +69,7 @@ pub(crate) async fn destroy_object(
     client
         .destroy_object(session, CkObjectHandle(object_handle))
         .await
-        .map_err(|e| format!("C_DestroyObject failed: CKR 0x{:08X}", e.0))?;
+        .map_err(crate::handlers::cli_err("C_DestroyObject"))?;
     println!("Object {} destroyed.", object_handle);
     close_session(client, session, pin.is_some()).await;
     Ok(())
@@ -87,7 +87,7 @@ pub(crate) async fn get_object_size(
     let size = client
         .get_object_size(session, CkObjectHandle(object_handle))
         .await
-        .map_err(|e| format!("C_GetObjectSize failed: CKR 0x{:08X}", e.0))?;
+        .map_err(crate::handlers::cli_err("C_GetObjectSize"))?;
     println!("Object {} size: {} bytes", object_handle, size);
     close_session(client, session, pin.is_some()).await;
     Ok(())
@@ -133,7 +133,7 @@ pub(crate) async fn create_object(
     let handle = client
         .create_object(session, &template)
         .await
-        .map_err(|e| format!("C_CreateObject failed: CKR 0x{:08X}", e.0))?;
+        .map_err(crate::handlers::cli_err("C_CreateObject"))?;
     println!("Created object with handle: {}", handle.0);
     close_session(client, session, true).await;
     Ok(())
@@ -160,8 +160,8 @@ pub(crate) async fn get_attribute(
     let (get_rv, results) = client
         .get_attribute_value(session, CkObjectHandle(object_handle), &template)
         .await
-        .map_err(|e| format!("C_GetAttributeValue failed: CKR 0x{:08X}", e.0))?;
-    if !get_rv.is_ok() {
+        .map_err(crate::handlers::cli_err("C_GetAttributeValue"))?;
+    if get_rv.is_err() {
         eprintln!(
             "warning: C_GetAttributeValue returned CKR 0x{:08X} (partial results follow)",
             get_rv.0

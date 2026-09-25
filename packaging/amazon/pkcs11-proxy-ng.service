@@ -1,0 +1,27 @@
+[Unit]
+Description=Rust PKCS#11 remote proxy daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/pkcs11-proxy-ng /etc/pkcs11-proxy-ng/proxy.toml
+Restart=on-failure
+RestartSec=5
+# Match the daemon's proxy.shutdown_grace_secs default. Raise both if
+# your HSM has very long operations (large RSA key gen, etc.).
+TimeoutStopSec=30
+# Drop privileges if possible; operators with HSM hardware that needs
+# root access (e.g. /dev/cardx) should remove this stanza.
+# User=pkcs11-proxy-ng
+# Group=pkcs11-proxy-ng
+
+# Hardening — adjust if your backend module needs filesystem write
+# access (most don't).
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

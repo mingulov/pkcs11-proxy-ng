@@ -116,6 +116,7 @@ async fn start_mtls_daemon() -> MtlsFixture {
         backend,
         TcpAuthMode::Mtls,
         Arc::new(token_policy),
+        pkcs11_proxy_ng::mechanism_registry_source::MechanismRegistrySource::load(None).unwrap(),
     );
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

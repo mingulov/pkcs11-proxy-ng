@@ -40,7 +40,8 @@ pub(super) async fn get_info(
 pub(super) async fn get_backend_interfaces(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    registry_source: &crate::mechanism_registry_source::MechanismRegistrySource,
     request: Request<pkcs11_proxy_ng_proto::GetBackendInterfacesRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GetBackendInterfacesResponse>, Status> {
-    interface_caps::get_backend_interfaces(ctx_mgr, backend_ref, request).await
+    interface_caps::get_backend_interfaces(ctx_mgr, backend_ref, registry_source, request).await
 }

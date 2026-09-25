@@ -1,0 +1,21 @@
+# Standalone (NOT a workspace member) — built independently from the
+# rest of the tree so a heavyweight `cargo build --workspace` doesn't
+# also compile the stub. Build with:
+#   (cd tests/r2_resilience/slow_backend && cargo build --release)
+[workspace]
+
+[package]
+name = "slow-backend"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+publish = false
+description = "PKCS#11 stub backend that injects configurable delays. Used to exercise the daemon's timeout + circuit-breaker code paths without touching SoftHSM2."
+
+[lib]
+name = "slow_backend"
+crate-type = ["cdylib"]
+
+[dependencies]
+cryptoki-sys = "0.5"
+libc = "0.2"

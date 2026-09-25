@@ -1,6 +1,43 @@
 use serde::Deserialize;
 use std::{fmt, path::PathBuf};
 
+/// Human-readable table of env vars the daemon honours, printed by
+/// `pkcs11-proxy-ng --print-env-vars`. Keep this aligned with the body
+/// of [`DaemonConfig::apply_env_overrides`].
+pub fn env_var_help() -> String {
+    let rows: &[(&str, &str, &str)] = &[
+        (
+            "PKCS11_PROXY_BIND",
+            "listener.remote.bind",
+            "TCP listen address; creates an insecure-TCP listener if [listener.remote] is absent.",
+        ),
+        (
+            "PKCS11_PROXY_BACKEND_MODULE",
+            "backend.module",
+            "Absolute path to the backend PKCS#11 .so the daemon dlopens.",
+        ),
+        (
+            "PKCS11_PROXY_BACKEND_ARGS",
+            "backend.initialize_args",
+            "Backend-specific C_Initialize args string (e.g. NSS config dir spec).",
+        ),
+        (
+            "PKCS11_PROXY_MECHANISMS_CONFIG",
+            "mechanisms.config_path",
+            "Path to the mechanism_params.toml registry served to shims.",
+        ),
+    ];
+    let var_w = rows.iter().map(|r| r.0.len()).max().unwrap_or(0);
+    let field_w = rows.iter().map(|r| r.1.len()).max().unwrap_or(0);
+    let mut out = String::new();
+    out.push_str("Environment variables (override the corresponding TOML field):\n\n");
+    for (var, field, desc) in rows {
+        out.push_str(&format!("  {var:var_w$}  →  {field:field_w$}    {desc}\n"));
+    }
+    out.push_str("\nPrecedence (lowest → highest): TOML defaults < TOML file < environment.\n");
+    out
+}
+
 #[derive(Debug, Deserialize)]
 pub struct DaemonConfig {
     pub backend: BackendConfig,
@@ -10,7 +47,23 @@ pub struct DaemonConfig {
     pub listener: ListenerGroup,
     #[serde(default)]
     pub auth: AuthConfig,
+    #[serde(default)]
+    pub mechanisms: MechanismsConfig,
 }
+
+/// Mechanism registry source. The daemon loads the file at startup and
+/// serves the resulting registry to shims over `GetBackendInterfaces`.
+/// If `config_path` is absent the daemon serves the embedded default
+/// registry (revision = "embedded-default").
+#[derive(Debug, Deserialize, Default)]
+pub struct MechanismsConfig {
+    pub config_path: Option<PathBuf>,
+}
+
+/// Placeholder backend module path shipped in the default proxy.toml.
+/// The daemon refuses to start if `backend.module` is still this value
+/// so misconfigurations fail loud at startup rather than at first call.
+pub const BACKEND_MODULE_PLACEHOLDER: &str = "/CHANGE_ME/path/to/backend.so";
 
 /// Authorization configuration (ADR-0005).
 #[derive(Debug, Deserialize, Default)]
@@ -111,6 +164,30 @@ pub struct ProxyConfig {
     /// HTTP/2 keepalive ping timeout (seconds).
     #[serde(default = "default_http2_keepalive_timeout_secs")]
     pub http2_keepalive_timeout_secs: u64,
+    /// Maximum time (seconds) the daemon waits for `populate_slots` to
+    /// complete at startup. On timeout the daemon exits 1.
+    #[serde(default = "default_startup_timeout_secs")]
+    pub startup_timeout_secs: u64,
+    /// On SIGTERM/SIGINT, drain in-flight RPCs for up to this many
+    /// seconds before forcing shutdown. k8s
+    /// `terminationGracePeriodSeconds` should be at least this value.
+    #[serde(default = "default_shutdown_grace_secs")]
+    pub shutdown_grace_secs: u64,
+    /// Consecutive backend-call failures before `tonic-health` flips to
+    /// NOT_SERVING. The next successful backend call flips it back.
+    /// Drives k8s readiness probes when the daemon is up but the
+    /// backend HSM is unresponsive.
+    #[serde(default = "default_backend_health_consecutive_failures")]
+    pub backend_health_consecutive_failures: u32,
+    /// Max GetBackendInterfaces RPCs allowed per peer IP per
+    /// `rate_limit_window_secs` window. Closes FOLLOWUP-rate-limit
+    /// — defends against a noisy peer spamming the discovery RPC.
+    /// 0 = disabled (default; trust the network boundary).
+    #[serde(default = "default_rate_limit_get_backend_interfaces")]
+    pub rate_limit_get_backend_interfaces: u32,
+    /// Window length for the per-peer rate limiter, in seconds.
+    #[serde(default = "default_rate_limit_window_secs")]
+    pub rate_limit_window_secs: u64,
 }
 
 impl Default for ProxyConfig {
@@ -126,8 +203,21 @@ impl Default for ProxyConfig {
             max_contexts: default_max_contexts(),
             http2_keepalive_interval_secs: default_http2_keepalive_interval_secs(),
             http2_keepalive_timeout_secs: default_http2_keepalive_timeout_secs(),
+            startup_timeout_secs: default_startup_timeout_secs(),
+            shutdown_grace_secs: default_shutdown_grace_secs(),
+            backend_health_consecutive_failures: default_backend_health_consecutive_failures(),
+            rate_limit_get_backend_interfaces: default_rate_limit_get_backend_interfaces(),
+            rate_limit_window_secs: default_rate_limit_window_secs(),
         }
     }
+}
+
+fn default_rate_limit_get_backend_interfaces() -> u32 {
+    0 // disabled by default; existing deployments don't see surprise rejections
+}
+
+fn default_rate_limit_window_secs() -> u64 {
+    1
 }
 
 fn default_lease_seconds() -> u64 {
@@ -156,6 +246,15 @@ fn default_http2_keepalive_interval_secs() -> u64 {
 }
 fn default_http2_keepalive_timeout_secs() -> u64 {
     5
+}
+fn default_startup_timeout_secs() -> u64 {
+    30
+}
+fn default_shutdown_grace_secs() -> u64 {
+    30
+}
+fn default_backend_health_consecutive_failures() -> u32 {
+    3
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -262,10 +361,58 @@ impl DaemonConfig {
     pub fn load(path: &std::path::Path) -> Result<Self, String> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("Failed to read config '{}': {e}", path.display()))?;
-        let config: Self = toml::from_str(&content)
+        let mut config: Self = toml::from_str(&content)
             .map_err(|e| format!("Failed to parse config '{}': {e}", path.display()))?;
+        config.apply_env_overrides();
         config.validate()?;
         Ok(config)
+    }
+
+    /// Apply documented env-var overrides on top of the TOML-parsed config.
+    /// Precedence: env > TOML > default. The set is intentionally small —
+    /// the daemon's primary config surface is the TOML file (mounted via
+    /// k8s ConfigMap in production). Env vars are reserved for the
+    /// highest-traffic operational tweaks (`PKCS11_PROXY_BIND` for
+    /// per-replica port tuning, `PKCS11_PROXY_BACKEND_MODULE` for swapping
+    /// HSM .sos without rewriting the ConfigMap, etc.).
+    ///
+    /// Documented env vars:
+    /// - `PKCS11_PROXY_BIND`              → `listener.remote.bind`
+    /// - `PKCS11_PROXY_BACKEND_MODULE`    → `backend.module`
+    /// - `PKCS11_PROXY_BACKEND_ARGS`      → `backend.initialize_args`
+    /// - `PKCS11_PROXY_MECHANISMS_CONFIG` → `mechanisms.config_path`
+    pub fn apply_env_overrides(&mut self) {
+        // Keep this list in sync with env_var_help() below — both surface the
+        // same canonical env-var → TOML-field mapping.
+        if let Ok(v) = std::env::var("PKCS11_PROXY_BACKEND_MODULE") {
+            self.backend.module = std::path::PathBuf::from(v);
+        }
+        if let Ok(v) = std::env::var("PKCS11_PROXY_BACKEND_ARGS") {
+            self.backend.initialize_args = Some(v);
+        }
+        if let Ok(v) = std::env::var("PKCS11_PROXY_MECHANISMS_CONFIG") {
+            self.mechanisms.config_path = Some(std::path::PathBuf::from(v));
+        }
+        if let Ok(v) = std::env::var("PKCS11_PROXY_BIND") {
+            // Bind override applies to whichever TCP listener is already
+            // configured; if there's no [listener.remote] block, the env
+            // var implicitly creates a TCP listener with insecure-TCP
+            // default. Tighter listener semantics (auth, TLS) still have
+            // to come from the TOML.
+            match self.listener.remote.as_mut() {
+                Some(tcp) => tcp.bind = v,
+                None => {
+                    self.listener.remote = Some(TcpListenerConfig {
+                        bind: v,
+                        auth: TcpAuthMode::None,
+                        ca_cert: None,
+                        server_cert: None,
+                        server_key: None,
+                        allow_insecure_tcp: true,
+                    });
+                }
+            }
+        }
     }
 
     fn validate(&self) -> Result<(), String> {
@@ -304,11 +451,43 @@ impl DaemonConfig {
         if self.proxy.eviction_interval_secs == 0 {
             return Err("proxy.eviction_interval_secs must be > 0".into());
         }
+        // Refuse to start if backend.module is still the shipped
+        // placeholder — fail loud at startup rather than at first call.
+        if self.backend.module.as_os_str() == BACKEND_MODULE_PLACEHOLDER {
+            return Err(format!(
+                "backend.module is still the shipped placeholder ({BACKEND_MODULE_PLACEHOLDER}). \
+                 Edit /etc/pkcs11-proxy-ng/proxy.toml or set the PKCS11_PROXY_BACKEND_MODULE \
+                 env var to point at a real PKCS#11 .so before starting the daemon."
+            ));
+        }
         // Validate backend module path exists
         if !self.backend.module.exists() {
             return Err(format!(
                 "backend.module path does not exist: {}",
                 self.backend.module.display()
+            ));
+        }
+        // Validate lifecycle/health knobs
+        if self.proxy.startup_timeout_secs == 0 {
+            return Err("proxy.startup_timeout_secs must be > 0".into());
+        }
+        if self.proxy.shutdown_grace_secs == 0 {
+            return Err("proxy.shutdown_grace_secs must be > 0 (set to 1 if you really want \
+                 effectively-immediate shutdown)"
+                .into());
+        }
+        if self.proxy.backend_health_consecutive_failures == 0 {
+            return Err("proxy.backend_health_consecutive_failures must be > 0 \
+                 (the readiness gate cannot trip on zero failures)"
+                .into());
+        }
+        // Validate the mechanism-registry config path if set.
+        if let Some(path) = &self.mechanisms.config_path
+            && !path.exists()
+        {
+            return Err(format!(
+                "mechanisms.config_path points at a missing file: {}",
+                path.display()
             ));
         }
         if let Some(ref tcp) = self.listener.remote {

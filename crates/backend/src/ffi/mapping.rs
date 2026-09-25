@@ -85,7 +85,7 @@ pub(super) fn update_template_from_ffi(
         };
         let returned_len = src.ulValueLen as usize;
 
-        if src.pValue.is_null() || provided_len.is_none() || returned_len > provided_len.unwrap() {
+        if src.pValue.is_null() || provided_len.is_none_or(|len| returned_len > len) {
             dst.value = None;
             continue;
         }

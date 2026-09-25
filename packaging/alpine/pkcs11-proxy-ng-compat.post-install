@@ -1,0 +1,9 @@
+#!/bin/sh
+# The legacy symlink is created by `package compat()` directly in the
+# APKBUILD; nothing else to do here. Existing consumer Dockerfiles
+# that use PKCS11_MODULE_PATH=/usr/lib/libpkcs11-proxy.so keep working
+# transparently. They must still switch their connection env var:
+#   PKCS11_PROXY_SOCKET=tcp://host:port    →    PKCS11_PROXY_ENDPOINT=http://host:port
+# (or set PKCS11_PROXY_SOCKET; the shim accepts the tcp:// form as a
+# back-compat alias.)
+exit 0

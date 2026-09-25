@@ -1,0 +1,59 @@
+# Daemon image for the resilience fixture. Bundles SoftHSM2 plus
+# the pkcs11-proxy-ng-daemon APK from the alpine3.23 carrier image we
+# build separately (`docker build -f packaging/alpine/Dockerfile.alpine
+# --build-arg ALPINE_VER=3.23 -t pkcs11-proxy-ng:test-alpine3.23 .`).
+# Using musl-compatible binaries that match the runtime environment.
+
+FROM pkcs11-proxy-ng:test-alpine3.23 AS pkcs11ng
+
+FROM alpine:3.23
+
+RUN apk add --no-cache softhsm opensc bash
+
+# Install the daemon + CLI subpackages from the carrier image's /apk
+# repo. The carrier image only contains the staged APKs, no shell, so
+# we bind-mount its /apk via the `pkcs11ng` build stage.
+RUN --mount=type=bind,from=pkcs11ng,source=/apk,target=/apk \
+    apk --no-cache add --allow-untrusted --repository /apk \
+        pkcs11-proxy-ng-daemon \
+        pkcs11-proxy-ng-cli
+
+# Resolve the SoftHSM2 .so path on Alpine (musl build).
+ENV SOFTHSM2_LIB=/usr/lib/softhsm/libsofthsm2.so
+
+# Initialize a single token at image build time so the daemon has
+# something to populate slots from. PIN/SO-PIN are well-known
+# weak values matching scripts/test-softhsm2-smoke.sh; this fixture
+# is local-only and uses auth="none".
+RUN mkdir -p /var/lib/softhsm/tokens \
+  && echo "directories.tokendir = /var/lib/softhsm/tokens" > /etc/softhsm2.conf \
+  && echo "objectstore.backend = file" >> /etc/softhsm2.conf \
+  && echo "log.level = INFO" >> /etc/softhsm2.conf \
+  && softhsm2-util --init-token --free \
+      --label r2-resilience \
+      --so-pin abcd \
+      --pin 1234
+
+# Daemon config: no-auth TCP on 7512, SoftHSM2 backend. Shutdown grace
+# tuned down so scenario 2/3 restarts are responsive.
+RUN cat > /etc/proxy.toml <<EOF
+[backend]
+module = "/usr/lib/softhsm/libsofthsm2.so"
+
+[proxy]
+request_timeout_secs = 60
+startup_timeout_secs = 30
+shutdown_grace_secs = 5
+backend_health_consecutive_failures = 3
+
+[listener.remote]
+bind = "0.0.0.0:7512"
+auth = "none"
+allow_insecure_tcp = true
+
+[auth]
+EOF
+
+EXPOSE 7512
+
+ENTRYPOINT ["/usr/bin/pkcs11-proxy-ng", "/etc/proxy.toml"]

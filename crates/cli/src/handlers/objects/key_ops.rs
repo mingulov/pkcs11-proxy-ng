@@ -4,7 +4,7 @@ use pkcs11_proxy_ng_types::*;
 use super::super::{CliResult, close_session, login_user, open_session};
 use crate::mechanisms::parse_mechanism;
 
-fn parameterless_mechanism(name: &str) -> Result<CkMechanism, Box<dyn std::error::Error>> {
+fn parameterless_mechanism(name: &str) -> Result<CkMechanism, Box<dyn core::error::Error>> {
     let mechanism_type = parse_mechanism(name)?;
     Ok(CkMechanism { mechanism_type: CkMechanismType(mechanism_type), params: None })
 }
@@ -29,7 +29,7 @@ pub(crate) async fn wrap_key(
             CkObjectHandle(key_handle),
         )
         .await
-        .map_err(|e| format!("C_WrapKey failed: CKR 0x{:08X}", e.0))?;
+        .map_err(crate::handlers::cli_err("C_WrapKey"))?;
     println!("{}", hex::encode(&wrapped));
     close_session(client, session, true).await;
     Ok(())
@@ -80,7 +80,7 @@ pub(crate) async fn unwrap_key(
             &template,
         )
         .await
-        .map_err(|e| format!("C_UnwrapKey failed: CKR 0x{:08X}", e.0))?;
+        .map_err(crate::handlers::cli_err("C_UnwrapKey"))?;
     println!("Unwrapped key handle: {}", handle.0);
     close_session(client, session, true).await;
     Ok(())
@@ -117,7 +117,7 @@ pub(crate) async fn derive_key(
     let handle = client
         .derive_key(session, &mechanism, CkObjectHandle(base_key_handle), &template)
         .await
-        .map_err(|e| format!("C_DeriveKey failed: CKR 0x{:08X}", e.0))?;
+        .map_err(crate::handlers::cli_err("C_DeriveKey"))?;
     println!("Derived key handle: {}", handle.0);
     close_session(client, session, true).await;
     Ok(())
@@ -168,7 +168,7 @@ pub(crate) async fn generate_key(
     let key_handle = client
         .generate_key(session, &mechanism, &template)
         .await
-        .map_err(|e| format!("C_GenerateKey failed: CKR 0x{:08X}", e.0))?;
+        .map_err(crate::handlers::cli_err("C_GenerateKey"))?;
     println!("Generated key handle: {}", key_handle.0);
     close_session(client, session, true).await;
     Ok(())
@@ -227,7 +227,7 @@ pub(crate) async fn generate_key_pair(
     let (public_key, private_key) = client
         .generate_key_pair(session, &mechanism, &public_template, &private_template)
         .await
-        .map_err(|e| format!("C_GenerateKeyPair failed: CKR 0x{:08X}", e.0))?;
+        .map_err(crate::handlers::cli_err("C_GenerateKeyPair"))?;
     println!("Public key handle:  {}", public_key.0);
     println!("Private key handle: {}", private_key.0);
     close_session(client, session, true).await;

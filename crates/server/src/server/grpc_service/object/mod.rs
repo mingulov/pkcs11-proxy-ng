@@ -92,11 +92,22 @@ pub(super) async fn destroy_object(
     lifecycle::destroy_object(ctx_mgr, backend_ref, request).await
 }
 
-fn attribute_results(template: &[CkAttribute]) -> Vec<pkcs11_proxy_ng_proto::AttributeResult> {
+/// Build the proto `AttributeResult` list from an owned template.
+///
+/// Consumes `template` so the `Vec<u8>` of each `CkAttributeValue::Bytes`
+/// is moved straight into the proto `value` field, and the `String` of
+/// each `CkAttributeValue::String` is converted via `into_bytes()`
+/// without re-allocating. Saves one heap clone per byte/string-typed
+/// attribute on the proto-encode path. (Prost still allocates when
+/// serializing the wire form; see `FOLLOWUP-proto-bytes` in
+/// `crates/proto/build.rs` for the eventual zero-copy work.) Caller is
+/// the gRPC handler owning the template returned from the backend;
+/// nothing reads it after this call.
+fn attribute_results(template: Vec<CkAttribute>) -> Vec<pkcs11_proxy_ng_proto::AttributeResult> {
     template
-        .iter()
+        .into_iter()
         .map(|attr| {
-            let encoded_value = attr.value.as_ref().map(attr_value_to_bytes);
+            let encoded_value = attr.value.map(attr_value_to_bytes);
             let actual_length = encoded_value.as_ref().map_or(0, |value| value.len() as u64);
 
             pkcs11_proxy_ng_proto::AttributeResult {
