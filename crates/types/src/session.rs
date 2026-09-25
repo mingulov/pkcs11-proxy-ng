@@ -1,3 +1,4 @@
+use crate::error::CkRv;
 use crate::slot::CkSlotId;
 
 /// General-purpose PKCS#11 flags (CK_FLAGS). Used where no more specific flag
@@ -7,9 +8,22 @@ pub struct CkFlags(pub u64);
 
 impl CkFlags {
     /// CKF_DONT_BLOCK: non-blocking `C_WaitForSlotEvent` (flags value 1).
-    pub const DONT_BLOCK: u64 = 0x0000_0001;
+    pub const DONT_BLOCK: Self = Self(0x0000_0001);
     /// CKF_END_OF_MESSAGE: final part of a multipart message operation.
-    pub const END_OF_MESSAGE: u64 = 0x0000_0001;
+    pub const END_OF_MESSAGE: Self = Self(0x0000_0001);
+}
+
+impl std::ops::BitOr for CkFlags {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl std::ops::BitOrAssign for CkFlags {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
 }
 
 /// Virtual session handle — scoped to logical client instance (ADR-0002 §5).
@@ -32,11 +46,24 @@ pub enum CkSessionState {
 pub struct CkSessionFlags(pub u64);
 
 impl CkSessionFlags {
-    pub const RW_SESSION: u64 = 0x00000002;
-    pub const SERIAL_SESSION: u64 = 0x00000004;
+    pub const RW_SESSION: Self = Self(0x00000002);
+    pub const SERIAL_SESSION: Self = Self(0x00000004);
 
     pub fn is_rw(self) -> bool {
-        self.0 & Self::RW_SESSION != 0
+        self.0 & Self::RW_SESSION.0 != 0
+    }
+}
+
+impl std::ops::BitOr for CkSessionFlags {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl std::ops::BitOrAssign for CkSessionFlags {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
     }
 }
 
@@ -45,7 +72,7 @@ pub struct CkSessionInfo {
     pub slot_id: CkSlotId,
     pub state: CkSessionState,
     pub flags: CkSessionFlags,
-    pub device_error: u64,
+    pub device_error: CkRv,
 }
 
 /// PKCS#11 user type for C_Login.
@@ -74,7 +101,7 @@ mod tests {
 
     #[test]
     fn session_flags_rw() {
-        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
         assert!(flags.is_rw());
     }
 
@@ -99,7 +126,7 @@ mod tests {
     #[test]
     fn session_flags_ro_not_rw() {
         // SERIAL_SESSION alone does not make a session RW.
-        let ro_flags = CkSessionFlags(CkSessionFlags::SERIAL_SESSION);
+        let ro_flags = CkSessionFlags::SERIAL_SESSION;
         assert!(!ro_flags.is_rw());
     }
 
@@ -130,9 +157,9 @@ mod tests {
     // verified against cryptoki-sys 0.5.0); no consumer re-declares them.
     #[test]
     fn ck_flags_named_constants() {
-        assert_eq!(CkFlags::DONT_BLOCK, 0x0000_0001);
-        assert_eq!(CkFlags::END_OF_MESSAGE, 0x0000_0001);
-        assert_eq!(CkFlags(CkFlags::DONT_BLOCK).0, 1);
+        assert_eq!(CkFlags::DONT_BLOCK.0, 0x0000_0001);
+        assert_eq!(CkFlags::END_OF_MESSAGE.0, 0x0000_0001);
+        assert_eq!(CkFlags::DONT_BLOCK.0, 1);
     }
 
     #[test]
@@ -140,12 +167,46 @@ mod tests {
         let info = CkSessionInfo {
             slot_id: crate::slot::CkSlotId(7),
             state: CkSessionState::RwUser,
-            flags: CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
-            device_error: 42,
+            flags: CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION,
+            device_error: CkRv(42),
         };
         assert_eq!(info.slot_id.0, 7);
         assert_eq!(info.state, CkSessionState::RwUser);
         assert!(info.flags.is_rw());
-        assert_eq!(info.device_error, 42);
+        assert_eq!(info.device_error, CkRv(42));
+    }
+
+    // W1-C9-13: session/general flag consts are Self-typed (CkRv convention)
+    // and combine with `|`.
+    #[test]
+    fn w1_c9_13_session_flag_consts_are_self_typed() {
+        let dont_block: CkFlags = CkFlags::DONT_BLOCK;
+        assert_eq!(dont_block.0, 0x0000_0001);
+        let eom: CkFlags = CkFlags::END_OF_MESSAGE;
+        assert_eq!(eom.0, 0x0000_0001);
+        let rw: CkSessionFlags = CkSessionFlags::RW_SESSION;
+        assert_eq!(rw.0, 0x0000_0002);
+        let combined: CkSessionFlags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
+        assert_eq!(combined.0, 0x06);
+        assert!(combined.is_rw());
+    }
+
+    // W1-C9-14: session device_error is a typed CkRv, not a raw u64.
+    #[test]
+    fn w1_c9_14_session_device_error_is_rv() {
+        let ok = CkSessionInfo {
+            slot_id: crate::slot::CkSlotId(0),
+            state: CkSessionState::RoPublic,
+            flags: CkSessionFlags::SERIAL_SESSION,
+            device_error: crate::error::CkRv::OK,
+        };
+        assert!(ok.device_error.is_ok());
+        let vendor = CkSessionInfo {
+            slot_id: crate::slot::CkSlotId(0),
+            state: CkSessionState::RoPublic,
+            flags: CkSessionFlags::SERIAL_SESSION,
+            device_error: crate::error::CkRv(0xDEAD),
+        };
+        assert_eq!(vendor.device_error.0, 0xDEAD);
     }
 }

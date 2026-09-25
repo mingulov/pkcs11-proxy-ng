@@ -8,6 +8,14 @@ static CALLS: Mutex<Vec<(bool, Option<u64>)>> = Mutex::new(Vec::new());
 static FAIL_SIZING: AtomicBool = AtomicBool::new(false);
 static MUTATE_SIZING_INPUTS: AtomicBool = AtomicBool::new(false);
 
+/// Test-oracle byte-output stub (W1-L1-04).
+///
+/// # Safety
+///
+/// `length` must be null or point to a valid writable `CK_ULONG` (it is
+/// read for capacity and overwritten with the result length). When
+/// `output` is non-null and the capacity read from `length` is at least
+/// 8, `output` must be writable for 8 bytes.
 unsafe fn output(
     output: cryptoki_sys::CK_BYTE_PTR,
     length: cryptoki_sys::CK_ULONG_PTR,

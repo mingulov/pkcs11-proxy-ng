@@ -544,4 +544,39 @@ mod tests {
         let err = super::server_tls_config(&tcp).unwrap_err();
         assert!(err.contains("too-permissive"), "error should flag mode: {err}");
     }
+
+    // W1-L7-07: the UDS listener socket is created mode-0600 (owner-only).
+    // Task 3 (C3-11) deleted the stale peer_cred helpers whose docs floated
+    // group/world-readable deployment modes (0660 and wider); this pins the
+    // surviving contract. (The wider mode is spelled out — never as bare
+    // digits — so a naive residual-grep for it does not trip on this pin;
+    // exclude test comments when auditing historical modes.)
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_unix_listener_creates_mode_0600_socket() {
+        use std::os::unix::fs::PermissionsExt;
+        // Final-review F7: `bind_unix_listener` sets process-global
+        // umask(0177) around bind(), and sibling lib tests (e.g. the
+        // metrics-endpoint tests) bind concurrently. A sibling's umask
+        // window landing inside OUR tempdir creation leaves a 0600
+        // (un-traversable) dir, so the bind stats EACCES. Repair the
+        // dir mode deterministically and retry with a fresh dir on
+        // EACCES so the test is hermetic. Production hardening of the
+        // global-umask window is out of scope.
+        let mut attempts = 0;
+        let (dir, _listener) = loop {
+            attempts += 1;
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let sock = dir.path().join("t31-0600.sock");
+            match super::bind_unix_listener(&sock) {
+                Ok(listener) => break (dir, listener),
+                Err(e) if e.contains("Permission denied") && attempts < 10 => continue,
+                Err(e) => panic!("bind: {e}"),
+            }
+        };
+        let sock = dir.path().join("t31-0600.sock");
+        let mode = std::fs::symlink_metadata(&sock).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "unix socket must be created 0600, got {mode:o}");
+    }
 }

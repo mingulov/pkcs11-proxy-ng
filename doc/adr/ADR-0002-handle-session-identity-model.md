@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Implemented
 
 **v0.2 P0 amendment (2026-09-13): selected contract; implementation pending.**
 The [native ownership contract](../release/native-mechanism-ownership.md)
@@ -55,9 +55,6 @@ Comparable remote or service-backed PKCS#11 systems avoid all three:
 The recurring pattern is: preserve isolated per-caller PKCS#11 state through a
 logical abstraction above the raw transport, even when backend lifecycle or
 token connectivity is shared underneath.
-
-Full analysis is in
-`doc/research/2026-03-12-handle-session-identity-model-research.md`.
 
 ## Decision
 

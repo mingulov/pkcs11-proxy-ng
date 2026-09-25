@@ -7,6 +7,12 @@ pub mod pkcs11_proxy_ng {
 pub mod convert;
 pub mod protected_decode;
 pub mod secret_boundary;
+pub mod version;
+
+// W1-C8-07: build-time oneof cross-validation core, shared with build.rs via
+// `#[path]`. Test-only in the crate: production code never calls it.
+#[cfg(test)]
+mod oneof_check;
 
 // ADR-0013 redacted generated-message diagnostics, emitted by build.rs from
 // secret-fields.toml + the protobuf schema (see build.rs). Defines

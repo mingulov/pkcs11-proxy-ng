@@ -88,6 +88,8 @@ allow_insecure_tcp = true
 # [[auth.policy]]
 # identity = "x509:spki=<hex-sha256-of-client-public-key>"
 # tokens = ["label:token-label"]
+# Scalar tokens = "all" (or "*", an accepted alias) grants blanket access
+# to all tokens.
 # The legacy x509:issuer=<dn>;subject=<dn> form still works but is
 # deprecated (the daemon logs a per-key migration warning).
 

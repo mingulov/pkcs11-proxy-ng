@@ -77,6 +77,23 @@ where
 pub(super) fn current_peer() -> Option<SocketAddr> {
     CURRENT_PEER.try_with(|peer| *peer).ok().flatten()
 }
+
+/// Derive the per-principal quota key (W1-L7-02), shared by the
+/// in-flight guard and the session quota so both caps key identically:
+/// the bound transport identity when one is recorded; otherwise the
+/// TCP peer IP from [`current_peer`] (published by
+/// `run_context_scoped` for every RPC) so N contexts from one peer
+/// cannot multiply the opt-in caps; otherwise (UDS / unpublished
+/// transport — no IP exists) the context id, as before.
+pub(super) fn principal_quota_key(ctx_mgr: &ContextManager, ctx_id: &ClientContextId) -> String {
+    if let Some(identity) = ctx_mgr.context_identity(ctx_id) {
+        return identity;
+    }
+    if let Some(peer) = current_peer() {
+        return peer.ip().to_string();
+    }
+    ctx_id.0.clone()
+}
 /// Tracks whether the LAST sent health event was `Success`. Initialized
 /// to `true` because the health-gate task assumes the daemon starts in
 /// `SERVING`. Used by [`report_backend_outcome`] to suppress
@@ -2042,7 +2059,7 @@ mod tests {
         use pkcs11_proxy_ng_backend::{MockBackend, mock::MockAttributeSlot};
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
         mock.initialize().unwrap();
-        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
         let backend_object = mock.create_object(backend_session, Some(&[])).unwrap();
 
@@ -2388,7 +2405,7 @@ mod tests {
         use pkcs11_proxy_ng_backend::{MockBackend, mock::MockAttributeSlot};
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
         mock.initialize().unwrap();
-        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
         let backend_object = mock.create_object(backend_session, Some(&[])).unwrap();
 
@@ -2504,7 +2521,7 @@ mod tests {
         // Create a backend object whose UID is OTHER_UID (NOT in the allowed list).
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
         mock.initialize().unwrap();
-        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
         let backend_object = mock.create_object(backend_session, Some(&[])).unwrap();
         mock.set_attribute(
@@ -2606,7 +2623,7 @@ mod tests {
 
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
         mock.initialize().unwrap();
-        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
         let backend_object = mock.create_object(backend_session, Some(&[])).unwrap();
         mock.set_attribute(
@@ -2695,7 +2712,7 @@ mod tests {
         use pkcs11_proxy_ng_backend::{MockBackend, mock::MockAttributeSlot};
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
         mock.initialize().unwrap();
-        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
         let backend_object = mock.create_object(backend_session, Some(&[])).unwrap();
         mock.set_attribute(
@@ -2760,7 +2777,7 @@ mod tests {
 
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
         mock.initialize().unwrap();
-        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
         let backend_object = mock.create_object(backend_session, Some(&[])).unwrap();
         // PRIVATE_KEY — denied class.
@@ -2831,7 +2848,7 @@ mod tests {
 
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
         mock.initialize().unwrap();
-        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
         let backend_object = mock.create_object(backend_session, Some(&[])).unwrap();
         // SECRET_KEY — allowed class.
@@ -2909,7 +2926,7 @@ mod tests {
 
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
         mock.initialize().unwrap();
-        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
         let backend_object = mock.create_object(backend_session, Some(&[])).unwrap();
         // Intentionally NO attributes (CLASS, TOKEN, UNIQUE_ID). If the gate fetches
@@ -3007,6 +3024,14 @@ mod tests {
 
     // --- W1-L7-28: per-connection admission under the global breaker ---
 
+    // Final-review F6: the peer admission table is process-global, so the
+    // tests that park table entries serialize on this test-only mutex;
+    // otherwise a sibling's live entry breaks the size-0 drain assertion
+    // in `per_connection_admission_rejects_over_cap`. No production
+    // change: the table behavior itself is pinned and green.
+    static PEER_ADMISSION_TEST_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+        LazyLock::new(|| tokio::sync::Mutex::new(()));
+
     fn test_peer(octet: u8, port: u16) -> std::net::SocketAddr {
         std::net::SocketAddr::new(
             std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, octet)),
@@ -3052,6 +3077,7 @@ mod tests {
     /// entry is removed (bounded table).
     #[tokio::test(flavor = "multi_thread")]
     async fn per_connection_admission_rejects_over_cap() {
+        let _table_guard = PEER_ADMISSION_TEST_LOCK.lock().await;
         let peer = test_peer(51, 40051);
         let cap = per_connection_max_in_flight();
         assert!(cap >= 1, "per-connection cap must be at least 1");
@@ -3105,6 +3131,7 @@ mod tests {
     /// by another peer's exhausted budget.
     #[tokio::test(flavor = "multi_thread")]
     async fn per_connection_admission_is_per_peer() {
+        let _table_guard = PEER_ADMISSION_TEST_LOCK.lock().await;
         let busy = test_peer(52, 40052);
         let idle = test_peer(53, 40053);
         let cap = per_connection_max_in_flight();
@@ -3134,5 +3161,64 @@ mod tests {
     async fn per_connection_admission_skipped_without_peer() {
         let result = spawn_backend(|| Ok::<u8, CkRv>(5)).await;
         assert_eq!(result.expect("no transport error"), Ok(5u8));
+    }
+
+    /// W1-L7-02: a context with a bound transport identity keeps that
+    /// identity as its quota key even when a peer is published —
+    /// authenticated quotas are unchanged.
+    #[tokio::test]
+    async fn principal_quota_key_prefers_bound_identity_over_peer() {
+        let ctx_mgr = ContextManager::new(Duration::from_secs(300), 0);
+        let ctx_id = ctx_mgr.create_context(Some("alice".to_string())).await.unwrap();
+        let peer = std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 7)),
+            4321,
+        );
+        let key =
+            scope_peer_admission(Some(peer), async { principal_quota_key(&ctx_mgr, &ctx_id) })
+                .await;
+        assert_eq!(key, "alice", "bound identity must win over the peer key");
+    }
+
+    /// W1-L7-02: unauthenticated contexts (no bound identity) share one
+    /// quota key per peer IP, so N contexts cannot multiply the caps.
+    /// The key is IP-only: ports never split a peer's quota.
+    #[tokio::test]
+    async fn principal_quota_key_uses_peer_ip_for_unauthenticated() {
+        let ctx_mgr = ContextManager::new(Duration::from_secs(300), 0);
+        let ctx_a = ctx_mgr.create_context(None).await.unwrap();
+        let ctx_b = ctx_mgr.create_context(None).await.unwrap();
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 7));
+        let key_a = scope_peer_admission(Some(std::net::SocketAddr::new(ip, 1111)), async {
+            principal_quota_key(&ctx_mgr, &ctx_a)
+        })
+        .await;
+        let key_b = scope_peer_admission(Some(std::net::SocketAddr::new(ip, 2222)), async {
+            principal_quota_key(&ctx_mgr, &ctx_b)
+        })
+        .await;
+        assert_eq!(key_a, "192.0.2.7", "unauthenticated key must be the peer IP");
+        assert_eq!(key_b, key_a, "same-IP contexts must share one quota key");
+        let other_ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 8));
+        let key_c = scope_peer_admission(Some(std::net::SocketAddr::new(other_ip, 1111)), async {
+            principal_quota_key(&ctx_mgr, &ctx_b)
+        })
+        .await;
+        assert_ne!(key_c, key_a, "different peer IPs must not share a quota key");
+    }
+
+    /// W1-L7-02 characterization: without a published peer (UDS /
+    /// unknown transport) the unauthenticated key stays the context id,
+    /// as before — there is no IP to key on.
+    #[tokio::test]
+    async fn principal_quota_key_falls_back_to_ctx_id_without_peer() {
+        let ctx_mgr = ContextManager::new(Duration::from_secs(300), 0);
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+        assert!(current_peer().is_none(), "setup: no peer must be published");
+        assert_eq!(
+            principal_quota_key(&ctx_mgr, &ctx_id),
+            ctx_id.0,
+            "peerless contexts keep the context-id key"
+        );
     }
 }

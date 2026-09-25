@@ -168,10 +168,7 @@ fn native_owner_oracle_retains_init_root_across_calls() {
     };
     backend.initialize().expect("oracle initialize");
     let session = backend
-        .ffi_open_session(
-            CkSlotId(7),
-            CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
-        )
+        .ffi_open_session(CkSlotId(7), CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION)
         .expect("oracle open session");
 
     let out = init_and_encrypt(&backend, session, controls);

@@ -196,10 +196,9 @@ fn acquire_principal_op_guard(
     client_context_id: &str,
 ) -> Result<crate::server::rate_quota::PrincipalOpGuard, Status> {
     let ctx_id = super::context_manager::ClientContextId(client_context_id.to_owned());
-    let principal = ctx
-        .context_manager
-        .context_identity(&ctx_id)
-        .unwrap_or_else(|| client_context_id.to_owned());
+    // W1-L7-02: unauthenticated quota keys on the peer IP (shared helper
+    // with the session quota), not the context id.
+    let principal = service_utils::principal_quota_key(&ctx.context_manager, &ctx_id);
     crate::server::rate_quota::try_begin_principal_op(&principal)
         .ok_or_else(|| Status::resource_exhausted("per-principal concurrency limit exceeded"))
 }
@@ -274,8 +273,11 @@ where
 //      unconfigured — the default for all CI tests.
 //   2. `open_session` and a macro-generated handler pass through end-to-end
 //      with the limit unset (regression guard: no behaviour change when off).
-//   3. The principal key falls back to `client_context_id` when no identity
-//      is bound to the context (unauthenticated / no transport auth).
+//   3. The principal key derivation (W1-L7-02): bound identity when one is
+//      recorded; peer IP when a peer is published (unauthenticated TCP);
+//      `client_context_id` only when peerless (UDS / unknown transport).
+//      Key selection itself is pinned by `service_utils` unit tests; the
+//      guard tests below cover the peerless no-op path.
 #[cfg(test)]
 mod dispatch_rate_quota_tests {
     use super::*;
@@ -331,11 +333,13 @@ mod dispatch_rate_quota_tests {
         drop(g_b);
     }
 
-    /// An unauthenticated context (no stored identity) must have the helper
-    /// fall back to the `client_context_id` string as the principal key.
-    /// With no limit configured the guard is still Ok.
+    /// An unauthenticated peerless context (no stored identity, no
+    /// published peer — the UDS case) must have the helper fall back to
+    /// the `client_context_id` string as the principal key (W1-L7-02:
+    /// peer-bearing requests key on the IP instead). With no limit
+    /// configured the guard is still Ok.
     #[tokio::test]
-    async fn principal_guard_falls_back_to_ctx_id_when_no_identity() {
+    async fn principal_guard_falls_back_to_ctx_id_when_no_identity_or_peer() {
         let ctx_mgr = make_ctx_mgr();
         let backend = make_backend();
         let ctx = HandlerContext::for_test(&ctx_mgr, &backend);
@@ -372,7 +376,7 @@ mod dispatch_rate_quota_tests {
             .open_session(Request::new(pkcs11_proxy_ng_proto::OpenSessionRequest {
                 client_context_id: ctx_id.0.clone(),
                 slot_id: virtual_slot.0,
-                flags: CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION,
+                flags: (CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION).0,
             }))
             .await
             .unwrap()
@@ -428,7 +432,7 @@ mod dispatch_rate_quota_tests {
                     svc.open_session(Request::new(pkcs11_proxy_ng_proto::OpenSessionRequest {
                         client_context_id: cid,
                         slot_id: virtual_slot.0,
-                        flags: CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION,
+                        flags: (CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION).0,
                     }))
                     .await
                     .unwrap()
@@ -566,7 +570,7 @@ mod scoped_dispatch_tests {
                 .open_session(Request::new(pkcs11_proxy_ng_proto::OpenSessionRequest {
                     client_context_id: client_context_id.to_owned(),
                     slot_id: slot,
-                    flags: CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION,
+                    flags: (CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION).0,
                 }))
                 .await
                 .map(|r| r.into_inner().ck_rv),

@@ -11,6 +11,7 @@ exact=$(( total - wildcards ))
 
 echo "pkcs11test filter coverage:"
 echo "  Total entries: $total"
+echo "  Category wildcards (*.Prefix): $categories"
 echo "  Wildcard patterns: $wildcards"
 echo "  Exact test names: $exact"
 echo ""

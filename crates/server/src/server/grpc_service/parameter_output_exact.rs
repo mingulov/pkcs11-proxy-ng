@@ -7,6 +7,9 @@ use pkcs11_proxy_ng_proto::convert::message_params::{
     MessageParameter, MessageParameterShape, validate_structured_wire_parameter,
 };
 use pkcs11_proxy_ng_proto::convert::output::parameter_output_function_from_i32;
+use pkcs11_proxy_ng_proto::version::{
+    exact_effects_version_rejected, exact_output_effects_version_supported,
+};
 use pkcs11_proxy_ng_types::{
     CkFlags, CkInBuf, CkOutputBufferResult, CkOutputBufferSpec, CkParameterRoundtripResult,
     CkParameterRoundtripSpec, CkResult, CkRv, ParameterOutputFunction, SecretBytes,
@@ -87,8 +90,9 @@ pub(super) async fn parameter_output_exact(
     let backend_ref = &ctx.backend;
     let sanitize_inputs = ctx.sanitize_inputs;
     let mut req = request.into_inner();
-    if req.exact_output_effects_version != 1 {
-        return Err(Status::failed_precondition("exact output effects version 1 required"));
+    // W1-L5-04: compatibility-range gate, never an equality literal.
+    if !exact_output_effects_version_supported(req.exact_output_effects_version) {
+        return Err(exact_effects_version_rejected(req.exact_output_effects_version));
     }
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -941,7 +945,7 @@ mod ambiguity_tests {
         let mock = Arc::new(MockBackend::default_test());
         mock.initialize().unwrap();
         let backend_session =
-            mock.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).unwrap();
+            mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
         let wrapping_key = mock.create_object(backend_session, Some(&[])).unwrap();
         let key = mock.create_object(backend_session, Some(&[])).unwrap();
         let backend: Arc<dyn Pkcs11Backend> = mock.clone();
@@ -1030,7 +1034,7 @@ mod ambiguity_tests {
         manager.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
         let context_id = manager.create_context(None).await.unwrap();
         let backend_session =
-            mock.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).unwrap();
+            mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
         let virtual_session = register_session_handle(
             &manager,
             &context_id,

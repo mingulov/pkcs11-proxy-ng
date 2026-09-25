@@ -495,7 +495,7 @@ mod tests {
     ) {
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
         mock.initialize().unwrap();
-        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
 
         // Create two objects and attach their UIDs. Also set CLASS and TOKEN so
@@ -688,7 +688,7 @@ mod tests {
 
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
         mock.initialize().unwrap();
-        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
         // Object created with CLASS and TOKEN but NO CKA_UNIQUE_ID.
         let obj_no_uid = mock.create_object(backend_session, Some(&[])).unwrap();
@@ -790,7 +790,7 @@ mod tests {
 
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
         mock.initialize().unwrap();
-        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
 
         // Two denied objects with uid_B, then the allowed object with uid_A.
@@ -949,7 +949,7 @@ mod tests {
 
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
         mock.initialize().unwrap();
-        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
 
         // No set_find_objects_result → mock default returns [] immediately (exhausted).
@@ -1041,7 +1041,7 @@ mod tests {
 
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
         mock.initialize().unwrap();
-        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
 
         // obj_sk: SECRET_KEY — allowed class.
@@ -1199,7 +1199,7 @@ mod tests {
     ) {
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
         mock.initialize().unwrap();
-        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
 
         let obj_priv = mock.create_object(backend_session, Some(&[])).unwrap();
@@ -1351,7 +1351,7 @@ mod tests {
 
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
         mock.initialize().unwrap();
-        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
         // CLASS + TOKEN only: no CKA_PRIVATE, so the probe fails with
         // ATTRIBUTE_TYPE_INVALID.
@@ -1411,7 +1411,7 @@ mod tests {
 
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
         mock.initialize().unwrap();
-        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
         let obj_priv = mock.create_object(backend_session, Some(&[])).unwrap();
         set_privacy_fixture(&mock, obj_priv, true);
@@ -1530,7 +1530,7 @@ mod tests {
     ) {
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
         mock.initialize().unwrap();
-        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
 
         let obj_sess = mock.create_object(backend_session, Some(&[])).unwrap();
@@ -1665,7 +1665,7 @@ mod tests {
         let policy = confined_policy(CONFINED_IDENTITY, "MockToken", UID_A_HEX);
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
         mock.initialize().unwrap();
-        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
         let obj_b = mock.create_object(backend_session, Some(&[])).unwrap();
         for (attr_type, value) in [

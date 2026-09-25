@@ -63,7 +63,13 @@ fn install(toml: &str, revision: &str) -> MechanismRegistry {
     r
 }
 
+/// W1-C7-13: opt-in long mode — the 60 s run is skipped by a plain
+/// `cargo test`. Run explicitly with
+/// `cargo test -p pkcs11-proxy-ng-shim --test stress_registry -- --ignored`
+/// (optionally with `R7_STRESS_DURATION_SECS` / `R7_STRESS_READER_THREADS` /
+/// `R7_STRESS_WRITER_PERIOD_MS` overrides).
 #[test]
+#[ignore]
 fn registry_swap_16_readers_1_writer_60s() {
     let duration = duration_secs_env("R7_STRESS_DURATION_SECS", 60);
     let reader_threads = usize_env("R7_STRESS_READER_THREADS", 16);

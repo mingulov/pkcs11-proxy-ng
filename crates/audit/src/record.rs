@@ -12,6 +12,13 @@ use crate::AuditError;
 /// record shape changes.
 pub const AUDIT_SCHEMA_VERSION: u32 = 2;
 
+/// `method` value marking a gap-sentinel record.
+///
+/// A record is a gap sentinel iff it matches the full ADR-0012 contract:
+/// `method == GAP_SENTINEL_METHOD`, `class == EventClass::System`, and
+/// `dropped_count.is_some()`. See [`AuditRecord::sentinel_dropped_count`].
+pub const GAP_SENTINEL_METHOD: &str = "__AUDIT_GAP__";
+
 /// The class of PKCS#11 operation being recorded.
 ///
 /// `fail_closed` returns `true` for classes where a logging failure must
@@ -50,7 +57,7 @@ impl EventClass {
 /// suitable as input to the hash chain.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditRecord {
-    /// Audit record schema version; 1 = the G1 field set.
+    /// Audit record schema version; 2 = the current field set.
     ///
     /// Bumped when the record shape changes so verifiers can detect format
     /// skew.  Always set to [`AUDIT_SCHEMA_VERSION`].
@@ -87,6 +94,21 @@ pub struct AuditRecord {
     /// `None` for all normal records.  Added in schema version 2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dropped_count: Option<u64>,
+}
+
+impl AuditRecord {
+    /// Returns the dropped-record count iff this record matches the full
+    /// gap-sentinel contract (W1-C12-08): the sentinel `method`, the
+    /// `System` class, and a `Some` count. Anything else — a normal record
+    /// smuggling the field, or a sentinel stripped of its method/class —
+    /// yields `None` and must not tally.
+    pub fn sentinel_dropped_count(&self) -> Option<u64> {
+        if self.method == GAP_SENTINEL_METHOD && self.class == EventClass::System {
+            self.dropped_count
+        } else {
+            None
+        }
+    }
 }
 
 /// Serializes `rec` as a single JSON line terminated by `\n`.
@@ -161,6 +183,46 @@ mod tests {
         // Both records carry schema_version = 2 after append.
         assert_eq!(r0.schema_version, AUDIT_SCHEMA_VERSION);
         assert_eq!(r1.schema_version, AUDIT_SCHEMA_VERSION);
+    }
+
+    /// W1-C12-13: the `schema_version` field comment must describe 2 as the
+    /// current field set, never 1 as the G1 set. Phrases are built from
+    /// parts so this test's own source neither satisfies nor trips the scan
+    /// (same pattern as the W1-C12-10 crate-docs test).
+    #[test]
+    fn schema_version_comment_matches_constant() {
+        let src = include_str!("record.rs");
+        let current = ["2 = the current", " field set"].concat();
+        assert!(src.contains(&current), "schema_version comment must state: {current}");
+        let stale = ["1 = the G", "1 field set"].concat();
+        assert!(!src.contains(&stale), "schema_version comment must not state: {stale}");
+    }
+
+    /// W1-C12-08: `sentinel_dropped_count` requires the full contract —
+    /// sentinel method, System class, and a `Some` count.
+    #[test]
+    fn sentinel_dropped_count_requires_full_contract() {
+        let mut full = make_record();
+        full.method = GAP_SENTINEL_METHOD.into();
+        full.class = EventClass::System;
+        full.dropped_count = Some(9);
+        assert_eq!(full.sentinel_dropped_count(), Some(9));
+
+        // Each stripped variant yields None.
+        let mut wrong_method = full.clone();
+        wrong_method.method = "C_Login".into();
+        assert_eq!(wrong_method.sentinel_dropped_count(), None);
+
+        let mut wrong_class = full.clone();
+        wrong_class.class = EventClass::Auth;
+        assert_eq!(wrong_class.sentinel_dropped_count(), None);
+
+        let mut no_count = full.clone();
+        no_count.dropped_count = None;
+        assert_eq!(no_count.sentinel_dropped_count(), None);
+
+        // A plain record never tallies.
+        assert_eq!(make_record().sentinel_dropped_count(), None);
     }
 
     #[test]

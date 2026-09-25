@@ -18,6 +18,13 @@ pkcs11-proxy-ng-proto = { path = "../proto" }
 # Shared module-FFI facts (raw acquisition, function-table layouts). Moved to the
 # pkcs11-components repo; consumed as a pinned git dependency (see deny.toml
 # allow-git). Default features keep `native` (cryptoki-sys tables + acquisition).
+# W1-L16-17 RESIDUAL (P2→P3): single-maintainer fork with no org-owned mirror,
+# tag, or vendored copy — builds depend on that GitHub URL serving the pinned
+# rev. Fallback plan, in order: (1) the rev pin + Cargo.lock make any existing
+# clone authoritative (git is hash-addressed) — re-push to an org mirror and
+# re-point this URL plus deny.toml allow-git; (2) vendor the crate in-tree
+# behind a [patch] section; (3) publish pkcs11-module to crates.io and switch
+# to a version dependency.
 pkcs11-module = { git = "https://github.com/mingulov/pkcs11-components", rev = "d0a47c71d34294466bc41100ae6b5a5a329029d2" }
 libloading.workspace = true
 cryptoki-sys.workspace = true

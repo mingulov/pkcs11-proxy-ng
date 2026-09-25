@@ -8,6 +8,15 @@ use pkcs11_proxy_ng_types::*;
 
 use super::helpers::*;
 
+/// Write an encapsulate result (ciphertext bytes + key handle) back to
+/// the caller, committing the handle only after the output validates
+/// (W1-L1-04).
+///
+/// # Safety
+///
+/// `p_ciphertext`/`pul_ciphertext_len` must be the writable pointers
+/// captured in `spec`; `ph_key` must be writable for one handle when
+/// non-null (a null `ph_key` skips the handle commit).
 unsafe fn write_exact_kem_output(
     spec: &CkOutputBufferSpec,
     result: CkOutputAndHandleResult,

@@ -58,6 +58,8 @@ ensure_rsa_key
 # 3. Background load generator inside the consumer container.
 #    Uses pkcs11-tool --sign in a tight loop, paced via `sleep $delay`.
 delay_ms=$(awk "BEGIN { printf \"%.3f\", 1.0 / $RPS }")
+# Remote script: $-expressions expand inside the container, not locally.
+# shellcheck disable=SC2016
 $COMPOSE exec -T -d -e DURATION="$DURATION" -e SLEEP_DELAY="$delay_ms" consumer-shell sh -c '
 . /scripts/common.sh
 echo "soak-test-data" > /tmp/in.bin

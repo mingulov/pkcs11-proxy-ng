@@ -51,7 +51,7 @@ resilience audit documented this; the manifest enforces it.
 ```bash
 # 1) Build the pkcs11-proxy-ng images.
 ( cd ../../.. && \
-  docker build --build-arg ALPINE_VER=3.23 \
+  docker build --build-arg ALPINE_BUILD_IMAGE=alpine:3.23@sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0 \
     -f packaging/alpine/Dockerfile.alpine \
     -t pkcs11-proxy-ng:test-alpine3.23 . )
 

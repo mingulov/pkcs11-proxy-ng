@@ -1,3 +1,7 @@
+// CK_ULONG is u32 on narrow targets (i686, armv7, Windows x64), so the
+// `as u64` widens below are no-ops here but required there; scoped
+// allow keeps the width conversions explicit (ADR-0011, W1-L12-07).
+#![allow(clippy::unnecessary_cast)]
 //! In-process cross-ABI topology suite (ADR-0011).
 //!
 //! Each test drives the full shim -> gRPC -> in-process daemon stack
@@ -39,10 +43,7 @@ fn assert_backend_nested_class(abi: MockAbi, object: CK_OBJECT_HANDLE, expected:
     use pkcs11_proxy_ng_types::{CkAttributeQuery, CkSessionFlags, CkSlotId};
     let daemon = TestDaemon::shared_with_abi(abi);
     let object = backend_object_handle(daemon, object);
-    let session = daemon
-        .backend
-        .open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-        .unwrap();
+    let session = daemon.backend.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
     let (rv, results) = daemon
         .backend
         .get_attribute_value_exact(

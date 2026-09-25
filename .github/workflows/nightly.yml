@@ -90,7 +90,7 @@ jobs:
 
       - name: Upload matrix log
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: matrix-log-${{ github.run_id }}
           path: matrix-run.log
@@ -145,6 +145,12 @@ jobs:
           cargo test --workspace --locked
           cargo clippy --workspace --locked --all-targets --all-features -- -D warnings
 
+      # W1-L17-15: same standalone-lock coverage as the ci.yml deny job —
+      # the root `cargo deny check` above never sees the standalone test
+      # workspaces' own locks.
+      - name: cargo deny check (standalone test workspaces)
+        run: scripts/audit-test-workspaces.sh deny
+
   # ── Live cross-width topology matrix ─────────────────────────────────────
   # Runs the real-binary width harness (ADR-0011): daemons + SoftHSM2 over
   # localhost TCP. The runner gets both the 64-bit SoftHSM2 package and the
@@ -155,14 +161,17 @@ jobs:
   cross-width-live:
     name: Live cross-width matrix (SoftHSM2)
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # W1-L17-22: headroom for the retained-oracle (12 legs, isolated
+    # hook-target builds) and SIGTERM drain legs in the live tier.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install system dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y softhsm2 \
+          # opensc provides pkcs11-tool for the SIGTERM drain leg.
+          sudo apt-get install -y softhsm2 opensc \
             gcc-multilib libc6-dev-i386 libnss3-tools
           # The i386 SoftHSM2 library conflicts with the amd64 package on
           # the compat symlink; extract it beside the system instead.
@@ -195,8 +204,10 @@ jobs:
           toolchain: 1.98.1
           targets: i686-unknown-linux-gnu
 
-      - name: Build release daemon
-        run: cargo build --locked --release -p pkcs11-proxy-ng
+      # The shim joins the daemon: the SIGTERM drain leg drives
+      # keygen through the release shim (W1-L17-22).
+      - name: Build release daemon and shim
+        run: cargo build --locked --release -p pkcs11-proxy-ng -p pkcs11-proxy-ng-shim
 
       - name: Run live tier
         run: scripts/run-test-tiers.sh live
@@ -231,11 +242,11 @@ jobs:
 
       - name: cargo llvm-cov (workspace)
         run: |
-          cargo llvm-cov --workspace --lcov --output-path lcov.info
-          cargo llvm-cov report --summary-only | tee coverage-summary.txt
+          cargo llvm-cov --locked --workspace --lcov --output-path lcov.info
+          cargo llvm-cov report --locked --summary-only | tee coverage-summary.txt
 
       - name: Upload coverage artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: coverage
           path: |
@@ -275,8 +286,8 @@ jobs:
       # (lib.rs cfg); the raw-pointer parse paths below are the point.
       - name: cargo miri test (width/attribute logic + shim parse paths)
         run: |
-          cargo +nightly miri test -p pkcs11-proxy-ng-types -- width attribute
-          cargo +nightly miri test -p pkcs11-proxy-ng-shim --lib -- \
+          cargo +nightly miri test --locked -p pkcs11-proxy-ng-types -- width attribute
+          cargo +nightly miri test --locked -p pkcs11-proxy-ng-shim --lib -- \
             dispatch::general::width_bridge \
             dispatch::general::helpers::nested_template_input \
             not_wild_read

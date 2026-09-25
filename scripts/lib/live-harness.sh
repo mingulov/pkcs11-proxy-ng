@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Shared helpers for the live cross-ABI harness scripts. Source, don't run:
 #
 #   source "$(dirname "$0")/lib/live-harness.sh"
@@ -122,8 +123,7 @@ harness_start_daemon() {
     harness_write_daemon_config "$module" "$port"
     "$daemon_bin" "$WORK/proxy-config.toml" > "$WORK/daemon.log" 2>&1 &
     DAEMON_PID=$!
-    local i
-    for i in $(seq 1 50); do
+    for _ in $(seq 1 50); do
         if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
             exec 3>&- 3<&-
             return 0

@@ -62,10 +62,7 @@ async fn mtls_authorized_identity_can_open_session() {
     let slots = client_a.get_slot_list(true).await.unwrap();
     assert_eq!(slots.len(), 1);
 
-    let session = client_a
-        .open_session(slots[0], CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-        .await
-        .unwrap();
+    let session = client_a.open_session(slots[0], CkSessionFlags::SERIAL_SESSION).await.unwrap();
     assert_ne!(session.0, 0);
 }
 
@@ -92,7 +89,11 @@ async fn mtls_listener_rejects_client_without_certificate() {
     match channel {
         Ok(channel) => {
             let status = Pkcs11ProxyClient::new(channel)
-                .initialize(InitializeRequest { client_context_id: String::new() })
+                .initialize(InitializeRequest {
+                    client_context_id: String::new(),
+                    client_effects_version_min: None,
+                    client_effects_version_max: None,
+                })
                 .await
                 .unwrap_err();
             assert!(

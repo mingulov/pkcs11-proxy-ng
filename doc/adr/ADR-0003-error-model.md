@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Implemented
 
 ## Context
 
@@ -113,8 +113,9 @@ function being called. The function-specific rules are:
 - **Functions that use a session handle**: transport failure maps to
   `CKR_DEVICE_ERROR` (preferred over `CKR_SESSION_HANDLE_INVALID`, because the
   session may still be valid server-side).
-- **`C_Initialize`**: transport failure maps to `CKR_DEVICE_ERROR` or
-  `CKR_GENERAL_ERROR`.
+- **`C_Initialize`**: transport failure maps to `CKR_GENERAL_ERROR`.
+  (`CKR_DEVICE_ERROR` is outside the lifecycle permitted set, so the
+  lifecycle mapping never emits it — see `grpc_status_to_ck_rv_kind`.)
 
 ### 4. Expired and invalid client context handling
 
@@ -138,7 +139,7 @@ consistent with the PKCS#11 spec's error priority rules (section 5.1).
 
 If the client shim has never successfully established a context (e.g.,
 `C_Initialize` itself fails due to transport error), the shim returns
-`CKR_DEVICE_ERROR` or `CKR_GENERAL_ERROR` from `C_Initialize`. All subsequent
+`CKR_GENERAL_ERROR` from `C_Initialize`. All subsequent
 calls return `CKR_CRYPTOKI_NOT_INITIALIZED` without attempting a round-trip.
 
 When a context expires, the client shim should also invalidate its local handle

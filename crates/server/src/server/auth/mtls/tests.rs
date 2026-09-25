@@ -448,3 +448,28 @@ fn dual_accept_legacy_dn_policy_authorizes_with_deprecation_warning() {
         "legacy DN-keyed policy must still authorize during transition"
     );
 }
+
+// ---------------------------------------------------------------------------
+// W1-L7-04: the validate_cert_file doc must describe every-certificate
+// validation — the code checks ALL certs in the bundle, so the stale
+// "first certificate" wording must not come back (R3: Task 31 owns it).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn validate_cert_file_doc_describes_every_certificate_validation() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server/auth/mtls.rs");
+    let text = std::fs::read_to_string(&path).expect("read own mtls.rs");
+    let start =
+        text.find("/// Validate a PEM certificate file at startup.").expect("doc head present");
+    let end =
+        start + text[start..].find("pub fn validate_cert_file").expect("fn present after doc");
+    let doc = &text[start..end];
+    assert!(
+        !doc.contains("first certificate"),
+        "stale first-cert-only wording must be gone:\n{doc}"
+    );
+    assert!(
+        doc.contains("Every certificate"),
+        "doc must state every-certificate validation:\n{doc}"
+    );
+}
