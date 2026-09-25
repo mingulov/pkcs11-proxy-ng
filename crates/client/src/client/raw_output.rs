@@ -64,7 +64,7 @@ fn decode_parameter_output_exact_response(
             })
     } else {
         parameter.returned_len == parameter_spec.buffer_len
-            && parameter.value == parameter_spec.buffer_present.then(Vec::new)
+            && parameter.value == parameter_spec.buffer_present.then(SecretBytes::default)
     };
     if parameter.ck_rv != output.ck_rv || !valid_parameter {
         return Err(CkRv::FUNCTION_NOT_SUPPORTED);
@@ -575,7 +575,7 @@ mod message_contract_tests {
             0,
         )
         .expect("genuine parameter output");
-        assert_eq!(parameter.value, Some(vec![1, 0xA5, 3]));
+        assert_eq!(parameter.value, Some(SecretBytes::new(vec![1, 0xA5, 3])));
     }
 
     #[test]
@@ -613,7 +613,7 @@ mod message_contract_tests {
 
         assert_eq!(output.ck_rv, CkRv::BUFFER_TOO_SMALL);
         assert_eq!(parameter.ck_rv, CkRv::BUFFER_TOO_SMALL);
-        assert_eq!(parameter.value, Some(vec![1, 0xA5, 3]));
+        assert_eq!(parameter.value, Some(SecretBytes::new(vec![1, 0xA5, 3])));
     }
 
     #[test]
@@ -820,7 +820,7 @@ mod message_contract_tests {
         .expect("actual mechanism parameter size within caller capacity is valid");
 
         assert_eq!(parameter.returned_len, 0);
-        assert_eq!(parameter.value, Some(Vec::new()));
+        assert_eq!(parameter.value, Some(SecretBytes::new(Vec::new())));
         assert!(message.is_none());
     }
 }

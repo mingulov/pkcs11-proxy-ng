@@ -135,27 +135,30 @@ pub trait Pkcs11Backend: Send + Sync {
     fn sign_init_cancel(&self, _session: CkSessionHandle) -> CkResult<()> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
-    fn sign(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<Vec<u8>>;
+    fn sign(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<SecretBytes>;
     fn sign_update(&self, session: CkSessionHandle, part: CkInBuf<'_>) -> CkResult<()>;
-    fn sign_final(&self, session: CkSessionHandle) -> CkResult<Vec<u8>>;
+    fn sign_final(&self, session: CkSessionHandle) -> CkResult<SecretBytes>;
 
     fn digest_encrypt_update(
         &self,
         session: CkSessionHandle,
         part: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>>;
+    ) -> CkResult<SecretBytes>;
     fn decrypt_digest_update(
         &self,
         session: CkSessionHandle,
         encrypted_part: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>>;
-    fn sign_encrypt_update(&self, session: CkSessionHandle, part: CkInBuf<'_>)
-    -> CkResult<Vec<u8>>;
+    ) -> CkResult<SecretBytes>;
+    fn sign_encrypt_update(
+        &self,
+        session: CkSessionHandle,
+        part: CkInBuf<'_>,
+    ) -> CkResult<SecretBytes>;
     fn decrypt_verify_update(
         &self,
         session: CkSessionHandle,
         encrypted_part: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>>;
+    ) -> CkResult<SecretBytes>;
 
     fn sign_recover_init(
         &self,
@@ -166,7 +169,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn sign_recover_init_cancel(&self, _session: CkSessionHandle) -> CkResult<()> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
-    fn sign_recover(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<Vec<u8>>;
+    fn sign_recover(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<SecretBytes>;
 
     fn verify_recover_init(
         &self,
@@ -177,8 +180,11 @@ pub trait Pkcs11Backend: Send + Sync {
     fn verify_recover_init_cancel(&self, _session: CkSessionHandle) -> CkResult<()> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
-    fn verify_recover(&self, session: CkSessionHandle, signature: CkInBuf<'_>)
-    -> CkResult<Vec<u8>>;
+    fn verify_recover(
+        &self,
+        session: CkSessionHandle,
+        signature: CkInBuf<'_>,
+    ) -> CkResult<SecretBytes>;
 
     fn verify_init(
         &self,
@@ -237,7 +243,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn digest_init_cancel(&self, _session: CkSessionHandle) -> CkResult<()> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
-    fn digest(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<Vec<u8>>;
+    fn digest(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<SecretBytes>;
     fn digest_update(&self, session: CkSessionHandle, part: CkInBuf<'_>) -> CkResult<()>;
     fn digest_key(&self, session: CkSessionHandle, key: CkObjectHandle) -> CkResult<()>;
     fn digest_final(&self, session: CkSessionHandle) -> CkResult<SecretBytes>;
@@ -251,9 +257,9 @@ pub trait Pkcs11Backend: Send + Sync {
     fn encrypt_init_cancel(&self, _session: CkSessionHandle) -> CkResult<()> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
-    fn encrypt(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<Vec<u8>>;
-    fn encrypt_update(&self, session: CkSessionHandle, part: CkInBuf<'_>) -> CkResult<Vec<u8>>;
-    fn encrypt_final(&self, session: CkSessionHandle) -> CkResult<Vec<u8>>;
+    fn encrypt(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<SecretBytes>;
+    fn encrypt_update(&self, session: CkSessionHandle, part: CkInBuf<'_>) -> CkResult<SecretBytes>;
+    fn encrypt_final(&self, session: CkSessionHandle) -> CkResult<SecretBytes>;
 
     fn decrypt_init(
         &self,
@@ -264,13 +270,17 @@ pub trait Pkcs11Backend: Send + Sync {
     fn decrypt_init_cancel(&self, _session: CkSessionHandle) -> CkResult<()> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
-    fn decrypt(&self, session: CkSessionHandle, encrypted_data: CkInBuf<'_>) -> CkResult<Vec<u8>>;
+    fn decrypt(
+        &self,
+        session: CkSessionHandle,
+        encrypted_data: CkInBuf<'_>,
+    ) -> CkResult<SecretBytes>;
     fn decrypt_update(
         &self,
         session: CkSessionHandle,
         encrypted_part: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>>;
-    fn decrypt_final(&self, session: CkSessionHandle) -> CkResult<Vec<u8>>;
+    ) -> CkResult<SecretBytes>;
+    fn decrypt_final(&self, session: CkSessionHandle) -> CkResult<SecretBytes>;
 
     fn derive_key(
         &self,
@@ -325,7 +335,7 @@ pub trait Pkcs11Backend: Send + Sync {
         mechanism: &CkMechanism,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle>;
     fn generate_key(
         &self,
@@ -343,7 +353,7 @@ pub trait Pkcs11Backend: Send + Sync {
         &self,
         session: CkSessionHandle,
         mechanism: &CkMechanism,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
         self.generate_key(session, mechanism, template).map(|h| (h, None))
     }
@@ -376,7 +386,7 @@ pub trait Pkcs11Backend: Send + Sync {
         auth_key: CkObjectHandle,
     ) -> CkResult<()>;
     fn seed_random(&self, session: CkSessionHandle, seed: CkInBuf<'_>) -> CkResult<()>;
-    fn generate_random(&self, session: CkSessionHandle, len: u32) -> CkResult<Vec<u8>>;
+    fn generate_random(&self, session: CkSessionHandle, len: u32) -> CkResult<SecretBytes>;
 
     // --- Exact byte-output methods (Track B) ---
     // Default: FUNCTION_NOT_SUPPORTED. Tasks 2-5 wire real backends.
@@ -843,7 +853,7 @@ pub trait Pkcs11Backend: Send + Sync {
         _session: CkSessionHandle,
         _mechanism: &CkMechanism,
         _private_key: CkObjectHandle,
-        _template: &[CkAttribute],
+        _template: Option<&[CkAttribute]>,
         _ciphertext: CkInBuf<'_>,
     ) -> CkResult<CkObjectHandle> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
@@ -873,7 +883,7 @@ pub trait Pkcs11Backend: Send + Sync {
         Ok(CkParameterRoundtripResult {
             ck_rv: CkRv::OK,
             returned_len: provider_spec.buffer_len,
-            value: provider_spec.buffer_present.then(Vec::new),
+            value: provider_spec.buffer_present.then(Vec::new).map(SecretBytes::new),
         })
     }
 
@@ -883,7 +893,7 @@ pub trait Pkcs11Backend: Send + Sync {
         _parameter: &mut [u8],
         _aad: CkInBuf<'_>,
         _plaintext: CkInBuf<'_>,
-    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+    ) -> CkResult<(SecretBytes, SecretBytes)> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
 
@@ -892,7 +902,7 @@ pub trait Pkcs11Backend: Send + Sync {
         _session: CkSessionHandle,
         _parameter: &mut [u8],
         _aad: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
 
@@ -943,7 +953,7 @@ pub trait Pkcs11Backend: Send + Sync {
         Ok(CkParameterRoundtripResult {
             ck_rv: CkRv::OK,
             returned_len: provider_spec.buffer_len,
-            value: provider_spec.buffer_present.then(Vec::new),
+            value: provider_spec.buffer_present.then(Vec::new).map(SecretBytes::new),
         })
     }
 
@@ -953,7 +963,7 @@ pub trait Pkcs11Backend: Send + Sync {
         _parameter: &mut [u8],
         _aad: CkInBuf<'_>,
         _ciphertext: CkInBuf<'_>,
-    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+    ) -> CkResult<(SecretBytes, SecretBytes)> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
 
@@ -962,7 +972,7 @@ pub trait Pkcs11Backend: Send + Sync {
         _session: CkSessionHandle,
         _parameter: &mut [u8],
         _aad: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
 
@@ -1005,7 +1015,7 @@ pub trait Pkcs11Backend: Send + Sync {
         _session: CkSessionHandle,
         _parameter: &mut [u8],
         _data: CkInBuf<'_>,
-    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+    ) -> CkResult<(SecretBytes, SecretBytes)> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
 
@@ -1025,14 +1035,6 @@ pub trait Pkcs11Backend: Send + Sync {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
 
-    fn sign_message_begin_exact(
-        &self,
-        _session: CkSessionHandle,
-        _provider_spec: &CkParameterRoundtripSpec,
-    ) -> CkResult<CkParameterRoundtripResult> {
-        Err(CkRv::FUNCTION_NOT_SUPPORTED)
-    }
-
     fn sign_message_next(
         &self,
         _session: CkSessionHandle,
@@ -1040,15 +1042,6 @@ pub trait Pkcs11Backend: Send + Sync {
         _data_part: CkInBuf<'_>,
         _request_signature: bool,
     ) -> CkResult<(SecretBytes, SecretBytes)> {
-        Err(CkRv::FUNCTION_NOT_SUPPORTED)
-    }
-
-    fn sign_message_next_feed_exact(
-        &self,
-        _session: CkSessionHandle,
-        _data_part: CkInBuf<'_>,
-        _provider_spec: &CkParameterRoundtripSpec,
-    ) -> CkResult<CkParameterRoundtripResult> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
 
@@ -1172,7 +1165,7 @@ pub trait Pkcs11Backend: Send + Sync {
         _wrapping_key: CkObjectHandle,
         _key: CkObjectHandle,
         _aad: CkInBuf<'_>,
-    ) -> CkResult<(Vec<u8>, pkcs11_proxy_ng_proto::convert::authenticated::AuthenticatedOutput)>
+    ) -> CkResult<(SecretBytes, pkcs11_proxy_ng_proto::convert::authenticated::AuthenticatedOutput)>
     {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -1200,7 +1193,7 @@ pub trait Pkcs11Backend: Send + Sync {
         _parameter: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         _unwrapping_key: CkObjectHandle,
         _wrapped_key: CkInBuf<'_>,
-        _template: &[CkAttribute],
+        _template: Option<&[CkAttribute]>,
         _aad: CkInBuf<'_>,
     ) -> CkResult<(
         CkObjectHandle,
@@ -1218,7 +1211,7 @@ pub trait Pkcs11Backend: Send + Sync {
         _wrapping_key: CkObjectHandle,
         _key: CkObjectHandle,
         _aad: CkInBuf<'_>,
-    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+    ) -> CkResult<(SecretBytes, SecretBytes)> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
 
@@ -1228,9 +1221,9 @@ pub trait Pkcs11Backend: Send + Sync {
         _mechanism: &CkMechanism,
         _unwrapping_key: CkObjectHandle,
         _wrapped_key: CkInBuf<'_>,
-        _template: &[CkAttribute],
+        _template: Option<&[CkAttribute]>,
         _aad: CkInBuf<'_>,
-    ) -> CkResult<(CkObjectHandle, Vec<u8>)> {
+    ) -> CkResult<(CkObjectHandle, SecretBytes)> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
 

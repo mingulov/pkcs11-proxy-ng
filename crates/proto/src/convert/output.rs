@@ -72,7 +72,7 @@ impl From<&CkOutputBufferResult> for v1_proto::OutputBufferResult {
         Self {
             ck_rv: result.ck_rv.0,
             returned_len: result.returned_len.unwrap_or(0),
-            value: result.value.clone(),
+            value: result.value.as_ref().map(secret_to_plain),
             apply_returned_len: Some(result.returned_len.is_some()),
         }
     }
@@ -88,7 +88,7 @@ impl TryFrom<&v1_proto::OutputBufferResult> for CkOutputBufferResult {
         Ok(Self {
             ck_rv: CkRv(result.ck_rv),
             returned_len: apply.then_some(result.returned_len),
-            value: result.value.clone(),
+            value: result.value.clone().map(SecretBytes::new),
         })
     }
 }
@@ -138,7 +138,7 @@ impl From<&CkOutputAndHandleResult> for v1_proto::OutputAndHandleResult {
         Self {
             ck_rv: result.ck_rv.0,
             returned_len: result.returned_len.unwrap_or(0),
-            value: result.value.clone(),
+            value: result.value.as_ref().map(secret_to_plain),
             object_handle: result.object_handle.map_or(0, |handle| handle.0),
             apply_returned_len: Some(result.returned_len.is_some()),
             apply_object_handle: Some(result.object_handle.is_some()),
@@ -160,7 +160,7 @@ impl TryFrom<&v1_proto::OutputAndHandleResult> for CkOutputAndHandleResult {
         Ok(Self {
             ck_rv: CkRv(result.ck_rv),
             returned_len: apply.then_some(result.returned_len),
-            value: result.value.clone(),
+            value: result.value.clone().map(SecretBytes::new),
             object_handle: handle.then_some(CkObjectHandle(result.object_handle)),
         })
     }
@@ -209,7 +209,7 @@ impl From<CkAttributeQueryResult> for v1_proto::AttributeQueryResult {
             apply_type: Some(result.apply_type),
             attr_type: result.attr_type.0,
             returned_len: result.returned_len,
-            value: result.value,
+            value: result.value.as_ref().map(secret_to_plain),
             ck_rv: result.ck_rv.map(|rv| rv.0),
             nested: result.nested.map(attribute_query_results_into_proto),
         }
@@ -242,7 +242,7 @@ fn decode_attribute_result(
         apply_type,
         attr_type: CkAttributeType(result.attr_type),
         returned_len: result.returned_len,
-        value: result.value.clone(),
+        value: result.value.clone().map(SecretBytes::new),
         ck_rv: result.ck_rv.map(CkRv),
         nested: result
             .nested
@@ -563,7 +563,7 @@ mod tests {
         let original = CkOutputAndHandleResult {
             ck_rv: CkRv::OK,
             returned_len: Some(3),
-            value: Some(vec![0xAA, 0xBB, 0xCC]),
+            value: Some(vec![0xAA, 0xBB, 0xCC].into()),
             object_handle: Some(CkObjectHandle(41)),
         };
         let proto = v1_proto::OutputAndHandleResult::from(&original);

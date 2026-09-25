@@ -14,12 +14,12 @@ use tonic::{Request, Response, Status};
 use pkcs11_proxy_ng_types::{CkObjectHandle, CkOutputBufferSpec, CkRv};
 
 use super::super::authorization::mechanism_permitted;
-use super::super::convert_template;
+use super::super::convert_template_opt;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
-    ExactCompletion, check_sanitize, input_from_wire, parse_mechanism,
+    ExactCompletion, check_sanitize, ensure_private_mint_allowed, input_from_wire, parse_mechanism,
     register_session_object_handle, resolve_session_and_key, spawn_backend, spawn_backend_exact,
-    template_declares_token_object,
+    template_declares_private_object, template_declares_token_object,
 };
 use crate::server::context_manager::ClientContextId;
 use crate::server::handle_map::VirtualHandle;
@@ -83,7 +83,7 @@ pub(crate) async fn encapsulate_key(
         }));
     }
 
-    let template = match convert_template(&req.template) {
+    let template = match convert_template_opt(&req.template, req.template_null) {
         Ok(template) => template,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyResponse {
@@ -94,8 +94,24 @@ pub(crate) async fn encapsulate_key(
         }
     };
 
+    // A NULL template carries no attributes; classification treats it as empty.
+    let template_view = template.as_deref().unwrap_or(&[]);
+
+    // D6(1): refuse minting a private object while logically logged out.
+    if let Err(rv) =
+        ensure_private_mint_allowed(ctx_mgr, &ctx_id, req.session_handle, template_view).await
+    {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyResponse {
+            ck_rv: rv.0,
+            ciphertext: Vec::new(),
+            key_handle: 0,
+        }));
+    }
+
     // An encapsulated key is a session object unless CKA_TOKEN is set (B2).
-    let is_token = template_declares_token_object(&template);
+    // The privacy bit is recorded for the D6(1) USE enforcement.
+    let is_token = template_declares_token_object(template_view);
+    let is_private = template_declares_private_object(template_view);
     let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
@@ -111,6 +127,7 @@ pub(crate) async fn encapsulate_key(
                 virtual_session,
                 CkObjectHandle(key.0 as u64),
                 is_token,
+                Some(is_private),
             )
             .await;
             Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyResponse {
@@ -178,7 +195,7 @@ pub(crate) async fn decapsulate_key(
         }));
     }
 
-    let template = match convert_template(&req.template) {
+    let template = match convert_template_opt(&req.template, req.template_null) {
         Ok(template) => template,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::DecapsulateKeyResponse {
@@ -188,8 +205,25 @@ pub(crate) async fn decapsulate_key(
         }
     };
 
+    // A NULL template carries no attributes; classification treats it as empty.
+    let template_view = template.as_deref().unwrap_or(&[]);
+
+    // D6(1): refuse minting a private object while logically logged out.
+    // (The private KEM key itself is refused by the USE check inside
+    // resolve_session_and_key above.)
+    if let Err(rv) =
+        ensure_private_mint_allowed(ctx_mgr, &ctx_id, req.session_handle, template_view).await
+    {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::DecapsulateKeyResponse {
+            ck_rv: rv.0,
+            key_handle: 0,
+        }));
+    }
+
     // A decapsulated key is a session object unless CKA_TOKEN is set (B2).
-    let is_token = template_declares_token_object(&template);
+    // The privacy bit is recorded for the D6(1) USE enforcement.
+    let is_token = template_declares_token_object(template_view);
+    let is_private = template_declares_private_object(template_view);
     let virtual_session = VirtualHandle(req.session_handle);
     let ciphertext = req.ciphertext;
     let ciphertext_null_len = req.ciphertext_null_len;
@@ -206,7 +240,7 @@ pub(crate) async fn decapsulate_key(
             session,
             &mechanism,
             private_key,
-            &template,
+            template.as_deref(),
             input_from_wire(&ciphertext, ciphertext_null_len),
         )
     })
@@ -220,6 +254,7 @@ pub(crate) async fn decapsulate_key(
                 virtual_session,
                 CkObjectHandle(key.0 as u64),
                 is_token,
+                Some(is_private),
             )
             .await;
             Ok(Response::new(pkcs11_proxy_ng_proto::DecapsulateKeyResponse {
@@ -315,7 +350,7 @@ pub(crate) async fn encapsulate_key_exact(
         }));
     }
 
-    let template = match convert_template(&req.template) {
+    let template = match convert_template_opt(&req.template, req.template_null) {
         Ok(template) => template,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
@@ -331,6 +366,25 @@ pub(crate) async fn encapsulate_key_exact(
         }
     };
 
+    // A NULL template carries no attributes; classification treats it as empty.
+    let template_view = template.as_deref().unwrap_or(&[]);
+
+    // D6(1): refuse minting a private object while logically logged out.
+    if let Err(rv) =
+        ensure_private_mint_allowed(ctx_mgr, &ctx_id, req.session_handle, template_view).await
+    {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
+            result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
+                apply_returned_len: Some(false),
+                apply_object_handle: Some(false),
+                ck_rv: rv.0,
+                returned_len: 0,
+                value: None,
+                object_handle: 0,
+            }),
+        }));
+    }
+
     let spec =
         req.output_spec.as_ref().map(CkOutputBufferSpec::from).unwrap_or(CkOutputBufferSpec {
             buffer_present: false,
@@ -339,13 +393,19 @@ pub(crate) async fn encapsulate_key_exact(
         });
 
     // The exact-encapsulated key is a session object unless CKA_TOKEN is set (B2).
-    let is_token = template_declares_token_object(&template);
+    // The privacy bit is recorded for the D6(1) USE enforcement.
+    let is_token = template_declares_token_object(template_view);
+    let is_private = template_declares_private_object(template_view);
     let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend_exact(move || {
-        ExactCompletion::capture(
-            backend.encapsulate_key_exact(session, &mechanism, public_key, &template, &spec),
-        )
+        ExactCompletion::capture(backend.encapsulate_key_exact(
+            session,
+            &mechanism,
+            public_key,
+            template.as_deref(),
+            &spec,
+        ))
     })
     .await?;
 
@@ -355,8 +415,15 @@ pub(crate) async fn encapsulate_key_exact(
             let virtual_handle = if r.ck_rv == CkRv::OK
                 && let Some(handle) = r.object_handle.filter(|h| h.0 != 0)
             {
-                register_session_object_handle(ctx_mgr, &ctx_id, virtual_session, handle, is_token)
-                    .await
+                register_session_object_handle(
+                    ctx_mgr,
+                    &ctx_id,
+                    virtual_session,
+                    handle,
+                    is_token,
+                    Some(is_private),
+                )
+                .await
             } else {
                 0
             };
@@ -366,7 +433,10 @@ pub(crate) async fn encapsulate_key_exact(
                     apply_object_handle: Some(virtual_handle != 0),
                     ck_rv: r.ck_rv.0,
                     returned_len: r.returned_len.unwrap_or(0),
-                    value: r.value,
+                    value: r
+                        .value
+                        .as_ref()
+                        .map(pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain),
                     object_handle: virtual_handle,
                 }),
             }))
@@ -403,7 +473,7 @@ mod tests {
         mock.initialize().unwrap();
         let backend_session =
             mock.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).unwrap();
-        let public_key = mock.create_object(backend_session, &[]).unwrap();
+        let public_key = mock.create_object(backend_session, Some(&[])).unwrap();
         let backend: Arc<dyn Pkcs11Backend> = mock;
         let manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
         manager.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
@@ -423,6 +493,7 @@ mod tests {
             virtual_session,
             public_key,
             false,
+            None,
         )
         .await;
 
@@ -443,6 +514,8 @@ mod tests {
                     buffer_len: 0,
                     length_pointer_null: true,
                 }),
+
+                template_null: false,
             }),
         )
         .await

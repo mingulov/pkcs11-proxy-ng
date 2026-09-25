@@ -28,7 +28,7 @@ use super::*;
 static TEST_DAEMON: OnceLock<TestDaemon> = OnceLock::new();
 static TEST_DAEMON_ILP32: OnceLock<TestDaemon> = OnceLock::new();
 static TEST_DAEMON_LLP64: OnceLock<TestDaemon> = OnceLock::new();
-static TEST_DAEMON_BIG_ENDIAN: OnceLock<TestDaemon> = OnceLock::new();
+static TEST_DAEMON_FOREIGN_ENDIAN: OnceLock<TestDaemon> = OnceLock::new();
 
 pub(super) struct TestDaemon {
     runtime: Runtime,
@@ -53,16 +53,20 @@ impl TestDaemon {
         }
     }
 
-    /// A daemon whose backend ADVERTISES big-endian (D6 poison config).
-    pub(super) fn shared_big_endian() -> &'static Self {
-        TEST_DAEMON_BIG_ENDIAN.get_or_init(|| Self::start_configured(MockAbi::host(), true))
+    /// A daemon whose backend ADVERTISES the byte order foreign to this
+    /// host (D6 poison config): big-endian on LE hosts, little-endian on
+    /// BE hosts — either way the client must refuse at `C_Initialize`.
+    pub(super) fn shared_foreign_endian() -> &'static Self {
+        let foreign = if cfg!(target_endian = "little") { 2 } else { 1 };
+        TEST_DAEMON_FOREIGN_ENDIAN
+            .get_or_init(|| Self::start_configured(MockAbi::host(), Some(foreign)))
     }
 
     fn start(abi: MockAbi) -> Self {
-        Self::start_configured(abi, false)
+        Self::start_configured(abi, None)
     }
 
-    fn start_configured(abi: MockAbi, big_endian: bool) -> Self {
+    fn start_configured(abi: MockAbi, advertised_order: Option<u32>) -> Self {
         let runtime = Runtime::new().expect("test runtime");
         let (endpoint, backend, context_manager, shutdown) = runtime.block_on(async {
             let mut mock = MockBackend::new(
@@ -76,8 +80,11 @@ impl TestDaemon {
                 ],
             )
             .with_abi(abi);
-            if big_endian {
-                mock = mock.with_big_endian_advertisement();
+            match advertised_order {
+                None => {}
+                Some(2) => mock = mock.with_big_endian_advertisement(),
+                Some(1) => mock = mock.with_little_endian_advertisement(),
+                Some(other) => panic!("invalid test byte-order advertisement {other}"),
             }
             let backend = Arc::new(mock);
             backend.set_interface_capabilities(InterfaceCapabilities {
@@ -303,7 +310,7 @@ fn write_exact_output_rejects_value_larger_than_declared_buffer_without_copy() {
     let result = CkOutputBufferResult {
         ck_rv: CkRv::OK,
         returned_len: Some(4),
-        value: Some(vec![1, 2, 3, 4]),
+        value: Some(vec![1, 2, 3, 4].into()),
     };
 
     let rv = unsafe {
@@ -325,8 +332,11 @@ fn write_exact_output_validates_all_effects_before_any_store() {
     let mut backing = [0xa5; 8];
     let mut length = 8;
     let spec = unsafe { dispatch::general::output_buffer_spec(backing.as_mut_ptr(), &mut length) };
-    let result =
-        CkOutputBufferResult { ck_rv: CkRv::OK, returned_len: Some(7), value: Some(vec![1; 4]) };
+    let result = CkOutputBufferResult {
+        ck_rv: CkRv::OK,
+        returned_len: Some(7),
+        value: Some(vec![1; 4].into()),
+    };
     let rv = unsafe {
         dispatch::general::write_exact_output(&spec, &result, backing.as_mut_ptr(), &mut length)
     };
@@ -362,7 +372,7 @@ fn write_exact_output_does_not_copy_value_on_buffer_too_small() {
     let result = CkOutputBufferResult {
         ck_rv: CkRv::BUFFER_TOO_SMALL,
         returned_len: Some(4),
-        value: Some(vec![1, 2, 3, 4]),
+        value: Some(vec![1, 2, 3, 4].into()),
     };
 
     let rv = unsafe {
@@ -1234,7 +1244,7 @@ fn malformed_post_provider_ack_returns_device_error_and_clears_shim_shape() {
     daemon.backend.set_next_message_parameter_ack(CkParameterRoundtripResult {
         ck_rv: CkRv::OK,
         returned_len: provider_len + 1,
-        value: Some(Vec::new()),
+        value: Some(Vec::new().into()),
     });
     let calls_before = daemon.backend.message_parameter_call_count();
     let input = [0x22_u8; 8];
@@ -3033,7 +3043,7 @@ fn exact_encrypt_message_size_query_returns_length() {
             mechanism_type: CkMechanismType::AES_ECB,
             params: None,
         };
-        let key = client.create_object(session, &[]).await.expect("C_CreateObject");
+        let key = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
         client
             .message_encrypt_init(session, Some(&mechanism), None, key)
             .await
@@ -3174,8 +3184,8 @@ fn null_output_length_parameter_rpc_preserves_exact_provider_rv() {
             .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
             .await
             .expect("C_OpenSession");
-        let wrapping_key = client.create_object(session, &[]).await.expect("C_CreateObject");
-        let key = client.create_object(session, &[]).await.expect("C_CreateObject");
+        let wrapping_key = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
+        let key = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
         let output_spec =
             CkOutputBufferSpec { buffer_present: true, buffer_len: 0, length_pointer_null: true };
         let parameter_spec =

@@ -4,9 +4,7 @@ v0.2.0 proves big-endian at the **build + QEMU-suite tier**: the workspace
 compiles for `s390x-unknown-linux-gnu` and the portable suites pass under
 `qemu-user`. This is deliberately one tier below a runtime claim — live
 native FFI on a BE host stays excluded (see below). Re-run any time with
-`scripts/run-be-qemu-test.sh` (no CI job: TX-12, 2026-09-19 — no BE leg in
-`cross-platform.yml`, which is a provider-parity gate and BE has no
-provider-parity claim; this script stays the proof vehicle).
+`scripts/run-be-qemu-test.sh` (no CI job; TX/T2run own CI).
 
 ## Proven (2026-09-18)
 

@@ -22,11 +22,6 @@ impl From<&CkAttribute> for v1_proto::Attribute {
                     attributes: subs.iter().map(v1_proto::Attribute::from).collect(),
                 }))
             }
-            Some(CkAttributeValue::NestedTemplate(subs)) => {
-                Some(v1_proto::attribute::Value::NestedTemplate(v1_proto::NestedAttributes {
-                    attributes: subs.iter().map(v1_proto::Attribute::from).collect(),
-                }))
-            }
         };
         v1_proto::Attribute { attr_type: a.attr_type.0, value }
     }
@@ -45,23 +40,6 @@ impl TryFrom<&v1_proto::Attribute> for CkAttribute {
             }
             Some(v1_proto::attribute::Value::StringValue(s)) => {
                 Some(CkAttributeValue::String(SecretBytes::copy_from_slice(s.as_bytes())))
-            }
-            Some(v1_proto::attribute::Value::NestedTemplate(nested)) => {
-                // D8: one level of nesting. A sub-attribute carrying another
-                // nested template is refused at the deserialization edge so
-                // neither the daemon nor the backend ever sees deeper trees.
-                let subs: Vec<CkAttribute> = nested
-                    .attributes
-                    .iter()
-                    .map(CkAttribute::try_from)
-                    .collect::<Result<_, _>>()?;
-                if subs
-                    .iter()
-                    .any(|sub| matches!(sub.value, Some(CkAttributeValue::NestedTemplate(_))))
-                {
-                    return Err(CkRv::ATTRIBUTE_VALUE_INVALID);
-                }
-                Some(CkAttributeValue::NestedTemplate(subs))
             }
             Some(v1_proto::attribute::Value::NestedTemplate(nested)) => {
                 // D8: one level of nesting. A sub-attribute carrying another

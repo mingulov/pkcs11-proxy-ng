@@ -47,19 +47,19 @@ pub(super) async fn finalize(
     let maybe_ctx = ctx_mgr.remove_context(&ctx_id);
     let ck_rv = match maybe_ctx {
         Some(mut ctx) => {
-            let backend_sessions = ctx.teardown();
-            let session_count = backend_sessions.len();
-            if !backend_sessions.is_empty() {
-                let backend = backend_ref.clone();
-                tokio::task::spawn_blocking(move || {
-                    for backend_handle in backend_sessions {
-                        let _ = backend.close_session(CkSessionHandle(backend_handle as u64));
-                    }
-                })
-                .await
-                .map_err(|e| Status::internal(format!("spawn_blocking panic: {e}")))?;
-            }
-            debug!(context_id = %ctx_id.0, sessions_closed = session_count, "Finalize: context removed");
+            // D6(2)/D9 shared teardown path: refcount-checked session reaping
+            // plus last-holder backend logout (best-effort; never fails the
+            // Finalize itself and never disturbs live tenants).
+            let plan = ctx_mgr.plan_removed_context_teardown(&mut ctx);
+            let session_count = plan.sessions_to_close.len();
+            let logout_count = plan.slot_logouts.len();
+            ctx_mgr.execute_teardown_plans(backend_ref, vec![plan]).await;
+            debug!(
+                context_id = %ctx_id.0,
+                sessions_closed = session_count,
+                logouts = logout_count,
+                "Finalize: context removed"
+            );
             CkRv::OK.0
         }
         None => CkRv::CRYPTOKI_NOT_INITIALIZED.0,

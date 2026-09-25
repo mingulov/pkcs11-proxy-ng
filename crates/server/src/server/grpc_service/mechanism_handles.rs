@@ -17,7 +17,9 @@
 
 use std::collections::HashMap;
 
-use pkcs11_proxy_ng_types::{CkMechanism, CkMechanismParams, CkObjectHandle, CkRv};
+use pkcs11_proxy_ng_types::{
+    CkMechanism, CkMechanismParams, CkObjectHandle, CkRv, CkSessionHandle,
+};
 
 use super::super::context_manager::ClientContextId;
 use super::super::handle_map::{BackendHandle, VirtualHandle};
@@ -50,10 +52,17 @@ use super::super::handle_map::{BackendHandle, VirtualHandle};
 /// latter handled by a separate resolver in `key_ops/generation.rs`) — is
 /// gated through the same single `gate_object_handle` choke point.
 ///
+/// D6(1): embedding a private key in mechanism parameters is a USE of that
+/// key — every collected non-zero embedded (virtual, backend) pair is gated
+/// through `ensure_private_use_allowed` on BOTH paths below, so a logged-out
+/// caller gets `CKR_USER_NOT_LOGGED_IN` instead of reaching the backend
+/// through another tenant's login.
+///
 /// Returns `CKR_CRYPTOKI_NOT_INITIALIZED` if the context no longer exists,
-/// `CKR_OBJECT_HANDLE_INVALID` if any embedded handle is not owned by the
-/// caller or is denied by object/class policy. A mechanism with no parameters
-/// is a no-op.
+/// `CKR_USER_NOT_LOGGED_IN` if a private embedded key is used while the
+/// caller is logically logged out, `CKR_OBJECT_HANDLE_INVALID` if any
+/// embedded handle is not owned by the caller or is denied by object/class
+/// policy. A mechanism with no parameters is a no-op.
 pub(super) async fn remap_mechanism_handles(
     ctx: &super::HandlerContext,
     ctx_id: &ClientContextId,
@@ -66,20 +75,45 @@ pub(super) async fn remap_mechanism_handles(
     };
 
     if !ctx.token_policy.per_object_active() && !ctx.token_policy.per_class_active() {
-        // Fast path: resolve virtual→backend without gating.
-        // This is the common case (no object or class policy configured).
-        return match ctx
+        // Fast path (no object or class policy configured): collect embedded
+        // handles, resolve virtual→backend under a single context-lock
+        // acquisition, D6(1)-check each pair, then remap.
+        let virtual_handles = collect_param_handles(params);
+        if virtual_handles.is_empty() {
+            return Ok(()); // no embedded handles → nothing to remap
+        }
+        let resolved: Vec<(u64, Option<u64>)> = match ctx
             .context_manager
             .get_context(ctx_id, |lci| {
-                remap_param_handles(params, &|h| {
-                    lci.object_handles.resolve(VirtualHandle(h)).map(|b| b.0)
-                })
+                virtual_handles
+                    .iter()
+                    .map(|&vh| (vh, lci.object_handles.resolve(VirtualHandle(vh)).map(|b| b.0)))
+                    .collect::<Vec<_>>()
             })
             .await
         {
-            Some(result) => result,
-            None => Err(CkRv::CRYPTOKI_NOT_INITIALIZED),
+            Some(pairs) => pairs,
+            None => return Err(CkRv::CRYPTOKI_NOT_INITIALIZED),
         };
+        let backend_session = CkSessionHandle(backend_session_handle);
+        for (virtual_h, backend_h) in &resolved {
+            if let Some(backend_h) = backend_h
+                && *backend_h != 0
+            {
+                super::service_utils::ensure_private_use_allowed(
+                    ctx,
+                    ctx_id,
+                    virtual_session_handle,
+                    *virtual_h,
+                    backend_session,
+                    CkObjectHandle(*backend_h),
+                )
+                .await?;
+            }
+        }
+        let remapped: HashMap<u64, u64> =
+            resolved.into_iter().filter_map(|(vh, bh)| bh.map(|b| (vh, b))).collect();
+        return remap_param_handles(params, &|h| remapped.get(&h).copied());
     }
 
     // Gating path — object or class policy is active.
@@ -117,6 +151,20 @@ pub(super) async fn remap_mechanism_handles(
                 gated.insert(virtual_h, 0); // CK_INVALID_HANDLE passes through
             }
             Some(bh) => {
+                // D6(1): embedding a private key is a USE of that key — refuse
+                // while logically logged out, before the per-object gate (the
+                // same authn-before-authz order as the primary-handle
+                // chokepoints). `Some(0)` is handled by the arm above, so `bh`
+                // is non-zero here.
+                super::service_utils::ensure_private_use_allowed(
+                    ctx,
+                    ctx_id,
+                    virtual_session_handle,
+                    virtual_h,
+                    CkSessionHandle(backend_session_handle),
+                    CkObjectHandle(bh),
+                )
+                .await?;
                 let gated_h = super::service_utils::gate_object_handle(
                     ctx,
                     ctx_id,
@@ -489,9 +537,9 @@ mod tests {
             expand: true,
             prf_hash_mechanism: 0,
             salt_type: 0,
-            salt: Vec::new(),
+            salt: Vec::new().into(),
             salt_key_handle: salt,
-            info: Vec::new(),
+            info: Vec::new().into(),
         })
     }
 
@@ -602,7 +650,7 @@ mod tests {
         mock.initialize().unwrap();
         let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
-        let backend_object = mock.create_object(backend_session, &[]).unwrap();
+        let backend_object = mock.create_object(backend_session, Some(&[])).unwrap();
         // Always set CLASS and TOKEN so fetch_object_metadata's 3-element template works.
         mock.set_attribute(
             backend_object,
@@ -620,7 +668,7 @@ mod tests {
             mock.set_attribute(
                 backend_object,
                 CkAttributeType::UNIQUE_ID,
-                MockAttributeSlot::Value(CkAttributeValue::Bytes(uid)),
+                MockAttributeSlot::Value(CkAttributeValue::Bytes(uid.into())),
             );
         }
 
@@ -696,9 +744,9 @@ mod tests {
                 expand: true,
                 prf_hash_mechanism: 0,
                 salt_type: 0,
-                salt: Vec::new(),
+                salt: Vec::new().into(),
                 salt_key_handle: vo, // this virtual handle is denied (wrong uid)
-                info: Vec::new(),
+                info: Vec::new().into(),
             })),
         };
 
@@ -726,9 +774,9 @@ mod tests {
                 expand: true,
                 prf_hash_mechanism: 0,
                 salt_type: 0,
-                salt: Vec::new(),
+                salt: Vec::new().into(),
                 salt_key_handle: vo, // this virtual handle is allowed
-                info: Vec::new(),
+                info: Vec::new().into(),
             })),
         };
 

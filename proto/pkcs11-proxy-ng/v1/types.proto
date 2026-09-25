@@ -844,6 +844,8 @@ message UnwrapKeyRequest {
   repeated Attribute template = 6;
   // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; wrapped_key is then empty.
   optional uint64 wrapped_key_null_len = 7;
+  // Wave 3.5 D2: true => caller passed (NULL, 0); template is then empty.
+  bool template_null = 8;
 }
 message UnwrapKeyResponse {
   uint64 ck_rv = 1;
@@ -1133,6 +1135,8 @@ message DecapsulateKeyRequest {
   bytes ciphertext = 6;
   // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; ciphertext is then empty.
   optional uint64 ciphertext_null_len = 7;
+  // Wave 3.5 D2: true => caller passed (NULL, 0); template is then empty.
+  bool template_null = 8;
 }
 message DecapsulateKeyResponse {
   uint64 ck_rv = 1;
@@ -1501,6 +1505,8 @@ message UnwrapKeyAuthenticatedRequest {
   // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; associated_data is then empty.
   optional uint64 associated_data_null_len = 9;
   AuthenticatedParameters authenticated_parameters = 10;
+  // Wave 3.5 D2: true => caller passed (NULL, 0); template is then empty.
+  bool template_null = 11;
 }
 message UnwrapKeyAuthenticatedResponse {
   uint64 ck_rv = 1;
@@ -1655,6 +1661,8 @@ message EncapsulateKeyExactRequest {
   repeated Attribute template = 5;
   OutputBufferSpec output_spec = 6;
   uint32 exact_output_effects_version = 7;
+  // Wave 3.5 D2: true => caller passed (NULL, 0); template is then empty.
+  bool template_null = 8;
 }
 
 message EncapsulateKeyExactResponse {

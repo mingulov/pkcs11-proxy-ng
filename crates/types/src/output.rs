@@ -33,7 +33,7 @@ pub struct CkOutputBufferResult {
     pub ck_rv: CkRv,
     /// A safely observable scalar effect, not a claim that a native store occurred.
     pub returned_len: Option<u64>,
-    pub value: Option<Vec<u8>>,
+    pub value: Option<SecretBytes>,
 }
 
 impl CkOutputBufferResult {
@@ -75,7 +75,7 @@ impl CkOutputBufferResult {
             Self {
                 ck_rv: CkRv::OK,
                 returned_len: Some(bytes.len() as u64),
-                value: Some(bytes.to_vec()),
+                value: Some(SecretBytes::copy_from_slice(bytes)),
             }
         } else {
             Self {
@@ -161,7 +161,7 @@ pub struct CkParameterRoundtripResult {
 pub struct CkOutputAndHandleResult {
     pub ck_rv: CkRv,
     pub returned_len: Option<u64>,
-    pub value: Option<Vec<u8>>,
+    pub value: Option<SecretBytes>,
     pub object_handle: Option<CkObjectHandle>,
 }
 
@@ -216,7 +216,7 @@ pub struct CkAttributeQueryResult {
     pub apply_returned_len: bool,
     /// Nested array types are output-only and only valid on defined output RVs.
     pub apply_type: bool,
-    pub value: Option<Vec<u8>>,
+    pub value: Option<SecretBytes>,
     pub ck_rv: Option<CkRv>,
     pub nested: Option<Vec<CkAttributeQueryResult>>,
 }

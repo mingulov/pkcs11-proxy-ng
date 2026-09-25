@@ -72,17 +72,6 @@ python3 scripts/release/validate_receipt.py /evidence/receipt.json \
   --lock-sha256 "$CANDIDATE_LOCK_SHA256"
 ```
 
-## Correction (2026-09-20): G-3 SHA rule is HEAD~1 + docs-only, not HEAD equality
-
-[2026-09-20] The "exact-commit SHA equality (`subject_sha` vs `git
-rev-parse HEAD`)" rule cited in the TX / G-3 section above proved
-UNSATISFIABLE: a tracked receipt cannot name its own commit, so no tag
-placement could ever pass. The `Verify quality receipt` step now
-requires `subject_sha == git rev-parse HEAD~1` (the frozen subject)
-AND a tag-commit delta of receipt/CHANGELOG only. Record preserved as
-written; the step and its battery
-(`scripts/test-verify-quality-receipt.sh`) are normative.
-
 ## Dangling references
 
 Grep of the submodule for `forthcoming`, `release-prep`, `b28753c`,

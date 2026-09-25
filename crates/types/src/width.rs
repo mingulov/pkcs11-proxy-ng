@@ -11,13 +11,36 @@
 
 /// Byte order of an edge's `CK_ULONG` encoding.
 ///
-/// All currently supported targets are little-endian; the variant exists so a
-/// big-endian backend is *detected* (and refused at probe) rather than silently
+/// The variants exist so a big-endian edge is *detected* (and refused at
+/// probe when it mismatches the peer — ADR-0011 D6) rather than silently
 /// mis-decoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ByteOrder {
     Little,
     Big,
+}
+
+impl ByteOrder {
+    /// The byte order of `CK_ULONG` on this build target.
+    ///
+    /// D6 refuses mismatched peers at probe, so past the probe both edges
+    /// share the client's native order — bridge code must use this, never a
+    /// hardcoded order, when (re-)encoding ulong values.
+    pub fn native() -> Self {
+        if cfg!(target_endian = "little") { Self::Little } else { Self::Big }
+    }
+}
+
+/// Encode `v` as native-order `CK_ULONG` bytes of `width` (4 or 8).
+///
+/// The single source of truth for "emulated/native ulong bytes" outside
+/// the FFI edge itself (the mock backend, bridge tests). Panics on any
+/// other width; callers must ensure `v` fits `width` (a truncated value
+/// here is a fixture bug, not a runtime case).
+pub fn encode_native_ulong(v: u64, width: usize) -> Vec<u8> {
+    assert!(width == 4 || width == 8, "CK_ULONG width must be 4 or 8, got {width}");
+    let full = v.to_ne_bytes();
+    if cfg!(target_endian = "little") { full[..width].to_vec() } else { full[8 - width..].to_vec() }
 }
 
 /// Why a width translation could not be performed.
@@ -251,6 +274,36 @@ mod tests {
     fn reencode_rejects_bad_width() {
         assert_eq!(reencode_ulong(&[1, 0], 2, 8, LE), Err(WidthError::UnsupportedWidth));
         assert_eq!(reencode_ulong(&[1; 8], 8, 3, LE), Err(WidthError::UnsupportedWidth));
+    }
+
+    #[test]
+    fn native_order_matches_target_endianness() {
+        let want = if cfg!(target_endian = "little") { LE } else { BE };
+        assert_eq!(ByteOrder::native(), want);
+    }
+
+    #[test]
+    fn native_encode_decodes_to_value_at_both_widths() {
+        // Order-independent pin: whatever this host's order is, the native
+        // encoding must decode back to the value in the native order.
+        for width in [4usize, 8] {
+            let bytes = encode_native_ulong(0x0102_0304, width);
+            assert_eq!(bytes.len(), width);
+            let back = reencode_ulong(&bytes, width, 8, ByteOrder::native()).unwrap();
+            let int_bytes: [u8; 8] = back.try_into().unwrap();
+            let v = if cfg!(target_endian = "little") {
+                u64::from_le_bytes(int_bytes)
+            } else {
+                u64::from_be_bytes(int_bytes)
+            };
+            assert_eq!(v, 0x0102_0304, "round-trip at width {width}");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "CK_ULONG width must be 4 or 8")]
+    fn native_encode_rejects_bad_width() {
+        let _ = encode_native_ulong(1, 2);
     }
 
     #[test]

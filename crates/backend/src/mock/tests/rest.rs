@@ -680,7 +680,12 @@ fn set_op_state_restores_sign_on_same_session() {
     let blob_bytes = blob.expose(|raw| raw.to_vec());
     backend.sign_final(session).unwrap();
     backend
-        .set_operation_state(session, CkInBuf::Bytes(&blob), CkObjectHandle(0), CkObjectHandle(0))
+        .set_operation_state(
+            session,
+            CkInBuf::Bytes(&blob_bytes),
+            CkObjectHandle(0),
+            CkObjectHandle(0),
+        )
         .unwrap();
     backend.sign_final(session).unwrap();
 }
@@ -692,8 +697,14 @@ fn set_op_state_transfers_to_different_session() {
     let mech = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
     backend.sign_init(session_a, &mech, CkObjectHandle(1)).unwrap();
     let blob = backend.get_operation_state(session_a).unwrap();
+    let blob_bytes = blob.expose(|raw| raw.to_vec());
     backend
-        .set_operation_state(session_b, CkInBuf::Bytes(&blob), CkObjectHandle(0), CkObjectHandle(0))
+        .set_operation_state(
+            session_b,
+            CkInBuf::Bytes(&blob_bytes),
+            CkObjectHandle(0),
+            CkObjectHandle(0),
+        )
         .unwrap();
     backend.sign_final(session_b).unwrap();
 }
@@ -812,7 +823,7 @@ fn get_set_op_state_all_op_types_roundtrip() {
         backend
             .set_operation_state(
                 session,
-                CkInBuf::Bytes(&blob),
+                CkInBuf::Bytes(&blob_bytes),
                 CkObjectHandle(0),
                 CkObjectHandle(0),
             )

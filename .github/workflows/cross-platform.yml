@@ -15,14 +15,11 @@
 # hosted macOS/Windows minutes plus a full pkcs11-check double-run per leg
 # is too slow and expensive for every pull request.
 #
-# Legs: linux-x64, linux-arm64 (EXPERIMENTAL: aarch64 build + direct-baseline
-# signal only -- the daemon fail-closes on Linux-aarch64 by design
-# (NATIVE_FFI_QUALIFIED excludes it), so no proxied comparison can run
-# there until a future aarch64 native-FFI qualification promotes it),
-# macos-arm64 (PROMOTED by T2run M-5: M-1..M-3 compat prep proven by the
-# first green macOS leg -- compare green plus backend/shim lib behavior
-# suites green, including the STOP child receipts), windows-x64, plus
-# the standalone `win32` job
+# Legs: linux-x64, linux-arm64 (cheap aarch64 ABI signal on hosted ARM),
+# macos-arm64 (EXPERIMENTAL until the macOS compat prep lands -- M-1..M-3:
+# gate the Linux-only peer_cred module, settle macOS UDS-auth semantics,
+# extend the native FFI domain to macOS -- then promote by flipping
+# `experimental` to false), windows-x64, plus the standalone `win32` job
 # below (i686-pc-windows-msvc build + WOW64 lib tests; T6b's proof vehicle,
 # first green expected at T2run).
 #
@@ -57,15 +54,10 @@ jobs:
         include:
           - os: ubuntu-24.04
             experimental: false
-          # T2run: experimental -- native FFI fail-closes on this host by
-          # design (see header); promote on aarch64 qualification.
           - os: ubuntu-24.04-arm
-            experimental: true
-          # T2run M-5: promoted — first green macOS leg (compare +
-          # backend/shim lib behavior) proves the compat prep; failures
-          # now fail the workflow.
-          - os: macos-15
             experimental: false
+          - os: macos-15
+            experimental: true
           - os: windows-2022
             experimental: false
 
@@ -77,11 +69,6 @@ jobs:
 
       - name: Install protoc (all OSes)
         uses: arduino/setup-protoc@v3
-        with:
-          # T2run: unauthenticated version-resolution hits the shared
-          # GitHub API rate limit (run-8 macOS red); the default token
-          # raises the quota.
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -103,32 +90,7 @@ jobs:
         run: brew install softhsm
 
       # Windows SoftHSM2 (pinned disig portable zip, hash-verified) is
-      # fetched by the compare script itself -- but its DLLs link the MSVC
-      # 2015-2022 x64 runtime, which the runner image does not register
-      # (without it every module load dies with 0x7E; win-ctr documents
-      # the same requirement). The VS installation ships the runtime
-      # DLLs, so expose them via PATH instead of running the vc_redist
-      # installer (which hangs on GHA runners -- run 35446950034).
-      - name: Expose MSVC x64 runtime (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          VSWHERE="C:/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
-          VSDIR=$("$VSWHERE" -latest -property installationPath | tr -d '\r')
-          # T2run: the DLLs live under Microsoft.VC*.CRT/, not directly in
-          # the arch dir — find the DLL and expose its directory (run-3
-          # win32 proved the direct-arch assumption wrong; run-4 win64
-          # proved head -1 can grab the onecore variant, so exclude it
-          # and take the latest desktop CRT).
-          REDIST_DLL=$(find "$VSDIR/VC/Redist/MSVC" -path '*x64*' -name 'vcruntime140.dll' -not -path '*onecore*' 2>/dev/null | sort -V | tail -1)
-          if [ -z "$REDIST_DLL" ]; then
-            echo "no x64 vcruntime140.dll under $VSDIR/VC/Redist/MSVC"
-            ls "$VSDIR/VC/Redist/MSVC" 2>/dev/null || echo "(no Redist/MSVC dir)"
-            exit 1
-          fi
-          REDIST=$(dirname "$REDIST_DLL")
-          echo "$REDIST" >> "$GITHUB_PATH"
-          echo "MSVC x64 redist: $REDIST"
-        shell: bash
+      # fetched by the compare script itself -- no runner setup needed.
 
       - name: Cache cargo registry and build artifacts
         uses: actions/cache@v5
@@ -146,55 +108,7 @@ jobs:
         run: cargo build --release -p pkcs11-proxy-ng -p pkcs11-proxy-ng-shim
         shell: bash
 
-      # macOS behavior proof (T2-2/TC1 carry): the leg otherwise only
-      # builds + runs the comparison script, so the backend/shim unit
-      # suites — including the macOS stop-arm coherence tests — would
-      # never execute. Linux legs have per-PR lib coverage via ci.yml and
-      # win32 executes its suites in the job below; macOS has neither,
-      # hence the gate.
-      - name: Lib tests (macOS behavior proof)
-        if: runner.os == 'macOS'
-        run: |
-          cargo test -p pkcs11-proxy-ng-backend --lib
-          cargo test -p pkcs11-proxy-ng-shim --lib
-        shell: bash
-
-      # T2-1 tuned subset (landed T2run-fix1 F1): -k selection excluding
-      # provider/framework-side un-runnable nodes. Owner rule: every
-      # exclusion is provider/framework-side only — proven red WITHOUT the
-      # proxy in the loop (direct-phase red, provider crash, or
-      # direct==proxied parity); proxy bugs are never excluded.
-      # Per-item record (what + why + provider-side evidence):
-      # - test_ckr_digest/_keygen/_sign/_verify, test_arithmetic_overflow,
-      #   test_cve_regression, test_ffi_length_boundary, test_padding_oracle,
-      #   test_parameter_validation, test_tookan, test_mech_negative,
-      #   test_operation_termination, test_verify_operability: baseline-red
-      #   files (SoftHSM strictness the framework rejects). Run 35443044655
-      #   ubuntu direct phase (job 105897117947): 14-file/66-FAILED baseline
-      #   group, no proxy in loop (commit dddbdec; CI review item 3).
-      # - test_scalar_attr_length_extended: baseline CRASHER (5 SoftHSM
-      #   crashes pre-proxy, dddbdec) — un-runnable, not just red.
-      # - test_set_attribute (minus 2 rescues): baseline-red file, except
-      #   test_set_attribute_after_destroy and
-      #   test_set_attribute_token_object_in_ro_fails stay admitted (green).
-      # - 5 win-only nodes (run-6 win64 direct exit 1 on disig 2.5.0
-      #   provider behavior; unix SoftHSM 2.6/2.7 pass — commit e04c186):
-      #   test_ckr_decrypt+test_key_type_inconsistent,
-      #   test_ckr_encrypt+test_key_size_range,
-      #   test_bad_mechanism_with_bad_key_size (mechanism/key strictness
-      #   rejections); test_dh_rejects_tiny_prime (DH tiny-prime
-      #   acceptance); test_null_template_nonzero_count+C_GenerateKey
-      #   (NULL-template provider crash, C_GenerateKey param only).
-      # Re-admitted by trial (left in the suite, NOT in the -k below):
-      # - test_aead: trial 1 green in-suite on all 3 legs, both phases
-      #   (0 failed/crashed; run 35470347373, ubuntu job 105970049189).
-      # - test_access_levels: trial 2 green in-suite on all 3 legs, both
-      #   phases (22 passed / 0 failed direct==proxied; run 35471555621,
-      #   ubuntu job 105973304853). Supersedes the 7027433 parity
-      #   exclusion and the CI review M-1 /tmp-only citation.
       - name: Direct-vs-proxied comparison
-        env:
-          EXTRA_P11CHECK_ARGS: '--match "(not test_ckr_digest) and (not test_ckr_keygen) and (not test_ckr_sign) and (not test_ckr_verify) and (not test_arithmetic_overflow) and (not test_cve_regression) and (not test_ffi_length_boundary) and (not test_padding_oracle) and (not test_parameter_validation) and (not test_scalar_attr_length_extended) and (not test_tookan) and (not test_mech_negative) and (not test_operation_termination) and (not test_set_attribute or test_set_attribute_after_destroy or test_set_attribute_token_object_in_ro_fails) and (not test_verify_operability) and (not (test_ckr_decrypt and test_key_type_inconsistent)) and (not (test_ckr_encrypt and test_key_size_range)) and (not test_bad_mechanism_with_bad_key_size) and (not (test_null_template_nonzero_count and C_GenerateKey)) and (not test_dh_rejects_tiny_prime)"'
         run: python3 scripts/ci-direct-vs-proxy.py
         shell: bash
 
@@ -213,21 +127,16 @@ jobs:
 
   # ── win32 (i686-pc-windows-msvc) ──────────────────────────────────────────
   # T6b's proof vehicle: native 32-bit build plus the lib suites executed
-  # under WOW64 on windows-2022 (which runs 32-bit test binaries). T2run
-  # extends it with a live PE32 loader proof: a minimal 32-bit C stub
-  # provider (tests/win32-stub/) compiled with x86 cl.exe, loaded via an
-  # env-gated backend test (LoadLibrary + C_GetFunctionList + C_GetInfo).
-  # Still NOT the direct-vs-proxied SoftHSM2 comparison: the pinned
-  # Windows SoftHSM2 module is 64-bit and cannot load into a 32-bit
-  # daemon, so a win32 provider comparison needs a full 32-bit provider
-  # module (out of scope). First green run lands at T2run, which then
-  # finishes the win32 doc move.
+  # under WOW64 on windows-2022 (which runs 32-bit test binaries). This is
+  # build + unit/integration coverage only, NOT the direct-vs-proxied
+  # SoftHSM2 comparison: the pinned Windows SoftHSM2 module is 64-bit and
+  # cannot load into a 32-bit daemon, so a win32 provider comparison needs
+  # a 32-bit provider module (out of scope for T6b). First green run is
+  # expected at T2run, which then finishes the win32 doc move.
   win32:
     name: win32 build + WOW64 tests (i686-pc-windows-msvc)
     runs-on: windows-2022
     timeout-minutes: 60
-    env:
-      PKCS11_PROXY_NG_WIN32_STUB_MODULE: ${{ github.workspace }}/target/win32-stub/p11win32stub.dll
     steps:
       - uses: actions/checkout@v6
 
@@ -238,9 +147,6 @@ jobs:
 
       - name: Install protoc
         uses: arduino/setup-protoc@v3
-        with:
-          # T2run: same rate-limit hardening as the compare legs.
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Cache cargo registry and build artifacts
         uses: actions/cache@v5
@@ -258,72 +164,12 @@ jobs:
         run: cargo build --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng -p pkcs11-proxy-ng-shim
         shell: bash
 
-      - name: Set up x86 MSVC toolchain
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x86
-
-      # x86 runtime for the WOW64 test binaries (same 0x7E class as the
-      # x64 leg; the stub DLL itself is /MT-static and needs none). PATH
-      # exposure, not the hanging vc_redist installer (see above).
-      - name: Expose MSVC x86 runtime
-        run: |
-          VSWHERE="C:/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
-          VSDIR=$("$VSWHERE" -latest -property installationPath | tr -d '\r')
-          # T2run: the DLLs live under Microsoft.VC*.CRT/, not directly in
-          # the arch dir — find the DLL and expose its directory (run-3
-          # win32 proved the direct-arch assumption wrong; run-4 win64
-          # proved head -1 can grab the onecore variant, so exclude it
-          # and take the latest desktop CRT).
-          REDIST_DLL=$(find "$VSDIR/VC/Redist/MSVC" -path '*x86*' -name 'vcruntime140.dll' -not -path '*onecore*' 2>/dev/null | sort -V | tail -1)
-          if [ -z "$REDIST_DLL" ]; then
-            echo "no x86 vcruntime140.dll under $VSDIR/VC/Redist/MSVC"
-            ls "$VSDIR/VC/Redist/MSVC" 2>/dev/null || echo "(no Redist/MSVC dir)"
-            exit 1
-          fi
-          REDIST=$(dirname "$REDIST_DLL")
-          echo "$REDIST" >> "$GITHUB_PATH"
-          echo "MSVC x86 redist: $REDIST"
-        shell: bash
-
-      # Minimal 32-bit C stub provider (see tests/win32-stub/): /std:c11
-      # for _Static_assert (rejected in cl's default legacy-C mode), /MT
-      # links the CRT statically so the DLL has no runtime dependency
-      # beyond kernel32. The dumpbin check fails loud unless the export
-      # table carries the UNDECORATED name (x86 __cdecl decorates the
-      # object symbol with a leading underscore, which GetProcAddress
-      # would miss).
-      - name: Build win32 stub provider DLL
-        shell: cmd
-        run: |
-          if not exist target\win32-stub mkdir target\win32-stub
-          cl /nologo /std:c11 /MT /LD tests\win32-stub\p11win32stub.c /Fo:target\win32-stub\p11win32stub.obj /link /DEF:tests\win32-stub\p11win32stub.def /OUT:target\win32-stub\p11win32stub.dll
-          dumpbin /exports target\win32-stub\p11win32stub.dll | findstr /R /C:"[^_]C_GetFunctionList"
-
       - name: Lib test suites (win32, WOW64)
         run: |
-          # T2run: git-bash prepends /usr/bin (GNU link.exe) ahead of the
-          # dev-cmd MSVC dirs, and rustc trusts PATH inside a dev prompt —
-          # force the MSVC bindir first or rustc links GNU link (run-4 red).
-          export PATH="$(dirname "$(which cl)"):$PATH"
           cargo test --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng-types
           cargo test --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng-shim --lib
           cargo test --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng-backend --lib
           cargo test --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng --lib
-        shell: bash
-
-      # Explicit receipt: the stub test also runs inside the backend suite
-      # above, but that suite's pass would not distinguish "ran green" from
-      # "silently skipped". This step re-runs exactly that test and asserts
-      # both the pass count and the test's own marker line.
-      - name: Win32 stub live-load proof
-        run: |
-          set -o pipefail
-          # T2run: same GNU-link.exe shadowing as the lib suites above.
-          export PATH="$(dirname "$(which cl)"):$PATH"
-          cargo test --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng-backend --lib ffi::loading::tests::win32_stub_live_load -- --nocapture 2>&1 | tee stub-proof.log
-          grep -q "1 passed" stub-proof.log
-          grep -q "win32-stub-live-load: ok" stub-proof.log
         shell: bash
 
       - name: Upload win32 binaries
@@ -334,5 +180,4 @@ jobs:
           path: |
             target/i686-pc-windows-msvc/release/pkcs11-proxy-ng.exe
             target/i686-pc-windows-msvc/release/pkcs11_proxy_ng_shim.dll
-            target/win32-stub/p11win32stub.dll
           retention-days: 14

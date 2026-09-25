@@ -114,7 +114,7 @@ fn empty_parameter_ack(spec: &CkParameterRoundtripSpec) -> CkParameterRoundtripR
     CkParameterRoundtripResult {
         ck_rv: CkRv::OK,
         returned_len: spec.buffer_len,
-        value: spec.buffer_present.then(Vec::new),
+        value: spec.buffer_present.then(Vec::new).map(SecretBytes::new),
     }
 }
 
@@ -148,7 +148,7 @@ fn structured_parameter_ack(
     Ok(CkParameterRoundtripResult {
         ck_rv,
         returned_len: provider_spec.buffer_len,
-        value: Some(Vec::new()),
+        value: Some(Vec::new().into()),
     })
 }
 
@@ -514,7 +514,7 @@ impl FfiBackend {
         Ok(CkParameterRoundtripResult {
             ck_rv: CkRv::OK,
             returned_len: provider_spec.buffer_len,
-            value: provider_spec.buffer_present.then(Vec::new),
+            value: provider_spec.buffer_present.then(Vec::new).map(SecretBytes::new),
         })
     }
 
@@ -629,7 +629,7 @@ impl FfiBackend {
         Ok(CkParameterRoundtripResult {
             ck_rv: CkRv::OK,
             returned_len: provider_spec.buffer_len,
-            value: provider_spec.buffer_present.then(Vec::new),
+            value: provider_spec.buffer_present.then(Vec::new).map(SecretBytes::new),
         })
     }
 
@@ -728,7 +728,7 @@ impl FfiBackend {
         parameter: &mut [u8],
         aad: CkInBuf<'_>,
         plaintext: CkInBuf<'_>,
-    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+    ) -> CkResult<(SecretBytes, SecretBytes)> {
         let (aad_ptr, aad_len) = native_message_input(aad)?;
         let (pt_ptr, pt_len) = native_message_input(plaintext)?;
         two_call_message!(
@@ -756,7 +756,7 @@ impl FfiBackend {
         session: CkSessionHandle,
         parameter: &mut [u8],
         aad: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_EncryptMessageBegin }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
@@ -769,29 +769,9 @@ impl FfiBackend {
                 aad_ptr as *mut _,
                 aad_len,
             )
-        })?;
+        };
+        Self::ck_result(rv)?;
         Ok(parameter.to_vec().into())
-    }
-
-    pub(super) fn ffi_encrypt_message_begin_exact(
-        &self,
-        session: CkSessionHandle,
-        aad: CkInBuf<'_>,
-        provider_spec: &CkParameterRoundtripSpec,
-    ) -> CkResult<CkParameterRoundtripResult> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
-        let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
-        let f = unsafe { (*fl).C_EncryptMessageBegin }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
-        self.ffi_message_begin_empty_exact(
-            &admission,
-            session,
-            aad,
-            provider_spec,
-            |session, parameter, len, aad, aad_len| unsafe {
-                f(session, parameter, len, aad, aad_len)
-            },
-        )
     }
 
     pub(super) fn ffi_encrypt_message_begin_exact(
@@ -821,7 +801,7 @@ impl FfiBackend {
         parameter: &mut [u8],
         plaintext_part: CkInBuf<'_>,
         flags: CkFlags,
-    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+    ) -> CkResult<(SecretBytes, SecretBytes)> {
         let (pt_ptr, pt_len) = native_message_input(plaintext_part)?;
         let flags = native_message_flags(flags)?;
         two_call_message!(
@@ -849,7 +829,7 @@ impl FfiBackend {
         parameter: &mut [u8],
         aad: CkInBuf<'_>,
         ciphertext: CkInBuf<'_>,
-    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+    ) -> CkResult<(SecretBytes, SecretBytes)> {
         let (aad_ptr, aad_len) = native_message_input(aad)?;
         let (ct_ptr, ct_len) = native_message_input(ciphertext)?;
         two_call_message!(
@@ -877,7 +857,7 @@ impl FfiBackend {
         session: CkSessionHandle,
         parameter: &mut [u8],
         aad: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_DecryptMessageBegin }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
@@ -890,29 +870,9 @@ impl FfiBackend {
                 aad_ptr as *mut _,
                 aad_len,
             )
-        })?;
+        };
+        Self::ck_result(rv)?;
         Ok(parameter.to_vec().into())
-    }
-
-    pub(super) fn ffi_decrypt_message_begin_exact(
-        &self,
-        session: CkSessionHandle,
-        aad: CkInBuf<'_>,
-        provider_spec: &CkParameterRoundtripSpec,
-    ) -> CkResult<CkParameterRoundtripResult> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
-        let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
-        let f = unsafe { (*fl).C_DecryptMessageBegin }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
-        self.ffi_message_begin_empty_exact(
-            &admission,
-            session,
-            aad,
-            provider_spec,
-            |session, parameter, len, aad, aad_len| unsafe {
-                f(session, parameter, len, aad, aad_len)
-            },
-        )
     }
 
     pub(super) fn ffi_decrypt_message_begin_exact(
@@ -942,7 +902,7 @@ impl FfiBackend {
         parameter: &mut [u8],
         ciphertext_part: CkInBuf<'_>,
         flags: CkFlags,
-    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+    ) -> CkResult<(SecretBytes, SecretBytes)> {
         let (ct_ptr, ct_len) = native_message_input(ciphertext_part)?;
         let flags = native_message_flags(flags)?;
         two_call_message!(
@@ -969,7 +929,7 @@ impl FfiBackend {
         session: CkSessionHandle,
         parameter: &mut [u8],
         data: CkInBuf<'_>,
-    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+    ) -> CkResult<(SecretBytes, SecretBytes)> {
         let (data_ptr, data_len) = native_message_input(data)?;
         two_call_message!(
             &admission,
@@ -994,7 +954,6 @@ impl FfiBackend {
         session: CkSessionHandle,
         parameter: &mut [u8],
     ) -> CkResult<SecretBytes> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_SignMessageBegin }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
@@ -1006,7 +965,7 @@ impl FfiBackend {
             )
         };
         Self::ck_result(rv)?;
-        Ok(parameter.to_vec())
+        Ok(parameter.to_vec().into())
     }
 
     pub(super) fn ffi_sign_message_begin_exact(
@@ -1033,7 +992,6 @@ impl FfiBackend {
         data_part: CkInBuf<'_>,
         request_signature: bool,
     ) -> CkResult<(SecretBytes, SecretBytes)> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_SignMessageNext }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
@@ -1657,7 +1615,7 @@ impl FfiBackend {
                     CkOutputBufferResult {
                         ck_rv: CkRv::OK,
                         returned_len: Some(out_len as u64),
-                        value: Some(buf),
+                        value: Some(buf.into()),
                     },
                     MessageParameter::GcmMessage(result_gcm),
                 ))
@@ -1778,7 +1736,7 @@ impl FfiBackend {
                     CkOutputBufferResult {
                         ck_rv: CkRv::OK,
                         returned_len: Some(out_len as u64),
-                        value: Some(buf),
+                        value: Some(buf.into()),
                     },
                     snapshot(&nonce_buf, &mac_buf),
                 ))
@@ -1878,7 +1836,7 @@ impl FfiBackend {
                     CkOutputBufferResult {
                         ck_rv: CkRv::OK,
                         returned_len: Some(out_len as u64),
-                        value: Some(buf),
+                        value: Some(buf.into()),
                     },
                     snapshot(&nonce_buf, &tag_buf),
                 ))
@@ -3322,7 +3280,7 @@ mod tests {
                     &format!("{shape} {direction} one-shot"),
                 );
                 assert_eq!(output.ck_rv, CkRv::OK);
-                assert_eq!(output.value, Some(b"input".to_vec()));
+                assert_eq!(output.value, Some(SecretBytes::new(b"input".to_vec())));
                 assert_eq!(ack.returned_len, native_len);
                 returned
                     .validate_for(
@@ -3406,7 +3364,7 @@ mod tests {
                     &format!("{shape} {direction} Next"),
                 );
                 assert_eq!(output.ck_rv, CkRv::OK);
-                assert_eq!(output.value, Some(b"input".to_vec()));
+                assert_eq!(output.value, Some(SecretBytes::new(b"input".to_vec())));
                 assert_eq!(ack.returned_len, native_len);
                 returned
                     .validate_for(
@@ -3511,7 +3469,7 @@ mod tests {
                 );
                 assert_eq!(ENCRYPT_BEGIN_PARAMETER_LEN.load(Ordering::SeqCst), len as usize);
                 assert_eq!(ack.returned_len, len);
-                assert_eq!(ack.value, present.then(Vec::new));
+                assert_eq!(ack.value, present.then(Vec::new).map(SecretBytes::new));
             }
         }
     }
@@ -3809,7 +3767,7 @@ mod tests {
     /// typed struct and must be rejected rather than shipped blindly.
     #[test]
     fn raw_message_init_param_is_rejected() {
-        let param = MessageParameter::Raw(vec![0u8; 8]);
+        let param = MessageParameter::Raw(vec![0u8; 8].into());
         let result = build_message_init_mechanism(cryptoki_sys::CKM_AES_GCM as u64, &param);
         assert!(
             matches!(result, Err(CkRv::MECHANISM_PARAM_INVALID)),

@@ -59,6 +59,7 @@ pub unsafe extern "C" fn c_encapsulate_key(
             Ok(template) => template,
             Err(e) => return rv_err(e),
         };
+        let template_opt = null_preserving_template(&template, p_template);
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
             return rv;
@@ -70,7 +71,7 @@ pub unsafe extern "C" fn c_encapsulate_key(
             CkSessionHandle(h_session as u64),
             &mech,
             CkObjectHandle(h_public_key as u64),
-            &template,
+            template_opt,
             &spec,
         ));
 
@@ -101,6 +102,7 @@ pub unsafe extern "C" fn c_decapsulate_key(
             Ok(template) => template,
             Err(e) => return rv_err(e),
         };
+        let template_opt = null_preserving_template(&template, p_template);
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
             return rv;
@@ -116,7 +118,7 @@ pub unsafe extern "C" fn c_decapsulate_key(
             CkSessionHandle(h_session as u64),
             &mech,
             CkObjectHandle(h_private_key as u64),
-            &template,
+            template_opt,
             ciphertext,
         )) {
             Ok(key_handle) => {

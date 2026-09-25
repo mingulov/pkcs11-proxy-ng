@@ -25,7 +25,7 @@ impl FfiBackend {
         let function = unsafe { (*fl).C_EncapsulateKey }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
-        let ffi_attrs = FfiAttrs::from_slice(template)?;
+        let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
 
         let h_session = Self::session_handle(session)?;
         let h_public_key = Self::object_handle(public_key)?;
@@ -65,7 +65,7 @@ impl FfiBackend {
         let function = unsafe { (*fl).C_EncapsulateKey }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
-        let ffi_attrs = FfiAttrs::from_slice(template)?;
+        let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
 
         // Two-call pattern: first call with pCiphertext=null to get size.
         // Each leg routes through the unit choke (single call, no retry —
@@ -112,13 +112,13 @@ impl FfiBackend {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         private_key: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
         ciphertext: CkInBuf<'_>,
     ) -> CkResult<CkObjectHandle> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         use super::ffi_conversion::FfiAttrs;
 
-        let ffi_attrs = FfiAttrs::from_slice(template)?;
+        let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
         let (ct_ptr, ct_len) = ciphertext.as_ptr_len();
         let mut key_handle: cryptoki_sys::CK_OBJECT_HANDLE = 0;
@@ -215,7 +215,7 @@ mod tests {
                 CkSessionHandle(1),
                 &mechanism,
                 CkObjectHandle(2),
-                &[],
+                Some(&[]),
                 &output_spec,
             )
             .expect("provider result envelope");

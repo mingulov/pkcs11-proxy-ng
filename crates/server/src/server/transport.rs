@@ -29,9 +29,14 @@ pub fn server_tls_config(tcp: &TcpListenerConfig) -> Result<Option<ServerTlsConf
             check_key_perms(key_path)?;
             let ca = read_file(ca_path, "listener.remote.ca_cert")?;
             let cert = read_file(cert_path, "listener.remote.server_cert")?;
-            let key = std::fs::read(key_path).map_err(|e| {
+            // ADR-0013 §5: the PEM key file is adopted into the wiping owner
+            // immediately; only the copy forced by tonic's `Vec<u8>` API is
+            // plain, and it is built at the call with no retained duplicate.
+            // (rustls necessarily retains its own parsed copy past this point,
+            // like tonic/prost transport buffers: outside the wiping guarantee.)
+            let key = SecretBytes::new(std::fs::read(key_path).map_err(|e| {
                 format!("failed to read listener.remote.server_key '{}': {e}", key_path.display())
-            })?;
+            })?);
 
             Ok(Some(
                 ServerTlsConfig::new()

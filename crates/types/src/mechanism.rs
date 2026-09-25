@@ -699,21 +699,6 @@ impl std::fmt::Debug for Pkcs5Pbkd2Params {
     }
 }
 
-impl std::fmt::Debug for Pkcs5Pbkd2Params {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Destructure to gate against silently-omitted future fields.
-        let Self { salt_source, salt_source_data, iterations, prf, prf_data, password } = self;
-        f.debug_struct("Pkcs5Pbkd2Params")
-            .field("salt_source", salt_source)
-            .field("salt_source_data", &format_args!("[{} bytes]", salt_source_data.len()))
-            .field("iterations", iterations)
-            .field("prf", prf)
-            .field("prf_data", &format_args!("[{} bytes]", prf_data.len()))
-            .field("password", &format_args!("[REDACTED; {} bytes]", password.len()))
-            .finish()
-    }
-}
-
 // ---------------------------------------------------------------------------
 // TLS/SSL parameter structs
 // ---------------------------------------------------------------------------
@@ -1077,30 +1062,6 @@ impl std::fmt::Debug for SkipjackRelayxParams {
     }
 }
 
-impl std::fmt::Debug for SkipjackRelayxParams {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Destructure to gate against silently-omitted future fields.
-        let Self {
-            old_wrapped_x,
-            old_password,
-            old_public_data,
-            old_random_a,
-            new_password,
-            new_public_data,
-            new_random_a,
-        } = self;
-        f.debug_struct("SkipjackRelayxParams")
-            .field("old_wrapped_x", &format_args!("[{} bytes]", old_wrapped_x.len()))
-            .field("old_password", &format_args!("[REDACTED; {} bytes]", old_password.len()))
-            .field("old_public_data", &format_args!("[{} bytes]", old_public_data.len()))
-            .field("old_random_a", &format_args!("[{} bytes]", old_random_a.len()))
-            .field("new_password", &format_args!("[REDACTED; {} bytes]", new_password.len()))
-            .field("new_public_data", &format_args!("[{} bytes]", new_public_data.len()))
-            .field("new_random_a", &format_args!("[{} bytes]", new_random_a.len()))
-            .finish()
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Generic / Vendor parameter structs
 // ---------------------------------------------------------------------------
@@ -1138,7 +1099,7 @@ pub struct KeyDerivationStringData {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignAdditionalContext {
     pub hedge_variant: u64,
-    pub context: Vec<u8>,
+    pub context: SecretBytes,
     /// 0 = plain CK_SIGN_ADDITIONAL_CONTEXT; non-zero = CK_HASH_SIGN_ADDITIONAL_CONTEXT.
     pub hash: u64,
 }
@@ -1669,15 +1630,15 @@ mod tests {
     fn pbe_params_zeroizes_password_on_explicit_call() {
         use zeroize::Zeroize;
         let mut p = PbeParams {
-            init_vector: vec![1u8; 16],
-            password: vec![0xAAu8; 32],
-            salt: vec![2u8; 16],
+            init_vector: vec![1u8; 16].into(),
+            password: vec![0xAAu8; 32].into(),
+            salt: vec![2u8; 16].into(),
             iteration: 4096,
         };
         p.zeroize();
         // After Zeroize::zeroize() Vec<u8> fields are cleared/truncated.
-        assert!(p.password.iter().all(|&b| b == 0), "password bytes not zeroed");
-        assert!(p.init_vector.iter().all(|&b| b == 0), "iv bytes not zeroed");
+        assert!(p.password.expose(|b| b.iter().all(|&x| x == 0)), "password bytes not zeroed");
+        assert!(p.init_vector.expose(|b| b.iter().all(|&x| x == 0)), "iv bytes not zeroed");
     }
 
     #[test]
@@ -1685,21 +1646,21 @@ mod tests {
         use zeroize::Zeroize;
         let mut p = Pkcs5Pbkd2Params {
             salt_source: 1,
-            salt_source_data: vec![1u8; 8],
+            salt_source_data: vec![1u8; 8].into(),
             iterations: 10_000,
             prf: 0x40,
-            prf_data: vec![2u8; 4],
-            password: b"hunter2".to_vec(),
+            prf_data: vec![2u8; 4].into(),
+            password: b"hunter2".to_vec().into(),
         };
         p.zeroize();
-        assert!(p.password.iter().all(|&b| b == 0));
+        assert!(p.password.expose(|b| b.iter().all(|&x| x == 0)));
     }
 
     #[test]
     fn skipjack_params_zeroize_passwords() {
         use zeroize::Zeroize;
         let mut a = SkipjackPrivateWrapParams {
-            password: b"old-secret".to_vec(),
+            password: b"old-secret".to_vec().into(),
             public_data: vec![],
             password_length: 10,
             random_a: vec![],
@@ -1708,20 +1669,20 @@ mod tests {
             subprime_q: vec![],
         };
         a.zeroize();
-        assert!(a.password.iter().all(|&b| b == 0));
+        assert!(a.password.expose(|b| b.iter().all(|&x| x == 0)));
 
         let mut b = SkipjackRelayxParams {
-            old_wrapped_x: vec![],
-            old_password: b"old-pin".to_vec(),
-            old_public_data: vec![],
-            old_random_a: vec![],
-            new_password: b"new-pin".to_vec(),
-            new_public_data: vec![],
-            new_random_a: vec![],
+            old_wrapped_x: vec![].into(),
+            old_password: b"old-pin".to_vec().into(),
+            old_public_data: vec![].into(),
+            old_random_a: vec![].into(),
+            new_password: b"new-pin".to_vec().into(),
+            new_public_data: vec![].into(),
+            new_random_a: vec![].into(),
         };
         b.zeroize();
-        assert!(b.old_password.iter().all(|&n| n == 0));
-        assert!(b.new_password.iter().all(|&n| n == 0));
+        assert!(b.old_password.expose(|b| b.iter().all(|&x| x == 0)));
+        assert!(b.new_password.expose(|b| b.iter().all(|&x| x == 0)));
     }
 
     // Witness whose Zeroize impl records that it ran, so ZeroizeOnDrop's
@@ -1773,9 +1734,9 @@ mod tests {
     #[test]
     fn pbe_params_debug_redacts_password() {
         let p = PbeParams {
-            init_vector: vec![1u8; 16],
-            password: b"hunter2".to_vec(),
-            salt: vec![2u8; 16],
+            init_vector: vec![1u8; 16].into(),
+            password: b"hunter2".to_vec().into(),
+            salt: vec![2u8; 16].into(),
             iteration: 4096,
         };
         let formatted = format!("{p:?}");
@@ -1788,11 +1749,11 @@ mod tests {
     fn pkcs5_pbkd2_debug_redacts_password() {
         let p = Pkcs5Pbkd2Params {
             salt_source: 1,
-            salt_source_data: vec![],
+            salt_source_data: vec![].into(),
             iterations: 1,
             prf: 0,
-            prf_data: vec![],
-            password: b"correct horse battery staple".to_vec(),
+            prf_data: vec![].into(),
+            password: b"correct horse battery staple".to_vec().into(),
         };
         let formatted = format!("{p:?}");
         assert!(!formatted.contains("correct horse"), "password leaked: {formatted}");
@@ -1802,7 +1763,7 @@ mod tests {
     #[test]
     fn skipjack_debug_redacts_passwords() {
         let a = SkipjackPrivateWrapParams {
-            password: b"alpha-pw".to_vec(),
+            password: b"alpha-pw".to_vec().into(),
             public_data: vec![],
             password_length: 8,
             random_a: vec![],
@@ -1815,13 +1776,13 @@ mod tests {
         assert!(af.contains("REDACTED"));
 
         let b = SkipjackRelayxParams {
-            old_wrapped_x: vec![],
-            old_password: b"old-pw".to_vec(),
-            old_public_data: vec![],
-            old_random_a: vec![],
-            new_password: b"new-pw".to_vec(),
-            new_public_data: vec![],
-            new_random_a: vec![],
+            old_wrapped_x: vec![].into(),
+            old_password: b"old-pw".to_vec().into(),
+            old_public_data: vec![].into(),
+            old_random_a: vec![].into(),
+            new_password: b"new-pw".to_vec().into(),
+            new_public_data: vec![].into(),
+            new_random_a: vec![].into(),
         };
         let bf = format!("{b:?}");
         assert!(!bf.contains("old-pw"));

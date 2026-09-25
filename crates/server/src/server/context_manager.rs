@@ -174,7 +174,10 @@ impl Drop for CloseSessionTransition {
 /// (I2 fix, ADR-0012 §G3).
 #[derive(Debug, Clone)]
 pub struct ObjectMetadata {
-    pub unique_id: Vec<u8>,
+    /// `CKA_UNIQUE_ID` bytes (ADR-0013: attribute values are secret-classified
+    /// and fail closed). Wiping owner; cached copies wipe on eviction, and
+    /// the derived `Debug` redacts via `SecretBytes`.
+    pub unique_id: SecretBytes,
     /// `None` when `CKA_CLASS` is absent or unparseable (M2: uid-only deployments must not
     /// fail on a missing class attribute). Class-confined gates treat `None` as fail-closed
     /// (deny); uid-only deployments ignore this field entirely.
@@ -190,7 +193,12 @@ pub struct ObjectMetadata {
 #[derive(Debug, Clone)]
 pub struct CachedAttr {
     /// Raw attribute value bytes as returned by the backend (may be empty on error).
-    pub value: Vec<u8>,
+    ///
+    /// A wiping owner (ADR-0013 §2): attribute fields are polymorphic and
+    /// vendor-defined types fail closed to secret, so even though the
+    /// coalescer declines to cache known-secret types, whatever IS cached
+    /// (including vendor-unknown values) wipes on eviction/session drop.
+    pub value: SecretBytes,
     /// The raw `CK_RV` returned by the backend for this attribute.
     pub ck_rv: u64,
 }
@@ -235,6 +243,21 @@ pub struct LogicalClientInstance {
     /// FIND results (`register_object_handles`) are intentionally NOT inserted
     /// here — only minting operations insert.
     pub created_objects: HashSet<VirtualHandle>,
+    /// Template-declared `CKA_PRIVATE` bit per virtual object handle, recorded
+    /// at mint time (create/copy/generate/derive/unwrap/encapsulate/decapsulate)
+    /// for the D6(1) logical-login enforcement. `true` = known-private (refuse
+    /// USE while logged out without a backend probe); `false` = known-public
+    /// (proceed without a probe). ABSENT = unknown (find results and
+    /// backend-minted mechanism-out handles, which carry no client template):
+    /// logged-out USE probes `CKA_PRIVATE` from the backend once per operation.
+    /// `CKA_PRIVATE` is immutable after creation, so a recorded bit never goes
+    /// stale within the handle's lifetime.
+    ///
+    /// Entries are evicted in the SAME removal hooks as `object_metadata` and
+    /// `created_objects` (per-handle removal on session close and on
+    /// `C_DestroyObject`, plus full teardown) so a recycled virtual handle
+    /// cannot inherit a stale privacy bit.
+    pub object_private: HashMap<VirtualHandle, bool>,
     /// Session-scoped attribute result cache (R2 coalescer).
     ///
     /// Keys are `(virtual object handle, attribute type)`. Entries are evicted
@@ -271,6 +294,7 @@ impl LogicalClientInstance {
             object_metadata: HashMap::new(),
             session_objects: HashMap::new(),
             created_objects: HashSet::new(),
+            object_private: HashMap::new(),
             attr_cache: HashMap::new(),
             login_state: HashMap::new(),
             authenticated_identity: identity,
@@ -312,6 +336,7 @@ impl LogicalClientInstance {
                     self.object_handles.remove(object);
                     self.object_metadata.remove(&object);
                     self.created_objects.remove(&object);
+                    self.object_private.remove(&object);
                     // Evict all cached attribute entries for this object (R2). Mirrors
                     // the object_metadata + created_objects eviction so a recycled
                     // virtual handle cannot return stale cached attributes.
@@ -348,6 +373,7 @@ impl LogicalClientInstance {
                 self.object_handles.remove(object);
                 self.object_metadata.remove(&object);
                 self.created_objects.remove(&object);
+                self.object_private.remove(&object);
                 // Evict all cached attribute entries for this object (R2). Mirrors
                 // the object_metadata + created_objects eviction so a recycled
                 // virtual handle cannot return stale cached attributes.
@@ -376,6 +402,7 @@ impl LogicalClientInstance {
         self.object_metadata.clear();
         self.session_objects.clear();
         self.created_objects.clear();
+        self.object_private.clear();
         self.attr_cache.clear();
         self.login_state.clear();
         self.message_operations.clear();
@@ -421,14 +448,6 @@ pub struct ContextManager {
     slot_map: Arc<RwLock<SlotMap>>,
     lease_duration: std::time::Duration,
     max_contexts: usize,
-    /// Per-(slot, login state) PIN verifiers (salted SHA-256), captured at the
-    /// first successful backend login so a co-located logical client can be
-    /// PIN-validated without a second backend `C_Login` (which the shared,
-    /// already-logged-in token answers `USER_ALREADY_LOGGED_IN` without
-    /// checking the PIN). Stores a salted hash, never the raw PIN. See ADR-0008.
-    pin_verifiers: Arc<DashMap<(BackendSlotId, LoginState), [u8; 32]>>,
-    /// Random per-process salt for the PIN-verifier hashes.
-    pin_salt: [u8; 16],
     /// Cache of `(label, serial)` per backend slot, captured when the daemon
     /// last read `C_GetTokenInfo` for an authorization check (M9). Authorization
     /// is otherwise a blocking backend call on every discovery/open. Entries are
@@ -496,8 +515,6 @@ impl ContextManager {
             slot_map: Arc::new(RwLock::new(SlotMap::new())),
             lease_duration,
             max_contexts,
-            pin_verifiers: Arc::new(DashMap::new()),
-            pin_salt: *Uuid::new_v4().as_bytes(),
             token_info_cache: Arc::new(DashMap::new()),
             login_locks: Arc::new(DashMap::new()),
         }
@@ -804,45 +821,6 @@ impl ContextManager {
         self.token_info_cache.remove(&backend_slot);
     }
 
-    /// Salted hash of a PIN for verifier storage/comparison. A `None` PIN
-    /// (protected-auth path) hashes to a value distinct from an empty PIN.
-    pub fn hash_pin(&self, pin: Option<&[u8]>) -> [u8; 32] {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(self.pin_salt);
-        match pin {
-            Some(p) => {
-                hasher.update([1u8]);
-                hasher.update(p);
-            }
-            None => hasher.update([0u8]),
-        }
-        hasher.finalize().into()
-    }
-
-    /// Capture the PIN verifier for `(slot, state)` after a successful backend
-    /// login so later co-located logical logins can be PIN-validated.
-    pub fn store_pin_verifier_hash(&self, slot: BackendSlotId, state: LoginState, hash: [u8; 32]) {
-        self.pin_verifiers.insert((slot, state), hash);
-    }
-
-    /// Validate a presented PIN's hash against the stored verifier for
-    /// `(slot, state)`. `None` means no verifier is recorded — the caller must
-    /// not synthesize a login (it cannot validate the PIN).
-    pub fn verify_pin_hash(
-        &self,
-        slot: BackendSlotId,
-        state: LoginState,
-        hash: &[u8; 32],
-    ) -> Option<bool> {
-        self.pin_verifiers.get(&(slot, state)).map(|stored| *stored == *hash)
-    }
-
-    /// Drop the PIN verifier for `(slot, state)` (on the last real logout).
-    pub fn clear_pin_verifier(&self, slot: BackendSlotId, state: LoginState) {
-        self.pin_verifiers.remove(&(slot, state));
-    }
-
     /// Populate slot map from backend's C_GetSlotList.
     pub async fn populate_slots(
         &self,
@@ -1012,52 +990,6 @@ impl ContextManager {
             entry.in_flight.clone()
         };
         Ok(Some(OperationGuard::new(Arc::clone(self), id.clone(), counter)))
-    }
-
-    pub fn begin_operation(self: &Arc<Self>, id: &ClientContextId) -> Option<OperationGuard> {
-        // Increment in_flight WHILE holding the shard lock (the `get` guard), so
-        // the eviction path's `remove_if` — which takes the shard write lock and
-        // is therefore mutually exclusive with this read lock — cannot observe
-        // in_flight==0 and reap this context between the read and the increment
-        // (L10). The Arc is cloned for the guard before the lock is released.
-        let counter = {
-            let entry = self.contexts.get(id)?;
-            entry.in_flight.fetch_add(1, Ordering::Relaxed);
-            entry.in_flight.clone()
-        };
-        Some(OperationGuard::new(Arc::clone(self), id.clone(), counter))
-    }
-
-    // Not `async`: a DashMap read needs no `.await` (L5).
-    pub fn context_identity(&self, id: &ClientContextId) -> Option<String> {
-        self.contexts.get(id).and_then(|ctx| ctx.authenticated_identity.clone())
-    }
-
-    /// Sum of open sessions across ALL contexts whose principal key equals
-    /// `principal_key`. A context's principal key is its `authenticated_identity`
-    /// when set; otherwise the context-id string itself (mirrors the derivation
-    /// used at the dispatch seam so authenticated principals aggregate across
-    /// their contexts and unauthenticated contexts are counted individually).
-    ///
-    /// Not `async`: iterates the DashMap with shared shard guards, no await
-    /// needed (L5). Called from `open_session` BEFORE opening the backend
-    /// session — leak-proof because it reads live bookkeeping rather than
-    /// maintaining a separate reserve/release counter.
-    pub fn session_count_for_principal(&self, principal_key: &str) -> usize {
-        self.contexts
-            .iter()
-            .map(|entry| {
-                let ctx = entry.value();
-                let key =
-                    ctx.authenticated_identity.as_deref().unwrap_or_else(|| entry.key().0.as_str());
-                if key == principal_key { ctx.session_slots.len() } else { 0 }
-            })
-            .sum()
-    }
-
-    // Not `async`: a DashMap remove needs no `.await` (L5).
-    pub fn remove_context(&self, id: &ClientContextId) -> Option<LogicalClientInstance> {
-        self.contexts.remove(id).map(|(_k, v)| v)
     }
 
     pub fn begin_operation(self: &Arc<Self>, id: &ClientContextId) -> Option<OperationGuard> {
@@ -1341,41 +1273,23 @@ impl ContextManager {
     ) -> Vec<ClientContextId> {
         let now = Instant::now();
         let expired = self.collect_expired_context_ids(now);
-        let all_backend_sessions = self.drain_expired_contexts(&expired);
-        Self::close_backend_sessions(backend, all_backend_sessions).await;
-        expired
-    }
-
-    /// A context is reapable only when its lease has expired AND it has no
-    /// backend operation in flight (a long in-flight op must never be evicted
-    /// mid-call — that is the whole point of the in-flight counter).
-    fn is_reapable(&self, ctx: &LogicalClientInstance, now: Instant) -> bool {
-        ctx.in_flight.load(Ordering::Relaxed) == 0
-            && now.duration_since(ctx.last_active) > self.lease_duration
-    }
-
-    fn collect_expired_context_ids(&self, now: Instant) -> Vec<ClientContextId> {
-        self.contexts
-            .iter()
-            .filter(|entry| self.is_reapable(entry.value(), now))
-            .map(|entry| entry.key().clone())
-            .collect()
-    }
-
-    fn drain_expired_contexts(&self, expired: &[ClientContextId]) -> Vec<u64> {
-        // Re-check expiry and remove ATOMICALLY under the per-shard write lock:
-        // `remove_if` evaluates the predicate while holding the lock, so a
-        // context touched (last_active bumped) or that started an operation
-        // (in_flight incremented under the read lock) since the best-effort first
-        // scan is not evicted on stale data — closing the get-then-remove TOCTOU
-        // (L10). The first scan is just a cheap candidate filter.
-        let now = Instant::now();
-        let mut backend_sessions = Vec::new();
-        for id in expired {
+        let mut evicted = Vec::with_capacity(expired.len());
+        let mut plans = Vec::with_capacity(expired.len());
+        for id in &expired {
+            // Re-check expiry and remove ATOMICALLY under the per-shard write
+            // lock: `remove_if` evaluates the predicate while holding the lock,
+            // so a context touched (last_active bumped) or that started an
+            // operation (in_flight incremented under the read lock) since the
+            // best-effort first scan is not evicted on stale data — closing the
+            // get-then-remove TOCTOU (L10). The first scan is just a cheap
+            // candidate filter. Sequential remove-then-plan keeps multi-expire
+            // login accounting exact: an earlier plan still sees a later
+            // candidate as a live holder.
             if let Some((_, mut ctx)) =
                 self.contexts.remove_if(id, |_, ctx| self.is_reapable(ctx, now))
             {
-                backend_sessions.extend(ctx.teardown());
+                evicted.push(id.clone());
+                plans.push(self.plan_removed_context_teardown(&mut ctx));
             }
         }
         self.execute_teardown_plans(backend, plans).await;

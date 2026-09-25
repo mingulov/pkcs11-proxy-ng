@@ -37,10 +37,10 @@ impl Pkcs11Client {
         mechanism: &CkMechanism,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
         let ctx = self.context_id()?;
-        let proto_template = Self::proto_template(template);
+        let proto_template = Self::proto_template(template.unwrap_or(&[]));
         let mut req = pkcs11_proxy_ng_proto::UnwrapKeyRequest {
             client_context_id: ctx,
             session_handle: session.0,
@@ -48,6 +48,7 @@ impl Pkcs11Client {
             unwrapping_key_handle: unwrapping_key.0,
             wrapped_key: Vec::new(),
             template: proto_template,
+            template_null: template.is_none(),
             wrapped_key_null_len: None,
         };
         Self::fill_input(wrapped_key, &mut req.wrapped_key, &mut req.wrapped_key_null_len);
@@ -140,7 +141,7 @@ impl Pkcs11Client {
         &mut self,
         session: CkSessionHandle,
         mechanism: &CkMechanism,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
         let ctx = self.context_id()?;
         let proto_mech = Self::proto_mechanism(mechanism);

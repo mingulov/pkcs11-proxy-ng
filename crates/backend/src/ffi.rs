@@ -491,7 +491,7 @@ impl Pkcs11Backend for FfiBackend {
         self.ffi_sign_init_cancel(session)
     }
 
-    fn sign(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<Vec<u8>> {
+    fn sign(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<SecretBytes> {
         self.ffi_sign(session, data)
     }
 
@@ -516,7 +516,7 @@ impl Pkcs11Backend for FfiBackend {
         self.ffi_sign_recover_init_cancel(session)
     }
 
-    fn sign_recover(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<Vec<u8>> {
+    fn sign_recover(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<SecretBytes> {
         self.ffi_sign_recover(session, data)
     }
 
@@ -572,7 +572,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         signature: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         self.ffi_verify_recover(session, signature)
     }
 
@@ -614,7 +614,7 @@ impl Pkcs11Backend for FfiBackend {
         self.ffi_digest_init_cancel(session)
     }
 
-    fn digest(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<Vec<u8>> {
+    fn digest(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<SecretBytes> {
         self.ffi_digest(session, data)
     }
 
@@ -660,11 +660,11 @@ impl Pkcs11Backend for FfiBackend {
         self.ffi_encrypt_init_cancel(session)
     }
 
-    fn encrypt(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<Vec<u8>> {
+    fn encrypt(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<SecretBytes> {
         self.ffi_encrypt(session, data)
     }
 
-    fn encrypt_update(&self, session: CkSessionHandle, part: CkInBuf<'_>) -> CkResult<Vec<u8>> {
+    fn encrypt_update(&self, session: CkSessionHandle, part: CkInBuf<'_>) -> CkResult<SecretBytes> {
         self.ffi_encrypt_update(session, part)
     }
 
@@ -697,7 +697,11 @@ impl Pkcs11Backend for FfiBackend {
             .and_then(|family| self.cached_mechanism_output_params_for(session, *family))
     }
 
-    fn decrypt(&self, session: CkSessionHandle, encrypted_data: CkInBuf<'_>) -> CkResult<Vec<u8>> {
+    fn decrypt(
+        &self,
+        session: CkSessionHandle,
+        encrypted_data: CkInBuf<'_>,
+    ) -> CkResult<SecretBytes> {
         self.ffi_decrypt(session, encrypted_data)
     }
 
@@ -705,7 +709,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         encrypted_part: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         self.ffi_decrypt_update(session, encrypted_part)
     }
 
@@ -842,7 +846,7 @@ impl Pkcs11Backend for FfiBackend {
         mechanism: &CkMechanism,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
         self.ffi_unwrap_key(session, mechanism, unwrapping_key, wrapped_key, template)
     }
@@ -860,7 +864,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         mechanism: &CkMechanism,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
         self.ffi_generate_key_with_output(session, mechanism, template)
     }
@@ -962,7 +966,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         part: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         self.ffi_digest_encrypt_update(session, part)
     }
 
@@ -979,7 +983,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         encrypted_part: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         self.ffi_decrypt_digest_update(session, encrypted_part)
     }
 
@@ -996,7 +1000,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         part: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         self.ffi_sign_encrypt_update(session, part)
     }
 
@@ -1013,7 +1017,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         encrypted_part: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         self.ffi_decrypt_verify_update(session, encrypted_part)
     }
 
@@ -1076,7 +1080,7 @@ impl Pkcs11Backend for FfiBackend {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         private_key: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
         ciphertext: CkInBuf<'_>,
     ) -> CkResult<CkObjectHandle> {
         self.ffi_decapsulate_key(session, mechanism, private_key, template, ciphertext)
@@ -1168,7 +1172,7 @@ impl Pkcs11Backend for FfiBackend {
         parameter: &mut [u8],
         aad: CkInBuf<'_>,
         plaintext: CkInBuf<'_>,
-    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+    ) -> CkResult<(SecretBytes, SecretBytes)> {
         self.ffi_encrypt_message(session, parameter, aad, plaintext)
     }
 
@@ -1177,7 +1181,7 @@ impl Pkcs11Backend for FfiBackend {
         session: CkSessionHandle,
         parameter: &mut [u8],
         aad: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         self.ffi_encrypt_message_begin(session, parameter, aad)
     }
 
@@ -1206,7 +1210,7 @@ impl Pkcs11Backend for FfiBackend {
         parameter: &mut [u8],
         aad: CkInBuf<'_>,
         ciphertext: CkInBuf<'_>,
-    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+    ) -> CkResult<(SecretBytes, SecretBytes)> {
         self.ffi_decrypt_message(session, parameter, aad, ciphertext)
     }
 
@@ -1215,7 +1219,7 @@ impl Pkcs11Backend for FfiBackend {
         session: CkSessionHandle,
         parameter: &mut [u8],
         aad: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         self.ffi_decrypt_message_begin(session, parameter, aad)
     }
 
@@ -1243,7 +1247,7 @@ impl Pkcs11Backend for FfiBackend {
         session: CkSessionHandle,
         parameter: &mut [u8],
         data: CkInBuf<'_>,
-    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+    ) -> CkResult<(SecretBytes, SecretBytes)> {
         self.ffi_sign_message(session, parameter, data)
     }
 
@@ -1373,7 +1377,7 @@ impl Pkcs11Backend for FfiBackend {
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
         aad: CkInBuf<'_>,
-    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+    ) -> CkResult<(SecretBytes, SecretBytes)> {
         self.ffi_wrap_key_authenticated(session, mechanism, wrapping_key, key, aad)
     }
 
@@ -1385,7 +1389,7 @@ impl Pkcs11Backend for FfiBackend {
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
         aad: CkInBuf<'_>,
-    ) -> CkResult<(Vec<u8>, pkcs11_proxy_ng_proto::convert::authenticated::AuthenticatedOutput)>
+    ) -> CkResult<(SecretBytes, pkcs11_proxy_ng_proto::convert::authenticated::AuthenticatedOutput)>
     {
         self.ffi_wrap_authenticated_typed(session, mechanism, parameter, wrapping_key, key, aad)
     }
@@ -1421,7 +1425,7 @@ impl Pkcs11Backend for FfiBackend {
         parameter: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
         aad: CkInBuf<'_>,
     ) -> CkResult<(
         CkObjectHandle,
@@ -1444,9 +1448,9 @@ impl Pkcs11Backend for FfiBackend {
         mechanism: &CkMechanism,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
         aad: CkInBuf<'_>,
-    ) -> CkResult<(CkObjectHandle, Vec<u8>)> {
+    ) -> CkResult<(CkObjectHandle, SecretBytes)> {
         self.ffi_unwrap_key_authenticated(
             session,
             mechanism,
@@ -1846,6 +1850,16 @@ mod tests {
         backend.last_init_family.insert(7, OperationFamily::Sign);
         // Use the public path so the forward map and reverse index stay in sync.
         backend.remember_session_slot(CkSessionHandle(7), CkSlotId(11));
+    }
+
+    #[test]
+    fn ffi_attr_ptr_passes_null_for_null_templates() {
+        // F3/D2: a caller-NULL template reaches the provider as NULL; an
+        // empty non-NULL template keeps the (dangling) array address.
+        let none = FfiAttrs::from_opt_slice(None).unwrap();
+        assert!(FfiBackend::ffi_attr_ptr(&none).is_null());
+        let empty = FfiAttrs::from_opt_slice(Some(&[])).unwrap();
+        assert!(!FfiBackend::ffi_attr_ptr(&empty).is_null());
     }
 
     #[test]

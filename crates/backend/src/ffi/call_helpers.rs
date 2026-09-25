@@ -559,7 +559,15 @@ impl FfiBackend {
         // must never change the caller's native capacity.
         let capacity = if spec.buffer_present && !spec.length_pointer_null {
             if spec.buffer_len > MAX_OUTPUT_BUFFER_BYTES {
-                return Err(CkRv::HOST_MEMORY);
+                // F4/D7: a claimed output capacity above the daemon's
+                // materialization ceiling is unforwardable (the exact
+                // provider call needs the full buffer to cross), so it is
+                // a bad argument, not a failed allocation: answer
+                // CKR_ARGUMENTS_BAD per ADR-0010 Limits-(d), mirroring
+                // Limits-(a) for absurd inputs and the parameter-roundtrip
+                // gate below. A genuine allocation failure under the cap
+                // still returns CKR_HOST_MEMORY.
+                return Err(CkRv::ARGUMENTS_BAD);
             }
             usize::try_from(spec.buffer_len).map_err(|_| CkRv::HOST_MEMORY)?
         } else {
@@ -593,7 +601,7 @@ impl FfiBackend {
         } else {
             None
         };
-        Ok(CkOutputBufferResult { ck_rv: rv, returned_len, value })
+        Ok(CkOutputBufferResult { ck_rv: rv, returned_len, value: value.map(SecretBytes::new) })
     }
 
     /// Resolve a function pointer then call `single_call_bytes_exact`.
@@ -811,7 +819,7 @@ impl FfiBackend {
         let parameter = CkParameterRoundtripResult {
             ck_rv: output.ck_rv,
             returned_len: param_out_spec.buffer_len,
-            value: (param_out_spec.buffer_present && defined).then_some(param_buf),
+            value: (param_out_spec.buffer_present && defined).then_some(param_buf.into()),
         };
         Ok((output, parameter))
     }
@@ -844,7 +852,7 @@ mod output_cap_tests {
     use super::{FfiBackend, MAX_OUTPUT_BUFFER_BYTES, capped_output_len};
     use pkcs11_proxy_ng_types::{
         CkObjectHandle, CkOutputBufferSpec, CkParameterRoundtripSpec, CkRv, CkSessionHandle,
-        CkSlotId,
+        CkSlotId, SecretBytes,
     };
 
     #[test]
@@ -1006,7 +1014,30 @@ mod output_cap_tests {
         )
         .expect("data result");
         assert_eq!(data_calls, 1);
-        assert_eq!(data.value.as_deref(), Some(b"out".as_slice()));
+        assert_eq!(data.value, Some(SecretBytes::copy_from_slice(b"out")));
+    }
+
+    #[test]
+    fn absurd_output_capacity_is_arguments_bad_before_native_entry() {
+        // F4/D7 (ADR-0010 Limits-(d)): a claimed output capacity above the
+        // materialization ceiling is answered CKR_ARGUMENTS_BAD without
+        // touching the provider — never CKR_HOST_MEMORY, and never a
+        // multi-exabyte allocation attempt.
+        for buffer_len in [MAX_OUTPUT_BUFFER_BYTES + 1, isize::MAX as u64, u64::MAX] {
+            let spec =
+                CkOutputBufferSpec { buffer_present: true, buffer_len, length_pointer_null: false };
+            let mut calls = 0;
+            let err = FfiBackend::single_call_bytes_exact(
+                &spec,
+                |_: *mut cryptoki_sys::CK_BYTE, _: *mut cryptoki_sys::CK_ULONG| {
+                    calls += 1;
+                    CkRv::OK.0 as cryptoki_sys::CK_RV
+                },
+            )
+            .unwrap_err();
+            assert_eq!(err, CkRv::ARGUMENTS_BAD, "buffer_len = {buffer_len:#x}");
+            assert_eq!(calls, 0, "provider must not be entered for {buffer_len:#x}");
+        }
     }
 
     #[test]
@@ -1016,28 +1047,34 @@ mod output_cap_tests {
         let parameter_spec = CkParameterRoundtripSpec {
             buffer_present: true,
             buffer_len: 3,
-            value: Some(vec![1, 2, 3]),
+            value: Some(vec![1, 2, 3].into()),
         };
         let mut calls = 0;
 
-        let (output, parameter) = FfiBackend::single_call_parameter_output_exact(
-            &output_spec,
-            parameter_spec.value.as_deref().unwrap(),
-            &parameter_spec,
-            |parameter,
-             parameter_len,
-             main_output,
-             main_output_len: *mut cryptoki_sys::CK_ULONG| {
-                calls += 1;
-                assert!(!parameter.is_null());
-                assert_eq!(parameter_len, 3);
-                assert!(!main_output.is_null());
-                assert!(main_output_len.is_null());
-                unsafe { *parameter.add(1) = 0xA5 };
-                CkRv::OK.0 as cryptoki_sys::CK_RV
-            },
-        )
-        .expect("provider result and parameter output");
+        let (output, parameter) = parameter_spec
+            .value
+            .as_ref()
+            .unwrap()
+            .expose(|raw| {
+                FfiBackend::single_call_parameter_output_exact(
+                    &output_spec,
+                    raw,
+                    &parameter_spec,
+                    |parameter,
+                     parameter_len,
+                     main_output,
+                     main_output_len: *mut cryptoki_sys::CK_ULONG| {
+                        calls += 1;
+                        assert!(!parameter.is_null());
+                        assert_eq!(parameter_len, 3);
+                        assert!(!main_output.is_null());
+                        assert!(main_output_len.is_null());
+                        unsafe { *parameter.add(1) = 0xA5 };
+                        CkRv::OK.0 as cryptoki_sys::CK_RV
+                    },
+                )
+            })
+            .expect("provider result and parameter output");
 
         assert_eq!(calls, 1);
         assert_eq!(output.ck_rv, CkRv::OK);
@@ -1045,7 +1082,7 @@ mod output_cap_tests {
         assert_eq!(output.value, None);
         assert_eq!(parameter.ck_rv, CkRv::OK);
         assert_eq!(parameter.returned_len, 3);
-        assert_eq!(parameter.value, Some(vec![1, 0xA5, 3]));
+        assert_eq!(parameter.value, Some(SecretBytes::new(vec![1, 0xA5, 3])));
     }
 
     #[test]
@@ -1055,22 +1092,28 @@ mod output_cap_tests {
         let parameter_spec = CkParameterRoundtripSpec {
             buffer_present: true,
             buffer_len: 3,
-            value: Some(vec![1, 2, 3]),
+            value: Some(vec![1, 2, 3].into()),
         };
         let mut calls = 0;
 
-        let (output, parameter) = FfiBackend::single_call_parameter_output_exact(
-            &output_spec,
-            parameter_spec.value.as_deref().unwrap(),
-            &parameter_spec,
-            |parameter, _, _, output_len: *mut cryptoki_sys::CK_ULONG| {
-                calls += 1;
-                assert!(output_len.is_null());
-                unsafe { *parameter.add(1) = 0xA5 };
-                CkRv::BUFFER_TOO_SMALL.0 as cryptoki_sys::CK_RV
-            },
-        )
-        .expect("provider result and parameter output");
+        let (output, parameter) = parameter_spec
+            .value
+            .as_ref()
+            .unwrap()
+            .expose(|raw| {
+                FfiBackend::single_call_parameter_output_exact(
+                    &output_spec,
+                    raw,
+                    &parameter_spec,
+                    |parameter, _, _, output_len: *mut cryptoki_sys::CK_ULONG| {
+                        calls += 1;
+                        assert!(output_len.is_null());
+                        unsafe { *parameter.add(1) = 0xA5 };
+                        CkRv::BUFFER_TOO_SMALL.0 as cryptoki_sys::CK_RV
+                    },
+                )
+            })
+            .expect("provider result and parameter output");
 
         assert_eq!(calls, 1);
         assert_eq!(
@@ -1083,7 +1126,7 @@ mod output_cap_tests {
         );
         assert_eq!(parameter.ck_rv, CkRv::BUFFER_TOO_SMALL);
         assert_eq!(parameter.returned_len, 3);
-        assert_eq!(parameter.value, Some(vec![1, 0xA5, 3]));
+        assert_eq!(parameter.value, Some(SecretBytes::new(vec![1, 0xA5, 3])));
     }
 
     #[test]
@@ -1166,7 +1209,7 @@ mod output_cap_tests {
 
         assert_eq!(calls, 1);
         assert_eq!(result.returned_len, 0);
-        assert_eq!(result.value, Some(Vec::new()));
+        assert_eq!(result.value, Some(SecretBytes::new(Vec::new())));
     }
 
     #[test]

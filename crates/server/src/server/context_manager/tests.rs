@@ -163,166 +163,6 @@ async fn capacity_eviction_reclaims_sessionless_expired_contexts() {
 }
 
 #[tokio::test]
-async fn backend_slot_metadata_invalidation_does_not_touch_colliding_virtual_number() {
-    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
-    let a = BackendSlotId(CkSlotId(42));
-    let b = BackendSlotId(CkSlotId(1));
-    mgr.register_slot(a).await;
-    mgr.register_slot(b).await;
-    assert_eq!(mgr.to_virtual_slot(a).await, Some(VirtualSlotId(1)));
-    mgr.cache_token_info(a, "Token42".into(), "serial42".into());
-    mgr.cache_token_info(b, "Token1".into(), "serial1".into());
-    mgr.invalidate_token_info(a);
-    assert_eq!(mgr.cached_token_info(a), None);
-    assert_eq!(mgr.cached_token_info(b), Some(("Token1".into(), "serial1".into())));
-}
-
-#[test]
-fn backend_slot_login_locks_share_only_the_same_backend_slot() {
-    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
-    let a = mgr.slot_login_lock(BackendSlotId(CkSlotId(42)));
-    let same = mgr.slot_login_lock(BackendSlotId(CkSlotId(42)));
-    let other = mgr.slot_login_lock(BackendSlotId(CkSlotId(1)));
-    assert!(Arc::ptr_eq(&a, &same));
-    assert!(!Arc::ptr_eq(&a, &other));
-}
-
-#[test]
-fn remove_sessions_for_backend_slot_preserves_other_slot_state() {
-    let mut ctx = LogicalClientInstance::new(None);
-    let a = BackendSlotId(CkSlotId(42));
-    let b = BackendSlotId(CkSlotId(1));
-    let sa = ctx.register_session(BackendHandle(101), a);
-    let sb = ctx.register_session(BackendHandle(202), b);
-    ctx.login_state.insert(a, LoginState::User);
-    ctx.login_state.insert(b, LoginState::So);
-    assert_eq!(ctx.remove_sessions_for_slot(a), vec![BackendHandle(101)]);
-    assert_eq!(ctx.session_handles.resolve(sa), None);
-    assert_eq!(ctx.session_handles.resolve(sb), Some(BackendHandle(202)));
-    assert_eq!(ctx.session_slots.get(&sb), Some(&b));
-    assert!(!ctx.login_state.contains_key(&a));
-    assert_eq!(ctx.login_state.get(&b), Some(&LoginState::So));
-}
-
-#[tokio::test]
-async fn begin_operation_capped_enforces_the_per_context_limit() {
-    // M2: a context can hold at most `max_in_flight` concurrent operations; the
-    // next is rejected (Err) so one client cannot drain the shared budget. A
-    // freed slot allows a new op, and a missing context yields Ok(None).
-    let mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-    let ctx = mgr.create_context(None).await.unwrap();
-    let cap = 3;
-    let mut guards = Vec::new();
-    for _ in 0..cap {
-        guards.push(
-            mgr.begin_operation_capped(&ctx, cap).expect("under cap").expect("context exists"),
-        );
-    }
-    assert!(mgr.begin_operation_capped(&ctx, cap).is_err(), "must reject at the per-context cap");
-
-    guards.pop(); // free one in-flight slot
-    assert!(mgr.begin_operation_capped(&ctx, cap).is_ok(), "a freed slot must allow a new op");
-
-    let gone = ClientContextId("nonexistent".into());
-    assert!(
-        matches!(mgr.begin_operation_capped(&gone, cap), Ok(None)),
-        "a missing context yields Ok(None), not a cap rejection"
-    );
-}
-
-#[tokio::test]
-async fn operation_guard_identity_includes_its_manager() {
-    let owner = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-    let other = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-    let context_id = owner.create_context(None).await.unwrap();
-    let guard = owner.begin_operation(&context_id).expect("context exists");
-
-    assert!(guard.belongs_to(&owner, &context_id));
-    assert!(
-        !guard.belongs_to(&other, &context_id),
-        "the same context-id text in another manager must not reuse this guard",
-    );
-}
-
-#[test]
-fn token_info_cache_serves_within_ttl_and_expires_after() {
-    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
-    mgr.cache_token_info(
-        crate::server::slot_map::BackendSlotId(CkSlotId(0)),
-        "MockToken".into(),
-        "SN1".into(),
-    );
-    assert_eq!(
-        mgr.cached_token_info_within(
-            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
-            std::time::Duration::from_secs(60)
-        ),
-        Some(("MockToken".to_string(), "SN1".to_string())),
-        "a fresh entry must be served"
-    );
-    std::thread::sleep(std::time::Duration::from_millis(3));
-    assert_eq!(
-        mgr.cached_token_info_within(
-            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
-            std::time::Duration::from_millis(1)
-        ),
-        None,
-        "an entry older than the TTL must not be served"
-    );
-}
-
-#[test]
-fn invalidate_token_info_drops_the_entry() {
-    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
-    mgr.cache_token_info(
-        crate::server::slot_map::BackendSlotId(CkSlotId(0)),
-        "MockToken".into(),
-        "SN1".into(),
-    );
-    mgr.invalidate_token_info(crate::server::slot_map::BackendSlotId(CkSlotId(0)));
-    assert_eq!(mgr.cached_token_info(crate::server::slot_map::BackendSlotId(CkSlotId(0))), None);
-}
-
-#[tokio::test]
-async fn capacity_eviction_skips_contexts_with_open_backend_sessions() {
-    // M4: the inline capacity-eviction path must NOT drop an expired context
-    // that still holds open backend sessions — it cannot close them (no backend
-    // ref here), so doing so would leak them. Those are left to the background
-    // reaper (evict_expired), which closes them properly. At capacity with only
-    // such a context present, creation is rejected rather than leaking.
-    let mgr = ContextManager::new(std::time::Duration::from_millis(1), 1);
-    let ctx_a = mgr.create_context(None).await.unwrap();
-    mgr.get_context(&ctx_a, |c| {
-        c.register_session(BackendHandle(100), crate::server::slot_map::BackendSlotId(CkSlotId(0)));
-    })
-    .await;
-    tokio::time::sleep(std::time::Duration::from_millis(5)).await; // expire ctx_a
-
-    let result = mgr.create_context(None).await;
-    assert!(result.is_err(), "must not inline-evict a context with open backend sessions");
-    assert!(
-        mgr.get_context(&ctx_a, |_| ()).await.is_some(),
-        "ctx_a with an open backend session must survive inline capacity-eviction"
-    );
-}
-
-#[tokio::test]
-async fn capacity_eviction_reclaims_sessionless_expired_contexts() {
-    // A sessionless expired context leaks nothing, so it IS reclaimed inline to
-    // make room (M4).
-    let mgr = ContextManager::new(std::time::Duration::from_millis(1), 1);
-    let ctx_a = mgr.create_context(None).await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(5)).await; // expire ctx_a
-
-    let ctx_b = mgr.create_context(None).await;
-    assert!(ctx_b.is_ok(), "a sessionless expired context must be inline-reclaimed");
-    assert!(
-        mgr.get_context(&ctx_a, |_| ()).await.is_none(),
-        "the sessionless expired context should be evicted"
-    );
-}
-
-#[tokio::test]
 async fn create_and_get_context() {
     let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
     let id = mgr.create_context(None).await.unwrap();
@@ -785,7 +625,7 @@ fn teardown_returns_correct_backend_session_handles() {
 
 fn make_session_meta(uid: Vec<u8>) -> super::ObjectMetadata {
     super::ObjectMetadata {
-        unique_id: uid,
+        unique_id: uid.into(),
         class: Some(pkcs11_proxy_ng_types::CkObjectClass::SECRET_KEY),
         is_token: false,
     }
@@ -793,7 +633,7 @@ fn make_session_meta(uid: Vec<u8>) -> super::ObjectMetadata {
 
 fn make_token_meta(uid: Vec<u8>) -> super::ObjectMetadata {
     super::ObjectMetadata {
-        unique_id: uid,
+        unique_id: uid.into(),
         class: Some(pkcs11_proxy_ng_types::CkObjectClass::SECRET_KEY),
         is_token: true,
     }
@@ -818,7 +658,7 @@ async fn object_metadata_session_object_round_trip() {
     mgr.cache_object_metadata(&ctx_id, 7, make_session_meta(uid.clone())).await;
     assert_eq!(
         mgr.object_metadata(&ctx_id, 7).await.map(|m| m.unique_id),
-        Some(uid),
+        Some(SecretBytes::new(uid)),
         "a cached session-object metadata must be returned by object_metadata"
     );
 }
@@ -885,7 +725,7 @@ async fn cache_object_metadata_noop_for_missing_context() {
 // --- per-object attribute cache (R2 coalescer, Task 1) ---
 
 fn make_cached_attr(value: Vec<u8>, rv: u64) -> super::CachedAttr {
-    super::CachedAttr { value, ck_rv: rv }
+    super::CachedAttr { value: SecretBytes::new(value), ck_rv: rv }
 }
 
 #[tokio::test]
@@ -948,7 +788,8 @@ fn attr_cache_cleared_on_teardown() {
     let mut ctx = LogicalClientInstance::new(None);
     let obj = VirtualHandle(55);
     let attr = CkAttributeType::CLASS;
-    ctx.attr_cache.insert((obj, attr), super::CachedAttr { value: vec![0xff], ck_rv: 0 });
+    ctx.attr_cache
+        .insert((obj, attr), super::CachedAttr { value: SecretBytes::new(vec![0xff]), ck_rv: 0 });
     let _ = ctx.teardown();
     assert!(ctx.attr_cache.is_empty(), "teardown must clear the attribute cache");
 }
@@ -964,7 +805,10 @@ fn attr_cache_evicted_on_session_close_via_remove_session() {
     ctx.record_session_object(session, obj);
 
     let attr = CkAttributeType::CLASS;
-    ctx.attr_cache.insert((obj, attr), super::CachedAttr { value: vec![1, 2, 3], ck_rv: 0 });
+    ctx.attr_cache.insert(
+        (obj, attr),
+        super::CachedAttr { value: SecretBytes::new(vec![1, 2, 3]), ck_rv: 0 },
+    );
 
     ctx.remove_session(session);
 
@@ -985,7 +829,8 @@ fn attr_cache_evicted_on_session_close_via_remove_sessions_for_slot() {
     ctx.record_session_object(session, obj);
 
     let attr = CkAttributeType::TOKEN;
-    ctx.attr_cache.insert((obj, attr), super::CachedAttr { value: vec![0x01], ck_rv: 0 });
+    ctx.attr_cache
+        .insert((obj, attr), super::CachedAttr { value: SecretBytes::new(vec![0x01]), ck_rv: 0 });
 
     ctx.remove_sessions_for_slot(crate::server::slot_map::BackendSlotId(CkSlotId(7)));
 

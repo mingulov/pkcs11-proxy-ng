@@ -582,6 +582,12 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
         }
         let router = apply_http2_keepalive(builder, &config)
             .layer(server::trace_id::TraceIdLayer)
+            // ADR-0013 pre-decode validation inside the trace layer so
+            // rejections inherit the request_id span. First `.layer()` is
+            // outermost: trace wraps validation wraps the routes.
+            .layer(server::protected_decode::ProtectedDecodeLayer::new(
+                config.proxy.max_message_bytes,
+            ))
             .add_service(health_service.clone())
             .add_service(svc.clone());
         let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
@@ -599,6 +605,11 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
         let listener = server::transport::bind_unix_listener(&uds_cfg.path)?;
         let router = apply_http2_keepalive(Server::builder(), &config)
             .layer(server::trace_id::TraceIdLayer)
+            // ADR-0013 pre-decode validation (see the TCP listener above for
+            // the layer-order rationale).
+            .layer(server::protected_decode::ProtectedDecodeLayer::new(
+                config.proxy.max_message_bytes,
+            ))
             .add_service(health_service.clone())
             .add_service(svc.clone());
         let incoming = tokio_stream::wrappers::UnixListenerStream::new(listener);

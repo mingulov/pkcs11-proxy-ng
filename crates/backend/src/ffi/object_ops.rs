@@ -83,11 +83,11 @@ impl FfiBackend {
         session: CkSessionHandle,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<()> {
-        let ffi_attrs = FfiAttrs::from_slice(template)?;
+        let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let ck_attrs = &ffi_attrs.attrs;
         let h_session = Self::session_handle(session)?;
         Self::call_unit(unsafe { (*self.func_list).C_FindObjectsInit }, |function| unsafe {
-            function(h_session, ck_attrs.as_ptr() as *mut _, Self::ulong_len(ck_attrs.len()))
+            function(h_session, Self::ffi_attr_ptr(&ffi_attrs), Self::ulong_len(ck_attrs.len()))
         })
     }
 
@@ -172,7 +172,7 @@ impl FfiBackend {
         session: CkSessionHandle,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
-        let ffi_attrs = FfiAttrs::from_slice(template)?;
+        let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let h_session = Self::session_handle(session)?;
         Self::call_object_output(
             &admission,
@@ -194,7 +194,7 @@ impl FfiBackend {
         object: CkObjectHandle,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
-        let ffi_attrs = FfiAttrs::from_slice(template)?;
+        let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let h_session = Self::session_handle(session)?;
         let h_object = Self::object_handle(object)?;
         Self::call_object_output(
@@ -244,7 +244,7 @@ impl FfiBackend {
         object: CkObjectHandle,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<()> {
-        let ffi_attrs = FfiAttrs::from_slice(template)?;
+        let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let h_session = Self::session_handle(session)?;
         let h_object = Self::object_handle(object)?;
         Self::call_unit(unsafe { (*self.func_list).C_SetAttributeValue }, |function| unsafe {

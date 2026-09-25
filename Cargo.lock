@@ -1340,23 +1340,6 @@ dependencies = [
 name = "pkcs11-proxy-ng"
 version = "0.2.0"
 dependencies = [
- "cryptoki-sys",
-]
-
-[[package]]
-name = "pkcs11-module"
-version = "0.2.0"
-source = "git+https://github.com/mingulov/pkcs11-components?rev=d0a47c71d34294466bc41100ae6b5a5a329029d2#d0a47c71d34294466bc41100ae6b5a5a329029d2"
-dependencies = [
- "cryptoki-sys",
- "libloading",
- "pkcs11-abi",
-]
-
-[[package]]
-name = "pkcs11-proxy-ng"
-version = "0.2.0"
-dependencies = [
  "bytes",
  "clap",
  "criterion",
@@ -1366,6 +1349,10 @@ dependencies = [
  "hdrhistogram",
  "hex",
  "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "libc",
  "libloading",
  "nix",

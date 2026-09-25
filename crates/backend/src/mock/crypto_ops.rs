@@ -115,9 +115,9 @@ impl MockBackend {
         self.begin_keyed_op_with_mechanism(session, mechanism, key, MultiPartOp::Sign)
     }
 
-    pub(super) fn sign_impl(&self, session: CkSessionHandle, data: &[u8]) -> CkResult<Vec<u8>> {
+    pub(super) fn sign_impl(&self, session: CkSessionHandle, data: &[u8]) -> CkResult<SecretBytes> {
         self.state.lock().unwrap().end_op(session, MultiPartOp::Sign)?;
-        Ok(super::echo::echo_bytes("sign", &[data], MOCK_SIGN_LEN))
+        Ok(super::echo::echo_bytes("sign", &[data], MOCK_SIGN_LEN).into())
     }
 
     pub(super) fn sign_update_impl(&self, session: CkSessionHandle) -> CkResult<()> {
@@ -126,7 +126,7 @@ impl MockBackend {
 
     pub(super) fn sign_final_impl(&self, session: CkSessionHandle) -> CkResult<SecretBytes> {
         self.state.lock().unwrap().end_op(session, MultiPartOp::Sign)?;
-        Ok(super::echo::echo_bytes("sign-final", &[], MOCK_SIGN_LEN))
+        Ok(super::echo::echo_bytes("sign-final", &[], MOCK_SIGN_LEN).into())
     }
 
     pub(super) fn verify_init_impl(
@@ -160,9 +160,9 @@ impl MockBackend {
         session: CkSessionHandle,
         data: &[u8],
         len: usize,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         self.state.lock().unwrap().end_op(session, MultiPartOp::Digest)?;
-        Ok(super::echo::echo_bytes("digest", &[data], len))
+        Ok(super::echo::echo_bytes("digest", &[data], len).into())
     }
 
     pub(super) fn digest_update_impl(&self, session: CkSessionHandle) -> CkResult<()> {
@@ -186,9 +186,9 @@ impl MockBackend {
         &self,
         session: CkSessionHandle,
         len: usize,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         self.state.lock().unwrap().end_op(session, MultiPartOp::Digest)?;
-        Ok(super::echo::echo_bytes("digest-final", &[], len))
+        Ok(super::echo::echo_bytes("digest-final", &[], len).into())
     }
 
     pub(super) fn encrypt_init_impl(
@@ -473,17 +473,6 @@ impl MockBackend {
             .unwrap_or(MOCK_DEFAULT_DIGEST_LEN)
     }
 
-    /// Active digest output length for `session` (mechanism-defined, or
-    /// the legacy compact default). Captured at C_DigestInit.
-    pub(super) fn active_digest_len(&self, session: CkSessionHandle) -> usize {
-        self.session_digest_mechanism
-            .lock()
-            .unwrap()
-            .get(&session.0)
-            .and_then(|m| super::output_lengths::digest_len(*m))
-            .unwrap_or(MOCK_DEFAULT_DIGEST_LEN)
-    }
-
     pub(super) fn digest_exact_impl(
         &self,
         session: CkSessionHandle,
@@ -651,7 +640,11 @@ impl MockBackend {
             } else {
                 parameter.len() as u64
             },
-            value: if param_out_spec.buffer_present { Some(parameter.to_vec()) } else { None },
+            value: if param_out_spec.buffer_present {
+                Some(parameter.to_vec().into())
+            } else {
+                None
+            },
         }
     }
 

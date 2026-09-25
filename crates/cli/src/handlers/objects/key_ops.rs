@@ -77,7 +77,7 @@ pub(crate) async fn unwrap_key(
             &mechanism,
             CkObjectHandle(unwrapping_key_handle),
             CkInBuf::Bytes(&wrapped_key),
-            &template,
+            Some(&template),
         )
         .await
         .map_err(crate::handlers::cli_err("C_UnwrapKey"))?;

@@ -173,7 +173,7 @@ async fn encapsulate_decapsulate_round_trip() {
 
     // Decapsulate
     let dec_key = client
-        .decapsulate_key(session, &test_mechanism(), key, &[], CkInBuf::Bytes(&capsule))
+        .decapsulate_key(session, &test_mechanism(), key, Some(&[]), CkInBuf::Bytes(&capsule))
         .await
         .unwrap();
     assert_ne!(dec_key, CkObjectHandle(0), "decapsulated key handle should be nonzero");
@@ -674,7 +674,7 @@ async fn byte_output_exact_wrap_key_returns_gcm_output_params_through_grpc() {
 
     assert_eq!(wrap_result.ck_rv, CkRv::OK);
     assert_eq!(wrap_result.returned_len, Some(4));
-    assert_eq!(wrap_result.value, Some(vec![0xDE, 0xAD, 0xBE, 0xEF]));
+    assert_eq!(wrap_result.value, Some(SecretBytes::new(vec![0xDE, 0xAD, 0xBE, 0xEF])));
     assert_eq!(
         mechanism_out,
         Some(CkMechanismParams::Gcm(GcmParams {
@@ -811,7 +811,7 @@ async fn sign_begin_empty_contract_rejects_positive_before_backend_and_acks_poin
         let empty = CkParameterRoundtripSpec { buffer_present, buffer_len: 0, value: None };
         let acknowledgement = client.sign_message_begin_contract(session, &empty).await.unwrap();
         assert_eq!(acknowledgement.returned_len, 0);
-        assert_eq!(acknowledgement.value, buffer_present.then(Vec::new));
+        assert_eq!(acknowledgement.value, buffer_present.then(Vec::new).map(SecretBytes::new));
     }
     assert_eq!(backend.message_parameter_call_count(), 2);
 }
@@ -957,7 +957,7 @@ async fn wrap_unwrap_key_authenticated_round_trip() {
             &test_mechanism(),
             wrapping_key,
             CkInBuf::Bytes(&wrapped_key),
-            &[],
+            Some(&[]),
             CkInBuf::Bytes(&[]),
         )
         .await

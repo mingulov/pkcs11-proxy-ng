@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use pkcs11_proxy_ng_audit::EventClass;
+use pkcs11_proxy_ng_types::SecretBytes;
 use tonic::{Request, Response, Status};
 
 use super::super::authorization::mechanism_permitted;
@@ -104,7 +105,7 @@ pub(crate) async fn verify(
         Err(rv) => return Ok(Response::new(pkcs11_proxy_ng_proto::VerifyResponse { ck_rv: rv.0 })),
     };
 
-    let data = req.data;
+    let data = SecretBytes::new(req.data);
     let data_null_len = req.data_null_len;
     let signature = req.signature;
     let signature_null_len = req.signature_null_len;
@@ -117,11 +118,13 @@ pub(crate) async fn verify(
     }
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
-        backend.verify(
-            session,
-            input_from_wire(&data, data_null_len),
-            input_from_wire(&signature, signature_null_len),
-        )
+        data.expose(|data_raw| {
+            backend.verify(
+                session,
+                input_from_wire(data_raw, data_null_len),
+                input_from_wire(&signature, signature_null_len),
+            )
+        })
     })
     .await?;
     let ck_rv = ck_rv_only(result);
@@ -158,7 +161,7 @@ pub(crate) async fn verify_update(
         }
     };
 
-    let part = req.part;
+    let part = SecretBytes::new(req.part);
     let part_null_len = req.part_null_len;
     // ADR-0010 sanitize_inputs: validate NULL data pointer before backend call.
     if let Err(rv) = check_sanitize(sanitize_inputs, part_null_len) {
@@ -166,7 +169,7 @@ pub(crate) async fn verify_update(
     }
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
-        backend.verify_update(session, input_from_wire(&part, part_null_len))
+        part.expose(|raw| backend.verify_update(session, input_from_wire(raw, part_null_len)))
     })
     .await?;
     Ok(Response::new(pkcs11_proxy_ng_proto::VerifyUpdateResponse { ck_rv: ck_rv_only(result) }))

@@ -166,9 +166,9 @@ pub(super) async fn extract_is_permitted(
     //   grant-level decision (an unconfined principal must NOT be over-denied on a
     //   transient uid-fetch failure).
     match resolve_uid_for_extract(ctx, ctx_id, virtual_session, virtual_object).await {
-        Some(uid) => {
-            Ok(ctx.token_policy.extract_allowed_for_object(&identity, &label, &serial, &uid))
-        }
+        Some(uid) => Ok(uid.expose(|raw| {
+            ctx.token_policy.extract_allowed_for_object(&identity, &label, &serial, raw)
+        })),
         None => {
             if ctx.token_policy.has_object_extract_override(&identity, &label, &serial) {
                 Ok(false) // I1 fix: fail-closed when per-object extract overrides exist
@@ -198,7 +198,7 @@ async fn resolve_uid_for_extract(
     ctx_id: &ClientContextId,
     virtual_session: u64,
     virtual_object: u64,
-) -> Option<Vec<u8>> {
+) -> Option<SecretBytes> {
     // Fast path: metadata already in cache (session objects only; token objects
     // are never cached per the I2 invariant).
     if let Some(cached) = ctx.context_manager.object_metadata(ctx_id, virtual_object).await {
@@ -352,7 +352,7 @@ pub(super) async fn fetch_object_metadata(
             },
             CkAttribute {
                 attr_type: CkAttributeType::TOKEN,
-                value: Some(CkAttributeValue::Bytes(vec![0u8; 1])),
+                value: Some(CkAttributeValue::Bytes(vec![0u8; 1].into())),
             },
         ];
 
@@ -374,11 +374,11 @@ pub(super) async fn fetch_object_metadata(
         let class: Option<CkObjectClass> = match template[1].value.take() {
             Some(CkAttributeValue::Ulong(u)) => Some(CkObjectClass(u)),
             Some(CkAttributeValue::Bytes(ref bytes)) if bytes.len() == 8 => {
-                let arr: [u8; 8] = bytes[..8].try_into().unwrap();
+                let arr: [u8; 8] = bytes.expose(|raw| raw[..8].try_into().unwrap());
                 Some(CkObjectClass(u64::from_ne_bytes(arr)))
             }
             Some(CkAttributeValue::Bytes(ref bytes)) if bytes.len() == 4 => {
-                let arr: [u8; 4] = bytes[..4].try_into().unwrap();
+                let arr: [u8; 4] = bytes.expose(|raw| raw[..4].try_into().unwrap());
                 Some(CkObjectClass(u32::from_ne_bytes(arr) as u64))
             }
             _ => None, // M2: CLASS absent or unrecognised → None, not fail-closed here
@@ -387,7 +387,9 @@ pub(super) async fn fetch_object_metadata(
         // Parse TOKEN (absent → session object; any non-zero byte → token object).
         let is_token = match template[2].value.take() {
             Some(CkAttributeValue::Bool(b)) => b,
-            Some(CkAttributeValue::Bytes(bytes)) => bytes.first().is_some_and(|&b| b != 0),
+            Some(CkAttributeValue::Bytes(bytes)) => {
+                bytes.expose(|raw| raw.first().is_some_and(|&b| b != 0))
+            }
             Some(CkAttributeValue::Ulong(u)) => u != 0,
             // String/NestedTemplate don't encode a boolean — treat as absent (session).
             None | Some(_) => false,
@@ -404,7 +406,7 @@ pub(super) async fn fetch_object_metadata(
         // Call 2: provide a pre-allocated 256-byte buffer for UNIQUE_ID.
         let mut uid_template = [CkAttribute {
             attr_type: CkAttributeType::UNIQUE_ID,
-            value: Some(CkAttributeValue::Bytes(vec![0u8; 256])),
+            value: Some(CkAttributeValue::Bytes(vec![0u8; 256].into())),
         }];
         match backend.get_attribute_value(session, object, &mut uid_template) {
             Ok(()) => {}
@@ -783,7 +785,7 @@ mod tests {
         mock.initialize().unwrap();
         let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
-        let backend_object = mock.create_object(backend_session, &[]).unwrap();
+        let backend_object = mock.create_object(backend_session, Some(&[])).unwrap();
         // Make UNIQUE_ID ATTRIBUTE_SENSITIVE so uid resolution returns None.
         mock.set_attribute(
             backend_object,
@@ -980,7 +982,7 @@ mod tests {
             mock.initialize().unwrap();
             let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
             let session = mock.open_session(CkSlotId(0), flags).unwrap();
-            let object = mock.create_object(session, &[]).unwrap();
+            let object = mock.create_object(session, Some(&[])).unwrap();
             // CLASS and TOKEN are mandatory in conformant backends; set them so the
             // 3-element template does not fail with ATTRIBUTE_TYPE_INVALID.
             mock.set_attribute(
@@ -1009,12 +1011,16 @@ mod tests {
             mock.set_attribute(
                 object,
                 CkAttributeType::UNIQUE_ID,
-                MockAttributeSlot::Value(CkAttributeValue::Bytes(uid.clone())),
+                MockAttributeSlot::Value(CkAttributeValue::Bytes(uid.clone().into())),
             );
             let ctx = make_ctx(mock);
             let result = fetch_object_metadata(&ctx, session, object).await;
             let meta = result.expect("must return metadata when all attrs present");
-            assert_eq!(meta.unique_id, uid, "uid must match the registered value");
+            assert_eq!(
+                meta.unique_id,
+                SecretBytes::new(uid),
+                "uid must match the registered value"
+            );
             assert_eq!(meta.class, Some(CkObjectClass::SECRET_KEY), "class must be SECRET_KEY");
             assert!(!meta.is_token, "is_token must be false for a session object");
         }
@@ -1050,7 +1056,7 @@ mod tests {
             mock.set_attribute(
                 object,
                 CkAttributeType::UNIQUE_ID,
-                MockAttributeSlot::Value(CkAttributeValue::Bytes(uid.clone())),
+                MockAttributeSlot::Value(CkAttributeValue::Bytes(uid.clone().into())),
             );
             let ctx = make_ctx(mock);
             let meta = fetch_object_metadata(&ctx, session, object).await.unwrap();
@@ -1069,7 +1075,7 @@ mod tests {
             let ctx_id = ctx_mgr.create_context(None).await.unwrap();
 
             let session_meta = ObjectMetadata {
-                unique_id: b"ses-uid".to_vec(),
+                unique_id: b"ses-uid".to_vec().into(),
                 class: Some(CkObjectClass::SECRET_KEY),
                 is_token: false,
             };
@@ -1078,7 +1084,7 @@ mod tests {
             assert!(cached.is_some(), "session object metadata must be cached");
 
             let token_meta = ObjectMetadata {
-                unique_id: b"tok-uid".to_vec(),
+                unique_id: b"tok-uid".to_vec().into(),
                 class: Some(CkObjectClass::SECRET_KEY),
                 is_token: true,
             };
@@ -1116,19 +1122,23 @@ mod tests {
             mock.set_attribute(
                 object,
                 CkAttributeType::CLASS,
-                MockAttributeSlot::Value(CkAttributeValue::Bytes(vec![0x00, 0x00, 0x03])),
+                MockAttributeSlot::Value(CkAttributeValue::Bytes(vec![0x00, 0x00, 0x03].into())),
             );
             let uid = b"uid-odd-class".to_vec();
             mock.set_attribute(
                 object,
                 CkAttributeType::UNIQUE_ID,
-                MockAttributeSlot::Value(CkAttributeValue::Bytes(uid.clone())),
+                MockAttributeSlot::Value(CkAttributeValue::Bytes(uid.clone().into())),
             );
             let ctx = make_ctx(mock);
             let result = fetch_object_metadata(&ctx, session, object).await;
             // M2: must return Some (not None) even though CLASS cannot be parsed.
             let meta = result.expect("M2: unrecognised CLASS format must NOT fail the fetch");
-            assert_eq!(meta.unique_id, uid, "uid must still be populated when CLASS unrecognised");
+            assert_eq!(
+                meta.unique_id,
+                SecretBytes::new(uid),
+                "uid must still be populated when CLASS unrecognised"
+            );
             assert!(
                 meta.class.is_none(),
                 "M2: unrecognised CLASS encoding must map to class=None in metadata"
@@ -1143,7 +1153,7 @@ mod tests {
             mock.set_attribute(
                 object,
                 CkAttributeType::UNIQUE_ID,
-                MockAttributeSlot::Value(CkAttributeValue::Bytes(uid.clone())),
+                MockAttributeSlot::Value(CkAttributeValue::Bytes(uid.clone().into())),
             );
             let ctx = make_ctx(mock);
             let meta = fetch_object_metadata(&ctx, session, object).await.unwrap();

@@ -89,7 +89,7 @@ async fn decapsulate_key_returns_synthetic_handle_through_full_stack() {
     let (session, key) = setup_session_with_key(&mut client).await;
 
     let decapsulated_key = client
-        .decapsulate_key(session, &test_mechanism(), key, &[], CkInBuf::Bytes(&[0xAA, 0xBB]))
+        .decapsulate_key(session, &test_mechanism(), key, Some(&[]), CkInBuf::Bytes(&[0xAA, 0xBB]))
         .await
         .unwrap();
 
@@ -106,7 +106,7 @@ async fn decapsulate_key_with_empty_ciphertext() {
 
     // Empty ciphertext should still reach the backend.
     let decapsulated_key = client
-        .decapsulate_key(session, &test_mechanism(), key, &[], CkInBuf::Bytes(&[]))
+        .decapsulate_key(session, &test_mechanism(), key, Some(&[]), CkInBuf::Bytes(&[]))
         .await
         .unwrap();
 
@@ -149,7 +149,7 @@ async fn decapsulate_key_rejects_invalid_session() {
             bad_session,
             &test_mechanism(),
             CkObjectHandle(1),
-            &[],
+            Some(&[]),
             CkInBuf::Bytes(&[0xCC]),
         )
         .await
@@ -199,7 +199,7 @@ async fn decapsulate_key_returns_backend_error_for_unknown_key_handle() {
             session,
             &test_mechanism(),
             CkObjectHandle(999_999),
-            &[],
+            Some(&[]),
             CkInBuf::Bytes(&[0xAA]),
         )
         .await
