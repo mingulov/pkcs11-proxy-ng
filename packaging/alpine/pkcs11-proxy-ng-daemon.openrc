@@ -1,0 +1,22 @@
+#!/sbin/openrc-run
+
+# OpenRC service unit for pkcs11-proxy-ng on Alpine.
+#
+# Disabled by default — the post-install message tells operators to
+# edit /etc/pkcs11-proxy-ng/proxy.toml first and then run
+# `rc-service pkcs11-proxy-ng start`.
+
+name="pkcs11-proxy-ng"
+description="Rust PKCS#11 remote proxy daemon"
+command="/usr/bin/pkcs11-proxy-ng"
+command_args="/etc/pkcs11-proxy-ng/proxy.toml"
+command_user="root"
+command_background="yes"
+pidfile="/run/${name}.pid"
+output_log="/var/log/${name}.log"
+error_log="/var/log/${name}.log"
+
+depend() {
+    need net
+    after firewall
+}

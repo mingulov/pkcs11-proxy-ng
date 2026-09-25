@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: daemon-config
+  namespace: pkcs11-proxy-demo
+data:
+  proxy.toml: |
+    [backend]
+    module = "/usr/lib/softhsm/libsofthsm2.so"
+
+    [proxy]
+    request_timeout_secs = 60
+    startup_timeout_secs = 30
+    shutdown_grace_secs = 30
+    backend_health_consecutive_failures = 3
+
+    [listener.remote]
+    bind = "0.0.0.0:7512"
+    auth = "none"
+    allow_insecure_tcp = true
+
+    [auth]
+
+    [mechanisms]
+    config_path = "/etc/pkcs11-proxy-ng/mechanism_params.toml"
+
+  # Shipped embedded default — replace with your own mechanism
+  # registry to enable vendor extensions (CloudHSM, etc.). The
+  # daemon recomputes the revision hash on every reload, so a
+  # `kubectl rollout restart` after editing this file is the
+  # canonical operator workflow.
+  mechanism_params.toml: |
+    discovery_mode = "transparent"
+
+    parameterless = [
+      0x0001,  # CKM_RSA_PKCS
+      0x0009,  # CKM_RSA_PKCS_OAEP — handled by [[params]] elsewhere
+      0x0040,  # CKM_SHA256_RSA_PKCS
+    ]
+
+    [[params]]
+    shape = "gcm"
+    mechanisms = [0x1087]   # CKM_AES_GCM
+
+    [[params]]
+    shape = "rsa_oaep"
+    mechanisms = [0x0009]   # CKM_RSA_PKCS_OAEP

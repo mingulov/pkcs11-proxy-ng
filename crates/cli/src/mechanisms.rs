@@ -12,7 +12,7 @@ pub(crate) fn mechanism_name(value: u64) -> String {
         .unwrap_or_else(|| format!("unknown (0x{value:08X})"))
 }
 
-pub(crate) fn parse_mechanism(name: &str) -> Result<u64, Box<dyn std::error::Error>> {
+pub(crate) fn parse_mechanism(name: &str) -> Result<u64, Box<dyn core::error::Error>> {
     // Accept hex (0x...) or decimal
     if let Some(hex_str) = name.strip_prefix("0x").or_else(|| name.strip_prefix("0X")) {
         return u64::from_str_radix(hex_str, 16)

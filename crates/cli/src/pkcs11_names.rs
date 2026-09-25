@@ -1,6 +1,6 @@
 use pkcs11_proxy_ng_types::*;
 
-pub(crate) fn parse_attr_type(s: &str) -> Result<CkAttributeType, Box<dyn std::error::Error>> {
+pub(crate) fn parse_attr_type(s: &str) -> Result<CkAttributeType, Box<dyn core::error::Error>> {
     if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
         return u64::from_str_radix(hex, 16)
             .map(CkAttributeType)
@@ -36,31 +36,34 @@ pub(crate) fn parse_attr_type(s: &str) -> Result<CkAttributeType, Box<dyn std::e
 }
 
 pub(crate) fn attr_type_name(v: u64) -> String {
-    match v {
-        0x00000000 => "CLASS".to_string(),
-        0x00000001 => "TOKEN".to_string(),
-        0x00000002 => "PRIVATE".to_string(),
-        0x00000003 => "LABEL".to_string(),
-        0x00000011 => "VALUE".to_string(),
-        0x00000080 => "CERTIFICATE_TYPE".to_string(),
-        0x00000100 => "KEY_TYPE".to_string(),
-        0x00000102 => "ID".to_string(),
-        0x00000103 => "SENSITIVE".to_string(),
-        0x00000104 => "ENCRYPT".to_string(),
-        0x00000105 => "DECRYPT".to_string(),
-        0x00000106 => "WRAP".to_string(),
-        0x00000107 => "UNWRAP".to_string(),
-        0x00000108 => "SIGN".to_string(),
-        0x0000010A => "VERIFY".to_string(),
-        0x00000120 => "MODULUS".to_string(),
-        0x00000121 => "MODULUS_BITS".to_string(),
-        0x00000122 => "PUBLIC_EXPONENT".to_string(),
-        0x00000161 => "VALUE_LEN".to_string(),
-        0x00000162 => "EXTRACTABLE".to_string(),
-        0x00000180 => "EC_PARAMS".to_string(),
-        0x00000181 => "EC_POINT".to_string(),
-        _ => format!("0x{v:08X}"),
-    }
+    // Match against the typed constants from CkAttributeType so the
+    // name table stays in sync with the canonical definitions.
+    let name = match CkAttributeType(v) {
+        CkAttributeType::CLASS => "CLASS",
+        CkAttributeType::TOKEN => "TOKEN",
+        CkAttributeType::PRIVATE => "PRIVATE",
+        CkAttributeType::LABEL => "LABEL",
+        CkAttributeType::VALUE => "VALUE",
+        CkAttributeType::CERTIFICATE_TYPE => "CERTIFICATE_TYPE",
+        CkAttributeType::KEY_TYPE => "KEY_TYPE",
+        CkAttributeType::ID => "ID",
+        CkAttributeType::SENSITIVE => "SENSITIVE",
+        CkAttributeType::ENCRYPT => "ENCRYPT",
+        CkAttributeType::DECRYPT => "DECRYPT",
+        CkAttributeType::WRAP => "WRAP",
+        CkAttributeType::UNWRAP => "UNWRAP",
+        CkAttributeType::SIGN => "SIGN",
+        CkAttributeType::VERIFY => "VERIFY",
+        CkAttributeType::MODULUS => "MODULUS",
+        CkAttributeType::MODULUS_BITS => "MODULUS_BITS",
+        CkAttributeType::PUBLIC_EXPONENT => "PUBLIC_EXPONENT",
+        CkAttributeType::VALUE_LEN => "VALUE_LEN",
+        CkAttributeType::EXTRACTABLE => "EXTRACTABLE",
+        CkAttributeType::EC_PARAMS => "EC_PARAMS",
+        CkAttributeType::EC_POINT => "EC_POINT",
+        _ => return format!("0x{v:08X}"),
+    };
+    name.to_string()
 }
 
 /// Interpret a little-endian byte slice as a u64 (handles 4-byte and 8-byte CK_ULONG).
@@ -73,69 +76,71 @@ pub(crate) fn bytes_to_u64(b: &[u8]) -> Option<u64> {
 }
 
 pub(crate) fn object_class_name(v: u64) -> String {
-    match v {
-        0 => "data".to_string(),
-        1 => "certificate".to_string(),
-        2 => "public-key".to_string(),
-        3 => "private-key".to_string(),
-        4 => "secret-key".to_string(),
-        _ => format!("0x{v:08X}"),
-    }
+    let name = match CkObjectClass(v) {
+        CkObjectClass::DATA => "data",
+        CkObjectClass::CERTIFICATE => "certificate",
+        CkObjectClass::PUBLIC_KEY => "public-key",
+        CkObjectClass::PRIVATE_KEY => "private-key",
+        CkObjectClass::SECRET_KEY => "secret-key",
+        _ => return format!("0x{v:08X}"),
+    };
+    name.to_string()
 }
 
 pub(crate) fn key_type_name(v: u64) -> String {
-    match v {
-        0x00 => "RSA".to_string(),
-        0x01 => "DSA".to_string(),
-        0x02 => "DH".to_string(),
-        0x03 => "EC".to_string(),
-        0x04 => "X9_42_DH".to_string(),
-        0x05 => "KEA".to_string(),
-        0x10 => "GENERIC_SECRET".to_string(),
-        0x11 => "RC2".to_string(),
-        0x12 => "RC4".to_string(),
-        0x13 => "DES".to_string(),
-        0x14 => "DES2".to_string(),
-        0x15 => "DES3".to_string(),
-        0x16 => "CAST".to_string(),
-        0x17 => "CAST3".to_string(),
-        0x18 => "CAST128".to_string(),
-        0x19 => "RC5".to_string(),
-        0x1A => "IDEA".to_string(),
-        0x1B => "SKIPJACK".to_string(),
-        0x1C => "BATON".to_string(),
-        0x1D => "JUNIPER".to_string(),
-        0x1E => "CDMF".to_string(),
-        0x1F => "AES".to_string(),
-        0x20 => "BLOWFISH".to_string(),
-        0x21 => "TWOFISH".to_string(),
-        0x22 => "SECURID".to_string(),
-        0x23 => "HOTP".to_string(),
-        0x24 => "ACTI".to_string(),
-        0x25 => "CAMELLIA".to_string(),
-        0x26 => "ARIA".to_string(),
-        0x27 => "SHA512_224".to_string(),
-        0x28 => "SHA512_256".to_string(),
-        0x29 => "SEED".to_string(),
-        0x2A => "GOSTR3410".to_string(),
-        0x2B => "GOSTR3411".to_string(),
-        0x2C => "GOST28147".to_string(),
-        0x2D => "CHACHA20".to_string(),
-        0x2E => "POLY1305".to_string(),
-        0x2F => "AES_XTS".to_string(),
-        0x30 => "SHA3_224".to_string(),
-        0x31 => "SHA3_256".to_string(),
-        0x32 => "SHA3_384".to_string(),
-        0x33 => "SHA3_512".to_string(),
-        0x34 => "BLAKE2B_160".to_string(),
-        0x35 => "BLAKE2B_256".to_string(),
-        0x36 => "BLAKE2B_384".to_string(),
-        0x37 => "BLAKE2B_512".to_string(),
-        0x38 => "SALSA20".to_string(),
-        0x39 => "X2RATCHET".to_string(),
-        0x3A => "EC_EDWARDS".to_string(),
-        0x3B => "EC_MONTGOMERY".to_string(),
-        0x3C => "HKDF".to_string(),
-        _ => format!("0x{v:08X}"),
-    }
+    let name = match CkKeyType(v) {
+        CkKeyType::RSA => "RSA",
+        CkKeyType::DSA => "DSA",
+        CkKeyType::DH => "DH",
+        CkKeyType::EC => "EC",
+        CkKeyType::X9_42_DH => "X9_42_DH",
+        CkKeyType::KEA => "KEA",
+        CkKeyType::GENERIC_SECRET => "GENERIC_SECRET",
+        CkKeyType::RC2 => "RC2",
+        CkKeyType::RC4 => "RC4",
+        CkKeyType::DES => "DES",
+        CkKeyType::DES2 => "DES2",
+        CkKeyType::DES3 => "DES3",
+        CkKeyType::CAST => "CAST",
+        CkKeyType::CAST3 => "CAST3",
+        CkKeyType::CAST128 => "CAST128",
+        CkKeyType::RC5 => "RC5",
+        CkKeyType::IDEA => "IDEA",
+        CkKeyType::SKIPJACK => "SKIPJACK",
+        CkKeyType::BATON => "BATON",
+        CkKeyType::JUNIPER => "JUNIPER",
+        CkKeyType::CDMF => "CDMF",
+        CkKeyType::AES => "AES",
+        CkKeyType::BLOWFISH => "BLOWFISH",
+        CkKeyType::TWOFISH => "TWOFISH",
+        CkKeyType::SECURID => "SECURID",
+        CkKeyType::HOTP => "HOTP",
+        CkKeyType::ACTI => "ACTI",
+        CkKeyType::CAMELLIA => "CAMELLIA",
+        CkKeyType::ARIA => "ARIA",
+        CkKeyType::SHA512_224 => "SHA512_224",
+        CkKeyType::SHA512_256 => "SHA512_256",
+        CkKeyType::SEED => "SEED",
+        CkKeyType::GOSTR3410 => "GOSTR3410",
+        CkKeyType::GOSTR3411 => "GOSTR3411",
+        CkKeyType::GOST28147 => "GOST28147",
+        CkKeyType::CHACHA20 => "CHACHA20",
+        CkKeyType::POLY1305 => "POLY1305",
+        CkKeyType::AES_XTS => "AES_XTS",
+        CkKeyType::SHA3_224 => "SHA3_224",
+        CkKeyType::SHA3_256 => "SHA3_256",
+        CkKeyType::SHA3_384 => "SHA3_384",
+        CkKeyType::SHA3_512 => "SHA3_512",
+        CkKeyType::BLAKE2B_160 => "BLAKE2B_160",
+        CkKeyType::BLAKE2B_256 => "BLAKE2B_256",
+        CkKeyType::BLAKE2B_384 => "BLAKE2B_384",
+        CkKeyType::BLAKE2B_512 => "BLAKE2B_512",
+        CkKeyType::SALSA20 => "SALSA20",
+        CkKeyType::X2RATCHET => "X2RATCHET",
+        CkKeyType::EC_EDWARDS => "EC_EDWARDS",
+        CkKeyType::EC_MONTGOMERY => "EC_MONTGOMERY",
+        CkKeyType::HKDF => "HKDF",
+        _ => return format!("0x{v:08X}"),
+    };
+    name.to_string()
 }

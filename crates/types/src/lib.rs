@@ -37,7 +37,7 @@ pub use mechanism::{
     X942Dh1DeriveParams, X942Dh2DeriveParams, X942MqvDeriveParams, XeddsaParams,
 };
 pub use mechanism_official::{PKCS11_3_2_OFFICIAL_MECHANISMS, pkcs11_3_2_official_mechanisms};
-pub use mechanism_registry::{DiscoveryMode, MechanismRegistry};
+pub use mechanism_registry::{DiscoveryMode, EMBEDDED_DEFAULT_REVISION, MechanismRegistry};
 pub use object::{CkKeyType, CkObjectClass, CkObjectHandle};
 pub use output::{
     ByteOutputFunction, CkAttributeQuery, CkAttributeQueryResult, CkOutputAndHandleResult,

@@ -6,6 +6,14 @@ mod function_registry;
 pub(crate) mod interface_probe;
 mod state;
 
+/// Test-only surface used by `crates/shim/tests/stress_registry.rs`
+/// and similar concurrency-audit fixtures. Not part
+/// of the shim's public API; do NOT depend on it from consumers.
+#[doc(hidden)]
+pub mod __test_api {
+    pub use crate::state::{mechanism_registry, replace_mechanism_registry};
+}
+
 use crate::dispatch::general::catch_panics;
 use cryptoki_sys::*;
 

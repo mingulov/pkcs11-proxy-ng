@@ -31,7 +31,7 @@ impl Pkcs11Client {
             .into_inner();
 
         let rv = CkRv(response.ck_rv);
-        if !rv.is_ok() {
+        if rv.is_err() {
             return Err(rv);
         }
 

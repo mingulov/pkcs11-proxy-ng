@@ -64,15 +64,17 @@ pub unsafe extern "C" fn c_initialize(p_init_args: CK_VOID_PTR) -> CK_RV {
             return rv_err(CkRv::CRYPTOKI_ALREADY_INITIALIZED);
         }
 
-        // Load the mechanism registry from embedded defaults + optional
-        // override file.  OnceLock means this only runs on the first
-        // C_Initialize; re-init after C_Finalize reuses the same registry.
+        // Seed the mechanism registry from the embedded default (plus
+        // the optional PKCS11_PROXY_MECHANISMS override). The probe in
+        // reprobe() below will replace this with the server-published
+        // registry once the daemon connection is up; this seeding
+        // ensures the registry is non-null during the brief
+        // C_Initialize → probe window and remains valid as a fallback
+        // when the daemon predates the published-registry field.
         let override_path = std::env::var("PKCS11_PROXY_MECHANISMS").ok().map(PathBuf::from);
         match MechanismRegistry::load(override_path.as_deref()) {
             Ok(reg) => {
-                // Ignore the error: OnceLock returns Err only if already set,
-                // which is fine — the registry persists across finalize/re-init.
-                let _ = state::init_mechanism_registry(reg);
+                state::replace_mechanism_registry(reg);
             }
             Err(e) => {
                 tracing::error!("Failed to load mechanism registry: {e}");

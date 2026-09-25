@@ -105,7 +105,14 @@ pub unsafe extern "C" fn c_derive_key(
     ph_key: CK_OBJECT_HANDLE_PTR,
 ) -> CK_RV {
     catch_panics(|| {
-        if p_mechanism.is_null() || ph_key.is_null() {
+        // `ph_key` may legitimately be NULL: the SSL3/TLS/WTLS key-and-mac
+        // "key material" derive mechanisms (e.g. CKM_TLS12_KEY_AND_MAC_DERIVE)
+        // return their derived keys through the mechanism parameter's
+        // pReturnedKeyMaterial rather than through ph_key, and callers pass NULL
+        // there. Don't fabricate CKR_ARGUMENTS_BAD locally — forward the call and
+        // let the backend decide (a plain derive with a NULL ph_key still gets
+        // the backend's own error, preserving exact CK_RV transparency).
+        if p_mechanism.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
         let rv = unsafe { validate_mechanism(p_mechanism) };
@@ -121,19 +128,24 @@ pub unsafe extern "C" fn c_derive_key(
             &template,
         )) {
             Ok(result) => {
-                // Write HSM-mutated mechanism fields (e.g. TLS12
-                // master-key-derive's pVersion) back into the caller's
-                // CK_MECHANISM. write_mechanism_output_params is a no-op
-                // for mechanisms that don't have output params or
-                // whose backing variant isn't yet implemented.
+                // Write HSM-mutated mechanism fields back into the caller's
+                // CK_MECHANISM: TLS12 master-key-derive's pVersion, and the
+                // key-and-mac derives' pReturnedKeyMaterial (4 key handles + IVs).
+                // A no-op for mechanisms without output params.
                 if let Some(params) = result.mechanism_out {
                     unsafe { write_mechanism_output_params(p_mechanism, &params) };
                 }
                 if result.rv.is_ok() {
-                    let Some(handle) = result.key_handle else {
-                        return rv_err(CkRv::GENERAL_ERROR);
-                    };
-                    unsafe { write_object_handle_output(handle, ph_key) };
+                    // A plain C_DeriveKey returns one handle via ph_key; the
+                    // key-material mechanisms return theirs via the param above
+                    // and pass ph_key == NULL. Only write the single handle when
+                    // the caller supplied a location for it.
+                    if !ph_key.is_null() {
+                        let Some(handle) = result.key_handle else {
+                            return rv_err(CkRv::GENERAL_ERROR);
+                        };
+                        unsafe { write_object_handle_output(handle, ph_key) };
+                    }
                     rv_ok()
                 } else {
                     rv_err(result.rv)

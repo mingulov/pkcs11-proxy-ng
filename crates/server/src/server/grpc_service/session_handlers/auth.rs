@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
+use zeroize::Zeroizing;
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_types::*;
@@ -35,9 +36,13 @@ pub(super) async fn login(
     };
 
     let user_type_raw = req.user_type;
-    let pin = req.pin;
+    // Wrap PIN bytes in `Zeroizing` so the backing buffer is
+    // overwritten when the spawned closure is dropped.
+    let pin = req.pin.map(Zeroizing::new);
     let backend = backend_ref.clone();
-    let result = spawn_backend(move || backend.login(session, user_type, pin.as_deref())).await?;
+    let result =
+        spawn_backend(move || backend.login(session, user_type, pin.as_deref().map(Vec::as_slice)))
+            .await?;
 
     let ck_rv = match &result {
         Ok(()) => {

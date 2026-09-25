@@ -11,7 +11,7 @@ use handlers::run_command;
 use mechanisms::MECHANISM_NAMES;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn core::error::Error>> {
     tracing_subscriber::fmt::init();
 
     let cli = Cli::parse();
@@ -25,6 +25,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    // FOLLOWUP-grpc-health-probe: a no-side-effects health check that
+    // honours the daemon's backend-health gating (the daemon registers
+    // its main service and flips NOT_SERVING on N consecutive backend
+    // failures). Exits 0/1/2 so k8s exec probes can interpret.
+    if let Commands::Health { service } = &cli.command {
+        use tonic_health::pb::HealthCheckRequest;
+        use tonic_health::pb::health_check_response::ServingStatus;
+        use tonic_health::pb::health_client::HealthClient;
+        let channel = tonic::transport::Endpoint::from_shared(cli.endpoint.clone())?
+            .connect_timeout(std::time::Duration::from_secs(2))
+            .connect()
+            .await?;
+        let mut hc = HealthClient::new(channel);
+        let resp = hc.check(HealthCheckRequest { service: service.clone() }).await?.into_inner();
+        let status = ServingStatus::try_from(resp.status).unwrap_or(ServingStatus::Unknown);
+        match status {
+            ServingStatus::Serving => {
+                println!("SERVING");
+                return Ok(());
+            }
+            other => {
+                eprintln!("NOT_SERVING: {other:?}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     let tls_files = ClientTlsFiles::from_optional_paths(
         cli.tls_ca_cert.clone(),
         cli.tls_client_cert.clone(),
@@ -36,7 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => Pkcs11Client::connect(&cli.endpoint).await,
     }
     .map_err(|e| format!("Connection failed: {e}"))?;
-    client.initialize().await.map_err(|e| format!("C_Initialize failed: CKR 0x{:08X}", e.0))?;
+    client.initialize().await.map_err(crate::handlers::cli_err("C_Initialize"))?;
 
     let result = run_command(&mut client, cli.command).await;
 

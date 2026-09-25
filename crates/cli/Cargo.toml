@@ -2,6 +2,8 @@
 name = "pkcs11-proxy-ng-cli"
 version = "0.1.0"
 edition.workspace = true
+license.workspace = true
+publish = false
 
 [[bin]]
 name = "pkcs11-proxy-ng-cli"
@@ -12,6 +14,8 @@ pkcs11-proxy-ng-types = { path = "../types" }
 pkcs11-proxy-ng-client = { path = "../client" }
 clap.workspace = true
 tokio.workspace = true
+tonic.workspace = true
+tonic-health.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 hex = "0.4"

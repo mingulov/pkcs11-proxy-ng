@@ -190,6 +190,19 @@ pub(crate) enum Commands {
         #[arg(long)]
         key_size: Option<u64>,
     },
+    /// Probe the daemon's gRPC health endpoint. Exits 0 if SERVING,
+    /// non-zero otherwise. Use as an `exec`-based k8s readiness probe
+    /// (closes FOLLOWUP-grpc-health-probe — TCP-only probes don't
+    /// honour the daemon's backend-health gating).
+    Health {
+        /// gRPC service name to check. The daemon only flips the
+        /// status of its own service when the backend-health gate
+        /// trips, so this defaults to the daemon's
+        /// service name. Pass `--service ""` to check overall server
+        /// status (which stays SERVING regardless of backend health).
+        #[arg(long, default_value = "pkcs11_proxy_ng.v1.Pkcs11Proxy")]
+        service: String,
+    },
     InitToken {
         #[arg(long)]
         slot_id: u64,

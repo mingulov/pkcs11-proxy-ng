@@ -1,0 +1,8 @@
+[
+  {
+    "name": "daemon",
+    "listen": "0.0.0.0:7512",
+    "upstream": "daemon:7512",
+    "enabled": true
+  }
+]

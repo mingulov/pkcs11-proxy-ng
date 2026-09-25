@@ -1,0 +1,5 @@
+#!/bin/sh
+# Nothing to do — the shim is a regular shared library that consumers
+# dlopen by full path. No ldconfig refresh is needed because the .so
+# lives outside the dynamic linker's default search path.
+exit 0

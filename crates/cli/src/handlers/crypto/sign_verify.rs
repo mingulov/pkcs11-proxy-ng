@@ -6,7 +6,7 @@ use super::super::{
 };
 use crate::mechanisms::parse_mechanism;
 
-fn parameterless_mechanism(name: &str) -> Result<CkMechanism, Box<dyn std::error::Error>> {
+fn parameterless_mechanism(name: &str) -> Result<CkMechanism, Box<dyn core::error::Error>> {
     let mechanism_type = parse_mechanism(name)?;
     Ok(CkMechanism { mechanism_type: CkMechanismType(mechanism_type), params: None })
 }
@@ -29,11 +29,9 @@ pub(crate) async fn sign(
     client
         .sign_init(session, &mechanism, key)
         .await
-        .map_err(|e| format!("C_SignInit failed: CKR 0x{:08X}", e.0))?;
-    let signature = client
-        .sign(session, &data)
-        .await
-        .map_err(|e| format!("C_Sign failed: CKR 0x{:08X}", e.0))?;
+        .map_err(crate::handlers::cli_err("C_SignInit"))?;
+    let signature =
+        client.sign(session, &data).await.map_err(crate::handlers::cli_err("C_Sign"))?;
     println!("{}", hex::encode(&signature));
     close_session(client, session, true).await;
     Ok(())
@@ -59,14 +57,14 @@ pub(crate) async fn verify(
     client
         .verify_init(session, &mechanism, key)
         .await
-        .map_err(|e| format!("C_VerifyInit failed: CKR 0x{:08X}", e.0))?;
+        .map_err(crate::handlers::cli_err("C_VerifyInit"))?;
     match client.verify(session, &data, &signature).await {
         Ok(()) => println!("Signature VALID"),
         Err(error) if error == CkRv::SIGNATURE_INVALID => {
             eprintln!("Signature INVALID (CKR_SIGNATURE_INVALID)");
             std::process::exit(1);
         }
-        Err(error) => return Err(format!("C_Verify failed: CKR 0x{:08X}", error.0).into()),
+        Err(error) => return Err(crate::handlers::cli_err("C_Verify")(error)),
     }
     close_session(client, session, pin.is_some()).await;
     Ok(())

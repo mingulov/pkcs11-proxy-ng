@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: daemon
+  namespace: pkcs11-proxy-demo
+  labels:
+    app: daemon
+spec:
+  selector:
+    app: daemon
+  # sessionAffinity is load-bearing. Without it, a shim that
+  # reconnects after a transient TCP drop can land on a different
+  # daemon replica that doesn't know its client_context_id, and
+  # the application sees CKR_CRYPTOKI_NOT_INITIALIZED until it
+  # re-inits. With ClientIP affinity, the kube-proxy honours the
+  # same backend per source IP and the shim's tonic auto-reconnect
+  # transparently lands on the same daemon.
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      # 3 hours — k8s default; matches typical consumer pod
+      # lifetime. Shorter values let DNS-driven rebalancing kick
+      # in faster but increase the per-restart blast radius.
+      timeoutSeconds: 10800
+  ports:
+    - name: grpc
+      port: 7512
+      targetPort: 7512
+      protocol: TCP

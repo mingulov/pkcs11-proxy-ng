@@ -1,0 +1,56 @@
+# pkcs11-proxy-ng — FIPS-flavored deployment.
+#
+# Targets a FIPS-validated backend (e.g. NSS softokn in FIPS mode, or
+# a FIPS 140-3 validated HSM). The companion mechanism_params.toml in
+# this directory pins discovery_mode = "filtered" and limits the
+# advertised mechanism set to FIPS-approved primitives so callers
+# cannot inadvertently use non-approved algorithms.
+#
+# CMVP caveat: a real FIPS compliance posture depends on which
+# specific HSM / softokn version is loaded. This config is a SHAPE,
+# not a certification. Cross-check `backend.module`'s CMVP cert
+# (https://csrc.nist.gov/projects/cryptographic-module-validation-program)
+# before declaring a deployment FIPS-compliant.
+
+[backend]
+# NSS softokn 3 in FIPS mode (Debian/Ubuntu path). The init args
+# point at a pre-initialised FIPS NSS database; the DB password must
+# have been set via `certutil -d sql:/path -W` before the daemon
+# starts (FIPS softokn refuses empty passwords).
+module = "/usr/lib/x86_64-linux-gnu/libsoftokn3.so"
+initialize_args = "configdir='sql:/var/lib/pkcs11-proxy-ng/fipsdb' tokdir='sql:/var/lib/pkcs11-proxy-ng/fipsdb' certPrefix='' keyPrefix='' secmod='secmod.db' flags=readOnly"
+
+[proxy]
+lease_seconds = 30
+max_concurrent_backend_calls = 64
+max_blocking_threads = 128
+request_timeout_secs = 60
+startup_timeout_secs = 60
+shutdown_grace_secs = 30
+backend_health_consecutive_failures = 3
+http2_keepalive_interval_secs = 15
+http2_keepalive_timeout_secs = 5
+rate_limit_get_backend_interfaces = 0
+rate_limit_window_secs = 1
+
+[listener.remote]
+bind = "0.0.0.0:7512"
+auth = "mtls"
+ca_cert = "/etc/pkcs11-proxy-ng/tls/ca.crt"
+server_cert = "/etc/pkcs11-proxy-ng/tls/server.crt"
+server_key = "/etc/pkcs11-proxy-ng/tls/server.key"
+allow_insecure_tcp = false
+
+[auth]
+# FIPS deployments should pin every authorised caller. The example
+# below is a starting point; tighten by issuer + subject DN.
+allow_all_authenticated = false
+# [[auth.policy]]
+# identity = "x509:issuer=CN=corp-ca;subject=CN=svc-fips-consumer"
+# tokens = ["NSS FIPS 140-2 Certificate DB"]
+
+[mechanisms]
+# Path to the companion mechanism_params.toml (this directory's file).
+# Operator may copy to /etc/pkcs11-proxy-ng/mechanism_params.toml or
+# point this path at the shipped example.
+config_path = "/etc/pkcs11-proxy-ng/mechanism_params.toml"

@@ -1,0 +1,46 @@
+# Chaos fixture.
+#
+# Topology:
+#
+#   runner ─► chaos-daemon (slow_backend.so via volume mount)
+#
+# Mounting slow_backend's host target/release into /opt/slow_backend
+# means we don't have to rebuild the image to change the backend
+# binary; just `cargo build --release` from the slow_backend dir.
+#
+# Per-scenario env vars (SLOW_BACKEND_SIGN_DELAY_MS,
+# SLOW_BACKEND_INIT_HANG, etc.) are set in each scenario script via
+# `docker compose up -d` with `-e VAR=VAL` style env injection.
+
+services:
+  chaos-daemon:
+    image: pkcs11-proxy-ng:chaos-daemon
+    container_name: r8-chaos-daemon
+    networks: [r8net]
+    expose: ["7512"]
+    environment:
+      RUST_LOG: "${RUST_LOG:-pkcs11_proxy_ng=info,pkcs11_proxy_ng_backend=info}"
+      LOG_FORMAT: "json"
+      SLOW_BACKEND_SIGN_DELAY_MS: "${SLOW_BACKEND_SIGN_DELAY_MS:-0}"
+      SLOW_BACKEND_INIT_DELAY_MS: "${SLOW_BACKEND_INIT_DELAY_MS:-0}"
+      SLOW_BACKEND_INIT_HANG: "${SLOW_BACKEND_INIT_HANG:-}"
+      SLOW_BACKEND_SIGN_RV_HEX: "${SLOW_BACKEND_SIGN_RV_HEX:-}"
+      SLOW_BACKEND_BREAK_AFTER_CALLS: "${SLOW_BACKEND_BREAK_AFTER_CALLS:-}"
+      SLOW_BACKEND_BREAK_RV_HEX: "${SLOW_BACKEND_BREAK_RV_HEX:-}"
+    volumes:
+      - ../r2_resilience/slow_backend/target/release:/opt/slow_backend:ro
+
+  chaos-runner:
+    image: consumers-consumer-shell:latest
+    container_name: r8-chaos-runner
+    networks: [r8net]
+    depends_on: [chaos-daemon]
+    environment:
+      PKCS11_PROXY_ENDPOINT: "http://chaos-daemon:7512"
+      PKCS11_PROXY_CONNECT_TIMEOUT: "5"
+      RUST_LOG: "pkcs11_proxy_ng_shim=warn,pkcs11_proxy_ng_client=warn"
+    command: ["sleep", "infinity"]
+
+networks:
+  r8net:
+    driver: bridge

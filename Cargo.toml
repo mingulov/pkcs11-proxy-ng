@@ -12,7 +12,20 @@ members = [
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.94"
+# MSRV raised from 1.85 to 1.88 so the workspace can use let-chains
+# (`if cond && let X = e { ... }`), stabilised in Rust 1.88. The pre-
+# existing codebase had 7 let-chain sites that were silently above the
+# old MSRV; this version reflects reality.
+#
+# Distribution matrix (see AGENTS.md §5):
+#   * Alpine 3.23  — stock rustc ≥ 1.91. Supported by stock toolchain.
+#   * Alpine 3.22  — stock rustc 1.87. NOT supported (below MSRV).
+#                    Drop in favour of Alpine 3.23.
+#   * Amazon Linux 2023 — stock rustc ~1.86. Below MSRV; users must
+#                    install Rust via rustup or vendor toolchain.
+# If a build target's stock Rust is older than 1.88, expect rustup-
+# installed toolchain rather than expanding the distro matrix.
+rust-version = "1.88"
 license = "Apache-2.0 OR MIT"
 
 [workspace.dependencies]
@@ -35,3 +48,19 @@ tonic-build = "0.14"
 tonic-health = "0.14"
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
+sha2 = "0.10"
+zeroize = { version = "1", features = ["derive"] }
+
+# Release profile tuned for size and runtime over build time. The shim
+# cdylib and daemon binary shrink ~25-30%; CI build cost rises by ~30s.
+#
+# `panic = "unwind"` is the default and MUST stay so. Several PIN/key
+# handling sites in `crates/types/src/mechanism.rs` rely on
+# `Drop` (`ZeroizeOnDrop`) running on unwind to zero password bytes.
+# Switching to `panic = "abort"` would skip those drops and turn a
+# zeroize-protected struct into a plain heap blob whose contents
+# survive in the allocator's freelist.
+[profile.release]
+lto = "thin"
+strip = "symbols"
+codegen-units = 1

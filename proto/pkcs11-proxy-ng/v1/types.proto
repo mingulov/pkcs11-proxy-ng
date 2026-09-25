@@ -1441,4 +1441,33 @@ message InterfaceInfo {
 
 message GetBackendInterfacesResponse {
   repeated InterfaceInfo interfaces = 1;
+  // Server-published mechanism registry. Absent if the daemon has no
+  // registry configured; older daemons predate this field and never
+  // emit it. Field number 2 is permanently reserved; do not reuse if
+  // ever removed.
+  optional MechanismRegistryPayload mechanism_registry = 2;
+}
+
+// Server-driven mechanism parameter registry payload. Carries the
+// mechanism->shape mapping, the parameterless mechanism set, the
+// discovery_mode hint, and a short content-derived revision string
+// so shims can detect changes between probes. See the packaging design
+// spec, "Server-Driven Mechanism Registry" section.
+message MechanismRegistryPayload {
+  // Short content digest (e.g., sha256(toml)[..16]) of the source TOML
+  // the daemon loaded. The literal string "embedded-default" indicates
+  // the daemon is serving its embedded default registry.
+  string revision = 1;
+  // "transparent" or "filtered". Hint only — the shim's runtime
+  // `PKCS11_PROXY_DISCOVERY_MODE` env override (if set) wins.
+  string discovery_mode = 2;
+  // CK_MECHANISM_TYPE values that always take NULL pMechanism->pParameter.
+  repeated uint64 parameterless = 3;
+  // shape -> mechanisms mapping (one entry per known shape name).
+  repeated MechanismParamEntry params = 4;
+}
+
+message MechanismParamEntry {
+  string shape = 1;
+  repeated uint64 mechanisms = 2;
 }

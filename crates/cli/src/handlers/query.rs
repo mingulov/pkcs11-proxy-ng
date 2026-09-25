@@ -9,7 +9,7 @@ pub(crate) async fn list_slots(client: &mut Pkcs11Client, token_present: bool) -
     let slots = client
         .get_slot_list(token_present)
         .await
-        .map_err(|e| format!("C_GetSlotList failed: CKR 0x{:08X}", e.0))?;
+        .map_err(crate::handlers::cli_err("C_GetSlotList"))?;
     if slots.is_empty() {
         println!("No slots found.");
     } else {
@@ -24,7 +24,7 @@ pub(crate) async fn slot_info(client: &mut Pkcs11Client, slot_id: u64) -> CliRes
     let info = client
         .get_slot_info(CkSlotId(slot_id))
         .await
-        .map_err(|e| format!("C_GetSlotInfo failed: CKR 0x{:08X}", e.0))?;
+        .map_err(crate::handlers::cli_err("C_GetSlotInfo"))?;
     println!("Slot {}:", slot_id);
     println!("  Description:  {}", info.slot_description);
     println!("  Manufacturer: {}", info.manufacturer_id);
@@ -38,7 +38,7 @@ pub(crate) async fn token_info(client: &mut Pkcs11Client, slot_id: u64) -> CliRe
     let info = client
         .get_token_info(CkSlotId(slot_id))
         .await
-        .map_err(|e| format!("C_GetTokenInfo failed: CKR 0x{:08X}", e.0))?;
+        .map_err(crate::handlers::cli_err("C_GetTokenInfo"))?;
     println!("Token in slot {}:", slot_id);
     println!("  Label:            {}", info.label);
     println!("  Manufacturer:     {}", info.manufacturer_id);
@@ -56,7 +56,7 @@ pub(crate) async fn list_mechanisms(client: &mut Pkcs11Client, slot_id: u64) -> 
     let mechs = client
         .get_mechanism_list(CkSlotId(slot_id))
         .await
-        .map_err(|e| format!("C_GetMechanismList failed: CKR 0x{:08X}", e.0))?;
+        .map_err(crate::handlers::cli_err("C_GetMechanismList"))?;
     if mechs.is_empty() {
         println!("No mechanisms found for slot {}.", slot_id);
     } else {
@@ -69,8 +69,7 @@ pub(crate) async fn list_mechanisms(client: &mut Pkcs11Client, slot_id: u64) -> 
 }
 
 pub(crate) async fn get_info(client: &mut Pkcs11Client) -> CliResult {
-    let info =
-        client.get_info().await.map_err(|e| format!("C_GetInfo failed: CKR 0x{:08X}", e.0))?;
+    let info = client.get_info().await.map_err(crate::handlers::cli_err("C_GetInfo"))?;
     println!("Cryptoki version: {}.{}", info.cryptoki_version.0, info.cryptoki_version.1);
     println!("Manufacturer:     {}", info.manufacturer_id);
     println!("Library:          {}", info.library_description);
@@ -90,7 +89,7 @@ pub(crate) async fn session_info(
     let info = client
         .get_session_info(session)
         .await
-        .map_err(|e| format!("C_GetSessionInfo failed: CKR 0x{:08X}", e.0))?;
+        .map_err(crate::handlers::cli_err("C_GetSessionInfo"))?;
     let state_name = match info.state {
         CkSessionState::RoPublic => "RO public",
         CkSessionState::RoUser => "RO user",
@@ -118,7 +117,7 @@ pub(crate) async fn random(
     let data = client
         .generate_random(session, len)
         .await
-        .map_err(|e| format!("C_GenerateRandom failed: CKR 0x{:08X}", e.0))?;
+        .map_err(crate::handlers::cli_err("C_GenerateRandom"))?;
     match format.to_lowercase().as_str() {
         "base64" => {
             use std::io::Write;

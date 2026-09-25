@@ -2,6 +2,8 @@
 name = "pkcs11-proxy-ng-backend"
 version = "0.1.0"
 edition.workspace = true
+license.workspace = true
+publish = false
 
 [dependencies]
 pkcs11-proxy-ng-types = { path = "../types" }

@@ -238,7 +238,7 @@ pub async fn get_attribute_bytes(
         )
         .await
         .map_err(|rv| format!("C_GetAttributeValueExact(size) failed: {rv}"))?;
-    if !rv.is_ok() {
+    if rv.is_err() {
         return Err(format!("C_GetAttributeValueExact(size) failed: 0x{:08X}", rv.0));
     }
     let Some(result) = results.into_iter().next() else {
@@ -261,7 +261,7 @@ pub async fn get_attribute_bytes(
         )
         .await
         .map_err(|rv| format!("C_GetAttributeValueExact(data) failed: {rv}"))?;
-    if !rv.is_ok() {
+    if rv.is_err() {
         return Err(format!("C_GetAttributeValueExact(data) failed: 0x{:08X}", rv.0));
     }
     Ok(results.into_iter().next().and_then(|result| result.value))

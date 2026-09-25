@@ -1,8 +1,9 @@
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
+use tokio::sync::mpsc;
 use tonic::Status;
 
 use pkcs11_proxy_ng_types::*;
@@ -13,11 +14,60 @@ use super::super::handle_map::{BackendHandle, VirtualHandle};
 static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 static BACKEND_TIMEOUT: OnceLock<Duration> = OnceLock::new();
 static MAX_BACKEND_CALLS: OnceLock<usize> = OnceLock::new();
+static HEALTH_EVENT_TX: OnceLock<mpsc::UnboundedSender<BackendHealthEvent>> = OnceLock::new();
+/// Tracks whether the LAST sent health event was `Success`. Initialized
+/// to `true` because the health-gate task assumes the daemon starts in
+/// `SERVING`. Used by [`report_backend_outcome`] to suppress
+/// successive `Success` events — the gate only needs the first
+/// `Success` after a `Failure` streak to reset its counter, so a
+/// per-RPC `Success` push at the data-plane rate is pure noise.
+static LAST_SENT_HEALTHY: AtomicBool = AtomicBool::new(true);
+
+/// Outcome reported by [`spawn_backend`] for the health-gating task
+/// in `main.rs` to consume. `Success` = backend produced any
+/// `CkResult` (including a PKCS#11 error code that is a normal
+/// application-level outcome); `Failure` = transport-level failure
+/// (timeout, blocking-pool panic, circuit-breaker trip) — those are
+/// the only conditions that flip `tonic-health` to NOT_SERVING.
+#[derive(Debug, Clone, Copy)]
+pub enum BackendHealthEvent {
+    Success,
+    Failure,
+}
 
 /// Called once at server startup to configure the backend guard.
 pub fn configure_backend_guard(timeout_secs: u64, max_calls: usize) {
     BACKEND_TIMEOUT.set(Duration::from_secs(timeout_secs)).ok();
     MAX_BACKEND_CALLS.set(max_calls).ok();
+}
+
+/// Wire up the channel that `spawn_backend` uses to report outcomes
+/// to the health-gating task. Called once at startup. If never called,
+/// backend outcomes are silently dropped — health gating is disabled
+/// and `tonic-health` stays at whatever startup last set it to.
+pub fn configure_backend_health_events(tx: mpsc::UnboundedSender<BackendHealthEvent>) {
+    HEALTH_EVENT_TX.set(tx).ok();
+}
+
+fn report_backend_outcome(success: bool) {
+    let Some(tx) = HEALTH_EVENT_TX.get() else { return };
+    if success {
+        // Coalesce: only send a Success event when transitioning from
+        // a previously-unhealthy state. The gate's only use for
+        // Success is to reset its consecutive_failures counter; once
+        // reset, repeated Success events do nothing. Suppressing them
+        // removes one MPSC push (+ allocation) from every successful
+        // data-plane RPC.
+        if !LAST_SENT_HEALTHY.swap(true, Ordering::Relaxed) {
+            let _ = tx.send(BackendHealthEvent::Success);
+        }
+    } else {
+        // Failures always go through: the gate counts consecutive
+        // failures toward its threshold. Coalescing would make the
+        // counter never advance.
+        LAST_SENT_HEALTHY.store(false, Ordering::Relaxed);
+        let _ = tx.send(BackendHealthEvent::Failure);
+    }
 }
 
 fn backend_timeout() -> Duration {
@@ -93,10 +143,14 @@ where
             max = max_calls,
             "Backend circuit breaker tripped — too many in-flight calls"
         );
+        // A flood of breaker trips means the daemon is overloaded and
+        // downstream traffic should be diverted — count as a failure
+        // for the health gate.
+        report_backend_outcome(false);
         return Ok(Err(CkRv::DEVICE_ERROR));
     };
 
-    match tokio::time::timeout(backend_timeout(), spawn_task(operation)).await {
+    let result = match tokio::time::timeout(backend_timeout(), spawn_task(operation)).await {
         Ok(result) => result,
         Err(_elapsed) => {
             tracing::warn!(
@@ -107,8 +161,55 @@ where
             );
             Ok(Err(CkRv::DEVICE_ERROR))
         }
-    }
+    };
+
+    let healthy = classify_backend_outcome::<T>(&result);
+    tracing::debug!(healthy, "backend outcome classified");
+    report_backend_outcome(healthy);
+
+    result
     // _guard drops here (or when Future is cancelled) → IN_FLIGHT decremented
+}
+
+/// Classify a `spawn_backend` result as healthy (true) or unhealthy
+/// (false) from the daemon-level readiness gauge's perspective.
+///
+/// Health gating triggers ONLY on transport-level failures:
+///   * timeouts (mapped to `Ok(Err(CkRv::DEVICE_ERROR))` by
+///     [`spawn_backend`] above, distinguishable because PKCS#11
+///     application errors must never produce `CKR_DEVICE_ERROR`),
+///   * `spawn_blocking` panics (`Err(Status)`),
+///   * circuit-breaker trips (also `Ok(Err(CkRv::DEVICE_ERROR))` —
+///     reported separately by `spawn_backend` before this function is
+///     called).
+///
+/// PKCS#11 application errors (CKR_PIN_INCORRECT, CKR_DATA_INVALID,
+/// CKR_MECHANISM_INVALID, …) are normal client-side outcomes; they
+/// must NOT trip the readiness gauge, or a noisy authentication user
+/// could take the daemon out of the load-balancer rotation.
+///
+/// Extracted as a pure function so the contract is testable without
+/// the global `HEALTH_EVENT_TX` channel state.
+fn classify_backend_outcome<T>(result: &Result<CkResult<T>, Status>) -> bool {
+    match result {
+        Ok(Ok(_)) => true,
+        // CkRv values that indicate the backend ITSELF is unhealthy
+        // (not just that the application's request was malformed).
+        // After N consecutive of these, the daemon flips
+        // tonic-health to NOT_SERVING so k8s pulls the pod out of
+        // the Service endpoint pool. Chaos scenario 2 verifies this.
+        Ok(Err(rv))
+            if *rv == CkRv::DEVICE_ERROR        // timeout / breaker trip
+                || *rv == CkRv::HOST_MEMORY     // HSM resource exhaustion
+                || *rv == CkRv::DEVICE_REMOVED  // HSM disconnected
+                || *rv == CkRv::TOKEN_NOT_PRESENT =>
+        {
+            tracing::debug!(?rv, "backend outcome: unhealthy");
+            false
+        }
+        Ok(Err(_)) => true, // normal application-level PKCS#11 error
+        Err(_) => false,    // blocking-pool panic / transport break
+    }
 }
 
 pub(super) fn ck_rv_only(result: CkResult<()>) -> u64 {
@@ -124,15 +225,97 @@ pub(super) fn ck_rv_only(result: CkResult<()>) -> u64 {
 /// Used by all RPCs whose response carries a `mechanism_out` field
 /// (Encrypt/Decrypt simple paths + ByteOutputExact + WrapKey). New
 /// mechanism variants that surface output parameters must extend the
-/// match below, otherwise `mechanism_out` will silently be `None` for
-/// that mechanism even when the backend mutated it.
+/// match below; the catch-all is enumerated exhaustively (no bare `_`)
+/// so adding a new `CkMechanismParams` variant fails to compile here,
+/// forcing the maintainer to triage whether the new variant surfaces
+/// `mechanism_out` and add the appropriate arm.
 pub(super) fn mechanism_output_to_proto(
     params: CkMechanismParams,
 ) -> Option<pkcs11_proxy_ng_proto::Mechanism> {
-    let mechanism_type = match params {
+    let mechanism_type = match &params {
+        // Variants that surface mechanism output to the caller.
         CkMechanismParams::Gcm(_) => CkMechanismType::AES_GCM,
         CkMechanismParams::Tls12MasterKeyDerive(_) => CkMechanismType::TLS12_MASTER_KEY_DERIVE,
-        _ => return None,
+        // Variants that do NOT surface mechanism output (today). The
+        // exhaustive enumeration forces a compile error when a new
+        // variant is added.
+        CkMechanismParams::RsaPkcsPss(_)
+        | CkMechanismParams::RsaPkcsOaep(_)
+        | CkMechanismParams::Ecdh1Derive(_)
+        | CkMechanismParams::Iv(_)
+        | CkMechanismParams::Rc5(_)
+        | CkMechanismParams::Rc5MacGeneral(_)
+        | CkMechanismParams::Rc2MacGeneral(_)
+        | CkMechanismParams::Xeddsa(_)
+        | CkMechanismParams::TlsMac(_)
+        | CkMechanismParams::AesCtr(_)
+        | CkMechanismParams::CamelliaCtr(_)
+        | CkMechanismParams::Rc2Cbc(_)
+        | CkMechanismParams::Rc5Cbc(_)
+        | CkMechanismParams::AesCbcEncryptData(_)
+        | CkMechanismParams::DesCbcEncryptData(_)
+        | CkMechanismParams::AriaCbcEncryptData(_)
+        | CkMechanismParams::CamelliaCbcEncryptData(_)
+        | CkMechanismParams::SeedCbcEncryptData(_)
+        | CkMechanismParams::Ccm(_)
+        | CkMechanismParams::ChaCha20(_)
+        | CkMechanismParams::Salsa20(_)
+        | CkMechanismParams::Salsa20ChaCha20Poly1305(_)
+        | CkMechanismParams::GcmWrap(_)
+        | CkMechanismParams::CcmWrap(_)
+        | CkMechanismParams::Ecdh2Derive(_)
+        | CkMechanismParams::EcmqvDerive(_)
+        | CkMechanismParams::X942Dh1Derive(_)
+        | CkMechanismParams::X942Dh2Derive(_)
+        | CkMechanismParams::X942MqvDerive(_)
+        | CkMechanismParams::Hkdf(_)
+        | CkMechanismParams::Eddsa(_)
+        | CkMechanismParams::Gostr3410Derive(_)
+        | CkMechanismParams::KeaDerive(_)
+        | CkMechanismParams::EcdhAesKeyWrap(_)
+        | CkMechanismParams::RsaAesKeyWrap(_)
+        | CkMechanismParams::Gostr3410KeyWrap(_)
+        | CkMechanismParams::KeyWrapSetOaep(_)
+        | CkMechanismParams::Pbe(_)
+        | CkMechanismParams::Pkcs5Pbkd2(_)
+        | CkMechanismParams::TlsPrf(_)
+        | CkMechanismParams::TlsKdf(_)
+        | CkMechanismParams::Ssl3MasterKeyDerive(_)
+        | CkMechanismParams::Tls12ExtendedMasterKeyDerive(_)
+        | CkMechanismParams::Ssl3KeyMat(_)
+        | CkMechanismParams::WtlsMasterKeyDerive(_)
+        | CkMechanismParams::WtlsPrf(_)
+        | CkMechanismParams::WtlsKeyMat(_)
+        | CkMechanismParams::IkePrfDerive(_)
+        | CkMechanismParams::Ike1PrfDerive(_)
+        | CkMechanismParams::Ike1ExtendedDerive(_)
+        | CkMechanismParams::Ike2PrfPlusDerive(_)
+        | CkMechanismParams::Sp800108Kdf(_)
+        | CkMechanismParams::Sp800108FeedbackKdf(_)
+        | CkMechanismParams::X3dhInitiate(_)
+        | CkMechanismParams::X3dhRespond(_)
+        | CkMechanismParams::X2RatchetInitialize(_)
+        | CkMechanismParams::X2RatchetRespond(_)
+        | CkMechanismParams::Otp(_)
+        | CkMechanismParams::Kip(_)
+        | CkMechanismParams::CmsSig(_)
+        | CkMechanismParams::SkipjackPrivateWrap(_)
+        | CkMechanismParams::SkipjackRelayx(_)
+        | CkMechanismParams::MacGeneral(_)
+        | CkMechanismParams::ObjectHandle(_)
+        | CkMechanismParams::Extract(_)
+        | CkMechanismParams::SignAdditionalContext(_)
+        | CkMechanismParams::Kmac(_)
+        | CkMechanismParams::MuGen(_)
+        | CkMechanismParams::KeyDerivationString(_)
+        | CkMechanismParams::Raw(_)
+        | CkMechanismParams::Ecies(_)
+        | CkMechanismParams::AesCmacKeyDerivation(_)
+        | CkMechanismParams::Dilithium(_)
+        | CkMechanismParams::Kyber(_)
+        | CkMechanismParams::HdKeyDerive(_)
+        | CkMechanismParams::VendorObjectExtract(_)
+        | CkMechanismParams::VendorObjectInsert(_) => return None,
     };
     Some(pkcs11_proxy_ng_proto::Mechanism::from(&CkMechanism {
         mechanism_type,
@@ -201,7 +384,7 @@ pub(super) async fn resolve_session_and_key(
     // CKR_KEY_HANDLE_INVALID locally.  This preserves transparency: the
     // backend decides the error priority (e.g., CKR_FUNCTION_NOT_SUPPORTED
     // vs CKR_KEY_HANDLE_INVALID).
-    let backend_key = key.map(|h| CkObjectHandle(h.0)).unwrap_or(CkObjectHandle(0));
+    let backend_key = key.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0));
     Ok((CkSessionHandle(backend_session.0), backend_key))
 }
 
@@ -226,7 +409,7 @@ pub(super) async fn resolve_session_and_object(
     let backend_session = session.ok_or(CkRv::SESSION_HANDLE_INVALID)?;
     // Forward CK_INVALID_HANDLE to backend when object is unknown — see
     // resolve_session_and_key for rationale.
-    let backend_object = object.map(|h| CkObjectHandle(h.0)).unwrap_or(CkObjectHandle(0));
+    let backend_object = object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0));
     Ok((CkSessionHandle(backend_session.0), backend_object))
 }
 
@@ -254,10 +437,8 @@ pub(super) async fn resolve_session_and_two_objects(
     // Forward CK_INVALID_HANDLE to backend when either object is unknown; see
     // resolve_session_and_key for rationale. Local context/session validation
     // remains explicit; backend-visible object handle priority stays backend-owned.
-    let first_backend_object =
-        first_object.map(|h| CkObjectHandle(h.0)).unwrap_or(CkObjectHandle(0));
-    let second_backend_object =
-        second_object.map(|h| CkObjectHandle(h.0)).unwrap_or(CkObjectHandle(0));
+    let first_backend_object = first_object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0));
+    let second_backend_object = second_object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0));
 
     Ok((CkSessionHandle(backend_session.0), first_backend_object, second_backend_object))
 }
@@ -418,6 +599,78 @@ mod tests {
         drop(third);
         drop(replacement);
         assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+
+    /// Health-event classification tests use the pure
+    /// `classify_backend_outcome` helper rather than driving
+    /// `spawn_backend` end-to-end. The end-to-end path is exercised
+    /// at runtime by `spawn_backend_health_gate` in `main.rs`; in
+    /// unit tests it races on the global `HEALTH_EVENT_TX` OnceLock
+    /// when other tests run in parallel.
+
+    #[test]
+    fn classify_ok_is_healthy() {
+        let result: Result<CkResult<u64>, Status> = Ok(Ok(42));
+        assert!(classify_backend_outcome(&result));
+    }
+
+    #[test]
+    fn classify_pkcs11_application_error_is_healthy() {
+        // CKR_PIN_INCORRECT, CKR_DATA_INVALID, etc. are normal
+        // application-level outcomes — they must NOT trip the
+        // readiness gauge, or a noisy auth user would take the
+        // daemon out of rotation.
+        for rv in [
+            CkRv::PIN_INCORRECT,
+            CkRv::DATA_INVALID,
+            CkRv::MECHANISM_INVALID,
+            CkRv::SESSION_HANDLE_INVALID,
+            CkRv::USER_NOT_LOGGED_IN,
+        ] {
+            let result: Result<CkResult<()>, Status> = Ok(Err(rv));
+            assert!(
+                classify_backend_outcome(&result),
+                "CkRv {:?} must be classified as healthy",
+                rv
+            );
+        }
+    }
+
+    #[test]
+    fn classify_device_error_is_unhealthy() {
+        // CKR_DEVICE_ERROR is what spawn_backend produces on the
+        // timeout and circuit-breaker-trip paths. PKCS#11
+        // application errors must NOT use CKR_DEVICE_ERROR — that
+        // invariant is enforced by the proto layer (see
+        // ADR-0003 §3).
+        let result: Result<CkResult<()>, Status> = Ok(Err(CkRv::DEVICE_ERROR));
+        assert!(!classify_backend_outcome(&result));
+    }
+
+    #[test]
+    fn classify_resource_exhaustion_is_unhealthy() {
+        // Chaos scenario 2: persistent CKR_HOST_MEMORY (HSM out of
+        // memory), CKR_DEVICE_REMOVED (HSM disconnected), or
+        // CKR_TOKEN_NOT_PRESENT (token gone) are backend-health
+        // signals, not application errors. Repeated occurrences
+        // flip readiness so k8s pulls the pod out of the Service.
+        for rv in [CkRv::HOST_MEMORY, CkRv::DEVICE_REMOVED, CkRv::TOKEN_NOT_PRESENT] {
+            let result: Result<CkResult<()>, Status> = Ok(Err(rv));
+            assert!(
+                !classify_backend_outcome(&result),
+                "CkRv {:?} must be classified as unhealthy",
+                rv
+            );
+        }
+    }
+
+    #[test]
+    fn classify_transport_status_is_unhealthy() {
+        // `Err(Status)` from spawn_task means a blocking-pool panic
+        // or otherwise unrecoverable backend interaction — always
+        // unhealthy.
+        let result: Result<CkResult<()>, Status> = Err(Status::internal("backend panicked"));
+        assert!(!classify_backend_outcome(&result));
     }
 
     #[tokio::test]

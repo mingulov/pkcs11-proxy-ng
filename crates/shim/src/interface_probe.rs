@@ -7,12 +7,20 @@
 //! get the static (all-non-null) function lists; post-`C_Initialize`
 //! callers get the patched versions.
 
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 
 use cryptoki_sys::*;
+use pkcs11_proxy_ng_types::MechanismRegistry;
 
 use crate::function_registry::{build_function_list, build_function_list_3_x};
 use crate::state;
+
+/// Tracks the registry revision the shim most-recently installed. Used
+/// only to log a WARN when consecutive probes deliver different
+/// revisions in the same shim lifetime — usually an HA-daemon
+/// `mechanism_params.toml` drift, occasionally an operator-driven
+/// SIGHUP reload that landed between probes.
+static LAST_REGISTRY_REVISION: Mutex<Option<String>> = Mutex::new(None);
 
 // ---------------------------------------------------------------------------
 // Cached state
@@ -40,7 +48,7 @@ unsafe impl Sync for InterfaceState {}
 static INTERFACE_STATE: RwLock<Option<&'static InterfaceState>> = RwLock::new(None);
 
 /// Null-terminated name used for all interface entries.
-static IFACE_NAME_PKCS11: &[u8] = b"PKCS 11\0";
+const IFACE_NAME_PKCS11: &[u8] = b"PKCS 11\0";
 
 // ---------------------------------------------------------------------------
 // Building unpatched function lists (delegates to existing macros)
@@ -416,20 +424,39 @@ fn build_patched_function_list_3_2(null_names: &[String]) -> CK_FUNCTION_LIST_3_
 // ---------------------------------------------------------------------------
 
 /// Contact the backend and build an `InterfaceState` with patched function
-/// lists reflecting the backend's capabilities.
+/// lists reflecting the backend's capabilities. Also pulls the server's
+/// mechanism registry payload (when provided) and atomically swaps the
+/// shim's in-memory registry to match.
 fn probe_backend() -> Result<InterfaceState, String> {
     // Ensure the gRPC channel is up (returns Err(CkRv) on failure).
     state::ensure_client_connected().map_err(|e| format!("connect failed: {e:?}"))?;
 
     let rt = state::runtime();
-    let interfaces = rt.block_on(async {
+    let probe = rt.block_on(async {
         let mut client = state::client().lock().await;
         client.get_backend_interfaces().await
     })?;
 
+    // Install the server-published registry whenever the daemon
+    // includes one. Older daemons predate the field — in that case we
+    // keep whatever the shim's embedded-default fallback already
+    // installed (see init_general.rs).
+    if std::env::var_os("PKCS11_PROXY_DISABLE_SERVER_REGISTRY").is_none() {
+        if let Some(payload) = &probe.mechanism_registry {
+            let registry: MechanismRegistry = payload.into();
+            let new_revision = registry.revision().to_string();
+            log_registry_change(&new_revision);
+            state::replace_mechanism_registry(registry);
+        }
+    } else {
+        tracing::debug!(
+            "PKCS11_PROXY_DISABLE_SERVER_REGISTRY set; ignoring server-published registry"
+        );
+    }
+
     // Index null-function lists by (major, minor).
     let mut null_map = std::collections::HashMap::<(u8, u8), Vec<String>>::new();
-    for (major, minor, nulls) in &interfaces {
+    for (major, minor, nulls) in &probe.interfaces {
         null_map.insert((*major, *minor), nulls.clone());
     }
 
@@ -489,6 +516,36 @@ fn fixup_catalog(st: &mut InterfaceState) {
         st.catalog[idx].pFunctionList =
             &st.fl_3_2 as *const CK_FUNCTION_LIST_3_2 as *mut std::ffi::c_void;
     }
+}
+
+/// Record the latest registry revision and emit a log line. A change
+/// across probes is normal after a daemon SIGHUP reload; an unexpected
+/// flap (different revisions in quick succession against a supposedly
+/// stable daemon) suggests HA daemon replicas serving inconsistent
+/// `mechanism_params.toml` files, so it is escalated to WARN.
+fn log_registry_change(new_revision: &str) {
+    let mut guard = LAST_REGISTRY_REVISION.lock().unwrap_or_else(|e| e.into_inner());
+    match guard.as_deref() {
+        Some(prev) if prev == new_revision => {
+            tracing::debug!(revision = %new_revision, "mechanism registry unchanged");
+        }
+        Some(prev) => {
+            tracing::warn!(
+                previous = %prev,
+                current = %new_revision,
+                "mechanism registry revision changed between probes — \
+                 expected after a daemon SIGHUP or new daemon replica; \
+                 if unintentional, check HA daemon mechanism_params.toml consistency"
+            );
+        }
+        None => {
+            tracing::info!(
+                revision = %new_revision,
+                "mechanism registry installed from server"
+            );
+        }
+    }
+    *guard = Some(new_revision.to_string());
 }
 
 fn leak_fixed_state(st: InterfaceState) -> &'static InterfaceState {

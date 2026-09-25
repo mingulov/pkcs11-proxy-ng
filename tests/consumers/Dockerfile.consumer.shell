@@ -1,0 +1,28 @@
+# consumer image — shell-based consumers.
+# Bundles: pkcs11-tool (OpenSC), p11tool (GnuTLS), OpenSSL 3 + libp11
+# engine + libp11 provider, plus the shim.
+
+FROM pkcs11-proxy-ng:test-alpine3.23 AS pkcs11ng
+
+FROM alpine:3.23
+
+RUN apk add --no-cache \
+        bash curl jq \
+        opensc \
+        gnutls-utils \
+        openssl libp11 \
+        p11-kit p11-kit-server \
+        libgcc
+
+RUN --mount=type=bind,from=pkcs11ng,source=/apk,target=/apk \
+    apk --no-cache add --allow-untrusted --repository /apk \
+        pkcs11-proxy-ng-shim \
+        pkcs11-proxy-ng-cli
+
+COPY pkcs11-proxy-ng/tests/consumers/scripts /scripts
+RUN chmod +x /scripts/*.sh
+
+ENV PKCS11_MODULE_PATH=/usr/lib/pkcs11/libpkcs11_proxy_ng_shim.so
+
+WORKDIR /work
+CMD ["sleep", "infinity"]

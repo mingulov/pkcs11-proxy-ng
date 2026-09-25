@@ -1,0 +1,23 @@
+# Standalone (NOT a workspace member). Built independently from the
+# main daemon workspace so rcgen + ring don't enter the production
+# dep graph. Build with:
+#   (cd tests/chaos/cert_minter && cargo build --release)
+[workspace]
+
+[package]
+name = "cert-minter"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+publish = false
+description = "Sub-day X.509 cert minter for chaos scenario 6 (TLS cert expiry). Uses rcgen to mint a CA, a short-lived server cert, and a long-lived client cert with second-granular not_after."
+
+[dependencies]
+rcgen = "0.13"
+time = "0.3"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+
+[profile.release]
+strip = "symbols"
+lto = "thin"

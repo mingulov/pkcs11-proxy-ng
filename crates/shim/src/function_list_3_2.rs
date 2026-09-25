@@ -1,15 +1,14 @@
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 
 use cryptoki_sys::*;
 
 use crate::dispatch::general;
 use crate::function_registry::build_function_list_3_x;
 
-static FUNC_LIST_3_2: OnceLock<CK_FUNCTION_LIST_3_2> = OnceLock::new();
+static FUNC_LIST_3_2: LazyLock<CK_FUNCTION_LIST_3_2> = LazyLock::new(build_function_list_3_2);
 
 pub fn get_function_list_3_2() -> *mut CK_FUNCTION_LIST_3_2 {
-    let fl = FUNC_LIST_3_2.get_or_init(build_function_list_3_2);
-    fl as *const CK_FUNCTION_LIST_3_2 as *mut CK_FUNCTION_LIST_3_2
+    &*FUNC_LIST_3_2 as *const CK_FUNCTION_LIST_3_2 as *mut CK_FUNCTION_LIST_3_2
 }
 
 fn build_function_list_3_2() -> CK_FUNCTION_LIST_3_2 {

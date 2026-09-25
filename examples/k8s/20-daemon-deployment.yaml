@@ -1,0 +1,142 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: daemon
+  namespace: pkcs11-proxy-demo
+  labels:
+    app: daemon
+spec:
+  replicas: 3
+  # RollingUpdate is the only policy that meets the rolling-restart SLO. A
+  # surge of 1 keeps 3 healthy replicas during the rollover; the
+  # consumer's session affinity drains gracefully via the
+  # Service's `sessionAffinity: ClientIP` (see daemon-svc).
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: daemon
+  template:
+    metadata:
+      labels:
+        app: daemon
+    spec:
+      # k8s terminationGracePeriodSeconds must be >= the daemon's
+      # proxy.shutdown_grace_secs (default 30) so an in-flight
+      # signing request can complete during graceful drain.
+      terminationGracePeriodSeconds: 45
+      containers:
+        - name: daemon
+          # Runnable daemon image — Alpine 3.23 with the
+          # pkcs11-proxy-ng-daemon APK and SoftHSM2 installed. Built
+          # by the resilience fixture
+          # (tests/r2_resilience/Dockerfile.daemon); kind operators
+          # load it with `kind load docker-image
+          # r2_resilience-daemon:latest --name <cluster>`. The
+          # carrier image `pkcs11-proxy-ng:test-alpine3.23` is
+          # FROM scratch and not directly usable as a runtime
+          # image. For your own deployment, build a runtime
+          # variant from your distro of choice.
+          image: r2_resilience-daemon:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              # All replicas share /tokens (hostPath). Only the FIRST
+              # to land initialises the token; later replicas detect
+              # the existing label and skip. In production, this is
+              # the shared HSM backend (CloudHSM, networked HSM,
+              # shared cluster device); the audit fixture's hostPath
+              # is a stand-in.
+              mkdir -p /tokens
+              cat > /etc/softhsm2.conf <<EOF
+              directories.tokendir = /tokens
+              objectstore.backend = file
+              log.level = INFO
+              slots.removable = false
+              slots.mechanisms = ALL
+              library.reset_on_fork = false
+              EOF
+              if ! softhsm2-util --show-slots 2>/dev/null | grep -q "Label:[[:space:]]*demo-token"; then
+                  softhsm2-util --init-token --free \
+                      --label demo-token --so-pin abcd --pin 1234 >/dev/null
+              fi
+              exec /usr/bin/pkcs11-proxy-ng /etc/pkcs11-proxy-ng/proxy.toml
+          env:
+            - name: RUST_LOG
+              value: "pkcs11_proxy_ng=info,pkcs11_proxy_ng_backend=info"
+            - name: LOG_FORMAT
+              value: "json"
+            - name: SOFTHSM2_CONF
+              value: "/etc/softhsm2.conf"
+          ports:
+            - name: grpc
+              containerPort: 7512
+              protocol: TCP
+          volumeMounts:
+            - name: config
+              mountPath: /etc/pkcs11-proxy-ng
+              readOnly: true
+            - name: tokens
+              mountPath: /tokens
+          # Readiness probe uses pkcs11-proxy-ng-cli's `health`
+          # subcommand (closes FOLLOWUP-grpc-health-probe). The
+          # CLI talks gRPC `grpc.health.v1.Health/Check` to the
+          # daemon and exits 0 on SERVING, 1 otherwise. This honours
+          # the daemon's backend-health gating: when N consecutive
+          # backend failures flip tonic-health to NOT_SERVING,
+          # kube-proxy removes the pod from the Service endpoints.
+          # The earlier TCP-only probe only checked that the
+          # listener was up — backend hangs were invisible.
+          readinessProbe:
+            exec:
+              command:
+                - /usr/bin/pkcs11-proxy-ng-cli
+                - --endpoint
+                - http://127.0.0.1:7512
+                - health
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Liveness probe is intentionally laxer than readiness:
+          # we want NOT_SERVING (= no traffic) but NOT a restart
+          # for backend hangs. Restarts only kick in if the
+          # listener itself stops accepting connections.
+          livenessProbe:
+            tcpSocket:
+              port: 7512
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "1000m"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            runAsNonRoot: false
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: config
+          configMap:
+            name: daemon-config
+        - name: tokens
+          # hostPath stands in for a shared HSM backend. In a real
+          # multi-replica deployment, this is the shared HSM device
+          # / CloudHSM client / network HSM mount that every daemon
+          # replica connects to. emptyDir does NOT work here — see
+          # doc/audit/pkcs11-proxy-demo-ops.md.
+          hostPath:
+            path: /var/lib/example-softhsm-tokens
+            type: DirectoryOrCreate

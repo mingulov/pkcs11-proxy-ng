@@ -1,0 +1,34 @@
+# pkcs11-proxy-ng — DEV deployment.
+#
+# Insecure TCP listener on loopback, SoftHSM2 backend, verbose
+# tracing.  Suitable for local laptop iteration; NEVER for prod.
+#
+# Run:
+#   pkcs11-proxy-ng /path/to/proxy.toml
+# with:
+#   RUST_LOG=pkcs11_proxy_ng=debug,pkcs11_proxy_ng_backend=debug
+#   LOG_FORMAT=plain
+
+[backend]
+module = "/usr/lib/softhsm/libsofthsm2.so"
+
+[proxy]
+# Short timeouts so iteration loops surface failures fast.
+request_timeout_secs = 30
+startup_timeout_secs = 10
+shutdown_grace_secs = 2
+backend_health_consecutive_failures = 3
+# Conservative concurrency on a developer box.
+max_concurrent_backend_calls = 20
+max_blocking_threads = 64
+
+[listener.remote]
+bind = "127.0.0.1:7512"
+auth = "none"
+allow_insecure_tcp = true
+
+[auth]
+
+[mechanisms]
+# Default registry. Add a config_path here to test vendor extensions
+# locally.

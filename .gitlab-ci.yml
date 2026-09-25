@@ -1,0 +1,83 @@
+default:
+  image: docker:latest
+
+services:
+  - docker:dind
+
+stages:
+  - build
+
+variables:
+  DOCKER_HOST: tcp://docker:2375
+  DOCKER_DRIVER: overlay2
+  APP_VERSION: "0.2.0"
+
+workflow:
+  rules:
+    # main branch builds tag as "release"; everything else gets a
+    # short-sha test suffix.
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      variables:
+        IMAGE_TAG_SUFFIX: ""
+        BUILD_TYPE: "Release"
+    - when: always
+      variables:
+        IMAGE_TAG_SUFFIX: "-${CI_COMMIT_SHORT_SHA}_test"
+        BUILD_TYPE: "Test"
+
+# Shared build template for Alpine APK targets.
+.alpine_build_template:
+  stage: build
+  script:
+    - |
+      set -x
+      echo "Performing a ${BUILD_TYPE} build for Alpine ${ALPINE_VERSION}"
+      image_name="${CI_REGISTRY}/${CI_PROJECT_PATH}:${APP_VERSION}-alpine${ALPINE_VERSION}${IMAGE_TAG_SUFFIX}"
+      echo "Image will be tagged as: ${image_name}"
+      echo "$CI_REGISTRY_PASSWORD" | docker login $CI_REGISTRY -u $CI_REGISTRY_USER --password-stdin
+      docker build --progress=plain \
+        --build-arg ALPINE_VER=${ALPINE_VERSION} \
+        --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --build-arg GIT_COMMIT="${CI_COMMIT_SHA}" \
+        -f packaging/alpine/Dockerfile.alpine \
+        -t "${image_name}" .
+      docker push "${image_name}"
+      echo "Carrier image pushed to: ${image_name}"
+
+# Shared build template for Amazon Linux RPM targets.
+.amazon_build_template:
+  stage: build
+  script:
+    - |
+      set -x
+      echo "Performing a ${BUILD_TYPE} build for Amazon Linux ${AMAZON_VERSION}"
+      image_name="${CI_REGISTRY}/${CI_PROJECT_PATH}:${APP_VERSION}-amazon${AMAZON_VERSION}${IMAGE_TAG_SUFFIX}"
+      echo "Image will be tagged as: ${image_name}"
+      echo "$CI_REGISTRY_PASSWORD" | docker login $CI_REGISTRY -u $CI_REGISTRY_USER --password-stdin
+      docker build --progress=plain \
+        --build-arg AMAZON_VER=${AMAZON_VERSION} \
+        --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --build-arg GIT_COMMIT="${CI_COMMIT_SHA}" \
+        -f packaging/amazon/Dockerfile.amazon \
+        -t "${image_name}" .
+      docker push "${image_name}"
+      echo "Carrier image pushed to: ${image_name}"
+
+# Phase-1 matrix: Alpine 3.22, Alpine 3.23, Amazon Linux 2023.
+# Older Alpine versions ship a Rust toolchain below the workspace
+# MSRV (1.85); they are intentionally not part of Phase 1.
+
+alpine_3_22:
+  extends: .alpine_build_template
+  variables:
+    ALPINE_VERSION: "3.22"
+
+alpine_3_23:
+  extends: .alpine_build_template
+  variables:
+    ALPINE_VERSION: "3.23"
+
+amazon_2023:
+  extends: .amazon_build_template
+  variables:
+    AMAZON_VERSION: "2023"

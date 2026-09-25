@@ -1,0 +1,83 @@
+# cargo-deny configuration for the pkcs11-proxy-ng workspace.
+#
+# Run with: cargo deny check
+#
+# Goals (R3 security audit):
+#   * Block any RustSec advisory above LOW from sneaking back in.
+#   * Whitelist only OSI-approved permissive licenses that match the
+#     workspace's own (Apache-2.0 OR MIT) and the existing dep tree.
+#   * Block known-bad crates and copy-cats.
+
+[graph]
+all-features = false
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# Fail the check on any advisory >= LOW. The default in cargo-deny
+# 0.19+ is to fail on all advisories; we keep that.
+yanked = "warn"
+ignore = []
+
+[licenses]
+# Permissive licenses approved for the workspace's dep tree. New
+# licenses appearing in transitive deps must be explicitly added here
+# (and reviewed for compatibility with our Apache-2.0 OR MIT
+# distribution).
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+    "Zlib",
+    "OpenSSL",
+]
+# Crates that ship with no SPDX license expression in their
+# Cargo.toml. Each must be reviewed individually before being added
+# here; the rest of the file flags any new bare crate.
+exceptions = []
+
+# Per-crate license clarifications for crates whose Cargo.toml is
+# ambiguous or whose effective license is documented in a LICENSE
+# file rather than the manifest. Empty by default — populated only
+# if a new dep needs it.
+clarify = []
+
+[bans]
+# Reject multiple major-version copies of the same crate where
+# possible — most are upgraded via `cargo update` rather than
+# tolerated. Warning rather than deny so transitive divergences in
+# the wider Rust ecosystem don't block the build.
+multiple-versions = "warn"
+wildcards = "deny"
+# In-workspace path deps don't carry a version constraint (they
+# track the workspace's own version), which cargo-deny flags as a
+# wildcard. Exempt them so this rule still catches third-party
+# wildcards meaningfully.
+allow-wildcard-paths = true
+highlight = "all"
+
+deny = [
+    # No specifically-banned crates today. Re-evaluate when adopting
+    # the slow-backend mock from R2 or any new vendor extension.
+]
+
+skip = []
+
+[sources]
+# Only allow git and crates.io as sources. No local-path overrides in
+# the workspace.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
