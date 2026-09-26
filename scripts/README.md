@@ -20,6 +20,8 @@ describe the checked-in workflows; they are not claims about a completed CI run.
 
 The GitLab pipeline builds the Alpine and Amazon carrier images through their
 packaging Dockerfiles. GitHub's packaging smoke gate checks their source metadata.
+The authoritative release order and evidence requirements are in the
+[`0.x` beta release checklist](../doc/release/0.x-beta-release-checklist.md).
 
 ## Tools reached through other runners
 

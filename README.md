@@ -11,13 +11,12 @@ backend module directly, apart from network latency.
 app ──dlopen──▶ libpkcs11_proxy_ng_shim.so ──gRPC/TLS──▶ pkcs11-proxy-ng (daemon) ──FFI──▶ backend .so (HSM/token)
 ```
 
-> **Public latest: `v0.1.0`.**
+> **Current source version: `v0.2.0`.**
 >
-> The local target is `v0.2.0`; its gateway, authorization, resilience, and audit
-> work is implemented locally, partially covered, and unreleased. Local unit and
-> integration coverage is not a
-> provenance-complete transparency matrix, so there is no public `v0.2.0` parity
-> or support claim. See [Beta scope](#beta-scope).
+> This is the `v0.2.0` release line. Until the annotated `v0.2.0` tag and its
+> release artifacts are published, an untagged checkout is a release candidate.
+> Release qualification still requires the source-bound receipt and provider
+> evidence in the [`0.x` release checklist](./doc/release/0.x-beta-release-checklist.md).
 
 ## Quick start (local dev, no Kubernetes)
 
@@ -131,6 +130,10 @@ scripts/release-dry-run.sh
 
 It builds the release workspace, verifies the expected artifact names, and
 stages them into a temporary install layout.
+
+The dry run checks packaging, not provider parity or publication readiness. The
+complete freeze, receipt, tag, and publication procedure is in the
+[`0.x` release checklist](./doc/release/0.x-beta-release-checklist.md).
 
 | Artifact | Purpose |
 | --- | --- |
