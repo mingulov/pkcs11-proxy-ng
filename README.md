@@ -3,15 +3,17 @@
 A PKCS#11 remote proxy written in Rust. Applications load the shim library in
 place of a local PKCS#11 module. The shim forwards calls over gRPC to a daemon
 connected to the token or HSM, preserving the backend's results within the
-[documented support limits](./doc/release/v0.2.0-release-notes.md#current-limits).
+[documented support limits](./doc/release/beta-support-matrix.md).
 
 ```
 app ──dlopen──▶ libpkcs11_proxy_ng_shim.so ──gRPC/TLS──▶ pkcs11-proxy-ng (daemon) ──FFI──▶ backend .so (HSM/token)
 ```
 
-**Current source version: `v0.2.0`. Latest published release: `v0.1.0`.**
-This source tree is an unpublished `v0.2.0` testing candidate that still needs
-final validation and provider comparisons.
+**Current source version: `v0.2.0` (unpublished candidate).** See
+[GitHub Releases](https://github.com/mingulov/pkcs11-proxy-ng/releases) for
+published versions, the [support matrix](./doc/release/beta-support-matrix.md)
+for supported environments, and [release documentation](./doc/release/) for
+qualification status.
 
 Use **one logical client in one trusted security domain per daemon/provider
 instance**. Do not share it with mutually untrusted clients. Restart the daemon
@@ -48,20 +50,7 @@ PKCS11_PROXY_ENDPOINT=http://127.0.0.1:7512 \
 
 See [configuration examples](./examples/configs/) for local, mTLS, and
 Unix-socket setups. The `staging` and `prod` example names describe settings;
-v0.2 remains a single-client testing candidate.
-
-## Beta scope
-
-The published **v0.1.0** beta covers Linux x86_64 with SoftHSM2, NSS softokn,
-and Kryoptic. Supported transports are TCP with mTLS and Unix-domain sockets
-with peer-credential authentication. Other providers and platforms, plain
-unauthenticated TCP, and general production readiness are outside that claim.
-See the [support matrix](./doc/release/beta-support-matrix.md).
-
-The **v0.2.0 candidate** adds authorization policies, audit logging, resilience
-controls, native-lifetime fixes, and platform work. Its
-[release notes](./doc/release/v0.2.0-release-notes.md) describe the remaining
-limits and validation work.
+the current source remains a single-client testing candidate.
 
 ## Documentation
 
@@ -85,9 +74,8 @@ Build and stage the Linux release artifacts without a PKCS#11 provider:
 scripts/release-dry-run.sh
 ```
 
-This validates packaging, not provider parity or publication readiness. Follow
-the [`0.x` release checklist](./doc/release/0.x-beta-release-checklist.md) before
-tagging.
+This validates packaging only; provider parity and publication readiness are
+separate release gates.
 
 The script checks and stages these files:
 
