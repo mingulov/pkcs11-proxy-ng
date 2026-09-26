@@ -1,43 +1,36 @@
-# OASIS PKCS#11 Profile Coverage Mapping
+# PKCS#11 coverage
 
-**Date:** 2026-05-17 (updated for OASIS source-discrepancy guardrails)
+This reference describes the interfaces and parameter shapes represented by
+the proxy. The inventory and profile tables are a **2026-05-17 snapshot**;
+the FFI reader limits were updated on 2026-09-22. For release support and
+current validation limits, see the [support matrix](release/beta-support-matrix.md)
+and [candidate notes](release/v0.2.0-release-notes.md).
 
-## Purpose
+## Generating the inventory
 
-Maps OASIS PKCS#11 specification profile areas to this project's validation
-coverage. This is a living document updated as test coverage expands.
+[scripts/oasis-coverage-inventory.py](../scripts/oasis-coverage-inventory.py)
+compares OASIS sources with the function tables, protobuf messages, Rust types,
+FFI conversions, shim dispatch, and test references.
 
-## Source-Derived Inventory
+Supply an external OASIS checkout containing `working/doc/spec/` and the
+published headers:
 
-Use `scripts/oasis-coverage-inventory.py` for the optional source-grounded
-function, interface, and mechanism matrix. When an OASIS spec tree is
-supplied through `PKCS11_PROXY_NG_OASIS_ROOT`
-(pointing at a checkout containing `working/doc/spec/`), the script reads that
-Markdown and the matching published headers
-(`../doc/oasis-tcs-pkcs11/published/{2-40-errata-1,3-00,3-01,3-02}/pkcs11t.h`).
-It compares those optional sources with local function-list tables, proto RPCs,
-backend trait methods, client methods, shim dispatch functions, the generated
-Rust mechanism inventory, and local `../pkcs11-check/artifacts/*/coverage.json`
-evidence.
+```bash
+PKCS11_PROXY_NG_OASIS_ROOT=/path/to/oasis-tcs-pkcs11 \
+    python3 scripts/oasis-coverage-inventory.py --format markdown
+```
 
-The inventory treats OASIS as the source family, not as one perfectly
-consistent file. Working Markdown, published headers, and local `cryptoki-sys`
-bindings can disagree or omit details from one another. When that happens, the
-matrix must keep the discrepancy explicit with source-specific reasons such as
-`cryptoki_sys_missing_function_list_field`,
-`oasis_working_spec_lacks_published_numeric_value`, alias classification, or
-placeholder exclusion. Do not infer numeric mechanism IDs, ABI structs, or
-function-list entries from prose alone.
+The script can also read local coverage artifacts from
+[pkcs11-check](https://github.com/mingulov/pkcs11-check). Mock coverage and
+provider results are reported separately. Neither a test citation nor a zero
+gap count establishes release qualification.
 
-The embedded mechanism-parameter registry follows the same rule: default
-entries use published `CKM_*` values only. It does not assign project-local
-placeholder IDs for working-spec names, ambiguous EC dual-party structures, or
-unsafe-to-read Signal structures. For example, `CKM_ECMQV_DERIVE` maps to the
-published `CK_ECMQV_DERIVE_PARAMS` shape, while `CK_ECDH2_DERIVE_PARAMS`
-remains a typed transport/helper shape because OASIS publishes no separate
-`CKM_ECDH2_DERIVE` value.
+Working specification text, published headers, and `cryptoki-sys` bindings
+can disagree. The inventory records those differences explicitly. Published
+headers supply ABI layouts and numeric mechanism values; the project does not
+invent missing values or extend standard function-list layouts.
 
-Current generated summary:
+## Inventory snapshot
 
 | Metric | Count |
 |--------|-------|
@@ -287,6 +280,65 @@ OASIS source evidence also supports mechanism-specific workflow flags. For
 rows such as `CKM_BATON_KEY_GEN`, the catalog smoke remains useful but the
 semantic status stays `no_source_workflow_evidence`.
 
+## Interfaces and intentional omissions
+
+The shim exposes standard `PKCS 11` interface catalogs for 2.40, 3.0, and 3.2.
+`C_GetFunctionList`, `C_GetInterfaceList`, and `C_GetInterface` are local
+shim entry points and do not need RPCs. Loaded-shim tests check catalog order
+and version selection.
+
+The six `C_DigestXof*` functions appear in working specification text but
+have no fields in the published function lists or the `cryptoki-sys` layouts
+used here. They remain explicit gaps; the shim adds neither private exports
+nor custom function-list fields.
+
+`MockBackend` inherits `CKR_FUNCTION_NOT_PARALLEL` defaults for
+`C_GetFunctionStatus` and `C_CancelFunction`. It does not simulate legacy
+parallel execution.
+
+The following are intentional omissions from the default mechanism registry
+under [the contributor rules](../AGENTS.md#12-mechanism-parameter-rules):
+
+- Working-spec names without published numeric values:
+  `CKM_KMAC128`, `CKM_KMAC256`, `CKM_ML_DSA_EXTERNAL_MU`,
+  `CKM_ML_DSA_EXTERNAL_MU_GEN`, `CKM_SHAKE_128`, and `CKM_SHAKE_256`.
+  They receive no project-local mechanism numbers.
+- `CK_CMS_SIG_PARAMS`, `CK_X3DH_*`, and `CK_X2RATCHET_*` parameter
+  shapes whose caller pointers have no usable length bounds. Their typed
+  transport/FFI representations do not make a generic C pointer read safe.
+  Direct parameterized shim calls are rejected with
+  `CKR_MECHANISM_PARAM_INVALID`.
+- Raw and vendor transport-only variants without a safe backend ABI mapping.
+  Backend conversion rejects these with `CKR_MECHANISM_PARAM_INVALID`.
+
+The inventory also distinguishes aliases and placeholders from missing types:
+
+- `CK_ECMQV_DERIVE_PARAMS` has a published mechanism mapping.
+  `CK_ECDH2_DERIVE_PARAMS` remains a helper/transport shape because there is
+  no separate published `CKM_ECDH2_DERIVE` value.
+- Working prose uses `CK_CHACHA20POLY1305_PARAMS` for the published
+  `CK_SALSA20_CHACHA20_POLY1305_PARAMS` layout.
+- `CK_XXX_MESSAGE_PARAMS` is a placeholder for mechanism-specific message
+  parameters, not a concrete C type.
+
+## What the tests cover
+
+The generated matrices trace each function and parameter shape through the
+applicable shim, client, protobuf, backend, and FFI layers. Test references
+cover conversions, loaded C ABI calls, exact output behavior, and modeled
+provider operations. Missing or stale test citations are reported explicitly.
+
+Message parameters are separate from `CK_MECHANISM` parameters. The modeled
+GCM, CCM, and Salsa/ChaCha message shapes apply to Encrypt/Decrypt. Encrypt
+can write parameters back; Decrypt is input-only. Sign/Verify accept empty
+parameters only. An unmodeled non-NULL, nonempty parameter is rejected.
+
+The tables below describe the recorded test coverage. **Full** means the
+function had an implementation and tests across its applicable layers; it
+does not mean exhaustive provider validation. Later support restrictions,
+including nonblocking-only native slot waits, are in the
+[candidate notes](release/v0.2.0-release-notes.md#current-limits).
+
 ## Profile Area Coverage
 
 ### Core Functions (OASIS §5.1–5.7)
@@ -460,6 +512,64 @@ real backend `.so` directly, except for network latency.
    bytes (when present) — without local reconstruction.
 
 ### RPCs
+## Mechanism coverage
+
+Parameter definitions and conversions live in:
+
+- `crates/types/src/mechanism.rs` and `mechanism_params_default.toml`;
+- `proto/pkcs11-proxy-ng/v1/mechanism_params.proto` and `types.proto`;
+- `crates/proto/src/convert/mechanism/` and `message_params.rs`;
+- `crates/backend/src/ffi/ffi_conversion/`.
+
+The official numeric catalog is generated in
+`crates/types/src/mechanism_official.rs`. Mechanisms without parameters,
+such as `CKM_RSA_PKCS`, `CKM_SHA256`, and `CKM_AES_KEY_GEN`, need no
+parameter layout.
+
+### MockBackend
+
+| Constructor | Purpose |
+| --- | --- |
+| `with_default_mechanism_registry()` | Advertise the embedded registry. |
+| `with_official_mechanism_catalog_smoke()` | Exercise generic transport paths for every published mechanism value. |
+| `with_official_mechanisms()` | Advertise the same catalog, but allow operations only where OASIS sources provide workflow flags. |
+
+Mock output is synthetic. Real providers are required to test cryptographic
+behavior.
+
+Mechanisms with published values remain in the catalog even when working
+Markdown omits them. If sources do not establish workflow flags, the semantic
+mock reports zero flags and rejects mechanism-bearing operations with
+`CKR_MECHANISM_INVALID`. It does not infer flags from mechanism names.
+
+The inventory keeps catalog smoke, source-based workflow tests, parameter
+coverage, and provider evidence separate. Its `completion_gap_summary`
+groups missing test citations, intentional omissions, and remaining gaps;
+the underlying rows contain the reasons and evidence.
+
+### FFI reader limits
+
+- **Nesting:** at most 16 nested mechanism nodes. A 17th node or a cycle in
+  active caller addresses is rejected before recursion.
+- **Copy sizes:** parameter structs and raw fallback copies are limited to
+  65,536 bytes (`MAX_MECHANISM_PARAM_STRUCT_LEN`). Embedded data such as AAD
+  and IVs is limited to 512 MiB (`MAX_SERIALIZABLE_BYTES`).
+- **Address arithmetic:** readers check count, multiplication, size, and
+  end-address overflow before constructing a slice. These checks cannot prove
+  that memory is mapped or readable. Embedded pointers remain subject to the
+  caller's FFI contract; `ulParameterLen` does not bound their allocations.
+- **Alignment:** readers use unaligned copies and do not form aligned
+  references into caller memory.
+
+Inputs over these limits return `CKR_MECHANISM_PARAM_INVALID` in shim
+readers and backend typed conversion.
+
+## Exact output semantics
+
+For output-bearing calls, the shim sends the caller's buffer presence and
+capacity to the daemon. The backend makes one native PKCS#11 call; the shim
+returns its `CK_RV`, lengths, and bytes. It does not simulate size queries
+or reconstruct `CKR_BUFFER_TOO_SMALL` from cached output.
 
 | RPC | Output Shape | Functions |
 |-----|-------------|-----------|
@@ -468,18 +578,8 @@ real backend `.so` directly, except for network latency.
 | `ParameterOutputExact` | Output bytes + parameter write-back | 7 message-crypto + auth-wrap functions |
 | `EncapsulateKeyExact` | Ciphertext + key handle | C_EncapsulateKey |
 
-### What Changed
 
-Previously, the shim used `two_call_cached_bytes` to call the backend once,
-cache the full result, and then locally reconstruct `CKR_BUFFER_TOO_SMALL`
-and size-query responses. This was incorrect for:
-- Stateful update functions (consumed backend state before checking caller buffer)
-- Per-attribute results in `C_GetAttributeValue` (fabricated zero-filled values)
-- Combined operations (undefined behavior on buffer-too-small)
-
-These issues are now resolved. The old cache helpers have been deleted.
-
-## External Conformance Tools
+## External test tools
 
 | Tool | Integration | Coverage |
 |------|------------|---------|
@@ -488,17 +588,6 @@ These issues are now resolved. The old cache helpers have been deleted.
 | GnuTLS p11tool | Token listing, object enumeration | URI-driven access |
 | OpenSSL pkcs11prov | CSR generation via PKCS#11 provider | Provider-based crypto workflow |
 
-## Provider Validation Matrix
 
-| Provider | Status | Mechanism Set |
-|----------|--------|--------------|
-| SoftHSM2 | Primary integration target | RSA, AES, SHA, EC |
-| NSS softokn | Secondary target | RSA, SHA, sign-recover |
-| Kryoptic | Experimental | RSA, AES, SHA, EC |
-
-## Notes
-
-- "Full" coverage means the function is implemented across all layers with tests
-- "ABI-complete" means the function has a non-null stub returning CKR_FUNCTION_NOT_SUPPORTED
-- "Partial" means implementation exists but validation is limited to specific backends
-- Profile coverage is additive — new backends and test modes expand validated claims
+Provider testing instructions are in the [test guide](../crates/server/tests/README.md).
+The [March provider tables](provider-support-tables.md) are historical.

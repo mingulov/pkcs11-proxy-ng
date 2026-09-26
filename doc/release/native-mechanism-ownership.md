@@ -1,11 +1,18 @@
 # Native Ownership and v0.2 FFI Contract
 
-**Status (2026-09-13): selected contract; implementation and qualification
-pending.** This amendment specifies the v0.2 native-owner correction. It does
-not describe completed production enforcement or establish provider parity.
-Independent contract review, the complete owner migration, native receipts and
-independent implementation review remain release gates. Historical width-bridge
-and provider tests do not qualify this new lifetime/termination contract.
+**Status: implemented in the unreleased v0.2 testing candidate; current-candidate
+qualification incomplete.** The acceptance records below describe historical
+source revisions and environments. They do not establish provider parity or
+qualify every later revision. Final acceptance requires evidence bound to the
+selected candidate and the claimed target/environment.
+
+v0.2.0 is a **single-logical-client testing baseline**: use one trusted
+security domain per daemon and provider instance. Do not connect mutually
+untrusted clients or share a daemon/provider between independent domains.
+Restart the daemon and its provider instance before changing to an independent
+client or security domain. `[proxy] max_contexts = 1` is an admission guardrail,
+not a repair for isolation or residual native authentication state.
+Multi-client isolation is deferred to the [v0.3 scope](v0.3.0-scope.md).
 
 ## Supported deployment boundary
 
@@ -32,16 +39,37 @@ stretch has
 landed, so Windows x64 native-provider daemon support is re-admitted
 (the native-provider deferral stands only for the still-excluded hosts above); the
 constructor refusal below stays in force for those hosts.
+The following targets may construct a native backend. Admission does not
+qualify a release: each candidate still needs provider, platform and stop
+evidence for its claimed environment. The coverage below is historical:
+
+- Linux GNU/musl x86_64 (64-bit) and x86 (32-bit): historical native width and
+  stop coverage;
+- Linux GNU/musl aarch64 (64-bit): historical runtime comparison, with the
+  `ubuntu-26.04-arm` CI leg configured as blocking; stop-arm compile/review
+  evidence exists, but native stop-fire was not executed;
+- Windows MSVC x86_64 (64-bit): historical interoperation and
+  Windows comparison evidence;
+- Windows MSVC x86 (32-bit): historical build, WOW64 suites and stub-provider
+  live load; production 32-bit provider behavior remains unqualified;
+- macOS aarch64 (64-bit): historical runtime comparison, backend/shim library
+  suites and stop tests; and
+- macOS x86_64 (64-bit): load coverage only, with no runtime qualification.
+
+Windows GNU, x32, big-/mixed-endian and other target configurations remain
+outside the admitted native-FFI set. Constructor refusal applies before native
+loading on those targets. Windows MSVC support supersedes the earlier Windows
+deferral, with historical coverage limited to the tiers listed above.
+All admitted targets retain the one-client and native-lifetime requirements.
 
 Portable Windows client/shim/proto/types builds and their existing contracts
 remain; a Windows client may interoperate with a qualified Linux daemon.
 Portable backend trait/mock and mock-only server builds remain available.
-Nonqualified-host FfiBackend construction must return a local platform-support
-error before loading, discovery or provider entry. Retain meaningful Windows
-compile CI and add constructor-refusal/no-loader-attempt coverage. Do not
-globally gate portable crates, remove all Windows CI, or introduce an unsafe
-legacy-FFI feature or portable abort fallback. Platform enforcement is part of
-the pending implementation, not supplied by this document.
+On targets outside the admitted set, FfiBackend construction must return a
+local platform-support error before loading, discovery or provider entry.
+Windows compile CI and constructor-refusal/no-loader-attempt coverage are
+required. Do not globally gate portable crates, remove all Windows CI, or
+introduce an unsafe legacy-FFI feature or portable abort fallback.
 
 ## One provider chain per embedding process
 
@@ -124,8 +152,6 @@ settlement; session calls also hold their generation-qualified session guard.
 Finalize seals admission, drains ordinary workers, then uses exclusive native
 access. Its own native call runs in a tracked worker.
 
-Status: IMPLEMENTED (TF01b; enforcement-complete 52f9796, 2026-09-19).
-
 Retain all project-owned native graphs, actual nested/attribute buffers,
 input/output cells, library and control contexts through their termination
 receipts. A pointer may not be retained to a local stack cell. Park complete
@@ -149,8 +175,9 @@ poisoned, failed-Finalize, stale-generation and returned-but-unsettled states
 cannot satisfy it. New native exposure invalidates it first. Reinitialize only
 after successful old-epoch Finalize and all old work, observations, controls
 and roots settle, using a new checked lifecycle generation; never reinitialize
-automatically after timeout, failed Finalize or uncertainty. Registry occupancy remains held
-while the same loaded chain is reused; only completed unload frees that slot.
+automatically after timeout, failed Finalize or uncertainty. Registry occupancy
+remains held while the same loaded chain is reused; only completed unload frees
+that slot.
 
 Explicit shutdown performs native cleanup. Final-domain Drop checks its private
 proof before any dependent field can drop, without allocation, panic or waiting
@@ -240,15 +267,16 @@ guarantee event delivery; timeout response and actual completion remain distinct
 
 ## Abnormal native-lifetime stop
 
-Select one private `native_stop::abnormal_stop_native_lifetime(reason) -> !`:
-a direct, return-aware Linux `exit_group(70)` loop on the qualified targets.
+The private `native_stop::abnormal_stop_native_lifetime(reason) -> !` uses
+a direct, return-aware `exit_group(70)` loop on admitted Linux targets.
+Windows and macOS use the platform-specific arms described below.
 It applies both when controlled shutdown cannot establish native quiescence
 and when the final native owner lacks its proof. It is unconditional native
 lifetime protection, not an opt-in gateway capability. Grace/stuck settings
 control proactive stopping; disabling them never permits unsafe final Drop.
 The release panic strategy remains unwinding everywhere else.
 
-The exact instruction contract to implement and review is:
+The Linux instruction contract is:
 
 | Linux target ABI | One raw attempt |
 | --- | --- |
@@ -298,8 +326,8 @@ systemd `Restart=on-failure` or `always` can cover exit 70;
 rate limits and explicit operator stops can prevent restart. Docker likewise
 requires an appropriate policy; restart is not promised after manual stops.
 PID-namespace init termination affects the container's other processes; global
-host init is outside this deployment contract. ADR-0007's separate daemons
-remain the selected way to limit cross-client failure impact.
+host init is outside this deployment contract. Use separate daemons to limit
+cross-client failure impact.
 
 No wiping, complete audit tail, provider cleanup, token deletion or global
 core-dump suppression is promised. No audit flush or diagnostic work may delay
@@ -313,7 +341,7 @@ placement and pre-entry publication are part of the implementation proof.
 
 ### Windows abnormal-stop contract
 
-On qualified Windows (MSVC, x86_64 with 64-bit pointers or x86 with
+On admitted Windows targets (MSVC, x86_64 with 64-bit pointers or x86 with
 32-bit pointers — the Windows leg of `NATIVE_FFI_QUALIFIED`), the
 backstop's one raw attempt is
 `TerminateProcess(GetCurrentProcess(), 70)` via a hand-declared
@@ -326,19 +354,17 @@ destruction. This is the faithful `exit_group` analog: whole-process,
 immediate, with no DLL detach routines, C exit handlers, or Rust
 destructors running, and it preserves status 70 for supervisor
 `Restart=on-failure` handling with identical receipt criteria. `abort()`
-was ruled out (reviewer Q3): it risks provider-handler interference and
+is excluded: it risks provider-handler interference and
 loses the 70 channel (SIGABRT/abnormal instead of a plain exit status),
 so `on-abnormal`/`on-abort`-only supervision would be required instead
 of `on-failure`.
 
-This arm is strictly weaker than the Linux contract above and claims
-less. Non-claims, each explicit: no seccomp or per-thread permission
-model applies on Windows; no memory wiping is performed; no audit tail
-is flushed or promised (status 70 is the terminal status channel, as on
-Linux); no core-dump suppression is configured (no WER policy is
-touched). The shutdown-deadline controller and the final-owner guard
-predicate keep their Linux semantics (lock-free, no registry or
-lifecycle waits); only the raw attempt differs.
+This arm has a weaker contract than the Linux raw syscall. No seccomp or
+per-thread permission model applies on Windows. It performs no memory wiping,
+audit flush or core-dump suppression, and changes no WER policy. Status 70 is
+the terminal status channel; no audit tail is promised. The shutdown-deadline
+controller and final-owner guard remain lock-free, with no registry or
+lifecycle waits; only the raw attempt differs.
 
 Receipt criteria (supervisor side, no in-process observation): the
 process dies (reaped, no lingering threads); no hang (a supervisor
@@ -347,7 +373,7 @@ supervisor side (exit code 70 observed by the parent via wait status).
 
 ### macOS abnormal-stop contract
 
-On qualified macOS (aarch64 or x86_64 with 64-bit pointers — the macOS
+On admitted macOS targets (aarch64 or x86_64 with 64-bit pointers — the macOS
 leg of `NATIVE_FFI_QUALIFIED`), the backstop's one raw attempt is
 libSystem `_exit(70)` via a hand-declared `unsafe extern "C"` block (no
 new crate; see the macOS `mod arch` arm in
@@ -358,38 +384,27 @@ arm's trailing `loop {}` exists only because `TerminateProcess` returns
 whole-process, immediate, with no atexit handlers, stdio flush,
 dyld-registered terminators, or Rust destructors running, and it
 preserves status 70 for supervisor handling with identical receipt
-criteria. Raw macOS syscalls
-were ruled out (no stable ABI — libSystem is the stable interface);
-`std::process::exit` was ruled out (runs atexit handlers and flushes
-stdio); `abort()` was ruled out (loses the 70 channel, same Q3 reasoning
-as Windows).
+criteria. Raw macOS syscalls are excluded because they have no stable ABI;
+libSystem is the stable interface. `std::process::exit` is excluded because
+it runs atexit handlers and flushes stdio; `abort()` loses the status-70 channel.
 
-This arm is strictly weaker than the Linux contract above and claims
-less. Non-claims, each explicit: the stop traverses libSystem userspace
-(a thin wrapper, but not a raw trap — a hostile in-process provider
-could interpose it, in the same class as the documented no-protection
-rule); no seccomp or per-thread permission model applies on macOS; no
-memory wiping is performed; no audit tail is flushed or promised (status
-70 is the terminal status channel, as on Linux); no core-dump
-suppression is configured. The shutdown-deadline controller and the
-final-owner guard predicate keep their Linux semantics (lock-free, no
-registry or lifecycle waits); only the raw attempt differs.
+This arm has a weaker contract than the Linux raw syscall: it traverses
+libSystem userspace, which a hostile in-process provider could interpose.
+No seccomp or per-thread permission model applies on macOS. It performs no
+memory wiping, audit flush or core-dump suppression. Status 70 is the terminal
+status channel; no audit tail is promised. The shutdown-deadline controller
+and final-owner guard remain lock-free, with no registry or lifecycle waits;
+only the raw attempt differs.
 
-Tested/untested boundary (same precedent as the Windows arm): the stub
-itself never runs in-process in unit tests — it would end the test
-process. What is tested is the supervisor-side record: the existing
-STOP-C1 child scenarios plus the S8 controller-deadline child exercise
-the real arm in a re-spawned child and assert normal exit 70, no
-signal/core, pipe EOF, and reaping. Those tests are `cfg(unix)`, so they
-compile on macOS, and T2run's macOS leg executes them (see Status below).
+The stub runs only in re-spawned children during tests: running it in the
+unit-test process would end the runner. STOP-C1 and the S8 controller-deadline
+child tests assert normal exit 70, no signal/core, pipe EOF, and reaping.
+They are `cfg(unix)` and compile on macOS.
 
-Status: IMPLEMENTED, runtime-qualified on aarch64. T2run landed both
-proofs on the cross-platform macOS leg (aarch64): (1) compile proof —
-the leg builds the backend and shim crates; (2) live-stop receipts —
-the STOP-C1/S8 child tests execute in the backend lib suite there, all
-green. The x86_64 arch has no CI runtime leg (T2run did not add a
-macos-15-intel leg); it stays load-qualified only — never claimed as
-runtime evidence.
+Historical runtime evidence covers aarch64: the macOS leg built the backend and
+shim crates and passed the STOP-C1/S8 child tests in the backend library suite.
+The x86_64 target has load coverage only; there is no `macos-15-intel` runtime
+leg. Neither record qualifies a later candidate without fresh evidence.
 
 Receipt criteria (supervisor side, no in-process observation): the
 process dies (reaped, no lingering threads); no hang (a supervisor
@@ -410,10 +425,9 @@ unwinds to its start; no FFI crossing, no UB); the process survives
 with the deadline unenforced — the same best-effort posture as a
 controller spawn failure.
 
-Since the macOS arm landed, the stop arms cover exactly the
-load-qualified set, so no load-qualified-but-stop-unqualified target
-remains; the residual unqualified set is precisely the complement of
-`NATIVE_FFI_QUALIFIED`, enumerated from code:
+The stop arms cover exactly the admitted native-construction set. The code
+names this set `NATIVE_FFI_QUALIFIED`; that constant records target admission,
+not release qualification. Its complement is:
 
 - Linux with a non-GNU/musl `target_env` (any arch), or with an
   arch/width outside x86_64-64/x86-32/aarch64-64 — s390x, riscv64, ... (the
@@ -441,6 +455,20 @@ backend trait, and `crates/server/tests/shutdown_lifetime_test.rs`.
   requests stop; it never claims native quiescence.
 - The native domain (FFI lifecycle + seal/drain + shutdown-deadline
   controller + final-owner guard) OWNS native state and is the SOLE
+## Daemon shutdown coordination
+
+The coordinator in `crates/server/src/server/shutdown.rs` sequences shutdown
+through the backend trait's `finalize_with_grace` method. Child tests live in
+`crates/server/tests/shutdown_lifetime_test.rs`. The design received independent
+native-ownership review on 2026-09-22.
+
+### Authority: who requests, who owns
+
+- The shutdown coordinator owns eviction cancellation/join, listener
+  drain, audit-flush completion and native retirement sequencing. It
+  requests stop; it never claims native quiescence.
+- The native domain (FFI lifecycle + seal/drain + shutdown-deadline
+  controller + final-owner guard) owns native state and is the sole
   authority for native retirement. Only its deadline-enforcement
   family may end the process over outstanding native work, and only
   through the reviewed raw arm (`abnormal_stop_native_lifetime`,
@@ -454,6 +482,11 @@ backend trait, and `crates/server/tests/shutdown_lifetime_test.rs`.
 - Ordinary graceful errors (listener error, audit-flush failure,
   eviction overrun, backend `C_Finalize` error return) and unresolved
   native-lifetime stops are DISTINCT outcomes with distinct statuses
+  No other caller is permitted. No server path may `std::process::exit`, return
+  past unresolved native work, or finalize "anyway".
+- Ordinary graceful errors (listener error, audit-flush failure,
+  eviction overrun, backend `C_Finalize` error return) and unresolved
+  native-lifetime stops have distinct statuses
   (table below). A graceful error never triggers the raw arm; an
   unresolved native stop never runs destructors, logging, allocation,
   flushing or wiping after commitment.
@@ -471,6 +504,13 @@ skipped/abandoned immediately, never granted a fresh grace):
 1. Listener drain (existing `serve_with_grace`, now passed the
    remaining budget instead of the full knob). On expiry the serve
    futures drop, aborting in-flight connections; detached backend
+`D = signal receipt + proxy.shutdown_grace_secs` (default 30s). This budget
+covers the entire shutdown. Phases run in order, each awaiting at most
+`D - now` (saturating; an exhausted budget means phases 1–3 are
+skipped/abandoned immediately, never granted a fresh grace):
+
+1. Listener drain (`serve_with_grace`) within the remaining budget. On expiry
+   the serve futures drop, aborting in-flight connections; detached backend
    workers keep their admission guards.
 2. Eviction stop: cancel new ticks (watch/cancellation channel), then
    join the retained task within the remaining budget. Cancellation
@@ -495,6 +535,10 @@ skipped/abandoned immediately, never granted a fresh grace):
    return past unresolved native work — forbidden above).
    `backend.finalize_with_grace(remaining)` on a blocking worker,
    attempted ONCE (no retry: a failed attempt proves nothing and a
+4. Native retirement always runs, even with no budget left: skipping it would
+   return past unresolved native work.
+   `backend.finalize_with_grace(remaining)` on a blocking worker,
+   attempted once (no retry: a failed attempt proves nothing and a
    retry would re-enter an uncertain incarnation). The FFI override
    arms the shutdown-deadline controller with exactly the saturating
    `remaining` and seals through a deadline-parameterized
@@ -504,6 +548,7 @@ skipped/abandoned immediately, never granted a fresh grace):
    `C_Finalize`. Unresolved work routes through the existing
    seal/drain/deadline authority — never "finalize anyway". At ~0
    remaining the arm is hair-trigger (likely immediate 70 on
+   remaining the arm can fire immediately (likely exit 70 on
    qualified targets); at exact 0 a benign race decides between an
    instant orderly return and 70 — both honest, since the budget is
    exhausted either way.
@@ -513,6 +558,9 @@ parameter on the existing finalize path plus one pure predicate (see
 Target qualification); the stop predicate (deadline expiry with
 outstanding work) stays inside the native controller, and
 `abnormal_stop_native_lifetime` keeps its existing callers (no additions).
+No general stop callback is exposed. The finalize path takes a grace parameter
+and exposes one pure predicate (see Target qualification). The stop predicate
+— deadline expiry with outstanding work — stays inside the native controller.
 
 ### How the independent deadlines remain live
 
@@ -549,6 +597,9 @@ The eviction loop's `max_stuck_backend_calls` trip no longer calls
 `std::process::exit` (which runs atexit handlers and flushes stdio).
 Instead it requests coordinator shutdown immediately (same channel as
 the OS signal, with the stuck reason recorded) and the eviction task
+The eviction loop's `max_stuck_backend_calls` trip requests coordinator
+shutdown immediately (same channel as the OS signal, with the stuck reason
+recorded) and the eviction task
 returns. The coordinator then runs phases 1–4: a wedged native call
 drains through seal into the controller arm and ends 70 on qualified
 targets; settled work finalizes orderly. The pre-commit stuck warning
@@ -556,6 +607,8 @@ log is retained; nothing runs after abnormal-stop commitment.
 Operators note: a stuck trip now takes up to the full remaining grace
 to resolve (lifecycle stop) instead of exiting immediately — bounded,
 supervised, and status-preserving (70 still means native-lifetime).
+A stuck trip can take the full remaining grace to resolve; status 70 still
+identifies an abnormal native-lifetime stop.
 
 ### Target qualification
 
@@ -563,6 +616,8 @@ The coordinator branches the finalize wait on one backend predicate,
 `finalize_is_natively_bounded()` (trait default `false`; FFI override
 returns `NATIVE_STOP_QUALIFIED`, pin-tested to cover exactly the load-
 qualified set; mock/test backends keep the default):
+returns `NATIVE_STOP_QUALIFIED`, pin-tested to cover exactly the admitted
+native-construction set; mock/test backends keep the default):
 
 | Backend / target | Phase-4 wait | Unresolved outcome |
 | --- | --- | --- |
@@ -578,6 +633,13 @@ general stop callback — both forbidden by this contract.
 ### Runtime-shutdown ownership
 
 `async_main` returning does NOT prove process exit: tokio's
+The server must not wrap finalize in an unconditional timeout with its own
+raw-stop fallback: that would duplicate the stop predicate outside native
+authority and require a forbidden general stop callback.
+
+### Runtime-shutdown ownership
+
+Returning from `async_main` does not prove process exit: tokio's
 `Runtime::Drop` waits forever for blocking threads (tokio 1.50.0 per
 `Cargo.lock`; `runtime.rs` module docs: "The `Drop` implementation
 waits forever"; `BlockingPool::drop` joins with no timeout). A wedged
@@ -629,6 +691,7 @@ Mock/test hooks needed for the matrix: `set_next_finalize_outcome`
 is a child-contained leak on the exit-2 path).
 
 ### Test plan (`shutdown_lifetime_test.rs`)
+### Child scenarios (`shutdown_lifetime_test.rs`)
 
 Parent-watched child scenarios (re-spawned test binary, marker files
 + pipes, bounded parent waits, child killed on parent failure; no
@@ -680,35 +743,14 @@ reaping, and absence of post-commitment provider markers.
 
 ## Required acceptance evidence
 
-All cases below are RECEIPTED (TO26a groups 1+4+5+6,
-`cd0b6e7f4cbafd38536d00407a195b85c2b392ae..d57d2cdfda608406c7619acf475d7bc178034ff4`;
-TO26b groups 2+3+7 plus carry items and the trailing paragraph,
-`0ae0effd78e9d4ff7ab9e0da2700e2267c3ec6a7..1519ed3e5beb14dfabd6f0b054b97d5961861675`;
-flipped 2026-09-19 — GAP-1 closed). The evidence rules that produced
-them still bind every future re-run: use synthetic canaries,
-deterministic gates, actual production owner seams and immutable
-same-source binaries, hashes, ELF widths, commands/test counts,
-toolchains, libc/kernel/environment records and child wait/marker
-results. Per-group evidence map:
+Historical acceptance records and their source revisions are in the
+[ownership inventory](native-ownership-inventory.md#historical-acceptance-records).
+New runs must use synthetic canaries, deterministic gates, actual production
+owner paths, and immutable binaries built from the same source. Retain binary hashes,
+ELF widths, commands, test counts, toolchains, environment details, and child
+wait/marker results.
 
-- Group 1 (constructor battery): TO26a report + `native_domain_tests`,
-  `constructor_child_tests`.
-- Group 2 (wait matrices): `WaiterDomain` + `slot_wait_tests`
-  (direct-backend), `session/tests.rs` wait cases (gRPC),
-  `shim/tests/wait_matrix.rs` (loaded shim), `types::width` helper
-  matrix; live legs in the group-3 runners.
-- Group 3 (width pairs): `run-retained-oracle-live-test.sh` (12 legs:
-  retention ×8 + control-loop ×4, hook daemons, maps/width/instance
-  receipts, production-build negative) and
-  `run-cross-width-live-test.sh` + `run-cross-width-nss32-live-test.sh`
-  (SoftHSM all four pairs + NSS32, bridging + live-wait receipts).
-- Groups 4–6 (stop/markers/signals): TO26a report (S1–S16, M1–M11,
-  N1); the group-4 gated-waiter case is S17 (TO26b I1), which
-  supersedes S11's parked-thread analog as waiter coverage.
-- Group 7 (codegen + native exec + classification):
-  `doc/release/native-stop-codegen-review.md` (8 codegen/final-link
-  variants, 4 native execution variants) and the wait-scope table in
-  `doc/release/native-ownership-inventory.md`.
+The required cases are:
 
 - Constructor races/second loads: identical, relative, symlink, hardlink and
   genuinely different paths; Reserved/Active/Retiring contention; no second
@@ -759,7 +801,8 @@ effects (`exact_output_contract_tests`, `retained_owner_contract_tests`,
 loaded `exact_output_error_test` 15/15), created-object cleanup
 (`object_cleanup`, retained-owner contracts) and cancellation/retirement
 tests (cancel/fence retirement suites, server close taxonomy) are
-RECEIPTED alongside P0 (same SHAs/date as above). Independent review
-remains required alongside P0. This document does not accept the common
+covered by those historical receipts.
+Independent review remains required. Those receipts did not accept the common
 owner repair, async completion, later lifecycle/privacy/budget integration,
-Windows native loading or a release.
+Windows native loading or a release; later platform evidence has the limited
+scope described above.

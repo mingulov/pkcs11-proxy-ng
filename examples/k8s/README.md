@@ -1,4 +1,4 @@
-# Reference k8s deployment for pkcs11-proxy-ng
+# Kubernetes test deployment
 
 This directory contains the manifests the SRE/ops audit
 exercises. It is an isolated audit/test fixture — not a production
@@ -7,6 +7,10 @@ transport and baked-in demo PINs exist so the audit can exercise the
 proxy without credential provisioning; do not promote this fixture
 by copying it into an overlay or chart. Start production from
 `examples/configs/{prod,staging}` with mTLS enabled (see
+These manifests run a three-replica SoftHSM2 demo with a signing consumer.
+They use unauthenticated TCP and fixed demo PINs. For a real deployment,
+configure mTLS and per-client authorization with the
+[staging or production configs](../configs/) (see
 [mTLS setup](../../doc/release/mtls-setup.md) and the
 [operator runbook](../../doc/runbooks/operating-pkcs11-proxy-ng.md))
 and provision real PINs.
@@ -25,7 +29,7 @@ and provision real PINs.
    │ daemon-0   │ │ daemon-1   │ │ daemon-2   │
    │  + softhsm │ │  + softhsm │ │  + softhsm │
    └────────────┘ └────────────┘ └────────────┘
-   (3-replica Deployment, rolling-restart safe)
+   (3-replica Deployment)
 
    ┌────────────────────────────────────┐
    │  ConfigMap: daemon-config       │
@@ -34,8 +38,8 @@ and provision real PINs.
    └────────────────────────────────────┘
 ```
 
-A stub consumer `StatefulSet` runs alongside, driving the shim
-against the Service hostname (`daemon.default.svc:7512`).
+A consumer `StatefulSet` uses the shim to sign through the Service at
+`daemon.pkcs11-proxy-demo.svc:7512`.
 
 ## Files
 
@@ -47,26 +51,28 @@ against the Service hostname (`daemon.default.svc:7512`).
 | `30-daemon-service.yaml` | ClusterIP Service with `sessionAffinity: ClientIP` |
 | `40-consumer-stub.yaml` | stub consumer `StatefulSet` that loads the shim + runs the load harness |
 
-The Service's `sessionAffinity: ClientIP` is **load-bearing** — without
-it, a shim reconnecting after a transient network failure can land
-on a different daemon replica and lose its `client_context_id`. The
-resilience audit documented this; the manifest enforces it.
+Keep `sessionAffinity: ClientIP`: a session belongs to the daemon replica
+that created it. A reconnect to another replica loses that session.
 
 ## Quick start (with `kind`)
+
+Run these commands from `examples/k8s/`. The resilience Docker Compose file
+expects the checkout directory to be named `pkcs11-proxy-ng`.
 
 ```bash
 # 1) Build the pkcs11-proxy-ng images.
 ( cd ../../.. && \
+( cd ../.. && \
   docker build --build-arg ALPINE_BUILD_IMAGE=alpine:3.23@sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0 \
     -f packaging/alpine/Dockerfile.alpine \
     -t pkcs11-proxy-ng:test-alpine3.23 . )
 
 # 2) Build the runner image we use as the consumer-pod base.
-( cd ../../../tests/r2_resilience && docker compose build )
+( cd ../../tests/r2_resilience && docker compose build )
 
 # 3) Spin up a kind cluster and load the images.
 kind create cluster --name pkcs11-proxy-demo
-kind load docker-image pkcs11-proxy-ng:test-alpine3.23     --name pkcs11-proxy-demo
+kind load docker-image r2_resilience-daemon:latest         --name pkcs11-proxy-demo
 kind load docker-image r2_resilience-runner:latest         --name pkcs11-proxy-demo
 
 # 4) Apply the manifests.
@@ -88,11 +94,8 @@ kubectl -n pkcs11-proxy-demo logs -f sts/consumer-load
 # In another terminal, restart the daemon replicas:
 kubectl -n pkcs11-proxy-demo rollout restart deploy/daemon
 
-# The consumer must report zero "unrecoverable" errors. Transient
-# CKR_DEVICE_ERROR / CKR_CRYPTOKI_NOT_INITIALIZED during the
-# rollover are EXPECTED and counted separately; the harness retries
-# such errors with a fresh C_Initialize and the SLA is "every sign
-# eventually succeeds within the rollout window".
+# Check the final success, recoverable, and unrecoverable counts.
+# The consumer records transient errors separately during a restart.
 ```
 
 See [`../../doc/runbooks/operating-pkcs11-proxy-ng.md`](../../doc/runbooks/operating-pkcs11-proxy-ng.md)

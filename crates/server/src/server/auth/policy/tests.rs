@@ -1981,15 +1981,19 @@ fn sustained_unique_spki_peers_keep_logged_set_bounded() {
 #[test]
 fn l7_06_log_dedup_eviction_logs_at_debug_never_warn() {
     // Deferred T30 M2: intentionally refactor-brittle/fail-closed — update this pin if the pinned structure moves deliberately.
-    let src = include_str!("../policy.rs");
-    let insert = src
-        .split("fn insert(&mut self, key: String) -> bool")
-        .nth(1)
-        .expect("LogDedupSet::insert must exist");
-    let body = insert.split("\n    }\n").next().unwrap_or(insert);
-    assert!(body.contains("tracing::debug!"), "eviction must log at debug");
-    assert!(!body.contains("tracing::warn!"), "eviction must never warn-spam");
-    assert!(!body.contains("tracing::error!"), "eviction must never error-spam");
+    let lf = include_str!("../policy.rs").replace("\r\n", "\n");
+    // Check both checkout formats even when the host uses only one.
+    for src in [lf.clone(), lf.replace('\n', "\r\n")] {
+        let src = src.replace("\r\n", "\n");
+        let insert = src
+            .split("fn insert(&mut self, key: String) -> bool")
+            .nth(1)
+            .expect("LogDedupSet::insert must exist");
+        let body = insert.split("\n    }\n").next().unwrap_or(insert);
+        assert!(body.contains("tracing::debug!"), "eviction must log at debug");
+        assert!(!body.contains("tracing::warn!"), "eviction must never warn-spam");
+        assert!(!body.contains("tracing::error!"), "eviction must never error-spam");
+    }
 }
 
 #[test]

@@ -1364,6 +1364,14 @@ pub(super) async fn session_slot_login_state(
 /// says (lenient backends such as NSS allow logged-out private session
 /// mints; strict backends refuse — both match direct exactly). The old
 /// unconditional refusal diverged from every lenient backend (21 lanes).
+///
+/// Refuse a template-declared private mint when this context is logged out
+/// and another logical context holds the slot login. Otherwise leave the
+/// provider's verdict unchanged. The holder snapshot does not prove physical
+/// logout: native calls can outlive their waits, and cleanup can fail.
+/// Missing privacy attributes also need provider-default interpretation.
+/// These are deferred isolation limits; v0.2 supports one trusted logical
+/// client per daemon/provider instance (doc/release/v0.3.0-scope.md).
 /// Unknown sessions fail closed (refuse), preserving error precedence for
 /// the downstream handle resolve.
 pub(super) async fn ensure_private_mint_allowed(
@@ -1482,15 +1490,26 @@ pub(super) async fn backend_object_known_token(
     backend_session: CkSessionHandle,
     backend_object: CkObjectHandle,
 ) -> bool {
+    backend_object_token_state(ctx, backend_session, backend_object).await.unwrap_or(false)
+}
+
+/// Actual token lifetime when known. Preserve unknown metadata separately
+/// from a positively observed session object so copy registration can fall
+/// back to an unambiguous explicit TOKEN override without overriding false.
+pub(super) async fn backend_object_token_state(
+    ctx: &HandlerContext,
+    backend_session: CkSessionHandle,
+    backend_object: CkObjectHandle,
+) -> Option<bool> {
     match probe_bool_attr(ctx, backend_session, backend_object, CkAttributeType::TOKEN).await {
-        BoolAttrProbe::Present(token) => token,
-        // Absent TOKEN on an "other"-class object is spec-compliant (no
-        // storage attributes); such objects are token-global metadata —
-        // fail open. Anything else stays fail-closed.
+        BoolAttrProbe::Present(token) => Some(token),
+        // Spec other-class objects lack TOKEN and are token-global metadata.
         BoolAttrProbe::AttrAbsent => {
-            backend_object_has_other_class(ctx, backend_session, backend_object).await
+            backend_object_has_other_class(ctx, backend_session, backend_object)
+                .await
+                .then_some(true)
         }
-        BoolAttrProbe::Failed => false,
+        BoolAttrProbe::Failed => None,
     }
 }
 
@@ -1630,6 +1649,11 @@ pub(super) async fn find_result_visible_to_context(
 /// Privacy bit for one object: the mint-recorded bit when known, else a
 /// single backend `CKA_PRIVATE` probe (fail-open `false` — the caller falls
 /// through to the backend's own faithful verdict).
+///
+/// Read the cached privacy bit, or probe CKA_PRIVATE when it is uncached.
+/// The current boolean representation can conflate unknown metadata with
+/// false and can retain stale defaults. It is not authoritative evidence
+/// for multi-client isolation; see the deferred v0.3 privacy contract.
 pub(super) async fn object_is_private(
     ctx: &HandlerContext,
     ctx_id: &ClientContextId,
@@ -1648,6 +1672,9 @@ pub(super) async fn object_is_private(
     }
 }
 
+/// Refuse a private-object use by a logged-out context while another logical
+/// holder is recorded. An empty holder map does not prove native logout;
+/// v0.2's supported deployment has one trusted logical client per instance.
 pub(super) async fn ensure_private_use_allowed(
     ctx: &HandlerContext,
     ctx_id: &ClientContextId,

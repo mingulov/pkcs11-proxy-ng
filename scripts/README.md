@@ -3,6 +3,8 @@
 These tools support building, testing, maintaining, and releasing the standalone
 repository. Paths in the tables are relative to `scripts/`. CI connections below
 describe the checked-in workflows; they are not claims about a completed CI run.
+Build, test, and release scripts, with their callers. Paths are relative to
+`scripts/`.
 
 ## CI and release entry points
 
@@ -48,6 +50,9 @@ An entry in this table does not mean the lane executes on every CI run.
 ## Manual maintainer and qualification tools
 
 These have a purpose even though the workflows do not invoke them directly.
+Live tests may skip when their tools or providers are unavailable.
+
+## Manual tools
 
 | Script | Purpose |
 | --- | --- |
@@ -72,3 +77,6 @@ These have a purpose even though the workflows do not invoke them directly.
 
 Scripts stay with their callers so a standalone checkout keeps its validation
 and release tooling. Archived results and planning notes are not build inputs.
+Performance results in `perf/results/` are generated and ignored by Git.
+Historical results and retired tooling live in the `pkcs11-proxy-ng-ws`
+planning workspace.
