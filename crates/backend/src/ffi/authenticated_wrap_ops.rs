@@ -102,6 +102,12 @@ impl FfiBackend {
         let parameter = CkParameterRoundtripResult { ck_rv: main.ck_rv, returned_len, value };
         Ok((main, parameter))
     }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::Pkcs11Backend;
 
     #[test]
     fn authenticated_typed_aead_rejects_provider_pointer_or_scalar_rebinding_without_reading_it() {
@@ -1039,36 +1045,6 @@ mod tests {
         );
     }
 
-    unsafe extern "C" fn aead_unwrap(
-        session: cryptoki_sys::CK_SESSION_HANDLE,
-        mechanism: cryptoki_sys::CK_MECHANISM_PTR,
-        key: cryptoki_sys::CK_OBJECT_HANDLE,
-        _: cryptoki_sys::CK_BYTE_PTR,
-        _: cryptoki_sys::CK_ULONG,
-        _: cryptoki_sys::CK_ATTRIBUTE_PTR,
-        _: cryptoki_sys::CK_ULONG,
-        aad: cryptoki_sys::CK_BYTE_PTR,
-        aad_len: cryptoki_sys::CK_ULONG,
-        handle: cryptoki_sys::CK_OBJECT_HANDLE_PTR,
-    ) -> cryptoki_sys::CK_RV {
-        let rv = unsafe {
-            aead_wrap(
-                session,
-                mechanism,
-                key,
-                0,
-                aad,
-                aad_len,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
-        if rv == cryptoki_sys::CKR_OK {
-            unsafe { *handle = 1 };
-        }
-        rv
-    }
-
     #[test]
     fn authenticated_typed_unwrap_never_returns_mutated_aead_input_fields() {
         use crate::Pkcs11Backend;
@@ -1096,41 +1072,6 @@ mod tests {
             );
             assert_eq!(CALLS.load(Ordering::SeqCst), 1);
         }
-    }
-
-    unsafe extern "C" fn missing_length_wrap(
-        _session: cryptoki_sys::CK_SESSION_HANDLE,
-        mechanism: cryptoki_sys::CK_MECHANISM_PTR,
-        _wrapping_key: cryptoki_sys::CK_OBJECT_HANDLE,
-        _key: cryptoki_sys::CK_OBJECT_HANDLE,
-        _aad: cryptoki_sys::CK_BYTE_PTR,
-        _aad_len: cryptoki_sys::CK_ULONG,
-        output: cryptoki_sys::CK_BYTE_PTR,
-        output_len: cryptoki_sys::CK_ULONG_PTR,
-    ) -> cryptoki_sys::CK_RV {
-        CALLS.fetch_add(1, Ordering::SeqCst);
-        OUTPUT_PRESENT.store(usize::from(!output.is_null()), Ordering::SeqCst);
-        LENGTH_NULL.store(usize::from(output_len.is_null()), Ordering::SeqCst);
-        if !mechanism.is_null() {
-            let mechanism = unsafe { &mut *mechanism };
-            if !mechanism.pParameter.is_null() && mechanism.ulParameterLen > 0 {
-                unsafe { *mechanism.pParameter.cast::<u8>() = 0xA5 };
-            }
-        }
-        RETURN_RV.load(Ordering::SeqCst) as cryptoki_sys::CK_RV
-    }
-
-    fn backend_with_missing_length_wrap()
-    -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>, Box<cryptoki_sys::CK_FUNCTION_LIST_3_2>)
-    {
-        let mut base = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
-        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_2::default());
-        functions.C_WrapKeyAuthenticated = Some(missing_length_wrap);
-        let backend =
-            FfiBackend::test_backend_with_tables(base.as_mut(), None, Some(functions.as_ref()));
-        // Wrap/unwrap/destroy are ordinary: establish post-Initialize state.
-        backend.lifecycle_domain.open_for_tests();
-        (backend, base, functions)
     }
 
     #[test]
