@@ -24,68 +24,6 @@ use super::super::handle_map::VirtualHandle;
 use super::service_utils::{
     ExactCompletion, check_sanitize, input_from_wire, resolve_session, spawn_backend_exact,
 };
-use super::super::handle_map::VirtualHandle;
-use super::service_utils::{
-    ExactCompletion, check_sanitize, input_from_wire, resolve_session, spawn_backend_exact,
-};
-
-use crate::server::grpc_service::HandlerContext;
-
-const MAX_EXACT_OUTPUT_BYTES: u64 = 512 * 1024 * 1024;
-
-fn native_message_parameter_len(parameter: &MessageParameter) -> CkResult<u64> {
-    match parameter {
-        MessageParameter::GcmMessage(_) => {
-            Ok(std::mem::size_of::<cryptoki_sys::CK_GCM_MESSAGE_PARAMS>() as u64)
-        }
-        MessageParameter::CcmMessage(_) => {
-            Ok(std::mem::size_of::<cryptoki_sys::CK_CCM_MESSAGE_PARAMS>() as u64)
-        }
-        MessageParameter::SalaChacha(_) => {
-            Ok(std::mem::size_of::<cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS>() as u64)
-        }
-        MessageParameter::Raw(_) => Err(CkRv::MECHANISM_PARAM_INVALID),
-    }
-}
-
-fn parameter_ack_matches(
-    result: &CkParameterRoundtripResult,
-    spec: &CkParameterRoundtripSpec,
-    expected_rv: CkRv,
-) -> bool {
-    result.ck_rv == expected_rv
-        && result.returned_len == spec.buffer_len
-        && result.value == spec.buffer_present.then(Vec::new).map(SecretBytes::new)
-}
-
-fn translate_parameter_ack(
-    output: &CkOutputBufferResult,
-    caller_spec: &CkParameterRoundtripSpec,
-) -> CkParameterRoundtripResult {
-    CkParameterRoundtripResult {
-        ck_rv: output.ck_rv,
-        returned_len: caller_spec.buffer_len,
-        value: caller_spec.buffer_present.then(Vec::new).map(SecretBytes::new),
-    }
-}
-
-fn message_parameter_has_null_positive(parameter: &MessageParameter) -> bool {
-    match parameter {
-        MessageParameter::Raw(_) => true,
-        MessageParameter::GcmMessage(params) => {
-            params.iv_null_len.is_some_and(|len| len > 0)
-                || params.tag_null_len.is_some_and(|len| len > 0)
-        }
-        MessageParameter::CcmMessage(params) => {
-            params.nonce_null_len.is_some_and(|len| len > 0)
-                || params.mac_null_len.is_some_and(|len| len > 0)
-        }
-        MessageParameter::SalaChacha(params) => {
-            params.nonce_null_len.is_some_and(|len| len > 0)
-                || params.tag_null_len.is_some_and(|len| len > 0)
-        }
-    }
-}
 
 use crate::server::grpc_service::HandlerContext;
 
