@@ -18,6 +18,8 @@
 #     even inside a `set -e` caller (the killer property).
 #   * The 64/32 locators honour a pre-exported override as-is.
 #   * The 64/32 locators return 0 with a sane value ("" or a file).
+#   * Dependency closure validation accepts resolved modules and rejects a
+#     missing shared object with the unresolved name in its diagnostic.
 #
 # Pure shell, no tooling needed: safe in the live tier everywhere.
 
@@ -68,6 +70,39 @@ echo "ok: 64-bit locator returns 0 with sane value ($SOFTHSM_MODULE_64)"
 harness_locate_softhsm32
 [[ -z "$SOFTHSM_MODULE_32" || -f "$SOFTHSM_MODULE_32" ]]
 echo "ok: 32-bit locator returns 0 with sane value ($SOFTHSM_MODULE_32)"
+
+# 6. Provider dependency closure fails before daemon startup. Shadow ldd so
+# the parser is deterministic and independent of this host's architecture.
+mkdir -p "$TDIR/bin"
+touch "$TDIR/module.so"
+cat > "$TDIR/bin/ldd" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${HARNESS_TEST_LDD_MODE:-resolved}" == "missing" ]]; then
+    cat <<'OUTPUT'
+libcrypto.so.3 => not found
+libstdc++.so.6 => /lib/libstdc++.so.6 (0xf00)
+OUTPUT
+else
+    cat <<'OUTPUT'
+libcrypto.so.3 => /lib/libcrypto.so.3 (0xf00)
+libstdc++.so.6 => /lib/libstdc++.so.6 (0xf01)
+OUTPUT
+fi
+EOF
+chmod +x "$TDIR/bin/ldd"
+
+PATH="$TDIR/bin:$PATH" HARNESS_TEST_LDD_MODE=resolved \
+    harness_require_resolved_dependencies "$TDIR/module.so" "test module"
+echo "ok: resolved dependency closure accepted"
+
+if PATH="$TDIR/bin:$PATH" HARNESS_TEST_LDD_MODE=missing \
+    harness_require_resolved_dependencies "$TDIR/module.so" "test module" \
+    >"$TDIR/missing.out" 2>&1; then
+    echo "FAIL: unresolved dependency closure was accepted" >&2
+    exit 1
+fi
+grep -q "libcrypto.so.3 => not found" "$TDIR/missing.out"
+echo "ok: unresolved dependency closure rejected with diagnostic"
 
 echo
 echo "LOCATORS PASS"

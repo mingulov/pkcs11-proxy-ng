@@ -6234,6 +6234,34 @@ fn live_tier_wires_retained_oracle_and_sigterm() {
 }
 
 #[test]
+fn nightly_extracts_softhsm_i386_runtime_dependency_closure() {
+    let root = workspace_root();
+    let nightly = fs::read_to_string(root.join(".github/workflows/nightly.yml"))
+        .expect(".github/workflows/nightly.yml should be readable");
+
+    assert!(
+        nightly.contains("libssl3t64:i386"),
+        "the extracted i386 SoftHSM package needs its libssl3t64 runtime dependency"
+    );
+    assert!(
+        nightly.contains("dpkg -x libssl3t64_*i386.deb /opt/softhsm2-i386/"),
+        "the i386 libssl/libcrypto package should be extracted beside SoftHSM"
+    );
+    for package in ["zlib1g:i386", "libzstd1:i386", "openssl-provider-legacy:i386"] {
+        assert!(
+            nightly.contains(package),
+            "the extracted i386 libssl package needs its {package} runtime dependency"
+        );
+    }
+    for archive in ["zlib1g_*i386.deb", "libzstd1_*i386.deb", "openssl-provider-legacy_*i386.deb"] {
+        assert!(
+            nightly.contains(&format!("dpkg -x {archive} /opt/softhsm2-i386/")),
+            "the i386 dependency archive {archive} should be extracted beside SoftHSM"
+        );
+    }
+}
+
+#[test]
 fn deny_allows_no_unused_licenses() {
     // W1-L17-27: Unicode-DFS-2016 was allowlisted-but-unused (the quality
     // receipt's own unmatched-allowance note), and tree drift had orphaned
