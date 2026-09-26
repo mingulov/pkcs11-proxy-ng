@@ -1,9 +1,49 @@
 use super::*;
-use crate::server::grpc_service::session::tests::capture_logs;
+use crate::server::grpc_service::session::tests::capture_logs as capture_shared_logs;
 use serde_json::Value;
+use std::io;
 use tracing::Instrument;
 use tracing::instrument::WithSubscriber;
 use tracing_subscriber::prelude::*;
+
+#[derive(Clone, Default)]
+struct DiagnosticWriter(Arc<Mutex<Vec<u8>>>);
+
+impl io::Write for DiagnosticWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+async fn capture_logs<F, Fut>(f: F) -> String
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let writer = DiagnosticWriter::default();
+    let destination = writer.clone();
+    // Register a private subscriber AFTER the shared subscriber is installed.
+    // Earlier tests can leave workers carrying Dispatch::none across that
+    // installation. With just one registered subscriber, tracing's first-use
+    // interest fast path can cache their completion callsite as disabled.
+    // Keeping both subscribers registered avoids that startup race and gives
+    // these assertions their own output, including on detached worker threads.
+    capture_shared_logs(|| async {
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || destination.clone())
+            .finish();
+        f().with_subscriber(subscriber).await;
+    })
+    .await;
+    String::from_utf8(writer.0.lock().unwrap().clone()).unwrap()
+}
 
 fn rpc_span(request_id: &'static str) -> tracing::Span {
     tracing::info_span!("rpc", request_id, method = "/test.Backend/Operation")
@@ -117,7 +157,8 @@ async fn backend_diagnostics_survive_caller_cancellation_without_releasing_capac
                 let _ = parked.recv();
                 Ok(17u8)
             })
-            .instrument(rpc_span("diagnostics-cancelled")),
+            .instrument(rpc_span("diagnostics-cancelled"))
+            .with_current_subscriber(),
         );
         entered.await.unwrap();
         rpc.abort();
@@ -163,7 +204,8 @@ fn backend_diagnostics_separate_worker_queue_from_task_duration() {
                 let _ = task_parked.recv();
                 Ok(23u8)
             })
-            .instrument(rpc_span("diagnostics-queued")),
+            .instrument(rpc_span("diagnostics-queued"))
+            .with_current_subscriber(),
         );
         wait_for_count(&COUNTER, 1).await;
         let after_submission = Instant::now();
