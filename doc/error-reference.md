@@ -322,6 +322,35 @@ from a transport layer; if it did, the issue is in the backend
 application. Backend-down RVs additionally log
 `backend outcome: unhealthy` with the RV.
 
+## Backend task completion and timing
+
+For operations dispatched through the backend timeout/circuit-breaker wrapper,
+`backend task completed` records the blocking task's actual completion. The
+worker retains the originating RPC span (`request_id` and `method`), including
+when the request timed out or its future was cancelled before completion.
+
+| Field | Meaning |
+|---|---|
+| `completion` | `returned` for normal task return, including provider errors; `panicked` when the completion guard runs during Rust panic unwinding. |
+| `backend_queue_ms` | Monotonic elapsed time from task submission, after admission, to worker start. |
+| `backend_task_ms` | Monotonic elapsed time from worker start to the completion guard, including backend adapter work and lock waits. |
+| `released_stuck_slot` | Whether this completion removed a slot previously counted by the wrapper's timeout branch. |
+| `stuck_calls` | Remaining published stuck-call count, present when `released_stuck_slot=true`. |
+
+Completion is logged at INFO when a published stuck slot is released, and at
+DEBUG otherwise (`RUST_LOG=pkcs11_proxy_ng=debug`). This replaces the old
+`a previously stuck backend call returned; slot released` message, which also
+appeared during panic unwinding. No request or result payload is included.
+
+Task duration is **not native PKCS#11 execution time** or end-to-end RPC latency.
+A task may contain multiple provider calls. Completion does not prove success,
+response delivery, or reversal of side effects. `released_stuck_slot=false`
+also covers caller cancellation, which does not publish a stuck slot, and a
+completion that wins the accounting race against timeout publication. A missing
+completion event can mean the task is still running, logging was filtered, or
+the process stopped; it is not proof of a permanent provider wedge. These
+diagnostics do not change timeout handling, admission, or ownership lifetimes.
+
 ## Quick triage flow
 
 1. **Application reports any CK_RV** → check the daemon's structured

@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use tokio::sync::mpsc;
@@ -21,6 +21,9 @@ use super::HandlerContext;
 
 mod exact_completion;
 pub(super) use exact_completion::{ExactCompletion, spawn_backend_exact};
+
+#[cfg(test)]
+mod backend_diagnostics_tests;
 
 /// Global backend-call budget shared by all tenants (W1-L15-30): one noisy
 /// tenant can fill the budget and trip `CKR_HOST_MEMORY` for co-tenants.
@@ -237,9 +240,16 @@ where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
-    tokio::task::spawn_blocking(operation)
-        .await
-        .map_err(|error| Status::internal(format!("spawn_blocking panic: {error}")))
+    // Blocking workers do not inherit the async request's tracing context.
+    // Keep both the span and its dispatcher alive after timeout/cancellation;
+    // entering a span alone would lose events with a thread-local subscriber.
+    let span = tracing::Span::current();
+    let dispatch = tracing::dispatcher::get_default(Clone::clone);
+    tokio::task::spawn_blocking(move || {
+        tracing::dispatcher::with_default(&dispatch, || span.in_scope(operation))
+    })
+    .await
+    .map_err(|error| Status::internal(format!("spawn_blocking panic: {error}")))
 }
 
 /// RAII guard that decrements an in-flight backend-call counter on drop.
@@ -334,14 +344,34 @@ impl<'a> StuckCallAccounting<'a> {
 /// `Running → Completed`.
 struct StuckCallCompletionGuard<'a> {
     accounting: Arc<StuckCallAccounting<'a>>,
+    submitted_at: Instant,
+    started_at: Instant,
 }
 
 impl Drop for StuckCallCompletionGuard<'_> {
     fn drop(&mut self) {
+        let completion = if std::thread::panicking() { "panicked" } else { "returned" };
+        // These boundaries cover worker queueing and the whole backend task,
+        // including adapter/session locks; they are not native-call timings.
+        let backend_queue_ms =
+            self.started_at.duration_since(self.submitted_at).as_secs_f64() * 1e3;
+        let backend_task_ms = self.started_at.elapsed().as_secs_f64() * 1e3;
         if let Some(remaining) = self.accounting.complete() {
             tracing::info!(
+                completion,
+                backend_queue_ms,
+                backend_task_ms,
+                released_stuck_slot = true,
                 stuck_calls = remaining,
-                "a previously stuck backend call returned; slot released"
+                "backend task completed"
+            );
+        } else {
+            tracing::debug!(
+                completion,
+                backend_queue_ms,
+                backend_task_ms,
+                released_stuck_slot = false,
+                "backend task completed"
             );
         }
     }
@@ -569,7 +599,9 @@ where
     // that was never incremented.
     let accounting = Arc::new(StuckCallAccounting::new(stuck_gauge));
     let accounting_task = Arc::clone(&accounting);
+    let submitted_at = Instant::now();
     let task = spawn_task(move || {
+        let started_at = Instant::now();
         // Hold the slot for the TRUE lifetime of the backend call: a
         // blocking task always runs to completion, so the guard drops
         // exactly when the FFI returns (even if the caller timed out or
@@ -582,7 +614,8 @@ where
         // unwind and after caller cancellation — balancing any timeout
         // publication. Breaker/peer/context guards keep their true
         // lifetimes: caller cancellation releases none of them.
-        let _completion = StuckCallCompletionGuard { accounting: accounting_task };
+        let _completion =
+            StuckCallCompletionGuard { accounting: accounting_task, submitted_at, started_at };
         operation()
     });
 
