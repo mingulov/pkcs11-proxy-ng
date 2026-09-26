@@ -1,5 +1,10 @@
 # Development environment
 
+Use the pinned Rust toolchain through rustup (`rust-toolchain.toml`
+selects it automatically), with `rustfmt` and `clippy`. The minimum
+supported Rust version is **1.88.0**, including when updating dependencies.
+The repository builds independently of the umbrella workspace and OASIS
+specification checkout.
 Use rustup with the toolchain in `rust-toolchain.toml`. The minimum supported
 Rust version is **1.88.0**. This repository builds on its own; no planning
 workspace or OASIS checkout is needed.

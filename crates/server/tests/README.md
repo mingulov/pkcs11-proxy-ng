@@ -32,6 +32,15 @@ cargo test -p pkcs11-proxy-ng --test concurrency_and_recovery_test -- --ignored 
 cargo test -p pkcs11-proxy-ng --test provider_matrix_test -- --ignored --test-threads=1
 ```
 
+## Default-run SoftHSM2 lanes
+
+`crates/server/tests/parameterized_mechanism_test.rs` runs in default
+`cargo test` (W1-L9-09). When SoftHSM2 (`libsofthsm2.so` + `softhsm2-util`)
+is present, all 10 mechanism tests plus the 79-shape matrix driver execute
+for real; when it is absent, each test records an honest
+`record_skip!(ProviderMissing)` line and passes without executing. A
+present-but-broken provider still fails loudly. The shape-matrix driver
+asserts `executed + skipped == 79` with zero transport failures.
 ## Tests using SoftHSM2 in default `cargo test`
 
 `crates/server/tests/parameterized_mechanism_test.rs` runs in default

@@ -5,6 +5,18 @@ This Rust test library implements a deterministic PKCS#11 module with 2.40,
 cryptography or real keys and data.
 
 `ExactOracle_SetScenario`, `ExactOracle_ResetObservation`, and
+`ExactOracle_GetObservation` are test-only sideband controls. Observations count
+native entries and stores and record the supplied pointer class/capacity. They
+never influence production proxy behavior. In particular, only the oracle can
+distinguish query store-zero from no-store; the proxy intentionally cannot.
+
+The fixture writes bytes only within the supplied capacity. Oversized results
+change the returned scalar only. Hostile, zero-length, and oversized provider
+writes are modeled as bounded writes plus recorded observations
+(`length_action`/`output_action` 0–4; see `ExactOracle_ByteOutput`): a true
+out-of-bounds write cannot be modeled — it would be UB in a real provider too.
+Tests use synthetic public canaries, serialize fixture scenarios, and require
+explicit library paths (missing paths fail).
 `ExactOracle_GetObservation` control and inspect the fixture. Observations
 count native calls and writes, and record the caller's pointer class and
 capacity. Only the fixture can distinguish a zero-byte write during a length
@@ -29,6 +41,16 @@ cargo test --locked -p pkcs11-proxy-ng --test exact_output_error_test \
   -- --ignored --test-threads=1
 ```
 
+Use a private task-owned `TMPDIR` and `umask 077` when retaining evidence. The
+native oracle covers deterministic output behavior, not real mechanism support,
+performance, true out-of-bounds provider writes, or the full provider matrix.
+
+The fix-round tests include direct/proxy query/data comparisons for GCM, CCM,
+Salsa20 and ChaCha20-Poly1305; generated Begin versus query effects; legal mixed
+attribute templates; and readiness events for every exact adapter family.
+Readiness is process-global, so its cases share one test and drain setup events
+before measuring each native call. The oversized-capacity cases exercise proven
+pre-native rejection only: their small canary backing is never dereferenced.
 When retaining test artifacts, use a private `TMPDIR` and `umask 077`. The
 fixture tests deterministic output behavior. It does not test real mechanism
 support, performance, out-of-bounds writes, or provider compatibility.

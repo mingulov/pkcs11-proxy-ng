@@ -45,6 +45,13 @@ disable piped core collectors.
 
 ## 1. Install (first deploy)
 
+```bash
+# 1) Build and publish a runnable daemon image to your registry.
+#    The APK carrier image (packaging/alpine/Dockerfile.alpine) is
+#    FROM scratch — it only stages APKs at /apk and cannot run.
+#    Likewise tests/r2_resilience/Dockerfile.daemon builds a test-only
+#    fixture (weak PINs, auth="none"): use it as the pattern for your
+#    runtime Dockerfile, not as a release image.
 The commands below use the Kubernetes demo manifests, which contain fixed PINs
 and unauthenticated TCP. For a real deployment, use the
 [mTLS guide](../release/mtls-setup.md), set per-client authorization, and
@@ -62,6 +69,7 @@ docker push <registry>/pkcs11-proxy-ng:<version>-alpine3.23
 
 # 2) Apply the reference manifests (or your Helm overlay), pointed at
 #    the image you just published.
+kubectl apply -f pkcs11-proxy-ng/examples/k8s/
 kubectl apply -f examples/k8s/
 kubectl -n pkcs11-proxy-demo set image deploy/daemon \
   daemon=<registry>/pkcs11-proxy-ng:<version>-alpine3.23
@@ -147,6 +155,36 @@ same mechanism list after reconnecting.
 
 ## 4a. Crash isolation & blast radius — run multiple instances
 
+**The vendor PKCS#11 module is loaded in-process in each daemon.** A SIGSEGV inside
+the vendor `.so` therefore takes down **that daemon process** and drops the consumers
+pinned to it. (In-process worker isolation was evaluated and
+**deliberately deferred**: it cannot make a crash transparent, because PKCS#11
+session/login/operation state is un-serializable and dies with the backend regardless,
+and its remaining wins were not worth the complexity.)
+
+**Supported mitigation — "safety" / stable-channel deployment: run multiple daemon
+instances and partition consumers across them.** This is the same multi-replica
+topology as §4. A backend crash is then contained to the **one** replica's consumers;
+the other replicas and their consumers are unaffected, and the orchestrator restarts
+the dead replica. No in-process feature is needed.
+
+**Sticky routing is mandatory.** A PKCS#11 session handle is valid **only on the
+replica that created it** (sessions live in that replica's backend process). So:
+
+* ✅ Pin each consumer to one replica for its lifetime — the reference manifests do
+  this with `sessionAffinity: ClientIP` (§4); a static per-consumer endpoint works too.
+* ❌ Never put a round-robin L4 load balancer that spreads a single consumer's calls
+  across replicas — you will get `CKR_SESSION_HANDLE_INVALID` storms.
+
+**Consumers must reconnect after a replica restart.** A restart re-initialises the
+backend fresh, so the consumer's sessions/login/in-progress operations are gone. The
+shim auto-reconnects the gRPC channel with bounded backoff, but the **application** must
+re-open its session, re-`C_Login`, and retry — see §6 `CKR_DEVICE_ERROR`. A consumer
+that keeps using its pre-crash handles keeps failing.
+
+**For stronger containment,** partition more finely: a dedicated instance per token /
+trust-domain, or per high-value consumer, so one consumer's crash-inducing input cannot
+affect another's. The cost is N× backend `C_Initialize` and N× resource use.
 The vendor PKCS#11 module runs inside the daemon. A crash in that module ends
 the daemon process and drops its clients' sessions and in-progress operations.
 
@@ -274,6 +312,13 @@ failure to the daemon — pod restart, network partition; or (b) a
 circuit-breaker trips surface as `CKR_HOST_MEMORY`, and backend-call
 timeouts as `CKR_FUNCTION_FAILED` — see `doc/error-reference.md`
 for the full proxy-originated mapping.)
+Some modules use `CKR_DEVICE_ERROR` as a catch-all: e.g. kryoptic returns it for its
+crypto-backend (OpenSSL) path, so a rejected `C_Verify`, an integrity failure, or an
+unmapped crypto error surfaces here too. The proxy does not invent a "network error"
+code (ADR-0003 §5), so this value alone cannot tell the two apart. **To distinguish:**
+a transport failure clears on the shim's automatic reconnect/retry; a backend error
+persists on retry. The authoritative "daemon restarted, re-initialize" signal is
+`CKR_CRYPTOKI_NOT_INITIALIZED` (below), **not** this code.
 Providers can also return `CKR_DEVICE_ERROR` for their own failures. Match
 the request ID in daemon logs to determine whether the provider returned it.
 Do not infer the cause from this code alone. A lost context after restart
@@ -427,6 +472,7 @@ controls which proxy the shim connects to and how.
 
 | Variable | Purpose | Notes |
 | --- | --- | --- |
+| `PKCS11_PROXY_ENDPOINT` | gRPC endpoint URL, e.g. `http://daemon:7512` or `https://daemon:7512` | Canonical. Wins over `PKCS11_PROXY_SOCKET` if both are set. |
 | `PKCS11_PROXY_ENDPOINT` | gRPC endpoint URL, e.g. `http://daemon:7512`, `https://daemon:7512`, or `unix:/run/proxy.sock` | Canonical. Wins over `PKCS11_PROXY_SOCKET` if both are set. |
 | `PKCS11_PROXY_SOCKET` | Back-compat with the original C `pkcs11-proxy`. Accepts only `tcp://host:port`; `tls://` is **not** supported (use mTLS via `PKCS11_PROXY_ENDPOINT=https://…` + `PKCS11_PROXY_TLS_*`). | `tls://` is a loud error that fails the connection (never falls back to the default endpoint); other non-`tcp://` values log a warning and use the default. |
 | `PKCS11_PROXY_CONNECT_TIMEOUT` | Connect timeout, seconds. Default `5`. | Plain integer. |
@@ -476,6 +522,53 @@ These limits may affect a deployment:
 
 | Limitation | Workaround | Owner |
 | --- | --- | --- |
+| FOLLOWUP-fork-safety: forked children of a `C_Initialize`d shim must `C_Finalize`+`C_Initialize` to recover | Use fork-then-exec in consumer apps | Application code (not daemon-side) |
+| Backend crash blast radius: a vendor-`.so` SIGSEGV downs the whole daemon process (backend is in-process; A2/in-process-worker deferred) | Run **multiple instances + sticky routing** (§4a); consumers reconnect + re-open (§6) | Deployment + application code |
+| Multiplexed daemon vs pristine token: N logical clients share one backend instance per slot — no per-context pristine state (see below) | Rotate/restart the daemon for pristine-state cases; partition daemons per tenant (§4a) | Test harness / deployment |
+| Message-Init struct strictness: classic param structs on message Init fail closed (`CKR_MECHANISM_PARAM_INVALID`); lenient backends accept them direct (see below) | Pack the `CK_*_MESSAGE_PARAMS` struct for the mechanism on message Init | Application code |
+| Login-timing observer: an authorized session owner can tell proxy-cooldown `CKR_PIN_LOCKED` (fast, no backend contact) from a forwarded attempt, and observes its own login state (see below) | Accepted residual — no constant-latency guarantee by design | — |
+| Suspended session handles count toward the per-principal session quota; unset quotas bound nothing (see below) | Set `per_principal_max_sessions` where tenants are untrusted | Deployment |
+| Daemon memory lock is best-effort (`mlockall`, loud on denial); shim has no process-wide lock; swap residual stands (see below) | Grant `CAP_IPC_LOCK` / `LimitMEMLOCK`, confirm the startup log line | Deployment |
+| Git-sourced dependencies need network unless the cargo cache is pre-populated; no vendored sources ship (see below) | Pre-populate the cargo cache for air-gapped builds | Build |
+| `tests/consumers/Dockerfile.daemon.kryoptic` is unpinned/unhashed fixture-only (see below) | Never use fixture images outside provider-matrix testing | Test harness |
+
+### Multiplexed daemon vs pristine token (in-memory backends)
+
+One daemon = one loaded backend module = **one token state per slot shared
+by every logical client** (ADR-0002 §6, ADR-0007). The proxy multiplexes
+handles, sessions, and login scoping, but it does **not** give each context a
+pristine token. In-memory backends (kryoptic, jcardsim, non-persistent
+SoftHSM) make this visible: token objects, backend login state, and
+find-enumeration all accumulate across tenants sharing the daemon.
+
+What the daemon does and does not reset between tenants:
+
+* **Per-context cleanup (always):** a departing context's backend sessions
+  are closed (only when unreferenced by live contexts), its virtual handles
+  invalidated, its session objects destroyed with their sessions.
+* **Shared state (by design, persists):** the backend login while any live
+  context holds it (released on last-context-out, D6(2)/D9); token objects
+  any tenant created; anything the backend itself remembers (jcardsim
+  key files, kryoptic in-memory tables).
+* **Consequences for assertions:** a case that logs in while a prior case's
+  context still lives gets `CKR_USER_ALREADY_LOGGED_IN` (§6) — correct
+  multiplexed behavior, not a bug. A case asserting an empty token, a
+  logged-out token, or a private-object population it did not create is
+  asserting **pristine** state and is invalid against a shared daemon.
+* **Find-enumeration login filtering (F-04, fixed):**
+  `C_FindObjects` results are filtered by the querying context's login
+  state: a logged-out context observes only known-public objects' bare
+  (virtual) handles/counts, even while another tenant holds the backend
+  logged in (unknown privacy hides fail-closed). Attribute reads, every
+  use path, and private-object create/copy/generate still refuse with
+  `CKR_USER_NOT_LOGGED_IN` as before.
+
+**Rule for harnesses:** cases needing pristine state must rotate to a fresh
+daemon (restart, or a per-case backend namespace/volume) — the D9-harness
+rotation option. Cases tolerant of multiplexing may share, but must treat
+`ALREADY` as "slot held" and must scope their assertions to objects they
+created. For strict tenant isolation in production, partition daemons per
+tenant exactly as for crash containment (§4a).
 | forked children of a `C_Initialize`d shim must `C_Finalize`+`C_Initialize` to recover | Use fork-then-exec in consumer apps | Application code (not daemon-side) |
 | A vendor module crash ends the daemon process | Use separate instances and keep each client on one replica (§4a); reopen sessions after restart (§6) | Deployment + application code |
 | Message-Init struct strictness: classic param structs on message Init fail closed (`CKR_MECHANISM_PARAM_INVALID`); lenient backends accept them direct | Pack the `CK_*_MESSAGE_PARAMS` struct for the mechanism on message Init | Application code |
@@ -533,6 +626,65 @@ copies on drop but cannot reach already-swapped pages (see
 grant the capability (systemd `LimitMEMLOCK=infinity` +
 `CapabilityBoundingSet=CAP_IPC_LOCK`, or `setcap cap_ipc_lock+ep`)
 and confirm the startup log shows the pages-locked line.
+
+### Login-timing observer (accepted residual)
+
+After context/session checks pass, a login attempt that hits the
+shared per-slot failed-login budget answers `CKR_PIN_LOCKED` fast,
+without contacting the backend — measurably faster than a forwarded
+attempt. An authorized session owner can therefore observe (a) whether
+the slot is in proxy cooldown (shared budget state) and (b) its own
+resulting login state. There is deliberately no constant-latency
+guarantee: no jitter, no generic return code, no extra HSM calls to
+mask the difference. The observer must already hold an authorized
+session, which bounds the exposure; accept it as designed.
+
+### Suspended handles and session quotas (accepted residual)
+
+A session close in flight parks its handle "suspended" (safety
+quarantine): stale completions are no-ops, and the handle either
+reactivates on transient failure or is removed on terminal
+completion. Suspended handles keep their slot registration, so the
+opt-in per-principal session quota counts them — fail-closed against
+quota evasion via rapid open/close churn. With quotas unset (the
+default), in-flight closes are unbounded in principle: completions
+always resolve them, but no bound was proven under adversarial
+scheduling. A new cap needs resource-policy design and is deferred;
+set `per_principal_max_sessions` where tenants are untrusted.
+
+### Memory lock and swap residual (accepted residual)
+
+At startup the daemon attempts `mlockall(MCL_CURRENT | MCL_FUTURE)` so
+PIN/key pages cannot swap; denial (typically missing `CAP_IPC_LOCK`
+or a restrictive `RLIMIT_MEMLOCK`) and non-Unix platforms log a loud
+warning with remediation and the daemon still starts. The shim has no
+process-wide lock. Without the lock, daemon pages can reach swap
+under memory pressure and outlive the process — wiping clears live
+copies on drop but cannot reach already-swapped pages (see
+[privacy](../release/privacy.md)). Operators who need the guarantee
+grant the capability (systemd `LimitMEMLOCK=infinity` +
+`CapabilityBoundingSet=CAP_IPC_LOCK`, or `setcap cap_ipc_lock+ep`)
+and confirm the startup log shows the pages-locked line.
+
+### Git-sourced dependencies (accepted residual)
+
+`pkcs11-module` (backend, shim) is consumed from a rev-pinned git URL
+(`pkcs11-components`), not from crates.io, and no vendored sources
+ship with the release. Builds fetch it over the network unless the
+cargo cache is already populated. For air-gapped builds, pre-populate
+the cache (a normal online build once) — offline distribution beyond
+that is deferred, not part of v0.2.
+
+### Unpinned provider-matrix fixtures (accepted residual)
+
+`tests/consumers/Dockerfile.daemon.kryoptic` builds from unpinned
+`alpine:3.23` bases, an unhashed kryoptic checkout, an unhashed
+OpenSSL source pull, and an unlocked rustup stable toolchain: the
+image is not reproducible and makes no release claim. It is a
+provider-matrix test fixture only. Fixture pinning is separate,
+optional work — it is not part of the release dependency closure,
+which stays fully locked (`Cargo.lock`, digest-pinned release
+images).
 
 ## 10. Escalation
 

@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use tokio::sync::mpsc;
@@ -21,6 +21,9 @@ use super::HandlerContext;
 
 mod exact_completion;
 pub(super) use exact_completion::{ExactCompletion, spawn_backend_exact};
+
+#[cfg(test)]
+mod backend_diagnostics_tests;
 
 /// Global backend-call budget shared by all tenants (W1-L15-30): one noisy
 /// tenant can fill the budget and trip `CKR_HOST_MEMORY` for co-tenants.
@@ -237,9 +240,16 @@ where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
-    tokio::task::spawn_blocking(operation)
-        .await
-        .map_err(|error| Status::internal(format!("spawn_blocking panic: {error}")))
+    // Blocking workers do not inherit the async request's tracing context.
+    // Keep both the span and its dispatcher alive after timeout/cancellation;
+    // entering a span alone would lose events with a thread-local subscriber.
+    let span = tracing::Span::current();
+    let dispatch = tracing::dispatcher::get_default(Clone::clone);
+    tokio::task::spawn_blocking(move || {
+        tracing::dispatcher::with_default(&dispatch, || span.in_scope(operation))
+    })
+    .await
+    .map_err(|error| Status::internal(format!("spawn_blocking panic: {error}")))
 }
 
 /// RAII guard that decrements an in-flight backend-call counter on drop.
@@ -334,14 +344,34 @@ impl<'a> StuckCallAccounting<'a> {
 /// `Running → Completed`.
 struct StuckCallCompletionGuard<'a> {
     accounting: Arc<StuckCallAccounting<'a>>,
+    submitted_at: Instant,
+    started_at: Instant,
 }
 
 impl Drop for StuckCallCompletionGuard<'_> {
     fn drop(&mut self) {
+        let completion = if std::thread::panicking() { "panicked" } else { "returned" };
+        // These boundaries cover worker queueing and the whole backend task,
+        // including adapter/session locks; they are not native-call timings.
+        let backend_queue_ms =
+            self.started_at.duration_since(self.submitted_at).as_secs_f64() * 1e3;
+        let backend_task_ms = self.started_at.elapsed().as_secs_f64() * 1e3;
         if let Some(remaining) = self.accounting.complete() {
             tracing::info!(
+                completion,
+                backend_queue_ms,
+                backend_task_ms,
+                released_stuck_slot = true,
                 stuck_calls = remaining,
-                "a previously stuck backend call returned; slot released"
+                "backend task completed"
+            );
+        } else {
+            tracing::debug!(
+                completion,
+                backend_queue_ms,
+                backend_task_ms,
+                released_stuck_slot = false,
+                "backend task completed"
             );
         }
     }
@@ -569,7 +599,9 @@ where
     // that was never incremented.
     let accounting = Arc::new(StuckCallAccounting::new(stuck_gauge));
     let accounting_task = Arc::clone(&accounting);
+    let submitted_at = Instant::now();
     let task = spawn_task(move || {
+        let started_at = Instant::now();
         // Hold the slot for the TRUE lifetime of the backend call: a
         // blocking task always runs to completion, so the guard drops
         // exactly when the FFI returns (even if the caller timed out or
@@ -582,7 +614,8 @@ where
         // unwind and after caller cancellation — balancing any timeout
         // publication. Breaker/peer/context guards keep their true
         // lifetimes: caller cancellation releases none of them.
-        let _completion = StuckCallCompletionGuard { accounting: accounting_task };
+        let _completion =
+            StuckCallCompletionGuard { accounting: accounting_task, submitted_at, started_at };
         operation()
     });
 
@@ -1321,6 +1354,17 @@ pub(super) async fn session_slot_login_state(
         .flatten()
 }
 
+/// D6(1) enforcement for object-MINTING operations (create/copy/generate/
+/// derive/unwrap), as refined in T20: when the calling context is logically
+/// logged out on the session's slot and `template` declares the new object
+/// private, refuse with `CKR_USER_NOT_LOGGED_IN` — but ONLY while another
+/// live tenant holds the slot login (forwarding would ride their backend
+/// login). With no other holder the backend is truly logged out, so its
+/// verdict is unpolluted and authoritative: forward and return whatever it
+/// says (lenient backends such as NSS allow logged-out private session
+/// mints; strict backends refuse — both match direct exactly). The old
+/// unconditional refusal diverged from every lenient backend (21 lanes).
+///
 /// Refuse a template-declared private mint when this context is logged out
 /// and another logical context holds the slot login. Otherwise leave the
 /// provider's verdict unchanged. The holder snapshot does not prove physical
@@ -1584,6 +1628,28 @@ pub(super) async fn find_result_visible_to_context(
     backend_object_known_token(ctx, backend_session, backend_object).await
 }
 
+/// D6(1) enforcement for object/key USE (sign/verify/encrypt/decrypt/digest
+/// init, get/set attributes, wrap/unwrap/derive keys, ...), as refined in
+/// T20: when the calling context is logically logged out on the session's
+/// slot and the object is private, refuse with `CKR_USER_NOT_LOGGED_IN` —
+/// but ONLY while another live tenant holds the slot login (forwarding
+/// would ride their backend login). With no other holder the backend is
+/// truly logged out, so its verdict is unpolluted and authoritative:
+/// forward and return whatever it says (lenient backends such as NSS
+/// allow logged-out use of own private session objects; strict backends
+/// refuse — both match direct exactly). The old unconditional refusal
+/// diverged from every lenient backend (21 lanes).
+///
+/// Cost: the logged-in path costs one in-memory map read. The logged-out path
+/// decides from the mint-recorded privacy bit when known (still no backend
+/// call, so cache-hit and coalescer semantics are unchanged) and probes
+/// `CKA_PRIVATE` from the backend — a read-only probe that never disturbs
+/// other tenants — only for unknown (find-registered / backend-minted)
+/// objects.
+/// Privacy bit for one object: the mint-recorded bit when known, else a
+/// single backend `CKA_PRIVATE` probe (fail-open `false` — the caller falls
+/// through to the backend's own faithful verdict).
+///
 /// Read the cached privacy bit, or probe CKA_PRIVATE when it is uncached.
 /// The current boolean representation can conflate unknown metadata with
 /// false and can retain stale defaults. It is not authoritative evidence

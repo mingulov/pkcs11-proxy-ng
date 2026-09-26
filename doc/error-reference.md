@@ -13,6 +13,27 @@ See the PKCS#11 specification for the complete meaning of each code.
 - gRPC transport failure (daemon unreachable, TLS handshake fail) on a
   **session-scoped** call. For lifecycle calls the same transport failure maps
   to `CKR_GENERAL_ERROR`, and for slot/token calls to `CKR_TOKEN_NOT_PRESENT`.
+- Exact-output contract violation detected by the proxy (W1-L3-05): the
+  daemon fails closed with this code when the native provider returns
+  effects its own RV/shape forbids, and the shim fails closed with the
+  same code when the daemon's response effects violate the caller's
+  buffer spec. One violation class, one RV on both layers. The shim
+  also treats this code on the message path as outcome-ambiguous and
+  clears its local operation state.
+- `classify_backend_outcome` folds only `HOST_MEMORY` and
+  `DEVICE_REMOVED` backend RVs — plus the daemon's own transport
+  failures (backend-call timeout, circuit-breaker trip,
+  blocking-pool panic) — into the health-gate's unhealthy set.
+  Backend-returned `TOKEN_NOT_PRESENT` and `CKR_DEVICE_ERROR` are
+  per-request responses and do not flip readiness, but the **return
+  value to the caller is still the exact backend RV** (per CLAUDE.md
+  rule 2).
+
+Daemon transport/capacity failures that formerly shared this code now
+have distinct values (W1-L3-01): backend-call timeout →
+`CKR_FUNCTION_FAILED`, circuit-breaker trip → `CKR_HOST_MEMORY`,
+per-slot login-lock contention → `CKR_GENERAL_ERROR`, failed-login
+cooldown → `CKR_PIN_LOCKED`. See those sections.
 - Exact-output contract violation: the provider or daemon response has
   effects that cannot be safely returned to the caller. On message calls,
   the shim clears local operation state because the outcome is uncertain.
@@ -41,6 +62,14 @@ typically when the shim cannot complete the
 the daemon is unreachable, returns a malformed response, or the
 shim hits a panic that `catch_panics` converts (FFI safety rule).
 Also originated by the proxy for:
+- Per-slot login-lock contention (W1-L3-01): another tenant holds the
+  slot's login serialization lock past the configured bound. The
+  backend was untouched; retry.
+- Daemon wrong-length response to `C_GenerateRandom` (W1-L3-08): the
+  daemon returned a byte count differing from the requested length.
+  A protocol violation, failed closed before any caller memory is
+  written.
+- 64-bit daemon `ck_rv` unrepresentable in the host `CK_RV` (W1-L3-13):
 - Per-slot login-lock contention: another operation holds the
   slot's login serialization lock past the configured bound. The
   backend was untouched; retry.
@@ -98,6 +127,53 @@ daemon is saturated — surface as an operator alert.
 **Cause.** The daemon fast-rejected a `C_Login`/`C_LoginUser` because
 the slot's aggregate failed-login budget tripped and the cooldown
 window is active. The proxy
+stops feeding the backend's shared PIN-lockout counter. The app must
+stop trying PINs — the same action a backend lockout demands.
+
+**Operator action.** None unless unexpected: repeated trips mean a
+client is guessing PINs. Check audit logs for the failing identity.
+
+**Application action.** Do not retry the PIN until the cooldown
+expires; tell the user the PIN is temporarily refused.
+
+### `CKR_FUNCTION_FAILED` (0x06)
+
+**Cause.** The daemon's `spawn_backend` call exceeded
+`proxy.request_timeout_secs` (W1-L3-01; formerly `CKR_DEVICE_ERROR`).
+Outcome-ambiguous: the backend call keeps running and may still
+complete — the same meaning as the **client-side** gRPC request
+timeout (`DeadlineExceeded`), which already mapped to this code.
+
+**Operator action.** Check whether the backend (HSM) is slow or
+wedged: look for `Backend call timed out` lines and a rising
+`stuck_calls` count. Consider raising
+`proxy.request_timeout_secs` or investigating HSM responsiveness.
+
+**Application action.** Treat as transient and retriable, but the
+operation may already have executed — use an idempotent retry or
+reconcile state first where the PKCS#11 call is not idempotent.
+
+### `CKR_HOST_MEMORY` (0x02)
+
+**Cause.** The daemon's circuit breaker tripped (W1-L3-01; formerly
+`CKR_DEVICE_ERROR`): global in-flight budget exhausted, or the
+per-connection budget exhausted. The backend was untouched — the
+daemon shed load. Same "cannot accept more work" meaning as
+ADR-0003's `RESOURCE_EXHAUSTED` row and the context-limit refusal.
+
+**Operator action.** Same triage as the old breaker signal: check
+backend (HSM) capacity vs. `proxy.max_concurrent_backend_calls`,
+look for `Backend circuit breaker tripped` lines, and scale the
+daemon or relieve the noisy tenant.
+
+**Application action.** Back off and retry. If it persists, the
+daemon is saturated — surface as an operator alert.
+
+### `CKR_PIN_LOCKED` (0xA4)
+
+**Cause.** The daemon fast-rejected a `C_Login`/`C_LoginUser` because
+the slot's aggregate failed-login budget tripped and the cooldown
+window is active (W1-L3-01; formerly `CKR_DEVICE_ERROR`). The proxy
 stops feeding the backend's shared PIN-lockout counter. The app must
 stop trying PINs — the same action a backend lockout demands.
 
@@ -225,6 +301,23 @@ the spec / vendor docs.
 
 ### `CKR_FUNCTION_NOT_SUPPORTED` (0x54)
 
+**Cause.** The shim called a function that the backend's
+`CK_FUNCTION_LIST` reports as null. The proxy never fabricates an
+implementation. Also returned when a discovery/session-info response
+arrives with its `info` payload absent (W1-L3-06; formerly
+`CKR_DEVICE_ERROR`): a malformed or older daemon spoke a contract
+the client cannot interpret. A backend-RETURNED `CKR_DEVICE_ERROR`
+still passes through as `CKR_DEVICE_ERROR`.
+Also returned at `C_Initialize` when the shim's and daemon's
+exact-output effects version ranges are disjoint (W1-L5-05): the
+peers cannot agree on an effects encoding, so init fails fast
+instead of corrupting per-RPC effects later.
+
+**Operator action.** Confirm the backend version supports the
+function; some HSMs ship truncated function lists for older
+PKCS#11 versions. For `C_Initialize` failures, compare the shim and
+daemon builds: disjoint exact-output effects ranges fail fast here
+(W1-L5-05) — upgrade the older peer.
 **Cause.** The provider's `CK_FUNCTION_LIST` has no entry for the requested
 function. The proxy also returns this for a discovery or session-info
 response with no required `info` payload.
@@ -268,12 +361,67 @@ request ID to daemon logs to identify the source.
 | `CKR_SESSION_COUNT` | 0xB1 | Token's session limit hit. |
 | `CKR_SIGNATURE_INVALID` | 0xC0 | Bad signature at `C_Verify`. |
 | `CKR_DATA_INVALID` | 0x20 | Bad input format. |
+| `CKR_DATA_LEN_RANGE` | 0x21 | Input length outside mechanism's permitted range. **Also originated by the shim** when a 64-bit count/length argument (e.g. `C_FindObjects` `ulMaxObjectCount`, W1-L3-07) exceeds the u32 wire width. |
 | `CKR_DATA_LEN_RANGE` | 0x21 | Input length outside mechanism's permitted range. **Also originated by the shim** when a 64-bit count/length argument (e.g. `C_FindObjects` `ulMaxObjectCount`) exceeds the u32 wire width. |
 | `CKR_TEMPLATE_INCONSISTENT` | 0xD1 | Object create/set template invalid. |
 | `CKR_ATTRIBUTE_SENSITIVE` | 0x11 | `C_GetAttributeValue` on a sensitive attribute. |
 | `CKR_ATTRIBUTE_TYPE_INVALID` | 0x12 | Unknown attribute type. |
 | `CKR_NO_EVENT` | 0x08 | `C_WaitForSlotEvent` in non-blocking mode with nothing pending. |
 
+For each of these the **operator action** is: enable debug logging
+(`RUST_LOG` defaults to `info`) and check the daemon's per-call
+`backend outcome classified` debug line — it carries the request's
+`request_id` — to confirm the value came from the backend and not
+from a transport layer; if it did, the issue is in the backend
+(HSM driver, PIN policy, mechanism availability) or the
+application. Backend-down RVs additionally log
+`backend outcome: unhealthy` with the RV.
+
+## Backend task completion and timing
+
+For operations dispatched through the backend timeout/circuit-breaker wrapper,
+`backend task completed` records the blocking task's actual completion. The
+worker retains the originating RPC span (`request_id` and `method`), including
+when the request timed out or its future was cancelled before completion.
+
+| Field | Meaning |
+|---|---|
+| `completion` | `returned` for normal task return, including provider errors; `panicked` when the completion guard runs during Rust panic unwinding. |
+| `backend_queue_ms` | Monotonic elapsed time from task submission, after admission, to worker start. |
+| `backend_task_ms` | Monotonic elapsed time from worker start to the completion guard, including backend adapter work and lock waits. |
+| `released_stuck_slot` | Whether this completion removed a slot previously counted by the wrapper's timeout branch. |
+| `stuck_calls` | Remaining published stuck-call count, present when `released_stuck_slot=true`. |
+
+Completion is logged at INFO when a published stuck slot is released, and at
+DEBUG otherwise (`RUST_LOG=pkcs11_proxy_ng=debug`). This replaces the old
+`a previously stuck backend call returned; slot released` message, which also
+appeared during panic unwinding. No request or result payload is included.
+
+Task duration is **not native PKCS#11 execution time** or end-to-end RPC latency.
+A task may contain multiple provider calls. Completion does not prove success,
+response delivery, or reversal of side effects. `released_stuck_slot=false`
+also covers caller cancellation, which does not publish a stuck slot, and a
+completion that wins the accounting race against timeout publication. A missing
+completion event can mean the task is still running, logging was filtered, or
+the process stopped; it is not proof of a permanent provider wedge. These
+diagnostics do not change timeout handling, admission, or ownership lifetimes.
+
+## Quick triage flow
+
+1. **Application reports any CK_RV** → check the daemon's structured
+   log at the matching request_id (the request-scoped trace-id
+   middleware emits `request_id` in every span).
+2. The debug line `backend outcome classified` at that `request_id`
+   proves the RV came from the backend, not from transport (enable
+   `RUST_LOG=pkcs11_proxy_ng=debug` first — the default is `info`).
+   If absent, the proxy's transport/timeout layer originated it
+   (see proxy-originated section above).
+3. If the same RV is repeated and folded into the unhealthy set
+   (HOST_MEMORY / DEVICE_REMOVED),
+   watch for `backend exceeded failure threshold; flipping
+   readiness to NOT_SERVING`. The pod will be pulled from the
+   Service after `backend_health_consecutive_failures` consecutive
+   failures.
 For provider errors, compare the application's request ID with the daemon's
 `backend outcome classified` debug log. Enable
 `RUST_LOG=pkcs11_proxy_ng=debug` when needed. A provider-returned error calls
@@ -303,6 +451,12 @@ These surface as process-startup errors before any PKCS#11 call is served:
 
 ## Related docs
 
+- [Runbook §6](runbooks/operating-pkcs11-proxy-ng.md#6-troubleshooting-common-ck_rv-codes) — surfaces the
+  three highest-frequency codes with concrete `kubectl` commands.
+- [Transport-error mapping](../crates/client/src/error.rs) — implementation and
+  unit tests for transport/lifecycle return codes.
+- [Chaos scenario 2](../tests/chaos/scenarios/scenario2_backend_oom.sh) — the
+  end-to-end harness for the health-gate transition under persistent `HOST_MEMORY`.
 - [Runbook §6](runbooks/operating-pkcs11-proxy-ng.md#6-troubleshooting-common-ck_rv-codes) — common errors and operator checks.
 - [Transport-error mapping](../crates/client/src/error.rs) — implementation and
   unit tests for transport/lifecycle return codes.
