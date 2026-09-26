@@ -9,8 +9,9 @@ connected to the token or HSM, preserving the backend's results within the
 app ──dlopen──▶ libpkcs11_proxy_ng_shim.so ──gRPC/TLS──▶ pkcs11-proxy-ng (daemon) ──FFI──▶ backend .so (HSM/token)
 ```
 
-**Latest release: `v0.1.0`.** This branch prepares `v0.2.0`, an unreleased
-testing candidate that still needs final validation and provider comparisons.
+**Current source version: `v0.2.0`. Latest published release: `v0.1.0`.**
+This source tree is an unpublished `v0.2.0` testing candidate that still needs
+final validation and provider comparisons.
 
 Use **one logical client in one trusted security domain per daemon/provider
 instance**. Do not share it with mutually untrusted clients. Restart the daemon
@@ -83,6 +84,10 @@ Build and stage the Linux release artifacts without a PKCS#11 provider:
 ```bash
 scripts/release-dry-run.sh
 ```
+
+This validates packaging, not provider parity or publication readiness. Follow
+the [`0.x` release checklist](./doc/release/0.x-beta-release-checklist.md) before
+tagging.
 
 The script checks and stages these files:
 
