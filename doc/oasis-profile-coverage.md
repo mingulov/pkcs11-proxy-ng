@@ -61,6 +61,224 @@ invent missing values or extend standard function-list layouts.
 | Official mechanism names/aliases with provider artifact coverage | 315 |
 | Official mechanism names/aliases absent from provider artifacts | 164 |
 
+The generated JSON also emits a top-level `completion_gap_summary` for audit
+triage. It derives `missing_local_test_citation_counts` from the function,
+parameter-shape, message-parameter, mechanism-info flag, and MockBackend
+coverage matrices, separates `actionable_mockbackend_semantic_gap_count` from
+`intentional_no_source_workflow_rejection_count`, emits
+`intentional_unsupported_function_list_gap_names` for XOF function-list
+omissions with a local ABI decision, emits
+`intentional_unsupported_numeric_value_gap_names` for working-spec mechanisms
+without published numeric values, emits
+`intentional_unsupported_workflow_gap_names` for no-source workflow rows with
+explicit rejection decisions, and groups the remaining explicit source gaps:
+provider gaps and missing parameter-shape coverage. It also emits
+`strict_completion_open_items`, `strict_completion_open_item_counts`,
+`internal_completion_open_item_count`, and `strict_completion_open_item_count`
+so that a zero actionable-MockBackend count cannot be confused with goal
+completion. This summary is a navigation aid over the matrices, not a
+standalone completion signal.
+
+The six `C_DigestXof*` functions are documented in the vendored
+`message_digesting_functions.md` but are not present in the current
+OASIS published v3.2 `pkcs11f.h` function list or the current `cryptoki-sys`
+0.5.0 function-list structs used by this project. The project does not add
+out-of-band named shim exports or custom `CK_FUNCTION_LIST_3_2` layouts for
+them, because callers discover portable PKCS#11 functions through the standard
+function list and changing that struct would break ABI compatibility. They are
+therefore tracked as explicit spec-only gaps with the generated reason
+`cryptoki_sys_missing_function_list_field`, not silently counted as
+implemented. Each XOF row also carries a structured `local_abi_decision`
+object with the policy
+`do_not_add_out_of_band_exports_or_custom_function_list_layout`, evidence from
+the working digest spec, all published `pkcs11f.h` headers checked, and the
+local function-list field table. The rows cite both the generated inventory
+guard and an ignored loaded-shim export-surface test proving the shim does not
+publish out-of-band `C_DigestXof*` symbols while preserving the standard
+`C_GetFunctionList` export. This records the OASIS source inconsistency as a
+deliberate ABI choice rather than a missing shim/server path.
+
+The interface matrix tracks the standard `PKCS 11` interfaces returned by the
+shim catalog: 2.40 (`CK_FUNCTION_LIST`), 3.0 (`CK_FUNCTION_LIST_3_0`), and 3.2
+(`CK_FUNCTION_LIST_3_2`). It cites the OASIS `CK_INTERFACE` and
+`C_GetInterface*` spec sections plus loaded shim tests proving catalog order,
+version selection, and the default 3.2 interface. The generated interface rows
+also mark MockBackend default capability and cite the backend unit test proving
+it reports the same 2.40/3.0/3.2 set by default, so loaded-shim tests exercise
+the 3.2 function list through the normal endpoint-probed catalog rather than a
+static fallback.
+
+`C_GetFunctionList`, `C_GetInterfaceList`, and `C_GetInterface` are local C ABI
+entry points served by the shim catalog itself. They intentionally have no
+proto, client, server, or backend trait path. The generated function matrix
+marks them with `shim_local_function_catalog_entrypoint` and cites the loaded
+shim interface tests instead of leaving those proxy-layer columns ambiguous.
+
+`C_GetFunctionStatus` and `C_CancelFunction` are legacy parallel-operation
+status APIs from the 2.40 function list. `MockBackend` intentionally inherits
+the `Pkcs11Backend` trait defaults for these two methods, which return
+`CKR_FUNCTION_NOT_PARALLEL`, rather than simulating legacy parallel execution.
+The generated `mock_backend_default_trait_decisions` matrix derives this from
+the trait implementation, maps the inherited defaults back to official C
+functions, and cites the backend unit test that pins the return value.
+
+Every represented function row now cites local test evidence. The function
+matrix cites proxy-layer consistency tests, shim C ABI function-list tests, and
+shim panic-boundary tests for proxy-routed functions; shim-local catalog
+entrypoints cite the loaded interface tests directly. The generator also emits
+`local_tests_missing` in JSON for function, MockBackend default-decision,
+mechanism-parameter shape, message-parameter shape, and mechanism MockBackend
+coverage rows so stale test-name citations fail the local quality gate instead
+of becoming silent documentation drift.
+For 3.0/3.2 provider-gap APIs, the function matrix also cites behavioral gRPC
+tests for async completion/status, KEM encapsulate/decapsulate, authenticated
+wrap/unwrap, and message init/one-shot/begin/next/final flows instead of
+relying only on function-list or handler-presence checks. The message
+Begin/Next rows additionally cite ignored loaded-shim C ABI tests:
+`loaded_shim_message_begin_next_round_trips_c_stack_params` covers modelled
+Encrypt/Decrypt GCM parameters and all outer pointer classes through the 3.2
+function list, while
+`loaded_shim_sign_verify_message_preserves_empty_parameter_classes_once_per_call`
+covers the distinct empty-only Sign/Verify contract.
+
+The mechanism parameter-shape matrix compares every `CkMechanismParams` enum
+variant against the Rust parameter struct, OASIS `CK_*PARAMS` source evidence,
+proto message, `Mechanism.params` oneof field, backend FFI reconstruction, shim
+read support, shim writeback support, and known mutable-output behavior. All
+concrete spec parameter structs are either modeled, classified as message
+parameters, or classified as aliases/placeholders. `CK_KMAC_PARAMS` and
+`CK_MU_GEN_PARAMS` are modeled as typed mechanism parameter shapes.
+`CK_EXTRACT_PARAMS` is modeled as the typed `ExtractParams` shape for
+`CKM_EXTRACT_KEY_FROM_KEY`.
+
+Every safe represented mechanism-parameter shape now cites local test evidence
+in the generated matrix. That includes raw IV parameters, scalar
+`CK_OBJECT_HANDLE` parameters, `CK_KEY_DERIVATION_STRING_DATA`, and
+`CK_SIGN_ADDITIONAL_CONTEXT`, with proto round-trips, backend FFI
+reconstruction tests, and shim C-stack read tests where applicable.
+Unsupported raw and vendor-specific transport-only parameter variants are also
+exercised: the backend FFI reconstruction path rejects them with
+`CKR_MECHANISM_PARAM_INVALID`, and the generated matrix cites that test beside
+their explicit unsupported reasons. This keeps those rows intentional without
+claiming a safe OASIS ABI mapping where the local sources do not provide one.
+Unsupported raw and vendor transport-only variants are likewise intentional
+`mechanism_params_default.toml` omissions under the AGENTS.md §12 exception.
+
+The working `chacha20_salsa20_poly1305.md` prose mentions
+`CK_CHACHA20POLY1305_PARAMS`, but its C definition and the published OASIS
+headers define `CK_SALSA20_CHACHA20_POLY1305_PARAMS`. The generated inventory
+therefore records `CK_CHACHA20POLY1305_PARAMS` as an explicit
+working-spec prose alias for the already modeled
+`Salsa20ChaCha20Poly1305Params` shape, not as a missing ABI struct.
+
+The working key-management prose uses `CK_XXX_MESSAGE_PARAMS` as a placeholder
+for mechanism-specific message parameter structs such as `CK_GCM_MESSAGE_PARAMS`
+and `CK_CCM_MESSAGE_PARAMS` in authenticated wrap/unwrap discussion. The
+generated inventory records it under placeholder exclusions, not as a missing
+concrete C ABI struct.
+
+Some official parameter structs are represented in Rust/proto/backend FFI but
+are deliberately not parsed into typed values by the shim from caller-owned C
+stack memory. `CK_X3DH_*`, `CK_X2RATCHET_*`, and `CK_CMS_SIG_PARAMS` contain
+byte or string pointers without sufficient bounded length information for a
+safe generic shim read. Their matrix rows carry `shim_read_decision.policy =
+do_not_parse_unbounded_caller_pointers_in_shim` and
+`shim_read_decision.caller_visible_outcome =
+direct_shim_parameterized_calls_return_CKR_MECHANISM_PARAM_INVALID`. The raw
+mechanism reader preserves bytes if it is reached, but direct shim C ABI
+entrypoints validate first and reject these parameterized mechanisms instead of
+guessing pointer lengths. This is covered both by shim helper unit tests and by
+an ignored loaded-shim C ABI test that calls through real function-list
+pointers with caller-owned `CK_CMS_SIG_PARAMS`, `CK_X3DH_*`, and
+`CK_X2RATCHET_*` stack structs. These rows are intentional
+`mechanism_params_default.toml` omissions under the AGENTS.md §12 exception —
+no TOML shape is required for them.
+MockBackend still performs source-grounded semantic checks on the typed
+transport representation where OASIS names real object-handle fields: X3DH and
+X2Ratchet derive parameters reject invalid referenced key handles, but
+lengthless byte-pointer fields are treated as opaque transported data. CMS
+signature workflows validate a nonzero `certificateHandle`, while preserving
+`CK_OBJECT_HANDLE(0)` as the local representation of the spec's absent
+certificate case. `CKM_CONCATENATE_BASE_AND_KEY` validates its scalar
+`CK_OBJECT_HANDLE` parameter, and CT-KIP validates `hKey` for derive/MAC while
+leaving the same field unused for `CKM_KIP_WRAP`, matching the mechanism prose.
+The EC/X9.42 dual-party derive shapes validate the source-defined
+`hPrivateData` handle, and their MQV variants also validate the source-defined
+`publicKey` handle.
+
+Message-operation parameter structs are tracked in a separate message-parameter
+matrix because they are not `CK_MECHANISM` parameters. That matrix currently
+covers `CK_GCM_MESSAGE_PARAMS`, `CK_CCM_MESSAGE_PARAMS`, and
+`CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS`, including proto fields, backend FFI
+message conversion, shape-bound shim reads, and the bounded Encrypt writeback
+path. These three shapes are modelled only for Encrypt/Decrypt: Encrypt is
+output-capable, Decrypt is input-only, and Sign/Verify parameters are
+empty-only. A materialized non-NULL/nonzero unmodelled parameter fails closed.
+The cited MockBackend exact-path tests cover synthetic cipher output and
+structured GCM, CCM, and Salsa/ChaCha Encrypt writeback without implying
+structured Sign/Verify or Decrypt writeback.
+
+The working Markdown also names six mechanism tokens that do not have numeric
+`CKM_*` values in the vendored OASIS published v2.40, v3.0, v3.1, or v3.2
+headers: `CKM_KMAC128`, `CKM_KMAC256`, `CKM_ML_DSA_EXTERNAL_MU`,
+`CKM_ML_DSA_EXTERNAL_MU_GEN`, `CKM_SHAKE_128`, and `CKM_SHAKE_256`. These are
+tracked as explicit mechanism gaps with the generated reason
+`oasis_working_spec_lacks_published_numeric_value`, because `MockBackend` can
+only advertise mechanisms that have a concrete `CK_MECHANISM_TYPE` value. Their
+matrix rows also carry `local_numeric_decision.policy =
+do_not_assign_project_local_ckm_values_for_working_spec_names`, so future
+readers can see that the project is deliberately waiting for published OASIS
+values instead of assigning local numbers that could collide later. These
+rows are intentional `mechanism_params_default.toml` omissions under the
+AGENTS.md §12 exception.
+
+The inverse discrepancy is also explicit: 119 mechanism names or aliases have
+published OASIS header values but are not named by the vendored working
+Markdown. Those rows are still official, represented mechanisms because the
+published headers provide concrete `CK_MECHANISM_TYPE` values and version
+metadata. The generated matrix marks them with
+`source_discrepancy_reason = oasis_published_header_not_in_working_markdown`
+instead of classifying them as implementation-only behavior.
+The mechanism rows also expose published-header annotations such as
+`Historical` and `Deprecated` per mechanism name/alias, so old-but-official
+2.40 mechanisms remain visible as official coverage rows without pretending
+the current working Markdown supplies modern workflow tables for them.
+
+Mechanism-info flag coverage is stricter than generic MockBackend workflow
+coverage. The generated matrix only marks a mechanism's expected
+`CK_MECHANISM_INFO` flags as source-grounded when the vendored OASIS sources
+provide workflow evidence for that mechanism or family. Mechanisms that lack
+that evidence remain represented in the official catalog when they have
+published values, but their flag rows carry `no_source_workflow_evidence`,
+`no_source_workflow_flags_available`, and a structured `source_gap_decision`
+with `policy =
+do_not_infer_ckf_flags_from_mechanism_name_or_header_presence`.
+
+The no-source rows are split by source-gap class. 119 are header-only
+mechanism names or aliases that are absent from the working Markdown, such as
+`CKM_BATON_KEY_GEN`. 2 are mechanisms named in working Markdown but lacking
+source workflow flags: `CKM_CAMELLIA_CTR` and `CKM_DES_CBC`. Both classes cite the
+specific Markdown/header evidence checked, which makes OASIS omissions visible
+instead of letting the simulator silently invent flags from names, legacy
+conventions, or broad synthetic workflow tests. MockBackend pins this as a
+tested zero-flag policy for representative mechanisms such as
+`CKM_BATON_KEY_GEN`, `CKM_CAMELLIA_CTR`, and `CKM_CAST5_CBC`; the gRPC daemon
+lane checks the same policy through client-to-backend transport, and the
+loaded-shim C ABI lane checks `C_GetMechanismInfo` for
+`CKM_BATON_KEY_GEN`, `CKM_CAMELLIA_CTR`, and `CKM_DES_CBC`, proving zero flags
+are written into caller-owned `CK_MECHANISM_INFO` stack structs without
+provider support. The semantic MockBackend constructor also has an exhaustive
+backend test that selects every official mechanism with zero source-grounded
+workflow flags and verifies each mechanism-bearing workflow rejects it with
+`CKR_MECHANISM_INVALID`.
+
+The mechanism matrix therefore separates broad MockBackend catalog smoke from
+source-grounded workflow semantics. `catalog_smoke_workflows` shows that an
+advertised official `CKM_*` value can traverse generic simulator paths without
+`CKR_MECHANISM_INVALID`. `source_grounded_workflows` is populated only when the
+OASIS source evidence also supports mechanism-specific workflow flags. For
+rows such as `CKM_BATON_KEY_GEN`, the catalog smoke remains useful but the
+semantic status stays `no_source_workflow_evidence`.
 
 ## Interfaces and intentional omissions
 
@@ -182,6 +400,118 @@ including nonblocking-only native slot waits, are in the
 | Validation | C_GetSessionValidationFlags | Full proxy path; deterministic MockBackend coverage | 3.2 interface; provider behavior depends on backend support |
 | Signature Verify | C_VerifySignatureInit, C_VerifySignature, C_VerifySignatureUpdate, C_VerifySignatureFinal | Full | 3.2 interface, proxied. No output buffer semantics. |
 
+## Mechanism Coverage
+
+### Modeled Mechanisms And MockBackend Inventory
+
+Mechanism parameter modeling is maintained in:
+
+- `crates/types/src/mechanism.rs` (`CkMechanismParams`, currently 79 variants);
+- `crates/proto/src/convert/message_params.rs` (three message-operation
+  parameter shapes);
+- `proto/pkcs11-proxy-ng/v1/mechanism_params.proto`;
+- `proto/pkcs11-proxy-ng/v1/types.proto`;
+- `crates/proto/src/convert/mechanism/*`;
+- `crates/types/src/mechanism_params_default.toml`;
+- `crates/types/src/mechanism_official.rs` (463 official v3.2 mechanism values,
+  checked against the vendored OASIS published headers).
+
+`MockBackend::with_default_mechanism_registry()` advertises every mechanism from
+the embedded mechanism registry.
+`MockBackend::with_official_mechanism_catalog_smoke()` advertises the generated
+463-entry official mechanism catalog, including mechanisms that no current
+provider artifact exposes, and keeps broad synthetic protocol coverage
+available for every published `CKM_*` value.
+`MockBackend::with_official_mechanisms()` advertises the same official catalog
+but rejects mechanism-bearing operations unless the requested workflow is
+backed by the mechanism's source-grounded `CK_MECHANISM_INFO` flags. The
+simulator returns synthetic, semantically shaped outputs; it does not claim
+cryptographic correctness.
+
+Working-spec mechanism names without published numeric values remain visible in
+the generated inventory but are not advertised by `MockBackend` until a
+published header value exists locally.
+
+Each generated mechanism-matrix row includes the published `CKM_*` value,
+aliases, version introduced, workflow columns, parameter structs, internal
+MockBackend catalog-smoke evidence, source-grounded MockBackend workflow
+evidence, the semantic MockBackend constructor, the workflow-enforcement test,
+exact-output simulator coverage evidence, provider artifact status, provider
+gap status, any explicit unsupported reason, and any source-discrepancy reason.
+The mechanism-row parameter struct list is source-local: it is populated only
+from nearby mechanism prose such as "provides the parameters to `CKM_*`" or
+explicit "has a parameter" statements, not from every `CK_*PARAMS` token in the
+same spec file. The separate parameter-shape matrix remains the full
+row-per-struct Rust/proto/FFI/shim coverage inventory.
+
+Provider-backed tests remain required for real cryptographic/provider behavior.
+The generated inventory marks provider gaps using `../pkcs11-check` artifacts
+but does not treat provider coverage as sufficient internal coverage. The
+current generated matrix distinguishes 463 unique published mechanism values
+from 479 official mechanism names/aliases. Provider artifacts cover 315 of
+those names/aliases and leave 164 names/aliases as provider gaps. Internal
+MockBackend coverage is reported separately from provider artifacts and cites
+the backend tests that advertise every official mechanism, run every official
+mechanism through the simulator's catalog-smoke workflows, and exercise exact
+size-query/data-query paths for byte-output, handle-output, and
+parameter-output workflows. The same matrix carries
+`workflow_semantics_status`, `semantic_constructor`,
+`source_grounded_workflow_enforcement_test`, `semantic_limitation`, and
+`source_grounded_workflows` so those broad smoke tests are not mistaken for
+OASIS-backed mechanism-specific semantics. It also cites negative
+catalog-semantics tests that reject unadvertised mechanisms and source-unsupported
+workflows on mechanism-bearing paths, so the all-official simulator catalog is
+both broad and explicit about semantic limits.
+
+### Parameterless Mechanisms (transparent proxy)
+
+CKM_RSA_PKCS, CKM_RSA_PKCS_KEY_PAIR_GEN, CKM_SHA256, CKM_AES_KEY_GEN, CKM_EC_KEY_PAIR_GEN, and all others without params.
+
+### FFI Reader Support Limits (2026-09-22)
+
+Shape-bound FFI readers bound what untrusted caller memory can drive
+(v0.2.0-T03; the nesting constant is mirrored on shim and backend sides):
+
+- **Nesting budget:** at most 16 nested mechanism nodes per mechanism
+  parameter (`MAX_NESTED_MECHANISMS`); the 17th nested node — and any
+  repeated active caller address (a reference cycle) — is rejected before
+  recursion;
+- **Copy caps:** whole-struct and raw-fallback copies are bounded by
+  `MAX_MECHANISM_PARAM_STRUCT_LEN` (65,536 bytes); embedded data payloads
+  (seed, label, AAD, IV, …) by `MAX_SERIALIZABLE_BYTES` (512 MiB
+  transport cap, ADR-0010);
+- **Extent arithmetic:** every variable-length read validates
+  count-fits-usize, count*stride overflow, cap/`isize::MAX` bounds, and
+  end-address wrap before constructing a slice. This checks arithmetic,
+  not mapping: embedded sub-pointers stay independent caller pointers
+  under the FFI readability contract and are not contained in
+  `ulParameterLen`;
+- **Alignment:** callers may pass arbitrarily aligned (including packed)
+  `CK_*` structs; readers copy via `read_unaligned` and never form
+  aligned references into caller memory (pinned by the `misaligned_*`
+  tests).
+
+Over-budget mechanism inputs fail with `CKR_MECHANISM_PARAM_INVALID` on
+both the shim readers and the backend typed conversion instead of
+truncating or guessing.
+
+## Exact Output Semantics (2026-04-04)
+
+The shim uses exact/raw output semantics for all output-bearing PKCS#11
+functions. The design requirement is **behavioral fidelity**: an application
+loading the shim `.so` must not be able to distinguish it from loading the
+real backend `.so` directly, except for network latency.
+
+### How It Works
+
+1. The shim sends the caller's exact buffer specification (NULL vs provided,
+   exact length) to the daemon via a dedicated gRPC RPC.
+2. The daemon passes the specification to the backend, which performs
+   **exactly one** PKCS#11 FFI call with those parameters.
+3. The shim writes back the exact result — `CK_RV`, returned length, and
+   bytes (when present) — without local reconstruction.
+
+### RPCs
 ## Mechanism coverage
 
 Parameter definitions and conversions live in:

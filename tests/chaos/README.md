@@ -11,6 +11,7 @@ Docker build context, which requires the checkout directory to be named
 `pkcs11-proxy-ng`.
 
 ```bash
+# 1. Build the chaos daemon image (one-time):
 # 1. Build the daemon image, consumer runner, and test module:
 docker build --build-arg ALPINE_BUILD_IMAGE=alpine:3.23@sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0 \
     -f packaging/alpine/Dockerfile.alpine \
@@ -37,6 +38,18 @@ docker compose -f tests/chaos/docker-compose.yml down -v
 
 | # | id | Description | Pass criteria |
 | --- | --- | --- | --- |
+| 1 | `backend_hang` | `SLOW_BACKEND_SIGN_DELAY_MS=120000` on C_Sign. | Shim returns CKR_FUNCTION_FAILED well under the hang (W1-L3-01: backend timeouts are outcome-ambiguous). Daemon stays alive. Future calls work once delay is dropped. |
+| 2 | `backend_oom` | Stub backend variant that returns CKR_HOST_MEMORY. | Health flips NOT_SERVING after `backend_health_consecutive_failures` consecutive failures. |
+| 3 | `sigstop_daemon` | SIGSTOP daemon for 60 s, then SIGCONT. | Shim's http2 keepalive trips; shim reconnects on next call; client_context_id may need re-init if lease expired. |
+| 4 | `disk_full_or_mid_write` | (a) chmod -w on daemon config dir + SIGHUP; (b) sed -i mid-write of mechanism_params.toml + SIGHUP. | Error logged, registry retained, daemon survives. |
+| 5 | `mid_write_configmap` | Same as 4(b), called out separately for visibility. | (subsumed in 4) |
+| 6 | `tls_cert_expiry` | mTLS with 60-s cert; run consumer 90 s. | Clear error returned to client post-expiry; daemon does not crash. Renewal documented in runbook. |
+
+Each scenario is a shell script in `scenarios/`. The scripts:
+- assume the fixture is already up (`docker compose ... up -d`)
+- set the relevant SLOW_BACKEND_* env vars and/or signal the daemon
+- drive a consumer-side probe
+- print PASS/FAIL with one line of evidence
 | 1 | `backend_hang` | Delay `C_Sign` for 120 seconds. | Shim returns `CKR_FUNCTION_FAILED` before the delayed call completes; daemon survives and later calls work after the delay is removed. A timed-out native call may still complete. |
 | 2 | `backend_oom` | Make backend calls return `CKR_HOST_MEMORY`. | Health becomes `NOT_SERVING` after `backend_health_consecutive_failures` consecutive failures. |
 | 3 | `sigstop_daemon` | Pause the daemon with `SIGSTOP`, then resume it with `SIGCONT`. | A call during the pause fails before the RPC deadline; a later call reconnects. A client context may need reinitialization if its lease expired. |

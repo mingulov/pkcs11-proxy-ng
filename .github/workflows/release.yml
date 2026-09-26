@@ -18,6 +18,8 @@
 # `release` environment) attaches both jobs' dist/ artifacts to the tag
 # release via the two softprops steps. Preparation and publication are
 # separate jobs so a reviewer must approve before anything publishes.
+# Repository prerequisite: create the `release` environment with required
+# reviewers and tag deployment restrictions before pushing a release tag.
 #
 # Security notes:
 #   - GITHUB_REF_NAME is read directly as a shell env var; no `${{ }}`
