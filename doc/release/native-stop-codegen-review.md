@@ -189,6 +189,7 @@ subset on the T10 tree (this commit) with the SAME toolchain as the
 original review (stable rustc 1.98.1 `48a229cea`, GNU objdump 2.46),
 so the bytes below are directly comparable.
 
+Source checklist (current `native_stop.rs`):
 Source checklist (`native_stop.rs` at this addendum's revision):
 
 - `core::arch::asm!` blocks: exactly 3 (x86_64 + i686 + aarch64;
@@ -252,6 +253,7 @@ an unlinked object). Native execution still impossible on x86_64
 hosts. VERDICT: pass (object-level; link + exec remain out of
 scope).
 
+Native execution (current tree):
 Native execution (the addendum's source revision):
 
 | Variant | Command | Result |
