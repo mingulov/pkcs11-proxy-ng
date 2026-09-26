@@ -58,6 +58,26 @@ harness_locate_nss32() {
         /opt/nss32-i386/usr/lib/i386-linux-gnu/libsoftokn3.so)"
 }
 
+# Fails before daemon startup when a provider has an unresolved dynamic
+# dependency. This keeps loader errors attributable to the extracted provider
+# closure instead of surfacing later as a generic module-load failure.
+harness_require_resolved_dependencies() {
+    local module="$1" label="${2:-$1}" output missing
+    if ! output="$(LC_ALL=C ldd "$module" 2>&1)"; then
+        echo "FAIL: $label: unable to inspect shared-library dependencies" >&2
+        echo "$output" >&2
+        return 1
+    fi
+
+    missing="$(grep -E '=>[[:space:]]+not found([[:space:]]|$)' <<<"$output" || true)"
+    if [[ -n "$missing" ]]; then
+        echo "FAIL: $label has unresolved shared-library dependencies:" >&2
+        echo "$missing" >&2
+        return 1
+    fi
+    echo "  dependency receipt: $label closure resolved"
+}
+
 # ── Workspace, token, cleanup ────────────────────────────────────────
 DAEMON_PID=""
 

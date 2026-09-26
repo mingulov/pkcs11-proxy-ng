@@ -139,6 +139,7 @@ if [[ $HAVE_I686 -eq 1 && -n "$SOFTHSM_MODULE_32" ]]; then
     SOFTHSM32_LIBDIR=$(dirname "$(dirname "$SOFTHSM_MODULE_32")")
     SOFTHSM32_SAVED_LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
     export LD_LIBRARY_PATH="$SOFTHSM32_LIBDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    harness_require_resolved_dependencies "$SOFTHSM_MODULE_32" "32-bit SoftHSM module"
     PORT=$(harness_pick_port)
     export PKCS11_PROXY_ENDPOINT="http://127.0.0.1:$PORT"
     harness_start_daemon target/i686-unknown-linux-gnu/debug/pkcs11-proxy-ng \
