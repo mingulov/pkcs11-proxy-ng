@@ -19,8 +19,6 @@ Build, test, and release scripts, with their callers. Paths are relative to
 
 The GitLab pipeline builds the Alpine and Amazon carrier images through their
 packaging Dockerfiles. GitHub's packaging smoke gate checks their source metadata.
-The freeze, receipt, tag, and publication sequence is in the
-[`0.x` beta release checklist](../doc/release/0.x-beta-release-checklist.md).
 
 ## Tools reached through other runners
 
