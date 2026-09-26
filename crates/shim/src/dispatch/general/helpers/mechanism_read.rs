@@ -442,6 +442,8 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                         nonce,
                         aad: aad.into(),
                         mac_len: ccm.ulMACLen as u64,
+                        nonce_null: ccm.pNonce.is_null(),
+                        aad_null: ccm.pAAD.is_null(),
                     }))
                 }
             }

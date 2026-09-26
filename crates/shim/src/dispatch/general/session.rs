@@ -3,7 +3,7 @@ use pkcs11_proxy_ng_client::MessageCallErrorOrigin;
 use pkcs11_proxy_ng_types::*;
 
 use super::helpers::{
-    catch_panics, rv_err, rv_ok, try_read_optional_bytes, unit_result_to_rv, with_client,
+    catch_panics, rv_err, rv_ok, try_read_credential_bytes, unit_result_to_rv, with_client,
     write_session_handle_output,
 };
 
@@ -103,7 +103,7 @@ pub unsafe extern "C" fn c_login(
             Some(ut) => ut,
             None => return rv_err(CkRv::USER_TYPE_INVALID),
         };
-        let pin = match unsafe { try_read_optional_bytes(p_pin, ul_pin_len) } {
+        let pin = match unsafe { try_read_credential_bytes(p_pin, ul_pin_len) } {
             Ok(pin) => pin,
             Err(e) => return rv_err(e),
         };

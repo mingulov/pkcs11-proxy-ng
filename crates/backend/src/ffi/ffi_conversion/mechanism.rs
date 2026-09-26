@@ -1319,9 +1319,11 @@ fn mechanism_to_ffi_at_depth(mechanism: &CkMechanism, depth: u8) -> CkResult<Ffi
         CkMechanismParams::Ccm(p) => {
             let mut nonce = Zeroizing::new(p.nonce.clone());
             let mut aad = p.aad.expose(|b| Zeroizing::new(b.to_vec()));
-            let nonce_ptr =
-                if nonce.is_empty() { std::ptr::null_mut() } else { nonce.as_mut_ptr() };
-            let aad_ptr = if aad.is_empty() { std::ptr::null_mut() } else { aad.as_mut_ptr() };
+            // Caller nullness wins over emptiness: an empty non-NULL buffer
+            // keeps a non-NULL pointer with len 0 (wolfpkcs11 rejects
+            // (ptr, 0) at Init but accepts (NULL, 0)).
+            let nonce_ptr = if p.nonce_null { std::ptr::null_mut() } else { nonce.as_mut_ptr() };
+            let aad_ptr = if p.aad_null { std::ptr::null_mut() } else { aad.as_mut_ptr() };
             let ccm = Box::new(cryptoki_sys::CK_CCM_PARAMS {
                 ulDataLen: narrow_wire_ulong(p.data_len)?,
                 pNonce: nonce_ptr,

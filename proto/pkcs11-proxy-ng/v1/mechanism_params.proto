@@ -101,6 +101,10 @@ message CcmParams {
   bytes nonce = 2;
   bytes aad = 3;
   uint64 mac_len = 4;
+  // True => caller passed (NULL, 0) for pNonce / pAAD. Preserves the
+  // (NULL, 0) vs (ptr, 0) distinction some backends enforce at Init.
+  bool nonce_null = 5;
+  bool aad_null = 6;
 }
 
 // CK_AES_CBC_ENCRYPT_DATA_PARAMS

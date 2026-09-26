@@ -13,6 +13,10 @@
 module = "/usr/lib/softhsm/libsofthsm2.so"
 
 [proxy]
+# v0.2 testing scope: one logical client in one trusted security domain.
+# Restart the daemon/provider before switching independent clients or domains.
+# This admission limit does not establish multi-client isolation.
+max_contexts = 1
 # Short timeouts so iteration loops surface failures fast.
 request_timeout_secs = 30
 startup_timeout_secs = 10

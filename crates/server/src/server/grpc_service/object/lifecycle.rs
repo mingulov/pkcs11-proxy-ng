@@ -1,15 +1,15 @@
 use tonic::{Request, Response, Status};
 
-use pkcs11_proxy_ng_types::CkRv;
+use pkcs11_proxy_ng_types::{CkAttribute, CkAttributeType, CkAttributeValue, CkRv};
 
 use super::super::super::context_manager::ClientContextId;
 use super::super::super::handle_map::VirtualHandle;
 use super::super::HandlerContext;
 use super::super::convert_template_opt;
 use super::super::service_utils::{
-    ck_rv_only, ensure_private_mint_allowed, object_is_private, register_session_object_handle,
-    resolve_session, resolve_session_and_object, spawn_backend, template_declares_private_object,
-    template_declares_token_object, template_has_private_attr,
+    backend_object_token_state, ck_rv_only, ensure_private_mint_allowed, object_is_private,
+    register_session_object_handle, resolve_session, resolve_session_and_object, spawn_backend,
+    template_declares_private_object, template_declares_token_object, template_has_private_attr,
 };
 
 pub(super) async fn create_object(
@@ -105,6 +105,28 @@ pub(super) async fn create_object(
     }
 }
 
+/// Only one explicitly encoded CK_BBOOL is reliable fallback evidence.
+/// Duplicate, absent, NULL, wrong-width, and non-boolean values remain unknown;
+/// the template itself is still forwarded verbatim for the provider to decide.
+fn explicit_copy_token_flag(template: &[CkAttribute]) -> Option<bool> {
+    let mut attributes = template.iter().filter(|attr| attr.attr_type == CkAttributeType::TOKEN);
+    let value = attributes.next()?.value.as_ref()?;
+    if attributes.next().is_some() {
+        return None;
+    }
+    match value {
+        CkAttributeValue::Bool(token) => Some(*token),
+        CkAttributeValue::Bytes(bytes) | CkAttributeValue::String(bytes) => {
+            bytes.expose(|raw| match raw {
+                [0] => Some(false),
+                [1] => Some(true),
+                _ => None,
+            })
+        }
+        _ => None,
+    }
+}
+
 pub(super) async fn copy_object(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::CopyObjectRequest>,
@@ -171,8 +193,7 @@ pub(super) async fn copy_object(
         }));
     }
 
-    // A copied object is a session object unless its template marks CKA_TOKEN (B2).
-    let is_token = template_declares_token_object(template_view);
+    let token_override = explicit_copy_token_flag(template_view);
     // The copy's privacy, computed before the template moves into the backend
     // call: template-declared when present (an explicit CKA_PRIVATE=False
     // makes a public copy even of a private source), else inherited from the
@@ -189,18 +210,31 @@ pub(super) async fn copy_object(
         spawn_backend(move || backend.copy_object(session, object, template.as_deref())).await?;
 
     match result {
-        Ok(new_object) => Ok(Response::new(pkcs11_proxy_ng_proto::CopyObjectResponse {
-            ck_rv: CkRv::OK.0,
-            new_object_handle: register_session_object_handle(
-                &ctx.context_manager,
-                &ctx_id,
-                virtual_session,
-                new_object,
-                is_token,
-                Some(new_is_private),
-            )
-            .await,
-        })),
+        Ok(new_object) => {
+            // Copy templates inherit omitted attributes; unlike creation, an
+            // absent CKA_TOKEN is not false. Classify the actual copied object
+            // so explicit overrides and discovered source handles work alike.
+            // Unknown metadata falls back only to a valid explicit CK_BBOOL.
+            // A positively observed false always wins over a true override.
+            // With neither evidence, retain conservative session ownership;
+            // never replace native success or lose the new virtual handle.
+            let is_token = backend_object_token_state(ctx, session, new_object)
+                .await
+                .or(token_override)
+                .unwrap_or(false);
+            Ok(Response::new(pkcs11_proxy_ng_proto::CopyObjectResponse {
+                ck_rv: CkRv::OK.0,
+                new_object_handle: register_session_object_handle(
+                    &ctx.context_manager,
+                    &ctx_id,
+                    virtual_session,
+                    new_object,
+                    is_token,
+                    Some(new_is_private),
+                )
+                .await,
+            }))
+        }
         Err(error) => Ok(Response::new(pkcs11_proxy_ng_proto::CopyObjectResponse {
             ck_rv: error.0,
             new_object_handle: 0,
@@ -713,5 +747,226 @@ mod tests {
             CkObjectHandle(0),
             "never-existed handles must keep the forward-0 semantic"
         );
+    }
+
+    #[tokio::test]
+    async fn copy_with_unknown_token_metadata_preserves_success_and_session_cleanup() {
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let session = mock.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+        let source = mock.create_object(session, Some(&[])).unwrap();
+        let manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        let id = manager.create_context(None).await.unwrap();
+        let slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
+        let (session_vh, source_vh) = manager
+            .get_context(&id, |c| {
+                let session_vh = c.register_session(BackendHandle(session.0), slot);
+                let source_vh = c.object_handles.insert(BackendHandle(source.0));
+                (session_vh, source_vh)
+            })
+            .await
+            .unwrap();
+        // This mock stores only the copy template. A storage-class result
+        // without TOKEN therefore returns ATTRIBUTE_TYPE_INVALID to the
+        // lifetime probe. It models the probe failure, not native inheritance
+        // (which is covered by the real SoftHSM integration regression).
+        let response = super::copy_object(
+            &HandlerContext::for_test(&manager, &backend),
+            Request::new(pkcs11_proxy_ng_proto::CopyObjectRequest {
+                client_context_id: id.0.clone(),
+                session_handle: session_vh.0,
+                object_handle: source_vh.0,
+                template: vec![pkcs11_proxy_ng_proto::Attribute {
+                    attr_type: CkAttributeType::CLASS.0,
+                    value: Some(pkcs11_proxy_ng_proto::attribute::Value::UlongValue(
+                        CkObjectClass::DATA.0,
+                    )),
+                }],
+                template_null: false,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(
+            response.ck_rv,
+            CkRv::OK.0,
+            "metadata failure must not replace native copy success"
+        );
+        assert_ne!(
+            response.new_object_handle, 0,
+            "successful copy must still return its virtual handle"
+        );
+        let copied = crate::server::handle_map::VirtualHandle(response.new_object_handle);
+        assert!(
+            manager.get_context(&id, |c| c.object_handles.resolve(copied).is_some()).await.unwrap()
+        );
+        let response = crate::server::grpc_service::session::close_session(
+            &HandlerContext::for_test(&manager, &backend),
+            Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
+                client_context_id: id.0.clone(),
+                session_handle: session_vh.0,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(response.ck_rv, CkRv::OK.0);
+        assert!(
+            manager.get_context(&id, |c| c.object_handles.resolve(copied).is_none()).await.unwrap(),
+            "unknown copied-object lifetime keeps conservative session cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn copied_token_metadata_failure_preserves_only_unambiguous_explicit_lifetime() {
+        use pkcs11_proxy_ng_proto::attribute::Value;
+        for (name, overrides, observed, survives) in [
+            ("bool true unreadable", vec![Value::BoolValue(true)], Err(CkRv::DEVICE_ERROR), true),
+            (
+                "byte true unreadable",
+                vec![Value::BytesValue(vec![1])],
+                Err(CkRv::DEVICE_ERROR),
+                true,
+            ),
+            (
+                "string true unreadable",
+                vec![Value::StringValue(String::from("\u{1}"))],
+                Err(CkRv::DEVICE_ERROR),
+                true,
+            ),
+            (
+                "string false unreadable",
+                vec![Value::StringValue(String::from("\0"))],
+                Err(CkRv::DEVICE_ERROR),
+                false,
+            ),
+            (
+                "bool false unreadable",
+                vec![Value::BoolValue(false)],
+                Err(CkRv::DEVICE_ERROR),
+                false,
+            ),
+            (
+                "byte false unreadable",
+                vec![Value::BytesValue(vec![0])],
+                Err(CkRv::DEVICE_ERROR),
+                false,
+            ),
+            (
+                "duplicate true unreadable",
+                vec![Value::BoolValue(true), Value::BoolValue(true)],
+                Err(CkRv::DEVICE_ERROR),
+                false,
+            ),
+            (
+                "conflicting unreadable",
+                vec![Value::BoolValue(true), Value::BoolValue(false)],
+                Err(CkRv::DEVICE_ERROR),
+                false,
+            ),
+            (
+                "empty bytes unreadable",
+                vec![Value::BytesValue(vec![])],
+                Err(CkRv::DEVICE_ERROR),
+                false,
+            ),
+            (
+                "wide bytes unreadable",
+                vec![Value::BytesValue(vec![1, 0])],
+                Err(CkRv::DEVICE_ERROR),
+                false,
+            ),
+            (
+                "nonboolean byte unreadable",
+                vec![Value::BytesValue(vec![2])],
+                Err(CkRv::DEVICE_ERROR),
+                false,
+            ),
+            ("ulong unreadable", vec![Value::UlongValue(1)], Err(CkRv::DEVICE_ERROR), false),
+            (
+                "observed false wins",
+                vec![Value::BoolValue(true)],
+                Ok(CkAttributeValue::Bool(false)),
+                false,
+            ),
+            (
+                "observed true wins",
+                vec![Value::BoolValue(false)],
+                Ok(CkAttributeValue::Bool(true)),
+                true,
+            ),
+        ] {
+            let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
+            let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+            let session = mock.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+            let other = mock.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+            let source = mock.create_object(session, Some(&[])).unwrap();
+            mock.set_attribute_read_override(CkAttributeType::TOKEN, observed);
+            let manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+            let id = manager.create_context(None).await.unwrap();
+            let slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
+            let (session_vh, source_vh) = manager
+                .get_context(&id, |c| {
+                    let session_vh = c.register_session(BackendHandle(session.0), slot);
+                    c.register_session(BackendHandle(other.0), slot);
+                    let source_vh = c.object_handles.insert(BackendHandle(source.0));
+                    (session_vh, source_vh)
+                })
+                .await
+                .unwrap();
+            let response = super::copy_object(
+                &HandlerContext::for_test(&manager, &backend),
+                Request::new(pkcs11_proxy_ng_proto::CopyObjectRequest {
+                    client_context_id: id.0.clone(),
+                    session_handle: session_vh.0,
+                    object_handle: source_vh.0,
+                    template: overrides
+                        .into_iter()
+                        .map(|value| pkcs11_proxy_ng_proto::Attribute {
+                            attr_type: CkAttributeType::TOKEN.0,
+                            value: Some(value),
+                        })
+                        .collect(),
+                    template_null: false,
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner();
+            assert_eq!(
+                response.ck_rv,
+                CkRv::OK.0,
+                "{name}: metadata must not replace native copy success"
+            );
+            let copied = crate::server::handle_map::VirtualHandle(response.new_object_handle);
+            assert_ne!(copied.0, 0, "{name}: native success must return a handle");
+            assert!(
+                manager
+                    .get_context(&id, |c| c.object_handles.resolve(copied).is_some())
+                    .await
+                    .unwrap(),
+                "{name}: copied handle must resolve before closing its session"
+            );
+            let response = crate::server::grpc_service::session::close_session(
+                &HandlerContext::for_test(&manager, &backend),
+                Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
+                    client_context_id: id.0.clone(),
+                    session_handle: session_vh.0,
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner();
+            assert_eq!(response.ck_rv, CkRv::OK.0);
+            assert_eq!(
+                manager
+                    .get_context(&id, |c| c.object_handles.resolve(copied).is_some())
+                    .await
+                    .unwrap(),
+                survives,
+                "{name}: virtual lifetime after closing creator with another session open"
+            );
+        }
     }
 }
