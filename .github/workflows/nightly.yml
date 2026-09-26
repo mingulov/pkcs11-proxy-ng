@@ -177,9 +177,13 @@ jobs:
           # the compat symlink; extract it beside the system instead.
           sudo dpkg --add-architecture i386
           sudo apt-get update -qq
-          apt-get download libsofthsm2:i386
+          # On Ubuntu 24.04 Noble, libssl supplies libcrypto and its provider
+          # modules. The installed multilib packages provide the libc closure.
+          apt-get download \
+            libsofthsm2:i386 libssl3t64:i386
           sudo mkdir -p /opt/softhsm2-i386
           sudo dpkg -x libsofthsm2_*i386.deb /opt/softhsm2-i386/
+          sudo dpkg -x libssl3t64_*i386.deb /opt/softhsm2-i386/
           # Second 32-bit provider leg (NSS i386): libsoftokn3 needs its
           # i386 closure (libnspr4 for libnspr4/libplc4/libplds4,
           # libsqlite3-0 for libsqlite3) extracted beside it, and the
