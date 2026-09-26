@@ -6234,7 +6234,7 @@ fn live_tier_wires_retained_oracle_and_sigterm() {
 }
 
 #[test]
-fn nightly_extracts_softhsm_i386_runtime_dependency_closure() {
+fn nightly_extracts_noble_softhsm_i386_runtime_dependency_closure() {
     let root = workspace_root();
     let nightly = fs::read_to_string(root.join(".github/workflows/nightly.yml"))
         .expect(".github/workflows/nightly.yml should be readable");
@@ -6247,16 +6247,10 @@ fn nightly_extracts_softhsm_i386_runtime_dependency_closure() {
         nightly.contains("dpkg -x libssl3t64_*i386.deb /opt/softhsm2-i386/"),
         "the i386 libssl/libcrypto package should be extracted beside SoftHSM"
     );
-    for package in ["zlib1g:i386", "libzstd1:i386", "openssl-provider-legacy:i386"] {
+    for newer_suite_package in ["zlib1g:i386", "libzstd1:i386", "openssl-provider-legacy:i386"] {
         assert!(
-            nightly.contains(package),
-            "the extracted i386 libssl package needs its {package} runtime dependency"
-        );
-    }
-    for archive in ["zlib1g_*i386.deb", "libzstd1_*i386.deb", "openssl-provider-legacy_*i386.deb"] {
-        assert!(
-            nightly.contains(&format!("dpkg -x {archive} /opt/softhsm2-i386/")),
-            "the i386 dependency archive {archive} should be extracted beside SoftHSM"
+            !nightly.contains(newer_suite_package),
+            "{newer_suite_package} is not part of the Ubuntu 24.04 Noble libssl closure"
         );
     }
 }

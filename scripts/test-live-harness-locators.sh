@@ -19,7 +19,8 @@
 #   * The 64/32 locators honour a pre-exported override as-is.
 #   * The 64/32 locators return 0 with a sane value ("" or a file).
 #   * Dependency closure validation accepts resolved modules and rejects a
-#     missing shared object with the unresolved name in its diagnostic.
+#     missing shared object with the unresolved name in its diagnostic, and
+#     reports an `ldd` inspection failure without accepting the module.
 #
 # Pure shell, no tooling needed: safe in the live tier everywhere.
 
@@ -77,7 +78,10 @@ mkdir -p "$TDIR/bin"
 touch "$TDIR/module.so"
 cat > "$TDIR/bin/ldd" <<'EOF'
 #!/usr/bin/env bash
-if [[ "${HARNESS_TEST_LDD_MODE:-resolved}" == "missing" ]]; then
+if [[ "${HARNESS_TEST_LDD_MODE:-resolved}" == "error" ]]; then
+    echo "synthetic ldd inspection failure" >&2
+    exit 1
+elif [[ "${HARNESS_TEST_LDD_MODE:-resolved}" == "missing" ]]; then
     cat <<'OUTPUT'
 libcrypto.so.3 => not found
 libstdc++.so.6 => /lib/libstdc++.so.6 (0xf00)
@@ -103,6 +107,16 @@ if PATH="$TDIR/bin:$PATH" HARNESS_TEST_LDD_MODE=missing \
 fi
 grep -q "libcrypto.so.3 => not found" "$TDIR/missing.out"
 echo "ok: unresolved dependency closure rejected with diagnostic"
+
+if PATH="$TDIR/bin:$PATH" HARNESS_TEST_LDD_MODE=error \
+    harness_require_resolved_dependencies "$TDIR/module.so" "test module" \
+    >"$TDIR/error.out" 2>&1; then
+    echo "FAIL: failed dependency inspection was accepted" >&2
+    exit 1
+fi
+grep -q "unable to inspect shared-library dependencies" "$TDIR/error.out"
+grep -q "synthetic ldd inspection failure" "$TDIR/error.out"
+echo "ok: failed dependency inspection rejected with diagnostic"
 
 echo
 echo "LOCATORS PASS"
