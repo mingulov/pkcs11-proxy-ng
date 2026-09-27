@@ -72,7 +72,8 @@ def _normal_ids(metadata: dict, root_name: str) -> tuple[dict, dict, set[str]]:
 
 
 def validate_metadata(metadata: dict, unpack: Path, root_name: str,
-                      version: str, mode: str) -> dict:
+                      version: str, mode: str,
+                      runtime_features: dict[str, set[str]] | None = None) -> dict:
     """Reject source leaks and thin-root server features in Cargo's resolved graph."""
     require(mode in ("archive", "registry"), "unknown consumer source mode")
     packages, nodes, reachable = _normal_ids(metadata, root_name)
@@ -97,7 +98,8 @@ def validate_metadata(metadata: dict, unpack: Path, root_name: str,
         if root_name in THIN:
             require(name not in FORBIDDEN_PACKAGES, f"{root_name} includes server package {name}")
             forbidden = FORBIDDEN_FEATURES.get(name, set())
-            active = set(nodes[item].get("features", []))
+            active = (runtime_features.get(name, set()) if runtime_features is not None
+                      else set(nodes[item].get("features", [])))
             require(not (active & forbidden),
                     f"{root_name} enables server-only {name} features {sorted(active & forbidden)}")
     require(root_name in observed, f"{root_name} not in resolved graph")
@@ -131,6 +133,21 @@ def _environment(root: Path, cargo_home: Path) -> dict:
 def _metadata(cwd: Path, env: dict, toolchain: str, config: list[str]) -> dict:
     output = _run(_cargo(toolchain, *config, "metadata", "--format-version", "1", "--locked"), cwd, env)
     return json.loads(output)
+
+
+def _runtime_features(cwd: Path, env: dict, toolchain: str, config: list[str],
+                      root_name: str) -> dict[str, set[str]]:
+    output = _run(_cargo(toolchain, *config, "tree", "--locked", "-p", root_name,
+                         "-e", "normal,build", "--prefix", "none", "-f", "{p}|{f}"),
+                  cwd, env)
+    features: dict[str, set[str]] = {}
+    for line in output.splitlines():
+        package, marker, enabled = line.partition("|")
+        require(marker == "|" and " v" in package, f"invalid Cargo runtime tree line: {line}")
+        name = package.split(" v", 1)[0]
+        features.setdefault(name, set()).update(enabled.removesuffix(" (*)").split(",") if enabled else ())
+    require(root_name in features, f"runtime feature tree misses {root_name}")
+    return features
 
 
 def _patches(roots: dict[str, Path], root_name: str, locked: set[str]) -> list[str]:
@@ -176,8 +193,11 @@ def _root_check(name: str, roots: dict[str, Path], base: Path, env: dict,
         _seed_lock(root / "Cargo.lock", root / "Cargo.lock", external, version, hashes,
                    locked_internal)
     graph = _metadata(root, env, toolchain, config)
+    runtime_features = (_runtime_features(root, env, toolchain, config, name)
+                        if name in THIN else None)
     result = validate_metadata(graph, base / "unpacked", name, version,
-                               "registry" if registry else "archive")
+                               "registry" if registry else "archive",
+                               runtime_features=runtime_features)
     if registry:
         require((root / "Cargo.lock").read_bytes() == (base / "original-locks" / f"{name}.lock").read_bytes(),
                 f"{name} packaged registry lock changed")
