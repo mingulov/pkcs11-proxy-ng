@@ -12,7 +12,12 @@ then proves real provider operations through them:
   provider-backed session via the shipped ``cross_width_smoke.exe``,
   which needs a live configured daemon/provider and scratch token.
 * ``apk-verify``: check the exact Alpine APK set members (own licenses,
-  upstream notices/inventory/provenance/materials).
+  upstream notices/inventory/provenance/materials) and record the
+  sha256 of each binary payload (``--hash-output``) as the reference
+  for install-fidelity comparison.
+* ``installed-verify``: hash the installed daemon/shim/CLI binaries
+  and compare against the ``apk-verify`` reference, refusing any
+  mismatch (proves the install delivered the verified payload bytes).
 * ``installed-smoke``: run the provider-operation flow against explicit
   installed daemon/shim/CLI paths (the Alpine installed lane).
 
@@ -27,8 +32,10 @@ slot discovery, login, RSA-2048 key generation, SHA256-RSA-PKCS sign
 with a non-trivial signature size check.
 
 Daemon lifecycle, SoftHSM provisioning, and ZIP safety helpers are
-reused from scripts/ci-direct-vs-proxy.py; the Windows SoftHSM archive
-pin below must stay identical to that helper's pin.
+reused from scripts/ci-direct-vs-proxy.py. Hash enforcement for the
+Windows SoftHSM archive lives solely in that helper's
+provision_softhsm_windows; this module keeps no separate verifier, only
+a drift-checked mirror of the pin below.
 """
 
 from __future__ import annotations
@@ -45,6 +52,8 @@ import sys
 import tarfile
 from pathlib import Path
 
+# Drift-checked mirror of the pin enforced by provision_softhsm_windows
+# (the single enforcement point); not enforced here.
 SOFTHSM_WIN_SHA256 = "85273BCC1A6B90E877F7BB4F7E90221D57103D8F5241D154A79DD730A135B910"
 
 DAEMON_LOG_TCP_WARN = "listening on tcp without authentication"
@@ -62,6 +71,15 @@ APK_NOTICE_MEMBERS = (
     "build-provenance.json",
     "license-material/ring-0.17.14/licenses/LICENSE",
     "license-material/rust-std/COPYRIGHT-library.html",
+)
+# Installed-binary payload each APK must deliver (APKBUILD install
+# paths, matched by suffix inside the APK tar). The sha256 of these
+# payload bytes is the install-fidelity reference: installed-verify
+# compares the on-disk installed files against it.
+APK_BINARY_MEMBERS = (
+    ("daemon", "pkcs11-proxy-ng-daemon", "usr/bin/pkcs11-proxy-ng"),
+    ("shim", "pkcs11-proxy-ng-shim", "usr/lib/pkcs11/libpkcs11_proxy_ng_shim.so"),
+    ("cli", "pkcs11-proxy-ng-cli", "usr/bin/pkcs11-proxy-ng-cli"),
 )
 
 
@@ -114,15 +132,6 @@ def sha256_file(path):
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def verify_softhsm_zip(zip_path):
-    """Refuse a Windows SoftHSM archive whose hash differs from the pin."""
-    require_file(zip_path, "SoftHSM Windows archive")
-    digest = sha256_file(zip_path).upper()
-    if digest != SOFTHSM_WIN_SHA256:
-        raise SystemExit(f"SoftHSM zip hash mismatch: {digest}")
-    return digest
 
 
 def provider_operation_chain():
@@ -404,8 +413,36 @@ def apk_members(apk_path):
         raise SystemExit(f"cannot list APK members {apk_path}: {exc}") from exc
 
 
-def verify_apk_set(apk_dir):
-    """Check the exact four-APK set and their notice/provenance carriage."""
+def apk_payload_bytes(apk_path, suffix):
+    """Return ``(member_name, raw_bytes)`` for one payload member of an APK.
+
+    Refuses a missing or ambiguous payload so a repackaged APK cannot
+    silently drop or duplicate the installed binary.
+    """
+    require_file(apk_path, "APK file")
+    try:
+        with tarfile.open(apk_path, "r:gz") as archive:
+            candidates = [m for m in archive.getmembers()
+                          if m.isfile() and (m.name == suffix or m.name.endswith("/" + suffix))]
+            if len(candidates) != 1:
+                raise SystemExit(f"{apk_path} has {len(candidates)} payload members"
+                                 f" matching {suffix}; expected exactly one")
+            member = candidates[0]
+            extracted = archive.extractfile(member)
+            if extracted is None:
+                raise SystemExit(f"{apk_path} payload {member.name} is unreadable")
+            return member.name, extracted.read()
+    except tarfile.TarError as exc:
+        raise SystemExit(f"cannot read APK payload {apk_path}: {exc}") from exc
+
+
+def verify_apk_set(apk_dir, hash_output=None):
+    """Check the exact four-APK set and their notice/provenance carriage.
+
+    When ``hash_output`` is given, additionally hash each binary payload
+    from the APK tars and write the ``{role: {package, member, sha256}}``
+    reference JSON there for ``installed-verify`` to compare against.
+    """
     apk_dir = require_dir(apk_dir, "APK directory")
     hits = {}
     for package in APK_PACKAGES:
@@ -422,7 +459,57 @@ def verify_apk_set(apk_dir):
             if not any(member.endswith(required) for member in members):
                 raise SystemExit(f"{apk_path.name} lacks packaged member {required}")
     log(f"APK set verified: {len(hits)} packages with notices/provenance/materials")
+    if hash_output is None:
+        return {name: str(path) for name, path in hits.items()}
+    reference = {}
+    for role, package, suffix in APK_BINARY_MEMBERS:
+        member, payload = apk_payload_bytes(str(hits[package]), suffix)
+        digest = hashlib.sha256(payload).hexdigest()
+        reference[role] = {"package": package, "member": member, "sha256": digest}
+        log(f"payload hash {role} ({package}:{member}): {digest}")
+    with open(hash_output, "w", encoding="utf-8") as handle:
+        json.dump({"binaries": reference}, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    log(f"payload hashes recorded at {hash_output}")
     return {name: str(path) for name, path in hits.items()}
+
+
+def verify_installed_hashes(daemon, shim, cli, expected_path, record_path=None):
+    """Hash the installed binaries and compare against the APK payload reference.
+
+    Refuses any mismatch (proves the install delivered the verified
+    payload bytes). When ``record_path`` is given, writes the installed
+    ``{role: {path, sha256}}`` hashes there as job evidence. Returns the
+    installed hashes.
+    """
+    daemon = require_executable(daemon, "installed daemon binary")
+    shim = require_file(shim, "installed shim library")
+    cli = require_executable(cli, "installed CLI binary")
+    require_file(expected_path, "expected payload hashes")
+    try:
+        expected = json.loads(Path(expected_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError) as exc:
+        raise SystemExit(f"cannot read payload hashes {expected_path}: {exc}") from exc
+    if not isinstance(expected, dict) or not isinstance(expected.get("binaries"), dict):
+        raise SystemExit(f"payload hashes have no binary inventory: {expected_path}")
+    installed = {"daemon": daemon, "shim": shim, "cli": cli}
+    checked = {}
+    for role, path in installed.items():
+        record = expected["binaries"].get(role)
+        if not isinstance(record, dict) or not record.get("sha256"):
+            raise SystemExit(f"payload hashes lack a reference for {role}: {expected_path}")
+        digest = sha256_file(path)
+        if digest != record["sha256"]:
+            raise SystemExit(f"installed {role} hash differs from APK payload:"
+                             f" {path} ({digest} != {record['sha256']})")
+        checked[role] = {"path": path, "sha256": digest}
+        log(f"installed hash {role} ({path}): {digest} matches payload")
+    if record_path is not None:
+        with open(record_path, "w", encoding="utf-8") as handle:
+            json.dump({"binaries": checked}, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        log(f"installed hashes recorded at {record_path}")
+    return checked
 
 
 def cmd_linux_bundle(args):
@@ -458,7 +545,12 @@ def cmd_windows_bundle(args):
 
 
 def cmd_apk_verify(args):
-    return verify_apk_set(args.apk_dir)
+    return verify_apk_set(args.apk_dir, hash_output=args.hash_output)
+
+
+def cmd_installed_verify(args):
+    return verify_installed_hashes(args.daemon, args.shim, args.cli,
+                                   args.expected_hashes, record_path=args.record_out)
 
 
 def cmd_installed_smoke(args):
@@ -471,26 +563,31 @@ def parse_args(argv=None):
     linux = commands.add_parser("linux-bundle")
     linux.add_argument("--bundle", required=True)
     linux.add_argument("--workdir", required=True)
-    linux.add_argument("--slot", type=int, default=0)
     windows = commands.add_parser("windows-bundle")
     windows.add_argument("--bundle", required=True)
     windows.add_argument("--workdir", required=True)
-    windows.add_argument("--slot", type=int, default=0)
     apk = commands.add_parser("apk-verify")
     apk.add_argument("--apk-dir", required=True)
+    apk.add_argument("--hash-output", default=None)
+    verify = commands.add_parser("installed-verify")
+    verify.add_argument("--daemon", required=True)
+    verify.add_argument("--shim", required=True)
+    verify.add_argument("--cli", required=True)
+    verify.add_argument("--expected-hashes", required=True)
+    verify.add_argument("--record-out", default=None)
     installed = commands.add_parser("installed-smoke")
     installed.add_argument("--daemon", required=True)
     installed.add_argument("--shim", required=True)
     installed.add_argument("--cli", required=True)
     installed.add_argument("--workdir", required=True)
-    installed.add_argument("--slot", type=int, default=0)
     return parser.parse_args(argv)
 
 
 def main(argv=None):
     args = parse_args(argv)
     handlers = {"linux-bundle": cmd_linux_bundle, "windows-bundle": cmd_windows_bundle,
-                "apk-verify": cmd_apk_verify, "installed-smoke": cmd_installed_smoke}
+                "apk-verify": cmd_apk_verify, "installed-verify": cmd_installed_verify,
+                "installed-smoke": cmd_installed_smoke}
     handlers[args.command](args)
     return 0
 

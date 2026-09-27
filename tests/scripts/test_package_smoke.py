@@ -71,6 +71,27 @@ class ExplicitPathTests(unittest.TestCase):
             mod.parse_args(["windows-bundle"])
         self.assertNotEqual(ctx.exception.code, 0)
 
+    def test_installed_verify_needs_expected_hashes(self):
+        with self.assertRaises(SystemExit) as ctx:
+            mod.parse_args(["installed-verify", "--daemon", "d",
+                            "--shim", "s", "--cli", "c"])
+        self.assertNotEqual(ctx.exception.code, 0)
+
+    def test_slot_option_removed(self):
+        # The smokes address the scratch token by label, never by slot
+        # number; --slot was dead CLI surface and must stay rejected.
+        cases = [
+            ["linux-bundle", "--bundle", "b", "--workdir", "w", "--slot", "1"],
+            ["windows-bundle", "--bundle", "b", "--workdir", "w", "--slot", "1"],
+            ["installed-smoke", "--daemon", "d", "--shim", "s", "--cli", "c",
+             "--workdir", "w", "--slot", "1"],
+        ]
+        for argv in cases:
+            with self.subTest(argv=argv):
+                with self.assertRaises(SystemExit) as ctx:
+                    mod.parse_args(argv)
+                self.assertNotEqual(ctx.exception.code, 0)
+
     def test_missing_binary_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
             missing = os.path.join(tmp, "no-such-daemon")
@@ -166,13 +187,23 @@ class WindowsProvisioningTests(unittest.TestCase):
         compare = load_compare()
         self.assertEqual(mod.SOFTHSM_WIN_SHA256, compare.SOFTHSM_WIN_SHA256)
 
-    def test_hash_mismatch_refused(self):
+    def test_no_duplicate_softhsm_verifier(self):
+        # Single enforcement point: provision_softhsm_windows in the
+        # compare helper. This module must not grow its own verifier.
+        self.assertFalse(hasattr(mod, "verify_softhsm_zip"))
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertNotIn("def verify_softhsm_zip", source)
+        self.assertIn("provision_softhsm_windows", source)
+
+    def test_hash_mismatch_refused_by_enforcement_point(self):
+        compare = load_compare()
         with tempfile.TemporaryDirectory() as tmp:
-            zpath = os.path.join(tmp, "softhsm2.zip")
-            with zipfile.ZipFile(zpath, "w") as zf:
-                zf.writestr("SoftHSM2/lib/x.dll", b"fake")
-            with self.assertRaises(SystemExit):
-                mod.verify_softhsm_zip(zpath)
+            def fake_download(url, dest):
+                Path(dest).write_bytes(b"not-the-pinned-zip")
+            with mock.patch.object(compare, "download_file",
+                                   side_effect=fake_download):
+                with self.assertRaises(SystemExit):
+                    compare.provision_softhsm_windows(tmp)
 
     def test_cross_width_smoke_requires_live_daemon(self):
         # The DLL check is not standalone: it needs an endpoint plus a
@@ -214,18 +245,52 @@ class ApkSetTests(unittest.TestCase):
         self.apk_dir = Path(self.temp.name) / "apk" / "x86_64"
         self.apk_dir.mkdir(parents=True)
 
-    def make_apk(self, package, members, release="0.2.0-r0"):
+    PAYLOAD_FIXTURES = {
+        "pkcs11-proxy-ng-shim": ("usr/lib/pkcs11/libpkcs11_proxy_ng_shim.so",
+                                 b"shim-payload-bytes"),
+        "pkcs11-proxy-ng-daemon": ("usr/bin/pkcs11-proxy-ng",
+                                   b"daemon-payload-bytes"),
+        "pkcs11-proxy-ng-cli": ("usr/bin/pkcs11-proxy-ng-cli",
+                                b"cli-payload-bytes"),
+    }
+
+    def make_apk(self, package, members, release="0.2.0-r0", contents=None):
         import io
         import tarfile
 
+        contents = contents or {}
         path = self.apk_dir / f"{package}-{release}.apk"
         with tarfile.open(path, "w:gz") as archive:
             for member in members:
-                data = b"material"
+                data = contents.get(member, b"material")
                 info = tarfile.TarInfo(member)
                 info.size = len(data)
                 archive.addfile(info, io.BytesIO(data))
         return path
+
+    def make_full_set(self):
+        for package in mod.APK_PACKAGES:
+            if package == "pkcs11-proxy-ng-compat":
+                self.make_apk(package, [".PKGINFO"])
+                continue
+            member, payload = self.PAYLOAD_FIXTURES[package]
+            members = [m.format(pkg=package) for m in self.LICENSED_MEMBERS]
+            members.append(member)
+            self.make_apk(package, members, contents={member: payload})
+
+    def make_installed(self, tamper_role=None):
+        installed = {}
+        for package, (member, payload) in self.PAYLOAD_FIXTURES.items():
+            role = {"pkcs11-proxy-ng-shim": "shim",
+                    "pkcs11-proxy-ng-daemon": "daemon",
+                    "pkcs11-proxy-ng-cli": "cli"}[package]
+            path = Path(self.temp.name) / f"installed-{role}"
+            data = b"tampered-installed-bytes" if role == tamper_role else payload
+            path.write_bytes(data)
+            if role in ("daemon", "cli"):
+                os.chmod(path, 0o755)
+            installed[role] = str(path)
+        return installed
 
     def test_matching_set_verifies(self):
         for package in mod.APK_PACKAGES:
@@ -258,6 +323,78 @@ class ApkSetTests(unittest.TestCase):
         self.make_apk("pkcs11-proxy-ng-shim", members, release="0.2.0-r1")
         with self.assertRaises(SystemExit):
             mod.verify_apk_set(str(self.apk_dir.parent))
+
+    def test_payload_hashes_recorded_from_apk_bytes(self):
+        self.make_full_set()
+        reference = Path(self.temp.name) / "payload-hashes.json"
+        mod.verify_apk_set(str(self.apk_dir.parent), hash_output=str(reference))
+        recorded = json.loads(reference.read_text(encoding="utf-8"))["binaries"]
+        self.assertEqual(set(recorded), {"daemon", "shim", "cli"})
+        for package, (member, payload) in self.PAYLOAD_FIXTURES.items():
+            role = {"pkcs11-proxy-ng-shim": "shim",
+                    "pkcs11-proxy-ng-daemon": "daemon",
+                    "pkcs11-proxy-ng-cli": "cli"}[package]
+            with self.subTest(role=role):
+                self.assertEqual(recorded[role]["package"], package)
+                self.assertEqual(recorded[role]["member"], member)
+                self.assertEqual(recorded[role]["sha256"],
+                                 hashlib.sha256(payload).hexdigest())
+
+    def test_installed_hashes_match_pass(self):
+        self.make_full_set()
+        reference = Path(self.temp.name) / "payload-hashes.json"
+        mod.verify_apk_set(str(self.apk_dir.parent), hash_output=str(reference))
+        installed = self.make_installed()
+        record = Path(self.temp.name) / "installed-hashes.json"
+        checked = mod.verify_installed_hashes(
+            installed["daemon"], installed["shim"], installed["cli"],
+            str(reference), record_path=str(record))
+        self.assertEqual(set(checked), {"daemon", "shim", "cli"})
+        evidence = json.loads(record.read_text(encoding="utf-8"))["binaries"]
+        for role, payload in (("daemon", b"daemon-payload-bytes"),
+                              ("shim", b"shim-payload-bytes"),
+                              ("cli", b"cli-payload-bytes")):
+            with self.subTest(role=role):
+                self.assertEqual(evidence[role]["sha256"],
+                                 hashlib.sha256(payload).hexdigest())
+                self.assertEqual(evidence[role]["path"], installed[role])
+
+    def test_tampered_installed_binary_refused(self):
+        self.make_full_set()
+        reference = Path(self.temp.name) / "payload-hashes.json"
+        mod.verify_apk_set(str(self.apk_dir.parent), hash_output=str(reference))
+        for role in ("daemon", "shim", "cli"):
+            with self.subTest(role=role):
+                installed = self.make_installed(tamper_role=role)
+                with self.assertRaises(SystemExit):
+                    mod.verify_installed_hashes(
+                        installed["daemon"], installed["shim"], installed["cli"],
+                        str(reference))
+
+    def test_missing_payload_member_refused(self):
+        # License-only APKs verify without a reference, but recording
+        # payload hashes must refuse a set whose binaries are absent.
+        for package in mod.APK_PACKAGES:
+            if package == "pkcs11-proxy-ng-compat":
+                self.make_apk(package, [".PKGINFO"])
+            else:
+                self.make_apk(package, [m.format(pkg=package) for m in self.LICENSED_MEMBERS])
+        reference = Path(self.temp.name) / "payload-hashes.json"
+        with self.assertRaises(SystemExit):
+            mod.verify_apk_set(str(self.apk_dir.parent), hash_output=str(reference))
+
+    def test_missing_reference_role_refused(self):
+        self.make_full_set()
+        reference = Path(self.temp.name) / "payload-hashes.json"
+        mod.verify_apk_set(str(self.apk_dir.parent), hash_output=str(reference))
+        trimmed = json.loads(reference.read_text(encoding="utf-8"))
+        del trimmed["binaries"]["cli"]
+        reference.write_text(json.dumps(trimmed))
+        installed = self.make_installed()
+        with self.assertRaises(SystemExit):
+            mod.verify_installed_hashes(
+                installed["daemon"], installed["shim"], installed["cli"],
+                str(reference))
 
 
 class TarballTests(unittest.TestCase):
