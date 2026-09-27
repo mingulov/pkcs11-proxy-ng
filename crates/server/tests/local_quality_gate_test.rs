@@ -936,20 +936,15 @@ fn ci_locked_builds_match_documented_gate_set() {
 
 #[test]
 fn release_receipt_path_is_version_parameterized() {
-    // W1-L17-02: the G-3 receipt step derives the receipt path (and the
-    // tag-delta allowlist) from the tag version, so a new version needs no
-    // workflow edit. Behavioral proof lives in
-    // scripts/test-verify-quality-receipt.sh (v0.3.0 fixtures); this pins
-    // the parameterization statically per-PR.
+    // W1-L17-02: the shared helper owns receipt path and delta checks.
+    // scripts/test-verify-quality-receipt.sh exercises its version fixtures.
     let root = workspace_root();
     let release = fs::read_to_string(root.join(".github/workflows/release.yml"))
         .expect(".github/workflows/release.yml should be readable");
-    let step = workflow_step_body(&release, "Verify quality receipt");
     assert!(
-        step.contains("GITHUB_REF_NAME"),
-        "receipt step should derive the receipt path from the tag version"
+        release.contains("      - name: Verify quality receipt\n        run: scripts/verify-quality-receipt.sh \"$GITHUB_REF_NAME\""),
+        "release workflow should invoke the shipped receipt guard"
     );
-    assert!(!step.contains("v0.2.0"), "receipt step should not hardcode a release version");
 }
 
 #[test]
