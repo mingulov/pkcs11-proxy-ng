@@ -12,6 +12,18 @@
 #   cargo build         — compilation gate (all workspace crates)
 #   cargo test          — unit + integration tests that don't require #[ignore]
 #   cargo clippy        — linting gate for all targets/features (-D warnings)
+#   package candidate   — all-eight source archives + inventory + MSRV consumer
+#   archive binaries    — archive-mode Linux/Windows builds + notices + bundles
+#   artifact smokes     — Alpine APK install/sign, extracted Linux/Windows
+#                         bundle provider-operation smokes (exact paths only)
+#   ci-success          — fail-closed aggregate over every required job above
+#
+# Stage B (Task 5a): this workflow is reusable (workflow_call) so
+# publication runs execute the identical required gate set as PRs. The
+# APK build/install/sign and extracted-bundle runtime checks run on
+# every PR and every publication run; see scripts/ci-package-smoke.py.
+# Full Amazon RPM build/install remains outside this gate (see the
+# smoke-apk-alpine job notes).
 #
 # Supply-chain pinning (W1-L16-09/10/13): every third-party action below is
 # pinned to a commit SHA (trailing `# <tag>` records the tag it was taken
@@ -33,11 +45,18 @@ on:
     branches: ["main", "dev"]
   pull_request:
   workflow_dispatch:
+  # Stage B: publication workflows invoke the full required gate set via
+  # workflow_call; the same jobs run for PR and publication calls (no
+  # job gates on the event name except the always() aggregate).
+  workflow_call:
 
 # W1-L17-20: superseded PR runs cancel instead of queueing full matrices
 # behind them; main/dev pushes are never cancelled.
+# Stage B: the `ci-` namespace keeps a reusable invocation from
+# conflicting with its caller (publication workflows use their own
+# `publish-`/`release-` namespaces).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -138,8 +157,11 @@ jobs:
   # (.gitlab-ci.yml header records the split); this job is the fast per-PR
   # signal — version-mirror agreement plus APKBUILD/spec shape — so
   # packaging regressions fail on the PR, not in external GitLab.
-  # Checkout + bash only (the smoke reads Cargo.toml directly, needs no
-  # Rust toolchain).
+  # Stage B adds GitHub carrier testing alongside (not instead of) this
+  # gate and the GitLab matrix: the smoke-apk-alpine job builds the
+  # Alpine APKs and runs an installed provider smoke; this mirror/syntax
+  # gate stays. Checkout + bash only (the smoke reads Cargo.toml
+  # directly, needs no Rust toolchain).
   packaging-smoke:
     name: Packaging smoke
     runs-on: ubuntu-24.04
@@ -188,7 +210,9 @@ jobs:
           done
           # From scripts/ so the `# shellcheck source=lib/...`
           # annotations resolve under -x (follow-sources).
-          ( cd scripts && shellcheck -x $(find . -name '*.sh' | sort) )
+          # SC2046: quoted array — the file list cannot word-split.
+          mapfile -t shell_files < <(cd scripts && find . -name '*.sh' | sort)
+          ( cd scripts && shellcheck -x "${shell_files[@]}" )
 
   # ── Tier 0c: build, test, clippy ──────────────────────────────────────────
   build-and-test:
@@ -442,7 +466,10 @@ jobs:
         # redirect resolving rustc's explicit -lgcc_s, which the
         # musl-gcc wrapper cannot resolve on its own.
         run: |
-          export RUSTFLAGS="$(scripts/musl-dynamic-link-flags.sh "$RUNNER_TEMP/musl-dynamic-link")"
+          # SC2155: separate assignment/export so a failing flag
+          # generator propagates instead of being masked by export.
+          RUSTFLAGS="$(scripts/musl-dynamic-link-flags.sh "$RUNNER_TEMP/musl-dynamic-link")"
+          export RUSTFLAGS
           echo "dynamic RUSTFLAGS: $RUSTFLAGS"
           cargo build --locked --release --target x86_64-unknown-linux-musl \
             -p pkcs11-proxy-ng-shim -p pkcs11-proxy-ng
@@ -474,3 +501,445 @@ jobs:
           # musl-dynamic daemon cannot (no musl loader here).
           "$MUSL_RELEASE/../static-save/pkcs11-proxy-ng" --version
           "$MUSL_RELEASE/pkcs11-proxy-ng-cli" --version
+
+  # ── Tier 0h: source package candidate (archives + inventory + consumer) ─────
+  # Stage B: packages all eight crates from the clean checkout with the
+  # release compiler, verifies archive identity/inventory, and runs the
+  # MSRV archive-consumer gates. The uploaded candidate artifact is the
+  # only source-bound input downstream binary/smoke jobs may consume —
+  # no shared or untrusted cache of candidate .crate files is used.
+  # Compilation coverage comes from the consumer gate plus the
+  # archive-binary jobs below, so packaging itself runs --no-verify.
+  package-candidate:
+    name: Package candidate (archives + consumer)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    needs: fmt
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      # Both Cargo directories are isolated (the runner context is not
+      # available in job-level env, so the temp-based paths are exported
+      # here): the global build.build-dir config makes isolating the
+      # target dir alone insufficient.
+      - name: Isolate Cargo build and target directories
+        run: |
+          set -euo pipefail
+          echo "CARGO_BUILD_BUILD_DIR=$RUNNER_TEMP/pkg-candidate/build" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/pkg-candidate/target" >> "$GITHUB_ENV"
+
+      - name: Install protoc (pinned, matches mise.toml)
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
+        with:
+          version: "36.1"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install pinned toolchain (release)
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.98.1
+
+      - name: Install Rust 1.88.0 (consumer MSRV)
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.88.0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Package all eight crates (clean, no-verify)
+        run: |
+          set -euo pipefail
+          cargo +1.98.1 package --workspace --locked --no-verify
+
+      - name: Verify archives + inventory
+        run: |
+          set -euo pipefail
+          python3 scripts/release_checks.py archives \
+            --package-dir "$CARGO_TARGET_DIR/package"
+
+      - name: Archive consumer gates (MSRV 1.88.0)
+        run: |
+          set -euo pipefail
+          python3 scripts/release_checks.py consumer \
+            --package-dir "$CARGO_TARGET_DIR/package" --toolchain 1.88.0
+
+      - name: Upload source-bound candidate
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: ci-candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.CARGO_TARGET_DIR }}/package/*.crate
+            ${{ env.CARGO_TARGET_DIR }}/package/inventory.json
+            ${{ env.CARGO_TARGET_DIR }}/package/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
+  # ── Tier 0i: archive-mode Linux binary + notices + bundle ───────────────────
+  # Stage B: builds the daemon/CLI/shim from the source-bound candidate
+  # (never the checkout) with the release toolchain, then collects
+  # notices and stages the deterministic tarball. Archive-source output
+  # is a CI candidate, never publication evidence.
+  archive-binary-linux:
+    name: Archive binary build (Linux GNU) + notices/bundle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    needs: package-candidate
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+    outputs:
+      bundle: ${{ steps.stage.outputs.bundle }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      # Both Cargo directories are isolated: the global build.build-dir
+      # config makes a target dir alone insufficient.
+      - name: Isolate Cargo build and target directories
+        run: |
+          set -euo pipefail
+          echo "CARGO_BUILD_BUILD_DIR=$RUNNER_TEMP/archive-linux/build" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/archive-linux/target" >> "$GITHUB_ENV"
+
+      - name: Install protoc (pinned, matches mise.toml)
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
+        with:
+          version: "36.1"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install pinned toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.98.1
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Download source-bound candidate
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: ci-candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/archive-linux/candidate
+
+      - name: Archive-mode binary build (Linux GNU)
+        run: |
+          set -euo pipefail
+          python3 scripts/release_checks.py binary-build --source archive --target x86_64-unknown-linux-gnu \
+            --inventory "${{ runner.temp }}/archive-linux/candidate/inventory.json" \
+            --package-dir "${{ runner.temp }}/archive-linux/candidate" \
+            --output "${{ runner.temp }}/archive-linux/output" \
+            --toolchain 1.98.1
+
+      - name: Notices + bundle
+        id: stage
+        run: |
+          set -euo pipefail
+          OUT="${{ runner.temp }}/archive-linux/output"
+          python3 scripts/release_checks.py notices --build-inputs "$OUT/build-inputs.json" --output "$OUT/notices"
+          python3 scripts/release_checks.py bundle --binaries "$OUT/binaries" --provenance "$OUT/build-provenance.json" --notices "$OUT/notices" --output "$OUT/staged-bundle" --timestamp "$(date +%s)"
+          ARCHIVES=( "$OUT/staged-bundle"/*.tar.gz )
+          if [ "${#ARCHIVES[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one Linux bundle tarball"
+            exit 1
+          fi
+          echo "bundle=$(basename "${ARCHIVES[0]}")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Linux bundle
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: ci-linux-bundle-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/archive-linux/output/staged-bundle/
+          if-no-files-found: error
+          retention-days: 14
+
+  # ── Tier 0j: archive-mode Windows binary + notices + bundle ──────────────────
+  # Stage B: cross-builds the Windows MSVC set (daemon/CLI/DLL plus
+  # cross_width_smoke.exe) from the source-bound candidate via cargo-xwin
+  # on Ubuntu, then collects notices and stages the deterministic ZIP.
+  # Native execution happens in smoke-bundle-windows; this job only
+  # cross-compiles and inspects, like windows-client-llp64.
+  archive-binary-windows:
+    name: Archive binary build (Windows MSVC) + notices/bundle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    needs: package-candidate
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+    outputs:
+      bundle: ${{ steps.stage.outputs.bundle }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      # Both Cargo directories are isolated: the global build.build-dir
+      # config makes a target dir alone insufficient.
+      - name: Isolate Cargo build and target directories
+        run: |
+          set -euo pipefail
+          echo "CARGO_BUILD_BUILD_DIR=$RUNNER_TEMP/archive-windows/build" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/archive-windows/target" >> "$GITHUB_ENV"
+
+      - name: Install LLVM (clang/lld/llvm-lib) + nasm
+        run: |
+          sudo apt-get update -qq
+          # llvm-lib (MSVC librarian) lets cc-rs cross-build ring for
+          # windows-msvc (same prerequisite as windows-client-llp64).
+          sudo apt-get install -y clang lld llvm nasm
+
+      - name: Install protoc (pinned, matches mise.toml)
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
+        with:
+          version: "36.1"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install pinned toolchain with Windows MSVC target
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.98.1
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install cargo-xwin
+        run: cargo install cargo-xwin --version 0.23.1 --locked
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Download source-bound candidate
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: ci-candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/archive-windows/candidate
+
+      - name: Archive-mode binary build (Windows MSVC)
+        run: |
+          set -euo pipefail
+          python3 scripts/release_checks.py binary-build --source archive --target x86_64-pc-windows-msvc \
+            --inventory "${{ runner.temp }}/archive-windows/candidate/inventory.json" \
+            --package-dir "${{ runner.temp }}/archive-windows/candidate" \
+            --output "${{ runner.temp }}/archive-windows/output" \
+            --toolchain 1.98.1
+
+      - name: Notices + bundle
+        id: stage
+        run: |
+          set -euo pipefail
+          OUT="${{ runner.temp }}/archive-windows/output"
+          python3 scripts/release_checks.py notices --build-inputs "$OUT/build-inputs.json" --output "$OUT/notices"
+          python3 scripts/release_checks.py bundle --binaries "$OUT/binaries" --provenance "$OUT/build-provenance.json" --notices "$OUT/notices" --output "$OUT/staged-bundle" --timestamp "$(date +%s)"
+          ARCHIVES=( "$OUT/staged-bundle"/*.zip )
+          if [ "${#ARCHIVES[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one Windows bundle ZIP"
+            exit 1
+          fi
+          echo "bundle=$(basename "${ARCHIVES[0]}")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Windows bundle
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: ci-windows-bundle-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/archive-windows/output/staged-bundle/
+          if-no-files-found: error
+          retention-days: 14
+
+  # ── Tier 0k: Alpine APK build/install/sign smoke ─────────────────────────────
+  # Stage B: builds the Alpine APK carrier from this checkout, verifies
+  # the exact APK set (own/upstream notices, inventory, provenance,
+  # materials), then installs the APKs in a scratch Alpine container and
+  # runs a real SoftHSM session/login/keygen/RSA-sign flow through the
+  # installed daemon + shim. Workspace APK output is CI smoke evidence,
+  # not an eligible registry-source release asset. Full Amazon RPM
+  # build/install was not run locally and is NOT covered by this gate.
+  smoke-apk-alpine:
+    name: Smoke Alpine APK (build/install/sign)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    needs: fmt
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Build Alpine APK carrier image
+        run: |
+          set -euo pipefail
+          docker build --progress=plain \
+            --build-arg "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --build-arg "GIT_COMMIT=${{ github.sha }}" \
+            -f packaging/alpine/Dockerfile.alpine \
+            -t "pkcs11-proxy-ng-apk-smoke:${{ github.sha }}" .
+
+      - name: Extract APK set from carrier
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ runner.temp }}/apk-smoke/apk"
+          CONTAINER="$(docker create "pkcs11-proxy-ng-apk-smoke:${{ github.sha }}")"
+          docker cp "$CONTAINER:/apk" "${{ runner.temp }}/apk-smoke/"
+          docker rm "$CONTAINER"
+          find "${{ runner.temp }}/apk-smoke/apk" -name '*.apk' | sort
+
+      - name: Verify APK set (notices/provenance/materials)
+        run: |
+          set -euo pipefail
+          python3 scripts/ci-package-smoke.py apk-verify \
+            --apk-dir "${{ runner.temp }}/apk-smoke/apk"
+
+      - name: Installed provider smoke (SoftHSM sign)
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ runner.temp }}/apk-smoke/work"
+          docker run --rm \
+            -v "${{ runner.temp }}/apk-smoke/apk:/apk:ro" \
+            -v "$GITHUB_WORKSPACE/scripts:/smoke-scripts:ro" \
+            -v "${{ runner.temp }}/apk-smoke/work:/smoke-work" \
+            "alpine:3.23@sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0" \
+            sh -eu -c 'apk --no-cache add --allow-untrusted --repository /apk pkcs11-proxy-ng-shim pkcs11-proxy-ng-daemon pkcs11-proxy-ng-cli pkcs11-proxy-ng-compat && apk --no-cache add softhsm opensc python3 && python3 /smoke-scripts/ci-package-smoke.py installed-smoke --daemon /usr/bin/pkcs11-proxy-ng --shim /usr/lib/pkcs11/libpkcs11_proxy_ng_shim.so --cli /usr/bin/pkcs11-proxy-ng-cli --workdir /smoke-work'
+
+      - name: Upload APK smoke evidence
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: smoke-apk-logs-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/apk-smoke/work/
+            ${{ runner.temp }}/apk-smoke/apk/
+          retention-days: 14
+
+  # ── Tier 0l: Linux bundle smoke (extracted paths, provider-backed) ──────────
+  # Stage B: extracts the exact Linux GNU bundle tarball staged above,
+  # checks hashes/materials against its provenance, and runs the
+  # extracted daemon/shim/CLI through a real SoftHSM
+  # session/login/keygen/RSA-sign flow. Uses only the downloaded bundle
+  # paths — never workspace binaries.
+  smoke-bundle-linux:
+    name: Smoke Linux bundle (extracted paths)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    needs: archive-binary-linux
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Install SoftHSM2 + pkcs11-tool
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y softhsm2 opensc
+
+      - name: Download Linux bundle
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: ci-linux-bundle-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/smoke-linux/bundle
+
+      - name: Extracted-bundle provider smoke
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ runner.temp }}/smoke-linux/work"
+          python3 scripts/ci-package-smoke.py linux-bundle \
+            --bundle "${{ runner.temp }}/smoke-linux/bundle/${{ needs.archive-binary-linux.outputs.bundle }}" \
+            --workdir "${{ runner.temp }}/smoke-linux/work"
+
+      - name: Upload smoke logs
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: smoke-linux-logs-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/smoke-linux/work/
+          retention-days: 14
+
+  # ── Tier 0m: Windows bundle smoke (native runner, provider-backed) ──────────
+  # Stage B: on a native windows-2022 runner, extracts the exact Windows
+  # MSVC ZIP staged above and executes the packaged daemon/CLI plus the
+  # shim DLL through a real provider-backed session (pinned SoftHSM
+  # archive, scratch token, cross_width_smoke.exe — which needs a live
+  # configured daemon/provider and is not a standalone DLL-load test).
+  # The existing Ubuntu/cargo-xwin LLP64 job is cross-compilation only
+  # and is NOT this native artifact smoke. Windows CRT prerequisites use
+  # the runner's own MSVC redist via PATH; no runtime DLLs are bundled.
+  smoke-bundle-windows:
+    name: Smoke Windows bundle (native)
+    runs-on: windows-2022
+    timeout-minutes: 60
+    needs: archive-binary-windows
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      # Same CRT prerequisite as cross-platform.yml: the pinned SoftHSM
+      # DLLs and the MSVC-built binaries need the desktop CRT, exposed
+      # via PATH from the VS installation (never the hanging vc_redist
+      # installer, never bundled DLLs).
+      - name: Expose MSVC x64 runtime (Windows)
+        run: |
+          VSWHERE="C:/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+          VSDIR=$("$VSWHERE" -latest -property installationPath | tr -d '\r')
+          REDIST_DLL=$(find "$VSDIR/VC/Redist/MSVC" -path '*x64*' -name 'vcruntime140.dll' -not -path '*onecore*' 2>/dev/null | sort -V | tail -1)
+          if [ -z "$REDIST_DLL" ]; then
+            echo "no x64 vcruntime140.dll under $VSDIR/VC/Redist/MSVC"
+            exit 1
+          fi
+          REDIST=$(dirname "$REDIST_DLL")
+          echo "$REDIST" >> "$GITHUB_PATH"
+          echo "MSVC x64 redist: $REDIST"
+        shell: bash
+
+      - name: Download Windows bundle
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: ci-windows-bundle-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/smoke-windows/bundle
+
+      - name: Native ZIP provider smoke
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/smoke-windows/work"
+          python3 scripts/ci-package-smoke.py windows-bundle \
+            --bundle "$RUNNER_TEMP/smoke-windows/bundle/${{ needs.archive-binary-windows.outputs.bundle }}" \
+            --workdir "$RUNNER_TEMP/smoke-windows/work"
+        shell: bash
+
+      - name: Upload smoke logs
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: smoke-windows-logs-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/smoke-windows/work/
+          retention-days: 14
+
+  # ── Tier 0z: fail-closed aggregate ──────────────────────────────────────────
+  # Stage B: succeeds only when every required job above succeeded. Any
+  # skipped/cancelled/failed/missing job refuses via the ci-results
+  # guard — a red gate can never become a green aggregate, and no
+  # publication call may proceed on a partial gate set.
+  ci-success:
+    name: CI success (fail-closed aggregate)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: [fmt, audit, deny, packaging-smoke, shellcheck, build-and-test, msrv, narrow-client-i686, windows-client-llp64, musl-x86_64, package-candidate, archive-binary-linux, archive-binary-windows, smoke-apk-alpine, smoke-bundle-linux, smoke-bundle-windows]
+    if: always()
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Refuse unless every required job succeeded
+        run: |
+          set -euo pipefail
+          python3 scripts/release_checks.py ci-results --needs-json '${{ toJSON(needs) }}'
