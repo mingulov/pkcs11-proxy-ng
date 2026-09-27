@@ -1,41 +1,71 @@
-# Release workflow
+# Registry-source GitHub release workflow.
 #
-# Builds release binaries on tag push (vX.Y.Z), packages them into a tarball
-# with SHA-256 checksums, extracts release notes from CHANGELOG.md for the
-# matching version, and creates a GitHub Release with the assets attached.
+# Builds release binaries ONLY from exact already-published crates.io
+# source archives (plus their original packaged locks) — never from
+# checkout source. There is no tag-push trigger: this workflow runs as a
+# reusable callee (`workflow_call`, auto-called by `publish.yml` only after
+# explicit all-eight complete success) or as an exact-tag manual retry
+# (`workflow_dispatch` with `candidate_run_id`); the manual path never
+# republishes crates.
 #
-# Trigger: push an annotated tag matching v*.  The workflow validates the
-# tag format (vMAJOR.MINOR.PATCH[-suffix]) before doing anything else and
-# fails loudly if CHANGELOG.md has no matching section.
+# Recovery contract: the `recover` job validates the referenced publish
+# run (same repository, `.github/workflows/publish.yml` workflow path,
+# manual event, tag-peeled head SHA) and requires exactly one matching
+# unexpired `crates-candidate-<tagCommit>-<runId>` artifact via read-only
+# `actions: read`. Missing/expired/ambiguous evidence refuses; expected
+# hashes are never reconstructed from already-published registry data.
+# `recover` then rechecks source/tag/receipt/qualification/candidate
+# binding (including exact annotated tag object plus peeled commit) before
+# `registry-recheck` re-verifies all eight published checksums and full
+# registry consumers.
 #
-# To cut a release:
-#   git tag -a vX.Y.Z -m "..."
-#   git push origin vX.Y.Z
-#
-# Topology: the build job compiles and packages the Linux bundle, the
-# build-windows job cross-compiles the Windows x64 (MSVC) bundle with
-# cargo-xwin (no Windows runner), and the publish job (gated on the
-# `release` environment) attaches both jobs' dist/ artifacts to the tag
-# release via the two softprops steps. Preparation and publication are
-# separate jobs so a reviewer must approve before anything publishes.
-# Repository prerequisite: create the `release` environment with required
-# reviewers and tag deployment restrictions before pushing a release tag.
-#
-# Security notes:
-#   - GITHUB_REF_NAME is read directly as a shell env var; no `${{ }}`
-#     interpolation of tag-derived strings into shell scripts.
-#   - The tag format is validated before any further command uses it,
-#     so a malformed or injection-style tag fails fast.
+# Binary jobs carry no registry token and no OIDC permission. `publish`
+# runs under the protected `release` environment and is the only job with
+# the write permission the GitHub Release needs (the reusable caller must
+# delegate that permission; every other job stays read-only).
+# Assets publish through one combined path: existing same-named assets are
+# compared first — identical bytes are retained, missing assets are added,
+# divergent bytes refuse. Tags are never moved; assets are never silently
+# replaced or deleted; a retry where everything already matches uploads
+# nothing. Repository prerequisite: create the `release` environment with
+# required reviewers and tag deployment restrictions.
 
 name: release
 
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_call:
+    inputs:
+      tag:
+        description: 'exact stable tag, e.g. v0.2.0'
+        required: true
+        type: string
+      candidate_run_id:
+        description: 'publish run holding the pre-auth candidate'
+        required: true
+        type: string
+      qualification-url:
+        description: 'HTTPS qualification record URL'
+        required: true
+        type: string
+      qualification-subject:
+        description: 'frozen-subject SHA'
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'exact stable tag, e.g. v0.2.0'
+        required: true
+      candidate_run_id:
+        description: 'publish run holding the pre-auth candidate'
+        required: true
+      qualification-url:
+        description: 'HTTPS qualification record URL'
+        required: true
+      qualification-subject:
+        description: 'frozen-subject SHA'
+        required: true
 
-# W1-L17-21: least privilege — the default token reads (checkout); only
-# the publish job (softprops/action-gh-release) gets contents:write.
 permissions:
   contents: read
 
@@ -43,150 +73,278 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    name: Build Linux release
+  recover:
+    name: Recover and recheck candidate evidence
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      tag: ${{ steps.recheck.outputs.tag }}
+      tag_commit: ${{ steps.recheck.outputs.tag_commit }}
+      tag_date: ${{ steps.recheck.outputs.tag_date }}
+    env:
+      RECOVER_TAG: ${{ inputs.tag }}
+      CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+      QUALIFICATION_URL: ${{ inputs.qualification-url }}
+      QUALIFICATION_SUBJECT: ${{ inputs.qualification-subject }}
+      GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Checkout
+      - name: Checkout tag with full history
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          # The receipt step compares against HEAD~1 and diffs HEAD~1..HEAD,
-          # so the checkout must contain at least the tag commit and its parent.
-          fetch-depth: 2
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+          fetch-tags: true
 
-      - name: Validate tag format
-        run: |
-          set -euo pipefail
-          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::Tag '$GITHUB_REF_NAME' does not match vMAJOR.MINOR.PATCH[-suffix]; refusing to release."
-            exit 1
-          fi
-          echo "tag $GITHUB_REF_NAME validated"
+      - name: Fetch origin main for ancestry checks
+        run: git fetch --no-tags origin main:refs/remotes/origin/main
+
+      - name: Install Python for release checks
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
 
       - name: Verify release subject
-        run: scripts/verify-release-subject.sh "$GITHUB_REF_NAME"
+        run: scripts/verify-release-subject.sh "$RECOVER_TAG"
 
       - name: Verify quality receipt
-        run: scripts/verify-quality-receipt.sh "$GITHUB_REF_NAME"
+        run: scripts/verify-quality-receipt.sh "$RECOVER_TAG"
+
+      - name: Reinspect tag, source, and qualification binding
+        id: recheck
+        run: |
+          set -euo pipefail
+          TAG="${RECOVER_TAG#refs/tags/}"
+          python3 scripts/release_checks.py tag-evidence --tag "$TAG" --repo .
+          PEELED="$(git rev-parse "${TAG}^{}")"
+          python3 scripts/release_checks.py preflight --ref "refs/tags/${TAG}" \
+            --require-main --mode dry-run --package workspace \
+            --qualification-url "$QUALIFICATION_URL" \
+            --qualification-subject "$QUALIFICATION_SUBJECT"
+          {
+            echo "tag=${TAG}"
+            echo "tag_commit=${PEELED}"
+            echo "tag_date=$(git log -1 --format=%ct "$TAG")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Collect candidate run evidence
+        run: |
+          set -euo pipefail
+          RUN_JSON="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}" \
+            --jq '{id: .id, event: .event, head_sha: .head_sha, path: .path}')"
+          ART_JSON="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}/artifacts" \
+            --jq '[.artifacts[] | {name: .name, expired: .expired, expires_at: .expires_at}]')"
+          jq -n --argjson run "$RUN_JSON" --argjson arts "$ART_JSON" \
+            --arg repo "$GITHUB_REPOSITORY" \
+            '{runs: [$run + {repository: $repo, workflow_path: $run.path, artifacts: $arts}]}' \
+            > runs.json
+
+      - name: Select exact candidate evidence
+        id: select
+        env:
+          EXPECT_WORKFLOW: .github/workflows/publish.yml
+          EXPECT_EVENT: workflow_dispatch
+          TAG_COMMIT: ${{ steps.recheck.outputs.tag_commit }}
+        run: |
+          set -euo pipefail
+          ARTIFACT="$(python3 scripts/release_checks.py candidate-name \
+            --tag-commit "$TAG_COMMIT" --run-id "$CANDIDATE_RUN_ID")"
+          python3 scripts/release_checks.py evidence-select \
+            --runs-json runs.json --run-id "$CANDIDATE_RUN_ID" \
+            --repository "$GITHUB_REPOSITORY" --workflow "$EXPECT_WORKFLOW" \
+            --event "$EXPECT_EVENT" --head-sha "$TAG_COMMIT" --name "$ARTIFACT"
+          echo "artifact=${ARTIFACT}" >> "$GITHUB_OUTPUT"
+
+      - name: Download immutable pre-auth candidate
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: ${{ steps.select.outputs.artifact }}
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+          path: recovered/
+
+      - name: Verify recovered qualification binding
+        env:
+          TAG_COMMIT: ${{ steps.recheck.outputs.tag_commit }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release_checks.py evidence-verify \
+            --binding recovered/qualification-binding.json \
+            --expect-url "$QUALIFICATION_URL" \
+            --expect-subject "$QUALIFICATION_SUBJECT" \
+            --expect-tag-commit "$TAG_COMMIT" \
+            --expect-run-id "$CANDIDATE_RUN_ID"
+
+      - name: Stage recovered evidence for downstream jobs
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: release-evidence-${{ github.run_id }}
+          path: recovered/
+          overwrite: false
+          retention-days: 90
+          if-no-files-found: error
+
+  registry-recheck:
+    name: Recheck registry before binaries
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    needs: [recover]
+    steps:
+      - name: Checkout scripts
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 1
+
+      - name: Install Python for release checks
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Install MSRV toolchain for registry consumers
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.88.0
 
       - name: Install protoc (pinned, matches mise.toml)
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
         with:
-          # W1-L16-13: single protoc version everywhere; must match
-          # mise.toml.
           version: "36.1"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install pinned Rust toolchain (must satisfy MSRV from Cargo.toml)
+      - name: Isolate Cargo build and target directories
+        run: |
+          set -euo pipefail
+          echo "CARGO_BUILD_BUILD_DIR=$RUNNER_TEMP/release-recheck/build" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/release-recheck/target" >> "$GITHUB_ENV"
+
+      - name: Download recovered candidate evidence
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: release-evidence-${{ github.run_id }}
+          path: recovered/
+
+      - name: Verify all eight published checksums
+        run: |
+          set -euo pipefail
+          python3 scripts/release_checks.py registry-verify \
+            --inventory recovered/inventory.json
+
+      - name: Run full registry consumers
+        run: |
+          set -euo pipefail
+          python3 scripts/release_checks.py registry-consumer \
+            --inventory recovered/inventory.json
+
+  binary-linux:
+    name: Registry-source Linux bundle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    needs: [recover, registry-recheck]
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+      TAG_DATE: ${{ needs.recover.outputs.tag_date }}
+    outputs:
+      bundle: ${{ steps.stage.outputs.bundle }}
+    steps:
+      - name: Checkout tag tooling
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 1
+
+      - name: Isolate Cargo build and target directories
+        run: |
+          set -euo pipefail
+          echo "CARGO_BUILD_BUILD_DIR=$RUNNER_TEMP/release-linux/build" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/release-linux/target" >> "$GITHUB_ENV"
+
+      - name: Install protoc (pinned, matches mise.toml)
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
+        with:
+          version: "36.1"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install pinned release toolchain
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: 1.98.1
 
-      - name: Cache cargo registry and build artifacts
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-release-
-            ${{ runner.os }}-cargo-
+          python-version: "3.12"
 
-      - name: Build release artifacts via existing dry-run script
-        run: scripts/release-dry-run.sh
+      - name: Download recovered candidate evidence
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: release-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/release-linux/candidate
 
-      - name: Smoke-test built binaries
-        run: |
-          target/release/pkcs11-proxy-ng --version
-          target/release/pkcs11-proxy-ng-cli --version
-          file target/release/libpkcs11_proxy_ng_shim.so
-
-      - name: Package release tarball + checksums
+      # Registry mode builds from exact published crates.io archives plus
+      # their original packaged locks; checkout source is never an input.
+      - name: Registry-mode binary build (Linux GNU)
         run: |
           set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
-          TARGET="$(rustc -vV | awk '/^host:/ {print $2}')"
-          BUNDLE="pkcs11-proxy-ng-${GITHUB_REF_NAME}-${TARGET}"
+          python3 scripts/release_checks.py binary-build \
+            --source registry --target x86_64-unknown-linux-gnu \
+            --inventory "${{ runner.temp }}/release-linux/candidate/inventory.json" \
+            --package-dir "${{ runner.temp }}/release-linux/candidate" \
+            --output "${{ runner.temp }}/release-linux/output" \
+            --toolchain 1.98.1
 
-          mkdir -p "dist/${BUNDLE}/bin" "dist/${BUNDLE}/lib/pkcs11" "dist/${BUNDLE}/doc"
-          cp target/release/pkcs11-proxy-ng           "dist/${BUNDLE}/bin/"
-          cp target/release/pkcs11-proxy-ng-cli       "dist/${BUNDLE}/bin/"
-          cp target/release/libpkcs11_proxy_ng_shim.so "dist/${BUNDLE}/lib/pkcs11/"
-          cp README.md CHANGELOG.md LICENSE-APACHE LICENSE-MIT "dist/${BUNDLE}/"
-          cp doc/release/beta-support-matrix.md doc/release/mtls-setup.md \
-             doc/release/parity-validation.md doc/release/v0.2.0-release-notes.md \
-             "dist/${BUNDLE}/doc/"
-
-          strip "dist/${BUNDLE}/bin/"* "dist/${BUNDLE}/lib/pkcs11/"*.so
-
-          TAG_DATE="$(git log -1 --format=%cI "$GITHUB_REF_NAME")"
-          # W1-L17-04: GZIP=-n suppresses the gzip header timestamp/name so
-          # the tarball is byte-reproducible like the Windows ZIP.
-          ( cd dist && GZIP=-n tar --owner=0 --group=0 --mtime="$TAG_DATE" \
-                  -czf "${BUNDLE}.tar.gz" "${BUNDLE}" )
-          ( cd dist && sha256sum "${BUNDLE}.tar.gz" > SHA256SUMS )
-
-          ls -la dist/
-          cat dist/SHA256SUMS
-
-      - name: Extract release notes from CHANGELOG.md
+      - name: Notices + bundle
+        id: stage
         run: |
           set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
-          # W1-L17-17: dot-escape so the version matches literally in the
-          # awk regex (same rule as verify-release-subject.sh BASE_ESCAPED;
-          # the tag-format validation above guarantees the remaining
-          # charset is regex-literal). Passed via the environment because
-          # awk -v would process the backslash escapes itself.
-          VER_ESCAPED="${VERSION//./\\.}"
-          VER_ESCAPED="$VER_ESCAPED" awk '
-            $0 ~ "^## \\[" ENVIRON["VER_ESCAPED"] "\\]" { flag=1; next }
-            /^## \[/ && flag           { flag=0 }
-            flag                       { print }
-          ' CHANGELOG.md > dist/RELEASE_NOTES.md
-
-          if [ ! -s dist/RELEASE_NOTES.md ]; then
-            echo "::error::CHANGELOG.md has no section for version ${VERSION} — refusing to publish empty release notes."
-            echo "Expected a heading like: ## [${VERSION}] - YYYY-MM-DD"
+          OUT="${{ runner.temp }}/release-linux/output"
+          python3 scripts/release_checks.py notices --build-inputs "$OUT/build-inputs.json" --output "$OUT/notices"
+          python3 scripts/release_checks.py bundle --binaries "$OUT/binaries" --provenance "$OUT/build-provenance.json" --notices "$OUT/notices" --output "$OUT/staged-bundle" --timestamp "$TAG_DATE" --inventory "${{ runner.temp }}/release-linux/candidate/inventory.json" --package-dir "${{ runner.temp }}/release-linux/candidate"
+          ARCHIVES=( "$OUT/staged-bundle"/*.tar.gz )
+          if [ "${#ARCHIVES[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one Linux bundle tarball"
             exit 1
           fi
+          echo "bundle=$(basename "${ARCHIVES[0]}")" >> "$GITHUB_OUTPUT"
 
-          echo "--- release notes ---"
-          cat dist/RELEASE_NOTES.md
-
-      - name: Upload Linux dist artifact
+      - name: Upload Linux bundle
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
-          name: linux-dist
-          path: |
-            dist/*.tar.gz
-            dist/SHA256SUMS
-            dist/RELEASE_NOTES.md
+          name: release-linux-bundle-${{ inputs.tag }}
+          path: ${{ runner.temp }}/release-linux/output/staged-bundle/
           if-no-files-found: error
+          retention-days: 90
 
-  build-windows:
-    name: Build Windows release bundle
+  binary-windows:
+    name: Registry-source Windows bundle
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    needs: [recover, registry-recheck]
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+      TAG_DATE: ${{ needs.recover.outputs.tag_date }}
+    outputs:
+      bundle: ${{ steps.stage.outputs.bundle }}
     steps:
-      - name: Checkout
+      - name: Checkout tag tooling
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 1
 
-      - name: Validate tag format
+      - name: Isolate Cargo build and target directories
         run: |
           set -euo pipefail
-          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::Tag '$GITHUB_REF_NAME' does not match vMAJOR.MINOR.PATCH[-suffix]; refusing to release."
-            exit 1
-          fi
-          echo "tag $GITHUB_REF_NAME validated"
+          echo "CARGO_BUILD_BUILD_DIR=$RUNNER_TEMP/release-windows/build" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/release-windows/target" >> "$GITHUB_ENV"
 
-      - name: Install LLVM (clang/lld) + nasm
+      - name: Install LLVM (clang/lld/llvm-lib) + nasm
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y clang lld nasm
+          sudo apt-get install -y clang lld llvm nasm
 
       - name: Install protoc (pinned, matches mise.toml)
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
@@ -203,62 +361,267 @@ jobs:
       - name: Install cargo-xwin
         run: cargo install cargo-xwin --version 0.23.1 --locked
 
-      - name: Build deterministic Windows bundle via release script
-        run: scripts/release-windows.sh --prefix dist/win-stage
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
 
-      - name: Verify Windows checksums
+      - name: Download recovered candidate evidence
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: release-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/release-windows/candidate
+
+      # Registry mode builds from exact published crates.io archives plus
+      # their original packaged locks; checkout source is never an input.
+      - name: Registry-mode binary build (Windows MSVC)
         run: |
           set -euo pipefail
-          ( cd dist/win-stage && sha256sum -c SHA256SUMS-windows )
+          python3 scripts/release_checks.py binary-build --source registry --target x86_64-pc-windows-msvc \
+            --inventory "${{ runner.temp }}/release-windows/candidate/inventory.json" \
+            --package-dir "${{ runner.temp }}/release-windows/candidate" \
+            --output "${{ runner.temp }}/release-windows/output" \
+            --toolchain 1.98.1
 
-      - name: Upload Windows dist artifact
+      - name: Notices + bundle
+        id: stage
+        run: |
+          set -euo pipefail
+          OUT="${{ runner.temp }}/release-windows/output"
+          python3 scripts/release_checks.py notices --build-inputs "$OUT/build-inputs.json" --output "$OUT/notices"
+          python3 scripts/release_checks.py bundle --binaries "$OUT/binaries" --provenance "$OUT/build-provenance.json" --notices "$OUT/notices" --output "$OUT/staged-bundle" --timestamp "$TAG_DATE" --inventory "${{ runner.temp }}/release-windows/candidate/inventory.json" --package-dir "${{ runner.temp }}/release-windows/candidate"
+          ARCHIVES=( "$OUT/staged-bundle"/*.zip )
+          if [ "${#ARCHIVES[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one Windows bundle ZIP"
+            exit 1
+          fi
+          echo "bundle=$(basename "${ARCHIVES[0]}")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Windows bundle
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
-          name: windows-dist
-          path: |
-            dist/win-stage/*.zip
-            dist/win-stage/SHA256SUMS-windows
+          name: release-windows-bundle-${{ inputs.tag }}
+          path: ${{ runner.temp }}/release-windows/output/staged-bundle/
           if-no-files-found: error
+          retention-days: 90
+
+  smoke-linux:
+    name: Smoke registry Linux bundle (extracted paths)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    needs: [recover, binary-linux]
+    steps:
+      - name: Checkout tag tooling
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 1
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Install SoftHSM2 + pkcs11-tool
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y softhsm2 opensc
+
+      - name: Download Linux bundle
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: release-linux-bundle-${{ inputs.tag }}
+          path: ${{ runner.temp }}/release-smoke-linux/bundle
+
+      - name: Extracted-bundle provider smoke
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ runner.temp }}/release-smoke-linux/work"
+          python3 scripts/ci-package-smoke.py linux-bundle \
+            --bundle "${{ runner.temp }}/release-smoke-linux/bundle/${{ needs.binary-linux.outputs.bundle }}" \
+            --workdir "${{ runner.temp }}/release-smoke-linux/work"
+
+      - name: Upload smoke logs
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: release-smoke-linux-logs-${{ github.run_id }}
+          path: ${{ runner.temp }}/release-smoke-linux/work/
+          retention-days: 90
+
+  smoke-windows:
+    name: Smoke registry Windows bundle (native)
+    runs-on: windows-2022
+    timeout-minutes: 60
+    needs: [recover, binary-windows]
+    steps:
+      - name: Checkout tag tooling
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 1
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      # The pinned SoftHSM DLLs and the MSVC-built binaries need the
+      # desktop CRT, exposed via PATH from the VS installation (never the
+      # hanging vc_redist installer, never bundled DLLs).
+      - name: Expose MSVC x64 runtime (Windows)
+        run: |
+          VSWHERE="C:/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+          VSDIR=$("$VSWHERE" -latest -property installationPath | tr -d '\r')
+          REDIST_DLL=$(find "$VSDIR/VC/Redist/MSVC" -path '*x64*' -name 'vcruntime140.dll' -not -path '*onecore*' 2>/dev/null | sort -V | tail -1)
+          if [ -z "$REDIST_DLL" ]; then
+            echo "no x64 vcruntime140.dll under $VSDIR/VC/Redist/MSVC"
+            exit 1
+          fi
+          REDIST=$(dirname "$REDIST_DLL")
+          echo "$REDIST" >> "$GITHUB_PATH"
+          echo "MSVC x64 redist: $REDIST"
+        shell: bash
+
+      - name: Download Windows bundle
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: release-windows-bundle-${{ inputs.tag }}
+          path: ${{ runner.temp }}/release-smoke-windows/bundle
+
+      - name: Native ZIP provider smoke
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/release-smoke-windows/work"
+          python3 scripts/ci-package-smoke.py windows-bundle \
+            --bundle "$RUNNER_TEMP/release-smoke-windows/bundle/${{ needs.binary-windows.outputs.bundle }}" \
+            --workdir "$RUNNER_TEMP/release-smoke-windows/work"
+        shell: bash
+
+      - name: Upload smoke logs
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: release-smoke-windows-logs-${{ github.run_id }}
+          path: ${{ runner.temp }}/release-smoke-windows/work/
+          retention-days: 90
 
   publish:
-    name: Publish GitHub Release
+    name: Publish GitHub release (non-destructive)
     runs-on: ubuntu-24.04
-    needs: [build, build-windows]
-    # Configure this environment with a required reviewer and release-tag
-    # restrictions before pushing a release tag.
+    timeout-minutes: 30
+    needs: [recover, binary-linux, binary-windows, smoke-linux, smoke-windows]
     environment: release
     permissions:
-      contents: write   # required to create the GitHub Release
-    concurrency:
-      group: release
-      cancel-in-progress: false
+      contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Download Linux dist artifact
+      - name: Checkout tag for release notes
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 1
+
+      - name: Install Python for release checks
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Download prepared Linux bundle
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
-          name: linux-dist
-          path: dist/
+          name: release-linux-bundle-${{ inputs.tag }}
+          path: prepared/
 
-      - name: Download Windows dist artifact
+      - name: Download prepared Windows bundle
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
-          name: windows-dist
-          path: dist/win-stage/
+          name: release-windows-bundle-${{ inputs.tag }}
+          path: prepared/
 
-      - name: Create GitHub Release
+      - name: Download recovered candidate evidence
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: release-evidence-${{ github.run_id }}
+          path: evidence/
+
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          set -euo pipefail
+          RELEASE_VERSION="${RELEASE_TAG#v}"
+          RELEASE_VERSION="${RELEASE_VERSION%%-*}"
+          VER_ESCAPED="${RELEASE_VERSION//./\\.}"
+          VER_ESCAPED="$VER_ESCAPED" awk '
+            $0 ~ "^## \\[" ENVIRON["VER_ESCAPED"] "\\]" { flag=1; next }
+            /^## \[/ && flag           { flag=0 }
+            flag                       { print }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "::error::CHANGELOG.md has no section for version ${RELEASE_VERSION}."
+            exit 1
+          fi
+
+      # Compare-then-stage: identical assets stay on the release untouched,
+      # missing assets are staged for upload, divergent bytes refuse here.
+      # Nothing is ever replaced, deleted, or moved by a retry.
+      - name: Compare prepared assets with the release
+        id: compare
+        run: |
+          set -euo pipefail
+          mkdir -p existing stage
+          if gh release view "$RELEASE_TAG" --json assets \
+              --jq '.assets[].name' > existing/names.txt 2>/dev/null; then
+            while IFS= read -r ASSET; do
+              [ -n "$ASSET" ] || continue
+              gh release download "$RELEASE_TAG" -p "$ASSET" -D existing/files
+            done < existing/names.txt
+          else
+            : > existing/names.txt
+          fi
+          python3 - <<'EOF' > existing/assets.json
+          import hashlib, json
+          from pathlib import Path
+          assets = []
+          for path in sorted(Path("existing/files").glob("*")):
+              if path.is_file():
+                  assets.append({"name": path.name,
+                                 "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+          print(json.dumps(assets))
+          EOF
+          cp evidence/inventory.json evidence/qualification-binding.json prepared/
+          python3 - <<'EOF' > prepared/assets.json
+          import hashlib, json
+          from pathlib import Path
+          assets = []
+          for path in sorted(Path("prepared").glob("*")):
+              if path.is_file():
+                  assets.append({"name": path.name, "path": str(path),
+                                 "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+          print(json.dumps(assets))
+          EOF
+          DECISION="$(python3 scripts/release_checks.py assets-compare \
+            --existing-json existing/assets.json \
+            --prepared-json prepared/assets.json | tail -1)"
+          echo "$DECISION"
+          ADD_COUNT="$(python3 -c 'import json,sys; print(len(json.load(sys.stdin)["assets_compare"]["add"]))' <<<"$DECISION")"
+          python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)["assets_compare"]["add"]))' <<<"$DECISION" > stage/add.txt
+          while IFS= read -r ASSET; do
+            [ -n "$ASSET" ] || continue
+            cp "prepared/${ASSET}" stage/
+          done < stage/add.txt
+          echo "add_count=${ADD_COUNT}" >> "$GITHUB_OUTPUT"
+
+      - name: Create or extend the GitHub release
+        if: steps.compare.outputs.add_count != '0'
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          name: pkcs11-proxy-ng ${{ github.ref_name }}
-          body_path: dist/RELEASE_NOTES.md
+          tag_name: ${{ inputs.tag }}
+          name: pkcs11-proxy-ng ${{ inputs.tag }}
+          body_path: RELEASE_NOTES.md
           files: |
-            dist/*.tar.gz
-            dist/SHA256SUMS
-          fail_on_unmatched_files: true
-
-      - name: Append Windows assets to GitHub Release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
-        with:
-          files: |
-            dist/win-stage/*.zip
-            dist/win-stage/SHA256SUMS-windows
-          fail_on_unmatched_files: true
+            stage/*.tar.gz
+            stage/*.zip
+            stage/*.json
+          fail_on_unmatched_files: false
