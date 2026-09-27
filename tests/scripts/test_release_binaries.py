@@ -178,6 +178,18 @@ class ControlledBinaryBuildTests(unittest.TestCase):
             return subprocess.CompletedProcess(command, 0, "cargo-xwin-xwin 0.23.1\n", "")
         if command[0] == "protoc":
             return subprocess.CompletedProcess(command, 0, "libprotoc 33.0\n", "")
+        if command[0] == "git":
+            # Hermetic annotated-tag evidence: the fixture inventory binds
+            # version 0.2.0 to a fabricated commit, so the tag lookup is
+            # mocked instead of tagging any real repository.
+            if getattr(self, "no_tag", False):
+                return subprocess.CompletedProcess(command, 1, "", "no such tag\n")
+            if command[-1].endswith("^{tag}"):
+                return subprocess.CompletedProcess(command, 0, "b" * 40 + "\n", "")
+            if command[-1].endswith("^{commit}"):
+                return subprocess.CompletedProcess(
+                    command, 0, self.inventory["source_commit"] + "\n", "")
+            return subprocess.CompletedProcess(command, 0, "git 0.2.0\n", "")
         if command[0] != "cargo":
             return subprocess.CompletedProcess(command, 0,
                                                f"{Path(command[0]).name} 0.2.0\n", "")
@@ -275,6 +287,8 @@ class ControlledBinaryBuildTests(unittest.TestCase):
             {"tools": {"rustc": "rustc 1.88.0"}},
             {"target": "i686-unknown-linux-gnu"},
             {"artifacts": original["artifacts"][:3]},
+            {"source_tag": None},
+            {"source_tag": {"name": "v9.9.9", "object_sha": "b" * 40}},
         )
         for changes in mutations:
             with self.subTest(changes=changes):
@@ -286,6 +300,31 @@ class ControlledBinaryBuildTests(unittest.TestCase):
         artifact.write_bytes(artifact.read_bytes() + b"candidate suffix")
         with self.assertRaises(ReleaseError):
             require_registry_provenance(path, self.inventory_path, self.packages, binaries)
+
+    def test_registry_build_records_exact_annotated_tag(self):
+        result = self.build()
+        self.assertTrue(result["github_publication_eligible"])
+        self.assertEqual(result["source_tag"],
+                         {"name": "v0.2.0", "object_sha": "b" * 40})
+
+    def test_tagless_registry_build_is_not_publication_eligible(self):
+        self.no_tag = True
+        self.addCleanup(setattr, self, "no_tag", False)
+        result = self.build()
+        self.assertFalse(result["github_publication_eligible"])
+        self.assertIsNone(result["source_tag"])
+        path = self.base / "output/build-provenance.json"
+        with self.assertRaises(ReleaseError):
+            require_registry_provenance(path, self.inventory_path,
+                                        self.packages,
+                                        self.base / "output/binaries")
+        provenance = json.loads(path.read_text())
+        provenance["github_publication_eligible"] = True
+        path.write_text(json.dumps(provenance))
+        with self.assertRaisesRegex(ReleaseError, "tag"):
+            require_registry_provenance(path, self.inventory_path,
+                                        self.packages,
+                                        self.base / "output/binaries")
 
     def test_archive_build_relabelled_as_registry_is_rejected(self):
         self.build(source="archive")

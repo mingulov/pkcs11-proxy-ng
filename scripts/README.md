@@ -17,9 +17,10 @@ Build, test, and release scripts, with their callers. Paths are relative to
 | `ci-package-smoke.py` | `ci.yml` smoke lanes: reusable installed/extracted artifact contract (APK set, Linux tarball, Windows ZIP); reused for registry bundles before asset approval |
 | `test-matrix.sh` | `nightly.yml` and `Dockerfile.test`: local CI gates and provider/consumer lanes |
 | `run-test-tiers.sh` | `nightly.yml`: live test lanes; also a manual unit/integration/regression runner |
-| `verify-release-subject.sh` | `release.yml`: validate the tag subject and version mirrors |
-| `release-dry-run.sh` | `release.yml`: build and stage the Linux artifacts; also useful locally |
-| `release-windows.sh` | `release.yml`: build and stage the Windows ZIP |
+| `verify-release-subject.sh` | `publish.yml` and `release.yml`: validate the tag subject and version mirrors |
+| `release-dry-run.sh` | Local Linux packaging check and staging; `release.yml` now builds from registry sources instead |
+| `release-windows.sh` | Local Windows ZIP staging; `release.yml` now builds from registry sources instead |
+| `release_checks.py` (`candidate-name`, `evidence-bind`, `evidence-verify`, `evidence-select`, `assets-compare`, `tag-evidence`) | `publish.yml` and `release.yml`: pre-auth candidate identity, cross-run evidence selection, non-destructive asset comparison, annotated-tag evidence |
 
 The GitLab pipeline builds the Alpine and Amazon carrier images through their
 packaging Dockerfiles. GitHub's packaging smoke gate checks their source metadata,

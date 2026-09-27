@@ -221,6 +221,34 @@ class BundleTests(unittest.TestCase):
             stage_bundle(self.base, self.binaries, self.provenance,
                          self.notices, self.output, timestamp=1_700_000_000)
 
+    def test_missing_version_notes_refuse_with_exact_name(self):
+        (self.base / "doc/release/v0.2.0-release-notes.md").unlink()
+        with self.assertRaisesRegex(ReleaseError, "release notes for version 0\\.2\\.0"):
+            stage_bundle(self.base, self.binaries, self.provenance,
+                         self.notices, self.output, timestamp=1_700_000_000)
+
+    def test_later_version_binds_exact_notes(self):
+        provenance = json.loads(self.provenance.read_text())
+        provenance["version"] = "9.9.9"
+        self.provenance.write_text(json.dumps(provenance))
+        own = self.notices / "license-material/pkcs11-proxy-ng-9.9.9/licenses"
+        own.mkdir(parents=True)
+        for name in ("LICENSE-APACHE", "LICENSE-MIT"):
+            (own / name).write_text(name + "\n")
+        inventory = json.loads(self.inventory.read_text())
+        inventory["build_provenance_sha256"] = digest(self.provenance.read_bytes())
+        inventory["files"] = {p.relative_to(self.notices).as_posix(): digest(p.read_bytes())
+                              for p in self.notices.rglob("*")
+                              if p.is_file() and p.name != "notice-inventory.json"}
+        self.inventory.write_text(json.dumps(inventory))
+        (self.base / "doc/release/v9.9.9-release-notes.md").write_text("later notes\n")
+        archive = stage_bundle(self.base, self.binaries, self.provenance,
+                               self.notices, self.base / "out9", timestamp=1_700_000_000)
+        with tarfile.open(archive, "r:gz") as bundle:
+            names = {member.name.split("/", 1)[1] for member in bundle if member.isfile()}
+        self.assertIn("doc/v9.9.9-release-notes.md", names)
+        self.assertNotIn("doc/v0.2.0-release-notes.md", names)
+
 
 class PackageCarriageTests(unittest.TestCase):
     def test_apkbuild_maintainer_metadata_is_valid_or_absent(self):

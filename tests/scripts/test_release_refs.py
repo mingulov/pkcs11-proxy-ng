@@ -1,6 +1,8 @@
 """Release ref and qualification refusal cases against real Git histories."""
 
+import io
 import json
+from contextlib import redirect_stderr
 from pathlib import Path
 import subprocess
 import sys
@@ -108,6 +110,15 @@ class RefFixture(unittest.TestCase):
         manifest.write_text(manifest.read_text().replace('0.2.0', '0.3.0'))
         self.assertEqual(self.check(), 1)
         git(self.repo, "restore", "Cargo.toml")
+        # A tracked modification that keeps the manifest contract valid
+        # must trip the clean-tree guard specifically — not an earlier
+        # guard that happens to fire first.
+        (self.repo / "source.txt").write_text("source\nmodified\n")
+        buffer = io.StringIO()
+        with redirect_stderr(buffer):
+            self.assertEqual(self.check(), 1)
+        self.assertIn("must be clean", buffer.getvalue())
+        git(self.repo, "restore", "source.txt")
         (self.repo / "untracked").write_text("x")
         self.assertEqual(self.check(), 1)
 

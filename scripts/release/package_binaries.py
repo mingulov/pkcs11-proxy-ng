@@ -55,10 +55,13 @@ def require_registry_provenance(path: Path, inventory_path: Path,
             provenance.get("inventory_sha256") == _sha256(Path(inventory_path)),
             "binary provenance source identity differs from inventory")
     tag = provenance.get("source_tag")
-    require(tag is None or (isinstance(tag, dict) and
+    require(tag is not None,
+            "binary provenance has no annotated source tag; "
+            "GitHub publication requires an exact annotated tag")
+    require(isinstance(tag, dict) and
             tag.get("name") == f"v{inventory['version']}" and
             isinstance(tag.get("object_sha"), str) and
-            re.fullmatch(r"[0-9a-f]{40}", tag["object_sha"]) is not None),
+            re.fullmatch(r"[0-9a-f]{40}", tag["object_sha"]) is not None,
             "binary provenance source tag is malformed")
     target = provenance.get("target")
     require(target in TARGETS, "binary provenance target is unsupported")
@@ -439,10 +442,11 @@ def build_binaries(repo: Path, inventory_path: Path, package_dir: Path, source: 
              "graphs": graphs, "binaries": {item["name"]: str((binaries / item["name"]).resolve())
                                            for item in artifacts}}
     (output / "build-inputs.json").write_text(json.dumps(local, indent=2, sort_keys=True) + "\n")
+    tag = _git_tag(repo, inventory["source_commit"], inventory["version"])
     portable = {"format_version": 1, "source_mode": source,
-                "github_publication_eligible": source == "registry",
+                "github_publication_eligible": source == "registry" and tag is not None,
                 "version": inventory["version"], "source_commit": inventory["source_commit"],
-                "source_tag": _git_tag(repo, inventory["source_commit"], inventory["version"]),
+                "source_tag": tag,
                 "target": target, "tools": versions,
                 "profile": {"name": "release", "lto": "thin", "strip": "symbols",
                             "codegen_units": 1, "panic": "unwind", "incremental": False, "jobs": 4},
