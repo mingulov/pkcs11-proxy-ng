@@ -8,6 +8,7 @@ import sys
 
 sys.dont_write_bytecode = True
 from release.package_archives import inspect_archives  # noqa: E402
+from release.package_binaries import build_binaries  # noqa: E402
 from release.package_consumers import archive_consumer, registry_consumer  # noqa: E402
 from release.package_model import ReleaseError  # noqa: E402
 from release.package_refs import preflight, verify_ci_results  # noqa: E402
@@ -33,6 +34,14 @@ def main(argv=None, *, repo=None) -> int:
     registry_build = commands.add_parser("registry-consumer")
     registry_build.add_argument("--inventory", required=True, type=Path)
     registry_build.add_argument("--toolchain", default="1.88.0")
+    binary = commands.add_parser("binary-build")
+    binary.add_argument("--inventory", required=True, type=Path)
+    binary.add_argument("--package-dir", required=True, type=Path)
+    binary.add_argument("--source", required=True, choices=("archive", "registry"))
+    binary.add_argument("--target", required=True,
+                        choices=("x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"))
+    binary.add_argument("--output", required=True, type=Path)
+    binary.add_argument("--toolchain", default="1.98.1")
     refs = commands.add_parser("preflight")
     refs.add_argument("--ref", required=True)
     refs.add_argument("--require-main", action="store_true")
@@ -82,6 +91,11 @@ def main(argv=None, *, repo=None) -> int:
         if args.command == "registry-consumer":
             result = registry_consumer(repo, args.inventory, args.toolchain)
             print(json.dumps({"registry_consumer": result}, sort_keys=True))
+            return 0
+        if args.command == "binary-build":
+            result = build_binaries(repo, args.inventory, args.package_dir, args.source,
+                                    args.target, args.output, args.toolchain)
+            print(json.dumps({"binary_build": result}, sort_keys=True))
             return 0
         inventory = inspect_archives(repo, args.package_dir)
         if args.expect_inventory:
