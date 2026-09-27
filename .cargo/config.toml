@@ -1,0 +1,3 @@
+[registries.staging]
+index = "sparse+https://index.staging.crates.io/"
+credential-provider = "cargo:token"

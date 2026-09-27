@@ -1,0 +1,11 @@
+[package]
+name = "pkcs11-proxy-ng-publish-probe"
+version = "0.0.0-ci.0.0"
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0 OR MIT"
+description = "Isolated staging registry publish probe for pkcs11-proxy-ng"
+publish = ["staging"]
+readme = "README.md"
+
+[workspace]

@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
 #
-# Fixture battery for the release.yml "Verify quality receipt" step (G-3).
+# Fixture battery for the shared release receipt guard (G-3).
 #
-# The battery extracts the step's `run` block from
-# .github/workflows/release.yml and executes that exact text against fixture
-# git topologies, so it always tests the shipped step (no logic duplicate
-# that can drift). Cases:
-#   real-topology  current worktree passes (valid only at a tag candidate:
+# The battery executes the shipped helper against fixture git topologies.
+# Optional --real checks the current worktree (valid only at a tag candidate:
 #                  receipt subject_sha == HEAD~1, top diff receipt/CHANGELOG-only)
+# Cases:
 #   synthetic-pass HEAD names HEAD~1, all gates pass, receipt-only top diff -> 0
 #   changelog-in-delta top diff touches receipt + CHANGELOG.md -> 0
 #   stale-subject  receipt names HEAD~2 -> 1 (SHA mismatch refusal)
@@ -41,9 +39,8 @@ cleanup_fixtures() {
 trap cleanup_fixtures EXIT
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORKFLOW="$REPO/.github/workflows/release.yml"
-STEP_NAME="Verify quality receipt"
-# W1-L17-02: the step derives the receipt path from GITHUB_REF_NAME, so the
+HELPER="$REPO/scripts/verify-quality-receipt.sh"
+# W1-L17-02: the helper derives the receipt path from its tag argument, so the
 # battery pins the tag per case (default v0.2.0) and derives the receipt
 # path the same way (strip leading v and any -suffix).
 FIXTURE_TAG="v0.2.0"
@@ -55,23 +52,10 @@ set_fixture_tag() {
   RECEIPT_REL="doc/release/v${version}-quality-receipt.md"
 }
 
-extract_step() {
-  awk -v name="$STEP_NAME" '
-    $0 == "      - name: " name { in_step = 1; next }
-    in_step && /^      - name: / { exit }
-    in_step && /^          / { sub(/^          /, ""); print }
-  ' "$WORKFLOW"
-}
-
-STEP="$(extract_step)"
-# Fail closed if the extraction missed (e.g. YAML reindented): the battery
-# must never execute a truncated step and call it a pass.
-for anchor in 'subject_sha' 'HEAD~1' 'release_dry_run' 'git diff --name-only'; do
-  if ! grep -qF "$anchor" <<<"$STEP"; then
-    echo "battery error: extracted step is missing '$anchor'; refusing to run." >&2
-    exit 2
-  fi
-done
+if [[ ! -x "$HELPER" ]]; then
+  echo "battery error: receipt helper is not executable: $HELPER" >&2
+  exit 2
+fi
 
 g() {
   git -c user.name=fixture -c user.email=fixture@example.com \
@@ -112,7 +96,7 @@ write_receipt() {
 }
 
 run_step() {
-  (cd "$1" && GITHUB_REF_NAME="$FIXTURE_TAG" bash -c "$STEP")
+  (cd "$1" && "$HELPER" "$FIXTURE_TAG")
 }
 
 PASS=0
@@ -139,8 +123,12 @@ expect() {
   PASS=$((PASS + 1))
 }
 
-# Case: real freeze topology — the current worktree must pass.
-expect "real-topology" 0 "quality receipt verified for subject" "$REPO"
+if [[ "${1:-}" == "--real" ]]; then
+  expect "real-topology" 0 "quality receipt verified for subject" "$REPO"
+elif [[ $# -ne 0 ]]; then
+  echo "usage: $0 [--real]" >&2
+  exit 2
+fi
 
 # Case: synthetic pass — docs-only refresh atop a content commit.
 D="$(new_repo)"

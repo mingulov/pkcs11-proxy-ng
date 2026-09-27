@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inspect source-bound Cargo release archives."""
+"""Verify release archives, source refs, CI results, and staging probes."""
 
 import argparse
 import json
@@ -9,6 +9,8 @@ import sys
 sys.dont_write_bytecode = True
 from release.package_archives import inspect_archives  # noqa: E402
 from release.package_model import ReleaseError  # noqa: E402
+from release.package_refs import preflight, verify_ci_results  # noqa: E402
+from release.package_staging import staging_probe  # noqa: E402
 
 
 def main(argv=None, *, repo=None) -> int:
@@ -17,9 +19,39 @@ def main(argv=None, *, repo=None) -> int:
     archives = commands.add_parser("archives")
     archives.add_argument("--package-dir", required=True, type=Path)
     archives.add_argument("--expect-inventory", type=Path)
+    refs = commands.add_parser("preflight")
+    refs.add_argument("--ref", required=True)
+    refs.add_argument("--require-main", action="store_true")
+    refs.add_argument("--mode", default="dry-run")
+    refs.add_argument("--package", default="workspace")
+    refs.add_argument("--qualification-url")
+    refs.add_argument("--qualification-subject")
+    probe = commands.add_parser("staging-probe")
+    probe.add_argument("--destination", required=True, type=Path)
+    probe.add_argument("--run-id", required=True)
+    probe.add_argument("--attempt", required=True)
+    probe.add_argument("--registry", default="staging")
+    ci = commands.add_parser("ci-results")
+    ci.add_argument("--needs-json", required=True)
     args = parser.parse_args(argv)
     try:
         repo = Path(__file__).resolve().parents[1] if repo is None else Path(repo)
+        if args.command == "preflight":
+            version, head, frozen_parent = preflight(
+                repo, args.ref, args.require_main, args.mode, args.package,
+                args.qualification_subject, args.qualification_url)
+            print(f"preflight: package {args.package} version {version}; tag commit {head}; "
+                  f"frozen parent {frozen_parent}")
+            return 0
+        if args.command == "staging-probe":
+            version = staging_probe(repo, args.destination, args.run_id,
+                                    args.attempt, args.registry)
+            print(f"staging probe: {args.destination} version {version}")
+            return 0
+        if args.command == "ci-results":
+            count = verify_ci_results(args.needs_json)
+            print(f"ci-results: {count} required jobs succeeded")
+            return 0
         inventory = inspect_archives(repo, args.package_dir)
         if args.expect_inventory:
             expected = json.loads(args.expect_inventory.read_text(encoding="utf-8"))
