@@ -47,6 +47,11 @@ class ArchiveFixture(unittest.TestCase):
             'repository = "https://example.invalid/proxy"\n'
             '[workspace.dependencies]\nserde = { version = "1", features = ["derive"] }\n'
         )
+        (self.repo / "Cargo.lock").write_text(
+            'version = 4\n[[package]]\nname = "serde"\nversion = "1.0.0"\n'
+            'source = "registry+https://github.com/rust-lang/crates.io-index"\n'
+            'checksum = "' + "a" * 64 + '"\n'
+        )
         for name, directory in PACKAGES:
             root = self.repo / "crates" / directory
             (root / "src").mkdir(parents=True)
@@ -103,6 +108,11 @@ class ArchiveFixture(unittest.TestCase):
         entries = {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()}
         entries["Cargo.toml.orig"] = entries.pop("Cargo.toml")
         entries["Cargo.toml"] = self.normalized(name, directory)
+        entries["Cargo.lock"] = (
+            'version = 4\n[[package]]\nname = "serde"\nversion = "1.0.0"\n'
+            'source = "registry+https://github.com/rust-lang/crates.io-index"\n'
+            'checksum = "' + "a" * 64 + '"\n'
+        ).encode()
         entries[".cargo_vcs_info.json"] = json.dumps({"git": {"sha1": self.head},
                                                         "path_in_vcs": f"crates/{directory}"}).encode()
         return entries
@@ -272,6 +282,28 @@ class ReleasePackageTests(ArchiveFixture):
             with self.subTest(old=old):
                 self.mutate("Cargo.toml", lambda b: b.replace(old, new))
                 self.assert_refused()
+
+    def test_refuses_generated_lockfile_git_source(self):
+        self.mutate("Cargo.lock", lambda b: b.replace(
+            b"registry+https://github.com/rust-lang/crates.io-index",
+            b"git+https://example.invalid/forged"))
+        self.assert_refused()
+
+    def test_refuses_generated_lockfile_checksum_drift(self):
+        self.mutate("Cargo.lock", lambda b: b.replace(b"a" * 64, b"b" * 64))
+        self.assert_refused()
+
+    def test_refuses_generated_internal_archive_checksum_drift(self):
+        name, directory = PACKAGES[3]
+        forged = (b'[[package]]\nname = "pkcs11-proxy-ng-types"\nversion = "0.2.0"\n'
+                  b'source = "registry+https://github.com/rust-lang/crates.io-index"\n'
+                  b'checksum = "' + b"b" * 64 + b'"\n')
+        self.mutate("Cargo.lock", lambda b: b + forged, name, directory)
+        self.assert_refused()
+
+    def test_refuses_generated_source_override(self):
+        self.mutate("Cargo.toml", lambda b: b + b'[source.crates-io]\nreplace-with = "local"\n')
+        self.assert_refused()
 
     def test_refuses_wrong_expected_inventory_without_overwrite(self):
         inspect_archives(self.repo, self.packages, write=True)
