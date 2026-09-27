@@ -21,6 +21,7 @@ from release.package_binaries import (  # noqa: E402
     target_command, require_registry_provenance, validate_release_profile,
 )
 from release.package_registry import read_inventory  # noqa: E402
+from release.package_archives import archive_entries  # noqa: E402
 from release.package_consumers import registry_consumer  # noqa: E402
 from test_release_registry import controlled_registry, ControlledCargo  # noqa: E402
 import release_checks  # noqa: E402
@@ -183,12 +184,27 @@ class ControlledBinaryBuildTests(unittest.TestCase):
         self.assertEqual(command[1], "+1.98.1")
         self.assertIn("--locked", command)
         self.assertNotIn("--all-features", command)
-        self.assertNotIn("--config", command)
+        if getattr(self, "archive_mode", False):
+            self.assertIn("--config", command)
+        else:
+            self.assertNotIn("--config", command)
         self.assertEqual(env["CARGO_PROFILE_RELEASE_PANIC"], "unwind")
         cwd = Path(cwd)
         root = cwd.name.removesuffix("-0.2.0")
         if "metadata" in command:
-            metadata = json.loads(self.cargo._metadata(root, cwd, env))
+            if getattr(self, "archive_mode", False):
+                names = self.cargo._closure(root)
+                identifiers = {name: f"path+{name}#0.2.0" for name in names}
+                metadata = {"packages": [
+                    {"id": identifiers[name], "name": name, "version": "0.2.0", "source": None,
+                     "manifest_path": str(cwd.parent / f"{name}-0.2.0/Cargo.toml")}
+                    for name in sorted(names)], "resolve": {"nodes": [
+                    {"id": identifiers[name], "features": [], "deps": [
+                        {"pkg": identifiers[dep], "dep_kinds": [{"kind": None}]}
+                        for dep in self.cargo._closure(name) - {name} if dep in names]}
+                    for name in sorted(names)]}}
+            else:
+                metadata = json.loads(self.cargo._metadata(root, cwd, env))
             if getattr(self, "local_source", False) and root == "pkcs11-proxy-ng":
                 package = next(p for p in metadata["packages"] if p["name"] == "pkcs11-proxy-ng-types")
                 package["source"] = None
@@ -212,7 +228,11 @@ class ControlledBinaryBuildTests(unittest.TestCase):
 
     def build(self, target="x86_64-pc-windows-msvc", *, source="registry"):
         self.cargo = ControlledCargo(self.inventory, self.locks)
+        self.archive_mode = source == "archive"
+        entries = {record["name"]: archive_entries(self.packages / record["archive"],
+                   record["name"], "0.2.0") for record in self.inventory["packages"]}
         with patch("release.package_binaries.inspect_archives", return_value=self.inventory), \
+             patch("release.package_archives._inspect", return_value=(self.inventory, entries)), \
              patch("release.package_binaries.subprocess.run", side_effect=self.fake_process):
             return build_binaries(ROOT, self.inventory_path, self.packages, source, target,
                                   self.base / "output", "1.98.1", registry=self.registry)
@@ -223,6 +243,11 @@ class ControlledBinaryBuildTests(unittest.TestCase):
         artifacts = json.loads((self.base / "output/build-provenance.json").read_text())["artifacts"]
         self.assertEqual(len(artifacts), 4)
         self.assertTrue((self.base / "output/binaries/cross_width_smoke.exe").is_file())
+        self.assertEqual(result["effective_locks"]["pkcs11-proxy-ng"],
+                         result["original_locks"]["pkcs11-proxy-ng"])
+        sources = result["graphs"]["pkcs11-proxy-ng"]["resolved_sources"]
+        self.assertIn({"name": "pkcs11-proxy-ng-types", "version": "0.2.0",
+                       "source": "registry+https://github.com/rust-lang/crates.io-index"}, sources)
         inputs = json.loads((self.base / "output/build-inputs.json").read_text())
         self.assertEqual(set(inputs["graphs"]), {"pkcs11-proxy-ng", "pkcs11-proxy-ng-cli",
                                                 "pkcs11-proxy-ng-shim"})
@@ -261,6 +286,27 @@ class ControlledBinaryBuildTests(unittest.TestCase):
         artifact.write_bytes(artifact.read_bytes() + b"candidate suffix")
         with self.assertRaises(ReleaseError):
             require_registry_provenance(path, self.inventory_path, self.packages, binaries)
+
+    def test_archive_build_relabelled_as_registry_is_rejected(self):
+        self.build(source="archive")
+        path = self.base / "output/build-provenance.json"
+        provenance = json.loads(path.read_text())
+        self.assertEqual(provenance["source_mode"], "archive")
+        self.assertNotEqual(provenance["effective_locks"]["pkcs11-proxy-ng"],
+                            provenance["original_locks"]["pkcs11-proxy-ng"])
+        provenance["source_mode"] = "registry"
+        provenance["github_publication_eligible"] = True
+        path.write_text(json.dumps(provenance))
+        with self.assertRaisesRegex(ReleaseError, "effective locks differ"):
+            require_registry_provenance(path, self.inventory_path, self.packages,
+                                        self.base / "output/binaries")
+        provenance["effective_locks"] = {name: provenance["original_locks"][name]
+                                          for name in ("pkcs11-proxy-ng", "pkcs11-proxy-ng-cli",
+                                                       "pkcs11-proxy-ng-shim")}
+        path.write_text(json.dumps(provenance))
+        with self.assertRaisesRegex(ReleaseError, "non-registry dependency"):
+            require_registry_provenance(path, self.inventory_path, self.packages,
+                                        self.base / "output/binaries")
 
     def test_missing_or_yanked_registry_member_blocks_build(self):
         name = "pkcs11-proxy-ng-types"
