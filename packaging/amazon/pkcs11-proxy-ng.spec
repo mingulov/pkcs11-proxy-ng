@@ -6,10 +6,9 @@
 #   * pkcs11-proxy-ng-cli     — admin / smoke-test CLI
 #   * pkcs11-proxy-ng-compat  — legacy symlinks
 #
-# The spec expects pre-built artifacts under
-# %%{_sourcedir}/pkcs11-proxy-ng-%%{version}/target/release/ — the
-# accompanying Dockerfile.amazon runs `cargo build --release` in a
-# stock AL2023 builder stage before invoking rpmbuild.
+# The spec builds the complete source tar staged by Dockerfile.amazon.
+# The build and notice collection run inside rpmbuild with pinned rustup
+# tools and the explicitly namespaced Python 3.11 interpreter.
 
 Name:           pkcs11-proxy-ng
 Version:        0.2.0
@@ -26,7 +25,7 @@ BuildArch:      x86_64
 # rust is below transitive dep MSRV). The rustup cargo is on PATH
 # when rpmbuild runs %build below. systemd-rpm-macros gives us the
 # %{_unitdir} macro used in the daemon subpackage's file list.
-BuildRequires:  protobuf-compiler systemd-rpm-macros
+BuildRequires:  protobuf-compiler systemd-rpm-macros python3.11
 Requires:       glibc
 
 %define _enable_debug_packages 0
@@ -83,11 +82,14 @@ back-compat alias).
 %setup -q -n %{name}-%{version}
 
 %build
-# The accompanying Dockerfile.amazon runs `cargo build --release` in
-# its own builder stage and packs the prebuilt target/ into the source
-# tarball, so this RPM-side build step is a no-op. Keeping it here
-# documented for `rpmbuild` users who want to run end-to-end.
+# Build from the staged workspace source and record local workspace notice
+# inputs. These RPMs make no registry-source binary provenance claim.
 cargo build --release --workspace --locked
+python3.11 scripts/release_checks.py workspace-notices \
+    --binaries target/release \
+    --target "$(rustc -vV | awk '/^host:/ {print $2}')" \
+    --inputs-output target/package-notice-inputs \
+    --output target/package-notices
 
 %install
 install -d %{buildroot}%{_bindir}
@@ -115,6 +117,16 @@ install -m 0644 packaging/amazon/pkcs11-proxy-ng.service \
 ln -sf pkcs11/libpkcs11_proxy_ng_shim.so \
     %{buildroot}%{_libdir}/libpkcs11-proxy.so
 
+for part in shim daemon cli; do
+    notice_dir="%{buildroot}%{_licensedir}/%{name}-$part"
+    install -d "$notice_dir"
+    install -m 0644 LICENSE-APACHE LICENSE-MIT \
+        target/package-notices/THIRD_PARTY_NOTICES \
+        target/package-notices/notice-inventory.json \
+        target/package-notice-inputs/build-provenance.json "$notice_dir/"
+    cp -a target/package-notices/license-material "$notice_dir/"
+done
+
 # ─── File manifests ────────────────────────────────────────────────────────
 
 %files
@@ -122,9 +134,21 @@ ln -sf pkcs11/libpkcs11_proxy_ng_shim.so \
 
 %files shim
 %{_libdir}/pkcs11/libpkcs11_proxy_ng_shim.so
+%license %{_licensedir}/%{name}-shim/LICENSE-APACHE
+%license %{_licensedir}/%{name}-shim/LICENSE-MIT
+%license %{_licensedir}/%{name}-shim/THIRD_PARTY_NOTICES
+%license %{_licensedir}/%{name}-shim/license-material
+%license %{_licensedir}/%{name}-shim/notice-inventory.json
+%license %{_licensedir}/%{name}-shim/build-provenance.json
 
 %files daemon
 %{_bindir}/pkcs11-proxy-ng
+%license %{_licensedir}/%{name}-daemon/LICENSE-APACHE
+%license %{_licensedir}/%{name}-daemon/LICENSE-MIT
+%license %{_licensedir}/%{name}-daemon/THIRD_PARTY_NOTICES
+%license %{_licensedir}/%{name}-daemon/license-material
+%license %{_licensedir}/%{name}-daemon/notice-inventory.json
+%license %{_licensedir}/%{name}-daemon/build-provenance.json
 %config(noreplace) %{_sysconfdir}/pkcs11-proxy-ng/proxy.toml
 %config(noreplace) %{_sysconfdir}/pkcs11-proxy-ng/mechanism_params.toml
 %{_sysconfdir}/pkcs11-proxy-ng/mechanism_params.cloudhsm.toml.example
@@ -132,6 +156,12 @@ ln -sf pkcs11/libpkcs11_proxy_ng_shim.so \
 
 %files cli
 %{_bindir}/pkcs11-proxy-ng-cli
+%license %{_licensedir}/%{name}-cli/LICENSE-APACHE
+%license %{_licensedir}/%{name}-cli/LICENSE-MIT
+%license %{_licensedir}/%{name}-cli/THIRD_PARTY_NOTICES
+%license %{_licensedir}/%{name}-cli/license-material
+%license %{_licensedir}/%{name}-cli/notice-inventory.json
+%license %{_licensedir}/%{name}-cli/build-provenance.json
 
 %files compat
 %{_libdir}/libpkcs11-proxy.so

@@ -44,6 +44,8 @@ ENV PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:
 # shim). Override so all crate-types compile; the daemon stays
 # musl-linked just like before.
 ENV RUSTFLAGS="-C target-feature=-crt-static"
+ENV CARGO_BUILD_JOBS=4
+ENV CARGO_INCREMENTAL=0
 # Deferred T22 F6: versioned rustup bootstrap (not the floating
 # install pipe) installing the receipted toolchain, with the init
 # binary's SHA256 verified before execute. Hashes below are the
@@ -55,7 +57,8 @@ ARG RUSTUP_SHA256_AMD64=331228566cc931f32cd684f9bebc5956a5e5d7394c8d5de595f196a6
 ARG RUSTUP_SHA256_ARM64=1ddf36182ac5d1782dbeefcb9bea7f5f9412d88f4a0d5047b1564a223624e8c6
 RUN <<EOF
   set -eux
-  apk add --no-cache alpine-sdk sudo protoc protobuf-dev curl gcc musl-dev openssl-dev bash
+  apk add --no-cache alpine-sdk sudo protoc protobuf-dev curl gcc musl-dev openssl-dev bash python3
+  python3 -c 'import tomllib'
   ARCH="$(uname -m)"
   case "$ARCH" in
     x86_64)  RUST_TRIPLE=x86_64-unknown-linux-musl;  RUSTUP_SHA256="${RUSTUP_SHA256_AMD64}" ;;
@@ -127,6 +130,15 @@ RUN <<EOF
   for pkg in pkcs11-proxy-ng-shim pkcs11-proxy-ng-daemon \
              pkcs11-proxy-ng-cli pkcs11-proxy-ng-compat; do
     apk --no-cache add --allow-untrusted --repository /apk "$pkg"
+    if [ "$pkg" != pkcs11-proxy-ng-compat ]; then
+      license_dir="/usr/share/licenses/$pkg"
+      for item in LICENSE-APACHE LICENSE-MIT THIRD_PARTY_NOTICES \
+                  notice-inventory.json build-provenance.json \
+                  license-material/ring-0.17.14/licenses/LICENSE \
+                  license-material/rust-std/COPYRIGHT-library.html; do
+        test -s "$license_dir/$item"
+      done
+    fi
     apk --no-cache del "$pkg"
   done
   echo "smoke test: install all together"
@@ -139,6 +151,10 @@ RUN <<EOF
   /usr/bin/pkcs11-proxy-ng-cli --version
   test -f /usr/lib/pkcs11/libpkcs11_proxy_ng_shim.so
   test -L /usr/lib/libpkcs11-proxy.so
+  for pkg in pkcs11-proxy-ng-shim pkcs11-proxy-ng-daemon pkcs11-proxy-ng-cli; do
+    test -s "/usr/share/licenses/$pkg/THIRD_PARTY_NOTICES"
+    test -s "/usr/share/licenses/$pkg/license-material/rust-std/COPYRIGHT-library.html"
+  done
   apk --no-cache del pkcs11-proxy-ng-shim pkcs11-proxy-ng-daemon \
                      pkcs11-proxy-ng-cli pkcs11-proxy-ng-compat
 EOF
