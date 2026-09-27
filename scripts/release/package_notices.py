@@ -275,6 +275,28 @@ def _workspace_content_hash(entries: dict[str, bytes]) -> str:
     return digest.hexdigest()
 
 
+def workspace_feature_tree(repo: Path, target: str) -> tuple[dict[str, set[str]], set[tuple[str, str]]]:
+    """Capture the unified normal/build graph of one `cargo build --workspace`."""
+    command = ["cargo", "tree", "--locked", "--offline", "--target", target,
+               "--workspace", "-e", "normal,build", "--prefix", "none", "-f", "{p}|{f}"]
+    result = subprocess.run(command, cwd=repo, text=True, capture_output=True)
+    require(result.returncode == 0,
+            f"workspace feature tree failed: {result.stderr[-2000:]}")
+    features = {}
+    packages = set()
+    for line in result.stdout.splitlines():
+        if not line:
+            continue
+        package, separator, enabled = line.partition("|")
+        require(separator == "|" and " v" in package, f"invalid workspace feature tree: {line}")
+        name, version_text = package.split(" v", 1)
+        version = version_text.split()[0]
+        packages.add((name, version))
+        features.setdefault(name, set()).update(enabled.removesuffix(" (*)").split(",") if enabled else ())
+    require(packages, "empty workspace feature tree")
+    return features, packages
+
+
 def collect_workspace_inputs(repo: Path, binaries_dir: Path, target: str, output: Path) -> Path:
     """Record an actual OS package build as local workspace input, never registry evidence."""
     repo, binaries_dir, output = map(Path, (repo, binaries_dir, output))
@@ -309,24 +331,18 @@ def collect_workspace_inputs(repo: Path, binaries_dir: Path, target: str, output
     cargo_home = Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo"))).resolve()
     metadata = json.loads(cargo_output(["cargo", "metadata", "--locked", "--format-version", "1",
                                         "--filter-platform", target]))
+    unified_features, unified_packages = workspace_feature_tree(repo, target)
     manifest = tomllib.loads((repo / "Cargo.toml").read_text(encoding="utf-8"))
     version = manifest["workspace"]["package"]["version"]
     graphs = {}
     for root in ROOTS:
         scopes = _node_scopes(metadata, root, False)
-        tree = cargo_output(["cargo", "tree", "--locked", "--target", target, "-p", root,
-                             "-e", "normal,build", "--prefix", "none", "-f", "{p}|{f}"])
-        features = {}
-        tree_packages = set()
-        for line in tree.splitlines():
-            package, separator, enabled = line.partition("|")
-            require(separator == "|" and " v" in package, f"invalid workspace feature tree: {line}")
-            key, version_text = package.split(" v", 1)
-            package_version = version_text.split()[0]
-            tree_packages.add((key, package_version))
-            features.setdefault(key, set()).update(enabled.removesuffix(" (*)").split(",") if enabled else ())
-        require(root in features and tree_packages <= {(key[0], key[1]) for key in scopes},
-                f"workspace feature closure differs: {root}")
+        tree_packages = {(name, package_version) for name, package_version, _ in scopes}
+        tree_packages &= unified_packages
+        require((root, version) in tree_packages and
+                all(name in unified_features for name, _ in tree_packages),
+                f"workspace unified feature closure differs: {root}")
+        features = {name: unified_features[name] for name, _ in tree_packages}
         sources = []
         for name, package_version, source in sorted(scopes):
             if (name, package_version) in tree_packages:
@@ -349,12 +365,14 @@ def collect_workspace_inputs(repo: Path, binaries_dir: Path, target: str, output
     for name in names:
         shutil.copyfile(binaries_dir / name, prepared / name)
     inputs = {"format_version": 1, "source_mode": "workspace", "target": target,
+              "feature_scope": "cargo-build-workspace-unified-default",
               "cargo_home": str(cargo_home), "rust_sysroot": sysroot,
               "workspace_lock_path": str((repo / "Cargo.lock").resolve()),
               "source_roots": {name: str((repo / "crates" / directory).resolve())
                                for name, directory in PACKAGES},
               "graphs": graphs}
     provenance = {"format_version": 1, "source_mode": "workspace",
+                  "feature_scope": "cargo-build-workspace-unified-default",
                   "github_publication_eligible": False, "version": version,
                   "source_commit": "workspace-source-unverified", "target": target,
                   "tools": versions, "workspace_lock_sha256": _file_hash(repo / "Cargo.lock"),
@@ -383,6 +401,8 @@ def _checked_inputs(path: Path) -> tuple[dict, dict, dict]:
     if mode == "workspace":
         require(provenance.get("github_publication_eligible") is False and
                 provenance.get("source_commit") == "workspace-source-unverified" and
+                inputs.get("feature_scope") == provenance.get("feature_scope") ==
+                "cargo-build-workspace-unified-default" and
                 set(inputs.get("source_roots", {})) == INTERNAL and
                 set(inputs.get("graphs", {})) == set(ROOTS) and
                 provenance.get("workspace_lock_sha256") ==
@@ -576,6 +596,9 @@ def generate_notices(build_inputs_path: Path, output: Path) -> dict:
              "Build, example/dev and conservative-extra material is labeled separately.", "",
              "Rust standard library:", f"  {rust_record['version']}",
              f"  {rust_record['material']} (SHA-256 {rust_record['sha256']})", ""]
+    if provenance["source_mode"] == "workspace":
+        lines.extend(["Workspace package build: default features are unified across all eight members.",
+                      "Per-root scopes describe metadata reachability within that shared build, not isolated builds.", ""])
     for record in records:
         lines.append(f"{record['name']} {record['version']} [{record['license'] or 'license-file'}]")
         lines.append(f"  source SHA-256: {record['source_sha256']}")

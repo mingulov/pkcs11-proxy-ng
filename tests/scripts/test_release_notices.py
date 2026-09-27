@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from release.package_model import ReleaseError  # noqa: E402
+from release import package_notices  # noqa: E402
 from release.package_notices import collect_material, verified_dependency_archive  # noqa: E402
 from release.package_bundles import stage_bundle  # noqa: E402
 
@@ -24,6 +25,36 @@ def digest(data):
 
 
 class MaterialTests(unittest.TestCase):
+    def test_workspace_feature_tree_records_shared_build_union(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            (repo / "Cargo.toml").write_text(
+                '[workspace]\nmembers=["app_a","app_b","shared","server_leaf"]\nresolver="2"\n')
+            manifests = {
+                "app_a": '[dependencies]\nshared={path="../shared",features=["server"]}\n',
+                "app_b": '[dependencies]\nshared={path="../shared"}\n',
+                "shared": '[features]\nserver=["dep:server_leaf"]\n'
+                          '[dependencies]\nserver_leaf={path="../server_leaf",optional=true}\n',
+                "server_leaf": "",
+            }
+            for name, tail in manifests.items():
+                root = repo / name
+                (root / "src").mkdir(parents=True)
+                (root / "src/lib.rs").write_text("pub fn fixture() {}\n")
+                (root / "Cargo.toml").write_text(
+                    f'[package]\nname="{name}"\nversion="0.1.0"\nedition="2024"\n{tail}')
+            subprocess.run(["cargo", "generate-lockfile", "--offline"], cwd=repo,
+                           capture_output=True, text=True, check=True)
+            isolated = subprocess.run(
+                ["cargo", "tree", "--locked", "--offline", "--target", "x86_64-unknown-linux-gnu",
+                 "-p", "app_b", "-e", "normal,build", "--prefix", "none", "-f", "{p}|{f}"],
+                cwd=repo, capture_output=True, text=True, check=True).stdout
+            self.assertNotIn("server_leaf v0.1.0", isolated)
+            features, packages = package_notices.workspace_feature_tree(
+                repo, "x86_64-unknown-linux-gnu")
+            self.assertIn("server", features["shared"])
+            self.assertIn(("server_leaf", "0.1.0"), packages)
+
     def test_dependency_archive_requires_exact_version_and_lock_checksum(self):
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp)
@@ -247,6 +278,14 @@ class PackageCarriageTests(unittest.TestCase):
         self.assertIn("python3.11", docker)
         self.assertIn("Cargo.toml Cargo.lock", docker)
         self.assertIn("scripts packaging crates", docker)
+        self.assertNotIn("cp -a Cargo.toml Cargo.lock README.md CHANGELOG.md", docker)
+        smoke = docker.split("FROM ${AMAZON_BUILD_IMAGE} AS buildtest", 1)[1]
+        for name in ("LICENSE-APACHE", "LICENSE-MIT", "THIRD_PARTY_NOTICES",
+                     "notice-inventory.json", "build-provenance.json",
+                     "license-material/ring-0.17.14/licenses/LICENSE",
+                     "license-material/rust-std/COPYRIGHT-library.html"):
+            self.assertIn(name, smoke)
+        self.assertIn('for pkg in pkcs11-proxy-ng-shim pkcs11-proxy-ng-daemon pkcs11-proxy-ng-cli;', smoke)
         for part in ("shim", "daemon", "cli"):
             section = spec.split(f"\n%files {part}\n", 1)[1].split("\n%files", 1)[0]
             for name in ("LICENSE-APACHE", "LICENSE-MIT", "THIRD_PARTY_NOTICES",
@@ -254,6 +293,41 @@ class PackageCarriageTests(unittest.TestCase):
                 with self.subTest(part=part, name=name):
                     self.assertRegex(section, r"%license[^\n]*" + re.escape(name))
         self.assertIn("Requires:       %{name}-shim = %{version}-%{release}", spec)
+
+    def test_apk_build_can_regenerate_only_its_owned_notice_outputs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            (base / "target").mkdir()
+            (base / "packaging/alpine").mkdir(parents=True)
+            (base / "target/keep-me").write_text("unrelated\n")
+            script = ROOT / "packaging/alpine/APKBUILD"
+            shell = r'''
+                startdir="$1/packaging/alpine"; builddir="$1"; source "$2"
+                cargo() { :; }
+                rustc() { printf 'host: x86_64-unknown-linux-musl\n'; }
+                python3() {
+                    local previous="" inputs="" output=""
+                    for arg in "$@"; do
+                        case "$previous" in
+                            --inputs-output) inputs="$arg" ;;
+                            --output) output="$arg" ;;
+                        esac
+                        previous="$arg"
+                    done
+                    test ! -e "$inputs" && test ! -e "$output" || return 41
+                    mkdir -p "$inputs" "$output"
+                    printf 'generated\n' > "$output/THIRD_PARTY_NOTICES"
+                }
+                build
+                printf 'stale\n' > "$builddir/target/package-notices/stale"
+                build
+                test ! -e "$builddir/target/package-notices/stale"
+                test -s "$builddir/target/package-notices/THIRD_PARTY_NOTICES"
+                test -s "$builddir/target/keep-me"
+            '''
+            result = subprocess.run(["bash", "-euc", shell, "bash", str(base), str(script)],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
 
 
 class WindowsBundleTests(unittest.TestCase):
