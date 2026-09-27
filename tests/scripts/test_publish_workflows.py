@@ -319,6 +319,36 @@ class SmokeLaneTests(unittest.TestCase):
         self.assertNotIn("target/release",
                          SMOKE_SCRIPT.read_text(encoding="utf-8"))
 
+    def test_apk_lane_covers_individual_install_remove(self):
+        workflow = load_workflow()
+        steps = workflow["jobs"]["smoke-apk-alpine"]["steps"]
+        indiv = [s for s in steps
+                 if "ndividual" in str(s.get("name", ""))]
+        self.assertEqual(len(indiv), 1)
+        run = str(indiv[0].get("run", ""))
+        for package in ("pkcs11-proxy-ng-shim", "pkcs11-proxy-ng-daemon",
+                        "pkcs11-proxy-ng-cli", "pkcs11-proxy-ng-compat"):
+            with self.subTest(package=package):
+                self.assertIn(package, run)
+        self.assertIn("apk del", run)
+        # The all-together install + provider smoke must remain alongside.
+        smoke = [s for s in steps if "provider smoke" in str(s.get("name", ""))]
+        self.assertEqual(len(smoke), 1)
+        self.assertIn("installed-smoke", str(smoke[0].get("run", "")))
+
+    def test_apk_lane_verifies_installed_hashes(self):
+        workflow = load_workflow()
+        steps = workflow["jobs"]["smoke-apk-alpine"]["steps"]
+        verify = [s for s in steps if "Verify APK set" in str(s.get("name", ""))]
+        self.assertEqual(len(verify), 1)
+        self.assertIn("--hash-output", str(verify[0].get("run", "")))
+        smoke = [s for s in steps if "provider smoke" in str(s.get("name", ""))]
+        self.assertEqual(len(smoke), 1)
+        run = str(smoke[0].get("run", ""))
+        self.assertIn("installed-verify", run)
+        self.assertIn("--expected-hashes", run)
+        self.assertIn("--record-out", run)
+
     def test_smoke_proves_provider_operations_not_help(self):
         self.assertTrue(SMOKE_SCRIPT.is_file())
         text = SMOKE_SCRIPT.read_text(encoding="utf-8")

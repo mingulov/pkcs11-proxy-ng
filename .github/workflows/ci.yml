@@ -753,9 +753,12 @@ jobs:
   # ── Tier 0k: Alpine APK build/install/sign smoke ─────────────────────────────
   # Stage B: builds the Alpine APK carrier from this checkout, verifies
   # the exact APK set (own/upstream notices, inventory, provenance,
-  # materials), then installs the APKs in a scratch Alpine container and
-  # runs a real SoftHSM session/login/keygen/RSA-sign flow through the
-  # installed daemon + shim. Workspace APK output is CI smoke evidence,
+  # materials, payload hashes), proves each subpackage installs and
+  # deinstalls individually in a scratch container, then installs the
+  # APKs all together, verifies the installed daemon/shim/CLI hashes
+  # against the APK payload bytes, and runs a real SoftHSM
+  # session/login/keygen/RSA-sign flow through the installed daemon +
+  # shim. Workspace APK output is CI smoke evidence,
   # not an eligible registry-source release asset. Full Amazon RPM
   # build/install was not run locally and is NOT covered by this gate.
   smoke-apk-alpine:
@@ -789,11 +792,28 @@ jobs:
           docker rm "$CONTAINER"
           find "${{ runner.temp }}/apk-smoke/apk" -name '*.apk' | sort
 
-      - name: Verify APK set (notices/provenance/materials)
+      - name: Verify APK set (notices/provenance/materials/hashes)
         run: |
           set -euo pipefail
           python3 scripts/ci-package-smoke.py apk-verify \
-            --apk-dir "${{ runner.temp }}/apk-smoke/apk"
+            --apk-dir "${{ runner.temp }}/apk-smoke/apk" \
+            --hash-output "${{ runner.temp }}/apk-smoke/apk/payload-hashes.json"
+
+      - name: Individual install/remove round-trip
+        run: |
+          set -euo pipefail
+          for pkg in pkcs11-proxy-ng-shim pkcs11-proxy-ng-daemon pkcs11-proxy-ng-cli pkcs11-proxy-ng-compat; do
+            case "$pkg" in
+              pkcs11-proxy-ng-shim) expect=/usr/lib/pkcs11/libpkcs11_proxy_ng_shim.so ;;
+              pkcs11-proxy-ng-daemon) expect=/usr/bin/pkcs11-proxy-ng ;;
+              pkcs11-proxy-ng-cli) expect=/usr/bin/pkcs11-proxy-ng-cli ;;
+              pkcs11-proxy-ng-compat) expect=/usr/lib/libpkcs11-proxy.so ;;
+            esac
+            docker run --rm \
+              -v "${{ runner.temp }}/apk-smoke/apk:/apk:ro" \
+              "alpine:3.23@sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0" \
+              sh -eu -c "apk --no-cache add --allow-untrusted --repository /apk $pkg && test -e $expect && apk del $pkg && test ! -e $expect"
+          done
 
       - name: Installed provider smoke (SoftHSM sign)
         run: |
@@ -804,7 +824,7 @@ jobs:
             -v "$GITHUB_WORKSPACE/scripts:/smoke-scripts:ro" \
             -v "${{ runner.temp }}/apk-smoke/work:/smoke-work" \
             "alpine:3.23@sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0" \
-            sh -eu -c 'apk --no-cache add --allow-untrusted --repository /apk pkcs11-proxy-ng-shim pkcs11-proxy-ng-daemon pkcs11-proxy-ng-cli pkcs11-proxy-ng-compat && apk --no-cache add softhsm opensc python3 && python3 /smoke-scripts/ci-package-smoke.py installed-smoke --daemon /usr/bin/pkcs11-proxy-ng --shim /usr/lib/pkcs11/libpkcs11_proxy_ng_shim.so --cli /usr/bin/pkcs11-proxy-ng-cli --workdir /smoke-work'
+            sh -eu -c 'apk --no-cache add --allow-untrusted --repository /apk pkcs11-proxy-ng-shim pkcs11-proxy-ng-daemon pkcs11-proxy-ng-cli pkcs11-proxy-ng-compat && apk --no-cache add softhsm opensc python3 && python3 /smoke-scripts/ci-package-smoke.py installed-verify --daemon /usr/bin/pkcs11-proxy-ng --shim /usr/lib/pkcs11/libpkcs11_proxy_ng_shim.so --cli /usr/bin/pkcs11-proxy-ng-cli --expected-hashes /apk/payload-hashes.json --record-out /smoke-work/installed-hashes.json && python3 /smoke-scripts/ci-package-smoke.py installed-smoke --daemon /usr/bin/pkcs11-proxy-ng --shim /usr/lib/pkcs11/libpkcs11_proxy_ng_shim.so --cli /usr/bin/pkcs11-proxy-ng-cli --workdir /smoke-work'
 
       - name: Upload APK smoke evidence
         if: always()
