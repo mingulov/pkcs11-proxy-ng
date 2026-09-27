@@ -24,6 +24,9 @@ def read_inventory(path: Path) -> dict:
         raise ReleaseError(f"cannot read candidate inventory {path}: {exc}") from exc
     require(isinstance(inventory, dict) and inventory.get("format_version") == 1,
             "candidate inventory format is invalid")
+    require(isinstance(inventory.get("source_commit"), str) and
+            re.fullmatch(r"[0-9a-f]{40}", inventory["source_commit"]) is not None,
+            "candidate inventory source commit is invalid")
     version = inventory.get("version")
     records = inventory.get("packages")
     require(isinstance(version, str) and bool(re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version)),
@@ -118,9 +121,14 @@ class Registry:
                     versions = [json.loads(line) for line in index_data.splitlines() if line]
                 except (ValueError, TypeError) as exc:
                     raise ReleaseError(f"{name} invalid sparse index: {exc}") from exc
+                require(all(isinstance(entry, dict) for entry in versions),
+                        f"{name} sparse index contains invalid records")
                 matches = [entry for entry in versions if entry.get("vers") == version]
                 require(len(matches) <= 1, f"{name} ambiguous sparse-index version")
                 index_entry = matches[0] if matches else None
+                if index_entry is not None:
+                    require(index_entry.get("name") == name,
+                            f"{name} sparse-index package name differs")
             for label, entry, field in (("metadata", api_entry, "checksum"),
                                         ("index", index_entry, "cksum")):
                 if entry is not None:

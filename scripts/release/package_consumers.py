@@ -80,12 +80,10 @@ def validate_metadata(metadata: dict, unpack: Path, root_name: str,
     unpack = Path(unpack).resolve()
     roots = {name: unpack / f"{name}-{version}" for name, _ in PACKAGES}
     observed = set()
-    for item in reachable:
-        package = packages[item]
+    for package in packages.values():
         name = package["name"]
         if name in INTERNAL:
             require(package["version"] == version, f"{name} resolved wrong version")
-            observed.add(name)
             source = package.get("source")
             path = Path(package["manifest_path"]).resolve()
             if mode == "archive":
@@ -95,6 +93,11 @@ def validate_metadata(metadata: dict, unpack: Path, root_name: str,
                 require(source is None, f"{name} unpacked registry root has unexpected source")
             else:
                 require(source == REGISTRY_SOURCE, f"{name} resolved from local source")
+    for item in reachable:
+        package = packages[item]
+        name = package["name"]
+        if name in INTERNAL:
+            observed.add(name)
         if root_name in THIN:
             require(name not in FORBIDDEN_PACKAGES, f"{root_name} includes server package {name}")
             forbidden = FORBIDDEN_FEATURES.get(name, set())
