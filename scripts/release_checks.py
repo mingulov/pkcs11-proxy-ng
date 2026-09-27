@@ -11,6 +11,8 @@ from release.package_archives import inspect_archives  # noqa: E402
 from release.package_binaries import build_binaries  # noqa: E402
 from release.package_bundles import stage_bundle  # noqa: E402
 from release.package_consumers import archive_consumer, registry_consumer  # noqa: E402
+from release.package_evidence import (candidate_name, compare_assets, select_evidence,  # noqa: E402
+                                      tag_evidence, verify_binding, write_binding)
 from release.package_model import ReleaseError  # noqa: E402
 from release.package_notices import collect_workspace_inputs, generate_notices  # noqa: E402
 from release.package_refs import preflight, verify_ci_results  # noqa: E402
@@ -74,6 +76,37 @@ def main(argv=None, *, repo=None) -> int:
     probe.add_argument("--registry", default="staging")
     ci = commands.add_parser("ci-results")
     ci.add_argument("--needs-json", required=True)
+    name = commands.add_parser("candidate-name")
+    name.add_argument("--tag-commit", required=True)
+    name.add_argument("--run-id", required=True)
+    bind = commands.add_parser("evidence-bind")
+    bind.add_argument("--output", required=True, type=Path)
+    bind.add_argument("--tag-commit", required=True)
+    bind.add_argument("--run-id", required=True)
+    bind.add_argument("--qualification-url", required=True)
+    bind.add_argument("--qualification-subject", required=True)
+    confirm = commands.add_parser("evidence-verify")
+    confirm.add_argument("--binding", required=True, type=Path)
+    confirm.add_argument("--expect-url", required=True)
+    confirm.add_argument("--expect-subject", required=True)
+    confirm.add_argument("--expect-tag-commit", required=True)
+    confirm.add_argument("--expect-run-id")
+    select = commands.add_parser("evidence-select")
+    select.add_argument("--runs-json", required=True, type=Path)
+    select.add_argument("--run-id", required=True)
+    select.add_argument("--repository", required=True)
+    select.add_argument("--workflow", required=True)
+    select.add_argument("--event", required=True)
+    select.add_argument("--head-sha", required=True)
+    select.add_argument("--name", required=True)
+    select.add_argument("--now", type=float)
+    assets = commands.add_parser("assets-compare")
+    assets.add_argument("--existing-json", required=True, type=Path)
+    assets.add_argument("--prepared-json", required=True, type=Path)
+    tagev = commands.add_parser("tag-evidence")
+    tagev.add_argument("--tag", required=True)
+    tagev.add_argument("--repo", required=True, type=Path)
+    tagev.add_argument("--expect-peeled")
     args = parser.parse_args(argv)
     try:
         repo = Path(__file__).resolve().parents[1] if repo is None else Path(repo)
@@ -92,6 +125,33 @@ def main(argv=None, *, repo=None) -> int:
         if args.command == "ci-results":
             count = verify_ci_results(args.needs_json)
             print(f"ci-results: {count} required jobs succeeded")
+            return 0
+        if args.command == "candidate-name":
+            print(candidate_name(args.tag_commit, args.run_id))
+            return 0
+        if args.command == "evidence-bind":
+            binding = write_binding(args.output, args.tag_commit, args.run_id,
+                                    args.qualification_url, args.qualification_subject)
+            print(json.dumps({"evidence_bind": binding["artifact"]}, sort_keys=True))
+            return 0
+        if args.command == "evidence-verify":
+            verify_binding(args.binding, args.expect_url, args.expect_subject,
+                           args.expect_tag_commit, args.expect_run_id)
+            print(f"evidence-verify: {args.binding} matches expected binding")
+            return 0
+        if args.command == "evidence-select":
+            selected = select_evidence(args.runs_json, args.run_id, args.repository,
+                                       args.workflow, args.event, args.head_sha,
+                                       args.name, args.now)
+            print(json.dumps({"evidence_select": selected}, sort_keys=True))
+            return 0
+        if args.command == "assets-compare":
+            decision = compare_assets(args.existing_json, args.prepared_json)
+            print(json.dumps({"assets_compare": decision}, sort_keys=True))
+            return 0
+        if args.command == "tag-evidence":
+            evidence = tag_evidence(args.repo, args.tag, args.expect_peeled)
+            print(json.dumps({"tag_evidence": evidence}, sort_keys=True))
             return 0
         if args.command == "consumer":
             result = archive_consumer(repo, args.package_dir, args.toolchain)

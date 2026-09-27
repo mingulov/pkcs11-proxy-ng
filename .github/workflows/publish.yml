@@ -1,0 +1,438 @@
+# Production crates.io publication workflow.
+#
+# Modes (dispatch input `mode`): `dry-run` (default, validates only, never
+# uploads), `bootstrap` (first upload with a token), `trusted` (OIDC trusted
+# publishing). A tag push runs validation only: the `upload` job is gated to
+# manual `workflow_dispatch` with a non-dry-run mode.
+#
+# Dispatch from the tag itself (or a ref whose HEAD equals the tag commit):
+# preflight requires the tag to point at the checked-out HEAD, and the
+# `candidate` job refuses unless the CI-built archives bind to the same tag
+# commit. A dispatch `tag` of `v0.2.0` with `package` `workspace` publishes
+# all eight crates in dependency order; an individual package name publishes
+# one member and prints the full follow-up command for the rest.
+#
+# Credential boundary: only the `upload` job holds `id-token: write`, and it
+# performs guards, fresh non-compiling repackaging plus archive comparison,
+# registry-state classification, bounded upload, and checksum readback only.
+# Compilation in that job would NOT be isolation, so `cargo publish` always
+# uses `--no-verify` here (allowed: the exact candidate already passed the
+# full CI build/consumer gates and the fresh pre-auth archive comparison).
+# All compilation stays in the reusable CI call and the read-only `verify`
+# job. The protected `crates-io` environment must require approval bound to
+# a source-specific qualification record before this workflow is dispatched.
+#
+# Evidence: `candidate` uploads exactly one immutable pre-auth artifact
+# `crates-candidate-<tagCommit>-<runId>` (eight archives, inventory,
+# SHA256SUMS, qualification-binding JSON; `overwrite: false`, 90 days).
+# `upload` retains post-upload evidence even on failure. `verify`
+# re-checks all eight published checksums plus full registry consumers and
+# only then emits `complete=true`, which alone may auto-call `release.yml`.
+# Partial publication never starts binaries; last-member recovery obeys the
+# same complete-success rule. Never edit a receipt to make a guard pass.
+
+name: publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'dry-run validates only; bootstrap/trusted upload'
+        required: false
+        default: dry-run
+        type: choice
+        options:
+          - dry-run
+          - bootstrap
+          - trusted
+      package:
+        description: 'workspace or exactly one of the eight crate names'
+        required: false
+        default: workspace
+      tag:
+        description: 'exact stable tag, e.g. v0.2.0 (dispatch only)'
+        required: true
+      qualification-url:
+        description: 'HTTPS qualification record URL (upload modes)'
+        required: false
+      qualification-subject:
+        description: 'frozen-subject SHA (upload modes)'
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  preflight:
+    name: Validate publication inputs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      tag_commit: ${{ steps.resolve.outputs.tag_commit }}
+      mode: ${{ steps.resolve.outputs.mode }}
+      package: ${{ steps.resolve.outputs.package }}
+      qual_url: ${{ steps.resolve.outputs.qual_url }}
+      qual_subject: ${{ steps.resolve.outputs.qual_subject }}
+    env:
+      PUBLISH_MODE: ${{ inputs.mode }}
+      PUBLISH_PACKAGE: ${{ inputs.package }}
+      PUBLISH_TAG: ${{ inputs.tag }}
+      QUALIFICATION_URL: ${{ inputs.qualification-url }}
+      QUALIFICATION_SUBJECT: ${{ inputs.qualification-subject }}
+    steps:
+      - name: Checkout tag with full history
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Fetch origin main for ancestry checks
+        run: git fetch --no-tags origin main:refs/remotes/origin/main
+
+      - name: Install Python for release checks
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Resolve and validate publication inputs
+        id: resolve
+        run: |
+          set -euo pipefail
+          TAG="${PUBLISH_TAG:-$GITHUB_REF_NAME}"
+          TAG="${TAG#refs/tags/}"
+          MODE="${PUBLISH_MODE:-dry-run}"
+          PACKAGE="${PUBLISH_PACKAGE:-workspace}"
+          ARGS=(--ref "refs/tags/${TAG}" --mode "$MODE" --package "$PACKAGE")
+          if [[ "$MODE" != "dry-run" ]]; then
+            ARGS+=(--require-main)
+          fi
+          if [[ -n "${QUALIFICATION_URL:-}" ]]; then
+            ARGS+=(--qualification-url "$QUALIFICATION_URL")
+          fi
+          if [[ -n "${QUALIFICATION_SUBJECT:-}" ]]; then
+            ARGS+=(--qualification-subject "$QUALIFICATION_SUBJECT")
+          fi
+          python3 scripts/release_checks.py preflight "${ARGS[@]}"
+          scripts/verify-release-subject.sh "$TAG"
+          scripts/verify-quality-receipt.sh "$TAG"
+          TAG_COMMIT="$(git rev-parse HEAD)"
+          {
+            echo "tag=${TAG}"
+            echo "tag_commit=${TAG_COMMIT}"
+            echo "mode=${MODE}"
+            echo "package=${PACKAGE}"
+            echo "qual_url=${QUALIFICATION_URL:-}"
+            echo "qual_subject=${QUALIFICATION_SUBJECT:-}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish approval inputs to summary
+        run: |
+          {
+            echo "## Publication preflight"
+            echo ""
+            echo "- tag: ${{ steps.resolve.outputs.tag }}"
+            echo "- tag commit: ${{ steps.resolve.outputs.tag_commit }}"
+            echo "- mode: ${{ steps.resolve.outputs.mode }}"
+            echo "- package: ${{ steps.resolve.outputs.package }}"
+            echo "- qualification URL: ${{ steps.resolve.outputs.qual_url }}"
+            echo "- qualification subject: ${{ steps.resolve.outputs.qual_subject }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  ci:
+    name: Full required CI
+    needs: [preflight]
+    uses: ./.github/workflows/ci.yml
+
+  candidate:
+    name: Stage immutable pre-auth candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    needs: [preflight, ci]
+    outputs:
+      artifact: ${{ steps.stage.outputs.artifact }}
+    env:
+      TAG_COMMIT: ${{ needs.preflight.outputs.tag_commit }}
+      RUN_ID: ${{ github.run_id }}
+      QUALIFICATION_URL: ${{ needs.preflight.outputs.qual_url }}
+      QUALIFICATION_SUBJECT: ${{ needs.preflight.outputs.qual_subject }}
+    steps:
+      - name: Checkout scripts
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 1
+
+      - name: Install Python for release checks
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Download CI candidate archives
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: ci-candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-candidate/
+
+      - name: Verify candidate archives and source binding
+        run: |
+          set -euo pipefail
+          for required in inventory.json SHA256SUMS; do
+            if [[ ! -f "ci-candidate/${required}" ]]; then
+              echo "::error::CI candidate is missing ${required}; refusing."
+              exit 1
+            fi
+          done
+          SOURCE_COMMIT="$(python3 -c 'import json; print(json.load(open("ci-candidate/inventory.json"))["source_commit"])')"
+          if [[ "$SOURCE_COMMIT" != "$TAG_COMMIT" ]]; then
+            echo "::error::candidate source_commit ${SOURCE_COMMIT} is not the tag commit ${TAG_COMMIT}; refusing."
+            exit 1
+            fi
+          python3 scripts/release_checks.py archives --package-dir ci-candidate
+
+      - name: Bind qualification evidence and stage artifact
+        id: stage
+        run: |
+          set -euo pipefail
+          python3 scripts/release_checks.py evidence-bind \
+            --output ci-candidate/qualification-binding.json \
+            --tag-commit "$TAG_COMMIT" --run-id "$RUN_ID" \
+            --qualification-url "$QUALIFICATION_URL" \
+            --qualification-subject "$QUALIFICATION_SUBJECT"
+          ARTIFACT="crates-candidate-${TAG_COMMIT}-${RUN_ID}"
+          echo "artifact=${ARTIFACT}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload immutable pre-auth candidate
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: crates-candidate-${{ needs.preflight.outputs.tag_commit }}-${{ github.run_id }}
+          path: ci-candidate/
+          overwrite: false
+          retention-days: 90
+          if-no-files-found: error
+
+  upload:
+    name: Guarded crates.io upload
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    needs: [preflight, ci, candidate]
+    if: github.event_name == 'workflow_dispatch' && inputs.mode != 'dry-run'
+    environment: crates-io
+    permissions:
+      id-token: write
+      contents: read
+    concurrency:
+      group: publish-crates-io
+      cancel-in-progress: false
+    env:
+      PUBLISH_MODE: ${{ needs.preflight.outputs.mode }}
+      PUBLISH_PACKAGE: ${{ needs.preflight.outputs.package }}
+      PUBLISH_TAG: ${{ needs.preflight.outputs.tag }}
+      TAG_COMMIT: ${{ needs.preflight.outputs.tag_commit }}
+      QUALIFICATION_URL: ${{ needs.preflight.outputs.qual_url }}
+      QUALIFICATION_SUBJECT: ${{ needs.preflight.outputs.qual_subject }}
+      # Dependency order from scripts/release/package_model.py PACKAGES:
+      # every crate publishes only after its in-workspace dependencies.
+      PUBLISH_ORDER: "pkcs11-proxy-ng-types pkcs11-proxy-ng-audit pkcs11-proxy-ng-proto pkcs11-proxy-ng-client pkcs11-proxy-ng-backend pkcs11-proxy-ng pkcs11-proxy-ng-shim pkcs11-proxy-ng-cli"
+    steps:
+      - name: Checkout tag without persisted credentials
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.preflight.outputs.tag }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Install Python for release checks
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+
+      # Cargo here only repackages (--no-verify) and uploads; it never
+      # compiles in this credential-capable job (see the header comment).
+      - name: Install pinned Cargo for packaging and upload
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.98.1
+
+      - name: Isolate Cargo build and target directories
+        run: |
+          set -euo pipefail
+          echo "CARGO_BUILD_BUILD_DIR=$RUNNER_TEMP/crates-upload/build" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crates-upload/target" >> "$GITHUB_ENV"
+
+      - name: Download immutable pre-auth candidate
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: ${{ needs.candidate.outputs.artifact }}
+          path: preauth/
+
+      - name: Verify release subject
+        run: scripts/verify-release-subject.sh "$PUBLISH_TAG"
+
+      - name: Verify quality receipt
+        run: scripts/verify-quality-receipt.sh "$PUBLISH_TAG"
+
+      - name: Preflight recheck before credentials
+        run: |
+          set -euo pipefail
+          python3 scripts/release_checks.py preflight \
+            --ref "refs/tags/${PUBLISH_TAG}" --require-main \
+            --mode "$PUBLISH_MODE" --package "$PUBLISH_PACKAGE" \
+            --qualification-url "$QUALIFICATION_URL" \
+            --qualification-subject "$QUALIFICATION_SUBJECT"
+
+      - name: Repackage and compare fresh archives without compilation
+        run: |
+          set -euo pipefail
+          for PKG in $PUBLISH_ORDER; do
+            cargo package --no-verify --locked -p "$PKG"
+          done
+          mkdir -p fresh
+          cp target/package/*.crate fresh/
+          python3 scripts/release_checks.py archives \
+            --package-dir fresh --expect-inventory preauth/inventory.json
+
+      - name: Check registry state for the bounded selection
+        run: |
+          set -euo pipefail
+          python3 scripts/release_checks.py registry-state \
+            --inventory preauth/inventory.json --package "$PUBLISH_PACKAGE"
+
+      - name: Authenticate to crates.io (bootstrap token)
+        if: needs.preflight.outputs.mode == 'bootstrap'
+        env:
+          CARGO_REGISTRY_BOOTSTRAP_TOKEN: ${{ secrets.CARGO_REGISTRY_BOOTSTRAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CARGO_REGISTRY_BOOTSTRAP_TOKEN:-}" ]]; then
+            echo "::error::bootstrap mode requires the CARGO_REGISTRY_BOOTSTRAP_TOKEN secret; refusing."
+            exit 1
+          fi
+          echo "CARGO_REGISTRIES_CRATES_IO_TOKEN=${CARGO_REGISTRY_BOOTSTRAP_TOKEN}" >> "$GITHUB_ENV"
+
+      - name: Authenticate to crates.io (trusted OIDC)
+        if: needs.preflight.outputs.mode == 'trusted'
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18
+
+      - name: Publish bounded selection to crates.io
+        run: |
+          set -euo pipefail
+          SELECTED="$PUBLISH_PACKAGE"
+          for PKG in $PUBLISH_ORDER; do
+            if [[ "$SELECTED" != "workspace" && "$SELECTED" != "$PKG" ]]; then
+              continue
+            fi
+            # --no-verify: the exact candidate passed full CI gates and the
+            # fresh pre-auth comparison above; no compilation happens here.
+            cargo publish --no-verify --locked --registry crates-io -p "$PKG"
+          done
+
+      - name: Read back published checksums
+        run: |
+          set -euo pipefail
+          ARGS=(--inventory preauth/inventory.json)
+          if [[ "$PUBLISH_PACKAGE" != "workspace" ]]; then
+            ARGS+=(--package "$PUBLISH_PACKAGE")
+          fi
+          python3 scripts/release_checks.py registry-verify "${ARGS[@]}"
+
+      - name: Print full follow-up command for individual recovery
+        if: needs.preflight.outputs.package != 'workspace'
+        run: |
+          echo "Individual selection published; run the full follow-up to publish the rest:"
+          echo "gh workflow run publish.yml --ref ${PUBLISH_TAG} -f mode=${PUBLISH_MODE} -f package=workspace -f tag=${PUBLISH_TAG} -f qualification-url=${QUALIFICATION_URL} -f qualification-subject=${QUALIFICATION_SUBJECT}"
+
+      - name: Retain post-upload evidence
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: postupload-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            preauth/
+            fresh/
+          overwrite: false
+          retention-days: 90
+          if-no-files-found: error
+
+  verify:
+    name: Verify publication and consumers
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    needs: [preflight, upload]
+    outputs:
+      complete: ${{ steps.mark.outputs.complete }}
+    env:
+      TAG_COMMIT: ${{ needs.preflight.outputs.tag_commit }}
+    steps:
+      - name: Checkout scripts
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 1
+
+      - name: Install Python for release checks
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Install MSRV toolchain for registry consumers
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.88.0
+
+      - name: Install protoc (pinned, matches mise.toml)
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
+        with:
+          version: "36.1"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Isolate Cargo build and target directories
+        run: |
+          set -euo pipefail
+          echo "CARGO_BUILD_BUILD_DIR=$RUNNER_TEMP/crates-verify/build" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crates-verify/target" >> "$GITHUB_ENV"
+
+      - name: Download immutable pre-auth candidate
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: crates-candidate-${{ needs.preflight.outputs.tag_commit }}-${{ github.run_id }}
+          path: preauth/
+
+      # Always all eight: partial publication must never auto-start binaries.
+      - name: Verify all eight published checksums
+        run: |
+          set -euo pipefail
+          python3 scripts/release_checks.py registry-verify \
+            --inventory preauth/inventory.json
+
+      - name: Run full registry consumers
+        run: |
+          set -euo pipefail
+          python3 scripts/release_checks.py registry-consumer \
+            --inventory preauth/inventory.json
+
+      - name: Mark explicit complete success
+        id: mark
+        run: echo "complete=true" >> "$GITHUB_OUTPUT"
+
+  release:
+    name: Build registry-source GitHub release
+    needs: [preflight, verify]
+    if: needs.verify.outputs.complete == 'true'
+    uses: ./.github/workflows/release.yml
+    # The callee's final protected publication needs contents:write; every
+    # other callee job stays read-only (see release.yml permissions).
+    permissions:
+      contents: write
+    secrets: inherit
+    with:
+      tag: ${{ needs.preflight.outputs.tag }}
+      candidate_run_id: ${{ github.run_id }}
+      qualification-url: ${{ needs.preflight.outputs.qual_url }}
+      qualification-subject: ${{ needs.preflight.outputs.qual_subject }}

@@ -1,0 +1,200 @@
+# Staging publication workflow (manual, main-only, upload-free by default).
+#
+# Ordinary `publish.yml` dry-runs stay upload-free; this workflow is the
+# only path that uploads anything before production, and it targets a
+# separate staging account/endpoint — never crates.io. It runs only by
+# manual dispatch on `main` under the protected `crates-io-staging`
+# environment (required reviewers), and uploads only the generated
+# dependency-free probe crate `pkcs11-proxy-ng-publish-probe`.
+#
+# The `probe` job generates the probe and records its identity; the
+# `staging-upload` job repeats the source/ref/probe checks, refuses unless
+# the protected environment provides the staging endpoint binding
+# (`STAGING_OIDC_URL`) and upload credential
+# (`CARGO_REGISTRIES_STAGING_TOKEN`), dry-runs the staging publish first
+# (proving the endpoint resolves without uploading), then performs the
+# real staging upload and retains signed staging evidence. The production
+# registry, bootstrap token, and OIDC trusted-publishing action never
+# appear here.
+
+name: publish-staging
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  probe:
+    name: Generate dependency-free staging probe
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    if: github.ref == 'refs/heads/main'
+    outputs:
+      probe_version: ${{ steps.generate.outputs.probe_version }}
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: refs/heads/main
+          fetch-depth: 1
+
+      - name: Install Python for release checks
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Install pinned Cargo for probe packaging
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.98.1
+
+      - name: Install protoc (pinned, matches mise.toml)
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
+        with:
+          version: "36.1"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Isolate Cargo build and target directories
+        run: |
+          set -euo pipefail
+          echo "CARGO_BUILD_BUILD_DIR=$RUNNER_TEMP/staging-probe/build" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/staging-probe/target" >> "$GITHUB_ENV"
+
+      - name: Generate staging probe
+        id: generate
+        env:
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release_checks.py staging-probe \
+            --destination probe --run-id "$RUN_ID" --attempt "$RUN_ATTEMPT"
+          PROBE_VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("probe/Cargo.toml", "rb"))["package"]["version"])')"
+          echo "probe_version=${PROBE_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload staging probe
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: staging-probe-${{ github.run_id }}-${{ github.run_attempt }}
+          path: probe/
+          overwrite: false
+          retention-days: 90
+          if-no-files-found: error
+
+  staging-upload:
+    name: Upload probe to staging registry
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    needs: [probe]
+    if: github.ref == 'refs/heads/main'
+    environment: crates-io-staging
+    env:
+      STAGING_OIDC_URL: ${{ vars.STAGING_OIDC_URL }}
+      CARGO_REGISTRIES_STAGING_TOKEN: ${{ secrets.CARGO_REGISTRIES_STAGING_TOKEN }}
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: refs/heads/main
+          fetch-depth: 1
+
+      - name: Install Python for release checks
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Install pinned Cargo for staging upload
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.98.1
+
+      - name: Install protoc (pinned, matches mise.toml)
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
+        with:
+          version: "36.1"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Isolate Cargo build and target directories
+        run: |
+          set -euo pipefail
+          echo "CARGO_BUILD_BUILD_DIR=$RUNNER_TEMP/staging-upload/build" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/staging-upload/target" >> "$GITHUB_ENV"
+
+      - name: Download staging probe
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: staging-probe-${{ github.run_id }}-${{ github.run_attempt }}
+          path: probe/
+
+      # Source/ref/probe rechecks plus endpoint binding: the protected
+      # environment owns the staging endpoint, so the run refuses unless
+      # the binding is present, then binds the recorded evidence to it.
+      - name: Recheck source, probe, and staging endpoint
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth 1 origin main:refs/remotes/origin/main
+          if [[ "$(git rev-parse HEAD)" != "$(git rev-parse refs/remotes/origin/main)" ]]; then
+            echo "::error::staging upload requires a main checkout; refusing."
+            exit 1
+          fi
+          python3 - <<'EOF'
+          import sys, tomllib
+          manifest = tomllib.load(open("probe/Cargo.toml", "rb"))
+          package = manifest["package"]
+          assert package["name"] == "pkcs11-proxy-ng-publish-probe", package["name"]
+          assert package["publish"] == ["staging"], package["publish"]
+          assert "dependencies" not in manifest, "probe must be dependency-free"
+          assert manifest.get("workspace") == {}, "probe must leave the workspace"
+          EOF
+          if [[ -z "${STAGING_OIDC_URL:-}" ]]; then
+            echo "::error::protected staging environment provides no STAGING_OIDC_URL; refusing."
+            exit 1
+          fi
+          if [[ "$STAGING_OIDC_URL" != https://* || "$STAGING_OIDC_URL" == *@* ]]; then
+            echo "::error::STAGING_OIDC_URL must be credential-free https; refusing."
+            exit 1
+          fi
+          if [[ -z "${CARGO_REGISTRIES_STAGING_TOKEN:-}" ]]; then
+            echo "::error::protected staging environment provides no CARGO_REGISTRIES_STAGING_TOKEN; refusing."
+            exit 1
+          fi
+
+      - name: Dry-run staging publish (endpoint validation)
+        run: |
+          set -euo pipefail
+          cd probe
+          cargo publish --dry-run --locked --registry staging
+
+      - name: Publish probe to staging registry
+        run: |
+          set -euo pipefail
+          cd probe
+          cargo publish --locked --registry staging
+          cd ..
+          PROBE_VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("probe/Cargo.toml", "rb"))["package"]["version"])')"
+          python3 - "$PROBE_VERSION" <<'EOF' > staging-evidence.json
+          import json, os, sys
+          from datetime import datetime, timezone
+          print(json.dumps({"probe": "pkcs11-proxy-ng-publish-probe",
+                            "version": sys.argv[1],
+                            "endpoint_binding": os.environ["STAGING_OIDC_URL"],
+                            "published_at": datetime.now(timezone.utc).isoformat()},
+                           indent=2, sort_keys=True))
+          EOF
+
+      - name: Retain staging evidence
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: staging-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            probe/
+            staging-evidence.json
+          overwrite: false
+          retention-days: 90
+          if-no-files-found: error

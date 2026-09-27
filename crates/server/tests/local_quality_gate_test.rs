@@ -307,7 +307,9 @@ fn supply_chain_pins_are_consistent() {
         "MSRV job should keep Rust 1.88"
     );
 
-    // Actions: pinned to SHAs, never floating major tags.
+    // Actions: pinned to SHAs, never floating major tags. Local
+    // reusable-workflow calls (./.github/workflows/...) carry no remote
+    // reference and are exempt.
     for text in &workflow_texts {
         for line in text.lines().map(str::trim) {
             let Some(pinned) =
@@ -315,6 +317,9 @@ fn supply_chain_pins_are_consistent() {
             else {
                 continue;
             };
+            if pinned.starts_with("./") {
+                continue;
+            }
             let reference =
                 pinned.split('#').next().unwrap_or("").trim().split('@').nth(1).unwrap_or("");
             assert!(
@@ -916,27 +921,47 @@ fn ci_locked_builds_match_documented_gate_set() {
 fn release_receipt_path_is_version_parameterized() {
     // W1-L17-02: the shared helper owns receipt path and delta checks.
     // scripts/test-verify-quality-receipt.sh exercises its version fixtures.
+    // Stage C: release.yml is workflow_call plus exact-tag manual retry, so
+    // the guard takes the validated tag input — GITHUB_REF_NAME names the
+    // caller's ref and must not select the release subject here.
     let root = workspace_root();
     let release = fs::read_to_string(root.join(".github/workflows/release.yml"))
         .expect(".github/workflows/release.yml should be readable");
     assert!(
-        release.contains("      - name: Verify quality receipt\n        run: scripts/verify-quality-receipt.sh \"$GITHUB_REF_NAME\""),
-        "release workflow should invoke the shipped receipt guard"
+        release.contains("scripts/verify-quality-receipt.sh \"$RECOVER_TAG\""),
+        "release workflow should invoke the shipped receipt guard with the validated tag"
+    );
+    assert!(
+        !release.contains("verify-quality-receipt.sh \"$GITHUB_REF_NAME\""),
+        "receipt guard must not take the caller-controlled GITHUB_REF_NAME"
     );
 }
 
 #[test]
-fn release_tarball_sets_gzip_n() {
-    // W1-L17-04: the Linux bundle tarball suppresses the gzip header
-    // timestamp/name (GZIP=-n), byte-reproducible like the Windows ZIP.
+fn release_bundle_uses_pinned_timestamp_helper() {
+    // W1-L17-04, Stage C: byte-reproducible bundles moved out of inline
+    // YAML tar into scripts/release/package_bundles.py (gzip filename "",
+    // mtime 0, tar uid/gid 0, member mtime pinned). The workflow must route
+    // both targets through that helper with the tag date — never inline
+    // tar packaging and never a wall-clock timestamp.
     let root = workspace_root();
     let release = fs::read_to_string(root.join(".github/workflows/release.yml"))
         .expect(".github/workflows/release.yml should be readable");
-    let step = workflow_step_body(&release, "Package release tarball + checksums");
-    assert!(step.contains("tar "), "tarball step should invoke tar");
     assert!(
-        step.contains("GZIP=-n"),
-        "tarball step should set GZIP=-n for byte-reproducible gzip output"
+        !release.contains("tar -c"),
+        "release workflow should not package bundles with inline tar"
+    );
+    assert!(
+        !release.contains("GZIP="),
+        "release workflow should not set GZIP outside the bundle helper"
+    );
+    assert!(
+        release.matches("bundle --binaries").count() >= 2,
+        "both binary jobs should stage bundles through the helper"
+    );
+    assert!(
+        release.contains("--timestamp \"$TAG_DATE\""),
+        "bundle helper should pin member timestamps to the tag date"
     );
 }
 
@@ -1743,16 +1768,19 @@ fn release_notes_awk_matches_version_literally() {
     // is dot-escaped before interpolation (same rule as
     // verify-release-subject.sh BASE_ESCAPED); the tag-format validation
     // above it guarantees the remaining charset is regex-literal.
+    // Stage C: the step reads the validated exact-tag input (workflow_call
+    // callers control GITHUB_REF_NAME) and writes RELEASE_NOTES.md for the
+    // combined asset path; the literal-match rule is unchanged.
     let root = workspace_root();
     let release = fs::read_to_string(root.join(".github/workflows/release.yml"))
         .expect(".github/workflows/release.yml should be readable");
     let step = workflow_step_body(&release, "Extract release notes from CHANGELOG.md");
     assert!(
-        step.contains("${VERSION//./"),
+        step.contains("${RELEASE_VERSION//./"),
         "extraction step should dot-escape the version before awk interpolation"
     );
     assert!(
-        !step.contains("-v ver=\"$VERSION\""),
+        !step.contains("-v ver="),
         "awk should receive the escaped version, not the raw dotted one"
     );
     #[cfg(unix)]
@@ -1766,16 +1794,15 @@ fn release_notes_awk_matches_version_literally() {
              ## [0.2.0] - 2026-01-01\n\nReal notes.\n",
         )
         .expect("fixture CHANGELOG");
-        fs::create_dir(dir.path().join("dist")).expect("dist dir");
         let status = Command::new("bash")
             .arg("-c")
             .arg(&step)
             .current_dir(dir.path())
-            .env("GITHUB_REF_NAME", "v0.2.0")
+            .env("RELEASE_TAG", "v0.2.0")
             .status()
             .expect("bash should run the extraction step");
         assert!(status.success(), "extraction step should succeed on the fixture");
-        let notes = fs::read_to_string(dir.path().join("dist/RELEASE_NOTES.md"))
+        let notes = fs::read_to_string(dir.path().join("RELEASE_NOTES.md"))
             .expect("RELEASE_NOTES.md should be written");
         assert!(
             notes.contains("Real notes.") && !notes.contains("DECOY"),
