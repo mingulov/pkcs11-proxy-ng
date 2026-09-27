@@ -176,7 +176,8 @@ def _root_check(name: str, roots: dict[str, Path], base: Path, env: dict,
         _seed_lock(root / "Cargo.lock", root / "Cargo.lock", external, version, hashes,
                    locked_internal)
     graph = _metadata(root, env, toolchain, config)
-    result = validate_metadata(graph, base, name, version, "registry" if registry else "archive")
+    result = validate_metadata(graph, base / "unpacked", name, version,
+                               "registry" if registry else "archive")
     if registry:
         require((root / "Cargo.lock").read_bytes() == (base / "original-locks" / f"{name}.lock").read_bytes(),
                 f"{name} packaged registry lock changed")
