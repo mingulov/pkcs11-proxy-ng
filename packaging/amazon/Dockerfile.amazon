@@ -123,6 +123,7 @@ COPY --from=buildtest /rpm /rpm
 LABEL org.opencontainers.image.title="pkcs11-proxy-ng"
 LABEL org.opencontainers.image.description="Rust PKCS#11 remote proxy RPMs (carrier image)"
 LABEL org.opencontainers.image.vendor="pkcs11-proxy-ng maintainers"
+LABEL org.opencontainers.image.source="https://github.com/mingulov/pkcs11-proxy-ng"
 LABEL org.opencontainers.image.licenses="Apache-2.0 OR MIT"
 LABEL org.opencontainers.image.created="${BUILD_DATE}"
 LABEL org.opencontainers.image.revision="${GIT_COMMIT}"
