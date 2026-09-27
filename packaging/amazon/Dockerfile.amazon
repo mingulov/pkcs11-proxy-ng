@@ -76,7 +76,7 @@ RUN <<EOF
   source_name="pkcs11-proxy-ng-${APP_VERSION}"
   source_dir="$HOME/rpmbuild/SOURCES/$source_name"
   mkdir -p "$source_dir"
-  cp -a Cargo.toml Cargo.lock README.md CHANGELOG.md LICENSE-APACHE LICENSE-MIT "$source_dir/"
+  cp -a Cargo.toml Cargo.lock README.md LICENSE-APACHE LICENSE-MIT "$source_dir/"
   cp -a scripts packaging crates "$source_dir/"
   cd ~/rpmbuild/SOURCES
   tar -czf "$source_name.tar.gz" "$source_name"
@@ -96,15 +96,15 @@ COPY --from=buildrpm /rpm /rpm
 RUN <<EOF
   set -eu
   echo "smoke test: install each subpackage"
-  dnf -y install /rpm/pkcs11-proxy-ng-shim-*.rpm
-  test -s /usr/share/licenses/pkcs11-proxy-ng-shim/THIRD_PARTY_NOTICES
-  test -s /usr/share/licenses/pkcs11-proxy-ng-shim/license-material/rust-std/COPYRIGHT-library.html
-  dnf -y install /rpm/pkcs11-proxy-ng-daemon-*.rpm
-  test -s /usr/share/licenses/pkcs11-proxy-ng-daemon/THIRD_PARTY_NOTICES
-  test -s /usr/share/licenses/pkcs11-proxy-ng-daemon/license-material/rust-std/COPYRIGHT-library.html
-  dnf -y install /rpm/pkcs11-proxy-ng-cli-*.rpm
-  test -s /usr/share/licenses/pkcs11-proxy-ng-cli/THIRD_PARTY_NOTICES
-  test -s /usr/share/licenses/pkcs11-proxy-ng-cli/license-material/rust-std/COPYRIGHT-library.html
+  for pkg in pkcs11-proxy-ng-shim pkcs11-proxy-ng-daemon pkcs11-proxy-ng-cli; do
+    dnf -y install /rpm/"${pkg}"-*.rpm
+    for item in LICENSE-APACHE LICENSE-MIT THIRD_PARTY_NOTICES \
+                notice-inventory.json build-provenance.json \
+                license-material/ring-0.17.14/licenses/LICENSE \
+                license-material/rust-std/COPYRIGHT-library.html; do
+      test -s "/usr/share/licenses/$pkg/$item"
+    done
+  done
   dnf -y install /rpm/pkcs11-proxy-ng-compat-*.rpm
   /usr/bin/pkcs11-proxy-ng --version
   /usr/bin/pkcs11-proxy-ng-cli --version

@@ -56,6 +56,10 @@ build() {
     # stripped, so no additional `strip` invocation is needed.
     cd "$builddir"
     cargo build --release --workspace --locked
+    # abuild can reuse this source checkout. Regenerate only these two
+    # task-owned outputs after a successful build; leave all other target
+    # contents (including Cargo's cache and unrelated outputs) untouched.
+    rm -rf -- target/package-notice-inputs target/package-notices
     python3 scripts/release_checks.py workspace-notices \
         --binaries "$builddir/target/release" \
         --target "$(rustc -vV | awk '/^host:/ {print $2}')" \
