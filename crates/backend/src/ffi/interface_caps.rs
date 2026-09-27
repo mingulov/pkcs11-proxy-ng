@@ -154,7 +154,7 @@ mod tests {
 
     #[test]
     fn upstream_function_tables_expose_104_standard_fields() {
-        // Pinned contract with the pkcs11-components git dependency: the
+        // Pinned contract with the published pkcs11-module dependency: the
         // capability scan and the OASIS inventory both assume the
         // 68 + 24 + 12 standard catalog.
         assert_eq!(FUNCTION_LIST_FIELDS.len(), 68);

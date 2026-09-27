@@ -207,8 +207,8 @@ fail silently at the FFI boundary with `CKR_MECHANISM_PARAM_INVALID`.
 - **FFI backend** (`crates/backend`, package `pkcs11-proxy-ng-backend`): Rust → C via `dlopen`. Uses
   `call_3x_fn!` for 3.0/3.2 functions. `mechanism_to_ffi()` converts
   Rust params to C structs.
-- **Module loader** (package `pkcs11-module`, rev-pinned git dependency from
-  `pkcs11-components`, with `pkcs11-abi` layouts): shared module-FFI
+- **Module loader** (package `pkcs11-module` 0.2 from crates.io, with
+  `pkcs11-abi` layouts): shared module-FFI
   *facts* — raw `C_GetFunctionList`/`C_GetInterfaceList` acquisition,
   function-list field-offset tables, provenance/version → table selection
   (`tables_for`), unaligned-safe readers. No proto/tonic dependencies; also

@@ -1512,18 +1512,21 @@ def official_function_headers(root: Path) -> list[tuple[str, Path]]:
 
 @lru_cache(maxsize=None)
 def pkcs11_abi_package(root: Path) -> tuple[Path, str, str]:
-    """Resolve the pinned pkcs11-abi dependency to (manifest path, source, rev).
+    """Resolve the pkcs11-abi dependency to (manifest path, source, rev).
 
     pkcs11-module/pkcs11-abi moved to the pkcs11-components repo and are
-    consumed as a rev-pinned git dependency, so the function-list field
-    catalog no longer lives under this root. `cargo metadata` reports the
-    locked checkout location.
+    consumed from crates.io, so the function-list field catalog no longer
+    lives under this root. Locked `cargo metadata` reports the resolved
+    artifact location. The rev element is the locked version for registry
+    sources (e.g. "0.2.0"; the lock checksum is recorded separately) and
+    the commit hash for git sources.
     """
     try:
         completed = subprocess.run(
             [
                 "cargo",
                 "metadata",
+                "--locked",
                 "--format-version",
                 "1",
                 "--manifest-path",
@@ -1542,9 +1545,39 @@ def pkcs11_abi_package(root: Path) -> tuple[Path, str, str]:
     for package in metadata.get("packages", []):
         if package.get("name") == "pkcs11-abi":
             source = package.get("source") or ""
-            rev = source.rsplit("#", 1)[-1] if "#" in source else ""
+            if "#" in source and not source.startswith("registry+"):
+                rev = source.rsplit("#", 1)[-1]
+            else:
+                rev = package.get("version") or ""
             return Path(package["manifest_path"]), source, rev
     raise SystemExit("pkcs11-abi not found in cargo metadata output")
+
+
+@lru_cache(maxsize=None)
+def pkcs11_abi_lock_checksum(root: Path) -> str:
+    """Read the locked pkcs11-abi checksum from Cargo.lock.
+
+    The registry is content-addressed only through the lockfile, so the
+    inventory records the checksum alongside the version to identify the
+    exact ABI artifact.
+    """
+    lock = root / "Cargo.lock"
+    try:
+        text = lock.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise SystemExit(f"cannot read Cargo.lock for pkcs11-abi checksum: {exc}")
+    in_package = False
+    is_abi = False
+    for line in text.splitlines():
+        if line.strip() == "[[package]]":
+            in_package, is_abi = True, False
+            continue
+        if in_package and line.strip() == 'name = "pkcs11-abi"':
+            is_abi = True
+            continue
+        if in_package and is_abi and line.strip().startswith("checksum = "):
+            return line.strip().split('"')[1]
+    raise SystemExit("pkcs11-abi checksum not found in Cargo.lock")
 
 
 def function_field_tables(root: Path) -> Path:
@@ -1552,11 +1585,12 @@ def function_field_tables(root: Path) -> Path:
     return manifest.parent / "src/layout.rs"
 
 
-def function_field_table_evidence() -> str:
-    # Stable citation for the upstream field catalog. The rev-pinned
-    # dependency source and rev are recorded separately in the inventory
-    # `source` section.
-    return "pkcs11-abi:crates/abi/src/layout.rs"
+def function_field_table_evidence(root: Path) -> str:
+    # Stable citation for the upstream field catalog, pinned to the
+    # resolved artifact. The dependency source, rev, and lock checksum
+    # are recorded separately in the inventory `source` section.
+    _, _, rev = pkcs11_abi_package(root)
+    return f"pkcs11-abi@{rev}:src/layout.rs"
 
 
 def service_proto(root: Path) -> Path:
@@ -3405,7 +3439,7 @@ def build_inventory() -> dict[str, Any]:
     spec_mechanism_names = set(spec_mechanisms)
 
     function_matrix = []
-    function_field_table_source = function_field_table_evidence()
+    function_field_table_source = function_field_table_evidence(root)
     for name in sorted(spec_function_names | function_field_names):
         snake = c_function_to_snake(name)
         shim_fn = f"c_{snake}"
@@ -3580,9 +3614,10 @@ def build_inventory() -> dict[str, Any]:
             "spec_markdown_file_count": len(list(spec_dir.glob("*.md"))),
             "official_function_headers": official_function_headers_source,
             "function_field_tables": str(function_field_tables(root)),
-            "function_field_tables_evidence": function_field_table_evidence(),
+            "function_field_tables_evidence": function_field_table_evidence(root),
             "function_field_tables_dependency": pkcs11_abi_package(root)[1],
             "function_field_tables_rev": pkcs11_abi_package(root)[2],
+            "function_field_tables_checksum": pkcs11_abi_lock_checksum(root),
             "official_mechanism_headers": official_headers,
             "rust_official_mechanism_inventory": str(official_mechanism_rust(root)),
             "mock_backend_source": str(mock_backend_source(root)),

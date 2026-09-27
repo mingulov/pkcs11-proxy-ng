@@ -529,7 +529,7 @@ These limits may affect a deployment:
 | Login-timing observer: an authorized session owner can tell proxy-cooldown `CKR_PIN_LOCKED` (fast, no backend contact) from a forwarded attempt, and observes its own login state (see below) | Accepted residual — no constant-latency guarantee by design | — |
 | Suspended session handles count toward the per-principal session quota; unset quotas bound nothing (see below) | Set `per_principal_max_sessions` where tenants are untrusted | Deployment |
 | Daemon memory lock is best-effort (`mlockall`, loud on denial); shim has no process-wide lock; swap residual stands (see below) | Grant `CAP_IPC_LOCK` / `LimitMEMLOCK`, confirm the startup log line | Deployment |
-| Git-sourced dependencies need network unless the cargo cache is pre-populated; no vendored sources ship (see below) | Pre-populate the cargo cache for air-gapped builds | Build |
+| Registry-sourced dependencies need network unless the cargo cache is pre-populated; no vendored sources ship (see below) | Pre-populate the cargo cache for air-gapped builds | Build |
 | `tests/consumers/Dockerfile.daemon.kryoptic` is unpinned/unhashed fixture-only (see below) | Never use fixture images outside provider-matrix testing | Test harness |
 
 ### Multiplexed daemon vs pristine token (in-memory backends)
@@ -666,14 +666,13 @@ grant the capability (systemd `LimitMEMLOCK=infinity` +
 `CapabilityBoundingSet=CAP_IPC_LOCK`, or `setcap cap_ipc_lock+ep`)
 and confirm the startup log shows the pages-locked line.
 
-### Git-sourced dependencies (accepted residual)
+### Registry-sourced dependencies (accepted residual)
 
-`pkcs11-module` (backend, shim) is consumed from a rev-pinned git URL
-(`pkcs11-components`), not from crates.io, and no vendored sources
-ship with the release. Builds fetch it over the network unless the
-cargo cache is already populated. For air-gapped builds, pre-populate
-the cache (a normal online build once) — offline distribution beyond
-that is deferred, not part of v0.2.
+`pkcs11-module` (backend, shim) is consumed from crates.io (version 0.2),
+and no vendored sources ship with the release. Builds fetch it over the
+network unless the cargo cache is already populated. For air-gapped builds,
+pre-populate the cache (a normal online build once) — offline distribution
+beyond that is deferred, not part of v0.2.
 
 ### Unpinned provider-matrix fixtures (accepted residual)
 

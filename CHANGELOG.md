@@ -86,10 +86,9 @@ validation remain open; see the [candidate notes](doc/release/v0.2.0-release-not
   the last-context-out and refcounted-teardown release paths. Login also
   self-heals a holderless-but-logged-in backend (F-01 reconcile: one logout
   + single retry → `OK`).
-- `pkcs11-module` is now consumed as a rev-pinned git dependency from
-  `https://github.com/mingulov/pkcs11-components` (which also provides the
-  `pkcs11-abi` layout catalog) instead of the nested `crates/module`; the
-  nested crate is removed. The backend keeps using the same
+- `pkcs11-module` is now consumed from crates.io (version 0.2, which also
+  provides the `pkcs11-abi` layout catalog) instead of the nested
+  `crates/module`; the nested crate is removed. The backend keeps using the same
   `pkcs11_module::{function_list, tables::{...}}` API via the upstream
   re-export, so runtime behavior is unchanged. `pkcs11-proxy-ng-types` stays
   nested: it carries proxy-specific exact-output contracts and registry
@@ -127,8 +126,9 @@ validation remain open; see the [candidate notes](doc/release/v0.2.0-release-not
 - `Pkcs11Client::get_backend_interfaces()` returns `BackendProbe`, containing
   interfaces and the mechanism registry. `Pkcs11ProxyService::new()` takes a
   `MechanismRegistrySource`.
-- Module loading and ABI layouts come from the revision-pinned
-  [pkcs11-components](https://github.com/mingulov/pkcs11-components) dependency.
+- Module loading and ABI layouts come from the published
+  [pkcs11-components](https://github.com/mingulov/pkcs11-components) crates
+  on crates.io (version 0.2).
   Proxy-specific types remain in this repository.
 - Admitted `C_Login` and `C_LoginUser` calls reach the backend even when a
   context already holds the slot login. Provider PIN errors and `ALREADY`

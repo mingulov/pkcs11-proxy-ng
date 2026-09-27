@@ -111,11 +111,12 @@ skip = [
 ]
 
 [sources]
-# Only allow git and crates.io as sources. No local-path overrides in
-# the workspace.
+# Only allow crates.io as a source (unknown-git is denied with no
+# allow-git entry). No local-path overrides in the workspace.
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# pkcs11-module/pkcs11-abi moved to pkcs11-components; the backend consumes
-# them as a rev-pinned git dependency (see crates/backend/Cargo.toml).
-allow-git = ["https://github.com/mingulov/pkcs11-components"]
+# pkcs11-module/pkcs11-abi come from the published pkcs11-components crates
+# on crates.io (see crates/backend/Cargo.toml); no git dependencies remain,
+# so there is no allow-git entry. Re-add one only with a pinned rev plus a
+# residual note.

@@ -1311,7 +1311,8 @@ checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 [[package]]
 name = "pkcs11-abi"
 version = "0.2.0"
-source = "git+https://github.com/mingulov/pkcs11-components?rev=d0a47c71d34294466bc41100ae6b5a5a329029d2#d0a47c71d34294466bc41100ae6b5a5a329029d2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9cba42280f784d54873423f6d60f3154941c244cc3ba6ace11d39ed38e5919fa"
 dependencies = [
  "cryptoki-sys",
 ]
@@ -1319,7 +1320,8 @@ dependencies = [
 [[package]]
 name = "pkcs11-module"
 version = "0.2.0"
-source = "git+https://github.com/mingulov/pkcs11-components?rev=d0a47c71d34294466bc41100ae6b5a5a329029d2#d0a47c71d34294466bc41100ae6b5a5a329029d2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "406e34951fb5062884cdc140dbdfb18a2b5a26c73a104a5c1d09cb6acf0062e8"
 dependencies = [
  "cryptoki-sys",
  "libloading",

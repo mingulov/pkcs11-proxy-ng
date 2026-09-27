@@ -4171,7 +4171,11 @@ fn oasis_inventory_tracks_digest_xof_as_explicit_abi_decision() {
                 .as_array()
                 .expect("XOF ABI decision evidence should be an array")
                 .iter()
-                .any(|source| source == "pkcs11-abi:crates/abi/src/layout.rs"),
+                .any(|source| source.as_str().is_some_and(|citation| {
+                    // Version-pinned `pkcs11-abi@<rev>:src/layout.rs` form; the
+                    // rev tracks the resolved crates.io artifact, not a git path.
+                    citation.starts_with("pkcs11-abi@") && citation.ends_with(":src/layout.rs")
+                })),
             "{function} should cite the upstream pkcs11-abi field catalog checked for ABI exposure"
         );
         assert!(
@@ -6288,10 +6292,11 @@ fn deny_allows_no_unused_licenses() {
 
 #[test]
 fn pkcs11_module_dep_documents_single_maintainer_residual() {
-    // W1-L16-17 (P2→P3): the backend's pkcs11-module git dependency tracks
-    // a single-maintainer fork with no vendor mirror. Downgraded to an
-    // explicit residual: the dependency site records the concentration
-    // risk and the fallback plan (hash-addressed mirror + vendor path).
+    // W1-L16-17 (P2→P3, narrowed): the backend's pkcs11-module crates.io
+    // dependency tracks a single-maintainer project with no org-owned
+    // mirror. Downgraded to an explicit residual: the dependency site
+    // records the concentration risk and the fallback plan
+    // (re-publish/mirror + vendor path).
     let root = workspace_root();
     let backend = fs::read_to_string(root.join("crates/backend/Cargo.toml"))
         .expect("crates/backend/Cargo.toml should be readable");
