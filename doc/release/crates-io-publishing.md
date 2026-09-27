@@ -192,10 +192,13 @@ everything already matches uploads nothing.
   missing versions (absent) from network failures (errors) and from
   published-but-divergent bytes (refusal). Re-run the readback before
   assuming registry state.
-- Full registry-only check without uploading: dispatch `dry-run` (or
-  run `registry-verify` plus `registry-consumer` locally against the
-  candidate inventory) to confirm all eight published checksums and
-  consumer builds at any time.
+- Full registry-only check without uploading: run `registry-verify`
+  plus `registry-consumer` locally against the candidate inventory (or
+  rely on a real dispatch's `verify` job, or the release
+  `registry-recheck`) to confirm all eight published checksums and
+  consumer builds at any time. A `dry-run` dispatch validates guards,
+  CI, and the candidate only — its `verify` job is skipped because
+  `upload` never runs.
 
 ## Evidence retention and escrow
 

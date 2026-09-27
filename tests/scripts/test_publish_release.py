@@ -31,6 +31,9 @@ ROOT = Path(__file__).resolve().parents[2]
 PUBLISH_YML = ROOT / ".github" / "workflows" / "publish.yml"
 STAGING_YML = ROOT / ".github" / "workflows" / "publish-staging.yml"
 RELEASE_YML = ROOT / ".github" / "workflows" / "release.yml"
+CHECKLIST = ROOT / "doc" / "release" / "0.x-beta-release-checklist.md"
+GUIDE = ROOT / "doc" / "release" / "crates-io-publishing.md"
+SCRIPTS_README = ROOT / "scripts" / "README.md"
 
 RELEASE_RUST = "1.98.1"
 MSRV = "1.88.0"
@@ -757,6 +760,38 @@ class TagEvidenceTests(unittest.TestCase):
         self.assertEqual(self.check("--tag", "v0.2.0", "--repo",
                                     str(self.repo), "--expect-peeled",
                                     "0" * 40), 1)
+
+
+class ReleaseDocsAccuracyTests(unittest.TestCase):
+    """Stage D guidance must describe the Stage C machinery exactly.
+
+    The release workflow stages only the two bundles plus the JSON
+    evidence files (no SHA256SUMS assets); a dry-run dispatch skips
+    ``upload`` and therefore ``verify``; and the CI archive jobs are
+    named per platform. Each test below fails on the stale wording.
+    """
+
+    def test_checklist_names_actual_release_assets(self):
+        text = CHECKLIST.read_text(encoding="utf-8")
+        start = text.index("The published release contains")
+        item = text[start:text.index("\n\n", start)]
+        self.assertIn("`inventory.json`", item)
+        self.assertIn("`qualification-binding.json`", item)
+        self.assertNotIn("SHA256SUMS", text)
+
+    def test_guide_scopes_dry_run_to_guards_ci_candidate(self):
+        text = GUIDE.read_text(encoding="utf-8")
+        start = text.index("Full registry-only check without uploading")
+        item = text[start:text.index("\n\n", start)]
+        self.assertIn("`registry-verify`", item)
+        self.assertIn("`registry-consumer`", item)
+        self.assertNotIn("dispatch `dry-run`", item)
+        self.assertIn("candidate only", item)
+
+    def test_scripts_readme_names_both_archive_jobs(self):
+        text = SCRIPTS_README.read_text(encoding="utf-8")
+        self.assertIn("`archive-binary-linux`", text)
+        self.assertIn("`archive-binary-windows`", text)
 
 
 if __name__ == "__main__":
