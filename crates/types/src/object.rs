@@ -74,7 +74,7 @@ impl CkKeyType {
     pub const CAMELLIA: Self = Self(0x0000_0025);
     pub const ARIA: Self = Self(0x0000_0026);
     // HMAC and modern key types, 0x27-0x4B. Values verified against
-    // cryptoki-sys 0.5.0 (generated from the OASIS pkcs11t.h); the
+    // cryptoki-sys 0.5.0 (built from a public-domain PKCS#11 header); the
     // key_type_and_class_tables_match_published_headers test pins every
     // entry against its binding. Names are the canonical CKK_* spellings.
     pub const MD5_HMAC: Self = Self(0x0000_0027);
@@ -209,7 +209,7 @@ mod tests {
     }
 
     /// Every named key-type/object-class constant matches the pinned header
-    /// binding (`cryptoki-sys` 0.5, generated from the OASIS `pkcs11t.h`).
+    /// binding (`cryptoki-sys` 0.5, built from a public-domain PKCS#11 header).
     /// Comparisons go project-const vs binding only — never project vs
     /// project — so a shifted table cannot stay self-consistent.
     #[test]

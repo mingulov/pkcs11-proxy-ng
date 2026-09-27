@@ -153,7 +153,7 @@ mod tests {
         }
     }
 
-    // W1-C9-09: CkFlags carries named CKF_ constants (OASIS PKCS#11 v3.2,
+    // W1-C9-09: CkFlags carries named CKF_ constants (PKCS#11 v3.2,
     // verified against cryptoki-sys 0.5.0); no consumer re-declares them.
     #[test]
     fn ck_flags_named_constants() {

@@ -81,7 +81,6 @@ const EXPECTED_ALLOW_FILES: &[&str] = &[
     "crates/server/tests/parameterized_mechanism_test.rs",
     "crates/server/tests/nss_tls_mkd_mechanism_out_test.rs",
     "crates/server/tests/pin_leak_test.rs",
-    "crates/server/tests/local_quality_gate_test.rs",
     // Example smoke output.
     "crates/shim/examples/cross_width_smoke.rs",
     // Shim live-test diagnostics (ignored-by-default provider tests).

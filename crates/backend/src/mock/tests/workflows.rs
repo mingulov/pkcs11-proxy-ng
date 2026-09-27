@@ -1010,8 +1010,8 @@ fn mock_mechanism_info_leaves_flags_empty_without_source_workflow_evidence() {
 
     // Camellia/ARIA are current-spec mechanisms whose working-spec markdown
     // carries no Mechanisms-vs-Functions table, and they are not in the
-    // historical spec either — so they stay ungrounded (unlike the legacy
-    // BATON/CAST families, which pkcs11-hist now grounds).
+    // historical spec either — so they stay without fallback flags (unlike
+    // the legacy BATON/CAST entries in the committed mock table).
     for mechanism in [
         CkMechanismType(0x0000_0558), // CKM_CAMELLIA_CTR
         CkMechanismType(0x0000_0375), // CKM_TLS_MASTER_KEY_DERIVE
@@ -2376,9 +2376,8 @@ fn mechanism_info_reports_spec_grounded_key_sizes() {
 
 #[test]
 fn historically_grounded_mechanisms_are_accepted_with_workflow_flags() {
-    // C1: legacy mechanisms grounded from the historical spec (pkcs11-hist,
-    // via the generated historical_flags table) must be accepted by the
-    // mock — a client using SKIPJACK/CAST/RC/DES/IDEA/GOST legacy
+    // C1: legacy mechanisms present in the committed historical_flags table
+    // must be accepted by the mock — a client using SKIPJACK/CAST/RC/DES/IDEA/GOST legacy
     // mechanisms through the proxy is exercised, not blanket-rejected.
     let backend = MockBackend::new(
         vec![CkSlotId(0)],

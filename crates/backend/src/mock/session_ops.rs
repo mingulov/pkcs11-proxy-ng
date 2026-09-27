@@ -303,12 +303,11 @@ impl MockBackend {
     }
 }
 
-/// Spec-grounded `(min_key_size, max_key_size)` for mechanisms whose
-/// OASIS tables define concrete sizes. Symmetric mechanisms report key
+/// `(min_key_size, max_key_size)` for mechanisms whose PKCS#11 tables define
+/// concrete sizes. Symmetric mechanisms report key
 /// sizes in BYTES (the convention SoftHSM and most providers follow);
 /// mechanisms with no defined size return `None` so `mechanism_info`
-/// keeps its generic default. Source-grounded metadata (cited by the
-/// OASIS coverage inventory) — extend only with spec-backed values.
+/// keeps its generic default. Extend only with checked standard values.
 /// The CKK_* key type of the secret key produced by a symmetric
 /// `*_KEY_GEN` mechanism (from cryptoki_sys::CKK_*). `None` leaves the
 /// key type unset (mechanism has no single obvious secret key type).
@@ -368,9 +367,8 @@ pub(super) fn mock_mechanism_workflow_flags(mech: CkMechanismType) -> u64 {
     if primary.0 != 0 {
         return primary.0;
     }
-    // Legacy mechanisms dropped from the current working spec are grounded
-    // from the historical-mechanisms spec (pkcs11-hist) instead — see
-    // super::historical_flags (generated, source-cited).
+    // Preserve the committed fallback mapping for legacy mechanisms; its
+    // numeric IDs agree with the cryptoki-sys public-domain header.
     super::historical_flags::historical_workflow_flags(mech).unwrap_or(0)
 }
 

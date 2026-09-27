@@ -11,7 +11,7 @@
 //! constant, so a hex typo or an upstream value change fails the build rather
 //! than silently mis-encoding (or skipping) an attribute across a 32/64-bit ABI.
 //!
-//! The set itself is sourced from the OASIS attribute-type tables (see
+//! The set itself is checked against PKCS#11 attribute-type tables (see
 //! `CkAttributeType::is_ulong`); adding/removing a classifier entry requires
 //! updating the corresponding list here, which is the intended drift guard.
 
