@@ -100,12 +100,36 @@ def require_registry_provenance(path: Path, inventory_path: Path,
     graphs = provenance.get("graphs")
     require(isinstance(graphs, dict) and set(graphs) == set(ROOTS),
             "binary provenance entry-point graphs are incomplete")
+    effective_locks = provenance.get("effective_locks")
+    require(isinstance(effective_locks, dict) and set(effective_locks) == set(ROOTS) and
+            all(effective_locks[name] == locks[name] for name in ROOTS),
+            "registry binary provenance effective locks differ from packaged locks")
     for name, graph in graphs.items():
         require(isinstance(graph, dict) and isinstance(graph.get("packages"), list) and
                 name in graph["packages"] and
                 isinstance(graph.get("runtime_features"), dict) and
                 name in graph["runtime_features"],
                 f"{name} binary provenance graph is incomplete")
+        sources = graph.get("resolved_sources")
+        require(isinstance(sources, list) and sources and
+                all(isinstance(item, dict) and set(item) == {"name", "version", "source"} and
+                    isinstance(item["name"], str) and isinstance(item["version"], str)
+                    for item in sources),
+                f"{name} binary provenance resolved sources are incomplete")
+        require(len({(item["name"], item["version"], item["source"]) for item in sources}) == len(sources),
+                f"{name} binary provenance resolved sources repeat an identity")
+        roots = [item for item in sources if item["name"] == name]
+        require(len(roots) == 1 and roots[0] == {"name": name, "version": inventory["version"],
+                                                  "source": "verified-unpacked-root"},
+                f"{name} binary provenance root source differs")
+        for item in sources:
+            if item["name"] != name:
+                require(item["source"] == REGISTRY_SOURCE and
+                        (item["name"] not in INTERNAL or item["version"] == inventory["version"]),
+                        f"{name} binary provenance includes a non-registry dependency")
+        require(set(graph["packages"]) == {item["name"] for item in sources
+                                             if item["name"] in INTERNAL},
+                f"{name} binary provenance internal source graph differs")
     expected_artifacts = {"pkcs11-proxy-ng": ("pkcs11-proxy-ng", "bin"),
                           "pkcs11-proxy-ng-cli": ("pkcs11-proxy-ng-cli", "bin"),
                           _artifact_name("pkcs11-proxy-ng-shim", target): ("pkcs11-proxy-ng-shim", "lib")}
@@ -186,17 +210,26 @@ def validate_build_graph(metadata: dict, unpack: Path, root_name: str,
         for dep in nodes[item].get("deps", []):
             if any(kind.get("kind") in (None, "build") for kind in dep.get("dep_kinds", [])):
                 pending.append(dep["pkg"])
+    resolved_sources = []
     for item in reachable:
         package = packages[item]
         if package["name"] not in INTERNAL:
             require(package.get("source") == REGISTRY_SOURCE,
                     f"{package['name']} resolved from a non-registry source")
+        source = package.get("source")
+        if package["name"] == root_name:
+            source = "verified-unpacked-root"
+        elif package["name"] in INTERNAL and mode == "archive":
+            source = "verified-archive-patch"
+        resolved_sources.append({"name": package["name"], "version": package["version"],
+                                 "source": source})
     require(not runtime_features.get(root_name),
             f"{root_name} enables unexpected release features: {sorted(runtime_features.get(root_name, set()))}")
     for name in INTERNAL:
         require("native-owner-test-hooks" not in runtime_features.get(name, set()),
                 f"{name} enables native owner test hooks")
-    return result
+    return {**result, "resolved_sources": sorted(resolved_sources,
+            key=lambda item: (item["name"], item["version"], item["source"]))}
 
 
 def _run(command: list[str], cwd: Path, env: dict) -> str:
@@ -417,8 +450,10 @@ def build_binaries(repo: Path, inventory_path: Path, package_dir: Path, source: 
                 "inventory_sha256": _sha256(inventory_path),
                 "archives": {item["name"]: item["sha256"] for item in inventory["packages"]},
                 "original_locks": {name: _sha256(original_locks / f"{name}.lock") for name in roots},
+                "effective_locks": {name: _sha256(roots[name] / "Cargo.lock") for name in ROOTS},
                 "graphs": {name: {"packages": data["checked"]["packages"],
-                                  "runtime_features": data["runtime_features"]}
+                                  "runtime_features": data["runtime_features"],
+                                  "resolved_sources": data["checked"]["resolved_sources"]}
                            for name, data in graphs.items()},
                 "artifacts": artifacts}
     (output / "build-provenance.json").write_text(json.dumps(portable, indent=2, sort_keys=True) + "\n")
