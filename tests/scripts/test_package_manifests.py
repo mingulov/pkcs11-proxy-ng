@@ -90,6 +90,23 @@ class PackageManifestTests(unittest.TestCase):
             self.assertTrue((proto / "proto/pkcs11-proxy-ng/v1" / (name + ".proto")).is_file())
         self.assertFalse((ROOT / "proto/pkcs11-proxy-ng/v1/service.proto").exists())
 
+    def test_readmes_explain_build_tools_and_repository_test_boundary(self):
+        for crate in CRATES:
+            with self.subTest(crate=crate):
+                readme = (ROOT / "crates" / crate / "README.md").read_text()
+                for required in (
+                    "Rust 1.88",
+                    "C compiler",
+                    "pkg-config",
+                    "protoc",
+                    "cargo install",
+                    "example",
+                    "standalone Git checkout",
+                    "cargo test --workspace",
+                    "repository-only tests",
+                ):
+                    self.assertIn(required, readme)
+
 
 if __name__ == "__main__":
     unittest.main()
