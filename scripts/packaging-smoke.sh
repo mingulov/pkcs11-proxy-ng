@@ -3,8 +3,10 @@
 #
 # Full Alpine-APK / Amazon-RPM carrier builds run in external GitLab
 # (.gitlab-ci.yml) by design; this script is the fast GitHub-side signal
-# (ci.yml `packaging-smoke` job + test-matrix.sh fast checks). It fails
-# fast on:
+# (ci.yml `packaging-smoke` job + test-matrix.sh fast checks). Stage B
+# adds a GitHub APK build/install/sign lane alongside (ci.yml
+# `smoke-apk-alpine`); full Amazon RPM build/install stays in GitLab.
+# It fails fast on:
 #   (a) APKBUILD/spec shape breakage, and
 #   (b) version drift between the Cargo workspace and the four packaging
 #       mirrors (.gitlab-ci.yml APP_VERSION, APKBUILD pkgver, spec

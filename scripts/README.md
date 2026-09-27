@@ -14,6 +14,7 @@ Build, test, and release scripts, with their callers. Paths are relative to
 | `packaging-smoke.sh` | `ci.yml` and `test-matrix.sh`: packaging/version consistency |
 | `musl-dynamic-link-flags.sh` | `ci.yml` and `run-musl-test.sh`: common musl link flags |
 | `ci-direct-vs-proxy.py` | `cross-platform.yml`: native direct-versus-proxied provider comparisons |
+| `ci-package-smoke.py` | `ci.yml` smoke lanes: reusable installed/extracted artifact contract (APK set, Linux tarball, Windows ZIP); reused for registry bundles before asset approval |
 | `test-matrix.sh` | `nightly.yml` and `Dockerfile.test`: local CI gates and provider/consumer lanes |
 | `run-test-tiers.sh` | `nightly.yml`: live test lanes; also a manual unit/integration/regression runner |
 | `verify-release-subject.sh` | `release.yml`: validate the tag subject and version mirrors |
@@ -21,7 +22,13 @@ Build, test, and release scripts, with their callers. Paths are relative to
 | `release-windows.sh` | `release.yml`: build and stage the Windows ZIP |
 
 The GitLab pipeline builds the Alpine and Amazon carrier images through their
-packaging Dockerfiles. GitHub's packaging smoke gate checks their source metadata.
+packaging Dockerfiles. GitHub's packaging smoke gate checks their source metadata,
+and the `ci.yml` package-candidate, archive-binary, and
+smoke-apk-alpine / smoke-bundle-linux / smoke-bundle-windows jobs build
+source-bound archive binaries and run installed/extracted provider smokes on
+every PR and publication run via `ci-package-smoke.py`. Workspace APK output is
+CI smoke evidence, not a release asset; full Amazon RPM build/install is not
+covered by the GitHub gate.
 The authoritative release order and evidence requirements are in the
 [`0.x` beta release checklist](../doc/release/0.x-beta-release-checklist.md).
 
@@ -57,7 +64,7 @@ Live tests may skip when their tools or providers are unavailable.
 | --- | --- |
 | `run-be-qemu-test.sh` | Big-endian/QEMU qualification; see `doc/release/be-qemu-tier.md` |
 | `run-musl-test.sh` | Full musl qualification; see `doc/release/musl-tier.md` |
-| `test-softhsm2-smoke.sh` | Local SoftHSM2 end-to-end smoke test; cross-platform CI uses `ci-direct-vs-proxy.py` |
+| `test-softhsm2-smoke.sh` | Local SoftHSM2 end-to-end smoke test; cross-platform CI uses `ci-direct-vs-proxy.py`; packaged-artifact CI uses `ci-package-smoke.py`. Accepts explicit daemon/shim paths via `PKCS11_PROXY_NG_DAEMON_BIN` / `PKCS11_PROXY_NG_SHIM_LIB` |
 | `test-verify-quality-receipt.sh` | Regression battery for the quality-receipt shell step in `release.yml` |
 | `release/validate_receipt.py` | Portable evidence validator; tested by `tests/scripts/test_release_receipts.py`; separate from the workflow's Markdown receipt gate |
 | `test-pkcs11test-coverage.sh` | Report the contents of the consumer filter |

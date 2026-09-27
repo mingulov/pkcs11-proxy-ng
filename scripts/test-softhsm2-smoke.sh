@@ -14,6 +14,9 @@
 # expects the workspace to already have been built once
 # (target/release/pkcs11-proxy-ng and libpkcs11_proxy_ng_shim.so);
 # scripts/release-dry-run.sh is the standard way to produce them.
+# Set PKCS11_PROXY_NG_DAEMON_BIN / PKCS11_PROXY_NG_SHIM_LIB to run the
+# same flow against explicit artifact paths (e.g. extracted bundle
+# binaries) instead of the workspace release defaults.
 
 set -euo pipefail
 
@@ -24,8 +27,8 @@ case "$TARGET_ROOT" in
     *) TARGET_ROOT="$ROOT_DIR/$TARGET_ROOT" ;;
 esac
 RELEASE_DIR="$TARGET_ROOT/release"
-DAEMON_BIN="$RELEASE_DIR/pkcs11-proxy-ng"
-SHIM_LIB="$RELEASE_DIR/libpkcs11_proxy_ng_shim.so"
+DAEMON_BIN="${PKCS11_PROXY_NG_DAEMON_BIN:-$RELEASE_DIR/pkcs11-proxy-ng}"
+SHIM_LIB="${PKCS11_PROXY_NG_SHIM_LIB:-$RELEASE_DIR/libpkcs11_proxy_ng_shim.so}"
 
 # Pick a SoftHSM2 .so the host actually has.
 SOFTHSM2_LIB=""
