@@ -131,6 +131,15 @@ class ConsumerIdentityTests(unittest.TestCase):
                 with self.assertRaises(ReleaseError):
                     validate_metadata(graph, self.unpack, "pkcs11-proxy-ng-client", "0.2.0", "archive")
 
+    def test_rejects_unreachable_internal_metadata_checkout_source(self):
+        graph = self.metadata()
+        graph["packages"].append({
+            "id": "path+file:///backend#0.2.0", "name": "pkcs11-proxy-ng-backend",
+            "version": "0.2.0", "source": None,
+            "manifest_path": str(self.root / "checkout/backend/Cargo.toml")})
+        with self.assertRaises(ReleaseError):
+            validate_metadata(graph, self.unpack, "pkcs11-proxy-ng-client", "0.2.0", "archive")
+
     def test_thin_client_rejects_backend_and_server_transport_features(self):
         server = {"id": "registry+server#0.2.0", "name": "pkcs11-proxy-ng",
                   "version": "0.2.0", "source": self.source,

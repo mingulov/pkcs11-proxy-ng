@@ -1,8 +1,11 @@
 """Controlled registry publication and recovery cases."""
 
 from pathlib import Path
+import hashlib
+import io
 import json
 import sys
+import tarfile
 import tempfile
 import unittest
 
@@ -10,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 from release.package_model import PACKAGES, ReleaseError  # noqa: E402
 from release.package_registry import Registry, publication_state, read_inventory, verify_publication  # noqa: E402
+from release.package_consumers import registry_consumer  # noqa: E402
 import release_checks  # noqa: E402
 
 
@@ -93,6 +97,13 @@ class RegistryTests(unittest.TestCase):
         self.replies[url] = (200, self.replies[url][1] * 2)
         with self.assertRaisesRegex(ReleaseError, "ambiguous"):
             publication_state(self.inventory, "workspace", self.registry)
+        self.replies[url] = (200, b"42\n")
+        with self.assertRaises(ReleaseError):
+            publication_state(self.inventory, "workspace", self.registry)
+        self.replies[url] = (200, json.dumps({"name": "different", "vers": "0.2.0",
+                                             "cksum": "b" * 64, "yanked": False}).encode())
+        with self.assertRaises(ReleaseError):
+            publication_state(self.inventory, "workspace", self.registry)
 
     def test_wrong_hash_in_one_surface_fails_even_while_other_is_pending(self):
         name = PACKAGES[0][0]
@@ -110,6 +121,9 @@ class RegistryTests(unittest.TestCase):
                 self.assertEqual(release_checks.main(["registry-state", "--inventory", str(path)]), 0)
                 self.assertEqual(release_checks.main(["registry-verify", "--inventory", str(path)]), 1)
             path.write_text(path.read_text().replace("pkcs11-proxy-ng-types", "wrong-name"))
+            with self.assertRaises(ReleaseError):
+                read_inventory(path)
+            path.write_text(json.dumps({**self.inventory, "source_commit": "bad"}))
             with self.assertRaises(ReleaseError):
                 read_inventory(path)
     def test_verify_incomplete_only_after_selected_matches_and_complete_after_recovery(self):
@@ -133,6 +147,43 @@ class RegistryTests(unittest.TestCase):
             self.publish(record["name"], checksum=digest)
             self.replies[self.registry.download_url(record["name"], "0.2.0")] = (200, payload)
         self.assertEqual(verify_publication(self.inventory, self.registry, selected=name)["state"], "complete")
+
+    def test_registry_consumer_requires_complete_and_uses_verified_downloads(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "inventory.json"
+            path.write_text(json.dumps(self.inventory), encoding="utf-8")
+            with patch("release.package_consumers._consume", side_effect=AssertionError("must not build")):
+                with self.assertRaises(ReleaseError):
+                    registry_consumer(ROOT, path, "1.88.0", self.registry)
+            for record in self.inventory["packages"]:
+                name = record["name"]
+                content = io.BytesIO()
+                with tarfile.open(fileobj=content, mode="w:gz") as archive:
+                    for relative, body in (("Cargo.toml", b"[package]\n"),
+                                           ("Cargo.lock", b"version = 4\n")):
+                        info = tarfile.TarInfo(f"{name}-0.2.0/{relative}")
+                        info.size = len(body)
+                        archive.addfile(info, io.BytesIO(body))
+                payload = content.getvalue()
+                record["sha256"] = hashlib.sha256(payload).hexdigest()
+                self.publish(name, checksum=record["sha256"])
+                self.replies[self.registry.download_url(name, "0.2.0")] = (200, payload)
+            path.write_text(json.dumps(self.inventory), encoding="utf-8")
+
+            def inspect_roots(roots, base, repo, toolchain, version, hashes, *, registry):
+                self.assertTrue(registry)
+                self.assertEqual(set(roots), {name for name, _ in PACKAGES})
+                self.assertEqual(version, "0.2.0")
+                for name, root in roots.items():
+                    self.assertEqual((root / "Cargo.lock").read_bytes(), b"version = 4\n")
+                    self.assertEqual(hashes[name], next(item["sha256"] for item in
+                                                         self.inventory["packages"] if item["name"] == name))
+                return {"verified_roots": len(roots)}
+
+            with patch("release.package_consumers._consume", side_effect=inspect_roots):
+                self.assertEqual(registry_consumer(ROOT, path, "1.88.0", self.registry),
+                                 {"verified_roots": 8})
 
 
 if __name__ == "__main__":
