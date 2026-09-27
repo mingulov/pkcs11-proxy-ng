@@ -24,7 +24,8 @@ Build, test, and release scripts, with their callers. Paths are relative to
 
 The GitLab pipeline builds the Alpine and Amazon carrier images through their
 packaging Dockerfiles. GitHub's packaging smoke gate checks their source metadata,
-and the `ci.yml` package-candidate, archive-binary, and
+and the `ci.yml` package-candidate, `archive-binary-linux`,
+`archive-binary-windows`, and
 smoke-apk-alpine / smoke-bundle-linux / smoke-bundle-windows jobs build
 source-bound archive binaries and run installed/extracted provider smokes on
 every PR and publication run via `ci-package-smoke.py`. Workspace APK output is
