@@ -13,7 +13,8 @@ import tarfile
 import tomllib
 
 from release.package_model import (INTERNAL, PACKAGES, ReleaseError, checked_workspace,
-                                   effective_dep, git, read_toml, require, source_sections)
+                                   checked_workspace_manifests, effective_dep, git, require,
+                                   source_sections)
 
 MAX_FILE = 16 * 1024 * 1024
 MAX_CONTENT = 64 * 1024 * 1024
@@ -48,14 +49,33 @@ def committed_bytes(repo: Path, commit: str, relative: str) -> bytes:
     return result.stdout
 
 
-def checked_source_bytes(repo: Path, commit: str, relative: str) -> bytes:
-    try:
-        current = (repo / relative).read_bytes()
-    except OSError as exc:
-        raise ReleaseError(f"cannot read source {relative}: {exc}") from exc
-    require(current == committed_bytes(repo, commit, relative),
-            f"source differs from committed HEAD: {relative}")
-    return current
+class SourceSnapshot:
+    """Immutable commit blobs plus the working inputs checked against them."""
+
+    def __init__(self, repo: Path, commit: str):
+        self.repo = repo
+        self.commit = commit
+        self._blobs: dict[str, bytes] = {}
+        self._checked: set[str] = set()
+
+    def blob(self, relative: str) -> bytes:
+        if relative not in self._blobs:
+            self._blobs[relative] = committed_bytes(self.repo, self.commit, relative)
+        return self._blobs[relative]
+
+    def check(self, relative: str) -> bytes:
+        expected = self.blob(relative)
+        try:
+            current = (self.repo / relative).read_bytes()
+        except OSError as exc:
+            raise ReleaseError(f"cannot read source {relative}: {exc}") from exc
+        require(current == expected, f"source differs from captured commit: {relative}")
+        self._checked.add(relative)
+        return expected
+
+    def recheck(self) -> None:
+        for relative in sorted(self._checked):
+            self.check(relative)
 
 
 def archive_entries(archive: Path, name: str, version: str) -> dict[str, bytes]:
@@ -107,9 +127,9 @@ def archive_entries(archive: Path, name: str, version: str) -> dict[str, bytes]:
         raise ReleaseError(f"cannot inspect {archive}: {exc}") from exc
 
 
-def package_sources(repo: Path, directory: str, source: dict, tracked: set[str],
-                    commit: str) -> dict[str, bytes]:
-    root = repo / "crates" / directory
+def package_sources(snapshot: SourceSnapshot, directory: str, source: dict,
+                    tracked: set[str]) -> dict[str, bytes]:
+    root = snapshot.repo / "crates" / directory
     patterns = source["package"]["include"]
     require(isinstance(patterns, list), f"invalid include list for {directory}")
     expected = {}
@@ -128,7 +148,7 @@ def package_sources(repo: Path, directory: str, source: dict, tracked: set[str],
             source_path = f"crates/{directory}/{relative}"
             require(source_path in tracked,
                     f"{directory} package source is absent from HEAD: {relative}")
-            expected[relative] = checked_source_bytes(repo, commit, source_path)
+            expected[relative] = snapshot.check(source_path)
     prefix = f"crates/{directory}/"
     for source_path in tracked:
         if not source_path.startswith(prefix):
@@ -141,7 +161,7 @@ def package_sources(repo: Path, directory: str, source: dict, tracked: set[str],
             require(relative in expected, f"{directory} committed package source is missing: {relative}")
     require("Cargo.toml" in expected and "README.md" in expected, f"missing package source in {root}")
     for license_name in ("LICENSE-APACHE", "LICENSE-MIT"):
-        require(expected.get(license_name) == (repo / license_name).read_bytes(),
+        require(expected.get(license_name) == snapshot.blob(license_name),
                 f"{directory} license differs from root")
     return expected
 
@@ -191,13 +211,13 @@ def validate_dependencies(source: dict, workspace: dict, normalized: dict, name:
                 require(found == value, f"{name} {dep} {key} differs from source")
 
 
-def expected_targets(root: Path, source: dict, entries: dict[str, bytes]) -> dict[str, list[dict]]:
+def expected_targets(source: dict, entries: dict[str, bytes]) -> dict[str, list[dict]]:
     result = {}
     package = source["package"]
     stem = package["name"].replace("-", "_")
-    if (root / "src/lib.rs").is_file():
+    if "src/lib.rs" in entries:
         result["lib"] = [{"name": stem, "path": "src/lib.rs"}]
-    if (root / "src/main.rs").is_file():
+    if "src/main.rs" in entries:
         result["bin"] = [{"name": package["name"], "path": "src/main.rs"}]
     for kind in ("lib", "bin", "example", "test", "bench"):
         if kind in ("lib", "bin") and kind in source:
@@ -206,7 +226,9 @@ def expected_targets(root: Path, source: dict, entries: dict[str, bytes]) -> dic
         elif kind not in ("lib", "bin") and kind in source:
             result[kind] = source[kind]
     for kind, folder in (("example", "examples"), ("test", "tests"), ("bench", "benches")):
-        paths = sorted((root / folder).glob("*.rs")) if (root / folder).is_dir() else []
+        paths = sorted(Path(relative) for relative in entries
+                       if relative.startswith(f"{folder}/") and relative.count("/") == 1
+                       and relative.endswith(".rs"))
         if paths and kind not in result:
             result[kind] = [{"name": path.stem, "path": f"{folder}/{path.name}"} for path in paths]
     included = {}
@@ -229,11 +251,9 @@ def expected_targets(root: Path, source: dict, entries: dict[str, bytes]) -> dic
     return included
 
 
-def validate_manifest(repo: Path, directory: str, name: str, version: str,
-                      entries: dict[str, bytes], workspace: dict) -> None:
-    root = repo / "crates" / directory
-    source = read_toml(root / "Cargo.toml")
-    require(entries.get("Cargo.toml.orig") == (root / "Cargo.toml").read_bytes(),
+def validate_manifest(directory: str, name: str, version: str, entries: dict[str, bytes],
+                      workspace: dict, source: dict, source_bytes: bytes) -> None:
+    require(entries.get("Cargo.toml.orig") == source_bytes,
             f"{name} original manifest differs from source")
     require("Cargo.toml" in entries, f"{name} missing normalized manifest")
     normalized = parsed_bytes(entries["Cargo.toml"], f"{name} Cargo.toml")
@@ -261,7 +281,7 @@ def validate_manifest(repo: Path, directory: str, name: str, version: str,
                 f"{name} manifest includes unsafe path")
     source_build = inherited(source, workspace, "build")
     expected_build = source_build if source_build is not None else (
-        "build.rs" if (root / "build.rs").is_file() else False)
+        "build.rs" if "build.rs" in entries else False)
     require(actual.get("build") == expected_build, f"{name} normalized build field differs")
     if isinstance(expected_build, str):
         require(safe_relative(expected_build) and expected_build in entries,
@@ -275,7 +295,7 @@ def validate_manifest(repo: Path, directory: str, name: str, version: str,
             f"{name} normalized features differ")
     require(actual.get("metadata") == source.get("package", {}).get("metadata"),
             f"{name} normalized metadata differs")
-    targets_by_kind = expected_targets(root, source, entries)
+    targets_by_kind = expected_targets(source, entries)
     for kind, targets in targets_by_kind.items():
         actual_targets = normalized.get(kind, [])
         if isinstance(actual_targets, dict):
@@ -298,12 +318,13 @@ def validate_manifest(repo: Path, directory: str, name: str, version: str,
 
 
 def validate_archive(repo: Path, package_dir: Path, name: str, directory: str,
-                     version: str, commit: str, workspace: dict,
+                     version: str, snapshot: SourceSnapshot, workspace: dict,
                      tracked: set[str]) -> tuple[dict, dict[str, bytes]]:
     archive = package_dir / f"{name}-{version}.crate"
     entries = archive_entries(archive, name, version)
-    source = read_toml(repo / "crates" / directory / "Cargo.toml")
-    expected = package_sources(repo, directory, source, tracked, commit)
+    source_bytes = snapshot.blob(f"crates/{directory}/Cargo.toml")
+    source = parsed_bytes(source_bytes, f"{name} source Cargo.toml")
+    expected = package_sources(snapshot, directory, source, tracked)
     expected.pop("Cargo.toml")
     require(set(entries) - GENERATED == set(expected), f"{name} archive source file set differs")
     for path, content in expected.items():
@@ -313,13 +334,13 @@ def validate_archive(repo: Path, package_dir: Path, name: str, directory: str,
         vcs = json.loads(entries[".cargo_vcs_info.json"])
     except (ValueError, UnicodeError) as exc:
         raise ReleaseError(f"{name} invalid VCS provenance: {exc}") from exc
-    require(vcs.get("git", {}).get("sha1") == commit and
+    require(vcs.get("git", {}).get("sha1") == snapshot.commit and
             vcs.get("path_in_vcs") == f"crates/{directory}" and
             vcs.get("dirty", False) is False and
             set(vcs) <= {"git", "path_in_vcs", "dirty"},
             f"{name} VCS provenance differs from clean source")
     require(set(vcs["git"]) == {"sha1"}, f"{name} VCS provenance has unexpected fields")
-    validate_manifest(repo, directory, name, version, entries, workspace)
+    validate_manifest(directory, name, version, entries, workspace, source, source_bytes)
     require("Cargo.lock" in entries, f"{name} lacks generated Cargo.lock")
     lock = parsed_bytes(entries["Cargo.lock"], f"{name} Cargo.lock")
     require(isinstance(lock.get("package"), list), f"{name} invalid generated Cargo.lock")
@@ -336,28 +357,34 @@ def validate_archive(repo: Path, package_dir: Path, name: str, directory: str,
 
 def _inspect(repo: Path, package_dir: Path) -> tuple[dict, dict[str, dict[str, bytes]]]:
     commit = git(repo, "rev-parse", "HEAD")
+    snapshot = SourceSnapshot(repo, commit)
     require(not git(repo, "status", "--porcelain", "--untracked-files=all"),
             "source checkout has tracked or untracked changes")
     for relative in ("Cargo.toml", "Cargo.lock", "LICENSE-APACHE", "LICENSE-MIT"):
-        checked_source_bytes(repo, commit, relative)
+        snapshot.check(relative)
     for _, directory in PACKAGES:
-        checked_source_bytes(repo, commit, f"crates/{directory}/Cargo.toml")
-    version = checked_workspace(repo)
+        snapshot.check(f"crates/{directory}/Cargo.toml")
+    checked_workspace(repo)
+    workspace = parsed_bytes(snapshot.blob("Cargo.toml"), "workspace Cargo.toml")
+    source_manifests = {directory: parsed_bytes(snapshot.blob(f"crates/{directory}/Cargo.toml"),
+                                                f"{directory} source Cargo.toml")
+                        for _, directory in PACKAGES}
+    version = checked_workspace_manifests(repo, workspace, source_manifests)
     require(git(repo, "ls-tree", "-r", "--name-only", commit, "--", "Cargo.lock") == "Cargo.lock",
             "workspace Cargo.lock is absent from HEAD")
     require(package_dir.is_dir(), f"missing package directory: {package_dir}")
     wanted = {f"{name}-{version}.crate" for name, _ in PACKAGES}
     actual = {path.name for path in package_dir.glob("*.crate")}
     require(actual == wanted, f"package archive set differs: missing {sorted(wanted - actual)}, extra {sorted(actual - wanted)}")
-    workspace = read_toml(repo / "Cargo.toml")
     tracked = set(git(repo, "ls-tree", "-r", "--name-only", commit, "--", "crates").splitlines())
     records = []
     contents = {}
     for name, directory in PACKAGES:
-        record, entries = validate_archive(repo, package_dir, name, directory, version, commit, workspace, tracked)
+        record, entries = validate_archive(repo, package_dir, name, directory, version, snapshot,
+                                           workspace, tracked)
         records.append(record)
         contents[name] = entries
-    root_lock = read_toml(repo / "Cargo.lock")
+    root_lock = parsed_bytes(snapshot.blob("Cargo.lock"), "workspace Cargo.lock")
     baseline = {(package["name"], package["version"], package.get("source"),
                  package.get("checksum")) for package in root_lock.get("package", [])
                 if package.get("source") is not None}
@@ -381,6 +408,7 @@ def _inspect(repo: Path, package_dir: Path) -> tuple[dict, dict[str, dict[str, b
                         f"{name} external lock identity differs from committed workspace lock")
     require(not git(repo, "status", "--porcelain", "--untracked-files=all"),
             "source checkout changed during inspection")
+    snapshot.recheck()
     require(git(repo, "rev-parse", "HEAD") == commit, "HEAD changed during inspection")
     return ({"format_version": 1, "source_commit": commit, "version": version,
              "packages": records}, contents)
