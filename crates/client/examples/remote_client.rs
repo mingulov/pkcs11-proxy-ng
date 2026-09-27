@@ -6,7 +6,7 @@ use pkcs11_proxy_ng_client::{
     Salsa20ChaCha20Poly1305MessageParams, types,
 };
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     let endpoint = std::env::args().nth(1).unwrap_or_else(|| "http://127.0.0.1:50051".to_owned());
     let mut client = Pkcs11Client::connect(&endpoint).await.expect("connect to proxy daemon");
