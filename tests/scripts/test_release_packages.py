@@ -8,10 +8,12 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 from release.package_archives import extract_verified_archives, inspect_archives  # noqa: E402
+import release.package_archives as package_archives  # noqa: E402
 from release.package_model import PACKAGES, ReleaseError, checked_workspace  # noqa: E402
 import release_checks  # noqa: E402
 
@@ -272,6 +274,60 @@ class ReleasePackageTests(ArchiveFixture):
             self.archive(name, directory, entries=entries)
         self.assertEqual(git(self.repo, "status", "--porcelain", "--untracked-files=all"), "")
         self.assert_refused()
+
+    def test_refuses_source_changed_after_its_archive_was_validated(self):
+        relative = "crates/types/src/lib.rs"
+        git(self.repo, "update-index", "--assume-unchanged", relative)
+        original = package_archives.validate_archive
+
+        def validate_then_change(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if args[2] == "pkcs11-proxy-ng-types":
+                (self.repo / relative).write_text("pub fn changed_after_validation() {}\n")
+                self.assertEqual(git(self.repo, "status", "--porcelain", "--untracked-files=all"), "")
+            return result
+
+        with mock.patch.object(package_archives, "validate_archive", side_effect=validate_then_change):
+            self.assert_refused()
+
+    def test_refuses_root_manifest_changed_before_semantic_parsing(self):
+        relative = "Cargo.toml"
+        git(self.repo, "update-index", "--skip-worktree", relative)
+        for name, directory in PACKAGES:
+            entries = self.entries(name, directory)
+            entries["Cargo.toml"] = entries["Cargo.toml"].replace(
+                b'[dependencies.serde]\nversion = "1"',
+                b'[dependencies.serde]\nversion = "2"')
+            self.archive(name, directory, entries=entries)
+        original = package_archives.checked_workspace
+
+        def change_then_check(repo):
+            manifest = self.repo / relative
+            manifest.write_bytes(manifest.read_bytes().replace(
+                b'serde = { version = "1"', b'serde = { version = "2"'))
+            self.assertEqual(git(self.repo, "status", "--porcelain", "--untracked-files=all"), "")
+            return original(repo)
+
+        with mock.patch.object(package_archives, "checked_workspace", side_effect=change_then_check):
+            self.assert_refused()
+
+    def test_refuses_root_lock_changed_before_baseline_parsing(self):
+        relative = "Cargo.lock"
+        git(self.repo, "update-index", "--skip-worktree", relative)
+        for name, directory in PACKAGES:
+            entries = self.entries(name, directory)
+            entries["Cargo.lock"] = entries["Cargo.lock"].replace(b"a" * 64, b"b" * 64)
+            self.archive(name, directory, entries=entries)
+        original = package_archives.checked_workspace
+
+        def change_then_check(repo):
+            lock = self.repo / relative
+            lock.write_bytes(lock.read_bytes().replace(b"a" * 64, b"b" * 64))
+            self.assertEqual(git(self.repo, "status", "--porcelain", "--untracked-files=all"), "")
+            return original(repo)
+
+        with mock.patch.object(package_archives, "checked_workspace", side_effect=change_then_check):
+            self.assert_refused()
 
     def test_refuses_manifest_and_vcs_mutations(self):
         name, directory = PACKAGES[0]

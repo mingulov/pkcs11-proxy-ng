@@ -79,6 +79,13 @@ def effective_dep(spec: object, workspace: dict, name: str) -> dict:
 
 def checked_workspace(repo: Path) -> str:
     workspace = read_toml(repo / "Cargo.toml")
+    manifests = {directory: read_toml(repo / "crates" / directory / "Cargo.toml")
+                 for _, directory in PACKAGES}
+    return checked_workspace_manifests(repo, workspace, manifests)
+
+
+def checked_workspace_manifests(repo: Path, workspace: dict, manifests: dict[str, dict]) -> str:
+    """Validate the workspace contract against a supplied manifest snapshot."""
     section = workspace.get("workspace", {})
     version = section.get("package", {}).get("version")
     require(isinstance(version, str) and bool(re.fullmatch(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?", version)),
@@ -90,7 +97,7 @@ def checked_workspace(repo: Path) -> str:
     require({path.parent.relative_to(repo).as_posix() for path in (repo / "crates").glob("*/Cargo.toml")}
             == expected_members, "crate manifest set differs from eight release crates")
     for name, directory in PACKAGES:
-        manifest = read_toml(repo / "crates" / directory / "Cargo.toml")
+        manifest = manifests[directory]
         package = manifest.get("package", {})
         require(package.get("name") == name, f"{directory} has wrong package name")
         source_version = package.get("version")
