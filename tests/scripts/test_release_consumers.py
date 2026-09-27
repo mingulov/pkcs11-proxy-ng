@@ -128,6 +128,21 @@ class ConsumerIdentityTests(unittest.TestCase):
         with self.assertRaises(ReleaseError):
             validate_metadata(graph, self.unpack, "pkcs11-proxy-ng-client", "0.2.0", "registry")
 
+    def test_runtime_features_exclude_root_dev_feature_unification(self):
+        graph = self.metadata()
+        graph["packages"].append({"id": "registry+tonic", "name": "tonic", "version": "0.14.5",
+                                  "source": self.source,
+                                  "manifest_path": str(self.root / "registry/tonic/Cargo.toml")})
+        graph["resolve"]["nodes"].append({"id": "registry+tonic",
+                                          "features": ["channel", "server"], "deps": []})
+        graph["resolve"]["nodes"][0]["deps"].append(
+            {"pkg": "registry+tonic", "dep_kinds": [{"kind": None}]})
+        validate_metadata(graph, self.unpack, "pkcs11-proxy-ng-client", "0.2.0", "archive",
+                          runtime_features={"tonic": {"channel"}})
+        with self.assertRaises(ReleaseError):
+            validate_metadata(graph, self.unpack, "pkcs11-proxy-ng-client", "0.2.0", "archive",
+                              runtime_features={"tonic": {"server"}})
+
 
 if __name__ == "__main__":
     unittest.main()
