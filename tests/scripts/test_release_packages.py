@@ -245,6 +245,34 @@ class ReleasePackageTests(ArchiveFixture):
         self.assertEqual(git(self.repo, "status", "--porcelain", "--untracked-files=all"), "")
         self.assert_refused()
 
+    def test_refuses_assume_unchanged_source_bytes(self):
+        relative = "crates/types/src/lib.rs"
+        git(self.repo, "update-index", "--assume-unchanged", relative)
+        (self.repo / relative).write_text("pub fn changed_after_commit() {}\n")
+        self.build_all()
+        self.assertEqual(git(self.repo, "status", "--porcelain", "--untracked-files=all"), "")
+        self.assert_refused()
+
+    def test_refuses_skip_worktree_crate_manifest_bytes(self):
+        relative = "crates/types/Cargo.toml"
+        git(self.repo, "update-index", "--skip-worktree", relative)
+        manifest = self.repo / relative
+        manifest.write_text(manifest.read_text() + "# hidden after commit\n")
+        self.build_all()
+        self.assertEqual(git(self.repo, "status", "--porcelain", "--untracked-files=all"), "")
+        self.assert_refused()
+
+    def test_refuses_skip_worktree_root_lock_baseline_substitution(self):
+        git(self.repo, "update-index", "--skip-worktree", "Cargo.lock")
+        lock = self.repo / "Cargo.lock"
+        lock.write_bytes(lock.read_bytes().replace(b"a" * 64, b"b" * 64))
+        for name, directory in PACKAGES:
+            entries = self.entries(name, directory)
+            entries["Cargo.lock"] = entries["Cargo.lock"].replace(b"a" * 64, b"b" * 64)
+            self.archive(name, directory, entries=entries)
+        self.assertEqual(git(self.repo, "status", "--porcelain", "--untracked-files=all"), "")
+        self.assert_refused()
+
     def test_refuses_manifest_and_vcs_mutations(self):
         name, directory = PACKAGES[0]
         cases = (

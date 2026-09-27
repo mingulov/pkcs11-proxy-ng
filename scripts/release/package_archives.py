@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import subprocess
 import tarfile
 import tomllib
 
@@ -37,6 +38,24 @@ def safe_relative(path: str) -> bool:
     return (bool(path) and not path.startswith("/") and "\\" not in path and
             all(part not in ("", ".", "..") and not part.startswith(".")
                 for part in path.split("/")))
+
+
+def committed_bytes(repo: Path, commit: str, relative: str) -> bytes:
+    result = subprocess.run(["git", "show", f"{commit}:{relative}"], cwd=repo,
+                            capture_output=True)
+    require(result.returncode == 0,
+            f"cannot read committed source {relative}: {result.stderr.decode(errors='replace').strip()}")
+    return result.stdout
+
+
+def checked_source_bytes(repo: Path, commit: str, relative: str) -> bytes:
+    try:
+        current = (repo / relative).read_bytes()
+    except OSError as exc:
+        raise ReleaseError(f"cannot read source {relative}: {exc}") from exc
+    require(current == committed_bytes(repo, commit, relative),
+            f"source differs from committed HEAD: {relative}")
+    return current
 
 
 def archive_entries(archive: Path, name: str, version: str) -> dict[str, bytes]:
@@ -88,7 +107,8 @@ def archive_entries(archive: Path, name: str, version: str) -> dict[str, bytes]:
         raise ReleaseError(f"cannot inspect {archive}: {exc}") from exc
 
 
-def package_sources(repo: Path, directory: str, source: dict, tracked: set[str]) -> dict[str, bytes]:
+def package_sources(repo: Path, directory: str, source: dict, tracked: set[str],
+                    commit: str) -> dict[str, bytes]:
     root = repo / "crates" / directory
     patterns = source["package"]["include"]
     require(isinstance(patterns, list), f"invalid include list for {directory}")
@@ -105,9 +125,20 @@ def package_sources(repo: Path, directory: str, source: dict, tracked: set[str])
             include = True
         if include:
             require(safe_relative(relative), f"unsafe package source path: {relative}")
-            require(f"crates/{directory}/{relative}" in tracked,
+            source_path = f"crates/{directory}/{relative}"
+            require(source_path in tracked,
                     f"{directory} package source is absent from HEAD: {relative}")
-            expected[relative] = path.read_bytes()
+            expected[relative] = checked_source_bytes(repo, commit, source_path)
+    prefix = f"crates/{directory}/"
+    for source_path in tracked:
+        if not source_path.startswith(prefix):
+            continue
+        relative = source_path[len(prefix):]
+        include = any(fnmatchcase(relative, pattern) for pattern in patterns)
+        if directory == "server" and relative == "tests/README.md":
+            include = True
+        if include:
+            require(relative in expected, f"{directory} committed package source is missing: {relative}")
     require("Cargo.toml" in expected and "README.md" in expected, f"missing package source in {root}")
     for license_name in ("LICENSE-APACHE", "LICENSE-MIT"):
         require(expected.get(license_name) == (repo / license_name).read_bytes(),
@@ -272,7 +303,7 @@ def validate_archive(repo: Path, package_dir: Path, name: str, directory: str,
     archive = package_dir / f"{name}-{version}.crate"
     entries = archive_entries(archive, name, version)
     source = read_toml(repo / "crates" / directory / "Cargo.toml")
-    expected = package_sources(repo, directory, source, tracked)
+    expected = package_sources(repo, directory, source, tracked, commit)
     expected.pop("Cargo.toml")
     require(set(entries) - GENERATED == set(expected), f"{name} archive source file set differs")
     for path, content in expected.items():
@@ -304,18 +335,22 @@ def validate_archive(repo: Path, package_dir: Path, name: str, directory: str,
 
 
 def _inspect(repo: Path, package_dir: Path) -> tuple[dict, dict[str, dict[str, bytes]]]:
-    version = checked_workspace(repo)
     commit = git(repo, "rev-parse", "HEAD")
     require(not git(repo, "status", "--porcelain", "--untracked-files=all"),
             "source checkout has tracked or untracked changes")
-    require(git(repo, "ls-tree", "-r", "--name-only", "HEAD", "--", "Cargo.lock") == "Cargo.lock",
+    for relative in ("Cargo.toml", "Cargo.lock", "LICENSE-APACHE", "LICENSE-MIT"):
+        checked_source_bytes(repo, commit, relative)
+    for _, directory in PACKAGES:
+        checked_source_bytes(repo, commit, f"crates/{directory}/Cargo.toml")
+    version = checked_workspace(repo)
+    require(git(repo, "ls-tree", "-r", "--name-only", commit, "--", "Cargo.lock") == "Cargo.lock",
             "workspace Cargo.lock is absent from HEAD")
     require(package_dir.is_dir(), f"missing package directory: {package_dir}")
     wanted = {f"{name}-{version}.crate" for name, _ in PACKAGES}
     actual = {path.name for path in package_dir.glob("*.crate")}
     require(actual == wanted, f"package archive set differs: missing {sorted(wanted - actual)}, extra {sorted(actual - wanted)}")
     workspace = read_toml(repo / "Cargo.toml")
-    tracked = set(git(repo, "ls-tree", "-r", "--name-only", "HEAD", "--", "crates").splitlines())
+    tracked = set(git(repo, "ls-tree", "-r", "--name-only", commit, "--", "crates").splitlines())
     records = []
     contents = {}
     for name, directory in PACKAGES:
@@ -346,6 +381,7 @@ def _inspect(repo: Path, package_dir: Path) -> tuple[dict, dict[str, dict[str, b
                         f"{name} external lock identity differs from committed workspace lock")
     require(not git(repo, "status", "--porcelain", "--untracked-files=all"),
             "source checkout changed during inspection")
+    require(git(repo, "rev-parse", "HEAD") == commit, "HEAD changed during inspection")
     return ({"format_version": 1, "source_commit": commit, "version": version,
              "packages": records}, contents)
 
