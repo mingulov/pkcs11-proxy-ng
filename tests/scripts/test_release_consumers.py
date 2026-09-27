@@ -96,6 +96,13 @@ class ConsumerIdentityTests(unittest.TestCase):
                          {"pkcs11-proxy-ng-client"})
         self.assertEqual(manifest["dependencies"]["tokio"]["version"], "=1.50.0")
         self.assertEqual(manifest["dependencies"]["tokio"]["features"], ["macros", "rt"])
+        registry_base = self.root / "registry"
+        registry_base.mkdir()
+        registry_root = _prepare_example(self.client, registry_base, "0.2.0",
+                                         registry=True, client_hash="d" * 64)
+        registry_manifest = tomllib.loads((registry_root / "Cargo.toml").read_text())
+        self.assertEqual(registry_manifest["dependencies"]["pkcs11-proxy-ng-client"],
+                         {"version": "=0.2.0"})
 
     def metadata(self, *, client_path=None, types_path=None, types_version="0.2.0",
                  extra=(), features=None):

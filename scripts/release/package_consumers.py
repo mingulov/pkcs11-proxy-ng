@@ -181,7 +181,8 @@ def _external_lock(repo: Path) -> set[tuple]:
             for item in lock["package"] if item.get("source") is not None}
 
 
-def _prepare_example(client: Path, base: Path, version: str) -> Path:
+def _prepare_example(client: Path, base: Path, version: str, *,
+                     registry: bool = False, client_hash: str | None = None) -> Path:
     """Use the packaged example as a separate application's exact source."""
     example = base / "example-client"
     source = client / "examples" / "remote_client.rs"
@@ -193,21 +194,49 @@ def _prepare_example(client: Path, base: Path, version: str) -> Path:
     tokio = [item for item in lock["package"] if item["name"] == "tokio"]
     require(len(tokio) == 1 and tokio[0].get("source") == REGISTRY_SOURCE,
             "client lock lacks a unique registry Tokio")
+    client_dep = ({"version": f"={version}"} if registry else
+                  {"path": str(client), "version": f"={version}"})
+    client_spec = ", ".join(f"{key} = {json.dumps(value)}" for key, value in client_dep.items())
     manifest = (
         '[package]\nname = "pkcs11-proxy-ng-example-consumer"\nversion = "0.0.0"\n'
         'edition = "2024"\nrust-version = "1.88"\n'
         '[dependencies]\n'
-        f'pkcs11-proxy-ng-client = {{ path = {json.dumps(str(client))}, version = "={version}" }}\n'
+        f'pkcs11-proxy-ng-client = {{ {client_spec} }}\n'
         f'tokio = {{ version = "={tokio[0]["version"]}", features = ["macros", "rt"] }}\n'
     )
     (example / "Cargo.toml").write_text(manifest, encoding="utf-8")
     root_record = ('\n[[package]]\nname = "pkcs11-proxy-ng-example-consumer"\n'
                    'version = "0.0.0"\ndependencies = [\n'
                    ' "pkcs11-proxy-ng-client",\n "tokio",\n]\n')
-    (example / "Cargo.lock").write_text(
-        (client / "Cargo.lock").read_text(encoding="utf-8") + root_record,
-        encoding="utf-8")
+    seeded = (client / "Cargo.lock").read_text(encoding="utf-8")
+    if registry:
+        require(client_hash is not None and re.fullmatch(r"[0-9a-f]{64}", client_hash),
+                "registry client example requires candidate checksum")
+        needle = f'name = "pkcs11-proxy-ng-client"\nversion = "{version}"\n'
+        require(seeded.count(needle) == 1, "registry client lock identity ambiguous")
+        seeded = seeded.replace(needle, needle +
+                                f'source = "{REGISTRY_SOURCE}"\nchecksum = "{client_hash}"\n')
+    (example / "Cargo.lock").write_text(seeded + root_record, encoding="utf-8")
     return example
+
+
+def _resolve_example_lock(example: Path, env: dict, toolchain: str,
+                          config: list[str], external: set[tuple], version: str,
+                          hashes: dict[str, str]) -> None:
+    # Cargo removes dev-only packages from this new application's seed. This
+    # one resolution is followed by identity reconciliation and locked builds.
+    _run(_cargo(toolchain, *config, "metadata", "--format-version", "1"), example, env)
+    lock = tomllib.loads((example / "Cargo.lock").read_text(encoding="utf-8"))
+    local = [item for item in lock["package"]
+             if item["name"] == "pkcs11-proxy-ng-example-consumer"]
+    require(len(local) == 1 and local[0].get("version") == "0.0.0" and
+            local[0].get("source") is None and
+            set(local[0].get("dependencies", [])) == {"pkcs11-proxy-ng-client", "tokio"},
+            "example consumer lock identity changed")
+    project = [item for item in lock["package"] if item not in local]
+    reconcile_lock({"package": project}, external, version,
+                   {"pkcs11-proxy-ng-client", "pkcs11-proxy-ng-proto",
+                    "pkcs11-proxy-ng-types"}, hashes)
 
 
 def _root_check(name: str, roots: dict[str, Path], base: Path, env: dict,
@@ -273,7 +302,9 @@ def _consume(roots: dict[str, Path], base: Path, repo: Path, toolchain: str,
             graph["exports"] = _shim_exports(library)
         elif name == "pkcs11-proxy-ng-client":
             _run(_cargo(toolchain, *config, "check", "--example", "remote_client", "--locked"), root, env)
-            example = _prepare_example(root, base, version)
+            example = _prepare_example(root, base, version, registry=registry,
+                                       client_hash=hashes[name] if registry else None)
+            _resolve_example_lock(example, env, toolchain, config, external, version, hashes)
             example_graph = _metadata(example, env, toolchain, config)
             example_features = _runtime_features(example, env, toolchain, config, name)
             graph["external_example_graph"] = validate_metadata(
