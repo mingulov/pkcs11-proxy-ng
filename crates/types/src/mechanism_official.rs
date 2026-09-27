@@ -1,4 +1,6 @@
-// Generated from pkcs11-check third_party/pkcs11-headers/3.2/pkcs11.h.
+// Numeric catalog derived from the public-domain latchset PKCS#11 3.2 header:
+// https://github.com/latchset/pkcs11-headers/blob/c5e61990c5621a9b955fc208644fe8145ac0a75d/public-domain/3.2/pkcs11.h
+// The pinned header was consumed via pkcs11-check third_party/pkcs11-headers/3.2/pkcs11.h.
 // Keep sorted by numeric mechanism value; duplicate official aliases are noted in comments.
 
 use crate::CkMechanismType;

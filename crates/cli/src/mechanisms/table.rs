@@ -3,7 +3,10 @@
 /// Names omit the CKM_ prefix for brevity and match what `parse_mechanism` accepts.
 /// This table must exactly match the canonical entries in
 /// `pkcs11-proxy-ng-types/src/mechanism_official.rs` (itself generated from the
-/// PKCS#11 3.2 headers); the sync test in `super::tests` fails on any drift.
+/// public-domain latchset PKCS#11 3.2 header at revision
+/// c5e61990c5621a9b955fc208644fe8145ac0a75d); the sync test in
+/// `super::tests` fails on any drift. Source:
+/// https://github.com/latchset/pkcs11-headers/blob/c5e61990c5621a9b955fc208644fe8145ac0a75d/public-domain/3.2/pkcs11.h
 /// Official aliases noted there (`CAST5_*`, `*_KEY_DERIVE`, `ECDSA_KEY_PAIR_GEN`,
 /// the `DSA_PROBABLISTIC_*` typo) share a value with their canonical row and are
 /// intentionally not repeated here, so values and names stay unique.

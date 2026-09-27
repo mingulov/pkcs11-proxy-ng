@@ -39,6 +39,7 @@ RUN --mount=type=bind,from=pkcs11ng,source=/apk,target=/apk \
         pkcs11-proxy-ng-cli
 
 COPY --from=softhsm-builder /usr/local/ /usr/local/
+COPY --from=softhsm-builder /src/softhsm/LICENSE /usr/local/share/licenses/softhsm2/LICENSE
 
 ENV SOFTHSM2_LIB=/usr/local/lib/softhsm/libsofthsm2.so
 ENV SOFTHSM2_CONF=/etc/softhsm2.conf

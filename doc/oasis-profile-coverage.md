@@ -13,7 +13,8 @@ compares OASIS sources with the function tables, protobuf messages, Rust types,
 FFI conversions, shim dispatch, and test references.
 
 Supply an external OASIS checkout containing `working/doc/spec/` and the
-published headers:
+published headers. The snapshot below counted that external reference tree;
+the OASIS Markdown and headers are not vendored in this standalone repository:
 
 ```bash
 PKCS11_PROXY_NG_OASIS_ROOT=/path/to/oasis-tcs-pkcs11 \
@@ -34,7 +35,7 @@ invent missing values or extend standard function-list layouts.
 
 | Metric | Count |
 |--------|-------|
-| Vendored OASIS Markdown files | 107 |
+| OASIS Markdown files in external reference snapshot | 107 |
 | Spec functions found in Markdown | 110 |
 | Published OASIS v3.2 function-list entries | 104 |
 | CK_FUNCTION_LIST / 3.0 / 3.2 function fields represented by `cryptoki-sys` | 104 |
@@ -79,7 +80,7 @@ so that a zero actionable-MockBackend count cannot be confused with goal
 completion. This summary is a navigation aid over the matrices, not a
 standalone completion signal.
 
-The six `C_DigestXof*` functions are documented in the vendored
+The six `C_DigestXof*` functions are documented in the external
 `message_digesting_functions.md` but are not present in the current
 OASIS published v3.2 `pkcs11f.h` function list or the current `cryptoki-sys`
 0.5.0 function-list structs used by this project. The project does not add
@@ -219,7 +220,7 @@ structured GCM, CCM, and Salsa/ChaCha Encrypt writeback without implying
 structured Sign/Verify or Decrypt writeback.
 
 The working Markdown also names six mechanism tokens that do not have numeric
-`CKM_*` values in the vendored OASIS published v2.40, v3.0, v3.1, or v3.2
+`CKM_*` values in the external OASIS published v2.40, v3.0, v3.1, or v3.2
 headers: `CKM_KMAC128`, `CKM_KMAC256`, `CKM_ML_DSA_EXTERNAL_MU`,
 `CKM_ML_DSA_EXTERNAL_MU_GEN`, `CKM_SHAKE_128`, and `CKM_SHAKE_256`. These are
 tracked as explicit mechanism gaps with the generated reason
@@ -233,7 +234,7 @@ rows are intentional `mechanism_params_default.toml` omissions under the
 AGENTS.md §12 exception.
 
 The inverse discrepancy is also explicit: 119 mechanism names or aliases have
-published OASIS header values but are not named by the vendored working
+published OASIS header values but are not named by the external working
 Markdown. Those rows are still official, represented mechanisms because the
 published headers provide concrete `CK_MECHANISM_TYPE` values and version
 metadata. The generated matrix marks them with
@@ -246,7 +247,7 @@ the current working Markdown supplies modern workflow tables for them.
 
 Mechanism-info flag coverage is stricter than generic MockBackend workflow
 coverage. The generated matrix only marks a mechanism's expected
-`CK_MECHANISM_INFO` flags as source-grounded when the vendored OASIS sources
+`CK_MECHANISM_INFO` flags as source-grounded when the external OASIS sources
 provide workflow evidence for that mechanism or family. Mechanisms that lack
 that evidence remain represented in the official catalog when they have
 published values, but their flag rows carry `no_source_workflow_evidence`,
@@ -414,7 +415,7 @@ Mechanism parameter modeling is maintained in:
 - `crates/proto/src/convert/mechanism/*`;
 - `crates/types/src/mechanism_params_default.toml`;
 - `crates/types/src/mechanism_official.rs` (463 official v3.2 mechanism values,
-  checked against the vendored OASIS published headers).
+  checked against the external OASIS published headers).
 
 `MockBackend::with_default_mechanism_registry()` advertises every mechanism from
 the embedded mechanism registry.
