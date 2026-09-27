@@ -25,6 +25,8 @@ FORBIDDEN_FEATURES = {
     "hyper": {"server", "server-auto", "server-graceful"},
     "hyper-util": {"server", "server-auto", "server-graceful"},
 }
+LIBRARY_NAMES = tuple(name for name, directory in PACKAGES if directory != "cli")
+DOC_TARGET = "x86_64-unknown-linux-gnu"
 
 
 def reconcile_lock(lock: dict, external: set[tuple], version: str,
@@ -275,10 +277,36 @@ def _shim_exports(library: Path) -> list[str]:
     return result.stdout.split()
 
 
+def _document_libraries(roots: dict[str, Path], base: Path, toolchain: str,
+                        version: str, hashes: dict[str, str], external: set[tuple],
+                        contexts: dict[str, tuple[dict, list[str]]], *, registry: bool) -> dict:
+    results = {}
+    for name in LIBRARY_NAMES:
+        root = roots[name]
+        if name not in contexts:
+            session = base / ("root-" + name)
+            session.mkdir()
+            env = _environment(session, base / "cargo-home")
+            if registry:
+                (base / "original-locks").mkdir(exist_ok=True)
+                shutil.copy2(root / "Cargo.lock", base / "original-locks" / f"{name}.lock")
+            graph = _root_check(name, roots, base, env, toolchain, external,
+                                version, hashes, registry=registry)
+            config = graph.pop("config")
+            contexts[name] = (env, config)
+            results[name] = graph
+        env, config = contexts[name]
+        _run(_cargo(toolchain, *config, "doc", "--lib", "--no-deps", "--locked",
+                    "--target", DOC_TARGET), root, env)
+        results.setdefault(name, {})["docs"] = f"default-feature library docs generated for {DOC_TARGET}"
+    return results
+
+
 def _consume(roots: dict[str, Path], base: Path, repo: Path, toolchain: str,
              version: str, hashes: dict[str, str], *, registry=False) -> dict:
     external = _external_lock(repo)
     results = {}
+    contexts = {}
     for name in ("pkcs11-proxy-ng-client", "pkcs11-proxy-ng-shim",
                  "pkcs11-proxy-ng", "pkcs11-proxy-ng-cli", "pkcs11-proxy-ng-proto"):
         session = base / ("root-" + name)
@@ -290,6 +318,7 @@ def _consume(roots: dict[str, Path], base: Path, repo: Path, toolchain: str,
         graph = _root_check(name, roots, base, env, toolchain, external,
                             version, hashes, registry=registry)
         config = graph.pop("config")
+        contexts[name] = (env, config)
         root = roots[name]
         if name in ("pkcs11-proxy-ng", "pkcs11-proxy-ng-cli"):
             install = base / ("install-" + name)
@@ -315,10 +344,11 @@ def _consume(roots: dict[str, Path], base: Path, repo: Path, toolchain: str,
                 "registry" if registry else "archive", runtime_features=example_features)
             _run(_cargo(toolchain, *config, "check", "--locked"), example, env)
             graph["example"] = "packaged and external remote_client checked"
-        elif name == "pkcs11-proxy-ng-proto":
-            _run(_cargo(toolchain, *config, "doc", "--lib", "--no-deps", "--locked"), root, env)
-            graph["docs"] = "proto library docs generated"
         results[name] = graph
+    for name, documented in _document_libraries(roots, base, toolchain, version,
+                                                hashes, external, contexts,
+                                                registry=registry).items():
+        results.setdefault(name, {}).update(documented)
     return results
 
 
