@@ -283,6 +283,26 @@ class ReleasePackageTests(ArchiveFixture):
                 self.mutate("Cargo.toml", lambda b: b.replace(old, new))
                 self.assert_refused()
 
+    def test_refuses_unrequested_dependency_identity_fields(self):
+        for field in (b'package = "serde_json"', b'registry = "other"',
+                      b'registry-index = "https://example.invalid/index"',
+                      b'optional = false', b'default-features = true'):
+            with self.subTest(field=field):
+                self.mutate("Cargo.toml", lambda b: b.replace(
+                    b'[dependencies.serde]\n', b'[dependencies.serde]\n' + field + b'\n'))
+                self.assert_refused()
+
+    def test_refuses_unrequested_target_field(self):
+        self.mutate("Cargo.toml", lambda b: b.replace(
+            b'[lib]\n', b'[lib]\ncrate-type = ["rlib"]\n'))
+        self.assert_refused()
+
+    def test_refuses_unrequested_package_field(self):
+        self.mutate("Cargo.toml", lambda b: b.replace(
+            b'readme = "README.md"\n',
+            b'readme = "README.md"\nlicense-file = "README.md"\n'))
+        self.assert_refused()
+
     def test_refuses_generated_lockfile_git_source(self):
         self.mutate("Cargo.lock", lambda b: b.replace(
             b"registry+https://github.com/rust-lang/crates.io-index",

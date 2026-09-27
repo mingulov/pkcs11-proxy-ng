@@ -124,13 +124,11 @@ def inherited(source: dict, workspace: dict, key: str):
 
 def normalized_dep(spec: object, workspace: dict, name: str) -> dict:
     effective = effective_dep(spec, workspace, name)
-    expected = {"version": effective.get("version"),
-                "features": sorted(set(effective.get("features", []))),
-                "optional": effective.get("optional", False),
-                "default-features": effective.get("default-features", True)}
-    for key in ("package", "registry", "registry-index"):
-        if key in effective:
-            expected[key] = effective[key]
+    expected = {key: value for key, value in effective.items()
+                if key in {"version", "features", "optional", "default-features",
+                           "package", "registry", "registry-index"}}
+    if "features" in expected:
+        expected["features"] = sorted(set(expected["features"]))
     return expected
 
 
@@ -155,13 +153,11 @@ def validate_dependencies(source: dict, workspace: dict, normalized: dict, name:
                     "rev" not in actual and "tag" not in actual,
                     f"{name} archive contains a non-registry dependency {dep}")
             expected = normalized_dep(source_spec, workspace, dep)
+            require(set(actual) == set(expected),
+                    f"{name} {dep} normalized dependency fields differ from source")
             for key, value in expected.items():
-                found = sorted(set(actual.get(key, []))) if key == "features" else actual.get(
-                    key, False if key == "optional" else True if key == "default-features" else None)
+                found = sorted(set(actual[key])) if key == "features" else actual[key]
                 require(found == value, f"{name} {dep} {key} differs from source")
-            require(set(actual) <= {"version", "features", "optional", "default-features",
-                                    "package", "registry", "registry-index"},
-                    f"{name} {dep} has unexpected dependency fields")
 
 
 def expected_targets(root: Path, source: dict, entries: dict[str, bytes]) -> dict[str, list[dict]]:
@@ -182,11 +178,24 @@ def expected_targets(root: Path, source: dict, entries: dict[str, bytes]) -> dic
         paths = sorted((root / folder).glob("*.rs")) if (root / folder).is_dir() else []
         if paths and kind not in result:
             result[kind] = [{"name": path.stem, "path": f"{folder}/{path.name}"} for path in paths]
-    return {kind: [target for target in targets
-                   if target.get("path", {"lib": "src/lib.rs", "bin": "src/main.rs"}.get(kind)) in entries]
-            for kind, targets in result.items()
-            if any(target.get("path", {"lib": "src/lib.rs", "bin": "src/main.rs"}.get(kind)) in entries
-                   for target in targets)}
+    included = {}
+    for kind, targets in result.items():
+        for target in targets:
+            if kind == "lib":
+                target_name = target.get("name", stem)
+                default_path = "src/lib.rs"
+            elif kind == "bin":
+                target_name = target.get("name", package["name"])
+                default_path = "src/main.rs"
+            else:
+                target_name = target.get("name", Path(target.get("path", "")).stem)
+                folder = {"example": "examples", "test": "tests", "bench": "benches"}[kind]
+                default_path = f"{folder}/{target_name}.rs"
+            path = target.get("path", default_path)
+            if path in entries:
+                normalized = {"name": target_name, "path": path, **target}
+                included.setdefault(kind, []).append(normalized)
+    return included
 
 
 def validate_manifest(repo: Path, directory: str, name: str, version: str,
@@ -206,8 +215,7 @@ def validate_manifest(repo: Path, directory: str, name: str, version: str,
             f"{name} normalized identity differs")
     for key in PACKAGE_FIELDS:
         expected = inherited(source, workspace, key)
-        if expected is not None:
-            require(actual.get(key) == expected, f"{name} normalized {key} differs from source")
+        require(actual.get(key) == expected, f"{name} normalized {key} differs from source")
     for key in ("readme", "license-file"):
         value = actual.get(key)
         if value is not None:
@@ -234,7 +242,7 @@ def validate_manifest(repo: Path, directory: str, name: str, version: str,
                 f"{name} normalized {key} differs")
     require(normalized.get("features", {}) == source.get("features", {}),
             f"{name} normalized features differ")
-    require(normalized.get("package", {}).get("metadata", {}) == source.get("package", {}).get("metadata", {}),
+    require(actual.get("metadata") == source.get("package", {}).get("metadata"),
             f"{name} normalized metadata differs")
     targets_by_kind = expected_targets(root, source, entries)
     for kind, targets in targets_by_kind.items():
@@ -243,8 +251,7 @@ def validate_manifest(repo: Path, directory: str, name: str, version: str,
             actual_targets = [actual_targets]
         require(len(actual_targets) == len(targets), f"{name} normalized {kind} targets differ")
         for expected, found in zip(targets, actual_targets):
-            for key, value in expected.items():
-                require(found.get(key) == value, f"{name} normalized {kind} {key} differs")
+            require(found == expected, f"{name} normalized {kind} target differs from source")
             require("path" in found and safe_relative(found["path"]) and found["path"] in entries,
                     f"{name} normalized {kind} target path invalid")
     for kind in ("lib", "bin", "example", "test", "bench"):
