@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import shutil
 import subprocess
@@ -14,7 +15,7 @@ import tomllib
 from .package_archives import archive_entries, extract_verified_archives, inspect_archives
 from .package_consumers import (_external_lock, _patches, _seed_lock, reconcile_lock,
                                 validate_metadata, validate_version_line, REGISTRY_SOURCE, _shim_exports)
-from .package_model import INTERNAL, ReleaseError, require
+from .package_model import INTERNAL, PACKAGES, ReleaseError, require
 from .package_registry import Registry, read_inventory, verify_publication
 
 
@@ -32,7 +33,14 @@ def validate_release_profile(repo: Path) -> None:
             "workspace release profile differs from recorded unwind/thin-LTO profile")
 
 
-def require_registry_provenance(path: Path) -> dict:
+def require_registry_provenance(path: Path, inventory_path: Path,
+                                package_dir: Path, binaries_dir: Path) -> dict:
+    """Bind a registry build claim to exact source archives and staged files.
+
+    Callers must separately enforce the publication/approval gates. The
+    package directory is the downloaded, checksum-verified source set used by
+    the binary build, and the binary directory is the set proposed for upload.
+    """
     try:
         provenance = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError, UnicodeError) as exc:
@@ -41,6 +49,90 @@ def require_registry_provenance(path: Path) -> dict:
             provenance.get("source_mode") == "registry" and
             provenance.get("github_publication_eligible") is True,
             "GitHub publication requires registry-source binary provenance")
+    inventory = read_inventory(inventory_path)
+    require(provenance.get("version") == inventory["version"] and
+            provenance.get("source_commit") == inventory["source_commit"] and
+            provenance.get("inventory_sha256") == _sha256(Path(inventory_path)),
+            "binary provenance source identity differs from inventory")
+    tag = provenance.get("source_tag")
+    require(tag is None or (isinstance(tag, dict) and
+            tag.get("name") == f"v{inventory['version']}" and
+            isinstance(tag.get("object_sha"), str) and
+            re.fullmatch(r"[0-9a-f]{40}", tag["object_sha"]) is not None),
+            "binary provenance source tag is malformed")
+    target = provenance.get("target")
+    require(target in TARGETS, "binary provenance target is unsupported")
+    expected_names = {name for name, _ in PACKAGES}
+    archive_hashes = provenance.get("archives")
+    locks = provenance.get("original_locks")
+    require(isinstance(archive_hashes, dict) and set(archive_hashes) == expected_names and
+            isinstance(locks, dict) and set(locks) == expected_names,
+            "binary provenance lacks all-eight archive and lock identities")
+    package_dir = Path(package_dir)
+    require(package_dir.is_dir() and
+            {item.name for item in package_dir.glob("*.crate")} ==
+            {record["archive"] for record in inventory["packages"]},
+            "binary evidence archive directory differs from inventory")
+    for record in inventory["packages"]:
+        name = record["name"]
+        archive = package_dir / record["archive"]
+        require(archive.is_file() and not archive.is_symlink() and
+                _sha256(archive) == record["sha256"] == archive_hashes[name],
+                f"{name} binary provenance archive checksum differs")
+        entries = archive_entries(archive, name, inventory["version"])
+        require("Cargo.lock" in entries and
+                hashlib.sha256(entries["Cargo.lock"]).hexdigest() == locks[name],
+                f"{name} binary provenance packaged lock differs")
+    tools = provenance.get("tools")
+    require(isinstance(tools, dict) and
+            isinstance(tools.get("rustc"), str) and tools["rustc"].startswith(f"rustc {TOOLCHAIN} ") and
+            isinstance(tools.get("cargo"), str) and tools["cargo"].startswith(f"cargo {TOOLCHAIN} ") and
+            isinstance(tools.get("protoc"), str) and tools["protoc"].startswith("libprotoc "),
+            "binary provenance tool versions are incomplete or wrong")
+    if target == TARGETS[1]:
+        require(tools.get("cargo_xwin") == XWIN_VERSION,
+                "Windows binary provenance cargo-xwin version differs")
+    profile = provenance.get("profile")
+    require(profile == {"name": "release", "lto": "thin", "strip": "symbols",
+                        "codegen_units": 1, "panic": "unwind", "incremental": False, "jobs": 4} and
+            provenance.get("flags") == {"rustflags": [], "rustdocflags": []},
+            "binary provenance release profile or flags differ")
+    graphs = provenance.get("graphs")
+    require(isinstance(graphs, dict) and set(graphs) == set(ROOTS),
+            "binary provenance entry-point graphs are incomplete")
+    for name, graph in graphs.items():
+        require(isinstance(graph, dict) and isinstance(graph.get("packages"), list) and
+                name in graph["packages"] and
+                isinstance(graph.get("runtime_features"), dict) and
+                name in graph["runtime_features"],
+                f"{name} binary provenance graph is incomplete")
+    expected_artifacts = {"pkcs11-proxy-ng": ("pkcs11-proxy-ng", "bin"),
+                          "pkcs11-proxy-ng-cli": ("pkcs11-proxy-ng-cli", "bin"),
+                          _artifact_name("pkcs11-proxy-ng-shim", target): ("pkcs11-proxy-ng-shim", "lib")}
+    if target == TARGETS[1]:
+        expected_artifacts = {name + ".exe" if kind == "bin" else name: value
+                              for name, value in expected_artifacts.items() for kind in [value[1]]}
+        expected_artifacts["cross_width_smoke.exe"] = ("pkcs11-proxy-ng-shim", "example")
+    records = provenance.get("artifacts")
+    require(isinstance(records, list) and len(records) == len(expected_artifacts) and
+            all(isinstance(record, dict) for record in records),
+            "binary provenance artifact set is incomplete")
+    by_name = {record.get("name"): record for record in records}
+    require(set(by_name) == set(expected_artifacts) and len(by_name) == len(records),
+            "binary provenance artifact names differ")
+    binaries_dir = Path(binaries_dir)
+    require(binaries_dir.is_dir() and
+            {item.name for item in binaries_dir.iterdir()} == set(expected_artifacts),
+            "staged binary set differs from provenance")
+    for name, (package, kind) in expected_artifacts.items():
+        record = by_name[name]
+        binary = binaries_dir / name
+        require(binary.is_file() and not binary.is_symlink() and
+                record.get("package") == package and record.get("kind") == kind and
+                isinstance(record.get("size"), int) and not isinstance(record["size"], bool) and
+                record["size"] > 0 and binary.stat().st_size == record["size"] and
+                record.get("sha256") == _sha256(binary),
+                f"{name} staged binary differs from provenance")
     return provenance
 
 
