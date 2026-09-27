@@ -234,6 +234,13 @@ class PackageCarriageTests(unittest.TestCase):
         else:
             self.assertIn("Denis Mingulov (project maintainer)", apkbuild)
 
+    def test_alpine_build_user_owns_rustup_and_cargo_homes(self):
+        docker = (ROOT / "packaging/alpine/Dockerfile.alpine").read_text()
+        builder = docker.split("FROM ${ALPINE_BUILD_IMAGE} AS buildapk", 1)[1].split("USER build", 1)[0]
+        self.assertIn("chown -R build:abuild /usr/local/cargo /usr/local/rustup", builder)
+        self.assertNotIn("chmod -R a+rwX /usr/local/cargo", builder)
+        self.assertNotIn("chmod -R a+rwX /usr/local/rustup", builder)
+
     def test_apk_functions_install_readable_material_in_each_code_package(self):
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)
