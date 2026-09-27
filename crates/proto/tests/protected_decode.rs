@@ -275,7 +275,7 @@ fn violation_messages_carry_no_payload_bytes() {
 #[test]
 fn coverage_matches_service_proto() {
     let mut methods = std::collections::BTreeSet::new();
-    for line in include_str!("../../../proto/pkcs11-proxy-ng/v1/service.proto").lines() {
+    for line in include_str!("../proto/pkcs11-proxy-ng/v1/service.proto").lines() {
         let line = line.split("//").next().unwrap_or_default();
         if let Some(rest) = line.trim().strip_prefix("rpc ") {
             let method: String =

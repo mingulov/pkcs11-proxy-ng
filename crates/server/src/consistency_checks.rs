@@ -14,7 +14,7 @@ fn backend_trait_methods() -> Vec<String> {
 
 /// Extract RPC names from the proto service definition.
 fn proto_rpc_names() -> Vec<String> {
-    parse_proto_rpc_names(include_str!("../../../proto/pkcs11-proxy-ng/v1/service.proto"))
+    parse_proto_rpc_names(include_str!("../../proto/proto/pkcs11-proxy-ng/v1/service.proto"))
 }
 
 /// Method names declared in the `Pkcs11Backend` trait body of `src`.
@@ -490,14 +490,14 @@ fn raw_string_len(rest: &[u8]) -> Option<usize> {
 /// List protobuf source files that should feed code generation.
 fn proto_source_paths() -> Vec<String> {
     let proto_dir =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../proto/pkcs11-proxy-ng/v1");
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../proto/proto/pkcs11-proxy-ng/v1");
     let mut paths: Vec<String> = std::fs::read_dir(&proto_dir)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", proto_dir.display()))
         .filter_map(|entry| {
             let path = entry.expect("dir entry").path();
             (path.extension().and_then(|e| e.to_str()) == Some("proto")).then(|| {
                 let name = path.file_name().unwrap_or_default().to_string_lossy();
-                format!("../../proto/pkcs11-proxy-ng/v1/{name}")
+                format!("proto/pkcs11-proxy-ng/v1/{name}")
             })
         })
         .collect();

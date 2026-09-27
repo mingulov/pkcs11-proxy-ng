@@ -100,7 +100,7 @@ WORKDIR /workspace
 
 # Copy dependency manifests first (this layer is cached when only source changes)
 COPY Cargo.toml Cargo.lock ./
-COPY proto/ proto/
+COPY crates/proto/proto/ crates/proto/proto/
 COPY crates/types/Cargo.toml crates/types/Cargo.toml
 COPY crates/proto/Cargo.toml crates/proto/Cargo.toml
 COPY crates/proto/build.rs crates/proto/build.rs

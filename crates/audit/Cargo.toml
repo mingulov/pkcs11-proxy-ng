@@ -4,6 +4,16 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+publish = ["crates-io"]
+description = "Audit records and signing for the PKCS#11 remote proxy"
+readme = "README.md"
+categories = ["cryptography", "authentication"]
+keywords = ["pkcs11", "audit", "hsm"]
+include = ["Cargo.toml", "README.md", "LICENSE-APACHE", "LICENSE-MIT", "src/**"]
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
 
 [dependencies]
 serde = { workspace = true, features = ["derive"] }

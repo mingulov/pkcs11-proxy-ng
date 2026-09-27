@@ -272,9 +272,9 @@ mod tests {
     fn schema_oneofs() -> Vec<(String, String)> {
         let mut oneofs = Vec::new();
         for source in [
-            include_str!("../../../proto/pkcs11-proxy-ng/v1/service.proto"),
-            include_str!("../../../proto/pkcs11-proxy-ng/v1/types.proto"),
-            include_str!("../../../proto/pkcs11-proxy-ng/v1/mechanism_params.proto"),
+            include_str!("../proto/pkcs11-proxy-ng/v1/service.proto"),
+            include_str!("../proto/pkcs11-proxy-ng/v1/types.proto"),
+            include_str!("../proto/pkcs11-proxy-ng/v1/mechanism_params.proto"),
         ] {
             oneofs.extend(parse_oneofs_in_source(source, "test schema"));
         }

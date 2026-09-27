@@ -4,7 +4,16 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-publish = false
+repository.workspace = true
+publish = ["crates-io"]
+description = "PKCS#11 C ABI shim for the remote proxy"
+readme = "README.md"
+categories = ["cryptography", "api-bindings"]
+keywords = ["pkcs11", "shim", "hsm"]
+include = ["Cargo.toml", "README.md", "LICENSE-APACHE", "LICENSE-MIT", "src/**", "examples/cross_width_smoke.rs"]
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
 
 [lib]
 name = "pkcs11_proxy_ng_shim"
@@ -13,9 +22,9 @@ name = "pkcs11_proxy_ng_shim"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-pkcs11-proxy-ng-types = { path = "../types" }
-pkcs11-proxy-ng-client = { path = "../client" }
-pkcs11-proxy-ng-proto = { path = "../proto" }
+pkcs11-proxy-ng-types = { version = "=0.2.0", path = "../types" }
+pkcs11-proxy-ng-client = { version = "=0.2.0", path = "../client" }
+pkcs11-proxy-ng-proto = { version = "=0.2.0", path = "../proto" }
 cryptoki-sys.workspace = true
 # W1-L16-15: minimal cdylib closure — current-thread runtime + sync/time/net.
 # No signal/process (verified via `cargo tree -p pkcs11-proxy-ng-shim`).

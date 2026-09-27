@@ -321,10 +321,10 @@ fn declared_wire_fields() -> BTreeSet<String> {
     [
         (
             "mechanism_params.proto",
-            include_str!("../../../proto/pkcs11-proxy-ng/v1/mechanism_params.proto"),
+            include_str!("../../proto/proto/pkcs11-proxy-ng/v1/mechanism_params.proto"),
         ),
-        ("types.proto", include_str!("../../../proto/pkcs11-proxy-ng/v1/types.proto")),
-        ("service.proto", include_str!("../../../proto/pkcs11-proxy-ng/v1/service.proto")),
+        ("types.proto", include_str!("../../proto/proto/pkcs11-proxy-ng/v1/types.proto")),
+        ("service.proto", include_str!("../../proto/proto/pkcs11-proxy-ng/v1/service.proto")),
     ]
     .into_iter()
     .flat_map(|(name, source)| parse_wire_fields(Path::new(name), source))

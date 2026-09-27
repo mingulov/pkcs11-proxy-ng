@@ -4,16 +4,22 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-publish = false
+repository.workspace = true
+publish = ["crates-io"]
+description = "Command-line client for the PKCS#11 remote proxy"
+readme = "README.md"
+categories = ["cryptography", "command-line-utilities"]
+keywords = ["pkcs11", "cli", "hsm"]
+include = ["Cargo.toml", "README.md", "LICENSE-APACHE", "LICENSE-MIT", "src/**"]
 
 [[bin]]
 name = "pkcs11-proxy-ng-cli"
 path = "src/main.rs"
 
 [dependencies]
-pkcs11-proxy-ng-types = { path = "../types" }
-pkcs11-proxy-ng-client = { path = "../client" }
-pkcs11-proxy-ng-audit = { path = "../audit" }
+pkcs11-proxy-ng-types = { version = "=0.2.0", path = "../types" }
+pkcs11-proxy-ng-client = { version = "=0.2.0", path = "../client" }
+pkcs11-proxy-ng-audit = { version = "=0.2.0", path = "../audit" }
 clap.workspace = true
 # W1-L16-15: #[tokio::main] (multi-thread) + client async surface.
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time", "net"] }

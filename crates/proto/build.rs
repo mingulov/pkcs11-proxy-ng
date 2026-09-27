@@ -4,9 +4,9 @@ mod oneof_check;
 use heck::ToUpperCamelCase as _;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("cargo:rerun-if-changed=../../proto/pkcs11-proxy-ng/v1/service.proto");
-    println!("cargo:rerun-if-changed=../../proto/pkcs11-proxy-ng/v1/types.proto");
-    println!("cargo:rerun-if-changed=../../proto/pkcs11-proxy-ng/v1/mechanism_params.proto");
+    println!("cargo:rerun-if-changed=proto/pkcs11-proxy-ng/v1/service.proto");
+    println!("cargo:rerun-if-changed=proto/pkcs11-proxy-ng/v1/types.proto");
+    println!("cargo:rerun-if-changed=proto/pkcs11-proxy-ng/v1/mechanism_params.proto");
     println!("cargo:rerun-if-changed=secret-fields.toml");
 
     // FOLLOWUP-proto-bytes (deferred, multi-PR project)
@@ -196,11 +196,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .skip_debug(redacted.iter().map(|message| format!(".pkcs11_proxy_ng.v1.{message}")))
         .compile_protos(
             &[
-                "../../proto/pkcs11-proxy-ng/v1/service.proto",
-                "../../proto/pkcs11-proxy-ng/v1/types.proto",
-                "../../proto/pkcs11-proxy-ng/v1/mechanism_params.proto",
+                "proto/pkcs11-proxy-ng/v1/service.proto",
+                "proto/pkcs11-proxy-ng/v1/types.proto",
+                "proto/pkcs11-proxy-ng/v1/mechanism_params.proto",
             ],
-            &["../../proto"],
+            &["proto"],
         )?;
 
     // W1-C8-07: the oneof cross-validation reads prost's output, so it runs
@@ -239,9 +239,9 @@ const EXTRA_REDACTED_MESSAGES: &[&str] = &[
 ];
 
 const PROTO_FILES: &[&str] = &[
-    "../../proto/pkcs11-proxy-ng/v1/service.proto",
-    "../../proto/pkcs11-proxy-ng/v1/types.proto",
-    "../../proto/pkcs11-proxy-ng/v1/mechanism_params.proto",
+    "proto/pkcs11-proxy-ng/v1/service.proto",
+    "proto/pkcs11-proxy-ng/v1/types.proto",
+    "proto/pkcs11-proxy-ng/v1/mechanism_params.proto",
 ];
 
 /// Every secret-bearing message plus [`EXTRA_REDACTED_MESSAGES`], sorted.
