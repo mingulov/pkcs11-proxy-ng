@@ -10,7 +10,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 from release.package_model import ReleaseError  # noqa: E402
-from release.package_consumers import (_patches, _prepare_example, _seed_lock,
+from release.package_consumers import (_document_libraries, _patches, _prepare_example, _seed_lock,
                                        reconcile_lock, validate_metadata)  # noqa: E402
 
 
@@ -165,6 +165,29 @@ class ConsumerIdentityTests(unittest.TestCase):
         graph = self.metadata()
         with self.assertRaises(ReleaseError):
             validate_metadata(graph, self.unpack, "pkcs11-proxy-ng-client", "0.2.0", "registry")
+
+    def test_library_docs_cover_all_seven_default_feature_linux_targets(self):
+        from unittest.mock import patch
+        names = ("pkcs11-proxy-ng-types", "pkcs11-proxy-ng-audit", "pkcs11-proxy-ng-proto",
+                 "pkcs11-proxy-ng-client", "pkcs11-proxy-ng-backend", "pkcs11-proxy-ng",
+                 "pkcs11-proxy-ng-shim")
+        roots = {name: self.unpack / f"{name}-0.2.0" for name in names}
+        contexts = {name: ({"CARGO_TARGET_DIR": str(self.root / name)}, []) for name in names}
+        seen = []
+
+        def execute(command, cwd, env):
+            self.assertEqual(command[0:2], ["cargo", "+1.88.0"])
+            self.assertEqual(command[2:], ["doc", "--lib", "--no-deps", "--locked",
+                                            "--target", "x86_64-unknown-linux-gnu"])
+            self.assertEqual(env, contexts[cwd.name.removesuffix("-0.2.0")][0])
+            seen.append(cwd.name.removesuffix("-0.2.0"))
+            return ""
+
+        with patch("release.package_consumers._run", side_effect=execute):
+            result = _document_libraries(roots, self.root, "1.88.0", "0.2.0", {}, set(),
+                                         contexts, registry=False)
+        self.assertEqual(tuple(seen), names)
+        self.assertEqual(set(result), set(names))
 
     def test_runtime_features_exclude_root_dev_feature_unification(self):
         graph = self.metadata()
