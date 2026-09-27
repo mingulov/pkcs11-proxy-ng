@@ -48,23 +48,8 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install pinned Cargo for probe packaging
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-        with:
-          toolchain: 1.98.1
-
-      - name: Install protoc (pinned, matches mise.toml)
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
-        with:
-          version: "36.1"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Isolate Cargo build and target directories
-        run: |
-          set -euo pipefail
-          echo "CARGO_BUILD_BUILD_DIR=$RUNNER_TEMP/staging-probe/build" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/staging-probe/target" >> "$GITHUB_ENV"
-
+      # No toolchain/protoc/Cargo setup here: probe generation is pure
+      # Python (staging-probe CLI); cargo runs only in staging-upload.
       - name: Generate staging probe
         id: generate
         env:
@@ -95,7 +80,6 @@ jobs:
     environment: crates-io-staging
     env:
       STAGING_OIDC_URL: ${{ vars.STAGING_OIDC_URL }}
-      CARGO_REGISTRIES_STAGING_TOKEN: ${{ secrets.CARGO_REGISTRIES_STAGING_TOKEN }}
     steps:
       - name: Checkout main
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -159,18 +143,22 @@ jobs:
             echo "::error::STAGING_OIDC_URL must be credential-free https; refusing."
             exit 1
           fi
+
+      - name: Dry-run staging publish (endpoint validation)
+        env:
+          CARGO_REGISTRIES_STAGING_TOKEN: ${{ secrets.CARGO_REGISTRIES_STAGING_TOKEN }}
+        run: |
+          set -euo pipefail
           if [[ -z "${CARGO_REGISTRIES_STAGING_TOKEN:-}" ]]; then
             echo "::error::protected staging environment provides no CARGO_REGISTRIES_STAGING_TOKEN; refusing."
             exit 1
           fi
-
-      - name: Dry-run staging publish (endpoint validation)
-        run: |
-          set -euo pipefail
           cd probe
           cargo publish --dry-run --locked --registry staging
 
       - name: Publish probe to staging registry
+        env:
+          CARGO_REGISTRIES_STAGING_TOKEN: ${{ secrets.CARGO_REGISTRIES_STAGING_TOKEN }}
         run: |
           set -euo pipefail
           cd probe

@@ -295,7 +295,7 @@ jobs:
             cargo package --no-verify --locked -p "$PKG"
           done
           mkdir -p fresh
-          cp target/package/*.crate fresh/
+          cp "$CARGO_TARGET_DIR/package/"*.crate fresh/
           python3 scripts/release_checks.py archives \
             --package-dir fresh --expect-inventory preauth/inventory.json
 
