@@ -275,8 +275,8 @@ async fn loaded_shim_preserves_provider_mechanism_info_flags() {
             backend.get_mechanism_info(CkSlotId(0), CkMechanismType(mechanism as u64)).unwrap()
         })
         .collect();
-    // BATON and DES now have a source-grounded historical registry; Camellia
-    // CTR remains the no-source case. Compare native provider facts, not stale
+    // BATON and DES use the committed mock fallback table; Camellia CTR has
+    // no fallback flags. Compare native provider facts, not stale
     // pre-registry assumptions about all three returning zero flags.
     assert_eq!(expected[0].flags.0, (CKF_GENERATE | CKF_GENERATE_KEY_PAIR) as u64);
     assert_eq!(expected[1].flags.0, 0);
@@ -664,7 +664,7 @@ async fn loaded_shim_writes_mechanism_out_to_caller_stack_after_encrypt_wrap_and
         assert_eq!(
             flags,
             CKF_GENERATE | CKF_GENERATE_KEY_PAIR,
-            "source-grounded historical BATON flags preserved"
+            "committed mock BATON flags preserved"
         );
 
         let mut session: CK_SESSION_HANDLE = 0;

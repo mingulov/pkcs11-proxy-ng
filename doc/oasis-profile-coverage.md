@@ -1,30 +1,22 @@
 # PKCS#11 coverage
 
 This reference describes the interfaces and parameter shapes represented by
-the proxy. The inventory and profile tables are a **2026-05-17 snapshot**;
-the FFI reader limits were updated on 2026-09-22. For release support and
+the proxy. The external-source inventory counts and profile tables are a
+**2026-05-17 research snapshot**, not current qualification evidence; the FFI
+reader limits were updated on 2026-09-22. For release support and
 current validation limits, see the [support matrix](release/beta-support-matrix.md)
 and [candidate notes](release/v0.2.0-release-notes.md).
 
-## Generating the inventory
+## Snapshot boundary
 
-[scripts/oasis-coverage-inventory.py](../scripts/oasis-coverage-inventory.py)
-compares OASIS sources with the function tables, protobuf messages, Rust types,
-FFI conversions, shim dispatch, and test references.
-
-Supply an external OASIS checkout containing `working/doc/spec/` and the
-published headers. The snapshot below counted that external reference tree;
-the OASIS Markdown and headers are not vendored in this standalone repository:
-
-```bash
-PKCS11_PROXY_NG_OASIS_ROOT=/path/to/oasis-tcs-pkcs11 \
-    python3 scripts/oasis-coverage-inventory.py --format markdown
-```
-
-The script can also read local coverage artifacts from
-[pkcs11-check](https://github.com/mingulov/pkcs11-check). Mock coverage and
-provider results are reported separately. Neither a test citation nor a zero
-gap count establishes release qualification.
+The dated inventory compared external OASIS Markdown and published headers
+with function tables, protobuf messages, Rust types, FFI conversions, shim
+dispatch, and test references. Those external sources and the document parser
+are not part of this standalone repository. The snapshot also read 14 local
+coverage artifacts from [pkcs11-check](https://github.com/mingulov/pkcs11-check);
+those counts are historical, not a fresh provider result. Mock coverage and
+provider results remain separate. Neither a test citation nor a zero gap count
+establishes release qualification.
 
 Working specification text, published headers, and `cryptoki-sys` bindings
 can disagree. The inventory records those differences explicitly. Published
@@ -53,7 +45,7 @@ invent missing values or extend standard function-list layouts.
 | Published-header mechanism names/aliases absent from working Markdown | 119 |
 | Mechanism-info flag matrix entries | 485 |
 | Source-grounded mechanism-info flag entries | 358 |
-| Mechanism-info flag rows without source workflow evidence | 121 |
+| Mechanism-info flag rows without working-Markdown/header workflow evidence (research classification) | 121 |
 | Header-only mechanism-info flag gaps | 119 |
 | Working-Markdown mechanism-info flag gaps without workflow rows | 2 |
 | Local pkcs11-check coverage artifacts read | 14 |
@@ -66,13 +58,14 @@ The generated JSON also emits a top-level `completion_gap_summary` for audit
 triage. It derives `missing_local_test_citation_counts` from the function,
 parameter-shape, message-parameter, mechanism-info flag, and MockBackend
 coverage matrices, separates `actionable_mockbackend_semantic_gap_count` from
-`intentional_no_source_workflow_rejection_count`, emits
+the no-working-source/no-committed-fallback rejection candidates, emits
 `intentional_unsupported_function_list_gap_names` for XOF function-list
 omissions with a local ABI decision, emits
 `intentional_unsupported_numeric_value_gap_names` for working-spec mechanisms
 without published numeric values, emits
-`intentional_unsupported_workflow_gap_names` for no-source workflow rows with
-explicit rejection decisions, and groups the remaining explicit source gaps:
+`historical_source_only_no_workflow_names` for the dated source-only
+classification and `intentional_unsupported_workflow_gap_names` only for
+no-source rows without a committed mock fallback, and groups other gaps:
 provider gaps and missing parameter-shape coverage. It also emits
 `strict_completion_open_items`, `strict_completion_open_item_counts`,
 `internal_completion_open_item_count`, and `strict_completion_open_item_count`
@@ -250,8 +243,8 @@ coverage. The generated matrix only marks a mechanism's expected
 `CK_MECHANISM_INFO` flags as source-grounded when the external OASIS sources
 provide workflow evidence for that mechanism or family. Mechanisms that lack
 that evidence remain represented in the official catalog when they have
-published values, but their flag rows carry `no_source_workflow_evidence`,
-`no_source_workflow_flags_available`, and a structured `source_gap_decision`
+published values, but their source-only flag rows carry
+`no_source_workflow_evidence` and a structured `source_gap_decision`
 with `policy =
 do_not_infer_ckf_flags_from_mechanism_name_or_header_presence`.
 
@@ -259,27 +252,26 @@ The no-source rows are split by source-gap class. 119 are header-only
 mechanism names or aliases that are absent from the working Markdown, such as
 `CKM_BATON_KEY_GEN`. 2 are mechanisms named in working Markdown but lacking
 source workflow flags: `CKM_CAMELLIA_CTR` and `CKM_DES_CBC`. Both classes cite the
-specific Markdown/header evidence checked, which makes OASIS omissions visible
-instead of letting the simulator silently invent flags from names, legacy
-conventions, or broad synthetic workflow tests. MockBackend pins this as a
-tested zero-flag policy for representative mechanisms such as
-`CKM_BATON_KEY_GEN`, `CKM_CAMELLIA_CTR`, and `CKM_CAST5_CBC`; the gRPC daemon
-lane checks the same policy through client-to-backend transport, and the
-loaded-shim C ABI lane checks `C_GetMechanismInfo` for
-`CKM_BATON_KEY_GEN`, `CKM_CAMELLIA_CTR`, and `CKM_DES_CBC`, proving zero flags
-are written into caller-owned `CK_MECHANISM_INFO` stack structs without
-provider support. The semantic MockBackend constructor also has an exhaustive
-backend test that selects every official mechanism with zero source-grounded
-workflow flags and verifies each mechanism-bearing workflow rejects it with
-`CKR_MECHANISM_INVALID`.
+specific Markdown/header evidence checked. This is a working-source research
+classification, not a current runtime rejection list. The committed mock
+fallback supplies nonzero flags for legacy rows including `CKM_BATON_KEY_GEN`,
+`CKM_DES_CBC`, and `CKM_CAST5_CBC`; backend workflow tests accept supported
+operations and the loaded-shim C ABI test preserves BATON and DES flags.
+`CKM_CAMELLIA_CTR`, `CKM_TLS_MASTER_KEY_DERIVE`, and `CKM_KEA_DERIVE` have no
+such fallback and are tested with zero flags. The exhaustive backend test
+selects official mechanisms whose actual mock flags are zero, then verifies
+mechanism-bearing workflows reject them with `CKR_MECHANISM_INVALID`. The
+private inventory records fallback presence separately and excludes those
+rows from its no-fallback rejection-candidate list.
 
 The mechanism matrix therefore separates broad MockBackend catalog smoke from
 source-grounded workflow semantics. `catalog_smoke_workflows` shows that an
 advertised official `CKM_*` value can traverse generic simulator paths without
 `CKR_MECHANISM_INVALID`. `source_grounded_workflows` is populated only when the
 OASIS source evidence also supports mechanism-specific workflow flags. For
-rows such as `CKM_BATON_KEY_GEN`, the catalog smoke remains useful but the
-semantic status stays `no_source_workflow_evidence`.
+rows such as `CKM_BATON_KEY_GEN`, the source-only status remains
+`no_source_workflow_evidence`, while the committed fallback still gives the
+mock nonzero flags and supported operations.
 
 ## Interfaces and intentional omissions
 
@@ -425,8 +417,8 @@ provider artifact exposes, and keeps broad synthetic protocol coverage
 available for every published `CKM_*` value.
 `MockBackend::with_official_mechanisms()` advertises the same official catalog
 but rejects mechanism-bearing operations unless the requested workflow is
-backed by the mechanism's source-grounded `CK_MECHANISM_INFO` flags. The
-simulator returns synthetic, semantically shaped outputs; it does not claim
+backed by its `CK_MECHANISM_INFO` flags, including the committed legacy mock
+fallback. The simulator returns synthetic, semantically shaped outputs; it does not claim
 cryptographic correctness.
 
 Working-spec mechanism names without published numeric values remain visible in
@@ -446,9 +438,9 @@ same spec file. The separate parameter-shape matrix remains the full
 row-per-struct Rust/proto/FFI/shim coverage inventory.
 
 Provider-backed tests remain required for real cryptographic/provider behavior.
-The generated inventory marks provider gaps using `../pkcs11-check` artifacts
-but does not treat provider coverage as sufficient internal coverage. The
-current generated matrix distinguishes 463 unique published mechanism values
+The dated inventory marked provider gaps using selected historical
+`pkcs11-check` artifacts; these are not current qualification evidence. The
+snapshot distinguished 463 unique published mechanism values
 from 479 official mechanism names/aliases. Provider artifacts cover 315 of
 those names/aliases and leave 164 names/aliases as provider gaps. Internal
 MockBackend coverage is reported separately from provider artifacts and cites
@@ -533,15 +525,16 @@ parameter layout.
 | --- | --- |
 | `with_default_mechanism_registry()` | Advertise the embedded registry. |
 | `with_official_mechanism_catalog_smoke()` | Exercise generic transport paths for every published mechanism value. |
-| `with_official_mechanisms()` | Advertise the same catalog, but allow operations only where OASIS sources provide workflow flags. |
+| `with_official_mechanisms()` | Advertise the same catalog, but enforce the mock's mechanism-specific flags, including its committed legacy fallback. |
 
 Mock output is synthetic. Real providers are required to test cryptographic
 behavior.
 
 Mechanisms with published values remain in the catalog even when working
-Markdown omits them. If sources do not establish workflow flags, the semantic
-mock reports zero flags and rejects mechanism-bearing operations with
-`CKR_MECHANISM_INVALID`. It does not infer flags from mechanism names.
+Markdown omits them. The semantic mock uses its current mechanism mapping and
+then its committed fallback; only mechanisms with no resulting workflow flags
+are rejected with `CKR_MECHANISM_INVALID`. It does not infer flags from
+mechanism names.
 
 The inventory keeps catalog smoke, source-based workflow tests, parameter
 coverage, and provider evidence separate. Its `completion_gap_summary`

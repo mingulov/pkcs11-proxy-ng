@@ -51,8 +51,8 @@ impl CkAttributeType {
     pub const ALLOWED_MECHANISMS: Self = Self(Self::ARRAY_ATTRIBUTE_FLAG | 0x00000600);
 
     // Additional scalar `CK_ULONG` / `CK_ULONG`-typedef attributes for the
-    // width bridge (ADR-0011 D10). Values verified against `cryptoki-sys` 0.5
-    // and the OASIS attribute-type tables (common/key/certificate/hardware/
+    // width bridge (ADR-0011 D10). Values checked against `cryptoki-sys` 0.5
+    // and PKCS#11 attribute-type tables (common/key/certificate/hardware/
     // validation/trust/profile/mechanism/otp/hss/double-ratchet object specs).
     pub const CERTIFICATE_CATEGORY: Self = Self(0x00000087); // CK_CERTIFICATE_CATEGORY
     pub const JAVA_MIDP_SECURITY_DOMAIN: Self = Self(0x00000088); // CK_JAVA_MIDP_SECURITY_DOMAIN
@@ -156,7 +156,7 @@ impl CkAttributeType {
     ///
     /// This is the width-bridge classifier (ADR-0011 D10): a scalar ulong is the
     /// only attribute shape whose value must be re-encoded between a 32-bit and
-    /// a 64-bit `CK_ULONG` edge. The set is sourced from the OASIS attribute-type
+    /// a 64-bit `CK_ULONG` edge. The set is checked against PKCS#11 attribute-type
     /// tables and pinned by a cross-checked consistency test; a missing entry is
     /// invisible at same width but corrupts the value across an ABI boundary.
     /// Array-of-ulong attributes are classified by [`is_ulong_array`](Self::is_ulong_array).

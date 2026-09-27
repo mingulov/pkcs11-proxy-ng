@@ -185,11 +185,9 @@ Licensed under either of
 
 at your option.
 
-The backend package carries the separate OASIS Historical Mechanisms Notices
-for its generated historical workflow table. See [licensing and source
-provenance](doc/release/licensing.md) for source citations and distribution
-notice boundaries. Third-party source material is not relicensed by the
-project's Apache-2.0 OR MIT choice.
+See [licensing and source provenance](doc/release/licensing.md) for the mock
+table's provenance limits and the distribution notice boundary. Third-party
+source material is not relicensed by the project's Apache-2.0 OR MIT choice.
 
 ### Contribution
 

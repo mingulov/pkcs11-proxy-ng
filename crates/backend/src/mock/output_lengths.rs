@@ -6,8 +6,8 @@
 //! Signature lengths that are key-dependent (RSA, ECDSA) have no fixed
 //! answer here and fall back to the caller's default.
 //!
-//! Values come from `cryptoki_sys::CKM_*` (authoritative OASIS numeric
-//! assignments) so the table cannot drift from the header set.
+//! Values come from `cryptoki_sys::CKM_*`, whose binding input is a
+//! public-domain PKCS#11 header, so the table cannot drift from that header.
 
 use pkcs11_proxy_ng_types::CkMechanismType;
 

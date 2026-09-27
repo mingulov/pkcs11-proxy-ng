@@ -42,7 +42,6 @@ The authoritative release order and evidence requirements are in the
 | `lib/version-mirrors.sh` | Shared by packaging smoke and release scripts |
 | `pkcs11test-filter.txt` | `test-consumers.sh`: consumer test selection |
 | `test-python-consumer.py` | Rust `consumer_python_test`: Python consumer fixture |
-| `oasis-coverage-inventory.py` | Rust `local_quality_gate_test`: source-grounded inventory when an external OASIS tree is available; also the umbrella's audit-doc check |
 
 Live lanes have tooling/provider prerequisites and may skip when those are absent.
 An entry in this table does not mean the lane executes on every CI run.
@@ -61,7 +60,6 @@ Live tests may skip when their tools or providers are unavailable.
 | `test-softhsm2-smoke.sh` | Local SoftHSM2 end-to-end smoke test; cross-platform CI uses `ci-direct-vs-proxy.py` |
 | `test-verify-quality-receipt.sh` | Regression battery for the quality-receipt shell step in `release.yml` |
 | `release/validate_receipt.py` | Portable evidence validator; tested by `tests/scripts/test_release_receipts.py`; separate from the workflow's Markdown receipt gate |
-| `gen-historical-mechanism-flags.py` | Regenerate the committed mock table from external OASIS sources; normal builds do not run it |
 | `test-pkcs11test-coverage.sh` | Report the contents of the consumer filter |
 | `perf/cold_start_storm.sh`, `perf/soak.sh` | Manual Docker performance/load harnesses |
 

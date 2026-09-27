@@ -15,8 +15,8 @@ use common_3x::{init_client, mock_daemon};
 
 // Camellia-CTR: a current-spec mechanism whose working-spec markdown has
 // no Mechanisms-vs-Functions table, and which the historical spec does not
-// cover either — so it stays ungrounded (unlike the legacy BATON/DES
-// families, now grounded from pkcs11-hist).
+// cover either — so it stays without mock workflow flags. The committed
+// legacy BATON/DES fallback table is a separate mock policy.
 const CKM_CAMELLIA_CTR: CkMechanismType = CkMechanismType(0x0000_0558);
 
 #[tokio::test]

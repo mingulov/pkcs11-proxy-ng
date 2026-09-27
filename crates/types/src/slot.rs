@@ -45,8 +45,8 @@ pub struct CkSlotInfo {
 pub struct CkTokenFlags(pub u64);
 
 impl CkTokenFlags {
-    // Standard CK_TOKEN_INFO bits (CKF_* values from the OASIS 2.40
-    // pkcs11t.h, unchanged through PKCS#11 v3.x).
+    // Standard CK_TOKEN_INFO bits (CKF_* values checked against PKCS#11 2.40
+    // and unchanged through PKCS#11 v3.x).
     pub const RNG: Self = Self(0x0000_0001);
     pub const WRITE_PROTECTED: Self = Self(0x0000_0002);
     pub const LOGIN_REQUIRED: Self = Self(0x0000_0004);
@@ -127,7 +127,7 @@ mod tests {
     }
 
     // W1-C9-08: every standard CK_TOKEN_INFO bit has a named const (values
-    // from the OASIS 2.40 pkcs11t.h CKF_* table); callers never hand-compose
+    // checked against PKCS#11 2.40 CKF_* values); callers never hand-compose
     // literals like CkTokenFlags(0x0404).
     #[test]
     fn w1_c9_08_token_flags_name_standard_bits() {

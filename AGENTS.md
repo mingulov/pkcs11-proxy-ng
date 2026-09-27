@@ -131,10 +131,9 @@ AI agents, automation, and human contributors.
   repository's builds, tests, release packaging, or public links depend on that
   private workspace. Its `scripts/test_planning_docs.py` checks the design docs.
 - Do not vendor or fetch OASIS specification sources into this repository.
-  Source-grounded OASIS inventory checks read an externally supplied spec tree
-  via `PKCS11_PROXY_NG_OASIS_ROOT` and skip cleanly when it is absent, so the
-  repo builds and tests standalone from its own sources plus `cryptoki-sys` /
-  provider headers.
+  Standalone builds and tests use repository sources plus `cryptoki-sys` /
+  provider headers. The local shape, default-registry, and real-backend-driver
+  quality gates run without an external specification tree.
 - Do not add project documents under vendored spec directories.
 
 ## 9. Git Rules
@@ -228,9 +227,9 @@ fail silently at the FFI boundary with `CKR_MECHANISM_PARAM_INVALID`.
 - **6 `C_DigestXof*` spec-only functions** tracked as explicit ABI gaps because
   the current published function-list headers and `cryptoki-sys` bindings do
   not expose standard slots for them.
-- **79 mechanism parameter shapes** and **3 message parameter shapes** with
-  serialization, FFI conversion, and shim-safety coverage tracked by the OASIS
-  inventory.
+- **79 mechanism parameter shapes** and **3 message parameter shapes** in the
+  historical coverage snapshot; local shape and driver checks are part of the
+  standalone test suite.
 - **Exact output semantics**: 27 output-bearing functions use the exact/raw
   path via 4 dedicated RPCs (`GetAttributeValueExact`, `ByteOutputExact`,
   `ParameterOutputExact`, `EncapsulateKeyExact`). The backend performs one
