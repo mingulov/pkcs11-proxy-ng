@@ -29,6 +29,10 @@ LIBRARY_NAMES = tuple(name for name, directory in PACKAGES if directory != "cli"
 DOC_TARGET = "x86_64-unknown-linux-gnu"
 
 
+def validate_version_line(output: str, name: str, version: str) -> None:
+    require(output == f"{name} {version}\n", f"{name} version output differs: {output!r}")
+
+
 def reconcile_lock(lock: dict, external: set[tuple], version: str,
                    required_internal: set[str], hashes: dict[str, str] | None = None) -> None:
     packages = lock.get("package")
@@ -324,9 +328,9 @@ def _consume(roots: dict[str, Path], base: Path, repo: Path, toolchain: str,
             install = base / ("install-" + name)
             _run(_cargo(toolchain, *config, "install", "--path", str(root),
                         "--root", str(install), "--locked", "--force"), root, env)
-            output = _run([str(install / "bin" / name), "--version"], root, env).strip()
-            require(output.split()[-1] == version, f"{name} installed version differs: {output}")
-            graph["installed_version"] = output
+            output = _run([str(install / "bin" / name), "--version"], root, env)
+            validate_version_line(output, name, version)
+            graph["installed_version"] = output.strip()
         elif name == "pkcs11-proxy-ng-shim":
             _run(_cargo(toolchain, *config, "build", "--release", "--lib", "--locked"), root, env)
             library = session / "target" / "release" / "libpkcs11_proxy_ng_shim.so"
