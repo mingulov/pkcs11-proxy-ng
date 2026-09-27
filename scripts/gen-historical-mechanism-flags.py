@@ -36,6 +36,8 @@ The numeric input was published/2-40-errata-1/pkcs11t.h at OASIS git
 revision 48fa09240cc64ec1cd4c559b6af6642a2cdd13ae, SHA-256
 5b58736b6d23f12b4d9492cd24b06b9d11056c3153afc4e89b1fe564749e71a2.
 See crates/backend/NOTICE for the complete OASIS Notices section.
+The generator refuses a different numeric header until its provenance is
+reviewed and this pinned revision/hash are updated together.
 """
 
 import hashlib
@@ -43,6 +45,8 @@ import os
 import re
 import sys
 from pathlib import Path
+
+PINNED_HEADER_SHA256 = "5b58736b6d23f12b4d9492cd24b06b9d11056c3153afc4e89b1fe564749e71a2"
 
 # Column index (after the mechanism-name cell) -> CkMechanismFlags OR-set.
 # Order matches the historical spec header:
@@ -82,10 +86,10 @@ def parse_hist_flags(html_path: Path) -> dict[str, list[str]]:
     return out
 
 
-def parse_header_values(header_path: Path) -> dict[str, int]:
+def parse_header_values(header_text: str) -> dict[str, int]:
     out: dict[str, int] = {}
     for m in re.finditer(
-        r"#define\s+(CKM_[A-Z0-9_]+)\s+(0x[0-9A-Fa-f]+)UL", header_path.read_text()
+        r"#define\s+(CKM_[A-Z0-9_]+)\s+(0x[0-9A-Fa-f]+)UL", header_text
     ):
         out[m.group(1)] = int(m.group(2), 16)
     return out
@@ -108,9 +112,17 @@ def main() -> int:
     if not header.exists():
         sys.stderr.write(f"2.40 header not found at {header}\n")
         return 2
+    header_bytes = header.read_bytes()
+    header_sha256 = hashlib.sha256(header_bytes).hexdigest()
+    if header_sha256 != PINNED_HEADER_SHA256:
+        sys.stderr.write(
+            f"numeric header SHA-256 mismatch at {header}: "
+            f"expected {PINNED_HEADER_SHA256}, got {header_sha256}\n"
+        )
+        return 2
 
     flags = parse_hist_flags(hist)
-    values = parse_header_values(header)
+    values = parse_header_values(header_bytes.decode())
     rows = []
     missing = []
     for name in sorted(flags):
@@ -125,7 +137,7 @@ def main() -> int:
     print(f"// Actual cached HTML input SHA-256: {hashlib.sha256(hist.read_bytes()).hexdigest()}")
     print("// Numeric input: published/2-40-errata-1/pkcs11t.h")
     print("// OASIS git revision: 48fa09240cc64ec1cd4c559b6af6642a2cdd13ae")
-    print(f"// Numeric header input SHA-256: {hashlib.sha256(header.read_bytes()).hexdigest()}")
+    print(f"// Numeric header input SHA-256: {header_sha256}")
     print("// The cached HTML is not claimed byte-identical to the /os/ URL.")
     print("// OASIS copyright and complete Notices: crates/backend/NOTICE")
     print("// DO NOT EDIT BY HAND — re-run the generator to refresh.")
