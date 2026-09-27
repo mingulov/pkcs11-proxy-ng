@@ -8,8 +8,10 @@ import sys
 
 sys.dont_write_bytecode = True
 from release.package_archives import inspect_archives  # noqa: E402
+from release.package_consumers import archive_consumer, registry_consumer  # noqa: E402
 from release.package_model import ReleaseError  # noqa: E402
 from release.package_refs import preflight, verify_ci_results  # noqa: E402
+from release.package_registry import Registry, publication_state, read_inventory, verify_publication  # noqa: E402
 from release.package_staging import staging_probe  # noqa: E402
 
 
@@ -19,6 +21,18 @@ def main(argv=None, *, repo=None) -> int:
     archives = commands.add_parser("archives")
     archives.add_argument("--package-dir", required=True, type=Path)
     archives.add_argument("--expect-inventory", type=Path)
+    consumer = commands.add_parser("consumer")
+    consumer.add_argument("--package-dir", required=True, type=Path)
+    consumer.add_argument("--toolchain", default="1.88.0")
+    state = commands.add_parser("registry-state")
+    state.add_argument("--inventory", required=True, type=Path)
+    state.add_argument("--package", default="workspace")
+    verify = commands.add_parser("registry-verify")
+    verify.add_argument("--inventory", required=True, type=Path)
+    verify.add_argument("--package")
+    registry_build = commands.add_parser("registry-consumer")
+    registry_build.add_argument("--inventory", required=True, type=Path)
+    registry_build.add_argument("--toolchain", default="1.88.0")
     refs = commands.add_parser("preflight")
     refs.add_argument("--ref", required=True)
     refs.add_argument("--require-main", action="store_true")
@@ -51,6 +65,23 @@ def main(argv=None, *, repo=None) -> int:
         if args.command == "ci-results":
             count = verify_ci_results(args.needs_json)
             print(f"ci-results: {count} required jobs succeeded")
+            return 0
+        if args.command == "consumer":
+            result = archive_consumer(repo, args.package_dir, args.toolchain)
+            print(json.dumps({"consumer": result}, sort_keys=True))
+            return 0
+        if args.command == "registry-state":
+            result = publication_state(read_inventory(args.inventory), args.package, Registry())
+            print(json.dumps(result, sort_keys=True))
+            return 0
+        if args.command == "registry-verify":
+            result = verify_publication(read_inventory(args.inventory), Registry(),
+                                        selected=args.package)
+            print(json.dumps(result, sort_keys=True))
+            return 0
+        if args.command == "registry-consumer":
+            result = registry_consumer(repo, args.inventory, args.toolchain)
+            print(json.dumps({"registry_consumer": result}, sort_keys=True))
             return 0
         inventory = inspect_archives(repo, args.package_dir)
         if args.expect_inventory:
