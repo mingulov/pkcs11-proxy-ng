@@ -65,6 +65,10 @@ class BinaryBoundaryTests(unittest.TestCase):
             self.assertIn("--manifest-path", command)
             self.assertNotIn("--all-features", command)
         self.assertEqual(windows[-2:], ["--example", "cross_width_smoke"])
+        shim = target_command("1.98.1", "x86_64-unknown-linux-gnu", root,
+                              "pkcs11-proxy-ng-shim", "lib")
+        self.assertEqual(shim[-1], "--lib")
+        self.assertNotIn("pkcs11-proxy-ng-shim", shim)
         configured = target_command("1.98.1", "x86_64-pc-windows-msvc", root,
                                     "pkcs11-proxy-ng", "bin",
                                     ["--config", 'patch.crates-io.pkcs11-proxy-ng-types.path="/tmp/types"'])
@@ -193,7 +197,7 @@ class ControlledBinaryBuildTests(unittest.TestCase):
             lines = [f"{name} v0.2.0|" for name in sorted(self.cargo._closure(root))]
             return subprocess.CompletedProcess(command, 0, "\n".join(lines) + "\n", "")
         self.assertIn("build", command)
-        name = command[-1]
+        name = root if "--lib" in command else command[-1]
         target = command[command.index("--target") + 1]
         extension = ".exe" if "windows" in target and name != "pkcs11-proxy-ng-shim" else ""
         output_name = "pkcs11_proxy_ng_shim.dll" if "windows" in target and name == "pkcs11-proxy-ng-shim" else (

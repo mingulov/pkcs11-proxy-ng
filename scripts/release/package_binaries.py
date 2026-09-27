@@ -75,7 +75,7 @@ def target_command(toolchain: str, target: str, manifest: Path,
     if target == TARGETS[1]:
         prefix.append("xwin")
     return [*prefix, "build", *(config or []), "--manifest-path", str(manifest), "--release", "--locked",
-            "--target", target, f"--{kind}", name]
+            "--target", target, f"--{kind}", *([] if kind == "lib" else [name])]
 
 
 def validate_build_graph(metadata: dict, unpack: Path, root_name: str,
