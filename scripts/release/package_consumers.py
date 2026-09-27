@@ -181,6 +181,35 @@ def _external_lock(repo: Path) -> set[tuple]:
             for item in lock["package"] if item.get("source") is not None}
 
 
+def _prepare_example(client: Path, base: Path, version: str) -> Path:
+    """Use the packaged example as a separate application's exact source."""
+    example = base / "example-client"
+    source = client / "examples" / "remote_client.rs"
+    require(source.is_file(), "client archive lacks remote_client example")
+    example.mkdir()
+    (example / "src").mkdir()
+    shutil.copy2(source, example / "src" / "main.rs")
+    lock = tomllib.loads((client / "Cargo.lock").read_text(encoding="utf-8"))
+    tokio = [item for item in lock["package"] if item["name"] == "tokio"]
+    require(len(tokio) == 1 and tokio[0].get("source") == REGISTRY_SOURCE,
+            "client lock lacks a unique registry Tokio")
+    manifest = (
+        '[package]\nname = "pkcs11-proxy-ng-example-consumer"\nversion = "0.0.0"\n'
+        'edition = "2024"\nrust-version = "1.88"\n'
+        '[dependencies]\n'
+        f'pkcs11-proxy-ng-client = {{ path = {json.dumps(str(client))}, version = "={version}" }}\n'
+        f'tokio = {{ version = "={tokio[0]["version"]}", features = ["macros", "rt"] }}\n'
+    )
+    (example / "Cargo.toml").write_text(manifest, encoding="utf-8")
+    root_record = ('\n[[package]]\nname = "pkcs11-proxy-ng-example-consumer"\n'
+                   'version = "0.0.0"\ndependencies = [\n'
+                   ' "pkcs11-proxy-ng-client",\n "tokio",\n]\n')
+    (example / "Cargo.lock").write_text(
+        (client / "Cargo.lock").read_text(encoding="utf-8") + root_record,
+        encoding="utf-8")
+    return example
+
+
 def _root_check(name: str, roots: dict[str, Path], base: Path, env: dict,
                 toolchain: str, external: set[tuple], version: str, hashes: dict[str, str],
                 *, registry=False) -> dict:
@@ -244,7 +273,14 @@ def _consume(roots: dict[str, Path], base: Path, repo: Path, toolchain: str,
             graph["exports"] = _shim_exports(library)
         elif name == "pkcs11-proxy-ng-client":
             _run(_cargo(toolchain, *config, "check", "--example", "remote_client", "--locked"), root, env)
-            graph["example"] = "remote_client checked"
+            example = _prepare_example(root, base, version)
+            example_graph = _metadata(example, env, toolchain, config)
+            example_features = _runtime_features(example, env, toolchain, config, name)
+            graph["external_example_graph"] = validate_metadata(
+                example_graph, base / "unpacked", name, version,
+                "registry" if registry else "archive", runtime_features=example_features)
+            _run(_cargo(toolchain, *config, "check", "--locked"), example, env)
+            graph["example"] = "packaged and external remote_client checked"
         elif name == "pkcs11-proxy-ng-proto":
             _run(_cargo(toolchain, *config, "doc", "--lib", "--no-deps", "--locked"), root, env)
             graph["docs"] = "proto library docs generated"

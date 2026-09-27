@@ -1,5 +1,7 @@
 """Archive consumer identity and graph boundaries."""
 
+# ruff: noqa: E402
+
 from pathlib import Path
 import sys
 import tempfile
@@ -8,7 +10,8 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 from release.package_model import ReleaseError  # noqa: E402
-from release.package_consumers import _patches, _seed_lock, reconcile_lock, validate_metadata  # noqa: E402
+from release.package_consumers import (_patches, _prepare_example, _seed_lock,
+                                       reconcile_lock, validate_metadata)  # noqa: E402
 
 
 class ConsumerIdentityTests(unittest.TestCase):
@@ -74,6 +77,25 @@ class ConsumerIdentityTests(unittest.TestCase):
         self.assertEqual(args[0], "--config")
         self.assertIn("pkcs11-proxy-ng-types", args[1])
         self.assertNotIn("pkcs11-proxy-ng-0.2.0", args[1])
+
+    def test_example_root_uses_packaged_source_and_client_as_sole_project_dep(self):
+        import tomllib
+        example = self.client / "examples"
+        example.mkdir()
+        (example / "remote_client.rs").write_bytes(b"fn main() {}\n")
+        (self.client / "Cargo.lock").write_text(
+            'version = 4\n[[package]]\nname = "pkcs11-proxy-ng-client"\nversion = "0.2.0"\n'
+            '[[package]]\nname = "tokio"\nversion = "1.50.0"\nsource = "' + self.source +
+            '"\nchecksum = "' + "a" * 64 + '"\n')
+        root = _prepare_example(self.client, self.root, "0.2.0")
+        manifest = tomllib.loads((root / "Cargo.toml").read_text())
+        self.assertEqual((root / "src/main.rs").read_bytes(), b"fn main() {}\n")
+        self.assertEqual(set(manifest["dependencies"]) &
+                         {"pkcs11-proxy-ng-client", "pkcs11-proxy-ng", "pkcs11-proxy-ng-backend",
+                          "pkcs11-proxy-ng-types", "pkcs11-proxy-ng-proto"},
+                         {"pkcs11-proxy-ng-client"})
+        self.assertEqual(manifest["dependencies"]["tokio"]["version"], "=1.50.0")
+        self.assertEqual(manifest["dependencies"]["tokio"]["features"], ["macros", "rt"])
 
     def metadata(self, *, client_path=None, types_path=None, types_version="0.2.0",
                  extra=(), features=None):
