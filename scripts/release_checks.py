@@ -9,8 +9,10 @@ import sys
 sys.dont_write_bytecode = True
 from release.package_archives import inspect_archives  # noqa: E402
 from release.package_binaries import build_binaries  # noqa: E402
+from release.package_bundles import stage_bundle  # noqa: E402
 from release.package_consumers import archive_consumer, registry_consumer  # noqa: E402
 from release.package_model import ReleaseError  # noqa: E402
+from release.package_notices import collect_workspace_inputs, generate_notices  # noqa: E402
 from release.package_refs import preflight, verify_ci_results  # noqa: E402
 from release.package_registry import Registry, publication_state, read_inventory, verify_publication  # noqa: E402
 from release.package_staging import staging_probe  # noqa: E402
@@ -42,6 +44,22 @@ def main(argv=None, *, repo=None) -> int:
                         choices=("x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"))
     binary.add_argument("--output", required=True, type=Path)
     binary.add_argument("--toolchain", default="1.98.1")
+    notices = commands.add_parser("notices")
+    notices.add_argument("--build-inputs", required=True, type=Path)
+    notices.add_argument("--output", required=True, type=Path)
+    workspace_notices = commands.add_parser("workspace-notices")
+    workspace_notices.add_argument("--binaries", required=True, type=Path)
+    workspace_notices.add_argument("--target", required=True)
+    workspace_notices.add_argument("--inputs-output", required=True, type=Path)
+    workspace_notices.add_argument("--output", required=True, type=Path)
+    bundle = commands.add_parser("bundle")
+    bundle.add_argument("--binaries", required=True, type=Path)
+    bundle.add_argument("--provenance", required=True, type=Path)
+    bundle.add_argument("--notices", required=True, type=Path)
+    bundle.add_argument("--output", required=True, type=Path)
+    bundle.add_argument("--timestamp", required=True, type=int)
+    bundle.add_argument("--inventory", type=Path)
+    bundle.add_argument("--package-dir", type=Path)
     refs = commands.add_parser("preflight")
     refs.add_argument("--ref", required=True)
     refs.add_argument("--require-main", action="store_true")
@@ -96,6 +114,25 @@ def main(argv=None, *, repo=None) -> int:
             result = build_binaries(repo, args.inventory, args.package_dir, args.source,
                                     args.target, args.output, args.toolchain)
             print(json.dumps({"binary_build": result}, sort_keys=True))
+            return 0
+        if args.command == "notices":
+            result = generate_notices(args.build_inputs, args.output)
+            print(json.dumps({"notices": {"target": result["target"],
+                                          "packages": len(result["packages"]),
+                                          "files": len(result["files"])}}, sort_keys=True))
+            return 0
+        if args.command == "workspace-notices":
+            inputs = collect_workspace_inputs(repo, args.binaries, args.target, args.inputs_output)
+            result = generate_notices(inputs, args.output)
+            print(json.dumps({"workspace_notices": {"target": result["target"],
+                                                    "packages": len(result["packages"]),
+                                                    "files": len(result["files"])}}, sort_keys=True))
+            return 0
+        if args.command == "bundle":
+            archive = stage_bundle(repo, args.binaries, args.provenance,
+                                   args.notices, args.output, timestamp=args.timestamp,
+                                   inventory_path=args.inventory, package_dir=args.package_dir)
+            print(json.dumps({"bundle": str(archive)}, sort_keys=True))
             return 0
         inventory = inspect_archives(repo, args.package_dir)
         if args.expect_inventory:

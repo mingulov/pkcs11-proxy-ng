@@ -29,7 +29,7 @@ depends=""
 # stock cargo/rust would not (libloading 0.9, time 0.3.47 require
 # 1.88+, but Alpine 3.22 ships 1.87). See doc/development.md for
 # the supported toolchain and MSRV checks.
-makedepends="protoc protobuf-dev"
+makedepends="protoc protobuf-dev python3"
 install="$pkgname-shim.post-install
         $pkgname-shim.post-deinstall
         $pkgname-daemon.post-install
@@ -56,6 +56,11 @@ build() {
     # stripped, so no additional `strip` invocation is needed.
     cd "$builddir"
     cargo build --release --workspace --locked
+    python3 scripts/release_checks.py workspace-notices \
+        --binaries "$builddir/target/release" \
+        --target "$(rustc -vV | awk '/^host:/ {print $2}')" \
+        --inputs-output "$builddir/target/package-notice-inputs" \
+        --output "$builddir/target/package-notices"
 }
 
 # No check() — the workspace's `cargo test --workspace` is run on the
@@ -70,10 +75,22 @@ package() {
     mkdir -p "$pkgdir"
 }
 
+_install_notices() {
+    _destination="$1/usr/share/licenses/$2"
+    install -d "$_destination"
+    install -m 0644 "$builddir/LICENSE-APACHE" "$builddir/LICENSE-MIT" \
+        "$builddir/target/package-notices/THIRD_PARTY_NOTICES" \
+        "$builddir/target/package-notices/notice-inventory.json" \
+        "$builddir/target/package-notice-inputs/build-provenance.json" \
+        "$_destination/"
+    cp -R "$builddir/target/package-notices/license-material" "$_destination/"
+}
+
 shim() {
     pkgdesc="$pkgdesc (client-side PKCS#11 module)"
     install -Dm0755 "$builddir/target/release/libpkcs11_proxy_ng_shim.so" \
         "$subpkgdir/usr/lib/pkcs11/libpkcs11_proxy_ng_shim.so"
+    _install_notices "$subpkgdir" "$pkgname-shim"
 }
 
 daemon() {
@@ -106,17 +123,19 @@ daemon() {
         "$subpkgdir/etc/pkcs11-proxy-ng/mechanism_params.cloudhsm.toml.example"
     install -Dm0644 "$builddir/packaging/alpine/pkcs11-proxy-ng-daemon.openrc" \
         "$subpkgdir/etc/init.d/pkcs11-proxy-ng"
+    _install_notices "$subpkgdir" "$pkgname-daemon"
 }
 
 cli() {
     pkgdesc="$pkgdesc (admin / smoke-test CLI)"
     install -Dm0755 "$builddir/target/release/pkcs11-proxy-ng-cli" \
         "$subpkgdir/usr/bin/pkcs11-proxy-ng-cli"
+    _install_notices "$subpkgdir" "$pkgname-cli"
 }
 
 compat() {
     pkgdesc="$pkgdesc (legacy libpkcs11-proxy.so symlink)"
-    depends="$pkgname-shim"
+    depends="$pkgname-shim=$pkgver-r$pkgrel"
     install -d "$subpkgdir/usr/lib"
     ln -s pkcs11/libpkcs11_proxy_ng_shim.so \
         "$subpkgdir/usr/lib/libpkcs11-proxy.so"

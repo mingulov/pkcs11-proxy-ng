@@ -24,6 +24,8 @@ ARG GIT_COMMIT=unknown
 # ─── Stage 1: build RPMs using rustup-managed Rust toolchain ──────────────────
 
 FROM ${AMAZON_BUILD_IMAGE} AS buildrpm
+ENV CARGO_BUILD_JOBS=4
+ENV CARGO_INCREMENTAL=0
 
 # Deferred T22 F6: versioned rustup bootstrap (not the floating
 # install pipe) installing the receipted toolchain, with the init
@@ -46,7 +48,8 @@ RUN <<EOF
   # `curl` is intentionally omitted because AL2023 ships curl-minimal
   # by default and a non-minimal curl install conflicts. The minimal
   # curl is sufficient for the rustup bootstrap below.
-  dnf -y install gcc make rpm-build rpmdevtools tar gzip protobuf-compiler systemd-rpm-macros
+  dnf -y install gcc make rpm-build rpmdevtools tar gzip protobuf-compiler systemd-rpm-macros python3.11
+  python3.11 -c 'import tomllib'
   # AL2023's stock rust/cargo (typically 1.86) is below transitive
   # dependency MSRV (libloading 0.9, time 0.3.47 require 1.88+). The
   # build therefore uses rustup; see doc/development.md for the
@@ -68,25 +71,19 @@ RUN <<EOF
   rpmdev-setuptree
   mkdir -p /rpm
 
-  # Build the workspace with the rustup-installed toolchain.
-  cargo build --release --workspace --locked
-
-  # Stage a source tarball that the .spec file consumes. The tarball
-  # includes the target/release artifacts so the .spec's %install
-  # phase can pick them up without rebuilding.
+  # The spec builds from this complete source tarball and generates
+  # workspace-labeled notices after compilation.
   source_name="pkcs11-proxy-ng-${APP_VERSION}"
   source_dir="$HOME/rpmbuild/SOURCES/$source_name"
   mkdir -p "$source_dir"
-  cp -a target "$source_dir/target"
-  cp -a packaging crates "$source_dir/"
+  cp -a Cargo.toml Cargo.lock README.md CHANGELOG.md LICENSE-APACHE LICENSE-MIT "$source_dir/"
+  cp -a scripts packaging crates "$source_dir/"
   cd ~/rpmbuild/SOURCES
   tar -czf "$source_name.tar.gz" "$source_name"
 
   cp /root/packaging/amazon/pkcs11-proxy-ng.spec ~/rpmbuild/SPECS/
-  # The .spec %build re-runs `cargo build` from inside rpmbuild; pass
-  # the rustup cargo via PATH so it picks up the same toolchain
-  # without re-downloading. Disable rpmbuild's debug split (already
-  # done in the .spec) so AL2023's strict-build defaults don't trip.
+  # The spec %build uses rustup cargo and the explicit python3.11
+  # interpreter, leaving AL2023's system /usr/bin/python3 unchanged.
   PATH="$HOME/.cargo/bin:$PATH" rpmbuild -ba ~/rpmbuild/SPECS/pkcs11-proxy-ng.spec
   cp ~/rpmbuild/RPMS/x86_64/*.rpm /rpm/
 EOF
@@ -100,8 +97,14 @@ RUN <<EOF
   set -eu
   echo "smoke test: install each subpackage"
   dnf -y install /rpm/pkcs11-proxy-ng-shim-*.rpm
+  test -s /usr/share/licenses/pkcs11-proxy-ng-shim/THIRD_PARTY_NOTICES
+  test -s /usr/share/licenses/pkcs11-proxy-ng-shim/license-material/rust-std/COPYRIGHT-library.html
   dnf -y install /rpm/pkcs11-proxy-ng-daemon-*.rpm
+  test -s /usr/share/licenses/pkcs11-proxy-ng-daemon/THIRD_PARTY_NOTICES
+  test -s /usr/share/licenses/pkcs11-proxy-ng-daemon/license-material/rust-std/COPYRIGHT-library.html
   dnf -y install /rpm/pkcs11-proxy-ng-cli-*.rpm
+  test -s /usr/share/licenses/pkcs11-proxy-ng-cli/THIRD_PARTY_NOTICES
+  test -s /usr/share/licenses/pkcs11-proxy-ng-cli/license-material/rust-std/COPYRIGHT-library.html
   dnf -y install /rpm/pkcs11-proxy-ng-compat-*.rpm
   /usr/bin/pkcs11-proxy-ng --version
   /usr/bin/pkcs11-proxy-ng-cli --version

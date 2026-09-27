@@ -11,7 +11,7 @@
 #       Version, Dockerfile.amazon ARG APP_VERSION).
 #
 # The Cargo version is read straight from the workspace Cargo.toml so the
-# smoke needs no Rust toolchain (checkout + bash only).
+# smoke needs no Rust toolchain (checkout + bash + Python 3.11+).
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -36,6 +36,31 @@ for section in '^%description' '^%build' '^%install' '^%files'; do
         exit 1
     }
 done
+
+# Each code-bearing package needs installed files, not just license
+# metadata. The executable APK function and RPM list tests check contents.
+for part in shim daemon cli; do
+    grep -Fq "_install_notices \"\$subpkgdir\" \"\$pkgname-$part\"" packaging/alpine/APKBUILD || {
+        echo "APK $part omits notice installation" >&2
+        exit 1
+    }
+    for item in LICENSE-APACHE LICENSE-MIT THIRD_PARTY_NOTICES license-material \
+                notice-inventory.json build-provenance.json; do
+        grep -Eq "^%license .*%\{name\}-$part/$item$" packaging/amazon/pkcs11-proxy-ng.spec || {
+            echo "RPM $part omits $item" >&2
+            exit 1
+        }
+    done
+done
+# The dollar signs are literal APKBUILD text, not shell expansions here.
+# shellcheck disable=SC2016
+grep -Fq 'depends="$pkgname-shim=$pkgver-r$pkgrel"' packaging/alpine/APKBUILD || {
+    echo "APK compat must require the exact shim version" >&2
+    exit 1
+}
+python3 -B scripts/release_checks.py notices --help >/dev/null
+python3 -B scripts/release_checks.py workspace-notices --help >/dev/null
+python3 -B scripts/release_checks.py bundle --help >/dev/null
 
 # (b) Version mirrors agree with the workspace Cargo version (shared
 # W1-L17-10 check: one mirror definition for all release tooling).
