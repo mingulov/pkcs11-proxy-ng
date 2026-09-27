@@ -77,11 +77,10 @@ RUN <<EOF
   apk update
   mkdir /apk
   chown build:abuild /apk
-  # Make the rustup toolchain visible to the build user, and the
-  # cargo registry / registry-index cache writable so abuild's
-  # cargo-build step can populate them.
-  chmod -R a+rwX /usr/local/cargo
-  chmod -R a+rX /usr/local/rustup
+  # The unprivileged abuild user needs rustup's tmp directory and the
+  # Cargo registry/cache writable. Own only these build-stage homes;
+  # do not grant other users write access to the compiler installation.
+  chown -R build:abuild /usr/local/cargo /usr/local/rustup
 EOF
 
 USER build
