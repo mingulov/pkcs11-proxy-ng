@@ -85,16 +85,19 @@ class BinaryBoundaryTests(unittest.TestCase):
             with self.assertRaises(ReleaseError):
                 validate_release_profile(root)
 
-    def test_candidate_provenance_cannot_pass_registry_gate(self):
+    def test_incomplete_registry_label_cannot_pass_evidence_gate(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "build-provenance.json"
             path.write_text(json.dumps({"format_version": 1, "source_mode": "archive",
                                         "github_publication_eligible": False}))
             with self.assertRaises(ReleaseError):
-                require_registry_provenance(path)
+                require_registry_provenance(path, Path(temp) / "inventory.json",
+                                            Path(temp) / "packages", Path(temp) / "binaries")
             path.write_text(json.dumps({"format_version": 1, "source_mode": "registry",
                                         "github_publication_eligible": True}))
-            require_registry_provenance(path)
+            with self.assertRaises(ReleaseError):
+                require_registry_provenance(path, Path(temp) / "inventory.json",
+                                            Path(temp) / "packages", Path(temp) / "binaries")
 
     def test_build_graph_rejects_checkout_roots_and_unexpected_features(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -229,6 +232,35 @@ class ControlledBinaryBuildTests(unittest.TestCase):
         for name in ("pkcs11-proxy-ng", "pkcs11-proxy-ng-cli", "pkcs11-proxy-ng-shim"):
             self.assertEqual((self.base / "output/unpacked" / f"{name}-0.2.0/Cargo.lock").read_bytes(),
                              self.locks[name])
+        checked = require_registry_provenance(self.base / "output/build-provenance.json",
+                                              self.inventory_path, self.packages,
+                                              self.base / "output/binaries")
+        self.assertEqual(checked["target"], "x86_64-pc-windows-msvc")
+
+    def test_evidence_gate_binds_archive_locks_and_staged_artifact_bytes(self):
+        self.build()
+        path = self.base / "output/build-provenance.json"
+        binaries = self.base / "output/binaries"
+        original = json.loads(path.read_text())
+        mutations = (
+            {"source_mode": "archive", "github_publication_eligible": False},
+            {"source_mode": "registry", "github_publication_eligible": True,
+             "archives": {**original["archives"], "pkcs11-proxy-ng-types": "0" * 64}},
+            {"original_locks": {**original["original_locks"], "pkcs11-proxy-ng": "0" * 64}},
+            {"tools": {"rustc": "rustc 1.88.0"}},
+            {"target": "i686-unknown-linux-gnu"},
+            {"artifacts": original["artifacts"][:3]},
+        )
+        for changes in mutations:
+            with self.subTest(changes=changes):
+                path.write_text(json.dumps({**original, **changes}))
+                with self.assertRaises(ReleaseError):
+                    require_registry_provenance(path, self.inventory_path, self.packages, binaries)
+        path.write_text(json.dumps(original))
+        artifact = binaries / "pkcs11-proxy-ng.exe"
+        artifact.write_bytes(artifact.read_bytes() + b"candidate suffix")
+        with self.assertRaises(ReleaseError):
+            require_registry_provenance(path, self.inventory_path, self.packages, binaries)
 
     def test_missing_or_yanked_registry_member_blocks_build(self):
         name = "pkcs11-proxy-ng-types"
