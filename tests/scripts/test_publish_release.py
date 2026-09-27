@@ -136,9 +136,16 @@ class PublishJobBoundaryTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertNotIn(command, runs)
         for line in runs.splitlines():
-            if "cargo package" in line:
+            if "cargo package" in line or "cargo publish" in line:
                 with self.subTest(line=line):
                     self.assertIn("--no-verify", line)
+
+    def test_repackage_copies_from_isolated_target_dir(self):
+        """C1: cargo package honors CARGO_TARGET_DIR, so the copy must."""
+        workflow = load_workflow(PUBLISH_YML)
+        runs = "\n".join(run_blocks(workflow["jobs"]["upload"]))
+        self.assertIn("$CARGO_TARGET_DIR/package/", runs)
+        self.assertNotIn("cp target/package/", runs)
 
     def test_credential_steps_follow_guards(self):
         workflow = load_workflow(PUBLISH_YML)
@@ -412,6 +419,45 @@ class StagingWorkflowTests(unittest.TestCase):
         self.assertIn(STAGING_TOKEN, text)
         self.assertNotIn(BOOTSTRAP_TOKEN, text)
 
+    def test_staging_token_scoped_to_upload_steps_only(self):
+        """M1: the staging secret must not leak into every job step."""
+        workflow = load_workflow(STAGING_YML)
+        job = workflow["jobs"]["staging-upload"]
+        self.assertNotIn(STAGING_TOKEN, job.get("env", {}))
+        steps = {step.get("name"): step for step in job.get("steps", [])}
+        for name in ("Dry-run staging publish (endpoint validation)",
+                     "Publish probe to staging registry"):
+            with self.subTest(step=name):
+                self.assertIn(STAGING_TOKEN, steps[name].get("env", {}))
+
+    def test_probe_job_needs_no_toolchain(self):
+        """M3: probe generation is pure Python; no toolchain/protoc."""
+        workflow = load_workflow(STAGING_YML)
+        text = job_text("probe", workflow)
+        self.assertNotIn("rust-toolchain", text)
+        self.assertNotIn("setup-protoc", text)
+        self.assertNotIn("CARGO_TARGET_DIR", text)
+
+    def test_dry_run_precedes_real_upload(self):
+        workflow = load_workflow(STAGING_YML)
+        names = step_names(workflow["jobs"]["staging-upload"])
+        dry = names.index("Dry-run staging publish (endpoint validation)")
+        real = names.index("Publish probe to staging registry")
+        self.assertLess(dry, real)
+
+    def test_endpoint_binding_validated_before_credentials(self):
+        workflow = load_workflow(STAGING_YML)
+        text = job_text("staging-upload", workflow)
+        self.assertIn("STAGING_OIDC_URL", text)
+        self.assertIn("https://", text)
+
+    def test_both_staging_jobs_gate_on_main(self):
+        workflow = load_workflow(STAGING_YML)
+        for job_id in ("probe", "staging-upload"):
+            with self.subTest(job=job_id):
+                self.assertIn("refs/heads/main",
+                              workflow["jobs"][job_id].get("if", ""))
+
     def test_staging_builds_dependency_free_probe_first(self):
         workflow = load_workflow(STAGING_YML)
         jobs = workflow["jobs"]
@@ -434,6 +480,13 @@ class StagingWorkflowTests(unittest.TestCase):
                 self.assertIn("timeout-minutes", job)
 
 
+CARGO_RUNNING_JOBS = {
+    PUBLISH_YML: ("upload", "verify"),
+    STAGING_YML: ("staging-upload",),
+    RELEASE_YML: ("registry-recheck", "binary-linux", "binary-windows"),
+}
+
+
 class WorkflowPinTests(unittest.TestCase):
     def test_toolchain_and_protoc_pins(self):
         for path in (PUBLISH_YML, STAGING_YML, RELEASE_YML):
@@ -442,13 +495,19 @@ class WorkflowPinTests(unittest.TestCase):
                 self.assertIn(RELEASE_RUST, text)
                 self.assertIn(PROTOC, text)
                 self.assertNotIn("toolchain: stable", text)
-
-    def test_cargo_dirs_isolated_where_cargo_runs(self):
         for path in (PUBLISH_YML, RELEASE_YML):
             text = Path(path).read_text(encoding="utf-8")
             with self.subTest(path=str(path)):
-                self.assertIn("CARGO_TARGET_DIR", text)
-                self.assertIn("CARGO_BUILD_BUILD_DIR", text)
+                self.assertIn(MSRV, text)
+
+    def test_cargo_dirs_isolated_in_every_cargo_running_job(self):
+        for path, jobs in CARGO_RUNNING_JOBS.items():
+            workflow = load_workflow(path)
+            for job_id in jobs:
+                with self.subTest(path=str(path), job=job_id):
+                    text = job_text(job_id, workflow)
+                    self.assertIn("CARGO_TARGET_DIR", text)
+                    self.assertIn("CARGO_BUILD_BUILD_DIR", text)
 
 
 TAG_COMMIT = "6b151b799b59bce4a06f6cb993f8a74a84ae0481"
