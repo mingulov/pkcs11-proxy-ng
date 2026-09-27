@@ -95,7 +95,7 @@ mod tests {
     /// of the request/response naming that makes the direction visible.
     #[test]
     fn scan_covers_requests_only() {
-        let service = include_str!("../../../proto/pkcs11-proxy-ng/v1/service.proto");
+        let service = include_str!("../proto/pkcs11-proxy-ng/v1/service.proto");
         let mut methods = BTreeSet::new();
         // One rpc spans two lines; join continuations before parsing.
         let mut current = String::new();

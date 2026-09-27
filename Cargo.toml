@@ -30,6 +30,7 @@ edition = "2024"
 # rustup-installed toolchain.
 rust-version = "1.88"
 license = "Apache-2.0 OR MIT"
+repository = "https://github.com/mingulov/pkcs11-proxy-ng"
 
 [workspace.dependencies]
 # W1-L16-15: tokio features are selected per crate (same rule as the M11

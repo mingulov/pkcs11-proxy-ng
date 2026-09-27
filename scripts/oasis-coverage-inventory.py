@@ -1594,11 +1594,11 @@ def function_field_table_evidence(root: Path) -> str:
 
 
 def service_proto(root: Path) -> Path:
-    return root / "proto/pkcs11-proxy-ng/v1/service.proto"
+    return root / "crates/proto/proto/pkcs11-proxy-ng/v1/service.proto"
 
 
 def mechanism_params_proto(root: Path) -> Path:
-    return root / "proto/pkcs11-proxy-ng/v1/mechanism_params.proto"
+    return root / "crates/proto/proto/pkcs11-proxy-ng/v1/mechanism_params.proto"
 
 
 def message_params_source(root: Path) -> Path:
@@ -1606,7 +1606,7 @@ def message_params_source(root: Path) -> Path:
 
 
 def types_proto(root: Path) -> Path:
-    return root / "proto/pkcs11-proxy-ng/v1/types.proto"
+    return root / "crates/proto/proto/pkcs11-proxy-ng/v1/types.proto"
 
 
 def backend_traits(root: Path) -> Path:

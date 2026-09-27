@@ -5925,8 +5925,9 @@ fn legacy_per_function_rpcs_have_documented_retention() {
     const MARKER: &str = "NOTE: legacy per-op RPC (W1-L11-21 retention; see service.proto)";
 
     let root = workspace_root();
-    let proto = fs::read_to_string(root.join("proto/pkcs11-proxy-ng/v1/service.proto"))
-        .expect("service.proto should be readable");
+    let proto =
+        fs::read_to_string(root.join("crates/proto/proto/pkcs11-proxy-ng/v1/service.proto"))
+            .expect("service.proto should be readable");
     let begin = proto
         .find("Legacy per-function retention (W1-L11-21) - BEGIN")
         .expect("service.proto must carry the legacy retention notice block");

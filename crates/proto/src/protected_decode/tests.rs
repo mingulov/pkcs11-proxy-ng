@@ -192,7 +192,7 @@ fn message_descriptors_match_prost_tags_exhaustively() {
 
 #[test]
 fn request_table_matches_service_definition_exhaustively() {
-    let service = include_str!("../../../../proto/pkcs11-proxy-ng/v1/service.proto");
+    let service = include_str!("../../proto/pkcs11-proxy-ng/v1/service.proto");
     let mut rpcs = BTreeMap::new();
     for line in service.lines() {
         let line = line.trim();

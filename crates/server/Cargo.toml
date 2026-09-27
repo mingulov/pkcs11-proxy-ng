@@ -4,7 +4,16 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-publish = false
+repository.workspace = true
+publish = ["crates-io"]
+description = "PKCS#11 remote proxy daemon for Linux token providers"
+readme = "README.md"
+categories = ["cryptography", "network-programming"]
+keywords = ["pkcs11", "proxy", "hsm"]
+include = ["Cargo.toml", "README.md", "LICENSE-APACHE", "LICENSE-MIT", "src/**"]
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
 
 [[bin]]
 name = "pkcs11-proxy-ng"
@@ -17,10 +26,10 @@ path = "src/main.rs"
 native-owner-test-hooks = ["pkcs11-proxy-ng-backend/native-owner-test-hooks"]
 
 [dependencies]
-pkcs11-proxy-ng-types = { path = "../types" }
-pkcs11-proxy-ng-proto = { path = "../proto" }
-pkcs11-proxy-ng-backend = { path = "../backend" }
-pkcs11-proxy-ng-audit = { path = "../audit" }
+pkcs11-proxy-ng-types = { version = "=0.2.0", path = "../types" }
+pkcs11-proxy-ng-proto = { version = "=0.2.0", path = "../proto" }
+pkcs11-proxy-ng-backend = { version = "=0.2.0", path = "../backend" }
+pkcs11-proxy-ng-audit = { version = "=0.2.0", path = "../audit" }
 cryptoki-sys.workspace = true
 serde_json.workspace = true
 clap.workspace = true

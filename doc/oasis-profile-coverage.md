@@ -409,8 +409,8 @@ Mechanism parameter modeling is maintained in:
 - `crates/types/src/mechanism.rs` (`CkMechanismParams`, currently 79 variants);
 - `crates/proto/src/convert/message_params.rs` (three message-operation
   parameter shapes);
-- `proto/pkcs11-proxy-ng/v1/mechanism_params.proto`;
-- `proto/pkcs11-proxy-ng/v1/types.proto`;
+- `crates/proto/proto/pkcs11-proxy-ng/v1/mechanism_params.proto`;
+- `crates/proto/proto/pkcs11-proxy-ng/v1/types.proto`;
 - `crates/proto/src/convert/mechanism/*`;
 - `crates/types/src/mechanism_params_default.toml`;
 - `crates/types/src/mechanism_official.rs` (463 official v3.2 mechanism values,
@@ -517,7 +517,7 @@ real backend `.so` directly, except for network latency.
 Parameter definitions and conversions live in:
 
 - `crates/types/src/mechanism.rs` and `mechanism_params_default.toml`;
-- `proto/pkcs11-proxy-ng/v1/mechanism_params.proto` and `types.proto`;
+- `crates/proto/proto/pkcs11-proxy-ng/v1/mechanism_params.proto` and `types.proto`;
 - `crates/proto/src/convert/mechanism/` and `message_params.rs`;
 - `crates/backend/src/ffi/ffi_conversion/`.
 
