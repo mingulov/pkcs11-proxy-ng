@@ -133,8 +133,8 @@ def _metadata(cwd: Path, env: dict, toolchain: str, config: list[str]) -> dict:
     return json.loads(output)
 
 
-def _patches(roots: dict[str, Path], root_name: str) -> list[str]:
-    return [arg for name, path in roots.items() if name != root_name
+def _patches(roots: dict[str, Path], root_name: str, locked: set[str]) -> list[str]:
+    return [arg for name, path in roots.items() if name != root_name and name in locked
             for arg in ("--config", f'patch.crates-io.{name}.path="{path}"')]
 
 
@@ -168,11 +168,13 @@ def _root_check(name: str, roots: dict[str, Path], base: Path, env: dict,
                 toolchain: str, external: set[tuple], version: str, hashes: dict[str, str],
                 *, registry=False) -> dict:
     root = roots[name]
-    config = [] if registry else _patches(roots, name)
+    locked_internal = {package["name"] for package in
+                       tomllib.loads((root / "Cargo.lock").read_text())["package"]
+                       if package["name"] in INTERNAL}
+    config = [] if registry else _patches(roots, name, locked_internal)
     if not registry:
-        expected = {item for item in INTERNAL if item in
-                    {package["name"] for package in tomllib.loads((root / "Cargo.lock").read_text())["package"]}}
-        _seed_lock(root / "Cargo.lock", root / "Cargo.lock", external, version, hashes, expected)
+        _seed_lock(root / "Cargo.lock", root / "Cargo.lock", external, version, hashes,
+                   locked_internal)
     graph = _metadata(root, env, toolchain, config)
     result = validate_metadata(graph, base, name, version, "registry" if registry else "archive")
     if registry:

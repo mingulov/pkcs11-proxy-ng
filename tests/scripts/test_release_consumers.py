@@ -8,7 +8,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 from release.package_model import ReleaseError  # noqa: E402
-from release.package_consumers import _seed_lock, reconcile_lock, validate_metadata  # noqa: E402
+from release.package_consumers import _patches, _seed_lock, reconcile_lock, validate_metadata  # noqa: E402
 
 
 class ConsumerIdentityTests(unittest.TestCase):
@@ -64,6 +64,16 @@ class ConsumerIdentityTests(unittest.TestCase):
                       '"\nchecksum = "' + "a" * 64 + '"', seeded)
         self.assertNotIn('checksum = "' + "b" * 64 + '"', seeded)
         self.assertEqual(source.read_text(), original)
+
+    def test_patch_list_contains_only_locked_internal_dependencies(self):
+        roots = {"pkcs11-proxy-ng-client": self.client,
+                 "pkcs11-proxy-ng-types": self.types,
+                 "pkcs11-proxy-ng": self.unpack / "pkcs11-proxy-ng-0.2.0"}
+        args = _patches(roots, "pkcs11-proxy-ng-client", {"pkcs11-proxy-ng-types"})
+        self.assertEqual(len(args), 2)
+        self.assertEqual(args[0], "--config")
+        self.assertIn("pkcs11-proxy-ng-types", args[1])
+        self.assertNotIn("pkcs11-proxy-ng-0.2.0", args[1])
 
     def metadata(self, *, client_path=None, types_path=None, types_version="0.2.0",
                  extra=(), features=None):
