@@ -1,7 +1,12 @@
 """Checks for source notice and provenance material without external checkouts."""
 
 import hashlib
+import os
 from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
 import tomllib
 import unittest
 
@@ -14,6 +19,28 @@ HEADER_HASH = "5b58736b6d23f12b4d9492cd24b06b9d11056c3153afc4e89b1fe564749e71a2"
 
 
 class SourceProvenanceTests(unittest.TestCase):
+    def test_generator_refuses_unpinned_numeric_header_without_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script = root / "repo/scripts/gen-historical-mechanism-flags.py"
+            script.parent.mkdir(parents=True)
+            shutil.copyfile(ROOT / "scripts/gen-historical-mechanism-flags.py", script)
+            historical = root / "doc/pkcs11-oasis/pkcs11-hist/v3.0/pkcs11-hist-v3.0.html"
+            historical.parent.mkdir(parents=True)
+            historical.write_text("<tr><td>CKM_RSA_PKCS</td><td>x</td></tr>")
+            header = root / "doc/oasis-tcs-pkcs11/published/2-40-errata-1/pkcs11t.h"
+            header.parent.mkdir(parents=True)
+            header.write_text("#define CKM_RSA_PKCS 0x00000001UL\n")
+            env = os.environ.copy()
+            env["PKCS11_PROXY_NG_OASIS_ROOT"] = str(root / "doc/pkcs11-oasis")
+            result = subprocess.run(
+                [sys.executable, str(script)], env=env, text=True,
+                capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stdout, "")
+            self.assertIn("numeric header SHA-256 mismatch", result.stderr)
+
     def test_backend_archive_declares_complete_historical_notice(self):
         manifest = tomllib.loads((ROOT / "crates/backend/Cargo.toml").read_text())
         self.assertIn("NOTICE", manifest["package"]["include"])
