@@ -223,6 +223,17 @@ class BundleTests(unittest.TestCase):
 
 
 class PackageCarriageTests(unittest.TestCase):
+    def test_apkbuild_maintainer_metadata_is_valid_or_absent(self):
+        apkbuild = (ROOT / "packaging/alpine/APKBUILD").read_text()
+        # Alpine 3.23 abuild check_maintainer warns but accepts no comment;
+        # a machine-readable Maintainer comment must be RFC822 instead.
+        matches = re.findall(r"^# *Maintainer[^\n]*", apkbuild, re.M)
+        self.assertLessEqual(len(matches), 1)
+        if matches:
+            self.assertRegex(matches[0], r"^# *Maintainer: [^<>\n]+ <[^@<>\n ]+@[^@<>\n ]+\.[^@<>\n ]+>$")
+        else:
+            self.assertIn("Denis Mingulov (project maintainer)", apkbuild)
+
     def test_apk_functions_install_readable_material_in_each_code_package(self):
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)
