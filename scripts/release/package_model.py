@@ -71,7 +71,8 @@ def effective_dep(spec: object, workspace: dict, name: str) -> dict:
         base = {"version": inherited} if isinstance(inherited, str) else dict(inherited)
         require(isinstance(base, dict), f"invalid workspace dependency {name}")
         merged = {**base, **{k: v for k, v in spec.items() if k not in ("workspace", "features")}}
-        merged["features"] = list(base.get("features", [])) + list(spec.get("features", []))
+        if "features" in base or "features" in spec:
+            merged["features"] = list(base.get("features", [])) + list(spec.get("features", []))
         return merged
     return dict(spec)
 
