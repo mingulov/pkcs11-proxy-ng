@@ -170,6 +170,29 @@ Use `--prefix /tmp/pkcs11-proxy-ng-install` to keep the staged layout, or
 `--skip-build` to check existing `target/release` artifacts. See the
 [development guide](./doc/development.md#provider-tests) for provider tests.
 
+## crates.io packages (candidate, unpublished)
+
+Eight crates publish at one synchronized version (`0.2.0` first) with
+exact `=0.2.0` internal requirements. Four are user-facing entry points;
+the rest resolve automatically as dependencies:
+
+```bash
+cargo install pkcs11-proxy-ng --version 0.2.0 --locked        # daemon
+cargo install pkcs11-proxy-ng-cli --version 0.2.0 --locked    # CLI
+```
+
+Add `pkcs11-proxy-ng-client = "=0.2.0"` as a dependency for the Rust
+client library. The `pkcs11-proxy-ng-shim` crate builds the loadable
+PKCS#11 module — take it from a GitHub release bundle or OS package,
+never `cargo install` it as a library.
+
+These commands describe the intended post-publication state; the crates
+are not published yet and the source is not release-qualified. The full
+maintainer procedure — prerequisites, protected environments, staging,
+qualification approval, recovery, evidence retention, and docs.rs
+follow-up — is in the
+[crates.io publication guide](./doc/release/crates-io-publishing.md).
+
 ## Contributor rules
 
 Read [AGENTS.md](./AGENTS.md) before contributing.

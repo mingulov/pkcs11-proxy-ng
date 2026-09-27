@@ -124,8 +124,14 @@ def _bundle_files(repo: Path, binaries_dir: Path, provenance_path: Path,
         files.update({"bin/pkcs11-proxy-ng": binaries_dir / "pkcs11-proxy-ng",
                       "bin/pkcs11-proxy-ng-cli": binaries_dir / "pkcs11-proxy-ng-cli",
                       "lib/pkcs11/libpkcs11_proxy_ng_shim.so": binaries_dir / "libpkcs11_proxy_ng_shim.so"})
+        notes_name = f"v{version}-release-notes.md"
+        notes_path = repo / "doc/release" / notes_name
+        require(notes_path.is_file() and not notes_path.is_symlink() and
+                notes_path.stat().st_size > 0,
+                f"release notes for version {version} are missing: "
+                f"expected doc/release/{notes_name}")
         for name in ("beta-support-matrix.md", "mtls-setup.md", "parity-validation.md",
-                     "v0.2.0-release-notes.md"):
+                     notes_name):
             files[f"doc/{name}"] = repo / "doc/release" / name
     else:
         files.update({"bin/pkcs11-proxy-ng.exe": binaries_dir / "pkcs11-proxy-ng.exe",
