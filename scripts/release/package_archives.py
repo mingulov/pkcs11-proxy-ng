@@ -197,6 +197,10 @@ def validate_manifest(repo: Path, directory: str, name: str, version: str,
             f"{name} original manifest differs from source")
     require("Cargo.toml" in entries, f"{name} missing normalized manifest")
     normalized = parsed_bytes(entries["Cargo.toml"], f"{name} Cargo.toml")
+    require(set(normalized) <= {"package", "features", "lib", "bin", "example", "test",
+                                "bench", "dependencies", "dev-dependencies", "build-dependencies",
+                                "target", "lints", "badges"},
+            f"{name} normalized manifest has unexpected sections")
     actual = normalized.get("package", {})
     require(actual.get("name") == name and actual.get("version") == version,
             f"{name} normalized identity differs")
@@ -278,6 +282,15 @@ def validate_archive(repo: Path, package_dir: Path, name: str, directory: str,
             f"{name} VCS provenance differs from clean source")
     require(set(vcs["git"]) == {"sha1"}, f"{name} VCS provenance has unexpected fields")
     validate_manifest(repo, directory, name, version, entries, workspace)
+    require("Cargo.lock" in entries, f"{name} lacks generated Cargo.lock")
+    lock = parsed_bytes(entries["Cargo.lock"], f"{name} Cargo.lock")
+    require(isinstance(lock.get("package"), list), f"{name} invalid generated Cargo.lock")
+    for package in lock["package"]:
+        require(isinstance(package, dict), f"{name} invalid generated lock package")
+        source = package.get("source")
+        require(source is None or
+                (isinstance(source, str) and source.startswith("registry+https://")),
+                f"{name} generated lock contains a non-registry source")
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     return ({"name": name, "version": version, "archive": archive.name,
              "sha256": digest, "files": sorted(entries)}, entries)
@@ -288,6 +301,8 @@ def _inspect(repo: Path, package_dir: Path) -> tuple[dict, dict[str, dict[str, b
     commit = git(repo, "rev-parse", "HEAD")
     require(not git(repo, "status", "--porcelain", "--untracked-files=all"),
             "source checkout has tracked or untracked changes")
+    require(git(repo, "ls-tree", "-r", "--name-only", "HEAD", "--", "Cargo.lock") == "Cargo.lock",
+            "workspace Cargo.lock is absent from HEAD")
     require(package_dir.is_dir(), f"missing package directory: {package_dir}")
     wanted = {f"{name}-{version}.crate" for name, _ in PACKAGES}
     actual = {path.name for path in package_dir.glob("*.crate")}
@@ -300,6 +315,28 @@ def _inspect(repo: Path, package_dir: Path) -> tuple[dict, dict[str, dict[str, b
         record, entries = validate_archive(repo, package_dir, name, directory, version, commit, workspace, tracked)
         records.append(record)
         contents[name] = entries
+    root_lock = read_toml(repo / "Cargo.lock")
+    baseline = {(package["name"], package["version"], package.get("source"),
+                 package.get("checksum")) for package in root_lock.get("package", [])
+                if package.get("source") is not None}
+    hashes = {record["name"]: record["sha256"] for record in records}
+    for name, entries in contents.items():
+        lock = parsed_bytes(entries["Cargo.lock"], f"{name} Cargo.lock")
+        seen = set()
+        for package in lock["package"]:
+            identity = (package.get("name"), package.get("version"), package.get("source"))
+            require(identity not in seen, f"{name} generated lock repeats package identity")
+            seen.add(identity)
+            locked_name, locked_version, source = identity
+            if locked_name in INTERNAL:
+                require(locked_version == version, f"{name} locks a wrong internal package version")
+                if source is not None:
+                    require(package.get("checksum") == hashes[locked_name],
+                            f"{name} internal archive checksum differs")
+            else:
+                require(source is not None and
+                        (locked_name, locked_version, source, package.get("checksum")) in baseline,
+                        f"{name} external lock identity differs from committed workspace lock")
     require(not git(repo, "status", "--porcelain", "--untracked-files=all"),
             "source checkout changed during inspection")
     return ({"format_version": 1, "source_commit": commit, "version": version,
