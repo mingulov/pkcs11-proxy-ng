@@ -361,6 +361,13 @@ pub struct MockBackend {
     /// a client issued (e.g. primary-class search followed by a SECRET_KEY
     /// fallback). Unbounded by design — test-only, tiny templates.
     find_init_templates: Mutex<Vec<Vec<CkAttribute>>>,
+    /// Log of every `generate_key_pair` call as
+    /// `(mechanism, public_template, private_template)`, in call order, with
+    /// template nullness preserved (`None` vs empty). Tests drain it with
+    /// [`MockBackend::take_keygen_templates`] to assert template parity
+    /// (order/count/values) at the backend boundary. Unbounded by design —
+    /// test-only, tiny templates.
+    keygen_templates: Mutex<Vec<(CkMechanism, Option<Vec<CkAttribute>>, Option<Vec<CkAttribute>>)>>,
     /// Optional gate (W1-C11-04 harness): when `Some`, `find_objects` serves
     /// the override list only if the gate accepts the most recent init
     /// template, and returns `[]` otherwise. `None` (default) keeps the
@@ -470,6 +477,7 @@ impl MockBackend {
             find_objects_override: Mutex::new(None),
             find_objects_cursor: Mutex::new(0),
             find_init_templates: Mutex::new(Vec::new()),
+            keygen_templates: Mutex::new(Vec::new()),
             find_template_gate: Mutex::new(None),
         }
     }
@@ -604,6 +612,15 @@ impl MockBackend {
     /// Drain the log of `find_objects_init` templates, in call order.
     pub fn take_find_init_templates(&self) -> Vec<Vec<CkAttribute>> {
         std::mem::take(&mut self.find_init_templates.lock().unwrap())
+    }
+
+    /// Drain the log of `generate_key_pair` calls, in call order, as
+    /// `(mechanism, public_template, private_template)` with template
+    /// nullness preserved.
+    pub fn take_keygen_templates(
+        &self,
+    ) -> Vec<(CkMechanism, Option<Vec<CkAttribute>>, Option<Vec<CkAttribute>>)> {
+        std::mem::take(&mut self.keygen_templates.lock().unwrap())
     }
 
     /// Whether the installed find gate (if any) accepts the most recent
@@ -2277,6 +2294,11 @@ impl Pkcs11Backend for MockBackend {
         private_template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, CkObjectHandle)> {
         self.record_mechanism_entry(MockMechanismEntry::GenerateKeyPair, Some(m));
+        self.keygen_templates.lock().unwrap().push((
+            m.clone(),
+            public_template.map(|t| t.to_vec()),
+            private_template.map(|t| t.to_vec()),
+        ));
         self.require_mechanism_workflow_for_session(
             session,
             m,
