@@ -290,6 +290,7 @@ jobs:
           set -euo pipefail
           gh workflow run publish.yml \
             --ref "${{ needs.cut.outputs.tag }}" \
+            -R "${{ github.repository }}" \
             -f mode=${{ inputs.mode }} \
             -f package=${{ inputs.package }} \
             -f tag=${{ needs.cut.outputs.tag }} \

@@ -184,6 +184,9 @@ class DispatchJobTests(unittest.TestCase):
         run = run_text(job)
         self.assertIn("gh workflow run publish.yml", run)
         self.assertIn("--ref", run)
+        # No checkout in this job: gh must resolve the repo explicitly
+        # or it dies with "fatal: not a git repository".
+        self.assertIn('-R "${{ github.repository }}"', run)
         for flag in ("mode=", "package=", "tag=",
                      "qualification-url=", "qualification-subject="):
             with self.subTest(flag=flag):
