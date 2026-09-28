@@ -18,7 +18,7 @@
 # Compilation in that job would NOT be isolation, so `cargo publish` always
 # uses `--no-verify` here (allowed: the exact candidate already passed the
 # full CI build/consumer gates and the fresh pre-auth archive comparison).
-# All compilation stays in the reusable CI call and the read-only `verify`
+# All compilation stays in CI runs on the tag and the read-only `verify`
 # job. The protected `crates-io` environment must require approval bound to
 # a source-specific qualification record before this workflow is dispatched.
 #
@@ -169,6 +169,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     needs: [preflight]
+    permissions:
+      contents: read
+      actions: write
     outputs:
       artifact: ${{ steps.stage.outputs.artifact }}
     env:
@@ -187,10 +190,33 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Resolve green CI run on tag commit
+        id: resolve-ci
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # CI runs in its own run (reusable calls never schedule
+          # here), so locate the newest completed green CI run on the
+          # tag commit. The list is newest-first; a success conclusion
+          # always reflects the run's current attempt, so that attempt
+          # uploaded the green candidate artifact.
+          CI_RUN="$(gh api "repos/${{ github.repository }}/actions/workflows/ci.yml/runs?head_sha=${TAG_COMMIT}&status=completed&per_page=20" \
+            --jq '[.workflow_runs[] | select(.conclusion == "success")] | first | select(. != null) | "\(.id) \(.run_attempt)"')"
+          if [[ -z "$CI_RUN" ]]; then
+            echo "::error::no completed green CI run on ${TAG_COMMIT}; refusing."
+            exit 1
+          fi
+          read -r CI_RUN_ID CI_RUN_ATTEMPT <<< "$CI_RUN"
+          echo "run_id=${CI_RUN_ID}" >> "$GITHUB_OUTPUT"
+          echo "run_attempt=${CI_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
       - name: Download CI candidate archives
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
-          name: ci-candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ci-candidate-${{ needs.preflight.outputs.tag_commit }}-${{ steps.resolve-ci.outputs.run_id }}-${{ steps.resolve-ci.outputs.run_attempt }}
+          run-id: ${{ steps.resolve-ci.outputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           path: ci-candidate/
 
       - name: Verify candidate archives and source binding
@@ -240,6 +266,7 @@ jobs:
     permissions:
       id-token: write
       contents: read
+      actions: write
     concurrency:
       group: publish-crates-io
       cancel-in-progress: false
@@ -379,6 +406,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     needs: [preflight, upload]
+    permissions:
+      contents: read
+      actions: read
     outputs:
       complete: ${{ steps.mark.outputs.complete }}
     env:
