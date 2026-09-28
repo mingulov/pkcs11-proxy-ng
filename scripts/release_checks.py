@@ -98,6 +98,9 @@ def main(argv=None, *, repo=None) -> int:
     select.add_argument("--repository", required=True)
     select.add_argument("--workflow", required=True)
     select.add_argument("--event", required=True)
+    # Compat shim: pre-fix tag scripts require --head-sha, so the
+    # workflow always passes the run's own head; new scripts ignore it.
+    select.add_argument("--head-sha", required=False, default=None)
     select.add_argument("--name", required=True)
     select.add_argument("--now", type=float)
     assets = commands.add_parser("assets-compare")
@@ -147,7 +150,8 @@ def main(argv=None, *, repo=None) -> int:
         if args.command == "evidence-select":
             selected = select_evidence(args.runs_json, args.run_id, args.repository,
                                        args.workflow, args.event,
-                                       args.name, args.now)
+                                       args.name, args.now,
+                                       head_sha=args.head_sha)
             print(json.dumps({"evidence_select": selected}, sort_keys=True))
             return 0
         if args.command == "assets-compare":

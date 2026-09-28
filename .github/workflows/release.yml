@@ -132,12 +132,12 @@ jobs:
       - name: Collect candidate run evidence
         run: |
           set -euo pipefail
-          # No dispatch-head criterion: the publish run comes from
-          # main, so its head names the workflow version, never the
-          # tag commit. Tag binding comes from the artifact name plus
-          # evidence-verify below.
+          # The run's own head feeds --head-sha below: pre-fix tag
+          # scripts require the flag (tautology for them), new scripts
+          # ignore it. Tag binding comes from the artifact name plus
+          # evidence-verify below, never from the dispatch head.
           RUN_JSON="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}" \
-            --jq '{id: .id, event: .event, path: .path}')"
+            --jq '{id: .id, event: .event, head_sha: .head_sha, path: .path}')"
           ART_JSON="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}/artifacts" \
             --jq '[.artifacts[] | {name: .name, expired: .expired, expires_at: .expires_at}]')"
           jq -n --argjson run "$RUN_JSON" --argjson arts "$ART_JSON" \
@@ -155,10 +155,11 @@ jobs:
           set -euo pipefail
           ARTIFACT="$(python3 scripts/release_checks.py candidate-name \
             --tag-commit "$TAG_COMMIT" --run-id "$CANDIDATE_RUN_ID")"
+          RUN_HEAD="$(jq -r '.runs[0].head_sha' runs.json)"
           python3 scripts/release_checks.py evidence-select \
             --runs-json runs.json --run-id "$CANDIDATE_RUN_ID" \
             --repository "$GITHUB_REPOSITORY" --workflow "$EXPECT_WORKFLOW" \
-            --event "$EXPECT_EVENT" --name "$ARTIFACT"
+            --event "$EXPECT_EVENT" --head-sha "$RUN_HEAD" --name "$ARTIFACT"
           echo "artifact=${ARTIFACT}" >> "$GITHUB_OUTPUT"
 
       - name: Download immutable pre-auth candidate
