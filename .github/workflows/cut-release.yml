@@ -167,18 +167,15 @@ jobs:
       - name: Gate release_dry_run
         run: scripts/release-dry-run.sh
 
-      - name: Check subject, version, and receipt absence
+      - name: Check subject and version
         run: |
           set -euo pipefail
           # verify-release-subject asserts the tag shape, the Cargo
           # version mirror, the CHANGELOG.md dated heading, and the four
           # packaging mirrors; it needs no pushed tag to check those.
+          # A receipt already on main is fine: the tag commit refreshes
+          # it in place (rule (b) allows add or modify).
           scripts/verify-release-subject.sh "${{ steps.record.outputs.tag }}"
-          RECEIPT="doc/release/v${{ inputs.version }}-quality-receipt.md"
-          if [[ -e "$RECEIPT" ]]; then
-            echo "::error::$RECEIPT already exists on main; refusing."
-            exit 1
-          fi
 
       - name: Write quality receipt
         run: |
@@ -247,7 +244,8 @@ jobs:
             exit 1
           fi
           cp "${found[0]}" "$RECEIPT"
-          if [[ "$(git status --porcelain -- "$RECEIPT")" != "?? $RECEIPT" ]]; then
+          state="$(git status --porcelain -- "$RECEIPT")"
+          if [[ "$state" != "?? $RECEIPT" && "$state" != " M $RECEIPT" ]]; then
             echo "::error::unexpected worktree state for $RECEIPT."
             exit 1
           fi
