@@ -255,12 +255,15 @@ class PackageCarriageTests(unittest.TestCase):
         apkbuild = (ROOT / "packaging/alpine/APKBUILD").read_text()
         # Alpine 3.23 abuild check_maintainer warns but accepts no comment;
         # a machine-readable Maintainer comment must be RFC822 instead.
+        # The project uses the approved personal maintainer address.
         matches = re.findall(r"^# *Maintainer[^\n]*", apkbuild, re.M)
-        self.assertLessEqual(len(matches), 1)
-        if matches:
-            self.assertRegex(matches[0], r"^# *Maintainer: [^<>\n]+ <[^@<>\n ]+@[^@<>\n ]+\.[^@<>\n ]+>$")
-        else:
-            self.assertIn("Denis Mingulov (project maintainer)", apkbuild)
+        self.assertEqual(len(matches), 1)
+        self.assertRegex(matches[0], r"^# *Maintainer: [^<>\n]+ <[^@<>\n ]+@[^@<>\n ]+\.[^@<>\n ]+>$")
+        self.assertIn("Denis Mingulov <denis@mingulov.com>", apkbuild)
+
+    def test_spec_changelog_names_approved_maintainer(self):
+        spec = (ROOT / "packaging/amazon/pkcs11-proxy-ng.spec").read_text()
+        self.assertIn("Denis Mingulov <denis@mingulov.com>", spec)
 
     def test_alpine_build_user_owns_rustup_and_cargo_homes(self):
         docker = (ROOT / "packaging/alpine/Dockerfile.alpine").read_text()
