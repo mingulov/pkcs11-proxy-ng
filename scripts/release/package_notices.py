@@ -435,7 +435,8 @@ def _checked_inputs(path: Path) -> tuple[dict, dict, dict]:
                 "workspace notice compiler differs")
         return inputs, provenance, {"version": provenance["version"], "packages": []}
     inventory_path = Path(inputs.get("inventory_path", ""))
-    package_dir = Path(inputs.get("package_dir", ""))
+    require(inputs.get("archives_dir"), "notice build inputs lack a recorded archives home")
+    archives_dir = Path(inputs.get("archives_dir", ""))
     inventory = read_inventory(inventory_path)
     require(provenance.get("inventory_sha256") == _file_hash(inventory_path) and
             provenance.get("source_commit") == inventory.get("source_commit") and
@@ -449,14 +450,14 @@ def _checked_inputs(path: Path) -> tuple[dict, dict, dict]:
         name = item["name"]
         archive = Path(inputs["archive_paths"][name])
         require(archive.is_file() and not archive.is_symlink() and
-                archive.resolve().parent == package_dir.resolve() and
+                archive.resolve().parent == archives_dir.resolve() and
                 archive.name == item["archive"] and _file_hash(archive) == item["sha256"],
                 f"notice source archive differs: {name}")
         entries = archive_entries(archive, name, inventory["version"])
         require(_sha(entries["Cargo.lock"]) == provenance["original_locks"][name],
                 f"notice original lock differs: {name}")
     if mode == "registry":
-        require_registry_provenance(provenance_path, inventory_path, package_dir,
+        require_registry_provenance(provenance_path, inventory_path, archives_dir,
                                     path.parent / "binaries")
     else:
         require(provenance.get("github_publication_eligible") is False,

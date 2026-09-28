@@ -354,6 +354,7 @@ def build_binaries(repo: Path, inventory_path: Path, package_dir: Path, source: 
     unpack = output / "unpacked"
     if source == "archive":
         roots = extract_verified_archives(repo, package_dir, unpack)
+        archives_dir = package_dir
         archive_paths = {item["name"]: package_dir / item["archive"]
                          for item in inventory["packages"]}
     else:
@@ -363,6 +364,7 @@ def build_binaries(repo: Path, inventory_path: Path, package_dir: Path, source: 
         downloads = output / "verified-archives"
         downloads.mkdir()
         roots = _unpack_registry(inventory, registry, downloads, unpack)
+        archives_dir = downloads
         archive_paths = {item["name"]: downloads / item["archive"] for item in inventory["packages"]}
     hashes = {item["name"]: item["sha256"] for item in inventory["packages"]}
     external = _external_lock(repo)
@@ -436,6 +438,7 @@ def build_binaries(repo: Path, inventory_path: Path, package_dir: Path, source: 
                               "package": name, "kind": kind})
     local = {"format_version": 1, "source_mode": source, "target": target,
              "inventory_path": str(inventory_path.resolve()), "package_dir": str(package_dir.resolve()),
+             "archives_dir": str(archives_dir.resolve()),
              "cargo_home": env["CARGO_HOME"], "rust_sysroot": rust_sysroot,
              "archive_paths": {k: str(v.resolve()) for k, v in archive_paths.items()},
              "source_roots": {k: str(v.resolve()) for k, v in roots.items()},
