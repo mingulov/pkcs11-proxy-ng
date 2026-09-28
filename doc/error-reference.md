@@ -111,6 +111,14 @@ wedged: look for `Backend call timed out` lines and a rising
 **Application action.** The call may still finish at the provider. Reconcile
 state before retrying a non-idempotent operation.
 
+**Verified behavior (T3 integration tests).** A caller-side timeout reports
+this code with exactly one native attempt: the proxy never replays a timed-out
+call and never reports success it did not observe. Local refusals (e.g. an
+unknown session handle → `CKR_SESSION_HANDLE_INVALID`) are answered before
+native entry and leave backend counters untouched. A healthy call on another
+session completes normally while a stalled call is parked — stalls do not
+head-of-line-block the daemon.
+
 ### `CKR_HOST_MEMORY` (0x02)
 
 **Cause.** The daemon's circuit breaker rejected the call because its global

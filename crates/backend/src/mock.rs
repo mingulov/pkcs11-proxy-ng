@@ -201,6 +201,11 @@ pub struct MockBackend {
     /// analogue for teardown tests (W1-C2-03): wedges the last-holder
     /// logout so eviction boundedness is provable without a real stuck HSM.
     logout_delay: Mutex<Option<std::time::Duration>>,
+    /// Optional blocking delay applied in [`MockBackend::resolve_input`],
+    /// i.e. on entry to every data op (sign/verify/encrypt/decrypt/digest).
+    /// T3 degraded-operation tests use it to model a slow backend with
+    /// entry observed via `data_op_call_count`, never inferred from sleeps.
+    data_op_delay: Mutex<Option<std::time::Duration>>,
     /// One-shot gate for the next `init_token` (T09): signals entry, waits
     /// release, then proceeds — models a slow provider reinit.
     init_token_gate: Mutex<Option<TokenRendezvous>>,
@@ -433,6 +438,7 @@ impl MockBackend {
             injected_close_error: Mutex::new(None),
             close_session_delay: Mutex::new(None),
             logout_delay: Mutex::new(None),
+            data_op_delay: Mutex::new(None),
             init_token_gate: Mutex::new(None),
             init_token_error: Mutex::new(None),
             token_info_gate: Mutex::new(None),
@@ -898,6 +904,15 @@ impl MockBackend {
         *self.logout_delay.lock().unwrap() = None;
     }
 
+    /// Block every data op for `delay` on entry (T3 slow-backend hook).
+    pub fn set_data_op_delay(&self, delay: std::time::Duration) {
+        *self.data_op_delay.lock().unwrap() = Some(delay);
+    }
+
+    pub fn clear_data_op_delay(&self) {
+        *self.data_op_delay.lock().unwrap() = None;
+    }
+
     /// Install a one-shot gate for the next `init_token` (T09): it signals
     /// `entered` with the slot, blocks until `release` fires, then proceeds
     /// (updating the slot identity to the requested label on success).
@@ -1040,6 +1055,9 @@ impl MockBackend {
     /// but returned ARGUMENTS_BAD" (count incremented).
     pub(crate) fn resolve_input<'a>(&self, input: CkInBuf<'a>) -> CkResult<&'a [u8]> {
         self.data_op_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(delay) = *self.data_op_delay.lock().unwrap() {
+            std::thread::sleep(delay);
+        }
         match input {
             CkInBuf::Bytes(b) => Ok(b),
             CkInBuf::Null { len: 0 } => Ok(&[]),
