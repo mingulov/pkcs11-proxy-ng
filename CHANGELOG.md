@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-28
+
 v0.2.0 is a testing candidate for one logical client in one trusted security
 domain per daemon/provider instance. Restart both before switching independent
 clients or domains. Multi-client isolation and final platform/provider
@@ -278,3 +280,4 @@ Initial release of the Rust PKCS#11 remote proxy.
 - Clippy static gate, local CI parity gate, and nightly workflow.
 
 [0.1.0]: https://github.com/mingulov/pkcs11-proxy-ng/releases/tag/v0.1.0
+[0.2.0]: https://github.com/mingulov/pkcs11-proxy-ng/releases/tag/v0.2.0
