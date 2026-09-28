@@ -180,9 +180,13 @@ jobs:
       QUALIFICATION_URL: ${{ needs.preflight.outputs.qual_url }}
       QUALIFICATION_SUBJECT: ${{ needs.preflight.outputs.qual_subject }}
     steps:
-      - name: Checkout scripts
+      # The tag tree: `archives` compares bytes and VCS provenance
+      # against checkout HEAD and refuses on any change, so this must
+      # be the tag commit with nothing downloaded into it.
+      - name: Checkout tag commit
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: ${{ needs.preflight.outputs.tag_commit }}
           fetch-depth: 1
 
       - name: Install Python for release checks
@@ -198,49 +202,57 @@ jobs:
           set -euo pipefail
           # CI runs in its own run (reusable calls never schedule
           # here), so locate the newest completed green CI run on the
-          # tag commit. The list is newest-first; a success conclusion
-          # always reflects the run's current attempt, so that attempt
-          # uploaded the green candidate artifact.
-          CI_RUN="$(gh api "repos/${{ github.repository }}/actions/workflows/ci.yml/runs?head_sha=${TAG_COMMIT}&status=completed&per_page=20" \
-            --jq '[.workflow_runs[] | select(.conclusion == "success")] | first | select(. != null) | "\(.id) \(.run_attempt)"')"
-          if [[ -z "$CI_RUN" ]]; then
+          # tag commit. The list is newest-first.
+          CI_RUN_ID="$(gh api "repos/${{ github.repository }}/actions/workflows/ci.yml/runs?head_sha=${TAG_COMMIT}&status=completed&per_page=20" \
+            --jq '[.workflow_runs[] | select(.conclusion == "success")] | first | select(. != null) | .id')"
+          if [[ -z "$CI_RUN_ID" ]]; then
             echo "::error::no completed green CI run on ${TAG_COMMIT}; refusing."
             exit 1
           fi
-          read -r CI_RUN_ID CI_RUN_ATTEMPT <<< "$CI_RUN"
+          # Take the actual artifact name from the run: partial
+          # re-runs upload nothing new, so the newest non-expired
+          # candidate artifact is the one the green run consumed.
+          ARTIFACT="$(gh api "repos/${{ github.repository }}/actions/runs/${CI_RUN_ID}/artifacts?per_page=100" \
+            | jq -r --arg prefix "ci-candidate-${TAG_COMMIT}-${CI_RUN_ID}-" \
+              '[.artifacts[] | select(.expired == false and (.name | startswith($prefix)))] | sort_by(.created_at) | last | select(. != null) | .name')"
+          if [[ -z "${ARTIFACT:-}" ]]; then
+            echo "::error::no usable CI candidate artifact in run ${CI_RUN_ID}; refusing."
+            exit 1
+          fi
           echo "run_id=${CI_RUN_ID}" >> "$GITHUB_OUTPUT"
-          echo "run_attempt=${CI_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+          echo "artifact=${ARTIFACT}" >> "$GITHUB_OUTPUT"
 
       - name: Download CI candidate archives
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
-          name: ci-candidate-${{ needs.preflight.outputs.tag_commit }}-${{ steps.resolve-ci.outputs.run_id }}-${{ steps.resolve-ci.outputs.run_attempt }}
+          name: ${{ steps.resolve-ci.outputs.artifact }}
           run-id: ${{ steps.resolve-ci.outputs.run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          path: ci-candidate/
+          path: ${{ runner.temp }}/ci-candidate/
 
       - name: Verify candidate archives and source binding
         run: |
           set -euo pipefail
+          CANDIDATE="$RUNNER_TEMP/ci-candidate"
           for required in inventory.json SHA256SUMS; do
-            if [[ ! -f "ci-candidate/${required}" ]]; then
+            if [[ ! -f "${CANDIDATE}/${required}" ]]; then
               echo "::error::CI candidate is missing ${required}; refusing."
               exit 1
             fi
           done
-          SOURCE_COMMIT="$(python3 -c 'import json; print(json.load(open("ci-candidate/inventory.json"))["source_commit"])')"
+          SOURCE_COMMIT="$(python3 -c 'import json,os; print(json.load(open(os.path.join(os.environ["RUNNER_TEMP"], "ci-candidate", "inventory.json")))["source_commit"])')"
           if [[ "$SOURCE_COMMIT" != "$TAG_COMMIT" ]]; then
             echo "::error::candidate source_commit ${SOURCE_COMMIT} is not the tag commit ${TAG_COMMIT}; refusing."
             exit 1
             fi
-          python3 scripts/release_checks.py archives --package-dir ci-candidate
+          python3 scripts/release_checks.py archives --package-dir "$CANDIDATE"
 
       - name: Bind qualification evidence and stage artifact
         id: stage
         run: |
           set -euo pipefail
           python3 scripts/release_checks.py evidence-bind \
-            --output ci-candidate/qualification-binding.json \
+            --output "$RUNNER_TEMP/ci-candidate/qualification-binding.json" \
             --tag-commit "$TAG_COMMIT" --run-id "$RUN_ID" \
             --qualification-url "$QUALIFICATION_URL" \
             --qualification-subject "$QUALIFICATION_SUBJECT"
@@ -251,7 +263,7 @@ jobs:
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: crates-candidate-${{ needs.preflight.outputs.tag_commit }}-${{ github.run_id }}
-          path: ci-candidate/
+          path: ${{ runner.temp }}/ci-candidate/
           overwrite: false
           retention-days: 90
           if-no-files-found: error
@@ -311,7 +323,7 @@ jobs:
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: ${{ needs.candidate.outputs.artifact }}
-          path: preauth/
+          path: ${{ runner.temp }}/preauth/
 
       - name: Verify release subject
         run: scripts/verify-release-subject.sh "$PUBLISH_TAG"
@@ -334,16 +346,17 @@ jobs:
           for PKG in $PUBLISH_ORDER; do
             cargo package --no-verify --locked -p "$PKG"
           done
-          mkdir -p fresh
-          cp "$CARGO_TARGET_DIR/package/"*.crate fresh/
+          mkdir -p "$RUNNER_TEMP/fresh"
+          cp "$CARGO_TARGET_DIR/package/"*.crate "$RUNNER_TEMP/fresh/"
           python3 scripts/release_checks.py archives \
-            --package-dir fresh --expect-inventory preauth/inventory.json
+            --package-dir "$RUNNER_TEMP/fresh" \
+            --expect-inventory "$RUNNER_TEMP/preauth/inventory.json"
 
       - name: Check registry state for the bounded selection
         run: |
           set -euo pipefail
           python3 scripts/release_checks.py registry-state \
-            --inventory preauth/inventory.json --package "$PUBLISH_PACKAGE"
+            --inventory "$RUNNER_TEMP/preauth/inventory.json" --package "$PUBLISH_PACKAGE"
 
       - name: Authenticate to crates.io (bootstrap token)
         if: needs.preflight.outputs.mode == 'bootstrap'
@@ -377,7 +390,7 @@ jobs:
       - name: Read back published checksums
         run: |
           set -euo pipefail
-          ARGS=(--inventory preauth/inventory.json)
+          ARGS=(--inventory "$RUNNER_TEMP/preauth/inventory.json")
           if [[ "$PUBLISH_PACKAGE" != "workspace" ]]; then
             ARGS+=(--package "$PUBLISH_PACKAGE")
           fi
@@ -395,8 +408,8 @@ jobs:
         with:
           name: postupload-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            preauth/
-            fresh/
+            ${{ runner.temp }}/preauth/
+            ${{ runner.temp }}/fresh/
           overwrite: false
           retention-days: 90
           if-no-files-found: error
@@ -405,7 +418,7 @@ jobs:
     name: Verify publication and consumers
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    needs: [preflight, upload]
+    needs: [preflight, candidate, upload]
     permissions:
       contents: read
       actions: read
@@ -414,9 +427,12 @@ jobs:
     env:
       TAG_COMMIT: ${{ needs.preflight.outputs.tag_commit }}
     steps:
-      - name: Checkout scripts
+      # The tag tree: the registry consumer pins externals to the
+      # checkout's Cargo.lock, which must be the release's lock.
+      - name: Checkout tag commit
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: ${{ needs.preflight.outputs.tag_commit }}
           fetch-depth: 1
 
       - name: Install Python for release checks
@@ -444,21 +460,21 @@ jobs:
       - name: Download immutable pre-auth candidate
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
-          name: crates-candidate-${{ needs.preflight.outputs.tag_commit }}-${{ github.run_id }}
-          path: preauth/
+          name: ${{ needs.candidate.outputs.artifact }}
+          path: ${{ runner.temp }}/preauth/
 
       # Always all eight: partial publication must never auto-start binaries.
       - name: Verify all eight published checksums
         run: |
           set -euo pipefail
           python3 scripts/release_checks.py registry-verify \
-            --inventory preauth/inventory.json
+            --inventory "$RUNNER_TEMP/preauth/inventory.json"
 
       - name: Run full registry consumers
         run: |
           set -euo pipefail
           python3 scripts/release_checks.py registry-consumer \
-            --inventory preauth/inventory.json
+            --inventory "$RUNNER_TEMP/preauth/inventory.json"
 
       - name: Mark explicit complete success
         id: mark

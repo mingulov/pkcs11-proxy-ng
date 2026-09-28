@@ -307,7 +307,25 @@ class PublishCandidateResolutionTests(unittest.TestCase):
         name = str(with_block.get("name", ""))
         self.assertNotIn("github.run_id", name)
         self.assertNotIn("github.sha", name)
-        self.assertIn("ci-candidate-", name)
+
+    def test_candidate_download_uses_exact_resolved_artifact(self):
+        step = self.download_step()
+        with_block = step.get("with", {})
+        self.assertEqual(with_block.get("name"),
+                         "${{ steps.resolve-ci.outputs.artifact }}")
+        self.assertEqual(with_block.get("run-id"),
+                         "${{ steps.resolve-ci.outputs.run_id }}")
+
+    def test_candidate_resolves_actual_artifact_from_run(self):
+        # Partial CI re-runs bump the run attempt without uploading,
+        # so the name must come from the run's artifact list (newest
+        # non-expired match), never synthesized from an attempt.
+        workflow = load_workflow(PUBLISH_YML)
+        runs = "\n".join(run_blocks(workflow["jobs"]["candidate"]))
+        self.assertIn("/artifacts", runs)
+        self.assertIn("expired == false", runs)
+        self.assertIn("sort_by", runs)
+        self.assertNotIn("run_attempt", runs)
 
     def test_candidate_download_passes_token_for_cross_run(self):
         step = self.download_step()
@@ -330,6 +348,58 @@ class PublishCandidateResolutionTests(unittest.TestCase):
         verify = workflow["jobs"]["verify"].get("permissions", {})
         self.assertEqual(verify.get("contents"), "read")
         self.assertEqual(verify.get("actions"), "read")
+
+
+class PublishTagCheckoutTests(unittest.TestCase):
+    """Every publish job that inspects the release must see the tag
+    tree with a clean worktree.
+
+    ``archives`` compares bytes and VCS provenance against checkout
+    HEAD and refuses on any tracked or untracked change; the upload
+    preflight recheck demands the same clean tree, and the verify
+    consumer pins externals to the checkout's Cargo.lock. Downloading
+    artifacts into the checkout, or checking out main, fails these
+    gates (run 36412429362).
+    """
+
+    def checkout_steps(self, job_id):
+        workflow = load_workflow(PUBLISH_YML)
+        return [step for step in workflow["jobs"][job_id]["steps"]
+                if "actions/checkout@" in str(step.get("uses", ""))]
+
+    def test_candidate_and_verify_check_out_tag_commit(self):
+        for job_id in ("candidate", "verify"):
+            with self.subTest(job=job_id):
+                checkouts = self.checkout_steps(job_id)
+                self.assertEqual(len(checkouts), 1)
+                ref = str(checkouts[0].get("with", {}).get("ref", ""))
+                self.assertIn("preflight.outputs.tag_commit", ref)
+
+    def test_upload_checks_out_tag(self):
+        checkouts = self.checkout_steps("upload")
+        self.assertEqual(len(checkouts), 1)
+        ref = str(checkouts[0].get("with", {}).get("ref", ""))
+        self.assertIn("preflight.outputs.tag", ref)
+
+    def test_package_dirs_live_outside_repo(self):
+        workflow = load_workflow(PUBLISH_YML)
+        for job_id in ("candidate", "upload", "verify"):
+            with self.subTest(job=job_id):
+                self.assertIn("runner.temp", job_text(job_id, workflow))
+        self.assertNotIn("path: ci-candidate/",
+                         job_text("candidate", workflow))
+        self.assertNotIn("path: preauth/", job_text("upload", workflow))
+        self.assertNotIn("mkdir -p fresh", job_text("upload", workflow))
+
+    def test_verify_consumes_candidate_output_name(self):
+        workflow = load_workflow(PUBLISH_YML)
+        job = workflow["jobs"]["verify"]
+        self.assertIn("candidate", job.get("needs", []))
+        steps = [step for step in job["steps"]
+                 if step.get("name") == "Download immutable pre-auth candidate"]
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0].get("with", {}).get("name"),
+                         "${{ needs.candidate.outputs.artifact }}")
 
 
 class ReleaseTriggerTests(unittest.TestCase):
