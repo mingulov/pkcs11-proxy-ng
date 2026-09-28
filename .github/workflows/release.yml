@@ -132,8 +132,12 @@ jobs:
       - name: Collect candidate run evidence
         run: |
           set -euo pipefail
+          # No dispatch-head criterion: the publish run comes from
+          # main, so its head names the workflow version, never the
+          # tag commit. Tag binding comes from the artifact name plus
+          # evidence-verify below.
           RUN_JSON="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}" \
-            --jq '{id: .id, event: .event, head_sha: .head_sha, path: .path}')"
+            --jq '{id: .id, event: .event, path: .path}')"
           ART_JSON="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}/artifacts" \
             --jq '[.artifacts[] | {name: .name, expired: .expired, expires_at: .expires_at}]')"
           jq -n --argjson run "$RUN_JSON" --argjson arts "$ART_JSON" \
@@ -154,7 +158,7 @@ jobs:
           python3 scripts/release_checks.py evidence-select \
             --runs-json runs.json --run-id "$CANDIDATE_RUN_ID" \
             --repository "$GITHUB_REPOSITORY" --workflow "$EXPECT_WORKFLOW" \
-            --event "$EXPECT_EVENT" --head-sha "$TAG_COMMIT" --name "$ARTIFACT"
+            --event "$EXPECT_EVENT" --name "$ARTIFACT"
           echo "artifact=${ARTIFACT}" >> "$GITHUB_OUTPUT"
 
       - name: Download immutable pre-auth candidate
@@ -192,9 +196,12 @@ jobs:
     timeout-minutes: 60
     needs: [recover]
     steps:
-      - name: Checkout scripts
+      # The tag tree: the registry consumer pins externals to the
+      # checkout's Cargo.lock, which must be the release's lock.
+      - name: Checkout tag tooling
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: ${{ inputs.tag }}
           fetch-depth: 1
 
       - name: Install Python for release checks

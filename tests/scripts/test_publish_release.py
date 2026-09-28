@@ -467,8 +467,29 @@ class ReleaseRecoveryTests(unittest.TestCase):
         text = job_text("recover", workflow)
         self.assertIn(PUBLISH_WORKFLOW_PATH, text)
         self.assertIn("workflow_dispatch", text)
-        self.assertIn("head_sha", text)
         self.assertIn("candidate_run_id", text)
+
+    def test_recovery_ignores_dispatch_head(self):
+        # The publish run is dispatched from main (the tag's frozen
+        # workflow predates fixes); its head_sha names the workflow
+        # version, not the tag tree. Requiring head_sha == tag commit
+        # refuses every main-dispatched run (36424073373). Tag binding
+        # comes from the artifact name plus evidence-verify instead.
+        workflow = load_workflow(RELEASE_YML)
+        text = job_text("recover", workflow)
+        self.assertNotIn("head_sha", text)
+        self.assertNotIn("head-sha", text)
+
+    def test_registry_recheck_checks_out_tag(self):
+        # registry-consumer pins externals to the checkout's
+        # Cargo.lock, which must be the release's lock.
+        workflow = load_workflow(RELEASE_YML)
+        steps = workflow["jobs"]["registry-recheck"]["steps"]
+        checkouts = [step for step in steps
+                     if "actions/checkout@" in str(step.get("uses", ""))]
+        self.assertEqual(len(checkouts), 1)
+        self.assertIn("inputs.tag",
+                      str(checkouts[0].get("with", {}).get("ref", "")))
 
     def test_recovery_permissions_are_read_only(self):
         workflow = load_workflow(RELEASE_YML)
@@ -817,7 +838,6 @@ class EvidenceSelectTests(unittest.TestCase):
                 "--repository", "example/pkcs11-proxy-ng",
                 "--workflow", PUBLISH_WORKFLOW_PATH,
                 "--event", "workflow_dispatch",
-                "--head-sha", TAG_COMMIT,
                 "--name", f"crates-candidate-{TAG_COMMIT}-{RUN_ID}"]
         for key, value in overrides.items():
             flag = "--" + key.replace("_", "-")
@@ -833,11 +853,18 @@ class EvidenceSelectTests(unittest.TestCase):
         for overrides in ({"repository": "example/other"},
                           {"workflow": ".github/workflows/ci.yml"},
                           {"event": "push"},
-                          {"head_sha": "0" * 40},
                           {"run_id": "999"},
                           {"name": "other-artifact"}):
             with self.subTest(overrides=overrides):
                 self.assertEqual(self.select(base, **overrides), 1)
+
+    def test_ignores_dispatch_head_sha(self):
+        # Run 36424073373: the publish run's head_sha is main (the
+        # workflow version), never the tag commit. Selection must
+        # accept any head_sha; tag binding is enforced downstream.
+        record = run_record()
+        record["head_sha"] = "f" * 40
+        self.assertEqual(self.select([record]), 0)
 
     def test_refuses_expired_evidence(self):
         record = run_record()
@@ -858,7 +885,7 @@ class EvidenceSelectTests(unittest.TestCase):
             ["evidence-select", "--runs-json", str(path),
              "--run-id", RUN_ID, "--repository", "example/pkcs11-proxy-ng",
              "--workflow", PUBLISH_WORKFLOW_PATH, "--event",
-             "workflow_dispatch", "--head-sha", TAG_COMMIT,
+             "workflow_dispatch",
              "--name", "x"], repo=ROOT)
         self.assertEqual(code, 1)
 
