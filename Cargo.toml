@@ -10,6 +10,9 @@ members = [
     "crates/cli",
     "crates/shim",
 ]
+# cargo-fuzz needs nightly + libFuzzer; keep it out of the stable/MSRV
+# workspace (standalone builds, `cargo build --workspace`, packaging).
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.2.0"
