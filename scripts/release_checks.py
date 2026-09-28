@@ -15,6 +15,7 @@ from release.package_evidence import (candidate_name, compare_assets, select_evi
                                       tag_evidence, verify_binding, write_binding)
 from release.package_model import ReleaseError  # noqa: E402
 from release.package_notices import collect_workspace_inputs, generate_notices  # noqa: E402
+from release.package_receipt import write_receipt  # noqa: E402
 from release.package_refs import preflight, verify_ci_results  # noqa: E402
 from release.package_registry import Registry, publication_state, read_inventory, verify_publication  # noqa: E402
 from release.package_staging import staging_probe  # noqa: E402
@@ -107,6 +108,11 @@ def main(argv=None, *, repo=None) -> int:
     tagev.add_argument("--tag", required=True)
     tagev.add_argument("--repo", required=True, type=Path)
     tagev.add_argument("--expect-peeled")
+    receipt = commands.add_parser("write-receipt")
+    receipt.add_argument("--version", required=True)
+    receipt.add_argument("--subject-sha", required=True)
+    receipt.add_argument("--output", required=True, type=Path)
+    receipt.add_argument("--run-url")
     args = parser.parse_args(argv)
     try:
         repo = Path(__file__).resolve().parents[1] if repo is None else Path(repo)
@@ -152,6 +158,11 @@ def main(argv=None, *, repo=None) -> int:
         if args.command == "tag-evidence":
             evidence = tag_evidence(args.repo, args.tag, args.expect_peeled)
             print(json.dumps({"tag_evidence": evidence}, sort_keys=True))
+            return 0
+        if args.command == "write-receipt":
+            path = write_receipt(args.output, args.version,
+                                 args.subject_sha, args.run_url)
+            print(f"write-receipt: {path}")
             return 0
         if args.command == "consumer":
             result = archive_consumer(repo, args.package_dir, args.toolchain)
