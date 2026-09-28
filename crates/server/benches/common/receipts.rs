@@ -61,11 +61,14 @@ pub fn git_identity() -> GitIdentity {
     GitIdentity { head, clean: dirty_patch_hash.is_none(), dirty_patch_hash }
 }
 
-/// T1 manifest for a mock-backed bench leg.
+/// T1 manifest for a mock-backed bench leg. `mode` is `"direct"` for the
+/// in-process leg and `"proxied"` for the gRPC leg; provider/workload
+/// identity is deliberately identical so the pair is comparable.
 pub fn bench_manifest(
     workload_revision: &str,
     corpus_hash: &str,
     build_tag: &str,
+    mode: &str,
     warmup: u64,
     concurrency: u64,
 ) -> serde_json::Value {
@@ -89,12 +92,12 @@ pub fn bench_manifest(
             "revision": workload_revision,
             "corpus_hash": corpus_hash,
         },
-        "mode": "proxied",
+        "mode": mode,
         "host": {
             "arch": std::env::consts::ARCH,
             "os": std::env::consts::OS,
         },
-        "transport": "tcp-loopback-insecure",
+        "transport": if mode == "direct" { "in-process" } else { "tcp-loopback-insecure" },
         "warmup": warmup,
         "concurrency": concurrency,
     })
@@ -110,6 +113,7 @@ pub fn sample(
     sample_id: &str,
     workload: &str,
     operation: &str,
+    mode: &str,
     duration_ns: u64,
     outcome: &str,
     rv_u64: Option<u64>,
@@ -121,7 +125,7 @@ pub fn sample(
         "sample_id": sample_id,
         "workload": workload,
         "operation": operation,
-        "mode": "proxied",
+        "mode": mode,
         "duration_ns": duration_ns,
         "outcome": outcome,
         "rv": rv_u64,
