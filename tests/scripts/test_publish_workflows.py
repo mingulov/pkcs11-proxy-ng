@@ -23,6 +23,8 @@ except ImportError:  # pragma: no cover - test env provides PyYAML
 
 ROOT = Path(__file__).resolve().parents[2]
 CI_YML = ROOT / ".github" / "workflows" / "ci.yml"
+OPENRC = ROOT / "packaging" / "alpine" / "pkcs11-proxy-ng-daemon.openrc"
+SYSTEMD_UNIT = ROOT / "packaging" / "amazon" / "pkcs11-proxy-ng.service"
 SMOKE_SCRIPT = ROOT / "scripts" / "ci-package-smoke.py"
 COMPARE_SCRIPT = ROOT / "scripts" / "ci-direct-vs-proxy.py"
 
@@ -376,6 +378,55 @@ class SmokeLaneTests(unittest.TestCase):
         self.assertIn(SOFTHSM_WIN_SHA256, text)
         compare = COMPARE_SCRIPT.read_text(encoding="utf-8")
         self.assertIn(SOFTHSM_WIN_SHA256, compare)
+
+    def test_provider_smoke_raises_memlock_limit(self):
+        # The smoke container runs the mlockall daemon directly: under
+        # MCL_FUTURE every thread-stack mmap charges RLIMIT_MEMLOCK, and
+        # the container default fails the first worker spawn with EAGAIN.
+        workflow = load_workflow()
+        steps = workflow["jobs"]["smoke-apk-alpine"]["steps"]
+        smoke = [s for s in steps
+                 if "provider smoke" in str(s.get("name", ""))]
+        self.assertEqual(len(smoke), 1)
+        run = str(smoke[0].get("run", ""))
+        self.assertIn("--ulimit memlock=", run)
+
+    def test_apk_smoke_fixes_workdir_ownership_before_upload(self):
+        # The smoke container runs as root; without a fixup the
+        # always-run evidence upload (runner user) fails EACCES on
+        # root-owned token files.
+        workflow = load_workflow()
+        steps = workflow["jobs"]["smoke-apk-alpine"]["steps"]
+        names = [str(s.get("name", "")) for s in steps]
+        fixup = [i for i, name in enumerate(names) if "ownership" in name]
+        upload = [i for i, name in enumerate(names)
+                  if "Upload APK smoke evidence" in name]
+        self.assertEqual(len(fixup), 1)
+        self.assertEqual(len(upload), 1)
+        self.assertLess(fixup[0], upload[0])
+        self.assertEqual(steps[fixup[0]].get("if"), "always()")
+        self.assertIn("chmod -R a+rwX", str(steps[fixup[0]].get("run", "")))
+
+
+class ServiceMemlockTests(unittest.TestCase):
+    """Packaged services must grant the mlockall daemon memlock headroom.
+
+    Same root cause as the CI smoke failure: thread-stack mmaps charge
+    RLIMIT_MEMLOCK under MCL_FUTURE, so the service defaults crash the
+    daemon at its first worker spawn. The runbook already requires this
+    (doc/runbooks/operating-pkcs11-proxy-ng.md "Memory lock and swap").
+    """
+
+    def test_openrc_raises_memlock_limit(self):
+        lines = [line for line in
+                 OPENRC.read_text(encoding="utf-8").splitlines()
+                 if line.startswith("rc_ulimit=")]
+        self.assertEqual(len(lines), 1)
+        self.assertIn("-l unlimited", lines[0])
+
+    def test_systemd_sets_limit_memlock(self):
+        text = SYSTEMD_UNIT.read_text(encoding="utf-8")
+        self.assertIn("LimitMEMLOCK=infinity", text)
 
 
 class ShellHygieneTests(unittest.TestCase):

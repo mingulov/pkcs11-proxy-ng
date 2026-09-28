@@ -618,7 +618,12 @@ mutually untrusted clients.
 At startup the daemon attempts `mlockall(MCL_CURRENT | MCL_FUTURE)` so
 PIN/key pages cannot swap; denial (typically missing `CAP_IPC_LOCK`
 or a restrictive `RLIMIT_MEMLOCK`) and non-Unix platforms log a loud
-warning with remediation and the daemon still starts. The shim has no
+warning with remediation and the daemon still starts. A limit that is
+merely too low (rather than outright denied) is worse: `mlockall`
+succeeds, then the first worker-thread stack mmap fails with `EAGAIN`
+and the runtime panics at startup — so grant headroom, not just the
+call. The packaged services already do (`rc_ulimit` / `LimitMEMLOCK`).
+The shim has no
 process-wide lock. Without the lock, daemon pages can reach swap
 under memory pressure and outlive the process — wiping clears live
 copies on drop but cannot reach already-swapped pages (see

@@ -24,6 +24,11 @@ command_user="root"
 # before dropping privileges), so no pid/log re-chown is needed.
 # Operators with HSM hardware that needs root access (e.g. /dev/cardx)
 # should keep command_user="root" — same guidance as the systemd unit.
+# The daemon calls mlockall(MCL_CURRENT | MCL_FUTURE) at startup, so
+# every thread-stack mmap charges RLIMIT_MEMLOCK: the service default
+# fails the first worker spawn with EAGAIN and tokio panics. Raise the
+# locked-memory limit (the OpenRC equivalent of systemd LimitMEMLOCK).
+rc_ulimit="-l unlimited"
 command_background="yes"
 pidfile="/run/${name}.pid"
 output_log="/var/log/${name}.log"

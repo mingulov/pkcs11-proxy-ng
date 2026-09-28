@@ -16,6 +16,11 @@ TimeoutStopSec=30
 # User=pkcs11-proxy-ng
 # Group=pkcs11-proxy-ng
 
+# The daemon calls mlockall(MCL_CURRENT | MCL_FUTURE) at startup, so
+# every thread-stack mmap charges RLIMIT_MEMLOCK: the service default
+# fails the first worker spawn with EAGAIN and tokio panics.
+LimitMEMLOCK=infinity
+
 # Hardening — adjust if your backend module needs filesystem write
 # access (most don't).
 ProtectSystem=strict

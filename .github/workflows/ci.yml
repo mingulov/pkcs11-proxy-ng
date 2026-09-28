@@ -819,12 +819,27 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "${{ runner.temp }}/apk-smoke/work"
+          # Mirror the packaged services' memlock limit: the smoke runs the
+          # mlockall daemon directly, and the container default fails the
+          # first worker-thread stack mmap with EAGAIN (tokio panics).
           docker run --rm \
+            --ulimit memlock=-1:-1 \
             -v "${{ runner.temp }}/apk-smoke/apk:/apk:ro" \
             -v "$GITHUB_WORKSPACE/scripts:/smoke-scripts:ro" \
             -v "${{ runner.temp }}/apk-smoke/work:/smoke-work" \
             "alpine:3.23@sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0" \
             sh -eu -c 'apk --no-cache add --allow-untrusted --repository /apk pkcs11-proxy-ng-shim pkcs11-proxy-ng-daemon pkcs11-proxy-ng-cli pkcs11-proxy-ng-compat && apk --no-cache add softhsm opensc python3 && python3 /smoke-scripts/ci-package-smoke.py installed-verify --daemon /usr/bin/pkcs11-proxy-ng --shim /usr/lib/pkcs11/libpkcs11_proxy_ng_shim.so --cli /usr/bin/pkcs11-proxy-ng-cli --expected-hashes /apk/payload-hashes.json --record-out /smoke-work/installed-hashes.json && python3 /smoke-scripts/ci-package-smoke.py installed-smoke --daemon /usr/bin/pkcs11-proxy-ng --shim /usr/lib/pkcs11/libpkcs11_proxy_ng_shim.so --cli /usr/bin/pkcs11-proxy-ng-cli --workdir /smoke-work'
+
+      - name: Fix smoke workdir ownership for upload
+        if: always()
+        run: |
+          set -euo pipefail
+          # The smoke container runs as root; without this the evidence
+          # upload below (runner user) fails EACCES on root-owned files.
+          docker run --rm \
+            -v "${{ runner.temp }}/apk-smoke/work:/smoke-work" \
+            "alpine:3.23@sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0" \
+            sh -c 'chmod -R a+rwX /smoke-work'
 
       - name: Upload APK smoke evidence
         if: always()
