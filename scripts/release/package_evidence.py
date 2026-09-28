@@ -98,11 +98,15 @@ def _expired(record: dict, now: float) -> bool:
 
 def select_evidence(runs_path: Path, run_id: str, repository: str,
                     workflow: str, event: str, name: str,
-                    now: float | None = None) -> dict:
+                    now: float | None = None,
+                    head_sha: str | None = None) -> dict:
     # No head_sha criterion: the publish run is dispatched from main
-    # (the tag's frozen workflow predates fixes), so its head_sha
-    # names the workflow version, never the tag commit. Tag binding
-    # comes from the artifact name plus evidence-verify downstream.
+    # (the tag's frozen workflow predates fixes), so its head names
+    # the workflow version, never the tag commit. Tag binding comes
+    # from the artifact name plus evidence-verify downstream. The
+    # parameter stays (ignored) so one workflow serves pre-fix tag
+    # scripts, which require the flag with the run's own head.
+    _ = head_sha
     try:
         payload = json.loads(Path(runs_path).read_text(encoding="utf-8"))
     except (OSError, ValueError, UnicodeError) as exc:

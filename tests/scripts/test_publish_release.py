@@ -469,16 +469,20 @@ class ReleaseRecoveryTests(unittest.TestCase):
         self.assertIn("workflow_dispatch", text)
         self.assertIn("candidate_run_id", text)
 
-    def test_recovery_ignores_dispatch_head(self):
+    def test_recovery_passes_run_head_as_compat(self):
         # The publish run is dispatched from main (the tag's frozen
-        # workflow predates fixes); its head_sha names the workflow
-        # version, not the tag tree. Requiring head_sha == tag commit
-        # refuses every main-dispatched run (36424073373). Tag binding
-        # comes from the artifact name plus evidence-verify instead.
+        # workflow predates fixes); its head names the workflow
+        # version, never the tag commit. Gating on head == tag commit
+        # refuses every main-dispatched run (36424073373), but
+        # pre-fix tag scripts require the flag — so the workflow
+        # passes the run's own head (tautology for old scripts,
+        # ignored by new ones). Tag binding comes from the artifact
+        # name plus evidence-verify instead.
         workflow = load_workflow(RELEASE_YML)
-        text = job_text("recover", workflow)
-        self.assertNotIn("head_sha", text)
-        self.assertNotIn("head-sha", text)
+        runs = "\n".join(run_blocks(workflow["jobs"]["recover"]))
+        self.assertIn("--head-sha", runs)
+        self.assertIn(".runs[0].head_sha", runs)
+        self.assertNotIn('--head-sha "$TAG_COMMIT"', runs)
 
     def test_registry_recheck_checks_out_tag(self):
         # registry-consumer pins externals to the checkout's
@@ -833,11 +837,15 @@ class EvidenceSelectTests(unittest.TestCase):
     def select(self, runs, **overrides):
         path = self.workdir / "runs.json"
         path.write_text(json.dumps({"runs": runs}), encoding="utf-8")
+        # --head-sha carries garbage: the flag exists only so one
+        # workflow serves pre-fix tag scripts (which require it) and
+        # new scripts (which ignore it).
         args = ["evidence-select", "--runs-json", str(path),
                 "--run-id", RUN_ID,
                 "--repository", "example/pkcs11-proxy-ng",
                 "--workflow", PUBLISH_WORKFLOW_PATH,
                 "--event", "workflow_dispatch",
+                "--head-sha", "f" * 40,
                 "--name", f"crates-candidate-{TAG_COMMIT}-{RUN_ID}"]
         for key, value in overrides.items():
             flag = "--" + key.replace("_", "-")
@@ -865,6 +873,21 @@ class EvidenceSelectTests(unittest.TestCase):
         record = run_record()
         record["head_sha"] = "f" * 40
         self.assertEqual(self.select([record]), 0)
+
+    def test_head_sha_flag_is_optional(self):
+        # New scripts must also serve flagless callers: the flag is
+        # a compat shim for pre-fix tag scripts, not a criterion.
+        path = self.workdir / "runs.json"
+        path.write_text(json.dumps({"runs": [run_record()]}),
+                        encoding="utf-8")
+        code = release_checks.main(
+            ["evidence-select", "--runs-json", str(path),
+             "--run-id", RUN_ID, "--repository", "example/pkcs11-proxy-ng",
+             "--workflow", PUBLISH_WORKFLOW_PATH, "--event",
+             "workflow_dispatch",
+             "--name", f"crates-candidate-{TAG_COMMIT}-{RUN_ID}"],
+            repo=ROOT)
+        self.assertEqual(code, 0)
 
     def test_refuses_expired_evidence(self):
         record = run_record()
