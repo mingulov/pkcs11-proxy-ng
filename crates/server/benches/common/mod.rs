@@ -9,6 +9,8 @@
 //! eviction is irrelevant to every measured path (one former copy had a
 //! 60 s eviction ticker; dropping it does not change bench behavior).
 
+pub mod receipts;
+
 use std::sync::Arc;
 use std::time::Duration;
 
