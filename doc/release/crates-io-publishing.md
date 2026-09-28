@@ -103,6 +103,42 @@ direct/proxied differential (pinned `pkcs11-check`), not general
 equality; no full provider-matrix sweep runs here. Smokes prove the
 packaged artifacts work; they are not provider qualification.
 
+### Release orchestrator (`cut-release.yml`)
+
+One GUI dispatch (Actions → cut-release → Run workflow) carries the
+whole pre-publication path, so the tag, the receipt, and the publish
+inputs are produced once instead of typed three times. Inputs:
+`version` (stable `MAJOR.MINOR.PATCH`, no `v` prefix), `mode`,
+`package`, and the qualification URL/subject (required for upload
+modes). Prepare `main` first with a normal PR containing the dated
+`CHANGELOG.md` entry; the orchestrator adds only the receipt.
+
+1. `verify` checks out `main`, validates the inputs, refuses if the
+   tag already exists, runs all eight receipt gates (fmt, check,
+   test, clippy, msrv, audit, deny, release_dry_run) plus the
+   subject/version/CHANGELOG/packaging-mirror checks, then writes
+   the quality receipt for the recorded HEAD SHA and uploads it.
+2. `cut` waits on the protected `release-tag` environment (create it
+   with required reviewers — this is the separate approval to tag),
+   re-verifies HEAD is unchanged and the tag still absent, commits
+   the receipt-only delta, re-verifies it with
+   `verify-quality-receipt.sh`, creates the annotated tag, and
+   pushes commit plus tag. Plain pushes only; races and drift
+   refuse, tags are never moved.
+3. `dispatch-publish` runs `publish.yml` from the new tag with the
+   inputs passed through. Upload and release approvals still gate
+   their own environments there; nothing here bypasses them.
+
+The cut job pushes with `GITHUB_TOKEN`, which works while `main` is
+unprotected (tag pushes from automation do not trigger the
+tag-push validation run; the orchestrator's own checks plus
+publish's preflight cover that ground). Protecting `main` later
+requires swapping in an App token with bypass for the cut job.
+
+Partial states recover by hand: tag pushed but publish never
+dispatched → dispatch `publish.yml` manually; commit pushed but tag
+missing → push the annotated tag manually, then dispatch.
+
 ### Production publication (`publish.yml`)
 
 Manual dispatch only, run **from the tag** (or a ref whose HEAD equals

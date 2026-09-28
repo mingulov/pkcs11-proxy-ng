@@ -1,0 +1,299 @@
+# GUI-dispatched release orchestrator: verify, cut, dispatch.
+#
+# One dispatch carries the whole pre-publication path from the Actions
+# tab: this workflow verifies the eight receipt gates plus
+# subject/version/CHANGELOG/tag preconditions on main, cuts an
+# approval-gated receipt-only commit with an annotated tag, then
+# dispatches publish.yml with the inputs passed through once. Upload
+# and release approvals still gate their own environments inside
+# publish/release; nothing here bypasses them.
+#
+# Prerequisites (maintainer, one-time): create the `release-tag`
+# environment with required reviewers. The cut job pushes with
+# GITHUB_TOKEN, which works while main is unprotected; protecting
+# main later requires an App token with bypass for that job instead
+# (see the publication guide).
+#
+# Recovery: every partial state has a manual path. Tag pushed but
+# publish never dispatched -> dispatch publish.yml by hand. Commit
+# pushed but tag missing -> push the annotated tag by hand, then
+# dispatch. Tag exists -> this workflow refuses (tags are never moved).
+
+name: cut-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'release version, e.g. 0.2.0 (stable only)'
+        required: true
+      mode:
+        description: 'publish mode to dispatch after tagging'
+        required: false
+        default: dry-run
+        type: choice
+        options:
+          - dry-run
+          - bootstrap
+          - trusted
+      package:
+        description: 'workspace or exactly one of the eight crate names'
+        required: false
+        default: workspace
+      qualification-url:
+        description: 'HTTPS qualification record URL (upload modes)'
+        required: false
+      qualification-subject:
+        description: 'frozen-subject SHA (upload modes)'
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: cut-release
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify release gates on main
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    outputs:
+      verified_sha: ${{ steps.record.outputs.verified_sha }}
+      tag: ${{ steps.record.outputs.tag }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Validate inputs and record subject
+        id: record
+        run: |
+          set -euo pipefail
+          VERSION="${{ inputs.version }}"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::version '$VERSION' is not MAJOR.MINOR.PATCH; refusing."
+            exit 1
+          fi
+          if [[ "${{ inputs.mode }}" != "dry-run" ]]; then
+            if [[ -z "${{ inputs.qualification-url }}" || -z "${{ inputs.qualification-subject }}" ]]; then
+              echo "::error::upload modes require qualification-url and qualification-subject."
+              exit 1
+            fi
+            if [[ ! "${{ inputs.qualification-subject }}" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::qualification-subject is not a 40-hex SHA."
+              exit 1
+            fi
+          fi
+          TAG="v$VERSION"
+          if git ls-remote --tags origin "refs/tags/$TAG" | grep -q .; then
+            echo "::error::tag $TAG already exists; tags are never moved."
+            exit 1
+          fi
+          echo "verified_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Isolate Cargo directories
+        run: |
+          set -euo pipefail
+          echo "CARGO_BUILD_BUILD_DIR=$RUNNER_TEMP/cut-verify/build" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/cut-verify/target" >> "$GITHUB_ENV"
+
+      - name: Install pinned toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - name: Install protoc (pinned, matches mise.toml)
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
+        with:
+          version: "36.1"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust 1.88.0 (MSRV gate)
+        run: rustup toolchain install 1.88.0 --profile minimal --component rustc,cargo
+
+      - name: Gate fmt
+        run: cargo fmt --all -- --check
+
+      - name: Gate check
+        run: cargo check --workspace --locked --all-targets
+
+      - name: Gate test
+        run: cargo test --workspace --locked
+
+      - name: Gate clippy
+        run: cargo clippy --workspace --locked --all-targets --all-features -- -D warnings
+
+      - name: Gate msrv
+        run: cargo +1.88.0 check --workspace --locked
+
+      - name: Cache cargo audit binary
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: ${{ runner.os }}-cargo-audit-0.22.2
+
+      - name: Gate audit
+        run: |
+          set -euo pipefail
+          if ! command -v cargo-audit >/dev/null 2>&1; then
+            cargo install cargo-audit --version 0.22.2 --locked
+          fi
+          cargo audit
+          scripts/audit-test-workspaces.sh audit
+
+      - name: Cache cargo deny binary
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ~/.cargo/bin/cargo-deny
+          key: ${{ runner.os }}-cargo-deny-0.20.2
+
+      - name: Gate deny
+        run: |
+          set -euo pipefail
+          if ! command -v cargo-deny >/dev/null 2>&1; then
+            cargo install cargo-deny --version 0.20.2 --locked
+          fi
+          cargo deny check
+          scripts/audit-test-workspaces.sh deny
+
+      - name: Gate release_dry_run
+        run: scripts/release-dry-run.sh
+
+      - name: Check subject, version, and receipt absence
+        run: |
+          set -euo pipefail
+          # verify-release-subject asserts the tag shape, the Cargo
+          # version mirror, the CHANGELOG.md dated heading, and the four
+          # packaging mirrors; it needs no pushed tag to check those.
+          scripts/verify-release-subject.sh "${{ steps.record.outputs.tag }}"
+          RECEIPT="doc/release/v${{ inputs.version }}-quality-receipt.md"
+          if [[ -e "$RECEIPT" ]]; then
+            echo "::error::$RECEIPT already exists on main; refusing."
+            exit 1
+          fi
+
+      - name: Write quality receipt
+        run: |
+          set -euo pipefail
+          python3 scripts/release_checks.py write-receipt \
+            --version "${{ inputs.version }}" \
+            --subject-sha "${{ steps.record.outputs.verified_sha }}" \
+            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --output "doc/release/v${{ inputs.version }}-quality-receipt.md"
+
+      - name: Upload receipt artifact
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: release-receipt
+          path: doc/release/v${{ inputs.version }}-quality-receipt.md
+          retention-days: 90
+          overwrite: false
+          if-no-files-found: error
+
+  cut:
+    name: Cut receipt commit and tag (approval-gated)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: [verify]
+    environment: release-tag
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ needs.verify.outputs.tag }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Re-verify subject and tag absence
+        run: |
+          set -euo pipefail
+          # Main may have moved during the approval wait; the receipt binds
+          # the verified SHA, so any drift refuses here.
+          HEAD="$(git rev-parse HEAD)"
+          if [[ "$HEAD" != "${{ needs.verify.outputs.verified_sha }}" ]]; then
+            echo "::error::HEAD $HEAD moved past verified ${{ needs.verify.outputs.verified_sha }}."
+            exit 1
+          fi
+          TAG="${{ needs.verify.outputs.tag }}"
+          if git ls-remote --tags origin "refs/tags/$TAG" | grep -q .; then
+            echo "::error::tag $TAG appeared meanwhile; tags are never moved."
+            exit 1
+          fi
+
+      - name: Download receipt artifact
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: release-receipt
+          path: cut-receipt
+
+      - name: Commit receipt-only delta
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          RECEIPT="doc/release/v${{ inputs.version }}-quality-receipt.md"
+          found=(cut-receipt/*.md)
+          if [[ "${#found[@]}" -ne 1 ]]; then
+            echo "::error::expected exactly one receipt file."
+            exit 1
+          fi
+          cp "${found[0]}" "$RECEIPT"
+          if [[ "$(git status --porcelain -- "$RECEIPT")" != "?? $RECEIPT" ]]; then
+            echo "::error::unexpected worktree state for $RECEIPT."
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$RECEIPT"
+          git commit -m "Record v${{ inputs.version }} quality receipt"
+
+      - name: Verify receipt before tag
+        run: |
+          set -euo pipefail
+          scripts/verify-quality-receipt.sh "${{ needs.verify.outputs.tag }}"
+
+      - name: Create annotated tag
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.verify.outputs.tag }}"
+          git tag -a "$TAG" -m "pkcs11-proxy-ng $TAG"
+
+      - name: Push commit and tag
+        run: |
+          set -euo pipefail
+          # Plain pushes only: the re-verify above refuses drift, and a
+          # concurrent push races instead of overwriting. Tags are never
+          # moved, and main stays append-only from this job.
+          git push origin main
+          git push origin "${{ needs.verify.outputs.tag }}"
+
+  dispatch-publish:
+    name: Dispatch publish.yml
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: [cut]
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Dispatch publish from the new tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh workflow run publish.yml \
+            --ref "${{ needs.cut.outputs.tag }}" \
+            -f mode=${{ inputs.mode }} \
+            -f package=${{ inputs.package }} \
+            -f tag=${{ needs.cut.outputs.tag }} \
+            -f qualification-url=${{ inputs.qualification-url }} \
+            -f qualification-subject=${{ inputs.qualification-subject }}
