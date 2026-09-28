@@ -303,6 +303,24 @@ jobs:
             --output "${{ runner.temp }}/release-linux/output" \
             --toolchain 1.98.1
 
+      # Same-tag retries of older tags (e.g. v0.2.0) execute that
+      # tag's producer, which records only the candidate dir as
+      # package_dir; only those legacy inputs need the pin to the
+      # true home. Current scripts record archives_dir themselves
+      # and pass through untouched. Names and sha256 stay pinned
+      # against the inventory downstream either way.
+      - name: Pin legacy inputs to verified registry archives
+        run: |
+          set -euo pipefail
+          OUT="${{ runner.temp }}/release-linux/output"
+          if jq -e '.archives_dir' "$OUT/build-inputs.json" > /dev/null; then
+            echo "build inputs record archives_dir; no pin needed"
+          else
+            jq --arg home "$OUT/verified-archives" '.package_dir = $home' \
+              "$OUT/build-inputs.json" > "$OUT/build-inputs.pinned.json"
+            mv "$OUT/build-inputs.pinned.json" "$OUT/build-inputs.json"
+          fi
+
       - name: Notices + bundle
         id: stage
         run: |
@@ -390,6 +408,24 @@ jobs:
             --package-dir "${{ runner.temp }}/release-windows/candidate" \
             --output "${{ runner.temp }}/release-windows/output" \
             --toolchain 1.98.1
+
+      # Same-tag retries of older tags (e.g. v0.2.0) execute that
+      # tag's producer, which records only the candidate dir as
+      # package_dir; only those legacy inputs need the pin to the
+      # true home. Current scripts record archives_dir themselves
+      # and pass through untouched. Names and sha256 stay pinned
+      # against the inventory downstream either way.
+      - name: Pin legacy inputs to verified registry archives
+        run: |
+          set -euo pipefail
+          OUT="${{ runner.temp }}/release-windows/output"
+          if jq -e '.archives_dir' "$OUT/build-inputs.json" > /dev/null; then
+            echo "build inputs record archives_dir; no pin needed"
+          else
+            jq --arg home "$OUT/verified-archives" '.package_dir = $home' \
+              "$OUT/build-inputs.json" > "$OUT/build-inputs.pinned.json"
+            mv "$OUT/build-inputs.pinned.json" "$OUT/build-inputs.json"
+          fi
 
       - name: Notices + bundle
         id: stage

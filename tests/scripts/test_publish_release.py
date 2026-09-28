@@ -534,27 +534,32 @@ class ReleaseRecoveryTests(unittest.TestCase):
                 self.assertIn("notices", runs)
                 self.assertIn("bundle", runs)
 
-    def test_binary_jobs_use_build_inputs_unmodified(self):
-        # build_binaries records the true consumed archives home
-        # (archives_dir) itself, so the workflow must not rewrite
-        # build-inputs.json between the registry build and notices.
+    def test_binary_jobs_pin_only_legacy_inputs(self):
+        # Current scripts record archives_dir themselves, but same-tag
+        # retries of older tags (e.g. v0.2.0) execute that tag's
+        # producer, which records only the candidate dir. The pin
+        # stays as a legacy-only compat step: it must rewrite
+        # package_dir only when archives_dir is absent.
         workflow = load_workflow(RELEASE_YML)
         for job_id in ("binary-linux", "binary-windows"):
             job = workflow["jobs"][job_id]
             names = step_names(job)
             build = [i for i, name in enumerate(names)
                      if "Registry-mode binary build" in name]
+            pin = [i for i, name in enumerate(names)
+                   if "verified registry archives" in name]
             notices = [i for i, name in enumerate(names)
                        if name == "Notices + bundle"]
             with self.subTest(job=job_id):
                 self.assertEqual(len(build), 1)
+                self.assertEqual(len(pin), 1)
                 self.assertEqual(len(notices), 1)
-                self.assertEqual(notices[0], build[0] + 1)
-                for step in job["steps"]:
-                    run = str(step.get("run", ""))
-                    self.assertNotIn("build-inputs.pinned.json", run)
-                    if "build-inputs.json" in run and "jq " in run:
-                        self.fail(f"workflow rewrites build inputs: {step.get('name')}")
+                self.assertEqual(pin[0], build[0] + 1)
+                self.assertEqual(notices[0], pin[0] + 1)
+                run = str(job["steps"][pin[0]].get("run", ""))
+                self.assertIn("jq -e '.archives_dir'", run)
+                self.assertIn("build-inputs.pinned.json", run)
+                self.assertIn(".package_dir", run)
 
     def test_binary_jobs_have_no_registry_token_or_oidc(self):
         workflow = load_workflow(RELEASE_YML)
