@@ -73,8 +73,8 @@ the `CHANGELOG.md` entry and the quality receipt.
 
 ### Continuous gates and artifact smokes (`ci.yml`)
 
-Every pull request and every publication run executes the full reusable
-CI: formatting, audit/deny, packaging smoke, shellcheck, build-and-test
+Every pull request executes the full CI: formatting, audit/deny,
+packaging smoke, shellcheck, build-and-test
 (with Clippy), MSRV, i686/LLP64/musl lanes, plus source-bound
 package/archive/consumer gates and archive-mode binary builds with
 notices and bundles. A fail-closed aggregate refuses unless every
@@ -122,9 +122,11 @@ modes). Prepare `main` first with a normal PR containing the dated
    with required reviewers — this is the separate approval to tag),
    re-verifies HEAD is unchanged and the tag still absent, commits
    the receipt-only delta, re-verifies it with
-   `verify-quality-receipt.sh`, creates the annotated tag, and
-   pushes commit plus tag. Plain pushes only; races and drift
-   refuse, tags are never moved.
+   `verify-quality-receipt.sh`, creates the annotated tag, pushes
+   commit plus tag, then starts CI on the new tag (token pushes
+   trigger no runs, and publish refuses until that aggregate is
+   green). Plain pushes only; races and drift refuse, tags are
+   never moved.
 3. `dispatch-publish` runs `publish.yml` from the new tag with the
    inputs passed through. Upload and release approvals still gate
    their own environments there; nothing here bypasses them.
@@ -147,9 +149,11 @@ the tag commit). Inputs: `mode` (`dry-run` default, `bootstrap`,
 exact `tag`, and the qualification URL/subject for upload modes. A tag
 push runs validation only and can never upload.
 
-1. Preflight validates ref/source/version/receipt/ancestry/qualification
-   and publishes the approval inputs to the run summary then calls the
-   full reusable CI above.
+1. Preflight validates ref/source/version/receipt/ancestry/qualification,
+   publishes the approval inputs to the run summary, then requires the
+   tag commit to already carry a green fail-closed aggregate from a CI
+   run (reusable calls cannot schedule here, so publication reuses the
+   tag commit's own CI instead of re-running the matrix).
 2. The candidate job stages exactly one immutable pre-auth artifact,
    `crates-candidate-<tagCommit>-<runId>` — all eight archives,
    inventory, SHA256SUMS, and the qualification-binding JSON —
@@ -187,10 +191,10 @@ workflow. Partial publication never starts binaries.
 
 ### Registry-source binaries and GitHub release (`release.yml`)
 
-No tag-push trigger. The workflow runs as a reusable callee after
-explicit complete success, or as an exact-tag manual retry with
-`candidate_run_id` plus matching qualification inputs; the manual
-path never republishes crates.
+No tag-push trigger. The workflow runs via API dispatch after
+explicit complete success (reusable calls cannot schedule here), or
+as an exact-tag manual retry with `candidate_run_id` plus matching
+qualification inputs; the manual path never republishes crates.
 
 Recovery validates the referenced publish run (same repository,
 publish workflow path, manual event, tag-peeled head SHA) and

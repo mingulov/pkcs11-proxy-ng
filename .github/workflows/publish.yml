@@ -73,6 +73,9 @@ jobs:
     name: Validate publication inputs
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    permissions:
+      contents: read
+      checks: read
     outputs:
       tag: ${{ steps.resolve.outputs.tag }}
       tag_commit: ${{ steps.resolve.outputs.tag_commit }}
@@ -146,16 +149,26 @@ jobs:
             echo "- qualification subject: ${{ steps.resolve.outputs.qual_subject }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  ci:
-    name: Full required CI
-    needs: [preflight]
-    uses: ./.github/workflows/ci.yml
+      - name: Require green CI aggregate on tag commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Reusable CI calls never schedule here (startup_failure), so
+          # the tag commit must already carry a green fail-closed
+          # aggregate from a CI run. Absent or non-green refuses.
+          SHA="$(git rev-parse HEAD)"
+          if ! gh api "repos/${{ github.repository }}/commits/$SHA/check-runs?per_page=100" \
+              --jq '[.check_runs[] | select(.name == "CI success (fail-closed aggregate)" and .status == "completed" and .conclusion == "success")] | if length > 0 then "green" else empty end' | grep -q green; then
+            echo "::error::no green CI success aggregate on $SHA; refusing."
+            exit 1
+          fi
 
   candidate:
     name: Stage immutable pre-auth candidate
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    needs: [preflight, ci]
+    needs: [preflight]
     outputs:
       artifact: ${{ steps.stage.outputs.artifact }}
     env:
@@ -221,7 +234,7 @@ jobs:
     name: Guarded crates.io upload
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    needs: [preflight, ci, candidate]
+    needs: [preflight, candidate]
     if: github.event_name == 'workflow_dispatch' && inputs.mode != 'dry-run'
     environment: crates-io
     permissions:
@@ -421,18 +434,29 @@ jobs:
         id: mark
         run: echo "complete=true" >> "$GITHUB_OUTPUT"
 
-  release:
-    name: Build registry-source GitHub release
+  dispatch-release:
+    name: Dispatch registry-source GitHub release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     needs: [preflight, verify]
     if: needs.verify.outputs.complete == 'true'
-    uses: ./.github/workflows/release.yml
-    # The callee's final protected publication needs contents:write; every
-    # other callee job stays read-only (see release.yml permissions).
+    # Reusable calls never schedule here (startup_failure); dispatch the
+    # standalone release workflow instead. Its own `release`
+    # environment still gates the actual GitHub Release publication.
+    # Selections come from preflight outputs, never raw inputs.
     permissions:
-      contents: write
-    secrets: inherit
-    with:
-      tag: ${{ needs.preflight.outputs.tag }}
-      candidate_run_id: ${{ github.run_id }}
-      qualification-url: ${{ needs.preflight.outputs.qual_url }}
-      qualification-subject: ${{ needs.preflight.outputs.qual_subject }}
+      contents: read
+      actions: write
+    steps:
+      - name: Dispatch release from the published tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh workflow run release.yml \
+            --ref "${{ needs.preflight.outputs.tag }}" \
+            -R "${{ github.repository }}" \
+            -f tag="${{ needs.preflight.outputs.tag }}" \
+            -f candidate_run_id="${{ github.run_id }}" \
+            -f qualification-url="${{ needs.preflight.outputs.qual_url }}" \
+            -f qualification-subject="${{ needs.preflight.outputs.qual_subject }}"

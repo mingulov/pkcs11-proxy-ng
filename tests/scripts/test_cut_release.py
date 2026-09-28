@@ -175,6 +175,18 @@ class CutJobTests(unittest.TestCase):
         cut_permissions = workflow["jobs"]["cut"].get("permissions", {})
         self.assertEqual(cut_permissions.get("contents"), "write")
 
+    def test_cut_starts_ci_on_new_tag(self):
+        # Token pushes trigger no runs: without this the tag commit
+        # would never get the CI aggregate publish requires.
+        workflow = load_workflow()
+        job = workflow["jobs"]["cut"]
+        run = run_text(job)
+        self.assertIn("gh workflow run ci.yml", run)
+        self.assertIn("--ref", run)
+        self.assertIn('-R "${{ github.repository }}"', run)
+        permissions = job.get("permissions", {})
+        self.assertEqual(permissions.get("actions"), "write")
+
 
 class DispatchJobTests(unittest.TestCase):
     def test_dispatch_needs_cut_and_passes_inputs_once(self):
