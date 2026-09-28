@@ -23,6 +23,7 @@ from release.package_binaries import (  # noqa: E402
 from release.package_registry import read_inventory  # noqa: E402
 from release.package_archives import archive_entries  # noqa: E402
 from release.package_consumers import registry_consumer  # noqa: E402
+from release.package_notices import _checked_inputs  # noqa: E402
 from test_release_registry import controlled_registry, ControlledCargo  # noqa: E402
 import release_checks  # noqa: E402
 
@@ -427,6 +428,57 @@ class ControlledBinaryBuildTests(unittest.TestCase):
         with patch("release.package_consumers.subprocess.run", side_effect=cargo):
             with self.assertRaises(ReleaseError):
                 registry_consumer(ROOT, self.inventory_path, "1.88.0", self.registry)
+
+    def test_registry_build_records_verified_archives_home(self):
+        self.build()
+        inputs = json.loads((self.base / "output/build-inputs.json").read_text())
+        # The consumed archives live in output/verified-archives/, while
+        # package_dir keeps identifying the input candidate evidence dir.
+        self.assertEqual(inputs.get("archives_dir"),
+                         str((self.base / "output/verified-archives").resolve()))
+        self.assertEqual(inputs["package_dir"], str(self.packages.resolve()))
+        for name, path in inputs["archive_paths"].items():
+            with self.subTest(name=name):
+                self.assertEqual(Path(path).resolve().parent,
+                                 Path(inputs["archives_dir"]).resolve())
+
+    def test_archive_build_records_candidate_archives_home(self):
+        self.build(source="archive")
+        inputs = json.loads((self.base / "output/build-inputs.json").read_text())
+        self.assertEqual(inputs.get("archives_dir"), str(self.packages.resolve()))
+        for name, path in inputs["archive_paths"].items():
+            with self.subTest(name=name):
+                self.assertEqual(Path(path).resolve().parent,
+                                 Path(inputs["archives_dir"]).resolve())
+
+    def test_registry_build_inputs_pass_notice_source_checks_unpinned(self):
+        # The exact production failure (registry build refused by notices
+        # co-location unless a workflow jq step rewrote package_dir):
+        # unpinned registry build inputs must validate as written.
+        self.build()
+        notice = self.base / "sysroot/share/doc/rust/COPYRIGHT-library.html"
+        notice.parent.mkdir(parents=True)
+        notice.write_bytes(b"<html>rust</html>")
+        inputs, provenance, _inventory = _checked_inputs(self.base / "output/build-inputs.json")
+        self.assertEqual(provenance["source_mode"], "registry")
+        self.assertEqual(Path(inputs["archives_dir"]).resolve(),
+                         (self.base / "output/verified-archives").resolve())
+
+    def test_notice_checks_reject_archive_outside_recorded_home(self):
+        # Byte-identical archives from another directory must not satisfy
+        # the recorded home binding, even when checksums match.
+        self.build()
+        notice = self.base / "sysroot/share/doc/rust/COPYRIGHT-library.html"
+        notice.parent.mkdir(parents=True)
+        notice.write_bytes(b"<html>rust</html>")
+        path = self.base / "output/build-inputs.json"
+        inputs = json.loads(path.read_text())
+        inputs["archive_paths"] = {
+            record["name"]: str((self.packages / record["archive"]).resolve())
+            for record in self.inventory["packages"]}
+        path.write_text(json.dumps(inputs))
+        with self.assertRaisesRegex(ReleaseError, "notice source archive differs"):
+            _checked_inputs(path)
 
 
 if __name__ == "__main__":

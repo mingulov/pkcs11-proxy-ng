@@ -303,18 +303,6 @@ jobs:
             --output "${{ runner.temp }}/release-linux/output" \
             --toolchain 1.98.1
 
-      # The handoff records the candidate dir, but registry archives
-      # live in verified-archives/; pin the record to the true home
-      # so the co-location check sees reality. Names and sha256 stay
-      # pinned against the inventory downstream.
-      - name: Pin inputs to verified registry archives
-        run: |
-          set -euo pipefail
-          OUT="${{ runner.temp }}/release-linux/output"
-          jq --arg home "$OUT/verified-archives" '.package_dir = $home' \
-            "$OUT/build-inputs.json" > "$OUT/build-inputs.pinned.json"
-          mv "$OUT/build-inputs.pinned.json" "$OUT/build-inputs.json"
-
       - name: Notices + bundle
         id: stage
         run: |
@@ -402,18 +390,6 @@ jobs:
             --package-dir "${{ runner.temp }}/release-windows/candidate" \
             --output "${{ runner.temp }}/release-windows/output" \
             --toolchain 1.98.1
-
-      # The handoff records the candidate dir, but registry archives
-      # live in verified-archives/; pin the record to the true home
-      # so the co-location check sees reality. Names and sha256 stay
-      # pinned against the inventory downstream.
-      - name: Pin inputs to verified registry archives
-        run: |
-          set -euo pipefail
-          OUT="${{ runner.temp }}/release-windows/output"
-          jq --arg home "$OUT/verified-archives" '.package_dir = $home' \
-            "$OUT/build-inputs.json" > "$OUT/build-inputs.pinned.json"
-          mv "$OUT/build-inputs.pinned.json" "$OUT/build-inputs.json"
 
       - name: Notices + bundle
         id: stage

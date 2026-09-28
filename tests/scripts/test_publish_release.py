@@ -534,29 +534,27 @@ class ReleaseRecoveryTests(unittest.TestCase):
                 self.assertIn("notices", runs)
                 self.assertIn("bundle", runs)
 
-    def test_binary_jobs_pin_inputs_to_verified_archives(self):
-        # Registry builds stage archives under verified-archives/,
-        # but the handoff records the candidate dir as package_dir,
-        # so notices' co-location check refuses every registry build
-        # (36431349750). The workflow pins the record to the true
-        # archives home before notices; names and sha256 stay pinned
-        # downstream, so the rewrite cannot smuggle other bytes.
+    def test_binary_jobs_use_build_inputs_unmodified(self):
+        # build_binaries records the true consumed archives home
+        # (archives_dir) itself, so the workflow must not rewrite
+        # build-inputs.json between the registry build and notices.
         workflow = load_workflow(RELEASE_YML)
         for job_id in ("binary-linux", "binary-windows"):
             job = workflow["jobs"][job_id]
             names = step_names(job)
-            pin = [i for i, name in enumerate(names)
-                   if "verified registry archives" in name]
+            build = [i for i, name in enumerate(names)
+                     if "Registry-mode binary build" in name]
             notices = [i for i, name in enumerate(names)
                        if name == "Notices + bundle"]
             with self.subTest(job=job_id):
-                self.assertEqual(len(pin), 1)
+                self.assertEqual(len(build), 1)
                 self.assertEqual(len(notices), 1)
-                self.assertLess(pin[0], notices[0])
-                run = str(job["steps"][pin[0]].get("run", ""))
-                self.assertIn("build-inputs.json", run)
-                self.assertIn("verified-archives", run)
-                self.assertIn(".package_dir", run)
+                self.assertEqual(notices[0], build[0] + 1)
+                for step in job["steps"]:
+                    run = str(step.get("run", ""))
+                    self.assertNotIn("build-inputs.pinned.json", run)
+                    if "build-inputs.json" in run and "jq " in run:
+                        self.fail(f"workflow rewrites build inputs: {step.get('name')}")
 
     def test_binary_jobs_have_no_registry_token_or_oidc(self):
         workflow = load_workflow(RELEASE_YML)
