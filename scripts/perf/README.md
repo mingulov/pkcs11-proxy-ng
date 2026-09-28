@@ -56,6 +56,16 @@ successful completions per summed successful-sample busy second.
 completions can never read as a speedup, and no retry subset is ever
 cherry-picked as the population.
 
+## Degraded operation (T3)
+
+Timeout and cancellation follow one rule: a timed-out call reports
+`CKR_FUNCTION_FAILED` with an unknown native outcome, exactly one native
+attempt, and no replay. Local refusals happen before native entry; healthy
+calls proceed alongside stalled ones. The `t3_*` tests in
+`crates/server/tests/concurrency_and_recovery_test.rs` pin this behavior
+against a mock backend with observed native-entry counts; shutdown and
+restart lifecycle cases live in `shutdown_lifetime_test.rs`.
+
 ## Harnesses
 
 - `soak.sh` — sustained-load soak driver (T2/T3).
