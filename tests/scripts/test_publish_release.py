@@ -16,6 +16,7 @@ controlled fixtures. No real GitHub writes, uploads, tags, or network.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -534,12 +535,15 @@ class ReleaseRecoveryTests(unittest.TestCase):
                 self.assertIn("notices", runs)
                 self.assertIn("bundle", runs)
 
+    @unittest.skipUnless(shutil.which("jq"), "jq is required to execute the pin step")
     def test_binary_jobs_pin_only_legacy_inputs(self):
         # Current scripts record archives_dir themselves, but same-tag
         # retries of older tags (e.g. v0.2.0) execute that tag's
         # producer, which records only the candidate dir. The pin
         # stays as a legacy-only compat step: it must rewrite
-        # package_dir only when archives_dir is absent.
+        # package_dir only when archives_dir is absent. Substring
+        # shape first, then real execution of the extracted step
+        # against both fixture shapes.
         workflow = load_workflow(RELEASE_YML)
         for job_id in ("binary-linux", "binary-windows"):
             job = workflow["jobs"][job_id]
@@ -560,6 +564,29 @@ class ReleaseRecoveryTests(unittest.TestCase):
                 self.assertIn("jq -e '.archives_dir'", run)
                 self.assertIn("build-inputs.pinned.json", run)
                 self.assertIn(".package_dir", run)
+                lane = "release-linux" if "release-linux" in run else "release-windows"
+                with tempfile.TemporaryDirectory() as temp:
+                    out = Path(temp) / lane / "output"
+                    (out / "verified-archives").mkdir(parents=True)
+                    script = run.replace("${{ runner.temp }}", temp)
+                    legacy = {"format_version": 1, "package_dir": "/candidate"}
+                    current = {"format_version": 1, "package_dir": "/candidate",
+                               "archives_dir": str(out / "verified-archives")}
+                    for fixture, payload, pinned in (("legacy", legacy, True),
+                                                     ("current", current, False)):
+                        with self.subTest(fixture=fixture):
+                            target = out / "build-inputs.json"
+                            target.write_text(json.dumps(payload))
+                            before = target.read_bytes()
+                            result = subprocess.run(["bash", "-euc", script],
+                                                    capture_output=True, text=True)
+                            self.assertEqual(result.returncode, 0, result.stderr)
+                            if pinned:
+                                after = json.loads(target.read_text())
+                                self.assertEqual(after["package_dir"],
+                                                 str(out / "verified-archives"))
+                            else:
+                                self.assertEqual(target.read_bytes(), before)
 
     def test_binary_jobs_have_no_registry_token_or_oidc(self):
         workflow = load_workflow(RELEASE_YML)
