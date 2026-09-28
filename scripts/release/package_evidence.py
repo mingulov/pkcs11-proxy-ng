@@ -97,8 +97,12 @@ def _expired(record: dict, now: float) -> bool:
 
 
 def select_evidence(runs_path: Path, run_id: str, repository: str,
-                    workflow: str, event: str, head_sha: str, name: str,
+                    workflow: str, event: str, name: str,
                     now: float | None = None) -> dict:
+    # No head_sha criterion: the publish run is dispatched from main
+    # (the tag's frozen workflow predates fixes), so its head_sha
+    # names the workflow version, never the tag commit. Tag binding
+    # comes from the artifact name plus evidence-verify downstream.
     try:
         payload = json.loads(Path(runs_path).read_text(encoding="utf-8"))
     except (OSError, ValueError, UnicodeError) as exc:
@@ -113,8 +117,7 @@ def select_evidence(runs_path: Path, run_id: str, repository: str,
         if (str(run.get("id")) != str(run_id)
                 or run.get("repository") != repository
                 or run.get("workflow_path") != workflow
-                or run.get("event") != event
-                or run.get("head_sha") != head_sha):
+                or run.get("event") != event):
             continue
         for artifact in run.get("artifacts", []):
             if not isinstance(artifact, dict) or artifact.get("name") != name:
