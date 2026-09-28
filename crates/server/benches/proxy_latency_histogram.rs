@@ -60,19 +60,58 @@ fn main() {
         });
     }
     let total_start = Instant::now();
-    for _ in 0..n {
-        rt.block_on(async {
+    // T1 samples: every op records an outcome (success/error) instead of
+    // aborting on the first failure, so mixed evidence is retained.
+    let mut t1_samples: Vec<serde_json::Value> = Vec::new();
+    let t1_run = common::receipts::run_id("sign-pair");
+    let mut failures: u64 = 0;
+    for i in 0..n {
+        let outcome = rt.block_on(async {
             let t0 = Instant::now();
-            client.sign_init(session, &mech, key).await.unwrap();
-            let _sig = client.sign(session, &payload).await.unwrap();
-            let elapsed = t0.elapsed().as_micros() as u64;
-            hist.record(elapsed).unwrap();
+            let result = async {
+                client.sign_init(session, &mech, key).await?;
+                let _sig = client.sign(session, &payload).await?;
+                Ok::<_, CkRv>(())
+            }
+            .await;
+            (t0.elapsed(), result)
         });
+        let (elapsed, result) = outcome;
+        match result {
+            Ok(()) => {
+                hist.record(elapsed.as_micros() as u64).unwrap();
+                t1_samples.push(common::receipts::sample(
+                    &t1_run,
+                    "a0",
+                    &format!("s{i}"),
+                    "sign-pair",
+                    "SignInit+Sign",
+                    elapsed.as_nanos().min(u128::from(u64::MAX)) as u64,
+                    "success",
+                    Some(0),
+                    None,
+                ));
+            }
+            Err(rv) => {
+                failures += 1;
+                t1_samples.push(common::receipts::sample(
+                    &t1_run,
+                    "a0",
+                    &format!("s{i}"),
+                    "sign-pair",
+                    "SignInit+Sign",
+                    elapsed.as_nanos().min(u128::from(u64::MAX)) as u64,
+                    "error",
+                    Some(rv.0),
+                    None,
+                ));
+            }
+        }
     }
     let total = total_start.elapsed();
 
     println!(
-        "n={n} duration={:.2}s mean_throughput={:.1}ops/s",
+        "n={n} duration={:.2}s mean_throughput={:.1}ops/s failures={failures}",
         total.as_secs_f64(),
         n as f64 / total.as_secs_f64()
     );
@@ -98,5 +137,20 @@ fn main() {
             hist.max(),
         ).unwrap();
         eprintln!("wrote summary JSON to {path}");
+    }
+
+    // T1 run receipt for `scripts/perf/compare.py` (opt-in; mock-backed
+    // legs compare baseline-proxy vs candidate-proxy across builds).
+    if let Ok(dir) = env::var("T1_RECEIPT_DIR") {
+        let manifest = common::receipts::bench_manifest(
+            "sign-pair-v1",
+            "payload-256B-0xAB-fixed",
+            &env::var("T1_BUILD_TAG").unwrap_or_else(|_| "candidate".to_string()),
+            100,
+            1,
+        );
+        common::receipts::write_t1_receipt(std::path::Path::new(&dir), &manifest, &t1_samples)
+            .unwrap();
+        eprintln!("wrote T1 receipt to {dir}");
     }
 }
