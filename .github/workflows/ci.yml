@@ -787,7 +787,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "${{ runner.temp }}/apk-smoke/apk"
-          CONTAINER="$(docker create "pkcs11-proxy-ng-apk-smoke:${{ github.sha }}")"
+          CONTAINER="$(docker create "pkcs11-proxy-ng-apk-smoke:${{ github.sha }}" /bin/true)"
           docker cp "$CONTAINER:/apk" "${{ runner.temp }}/apk-smoke/"
           docker rm "$CONTAINER"
           find "${{ runner.temp }}/apk-smoke/apk" -name '*.apk' | sort
