@@ -22,15 +22,18 @@ GATES = ("fmt", "check", "test", "clippy", "msrv", "audit", "deny",
 
 def write_receipt(output: Path, version: str, subject_sha: str,
                   run_url: str | None = None) -> Path:
-    """Write a quality receipt; refuse unless every input is exact."""
+    """Write a quality receipt; refuse unless every input is exact.
+
+    An existing receipt is replaced outright: stale evidence lines must
+    never describe a new run. History stays in git; the file always
+    attests exactly one run.
+    """
     require(isinstance(version, str) and VERSION.match(version) is not None,
             f"version {version!r} is not MAJOR.MINOR.PATCH")
     require(isinstance(subject_sha, str) and
             SHA40.match(subject_sha) is not None,
             f"subject SHA {subject_sha!r} is not a 40-hex SHA")
     target = Path(output)
-    require(not target.exists(),
-            f"refusing to overwrite existing receipt {target}")
     lines = [f"# Quality receipt v{version}", "",
              f"subject_sha: {subject_sha}", ""]
     lines.extend(f"{gate}: pass" for gate in GATES)

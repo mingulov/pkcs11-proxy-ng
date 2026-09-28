@@ -111,7 +111,7 @@ inputs are produced once instead of typed three times. Inputs:
 `version` (stable `MAJOR.MINOR.PATCH`, no `v` prefix), `mode`,
 `package`, and the qualification URL/subject (required for upload
 modes). Prepare `main` first with a normal PR containing the dated
-`CHANGELOG.md` entry; the orchestrator adds only the receipt.
+`CHANGELOG.md` entry; the orchestrator adds or refreshes only the receipt.
 
 1. `verify` checks out `main`, validates the inputs, refuses if the
    tag already exists, runs all eight receipt gates (fmt, check,

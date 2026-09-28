@@ -160,6 +160,14 @@ class CutJobTests(unittest.TestCase):
         self.assertNotIn("--force", run)
         self.assertNotIn("-f ", run)
 
+    def test_cut_accepts_new_or_modified_receipt(self):
+        # Rule (b) allows the tag commit to add or modify the receipt;
+        # anything else in the worktree state still refuses.
+        workflow = load_workflow()
+        run = run_text(workflow["jobs"]["cut"])
+        self.assertIn('"?? $RECEIPT"', run)
+        self.assertIn('" M $RECEIPT"', run)
+
     def test_top_level_permissions_stay_read_only(self):
         workflow = load_workflow()
         permissions = workflow.get("permissions", {})
@@ -221,13 +229,28 @@ class WriteReceiptTests(unittest.TestCase):
                                            "--subject-sha", "b" * 40,
                                            "--output", output), 0)
 
-    def test_refuses_existing_output(self):
+    def test_overwrites_stale_receipt_with_fresh_attestation(self):
+        # The receipt is a living file on main (rule (b) allows the tag
+        # commit to modify it); recording a run replaces stale content
+        # outright so old evidence lines can never describe a new run.
         with tempfile.TemporaryDirectory() as temp:
             output = Path(temp) / "receipt.md"
-            output.write_text("existing\n", encoding="utf-8")
-            self.assertNotEqual(self.check("--version", "0.2.0",
-                                           "--subject-sha", "c" * 40,
-                                           "--output", str(output)), 0)
+            output.write_text("# v0.2.0 quality receipt\n\n"
+                              "subject_sha: %s\n\ntest: fail\n"
+                              "test_evidence: stale run\n" % ("d" * 40),
+                              encoding="utf-8")
+            self.assertEqual(self.check("--version", "0.2.0",
+                                        "--subject-sha", "c" * 40,
+                                        "--output", str(output)), 0)
+            text = output.read_text(encoding="utf-8")
+        subjects = re.findall(r"^subject_sha: ([0-9a-fA-F]+)$", text,
+                              re.M)
+        self.assertEqual(subjects, ["c" * 40])
+        for gate in GATES:
+            with self.subTest(gate=gate):
+                values = re.findall(r"^%s: (.*)$" % gate, text, re.M)
+                self.assertEqual(values, ["pass"])
+        self.assertNotIn("stale run", text)
 
 
 if __name__ == "__main__":
