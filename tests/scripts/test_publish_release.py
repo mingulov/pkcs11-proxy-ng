@@ -240,6 +240,15 @@ class PublishEvidenceTests(unittest.TestCase):
         workflow = load_workflow(PUBLISH_YML)
         self.assertIn(BOOTSTRAP_TOKEN, job_text("upload", workflow))
 
+    def test_bootstrap_exports_registry_token_cargo_reads(self):
+        # Cargo ignores CARGO_REGISTRIES_CRATES_IO_TOKEN for the
+        # default registry ("no token found", run 36418273734); only
+        # CARGO_REGISTRY_TOKEN authenticates crates.io uploads.
+        workflow = load_workflow(PUBLISH_YML)
+        text = job_text("upload", workflow)
+        self.assertIn("CARGO_REGISTRY_TOKEN=", text)
+        self.assertNotIn("CARGO_REGISTRIES_CRATES_IO_TOKEN", text)
+
     def test_no_credentials_in_logged_artifacts(self):
         workflow = load_workflow(PUBLISH_YML)
         text = job_text("upload", workflow)
