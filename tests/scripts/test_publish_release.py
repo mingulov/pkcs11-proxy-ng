@@ -271,6 +271,67 @@ class PublishEvidenceTests(unittest.TestCase):
         self.assertEqual(order.split(), [name for name, _ in PACKAGES])
 
 
+class PublishCandidateResolutionTests(unittest.TestCase):
+    """The candidate job must consume the CI-built archives from the
+    green CI run on the tag, not from its own run.
+
+    Reusable calls never schedule here, so CI and publish are always
+    separate runs: downloading ``ci-candidate-<own sha>-<own run id>``
+    fails with "artifact not found". The job resolves the newest
+    completed green CI run on the tag commit, downloads that exact
+    artifact cross-run, and the existing source_commit binding check
+    pins it to the tag commit.
+    """
+
+    def download_step(self):
+        workflow = load_workflow(PUBLISH_YML)
+        steps = workflow["jobs"]["candidate"]["steps"]
+        matches = [step for step in steps
+                   if step.get("name") == "Download CI candidate archives"]
+        self.assertEqual(len(matches), 1)
+        return matches[0]
+
+    def test_candidate_resolves_newest_green_ci_run(self):
+        workflow = load_workflow(PUBLISH_YML)
+        runs = "\n".join(run_blocks(workflow["jobs"]["candidate"]))
+        self.assertIn("actions/workflows/ci.yml/runs", runs)
+        self.assertIn('conclusion == "success"', runs)
+        self.assertIn("head_sha", runs)
+        self.assertIn("refusing", runs)
+
+    def test_candidate_download_uses_resolved_run_not_own(self):
+        step = self.download_step()
+        with_block = step.get("with", {})
+        self.assertIn("run-id", with_block)
+        self.assertIn("resolve-ci", str(with_block))
+        name = str(with_block.get("name", ""))
+        self.assertNotIn("github.run_id", name)
+        self.assertNotIn("github.sha", name)
+        self.assertIn("ci-candidate-", name)
+
+    def test_candidate_download_passes_token_for_cross_run(self):
+        step = self.download_step()
+        with_block = step.get("with", {})
+        self.assertIn("GITHUB_TOKEN", str(with_block.get("github-token", "")))
+
+    def test_artifact_chain_holds_actions_permissions(self):
+        # Top-level permissions are contents:read only, so every job
+        # touching artifacts needs its own actions scope: candidate
+        # downloads cross-run and uploads the immutable artifact,
+        # upload downloads the pre-auth set and retains evidence,
+        # verify downloads the pre-auth set read-only.
+        workflow = load_workflow(PUBLISH_YML)
+        candidate = workflow["jobs"]["candidate"].get("permissions", {})
+        self.assertEqual(candidate.get("contents"), "read")
+        self.assertEqual(candidate.get("actions"), "write")
+        upload = workflow["jobs"]["upload"].get("permissions", {})
+        self.assertEqual(upload.get("id-token"), "write")
+        self.assertEqual(upload.get("actions"), "write")
+        verify = workflow["jobs"]["verify"].get("permissions", {})
+        self.assertEqual(verify.get("contents"), "read")
+        self.assertEqual(verify.get("actions"), "read")
+
+
 class ReleaseTriggerTests(unittest.TestCase):
     def test_release_is_reusable_plus_manual_retry(self):
         workflow = load_workflow(RELEASE_YML)
