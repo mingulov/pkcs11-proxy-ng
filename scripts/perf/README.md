@@ -70,5 +70,37 @@ restart lifecycle cases live in `shutdown_lifetime_test.rs`.
 
 - `soak.sh` — sustained-load soak driver (T2/T3).
 - `cold_start_storm.sh` — cold connect/init storm driver (T2/T3).
-- `../release/` packaging and the Criterion benches under
+- `../release/` packaging and the benches under
   `crates/server/benches/` emit T1 receipts/samples for their runs.
+
+## Latency decomposition recipe (T4)
+
+`proxy_latency_histogram` runs the same SignInit+Sign sequence in two
+modes: `--direct` drives MockBackend in-process (no gRPC), default
+drives it through a loopback daemon. Emit one T1 receipt per mode with
+the same `T1_BUILD_TAG` and compare the pair with `compare_pair` —
+a clean pair is `COMPARABLE` and the median delta is the proxy
+overhead for that workload (measured: direct p50 331 ns vs proxied
+p50 116.7 µs, n=200 each).
+
+Measured breakdown of the 121 µs proxied sign-pair p50 (MockBackend,
+loopback, release; host-dependent, re-run before quoting):
+
+| Leg | p50 | Share |
+| --- | --- | --- |
+| Proxied pair, TCP loopback | 121 µs | 100% |
+| Proxied pair, unix socket | 86 µs | 71% |
+| Single cheap RPC, TCP | 57 µs | 47% (~half the pair: fixed per-RPC cost dominates) |
+| Single cheap RPC, unix | 43 µs | — |
+| In-process service call (dispatch + backend) | 0.4 µs | <1% |
+| Prost codec (encode+decode ×2) | 0.15 µs | <1% |
+| Direct backend pair | <1 µs | <1% |
+
+Ranked outcome: proxy code is ~0.5% of per-RPC latency, so handler /
+codec micro-optimizations are deferred (ceiling <1%, below the ±5%
+A/A noise bar). The one adopted improvement is operational, not code:
+co-located consumer+daemon deployments should use the unix-socket
+listener, which cuts the sign-pair p50 by ~29% with no code change
+(see the runbook's co-located transport note). Combining Init+op
+pairs into single RPCs would cut per-RPC fixed cost further but is a
+protocol change — deferred, not designed here.
