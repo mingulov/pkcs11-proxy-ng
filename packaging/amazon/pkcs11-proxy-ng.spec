@@ -187,6 +187,6 @@ EOF
 exit 0
 
 %changelog
-* Wed May 20 2026 Denis Mingulov (project maintainer) - 0.2.0-1
+* Wed May 20 2026 Denis Mingulov <denis@mingulov.com> - 0.2.0-1
 - Initial pkcs11-proxy-ng RPM release. Server-driven mechanism
   registry, three-way subpackage split, optional -compat layer.
