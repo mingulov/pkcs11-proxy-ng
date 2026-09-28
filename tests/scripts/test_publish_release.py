@@ -534,6 +534,30 @@ class ReleaseRecoveryTests(unittest.TestCase):
                 self.assertIn("notices", runs)
                 self.assertIn("bundle", runs)
 
+    def test_binary_jobs_pin_inputs_to_verified_archives(self):
+        # Registry builds stage archives under verified-archives/,
+        # but the handoff records the candidate dir as package_dir,
+        # so notices' co-location check refuses every registry build
+        # (36431349750). The workflow pins the record to the true
+        # archives home before notices; names and sha256 stay pinned
+        # downstream, so the rewrite cannot smuggle other bytes.
+        workflow = load_workflow(RELEASE_YML)
+        for job_id in ("binary-linux", "binary-windows"):
+            job = workflow["jobs"][job_id]
+            names = step_names(job)
+            pin = [i for i, name in enumerate(names)
+                   if "verified registry archives" in name]
+            notices = [i for i, name in enumerate(names)
+                       if name == "Notices + bundle"]
+            with self.subTest(job=job_id):
+                self.assertEqual(len(pin), 1)
+                self.assertEqual(len(notices), 1)
+                self.assertLess(pin[0], notices[0])
+                run = str(job["steps"][pin[0]].get("run", ""))
+                self.assertIn("build-inputs.json", run)
+                self.assertIn("verified-archives", run)
+                self.assertIn(".package_dir", run)
+
     def test_binary_jobs_have_no_registry_token_or_oidc(self):
         workflow = load_workflow(RELEASE_YML)
         for job_id in ("binary-linux", "binary-windows"):
