@@ -349,6 +349,20 @@ class SmokeLaneTests(unittest.TestCase):
         self.assertIn("--expected-hashes", run)
         self.assertIn("--record-out", run)
 
+    def test_apk_export_passes_command_to_docker_create(self):
+        # The carrier image is FROM scratch with no CMD, so `docker create`
+        # without an explicit command fails ("no command specified").
+        # create/cp/rm never execute it, so any argv keeps export working.
+        workflow = load_workflow()
+        steps = workflow["jobs"]["smoke-apk-alpine"]["steps"]
+        extract = [s for s in steps
+                   if "Extract APK set" in str(s.get("name", ""))]
+        self.assertEqual(len(extract), 1)
+        creates = [line for line in str(extract[0].get("run", "")).splitlines()
+                   if "docker create" in line]
+        self.assertEqual(len(creates), 1)
+        self.assertRegex(creates[0], r'docker create\s+"[^"]+"\s+\S+')
+
     def test_smoke_proves_provider_operations_not_help(self):
         self.assertTrue(SMOKE_SCRIPT.is_file())
         text = SMOKE_SCRIPT.read_text(encoding="utf-8")
