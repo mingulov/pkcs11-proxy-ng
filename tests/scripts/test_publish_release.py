@@ -106,22 +106,36 @@ class PublishJobBoundaryTests(unittest.TestCase):
     def test_required_jobs_exist(self):
         workflow = load_workflow(PUBLISH_YML)
         jobs = workflow["jobs"]
-        for job_id in ("preflight", "ci", "candidate", "upload",
-                       "verify", "release"):
+        for job_id in ("preflight", "candidate", "upload",
+                       "verify", "dispatch-release"):
             with self.subTest(job=job_id):
                 self.assertIn(job_id, jobs)
 
-    def test_ci_calls_reusable_workflow(self):
+    def test_no_reusable_workflow_calls(self):
+        # Reusable calls never schedule here (repeated startup_failure
+        # with zero jobs); the CI gate and the release handoff use the
+        # check-runs API and gh dispatch instead.
         workflow = load_workflow(PUBLISH_YML)
-        ci_job = workflow["jobs"]["ci"]
-        self.assertIn("ci.yml", str(ci_job.get("uses", "")))
+        for job_id, job in workflow["jobs"].items():
+            with self.subTest(job=job_id):
+                self.assertNotIn("./.github/workflows",
+                                 str(job.get("uses", "")))
+
+    def test_preflight_requires_green_ci_aggregate(self):
+        workflow = load_workflow(PUBLISH_YML)
+        job = workflow["jobs"]["preflight"]
+        runs = "\n".join(run_blocks(job))
+        self.assertIn("check-runs", runs)
+        self.assertIn("CI success (fail-closed aggregate)", runs)
+        permissions = job.get("permissions", {})
+        self.assertEqual(permissions.get("checks"), "read")
 
     def test_protected_upload_gating(self):
         workflow = load_workflow(PUBLISH_YML)
         upload = workflow["jobs"]["upload"]
         self.assertEqual(upload.get("environment"), "crates-io")
         self.assertIn("needs", upload)
-        for needed in ("preflight", "ci", "candidate"):
+        for needed in ("preflight", "candidate"):
             self.assertIn(needed, upload["needs"])
 
     def test_oidc_write_scoped_to_upload_job_only(self):
@@ -226,12 +240,23 @@ class PublishEvidenceTests(unittest.TestCase):
         self.assertIn("registry-verify", text)
         self.assertIn("registry-consumer", text)
 
-    def test_release_called_only_on_explicit_complete_success(self):
+    def test_release_dispatched_only_on_explicit_complete_success(self):
         workflow = load_workflow(PUBLISH_YML)
-        job = workflow["jobs"]["release"]
+        job = workflow["jobs"]["dispatch-release"]
         self.assertIn("complete", job.get("if", ""))
         self.assertIn("verify", job.get("needs", []))
-        self.assertIn("release.yml", str(job.get("uses", "")))
+        self.assertIn("preflight", job.get("needs", []))
+        runs = "\n".join(run_blocks(job))
+        self.assertIn("gh workflow run release.yml", runs)
+        self.assertIn("--ref", runs)
+        self.assertIn('-R "${{ github.repository }}"', runs)
+        for flag in ("tag=", "candidate_run_id=",
+                     "qualification-url=", "qualification-subject="):
+            with self.subTest(flag=flag):
+                self.assertIn(flag, runs)
+        permissions = job.get("permissions", {})
+        self.assertEqual(permissions.get("actions"), "write")
+        self.assertNotEqual(permissions.get("id-token"), "write")
 
     def test_individual_recovery_prints_full_follow_up_command(self):
         workflow = load_workflow(PUBLISH_YML)

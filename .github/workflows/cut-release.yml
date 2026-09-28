@@ -203,6 +203,7 @@ jobs:
     environment: release-tag
     permissions:
       contents: write
+      actions: write
     outputs:
       tag: ${{ needs.verify.outputs.tag }}
     steps:
@@ -274,6 +275,18 @@ jobs:
           git push origin main
           git push origin "${{ needs.verify.outputs.tag }}"
 
+      - name: Start CI on the new tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Token pushes trigger no runs, so the tag commit would never
+          # get CI: start it explicitly. Publish refuses until the
+          # aggregate on this commit is green.
+          gh workflow run ci.yml \
+            --ref "${{ needs.verify.outputs.tag }}" \
+            -R "${{ github.repository }}"
+
   dispatch-publish:
     name: Dispatch publish.yml
     runs-on: ubuntu-24.04
@@ -291,8 +304,8 @@ jobs:
           gh workflow run publish.yml \
             --ref "${{ needs.cut.outputs.tag }}" \
             -R "${{ github.repository }}" \
-            -f mode=${{ inputs.mode }} \
-            -f package=${{ inputs.package }} \
-            -f tag=${{ needs.cut.outputs.tag }} \
-            -f qualification-url=${{ inputs.qualification-url }} \
-            -f qualification-subject=${{ inputs.qualification-subject }}
+            -f mode="${{ inputs.mode }}" \
+            -f package="${{ inputs.package }}" \
+            -f tag="${{ needs.cut.outputs.tag }}" \
+            -f qualification-url="${{ inputs.qualification-url }}" \
+            -f qualification-subject="${{ inputs.qualification-subject }}"
