@@ -164,6 +164,22 @@ class PublishJobBoundaryTests(unittest.TestCase):
         self.assertIn("$CARGO_TARGET_DIR/package/", runs)
         self.assertNotIn("cp target/package/", runs)
 
+    def test_repackage_packages_workspace_in_one_invocation(self):
+        # Per-package `cargo package -p` rewrites path deps to
+        # registry deps and fails on unpublished siblings ("no
+        # matching package ... location searched: crates.io index",
+        # run 36416792233). Only one --workspace invocation packages
+        # the closure exactly like CI.
+        workflow = load_workflow(PUBLISH_YML)
+        steps = workflow["jobs"]["upload"]["steps"]
+        matches = [step for step in steps
+                   if step.get("name") == "Repackage and compare fresh archives without compilation"]
+        self.assertEqual(len(matches), 1)
+        run = str(matches[0].get("run", ""))
+        self.assertIn("--workspace", run)
+        self.assertEqual(run.count("cargo package"), 1)
+        self.assertNotIn("for PKG", run)
+
     def test_credential_steps_follow_guards(self):
         workflow = load_workflow(PUBLISH_YML)
         names = step_names(workflow["jobs"]["upload"])

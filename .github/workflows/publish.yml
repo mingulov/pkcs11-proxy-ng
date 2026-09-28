@@ -343,9 +343,10 @@ jobs:
       - name: Repackage and compare fresh archives without compilation
         run: |
           set -euo pipefail
-          for PKG in $PUBLISH_ORDER; do
-            cargo package --no-verify --locked -p "$PKG"
-          done
+          # One workspace invocation, exactly like CI: per-package
+          # (-p) mode resolves rewritten path deps against the
+          # crates.io index and fails on unpublished siblings.
+          cargo package --workspace --no-verify --locked
           mkdir -p "$RUNNER_TEMP/fresh"
           cp "$CARGO_TARGET_DIR/package/"*.crate "$RUNNER_TEMP/fresh/"
           python3 scripts/release_checks.py archives \
