@@ -217,9 +217,10 @@ jobs:
         run: scripts/run-test-tiers.sh live
 
   # ── Coverage report ───────────────────────────────────────────────────────
-  # Report-only (no hard threshold yet): measures line coverage across the
-  # workspace lib suites and uploads the lcov + summary as artifacts so
-  # coverage drift is visible run to run.
+  # Ratchet: fails when workspace line coverage drops below 84%. Baseline was
+  # 85.20% lines on 2026-09-28; bump the floor (never lower it) once a higher
+  # level holds across several nightlies. The lcov + summary stay uploaded so
+  # drift is visible run to run.
   coverage:
     name: Coverage (cargo-llvm-cov)
     runs-on: ubuntu-24.04
@@ -246,7 +247,8 @@ jobs:
 
       - name: cargo llvm-cov (workspace)
         run: |
-          cargo llvm-cov --locked --workspace --lcov --output-path lcov.info
+          cargo llvm-cov --locked --workspace --lcov --output-path lcov.info \
+            --fail-under-lines 84
           cargo llvm-cov report --locked --summary-only | tee coverage-summary.txt
 
       - name: Upload coverage artifacts
@@ -282,16 +284,68 @@ jobs:
           toolchain: nightly
           components: miri
 
-      # Scope notes (measured 2026-07-04): the FULL types suite takes ~2.5 h
-      # under Miri (TOML/serde interpretation dominates) and its registry
-      # tests use real fs (cfg_attr(miri, ignore)). The width/attribute
-      # modules are the UB-relevant pure logic. On the shim, the daemon-based
+      # Scope notes (measured 2026-07-04, expanded 2026-09-28): the FULL
+      # types suite takes ~2.5 h under Miri (TOML/serde interpretation
+      # dominates) and its registry tests use real fs
+      # (cfg_attr(miri, ignore)). The width/attribute/mechanism modules are
+      # the UB-relevant pure logic; `mechanism::tests` (const tables,
+      # Zeroize/Drop glue, Debug redaction) runs in ~7 s because it avoids
+      # the registry TOML. The `secret` filter additionally covers the
+      # secret-classification predicates. On the shim, the daemon-based
       # tests:: modules need real sockets and are compiled out under Miri
       # (lib.rs cfg); the raw-pointer parse paths below are the point.
-      - name: cargo miri test (width/attribute logic + shim parse paths)
+      - name: cargo miri test (width/attribute/logic + shim parse paths)
         run: |
-          cargo +nightly miri test --locked -p pkcs11-proxy-ng-types -- width attribute
+          cargo +nightly miri test --locked -p pkcs11-proxy-ng-types -- width attribute mechanism::tests secret
           cargo +nightly miri test --locked -p pkcs11-proxy-ng-shim --lib -- \
             dispatch::general::width_bridge \
             dispatch::general::helpers::nested_template_input \
             not_wild_read
+
+  # ── Fuzz smoke (cargo-fuzz, libFuzzer) ────────────────────────────────────
+  # Short time-boxed smoke over the four harnesses in fuzz/fuzz_targets:
+  # width translation, registry TOML, attribute proto edge, and the
+  # pre-decode wire scanner. Any crash fails the job and uploads the
+  # artifact for triage. Longer campaigns run on demand locally
+  # (see doc/development.md).
+  fuzz-smoke:
+    name: Fuzz smoke (4 targets x 90 s)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install protoc (pinned, matches mise.toml)
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
+        with:
+          version: "36.1"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: cargo fuzz build
+        run: cargo +nightly fuzz build
+
+      - name: Seed registry corpus from the default TOML
+        run: |
+          mkdir -p fuzz/corpus/fuzz_registry
+          cp fuzz/seeds/fuzz_registry/default.toml fuzz/corpus/fuzz_registry/seed-default.toml
+
+      - name: Fuzz smoke (90 s per target)
+        run: |
+          for target in fuzz_width fuzz_registry fuzz_attribute fuzz_protected_decode; do
+            cargo +nightly fuzz run "$target" -- -max_total_time=90 -print_final_stats=1
+          done
+
+      - name: Upload crash artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: fuzz-crashes
+          path: fuzz/artifacts/

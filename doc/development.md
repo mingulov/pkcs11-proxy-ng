@@ -103,6 +103,47 @@ cargo install cargo-llvm-cov --locked
 rustup toolchain install nightly --component miri --component rust-src
 ```
 
+For fuzzing (nightly only; `fuzz/` is excluded from the stable workspace):
+
+```bash
+cargo install cargo-fuzz --locked
+```
+
+## Fuzzing, Miri, and coverage
+
+The nightly pipeline runs three complementary dynamic gates; all reproduce
+locally with the tooling above.
+
+**Fuzz smoke** (`fuzz/`): four libFuzzer harnesses over untrusted-input
+edges — `fuzz_width` (cross-ABI `CK_ULONG` translation),
+`fuzz_registry` (registry TOML load + queries),
+`fuzz_attribute` (attribute proto edge incl. the D8 nesting refusal), and
+`fuzz_protected_decode` (pre-decode wire scanner). Each asserts totality
+(typed errors, never a panic) plus edge-specific round-trip invariants.
+
+```bash
+cargo +nightly fuzz build
+mkdir -p fuzz/corpus/fuzz_registry
+cp fuzz/seeds/fuzz_registry/default.toml fuzz/corpus/fuzz_registry/
+cargo +nightly fuzz run fuzz_width -- -max_total_time=90
+```
+
+Crashes land in `fuzz/artifacts/<target>/` (git-ignored); reproduce one
+with `cargo +nightly fuzz run <target> fuzz/artifacts/<target>/crash-<hash>`.
+Corpus coverage: `cargo +nightly fuzz coverage <target>` (needs the
+`llvm-tools` nightly component), then `llvm-cov report` against the binary
+under `target/<triple>/coverage/<triple>/release/<target>`.
+
+**Miri**: the pure width/attribute/mechanism logic plus the shim's
+raw-pointer parse paths run under the UB interpreter; tests needing real
+time/FFI stay `cfg_attr(miri, ignore)`d. The exact filter lists live in
+`nightly.yml` (keep them in sync when adding UB-relevant pure logic).
+
+**Coverage ratchet**: `cargo llvm-cov --workspace` must stay at or above
+84% lines (`--fail-under-lines 84` in `nightly.yml`; baseline 85.20% on
+2026-09-28). Bump the floor up as coverage sustainably improves; never
+lower it to fit a change — add tests instead.
+
 Target-specific commands are in [ci.yml](../.github/workflows/ci.yml) and
 [nightly.yml](../.github/workflows/nightly.yml). Live tests may also need
 provider images, 32-bit libraries, or Wine; see the [test guide](../crates/server/tests/README.md).

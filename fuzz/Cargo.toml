@@ -1,0 +1,45 @@
+[package]
+name = "pkcs11-proxy-ng-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.pkcs11-proxy-ng-types]
+path = "../crates/types"
+
+[dependencies.pkcs11-proxy-ng-proto]
+path = "../crates/proto"
+
+[[bin]]
+name = "fuzz_width"
+path = "fuzz_targets/fuzz_width.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_registry"
+path = "fuzz_targets/fuzz_registry.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_attribute"
+path = "fuzz_targets/fuzz_attribute.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_protected_decode"
+path = "fuzz_targets/fuzz_protected_decode.rs"
+test = false
+doc = false
+bench = false
