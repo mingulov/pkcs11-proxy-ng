@@ -223,6 +223,32 @@ is produced by `scripts/release-windows.sh`.
   Configure the supervisor to restart when it observes that status; see the
   [native ownership contract](../release/native-mechanism-ownership.md).
 
+## 4c. Co-located consumer transport (latency)
+
+When the consumer and the daemon run on the same host, prefer the
+unix-socket listener over TCP loopback: per-RPC latency is dominated
+by fixed transport cost (~57 µs TCP vs ~43 µs unix per cheap RPC in
+the sign-pair bench), and the unix path cuts the measured sign-pair
+p50 by ~29% (121 µs → 86 µs; MockBackend, release, host-dependent —
+see `scripts/perf/README.md` for the decomposition recipe and
+re-run before quoting).
+
+```toml
+[listener.local]
+path = "/run/pkcs11-proxy/proxy.sock"
+auth = "peer_cred"
+```
+
+```bash
+# Consumer side (shim / CLI):
+export PKCS11_PROXY_ENDPOINT="unix:/run/pkcs11-proxy/proxy.sock"
+```
+
+Authentication on this listener is Unix peer credentials (ADR-0005),
+not mTLS. Remote consumers still use `[listener.remote]` with
+`auth = "mtls"`; both listeners can be configured at once. Windows
+daemons reject `[listener.local]` (§4b) — serve mTLS/TCP only there.
+
 ## 5. Updating mechanism registry (vendor extensions, e.g. CloudHSM)
 
 ```bash
