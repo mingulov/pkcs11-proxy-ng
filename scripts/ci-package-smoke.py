@@ -11,6 +11,11 @@ then proves real provider operations through them:
   execute the packaged daemon/CLI plus the shim DLL through a real
   provider-backed session via the shipped ``cross_width_smoke.exe``,
   which needs a live configured daemon/provider and scratch token.
+* ``macos-bundle``: extract the exact macOS arm64 tarball, check
+  hashes/materials against its build provenance, strip the Gatekeeper
+  quarantine xattrs macOS attaches to downloaded archives (byte hashes
+  are verified first, so the strip cannot mask tampering), and run the
+  extracted daemon/shim/CLI through the Unix SoftHSM flow.
 * ``apk-verify``: check the exact Alpine APK set members (own licenses,
   upstream notices/inventory/provenance/materials) and record the
   sha256 of each binary payload (``--hash-output``) as the reference
@@ -527,6 +532,31 @@ def cmd_linux_bundle(args):
     return unix_provider_smoke(daemon, shim, cli, workdir)
 
 
+def cmd_macos_bundle(args):
+    tarball = require_file(args.bundle, "macOS bundle tarball")
+    workdir = require_dir(args.workdir, "smoke workdir")
+    extracted = os.path.join(workdir, "extracted")
+    safe_extract_tarball(tarball, extracted)
+    provenance_hits = [str(item) for item in Path(extracted).rglob("build-provenance.json")]
+    if len(provenance_hits) != 1:
+        raise SystemExit(f"bundle has {len(provenance_hits)} build-provenance.json files")
+    verify_prepared_bundle(extracted, provenance_hits[0])
+    if sys.platform == "darwin":
+        # Downloaded archives arrive quarantined; Gatekeeper would kill the
+        # extracted Mach-O binaries (SIGKILL) and refuse the dylib at dlopen.
+        # Hashes are already verified above, so clearing xattrs only drops
+        # the OS tag — it cannot hide a byte change.
+        cleared = subprocess.run(["xattr", "-cr", extracted],
+                                 text=True, capture_output=True)
+        if cleared.returncode != 0:
+            raise SystemExit(f"xattr -cr failed on {extracted}: {cleared.stderr.strip()}")
+        log("cleared quarantine xattrs from extracted bundle")
+    daemon = find_staged(extracted, "pkcs11-proxy-ng")
+    cli = find_staged(extracted, "pkcs11-proxy-ng-cli")
+    shim = find_staged(extracted, "libpkcs11_proxy_ng_shim.dylib")
+    return unix_provider_smoke(daemon, shim, cli, workdir)
+
+
 def cmd_windows_bundle(args):
     archive = require_file(args.bundle, "Windows bundle ZIP")
     workdir = require_dir(args.workdir, "smoke workdir")
@@ -566,6 +596,9 @@ def parse_args(argv=None):
     windows = commands.add_parser("windows-bundle")
     windows.add_argument("--bundle", required=True)
     windows.add_argument("--workdir", required=True)
+    macos = commands.add_parser("macos-bundle")
+    macos.add_argument("--bundle", required=True)
+    macos.add_argument("--workdir", required=True)
     apk = commands.add_parser("apk-verify")
     apk.add_argument("--apk-dir", required=True)
     apk.add_argument("--hash-output", default=None)
@@ -586,6 +619,7 @@ def parse_args(argv=None):
 def main(argv=None):
     args = parse_args(argv)
     handlers = {"linux-bundle": cmd_linux_bundle, "windows-bundle": cmd_windows_bundle,
+                "macos-bundle": cmd_macos_bundle,
                 "apk-verify": cmd_apk_verify, "installed-verify": cmd_installed_verify,
                 "installed-smoke": cmd_installed_smoke}
     handlers[args.command](args)

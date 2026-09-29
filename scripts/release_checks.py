@@ -44,7 +44,8 @@ def main(argv=None, *, repo=None) -> int:
     binary.add_argument("--package-dir", required=True, type=Path)
     binary.add_argument("--source", required=True, choices=("archive", "registry"))
     binary.add_argument("--target", required=True,
-                        choices=("x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"))
+                        choices=("x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc",
+                                 "aarch64-apple-darwin"))
     binary.add_argument("--output", required=True, type=Path)
     binary.add_argument("--toolchain", default="1.98.1")
     notices = commands.add_parser("notices")

@@ -420,5 +420,54 @@ class WindowsBundleTests(unittest.TestCase):
                          self.notices, self.base / "again", timestamp=1_700_000_000)
 
 
+class MacBundleTests(unittest.TestCase):
+    setUp = BundleTests.setUp
+
+    def _stage_darwin(self):
+        self.target = "aarch64-apple-darwin"
+        darwin_names = ("pkcs11-proxy-ng", "pkcs11-proxy-ng-cli",
+                        "libpkcs11_proxy_ng_shim.dylib")
+        for path in self.binaries.iterdir():
+            path.unlink()
+        artifacts = []
+        for name in darwin_names:
+            data = ("binary:" + name).encode()
+            (self.binaries / name).write_bytes(data)
+            artifacts.append({"name": name, "package": "pkcs11-proxy-ng-shim" if name.endswith(".dylib")
+                              else name, "kind": "lib" if name.endswith(".dylib") else "bin",
+                              "sha256": digest(data), "size": len(data)})
+        provenance = json.loads(self.provenance.read_text())
+        provenance.update(target=self.target, artifacts=artifacts)
+        self.provenance.write_text(json.dumps(provenance))
+        inventory = json.loads(self.inventory.read_text())
+        inventory.update(target=self.target, artifacts=artifacts,
+                         build_provenance_sha256=digest(self.provenance.read_bytes()))
+        self.inventory.write_text(json.dumps(inventory))
+        (self.base / "doc/release/macos-install.md").write_text("macos install\n")
+
+    def test_darwin_tar_carries_dylib_and_mac_install_doc(self):
+        self._stage_darwin()
+        archive = stage_bundle(self.base, self.binaries, self.provenance,
+                               self.notices, self.output, timestamp=1_700_000_000)
+        self.assertTrue(str(archive).endswith(".tar.gz"))
+        with tarfile.open(archive, "r:gz") as bundle:
+            names = {member.name.split("/", 1)[1] for member in bundle if member.isfile()}
+            self.assertTrue({"bin/pkcs11-proxy-ng", "bin/pkcs11-proxy-ng-cli",
+                             "lib/pkcs11/libpkcs11_proxy_ng_shim.dylib", "doc/macos-install.md",
+                             "doc/v0.2.0-release-notes.md", "THIRD_PARTY_NOTICES",
+                             "notice-inventory.json", "build-provenance.json"} <= names)
+        (self.binaries / "libpkcs11_proxy_ng_shim.dylib").write_bytes(b"changed")
+        with self.assertRaises(ReleaseError):
+            stage_bundle(self.base, self.binaries, self.provenance,
+                         self.notices, self.base / "again", timestamp=1_700_000_000)
+
+    def test_missing_mac_install_doc_refuses(self):
+        self._stage_darwin()
+        (self.base / "doc/release/macos-install.md").unlink()
+        with self.assertRaisesRegex(ReleaseError, "macos-install"):
+            stage_bundle(self.base, self.binaries, self.provenance,
+                         self.notices, self.output, timestamp=1_700_000_000)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -23,6 +23,9 @@ EXPECTED_ARTIFACTS = {
                  "pkcs11-proxy-ng-cli.exe": ("pkcs11-proxy-ng-cli", "bin"),
                  "pkcs11_proxy_ng_shim.dll": ("pkcs11-proxy-ng-shim", "lib"),
                  "cross_width_smoke.exe": ("pkcs11-proxy-ng-shim", "example")},
+    TARGETS[2]: {"pkcs11-proxy-ng": ("pkcs11-proxy-ng", "bin"),
+                 "pkcs11-proxy-ng-cli": ("pkcs11-proxy-ng-cli", "bin"),
+                 "libpkcs11_proxy_ng_shim.dylib": ("pkcs11-proxy-ng-shim", "lib")},
 }
 
 
@@ -120,10 +123,12 @@ def _bundle_files(repo: Path, binaries_dir: Path, provenance_path: Path,
     for item in notices_dir.rglob("*"):
         if item.is_file():
             files[item.relative_to(notices_dir).as_posix()] = item
-    if target == TARGETS[0]:
+    if target in (TARGETS[0], TARGETS[2]):
+        shim_name = ("libpkcs11_proxy_ng_shim.dylib" if target == TARGETS[2]
+                     else "libpkcs11_proxy_ng_shim.so")
         files.update({"bin/pkcs11-proxy-ng": binaries_dir / "pkcs11-proxy-ng",
                       "bin/pkcs11-proxy-ng-cli": binaries_dir / "pkcs11-proxy-ng-cli",
-                      "lib/pkcs11/libpkcs11_proxy_ng_shim.so": binaries_dir / "libpkcs11_proxy_ng_shim.so"})
+                      f"lib/pkcs11/{shim_name}": binaries_dir / shim_name})
         notes_name = f"v{version}-release-notes.md"
         notes_path = repo / "doc/release" / notes_name
         require(notes_path.is_file() and not notes_path.is_symlink() and
@@ -133,6 +138,12 @@ def _bundle_files(repo: Path, binaries_dir: Path, provenance_path: Path,
         for name in ("beta-support-matrix.md", "mtls-setup.md", "parity-validation.md",
                      notes_name):
             files[f"doc/{name}"] = repo / "doc/release" / name
+        if target == TARGETS[2]:
+            mac_doc = repo / "doc/release/macos-install.md"
+            require(mac_doc.is_file() and not mac_doc.is_symlink() and
+                    mac_doc.stat().st_size > 0,
+                    "macos-install.md is missing: expected doc/release/macos-install.md")
+            files["doc/macos-install.md"] = mac_doc
     else:
         files.update({"bin/pkcs11-proxy-ng.exe": binaries_dir / "pkcs11-proxy-ng.exe",
                       "bin/pkcs11-proxy-ng-cli.exe": binaries_dir / "pkcs11-proxy-ng-cli.exe",
@@ -173,7 +184,7 @@ def stage_bundle(repo: Path, binaries_dir: Path, provenance_path: Path,
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, dest)
         require(_hash(dest) == _hash(source), f"staged file changed: {relative}")
-    if target == TARGETS[0]:
+    if target in (TARGETS[0], TARGETS[2]):
         archive = output / f"{name}.tar.gz"
         with archive.open("wb") as stream, gzip.GzipFile(fileobj=stream, mode="wb", filename="", mtime=0) as gz:
             with tarfile.open(fileobj=gz, mode="w") as bundle:
