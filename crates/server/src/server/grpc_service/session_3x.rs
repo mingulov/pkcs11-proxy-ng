@@ -198,6 +198,9 @@ async fn login_user_inner(
     // in Debug. DO NOT log pin or username at any tracing level.
     // (build.rs flags LoginUserRequest.username secret-bearing.)
     let pin = std::mem::take(&mut req.pin).map(SecretBytes::new);
+    // D6(1) contended-login marker (same rule as `C_Login`): only a
+    // presented PIN records a contended attempt.
+    let pin_presented = pin.is_some();
     let username = std::mem::take(&mut req.username).map(SecretBytes::new);
     let backend = backend_ref.clone();
     let result = spawn_backend(move || {
@@ -261,6 +264,21 @@ async fn login_user_inner(
                 || *error == CkRv::PIN_LEN_RANGE
             {
                 crate::server::rate_quota::record_login_failure(slot);
+            }
+            // D6(1) contended-login marker, same rule as `C_Login`: a
+            // presented PIN answered ALREADY records the attempt (no
+            // LoginState, no holder-index touch); the D6(1) gates
+            // forward instead of refusing 257.
+            if (*error == CkRv::USER_ALREADY_LOGGED_IN
+                || *error == CkRv::USER_ANOTHER_ALREADY_LOGGED_IN)
+                && pin_presented
+                && requested_login_state.is_some()
+            {
+                let _ = ctx_mgr
+                    .get_context(&ctx_id, |ctx| {
+                        ctx.contended_slot_login.insert(slot);
+                    })
+                    .await;
             }
             error.0
         }
@@ -803,6 +821,35 @@ mod tests {
         let b_state =
             ctx_mgr.get_context(&ctx_b, |ctx| ctx.login_state.get(&slot).copied()).await.unwrap();
         assert_eq!(b_state, None, "D6(3) refusal must mint no LoginState");
+    }
+
+    /// D6(1) contended-login refinement, 3.x path: B's PIN-presenting
+    /// `login_user` answered ALREADY records the marker, so B's private
+    /// mint forwards (backend verdict authoritative) — same rule as
+    /// `C_Login`.
+    #[tokio::test]
+    async fn login_user_contended_pin_login_forwards_private_mint() {
+        use crate::server::grpc_service::service_utils::ensure_private_mint_allowed;
+        use pkcs11_proxy_ng_types::{CkAttribute, CkAttributeType, CkAttributeValue};
+
+        let (ctx_mgr, _, backend, ctx_a, ctx_b, session_a, session_b, _) = setup_login_user().await;
+        let rv_a =
+            login_user_rv(&ctx_mgr, &backend, &ctx_a, session_a, CkUserType::User as u64, b"1234")
+                .await;
+        assert_eq!(rv_a, CkRv::OK.0, "first login_user must succeed");
+        let rv_b =
+            login_user_rv(&ctx_mgr, &backend, &ctx_b, session_b, CkUserType::User as u64, b"1234")
+                .await;
+        assert_eq!(rv_b, CkRv::USER_ALREADY_LOGGED_IN.0);
+        let template = vec![CkAttribute {
+            attr_type: CkAttributeType::PRIVATE,
+            value: Some(CkAttributeValue::Bool(true)),
+        }];
+        assert_eq!(
+            ensure_private_mint_allowed(&ctx_mgr, &ctx_b, session_b.0, &template).await,
+            Ok(()),
+            "contended login_user's private mint must forward"
+        );
     }
 
     /// W1-C1-02 (M5): two clients racing the FIRST `C_LoginUser` on the same

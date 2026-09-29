@@ -108,6 +108,10 @@ pub(super) async fn login(
     // Hold PIN bytes in `SecretBytes`: the backing buffer is overwritten
     // when dropped, and Debug redacts the secret (audit/log safety net).
     let pin = std::mem::take(&mut req.pin).map(SecretBytes::new);
+    // D6(1) contended-login marker needs PIN-presence after `pin` moves
+    // into the backend closure below: only a presented PIN (not a
+    // protected-path `None`) records a contended attempt.
+    let pin_presented = pin.is_some();
 
     // T20: NO short-circuit past this point — every login attempt, including
     // same-context re-logins and logins while another context holds the
@@ -252,6 +256,24 @@ pub(super) async fn login(
             {
                 crate::server::rate_quota::record_login_failure(slot);
             }
+            // D6(1) contended-login marker: the backend reports the slot
+            // physically logged in and this context presented a PIN, so a
+            // later private mint/use forwards (backend verdict
+            // authoritative) instead of refusing 257. Mints NO LoginState
+            // (D6(3)) and touches no holder index; the RV stays faithful.
+            // Context-specific logins establish no per-slot state (ADR-0002
+            // §6), so they record no marker either.
+            if (*error == CkRv::USER_ALREADY_LOGGED_IN
+                || *error == CkRv::USER_ANOTHER_ALREADY_LOGGED_IN)
+                && pin_presented
+                && requested_login_state.is_some()
+            {
+                let _ = ctx_mgr
+                    .get_context(&ctx_id, |ctx| {
+                        ctx.contended_slot_login.insert(slot);
+                    })
+                    .await;
+            }
             error.0
         }
     };
@@ -322,6 +344,14 @@ pub(super) async fn logout(
         ctx_mgr.first_login_state_for_slot_excluding_authoritative(slot, &ctx_id);
 
     if current_login_state.is_none() && other_login_state.is_some() {
+        // Contended-login marker dies with the logout intent, like login
+        // state (no backend call on this path — the other holder keeps
+        // the physical login).
+        let _ = ctx_mgr
+            .get_context(&ctx_id, |ctx| {
+                ctx.contended_slot_login.remove(&slot);
+            })
+            .await;
         return Ok(Response::new(pkcs11_proxy_ng_proto::LogoutResponse {
             ck_rv: CkRv::USER_NOT_LOGGED_IN.0,
         }));
@@ -331,6 +361,7 @@ pub(super) async fn logout(
         let _ = ctx_mgr
             .get_context(&ctx_id, |ctx| {
                 ctx.login_state.remove(&slot);
+                ctx.contended_slot_login.remove(&slot);
             })
             .await;
         // W1-L13-17: sync the holder index with the release.
@@ -352,6 +383,7 @@ pub(super) async fn logout(
             let _ = ctx_mgr
                 .get_context(&ctx_id, |ctx| {
                     ctx.login_state.remove(&slot);
+                    ctx.contended_slot_login.remove(&slot);
                 })
                 .await;
             // W1-L13-17: sync the holder index with the release.
@@ -839,6 +871,188 @@ mod tests {
             .await
             .flatten();
         assert_eq!(held_b, None, "ALREADY must mint no logical login");
+    }
+
+    /// Setup for the contended-login gate tests: two contexts on one
+    /// slot, A logged in (holder), B's login answered ALREADY by the
+    /// mock. `pin_b` is B's presented PIN (`None` = protected-path).
+    /// Returns the manager, backend, slot, both contexts/sessions, and
+    /// B's backend session handle (for use-gate calls).
+    async fn contended_login_pair(
+        pin_b: Option<Vec<u8>>,
+    ) -> (
+        Arc<ContextManager>,
+        Arc<dyn Pkcs11Backend>,
+        crate::server::slot_map::BackendSlotId,
+        ClientContextId,
+        crate::server::handle_map::VirtualHandle,
+        ClientContextId,
+        crate::server::handle_map::VirtualHandle,
+        CkSessionHandle,
+    ) {
+        let slot = CkSlotId(46);
+        let mock = Arc::new(MockBackend::new(vec![slot], vec![CkMechanismType::RSA_PKCS]));
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let backend_slot = crate::server::slot_map::BackendSlotId(slot);
+
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        ctx_mgr.register_slot(backend_slot).await;
+        let ctx_a = ctx_mgr.create_context(None).await.unwrap();
+        let backend_session_a = mock.open_session(slot, CkSessionFlags::default()).unwrap();
+        let session_a = ctx_mgr
+            .get_context(&ctx_a, |ctx| {
+                ctx.register_session(BackendHandle(backend_session_a.0), backend_slot)
+            })
+            .await
+            .unwrap();
+        let ctx_b = ctx_mgr.create_context(None).await.unwrap();
+        let backend_session_b = mock.open_session(slot, CkSessionFlags::default()).unwrap();
+        let session_b = ctx_mgr
+            .get_context(&ctx_b, |ctx| {
+                ctx.register_session(BackendHandle(backend_session_b.0), backend_slot)
+            })
+            .await
+            .unwrap();
+
+        let login_req = |ctx_id: &ClientContextId, session_vh: u64, pin: Option<Vec<u8>>| {
+            pkcs11_proxy_ng_proto::LoginRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: session_vh,
+                user_type: CkUserType::User as u64,
+                pin,
+            }
+        };
+        let first =
+            super::login(&ctx_mgr, &backend, Request::new(login_req(&ctx_a, session_a.0, None)))
+                .await
+                .unwrap()
+                .into_inner();
+        assert_eq!(first.ck_rv, CkRv::OK.0);
+        let second =
+            super::login(&ctx_mgr, &backend, Request::new(login_req(&ctx_b, session_b.0, pin_b)))
+                .await
+                .unwrap()
+                .into_inner();
+        assert_eq!(second.ck_rv, CkRv::USER_ALREADY_LOGGED_IN.0);
+        let held_b = ctx_mgr
+            .get_context(&ctx_b, |ctx| ctx.login_state.get(&backend_slot).copied())
+            .await
+            .flatten();
+        assert_eq!(held_b, None, "ALREADY must mint no logical login");
+        (ctx_mgr, backend, backend_slot, ctx_a, session_a, ctx_b, session_b, backend_session_b)
+    }
+
+    /// D6(1) contended-login refinement (rc2
+    /// `test_rsa_modulus_bits_oversized_value`): a second context that
+    /// PRESENTED a PIN and got backend ALREADY must have its subsequent
+    /// private mint forwarded — the backend's verdict under its physical
+    /// login is authoritative — not refused 257 without consulting it.
+    /// D6(3) intact: ALREADY still mints no `LoginState`.
+    #[tokio::test]
+    async fn contended_pin_login_forwards_private_mint() {
+        use crate::server::grpc_service::service_utils::ensure_private_mint_allowed;
+
+        let (ctx_mgr, _, _, _, _, ctx_b, session_b, _) =
+            contended_login_pair(Some(vec![1, 2, 3, 4])).await;
+        let template = vec![CkAttribute {
+            attr_type: CkAttributeType::PRIVATE,
+            value: Some(CkAttributeValue::Bool(true)),
+        }];
+        assert_eq!(
+            ensure_private_mint_allowed(&ctx_mgr, &ctx_b, session_b.0, &template).await,
+            Ok(()),
+            "contended PIN login's private mint must forward"
+        );
+    }
+
+    /// Same refinement for the USE gate: a contended PIN login's private
+    /// object use must forward, not refuse 257.
+    #[tokio::test]
+    async fn contended_pin_login_forwards_private_use() {
+        use crate::server::grpc_service::HandlerContext;
+        use crate::server::grpc_service::service_utils::ensure_private_use_allowed;
+
+        let (ctx_mgr, backend, _, _, _, ctx_b, session_b, backend_session_b) =
+            contended_login_pair(Some(vec![1, 2, 3, 4])).await;
+        // A known-private virtual object (mint-recorded bit: no backend probe).
+        let vobj = ctx_mgr
+            .get_context(&ctx_b, |ctx| {
+                let vh = ctx.object_handles.insert(BackendHandle(0xBEEF));
+                ctx.object_private.insert(vh, true);
+                vh
+            })
+            .await
+            .unwrap();
+        let hctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        assert_eq!(
+            ensure_private_use_allowed(
+                &hctx,
+                &ctx_b,
+                session_b.0,
+                vobj.0,
+                backend_session_b,
+                CkObjectHandle(0xBEEF),
+            )
+            .await,
+            Ok(()),
+            "contended PIN login's private use must forward"
+        );
+    }
+
+    /// Logout ends the contended attempt like any login state: after B
+    /// logs out, B's private mint is refused again (marker cleared), even
+    /// though A still holds the slot login.
+    #[tokio::test]
+    async fn contended_marker_cleared_on_logout() {
+        use crate::server::grpc_service::service_utils::ensure_private_mint_allowed;
+
+        let (ctx_mgr, backend, _, _, _, ctx_b, session_b, _) =
+            contended_login_pair(Some(vec![1, 2, 3, 4])).await;
+        let template = vec![CkAttribute {
+            attr_type: CkAttributeType::PRIVATE,
+            value: Some(CkAttributeValue::Bool(true)),
+        }];
+        assert_eq!(
+            ensure_private_mint_allowed(&ctx_mgr, &ctx_b, session_b.0, &template).await,
+            Ok(()),
+            "precondition: marker forwards before logout"
+        );
+        let out = super::logout(
+            &ctx_mgr,
+            &backend,
+            Request::new(pkcs11_proxy_ng_proto::LogoutRequest {
+                client_context_id: ctx_b.0.clone(),
+                session_handle: session_b.0,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(out.ck_rv, CkRv::USER_NOT_LOGGED_IN.0);
+        assert_eq!(
+            ensure_private_mint_allowed(&ctx_mgr, &ctx_b, session_b.0, &template).await,
+            Err(CkRv::USER_NOT_LOGGED_IN),
+            "post-logout mint must refuse (marker cleared)"
+        );
+    }
+
+    /// Lock-in for the conservative PIN rule: a contended login WITHOUT a
+    /// presented PIN sets no marker — its private mint is still refused
+    /// (anti-riding for credential-less attempts).
+    #[tokio::test]
+    async fn contended_pinless_login_still_refuses_private_mint() {
+        use crate::server::grpc_service::service_utils::ensure_private_mint_allowed;
+
+        let (ctx_mgr, _, _, _, _, ctx_b, session_b, _) = contended_login_pair(None).await;
+        let template = vec![CkAttribute {
+            attr_type: CkAttributeType::PRIVATE,
+            value: Some(CkAttributeValue::Bool(true)),
+        }];
+        assert_eq!(
+            ensure_private_mint_allowed(&ctx_mgr, &ctx_b, session_b.0, &template).await,
+            Err(CkRv::USER_NOT_LOGGED_IN),
+            "contended PIN-less login must not pass the mint gate"
+        );
     }
 
     /// Pin: context-specific logins never mint token state, so they must

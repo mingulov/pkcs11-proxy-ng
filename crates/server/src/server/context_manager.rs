@@ -253,6 +253,20 @@ pub struct LogicalClientInstance {
     /// Per-token login. Production mutations must sync the holder index
     /// via `note_login_acquired` / `note_login_released` (W1-L13-17).
     pub login_state: HashMap<BackendSlotId, LoginState>,
+    /// Per-slot "presented a PIN, backend answered ALREADY" marker (D6(1)
+    /// contended-login refinement). Set when this context's `C_Login` /
+    /// `C_LoginUser` with a presented PIN is answered
+    /// `USER_ALREADY_LOGGED_IN` / `USER_ANOTHER_ALREADY_LOGGED_IN`: the PIN
+    /// is unverified, so NO `LoginState` is minted (D6(3) intact) and the
+    /// holder index is untouched — but the backend reports the slot
+    /// physically logged in, so the D6(1) mint/use gates forward this
+    /// context's private operations (backend verdict authoritative)
+    /// instead of refusing `USER_NOT_LOGGED_IN` without consulting it.
+    /// Contexts that never presented credentials are still refused.
+    /// Cleared on logout and on last-session-out, mirroring `login_state`;
+    /// dies with the context on teardown/eviction (no holder-index entry —
+    /// consulted only for the owning context, never cross-context).
+    pub contended_slot_login: HashSet<BackendSlotId>,
     pub authenticated_identity: Option<String>, // bound at creation (ADR-0005 §4)
     /// Last TCP peer IP seen opening a session on this context (W1-L7-02).
     /// Recorded only for unauthenticated contexts while the session quota
@@ -343,6 +357,7 @@ impl LogicalClientInstance {
             destroyed_objects: HashSet::new(),
             attr_cache: HashMap::new(),
             login_state: HashMap::new(),
+            contended_slot_login: HashSet::new(),
             authenticated_identity: identity,
             last_peer_ip: None,
             in_flight: Arc::new(AtomicI64::new(0)),
@@ -396,6 +411,7 @@ impl LogicalClientInstance {
             }
         }
         self.login_state.remove(&slot);
+        self.contended_slot_login.remove(&slot);
         backend_handles
     }
 
@@ -433,6 +449,7 @@ impl LogicalClientInstance {
             let has_remaining_session_for_slot = self.session_slots.values().any(|s| *s == slot);
             if !has_remaining_session_for_slot {
                 self.login_state.remove(&slot);
+                self.contended_slot_login.remove(&slot);
             }
         }
         backend_handle
@@ -455,6 +472,7 @@ impl LogicalClientInstance {
         self.object_private.clear();
         self.attr_cache.clear();
         self.login_state.clear();
+        self.contended_slot_login.clear();
         self.message_operations.clear();
         backend_sessions
     }
