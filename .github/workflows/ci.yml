@@ -750,6 +750,87 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # ── Tier 0j2: archive-mode macOS binary + notices + bundle ───────────────────
+  # Stage B (mac): natively builds the macOS arm64 set (daemon/CLI/dylib)
+  # from the source-bound candidate on macos-15, then collects notices
+  # and stages the deterministic tarball. Native execution happens here
+  # (the build runs --version and loads the shim) and again in
+  # smoke-bundle-macos. Intel macs are a follow-up: only arm64 ships, so
+  # every shipped bundle is CI-executed (no Rosetta dependency).
+  archive-binary-macos:
+    name: Archive binary build (macOS arm64) + notices/bundle
+    runs-on: macos-15
+    timeout-minutes: 120
+    needs: package-candidate
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+    outputs:
+      bundle: ${{ steps.stage.outputs.bundle }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      # Both Cargo directories are isolated: the global build.build-dir
+      # config makes a target dir alone insufficient.
+      - name: Isolate Cargo build and target directories
+        run: |
+          set -euo pipefail
+          echo "CARGO_BUILD_BUILD_DIR=$RUNNER_TEMP/archive-macos/build" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/archive-macos/target" >> "$GITHUB_ENV"
+
+      - name: Install protoc (pinned, matches mise.toml)
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
+        with:
+          version: "36.1"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install pinned toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.98.1
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Download source-bound candidate
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: ci-candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/archive-macos/candidate
+
+      - name: Archive-mode binary build (macOS arm64)
+        run: |
+          set -euo pipefail
+          python3 scripts/release_checks.py binary-build --source archive --target aarch64-apple-darwin \
+            --inventory "${{ runner.temp }}/archive-macos/candidate/inventory.json" \
+            --package-dir "${{ runner.temp }}/archive-macos/candidate" \
+            --output "${{ runner.temp }}/archive-macos/output" \
+            --toolchain 1.98.1
+
+      - name: Notices + bundle
+        id: stage
+        run: |
+          set -euo pipefail
+          OUT="${{ runner.temp }}/archive-macos/output"
+          python3 scripts/release_checks.py notices --build-inputs "$OUT/build-inputs.json" --output "$OUT/notices"
+          python3 scripts/release_checks.py bundle --binaries "$OUT/binaries" --provenance "$OUT/build-provenance.json" --notices "$OUT/notices" --output "$OUT/staged-bundle" --timestamp "$(date +%s)"
+          ARCHIVES=( "$OUT/staged-bundle"/*.tar.gz )
+          if [ "${#ARCHIVES[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one macOS bundle tarball"
+            exit 1
+          fi
+          echo "bundle=$(basename "${ARCHIVES[0]}")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload macOS bundle
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: ci-macos-bundle-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/archive-macos/output/staged-bundle/
+          if-no-files-found: error
+          retention-days: 14
+
   # ── Tier 0k: Alpine APK build/install/sign smoke ─────────────────────────────
   # Stage B: builds the Alpine APK carrier from this checkout, verifies
   # the exact APK set (own/upstream notices, inventory, provenance,
@@ -960,6 +1041,49 @@ jobs:
           path: ${{ runner.temp }}/smoke-windows/work/
           retention-days: 14
 
+  # ── Tier 0m2: macOS bundle smoke (native runner, provider-backed) ────────────
+  # Stage B (mac): on a native macos-15 runner, extracts the exact macOS
+  # arm64 tarball staged above (clearing Gatekeeper quarantine xattrs
+  # after the hash check) and runs the packaged daemon/CLI plus the shim
+  # dylib through a real SoftHSM session/login/keygen/RSA-sign flow.
+  smoke-bundle-macos:
+    name: Smoke macOS bundle (native)
+    runs-on: macos-15
+    timeout-minutes: 60
+    needs: archive-binary-macos
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Install SoftHSM2 + pkcs11-tool
+        run: brew install softhsm opensc
+
+      - name: Download macOS bundle
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: ci-macos-bundle-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/smoke-macos/bundle
+
+      - name: Extracted-bundle provider smoke
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ runner.temp }}/smoke-macos/work"
+          python3 scripts/ci-package-smoke.py macos-bundle \
+            --bundle "${{ runner.temp }}/smoke-macos/bundle/${{ needs.archive-binary-macos.outputs.bundle }}" \
+            --workdir "${{ runner.temp }}/smoke-macos/work"
+
+      - name: Upload smoke logs
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: smoke-macos-logs-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/smoke-macos/work/
+          retention-days: 14
+
   # ── Tier 0z: fail-closed aggregate ──────────────────────────────────────────
   # Stage B: succeeds only when every required job above succeeded. Any
   # skipped/cancelled/failed/missing job refuses via the ci-results
@@ -969,7 +1093,7 @@ jobs:
     name: CI success (fail-closed aggregate)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    needs: [fmt, audit, deny, packaging-smoke, shellcheck, build-and-test, msrv, narrow-client-i686, windows-client-llp64, musl-x86_64, package-candidate, archive-binary-linux, archive-binary-windows, smoke-apk-alpine, smoke-bundle-linux, smoke-bundle-windows]
+    needs: [fmt, audit, deny, packaging-smoke, shellcheck, build-and-test, msrv, narrow-client-i686, windows-client-llp64, musl-x86_64, package-candidate, archive-binary-linux, archive-binary-windows, archive-binary-macos, smoke-apk-alpine, smoke-bundle-linux, smoke-bundle-windows, smoke-bundle-macos]
     if: always()
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6

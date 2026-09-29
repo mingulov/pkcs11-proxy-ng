@@ -449,6 +449,102 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+  binary-macos:
+    name: Registry-source macOS bundle
+    runs-on: macos-15
+    timeout-minutes: 120
+    needs: [recover, registry-recheck]
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+      TAG_DATE: ${{ needs.recover.outputs.tag_date }}
+    outputs:
+      bundle: ${{ steps.stage.outputs.bundle }}
+    steps:
+      - name: Checkout tag tooling
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 1
+
+      - name: Isolate Cargo build and target directories
+        run: |
+          set -euo pipefail
+          echo "CARGO_BUILD_BUILD_DIR=$RUNNER_TEMP/release-macos/build" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/release-macos/target" >> "$GITHUB_ENV"
+
+      - name: Install protoc (pinned, matches mise.toml)
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
+        with:
+          version: "36.1"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install pinned release toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.98.1
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Download recovered candidate evidence
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: release-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/release-macos/candidate
+
+      # Registry mode builds from exact published crates.io archives plus
+      # their original packaged locks; checkout source is never an input.
+      # Native arm64 build: the script executes --version and loads the
+      # shim, so the binaries are proven runnable at build time.
+      - name: Registry-mode binary build (macOS arm64)
+        run: |
+          set -euo pipefail
+          python3 scripts/release_checks.py binary-build \
+            --source registry --target aarch64-apple-darwin \
+            --inventory "${{ runner.temp }}/release-macos/candidate/inventory.json" \
+            --package-dir "${{ runner.temp }}/release-macos/candidate" \
+            --output "${{ runner.temp }}/release-macos/output" \
+            --toolchain 1.98.1
+
+      # Same-tag retries of older tags execute that tag's producer; see
+      # the Linux job for the legacy-pin rationale.
+      - name: Pin legacy inputs to verified registry archives
+        run: |
+          set -euo pipefail
+          OUT="${{ runner.temp }}/release-macos/output"
+          if jq -e '.archives_dir' "$OUT/build-inputs.json" > /dev/null; then
+            echo "build inputs record archives_dir; no pin needed"
+          else
+            jq --arg home "$OUT/verified-archives" '.package_dir = $home' \
+              "$OUT/build-inputs.json" > "$OUT/build-inputs.pinned.json"
+            mv "$OUT/build-inputs.pinned.json" "$OUT/build-inputs.json"
+          fi
+
+      - name: Notices + bundle
+        id: stage
+        run: |
+          set -euo pipefail
+          OUT="${{ runner.temp }}/release-macos/output"
+          python3 scripts/release_checks.py notices --build-inputs "$OUT/build-inputs.json" --output "$OUT/notices"
+          python3 scripts/release_checks.py bundle --binaries "$OUT/binaries" --provenance "$OUT/build-provenance.json" --notices "$OUT/notices" --output "$OUT/staged-bundle" --timestamp "$TAG_DATE" --inventory "${{ runner.temp }}/release-macos/candidate/inventory.json" --package-dir "${{ runner.temp }}/release-macos/candidate"
+          ARCHIVES=( "$OUT/staged-bundle"/*.tar.gz )
+          if [ "${#ARCHIVES[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one macOS bundle tarball"
+            exit 1
+          fi
+          echo "bundle=$(basename "${ARCHIVES[0]}")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload macOS bundle
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: release-macos-bundle-${{ inputs.tag }}
+          path: ${{ runner.temp }}/release-macos/output/staged-bundle/
+          if-no-files-found: error
+          retention-days: 90
+
   smoke-linux:
     name: Smoke registry Linux bundle (extracted paths)
     runs-on: ubuntu-24.04
@@ -550,11 +646,53 @@ jobs:
           path: ${{ runner.temp }}/release-smoke-windows/work/
           retention-days: 90
 
+  smoke-macos:
+    name: Smoke registry macOS bundle (native)
+    runs-on: macos-15
+    timeout-minutes: 60
+    needs: [recover, binary-macos]
+    steps:
+      - name: Checkout tag tooling
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 1
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Install SoftHSM2 + pkcs11-tool
+        run: brew install softhsm opensc
+
+      - name: Download macOS bundle
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: release-macos-bundle-${{ inputs.tag }}
+          path: ${{ runner.temp }}/release-smoke-macos/bundle
+
+      - name: Extracted-bundle provider smoke
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ runner.temp }}/release-smoke-macos/work"
+          python3 scripts/ci-package-smoke.py macos-bundle \
+            --bundle "${{ runner.temp }}/release-smoke-macos/bundle/${{ needs.binary-macos.outputs.bundle }}" \
+            --workdir "${{ runner.temp }}/release-smoke-macos/work"
+
+      - name: Upload smoke logs
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: release-smoke-macos-logs-${{ github.run_id }}
+          path: ${{ runner.temp }}/release-smoke-macos/work/
+          retention-days: 90
+
   publish:
     name: Publish GitHub release (non-destructive)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    needs: [recover, binary-linux, binary-windows, smoke-linux, smoke-windows]
+    needs: [recover, binary-linux, binary-windows, binary-macos, smoke-linux, smoke-windows, smoke-macos]
     environment: release
     permissions:
       contents: write
@@ -583,6 +721,12 @@ jobs:
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: release-windows-bundle-${{ inputs.tag }}
+          path: prepared/
+
+      - name: Download prepared macOS bundle
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: release-macos-bundle-${{ inputs.tag }}
           path: prepared/
 
       - name: Download recovered candidate evidence
