@@ -19,7 +19,12 @@ from .package_model import INTERNAL, PACKAGES, ReleaseError, require
 from .package_registry import Registry, read_inventory, verify_publication
 
 
-TARGETS = ("x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc")
+TARGETS = ("x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc", "aarch64-apple-darwin")
+#: Binary targets whose artifacts execute natively on their build host, so the
+#: build may run `--version` and load the shim to check its exports. The macOS
+#: target builds on macos-15 (arm64); cross-building it elsewhere would fail
+#: these checks instead of silently shipping unexecuted binaries.
+NATIVE_EXEC_TARGETS = ("x86_64-unknown-linux-gnu", "aarch64-apple-darwin")
 TOOLCHAIN = "1.98.1"
 XWIN_VERSION = "cargo-xwin-xwin 0.23.1"
 ROOTS = ("pkcs11-proxy-ng", "pkcs11-proxy-ng-cli", "pkcs11-proxy-ng-shim")
@@ -316,7 +321,11 @@ def _locked_names(path: Path) -> set[str]:
 
 def _artifact_name(name: str, target: str) -> str:
     if name == "pkcs11-proxy-ng-shim":
-        return "pkcs11_proxy_ng_shim.dll" if target == TARGETS[1] else "libpkcs11_proxy_ng_shim.so"
+        if target == TARGETS[1]:
+            return "pkcs11_proxy_ng_shim.dll"
+        if target == TARGETS[2]:
+            return "libpkcs11_proxy_ng_shim.dylib"
+        return "libpkcs11_proxy_ng_shim.so"
     return name + (".exe" if target == TARGETS[1] else "")
 
 
@@ -428,12 +437,12 @@ def build_binaries(repo: Path, inventory_path: Path, package_dir: Path, source: 
             staged = binaries / basename
             require(not staged.exists(), f"duplicate release artifact: {basename}")
             shutil.copy2(built, staged)
-            if target == TARGETS[0] and kind == "bin":
+            if target in NATIVE_EXEC_TARGETS and kind == "bin":
                 validate_version_line(_run([str(staged), "--version"], repo, root_env),
                                       name, inventory["version"])
-            if target == TARGETS[0] and kind == "lib":
+            if target in NATIVE_EXEC_TARGETS and kind == "lib":
                 require(set(_shim_exports(staged)) == {"C_GetFunctionList", "C_GetInterfaceList", "C_GetInterface"},
-                        "Linux shim exports differ")
+                        f"{target} shim exports differ")
             artifacts.append({"name": basename, "sha256": _sha256(staged), "size": staged.stat().st_size,
                               "package": name, "kind": kind})
     local = {"format_version": 1, "source_mode": source, "target": target,

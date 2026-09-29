@@ -19,6 +19,7 @@ from release.package_model import ReleaseError  # noqa: E402
 from release.package_binaries import (  # noqa: E402
     build_binaries, release_environment, validate_version_line, validate_build_graph,
     target_command, require_registry_provenance, validate_release_profile,
+    _artifact_name,
 )
 from release.package_registry import read_inventory  # noqa: E402
 from release.package_archives import archive_entries  # noqa: E402
@@ -76,6 +77,27 @@ class BinaryBoundaryTests(unittest.TestCase):
                                     ["--config", 'patch.crates-io.pkcs11-proxy-ng-types.path="/tmp/types"'])
         self.assertEqual(configured[2:6], ["xwin", "build", "--config",
                                            'patch.crates-io.pkcs11-proxy-ng-types.path="/tmp/types"'])
+
+    def test_darwin_target_command_is_native_locked_build(self):
+        root = Path("/tmp/source/Cargo.toml")
+        darwin = target_command("1.98.1", "aarch64-apple-darwin", root,
+                               "pkcs11-proxy-ng", "bin")
+        self.assertEqual(darwin[:3], ["cargo", "+1.98.1", "build"])
+        self.assertNotIn("xwin", darwin)
+        for flag in ("--locked", "--release", "--manifest-path", "--target",
+                     "aarch64-apple-darwin", "--bin", "pkcs11-proxy-ng"):
+            self.assertIn(flag, darwin)
+        shim = target_command("1.98.1", "aarch64-apple-darwin", root,
+                              "pkcs11-proxy-ng-shim", "lib")
+        self.assertEqual(shim[-1], "--lib")
+
+    def test_darwin_artifact_names_use_dylib_and_plain_bins(self):
+        self.assertEqual(_artifact_name("pkcs11-proxy-ng-shim", "aarch64-apple-darwin"),
+                         "libpkcs11_proxy_ng_shim.dylib")
+        self.assertEqual(_artifact_name("pkcs11-proxy-ng", "aarch64-apple-darwin"),
+                         "pkcs11-proxy-ng")
+        self.assertEqual(_artifact_name("pkcs11-proxy-ng-cli", "aarch64-apple-darwin"),
+                         "pkcs11-proxy-ng-cli")
 
     def test_profile_must_retain_current_unwind_release_contract(self):
         with tempfile.TemporaryDirectory() as temp:

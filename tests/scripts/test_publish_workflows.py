@@ -44,9 +44,11 @@ NEW_REQUIRED_JOBS = (
     "package-candidate",
     "archive-binary-linux",
     "archive-binary-windows",
+    "archive-binary-macos",
     "smoke-apk-alpine",
     "smoke-bundle-linux",
     "smoke-bundle-windows",
+    "smoke-bundle-macos",
 )
 AGGREGATE_JOB = "ci-success"
 REQUIRED_JOBS = EXISTING_JOBS + NEW_REQUIRED_JOBS
@@ -232,7 +234,7 @@ class PackageCandidateTests(unittest.TestCase):
     def test_cargo_build_and_target_dirs_isolated(self):
         workflow = load_workflow()
         for job_id in ("package-candidate", "archive-binary-linux",
-                       "archive-binary-windows"):
+                       "archive-binary-windows", "archive-binary-macos"):
             with self.subTest(job=job_id):
                 text = job_text(job_id, workflow)
                 self.assertIn("CARGO_BUILD_BUILD_DIR", text)
@@ -249,9 +251,10 @@ class PackageCandidateTests(unittest.TestCase):
 
 
 class BinaryNoticeBundleTests(unittest.TestCase):
-    def test_archive_mode_builds_for_both_targets(self):
+    def test_archive_mode_builds_for_all_targets(self):
         text = CI_YML.read_text(encoding="utf-8")
-        for target in ("x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"):
+        for target in ("x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc",
+                       "aarch64-apple-darwin"):
             with self.subTest(target=target):
                 self.assertIn(f"binary-build --source archive --target {target}", text)
 
@@ -262,7 +265,8 @@ class BinaryNoticeBundleTests(unittest.TestCase):
 
     def test_downstream_jobs_consume_source_bound_candidate(self):
         workflow = load_workflow()
-        for job_id in ("archive-binary-linux", "archive-binary-windows"):
+        for job_id in ("archive-binary-linux", "archive-binary-windows",
+                       "archive-binary-macos"):
             with self.subTest(job=job_id):
                 text = job_text(job_id, workflow)
                 self.assertIn("download-artifact", text)
@@ -272,7 +276,8 @@ class BinaryNoticeBundleTests(unittest.TestCase):
     def test_smoke_jobs_consume_matching_bundle_artifact(self):
         workflow = load_workflow()
         for job_id, artifact in (("smoke-bundle-linux", "ci-linux-bundle-"),
-                                 ("smoke-bundle-windows", "ci-windows-bundle-")):
+                                 ("smoke-bundle-windows", "ci-windows-bundle-"),
+                                 ("smoke-bundle-macos", "ci-macos-bundle-")):
             with self.subTest(job=job_id):
                 text = job_text(job_id, workflow)
                 self.assertIn("download-artifact", text)
@@ -281,11 +286,11 @@ class BinaryNoticeBundleTests(unittest.TestCase):
 
 
 class SmokeLaneTests(unittest.TestCase):
-    def test_three_smoke_lanes_are_required(self):
+    def test_required_smoke_lanes_are_present(self):
         workflow = load_workflow()
         needs = workflow["jobs"][AGGREGATE_JOB].get("needs", [])
         for job_id in ("smoke-apk-alpine", "smoke-bundle-linux",
-                       "smoke-bundle-windows"):
+                       "smoke-bundle-windows", "smoke-bundle-macos"):
             with self.subTest(job=job_id):
                 self.assertIn(job_id, workflow["jobs"])
                 self.assertIn(job_id, needs)
@@ -295,10 +300,15 @@ class SmokeLaneTests(unittest.TestCase):
         runs_on = str(workflow["jobs"]["smoke-bundle-windows"].get("runs-on"))
         self.assertIn("windows", runs_on)
 
+    def test_macos_lane_is_native(self):
+        workflow = load_workflow()
+        runs_on = str(workflow["jobs"]["smoke-bundle-macos"].get("runs-on"))
+        self.assertIn("macos", runs_on)
+
     def test_smoke_lanes_use_reusable_contract(self):
         workflow = load_workflow()
         for job_id in ("smoke-apk-alpine", "smoke-bundle-linux",
-                       "smoke-bundle-windows"):
+                       "smoke-bundle-windows", "smoke-bundle-macos"):
             with self.subTest(job=job_id):
                 self.assertIn("ci-package-smoke.py",
                               job_text(job_id, workflow))
@@ -308,11 +318,12 @@ class SmokeLaneTests(unittest.TestCase):
         self.assertIn("--apk-dir", job_text("smoke-apk-alpine", workflow))
         self.assertIn("--bundle", job_text("smoke-bundle-linux", workflow))
         self.assertIn("--bundle", job_text("smoke-bundle-windows", workflow))
+        self.assertIn("--bundle", job_text("smoke-bundle-macos", workflow))
 
     def test_no_workspace_binary_fallback(self):
         workflow = load_workflow()
         for job_id in ("smoke-apk-alpine", "smoke-bundle-linux",
-                       "smoke-bundle-windows"):
+                       "smoke-bundle-windows", "smoke-bundle-macos"):
             with self.subTest(job=job_id):
                 text = job_text(job_id, workflow)
                 self.assertNotIn("target/release", text)

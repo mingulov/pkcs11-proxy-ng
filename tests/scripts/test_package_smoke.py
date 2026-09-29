@@ -71,6 +71,15 @@ class ExplicitPathTests(unittest.TestCase):
             mod.parse_args(["windows-bundle"])
         self.assertNotEqual(ctx.exception.code, 0)
 
+    def test_macos_bundle_is_required(self):
+        with self.assertRaises(SystemExit) as ctx:
+            mod.parse_args(["macos-bundle"])
+        self.assertNotEqual(ctx.exception.code, 0)
+
+    def test_macos_bundle_accepts_exact_paths(self):
+        args = mod.parse_args(["macos-bundle", "--bundle", "b", "--workdir", "w"])
+        self.assertEqual((args.bundle, args.workdir), ("b", "w"))
+
     def test_installed_verify_needs_expected_hashes(self):
         with self.assertRaises(SystemExit) as ctx:
             mod.parse_args(["installed-verify", "--daemon", "d",
@@ -83,6 +92,7 @@ class ExplicitPathTests(unittest.TestCase):
         cases = [
             ["linux-bundle", "--bundle", "b", "--workdir", "w", "--slot", "1"],
             ["windows-bundle", "--bundle", "b", "--workdir", "w", "--slot", "1"],
+            ["macos-bundle", "--bundle", "b", "--workdir", "w", "--slot", "1"],
             ["installed-smoke", "--daemon", "d", "--shim", "s", "--cli", "c",
              "--workdir", "w", "--slot", "1"],
         ]
