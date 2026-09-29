@@ -145,4 +145,53 @@ mod tests {
             "scan must cover exactly the RPC request set (responses are trusted, not scanned)"
         );
     }
+
+    use pkcs11_proxy_ng_types::SecretBytes;
+
+    use super::{secret_into_plain, secret_to_plain, secret_to_plain_string};
+
+    /// Distinct nonzero canary: every test below first asserts it is
+    /// present, so a silently-emptied fixture fails instead of passing
+    /// vacuously (same pattern as `client_pin_zeroize`).
+    const CANARY: &[u8] = b"BOUNDARY-CANARY-9f2e7c1a4b";
+
+    /// `secret_into_plain` transfers the allocation without copying: the
+    /// returned buffer is byte-identical AND lives at the original
+    /// address, so no second copy exists that would need wiping.
+    #[test]
+    fn into_plain_moves_canary_without_copy() {
+        let owned = CANARY.to_vec();
+        assert!(owned.iter().any(|&b| b != 0), "canary must be nonzero");
+        let addr = owned.as_ptr();
+        let len = owned.len();
+        let plain = secret_into_plain(SecretBytes::new(owned));
+        assert_eq!(plain, CANARY, "moved bytes must equal the canary");
+        assert_eq!(plain.as_ptr(), addr, "transfer must reuse the allocation");
+        assert_eq!(plain.len(), len, "transfer must preserve length");
+    }
+
+    /// `secret_to_plain` copies: the source still holds the canary in a
+    /// different allocation (the source keeps its drop-wipe duty).
+    #[test]
+    fn to_plain_copies_canary_source_still_holds() {
+        let secret = SecretBytes::copy_from_slice(CANARY);
+        let before = secret.expose(|b| b.to_vec());
+        assert_eq!(before, CANARY, "source must hold the canary first");
+        let plain = secret_to_plain(&secret);
+        assert_eq!(plain, CANARY, "copy must equal the canary");
+        let (src_addr, plain_addr) = secret.expose(|b| (b.as_ptr(), plain.as_ptr()));
+        assert_ne!(src_addr, plain_addr, "copy must be a fresh allocation");
+        assert_eq!(secret.expose(|b| b.to_vec()), CANARY, "source keeps the canary");
+        assert!(!secret.is_empty(), "source stays non-empty");
+    }
+
+    /// Valid-UTF-8 canaries round-trip through the string helper;
+    /// malformed bytes degrade to U+FFFD instead of panicking.
+    #[test]
+    fn to_plain_string_roundtrips_and_degrades() {
+        let text = SecretBytes::copy_from_slice(b"pin-canary-text");
+        assert_eq!(secret_to_plain_string(&text), "pin-canary-text");
+        let malformed = SecretBytes::copy_from_slice(b"\xff\xfe-binary");
+        assert_eq!(secret_to_plain_string(&malformed), "��-binary");
+    }
 }
