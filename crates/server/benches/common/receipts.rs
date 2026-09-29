@@ -9,6 +9,13 @@
 //! their honest comparison mode is baseline-proxy vs candidate-proxy across
 //! builds (`build_id` differs), never direct-vs-provider.
 
+//! Shared bench harness, compiled once per bench target via
+//! `#[path = "common/mod.rs"]`: only the T1-emitting benches use this
+//! module, so including targets that need just `start_daemon` would
+//! otherwise report every helper as dead. Scoped to this module on
+//! purpose — the daemon harness itself stays fully linted.
+#![allow(dead_code)]
+
 use std::path::Path;
 use std::process::Command;
 
@@ -150,7 +157,7 @@ pub fn write_t1_receipt(
     samples: &[serde_json::Value],
 ) -> std::io::Result<()> {
     fn json_err(e: serde_json::Error) -> std::io::Error {
-        std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+        std::io::Error::other(e.to_string())
     }
     std::fs::create_dir_all(dir)?;
     let manifest_json = serde_json::to_string_pretty(manifest).map_err(json_err)?;

@@ -50,6 +50,12 @@ struct InterfaceCapsRendezvous {
 /// class-sensitive search.
 type FindTemplateGate = Arc<dyn Fn(&[CkAttribute]) -> bool + Send + Sync>;
 
+/// One logged `generate_key_pair` call as
+/// `(mechanism, public_template, private_template)` with template nullness
+/// preserved (`None` vs empty). Named so the keygen log and its drain
+/// stay under the `type_complexity` threshold.
+pub type KeygenTemplate = (CkMechanism, Option<Vec<CkAttribute>>, Option<Vec<CkAttribute>>);
+
 mod crypto_ops;
 pub mod echo;
 mod historical_flags;
@@ -372,7 +378,7 @@ pub struct MockBackend {
     /// [`MockBackend::take_keygen_templates`] to assert template parity
     /// (order/count/values) at the backend boundary. Unbounded by design —
     /// test-only, tiny templates.
-    keygen_templates: Mutex<Vec<(CkMechanism, Option<Vec<CkAttribute>>, Option<Vec<CkAttribute>>)>>,
+    keygen_templates: Mutex<Vec<KeygenTemplate>>,
     /// Optional gate (W1-C11-04 harness): when `Some`, `find_objects` serves
     /// the override list only if the gate accepts the most recent init
     /// template, and returns `[]` otherwise. `None` (default) keeps the
@@ -623,9 +629,7 @@ impl MockBackend {
     /// Drain the log of `generate_key_pair` calls, in call order, as
     /// `(mechanism, public_template, private_template)` with template
     /// nullness preserved.
-    pub fn take_keygen_templates(
-        &self,
-    ) -> Vec<(CkMechanism, Option<Vec<CkAttribute>>, Option<Vec<CkAttribute>>)> {
+    pub fn take_keygen_templates(&self) -> Vec<KeygenTemplate> {
         std::mem::take(&mut self.keygen_templates.lock().unwrap())
     }
 
