@@ -81,6 +81,9 @@ const EXPECTED_ALLOW_FILES: &[&str] = &[
     "crates/server/tests/parameterized_mechanism_test.rs",
     "crates/server/tests/nss_tls_mkd_mechanism_out_test.rs",
     "crates/server/tests/pin_leak_test.rs",
+    // Keygen parity diagnostic: prints only the refusal RV code, never
+    // key material.
+    "crates/server/tests/rsa_template_parity_test.rs",
     // Example smoke output.
     "crates/shim/examples/cross_width_smoke.rs",
     // Shim live-test diagnostics (ignored-by-default provider tests).
@@ -278,6 +281,19 @@ fn workspace_lints_deny_print_and_dbg() {
         manifest_has_print_deny(&manifest),
         "workspace Cargo.toml must carry [workspace.lints.clippy] denying \
          print_stdout, print_stderr, and dbg_macro (W1-L12-03)"
+    );
+    // No `check-cfg` under `[lints]`: cargo strips it when packaging,
+    // so the stripped manifest trips the archive manifest-identity gate
+    // (`normalized lints differ`, PR #21). Custom cfgs (e.g. `kani`)
+    // must be declared via the owning crate's build script
+    // (`cargo::rustc-check-cfg`), never the manifest. Comment lines are
+    // skipped so this rule can document itself in the manifest.
+    let code_lines: Vec<_> =
+        manifest.lines().filter(|l| !l.trim_start().starts_with('#')).collect();
+    assert!(
+        !code_lines.join("\n").contains("check-cfg"),
+        "workspace Cargo.toml must not use check-cfg in [lints] — cargo \
+         strips it on package; declare custom cfgs in build.rs instead"
     );
 
     // Every member must opt into the workspace table, or the deny has a
