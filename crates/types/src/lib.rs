@@ -13,6 +13,9 @@ pub mod session;
 pub mod slot;
 pub mod width;
 
+#[cfg(kani)]
+mod kani_proofs;
+
 pub use attribute::{
     CkAttribute, CkAttributeType, CkAttributeValue, VALUE_BEARING_SECRET, is_value_bearing_secret,
 };

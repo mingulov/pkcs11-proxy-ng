@@ -103,3 +103,10 @@ codegen-units = 1
 print_stdout = "deny"
 print_stderr = "deny"
 dbg_macro = "deny"
+
+# Step 7: `cargo kani` builds with `--cfg kani` (Kani proof modules are
+# `#[cfg(kani)]`-gated with no manifest dependency — the verifier injects
+# its library). Register the name so stable/MSRV builds stay warning-free
+# under CI's `-D warnings`. No dependency or lockfile effect.
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

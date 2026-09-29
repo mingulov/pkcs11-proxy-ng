@@ -349,3 +349,30 @@ jobs:
         with:
           name: fuzz-crashes
           path: fuzz/artifacts/
+
+  # ── Kani proofs (width-translation laws) ─────────────────────────────────────
+  # Step 7: `crates/types/src/kani_proofs.rs` proves the "never silently
+  # truncate" laws over the whole input space (unit + randomized law tests
+  # cover examples). The module is `#[cfg(kani)]`-gated with no manifest
+  # dependency — `cargo kani` injects its library — so stable/MSRV builds
+  # are unaffected. Pinned verifier; bump only after re-running locally.
+  kani:
+    name: Kani width proofs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install pinned toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.98.1
+
+      - name: Install Kani verifier (pinned)
+        run: cargo install kani-verifier --locked --version 0.68.0
+
+      - name: Kani first-time setup (toolchain + CBMC)
+        run: cargo kani setup
+
+      - name: Verify width proofs
+        run: cargo kani -p pkcs11-proxy-ng-types --output-format terse
