@@ -248,6 +248,9 @@ Authentication on this listener is Unix peer credentials (ADR-0005),
 not mTLS. Remote consumers still use `[listener.remote]` with
 `auth = "mtls"`; both listeners can be configured at once. Windows
 daemons reject `[listener.local]` (§4b) — serve mTLS/TCP only there.
+macOS arm64 deployments use the same unix listener (peer credentials
+are supported on macOS); see `doc/release/macos-install.md`, shipped
+in the macOS bundle.
 
 ## 5. Updating mechanism registry (vendor extensions, e.g. CloudHSM)
 
