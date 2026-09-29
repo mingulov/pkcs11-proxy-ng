@@ -1354,6 +1354,22 @@ pub(super) async fn session_slot_login_state(
         .flatten()
 }
 
+/// D6(1) contended-login marker read: true when this context presented a
+/// PIN for `slot` and the backend answered ALREADY — the slot is
+/// physically logged in but the PIN is unverified, so no `LoginState`
+/// was minted (D6(3)) and the holder index is untouched. The gates
+/// forward (backend verdict authoritative) instead of refusing 257.
+pub(super) async fn session_slot_contended_login(
+    ctx_mgr: &Arc<ContextManager>,
+    ctx_id: &ClientContextId,
+    slot: BackendSlotId,
+) -> bool {
+    ctx_mgr
+        .get_context(ctx_id, |ctx| ctx.contended_slot_login.contains(&slot))
+        .await
+        .unwrap_or(false)
+}
+
 /// D6(1) enforcement for object-MINTING operations (create/copy/generate/
 /// derive/unwrap), as refined in T20: when the calling context is logically
 /// logged out on the session's slot and `template` declares the new object
@@ -1366,7 +1382,10 @@ pub(super) async fn session_slot_login_state(
 /// unconditional refusal diverged from every lenient backend (21 lanes).
 ///
 /// Refuse a template-declared private mint when this context is logged out
-/// and another logical context holds the slot login. Otherwise leave the
+/// and another logical context holds the slot login — unless this context
+/// presented a PIN and the backend answered ALREADY (contended-login
+/// marker: the slot is physically logged in, so forward and let the
+/// backend's verdict decide). Otherwise leave the
 /// provider's verdict unchanged. The holder snapshot does not prove physical
 /// logout: native calls can outlive their waits, and cleanup can fail.
 /// Missing privacy attributes also need provider-default interpretation.
@@ -1388,7 +1407,14 @@ pub(super) async fn ensure_private_mint_allowed(
             Ok(triple) => triple,
             Err(_) => return Err(CkRv::USER_NOT_LOGGED_IN),
         };
-    if login_state.is_none() && ctx_mgr.other_login_state_for_slot(slot, ctx_id) {
+    // Contended-login refinement: a context that presented a PIN and got
+    // backend ALREADY forwards — the backend is physically logged in and
+    // its verdict is authoritative. Only contexts that never presented
+    // credentials are refused (anti-riding).
+    if login_state.is_none()
+        && !session_slot_contended_login(ctx_mgr, ctx_id, slot).await
+        && ctx_mgr.other_login_state_for_slot(slot, ctx_id)
+    {
         return Err(CkRv::USER_NOT_LOGGED_IN);
     }
     Ok(())
@@ -1673,7 +1699,9 @@ pub(super) async fn object_is_private(
 }
 
 /// Refuse a private-object use by a logged-out context while another logical
-/// holder is recorded. An empty holder map does not prove native logout;
+/// holder is recorded — unless this context presented a PIN and the backend
+/// answered ALREADY (contended-login marker: forward, backend decides).
+/// An empty holder map does not prove native logout;
 /// v0.2's supported deployment has one trusted logical client per instance.
 pub(super) async fn ensure_private_use_allowed(
     ctx: &HandlerContext,
@@ -1701,7 +1729,10 @@ pub(super) async fn ensure_private_use_allowed(
     if login_state.is_some() {
         return Ok(());
     }
+    // Contended-login refinement (same rule as the mint gate): a context
+    // that presented a PIN and got backend ALREADY forwards.
     if object_is_private(ctx, ctx_id, virtual_object, backend_session, backend_object).await
+        && !session_slot_contended_login(&ctx.context_manager, ctx_id, slot).await
         && ctx.context_manager.other_login_state_for_slot(slot, ctx_id)
     {
         return Err(CkRv::USER_NOT_LOGGED_IN);

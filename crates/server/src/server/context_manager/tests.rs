@@ -44,6 +44,30 @@ fn remove_sessions_for_backend_slot_preserves_other_slot_state() {
     assert_eq!(ctx.login_state.get(&b), Some(&LoginState::So));
 }
 
+#[test]
+fn contended_marker_clears_with_session_and_teardown_lifecycle() {
+    // The contended-login marker mirrors login_state eviction: last
+    // session out for the slot clears it, bulk slot removal clears it,
+    // and teardown clears it.
+    let mut ctx = LogicalClientInstance::new(None);
+    let a = BackendSlotId(CkSlotId(42));
+    let b = BackendSlotId(CkSlotId(1));
+    let sa = ctx.register_session(BackendHandle(101), a);
+    let sb = ctx.register_session(BackendHandle(202), b);
+    ctx.contended_slot_login.insert(a);
+    ctx.contended_slot_login.insert(b);
+    ctx.remove_session(sa);
+    assert!(!ctx.contended_slot_login.contains(&a));
+    assert!(ctx.contended_slot_login.contains(&b));
+    ctx.remove_sessions_for_slot(b);
+    assert!(!ctx.contended_slot_login.contains(&b));
+    assert_eq!(ctx.session_handles.resolve(sb), None);
+
+    ctx.contended_slot_login.insert(a);
+    ctx.teardown();
+    assert!(ctx.contended_slot_login.is_empty());
+}
+
 #[tokio::test]
 async fn begin_operation_capped_enforces_the_per_context_limit() {
     // M2: a context can hold at most `max_in_flight` concurrent operations; the
