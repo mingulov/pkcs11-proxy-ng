@@ -452,3 +452,99 @@ mod tests {
         assert!(!is_value_bearing_secret(CkAttributeType::LABEL));
     }
 }
+
+#[cfg(test)]
+mod law_tests {
+    //! Classifier laws over the attribute-id domain (dependency-free):
+    //! the example tests above pin *membership*; these pin *shape* — a
+    //! future constant added to two classifier lists (or a secret type
+    //! misclassified as a bridged shape) fails here, not in production.
+    //! Standard ids sweep exhaustively; vendor/high ids sweep randomly
+    //! with a seeded xorshift (same pattern as `width::law_tests`).
+
+    use super::*;
+
+    /// Deterministic xorshift64* — identical on every arch/run.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+    }
+
+    fn shape_hits(t: CkAttributeType) -> u32 {
+        [t.is_bool(), t.is_ulong(), t.is_ulong_array(), t.is_attribute_template()]
+            .into_iter()
+            .filter(|hit| *hit)
+            .count() as u32
+    }
+
+    fn check_laws(t: CkAttributeType, seed: u64) {
+        // Exclusion: at most one bridged shape per id. A double-hit means
+        // one constant sits in two classifier lists — the bridge would
+        // apply two translations to one value.
+        assert!(shape_hits(t) <= 1, "id {:#x} fires two shape classifiers (seed {seed:#x})", t.0);
+        // Refinement: allocation-size is a subset of scalar ulong, never
+        // a bool/array/template on its own.
+        if t.is_allocation_size() {
+            assert!(t.is_ulong(), "allocation-size id {:#x} must be ulong", t.0);
+            assert!(!t.is_bool() && !t.is_ulong_array() && !t.is_attribute_template());
+        }
+    }
+
+    #[test]
+    fn classifier_laws_hold_on_standard_ids() {
+        // Exhaustive over the standard-id ranges: plain ids (max listed
+        // constant is TRUST_OCSP_SIGNING 0x632) plus the CKF_ARRAY_ATTRIBUTE
+        // bank (nested templates 0x211-0x213, ALLOWED_MECHANISMS 0x600).
+        // Covers every listed constant plus every unlisted id a backend
+        // may send.
+        const FLAG: u64 = 0x4000_0000;
+        for raw in 0..0x700u64 {
+            check_laws(CkAttributeType(raw), raw);
+            check_laws(CkAttributeType(FLAG | raw), FLAG | raw);
+        }
+    }
+
+    #[test]
+    fn classifier_laws_hold_on_vendor_and_high_ids() {
+        // Vendor-defined and far-future ids: unknown shapes must stay
+        // byte-shaped (no classifier fires), never half-bridged.
+        let mut rng = Rng(0xC1A5_51F1_9E2B_4D07);
+        for i in 0..2000u64 {
+            let raw = if i % 2 == 0 {
+                0x8000_0000u64 | (rng.next() & 0x0FFF_FFFF)
+            } else {
+                rng.next() | 0x0000_0700
+            };
+            check_laws(CkAttributeType(raw), raw);
+        }
+        // …and the sweep above must actually exercise unknowns: the
+        // standard range is fully covered by the other test, so any hit
+        // out here would be a listed constant smuggled into range.
+        let mut rng = Rng(0xC1A5_51F1_9E2B_4D07);
+        let mut hits = 0u32;
+        for _ in 0..2000 {
+            let raw = 0x8000_0000u64 | (rng.next() & 0x0FFF_FFFF);
+            hits += shape_hits(CkAttributeType(raw));
+        }
+        assert_eq!(hits, 0, "vendor ids must stay byte-shaped");
+    }
+
+    #[test]
+    fn secret_bearing_types_are_never_bridged_shapes() {
+        // Every VALUE_BEARING_SECRET member is a byte blob: if one ever
+        // classified as ulong/bool/array/template, the width bridge
+        // would re-encode key material across ABI edges.
+        for t in VALUE_BEARING_SECRET {
+            assert_eq!(shape_hits(*t), 0, "secret {t:?} must be byte-shaped");
+            assert!(!t.is_allocation_size(), "secret {t:?} is not a size");
+        }
+    }
+}
