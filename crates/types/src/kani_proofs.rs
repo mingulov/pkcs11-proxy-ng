@@ -1,7 +1,8 @@
 //! Kani proofs for the width-translation laws (Step 7).
 //!
-//! Compiled only under `cargo kani` (`--cfg kani`, registered in the
-//! workspace lints); normal stable/MSRV builds never see this module,
+//! Compiled only under `cargo kani` (`--cfg kani`, declared via the
+//! crate build script's `cargo::rustc-check-cfg` so stable/MSRV builds
+//! stay warning-free); normal stable/MSRV builds never see this module,
 //! so no manifest dependency or lockfile change is needed — `cargo kani`
 //! injects the `kani` library itself. Run:
 //! `cargo kani -p pkcs11-proxy-ng-types` (nightly lane, like Miri/fuzz).
