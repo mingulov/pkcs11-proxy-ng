@@ -296,6 +296,16 @@ pub(super) async fn parameter_output_exact(
                 | ParameterOutputFunction::DecryptMessageNext => MessageOperation::Decrypt,
                 _ => unreachable!(),
             };
+            // S1 defect 4: request-shape validation precedes session
+            // resolution, so a malformed request yields the direct-identical
+            // ARGUMENTS_BAD regardless of session validity instead of
+            // SESSION_HANDLE_INVALID. Order among the checks is unchanged.
+            if let Err(rv) = check_sanitize(sanitize_inputs, associated_data_null_len) {
+                return Ok(Response::new(error_response(rv)));
+            }
+            if let Err(rv) = check_sanitize(sanitize_inputs, input_data_null_len) {
+                return Ok(Response::new(error_response(rv)));
+            }
             let operation_lock = match ctx_mgr
                 .message_operation_lock(&ctx_id, VirtualHandle(req.session_handle), operation_kind)
                 .await
@@ -320,12 +330,6 @@ pub(super) async fn parameter_output_exact(
                 || param_out_spec.value.is_some()
             {
                 return Ok(Response::new(error_response(CkRv::MECHANISM_PARAM_INVALID)));
-            }
-            if let Err(rv) = check_sanitize(sanitize_inputs, associated_data_null_len) {
-                return Ok(Response::new(error_response(rv)));
-            }
-            if let Err(rv) = check_sanitize(sanitize_inputs, input_data_null_len) {
-                return Ok(Response::new(error_response(rv)));
             }
 
             let installed_shape = match operation.shape {
@@ -564,6 +568,13 @@ pub(super) async fn parameter_output_exact(
         // Sign remains empty-only; structured or materialized parameters are
         // rejected before the backend. The zero-length pointer class is kept.
         ParameterOutputFunction::SignMessage | ParameterOutputFunction::SignMessageNext => {
+            // S1 defect 4: request-shape validation precedes session
+            // resolution (as in the Encrypt/Decrypt arm above), so a malformed
+            // request yields the direct-identical ARGUMENTS_BAD regardless of
+            // session validity instead of SESSION_HANDLE_INVALID.
+            if let Err(rv) = check_sanitize(sanitize_inputs, input_data_null_len) {
+                return Ok(Response::new(error_response(rv)));
+            }
             let operation_lock = match ctx_mgr
                 .message_operation_lock(
                     &ctx_id,
@@ -594,9 +605,6 @@ pub(super) async fn parameter_output_exact(
             };
             if operation.shape.is_none() {
                 return Ok(Response::new(error_response(CkRv::OPERATION_NOT_INITIALIZED)));
-            }
-            if let Err(rv) = check_sanitize(sanitize_inputs, input_data_null_len) {
-                return Ok(Response::new(error_response(rv)));
             }
             let backend = backend_ref.clone();
             let mut transition = MessageOperationTransition::begin(operation);
@@ -1273,5 +1281,210 @@ mod ambiguity_tests {
         assert_eq!(rejected_output.apply_returned_len, Some(false));
         assert_eq!(rejected_output.returned_len, 0);
         assert_eq!(rejected_output.value, None);
+    }
+
+    /// S1 defect 4: build a well-shaped exact message request except for the
+    /// caller-supplied NULL/nonzero input encodings. The T12 `ZeroizeOnDrop`
+    /// literal spells every field once here instead of per subcase.
+    fn exact_message_request(
+        context_id: &str,
+        session_handle: u64,
+        function: ParameterOutputFunction,
+        input_data_null_len: Option<u64>,
+        associated_data_null_len: Option<u64>,
+    ) -> pkcs11_proxy_ng_proto::ParameterOutputExactRequest {
+        pkcs11_proxy_ng_proto::ParameterOutputExactRequest {
+            exact_output_effects_version: 1,
+            authenticated_parameters: None,
+            client_context_id: context_id.to_owned(),
+            session_handle,
+            function: pkcs11_proxy_ng_proto::convert::output::parameter_output_function_to_i32(
+                function,
+            ),
+            output_spec: Some(pkcs11_proxy_ng_proto::OutputBufferSpec {
+                buffer_present: true,
+                buffer_len: 8,
+                length_pointer_null: false,
+            }),
+            input_data: Vec::new(),
+            associated_data: Vec::new(),
+            parameter: Vec::new(),
+            parameter_out_spec: Some(pkcs11_proxy_ng_proto::ParameterRoundtripSpec {
+                buffer_present: false,
+                buffer_len: 0,
+                value: None,
+            }),
+            flags: 0,
+            mechanism: None,
+            wrapping_key_handle: 0,
+            key_handle: 0,
+            message_parameter: None,
+            input_data_null_len,
+            associated_data_null_len,
+        }
+    }
+
+    async fn exact_message_ck_rv(
+        ctx: &HandlerContext,
+        request: pkcs11_proxy_ng_proto::ParameterOutputExactRequest,
+    ) -> u64 {
+        parameter_output_exact(ctx, Request::new(request))
+            .await
+            .unwrap()
+            .into_inner()
+            .output_result
+            .expect("exact response must carry an output result")
+            .ck_rv
+    }
+
+    /// S1 defect 4: malformed arguments beat an invalid session. With
+    /// `sanitize_inputs` on, a NULL/nonzero input or AAD encoding must yield
+    /// the direct-identical `ARGUMENTS_BAD` even when the session handle is
+    /// unregistered — never `SESSION_HANDLE_INVALID`.
+    #[tokio::test]
+    async fn malformed_input_beats_invalid_session_encrypt_message() {
+        let mock = Arc::new(MockBackend::default_test());
+        mock.initialize().unwrap();
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        manager.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let context_id = manager.create_context(None).await.unwrap();
+        let mut handler = HandlerContext::for_test(&manager, &backend);
+        handler.sanitize_inputs = true;
+        let invalid_session = 10_000u64;
+        let calls_before = mock.message_parameter_call_count();
+        let data_calls_before = mock.data_op_call_count();
+
+        for (input_null_len, aad_null_len) in [(Some(8), None), (None, Some(4))] {
+            let rv = exact_message_ck_rv(
+                &handler,
+                exact_message_request(
+                    &context_id.0,
+                    invalid_session,
+                    ParameterOutputFunction::EncryptMessage,
+                    input_null_len,
+                    aad_null_len,
+                ),
+            )
+            .await;
+            assert_eq!(rv, CkRv::ARGUMENTS_BAD.0);
+        }
+
+        assert_eq!(mock.message_parameter_call_count(), calls_before);
+        assert_eq!(mock.data_op_call_count(), data_calls_before);
+        assert_eq!(
+            manager.get_context(&context_id, |context| context.message_operations.len()).await,
+            Some(0),
+            "shape-first rejection must not allocate operation state",
+        );
+    }
+
+    /// S1 defect 4 across the remaining message arms: multipart-Next and
+    /// Sign reject NULL/nonzero input before session resolution too.
+    #[tokio::test]
+    async fn malformed_input_beats_invalid_session_next_and_sign() {
+        let mock = Arc::new(MockBackend::default_test());
+        mock.initialize().unwrap();
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        manager.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let context_id = manager.create_context(None).await.unwrap();
+        let mut handler = HandlerContext::for_test(&manager, &backend);
+        handler.sanitize_inputs = true;
+        let invalid_session = 10_000u64;
+        let calls_before = mock.message_parameter_call_count();
+
+        for function in [
+            ParameterOutputFunction::DecryptMessageNext,
+            ParameterOutputFunction::SignMessage,
+            ParameterOutputFunction::SignMessageNext,
+        ] {
+            let rv = exact_message_ck_rv(
+                &handler,
+                exact_message_request(&context_id.0, invalid_session, function, Some(8), None),
+            )
+            .await;
+            assert_eq!(rv, CkRv::ARGUMENTS_BAD.0, "function {function:?}");
+        }
+
+        assert_eq!(mock.message_parameter_call_count(), calls_before);
+        assert_eq!(
+            manager.get_context(&context_id, |context| context.message_operations.len()).await,
+            Some(0),
+            "shape-first rejection must not allocate operation state",
+        );
+    }
+
+    /// S1 defect 4 negative: a well-shaped request on an invalid session
+    /// still yields `SESSION_HANDLE_INVALID` — only malformed requests move.
+    #[tokio::test]
+    async fn well_shaped_request_on_invalid_session_still_rejected() {
+        let mock = Arc::new(MockBackend::default_test());
+        mock.initialize().unwrap();
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        manager.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let context_id = manager.create_context(None).await.unwrap();
+        let mut handler = HandlerContext::for_test(&manager, &backend);
+        handler.sanitize_inputs = true;
+        let invalid_session = 10_000u64;
+        let calls_before = mock.message_parameter_call_count();
+
+        for function in
+            [ParameterOutputFunction::EncryptMessage, ParameterOutputFunction::SignMessage]
+        {
+            let rv = exact_message_ck_rv(
+                &handler,
+                exact_message_request(&context_id.0, invalid_session, function, None, None),
+            )
+            .await;
+            assert_eq!(rv, CkRv::SESSION_HANDLE_INVALID.0, "function {function:?}");
+        }
+
+        assert_eq!(mock.message_parameter_call_count(), calls_before);
+        assert_eq!(
+            manager.get_context(&context_id, |context| context.message_operations.len()).await,
+            Some(0),
+            "invalid sessions must not allocate operation state",
+        );
+    }
+
+    /// S1 defect 4 Sign alignment: the hoisted sanitize gate now precedes the
+    /// installed-shape check, matching the Encrypt/Decrypt arm order (and the
+    /// args-first direct token) — NULL/nonzero input on an operation-less
+    /// session yields `ARGUMENTS_BAD`, not `OPERATION_NOT_INITIALIZED`.
+    #[tokio::test]
+    async fn sign_sanitize_beats_uninitialized_operation() {
+        let mock = Arc::new(MockBackend::default_test());
+        mock.initialize().unwrap();
+        let backend_session =
+            mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        manager.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let context_id = manager.create_context(None).await.unwrap();
+        let virtual_session = register_session_handle(
+            &manager,
+            &context_id,
+            backend_session,
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+        )
+        .await
+        .unwrap();
+        let mut handler = HandlerContext::for_test(&manager, &backend);
+        handler.sanitize_inputs = true;
+
+        let rv = exact_message_ck_rv(
+            &handler,
+            exact_message_request(
+                &context_id.0,
+                virtual_session,
+                ParameterOutputFunction::SignMessage,
+                Some(8),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(rv, CkRv::ARGUMENTS_BAD.0);
     }
 }
