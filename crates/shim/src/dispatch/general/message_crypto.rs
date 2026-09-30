@@ -1408,15 +1408,18 @@ pub unsafe extern "C" fn c_verify_message_next(
             Err(e) => return rv_err(e),
         };
 
-        // If pSignature is NULL, this is a "feed more data" call (is_final = false)
+        // Finality derives from signature pointer presence (non-NULL =
+        // final), but the signature shape itself is preserved verbatim: a
+        // NULL signature keeps its claimed length (S1 defect 3), so a
+        // malformed NULL/nonzero feed probe reaches the backend exactly as
+        // the caller passed it and draws the backend's own RV — exactly as
+        // direct — instead of being normalized to a well-shaped empty feed.
         let is_final = !p_signature.is_null();
-        let signature = if is_final {
-            match input_buf_to_ck_in_buf(unsafe { classify_input(p_signature, ul_signature_len) }) {
-                Ok(buf) => buf,
-                Err(e) => return rv_err(e),
-            }
-        } else {
-            CkInBuf::Bytes(&[])
+        let signature = match input_buf_to_ck_in_buf(unsafe {
+            classify_input(p_signature, ul_signature_len)
+        }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
         };
 
         match with_client!(client => client.verify_message_next_contract(
