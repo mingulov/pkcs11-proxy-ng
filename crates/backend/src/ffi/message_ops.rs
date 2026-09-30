@@ -1301,7 +1301,18 @@ impl FfiBackend {
         let (sig_ptr, sig_len) = if is_final {
             (raw_sig_ptr as *mut _, narrow_wire_ulong(raw_sig_len)?)
         } else {
-            (std::ptr::null_mut(), 0)
+            // S1 defect 3: a feed call carries no signature, but a preserved
+            // NULL shape keeps its claimed length so a malformed NULL/nonzero
+            // probe reaches the provider exactly as direct (whose own RV then
+            // matches direct by construction). A materialized signature in
+            // non-final position is unrepresentable from any C caller (the
+            // shim derives finality from pointer presence), so it maps to
+            // the canonical (NULL, 0) feed shape — including the older shim's
+            // empty-bytes feed.
+            match signature {
+                CkInBuf::Null { len } => (std::ptr::null_mut(), narrow_wire_ulong(len)?),
+                CkInBuf::Bytes(_) => (std::ptr::null_mut(), 0),
+            }
         };
 
         let h_session = Self::session_handle(session)?;
@@ -1337,7 +1348,14 @@ impl FfiBackend {
         let (signature, signature_len) = if is_final {
             (raw_signature as *mut _, narrow_wire_ulong(raw_signature_len)?)
         } else {
-            (std::ptr::null_mut(), 0)
+            // S1 defect 3: same verbatim-NULL-shape rule as the legacy path
+            // above — a preserved NULL/nonzero feed probe reaches the
+            // provider exactly as direct; materialized bytes map to the
+            // canonical (NULL, 0) feed shape.
+            match signature {
+                CkInBuf::Null { len } => (std::ptr::null_mut(), narrow_wire_ulong(len)?),
+                CkInBuf::Bytes(_) => (std::ptr::null_mut(), 0),
+            }
         };
         let h_session = Self::session_handle(session)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
@@ -2410,6 +2428,12 @@ mod tests {
     static SIGN_VERIFY_PARAMETER_PRESENT: AtomicUsize = AtomicUsize::new(0);
     static SIGN_VERIFY_PARAMETER_LEN: AtomicUsize = AtomicUsize::new(0);
     static SIGN_VERIFY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static STRICT_VERIFY_NEXT_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static STRICT_VERIFY_NEXT_DATA_PRESENT: AtomicUsize = AtomicUsize::new(0);
+    static STRICT_VERIFY_NEXT_DATA_LEN: AtomicUsize = AtomicUsize::new(0);
+    static STRICT_VERIFY_NEXT_SIG_PRESENT: AtomicUsize = AtomicUsize::new(0);
+    static STRICT_VERIFY_NEXT_SIG_LEN: AtomicUsize = AtomicUsize::new(0);
+    static STRICT_VERIFY_NEXT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     static STRUCTURED_PROVIDER_CALLS: AtomicUsize = AtomicUsize::new(0);
     static STRUCTURED_PROVIDER_OPERATION: AtomicUsize = AtomicUsize::new(0);
     static STRUCTURED_PROVIDER_PARAMETER_PRESENT: AtomicUsize = AtomicUsize::new(0);
@@ -2898,6 +2922,42 @@ mod tests {
         functions.C_VerifyMessage = Some(counted_verify_message);
         functions.C_VerifyMessageBegin = Some(counted_verify_message_begin);
         functions.C_VerifyMessageNext = Some(counted_verify_message_next);
+        let backend =
+            FfiBackend::test_backend_with_tables(base.as_mut(), Some(functions.as_ref()), None);
+        (backend, base, functions)
+    }
+
+    /// Strict-token `C_VerifyMessageNext` oracle (S1 defect 3): records the
+    /// observed data/signature pointer shapes and answers a NULL/nonzero
+    /// shape with `CKR_ARGUMENTS_BAD`, like the strict consumer's token.
+    /// A NULL pointer is never dereferenced regardless of claimed length.
+    unsafe extern "C" fn strict_verify_message_next(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _parameter: cryptoki_sys::CK_VOID_PTR,
+        _parameter_len: cryptoki_sys::CK_ULONG,
+        data: cryptoki_sys::CK_BYTE_PTR,
+        data_len: cryptoki_sys::CK_ULONG,
+        signature: cryptoki_sys::CK_BYTE_PTR,
+        signature_len: cryptoki_sys::CK_ULONG,
+    ) -> cryptoki_sys::CK_RV {
+        STRICT_VERIFY_NEXT_CALLS.fetch_add(1, Ordering::SeqCst);
+        STRICT_VERIFY_NEXT_DATA_PRESENT.store(usize::from(!data.is_null()), Ordering::SeqCst);
+        STRICT_VERIFY_NEXT_DATA_LEN.store(data_len as usize, Ordering::SeqCst);
+        STRICT_VERIFY_NEXT_SIG_PRESENT.store(usize::from(!signature.is_null()), Ordering::SeqCst);
+        STRICT_VERIFY_NEXT_SIG_LEN.store(signature_len as usize, Ordering::SeqCst);
+        if (data.is_null() && data_len > 0) || (signature.is_null() && signature_len > 0) {
+            return cryptoki_sys::CKR_ARGUMENTS_BAD;
+        }
+        cryptoki_sys::CKR_OK
+    }
+
+    #[cfg(unix)]
+    fn backend_with_strict_verify_message_next()
+    -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>, Box<cryptoki_sys::CK_FUNCTION_LIST_3_0>)
+    {
+        let mut base = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_0::default());
+        functions.C_VerifyMessageNext = Some(strict_verify_message_next);
         let backend =
             FfiBackend::test_backend_with_tables(base.as_mut(), Some(functions.as_ref()), None);
         (backend, base, functions)
@@ -4679,5 +4739,132 @@ mod tests {
             .unwrap();
         assert_eq!(output.ck_rv, CkRv::OK);
         assert_eq!(output.returned_len, Some(1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_message_next_nonfinal_null_signature_len_matches_direct() {
+        // S1 defect 3 regression pin (legacy path): a non-final call with a
+        // preserved NULL/nonzero signature must reach the provider verbatim,
+        // so the routed RV equals the direct stub RV (ARGUMENTS_BAD) instead
+        // of being normalized to a well-shaped (NULL, 0) feed (OK).
+        let _guard = STRICT_VERIFY_NEXT_TEST_LOCK.lock().unwrap();
+        let (backend, _base, _functions) = backend_with_strict_verify_message_next();
+        backend.lifecycle_domain.open_for_tests();
+        let data = [0x22_u8; 8];
+
+        // Direct oracle: the strict provider answers the raw shape itself.
+        let direct_rv = unsafe {
+            strict_verify_message_next(
+                7,
+                std::ptr::null_mut(),
+                0,
+                data.as_ptr() as cryptoki_sys::CK_BYTE_PTR,
+                data.len() as cryptoki_sys::CK_ULONG,
+                std::ptr::null_mut(),
+                8,
+            )
+        };
+        assert_eq!(direct_rv, cryptoki_sys::CKR_ARGUMENTS_BAD);
+
+        STRICT_VERIFY_NEXT_CALLS.store(0, Ordering::SeqCst);
+        let routed = backend.ffi_verify_message_next(
+            CkSessionHandle(7),
+            &[],
+            CkInBuf::Bytes(&data),
+            false,
+            CkInBuf::Null { len: 8 },
+        );
+
+        assert_eq!(routed.unwrap_err(), CkRv::ARGUMENTS_BAD);
+        assert_eq!(STRICT_VERIFY_NEXT_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(STRICT_VERIFY_NEXT_DATA_PRESENT.load(Ordering::SeqCst), 1);
+        assert_eq!(STRICT_VERIFY_NEXT_DATA_LEN.load(Ordering::SeqCst), 8);
+        assert_eq!(STRICT_VERIFY_NEXT_SIG_PRESENT.load(Ordering::SeqCst), 0);
+        assert_eq!(STRICT_VERIFY_NEXT_SIG_LEN.load(Ordering::SeqCst), 8);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_message_next_exact_nonfinal_null_signature_len_matches_direct() {
+        // S1 defect 3 regression pin (exact path): the same verbatim-shape
+        // requirement through ffi_verify_message_next_exact.
+        let _guard = STRICT_VERIFY_NEXT_TEST_LOCK.lock().unwrap();
+        let (backend, _base, _functions) = backend_with_strict_verify_message_next();
+        backend.lifecycle_domain.open_for_tests();
+        let data = [0x22_u8; 8];
+        let param_spec =
+            CkParameterRoundtripSpec { buffer_present: false, buffer_len: 0, value: None };
+
+        STRICT_VERIFY_NEXT_CALLS.store(0, Ordering::SeqCst);
+        let routed = backend.ffi_verify_message_next_exact(
+            CkSessionHandle(7),
+            CkInBuf::Bytes(&data),
+            false,
+            CkInBuf::Null { len: 8 },
+            &param_spec,
+        );
+
+        assert_eq!(routed.unwrap_err(), CkRv::ARGUMENTS_BAD);
+        assert_eq!(STRICT_VERIFY_NEXT_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(STRICT_VERIFY_NEXT_DATA_PRESENT.load(Ordering::SeqCst), 1);
+        assert_eq!(STRICT_VERIFY_NEXT_DATA_LEN.load(Ordering::SeqCst), 8);
+        assert_eq!(STRICT_VERIFY_NEXT_SIG_PRESENT.load(Ordering::SeqCst), 0);
+        assert_eq!(STRICT_VERIFY_NEXT_SIG_LEN.load(Ordering::SeqCst), 8);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_message_next_nonfinal_well_shaped_feed_matches_direct() {
+        // S1 defect 3 well-shaped guard: the canonical (NULL, 0) feed — both
+        // as a preserved Null and as the older shim's empty bytes — still
+        // reaches the provider as (NULL, 0) and verifies OK.
+        let _guard = STRICT_VERIFY_NEXT_TEST_LOCK.lock().unwrap();
+        let (backend, _base, _functions) = backend_with_strict_verify_message_next();
+        backend.lifecycle_domain.open_for_tests();
+        let data = [0x22_u8; 8];
+        for signature in [CkInBuf::Null { len: 0 }, CkInBuf::Bytes(&[])] {
+            STRICT_VERIFY_NEXT_CALLS.store(0, Ordering::SeqCst);
+            backend
+                .ffi_verify_message_next(
+                    CkSessionHandle(7),
+                    &[],
+                    CkInBuf::Bytes(&data),
+                    false,
+                    signature,
+                )
+                .unwrap();
+            assert_eq!(STRICT_VERIFY_NEXT_CALLS.load(Ordering::SeqCst), 1);
+            assert_eq!(STRICT_VERIFY_NEXT_SIG_PRESENT.load(Ordering::SeqCst), 0);
+            assert_eq!(STRICT_VERIFY_NEXT_SIG_LEN.load(Ordering::SeqCst), 0);
+        }
+        let param_spec =
+            CkParameterRoundtripSpec { buffer_present: false, buffer_len: 0, value: None };
+        STRICT_VERIFY_NEXT_CALLS.store(0, Ordering::SeqCst);
+        backend
+            .ffi_verify_message_next_exact(
+                CkSessionHandle(7),
+                CkInBuf::Bytes(&data),
+                false,
+                CkInBuf::Null { len: 0 },
+                &param_spec,
+            )
+            .unwrap();
+        assert_eq!(STRICT_VERIFY_NEXT_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(STRICT_VERIFY_NEXT_SIG_PRESENT.load(Ordering::SeqCst), 0);
+        assert_eq!(STRICT_VERIFY_NEXT_SIG_LEN.load(Ordering::SeqCst), 0);
+        // Direct oracle: the strict provider accepts the canonical shape.
+        let direct_rv = unsafe {
+            strict_verify_message_next(
+                7,
+                std::ptr::null_mut(),
+                0,
+                data.as_ptr() as cryptoki_sys::CK_BYTE_PTR,
+                data.len() as cryptoki_sys::CK_ULONG,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        assert_eq!(direct_rv, cryptoki_sys::CKR_OK);
     }
 }

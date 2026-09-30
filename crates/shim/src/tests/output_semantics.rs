@@ -3259,6 +3259,157 @@ fn null_pul_len_sign_message_next_remains_a_feed_call() {
 }
 
 #[test]
+fn verify_message_next_null_signature_nonzero_len_returns_arguments_bad() {
+    // S1 defect 3 regression pin: a NULL signature with a nonzero claimed
+    // length is a malformed feed probe. The shim must preserve the shape in
+    // transit (finality still derives from pointer presence) so the backend
+    // answers exactly as direct — the strict mock answers ARGUMENTS_BAD —
+    // instead of normalizing the call to a well-shaped empty feed (OK).
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let key = create_object(shim.session);
+    let mut mechanism = rsa_pkcs_mechanism();
+    assert_eq!(
+        unsafe { dispatch::general::c_message_verify_init(shim.session, &mut mechanism, key) },
+        CKR_OK as CK_RV,
+        "C_MessageVerifyInit",
+    );
+
+    let daemon = TestDaemon::shared();
+    let data_calls_before = daemon.backend.data_op_call_count();
+    let data = *b"more-data-part!!";
+    let rv = unsafe {
+        dispatch::general::c_verify_message_next(
+            shim.session,
+            std::ptr::null_mut(),
+            0,
+            data.as_ptr() as CK_BYTE_PTR,
+            data.len() as CK_ULONG,
+            std::ptr::null_mut(),
+            8,
+        )
+    };
+
+    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV, "NULL-signature/nonzero-length probe");
+    assert_eq!(
+        daemon.backend.data_op_call_count(),
+        data_calls_before + 2,
+        "malformed probe must reach the provider (data + signature resolve)",
+    );
+    assert_eq!(
+        test_message_shape(shim.session, state::MessageOperation::Verify),
+        Some(MessageParameterShape::Unmodeled),
+        "backend-origin rejection must keep the verify operation active",
+    );
+}
+
+#[test]
+fn verify_message_next_null_signature_zero_len_remains_a_feed_call() {
+    // S1 defect 3 well-shaped guard: (NULL, 0) is the canonical feed call —
+    // the shape-preservation fix must not disturb it.
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let key = create_object(shim.session);
+    let mut mechanism = rsa_pkcs_mechanism();
+    assert_eq!(
+        unsafe { dispatch::general::c_message_verify_init(shim.session, &mut mechanism, key) },
+        CKR_OK as CK_RV,
+        "C_MessageVerifyInit",
+    );
+
+    let daemon = TestDaemon::shared();
+    let data_calls_before = daemon.backend.data_op_call_count();
+    let data = *b"more-data-part!!";
+    let rv = unsafe {
+        dispatch::general::c_verify_message_next(
+            shim.session,
+            std::ptr::null_mut(),
+            0,
+            data.as_ptr() as CK_BYTE_PTR,
+            data.len() as CK_ULONG,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+
+    assert_eq!(rv, CKR_OK as CK_RV, "C_VerifyMessageNext(feed)");
+    assert_eq!(
+        daemon.backend.data_op_call_count(),
+        data_calls_before + 2,
+        "feed call must reach the provider (data + signature resolve)",
+    );
+    assert_eq!(
+        test_message_shape(shim.session, state::MessageOperation::Verify),
+        Some(MessageParameterShape::Unmodeled),
+        "feed call must keep the message-verify operation active",
+    );
+}
+
+#[test]
+fn verify_message_null_data_nonzero_len_returns_arguments_bad() {
+    // S1 defect 3 general-shape pin: NULL/nonzero input shapes are preserved
+    // end to end by classify_input plus the null_len wire fields (the
+    // S1-era read_input_slice erasure is gone), so a one-shot NULL-data
+    // probe draws the backend's ARGUMENTS_BAD exactly as direct.
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let key = create_object(shim.session);
+    let mut mechanism = rsa_pkcs_mechanism();
+    assert_eq!(
+        unsafe { dispatch::general::c_message_verify_init(shim.session, &mut mechanism, key) },
+        CKR_OK as CK_RV,
+        "C_MessageVerifyInit",
+    );
+
+    let signature = [0x5a_u8; 4];
+    let rv = unsafe {
+        dispatch::general::c_verify_message(
+            shim.session,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            8,
+            signature.as_ptr() as CK_BYTE_PTR,
+            signature.len() as CK_ULONG,
+        )
+    };
+
+    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV, "NULL-data/nonzero-length probe");
+}
+
+#[test]
+fn sign_message_next_feed_null_data_nonzero_len_returns_arguments_bad() {
+    // S1 defect 3 general-shape pin for the Next feed path: the feed data
+    // part is classified, so a NULL-data/nonzero-length feed probe reaches
+    // the backend intact and draws ARGUMENTS_BAD exactly as direct.
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let key = create_object(shim.session);
+    let mut mechanism = rsa_pkcs_mechanism();
+    assert_eq!(
+        unsafe { dispatch::general::c_message_sign_init(shim.session, &mut mechanism, key) },
+        CKR_OK as CK_RV,
+        "C_MessageSignInit",
+    );
+
+    let mut signature_canary = 0xA5;
+    let rv = unsafe {
+        dispatch::general::c_sign_message_next(
+            shim.session,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            8,
+            &mut signature_canary,
+            std::ptr::null_mut(),
+        )
+    };
+
+    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV, "NULL-data/nonzero-length feed probe");
+    assert_eq!(signature_canary, 0xA5, "rejected feed call must not write signature bytes");
+}
+
+#[test]
 fn exact_wrap_key_size_query_returns_length() {
     let _guard = shim_state_test_guard();
     let shim = ShimSession::new();
