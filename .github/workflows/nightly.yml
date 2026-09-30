@@ -291,25 +291,43 @@ jobs:
       # the UB-relevant pure logic; `mechanism::tests` (const tables,
       # Zeroize/Drop glue, Debug redaction) runs in ~7 s because it avoids
       # the registry TOML. The `secret` filter additionally covers the
-      # secret-classification predicates. On the shim, the daemon-based
-      # tests:: modules need real sockets and are compiled out under Miri
-      # (lib.rs cfg); the raw-pointer parse paths below are the point.
+      # secret-classification predicates. On the shim, daemon-based
+      # tests:: modules self-gate with #[cfg(not(miri))] in tests/mod.rs
+      # (measured 2026-09-29: 126 pure tests across abi_audit,
+      # null_pointers, attribute_classification, dispatch_shape, endpoint,
+      # regression, resource_limits run in ~102 s); poison_recovery stays
+      # native-only (>90 s/test under the interpreter). The backend line
+      # covers the Miri-designed lifecycle/registry state-machine suites
+      # (measured 2026-09-29: 40 tests in ~18 s); dlopen-dependent tests
+      # self-skip under Miri via cfg!(miri) early returns. The raw-pointer
+      # parse paths below are the point.
       - name: cargo miri test (width/attribute/logic + shim parse paths)
         run: |
           cargo +nightly miri test --locked -p pkcs11-proxy-ng-types -- width attribute mechanism::tests secret
           cargo +nightly miri test --locked -p pkcs11-proxy-ng-shim --lib -- \
             dispatch::general::width_bridge \
-            dispatch::general::helpers::nested_template_input \
-            not_wild_read
+            template_input::nested_template_input_tests \
+            not_wild_read \
+            tests::abi_audit \
+            tests::null_pointers \
+            tests::attribute_classification \
+            tests::dispatch_shape \
+            tests::endpoint \
+            tests::regression \
+            tests::resource_limits
+          cargo +nightly miri test --locked -p pkcs11-proxy-ng-backend --lib -- \
+            ffi::native_domain_tests \
+            ffi::native_domain::tests \
+            mock::echo
 
   # ── Fuzz smoke (cargo-fuzz, libFuzzer) ────────────────────────────────────
-  # Short time-boxed smoke over the four harnesses in fuzz/fuzz_targets:
-  # width translation, registry TOML, attribute proto edge, and the
-  # pre-decode wire scanner. Any crash fails the job and uploads the
-  # artifact for triage. Longer campaigns run on demand locally
-  # (see doc/development.md).
+  # Short time-boxed smoke over the five harnesses in fuzz/fuzz_targets:
+  # width translation, registry TOML, attribute proto edge, mechanism
+  # wire edge, and the pre-decode wire scanner. Any crash fails the job
+  # and uploads the artifact for triage. Longer campaigns run on demand
+  # locally (see doc/development.md).
   fuzz-smoke:
-    name: Fuzz smoke (4 targets x 90 s)
+    name: Fuzz smoke (5 targets x 90 s)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -332,15 +350,24 @@ jobs:
       - name: cargo fuzz build
         run: cargo +nightly fuzz build
 
-      - name: Seed registry corpus from the default TOML
+      - name: Seed corpora from checked-in seeds
         run: |
-          mkdir -p fuzz/corpus/fuzz_registry
-          cp fuzz/seeds/fuzz_registry/default.toml fuzz/corpus/fuzz_registry/seed-default.toml
+          for target in fuzz_width fuzz_registry fuzz_attribute fuzz_protected_decode fuzz_mechanism; do
+            mkdir -p "fuzz/corpus/$target"
+            cp fuzz/seeds/$target/* "fuzz/corpus/$target/"
+          done
 
       - name: Fuzz smoke (90 s per target)
         run: |
-          for target in fuzz_width fuzz_registry fuzz_attribute fuzz_protected_decode; do
-            cargo +nightly fuzz run "$target" -- -max_total_time=90 -print_final_stats=1
+          for target in fuzz_width fuzz_registry fuzz_attribute fuzz_protected_decode fuzz_mechanism; do
+            dict=""
+            case "$target" in
+              fuzz_registry) dict="-dict=fuzz/dict/registry.dict" ;;
+              fuzz_attribute) dict="-dict=fuzz/dict/attribute.dict" ;;
+              fuzz_protected_decode) dict="-dict=fuzz/dict/rpc_paths.dict" ;;
+            esac
+            # shellcheck disable=SC2086
+            cargo +nightly fuzz run "$target" -- -max_total_time=90 -print_final_stats=1 $dict
           done
 
       - name: Upload crash artifacts on failure
@@ -350,14 +377,16 @@ jobs:
           name: fuzz-crashes
           path: fuzz/artifacts/
 
-  # ── Kani proofs (width-translation laws) ─────────────────────────────────────
+  # ── Kani proofs (width + attribute-classifier laws) ───────────────────────────
   # Step 7: `crates/types/src/kani_proofs.rs` proves the "never silently
-  # truncate" laws over the whole input space (unit + randomized law tests
-  # cover examples). The module is `#[cfg(kani)]`-gated with no manifest
+  # truncate" width laws plus the attribute-classifier laws (scalar-shape
+  # disjointness, template=>array-flag, allocation-size=>ulong,
+  # secret-classification totality) over the whole input space (unit +
+  # randomized law tests cover examples). The module is `#[cfg(kani)]`-gated with no manifest
   # dependency — `cargo kani` injects its library — so stable/MSRV builds
   # are unaffected. Pinned verifier; bump only after re-running locally.
   kani:
-    name: Kani width proofs
+    name: Kani width + classifier proofs
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:

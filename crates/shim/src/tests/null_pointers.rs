@@ -809,6 +809,7 @@ fn sibling_init_known_session_with_bad_mechanism_still_validates_mechanism() {
 // duplicate.
 // ---------------------------------------------------------------------------
 
+#[cfg(not(miri))] // needs a running daemon (sockets); covered natively
 mod decrypt_null_e2e {
     use super::super::output_semantics::TestDaemon;
     use super::super::*;

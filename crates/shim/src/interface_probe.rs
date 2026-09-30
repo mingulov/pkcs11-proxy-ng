@@ -883,6 +883,12 @@ fn leak_fixed_state(st: InterfaceState) -> &'static InterfaceState {
 ///
 /// This is a no-op if the cache already has data.
 pub fn ensure_probed() -> Result<(), String> {
+    // Miri never has a daemon (no sockets): report daemon-down immediately
+    // so pre-init entries use the static fallback lists, exactly the
+    // documented unreachable-daemon behavior. Covered natively.
+    if cfg!(miri) {
+        return Err("miri: daemon probe skipped (no sockets)".to_string());
+    }
     // W1-C7-10: serialize probe + install so two concurrent callers cannot
     // cross-pair one probe's ABI/registry with another's function lists.
     let install = PROBE_INSTALL_LOCK.lock().unwrap_or_else(|e| e.into_inner());

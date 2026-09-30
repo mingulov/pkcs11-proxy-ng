@@ -176,5 +176,8 @@ pub unsafe extern "C" fn C_GetInterface(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[cfg(not(miri))] // daemon-based integration tests need real sockets
+// Miri: pure suites (abi_audit, attribute_classification, dispatch_shape,
+// endpoint, null_pointers, regression, resource_limits) run under the
+// interpreter; daemon-based or too-slow modules self-gate with
+// #[cfg(not(miri))] in tests/mod.rs.
 mod tests;

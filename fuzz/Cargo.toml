@@ -9,6 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+prost = "0.14"
 
 [dependencies.pkcs11-proxy-ng-types]
 path = "../crates/types"
@@ -40,6 +41,13 @@ bench = false
 [[bin]]
 name = "fuzz_protected_decode"
 path = "fuzz_targets/fuzz_protected_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_mechanism"
+path = "fuzz_targets/fuzz_mechanism.rs"
 test = false
 doc = false
 bench = false
