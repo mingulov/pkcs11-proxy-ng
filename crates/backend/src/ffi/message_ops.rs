@@ -466,7 +466,7 @@ impl FfiBackend {
     ) -> CkResult<()> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         match (mechanism, init_param) {
-            // AEAD message-based init: reconstruct CK_*_MESSAGE_PARAMS.
+            // Message-based init: reconstruct CK_*_MESSAGE_PARAMS or forward raw bytes.
             (Some(mech), Some(param)) => {
                 let mut init_mech = build_message_init_mechanism(mech.mechanism_type.0, param)?;
                 let _session_fence = self.session_fences.enter(&admission, session)?;
@@ -596,7 +596,7 @@ impl FfiBackend {
     ) -> CkResult<()> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         match (mechanism, init_param) {
-            // AEAD message-based init: reconstruct CK_*_MESSAGE_PARAMS.
+            // Message-based init: reconstruct CK_*_MESSAGE_PARAMS or forward raw bytes.
             (Some(mech), Some(param)) => {
                 let mut init_mech = build_message_init_mechanism(mech.mechanism_type.0, param)?;
                 let _session_fence = self.session_fences.enter(&admission, session)?;
@@ -2058,7 +2058,7 @@ impl FfiBackend {
         )
     }
 
-    /// C_EncryptMessage with structured GCM message parameter.
+    /// C_EncryptMessage with structured GCM or raw message parameter.
     pub(super) fn ffi_encrypt_message_exact_msg(
         &self,
         session: CkSessionHandle,
@@ -2107,7 +2107,7 @@ impl FfiBackend {
         Ok((output, acknowledgement, effects))
     }
 
-    /// C_DecryptMessage with structured message parameter.
+    /// C_DecryptMessage with structured or raw message parameter.
     pub(super) fn ffi_decrypt_message_exact_msg(
         &self,
         session: CkSessionHandle,
@@ -2228,7 +2228,7 @@ impl FfiBackend {
         }
     }
 
-    /// C_EncryptMessageNext with structured message parameter.
+    /// C_EncryptMessageNext with structured or raw message parameter.
     pub(super) fn ffi_encrypt_message_next_exact_msg(
         &self,
         session: CkSessionHandle,
@@ -2276,7 +2276,7 @@ impl FfiBackend {
         Ok((output, acknowledgement, effects))
     }
 
-    /// C_DecryptMessageNext with structured message parameter.
+    /// C_DecryptMessageNext with structured or raw message parameter.
     pub(super) fn ffi_decrypt_message_next_exact_msg(
         &self,
         session: CkSessionHandle,
@@ -4117,6 +4117,9 @@ mod tests {
         });
         assert_eq!(native_message_parameter_len(&param).unwrap(), RAW_CBC_IV.len() as u64);
         init.validate_authenticated_inputs(&param).expect("raw holder validates");
+        // Negative branch: mismatched opaque bytes fail the integrity check.
+        let tampered = MessageParameter::Raw(vec![0xAA; RAW_CBC_IV.len()].into());
+        assert_eq!(init.validate_authenticated_inputs(&tampered).unwrap_err(), CkRv::DEVICE_ERROR);
         assert_eq!(init.authenticated_output(&param), param);
 
         // Empty raw params stay well-shaped: zero length, still owned.
