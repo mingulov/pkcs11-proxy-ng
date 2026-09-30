@@ -1025,6 +1025,10 @@ mod ambiguity_tests {
 
         let output = response.output_result.unwrap();
         assert_eq!(output.ck_rv, CkRv::ARGUMENTS_BAD.0);
+        // S1 defect 2 pin (fixed by the Option/apply refactor): a
+        // daemon-generated error response must mark its zero length
+        // non-applicable, so the shim never writes it back over caller memory.
+        assert_eq!(output.apply_returned_len, Some(false));
         assert_eq!(output.returned_len, 0);
         assert_eq!(output.value, None);
         let parameter = response.parameter_result.unwrap();
@@ -1114,14 +1118,71 @@ mod ambiguity_tests {
         .unwrap()
         .into_inner();
 
+        let output = response.output_result.unwrap();
         assert_eq!(
-            response.output_result.unwrap().ck_rv,
+            output.ck_rv,
             CkRv::DEVICE_ERROR.0,
             "W1-L3-05: post-provider contract failure fails closed with DEVICE_ERROR, \
              the unified exact-output violation RV shared with validate_for",
         );
+        // S1 defect 2 pin (fixed by the Option/apply refactor): the
+        // `result_to_proto_msg` Err arm must mark its zero length
+        // non-applicable, so the shim never writes it back over caller memory.
+        assert_eq!(output.apply_returned_len, Some(false));
+        assert_eq!(output.returned_len, 0);
+        assert_eq!(output.value, None);
         assert_eq!(mock.message_parameter_call_count(), calls_before + 1);
         assert_eq!(operation.lock().await.shape, None);
+
+        // S1 defect 2 pin (fixed by the Option/apply refactor): the
+        // `result_to_proto` Err arm (raw message path, no structured
+        // parameter) must carry the same non-applicable zero length. A NULL
+        // input with non-zero claimed length passes the disabled sanitize
+        // gate and fails in the backend (`resolve_input`), proving the error
+        // travels the post-backend Err arm rather than `error_response`.
+        operation.lock().await.shape = Some(MessageParameterShape::Unmodeled);
+        let raw_calls_before = mock.message_parameter_call_count();
+        let raw_response = parameter_output_exact(
+            &HandlerContext::for_test(&manager, &backend),
+            Request::new(pkcs11_proxy_ng_proto::ParameterOutputExactRequest {
+                exact_output_effects_version: 1,
+                authenticated_parameters: None,
+                client_context_id: context_id.0.clone(),
+                session_handle: virtual_session,
+                function: pkcs11_proxy_ng_proto::convert::output::parameter_output_function_to_i32(
+                    ParameterOutputFunction::EncryptMessage,
+                ),
+                output_spec: Some(pkcs11_proxy_ng_proto::OutputBufferSpec {
+                    buffer_present: true,
+                    buffer_len: 8,
+                    length_pointer_null: false,
+                }),
+                input_data: Vec::new(),
+                associated_data: Vec::new(),
+                parameter: Vec::new(),
+                parameter_out_spec: Some(pkcs11_proxy_ng_proto::ParameterRoundtripSpec {
+                    buffer_present: false,
+                    buffer_len: 0,
+                    value: None,
+                }),
+                flags: 0,
+                mechanism: None,
+                wrapping_key_handle: 0,
+                key_handle: 0,
+                message_parameter: None,
+                input_data_null_len: Some(8),
+                associated_data_null_len: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        let raw_output = raw_response.output_result.unwrap();
+        assert_eq!(raw_output.ck_rv, CkRv::ARGUMENTS_BAD.0);
+        assert_eq!(raw_output.apply_returned_len, Some(false));
+        assert_eq!(raw_output.returned_len, 0);
+        assert_eq!(raw_output.value, None);
+        assert_eq!(mock.message_parameter_call_count(), raw_calls_before + 1);
     }
 
     /// W1-C1-10: an unknown parameter-output function id must yield a
@@ -1163,8 +1224,54 @@ mod ambiguity_tests {
 
         let output = resp.output_result.expect("unknown function must still carry a ck_rv");
         assert_eq!(output.ck_rv, CkRv::FUNCTION_NOT_SUPPORTED.0);
+        // S1 defect 2 pin (fixed by the Option/apply refactor): the
+        // unknown-function arm must mark its zero length non-applicable, so
+        // the shim never writes it back over caller memory.
+        assert_eq!(output.apply_returned_len, Some(false));
+        assert_eq!(output.returned_len, 0);
+        assert_eq!(output.value, None);
         let parameter =
             resp.parameter_result.expect("parameter result must be present with the ck_rv");
         assert_eq!(parameter.ck_rv, CkRv::FUNCTION_NOT_SUPPORTED.0);
+
+        // S1 defect 2 pin (fixed by the Option/apply refactor): the shared
+        // `error_response` helper for pre-backend rejections must carry the
+        // same non-applicable zero length. A valid function id with an
+        // unresolvable context reaches it via the operation-lock failure.
+        let rejected = parameter_output_exact(
+            &HandlerContext::for_test(&ctx_mgr, &backend),
+            // T12: `ParameterOutputExactRequest` is `ZeroizeOnDrop`;
+            // struct-update syntax is forbidden — all fields spelled out.
+            Request::new(pkcs11_proxy_ng_proto::ParameterOutputExactRequest {
+                exact_output_effects_version: 1,
+                function: pkcs11_proxy_ng_proto::convert::output::parameter_output_function_to_i32(
+                    ParameterOutputFunction::EncryptMessage,
+                ),
+                authenticated_parameters: None,
+                client_context_id: String::new(),
+                session_handle: 0,
+                output_spec: None,
+                input_data: Vec::new(),
+                associated_data: Vec::new(),
+                parameter: Vec::new(),
+                parameter_out_spec: None,
+                flags: 0,
+                mechanism: None,
+                wrapping_key_handle: 0,
+                key_handle: 0,
+                message_parameter: None,
+                input_data_null_len: None,
+                associated_data_null_len: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        let rejected_output =
+            rejected.output_result.expect("pre-backend rejection must still carry a ck_rv");
+        assert_eq!(rejected_output.ck_rv, CkRv::CRYPTOKI_NOT_INITIALIZED.0);
+        assert_eq!(rejected_output.apply_returned_len, Some(false));
+        assert_eq!(rejected_output.returned_len, 0);
+        assert_eq!(rejected_output.value, None);
     }
 }

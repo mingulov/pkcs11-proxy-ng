@@ -1338,6 +1338,43 @@ fn malformed_post_provider_ack_returns_device_error_and_clears_shim_shape() {
 }
 
 #[test]
+fn daemon_operation_not_initialized_preserves_output_canaries() {
+    // S1 defect 2 regression pin (fixed by the Option/apply refactor, not by
+    // a targeted fix): a daemon-generated error arrives with no applicable
+    // output effects, so the shim must return the rv without touching the
+    // caller's output buffer or length cell. Shim-only Encrypt shape (no
+    // daemon init) -> daemon answers OPERATION_NOT_INITIALIZED after the
+    // shim captures the output spec -> output bytes AND *pul_output_len
+    // canaries preserved.
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    set_test_message_shape(
+        shim.session,
+        state::MessageOperation::Encrypt,
+        MessageParameterShape::Unmodeled,
+    );
+    let input = [0x22_u8; 8];
+    let mut output = [0xA5_u8; 8];
+    let mut output_len = output.len() as CK_ULONG;
+    let rv = unsafe {
+        dispatch::general::c_encrypt_message(
+            shim.session,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            0,
+            input.as_ptr() as CK_BYTE_PTR,
+            input.len() as CK_ULONG,
+            output.as_mut_ptr(),
+            &mut output_len,
+        )
+    };
+    assert_eq!(rv, CKR_OPERATION_NOT_INITIALIZED as CK_RV);
+    assert_eq!(output, [0xA5; 8]);
+    assert_eq!(output_len, 8);
+}
+
+#[test]
 fn device_error_close_clears_authoritative_message_shapes() {
     let _guard = shim_state_test_guard();
     let shim = ShimSession::new();
