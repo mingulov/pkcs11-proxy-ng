@@ -153,12 +153,21 @@ impl FfiAttrs {
 struct NestedTemplateBacking {
     /// The nested `CK_ATTRIBUTE` array at a stable heap address.
     _template: std::pin::Pin<Box<[cryptoki_sys::CK_ATTRIBUTE]>>,
-    /// Sub-buffers for each nested attribute's `pValue`. Wiping (ADR-0013
-    /// §5): sub-values may carry secret key material.
+    /// Input-direction sub-buffers for each nested attribute's `pValue`.
+    /// Wiping (ADR-0013 §5): sub-values may carry secret key material.
+    /// Byte-`Vec` backing is sound here: the provider only READS these
+    /// value bytes (bytewise, alignment-free); nested `Ulong` sub-values
+    /// the provider may load through a typed pointer live in
+    /// `_ulong_buffers` instead.
     _sub_buffers: Vec<Zeroizing<Vec<u8>>>,
     /// Typed backing for nested `Ulong` sub-values (same misalignment
     /// rationale as `FfiAttrs::_ulong_backing`; values non-secret).
     _ulong_buffers: Vec<NativeAllocation<cryptoki_sys::CK_ULONG>>,
+    /// Query-direction sub-buffers: provider-WRITTEN output, which the
+    /// provider may store through a typed `CK_ULONG` pointer, so these
+    /// are `CK_ULONG`-aligned (S3/T5) — never mere output bytes. Wiping
+    /// (ADR-0013 §5): the provider may write key material here.
+    _query_sub_buffers: Vec<AlignedQueryBuffer>,
 }
 
 impl NestedTemplateBacking {
@@ -223,6 +232,8 @@ impl FfiAttrs {
             _template: std::pin::Pin::new(native.into_boxed_slice()),
             _sub_buffers: sub_buffers,
             _ulong_buffers: ulong_buffers,
+            // Input direction: no provider-written sub-output.
+            _query_sub_buffers: Vec::new(),
         })
     }
 
@@ -243,19 +254,78 @@ impl FfiAttrs {
     }
 }
 
+/// Provider-written attribute-query output buffer: `CK_ULONG`-aligned
+/// wiping storage (S3/T5).
+///
+/// A provider may write an integer attribute through a typed `CK_ULONG`
+/// pointer, so byte-`Vec` backing (align 1) is UB on that store (Miri
+/// confirmed). A `Vec<CK_ULONG>` base is `CK_ULONG`-aligned by
+/// construction; the element count rounds the byte extent up, so the byte
+/// view still covers the advertised capacity plus the fixed scalar
+/// scratch. `Zeroizing` wipes the allocation on drop (ADR-0013 §5); the
+/// heap address is stable across `Vec`-header moves, as before.
+struct AlignedQueryBuffer(Zeroizing<Vec<cryptoki_sys::CK_ULONG>>);
+
+impl AlignedQueryBuffer {
+    /// Raw base for the query's `pValue`. The caller captures this address
+    /// and then moves the owner into backing storage; the heap allocation
+    /// never moves, so the pointer stays valid (same Tree Borrows idiom as
+    /// the other materializers in this module).
+    fn as_mut_ptr(&mut self) -> *mut std::ffi::c_void {
+        self.0.as_mut_ptr() as *mut std::ffi::c_void
+    }
+
+    /// Raw base for matching a buffer against its advertised `pValue`.
+    fn as_ptr(&self) -> *const std::ffi::c_void {
+        self.0.as_ptr() as *const std::ffi::c_void
+    }
+
+    /// Byte view over the whole allocation (rounded-up extent, never less
+    /// than the advertised capacity). Readback still slices only the
+    /// provider-reported length bounded by the advertised capacity.
+    fn as_bytes(&self) -> &[u8] {
+        // SAFETY: the `Vec<CK_ULONG>` owns `len * size_of::<CK_ULONG>()`
+        // initialized bytes at `as_ptr()`; a `u8` view needs no alignment.
+        unsafe {
+            std::slice::from_raw_parts(
+                self.0.as_ptr() as *const u8,
+                self.0.len() * std::mem::size_of::<cryptoki_sys::CK_ULONG>(),
+            )
+        }
+    }
+
+    /// Mutable byte view over the whole allocation (tests only).
+    #[cfg(test)]
+    fn as_bytes_mut(&mut self) -> &mut [u8] {
+        // SAFETY: same allocation as `as_bytes`, exclusively borrowed.
+        unsafe {
+            std::slice::from_raw_parts_mut(
+                self.0.as_mut_ptr() as *mut u8,
+                self.0.len() * std::mem::size_of::<cryptoki_sys::CK_ULONG>(),
+            )
+        }
+    }
+
+    /// Byte length of the whole allocation (tests only).
+    #[cfg(test)]
+    fn byte_len(&self) -> usize {
+        self.as_bytes().len()
+    }
+}
+
 /// Owns raw `CK_ATTRIBUTE` buffers for exact `C_GetAttributeValue` semantics.
 ///
 /// For attributes with `CKF_ARRAY_ATTRIBUTE`, stores additional nested template
 /// arrays and their sub-buffers. Pointer stability is ensured by using pinned
-/// `Box<[CK_ATTRIBUTE]>` for nested templates and pre-allocated `Vec<u8>` for
-/// all byte buffers.
+/// `Box<[CK_ATTRIBUTE]>` for nested templates and pre-allocated
+/// `CK_ULONG`-aligned buffers for all provider-written output.
 pub(in crate::ffi) struct FfiAttributeQueries {
     pub(in crate::ffi) attrs: Vec<cryptoki_sys::CK_ATTRIBUTE>,
     original: Vec<cryptoki_sys::CK_ATTRIBUTE>,
     nested_originals: Vec<Vec<cryptoki_sys::CK_ATTRIBUTE>>,
     /// Provider-written output buffers. Wiping (ADR-0013 §5): the provider
     /// may write key material here; leftovers are wiped on drop.
-    _buffers: Vec<Zeroizing<Vec<u8>>>,
+    _buffers: Vec<AlignedQueryBuffer>,
     _nested: Vec<NestedTemplateBacking>,
 }
 
@@ -285,7 +355,7 @@ impl FfiAttributeQueries {
                     .map_err(|_| CkRv::HOST_MEMORY)?;
                 let (pvalue, len) = if query.buffer_present {
                     let mut buffer = Self::output_buffer(query.buffer_len)?;
-                    let ptr = buffer.as_mut_ptr() as *mut std::ffi::c_void;
+                    let ptr = buffer.as_mut_ptr();
                     buffers.push(buffer);
                     (ptr, ul_value_len)
                 } else {
@@ -364,7 +434,7 @@ impl FfiAttributeQueries {
                         && out.returned_len <= query.buffer_len
                     {
                         out.value = owned_attribute_bytes(
-                            &backing._sub_buffers,
+                            &backing._query_sub_buffers,
                             old.pValue,
                             out.returned_len,
                         );
@@ -387,16 +457,19 @@ impl FfiAttributeQueries {
     /// even short/empty queries real writable storage for a CK_ULONG or CK_DATE;
     /// boolean values also fit. This is bounded padding, not protection against
     /// arbitrary provider overruns. Readback still uses the advertised capacity.
-    fn output_buffer(capacity: u64) -> CkResult<Zeroizing<Vec<u8>>> {
+    /// The storage is CK_ULONG-aligned: a provider may store an integer
+    /// attribute through a typed pointer (S3/T5).
+    fn output_buffer(capacity: u64) -> CkResult<AlignedQueryBuffer> {
         let capacity = usize::try_from(capacity).map_err(|_| CkRv::HOST_MEMORY)?;
         let extent = capacity.max(
             std::mem::size_of::<cryptoki_sys::CK_ULONG>()
                 .max(std::mem::size_of::<cryptoki_sys::CK_DATE>()),
         );
+        let units = extent.div_ceil(std::mem::size_of::<cryptoki_sys::CK_ULONG>());
         let mut buffer = Zeroizing::new(Vec::new());
-        buffer.try_reserve_exact(extent).map_err(|_| CkRv::HOST_MEMORY)?;
-        buffer.resize(extent, 0);
-        Ok(buffer)
+        buffer.try_reserve_exact(units).map_err(|_| CkRv::HOST_MEMORY)?;
+        buffer.resize(units, 0);
+        Ok(AlignedQueryBuffer(buffer))
     }
 
     /// Build a `CK_ATTRIBUTE` entry for a nested template attribute.
@@ -431,7 +504,7 @@ impl FfiAttributeQueries {
         }
 
         // Allocate sub-buffers first, collecting stable pointers
-        let mut sub_buffers: Vec<Zeroizing<Vec<u8>>> = Vec::with_capacity(nested_queries.len());
+        let mut sub_buffers: Vec<AlignedQueryBuffer> = Vec::with_capacity(nested_queries.len());
         let mut sub_attrs: Vec<cryptoki_sys::CK_ATTRIBUTE> =
             Vec::with_capacity(nested_queries.len());
 
@@ -446,7 +519,7 @@ impl FfiAttributeQueries {
 
             let (sub_pvalue, sub_len) = if sub_query.buffer_present {
                 let mut sub_buf = Self::output_buffer(sub_query.buffer_len)?;
-                let ptr = sub_buf.as_mut_ptr() as *mut std::ffi::c_void;
+                let ptr = sub_buf.as_mut_ptr();
                 sub_buffers.push(sub_buf);
                 (ptr, sub_ul_value_len)
             } else {
@@ -487,10 +560,14 @@ impl FfiAttributeQueries {
 
         nested_backings.push(NestedTemplateBacking {
             _template: template_box,
-            _sub_buffers: sub_buffers,
-            // Query path: sub-buffers are provider-written output bytes,
-            // never Ulong values.
+            // Query direction: no input sub-values; sub-output lives in
+            // `_query_sub_buffers`.
+            _sub_buffers: Vec::new(),
             _ulong_buffers: Vec::new(),
+            // Query path: sub-buffers are provider-written output the
+            // provider may store through a typed CK_ULONG pointer, so
+            // they are CK_ULONG-aligned (S3/T5).
+            _query_sub_buffers: sub_buffers,
         });
 
         Ok(())
@@ -498,15 +575,15 @@ impl FfiAttributeQueries {
 }
 
 fn owned_attribute_bytes(
-    buffers: &[Zeroizing<Vec<u8>>],
+    buffers: &[AlignedQueryBuffer],
     pointer: *mut std::ffi::c_void,
     length: u64,
 ) -> Option<SecretBytes> {
     let length = usize::try_from(length).ok()?;
-    let buffer = buffers.iter().find(|buffer| {
-        !pointer.is_null() && buffer.as_ptr().cast::<std::ffi::c_void>() == pointer
-    })?;
-    buffer.get(..length).map(SecretBytes::copy_from_slice)
+    let buffer = buffers
+        .iter()
+        .find(|buffer| !pointer.is_null() && buffer.as_ptr().cast_mut() == pointer)?;
+    buffer.as_bytes().get(..length).map(SecretBytes::copy_from_slice)
 }
 
 #[cfg(test)]
@@ -782,14 +859,14 @@ mod exact_query_storage_tests {
                 assert_eq!(ffi.attrs[0].ulValueLen as u64, capacity);
                 let extent = std::mem::size_of::<cryptoki_sys::CK_ULONG>()
                     .max(std::mem::size_of::<cryptoki_sys::CK_DATE>());
-                assert!(ffi._buffers[0].len() >= extent);
-                ffi._buffers[1].fill(0xa5);
+                assert!(ffi._buffers[0].byte_len() >= extent);
+                ffi._buffers[1].as_bytes_mut().fill(0xa5);
                 unsafe { std::ptr::write_bytes(ffi.attrs[0].pValue.cast::<u8>(), 0x5a, extent) };
                 ffi.attrs[0].ulValueLen = extent as cryptoki_sys::CK_ULONG;
                 let results = ffi.readback(&queries, CkRv::OK);
                 assert!(results[0].value.is_none(), "scratch is not advertised output capacity");
                 assert_eq!(results[0].returned_len, extent as u64);
-                assert!(ffi._buffers[1].iter().all(|b| *b == 0xa5), "neighbor canary");
+                assert!(ffi._buffers[1].as_bytes().iter().all(|b| *b == 0xa5), "neighbor canary");
             }
         }
     }
@@ -812,7 +889,7 @@ mod exact_query_storage_tests {
         assert!(backing._template[1].pValue.is_null());
         assert_eq!(backing._template[0].ulValueLen as u64, 0);
         let extent = std::mem::size_of::<cryptoki_sys::CK_ULONG>();
-        assert!(backing._sub_buffers[0].len() >= extent);
+        assert!(backing._query_sub_buffers[0].byte_len() >= extent);
         unsafe { std::ptr::write_bytes(backing._template[0].pValue.cast::<u8>(), 0x5a, extent) };
         backing._template[0].ulValueLen = extent as cryptoki_sys::CK_ULONG;
         let result = ffi.readback(&queries, CkRv::OK);
@@ -820,6 +897,88 @@ mod exact_query_storage_tests {
         assert_eq!(children[0].returned_len, extent as u64);
         assert!(children[0].value.is_none());
         assert!(children[1].value.is_none());
+    }
+
+    #[test]
+    fn provider_typed_ulong_write_into_top_level_query_outputs() {
+        // S3/T5: a provider may write an integer attribute through a typed
+        // CK_ULONG pointer. Byte-Vec backing (align 1) is UB on that store
+        // unless the heap address happens to be CK_ULONG-aligned. Cover
+        // ordinary, short and zero-capacity non-NULL buffers; the NULL
+        // query has no storage so nothing is written through it. Under
+        // Miri this fires on misaligned backing and passes on aligned
+        // storage (same class Miri caught for pParameter in
+        // mechanism.rs).
+        let queries = [
+            query(CkAttributeType::CLASS, true, 8),
+            query(CkAttributeType::CLASS, true, 2),
+            query(CkAttributeType::CLASS, true, 0),
+            query(CkAttributeType::CLASS, false, 0),
+        ];
+        let ffi = FfiAttributeQueries::from_queries(&queries).unwrap();
+        for (attr, q) in ffi.attrs.iter().zip(&queries) {
+            // E0793: CK_ATTRIBUTE is packed on Windows; copy fields by value.
+            let (pvalue, len) = (attr.pValue, attr.ulValueLen);
+            if q.buffer_present {
+                assert!(!pvalue.is_null());
+                assert_eq!(len as u64, q.buffer_len);
+                // Provider-style typed store; in-bounds for every shape:
+                // even a zero-capacity query owns scratch for a CK_ULONG.
+                unsafe { std::ptr::write(pvalue as *mut cryptoki_sys::CK_ULONG, 0x0A0B_0C0D) };
+            } else {
+                assert!(pvalue.is_null());
+                assert_eq!(len, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn provider_typed_ulong_write_into_nested_query_outputs() {
+        // Same provider-style typed store into nested
+        // (CKF_ARRAY_ATTRIBUTE) sub-query buffers. The nested parent's own
+        // pValue addresses the pinned CK_ATTRIBUTE array (natively
+        // aligned), not bytes; a NULL parent carries no sub-storage.
+        let stride = std::mem::size_of::<cryptoki_sys::CK_ATTRIBUTE>();
+        let subs = vec![
+            query(CkAttributeType::CLASS, true, 8),
+            query(CkAttributeType::CLASS, true, 1),
+            query(CkAttributeType::CLASS, true, 0),
+            query(CkAttributeType::CLASS, false, 0),
+        ];
+        let queries = [CkAttributeQuery {
+            attr_type: CkAttributeType::WRAP_TEMPLATE,
+            buffer_present: true,
+            buffer_len: (subs.len() * stride) as u64,
+            nested: Some(subs),
+        }];
+        let ffi = FfiAttributeQueries::from_queries(&queries).unwrap();
+        let nested = queries[0].nested.as_ref().unwrap();
+        let backing = &ffi._nested[0];
+        for (i, sub_query) in nested.iter().enumerate() {
+            // E0793: CK_ATTRIBUTE is packed on Windows; copy fields by value.
+            let (pvalue, len) = (backing._template[i].pValue, backing._template[i].ulValueLen);
+            if sub_query.buffer_present {
+                assert!(!pvalue.is_null());
+                assert_eq!(len as u64, sub_query.buffer_len);
+                unsafe { std::ptr::write(pvalue as *mut cryptoki_sys::CK_ULONG, 0x0A0B_0C0D) };
+            } else {
+                assert!(pvalue.is_null());
+                assert_eq!(len, 0);
+            }
+        }
+
+        let null_parent = [CkAttributeQuery {
+            attr_type: CkAttributeType::WRAP_TEMPLATE,
+            buffer_present: false,
+            buffer_len: 0,
+            nested: Some(vec![query(CkAttributeType::CLASS, true, 8)]),
+        }];
+        let ffi_null = FfiAttributeQueries::from_queries(&null_parent).unwrap();
+        // E0793: CK_ATTRIBUTE is packed on Windows; copy fields by value.
+        let (pvalue, len) = (ffi_null.attrs[0].pValue, ffi_null.attrs[0].ulValueLen);
+        assert!(pvalue.is_null());
+        assert_eq!(len, 0);
+        assert!(ffi_null._nested.is_empty(), "NULL parent owns no sub-storage");
     }
 
     #[test]
