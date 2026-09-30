@@ -447,6 +447,12 @@ fn encapsulate_key_exact_non_data_queries_do_not_allocate_key() {
 }
 
 #[test]
+// Miri: full-registry x exact-wrap matrix repeats the same pure-safe-Rust
+// `mock/` operations hundreds of times (zero `unsafe` in `mock/`). Measured
+// >13 min under Miri with no completion (killed); per-mechanism UB signal is
+// retained by the remaining `mock::` suite. Native run stays authoritative
+// for functional coverage.
+#[cfg_attr(miri, ignore)]
 fn full_registry_mock_accepts_every_registered_mechanism_for_exact_wrap_workflow() {
     let registry = MechanismRegistry::load_with_override_str(None).unwrap();
     let mechanisms = registry
@@ -483,6 +489,12 @@ fn full_registry_mock_accepts_every_registered_mechanism_for_exact_wrap_workflow
 }
 
 #[test]
+// Miri: official-list x exact-output matrix repeats the same
+// pure-safe-Rust `mock/` operations hundreds of times (zero `unsafe` in
+// `mock/`). Measured 240 s standalone under Miri with no completion
+// (timeout); per-mechanism UB signal is retained by the remaining
+// `mock::` suite. Native run stays authoritative for functional coverage.
+#[cfg_attr(miri, ignore)]
 fn official_mechanism_mock_accepts_every_official_mechanism_across_exact_output_workflows() {
     let backend = MockBackend::with_official_mechanism_catalog_smoke(vec![CkSlotId(0)]);
     backend.initialize().unwrap();

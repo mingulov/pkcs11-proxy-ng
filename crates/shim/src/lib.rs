@@ -177,7 +177,7 @@ pub unsafe extern "C" fn C_GetInterface(
 
 #[cfg(test)]
 // Miri: pure suites (abi_audit, attribute_classification, dispatch_shape,
-// endpoint, null_pointers, regression, resource_limits) run under the
-// interpreter; daemon-based or too-slow modules self-gate with
+// endpoint, null_pointers, poison_recovery, regression, resource_limits)
+// run under the interpreter; daemon-based modules self-gate with
 // #[cfg(not(miri))] in tests/mod.rs.
 mod tests;

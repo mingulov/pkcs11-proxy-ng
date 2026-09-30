@@ -10,27 +10,26 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
-/// Poison `m` the way production poisoning happens: a thread panics
-/// while holding the guard. Returns after the panic is reaped.
-fn poison_mutex<T: Send + 'static>(m: &Mutex<T>) {
-    std::thread::scope(|s| {
-        let handle = s.spawn(|| {
-            let _guard = m.lock().unwrap();
-            panic!("T07 fixture: poison the mutex");
-        });
-        assert!(handle.join().is_err(), "fixture thread must panic");
-    });
+/// Poison `m` the way production poisoning happens: a panic unwinds
+/// through a held guard. Same-thread `catch_unwind` (not a spawned
+/// thread): the poison mechanism is thread-agnostic, and this keeps the
+/// suite fast enough to run under Miri (>90 s/test with threads).
+/// Returns after the panic is reaped.
+fn poison_mutex<T>(m: &Mutex<T>) {
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = m.lock().unwrap();
+        panic!("T07 fixture: poison the mutex");
+    }));
+    assert!(r.is_err(), "fixture panic must unwind");
     assert!(m.is_poisoned(), "fixture must leave the mutex poisoned");
 }
 
-fn poison_rwlock_write<T: Send + Sync + 'static>(m: &RwLock<T>) {
-    std::thread::scope(|s| {
-        let handle = s.spawn(|| {
-            let _guard = m.write().unwrap();
-            panic!("T07 fixture: poison the rwlock");
-        });
-        assert!(handle.join().is_err(), "fixture thread must panic");
-    });
+fn poison_rwlock_write<T>(m: &RwLock<T>) {
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = m.write().unwrap();
+        panic!("T07 fixture: poison the rwlock");
+    }));
+    assert!(r.is_err(), "fixture panic must unwind");
     assert!(m.is_poisoned(), "fixture must leave the rwlock poisoned");
 }
 
@@ -86,6 +85,7 @@ fn recovery_keeps_poison_flag_set_for_later_accessors() {
 /// A poisoned registry lock still yields a usable `Arc` snapshot: the
 /// recovered clone is either the pre- or post-swap registry, whole.
 #[test]
+#[cfg_attr(miri, ignore = "embedded TOML loads too slow under Miri; covered natively")]
 fn recovering_registry_read_yields_usable_snapshot() {
     let registry =
         pkcs11_proxy_ng_types::MechanismRegistry::load(None).expect("embedded default registry");
@@ -100,6 +100,7 @@ fn recovering_registry_read_yields_usable_snapshot() {
 /// A poisoned registry write lock recovers and the replacement swap
 /// overwrites whatever the panicked writer left behind.
 #[test]
+#[cfg_attr(miri, ignore = "embedded TOML loads too slow under Miri; covered natively")]
 fn recovering_registry_write_replaces_snapshot() {
     let registry =
         pkcs11_proxy_ng_types::MechanismRegistry::load(None).expect("embedded default registry");

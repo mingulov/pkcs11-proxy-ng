@@ -36,7 +36,6 @@ mod interface;
 mod null_pointers;
 #[cfg(not(miri))] // binds TcpListeners (tokio); covered natively
 mod output_semantics;
-#[cfg(not(miri))] // thread-scope + panic-join too slow under Miri (>90 s/test); covered natively
 mod poison_recovery;
 mod regression;
 mod resource_limits;

@@ -2,6 +2,7 @@
 //! the regression tests safe even against the original dangling-pointer bug.
 
 use super::*;
+use crate::ffi::native_allocation::NativeAllocation;
 use cryptoki_sys::{CK_MECHANISM, CK_RV, CK_ULONG, CK_X3DH_RESPOND_PARAMS};
 
 const VALUES: [u64; 6] = [0x11, 0x2233, 0x445566, 0x778899aa, 0x33445566, 0x11223344];
@@ -25,6 +26,16 @@ fn input(values: [u64; 6]) -> CkMechanism {
 /// The native record is returned as an owned snapshot plus the live root
 /// address: no live reference into retained storage may cross the owner
 /// moves this suite performs.
+/// Byte view of one retained handle allocation. The allocation owns a
+/// single `CK_ULONG` (plain integer), so its bytes are a valid `&[u8]`.
+fn alloc_bytes(alloc: &NativeAllocation<CK_ULONG>) -> &[u8] {
+    // SAFETY: root points at a live `CK_ULONG` owned by the borrowed `ffi`;
+    // the slice carries the borrow's lifetime and never outlives the owner.
+    unsafe {
+        std::slice::from_raw_parts(alloc.root() as *const u8, std::mem::size_of::<CK_ULONG>())
+    }
+}
+
 fn retained_regions(
     ffi: &FfiMechanism,
 ) -> (CK_X3DH_RESPOND_PARAMS, *mut CK_X3DH_RESPOND_PARAMS, Vec<&[u8]>) {
@@ -33,7 +44,12 @@ fn retained_regions(
             // SAFETY: backing is borrowed alive; the copy carries no provenance.
             unsafe { native.snapshot() },
             native.root(),
-            vec![identity.as_slice(), prekey.as_slice(), onetime.as_slice(), ephemeral.as_slice()],
+            vec![
+                alloc_bytes(identity),
+                alloc_bytes(prekey),
+                alloc_bytes(onetime),
+                alloc_bytes(ephemeral),
+            ],
         ),
         _ => panic!("expected X3DH response backing"),
     }
@@ -94,8 +110,11 @@ unsafe extern "C" fn native_oracle(
     observation: *mut Observation,
 ) -> CK_RV {
     // SAFETY: the caller proves ownership immediately before the call and
-    // retains the owner throughout. Byte buffers need not be CK_ULONG-aligned,
-    // so use unaligned native-width reads, never typed references into them.
+    // retains the owner throughout. The handle pointees are typed
+    // `NativeAllocation<CK_ULONG>` (aligned by construction), so the oracle
+    // uses typed reads here: under Miri a regression to byte-Vec backing
+    // would fire a misalignment error. The outer mechanism/params reads
+    // stay unaligned (CK_MECHANISM is packed on Windows).
     unsafe {
         let mechanism = mechanism.read_unaligned();
         let native = mechanism.pParameter.cast::<CK_X3DH_RESPOND_PARAMS>().read_unaligned();
@@ -104,11 +123,11 @@ unsafe extern "C" fn native_oracle(
         (*observation).parameter_len = mechanism.ulParameterLen;
         (*observation).values = [
             native.kdf,
-            native.pIdentity_id.cast::<CK_ULONG>().read_unaligned(),
-            native.pPrekey_id.cast::<CK_ULONG>().read_unaligned(),
-            native.pOnetime_id.cast::<CK_ULONG>().read_unaligned(),
+            native.pIdentity_id.cast::<CK_ULONG>().read(),
+            native.pPrekey_id.cast::<CK_ULONG>().read(),
+            native.pOnetime_id.cast::<CK_ULONG>().read(),
             native.pInitiator_identity,
-            native.pInitiator_ephemeral.cast::<CK_ULONG>().read_unaligned(),
+            native.pInitiator_ephemeral.cast::<CK_ULONG>().read(),
         ];
     }
     cryptoki_sys::CKR_DEVICE_ERROR

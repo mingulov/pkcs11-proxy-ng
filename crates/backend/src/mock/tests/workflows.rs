@@ -1415,6 +1415,12 @@ fn official_source_grounded_mock_rejects_all_no_source_workflow_mechanisms() {
 }
 
 #[test]
+// Miri: official-list x core-workflows matrix repeats the same
+// pure-safe-Rust `mock/` operations hundreds of times (zero `unsafe` in
+// `mock/`). Measured 300 s standalone under Miri with no completion
+// (timeout); per-mechanism UB signal is retained by the remaining
+// `mock::` suite. Native run stays authoritative for functional coverage.
+#[cfg_attr(miri, ignore)]
 fn official_mechanism_mock_accepts_every_official_mechanism_across_core_workflows() {
     let backend = MockBackend::with_official_mechanism_catalog_smoke(vec![CkSlotId(0)]);
     backend.initialize().unwrap();
@@ -1627,6 +1633,12 @@ fn official_mechanism_mock_accepts_every_official_mechanism_across_core_workflow
 }
 
 #[test]
+// Miri: full-registry x core-workflows matrix repeats the same
+// pure-safe-Rust `mock/` operations hundreds of times (zero `unsafe` in
+// `mock/`). Measured 15 min under Miri with no completion (timeout);
+// per-mechanism UB signal is retained by the remaining `mock::` suite.
+// Native run stays authoritative for functional coverage.
+#[cfg_attr(miri, ignore)]
 fn full_registry_mock_accepts_every_registered_mechanism_across_core_workflows() {
     let registry = MechanismRegistry::load_with_override_str(None).unwrap();
     let mechanisms = registry

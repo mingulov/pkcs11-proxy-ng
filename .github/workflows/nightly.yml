@@ -284,26 +284,43 @@ jobs:
           toolchain: nightly
           components: miri
 
-      # Scope notes (measured 2026-07-04, expanded 2026-09-28): the FULL
-      # types suite takes ~2.5 h under Miri (TOML/serde interpretation
-      # dominates) and its registry tests use real fs
-      # (cfg_attr(miri, ignore)). The width/attribute/mechanism modules are
-      # the UB-relevant pure logic; `mechanism::tests` (const tables,
-      # Zeroize/Drop glue, Debug redaction) runs in ~7 s because it avoids
-      # the registry TOML. The `secret` filter additionally covers the
-      # secret-classification predicates. On the shim, daemon-based
+      # Scope notes (measured 2026-07-04, expanded 2026-09-28, resharded
+      # 2026-09-30): the types suite runs all-but-registry under Miri
+      # (measured: 114 tests in ~31 s). Only `mechanism_registry::tests`
+      # is skipped (pervasive TOML parsing is too slow under the
+      # interpreter; that edge is covered by fuzz_registry plus the 48
+      # native registry tests instead — Kani registry-query proofs were
+      # attempted and removed as CBMC-intractable, see kani_proofs.rs).
+      # The `--skip` form auto-includes future pure types modules.
+      # Deliberately NOT gated: `mechanism_registry::tests` (above);
+      # the server crate's `consistency_checks` is out of this job's
+      # scope (pure safe string audits, zero unsafe, no UB surface —
+      # assessed 2026-09-30). On the shim, daemon-based
       # tests:: modules self-gate with #[cfg(not(miri))] in tests/mod.rs
-      # (measured 2026-09-29: 126 pure tests across abi_audit,
-      # null_pointers, attribute_classification, dispatch_shape, endpoint,
-      # regression, resource_limits run in ~102 s); poison_recovery stays
-      # native-only (>90 s/test under the interpreter). The backend line
+      # (measured 2026-09-30: 130 passed, 5 ignored in ~101 s across
+      # width_bridge, nested_template_input_tests, not_wild_read plus
+      # the 8 tests:: modules abi_audit, null_pointers,
+      # attribute_classification, dispatch_shape, endpoint, regression,
+      # resource_limits, poison_recovery — poison fixtures use
+      # same-thread catch_unwind; the two TOML-loading registry tests
+      # stay native-only). The backend line
       # covers the Miri-designed lifecycle/registry state-machine suites
       # (measured 2026-09-29: 40 tests in ~18 s); dlopen-dependent tests
       # self-skip under Miri via cfg!(miri) early returns. The raw-pointer
       # parse paths below are the point.
+      # The mock:: suite is gated PER FILE (measured 2026-09-30): the
+      # one-line `mock::` form times out (20 min, died in workflows after
+      # 159 tests) and profiles+workflows in one process stalls on the
+      # vendor-override test (500 s cap) although every file passes in
+      # isolation and rest+workflows passes combined (129 s) — a
+      # Miri-harness interaction with no UB signal (zero `unsafe` in
+      # mock/; root cause not isolated). Five registry/official-list
+      # matrix tests are cfg_attr(miri, ignore)d with measured notes
+      # (each 240-900 s standalone). All lines use --test-threads=1.
+      # Measured: 187 passed, 5 ignored, ~250 s interpretation total.
       - name: cargo miri test (width/attribute/logic + shim parse paths)
         run: |
-          cargo +nightly miri test --locked -p pkcs11-proxy-ng-types -- width attribute mechanism::tests secret
+          cargo +nightly miri test --locked -p pkcs11-proxy-ng-types --lib -- --skip mechanism_registry
           cargo +nightly miri test --locked -p pkcs11-proxy-ng-shim --lib -- \
             dispatch::general::width_bridge \
             template_input::nested_template_input_tests \
@@ -314,11 +331,79 @@ jobs:
             tests::dispatch_shape \
             tests::endpoint \
             tests::regression \
-            tests::resource_limits
+            tests::resource_limits \
+            tests::poison_recovery
+          # Shim param-reader suites run as SEPARATE lines (measured
+          # 2026-09-30): each passes standalone (56 in ~92 s, 36 in
+          # ~12 s, 15 in ~9 s) but the combined 107-test process
+          # stalls (~48 done at the 500 s cap) — same Miri-harness
+          # interaction shape as mock:: (no UB signal; root cause not
+          # isolated). These cover the unsafe mechanism/message param
+          # readers the scope comment names.
+          cargo +nightly miri test --locked -p pkcs11-proxy-ng-shim --lib -- \
+            dispatch::general::helpers::mechanism_parameter_tests --test-threads=1
+          cargo +nightly miri test --locked -p pkcs11-proxy-ng-shim --lib -- \
+            dispatch::general::helpers::message_parameter_tests --test-threads=1
+          cargo +nightly miri test --locked -p pkcs11-proxy-ng-shim --lib -- \
+            dispatch::general::helpers::mechanism_writeback_tests --test-threads=1
           cargo +nightly miri test --locked -p pkcs11-proxy-ng-backend --lib -- \
             ffi::native_domain_tests \
             ffi::native_domain::tests \
             mock::echo
+          # Tree Borrows for the FFI materializers: their Pin-stabilized
+          # capture-then-move idiom is sound (pinned contents never move)
+          # but Stacked Borrows rejects it. Tree Borrows still caught a
+          # real pParameter misalignment here (MacGeneral/Extract/
+          # ObjectHandle now use typed NativeAllocation; attribute Ulongs
+          # and X3DH handle buffers followed in review follow-up).
+          # Measured 2026-09-30: 86 tests in ~25 s.
+          MIRIFLAGS="-Zmiri-tree-borrows" \
+          cargo +nightly miri test --locked -p pkcs11-proxy-ng-backend --lib -- \
+            ffi::ffi_conversion
+          # mock:: per-file gate (see scope note; mock::echo stays on the
+          # native-domain line above). Each line proven green standalone.
+          cargo +nightly miri test --locked -p pkcs11-proxy-ng-backend --lib -- \
+            mock::tests::derive --test-threads=1
+          cargo +nightly miri test --locked -p pkcs11-proxy-ng-backend --lib -- \
+            mock::tests::exact_outputs --test-threads=1
+          cargo +nightly miri test --locked -p pkcs11-proxy-ng-backend --lib -- \
+            mock::tests::find_swap --test-threads=1
+          cargo +nightly miri test --locked -p pkcs11-proxy-ng-backend --lib -- \
+            mock::tests::profiles --test-threads=1
+          cargo +nightly miri test --locked -p pkcs11-proxy-ng-backend --lib -- \
+            mock::tests::rest mock::tests::workflows --test-threads=1
+          cargo +nightly miri test --locked -p pkcs11-proxy-ng-backend --lib -- \
+            mock::tests::session_state --test-threads=1
+          cargo +nightly miri test --locked -p pkcs11-proxy-ng-backend --lib -- \
+            mock::mock_types mock::output_lengths --test-threads=1
+          # Backend pure-logic FFI suites (measured 2026-09-30, each green
+          # standalone, ~35 s total): mapping (7), native_allocation (4),
+          # lifecycle_domain_tests (34), call_helpers (13), session_fence
+          # (11), retained_owner_contract_tests (9+2 ignored; the
+          # dlopen-needing oracle_retains_init_root... test is skipped).
+          # Deliberately NOT gated: wrap/contract, exact_output_contract,
+          # native_stop, interface_caps, constructor_child, crypto_ops,
+          # message_ops, session_ops, kem_ops, object_ops,
+          # verify_signature_ops, session_3x_ops, key_state_ops, loading —
+          # every test builds a full FfiBackend whose `_lib` needs
+          # dlopen(NULL) (loading::test_library_handle) or the tests need
+          # readlink/statx/child processes; Miri rejects all foreign calls
+          # (measured: 0 UB, only unsupported-operation aborts). A
+          # null-handle Miri arm cannot work either: backend Drop would
+          # still call foreign dlclose. Native + docker matrix cover them.
+          cargo +nightly miri test --locked -p pkcs11-proxy-ng-backend --lib -- \
+            ffi::mapping --test-threads=1
+          cargo +nightly miri test --locked -p pkcs11-proxy-ng-backend --lib -- \
+            ffi::native_allocation --test-threads=1
+          cargo +nightly miri test --locked -p pkcs11-proxy-ng-backend --lib -- \
+            ffi::lifecycle_domain_tests --test-threads=1
+          cargo +nightly miri test --locked -p pkcs11-proxy-ng-backend --lib -- \
+            ffi::call_helpers --test-threads=1
+          cargo +nightly miri test --locked -p pkcs11-proxy-ng-backend --lib -- \
+            ffi::session_fence --test-threads=1
+          cargo +nightly miri test --locked -p pkcs11-proxy-ng-backend --lib -- \
+            ffi::retained_owner_contract_tests \
+            --skip oracle_retains_init_root_across_native_calls --test-threads=1
 
   # ── Fuzz smoke (cargo-fuzz, libFuzzer) ────────────────────────────────────
   # Short time-boxed smoke over the five harnesses in fuzz/fuzz_targets:
@@ -377,16 +462,17 @@ jobs:
           name: fuzz-crashes
           path: fuzz/artifacts/
 
-  # ── Kani proofs (width + attribute-classifier laws) ───────────────────────────
-  # Step 7: `crates/types/src/kani_proofs.rs` proves the "never silently
-  # truncate" width laws plus the attribute-classifier laws (scalar-shape
-  # disjointness, template=>array-flag, allocation-size=>ulong,
-  # secret-classification totality) over the whole input space (unit +
-  # randomized law tests cover examples). The module is `#[cfg(kani)]`-gated with no manifest
+  # ── Kani proofs (pure types laws) ────────────────────────────────────────────
+  # `crates/types/src/kani_proofs.rs` proves 30 harnesses over the whole
+  # input space (unit + randomized law tests cover examples): width
+  # "never silently truncate" laws, attribute-classifier laws,
+  # mechanism/object/session/slot/secret/output laws, CkRv laws,
+  # CkInBuf pointer laws, and the official-mechanism table law. The
+  # module is `#[cfg(kani)]`-gated with no manifest
   # dependency — `cargo kani` injects its library — so stable/MSRV builds
   # are unaffected. Pinned verifier; bump only after re-running locally.
   kani:
-    name: Kani width + classifier proofs
+    name: Kani types proofs (30 harnesses)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:

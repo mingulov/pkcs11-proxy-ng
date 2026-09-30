@@ -1,6 +1,12 @@
 use super::*;
 
 #[test]
+// Miri: TOML registry load plus a full-registry advertise loop over
+// pure-safe-Rust `mock/` operations (zero `unsafe` in `mock/`).
+// Measured 240 s standalone under Miri with no completion (timeout);
+// per-mechanism UB signal is retained by the remaining `mock::` suite.
+// Native run stays authoritative for functional coverage.
+#[cfg_attr(miri, ignore)]
 fn full_registry_mock_advertises_every_default_registered_mechanism() {
     let registry = MechanismRegistry::load_with_override_str(None).unwrap();
     let expected = registry
