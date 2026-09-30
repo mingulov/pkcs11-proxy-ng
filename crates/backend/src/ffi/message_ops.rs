@@ -129,16 +129,22 @@ fn native_message_parameter_len(parameter: &MessageParameter) -> CkResult<u64> {
         MessageParameter::SalaChacha(_) => {
             Ok(std::mem::size_of::<cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS>() as u64)
         }
-        MessageParameter::Raw(_) => Err(CkRv::MECHANISM_PARAM_INVALID),
+        // Opaque bytes (e.g. a CBC IV): the native footprint is the byte
+        // length itself, with no struct layout to validate.
+        MessageParameter::Raw(raw) => Ok(raw.len() as u64),
     }
 }
 
-fn structured_parameter_ack(
+fn message_parameter_ack(
     parameter: &MessageParameter,
     provider_spec: &CkParameterRoundtripSpec,
     ck_rv: CkRv,
 ) -> CkResult<CkParameterRoundtripResult> {
-    parameter.validate_structured()?;
+    // Opaque bytes carry no structured layout; only the provider envelope
+    // (buffer presence, exact byte length, no smuggled value) is checked.
+    if !matches!(parameter, MessageParameter::Raw(_)) {
+        parameter.validate_structured()?;
+    }
     if !provider_spec.buffer_present
         || provider_spec.buffer_len != native_message_parameter_len(parameter)?
         || provider_spec.value.is_some()
@@ -164,14 +170,15 @@ fn validate_message_init_provider_ack(
     Ok(())
 }
 
-/// Owns a reconstructed `CK_*_MESSAGE_PARAMS` C struct and its backing
-/// IV/tag/nonce/MAC buffers so that a `CK_MECHANISM` can reference them across a
-/// `C_Message{Encrypt,Decrypt}Init` FFI call. The params struct lives in a
-/// persistent [`NativeAllocation`] (stable heap address with no reborrow, so
-/// owner moves cannot strand the stored root) and the buffers live in
-/// `_buffers`; both survive a move of this holder, so the raw pointers stored
-/// in `ck_mechanism` and the params struct stay valid for as long as the
-/// holder is alive.
+/// Owns a reconstructed message parameter and its backing storage so that a
+/// `CK_MECHANISM` can reference them across a `C_Message{Encrypt,Decrypt}Init`
+/// FFI call: either a `CK_*_MESSAGE_PARAMS` C struct with its backing
+/// IV/tag/nonce/MAC buffers, or — for unmodeled mechanisms such as CBC — the
+/// opaque parameter bytes themselves. The params struct lives in a persistent
+/// [`NativeAllocation`] (stable heap address with no reborrow, so owner moves
+/// cannot strand the stored root) and the buffers live in `_buffers`; both
+/// survive a move of this holder, so the raw pointers stored in `ck_mechanism`
+/// and the params struct stay valid for as long as the holder is alive.
 pub(super) struct MessageInitMechanism {
     pub(super) ck_mechanism: cryptoki_sys::CK_MECHANISM,
     _gcm: Option<NativeAllocation<cryptoki_sys::CK_GCM_MESSAGE_PARAMS>>,
@@ -184,6 +191,22 @@ impl MessageInitMechanism {
     /// Read only the allocations we own. Native pointer and input scalar
     /// replacement is a provider contract error, never a new memory source.
     pub(super) fn validate_authenticated_inputs(&self, input: &MessageParameter) -> CkResult<()> {
+        // Opaque bytes: no struct layout to check — the holder must own
+        // exactly the one raw buffer, still pointed at with its original
+        // length and contents. Any provider rewrite of opaque input is a
+        // provider contract error, like a structured pointer replacement.
+        if let MessageParameter::Raw(raw) = input {
+            let [buffer] = self._buffers.as_slice() else {
+                return Err(CkRv::DEVICE_ERROR);
+            };
+            let intact = self._gcm.is_none()
+                && self._ccm.is_none()
+                && self._salsa.is_none()
+                && std::ptr::eq(self.ck_mechanism.pParameter as *const u8, buffer.as_ptr())
+                && self.ck_mechanism.ulParameterLen as usize == buffer.len()
+                && raw.expose(|expected| expected == buffer.as_slice());
+            return if intact { Ok(()) } else { Err(CkRv::DEVICE_ERROR) };
+        }
         let [first, second] = self._buffers.as_slice() else {
             return Err(CkRv::DEVICE_ERROR);
         };
@@ -308,15 +331,17 @@ fn message_mechanism_for<T>(
     }
 }
 
-/// Reconstruct an AEAD message-based init mechanism (`CK_GCM_MESSAGE_PARAMS` /
-/// `CK_CCM_MESSAGE_PARAMS` / `CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS`) from the
-/// structured `MessageParameter` carried alongside a message-init request.
+/// Reconstruct a message-based init mechanism from the `MessageParameter`
+/// carried alongside a message-init request: either an AEAD outer struct
+/// (`CK_GCM_MESSAGE_PARAMS` / `CK_CCM_MESSAGE_PARAMS` /
+/// `CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS`) or, for unmodeled mechanisms
+/// such as CBC, the opaque parameter bytes themselves (e.g. the IV).
 ///
 /// The server has already derived and validated the registry-selected shape,
-/// caller envelope, and structured variant before this boundary. Reconstruct
-/// that parameter as a provider-native outer struct and keep the outer value
-/// plus all embedded buffers alive for the Init FFI call; raw client ABI bytes
-/// never reach this helper.
+/// caller envelope, and parameter variant before this boundary. Reconstruct
+/// that parameter for the provider-native FFI call and keep every backing
+/// buffer alive for the call; the reconstruction always points at
+/// daemon-owned storage, never at client addresses.
 pub(super) fn build_message_init_mechanism(
     mech_type: u64,
     param: &MessageParameter,
@@ -324,7 +349,11 @@ pub(super) fn build_message_init_mechanism(
     // Vendor mechanism IDs cross into native CK_MECHANISM_TYPE here: fail
     // loudly on narrow hosts, never truncate.
     let mech_type = narrow_wire_ulong(mech_type)?;
-    param.validate_for_native_ulong(native_ulong_max())?;
+    // Opaque bytes carry no CK_ULONG scalars; only their byte length
+    // crosses into native width (narrowed in the Raw arm below).
+    if !matches!(param, MessageParameter::Raw(_)) {
+        param.validate_for_native_ulong(native_ulong_max())?;
+    }
     match param {
         MessageParameter::GcmMessage(gcm) => {
             let iv_len = gcm.iv_null_len.unwrap_or(gcm.iv.len() as u64);
@@ -400,9 +429,28 @@ pub(super) fn build_message_init_mechanism(
                 _buffers: vec![nonce, tag],
             })
         }
-        // Raw bytes can carry an unknown layout (possibly embedded pointers);
-        // refuse rather than ship something the backend can't safely interpret.
-        MessageParameter::Raw(_) => Err(CkRv::MECHANISM_PARAM_INVALID),
+        // Opaque bytes (e.g. a CBC IV): forward a daemon-owned copy,
+        // mirroring the classic-path Iv arm. `MessageParameter::Raw`
+        // carries bytes only, so no client address can be imported; the
+        // provider reads the bytes opaquely exactly as a direct caller
+        // would pass them. Byte reads only: like the classic `Bytes`
+        // backing, this must never back an integer or struct read.
+        MessageParameter::Raw(raw) => {
+            let ul_len = message_ck_ulong(raw.len() as u64)?;
+            let mut backing = raw.expose(|bytes| bytes.to_vec());
+            let ck_mechanism = cryptoki_sys::CK_MECHANISM {
+                mechanism: mech_type,
+                pParameter: message_pointer(&mut backing, None).cast(),
+                ulParameterLen: ul_len,
+            };
+            Ok(MessageInitMechanism {
+                ck_mechanism,
+                _gcm: None,
+                _ccm: None,
+                _salsa: None,
+                _buffers: vec![backing],
+            })
+        }
     }
 }
 
@@ -1938,7 +1986,7 @@ impl FfiBackend {
             cryptoki_sys::CK_ULONG,
         ) -> cryptoki_sys::CK_RV,
     {
-        let mut acknowledgement = structured_parameter_ack(msg_param, provider_spec, CkRv::OK)?;
+        let mut acknowledgement = message_parameter_ack(msg_param, provider_spec, CkRv::OK)?;
         let (aad_ptr, aad_len) = native_message_input(aad)?;
         let native = build_message_init_mechanism(0, msg_param)?;
         let rv = CkRv(call(
@@ -2023,7 +2071,7 @@ impl FfiBackend {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_EncryptMessage }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
-        let acknowledgement = structured_parameter_ack(msg_param, provider_spec, CkRv::OK)?;
+        let acknowledgement = message_parameter_ack(msg_param, provider_spec, CkRv::OK)?;
         let (input_ptr, input_len) = native_message_input(plaintext)?;
         let (aad_ptr, aad_len) = native_message_input(aad)?;
         let native = build_message_init_mechanism(0, msg_param)?;
@@ -2072,7 +2120,7 @@ impl FfiBackend {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_DecryptMessage }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
-        let acknowledgement = structured_parameter_ack(msg_param, provider_spec, CkRv::OK)?;
+        let acknowledgement = message_parameter_ack(msg_param, provider_spec, CkRv::OK)?;
         let (input_ptr, input_len) = native_message_input(ciphertext)?;
         let (aad_ptr, aad_len) = native_message_input(aad)?;
         let native = build_message_init_mechanism(0, msg_param)?;
@@ -2193,7 +2241,7 @@ impl FfiBackend {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_EncryptMessageNext }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
-        let acknowledgement = structured_parameter_ack(msg_param, provider_spec, CkRv::OK)?;
+        let acknowledgement = message_parameter_ack(msg_param, provider_spec, CkRv::OK)?;
         let (input_ptr, input_len) = native_message_input(plaintext_part)?;
         let flags = native_message_flags(flags)?;
         let native = build_message_init_mechanism(0, msg_param)?;
@@ -2241,7 +2289,7 @@ impl FfiBackend {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_DecryptMessageNext }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
-        let acknowledgement = structured_parameter_ack(msg_param, provider_spec, CkRv::OK)?;
+        let acknowledgement = message_parameter_ack(msg_param, provider_spec, CkRv::OK)?;
         let (input_ptr, input_len) = native_message_input(ciphertext_part)?;
         let flags = native_message_flags(flags)?;
         let native = build_message_init_mechanism(0, msg_param)?;
@@ -2375,6 +2423,39 @@ mod tests {
     static MUTATING_INIT_PARAMETER_PRESENT: AtomicUsize = AtomicUsize::new(0);
     static MUTATING_INIT_PARAMETER_LEN: AtomicUsize = AtomicUsize::new(0);
     static MUTATING_INIT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    // NIST SP 800-38A F.2.1 AES-CBC-128 golden vector (key
+    // 2b7e1516...09cf4f3c, blocks 1-2). The raw-CBC stub provider below
+    // records the forwarded bytes and returns these canned ciphertext
+    // blocks, so each test can compare a backend-driven call against a
+    // direct stub call byte-for-byte.
+    const RAW_CBC_IV: [u8; 16] = [
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+        0x0f,
+    ];
+    const RAW_CBC_PT1: [u8; 16] = [
+        0x6b, 0xc1, 0xbe, 0xe2, 0x2e, 0x40, 0x9f, 0x96, 0xe9, 0x3d, 0x7e, 0x11, 0x73, 0x93, 0x17,
+        0x2a,
+    ];
+    const RAW_CBC_CT1: [u8; 16] = [
+        0x76, 0x49, 0xab, 0xac, 0x81, 0x19, 0xb2, 0x46, 0xce, 0xe9, 0x8e, 0x9b, 0x12, 0xe9, 0x19,
+        0x7d,
+    ];
+    const RAW_CBC_PT2: [u8; 16] = [
+        0xae, 0x2d, 0x8a, 0x57, 0x1e, 0x03, 0xac, 0x9c, 0x9e, 0xb7, 0x6f, 0xac, 0x45, 0xaf, 0x8e,
+        0x51,
+    ];
+    const RAW_CBC_CT2: [u8; 16] = [
+        0x50, 0x86, 0xcb, 0x9b, 0x50, 0x72, 0x19, 0xee, 0x95, 0xdb, 0x11, 0x3a, 0x91, 0x76, 0x78,
+        0xb2,
+    ];
+    static RAW_CBC_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static RAW_CBC_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static RAW_CBC_MUTATE_PARAM: AtomicUsize = AtomicUsize::new(0);
+    static RAW_CBC_LAST_MECH: AtomicUsize = AtomicUsize::new(0);
+    static RAW_CBC_LAST_PARAM_PRESENT: AtomicUsize = AtomicUsize::new(0);
+    static RAW_CBC_LAST_PARAM: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+    static RAW_CBC_LAST_INPUT: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
 
     const PROVIDER_ENCRYPT_INIT: usize = 1;
     const PROVIDER_ENCRYPT_ONE_SHOT: usize = 2;
@@ -2852,6 +2933,160 @@ mod tests {
         let backend =
             FfiBackend::test_backend_with_tables(base.as_mut(), Some(functions.as_ref()), None);
         (backend, base, functions)
+    }
+
+    /// Raw-CBC oracle recorder: snapshots the forwarded parameter and data
+    /// bytes for the test to compare. A null pointer records empty bytes
+    /// with `RAW_CBC_LAST_PARAM_PRESENT` cleared.
+    ///
+    /// # Safety
+    ///
+    /// Non-null `parameter`/`input` must be readable for their lengths (the
+    /// backend upholds this); with `RAW_CBC_MUTATE_PARAM` set, the first
+    /// parameter byte is writable test scratch.
+    unsafe fn record_raw_cbc_call(
+        parameter: cryptoki_sys::CK_VOID_PTR,
+        parameter_len: cryptoki_sys::CK_ULONG,
+        input: cryptoki_sys::CK_BYTE_PTR,
+        input_len: cryptoki_sys::CK_ULONG,
+    ) {
+        RAW_CBC_CALLS.fetch_add(1, Ordering::SeqCst);
+        RAW_CBC_LAST_PARAM_PRESENT.store(usize::from(!parameter.is_null()), Ordering::SeqCst);
+        let snapshot = |pointer: *const u8, len: cryptoki_sys::CK_ULONG| {
+            if pointer.is_null() {
+                Vec::new()
+            } else {
+                unsafe { std::slice::from_raw_parts(pointer, len as usize) }.to_vec()
+            }
+        };
+        *RAW_CBC_LAST_PARAM.lock().unwrap() =
+            snapshot(parameter.cast_const().cast(), parameter_len);
+        *RAW_CBC_LAST_INPUT.lock().unwrap() = snapshot(input.cast_const(), input_len);
+        if RAW_CBC_MUTATE_PARAM.load(Ordering::SeqCst) == 1
+            && !parameter.is_null()
+            && parameter_len > 0
+        {
+            unsafe {
+                *parameter.cast::<u8>() ^= 0xFF;
+            }
+        }
+    }
+
+    fn reset_raw_cbc_oracle() {
+        RAW_CBC_CALLS.store(0, Ordering::SeqCst);
+        RAW_CBC_MUTATE_PARAM.store(0, Ordering::SeqCst);
+        RAW_CBC_LAST_MECH.store(0, Ordering::SeqCst);
+        RAW_CBC_LAST_PARAM_PRESENT.store(0, Ordering::SeqCst);
+        RAW_CBC_LAST_PARAM.lock().unwrap().clear();
+        RAW_CBC_LAST_INPUT.lock().unwrap().clear();
+    }
+
+    unsafe extern "C" fn raw_cbc_message_encrypt_init(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        mechanism: cryptoki_sys::CK_MECHANISM_PTR,
+        _key: cryptoki_sys::CK_OBJECT_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        if mechanism.is_null() {
+            unsafe {
+                record_raw_cbc_call(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
+            }
+            return cryptoki_sys::CKR_MECHANISM_PARAM_INVALID;
+        }
+        let mechanism = unsafe { &*mechanism };
+        RAW_CBC_LAST_MECH.store(mechanism.mechanism as usize, Ordering::SeqCst);
+        unsafe {
+            record_raw_cbc_call(
+                mechanism.pParameter,
+                mechanism.ulParameterLen,
+                std::ptr::null_mut(),
+                0,
+            );
+        }
+        cryptoki_sys::CKR_OK
+    }
+
+    unsafe extern "C" fn raw_cbc_encrypt_message(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        parameter: cryptoki_sys::CK_VOID_PTR,
+        parameter_len: cryptoki_sys::CK_ULONG,
+        _aad: cryptoki_sys::CK_BYTE_PTR,
+        _aad_len: cryptoki_sys::CK_ULONG,
+        plaintext: cryptoki_sys::CK_BYTE_PTR,
+        plaintext_len: cryptoki_sys::CK_ULONG,
+        ciphertext: cryptoki_sys::CK_BYTE_PTR,
+        ciphertext_len: cryptoki_sys::CK_ULONG_PTR,
+    ) -> cryptoki_sys::CK_RV {
+        unsafe {
+            record_raw_cbc_call(parameter, parameter_len, plaintext, plaintext_len);
+            finish_structured_provider_output(
+                RAW_CBC_CT1.as_ptr() as cryptoki_sys::CK_BYTE_PTR,
+                RAW_CBC_CT1.len() as cryptoki_sys::CK_ULONG,
+                ciphertext,
+                ciphertext_len,
+            )
+        }
+    }
+
+    unsafe extern "C" fn raw_cbc_encrypt_message_begin(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        parameter: cryptoki_sys::CK_VOID_PTR,
+        parameter_len: cryptoki_sys::CK_ULONG,
+        _aad: cryptoki_sys::CK_BYTE_PTR,
+        _aad_len: cryptoki_sys::CK_ULONG,
+    ) -> cryptoki_sys::CK_RV {
+        unsafe {
+            record_raw_cbc_call(parameter, parameter_len, std::ptr::null_mut(), 0);
+        }
+        cryptoki_sys::CKR_OK
+    }
+
+    unsafe extern "C" fn raw_cbc_encrypt_message_next(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        parameter: cryptoki_sys::CK_VOID_PTR,
+        parameter_len: cryptoki_sys::CK_ULONG,
+        plaintext: cryptoki_sys::CK_BYTE_PTR,
+        plaintext_len: cryptoki_sys::CK_ULONG,
+        ciphertext: cryptoki_sys::CK_BYTE_PTR,
+        ciphertext_len: cryptoki_sys::CK_ULONG_PTR,
+        _flags: cryptoki_sys::CK_FLAGS,
+    ) -> cryptoki_sys::CK_RV {
+        unsafe {
+            record_raw_cbc_call(parameter, parameter_len, plaintext, plaintext_len);
+            finish_structured_provider_output(
+                RAW_CBC_CT2.as_ptr() as cryptoki_sys::CK_BYTE_PTR,
+                RAW_CBC_CT2.len() as cryptoki_sys::CK_ULONG,
+                ciphertext,
+                ciphertext_len,
+            )
+        }
+    }
+
+    unsafe extern "C" fn raw_cbc_message_encrypt_final(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        RAW_CBC_CALLS.fetch_add(1, Ordering::SeqCst);
+        cryptoki_sys::CKR_OK
+    }
+
+    #[cfg(unix)]
+    fn backend_with_raw_cbc_message_functions()
+    -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>, Box<cryptoki_sys::CK_FUNCTION_LIST_3_0>)
+    {
+        let mut base = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_0::default());
+        functions.C_MessageEncryptInit = Some(raw_cbc_message_encrypt_init);
+        functions.C_EncryptMessage = Some(raw_cbc_encrypt_message);
+        functions.C_EncryptMessageBegin = Some(raw_cbc_encrypt_message_begin);
+        functions.C_EncryptMessageNext = Some(raw_cbc_encrypt_message_next);
+        functions.C_MessageEncryptFinal = Some(raw_cbc_message_encrypt_final);
+        let backend =
+            FfiBackend::test_backend_with_tables(base.as_mut(), Some(functions.as_ref()), None);
+        (backend, base, functions)
+    }
+
+    #[cfg(unix)]
+    fn raw_cbc_recorded() -> (Vec<u8>, Vec<u8>) {
+        (RAW_CBC_LAST_PARAM.lock().unwrap().clone(), RAW_CBC_LAST_INPUT.lock().unwrap().clone())
     }
 
     #[cfg(unix)]
@@ -3850,16 +4085,324 @@ mod tests {
         assert!(!p.pMAC.is_null(), "MAC buffer must be allocated for the token to write");
     }
 
-    /// Raw (unrecognised) message params can't be safely reconstructed into a
-    /// typed struct and must be rejected rather than shipped blindly.
+    /// S1 defect 1: opaque message params (e.g. a CBC IV) reconstruct into
+    /// a daemon-owned byte copy, mirroring the classic-path Iv arm. Client
+    /// addresses are never imported.
     #[test]
-    fn raw_message_init_param_is_rejected() {
-        let param = MessageParameter::Raw(vec![0u8; 8].into());
-        let result = build_message_init_mechanism(cryptoki_sys::CKM_AES_GCM as u64, &param);
-        assert!(
-            matches!(result, Err(CkRv::MECHANISM_PARAM_INVALID)),
-            "raw message param must be rejected",
-        );
+    fn raw_message_init_reconstructs_daemon_owned_bytes() {
+        let param = MessageParameter::Raw(RAW_CBC_IV.to_vec().into());
+        let init = build_message_init_mechanism(cryptoki_sys::CKM_AES_CBC as u64, &param)
+            .expect("raw message param reconstructs");
+        assert_eq!(u64::from(init.ck_mechanism.mechanism), u64::from(cryptoki_sys::CKM_AES_CBC));
+        assert_eq!(init.ck_mechanism.ulParameterLen as usize, RAW_CBC_IV.len());
+        assert!(!init.ck_mechanism.pParameter.is_null());
+        let forwarded = unsafe {
+            std::slice::from_raw_parts(
+                init.ck_mechanism.pParameter.cast_const().cast::<u8>(),
+                RAW_CBC_IV.len(),
+            )
+        };
+        assert_eq!(forwarded, RAW_CBC_IV.as_slice());
+        // The forwarded bytes are a daemon-owned copy, not the caller's
+        // allocation: two distinct live allocations never share an address.
+        let MessageParameter::Raw(caller) = &param else {
+            unreachable!("test builds a Raw param");
+        };
+        caller.expose(|caller_bytes| {
+            assert_ne!(
+                init.ck_mechanism.pParameter as *const u8,
+                caller_bytes.as_ptr(),
+                "raw bytes must be copied into daemon storage",
+            );
+        });
+        assert_eq!(native_message_parameter_len(&param).unwrap(), RAW_CBC_IV.len() as u64);
+        init.validate_authenticated_inputs(&param).expect("raw holder validates");
+        assert_eq!(init.authenticated_output(&param), param);
+
+        // Empty raw params stay well-shaped: zero length, still owned.
+        let empty = MessageParameter::Raw(Vec::new().into());
+        let init = build_message_init_mechanism(cryptoki_sys::CKM_AES_CBC as u64, &empty)
+            .expect("empty raw message param reconstructs");
+        assert_eq!(init.ck_mechanism.ulParameterLen, 0);
+        assert_eq!(native_message_parameter_len(&empty).unwrap(), 0);
+        init.validate_authenticated_inputs(&empty).expect("empty raw holder validates");
+    }
+
+    /// S1 defect 1, one-shot: CBC EncryptMessage with a 16-byte raw IV
+    /// returns the same RV + bytes through the backend as direct against
+    /// the same provider (NIST SP 800-38A F.2.1 block 1).
+    #[cfg(unix)]
+    #[test]
+    fn raw_cbc_encrypt_message_one_shot_matches_direct_nist_vector() {
+        let _guard = RAW_CBC_TEST_LOCK.lock().unwrap();
+        reset_raw_cbc_oracle();
+        let (backend, _base, _functions) = backend_with_raw_cbc_message_functions();
+        // Message paths are ordinary: establish post-Initialize state.
+        backend.lifecycle_domain.open_for_tests();
+
+        let param = MessageParameter::Raw(RAW_CBC_IV.to_vec().into());
+        let provider_spec =
+            CkParameterRoundtripSpec { buffer_present: true, buffer_len: 16, value: None };
+        let output_spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 16, length_pointer_null: false };
+        let (output, ack, effects) = backend
+            .ffi_encrypt_message_exact_msg(
+                CkSessionHandle(7),
+                &param,
+                CkInBuf::Bytes(&[]),
+                CkInBuf::Bytes(&RAW_CBC_PT1),
+                &output_spec,
+                &provider_spec,
+            )
+            .expect("raw CBC one-shot succeeds");
+        assert_eq!(output.ck_rv, CkRv::OK);
+        let backend_bytes =
+            output.value.expect("exact output carries bytes").expose(|bytes| bytes.to_vec());
+        assert_eq!(backend_bytes, RAW_CBC_CT1.as_slice());
+        assert_eq!(ack.ck_rv, CkRv::OK);
+        assert_eq!(ack.returned_len, 16);
+        // Opaque params carry no structured effects under current proto
+        // semantics; pin that rather than ignoring the third element.
+        assert_eq!(effects, MessageEffects::Invalid(OutputContractViolation::ParameterIntegrity));
+        let (backend_param, backend_input) = raw_cbc_recorded();
+        assert_eq!(backend_param, RAW_CBC_IV.as_slice());
+        assert_eq!(backend_input, RAW_CBC_PT1.as_slice());
+
+        // Direct: the same C call against the same stub provider.
+        reset_raw_cbc_oracle();
+        let mut iv_direct = RAW_CBC_IV;
+        let mut direct_out = [0u8; 16];
+        let mut direct_len = 16 as cryptoki_sys::CK_ULONG;
+        let direct_rv = unsafe {
+            raw_cbc_encrypt_message(
+                7,
+                iv_direct.as_mut_ptr().cast(),
+                16,
+                std::ptr::NonNull::<u8>::dangling().as_ptr(),
+                0,
+                RAW_CBC_PT1.as_ptr() as cryptoki_sys::CK_BYTE_PTR,
+                16,
+                direct_out.as_mut_ptr(),
+                &mut direct_len,
+            )
+        };
+        assert_eq!(direct_rv, cryptoki_sys::CKR_OK);
+        assert_eq!(direct_len as usize, RAW_CBC_CT1.len());
+        assert_eq!(direct_out, RAW_CBC_CT1);
+        let (direct_param, direct_input) = raw_cbc_recorded();
+
+        // Backend-vs-direct parity: same RV, same bytes, same forwarded IV.
+        assert_eq!(output.ck_rv, CkRv(direct_rv as u64));
+        assert_eq!(backend_bytes, direct_out.as_slice());
+        assert_eq!(backend_param, direct_param);
+        assert_eq!(backend_input, direct_input);
+    }
+
+    /// S1 defect 1, multipart: the raw IV rides the message Init, then an
+    /// empty-param Begin/Next/Final sequence returns the same RV + bytes as
+    /// direct (NIST SP 800-38A F.2.1 block 2 for the Next part).
+    #[cfg(unix)]
+    #[test]
+    fn raw_cbc_multipart_init_begin_next_final_matches_direct() {
+        let _guard = RAW_CBC_TEST_LOCK.lock().unwrap();
+        reset_raw_cbc_oracle();
+        let (backend, _base, _functions) = backend_with_raw_cbc_message_functions();
+        // Message paths are ordinary: establish post-Initialize state.
+        backend.lifecycle_domain.open_for_tests();
+
+        let mechanism = CkMechanism { mechanism_type: CkMechanismType::AES_CBC, params: None };
+        let param = MessageParameter::Raw(RAW_CBC_IV.to_vec().into());
+        let init_spec =
+            CkParameterRoundtripSpec { buffer_present: true, buffer_len: 16, value: None };
+        let empty_spec =
+            CkParameterRoundtripSpec { buffer_present: false, buffer_len: 0, value: None };
+        let output_spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 16, length_pointer_null: false };
+
+        let init_ack = backend
+            .ffi_message_encrypt_init_contract(
+                CkSessionHandle(7),
+                &mechanism,
+                Some(&param),
+                CkObjectHandle(1),
+                &init_spec,
+            )
+            .expect("raw CBC multipart init succeeds");
+        assert_eq!(init_ack.ck_rv, CkRv::OK);
+        assert_eq!(init_ack.returned_len, 16);
+        assert_eq!(RAW_CBC_LAST_MECH.load(Ordering::SeqCst), cryptoki_sys::CKM_AES_CBC as usize);
+        let (init_param, _) = raw_cbc_recorded();
+        assert_eq!(init_param, RAW_CBC_IV.as_slice());
+
+        let begin_ack = backend
+            .ffi_encrypt_message_begin_exact(CkSessionHandle(7), CkInBuf::Bytes(&[]), &empty_spec)
+            .expect("raw CBC multipart begin succeeds");
+        assert_eq!(begin_ack.ck_rv, CkRv::OK);
+        assert_eq!(RAW_CBC_LAST_PARAM_PRESENT.load(Ordering::SeqCst), 0);
+        let (begin_param, _) = raw_cbc_recorded();
+        assert!(begin_param.is_empty());
+
+        let (next_out, next_ack) = backend
+            .ffi_encrypt_message_next_exact(
+                CkSessionHandle(7),
+                &[],
+                CkInBuf::Bytes(&RAW_CBC_PT2),
+                CkFlags(cryptoki_sys::CKF_END_OF_MESSAGE as u64),
+                &output_spec,
+                &empty_spec,
+            )
+            .expect("raw CBC multipart next succeeds");
+        assert_eq!(next_out.ck_rv, CkRv::OK);
+        assert_eq!(next_ack.ck_rv, CkRv::OK);
+        let backend_part =
+            next_out.value.expect("exact output carries bytes").expose(|bytes| bytes.to_vec());
+        assert_eq!(backend_part, RAW_CBC_CT2.as_slice());
+        let (next_param, next_input) = raw_cbc_recorded();
+        assert!(next_param.is_empty());
+        assert_eq!(next_input, RAW_CBC_PT2.as_slice());
+
+        backend
+            .ffi_message_encrypt_final(CkSessionHandle(7))
+            .expect("raw CBC multipart final succeeds");
+        assert_eq!(RAW_CBC_CALLS.load(Ordering::SeqCst), 4);
+
+        // Direct: the same C sequence against the same stub provider.
+        reset_raw_cbc_oracle();
+        let mut iv_direct = RAW_CBC_IV;
+        let mut direct_mech = cryptoki_sys::CK_MECHANISM {
+            mechanism: cryptoki_sys::CKM_AES_CBC,
+            pParameter: iv_direct.as_mut_ptr().cast(),
+            ulParameterLen: 16,
+        };
+        let direct_init_rv = unsafe { raw_cbc_message_encrypt_init(7, &mut direct_mech, 1) };
+        let (direct_init_param, _) = raw_cbc_recorded();
+        let direct_begin_rv = unsafe {
+            raw_cbc_encrypt_message_begin(
+                7,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::NonNull::<u8>::dangling().as_ptr(),
+                0,
+            )
+        };
+        let mut direct_out = [0u8; 16];
+        let mut direct_len = 16 as cryptoki_sys::CK_ULONG;
+        let direct_next_rv = unsafe {
+            raw_cbc_encrypt_message_next(
+                7,
+                std::ptr::null_mut(),
+                0,
+                RAW_CBC_PT2.as_ptr() as cryptoki_sys::CK_BYTE_PTR,
+                16,
+                direct_out.as_mut_ptr(),
+                &mut direct_len,
+                cryptoki_sys::CKF_END_OF_MESSAGE,
+            )
+        };
+        let direct_final_rv = unsafe { raw_cbc_message_encrypt_final(7) };
+        assert_eq!(RAW_CBC_CALLS.load(Ordering::SeqCst), 4);
+
+        // Backend-vs-direct parity per step: same RVs, same bytes, same IV.
+        assert_eq!(init_ack.ck_rv, CkRv(direct_init_rv as u64));
+        assert_eq!(direct_init_rv, cryptoki_sys::CKR_OK);
+        assert_eq!(init_param, direct_init_param);
+        assert_eq!(begin_ack.ck_rv, CkRv(direct_begin_rv as u64));
+        assert_eq!(next_out.ck_rv, CkRv(direct_next_rv as u64));
+        assert_eq!(direct_next_rv, cryptoki_sys::CKR_OK);
+        assert_eq!(backend_part, direct_out.as_slice());
+        assert_eq!(direct_final_rv, cryptoki_sys::CKR_OK);
+    }
+
+    /// A provider rewrite of opaque input is a provider contract error: the
+    /// provider's output bytes are still honored, but the effects degrade
+    /// to Invalid exactly like a structured pointer/length replacement.
+    #[cfg(unix)]
+    #[test]
+    fn raw_cbc_provider_param_mutation_yields_invalid_effects() {
+        let _guard = RAW_CBC_TEST_LOCK.lock().unwrap();
+        reset_raw_cbc_oracle();
+        RAW_CBC_MUTATE_PARAM.store(1, Ordering::SeqCst);
+        let (backend, _base, _functions) = backend_with_raw_cbc_message_functions();
+        // Message paths are ordinary: establish post-Initialize state.
+        backend.lifecycle_domain.open_for_tests();
+
+        let param = MessageParameter::Raw(RAW_CBC_IV.to_vec().into());
+        let provider_spec =
+            CkParameterRoundtripSpec { buffer_present: true, buffer_len: 16, value: None };
+        let output_spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 16, length_pointer_null: false };
+        let (output, ack, effects) = backend
+            .ffi_encrypt_message_exact_msg(
+                CkSessionHandle(7),
+                &param,
+                CkInBuf::Bytes(&[]),
+                CkInBuf::Bytes(&RAW_CBC_PT1),
+                &output_spec,
+                &provider_spec,
+            )
+            .expect("mutating provider still completes the call");
+        assert_eq!(output.ck_rv, CkRv::OK);
+        let bytes = output.value.expect("exact output carries bytes").expose(|b| b.to_vec());
+        assert_eq!(bytes, RAW_CBC_CT1.as_slice());
+        assert_eq!(ack.ck_rv, CkRv::OK);
+        assert_eq!(effects, MessageEffects::Invalid(OutputContractViolation::ParameterIntegrity));
+    }
+
+    /// Guard: accepting Raw must not loosen the provider envelope — a
+    /// mismatched length, absent buffer, or smuggled value still fails
+    /// before any provider call.
+    #[cfg(unix)]
+    #[test]
+    fn raw_cbc_contract_paths_reject_provider_spec_mismatch() {
+        let _guard = RAW_CBC_TEST_LOCK.lock().unwrap();
+        reset_raw_cbc_oracle();
+        let (backend, _base, _functions) = backend_with_raw_cbc_message_functions();
+        // Message paths are ordinary: establish post-Initialize state.
+        backend.lifecycle_domain.open_for_tests();
+
+        let mechanism = CkMechanism { mechanism_type: CkMechanismType::AES_CBC, params: None };
+        let param = MessageParameter::Raw(RAW_CBC_IV.to_vec().into());
+        let output_spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 16, length_pointer_null: false };
+        let mismatches = [
+            CkParameterRoundtripSpec { buffer_present: true, buffer_len: 15, value: None },
+            CkParameterRoundtripSpec { buffer_present: false, buffer_len: 16, value: None },
+            CkParameterRoundtripSpec {
+                buffer_present: true,
+                buffer_len: 16,
+                value: Some(SecretBytes::new(Vec::new())),
+            },
+        ];
+        for spec in &mismatches {
+            assert_eq!(
+                backend
+                    .ffi_message_encrypt_init_contract(
+                        CkSessionHandle(7),
+                        &mechanism,
+                        Some(&param),
+                        CkObjectHandle(1),
+                        spec,
+                    )
+                    .unwrap_err(),
+                CkRv::MECHANISM_PARAM_INVALID,
+                "init contract must reject spec {spec:?}",
+            );
+            assert_eq!(
+                backend
+                    .ffi_encrypt_message_exact_msg(
+                        CkSessionHandle(7),
+                        &param,
+                        CkInBuf::Bytes(&[]),
+                        CkInBuf::Bytes(&RAW_CBC_PT1),
+                        &output_spec,
+                        spec,
+                    )
+                    .unwrap_err(),
+                CkRv::MECHANISM_PARAM_INVALID,
+                "one-shot must reject spec {spec:?}",
+            );
+        }
+        assert_eq!(RAW_CBC_CALLS.load(Ordering::SeqCst), 0);
     }
 
     /// Row-6 retained-envelope gate (C3M.6 order item 6): the GCM and CCM
