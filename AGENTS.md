@@ -141,6 +141,12 @@ AI agents, automation, and human contributors.
 - Keep each commit focused and self-contained; do not mix unrelated changes.
 - Do not rewrite unrelated user changes.
 - Do not use destructive Git commands unless explicitly requested.
+- Git worktree disk hygiene: always run `cargo clean` in a worktree before
+  `git worktree remove` — with cargo's build dir redirected outside the
+  worktree (`build.build-dir`), removal orphans that worktree's cached build
+  instead of deleting it. If removal refuses or the worktree stays idle, at
+  least `cargo clean` it. Prefer `remove` over `rm -rf` (manual deletion needs
+  a follow-up `git worktree prune`).
 
 ## 10. AI Agent Rules
 
