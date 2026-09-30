@@ -3,16 +3,25 @@
 //! ADR-0011 D8/D4) and exact-query buffers.
 
 use super::*;
+use crate::ffi::native_allocation::NativeAllocation;
 
 pub(in crate::ffi) struct FfiAttrs {
     /// The ready-to-pass attribute array. Pointers inside borrow from
-    /// `_backing`/`_secret_backing`/`_nested_backing` (all owned by `self`).
+    /// `_backing`/`_ulong_backing`/`_secret_backing`/`_nested_backing`
+    /// (all owned by `self`).
     pub(in crate::ffi) attrs: Vec<cryptoki_sys::CK_ATTRIBUTE>,
     /// True when the caller passed a NULL template pointer (Wave 3.5 D2):
     /// the FFI call receives NULL, not the empty array's address.
     pub(in crate::ffi) null_template: bool,
-    /// Backing byte storage for `Ulong` values whose native size differs from `u64`.
+    /// Backing byte storage for `Bool` values (single bytes;
+    /// alignment-free, so a byte `Vec` is sound here).
     _backing: Vec<Vec<u8>>,
+    /// Typed backing for `Ulong` values. A provider may read an integer
+    /// attribute's `pValue` via an aligned `CK_ULONG` load, so byte-`Vec`
+    /// backing (align 1) would be UB on read — the same misalignment
+    /// Miri caught for single-ulong `pParameter` (mechanism.rs). Values
+    /// are non-secret (types, lengths), matching the plain `_backing`.
+    _ulong_backing: Vec<NativeAllocation<cryptoki_sys::CK_ULONG>>,
     /// Wiping backing for `Bytes`/`String` values (ADR-0013 §5). The
     /// `SecretBytes` source cannot serve a stored raw pointer
     /// (closure-scoped access), so each value is copied once into a
@@ -39,6 +48,7 @@ impl FfiAttrs {
                 attrs: Vec::new(),
                 null_template: true,
                 _backing: Vec::new(),
+                _ulong_backing: Vec::new(),
                 _secret_backing: Vec::new(),
                 _nested_backing: Vec::new(),
             }),
@@ -49,6 +59,7 @@ impl FfiAttrs {
     pub(in crate::ffi) fn from_slice(template: &[CkAttribute]) -> CkResult<Self> {
         let mut attrs = Vec::with_capacity(template.len());
         let mut backing: Vec<Vec<u8>> = Vec::new();
+        let mut ulong_backing: Vec<NativeAllocation<cryptoki_sys::CK_ULONG>> = Vec::new();
         let mut secret_backing: Vec<Zeroizing<Vec<u8>>> = Vec::new();
         let mut nested_backing: Vec<NestedTemplateBacking> = Vec::new();
 
@@ -68,10 +79,11 @@ impl FfiAttrs {
                     (ptr, 1)
                 }
                 Some(CkAttributeValue::Ulong(u)) => {
-                    let bytes = narrow_wire_ulong(*u)?.to_ne_bytes().to_vec();
-                    let len = bytes.len() as cryptoki_sys::CK_ULONG;
-                    let ptr = bytes.as_ptr() as *mut _;
-                    backing.push(bytes);
+                    let alloc = NativeAllocation::new(narrow_wire_ulong(*u)?);
+                    let len =
+                        std::mem::size_of::<cryptoki_sys::CK_ULONG>() as cryptoki_sys::CK_ULONG;
+                    let ptr = alloc.root() as *mut _;
+                    ulong_backing.push(alloc);
                     (ptr, len)
                 }
                 // T4-AUDIT site 4: pass NULL for empty values. An empty
@@ -108,6 +120,7 @@ impl FfiAttrs {
             attrs,
             null_template: false,
             _backing: backing,
+            _ulong_backing: ulong_backing,
             _secret_backing: secret_backing,
             _nested_backing: nested_backing,
         })
@@ -143,10 +156,21 @@ struct NestedTemplateBacking {
     /// Sub-buffers for each nested attribute's `pValue`. Wiping (ADR-0013
     /// §5): sub-values may carry secret key material.
     _sub_buffers: Vec<Zeroizing<Vec<u8>>>,
+    /// Typed backing for nested `Ulong` sub-values (same misalignment
+    /// rationale as `FfiAttrs::_ulong_backing`; values non-secret).
+    _ulong_buffers: Vec<NativeAllocation<cryptoki_sys::CK_ULONG>>,
 }
 
 impl NestedTemplateBacking {
     /// Stable address of the pinned native sub-attribute array.
+    ///
+    /// ALIASING MODEL: callers capture this pointer and then move the
+    /// owner into the backing `Vec`. The pinned box contents never move,
+    /// so the pointer stays valid — but the move invalidates the shared
+    /// reborrow tag under Stacked Borrows. This suite therefore runs
+    /// under `-Zmiri-tree-borrows` (see nightly.yml), which accepts the
+    /// sound Pin-stabilized idiom while still catching spatial/temporal
+    /// UB (it caught a real pParameter misalignment in mechanism.rs).
     fn template_ptr(&self) -> *const cryptoki_sys::CK_ATTRIBUTE {
         self._template.as_ptr()
     }
@@ -156,38 +180,66 @@ impl FfiAttrs {
     /// Build the pinned native `CK_ATTRIBUTE[]` for a nested template VALUE.
     fn materialize_nested_template(subs: &[CkAttribute]) -> CkResult<NestedTemplateBacking> {
         let mut sub_buffers: Vec<Zeroizing<Vec<u8>>> = Vec::with_capacity(subs.len());
+        let mut ulong_buffers: Vec<NativeAllocation<cryptoki_sys::CK_ULONG>> = Vec::new();
         let mut native: Vec<cryptoki_sys::CK_ATTRIBUTE> = Vec::with_capacity(subs.len());
         for sub in subs {
-            let bytes: Zeroizing<Vec<u8>> = match &sub.value {
-                None => Zeroizing::new(Vec::new()),
-                Some(CkAttributeValue::Bool(b)) => Zeroizing::new(vec![u8::from(*b)]),
-                Some(CkAttributeValue::Ulong(u)) => {
-                    Zeroizing::new(narrow_wire_ulong(*u)?.to_ne_bytes().to_vec())
+            let (pvalue, len): (*mut std::ffi::c_void, cryptoki_sys::CK_ULONG) = match &sub.value {
+                None => (std::ptr::null_mut(), 0),
+                Some(CkAttributeValue::Bool(b)) => {
+                    let bytes = Zeroizing::new(vec![u8::from(*b)]);
+                    let ptr = bytes.as_ptr() as *mut _;
+                    sub_buffers.push(bytes);
+                    (ptr, 1)
                 }
-                Some(CkAttributeValue::Bytes(b)) => b.expose(|raw| Zeroizing::new(raw.to_vec())),
-                Some(CkAttributeValue::String(s)) => s.expose(|raw| Zeroizing::new(raw.to_vec())),
+                Some(CkAttributeValue::Ulong(u)) => {
+                    let alloc = NativeAllocation::new(narrow_wire_ulong(*u)?);
+                    let ulen =
+                        std::mem::size_of::<cryptoki_sys::CK_ULONG>() as cryptoki_sys::CK_ULONG;
+                    let ptr = alloc.root() as *mut _;
+                    ulong_buffers.push(alloc);
+                    (ptr, ulen)
+                }
+                Some(CkAttributeValue::Bytes(b)) => {
+                    let bytes = b.expose(|raw| Zeroizing::new(raw.to_vec()));
+                    Self::push_nested_value(&mut sub_buffers, bytes)
+                }
+                Some(CkAttributeValue::String(s)) => {
+                    let bytes = s.expose(|raw| Zeroizing::new(raw.to_vec()));
+                    Self::push_nested_value(&mut sub_buffers, bytes)
+                }
                 // D8: refused at the deserialization edge; defensively
                 // reject here too rather than recurse.
                 Some(CkAttributeValue::NestedTemplate(_)) => {
                     return Err(CkRv::ATTRIBUTE_VALUE_INVALID);
                 }
             };
-            sub_buffers.push(bytes);
-            let stored = sub_buffers.last().expect("just pushed");
             native.push(cryptoki_sys::CK_ATTRIBUTE {
                 type_: narrow_wire_ulong(sub.attr_type.0)?,
-                pValue: if stored.is_empty() {
-                    std::ptr::null_mut()
-                } else {
-                    stored.as_ptr() as *mut std::ffi::c_void
-                },
-                ulValueLen: stored.len() as cryptoki_sys::CK_ULONG,
+                pValue: pvalue,
+                ulValueLen: len,
             });
         }
         Ok(NestedTemplateBacking {
             _template: std::pin::Pin::new(native.into_boxed_slice()),
             _sub_buffers: sub_buffers,
+            _ulong_buffers: ulong_buffers,
         })
+    }
+
+    /// Pushes a nested byte sub-value, preserving the NULL+0 empty
+    /// encoding the old shared path gave empty buffers.
+    fn push_nested_value(
+        sub_buffers: &mut Vec<Zeroizing<Vec<u8>>>,
+        bytes: Zeroizing<Vec<u8>>,
+    ) -> (*mut std::ffi::c_void, cryptoki_sys::CK_ULONG) {
+        if bytes.is_empty() {
+            sub_buffers.push(bytes);
+            return (std::ptr::null_mut(), 0);
+        }
+        let len = bytes.len() as cryptoki_sys::CK_ULONG;
+        let ptr = bytes.as_ptr() as *mut _;
+        sub_buffers.push(bytes);
+        (ptr, len)
     }
 }
 
@@ -433,8 +485,13 @@ impl FfiAttributeQueries {
             ulValueLen: template_byte_len,
         });
 
-        nested_backings
-            .push(NestedTemplateBacking { _template: template_box, _sub_buffers: sub_buffers });
+        nested_backings.push(NestedTemplateBacking {
+            _template: template_box,
+            _sub_buffers: sub_buffers,
+            // Query path: sub-buffers are provider-written output bytes,
+            // never Ulong values.
+            _ulong_buffers: Vec::new(),
+        });
 
         Ok(())
     }
@@ -484,6 +541,41 @@ mod ffi_attrs_narrowing_tests {
         let template = ulong_template(1);
         let attrs = FfiAttrs::from_slice(&template).expect("in-range value converts");
         assert_eq!(materialized_ulong(&attrs), 1);
+    }
+
+    #[test]
+    fn ulong_attribute_pvalue_supports_typed_ck_ulong_read() {
+        // A provider may read an integer attribute's pValue via an aligned
+        // CK_ULONG load; byte-Vec backing (align 1) would be UB on that
+        // read (same class as the single-ulong pParameter misalignment
+        // Miri caught in mechanism.rs). The typed read below fires under
+        // Miri on misaligned backing and passes on NativeAllocation.
+        let template = ulong_template(0x0A0B_0C0D);
+        let attrs = FfiAttrs::from_slice(&template).expect("in-range value converts");
+        // E0793: CK_ATTRIBUTE is packed on Windows; copy fields by value.
+        let (pvalue, len) = (attrs.attrs[0].pValue, attrs.attrs[0].ulValueLen);
+        assert_eq!(len as usize, std::mem::size_of::<cryptoki_sys::CK_ULONG>());
+        let value = unsafe { *(pvalue as *const cryptoki_sys::CK_ULONG) };
+        assert_eq!(value as u64, 0x0A0B_0C0D);
+    }
+
+    #[test]
+    fn nested_ulong_subvalue_supports_typed_ck_ulong_read() {
+        // Same aligned-load rule for nested-template Ulong sub-values.
+        let template = [CkAttribute {
+            attr_type: CkAttributeType::WRAP_TEMPLATE,
+            value: Some(CkAttributeValue::NestedTemplate(vec![CkAttribute {
+                attr_type: CkAttributeType::CLASS,
+                value: Some(CkAttributeValue::Ulong(4)),
+            }])),
+        }];
+        let attrs = FfiAttrs::from_slice(&template).expect("nested template converts");
+        let (pvalue, len) = (attrs.attrs[0].pValue, attrs.attrs[0].ulValueLen);
+        assert_eq!(len as usize, std::mem::size_of::<cryptoki_sys::CK_ATTRIBUTE>());
+        let sub = unsafe { *(pvalue as *const cryptoki_sys::CK_ATTRIBUTE) };
+        assert_eq!(sub.ulValueLen as usize, std::mem::size_of::<cryptoki_sys::CK_ULONG>());
+        let value = unsafe { *(sub.pValue as *const cryptoki_sys::CK_ULONG) };
+        assert_eq!(value as u64, 4);
     }
 
     #[test]

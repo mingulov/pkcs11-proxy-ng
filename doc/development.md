@@ -141,23 +141,33 @@ Corpus coverage: `cargo +nightly fuzz coverage <target>` (needs the
 `llvm-tools` nightly component), then `llvm-cov report` against the binary
 under `target/<triple>/coverage/<triple>/release/<target>`.
 
-**Miri**: the pure width/attribute/mechanism logic, the shim's
-raw-pointer parse paths, the shim's pure `tests::` suites (ABI audit,
+**Miri**: the types crate (all but the TOML-bound registry suite), the
+shim's raw-pointer parse paths and pure `tests::` suites (ABI audit,
 null-pointer handling, classifier, dispatch shape, endpoint parsing,
-regressions, resource limits), and the backend lifecycle/registry
-state-machine suites run under the UB interpreter. Daemon/socket/fs
-dependent tests self-gate (`#[cfg(not(miri))]` modules,
-`cfg_attr(miri, ignore)`, or `cfg!(miri)` skips); the daemon probe is a
-no-op under Miri (daemon-down fallback, same as unreachable-daemon).
-The exact filter lists live in `nightly.yml` (keep them in sync when
-adding UB-relevant pure logic).
+poison recovery, regressions, resource limits), and the backend
+lifecycle/registry state-machine, FFI-materialization, and `mock::`
+(per-file lines; the one-line form stalls) suites run under the UB
+interpreter. Five registry/official-list matrix tests are Miri-ignored
+with measured notes (each 240+ s standalone; zero `unsafe` in `mock/`).
+Daemon/socket/fs dependent tests self-gate
+(`#[cfg(not(miri))]` modules, `cfg_attr(miri, ignore)`, or `cfg!(miri)`
+skips); the daemon probe is a no-op under Miri (daemon-down fallback,
+same as unreachable-daemon). The FFI-materialization line runs with
+`-Zmiri-tree-borrows`: its Pin-stabilized capture-then-move idiom is
+sound but Stacked-dirty, and Tree Borrows caught a real `pParameter`
+misalignment there. The exact filter lists live in `nightly.yml` (keep
+them in sync when adding UB-relevant pure logic).
 
-**Kani**: `crates/types/src/kani_proofs.rs` proves the width-translation
-"never silently truncate" laws plus the attribute-classifier laws
-(scalar-shape disjointness, template⇒array-flag,
-allocation-size⇒ulong, secret-classification totality) over the whole
-input space. Run `cargo kani -p pkcs11-proxy-ng-types`
-(pinned verifier; see `nightly.yml`).
+**Kani**: `crates/types/src/kani_proofs.rs` proves 30 harnesses over the
+whole input space: width-translation "never silently truncate" laws,
+attribute-classifier laws, mechanism vendor/flag laws, `SecretBytes`
+length/content laws, output/session/slot/object gating laws, `CkRv`
+ok/err + vendor-range + spec-table laws, `CkInBuf` NULL/bytes pointer
+laws, and the official-mechanism table law. Run
+`cargo kani -p pkcs11-proxy-ng-types` (pinned verifier; see
+`nightly.yml`). Registry-query and proto-crate proofs were attempted
+and removed as CBMC-intractable (nondet-SipHash blowup; details in
+`kani_proofs.rs`) — those edges stay covered by fuzzing instead.
 
 **Coverage ratchet**: `cargo llvm-cov --workspace` must stay at or above
 84% lines (`--fail-under-lines 84` in `nightly.yml`; baseline 85.20% on

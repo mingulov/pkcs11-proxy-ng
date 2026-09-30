@@ -2076,6 +2076,10 @@ mod output_params_equal_tests {
     // the workspace print/dbg deny.
     #[allow(clippy::print_stderr)]
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "ns/iter perf budget meaningless under interpretation; covered natively"
+    )]
     fn mechanism_clone_hotspot_measured() {
         // W1-C5-B06/W1-L13-05/W1-L13-06: measured note for the
         // per-Init backing clones. Prints ns/iter with `-- --nocapture`;

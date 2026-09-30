@@ -130,10 +130,15 @@ impl FfiMechanism {
     /// **SAFETY INVARIANT (callers must uphold):** `ptr` must point into the
     /// `backing` value (typically `Box::into_raw(...)` or the data pointer of
     /// a `Vec` stored inside `backing`), so that the pointer remains valid for
-    /// as long as `_backing` is held. This helper does not enforce the
-    /// invariant; it only packages the fields into the `CK_MECHANISM` shape
-    /// so the 70+ construction sites in `mechanism_to_ffi` don't repeat the
-    /// same struct-literal boilerplate.
+    /// as long as `_backing` is held. Additionally `ptr` must satisfy the
+    /// alignment of whatever type the provider reads through it: a byte-`Vec`
+    /// data pointer (alignment 1) is UB backing for an integer or struct
+    /// read — materialize those via [`Self::from_box`] with a typed
+    /// `NativeAllocation` instead (the MacGeneral/Extract/ObjectHandle arms
+    /// were fixed for exactly this after Miri flagged the misalignment).
+    /// This helper does not enforce the invariant; it only packages the
+    /// fields into the `CK_MECHANISM` shape so the 70+ construction sites in
+    /// `mechanism_to_ffi` don't repeat the same struct-literal boilerplate.
     fn with_param(
         mech_type: cryptoki_sys::CK_MECHANISM_TYPE,
         ptr: *mut std::ffi::c_void,
@@ -831,8 +836,14 @@ impl FfiSp800108DerivedKeys {
 enum FfiParamBacking {
     /// Parameterless mechanism — no backing needed.
     None,
-    /// Raw byte buffer (IV params, raw params, MacGeneral ulong, etc.)
+    /// Raw byte buffer (IV params, raw params). Byte reads only: the
+    /// allocation carries alignment 1, so this variant must NEVER back a
+    /// `pParameter` the provider reads as an integer or struct (Miri found
+    /// the MacGeneral/Extract/ObjectHandle arms doing exactly that).
     Bytes(Zeroizing<Vec<u8>>),
+    /// Single native `CK_ULONG` parameter (MacGeneral, Extract,
+    /// ObjectHandle): typed, aligned `NativeAllocation`, not a byte Vec.
+    Ulong(NativeAllocation<cryptoki_sys::CK_ULONG>),
     /// Scalar-only C struct stored as a pinned Box (PSS, RC5, RC2MacGeneral, etc.)
     Pss(NativeAllocation<cryptoki_sys::CK_RSA_PKCS_PSS_PARAMS>),
     Rc5(NativeAllocation<cryptoki_sys::CK_RC5_PARAMS>),
@@ -1075,14 +1086,14 @@ enum FfiParamBacking {
     X3dhInitiate(
         NativeAllocation<cryptoki_sys::CK_X3DH_INITIATE_PARAMS>,
         Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
+        NativeAllocation<cryptoki_sys::CK_ULONG>,
     ),
     X3dhRespond(
         NativeAllocation<cryptoki_sys::CK_X3DH_RESPOND_PARAMS>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
-        Zeroizing<Vec<u8>>,
+        NativeAllocation<cryptoki_sys::CK_ULONG>,
+        NativeAllocation<cryptoki_sys::CK_ULONG>,
+        NativeAllocation<cryptoki_sys::CK_ULONG>,
+        NativeAllocation<cryptoki_sys::CK_ULONG>,
     ),
     X2RatchetInitialize(
         NativeAllocation<cryptoki_sys::CK_X2RATCHET_INITIALIZE_PARAMS>,
@@ -1646,31 +1657,17 @@ fn mechanism_to_ffi_at_depth(mechanism: &CkMechanism, depth: u8) -> CkResult<Ffi
         }
 
         // -- MacGeneral: single CK_ULONG -----------------------------------
+        // Typed allocation: the provider reads `*(CK_ULONG*)pParameter`,
+        // so a byte Vec (alignment 1) is UB — Miri caught it.
         CkMechanismParams::MacGeneral(p) => {
             let val = narrow_wire_ulong(p.mac_length)?;
-            let mut buf = val.to_ne_bytes().to_vec();
-            let ptr = buf.as_mut_ptr() as *mut std::ffi::c_void;
-            let len = buf.len();
-            Ok(FfiMechanism::with_param(
-                mech_type,
-                ptr,
-                len,
-                FfiParamBacking::Bytes(Zeroizing::new(buf)),
-            ))
+            Ok(FfiMechanism::from_box(mech_type, Box::new(val), FfiParamBacking::Ulong))
         }
 
         // -- Extract: single CK_ULONG bit position --------------------------
         CkMechanismParams::Extract(p) => {
             let val = narrow_wire_ulong(p.bit_position)?;
-            let mut buf = val.to_ne_bytes().to_vec();
-            let ptr = buf.as_mut_ptr() as *mut std::ffi::c_void;
-            let len = buf.len();
-            Ok(FfiMechanism::with_param(
-                mech_type,
-                ptr,
-                len,
-                FfiParamBacking::Bytes(Zeroizing::new(buf)),
-            ))
+            Ok(FfiMechanism::from_box(mech_type, Box::new(val), FfiParamBacking::Ulong))
         }
 
         // -- KeyDerivationStringData: struct with pointer to data -----------
@@ -1729,15 +1726,7 @@ fn mechanism_to_ffi_at_depth(mechanism: &CkMechanism, depth: u8) -> CkResult<Ffi
         // -- ObjectHandle: single CK_OBJECT_HANDLE ----------------------------
         CkMechanismParams::ObjectHandle(p) => {
             let val = narrow_wire_ulong(p.handle.0)?;
-            let mut buf = val.to_ne_bytes().to_vec();
-            let ptr = buf.as_mut_ptr() as *mut std::ffi::c_void;
-            let len = buf.len();
-            Ok(FfiMechanism::with_param(
-                mech_type,
-                ptr,
-                len,
-                FfiParamBacking::Bytes(Zeroizing::new(buf)),
-            ))
+            Ok(FfiMechanism::from_box(mech_type, Box::new(val), FfiParamBacking::Ulong))
         }
 
         // -- SignAdditionalContext: CK_SIGN_ADDITIONAL_CONTEXT (hash == 0) or
@@ -2658,9 +2647,11 @@ fn mechanism_to_ffi_at_depth(mechanism: &CkMechanism, depth: u8) -> CkResult<Ffi
             // pOnetime_key is a pointer in the C struct — but it represents an
             // object handle packed as a pointer. In PKCS#11, CK_X3DH_INITIATE_PARAMS
             // has pOnetime_key as *mut CK_BYTE. We pass the handle as a pointer.
-            let mut onetime_buf =
-                Zeroizing::new((narrow_wire_ulong(p.onetime_key_handle.0)?).to_ne_bytes().to_vec());
-            let onetime_ptr = onetime_buf.as_mut_ptr();
+            // Typed backing: the buffer holds a narrowed handle the provider
+            // may read via an aligned CK_ULONG load (same rule as Ulong
+            // pParameter/attribute values); byte-Vec backing would be UB.
+            let onetime_buf = NativeAllocation::new(narrow_wire_ulong(p.onetime_key_handle.0)?);
+            let onetime_ptr = onetime_buf.root() as *mut u8;
             let x3dh = Box::new(cryptoki_sys::CK_X3DH_INITIATE_PARAMS {
                 kdf: narrow_wire_ulong(p.kdf)?,
                 pPeer_identity: narrow_wire_ulong(p.peer_identity_handle.0)?,
@@ -2677,25 +2668,23 @@ fn mechanism_to_ffi_at_depth(mechanism: &CkMechanism, depth: u8) -> CkResult<Ffi
 
         // -- X3DH Respond: struct with 4 pointers + 2 scalars -------------------
         CkMechanismParams::X3dhRespond(p) => {
-            let mut identity_buf =
-                Zeroizing::new((narrow_wire_ulong(p.identity_handle.0)?).to_ne_bytes().to_vec());
-            let mut prekey_buf =
-                Zeroizing::new((narrow_wire_ulong(p.prekey_handle.0)?).to_ne_bytes().to_vec());
-            let mut onetime_buf =
-                Zeroizing::new((narrow_wire_ulong(p.onetime_key_handle.0)?).to_ne_bytes().to_vec());
+            // Typed backing for all four handle buffers (same aligned-load
+            // rule as above; handles are non-secret, so no wiping needed).
+            let identity_buf = NativeAllocation::new(narrow_wire_ulong(p.identity_handle.0)?);
+            let prekey_buf = NativeAllocation::new(narrow_wire_ulong(p.prekey_handle.0)?);
+            let onetime_buf = NativeAllocation::new(narrow_wire_ulong(p.onetime_key_handle.0)?);
             // pInitiator_ephemeral is also a *mut CK_BYTE in the C struct
-            let mut ephem_buf = Zeroizing::new(
-                (narrow_wire_ulong(p.initiator_ephemeral_handle.0)?).to_ne_bytes().to_vec(),
-            );
+            let ephem_buf =
+                NativeAllocation::new(narrow_wire_ulong(p.initiator_ephemeral_handle.0)?);
             // All four buffers have their final size before pointer capture.
             // Each is retained unchanged in the owner until the native call ends.
             let x3dh = Box::new(cryptoki_sys::CK_X3DH_RESPOND_PARAMS {
                 kdf: narrow_wire_ulong(p.kdf)?,
-                pIdentity_id: identity_buf.as_mut_ptr(),
-                pPrekey_id: prekey_buf.as_mut_ptr(),
-                pOnetime_id: onetime_buf.as_mut_ptr(),
+                pIdentity_id: identity_buf.root() as *mut u8,
+                pPrekey_id: prekey_buf.root() as *mut u8,
+                pOnetime_id: onetime_buf.root() as *mut u8,
                 pInitiator_identity: narrow_wire_ulong(p.initiator_identity_handle.0)?,
-                pInitiator_ephemeral: ephem_buf.as_mut_ptr(),
+                pInitiator_ephemeral: ephem_buf.root() as *mut u8,
             });
             Ok(FfiMechanism::from_box(mech_type, x3dh, |b| {
                 FfiParamBacking::X3dhRespond(b, identity_buf, prekey_buf, onetime_buf, ephem_buf)
