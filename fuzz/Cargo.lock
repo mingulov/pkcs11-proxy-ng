@@ -454,6 +454,7 @@ dependencies = [
  "libfuzzer-sys",
  "pkcs11-proxy-ng-proto",
  "pkcs11-proxy-ng-types",
+ "prost",
 ]
 
 [[package]]

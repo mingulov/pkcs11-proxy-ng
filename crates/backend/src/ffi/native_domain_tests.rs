@@ -117,6 +117,10 @@ fn native_domain_global_serial_second_load_rejected_and_rollback() {
 /// surface its own error, never AlreadyReserved.
 #[test]
 fn native_domain_global_serial_path_variants_refused_before_loader() {
+    if cfg!(miri) {
+        eprintln!("skipping: real dlopen is unsupported under Miri; covered natively");
+        return;
+    }
     let _serial = serial_domain_test_guard();
     let first = reserve_for_construction().expect("first reservation succeeds");
     let missing = std::path::Path::new("/nonexistent-pkcs11-proxy-ng-test-module.so");
@@ -179,6 +183,10 @@ fn native_domain_global_serial_path_variants_refused_before_loader() {
 /// clean (Retiring window, then exact-epoch release).
 #[test]
 fn native_domain_global_serial_active_contention_denies_load() {
+    if cfg!(miri) {
+        eprintln!("skipping: real dlopen is unsupported under Miri; covered natively");
+        return;
+    }
     let _serial = serial_domain_test_guard();
     let first = reserve_for_construction().expect("first reservation succeeds");
     first.activate().expect("owner activates");
@@ -199,6 +207,10 @@ fn native_domain_global_serial_active_contention_denies_load() {
 /// Restores Vacant afterwards.
 #[test]
 fn native_domain_global_serial_retiring_contention_denies_load() {
+    if cfg!(miri) {
+        eprintln!("skipping: real dlopen is unsupported under Miri; covered natively");
+        return;
+    }
     let _serial = serial_domain_test_guard();
     let first = reserve_for_construction().expect("first reservation succeeds");
     first.activate().expect("owner activates");
@@ -268,6 +280,10 @@ fn native_domain_global_serial_constructor_race_exactly_one_wins() {
 /// handle (multiple logical clients, one native domain/epoch).
 #[test]
 fn native_domain_arc_clones_share_one_lifecycle_domain() {
+    if cfg!(miri) {
+        eprintln!("skipping: test backend needs dlopen; covered natively");
+        return;
+    }
     let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
     let backend = FfiBackend::test_backend_with_tables(
         functions.as_mut() as *mut cryptoki_sys::CK_FUNCTION_LIST,
@@ -543,6 +559,10 @@ fn native_domain_global_serial_release_drop_recycles_after_full_retirement() {
     // backend (Release path) leaves the slot Vacant and reusable once
     // every field — dependent graphs, `dlclose`, permit, lifecycle,
     // sentinel — has retired.
+    if cfg!(miri) {
+        eprintln!("skipping: managed backend needs dlopen/dlclose; covered natively");
+        return;
+    }
     let _serial = serial_domain_test_guard();
     let permit = reserve_for_construction().expect("first reservation succeeds");
     permit.activate().expect("owner activates");

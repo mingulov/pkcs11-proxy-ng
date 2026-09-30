@@ -736,6 +736,7 @@ fn all_function_list_pointers_are_non_null() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "source-text audit needs fs; covered natively")]
 fn catch_panics_source_coverage() {
     // W1-C7-02: walk the WHOLE src tree (not a hardcoded file list) so a new
     // handler cannot slip an un-gated export past this gate. Mirrors the H5
@@ -1035,17 +1036,21 @@ fn catch_panics_gate_trips_on_ungated_export() {
 
     // The walk itself must cover the whole tree: a nested helper file (never
     // in the old hardcoded list) and the crate root must both be visited.
-    let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut files = Vec::new();
-    collect_rs_files(&src_dir, &mut files);
-    assert!(
-        files.iter().any(|p| p.ends_with("helpers/message_params.rs")),
-        "whole-tree walk must reach nested dispatch helpers"
-    );
-    assert!(
-        files.iter().any(|p| p.ends_with("src/lib.rs")),
-        "whole-tree walk must reach the crate root"
-    );
+    // Miri isolates the filesystem, so this block runs natively only; the
+    // pure per-export checks above still run under the interpreter.
+    if !cfg!(miri) {
+        let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        collect_rs_files(&src_dir, &mut files);
+        assert!(
+            files.iter().any(|p| p.ends_with("helpers/message_params.rs")),
+            "whole-tree walk must reach nested dispatch helpers"
+        );
+        assert!(
+            files.iter().any(|p| p.ends_with("src/lib.rs")),
+            "whole-tree walk must reach the crate root"
+        );
+    }
 }
 
 /// Pinned count of non-stub `extern "C"` exports. Bumped only together with a
@@ -1618,25 +1623,29 @@ fn per_export_runtime_panic_boundary() {
 
     // No silent omission: the table must name every non-stub export defined in
     // the source tree, exactly (both directions), and match the pinned count.
-    let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let tests_dir = src_dir.join("tests");
-    let mut files = Vec::new();
-    collect_rs_files(&src_dir, &mut files);
-    files.retain(|p| !p.starts_with(&tests_dir));
-    let mut defined: Vec<String> = files
-        .iter()
-        .map(|p| std::fs::read_to_string(p).expect("read shim source"))
-        .flat_map(|src| source_export_names(&src))
-        .collect();
-    defined.sort();
-    let mut tabled: Vec<String> = cases.iter().map(|(name, _)| name.to_string()).collect();
-    tabled.sort();
-    assert_eq!(tabled, defined, "panic table must cover every non-stub export exactly");
-    assert_eq!(
-        cases.len(),
-        EXPECTED_NON_STUB_EXPORT_COUNT,
-        "pinned export count must match the table"
-    );
+    // Miri isolates the filesystem: this source-walk runs natively only. The
+    // runtime injection loop below still runs under the interpreter.
+    if !cfg!(miri) {
+        let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let tests_dir = src_dir.join("tests");
+        let mut files = Vec::new();
+        collect_rs_files(&src_dir, &mut files);
+        files.retain(|p| !p.starts_with(&tests_dir));
+        let mut defined: Vec<String> = files
+            .iter()
+            .map(|p| std::fs::read_to_string(p).expect("read shim source"))
+            .flat_map(|src| source_export_names(&src))
+            .collect();
+        defined.sort();
+        let mut tabled: Vec<String> = cases.iter().map(|(name, _)| name.to_string()).collect();
+        tabled.sort();
+        assert_eq!(tabled, defined, "panic table must cover every non-stub export exactly");
+        assert_eq!(
+            cases.len(),
+            EXPECTED_NON_STUB_EXPORT_COUNT,
+            "pinned export count must match the table"
+        );
+    }
 
     // Run every export under injection; collect all violations for one report.
     let mut failures = Vec::new();
@@ -1690,6 +1699,7 @@ fn source_export_names(src: &str) -> Vec<String> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "source-text audit needs fs; covered natively")]
 fn shim_source_never_formats_pin_data() {
     // H5: walk the WHOLE dispatch tree (not a hardcoded file list) so a new
     // handler cannot slip PIN logging past this gate, and broaden the patterns.
@@ -1855,6 +1865,7 @@ fn has_allow_paired_glob(src: &str) -> bool {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "source-text audit needs fs; covered natively")]
 fn dispatch_has_no_allow_paired_glob_imports() {
     // W1-L12-05: every dispatch file imports explicitly — no
     // `use super::*` (or other glob) hiding behind

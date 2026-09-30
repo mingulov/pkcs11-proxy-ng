@@ -21,20 +21,30 @@ fn shim_state_test_guard() -> MutexGuard<'static, ()> {
 mod abi_audit;
 mod attribute_classification;
 #[cfg(unix)]
+#[cfg(not(miri))] // live hook-daemon Unix socket; covered natively
 mod control_channel_live;
+#[cfg(not(miri))] // in-process daemon stack (sockets); covered natively
 mod cross_abi;
+#[cfg(not(miri))] // in-process daemon stack (sockets); covered natively
 mod cross_width_live;
 mod dispatch_shape;
 mod endpoint;
+#[cfg(not(miri))] // C_Initialize spins a tokio runtime + daemon dial; covered natively
 mod init_args;
+#[cfg(not(miri))] // binds TcpListeners / dials daemons; covered natively
 mod interface;
 mod null_pointers;
+#[cfg(not(miri))] // binds TcpListeners (tokio); covered natively
 mod output_semantics;
+#[cfg(not(miri))] // thread-scope + panic-join too slow under Miri (>90 s/test); covered natively
 mod poison_recovery;
 mod regression;
 mod resource_limits;
+#[cfg(not(miri))] // live oracle daemon; covered natively
 mod retained_oracle_live;
+#[cfg(not(miri))] // real SoftHSM2 provider + daemon; covered natively
 mod softhsm_gcm;
+#[cfg(not(miri))] // shared daemon fixture; covered natively
 mod wait_matrix;
 
 fn empty_interface() -> CK_INTERFACE {

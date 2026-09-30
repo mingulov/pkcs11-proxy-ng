@@ -12,6 +12,7 @@
 //! truncate" laws over all inputs (the unit + randomized law tests in
 //! `width.rs` cover examples; these cover the whole input space).
 
+use crate::attribute::{CkAttributeType, is_value_bearing_secret};
 use crate::width::*;
 
 fn sym_width() -> usize {
@@ -153,4 +154,47 @@ fn checked_narrow_sound_and_complete() {
 fn narrow_u32_matches_primitive() {
     let v: u32 = kani::any();
     kani::assert(narrow_u32_to_u8(v).ok() == u8::try_from(v).ok(), "matches primitive");
+}
+
+// ── Attribute-classifier laws (K1) ──────────────────────────────────────
+// The width bridge (ADR-0011 D10) routes attribute values by these
+// predicates; a misclassification is invisible at same width but corrupts
+// values across an ABI boundary. The fuzz harness asserts these over
+// examples; these proofs cover all 2^64 type ids.
+
+/// Scalar shapes are disjoint: no id is two of bool/ulong/ulong-array.
+#[kani::proof]
+fn attr_scalar_kinds_disjoint() {
+    let t = CkAttributeType(kani::any());
+    let n = [t.is_bool(), t.is_ulong(), t.is_ulong_array()].iter().filter(|b| **b).count();
+    kani::assert(n <= 1, "scalar kinds disjoint");
+}
+
+/// Nested-template ids always carry the CKF_ARRAY_ATTRIBUTE flag.
+#[kani::proof]
+fn attr_template_implies_array_flag() {
+    let t = CkAttributeType(kani::any());
+    if t.is_attribute_template() {
+        kani::assert(t.is_array_attribute(), "template implies array flag");
+    }
+}
+
+/// Allocation-size ids are width-bridged scalars: the absurd-allocation
+/// guard (W1-C9-11) only ever applies to `is_ulong` values.
+#[kani::proof]
+fn attr_allocation_size_subset_of_ulong() {
+    let t = CkAttributeType(kani::any());
+    if t.is_allocation_size() {
+        kani::assert(t.is_ulong(), "allocation-size implies ulong scalar");
+    }
+}
+
+/// Secret classification is total (no panic, free) and deterministic.
+#[kani::proof]
+fn attr_secret_classification_deterministic() {
+    let t = CkAttributeType(kani::any());
+    kani::assert(
+        is_value_bearing_secret(t) == is_value_bearing_secret(t),
+        "secret classification deterministic",
+    );
 }

@@ -114,18 +114,25 @@ cargo install cargo-fuzz --locked
 The nightly pipeline runs three complementary dynamic gates; all reproduce
 locally with the tooling above.
 
-**Fuzz smoke** (`fuzz/`): four libFuzzer harnesses over untrusted-input
+**Fuzz smoke** (`fuzz/`): five libFuzzer harnesses over untrusted-input
 edges — `fuzz_width` (cross-ABI `CK_ULONG` translation),
 `fuzz_registry` (registry TOML load + queries),
-`fuzz_attribute` (attribute proto edge incl. the D8 nesting refusal), and
-`fuzz_protected_decode` (pre-decode wire scanner). Each asserts totality
-(typed errors, never a panic) plus edge-specific round-trip invariants.
+`fuzz_attribute` (attribute proto edge incl. the D8 nesting refusal),
+`fuzz_mechanism` (hostile-wire `Mechanism` decode + `CkMechanism`
+round-trip over all 79 param shapes), and `fuzz_protected_decode`
+(pre-decode wire scanner). Each asserts totality (typed errors, never a
+panic) plus edge-specific round-trip invariants. Every target ships
+checked-in seeds (`fuzz/seeds/<target>/`); the parser-shaped targets
+add libFuzzer dictionaries (`fuzz/dict/*.dict`).
 
 ```bash
 cargo +nightly fuzz build
-mkdir -p fuzz/corpus/fuzz_registry
-cp fuzz/seeds/fuzz_registry/default.toml fuzz/corpus/fuzz_registry/
+for t in fuzz_width fuzz_registry fuzz_attribute fuzz_protected_decode fuzz_mechanism; do
+  mkdir -p fuzz/corpus/$t
+  cp fuzz/seeds/$t/* fuzz/corpus/$t/
+done
 cargo +nightly fuzz run fuzz_width -- -max_total_time=90
+cargo +nightly fuzz run fuzz_registry -- -max_total_time=90 -dict=fuzz/dict/registry.dict
 ```
 
 Crashes land in `fuzz/artifacts/<target>/` (git-ignored); reproduce one
@@ -134,10 +141,23 @@ Corpus coverage: `cargo +nightly fuzz coverage <target>` (needs the
 `llvm-tools` nightly component), then `llvm-cov report` against the binary
 under `target/<triple>/coverage/<triple>/release/<target>`.
 
-**Miri**: the pure width/attribute/mechanism logic plus the shim's
-raw-pointer parse paths run under the UB interpreter; tests needing real
-time/FFI stay `cfg_attr(miri, ignore)`d. The exact filter lists live in
-`nightly.yml` (keep them in sync when adding UB-relevant pure logic).
+**Miri**: the pure width/attribute/mechanism logic, the shim's
+raw-pointer parse paths, the shim's pure `tests::` suites (ABI audit,
+null-pointer handling, classifier, dispatch shape, endpoint parsing,
+regressions, resource limits), and the backend lifecycle/registry
+state-machine suites run under the UB interpreter. Daemon/socket/fs
+dependent tests self-gate (`#[cfg(not(miri))]` modules,
+`cfg_attr(miri, ignore)`, or `cfg!(miri)` skips); the daemon probe is a
+no-op under Miri (daemon-down fallback, same as unreachable-daemon).
+The exact filter lists live in `nightly.yml` (keep them in sync when
+adding UB-relevant pure logic).
+
+**Kani**: `crates/types/src/kani_proofs.rs` proves the width-translation
+"never silently truncate" laws plus the attribute-classifier laws
+(scalar-shape disjointness, template⇒array-flag,
+allocation-size⇒ulong, secret-classification totality) over the whole
+input space. Run `cargo kani -p pkcs11-proxy-ng-types`
+(pinned verifier; see `nightly.yml`).
 
 **Coverage ratchet**: `cargo llvm-cov --workspace` must stay at or above
 84% lines (`--fail-under-lines 84` in `nightly.yml`; baseline 85.20% on
