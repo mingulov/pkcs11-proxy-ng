@@ -219,12 +219,10 @@ if [[ "$RUN_MODE" == "docker" ]]; then
         ${BE_EXTRA_DOCKER_ARGS:-} \
         "$IMAGE" \
         cargo test --target "$TARGET" -p pkcs11-proxy-ng \
-            --test shim_c_abi_mechanism_out_test -- --ignored \
-            --skip loaded_shim_writes_mechanism_out_to_caller_stack_after_encrypt_wrap_and_derive
+            --test shim_c_abi_mechanism_out_test -- --ignored
 else
     PKCS11_PROXY_SHIM_LIB="$SHIM_SO" be_cargo test --target "$TARGET" -p pkcs11-proxy-ng \
-        --test shim_c_abi_mechanism_out_test -- --ignored \
-        --skip loaded_shim_writes_mechanism_out_to_caller_stack_after_encrypt_wrap_and_derive
+        --test shim_c_abi_mechanism_out_test -- --ignored
 fi
 
 echo "[be-qemu] ALL GREEN on $TARGET."

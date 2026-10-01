@@ -28,6 +28,9 @@ establish parity. Investigate every changed outcome before accepting a release.
   if it affects the published support claim.
 - An accepted limitation must be explained in the
   [support matrix](beta-support-matrix.md) with its evidence.
+- A provider family whose backend emits mechanism output only after the `*Init`
+  call (delayed output) needs its own direct-vs-proxied evidence before the
+  support matrix may claim it, per the delayed-output boundary recorded there.
 
 Do not change the proxy to hide a provider result. The proxy must preserve
 backend `CK_RV` values and exact output behavior; valid providers may choose

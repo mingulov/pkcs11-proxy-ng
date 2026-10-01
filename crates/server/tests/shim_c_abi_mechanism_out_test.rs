@@ -4,11 +4,13 @@
 //! End-to-end shim C ABI coverage for HSM-mutated mechanism parameters.
 //!
 //! This test loads `libpkcs11_proxy_ng_shim.so` with `dlopen`, calls through
-//! the exported PKCS#11 function list, and verifies that the caller's
-//! stack-owned `CK_GCM_PARAMS` receives delayed generated-IV writeback after
-//! `C_Encrypt` and `C_WrapKey`, that SP800-108 nested `CK_DERIVED_KEY` handles
-//! are written back through `C_DeriveKey` and invalidated when their owning
-//! session closes, and that slot-event lifecycle errors survive the loaded shim
+//! the exported PKCS#11 function list, and verifies the delayed-output
+//! boundary: `C_Encrypt` never writes into `C_EncryptInit`-scope caller memory
+//! (W1-C6-01 — the shim retains no Init caller pointer for a later call to
+//! use), while `C_WrapKey` writes delayed generated-IV output into the live
+//! caller `CK_GCM_PARAMS`, SP800-108 nested `CK_DERIVED_KEY` handles are
+//! written back through `C_DeriveKey` and invalidated when their owning session
+//! closes, and slot-event lifecycle errors survive the loaded shim
 //! function-list path. It also verifies that provider mechanism-info flags are
 //! returned through a real caller-owned `CK_MECHANISM_INFO` stack struct without
 //! inventing workflow flags. Message Begin/Next coverage exercises modelled
@@ -543,9 +545,16 @@ async fn loaded_shim_rejects_unsafe_official_lengthless_parameter_shapes() {
     }
 }
 
+/// Loaded-shim leg for the delayed-Encrypt-output boundary (W1-C6-01):
+/// even when the backend produces a generated GCM IV after Init and the
+/// transport carries it, `C_Encrypt` must leave `C_EncryptInit`-scope caller
+/// memory untouched — the shim retains no Init caller pointer for a later
+/// call to use. Live-call writeback is covered by
+/// `loaded_shim_writes_wrap_delayed_iv_to_live_caller_stack` and
+/// `loaded_shim_writes_derive_handles_to_live_caller_stack`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires a built libpkcs11_proxy_ng_shim.so; run cargo build -p pkcs11-proxy-ng-shim first"]
-async fn loaded_shim_writes_mechanism_out_to_caller_stack_after_encrypt_wrap_and_derive() {
+async fn loaded_shim_leaves_init_scope_encrypt_params_untouched_after_encrypt() {
     let _guard = SHIM_C_ABI_LOCK.get_or_init(|| Mutex::new(())).lock().await;
     let Some(shim_path) = find_shim_library() else {
         eprintln!(
@@ -557,36 +566,19 @@ async fn loaded_shim_writes_mechanism_out_to_caller_stack_after_encrypt_wrap_and
 
     let encrypt_generated_iv =
         vec![0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xDB];
-    let wrap_generated_iv =
-        vec![0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xEB];
     const CKM_BATON_KEY_GEN: CK_MECHANISM_TYPE = 0x0000_1030;
-    const CKM_SP800_108_COUNTER_KDF: CK_MECHANISM_TYPE = 0x0000_03AC;
-    const CKM_SHA256_HMAC: CK_SP800_108_PRF_TYPE = 0x0000_0251;
-    const CK_SP800_108_ITERATION_VARIABLE: CK_PRF_DATA_TYPE = 0x0000_0001;
 
     let backend = Arc::new(MockBackend::new(
         vec![CkSlotId(0)],
-        vec![
-            CkMechanismType::AES_GCM,
-            CkMechanismType(CKM_SP800_108_COUNTER_KDF as u64),
-            CkMechanismType(CKM_BATON_KEY_GEN as u64),
-        ],
+        vec![CkMechanismType::AES_GCM, CkMechanismType(CKM_BATON_KEY_GEN as u64)],
     ));
+    // The backend produces delayed IV output after Init and the transport
+    // carries it; the shim must still not write it into Init-scope memory.
     backend.set_encrypt_exact_output(Some(CkMechanismParams::Gcm(GcmParams {
         iv: encrypt_generated_iv.clone(),
         iv_bits: 96,
         iv_buffer_len: encrypt_generated_iv.len() as u64,
         aad: b"aad".to_vec().into(),
-        tag_bits: 128,
-
-        iv_null: false,
-        aad_null: false,
-    })));
-    backend.set_wrap_key_exact_output(Some(CkMechanismParams::Gcm(GcmParams {
-        iv: wrap_generated_iv.clone(),
-        iv_bits: 96,
-        iv_buffer_len: wrap_generated_iv.len() as u64,
-        aad: b"wrap-aad".to_vec().into(),
         tag_bits: 128,
 
         iv_null: false,
@@ -612,12 +604,9 @@ async fn loaded_shim_writes_mechanism_out_to_caller_stack_after_encrypt_wrap_and
         let c_open_session = functions.C_OpenSession.expect("C_OpenSession");
         let c_close_session = functions.C_CloseSession.expect("C_CloseSession");
         let c_create_object = functions.C_CreateObject.expect("C_CreateObject");
-        let c_destroy_object = functions.C_DestroyObject.expect("C_DestroyObject");
         let c_wait_for_slot_event = functions.C_WaitForSlotEvent.expect("C_WaitForSlotEvent");
         let c_encrypt_init = functions.C_EncryptInit.expect("C_EncryptInit");
         let c_encrypt = functions.C_Encrypt.expect("C_Encrypt");
-        let c_wrap_key = functions.C_WrapKey.expect("C_WrapKey");
-        let c_derive_key = functions.C_DeriveKey.expect("C_DeriveKey");
 
         let mut event_slot: CK_SLOT_ID = 0xCAFE_BABE;
         assert_eq!(
@@ -680,17 +669,6 @@ async fn loaded_shim_writes_mechanism_out_to_caller_stack_after_encrypt_wrap_and
             pValue: &mut object_class as *mut CK_OBJECT_CLASS as CK_VOID_PTR,
             ulValueLen: std::mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
         }];
-        let mut wrapping_key: CK_OBJECT_HANDLE = 0;
-        assert_eq!(
-            c_create_object(
-                session,
-                template.as_mut_ptr(),
-                template.len() as CK_ULONG,
-                &mut wrapping_key,
-            ),
-            CKR_OK as CK_RV,
-            "C_CreateObject(wrapping key)"
-        );
         let mut key: CK_OBJECT_HANDLE = 0;
         assert_eq!(
             c_create_object(session, template.as_mut_ptr(), template.len() as CK_ULONG, &mut key),
@@ -751,17 +729,126 @@ async fn loaded_shim_writes_mechanism_out_to_caller_stack_after_encrypt_wrap_and
         let expected_ciphertext = plaintext.iter().map(|byte| byte ^ 0x42).collect::<Vec<_>>();
         ciphertext.truncate(ciphertext_len as usize);
         assert_eq!(ciphertext, expected_ciphertext, "mock ciphertext");
+        // W1-C6-01: no cross-call writeback — C_Encrypt receives no mechanism
+        // pointer, so the delayed IV the backend produced has no live caller
+        // target. The Init-scope struct and buffer stay exactly as Init left
+        // them (mirrors the live `output_semantics.rs` boundary tests,
+        // including the PROT_NONE use-after-scope leg).
         let (encrypt_iv_len, encrypt_iv_bits) = (encrypt_gcm.ulIvLen, encrypt_gcm.ulIvBits);
+        assert_eq!(encrypt_iv_len, 0, "W1-C6-01: C_Encrypt must not touch Init-scope params");
+        assert_eq!(encrypt_iv_bits, 96, "Init-scope IV bits unchanged");
         assert_eq!(
-            encrypt_iv_len,
-            encrypt_generated_iv.len() as CK_ULONG,
-            "delayed encrypt IV length"
+            encrypt_iv_buffer, [0_u8; 12],
+            "W1-C6-01: C_Encrypt must not write the IV into Init-scope caller memory"
         );
-        assert_eq!(encrypt_iv_bits, 96, "delayed encrypt IV bits");
+
+        assert_eq!(c_close_session(session), CKR_OK as CK_RV, "C_CloseSession");
+        assert_eq!(c_finalize(std::ptr::null_mut()), CKR_OK as CK_RV, "C_Finalize");
         assert_eq!(
-            encrypt_iv_buffer.as_slice(),
-            encrypt_generated_iv.as_slice(),
-            "delayed encrypt IV writeback"
+            c_wait_for_slot_event(CKF_DONT_BLOCK, &mut event_slot, std::ptr::null_mut()),
+            CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV,
+            "C_WaitForSlotEvent after C_Finalize"
+        );
+        assert_eq!(event_slot, 0xCAFE_BABE, "post-finalize wait must not write pSlot");
+    }
+}
+
+/// Loaded-shim leg for delayed `C_WrapKey` mechanism output: unlike
+/// `C_Encrypt`, `C_WrapKey` carries a live caller mechanism pointer, so the
+/// provider-generated GCM IV is written back into the caller's stack struct
+/// on the data call (size queries stay untouched).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a built libpkcs11_proxy_ng_shim.so; run cargo build -p pkcs11-proxy-ng-shim first"]
+async fn loaded_shim_writes_wrap_delayed_iv_to_live_caller_stack() {
+    let _guard = SHIM_C_ABI_LOCK.get_or_init(|| Mutex::new(())).lock().await;
+    let Some(shim_path) = find_shim_library() else {
+        eprintln!(
+            "[shim_c_abi_mechanism_out_test] shim library not found; \
+             run cargo build -p pkcs11-proxy-ng-shim first"
+        );
+        return;
+    };
+
+    let wrap_generated_iv =
+        vec![0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xEB];
+
+    let backend = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::AES_GCM]));
+    backend.set_wrap_key_exact_output(Some(CkMechanismParams::Gcm(GcmParams {
+        iv: wrap_generated_iv.clone(),
+        iv_bits: 96,
+        iv_buffer_len: wrap_generated_iv.len() as u64,
+        aad: b"wrap-aad".to_vec().into(),
+        tag_bits: 128,
+
+        iv_null: false,
+        aad_null: false,
+    })));
+    let (endpoint, _shutdown) = common_3x::mock_daemon(backend).await;
+    let _endpoint_guard = EnvRestore::set("PKCS11_PROXY_ENDPOINT", &endpoint);
+
+    unsafe {
+        let lib = Library::new(&shim_path).expect("dlopen shim library");
+        let c_get_function_list: Symbol<CGetFunctionList> =
+            lib.get(b"C_GetFunctionList\0").expect("C_GetFunctionList symbol");
+        let mut function_list: CK_FUNCTION_LIST_PTR = std::ptr::null_mut();
+        assert_eq!(c_get_function_list(&mut function_list), CKR_OK as CK_RV, "C_GetFunctionList");
+        assert!(!function_list.is_null(), "C_GetFunctionList returned null");
+        let functions = &*function_list;
+
+        let c_initialize = functions.C_Initialize.expect("C_Initialize");
+        let c_finalize = functions.C_Finalize.expect("C_Finalize");
+        let _finalize_on_drop = FinalizeOnDrop(c_finalize);
+        let c_get_slot_list = functions.C_GetSlotList.expect("C_GetSlotList");
+        let c_open_session = functions.C_OpenSession.expect("C_OpenSession");
+        let c_close_session = functions.C_CloseSession.expect("C_CloseSession");
+        let c_create_object = functions.C_CreateObject.expect("C_CreateObject");
+        let c_wrap_key = functions.C_WrapKey.expect("C_WrapKey");
+
+        assert_eq!(c_initialize(std::ptr::null_mut()), CKR_OK as CK_RV, "C_Initialize");
+
+        let mut slot_count: CK_ULONG = 0;
+        assert_eq!(
+            c_get_slot_list(CK_TRUE, std::ptr::null_mut(), &mut slot_count),
+            CKR_OK as CK_RV,
+            "C_GetSlotList(size)"
+        );
+        assert!(slot_count > 0, "mock daemon should expose at least one token slot");
+        let mut slots = vec![0 as CK_SLOT_ID; slot_count as usize];
+        assert_eq!(
+            c_get_slot_list(CK_TRUE, slots.as_mut_ptr(), &mut slot_count),
+            CKR_OK as CK_RV,
+            "C_GetSlotList(data)"
+        );
+
+        let mut session: CK_SESSION_HANDLE = 0;
+        assert_eq!(
+            c_open_session(slots[0], CKF_SERIAL_SESSION, std::ptr::null_mut(), None, &mut session),
+            CKR_OK as CK_RV,
+            "C_OpenSession"
+        );
+
+        let mut object_class = CKO_SECRET_KEY;
+        let mut template = [CK_ATTRIBUTE {
+            type_: CKA_CLASS,
+            pValue: &mut object_class as *mut CK_OBJECT_CLASS as CK_VOID_PTR,
+            ulValueLen: std::mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
+        }];
+        let mut wrapping_key: CK_OBJECT_HANDLE = 0;
+        assert_eq!(
+            c_create_object(
+                session,
+                template.as_mut_ptr(),
+                template.len() as CK_ULONG,
+                &mut wrapping_key,
+            ),
+            CKR_OK as CK_RV,
+            "C_CreateObject(wrapping key)"
+        );
+        let mut key: CK_OBJECT_HANDLE = 0;
+        assert_eq!(
+            c_create_object(session, template.as_mut_ptr(), template.len() as CK_ULONG, &mut key),
+            CKR_OK as CK_RV,
+            "C_CreateObject(key)"
         );
 
         let mut wrap_iv_buffer = [0_u8; 12];
@@ -819,6 +906,96 @@ async fn loaded_shim_writes_mechanism_out_to_caller_stack_after_encrypt_wrap_and
             wrap_iv_buffer.as_slice(),
             wrap_generated_iv.as_slice(),
             "delayed wrap IV writeback"
+        );
+
+        assert_eq!(c_close_session(session), CKR_OK as CK_RV, "C_CloseSession");
+        assert_eq!(c_finalize(std::ptr::null_mut()), CKR_OK as CK_RV, "C_Finalize");
+    }
+}
+
+/// Loaded-shim leg for `C_DeriveKey` mechanism output: SP800-108 nested
+/// `CK_DERIVED_KEY` handles are written back into the live caller struct,
+/// failures report `CK_INVALID_HANDLE` only for the offending entry, and
+/// derived handles die with their owning session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a built libpkcs11_proxy_ng_shim.so; run cargo build -p pkcs11-proxy-ng-shim first"]
+async fn loaded_shim_writes_derive_handles_to_live_caller_stack() {
+    let _guard = SHIM_C_ABI_LOCK.get_or_init(|| Mutex::new(())).lock().await;
+    let Some(shim_path) = find_shim_library() else {
+        eprintln!(
+            "[shim_c_abi_mechanism_out_test] shim library not found; \
+             run cargo build -p pkcs11-proxy-ng-shim first"
+        );
+        return;
+    };
+
+    const CKM_SP800_108_COUNTER_KDF: CK_MECHANISM_TYPE = 0x0000_03AC;
+    const CKM_SHA256_HMAC: CK_SP800_108_PRF_TYPE = 0x0000_0251;
+    const CK_SP800_108_ITERATION_VARIABLE: CK_PRF_DATA_TYPE = 0x0000_0001;
+
+    let backend = Arc::new(MockBackend::new(
+        vec![CkSlotId(0)],
+        vec![CkMechanismType(CKM_SP800_108_COUNTER_KDF as u64)],
+    ));
+    let (endpoint, _shutdown) = common_3x::mock_daemon(backend).await;
+    let _endpoint_guard = EnvRestore::set("PKCS11_PROXY_ENDPOINT", &endpoint);
+
+    unsafe {
+        let lib = Library::new(&shim_path).expect("dlopen shim library");
+        let c_get_function_list: Symbol<CGetFunctionList> =
+            lib.get(b"C_GetFunctionList\0").expect("C_GetFunctionList symbol");
+        let mut function_list: CK_FUNCTION_LIST_PTR = std::ptr::null_mut();
+        assert_eq!(c_get_function_list(&mut function_list), CKR_OK as CK_RV, "C_GetFunctionList");
+        assert!(!function_list.is_null(), "C_GetFunctionList returned null");
+        let functions = &*function_list;
+
+        let c_initialize = functions.C_Initialize.expect("C_Initialize");
+        let c_finalize = functions.C_Finalize.expect("C_Finalize");
+        let _finalize_on_drop = FinalizeOnDrop(c_finalize);
+        let c_get_slot_list = functions.C_GetSlotList.expect("C_GetSlotList");
+        let c_open_session = functions.C_OpenSession.expect("C_OpenSession");
+        let c_close_session = functions.C_CloseSession.expect("C_CloseSession");
+        let c_create_object = functions.C_CreateObject.expect("C_CreateObject");
+        let c_destroy_object = functions.C_DestroyObject.expect("C_DestroyObject");
+        let c_wait_for_slot_event = functions.C_WaitForSlotEvent.expect("C_WaitForSlotEvent");
+        let c_derive_key = functions.C_DeriveKey.expect("C_DeriveKey");
+
+        let mut event_slot: CK_SLOT_ID = 0xCAFE_BABE;
+
+        assert_eq!(c_initialize(std::ptr::null_mut()), CKR_OK as CK_RV, "C_Initialize");
+
+        let mut slot_count: CK_ULONG = 0;
+        assert_eq!(
+            c_get_slot_list(CK_TRUE, std::ptr::null_mut(), &mut slot_count),
+            CKR_OK as CK_RV,
+            "C_GetSlotList(size)"
+        );
+        assert!(slot_count > 0, "mock daemon should expose at least one token slot");
+        let mut slots = vec![0 as CK_SLOT_ID; slot_count as usize];
+        assert_eq!(
+            c_get_slot_list(CK_TRUE, slots.as_mut_ptr(), &mut slot_count),
+            CKR_OK as CK_RV,
+            "C_GetSlotList(data)"
+        );
+
+        let mut session: CK_SESSION_HANDLE = 0;
+        assert_eq!(
+            c_open_session(slots[0], CKF_SERIAL_SESSION, std::ptr::null_mut(), None, &mut session),
+            CKR_OK as CK_RV,
+            "C_OpenSession"
+        );
+
+        let mut object_class = CKO_SECRET_KEY;
+        let mut template = [CK_ATTRIBUTE {
+            type_: CKA_CLASS,
+            pValue: &mut object_class as *mut CK_OBJECT_CLASS as CK_VOID_PTR,
+            ulValueLen: std::mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
+        }];
+        let mut key: CK_OBJECT_HANDLE = 0;
+        assert_eq!(
+            c_create_object(session, template.as_mut_ptr(), template.len() as CK_ULONG, &mut key),
+            CKR_OK as CK_RV,
+            "C_CreateObject(key)"
         );
 
         let mut additional_value_len = 32 as CK_ULONG;
