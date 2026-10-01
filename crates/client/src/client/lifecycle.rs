@@ -103,8 +103,7 @@ pub struct BackendProbe {
     pub pointer_safe_authenticated_parameters: bool,
     /// Daemon-advertised `mechanism_parameter_transport_version` (R5/F1, S2
     /// §3 monotonic capabilities). `None` against a daemon that predates
-    /// the field (or until the R23 advertisement) — the caller treats it
-    /// as 0 (legacy encoding).
+    /// the field — the caller treats it as 0 (legacy encoding).
     pub mechanism_parameter_transport_version: Option<u32>,
 }
 
@@ -500,9 +499,9 @@ impl Pkcs11Client {
 
     /// Test-only injection for the transport-version cache (R5/F1): the
     /// capability normally arrives via discovery in
-    /// `get_backend_interfaces`, but the daemon stays hard-0 until the R23
-    /// advertisement, so integration tests inject it. Production code must
-    /// never call this.
+    /// `get_backend_interfaces` (v1 since the R23 advertisement); tests
+    /// inject it only to simulate an old daemon's absent advertisement.
+    /// Production code must never call this.
     pub fn set_mechanism_parameter_transport_version_for_tests(&self, version: u32) {
         self.mechanism_parameter_transport_version
             .store(version, std::sync::atomic::Ordering::Release);

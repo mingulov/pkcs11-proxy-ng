@@ -129,9 +129,9 @@ fn clear_mechanism_parameter_transport_version() {
 }
 
 /// Test-only injection for the transport-version snapshot (R5/F1): the
-/// capability normally arrives via discovery in `probe_backend`, but the
-/// daemon stays hard-0 until the R23 advertisement, so integration tests
-/// inject it. Production code must never call this.
+/// capability normally arrives via discovery in `probe_backend` (v1 since
+/// the R23 advertisement); tests inject it only to simulate an old daemon's
+/// absent advertisement. Production code must never call this.
 #[cfg(test)]
 pub(crate) fn set_mechanism_parameter_transport_version_for_tests(version: u32) {
     MECHANISM_PARAMETER_TRANSPORT_VERSION.store(version, Ordering::Release);
