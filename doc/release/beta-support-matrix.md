@@ -123,6 +123,22 @@ These remain valuable but do **not** block or qualify the beta:
 - Error semantics follow the backend; the proxy preserves exact `CK_RV` values
   and does not normalize provider-specific error precedence. See
   [doc/error-reference.md](../error-reference.md).
+- **Delayed mechanism output across Init/operation-split calls:** when a
+  provider generates mechanism output (for example a random GCM IV) only after
+  the `*Init` call returns, the shim delivers provider-generated output solely
+  into caller memory that is live for the call carrying the mechanism pointer.
+  It never writes into `*Init`-scope caller memory from a later call: the shim
+  retains no Init caller pointer, so such a write would be a use-after-scope
+  access to memory the caller may already have freed. Single-call operations
+  that carry their own mechanism pointer (`C_WrapKey`, `C_DeriveKey`) do write
+  provider mechanism output back into the live caller struct. The boundary is
+  pinned by `crates/shim/src/tests/output_semantics.rs` (including a
+  protected-memory use-after-scope probe) and the loaded-shim legs in
+  `crates/server/tests/shim_c_abi_mechanism_out_test.rs`. Per
+  [parity validation](parity-validation.md), a support claim covering a
+  provider family that emits delayed mechanism output additionally requires
+  direct-vs-proxied comparison evidence against such a provider; that evidence
+  has not been recorded yet.
 
 ## How to report incompatibilities
 
