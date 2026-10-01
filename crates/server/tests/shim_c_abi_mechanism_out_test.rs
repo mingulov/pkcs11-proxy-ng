@@ -32,7 +32,9 @@ use cryptoki_sys::*;
 use libloading::{Library, Symbol};
 use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
 use pkcs11_proxy_ng_proto::convert::message_params::MessageParameter;
-use pkcs11_proxy_ng_types::{CkMechanismParams, CkMechanismType, CkSlotId, GcmParams};
+use pkcs11_proxy_ng_types::{
+    CkMechanismParams, CkMechanismType, CkSlotId, GcmParams, PointerBytes,
+};
 use support::{DaemonHarness, ProviderFixture};
 use tokio::sync::Mutex;
 
@@ -580,6 +582,8 @@ async fn loaded_shim_leaves_init_scope_encrypt_params_untouched_after_encrypt() 
         iv_buffer_len: encrypt_generated_iv.len() as u64,
         aad: b"aad".to_vec().into(),
         tag_bits: 128,
+        iv_presence: PointerBytes::from_legacy(&encrypt_generated_iv, false),
+        aad_presence: PointerBytes::from_legacy(b"aad", false),
 
         iv_null: false,
         aad_null: false,
@@ -779,6 +783,8 @@ async fn loaded_shim_writes_wrap_delayed_iv_to_live_caller_stack() {
         iv_buffer_len: wrap_generated_iv.len() as u64,
         aad: b"wrap-aad".to_vec().into(),
         tag_bits: 128,
+        iv_presence: PointerBytes::from_legacy(&wrap_generated_iv, false),
+        aad_presence: PointerBytes::from_legacy(b"wrap-aad", false),
 
         iv_null: false,
         aad_null: false,

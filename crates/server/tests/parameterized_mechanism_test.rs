@@ -34,7 +34,7 @@ use pkcs11_proxy_ng_client::{Pkcs11Client, set_transport_failure_hook};
 use pkcs11_proxy_ng_types::{
     CkAttribute, CkAttributeType, CkAttributeValue, CkKeyType, CkMechanism, CkMechanismFlags,
     CkMechanismParams, CkMechanismType, CkObjectClass, CkObjectHandle, CkResult, CkRv,
-    CkSessionHandle, CkSlotId, CkUserType, GcmParams, IvParams,
+    CkSessionHandle, CkSlotId, CkUserType, GcmParams, IvParams, PointerBytes,
 };
 use support::{
     CKA_DERIVE, CKK_DES3, CKK_GENERIC_SECRET, CKM_AES_CBC_ENCRYPT_DATA, CKM_AES_CTR,
@@ -468,6 +468,8 @@ async fn softhsm_aes_gcm_encrypt_decrypt() -> Result<(), String> {
             iv_buffer_len: iv.len() as u64,
             aad: aad.clone().into(),
             tag_bits: 128,
+            iv_presence: PointerBytes::from_legacy(&iv, false),
+            aad_presence: PointerBytes::from_legacy(&aad, false),
 
             iv_null: false,
             aad_null: false,
@@ -524,6 +526,14 @@ async fn softhsm_aes_gcm_encrypt_decrypt() -> Result<(), String> {
             iv_buffer_len: 12,
             aad: aad.into(),
             tag_bits: 128,
+            iv_presence: PointerBytes::from_legacy(
+                &[0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B],
+                false,
+            ),
+            aad_presence: PointerBytes::from_legacy(
+                b"softhsm2 gcm additional authenticated data",
+                false,
+            ),
 
             iv_null: false,
             aad_null: false,

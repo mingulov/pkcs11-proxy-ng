@@ -884,6 +884,8 @@ mod tests {
                 salt: Vec::new().into(),
                 salt_key_handle: CkObjectHandle(0xDEAD_BEEF),
                 info: Vec::new().into(),
+                salt_presence: PointerBytes::present_copy(&[]),
+                info_presence: PointerBytes::present_copy(&[]),
             })),
         };
         pkcs11_proxy_ng_proto::Mechanism::try_from(&ck).expect("HKDF must convert to proto")

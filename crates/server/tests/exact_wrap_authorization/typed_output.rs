@@ -230,6 +230,8 @@ async fn authenticated_typed_sdk_roundtrips_ordinary_exact_and_unwrap_over_mtls(
             wrap_oid: vec![1; 3],
             ukm: vec![2; 8],
             key_handle: key,
+            wrap_oid_presence: PointerBytes::present_copy(&[1; 3]),
+            ukm_presence: PointerBytes::present_copy(&[2; 8]),
         })),
     };
     let (wrapped, output) = client

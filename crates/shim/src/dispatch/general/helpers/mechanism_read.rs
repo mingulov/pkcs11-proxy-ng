@@ -4,6 +4,7 @@
 //! auditability), plus the shared raw-parameter utilities.
 
 use super::*;
+use pkcs11_proxy_ng_types::PointerBytes;
 use pkcs11_proxy_ng_types::shape_descriptors::{
     FlatDecision, FlatRequest, Operation, OperationContext, OuterKind, ParamAbi, ResolvedShape,
     ShapeResolver, decide_flat,
@@ -649,6 +650,8 @@ unsafe fn read_gcm_struct_params(
     } else {
         unsafe { payload_bytes(gcm.pAAD as *const u8, gcm.ulAADLen)? }
     };
+    let iv_presence = PointerBytes::from_legacy(&iv, gcm.pIv.is_null());
+    let aad_presence = PointerBytes::from_legacy(&aad, gcm.pAAD.is_null());
     Ok(CkMechanismParams::Gcm(GcmParams {
         iv,
         iv_bits: gcm.ulIvBits as u64,
@@ -659,6 +662,8 @@ unsafe fn read_gcm_struct_params(
         // crossing; (NULL, len > 0) took the Raw path above.
         iv_null: gcm.pIv.is_null(),
         aad_null: gcm.pAAD.is_null(),
+        iv_presence,
+        aad_presence,
     }))
 }
 
@@ -733,6 +738,8 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                             payload_bytes(oaep.pSourceData as *const u8, oaep.ulSourceDataLen)?
                         }
                     };
+                    let source_data_presence =
+                        PointerBytes::from_legacy(&source_data, oaep.pSourceData.is_null());
                     Some(CkMechanismParams::RsaPkcsOaep(RsaPkcsOaepParams {
                         hash_alg: CkMechanismType(oaep.hashAlg as u64),
                         mgf: CkMgf(oaep.mgf as u64),
@@ -741,6 +748,7 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                         // F3/D2: (NULL, 0) vs (ptr, 0) must survive the
                         // crossing; (NULL, len > 0) took the Raw path above.
                         source_null: oaep.pSourceData.is_null(),
+                        source_data_presence,
                     }))
                 }
             }
@@ -797,6 +805,8 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     } else {
                         unsafe { payload_bytes(ccm.pAAD as *const u8, ccm.ulAADLen)? }
                     };
+                    let nonce_presence = PointerBytes::from_legacy(&nonce, ccm.pNonce.is_null());
+                    let aad_presence = PointerBytes::from_legacy(&aad, ccm.pAAD.is_null());
                     Some(CkMechanismParams::Ccm(CcmParams {
                         data_len: ccm.ulDataLen as u64,
                         nonce,
@@ -804,6 +814,8 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                         mac_len: ccm.ulMACLen as u64,
                         nonce_null: ccm.pNonce.is_null(),
                         aad_null: ccm.pAAD.is_null(),
+                        nonce_presence,
+                        aad_presence,
                     }))
                 }
             }
@@ -839,10 +851,14 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                             payload_bytes(ecdh.pPublicData as *const u8, ecdh.ulPublicDataLen)?
                         }
                     };
+                    let shared_data_presence = PointerBytes::present_copy(&shared_data);
+                    let public_data_presence = PointerBytes::present_copy(&public_data);
                     Some(CkMechanismParams::Ecdh1Derive(Ecdh1DeriveParams {
                         kdf: CkKdf(ecdh.kdf as u64),
                         shared_data: shared_data.into(),
                         public_data,
+                        shared_data_presence,
+                        public_data_presence,
                     }))
                 }
             }
@@ -903,6 +919,8 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     } else {
                         unsafe { payload_bytes(hkdf.pInfo as *const u8, hkdf.ulInfoLen)? }
                     };
+                    let salt_presence = PointerBytes::present_copy(&salt);
+                    let info_presence = PointerBytes::present_copy(&info);
                     Some(CkMechanismParams::Hkdf(HkdfParams {
                         extract: hkdf.bExtract != 0,
                         expand: hkdf.bExpand != 0,
@@ -911,6 +929,8 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                         salt: salt.into(),
                         salt_key_handle: CkObjectHandle(hkdf.hSaltKey as u64),
                         info: info.into(),
+                        salt_presence,
+                        info_presence,
                     }))
                 }
             }
@@ -938,9 +958,11 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                             payload_bytes(eddsa.pContextData as *const u8, eddsa.ulContextDataLen)?
                         }
                     };
+                    let context_data_presence = PointerBytes::present_copy(&context_data);
                     Some(CkMechanismParams::Eddsa(EddsaParams {
                         ph_flag: eddsa.phFlag != 0,
                         context_data: context_data.into(),
+                        context_data_presence,
                     }))
                 }
             }
@@ -978,11 +1000,15 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                         // Safety: pNonce is non-null, nonce_bytes <= MAX_SERIALIZABLE_BYTES.
                         unsafe { payload_bytes(ch.pNonce as *const u8, nonce_bytes as CK_ULONG)? }
                     };
+                    let block_counter_presence = PointerBytes::present_copy(&block_counter);
+                    let nonce_presence = PointerBytes::present_copy(&nonce);
                     Some(CkMechanismParams::ChaCha20(ChaCha20Params {
                         block_counter,
                         block_counter_bits: ch.blockCounterBits as u64,
                         nonce,
                         nonce_bits: ch.ulNonceBits as u64,
+                        block_counter_presence,
+                        nonce_presence,
                     }))
                 }
             }
@@ -1015,10 +1041,14 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                             payload_bytes(salsa.pNonce as *const u8, nonce_bytes as CK_ULONG)?
                         }
                     };
+                    let block_counter_presence = PointerBytes::present_copy(&block_counter);
+                    let nonce_presence = PointerBytes::present_copy(&nonce);
                     Some(CkMechanismParams::Salsa20(Salsa20Params {
                         block_counter,
                         nonce,
                         nonce_bits: salsa.ulNonceBits as u64,
+                        block_counter_presence,
+                        nonce_presence,
                     }))
                 }
             }
@@ -1052,8 +1082,15 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     } else {
                         unsafe { payload_bytes(sp.pAAD as *const u8, sp.ulAADLen)? }
                     };
+                    let nonce_presence = PointerBytes::present_copy(&nonce);
+                    let aad_presence = PointerBytes::present_copy(&aad);
                     Some(CkMechanismParams::Salsa20ChaCha20Poly1305(
-                        Salsa20ChaCha20Poly1305Params { nonce, aad: aad.into() },
+                        Salsa20ChaCha20Poly1305Params {
+                            nonce,
+                            aad: aad.into(),
+                            nonce_presence,
+                            aad_presence,
+                        },
                     ))
                 }
             }
@@ -1079,9 +1116,11 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     } else {
                         unsafe { payload_bytes(s.pData as *const u8, s.length)? }
                     };
+                    let data_presence = PointerBytes::present_copy(&data);
                     Some(CkMechanismParams::AesCbcEncryptData(AesCbcEncryptDataParams {
                         iv: s.iv.to_vec(),
                         data: data.into(),
+                        data_presence,
                     }))
                 }
             }
@@ -1107,9 +1146,11 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     } else {
                         unsafe { payload_bytes(s.pData as *const u8, s.length)? }
                     };
+                    let data_presence = PointerBytes::present_copy(&data);
                     Some(CkMechanismParams::DesCbcEncryptData(DesCbcEncryptDataParams {
                         iv: s.iv.to_vec(),
                         data: data.into(),
+                        data_presence,
                     }))
                 }
             }
@@ -1135,9 +1176,11 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     } else {
                         unsafe { payload_bytes(s.pData as *const u8, s.length)? }
                     };
+                    let data_presence = PointerBytes::present_copy(&data);
                     Some(CkMechanismParams::CamelliaCbcEncryptData(CamelliaCbcEncryptDataParams {
                         iv: s.iv.to_vec(),
                         data: data.into(),
+                        data_presence,
                     }))
                 }
             }
@@ -1163,9 +1206,11 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     } else {
                         unsafe { payload_bytes(s.pData as *const u8, s.length)? }
                     };
+                    let data_presence = PointerBytes::present_copy(&data);
                     Some(CkMechanismParams::AriaCbcEncryptData(AriaCbcEncryptDataParams {
                         iv: s.iv.to_vec(),
                         data: data.into(),
+                        data_presence,
                     }))
                 }
             }
@@ -1191,9 +1236,11 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     } else {
                         unsafe { payload_bytes(s.pData as *const u8, s.length)? }
                     };
+                    let data_presence = PointerBytes::present_copy(&data);
                     Some(CkMechanismParams::SeedCbcEncryptData(SeedCbcEncryptDataParams {
                         iv: s.iv.to_vec(),
                         data: data.into(),
+                        data_presence,
                     }))
                 }
             }
@@ -1259,8 +1306,10 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     } else {
                         unsafe { payload_bytes(kds.pData as *const u8, kds.ulLen)? }
                     };
+                    let data_presence = PointerBytes::present_copy(&data);
                     Some(CkMechanismParams::KeyDerivationString(KeyDerivationStringData {
                         data: data.into(),
+                        data_presence,
                     }))
                 }
             }
@@ -1291,12 +1340,16 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     } else {
                         unsafe { payload_bytes(gw.pAAD as *const u8, gw.ulAADLen)? }
                     };
+                    let iv_presence = PointerBytes::present_copy(&iv);
+                    let aad_presence = PointerBytes::present_copy(&aad);
                     Some(CkMechanismParams::GcmWrap(GcmWrapParams {
                         iv,
                         iv_fixed_bits: gw.ulIvFixedBits as u64,
                         iv_generator: CkGeneratorFunction(gw.ivGenerator as u64),
                         aad: aad.into(),
                         tag_bits: gw.ulTagBits as u64,
+                        iv_presence,
+                        aad_presence,
                     }))
                 }
             }
@@ -1327,6 +1380,8 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     } else {
                         unsafe { payload_bytes(cw.pAAD as *const u8, cw.ulAADLen)? }
                     };
+                    let nonce_presence = PointerBytes::present_copy(&nonce);
+                    let aad_presence = PointerBytes::present_copy(&aad);
                     Some(CkMechanismParams::CcmWrap(CcmWrapParams {
                         data_len: cw.ulDataLen as u64,
                         nonce,
@@ -1334,6 +1389,8 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                         nonce_generator: CkGeneratorFunction(cw.nonceGenerator as u64),
                         aad: aad.into(),
                         mac_len: cw.ulMACLen as u64,
+                        nonce_presence,
+                        aad_presence,
                     }))
                 }
             }
@@ -1387,10 +1444,12 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     } else {
                         unsafe { payload_bytes(rc5.pIv as *const u8, rc5.ulIvLen)? }
                     };
+                    let iv_presence = PointerBytes::present_copy(&iv);
                     Some(CkMechanismParams::Rc5Cbc(Rc5CbcParams {
                         word_size: rc5.ulWordsize as u64,
                         rounds: rc5.ulRounds as u64,
                         iv,
+                        iv_presence,
                     }))
                 }
             }
@@ -1507,6 +1566,8 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                                 payload_bytes(oaep.pSourceData as *const u8, oaep.ulSourceDataLen)?
                             }
                         };
+                        let source_data_presence =
+                            PointerBytes::from_legacy(&source_data, oaep.pSourceData.is_null());
                         Some(CkMechanismParams::RsaAesKeyWrap(RsaAesKeyWrapParams {
                             aes_key_bits: aes_key_bits as u64,
                             oaep_params: RsaPkcsOaepParams {
@@ -1515,6 +1576,7 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                                 source: CkOaepSource(oaep.source as u64),
                                 source_data: source_data.into(),
                                 source_null: oaep.pSourceData.is_null(),
+                                source_data_presence,
                             },
                         }))
                     } // close inner else (source data ok)
@@ -1572,10 +1634,12 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     } else {
                         0
                     };
+                    let context_presence = PointerBytes::present_copy(&context);
                     Some(CkMechanismParams::SignAdditionalContext(SignAdditionalContext {
                         hedge_variant: hedge_variant as u64,
                         context: context.into(),
                         hash: CkMechanismType(hash),
+                        context_presence,
                     }))
                 }
             }
@@ -1607,10 +1671,13 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                             )?
                         }
                     };
+                    let customization_string_presence =
+                        PointerBytes::present_copy(&customization_string);
                     Some(CkMechanismParams::Kmac(KmacParams {
                         key_handle: CkObjectHandle(p.h_key as u64),
                         mac_length: p.ul_mac_length as u64,
                         customization_string: customization_string.into(),
+                        customization_string_presence,
                     }))
                 }
             }
@@ -1640,10 +1707,14 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     } else {
                         unsafe { payload_bytes(p.p_ctx as *const u8, p.ul_ctx_len)? }
                     };
+                    let tr_presence = PointerBytes::present_copy(&tr);
+                    let context_presence = PointerBytes::present_copy(&context);
                     Some(CkMechanismParams::MuGen(MuGenParams {
                         key_handle: CkObjectHandle(p.h_key as u64),
                         tr: tr.into(),
                         context: context.into(),
+                        tr_presence,
+                        context_presence,
                     }))
                 }
             }
@@ -1684,6 +1755,9 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     } else {
                         unsafe { payload_bytes(p.pPassword as *const u8, p.ulPasswordLen)? }
                     };
+                    let salt_source_data_presence = PointerBytes::present_copy(&salt_source_data);
+                    let prf_data_presence = PointerBytes::present_copy(&prf_data);
+                    let password_presence = PointerBytes::present_copy(&password);
                     Some(CkMechanismParams::Pkcs5Pbkd2(Pkcs5Pbkd2Params {
                         salt_source: CkPbkdf2SaltSource(p.saltSource as u64),
                         salt_source_data: salt_source_data.into(),
@@ -1691,6 +1765,9 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                         prf: CkPbkdf2Prf(p.prf as u64),
                         prf_data: prf_data.into(),
                         password: password.into(),
+                        salt_source_data_presence,
+                        prf_data_presence,
+                        password_presence,
                     }))
                 }
             }
@@ -2267,11 +2344,17 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     } else {
                         unsafe { payload_bytes(p.pSalt as *const u8, p.ulSaltLen)? }
                     };
+                    let init_vector_presence = PointerBytes::present_copy(&init_vector);
+                    let password_presence = PointerBytes::present_copy(&password);
+                    let salt_presence = PointerBytes::present_copy(&salt);
                     Some(CkMechanismParams::Pbe(PbeParams {
                         init_vector: init_vector.into(),
                         password: password.into(),
                         salt: salt.into(),
                         iteration: p.ulIteration as u64,
+                        init_vector_presence,
+                        password_presence,
+                        salt_presence,
                     }))
                 }
             }
@@ -2295,10 +2378,12 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     } else {
                         unsafe { payload_bytes(p.pSharedData as *const u8, p.ulSharedDataLen)? }
                     };
+                    let shared_data_presence = PointerBytes::present_copy(&shared_data);
                     Some(CkMechanismParams::EcdhAesKeyWrap(EcdhAesKeyWrapParams {
                         aes_key_bits: p.ulAESKeyBits as u64,
                         kdf: CkKdf(p.kdf as u64),
                         shared_data: shared_data.into(),
+                        shared_data_presence,
                     }))
                 }
             }
@@ -2335,6 +2420,9 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     } else {
                         unsafe { payload_bytes(p.pPublicData2 as *const u8, p.ulPublicDataLen2)? }
                     };
+                    let shared_data_presence = PointerBytes::present_copy(&shared_data);
+                    let public_data_presence = PointerBytes::present_copy(&public_data);
+                    let public_data2_presence = PointerBytes::present_copy(&public_data2);
                     Some(CkMechanismParams::Ecdh2Derive(Ecdh2DeriveParams {
                         kdf: CkKdf(p.kdf as u64),
                         shared_data: shared_data.into(),
@@ -2342,6 +2430,9 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                         private_data_len: p.ulPrivateDataLen as u64,
                         private_data_handle: CkObjectHandle(p.hPrivateData as u64),
                         public_data2,
+                        shared_data_presence,
+                        public_data_presence,
+                        public_data2_presence,
                     }))
                 }
             }
@@ -2378,6 +2469,9 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     } else {
                         unsafe { payload_bytes(p.pPublicData2 as *const u8, p.ulPublicDataLen2)? }
                     };
+                    let shared_data_presence = PointerBytes::present_copy(&shared_data);
+                    let public_data_presence = PointerBytes::present_copy(&public_data);
+                    let public_data2_presence = PointerBytes::present_copy(&public_data2);
                     Some(CkMechanismParams::EcmqvDerive(EcmqvDeriveParams {
                         kdf: CkKdf(p.kdf as u64),
                         shared_data: shared_data.into(),
@@ -2386,6 +2480,9 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                         private_data_handle: CkObjectHandle(p.hPrivateData as u64),
                         public_data2,
                         public_key_handle: CkObjectHandle(p.publicKey as u64),
+                        shared_data_presence,
+                        public_data_presence,
+                        public_data2_presence,
                     }))
                 }
             }
@@ -2416,10 +2513,14 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     } else {
                         unsafe { payload_bytes(p.pPublicData as *const u8, p.ulPublicDataLen)? }
                     };
+                    let other_info_presence = PointerBytes::present_copy(&other_info);
+                    let public_data_presence = PointerBytes::present_copy(&public_data);
                     Some(CkMechanismParams::X942Dh1Derive(X942Dh1DeriveParams {
                         kdf: CkKdf(p.kdf as u64),
                         other_info: other_info.into(),
                         public_data,
+                        other_info_presence,
+                        public_data_presence,
                     }))
                 }
             }
@@ -2457,6 +2558,9 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     } else {
                         unsafe { payload_bytes(p.pPublicData2 as *const u8, p.ulPublicDataLen2)? }
                     };
+                    let other_info_presence = PointerBytes::present_copy(&other_info);
+                    let public_data_presence = PointerBytes::present_copy(&public_data);
+                    let public_data2_presence = PointerBytes::present_copy(&public_data2);
                     Some(CkMechanismParams::X942Dh2Derive(X942Dh2DeriveParams {
                         kdf: CkKdf(p.kdf as u64),
                         other_info: other_info.into(),
@@ -2464,6 +2568,9 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                         private_data_len: p.ulPrivateDataLen as u64,
                         private_data_handle: CkObjectHandle(p.hPrivateData as u64),
                         public_data2,
+                        other_info_presence,
+                        public_data_presence,
+                        public_data2_presence,
                     }))
                 }
             }
@@ -2501,6 +2608,9 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     } else {
                         unsafe { payload_bytes(p.PublicData2 as *const u8, p.ulPublicDataLen2)? }
                     };
+                    let other_info_presence = PointerBytes::present_copy(&other_info);
+                    let public_data_presence = PointerBytes::present_copy(&public_data);
+                    let public_data2_presence = PointerBytes::present_copy(&public_data2);
                     Some(CkMechanismParams::X942MqvDerive(X942MqvDeriveParams {
                         kdf: CkKdf(p.kdf as u64),
                         other_info: other_info.into(),
@@ -2509,6 +2619,9 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                         private_data_handle: CkObjectHandle(p.hPrivateData as u64),
                         public_data2,
                         public_key_handle: CkObjectHandle(p.publicKey as u64),
+                        other_info_presence,
+                        public_data_presence,
+                        public_data2_presence,
                     }))
                 }
             }
@@ -2539,10 +2652,14 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     } else {
                         unsafe { payload_bytes(p.pUKM as *const u8, p.ulUKMLen)? }
                     };
+                    let public_data_presence = PointerBytes::present_copy(&public_data);
+                    let ukm_presence = PointerBytes::present_copy(&ukm);
                     Some(CkMechanismParams::Gostr3410Derive(Gostr3410DeriveParams {
                         kdf: CkKdf(p.kdf as u64),
                         public_data,
                         ukm,
+                        public_data_presence,
+                        ukm_presence,
                     }))
                 }
             }
@@ -2573,10 +2690,14 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     } else {
                         unsafe { payload_bytes(p.pUKM as *const u8, p.ulUKMLen)? }
                     };
+                    let wrap_oid_presence = PointerBytes::present_copy(&wrap_oid);
+                    let ukm_presence = PointerBytes::present_copy(&ukm);
                     Some(CkMechanismParams::Gostr3410KeyWrap(Gostr3410KeyWrapParams {
                         wrap_oid,
                         ukm,
                         key_handle: CkObjectHandle(p.hKey as u64),
+                        wrap_oid_presence,
+                        ukm_presence,
                     }))
                 }
             }
@@ -2598,9 +2719,11 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     } else {
                         unsafe { payload_bytes(p.pX as *const u8, p.ulXLen)? }
                     };
+                    let x_presence = PointerBytes::present_copy(&x);
                     Some(CkMechanismParams::KeyWrapSetOaep(KeyWrapSetOaepParams {
                         bc: p.bBC as u32,
                         x: x.into(),
+                        x_presence,
                     }))
                 }
             }
@@ -2668,6 +2791,8 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     } else {
                         unsafe { payload_bytes(p.pNr as *const u8, p.ulNrLen)? }
                     };
+                    let ni_presence = PointerBytes::present_copy(&ni);
+                    let nr_presence = PointerBytes::present_copy(&nr);
                     Some(CkMechanismParams::IkePrfDerive(IkePrfDeriveParams {
                         prf_mechanism: CkMechanismType(p.prfMechanism as u64),
                         data_as_key: p.bDataAsKey != 0,
@@ -2675,6 +2800,8 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                         ni: ni.into(),
                         nr: nr.into(),
                         new_key_handle: CkObjectHandle(p.hNewKey as u64),
+                        ni_presence,
+                        nr_presence,
                     }))
                 }
             }
@@ -2705,6 +2832,8 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     } else {
                         unsafe { payload_bytes(p.pCKYr as *const u8, p.ulCKYrLen)? }
                     };
+                    let ckyi_presence = PointerBytes::present_copy(&ckyi);
+                    let ckyr_presence = PointerBytes::present_copy(&ckyr);
                     Some(CkMechanismParams::Ike1PrfDerive(Ike1PrfDeriveParams {
                         prf_mechanism: CkMechanismType(p.prfMechanism as u64),
                         has_prev_key: p.bHasPrevKey != 0,
@@ -2713,6 +2842,8 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                         ckyi: ckyi.into(),
                         ckyr: ckyr.into(),
                         key_number: p.keyNumber as u32,
+                        ckyi_presence,
+                        ckyr_presence,
                     }))
                 }
             }
@@ -2737,11 +2868,13 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     } else {
                         unsafe { payload_bytes(p.pExtraData as *const u8, p.ulExtraDataLen)? }
                     };
+                    let extra_data_presence = PointerBytes::present_copy(&extra_data);
                     Some(CkMechanismParams::Ike1ExtendedDerive(Ike1ExtendedDeriveParams {
                         prf_mechanism: CkMechanismType(p.prfMechanism as u64),
                         has_keygxy: p.bHasKeygxy != 0,
                         keygxy_handle: CkObjectHandle(p.hKeygxy as u64),
                         extra_data: extra_data.into(),
+                        extra_data_presence,
                     }))
                 }
             }
@@ -2766,11 +2899,13 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     } else {
                         unsafe { payload_bytes(p.pSeedData as *const u8, p.ulSeedDataLen)? }
                     };
+                    let seed_data_presence = PointerBytes::present_copy(&seed_data);
                     Some(CkMechanismParams::Ike2PrfPlusDerive(Ike2PrfPlusDeriveParams {
                         prf_mechanism: CkMechanismType(p.prfMechanism as u64),
                         has_seed_key: p.bHasSeedKey != 0,
                         seed_key_handle: CkObjectHandle(p.hSeedKey as u64),
                         seed_data: seed_data.into(),
+                        seed_data_presence,
                     }))
                 }
             }

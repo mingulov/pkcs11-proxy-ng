@@ -6,6 +6,7 @@ use crate::pkcs11_proxy_ng::v1::sp800108_attribute;
 // ADR-0013 §5: every `secret_to_plain` use in this file is a prost wire-encoding
 // boundary (response/request construction); the standing justification lives in
 // `secret_boundary` docs. No plain copy is retained past the enclosing encode.
+use super::{FromWire, pointer_from_wire};
 use crate::secret_boundary::{secret_to_plain, secret_to_plain_string};
 use pkcs11_proxy_ng_types::{
     AesCmacKeyDerivationParams, CkAttribute, CkAttributeType, CkAttributeValue, CkKdf, CkMechanism,
@@ -30,20 +31,26 @@ impl From<&IkePrfDeriveParams> for v1_proto::IkePrfDeriveParams {
             ni: secret_to_plain(&p.ni),
             nr: secret_to_plain(&p.nr),
             new_key_handle: p.new_key_handle.0,
+            // R16: production encode stays v0-shaped.
+            ni_null_len: None,
+            nr_null_len: None,
         }
     }
 }
 
-impl From<&v1_proto::IkePrfDeriveParams> for IkePrfDeriveParams {
-    fn from(p: &v1_proto::IkePrfDeriveParams) -> Self {
-        Self {
+impl FromWire<v1_proto::IkePrfDeriveParams> for IkePrfDeriveParams {
+    // R16: fallible + version-threaded (presence needs the outer stamp).
+    fn from_wire(p: &v1_proto::IkePrfDeriveParams, version: u32) -> Result<Self, CkRv> {
+        Ok(Self {
             prf_mechanism: CkMechanismType(p.prf_mechanism),
             data_as_key: p.data_as_key,
             rekey: p.rekey,
             ni: SecretBytes::copy_from_slice(&p.ni),
             nr: SecretBytes::copy_from_slice(&p.nr),
             new_key_handle: CkObjectHandle(p.new_key_handle),
-        }
+            ni_presence: pointer_from_wire(&p.ni, p.ni_null_len, version)?,
+            nr_presence: pointer_from_wire(&p.nr, p.nr_null_len, version)?,
+        })
     }
 }
 
@@ -61,13 +68,17 @@ impl From<&Ike1PrfDeriveParams> for v1_proto::Ike1PrfDeriveParams {
             ckyi: secret_to_plain(&p.ckyi),
             ckyr: secret_to_plain(&p.ckyr),
             key_number: p.key_number,
+            // R16: production encode stays v0-shaped.
+            ckyi_null_len: None,
+            ckyr_null_len: None,
         }
     }
 }
 
-impl From<&v1_proto::Ike1PrfDeriveParams> for Ike1PrfDeriveParams {
-    fn from(p: &v1_proto::Ike1PrfDeriveParams) -> Self {
-        Self {
+impl FromWire<v1_proto::Ike1PrfDeriveParams> for Ike1PrfDeriveParams {
+    // R16: fallible + version-threaded (presence needs the outer stamp).
+    fn from_wire(p: &v1_proto::Ike1PrfDeriveParams, version: u32) -> Result<Self, CkRv> {
+        Ok(Self {
             prf_mechanism: CkMechanismType(p.prf_mechanism),
             has_prev_key: p.has_prev_key,
             keygxy_handle: CkObjectHandle(p.keygxy_handle),
@@ -75,7 +86,9 @@ impl From<&v1_proto::Ike1PrfDeriveParams> for Ike1PrfDeriveParams {
             ckyi: SecretBytes::copy_from_slice(&p.ckyi),
             ckyr: SecretBytes::copy_from_slice(&p.ckyr),
             key_number: p.key_number,
-        }
+            ckyi_presence: pointer_from_wire(&p.ckyi, p.ckyi_null_len, version)?,
+            ckyr_presence: pointer_from_wire(&p.ckyr, p.ckyr_null_len, version)?,
+        })
     }
 }
 
@@ -90,18 +103,22 @@ impl From<&Ike1ExtendedDeriveParams> for v1_proto::Ike1ExtendedDeriveParams {
             has_keygxy: p.has_keygxy,
             keygxy_handle: p.keygxy_handle.0,
             extra_data: secret_to_plain(&p.extra_data),
+            // R16: production encode stays v0-shaped.
+            extra_data_null_len: None,
         }
     }
 }
 
-impl From<&v1_proto::Ike1ExtendedDeriveParams> for Ike1ExtendedDeriveParams {
-    fn from(p: &v1_proto::Ike1ExtendedDeriveParams) -> Self {
-        Self {
+impl FromWire<v1_proto::Ike1ExtendedDeriveParams> for Ike1ExtendedDeriveParams {
+    // R16: fallible + version-threaded (presence needs the outer stamp).
+    fn from_wire(p: &v1_proto::Ike1ExtendedDeriveParams, version: u32) -> Result<Self, CkRv> {
+        Ok(Self {
             prf_mechanism: CkMechanismType(p.prf_mechanism),
             has_keygxy: p.has_keygxy,
             keygxy_handle: CkObjectHandle(p.keygxy_handle),
             extra_data: SecretBytes::copy_from_slice(&p.extra_data),
-        }
+            extra_data_presence: pointer_from_wire(&p.extra_data, p.extra_data_null_len, version)?,
+        })
     }
 }
 
@@ -116,18 +133,22 @@ impl From<&Ike2PrfPlusDeriveParams> for v1_proto::Ike2PrfPlusDeriveParams {
             has_seed_key: p.has_seed_key,
             seed_key_handle: p.seed_key_handle.0,
             seed_data: secret_to_plain(&p.seed_data),
+            // R16: production encode stays v0-shaped.
+            seed_data_null_len: None,
         }
     }
 }
 
-impl From<&v1_proto::Ike2PrfPlusDeriveParams> for Ike2PrfPlusDeriveParams {
-    fn from(p: &v1_proto::Ike2PrfPlusDeriveParams) -> Self {
-        Self {
+impl FromWire<v1_proto::Ike2PrfPlusDeriveParams> for Ike2PrfPlusDeriveParams {
+    // R16: fallible + version-threaded (presence needs the outer stamp).
+    fn from_wire(p: &v1_proto::Ike2PrfPlusDeriveParams, version: u32) -> Result<Self, CkRv> {
+        Ok(Self {
             prf_mechanism: CkMechanismType(p.prf_mechanism),
             has_seed_key: p.has_seed_key,
             seed_key_handle: CkObjectHandle(p.seed_key_handle),
             seed_data: SecretBytes::copy_from_slice(&p.seed_data),
-        }
+            seed_data_presence: pointer_from_wire(&p.seed_data, p.seed_data_null_len, version)?,
+        })
     }
 }
 

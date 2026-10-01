@@ -1,5 +1,6 @@
 //! Regression observations through the actual native exact-call boundary.
 use super::*;
+use pkcs11_proxy_ng_types::PointerBytes;
 #[path = "../../../../tests/ffi_oracles/exact_outputs/src/lib.rs"]
 mod oracle;
 use oracle::*;
@@ -552,7 +553,8 @@ fn classic_gcm_initialized_error_iv_effect() {
             iv_buffer_len: 12,
             aad: vec![].into(),
             tag_bits: 128,
-
+            iv_presence: PointerBytes::from_legacy(&[0x11; 12], false),
+            aad_presence: PointerBytes::from_legacy(&[], false),
             iv_null: false,
             aad_null: false,
         })),
@@ -594,7 +596,8 @@ fn classic_gcm_error_effect_matrix_data_query_and_missing_length() {
         iv_buffer_len: 12,
         aad: vec![].into(),
         tag_bits: 128,
-
+        iv_presence: PointerBytes::from_legacy(&[0x11; 12], false),
+        aad_presence: PointerBytes::from_legacy(&[], false),
         iv_null: false,
         aad_null: false,
     };
@@ -709,7 +712,8 @@ fn classic_gcm_ok_effect_unchanged_data_and_missing_length() {
         iv_buffer_len: 12,
         aad: vec![].into(),
         tag_bits: 128,
-
+        iv_presence: PointerBytes::from_legacy(&[0x11; 12], false),
+        aad_presence: PointerBytes::from_legacy(&[], false),
         iv_null: false,
         aad_null: false,
     };
@@ -784,6 +788,8 @@ fn mechanism_output_path_snapshots_once_when_provider_writes_nothing() {
         iv_buffer_len: 12,
         aad: vec![].into(),
         tag_bits: 128,
+        iv_presence: PointerBytes::from_legacy(&[0x11; 12], false),
+        aad_presence: PointerBytes::from_legacy(&[], false),
         iv_null: false,
         aad_null: false,
     };
@@ -831,6 +837,8 @@ fn mechanism_output_path_resnapshots_only_when_provider_writes() {
             iv_buffer_len: 12,
             aad: vec![].into(),
             tag_bits: 128,
+            iv_presence: PointerBytes::from_legacy(&[0x11; 12], false),
+            aad_presence: PointerBytes::from_legacy(&[], false),
             iv_null: false,
             aad_null: false,
         })),

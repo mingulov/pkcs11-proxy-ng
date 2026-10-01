@@ -726,6 +726,7 @@ impl FfiBackend {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use pkcs11_proxy_ng_types::PointerBytes;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicPtr, Ordering};
     use std::sync::mpsc;
@@ -763,7 +764,8 @@ mod tests {
                 iv_buffer_len: 12,
                 aad: Vec::new().into(),
                 tag_bits: 128,
-
+                iv_presence: PointerBytes::from_legacy(&[0xA5; 12], false),
+                aad_presence: PointerBytes::from_legacy(&[], false),
                 iv_null: false,
                 aad_null: false,
             })),
@@ -862,7 +864,8 @@ mod tests {
                 iv_buffer_len: 12,
                 aad: Vec::new().into(),
                 tag_bits: 128,
-
+                iv_presence: PointerBytes::from_legacy(&[0x11; 12], false),
+                aad_presence: PointerBytes::from_legacy(&[], false),
                 iv_null: false,
                 aad_null: false,
             })),
@@ -1000,7 +1003,8 @@ mod tests {
                 iv_buffer_len: 12,
                 aad: Vec::new().into(),
                 tag_bits: 128,
-
+                iv_presence: PointerBytes::from_legacy(&[0xA5; 12], false),
+                aad_presence: PointerBytes::from_legacy(&[], false),
                 iv_null: false,
                 aad_null: false,
             })),
@@ -1057,7 +1061,8 @@ mod tests {
                 iv_buffer_len: 12,
                 aad: Vec::new().into(),
                 tag_bits: 128,
-
+                iv_presence: PointerBytes::from_legacy(&[0xA5; 12], false),
+                aad_presence: PointerBytes::from_legacy(&[], false),
                 iv_null: false,
                 aad_null: false,
             })),
@@ -1110,7 +1115,8 @@ mod tests {
                 iv_buffer_len: 12,
                 aad: Vec::new().into(),
                 tag_bits: 128,
-
+                iv_presence: PointerBytes::from_legacy(&[0xA5; 12], false),
+                aad_presence: PointerBytes::from_legacy(&[], false),
                 iv_null: false,
                 aad_null: false,
             })),
@@ -1151,7 +1157,8 @@ mod tests {
                 iv_buffer_len: 12,
                 aad: Vec::new().into(),
                 tag_bits: 128,
-
+                iv_presence: PointerBytes::from_legacy(&[0xA5; 12], false),
+                aad_presence: PointerBytes::from_legacy(&[], false),
                 iv_null: false,
                 aad_null: false,
             })),
@@ -1423,6 +1430,8 @@ mod tests {
                 iv_buffer_len: 12,
                 aad: Vec::new().into(),
                 tag_bits: 128,
+                iv_presence: PointerBytes::from_legacy(&[0xA5; 12], false),
+                aad_presence: PointerBytes::from_legacy(&[], false),
                 iv_null: false,
                 aad_null: false,
             })),
@@ -1452,6 +1461,8 @@ mod tests {
                 iv_buffer_len: 12,
                 aad: Vec::new().into(),
                 tag_bits: 128,
+                iv_presence: PointerBytes::from_legacy(&[0xA5; 12], false),
+                aad_presence: PointerBytes::from_legacy(&[], false),
                 iv_null: false,
                 aad_null: false,
             })),

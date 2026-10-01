@@ -360,7 +360,8 @@ fn gcm_mechanism_output() -> CkMechanismParams {
         iv_buffer_len: 12,
         aad: b"mock-aad".to_vec().into(),
         tag_bits: 128,
-
+        iv_presence: PointerBytes::from_legacy(&[0xA5; 12], false),
+        aad_presence: PointerBytes::from_legacy(b"mock-aad", false),
         iv_null: false,
         aad_null: false,
     })

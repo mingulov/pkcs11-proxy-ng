@@ -8,8 +8,8 @@ use super::{
 use cryptoki_sys::*;
 use pkcs11_proxy_ng_types::{
     CkAttribute, CkMechanismParams, CkMechanismType, CkObjectHandle, CkOutputBufferResult,
-    CkOutputBufferSpec, CkRv, GcmParams, SecretBytes, Sp800108DerivedKey, Sp800108KdfParams,
-    Tls12MasterKeyDeriveParams, TlsPrfParams, WtlsKeyMatParams, WtlsRandomData,
+    CkOutputBufferSpec, CkRv, GcmParams, PointerBytes, SecretBytes, Sp800108DerivedKey,
+    Sp800108KdfParams, Tls12MasterKeyDeriveParams, TlsPrfParams, WtlsKeyMatParams, WtlsRandomData,
 };
 
 /// Fixtures are built in two steps so nothing moves after its address
@@ -202,6 +202,8 @@ fn transactional_gcm_overlong_daemon_iv_rejected() {
         iv_buffer_len: 16,
         aad: Vec::new().into(),
         tag_bits: 96,
+        iv_presence: PointerBytes::from_legacy(&[0xD0; 16], false),
+        aad_presence: PointerBytes::from_legacy(&[], false),
         iv_null: false,
         aad_null: false,
     });
@@ -396,6 +398,9 @@ fn transactional_generate_malformed_mechanism_writes_nothing() {
         init_vector: SecretBytes::copy_from_slice(&[0xD2; 12]),
         password: SecretBytes::copy_from_slice(&[]),
         salt: SecretBytes::copy_from_slice(&[]),
+        init_vector_presence: PointerBytes::present_copy(&[0xD2; 12]),
+        password_presence: PointerBytes::present_copy(&[]),
+        salt_presence: PointerBytes::present_copy(&[]),
         iteration: 1,
     });
     let mut cell = 0;

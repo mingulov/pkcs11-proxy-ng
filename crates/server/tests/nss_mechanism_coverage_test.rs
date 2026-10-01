@@ -14,7 +14,7 @@ mod support;
 
 use pkcs11_proxy_ng_types::{
     CkAttribute, CkAttributeType, CkAttributeValue, CkInBuf, CkKeyType, CkMechanism,
-    CkMechanismParams, CkMechanismType, CkMgf, CkObjectClass, GcmParams, IvParams,
+    CkMechanismParams, CkMechanismType, CkMgf, CkObjectClass, GcmParams, IvParams, PointerBytes,
     RsaPkcsPssParams,
 };
 use support::{
@@ -463,6 +463,8 @@ async fn nss_aes_gcm_encrypt_decrypt_parameterized() -> Result<(), String> {
             iv_buffer_len: iv.len() as u64,
             aad: aad.clone().into(),
             tag_bits: 128,
+            iv_presence: PointerBytes::from_legacy(&iv, false),
+            aad_presence: PointerBytes::from_legacy(&aad, false),
 
             iv_null: false,
             aad_null: false,
@@ -519,6 +521,14 @@ async fn nss_aes_gcm_encrypt_decrypt_parameterized() -> Result<(), String> {
             iv_buffer_len: 12,
             aad: aad.into(),
             tag_bits: 128,
+            iv_presence: PointerBytes::from_legacy(
+                &[0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B],
+                false,
+            ),
+            aad_presence: PointerBytes::from_legacy(
+                b"additional authenticated data for GCM test",
+                false,
+            ),
 
             iv_null: false,
             aad_null: false,

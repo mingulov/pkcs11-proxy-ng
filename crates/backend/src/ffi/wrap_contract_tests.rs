@@ -1,5 +1,6 @@
 //! Native-boundary counters; no returned secrets or mechanism bytes are observed.
 use super::*;
+use pkcs11_proxy_ng_types::PointerBytes;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -274,7 +275,8 @@ fn ordinary_wrap_error_iv_effect_matches_one_shot_rule() {
             iv_buffer_len: 12,
             aad: vec![].into(),
             tag_bits: 128,
-
+            iv_presence: PointerBytes::from_legacy(&[0x11; 12], false),
+            aad_presence: PointerBytes::from_legacy(&[], false),
             iv_null: false,
             aad_null: false,
         })),

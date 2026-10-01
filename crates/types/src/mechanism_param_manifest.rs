@@ -442,7 +442,7 @@ pub fn render_manifest() -> String {
 mod manifest_tests {
     use std::collections::BTreeSet;
 
-    use super::{MANIFEST_VERSION, ManifestForm, outer_kind_name};
+    use super::{MANIFEST_VERSION, ManifestForm, ManifestStatus, outer_kind_name};
     use crate::shape_descriptors::{
         FieldClass, OuterKind, ResolvedShape, SHAPE_DESCRIPTORS, ShapeResolver,
         VENDOR_FLAT_ALLOWLIST,
@@ -888,5 +888,449 @@ mod manifest_tests {
         for entry in super::manifest().shape.iter() {
             assert_eq!(entry.min_transport_version, 1, "v1 carries every shape: {}", entry.name);
         }
+    }
+
+    /// R16 typed-presence table: (S2 §8 family, shape, wire message,
+    /// pre-R16 max tag, [(bytes field, `*_null_len` field, tag)]), in S2 §8
+    /// family order. The tags are the S2 §3-named tags (GCM 8/9, OAEP 6,
+    /// EdDSA 3) plus the binding TAG RULE for the rest (lowest free tag per
+    /// message, `optional uint64 <field>_null_len`, consecutive from the
+    /// pre-R16 max — machine-checked below). The reviewer checks this table
+    /// item-by-item against S2 §8; the union test below proves no
+    /// input-pointer family is silently omitted.
+    #[allow(clippy::type_complexity)]
+    const R16_PRESENCE_TABLE: &[(&str, &str, &str, u32, &[(&str, &str, u32)])] = &[
+        // S2 §8 "GCM/CCM/wrap" (`gcm_compat` rides `GcmParams` for its
+        // struct form — covered by the `gcm` row).
+        (
+            "GCM/CCM/wrap",
+            "ccm",
+            "CcmParams",
+            6,
+            &[("nonce", "nonce_null_len", 7), ("aad", "aad_null_len", 8)],
+        ),
+        (
+            "GCM/CCM/wrap",
+            "ccm_wrap",
+            "CcmWrapParams",
+            6,
+            &[("nonce", "nonce_null_len", 7), ("aad", "aad_null_len", 8)],
+        ),
+        (
+            "GCM/CCM/wrap",
+            "gcm",
+            "GcmParams",
+            7,
+            &[("iv", "iv_null_len", 8), ("aad", "aad_null_len", 9)],
+        ),
+        (
+            "GCM/CCM/wrap",
+            "gcm_wrap",
+            "GcmWrapParams",
+            5,
+            &[("iv", "iv_null_len", 6), ("aad", "aad_null_len", 7)],
+        ),
+        // S2 §8 "EdDSA" (`xeddsa` is scalar — no presence).
+        ("EdDSA", "eddsa", "EddsaParams", 2, &[("context_data", "context_data_null_len", 3)]),
+        // S2 §8 "OAEP".
+        ("OAEP", "rsa_oaep", "RsaPkcsOaepParams", 5, &[("source_data", "source_data_null_len", 6)]),
+        ("OAEP", "key_wrap_set_oaep", "KeyWrapSetOaepParams", 2, &[("x", "x_null_len", 3)]),
+        // S2 §8 "ECDH1/2".
+        (
+            "ECDH1/2",
+            "ecdh1_derive",
+            "Ecdh1DeriveParams",
+            3,
+            &[
+                ("shared_data", "shared_data_null_len", 4),
+                ("public_data", "public_data_null_len", 5),
+            ],
+        ),
+        (
+            "ECDH1/2",
+            "ecdh2_derive",
+            "Ecdh2DeriveParams",
+            6,
+            &[
+                ("shared_data", "shared_data_null_len", 7),
+                ("public_data", "public_data_null_len", 8),
+                ("public_data2", "public_data2_null_len", 9),
+            ],
+        ),
+        // S2 §8 "ECMQV".
+        (
+            "ECMQV",
+            "ecmqv_derive",
+            "EcmqvDeriveParams",
+            7,
+            &[
+                ("shared_data", "shared_data_null_len", 8),
+                ("public_data", "public_data_null_len", 9),
+                ("public_data2", "public_data2_null_len", 10),
+            ],
+        ),
+        // S2 §8 "X9.42 DH/MQV".
+        (
+            "X9.42 DH/MQV",
+            "x942_dh1_derive",
+            "X942Dh1DeriveParams",
+            3,
+            &[("other_info", "other_info_null_len", 4), ("public_data", "public_data_null_len", 5)],
+        ),
+        (
+            "X9.42 DH/MQV",
+            "x942_dh2_derive",
+            "X942Dh2DeriveParams",
+            6,
+            &[
+                ("other_info", "other_info_null_len", 7),
+                ("public_data", "public_data_null_len", 8),
+                ("public_data2", "public_data2_null_len", 9),
+            ],
+        ),
+        (
+            "X9.42 DH/MQV",
+            "x942_mqv_derive",
+            "X942MqvDeriveParams",
+            7,
+            &[
+                ("other_info", "other_info_null_len", 8),
+                ("public_data", "public_data_null_len", 9),
+                ("public_data2", "public_data2_null_len", 10),
+            ],
+        ),
+        // S2 §8 "HKDF".
+        (
+            "HKDF",
+            "hkdf",
+            "HkdfParams",
+            7,
+            &[("salt", "salt_null_len", 8), ("info", "info_null_len", 9)],
+        ),
+        // S2 §8 "GOST derive/wrap".
+        (
+            "GOST derive/wrap",
+            "gostr3410_derive",
+            "Gostr3410DeriveParams",
+            3,
+            &[("public_data", "public_data_null_len", 4), ("ukm", "ukm_null_len", 5)],
+        ),
+        (
+            "GOST derive/wrap",
+            "gostr3410_key_wrap",
+            "Gostr3410KeyWrapParams",
+            3,
+            &[("wrap_oid", "wrap_oid_null_len", 4), ("ukm", "ukm_null_len", 5)],
+        ),
+        // S2 §8 "AES/DES/ARIA/Camellia/SEED CBC-encrypt-data" (the `iv`
+        // bytes are a fixed inline array, not a pointer — `data` only).
+        (
+            "CBC-encrypt-data",
+            "aes_cbc_encrypt_data",
+            "AesCbcEncryptDataParams",
+            2,
+            &[("data", "data_null_len", 3)],
+        ),
+        (
+            "CBC-encrypt-data",
+            "des_cbc_encrypt_data",
+            "DesCbcEncryptDataParams",
+            2,
+            &[("data", "data_null_len", 3)],
+        ),
+        (
+            "CBC-encrypt-data",
+            "aria_cbc_encrypt_data",
+            "AriaCbcEncryptDataParams",
+            2,
+            &[("data", "data_null_len", 3)],
+        ),
+        (
+            "CBC-encrypt-data",
+            "camellia_cbc_encrypt_data",
+            "CamelliaCbcEncryptDataParams",
+            2,
+            &[("data", "data_null_len", 3)],
+        ),
+        (
+            "CBC-encrypt-data",
+            "seed_cbc_encrypt_data",
+            "SeedCbcEncryptDataParams",
+            2,
+            &[("data", "data_null_len", 3)],
+        ),
+        // S2 §8 "RC5" (`rc5`/`rc5_mac_general` scalar; only `rc5_cbc`
+        // carries a (variable-length) IV pointer).
+        ("RC5", "rc5_cbc", "Rc5CbcParams", 3, &[("iv", "iv_null_len", 4)]),
+        // S2 §8 "ChaCha20".
+        (
+            "ChaCha20",
+            "chacha20",
+            "ChaCha20Params",
+            4,
+            &[("block_counter", "block_counter_null_len", 5), ("nonce", "nonce_null_len", 6)],
+        ),
+        // S2 §8 "Salsa20".
+        (
+            "Salsa20",
+            "salsa20",
+            "Salsa20Params",
+            3,
+            &[("block_counter", "block_counter_null_len", 4), ("nonce", "nonce_null_len", 5)],
+        ),
+        // S2 §8 "AEAD".
+        (
+            "AEAD",
+            "salsa20_chacha20_poly1305",
+            "Salsa20ChaCha20Poly1305Params",
+            2,
+            &[("nonce", "nonce_null_len", 3), ("aad", "aad_null_len", 4)],
+        ),
+        // S2 §8 "PBKDF2".
+        (
+            "PBKDF2",
+            "pkcs5_pbkd2",
+            "Pkcs5Pbkd2Params",
+            6,
+            &[
+                ("salt_source_data", "salt_source_data_null_len", 7),
+                ("prf_data", "prf_data_null_len", 8),
+                ("password", "password_null_len", 9),
+            ],
+        ),
+        // S2 §8 "IKE v1/v2".
+        (
+            "IKE v1/v2",
+            "ike_prf_derive",
+            "IkePrfDeriveParams",
+            6,
+            &[("ni", "ni_null_len", 7), ("nr", "nr_null_len", 8)],
+        ),
+        (
+            "IKE v1/v2",
+            "ike1_prf_derive",
+            "Ike1PrfDeriveParams",
+            7,
+            &[("ckyi", "ckyi_null_len", 8), ("ckyr", "ckyr_null_len", 9)],
+        ),
+        (
+            "IKE v1/v2",
+            "ike1_extended_derive",
+            "Ike1ExtendedDeriveParams",
+            4,
+            &[("extra_data", "extra_data_null_len", 5)],
+        ),
+        (
+            "IKE v1/v2",
+            "ike2_prf_plus_derive",
+            "Ike2PrfPlusDeriveParams",
+            4,
+            &[("seed_data", "seed_data_null_len", 5)],
+        ),
+        // S2 §8 "KDF string-data".
+        (
+            "KDF string-data",
+            "key_derivation_string",
+            "KeyDerivationStringData",
+            1,
+            &[("data", "data_null_len", 2)],
+        ),
+        // S2 §8 "KMAC".
+        (
+            "KMAC",
+            "kmac",
+            "KmacParams",
+            3,
+            &[("customization_string", "customization_string_null_len", 4)],
+        ),
+        // S2 §8 "MGF": no standalone shape (existing `mgf` pin) — no row.
+        // S2 §8 "PBE".
+        (
+            "PBE",
+            "pbe",
+            "PbeParams",
+            4,
+            &[
+                ("init_vector", "init_vector_null_len", 5),
+                ("password", "password_null_len", 6),
+                ("salt", "salt_null_len", 7),
+            ],
+        ),
+        // S2 §8 "RSA-AES-wrap nesting".
+        (
+            "RSA-AES-wrap nesting",
+            "ecdh_aes_key_wrap",
+            "EcdhAesKeyWrapParams",
+            3,
+            &[("shared_data", "shared_data_null_len", 4)],
+        ),
+        // `rsa_aes_key_wrap` carries no direct byte buffer: its only
+        // pointer past the safe prefix is the nested OAEP struct, whose
+        // presence rides the shared `RsaPkcsOaepParams` envelope (nested
+        // presence is otherwise an R18 tail concept). Empty list + the
+        // no-direct-bytes pin below.
+        ("RSA-AES-wrap nesting", "rsa_aes_key_wrap", "RsaAesKeyWrapParams", 2, &[]),
+        // S2 §8 "PSS-flat": scalar — no row.
+        // Compiled-but-S2-unnamed input-pointer shapes (D1(a) full
+        // inventory; R18 claims none of these, so R16 covers them).
+        (
+            "PQ/local",
+            "mu_gen",
+            "MuGenParams",
+            3,
+            &[("tr", "tr_null_len", 4), ("context", "context_null_len", 5)],
+        ),
+        (
+            "PQ/local",
+            "sign_additional_context",
+            "SignAdditionalContext",
+            3,
+            &[("context", "context_null_len", 4)],
+        ),
+    ];
+
+    /// Complete+PointerStruct shapes R16 does NOT cover: R18 owns every
+    /// TLS/WTLS envelope (R18 step 1 names them), so they are excluded
+    /// here explicitly — never silently. The union test pins this set
+    /// against the live manifest in both directions.
+    const R16_R18_TLS_SET: &[&str] = &[
+        "ssl3_master_key_derive",
+        "tls12_extended_master_key_derive",
+        "tls12_master_key_derive",
+        "tls_kdf",
+        "wtls_master_key_derive",
+    ];
+
+    /// Source lines of the top-level `message {name} {...}` block in
+    /// `mechanism_params.proto` (brace-counted, so nested oneofs stay
+    /// inside the block).
+    fn message_block_lines(name: &str) -> Vec<&'static str> {
+        let mut lines = Vec::new();
+        let mut depth = 0u32;
+        let mut inside = false;
+        for line in MECHANISM_PARAMS_PROTO.lines() {
+            if !inside {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with(&format!("message {name} "))
+                    || trimmed.starts_with(&format!("message {name}{{"))
+                {
+                    inside = true;
+                } else {
+                    continue;
+                }
+            }
+            depth += line.chars().filter(|c| *c == '{').count() as u32;
+            depth -= line.chars().filter(|c| *c == '}').count() as u32;
+            lines.push(line);
+            if depth == 0 {
+                break;
+            }
+        }
+        assert!(inside, "message {name} not found in mechanism_params.proto");
+        lines
+    }
+
+    #[test]
+    fn r16_input_pointer_presence_fields_exist() {
+        for (family, shape, message, pre16_max, fields) in R16_PRESENCE_TABLE {
+            let block = message_block_lines(message);
+            // TAG RULE (binding): lowest free tag per message — the row's
+            // tags are exactly pre16_max+1, +2, … in order. The S2-named
+            // tags (GCM 8/9, OAEP 6, EdDSA 3) satisfy the same rule.
+            for (index, (_, _, tag)) in fields.iter().enumerate() {
+                assert_eq!(
+                    *tag,
+                    pre16_max + index as u32 + 1,
+                    "tag rule for {family}/{shape}/{message}"
+                );
+            }
+            for (bytes_field, null_len_field, tag) in *fields {
+                assert!(
+                    block.iter().any(|line| line
+                        .trim_start()
+                        .starts_with(&format!("bytes {bytes_field} ="))),
+                    "{family}/{shape}: {message} must carry `bytes {bytes_field}` \
+                     (else the presence pin is vacuous)"
+                );
+                let expected = format!("optional uint64 {null_len_field} = {tag};");
+                assert!(
+                    block.iter().any(|line| line.trim_start().starts_with(&expected)),
+                    "{family}/{shape}: {message} must carry `{expected}`"
+                );
+            }
+            // The table's only empty row: `rsa_aes_key_wrap` has no direct
+            // byte buffer (nested OAEP envelope carries the presence).
+            if fields.is_empty() {
+                assert_eq!(
+                    (*shape, *message),
+                    ("rsa_aes_key_wrap", "RsaAesKeyWrapParams"),
+                    "only rsa_aes_key_wrap may list no presence fields"
+                );
+                assert!(
+                    !block.iter().any(|line| line.trim_start().starts_with("bytes ")),
+                    "rsa_aes_key_wrap must have no direct bytes field"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn r16_presence_table_covers_every_input_pointer_shape() {
+        let table_shapes: BTreeSet<&str> = R16_PRESENCE_TABLE.iter().map(|row| row.1).collect();
+        assert_eq!(
+            table_shapes.len(),
+            R16_PRESENCE_TABLE.len(),
+            "one row per shape (no duplicates)"
+        );
+        // Every row resolves to a live Complete PointerStruct whose wire
+        // binding carries the row's message.
+        for (family, shape, message, _, _) in R16_PRESENCE_TABLE {
+            let entry = super::manifest_shape(shape)
+                .unwrap_or_else(|| panic!("{family} names unknown shape {shape}"));
+            assert_eq!(
+                entry.status,
+                ManifestStatus::Complete,
+                "{family}/{shape} must be Complete (tail is R18)"
+            );
+            let descriptor = ShapeResolver::descriptor(shape)
+                .unwrap_or_else(|| panic!("{family} names undescribed shape {shape}"));
+            assert_eq!(
+                descriptor.outer_kind,
+                OuterKind::PointerStruct,
+                "{family}/{shape} must be PointerStruct"
+            );
+            assert!(
+                entry.wire_messages.iter().any(|bound| bound == message),
+                "{family}/{shape} must bind {message}"
+            );
+        }
+        // No silent omission in either direction: the table is exactly the
+        // Complete PointerStruct set minus the explicit R18 TLS set.
+        let complete_pointer: BTreeSet<&str> = SHAPE_DESCRIPTORS
+            .iter()
+            .filter(|descriptor| descriptor.outer_kind == OuterKind::PointerStruct)
+            .filter(|descriptor| {
+                super::manifest_shape(descriptor.name)
+                    .is_some_and(|entry| entry.status == ManifestStatus::Complete)
+            })
+            .map(|descriptor| descriptor.name)
+            .collect();
+        let r18: BTreeSet<&str> = R16_R18_TLS_SET.iter().copied().collect();
+        assert_eq!(r18.len(), R16_R18_TLS_SET.len(), "R18 set has no duplicates");
+        for shape in &r18 {
+            assert!(
+                complete_pointer.contains(shape),
+                "R18 exclusion {shape} must be a live Complete PointerStruct \
+                 (else the exclusion is vacuous)"
+            );
+        }
+        let mut expected = complete_pointer;
+        for shape in &r18 {
+            expected.remove(shape);
+        }
+        assert_eq!(
+            table_shapes, expected,
+            "presence table must equal Complete PointerStructs minus the R18 TLS set"
+        );
     }
 }

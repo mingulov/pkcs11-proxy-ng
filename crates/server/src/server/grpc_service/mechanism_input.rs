@@ -104,8 +104,8 @@ mod transport_validation_tests {
         decide_flat_for_registry,
     };
     use pkcs11_proxy_ng_types::{
-        CkMechanismParams, CkMechanismType, FlatParams, IvParams,
-        MECHANISM_PARAMETER_TRANSPORT_VERSION, RawMechanismParams, SecretBytes,
+        CkMechanismParams, CkMechanismType, FlatParams, GcmParams, IvParams,
+        MECHANISM_PARAMETER_TRANSPORT_VERSION, PointerBytes, RawMechanismParams, SecretBytes,
     };
     use std::collections::HashMap;
 
@@ -548,5 +548,33 @@ mod transport_validation_tests {
         validate(&reg, &none).unwrap();
         validate(&reg, &flat_mech(AES_CBC, "iv", 16, LP64)).unwrap();
         validate(&reg, &null_mech(AES_CBC, 0)).unwrap();
+    }
+
+    #[test]
+    fn r16_typed_presence_consistency_through_entry_point() {
+        // The R16 typed gate (S2 §3 "no dual representations") is enforced
+        // through this entry point, not just the pure fn: a consistent
+        // v0 NULL triple validates; a set bool over non-empty legacy
+        // bytes is contradictory metadata (PARAM_INVALID).
+        let reg = registry(&[("gcm", AES_GCM)], &[], &[]);
+        let gcm = |iv: Vec<u8>, iv_null: bool, iv_presence: PointerBytes| CkMechanism {
+            mechanism_type: CkMechanismType(AES_GCM),
+            params: Some(CkMechanismParams::Gcm(GcmParams {
+                iv,
+                iv_bits: 96,
+                iv_buffer_len: 12,
+                aad: SecretBytes::copy_from_slice(b""),
+                tag_bits: 128,
+                iv_null,
+                aad_null: false,
+                iv_presence,
+                aad_presence: PointerBytes::present_copy(b""),
+            })),
+        };
+        validate(&reg, &gcm(vec![], true, PointerBytes::null_len(0))).unwrap();
+        assert_eq!(
+            validate(&reg, &gcm(vec![0xA5; 3], true, PointerBytes::null_len(0))),
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        );
     }
 }

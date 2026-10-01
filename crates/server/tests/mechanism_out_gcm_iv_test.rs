@@ -34,7 +34,7 @@ use std::path::PathBuf;
 
 use pkcs11_proxy_ng_types::{
     CkAttribute, CkAttributeType, CkAttributeValue, CkKeyType, CkMechanism, CkMechanismParams,
-    CkMechanismType, CkObjectClass, CkObjectHandle, GcmParams,
+    CkMechanismType, CkObjectClass, CkObjectHandle, GcmParams, PointerBytes,
 };
 use support::{
     DaemonHarness, ProviderFixture, find_token_slot, initialized_client, open_user_session,
@@ -89,6 +89,8 @@ async fn aes_gcm_aws_convention_iv_round_trip() -> Result<(), String> {
             iv_buffer_len: 12,
             aad: Vec::new().into(),
             tag_bits: 128,
+            iv_presence: PointerBytes::from_legacy(&[0u8; 12], false),
+            aad_presence: PointerBytes::from_legacy(&[], false),
 
             iv_null: false,
             aad_null: false,
@@ -138,6 +140,8 @@ async fn aes_gcm_aws_convention_iv_round_trip() -> Result<(), String> {
             iv_buffer_len: iv.len() as u64,
             aad: Vec::new().into(),
             tag_bits: 128,
+            iv_presence: PointerBytes::from_legacy(&iv, false),
+            aad_presence: PointerBytes::from_legacy(&[], false),
 
             iv_null: false,
             aad_null: false,
@@ -181,6 +185,8 @@ async fn aes_gcm_strict_convention_iv_round_trip() -> Result<(), String> {
             iv_buffer_len: 12,
             aad: Vec::new().into(),
             tag_bits: 128,
+            iv_presence: PointerBytes::from_legacy(&[], false),
+            aad_presence: PointerBytes::from_legacy(&[], false),
 
             iv_null: false,
             aad_null: false,

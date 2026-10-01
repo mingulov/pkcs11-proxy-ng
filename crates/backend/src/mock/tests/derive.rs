@@ -427,6 +427,9 @@ fn derive_key_validates_dual_ec_and_x942_parameter_handles() {
             private_data_len: 32,
             private_data_handle: CkObjectHandle(private_data_handle),
             public_data2: b"peer-public-2".to_vec(),
+            shared_data_presence: PointerBytes::present_copy(b"shared"),
+            public_data_presence: PointerBytes::present_copy(b"peer-public-1"),
+            public_data2_presence: PointerBytes::present_copy(b"peer-public-2"),
         })
     };
     expect_derive_param_handle_invalid(
@@ -446,6 +449,9 @@ fn derive_key_validates_dual_ec_and_x942_parameter_handles() {
             private_data_handle: CkObjectHandle(private_data_handle),
             public_data2: b"peer-public-2".to_vec(),
             public_key_handle: CkObjectHandle(public_key_handle),
+            shared_data_presence: PointerBytes::present_copy(b"shared"),
+            public_data_presence: PointerBytes::present_copy(b"peer-public-1"),
+            public_data2_presence: PointerBytes::present_copy(b"peer-public-2"),
         })
     };
     expect_derive_param_handle_invalid(
@@ -471,6 +477,9 @@ fn derive_key_validates_dual_ec_and_x942_parameter_handles() {
             private_data_len: 32,
             private_data_handle: CkObjectHandle(private_data_handle),
             public_data2: b"dh-public-2".to_vec(),
+            other_info_presence: PointerBytes::present_copy(b"other"),
+            public_data_presence: PointerBytes::present_copy(b"dh-public-1"),
+            public_data2_presence: PointerBytes::present_copy(b"dh-public-2"),
         })
     };
     expect_derive_param_handle_invalid(
@@ -490,6 +499,9 @@ fn derive_key_validates_dual_ec_and_x942_parameter_handles() {
             private_data_handle: CkObjectHandle(private_data_handle),
             public_data2: b"dh-public-2".to_vec(),
             public_key_handle: CkObjectHandle(public_key_handle),
+            other_info_presence: PointerBytes::present_copy(b"other"),
+            public_data_presence: PointerBytes::present_copy(b"dh-public-1"),
+            public_data2_presence: PointerBytes::present_copy(b"dh-public-2"),
         })
     };
     expect_derive_param_handle_invalid(
@@ -560,6 +572,9 @@ fn derive_key_with_output_returns_configured_pbe_iv_output_params() {
         password: b"password".to_vec().into(),
         salt: b"salt".to_vec().into(),
         iteration: 4096,
+        init_vector_presence: PointerBytes::present_copy(&[0x5A; 8]),
+        password_presence: PointerBytes::present_copy(b"password"),
+        salt_presence: PointerBytes::present_copy(b"salt"),
     });
     backend.set_derive_key_output(Some(output.clone()));
     let base_key = live_key(&backend, session);

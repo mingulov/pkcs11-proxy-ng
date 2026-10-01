@@ -322,6 +322,8 @@ async fn encrypt_init_returns_gcm_output_params_through_grpc() {
         iv_buffer_len: generated_iv.len() as u64,
         aad: b"aad".to_vec().into(),
         tag_bits: 128,
+        iv_presence: PointerBytes::from_legacy(&generated_iv, false),
+        aad_presence: PointerBytes::from_legacy(b"aad", false),
 
         iv_null: false,
         aad_null: false,
@@ -338,6 +340,8 @@ async fn encrypt_init_returns_gcm_output_params_through_grpc() {
             iv_buffer_len: generated_iv.len() as u64,
             aad: b"aad".to_vec().into(),
             tag_bits: 128,
+            iv_presence: PointerBytes::from_legacy(&[], false),
+            aad_presence: PointerBytes::from_legacy(b"aad", false),
 
             iv_null: false,
             aad_null: false,
@@ -354,6 +358,8 @@ async fn encrypt_init_returns_gcm_output_params_through_grpc() {
             iv_buffer_len: generated_iv.len() as u64,
             aad: b"aad".to_vec().into(),
             tag_bits: 128,
+            iv_presence: PointerBytes::from_legacy(&generated_iv, false),
+            aad_presence: PointerBytes::from_legacy(b"aad", false),
 
             iv_null: false,
             aad_null: false,
@@ -371,6 +377,8 @@ async fn simple_encrypt_returns_cached_gcm_output_params_through_grpc() {
         iv_buffer_len: generated_iv.len() as u64,
         aad: b"simple-aad".to_vec().into(),
         tag_bits: 128,
+        iv_presence: PointerBytes::from_legacy(&generated_iv, false),
+        aad_presence: PointerBytes::from_legacy(b"simple-aad", false),
 
         iv_null: false,
         aad_null: false,
@@ -387,6 +395,8 @@ async fn simple_encrypt_returns_cached_gcm_output_params_through_grpc() {
             iv_buffer_len: generated_iv.len() as u64,
             aad: b"simple-aad".to_vec().into(),
             tag_bits: 128,
+            iv_presence: PointerBytes::from_legacy(&[], false),
+            aad_presence: PointerBytes::from_legacy(b"simple-aad", false),
 
             iv_null: false,
             aad_null: false,
@@ -404,11 +414,13 @@ async fn simple_encrypt_returns_cached_gcm_output_params_through_grpc() {
     assert_eq!(
         mechanism_out,
         Some(CkMechanismParams::Gcm(GcmParams {
-            iv: generated_iv,
+            iv: generated_iv.clone(),
             iv_bits: 96,
             iv_buffer_len: 12,
             aad: b"simple-aad".to_vec().into(),
             tag_bits: 128,
+            iv_presence: PointerBytes::from_legacy(&generated_iv, false),
+            aad_presence: PointerBytes::from_legacy(b"simple-aad", false),
 
             iv_null: false,
             aad_null: false,
@@ -426,6 +438,8 @@ async fn simple_encrypt_returns_late_gcm_output_params_through_grpc() {
         iv_buffer_len: generated_iv.len() as u64,
         aad: b"late-simple-aad".to_vec().into(),
         tag_bits: 128,
+        iv_presence: PointerBytes::from_legacy(&generated_iv, false),
+        aad_presence: PointerBytes::from_legacy(b"late-simple-aad", false),
 
         iv_null: false,
         aad_null: false,
@@ -443,6 +457,8 @@ async fn simple_encrypt_returns_late_gcm_output_params_through_grpc() {
             iv_buffer_len: generated_iv.len() as u64,
             aad: b"late-simple-aad".to_vec().into(),
             tag_bits: 128,
+            iv_presence: PointerBytes::from_legacy(&[], false),
+            aad_presence: PointerBytes::from_legacy(b"late-simple-aad", false),
 
             iv_null: false,
             aad_null: false,
@@ -469,6 +485,8 @@ async fn multipart_encrypt_returns_cached_gcm_output_params_through_grpc() {
         iv_buffer_len: generated_iv.len() as u64,
         aad: b"multipart-aad".to_vec().into(),
         tag_bits: 128,
+        iv_presence: PointerBytes::from_legacy(&generated_iv, false),
+        aad_presence: PointerBytes::from_legacy(b"multipart-aad", false),
 
         iv_null: false,
         aad_null: false,
@@ -486,6 +504,8 @@ async fn multipart_encrypt_returns_cached_gcm_output_params_through_grpc() {
             iv_buffer_len: generated_iv.len() as u64,
             aad: b"multipart-aad".to_vec().into(),
             tag_bits: 128,
+            iv_presence: PointerBytes::from_legacy(&[], false),
+            aad_presence: PointerBytes::from_legacy(b"multipart-aad", false),
 
             iv_null: false,
             aad_null: false,
@@ -517,6 +537,8 @@ async fn multipart_encrypt_returns_late_gcm_output_params_through_grpc() {
         iv_buffer_len: generated_iv.len() as u64,
         aad: b"late-multipart-aad".to_vec().into(),
         tag_bits: 128,
+        iv_presence: PointerBytes::from_legacy(&generated_iv, false),
+        aad_presence: PointerBytes::from_legacy(b"late-multipart-aad", false),
 
         iv_null: false,
         aad_null: false,
@@ -534,6 +556,8 @@ async fn multipart_encrypt_returns_late_gcm_output_params_through_grpc() {
             iv_buffer_len: generated_iv.len() as u64,
             aad: b"late-multipart-aad".to_vec().into(),
             tag_bits: 128,
+            iv_presence: PointerBytes::from_legacy(&[], false),
+            aad_presence: PointerBytes::from_legacy(b"late-multipart-aad", false),
 
             iv_null: false,
             aad_null: false,
@@ -565,6 +589,8 @@ async fn byte_output_exact_encrypt_returns_gcm_output_params_through_grpc() {
         iv_buffer_len: generated_iv.len() as u64,
         aad: b"aad".to_vec().into(),
         tag_bits: 128,
+        iv_presence: PointerBytes::from_legacy(&generated_iv, false),
+        aad_presence: PointerBytes::from_legacy(b"aad", false),
 
         iv_null: false,
         aad_null: false,
@@ -581,6 +607,8 @@ async fn byte_output_exact_encrypt_returns_gcm_output_params_through_grpc() {
             iv_buffer_len: generated_iv.len() as u64,
             aad: b"aad".to_vec().into(),
             tag_bits: 128,
+            iv_presence: PointerBytes::from_legacy(&[], false),
+            aad_presence: PointerBytes::from_legacy(b"aad", false),
 
             iv_null: false,
             aad_null: false,
@@ -638,6 +666,8 @@ async fn byte_output_exact_encrypt_returns_gcm_output_params_through_grpc() {
             iv_buffer_len: generated_iv.len() as u64,
             aad: b"aad".to_vec().into(),
             tag_bits: 128,
+            iv_presence: PointerBytes::from_legacy(&generated_iv, false),
+            aad_presence: PointerBytes::from_legacy(b"aad", false),
 
             iv_null: false,
             aad_null: false,
@@ -655,6 +685,8 @@ async fn byte_output_exact_wrap_key_returns_gcm_output_params_through_grpc() {
         iv_buffer_len: generated_iv.len() as u64,
         aad: b"wrap-aad".to_vec().into(),
         tag_bits: 128,
+        iv_presence: PointerBytes::from_legacy(&generated_iv, false),
+        aad_presence: PointerBytes::from_legacy(b"wrap-aad", false),
 
         iv_null: false,
         aad_null: false,
@@ -671,6 +703,8 @@ async fn byte_output_exact_wrap_key_returns_gcm_output_params_through_grpc() {
             iv_buffer_len: generated_iv.len() as u64,
             aad: b"wrap-aad".to_vec().into(),
             tag_bits: 128,
+            iv_presence: PointerBytes::from_legacy(&[], false),
+            aad_presence: PointerBytes::from_legacy(b"wrap-aad", false),
 
             iv_null: false,
             aad_null: false,
@@ -717,11 +751,13 @@ async fn byte_output_exact_wrap_key_returns_gcm_output_params_through_grpc() {
     assert_eq!(
         mechanism_out,
         Some(CkMechanismParams::Gcm(GcmParams {
-            iv: generated_iv,
+            iv: generated_iv.clone(),
             iv_bits: 96,
             iv_buffer_len: 12,
             aad: b"wrap-aad".to_vec().into(),
             tag_bits: 128,
+            iv_presence: PointerBytes::from_legacy(&generated_iv, false),
+            aad_presence: PointerBytes::from_legacy(b"wrap-aad", false),
 
             iv_null: false,
             aad_null: false,

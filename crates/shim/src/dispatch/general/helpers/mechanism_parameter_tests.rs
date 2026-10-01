@@ -18,9 +18,9 @@ use pkcs11_proxy_ng_types::{
     CkOaepSource, CkObjectHandle, CkPbkdf2Prf, CkPbkdf2SaltSource, CkRv, ExtractParams, FlatParams,
     GcmParams, GcmWrapParams, IvParams, KeyWrapSetOaepParams, KipParams, KmacParams,
     MECHANISM_PARAMETER_TRANSPORT_VERSION, MacGeneralParams, MechanismRegistry, MuGenParams,
-    RsaAesKeyWrapParams, RsaPkcsOaepParams, RsaPkcsPssParams, Salsa20ChaCha20Poly1305Params,
-    SecretBytes, SignAdditionalContext, Sp800108DerivedKey, Sp800108FeedbackKdfParams,
-    Sp800108KdfParams, TlsPrfParams,
+    PointerBytes, RsaAesKeyWrapParams, RsaPkcsOaepParams, RsaPkcsPssParams,
+    Salsa20ChaCha20Poly1305Params, SecretBytes, SignAdditionalContext, Sp800108DerivedKey,
+    Sp800108FeedbackKdfParams, Sp800108KdfParams, TlsPrfParams,
 };
 
 fn cached_default_registry() -> MechanismRegistry {
@@ -620,9 +620,10 @@ fn reads_rsa_wrap_parameter_structs() {
         ulParameterLen: std::mem::size_of::<CK_KEY_WRAP_SET_OAEP_PARAMS>() as CK_ULONG,
     };
     match unsafe { read_ck_mechanism(&mechanism) } {
-        CkMechanismParams::KeyWrapSetOaep(KeyWrapSetOaepParams { bc, x }) => {
+        CkMechanismParams::KeyWrapSetOaep(KeyWrapSetOaepParams { bc, x, x_presence }) => {
             assert_eq!(bc, 7);
             assert_eq!(x, SecretBytes::copy_from_slice(&[0x51, 0x52, 0x53, 0x54]));
+            assert_eq!(x_presence, PointerBytes::present_copy(&[0x51, 0x52, 0x53, 0x54]));
         }
         other => panic!("unexpected SET OAEP key wrap params: {other:?}"),
     }
@@ -660,12 +661,16 @@ fn reads_authenticated_wrap_parameter_structs() {
             iv_generator,
             aad,
             tag_bits,
+            iv_presence,
+            aad_presence,
         }) => {
             assert_eq!(iv, [0x11; 12]);
             assert_eq!(iv_fixed_bits, 32);
             assert_eq!(iv_generator, CkGeneratorFunction(1));
             assert_eq!(aad, SecretBytes::copy_from_slice(&[0xA1, 0xA2]));
             assert_eq!(tag_bits, 128);
+            assert_eq!(iv_presence, PointerBytes::present_copy(&[0x11; 12]));
+            assert_eq!(aad_presence, PointerBytes::present_copy(&[0xA1, 0xA2]));
         }
         other => panic!("unexpected GCM wrap params: {other:?}"),
     }
@@ -699,6 +704,8 @@ fn reads_authenticated_wrap_parameter_structs() {
             nonce_generator,
             aad,
             mac_len,
+            nonce_presence,
+            aad_presence,
         }) => {
             assert_eq!(data_len, 1024);
             assert_eq!(nonce, [0x22; 7]);
@@ -706,6 +713,8 @@ fn reads_authenticated_wrap_parameter_structs() {
             assert_eq!(nonce_generator, CkGeneratorFunction(2));
             assert_eq!(aad, SecretBytes::copy_from_slice(&[0xB1, 0xB2, 0xB3]));
             assert_eq!(mac_len, 16);
+            assert_eq!(nonce_presence, PointerBytes::present_copy(&[0x22; 7]));
+            assert_eq!(aad_presence, PointerBytes::present_copy(&[0xB1, 0xB2, 0xB3]));
         }
         other => panic!("unexpected CCM wrap params: {other:?}"),
     }
@@ -935,6 +944,8 @@ fn write_mechanism_output_params_writes_aead_wrap_generated_fields() {
         iv_generator: CkGeneratorFunction(CKG_GENERATE as u64),
         aad: Vec::new().into(),
         tag_bits: 96,
+        iv_presence: PointerBytes::present_copy(&[1, 2, 3, 4]),
+        aad_presence: PointerBytes::present_copy(&[]),
     });
     let plan = unsafe { prepare_mechanism_output_params(&mut mechanism, &output) }
         .expect("valid output prepares");
@@ -968,6 +979,8 @@ fn write_mechanism_output_params_writes_aead_wrap_generated_fields() {
         nonce_generator: CkGeneratorFunction(CKG_GENERATE as u64),
         aad: Vec::new().into(),
         mac_len: 12,
+        nonce_presence: PointerBytes::present_copy(&[9, 8, 7, 6]),
+        aad_presence: PointerBytes::present_copy(&[]),
     });
     let plan = unsafe { prepare_mechanism_output_params(&mut mechanism, &output) }
         .expect("valid output prepares");
@@ -1011,6 +1024,8 @@ fn reads_aead_and_chacha_parameter_structs() {
             mac_len,
             nonce_null,
             aad_null,
+            nonce_presence,
+            aad_presence,
         }) => {
             assert_eq!(data_len, 2048);
             assert_eq!(nonce, [0x31; 11]);
@@ -1018,6 +1033,8 @@ fn reads_aead_and_chacha_parameter_structs() {
             assert_eq!(mac_len, 12);
             assert!(!nonce_null);
             assert!(!aad_null);
+            assert_eq!(nonce_presence, PointerBytes::from_legacy(&[0x31; 11], false));
+            assert_eq!(aad_presence, PointerBytes::from_legacy(&[0xC1, 0xC2], false));
         }
         other => panic!("unexpected CCM params: {other:?}"),
     }
@@ -1045,11 +1062,15 @@ fn reads_aead_and_chacha_parameter_structs() {
             block_counter_bits,
             nonce,
             nonce_bits,
+            block_counter_presence,
+            nonce_presence,
         }) => {
             assert_eq!(block_counter, [0x41; 4]);
             assert_eq!(block_counter_bits, 32);
             assert_eq!(nonce, [0x42; 12]);
             assert_eq!(nonce_bits, 96);
+            assert_eq!(block_counter_presence, PointerBytes::present_copy(&[0x41; 4]));
+            assert_eq!(nonce_presence, PointerBytes::present_copy(&[0x42; 12]));
         }
         other => panic!("unexpected ChaCha20 params: {other:?}"),
     }
@@ -1075,9 +1096,13 @@ fn reads_aead_and_chacha_parameter_structs() {
         CkMechanismParams::Salsa20ChaCha20Poly1305(Salsa20ChaCha20Poly1305Params {
             nonce,
             aad,
+            nonce_presence,
+            aad_presence,
         }) => {
             assert_eq!(nonce, [0x51; 12]);
             assert_eq!(aad, SecretBytes::copy_from_slice(&[0x52, 0x53, 0x54]));
+            assert_eq!(nonce_presence, PointerBytes::present_copy(&[0x51; 12]));
+            assert_eq!(aad_presence, PointerBytes::present_copy(&[0x52, 0x53, 0x54]));
         }
         other => panic!("unexpected Salsa20/ChaCha20-Poly1305 params: {other:?}"),
     }
@@ -2375,6 +2400,8 @@ fn gcm_generated_iv_buffer_is_preserved_and_written_back() {
                 iv_buffer_len: 12,
                 aad: Vec::new().into(),
                 tag_bits: 128,
+                iv_presence: PointerBytes::from_legacy(&generated, false),
+                aad_presence: PointerBytes::from_legacy(&[], false),
 
                 iv_null: false,
                 aad_null: false,
@@ -2431,10 +2458,16 @@ fn kmac_params_reads_key_length_and_customization_string() {
         .params
         .expect("mechanism params")
     {
-        CkMechanismParams::Kmac(KmacParams { key_handle, mac_length, customization_string }) => {
+        CkMechanismParams::Kmac(KmacParams {
+            key_handle,
+            mac_length,
+            customization_string,
+            customization_string_presence,
+        }) => {
             assert_eq!(key_handle.0, 0xCAFE);
             assert_eq!(mac_length, 64);
             assert_eq!(customization_string, SecretBytes::copy_from_slice(b"custom"));
+            assert_eq!(customization_string_presence, PointerBytes::present_copy(b"custom"));
         }
         other => panic!("unexpected KMAC params: {other:?}"),
     }
@@ -2464,10 +2497,18 @@ fn mu_gen_params_reads_key_tr_and_context() {
         .params
         .expect("mechanism params")
     {
-        CkMechanismParams::MuGen(MuGenParams { key_handle, tr, context }) => {
+        CkMechanismParams::MuGen(MuGenParams {
+            key_handle,
+            tr,
+            context,
+            tr_presence,
+            context_presence,
+        }) => {
             assert_eq!(key_handle.0, 0xA11CE);
             assert_eq!(tr, SecretBytes::copy_from_slice(b"precomputed-tr"));
             assert_eq!(context, SecretBytes::copy_from_slice(b"context"));
+            assert_eq!(tr_presence, PointerBytes::present_copy(b"precomputed-tr"));
+            assert_eq!(context_presence, PointerBytes::present_copy(b"context"));
         }
         other => panic!("unexpected mu-gen params: {other:?}"),
     }
@@ -3070,11 +3111,17 @@ fn misaligned_sign_additional_context_reads_byte_identical_values() {
                 hedge_variant,
                 context,
                 hash,
+                context_presence,
             })) => {
                 assert_eq!(hedge_variant, 7, "with_hash={with_hash}");
                 assert_eq!(
                     context,
                     SecretBytes::copy_from_slice(&[0xB1, 0xB2]),
+                    "with_hash={with_hash}"
+                );
+                assert_eq!(
+                    context_presence,
+                    PointerBytes::present_copy(&[0xB1, 0xB2]),
                     "with_hash={with_hash}"
                 );
                 assert_eq!(hash.0, if with_hash { 0xA5A5 } else { 0 }, "with_hash={with_hash}");

@@ -170,6 +170,8 @@ fn mechanism(handle: u64) -> Option<Mechanism> {
                 wrap_oid: vec![1, 2, 3],
                 ukm: vec![7; 8],
                 key_handle: CkObjectHandle(handle),
+                wrap_oid_presence: PointerBytes::present_copy(&[1, 2, 3]),
+                ukm_presence: PointerBytes::present_copy(&[7; 8]),
             })),
         })
         .unwrap(),

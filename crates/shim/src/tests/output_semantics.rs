@@ -15,7 +15,8 @@ use pkcs11_proxy_ng_types::{
     CkAttributeQuery, CkAttributeQueryResult, CkAttributeType, CkAttributeValue, CkInBuf,
     CkMechanismParams, CkMechanismType, CkObjectHandle, CkOutputBufferResult, CkOutputBufferSpec,
     CkParameterRoundtripResult, CkParameterRoundtripSpec, CkRv, CkSessionFlags, CkSlotId,
-    GcmParams, InterfaceCapabilities, InterfaceInfo, ParameterOutputFunction, encode_native_ulong,
+    GcmParams, InterfaceCapabilities, InterfaceInfo, ParameterOutputFunction, PointerBytes,
+    encode_native_ulong,
 };
 use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
@@ -2582,6 +2583,8 @@ fn gcm_generated_iv_round_trips_through_shim_client_and_server() {
         iv_buffer_len: generated_iv.len() as u64,
         aad: b"aad".to_vec().into(),
         tag_bits: 128,
+        iv_presence: PointerBytes::from_legacy(&generated_iv, false),
+        aad_presence: PointerBytes::from_legacy(b"aad", false),
 
         iv_null: false,
         aad_null: false,
@@ -2659,6 +2662,8 @@ fn gcm_encrypt_does_not_write_back_to_init_scope_memory() {
         iv_buffer_len: generated_iv.len() as u64,
         aad: b"aad".to_vec().into(),
         tag_bits: 128,
+        iv_presence: PointerBytes::from_legacy(&generated_iv, false),
+        aad_presence: PointerBytes::from_legacy(b"aad", false),
 
         iv_null: false,
         aad_null: false,
@@ -2723,6 +2728,8 @@ fn gcm_encrypt_size_query_leaves_init_scope_memory_untouched() {
         iv_buffer_len: generated_iv.len() as u64,
         aad: b"aad".to_vec().into(),
         tag_bits: 128,
+        iv_presence: PointerBytes::from_legacy(&generated_iv, false),
+        aad_presence: PointerBytes::from_legacy(b"aad", false),
 
         iv_null: false,
         aad_null: false,
@@ -2796,11 +2803,13 @@ fn gcm_encrypt_does_not_touch_released_init_params() {
     let daemon = TestDaemon::shared();
     let generated_iv = vec![0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xEB];
     daemon.backend.set_encrypt_exact_output(Some(CkMechanismParams::Gcm(GcmParams {
-        iv: generated_iv,
+        iv: generated_iv.clone(),
         iv_bits: 96,
         iv_buffer_len: 12,
         aad: b"aad".to_vec().into(),
         tag_bits: 128,
+        iv_presence: PointerBytes::from_legacy(&generated_iv, false),
+        aad_presence: PointerBytes::from_legacy(b"aad", false),
 
         iv_null: false,
         aad_null: false,
