@@ -1,5 +1,7 @@
 use super::ffi_conversion::{mechanism_to_ffi, narrow_wire_ulong};
 use super::native_allocation::NativeAllocation;
+#[cfg(test)]
+use super::validated_mechanism_for_tests;
 use super::{FfiBackend, call_3x_fn, native_domain::OrdinaryGuard};
 use pkcs11_proxy_ng_proto::convert::message_effects::ParameterEffectCallMode;
 use pkcs11_proxy_ng_proto::convert::message_effects::{MessageEffectContext, MessageEffects};
@@ -460,7 +462,7 @@ impl FfiBackend {
     pub(super) fn ffi_message_encrypt_init(
         &self,
         session: CkSessionHandle,
-        mechanism: Option<&CkMechanism>,
+        mechanism: Option<&ValidatedMechanismParams>,
         init_param: Option<&MessageParameter>,
         key: CkObjectHandle,
     ) -> CkResult<()> {
@@ -468,7 +470,8 @@ impl FfiBackend {
         match (mechanism, init_param) {
             // Message-based init: reconstruct CK_*_MESSAGE_PARAMS or forward raw bytes.
             (Some(mech), Some(param)) => {
-                let mut init_mech = build_message_init_mechanism(mech.mechanism_type.0, param)?;
+                let mut init_mech =
+                    build_message_init_mechanism(mech.mechanism().mechanism_type.0, param)?;
                 let _session_fence = self.session_fences.enter(&admission, session)?;
                 call_3x_fn!(
                     &admission,
@@ -481,8 +484,7 @@ impl FfiBackend {
                 )
             }
             (Some(mech), None) => {
-                let validated = super::ffi_conversion::validate_for_ffi(mech)?;
-                let ffi_mech = mechanism_to_ffi(&validated)?;
+                let ffi_mech = mechanism_to_ffi(mech)?;
                 call_3x_fn!(
                     &admission,
                     self,
@@ -511,14 +513,15 @@ impl FfiBackend {
     pub(super) fn ffi_message_encrypt_init_contract(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         init_param: Option<&MessageParameter>,
         key: CkObjectHandle,
         provider_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<CkParameterRoundtripResult> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         if let Some(param) = init_param {
-            let mut init_mech = build_message_init_mechanism(mechanism.mechanism_type.0, param)?;
+            let mut init_mech =
+                build_message_init_mechanism(mechanism.mechanism().mechanism_type.0, param)?;
             if !provider_spec.buffer_present
                 || provider_spec.buffer_len != init_mech.ck_mechanism.ulParameterLen as u64
                 || provider_spec.value.is_some()
@@ -542,8 +545,7 @@ impl FfiBackend {
             {
                 return Err(CkRv::MECHANISM_PARAM_INVALID);
             }
-            let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
-            let mut ffi_mech = mechanism_to_ffi(&validated)?;
+            let mut ffi_mech = mechanism_to_ffi(mechanism)?;
             if ffi_mech.ck_mechanism().pParameter.is_null()
                 && ffi_mech.ck_mechanism().ulParameterLen == 0
             {
@@ -592,7 +594,7 @@ impl FfiBackend {
     pub(super) fn ffi_message_decrypt_init(
         &self,
         session: CkSessionHandle,
-        mechanism: Option<&CkMechanism>,
+        mechanism: Option<&ValidatedMechanismParams>,
         init_param: Option<&MessageParameter>,
         key: CkObjectHandle,
     ) -> CkResult<()> {
@@ -600,7 +602,8 @@ impl FfiBackend {
         match (mechanism, init_param) {
             // Message-based init: reconstruct CK_*_MESSAGE_PARAMS or forward raw bytes.
             (Some(mech), Some(param)) => {
-                let mut init_mech = build_message_init_mechanism(mech.mechanism_type.0, param)?;
+                let mut init_mech =
+                    build_message_init_mechanism(mech.mechanism().mechanism_type.0, param)?;
                 let _session_fence = self.session_fences.enter(&admission, session)?;
                 call_3x_fn!(
                     &admission,
@@ -613,8 +616,7 @@ impl FfiBackend {
                 )
             }
             (Some(mech), None) => {
-                let validated = super::ffi_conversion::validate_for_ffi(mech)?;
-                let ffi_mech = mechanism_to_ffi(&validated)?;
+                let ffi_mech = mechanism_to_ffi(mech)?;
                 call_3x_fn!(
                     &admission,
                     self,
@@ -643,14 +645,15 @@ impl FfiBackend {
     pub(super) fn ffi_message_decrypt_init_contract(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         init_param: Option<&MessageParameter>,
         key: CkObjectHandle,
         provider_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<CkParameterRoundtripResult> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         if let Some(param) = init_param {
-            let mut init_mech = build_message_init_mechanism(mechanism.mechanism_type.0, param)?;
+            let mut init_mech =
+                build_message_init_mechanism(mechanism.mechanism().mechanism_type.0, param)?;
             if !provider_spec.buffer_present
                 || provider_spec.buffer_len != init_mech.ck_mechanism.ulParameterLen as u64
                 || provider_spec.value.is_some()
@@ -674,8 +677,7 @@ impl FfiBackend {
             {
                 return Err(CkRv::MECHANISM_PARAM_INVALID);
             }
-            let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
-            let mut ffi_mech = mechanism_to_ffi(&validated)?;
+            let mut ffi_mech = mechanism_to_ffi(mechanism)?;
             if ffi_mech.ck_mechanism().pParameter.is_null()
                 && ffi_mech.ck_mechanism().ulParameterLen == 0
             {
@@ -724,14 +726,13 @@ impl FfiBackend {
     pub(super) fn ffi_message_sign_init(
         &self,
         session: CkSessionHandle,
-        mechanism: Option<&CkMechanism>,
+        mechanism: Option<&ValidatedMechanismParams>,
         key: CkObjectHandle,
     ) -> CkResult<()> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         match mechanism {
             Some(mech) => {
-                let validated = super::ffi_conversion::validate_for_ffi(mech)?;
-                let ffi_mech = mechanism_to_ffi(&validated)?;
+                let ffi_mech = mechanism_to_ffi(mech)?;
                 let _session_fence = self.session_fences.enter(&admission, session)?;
                 call_3x_fn!(
                     &admission,
@@ -775,14 +776,13 @@ impl FfiBackend {
     pub(super) fn ffi_message_verify_init(
         &self,
         session: CkSessionHandle,
-        mechanism: Option<&CkMechanism>,
+        mechanism: Option<&ValidatedMechanismParams>,
         key: CkObjectHandle,
     ) -> CkResult<()> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         match mechanism {
             Some(mech) => {
-                let validated = super::ffi_conversion::validate_for_ffi(mech)?;
-                let ffi_mech = mechanism_to_ffi(&validated)?;
+                let ffi_mech = mechanism_to_ffi(mech)?;
                 let _session_fence = self.session_fences.enter(&admission, session)?;
                 call_3x_fn!(
                     &admission,
@@ -3413,7 +3413,7 @@ mod tests {
                     let result = if encrypt {
                         backend.ffi_message_encrypt_init_contract(
                             CkSessionHandle(7),
-                            &mechanism,
+                            &validated_mechanism_for_tests(&mechanism),
                             parameter.as_ref(),
                             CkObjectHandle(9),
                             provider_spec,
@@ -3421,7 +3421,7 @@ mod tests {
                     } else {
                         backend.ffi_message_decrypt_init_contract(
                             CkSessionHandle(7),
-                            &mechanism,
+                            &validated_mechanism_for_tests(&mechanism),
                             parameter.as_ref(),
                             CkObjectHandle(9),
                             provider_spec,
@@ -3468,7 +3468,7 @@ mod tests {
                 let result = if encrypt {
                     backend.ffi_message_encrypt_init_contract(
                         CkSessionHandle(7),
-                        &mechanism,
+                        &validated_mechanism_for_tests(&mechanism),
                         parameter,
                         CkObjectHandle(9),
                         provider_spec,
@@ -3476,7 +3476,7 @@ mod tests {
                 } else {
                     backend.ffi_message_decrypt_init_contract(
                         CkSessionHandle(7),
-                        &mechanism,
+                        &validated_mechanism_for_tests(&mechanism),
                         parameter,
                         CkObjectHandle(9),
                         provider_spec,
@@ -3605,7 +3605,7 @@ mod tests {
                 let init_ack = if encrypt {
                     backend.ffi_message_encrypt_init_contract(
                         session,
-                        &mechanism,
+                        &validated_mechanism_for_tests(&mechanism),
                         Some(&parameter),
                         key,
                         &provider_spec,
@@ -3613,7 +3613,7 @@ mod tests {
                 } else {
                     backend.ffi_message_decrypt_init_contract(
                         session,
-                        &mechanism,
+                        &validated_mechanism_for_tests(&mechanism),
                         Some(&parameter),
                         key,
                         &provider_spec,
@@ -4292,7 +4292,7 @@ mod tests {
         let init_ack = backend
             .ffi_message_encrypt_init_contract(
                 CkSessionHandle(7),
-                &mechanism,
+                &validated_mechanism_for_tests(&mechanism),
                 Some(&param),
                 CkObjectHandle(1),
                 &init_spec,
@@ -4448,7 +4448,7 @@ mod tests {
                 backend
                     .ffi_message_encrypt_init_contract(
                         CkSessionHandle(7),
-                        &mechanism,
+                        &validated_mechanism_for_tests(&mechanism),
                         Some(&param),
                         CkObjectHandle(1),
                         spec,
@@ -4580,7 +4580,7 @@ mod tests {
         backend
             .ffi_message_encrypt_init(
                 CkSessionHandle(7),
-                Some(&gcm_mech),
+                Some(&validated_mechanism_for_tests(&gcm_mech)),
                 Some(&gcm_param),
                 CkObjectHandle(1),
             )
@@ -4588,7 +4588,7 @@ mod tests {
         backend
             .ffi_message_decrypt_init(
                 CkSessionHandle(7),
-                Some(&gcm_mech),
+                Some(&validated_mechanism_for_tests(&gcm_mech)),
                 Some(&gcm_param),
                 CkObjectHandle(1),
             )
@@ -4598,7 +4598,7 @@ mod tests {
         backend
             .ffi_message_encrypt_init(
                 CkSessionHandle(7),
-                Some(&plain_mech),
+                Some(&validated_mechanism_for_tests(&plain_mech)),
                 None,
                 CkObjectHandle(1),
             )

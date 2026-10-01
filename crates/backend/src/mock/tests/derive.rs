@@ -15,7 +15,9 @@ fn derive_key_with_sp800_108_rejects_unsupported_prf_type() {
         })),
     };
 
-    let err = backend.derive_key_with_output(session, &mechanism, base_key, Some(&[])).unwrap_err();
+    let err = backend
+        .derive_key_with_output(session, &validated(&mechanism), base_key, Some(&[]))
+        .unwrap_err();
 
     assert_eq!(err, CkRv::MECHANISM_PARAM_INVALID);
 }
@@ -196,11 +198,15 @@ fn derive_key_leaves_lengthless_signal_byte_fields_unvalidated() {
     };
 
     assert_ne!(
-        backend.derive_key(session, &initiate, base_key, Some(&[label_attr("initiate")])).unwrap(),
+        backend
+            .derive_key(session, &validated(&initiate), base_key, Some(&[label_attr("initiate")]))
+            .unwrap(),
         CkObjectHandle(0)
     );
     assert_ne!(
-        backend.derive_key(session, &respond, base_key, Some(&[label_attr("respond")])).unwrap(),
+        backend
+            .derive_key(session, &validated(&respond), base_key, Some(&[label_attr("respond")]))
+            .unwrap(),
         CkObjectHandle(0)
     );
 }
@@ -219,35 +225,39 @@ fn cms_sig_workflows_validate_optional_certificate_handle() {
     let invalid_cert_mechanism = cms_sig_mechanism(invalid_certificate);
 
     assert_eq!(
-        backend.sign_init(session, &invalid_cert_mechanism, signing_key).unwrap_err(),
+        backend.sign_init(session, &validated(&invalid_cert_mechanism), signing_key).unwrap_err(),
         CkRv::OBJECT_HANDLE_INVALID
     );
     assert_eq!(
-        backend.verify_init(session, &invalid_cert_mechanism, signing_key).unwrap_err(),
+        backend.verify_init(session, &validated(&invalid_cert_mechanism), signing_key).unwrap_err(),
         CkRv::OBJECT_HANDLE_INVALID
     );
     assert_eq!(
-        backend.sign_recover_init(session, &invalid_cert_mechanism, signing_key).unwrap_err(),
+        backend
+            .sign_recover_init(session, &validated(&invalid_cert_mechanism), signing_key)
+            .unwrap_err(),
         CkRv::OBJECT_HANDLE_INVALID
     );
     assert_eq!(
-        backend.verify_recover_init(session, &invalid_cert_mechanism, signing_key).unwrap_err(),
+        backend
+            .verify_recover_init(session, &validated(&invalid_cert_mechanism), signing_key)
+            .unwrap_err(),
         CkRv::OBJECT_HANDLE_INVALID
     );
 
     let live_cert_mechanism = cms_sig_mechanism(certificate);
-    backend.sign_init(session, &live_cert_mechanism, signing_key).unwrap();
+    backend.sign_init(session, &validated(&live_cert_mechanism), signing_key).unwrap();
     let signature = backend.sign_final(session).unwrap();
     let signature_bytes = signature.expose(|raw| raw.to_vec());
-    backend.verify_init(session, &live_cert_mechanism, signing_key).unwrap();
+    backend.verify_init(session, &validated(&live_cert_mechanism), signing_key).unwrap();
     backend.verify_final(session, CkInBuf::Bytes(&signature_bytes)).unwrap();
-    backend.sign_recover_init(session, &live_cert_mechanism, signing_key).unwrap();
+    backend.sign_recover_init(session, &validated(&live_cert_mechanism), signing_key).unwrap();
     backend.sign_recover(session, CkInBuf::Bytes(b"data")).unwrap();
-    backend.verify_recover_init(session, &live_cert_mechanism, signing_key).unwrap();
+    backend.verify_recover_init(session, &validated(&live_cert_mechanism), signing_key).unwrap();
     backend.verify_recover(session, CkInBuf::Bytes(b"sig")).unwrap();
 
     let absent_cert_mechanism = cms_sig_mechanism(CkObjectHandle(0));
-    backend.sign_init(session, &absent_cert_mechanism, signing_key).unwrap();
+    backend.sign_init(session, &validated(&absent_cert_mechanism), signing_key).unwrap();
     backend.sign_final(session).unwrap();
 }
 
@@ -269,7 +279,12 @@ fn derive_key_validates_concatenate_base_and_key_parameter_handle() {
     };
     assert_eq!(
         backend
-            .derive_key(session, &invalid_mechanism, base_key, Some(&[label_attr("derived")]))
+            .derive_key(
+                session,
+                &validated(&invalid_mechanism),
+                base_key,
+                Some(&[label_attr("derived")])
+            )
             .unwrap_err(),
         CkRv::OBJECT_HANDLE_INVALID
     );
@@ -277,7 +292,7 @@ fn derive_key_validates_concatenate_base_and_key_parameter_handle() {
         backend
             .derive_key_with_output(
                 session,
-                &invalid_mechanism,
+                &validated(&invalid_mechanism),
                 base_key,
                 Some(&[label_attr("derived")])
             )
@@ -291,7 +306,12 @@ fn derive_key_validates_concatenate_base_and_key_parameter_handle() {
     };
     assert_ne!(
         backend
-            .derive_key(session, &valid_mechanism, base_key, Some(&[label_attr("valid")]))
+            .derive_key(
+                session,
+                &validated(&valid_mechanism),
+                base_key,
+                Some(&[label_attr("valid")])
+            )
             .unwrap(),
         CkObjectHandle(0)
     );
@@ -314,7 +334,12 @@ fn kip_derive_and_mac_validate_hkey_but_wrap_does_not_use_it() {
     let invalid_derive = kip_mechanism(CkMechanismType::KIP_DERIVE, invalid);
     assert_eq!(
         backend
-            .derive_key(session, &invalid_derive, base_key, Some(&[label_attr("kip-derived")]))
+            .derive_key(
+                session,
+                &validated(&invalid_derive),
+                base_key,
+                Some(&[label_attr("kip-derived")])
+            )
             .unwrap_err(),
         CkRv::OBJECT_HANDLE_INVALID
     );
@@ -322,7 +347,7 @@ fn kip_derive_and_mac_validate_hkey_but_wrap_does_not_use_it() {
         backend
             .derive_key_with_output(
                 session,
-                &invalid_derive,
+                &validated(&invalid_derive),
                 base_key,
                 Some(&[label_attr("kip-derived")])
             )
@@ -333,38 +358,43 @@ fn kip_derive_and_mac_validate_hkey_but_wrap_does_not_use_it() {
     let valid_derive = kip_mechanism(CkMechanismType::KIP_DERIVE, entropy_key);
     assert_ne!(
         backend
-            .derive_key(session, &valid_derive, base_key, Some(&[label_attr("kip-valid")]))
+            .derive_key(
+                session,
+                &validated(&valid_derive),
+                base_key,
+                Some(&[label_attr("kip-valid")])
+            )
             .unwrap(),
         CkObjectHandle(0)
     );
 
     let invalid_mac = kip_mechanism(CkMechanismType::KIP_MAC, invalid);
     assert_eq!(
-        backend.sign_init(session, &invalid_mac, base_key).unwrap_err(),
+        backend.sign_init(session, &validated(&invalid_mac), base_key).unwrap_err(),
         CkRv::OBJECT_HANDLE_INVALID
     );
     assert_eq!(
-        backend.verify_init(session, &invalid_mac, base_key).unwrap_err(),
+        backend.verify_init(session, &validated(&invalid_mac), base_key).unwrap_err(),
         CkRv::OBJECT_HANDLE_INVALID
     );
 
     let valid_mac = kip_mechanism(CkMechanismType::KIP_MAC, entropy_key);
-    backend.sign_init(session, &valid_mac, base_key).unwrap();
+    backend.sign_init(session, &validated(&valid_mac), base_key).unwrap();
     let signature = backend.sign_final(session).unwrap();
     let signature_bytes = signature.expose(|raw| raw.to_vec());
-    backend.verify_init(session, &valid_mac, base_key).unwrap();
+    backend.verify_init(session, &validated(&valid_mac), base_key).unwrap();
     backend.verify_final(session, CkInBuf::Bytes(&signature_bytes)).unwrap();
 
     let wrap_mechanism = kip_mechanism(CkMechanismType::KIP_WRAP, invalid);
     assert_eq!(
-        backend.wrap_key(session, &wrap_mechanism, wrapping_key, wrapped_key).unwrap(),
+        backend.wrap_key(session, &validated(&wrap_mechanism), wrapping_key, wrapped_key).unwrap(),
         vec![0xDE, 0xAD, 0xBE, 0xEF].into()
     );
     assert_ne!(
         backend
             .unwrap_key(
                 session,
-                &wrap_mechanism,
+                &validated(&wrap_mechanism),
                 wrapping_key,
                 CkInBuf::Bytes(b"wrapped"),
                 Some(&[label_attr("kip-unwrapped")])
@@ -487,7 +517,7 @@ fn derive_key_validates_dual_ec_and_x942_parameter_handles() {
         let mechanism = CkMechanism { mechanism_type, params: Some(params) };
         assert_ne!(
             backend
-                .derive_key(session, &mechanism, base_key, Some(&[label_attr("valid")]))
+                .derive_key(session, &validated(&mechanism), base_key, Some(&[label_attr("valid")]))
                 .unwrap(),
             CkObjectHandle(0)
         );
@@ -511,8 +541,9 @@ fn derive_key_with_output_returns_configured_tls_output_params() {
     backend.set_derive_key_output(Some(output.clone()));
     let base_key = live_key(&backend, session);
 
-    let (handle, mechanism_out) =
-        backend.derive_key_with_output(session, &mechanism, base_key, Some(&[])).unwrap();
+    let (handle, mechanism_out) = backend
+        .derive_key_with_output(session, &validated(&mechanism), base_key, Some(&[]))
+        .unwrap();
 
     assert_ne!(handle, CkObjectHandle(0));
     assert_eq!(mechanism_out, Some(output));
@@ -533,8 +564,9 @@ fn derive_key_with_output_returns_configured_pbe_iv_output_params() {
     backend.set_derive_key_output(Some(output.clone()));
     let base_key = live_key(&backend, session);
 
-    let (handle, mechanism_out) =
-        backend.derive_key_with_output(session, &mechanism, base_key, Some(&[])).unwrap();
+    let (handle, mechanism_out) = backend
+        .derive_key_with_output(session, &validated(&mechanism), base_key, Some(&[]))
+        .unwrap();
 
     assert_ne!(handle, CkObjectHandle(0));
     assert_eq!(mechanism_out, Some(output));
@@ -570,8 +602,9 @@ fn derive_key_with_sp800_108_additional_keys_allocates_output_handles() {
     };
     let base_key = live_key(&backend, session);
 
-    let (primary, mechanism_out) =
-        backend.derive_key_with_output(session, &mechanism, base_key, Some(&[])).unwrap();
+    let (primary, mechanism_out) = backend
+        .derive_key_with_output(session, &validated(&mechanism), base_key, Some(&[]))
+        .unwrap();
 
     let Some(CkMechanismParams::Sp800108Kdf(output)) = mechanism_out else {
         panic!("expected SP800-108 output params");
@@ -638,8 +671,9 @@ fn derive_key_with_sp800_108_additional_key_handles_preserves_templates() {
         let base_key = live_key(&backend, session);
         let mechanism = CkMechanism { mechanism_type, params: Some(params) };
 
-        let (_, mechanism_out) =
-            backend.derive_key_with_output(session, &mechanism, base_key, Some(&[])).unwrap();
+        let (_, mechanism_out) = backend
+            .derive_key_with_output(session, &validated(&mechanism), base_key, Some(&[]))
+            .unwrap();
         let additional_key = match mechanism_out {
             Some(CkMechanismParams::Sp800108Kdf(output)) => {
                 output.additional_derived_keys[0].key_handle
@@ -756,8 +790,9 @@ fn derive_key_with_sp800_108_enforces_mode_data_param_rules() {
         let base_key = live_key(&backend, session);
         let mechanism = CkMechanism { mechanism_type, params: Some(params) };
 
-        let err =
-            backend.derive_key_with_output(session, &mechanism, base_key, Some(&[])).unwrap_err();
+        let err = backend
+            .derive_key_with_output(session, &validated(&mechanism), base_key, Some(&[]))
+            .unwrap_err();
 
         assert_eq!(err, CkRv::MECHANISM_PARAM_INVALID, "{name}");
         assert_eq!(
@@ -896,8 +931,9 @@ fn derive_key_with_sp800_108_validates_data_param_payload_shapes_and_singletons(
         let base_key = live_key(&backend, session);
         let mechanism = CkMechanism { mechanism_type, params: Some(params) };
 
-        let err =
-            backend.derive_key_with_output(session, &mechanism, base_key, Some(&[])).unwrap_err();
+        let err = backend
+            .derive_key_with_output(session, &validated(&mechanism), base_key, Some(&[]))
+            .unwrap_err();
 
         assert_eq!(err, CkRv::MECHANISM_PARAM_INVALID, "{name}");
         assert_eq!(
@@ -952,8 +988,9 @@ fn derive_key_with_sp800_108_key_handle_data_param_requires_live_input_key() {
         ),
     ] {
         let mechanism = CkMechanism { mechanism_type, params: Some(params) };
-        let err =
-            backend.derive_key_with_output(session, &mechanism, base_key, Some(&[])).unwrap_err();
+        let err = backend
+            .derive_key_with_output(session, &validated(&mechanism), base_key, Some(&[]))
+            .unwrap_err();
 
         assert_eq!(err, CkRv::OBJECT_HANDLE_INVALID);
     }
@@ -1003,8 +1040,9 @@ fn derive_key_with_sp800_108_key_handle_data_param_accepts_live_input_key() {
         ),
     ] {
         let mechanism = CkMechanism { mechanism_type, params: Some(params) };
-        let (derived, mechanism_out) =
-            backend.derive_key_with_output(session, &mechanism, input_key, Some(&[])).unwrap();
+        let (derived, mechanism_out) = backend
+            .derive_key_with_output(session, &validated(&mechanism), input_key, Some(&[]))
+            .unwrap();
 
         assert_ne!(derived, CkObjectHandle(0));
         assert_eq!(mechanism_out, None);
@@ -1022,7 +1060,7 @@ fn derive_key_preserves_primary_key_template() {
     let derived_key = backend
         .derive_key(
             session,
-            &mechanism,
+            &validated(&mechanism),
             base_key,
             Some(&[
                 CkAttribute {
@@ -1071,8 +1109,9 @@ fn derive_key_with_sp800_108_additional_key_handles_rejects_small_attribute_buff
     };
     let base_key = live_key(&backend, session);
 
-    let (_, mechanism_out) =
-        backend.derive_key_with_output(session, &mechanism, base_key, Some(&[])).unwrap();
+    let (_, mechanism_out) = backend
+        .derive_key_with_output(session, &validated(&mechanism), base_key, Some(&[]))
+        .unwrap();
     let Some(CkMechanismParams::Sp800108Kdf(output)) = mechanism_out else {
         panic!("expected SP800-108 output params");
     };
@@ -1134,7 +1173,7 @@ fn close_session_clears_sp800_108_session_keys_but_preserves_token_keys() {
     let (session_primary, session_output) = backend
         .derive_key_with_output(
             session,
-            &session_mechanism,
+            &validated(&session_mechanism),
             base_key,
             Some(&[label_attr("session-primary")]),
         )
@@ -1148,7 +1187,7 @@ fn close_session_clears_sp800_108_session_keys_but_preserves_token_keys() {
     let (token_primary, token_output) = backend
         .derive_key_with_output(
             session,
-            &token_mechanism,
+            &validated(&token_mechanism),
             base_key,
             Some(&[
                 CkAttribute {
@@ -1232,8 +1271,9 @@ fn derive_key_with_sp800_108_additional_keys_does_not_partially_allocate_on_quot
         let base_key = live_key(&backend, session);
         let mechanism = CkMechanism { mechanism_type, params: Some(params) };
 
-        let err =
-            backend.derive_key_with_output(session, &mechanism, base_key, Some(&[])).unwrap_err();
+        let err = backend
+            .derive_key_with_output(session, &validated(&mechanism), base_key, Some(&[]))
+            .unwrap_err();
 
         assert_eq!(err, CkRv::DEVICE_MEMORY);
         assert_eq!(
@@ -1282,7 +1322,7 @@ fn derive_key_with_sp800_108_template_failure_reports_invalid_additional_handle(
     };
 
     let result = backend
-        .derive_key_with_output_result(session, &mechanism, base_key, Some(&[]))
+        .derive_key_with_output_result(session, &validated(&mechanism), base_key, Some(&[]))
         .expect("mock backend call should return a structured PKCS#11 result");
 
     assert_eq!(result.rv, CkRv::TEMPLATE_INCONSISTENT);
@@ -1310,7 +1350,8 @@ fn derived_object_stores_its_template_attributes() {
     }];
     let base_key = backend.create_object(session, Some(&[])).unwrap();
     let mech = CkMechanism { mechanism_type: CkMechanismType::SHA256, params: None };
-    let derived = backend.derive_key(session, &mech, base_key, Some(&template)).unwrap();
+    let derived =
+        backend.derive_key(session, &validated(&mech), base_key, Some(&template)).unwrap();
     let (rv, results) = backend
         .get_attribute_value_exact(
             session,

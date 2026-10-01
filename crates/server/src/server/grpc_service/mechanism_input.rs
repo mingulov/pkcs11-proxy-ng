@@ -1,23 +1,72 @@
-//! Daemon transport validation entry point (S2 §6; R9).
+//! Daemon transport validation entry point (S2 §6; R9, wired by R13).
 //!
-//! [`validate_mechanism_transport`] is the always-on gate R13 wires into
-//! every classic handler between per-principal authorization and handle
-//! remapping. The checks themselves live in
+//! [`validate_mechanism_transport`] is the always-on gate every classic
+//! handler calls between per-principal authorization and handle remapping.
+//! The checks themselves live in
 //! [`ValidatedMechanismParams::validate`](pkcs11_proxy_ng_types::ValidatedMechanismParams)
 //! (S2 ownership: the opaque type + validating constructor live in
 //! `types`, which both edges depend on); this module adapts the
 //! server-side call context (registry snapshot, operation, ABIs) and pins
 //! the S2 §6 RV table end to end through the server entry point.
 //!
-//! UNWIRED until R13: no handler calls this yet, so no behavior changes.
+//! Handler order (exact, S2 §6): session/key resolution → `parse_mechanism`
+//! → [`check_operator_exclusion`] → `mechanism_permitted` → this gate →
+//! `remap_mechanism_handles` → (R20 sanitizer) → backend call. Every stage
+//! shares the request's single [`current_registry_snapshot`].
 
 use pkcs11_proxy_ng_types::shape_descriptors::{Operation, ParamAbi};
-use pkcs11_proxy_ng_types::{CkMechanism, CkRv, MechanismRegistry, ValidatedMechanismParams};
+use pkcs11_proxy_ng_types::{
+    CkMechanism, CkMechanismParams, CkMechanismType, CkRv, MechanismRegistry,
+    ValidatedMechanismParams,
+};
+
+/// Acquire this request's single registry snapshot (S2 §6: one snapshot
+/// per request feeds exclusion, descriptor resolution, and validation —
+/// SIGHUP safety). Fail-closed `DEVICE_ERROR` on a poisoned lock (the
+/// pre-R13 message-path poison RV, now uniform across handlers).
+pub(super) fn current_registry_snapshot(
+    ctx: &super::HandlerContext,
+) -> Result<std::sync::Arc<MechanismRegistry>, CkRv> {
+    ctx.mechanism_registry_source.current_registry().map_err(|_| CkRv::DEVICE_ERROR)
+}
+
+/// Operator exclusion (S2 §6): an excluded mechanism is rejected with
+/// `MECHANISM_INVALID` BEFORE per-principal authorization. (Transport
+/// validation re-checks exclusion from the same snapshot; that inner check
+/// is unreachable on this path but keeps the types-layer gate total.)
+pub(super) fn check_operator_exclusion(
+    registry: &MechanismRegistry,
+    mech_type: CkMechanismType,
+) -> Result<(), CkRv> {
+    if registry.excluded_view().contains(&mech_type.0) {
+        return Err(CkRv::MECHANISM_INVALID);
+    }
+    Ok(())
+}
+
+/// The ABIs transport validation decides under (R13): local is this
+/// daemon's compiled native ABI; backend is the in-process provider's
+/// `CK_ULONG` width (the backend FFI runs in this process, so the
+/// daemon's compiled width is the backend's width).
+///
+/// Big-endian targets (`ParamAbi::native() == None`): v1 layout ABIs are
+/// all little-endian, so no Flat image can match — the width-derived
+/// fallback below is width-correct for Null narrowing and typed/None
+/// paths, and [`validate_mechanism_transport`] rejects Flat outright
+/// there (fail closed; BE daemons are outside the supported matrix).
+pub(super) fn daemon_validation_abis() -> (ParamAbi, ParamAbi) {
+    let width_abi = if pkcs11_proxy_ng_backend::host_abi::host_ulong_size() >= 8 {
+        ParamAbi::Lp64NativeLe
+    } else {
+        ParamAbi::Ilp32NativeLe
+    };
+    (ParamAbi::native().unwrap_or(width_abi), width_abi)
+}
 
 /// Validate one request's mechanism parameters against the daemon's
-/// transport contract (S2 §6, always on once wired).
+/// transport contract (S2 §6, always on).
 ///
-/// - `registry` is the `current_registry()` snapshot for this request
+/// - `registry` is the [`current_registry_snapshot`] for this request
 ///   (SIGHUP safety: one snapshot feeds exclusion, descriptor resolution,
 ///   and validation).
 /// - `operation` is the call-site operation context (`WrapKey` selects the
@@ -30,8 +79,6 @@ use pkcs11_proxy_ng_types::{CkMechanism, CkRv, MechanismRegistry, ValidatedMecha
 /// is exact per S2 §6 (see
 /// [`ValidatedMechanismParams::validate`](pkcs11_proxy_ng_types::ValidatedMechanismParams::validate));
 /// the tests below pin every row through this entry point.
-// TODO(R13): remove once handlers wire this in (unwired by design until R13).
-#[allow(dead_code)]
 pub fn validate_mechanism_transport(
     registry: &MechanismRegistry,
     mechanism: &CkMechanism,
@@ -39,6 +86,12 @@ pub fn validate_mechanism_transport(
     local_abi: ParamAbi,
     backend_abi: ParamAbi,
 ) -> Result<ValidatedMechanismParams, CkRv> {
+    // Big-endian fail-closed (see `daemon_validation_abis`): v1 ABIs are
+    // all little-endian, so a BE daemon must never accept a Flat image.
+    if ParamAbi::native().is_none() && matches!(mechanism.params, Some(CkMechanismParams::Flat(_)))
+    {
+        return Err(CkRv::MECHANISM_PARAM_INVALID);
+    }
     ValidatedMechanismParams::validate(mechanism, registry, operation, local_abi, backend_abi)
 }
 

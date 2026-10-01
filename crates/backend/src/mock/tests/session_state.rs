@@ -48,7 +48,8 @@ fn mock_generate_key_pair_returns_unique_handles() {
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
     let mech = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS_KEY_PAIR_GEN, params: None };
-    let (pub_h, priv_h) = backend.generate_key_pair(session, &mech, Some(&[]), Some(&[])).unwrap();
+    let (pub_h, priv_h) =
+        backend.generate_key_pair(session, &validated(&mech), Some(&[]), Some(&[])).unwrap();
     assert_ne!(pub_h, priv_h);
 }
 
@@ -61,15 +62,20 @@ fn object_and_key_creation_workflows_reject_invalid_session_without_allocating()
         backend.copy_object(session, CkObjectHandle(1), Some(&[label_attr("copied")]))
     });
     assert_invalid_session_does_not_allocate_object(|backend, session, mechanism| {
-        backend.generate_key(session, mechanism, Some(&[label_attr("generated")]))
+        backend.generate_key(session, &validated(mechanism), Some(&[label_attr("generated")]))
     });
     assert_invalid_session_does_not_allocate_object(|backend, session, mechanism| {
-        backend.derive_key(session, mechanism, CkObjectHandle(1), Some(&[label_attr("derived")]))
+        backend.derive_key(
+            session,
+            &validated(mechanism),
+            CkObjectHandle(1),
+            Some(&[label_attr("derived")]),
+        )
     });
     assert_invalid_session_does_not_allocate_object(|backend, session, mechanism| {
         backend.derive_key_with_output(
             session,
-            mechanism,
+            &validated(mechanism),
             CkObjectHandle(1),
             Some(&[label_attr("derived-output")]),
         )
@@ -77,7 +83,7 @@ fn object_and_key_creation_workflows_reject_invalid_session_without_allocating()
     assert_invalid_session_does_not_allocate_object(|backend, session, mechanism| {
         backend.unwrap_key(
             session,
-            mechanism,
+            &validated(mechanism),
             CkObjectHandle(1),
             CkInBuf::Bytes(b"wrapped"),
             Some(&[label_attr("unwrapped")]),
@@ -86,7 +92,7 @@ fn object_and_key_creation_workflows_reject_invalid_session_without_allocating()
     assert_invalid_session_does_not_allocate_object(|backend, session, mechanism| {
         backend.generate_key_pair(
             session,
-            mechanism,
+            &validated(mechanism),
             Some(&[label_attr("public")]),
             Some(&[label_attr("private")]),
         )
@@ -94,7 +100,7 @@ fn object_and_key_creation_workflows_reject_invalid_session_without_allocating()
     assert_invalid_session_does_not_allocate_object(|backend, session, mechanism| {
         backend.encapsulate_key(
             session,
-            mechanism,
+            &validated(mechanism),
             CkObjectHandle(1),
             Some(&[label_attr("encapsulated")]),
         )
@@ -102,7 +108,7 @@ fn object_and_key_creation_workflows_reject_invalid_session_without_allocating()
     assert_invalid_session_does_not_allocate_object(|backend, session, mechanism| {
         backend.encapsulate_key_exact(
             session,
-            mechanism,
+            &validated(mechanism),
             CkObjectHandle(1),
             Some(&[label_attr("encapsulated-exact")]),
             &CkOutputBufferSpec { buffer_present: true, buffer_len: 8, length_pointer_null: false },
@@ -111,7 +117,7 @@ fn object_and_key_creation_workflows_reject_invalid_session_without_allocating()
     assert_invalid_session_does_not_allocate_object(|backend, session, mechanism| {
         backend.decapsulate_key(
             session,
-            mechanism,
+            &validated(mechanism),
             CkObjectHandle(1),
             Some(&[label_attr("decapsulated")]),
             CkInBuf::Bytes(b"capsule"),
@@ -120,7 +126,7 @@ fn object_and_key_creation_workflows_reject_invalid_session_without_allocating()
     assert_invalid_session_does_not_allocate_object(|backend, session, mechanism| {
         backend.unwrap_key_authenticated(
             session,
-            mechanism,
+            &validated(mechanism),
             CkObjectHandle(1),
             CkInBuf::Bytes(b"wrapped"),
             Some(&[label_attr("authenticated-unwrapped")]),
@@ -199,12 +205,15 @@ fn find_objects_tracks_active_search_operation() {
 
     backend.find_objects_init(session, Some(&[])).unwrap();
     assert_eq!(backend.find_objects_init(session, Some(&[])).unwrap_err(), CkRv::OPERATION_ACTIVE);
-    assert_eq!(backend.sign_init(session, &mechanism, key).unwrap_err(), CkRv::OPERATION_ACTIVE);
+    assert_eq!(
+        backend.sign_init(session, &validated(&mechanism), key).unwrap_err(),
+        CkRv::OPERATION_ACTIVE
+    );
     assert_eq!(backend.find_objects(session, 0).unwrap(), Vec::<CkObjectHandle>::new());
     backend.find_objects_final(session).unwrap();
     assert_eq!(backend.find_objects_final(session).unwrap_err(), CkRv::OPERATION_NOT_INITIALIZED);
 
-    backend.sign_init(session, &mechanism, key).unwrap();
+    backend.sign_init(session, &validated(&mechanism), key).unwrap();
     assert_eq!(backend.find_objects_init(session, Some(&[])).unwrap_err(), CkRv::OPERATION_ACTIVE);
 }
 
@@ -231,7 +240,9 @@ fn stateless_session_workflows_reject_invalid_session() {
         CkRv::SESSION_HANDLE_INVALID
     );
     assert_eq!(
-        backend.sign_recover_init(invalid_session, &mechanism, CkObjectHandle(1)).unwrap_err(),
+        backend
+            .sign_recover_init(invalid_session, &validated(&mechanism), CkObjectHandle(1))
+            .unwrap_err(),
         CkRv::SESSION_HANDLE_INVALID
     );
     assert_eq!(
@@ -245,7 +256,9 @@ fn stateless_session_workflows_reject_invalid_session() {
         CkRv::SESSION_HANDLE_INVALID
     );
     assert_eq!(
-        backend.verify_recover_init(invalid_session, &mechanism, CkObjectHandle(1)).unwrap_err(),
+        backend
+            .verify_recover_init(invalid_session, &validated(&mechanism), CkObjectHandle(1))
+            .unwrap_err(),
         CkRv::SESSION_HANDLE_INVALID
     );
     assert_eq!(
@@ -260,7 +273,7 @@ fn stateless_session_workflows_reject_invalid_session() {
     );
     assert_eq!(
         backend
-            .wrap_key(invalid_session, &mechanism, CkObjectHandle(1), CkObjectHandle(2))
+            .wrap_key(invalid_session, &validated(&mechanism), CkObjectHandle(1), CkObjectHandle(2))
             .unwrap_err(),
         CkRv::SESSION_HANDLE_INVALID
     );
@@ -268,7 +281,7 @@ fn stateless_session_workflows_reject_invalid_session() {
         backend
             .wrap_key_exact(
                 invalid_session,
-                &mechanism,
+                &validated(&mechanism),
                 CkObjectHandle(1),
                 CkObjectHandle(2),
                 &output_spec,
@@ -280,7 +293,7 @@ fn stateless_session_workflows_reject_invalid_session() {
         backend
             .wrap_key_authenticated_exact(
                 invalid_session,
-                &mechanism,
+                &validated(&mechanism),
                 CkObjectHandle(1),
                 CkObjectHandle(2),
                 CkInBuf::Bytes(b"aad"),
@@ -351,7 +364,7 @@ fn generate_key_pair_does_not_partially_allocate_on_quota_failure() {
     let err = backend
         .generate_key_pair(
             session,
-            &mechanism,
+            &validated(&mechanism),
             Some(&[label_attr("public")]),
             Some(&[label_attr("private")]),
         )
@@ -384,7 +397,7 @@ fn close_session_clears_session_mechanism_output() {
     let mechanism = CkMechanism { mechanism_type: CkMechanismType::AES_GCM, params: None };
     let key = live_key(&backend, session);
 
-    backend.encrypt_init(session, &mechanism, key).unwrap();
+    backend.encrypt_init(session, &validated(&mechanism), key).unwrap();
     assert_eq!(backend.session_output_mechanism_params(session), Some(output));
 
     backend.close_session(session).unwrap();
@@ -402,8 +415,8 @@ fn close_all_sessions_clears_only_matching_session_mechanism_outputs() {
     let mechanism = CkMechanism { mechanism_type: CkMechanismType::AES_GCM, params: None };
     let key0 = live_key(&backend, s0);
     let key1 = live_key(&backend, s1);
-    backend.encrypt_init(s0, &mechanism, key0).unwrap();
-    backend.encrypt_init(s1, &mechanism, key1).unwrap();
+    backend.encrypt_init(s0, &validated(&mechanism), key0).unwrap();
+    backend.encrypt_init(s1, &validated(&mechanism), key1).unwrap();
 
     backend.close_all_sessions(CkSlotId(0)).unwrap();
 
@@ -419,7 +432,7 @@ fn finalize_clears_all_session_mechanism_outputs() {
     backend.set_encrypt_init_output(Some(gcm_mechanism_output()));
     let mechanism = CkMechanism { mechanism_type: CkMechanismType::AES_GCM, params: None };
     let key = live_key(&backend, session);
-    backend.encrypt_init(session, &mechanism, key).unwrap();
+    backend.encrypt_init(session, &validated(&mechanism), key).unwrap();
     assert!(backend.session_output_mechanism_params(session).is_some());
 
     backend.finalize().unwrap();
@@ -436,10 +449,15 @@ fn session_cancel_clears_all_session_scoped_mock_state() {
     let signature = b"payload".iter().rev().copied().collect::<Vec<_>>();
 
     backend.set_encrypt_init_output(Some(gcm_mechanism_output()));
-    backend.encrypt_init(session, &mechanism, key).unwrap();
+    backend.encrypt_init(session, &validated(&mechanism), key).unwrap();
     assert!(backend.session_output_mechanism_params(session).is_some());
     backend
-        .verify_signature_init(session, Some(&mechanism), key, CkInBuf::Bytes(&signature))
+        .verify_signature_init(
+            session,
+            Some(&validated(&mechanism)),
+            key,
+            CkInBuf::Bytes(&signature),
+        )
         .unwrap();
     backend.verify_signature_update(session, CkInBuf::Bytes(b"pay")).unwrap();
     backend.verify_signature_update(session, CkInBuf::Bytes(b"load")).unwrap();
@@ -530,8 +548,8 @@ fn sign_operations_are_per_session_independent() {
     let mech = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
     let sha_mech = CkMechanism { mechanism_type: CkMechanismType::SHA256, params: None };
     let key = live_key(&backend, s1);
-    backend.sign_init(s1, &mech, key).unwrap();
-    backend.digest_init(s2, &sha_mech).unwrap();
+    backend.sign_init(s1, &validated(&mech), key).unwrap();
+    backend.digest_init(s2, &validated(&sha_mech)).unwrap();
     backend.sign_update(s1, CkInBuf::Bytes(b"data")).unwrap();
     backend.digest_update(s2, CkInBuf::Bytes(b"data")).unwrap();
     backend.sign_final(s1).unwrap();
@@ -545,7 +563,7 @@ fn close_session_clears_active_op_state() {
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
     let mech = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
     let key = live_key(&backend, session);
-    backend.sign_init(session, &mech, key).unwrap();
+    backend.sign_init(session, &validated(&mech), key).unwrap();
     backend.close_session(session).unwrap();
     let session2 = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
     assert_eq!(

@@ -6,15 +6,14 @@ impl FfiBackend {
     pub(super) fn ffi_verify_signature_init(
         &self,
         session: CkSessionHandle,
-        mechanism: Option<&CkMechanism>,
+        mechanism: Option<&ValidatedMechanismParams>,
         key: CkObjectHandle,
         signature: CkInBuf<'_>,
     ) -> CkResult<()> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         match mechanism {
             Some(mech) => {
-                let validated = super::ffi_conversion::validate_for_ffi(mech)?;
-                let ffi_mech = mechanism_to_ffi(&validated)?;
+                let ffi_mech = mechanism_to_ffi(mech)?;
                 let (sig_ptr, sig_len) = signature.as_ptr_len();
                 let _session_fence = self.session_fences.enter(&admission, session)?;
                 call_3x_fn!(

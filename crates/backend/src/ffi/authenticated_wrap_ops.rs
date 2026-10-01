@@ -1,4 +1,6 @@
 use super::FfiBackend;
+#[cfg(test)]
+use super::validated_mechanism_for_tests;
 use pkcs11_proxy_ng_proto::convert::authenticated::{
     AuthenticatedOutput, legacy_parameter_supported,
 };
@@ -24,12 +26,12 @@ impl FfiBackend {
     pub(super) fn ffi_wrap_key_authenticated(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
         aad: CkInBuf<'_>,
     ) -> CkResult<(SecretBytes, SecretBytes)> {
-        require_legacy_parameter(mechanism)?;
+        require_legacy_parameter(mechanism.mechanism())?;
         let (bytes, output) =
             self.ffi_wrap_authenticated_typed(session, mechanism, None, wrapping_key, key, aad)?;
         Ok((bytes.into(), legacy_bytes(output)?))
@@ -38,13 +40,13 @@ impl FfiBackend {
     pub(super) fn ffi_unwrap_key_authenticated(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
         template: Option<&[CkAttribute]>,
         aad: CkInBuf<'_>,
     ) -> CkResult<(CkObjectHandle, SecretBytes)> {
-        require_legacy_parameter(mechanism)?;
+        require_legacy_parameter(mechanism.mechanism())?;
         let (key, output) = self.ffi_unwrap_authenticated_typed(
             session,
             mechanism,
@@ -62,14 +64,14 @@ impl FfiBackend {
     pub(super) fn ffi_wrap_key_authenticated_exact(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
         aad: CkInBuf<'_>,
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
-        require_legacy_parameter(mechanism)?;
+        require_legacy_parameter(mechanism.mechanism())?;
         let (main, output) = self.ffi_wrap_authenticated_exact_typed(
             session,
             mechanism,
@@ -122,7 +124,7 @@ mod tests {
             CALLS.store(0, Ordering::SeqCst);
             let result = backend.wrap_key_authenticated_exact_typed(
                 CkSessionHandle(1),
-                &mechanism,
+                &validated_mechanism_for_tests(&mechanism),
                 Some(&parameter),
                 CkObjectHandle(2),
                 CkObjectHandle(3),
@@ -154,7 +156,7 @@ mod tests {
         let (mechanism, parameter) = aead_parameter(false);
         let result = backend.wrap_key_authenticated_typed(
             CkSessionHandle(1),
-            &mechanism,
+            &validated_mechanism_for_tests(&mechanism),
             Some(&parameter),
             CkObjectHandle(2),
             CkObjectHandle(3),
@@ -213,7 +215,7 @@ mod tests {
             CALLS.store(0, Ordering::SeqCst);
             let result = backend.unwrap_key_authenticated_typed(
                 CkSessionHandle(1),
-                &mechanism,
+                &validated_mechanism_for_tests(&mechanism),
                 Some(&parameter),
                 CkObjectHandle(2),
                 CkInBuf::Bytes(&[0; 8]),
@@ -304,7 +306,7 @@ mod tests {
         let (output, parameter) = backend
             .ffi_wrap_key_authenticated_exact(
                 CkSessionHandle(1),
-                &mechanism,
+                &validated_mechanism_for_tests(&mechanism),
                 CkObjectHandle(2),
                 CkObjectHandle(3),
                 CkInBuf::Bytes(b"aad"),
@@ -347,7 +349,7 @@ mod tests {
         let (output, parameter) = backend
             .ffi_wrap_key_authenticated_exact(
                 CkSessionHandle(1),
-                &mechanism,
+                &validated_mechanism_for_tests(&mechanism),
                 CkObjectHandle(2),
                 CkObjectHandle(3),
                 CkInBuf::Bytes(b"aad"),
@@ -431,7 +433,7 @@ mod tests {
                 0 => backend
                     .ffi_wrap_key_authenticated(
                         CkSessionHandle(1),
-                        &mechanism,
+                        &validated_mechanism_for_tests(&mechanism),
                         CkObjectHandle(2),
                         CkObjectHandle(3),
                         CkInBuf::Bytes(&[]),
@@ -440,7 +442,7 @@ mod tests {
                 1 => backend
                     .ffi_wrap_key_authenticated_exact(
                         CkSessionHandle(1),
-                        &mechanism,
+                        &validated_mechanism_for_tests(&mechanism),
                         CkObjectHandle(2),
                         CkObjectHandle(3),
                         CkInBuf::Bytes(&[]),
@@ -459,7 +461,7 @@ mod tests {
                 _ => backend
                     .ffi_unwrap_key_authenticated(
                         CkSessionHandle(1),
-                        &mechanism,
+                        &validated_mechanism_for_tests(&mechanism),
                         CkObjectHandle(2),
                         CkInBuf::Bytes(&[0]),
                         Some(&[]),
@@ -514,7 +516,7 @@ mod tests {
                 0 => backend
                     .wrap_key_authenticated_typed(
                         CkSessionHandle(1),
-                        &mechanism,
+                        &validated_mechanism_for_tests(&mechanism),
                         None,
                         CkObjectHandle(2),
                         CkObjectHandle(3),
@@ -524,7 +526,7 @@ mod tests {
                 1 => backend
                     .wrap_key_authenticated_exact_typed(
                         CkSessionHandle(1),
-                        &mechanism,
+                        &validated_mechanism_for_tests(&mechanism),
                         None,
                         CkObjectHandle(2),
                         CkObjectHandle(3),
@@ -539,7 +541,7 @@ mod tests {
                 _ => backend
                     .unwrap_key_authenticated_typed(
                         CkSessionHandle(1),
-                        &mechanism,
+                        &validated_mechanism_for_tests(&mechanism),
                         None,
                         CkObjectHandle(2),
                         CkInBuf::Bytes(&[0]),
@@ -658,7 +660,7 @@ mod tests {
         CALLS.store(0, Ordering::SeqCst);
         let result = backend.wrap_key_authenticated_typed(
             CkSessionHandle(1),
-            &mechanism,
+            &validated_mechanism_for_tests(&mechanism),
             parameter.as_ref(),
             CkObjectHandle(2),
             CkObjectHandle(3),
@@ -742,7 +744,7 @@ mod tests {
         let (mechanism, parameter) = aead_parameter(false);
         let result = backend.unwrap_key_authenticated_typed(
             CkSessionHandle(1),
-            &mechanism,
+            &validated_mechanism_for_tests(&mechanism),
             Some(&parameter),
             CkObjectHandle(2),
             CkInBuf::Bytes(&[0; 8]),
@@ -776,7 +778,7 @@ mod tests {
         for _ in 0..2 {
             let result = backend.unwrap_key_authenticated_typed(
                 CkSessionHandle(1),
-                &mechanism,
+                &validated_mechanism_for_tests(&mechanism),
                 Some(&parameter),
                 CkObjectHandle(2),
                 CkInBuf::Bytes(&[0; 8]),
@@ -805,7 +807,7 @@ mod tests {
         let (mechanism, parameter) = aead_parameter(false);
         let result = backend.unwrap_key_authenticated_typed(
             CkSessionHandle(1),
-            &mechanism,
+            &validated_mechanism_for_tests(&mechanism),
             Some(&parameter),
             CkObjectHandle(2),
             CkInBuf::Bytes(&[0; 8]),
@@ -935,7 +937,7 @@ mod tests {
                 CALLS.store(0, Ordering::SeqCst);
                 let result = backend.wrap_key_authenticated_exact_typed(
                     CkSessionHandle(1),
-                    &mechanism,
+                    &validated_mechanism_for_tests(&mechanism),
                     Some(&parameter),
                     CkObjectHandle(2),
                     CkObjectHandle(3),

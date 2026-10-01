@@ -24,6 +24,8 @@ mod general;
 mod key_ops;
 mod mechanism_handles;
 mod mechanism_input;
+#[cfg(test)]
+mod mechanism_wiring_tests;
 mod message_crypto;
 mod object;
 mod parameter_output_exact;

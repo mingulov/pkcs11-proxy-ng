@@ -8,12 +8,17 @@ use std::time::Instant;
 use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_audit::EventClass;
+use pkcs11_proxy_ng_types::shape_descriptors::Operation;
 use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv, SecretBytes};
 
 use super::super::authorization::mechanism_permitted;
 use super::super::ck_result_to_rv;
 use super::super::convert_template_opt;
 use super::super::mechanism_handles::remap_mechanism_handles;
+use super::super::mechanism_input::{
+    check_operator_exclusion, current_registry_snapshot, daemon_validation_abis,
+    validate_mechanism_transport,
+};
 use super::super::service_utils::{
     check_sanitize, ensure_private_mint_allowed, input_from_wire, parse_mechanism,
     register_session_object_handle, resolve_session_and_object, spawn_backend,
@@ -49,6 +54,7 @@ pub(crate) async fn wrap_key(
             Err(rv) => return Ok(Err(rv)),
         };
         let backend = Arc::clone(&ctx.backend);
+        // TODO(R20): insert sanitize_mechanism_input(p.mechanism) → backend call.
         spawn_backend(move || backend.wrap_key(p.session, &p.mechanism, p.wrapping_key, p.key))
             .await
     }
@@ -129,7 +135,18 @@ async fn unwrap_key_impl(
         }
     };
 
-    let mut mechanism = match parse_mechanism(std::mem::take(&mut req.mechanism)) {
+    // S2 §6: single registry snapshot feeds exclusion and transport
+    // validation for this request.
+    let registry = match current_registry_snapshot(ctx) {
+        Ok(registry) => registry,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyResponse {
+                ck_rv: rv.0,
+                key_handle: 0,
+            }));
+        }
+    };
+    let mechanism = match parse_mechanism(std::mem::take(&mut req.mechanism)) {
         Ok(mechanism) => mechanism,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyResponse {
@@ -138,6 +155,13 @@ async fn unwrap_key_impl(
             }));
         }
     };
+    // S2 §6: operator exclusion precedes authorization.
+    if let Err(rv) = check_operator_exclusion(&registry, mechanism.mechanism_type) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyResponse {
+            ck_rv: rv.0,
+            key_handle: 0,
+        }));
+    }
 
     // Mechanism policy gate (G3-PR3 Task 3): deny before backend call when the
     // principal's grant does not include this unwrapping mechanism.
@@ -150,16 +174,37 @@ async fn unwrap_key_impl(
         }));
     }
 
+    // S2 §6: transport validation (representable-shape gate) over the
+    // single snapshot precedes handle translation.
+    let (daemon_native_abi, daemon_width_abi) = daemon_validation_abis();
+    let validated = match validate_mechanism_transport(
+        &registry,
+        &mechanism,
+        Operation::General,
+        daemon_native_abi,
+        daemon_width_abi,
+    ) {
+        Ok(validated) => validated,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyResponse {
+                ck_rv: rv.0,
+                key_handle: 0,
+            }));
+        }
+    };
     // B1: remap object handles embedded in the mechanism parameters;
     // gate each through per-object authz when active (C1).
-    if let Err(rv) =
-        remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
-    {
-        return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyResponse {
-            ck_rv: rv.0,
-            key_handle: 0,
-        }));
-    }
+    let validated =
+        match remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, validated).await
+        {
+            Ok(validated) => validated,
+            Err(rv) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyResponse {
+                    ck_rv: rv.0,
+                    key_handle: 0,
+                }));
+            }
+        };
 
     let template = match convert_template_opt(&req.template, req.template_null) {
         Ok(template) => template,
@@ -201,11 +246,12 @@ async fn unwrap_key_impl(
         }));
     }
     let backend = Arc::clone(backend_ref);
+    // TODO(R20): insert sanitize_mechanism_input(validated) → backend call.
     let result = spawn_backend(move || {
         wrapped_key.expose(|raw| {
             backend.unwrap_key(
                 session,
-                &mechanism,
+                &validated,
                 unwrapping_key,
                 input_from_wire(raw, wrapped_key_null_len),
                 template.as_deref(),

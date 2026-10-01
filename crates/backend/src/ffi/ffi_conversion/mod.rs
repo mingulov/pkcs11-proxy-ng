@@ -55,7 +55,9 @@ pub(super) fn session_state_from_ck(state: CK_STATE) -> CkSessionState {
 /// keep those bytes alive alongside the attribute array.
 mod attrs;
 mod guarded;
-mod mechanism;
+// R13: `pub(crate)` so the test-only validated-mechanism funnel below is
+// reachable outside `ffi/`; every other item keeps its own visibility.
+pub(crate) mod mechanism;
 mod tests;
 
 pub(in crate::ffi) use attrs::*;

@@ -7,11 +7,16 @@ use std::time::Instant;
 
 use pkcs11_proxy_ng_audit::EventClass;
 use pkcs11_proxy_ng_types::SecretBytes;
+use pkcs11_proxy_ng_types::shape_descriptors::Operation;
 use tonic::{Request, Response, Status};
 
 use super::super::authorization::mechanism_permitted;
 use super::super::ck_result_to_rv;
 use super::super::mechanism_handles::remap_mechanism_handles;
+use super::super::mechanism_input::{
+    check_operator_exclusion, current_registry_snapshot, daemon_validation_abis,
+    validate_mechanism_transport,
+};
 use super::super::service_utils::{
     check_sanitize, ck_rv_only, input_from_wire, parse_mechanism, resolve_session,
     resolve_session_and_key, spawn_backend,
@@ -59,12 +64,24 @@ pub(crate) async fn sign_init(
             }
         };
 
-    let mut mechanism = match parse_mechanism(req.mechanism) {
+    // S2 §6: single registry snapshot feeds exclusion and transport
+    // validation for this request.
+    let registry = match current_registry_snapshot(ctx) {
+        Ok(registry) => registry,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::SignInitResponse { ck_rv: rv.0 }));
+        }
+    };
+    let mechanism = match parse_mechanism(req.mechanism) {
         Ok(mechanism) => mechanism,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::SignInitResponse { ck_rv: rv.0 }));
         }
     };
+    // S2 §6: operator exclusion precedes authorization.
+    if let Err(rv) = check_operator_exclusion(&registry, mechanism.mechanism_type) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::SignInitResponse { ck_rv: rv.0 }));
+    }
 
     // Mechanism policy gate (G3-PR3 Task 3).
     // W1-C1-13: the gate runs before remap on every init handler so identical
@@ -75,16 +92,35 @@ pub(crate) async fn sign_init(
         }));
     }
 
+    // S2 §6: transport validation (representable-shape gate) over the
+    // single snapshot precedes handle translation.
+    let (daemon_native_abi, daemon_width_abi) = daemon_validation_abis();
+    let validated = match validate_mechanism_transport(
+        &registry,
+        &mechanism,
+        Operation::General,
+        daemon_native_abi,
+        daemon_width_abi,
+    ) {
+        Ok(validated) => validated,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::SignInitResponse { ck_rv: rv.0 }));
+        }
+    };
     // B1: remap object handles embedded in the mechanism parameters;
     // gate each through per-object authz when active (C1).
-    if let Err(rv) =
-        remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
-    {
-        return Ok(Response::new(pkcs11_proxy_ng_proto::SignInitResponse { ck_rv: rv.0 }));
-    }
+    let validated =
+        match remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, validated).await
+        {
+            Ok(validated) => validated,
+            Err(rv) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::SignInitResponse { ck_rv: rv.0 }));
+            }
+        };
 
     let backend = Arc::clone(backend_ref);
-    let result = spawn_backend(move || backend.sign_init(session, &mechanism, key)).await?;
+    // TODO(R20): insert sanitize_mechanism_input(validated) → backend call.
+    let result = spawn_backend(move || backend.sign_init(session, &validated, key)).await?;
     Ok(Response::new(pkcs11_proxy_ng_proto::SignInitResponse { ck_rv: ck_rv_only(result) }))
 }
 
@@ -265,7 +301,17 @@ pub(crate) async fn sign_recover_init(
             }
         };
 
-    let mut mechanism = match parse_mechanism(req.mechanism) {
+    // S2 §6: single registry snapshot feeds exclusion and transport
+    // validation for this request.
+    let registry = match current_registry_snapshot(ctx) {
+        Ok(registry) => registry,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::SignRecoverInitResponse {
+                ck_rv: rv.0,
+            }));
+        }
+    };
+    let mechanism = match parse_mechanism(req.mechanism) {
         Ok(mechanism) => mechanism,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::SignRecoverInitResponse {
@@ -273,6 +319,10 @@ pub(crate) async fn sign_recover_init(
             }));
         }
     };
+    // S2 §6: operator exclusion precedes authorization.
+    if let Err(rv) = check_operator_exclusion(&registry, mechanism.mechanism_type) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::SignRecoverInitResponse { ck_rv: rv.0 }));
+    }
 
     // Mechanism policy gate (G3-PR3 Task 3).
     // W1-C1-13: the gate runs before remap on every init handler so identical
@@ -283,16 +333,39 @@ pub(crate) async fn sign_recover_init(
         }));
     }
 
+    // S2 §6: transport validation (representable-shape gate) over the
+    // single snapshot precedes handle translation.
+    let (daemon_native_abi, daemon_width_abi) = daemon_validation_abis();
+    let validated = match validate_mechanism_transport(
+        &registry,
+        &mechanism,
+        Operation::General,
+        daemon_native_abi,
+        daemon_width_abi,
+    ) {
+        Ok(validated) => validated,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::SignRecoverInitResponse {
+                ck_rv: rv.0,
+            }));
+        }
+    };
     // B1: remap object handles embedded in the mechanism parameters;
     // gate each through per-object authz when active (C1).
-    if let Err(rv) =
-        remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
-    {
-        return Ok(Response::new(pkcs11_proxy_ng_proto::SignRecoverInitResponse { ck_rv: rv.0 }));
-    }
+    let validated =
+        match remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, validated).await
+        {
+            Ok(validated) => validated,
+            Err(rv) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::SignRecoverInitResponse {
+                    ck_rv: rv.0,
+                }));
+            }
+        };
 
     let backend = Arc::clone(backend_ref);
-    let result = spawn_backend(move || backend.sign_recover_init(session, &mechanism, key)).await?;
+    // TODO(R20): insert sanitize_mechanism_input(validated) → backend call.
+    let result = spawn_backend(move || backend.sign_recover_init(session, &validated, key)).await?;
     Ok(Response::new(pkcs11_proxy_ng_proto::SignRecoverInitResponse { ck_rv: ck_rv_only(result) }))
 }
 

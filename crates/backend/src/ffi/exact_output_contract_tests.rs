@@ -363,7 +363,10 @@ fn exact_kem_error_keeps_length_and_never_publishes_output_only_handle() {
         ExactOracle_ResetObservation();
         let result = backend.ffi_encapsulate_key_exact(
             CkSessionHandle(1),
-            &CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None },
+            &validated_mechanism_for_tests(&CkMechanism {
+                mechanism_type: CkMechanismType::RSA_PKCS,
+                params: None,
+            }),
             CkObjectHandle(2),
             Some(&[]),
             &CkOutputBufferSpec {

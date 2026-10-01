@@ -23,6 +23,7 @@ use hdrhistogram::Histogram;
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_backend::mock::MockBackend;
 use pkcs11_proxy_ng_client::Pkcs11Client;
+use pkcs11_proxy_ng_types::shape_descriptors::{Operation, ParamAbi};
 use pkcs11_proxy_ng_types::*;
 
 // W1-C3-12: daemon harness shared with the sibling bench files.
@@ -152,7 +153,16 @@ fn run_direct(n: u64) -> (Histogram<u64>, Vec<serde_json::Value>, u64, Duration)
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
     let key = backend.create_object(session, Some(&[])).unwrap();
-    let mech = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
+    // R13: backend entries take the validated newtype (parameterless
+    // passthrough; validated once in setup, outside the measured loop).
+    let mech = ValidatedMechanismParams::validate(
+        &CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None },
+        &MechanismRegistry::load(None).unwrap(),
+        Operation::General,
+        ParamAbi::Lp64NativeLe,
+        ParamAbi::Lp64NativeLe,
+    )
+    .unwrap();
     let payload = vec![0xABu8; 256];
 
     let mut hist: Histogram<u64> = Histogram::new(3).unwrap();

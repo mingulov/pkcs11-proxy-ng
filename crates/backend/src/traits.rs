@@ -166,7 +166,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn sign_init(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         key: CkObjectHandle,
     ) -> CkResult<()>;
     fn sign_init_cancel(&self, _session: CkSessionHandle) -> CkResult<()> {
@@ -200,7 +200,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn sign_recover_init(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         key: CkObjectHandle,
     ) -> CkResult<()>;
     fn sign_recover_init_cancel(&self, _session: CkSessionHandle) -> CkResult<()> {
@@ -211,7 +211,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn verify_recover_init(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         key: CkObjectHandle,
     ) -> CkResult<()>;
     fn verify_recover_init_cancel(&self, _session: CkSessionHandle) -> CkResult<()> {
@@ -226,7 +226,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn verify_init(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         key: CkObjectHandle,
     ) -> CkResult<()>;
     fn verify_init_cancel(&self, _session: CkSessionHandle) -> CkResult<()> {
@@ -276,7 +276,11 @@ pub trait Pkcs11Backend: Send + Sync {
         template: Option<&[CkAttribute]>,
     ) -> CkResult<()>;
 
-    fn digest_init(&self, session: CkSessionHandle, mechanism: &CkMechanism) -> CkResult<()>;
+    fn digest_init(
+        &self,
+        session: CkSessionHandle,
+        mechanism: &ValidatedMechanismParams,
+    ) -> CkResult<()>;
     fn digest_init_cancel(&self, _session: CkSessionHandle) -> CkResult<()> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -288,7 +292,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn encrypt_init(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         key: CkObjectHandle,
     ) -> CkResult<Option<CkMechanismParams>>;
     fn encrypt_init_cancel(&self, _session: CkSessionHandle) -> CkResult<()> {
@@ -301,7 +305,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn decrypt_init(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         key: CkObjectHandle,
     ) -> CkResult<Option<CkMechanismParams>>;
     fn decrypt_init_cancel(&self, _session: CkSessionHandle) -> CkResult<()> {
@@ -322,7 +326,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn derive_key(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         base_key: CkObjectHandle,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle>;
@@ -336,7 +340,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn derive_key_with_output(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         base_key: CkObjectHandle,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
@@ -350,7 +354,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn derive_key_with_output_result(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         base_key: CkObjectHandle,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<CkDeriveKeyOutputResult> {
@@ -362,14 +366,14 @@ pub trait Pkcs11Backend: Send + Sync {
     fn wrap_key(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
     ) -> CkResult<SecretBytes>;
     fn unwrap_key(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
         template: Option<&[CkAttribute]>,
@@ -377,7 +381,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn generate_key(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle>;
 
@@ -389,7 +393,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn generate_key_with_output(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
         self.generate_key(session, mechanism, template).map(|h| (h, None))
@@ -397,7 +401,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn generate_key_pair(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         pub_template: Option<&[CkAttribute]>,
         priv_template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, CkObjectHandle)>;
@@ -614,7 +618,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn wrap_key_exact(
         &self,
         _session: CkSessionHandle,
-        _mechanism: &CkMechanism,
+        _mechanism: &ValidatedMechanismParams,
         _wrapping_key: CkObjectHandle,
         _key: CkObjectHandle,
         _spec: &CkOutputBufferSpec,
@@ -631,7 +635,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn wrap_key_exact_with_output(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
         spec: &CkOutputBufferSpec,
@@ -836,7 +840,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn wrap_key_authenticated_exact(
         &self,
         _session: CkSessionHandle,
-        _mechanism: &CkMechanism,
+        _mechanism: &ValidatedMechanismParams,
         _wrapping_key: CkObjectHandle,
         _key: CkObjectHandle,
         _aad: CkInBuf<'_>,
@@ -887,7 +891,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn encapsulate_key_exact(
         &self,
         _session: CkSessionHandle,
-        _mechanism: &CkMechanism,
+        _mechanism: &ValidatedMechanismParams,
         _public_key: CkObjectHandle,
         _template: Option<&[CkAttribute]>,
         _spec: &CkOutputBufferSpec,
@@ -898,7 +902,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn encapsulate_key(
         &self,
         _session: CkSessionHandle,
-        _mechanism: &CkMechanism,
+        _mechanism: &ValidatedMechanismParams,
         _public_key: CkObjectHandle,
         _template: Option<&[CkAttribute]>,
     ) -> CkResult<(SecretBytes, CkObjectHandle)> {
@@ -908,7 +912,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn decapsulate_key(
         &self,
         _session: CkSessionHandle,
-        _mechanism: &CkMechanism,
+        _mechanism: &ValidatedMechanismParams,
         _private_key: CkObjectHandle,
         _template: Option<&[CkAttribute]>,
         _ciphertext: CkInBuf<'_>,
@@ -921,7 +925,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn message_encrypt_init(
         &self,
         _session: CkSessionHandle,
-        _mechanism: Option<&CkMechanism>,
+        _mechanism: Option<&ValidatedMechanismParams>,
         _init_param: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         _key: CkObjectHandle,
     ) -> CkResult<()> {
@@ -931,7 +935,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn message_encrypt_init_contract(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         init_param: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         key: CkObjectHandle,
         provider_spec: &CkParameterRoundtripSpec,
@@ -991,7 +995,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn message_decrypt_init(
         &self,
         _session: CkSessionHandle,
-        _mechanism: Option<&CkMechanism>,
+        _mechanism: Option<&ValidatedMechanismParams>,
         _init_param: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         _key: CkObjectHandle,
     ) -> CkResult<()> {
@@ -1001,7 +1005,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn message_decrypt_init_contract(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         init_param: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         key: CkObjectHandle,
         provider_spec: &CkParameterRoundtripSpec,
@@ -1061,7 +1065,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn message_sign_init(
         &self,
         _session: CkSessionHandle,
-        _mechanism: Option<&CkMechanism>,
+        _mechanism: Option<&ValidatedMechanismParams>,
         _key: CkObjectHandle,
     ) -> CkResult<()> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
@@ -1120,7 +1124,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn message_verify_init(
         &self,
         _session: CkSessionHandle,
-        _mechanism: Option<&CkMechanism>,
+        _mechanism: Option<&ValidatedMechanismParams>,
         _key: CkObjectHandle,
     ) -> CkResult<()> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
@@ -1189,7 +1193,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn verify_signature_init(
         &self,
         _session: CkSessionHandle,
-        _mechanism: Option<&CkMechanism>,
+        _mechanism: Option<&ValidatedMechanismParams>,
         _key: CkObjectHandle,
         _signature: CkInBuf<'_>,
     ) -> CkResult<()> {
@@ -1217,7 +1221,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn wrap_key_authenticated_typed(
         &self,
         _session: CkSessionHandle,
-        _mechanism: &CkMechanism,
+        _mechanism: &ValidatedMechanismParams,
         _parameter: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         _wrapping_key: CkObjectHandle,
         _key: CkObjectHandle,
@@ -1230,7 +1234,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn wrap_key_authenticated_exact_typed(
         &self,
         _session: CkSessionHandle,
-        _mechanism: &CkMechanism,
+        _mechanism: &ValidatedMechanismParams,
         _parameter: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         _wrapping_key: CkObjectHandle,
         _key: CkObjectHandle,
@@ -1246,7 +1250,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn unwrap_key_authenticated_typed(
         &self,
         _session: CkSessionHandle,
-        _mechanism: &CkMechanism,
+        _mechanism: &ValidatedMechanismParams,
         _parameter: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         _unwrapping_key: CkObjectHandle,
         _wrapped_key: CkInBuf<'_>,
@@ -1264,7 +1268,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn wrap_key_authenticated(
         &self,
         _session: CkSessionHandle,
-        _mechanism: &CkMechanism,
+        _mechanism: &ValidatedMechanismParams,
         _wrapping_key: CkObjectHandle,
         _key: CkObjectHandle,
         _aad: CkInBuf<'_>,
@@ -1275,7 +1279,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn unwrap_key_authenticated(
         &self,
         _session: CkSessionHandle,
-        _mechanism: &CkMechanism,
+        _mechanism: &ValidatedMechanismParams,
         _unwrapping_key: CkObjectHandle,
         _wrapped_key: CkInBuf<'_>,
         _template: Option<&[CkAttribute]>,

@@ -174,7 +174,12 @@ impl Pkcs11Backend for TestBackend3x {
     ) -> CkResult<(CkRv, Vec<CkAttributeQueryResult>)> {
         self.inner.get_attribute_value_exact(s, object, queries)
     }
-    fn sign_init(&self, s: CkSessionHandle, m: &CkMechanism, k: CkObjectHandle) -> CkResult<()> {
+    fn sign_init(
+        &self,
+        s: CkSessionHandle,
+        m: &ValidatedMechanismParams,
+        k: CkObjectHandle,
+    ) -> CkResult<()> {
         self.inner.sign_init(s, m, k)
     }
     fn sign(&self, s: CkSessionHandle, d: CkInBuf<'_>) -> CkResult<SecretBytes> {
@@ -189,7 +194,7 @@ impl Pkcs11Backend for TestBackend3x {
     fn sign_recover_init(
         &self,
         s: CkSessionHandle,
-        m: &CkMechanism,
+        m: &ValidatedMechanismParams,
         k: CkObjectHandle,
     ) -> CkResult<()> {
         self.inner.sign_recover_init(s, m, k)
@@ -200,7 +205,7 @@ impl Pkcs11Backend for TestBackend3x {
     fn verify_recover_init(
         &self,
         s: CkSessionHandle,
-        m: &CkMechanism,
+        m: &ValidatedMechanismParams,
         k: CkObjectHandle,
     ) -> CkResult<()> {
         self.inner.verify_recover_init(s, m, k)
@@ -208,7 +213,12 @@ impl Pkcs11Backend for TestBackend3x {
     fn verify_recover(&self, s: CkSessionHandle, sig: CkInBuf<'_>) -> CkResult<SecretBytes> {
         self.inner.verify_recover(s, sig)
     }
-    fn verify_init(&self, s: CkSessionHandle, m: &CkMechanism, k: CkObjectHandle) -> CkResult<()> {
+    fn verify_init(
+        &self,
+        s: CkSessionHandle,
+        m: &ValidatedMechanismParams,
+        k: CkObjectHandle,
+    ) -> CkResult<()> {
         self.inner.verify_init(s, m, k)
     }
     fn verify(&self, s: CkSessionHandle, d: CkInBuf<'_>, sig: CkInBuf<'_>) -> CkResult<()> {
@@ -220,7 +230,7 @@ impl Pkcs11Backend for TestBackend3x {
     fn verify_final(&self, s: CkSessionHandle, sig: CkInBuf<'_>) -> CkResult<()> {
         self.inner.verify_final(s, sig)
     }
-    fn digest_init(&self, s: CkSessionHandle, m: &CkMechanism) -> CkResult<()> {
+    fn digest_init(&self, s: CkSessionHandle, m: &ValidatedMechanismParams) -> CkResult<()> {
         self.inner.digest_init(s, m)
     }
     fn digest(&self, s: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<SecretBytes> {
@@ -238,7 +248,7 @@ impl Pkcs11Backend for TestBackend3x {
     fn encrypt_init(
         &self,
         s: CkSessionHandle,
-        m: &CkMechanism,
+        m: &ValidatedMechanismParams,
         k: CkObjectHandle,
     ) -> CkResult<Option<CkMechanismParams>> {
         self.inner.encrypt_init(s, m, k)
@@ -255,7 +265,7 @@ impl Pkcs11Backend for TestBackend3x {
     fn decrypt_init(
         &self,
         s: CkSessionHandle,
-        m: &CkMechanism,
+        m: &ValidatedMechanismParams,
         k: CkObjectHandle,
     ) -> CkResult<Option<CkMechanismParams>> {
         self.inner.decrypt_init(s, m, k)
@@ -276,7 +286,7 @@ impl Pkcs11Backend for TestBackend3x {
     fn derive_key(
         &self,
         s: CkSessionHandle,
-        m: &CkMechanism,
+        m: &ValidatedMechanismParams,
         base_key: CkObjectHandle,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
@@ -285,7 +295,7 @@ impl Pkcs11Backend for TestBackend3x {
     fn wrap_key(
         &self,
         s: CkSessionHandle,
-        m: &CkMechanism,
+        m: &ValidatedMechanismParams,
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
     ) -> CkResult<SecretBytes> {
@@ -294,7 +304,7 @@ impl Pkcs11Backend for TestBackend3x {
     fn unwrap_key(
         &self,
         s: CkSessionHandle,
-        m: &CkMechanism,
+        m: &ValidatedMechanismParams,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
         template: Option<&[CkAttribute]>,
@@ -304,7 +314,7 @@ impl Pkcs11Backend for TestBackend3x {
     fn generate_key(
         &self,
         s: CkSessionHandle,
-        m: &CkMechanism,
+        m: &ValidatedMechanismParams,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
         self.inner.generate_key(s, m, template)
@@ -341,7 +351,7 @@ impl Pkcs11Backend for TestBackend3x {
     fn generate_key_pair(
         &self,
         s: CkSessionHandle,
-        m: &CkMechanism,
+        m: &ValidatedMechanismParams,
         pub_t: Option<&[CkAttribute]>,
         priv_t: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, CkObjectHandle)> {
@@ -432,7 +442,7 @@ impl Pkcs11Backend for TestBackend3x {
     fn encapsulate_key(
         &self,
         session: CkSessionHandle,
-        _mechanism: &CkMechanism,
+        _mechanism: &ValidatedMechanismParams,
         _public_key: CkObjectHandle,
         _template: Option<&[CkAttribute]>,
     ) -> CkResult<(SecretBytes, CkObjectHandle)> {
@@ -443,7 +453,7 @@ impl Pkcs11Backend for TestBackend3x {
     fn decapsulate_key(
         &self,
         session: CkSessionHandle,
-        _mechanism: &CkMechanism,
+        _mechanism: &ValidatedMechanismParams,
         _private_key: CkObjectHandle,
         _template: Option<&[CkAttribute]>,
         ciphertext: CkInBuf<'_>,
@@ -458,7 +468,7 @@ impl Pkcs11Backend for TestBackend3x {
     fn message_encrypt_init(
         &self,
         _session: CkSessionHandle,
-        _mechanism: Option<&CkMechanism>,
+        _mechanism: Option<&ValidatedMechanismParams>,
         _init_param: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         _key: CkObjectHandle,
     ) -> CkResult<()> {
@@ -511,7 +521,7 @@ impl Pkcs11Backend for TestBackend3x {
     fn message_decrypt_init(
         &self,
         _session: CkSessionHandle,
-        _mechanism: Option<&CkMechanism>,
+        _mechanism: Option<&ValidatedMechanismParams>,
         _init_param: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         _key: CkObjectHandle,
     ) -> CkResult<()> {
@@ -563,7 +573,7 @@ impl Pkcs11Backend for TestBackend3x {
     fn message_sign_init(
         &self,
         _session: CkSessionHandle,
-        _mechanism: Option<&CkMechanism>,
+        _mechanism: Option<&ValidatedMechanismParams>,
         _key: CkObjectHandle,
     ) -> CkResult<()> {
         Ok(())
@@ -610,7 +620,7 @@ impl Pkcs11Backend for TestBackend3x {
     fn message_verify_init(
         &self,
         _session: CkSessionHandle,
-        _mechanism: Option<&CkMechanism>,
+        _mechanism: Option<&ValidatedMechanismParams>,
         _key: CkObjectHandle,
     ) -> CkResult<()> {
         Ok(())
@@ -660,7 +670,7 @@ impl Pkcs11Backend for TestBackend3x {
     fn verify_signature_init(
         &self,
         session: CkSessionHandle,
-        _mechanism: Option<&CkMechanism>,
+        _mechanism: Option<&ValidatedMechanismParams>,
         _key: CkObjectHandle,
         signature: CkInBuf<'_>,
     ) -> CkResult<()> {
@@ -712,7 +722,7 @@ impl Pkcs11Backend for TestBackend3x {
     fn wrap_key_authenticated(
         &self,
         _session: CkSessionHandle,
-        _mechanism: &CkMechanism,
+        _mechanism: &ValidatedMechanismParams,
         _wrapping_key: CkObjectHandle,
         _key: CkObjectHandle,
         aad: CkInBuf<'_>,
@@ -724,7 +734,7 @@ impl Pkcs11Backend for TestBackend3x {
     fn unwrap_key_authenticated(
         &self,
         _session: CkSessionHandle,
-        _mechanism: &CkMechanism,
+        _mechanism: &ValidatedMechanismParams,
         _unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
         _template: Option<&[CkAttribute]>,
@@ -765,6 +775,7 @@ impl Pkcs11Backend for TestBackend3x {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ffi::validated_mechanism_for_tests;
 
     #[test]
     fn login_user_correct_pin() {
@@ -808,8 +819,14 @@ mod tests {
         backend.initialize().unwrap();
         let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
         let mech = CkMechanism { mechanism_type: CkMechanismType(1), params: None };
-        let (capsule, key) =
-            backend.encapsulate_key(session, &mech, CkObjectHandle(1), Some(&[])).unwrap();
+        let (capsule, key) = backend
+            .encapsulate_key(
+                session,
+                &validated_mechanism_for_tests(&mech),
+                CkObjectHandle(1),
+                Some(&[]),
+            )
+            .unwrap();
         assert_eq!(capsule, vec![0xCA; 32].into());
         assert_eq!(key, CkObjectHandle(9001));
     }
@@ -823,7 +840,7 @@ mod tests {
         let key = backend
             .decapsulate_key(
                 session,
-                &mech,
+                &validated_mechanism_for_tests(&mech),
                 CkObjectHandle(1),
                 Some(&[]),
                 CkInBuf::Bytes(&[0xCA; 32]),
@@ -960,14 +977,21 @@ mod tests {
             Err(CkRv::SESSION_HANDLE_INVALID)
         );
         assert_eq!(
-            backend.encapsulate_key(bogus, &mech, CkObjectHandle(1), Some(&[])).unwrap_err(),
+            backend
+                .encapsulate_key(
+                    bogus,
+                    &validated_mechanism_for_tests(&mech),
+                    CkObjectHandle(1),
+                    Some(&[])
+                )
+                .unwrap_err(),
             CkRv::SESSION_HANDLE_INVALID
         );
         assert_eq!(
             backend
                 .decapsulate_key(
                     bogus,
-                    &mech,
+                    &validated_mechanism_for_tests(&mech),
                     CkObjectHandle(1),
                     Some(&[]),
                     CkInBuf::Bytes(&[0xCA; 32]),

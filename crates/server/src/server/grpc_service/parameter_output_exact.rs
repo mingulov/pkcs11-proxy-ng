@@ -187,15 +187,16 @@ pub(super) async fn parameter_output_exact(
                         {
                             return Ok(Err(CkRv::MECHANISM_PARAM_INVALID));
                         }
-                        match decode_parameters(&p.mechanism, envelope) {
+                        match decode_parameters(p.mechanism.mechanism(), envelope) {
                             Ok(parameter) => Some(parameter),
                             Err(rv) => return Ok(Err(rv)),
                         }
                     }
-                    None if legacy_parameter_supported(&p.mechanism) => None,
+                    None if legacy_parameter_supported(p.mechanism.mechanism()) => None,
                     None => return Ok(Err(CkRv::FUNCTION_NOT_SUPPORTED)),
                 };
                 let backend = backend_ref.clone();
+                // TODO(R20): insert sanitize_mechanism_input(p.mechanism) → backend call.
                 spawn_backend_exact(move || {
                     associated_data.expose(|aad_raw| {
                         if let Some(parameter) = typed {
@@ -214,7 +215,7 @@ pub(super) async fn parameter_output_exact(
                                 let (output, typed_output) = result?;
                                 if typed_output
                                     .validate_exact_for(
-                                        &p.mechanism,
+                                        p.mechanism.mechanism(),
                                         parameter.as_ref(),
                                         output.ck_rv,
                                         ParameterEffectCallMode::from_output_spec(&output_spec),
