@@ -2091,9 +2091,10 @@ fn r10_packaging_workflows_reject_test_mechanism_params_cfg() {
     }
 }
 
-/// R14 completeness gate, transport-validation half (S2 §12): every
-/// handler calling `parse_mechanism` also invokes
-/// `validate_mechanism_transport` on the result before any backend call.
+/// R14/R20 completeness gate, transport-validation + sanitizer halves
+/// (S2 §12): every handler calling `parse_mechanism` invokes BOTH
+/// `validate_mechanism_transport` AND `sanitize_mechanism_input` (in that
+/// order) on the result before any backend call.
 ///
 /// The scan walks `crates/server/src/server/`, discovers every
 /// `parse_mechanism(` call site (excluding the definition, test sources,
@@ -2103,16 +2104,16 @@ fn r10_packaging_workflows_reject_test_mechanism_params_cfg() {
 /// `validate_mechanism_transport(` after the parse and before
 /// `remap_mechanism_handles(` — the validated-newtype handoff feeding
 /// the backend call in R13's pipeline, so validate-before-remap is
-/// validate-before-backend; (3) the only `parse_mechanism(` callers
-/// outside `grpc_service/` are the pinned `server/auth/` namesakes (a
+/// validate-before-backend; (3) each wired site invokes
+/// `sanitize_mechanism_input(` after validation AND after the remap —
+/// the R20 policy layer between remapping and the backend call (S2 §6
+/// order); the wrap funnel (`wrap_preparation.rs`) sanitizes inside
+/// `prepare_wrap`, so its window carries the call for all four wrap
+/// callers; (4) the only `parse_mechanism(` callers outside
+/// `grpc_service/` are the pinned `server/auth/` namesakes (a
 /// string→type policy parser with no FFI — it takes no transport
-/// validation per R13).
-///
-/// TRANSPORT-ONLY UNTIL R20: the sanitizer half of the completeness gate
-/// lands in R20, which extends this scan to the sanitizer stage. The
-/// handoff point is the named `TODO(R20)` marker at each wired site's
-/// backend call (asserted present below); until then this gate pins the
-/// transport half only.
+/// validation per R13); (5) no `TODO(R20)` handoff marker remains — R20
+/// consumed every R13 marker (direct insertions plus the wrap funnel).
 #[test]
 fn every_parse_mechanism_site_validates_transport_before_backend() {
     // The R13 21-site expectation: (grpc_service/-relative file, anchor
@@ -2151,6 +2152,10 @@ fn every_parse_mechanism_site_validates_transport_before_backend() {
         // `#[cfg(test)]` also marks small test helpers mid-file (e.g. in
         // auth/policy.rs), which must not truncate the scan.
         let prod = prod_head_before_test_module(&text);
+        // R20 handoff sweep: every R13 marker (including the wrap-funnel
+        // downstream markers in anchor-less adapter files) must be
+        // consumed, so count before the anchor-less early exit.
+        r20_markers += prod.matches("TODO(R20)").count();
         // Anchors: `parse_mechanism(` call lines, excluding the `fn`
         // definition lines (service_utils.rs, auth/grant.rs).
         let mut anchors = Vec::new();
@@ -2192,11 +2197,23 @@ fn every_parse_mechanism_site_validates_transport_before_backend() {
                     validate < remap,
                     "{short} site {site}: validate_mechanism_transport must precede the remap/backend handoff (R14)"
                 );
+                let sanitize = body.find("sanitize_mechanism_input(").unwrap_or_else(|| {
+                    panic!(
+                        "{short} site {site}: parse_mechanism result never reaches sanitize_mechanism_input (R20)"
+                    )
+                });
+                assert!(
+                    validate < sanitize,
+                    "{short} site {site}: validate_mechanism_transport must precede sanitize_mechanism_input (R20)"
+                );
+                assert!(
+                    remap < sanitize,
+                    "{short} site {site}: sanitize_mechanism_input must follow the remap handoff, before the backend call (R20)"
+                );
             }
         } else {
             namesakes.push((rel, anchors.len()));
         }
-        r20_markers += prod.matches("TODO(R20)").count();
     }
 
     wired.sort();
@@ -2217,9 +2234,12 @@ fn every_parse_mechanism_site_validates_transport_before_backend() {
         "non-handler parse_mechanism callers changed — allowlist the new namesake explicitly or wire it (R14)"
     );
 
-    // The R20 handoff exists: the sanitizer half of this gate extends the
-    // scan to these markers (see the doc comment above).
-    assert!(r20_markers > 0, "expected TODO(R20) sanitizer-handoff markers under grpc_service/");
+    // R20 consumed every R13 handoff marker (direct insertions plus the
+    // wrap funnel): none may remain.
+    assert_eq!(
+        r20_markers, 0,
+        "stale TODO(R20) sanitizer-handoff markers remain under grpc_service/ (R20)"
+    );
 }
 
 /// Production head of a source file: cut the `cfg(test)`-gated test

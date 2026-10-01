@@ -17,7 +17,7 @@ use super::super::convert_template_opt;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::mechanism_input::{
     check_operator_exclusion, current_registry_snapshot, daemon_validation_abis,
-    validate_mechanism_transport,
+    sanitize_mechanism_input, validate_mechanism_transport,
 };
 use super::super::service_utils::{
     check_sanitize, ensure_private_mint_allowed, input_from_wire, parse_mechanism,
@@ -54,7 +54,8 @@ pub(crate) async fn wrap_key(
             Err(rv) => return Ok(Err(rv)),
         };
         let backend = Arc::clone(&ctx.backend);
-        // TODO(R20): insert sanitize_mechanism_input(p.mechanism) → backend call.
+        // R20: p.mechanism arrives sanitized from prepare_wrap (the single
+        // wrap funnel) — no downstream re-check before the backend call.
         spawn_backend(move || backend.wrap_key(p.session, &p.mechanism, p.wrapping_key, p.key))
             .await
     }
@@ -246,7 +247,16 @@ async fn unwrap_key_impl(
         }));
     }
     let backend = Arc::clone(backend_ref);
-    // TODO(R20): insert sanitize_mechanism_input(validated) → backend call.
+    // R20 (S2 §6): optional sanitizer between remap and backend call.
+    let validated = match sanitize_mechanism_input(ctx.sanitize_inputs, validated) {
+        Ok(validated) => validated,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyResponse {
+                ck_rv: rv.0,
+                key_handle: 0,
+            }));
+        }
+    };
     let result = spawn_backend(move || {
         wrapped_key.expose(|raw| {
             backend.unwrap_key(

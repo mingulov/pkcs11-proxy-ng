@@ -40,7 +40,7 @@ use super::authorization::mechanism_permitted;
 use super::mechanism_handles::remap_mechanism_handles;
 use super::mechanism_input::{
     check_operator_exclusion, current_registry_snapshot, daemon_validation_abis,
-    validate_mechanism_transport,
+    sanitize_mechanism_input, validate_mechanism_transport,
 };
 use super::service_utils::{
     check_sanitize, ck_rv_only, input_from_wire, parse_mechanism, resolve_session,
@@ -601,9 +601,16 @@ async fn message_encrypt_init_with_timeout(
                 }
             };
 
-        // R13 named marker: R20 inserts `sanitize_mechanism_input` here,
-        // between handle remapping and the backend call.
-        // TODO(R20): insert sanitize_mechanism_input(validated) → backend call.
+        // R20 (S2 §6): optional sanitizer between remap and backend call.
+        let validated = match sanitize_mechanism_input(ctx.sanitize_inputs, validated) {
+            Ok(validated) => validated,
+            Err(rv) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::MessageEncryptInitResponse {
+                    ck_rv: rv.0,
+                    ..Default::default()
+                }));
+            }
+        };
 
         let backend = Arc::clone(backend_ref);
         let init_param_for_response = init_param.clone();
@@ -993,9 +1000,16 @@ async fn message_decrypt_init_with_timeout(
                 }
             };
 
-        // R13 named marker: R20 inserts `sanitize_mechanism_input` here,
-        // between handle remapping and the backend call.
-        // TODO(R20): insert sanitize_mechanism_input(validated) → backend call.
+        // R20 (S2 §6): optional sanitizer between remap and backend call.
+        let validated = match sanitize_mechanism_input(ctx.sanitize_inputs, validated) {
+            Ok(validated) => validated,
+            Err(rv) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::MessageDecryptInitResponse {
+                    ck_rv: rv.0,
+                    ..Default::default()
+                }));
+            }
+        };
 
         let backend = Arc::clone(backend_ref);
         let init_param_for_response = init_param.clone();
@@ -1334,9 +1348,15 @@ pub(crate) async fn message_sign_init(
                 }
             };
 
-        // R13 named marker: R20 inserts `sanitize_mechanism_input` here,
-        // between handle remapping and the backend call.
-        // TODO(R20): insert sanitize_mechanism_input(validated) → backend call.
+        // R20 (S2 §6): optional sanitizer between remap and backend call.
+        let validated = match sanitize_mechanism_input(ctx.sanitize_inputs, validated) {
+            Ok(validated) => validated,
+            Err(rv) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::MessageSignInitResponse {
+                    ck_rv: rv.0,
+                }));
+            }
+        };
 
         let backend = Arc::clone(backend_ref);
         let mut transition = MessageOperationTransition::begin(operation);
@@ -1560,9 +1580,15 @@ pub(crate) async fn message_verify_init(
                 }
             };
 
-        // R13 named marker: R20 inserts `sanitize_mechanism_input` here,
-        // between handle remapping and the backend call.
-        // TODO(R20): insert sanitize_mechanism_input(validated) → backend call.
+        // R20 (S2 §6): optional sanitizer between remap and backend call.
+        let validated = match sanitize_mechanism_input(ctx.sanitize_inputs, validated) {
+            Ok(validated) => validated,
+            Err(rv) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::MessageVerifyInitResponse {
+                    ck_rv: rv.0,
+                }));
+            }
+        };
 
         let backend = Arc::clone(backend_ref);
         let mut transition = MessageOperationTransition::begin(operation);

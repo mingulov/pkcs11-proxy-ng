@@ -23,7 +23,7 @@ use super::super::convert_template_opt;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::mechanism_input::{
     check_operator_exclusion, current_registry_snapshot, daemon_validation_abis,
-    validate_mechanism_transport,
+    sanitize_mechanism_input, validate_mechanism_transport,
 };
 use super::super::service_utils::{
     check_sanitize, ensure_private_mint_allowed, input_from_wire, parse_mechanism,
@@ -73,7 +73,8 @@ pub(crate) async fn wrap_key_authenticated(
             None => return Ok(Err(CkRv::FUNCTION_NOT_SUPPORTED)),
         };
         let backend = Arc::clone(&ctx.backend);
-        // TODO(R20): insert sanitize_mechanism_input(p.mechanism) → backend call.
+        // R20: p.mechanism arrives sanitized from prepare_wrap (the single
+        // wrap funnel) — no downstream re-check before the backend call.
         spawn_backend(move || {
             associated_data.expose(|aad_raw| {
                 if let Some(parameter) = parameter {
@@ -348,7 +349,20 @@ async fn unwrap_key_authenticated_impl(
     let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
     let object_cleanup = Arc::clone(&ctx.object_cleanup);
-    // TODO(R20): insert sanitize_mechanism_input(validated) → backend call.
+    // R20 (S2 §6): optional sanitizer between remap and backend call.
+    // (T12: UnwrapKeyAuthenticatedResponse is ZeroizeOnDrop — all fields
+    // spelled out, mirroring the adjacent arms.)
+    let validated = match sanitize_mechanism_input(ctx.sanitize_inputs, validated) {
+        Ok(validated) => validated,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
+                authenticated_output: None,
+                ck_rv: rv.0,
+                key_handle: 0,
+                mechanism_parameter_out: Vec::new(),
+            }));
+        }
+    };
     let result = spawn_backend(move || {
         wrapped_key.expose(|wrapped_raw| {
             aad.expose(|aad_raw| {

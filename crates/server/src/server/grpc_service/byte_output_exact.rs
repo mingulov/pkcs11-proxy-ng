@@ -84,7 +84,9 @@ pub(super) async fn byte_output_exact(
                     Err(rv) => return Ok(Err(rv)),
                 };
                 let backend = ctx.backend.clone();
-                // TODO(R20): insert sanitize_mechanism_input(p.mechanism) → backend call.
+                // R20: p.mechanism arrives sanitized from prepare_wrap (the
+                // single wrap funnel) — no downstream re-check before the
+                // backend call.
                 spawn_backend_exact(move || {
                     ExactCompletion::capture(backend.wrap_key_exact_with_output(
                         p.session,
