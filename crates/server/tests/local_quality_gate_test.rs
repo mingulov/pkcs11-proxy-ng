@@ -2048,16 +2048,19 @@ fn r10_packaging_workflows_reject_test_mechanism_params_cfg() {
     // packaged or published artifacts — the packaging workflows fail loudly
     // when RUSTFLAGS carries it. cut-release verifies on main before the tag
     // exists (its `verify` job runs the cargo gates); publish stages the
-    // immutable candidate (`preflight` is its first gate); release compiles
-    // the shipped binaries (each `binary-*` job builds). None of the three
-    // sets RUSTFLAGS today (only ci.yml's musl job does) — this pins the
-    // rejection so a future RUSTFLAGS addition cannot smuggle the cfg in.
+    // immutable candidate (`preflight` is its first gate) and re-verifies
+    // published checksums plus registry consumers (`verify` compiles);
+    // release rechecks the registry (`registry-recheck` compiles) and
+    // compiles the shipped binaries (each `binary-*` job builds). None of
+    // the three sets RUSTFLAGS today (only ci.yml's musl job does) — this
+    // pins the rejection so a future RUSTFLAGS addition cannot smuggle the
+    // cfg in.
     let root = workspace_root();
     let step = "Reject test-only mechanism-params cfg";
     for (file, jobs) in [
         ("cut-release.yml", vec!["verify"]),
-        ("publish.yml", vec!["preflight"]),
-        ("release.yml", vec!["binary-linux", "binary-windows", "binary-macos"]),
+        ("publish.yml", vec!["preflight", "verify"]),
+        ("release.yml", vec!["registry-recheck", "binary-linux", "binary-windows", "binary-macos"]),
     ] {
         let workflow = fs::read_to_string(root.join(".github/workflows").join(file))
             .unwrap_or_else(|_| panic!(".github/workflows/{file} should be readable"));
