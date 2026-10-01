@@ -120,6 +120,58 @@ Validate the parameter shapes your deployment uses before the rollout.
    shared one. Verify the `tokens` volume is mounted from the
    shared `hostPath` / PVC, not `emptyDir`.
 
+## 2a. Mechanism-parameter transport v1 — daemon-first rollout
+
+Since the v1 advertisement, the daemon's discovery response carries
+`mechanism_parameter_transport_version = 1` plus the daemon's mechanism
+ABI, and current shims emit versioned (v1) mechanism-parameter encodings
+when they see that capability. The transport version is negotiated per
+connection at probe time and is a monotonic maximum capability: newer
+daemons keep accepting older (legacy) encodings.
+
+**Roll daemons first, then shims.** The supported mixed pairs during the
+rollout window are:
+
+- New daemon + old shim: the old shim predates the capability field and
+  emits legacy only; the new daemon accepts it.
+- New shim + old daemon: the capability is absent, so the shim uses
+  legacy emission automatically (absence/failure disables v1 — this
+  fallback is correct behavior, not an error).
+
+So: roll the daemon Deployment to the new version, verify consumer
+traffic is clean, then roll the shim/consumer side. Do not roll shims
+first: a new shim against an old daemon works (legacy fallback), but you
+lose v1 coverage until the daemons follow, and a mid-window daemon
+rollback under v1-emitting shims churns the negotiated version.
+
+**No silent downgrade.** Once a daemon advertises v1 it honors v1 for
+v1-emitting peers — it never silently processes a v1 encoding as legacy.
+If a consumer that negotiated v1 is moved to an old daemon it re-probes
+on reconnect and falls back to legacy; that is why mixed fleets need the
+next paragraph, not version pinning.
+
+**Sticky affinity + drain for mixed fleets.** Keep consumers pinned to
+one daemon replica across the window (`sessionAffinity: ClientIP` as in
+the demo manifests) so the negotiated capability cannot flap between 1
+and absent from one RPC to the next. Keep `maxUnavailable: 0` and drain
+old replicas: let in-flight operations finish and allow consumers to
+reconnect (re-probe) before the old pod goes away. Keep the mixed window
+short and validate the parameter shapes your deployment uses on both
+sides before and after.
+
+**Freeze refusal.** If a daemon logs `R23 FREEZE REFUSAL` at discovery
+time, its mechanism-parameter manifest is incomplete and it deliberately
+stays legacy (capability 0) rather than advertise a partial v1. That
+happens only in inconsistent builds — treat it as a failed rollout:
+stop, replace the daemon image with a qualified build, and do not
+proceed to the shim rollout.
+
+**Scope note.** The "mixed versions are unsupported" rule in §2 still
+stands for behavior versions in general; the transport-version dimension
+above is the explicit, designed exception for daemon-first mixed
+operation *during the rollout window only*. Steady state is always
+matched versions.
+
 ## 3. Rollback
 
 ```bash

@@ -4592,12 +4592,13 @@ const R5_NIST_CBC_PT2: [u8; 16] = [
 /// R5/F1 audit (C-shim edge): a CBC message init carrying a materialized
 /// 16-byte IV fails closed locally with `MECHANISM_PARAM_INVALID` — the
 /// Unmodeled arm never reads the bytes and no RPC reaches the daemon.
-/// Post-R5 this stays the exact legacy-capability behavior
-/// (legacy-identity pin, green before AND after).
+/// R23: legacy capability is simulated (the shared `TestDaemon` now probes
+/// to v1) — the legacy-identity pin stays byte-exact against an old daemon.
 #[test]
 fn r5_audit_cbc_message_init_with_iv_fails_closed_locally() {
     let _guard = shim_state_test_guard();
     let shim = ShimSession::new();
+    let _legacy = R23LegacyGuard::simulate_old_daemon();
     let key = create_object(shim.session);
     let daemon = TestDaemon::shared();
     let calls_before = daemon.backend.message_init_contract_call_count();
@@ -4650,8 +4651,9 @@ impl Drop for R5SavedEndpoint {
 /// R5/F1: injects transport capability 1 into BOTH edges (the shim
 /// snapshot and the shared-client cache — production feeds both from the
 /// same discovery probe) and restores legacy 0 on drop. The test must
-/// hold `shim_state_test_guard`; a fresh `ShimSession` re-probes to 0
-/// anyway, so a leak could only affect the current test.
+/// hold `shim_state_test_guard`; a fresh `ShimSession` re-probes (to 1
+/// since the R23 advertisement) anyway, so a leak could only affect the
+/// current test.
 struct R5TransportGuard;
 
 impl R5TransportGuard {
@@ -4672,6 +4674,53 @@ impl Drop for R5TransportGuard {
             state::client().lock().await.set_mechanism_parameter_transport_version_for_tests(0);
         });
     }
+}
+
+/// R23: simulates a PRE-v1 daemon on BOTH edges (the shim snapshot and the
+/// shared-client cache) by injecting legacy 0 after the real probe, and
+/// restores the probed production value 1 on drop. Legacy-behavior tests
+/// use this: since the R23 advertisement every real `TestDaemon` probes
+/// to 1, so legacy capability is only reachable by simulating an old
+/// daemon's absent advertisement. The test must hold
+/// `shim_state_test_guard`.
+struct R23LegacyGuard;
+
+impl R23LegacyGuard {
+    fn simulate_old_daemon() -> Self {
+        crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(0);
+        state::runtime().block_on(async {
+            state::client().lock().await.set_mechanism_parameter_transport_version_for_tests(0);
+        });
+        assert_eq!(crate::interface_probe::mechanism_parameter_transport_version(), 0);
+        Self
+    }
+}
+
+impl Drop for R23LegacyGuard {
+    fn drop(&mut self) {
+        crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(1);
+        state::runtime().block_on(async {
+            state::client().lock().await.set_mechanism_parameter_transport_version_for_tests(1);
+        });
+    }
+}
+
+/// R23 production-path v1-on-capability: a plain `ShimSession` probe
+/// against a production `TestDaemon` (no injection, no override) records
+/// transport capability 1 — the advertisement the daemon ships since the
+/// R23 flip. The R5 one-shot/multipart legs below prove the client edge
+/// encodes v1 from the same probe end-to-end.
+#[test]
+fn r23_production_probe_records_v1_no_override() {
+    let _guard = shim_state_test_guard();
+    let _saved = R5SavedEndpoint::capture();
+    let daemon = r5_cbc_daemon();
+    let _shim = ShimSession::with_endpoint(&daemon.endpoint);
+    assert_eq!(
+        crate::interface_probe::mechanism_parameter_transport_version(),
+        1,
+        "production discovery must advertise v1 (R23 flip, no override)"
+    );
 }
 
 fn r5_cbc_daemon() -> TestDaemon {
@@ -4697,20 +4746,21 @@ fn r5_assert_raw_iv(
     }
 }
 
-/// R5/F1 one-shot leg: with capability 1 injected on both edges, a CBC
-/// message Init carrying the 16-byte NIST IV succeeds through v1, and the
-/// one-shot `C_EncryptMessage` with the same IV returns the mock's exact
-/// bytes. Both legs record the exact IV at the strict mock.
+/// R5/F1 one-shot leg: a CBC message Init carrying the 16-byte NIST IV
+/// succeeds through v1, and the one-shot `C_EncryptMessage` with the same
+/// IV returns the mock's exact bytes. Both legs record the exact IV at the
+/// strict mock.
+/// R23 (F1-live proof): the capability arrives via PRODUCTION discovery
+/// (no injection, no override) — the real probe records 1 on both edges.
 #[test]
 fn r5_cbc_encrypt_message_one_shot_v1_exact_bytes() {
     let _guard = shim_state_test_guard();
     let _saved = R5SavedEndpoint::capture();
     let daemon = r5_cbc_daemon();
     let shim = ShimSession::with_endpoint(&daemon.endpoint);
-    // The hard-0 daemon advertises nothing: the real probe path records
-    // legacy 0 (absent → 0) before injection.
-    assert_eq!(crate::interface_probe::mechanism_parameter_transport_version(), 0);
-    let _v1 = R5TransportGuard::inject();
+    // R23: the production daemon advertises v1 — the real probe path
+    // records 1 (RED pre-flip: the hard-0 daemon advertised nothing).
+    assert_eq!(crate::interface_probe::mechanism_parameter_transport_version(), 1);
 
     let key = create_object(shim.session);
     let mut iv = R5_NIST_CBC_IV;
@@ -4762,14 +4812,15 @@ fn r5_cbc_encrypt_message_one_shot_v1_exact_bytes() {
 /// R5/F1 multipart leg: the CBC Init rides v1 (exact IV bytes at the
 /// mock), then a `Begin`/`Next` sequence carries the IV through the
 /// multipart contract with exact bytes and mock-exact output.
+/// R23 (F1-live proof): production discovery feeds v1 (no injection).
 #[test]
 fn r5_cbc_multipart_init_begin_next_v1_exact_bytes() {
     let _guard = shim_state_test_guard();
     let _saved = R5SavedEndpoint::capture();
     let daemon = r5_cbc_daemon();
     let shim = ShimSession::with_endpoint(&daemon.endpoint);
-    assert_eq!(crate::interface_probe::mechanism_parameter_transport_version(), 0);
-    let _v1 = R5TransportGuard::inject();
+    // R23 (F1-live proof): production discovery feeds v1 (no injection).
+    assert_eq!(crate::interface_probe::mechanism_parameter_transport_version(), 1);
 
     let key = create_object(shim.session);
     let mut iv = R5_NIST_CBC_IV;
@@ -4858,18 +4909,19 @@ fn r17_gcm_daemon() -> TestDaemon {
 }
 
 /// R17 mixed-field fix, end to end: a classic `C_EncryptInit` carrying
-/// valid-IV + NULL-AAD-16 GCM params succeeds under injected v1 (shim
-/// typed read → client v1 encode → daemon v1 decode → strict-mock
-/// accept). Pre-R17 the IV is discarded into legacy `Raw` and the init
-/// fails closed locally with `PARAM_INVALID`.
+/// valid-IV + NULL-AAD-16 GCM params succeeds under v1 (shim typed read →
+/// client v1 encode → daemon v1 decode → strict-mock accept). Pre-R17 the
+/// IV is discarded into legacy `Raw` and the init fails closed locally
+/// with `PARAM_INVALID`.
+/// R23: the capability arrives via PRODUCTION discovery (no injection) —
+/// the production-path classic-v1 proof. RED pre-flip (probe records 0).
 #[test]
 fn r17_gcm_mixed_iv_aad_null_16_encrypt_init_v1_succeeds() {
     let _guard = shim_state_test_guard();
     let _saved = R5SavedEndpoint::capture();
     let daemon = r17_gcm_daemon();
     let shim = ShimSession::with_endpoint(&daemon.endpoint);
-    assert_eq!(crate::interface_probe::mechanism_parameter_transport_version(), 0);
-    let _v1 = R5TransportGuard::inject();
+    assert_eq!(crate::interface_probe::mechanism_parameter_transport_version(), 1);
 
     let key = create_object(shim.session);
     let mut iv = [0x11u8; 12];
@@ -4893,16 +4945,18 @@ fn r17_gcm_mixed_iv_aad_null_16_encrypt_init_v1_succeeds() {
     );
 }
 
-/// R17 legacy control: the same mixed call without the injection fails
-/// closed locally with `PARAM_INVALID`, byte-identical to pre-R17
-/// (legacy capability preserves existing behavior exactly).
+/// R17 legacy control: the same mixed call against a simulated old
+/// daemon (legacy 0 — the real probe yields v1 since R23) fails closed
+/// locally with `PARAM_INVALID`, byte-identical to pre-R17 (legacy
+/// capability preserves existing behavior exactly).
 #[test]
 fn r17_gcm_mixed_iv_aad_null_16_legacy_stays_fail_closed() {
     let _guard = shim_state_test_guard();
     let _saved = R5SavedEndpoint::capture();
     let daemon = r17_gcm_daemon();
     let shim = ShimSession::with_endpoint(&daemon.endpoint);
-    assert_eq!(crate::interface_probe::mechanism_parameter_transport_version(), 0);
+    assert_eq!(crate::interface_probe::mechanism_parameter_transport_version(), 1);
+    let _legacy = R23LegacyGuard::simulate_old_daemon();
 
     let key = create_object(shim.session);
     let mut iv = [0x11u8; 12];
