@@ -5,6 +5,8 @@ pub mod pkcs11_proxy_ng {
 }
 
 pub mod convert;
+#[doc(hidden)]
+pub mod fuzz_support;
 pub mod protected_decode;
 pub mod secret_boundary;
 pub mod version;
