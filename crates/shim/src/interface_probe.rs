@@ -104,6 +104,11 @@ pub(crate) fn invalidate_pointer_safe_message_parameters() {
 /// readers gate v1-opaque emission on this (R5); R10 extends this read with
 /// the cfg-gated test override (no API break); R11/R23 consume it.
 pub fn mechanism_parameter_transport_version() -> u32 {
+    // R10: the test-only override forces v1 under the custom cfg ONLY (a
+    // `false` stub without it — production behavior unchanged).
+    if test_mechanism_params_v1_override_enabled() {
+        return 1;
+    }
     MECHANISM_PARAMETER_TRANSPORT_VERSION.load(Ordering::Acquire)
 }
 
@@ -131,6 +136,78 @@ fn clear_mechanism_parameter_transport_version() {
 pub(crate) fn set_mechanism_parameter_transport_version_for_tests(version: u32) {
     MECHANISM_PARAMETER_TRANSPORT_VERSION.store(version, Ordering::Release);
 }
+
+// ---------------------------------------------------------------------------
+// R10 test-only v1-enable override (S2 §11 Phase 2)
+// ---------------------------------------------------------------------------
+//
+// Custom build cfg `pkcs11_proxy_test_mechanism_params_v1`, ABSENT from
+// normal builds: enable it ONLY via
+// `RUSTFLAGS="--cfg pkcs11_proxy_test_mechanism_params_v1"` with a SEPARATE
+// target dir (`CARGO_TARGET_DIR=/tmp/tgt-v1test`) so override artifacts
+// never share fingerprints with normal builds. NO public Cargo feature:
+// without the cfg this section compiles to stubs and the env name/value
+// strings below are absent from the binary (pinned by the R10 step-7 tests
+// + the artifact-absence check).
+//
+// Under the cfg ONLY, the exact-value env
+// `PKCS11_PROXY_TEST_MECHANISM_PARAMS_V1=enable-v1-test-only` forces the
+// transport snapshot to v1; missing/invalid fails closed to legacy.
+// Sibling read sites (same contract, own copies — no public API): the
+// daemon advertisement (`server/.../interface_caps.rs`) and the daemon
+// startup marker (`server/src/main.rs`).
+
+/// Env var arming the test-only v1 override; cfg-gated so normal binaries
+/// carry neither this name nor the enable value.
+#[cfg(pkcs11_proxy_test_mechanism_params_v1)]
+pub(crate) const R10_OVERRIDE_ENV_VAR: &str = "PKCS11_PROXY_TEST_MECHANISM_PARAMS_V1";
+/// The single accepted override value; cfg-gated (see above).
+#[cfg(pkcs11_proxy_test_mechanism_params_v1)]
+pub(crate) const R10_OVERRIDE_ENABLE_VALUE: &str = "enable-v1-test-only";
+
+/// Pure exact-value check (unit tested under the cfg): only the exact
+/// enable value arms the override — anything else fails closed.
+#[cfg(pkcs11_proxy_test_mechanism_params_v1)]
+fn is_override_enable_value(value: Option<&std::ffi::OsStr>) -> bool {
+    value == Some(std::ffi::OsStr::new(R10_OVERRIDE_ENABLE_VALUE))
+}
+
+/// Whether the test-only v1 override is armed: the custom cfg compiled it
+/// in AND the env carries the exact enable value. Without the cfg this is
+/// a `false` stub (no env read, no strings in the binary).
+#[cfg(pkcs11_proxy_test_mechanism_params_v1)]
+pub(crate) fn test_mechanism_params_v1_override_enabled() -> bool {
+    is_override_enable_value(std::env::var_os(R10_OVERRIDE_ENV_VAR).as_deref())
+}
+/// R10 override predicate without the cfg: hard `false` (step 7 — the env
+/// is inert in normal builds).
+#[cfg(not(pkcs11_proxy_test_mechanism_params_v1))]
+pub(crate) fn test_mechanism_params_v1_override_enabled() -> bool {
+    false
+}
+
+/// Conspicuous override marker for the shim log at `C_Initialize` (R10 step
+/// 4): a WARN naming the armed state. Under the cfg a test binary NEVER
+/// starts silently — armed forces v1, inactive runs legacy. Without the cfg
+/// this is an empty stub.
+#[cfg(pkcs11_proxy_test_mechanism_params_v1)]
+pub(crate) fn log_test_mechanism_params_v1_override_marker() {
+    if test_mechanism_params_v1_override_enabled() {
+        tracing::warn!(
+            "TEST-ONLY OVERRIDE ARMED (R10): {R10_OVERRIDE_ENV_VAR}={R10_OVERRIDE_ENABLE_VALUE} \
+             forces mechanism-parameter transport v1; never ship this build"
+        );
+    } else {
+        tracing::warn!(
+            "TEST-ONLY OVERRIDE BUILD (R10): custom cfg \
+             pkcs11_proxy_test_mechanism_params_v1 without the exact-value env - running legacy; \
+             never ship this build"
+        );
+    }
+}
+/// R10 marker without the cfg: no code, no log line.
+#[cfg(not(pkcs11_proxy_test_mechanism_params_v1))]
+pub(crate) fn log_test_mechanism_params_v1_override_marker() {}
 
 /// The backend's `CK_ULONG` width in bytes for the value bridge (ADR-0011).
 ///
@@ -1218,6 +1295,10 @@ unsafe impl Sync for FallbackCatalog {}
 mod backend_abi_tests {
     use cryptoki_sys::{CK_INTERFACE, CK_VERSION};
 
+    #[cfg(pkcs11_proxy_test_mechanism_params_v1)]
+    use super::is_override_enable_value;
+    #[cfg(not(pkcs11_proxy_test_mechanism_params_v1))]
+    use super::test_mechanism_params_v1_override_enabled;
     use super::{
         BackendInterface, clear_pointer_safe_message_parameters, find_interface_in_catalog,
         pointer_safe_message_parameters, record_pointer_safe_message_parameters,
@@ -1566,5 +1647,32 @@ mod backend_abi_tests {
         assert_eq!(resolve_mechanism_parameter_transport_version(Some(0)), 0);
         assert_eq!(resolve_mechanism_parameter_transport_version(Some(1)), 1);
         assert_eq!(resolve_mechanism_parameter_transport_version(Some(2)), 2);
+    }
+
+    /// R10 pure exact-value policy (cfg-gated, like the strings it checks):
+    /// only the exact enable value arms the override — everything else
+    /// fails closed.
+    #[test]
+    #[cfg(pkcs11_proxy_test_mechanism_params_v1)]
+    fn r10_override_enable_value_is_exact() {
+        use std::ffi::OsStr;
+        assert!(is_override_enable_value(Some(OsStr::new("enable-v1-test-only"))));
+        for bad in [
+            None,
+            Some(OsStr::new("")),
+            Some(OsStr::new("yes-please")),
+            Some(OsStr::new("ENABLE-V1-TEST-ONLY")),
+            Some(OsStr::new("enable-v1-test-only ")),
+        ] {
+            assert!(!is_override_enable_value(bad), "must fail closed: {bad:?}");
+        }
+    }
+
+    /// R10 step 7 (code-level): without the cfg the predicate is a `false`
+    /// stub — no env read exists to take effect.
+    #[test]
+    #[cfg(not(pkcs11_proxy_test_mechanism_params_v1))]
+    fn r10_override_predicate_is_false_stub_without_cfg() {
+        assert!(!test_mechanism_params_v1_override_enabled());
     }
 }

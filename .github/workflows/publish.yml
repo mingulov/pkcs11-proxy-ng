@@ -97,6 +97,16 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
+      # R10 (S2 §11): the test-only v1-enable cfg must never reach published
+      # artifacts. Fail loudly if RUSTFLAGS carries it.
+      - name: Reject test-only mechanism-params cfg
+        run: |
+          set -euo pipefail
+          if [[ "${RUSTFLAGS:-}" == *"pkcs11_proxy_test_mechanism_params_v1"* ]]; then
+            echo "::error::RUSTFLAGS carries the test-only cfg pkcs11_proxy_test_mechanism_params_v1; refusing."
+            exit 1
+          fi
+
       - name: Fetch origin main for ancestry checks
         run: git fetch --no-tags origin main:refs/remotes/origin/main
 

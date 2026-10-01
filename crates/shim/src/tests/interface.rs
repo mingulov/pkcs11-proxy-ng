@@ -1800,6 +1800,46 @@ fn pre_probe_fallback_catalog_shape_is_pinned_transient() {
     assert_eq!(versions, [(2, 40), (3, 0), (3, 2)], "fallback shape is the optimistic transient");
 }
 
+/// R10 (S2 §11 Phase 2 test-only v1-enable override): under the custom
+/// cfg, the exact-value env arms the override and the public snapshot read
+/// forces v1 even though the stored discovery value is legacy 0. Guarded:
+/// env + snapshot are process-global. RED without the R10 plumbing
+/// (snapshot stays 0).
+#[test]
+#[cfg(pkcs11_proxy_test_mechanism_params_v1)]
+fn r10_override_exact_env_forces_v1_snapshot_under_cfg() {
+    let _guard = shim_state_test_guard();
+    crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(0);
+    unsafe {
+        std::env::set_var("PKCS11_PROXY_TEST_MECHANISM_PARAMS_V1", "enable-v1-test-only");
+    }
+    let snapshot = crate::interface_probe::mechanism_parameter_transport_version();
+    unsafe {
+        std::env::remove_var("PKCS11_PROXY_TEST_MECHANISM_PARAMS_V1");
+    }
+    assert_eq!(snapshot, 1, "exact-value env must force v1 under the test cfg");
+    crate::interface_probe::clear_cache();
+}
+
+/// R10 step 7 (S2 §11): without the test cfg, the exact-value env is inert
+/// — the snapshot stays at the stored legacy value. This test FAILS if the
+/// env ever takes effect in a normal build.
+#[test]
+#[cfg(not(pkcs11_proxy_test_mechanism_params_v1))]
+fn r10_override_env_inert_without_cfg() {
+    let _guard = shim_state_test_guard();
+    crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(0);
+    unsafe {
+        std::env::set_var("PKCS11_PROXY_TEST_MECHANISM_PARAMS_V1", "enable-v1-test-only");
+    }
+    let snapshot = crate::interface_probe::mechanism_parameter_transport_version();
+    unsafe {
+        std::env::remove_var("PKCS11_PROXY_TEST_MECHANISM_PARAMS_V1");
+    }
+    assert_eq!(snapshot, 0, "env must be inert without the test cfg (legacy)");
+    crate::interface_probe::clear_cache();
+}
+
 /// R5/F1 snapshot-API storage: the test injection round-trips through the
 /// public snapshot read, and `clear_cache` resets it to legacy 0. Guarded:
 /// the snapshot is process-global, like the probe cache.

@@ -82,6 +82,9 @@ unsafe fn parse_init_args(p_init_args: CK_VOID_PTR) -> Option<CK_RV> {
 
 pub unsafe extern "C" fn c_initialize(p_init_args: CK_VOID_PTR) -> CK_RV {
     catch_panics(|| {
+        // R10 step 4: conspicuous test-override marker in the shim log at
+        // startup (empty stub without the custom cfg).
+        crate::interface_probe::log_test_mechanism_params_v1_override_marker();
         // Validate pInitArgs before touching state or network.
         if let Some(err_rv) = unsafe { parse_init_args(p_init_args) } {
             return err_rv;
