@@ -5923,17 +5923,8 @@ fn r16_sign_additional_context_presence_matrix() {
     assert_eq!(wire(vec![1], Some(1), 1), Err(CkRv::MECHANISM_PARAM_INVALID));
 }
 
-// --- R16 test-only v1 encode + round-trips (production encode stays v0) ---
-
-/// Test-only direction of the R16 domain conversion: `PointerBytes` →
-/// (bytes, `*_null_len`). Production encode never emits the new fields
-/// (pinned below); the shim starts emitting v1 in R17.
-fn r16_pointer_to_wire(presence: &PointerBytes) -> (Vec<u8>, Option<u64>) {
-    match presence {
-        PointerBytes::Present(bytes) => (bytes.expose(<[u8]>::to_vec), None),
-        PointerBytes::Null { declared_len } => (Vec::new(), Some(*declared_len)),
-    }
-}
+// --- R16 v1 round-trips (R17 productionized the encode direction as
+// `super::pointer_to_wire`; these tests ride the production helper) ---
 
 #[test]
 fn r16_presence_helpers_round_trip() {
@@ -5943,18 +5934,20 @@ fn r16_presence_helpers_round_trip() {
         [(vec![], Some(0)), (vec![], Some(41)), (vec![], None), (vec![0xA5; 37], None)]
     {
         let presence = super::pointer_from_wire(&bytes, null_len, 1).unwrap();
-        let (back_bytes, back_null) = r16_pointer_to_wire(&presence);
+        let (back_bytes, back_null) = super::pointer_to_wire(&presence);
         assert_eq!((back_bytes, back_null), (bytes.clone(), null_len));
         let legacy = super::pointer_from_wire_legacy(&bytes, null_len, false, 1).unwrap();
-        assert_eq!(r16_pointer_to_wire(&legacy), (bytes.clone(), null_len));
+        assert_eq!(super::pointer_to_wire(&legacy), (bytes.clone(), null_len));
     }
     // Legacy-bool mirror at v0: set → Null{0}, unset → Present.
     assert_eq!(
-        r16_pointer_to_wire(&super::pointer_from_wire_legacy(&[], None, true, 0).unwrap()),
+        super::pointer_to_wire(&super::pointer_from_wire_legacy(&[], None, true, 0).unwrap()),
         (Vec::new(), Some(0))
     );
     assert_eq!(
-        r16_pointer_to_wire(&super::pointer_from_wire_legacy(&[0xA5; 3], None, false, 0).unwrap()),
+        super::pointer_to_wire(
+            &super::pointer_from_wire_legacy(&[0xA5; 3], None, false, 0).unwrap()
+        ),
         (vec![0xA5; 3], None)
     );
 }
@@ -5962,8 +5955,9 @@ fn r16_presence_helpers_round_trip() {
 #[test]
 fn r16_production_encode_never_emits_presence_fields() {
     // Even a v1-decoded domain value (NULL/41 presence) production-encodes
-    // v0-shaped: legacy bytes only, no presence fields, version 0. The
-    // shim starts emitting v1 in R17.
+    // v0-shaped through the legacy `TryFrom`: legacy bytes only, no
+    // presence fields, version 0. (Since R17 the shim emits v1 through
+    // `to_wire_with_transport_version`; this `TryFrom` stays v0.)
     let domain = CkMechanism {
         mechanism_type: CkMechanismType(0x1087),
         params: Some(CkMechanismParams::Gcm(GcmParams {
@@ -5993,7 +5987,7 @@ fn r16_production_encode_never_emits_presence_fields() {
 #[test]
 fn r16_gcm_v1_round_trip_through_test_encode() {
     // Representative full round-trip: hand-built v1 wire → production
-    // decode → test-only encode → identical wire.
+    // decode → production presence encode → identical wire.
     let wire = v1_proto::GcmParams {
         iv: vec![1; 12],
         iv_bits: 96,
@@ -6015,8 +6009,8 @@ fn r16_gcm_v1_round_trip_through_test_encode() {
         panic!("expected Gcm, got {:?}", back.params)
     };
     assert_eq!(p.iv, vec![1; 12]);
-    let (iv, iv_null_len) = r16_pointer_to_wire(&p.iv_presence);
-    let (aad, aad_null_len) = r16_pointer_to_wire(&p.aad_presence);
+    let (iv, iv_null_len) = super::pointer_to_wire(&p.iv_presence);
+    let (aad, aad_null_len) = super::pointer_to_wire(&p.aad_presence);
     assert_eq!(
         v1_proto::GcmParams {
             iv,
@@ -6031,4 +6025,1555 @@ fn r16_gcm_v1_round_trip_through_test_encode() {
         },
         wire
     );
+}
+
+// --- R17 version-threaded production encode (S2 §3/§5: shim emits v1) ---
+//
+// Coverage decomposition (see the R17 report): `pointer_to_wire` carries
+// the 4-state (NULL/0, NULL/n, ptr/0, ptr/n) semantics once (pinned
+// below); each per-family test below pins WIRING — every `*_null_len`
+// rides its own peer (distinct declared lengths catch crossed wires),
+// Present bytes ride the peer bytes, legacy bools are forced unset, and
+// the outer stamp is 1.
+
+fn r17_mech(params: Option<CkMechanismParams>) -> CkMechanism {
+    CkMechanism { mechanism_type: CkMechanismType(0x1087), params }
+}
+
+#[test]
+fn r17_encode_v0_is_legacy_identical() {
+    // Capability 0 delegates to the legacy `TryFrom` exactly — even for
+    // v1-reader-shaped domain input (NULL presence + cleared bools).
+    let cases: Vec<Option<CkMechanismParams>> = vec![
+        None,
+        Some(CkMechanismParams::Gcm(GcmParams {
+            iv: vec![1; 12],
+            iv_bits: 96,
+            iv_buffer_len: 12,
+            aad: SecretBytes::copy_from_slice(&[]),
+            tag_bits: 128,
+            iv_null: false,
+            aad_null: false,
+            iv_presence: PointerBytes::present_copy(&[1; 12]),
+            aad_presence: PointerBytes::null_len(16),
+        })),
+        Some(CkMechanismParams::Hkdf(HkdfParams {
+            extract: true,
+            expand: true,
+            prf_hash_mechanism: CkMechanismType(0x250),
+            salt_type: 0,
+            salt: SecretBytes::copy_from_slice(&[]),
+            salt_key_handle: CkObjectHandle(0),
+            info: SecretBytes::copy_from_slice(&[2; 8]),
+            salt_presence: PointerBytes::null_len(41),
+            info_presence: PointerBytes::present_copy(&[2; 8]),
+        })),
+        Some(CkMechanismParams::ChaCha20(ChaCha20Params {
+            block_counter: Vec::new(),
+            block_counter_bits: 32,
+            nonce: vec![3; 12],
+            nonce_bits: 96,
+            block_counter_presence: PointerBytes::null_len(4),
+            nonce_presence: PointerBytes::present_copy(&[3; 12]),
+        })),
+        Some(CkMechanismParams::KeaDerive(KeaDeriveParams {
+            is_sender: true,
+            random_a: vec![4; 8],
+            random_b: Vec::new(),
+            public_data: vec![5; 16],
+        })),
+    ];
+    for params in cases {
+        let m = r17_mech(params);
+        let legacy = v1_proto::Mechanism::try_from(&m).unwrap();
+        let wire = super::to_wire_with_transport_version(&m, 0).unwrap();
+        assert_eq!(wire, legacy, "capability 0 is the legacy encode exactly");
+        assert_eq!(wire.parameter_encoding_version, 0);
+    }
+}
+
+#[test]
+fn r17_pointer_to_wire_matrix() {
+    // The 4-state semantics every per-family arm rides: NULL (any length,
+    // incl. zero) = empty bytes + Some(len); Present = bytes + None.
+    assert_eq!(super::pointer_to_wire(&PointerBytes::null_len(0)), (Vec::new(), Some(0)));
+    assert_eq!(super::pointer_to_wire(&PointerBytes::null_len(41)), (Vec::new(), Some(41)));
+    assert_eq!(super::pointer_to_wire(&PointerBytes::present_copy(&[])), (Vec::new(), None));
+    assert_eq!(
+        super::pointer_to_wire(&PointerBytes::present_copy(&[0xA5; 37])),
+        (vec![0xA5; 37], None)
+    );
+}
+
+#[test]
+fn r17_encode_v1_newer_capability_still_v1() {
+    // Monotonic capabilities (S2 §3, message-path precedent): a capability
+    // newer than this encoder still emits the v1 form it knows.
+    let m = r17_mech(Some(CkMechanismParams::Eddsa(EddsaParams {
+        ph_flag: false,
+        context_data: SecretBytes::copy_from_slice(&[]),
+        context_data_presence: PointerBytes::null_len(7),
+    })));
+    for version in [1, 2, u32::MAX] {
+        let wire = super::to_wire_with_transport_version(&m, version).unwrap();
+        assert_eq!(wire.parameter_encoding_version, 1, "capability {version}");
+        match &wire.params {
+            Some(v1_proto::mechanism::Params::EddsaParams(p)) => {
+                assert!(p.context_data.is_empty());
+                assert_eq!(p.context_data_null_len, Some(7));
+            }
+            other => panic!("capability {version} must emit EddsaParams, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn r17_encode_v1_non_r17_families_stay_v0_shaped() {
+    // Tail/scalar/output families take the identical legacy path at every
+    // capability (R18 owns the tail; scalar shapes have no presence).
+    let kea = r17_mech(Some(CkMechanismParams::KeaDerive(KeaDeriveParams {
+        is_sender: false,
+        random_a: vec![1; 4],
+        random_b: vec![2; 4],
+        public_data: Vec::new(),
+    })));
+    for version in [0, 1, 2] {
+        let wire = super::to_wire_with_transport_version(&kea, version).unwrap();
+        assert_eq!(wire, v1_proto::Mechanism::try_from(&kea).unwrap());
+        assert_eq!(wire.parameter_encoding_version, 0, "capability {version}");
+    }
+    // Flat/Null keep their stored (R11-threaded) stamp, untouched.
+    let flat = r17_mech(Some(CkMechanismParams::Flat(FlatParams {
+        bytes: SecretBytes::copy_from_slice(&[9; 8]),
+        declared_len: 8,
+        source_abi: None,
+        fingerprint: 0,
+        version: 1,
+    })));
+    let wire = super::to_wire_with_transport_version(&flat, 1).unwrap();
+    assert_eq!(wire, v1_proto::Mechanism::try_from(&flat).unwrap());
+    assert_eq!(wire.parameter_encoding_version, 1);
+}
+
+#[test]
+fn r17_encode_v1_rsa_oaep() {
+    // Adversarial legacy bool (set) is forced unset; NULL rides presence.
+    let m = r17_mech(Some(CkMechanismParams::RsaPkcsOaep(RsaPkcsOaepParams {
+        hash_alg: CkMechanismType(0x250),
+        mgf: CkMgf(1),
+        source: CkOaepSource(1),
+        source_data: SecretBytes::copy_from_slice(&[]),
+        source_null: true,
+        source_data_presence: PointerBytes::null_len(41),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::RsaPkcsOaepParams(p)) => {
+            assert!(p.source_data.is_empty());
+            assert_eq!(p.source_data_null_len, Some(41));
+            assert!(!p.source_null);
+        }
+        other => panic!("must emit RsaPkcsOaepParams, got {other:?}"),
+    }
+    let m = r17_mech(Some(CkMechanismParams::RsaPkcsOaep(RsaPkcsOaepParams {
+        hash_alg: CkMechanismType(0x250),
+        mgf: CkMgf(1),
+        source: CkOaepSource(1),
+        source_data: SecretBytes::copy_from_slice(&[7; 5]),
+        source_null: false,
+        source_data_presence: PointerBytes::present_copy(&[7; 5]),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::RsaPkcsOaepParams(p)) => {
+            assert_eq!(p.source_data, vec![7; 5]);
+            assert_eq!(p.source_data_null_len, None);
+        }
+        other => panic!("must emit RsaPkcsOaepParams, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_gcm() {
+    // THE mixed-field fix on the wire: copied IV + aad_null_len, bools
+    // forced unset even when the domain input carries legacy-bool state.
+    let m = r17_mech(Some(CkMechanismParams::Gcm(GcmParams {
+        iv: vec![1; 12],
+        iv_bits: 96,
+        iv_buffer_len: 12,
+        aad: SecretBytes::copy_from_slice(&[]),
+        tag_bits: 128,
+        iv_null: true,
+        aad_null: true,
+        iv_presence: PointerBytes::present_copy(&[1; 12]),
+        aad_presence: PointerBytes::null_len(16),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::GcmParams(p)) => {
+            assert_eq!(p.iv, vec![1; 12]);
+            assert_eq!(p.iv_null_len, None);
+            assert!(p.aad.is_empty());
+            assert_eq!(p.aad_null_len, Some(16));
+            assert!(!p.iv_null && !p.aad_null);
+        }
+        other => panic!("must emit GcmParams, got {other:?}"),
+    }
+    // Distinct NULL lens catch crossed wires (iv⟷aad swap).
+    let m = r17_mech(Some(CkMechanismParams::Gcm(GcmParams {
+        iv: Vec::new(),
+        iv_bits: 96,
+        iv_buffer_len: 0,
+        aad: SecretBytes::copy_from_slice(&[]),
+        tag_bits: 128,
+        iv_null: false,
+        aad_null: false,
+        iv_presence: PointerBytes::null_len(11),
+        aad_presence: PointerBytes::null_len(22),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::GcmParams(p)) => {
+            assert_eq!(p.iv_null_len, Some(11));
+            assert_eq!(p.aad_null_len, Some(22));
+        }
+        other => panic!("must emit GcmParams, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_ecdh1_derive() {
+    let m = r17_mech(Some(CkMechanismParams::Ecdh1Derive(Ecdh1DeriveParams {
+        kdf: CkKdf(3),
+        shared_data: SecretBytes::copy_from_slice(&[]),
+        public_data: vec![2; 65],
+        shared_data_presence: PointerBytes::null_len(11),
+        public_data_presence: PointerBytes::present_copy(&[2; 65]),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::Ecdh1DeriveParams(p)) => {
+            assert!(p.shared_data.is_empty());
+            assert_eq!(p.shared_data_null_len, Some(11));
+            assert_eq!(p.public_data, vec![2; 65]);
+            assert_eq!(p.public_data_null_len, None);
+        }
+        other => panic!("must emit Ecdh1DeriveParams, got {other:?}"),
+    }
+    let m = r17_mech(Some(CkMechanismParams::Ecdh1Derive(Ecdh1DeriveParams {
+        kdf: CkKdf(3),
+        shared_data: SecretBytes::copy_from_slice(&[3; 4]),
+        public_data: Vec::new(),
+        shared_data_presence: PointerBytes::present_copy(&[3; 4]),
+        public_data_presence: PointerBytes::null_len(22),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::Ecdh1DeriveParams(p)) => {
+            assert_eq!(p.shared_data, vec![3; 4]);
+            assert_eq!(p.shared_data_null_len, None);
+            assert!(p.public_data.is_empty());
+            assert_eq!(p.public_data_null_len, Some(22));
+        }
+        other => panic!("must emit Ecdh1DeriveParams, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_ccm() {
+    let m = r17_mech(Some(CkMechanismParams::Ccm(CcmParams {
+        data_len: 32,
+        nonce: Vec::new(),
+        aad: SecretBytes::copy_from_slice(&[]),
+        mac_len: 16,
+        nonce_null: true,
+        aad_null: true,
+        nonce_presence: PointerBytes::null_len(11),
+        aad_presence: PointerBytes::null_len(22),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::CcmParams(p)) => {
+            assert!(p.nonce.is_empty());
+            assert_eq!(p.nonce_null_len, Some(11));
+            assert!(p.aad.is_empty());
+            assert_eq!(p.aad_null_len, Some(22));
+            assert!(!p.nonce_null && !p.aad_null);
+        }
+        other => panic!("must emit CcmParams, got {other:?}"),
+    }
+    let m = r17_mech(Some(CkMechanismParams::Ccm(CcmParams {
+        data_len: 32,
+        nonce: vec![4; 13],
+        aad: SecretBytes::copy_from_slice(&[5; 6]),
+        mac_len: 16,
+        nonce_null: false,
+        aad_null: false,
+        nonce_presence: PointerBytes::present_copy(&[4; 13]),
+        aad_presence: PointerBytes::present_copy(&[5; 6]),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::CcmParams(p)) => {
+            assert_eq!(p.nonce, vec![4; 13]);
+            assert_eq!(p.nonce_null_len, None);
+            assert_eq!(p.aad, vec![5; 6]);
+            assert_eq!(p.aad_null_len, None);
+        }
+        other => panic!("must emit CcmParams, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_chacha20() {
+    let m = r17_mech(Some(CkMechanismParams::ChaCha20(ChaCha20Params {
+        block_counter: Vec::new(),
+        block_counter_bits: 32,
+        nonce: Vec::new(),
+        nonce_bits: 96,
+        block_counter_presence: PointerBytes::null_len(11),
+        nonce_presence: PointerBytes::null_len(22),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::Chacha20Params(p)) => {
+            assert!(p.block_counter.is_empty());
+            assert_eq!(p.block_counter_null_len, Some(11));
+            assert!(p.nonce.is_empty());
+            assert_eq!(p.nonce_null_len, Some(22));
+        }
+        other => panic!("must emit Chacha20Params, got {other:?}"),
+    }
+    let m = r17_mech(Some(CkMechanismParams::ChaCha20(ChaCha20Params {
+        block_counter: vec![6; 4],
+        block_counter_bits: 32,
+        nonce: vec![7; 12],
+        nonce_bits: 96,
+        block_counter_presence: PointerBytes::present_copy(&[6; 4]),
+        nonce_presence: PointerBytes::present_copy(&[7; 12]),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::Chacha20Params(p)) => {
+            assert_eq!(p.block_counter, vec![6; 4]);
+            assert_eq!(p.block_counter_null_len, None);
+            assert_eq!(p.nonce, vec![7; 12]);
+            assert_eq!(p.nonce_null_len, None);
+        }
+        other => panic!("must emit Chacha20Params, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_salsa20() {
+    let m = r17_mech(Some(CkMechanismParams::Salsa20(Salsa20Params {
+        block_counter: Vec::new(),
+        nonce: Vec::new(),
+        nonce_bits: 64,
+        block_counter_presence: PointerBytes::null_len(11),
+        nonce_presence: PointerBytes::null_len(22),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::Salsa20Params(p)) => {
+            assert_eq!(p.block_counter_null_len, Some(11));
+            assert_eq!(p.nonce_null_len, Some(22));
+        }
+        other => panic!("must emit Salsa20Params, got {other:?}"),
+    }
+    let m = r17_mech(Some(CkMechanismParams::Salsa20(Salsa20Params {
+        block_counter: vec![8; 8],
+        nonce: Vec::new(),
+        nonce_bits: 0,
+        block_counter_presence: PointerBytes::present_copy(&[8; 8]),
+        nonce_presence: PointerBytes::present_copy(&[]),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::Salsa20Params(p)) => {
+            assert_eq!(p.block_counter, vec![8; 8]);
+            assert_eq!(p.block_counter_null_len, None);
+            assert!(p.nonce.is_empty());
+            assert_eq!(p.nonce_null_len, None);
+        }
+        other => panic!("must emit Salsa20Params, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_salsa20_chacha20_poly1305() {
+    let m =
+        r17_mech(Some(CkMechanismParams::Salsa20ChaCha20Poly1305(Salsa20ChaCha20Poly1305Params {
+            nonce: Vec::new(),
+            aad: SecretBytes::copy_from_slice(&[]),
+            nonce_presence: PointerBytes::null_len(11),
+            aad_presence: PointerBytes::null_len(22),
+        })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::Salsa20Chacha20Poly1305Params(p)) => {
+            assert_eq!(p.nonce_null_len, Some(11));
+            assert_eq!(p.aad_null_len, Some(22));
+        }
+        other => panic!("must emit Salsa20Chacha20Poly1305Params, got {other:?}"),
+    }
+    let m =
+        r17_mech(Some(CkMechanismParams::Salsa20ChaCha20Poly1305(Salsa20ChaCha20Poly1305Params {
+            nonce: vec![9; 8],
+            aad: SecretBytes::copy_from_slice(&[1; 3]),
+            nonce_presence: PointerBytes::present_copy(&[9; 8]),
+            aad_presence: PointerBytes::present_copy(&[1; 3]),
+        })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::Salsa20Chacha20Poly1305Params(p)) => {
+            assert_eq!(p.nonce, vec![9; 8]);
+            assert_eq!(p.nonce_null_len, None);
+            assert_eq!(p.aad, vec![1; 3]);
+            assert_eq!(p.aad_null_len, None);
+        }
+        other => panic!("must emit Salsa20Chacha20Poly1305Params, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_gcm_wrap() {
+    let m = r17_mech(Some(CkMechanismParams::GcmWrap(GcmWrapParams {
+        iv: Vec::new(),
+        iv_fixed_bits: 32,
+        iv_generator: CkGeneratorFunction(2),
+        aad: SecretBytes::copy_from_slice(&[]),
+        tag_bits: 128,
+        iv_presence: PointerBytes::null_len(11),
+        aad_presence: PointerBytes::null_len(22),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::GcmWrapParams(p)) => {
+            assert_eq!(p.iv_null_len, Some(11));
+            assert_eq!(p.aad_null_len, Some(22));
+        }
+        other => panic!("must emit GcmWrapParams, got {other:?}"),
+    }
+    let m = r17_mech(Some(CkMechanismParams::GcmWrap(GcmWrapParams {
+        iv: vec![2; 8],
+        iv_fixed_bits: 32,
+        iv_generator: CkGeneratorFunction(2),
+        aad: SecretBytes::copy_from_slice(&[3; 5]),
+        tag_bits: 128,
+        iv_presence: PointerBytes::present_copy(&[2; 8]),
+        aad_presence: PointerBytes::present_copy(&[3; 5]),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::GcmWrapParams(p)) => {
+            assert_eq!(p.iv, vec![2; 8]);
+            assert_eq!(p.iv_null_len, None);
+            assert_eq!(p.aad, vec![3; 5]);
+            assert_eq!(p.aad_null_len, None);
+        }
+        other => panic!("must emit GcmWrapParams, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_ccm_wrap() {
+    let m = r17_mech(Some(CkMechanismParams::CcmWrap(CcmWrapParams {
+        data_len: 64,
+        nonce: Vec::new(),
+        nonce_fixed_bits: 16,
+        nonce_generator: CkGeneratorFunction(2),
+        aad: SecretBytes::copy_from_slice(&[]),
+        mac_len: 12,
+        nonce_presence: PointerBytes::null_len(11),
+        aad_presence: PointerBytes::null_len(22),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::CcmWrapParams(p)) => {
+            assert_eq!(p.nonce_null_len, Some(11));
+            assert_eq!(p.aad_null_len, Some(22));
+        }
+        other => panic!("must emit CcmWrapParams, got {other:?}"),
+    }
+    let m = r17_mech(Some(CkMechanismParams::CcmWrap(CcmWrapParams {
+        data_len: 64,
+        nonce: vec![4; 7],
+        nonce_fixed_bits: 16,
+        nonce_generator: CkGeneratorFunction(2),
+        aad: SecretBytes::copy_from_slice(&[5; 9]),
+        mac_len: 12,
+        nonce_presence: PointerBytes::present_copy(&[4; 7]),
+        aad_presence: PointerBytes::present_copy(&[5; 9]),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::CcmWrapParams(p)) => {
+            assert_eq!(p.nonce, vec![4; 7]);
+            assert_eq!(p.nonce_null_len, None);
+            assert_eq!(p.aad, vec![5; 9]);
+            assert_eq!(p.aad_null_len, None);
+        }
+        other => panic!("must emit CcmWrapParams, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_rc5_cbc() {
+    let m = r17_mech(Some(CkMechanismParams::Rc5Cbc(Rc5CbcParams {
+        word_size: 4,
+        rounds: 12,
+        iv: Vec::new(),
+        iv_presence: PointerBytes::null_len(41),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::Rc5CbcParams(p)) => {
+            assert!(p.iv.is_empty());
+            assert_eq!(p.iv_null_len, Some(41));
+        }
+        other => panic!("must emit Rc5CbcParams, got {other:?}"),
+    }
+    let m = r17_mech(Some(CkMechanismParams::Rc5Cbc(Rc5CbcParams {
+        word_size: 4,
+        rounds: 12,
+        iv: vec![6; 8],
+        iv_presence: PointerBytes::present_copy(&[6; 8]),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::Rc5CbcParams(p)) => {
+            assert_eq!(p.iv, vec![6; 8]);
+            assert_eq!(p.iv_null_len, None);
+        }
+        other => panic!("must emit Rc5CbcParams, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_aes_cbc_encrypt_data() {
+    let m = r17_mech(Some(CkMechanismParams::AesCbcEncryptData(AesCbcEncryptDataParams {
+        iv: vec![1; 16],
+        data: SecretBytes::copy_from_slice(&[]),
+        data_presence: PointerBytes::null_len(41),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::AesCbcEncryptDataParams(p)) => {
+            assert_eq!(p.iv, vec![1; 16]);
+            assert!(p.data.is_empty());
+            assert_eq!(p.data_null_len, Some(41));
+        }
+        other => panic!("must emit AesCbcEncryptDataParams, got {other:?}"),
+    }
+    let m = r17_mech(Some(CkMechanismParams::AesCbcEncryptData(AesCbcEncryptDataParams {
+        iv: vec![1; 16],
+        data: SecretBytes::copy_from_slice(&[2; 16]),
+        data_presence: PointerBytes::present_copy(&[2; 16]),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::AesCbcEncryptDataParams(p)) => {
+            assert_eq!(p.data, vec![2; 16]);
+            assert_eq!(p.data_null_len, None);
+        }
+        other => panic!("must emit AesCbcEncryptDataParams, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_des_cbc_encrypt_data() {
+    let m = r17_mech(Some(CkMechanismParams::DesCbcEncryptData(DesCbcEncryptDataParams {
+        iv: vec![1; 8],
+        data: SecretBytes::copy_from_slice(&[]),
+        data_presence: PointerBytes::null_len(41),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::DesCbcEncryptDataParams(p)) => {
+            assert!(p.data.is_empty());
+            assert_eq!(p.data_null_len, Some(41));
+        }
+        other => panic!("must emit DesCbcEncryptDataParams, got {other:?}"),
+    }
+    let m = r17_mech(Some(CkMechanismParams::DesCbcEncryptData(DesCbcEncryptDataParams {
+        iv: vec![1; 8],
+        data: SecretBytes::copy_from_slice(&[2; 8]),
+        data_presence: PointerBytes::present_copy(&[2; 8]),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::DesCbcEncryptDataParams(p)) => {
+            assert_eq!(p.data, vec![2; 8]);
+            assert_eq!(p.data_null_len, None);
+        }
+        other => panic!("must emit DesCbcEncryptDataParams, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_camellia_cbc_encrypt_data() {
+    let m =
+        r17_mech(Some(CkMechanismParams::CamelliaCbcEncryptData(CamelliaCbcEncryptDataParams {
+            iv: vec![1; 16],
+            data: SecretBytes::copy_from_slice(&[]),
+            data_presence: PointerBytes::null_len(41),
+        })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::CamelliaCbcEncryptDataParams(p)) => {
+            assert_eq!(p.data_null_len, Some(41));
+        }
+        other => panic!("must emit CamelliaCbcEncryptDataParams, got {other:?}"),
+    }
+    let m =
+        r17_mech(Some(CkMechanismParams::CamelliaCbcEncryptData(CamelliaCbcEncryptDataParams {
+            iv: vec![1; 16],
+            data: SecretBytes::copy_from_slice(&[2; 16]),
+            data_presence: PointerBytes::present_copy(&[2; 16]),
+        })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::CamelliaCbcEncryptDataParams(p)) => {
+            assert_eq!(p.data, vec![2; 16]);
+            assert_eq!(p.data_null_len, None);
+        }
+        other => panic!("must emit CamelliaCbcEncryptDataParams, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_aria_cbc_encrypt_data() {
+    let m = r17_mech(Some(CkMechanismParams::AriaCbcEncryptData(AriaCbcEncryptDataParams {
+        iv: vec![1; 16],
+        data: SecretBytes::copy_from_slice(&[]),
+        data_presence: PointerBytes::null_len(41),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::AriaCbcEncryptDataParams(p)) => {
+            assert_eq!(p.data_null_len, Some(41));
+        }
+        other => panic!("must emit AriaCbcEncryptDataParams, got {other:?}"),
+    }
+    let m = r17_mech(Some(CkMechanismParams::AriaCbcEncryptData(AriaCbcEncryptDataParams {
+        iv: vec![1; 16],
+        data: SecretBytes::copy_from_slice(&[2; 16]),
+        data_presence: PointerBytes::present_copy(&[2; 16]),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::AriaCbcEncryptDataParams(p)) => {
+            assert_eq!(p.data, vec![2; 16]);
+            assert_eq!(p.data_null_len, None);
+        }
+        other => panic!("must emit AriaCbcEncryptDataParams, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_seed_cbc_encrypt_data() {
+    let m = r17_mech(Some(CkMechanismParams::SeedCbcEncryptData(SeedCbcEncryptDataParams {
+        iv: vec![1; 16],
+        data: SecretBytes::copy_from_slice(&[]),
+        data_presence: PointerBytes::null_len(41),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::SeedCbcEncryptDataParams(p)) => {
+            assert_eq!(p.data_null_len, Some(41));
+        }
+        other => panic!("must emit SeedCbcEncryptDataParams, got {other:?}"),
+    }
+    let m = r17_mech(Some(CkMechanismParams::SeedCbcEncryptData(SeedCbcEncryptDataParams {
+        iv: vec![1; 16],
+        data: SecretBytes::copy_from_slice(&[2; 16]),
+        data_presence: PointerBytes::present_copy(&[2; 16]),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::SeedCbcEncryptDataParams(p)) => {
+            assert_eq!(p.data, vec![2; 16]);
+            assert_eq!(p.data_null_len, None);
+        }
+        other => panic!("must emit SeedCbcEncryptDataParams, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_ecdh2_derive() {
+    let m = r17_mech(Some(CkMechanismParams::Ecdh2Derive(Ecdh2DeriveParams {
+        kdf: CkKdf(3),
+        shared_data: SecretBytes::copy_from_slice(&[]),
+        public_data: Vec::new(),
+        private_data_len: 0,
+        private_data_handle: CkObjectHandle(0),
+        public_data2: Vec::new(),
+        shared_data_presence: PointerBytes::null_len(11),
+        public_data_presence: PointerBytes::null_len(22),
+        public_data2_presence: PointerBytes::null_len(33),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::Ecdh2DeriveParams(p)) => {
+            assert_eq!(p.shared_data_null_len, Some(11));
+            assert_eq!(p.public_data_null_len, Some(22));
+            assert_eq!(p.public_data2_null_len, Some(33));
+        }
+        other => panic!("must emit Ecdh2DeriveParams, got {other:?}"),
+    }
+    let m = r17_mech(Some(CkMechanismParams::Ecdh2Derive(Ecdh2DeriveParams {
+        kdf: CkKdf(3),
+        shared_data: SecretBytes::copy_from_slice(&[1; 4]),
+        public_data: vec![2; 65],
+        private_data_len: 0,
+        private_data_handle: CkObjectHandle(0),
+        public_data2: Vec::new(),
+        shared_data_presence: PointerBytes::present_copy(&[1; 4]),
+        public_data_presence: PointerBytes::present_copy(&[2; 65]),
+        public_data2_presence: PointerBytes::present_copy(&[]),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::Ecdh2DeriveParams(p)) => {
+            assert_eq!(p.shared_data, vec![1; 4]);
+            assert_eq!(p.shared_data_null_len, None);
+            assert_eq!(p.public_data, vec![2; 65]);
+            assert_eq!(p.public_data_null_len, None);
+            assert!(p.public_data2.is_empty());
+            assert_eq!(p.public_data2_null_len, None);
+        }
+        other => panic!("must emit Ecdh2DeriveParams, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_ecmqv_derive() {
+    let m = r17_mech(Some(CkMechanismParams::EcmqvDerive(EcmqvDeriveParams {
+        kdf: CkKdf(3),
+        shared_data: SecretBytes::copy_from_slice(&[]),
+        public_data: Vec::new(),
+        private_data_len: 0,
+        private_data_handle: CkObjectHandle(0),
+        public_data2: Vec::new(),
+        public_key_handle: CkObjectHandle(7),
+        shared_data_presence: PointerBytes::null_len(11),
+        public_data_presence: PointerBytes::null_len(22),
+        public_data2_presence: PointerBytes::null_len(33),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::EcmqvDeriveParams(p)) => {
+            assert_eq!(p.shared_data_null_len, Some(11));
+            assert_eq!(p.public_data_null_len, Some(22));
+            assert_eq!(p.public_data2_null_len, Some(33));
+            assert_eq!(p.public_key_handle, 7);
+        }
+        other => panic!("must emit EcmqvDeriveParams, got {other:?}"),
+    }
+    let m = r17_mech(Some(CkMechanismParams::EcmqvDerive(EcmqvDeriveParams {
+        kdf: CkKdf(3),
+        shared_data: SecretBytes::copy_from_slice(&[1; 4]),
+        public_data: vec![2; 65],
+        private_data_len: 0,
+        private_data_handle: CkObjectHandle(0),
+        public_data2: vec![3; 65],
+        public_key_handle: CkObjectHandle(7),
+        shared_data_presence: PointerBytes::present_copy(&[1; 4]),
+        public_data_presence: PointerBytes::present_copy(&[2; 65]),
+        public_data2_presence: PointerBytes::present_copy(&[3; 65]),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::EcmqvDeriveParams(p)) => {
+            assert_eq!(p.shared_data_null_len, None);
+            assert_eq!(p.public_data_null_len, None);
+            assert_eq!(p.public_data2_null_len, None);
+        }
+        other => panic!("must emit EcmqvDeriveParams, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_x942_dh1_derive() {
+    let m = r17_mech(Some(CkMechanismParams::X942Dh1Derive(X942Dh1DeriveParams {
+        kdf: CkKdf(2),
+        other_info: SecretBytes::copy_from_slice(&[]),
+        public_data: Vec::new(),
+        other_info_presence: PointerBytes::null_len(11),
+        public_data_presence: PointerBytes::null_len(22),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::X942Dh1DeriveParams(p)) => {
+            assert_eq!(p.other_info_null_len, Some(11));
+            assert_eq!(p.public_data_null_len, Some(22));
+        }
+        other => panic!("must emit X942Dh1DeriveParams, got {other:?}"),
+    }
+    let m = r17_mech(Some(CkMechanismParams::X942Dh1Derive(X942Dh1DeriveParams {
+        kdf: CkKdf(2),
+        other_info: SecretBytes::copy_from_slice(&[4; 6]),
+        public_data: vec![5; 64],
+        other_info_presence: PointerBytes::present_copy(&[4; 6]),
+        public_data_presence: PointerBytes::present_copy(&[5; 64]),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::X942Dh1DeriveParams(p)) => {
+            assert_eq!(p.other_info, vec![4; 6]);
+            assert_eq!(p.other_info_null_len, None);
+            assert_eq!(p.public_data, vec![5; 64]);
+            assert_eq!(p.public_data_null_len, None);
+        }
+        other => panic!("must emit X942Dh1DeriveParams, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_x942_dh2_derive() {
+    let m = r17_mech(Some(CkMechanismParams::X942Dh2Derive(X942Dh2DeriveParams {
+        kdf: CkKdf(2),
+        other_info: SecretBytes::copy_from_slice(&[]),
+        public_data: Vec::new(),
+        private_data_len: 0,
+        private_data_handle: CkObjectHandle(0),
+        public_data2: Vec::new(),
+        other_info_presence: PointerBytes::null_len(11),
+        public_data_presence: PointerBytes::null_len(22),
+        public_data2_presence: PointerBytes::null_len(33),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::X942Dh2DeriveParams(p)) => {
+            assert_eq!(p.other_info_null_len, Some(11));
+            assert_eq!(p.public_data_null_len, Some(22));
+            assert_eq!(p.public_data2_null_len, Some(33));
+        }
+        other => panic!("must emit X942Dh2DeriveParams, got {other:?}"),
+    }
+    let m = r17_mech(Some(CkMechanismParams::X942Dh2Derive(X942Dh2DeriveParams {
+        kdf: CkKdf(2),
+        other_info: SecretBytes::copy_from_slice(&[6; 6]),
+        public_data: vec![7; 64],
+        private_data_len: 0,
+        private_data_handle: CkObjectHandle(0),
+        public_data2: vec![8; 64],
+        other_info_presence: PointerBytes::present_copy(&[6; 6]),
+        public_data_presence: PointerBytes::present_copy(&[7; 64]),
+        public_data2_presence: PointerBytes::present_copy(&[8; 64]),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::X942Dh2DeriveParams(p)) => {
+            assert_eq!(p.other_info_null_len, None);
+            assert_eq!(p.public_data_null_len, None);
+            assert_eq!(p.public_data2_null_len, None);
+        }
+        other => panic!("must emit X942Dh2DeriveParams, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_x942_mqv_derive() {
+    let m = r17_mech(Some(CkMechanismParams::X942MqvDerive(X942MqvDeriveParams {
+        kdf: CkKdf(2),
+        other_info: SecretBytes::copy_from_slice(&[]),
+        public_data: Vec::new(),
+        private_data_len: 0,
+        private_data_handle: CkObjectHandle(0),
+        public_data2: Vec::new(),
+        public_key_handle: CkObjectHandle(9),
+        other_info_presence: PointerBytes::null_len(11),
+        public_data_presence: PointerBytes::null_len(22),
+        public_data2_presence: PointerBytes::null_len(33),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::X942MqvDeriveParams(p)) => {
+            assert_eq!(p.other_info_null_len, Some(11));
+            assert_eq!(p.public_data_null_len, Some(22));
+            assert_eq!(p.public_data2_null_len, Some(33));
+        }
+        other => panic!("must emit X942MqvDeriveParams, got {other:?}"),
+    }
+    let m = r17_mech(Some(CkMechanismParams::X942MqvDerive(X942MqvDeriveParams {
+        kdf: CkKdf(2),
+        other_info: SecretBytes::copy_from_slice(&[1; 2]),
+        public_data: vec![2; 64],
+        private_data_len: 0,
+        private_data_handle: CkObjectHandle(0),
+        public_data2: vec![3; 64],
+        public_key_handle: CkObjectHandle(9),
+        other_info_presence: PointerBytes::present_copy(&[1; 2]),
+        public_data_presence: PointerBytes::present_copy(&[2; 64]),
+        public_data2_presence: PointerBytes::present_copy(&[3; 64]),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::X942MqvDeriveParams(p)) => {
+            assert_eq!(p.other_info_null_len, None);
+            assert_eq!(p.public_data_null_len, None);
+            assert_eq!(p.public_data2_null_len, None);
+        }
+        other => panic!("must emit X942MqvDeriveParams, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_hkdf() {
+    let m = r17_mech(Some(CkMechanismParams::Hkdf(HkdfParams {
+        extract: true,
+        expand: false,
+        prf_hash_mechanism: CkMechanismType(0x250),
+        salt_type: 1,
+        salt: SecretBytes::copy_from_slice(&[]),
+        salt_key_handle: CkObjectHandle(0),
+        info: SecretBytes::copy_from_slice(&[]),
+        salt_presence: PointerBytes::null_len(11),
+        info_presence: PointerBytes::null_len(22),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::HkdfParams(p)) => {
+            assert_eq!(p.salt_null_len, Some(11));
+            assert_eq!(p.info_null_len, Some(22));
+        }
+        other => panic!("must emit HkdfParams, got {other:?}"),
+    }
+    let m = r17_mech(Some(CkMechanismParams::Hkdf(HkdfParams {
+        extract: true,
+        expand: true,
+        prf_hash_mechanism: CkMechanismType(0x250),
+        salt_type: 0,
+        salt: SecretBytes::copy_from_slice(&[1; 16]),
+        salt_key_handle: CkObjectHandle(0),
+        info: SecretBytes::copy_from_slice(&[2; 8]),
+        salt_presence: PointerBytes::present_copy(&[1; 16]),
+        info_presence: PointerBytes::present_copy(&[2; 8]),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::HkdfParams(p)) => {
+            assert_eq!(p.salt, vec![1; 16]);
+            assert_eq!(p.salt_null_len, None);
+            assert_eq!(p.info, vec![2; 8]);
+            assert_eq!(p.info_null_len, None);
+        }
+        other => panic!("must emit HkdfParams, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_eddsa() {
+    let m = r17_mech(Some(CkMechanismParams::Eddsa(EddsaParams {
+        ph_flag: true,
+        context_data: SecretBytes::copy_from_slice(&[]),
+        context_data_presence: PointerBytes::null_len(41),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::EddsaParams(p)) => {
+            assert!(p.context_data.is_empty());
+            assert_eq!(p.context_data_null_len, Some(41));
+        }
+        other => panic!("must emit EddsaParams, got {other:?}"),
+    }
+    let m = r17_mech(Some(CkMechanismParams::Eddsa(EddsaParams {
+        ph_flag: false,
+        context_data: SecretBytes::copy_from_slice(&[3; 9]),
+        context_data_presence: PointerBytes::present_copy(&[3; 9]),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::EddsaParams(p)) => {
+            assert_eq!(p.context_data, vec![3; 9]);
+            assert_eq!(p.context_data_null_len, None);
+        }
+        other => panic!("must emit EddsaParams, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_gostr3410_derive() {
+    let m = r17_mech(Some(CkMechanismParams::Gostr3410Derive(Gostr3410DeriveParams {
+        kdf: CkKdf(1),
+        public_data: Vec::new(),
+        ukm: Vec::new(),
+        public_data_presence: PointerBytes::null_len(11),
+        ukm_presence: PointerBytes::null_len(22),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::Gostr3410DeriveParams(p)) => {
+            assert_eq!(p.public_data_null_len, Some(11));
+            assert_eq!(p.ukm_null_len, Some(22));
+        }
+        other => panic!("must emit Gostr3410DeriveParams, got {other:?}"),
+    }
+    let m = r17_mech(Some(CkMechanismParams::Gostr3410Derive(Gostr3410DeriveParams {
+        kdf: CkKdf(1),
+        public_data: vec![4; 64],
+        ukm: vec![5; 8],
+        public_data_presence: PointerBytes::present_copy(&[4; 64]),
+        ukm_presence: PointerBytes::present_copy(&[5; 8]),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::Gostr3410DeriveParams(p)) => {
+            assert_eq!(p.public_data, vec![4; 64]);
+            assert_eq!(p.public_data_null_len, None);
+            assert_eq!(p.ukm, vec![5; 8]);
+            assert_eq!(p.ukm_null_len, None);
+        }
+        other => panic!("must emit Gostr3410DeriveParams, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_gostr3410_key_wrap() {
+    let m = r17_mech(Some(CkMechanismParams::Gostr3410KeyWrap(Gostr3410KeyWrapParams {
+        wrap_oid: Vec::new(),
+        ukm: Vec::new(),
+        key_handle: CkObjectHandle(3),
+        wrap_oid_presence: PointerBytes::null_len(11),
+        ukm_presence: PointerBytes::null_len(22),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::Gostr3410KeyWrapParams(p)) => {
+            assert_eq!(p.wrap_oid_null_len, Some(11));
+            assert_eq!(p.ukm_null_len, Some(22));
+            assert_eq!(p.key_handle, 3);
+        }
+        other => panic!("must emit Gostr3410KeyWrapParams, got {other:?}"),
+    }
+    let m = r17_mech(Some(CkMechanismParams::Gostr3410KeyWrap(Gostr3410KeyWrapParams {
+        wrap_oid: vec![6; 9],
+        ukm: vec![7; 8],
+        key_handle: CkObjectHandle(3),
+        wrap_oid_presence: PointerBytes::present_copy(&[6; 9]),
+        ukm_presence: PointerBytes::present_copy(&[7; 8]),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::Gostr3410KeyWrapParams(p)) => {
+            assert_eq!(p.wrap_oid_null_len, None);
+            assert_eq!(p.ukm_null_len, None);
+        }
+        other => panic!("must emit Gostr3410KeyWrapParams, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_ecdh_aes_key_wrap() {
+    let m = r17_mech(Some(CkMechanismParams::EcdhAesKeyWrap(EcdhAesKeyWrapParams {
+        aes_key_bits: 256,
+        kdf: CkKdf(3),
+        shared_data: SecretBytes::copy_from_slice(&[]),
+        shared_data_presence: PointerBytes::null_len(41),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::EcdhAesKeyWrapParams(p)) => {
+            assert!(p.shared_data.is_empty());
+            assert_eq!(p.shared_data_null_len, Some(41));
+        }
+        other => panic!("must emit EcdhAesKeyWrapParams, got {other:?}"),
+    }
+    let m = r17_mech(Some(CkMechanismParams::EcdhAesKeyWrap(EcdhAesKeyWrapParams {
+        aes_key_bits: 256,
+        kdf: CkKdf(3),
+        shared_data: SecretBytes::copy_from_slice(&[8; 12]),
+        shared_data_presence: PointerBytes::present_copy(&[8; 12]),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::EcdhAesKeyWrapParams(p)) => {
+            assert_eq!(p.shared_data, vec![8; 12]);
+            assert_eq!(p.shared_data_null_len, None);
+        }
+        other => panic!("must emit EcdhAesKeyWrapParams, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_rsa_aes_key_wrap() {
+    // Nested OAEP envelope: nested bool forced unset, nested presence set.
+    let m = r17_mech(Some(CkMechanismParams::RsaAesKeyWrap(RsaAesKeyWrapParams {
+        aes_key_bits: 256,
+        oaep_params: RsaPkcsOaepParams {
+            hash_alg: CkMechanismType(0x250),
+            mgf: CkMgf(1),
+            source: CkOaepSource(1),
+            source_data: SecretBytes::copy_from_slice(&[]),
+            source_null: true,
+            source_data_presence: PointerBytes::null_len(41),
+        },
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::RsaAesKeyWrapParams(p)) => {
+            let o = p.oaep_params.as_ref().expect("nested OAEP present");
+            assert!(o.source_data.is_empty());
+            assert_eq!(o.source_data_null_len, Some(41));
+            assert!(!o.source_null);
+        }
+        other => panic!("must emit RsaAesKeyWrapParams, got {other:?}"),
+    }
+    let m = r17_mech(Some(CkMechanismParams::RsaAesKeyWrap(RsaAesKeyWrapParams {
+        aes_key_bits: 128,
+        oaep_params: RsaPkcsOaepParams {
+            hash_alg: CkMechanismType(0x250),
+            mgf: CkMgf(1),
+            source: CkOaepSource(0),
+            source_data: SecretBytes::copy_from_slice(&[9; 6]),
+            source_null: false,
+            source_data_presence: PointerBytes::present_copy(&[9; 6]),
+        },
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::RsaAesKeyWrapParams(p)) => {
+            let o = p.oaep_params.as_ref().expect("nested OAEP present");
+            assert_eq!(o.source_data, vec![9; 6]);
+            assert_eq!(o.source_data_null_len, None);
+        }
+        other => panic!("must emit RsaAesKeyWrapParams, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_key_wrap_set_oaep() {
+    let m = r17_mech(Some(CkMechanismParams::KeyWrapSetOaep(KeyWrapSetOaepParams {
+        bc: 1,
+        x: SecretBytes::copy_from_slice(&[]),
+        x_presence: PointerBytes::null_len(41),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::KeyWrapSetOaepParams(p)) => {
+            assert!(p.x.is_empty());
+            assert_eq!(p.x_null_len, Some(41));
+        }
+        other => panic!("must emit KeyWrapSetOaepParams, got {other:?}"),
+    }
+    let m = r17_mech(Some(CkMechanismParams::KeyWrapSetOaep(KeyWrapSetOaepParams {
+        bc: 0,
+        x: SecretBytes::copy_from_slice(&[1; 20]),
+        x_presence: PointerBytes::present_copy(&[1; 20]),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::KeyWrapSetOaepParams(p)) => {
+            assert_eq!(p.x, vec![1; 20]);
+            assert_eq!(p.x_null_len, None);
+        }
+        other => panic!("must emit KeyWrapSetOaepParams, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_pbe() {
+    let m = r17_mech(Some(CkMechanismParams::Pbe(PbeParams {
+        init_vector: SecretBytes::copy_from_slice(&[]),
+        password: SecretBytes::copy_from_slice(&[]),
+        salt: SecretBytes::copy_from_slice(&[]),
+        iteration: 1000,
+        init_vector_presence: PointerBytes::null_len(11),
+        password_presence: PointerBytes::null_len(22),
+        salt_presence: PointerBytes::null_len(33),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::PbeParams(p)) => {
+            assert_eq!(p.init_vector_null_len, Some(11));
+            assert_eq!(p.password_null_len, Some(22));
+            assert_eq!(p.salt_null_len, Some(33));
+        }
+        other => panic!("must emit PbeParams, got {other:?}"),
+    }
+    let m = r17_mech(Some(CkMechanismParams::Pbe(PbeParams {
+        init_vector: SecretBytes::copy_from_slice(&[2; 8]),
+        password: SecretBytes::copy_from_slice(&[3; 6]),
+        salt: SecretBytes::copy_from_slice(&[4; 8]),
+        iteration: 1000,
+        init_vector_presence: PointerBytes::present_copy(&[2; 8]),
+        password_presence: PointerBytes::present_copy(&[3; 6]),
+        salt_presence: PointerBytes::present_copy(&[4; 8]),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::PbeParams(p)) => {
+            assert_eq!(p.init_vector, vec![2; 8]);
+            assert_eq!(p.init_vector_null_len, None);
+            assert_eq!(p.password, vec![3; 6]);
+            assert_eq!(p.password_null_len, None);
+            assert_eq!(p.salt, vec![4; 8]);
+            assert_eq!(p.salt_null_len, None);
+        }
+        other => panic!("must emit PbeParams, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_pkcs5_pbkd2() {
+    let m = r17_mech(Some(CkMechanismParams::Pkcs5Pbkd2(Pkcs5Pbkd2Params {
+        salt_source: CkPbkdf2SaltSource(1),
+        salt_source_data: SecretBytes::copy_from_slice(&[]),
+        iterations: 2048,
+        prf: CkPbkdf2Prf(1),
+        prf_data: SecretBytes::copy_from_slice(&[]),
+        password: SecretBytes::copy_from_slice(&[]),
+        salt_source_data_presence: PointerBytes::null_len(11),
+        prf_data_presence: PointerBytes::null_len(22),
+        password_presence: PointerBytes::null_len(33),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::Pkcs5Pbkd2Params(p)) => {
+            assert_eq!(p.salt_source_data_null_len, Some(11));
+            assert_eq!(p.prf_data_null_len, Some(22));
+            assert_eq!(p.password_null_len, Some(33));
+        }
+        other => panic!("must emit Pkcs5Pbkd2Params, got {other:?}"),
+    }
+    let m = r17_mech(Some(CkMechanismParams::Pkcs5Pbkd2(Pkcs5Pbkd2Params {
+        salt_source: CkPbkdf2SaltSource(0),
+        salt_source_data: SecretBytes::copy_from_slice(&[5; 8]),
+        iterations: 2048,
+        prf: CkPbkdf2Prf(1),
+        prf_data: SecretBytes::copy_from_slice(&[6; 4]),
+        password: SecretBytes::copy_from_slice(&[7; 10]),
+        salt_source_data_presence: PointerBytes::present_copy(&[5; 8]),
+        prf_data_presence: PointerBytes::present_copy(&[6; 4]),
+        password_presence: PointerBytes::present_copy(&[7; 10]),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::Pkcs5Pbkd2Params(p)) => {
+            assert_eq!(p.salt_source_data_null_len, None);
+            assert_eq!(p.prf_data_null_len, None);
+            assert_eq!(p.password_null_len, None);
+        }
+        other => panic!("must emit Pkcs5Pbkd2Params, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_sign_additional_context() {
+    let m = r17_mech(Some(CkMechanismParams::SignAdditionalContext(SignAdditionalContext {
+        hedge_variant: 1,
+        context: SecretBytes::copy_from_slice(&[]),
+        hash: CkMechanismType(0x250),
+        context_presence: PointerBytes::null_len(41),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::SignAdditionalContext(p)) => {
+            assert!(p.context.is_empty());
+            assert_eq!(p.context_null_len, Some(41));
+        }
+        other => panic!("must emit SignAdditionalContext, got {other:?}"),
+    }
+    let m = r17_mech(Some(CkMechanismParams::SignAdditionalContext(SignAdditionalContext {
+        hedge_variant: 0,
+        context: SecretBytes::copy_from_slice(&[8; 5]),
+        hash: CkMechanismType(0),
+        context_presence: PointerBytes::present_copy(&[8; 5]),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::SignAdditionalContext(p)) => {
+            assert_eq!(p.context, vec![8; 5]);
+            assert_eq!(p.context_null_len, None);
+        }
+        other => panic!("must emit SignAdditionalContext, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_kmac() {
+    let m = r17_mech(Some(CkMechanismParams::Kmac(KmacParams {
+        key_handle: CkObjectHandle(5),
+        mac_length: 32,
+        customization_string: SecretBytes::copy_from_slice(&[]),
+        customization_string_presence: PointerBytes::null_len(41),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::KmacParams(p)) => {
+            assert!(p.customization_string.is_empty());
+            assert_eq!(p.customization_string_null_len, Some(41));
+        }
+        other => panic!("must emit KmacParams, got {other:?}"),
+    }
+    let m = r17_mech(Some(CkMechanismParams::Kmac(KmacParams {
+        key_handle: CkObjectHandle(5),
+        mac_length: 32,
+        customization_string: SecretBytes::copy_from_slice(&[9; 7]),
+        customization_string_presence: PointerBytes::present_copy(&[9; 7]),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::KmacParams(p)) => {
+            assert_eq!(p.customization_string, vec![9; 7]);
+            assert_eq!(p.customization_string_null_len, None);
+        }
+        other => panic!("must emit KmacParams, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_mu_gen() {
+    let m = r17_mech(Some(CkMechanismParams::MuGen(MuGenParams {
+        key_handle: CkObjectHandle(6),
+        tr: SecretBytes::copy_from_slice(&[]),
+        context: SecretBytes::copy_from_slice(&[]),
+        tr_presence: PointerBytes::null_len(11),
+        context_presence: PointerBytes::null_len(22),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::MuGenParams(p)) => {
+            assert_eq!(p.tr_null_len, Some(11));
+            assert_eq!(p.context_null_len, Some(22));
+        }
+        other => panic!("must emit MuGenParams, got {other:?}"),
+    }
+    let m = r17_mech(Some(CkMechanismParams::MuGen(MuGenParams {
+        key_handle: CkObjectHandle(6),
+        tr: SecretBytes::copy_from_slice(&[1; 64]),
+        context: SecretBytes::copy_from_slice(&[2; 9]),
+        tr_presence: PointerBytes::present_copy(&[1; 64]),
+        context_presence: PointerBytes::present_copy(&[2; 9]),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::MuGenParams(p)) => {
+            assert_eq!(p.tr, vec![1; 64]);
+            assert_eq!(p.tr_null_len, None);
+            assert_eq!(p.context, vec![2; 9]);
+            assert_eq!(p.context_null_len, None);
+        }
+        other => panic!("must emit MuGenParams, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_key_derivation_string() {
+    let m = r17_mech(Some(CkMechanismParams::KeyDerivationString(KeyDerivationStringData {
+        data: SecretBytes::copy_from_slice(&[]),
+        data_presence: PointerBytes::null_len(41),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::KeyDerivationStringData(p)) => {
+            assert!(p.data.is_empty());
+            assert_eq!(p.data_null_len, Some(41));
+        }
+        other => panic!("must emit KeyDerivationStringData, got {other:?}"),
+    }
+    let m = r17_mech(Some(CkMechanismParams::KeyDerivationString(KeyDerivationStringData {
+        data: SecretBytes::copy_from_slice(&[3; 12]),
+        data_presence: PointerBytes::present_copy(&[3; 12]),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::KeyDerivationStringData(p)) => {
+            assert_eq!(p.data, vec![3; 12]);
+            assert_eq!(p.data_null_len, None);
+        }
+        other => panic!("must emit KeyDerivationStringData, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_ike_prf_derive() {
+    let m = r17_mech(Some(CkMechanismParams::IkePrfDerive(IkePrfDeriveParams {
+        prf_mechanism: CkMechanismType(0x250),
+        data_as_key: false,
+        rekey: false,
+        ni: SecretBytes::copy_from_slice(&[]),
+        nr: SecretBytes::copy_from_slice(&[]),
+        new_key_handle: CkObjectHandle(0),
+        ni_presence: PointerBytes::null_len(11),
+        nr_presence: PointerBytes::null_len(22),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::IkePrfDeriveParams(p)) => {
+            assert_eq!(p.ni_null_len, Some(11));
+            assert_eq!(p.nr_null_len, Some(22));
+        }
+        other => panic!("must emit IkePrfDeriveParams, got {other:?}"),
+    }
+    let m = r17_mech(Some(CkMechanismParams::IkePrfDerive(IkePrfDeriveParams {
+        prf_mechanism: CkMechanismType(0x250),
+        data_as_key: true,
+        rekey: true,
+        ni: SecretBytes::copy_from_slice(&[4; 8]),
+        nr: SecretBytes::copy_from_slice(&[5; 8]),
+        new_key_handle: CkObjectHandle(0),
+        ni_presence: PointerBytes::present_copy(&[4; 8]),
+        nr_presence: PointerBytes::present_copy(&[5; 8]),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::IkePrfDeriveParams(p)) => {
+            assert_eq!(p.ni, vec![4; 8]);
+            assert_eq!(p.ni_null_len, None);
+            assert_eq!(p.nr, vec![5; 8]);
+            assert_eq!(p.nr_null_len, None);
+        }
+        other => panic!("must emit IkePrfDeriveParams, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_ike1_prf_derive() {
+    let m = r17_mech(Some(CkMechanismParams::Ike1PrfDerive(Ike1PrfDeriveParams {
+        prf_mechanism: CkMechanismType(0x250),
+        has_prev_key: false,
+        keygxy_handle: CkObjectHandle(0),
+        prev_key_handle: CkObjectHandle(0),
+        ckyi: SecretBytes::copy_from_slice(&[]),
+        ckyr: SecretBytes::copy_from_slice(&[]),
+        key_number: 1,
+        ckyi_presence: PointerBytes::null_len(11),
+        ckyr_presence: PointerBytes::null_len(22),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::Ike1PrfDeriveParams(p)) => {
+            assert_eq!(p.ckyi_null_len, Some(11));
+            assert_eq!(p.ckyr_null_len, Some(22));
+        }
+        other => panic!("must emit Ike1PrfDeriveParams, got {other:?}"),
+    }
+    let m = r17_mech(Some(CkMechanismParams::Ike1PrfDerive(Ike1PrfDeriveParams {
+        prf_mechanism: CkMechanismType(0x250),
+        has_prev_key: true,
+        keygxy_handle: CkObjectHandle(1),
+        prev_key_handle: CkObjectHandle(2),
+        ckyi: SecretBytes::copy_from_slice(&[6; 8]),
+        ckyr: SecretBytes::copy_from_slice(&[7; 8]),
+        key_number: 1,
+        ckyi_presence: PointerBytes::present_copy(&[6; 8]),
+        ckyr_presence: PointerBytes::present_copy(&[7; 8]),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::Ike1PrfDeriveParams(p)) => {
+            assert_eq!(p.ckyi_null_len, None);
+            assert_eq!(p.ckyr_null_len, None);
+        }
+        other => panic!("must emit Ike1PrfDeriveParams, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_ike1_extended_derive() {
+    let m = r17_mech(Some(CkMechanismParams::Ike1ExtendedDerive(Ike1ExtendedDeriveParams {
+        prf_mechanism: CkMechanismType(0x250),
+        has_keygxy: false,
+        keygxy_handle: CkObjectHandle(0),
+        extra_data: SecretBytes::copy_from_slice(&[]),
+        extra_data_presence: PointerBytes::null_len(41),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::Ike1ExtendedDeriveParams(p)) => {
+            assert!(p.extra_data.is_empty());
+            assert_eq!(p.extra_data_null_len, Some(41));
+        }
+        other => panic!("must emit Ike1ExtendedDeriveParams, got {other:?}"),
+    }
+    let m = r17_mech(Some(CkMechanismParams::Ike1ExtendedDerive(Ike1ExtendedDeriveParams {
+        prf_mechanism: CkMechanismType(0x250),
+        has_keygxy: true,
+        keygxy_handle: CkObjectHandle(3),
+        extra_data: SecretBytes::copy_from_slice(&[8; 10]),
+        extra_data_presence: PointerBytes::present_copy(&[8; 10]),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::Ike1ExtendedDeriveParams(p)) => {
+            assert_eq!(p.extra_data, vec![8; 10]);
+            assert_eq!(p.extra_data_null_len, None);
+        }
+        other => panic!("must emit Ike1ExtendedDeriveParams, got {other:?}"),
+    }
+}
+
+#[test]
+fn r17_encode_v1_ike2_prf_plus_derive() {
+    let m = r17_mech(Some(CkMechanismParams::Ike2PrfPlusDerive(Ike2PrfPlusDeriveParams {
+        prf_mechanism: CkMechanismType(0x250),
+        has_seed_key: false,
+        seed_key_handle: CkObjectHandle(0),
+        seed_data: SecretBytes::copy_from_slice(&[]),
+        seed_data_presence: PointerBytes::null_len(41),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::Ike2PrfPlusDeriveParams(p)) => {
+            assert!(p.seed_data.is_empty());
+            assert_eq!(p.seed_data_null_len, Some(41));
+        }
+        other => panic!("must emit Ike2PrfPlusDeriveParams, got {other:?}"),
+    }
+    let m = r17_mech(Some(CkMechanismParams::Ike2PrfPlusDerive(Ike2PrfPlusDeriveParams {
+        prf_mechanism: CkMechanismType(0x250),
+        has_seed_key: true,
+        seed_key_handle: CkObjectHandle(4),
+        seed_data: SecretBytes::copy_from_slice(&[9; 14]),
+        seed_data_presence: PointerBytes::present_copy(&[9; 14]),
+    })));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::Ike2PrfPlusDeriveParams(p)) => {
+            assert_eq!(p.seed_data, vec![9; 14]);
+            assert_eq!(p.seed_data_null_len, None);
+        }
+        other => panic!("must emit Ike2PrfPlusDeriveParams, got {other:?}"),
+    }
 }

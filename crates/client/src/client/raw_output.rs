@@ -280,7 +280,7 @@ impl Pkcs11Client {
             parameter_out_spec: Some(Self::proto_parameter_roundtrip_spec(param_out_spec)),
             flags,
             mechanism: mechanism
-                .map(pkcs11_proxy_ng_proto::Mechanism::try_from)
+                .map(|m| self.proto_mechanism(m))
                 .transpose()
                 .map_err(MessageCallError::backend)?,
             wrapping_key_handle,
@@ -369,7 +369,7 @@ impl Pkcs11Client {
             exact_output_effects_version: 1,
             client_context_id: ctx,
             session_handle: session.0,
-            mechanism: Some(pkcs11_proxy_ng_proto::Mechanism::try_from(mechanism)?),
+            mechanism: Some(self.proto_mechanism(mechanism)?),
             public_key_handle: public_key.0,
             template: proto_template,
             template_null: template.is_none(),
@@ -461,7 +461,7 @@ impl Pkcs11Client {
             function: pkcs11_proxy_ng_proto::convert::output::byte_output_function_to_i32(function),
             output_spec: Some(Self::proto_output_buffer_spec(spec)),
             input_data: input_bytes,
-            mechanism: mechanism.map(pkcs11_proxy_ng_proto::Mechanism::try_from).transpose()?,
+            mechanism: mechanism.map(|m| self.proto_mechanism(m)).transpose()?,
             wrapping_key_handle,
             key_handle,
             input_data_null_len: input_null_len,
@@ -1070,6 +1070,66 @@ mod message_contract_tests {
         client.set_mechanism_parameter_transport_version_for_tests(version);
         assert_eq!(client.mechanism_parameter_transport_version(), version);
         client
+    }
+
+    /// R17 client threading: `proto_mechanism` reads the cached
+    /// `mechanism_parameter_transport_version` (R5 precedent). At legacy
+    /// capability the bytes are identical to the legacy `TryFrom`; at
+    /// capability ≥ 1 the mixed IV+AAD-NULL-16 GCM emits v1
+    /// (copied IV + `aad_null_len`, stamp 1, bools unset); a tail family
+    /// (KEA) stays v0-shaped at every capability.
+    #[tokio::test]
+    async fn r17_proto_mechanism_threads_capability() {
+        use pkcs11_proxy_ng_types::{CkMechanismType, GcmParams, KeaDeriveParams, PointerBytes};
+        let mixed = CkMechanism {
+            mechanism_type: CkMechanismType::AES_GCM,
+            params: Some(CkMechanismParams::Gcm(GcmParams {
+                iv: vec![0x11; 12],
+                iv_bits: 96,
+                iv_buffer_len: 12,
+                aad: SecretBytes::copy_from_slice(&[]),
+                tag_bits: 128,
+                iv_null: false,
+                aad_null: false,
+                iv_presence: PointerBytes::present_copy(&[0x11; 12]),
+                aad_presence: PointerBytes::null_len(16),
+            })),
+        };
+
+        let legacy = r5_client_with_transport_version(0);
+        let wire = legacy.proto_mechanism(&mixed).expect("legacy encodes");
+        assert_eq!(wire, pkcs11_proxy_ng_proto::Mechanism::try_from(&mixed).unwrap());
+        assert_eq!(wire.parameter_encoding_version, 0);
+
+        for version in [1, 2] {
+            let client = r5_client_with_transport_version(version);
+            let wire = client.proto_mechanism(&mixed).expect("v1 encodes");
+            assert_eq!(wire.parameter_encoding_version, 1, "capability {version}");
+            match &wire.params {
+                Some(pkcs11_proxy_ng_proto::mechanism::Params::GcmParams(p)) => {
+                    assert_eq!(p.iv, vec![0x11; 12]);
+                    assert_eq!(p.iv_null_len, None);
+                    assert!(p.aad.is_empty());
+                    assert_eq!(p.aad_null_len, Some(16));
+                    assert!(!p.iv_null && !p.aad_null);
+                }
+                other => panic!("capability {version} must emit GcmParams, got {other:?}"),
+            }
+        }
+
+        let kea = CkMechanism {
+            mechanism_type: CkMechanismType(0xFFFF_FFFF),
+            params: Some(CkMechanismParams::KeaDerive(KeaDeriveParams {
+                is_sender: true,
+                random_a: vec![1; 4],
+                random_b: vec![2; 4],
+                public_data: Vec::new(),
+            })),
+        };
+        let client = r5_client_with_transport_version(1);
+        let wire = client.proto_mechanism(&kea).expect("tail encodes");
+        assert_eq!(wire, pkcs11_proxy_ng_proto::Mechanism::try_from(&kea).unwrap());
+        assert_eq!(wire.parameter_encoding_version, 0);
     }
 
     /// R5/F1 client encode matrix: at legacy capability the helper emits

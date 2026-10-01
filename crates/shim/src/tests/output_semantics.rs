@@ -4867,3 +4867,81 @@ fn r5_transport_restore_returns_legacy_fail_closed() {
         "restored capability fails closed exactly as before",
     );
 }
+
+fn r17_gcm_daemon() -> TestDaemon {
+    TestDaemon::fresh_with_mechanisms(vec![
+        CkMechanismType::SHA256,
+        CkMechanismType::AES_ECB,
+        CkMechanismType::AES_GCM,
+        CkMechanismType::AES_KEY_GEN,
+    ])
+}
+
+/// R17 mixed-field fix, end to end: a classic `C_EncryptInit` carrying
+/// valid-IV + NULL-AAD-16 GCM params succeeds under injected v1 (shim
+/// typed read → client v1 encode → daemon v1 decode → strict-mock
+/// accept). Pre-R17 the IV is discarded into legacy `Raw` and the init
+/// fails closed locally with `PARAM_INVALID`.
+#[test]
+fn r17_gcm_mixed_iv_aad_null_16_encrypt_init_v1_succeeds() {
+    let _guard = shim_state_test_guard();
+    let _saved = R5SavedEndpoint::capture();
+    let daemon = r17_gcm_daemon();
+    let shim = ShimSession::with_endpoint(&daemon.endpoint);
+    assert_eq!(crate::interface_probe::mechanism_parameter_transport_version(), 0);
+    let _v1 = R5TransportGuard::inject();
+
+    let key = create_object(shim.session);
+    let mut iv = [0x11u8; 12];
+    let gcm = CK_GCM_PARAMS {
+        pIv: iv.as_mut_ptr(),
+        ulIvLen: iv.len() as CK_ULONG,
+        ulIvBits: 96,
+        pAAD: std::ptr::null_mut(),
+        ulAADLen: 16,
+        ulTagBits: 128,
+    };
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_AES_GCM,
+        pParameter: &gcm as *const _ as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_GCM_PARAMS>() as CK_ULONG,
+    };
+    assert_eq!(
+        unsafe { dispatch::general::c_encrypt_init(shim.session, &mut mechanism, key) },
+        CKR_OK as CK_RV,
+        "v1 mixed GCM init succeeds end-to-end",
+    );
+}
+
+/// R17 legacy control: the same mixed call without the injection fails
+/// closed locally with `PARAM_INVALID`, byte-identical to pre-R17
+/// (legacy capability preserves existing behavior exactly).
+#[test]
+fn r17_gcm_mixed_iv_aad_null_16_legacy_stays_fail_closed() {
+    let _guard = shim_state_test_guard();
+    let _saved = R5SavedEndpoint::capture();
+    let daemon = r17_gcm_daemon();
+    let shim = ShimSession::with_endpoint(&daemon.endpoint);
+    assert_eq!(crate::interface_probe::mechanism_parameter_transport_version(), 0);
+
+    let key = create_object(shim.session);
+    let mut iv = [0x11u8; 12];
+    let gcm = CK_GCM_PARAMS {
+        pIv: iv.as_mut_ptr(),
+        ulIvLen: iv.len() as CK_ULONG,
+        ulIvBits: 96,
+        pAAD: std::ptr::null_mut(),
+        ulAADLen: 16,
+        ulTagBits: 128,
+    };
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_AES_GCM,
+        pParameter: &gcm as *const _ as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_GCM_PARAMS>() as CK_ULONG,
+    };
+    assert_eq!(
+        unsafe { dispatch::general::c_encrypt_init(shim.session, &mut mechanism, key) },
+        CKR_MECHANISM_PARAM_INVALID as CK_RV,
+        "legacy mixed GCM init still fails closed locally",
+    );
+}

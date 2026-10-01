@@ -83,6 +83,30 @@ pub(crate) trait FromWire<P> {
         Self: Sized;
 }
 
+/// Encode one presence peer (R17 production direction of the R16 domain
+/// conversion, S2 §3): NULL (any length, including zero) travels as
+/// empty bytes + `Some(declared_len)`; Present travels as its bytes +
+/// `None` (including non-NULL/zero). The peer is authoritative: callers
+/// pass the `PointerBytes` member, never the legacy bytes member, so a
+/// NULL arm can never ride non-empty bytes.
+pub(crate) fn pointer_to_wire(presence: &PointerBytes) -> (Vec<u8>, Option<u64>) {
+    match presence {
+        PointerBytes::Present(bytes) => (secret_to_plain(bytes), None),
+        PointerBytes::Null { declared_len } => (Vec::new(), Some(*declared_len)),
+    }
+}
+
+/// R17 v1 encode of one classic params struct (S2 §3/§5): the presence
+/// dual of [`FromWire`]. Each R17 input-pointer family implements
+/// `ToWireV1<its wire message>` (inline arms live in
+/// [`encode_r17_v1_params`]; delegated families implement this trait in
+/// their family module); the version-threaded entry calls it and stamps
+/// version 1. Legacy `*_null` bools are forced unset (S2 §3: a v1
+/// encoder MUST leave legacy bools unset).
+pub(crate) trait ToWireV1<W> {
+    fn to_wire_v1(&self) -> W;
+}
+
 impl TryFrom<&CkMechanism> for v1_proto::Mechanism {
     type Error = CkRv;
 
@@ -560,6 +584,298 @@ impl TryFrom<&CkMechanism> for v1_proto::Mechanism {
             params,
             parameter_encoding_version: version,
         })
+    }
+}
+
+/// Capability-gated classic wire encoding (R17; S2 §3/§5: the shim emits
+/// v1 for the input-pointer families, never legacy `Raw` under v1).
+///
+/// `transport_version` is the negotiated
+/// `mechanism_parameter_transport_version` capability (discovery value, 0
+/// when absent). At capability 0 the encoding delegates to the legacy
+/// `TryFrom` exactly (bit-identical, version 0). At capability ≥ 1 —
+/// including capabilities newer than this encoder, which still emits the
+/// v1 form it knows — each R17 input-pointer family encodes
+/// presence-based (NULL = empty bytes + `*_null_len`, legacy bools forced
+/// unset) with the outer stamp 1; every other variant (tail, scalar,
+/// byte-buffer, Flat/Null, absent) takes the identical legacy path
+/// (Flat/Null keep their stored stamp).
+pub fn to_wire_with_transport_version(
+    m: &CkMechanism,
+    transport_version: u32,
+) -> Result<v1_proto::Mechanism, CkRv> {
+    if transport_version < MECHANISM_PARAMETER_TRANSPORT_VERSION {
+        return v1_proto::Mechanism::try_from(m);
+    }
+    match encode_r17_v1_params(m.params.as_ref()) {
+        Some(params) => Ok(v1_proto::Mechanism {
+            mechanism_type: m.mechanism_type.0,
+            params: Some(params),
+            parameter_encoding_version: MECHANISM_PARAMETER_TRANSPORT_VERSION,
+        }),
+        None => v1_proto::Mechanism::try_from(m),
+    }
+}
+
+/// v1 presence encode for the 37 R17 input-pointer shapes (S2 §8 list +
+/// `gcm_compat`, which rides the GCM wire form): `Some` for an R17
+/// family, `None` for every other variant (the entry falls back to the
+/// identical legacy encode). Reviewer-checked against
+/// `R16_PRESENCE_TABLE` and the R17 shim dispatch predicate.
+fn encode_r17_v1_params(params: Option<&CkMechanismParams>) -> Option<v1_proto::mechanism::Params> {
+    match params {
+        Some(CkMechanismParams::RsaPkcsOaep(p)) => {
+            let (source_data, source_data_null_len) = pointer_to_wire(&p.source_data_presence);
+            Some(v1_proto::mechanism::Params::RsaPkcsOaepParams(v1_proto::RsaPkcsOaepParams {
+                hash_alg: p.hash_alg.0,
+                mgf: p.mgf.0,
+                source: p.source.0,
+                source_data,
+                // S2 §3: a v1 encoder MUST leave legacy bools unset.
+                source_null: false,
+                source_data_null_len,
+            }))
+        }
+        Some(CkMechanismParams::Gcm(p)) => {
+            let (iv, iv_null_len) = pointer_to_wire(&p.iv_presence);
+            let (aad, aad_null_len) = pointer_to_wire(&p.aad_presence);
+            Some(v1_proto::mechanism::Params::GcmParams(v1_proto::GcmParams {
+                iv,
+                iv_bits: p.iv_bits,
+                aad,
+                tag_bits: p.tag_bits,
+                iv_buffer_len: p.iv_buffer_len,
+                // S2 §3: a v1 encoder MUST leave legacy bools unset.
+                iv_null: false,
+                aad_null: false,
+                iv_null_len,
+                aad_null_len,
+            }))
+        }
+        Some(CkMechanismParams::Ecdh1Derive(p)) => {
+            let (shared_data, shared_data_null_len) = pointer_to_wire(&p.shared_data_presence);
+            let (public_data, public_data_null_len) = pointer_to_wire(&p.public_data_presence);
+            Some(v1_proto::mechanism::Params::Ecdh1DeriveParams(v1_proto::Ecdh1DeriveParams {
+                kdf: p.kdf.0,
+                shared_data,
+                public_data,
+                shared_data_null_len,
+                public_data_null_len,
+            }))
+        }
+        Some(CkMechanismParams::Ccm(p)) => {
+            let (nonce, nonce_null_len) = pointer_to_wire(&p.nonce_presence);
+            let (aad, aad_null_len) = pointer_to_wire(&p.aad_presence);
+            Some(v1_proto::mechanism::Params::CcmParams(v1_proto::CcmParams {
+                data_len: p.data_len,
+                nonce,
+                aad,
+                mac_len: p.mac_len,
+                // S2 §3: a v1 encoder MUST leave legacy bools unset.
+                nonce_null: false,
+                aad_null: false,
+                nonce_null_len,
+                aad_null_len,
+            }))
+        }
+        Some(CkMechanismParams::ChaCha20(p)) => {
+            let (block_counter, block_counter_null_len) =
+                pointer_to_wire(&p.block_counter_presence);
+            let (nonce, nonce_null_len) = pointer_to_wire(&p.nonce_presence);
+            Some(v1_proto::mechanism::Params::Chacha20Params(v1_proto::ChaCha20Params {
+                block_counter,
+                block_counter_bits: p.block_counter_bits,
+                nonce,
+                nonce_bits: p.nonce_bits,
+                block_counter_null_len,
+                nonce_null_len,
+            }))
+        }
+        Some(CkMechanismParams::Salsa20(p)) => {
+            let (block_counter, block_counter_null_len) =
+                pointer_to_wire(&p.block_counter_presence);
+            let (nonce, nonce_null_len) = pointer_to_wire(&p.nonce_presence);
+            Some(v1_proto::mechanism::Params::Salsa20Params(v1_proto::Salsa20Params {
+                block_counter,
+                nonce,
+                nonce_bits: p.nonce_bits,
+                block_counter_null_len,
+                nonce_null_len,
+            }))
+        }
+        Some(CkMechanismParams::Salsa20ChaCha20Poly1305(p)) => {
+            let (nonce, nonce_null_len) = pointer_to_wire(&p.nonce_presence);
+            let (aad, aad_null_len) = pointer_to_wire(&p.aad_presence);
+            Some(v1_proto::mechanism::Params::Salsa20Chacha20Poly1305Params(
+                v1_proto::Salsa20ChaCha20Poly1305Params {
+                    nonce,
+                    aad,
+                    nonce_null_len,
+                    aad_null_len,
+                },
+            ))
+        }
+        Some(CkMechanismParams::GcmWrap(p)) => {
+            let (iv, iv_null_len) = pointer_to_wire(&p.iv_presence);
+            let (aad, aad_null_len) = pointer_to_wire(&p.aad_presence);
+            Some(v1_proto::mechanism::Params::GcmWrapParams(v1_proto::GcmWrapParams {
+                iv,
+                iv_fixed_bits: p.iv_fixed_bits,
+                iv_generator: p.iv_generator.0,
+                aad,
+                tag_bits: p.tag_bits,
+                iv_null_len,
+                aad_null_len,
+            }))
+        }
+        Some(CkMechanismParams::CcmWrap(p)) => {
+            let (nonce, nonce_null_len) = pointer_to_wire(&p.nonce_presence);
+            let (aad, aad_null_len) = pointer_to_wire(&p.aad_presence);
+            Some(v1_proto::mechanism::Params::CcmWrapParams(v1_proto::CcmWrapParams {
+                data_len: p.data_len,
+                nonce,
+                nonce_fixed_bits: p.nonce_fixed_bits,
+                nonce_generator: p.nonce_generator.0,
+                aad,
+                mac_len: p.mac_len,
+                nonce_null_len,
+                aad_null_len,
+            }))
+        }
+        Some(CkMechanismParams::Rc5Cbc(p)) => {
+            let (iv, iv_null_len) = pointer_to_wire(&p.iv_presence);
+            Some(v1_proto::mechanism::Params::Rc5CbcParams(v1_proto::Rc5CbcParams {
+                word_size: p.word_size,
+                rounds: p.rounds,
+                iv,
+                iv_null_len,
+            }))
+        }
+        Some(CkMechanismParams::AesCbcEncryptData(p)) => {
+            let (data, data_null_len) = pointer_to_wire(&p.data_presence);
+            Some(v1_proto::mechanism::Params::AesCbcEncryptDataParams(
+                v1_proto::AesCbcEncryptDataParams { iv: p.iv.clone(), data, data_null_len },
+            ))
+        }
+        Some(CkMechanismParams::DesCbcEncryptData(p)) => {
+            let (data, data_null_len) = pointer_to_wire(&p.data_presence);
+            Some(v1_proto::mechanism::Params::DesCbcEncryptDataParams(
+                v1_proto::DesCbcEncryptDataParams { iv: p.iv.clone(), data, data_null_len },
+            ))
+        }
+        Some(CkMechanismParams::AriaCbcEncryptData(p)) => {
+            let (data, data_null_len) = pointer_to_wire(&p.data_presence);
+            Some(v1_proto::mechanism::Params::AriaCbcEncryptDataParams(
+                v1_proto::AriaCbcEncryptDataParams { iv: p.iv.clone(), data, data_null_len },
+            ))
+        }
+        Some(CkMechanismParams::CamelliaCbcEncryptData(p)) => {
+            let (data, data_null_len) = pointer_to_wire(&p.data_presence);
+            Some(v1_proto::mechanism::Params::CamelliaCbcEncryptDataParams(
+                v1_proto::CamelliaCbcEncryptDataParams { iv: p.iv.clone(), data, data_null_len },
+            ))
+        }
+        Some(CkMechanismParams::SeedCbcEncryptData(p)) => {
+            let (data, data_null_len) = pointer_to_wire(&p.data_presence);
+            Some(v1_proto::mechanism::Params::SeedCbcEncryptDataParams(
+                v1_proto::SeedCbcEncryptDataParams { iv: p.iv.clone(), data, data_null_len },
+            ))
+        }
+        // Delegated families implement `ToWireV1` in their family module.
+        Some(CkMechanismParams::Ecdh2Derive(p)) => {
+            Some(v1_proto::mechanism::Params::Ecdh2DeriveParams(p.to_wire_v1()))
+        }
+        Some(CkMechanismParams::EcmqvDerive(p)) => {
+            Some(v1_proto::mechanism::Params::EcmqvDeriveParams(p.to_wire_v1()))
+        }
+        Some(CkMechanismParams::X942Dh1Derive(p)) => {
+            Some(v1_proto::mechanism::Params::X942Dh1DeriveParams(p.to_wire_v1()))
+        }
+        Some(CkMechanismParams::X942Dh2Derive(p)) => {
+            Some(v1_proto::mechanism::Params::X942Dh2DeriveParams(p.to_wire_v1()))
+        }
+        Some(CkMechanismParams::X942MqvDerive(p)) => {
+            Some(v1_proto::mechanism::Params::X942MqvDeriveParams(p.to_wire_v1()))
+        }
+        Some(CkMechanismParams::Hkdf(p)) => {
+            Some(v1_proto::mechanism::Params::HkdfParams(p.to_wire_v1()))
+        }
+        Some(CkMechanismParams::Eddsa(p)) => {
+            Some(v1_proto::mechanism::Params::EddsaParams(p.to_wire_v1()))
+        }
+        Some(CkMechanismParams::Gostr3410Derive(p)) => {
+            Some(v1_proto::mechanism::Params::Gostr3410DeriveParams(p.to_wire_v1()))
+        }
+        Some(CkMechanismParams::EcdhAesKeyWrap(p)) => {
+            Some(v1_proto::mechanism::Params::EcdhAesKeyWrapParams(p.to_wire_v1()))
+        }
+        Some(CkMechanismParams::RsaAesKeyWrap(p)) => {
+            Some(v1_proto::mechanism::Params::RsaAesKeyWrapParams(p.to_wire_v1()))
+        }
+        Some(CkMechanismParams::Gostr3410KeyWrap(p)) => {
+            Some(v1_proto::mechanism::Params::Gostr3410KeyWrapParams(p.to_wire_v1()))
+        }
+        Some(CkMechanismParams::KeyWrapSetOaep(p)) => {
+            Some(v1_proto::mechanism::Params::KeyWrapSetOaepParams(p.to_wire_v1()))
+        }
+        Some(CkMechanismParams::Pbe(p)) => {
+            Some(v1_proto::mechanism::Params::PbeParams(p.to_wire_v1()))
+        }
+        Some(CkMechanismParams::Pkcs5Pbkd2(p)) => {
+            Some(v1_proto::mechanism::Params::Pkcs5Pbkd2Params(p.to_wire_v1()))
+        }
+        Some(CkMechanismParams::IkePrfDerive(p)) => {
+            Some(v1_proto::mechanism::Params::IkePrfDeriveParams(p.to_wire_v1()))
+        }
+        Some(CkMechanismParams::Ike1PrfDerive(p)) => {
+            Some(v1_proto::mechanism::Params::Ike1PrfDeriveParams(p.to_wire_v1()))
+        }
+        Some(CkMechanismParams::Ike1ExtendedDerive(p)) => {
+            Some(v1_proto::mechanism::Params::Ike1ExtendedDeriveParams(p.to_wire_v1()))
+        }
+        Some(CkMechanismParams::Ike2PrfPlusDerive(p)) => {
+            Some(v1_proto::mechanism::Params::Ike2PrfPlusDeriveParams(p.to_wire_v1()))
+        }
+        Some(CkMechanismParams::SignAdditionalContext(p)) => {
+            let (context, context_null_len) = pointer_to_wire(&p.context_presence);
+            Some(v1_proto::mechanism::Params::SignAdditionalContext(
+                v1_proto::SignAdditionalContext {
+                    hedge_variant: p.hedge_variant,
+                    context,
+                    hash: p.hash.0,
+                    context_null_len,
+                },
+            ))
+        }
+        Some(CkMechanismParams::Kmac(p)) => {
+            let (customization_string, customization_string_null_len) =
+                pointer_to_wire(&p.customization_string_presence);
+            Some(v1_proto::mechanism::Params::KmacParams(v1_proto::KmacParams {
+                key_handle: p.key_handle.0,
+                mac_length: p.mac_length,
+                customization_string,
+                customization_string_null_len,
+            }))
+        }
+        Some(CkMechanismParams::MuGen(p)) => {
+            let (tr, tr_null_len) = pointer_to_wire(&p.tr_presence);
+            let (context, context_null_len) = pointer_to_wire(&p.context_presence);
+            Some(v1_proto::mechanism::Params::MuGenParams(v1_proto::MuGenParams {
+                key_handle: p.key_handle.0,
+                tr,
+                context,
+                tr_null_len,
+                context_null_len,
+            }))
+        }
+        Some(CkMechanismParams::KeyDerivationString(p)) => {
+            let (data, data_null_len) = pointer_to_wire(&p.data_presence);
+            Some(v1_proto::mechanism::Params::KeyDerivationStringData(
+                v1_proto::KeyDerivationStringData { data, data_null_len },
+            ))
+        }
+        // Non-R17 variants fall back to the identical legacy encode.
+        _ => None,
     }
 }
 
