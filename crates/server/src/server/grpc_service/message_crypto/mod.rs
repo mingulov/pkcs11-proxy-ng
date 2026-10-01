@@ -3028,6 +3028,7 @@ mod lifecycle_transition_tests {
                     tag_null_len: None,
                 },
             )),
+            parameter_encoding_version: 0,
         }
     }
 
@@ -3045,6 +3046,7 @@ mod lifecycle_transition_tests {
                     mac_null_len: None,
                 },
             )),
+            parameter_encoding_version: 0,
         }
     }
 
@@ -3061,6 +3063,7 @@ mod lifecycle_transition_tests {
                     },
                 ),
             ),
+            parameter_encoding_version: 0,
         }
     }
 
@@ -3513,8 +3516,10 @@ mod lifecycle_transition_tests {
                     }
                     2 => {
                         parameter_shape = Some(MessageParameterShape::Gcm.to_proto_i32());
-                        init_message_parameter =
-                            Some(pkcs11_proxy_ng_proto::MessageParameter { params: None });
+                        init_message_parameter = Some(pkcs11_proxy_ng_proto::MessageParameter {
+                            params: None,
+                            parameter_encoding_version: 0,
+                        });
                         CkRv::ARGUMENTS_BAD
                     }
                     3 => {
@@ -3550,6 +3555,7 @@ mod lifecycle_transition_tests {
                             params: Some(pkcs11_proxy_ng_proto::message_parameter::Params::Raw(
                                 if case == 5 { Vec::new() } else { vec![0xA5] },
                             )),
+                            parameter_encoding_version: 0,
                         });
                         CkRv::MECHANISM_PARAM_INVALID
                     }
@@ -3968,13 +3974,17 @@ mod lifecycle_transition_tests {
             ("wrong structured variant", valid_ccm_wire_parameter(), CkRv::MECHANISM_PARAM_INVALID),
             (
                 "malformed oneof",
-                pkcs11_proxy_ng_proto::MessageParameter { params: None },
+                pkcs11_proxy_ng_proto::MessageParameter {
+                    params: None,
+                    parameter_encoding_version: 0,
+                },
                 CkRv::ARGUMENTS_BAD,
             ),
             (
                 "raw empty",
                 pkcs11_proxy_ng_proto::MessageParameter {
                     params: Some(pkcs11_proxy_ng_proto::message_parameter::Params::Raw(Vec::new())),
+                    parameter_encoding_version: 0,
                 },
                 CkRv::MECHANISM_PARAM_INVALID,
             ),
@@ -3982,6 +3992,7 @@ mod lifecycle_transition_tests {
                 "raw nonempty",
                 pkcs11_proxy_ng_proto::MessageParameter {
                     params: Some(pkcs11_proxy_ng_proto::message_parameter::Params::Raw(vec![0xA5])),
+                    parameter_encoding_version: 0,
                 },
                 CkRv::MECHANISM_PARAM_INVALID,
             ),

@@ -1161,12 +1161,15 @@ mod begin_contract_tests {
         };
         parameter.iv[0] ^= 0xFF;
         let wire_mutated: pkcs11_proxy_ng_proto::MessageParameter = (&mutated_parameter).into();
-        let malformed_parameter = pkcs11_proxy_ng_proto::MessageParameter { params: None };
+        let malformed_parameter =
+            pkcs11_proxy_ng_proto::MessageParameter { params: None, parameter_encoding_version: 0 };
         let raw_parameter = pkcs11_proxy_ng_proto::MessageParameter {
             params: Some(pkcs11_proxy_ng_proto::message_parameter::Params::Raw(Vec::new())),
+            parameter_encoding_version: 0,
         };
         let raw_nonempty_parameter = pkcs11_proxy_ng_proto::MessageParameter {
             params: Some(pkcs11_proxy_ng_proto::message_parameter::Params::Raw(vec![0xA5])),
+            parameter_encoding_version: 0,
         };
         let wrong_variant: pkcs11_proxy_ng_proto::MessageParameter = (&ccm_parameter()).into();
 
@@ -1352,17 +1355,25 @@ mod begin_contract_tests {
             value: Some(Vec::new()),
         };
         let responses = [
-            ("malformed oneof", pkcs11_proxy_ng_proto::MessageParameter { params: None }),
+            (
+                "malformed oneof",
+                pkcs11_proxy_ng_proto::MessageParameter {
+                    params: None,
+                    parameter_encoding_version: 0,
+                },
+            ),
             (
                 "raw empty",
                 pkcs11_proxy_ng_proto::MessageParameter {
                     params: Some(pkcs11_proxy_ng_proto::message_parameter::Params::Raw(Vec::new())),
+                    parameter_encoding_version: 0,
                 },
             ),
             (
                 "raw nonempty",
                 pkcs11_proxy_ng_proto::MessageParameter {
                     params: Some(pkcs11_proxy_ng_proto::message_parameter::Params::Raw(vec![0xA5])),
+                    parameter_encoding_version: 0,
                 },
             ),
             ("wrong structured variant", (&ccm_parameter()).into()),

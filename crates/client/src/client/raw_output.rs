@@ -803,17 +803,25 @@ mod message_contract_tests {
         let parameter_spec =
             CkParameterRoundtripSpec { buffer_present: true, buffer_len: 48, value: None };
         let responses = [
-            ("malformed oneof", pkcs11_proxy_ng_proto::MessageParameter { params: None }),
+            (
+                "malformed oneof",
+                pkcs11_proxy_ng_proto::MessageParameter {
+                    params: None,
+                    parameter_encoding_version: 0,
+                },
+            ),
             (
                 "raw empty",
                 pkcs11_proxy_ng_proto::MessageParameter {
                     params: Some(pkcs11_proxy_ng_proto::message_parameter::Params::Raw(Vec::new())),
+                    parameter_encoding_version: 0,
                 },
             ),
             (
                 "raw nonempty",
                 pkcs11_proxy_ng_proto::MessageParameter {
                     params: Some(pkcs11_proxy_ng_proto::message_parameter::Params::Raw(vec![0xA5])),
+                    parameter_encoding_version: 0,
                 },
             ),
             ("wrong structured variant", (&ccm_parameter()).into()),

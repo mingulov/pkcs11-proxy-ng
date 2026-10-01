@@ -158,7 +158,10 @@ fn attribute_and_message_parameter_oneofs_render_no_payload() {
         "attribute_result.Result([REDACTED])"
     );
 
-    let parameter = MessageParameter { params: Some(MessageParams::Raw(PIN_CANARY.to_vec())) };
+    let parameter = MessageParameter {
+        params: Some(MessageParams::Raw(PIN_CANARY.to_vec())),
+        parameter_encoding_version: 0,
+    };
     assert_eq!(format!("{parameter:?}"), "MessageParameter([REDACTED])");
     assert_eq!(
         format!("{:?}", MessageParams::Raw(PIN_CANARY.to_vec())),
@@ -190,7 +193,10 @@ fn authenticated_mechanism_output_oneof_renders_no_payload() {
         format!("{:?}", AuthenticatedOutput::Iv(PIN_CANARY.to_vec())),
         "authenticated_mechanism_output.Output([REDACTED])"
     );
-    let parameter = MessageParameter { params: Some(MessageParams::Raw(PIN_CANARY.to_vec())) };
+    let parameter = MessageParameter {
+        params: Some(MessageParams::Raw(PIN_CANARY.to_vec())),
+        parameter_encoding_version: 0,
+    };
     assert_eq!(
         format!("{:?}", AuthenticatedOutput::MessageParameter(parameter)),
         "authenticated_mechanism_output.Output([REDACTED])"

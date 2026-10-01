@@ -1773,7 +1773,8 @@ mod ambiguity_tests {
         let inconsistent_wire = pkcs11_proxy_ng_proto::MessageParameter::from(&inconsistent_iv);
         // Absent oneof: wire validation fails (with ARGUMENTS_BAD) — still
         // a parse failure, so it still defers.
-        let absent_oneof = pkcs11_proxy_ng_proto::MessageParameter { params: None };
+        let absent_oneof =
+            pkcs11_proxy_ng_proto::MessageParameter { params: None, parameter_encoding_version: 0 };
         for function in [
             ParameterOutputFunction::EncryptMessage,
             ParameterOutputFunction::DecryptMessage,
