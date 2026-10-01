@@ -45,8 +45,10 @@ fn settle_message_init_error(
 /// client-native layout, direction, and memory contract. The wire mechanism is
 /// type-only; the backend reconstructs the structured parameter in its native
 /// ABI. A NULL mechanism is the cancel path. Empty unmodelled parameters remain
-/// valid, while materialized unmodelled parameters fail closed rather than
-/// falling back to raw or classic mechanism bytes.
+/// valid; materialized unmodelled parameters travel as v1-opaque exact bytes
+/// under transport capability ≥ 1 (R5/F1) and keep the historical fail-closed
+/// `MECHANISM_PARAM_INVALID` under legacy capability — never a fallback to
+/// raw or classic mechanism bytes.
 ///
 /// Returns the mechanism (None = cancel) and the optional structured init param,
 /// or a `CK_RV` to return directly.
@@ -79,6 +81,7 @@ unsafe fn read_message_init_mechanism(
             direction,
             MessageParameterStage::Init,
             MessageCallMemory::init(p_mechanism),
+            crate::interface_probe::mechanism_parameter_transport_version(),
         )
     }
     .map_err(rv_err)?
@@ -474,6 +477,7 @@ pub unsafe extern "C" fn c_encrypt_message(
                     output_spec.buffer_len,
                     pul_ciphertext_len,
                 ),
+                crate::interface_probe::mechanism_parameter_transport_version(),
             )
         } {
             Ok(call) => call,
@@ -565,6 +569,7 @@ pub unsafe extern "C" fn c_encrypt_message_begin(
                 MessageParameterDirection::Encrypt,
                 MessageParameterStage::Begin,
                 MessageCallMemory::begin(p_associated_data, ul_associated_data_len),
+                crate::interface_probe::mechanism_parameter_transport_version(),
             )
         } {
             Ok(call) => call,
@@ -659,6 +664,7 @@ pub unsafe extern "C" fn c_encrypt_message_next(
                     output_spec.buffer_len,
                     pul_ciphertext_part_len,
                 ),
+                crate::interface_probe::mechanism_parameter_transport_version(),
             )
         } {
             Ok(call) => call,
@@ -769,6 +775,7 @@ pub unsafe extern "C" fn c_decrypt_message(
                     output_spec.buffer_len,
                     pul_plaintext_len,
                 ),
+                crate::interface_probe::mechanism_parameter_transport_version(),
             )
         } {
             Ok(call) => call,
@@ -860,6 +867,7 @@ pub unsafe extern "C" fn c_decrypt_message_begin(
                 MessageParameterDirection::Decrypt,
                 MessageParameterStage::Begin,
                 MessageCallMemory::begin(p_associated_data, ul_associated_data_len),
+                crate::interface_probe::mechanism_parameter_transport_version(),
             )
         } {
             Ok(call) => call,
@@ -954,6 +962,7 @@ pub unsafe extern "C" fn c_decrypt_message_next(
                     output_spec.buffer_len,
                     pul_plaintext_part_len,
                 ),
+                crate::interface_probe::mechanism_parameter_transport_version(),
             )
         } {
             Ok(call) => call,

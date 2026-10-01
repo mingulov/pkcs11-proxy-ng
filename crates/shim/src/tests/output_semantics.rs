@@ -78,20 +78,37 @@ impl TestDaemon {
         Self::start_configured(abi, None)
     }
 
+    /// An owned daemon advertising exactly `mechanisms` (R5/F1: CBC
+    /// coverage needs AES_CBC in the slot list, while the shared
+    /// fixture's 5-mechanism list is pinned by
+    /// `mechanism_list_count_reflects_filtered_count`).
+    pub(super) fn fresh_with_mechanisms(mechanisms: Vec<CkMechanismType>) -> Self {
+        Self::start_configured_with_mechanisms(MockAbi::host(), None, mechanisms)
+    }
+
     fn start_configured(abi: MockAbi, advertised_order: Option<u32>) -> Self {
+        Self::start_configured_with_mechanisms(
+            abi,
+            advertised_order,
+            vec![
+                CkMechanismType::SHA256,
+                CkMechanismType::RSA_PKCS,
+                CkMechanismType::AES_ECB,
+                CkMechanismType::AES_GCM,
+                CkMechanismType::AES_KEY_GEN,
+            ],
+        )
+    }
+
+    fn start_configured_with_mechanisms(
+        abi: MockAbi,
+        advertised_order: Option<u32>,
+        mechanisms: Vec<CkMechanismType>,
+    ) -> Self {
         let runtime = Runtime::new().expect("test runtime");
         let (endpoint, backend, context_manager, shutdown) = runtime.block_on(async {
-            let mut mock = MockBackend::new(
-                vec![CkSlotId(0), CkSlotId(1)],
-                vec![
-                    CkMechanismType::SHA256,
-                    CkMechanismType::RSA_PKCS,
-                    CkMechanismType::AES_ECB,
-                    CkMechanismType::AES_GCM,
-                    CkMechanismType::AES_KEY_GEN,
-                ],
-            )
-            .with_abi(abi);
+            let mut mock =
+                MockBackend::new(vec![CkSlotId(0), CkSlotId(1)], mechanisms).with_abi(abi);
             match advertised_order {
                 None => {}
                 Some(2) => mock = mock.with_big_endian_advertisement(),
@@ -4564,4 +4581,280 @@ fn initialize_finalize_context_id_lifecycle() {
     // ShimSession::drop ran c_finalize: the shared client's id is cleared.
     let ctx = state::runtime().block_on(async { state::client().lock().await.context_id_opt() });
     assert!(ctx.is_none(), "c_finalize must clear the context id on the shared client");
+}
+
+// ---------------------------------------------------------------------------
+// R5/F1: CBC message-parameter encode audit + v1-opaque emission.
+// ---------------------------------------------------------------------------
+
+/// NIST SP 800-38A F.2.1 AES-CBC-128 vectors (mirrors T1's backend oracle at
+/// the shim layer): the IV rides the message Init, block 1 drives the
+/// one-shot leg, block 2 drives the multipart Next leg.
+const R5_NIST_CBC_IV: [u8; 16] = [
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+];
+const R5_NIST_CBC_PT1: [u8; 16] = [
+    0x6b, 0xc1, 0xbe, 0xe2, 0x2e, 0x40, 0x9f, 0x96, 0xe9, 0x3d, 0x7e, 0x11, 0x73, 0x93, 0x17, 0x2a,
+];
+const R5_NIST_CBC_PT2: [u8; 16] = [
+    0xae, 0x2d, 0x8a, 0x57, 0x1e, 0x03, 0xac, 0x9c, 0x9e, 0xb7, 0x6f, 0xac, 0x45, 0xaf, 0x8e, 0x51,
+];
+
+/// R5/F1 audit (C-shim edge): a CBC message init carrying a materialized
+/// 16-byte IV fails closed locally with `MECHANISM_PARAM_INVALID` — the
+/// Unmodeled arm never reads the bytes and no RPC reaches the daemon.
+/// Post-R5 this stays the exact legacy-capability behavior
+/// (legacy-identity pin, green before AND after).
+#[test]
+fn r5_audit_cbc_message_init_with_iv_fails_closed_locally() {
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let key = create_object(shim.session);
+    let daemon = TestDaemon::shared();
+    let calls_before = daemon.backend.message_init_contract_call_count();
+
+    let mut iv = R5_NIST_CBC_IV;
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_AES_CBC,
+        pParameter: iv.as_mut_ptr().cast(),
+        ulParameterLen: iv.len() as CK_ULONG,
+    };
+    let rv =
+        unsafe { dispatch::general::c_message_encrypt_init(shim.session, &mut mechanism, key) };
+    assert_eq!(rv, CKR_MECHANISM_PARAM_INVALID as CK_RV);
+    assert_eq!(
+        test_message_shape(shim.session, state::MessageOperation::Encrypt),
+        None,
+        "failed init installs no shape",
+    );
+    assert_eq!(
+        daemon.backend.message_init_contract_call_count(),
+        calls_before,
+        "local fail-closed emits no RPC",
+    );
+}
+
+/// Panic-safe save/restore for the endpoint env var (mirrors the
+/// `SavedEndpointEnv` pattern in `endpoint.rs`): R5 tests point the shim
+/// at an owned CBC daemon and must not leak its dropped endpoint.
+struct R5SavedEndpoint {
+    endpoint: Option<String>,
+}
+
+impl R5SavedEndpoint {
+    fn capture() -> Self {
+        Self { endpoint: std::env::var("PKCS11_PROXY_ENDPOINT").ok() }
+    }
+}
+
+impl Drop for R5SavedEndpoint {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.endpoint {
+                Some(v) => std::env::set_var("PKCS11_PROXY_ENDPOINT", v),
+                None => std::env::remove_var("PKCS11_PROXY_ENDPOINT"),
+            }
+        }
+    }
+}
+
+/// R5/F1: injects transport capability 1 into BOTH edges (the shim
+/// snapshot and the shared-client cache — production feeds both from the
+/// same discovery probe) and restores legacy 0 on drop. The test must
+/// hold `shim_state_test_guard`; a fresh `ShimSession` re-probes to 0
+/// anyway, so a leak could only affect the current test.
+struct R5TransportGuard;
+
+impl R5TransportGuard {
+    fn inject() -> Self {
+        crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(1);
+        state::runtime().block_on(async {
+            state::client().lock().await.set_mechanism_parameter_transport_version_for_tests(1);
+        });
+        assert_eq!(crate::interface_probe::mechanism_parameter_transport_version(), 1);
+        Self
+    }
+}
+
+impl Drop for R5TransportGuard {
+    fn drop(&mut self) {
+        crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(0);
+        state::runtime().block_on(async {
+            state::client().lock().await.set_mechanism_parameter_transport_version_for_tests(0);
+        });
+    }
+}
+
+fn r5_cbc_daemon() -> TestDaemon {
+    TestDaemon::fresh_with_mechanisms(vec![
+        CkMechanismType::SHA256,
+        CkMechanismType::RSA_PKCS,
+        CkMechanismType::AES_ECB,
+        CkMechanismType::AES_GCM,
+        CkMechanismType::AES_CBC,
+        CkMechanismType::AES_KEY_GEN,
+    ])
+}
+
+fn r5_assert_raw_iv(
+    recorded: Option<pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
+    label: &str,
+) {
+    match recorded {
+        Some(pkcs11_proxy_ng_proto::convert::message_params::MessageParameter::Raw(bytes)) => {
+            bytes.expose(|raw| assert_eq!(raw, R5_NIST_CBC_IV.as_slice(), "{label}"));
+        }
+        other => panic!("{label} must record the exact IV bytes, got {other:?}"),
+    }
+}
+
+/// R5/F1 one-shot leg: with capability 1 injected on both edges, a CBC
+/// message Init carrying the 16-byte NIST IV succeeds through v1, and the
+/// one-shot `C_EncryptMessage` with the same IV returns the mock's exact
+/// bytes. Both legs record the exact IV at the strict mock.
+#[test]
+fn r5_cbc_encrypt_message_one_shot_v1_exact_bytes() {
+    let _guard = shim_state_test_guard();
+    let _saved = R5SavedEndpoint::capture();
+    let daemon = r5_cbc_daemon();
+    let shim = ShimSession::with_endpoint(&daemon.endpoint);
+    // The hard-0 daemon advertises nothing: the real probe path records
+    // legacy 0 (absent → 0) before injection.
+    assert_eq!(crate::interface_probe::mechanism_parameter_transport_version(), 0);
+    let _v1 = R5TransportGuard::inject();
+
+    let key = create_object(shim.session);
+    let mut iv = R5_NIST_CBC_IV;
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_AES_CBC,
+        pParameter: iv.as_mut_ptr().cast(),
+        ulParameterLen: iv.len() as CK_ULONG,
+    };
+    assert_eq!(
+        unsafe { dispatch::general::c_message_encrypt_init(shim.session, &mut mechanism, key) },
+        CKR_OK as CK_RV,
+        "v1 CBC init succeeds",
+    );
+    assert_eq!(
+        test_message_shape(shim.session, state::MessageOperation::Encrypt),
+        Some(MessageParameterShape::Unmodeled),
+    );
+    let (init_param, _) =
+        daemon.backend.last_message_init_contract().expect("mock records the init contract");
+    r5_assert_raw_iv(Some(init_param), "v1 init");
+
+    let mut output = [0u8; 16];
+    let mut output_len = output.len() as CK_ULONG;
+    let rv = unsafe {
+        dispatch::general::c_encrypt_message(
+            shim.session,
+            iv.as_mut_ptr().cast(),
+            iv.len() as CK_ULONG,
+            std::ptr::null_mut(),
+            0,
+            R5_NIST_CBC_PT1.as_ptr() as CK_BYTE_PTR,
+            R5_NIST_CBC_PT1.len() as CK_ULONG,
+            output.as_mut_ptr(),
+            &mut output_len,
+        )
+    };
+    assert_eq!(rv, CKR_OK as CK_RV, "v1 CBC one-shot succeeds");
+    assert_eq!(output_len as usize, R5_NIST_CBC_PT1.len());
+    let expected: Vec<u8> = R5_NIST_CBC_PT1.iter().map(|byte| byte ^ 0x42).collect();
+    assert_eq!(output.as_slice(), expected.as_slice(), "mock xor_bytes output");
+    r5_assert_raw_iv(daemon.backend.last_message_parameter_call(), "v1 one-shot");
+    assert_eq!(
+        test_message_shape(shim.session, state::MessageOperation::Encrypt),
+        Some(MessageParameterShape::Unmodeled),
+        "success preserves the shape",
+    );
+}
+
+/// R5/F1 multipart leg: the CBC Init rides v1 (exact IV bytes at the
+/// mock), then a `Begin`/`Next` sequence carries the IV through the
+/// multipart contract with exact bytes and mock-exact output.
+#[test]
+fn r5_cbc_multipart_init_begin_next_v1_exact_bytes() {
+    let _guard = shim_state_test_guard();
+    let _saved = R5SavedEndpoint::capture();
+    let daemon = r5_cbc_daemon();
+    let shim = ShimSession::with_endpoint(&daemon.endpoint);
+    assert_eq!(crate::interface_probe::mechanism_parameter_transport_version(), 0);
+    let _v1 = R5TransportGuard::inject();
+
+    let key = create_object(shim.session);
+    let mut iv = R5_NIST_CBC_IV;
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_AES_CBC,
+        pParameter: iv.as_mut_ptr().cast(),
+        ulParameterLen: iv.len() as CK_ULONG,
+    };
+    assert_eq!(
+        unsafe { dispatch::general::c_message_encrypt_init(shim.session, &mut mechanism, key) },
+        CKR_OK as CK_RV,
+        "v1 CBC multipart init succeeds",
+    );
+    let (init_param, _) =
+        daemon.backend.last_message_init_contract().expect("mock records the init contract");
+    r5_assert_raw_iv(Some(init_param), "v1 multipart init");
+
+    assert_eq!(
+        unsafe {
+            dispatch::general::c_encrypt_message_begin(
+                shim.session,
+                iv.as_mut_ptr().cast(),
+                iv.len() as CK_ULONG,
+                std::ptr::null_mut(),
+                0,
+            )
+        },
+        CKR_OK as CK_RV,
+        "v1 CBC Begin succeeds",
+    );
+    r5_assert_raw_iv(daemon.backend.last_message_parameter_call(), "v1 Begin");
+
+    let mut part_out = [0u8; 16];
+    let mut part_len = part_out.len() as CK_ULONG;
+    let rv = unsafe {
+        dispatch::general::c_encrypt_message_next(
+            shim.session,
+            iv.as_mut_ptr().cast(),
+            iv.len() as CK_ULONG,
+            R5_NIST_CBC_PT2.as_ptr() as CK_BYTE_PTR,
+            R5_NIST_CBC_PT2.len() as CK_ULONG,
+            part_out.as_mut_ptr(),
+            &mut part_len,
+            CKF_END_OF_MESSAGE,
+        )
+    };
+    assert_eq!(rv, CKR_OK as CK_RV, "v1 CBC Next succeeds");
+    assert_eq!(part_len as usize, R5_NIST_CBC_PT2.len());
+    let expected: Vec<u8> = R5_NIST_CBC_PT2.iter().map(|byte| byte ^ 0x42).collect();
+    assert_eq!(part_out.as_slice(), expected.as_slice(), "mock xor_bytes part output");
+    r5_assert_raw_iv(daemon.backend.last_message_parameter_call(), "v1 Next");
+}
+
+/// R5/F1 legacy-identity: dropping the injection restores byte-identical
+/// legacy behavior — the CBC init fails closed locally again.
+#[test]
+fn r5_transport_restore_returns_legacy_fail_closed() {
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let key = create_object(shim.session);
+    {
+        let _v1 = R5TransportGuard::inject();
+        assert_eq!(crate::interface_probe::mechanism_parameter_transport_version(), 1);
+    }
+    assert_eq!(crate::interface_probe::mechanism_parameter_transport_version(), 0);
+    let mut iv = R5_NIST_CBC_IV;
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_AES_CBC,
+        pParameter: iv.as_mut_ptr().cast(),
+        ulParameterLen: iv.len() as CK_ULONG,
+    };
+    assert_eq!(
+        unsafe { dispatch::general::c_message_encrypt_init(shim.session, &mut mechanism, key) },
+        CKR_MECHANISM_PARAM_INVALID as CK_RV,
+        "restored capability fails closed exactly as before",
+    );
 }

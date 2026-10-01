@@ -48,6 +48,7 @@ impl AuthenticatedCall {
                     direction,
                     MessageParameterStage::OneShot,
                     memory,
+                    crate::interface_probe::mechanism_parameter_transport_version(),
                 )
             }?;
             if message.parameter().is_none()

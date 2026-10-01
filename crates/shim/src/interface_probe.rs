@@ -7,7 +7,7 @@
 //! get the static (all-non-null) function lists; post-`C_Initialize`
 //! callers get the patched versions.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Mutex, RwLock};
 
 use cryptoki_sys::*;
@@ -74,6 +74,11 @@ static PROBE_INSTALL_LOCK: Mutex<()> = Mutex::new(());
 static BACKEND_ULONG_SIZE: AtomicUsize = AtomicUsize::new(0);
 static BACKEND_ATTRIBUTE_STRIDE: AtomicUsize = AtomicUsize::new(0);
 static POINTER_SAFE_MESSAGE_PARAMETERS: AtomicBool = AtomicBool::new(false);
+/// Daemon-advertised `mechanism_parameter_transport_version` discovery
+/// capability (R5/F1; S2 §3 monotonic capabilities). `0` = not yet probed,
+/// or a daemon predating the advertisement (legacy encoding); readers
+/// treat it as "no v1".
+static MECHANISM_PARAMETER_TRANSPORT_VERSION: AtomicU32 = AtomicU32::new(0);
 
 /// Whether the daemon acknowledged the shape-bound message-parameter contract.
 /// Absence and an in-progress/failed reprobe are both fail-closed.
@@ -91,6 +96,40 @@ fn clear_pointer_safe_message_parameters() {
 
 pub(crate) fn invalidate_pointer_safe_message_parameters() {
     clear_pointer_safe_message_parameters();
+}
+
+/// Snapshot of the daemon-advertised `mechanism_parameter_transport_version`
+/// discovery capability (R5/F1; S2 §3 monotonic capabilities): the discovery
+/// value, or 0 when absent/pre-probe (legacy encoding). Message-parameter
+/// readers gate v1-opaque emission on this (R5); R10 extends this read with
+/// the cfg-gated test override (no API break); R11/R23 consume it.
+pub fn mechanism_parameter_transport_version() -> u32 {
+    MECHANISM_PARAMETER_TRANSPORT_VERSION.load(Ordering::Acquire)
+}
+
+/// Resolve the advertised transport capability to the snapshot value
+/// (pure policy, unit tested): the discovery value, or 0 when the daemon
+/// predates the advertisement (legacy encoding).
+fn resolve_mechanism_parameter_transport_version(advertised: Option<u32>) -> u32 {
+    advertised.unwrap_or(0)
+}
+
+fn record_mechanism_parameter_transport_version(advertised: Option<u32>) {
+    MECHANISM_PARAMETER_TRANSPORT_VERSION
+        .store(resolve_mechanism_parameter_transport_version(advertised), Ordering::Release);
+}
+
+fn clear_mechanism_parameter_transport_version() {
+    record_mechanism_parameter_transport_version(None);
+}
+
+/// Test-only injection for the transport-version snapshot (R5/F1): the
+/// capability normally arrives via discovery in `probe_backend`, but the
+/// daemon stays hard-0 until the R23 advertisement, so integration tests
+/// inject it. Production code must never call this.
+#[cfg(test)]
+pub(crate) fn set_mechanism_parameter_transport_version_for_tests(version: u32) {
+    MECHANISM_PARAMETER_TRANSPORT_VERSION.store(version, Ordering::Release);
 }
 
 /// The backend's `CK_ULONG` width in bytes for the value bridge (ADR-0011).
@@ -663,6 +702,10 @@ fn probe_backend(_install: &std::sync::MutexGuard<'_, ()>) -> Result<InterfaceSt
     )
     .map_err(ProbeFailure::AbiMismatch)?;
 
+    // Record the daemon-advertised mechanism-parameter transport capability
+    // (R5/F1): discovery value, or 0 when the daemon predates the field.
+    record_mechanism_parameter_transport_version(probe.mechanism_parameter_transport_version);
+
     maybe_install_server_registry(probe.mechanism_registry.as_ref());
 
     Ok(build_interface_state(&probe.interfaces, probe.pointer_safe_message_parameters))
@@ -924,6 +967,10 @@ pub fn reprobe() -> Result<(), String> {
     // A reprobe can be talking to a restarted or downgraded daemon. Do not let
     // a transient failure retain permission for stateful message operations.
     clear_pointer_safe_message_parameters();
+    // Same fail-closed stance for the v1 encoding capability (R5/F1): a
+    // transient probe failure must fall back to legacy emission, never
+    // retain a stale v1 snapshot.
+    clear_mechanism_parameter_transport_version();
     // A re-probe always dials fresh: drop any cached pre-init failure (W1-C7-01).
     state::clear_pre_init_connect_failure();
     match probe_backend(&install) {
@@ -963,6 +1010,9 @@ pub fn clear_cache() {
     // Drop the advertised backend ABI so a fresh probe re-reads it (D2).
     BACKEND_ULONG_SIZE.store(0, Ordering::Relaxed);
     BACKEND_ATTRIBUTE_STRIDE.store(0, Ordering::Relaxed);
+    // Drop the advertised transport capability likewise (R5/F1): a fresh
+    // probe re-reads it, and pre-probe readers see legacy 0.
+    clear_mechanism_parameter_transport_version();
     // W1-C7-11: reset the revision tracker — the next Initialize may talk
     // to a different daemon, and that must log a fresh install INFO, not
     // a spurious drift WARN against the previous lifetime's revision.
@@ -1172,6 +1222,7 @@ mod backend_abi_tests {
         BackendInterface, clear_pointer_safe_message_parameters, find_interface_in_catalog,
         pointer_safe_message_parameters, record_pointer_safe_message_parameters,
         resolve_backend_attribute_stride, resolve_backend_ulong_size,
+        resolve_mechanism_parameter_transport_version,
     };
 
     fn iface(major: u8, minor: u8, nulls: Vec<String>) -> BackendInterface {
@@ -1505,5 +1556,15 @@ mod backend_abi_tests {
         assert!(resolve_backend_ulong_size(Some(8), Some(1)).is_err());
         assert!(resolve_backend_ulong_size(Some(8), Some(2)).is_ok());
         assert!(resolve_backend_ulong_size(Some(8), None).is_ok());
+    }
+
+    /// R5/F1 snapshot-API policy: the snapshot is the discovery value, or
+    /// 0 when the daemon predates the advertisement (legacy encoding).
+    #[test]
+    fn r5_transport_version_snapshot_is_discovery_value_or_zero() {
+        assert_eq!(resolve_mechanism_parameter_transport_version(None), 0);
+        assert_eq!(resolve_mechanism_parameter_transport_version(Some(0)), 0);
+        assert_eq!(resolve_mechanism_parameter_transport_version(Some(1)), 1);
+        assert_eq!(resolve_mechanism_parameter_transport_version(Some(2)), 2);
     }
 }

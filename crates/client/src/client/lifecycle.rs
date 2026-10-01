@@ -101,6 +101,11 @@ pub struct BackendProbe {
     /// Older daemons omit the field and are therefore unsafe.
     pub pointer_safe_message_parameters: bool,
     pub pointer_safe_authenticated_parameters: bool,
+    /// Daemon-advertised `mechanism_parameter_transport_version` (R5/F1, S2
+    /// §3 monotonic capabilities). `None` against a daemon that predates
+    /// the field (or until the R23 advertisement) — the caller treats it
+    /// as 0 (legacy encoding).
+    pub mechanism_parameter_transport_version: Option<u32>,
 }
 
 fn pointer_safe_message_parameters_from_wire(advertised: Option<bool>) -> bool {
@@ -311,6 +316,7 @@ impl Pkcs11Client {
         Ok(Self {
             exact_effects_version: Default::default(),
             typed_auth_capability: Default::default(),
+            mechanism_parameter_transport_version: Default::default(),
             grpc,
             channel,
             context_id: None,
@@ -331,6 +337,7 @@ impl Pkcs11Client {
         Ok(Self {
             exact_effects_version: Default::default(),
             typed_auth_capability: Default::default(),
+            mechanism_parameter_transport_version: Default::default(),
             grpc,
             channel,
             context_id: None,
@@ -349,6 +356,7 @@ impl Pkcs11Client {
         Self {
             exact_effects_version: Default::default(),
             typed_auth_capability: Default::default(),
+            mechanism_parameter_transport_version: Default::default(),
             grpc: new_grpc_client(channel.clone(), DEFAULT_RPC_TIMEOUT),
             channel,
             context_id: None,
@@ -466,12 +474,38 @@ impl Pkcs11Client {
     }
 
     /// Record a fresh `GetBackendInterfaces` probe (W1-C10-03): the
-    /// effects version and the typed-auth capability are always refreshed
-    /// together from the same probe, so a version change can never leave a
-    /// stale capability behind.
-    pub(crate) fn note_backend_probe(&self, effects_version: u32, auth_capable: bool) {
+    /// effects version, the typed-auth capability, and the
+    /// mechanism-parameter transport version are always refreshed together
+    /// from the same probe, so a version change can never leave a stale
+    /// capability behind.
+    pub(crate) fn note_backend_probe(
+        &self,
+        effects_version: u32,
+        auth_capable: bool,
+        mechanism_parameter_transport_version: u32,
+    ) {
         self.exact_effects_version.store(effects_version, std::sync::atomic::Ordering::Release);
         self.note_typed_auth_capability(auth_capable);
+        self.mechanism_parameter_transport_version
+            .store(mechanism_parameter_transport_version, std::sync::atomic::Ordering::Release);
+    }
+
+    /// The cached `mechanism_parameter_transport_version` discovery
+    /// capability (R5/F1): the daemon-advertised value, or 0 when no probe
+    /// has established one (legacy). Message-parameter encoding gates on
+    /// this (v1-opaque at ≥ 1, legacy otherwise).
+    pub(crate) fn mechanism_parameter_transport_version(&self) -> u32 {
+        self.mechanism_parameter_transport_version.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Test-only injection for the transport-version cache (R5/F1): the
+    /// capability normally arrives via discovery in
+    /// `get_backend_interfaces`, but the daemon stays hard-0 until the R23
+    /// advertisement, so integration tests inject it. Production code must
+    /// never call this.
+    pub fn set_mechanism_parameter_transport_version_for_tests(&self, version: u32) {
+        self.mechanism_parameter_transport_version
+            .store(version, std::sync::atomic::Ordering::Release);
     }
 
     /// Query the daemon for the backend's interface capabilities. Also
@@ -506,10 +540,12 @@ impl Pkcs11Client {
             pointer_safe_message_parameters: pointer_safe_message_parameters_from_wire(
                 resp.pointer_safe_message_parameters,
             ),
+            mechanism_parameter_transport_version: resp.mechanism_parameter_transport_version,
         };
         self.note_backend_probe(
             probe.exact_output_effects_version.unwrap_or(0),
             probe.pointer_safe_authenticated_parameters,
+            probe.mechanism_parameter_transport_version.unwrap_or(0),
         );
         Ok(probe)
     }
@@ -535,6 +571,7 @@ impl Pkcs11Client {
                 self.grpc = new_grpc_client(channel.clone(), self.rpc_timeout);
                 self.channel = channel;
                 self.exact_effects_version = Default::default();
+                self.mechanism_parameter_transport_version = Default::default();
                 self.invalidate_typed_auth_capability();
                 if let Some(ref ctx) = self.context_id {
                     let req = pkcs11_proxy_ng_proto::GetSlotListRequest {
@@ -670,24 +707,36 @@ mod tests {
         assert!(err.is_transient());
     }
 
-    // W1-C10-03: every probe refreshes version + capability together, so
-    // neither a same-version re-probe nor a version change can leave a
+    // W1-C10-03: every probe refreshes version + capabilities together,
+    // so neither a same-version re-probe nor a version change can leave a
     // stale capability behind.
     #[tokio::test]
     async fn probe_note_refreshes_version_and_capability_together() {
         use std::sync::atomic::Ordering;
         let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
         let client = Pkcs11Client::from_channel(channel);
-        client.note_backend_probe(1, true);
+        client.note_backend_probe(1, true, 1);
         assert_eq!(client.exact_effects_version.load(Ordering::Acquire), 1);
         assert_eq!(client.cached_typed_auth_capability(), Some(true));
+        assert_eq!(client.mechanism_parameter_transport_version(), 1);
         // Same-version re-probe still overwrites with the fresh value.
-        client.note_backend_probe(1, false);
+        client.note_backend_probe(1, false, 0);
         assert_eq!(client.cached_typed_auth_capability(), Some(false));
+        assert_eq!(client.mechanism_parameter_transport_version(), 0);
         // Version change carries the new version's capability.
-        client.note_backend_probe(2, true);
+        client.note_backend_probe(2, true, 1);
         assert_eq!(client.exact_effects_version.load(Ordering::Acquire), 2);
         assert_eq!(client.cached_typed_auth_capability(), Some(true));
+        assert_eq!(client.mechanism_parameter_transport_version(), 1);
+    }
+
+    /// R5/F1: a fresh client has no transport capability (legacy encoding)
+    /// until a probe establishes one.
+    #[tokio::test]
+    async fn fresh_client_transport_version_is_legacy_zero() {
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
+        let client = Pkcs11Client::from_channel(channel);
+        assert_eq!(client.mechanism_parameter_transport_version(), 0);
     }
 
     #[test]

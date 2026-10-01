@@ -558,6 +558,45 @@ impl From<&MessageParameter> for v1_proto::MessageParameter {
     }
 }
 
+impl MessageParameter {
+    /// Capability-gated wire encoding (R5/F1; S2 §5: under v1 the shim
+    /// never emits legacy `Raw`; legacy capability preserves current
+    /// behavior exactly).
+    ///
+    /// `transport_version` is the negotiated `mechanism_parameter_transport_version`
+    /// capability (discovery value, 0 when absent). At capability ≥ 1 —
+    /// including capabilities newer than this encoder, which still emits
+    /// the v1 form it knows — `Raw` (the Unmodeled shape's representation)
+    /// travels as `opaque_message_params` carrying the exact bytes with
+    /// `declared_len` set to the byte length and version 1; a declared
+    /// extent over the 64 KiB outer cap (S2 §3) fails locally with
+    /// `MECHANISM_PARAM_INVALID` without wire emission. At legacy
+    /// capability the encoding is bit-identical to the legacy `From`
+    /// (legacy `Raw`, version 0). Structured arms always use the legacy
+    /// encoding: their contract is unchanged across versions.
+    pub fn to_wire_with_transport_version(
+        &self,
+        transport_version: u32,
+    ) -> Result<v1_proto::MessageParameter, pkcs11_proxy_ng_types::CkRv> {
+        if transport_version >= SUPPORTED_MESSAGE_PARAMETER_TRANSPORT_VERSION
+            && let MessageParameter::Raw(data) = self
+        {
+            let declared_len = u64::try_from(data.len())
+                .map_err(|_| pkcs11_proxy_ng_types::CkRv::MECHANISM_PARAM_INVALID)?;
+            if declared_len > MAX_OPAQUE_MESSAGE_PARAMETER_BYTES {
+                return Err(pkcs11_proxy_ng_types::CkRv::MECHANISM_PARAM_INVALID);
+            }
+            return Ok(v1_proto::MessageParameter {
+                params: Some(v1_proto::message_parameter::Params::OpaqueMessageParams(
+                    v1_proto::OpaqueMessageParams { data: secret_to_plain(data), declared_len },
+                )),
+                parameter_encoding_version: SUPPORTED_MESSAGE_PARAMETER_TRANSPORT_VERSION,
+            });
+        }
+        Ok(v1_proto::MessageParameter::from(self))
+    }
+}
+
 /// Per-message version newer than the daemon understands is
 /// `FUNCTION_NOT_SUPPORTED` pre-entry (S2 §6 RV table).
 fn check_wire_version(version: u32) -> Result<(), pkcs11_proxy_ng_types::CkRv> {
@@ -1655,5 +1694,79 @@ mod tests {
             assert_eq!(Abi::try_from(raw), Ok(expected));
         }
         assert!(Abi::try_from(4).is_err());
+    }
+
+    /// R5/F1 encode matrix: legacy capability emits bit-identical legacy
+    /// bytes; capability ≥ 1 emits v1-opaque for `Raw` (exact bytes,
+    /// declared length, version 1); newer capabilities still emit the v1
+    /// form this encoder knows; over-64 KiB fails locally with
+    /// `MECHANISM_PARAM_INVALID`.
+    #[test]
+    fn r5_to_wire_with_transport_version_matrix() {
+        use pkcs11_proxy_ng_types::CkRv;
+        let raw16 = MessageParameter::Raw(vec![0xA5; 16].into());
+
+        // Legacy: bit-identical to the legacy `From` (legacy Raw, version 0).
+        let wire = raw16.to_wire_with_transport_version(0).expect("legacy encodes");
+        assert_eq!(wire, v1_proto::MessageParameter::from(&raw16));
+        assert_eq!(wire.parameter_encoding_version, 0);
+        assert!(matches!(wire.params, Some(v1_proto::message_parameter::Params::Raw(_))));
+
+        // v1: opaque bytes, exact length, version 1 — never legacy Raw.
+        for version in [1, 2, u32::MAX] {
+            let wire = raw16.to_wire_with_transport_version(version).expect("v1 encodes Raw");
+            assert_eq!(wire.parameter_encoding_version, 1, "capability {version}");
+            match &wire.params {
+                Some(v1_proto::message_parameter::Params::OpaqueMessageParams(opaque)) => {
+                    assert_eq!(opaque.data, vec![0xA5; 16]);
+                    assert_eq!(opaque.declared_len, 16);
+                }
+                other => panic!("capability {version} must emit opaque, got {other:?}"),
+            }
+        }
+
+        // Empty opaque edge: empty bytes, zero declared length, version 1.
+        let empty = MessageParameter::Raw(Vec::new().into());
+        let wire = empty.to_wire_with_transport_version(1).expect("empty opaque encodes");
+        assert_eq!(wire.parameter_encoding_version, 1);
+        match &wire.params {
+            Some(v1_proto::message_parameter::Params::OpaqueMessageParams(opaque)) => {
+                assert!(opaque.data.is_empty());
+                assert_eq!(opaque.declared_len, 0);
+            }
+            other => panic!("empty Raw must emit empty opaque, got {other:?}"),
+        }
+
+        // 64 KiB cap boundary on the encode side (local reject, no wire).
+        let at_cap = MessageParameter::Raw(vec![0xA5; 64 * 1024].into());
+        let wire = at_cap.to_wire_with_transport_version(1).expect("64 KiB encodes");
+        assert_eq!(wire.parameter_encoding_version, 1);
+        let over_cap = MessageParameter::Raw(vec![0xA5; 64 * 1024 + 1].into());
+        assert_eq!(over_cap.to_wire_with_transport_version(1), Err(CkRv::MECHANISM_PARAM_INVALID),);
+        // The cap is v1-only: legacy still emits (the daemon rejects).
+        assert!(over_cap.to_wire_with_transport_version(0).is_ok());
+    }
+
+    /// R5/F1: structured arms always use the legacy encoding at every
+    /// capability — their contract is unchanged across versions.
+    #[test]
+    fn r5_structured_encode_ignores_transport_version() {
+        let gcm = MessageParameter::GcmMessage(GcmMessageParams {
+            iv: vec![0x01; 12],
+            iv_null_len: None,
+            iv_fixed_bits: 32,
+            iv_generator: 2,
+            tag: vec![0xAA; 16],
+            tag_null_len: None,
+            tag_bits: 128,
+        });
+        let legacy = v1_proto::MessageParameter::from(&gcm);
+        for version in [0, 1, 2] {
+            assert_eq!(
+                gcm.to_wire_with_transport_version(version),
+                Ok(legacy.clone()),
+                "structured encoding is capability-independent (v{version})",
+            );
+        }
     }
 }

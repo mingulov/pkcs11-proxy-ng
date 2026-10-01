@@ -98,8 +98,16 @@ fn decode_message_begin_contract_response(
     }
     let response_parameter = match (requested, message_effects) {
         (Some(request), Some(response)) => {
-            let decoded =
-                MessageEffects::try_from(response).map_err(|_| MessageCallError::protocol())?;
+            // R5/F1 (controller ruling, Begin leg — same matrix as the
+            // one-shot decoder): `Some(empty)` decodes to `None` for a
+            // `Raw` request only; every other `(request, Some(empty))`
+            // pair keeps the unchanged `TryFrom` rejection.
+            let decoded = match (request, response.effect.as_ref()) {
+                (MessageParameter::Raw(_), None) => MessageEffects::None,
+                _ => {
+                    MessageEffects::try_from(response).map_err(|_| MessageCallError::protocol())?
+                }
+            };
             decoded
                 .validate_for(
                     request,
@@ -183,7 +191,7 @@ impl Pkcs11Client {
                 .transpose()
                 .map_err(MessageCallError::backend)?,
             key_handle: key.0,
-            init_message_parameter: init_param.map(Into::into),
+            init_message_parameter: self.proto_message_parameter(init_param)?,
             parameter_out_spec: None,
             parameter_shape: None,
         };
@@ -216,7 +224,7 @@ impl Pkcs11Client {
             session_handle: session.0,
             mechanism: Some(Self::proto_mechanism(mechanism).map_err(MessageCallError::backend)?),
             key_handle: key.0,
-            init_message_parameter: init_param.map(Into::into),
+            init_message_parameter: self.proto_message_parameter(init_param)?,
             parameter_out_spec: Some(Self::proto_parameter_roundtrip_spec(envelope)),
             parameter_shape: Some(shape.to_proto_i32()),
         };
@@ -295,7 +303,7 @@ impl Pkcs11Client {
                 .transpose()
                 .map_err(MessageCallError::backend)?,
             key_handle: key.0,
-            init_message_parameter: init_param.map(Into::into),
+            init_message_parameter: self.proto_message_parameter(init_param)?,
             parameter_out_spec: None,
             parameter_shape: None,
         };
@@ -325,7 +333,7 @@ impl Pkcs11Client {
             session_handle: session.0,
             mechanism: Some(Self::proto_mechanism(mechanism).map_err(MessageCallError::backend)?),
             key_handle: key.0,
-            init_message_parameter: init_param.map(Into::into),
+            init_message_parameter: self.proto_message_parameter(init_param)?,
             parameter_out_spec: Some(Self::proto_parameter_roundtrip_spec(envelope)),
             parameter_shape: Some(shape.to_proto_i32()),
         };
@@ -582,7 +590,7 @@ impl Pkcs11Client {
             associated_data: Vec::new(),
             associated_data_null_len: None,
             parameter_out_spec: Some(Self::proto_parameter_roundtrip_spec(envelope)),
-            message_parameter: message_parameter.map(Into::into),
+            message_parameter: self.proto_message_parameter(message_parameter)?,
         };
         Self::fill_input(aad, &mut req.associated_data, &mut req.associated_data_null_len);
         let mut response = self
@@ -702,7 +710,7 @@ impl Pkcs11Client {
             associated_data: Vec::new(),
             associated_data_null_len: None,
             parameter_out_spec: Some(Self::proto_parameter_roundtrip_spec(envelope)),
-            message_parameter: message_parameter.map(Into::into),
+            message_parameter: self.proto_message_parameter(message_parameter)?,
         };
         Self::fill_input(aad, &mut req.associated_data, &mut req.associated_data_null_len);
         let mut response = self
@@ -1414,5 +1422,100 @@ mod begin_contract_tests {
             decode_empty_message_parameter_response(CkRv::OK.0, &[], &[], Some(mutated), &envelope)
                 .unwrap_err();
         assert_eq!(error.origin, crate::MessageCallErrorOrigin::Protocol);
+    }
+
+    /// R5/F1 audit (Rust-client edge): today every client message-param
+    /// encode site converts via the legacy `From`, so a CBC `Raw` IV emits
+    /// legacy `Raw` + version 0 — which the daemon rejects with
+    /// `MECHANISM_PARAM_INVALID` (R3 pin). Post-R5 this stays the exact
+    /// legacy-capability emission (`From` unchanged; legacy-identity pin,
+    /// green before AND after).
+    #[test]
+    fn r5_audit_raw_message_parameter_encodes_legacy_raw() {
+        let raw = MessageParameter::Raw(vec![0xA5; 16].into());
+        let wire = pkcs11_proxy_ng_proto::MessageParameter::from(&raw);
+        assert_eq!(wire.parameter_encoding_version, 0);
+        assert!(
+            matches!(wire.params, Some(pkcs11_proxy_ng_proto::message_parameter::Params::Raw(_))),
+            "client encodes Raw via the legacy arm",
+        );
+    }
+
+    fn r5_begin_acknowledged(
+        envelope: &CkParameterRoundtripSpec,
+    ) -> pkcs11_proxy_ng_proto::ParameterRoundtripResult {
+        pkcs11_proxy_ng_proto::ParameterRoundtripResult {
+            ck_rv: CkRv::OK.0,
+            returned_len: envelope.buffer_len,
+            value: envelope.buffer_present.then(Vec::new),
+        }
+    }
+
+    /// R5/F1 (controller ruling, Begin leg): a Raw request paired with the
+    /// R3 None-effects wire signal (`message_effects: Some(empty)`) decodes
+    /// to `MessageEffects::None`. RED pre-R5: the empty wire oneof fails
+    /// `TryFrom`, surfacing a protocol error.
+    #[test]
+    fn r5_begin_raw_request_with_empty_effects_wire_decodes_to_none() {
+        let requested = MessageParameter::Raw(vec![0xA5; 16].into());
+        let envelope =
+            CkParameterRoundtripSpec { buffer_present: true, buffer_len: 16, value: None };
+        let effects =
+            pkcs11_proxy_ng_proto::pkcs11_proxy_ng::v1::MessageParameterEffects { effect: None };
+        let (_, decoded) = decode_message_begin_contract_response(
+            CkRv::OK.0,
+            &[],
+            Some(r5_begin_acknowledged(&envelope)),
+            None,
+            Some(&effects),
+            &envelope,
+            Some(&requested),
+            false,
+        )
+        .expect("Raw request + empty effects wire decodes to None");
+        assert_eq!(decoded, Some(MessageEffects::None));
+    }
+
+    /// R5/F1 ruling matrix pins for the Begin leg (green before AND after):
+    /// a structured request with an empty effects message stays a protocol
+    /// error (`TryFrom` unchanged); `(None, None)` still decodes to no
+    /// effects.
+    #[test]
+    fn r5_begin_empty_effects_wire_matrix_pins() {
+        let envelope =
+            CkParameterRoundtripSpec { buffer_present: true, buffer_len: 16, value: None };
+        let effects =
+            pkcs11_proxy_ng_proto::pkcs11_proxy_ng::v1::MessageParameterEffects { effect: None };
+        for (label, requested) in [("gcm", gcm_parameter()), ("ccm", ccm_parameter())] {
+            let error = decode_message_begin_contract_response(
+                CkRv::OK.0,
+                &[],
+                Some(r5_begin_acknowledged(&envelope)),
+                None,
+                Some(&effects),
+                &envelope,
+                Some(&requested),
+                false,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.origin,
+                crate::MessageCallErrorOrigin::Protocol,
+                "{label} + empty effects wire"
+            );
+        }
+
+        let (_, decoded) = decode_message_begin_contract_response(
+            CkRv::OK.0,
+            &[],
+            Some(r5_begin_acknowledged(&envelope)),
+            None,
+            None,
+            &envelope,
+            None,
+            false,
+        )
+        .expect("(None, None) still decodes");
+        assert!(decoded.is_none());
     }
 }

@@ -556,6 +556,16 @@ async fn message_encrypt_init_with_timeout(
 
         let backend = Arc::clone(backend_ref);
         let init_param_for_response = init_param.clone();
+        // R5/F1 (plan gap): the init echo preserves the request's wire
+        // encoding — a v1-opaque request re-encoded via the legacy `From`
+        // would echo legacy `Raw` and fail the client's R3 wire
+        // validation. The request version is 0/1 here (newer versions
+        // reject pre-entry at decode).
+        let request_transport_version = req
+            .init_message_parameter
+            .as_ref()
+            .map(|param| param.parameter_encoding_version)
+            .unwrap_or(0);
         // W1-C3-26: a poisoned registry lock fails closed with
         // DEVICE_ERROR (internal daemon fault), never a panic. The lock
         // is still only acquired when no contract supplied the shape.
@@ -638,7 +648,13 @@ async fn message_encrypt_init_with_timeout(
         {
             (
                 Some(parameter_ack(&contract.caller_spec)),
-                init_param_for_response.as_ref().map(Into::into),
+                init_param_for_response
+                    .as_ref()
+                    .map(|param| param.to_wire_with_transport_version(request_transport_version))
+                    .transpose()
+                    .map_err(|_| {
+                        Status::internal("R5/F1: validated init parameter is echo-unrepresentable")
+                    })?,
             )
         } else {
             (None, None)
@@ -901,6 +917,16 @@ async fn message_decrypt_init_with_timeout(
 
         let backend = Arc::clone(backend_ref);
         let init_param_for_response = init_param.clone();
+        // R5/F1 (plan gap): the init echo preserves the request's wire
+        // encoding — a v1-opaque request re-encoded via the legacy `From`
+        // would echo legacy `Raw` and fail the client's R3 wire
+        // validation. The request version is 0/1 here (newer versions
+        // reject pre-entry at decode).
+        let request_transport_version = req
+            .init_message_parameter
+            .as_ref()
+            .map(|param| param.parameter_encoding_version)
+            .unwrap_or(0);
         // W1-C3-26: a poisoned registry lock fails closed with
         // DEVICE_ERROR (internal daemon fault), never a panic. The lock
         // is still only acquired when no contract supplied the shape.
@@ -983,7 +1009,13 @@ async fn message_decrypt_init_with_timeout(
         {
             (
                 Some(parameter_ack(&contract.caller_spec)),
-                init_param_for_response.as_ref().map(Into::into),
+                init_param_for_response
+                    .as_ref()
+                    .map(|param| param.to_wire_with_transport_version(request_transport_version))
+                    .transpose()
+                    .map_err(|_| {
+                        Status::internal("R5/F1: validated init parameter is echo-unrepresentable")
+                    })?,
             )
         } else {
             (None, None)
@@ -5023,5 +5055,128 @@ mod r4_v1_opaque_tests {
             tag_bits: 128,
         });
         assert!(message_parameter_has_null_positive(&null_positive));
+    }
+
+    fn type_only_aes_gcm() -> pkcs11_proxy_ng_proto::Mechanism {
+        pkcs11_proxy_ng_proto::Mechanism {
+            mechanism_type: CkMechanismType::AES_GCM.0,
+            params: None,
+        }
+    }
+
+    fn valid_gcm_wire_parameter() -> pkcs11_proxy_ng_proto::MessageParameter {
+        pkcs11_proxy_ng_proto::MessageParameter {
+            params: Some(pkcs11_proxy_ng_proto::message_parameter::Params::GcmMessageParams(
+                pkcs11_proxy_ng_proto::GcmMessageParams {
+                    iv: vec![0x11; 12],
+                    iv_fixed_bits: 96,
+                    iv_generator: 0,
+                    tag: vec![0; 16],
+                    tag_bits: 128,
+                    iv_null_len: None,
+                    tag_null_len: None,
+                },
+            )),
+            parameter_encoding_version: 0,
+        }
+    }
+
+    /// R5/F1 (plan gap): the init echo preserves the request's wire
+    /// encoding — a v1-opaque request echoes v1-opaque with exact bytes
+    /// (both directions), so the client's R3 wire validation accepts it;
+    /// a legacy structured request still echoes the bit-identical legacy
+    /// bytes. RED pre-R5: the v1 leg echoes legacy `Raw`.
+    #[tokio::test]
+    async fn r5_v1_opaque_init_echo_preserves_request_encoding() {
+        for direction in [Direction::Encrypt, Direction::Decrypt] {
+            let (ctx, mock, context_id, session) = setup(direction, None).await;
+            mock.set_next_message_lifecycle_action(MockMessageLifecycleAction::Return(CkRv::OK));
+            let request = pkcs11_proxy_ng_proto::MessageEncryptInitRequest {
+                client_context_id: context_id.0.clone(),
+                session_handle: session,
+                mechanism: Some(type_only_aes_cbc()),
+                key_handle: 0,
+                init_message_parameter: Some(v1_opaque_wire(vec![0xA5; 16])),
+                parameter_out_spec: Some(caller_spec(16)),
+                parameter_shape: Some(MessageParameterShape::Unmodeled.to_proto_i32()),
+            };
+            let (ck_rv, echo) = match direction {
+                Direction::Encrypt => {
+                    let response = message_encrypt_init(&ctx, Request::new(request))
+                        .await
+                        .unwrap()
+                        .into_inner();
+                    (response.ck_rv, response.init_message_parameter)
+                }
+                Direction::Decrypt => {
+                    let decrypt = pkcs11_proxy_ng_proto::MessageDecryptInitRequest {
+                        client_context_id: request.client_context_id,
+                        session_handle: request.session_handle,
+                        mechanism: request.mechanism,
+                        key_handle: request.key_handle,
+                        init_message_parameter: request.init_message_parameter,
+                        parameter_out_spec: request.parameter_out_spec,
+                        parameter_shape: request.parameter_shape,
+                    };
+                    let response = message_decrypt_init(&ctx, Request::new(decrypt))
+                        .await
+                        .unwrap()
+                        .into_inner();
+                    (response.ck_rv, response.init_message_parameter)
+                }
+            };
+            assert_eq!(ck_rv, CkRv::OK.0, "{direction:?} v1 init");
+            let echo = echo.expect("v1 init echo");
+            assert_eq!(echo.parameter_encoding_version, 1, "{direction:?} echo version");
+            match &echo.params {
+                Some(pkcs11_proxy_ng_proto::message_parameter::Params::OpaqueMessageParams(
+                    opaque,
+                )) => {
+                    assert_eq!(opaque.data, vec![0xA5; 16], "{direction:?} echo bytes");
+                    assert_eq!(opaque.declared_len, 16, "{direction:?} echo length");
+                }
+                other => panic!("{direction:?} echo must be v1-opaque, got {other:?}"),
+            }
+
+            let (ctx, mock, context_id, session) = setup(direction, None).await;
+            mock.set_next_message_lifecycle_action(MockMessageLifecycleAction::Return(CkRv::OK));
+            let gcm = valid_gcm_wire_parameter();
+            let envelope_len = std::mem::size_of::<cryptoki_sys::CK_GCM_MESSAGE_PARAMS>() as u64;
+            let encrypt = pkcs11_proxy_ng_proto::MessageEncryptInitRequest {
+                client_context_id: context_id.0.clone(),
+                session_handle: session,
+                mechanism: Some(type_only_aes_gcm()),
+                key_handle: 0,
+                init_message_parameter: Some(gcm.clone()),
+                parameter_out_spec: Some(caller_spec(envelope_len)),
+                parameter_shape: Some(MessageParameterShape::Gcm.to_proto_i32()),
+            };
+            let echo = match direction {
+                Direction::Encrypt => {
+                    message_encrypt_init(&ctx, Request::new(encrypt))
+                        .await
+                        .unwrap()
+                        .into_inner()
+                        .init_message_parameter
+                }
+                Direction::Decrypt => {
+                    let decrypt = pkcs11_proxy_ng_proto::MessageDecryptInitRequest {
+                        client_context_id: encrypt.client_context_id,
+                        session_handle: encrypt.session_handle,
+                        mechanism: encrypt.mechanism,
+                        key_handle: encrypt.key_handle,
+                        init_message_parameter: encrypt.init_message_parameter,
+                        parameter_out_spec: encrypt.parameter_out_spec,
+                        parameter_shape: encrypt.parameter_shape,
+                    };
+                    message_decrypt_init(&ctx, Request::new(decrypt))
+                        .await
+                        .unwrap()
+                        .into_inner()
+                        .init_message_parameter
+                }
+            };
+            assert_eq!(echo, Some(gcm), "{direction:?} legacy echo bit-identical");
+        }
     }
 }

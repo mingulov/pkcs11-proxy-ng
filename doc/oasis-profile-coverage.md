@@ -207,8 +207,14 @@ covers `CK_GCM_MESSAGE_PARAMS`, `CK_CCM_MESSAGE_PARAMS`, and
 message conversion, shape-bound shim reads, and the bounded Encrypt writeback
 path. These three shapes are modelled only for Encrypt/Decrypt: Encrypt is
 output-capable, Decrypt is input-only, and Sign/Verify parameters are
-empty-only. A materialized non-NULL/nonzero unmodelled parameter fails closed.
-The cited MockBackend exact-path tests cover synthetic cipher output and
+empty-only. A materialized non-NULL/nonzero unmodelled message parameter
+travels as versioned opaque bytes once the daemon advertises transport
+capability 1 or later: the shim and client forward the exact caller bytes
+with the declared length, and the daemon reconstructs the native parameter
+from those bytes. Against a daemon without the advertisement the legacy
+encoding still fails closed, and classic-path (`CK_MECHANISM`) unmodelled
+parameters are unchanged. The cited MockBackend exact-path tests cover
+synthetic cipher output and
 structured GCM, CCM, and Salsa/ChaCha Encrypt writeback without implying
 structured Sign/Verify or Decrypt writeback.
 
@@ -324,7 +330,11 @@ provider operations. Missing or stale test citations are reported explicitly.
 Message parameters are separate from `CK_MECHANISM` parameters. The modeled
 GCM, CCM, and Salsa/ChaCha message shapes apply to Encrypt/Decrypt. Encrypt
 can write parameters back; Decrypt is input-only. Sign/Verify accept empty
-parameters only. An unmodeled non-NULL, nonempty parameter is rejected.
+parameters only. An unmodeled non-NULL, nonempty message parameter travels as
+versioned opaque bytes once the daemon advertises transport capability 1 or
+later (exact caller bytes with the declared length; the daemon owns
+reconstruction); without the advertisement the legacy encoding is still
+rejected, and classic-path unmodeled parameters are unchanged.
 
 The tables below describe the recorded test coverage. **Full** means the
 function had an implementation and tests across its applicable layers; it

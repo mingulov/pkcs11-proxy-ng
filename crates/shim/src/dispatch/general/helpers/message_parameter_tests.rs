@@ -149,6 +149,33 @@ unsafe fn read_message_parameter_call_for_shape(
     stage: MessageParameterStage,
 ) -> CkResult<MessageParameterCall> {
     unsafe {
+        read_message_parameter_call_for_shape_with_transport(
+            p_parameter,
+            ul_parameter_len,
+            shape,
+            direction,
+            stage,
+            // Pre-existing tests pin the LEGACY read (capability 0); v1
+            // tests use the explicit-capability wrapper below.
+            0,
+        )
+    }
+}
+
+/// Test read with an explicit transport-capability snapshot (R5/F1).
+///
+/// # Safety
+///
+/// Same contract as `read_message_parameter_call_for_shape`.
+unsafe fn read_message_parameter_call_for_shape_with_transport(
+    p_parameter: *const std::ffi::c_void,
+    ul_parameter_len: CK_ULONG,
+    shape: MessageParameterShape,
+    direction: MessageParameterDirection,
+    stage: MessageParameterStage,
+    transport_version: u32,
+) -> CkResult<MessageParameterCall> {
+    unsafe {
         read_message_parameter_call_for_shape_with_memory(
             p_parameter,
             ul_parameter_len,
@@ -156,6 +183,7 @@ unsafe fn read_message_parameter_call_for_shape(
             direction,
             stage,
             MessageCallMemory::none(),
+            transport_version,
         )
     }
 }
@@ -1049,6 +1077,9 @@ fn message_call_ranges_reject_output_length_alias_with_embedded_storage() {
                 output.len() as u64,
                 &mut output_len,
             ),
+            // Legacy read (capability 0): these tests pin the pre-R5
+            // alias behavior, which is capability-independent.
+            0,
         )
     };
 
@@ -1076,6 +1107,9 @@ fn message_call_ranges_reject_partial_main_buffer_overlap() {
                 8,
                 &mut output_len,
             ),
+            // Legacy read (capability 0): these tests pin the pre-R5
+            // alias behavior, which is capability-independent.
+            0,
         )
     };
 
@@ -1103,6 +1137,9 @@ fn message_call_ranges_allow_exact_same_base_main_in_place() {
                 shared.len() as u64,
                 &mut output_len,
             ),
+            // Legacy read (capability 0): these tests pin the pre-R5
+            // alias behavior, which is capability-independent.
+            0,
         )
     }
     .expect("same-base plaintext/ciphertext is the one permitted alias");
@@ -1895,4 +1932,128 @@ fn gcm_message_params_lp64_layout_derives_48() {
     assert_eq!(std::mem::offset_of!(CK_GCM_MESSAGE_PARAMS, pTag), 32);
     assert_eq!(std::mem::offset_of!(CK_GCM_MESSAGE_PARAMS, ulTagBits), 40);
     assert_eq!(std::mem::size_of::<CK_GCM_MESSAGE_PARAMS>(), 48, "six 8-byte fields, no padding");
+}
+
+/// R5/F1: under transport capability ≥ 1 the Unmodeled shape (e.g. a CBC
+/// IV) reads the caller's exact bytes as v1-opaque — every direction and
+/// stage, including capabilities newer than this reader (which still
+/// applies the v1 rule it knows).
+#[test]
+fn r5_unmodeled_v1_reads_exact_caller_bytes() {
+    let iv: Vec<u8> = (0x00..0x10).collect();
+    for transport_version in [1, 2] {
+        for direction in [MessageParameterDirection::Encrypt, MessageParameterDirection::Decrypt] {
+            for stage in [
+                MessageParameterStage::Init,
+                MessageParameterStage::OneShot,
+                MessageParameterStage::Begin,
+                MessageParameterStage::Next { final_part: false },
+                MessageParameterStage::Next { final_part: true },
+            ] {
+                let call = unsafe {
+                    read_message_parameter_call_for_shape_with_transport(
+                        iv.as_ptr().cast(),
+                        iv.len() as CK_ULONG,
+                        MessageParameterShape::Unmodeled,
+                        direction,
+                        stage,
+                        transport_version,
+                    )
+                }
+                .unwrap();
+                match call.parameter() {
+                    Some(MessageParameter::Raw(bytes)) => {
+                        bytes.expose(|raw| assert_eq!(raw, iv.as_slice()))
+                    }
+                    other => panic!("v1 Unmodeled must read Raw, got {other:?}"),
+                }
+            }
+        }
+    }
+}
+
+/// R5/F1: the NULL/zero early return is capability-independent — NULL or
+/// zero-length Unmodeled parameters stay `None` (valid, no bytes) at both
+/// legacy and v1 capabilities.
+#[test]
+fn r5_unmodeled_empty_edges_stay_parameter_none_at_both_capabilities() {
+    for transport_version in [0, 1] {
+        for (label, pointer, len) in [
+            ("null/zero", std::ptr::null(), 0),
+            ("non-null/zero", std::ptr::dangling(), 0),
+            ("null/nonzero", std::ptr::null(), 16),
+        ] {
+            let call = unsafe {
+                read_message_parameter_call_for_shape_with_transport(
+                    pointer,
+                    len,
+                    MessageParameterShape::Unmodeled,
+                    MessageParameterDirection::Encrypt,
+                    MessageParameterStage::OneShot,
+                    transport_version,
+                )
+            }
+            .unwrap();
+            assert!(
+                call.parameter().is_none(),
+                "{label} stays None at capability {transport_version}",
+            );
+        }
+    }
+}
+
+/// R5/F1: inputs the v1 encoding cannot represent fail locally with
+/// `MECHANISM_PARAM_INVALID` without reading caller memory — a declared
+/// extent over the 64 KiB outer cap, or a length that cannot narrow to the
+/// address width. Exactly 64 KiB reads fine (boundary pin).
+#[test]
+fn r5_unmodeled_v1_unrepresentable_fails_locally() {
+    // Over-cap declared extent: rejected before any byte is read (the
+    // pointer is never dereferenced, so dangling is safe here).
+    for transport_version in [1, 2] {
+        let error = unsafe {
+            read_message_parameter_call_for_shape_with_transport(
+                std::ptr::dangling(),
+                64 * 1024 + 1,
+                MessageParameterShape::Unmodeled,
+                MessageParameterDirection::Encrypt,
+                MessageParameterStage::OneShot,
+                transport_version,
+            )
+        }
+        .unwrap_err();
+        assert_eq!(error, CkRv::MECHANISM_PARAM_INVALID, "capability {transport_version}");
+    }
+
+    // Unnarrowable length: rejected by the range arithmetic, never read.
+    let error = unsafe {
+        read_message_parameter_call_for_shape_with_transport(
+            std::ptr::dangling(),
+            CK_ULONG::MAX,
+            MessageParameterShape::Unmodeled,
+            MessageParameterDirection::Encrypt,
+            MessageParameterStage::OneShot,
+            1,
+        )
+    }
+    .unwrap_err();
+    assert_eq!(error, CkRv::MECHANISM_PARAM_INVALID);
+
+    // Boundary: exactly 64 KiB reads the full extent.
+    let full = vec![0xA5u8; 64 * 1024];
+    let call = unsafe {
+        read_message_parameter_call_for_shape_with_transport(
+            full.as_ptr().cast(),
+            full.len() as CK_ULONG,
+            MessageParameterShape::Unmodeled,
+            MessageParameterDirection::Encrypt,
+            MessageParameterStage::OneShot,
+            1,
+        )
+    }
+    .unwrap();
+    match call.parameter() {
+        Some(MessageParameter::Raw(bytes)) => bytes.expose(|raw| assert_eq!(raw.len(), 64 * 1024)),
+        other => panic!("64 KiB Unmodeled must read Raw, got {other:?}"),
+    }
 }

@@ -6,7 +6,8 @@ use pkcs11_proxy_ng_proto::convert::message_effects::ParameterEffectCallMode;
 use pkcs11_proxy_ng_proto::convert::message_effects::{MessageEffectContext, MessageEffects};
 use pkcs11_proxy_ng_proto::convert::message_params::{
     CcmMessageParams, GcmMessageParams, MessageParameter, MessageParameterShape,
-    Salsa20ChaCha20Poly1305MessageParams, salsa_nonce_len,
+    SUPPORTED_MESSAGE_PARAMETER_TRANSPORT_VERSION, Salsa20ChaCha20Poly1305MessageParams,
+    salsa_nonce_len,
 };
 use pkcs11_proxy_ng_types::{CkResult, CkRv};
 
@@ -215,11 +216,33 @@ pub(crate) fn validate_message_mechanism_outer(p_mechanism: CK_MECHANISM_PTR) ->
     Ok(())
 }
 
+/// 64 KiB outer-parameter cap for v1-opaque message params (S2 §3),
+/// mirrored from the proto crate's enforcement twin: the declared extent
+/// must fit. Both constants derive from S2 §3 — keep them in sync.
+const MAX_OPAQUE_MESSAGE_PARAMETER_BYTES: u64 = 64 * 1024;
+
 #[derive(Debug, Clone, Copy)]
 enum MessageParameterWriteback {
-    Gcm { iv: *mut CK_BYTE, iv_len: usize, tag: *mut CK_BYTE, tag_len: usize },
-    Ccm { nonce: *mut CK_BYTE, nonce_len: usize, mac: *mut CK_BYTE, mac_len: usize },
-    SalsaChacha { tag: *mut CK_BYTE, tag_len: usize },
+    Gcm {
+        iv: *mut CK_BYTE,
+        iv_len: usize,
+        tag: *mut CK_BYTE,
+        tag_len: usize,
+    },
+    Ccm {
+        nonce: *mut CK_BYTE,
+        nonce_len: usize,
+        mac: *mut CK_BYTE,
+        mac_len: usize,
+    },
+    SalsaChacha {
+        tag: *mut CK_BYTE,
+        tag_len: usize,
+    },
+    /// v1-opaque bytes (R5/F1): the provider never writes structured
+    /// output back into opaque input (`MessageEffects::None` validates,
+    /// the commit is a no-op), so there is no pointer snapshot to keep.
+    Opaque,
 }
 
 /// One immutable caller snapshot used for both request serialization and
@@ -345,11 +368,18 @@ unsafe fn generated_input_bytes(
 /// Shape-bound reader with the surrounding C call's memory ranges included
 /// in the pre-dereference alias check.
 ///
+/// `transport_version` is the caller's capability snapshot
+/// (`interface_probe::mechanism_parameter_transport_version`): at ≥ 1 the
+/// Unmodeled shape reads the caller's exact bytes as v1-opaque, at legacy
+/// 0 it keeps the historical fail-closed `MECHANISM_PARAM_INVALID`.
+///
 /// # Safety
 ///
 /// A non-null, positive-length `p_parameter` must designate the exact outer
-/// struct selected by `shape`; every non-null embedded pointer and non-null
-/// pointer captured by `memory` must satisfy its PKCS#11 caller contract.
+/// struct selected by `shape` (for Unmodeled under v1, a flat byte buffer
+/// readable for `ul_parameter_len` bytes); every non-null embedded pointer
+/// and non-null pointer captured by `memory` must satisfy its PKCS#11
+/// caller contract.
 pub(crate) unsafe fn read_message_parameter_call_for_shape_with_memory(
     p_parameter: *const std::ffi::c_void,
     ul_parameter_len: CK_ULONG,
@@ -357,6 +387,7 @@ pub(crate) unsafe fn read_message_parameter_call_for_shape_with_memory(
     direction: MessageParameterDirection,
     stage: MessageParameterStage,
     memory: MessageCallMemory,
+    transport_version: u32,
 ) -> CkResult<MessageParameterCall> {
     if p_parameter.is_null() || ul_parameter_len == 0 {
         validate_message_caller_ranges(memory, p_parameter, ul_parameter_len as u64, &[])?;
@@ -364,7 +395,36 @@ pub(crate) unsafe fn read_message_parameter_call_for_shape_with_memory(
     }
 
     let (parameter, writeback) = match shape {
-        MessageParameterShape::Unmodeled => return Err(CkRv::MECHANISM_PARAM_INVALID),
+        MessageParameterShape::Unmodeled => {
+            // R5/F1: under transport capability ≥ 1 the Unmodeled shape
+            // (e.g. a CBC IV) travels as v1-opaque — the exact caller
+            // bytes, with the wire encoder assigning
+            // `opaque_message_params` + version 1. Under legacy
+            // capability the historical fail-closed MPI is preserved
+            // exactly (no bytes are read). Inputs the v1 encoding
+            // cannot represent fail locally with MPI without wire
+            // emission (S2 §5).
+            if transport_version < SUPPORTED_MESSAGE_PARAMETER_TRANSPORT_VERSION {
+                return Err(CkRv::MECHANISM_PARAM_INVALID);
+            }
+            checked_caller_range(
+                p_parameter.cast(),
+                ul_parameter_len as u64,
+                CallerRangeRole::ParameterOuter,
+            )?;
+            validate_message_caller_ranges(memory, p_parameter, ul_parameter_len as u64, &[])?;
+            // The declared extent (not just the materialized buffer) must
+            // fit the 64 KiB outer cap (S2 §3); the encoder re-checks the
+            // same bound, so this is a fail-fast, not the only gate.
+            let declared_len = ul_parameter_len as u64;
+            if declared_len > MAX_OPAQUE_MESSAGE_PARAMETER_BYTES {
+                return Err(CkRv::MECHANISM_PARAM_INVALID);
+            }
+            let len = usize::try_from(declared_len).map_err(|_| CkRv::MECHANISM_PARAM_INVALID)?;
+            let bytes =
+                unsafe { std::slice::from_raw_parts(p_parameter.cast::<u8>(), len) }.to_vec();
+            (MessageParameter::Raw(bytes.into()), MessageParameterWriteback::Opaque)
+        }
         MessageParameterShape::Gcm => {
             if ul_parameter_len as usize != std::mem::size_of::<CK_GCM_MESSAGE_PARAMS>() {
                 return Err(CkRv::MECHANISM_PARAM_INVALID);
