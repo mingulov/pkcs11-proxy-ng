@@ -4,7 +4,7 @@ use crate::mechanism_registry::MechanismRegistry;
 use crate::object::CkObjectHandle;
 use crate::secret::SecretBytes;
 use crate::shape_descriptors::{
-    FlatDecision, FlatGrant, Operation, ParamAbi, decide_flat_for_registry,
+    FlatDecision, FlatGrant, Operation, OuterKind, ParamAbi, decide_flat_for_registry,
 };
 
 /// Mechanism type identifier.
@@ -1918,6 +1918,143 @@ impl ValidatedMechanismParams {
     /// The stored Flat grant (`Some` only for validated Flat).
     pub fn flat_grant(&self) -> Option<FlatGrant> {
         self.flat_grant
+    }
+
+    /// Classic sanitize policy (S2 §6 matrix; R20). Pure: no I/O, no
+    /// allocation, no registry access — Flat classification reuses the
+    /// stored [`FlatGrant`](crate::shape_descriptors::FlatGrant) instead
+    /// of re-deciding policy.
+    ///
+    /// OFF (default `false`): always `Ok` — stray flat bytes, safe
+    /// truncated forms, and outer/embedded NULL-nonzero forward to the
+    /// backend untouched. ON: parameterless+Flat → reject; struct-prefix
+    /// Flat → reject; canonical byte-buffer Flat → allow (subject to the
+    /// upstream mechanism policy, already enforced before validation);
+    /// NULL/nonzero → reject (D3: NULL-huge rejects regardless — no D3
+    /// forwarding under sanitize); legacy Raw → always reject. Every
+    /// rejection is `PARAM_INVALID` (`ARGUMENTS_BAD` stays with the
+    /// pre-existing whole-mechanism/data-pointer gates). Typed params
+    /// pass under both settings: R16 presence/length consistency already
+    /// gated them, and scalar/operation semantics belong to the backend —
+    /// no provider-specific scalar conformance (forbidden by S2 §6).
+    pub fn check_classic_sanitize_policy(&self, sanitize: bool) -> Result<(), CkRv> {
+        use CkMechanismParams as P;
+        if !sanitize {
+            return Ok(());
+        }
+        match &self.mechanism.params {
+            None => Ok(()),
+            Some(P::Flat(_)) => {
+                match self.flat_grant.map(|grant| grant.resolved.outer_kind()) {
+                    // Canonical byte-buffer Flat (IV/nonce blobs, GMAC short
+                    // form): the only Flat form sanitize admits.
+                    Some(OuterKind::ByteBuffer) => Ok(()),
+                    // Parameterless+Flat and struct-prefix Flat (scalar or
+                    // pointer-bearing) reject; a missing grant (unreachable:
+                    // validation stores one for every accepted Flat) and
+                    // NestedOrOutput (unreachable: validation denies it)
+                    // fail closed.
+                    _ => Err(CkRv::MECHANISM_PARAM_INVALID),
+                }
+            }
+            // D3: NULL-huge rejects regardless — no D3 forwarding under
+            // sanitize. NULL/zero (the canonical null) stays allowed.
+            Some(P::Null { declared_len, .. }) => {
+                if *declared_len == 0 {
+                    Ok(())
+                } else {
+                    Err(CkRv::MECHANISM_PARAM_INVALID)
+                }
+            }
+            // Unreachable: transport validation rejects legacy Raw
+            // always-on, before the sanitizer runs. The fail-closed arm
+            // stays so a future constructor cannot silently forward Raw.
+            Some(P::Raw(_)) => Err(CkRv::MECHANISM_PARAM_INVALID),
+            // Typed params (exhaustive — no catch-all, so a future variant
+            // cannot silently skip this gate): R16 presence/length
+            // consistency already gated them; scalar/operation semantics
+            // belong to the backend. Enum order mirrors the definition.
+            Some(
+                P::RsaPkcsPss(_)
+                | P::RsaPkcsOaep(_)
+                | P::Gcm(_)
+                | P::Ecdh1Derive(_)
+                | P::Iv(_)
+                | P::Rc5(_)
+                | P::Rc5MacGeneral(_)
+                | P::Rc2MacGeneral(_)
+                | P::Xeddsa(_)
+                | P::TlsMac(_)
+                | P::AesCtr(_)
+                | P::CamelliaCtr(_)
+                | P::Rc2Cbc(_)
+                | P::Rc5Cbc(_)
+                | P::AesCbcEncryptData(_)
+                | P::DesCbcEncryptData(_)
+                | P::AriaCbcEncryptData(_)
+                | P::CamelliaCbcEncryptData(_)
+                | P::SeedCbcEncryptData(_)
+                | P::Ccm(_)
+                | P::ChaCha20(_)
+                | P::Salsa20(_)
+                | P::Salsa20ChaCha20Poly1305(_)
+                | P::GcmWrap(_)
+                | P::CcmWrap(_)
+                | P::Ecdh2Derive(_)
+                | P::EcmqvDerive(_)
+                | P::X942Dh1Derive(_)
+                | P::X942Dh2Derive(_)
+                | P::X942MqvDerive(_)
+                | P::Hkdf(_)
+                | P::Eddsa(_)
+                | P::Gostr3410Derive(_)
+                | P::KeaDerive(_)
+                | P::EcdhAesKeyWrap(_)
+                | P::RsaAesKeyWrap(_)
+                | P::Gostr3410KeyWrap(_)
+                | P::KeyWrapSetOaep(_)
+                | P::Pbe(_)
+                | P::Pkcs5Pbkd2(_)
+                | P::TlsPrf(_)
+                | P::TlsKdf(_)
+                | P::Ssl3MasterKeyDerive(_)
+                | P::Tls12MasterKeyDerive(_)
+                | P::Tls12ExtendedMasterKeyDerive(_)
+                | P::Ssl3KeyMat(_)
+                | P::WtlsMasterKeyDerive(_)
+                | P::WtlsPrf(_)
+                | P::WtlsKeyMat(_)
+                | P::IkePrfDerive(_)
+                | P::Ike1PrfDerive(_)
+                | P::Ike1ExtendedDerive(_)
+                | P::Ike2PrfPlusDerive(_)
+                | P::Sp800108Kdf(_)
+                | P::Sp800108FeedbackKdf(_)
+                | P::X3dhInitiate(_)
+                | P::X3dhRespond(_)
+                | P::X2RatchetInitialize(_)
+                | P::X2RatchetRespond(_)
+                | P::Otp(_)
+                | P::Kip(_)
+                | P::CmsSig(_)
+                | P::SkipjackPrivateWrap(_)
+                | P::SkipjackRelayx(_)
+                | P::MacGeneral(_)
+                | P::ObjectHandle(_)
+                | P::Extract(_)
+                | P::SignAdditionalContext(_)
+                | P::Kmac(_)
+                | P::MuGen(_)
+                | P::KeyDerivationString(_)
+                | P::Ecies(_)
+                | P::AesCmacKeyDerivation(_)
+                | P::Dilithium(_)
+                | P::Kyber(_)
+                | P::HdKeyDerive(_)
+                | P::VendorObjectExtract(_)
+                | P::VendorObjectInsert(_),
+            ) => Ok(()),
+        }
     }
 
     /// Substitute embedded virtual handle integers with backend values

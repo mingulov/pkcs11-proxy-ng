@@ -22,7 +22,7 @@ use super::super::convert_template_opt;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::mechanism_input::{
     check_operator_exclusion, current_registry_snapshot, daemon_validation_abis,
-    validate_mechanism_transport,
+    sanitize_mechanism_input, validate_mechanism_transport,
 };
 use super::super::service_utils::{
     ExactCompletion, check_sanitize, ensure_private_mint_allowed, input_from_wire, parse_mechanism,
@@ -165,7 +165,17 @@ pub(crate) async fn encapsulate_key(
     let is_private = template_declares_private_object(template_view);
     let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
-    // TODO(R20): insert sanitize_mechanism_input(validated) → backend call.
+    // R20 (S2 §6): optional sanitizer between remap and backend call.
+    let validated = match sanitize_mechanism_input(ctx.sanitize_inputs, validated) {
+        Ok(validated) => validated,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyResponse {
+                ck_rv: rv.0,
+                ciphertext: Vec::new(),
+                key_handle: 0,
+            }));
+        }
+    };
     let result = spawn_backend(move || {
         backend.encapsulate_key(session, &validated, public_key, template.as_deref())
     })
@@ -326,7 +336,16 @@ pub(crate) async fn decapsulate_key(
         }));
     }
     let backend = Arc::clone(backend_ref);
-    // TODO(R20): insert sanitize_mechanism_input(validated) → backend call.
+    // R20 (S2 §6): optional sanitizer between remap and backend call.
+    let validated = match sanitize_mechanism_input(ctx.sanitize_inputs, validated) {
+        Ok(validated) => validated,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::DecapsulateKeyResponse {
+                ck_rv: rv.0,
+                key_handle: 0,
+            }));
+        }
+    };
     let result = spawn_backend(move || {
         backend.decapsulate_key(
             session,
@@ -548,7 +567,24 @@ pub(crate) async fn encapsulate_key_exact(
     let is_private = template_declares_private_object(template_view);
     let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
-    // TODO(R20): insert sanitize_mechanism_input(validated) → backend call.
+    // R20 (S2 §6): optional sanitizer between remap and backend call.
+    // (T2 shape: errors carry apply_* = Some(false), mirroring the
+    // adjacent arms.)
+    let validated = match sanitize_mechanism_input(ctx.sanitize_inputs, validated) {
+        Ok(validated) => validated,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
+                result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
+                    apply_returned_len: Some(false),
+                    apply_object_handle: Some(false),
+                    ck_rv: rv.0,
+                    returned_len: 0,
+                    value: None,
+                    object_handle: 0,
+                }),
+            }));
+        }
+    };
     let result = spawn_backend_exact(move || {
         ExactCompletion::capture(backend.encapsulate_key_exact(
             session,

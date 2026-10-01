@@ -196,7 +196,9 @@ pub(super) async fn parameter_output_exact(
                     None => return Ok(Err(CkRv::FUNCTION_NOT_SUPPORTED)),
                 };
                 let backend = backend_ref.clone();
-                // TODO(R20): insert sanitize_mechanism_input(p.mechanism) → backend call.
+                // R20: p.mechanism arrives sanitized from prepare_wrap (the
+                // single wrap funnel) — no downstream re-check before the
+                // backend call.
                 spawn_backend_exact(move || {
                     associated_data.expose(|aad_raw| {
                         if let Some(parameter) = typed {

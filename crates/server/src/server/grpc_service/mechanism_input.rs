@@ -11,8 +11,8 @@
 //!
 //! Handler order (exact, S2 §6): session/key resolution → `parse_mechanism`
 //! → [`check_operator_exclusion`] → `mechanism_permitted` → this gate →
-//! `remap_mechanism_handles` → (R20 sanitizer) → backend call. Every stage
-//! shares the request's single [`current_registry_snapshot`].
+//! `remap_mechanism_handles` → [`sanitize_mechanism_input`] → backend call.
+//! Every stage shares the request's single [`current_registry_snapshot`].
 
 use pkcs11_proxy_ng_types::shape_descriptors::{Operation, ParamAbi};
 use pkcs11_proxy_ng_types::{
@@ -93,6 +93,33 @@ pub fn validate_mechanism_transport(
         return Err(CkRv::MECHANISM_PARAM_INVALID);
     }
     ValidatedMechanismParams::validate(mechanism, registry, operation, local_abi, backend_abi)
+}
+
+/// Optional classic sanitizer — the S2 §6 policy layer (R20).
+///
+/// Runs between `remap_mechanism_handles` and the backend call at every
+/// R13 site (the wrap funnel sanitizes once inside `prepare_wrap` for
+/// all four wrap callers). Pure policy over the validated newtype: the
+/// matrix itself is
+/// [`ValidatedMechanismParams::check_classic_sanitize_policy`](pkcs11_proxy_ng_types::ValidatedMechanismParams),
+/// shared with the backend's ON/zero-call pin so both layers enforce one
+/// implementation.
+///
+/// - `sanitize` is the request's `ctx.sanitize_inputs` toggle (ADR-0010,
+///   default false). OFF passes the newtype through untouched (bit-for-bit
+///   with the pre-R20 path); ON applies the S2 §6 matrix.
+/// - Every sanitizer rejection is `PARAM_INVALID` — never `ARGUMENTS_BAD`
+///   (that RV stays with the pre-existing whole-mechanism/data-pointer
+///   gates, e.g. the whole-NULL-mechanism check at each handler head).
+/// - Legacy `Raw` never reaches this function: transport validation
+///   rejects it always-on, under both toggle settings (the policy keeps a
+///   fail-closed `Raw` arm for defense in depth).
+pub fn sanitize_mechanism_input(
+    sanitize: bool,
+    validated: ValidatedMechanismParams,
+) -> Result<ValidatedMechanismParams, CkRv> {
+    validated.check_classic_sanitize_policy(sanitize)?;
+    Ok(validated)
 }
 
 #[cfg(test)]
@@ -570,5 +597,202 @@ mod transport_validation_tests {
         validate(&reg, &gcm(PointerBytes::null_len(0))).unwrap();
         validate(&reg, &gcm(PointerBytes::null_len(41))).unwrap();
         validate(&reg, &gcm(PointerBytes::present_copy(b"iv-bytes"))).unwrap();
+    }
+
+    // ─── R20 sanitizer matrix (S2 §6) ────────────────────────────────
+
+    /// D3 probe: NULL lengths above 512 MiB forward by default (OFF) but
+    /// reject under sanitize ON (no D3 forwarding under sanitize).
+    const D3_HUGE_NULL_LEN: u64 = 512 * 1024 * 1024 + 1;
+
+    fn sanitize_on(validated: &ValidatedMechanismParams) -> Result<ValidatedMechanismParams, CkRv> {
+        sanitize_mechanism_input(true, validated.clone())
+    }
+
+    fn sanitize_off(
+        validated: &ValidatedMechanismParams,
+    ) -> Result<ValidatedMechanismParams, CkRv> {
+        sanitize_mechanism_input(false, validated.clone())
+    }
+
+    /// Every sanitizer rejection is `PARAM_INVALID` — never `ARGUMENTS_BAD`
+    /// (that RV stays with the pre-existing whole-mechanism/data-pointer
+    /// gates).
+    fn assert_sanitizer_reject(result: Result<ValidatedMechanismParams, CkRv>, case: &str) {
+        let rv = result.err().unwrap_or_else(|| panic!("{case}: sanitizer ON must reject"));
+        assert_eq!(rv, CkRv::MECHANISM_PARAM_INVALID, "{case}: sanitizer RV");
+        assert_ne!(rv, CkRv::ARGUMENTS_BAD, "{case}: never ARGUMENTS_BAD");
+    }
+
+    fn assert_sanitizer_allow(
+        result: Result<ValidatedMechanismParams, CkRv>,
+        expected: &ValidatedMechanismParams,
+        case: &str,
+    ) {
+        let back = result.unwrap_or_else(|rv| panic!("{case}: sanitizer must allow, got {rv:?}"));
+        assert_eq!(&back, expected, "{case}: allowed values pass through unchanged");
+    }
+
+    fn gcm_with_iv(iv_presence: PointerBytes) -> CkMechanism {
+        CkMechanism {
+            mechanism_type: CkMechanismType(AES_GCM),
+            params: Some(CkMechanismParams::Gcm(GcmParams {
+                iv_bits: 96,
+                iv_buffer_len: 12,
+                tag_bits: 128,
+                iv_presence,
+                aad_presence: PointerBytes::present_copy(b""),
+            })),
+        }
+    }
+
+    #[test]
+    fn sanitize_off_forwards_every_matrix_row() {
+        // OFF (default false) is bit-for-bit with the pre-R20 path: every
+        // validated row forwards untouched.
+        let reg_struct = registry(&[("aes_cbc_encrypt_data", AES_CBC)], &[], &[]);
+        let reg_bytes = registry(&[("iv", AES_CBC)], &[], &[]);
+        let reg_paramless = registry(&[], &[AES_CBC], &[]);
+        let reg_gcm = registry(&[("gcm", AES_GCM)], &[], &[]);
+        let rows: Vec<(&str, ValidatedMechanismParams)> = vec![
+            (
+                "parameterless+Flat",
+                validate(&reg_paramless, &flat_mech(AES_CBC, "iv", 16, LP64)).unwrap(),
+            ),
+            (
+                "struct-prefix Flat",
+                validate(&reg_struct, &flat_mech(AES_CBC, "aes_cbc_encrypt_data", 8, LP64))
+                    .unwrap(),
+            ),
+            (
+                "byte-buffer Flat",
+                validate(&reg_bytes, &flat_mech(AES_CBC, "iv", 16, LP64)).unwrap(),
+            ),
+            ("NULL/nonzero", validate(&reg_bytes, &null_mech(AES_CBC, 41)).unwrap()),
+            ("NULL/zero", validate(&reg_bytes, &null_mech(AES_CBC, 0)).unwrap()),
+            (
+                "NULL/huge (D3)",
+                validate(&reg_bytes, &null_mech(AES_CBC, D3_HUGE_NULL_LEN)).unwrap(),
+            ),
+            (
+                "no params",
+                validate(
+                    &reg_bytes,
+                    &CkMechanism { mechanism_type: CkMechanismType(AES_CBC), params: None },
+                )
+                .unwrap(),
+            ),
+            (
+                "typed Iv",
+                validate(
+                    &reg_bytes,
+                    &CkMechanism {
+                        mechanism_type: CkMechanismType(AES_CBC),
+                        params: Some(CkMechanismParams::Iv(IvParams { iv: vec![1, 2, 3] })),
+                    },
+                )
+                .unwrap(),
+            ),
+            (
+                "typed Gcm with embedded NULL IV",
+                validate(&reg_gcm, &gcm_with_iv(PointerBytes::null_len(12))).unwrap(),
+            ),
+        ];
+        for (case, validated) in &rows {
+            assert_sanitizer_allow(sanitize_off(validated), validated, case);
+        }
+    }
+
+    #[test]
+    fn sanitize_on_rejects_parameterless_flat() {
+        let reg = registry(&[], &[AES_CBC], &[]);
+        let validated = validate(&reg, &flat_mech(AES_CBC, "iv", 16, LP64)).unwrap();
+        assert_sanitizer_reject(sanitize_on(&validated), "parameterless+Flat");
+    }
+
+    #[test]
+    fn sanitize_on_rejects_struct_prefix_flat() {
+        let reg = registry(&[("aes_cbc_encrypt_data", AES_CBC)], &[], &[]);
+        let validated =
+            validate(&reg, &flat_mech(AES_CBC, "aes_cbc_encrypt_data", 8, LP64)).unwrap();
+        assert_sanitizer_reject(sanitize_on(&validated), "struct-prefix Flat");
+    }
+
+    #[test]
+    fn sanitize_on_allows_canonical_byte_buffer_flat() {
+        let reg = registry(&[("iv", AES_CBC)], &[], &[]);
+        for len in [0, 1, 16] {
+            let validated = validate(&reg, &flat_mech(AES_CBC, "iv", len, LP64)).unwrap();
+            assert_sanitizer_allow(
+                sanitize_on(&validated),
+                &validated,
+                &format!("byte-buffer Flat len {len}"),
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_on_rejects_null_nonzero_allows_null_zero() {
+        let reg = registry(&[("iv", AES_CBC)], &[], &[]);
+        let nonzero = validate(&reg, &null_mech(AES_CBC, 41)).unwrap();
+        assert_sanitizer_reject(sanitize_on(&nonzero), "NULL/nonzero");
+        let zero = validate(&reg, &null_mech(AES_CBC, 0)).unwrap();
+        assert_sanitizer_allow(sanitize_on(&zero), &zero, "NULL/zero");
+    }
+
+    #[test]
+    fn sanitize_on_rejects_null_huge_d3() {
+        // D3: NULL-huge forwards by default (OFF) but rejects under
+        // sanitize ON regardless.
+        let reg = registry(&[("iv", AES_CBC)], &[], &[]);
+        let huge = validate(&reg, &null_mech(AES_CBC, D3_HUGE_NULL_LEN)).unwrap();
+        assert_sanitizer_reject(sanitize_on(&huge), "NULL/huge D3 ON");
+        assert_sanitizer_allow(sanitize_off(&huge), &huge, "NULL/huge D3 OFF");
+    }
+
+    #[test]
+    fn sanitize_on_allows_none_and_typed() {
+        // The matrix governs the outer form (Flat/Null/Raw); typed params
+        // stay allowed under ON — including embedded NULL-nonzero, which
+        // is an R16/R19 typed-path concern, not structure policy. (No
+        // provider-specific scalar conformance — forbidden by S2 §6.)
+        let reg = registry(&[("iv", AES_CBC)], &[], &[]);
+        let none =
+            validate(&reg, &CkMechanism { mechanism_type: CkMechanismType(AES_CBC), params: None })
+                .unwrap();
+        assert_sanitizer_allow(sanitize_on(&none), &none, "no params ON");
+        let typed = validate(
+            &reg,
+            &CkMechanism {
+                mechanism_type: CkMechanismType(AES_CBC),
+                params: Some(CkMechanismParams::Iv(IvParams { iv: vec![1, 2, 3] })),
+            },
+        )
+        .unwrap();
+        assert_sanitizer_allow(sanitize_on(&typed), &typed, "typed Iv ON");
+        let reg_gcm = registry(&[("gcm", AES_GCM)], &[], &[]);
+        let embedded_null = validate(&reg_gcm, &gcm_with_iv(PointerBytes::null_len(12))).unwrap();
+        assert_sanitizer_allow(sanitize_on(&embedded_null), &embedded_null, "typed Gcm+NULL-IV ON");
+    }
+
+    #[test]
+    fn legacy_raw_always_rejected_regardless_of_toggle() {
+        // Legacy Raw fails closed at transport validation — always-on, so
+        // the toggle cannot rescue it and the sanitizer never sees it (the
+        // policy keeps a fail-closed Raw arm for defense in depth).
+        let reg = registry(&[("iv", AES_CBC)], &[], &[]);
+        let mechanism = CkMechanism {
+            mechanism_type: CkMechanismType(AES_CBC),
+            params: Some(CkMechanismParams::Raw(RawMechanismParams {
+                data: SecretBytes::copy_from_slice(b"AB"),
+            })),
+        };
+        for toggle in [false, true] {
+            let rv = validate(&reg, &mechanism)
+                .err()
+                .unwrap_or_else(|| panic!("legacy Raw must reject with sanitize={toggle}"));
+            assert_eq!(rv, CkRv::MECHANISM_PARAM_INVALID, "sanitize={toggle}: Raw RV");
+            assert_ne!(rv, CkRv::ARGUMENTS_BAD, "sanitize={toggle}: never ARGUMENTS_BAD");
+        }
     }
 }

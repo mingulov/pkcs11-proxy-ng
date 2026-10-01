@@ -28,6 +28,8 @@ mod r19_init_retention_tests;
 #[cfg(test)]
 mod r19_typed_tail_tests;
 #[cfg(test)]
+mod r20_sanitize_tests;
+#[cfg(test)]
 mod x3dh_tests;
 
 /// Owns the `CK_MECHANISM` and any backing storage that `pParameter` points

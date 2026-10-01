@@ -14,7 +14,7 @@ use super::super::authorization::mechanism_permitted;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::mechanism_input::{
     check_operator_exclusion, current_registry_snapshot, daemon_validation_abis,
-    validate_mechanism_transport,
+    sanitize_mechanism_input, validate_mechanism_transport,
 };
 use super::super::service_utils::{
     check_sanitize, ck_rv_only, input_from_wire, parse_mechanism, resolve_session,
@@ -124,7 +124,13 @@ pub(crate) async fn verify_init(
         };
 
     let backend = Arc::clone(backend_ref);
-    // TODO(R20): insert sanitize_mechanism_input(validated) → backend call.
+    // R20 (S2 §6): optional sanitizer between remap and backend call.
+    let validated = match sanitize_mechanism_input(ctx.sanitize_inputs, validated) {
+        Ok(validated) => validated,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::VerifyInitResponse { ck_rv: rv.0 }));
+        }
+    };
     let result = spawn_backend(move || backend.verify_init(session, &validated, key)).await?;
     Ok(Response::new(pkcs11_proxy_ng_proto::VerifyInitResponse { ck_rv: ck_rv_only(result) }))
 }
@@ -371,7 +377,15 @@ pub(crate) async fn verify_recover_init(
         };
 
     let backend = Arc::clone(backend_ref);
-    // TODO(R20): insert sanitize_mechanism_input(validated) → backend call.
+    // R20 (S2 §6): optional sanitizer between remap and backend call.
+    let validated = match sanitize_mechanism_input(ctx.sanitize_inputs, validated) {
+        Ok(validated) => validated,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::VerifyRecoverInitResponse {
+                ck_rv: rv.0,
+            }));
+        }
+    };
     let result =
         spawn_backend(move || backend.verify_recover_init(session, &validated, key)).await?;
     Ok(Response::new(pkcs11_proxy_ng_proto::VerifyRecoverInitResponse {

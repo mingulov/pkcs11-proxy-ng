@@ -11,7 +11,7 @@ use super::super::authorization::{extract_is_permitted, mechanism_permitted};
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::mechanism_input::{
     check_operator_exclusion, current_registry_snapshot, daemon_validation_abis,
-    validate_mechanism_transport,
+    sanitize_mechanism_input, validate_mechanism_transport,
 };
 use super::super::service_utils::{parse_mechanism, resolve_session_and_two_objects};
 use crate::server::context_manager::ClientContextId;
@@ -87,5 +87,15 @@ pub(in crate::server::grpc_service) async fn prepare_wrap(
     if !extract_is_permitted(ctx, context_id, virtual_session, virtual_key).await? {
         return Ok(Err(CkRv::KEY_FUNCTION_NOT_PERMITTED));
     }
+    // R20 (S2 §6): optional sanitizer between remap and backend call —
+    // applied once here in the single wrap funnel (after the extract
+    // gate, so extract-denied requests keep their existing RV), so all
+    // four wrap callers (wrap, authenticated, byte-exact,
+    // parameter-exact) receive a sanitized mechanism with no downstream
+    // re-check.
+    let validated = match sanitize_mechanism_input(ctx.sanitize_inputs, validated) {
+        Ok(validated) => validated,
+        Err(rv) => return Ok(Err(rv)),
+    };
     Ok(Ok(PreparedWrap { session, wrapping_key, key, mechanism: validated }))
 }

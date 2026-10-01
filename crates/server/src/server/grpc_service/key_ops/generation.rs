@@ -15,7 +15,7 @@ use super::super::convert_template_opt;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::mechanism_input::{
     check_operator_exclusion, current_registry_snapshot, daemon_validation_abis,
-    validate_mechanism_transport,
+    sanitize_mechanism_input, validate_mechanism_transport,
 };
 use super::super::service_utils::{
     ensure_private_mint_allowed, ensure_private_use_allowed, gate_object_handle, parse_mechanism,
@@ -238,7 +238,17 @@ async fn generate_key_pair_impl(
     let private_is_private = template_declares_private_object(private_view);
     let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
-    // TODO(R20): insert sanitize_mechanism_input(validated) → backend call.
+    // R20 (S2 §6): optional sanitizer between remap and backend call.
+    let validated = match sanitize_mechanism_input(ctx.sanitize_inputs, validated) {
+        Ok(validated) => validated,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyPairResponse {
+                ck_rv: rv.0,
+                public_key_handle: 0,
+                private_key_handle: 0,
+            }));
+        }
+    };
     let result = spawn_backend(move || {
         backend.generate_key_pair(
             session,
@@ -455,7 +465,17 @@ async fn generate_key_impl(
     let is_private = template_declares_private_object(template_view);
     let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
-    // TODO(R20): insert sanitize_mechanism_input(validated) → backend call.
+    // R20 (S2 §6): optional sanitizer between remap and backend call.
+    let validated = match sanitize_mechanism_input(ctx.sanitize_inputs, validated) {
+        Ok(validated) => validated,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyResponse {
+                ck_rv: rv.0,
+                key_handle: 0,
+                mechanism_out: None,
+            }));
+        }
+    };
     let result = spawn_backend(move || {
         backend.generate_key_with_output(session, &validated, template.as_deref())
     })
@@ -714,7 +734,17 @@ async fn derive_key_impl(
     let is_private = template_declares_private_object(template_view);
     let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
-    // TODO(R20): insert sanitize_mechanism_input(validated) → backend call.
+    // R20 (S2 §6): optional sanitizer between remap and backend call.
+    let validated = match sanitize_mechanism_input(ctx.sanitize_inputs, validated) {
+        Ok(validated) => validated,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::DeriveKeyResponse {
+                ck_rv: rv.0,
+                key_handle: 0,
+                mechanism_out: None,
+            }));
+        }
+    };
     let result = spawn_backend(move || {
         backend.derive_key_with_output_result(session, &validated, base_key, template.as_deref())
     })
