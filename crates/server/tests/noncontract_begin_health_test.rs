@@ -138,7 +138,11 @@ impl Harness {
         let mechanism =
             // T12: `Mechanism` is `ZeroizeOnDrop`; struct-update syntax is
             // forbidden — all fields are spelled out.
-            Some(wire::Mechanism { mechanism_type: CKM_AES_GCM as u64, params: None });
+            Some(wire::Mechanism {
+                mechanism_type: CKM_AES_GCM as u64,
+                params: None,
+                parameter_encoding_version: 0,
+            });
         let rv = if decrypt {
             self.rpc
                 .message_decrypt_init(wire::MessageDecryptInitRequest {

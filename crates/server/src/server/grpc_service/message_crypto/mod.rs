@@ -3049,6 +3049,7 @@ mod lifecycle_transition_tests {
         pkcs11_proxy_ng_proto::Mechanism {
             mechanism_type: CkMechanismType::AES_GCM.0,
             params: None,
+            parameter_encoding_version: 0,
         }
     }
 
@@ -4758,6 +4759,7 @@ mod r4_v1_opaque_tests {
         pkcs11_proxy_ng_proto::Mechanism {
             mechanism_type: CkMechanismType::AES_CBC.0,
             params: None,
+            parameter_encoding_version: 0,
         }
     }
 
@@ -5061,6 +5063,7 @@ mod r4_v1_opaque_tests {
         pkcs11_proxy_ng_proto::Mechanism {
             mechanism_type: CkMechanismType::AES_GCM.0,
             params: None,
+            parameter_encoding_version: 0,
         }
     }
 

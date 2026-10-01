@@ -511,6 +511,7 @@ mod tests {
                 mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {
                     mechanism_type: CkMechanismType::RSA_PKCS.0,
                     params: None,
+                    parameter_encoding_version: 0,
                 }),
                 public_key_handle: virtual_public_key,
                 template: Vec::new(),

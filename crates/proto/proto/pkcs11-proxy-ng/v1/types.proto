@@ -101,7 +101,25 @@ message Mechanism {
     ExtractParams extract_params = 78;
     KmacParams kmac_params = 79;
     MuGenParams mu_gen_params = 80;
+    // R6 v1 encoding (S2 §3): flat caller bytes / NULL + declared length
+    // for classic mechanisms. Valid only with `parameter_encoding_version
+    // == 1`; legacy `raw_mechanism_params` stays rejected with
+    // PARAM_INVALID at every version.
+    FlatMechanismParams flat_mechanism_params = 81;
+    NullMechanismParams null_mechanism_params = 82;
   }
+  // Classic mechanism-parameter transport version (S2 §3; outside the oneof
+  // so it coexists with Flat/Null). Absent/zero = legacy encoding, legacy
+  // decode. 1 = this contract. A newer daemon keeps accepting older
+  // encodings; a v1 shim facing capability 2 uses v1 (never legacy, never
+  // an error). A per-message version newer than the daemon understands is
+  // FUNCTION_NOT_SUPPORTED pre-entry; a discovery capability newer than the
+  // shim knows is NOT an error (the shim uses the newest version it speaks).
+  // Legacy NULL-bool reconciliation: v0 `iv_null`/`aad_null`/`source_null`
+  // keep legacy meaning (NULL only expressible at length zero); v1 is
+  // presence-only and a v1 decoder rejects any set legacy bool as
+  // contradictory metadata.
+  uint32 parameter_encoding_version = 83;
 }
 
 // CK_KIP_PARAMS — placed in types.proto (references Mechanism).
