@@ -696,6 +696,8 @@ mod tests {
                 salt: Vec::new().into(),
                 salt_key_handle: CkObjectHandle(0xDEAD_BEEF),
                 info: Vec::new().into(),
+                salt_presence: PointerBytes::present_copy(&[]),
+                info_presence: PointerBytes::present_copy(&[]),
             })),
         };
         let req = pkcs11_proxy_ng_proto::WrapKeyRequest {

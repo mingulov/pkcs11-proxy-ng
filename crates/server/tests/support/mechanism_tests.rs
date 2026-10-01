@@ -11,7 +11,7 @@ use pkcs11_proxy_ng_types::{
     AesCbcEncryptDataParams, AesCtrParams, CkAttribute, CkAttributeType, CkAttributeValue, CkInBuf,
     CkKdf, CkKeyType, CkMechanism, CkMechanismParams, CkMechanismType, CkMgf, CkOaepSource,
     CkObjectClass, CkObjectHandle, CkResult, CkSessionHandle, Ecdh1DeriveParams, HkdfParams,
-    IvParams, RsaPkcsOaepParams, RsaPkcsPssParams,
+    IvParams, PointerBytes, RsaPkcsOaepParams, RsaPkcsPssParams,
 };
 
 use super::get_attribute_bytes;
@@ -533,6 +533,7 @@ pub async fn test_rsa_oaep_encrypt_decrypt(
         mgf: CkMgf::MGF1_SHA1,
         source: CkOaepSource::DATA_SPECIFIED,
         source_data: Vec::new().into(),
+        source_data_presence: PointerBytes::from_legacy(&[], true),
 
         source_null: true,
     };
@@ -611,6 +612,8 @@ pub async fn test_ecdh1_derive(
             kdf: CkKdf::NULL,
             shared_data: Vec::new().into(),
             public_data: bob_ec_point.clone(),
+            shared_data_presence: PointerBytes::present_copy(&[]),
+            public_data_presence: PointerBytes::present_copy(&bob_ec_point),
         })),
     };
 
@@ -693,6 +696,8 @@ pub async fn test_hkdf_derive(
             salt: salt.to_vec().into(),
             salt_key_handle: CkObjectHandle(0), // not used with DATA salt
             info: info.to_vec().into(),
+            salt_presence: PointerBytes::present_copy(salt),
+            info_presence: PointerBytes::present_copy(info),
         })),
     };
 
@@ -773,6 +778,9 @@ pub async fn test_aes_cbc_encrypt_data_derive(
                 .chain(std::iter::repeat_n(0u8, 8))
                 .collect::<Vec<u8>>()
                 .into(), // 32 bytes (multiple of 16)
+            data_presence: PointerBytes::present_copy(
+                &[b"data to derive key from!".as_slice(), &[0u8; 8][..]].concat(),
+            ),
         })),
     };
 

@@ -12,13 +12,76 @@ use pkcs11_proxy_ng_types::{
     AesCbcEncryptDataParams, AesCtrParams, AriaCbcEncryptDataParams, CamelliaCbcEncryptDataParams,
     CamelliaCtrParams, CcmParams, CcmWrapParams, ChaCha20Params, CkGeneratorFunction, CkKdf,
     CkMechanism, CkMechanismFlags, CkMechanismInfo, CkMechanismParams, CkMechanismType, CkMgf,
-    CkOaepSource, CkObjectHandle, CkRv, DesCbcEncryptDataParams, Ecdh1DeriveParams, ExtractParams,
-    FlatParams, GcmParams, GcmWrapParams, IvParams, KeyDerivationStringData, KmacParams,
+    CkOaepSource, CkObjectHandle, CkRv, DesCbcEncryptDataParams, Ecdh1DeriveParams,
+    Ecdh2DeriveParams, EcdhAesKeyWrapParams, EcmqvDeriveParams, EddsaParams, ExtractParams,
+    FlatParams, GcmParams, GcmWrapParams, Gostr3410DeriveParams, Gostr3410KeyWrapParams,
+    HkdfParams, Ike1ExtendedDeriveParams, Ike1PrfDeriveParams, Ike2PrfPlusDeriveParams,
+    IkePrfDeriveParams, IvParams, KeyDerivationStringData, KeyWrapSetOaepParams, KmacParams,
     MECHANISM_PARAMETER_TRANSPORT_VERSION, MacGeneralParams, MuGenParams, ObjectHandleParam,
-    RawMechanismParams, Rc2CbcParams, Rc2MacGeneralParams, Rc5CbcParams, Rc5MacGeneralParams,
-    Rc5Params, RsaPkcsOaepParams, RsaPkcsPssParams, Salsa20ChaCha20Poly1305Params, Salsa20Params,
-    SecretBytes, SeedCbcEncryptDataParams, SignAdditionalContext, TlsMacParams, XeddsaParams,
+    PbeParams, Pkcs5Pbkd2Params, PointerBytes, RawMechanismParams, Rc2CbcParams,
+    Rc2MacGeneralParams, Rc5CbcParams, Rc5MacGeneralParams, Rc5Params, RsaAesKeyWrapParams,
+    RsaPkcsOaepParams, RsaPkcsPssParams, Salsa20ChaCha20Poly1305Params, Salsa20Params, SecretBytes,
+    SeedCbcEncryptDataParams, SignAdditionalContext, TlsMacParams, X942Dh1DeriveParams,
+    X942Dh2DeriveParams, X942MqvDeriveParams, XeddsaParams,
 };
+
+/// Decode one bool-less (bytes, `*_null_len`) wire pair under `version`
+/// (R16 typed presence, S2 §3): presence = NULL with exactly that length
+/// (bytes must be empty); absence = non-NULL with `len == bytes.len()`
+/// (including non-NULL/zero). Presence fields are v1-only: set on a
+/// version-0 message they are contradictory metadata (mirrors the R9
+/// Flat-with-legacy-stamp rule — no v0 encoder emits them, so only
+/// crafted input carries them).
+pub(crate) fn pointer_from_wire(
+    bytes: &[u8],
+    null_len: Option<u64>,
+    version: u32,
+) -> Result<PointerBytes, CkRv> {
+    match null_len {
+        Some(declared_len) => {
+            if version == 0 || !bytes.is_empty() {
+                return Err(CkRv::MECHANISM_PARAM_INVALID);
+            }
+            Ok(PointerBytes::null_len(declared_len))
+        }
+        None => Ok(PointerBytes::present_copy(bytes)),
+    }
+}
+
+/// Decode one legacy-bool (bytes, `*_null_len`, `*_null`) wire triple
+/// (R16: GCM/CCM/OAEP families). v0 keeps the legacy meaning (set bool →
+/// NULL/0, unset → present bytes); v1 is presence-only (the top-level R9
+/// gate rejects set bools before this runs; the re-check here is defense
+/// in depth). Conversion stays total over legacy shapes: a set bool with
+/// non-empty bytes still decodes (the bool wins, per legacy meaning) and
+/// fails closed later at transport validation.
+pub(crate) fn pointer_from_wire_legacy(
+    bytes: &[u8],
+    null_len: Option<u64>,
+    legacy_null: bool,
+    version: u32,
+) -> Result<PointerBytes, CkRv> {
+    match null_len {
+        Some(declared_len) => {
+            if version == 0 || legacy_null || !bytes.is_empty() {
+                return Err(CkRv::MECHANISM_PARAM_INVALID);
+            }
+            Ok(PointerBytes::null_len(declared_len))
+        }
+        None => Ok(PointerBytes::from_legacy(bytes, legacy_null)),
+    }
+}
+
+/// R16 version-threaded decode of one classic params struct (S2 §3).
+/// An inherent `Type::from_wire` is impossible — the types structs live
+/// in the types crate — so the convention rides this local trait: each
+/// family implements `FromWire<its wire message>` and the `TryFrom`
+/// dispatch calls `Type::from_wire(p, version)?`.
+pub(crate) trait FromWire<P> {
+    fn from_wire(p: &P, version: u32) -> Result<Self, CkRv>
+    where
+        Self: Sized;
+}
 
 impl TryFrom<&CkMechanism> for v1_proto::Mechanism {
     type Error = CkRv;
@@ -40,6 +103,9 @@ impl TryFrom<&CkMechanism> for v1_proto::Mechanism {
                     source: p.source.0,
                     source_data: secret_to_plain(&p.source_data),
                     source_null: p.source_null,
+                    // R16: production encode stays v0-shaped (shim emits
+                    // v1 in R17); presence fields are decode-side only.
+                    source_data_null_len: None,
                 }))
             }
             Some(CkMechanismParams::Gcm(p)) => {
@@ -51,6 +117,10 @@ impl TryFrom<&CkMechanism> for v1_proto::Mechanism {
                     iv_buffer_len: p.iv_buffer_len,
                     iv_null: p.iv_null,
                     aad_null: p.aad_null,
+                    // R16: production encode stays v0-shaped (shim emits
+                    // v1 in R17); presence fields are decode-side only.
+                    iv_null_len: None,
+                    aad_null_len: None,
                 }))
             }
             Some(CkMechanismParams::Ecdh1Derive(p)) => {
@@ -58,6 +128,10 @@ impl TryFrom<&CkMechanism> for v1_proto::Mechanism {
                     kdf: p.kdf.0,
                     shared_data: secret_to_plain(&p.shared_data),
                     public_data: p.public_data.clone(),
+                    // R16: production encode stays v0-shaped (shim emits
+                    // v1 in R17); presence fields are decode-side only.
+                    shared_data_null_len: None,
+                    public_data_null_len: None,
                 }))
             }
             Some(CkMechanismParams::Iv(iv)) => {
@@ -121,6 +195,9 @@ impl TryFrom<&CkMechanism> for v1_proto::Mechanism {
                     word_size: p.word_size,
                     rounds: p.rounds,
                     iv: p.iv.clone(),
+                    // R16: production encode stays v0-shaped (shim emits
+                    // v1 in R17); presence fields are decode-side only.
+                    iv_null_len: None,
                 }))
             }
             // CBC encrypt data
@@ -129,6 +206,8 @@ impl TryFrom<&CkMechanism> for v1_proto::Mechanism {
                     v1_proto::AesCbcEncryptDataParams {
                         iv: p.iv.clone(),
                         data: secret_to_plain(&p.data),
+                        // R16: production encode stays v0-shaped.
+                        data_null_len: None,
                     },
                 ))
             }
@@ -137,6 +216,8 @@ impl TryFrom<&CkMechanism> for v1_proto::Mechanism {
                     v1_proto::DesCbcEncryptDataParams {
                         iv: p.iv.clone(),
                         data: secret_to_plain(&p.data),
+                        // R16: production encode stays v0-shaped.
+                        data_null_len: None,
                     },
                 ))
             }
@@ -145,6 +226,8 @@ impl TryFrom<&CkMechanism> for v1_proto::Mechanism {
                     v1_proto::AriaCbcEncryptDataParams {
                         iv: p.iv.clone(),
                         data: secret_to_plain(&p.data),
+                        // R16: production encode stays v0-shaped.
+                        data_null_len: None,
                     },
                 ))
             }
@@ -153,6 +236,8 @@ impl TryFrom<&CkMechanism> for v1_proto::Mechanism {
                     v1_proto::CamelliaCbcEncryptDataParams {
                         iv: p.iv.clone(),
                         data: secret_to_plain(&p.data),
+                        // R16: production encode stays v0-shaped.
+                        data_null_len: None,
                     },
                 ))
             }
@@ -161,6 +246,8 @@ impl TryFrom<&CkMechanism> for v1_proto::Mechanism {
                     v1_proto::SeedCbcEncryptDataParams {
                         iv: p.iv.clone(),
                         data: secret_to_plain(&p.data),
+                        // R16: production encode stays v0-shaped.
+                        data_null_len: None,
                     },
                 ))
             }
@@ -173,6 +260,9 @@ impl TryFrom<&CkMechanism> for v1_proto::Mechanism {
                     mac_len: p.mac_len,
                     nonce_null: p.nonce_null,
                     aad_null: p.aad_null,
+                    // R16: production encode stays v0-shaped.
+                    nonce_null_len: None,
+                    aad_null_len: None,
                 }))
             }
             Some(CkMechanismParams::ChaCha20(p)) => {
@@ -181,6 +271,9 @@ impl TryFrom<&CkMechanism> for v1_proto::Mechanism {
                     block_counter_bits: p.block_counter_bits,
                     nonce: p.nonce.clone(),
                     nonce_bits: p.nonce_bits,
+                    // R16: production encode stays v0-shaped.
+                    block_counter_null_len: None,
+                    nonce_null_len: None,
                 }))
             }
             Some(CkMechanismParams::Salsa20(p)) => {
@@ -188,6 +281,9 @@ impl TryFrom<&CkMechanism> for v1_proto::Mechanism {
                     block_counter: p.block_counter.clone(),
                     nonce: p.nonce.clone(),
                     nonce_bits: p.nonce_bits,
+                    // R16: production encode stays v0-shaped.
+                    block_counter_null_len: None,
+                    nonce_null_len: None,
                 }))
             }
             Some(CkMechanismParams::Salsa20ChaCha20Poly1305(p)) => {
@@ -195,6 +291,9 @@ impl TryFrom<&CkMechanism> for v1_proto::Mechanism {
                     v1_proto::Salsa20ChaCha20Poly1305Params {
                         nonce: p.nonce.clone(),
                         aad: secret_to_plain(&p.aad),
+                        // R16: production encode stays v0-shaped.
+                        nonce_null_len: None,
+                        aad_null_len: None,
                     },
                 ))
             }
@@ -205,6 +304,9 @@ impl TryFrom<&CkMechanism> for v1_proto::Mechanism {
                     iv_generator: p.iv_generator.0,
                     aad: secret_to_plain(&p.aad),
                     tag_bits: p.tag_bits,
+                    // R16: production encode stays v0-shaped.
+                    iv_null_len: None,
+                    aad_null_len: None,
                 }))
             }
             Some(CkMechanismParams::CcmWrap(p)) => {
@@ -215,6 +317,9 @@ impl TryFrom<&CkMechanism> for v1_proto::Mechanism {
                     nonce_generator: p.nonce_generator.0,
                     aad: secret_to_plain(&p.aad),
                     mac_len: p.mac_len,
+                    // R16: production encode stays v0-shaped.
+                    nonce_null_len: None,
+                    aad_null_len: None,
                 }))
             }
             // Key derivation
@@ -366,6 +471,8 @@ impl TryFrom<&CkMechanism> for v1_proto::Mechanism {
                         hedge_variant: p.hedge_variant,
                         context: secret_to_plain(&p.context),
                         hash: p.hash.0,
+                        // R16: production encode stays v0-shaped.
+                        context_null_len: None,
                     },
                 ))
             }
@@ -374,6 +481,8 @@ impl TryFrom<&CkMechanism> for v1_proto::Mechanism {
                     key_handle: p.key_handle.0,
                     mac_length: p.mac_length,
                     customization_string: secret_to_plain(&p.customization_string),
+                    // R16: production encode stays v0-shaped.
+                    customization_string_null_len: None,
                 }))
             }
             Some(CkMechanismParams::MuGen(p)) => {
@@ -381,11 +490,18 @@ impl TryFrom<&CkMechanism> for v1_proto::Mechanism {
                     key_handle: p.key_handle.0,
                     tr: secret_to_plain(&p.tr),
                     context: secret_to_plain(&p.context),
+                    // R16: production encode stays v0-shaped.
+                    tr_null_len: None,
+                    context_null_len: None,
                 }))
             }
             Some(CkMechanismParams::KeyDerivationString(p)) => {
                 Some(v1_proto::mechanism::Params::KeyDerivationStringData(
-                    v1_proto::KeyDerivationStringData { data: secret_to_plain(&p.data) },
+                    v1_proto::KeyDerivationStringData {
+                        data: secret_to_plain(&p.data),
+                        // R16: production encode stays v0-shaped.
+                        data_null_len: None,
+                    },
                 ))
             }
             Some(CkMechanismParams::Raw(p)) => {
@@ -569,6 +685,12 @@ impl TryFrom<&v1_proto::Mechanism> for CkMechanism {
                     source: CkOaepSource(p.source),
                     source_data: SecretBytes::copy_from_slice(&p.source_data),
                     source_null: p.source_null,
+                    source_data_presence: pointer_from_wire_legacy(
+                        &p.source_data,
+                        p.source_data_null_len,
+                        p.source_null,
+                        version,
+                    )?,
                 }))
             }
             Some(v1_proto::mechanism::Params::GcmParams(p)) => {
@@ -580,6 +702,18 @@ impl TryFrom<&v1_proto::Mechanism> for CkMechanism {
                     tag_bits: p.tag_bits,
                     iv_null: p.iv_null,
                     aad_null: p.aad_null,
+                    iv_presence: pointer_from_wire_legacy(
+                        &p.iv,
+                        p.iv_null_len,
+                        p.iv_null,
+                        version,
+                    )?,
+                    aad_presence: pointer_from_wire_legacy(
+                        &p.aad,
+                        p.aad_null_len,
+                        p.aad_null,
+                        version,
+                    )?,
                 }))
             }
             Some(v1_proto::mechanism::Params::Ecdh1DeriveParams(p)) => {
@@ -587,6 +721,16 @@ impl TryFrom<&v1_proto::Mechanism> for CkMechanism {
                     kdf: CkKdf(p.kdf),
                     shared_data: SecretBytes::copy_from_slice(&p.shared_data),
                     public_data: p.public_data.clone(),
+                    shared_data_presence: pointer_from_wire(
+                        &p.shared_data,
+                        p.shared_data_null_len,
+                        version,
+                    )?,
+                    public_data_presence: pointer_from_wire(
+                        &p.public_data,
+                        p.public_data_null_len,
+                        version,
+                    )?,
                 }))
             }
             Some(v1_proto::mechanism::Params::IvParams(p)) => {
@@ -643,6 +787,7 @@ impl TryFrom<&v1_proto::Mechanism> for CkMechanism {
                     word_size: p.word_size,
                     rounds: p.rounds,
                     iv: p.iv.clone(),
+                    iv_presence: pointer_from_wire(&p.iv, p.iv_null_len, version)?,
                 }))
             }
             // CBC encrypt data
@@ -650,30 +795,35 @@ impl TryFrom<&v1_proto::Mechanism> for CkMechanism {
                 Some(CkMechanismParams::AesCbcEncryptData(AesCbcEncryptDataParams {
                     iv: p.iv.clone(),
                     data: SecretBytes::copy_from_slice(&p.data),
+                    data_presence: pointer_from_wire(&p.data, p.data_null_len, version)?,
                 }))
             }
             Some(v1_proto::mechanism::Params::DesCbcEncryptDataParams(p)) => {
                 Some(CkMechanismParams::DesCbcEncryptData(DesCbcEncryptDataParams {
                     iv: p.iv.clone(),
                     data: SecretBytes::copy_from_slice(&p.data),
+                    data_presence: pointer_from_wire(&p.data, p.data_null_len, version)?,
                 }))
             }
             Some(v1_proto::mechanism::Params::AriaCbcEncryptDataParams(p)) => {
                 Some(CkMechanismParams::AriaCbcEncryptData(AriaCbcEncryptDataParams {
                     iv: p.iv.clone(),
                     data: SecretBytes::copy_from_slice(&p.data),
+                    data_presence: pointer_from_wire(&p.data, p.data_null_len, version)?,
                 }))
             }
             Some(v1_proto::mechanism::Params::CamelliaCbcEncryptDataParams(p)) => {
                 Some(CkMechanismParams::CamelliaCbcEncryptData(CamelliaCbcEncryptDataParams {
                     iv: p.iv.clone(),
                     data: SecretBytes::copy_from_slice(&p.data),
+                    data_presence: pointer_from_wire(&p.data, p.data_null_len, version)?,
                 }))
             }
             Some(v1_proto::mechanism::Params::SeedCbcEncryptDataParams(p)) => {
                 Some(CkMechanismParams::SeedCbcEncryptData(SeedCbcEncryptDataParams {
                     iv: p.iv.clone(),
                     data: SecretBytes::copy_from_slice(&p.data),
+                    data_presence: pointer_from_wire(&p.data, p.data_null_len, version)?,
                 }))
             }
             // AEAD
@@ -685,6 +835,18 @@ impl TryFrom<&v1_proto::Mechanism> for CkMechanism {
                     mac_len: p.mac_len,
                     nonce_null: p.nonce_null,
                     aad_null: p.aad_null,
+                    nonce_presence: pointer_from_wire_legacy(
+                        &p.nonce,
+                        p.nonce_null_len,
+                        p.nonce_null,
+                        version,
+                    )?,
+                    aad_presence: pointer_from_wire_legacy(
+                        &p.aad,
+                        p.aad_null_len,
+                        p.aad_null,
+                        version,
+                    )?,
                 }))
             }
             Some(v1_proto::mechanism::Params::Chacha20Params(p)) => {
@@ -693,6 +855,12 @@ impl TryFrom<&v1_proto::Mechanism> for CkMechanism {
                     block_counter_bits: p.block_counter_bits,
                     nonce: p.nonce.clone(),
                     nonce_bits: p.nonce_bits,
+                    block_counter_presence: pointer_from_wire(
+                        &p.block_counter,
+                        p.block_counter_null_len,
+                        version,
+                    )?,
+                    nonce_presence: pointer_from_wire(&p.nonce, p.nonce_null_len, version)?,
                 }))
             }
             Some(v1_proto::mechanism::Params::Salsa20Params(p)) => {
@@ -700,12 +868,20 @@ impl TryFrom<&v1_proto::Mechanism> for CkMechanism {
                     block_counter: p.block_counter.clone(),
                     nonce: p.nonce.clone(),
                     nonce_bits: p.nonce_bits,
+                    block_counter_presence: pointer_from_wire(
+                        &p.block_counter,
+                        p.block_counter_null_len,
+                        version,
+                    )?,
+                    nonce_presence: pointer_from_wire(&p.nonce, p.nonce_null_len, version)?,
                 }))
             }
             Some(v1_proto::mechanism::Params::Salsa20Chacha20Poly1305Params(p)) => {
                 Some(CkMechanismParams::Salsa20ChaCha20Poly1305(Salsa20ChaCha20Poly1305Params {
                     nonce: p.nonce.clone(),
                     aad: SecretBytes::copy_from_slice(&p.aad),
+                    nonce_presence: pointer_from_wire(&p.nonce, p.nonce_null_len, version)?,
+                    aad_presence: pointer_from_wire(&p.aad, p.aad_null_len, version)?,
                 }))
             }
             Some(v1_proto::mechanism::Params::GcmWrapParams(p)) => {
@@ -715,6 +891,8 @@ impl TryFrom<&v1_proto::Mechanism> for CkMechanism {
                     iv_generator: CkGeneratorFunction(p.iv_generator),
                     aad: SecretBytes::copy_from_slice(&p.aad),
                     tag_bits: p.tag_bits,
+                    iv_presence: pointer_from_wire(&p.iv, p.iv_null_len, version)?,
+                    aad_presence: pointer_from_wire(&p.aad, p.aad_null_len, version)?,
                 }))
             }
             Some(v1_proto::mechanism::Params::CcmWrapParams(p)) => {
@@ -725,55 +903,57 @@ impl TryFrom<&v1_proto::Mechanism> for CkMechanism {
                     nonce_generator: CkGeneratorFunction(p.nonce_generator),
                     aad: SecretBytes::copy_from_slice(&p.aad),
                     mac_len: p.mac_len,
+                    nonce_presence: pointer_from_wire(&p.nonce, p.nonce_null_len, version)?,
+                    aad_presence: pointer_from_wire(&p.aad, p.aad_null_len, version)?,
                 }))
             }
             // Key derivation
             Some(v1_proto::mechanism::Params::Ecdh2DeriveParams(p)) => {
-                Some(CkMechanismParams::Ecdh2Derive(p.into()))
+                Some(CkMechanismParams::Ecdh2Derive(Ecdh2DeriveParams::from_wire(p, version)?))
             }
             Some(v1_proto::mechanism::Params::EcmqvDeriveParams(p)) => {
-                Some(CkMechanismParams::EcmqvDerive(p.into()))
+                Some(CkMechanismParams::EcmqvDerive(EcmqvDeriveParams::from_wire(p, version)?))
             }
             Some(v1_proto::mechanism::Params::X942Dh1DeriveParams(p)) => {
-                Some(CkMechanismParams::X942Dh1Derive(p.into()))
+                Some(CkMechanismParams::X942Dh1Derive(X942Dh1DeriveParams::from_wire(p, version)?))
             }
             Some(v1_proto::mechanism::Params::X942Dh2DeriveParams(p)) => {
-                Some(CkMechanismParams::X942Dh2Derive(p.into()))
+                Some(CkMechanismParams::X942Dh2Derive(X942Dh2DeriveParams::from_wire(p, version)?))
             }
             Some(v1_proto::mechanism::Params::X942MqvDeriveParams(p)) => {
-                Some(CkMechanismParams::X942MqvDerive(p.into()))
+                Some(CkMechanismParams::X942MqvDerive(X942MqvDeriveParams::from_wire(p, version)?))
             }
             Some(v1_proto::mechanism::Params::HkdfParams(p)) => {
-                Some(CkMechanismParams::Hkdf(p.into()))
+                Some(CkMechanismParams::Hkdf(HkdfParams::from_wire(p, version)?))
             }
             Some(v1_proto::mechanism::Params::EddsaParams(p)) => {
-                Some(CkMechanismParams::Eddsa(p.into()))
+                Some(CkMechanismParams::Eddsa(EddsaParams::from_wire(p, version)?))
             }
-            Some(v1_proto::mechanism::Params::Gostr3410DeriveParams(p)) => {
-                Some(CkMechanismParams::Gostr3410Derive(p.into()))
-            }
+            Some(v1_proto::mechanism::Params::Gostr3410DeriveParams(p)) => Some(
+                CkMechanismParams::Gostr3410Derive(Gostr3410DeriveParams::from_wire(p, version)?),
+            ),
             Some(v1_proto::mechanism::Params::KeaDeriveParams(p)) => {
                 Some(CkMechanismParams::KeaDerive(p.into()))
             }
             // Key wrapping
-            Some(v1_proto::mechanism::Params::EcdhAesKeyWrapParams(p)) => {
-                Some(CkMechanismParams::EcdhAesKeyWrap(p.into()))
-            }
+            Some(v1_proto::mechanism::Params::EcdhAesKeyWrapParams(p)) => Some(
+                CkMechanismParams::EcdhAesKeyWrap(EcdhAesKeyWrapParams::from_wire(p, version)?),
+            ),
             Some(v1_proto::mechanism::Params::RsaAesKeyWrapParams(p)) => {
-                Some(CkMechanismParams::RsaAesKeyWrap(p.try_into()?))
+                Some(CkMechanismParams::RsaAesKeyWrap(RsaAesKeyWrapParams::from_wire(p, version)?))
             }
-            Some(v1_proto::mechanism::Params::Gostr3410KeyWrapParams(p)) => {
-                Some(CkMechanismParams::Gostr3410KeyWrap(p.into()))
-            }
-            Some(v1_proto::mechanism::Params::KeyWrapSetOaepParams(p)) => {
-                Some(CkMechanismParams::KeyWrapSetOaep(p.into()))
-            }
+            Some(v1_proto::mechanism::Params::Gostr3410KeyWrapParams(p)) => Some(
+                CkMechanismParams::Gostr3410KeyWrap(Gostr3410KeyWrapParams::from_wire(p, version)?),
+            ),
+            Some(v1_proto::mechanism::Params::KeyWrapSetOaepParams(p)) => Some(
+                CkMechanismParams::KeyWrapSetOaep(KeyWrapSetOaepParams::from_wire(p, version)?),
+            ),
             // Password-based encryption
             Some(v1_proto::mechanism::Params::PbeParams(p)) => {
-                Some(CkMechanismParams::Pbe(p.into()))
+                Some(CkMechanismParams::Pbe(PbeParams::from_wire(p, version)?))
             }
             Some(v1_proto::mechanism::Params::Pkcs5Pbkd2Params(p)) => {
-                Some(CkMechanismParams::Pkcs5Pbkd2(p.into()))
+                Some(CkMechanismParams::Pkcs5Pbkd2(Pkcs5Pbkd2Params::from_wire(p, version)?))
             }
             // TLS/SSL
             Some(v1_proto::mechanism::Params::TlsPrfParams(p)) => {
@@ -805,16 +985,20 @@ impl TryFrom<&v1_proto::Mechanism> for CkMechanism {
             }
             // IKE/IPSec
             Some(v1_proto::mechanism::Params::IkePrfDeriveParams(p)) => {
-                Some(CkMechanismParams::IkePrfDerive(p.into()))
+                Some(CkMechanismParams::IkePrfDerive(IkePrfDeriveParams::from_wire(p, version)?))
             }
             Some(v1_proto::mechanism::Params::Ike1PrfDeriveParams(p)) => {
-                Some(CkMechanismParams::Ike1PrfDerive(p.into()))
+                Some(CkMechanismParams::Ike1PrfDerive(Ike1PrfDeriveParams::from_wire(p, version)?))
             }
             Some(v1_proto::mechanism::Params::Ike1ExtendedDeriveParams(p)) => {
-                Some(CkMechanismParams::Ike1ExtendedDerive(p.into()))
+                Some(CkMechanismParams::Ike1ExtendedDerive(Ike1ExtendedDeriveParams::from_wire(
+                    p, version,
+                )?))
             }
             Some(v1_proto::mechanism::Params::Ike2PrfPlusDeriveParams(p)) => {
-                Some(CkMechanismParams::Ike2PrfPlusDerive(p.into()))
+                Some(CkMechanismParams::Ike2PrfPlusDerive(Ike2PrfPlusDeriveParams::from_wire(
+                    p, version,
+                )?))
             }
             // SP800-108 KDF
             Some(v1_proto::mechanism::Params::Sp800108KdfParams(p)) => {
@@ -869,6 +1053,7 @@ impl TryFrom<&v1_proto::Mechanism> for CkMechanism {
                     hedge_variant: p.hedge_variant,
                     context: SecretBytes::copy_from_slice(&p.context),
                     hash: CkMechanismType(p.hash),
+                    context_presence: pointer_from_wire(&p.context, p.context_null_len, version)?,
                 }))
             }
             Some(v1_proto::mechanism::Params::KmacParams(p)) => {
@@ -876,6 +1061,11 @@ impl TryFrom<&v1_proto::Mechanism> for CkMechanism {
                     key_handle: CkObjectHandle(p.key_handle),
                     mac_length: p.mac_length,
                     customization_string: SecretBytes::copy_from_slice(&p.customization_string),
+                    customization_string_presence: pointer_from_wire(
+                        &p.customization_string,
+                        p.customization_string_null_len,
+                        version,
+                    )?,
                 }))
             }
             Some(v1_proto::mechanism::Params::MuGenParams(p)) => {
@@ -883,11 +1073,14 @@ impl TryFrom<&v1_proto::Mechanism> for CkMechanism {
                     key_handle: CkObjectHandle(p.key_handle),
                     tr: SecretBytes::copy_from_slice(&p.tr),
                     context: SecretBytes::copy_from_slice(&p.context),
+                    tr_presence: pointer_from_wire(&p.tr, p.tr_null_len, version)?,
+                    context_presence: pointer_from_wire(&p.context, p.context_null_len, version)?,
                 }))
             }
             Some(v1_proto::mechanism::Params::KeyDerivationStringData(p)) => {
                 Some(CkMechanismParams::KeyDerivationString(KeyDerivationStringData {
                     data: SecretBytes::copy_from_slice(&p.data),
+                    data_presence: pointer_from_wire(&p.data, p.data_null_len, version)?,
                 }))
             }
             Some(v1_proto::mechanism::Params::RawMechanismParams(p)) => {

@@ -416,7 +416,8 @@ fn registry_backed_mock_validates_mechanism_param_presence() {
             iv_buffer_len: 12,
             aad: vec![].into(),
             tag_bits: 128,
-
+            iv_presence: PointerBytes::from_legacy(&[0; 12], false),
+            aad_presence: PointerBytes::from_legacy(&[], false),
             iv_null: false,
             aad_null: false,
         })),
@@ -453,6 +454,10 @@ fn gcm_wrap_iv_generation_is_deterministic_and_preserves_fixed_prefix() {
             iv_generator: CkGeneratorFunction::GENERATE_COUNTER_XOR, // CKG_GENERATE_COUNTER_XOR (4)
             aad: vec![].into(),
             tag_bits: 128,
+            iv_presence: PointerBytes::present_copy(&[
+                0xA1, 0xA2, 0xA3, 0xA4, 0, 0, 0, 0, 0, 0, 0, 0,
+            ]),
+            aad_presence: PointerBytes::present_copy(&[]),
         })),
     };
 
@@ -479,6 +484,8 @@ fn gcm_wrap_iv_generation_is_deterministic_and_preserves_fixed_prefix() {
             iv_generator: CkGeneratorFunction::GENERATE, // CKG_GENERATE (1)
             aad: vec![].into(),
             tag_bits: 128,
+            iv_presence: PointerBytes::present_copy(&[0; 12]),
+            aad_presence: PointerBytes::present_copy(&[]),
         })),
     };
     assert_eq!(backend.encrypt_init(session, &validated(&mech_no_gen), key).unwrap(), None);

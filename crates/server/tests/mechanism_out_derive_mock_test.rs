@@ -34,6 +34,9 @@ async fn derive_key_mechanism_out_surfaces_pbe_iv_through_mock_grpc_stack() {
         password: b"password".to_vec().into(),
         salt: b"salt".to_vec().into(),
         iteration: 4096,
+        init_vector_presence: PointerBytes::present_copy(&[0xA5; 8]),
+        password_presence: PointerBytes::present_copy(b"password"),
+        salt_presence: PointerBytes::present_copy(b"salt"),
     });
     backend.set_derive_key_output(Some(expected_output.clone()));
     let (endpoint, _shutdown) = mock_daemon(backend).await;

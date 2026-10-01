@@ -1950,6 +1950,8 @@ mod tests {
             iv_buffer_len: 12,
             aad: Vec::new().into(),
             tag_bits: 128,
+            iv_presence: PointerBytes::from_legacy(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], false),
+            aad_presence: PointerBytes::from_legacy(&[], false),
 
             iv_null: false,
             aad_null: false,

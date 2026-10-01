@@ -133,6 +133,8 @@ fn secret_response_and_mechanism_debug_renders_no_payload() {
 
         iv_null: false,
         aad_null: false,
+        iv_null_len: None,
+        aad_null_len: None,
     };
     assert_eq!(format!("{gcm:?}"), "GcmParams([REDACTED])");
 }

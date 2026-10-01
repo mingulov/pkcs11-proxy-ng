@@ -2706,6 +2706,8 @@ fn hkdf_derive_mechanism(salt_key: u64) -> pkcs11_proxy_ng_proto::Mechanism {
             salt: Vec::new().into(),
             salt_key_handle: CkObjectHandle(salt_key),
             info: Vec::new().into(),
+            salt_presence: PointerBytes::present_copy(&[]),
+            info_presence: PointerBytes::present_copy(&[]),
         })),
     })
     .unwrap()

@@ -8,7 +8,8 @@ use ::pkcs11_proxy_ng::server::handle_map::{BackendHandle, VirtualHandle};
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_backend::mock::MockEmbeddedHandles;
 use pkcs11_proxy_ng_types::{
-    CkObjectHandle, HkdfParams, PrfDataParam, Sp800108FeedbackKdfParams, Sp800108KdfParams,
+    CkObjectHandle, HkdfParams, PointerBytes, PrfDataParam, Sp800108FeedbackKdfParams,
+    Sp800108KdfParams,
 };
 
 fn hkdf(handle: u64) -> Option<Mechanism> {
@@ -23,6 +24,8 @@ fn hkdf(handle: u64) -> Option<Mechanism> {
                 salt: vec![].into(),
                 salt_key_handle: CkObjectHandle(handle),
                 info: vec![].into(),
+                salt_presence: PointerBytes::present_copy(&[]),
+                info_presence: PointerBytes::present_copy(&[]),
             })),
         })
         .unwrap(),

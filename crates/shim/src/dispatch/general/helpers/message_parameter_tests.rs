@@ -10,7 +10,7 @@ use super::{
 use cryptoki_sys::*;
 use pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects;
 use pkcs11_proxy_ng_proto::convert::message_params::{MessageParameter, MessageParameterShape};
-use pkcs11_proxy_ng_types::{CkObjectHandle, CkResult, CkRv, SecretBytes};
+use pkcs11_proxy_ng_types::{CkObjectHandle, CkResult, CkRv, PointerBytes, SecretBytes};
 
 #[test]
 fn exact_query_parameter_effect_rejection_is_transactional() {
@@ -1433,6 +1433,9 @@ fn write_mechanism_output_params_writes_pbe_init_vector() {
         password: Vec::new().into(),
         salt: Vec::new().into(),
         iteration: 1000,
+        init_vector_presence: PointerBytes::present_copy(&generated_iv),
+        password_presence: PointerBytes::present_copy(&[]),
+        salt_presence: PointerBytes::present_copy(&[]),
     });
 
     unsafe {
@@ -1471,6 +1474,9 @@ fn write_mechanism_output_params_pbe_safe_when_init_vector_null() {
         password: Vec::new().into(),
         salt: Vec::new().into(),
         iteration: 1,
+        init_vector_presence: PointerBytes::present_copy(&[9u8; 8]),
+        password_presence: PointerBytes::present_copy(&[]),
+        salt_presence: PointerBytes::present_copy(&[]),
     });
     // Must not panic / deref NULL.
     unsafe {

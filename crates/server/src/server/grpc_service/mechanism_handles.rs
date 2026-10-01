@@ -597,7 +597,7 @@ mod tests {
     use super::*;
     use pkcs11_proxy_ng_types::shape_descriptors::Operation;
     use pkcs11_proxy_ng_types::{
-        CkMechanism, HkdfParams, IvParams, MechanismRegistry, X3dhInitiateParams,
+        CkMechanism, HkdfParams, IvParams, MechanismRegistry, PointerBytes, X3dhInitiateParams,
     };
     use std::collections::HashMap;
 
@@ -632,6 +632,8 @@ mod tests {
             salt: Vec::new().into(),
             salt_key_handle: CkObjectHandle(salt),
             info: Vec::new().into(),
+            salt_presence: PointerBytes::present_copy(&[]),
+            info_presence: PointerBytes::present_copy(&[]),
         })
     }
 
@@ -924,6 +926,8 @@ mod tests {
                 salt: Vec::new().into(),
                 salt_key_handle: CkObjectHandle(vo), // this virtual handle is denied (wrong uid)
                 info: Vec::new().into(),
+                salt_presence: PointerBytes::present_copy(&[]),
+                info_presence: PointerBytes::present_copy(&[]),
             })),
         };
 
@@ -956,6 +960,8 @@ mod tests {
                 salt: Vec::new().into(),
                 salt_key_handle: CkObjectHandle(vo), // this virtual handle is allowed
                 info: Vec::new().into(),
+                salt_presence: PointerBytes::present_copy(&[]),
+                info_presence: PointerBytes::present_copy(&[]),
             })),
         };
 
@@ -994,6 +1000,8 @@ mod tests {
                 salt: vec![1, 2, 3, 4, 5].into(),
                 salt_key_handle: CkObjectHandle(vo),
                 info: vec![9, 9].into(),
+                salt_presence: PointerBytes::present_copy(&[1, 2, 3, 4, 5]),
+                info_presence: PointerBytes::present_copy(&[9, 9]),
             })),
         };
         let before = mechanism.clone();

@@ -110,6 +110,7 @@ impl FfiBackend {
 mod tests {
     use super::*;
     use crate::Pkcs11Backend;
+    use pkcs11_proxy_ng_types::PointerBytes;
 
     #[test]
     fn authenticated_typed_aead_rejects_provider_pointer_or_scalar_rebinding_without_reading_it() {
@@ -425,6 +426,8 @@ mod tests {
                 wrap_oid: vec![1; 3],
                 ukm: vec![2; 8],
                 key_handle: CkObjectHandle(7),
+                wrap_oid_presence: PointerBytes::present_copy(&[1; 3]),
+                ukm_presence: PointerBytes::present_copy(&[2; 8]),
             })),
         };
         {
@@ -508,6 +511,8 @@ mod tests {
                 wrap_oid: vec![1; 3],
                 ukm: vec![2; 8],
                 key_handle: CkObjectHandle(7),
+                wrap_oid_presence: PointerBytes::present_copy(&[1; 3]),
+                ukm_presence: PointerBytes::present_copy(&[2; 8]),
             })),
         };
         for route in 0..3 {
@@ -641,6 +646,8 @@ mod tests {
                         wrap_oid: vec![1; 3],
                         ukm: vec![2; 8],
                         key_handle: CkObjectHandle(7),
+                        wrap_oid_presence: PointerBytes::present_copy(&[1; 3]),
+                        ukm_presence: PointerBytes::present_copy(&[2; 8]),
                     })),
                 },
                 None,

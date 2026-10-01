@@ -138,6 +138,9 @@ fn gcm_params(json: &serde_json::Value) -> Result<CkMechanismParams, String> {
     if tag_bits == 0 || tag_bits > 128 {
         return Err(format!("GCM tag_bits must be 1..=128 (got {tag_bits})"));
     }
+    // R16: v0-consistent mirrors (CLI builds non-NULL inputs only).
+    let iv_presence = PointerBytes::present_copy(&iv);
+    let aad_presence = PointerBytes::present_copy(&aad);
     Ok(CkMechanismParams::Gcm(GcmParams {
         iv_bits: iv.len() as u64 * 8,
         iv,
@@ -146,6 +149,8 @@ fn gcm_params(json: &serde_json::Value) -> Result<CkMechanismParams, String> {
         tag_bits,
         iv_null: false,
         aad_null: false,
+        iv_presence,
+        aad_presence,
     }))
 }
 
@@ -155,6 +160,8 @@ fn oaep_params(json: &serde_json::Value) -> Result<CkMechanismParams, String> {
     let obj = params_object(json)?;
     let (hash_alg, mgf) = hash_and_mgf(obj)?;
     let source_data = optional_hex_field(obj, "source_data_hex")?;
+    // R16: v0-consistent mirror of the (NULL, 0)-on-empty encoding.
+    let source_data_presence = PointerBytes::from_legacy(&source_data, source_data.is_empty());
     Ok(CkMechanismParams::RsaPkcsOaep(RsaPkcsOaepParams {
         hash_alg,
         mgf,
@@ -162,6 +169,7 @@ fn oaep_params(json: &serde_json::Value) -> Result<CkMechanismParams, String> {
         // Empty label is the (NULL, 0) encoding, preserved end to end.
         source_null: source_data.is_empty(),
         source_data: source_data.into(),
+        source_data_presence,
     }))
 }
 

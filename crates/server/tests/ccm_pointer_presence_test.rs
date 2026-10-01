@@ -7,7 +7,9 @@
 
 mod support;
 
-use pkcs11_proxy_ng_types::{CcmParams, CkMechanism, CkMechanismParams, CkMechanismType};
+use pkcs11_proxy_ng_types::{
+    CcmParams, CkMechanism, CkMechanismParams, CkMechanismType, PointerBytes,
+};
 use support::{
     DaemonHarness, ProviderFixture, ensure_user_token, generate_aes_key, initialized_client,
     open_user_session, supports_mechanism,
@@ -51,6 +53,8 @@ async fn kryoptic_ccm_empty_aad_null_and_nonnull_round_trip() -> Result<(), Stri
                         nonce: nonce.clone(),
                         aad: Vec::new().into(),
                         mac_len: 16,
+                        nonce_presence: PointerBytes::from_legacy(&nonce, false),
+                        aad_presence: PointerBytes::from_legacy(&[], aad_null),
                         nonce_null: false,
                         aad_null,
                     })),

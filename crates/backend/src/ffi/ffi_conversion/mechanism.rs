@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::ffi::native_allocation::NativeAllocation;
+use pkcs11_proxy_ng_types::PointerBytes;
 use pkcs11_proxy_ng_types::shape_descriptors::{Operation, ParamAbi};
 
 // Thread-local `output_params()` call count (W1-C4-04). Thread-local —
@@ -481,6 +482,11 @@ impl FfiMechanism {
                     // post-call pointer class still reports the caller's.
                     iv_null: gcm.pIv.is_null(),
                     aad_null: gcm.pAAD.is_null(),
+                    // R16: v0-consistent mirrors (native-faithful lengths
+                    // arrive with the R17 readers; this snapshot echoes the
+                    // caller's pointer class only).
+                    iv_presence: PointerBytes::from_legacy(&iv[..iv_len], gcm.pIv.is_null()),
+                    aad_presence: PointerBytes::from_legacy(&aad[..aad_len], gcm.pAAD.is_null()),
                 }))
             }
             FfiParamBacking::Tls12MasterKeyDerive(tls12, client_random, server_random, version) => {
@@ -706,6 +712,11 @@ impl FfiMechanism {
                     password: Vec::new().into(),
                     salt: Vec::new().into(),
                     iteration: pbe.ulIteration as u64,
+                    // R16: v0-consistent mirrors of the surfaced bytes
+                    // (password/salt stay un-echoed per AGENTS.md §4).
+                    init_vector_presence: PointerBytes::present_copy(init_vector),
+                    password_presence: PointerBytes::present_copy(&[]),
+                    salt_presence: PointerBytes::present_copy(&[]),
                 }))
             }
             _ => None,

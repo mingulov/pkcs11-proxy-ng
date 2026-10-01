@@ -486,8 +486,14 @@ pub struct RsaPkcsOaepParams {
     pub hash_alg: CkMechanismType,
     pub mgf: CkMgf,
     pub source: CkOaepSource,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub source_data: SecretBytes,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub source_null: bool,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peer of
+    // the legacy members (transitional dual representation; R19 removes
+    // the legacy members above).
+    pub source_data_presence: PointerBytes,
 }
 
 /// CK_GCM_PARAMS — parameters for CKM_AES_GCM.
@@ -501,13 +507,22 @@ pub struct RsaPkcsOaepParams {
 ///   (Wave 3.5 D2; preserved so the daemon materializes NULL).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GcmParams {
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub iv: Vec<u8>,
     pub iv_bits: u64,
     pub iv_buffer_len: u64,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub aad: SecretBytes,
     pub tag_bits: u64,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub iv_null: bool,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub aad_null: bool,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peers of
+    // the legacy members (transitional dual representation; R19 removes
+    // the legacy members above).
+    pub iv_presence: PointerBytes,
+    pub aad_presence: PointerBytes,
 }
 
 /// CK_ECDH1_DERIVE_PARAMS — parameters for CKM_ECDH1_DERIVE.
@@ -518,8 +533,15 @@ pub struct GcmParams {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ecdh1DeriveParams {
     pub kdf: CkKdf,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub shared_data: SecretBytes,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub public_data: Vec<u8>,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peers of
+    // the legacy members (transitional dual representation; R19 removes
+    // the legacy members above).
+    pub shared_data_presence: PointerBytes,
+    pub public_data_presence: PointerBytes,
 }
 
 /// IV parameters for CBC/CBC-PAD mechanisms (AES-CBC, DES3-CBC, etc.)
@@ -595,7 +617,12 @@ pub struct Rc2CbcParams {
 pub struct Rc5CbcParams {
     pub word_size: u64,
     pub rounds: u64,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub iv: Vec<u8>,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peer of
+    // the legacy member (transitional dual representation; R19 removes
+    // the legacy member above).
+    pub iv_presence: PointerBytes,
 }
 
 // --- CBC encrypt data (IV + data pointer) ---
@@ -604,35 +631,65 @@ pub struct Rc5CbcParams {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AesCbcEncryptDataParams {
     pub iv: Vec<u8>, // 16-byte IV
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub data: SecretBytes,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peer of
+    // the legacy member (transitional dual representation; R19 removes
+    // the legacy member above). The IV is a fixed inline array, never a
+    // pointer, so it carries no presence.
+    pub data_presence: PointerBytes,
 }
 
 /// CK_DES_CBC_ENCRYPT_DATA_PARAMS
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesCbcEncryptDataParams {
     pub iv: Vec<u8>, // 8-byte IV
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub data: SecretBytes,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peer of
+    // the legacy member (transitional dual representation; R19 removes
+    // the legacy member above). The IV is a fixed inline array, never a
+    // pointer, so it carries no presence.
+    pub data_presence: PointerBytes,
 }
 
 /// CK_ARIA_CBC_ENCRYPT_DATA_PARAMS
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AriaCbcEncryptDataParams {
     pub iv: Vec<u8>, // 16-byte IV
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub data: SecretBytes,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peer of
+    // the legacy member (transitional dual representation; R19 removes
+    // the legacy member above). The IV is a fixed inline array, never a
+    // pointer, so it carries no presence.
+    pub data_presence: PointerBytes,
 }
 
 /// CK_CAMELLIA_CBC_ENCRYPT_DATA_PARAMS
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CamelliaCbcEncryptDataParams {
     pub iv: Vec<u8>, // 16-byte IV
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub data: SecretBytes,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peer of
+    // the legacy member (transitional dual representation; R19 removes
+    // the legacy member above). The IV is a fixed inline array, never a
+    // pointer, so it carries no presence.
+    pub data_presence: PointerBytes,
 }
 
 /// CK_SEED_CBC_ENCRYPT_DATA_PARAMS
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeedCbcEncryptDataParams {
     pub iv: Vec<u8>, // 16-byte IV
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub data: SecretBytes,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peer of
+    // the legacy member (transitional dual representation; R19 removes
+    // the legacy member above). The IV is a fixed inline array, never a
+    // pointer, so it carries no presence.
+    pub data_presence: PointerBytes,
 }
 
 // --- AEAD parameter structs ---
@@ -641,58 +698,102 @@ pub struct SeedCbcEncryptDataParams {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CcmParams {
     pub data_len: u64,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub nonce: Vec<u8>,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub aad: SecretBytes,
     pub mac_len: u64,
     /// True when the caller passed `(NULL, 0)` for `pNonce` / `pAAD`.
     /// Distinguishes it from `(ptr, 0)`, which some backends reject.
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub nonce_null: bool,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub aad_null: bool,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peers of
+    // the legacy members (transitional dual representation; R19 removes
+    // the legacy members above).
+    pub nonce_presence: PointerBytes,
+    pub aad_presence: PointerBytes,
 }
 
 /// CK_CHACHA20_PARAMS
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChaCha20Params {
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub block_counter: Vec<u8>,
     pub block_counter_bits: u64,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub nonce: Vec<u8>,
     pub nonce_bits: u64,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peers of
+    // the legacy members (transitional dual representation; R19 removes
+    // the legacy members above).
+    pub block_counter_presence: PointerBytes,
+    pub nonce_presence: PointerBytes,
 }
 
 /// CK_SALSA20_PARAMS
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Salsa20Params {
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub block_counter: Vec<u8>,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub nonce: Vec<u8>,
     pub nonce_bits: u64,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peers of
+    // the legacy members (transitional dual representation; R19 removes
+    // the legacy members above).
+    pub block_counter_presence: PointerBytes,
+    pub nonce_presence: PointerBytes,
 }
 
 /// CK_SALSA20_CHACHA20_POLY1305_PARAMS (non-message variant)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Salsa20ChaCha20Poly1305Params {
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub nonce: Vec<u8>,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub aad: SecretBytes,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peers of
+    // the legacy members (transitional dual representation; R19 removes
+    // the legacy members above).
+    pub nonce_presence: PointerBytes,
+    pub aad_presence: PointerBytes,
 }
 
 /// CK_GCM_WRAP_PARAMS
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GcmWrapParams {
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub iv: Vec<u8>,
     pub iv_fixed_bits: u64,
     pub iv_generator: CkGeneratorFunction,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub aad: SecretBytes,
     pub tag_bits: u64,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peers of
+    // the legacy members (transitional dual representation; R19 removes
+    // the legacy members above).
+    pub iv_presence: PointerBytes,
+    pub aad_presence: PointerBytes,
 }
 
 /// CK_CCM_WRAP_PARAMS
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CcmWrapParams {
     pub data_len: u64,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub nonce: Vec<u8>,
     pub nonce_fixed_bits: u64,
     pub nonce_generator: CkGeneratorFunction,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub aad: SecretBytes,
     pub mac_len: u64,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peers of
+    // the legacy members (transitional dual representation; R19 removes
+    // the legacy members above).
+    pub nonce_presence: PointerBytes,
+    pub aad_presence: PointerBytes,
 }
 
 // ---------------------------------------------------------------------------
@@ -703,54 +804,97 @@ pub struct CcmWrapParams {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ecdh2DeriveParams {
     pub kdf: CkKdf,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub shared_data: SecretBytes,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub public_data: Vec<u8>,
     pub private_data_len: u64,
     pub private_data_handle: CkObjectHandle,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub public_data2: Vec<u8>,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peers of
+    // the legacy members (transitional dual representation; R19 removes
+    // the legacy members above).
+    pub shared_data_presence: PointerBytes,
+    pub public_data_presence: PointerBytes,
+    pub public_data2_presence: PointerBytes,
 }
 
 /// CK_ECMQV_DERIVE_PARAMS — EC-MQV key derivation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EcmqvDeriveParams {
     pub kdf: CkKdf,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub shared_data: SecretBytes,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub public_data: Vec<u8>,
     pub private_data_len: u64,
     pub private_data_handle: CkObjectHandle,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub public_data2: Vec<u8>,
     pub public_key_handle: CkObjectHandle,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peers of
+    // the legacy members (transitional dual representation; R19 removes
+    // the legacy members above).
+    pub shared_data_presence: PointerBytes,
+    pub public_data_presence: PointerBytes,
+    pub public_data2_presence: PointerBytes,
 }
 
 /// CK_X9_42_DH1_DERIVE_PARAMS — X9.42 DH key derivation (single).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct X942Dh1DeriveParams {
     pub kdf: CkKdf,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub other_info: SecretBytes,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub public_data: Vec<u8>,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peers of
+    // the legacy members (transitional dual representation; R19 removes
+    // the legacy members above).
+    pub other_info_presence: PointerBytes,
+    pub public_data_presence: PointerBytes,
 }
 
 /// CK_X9_42_DH2_DERIVE_PARAMS — X9.42 DH key derivation (dual).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct X942Dh2DeriveParams {
     pub kdf: CkKdf,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub other_info: SecretBytes,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub public_data: Vec<u8>,
     pub private_data_len: u64,
     pub private_data_handle: CkObjectHandle,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub public_data2: Vec<u8>,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peers of
+    // the legacy members (transitional dual representation; R19 removes
+    // the legacy members above).
+    pub other_info_presence: PointerBytes,
+    pub public_data_presence: PointerBytes,
+    pub public_data2_presence: PointerBytes,
 }
 
 /// CK_X9_42_MQV_DERIVE_PARAMS — X9.42 MQV key derivation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct X942MqvDeriveParams {
     pub kdf: CkKdf,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub other_info: SecretBytes,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub public_data: Vec<u8>,
     pub private_data_len: u64,
     pub private_data_handle: CkObjectHandle,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub public_data2: Vec<u8>,
     pub public_key_handle: CkObjectHandle,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peers of
+    // the legacy members (transitional dual representation; R19 removes
+    // the legacy members above).
+    pub other_info_presence: PointerBytes,
+    pub public_data_presence: PointerBytes,
+    pub public_data2_presence: PointerBytes,
 }
 
 /// CK_HKDF_PARAMS — HKDF key derivation.
@@ -760,24 +904,43 @@ pub struct HkdfParams {
     pub expand: bool,
     pub prf_hash_mechanism: CkMechanismType,
     pub salt_type: u64,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub salt: SecretBytes,
     pub salt_key_handle: CkObjectHandle,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub info: SecretBytes,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peers of
+    // the legacy members (transitional dual representation; R19 removes
+    // the legacy members above).
+    pub salt_presence: PointerBytes,
+    pub info_presence: PointerBytes,
 }
 
 /// CK_EDDSA_PARAMS — EdDSA signature parameters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EddsaParams {
     pub ph_flag: bool,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub context_data: SecretBytes,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peer of
+    // the legacy member (transitional dual representation; R19 removes
+    // the legacy member above).
+    pub context_data_presence: PointerBytes,
 }
 
 /// CK_GOSTR3410_DERIVE_PARAMS — GOST R 34.10 key derivation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Gostr3410DeriveParams {
     pub kdf: CkKdf,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub public_data: Vec<u8>,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub ukm: Vec<u8>,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peers of
+    // the legacy members (transitional dual representation; R19 removes
+    // the legacy members above).
+    pub public_data_presence: PointerBytes,
+    pub ukm_presence: PointerBytes,
 }
 
 /// CK_KEA_DERIVE_PARAMS — KEA key derivation.
@@ -798,7 +961,12 @@ pub struct KeaDeriveParams {
 pub struct EcdhAesKeyWrapParams {
     pub aes_key_bits: u64,
     pub kdf: CkKdf,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub shared_data: SecretBytes,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peer of
+    // the legacy member (transitional dual representation; R19 removes
+    // the legacy member above).
+    pub shared_data_presence: PointerBytes,
 }
 
 /// CK_RSA_AES_KEY_WRAP_PARAMS — RSA-OAEP + AES key wrap (nested OAEP params).
@@ -811,21 +979,42 @@ pub struct RsaAesKeyWrapParams {
 /// CK_GOSTR3410_KEY_WRAP_PARAMS — GOST R 34.10 key wrapping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Gostr3410KeyWrapParams {
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub wrap_oid: Vec<u8>,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub ukm: Vec<u8>,
     pub key_handle: CkObjectHandle,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peers of
+    // the legacy members (transitional dual representation; R19 removes
+    // the legacy members above).
+    pub wrap_oid_presence: PointerBytes,
+    pub ukm_presence: PointerBytes,
 }
 
 /// CK_KEY_WRAP_SET_OAEP_PARAMS — SET OAEP key wrapping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyWrapSetOaepParams {
     pub bc: u32,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub x: SecretBytes,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peer of
+    // the legacy member (transitional dual representation; R19 removes
+    // the legacy member above).
+    pub x_presence: PointerBytes,
 }
 
 // ---------------------------------------------------------------------------
 // Password-Based Encryption parameter structs
 // ---------------------------------------------------------------------------
+
+/// Length-only rendering of a [`PointerBytes`] member for the redacting
+/// `Debug` impls below: presence arm + declared length, never bytes.
+fn presence_debug(presence: &PointerBytes) -> String {
+    match presence {
+        PointerBytes::Present(bytes) => format!("present, {} bytes", bytes.len()),
+        PointerBytes::Null { declared_len } => format!("null, len {declared_len}"),
+    }
+}
 
 /// CK_PBE_PARAMS — password-based encryption.
 ///
@@ -834,10 +1023,19 @@ pub struct KeyWrapSetOaepParams {
 /// is overwritten when the value is dropped.
 #[derive(Clone, PartialEq, Eq, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 pub struct PbeParams {
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub init_vector: SecretBytes,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub password: SecretBytes,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub salt: SecretBytes,
     pub iteration: u64,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peers of
+    // the legacy members (transitional dual representation; R19 removes
+    // the legacy members above).
+    pub init_vector_presence: PointerBytes,
+    pub password_presence: PointerBytes,
+    pub salt_presence: PointerBytes,
 }
 
 impl std::fmt::Debug for PbeParams {
@@ -845,12 +1043,29 @@ impl std::fmt::Debug for PbeParams {
         // Destructure so the compiler errors here when a field is
         // added — preventing a future contributor from adding a
         // secret-bearing field that is silently omitted from Debug.
-        let Self { init_vector, password, salt, iteration } = self;
+        let Self {
+            init_vector,
+            password,
+            salt,
+            iteration,
+            init_vector_presence,
+            password_presence,
+            salt_presence,
+        } = self;
         f.debug_struct("PbeParams")
             .field("init_vector", &format_args!("[{} bytes]", init_vector.len()))
             .field("password", &format_args!("[REDACTED; {} bytes]", password.len()))
             .field("salt", &format_args!("[{} bytes]", salt.len()))
             .field("iteration", iteration)
+            .field(
+                "init_vector_presence",
+                &format_args!("[{}]", presence_debug(init_vector_presence)),
+            )
+            .field(
+                "password_presence",
+                &format_args!("[REDACTED; {}]", presence_debug(password_presence)),
+            )
+            .field("salt_presence", &format_args!("[{}]", presence_debug(salt_presence)))
             .finish()
     }
 }
@@ -862,17 +1077,36 @@ impl std::fmt::Debug for PbeParams {
 #[derive(Clone, PartialEq, Eq, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 pub struct Pkcs5Pbkd2Params {
     pub salt_source: CkPbkdf2SaltSource,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub salt_source_data: SecretBytes,
     pub iterations: u64,
     pub prf: CkPbkdf2Prf,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub prf_data: SecretBytes,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub password: SecretBytes,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peers of
+    // the legacy members (transitional dual representation; R19 removes
+    // the legacy members above).
+    pub salt_source_data_presence: PointerBytes,
+    pub prf_data_presence: PointerBytes,
+    pub password_presence: PointerBytes,
 }
 
 impl std::fmt::Debug for Pkcs5Pbkd2Params {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Destructure to gate against silently-omitted future fields.
-        let Self { salt_source, salt_source_data, iterations, prf, prf_data, password } = self;
+        let Self {
+            salt_source,
+            salt_source_data,
+            iterations,
+            prf,
+            prf_data,
+            password,
+            salt_source_data_presence,
+            prf_data_presence,
+            password_presence,
+        } = self;
         f.debug_struct("Pkcs5Pbkd2Params")
             .field("salt_source", salt_source)
             .field("salt_source_data", &format_args!("[{} bytes]", salt_source_data.len()))
@@ -880,6 +1114,15 @@ impl std::fmt::Debug for Pkcs5Pbkd2Params {
             .field("prf", prf)
             .field("prf_data", &format_args!("[{} bytes]", prf_data.len()))
             .field("password", &format_args!("[REDACTED; {} bytes]", password.len()))
+            .field(
+                "salt_source_data_presence",
+                &format_args!("[{}]", presence_debug(salt_source_data_presence)),
+            )
+            .field("prf_data_presence", &format_args!("[{}]", presence_debug(prf_data_presence)))
+            .field(
+                "password_presence",
+                &format_args!("[REDACTED; {}]", presence_debug(password_presence)),
+            )
             .finish()
     }
 }
@@ -1014,9 +1257,16 @@ pub struct IkePrfDeriveParams {
     pub prf_mechanism: CkMechanismType,
     pub data_as_key: bool,
     pub rekey: bool,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub ni: SecretBytes,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub nr: SecretBytes,
     pub new_key_handle: CkObjectHandle,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peers of
+    // the legacy members (transitional dual representation; R19 removes
+    // the legacy members above).
+    pub ni_presence: PointerBytes,
+    pub nr_presence: PointerBytes,
 }
 
 /// CK_IKE1_PRF_DERIVE_PARAMS
@@ -1026,9 +1276,16 @@ pub struct Ike1PrfDeriveParams {
     pub has_prev_key: bool,
     pub keygxy_handle: CkObjectHandle,
     pub prev_key_handle: CkObjectHandle,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub ckyi: SecretBytes,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub ckyr: SecretBytes,
     pub key_number: u32,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peers of
+    // the legacy members (transitional dual representation; R19 removes
+    // the legacy members above).
+    pub ckyi_presence: PointerBytes,
+    pub ckyr_presence: PointerBytes,
 }
 
 /// CK_IKE1_EXTENDED_DERIVE_PARAMS
@@ -1037,7 +1294,12 @@ pub struct Ike1ExtendedDeriveParams {
     pub prf_mechanism: CkMechanismType,
     pub has_keygxy: bool,
     pub keygxy_handle: CkObjectHandle,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub extra_data: SecretBytes,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peer of
+    // the legacy member (transitional dual representation; R19 removes
+    // the legacy member above).
+    pub extra_data_presence: PointerBytes,
 }
 
 /// CK_IKE2_PRF_PLUS_DERIVE_PARAMS
@@ -1046,7 +1308,12 @@ pub struct Ike2PrfPlusDeriveParams {
     pub prf_mechanism: CkMechanismType,
     pub has_seed_key: bool,
     pub seed_key_handle: CkObjectHandle,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub seed_data: SecretBytes,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peer of
+    // the legacy member (transitional dual representation; R19 removes
+    // the legacy member above).
+    pub seed_data_presence: PointerBytes,
 }
 
 // ---------------------------------------------------------------------------
@@ -1280,7 +1547,12 @@ pub struct ExtractParams {
 /// Used by CONCATENATE_BASE_AND_DATA, CONCATENATE_DATA_AND_BASE, etc.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyDerivationStringData {
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub data: SecretBytes,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peer of
+    // the legacy member (transitional dual representation; R19 removes
+    // the legacy member above).
+    pub data_presence: PointerBytes,
 }
 
 /// CK_SIGN_ADDITIONAL_CONTEXT (`hash == 0`) or, for the generic
@@ -1290,9 +1562,14 @@ pub struct KeyDerivationStringData {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignAdditionalContext {
     pub hedge_variant: u64,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub context: SecretBytes,
     /// 0 = plain CK_SIGN_ADDITIONAL_CONTEXT; non-zero = CK_HASH_SIGN_ADDITIONAL_CONTEXT.
     pub hash: CkMechanismType,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peer of
+    // the legacy member (transitional dual representation; R19 removes
+    // the legacy member above).
+    pub context_presence: PointerBytes,
 }
 
 /// CK_KMAC_PARAMS — keyed MAC output length and optional customization string.
@@ -1300,15 +1577,27 @@ pub struct SignAdditionalContext {
 pub struct KmacParams {
     pub key_handle: CkObjectHandle,
     pub mac_length: u64,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub customization_string: SecretBytes,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peer of
+    // the legacy member (transitional dual representation; R19 removes
+    // the legacy member above).
+    pub customization_string_presence: PointerBytes,
 }
 
 /// CK_MU_GEN_PARAMS — ML-DSA external-mu generation inputs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MuGenParams {
     pub key_handle: CkObjectHandle,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub tr: SecretBytes,
+    // TODO(R19): R16 legacy member, remove (PointerBytes covers it).
     pub context: SecretBytes,
+    // R16 typed presence (S2 §3): non-contradictory NULL/length peers of
+    // the legacy members (transitional dual representation; R19 removes
+    // the legacy members above).
+    pub tr_presence: PointerBytes,
+    pub context_presence: PointerBytes,
 }
 
 /// Opaque raw parameter bytes — legacy wire-compat only (S2 §3/§6).
@@ -1344,7 +1633,7 @@ pub const MECHANISM_PARAMETER_TRANSPORT_VERSION: u32 = 1;
 /// present-with-undeclared-length are unrepresentable by construction
 /// (each arm carries exactly what its presence claim allows, and no
 /// accessor crosses the arms).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, zeroize::Zeroize)]
 pub enum PointerBytes {
     /// Non-NULL pointer to these bytes (including non-NULL/zero).
     Present(SecretBytes),
@@ -1377,6 +1666,34 @@ impl PointerBytes {
             Self::Present(bytes) => Some(bytes),
             Self::Null { .. } => None,
         }
+    }
+
+    /// NULL pointer with this declared length (no bytes cross).
+    pub fn null_len(declared_len: u64) -> Self {
+        Self::Null { declared_len }
+    }
+
+    /// Non-NULL pointer to a copy of these bytes (including empty).
+    pub fn present_copy(bytes: &[u8]) -> Self {
+        Self::Present(SecretBytes::copy_from_slice(bytes))
+    }
+
+    /// Non-NULL pointer to a clone of these secret bytes.
+    pub fn present_cloned(bytes: &SecretBytes) -> Self {
+        bytes.expose(Self::present_copy)
+    }
+
+    /// Mirror a legacy plain-bytes + NULL-bit pair: set bit → NULL with
+    /// length zero, unset bit → the bytes as `Present` (transitional R16
+    /// helper for the dual-representation literals; R19 removes the
+    /// legacy members and constructs `PointerBytes` directly).
+    pub fn from_legacy(bytes: &[u8], is_null: bool) -> Self {
+        if is_null { Self::null_len(0) } else { Self::present_copy(bytes) }
+    }
+
+    /// Mirror a legacy secret-bytes + NULL-bit pair (see [`Self::from_legacy`]).
+    pub fn from_legacy_secret(bytes: &SecretBytes, is_null: bool) -> Self {
+        if is_null { Self::null_len(0) } else { Self::present_cloned(bytes) }
     }
 }
 
@@ -1507,6 +1824,49 @@ fn reserve_or_host_memory(vec: &mut Vec<u8>, additional: usize) -> Result<(), Ck
     vec.try_reserve(additional).map_err(|_| CkRv::HOST_MEMORY)
 }
 
+/// Agreement between one legacy byte buffer and its R16 presence peer
+/// (S2 §3 "no dual representations"): `Present` carries exactly the
+/// legacy bytes (including present-empty); `Null` carries no bytes, so
+/// the legacy buffer must be empty. Any disagreement is contradictory
+/// metadata (`PARAM_INVALID`). The declared length is unconstrained
+/// here — narrowing to the backend `CK_ULONG` width happens at R19
+/// reconstruction, where the native call is built.
+fn check_presence_pair(legacy: &[u8], presence: &PointerBytes) -> Result<(), CkRv> {
+    match presence {
+        PointerBytes::Present(expected) => {
+            if expected.expose(|bytes| bytes == legacy) {
+                Ok(())
+            } else {
+                Err(CkRv::MECHANISM_PARAM_INVALID)
+            }
+        }
+        PointerBytes::Null { .. } => {
+            if legacy.is_empty() {
+                Ok(())
+            } else {
+                Err(CkRv::MECHANISM_PARAM_INVALID)
+            }
+        }
+    }
+}
+
+/// Secret-bytes variant of [`check_presence_pair`].
+fn check_secret_presence_pair(legacy: &SecretBytes, presence: &PointerBytes) -> Result<(), CkRv> {
+    legacy.expose(|bytes| check_presence_pair(bytes, presence))
+}
+
+/// Legacy-bool agreement for the GCM/CCM/OAEP families (R16): a set
+/// bool means NULL/0, so the presence peer must be exactly `Null{0}` —
+/// a set bool beside v1-style presence (`Null{n≠0}` or `Present`) is
+/// the domain form of the wire contradiction the v1 decoder rejects.
+/// An unset bool constrains nothing (v1 NULL arrives with unset bools).
+fn check_legacy_null_bool(is_null: bool, presence: &PointerBytes) -> Result<(), CkRv> {
+    if is_null && !matches!(presence, PointerBytes::Null { declared_len: 0 }) {
+        return Err(CkRv::MECHANISM_PARAM_INVALID);
+    }
+    Ok(())
+}
+
 /// Proof that a mechanism's parameters passed daemon transport validation
 /// (S2 §6). Opaque: the only way to obtain one is [`Self::validate`],
 /// which runs every always-on check; `mechanism_to_ffi` (R12) accepts
@@ -1527,7 +1887,8 @@ pub struct ValidatedMechanismParams {
 impl ValidatedMechanismParams {
     /// Run every always-on transport check (S2 §6): version/oneof
     /// consistency, length equality, 64 KiB cap, registry binding, safe
-    /// prefix, ABI match, no handles/pointers in Flat, legacy-Raw reject.
+    /// prefix, ABI match, no handles/pointers in Flat, legacy-Raw reject,
+    /// typed presence/length consistency (R16).
     /// Pure and total: no I/O, no allocation beyond the validated copy.
     ///
     /// - `registry` is the daemon's `current_registry()` snapshot for this
@@ -1549,9 +1910,10 @@ impl ValidatedMechanismParams {
     /// wire u64 unnarrowable to backend `CK_ULONG` → `FUNCTION_FAILED`;
     /// faithful bytes pass through verbatim.
     ///
-    /// Typed (non-Flat/Null/Raw) params pass through: the typed path is
-    /// variant-driven, not registry-driven, and keeps its existing
-    /// contract — the descriptor system governs Flat carriage only.
+    /// Typed (non-Flat/Null/Raw) params pass the R16 presence/length
+    /// consistency gate ([`check_typed_presence`]): the typed path stays
+    /// variant-driven, not registry-driven — the descriptor system
+    /// governs Flat carriage only.
     pub fn validate(
         mechanism: &CkMechanism,
         registry: &MechanismRegistry,
@@ -1623,8 +1985,13 @@ impl ValidatedMechanismParams {
                     flat_grant: Some(grant),
                 })
             }
-            // Typed params: variant-driven contract, unchanged.
-            Some(_) => Ok(Self { mechanism: mechanism.clone(), flat_grant: None }),
+            // Typed params: R16 presence/length consistency (S2 §3)
+            // over every input-pointer pair; shapes without presence
+            // peers keep the pass-through contract.
+            Some(params) => {
+                check_typed_presence(params)?;
+                Ok(Self { mechanism: mechanism.clone(), flat_grant: None })
+            }
         }
     }
 
@@ -1676,6 +2043,207 @@ impl ValidatedMechanismParams {
 /// variant fails to compile here until classified, so the two lists cannot
 /// silently drift. SP800-108 byte-encoded key-handle values are zeroed
 /// (lengths preserved) so its dedicated substitution compares equal.
+/// R16 typed presence/length consistency (S2 §3): every
+/// input-pointer pair agrees between its legacy buffer and its
+/// `PointerBytes` peer, and every legacy NULL bool agrees with its
+/// peer ([`check_presence_pair`], [`check_legacy_null_bool`]).
+/// Exhaustive with no catch-all, so a future variant cannot silently
+/// skip this gate (the compiler rejects the omission).
+fn check_typed_presence(params: &CkMechanismParams) -> Result<(), CkRv> {
+    match params {
+        CkMechanismParams::RsaPkcsOaep(p) => {
+            check_legacy_null_bool(p.source_null, &p.source_data_presence)?;
+            check_secret_presence_pair(&p.source_data, &p.source_data_presence)
+        }
+        CkMechanismParams::Gcm(p) => {
+            check_legacy_null_bool(p.iv_null, &p.iv_presence)?;
+            check_legacy_null_bool(p.aad_null, &p.aad_presence)?;
+            check_presence_pair(&p.iv, &p.iv_presence)?;
+            check_secret_presence_pair(&p.aad, &p.aad_presence)
+        }
+        CkMechanismParams::Ccm(p) => {
+            check_legacy_null_bool(p.nonce_null, &p.nonce_presence)?;
+            check_legacy_null_bool(p.aad_null, &p.aad_presence)?;
+            check_presence_pair(&p.nonce, &p.nonce_presence)?;
+            check_secret_presence_pair(&p.aad, &p.aad_presence)
+        }
+        CkMechanismParams::GcmWrap(p) => {
+            check_presence_pair(&p.iv, &p.iv_presence)?;
+            check_secret_presence_pair(&p.aad, &p.aad_presence)
+        }
+        CkMechanismParams::CcmWrap(p) => {
+            check_presence_pair(&p.nonce, &p.nonce_presence)?;
+            check_secret_presence_pair(&p.aad, &p.aad_presence)
+        }
+        CkMechanismParams::Eddsa(p) => {
+            check_secret_presence_pair(&p.context_data, &p.context_data_presence)
+        }
+        CkMechanismParams::KeyWrapSetOaep(p) => check_secret_presence_pair(&p.x, &p.x_presence),
+        CkMechanismParams::Ecdh1Derive(p) => {
+            check_secret_presence_pair(&p.shared_data, &p.shared_data_presence)?;
+            check_presence_pair(&p.public_data, &p.public_data_presence)
+        }
+        CkMechanismParams::Ecdh2Derive(p) => {
+            check_secret_presence_pair(&p.shared_data, &p.shared_data_presence)?;
+            check_presence_pair(&p.public_data, &p.public_data_presence)?;
+            check_presence_pair(&p.public_data2, &p.public_data2_presence)
+        }
+        CkMechanismParams::EcmqvDerive(p) => {
+            check_secret_presence_pair(&p.shared_data, &p.shared_data_presence)?;
+            check_presence_pair(&p.public_data, &p.public_data_presence)?;
+            check_presence_pair(&p.public_data2, &p.public_data2_presence)
+        }
+        CkMechanismParams::X942Dh1Derive(p) => {
+            check_secret_presence_pair(&p.other_info, &p.other_info_presence)?;
+            check_presence_pair(&p.public_data, &p.public_data_presence)
+        }
+        CkMechanismParams::X942Dh2Derive(p) => {
+            check_secret_presence_pair(&p.other_info, &p.other_info_presence)?;
+            check_presence_pair(&p.public_data, &p.public_data_presence)?;
+            check_presence_pair(&p.public_data2, &p.public_data2_presence)
+        }
+        CkMechanismParams::X942MqvDerive(p) => {
+            check_secret_presence_pair(&p.other_info, &p.other_info_presence)?;
+            check_presence_pair(&p.public_data, &p.public_data_presence)?;
+            check_presence_pair(&p.public_data2, &p.public_data2_presence)
+        }
+        CkMechanismParams::Hkdf(p) => {
+            check_secret_presence_pair(&p.salt, &p.salt_presence)?;
+            check_secret_presence_pair(&p.info, &p.info_presence)
+        }
+        CkMechanismParams::Gostr3410Derive(p) => {
+            check_presence_pair(&p.public_data, &p.public_data_presence)?;
+            check_presence_pair(&p.ukm, &p.ukm_presence)
+        }
+        CkMechanismParams::Gostr3410KeyWrap(p) => {
+            check_presence_pair(&p.wrap_oid, &p.wrap_oid_presence)?;
+            check_presence_pair(&p.ukm, &p.ukm_presence)
+        }
+        CkMechanismParams::AesCbcEncryptData(p) => {
+            check_secret_presence_pair(&p.data, &p.data_presence)
+        }
+        CkMechanismParams::DesCbcEncryptData(p) => {
+            check_secret_presence_pair(&p.data, &p.data_presence)
+        }
+        CkMechanismParams::AriaCbcEncryptData(p) => {
+            check_secret_presence_pair(&p.data, &p.data_presence)
+        }
+        CkMechanismParams::CamelliaCbcEncryptData(p) => {
+            check_secret_presence_pair(&p.data, &p.data_presence)
+        }
+        CkMechanismParams::SeedCbcEncryptData(p) => {
+            check_secret_presence_pair(&p.data, &p.data_presence)
+        }
+        CkMechanismParams::Rc5Cbc(p) => check_presence_pair(&p.iv, &p.iv_presence),
+        CkMechanismParams::ChaCha20(p) => {
+            check_presence_pair(&p.block_counter, &p.block_counter_presence)?;
+            check_presence_pair(&p.nonce, &p.nonce_presence)
+        }
+        CkMechanismParams::Salsa20(p) => {
+            check_presence_pair(&p.block_counter, &p.block_counter_presence)?;
+            check_presence_pair(&p.nonce, &p.nonce_presence)
+        }
+        CkMechanismParams::Salsa20ChaCha20Poly1305(p) => {
+            check_presence_pair(&p.nonce, &p.nonce_presence)?;
+            check_secret_presence_pair(&p.aad, &p.aad_presence)
+        }
+        CkMechanismParams::Pkcs5Pbkd2(p) => {
+            check_secret_presence_pair(&p.salt_source_data, &p.salt_source_data_presence)?;
+            check_secret_presence_pair(&p.prf_data, &p.prf_data_presence)?;
+            check_secret_presence_pair(&p.password, &p.password_presence)
+        }
+        CkMechanismParams::IkePrfDerive(p) => {
+            check_secret_presence_pair(&p.ni, &p.ni_presence)?;
+            check_secret_presence_pair(&p.nr, &p.nr_presence)
+        }
+        CkMechanismParams::Ike1PrfDerive(p) => {
+            check_secret_presence_pair(&p.ckyi, &p.ckyi_presence)?;
+            check_secret_presence_pair(&p.ckyr, &p.ckyr_presence)
+        }
+        CkMechanismParams::Ike1ExtendedDerive(p) => {
+            check_secret_presence_pair(&p.extra_data, &p.extra_data_presence)
+        }
+        CkMechanismParams::Ike2PrfPlusDerive(p) => {
+            check_secret_presence_pair(&p.seed_data, &p.seed_data_presence)
+        }
+        CkMechanismParams::KeyDerivationString(p) => {
+            check_secret_presence_pair(&p.data, &p.data_presence)
+        }
+        CkMechanismParams::Kmac(p) => {
+            check_secret_presence_pair(&p.customization_string, &p.customization_string_presence)
+        }
+        CkMechanismParams::Pbe(p) => {
+            check_secret_presence_pair(&p.init_vector, &p.init_vector_presence)?;
+            check_secret_presence_pair(&p.password, &p.password_presence)?;
+            check_secret_presence_pair(&p.salt, &p.salt_presence)
+        }
+        CkMechanismParams::EcdhAesKeyWrap(p) => {
+            check_secret_presence_pair(&p.shared_data, &p.shared_data_presence)
+        }
+        CkMechanismParams::RsaAesKeyWrap(p) => {
+            let o = &p.oaep_params;
+            check_legacy_null_bool(o.source_null, &o.source_data_presence)?;
+            check_secret_presence_pair(&o.source_data, &o.source_data_presence)
+        }
+        CkMechanismParams::MuGen(p) => {
+            check_secret_presence_pair(&p.tr, &p.tr_presence)?;
+            check_secret_presence_pair(&p.context, &p.context_presence)
+        }
+        CkMechanismParams::SignAdditionalContext(p) => {
+            check_secret_presence_pair(&p.context, &p.context_presence)
+        }
+        // No presence peers: scalar-only, fixed-size, and R18-tail
+        // (TLS/WTLS, KEA, KIP, OTP/SP800-108, Skipjack, key-mat)
+        // shapes keep the pass-through contract.
+        CkMechanismParams::RsaPkcsPss(_)
+        | CkMechanismParams::Iv(_)
+        | CkMechanismParams::Rc5(_)
+        | CkMechanismParams::Rc5MacGeneral(_)
+        | CkMechanismParams::Rc2MacGeneral(_)
+        | CkMechanismParams::Xeddsa(_)
+        | CkMechanismParams::TlsMac(_)
+        | CkMechanismParams::AesCtr(_)
+        | CkMechanismParams::CamelliaCtr(_)
+        | CkMechanismParams::Rc2Cbc(_)
+        | CkMechanismParams::MacGeneral(_)
+        | CkMechanismParams::ObjectHandle(_)
+        | CkMechanismParams::Extract(_)
+        | CkMechanismParams::KeaDerive(_)
+        | CkMechanismParams::TlsPrf(_)
+        | CkMechanismParams::TlsKdf(_)
+        | CkMechanismParams::Ssl3MasterKeyDerive(_)
+        | CkMechanismParams::Tls12MasterKeyDerive(_)
+        | CkMechanismParams::Tls12ExtendedMasterKeyDerive(_)
+        | CkMechanismParams::Ssl3KeyMat(_)
+        | CkMechanismParams::WtlsMasterKeyDerive(_)
+        | CkMechanismParams::WtlsPrf(_)
+        | CkMechanismParams::WtlsKeyMat(_)
+        | CkMechanismParams::Sp800108Kdf(_)
+        | CkMechanismParams::Sp800108FeedbackKdf(_)
+        | CkMechanismParams::X3dhInitiate(_)
+        | CkMechanismParams::X3dhRespond(_)
+        | CkMechanismParams::X2RatchetInitialize(_)
+        | CkMechanismParams::X2RatchetRespond(_)
+        | CkMechanismParams::Otp(_)
+        | CkMechanismParams::Kip(_)
+        | CkMechanismParams::CmsSig(_)
+        | CkMechanismParams::SkipjackPrivateWrap(_)
+        | CkMechanismParams::SkipjackRelayx(_)
+        | CkMechanismParams::Ecies(_)
+        | CkMechanismParams::AesCmacKeyDerivation(_)
+        | CkMechanismParams::Dilithium(_)
+        | CkMechanismParams::Kyber(_)
+        | CkMechanismParams::HdKeyDerive(_)
+        | CkMechanismParams::VendorObjectExtract(_)
+        | CkMechanismParams::VendorObjectInsert(_) => Ok(()),
+        // Decided by the outer arms (`None` never reaches here);
+        // listed so a future variant cannot silently skip this gate.
+        CkMechanismParams::Raw(_) | CkMechanismParams::Flat(_) | CkMechanismParams::Null { .. } => {
+            Ok(())
+        }
+    }
+}
+
 fn normalized_for_handle_compare(mechanism: &CkMechanism) -> CkMechanism {
     let mut normalized = mechanism.clone();
     if let Some(params) = normalized.params.as_mut() {
@@ -2054,6 +2622,9 @@ mod tests {
             private_data_len: 0,
             private_data_handle: CkObjectHandle(7),
             public_data2: vec![],
+            shared_data_presence: PointerBytes::present_cloned(&empty),
+            public_data_presence: PointerBytes::present_copy(&[]),
+            public_data2_presence: PointerBytes::present_copy(&[]),
         };
         assert_eq!(p.private_data_handle.0, 7);
 
@@ -2065,6 +2636,9 @@ mod tests {
             private_data_handle: CkObjectHandle(7),
             public_data2: vec![],
             public_key_handle: CkObjectHandle(8),
+            shared_data_presence: PointerBytes::present_cloned(&empty),
+            public_data_presence: PointerBytes::present_copy(&[]),
+            public_data2_presence: PointerBytes::present_copy(&[]),
         };
         assert_eq!((p.private_data_handle.0, p.public_key_handle.0), (7, 8));
 
@@ -2075,6 +2649,9 @@ mod tests {
             private_data_len: 0,
             private_data_handle: CkObjectHandle(7),
             public_data2: vec![],
+            other_info_presence: PointerBytes::present_cloned(&empty),
+            public_data_presence: PointerBytes::present_copy(&[]),
+            public_data2_presence: PointerBytes::present_copy(&[]),
         };
         assert_eq!(p.private_data_handle.0, 7);
 
@@ -2086,6 +2663,9 @@ mod tests {
             private_data_handle: CkObjectHandle(7),
             public_data2: vec![],
             public_key_handle: CkObjectHandle(8),
+            other_info_presence: PointerBytes::present_cloned(&empty),
+            public_data_presence: PointerBytes::present_copy(&[]),
+            public_data2_presence: PointerBytes::present_copy(&[]),
         };
         assert_eq!((p.private_data_handle.0, p.public_key_handle.0), (7, 8));
 
@@ -2097,11 +2677,18 @@ mod tests {
             salt: empty.clone(),
             salt_key_handle: CkObjectHandle(9),
             info: empty.clone(),
+            salt_presence: PointerBytes::present_cloned(&empty),
+            info_presence: PointerBytes::present_cloned(&empty),
         };
         assert_eq!(p.salt_key_handle.0, 9);
 
-        let p =
-            Gostr3410KeyWrapParams { wrap_oid: vec![], ukm: vec![], key_handle: CkObjectHandle(9) };
+        let p = Gostr3410KeyWrapParams {
+            wrap_oid: vec![],
+            ukm: vec![],
+            key_handle: CkObjectHandle(9),
+            wrap_oid_presence: PointerBytes::present_copy(&[]),
+            ukm_presence: PointerBytes::present_copy(&[]),
+        };
         assert_eq!(p.key_handle.0, 9);
 
         let p = Ssl3KeyMatParams {
@@ -2141,6 +2728,8 @@ mod tests {
             ni: empty.clone(),
             nr: empty.clone(),
             new_key_handle: CkObjectHandle(10),
+            ni_presence: PointerBytes::present_cloned(&empty),
+            nr_presence: PointerBytes::present_cloned(&empty),
         };
         assert_eq!(p.new_key_handle.0, 10);
 
@@ -2152,6 +2741,8 @@ mod tests {
             ckyi: empty.clone(),
             ckyr: empty.clone(),
             key_number: 0,
+            ckyi_presence: PointerBytes::present_cloned(&empty),
+            ckyr_presence: PointerBytes::present_cloned(&empty),
         };
         assert_eq!((p.keygxy_handle.0, p.prev_key_handle.0), (11, 12));
 
@@ -2160,6 +2751,7 @@ mod tests {
             has_keygxy: false,
             keygxy_handle: CkObjectHandle(11),
             extra_data: empty.clone(),
+            extra_data_presence: PointerBytes::present_cloned(&empty),
         };
         assert_eq!(p.keygxy_handle.0, 11);
 
@@ -2168,6 +2760,7 @@ mod tests {
             has_seed_key: false,
             seed_key_handle: CkObjectHandle(13),
             seed_data: empty.clone(),
+            seed_data_presence: PointerBytes::present_cloned(&empty),
         };
         assert_eq!(p.seed_key_handle.0, 13);
 
@@ -2243,6 +2836,7 @@ mod tests {
             key_handle: CkObjectHandle(40),
             mac_length: 0,
             customization_string: empty.clone(),
+            customization_string_presence: PointerBytes::present_cloned(&empty),
         };
         assert_eq!(p.key_handle.0, 40);
 
@@ -2250,6 +2844,8 @@ mod tests {
             key_handle: CkObjectHandle(41),
             tr: empty.clone(),
             context: empty.clone(),
+            tr_presence: PointerBytes::present_cloned(&empty),
+            context_presence: PointerBytes::present_cloned(&empty),
         };
         assert_eq!(p.key_handle.0, 41);
 
@@ -2284,6 +2880,8 @@ mod tests {
             salt: empty.clone(),
             salt_key_handle: CkObjectHandle(0),
             info: empty.clone(),
+            salt_presence: PointerBytes::present_cloned(&empty),
+            info_presence: PointerBytes::present_cloned(&empty),
         };
         assert_eq!(p.prf_hash_mechanism.0, 0x250);
 
@@ -2364,6 +2962,8 @@ mod tests {
             ni: empty.clone(),
             nr: empty.clone(),
             new_key_handle: CkObjectHandle(0),
+            ni_presence: PointerBytes::present_cloned(&empty),
+            nr_presence: PointerBytes::present_cloned(&empty),
         };
         assert_eq!(p.prf_mechanism.0, 0x250);
 
@@ -2375,6 +2975,8 @@ mod tests {
             ckyi: empty.clone(),
             ckyr: empty.clone(),
             key_number: 0,
+            ckyi_presence: PointerBytes::present_cloned(&empty),
+            ckyr_presence: PointerBytes::present_cloned(&empty),
         };
         assert_eq!(p.prf_mechanism.0, 0x250);
 
@@ -2383,6 +2985,7 @@ mod tests {
             has_keygxy: false,
             keygxy_handle: CkObjectHandle(0),
             extra_data: empty.clone(),
+            extra_data_presence: PointerBytes::present_cloned(&empty),
         };
         assert_eq!(p.prf_mechanism.0, 0x250);
 
@@ -2391,6 +2994,7 @@ mod tests {
             has_seed_key: false,
             seed_key_handle: CkObjectHandle(0),
             seed_data: empty.clone(),
+            seed_data_presence: PointerBytes::present_cloned(&empty),
         };
         assert_eq!(p.prf_mechanism.0, 0x250);
 
@@ -2418,7 +3022,12 @@ mod tests {
         };
         assert_eq!(p.aead_mechanism.0, 0x1087);
 
-        let p = SignAdditionalContext { hedge_variant: 0, context: empty.clone(), hash: sha256 };
+        let p = SignAdditionalContext {
+            hedge_variant: 0,
+            context: empty.clone(),
+            hash: sha256,
+            context_presence: PointerBytes::present_cloned(&empty),
+        };
         assert_eq!(p.hash.0, 0x250);
 
         let p = Sp800108KdfParams {
@@ -2516,6 +3125,7 @@ mod tests {
             source: CkOaepSource::DATA_SPECIFIED,
             source_data: empty.clone(),
             source_null: false,
+            source_data_presence: PointerBytes::present_cloned(&empty),
         };
         assert_eq!((p.mgf.0, p.source.0), (1, 1));
 
@@ -2525,6 +3135,8 @@ mod tests {
             iv_generator: CkGeneratorFunction::GENERATE_RANDOM,
             aad: empty.clone(),
             tag_bits: 0,
+            iv_presence: PointerBytes::present_copy(&[]),
+            aad_presence: PointerBytes::present_cloned(&empty),
         };
         assert_eq!(p.iv_generator.0, 3);
 
@@ -2535,6 +3147,8 @@ mod tests {
             nonce_generator: CkGeneratorFunction::NO_GENERATE,
             aad: empty.clone(),
             mac_len: 0,
+            nonce_presence: PointerBytes::present_copy(&[]),
+            aad_presence: PointerBytes::present_cloned(&empty),
         };
         assert_eq!(p.nonce_generator.0, 0);
 
@@ -2542,6 +3156,8 @@ mod tests {
             kdf: CkKdf::SHA256_KDF,
             shared_data: empty.clone(),
             public_data: vec![],
+            shared_data_presence: PointerBytes::present_cloned(&empty),
+            public_data_presence: PointerBytes::present_copy(&[]),
         };
         assert_eq!(p.kdf.0, 6);
 
@@ -2552,6 +3168,9 @@ mod tests {
             prf: CkPbkdf2Prf::HMAC_SHA256,
             prf_data: empty.clone(),
             password: empty.clone(),
+            salt_source_data_presence: PointerBytes::present_cloned(&empty),
+            prf_data_presence: PointerBytes::present_cloned(&empty),
+            password_presence: PointerBytes::present_cloned(&empty),
         };
         assert_eq!((p.salt_source.0, p.prf.0), (1, 4));
 
@@ -2980,6 +3599,9 @@ mod tests {
             password: vec![0xAAu8; 32].into(),
             salt: vec![2u8; 16].into(),
             iteration: 4096,
+            init_vector_presence: PointerBytes::present_copy(&[1u8; 16]),
+            password_presence: PointerBytes::present_copy(&[0xAAu8; 32]),
+            salt_presence: PointerBytes::present_copy(&[2u8; 16]),
         };
         p.zeroize();
         // After Zeroize::zeroize() Vec<u8> fields are cleared/truncated.
@@ -2997,6 +3619,9 @@ mod tests {
             prf: CkPbkdf2Prf(0x40),
             prf_data: vec![2u8; 4].into(),
             password: b"hunter2".to_vec().into(),
+            salt_source_data_presence: PointerBytes::present_copy(&[1u8; 8]),
+            prf_data_presence: PointerBytes::present_copy(&[2u8; 4]),
+            password_presence: PointerBytes::present_copy(b"hunter2"),
         };
         p.zeroize();
         assert!(p.password.expose(|b| b.iter().all(|&x| x == 0)));
@@ -3084,6 +3709,9 @@ mod tests {
             password: b"hunter2".to_vec().into(),
             salt: vec![2u8; 16].into(),
             iteration: 4096,
+            init_vector_presence: PointerBytes::present_copy(&[1u8; 16]),
+            password_presence: PointerBytes::present_copy(b"hunter2"),
+            salt_presence: PointerBytes::present_copy(&[2u8; 16]),
         };
         let formatted = format!("{p:?}");
         assert!(!formatted.contains("hunter2"), "password leaked into Debug output: {formatted}");
@@ -3100,6 +3728,9 @@ mod tests {
             prf: CkPbkdf2Prf(0),
             prf_data: vec![].into(),
             password: b"correct horse battery staple".to_vec().into(),
+            salt_source_data_presence: PointerBytes::present_copy(&[]),
+            prf_data_presence: PointerBytes::present_copy(&[]),
+            password_presence: PointerBytes::present_copy(b"correct horse battery staple"),
         };
         let formatted = format!("{p:?}");
         assert!(!formatted.contains("correct horse"), "password leaked: {formatted}");
@@ -3737,6 +4368,8 @@ mod validated_params_tests {
                 salt: SecretBytes::copy_from_slice(b"salty"),
                 salt_key_handle: CkObjectHandle(11),
                 info: SecretBytes::copy_from_slice(b"context"),
+                salt_presence: PointerBytes::present_copy(b"salty"),
+                info_presence: PointerBytes::present_copy(b"context"),
             })),
         };
         let before = hkdf.clone();
@@ -3767,5 +4400,213 @@ mod validated_params_tests {
         let substituted = validated.substitute_handles(|_| {});
         assert_eq!(substituted.flat_grant(), Some(grant));
         assert_eq!(substituted.mechanism(), &flat);
+    }
+
+    // ------------------------------------------------------------------
+    // R16: typed presence/length consistency (S2 §3 "no dual
+    // representations"). The v1 wire gate rejects set legacy bools at
+    // decode; validation re-enforces the same rule on domain values,
+    // plus presence/payload agreement for every pair.
+    // ------------------------------------------------------------------
+
+    fn r16_mech(mech: u64, params: CkMechanismParams) -> CkMechanism {
+        CkMechanism { mechanism_type: CkMechanismType(mech), params: Some(params) }
+    }
+
+    fn r16_gcm(
+        iv: Vec<u8>,
+        iv_null: bool,
+        iv_presence: PointerBytes,
+        aad: SecretBytes,
+        aad_null: bool,
+        aad_presence: PointerBytes,
+    ) -> CkMechanismParams {
+        CkMechanismParams::Gcm(GcmParams {
+            iv,
+            iv_bits: 96,
+            iv_buffer_len: 12,
+            aad,
+            tag_bits: 128,
+            iv_null,
+            aad_null,
+            iv_presence,
+            aad_presence,
+        })
+    }
+
+    #[test]
+    fn r16_validation_accepts_consistent_presence() {
+        let registry = registry_with_binding(AES_CBC, "iv");
+        // v0 NULL triple: set bool + empty legacy + Null{0}; present-empty
+        // aad alongside.
+        let v0_null = r16_gcm(
+            vec![],
+            true,
+            PointerBytes::null_len(0),
+            SecretBytes::copy_from_slice(b""),
+            false,
+            PointerBytes::present_copy(b""),
+        );
+        validate(&registry, &r16_mech(CkMechanismType::AES_GCM.0, v0_null)).unwrap();
+        // v1 NULL: unset bool + empty legacy + Null{41}.
+        let v1_null = r16_gcm(
+            vec![],
+            false,
+            PointerBytes::null_len(41),
+            SecretBytes::copy_from_slice(b"tag"),
+            false,
+            PointerBytes::present_copy(b"tag"),
+        );
+        validate(&registry, &r16_mech(CkMechanismType::AES_GCM.0, v1_null)).unwrap();
+        // Bool-less present + NULL pairs (HKDF).
+        let hkdf = CkMechanismParams::Hkdf(HkdfParams {
+            extract: true,
+            expand: true,
+            prf_hash_mechanism: CkMechanismType::SHA256,
+            salt_type: 1,
+            salt: SecretBytes::copy_from_slice(b"salty"),
+            salt_key_handle: CkObjectHandle(11),
+            info: SecretBytes::copy_from_slice(b""),
+            salt_presence: PointerBytes::present_copy(b"salty"),
+            info_presence: PointerBytes::null_len(12),
+        });
+        validate(&registry, &r16_mech(0x0000_1087, hkdf)).unwrap();
+        // Bool-less Vec pair (ECDH1 public data).
+        let ecdh1 = CkMechanismParams::Ecdh1Derive(Ecdh1DeriveParams {
+            kdf: CkKdf(1),
+            shared_data: SecretBytes::copy_from_slice(b""),
+            public_data: vec![0x04; 65],
+            shared_data_presence: PointerBytes::present_copy(b""),
+            public_data_presence: PointerBytes::present_copy(&[0x04; 65]),
+        });
+        validate(&registry, &r16_mech(0x0000_1087, ecdh1)).unwrap();
+        // Nested OAEP inside RSA-AES wrap.
+        let wrap = CkMechanismParams::RsaAesKeyWrap(RsaAesKeyWrapParams {
+            aes_key_bits: 128,
+            oaep_params: RsaPkcsOaepParams {
+                hash_alg: CkMechanismType::SHA256,
+                mgf: CkMgf(1),
+                source: CkOaepSource(1),
+                source_data: SecretBytes::copy_from_slice(b""),
+                source_null: false,
+                source_data_presence: PointerBytes::present_copy(b""),
+            },
+        });
+        validate(&registry, &r16_mech(0x0000_1087, wrap)).unwrap();
+    }
+
+    #[test]
+    fn r16_validation_rejects_set_bool_contradictions() {
+        let registry = registry_with_binding(AES_CBC, "iv");
+        let empty_secret = || SecretBytes::copy_from_slice(b"");
+        // Set bool + non-empty legacy: conversion stays total over this
+        // legacy shape and fails closed here.
+        let bool_wins = r16_gcm(
+            vec![0xA5; 3],
+            true,
+            PointerBytes::null_len(0),
+            empty_secret(),
+            false,
+            PointerBytes::present_copy(b""),
+        );
+        assert_eq!(
+            validate(&registry, &r16_mech(CkMechanismType::AES_GCM.0, bool_wins)),
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        );
+        // Set bool (NULL/0) + v1 NULL length: dual lengths.
+        let dual_len = r16_gcm(
+            vec![],
+            true,
+            PointerBytes::null_len(41),
+            empty_secret(),
+            false,
+            PointerBytes::present_copy(b""),
+        );
+        assert_eq!(
+            validate(&registry, &r16_mech(CkMechanismType::AES_GCM.0, dual_len)),
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        );
+        // Set bool (NULL) + Present: dual null-ness.
+        let dual_nullness = r16_gcm(
+            vec![],
+            true,
+            PointerBytes::present_copy(b""),
+            empty_secret(),
+            false,
+            PointerBytes::present_copy(b""),
+        );
+        assert_eq!(
+            validate(&registry, &r16_mech(CkMechanismType::AES_GCM.0, dual_nullness)),
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        );
+    }
+
+    #[test]
+    fn r16_validation_rejects_payload_mismatch() {
+        let registry = registry_with_binding(AES_CBC, "iv");
+        // Present payload differs from the legacy bytes.
+        let mismatch = CkMechanismParams::Hkdf(HkdfParams {
+            extract: true,
+            expand: true,
+            prf_hash_mechanism: CkMechanismType::SHA256,
+            salt_type: 1,
+            salt: SecretBytes::copy_from_slice(b"salty"),
+            salt_key_handle: CkObjectHandle(11),
+            info: SecretBytes::copy_from_slice(b""),
+            salt_presence: PointerBytes::present_copy(b"other"),
+            info_presence: PointerBytes::present_copy(b""),
+        });
+        assert_eq!(
+            validate(&registry, &r16_mech(0x0000_1087, mismatch)),
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        );
+        // NULL presence with non-empty legacy bytes.
+        let null_nonempty = CkMechanismParams::Hkdf(HkdfParams {
+            extract: true,
+            expand: true,
+            prf_hash_mechanism: CkMechanismType::SHA256,
+            salt_type: 1,
+            salt: SecretBytes::copy_from_slice(b"salty"),
+            salt_key_handle: CkObjectHandle(11),
+            info: SecretBytes::copy_from_slice(b""),
+            salt_presence: PointerBytes::null_len(5),
+            info_presence: PointerBytes::present_copy(b""),
+        });
+        assert_eq!(
+            validate(&registry, &r16_mech(0x0000_1087, null_nonempty)),
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        );
+        // Vec pair mismatch (ECDH1 public data).
+        let vec_mismatch = CkMechanismParams::Ecdh1Derive(Ecdh1DeriveParams {
+            kdf: CkKdf(1),
+            shared_data: SecretBytes::copy_from_slice(b""),
+            public_data: vec![0x04; 65],
+            shared_data_presence: PointerBytes::present_copy(b""),
+            public_data_presence: PointerBytes::present_copy(&[0x05; 65]),
+        });
+        assert_eq!(
+            validate(&registry, &r16_mech(0x0000_1087, vec_mismatch)),
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        );
+    }
+
+    #[test]
+    fn r16_validation_rejects_nested_oaep_contradiction() {
+        let registry = registry_with_binding(AES_CBC, "iv");
+        let wrap = CkMechanismParams::RsaAesKeyWrap(RsaAesKeyWrapParams {
+            aes_key_bits: 128,
+            oaep_params: RsaPkcsOaepParams {
+                hash_alg: CkMechanismType::SHA256,
+                mgf: CkMgf(1),
+                source: CkOaepSource(1),
+                source_data: SecretBytes::copy_from_slice(b"data"),
+                source_null: true,
+                source_data_presence: PointerBytes::null_len(0),
+            },
+        });
+        assert_eq!(
+            validate(&registry, &r16_mech(0x0000_1087, wrap)),
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        );
     }
 }

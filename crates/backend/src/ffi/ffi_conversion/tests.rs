@@ -14,10 +14,10 @@ mod mechanism_to_ffi_tests {
         CkRv, DilithiumParams, EciesParams, ExtractParams, GcmParams, HdKeyDeriveParams,
         Ike1PrfDeriveParams, IvParams, KeyDerivationStringData, KeyWrapSetOaepParams, KipParams,
         KmacParams, KyberParams, MuGenParams, ObjectHandleParam, PbeParams, Pkcs5Pbkd2Params,
-        RawMechanismParams, RsaAesKeyWrapParams, RsaPkcsOaepParams, RsaPkcsPssParams, SecretBytes,
-        SignAdditionalContext, Ssl3KeyMatParams, Ssl3MasterKeyDeriveParams, SslRandomData,
-        Tls12ExtendedMasterKeyDeriveParams, Tls12MasterKeyDeriveParams, TlsPrfParams,
-        VendorObjectExtractParams, VendorObjectInsertParams, WtlsKeyMatParams,
+        PointerBytes, RawMechanismParams, RsaAesKeyWrapParams, RsaPkcsOaepParams, RsaPkcsPssParams,
+        SecretBytes, SignAdditionalContext, Ssl3KeyMatParams, Ssl3MasterKeyDeriveParams,
+        SslRandomData, Tls12ExtendedMasterKeyDeriveParams, Tls12MasterKeyDeriveParams,
+        TlsPrfParams, VendorObjectExtractParams, VendorObjectInsertParams, WtlsKeyMatParams,
         WtlsMasterKeyDeriveParams, WtlsPrfParams, WtlsRandomData,
     };
 
@@ -145,6 +145,7 @@ mod mechanism_to_ffi_tests {
             params: Some(CkMechanismParams::KeyWrapSetOaep(KeyWrapSetOaepParams {
                 bc,
                 x: SecretBytes::copy_from_slice(&[0x44; 8]),
+                x_presence: PointerBytes::present_copy(&[0x44; 8]),
             })),
         };
         let ike1 = |key_number: u32| CkMechanism {
@@ -157,6 +158,8 @@ mod mechanism_to_ffi_tests {
                 ckyi: SecretBytes::copy_from_slice(&[0x55; 8]),
                 ckyr: SecretBytes::copy_from_slice(&[0x66; 8]),
                 key_number,
+                ckyi_presence: PointerBytes::present_copy(&[0x55; 8]),
+                ckyr_presence: PointerBytes::present_copy(&[0x66; 8]),
             })),
         };
         let wtls = |version: u32| CkMechanism {
@@ -451,7 +454,7 @@ mod mechanism_to_ffi_tests {
                 mgf: CkMgf(1),
                 source: CkOaepSource(1),
                 source_data: vec![0xA0, 0xA1, 0xA2].into(),
-
+                source_data_presence: PointerBytes::from_legacy(&[0xA0, 0xA1, 0xA2], false),
                 source_null: false,
             }),
         );
@@ -487,7 +490,8 @@ mod mechanism_to_ffi_tests {
                 iv_buffer_len: 12,
                 aad: vec![0xAA, 0xBB, 0xCC].into(),
                 tag_bits: 128,
-
+                iv_presence: PointerBytes::from_legacy(&[0x10; 12], false),
+                aad_presence: PointerBytes::from_legacy(&[0xAA, 0xBB, 0xCC], false),
                 iv_null: false,
                 aad_null: false,
             }),
@@ -531,7 +535,8 @@ mod mechanism_to_ffi_tests {
                     iv_buffer_len: buffer_len as u64,
                     aad: Vec::new().into(),
                     tag_bits: 128,
-
+                    iv_presence: PointerBytes::from_legacy(&vec![0x5A; iv_len], false),
+                    aad_presence: PointerBytes::from_legacy(&[], false),
                     iv_null: false,
                     aad_null: false,
                 }),
@@ -575,7 +580,8 @@ mod mechanism_to_ffi_tests {
                 iv_buffer_len: u64::MAX,
                 aad: Vec::new().into(),
                 tag_bits: 128,
-
+                iv_presence: PointerBytes::from_legacy(&[], false),
+                aad_presence: PointerBytes::from_legacy(&[], false),
                 iv_null: false,
                 aad_null: false,
             })),
@@ -597,6 +603,9 @@ mod mechanism_to_ffi_tests {
                 password: password.clone().into(),
                 salt: vec![0x02; 4].into(),
                 iteration: 1000,
+                init_vector_presence: PointerBytes::present_copy(&[0x01; 8]),
+                password_presence: PointerBytes::present_copy(&password),
+                salt_presence: PointerBytes::present_copy(&[0x02; 4]),
             }),
         );
         let pbe =
@@ -621,6 +630,9 @@ mod mechanism_to_ffi_tests {
                 prf: CkPbkdf2Prf(2),
                 prf_data: vec![].into(),
                 password: password.clone().into(),
+                salt_source_data_presence: PointerBytes::present_copy(&[0x09; 8]),
+                prf_data_presence: PointerBytes::present_copy(&[]),
+                password_presence: PointerBytes::present_copy(&password),
             }),
         );
         let p = unsafe {
@@ -643,7 +655,8 @@ mod mechanism_to_ffi_tests {
                 iv_buffer_len: 12,
                 aad: Vec::new().into(),
                 tag_bits: 128,
-
+                iv_presence: PointerBytes::from_legacy(&[], false),
+                aad_presence: PointerBytes::from_legacy(&[], false),
                 iv_null: false,
                 aad_null: false,
             }),
@@ -1096,6 +1109,7 @@ mod mechanism_to_ffi_tests {
             CkMechanismType(0x0000_0501),
             CkMechanismParams::KeyDerivationString(KeyDerivationStringData {
                 data: vec![0xDE, 0xAD, 0xBE, 0xEF].into(),
+                data_presence: PointerBytes::present_copy(&[0xDE, 0xAD, 0xBE, 0xEF]),
             }),
         );
 
@@ -1123,6 +1137,7 @@ mod mechanism_to_ffi_tests {
                 hedge_variant: 1,
                 context: vec![0xA1, 0xA2, 0xA3].into(),
                 hash: CkMechanismType(0),
+                context_presence: PointerBytes::present_copy(&[0xA1, 0xA2, 0xA3]),
             }),
         );
 
@@ -1152,6 +1167,7 @@ mod mechanism_to_ffi_tests {
                 hedge_variant: 1,
                 context: vec![0xB1, 0xB2].into(),
                 hash: CkMechanismType::SHA256,
+                context_presence: PointerBytes::present_copy(&[0xB1, 0xB2]),
             }),
         );
 
@@ -1182,6 +1198,7 @@ mod mechanism_to_ffi_tests {
                 key_handle: CkObjectHandle(0xCAFE),
                 mac_length: 64,
                 customization_string: b"custom".to_vec().into(),
+                customization_string_presence: PointerBytes::present_copy(b"custom"),
             }),
         );
 
@@ -1214,6 +1231,8 @@ mod mechanism_to_ffi_tests {
                 key_handle: CkObjectHandle(0xA11CE),
                 tr: b"precomputed-tr".to_vec().into(),
                 context: b"context".to_vec().into(),
+                tr_presence: PointerBytes::present_copy(b"precomputed-tr"),
+                context_presence: PointerBytes::present_copy(b"context"),
             }),
         );
 
@@ -1248,6 +1267,8 @@ mod mechanism_to_ffi_tests {
                     iv_buffer_len: 0,
                     aad: Vec::new().into(),
                     tag_bits: 128,
+                    iv_presence: PointerBytes::from_legacy(&[], iv_null),
+                    aad_presence: PointerBytes::from_legacy(&[], aad_null),
                     iv_null,
                     aad_null,
                 }),
@@ -1277,6 +1298,8 @@ mod mechanism_to_ffi_tests {
                     nonce: Vec::new(),
                     aad: Vec::new().into(),
                     mac_len: 12,
+                    nonce_presence: PointerBytes::from_legacy(&[], nonce_null),
+                    aad_presence: PointerBytes::from_legacy(&[], aad_null),
                     nonce_null,
                     aad_null,
                 }),
@@ -1306,6 +1329,7 @@ mod mechanism_to_ffi_tests {
                     mgf: CkMgf(1),
                     source: CkOaepSource(1),
                     source_data: Vec::new().into(),
+                    source_data_presence: PointerBytes::from_legacy(&[], source_null),
                     source_null,
                 }),
             );
@@ -1335,6 +1359,7 @@ mod mechanism_to_ffi_tests {
                 mgf: CkMgf(1),
                 source: CkOaepSource(1),
                 source_data: Vec::new().into(),
+                source_data_presence: PointerBytes::from_legacy(&[], source_null),
                 source_null,
             };
             let top = convert(
@@ -1401,6 +1426,7 @@ mod mechanism_to_ffi_tests {
             mgf: CkMgf(1),
             source: CkOaepSource(1),
             source_data: vec![0xA0, 0xA1, 0xA2].into(),
+            source_data_presence: PointerBytes::from_legacy(&[0xA0, 0xA1, 0xA2], false),
             source_null: false,
         };
         let nested = convert(
@@ -1769,10 +1795,10 @@ mod output_params_equal_tests {
     use super::{mechanism_to_ffi, validated_mechanism_for_tests};
     use pkcs11_proxy_ng_types::{
         CkAttribute, CkAttributeType, CkAttributeValue, CkMechanism, CkMechanismParams,
-        CkMechanismType, CkObjectHandle, GcmParams, PbeParams, PrfDataParam, SecretBytes,
-        Sp800108DerivedKey, Sp800108FeedbackKdfParams, Sp800108KdfParams, Ssl3KeyMatParams,
-        Ssl3MasterKeyDeriveParams, SslRandomData, Tls12MasterKeyDeriveParams, TlsPrfParams,
-        WtlsKeyMatParams, WtlsMasterKeyDeriveParams, WtlsPrfParams, WtlsRandomData,
+        CkMechanismType, CkObjectHandle, GcmParams, PbeParams, PointerBytes, PrfDataParam,
+        SecretBytes, Sp800108DerivedKey, Sp800108FeedbackKdfParams, Sp800108KdfParams,
+        Ssl3KeyMatParams, Ssl3MasterKeyDeriveParams, SslRandomData, Tls12MasterKeyDeriveParams,
+        TlsPrfParams, WtlsKeyMatParams, WtlsMasterKeyDeriveParams, WtlsPrfParams, WtlsRandomData,
     };
 
     fn convert(mechanism_type: CkMechanismType, params: CkMechanismParams) -> super::FfiMechanism {
@@ -1790,6 +1816,8 @@ mod output_params_equal_tests {
             iv_buffer_len: 12,
             aad: b"aad-bytes".to_vec().into(),
             tag_bits: 128,
+            iv_presence: PointerBytes::from_legacy(&[0x11; 12], false),
+            aad_presence: PointerBytes::from_legacy(b"aad-bytes", false),
             iv_null: false,
             aad_null: false,
         })
@@ -1961,6 +1989,9 @@ mod output_params_equal_tests {
                     password: b"pw".to_vec().into(),
                     salt: b"salt".to_vec().into(),
                     iteration: 1000,
+                    init_vector_presence: PointerBytes::present_copy(&[0x13; 8]),
+                    password_presence: PointerBytes::present_copy(b"pw"),
+                    salt_presence: PointerBytes::present_copy(b"salt"),
                 }),
                 "Pbe",
             ),
@@ -1994,6 +2025,9 @@ mod output_params_equal_tests {
                 password: b"pw".to_vec().into(),
                 salt: b"salt".to_vec().into(),
                 iteration: 1,
+                init_vector_presence: PointerBytes::present_copy(&[]),
+                password_presence: PointerBytes::present_copy(b"pw"),
+                salt_presence: PointerBytes::present_copy(b"salt"),
             }),
         );
         assert_eq!(pbe_null.output_params(), None);
