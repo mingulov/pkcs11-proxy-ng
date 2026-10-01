@@ -158,16 +158,24 @@ sound but Stacked-dirty, and Tree Borrows caught a real `pParameter`
 misalignment there. The exact filter lists live in `nightly.yml` (keep
 them in sync when adding UB-relevant pure logic).
 
-**Kani**: `crates/types/src/kani_proofs.rs` proves 30 harnesses over the
-whole input space: width-translation "never silently truncate" laws,
+**Kani**: `crates/types/src/kani_proofs.rs` proves 31 harnesses:
+width-translation "never silently truncate" laws,
 attribute-classifier laws, mechanism vendor/flag laws, `SecretBytes`
 length/content laws, output/session/slot/object gating laws, `CkRv`
 ok/err + vendor-range + spec-table laws, `CkInBuf` NULL/bytes pointer
 laws, and the official-mechanism table law. Run
 `cargo kani -p pkcs11-proxy-ng-types` (pinned verifier; see
-`nightly.yml`). Registry-query and proto-crate proofs were attempted
-and removed as CBMC-intractable (nondet-SipHash blowup; details in
-`kani_proofs.rs`) — those edges stay covered by fuzzing instead.
+`nightly.yml`). Each harness covers its modeled inputs exhaustively,
+but the models are bounded where CBMC needs a bound: fully symbolic
+scalars/ids for the classifier, vendor, flag-predicate, `CkRv`,
+`CkInBuf`, and length-translation proofs; fixed 8/12/6-byte inputs for
+the reencode proofs; a concrete invalid-width set; fixed 4/8-byte plus
+0..=8-byte variable-length `SecretBytes` models; a concrete flag table
+with pairwise distinctness; and one symbolic index into the asserted-
+nonempty official-mechanism table. Registry-query and proto-crate
+proofs were attempted and removed as CBMC-intractable
+(nondet-SipHash blowup; details in `kani_proofs.rs`) — those edges
+stay covered by fuzzing instead.
 
 **Coverage ratchet**: `cargo llvm-cov --workspace` must stay at or above
 84% lines (`--fail-under-lines 84` in `nightly.yml`; baseline 85.20% on

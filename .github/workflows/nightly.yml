@@ -463,8 +463,9 @@ jobs:
           path: fuzz/artifacts/
 
   # ── Kani proofs (pure types laws) ────────────────────────────────────────────
-  # `crates/types/src/kani_proofs.rs` proves 30 harnesses over the whole
-  # input space (unit + randomized law tests cover examples): width
+  # `crates/types/src/kani_proofs.rs` proves 31 harnesses (unit +
+  # randomized law tests cover examples; each harness covers its modeled,
+  # bounded inputs exhaustively — see kani_proofs.rs header): width
   # "never silently truncate" laws, attribute-classifier laws,
   # mechanism/object/session/slot/secret/output laws, CkRv laws,
   # CkInBuf pointer laws, and the official-mechanism table law. The
@@ -472,7 +473,7 @@ jobs:
   # dependency — `cargo kani` injects its library — so stable/MSRV builds
   # are unaffected. Pinned verifier; bump only after re-running locally.
   kani:
-    name: Kani types proofs (30 harnesses)
+    name: Kani types proofs (31 harnesses)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:

@@ -11,8 +11,13 @@
 //!
 //! Kani checks memory safety, panics, and arithmetic overflow on every
 //! path for free; the explicit asserts pin the "never silently
-//! truncate" laws over all inputs (the unit + randomized law tests in
-//! `width.rs` cover examples; these cover the whole input space).
+//! truncate" laws. Coverage shape varies per harness (see each proof's
+//! doc comment): fully symbolic scalars/ids where tractable, bounded
+//! models — fixed 8/12/6-byte inputs, 0..=8-byte secrets, a concrete
+//! invalid-width set, a concrete flag table, one symbolic table index —
+//! where CBMC needs a bound. The unit + randomized law tests in
+//! `width.rs` cover examples; these proofs cover each modeled space
+//! exhaustively, not the unbounded input space.
 
 use crate::CkRv;
 use crate::attribute::{CkAttributeType, is_value_bearing_secret};
@@ -200,14 +205,18 @@ fn attr_allocation_size_subset_of_ulong() {
     }
 }
 
-/// Secret classification is total (no panic, free) and deterministic.
+/// Secret classification matches the independently specified PKCS#11 id
+/// set over all 2^64 ids: `CKA_VALUE` (0x11) plus the six RSA private-key
+/// component attributes `CKA_PRIVATE_EXPONENT..=CKA_COEFFICIENT`
+/// (0x123..=0x128). The expected set is written as literal spec ids, not
+/// derived from the implementation's `VALUE_BEARING_SECRET` list, so a
+/// missing or extra entry fails here. Totality (no panic) is free.
 #[kani::proof]
-fn attr_secret_classification_deterministic() {
-    let t = CkAttributeType(kani::any());
-    kani::assert(
-        is_value_bearing_secret(t) == is_value_bearing_secret(t),
-        "secret classification deterministic",
-    );
+fn attr_secret_classification_matches_spec() {
+    let raw: u64 = kani::any();
+    let t = CkAttributeType(raw);
+    let expected = raw == 0x11 || (0x123..=0x128).contains(&raw);
+    kani::assert(is_value_bearing_secret(t) == expected, "classification matches spec ids");
 }
 
 // ── Mechanism-type/flag laws (K1b) ─────────────────────────────────────
@@ -247,11 +256,12 @@ fn mech_flags_bitor_exact() {
 }
 
 /// Every named flag constant is a single bit (a doubled bit would
-/// silently merge two capabilities); aliases equal their primaries.
+/// silently merge two capabilities), and distinct names sit on distinct
+/// bits; aliases equal their primaries.
 #[kani::proof]
 fn mech_flag_consts_single_bit() {
     use CkMechanismFlags as F;
-    for f in [
+    let flags = [
         F::HW.0,
         F::MESSAGE_ENCRYPT.0,
         F::MESSAGE_DECRYPT.0,
@@ -281,8 +291,18 @@ fn mech_flag_consts_single_bit() {
         F::ENCAPSULATE.0,
         F::DECAPSULATE.0,
         F::EXTENSION.0,
-    ] {
+    ];
+    for f in flags {
         kani::assert(f.is_power_of_two(), "flag const is a single bit");
+    }
+    // Pairwise distinct: two capabilities sharing one bit would be
+    // indistinguishable to every flag filter. The intentional aliases
+    // (`EC_NAMEDCURVE`/`EC_OID`, `MULTI_MESSGE`/`MULTI_MESSAGE`) are
+    // pinned equal below and listed once here, so they cannot trip this.
+    for (i, a) in flags.iter().enumerate() {
+        for b in flags.iter().skip(i + 1) {
+            kani::assert(a != b, "flag consts are pairwise distinct");
+        }
     }
     kani::assert(F::MULTI_MESSGE.0 == F::MULTI_MESSAGE.0, "alias equal");
     kani::assert(F::EC_NAMEDCURVE.0 == F::EC_OID.0, "alias equal");
@@ -312,6 +332,24 @@ fn secret_new_adopts_len() {
     let d = SecretBytes::default();
     kani::assert(d.len() == 0, "default length zero");
     kani::assert(d.is_empty(), "default empty");
+}
+
+/// `copy_from_slice` over empty and bounded variable-length inputs
+/// (every length 0..=8): exact length, exact emptiness, exact bytes.
+/// The fixed four/eight-byte models above are retained as concrete
+/// width pins; this proof adds the empty input and every length in
+/// between. Lengths past 8 are covered by shape, not symbolically —
+/// CBMC needs the bound — plus the native round-trip tests.
+#[kani::proof]
+#[kani::unwind(10)]
+fn secret_copy_variable_len_exact() {
+    let buf: [u8; 8] = kani::any();
+    let len: usize = kani::any();
+    kani::assume(len <= 8);
+    let s = SecretBytes::copy_from_slice(&buf[..len]);
+    kani::assert(s.len() == len, "length exact");
+    kani::assert(s.is_empty() == (len == 0), "emptiness exact");
+    kani::assert(s.expose(|b| b == &buf[..len]), "bytes exact");
 }
 
 /// `expose_mut` writes are visible through later `expose` reads.
@@ -721,10 +759,13 @@ fn inbuf_bytes_len_exact() {
 }
 
 /// Every official PKCS#11 3.2 mechanism sits below the vendor range.
-/// A symbolic index covers the whole table, not examples.
+/// A symbolic index covers the whole table, not examples — after an
+/// explicit nonempty assert so an empty table cannot make the proof
+/// vacuous (`any_where` over an empty range constrains nothing).
 #[kani::proof]
 fn official_mechanisms_below_vendor_range() {
     let list = pkcs11_3_2_official_mechanisms();
+    kani::assert(!list.is_empty(), "table nonempty: symbolic index is non-vacuous");
     let i = kani::any_where(|idx: &usize| *idx < list.len());
     kani::assert(list[i].0 < 0x8000_0000, "official entry non-vendor");
 }
