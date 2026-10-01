@@ -278,11 +278,7 @@ pub unsafe extern "C" fn c_message_sign_init(
         let mech = if p_mechanism.is_null() {
             None // cancel path
         } else {
-            let rv = unsafe { validate_mechanism(p_mechanism) };
-            if rv != rv_ok() {
-                return rv;
-            }
-            Some(match unsafe { read_mechanism(p_mechanism) } {
+            Some(match unsafe { read_mechanism_for_transport(p_mechanism, Operation::General) } {
                 Ok(mech) => mech,
                 Err(e) => return rv_err(e),
             })
@@ -352,11 +348,7 @@ pub unsafe extern "C" fn c_message_verify_init(
         let mech = if p_mechanism.is_null() {
             None // cancel path
         } else {
-            let rv = unsafe { validate_mechanism(p_mechanism) };
-            if rv != rv_ok() {
-                return rv;
-            }
-            Some(match unsafe { read_mechanism(p_mechanism) } {
+            Some(match unsafe { read_mechanism_for_transport(p_mechanism, Operation::General) } {
                 Ok(mech) => mech,
                 Err(e) => return rv_err(e),
             })

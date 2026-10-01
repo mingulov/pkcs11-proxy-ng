@@ -86,6 +86,11 @@ macro_rules! with_client {
     }};
 }
 
+/// Operation context for `read_mechanism_for_transport` (S2 §4: `WrapKey`
+/// selects the GCM/CCM wrap layouts by operation+length; every other call
+/// passes `General`). Re-exported so mechanism call sites keep a single
+/// `helpers` import.
+pub(crate) use pkcs11_proxy_ng_types::shape_descriptors::Operation;
 pub(crate) use with_client;
 
 /// Maximum byte count we will serialize over gRPC.  Any `CK_ULONG` length

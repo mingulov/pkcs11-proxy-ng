@@ -1,8 +1,13 @@
-//! Mechanism-parameter FFI readers: validate_mechanism / read_mechanism
-//! and the per-shape `read_mechanism_with_shape` match (kept flat by
-//! design for auditability), plus the shared raw-parameter utilities.
+//! Mechanism-parameter FFI readers: `read_mechanism_for_transport` (S2 §5,
+//! single-snapshot outer classification + typed-or-Flat routing) and the
+//! per-shape `read_mechanism_with_shape` match (kept flat by design for
+//! auditability), plus the shared raw-parameter utilities.
 
 use super::*;
+use pkcs11_proxy_ng_types::shape_descriptors::{
+    FlatDecision, FlatRequest, Operation, OperationContext, OuterKind, ParamAbi, ResolvedShape,
+    ShapeResolver, decide_flat,
+};
 
 /// Return `true` when an embedded mechanism-parameter **data** payload (seed,
 /// label, AAD, IV, OtherInfo, public-data, password, random, …) has a length
@@ -45,7 +50,7 @@ pub(crate) struct CkMuGenParams {
 }
 
 /// Maximum nested (non-top-level) mechanism nodes a single
-/// `read_mechanism` traversal will descend into (T03/RV-N2). The 17th
+/// `read_mechanism_for_transport` traversal will descend into (T03/RV-N2). The 17th
 /// nested node — and any repeated active caller address (a reference
 /// cycle) — is rejected with `MECHANISM_PARAM_INVALID` before recursion.
 /// Recorded as an explicit support limit in the canonical
@@ -132,106 +137,461 @@ pub(crate) unsafe fn payload_bytes(ptr: *const u8, len: CK_ULONG) -> CkResult<Ve
     Ok(unsafe { std::slice::from_raw_parts(ptr, extent) }.to_vec())
 }
 
-/// Validate that the proxy can forward a mechanism invocation.
+/// Read one C `CK_MECHANISM` for transport in a single snapshot (S2 §5).
 ///
-/// Uses the global [`MechanismRegistry`] to check whether parameterized
-/// mechanisms have a known parameter shape.  Parameterless invocations
-/// are always allowed.
+/// This ONE call replaces the old `validate_mechanism` + `read_mechanism`
+/// pair: the outer struct is read exactly once (no validate/read race —
+/// the old double outer-struct read is gone), then a single
+/// registry/capability/ABI snapshot feeds the whole decision.
 ///
-/// The check is done against the raw `CK_MECHANISM` pointer so that the
-/// proxy rejects mechanisms whose parameter shapes are not modeled in the
-/// registry before attempting conversion. For mechanisms with known shapes,
-/// `read_mechanism` will properly parse the C struct; for unknown shapes
-/// it falls back to raw bytes, but `validate_mechanism` prevents those
-/// from reaching the server.
+/// Outer classification (exact): (NULL,0) -> `params=None`; (NULL,n>0) ->
+/// `Null`; (non-NULL,0) -> empty Flat; (non-NULL,n>0) -> typed or Flat per
+/// descriptor. The old early return collapsing NULL and zero-length is gone.
 ///
-/// Returns `rv_ok()` when the mechanism is acceptable, or
-/// `CKR_MECHANISM_PARAM_INVALID` when the mechanism has unmodeled
-/// parameters that the proxy cannot safely serialize.
+/// `operation` is the call-site operation context (S2 §4): `WrapKey`
+/// (exactly the `C_WrapKey` entrypoint, the sole old wrap-shape caller)
+/// selects the GCM/CCM wrap layouts by operation+length; every other call
+/// passes `General` and never selects wrap layouts.
+///
+/// Legacy capability preserves the old behavior EXACTLY (including legacy
+/// `Raw` emission for old daemons); under v1 the shim NEVER emits legacy
+/// `Raw` — unrepresentable inputs fail locally with `PARAM_INVALID`
+/// without wire emission.
 ///
 /// # Safety
 ///
-/// `p_mechanism` must point to a valid `CK_MECHANISM` (caller already
-/// checked non-null before calling this).
-pub(crate) unsafe fn validate_mechanism(p_mechanism: *const CK_MECHANISM) -> CK_RV {
-    let c_mech = match unsafe { read_param_struct(p_mechanism) } {
-        Ok(m) => m,
-        Err(_) => return rv_err(CkRv::MECHANISM_PARAM_INVALID),
-    };
-    let has_params = !c_mech.pParameter.is_null() && c_mech.ulParameterLen > 0;
-    // Reject absurd parameter lengths before we attempt to dereference
-    // the parameter buffer.  This prevents undefined behavior when the
-    // caller passes a small buffer with an enormous ulParameterLen.
-    if has_params && (c_mech.ulParameterLen as usize) > MAX_MECHANISM_PARAM_STRUCT_LEN {
-        return rv_err(CkRv::MECHANISM_PARAM_INVALID);
+/// `p_mechanism` must point to a valid `CK_MECHANISM` (callers already
+/// checked non-null). If the mechanism has parameters, `pParameter` must
+/// point to a valid buffer of at least `ulParameterLen` bytes containing
+/// the appropriate C struct. Unreadable-pointer rule (exact, S2 §5): the
+/// readers validate arithmetic and caps but CANNOT detect an unmapped
+/// non-NULL pointer — such an address may fault the caller exactly as in
+/// direct loading. Only NULL (never dereferenced) is unconditionally safe.
+pub(crate) unsafe fn read_mechanism_for_transport(
+    p_mechanism: *const CK_MECHANISM,
+    operation: Operation,
+) -> CkResult<CkMechanism> {
+    let c_mech = unsafe { read_param_struct(p_mechanism)? };
+    let capability = crate::interface_probe::mechanism_parameter_transport_version();
+    if capability == 0 {
+        // Legacy order parity: the old `validate_mechanism` rejected
+        // overlong outer lengths BEFORE touching the registry, so a
+        // pre-init overlong call answers MPI rather than the pre-init RV.
+        // (Under v1 there is no outer length cap: NULL lengths forward
+        // uncapped per D3, Flat lengths are decided per descriptor below.)
+        let has_params = !c_mech.pParameter.is_null() && c_mech.ulParameterLen > 0;
+        if has_params && (c_mech.ulParameterLen as usize) > MAX_MECHANISM_PARAM_STRUCT_LEN {
+            return Err(CkRv::MECHANISM_PARAM_INVALID);
+        }
     }
-    let registry = match crate::state::try_mechanism_registry() {
-        Ok(registry) => registry,
-        // Pre-init (or racing C_Initialize): no registry installed yet.
-        Err(rv) => return rv_err(rv),
-    };
-    match registry.check_operation(c_mech.mechanism.into(), has_params) {
-        Ok(()) => rv_ok(),
-        Err(rv) => rv_err(rv),
+    // Pre-init (or racing C_Initialize): no registry installed yet.
+    let registry = crate::state::try_mechanism_registry()?;
+    let backend_abi = backend_abi_snapshot();
+    unsafe {
+        read_mechanism_node(
+            &c_mech,
+            &registry,
+            capability,
+            ParamAbi::native(),
+            backend_abi,
+            operation,
+            &mut NestingBudget::new(),
+            false,
+        )
     }
 }
 
-/// Read a C `CK_MECHANISM` into the typed Rust `CkMechanism` representation.
+/// Snapshot core behind [`read_mechanism_for_transport`] (S2 §5 signature:
+/// outer struct + registry/capability/ABI snapshots + operation context).
 ///
-/// Uses the global [`MechanismRegistry`] to determine the parameter shape for
-/// the mechanism type. This is the inverse of `mechanism_to_ffi()` in the FFI
-/// backend: it converts C structs → Rust types for the shim's gRPC path.
-///
-/// For mechanisms with no known shape but non-null params, the raw bytes are
-/// preserved as `CkMechanismParams::Raw` so they can still reach the server.
+/// Test seam — production enters through the pointer-level wrapper above
+/// (nested KIP recursion through `read_nested_mechanism_for_transport`):
+/// every snapshot is injected, so the v1/legacy × ABI × operation ×
+/// nesting matrices run hermetically with no global state.
 ///
 /// # Safety
 ///
-/// `p_mechanism` must point to a valid `CK_MECHANISM`. If the mechanism has
-/// parameters, `pParameter` must point to a valid buffer of at least
-/// `ulParameterLen` bytes containing the appropriate C struct.
-pub(crate) unsafe fn read_mechanism(p_mechanism: *const CK_MECHANISM) -> CkResult<CkMechanism> {
-    unsafe { read_mechanism_budgeted(p_mechanism, &mut NestingBudget::new()) }
+/// `c_mech` is borrowed (always safe); its `pParameter`, when non-null
+/// with nonzero length, must designate `ulParameterLen` readable bytes.
+/// Inputs the v1 encoding cannot represent fail with
+/// `MECHANISM_PARAM_INVALID`; under v1 no legacy `Raw` is ever produced.
+#[cfg(test)]
+pub(crate) unsafe fn read_mechanism_for_transport_with_snapshots(
+    c_mech: &CK_MECHANISM,
+    registry: &MechanismRegistry,
+    capability: u32,
+    local_abi: Option<ParamAbi>,
+    backend_abi: Option<ParamAbi>,
+    operation: Operation,
+    nested: bool,
+    budget: &mut NestingBudget,
+) -> CkResult<CkMechanism> {
+    unsafe {
+        read_mechanism_node(
+            c_mech,
+            registry,
+            capability,
+            local_abi,
+            backend_abi,
+            operation,
+            budget,
+            nested,
+        )
+    }
 }
 
-/// Budget-carrying `read_mechanism` for nested (KIP) recursion.
+/// One mechanism node (top-level or KIP-nested) against explicit snapshots.
+///
+/// `nested` selects the nested contract (validate-fusion skipped: the old
+/// nested read ran no validation, and the daemon's R9 validation does not
+/// recurse into nested params).
 ///
 /// # Safety
 ///
-/// Same contract as [`read_mechanism`].
-unsafe fn read_mechanism_budgeted(
+/// Same contract as [`read_mechanism_for_transport`].
+unsafe fn read_mechanism_node(
+    c_mech: &CK_MECHANISM,
+    registry: &MechanismRegistry,
+    capability: u32,
+    local_abi: Option<ParamAbi>,
+    backend_abi: Option<ParamAbi>,
+    operation: Operation,
+    budget: &mut NestingBudget,
+    nested: bool,
+) -> CkResult<CkMechanism> {
+    if capability == 0 {
+        return unsafe { read_mechanism_legacy(c_mech, registry, operation, budget, nested) };
+    }
+    if !nested {
+        let mech_type: u64 = c_mech.mechanism.into();
+        if registry.excluded_view().contains(&mech_type) {
+            // S2 §4 rule 1: operator exclusion wins (both capabilities; the
+            // legacy branch enforces it via `check_operation` with the same
+            // log line). Nested nodes skip it (see the `nested` contract).
+            tracing::warn!(
+                mechanism = format_args!("0x{mech_type:08X}"),
+                "rejecting operator-excluded mechanism"
+            );
+            return Err(CkRv::MECHANISM_INVALID);
+        }
+    }
+    unsafe { read_mechanism_v1(c_mech, registry, local_abi, backend_abi, operation, budget) }
+}
+
+/// Legacy-capability behavior (S2 §5: preserved EXACTLY, including legacy
+/// `Raw` emission for old daemons): the old `validate_mechanism` +
+/// `read_mechanism`/`read_wrap_key_mechanism` logic fused over the single
+/// outer read (the only change is the removal of the TOCTOU window —
+/// single-threaded behavior is bit-identical).
+///
+/// `nested` reproduces the old nested read exactly (no validate-fusion:
+/// no length cap, no `check_operation` — validation was top-level-only).
+///
+/// # Safety
+///
+/// Same contract as [`read_mechanism_for_transport`].
+unsafe fn read_mechanism_legacy(
+    c_mech: &CK_MECHANISM,
+    registry: &MechanismRegistry,
+    operation: Operation,
+    budget: &mut NestingBudget,
+    nested: bool,
+) -> CkResult<CkMechanism> {
+    if !nested {
+        let has_params = !c_mech.pParameter.is_null() && c_mech.ulParameterLen > 0;
+        // Reject absurd parameter lengths before we attempt to dereference
+        // the parameter buffer.  This prevents undefined behavior when the
+        // caller passes a small buffer with an enormous ulParameterLen.
+        // (The production entry enforces the same gate pre-registry; this
+        // copy covers snapshot-core callers. Same RV either way once the
+        // registry is in hand.)
+        if has_params && (c_mech.ulParameterLen as usize) > MAX_MECHANISM_PARAM_STRUCT_LEN {
+            return Err(CkRv::MECHANISM_PARAM_INVALID);
+        }
+        registry.check_operation(c_mech.mechanism.into(), has_params)?;
+    }
+    let shape = select_reader_shape(c_mech, registry, operation);
+    unsafe { read_mechanism_with_shape_budgeted(c_mech, shape, budget) }
+}
+
+/// Reader shape selection shared by the legacy branch and the v1 typed
+/// branch: `WrapKey` selects the GCM/CCM wrap layouts by exact local size
+/// (S2 §4 operation context — this reconciles the old operation-blind
+/// wrap reader with R7's WrapKey gate; the selections are identical),
+/// every other case falls back to the registry binding, and `General`
+/// NEVER selects wrap layouts (R7
+/// `general_operation_ignores_wrap_layouts`).
+fn select_reader_shape<'a>(
+    c_mech: &CK_MECHANISM,
+    registry: &'a MechanismRegistry,
+    operation: Operation,
+) -> Option<&'a str> {
+    if operation == Operation::WrapKey {
+        let param_len = c_mech.ulParameterLen as usize;
+        match c_mech.mechanism {
+            CKM_AES_GCM if param_len == std::mem::size_of::<CK_GCM_WRAP_PARAMS>() => {
+                return Some("gcm_wrap");
+            }
+            CKM_AES_CCM if param_len == std::mem::size_of::<CK_CCM_WRAP_PARAMS>() => {
+                return Some("ccm_wrap");
+            }
+            _ => {}
+        }
+    }
+    registry.param_shape(c_mech.mechanism.into())
+}
+
+/// v1-capability read (S2 §5): exact outer classification, per-shape
+/// typed-or-Flat routing, legacy `Raw` never emitted.
+///
+/// # Safety
+///
+/// Same contract as [`read_mechanism_for_transport`].
+unsafe fn read_mechanism_v1(
+    c_mech: &CK_MECHANISM,
+    registry: &MechanismRegistry,
+    local_abi: Option<ParamAbi>,
+    backend_abi: Option<ParamAbi>,
+    operation: Operation,
+    budget: &mut NestingBudget,
+) -> CkResult<CkMechanism> {
+    let mech_type: u64 = c_mech.mechanism.into();
+    let mechanism_type = CkMechanismType(mech_type);
+    let declared_len = c_mech.ulParameterLen as u64;
+    if c_mech.pParameter.is_null() {
+        if declared_len == 0 {
+            return Ok(CkMechanism { mechanism_type, params: None });
+        }
+        // (NULL, n>0) -> Null: the pointer is NEVER dereferenced
+        // (unreadable-pointer rule: only NULL is unconditionally safe), no
+        // bytes materialize, and no cap applies (D3 — CK_ULONG narrowing
+        // is the daemon's job, R9). No descriptor is needed (S2 §6 RV
+        // table: unknown mechanisms with Null forward). The D3
+        // shared-length exception is vacuous here — no struct is read, so
+        // no companion can share this length (R17 enforces it per field
+        // on the typed path).
+        return Ok(CkMechanism {
+            mechanism_type,
+            params: Some(CkMechanismParams::Null {
+                declared_len,
+                version: MECHANISM_PARAMETER_TRANSPORT_VERSION,
+            }),
+        });
+    }
+    // Non-NULL below. (non-NULL, 0) -> empty Flat (S2: distinct from None —
+    // NULL/non-NULL are never conflated); it routes through the Flat branch
+    // like any other noncanonical length (0 is never a native struct size).
+    let Some(abi) = local_abi else {
+        // No v1 ABI on this target (big-endian): the shim cannot name a
+        // source ABI or fingerprint, so it can never emit well-formed Flat.
+        // The typed path still works (native mirrors); legacy Raw stays
+        // banned; (non-NULL, 0) cannot collapse to None (conflation).
+        if declared_len == 0 {
+            return Err(CkRv::MECHANISM_PARAM_INVALID);
+        }
+        let shape = select_reader_shape(c_mech, registry, operation);
+        return unsafe { read_typed_under_v1(c_mech, shape, budget) };
+    };
+    let bound_shape = registry.param_shape(mech_type);
+    let resolved = ShapeResolver::resolve(
+        bound_shape,
+        OperationContext { mechanism: mech_type, operation, length: declared_len },
+        abi,
+    );
+    // Typed-or-Flat per descriptor (S2 §5 per-shape algorithm; the typed
+    // branch itself is R17 — here canonical lengths route to the EXISTING
+    // typed reader unchanged):
+    // - parameterless forms ride Flat (S2 §4: parameterless-shaped bytes
+    //   may carry arbitrary flat bytes to the cap), like the unbound
+    //   parameterless-only case below;
+    // - byte-buffer forms have no canonical length: every nonzero length
+    //   stays typed (Iv bytes keep their legacy typed encoding, still
+    //   valid under v1 per S2 §3 newer-accepts-older);
+    // - struct forms: exact native size -> canonical -> typed reader;
+    //   anything else -> Flat iff R7-eligible, else the forced
+    //   transport-limit RV (PARAM_INVALID) — in particular,
+    //   pointer-bearing oversized structs stay rejected (residual limit;
+    //   typed-plus-tail only on provider evidence, NOT this task);
+    // - nested/output forms ride typed envelopes only (R18): until then
+    //   the reader keeps its native length tolerance;
+    // - unresolvable (unbound/unknown shape) -> Flat branch, where
+    //   `decide_flat` grants parameterless-only and denies the rest
+    //   (unknown/vendor/nested/over-cap -> PARAM_INVALID).
+    let use_typed_reader = match resolved {
+        Some(form) => match form.outer_kind() {
+            OuterKind::Parameterless => false,
+            OuterKind::ByteBuffer => declared_len != 0,
+            OuterKind::ScalarStruct | OuterKind::PointerStruct => {
+                Some(declared_len) == form.native_size(abi).map(|size| size as u64)
+            }
+            OuterKind::NestedOrOutput => declared_len != 0,
+        },
+        None => false,
+    };
+    if use_typed_reader {
+        let shape = select_reader_shape(c_mech, registry, operation);
+        return unsafe { read_typed_under_v1(c_mech, shape, budget) };
+    }
+    unsafe { read_flat_under_v1(c_mech, registry, resolved, abi, backend_abi, operation) }
+}
+
+/// Typed branch under v1: the EXISTING typed reader, unchanged (R17 owns
+/// its rework) — except its legacy-`Raw` fallbacks, which v1 cannot emit:
+/// full-extent or degenerate-struct bytes that would have ridden `Raw`
+/// fail locally with `PARAM_INVALID` (no wire emission). `None` is
+/// unreachable (the router only sends non-NULL/nonzero here) and fails
+/// closed rather than conflate.
+///
+/// # Safety
+///
+/// Same contract as [`read_mechanism_for_transport`].
+unsafe fn read_typed_under_v1(
+    c_mech: &CK_MECHANISM,
+    shape: Option<&str>,
+    budget: &mut NestingBudget,
+) -> CkResult<CkMechanism> {
+    let mechanism = unsafe { read_mechanism_with_shape_budgeted(c_mech, shape, budget)? };
+    match mechanism.params {
+        Some(CkMechanismParams::Raw(_)) => Err(CkRv::MECHANISM_PARAM_INVALID),
+        Some(_) => Ok(mechanism),
+        None => Err(CkRv::MECHANISM_PARAM_INVALID),
+    }
+}
+
+/// Flat branch under v1 (S2 §4 eligibility + S2 §5 width rule): Flat iff
+/// R7-eligible, else the forced transport-limit RV (`PARAM_INVALID`,
+/// local, no wire emission).
+///
+/// The Flat decision is embedded-field-independent: only the outer extent
+/// is read (verbatim bytes via the capped raw reader); struct contents —
+/// including any NULL embedded pointers — are never interpreted (a NULL
+/// record would declare its length without dereference; here there is not
+/// even a record).
+///
+/// Width (S2 §5): parameterless and byte-buffer Flat cross ABIs; struct
+/// prefixes require identical layouts (`backend_abi == local_abi`), else
+/// explicit `PARAM_INVALID`. An unknown backend ABI fails closed for
+/// struct prefixes. (The daemon re-validates authoritatively; this is the
+/// fail-fast that avoids needless RPCs.)
+///
+/// # Safety
+///
+/// `c_mech.pParameter` must be non-null and designate `ulParameterLen`
+/// readable bytes (the v1 router guarantees both: NULL routes to Null,
+/// and over-cap lengths are denied before any dereference).
+unsafe fn read_flat_under_v1(
+    c_mech: &CK_MECHANISM,
+    registry: &MechanismRegistry,
+    resolved: Option<ResolvedShape>,
+    local_abi: ParamAbi,
+    backend_abi: Option<ParamAbi>,
+    operation: Operation,
+) -> CkResult<CkMechanism> {
+    let mech_type: u64 = c_mech.mechanism.into();
+    let declared_len = c_mech.ulParameterLen as u64;
+    // `decide_flat` against our own descriptor (S2 §4: each side validates
+    // against its own; the shim never re-decides R7 policy): peer == local,
+    // so the ABI/fingerprint checks pass trivially and the grant carries
+    // the wire fingerprint. (`resolved` is None only for unbound/unknown
+    // shapes, where the fingerprint is unused: the parameterless-only arm
+    // grants without one and every other arm denies first.)
+    let peer_fingerprint = resolved.map(|form| form.fingerprint(local_abi)).unwrap_or(0);
+    let grant = match decide_flat(FlatRequest {
+        mechanism: mech_type,
+        operation,
+        declared_len,
+        bound_shape: registry.param_shape(mech_type),
+        parameterless_listed: registry.is_parameterless(mech_type),
+        // Exclusion was decided by the caller (top-level pre-check;
+        // nested nodes skip it — see `read_mechanism_node`).
+        excluded: false,
+        peer_fingerprint,
+        peer_abi: local_abi,
+        local_abi,
+    }) {
+        FlatDecision::Eligible(grant) => grant,
+        // Unreachable (`excluded: false` above); mapped anyway so a future
+        // reorder cannot silently forward (R9 precedent).
+        FlatDecision::Excluded => return Err(CkRv::MECHANISM_INVALID),
+        // OverCap, VendorWithoutAllowlist, UnknownShape, NestedOrOutput,
+        // FullNativeImage, AbiMismatch, FingerprintMismatch, PrefixTooLong:
+        // every R7 denial is the forced transport-limit RV (S2 §6 table).
+        FlatDecision::Denied(_) => return Err(CkRv::MECHANISM_PARAM_INVALID),
+    };
+    match grant.resolved.outer_kind() {
+        OuterKind::Parameterless | OuterKind::ByteBuffer => {}
+        OuterKind::ScalarStruct | OuterKind::PointerStruct => {
+            if backend_abi != Some(local_abi) {
+                return Err(CkRv::MECHANISM_PARAM_INVALID);
+            }
+        }
+        // Unreachable (`decide_flat` denies nested/output); defense in depth.
+        OuterKind::NestedOrOutput => return Err(CkRv::MECHANISM_PARAM_INVALID),
+    }
+    // Materialize the outer extent verbatim: the grant confines it to the
+    // 64 KiB Flat cap, and the capped raw reader re-checks (extent
+    // arithmetic + no-deref-before-cap) rather than trust the grant.
+    let extent = usize::try_from(declared_len).map_err(|_| CkRv::MECHANISM_PARAM_INVALID)?;
+    let bytes = unsafe { read_raw_bytes(c_mech.pParameter, extent)? };
+    Ok(CkMechanism {
+        mechanism_type: CkMechanismType(mech_type),
+        params: Some(CkMechanismParams::Flat(FlatParams {
+            bytes: SecretBytes::copy_from_slice(&bytes),
+            declared_len,
+            source_abi: Some(local_abi),
+            fingerprint: grant.fingerprint,
+            version: MECHANISM_PARAMETER_TRANSPORT_VERSION,
+        })),
+    })
+}
+
+/// Nested-node read for KIP `pMechanism` recursion: one snapshot per nested
+/// node (the race fix applies per node — each node reads its outer struct
+/// once). Nested nodes are never wrap operations (legacy parity: nested
+/// reads never wrap-selected) and skip the validate-fusion (legacy parity:
+/// validation was top-level-only; the daemon's R9 validation likewise does
+/// not recurse into nested params).
+///
+/// # Safety
+///
+/// Same contract as [`read_mechanism_for_transport`].
+unsafe fn read_nested_mechanism_for_transport(
     p_mechanism: *const CK_MECHANISM,
     budget: &mut NestingBudget,
 ) -> CkResult<CkMechanism> {
-    let c_mech = unsafe { read_param_struct(p_mechanism) }?;
-    // Hold the Arc until after we have copied the shape string out — the
-    // returned `&str` borrows from the Arc, so dropping it before the call
-    // below would leave a dangling reference.
+    let c_mech = unsafe { read_param_struct(p_mechanism)? };
+    let capability = crate::interface_probe::mechanism_parameter_transport_version();
     let registry = crate::state::try_mechanism_registry()?;
-    let shape = registry.param_shape(c_mech.mechanism.into());
-    unsafe { read_mechanism_with_shape_budgeted(&c_mech, shape, budget) }
+    let backend_abi = backend_abi_snapshot();
+    unsafe {
+        read_mechanism_node(
+            &c_mech,
+            &registry,
+            capability,
+            ParamAbi::native(),
+            backend_abi,
+            Operation::General,
+            budget,
+            true,
+        )
+    }
 }
 
-/// Read a wrap-key `CK_MECHANISM`, selecting the GCM/CCM wrap shape by
-/// parameter length before falling back to the registry shape (W1-L1-04).
-///
-/// # Safety
-///
-/// Same contract as [`read_mechanism`]: `p_mechanism` must point to a
-/// valid `CK_MECHANISM`, and a non-null `pParameter` must designate
-/// `ulParameterLen` readable bytes.
-pub(crate) unsafe fn read_wrap_key_mechanism(
-    p_mechanism: *const CK_MECHANISM,
-) -> CkResult<CkMechanism> {
-    let c_mech = unsafe { read_param_struct(p_mechanism) }?;
-    let param_len = c_mech.ulParameterLen as usize;
-    let registry = crate::state::try_mechanism_registry()?;
-    let shape = match c_mech.mechanism {
-        CKM_AES_GCM if param_len == std::mem::size_of::<CK_GCM_WRAP_PARAMS>() => Some("gcm_wrap"),
-        CKM_AES_CCM if param_len == std::mem::size_of::<CK_CCM_WRAP_PARAMS>() => Some("ccm_wrap"),
-        _ => registry.param_shape(c_mech.mechanism.into()),
-    };
-    unsafe { read_mechanism_with_shape_budgeted(&c_mech, shape, &mut NestingBudget::new()) }
+/// Derive the backend's v1 ABI from the probed width/stride snapshot
+/// (ADR-0011 D2): exact pairs map to a v1 ABI, anything else (unmapped
+/// widths, future layouts) yields `None` and struct-prefix Flat fails
+/// closed locally. Pre-probe readers see the D9 fallback width/stride
+/// (LP64); the daemon re-validates authoritatively either way.
+fn backend_abi_snapshot() -> Option<ParamAbi> {
+    match (
+        crate::interface_probe::backend_ulong_size(),
+        crate::interface_probe::backend_attribute_stride(),
+    ) {
+        (8, 24) => Some(ParamAbi::Lp64NativeLe),
+        (4, 12) => Some(ParamAbi::Ilp32NativeLe),
+        (4, 16) => Some(ParamAbi::Llp64Packed1Le),
+        _ => None,
+    }
 }
 
 /// Parse `c_mech` per the registry `shape`, preserving unmodeled params
@@ -2441,7 +2801,8 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     budget.enter(p.pMechanism as usize)?;
-                    let mechanism = unsafe { read_mechanism_budgeted(p.pMechanism, budget) };
+                    let mechanism =
+                        unsafe { read_nested_mechanism_for_transport(p.pMechanism, budget) };
                     budget.exit();
                     let mechanism = mechanism?;
                     let seed = unsafe { payload_bytes(p.pSeed, p.ulSeedLen)? };
@@ -2951,9 +3312,9 @@ pub(crate) fn raw_mechanism_params(
 ///
 /// Lengths above `MAX_MECHANISM_PARAM_STRUCT_LEN` are an explicit
 /// `MECHANISM_PARAM_INVALID` error (W1-L12-06: never conflate overlong
-/// with empty). The `validate_mechanism` entry gate already rejects such
-/// lengths, so the error arm is unreachable in production and exists as
-/// defense-in-depth at the API boundary.
+/// with empty). The `read_mechanism_for_transport` legacy entry gate
+/// already rejects such lengths, so the error arm is unreachable in
+/// production and exists as defense-in-depth at the API boundary.
 ///
 /// # Safety
 ///

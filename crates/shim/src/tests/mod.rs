@@ -11,7 +11,10 @@ static FAST_CONNECT_ENV: Once = Once::new();
 /// process-global env vars) sleeps through the full production backoff
 /// (~21 s), and victims queue behind the client-init lock — the whole
 /// suite degraded to ~10 min per run on every architecture.
-fn shim_state_test_guard() -> MutexGuard<'static, ()> {
+/// `pub(crate)` so R11 reader tests (which gather the global capability
+/// snapshot through the production entry / nested helper) serialize
+/// against the capability-mutating suites (R5/R10).
+pub(crate) fn shim_state_test_guard() -> MutexGuard<'static, ()> {
     FAST_CONNECT_ENV.call_once(|| unsafe {
         std::env::set_var("PKCS11_PROXY_CONNECT_ATTEMPTS", "1");
     });

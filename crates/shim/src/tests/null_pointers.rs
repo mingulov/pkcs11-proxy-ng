@@ -617,7 +617,7 @@ const UNKNOWN_SESSION: CK_SESSION_HANDLE = CK_SESSION_HANDLE::MAX;
 /// A second never-minted handle, registered as known for the control test.
 const KNOWN_SESSION: CK_SESSION_HANDLE = CK_SESSION_HANDLE::MAX - 1;
 
-/// Build a mechanism `validate_mechanism` must reject deterministically:
+/// Build a mechanism `read_mechanism_for_transport` must reject deterministically:
 /// an overlong parameter length trips the entry gate before any memory is
 /// touched, so the dangling pointer is never dereferenced (W1-L12-06
 /// convention) and no registry state is needed.

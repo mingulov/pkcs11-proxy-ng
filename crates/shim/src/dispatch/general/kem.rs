@@ -78,11 +78,7 @@ pub unsafe extern "C" fn c_encapsulate_key(
         if !state::is_initialized() {
             return rv_err(CkRv::CRYPTOKI_NOT_INITIALIZED);
         }
-        let rv = unsafe { validate_mechanism(p_mechanism) };
-        if rv != rv_ok() {
-            return rv;
-        }
-        let mech = match unsafe { read_mechanism(p_mechanism) } {
+        let mech = match unsafe { read_mechanism_for_transport(p_mechanism, Operation::General) } {
             Ok(mech) => mech,
             Err(e) => return rv_err(e),
         };
@@ -131,11 +127,7 @@ pub unsafe extern "C" fn c_decapsulate_key(
         if !state::is_initialized() {
             return rv_err(CkRv::CRYPTOKI_NOT_INITIALIZED);
         }
-        let rv = unsafe { validate_mechanism(p_mechanism) };
-        if rv != rv_ok() {
-            return rv;
-        }
-        let mech = match unsafe { read_mechanism(p_mechanism) } {
+        let mech = match unsafe { read_mechanism_for_transport(p_mechanism, Operation::General) } {
             Ok(mech) => mech,
             Err(e) => return rv_err(e),
         };

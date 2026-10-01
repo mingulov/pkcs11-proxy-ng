@@ -4,10 +4,10 @@ use pkcs11_proxy_ng_types::*;
 use crate::state;
 
 use super::helpers::{
-    catch_panics, ck_attrs_to_rust_checked, classify_input, derive_key_post_rpc,
+    Operation, catch_panics, ck_attrs_to_rust_checked, classify_input, derive_key_post_rpc,
     generate_key_post_rpc, input_buf_to_ck_in_buf, null_preserving_template, output_buffer_spec,
-    read_mechanism, read_wrap_key_mechanism, rv_err, rv_ok, unit_result_to_rv, validate_mechanism,
-    with_client, wrap_key_post_rpc, write_object_handle_output, write_object_handle_pair_output,
+    read_mechanism_for_transport, rv_err, rv_ok, unit_result_to_rv, with_client, wrap_key_post_rpc,
+    write_object_handle_output, write_object_handle_pair_output,
 };
 
 pub unsafe extern "C" fn c_wrap_key(
@@ -28,12 +28,7 @@ pub unsafe extern "C" fn c_wrap_key(
         if !state::is_initialized() {
             return rv_err(CkRv::CRYPTOKI_NOT_INITIALIZED);
         }
-        let rv = unsafe { validate_mechanism(p_mechanism) };
-        if rv != rv_ok() {
-            return rv;
-        }
-
-        let mech = match unsafe { read_wrap_key_mechanism(p_mechanism) } {
+        let mech = match unsafe { read_mechanism_for_transport(p_mechanism, Operation::WrapKey) } {
             Ok(mech) => mech,
             Err(e) => return rv_err(e),
         };
@@ -94,11 +89,7 @@ pub unsafe extern "C" fn c_unwrap_key(
         if !state::is_initialized() {
             return rv_err(CkRv::CRYPTOKI_NOT_INITIALIZED);
         }
-        let rv = unsafe { validate_mechanism(p_mechanism) };
-        if rv != rv_ok() {
-            return rv;
-        }
-        let mech = match unsafe { read_mechanism(p_mechanism) } {
+        let mech = match unsafe { read_mechanism_for_transport(p_mechanism, Operation::General) } {
             Ok(mech) => mech,
             Err(e) => return rv_err(e),
         };
@@ -155,11 +146,7 @@ pub unsafe extern "C" fn c_derive_key(
         if !state::is_initialized() {
             return rv_err(CkRv::CRYPTOKI_NOT_INITIALIZED);
         }
-        let rv = unsafe { validate_mechanism(p_mechanism) };
-        if rv != rv_ok() {
-            return rv;
-        }
-        let mech = match unsafe { read_mechanism(p_mechanism) } {
+        let mech = match unsafe { read_mechanism_for_transport(p_mechanism, Operation::General) } {
             Ok(mech) => mech,
             Err(e) => return rv_err(e),
         };
@@ -209,11 +196,7 @@ pub unsafe extern "C" fn c_generate_key(
         if !state::is_initialized() {
             return rv_err(CkRv::CRYPTOKI_NOT_INITIALIZED);
         }
-        let rv = unsafe { validate_mechanism(p_mechanism) };
-        if rv != rv_ok() {
-            return rv;
-        }
-        let mech = match unsafe { read_mechanism(p_mechanism) } {
+        let mech = match unsafe { read_mechanism_for_transport(p_mechanism, Operation::General) } {
             Ok(mech) => mech,
             Err(e) => return rv_err(e),
         };
@@ -268,11 +251,7 @@ pub unsafe extern "C" fn c_generate_key_pair(
         if !state::is_initialized() {
             return rv_err(CkRv::CRYPTOKI_NOT_INITIALIZED);
         }
-        let rv = unsafe { validate_mechanism(p_mechanism) };
-        if rv != rv_ok() {
-            return rv;
-        }
-        let mech = match unsafe { read_mechanism(p_mechanism) } {
+        let mech = match unsafe { read_mechanism_for_transport(p_mechanism, Operation::General) } {
             Ok(mech) => mech,
             Err(e) => return rv_err(e),
         };

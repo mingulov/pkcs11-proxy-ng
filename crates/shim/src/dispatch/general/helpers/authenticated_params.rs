@@ -67,11 +67,7 @@ impl AuthenticatedCall {
             });
         }
         validate_message_caller_ranges(memory, outer.pParameter, outer.ulParameterLen as u64, &[])?;
-        let rv = unsafe { validate_mechanism(mechanism) };
-        if rv != CKR_OK {
-            return Err(CkRv(rv as u64));
-        }
-        let mechanism = unsafe { read_mechanism(mechanism) }?;
+        let mechanism = unsafe { read_mechanism_for_transport(mechanism, Operation::General) }?;
         validate_input(&mechanism, None)?;
         let iv_target = if matches!(mechanism.params, Some(CkMechanismParams::Iv(_))) {
             outer.pParameter.cast()
