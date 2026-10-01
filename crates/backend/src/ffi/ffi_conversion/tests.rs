@@ -40,7 +40,9 @@ mod mechanism_to_ffi_tests {
                 params: Some(CkMechanismParams::Kip(KipParams {
                     mechanism: Box::new(inner),
                     key_handle: CkObjectHandle(0),
+                    seed_presence: PointerBytes::present_copy(&[]),
                     seed: SecretBytes::copy_from_slice(&[]),
+                    mechanism_is_null: false,
                 })),
             }
         }
@@ -64,7 +66,12 @@ mod mechanism_to_ffi_tests {
     }
 
     fn ssl_random() -> SslRandomData {
-        SslRandomData { client_random: vec![0x11; 32], server_random: vec![0x22; 32] }
+        SslRandomData {
+            client_random_presence: PointerBytes::present_copy(&[0x11; 32]),
+            server_random_presence: PointerBytes::present_copy(&[0x22; 32]),
+            client_random: vec![0x11; 32],
+            server_random: vec![0x22; 32],
+        }
     }
 
     fn tls12_mech(major: u32, minor: u32) -> CkMechanism {
@@ -75,6 +82,7 @@ mod mechanism_to_ffi_tests {
                 version_major: major,
                 version_minor: minor,
                 prf_hash_mechanism: CkMechanismType::SHA256,
+                version_is_null: false,
             })),
         }
     }
@@ -105,6 +113,7 @@ mod mechanism_to_ffi_tests {
                 random_info: ssl_random(),
                 version_major: major,
                 version_minor: minor,
+                version_is_null: false,
             })),
         };
         let ext = |major: u32, minor: u32| CkMechanism {
@@ -112,9 +121,11 @@ mod mechanism_to_ffi_tests {
             params: Some(CkMechanismParams::Tls12ExtendedMasterKeyDerive(
                 Tls12ExtendedMasterKeyDeriveParams {
                     prf_hash_mechanism: CkMechanismType::SHA256,
+                    session_hash_presence: PointerBytes::present_copy(&[0x33; 48]),
                     session_hash: vec![0x33; 48],
                     version_major: major,
                     version_minor: minor,
+                    version_is_null: false,
                 },
             )),
         };
@@ -167,10 +178,13 @@ mod mechanism_to_ffi_tests {
             params: Some(CkMechanismParams::WtlsMasterKeyDerive(WtlsMasterKeyDeriveParams {
                 digest_mechanism: CkMechanismType::SHA256,
                 random_info: WtlsRandomData {
+                    client_random_presence: PointerBytes::present_copy(&[0xA1, 0xA2]),
+                    server_random_presence: PointerBytes::present_copy(&[0xB1, 0xB2]),
                     client_random: vec![0xA1, 0xA2],
                     server_random: vec![0xB1, 0xB2],
                 },
                 version,
+                version_is_null: false,
             })),
         };
         assert!(mechanism_to_ffi(&validated_mechanism_for_tests(&kwso(1))).is_ok());
@@ -696,10 +710,13 @@ mod mechanism_to_ffi_tests {
             CkMechanismParams::WtlsMasterKeyDerive(WtlsMasterKeyDeriveParams {
                 digest_mechanism: CkMechanismType::SHA256,
                 random_info: WtlsRandomData {
+                    client_random_presence: PointerBytes::present_copy(&[0xA1, 0xA2]),
+                    server_random_presence: PointerBytes::present_copy(&[0xB1, 0xB2]),
                     client_random: vec![0xA1, 0xA2],
                     server_random: vec![0xB1, 0xB2],
                 },
                 version: 1,
+                version_is_null: false,
             }),
         );
 
@@ -731,10 +748,14 @@ mod mechanism_to_ffi_tests {
         let ffi = convert(
             CkMechanismType::TLS_PRF,
             CkMechanismParams::TlsPrf(TlsPrfParams {
-                seed: vec![0xA1, 0xA2, 0xA3].into(),
-                label: vec![0xB1, 0xB2].into(),
+                seed_presence: PointerBytes::present_copy(&[0xA1, 0xA2, 0xA3]),
+                label_presence: PointerBytes::present_copy(&[0xB1, 0xB2]),
+                seed: (vec![0xA1, 0xA2, 0xA3]).into(),
+                label: (vec![0xB1, 0xB2]).into(),
                 output_len: 48,
                 output: Vec::new().into(),
+                output_is_null: false,
+                output_len_is_null: false,
             }),
         );
 
@@ -769,10 +790,14 @@ mod mechanism_to_ffi_tests {
             CkMechanismType::WTLS_PRF,
             CkMechanismParams::WtlsPrf(WtlsPrfParams {
                 digest_mechanism: CkMechanismType::SHA256,
-                seed: vec![0xC1, 0xC2].into(),
-                label: vec![0xD1].into(),
+                seed_presence: PointerBytes::present_copy(&[0xC1, 0xC2]),
+                label_presence: PointerBytes::present_copy(&[0xD1]),
+                seed: (vec![0xC1, 0xC2]).into(),
+                label: (vec![0xD1]).into(),
                 output_len: 20,
                 output: Vec::new().into(),
+                output_is_null: false,
+                output_len_is_null: false,
             }),
         );
 
@@ -807,11 +832,14 @@ mod mechanism_to_ffi_tests {
             CkMechanismType::SSL3_MASTER_KEY_DERIVE,
             CkMechanismParams::Ssl3MasterKeyDerive(Ssl3MasterKeyDeriveParams {
                 random_info: SslRandomData {
+                    client_random_presence: PointerBytes::present_copy(&[0x11; 32]),
+                    server_random_presence: PointerBytes::present_copy(&[0x22; 32]),
                     client_random: vec![0x11; 32],
                     server_random: vec![0x22; 32],
                 },
                 version_major: 3,
                 version_minor: 0,
+                version_is_null: false,
             }),
         );
 
@@ -850,12 +878,16 @@ mod mechanism_to_ffi_tests {
                 sequence_number: 7,
                 is_export: true,
                 random_info: WtlsRandomData {
+                    client_random_presence: PointerBytes::present_copy(&[0xC1, 0xC2]),
+                    server_random_presence: PointerBytes::present_copy(&[0xD1, 0xD2]),
                     client_random: vec![0xC1, 0xC2],
                     server_random: vec![0xD1, 0xD2],
                 },
                 mac_secret_handle: CkObjectHandle(0),
                 key_handle: CkObjectHandle(0),
-                iv: Vec::new().into(),
+                iv_presence: PointerBytes::present_copy(&(Vec::new())),
+                iv: (Vec::new()).into(),
+                returned_key_material_is_null: false,
             }),
         );
 
@@ -900,6 +932,8 @@ mod mechanism_to_ffi_tests {
                 iv_size_bits: 32,
                 is_export: false,
                 random_info: SslRandomData {
+                    client_random_presence: PointerBytes::present_copy(&[0x11, 0x12]),
+                    server_random_presence: PointerBytes::present_copy(&[0x21, 0x22]),
                     client_random: vec![0x11, 0x12],
                     server_random: vec![0x21, 0x22],
                 },
@@ -908,8 +942,11 @@ mod mechanism_to_ffi_tests {
                 server_mac_secret_handle: CkObjectHandle(0),
                 client_key_handle: CkObjectHandle(0),
                 server_key_handle: CkObjectHandle(0),
-                client_iv: Vec::new().into(),
-                server_iv: Vec::new().into(),
+                client_iv_presence: PointerBytes::present_copy(&(Vec::new())),
+                server_iv_presence: PointerBytes::present_copy(&(Vec::new())),
+                client_iv: (Vec::new()).into(),
+                server_iv: (Vec::new()).into(),
+                returned_key_material_is_null: false,
             }),
         );
 
@@ -972,6 +1009,8 @@ mod mechanism_to_ffi_tests {
                 iv_size_bits: 32,
                 is_export: false,
                 random_info: SslRandomData {
+                    client_random_presence: PointerBytes::present_copy(&[0x31, 0x32]),
+                    server_random_presence: PointerBytes::present_copy(&[0x41, 0x42]),
                     client_random: vec![0x31, 0x32],
                     server_random: vec![0x41, 0x42],
                 },
@@ -980,8 +1019,11 @@ mod mechanism_to_ffi_tests {
                 server_mac_secret_handle: CkObjectHandle(0),
                 client_key_handle: CkObjectHandle(0),
                 server_key_handle: CkObjectHandle(0),
-                client_iv: Vec::new().into(),
-                server_iv: Vec::new().into(),
+                client_iv_presence: PointerBytes::present_copy(&(Vec::new())),
+                server_iv_presence: PointerBytes::present_copy(&(Vec::new())),
+                client_iv: (Vec::new()).into(),
+                server_iv: (Vec::new()).into(),
+                returned_key_material_is_null: false,
             }),
         );
 
@@ -1795,10 +1837,11 @@ mod output_params_equal_tests {
     use super::{mechanism_to_ffi, validated_mechanism_for_tests};
     use pkcs11_proxy_ng_types::{
         CkAttribute, CkAttributeType, CkAttributeValue, CkMechanism, CkMechanismParams,
-        CkMechanismType, CkObjectHandle, GcmParams, PbeParams, PointerBytes, PrfDataParam,
-        SecretBytes, Sp800108DerivedKey, Sp800108FeedbackKdfParams, Sp800108KdfParams,
-        Ssl3KeyMatParams, Ssl3MasterKeyDeriveParams, SslRandomData, Tls12MasterKeyDeriveParams,
-        TlsPrfParams, WtlsKeyMatParams, WtlsMasterKeyDeriveParams, WtlsPrfParams, WtlsRandomData,
+        CkMechanismType, CkObjectHandle, GcmParams, PbeParams, PointerArray, PointerBytes,
+        PrfDataParam, SecretBytes, Sp800108DerivedKey, Sp800108FeedbackKdfParams,
+        Sp800108KdfParams, Ssl3KeyMatParams, Ssl3MasterKeyDeriveParams, SslRandomData,
+        Tls12MasterKeyDeriveParams, TlsPrfParams, WtlsKeyMatParams, WtlsMasterKeyDeriveParams,
+        WtlsPrfParams, WtlsRandomData,
     };
 
     fn convert(mechanism_type: CkMechanismType, params: CkMechanismParams) -> super::FfiMechanism {
@@ -1833,12 +1876,15 @@ mod output_params_equal_tests {
                 CkMechanismType::TLS12_MASTER_KEY_DERIVE,
                 CkMechanismParams::Tls12MasterKeyDerive(Tls12MasterKeyDeriveParams {
                     random_info: SslRandomData {
+                        client_random_presence: PointerBytes::present_copy(&[0x01; 32]),
+                        server_random_presence: PointerBytes::present_copy(&[0x02; 32]),
                         client_random: vec![0x01; 32],
                         server_random: vec![0x02; 32],
                     },
                     version_major: 3,
                     version_minor: 3,
                     prf_hash_mechanism: CkMechanismType::SHA256,
+                    version_is_null: false,
                 }),
                 "Tls12MasterKeyDerive",
             ),
@@ -1847,10 +1893,13 @@ mod output_params_equal_tests {
                 CkMechanismParams::WtlsMasterKeyDerive(WtlsMasterKeyDeriveParams {
                     digest_mechanism: CkMechanismType::SHA256,
                     random_info: WtlsRandomData {
+                        client_random_presence: PointerBytes::present_copy(&[0x03; 20]),
+                        server_random_presence: PointerBytes::present_copy(&[0x04; 20]),
                         client_random: vec![0x03; 20],
                         server_random: vec![0x04; 20],
                     },
                     version: 1,
+                    version_is_null: false,
                 }),
                 "WtlsMasterKeyDerive",
             ),
@@ -1864,12 +1913,16 @@ mod output_params_equal_tests {
                     sequence_number: 7,
                     is_export: false,
                     random_info: WtlsRandomData {
+                        client_random_presence: PointerBytes::present_copy(&[0x05; 20]),
+                        server_random_presence: PointerBytes::present_copy(&[0x06; 20]),
                         client_random: vec![0x05; 20],
                         server_random: vec![0x06; 20],
                     },
                     mac_secret_handle: CkObjectHandle(11),
                     key_handle: CkObjectHandle(12),
-                    iv: vec![0x07; 16].into(),
+                    iv_presence: PointerBytes::present_copy(&[0x07; 16]),
+                    iv: (vec![0x07; 16]).into(),
+                    returned_key_material_is_null: false,
                 }),
                 "WtlsKeyMat",
             ),
@@ -1881,6 +1934,8 @@ mod output_params_equal_tests {
                     iv_size_bits: 64,
                     is_export: false,
                     random_info: SslRandomData {
+                        client_random_presence: PointerBytes::present_copy(&[0x08; 32]),
+                        server_random_presence: PointerBytes::present_copy(&[0x09; 32]),
                         client_random: vec![0x08; 32],
                         server_random: vec![0x09; 32],
                     },
@@ -1889,8 +1944,11 @@ mod output_params_equal_tests {
                     server_mac_secret_handle: CkObjectHandle(22),
                     client_key_handle: CkObjectHandle(23),
                     server_key_handle: CkObjectHandle(24),
-                    client_iv: vec![0x0A; 8].into(),
-                    server_iv: vec![0x0B; 8].into(),
+                    client_iv_presence: PointerBytes::present_copy(&[0x0A; 8]),
+                    server_iv_presence: PointerBytes::present_copy(&[0x0B; 8]),
+                    client_iv: (vec![0x0A; 8]).into(),
+                    server_iv: (vec![0x0B; 8]).into(),
+                    returned_key_material_is_null: false,
                 }),
                 "Ssl3KeyMat",
             ),
@@ -1902,6 +1960,8 @@ mod output_params_equal_tests {
                     iv_size_bits: 64,
                     is_export: false,
                     random_info: SslRandomData {
+                        client_random_presence: PointerBytes::present_copy(&[0x0C; 32]),
+                        server_random_presence: PointerBytes::present_copy(&[0x0D; 32]),
                         client_random: vec![0x0C; 32],
                         server_random: vec![0x0D; 32],
                     },
@@ -1910,8 +1970,11 @@ mod output_params_equal_tests {
                     server_mac_secret_handle: CkObjectHandle(32),
                     client_key_handle: CkObjectHandle(33),
                     server_key_handle: CkObjectHandle(34),
-                    client_iv: vec![0x0E; 8].into(),
-                    server_iv: vec![0x0F; 8].into(),
+                    client_iv_presence: PointerBytes::present_copy(&[0x0E; 8]),
+                    server_iv_presence: PointerBytes::present_copy(&[0x0F; 8]),
+                    client_iv: (vec![0x0E; 8]).into(),
+                    server_iv: (vec![0x0F; 8]).into(),
+                    returned_key_material_is_null: false,
                 }),
                 "Tls12KeyMat",
             ),
@@ -1919,8 +1982,36 @@ mod output_params_equal_tests {
                 CkMechanismType::SP800_108_COUNTER_KDF,
                 CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
                     prf_type: CkMechanismType(0x0000_0251), // CKM_SHA256_HMAC
-                    data_params: vec![PrfDataParam { type_: 1, value: b"counter".to_vec().into() }],
+                    data_params_presence: PointerArray::present(vec![PrfDataParam {
+                        type_: 1,
+                        value_presence: PointerBytes::present_copy(b"counter"),
+                        value: b"counter".to_vec().into(),
+                    }]),
+                    additional_derived_keys_presence: PointerArray::present(vec![
+                        Sp800108DerivedKey {
+                            template_presence: PointerArray::present(vec![CkAttribute {
+                                attr_type: CkAttributeType::LABEL,
+                                value: Some(CkAttributeValue::String("kdf".to_string().into())),
+                            }]),
+                            ph_key_is_null: false,
+                            template: vec![CkAttribute {
+                                attr_type: CkAttributeType::LABEL,
+                                value: Some(CkAttributeValue::String("kdf".to_string().into())),
+                            }],
+                            key_handle: CkObjectHandle(41),
+                        },
+                    ]),
+                    data_params: vec![PrfDataParam {
+                        type_: 1,
+                        value_presence: PointerBytes::present_copy(b"counter"),
+                        value: b"counter".to_vec().into(),
+                    }],
                     additional_derived_keys: vec![Sp800108DerivedKey {
+                        template_presence: PointerArray::present(vec![CkAttribute {
+                            attr_type: CkAttributeType::LABEL,
+                            value: Some(CkAttributeValue::String("kdf".to_string().into())),
+                        }]),
+                        ph_key_is_null: false,
                         template: vec![CkAttribute {
                             attr_type: CkAttributeType::LABEL,
                             value: Some(CkAttributeValue::String("kdf".to_string().into())),
@@ -1934,12 +2025,38 @@ mod output_params_equal_tests {
                 CkMechanismType::SP800_108_FEEDBACK_KDF,
                 CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
                     prf_type: CkMechanismType(0x0000_0251), // CKM_SHA256_HMAC
+                    data_params_presence: PointerArray::present(vec![PrfDataParam {
+                        type_: 2,
+                        value_presence: PointerBytes::present_copy(b"feedback"),
+                        value: b"feedback".to_vec().into(),
+                    }]),
+                    iv_presence: PointerBytes::present_copy(&[0x10; 16]),
+                    additional_derived_keys_presence: PointerArray::present(vec![
+                        Sp800108DerivedKey {
+                            template_presence: PointerArray::present(vec![CkAttribute {
+                                attr_type: CkAttributeType::LABEL,
+                                value: Some(CkAttributeValue::String("fb".to_string().into())),
+                            }]),
+                            ph_key_is_null: false,
+                            template: vec![CkAttribute {
+                                attr_type: CkAttributeType::LABEL,
+                                value: Some(CkAttributeValue::String("fb".to_string().into())),
+                            }],
+                            key_handle: CkObjectHandle(42),
+                        },
+                    ]),
                     data_params: vec![PrfDataParam {
                         type_: 2,
+                        value_presence: PointerBytes::present_copy(b"feedback"),
                         value: b"feedback".to_vec().into(),
                     }],
                     iv: vec![0x10; 16],
                     additional_derived_keys: vec![Sp800108DerivedKey {
+                        template_presence: PointerArray::present(vec![CkAttribute {
+                            attr_type: CkAttributeType::LABEL,
+                            value: Some(CkAttributeValue::String("fb".to_string().into())),
+                        }]),
+                        ph_key_is_null: false,
                         template: vec![CkAttribute {
                             attr_type: CkAttributeType::LABEL,
                             value: Some(CkAttributeValue::String("fb".to_string().into())),
@@ -1952,10 +2069,14 @@ mod output_params_equal_tests {
             (
                 CkMechanismType::TLS_PRF,
                 CkMechanismParams::TlsPrf(TlsPrfParams {
-                    seed: vec![0xA1, 0xA2].into(),
-                    label: vec![0xB1].into(),
+                    seed_presence: PointerBytes::present_copy(&[0xA1, 0xA2]),
+                    label_presence: PointerBytes::present_copy(&[0xB1]),
+                    seed: (vec![0xA1, 0xA2]).into(),
+                    label: (vec![0xB1]).into(),
                     output_len: 48,
                     output: Vec::new().into(),
+                    output_is_null: false,
+                    output_len_is_null: false,
                 }),
                 "TlsPrf",
             ),
@@ -1963,10 +2084,14 @@ mod output_params_equal_tests {
                 CkMechanismType::WTLS_PRF,
                 CkMechanismParams::WtlsPrf(WtlsPrfParams {
                     digest_mechanism: CkMechanismType::SHA256,
-                    seed: vec![0xC1].into(),
-                    label: vec![0xD1].into(),
+                    seed_presence: PointerBytes::present_copy(&[0xC1]),
+                    label_presence: PointerBytes::present_copy(&[0xD1]),
+                    seed: (vec![0xC1]).into(),
+                    label: (vec![0xD1]).into(),
                     output_len: 20,
                     output: Vec::new().into(),
+                    output_is_null: false,
+                    output_len_is_null: false,
                 }),
                 "WtlsPrf",
             ),
@@ -1974,11 +2099,14 @@ mod output_params_equal_tests {
                 CkMechanismType::SSL3_MASTER_KEY_DERIVE,
                 CkMechanismParams::Ssl3MasterKeyDerive(Ssl3MasterKeyDeriveParams {
                     random_info: SslRandomData {
+                        client_random_presence: PointerBytes::present_copy(&[0x11; 32]),
+                        server_random_presence: PointerBytes::present_copy(&[0x12; 32]),
                         client_random: vec![0x11; 32],
                         server_random: vec![0x12; 32],
                     },
                     version_major: 3,
                     version_minor: 0,
+                    version_is_null: false,
                 }),
                 "Ssl3MasterKeyDerive",
             ),
@@ -2081,12 +2209,15 @@ mod output_params_equal_tests {
             CkMechanismType::TLS12_MASTER_KEY_DERIVE,
             CkMechanismParams::Tls12MasterKeyDerive(Tls12MasterKeyDeriveParams {
                 random_info: SslRandomData {
+                    client_random_presence: PointerBytes::present_copy(&[0x01; 32]),
+                    server_random_presence: PointerBytes::present_copy(&[0x02; 32]),
                     client_random: vec![0x01; 32],
                     server_random: vec![0x02; 32],
                 },
                 version_major: 3,
                 version_minor: 3,
                 prf_hash_mechanism: CkMechanismType::SHA256,
+                version_is_null: false,
             }),
         );
         let mut tampered = tls.output_params().expect("tls snapshot");

@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::ffi::native_allocation::NativeAllocation;
+use pkcs11_proxy_ng_types::PointerArray;
 use pkcs11_proxy_ng_types::PointerBytes;
 use pkcs11_proxy_ng_types::shape_descriptors::{Operation, ParamAbi};
 
@@ -502,12 +503,16 @@ impl FfiMechanism {
                 // fields are caller-supplied inputs).
                 Some(CkMechanismParams::Tls12MasterKeyDerive(Tls12MasterKeyDeriveParams {
                     random_info: pkcs11_proxy_ng_types::SslRandomData {
+                        // R18: v0-consistent mirrors of the surfaced bytes.
+                        client_random_presence: PointerBytes::present_copy(client_random),
+                        server_random_presence: PointerBytes::present_copy(server_random),
                         client_random: client_random.to_vec(),
                         server_random: server_random.to_vec(),
                     },
                     version_major: version.major as u32,
                     version_minor: version.minor as u32,
                     prf_hash_mechanism: CkMechanismType(tls12.prfHashMechanism as u64),
+                    version_is_null: false,
                 }))
             }
             FfiParamBacking::WtlsMasterKeyDerive(wtls, client_random, server_random, version) => {
@@ -516,10 +521,14 @@ impl FfiMechanism {
                 Some(CkMechanismParams::WtlsMasterKeyDerive(WtlsMasterKeyDeriveParams {
                     digest_mechanism: CkMechanismType(wtls.DigestMechanism as u64),
                     random_info: WtlsRandomData {
+                        // R18: v0-consistent mirrors of the surfaced bytes.
+                        client_random_presence: PointerBytes::present_copy(client_random),
+                        server_random_presence: PointerBytes::present_copy(server_random),
                         client_random: client_random.to_vec(),
                         server_random: server_random.to_vec(),
                     },
                     version: version.first().copied().unwrap_or_default() as u32,
+                    version_is_null: false,
                 }))
             }
             FfiParamBacking::WtlsKeyMat(wtls, client_random, server_random, key_mat_out, iv) => {
@@ -528,6 +537,8 @@ impl FfiMechanism {
                 // SAFETY: backing is borrowed alive; the copy carries no provenance.
                 let key_mat_out = unsafe { key_mat_out.snapshot() };
                 let iv_len = (((wtls.ulIVSizeInBits as usize).saturating_add(7)) / 8).min(iv.len());
+                let iv: Vec<u8> =
+                    if key_mat_out.pIV.is_null() { Vec::new() } else { iv[..iv_len].to_vec() };
                 Some(CkMechanismParams::WtlsKeyMat(WtlsKeyMatParams {
                     digest_mechanism: CkMechanismType(wtls.DigestMechanism as u64),
                     mac_size_bits: wtls.ulMacSizeInBits as u64,
@@ -536,16 +547,18 @@ impl FfiMechanism {
                     sequence_number: wtls.ulSequenceNumber as u64,
                     is_export: wtls.bIsExport != 0,
                     random_info: WtlsRandomData {
+                        // R18: v0-consistent mirrors of the surfaced bytes.
+                        client_random_presence: PointerBytes::present_copy(client_random),
+                        server_random_presence: PointerBytes::present_copy(server_random),
                         client_random: client_random.to_vec(),
                         server_random: server_random.to_vec(),
                     },
                     mac_secret_handle: CkObjectHandle(key_mat_out.hMacSecret as u64),
                     key_handle: CkObjectHandle(key_mat_out.hKey as u64),
-                    iv: if key_mat_out.pIV.is_null() {
-                        Vec::new().into()
-                    } else {
-                        iv[..iv_len].to_vec().into()
-                    },
+                    // R18: v0-consistent mirror of the surfaced bytes.
+                    iv_presence: PointerBytes::present_copy(&iv),
+                    iv: iv.into(),
+                    returned_key_material_is_null: false,
                 }))
             }
             FfiParamBacking::Ssl3KeyMat(
@@ -562,12 +575,25 @@ impl FfiMechanism {
                 let key_mat_out = unsafe { key_mat_out.snapshot() };
                 let iv_len =
                     (((ssl3.ulIVSizeInBits as usize).saturating_add(7)) / 8).min(client_iv.len());
+                let client_iv: Vec<u8> = if key_mat_out.pIVClient.is_null() {
+                    Vec::new()
+                } else {
+                    client_iv[..iv_len].to_vec()
+                };
+                let server_iv: Vec<u8> = if key_mat_out.pIVServer.is_null() {
+                    Vec::new()
+                } else {
+                    server_iv[..iv_len.min(server_iv.len())].to_vec()
+                };
                 Some(CkMechanismParams::Ssl3KeyMat(Ssl3KeyMatParams {
                     mac_size_bits: ssl3.ulMacSizeInBits as u64,
                     key_size_bits: ssl3.ulKeySizeInBits as u64,
                     iv_size_bits: ssl3.ulIVSizeInBits as u64,
                     is_export: ssl3.bIsExport != 0,
                     random_info: pkcs11_proxy_ng_types::SslRandomData {
+                        // R18: v0-consistent mirrors of the surfaced bytes.
+                        client_random_presence: PointerBytes::present_copy(client_random),
+                        server_random_presence: PointerBytes::present_copy(server_random),
                         client_random: client_random.to_vec(),
                         server_random: server_random.to_vec(),
                     },
@@ -576,16 +602,12 @@ impl FfiMechanism {
                     server_mac_secret_handle: CkObjectHandle(key_mat_out.hServerMacSecret as u64),
                     client_key_handle: CkObjectHandle(key_mat_out.hClientKey as u64),
                     server_key_handle: CkObjectHandle(key_mat_out.hServerKey as u64),
-                    client_iv: if key_mat_out.pIVClient.is_null() {
-                        Vec::new().into()
-                    } else {
-                        client_iv[..iv_len].to_vec().into()
-                    },
-                    server_iv: if key_mat_out.pIVServer.is_null() {
-                        Vec::new().into()
-                    } else {
-                        server_iv[..iv_len.min(server_iv.len())].to_vec().into()
-                    },
+                    // R18: v0-consistent mirrors of the surfaced bytes.
+                    client_iv_presence: PointerBytes::present_copy(&client_iv),
+                    server_iv_presence: PointerBytes::present_copy(&server_iv),
+                    client_iv: client_iv.into(),
+                    server_iv: server_iv.into(),
+                    returned_key_material_is_null: false,
                 }))
             }
             FfiParamBacking::Tls12KeyMat(
@@ -602,12 +624,25 @@ impl FfiMechanism {
                 let key_mat_out = unsafe { key_mat_out.snapshot() };
                 let iv_len =
                     (((tls12.ulIVSizeInBits as usize).saturating_add(7)) / 8).min(client_iv.len());
+                let client_iv: Vec<u8> = if key_mat_out.pIVClient.is_null() {
+                    Vec::new()
+                } else {
+                    client_iv[..iv_len].to_vec()
+                };
+                let server_iv: Vec<u8> = if key_mat_out.pIVServer.is_null() {
+                    Vec::new()
+                } else {
+                    server_iv[..iv_len.min(server_iv.len())].to_vec()
+                };
                 Some(CkMechanismParams::Ssl3KeyMat(Ssl3KeyMatParams {
                     mac_size_bits: tls12.ulMacSizeInBits as u64,
                     key_size_bits: tls12.ulKeySizeInBits as u64,
                     iv_size_bits: tls12.ulIVSizeInBits as u64,
                     is_export: tls12.bIsExport != 0,
                     random_info: pkcs11_proxy_ng_types::SslRandomData {
+                        // R18: v0-consistent mirrors of the surfaced bytes.
+                        client_random_presence: PointerBytes::present_copy(client_random),
+                        server_random_presence: PointerBytes::present_copy(server_random),
                         client_random: client_random.to_vec(),
                         server_random: server_random.to_vec(),
                     },
@@ -616,16 +651,12 @@ impl FfiMechanism {
                     server_mac_secret_handle: CkObjectHandle(key_mat_out.hServerMacSecret as u64),
                     client_key_handle: CkObjectHandle(key_mat_out.hClientKey as u64),
                     server_key_handle: CkObjectHandle(key_mat_out.hServerKey as u64),
-                    client_iv: if key_mat_out.pIVClient.is_null() {
-                        Vec::new().into()
-                    } else {
-                        client_iv[..iv_len].to_vec().into()
-                    },
-                    server_iv: if key_mat_out.pIVServer.is_null() {
-                        Vec::new().into()
-                    } else {
-                        server_iv[..iv_len.min(server_iv.len())].to_vec().into()
-                    },
+                    // R18: v0-consistent mirrors of the surfaced bytes.
+                    client_iv_presence: PointerBytes::present_copy(&client_iv),
+                    server_iv_presence: PointerBytes::present_copy(&server_iv),
+                    client_iv: client_iv.into(),
+                    server_iv: server_iv.into(),
+                    returned_key_material_is_null: false,
                 }))
             }
             FfiParamBacking::Sp800108Kdf(sp800, data_params, data_buffers, derived_keys)
@@ -633,10 +664,17 @@ impl FfiMechanism {
             {
                 // SAFETY: backing is borrowed alive; the copy carries no provenance.
                 let sp800 = unsafe { sp800.snapshot() };
+                let data_params = sp800_108_data_params_from_ffi(data_params, data_buffers);
+                let additional_derived_keys = derived_keys.output_keys();
                 Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
                     prf_type: CkMechanismType(sp800.prfType as u64),
-                    data_params: sp800_108_data_params_from_ffi(data_params, data_buffers),
-                    additional_derived_keys: derived_keys.output_keys(),
+                    // R18: v0-consistent mirrors of the surfaced arrays.
+                    data_params_presence: PointerArray::present(data_params.clone()),
+                    additional_derived_keys_presence: PointerArray::present(
+                        additional_derived_keys.clone(),
+                    ),
+                    data_params,
+                    additional_derived_keys,
                 }))
             }
             FfiParamBacking::Sp800108FeedbackKdf(
@@ -648,11 +686,20 @@ impl FfiMechanism {
             ) if !derived_keys.is_empty() => {
                 // SAFETY: backing is borrowed alive; the copy carries no provenance.
                 let sp800 = unsafe { sp800.snapshot() };
+                let data_params = sp800_108_data_params_from_ffi(data_params, data_buffers);
+                let iv: Vec<u8> = iv[..(sp800.ulIVLen as usize).min(iv.len())].to_vec();
+                let additional_derived_keys = derived_keys.output_keys();
                 Some(CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
                     prf_type: CkMechanismType(sp800.prfType as u64),
-                    data_params: sp800_108_data_params_from_ffi(data_params, data_buffers),
-                    iv: iv[..(sp800.ulIVLen as usize).min(iv.len())].to_vec(),
-                    additional_derived_keys: derived_keys.output_keys(),
+                    // R18: v0-consistent mirrors of the surfaced bytes/arrays.
+                    data_params_presence: PointerArray::present(data_params.clone()),
+                    iv_presence: PointerBytes::present_copy(&iv),
+                    additional_derived_keys_presence: PointerArray::present(
+                        additional_derived_keys.clone(),
+                    ),
+                    data_params,
+                    iv,
+                    additional_derived_keys,
                 }))
             }
             FfiParamBacking::TlsPrf(_tls, seed, label, output, output_len) => {
@@ -663,10 +710,15 @@ impl FfiMechanism {
                 // a misbehaving length to the buffer we allocated.
                 let written = (output_len as usize).min(output.len());
                 Some(CkMechanismParams::TlsPrf(TlsPrfParams {
+                    // R18: v0-consistent mirrors of the surfaced bytes.
+                    seed_presence: PointerBytes::present_copy(seed),
+                    label_presence: PointerBytes::present_copy(label),
                     seed: seed.to_vec().into(),
                     label: label.to_vec().into(),
                     output_len: written as u64,
                     output: output[..written].to_vec().into(),
+                    output_is_null: false,
+                    output_len_is_null: false,
                 }))
             }
             FfiParamBacking::WtlsPrf(wtls, seed, label, output, output_len) => {
@@ -676,10 +728,15 @@ impl FfiMechanism {
                 let written = (output_len as usize).min(output.len());
                 Some(CkMechanismParams::WtlsPrf(WtlsPrfParams {
                     digest_mechanism: CkMechanismType(wtls.DigestMechanism as u64),
+                    // R18: v0-consistent mirrors of the surfaced bytes.
+                    seed_presence: PointerBytes::present_copy(seed),
+                    label_presence: PointerBytes::present_copy(label),
                     seed: seed.to_vec().into(),
                     label: label.to_vec().into(),
                     output_len: written as u64,
                     output: output[..written].to_vec().into(),
+                    output_is_null: false,
+                    output_len_is_null: false,
                 }))
             }
             FfiParamBacking::Ssl3MasterKeyDerive(_ssl3, client_random, server_random, version) => {
@@ -690,11 +747,15 @@ impl FfiMechanism {
                 // (W1-C5-01; mirrors the TLS 1.2 arm above).
                 Some(CkMechanismParams::Ssl3MasterKeyDerive(Ssl3MasterKeyDeriveParams {
                     random_info: pkcs11_proxy_ng_types::SslRandomData {
+                        // R18: v0-consistent mirrors of the surfaced bytes.
+                        client_random_presence: PointerBytes::present_copy(client_random),
+                        server_random_presence: PointerBytes::present_copy(server_random),
                         client_random: client_random.to_vec(),
                         server_random: server_random.to_vec(),
                     },
                     version_major: version.major as u32,
                     version_minor: version.minor as u32,
+                    version_is_null: false,
                 }))
             }
             FfiParamBacking::Pbe(pbe, init_vector, _password, _salt) => {
@@ -733,6 +794,8 @@ fn sp800_108_data_params_from_ffi(
         .zip(buffers.iter())
         .map(|(param, value)| PrfDataParam {
             type_: param.type_ as u64,
+            // R18: v0-consistent mirror of the surfaced bytes.
+            value_presence: PointerBytes::present_copy(value),
             value: value.clone().into(),
         })
         .collect()
@@ -852,6 +915,9 @@ impl FfiSp800108DerivedKeys {
             .iter()
             .zip(self.handles.iter())
             .map(|(original, handle)| Sp800108DerivedKey {
+                // R18: v0-consistent mirror of the surfaced template.
+                template_presence: PointerArray::present(original.template.clone()),
+                ph_key_is_null: false,
                 template: original.template.clone(),
                 key_handle: CkObjectHandle(*handle as u64),
             })

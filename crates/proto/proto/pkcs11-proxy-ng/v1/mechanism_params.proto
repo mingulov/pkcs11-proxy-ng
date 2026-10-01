@@ -11,6 +11,22 @@ package pkcs11_proxy_ng.v1;
 // (PARAM_INVALID). Legacy v0 decode is bit-identical (bools keep legacy
 // meaning). Only v1 messages may carry these fields.
 
+// R18 exotic-tail envelopes (S2 §8 tail, D1(a)): three envelope kinds,
+// all v1-only (a v0 decoder rejects any set envelope field as
+// contradictory metadata, PARAM_INVALID).
+// - `optional uint64 <field>_null_len` beside `bytes <field>`: R16
+//   semantics (present = NULL + exactly that length, empty bytes).
+// - `optional uint64 <field>_null_count` beside `repeated <T> <field>`:
+//   present = NULL array + exactly that count (repeated must be empty);
+//   absent = non-NULL array with count == len (incl. non-NULL/zero).
+// - `optional bool <field>_null` (length-less pointer: nested
+//   mechanism, version, output-length pointer, output handle pointer,
+//   returned key material): set (true) = NULL; absent/false =
+//   non-NULL. These are v1 ENVELOPE bits, not legacy `*_null` bools.
+// Shared lengths (KEA RandomA/B, Skipjack PrimeP/BaseG): companions
+// MUST agree on the effective length under v1 (unrepresentable in C
+// otherwise — PARAM_INVALID); v0 keeps legacy meaning bit-identical.
+
 message RsaPkcsPssParams {
   uint64 hash_alg = 1;
   uint64 mgf = 2;
@@ -358,6 +374,9 @@ message KeaDeriveParams {
   bytes random_a = 2;
   bytes random_b = 3;
   bytes public_data = 4;
+  optional uint64 random_a_null_len = 5;
+  optional uint64 random_b_null_len = 6;
+  optional uint64 public_data_null_len = 7;
 }
 
 // ---------------------------------------------------------------------------
@@ -430,6 +449,8 @@ message Pkcs5Pbkd2Params {
 message SslRandomData {
   bytes client_random = 1;
   bytes server_random = 2;
+  optional uint64 client_random_null_len = 3;
+  optional uint64 server_random_null_len = 4;
 }
 
 // CK_TLS_MAC_PARAMS
@@ -446,6 +467,10 @@ message TlsPrfParams {
   uint64 output_len = 3;
   // Provider-written PRF output (W1-C5-01); empty on requests.
   bytes output = 4;
+  optional uint64 seed_null_len = 5;
+  optional uint64 label_null_len = 6;
+  optional bool output_null = 7;
+  optional bool output_len_null = 8;
 }
 
 // CK_TLS_KDF_PARAMS
@@ -454,6 +479,8 @@ message TlsKdfParams {
   bytes label = 2;
   SslRandomData random_info = 3;
   bytes context_data = 4;
+  optional uint64 label_null_len = 5;
+  optional uint64 context_data_null_len = 6;
 }
 
 // CK_SSL3_MASTER_KEY_DERIVE_PARAMS
@@ -461,6 +488,7 @@ message Ssl3MasterKeyDeriveParams {
   SslRandomData random_info = 1;
   uint32 version_major = 2;
   uint32 version_minor = 3;
+  optional bool version_null = 4;
 }
 
 // CK_TLS12_MASTER_KEY_DERIVE_PARAMS
@@ -469,6 +497,7 @@ message Tls12MasterKeyDeriveParams {
   uint32 version_major = 2;
   uint32 version_minor = 3;
   uint64 prf_hash_mechanism = 4;
+  optional bool version_null = 5;
 }
 
 // CK_TLS12_EXTENDED_MASTER_KEY_DERIVE_PARAMS
@@ -477,6 +506,8 @@ message Tls12ExtendedMasterKeyDeriveParams {
   bytes session_hash = 2;
   uint32 version_major = 3;
   uint32 version_minor = 4;
+  optional uint64 session_hash_null_len = 5;
+  optional bool version_null = 6;
 }
 
 // CK_SSL3_KEY_MAT_PARAMS / CK_TLS12_KEY_MAT_PARAMS
@@ -493,12 +524,17 @@ message Ssl3KeyMatParams {
   uint64 server_key_handle = 10;
   bytes client_iv = 11;
   bytes server_iv = 12;
+  optional bool returned_key_material_null = 13;
+  optional uint64 client_iv_null_len = 14;
+  optional uint64 server_iv_null_len = 15;
 }
 
 // CK_WTLS_RANDOM_DATA
 message WtlsRandomData {
   bytes client_random = 1;
   bytes server_random = 2;
+  optional uint64 client_random_null_len = 3;
+  optional uint64 server_random_null_len = 4;
 }
 
 // CK_WTLS_MASTER_KEY_DERIVE_PARAMS
@@ -506,6 +542,7 @@ message WtlsMasterKeyDeriveParams {
   uint64 digest_mechanism = 1;
   WtlsRandomData random_info = 2;
   uint32 version = 3;
+  optional bool version_null = 4;
 }
 
 // CK_WTLS_PRF_PARAMS
@@ -516,6 +553,10 @@ message WtlsPrfParams {
   uint64 output_len = 4;
   // Provider-written PRF output (W1-C5-01); empty on requests.
   bytes output = 5;
+  optional uint64 seed_null_len = 6;
+  optional uint64 label_null_len = 7;
+  optional bool output_null = 8;
+  optional bool output_len_null = 9;
 }
 
 // CK_WTLS_KEY_MAT_PARAMS
@@ -530,6 +571,8 @@ message WtlsKeyMatParams {
   uint64 mac_secret_handle = 8;
   uint64 key_handle = 9;
   bytes iv = 10;
+  optional bool returned_key_material_null = 11;
+  optional uint64 iv_null_len = 12;
 }
 
 // ---------------------------------------------------------------------------
@@ -587,6 +630,7 @@ message Ike2PrfPlusDeriveParams {
 message PrfDataParam {
   uint64 type = 1;
   bytes value = 2;
+  optional uint64 value_null_len = 3;
 }
 
 message Sp800108Attribute {
@@ -603,6 +647,8 @@ message Sp800108Attribute {
 message Sp800108DerivedKey {
   repeated Sp800108Attribute template = 1;
   uint64 key_handle = 2;
+  optional uint64 template_null_count = 3;
+  optional bool ph_key_null = 4;
 }
 
 // CK_SP800_108_KDF_PARAMS
@@ -610,6 +656,8 @@ message Sp800108KdfParams {
   uint64 prf_type = 1;
   repeated PrfDataParam data_params = 2;
   repeated Sp800108DerivedKey additional_derived_keys = 3;
+  optional uint64 data_params_null_count = 4;
+  optional uint64 additional_derived_keys_null_count = 5;
 }
 
 // CK_SP800_108_FEEDBACK_KDF_PARAMS
@@ -618,6 +666,9 @@ message Sp800108FeedbackKdfParams {
   repeated PrfDataParam data_params = 2;
   bytes iv = 3;
   repeated Sp800108DerivedKey additional_derived_keys = 4;
+  optional uint64 data_params_null_count = 5;
+  optional uint64 iv_null_len = 6;
+  optional uint64 additional_derived_keys_null_count = 7;
 }
 
 // W1-C9-12 removal note: CK_SP800_108_COUNTER_FORMAT /
@@ -682,11 +733,13 @@ message X2RatchetRespondParams {
 message OtpParam {
   uint64 type = 1;
   bytes value = 2;
+  optional uint64 value_null_len = 3;
 }
 
 // CK_OTP_PARAMS
 message OtpParams {
   repeated OtpParam params = 1;
+  optional uint64 params_null_count = 2;
 }
 
 // CK_SKIPJACK_PRIVATE_WRAP_PARAMS
@@ -698,6 +751,12 @@ message SkipjackPrivateWrapParams {
   bytes prime_p = 5;
   bytes base_g = 6;
   bytes subprime_q = 7;
+  optional uint64 password_null_len = 8;
+  optional uint64 public_data_null_len = 9;
+  optional uint64 random_a_null_len = 10;
+  optional uint64 prime_p_null_len = 11;
+  optional uint64 base_g_null_len = 12;
+  optional uint64 subprime_q_null_len = 13;
 }
 
 // CK_SKIPJACK_RELAYX_PARAMS
@@ -709,6 +768,13 @@ message SkipjackRelayxParams {
   bytes new_password = 5;
   bytes new_public_data = 6;
   bytes new_random_a = 7;
+  optional uint64 old_wrapped_x_null_len = 8;
+  optional uint64 old_password_null_len = 9;
+  optional uint64 old_public_data_null_len = 10;
+  optional uint64 old_random_a_null_len = 11;
+  optional uint64 new_password_null_len = 12;
+  optional uint64 new_public_data_null_len = 13;
+  optional uint64 new_random_a_null_len = 14;
 }
 
 // ---------------------------------------------------------------------------

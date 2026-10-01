@@ -1077,7 +1077,7 @@ mod message_contract_tests {
     /// capability the bytes are identical to the legacy `TryFrom`; at
     /// capability ≥ 1 the mixed IV+AAD-NULL-16 GCM emits v1
     /// (copied IV + `aad_null_len`, stamp 1, bools unset); a tail family
-    /// (KEA) stays v0-shaped at every capability.
+    /// (KEA) emits v1 presence envelopes at capability ≥ 1 (R18).
     #[tokio::test]
     async fn r17_proto_mechanism_threads_capability() {
         use pkcs11_proxy_ng_types::{CkMechanismType, GcmParams, KeaDeriveParams, PointerBytes};
@@ -1117,6 +1117,8 @@ mod message_contract_tests {
             }
         }
 
+        // R18: KEA moved to the v1 tail encoder (S2 §8) — the client
+        // threads the negotiated capability into the tail envelopes.
         let kea = CkMechanism {
             mechanism_type: CkMechanismType(0xFFFF_FFFF),
             params: Some(CkMechanismParams::KeaDerive(KeaDeriveParams {
@@ -1124,12 +1126,54 @@ mod message_contract_tests {
                 random_a: vec![1; 4],
                 random_b: vec![2; 4],
                 public_data: Vec::new(),
+                random_a_presence: PointerBytes::present_copy(&[1; 4]),
+                random_b_presence: PointerBytes::present_copy(&[2; 4]),
+                public_data_presence: PointerBytes::present_copy(&[]),
             })),
         };
         let client = r5_client_with_transport_version(1);
         let wire = client.proto_mechanism(&kea).expect("tail encodes");
-        assert_eq!(wire, pkcs11_proxy_ng_proto::Mechanism::try_from(&kea).unwrap());
+        assert_eq!(wire.parameter_encoding_version, 1);
+        match &wire.params {
+            Some(pkcs11_proxy_ng_proto::mechanism::Params::KeaDeriveParams(p)) => {
+                assert_eq!(p.random_a, vec![1; 4]);
+                assert_eq!(p.random_a_null_len, None);
+                assert_eq!(p.random_b, vec![2; 4]);
+                assert_eq!(p.random_b_null_len, None);
+                assert!(p.public_data.is_empty());
+                assert_eq!(p.public_data_null_len, None);
+            }
+            other => panic!("capability 1 must emit KeaDeriveParams, got {other:?}"),
+        }
+
+        // R18: the counted-array tail envelopes thread the same way —
+        // OTP at capability ≥ 1 carries `params_null_count`.
+        let otp = CkMechanism {
+            mechanism_type: CkMechanismType(0xFFFF_FFFE),
+            params: Some(CkMechanismParams::Otp(pkcs11_proxy_ng_types::OtpParams {
+                params: Vec::new(),
+                params_presence: pkcs11_proxy_ng_types::PointerArray::null_count(5),
+            })),
+        };
+        let legacy = r5_client_with_transport_version(0);
+        let wire = legacy.proto_mechanism(&otp).expect("legacy encodes");
         assert_eq!(wire.parameter_encoding_version, 0);
+        match &wire.params {
+            Some(pkcs11_proxy_ng_proto::mechanism::Params::OtpParams(p)) => {
+                assert_eq!(p.params_null_count, None, "no envelope at capability 0");
+            }
+            other => panic!("legacy must emit OtpParams, got {other:?}"),
+        }
+        let client = r5_client_with_transport_version(1);
+        let wire = client.proto_mechanism(&otp).expect("v1 encodes");
+        assert_eq!(wire.parameter_encoding_version, 1);
+        match &wire.params {
+            Some(pkcs11_proxy_ng_proto::mechanism::Params::OtpParams(p)) => {
+                assert!(p.params.is_empty());
+                assert_eq!(p.params_null_count, Some(5));
+            }
+            other => panic!("capability 1 must emit OtpParams, got {other:?}"),
+        }
     }
 
     /// R5/F1 client encode matrix: at legacy capability the helper emits

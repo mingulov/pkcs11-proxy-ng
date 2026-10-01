@@ -2,8 +2,9 @@
 // load-bearing on 32-bit targets (CK_ULONG=u32); the allow keeps them portable.
 #![allow(clippy::unnecessary_cast)]
 use super::{
-    MAX_MECHANISM_PARAM_STRUCT_LEN, MAX_NESTED_MECHANISMS, MAX_SERIALIZABLE_BYTES, NestingBudget,
-    Operation, prepare_mechanism_output_params, read_mechanism_for_transport,
+    MAX_MECHANISM_PARAM_STRUCT_LEN, MAX_NESTED_MECHANISMS, MAX_SERIALIZABLE_BYTES,
+    MAX_TEMPLATE_COUNT, NestingBudget, Operation, is_r18_tail_shape,
+    prepare_mechanism_output_params, read_mechanism_for_transport,
     read_mechanism_for_transport_with_snapshots, read_mechanism_with_shape,
     read_mechanism_with_shape_budgeted, read_raw_bytes,
 };
@@ -18,9 +19,9 @@ use pkcs11_proxy_ng_types::{
     CkOaepSource, CkObjectHandle, CkPbkdf2Prf, CkPbkdf2SaltSource, CkRv, ExtractParams, FlatParams,
     GcmParams, GcmWrapParams, IvParams, KeyWrapSetOaepParams, KipParams, KmacParams,
     MECHANISM_PARAMETER_TRANSPORT_VERSION, MacGeneralParams, MechanismRegistry, MuGenParams,
-    PointerBytes, RsaAesKeyWrapParams, RsaPkcsOaepParams, RsaPkcsPssParams,
+    PointerArray, PointerBytes, RsaAesKeyWrapParams, RsaPkcsOaepParams, RsaPkcsPssParams,
     Salsa20ChaCha20Poly1305Params, SecretBytes, SignAdditionalContext, Sp800108DerivedKey,
-    Sp800108FeedbackKdfParams, Sp800108KdfParams, TlsPrfParams,
+    Sp800108FeedbackKdfParams, Sp800108KdfParams, TlsMacParams, TlsPrfParams,
 };
 
 fn cached_default_registry() -> MechanismRegistry {
@@ -2790,9 +2791,19 @@ fn sp800_108_feedback_reads_additional_keys_and_writes_handles_back() {
             &mut mechanism,
             &CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
                 prf_type: CkMechanismType(CKM_SHA256_HMAC as u64),
+                data_params_presence: PointerArray::present(Vec::new()),
+                iv_presence: PointerBytes::present_copy(&[0xA5; 16]),
+                additional_derived_keys_presence: PointerArray::present(vec![Sp800108DerivedKey {
+                    template_presence: PointerArray::present(Vec::new()),
+                    ph_key_is_null: false,
+                    template: Vec::new(),
+                    key_handle: CkObjectHandle(0xCAFE),
+                }]),
                 data_params: Vec::new(),
                 iv: vec![0xA5; 16],
                 additional_derived_keys: vec![Sp800108DerivedKey {
+                    template_presence: PointerArray::present(Vec::new()),
+                    ph_key_is_null: false,
                     template: Vec::new(),
                     key_handle: CkObjectHandle(0xCAFE),
                 }],
@@ -3407,7 +3418,7 @@ fn misaligned_kip_nested_records_read() {
     };
     match unsafe { read_mechanism_with_shape(&mechanism, Some("kip")) } {
         Ok(CkMechanism {
-            params: Some(CkMechanismParams::Kip(KipParams { mechanism, key_handle, seed })),
+            params: Some(CkMechanismParams::Kip(KipParams { mechanism, key_handle, seed, .. })),
             ..
         }) => {
             assert_eq!(mechanism.mechanism_type.0, CKM_RSA_PKCS as u64);
@@ -3440,7 +3451,7 @@ fn kip_valid_nested_mechanism_roundtrips() {
     };
     match unsafe { read_mechanism_with_shape(&mechanism, Some("kip")) } {
         Ok(CkMechanism {
-            params: Some(CkMechanismParams::Kip(KipParams { mechanism, key_handle, seed })),
+            params: Some(CkMechanismParams::Kip(KipParams { mechanism, key_handle, seed, .. })),
             ..
         }) => {
             assert_eq!(mechanism.mechanism_type.0, CKM_RSA_PKCS as u64);
@@ -4848,7 +4859,7 @@ fn r11_v1_canonical_kip_stays_typed() {
         .expect("read mechanism")
         .params;
     match &params {
-        Some(CkMechanismParams::Kip(KipParams { mechanism, key_handle, seed })) => {
+        Some(CkMechanismParams::Kip(KipParams { mechanism, key_handle, seed, .. })) => {
             assert_eq!(mechanism.mechanism_type.0, CkMechanismType::SHA256.0);
             assert_eq!(key_handle.0, 0x43);
             assert_eq!(seed, &SecretBytes::copy_from_slice(&[0xF2, 0xF3, 0xF4]));
@@ -7509,5 +7520,1200 @@ fn r17_cross_path_each_operation_entry_hits_typed_v1() {
             r17_assert_null_secret(&p.aad, &p.aad_presence, 5);
         }
         other => panic!("authenticated-path CCM-wrap must stay typed under v1, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// R18: v1 tail-reader matrix (S2 §8 tail, D1(a)) — presence/count/output
+// envelopes per tail family incl. NULL/count-0/empty edges. Byte-field
+// assertions reuse the R17 helpers; only array + null-bit assertions are
+// R18-local. These tests cover the v1 tail branch only; legacy identity
+// for the same inputs stays pinned by the pre-R18 suites (append-only).
+// ---------------------------------------------------------------------------
+
+/// Synthetic mechanism numbers for the R18 matrix (unbound range above
+/// the R17 block).
+const R18_SYN_BASE: u64 = 0x0000_B000;
+
+/// R18 tail shapes bound to synthetic mechanisms (single source for the
+/// registry builder + the mech lookup; reviewer-checked against
+/// `R18_TAIL_TABLE` — the 17-shape R18 scope).
+const R18_SYN_SHAPES: &[&str] = &[
+    "tls_mac",
+    "tls_prf",
+    "tls_kdf",
+    "ssl3_master_key_derive",
+    "tls12_master_key_derive",
+    "tls12_extended_master_key_derive",
+    "ssl3_key_mat",
+    "wtls_master_key_derive",
+    "wtls_prf",
+    "wtls_key_mat",
+    "kea_derive",
+    "kip",
+    "otp",
+    "skipjack_private_wrap",
+    "skipjack_relayx",
+    "sp800_108_kdf",
+    "sp800_108_feedback_kdf",
+];
+
+/// Custom registry for the R18 matrix: no TOML parse (Miri-friendly),
+/// one binding per tail shape.
+fn r18_registry() -> MechanismRegistry {
+    let bindings: Vec<(&str, u64)> = R18_SYN_SHAPES
+        .iter()
+        .enumerate()
+        .map(|(i, shape)| (*shape, R18_SYN_BASE + i as u64))
+        .collect();
+    assert_eq!(R18_SYN_SHAPES.len(), 17, "r18 registry binds the 17-shape R18 scope");
+    r11_registry(&bindings, &[], &[])
+}
+
+/// Mechanism number bound to `shape` in [`r18_registry`].
+fn r18_mech(shape: &str) -> u64 {
+    R18_SYN_SHAPES
+        .iter()
+        .position(|s| *s == shape)
+        .map(|i| R18_SYN_BASE + i as u64)
+        .expect("r18 shape")
+}
+
+/// Read one host-native param struct as `shape` under v1/`General`
+/// (matrix shorthand).
+///
+/// # Safety
+///
+/// `p_parameter` must designate `ul_parameter_len` readable bytes
+/// containing the shape's C struct.
+unsafe fn r18_read_v1(
+    registry: &MechanismRegistry,
+    shape: &str,
+    p_parameter: CK_VOID_PTR,
+    ul_parameter_len: CK_ULONG,
+) -> Result<CkMechanism, CkRv> {
+    let mechanism = r11_mechanism(r18_mech(shape), p_parameter, ul_parameter_len);
+    unsafe { read_r11_v1_native_abi(&mechanism, registry, Operation::General) }
+}
+
+/// Assert one v1 counted array is NULL with `declared_count`: legacy
+/// vec stays empty, peer is `Null(n)`.
+fn r18_assert_null_array<T: PartialEq + std::fmt::Debug>(
+    legacy: &[T],
+    peer: &PointerArray<T>,
+    declared_count: u64,
+) {
+    assert!(legacy.is_empty(), "NULL legacy array stays empty");
+    assert_eq!(peer, &PointerArray::null_count(declared_count), "peer is Null(n)");
+}
+
+/// Assert one v1 counted array is present-but-empty: legacy vec stays
+/// empty, peer is `Present(empty)`.
+fn r18_assert_present_empty_array<T: PartialEq + std::fmt::Debug>(
+    legacy: &[T],
+    peer: &PointerArray<T>,
+) {
+    assert!(legacy.is_empty(), "empty legacy array stays empty");
+    assert_eq!(peer, &PointerArray::present(Vec::new()), "peer is Present(empty)");
+}
+
+/// R18 dispatch: the predicate covers exactly the 17-shape tail scope
+/// and stays disjoint from the R17 input-pointer shapes.
+#[test]
+fn r18_dispatch_predicate_covers_tail_scope() {
+    for shape in R18_SYN_SHAPES {
+        assert!(is_r18_tail_shape(Some(shape)), "{shape} must route to the tail readers");
+    }
+    for shape in R17_SYN_SHAPES {
+        assert!(!is_r18_tail_shape(Some(shape)), "{shape} must NOT route to the tail readers");
+    }
+    for shape in ["gcm", "ccm", "rsa_pss", "iv", "mac_general", "no_such_shape"] {
+        assert!(!is_r18_tail_shape(Some(shape)), "{shape} must NOT route to the tail readers");
+    }
+    assert!(!is_r18_tail_shape(None));
+}
+
+/// S2 §8 TLS/WTLS envelopes: TlsMac stays scalar under v1 (no envelope
+/// fields — pinned by the R18 proto `tls_mac_stays_v0` test).
+#[test]
+fn r18_tls_mac_v1_scalar() {
+    let registry = r18_registry();
+    let mut tls_mac = CK_TLS_MAC_PARAMS {
+        prfHashMechanism: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
+        ulMacLength: 32,
+        ulServerOrClient: 1,
+    };
+    match unsafe {
+        r18_read_v1(
+            &registry,
+            "tls_mac",
+            &mut tls_mac as *mut _ as CK_VOID_PTR,
+            std::mem::size_of::<CK_TLS_MAC_PARAMS>() as CK_ULONG,
+        )
+    }
+    .expect("read mechanism")
+    .params
+    {
+        Some(CkMechanismParams::TlsMac(TlsMacParams {
+            prf_hash_mechanism,
+            mac_length,
+            server_or_client,
+        })) => {
+            assert_eq!(prf_hash_mechanism.0, CkMechanismType::SHA256.0 as u64);
+            assert_eq!(mac_length, 32);
+            assert_eq!(server_or_client, 1);
+        }
+        other => panic!("TLS MAC must stay scalar under v1, got {other:?}"),
+    }
+}
+
+/// S2 §8 TLS/WTLS envelopes: TLS PRF with a NULL seed stays ONE typed
+/// message (the mixed-field fix); NULL output pointers set the
+/// length-less null bits with zeroed mirrors.
+#[test]
+fn r18_tls_prf_v1_null_seed_stays_typed() {
+    let registry = r18_registry();
+    let mut label = [0xD0u8, 0xD1];
+    let mut prf = CK_TLS_PRF_PARAMS {
+        pSeed: std::ptr::null_mut(),
+        ulSeedLen: 7,
+        pLabel: label.as_mut_ptr(),
+        ulLabelLen: label.len() as CK_ULONG,
+        pOutput: std::ptr::null_mut(),
+        pulOutputLen: std::ptr::null_mut(),
+    };
+    match unsafe {
+        r18_read_v1(
+            &registry,
+            "tls_prf",
+            &mut prf as *mut _ as CK_VOID_PTR,
+            std::mem::size_of::<CK_TLS_PRF_PARAMS>() as CK_ULONG,
+        )
+    }
+    .expect("read mechanism")
+    .params
+    {
+        Some(CkMechanismParams::TlsPrf(p)) => {
+            r17_assert_null_secret(&p.seed, &p.seed_presence, 7);
+            r17_assert_present_secret(&p.label, &p.label_presence, &label);
+            assert!(p.output_is_null);
+            assert!(p.output_len_is_null);
+            assert_eq!(p.output_len, 0);
+            p.output.expose(|b| assert!(b.is_empty()));
+        }
+        other => panic!("NULL-seed TLS PRF must stay typed under v1, got {other:?}"),
+    }
+}
+
+/// S2 §8 TLS/WTLS envelopes: present PRF output pointers clear the null
+/// bits and mirror the length — but the OUT bytes are never read
+/// (W1-C5-01: the sentinel-filled caller buffer must not leak in).
+#[test]
+fn r18_tls_prf_v1_output_bits() {
+    let registry = r18_registry();
+    let mut seed = [0xC0u8, 0xC1];
+    let mut label = [0xD0u8];
+    let mut output = [0xEEu8; 48];
+    let mut output_len = output.len() as CK_ULONG;
+    let mut prf = CK_TLS_PRF_PARAMS {
+        pSeed: seed.as_mut_ptr(),
+        ulSeedLen: seed.len() as CK_ULONG,
+        pLabel: label.as_mut_ptr(),
+        ulLabelLen: label.len() as CK_ULONG,
+        pOutput: output.as_mut_ptr(),
+        pulOutputLen: &mut output_len,
+    };
+    match unsafe {
+        r18_read_v1(
+            &registry,
+            "tls_prf",
+            &mut prf as *mut _ as CK_VOID_PTR,
+            std::mem::size_of::<CK_TLS_PRF_PARAMS>() as CK_ULONG,
+        )
+    }
+    .expect("read mechanism")
+    .params
+    {
+        Some(CkMechanismParams::TlsPrf(p)) => {
+            r17_assert_present_secret(&p.seed, &p.seed_presence, &seed);
+            r17_assert_present_secret(&p.label, &p.label_presence, &label);
+            assert!(!p.output_is_null);
+            assert!(!p.output_len_is_null);
+            assert_eq!(p.output_len, 48);
+            p.output.expose(|b| assert!(b.is_empty(), "OUT bytes never read"));
+        }
+        other => panic!("present-output TLS PRF must stay typed under v1, got {other:?}"),
+    }
+}
+
+/// S2 §8 TLS/WTLS envelopes: TLS KDF mixed NULLs (label NULL+3, client
+/// NULL+5, server present, context NULL+0 — the count-0 edge records
+/// `Null{0}`, never conflated with present-empty).
+#[test]
+fn r18_tls_kdf_v1_mixed_nulls() {
+    let registry = r18_registry();
+    let mut server_random = [0x22u8; 4];
+    let mut tls_kdf = CK_TLS_KDF_PARAMS {
+        prfMechanism: CkMechanismType::SHA384.0 as CK_MECHANISM_TYPE,
+        pLabel: std::ptr::null_mut(),
+        ulLabelLength: 3,
+        RandomInfo: CK_SSL3_RANDOM_DATA {
+            pClientRandom: std::ptr::null_mut(),
+            ulClientRandomLen: 5,
+            pServerRandom: server_random.as_mut_ptr(),
+            ulServerRandomLen: server_random.len() as CK_ULONG,
+        },
+        pContextData: std::ptr::null_mut(),
+        ulContextDataLength: 0,
+    };
+    match unsafe {
+        r18_read_v1(
+            &registry,
+            "tls_kdf",
+            &mut tls_kdf as *mut _ as CK_VOID_PTR,
+            std::mem::size_of::<CK_TLS_KDF_PARAMS>() as CK_ULONG,
+        )
+    }
+    .expect("read mechanism")
+    .params
+    {
+        Some(CkMechanismParams::TlsKdf(p)) => {
+            assert_eq!(p.prf_mechanism.0, CkMechanismType::SHA384.0 as u64);
+            r17_assert_null_secret(&p.label, &p.label_presence, 3);
+            r17_assert_null(&p.random_info.client_random, &p.random_info.client_random_presence, 5);
+            r17_assert_present(
+                &p.random_info.server_random,
+                &p.random_info.server_random_presence,
+                &server_random,
+            );
+            r17_assert_null_secret(&p.context_data, &p.context_data_presence, 0);
+        }
+        other => panic!("mixed-NULL TLS KDF must stay typed under v1, got {other:?}"),
+    }
+}
+
+/// S2 §8 TLS/WTLS envelopes: SSL3 master with NULL version (bit set,
+/// zeroed mirrors) and a NULL+0 client random beside present server
+/// random.
+#[test]
+fn r18_ssl3_master_v1_null_version() {
+    let registry = r18_registry();
+    let mut server_random = [0x52u8; 4];
+    let mut ssl3_master = CK_SSL3_MASTER_KEY_DERIVE_PARAMS {
+        RandomInfo: CK_SSL3_RANDOM_DATA {
+            pClientRandom: std::ptr::null_mut(),
+            ulClientRandomLen: 0,
+            pServerRandom: server_random.as_mut_ptr(),
+            ulServerRandomLen: server_random.len() as CK_ULONG,
+        },
+        pVersion: std::ptr::null_mut(),
+    };
+    match unsafe {
+        r18_read_v1(
+            &registry,
+            "ssl3_master_key_derive",
+            &mut ssl3_master as *mut _ as CK_VOID_PTR,
+            std::mem::size_of::<CK_SSL3_MASTER_KEY_DERIVE_PARAMS>() as CK_ULONG,
+        )
+    }
+    .expect("read mechanism")
+    .params
+    {
+        Some(CkMechanismParams::Ssl3MasterKeyDerive(p)) => {
+            r17_assert_null(&p.random_info.client_random, &p.random_info.client_random_presence, 0);
+            r17_assert_present(
+                &p.random_info.server_random,
+                &p.random_info.server_random_presence,
+                &server_random,
+            );
+            assert!(p.version_is_null);
+            assert_eq!((p.version_major, p.version_minor), (0, 0));
+        }
+        other => panic!("NULL-version SSL3 master must stay typed under v1, got {other:?}"),
+    }
+}
+
+/// S2 §8 TLS/WTLS envelopes: TLS12 master with a present version
+/// (values mirrored, bit clear) and present randoms.
+#[test]
+fn r18_tls12_master_v1_present_version() {
+    let registry = r18_registry();
+    let mut client_random = [0x11u8; 4];
+    let mut server_random = [0x22u8; 4];
+    let mut version = CK_VERSION { major: 3, minor: 3 };
+    let mut tls12_master = CK_TLS12_MASTER_KEY_DERIVE_PARAMS {
+        RandomInfo: CK_SSL3_RANDOM_DATA {
+            pClientRandom: client_random.as_mut_ptr(),
+            ulClientRandomLen: client_random.len() as CK_ULONG,
+            pServerRandom: server_random.as_mut_ptr(),
+            ulServerRandomLen: server_random.len() as CK_ULONG,
+        },
+        pVersion: &mut version,
+        prfHashMechanism: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
+    };
+    match unsafe {
+        r18_read_v1(
+            &registry,
+            "tls12_master_key_derive",
+            &mut tls12_master as *mut _ as CK_VOID_PTR,
+            std::mem::size_of::<CK_TLS12_MASTER_KEY_DERIVE_PARAMS>() as CK_ULONG,
+        )
+    }
+    .expect("read mechanism")
+    .params
+    {
+        Some(CkMechanismParams::Tls12MasterKeyDerive(p)) => {
+            r17_assert_present(
+                &p.random_info.client_random,
+                &p.random_info.client_random_presence,
+                &client_random,
+            );
+            r17_assert_present(
+                &p.random_info.server_random,
+                &p.random_info.server_random_presence,
+                &server_random,
+            );
+            assert!(!p.version_is_null);
+            assert_eq!((p.version_major, p.version_minor), (3, 3));
+            assert_eq!(p.prf_hash_mechanism.0, CkMechanismType::SHA256.0 as u64);
+        }
+        other => panic!("present-version TLS12 master must stay typed under v1, got {other:?}"),
+    }
+}
+
+/// S2 §8 TLS/WTLS envelopes: TLS12 extended master with NULL
+/// session-hash + NULL version.
+#[test]
+fn r18_tls12_extended_v1_null_session_hash() {
+    let registry = r18_registry();
+    let mut tls12_extended = CK_TLS12_EXTENDED_MASTER_KEY_DERIVE_PARAMS {
+        prfHashMechanism: CkMechanismType::SHA512.0 as CK_MECHANISM_TYPE,
+        pSessionHash: std::ptr::null_mut(),
+        ulSessionHashLen: 9,
+        pVersion: std::ptr::null_mut(),
+    };
+    match unsafe {
+        r18_read_v1(
+            &registry,
+            "tls12_extended_master_key_derive",
+            &mut tls12_extended as *mut _ as CK_VOID_PTR,
+            std::mem::size_of::<CK_TLS12_EXTENDED_MASTER_KEY_DERIVE_PARAMS>() as CK_ULONG,
+        )
+    }
+    .expect("read mechanism")
+    .params
+    {
+        Some(CkMechanismParams::Tls12ExtendedMasterKeyDerive(p)) => {
+            assert_eq!(p.prf_hash_mechanism.0, CkMechanismType::SHA512.0 as u64);
+            r17_assert_null(&p.session_hash, &p.session_hash_presence, 9);
+            assert!(p.version_is_null);
+            assert_eq!((p.version_major, p.version_minor), (0, 0));
+        }
+        other => panic!("NULL-hash TLS12 extended master must stay typed under v1, got {other:?}"),
+    }
+}
+
+/// S2 §8 key-mat: SSL3 key-mat with NULL returned material (bit
+/// set, handles zero, IV peers record the bits-derived length without
+/// dereference) beside present randoms.
+#[test]
+fn r18_ssl3_key_mat_v1_null_returned() {
+    let registry = r18_registry();
+    let mut client_random = [0x11u8, 0x12, 0x13];
+    let mut server_random = [0x21u8, 0x22];
+    let mut key_mat = CK_SSL3_KEY_MAT_PARAMS {
+        ulMacSizeInBits: 160,
+        ulKeySizeInBits: 128,
+        ulIVSizeInBits: 32,
+        bIsExport: CK_FALSE,
+        RandomInfo: CK_SSL3_RANDOM_DATA {
+            pClientRandom: client_random.as_mut_ptr(),
+            ulClientRandomLen: client_random.len() as CK_ULONG,
+            pServerRandom: server_random.as_mut_ptr(),
+            ulServerRandomLen: server_random.len() as CK_ULONG,
+        },
+        pReturnedKeyMaterial: std::ptr::null_mut(),
+    };
+    match unsafe {
+        r18_read_v1(
+            &registry,
+            "ssl3_key_mat",
+            &mut key_mat as *mut _ as CK_VOID_PTR,
+            std::mem::size_of::<CK_SSL3_KEY_MAT_PARAMS>() as CK_ULONG,
+        )
+    }
+    .expect("read mechanism")
+    .params
+    {
+        Some(CkMechanismParams::Ssl3KeyMat(p)) => {
+            r17_assert_present(
+                &p.random_info.client_random,
+                &p.random_info.client_random_presence,
+                &client_random,
+            );
+            r17_assert_present(
+                &p.random_info.server_random,
+                &p.random_info.server_random_presence,
+                &server_random,
+            );
+            assert!(p.returned_key_material_is_null);
+            assert_eq!(p.client_mac_secret_handle.0, 0);
+            assert_eq!(p.server_mac_secret_handle.0, 0);
+            assert_eq!(p.client_key_handle.0, 0);
+            assert_eq!(p.server_key_handle.0, 0);
+            r17_assert_null_secret(&p.client_iv, &p.client_iv_presence, 4);
+            r17_assert_null_secret(&p.server_iv, &p.server_iv_presence, 4);
+            assert_eq!(p.prf_hash_mechanism.0, 0, "ssl3 form carries no prf");
+        }
+        other => panic!("NULL-returned SSL3 key-mat must stay typed under v1, got {other:?}"),
+    }
+}
+
+/// S2 §8 key-mat: TLS12 key-mat superset with present returned
+/// material (handles + IVs mirrored, bit clear, prf decoded).
+#[test]
+fn r18_ssl3_key_mat_v1_tls12_superset_present() {
+    let registry = r18_registry();
+    let mut client_random = [0x11u8, 0x12, 0x13];
+    let mut server_random = [0x21u8, 0x22];
+    let mut client_iv = [0xA1u8, 0xA2, 0xA3, 0xA4];
+    let mut server_iv = [0xB1u8, 0xB2, 0xB3, 0xB4];
+    let mut key_mat_out = CK_SSL3_KEY_MAT_OUT {
+        hClientMacSecret: 101,
+        hServerMacSecret: 102,
+        hClientKey: 201,
+        hServerKey: 202,
+        pIVClient: client_iv.as_mut_ptr(),
+        pIVServer: server_iv.as_mut_ptr(),
+    };
+    let mut key_mat = CK_TLS12_KEY_MAT_PARAMS {
+        ulMacSizeInBits: 160,
+        ulKeySizeInBits: 128,
+        ulIVSizeInBits: 32,
+        bIsExport: CK_FALSE,
+        RandomInfo: CK_SSL3_RANDOM_DATA {
+            pClientRandom: client_random.as_mut_ptr(),
+            ulClientRandomLen: client_random.len() as CK_ULONG,
+            pServerRandom: server_random.as_mut_ptr(),
+            ulServerRandomLen: server_random.len() as CK_ULONG,
+        },
+        pReturnedKeyMaterial: &mut key_mat_out,
+        prfHashMechanism: CkMechanismType::SHA256.0 as CK_ULONG,
+    };
+    match unsafe {
+        r18_read_v1(
+            &registry,
+            "ssl3_key_mat",
+            &mut key_mat as *mut _ as CK_VOID_PTR,
+            std::mem::size_of::<CK_TLS12_KEY_MAT_PARAMS>() as CK_ULONG,
+        )
+    }
+    .expect("read mechanism")
+    .params
+    {
+        Some(CkMechanismParams::Ssl3KeyMat(p)) => {
+            assert!(!p.returned_key_material_is_null);
+            assert_eq!(p.client_mac_secret_handle.0, 101);
+            assert_eq!(p.server_mac_secret_handle.0, 102);
+            assert_eq!(p.client_key_handle.0, 201);
+            assert_eq!(p.server_key_handle.0, 202);
+            r17_assert_present_secret(&p.client_iv, &p.client_iv_presence, &client_iv);
+            r17_assert_present_secret(&p.server_iv, &p.server_iv_presence, &server_iv);
+            assert_eq!(p.prf_hash_mechanism.0, CkMechanismType::SHA256.0 as u64);
+        }
+        other => panic!("present TLS12 key-mat must stay typed under v1, got {other:?}"),
+    }
+}
+
+/// S2 §8 TLS/WTLS envelopes: WTLS master with NULL version (bit set,
+/// zeroed mirror) beside a NULL client random + present server random.
+#[test]
+fn r18_wtls_master_v1_null_version() {
+    let registry = r18_registry();
+    let mut server_random = [0x22u8; 4];
+    let mut wtls_master = CK_WTLS_MASTER_KEY_DERIVE_PARAMS {
+        DigestMechanism: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
+        RandomInfo: CK_WTLS_RANDOM_DATA {
+            pClientRandom: std::ptr::null_mut(),
+            ulClientRandomLen: 6,
+            pServerRandom: server_random.as_mut_ptr(),
+            ulServerRandomLen: server_random.len() as CK_ULONG,
+        },
+        pVersion: std::ptr::null_mut(),
+    };
+    match unsafe {
+        r18_read_v1(
+            &registry,
+            "wtls_master_key_derive",
+            &mut wtls_master as *mut _ as CK_VOID_PTR,
+            std::mem::size_of::<CK_WTLS_MASTER_KEY_DERIVE_PARAMS>() as CK_ULONG,
+        )
+    }
+    .expect("read mechanism")
+    .params
+    {
+        Some(CkMechanismParams::WtlsMasterKeyDerive(p)) => {
+            assert_eq!(p.digest_mechanism.0, CkMechanismType::SHA256.0 as u64);
+            r17_assert_null(&p.random_info.client_random, &p.random_info.client_random_presence, 6);
+            r17_assert_present(
+                &p.random_info.server_random,
+                &p.random_info.server_random_presence,
+                &server_random,
+            );
+            assert!(p.version_is_null);
+            assert_eq!(p.version, 0);
+        }
+        other => panic!("NULL-version WTLS master must stay typed under v1, got {other:?}"),
+    }
+}
+
+/// S2 §8 TLS/WTLS envelopes: WTLS PRF output bits mirror the TLS PRF
+/// contract (present pointers clear the bits; OUT bytes never read).
+#[test]
+fn r18_wtls_prf_v1_output_bits() {
+    let registry = r18_registry();
+    let mut seed = [0xA1u8, 0xA2, 0xA3];
+    let mut label = [0xB1u8, 0xB2];
+    let mut output = [0xEEu8; 20];
+    let mut output_len = output.len() as CK_ULONG;
+    let mut wtls = CK_WTLS_PRF_PARAMS {
+        DigestMechanism: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
+        pSeed: seed.as_mut_ptr(),
+        ulSeedLen: seed.len() as CK_ULONG,
+        pLabel: label.as_mut_ptr(),
+        ulLabelLen: label.len() as CK_ULONG,
+        pOutput: output.as_mut_ptr(),
+        pulOutputLen: &mut output_len,
+    };
+    match unsafe {
+        r18_read_v1(
+            &registry,
+            "wtls_prf",
+            &mut wtls as *mut _ as CK_VOID_PTR,
+            std::mem::size_of::<CK_WTLS_PRF_PARAMS>() as CK_ULONG,
+        )
+    }
+    .expect("read mechanism")
+    .params
+    {
+        Some(CkMechanismParams::WtlsPrf(p)) => {
+            r17_assert_present_secret(&p.seed, &p.seed_presence, &seed);
+            r17_assert_present_secret(&p.label, &p.label_presence, &label);
+            assert!(!p.output_is_null);
+            assert!(!p.output_len_is_null);
+            assert_eq!(p.output_len, 20);
+            p.output.expose(|b| assert!(b.is_empty(), "OUT bytes never read"));
+        }
+        other => panic!("present-output WTLS PRF must stay typed under v1, got {other:?}"),
+    }
+}
+
+/// S2 §8 key-mat: WTLS key-mat with NULL returned material (bit set,
+/// handles zero, IV peer records the bits-derived length).
+#[test]
+fn r18_wtls_key_mat_v1_null_returned() {
+    let registry = r18_registry();
+    let mut client_random = [0x11u8; 4];
+    let mut server_random = [0x22u8; 4];
+    let mut key_mat = CK_WTLS_KEY_MAT_PARAMS {
+        DigestMechanism: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
+        ulMacSizeInBits: 160,
+        ulKeySizeInBits: 128,
+        ulIVSizeInBits: 32,
+        ulSequenceNumber: 7,
+        bIsExport: CK_TRUE,
+        RandomInfo: CK_WTLS_RANDOM_DATA {
+            pClientRandom: client_random.as_mut_ptr(),
+            ulClientRandomLen: client_random.len() as CK_ULONG,
+            pServerRandom: server_random.as_mut_ptr(),
+            ulServerRandomLen: server_random.len() as CK_ULONG,
+        },
+        pReturnedKeyMaterial: std::ptr::null_mut(),
+    };
+    match unsafe {
+        r18_read_v1(
+            &registry,
+            "wtls_key_mat",
+            &mut key_mat as *mut _ as CK_VOID_PTR,
+            std::mem::size_of::<CK_WTLS_KEY_MAT_PARAMS>() as CK_ULONG,
+        )
+    }
+    .expect("read mechanism")
+    .params
+    {
+        Some(CkMechanismParams::WtlsKeyMat(p)) => {
+            assert_eq!(p.sequence_number, 7);
+            assert!(p.is_export);
+            assert!(p.returned_key_material_is_null);
+            assert_eq!(p.mac_secret_handle.0, 0);
+            assert_eq!(p.key_handle.0, 0);
+            r17_assert_null_secret(&p.iv, &p.iv_presence, 4);
+        }
+        other => panic!("NULL-returned WTLS key-mat must stay typed under v1, got {other:?}"),
+    }
+}
+
+/// S2 §8 KEA: shared-length companions read independently — a NULL
+/// B beside a valid A stays ONE typed message (agreement is the proto
+/// decoder's job, pinned by the R18 `shared_len` tests).
+#[test]
+fn r18_kea_v1_null_b_stays_typed() {
+    let registry = r18_registry();
+    let mut random_a = [0xAAu8; 16];
+    let mut kea = CK_KEA_DERIVE_PARAMS {
+        isSender: CK_TRUE,
+        ulRandomLen: 16,
+        RandomA: random_a.as_mut_ptr(),
+        RandomB: std::ptr::null_mut(),
+        ulPublicDataLen: 0,
+        PublicData: std::ptr::null_mut(),
+    };
+    match unsafe {
+        r18_read_v1(
+            &registry,
+            "kea_derive",
+            &mut kea as *mut _ as CK_VOID_PTR,
+            std::mem::size_of::<CK_KEA_DERIVE_PARAMS>() as CK_ULONG,
+        )
+    }
+    .expect("read mechanism")
+    .params
+    {
+        Some(CkMechanismParams::KeaDerive(p)) => {
+            assert!(p.is_sender);
+            r17_assert_present(&p.random_a, &p.random_a_presence, &random_a);
+            r17_assert_null(&p.random_b, &p.random_b_presence, 16);
+            r17_assert_null(&p.public_data, &p.public_data_presence, 0);
+        }
+        other => panic!("NULL-B KEA must stay typed under v1, got {other:?}"),
+    }
+}
+
+/// S2 §8 KIP: NULL nesting records the canonical placeholder + the set
+/// nesting bit (the v1 decoder's `(None, true)` arm).
+#[test]
+fn r18_kip_v1_null_nesting() {
+    let registry = r18_registry();
+    let mut seed = [0xF2u8, 0xF3, 0xF4];
+    let mut kip = CK_KIP_PARAMS {
+        pMechanism: std::ptr::null_mut(),
+        hKey: 0x43,
+        pSeed: seed.as_mut_ptr() as *mut CK_BYTE,
+        ulSeedLen: seed.len() as CK_ULONG,
+    };
+    match unsafe {
+        r18_read_v1(
+            &registry,
+            "kip",
+            &mut kip as *mut _ as CK_VOID_PTR,
+            std::mem::size_of::<CK_KIP_PARAMS>() as CK_ULONG,
+        )
+    }
+    .expect("read mechanism")
+    .params
+    {
+        Some(CkMechanismParams::Kip(p)) => {
+            assert!(p.mechanism_is_null);
+            assert_eq!(*p.mechanism, KipParams::NULL_NESTED_MECHANISM);
+            assert_eq!(p.key_handle.0, 0x43);
+            r17_assert_present_secret(&p.seed, &p.seed_presence, &seed);
+        }
+        other => panic!("NULL-nested KIP must stay typed under v1, got {other:?}"),
+    }
+}
+
+/// S2 §8 KIP: present nesting recurses through the v1 router (bit
+/// clear) — guarded + pinned to v1: the nested read gathers the global
+/// registry/capability snapshots.
+#[test]
+fn r18_kip_v1_nested_present() {
+    let _guard = crate::tests::shim_state_test_guard();
+    crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(1);
+    ensure_registry();
+    let registry = r18_registry();
+    let mut nested = kip_nested_rsa_mechanism();
+    let mut seed = [0xF5u8];
+    let mut kip = CK_KIP_PARAMS {
+        pMechanism: &mut nested,
+        hKey: 0x44,
+        pSeed: seed.as_mut_ptr() as *mut CK_BYTE,
+        ulSeedLen: seed.len() as CK_ULONG,
+    };
+    let params = unsafe {
+        r18_read_v1(
+            &registry,
+            "kip",
+            &mut kip as *mut _ as CK_VOID_PTR,
+            std::mem::size_of::<CK_KIP_PARAMS>() as CK_ULONG,
+        )
+    }
+    .expect("read mechanism")
+    .params;
+    crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(0);
+    match params {
+        Some(CkMechanismParams::Kip(p)) => {
+            assert!(!p.mechanism_is_null);
+            assert_eq!(p.mechanism.mechanism_type.0, CKM_RSA_PKCS as u64);
+            assert_eq!(p.mechanism.params, None, "nested (NULL,0) forwards paramless");
+            assert_eq!(p.key_handle.0, 0x44);
+            r17_assert_present_secret(&p.seed, &p.seed_presence, &seed);
+        }
+        other => panic!("nested-present KIP must stay typed under v1, got {other:?}"),
+    }
+}
+
+/// S2 §8 OTP/SP800-108: NULL OTP array records its declared count
+/// (counted-array envelope — the legacy conflation to empty is gone).
+#[test]
+fn r18_otp_v1_null_array() {
+    let registry = r18_registry();
+    let mut otp = CK_OTP_PARAMS { pParams: std::ptr::null_mut(), ulCount: 5 };
+    match unsafe {
+        r18_read_v1(
+            &registry,
+            "otp",
+            &mut otp as *mut _ as CK_VOID_PTR,
+            std::mem::size_of::<CK_OTP_PARAMS>() as CK_ULONG,
+        )
+    }
+    .expect("read mechanism")
+    .params
+    {
+        Some(CkMechanismParams::Otp(p)) => {
+            r18_assert_null_array(&p.params, &p.params_presence, 5);
+        }
+        other => panic!("NULL OTP array must stay typed under v1, got {other:?}"),
+    }
+}
+
+/// S2 §8 OTP/SP800-108: count-0 records `Present(empty)` (never
+/// conflated with `Null{0}`); over-cap counts fail closed.
+#[test]
+fn r18_otp_v1_count_zero_and_over_cap() {
+    let registry = r18_registry();
+    let mut probe =
+        CK_OTP_PARAM { type_: 1 as CK_OTP_PARAM_TYPE, pValue: std::ptr::null_mut(), ulValueLen: 0 };
+    let mut otp = CK_OTP_PARAMS { pParams: &mut probe, ulCount: 0 };
+    match unsafe {
+        r18_read_v1(
+            &registry,
+            "otp",
+            &mut otp as *mut _ as CK_VOID_PTR,
+            std::mem::size_of::<CK_OTP_PARAMS>() as CK_ULONG,
+        )
+    }
+    .expect("read mechanism")
+    .params
+    {
+        Some(CkMechanismParams::Otp(p)) => {
+            r18_assert_present_empty_array(&p.params, &p.params_presence);
+        }
+        other => panic!("count-0 OTP array must read Present(empty) under v1, got {other:?}"),
+    }
+
+    let mut otp =
+        CK_OTP_PARAMS { pParams: &mut probe, ulCount: (MAX_TEMPLATE_COUNT + 1) as CK_ULONG };
+    assert_eq!(
+        unsafe {
+            r18_read_v1(
+                &registry,
+                "otp",
+                &mut otp as *mut _ as CK_VOID_PTR,
+                std::mem::size_of::<CK_OTP_PARAMS>() as CK_ULONG,
+            )
+        },
+        Err(CkRv::MECHANISM_PARAM_INVALID),
+        "over-cap OTP count must fail closed"
+    );
+}
+
+/// S2 §8 OTP/SP800-108: element payloads are independent — a NULL
+/// element value records that element's `Null` peer instead of
+/// rejecting the whole array.
+#[test]
+fn r18_otp_v1_mixed_element_null() {
+    let registry = r18_registry();
+    let mut v0 = [0x01u8, 0x02];
+    let mut elems = [
+        CK_OTP_PARAM {
+            type_: 1 as CK_OTP_PARAM_TYPE,
+            pValue: v0.as_mut_ptr() as *mut _,
+            ulValueLen: v0.len() as CK_ULONG,
+        },
+        CK_OTP_PARAM { type_: 2 as CK_OTP_PARAM_TYPE, pValue: std::ptr::null_mut(), ulValueLen: 4 },
+    ];
+    let mut otp = CK_OTP_PARAMS { pParams: elems.as_mut_ptr(), ulCount: elems.len() as CK_ULONG };
+    match unsafe {
+        r18_read_v1(
+            &registry,
+            "otp",
+            &mut otp as *mut _ as CK_VOID_PTR,
+            std::mem::size_of::<CK_OTP_PARAMS>() as CK_ULONG,
+        )
+    }
+    .expect("read mechanism")
+    .params
+    {
+        Some(CkMechanismParams::Otp(p)) => {
+            assert_eq!(p.params.len(), 2);
+            assert_eq!(p.params[0].type_, 1);
+            r17_assert_present_secret(&p.params[0].value, &p.params[0].value_presence, &v0);
+            assert_eq!(p.params[1].type_, 2);
+            r17_assert_null_secret(&p.params[1].value, &p.params[1].value_presence, 4);
+            assert_eq!(
+                p.params_presence,
+                PointerArray::present(p.params.clone()),
+                "array peer mirrors the elements"
+            );
+        }
+        other => panic!("mixed-NULL OTP array must stay typed under v1, got {other:?}"),
+    }
+}
+
+/// S2 §8 Skipjack: shared-length companions read independently — a
+/// NULL PrimeP beside a valid BaseG stays ONE typed message.
+#[test]
+fn r18_skipjack_private_wrap_v1_null_prime() {
+    let registry = r18_registry();
+    let mut password = [0x31u8, 0x32];
+    let mut public_data = [0x41u8, 0x42, 0x43];
+    let mut random_a = [0x51u8, 0x52, 0x53, 0x54];
+    let mut base_g = [0x71u8, 0x72];
+    let mut subprime_q = [0x81u8, 0x82, 0x83];
+    let mut private_wrap = CK_SKIPJACK_PRIVATE_WRAP_PARAMS {
+        ulPasswordLen: password.len() as CK_ULONG,
+        pPassword: password.as_mut_ptr(),
+        ulPublicDataLen: public_data.len() as CK_ULONG,
+        pPublicData: public_data.as_mut_ptr(),
+        ulPAndGLen: base_g.len() as CK_ULONG,
+        ulQLen: subprime_q.len() as CK_ULONG,
+        ulRandomLen: random_a.len() as CK_ULONG,
+        pRandomA: random_a.as_mut_ptr(),
+        pPrimeP: std::ptr::null_mut(),
+        pBaseG: base_g.as_mut_ptr(),
+        pSubprimeQ: subprime_q.as_mut_ptr(),
+    };
+    match unsafe {
+        r18_read_v1(
+            &registry,
+            "skipjack_private_wrap",
+            &mut private_wrap as *mut _ as CK_VOID_PTR,
+            std::mem::size_of::<CK_SKIPJACK_PRIVATE_WRAP_PARAMS>() as CK_ULONG,
+        )
+    }
+    .expect("read mechanism")
+    .params
+    {
+        Some(CkMechanismParams::SkipjackPrivateWrap(p)) => {
+            r17_assert_present_secret(&p.password, &p.password_presence, &password);
+            assert_eq!(p.password_length, password.len() as u64);
+            r17_assert_present(&p.public_data, &p.public_data_presence, &public_data);
+            r17_assert_present(&p.random_a, &p.random_a_presence, &random_a);
+            r17_assert_null(&p.prime_p, &p.prime_p_presence, base_g.len() as u64);
+            r17_assert_present(&p.base_g, &p.base_g_presence, &base_g);
+            r17_assert_present(&p.subprime_q, &p.subprime_q_presence, &subprime_q);
+        }
+        other => panic!("NULL-prime Skipjack wrap must stay typed under v1, got {other:?}"),
+    }
+}
+
+/// S2 §8 Skipjack: RelayX mixed NULLs (old password NULL+6) stay ONE
+/// typed message.
+#[test]
+fn r18_skipjack_relayx_v1_mixed_nulls() {
+    let registry = r18_registry();
+    let mut old_wrapped_x = [0x01u8; 8];
+    let mut old_public_data = [0x02u8; 4];
+    let mut old_random_a = [0x03u8; 4];
+    let mut new_password = [0x04u8; 2];
+    let mut new_public_data = [0x05u8; 4];
+    let mut new_random_a = [0x06u8; 4];
+    let mut relayx = CK_SKIPJACK_RELAYX_PARAMS {
+        ulOldWrappedXLen: old_wrapped_x.len() as CK_ULONG,
+        pOldWrappedX: old_wrapped_x.as_mut_ptr(),
+        ulOldPasswordLen: 6,
+        pOldPassword: std::ptr::null_mut(),
+        ulOldPublicDataLen: old_public_data.len() as CK_ULONG,
+        pOldPublicData: old_public_data.as_mut_ptr(),
+        ulOldRandomLen: old_random_a.len() as CK_ULONG,
+        pOldRandomA: old_random_a.as_mut_ptr(),
+        ulNewPasswordLen: new_password.len() as CK_ULONG,
+        pNewPassword: new_password.as_mut_ptr(),
+        ulNewPublicDataLen: new_public_data.len() as CK_ULONG,
+        pNewPublicData: new_public_data.as_mut_ptr(),
+        ulNewRandomLen: new_random_a.len() as CK_ULONG,
+        pNewRandomA: new_random_a.as_mut_ptr(),
+    };
+    match unsafe {
+        r18_read_v1(
+            &registry,
+            "skipjack_relayx",
+            &mut relayx as *mut _ as CK_VOID_PTR,
+            std::mem::size_of::<CK_SKIPJACK_RELAYX_PARAMS>() as CK_ULONG,
+        )
+    }
+    .expect("read mechanism")
+    .params
+    {
+        Some(CkMechanismParams::SkipjackRelayx(p)) => {
+            r17_assert_present_secret(&p.old_wrapped_x, &p.old_wrapped_x_presence, &old_wrapped_x);
+            r17_assert_null_secret(&p.old_password, &p.old_password_presence, 6);
+            r17_assert_present_secret(
+                &p.old_public_data,
+                &p.old_public_data_presence,
+                &old_public_data,
+            );
+            r17_assert_present_secret(&p.old_random_a, &p.old_random_a_presence, &old_random_a);
+            r17_assert_present_secret(&p.new_password, &p.new_password_presence, &new_password);
+            r17_assert_present_secret(
+                &p.new_public_data,
+                &p.new_public_data_presence,
+                &new_public_data,
+            );
+            r17_assert_present_secret(&p.new_random_a, &p.new_random_a_presence, &new_random_a);
+        }
+        other => panic!("mixed-NULL Skipjack RelayX must stay typed under v1, got {other:?}"),
+    }
+}
+
+/// S2 §8 OTP/SP800-108: NULL data-params + NULL derived-keys arrays
+/// record their declared counts.
+#[test]
+fn r18_sp800_108_kdf_v1_null_arrays() {
+    let registry = r18_registry();
+    let mut params = CK_SP800_108_KDF_PARAMS {
+        prfType: 1 as CK_SP800_108_PRF_TYPE,
+        ulNumberOfDataParams: 2,
+        pDataParams: std::ptr::null_mut(),
+        ulAdditionalDerivedKeys: 3,
+        pAdditionalDerivedKeys: std::ptr::null_mut(),
+    };
+    match unsafe {
+        r18_read_v1(
+            &registry,
+            "sp800_108_kdf",
+            &mut params as *mut _ as CK_VOID_PTR,
+            std::mem::size_of::<CK_SP800_108_KDF_PARAMS>() as CK_ULONG,
+        )
+    }
+    .expect("read mechanism")
+    .params
+    {
+        Some(CkMechanismParams::Sp800108Kdf(p)) => {
+            assert_eq!(p.prf_type.0, 1);
+            r18_assert_null_array(&p.data_params, &p.data_params_presence, 2);
+            r18_assert_null_array(
+                &p.additional_derived_keys,
+                &p.additional_derived_keys_presence,
+                3,
+            );
+        }
+        other => panic!("NULL-array SP800-108 KDF must stay typed under v1, got {other:?}"),
+    }
+}
+
+/// S2 §8 OTP/SP800-108: a NULL `pTemplate` with a declared attribute
+/// count records the `Null{count}` template peer with an empty mirror
+/// (this test CLOSES the ADR-0010 Scope-2 class-4 `pTemplate` null-bit
+/// residual — the legacy arm could only conflate it to empty or flee
+/// to `Raw`); a NULL `phKey` sets the output-handle null bit.
+#[test]
+fn r18_sp800_108_null_template_closes_adr0010_residual() {
+    let registry = r18_registry();
+    let mut value = [0x09u8, 0x08];
+    let mut data_params = [CK_PRF_DATA_PARAM {
+        type_: 1 as CK_PRF_DATA_TYPE,
+        pValue: value.as_mut_ptr() as *mut _,
+        ulValueLen: value.len() as CK_ULONG,
+    }];
+    let mut derived_keys = [CK_DERIVED_KEY {
+        pTemplate: std::ptr::null_mut(),
+        ulAttributeCount: 3,
+        phKey: std::ptr::null_mut(),
+    }];
+    let mut params = CK_SP800_108_KDF_PARAMS {
+        prfType: 1 as CK_SP800_108_PRF_TYPE,
+        ulNumberOfDataParams: data_params.len() as CK_ULONG,
+        pDataParams: data_params.as_mut_ptr(),
+        ulAdditionalDerivedKeys: derived_keys.len() as CK_ULONG,
+        pAdditionalDerivedKeys: derived_keys.as_mut_ptr(),
+    };
+    match unsafe {
+        r18_read_v1(
+            &registry,
+            "sp800_108_kdf",
+            &mut params as *mut _ as CK_VOID_PTR,
+            std::mem::size_of::<CK_SP800_108_KDF_PARAMS>() as CK_ULONG,
+        )
+    }
+    .expect("read mechanism")
+    .params
+    {
+        Some(CkMechanismParams::Sp800108Kdf(p)) => {
+            assert_eq!(p.data_params.len(), 1);
+            r17_assert_present_secret(
+                &p.data_params[0].value,
+                &p.data_params[0].value_presence,
+                &value,
+            );
+            assert_eq!(p.additional_derived_keys.len(), 1);
+            let dk = &p.additional_derived_keys[0];
+            assert!(dk.template.is_empty(), "NULL template mirror stays empty");
+            assert_eq!(
+                dk.template_presence,
+                PointerArray::null_count(3),
+                "NULL template peer records the declared attribute count"
+            );
+            assert!(dk.ph_key_is_null);
+            assert_eq!(dk.key_handle.0, 0);
+        }
+        other => panic!("NULL-template SP800-108 KDF must stay typed under v1, got {other:?}"),
+    }
+}
+
+/// S2 §8 OTP/SP800-108: feedback KDF with NULL IV + NULL+0 data-params
+/// (the count-0 edge records `Null{0}`) + NULL derived keys.
+#[test]
+fn r18_sp800_108_feedback_v1_iv_null() {
+    let registry = r18_registry();
+    let mut params = CK_SP800_108_FEEDBACK_KDF_PARAMS {
+        prfType: 2 as CK_SP800_108_PRF_TYPE,
+        ulNumberOfDataParams: 0,
+        pDataParams: std::ptr::null_mut(),
+        ulIVLen: 11,
+        pIV: std::ptr::null_mut(),
+        ulAdditionalDerivedKeys: 1,
+        pAdditionalDerivedKeys: std::ptr::null_mut(),
+    };
+    match unsafe {
+        r18_read_v1(
+            &registry,
+            "sp800_108_feedback_kdf",
+            &mut params as *mut _ as CK_VOID_PTR,
+            std::mem::size_of::<CK_SP800_108_FEEDBACK_KDF_PARAMS>() as CK_ULONG,
+        )
+    }
+    .expect("read mechanism")
+    .params
+    {
+        Some(CkMechanismParams::Sp800108FeedbackKdf(p)) => {
+            assert_eq!(p.prf_type.0, 2);
+            r18_assert_null_array(&p.data_params, &p.data_params_presence, 0);
+            r17_assert_null(&p.iv, &p.iv_presence, 11);
+            r18_assert_null_array(
+                &p.additional_derived_keys,
+                &p.additional_derived_keys_presence,
+                1,
+            );
+        }
+        other => panic!("NULL-IV feedback KDF must stay typed under v1, got {other:?}"),
+    }
+}
+
+/// R18 closeout: every nested/output tail shape fails closed with
+/// `PARAM_INVALID` (never `Raw`) on a short buffer. `tls_mac` is
+/// scalar (not nested/output): a short image rides struct-prefix Flat
+/// under same-ABI pairs by design (S2 §5 width rule), pinned below.
+#[test]
+fn r18_tail_short_buffers_fail_closed() {
+    let registry = r18_registry();
+    // Full-size buffers presented one byte short: the failure is the
+    // shape gate, not unreadable memory.
+    let cases: &[(&str, usize)] = &[
+        ("tls_prf", std::mem::size_of::<CK_TLS_PRF_PARAMS>()),
+        ("tls_kdf", std::mem::size_of::<CK_TLS_KDF_PARAMS>()),
+        ("ssl3_master_key_derive", std::mem::size_of::<CK_SSL3_MASTER_KEY_DERIVE_PARAMS>()),
+        ("tls12_master_key_derive", std::mem::size_of::<CK_TLS12_MASTER_KEY_DERIVE_PARAMS>()),
+        (
+            "tls12_extended_master_key_derive",
+            std::mem::size_of::<CK_TLS12_EXTENDED_MASTER_KEY_DERIVE_PARAMS>(),
+        ),
+        ("ssl3_key_mat", std::mem::size_of::<CK_SSL3_KEY_MAT_PARAMS>()),
+        ("wtls_master_key_derive", std::mem::size_of::<CK_WTLS_MASTER_KEY_DERIVE_PARAMS>()),
+        ("wtls_prf", std::mem::size_of::<CK_WTLS_PRF_PARAMS>()),
+        ("wtls_key_mat", std::mem::size_of::<CK_WTLS_KEY_MAT_PARAMS>()),
+        ("kea_derive", std::mem::size_of::<CK_KEA_DERIVE_PARAMS>()),
+        ("kip", std::mem::size_of::<CK_KIP_PARAMS>()),
+        ("otp", std::mem::size_of::<CK_OTP_PARAMS>()),
+        ("skipjack_private_wrap", std::mem::size_of::<CK_SKIPJACK_PRIVATE_WRAP_PARAMS>()),
+        ("skipjack_relayx", std::mem::size_of::<CK_SKIPJACK_RELAYX_PARAMS>()),
+        ("sp800_108_kdf", std::mem::size_of::<CK_SP800_108_KDF_PARAMS>()),
+        ("sp800_108_feedback_kdf", std::mem::size_of::<CK_SP800_108_FEEDBACK_KDF_PARAMS>()),
+    ];
+    assert_eq!(cases.len(), 16, "one short case per nested/output tail shape");
+    let mut backing = [0u8; 512];
+    for (shape, size) in cases {
+        assert!(*size <= backing.len() && *size > 1, "{shape} fixture fits");
+        let err = unsafe {
+            r18_read_v1(
+                &registry,
+                shape,
+                backing.as_mut_ptr() as CK_VOID_PTR,
+                (*size - 1) as CK_ULONG,
+            )
+        }
+        .expect_err("short tail buffer must fail");
+        assert_eq!(err, CkRv::MECHANISM_PARAM_INVALID, "{shape} short must fail closed");
+    }
+
+    // Scalar `tls_mac`, one byte short: struct-prefix Flat (same-ABI
+    // pair), never `Raw`, never the typed reader.
+    let short = std::mem::size_of::<CK_TLS_MAC_PARAMS>() - 1;
+    match unsafe {
+        r18_read_v1(&registry, "tls_mac", backing.as_mut_ptr() as CK_VOID_PTR, short as CK_ULONG)
+    }
+    .expect("short scalar reads")
+    .params
+    {
+        Some(CkMechanismParams::Flat(p)) => {
+            assert_eq!(p.declared_len, short as u64);
+        }
+        other => panic!("short tls_mac must ride struct-prefix Flat, got {other:?}"),
+    }
+}
+
+/// R18 legacy pin: the same NULL-seed TLS PRF input rides legacy `Raw`
+/// under capability 0 (behavior EXACTLY preserved) and stays typed
+/// under v1.
+#[test]
+fn r18_legacy_capability_tail_behavior_exact() {
+    let registry = r18_registry();
+    let mut label = [0xD0u8, 0xD1];
+    let mut prf = CK_TLS_PRF_PARAMS {
+        pSeed: std::ptr::null_mut(),
+        ulSeedLen: 7,
+        pLabel: label.as_mut_ptr(),
+        ulLabelLen: label.len() as CK_ULONG,
+        pOutput: std::ptr::null_mut(),
+        pulOutputLen: std::ptr::null_mut(),
+    };
+    let mechanism = r11_mechanism(
+        r18_mech("tls_prf"),
+        &mut prf as *mut _ as CK_VOID_PTR,
+        std::mem::size_of::<CK_TLS_PRF_PARAMS>() as CK_ULONG,
+    );
+    match unsafe { read_r11_legacy(&mechanism, &registry, Operation::General) }
+        .expect("legacy read")
+        .params
+    {
+        Some(CkMechanismParams::Raw(_)) => {}
+        other => panic!("NULL-seed TLS PRF must stay legacy Raw, got {other:?}"),
+    }
+    match unsafe {
+        r18_read_v1(
+            &registry,
+            "tls_prf",
+            &mut prf as *mut _ as CK_VOID_PTR,
+            std::mem::size_of::<CK_TLS_PRF_PARAMS>() as CK_ULONG,
+        )
+    }
+    .expect("v1 read")
+    .params
+    {
+        Some(CkMechanismParams::TlsPrf(p)) => {
+            r17_assert_null_secret(&p.seed, &p.seed_presence, 7);
+            assert!(p.output_is_null && p.output_len_is_null);
+        }
+        other => panic!("NULL-seed TLS PRF must stay typed under v1, got {other:?}"),
     }
 }

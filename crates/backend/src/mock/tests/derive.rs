@@ -1,4 +1,5 @@
 use super::*;
+use pkcs11_proxy_ng_types::PointerArray;
 
 #[test]
 fn derive_key_with_sp800_108_rejects_unsupported_prf_type() {
@@ -10,7 +11,9 @@ fn derive_key_with_sp800_108_rejects_unsupported_prf_type() {
         mechanism_type: CkMechanismType::SP800_108_COUNTER_KDF,
         params: Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
             prf_type: CkMechanismType::SHA256,
+            data_params_presence: PointerArray::present(vec![sp800_108_counter_iteration_param()]),
             data_params: vec![sp800_108_counter_iteration_param()],
+            additional_derived_keys_presence: PointerArray::present(Vec::new()),
             additional_derived_keys: Vec::new(),
         })),
     };
@@ -545,10 +548,16 @@ fn derive_key_with_output_returns_configured_tls_output_params() {
     let mechanism =
         CkMechanism { mechanism_type: CkMechanismType::TLS12_MASTER_KEY_DERIVE, params: None };
     let output = CkMechanismParams::Tls12MasterKeyDerive(Tls12MasterKeyDeriveParams {
-        random_info: SslRandomData { client_random: vec![0x11; 32], server_random: vec![0x22; 32] },
+        random_info: SslRandomData {
+            client_random_presence: PointerBytes::present_copy(&[0x11; 32]),
+            server_random_presence: PointerBytes::present_copy(&[0x22; 32]),
+            client_random: vec![0x11; 32],
+            server_random: vec![0x22; 32],
+        },
         version_major: 3,
         version_minor: 3,
         prf_hash_mechanism: CkMechanismType::SHA256,
+        version_is_null: false,
     });
     backend.set_derive_key_output(Some(output.clone()));
     let base_key = live_key(&backend, session);
@@ -596,9 +605,15 @@ fn derive_key_with_sp800_108_additional_keys_allocates_output_handles() {
         mechanism_type: CkMechanismType::SP800_108_COUNTER_KDF,
         params: Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
             prf_type: CkMechanismType(CKM_SHA256_HMAC),
+            data_params_presence: PointerArray::present(vec![sp800_108_counter_iteration_param()]),
             data_params: vec![sp800_108_counter_iteration_param()],
-            additional_derived_keys: vec![
+            additional_derived_keys_presence: PointerArray::present(vec![
                 Sp800108DerivedKey {
+                    template_presence: PointerArray::present(vec![CkAttribute {
+                        attr_type: CkAttributeType::VALUE_LEN,
+                        value: Some(CkAttributeValue::Ulong(32)),
+                    }]),
+                    ph_key_is_null: false,
                     template: vec![CkAttribute {
                         attr_type: CkAttributeType::VALUE_LEN,
                         value: Some(CkAttributeValue::Ulong(32)),
@@ -606,6 +621,37 @@ fn derive_key_with_sp800_108_additional_keys_allocates_output_handles() {
                     key_handle: CkObjectHandle(0),
                 },
                 Sp800108DerivedKey {
+                    template_presence: PointerArray::present(vec![CkAttribute {
+                        attr_type: CkAttributeType::LABEL,
+                        value: Some(CkAttributeValue::String("extra".to_string().into())),
+                    }]),
+                    ph_key_is_null: false,
+                    template: vec![CkAttribute {
+                        attr_type: CkAttributeType::LABEL,
+                        value: Some(CkAttributeValue::String("extra".to_string().into())),
+                    }],
+                    key_handle: CkObjectHandle(0),
+                },
+            ]),
+            additional_derived_keys: vec![
+                Sp800108DerivedKey {
+                    template_presence: PointerArray::present(vec![CkAttribute {
+                        attr_type: CkAttributeType::VALUE_LEN,
+                        value: Some(CkAttributeValue::Ulong(32)),
+                    }]),
+                    ph_key_is_null: false,
+                    template: vec![CkAttribute {
+                        attr_type: CkAttributeType::VALUE_LEN,
+                        value: Some(CkAttributeValue::Ulong(32)),
+                    }],
+                    key_handle: CkObjectHandle(0),
+                },
+                Sp800108DerivedKey {
+                    template_presence: PointerArray::present(vec![CkAttribute {
+                        attr_type: CkAttributeType::LABEL,
+                        value: Some(CkAttributeValue::String("extra".to_string().into())),
+                    }]),
+                    ph_key_is_null: false,
                     template: vec![CkAttribute {
                         attr_type: CkAttributeType::LABEL,
                         value: Some(CkAttributeValue::String("extra".to_string().into())),
@@ -642,8 +688,46 @@ fn derive_key_with_sp800_108_additional_key_handles_preserves_templates() {
             CkMechanismType::SP800_108_COUNTER_KDF,
             CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
                 prf_type: CkMechanismType(CKM_SHA256_HMAC),
+                data_params_presence: PointerArray::present(vec![
+                    sp800_108_counter_iteration_param(),
+                ]),
                 data_params: vec![sp800_108_counter_iteration_param()],
+                additional_derived_keys_presence: PointerArray::present(vec![Sp800108DerivedKey {
+                    template_presence: PointerArray::present(vec![
+                        CkAttribute {
+                            attr_type: CkAttributeType::VALUE_LEN,
+                            value: Some(CkAttributeValue::Ulong(48)),
+                        },
+                        CkAttribute {
+                            attr_type: CkAttributeType::LABEL,
+                            value: Some(CkAttributeValue::String("sp800 extra".to_string().into())),
+                        },
+                    ]),
+                    ph_key_is_null: false,
+                    template: vec![
+                        CkAttribute {
+                            attr_type: CkAttributeType::VALUE_LEN,
+                            value: Some(CkAttributeValue::Ulong(48)),
+                        },
+                        CkAttribute {
+                            attr_type: CkAttributeType::LABEL,
+                            value: Some(CkAttributeValue::String("sp800 extra".to_string().into())),
+                        },
+                    ],
+                    key_handle: CkObjectHandle(0),
+                }]),
                 additional_derived_keys: vec![Sp800108DerivedKey {
+                    template_presence: PointerArray::present(vec![
+                        CkAttribute {
+                            attr_type: CkAttributeType::VALUE_LEN,
+                            value: Some(CkAttributeValue::Ulong(48)),
+                        },
+                        CkAttribute {
+                            attr_type: CkAttributeType::LABEL,
+                            value: Some(CkAttributeValue::String("sp800 extra".to_string().into())),
+                        },
+                    ]),
+                    ph_key_is_null: false,
                     template: vec![
                         CkAttribute {
                             attr_type: CkAttributeType::VALUE_LEN,
@@ -662,9 +746,46 @@ fn derive_key_with_sp800_108_additional_key_handles_preserves_templates() {
             CkMechanismType::SP800_108_FEEDBACK_KDF,
             CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
                 prf_type: CkMechanismType(CKM_SHA256_HMAC),
+                data_params_presence: PointerArray::present(vec![sp800_108_null_iteration_param()]),
                 data_params: vec![sp800_108_null_iteration_param()],
+                iv_presence: PointerBytes::present_copy(&[0xA5; 16]),
                 iv: vec![0xA5; 16],
+                additional_derived_keys_presence: PointerArray::present(vec![Sp800108DerivedKey {
+                    template_presence: PointerArray::present(vec![
+                        CkAttribute {
+                            attr_type: CkAttributeType::VALUE_LEN,
+                            value: Some(CkAttributeValue::Ulong(48)),
+                        },
+                        CkAttribute {
+                            attr_type: CkAttributeType::LABEL,
+                            value: Some(CkAttributeValue::String("sp800 extra".to_string().into())),
+                        },
+                    ]),
+                    ph_key_is_null: false,
+                    template: vec![
+                        CkAttribute {
+                            attr_type: CkAttributeType::VALUE_LEN,
+                            value: Some(CkAttributeValue::Ulong(48)),
+                        },
+                        CkAttribute {
+                            attr_type: CkAttributeType::LABEL,
+                            value: Some(CkAttributeValue::String("sp800 extra".to_string().into())),
+                        },
+                    ],
+                    key_handle: CkObjectHandle(0),
+                }]),
                 additional_derived_keys: vec![Sp800108DerivedKey {
+                    template_presence: PointerArray::present(vec![
+                        CkAttribute {
+                            attr_type: CkAttributeType::VALUE_LEN,
+                            value: Some(CkAttributeValue::Ulong(48)),
+                        },
+                        CkAttribute {
+                            attr_type: CkAttributeType::LABEL,
+                            value: Some(CkAttributeValue::String("sp800 extra".to_string().into())),
+                        },
+                    ]),
+                    ph_key_is_null: false,
                     template: vec![
                         CkAttribute {
                             attr_type: CkAttributeType::VALUE_LEN,
@@ -759,14 +880,20 @@ fn derive_key_with_sp800_108_additional_key_handles_preserves_templates() {
 fn derive_key_with_sp800_108_enforces_mode_data_param_rules() {
     const CK_SP800_108_COUNTER: u64 = 0x0000_0002;
 
-    let counter_field = PrfDataParam { type_: CK_SP800_108_COUNTER, value: vec![0; 16].into() };
+    let counter_field = PrfDataParam {
+        type_: CK_SP800_108_COUNTER,
+        value_presence: PointerBytes::present_copy(&[0; 16]),
+        value: (vec![0; 16]).into(),
+    };
     for (name, mechanism_type, params) in [
         (
             "counter mode missing iteration variable",
             CkMechanismType::SP800_108_COUNTER_KDF,
             CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
                 prf_type: CkMechanismType(CKM_SHA256_HMAC),
+                data_params_presence: PointerArray::present(Vec::new()),
                 data_params: Vec::new(),
+                additional_derived_keys_presence: PointerArray::present(Vec::new()),
                 additional_derived_keys: Vec::new(),
             }),
         ),
@@ -775,8 +902,11 @@ fn derive_key_with_sp800_108_enforces_mode_data_param_rules() {
             CkMechanismType::SP800_108_FEEDBACK_KDF,
             CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
                 prf_type: CkMechanismType(CKM_SHA256_HMAC),
+                data_params_presence: PointerArray::present(Vec::new()),
                 data_params: Vec::new(),
+                iv_presence: PointerBytes::present_copy(&[0xA5; 16]),
                 iv: vec![0xA5; 16],
+                additional_derived_keys_presence: PointerArray::present(Vec::new()),
                 additional_derived_keys: Vec::new(),
             }),
         ),
@@ -785,7 +915,9 @@ fn derive_key_with_sp800_108_enforces_mode_data_param_rules() {
             CkMechanismType::SP800_108_DOUBLE_PIPELINE_KDF,
             CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
                 prf_type: CkMechanismType(CKM_SHA256_HMAC),
+                data_params_presence: PointerArray::present(Vec::new()),
                 data_params: Vec::new(),
+                additional_derived_keys_presence: PointerArray::present(Vec::new()),
                 additional_derived_keys: Vec::new(),
             }),
         ),
@@ -794,7 +926,12 @@ fn derive_key_with_sp800_108_enforces_mode_data_param_rules() {
             CkMechanismType::SP800_108_COUNTER_KDF,
             CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
                 prf_type: CkMechanismType(CKM_SHA256_HMAC),
+                data_params_presence: PointerArray::present(vec![
+                    sp800_108_counter_iteration_param(),
+                    counter_field.clone(),
+                ]),
                 data_params: vec![sp800_108_counter_iteration_param(), counter_field.clone()],
+                additional_derived_keys_presence: PointerArray::present(Vec::new()),
                 additional_derived_keys: Vec::new(),
             }),
         ),
@@ -836,10 +973,17 @@ fn derive_key_with_sp800_108_validates_data_param_payload_shapes_and_singletons(
             CkMechanismType::SP800_108_COUNTER_KDF,
             CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
                 prf_type: CkMechanismType(CKM_SHA256_HMAC),
+                data_params_presence: PointerArray::present(vec![PrfDataParam {
+                    type_: CK_SP800_108_ITERATION_VARIABLE,
+                    value_presence: PointerBytes::present_copy(&[]),
+                    value: Vec::new().into(),
+                }]),
                 data_params: vec![PrfDataParam {
                     type_: CK_SP800_108_ITERATION_VARIABLE,
+                    value_presence: PointerBytes::present_copy(&[]),
                     value: Vec::new().into(),
                 }],
+                additional_derived_keys_presence: PointerArray::present(Vec::new()),
                 additional_derived_keys: Vec::new(),
             }),
         ),
@@ -848,14 +992,25 @@ fn derive_key_with_sp800_108_validates_data_param_payload_shapes_and_singletons(
             CkMechanismType::SP800_108_FEEDBACK_KDF,
             CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
                 prf_type: CkMechanismType(CKM_SHA256_HMAC),
+                data_params_presence: PointerArray::present(vec![
+                    sp800_108_null_iteration_param(),
+                    PrfDataParam {
+                        type_: CK_SP800_108_COUNTER,
+                        value_presence: PointerBytes::present_copy(&(short_counter_format.clone())),
+                        value: short_counter_format.clone().into(),
+                    },
+                ]),
                 data_params: vec![
                     sp800_108_null_iteration_param(),
                     PrfDataParam {
                         type_: CK_SP800_108_COUNTER,
+                        value_presence: PointerBytes::present_copy(&(short_counter_format.clone())),
                         value: short_counter_format.clone().into(),
                     },
                 ],
+                iv_presence: PointerBytes::present_copy(&[0xA5; 16]),
                 iv: vec![0xA5; 16],
+                additional_derived_keys_presence: PointerArray::present(Vec::new()),
                 additional_derived_keys: Vec::new(),
             }),
         ),
@@ -864,13 +1019,27 @@ fn derive_key_with_sp800_108_validates_data_param_payload_shapes_and_singletons(
             CkMechanismType::SP800_108_DOUBLE_PIPELINE_KDF,
             CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
                 prf_type: CkMechanismType(CKM_SHA256_HMAC),
+                data_params_presence: PointerArray::present(vec![
+                    sp800_108_null_iteration_param(),
+                    PrfDataParam {
+                        type_: CK_SP800_108_DKM_LENGTH,
+                        value_presence: PointerBytes::present_copy(
+                            &(short_dkm_length_format.clone()),
+                        ),
+                        value: short_dkm_length_format.clone().into(),
+                    },
+                ]),
                 data_params: vec![
                     sp800_108_null_iteration_param(),
                     PrfDataParam {
                         type_: CK_SP800_108_DKM_LENGTH,
-                        value: short_dkm_length_format.into(),
+                        value_presence: PointerBytes::present_copy(
+                            &(short_dkm_length_format.clone()),
+                        ),
+                        value: short_dkm_length_format.clone().into(),
                     },
                 ],
+                additional_derived_keys_presence: PointerArray::present(Vec::new()),
                 additional_derived_keys: Vec::new(),
             }),
         ),
@@ -879,10 +1048,23 @@ fn derive_key_with_sp800_108_validates_data_param_payload_shapes_and_singletons(
             CkMechanismType::SP800_108_COUNTER_KDF,
             CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
                 prf_type: CkMechanismType(CKM_SHA256_HMAC),
+                data_params_presence: PointerArray::present(vec![
+                    sp800_108_counter_iteration_param(),
+                    PrfDataParam {
+                        type_: CK_SP800_108_BYTE_ARRAY,
+                        value_presence: PointerBytes::present_copy(&(Vec::new())),
+                        value: (Vec::new()).into(),
+                    },
+                ]),
                 data_params: vec![
                     sp800_108_counter_iteration_param(),
-                    PrfDataParam { type_: CK_SP800_108_BYTE_ARRAY, value: Vec::new().into() },
+                    PrfDataParam {
+                        type_: CK_SP800_108_BYTE_ARRAY,
+                        value_presence: PointerBytes::present_copy(&(Vec::new())),
+                        value: (Vec::new()).into(),
+                    },
                 ],
+                additional_derived_keys_presence: PointerArray::present(Vec::new()),
                 additional_derived_keys: Vec::new(),
             }),
         ),
@@ -891,15 +1073,35 @@ fn derive_key_with_sp800_108_validates_data_param_payload_shapes_and_singletons(
             CkMechanismType::SP800_108_FEEDBACK_KDF,
             CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
                 prf_type: CkMechanismType(CKM_SHA256_HMAC),
+                data_params_presence: PointerArray::present(vec![
+                    sp800_108_null_iteration_param(),
+                    PrfDataParam {
+                        type_: CK_SP800_108_COUNTER,
+                        value_presence: PointerBytes::present_copy(&(counter_format.clone())),
+                        value: counter_format.clone().into(),
+                    },
+                    PrfDataParam {
+                        type_: CK_SP800_108_COUNTER,
+                        value_presence: PointerBytes::present_copy(&(counter_format.clone())),
+                        value: (counter_format.clone()).into(),
+                    },
+                ]),
                 data_params: vec![
                     sp800_108_null_iteration_param(),
                     PrfDataParam {
                         type_: CK_SP800_108_COUNTER,
+                        value_presence: PointerBytes::present_copy(&(counter_format.clone())),
                         value: counter_format.clone().into(),
                     },
-                    PrfDataParam { type_: CK_SP800_108_COUNTER, value: counter_format.into() },
+                    PrfDataParam {
+                        type_: CK_SP800_108_COUNTER,
+                        value_presence: PointerBytes::present_copy(&(counter_format.clone())),
+                        value: (counter_format.clone()).into(),
+                    },
                 ],
+                iv_presence: PointerBytes::present_copy(&[0xA5; 16]),
                 iv: vec![0xA5; 16],
+                additional_derived_keys_presence: PointerArray::present(Vec::new()),
                 additional_derived_keys: Vec::new(),
             }),
         ),
@@ -908,17 +1110,33 @@ fn derive_key_with_sp800_108_validates_data_param_payload_shapes_and_singletons(
             CkMechanismType::SP800_108_COUNTER_KDF,
             CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
                 prf_type: CkMechanismType(CKM_SHA256_HMAC),
-                data_params: vec![
+                data_params_presence: PointerArray::present(vec![
                     sp800_108_counter_iteration_param(),
                     PrfDataParam {
                         type_: CK_SP800_108_DKM_LENGTH,
+                        value_presence: PointerBytes::present_copy(&(dkm_length_format.clone())),
                         value: dkm_length_format.clone().into(),
                     },
                     PrfDataParam {
                         type_: CK_SP800_108_DKM_LENGTH,
-                        value: dkm_length_format.into(),
+                        value_presence: PointerBytes::present_copy(&(dkm_length_format.clone())),
+                        value: dkm_length_format.clone().into(),
+                    },
+                ]),
+                data_params: vec![
+                    sp800_108_counter_iteration_param(),
+                    PrfDataParam {
+                        type_: CK_SP800_108_DKM_LENGTH,
+                        value_presence: PointerBytes::present_copy(&(dkm_length_format.clone())),
+                        value: dkm_length_format.clone().into(),
+                    },
+                    PrfDataParam {
+                        type_: CK_SP800_108_DKM_LENGTH,
+                        value_presence: PointerBytes::present_copy(&(dkm_length_format.clone())),
+                        value: dkm_length_format.clone().into(),
                     },
                 ],
+                additional_derived_keys_presence: PointerArray::present(Vec::new()),
                 additional_derived_keys: Vec::new(),
             }),
         ),
@@ -927,13 +1145,27 @@ fn derive_key_with_sp800_108_validates_data_param_payload_shapes_and_singletons(
             CkMechanismType::SP800_108_COUNTER_KDF,
             CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
                 prf_type: CkMechanismType(CKM_SHA256_HMAC),
+                data_params_presence: PointerArray::present(vec![
+                    sp800_108_counter_iteration_param(),
+                    PrfDataParam {
+                        type_: CK_SP800_108_DKM_LENGTH,
+                        value_presence: PointerBytes::present_copy(
+                            &(sp800_108_dkm_length_format_bytes_with_method(0xDEAD_BEEF)),
+                        ),
+                        value: sp800_108_dkm_length_format_bytes_with_method(0xDEAD_BEEF).into(),
+                    },
+                ]),
                 data_params: vec![
                     sp800_108_counter_iteration_param(),
                     PrfDataParam {
                         type_: CK_SP800_108_DKM_LENGTH,
+                        value_presence: PointerBytes::present_copy(
+                            &(sp800_108_dkm_length_format_bytes_with_method(0xDEAD_BEEF)),
+                        ),
                         value: sp800_108_dkm_length_format_bytes_with_method(0xDEAD_BEEF).into(),
                     },
                 ],
+                additional_derived_keys_presence: PointerArray::present(Vec::new()),
                 additional_derived_keys: Vec::new(),
             }),
         ),
@@ -976,13 +1208,27 @@ fn derive_key_with_sp800_108_key_handle_data_param_requires_live_input_key() {
             CkMechanismType::SP800_108_COUNTER_KDF,
             CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
                 prf_type: CkMechanismType(CKM_SHA256_HMAC),
+                data_params_presence: PointerArray::present(vec![
+                    sp800_108_counter_iteration_param(),
+                    PrfDataParam {
+                        type_: CK_SP800_108_KEY_HANDLE,
+                        value_presence: PointerBytes::present_copy(
+                            0xBAD_u64.to_ne_bytes().as_ref(),
+                        ),
+                        value: 0xBAD_u64.to_ne_bytes().to_vec().into(),
+                    },
+                ]),
                 data_params: vec![
                     sp800_108_counter_iteration_param(),
                     PrfDataParam {
                         type_: CK_SP800_108_KEY_HANDLE,
+                        value_presence: PointerBytes::present_copy(
+                            0xBAD_u64.to_ne_bytes().as_ref(),
+                        ),
                         value: 0xBAD_u64.to_ne_bytes().to_vec().into(),
                     },
                 ],
+                additional_derived_keys_presence: PointerArray::present(Vec::new()),
                 additional_derived_keys: Vec::new(),
             }),
         ),
@@ -990,14 +1236,29 @@ fn derive_key_with_sp800_108_key_handle_data_param_requires_live_input_key() {
             CkMechanismType::SP800_108_FEEDBACK_KDF,
             CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
                 prf_type: CkMechanismType(CKM_SHA256_HMAC),
+                data_params_presence: PointerArray::present(vec![
+                    sp800_108_null_iteration_param(),
+                    PrfDataParam {
+                        type_: CK_SP800_108_KEY_HANDLE,
+                        value_presence: PointerBytes::present_copy(
+                            0xBAD_u64.to_ne_bytes().as_ref(),
+                        ),
+                        value: 0xBAD_u64.to_ne_bytes().to_vec().into(),
+                    },
+                ]),
                 data_params: vec![
                     sp800_108_null_iteration_param(),
                     PrfDataParam {
                         type_: CK_SP800_108_KEY_HANDLE,
+                        value_presence: PointerBytes::present_copy(
+                            0xBAD_u64.to_ne_bytes().as_ref(),
+                        ),
                         value: 0xBAD_u64.to_ne_bytes().to_vec().into(),
                     },
                 ],
+                iv_presence: PointerBytes::present_copy(&(Vec::new())),
                 iv: Vec::new(),
+                additional_derived_keys_presence: PointerArray::present(Vec::new()),
                 additional_derived_keys: Vec::new(),
             }),
         ),
@@ -1028,13 +1289,27 @@ fn derive_key_with_sp800_108_key_handle_data_param_accepts_live_input_key() {
             CkMechanismType::SP800_108_COUNTER_KDF,
             CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
                 prf_type: CkMechanismType(CKM_SHA256_HMAC),
+                data_params_presence: PointerArray::present(vec![
+                    sp800_108_counter_iteration_param(),
+                    PrfDataParam {
+                        type_: CK_SP800_108_KEY_HANDLE,
+                        value_presence: PointerBytes::present_copy(
+                            input_key.0.to_ne_bytes().as_ref(),
+                        ),
+                        value: input_key.0.to_ne_bytes().to_vec().into(),
+                    },
+                ]),
                 data_params: vec![
                     sp800_108_counter_iteration_param(),
                     PrfDataParam {
                         type_: CK_SP800_108_KEY_HANDLE,
+                        value_presence: PointerBytes::present_copy(
+                            input_key.0.to_ne_bytes().as_ref(),
+                        ),
                         value: input_key.0.to_ne_bytes().to_vec().into(),
                     },
                 ],
+                additional_derived_keys_presence: PointerArray::present(Vec::new()),
                 additional_derived_keys: Vec::new(),
             }),
         ),
@@ -1042,14 +1317,29 @@ fn derive_key_with_sp800_108_key_handle_data_param_accepts_live_input_key() {
             CkMechanismType::SP800_108_FEEDBACK_KDF,
             CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
                 prf_type: CkMechanismType(CKM_SHA256_HMAC),
+                data_params_presence: PointerArray::present(vec![
+                    sp800_108_null_iteration_param(),
+                    PrfDataParam {
+                        type_: CK_SP800_108_KEY_HANDLE,
+                        value_presence: PointerBytes::present_copy(
+                            input_key.0.to_ne_bytes().as_ref(),
+                        ),
+                        value: input_key.0.to_ne_bytes().to_vec().into(),
+                    },
+                ]),
                 data_params: vec![
                     sp800_108_null_iteration_param(),
                     PrfDataParam {
                         type_: CK_SP800_108_KEY_HANDLE,
+                        value_presence: PointerBytes::present_copy(
+                            input_key.0.to_ne_bytes().as_ref(),
+                        ),
                         value: input_key.0.to_ne_bytes().to_vec().into(),
                     },
                 ],
+                iv_presence: PointerBytes::present_copy(&(Vec::new())),
                 iv: Vec::new(),
+                additional_derived_keys_presence: PointerArray::present(Vec::new()),
                 additional_derived_keys: Vec::new(),
             }),
         ),
@@ -1112,8 +1402,26 @@ fn derive_key_with_sp800_108_additional_key_handles_rejects_small_attribute_buff
         mechanism_type: CkMechanismType::SP800_108_COUNTER_KDF,
         params: Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
             prf_type: CkMechanismType(CKM_SHA256_HMAC),
+            data_params_presence: PointerArray::present(vec![sp800_108_counter_iteration_param()]),
             data_params: vec![sp800_108_counter_iteration_param()],
+            additional_derived_keys_presence: PointerArray::present(vec![Sp800108DerivedKey {
+                template_presence: PointerArray::present(vec![CkAttribute {
+                    attr_type: CkAttributeType::LABEL,
+                    value: Some(CkAttributeValue::String("sp800 extra".to_string().into())),
+                }]),
+                ph_key_is_null: false,
+                template: vec![CkAttribute {
+                    attr_type: CkAttributeType::LABEL,
+                    value: Some(CkAttributeValue::String("sp800 extra".to_string().into())),
+                }],
+                key_handle: CkObjectHandle(0),
+            }]),
             additional_derived_keys: vec![Sp800108DerivedKey {
+                template_presence: PointerArray::present(vec![CkAttribute {
+                    attr_type: CkAttributeType::LABEL,
+                    value: Some(CkAttributeValue::String("sp800 extra".to_string().into())),
+                }]),
+                ph_key_is_null: false,
                 template: vec![CkAttribute {
                     attr_type: CkAttributeType::LABEL,
                     value: Some(CkAttributeValue::String("sp800 extra".to_string().into())),
@@ -1160,8 +1468,17 @@ fn close_session_clears_sp800_108_session_keys_but_preserves_token_keys() {
         mechanism_type: CkMechanismType::SP800_108_COUNTER_KDF,
         params: Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
             prf_type: CkMechanismType(CKM_SHA256_HMAC),
+            data_params_presence: PointerArray::present(vec![sp800_108_counter_iteration_param()]),
             data_params: vec![sp800_108_counter_iteration_param()],
+            additional_derived_keys_presence: PointerArray::present(vec![Sp800108DerivedKey {
+                template_presence: PointerArray::present(vec![label_attr("session-extra")]),
+                ph_key_is_null: false,
+                template: vec![label_attr("session-extra")],
+                key_handle: CkObjectHandle(0),
+            }]),
             additional_derived_keys: vec![Sp800108DerivedKey {
+                template_presence: PointerArray::present(vec![label_attr("session-extra")]),
+                ph_key_is_null: false,
                 template: vec![label_attr("session-extra")],
                 key_handle: CkObjectHandle(0),
             }],
@@ -1171,8 +1488,35 @@ fn close_session_clears_sp800_108_session_keys_but_preserves_token_keys() {
         mechanism_type: CkMechanismType::SP800_108_COUNTER_KDF,
         params: Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
             prf_type: CkMechanismType(CKM_SHA256_HMAC),
+            data_params_presence: PointerArray::present(vec![sp800_108_counter_iteration_param()]),
             data_params: vec![sp800_108_counter_iteration_param()],
+            additional_derived_keys_presence: PointerArray::present(vec![Sp800108DerivedKey {
+                template_presence: PointerArray::present(vec![
+                    CkAttribute {
+                        attr_type: CkAttributeType::TOKEN,
+                        value: Some(CkAttributeValue::Bool(true)),
+                    },
+                    label_attr("token-extra"),
+                ]),
+                ph_key_is_null: false,
+                template: vec![
+                    CkAttribute {
+                        attr_type: CkAttributeType::TOKEN,
+                        value: Some(CkAttributeValue::Bool(true)),
+                    },
+                    label_attr("token-extra"),
+                ],
+                key_handle: CkObjectHandle(0),
+            }]),
             additional_derived_keys: vec![Sp800108DerivedKey {
+                template_presence: PointerArray::present(vec![
+                    CkAttribute {
+                        attr_type: CkAttributeType::TOKEN,
+                        value: Some(CkAttributeValue::Bool(true)),
+                    },
+                    label_attr("token-extra"),
+                ]),
+                ph_key_is_null: false,
                 template: vec![
                     CkAttribute {
                         attr_type: CkAttributeType::TOKEN,
@@ -1260,10 +1604,37 @@ fn derive_key_with_sp800_108_additional_keys_does_not_partially_allocate_on_quot
             CkMechanismType::SP800_108_COUNTER_KDF,
             CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
                 prf_type: CkMechanismType(CKM_SHA256_HMAC),
+                data_params_presence: PointerArray::present(vec![
+                    sp800_108_counter_iteration_param(),
+                ]),
                 data_params: vec![sp800_108_counter_iteration_param()],
+                additional_derived_keys_presence: PointerArray::present(vec![
+                    Sp800108DerivedKey {
+                        template_presence: PointerArray::present(Vec::new()),
+                        ph_key_is_null: false,
+                        template: Vec::new(),
+                        key_handle: CkObjectHandle(0),
+                    },
+                    Sp800108DerivedKey {
+                        template_presence: PointerArray::present(Vec::new()),
+                        ph_key_is_null: false,
+                        template: Vec::new(),
+                        key_handle: CkObjectHandle(0),
+                    },
+                ]),
                 additional_derived_keys: vec![
-                    Sp800108DerivedKey { template: Vec::new(), key_handle: CkObjectHandle(0) },
-                    Sp800108DerivedKey { template: Vec::new(), key_handle: CkObjectHandle(0) },
+                    Sp800108DerivedKey {
+                        template_presence: PointerArray::present(Vec::new()),
+                        ph_key_is_null: false,
+                        template: Vec::new(),
+                        key_handle: CkObjectHandle(0),
+                    },
+                    Sp800108DerivedKey {
+                        template_presence: PointerArray::present(Vec::new()),
+                        ph_key_is_null: false,
+                        template: Vec::new(),
+                        key_handle: CkObjectHandle(0),
+                    },
                 ],
             }),
         ),
@@ -1271,11 +1642,37 @@ fn derive_key_with_sp800_108_additional_keys_does_not_partially_allocate_on_quot
             CkMechanismType::SP800_108_FEEDBACK_KDF,
             CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
                 prf_type: CkMechanismType(CKM_SHA256_HMAC),
+                data_params_presence: PointerArray::present(vec![sp800_108_null_iteration_param()]),
                 data_params: vec![sp800_108_null_iteration_param()],
+                iv_presence: PointerBytes::present_copy(&[0xA5; 16]),
                 iv: vec![0xA5; 16],
+                additional_derived_keys_presence: PointerArray::present(vec![
+                    Sp800108DerivedKey {
+                        template_presence: PointerArray::present(Vec::new()),
+                        ph_key_is_null: false,
+                        template: Vec::new(),
+                        key_handle: CkObjectHandle(0),
+                    },
+                    Sp800108DerivedKey {
+                        template_presence: PointerArray::present(Vec::new()),
+                        ph_key_is_null: false,
+                        template: Vec::new(),
+                        key_handle: CkObjectHandle(0),
+                    },
+                ]),
                 additional_derived_keys: vec![
-                    Sp800108DerivedKey { template: Vec::new(), key_handle: CkObjectHandle(0) },
-                    Sp800108DerivedKey { template: Vec::new(), key_handle: CkObjectHandle(0) },
+                    Sp800108DerivedKey {
+                        template_presence: PointerArray::present(Vec::new()),
+                        ph_key_is_null: false,
+                        template: Vec::new(),
+                        key_handle: CkObjectHandle(0),
+                    },
+                    Sp800108DerivedKey {
+                        template_presence: PointerArray::present(Vec::new()),
+                        ph_key_is_null: false,
+                        template: Vec::new(),
+                        key_handle: CkObjectHandle(0),
+                    },
                 ],
             }),
         ),
@@ -1316,9 +1713,15 @@ fn derive_key_with_sp800_108_template_failure_reports_invalid_additional_handle(
         mechanism_type: CkMechanismType::SP800_108_COUNTER_KDF,
         params: Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
             prf_type: CkMechanismType(CKM_SHA256_HMAC),
+            data_params_presence: PointerArray::present(vec![sp800_108_counter_iteration_param()]),
             data_params: vec![sp800_108_counter_iteration_param()],
-            additional_derived_keys: vec![
+            additional_derived_keys_presence: PointerArray::present(vec![
                 Sp800108DerivedKey {
+                    template_presence: PointerArray::present(vec![CkAttribute {
+                        attr_type: CkAttributeType::VALUE_LEN,
+                        value: Some(CkAttributeValue::Ulong(32)),
+                    }]),
+                    ph_key_is_null: false,
                     template: vec![CkAttribute {
                         attr_type: CkAttributeType::VALUE_LEN,
                         value: Some(CkAttributeValue::Ulong(32)),
@@ -1326,6 +1729,37 @@ fn derive_key_with_sp800_108_template_failure_reports_invalid_additional_handle(
                     key_handle: CkObjectHandle(SENTINEL_HANDLE),
                 },
                 Sp800108DerivedKey {
+                    template_presence: PointerArray::present(vec![CkAttribute {
+                        attr_type: CkAttributeType::VALUE_LEN,
+                        value: Some(CkAttributeValue::Ulong(0)),
+                    }]),
+                    ph_key_is_null: false,
+                    template: vec![CkAttribute {
+                        attr_type: CkAttributeType::VALUE_LEN,
+                        value: Some(CkAttributeValue::Ulong(0)),
+                    }],
+                    key_handle: CkObjectHandle(SENTINEL_HANDLE),
+                },
+            ]),
+            additional_derived_keys: vec![
+                Sp800108DerivedKey {
+                    template_presence: PointerArray::present(vec![CkAttribute {
+                        attr_type: CkAttributeType::VALUE_LEN,
+                        value: Some(CkAttributeValue::Ulong(32)),
+                    }]),
+                    ph_key_is_null: false,
+                    template: vec![CkAttribute {
+                        attr_type: CkAttributeType::VALUE_LEN,
+                        value: Some(CkAttributeValue::Ulong(32)),
+                    }],
+                    key_handle: CkObjectHandle(SENTINEL_HANDLE),
+                },
+                Sp800108DerivedKey {
+                    template_presence: PointerArray::present(vec![CkAttribute {
+                        attr_type: CkAttributeType::VALUE_LEN,
+                        value: Some(CkAttributeValue::Ulong(0)),
+                    }]),
+                    ph_key_is_null: false,
                     template: vec![CkAttribute {
                         attr_type: CkAttributeType::VALUE_LEN,
                         value: Some(CkAttributeValue::Ulong(0)),

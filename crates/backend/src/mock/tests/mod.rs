@@ -177,6 +177,7 @@ fn sp800_108_counter_iteration_param() -> PrfDataParam {
 
     PrfDataParam {
         type_: CK_SP800_108_ITERATION_VARIABLE,
+        value_presence: PointerBytes::present_copy(&sp800_108_counter_format_bytes()),
         value: sp800_108_counter_format_bytes().into(),
     }
 }
@@ -184,7 +185,11 @@ fn sp800_108_counter_iteration_param() -> PrfDataParam {
 fn sp800_108_null_iteration_param() -> PrfDataParam {
     const CK_SP800_108_ITERATION_VARIABLE: u64 = 0x0000_0001;
 
-    PrfDataParam { type_: CK_SP800_108_ITERATION_VARIABLE, value: Vec::new().into() }
+    PrfDataParam {
+        type_: CK_SP800_108_ITERATION_VARIABLE,
+        value_presence: PointerBytes::present_copy(&(Vec::new())),
+        value: (Vec::new()).into(),
+    }
 }
 
 fn sp800_108_counter_format_bytes() -> Vec<u8> {
@@ -317,7 +322,9 @@ fn kip_mechanism(mechanism_type: CkMechanismType, key_handle: CkObjectHandle) ->
                 params: None,
             }),
             key_handle,
+            seed_presence: PointerBytes::present_copy(b"seed"),
             seed: b"seed".to_vec().into(),
+            mechanism_is_null: false,
         })),
     }
 }

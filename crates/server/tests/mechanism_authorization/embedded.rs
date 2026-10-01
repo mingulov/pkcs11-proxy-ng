@@ -8,8 +8,8 @@ use ::pkcs11_proxy_ng::server::handle_map::{BackendHandle, VirtualHandle};
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_backend::mock::MockEmbeddedHandles;
 use pkcs11_proxy_ng_types::{
-    CkObjectHandle, HkdfParams, PointerBytes, PrfDataParam, Sp800108FeedbackKdfParams,
-    Sp800108KdfParams,
+    CkObjectHandle, HkdfParams, PointerArray, PointerBytes, PrfDataParam,
+    Sp800108FeedbackKdfParams, Sp800108KdfParams,
 };
 
 fn hkdf(handle: u64) -> Option<Mechanism> {
@@ -37,8 +37,13 @@ fn sp800108(value: Vec<u8>, feedback: bool) -> Option<Mechanism> {
         PrfDataParam {
             type_: cryptoki_sys::CK_SP800_108_ITERATION_VARIABLE as u64,
             value: vec![].into(),
+            value_presence: PointerBytes::present_copy(&[]),
         },
-        PrfDataParam { type_: cryptoki_sys::CK_SP800_108_KEY_HANDLE as u64, value: value.into() },
+        PrfDataParam {
+            type_: cryptoki_sys::CK_SP800_108_KEY_HANDLE as u64,
+            value: value.clone().into(),
+            value_presence: PointerBytes::present_copy(&value),
+        },
     ];
     Some(
         Mechanism::try_from(&CkMechanism {
@@ -46,6 +51,9 @@ fn sp800108(value: Vec<u8>, feedback: bool) -> Option<Mechanism> {
             params: Some(if feedback {
                 CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
                     prf_type: CkMechanismType(cryptoki_sys::CKM_SHA256_HMAC as u64),
+                    data_params_presence: PointerArray::present(data_params.clone()),
+                    iv_presence: PointerBytes::present_copy(&[]),
+                    additional_derived_keys_presence: PointerArray::present(Vec::new()),
                     data_params,
                     iv: vec![],
                     additional_derived_keys: vec![],
@@ -53,6 +61,8 @@ fn sp800108(value: Vec<u8>, feedback: bool) -> Option<Mechanism> {
             } else {
                 CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
                     prf_type: CkMechanismType(cryptoki_sys::CKM_SHA256_HMAC as u64),
+                    data_params_presence: PointerArray::present(data_params.clone()),
+                    additional_derived_keys_presence: PointerArray::present(Vec::new()),
                     data_params,
                     additional_derived_keys: vec![],
                 })

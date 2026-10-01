@@ -1333,4 +1333,530 @@ mod manifest_tests {
             "presence table must equal Complete PointerStructs minus the R18 TLS set"
         );
     }
+
+    /// R18 tail-envelope field kinds (S2 §8 tail, D1(a)): byte-pointer
+    /// presence follows the R16 pattern; counted arrays and length-less
+    /// scalar pointers get their own envelope shapes (no silent omission
+    /// — every tail pointer must appear here with its kind).
+    /// The shared `Null` prefix mirrors the `_null_len`/`_null_count`/
+    /// `_null` proto suffixes it classifies.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[allow(clippy::enum_variant_names)]
+    enum R18FieldKind {
+        /// `optional uint64 {field} = {tag};` beside `bytes {companion}`
+        /// (R16 semantics: present = NULL + exactly that length).
+        NullLen { companion: &'static str },
+        /// `optional uint64 {field} = {tag};` beside
+        /// `repeated <T> {companion}` (present = NULL array + exactly
+        /// that count; absent = non-NULL, count == len).
+        NullCount { companion: &'static str },
+        /// `optional bool {field} = {tag};` (length-less pointer:
+        /// `Some(true)` = NULL; absent/`Some(false)` = non-NULL).
+        NullBit,
+    }
+
+    /// R18 tail-envelope table: `(S2 family, shape, wire message,
+    /// pre-R18 max tag, message lives in types.proto,
+    /// [(envelope field, tag, kind)])`. TAG RULE (binding, R16 step 2):
+    /// lowest free tag per message — the row's tags are exactly
+    /// pre18_max+1, +2, … in C-struct field order. The union test pins
+    /// this table against the live manifest in both directions.
+    #[allow(clippy::type_complexity)]
+    const R18_TAIL_TABLE: &[(&str, &str, &str, u32, bool, &[(&str, u32, R18FieldKind)])] = &[
+        // S2 §8 "KEA" (A/B share ulRandomLen — companions).
+        (
+            "KEA",
+            "kea_derive",
+            "KeaDeriveParams",
+            4,
+            false,
+            &[
+                ("random_a_null_len", 5, R18FieldKind::NullLen { companion: "random_a" }),
+                ("random_b_null_len", 6, R18FieldKind::NullLen { companion: "random_b" }),
+                ("public_data_null_len", 7, R18FieldKind::NullLen { companion: "public_data" }),
+            ],
+        ),
+        // S2 §8 "KIP" (nesting presence; message lives in types.proto).
+        (
+            "KIP",
+            "kip",
+            "KipParams",
+            3,
+            true,
+            &[
+                ("mechanism_null", 4, R18FieldKind::NullBit),
+                ("seed_null_len", 5, R18FieldKind::NullLen { companion: "seed" }),
+            ],
+        ),
+        // S2 §8 "OTP/SP800-108" (array presence).
+        (
+            "OTP/SP800-108",
+            "otp",
+            "OtpParams",
+            1,
+            false,
+            &[("params_null_count", 2, R18FieldKind::NullCount { companion: "params" })],
+        ),
+        (
+            "OTP/SP800-108",
+            "sp800_108_kdf",
+            "Sp800108KdfParams",
+            3,
+            false,
+            &[
+                ("data_params_null_count", 4, R18FieldKind::NullCount { companion: "data_params" }),
+                (
+                    "additional_derived_keys_null_count",
+                    5,
+                    R18FieldKind::NullCount { companion: "additional_derived_keys" },
+                ),
+            ],
+        ),
+        (
+            "OTP/SP800-108",
+            "sp800_108_feedback_kdf",
+            "Sp800108FeedbackKdfParams",
+            4,
+            false,
+            &[
+                ("data_params_null_count", 5, R18FieldKind::NullCount { companion: "data_params" }),
+                ("iv_null_len", 6, R18FieldKind::NullLen { companion: "iv" }),
+                (
+                    "additional_derived_keys_null_count",
+                    7,
+                    R18FieldKind::NullCount { companion: "additional_derived_keys" },
+                ),
+            ],
+        ),
+        // S2 §8 "Skipjack" (shared-length companions: P/G share ulPAndGLen).
+        (
+            "Skipjack",
+            "skipjack_private_wrap",
+            "SkipjackPrivateWrapParams",
+            7,
+            false,
+            &[
+                ("password_null_len", 8, R18FieldKind::NullLen { companion: "password" }),
+                ("public_data_null_len", 9, R18FieldKind::NullLen { companion: "public_data" }),
+                ("random_a_null_len", 10, R18FieldKind::NullLen { companion: "random_a" }),
+                ("prime_p_null_len", 11, R18FieldKind::NullLen { companion: "prime_p" }),
+                ("base_g_null_len", 12, R18FieldKind::NullLen { companion: "base_g" }),
+                ("subprime_q_null_len", 13, R18FieldKind::NullLen { companion: "subprime_q" }),
+            ],
+        ),
+        (
+            "Skipjack",
+            "skipjack_relayx",
+            "SkipjackRelayxParams",
+            7,
+            false,
+            &[
+                ("old_wrapped_x_null_len", 8, R18FieldKind::NullLen { companion: "old_wrapped_x" }),
+                ("old_password_null_len", 9, R18FieldKind::NullLen { companion: "old_password" }),
+                (
+                    "old_public_data_null_len",
+                    10,
+                    R18FieldKind::NullLen { companion: "old_public_data" },
+                ),
+                ("old_random_a_null_len", 11, R18FieldKind::NullLen { companion: "old_random_a" }),
+                ("new_password_null_len", 12, R18FieldKind::NullLen { companion: "new_password" }),
+                (
+                    "new_public_data_null_len",
+                    13,
+                    R18FieldKind::NullLen { companion: "new_public_data" },
+                ),
+                ("new_random_a_null_len", 14, R18FieldKind::NullLen { companion: "new_random_a" }),
+            ],
+        ),
+        // S2 §8 "TLS/WTLS envelopes": TlsMac is scalar (no pointers —
+        // the table's only empty row, pinned below).
+        ("TLS/WTLS envelopes", "tls_mac", "TlsMacParams", 3, false, &[]),
+        (
+            "TLS/WTLS envelopes",
+            "tls_prf",
+            "TlsPrfParams",
+            4,
+            false,
+            &[
+                ("seed_null_len", 5, R18FieldKind::NullLen { companion: "seed" }),
+                ("label_null_len", 6, R18FieldKind::NullLen { companion: "label" }),
+                ("output_null", 7, R18FieldKind::NullBit),
+                ("output_len_null", 8, R18FieldKind::NullBit),
+            ],
+        ),
+        (
+            "TLS/WTLS envelopes",
+            "tls_kdf",
+            "TlsKdfParams",
+            4,
+            false,
+            &[
+                ("label_null_len", 5, R18FieldKind::NullLen { companion: "label" }),
+                ("context_data_null_len", 6, R18FieldKind::NullLen { companion: "context_data" }),
+            ],
+        ),
+        (
+            "TLS/WTLS envelopes",
+            "ssl3_master_key_derive",
+            "Ssl3MasterKeyDeriveParams",
+            3,
+            false,
+            &[("version_null", 4, R18FieldKind::NullBit)],
+        ),
+        (
+            "TLS/WTLS envelopes",
+            "tls12_master_key_derive",
+            "Tls12MasterKeyDeriveParams",
+            4,
+            false,
+            &[("version_null", 5, R18FieldKind::NullBit)],
+        ),
+        (
+            "TLS/WTLS envelopes",
+            "tls12_extended_master_key_derive",
+            "Tls12ExtendedMasterKeyDeriveParams",
+            4,
+            false,
+            &[
+                ("session_hash_null_len", 5, R18FieldKind::NullLen { companion: "session_hash" }),
+                ("version_null", 6, R18FieldKind::NullBit),
+            ],
+        ),
+        (
+            "TLS/WTLS envelopes",
+            "ssl3_key_mat",
+            "Ssl3KeyMatParams",
+            12,
+            false,
+            &[
+                ("returned_key_material_null", 13, R18FieldKind::NullBit),
+                ("client_iv_null_len", 14, R18FieldKind::NullLen { companion: "client_iv" }),
+                ("server_iv_null_len", 15, R18FieldKind::NullLen { companion: "server_iv" }),
+            ],
+        ),
+        (
+            "TLS/WTLS envelopes",
+            "wtls_master_key_derive",
+            "WtlsMasterKeyDeriveParams",
+            3,
+            false,
+            &[("version_null", 4, R18FieldKind::NullBit)],
+        ),
+        (
+            "TLS/WTLS envelopes",
+            "wtls_prf",
+            "WtlsPrfParams",
+            5,
+            false,
+            &[
+                ("seed_null_len", 6, R18FieldKind::NullLen { companion: "seed" }),
+                ("label_null_len", 7, R18FieldKind::NullLen { companion: "label" }),
+                ("output_null", 8, R18FieldKind::NullBit),
+                ("output_len_null", 9, R18FieldKind::NullBit),
+            ],
+        ),
+        (
+            "TLS/WTLS envelopes",
+            "wtls_key_mat",
+            "WtlsKeyMatParams",
+            10,
+            false,
+            &[
+                ("returned_key_material_null", 11, R18FieldKind::NullBit),
+                ("iv_null_len", 12, R18FieldKind::NullLen { companion: "iv" }),
+            ],
+        ),
+    ];
+
+    /// Source lines of the top-level `message {name} {...}` block in the
+    /// given `.proto` source (brace-counted, so nested oneofs stay
+    /// inside the block).
+    fn message_block_lines_in(source: &'static str, name: &str) -> Vec<&'static str> {
+        let mut lines = Vec::new();
+        let mut depth = 0u32;
+        let mut inside = false;
+        for line in source.lines() {
+            if !inside {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with(&format!("message {name} "))
+                    || trimmed.starts_with(&format!("message {name}{{"))
+                {
+                    inside = true;
+                } else {
+                    continue;
+                }
+            }
+            depth += line.chars().filter(|c| *c == '{').count() as u32;
+            depth -= line.chars().filter(|c| *c == '}').count() as u32;
+            lines.push(line);
+            if depth == 0 {
+                break;
+            }
+        }
+        assert!(inside, "message {name} not found in .proto source");
+        lines
+    }
+
+    #[test]
+    fn r18_tail_envelope_fields_exist() {
+        for (family, shape, message, pre18_max, in_types_proto, fields) in R18_TAIL_TABLE {
+            let source = if *in_types_proto { TYPES_PROTO } else { MECHANISM_PARAMS_PROTO };
+            let block = message_block_lines_in(source, message);
+            // TAG RULE (binding): lowest free tag per message — the row's
+            // tags are exactly pre18_max+1, +2, … in C-struct order.
+            for (index, (_, tag, _)) in fields.iter().enumerate() {
+                assert_eq!(
+                    *tag,
+                    pre18_max + index as u32 + 1,
+                    "tag rule for {family}/{shape}/{message}"
+                );
+            }
+            for (field, tag, kind) in *fields {
+                let expected = match kind {
+                    R18FieldKind::NullLen { companion } => {
+                        assert!(
+                            block.iter().any(|line| line
+                                .trim_start()
+                                .starts_with(&format!("bytes {companion} ="))),
+                            "{family}/{shape}: {message} must carry `bytes {companion}` \
+                             (else the presence pin is vacuous)"
+                        );
+                        format!("optional uint64 {field} = {tag};")
+                    }
+                    R18FieldKind::NullCount { companion } => {
+                        assert!(
+                            block.iter().any(|line| {
+                                let trimmed = line.trim_start();
+                                trimmed.starts_with("repeated ")
+                                    && trimmed.contains(&format!(" {companion} ="))
+                            }),
+                            "{family}/{shape}: {message} must carry `repeated <T> {companion}` \
+                             (else the count pin is vacuous)"
+                        );
+                        format!("optional uint64 {field} = {tag};")
+                    }
+                    R18FieldKind::NullBit => format!("optional bool {field} = {tag};"),
+                };
+                assert!(
+                    block.iter().any(|line| line.trim_start().starts_with(&expected)),
+                    "{family}/{shape}: {message} must carry `{expected}`"
+                );
+            }
+            // The table's only empty row: `tls_mac` is scalar (no
+            // pointers, nothing to envelop).
+            if fields.is_empty() {
+                assert_eq!(
+                    (*shape, *message),
+                    ("tls_mac", "TlsMacParams"),
+                    "only tls_mac may list no envelope fields"
+                );
+                assert!(
+                    !block.iter().any(|line| {
+                        let trimmed = line.trim_start();
+                        trimmed.starts_with("bytes ")
+                            || trimmed.starts_with("repeated ")
+                            || trimmed.starts_with("optional ")
+                    }),
+                    "tls_mac must have no byte/array/envelope field"
+                );
+                let descriptor = ShapeResolver::descriptor(shape)
+                    .unwrap_or_else(|| panic!("{family} names undescribed shape {shape}"));
+                assert_eq!(
+                    descriptor.outer_kind,
+                    OuterKind::ScalarStruct,
+                    "{family}/{shape} must be ScalarStruct"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn r18_tail_submessage_envelopes_exist() {
+        // Shared/nested sub-messages carry the envelopes their parents
+        // reuse (pinned here — they have no manifest shape row of their
+        // own, so the table test cannot cover them).
+        for (message, pre18_max, fields) in [
+            (
+                "SslRandomData",
+                2u32,
+                &[("client_random_null_len", 3u32), ("server_random_null_len", 4u32)]
+                    as &[(&str, u32)],
+            ),
+            (
+                "WtlsRandomData",
+                2u32,
+                &[("client_random_null_len", 3u32), ("server_random_null_len", 4u32)]
+                    as &[(&str, u32)],
+            ),
+            ("PrfDataParam", 2u32, &[("value_null_len", 3u32)] as &[(&str, u32)]),
+            ("OtpParam", 2u32, &[("value_null_len", 3u32)] as &[(&str, u32)]),
+            ("Sp800108DerivedKey", 2u32, &[("template_null_count", 3u32)] as &[(&str, u32)]),
+        ] {
+            let block = message_block_lines_in(MECHANISM_PARAMS_PROTO, message);
+            for (index, (field, tag)) in fields.iter().enumerate() {
+                assert_eq!(*tag, pre18_max + index as u32 + 1, "tag rule for {message}");
+                let expected = format!("optional uint64 {field} = {tag};");
+                assert!(
+                    block.iter().any(|line| line.trim_start().starts_with(&expected)),
+                    "{message} must carry `{expected}`"
+                );
+            }
+        }
+        // The SP800-108 derived-key output-handle null bit (length-less
+        // pointer — the bool envelope kind).
+        let block = message_block_lines_in(MECHANISM_PARAMS_PROTO, "Sp800108DerivedKey");
+        assert!(
+            block
+                .iter()
+                .any(|line| line.trim_start().starts_with("optional bool ph_key_null = 4;")),
+            "Sp800108DerivedKey must carry `optional bool ph_key_null = 4;`"
+        );
+    }
+
+    #[test]
+    fn r18_tail_table_covers_every_tail_shape() {
+        let table_shapes: BTreeSet<&str> = R18_TAIL_TABLE.iter().map(|row| row.1).collect();
+        assert_eq!(table_shapes.len(), R18_TAIL_TABLE.len(), "one row per shape (no duplicates)");
+        // Every row resolves to a live shape whose wire binding carries
+        // the row's message.
+        for (family, shape, message, _, _, _) in R18_TAIL_TABLE {
+            let entry = super::manifest_shape(shape)
+                .unwrap_or_else(|| panic!("{family} names unknown shape {shape}"));
+            assert!(
+                entry.wire_messages.iter().any(|bound| bound == message),
+                "{family}/{shape} must bind {message}"
+            );
+        }
+        // No silent omission in either direction: the table is exactly
+        // the PendingTail set + the R16-deferred TLS-input set + tls_mac.
+        // (PendingTail stays pending until R19+R21 — the manifest is
+        // still incomplete; this pins the exact pending tail list.)
+        let mut expected: BTreeSet<&str> = super::pending_shapes().into_iter().collect();
+        for shape in R16_R18_TLS_SET {
+            expected.insert(shape);
+        }
+        expected.insert("tls_mac");
+        assert_eq!(
+            expected,
+            BTreeSet::from([
+                "kea_derive",
+                "kip",
+                "otp",
+                "skipjack_private_wrap",
+                "skipjack_relayx",
+                "sp800_108_feedback_kdf",
+                "sp800_108_kdf",
+                "ssl3_key_mat",
+                "ssl3_master_key_derive",
+                "tls12_extended_master_key_derive",
+                "tls12_master_key_derive",
+                "tls_kdf",
+                "tls_mac",
+                "tls_prf",
+                "wtls_key_mat",
+                "wtls_master_key_derive",
+                "wtls_prf",
+            ]),
+            "exact R18 tail scope (pending tail + TLS-input + tls_mac)"
+        );
+        assert_eq!(table_shapes, expected, "tail table must equal the exact R18 tail scope");
+    }
+
+    #[test]
+    fn r18_kem_needs_no_envelope() {
+        // S2 §8: KEM rides the general `Mechanism` path — no KEM message
+        // gains an envelope field. Each KEM request carries a `Mechanism`
+        // member; each KEM response carries none. The only `optional`
+        // lines are the pre-R18 ones (ADR-0010 Scope 2 / Wave 3.5 D2).
+        for (message, optionals) in [
+            ("EncapsulateKeyRequest", &[] as &[&str]),
+            ("EncapsulateKeyExactRequest", &[] as &[&str]),
+            ("DecapsulateKeyRequest", &["optional uint64 ciphertext_null_len = 7;"] as &[&str]),
+        ] {
+            let block = message_block_lines_in(TYPES_PROTO, message);
+            assert!(
+                block.iter().any(|line| line.trim_start().starts_with("Mechanism mechanism =")),
+                "{message} must ride the general Mechanism path"
+            );
+            let got: Vec<&str> = block
+                .iter()
+                .map(|line| line.trim_start())
+                .filter(|l| l.starts_with("optional "))
+                .collect();
+            assert_eq!(got, *optionals, "{message} gains no envelope field");
+        }
+        for message in
+            ["EncapsulateKeyResponse", "DecapsulateKeyResponse", "EncapsulateKeyExactResponse"]
+        {
+            let block = message_block_lines_in(TYPES_PROTO, message);
+            assert!(
+                !block.iter().any(|line| line.trim_start().starts_with("Mechanism ")),
+                "{message} carries no Mechanism"
+            );
+            assert!(
+                !block.iter().any(|line| line.trim_start().starts_with("optional ")),
+                "{message} gains no envelope field"
+            );
+        }
+    }
+
+    #[test]
+    fn r18_vendor_tail_fail_closed() {
+        use crate::mechanism_registry::MechanismRegistry;
+        use crate::shape_descriptors::{
+            FlatDecision, FlatDenyReason, FlatRequest, Operation, ParamAbi, decide_flat,
+            is_vendor_mechanism,
+        };
+        // (a) No TOML-created tail descriptor: a vendor override naming
+        // an uncompiled tail shape fails loudly at load.
+        let override_toml = "[[params]]\nshape = \"vendor_tls_tail\"\nmechanisms = [0x80001087]\n";
+        let err = MechanismRegistry::load_with_override_str(Some(override_toml)).unwrap_err();
+        assert!(
+            err.contains("vendor_tls_tail"),
+            "TOML-created tail shape must fail load naming the shape, got: {err}"
+        );
+        // (b) A vendor mechanism bound to a COMPILED tail shape still
+        // fails closed on the Flat path (vendor check precedes the
+        // nested check, so the reason names the missing allowlist
+        // entry — TOML binding alone never authorizes vendor Flat).
+        let vendor_mech = 0x8000_0001u64;
+        assert!(is_vendor_mechanism(vendor_mech));
+        let decision = decide_flat(FlatRequest {
+            mechanism: vendor_mech,
+            operation: Operation::General,
+            declared_len: 64,
+            bound_shape: Some("tls_prf"),
+            parameterless_listed: false,
+            excluded: false,
+            peer_fingerprint: 0,
+            peer_abi: ParamAbi::Lp64NativeLe,
+            local_abi: ParamAbi::Lp64NativeLe,
+        });
+        assert_eq!(
+            decision,
+            FlatDecision::Denied(FlatDenyReason::VendorWithoutAllowlist),
+            "vendor + compiled tail shape must deny Flat for the missing allowlist entry"
+        );
+        // (c) Vendor wire messages carry no envelope fields (no
+        // presence/count/null-bit line in any vendor block).
+        for message in [
+            "AesCmacKeyDerivationParams",
+            "DilithiumParams",
+            "KyberParams",
+            "HdKeyDeriveParams",
+            "VendorObjectExtractParams",
+            "VendorObjectInsertParams",
+        ] {
+            let block = message_block_lines_in(MECHANISM_PARAMS_PROTO, message);
+            assert!(
+                !block.iter().any(|line| {
+                    let trimmed = line.trim_start();
+                    trimmed.contains("_null_len")
+                        || trimmed.contains("_null_count")
+                        || trimmed.starts_with("optional bool")
+                }),
+                "{message} carries no envelope field"
+            );
+        }
+    }
 }

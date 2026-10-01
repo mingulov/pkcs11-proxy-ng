@@ -5,7 +5,10 @@ use crate::pkcs11_proxy_ng::v1 as v1_proto;
 // ADR-0013 §5: every `secret_to_plain` use in this file is a prost wire-encoding
 // boundary (response/request construction); the standing justification lives in
 // `secret_boundary` docs. No plain copy is retained past the enclosing encode.
-use super::{FromWire, ToWireV1, pointer_from_wire, pointer_from_wire_legacy, pointer_to_wire};
+use super::{
+    FromWire, ToWireV1, check_shared_len_agreement, pointer_from_wire, pointer_from_wire_legacy,
+    pointer_to_wire,
+};
 use crate::secret_boundary::secret_to_plain;
 use pkcs11_proxy_ng_types::{
     CkKdf, CkMechanismType, CkMgf, CkOaepSource, CkObjectHandle, CkPbkdf2Prf, CkPbkdf2SaltSource,
@@ -505,17 +508,65 @@ impl From<&KeaDeriveParams> for v1_proto::KeaDeriveParams {
             random_a: p.random_a.clone(),
             random_b: p.random_b.clone(),
             public_data: p.public_data.clone(),
+            // R18: v0 encode stays v0-shaped (shim emits v1 in R18 tail arms).
+            random_a_null_len: None,
+            random_b_null_len: None,
+            public_data_null_len: None,
         }
     }
 }
 
 impl From<&v1_proto::KeaDeriveParams> for KeaDeriveParams {
     fn from(p: &v1_proto::KeaDeriveParams) -> Self {
+        // R18: unversioned legacy decode — peers mirror Present (FromWire threads versions).
+        let random_a = p.random_a.clone();
+        let random_b = p.random_b.clone();
+        let public_data = p.public_data.clone();
         Self {
+            is_sender: p.is_sender,
+            random_a_presence: PointerBytes::present_copy(&random_a),
+            random_b_presence: PointerBytes::present_copy(&random_b),
+            public_data_presence: PointerBytes::present_copy(&public_data),
+            random_a,
+            random_b,
+            public_data,
+        }
+    }
+}
+
+impl FromWire<v1_proto::KeaDeriveParams> for KeaDeriveParams {
+    fn from_wire(p: &v1_proto::KeaDeriveParams, version: u32) -> Result<Self, CkRv> {
+        let random_a_presence = pointer_from_wire(&p.random_a, p.random_a_null_len, version)?;
+        let random_b_presence = pointer_from_wire(&p.random_b, p.random_b_null_len, version)?;
+        let public_data_presence =
+            pointer_from_wire(&p.public_data, p.public_data_null_len, version)?;
+        // RandomA/B share the one C ulRandomLen (v1-only agreement).
+        check_shared_len_agreement(version, &[&random_a_presence, &random_b_presence])?;
+        Ok(Self {
             is_sender: p.is_sender,
             random_a: p.random_a.clone(),
             random_b: p.random_b.clone(),
             public_data: p.public_data.clone(),
+            random_a_presence,
+            random_b_presence,
+            public_data_presence,
+        })
+    }
+}
+
+impl ToWireV1<v1_proto::KeaDeriveParams> for KeaDeriveParams {
+    fn to_wire_v1(&self) -> v1_proto::KeaDeriveParams {
+        let (random_a, random_a_null_len) = pointer_to_wire(&self.random_a_presence);
+        let (random_b, random_b_null_len) = pointer_to_wire(&self.random_b_presence);
+        let (public_data, public_data_null_len) = pointer_to_wire(&self.public_data_presence);
+        v1_proto::KeaDeriveParams {
+            is_sender: self.is_sender,
+            random_a,
+            random_b,
+            public_data,
+            random_a_null_len,
+            random_b_null_len,
+            public_data_null_len,
         }
     }
 }

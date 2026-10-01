@@ -123,10 +123,15 @@ message Mechanism {
 }
 
 // CK_KIP_PARAMS — placed in types.proto (references Mechanism).
+// R18 tail envelopes (S2 §8, D1(a)): `mechanism_null` is the nesting
+// presence bit (set = NULL nested mechanism, `mechanism` must be
+// absent); `seed_null_len` is R16 byte-pointer presence. Both v1-only.
 message KipParams {
   Mechanism mechanism = 1;  // nested CK_MECHANISM
   uint64 key_handle = 2;
   bytes seed = 3;
+  optional bool mechanism_null = 4;
+  optional uint64 seed_null_len = 5;
 }
 
 // ECIES (Elliptic Curve Integrated Encryption Scheme) parameters (CK_NC_ECIES_PARAMS).

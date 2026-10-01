@@ -1966,10 +1966,13 @@ mod tests {
         let params = CkMechanismParams::Tls12MasterKeyDerive(Tls12MasterKeyDeriveParams {
             random_info: SslRandomData {
                 client_random: vec![0xaa; 32],
+                client_random_presence: PointerBytes::present_copy(&[0xaa; 32]),
                 server_random: vec![0xbb; 32],
+                server_random_presence: PointerBytes::present_copy(&[0xbb; 32]),
             },
             version_major: 3,
             version_minor: 3, // TLS 1.2
+            version_is_null: false,
             prf_hash_mechanism: CkMechanismType::SHA256,
         });
         let proto_mech = mechanism_output_to_proto(params).expect("tls12 should convert");

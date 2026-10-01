@@ -530,8 +530,11 @@ pub fn all_shape_cases() -> Vec<ShapeCase> {
                 params: Some(CkMechanismParams::KeaDerive(KeaDeriveParams {
                     is_sender: true,
                     random_a: vec![0x11; 128],
+                    random_a_presence: PointerBytes::present_copy(&[0x11; 128]),
                     random_b: vec![0x22; 128],
+                    random_b_presence: PointerBytes::present_copy(&[0x22; 128]),
                     public_data: vec![0x33; 128],
+                    public_data_presence: PointerBytes::present_copy(&[0x33; 128]),
                 })),
             },
             key: ShapeKeyHint::GenericSecret,
@@ -642,9 +645,13 @@ pub fn all_shape_cases() -> Vec<ShapeCase> {
                 mechanism_type: CkMechanismType::TLS_PRF,
                 params: Some(CkMechanismParams::TlsPrf(TlsPrfParams {
                     seed: vec![0x01; 32].into(),
+                    seed_presence: PointerBytes::present_copy(&[0x01; 32]),
                     label: vec![0x6D, 0x61, 0x73, 0x74].into(), // "mast"
+                    label_presence: PointerBytes::present_copy(&[0x6D, 0x61, 0x73, 0x74]),
                     output_len: 48,
                     output: Vec::new().into(),
+                    output_is_null: false,
+                    output_len_is_null: false,
                 })),
             },
             key: ShapeKeyHint::GenericSecret,
@@ -657,11 +664,15 @@ pub fn all_shape_cases() -> Vec<ShapeCase> {
                 params: Some(CkMechanismParams::TlsKdf(TlsKdfParams {
                     prf_mechanism: CkMechanismType(0x250),
                     label: vec![0x6B, 0x65, 0x79].into(), // "key"
+                    label_presence: PointerBytes::present_copy(&[0x6B, 0x65, 0x79]),
                     random_info: SslRandomData {
                         client_random: vec![0xAA; 32],
+                        client_random_presence: PointerBytes::present_copy(&[0xAA; 32]),
                         server_random: vec![0xBB; 32],
+                        server_random_presence: PointerBytes::present_copy(&[0xBB; 32]),
                     },
                     context_data: vec![0xCC; 16].into(),
+                    context_data_presence: PointerBytes::present_copy(&[0xCC; 16]),
                 })),
             },
             key: ShapeKeyHint::GenericSecret,
@@ -674,10 +685,13 @@ pub fn all_shape_cases() -> Vec<ShapeCase> {
                 params: Some(CkMechanismParams::Ssl3MasterKeyDerive(Ssl3MasterKeyDeriveParams {
                     random_info: SslRandomData {
                         client_random: vec![0x11; 32],
+                        client_random_presence: PointerBytes::present_copy(&[0x11; 32]),
                         server_random: vec![0x22; 32],
+                        server_random_presence: PointerBytes::present_copy(&[0x22; 32]),
                     },
                     version_major: 3,
                     version_minor: 0,
+                    version_is_null: false,
                 })),
             },
             key: ShapeKeyHint::GenericSecret,
@@ -690,10 +704,13 @@ pub fn all_shape_cases() -> Vec<ShapeCase> {
                 params: Some(CkMechanismParams::Tls12MasterKeyDerive(Tls12MasterKeyDeriveParams {
                     random_info: SslRandomData {
                         client_random: vec![0x33; 32],
+                        client_random_presence: PointerBytes::present_copy(&[0x33; 32]),
                         server_random: vec![0x44; 32],
+                        server_random_presence: PointerBytes::present_copy(&[0x44; 32]),
                     },
                     version_major: 3,
                     version_minor: 3,
+                    version_is_null: false,
                     prf_hash_mechanism: CkMechanismType(0x250),
                 })),
             },
@@ -708,8 +725,10 @@ pub fn all_shape_cases() -> Vec<ShapeCase> {
                     Tls12ExtendedMasterKeyDeriveParams {
                         prf_hash_mechanism: CkMechanismType(0x260),
                         session_hash: vec![0x55; 48],
+                        session_hash_presence: PointerBytes::present_copy(&[0x55; 48]),
                         version_major: 3,
                         version_minor: 3,
+                        version_is_null: false,
                     },
                 )),
             },
@@ -727,7 +746,9 @@ pub fn all_shape_cases() -> Vec<ShapeCase> {
                     is_export: false,
                     random_info: SslRandomData {
                         client_random: vec![0x66; 32],
+                        client_random_presence: PointerBytes::present_copy(&[0x66; 32]),
                         server_random: vec![0x77; 32],
+                        server_random_presence: PointerBytes::present_copy(&[0x77; 32]),
                     },
                     prf_hash_mechanism: CkMechanismType(0x250),
                     client_mac_secret_handle: CkObjectHandle(101),
@@ -735,7 +756,10 @@ pub fn all_shape_cases() -> Vec<ShapeCase> {
                     client_key_handle: CkObjectHandle(201),
                     server_key_handle: CkObjectHandle(202),
                     client_iv: vec![0xA1; 16].into(),
+                    client_iv_presence: PointerBytes::present_copy(&[0xA1; 16]),
                     server_iv: vec![0xB1; 16].into(),
+                    server_iv_presence: PointerBytes::present_copy(&[0xB1; 16]),
+                    returned_key_material_is_null: false,
                 })),
             },
             key: ShapeKeyHint::GenericSecret,
@@ -749,9 +773,12 @@ pub fn all_shape_cases() -> Vec<ShapeCase> {
                     digest_mechanism: CkMechanismType(0x250),
                     random_info: WtlsRandomData {
                         client_random: vec![0x88; 16],
+                        client_random_presence: PointerBytes::present_copy(&[0x88; 16]),
                         server_random: vec![0x99; 16],
+                        server_random_presence: PointerBytes::present_copy(&[0x99; 16]),
                     },
                     version: 1,
+                    version_is_null: false,
                 })),
             },
             key: ShapeKeyHint::GenericSecret,
@@ -764,9 +791,13 @@ pub fn all_shape_cases() -> Vec<ShapeCase> {
                 params: Some(CkMechanismParams::WtlsPrf(WtlsPrfParams {
                     digest_mechanism: CkMechanismType(0x260),
                     seed: vec![0xAA; 20].into(),
+                    seed_presence: PointerBytes::present_copy(&[0xAA; 20]),
                     label: vec![0xBB; 10].into(),
+                    label_presence: PointerBytes::present_copy(&[0xBB; 10]),
                     output_len: 32,
                     output: Vec::new().into(),
+                    output_is_null: false,
+                    output_len_is_null: false,
                 })),
             },
             key: ShapeKeyHint::GenericSecret,
@@ -785,11 +816,15 @@ pub fn all_shape_cases() -> Vec<ShapeCase> {
                     is_export: true,
                     random_info: WtlsRandomData {
                         client_random: vec![0xCC; 16],
+                        client_random_presence: PointerBytes::present_copy(&[0xCC; 16]),
                         server_random: vec![0xDD; 16],
+                        server_random_presence: PointerBytes::present_copy(&[0xDD; 16]),
                     },
                     mac_secret_handle: CkObjectHandle(101),
                     key_handle: CkObjectHandle(202),
                     iv: vec![0xA1; 8].into(),
+                    iv_presence: PointerBytes::present_copy(&[0xA1; 8]),
+                    returned_key_material_is_null: false,
                 })),
             },
             key: ShapeKeyHint::GenericSecret,
@@ -869,9 +904,29 @@ pub fn all_shape_cases() -> Vec<ShapeCase> {
                 params: Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
                     prf_type: CkMechanismType(0x250),
                     data_params: vec![
-                        PrfDataParam { type_: 1, value: vec![0xAA; 4].into() },
-                        PrfDataParam { type_: 2, value: vec![0xBB; 8].into() },
+                        PrfDataParam {
+                            type_: 1,
+                            value: vec![0xAA; 4].into(),
+                            value_presence: PointerBytes::present_copy(&[0xAA; 4]),
+                        },
+                        PrfDataParam {
+                            type_: 2,
+                            value: vec![0xBB; 8].into(),
+                            value_presence: PointerBytes::present_copy(&[0xBB; 8]),
+                        },
                     ],
+                    data_params_presence: PointerArray::present(vec![
+                        PrfDataParam {
+                            type_: 1,
+                            value: vec![0xAA; 4].into(),
+                            value_presence: PointerBytes::present_copy(&[0xAA; 4]),
+                        },
+                        PrfDataParam {
+                            type_: 2,
+                            value: vec![0xBB; 8].into(),
+                            value_presence: PointerBytes::present_copy(&[0xBB; 8]),
+                        },
+                    ]),
                     additional_derived_keys: vec![Sp800108DerivedKey {
                         template: vec![
                             CkAttribute {
@@ -883,8 +938,49 @@ pub fn all_shape_cases() -> Vec<ShapeCase> {
                                 value: Some(CkAttributeValue::Ulong(32)),
                             },
                         ],
+                        template_presence: PointerArray::present(vec![
+                            CkAttribute {
+                                attr_type: CkAttributeType::LABEL,
+                                value: Some(CkAttributeValue::String("extra-a".to_string().into())),
+                            },
+                            CkAttribute {
+                                attr_type: CkAttributeType::VALUE_LEN,
+                                value: Some(CkAttributeValue::Ulong(32)),
+                            },
+                        ]),
                         key_handle: CkObjectHandle(0xAA55),
+                        ph_key_is_null: false,
                     }],
+                    additional_derived_keys_presence: PointerArray::present(vec![
+                        Sp800108DerivedKey {
+                            template: vec![
+                                CkAttribute {
+                                    attr_type: CkAttributeType::LABEL,
+                                    value: Some(CkAttributeValue::String(
+                                        "extra-a".to_string().into(),
+                                    )),
+                                },
+                                CkAttribute {
+                                    attr_type: CkAttributeType::VALUE_LEN,
+                                    value: Some(CkAttributeValue::Ulong(32)),
+                                },
+                            ],
+                            template_presence: PointerArray::present(vec![
+                                CkAttribute {
+                                    attr_type: CkAttributeType::LABEL,
+                                    value: Some(CkAttributeValue::String(
+                                        "extra-a".to_string().into(),
+                                    )),
+                                },
+                                CkAttribute {
+                                    attr_type: CkAttributeType::VALUE_LEN,
+                                    value: Some(CkAttributeValue::Ulong(32)),
+                                },
+                            ]),
+                            key_handle: CkObjectHandle(0xAA55),
+                            ph_key_is_null: false,
+                        },
+                    ]),
                 })),
             },
             key: ShapeKeyHint::GenericSecret,
@@ -896,15 +992,44 @@ pub fn all_shape_cases() -> Vec<ShapeCase> {
                 mechanism_type: CkMechanismType(0x03AD),
                 params: Some(CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
                     prf_type: CkMechanismType(0x260),
-                    data_params: vec![PrfDataParam { type_: 3, value: vec![0xCC; 16].into() }],
+                    data_params: vec![PrfDataParam {
+                        type_: 3,
+                        value: vec![0xCC; 16].into(),
+                        value_presence: PointerBytes::present_copy(&[0xCC; 16]),
+                    }],
+                    data_params_presence: PointerArray::present(vec![PrfDataParam {
+                        type_: 3,
+                        value: vec![0xCC; 16].into(),
+                        value_presence: PointerBytes::present_copy(&[0xCC; 16]),
+                    }]),
                     iv: vec![0xDD; 16],
+                    iv_presence: PointerBytes::present_copy(&[0xDD; 16]),
                     additional_derived_keys: vec![Sp800108DerivedKey {
                         template: vec![CkAttribute {
                             attr_type: CkAttributeType::VALUE_LEN,
                             value: Some(CkAttributeValue::Ulong(16)),
                         }],
+                        template_presence: PointerArray::present(vec![CkAttribute {
+                            attr_type: CkAttributeType::VALUE_LEN,
+                            value: Some(CkAttributeValue::Ulong(16)),
+                        }]),
                         key_handle: CkObjectHandle(0xBB66),
+                        ph_key_is_null: false,
                     }],
+                    additional_derived_keys_presence: PointerArray::present(vec![
+                        Sp800108DerivedKey {
+                            template: vec![CkAttribute {
+                                attr_type: CkAttributeType::VALUE_LEN,
+                                value: Some(CkAttributeValue::Ulong(16)),
+                            }],
+                            template_presence: PointerArray::present(vec![CkAttribute {
+                                attr_type: CkAttributeType::VALUE_LEN,
+                                value: Some(CkAttributeValue::Ulong(16)),
+                            }]),
+                            key_handle: CkObjectHandle(0xBB66),
+                            ph_key_is_null: false,
+                        },
+                    ]),
                 })),
             },
             key: ShapeKeyHint::GenericSecret,
@@ -985,9 +1110,29 @@ pub fn all_shape_cases() -> Vec<ShapeCase> {
                 mechanism_type: CkMechanismType::HOTP,
                 params: Some(CkMechanismParams::Otp(OtpParams {
                     params: vec![
-                        OtpParam { type_: 1, value: vec![0x01; 6].into() },
-                        OtpParam { type_: 2, value: vec![0x02; 4].into() },
+                        OtpParam {
+                            type_: 1,
+                            value: vec![0x01; 6].into(),
+                            value_presence: PointerBytes::present_copy(&[0x01; 6]),
+                        },
+                        OtpParam {
+                            type_: 2,
+                            value: vec![0x02; 4].into(),
+                            value_presence: PointerBytes::present_copy(&[0x02; 4]),
+                        },
                     ],
+                    params_presence: PointerArray::present(vec![
+                        OtpParam {
+                            type_: 1,
+                            value: vec![0x01; 6].into(),
+                            value_presence: PointerBytes::present_copy(&[0x01; 6]),
+                        },
+                        OtpParam {
+                            type_: 2,
+                            value: vec![0x02; 4].into(),
+                            value_presence: PointerBytes::present_copy(&[0x02; 4]),
+                        },
+                    ]),
                 })),
             },
             key: ShapeKeyHint::GenericSecret,
@@ -1003,7 +1148,9 @@ pub fn all_shape_cases() -> Vec<ShapeCase> {
                         params: None,
                     }),
                     key_handle: CkObjectHandle(0xBEEF),
+                    mechanism_is_null: false,
                     seed: vec![0xAA; 16].into(),
+                    seed_presence: PointerBytes::present_copy(&[0xAA; 16]),
                 })),
             },
             key: ShapeKeyHint::GenericSecret,
@@ -1037,12 +1184,18 @@ pub fn all_shape_cases() -> Vec<ShapeCase> {
                 mechanism_type: CkMechanismType(0x1009),
                 params: Some(CkMechanismParams::SkipjackPrivateWrap(SkipjackPrivateWrapParams {
                     password: vec![0x70, 0x61, 0x73, 0x73].into(),
+                    password_presence: PointerBytes::present_copy(&[0x70, 0x61, 0x73, 0x73]),
                     public_data: vec![0x11; 128],
+                    public_data_presence: PointerBytes::present_copy(&[0x11; 128]),
                     password_length: 4,
                     random_a: vec![0x22; 20],
+                    random_a_presence: PointerBytes::present_copy(&[0x22; 20]),
                     prime_p: vec![0x33; 128],
+                    prime_p_presence: PointerBytes::present_copy(&[0x33; 128]),
                     base_g: vec![0x44; 128],
+                    base_g_presence: PointerBytes::present_copy(&[0x44; 128]),
                     subprime_q: vec![0x55; 20],
+                    subprime_q_presence: PointerBytes::present_copy(&[0x55; 20]),
                 })),
             },
             key: ShapeKeyHint::GenericSecret,
@@ -1054,12 +1207,19 @@ pub fn all_shape_cases() -> Vec<ShapeCase> {
                 mechanism_type: CkMechanismType(0x100A),
                 params: Some(CkMechanismParams::SkipjackRelayx(SkipjackRelayxParams {
                     old_wrapped_x: vec![0x01; 24].into(),
+                    old_wrapped_x_presence: PointerBytes::present_copy(&[0x01; 24]),
                     old_password: vec![0x02; 8].into(),
+                    old_password_presence: PointerBytes::present_copy(&[0x02; 8]),
                     old_public_data: vec![0x03; 128].into(),
+                    old_public_data_presence: PointerBytes::present_copy(&[0x03; 128]),
                     old_random_a: vec![0x04; 20].into(),
+                    old_random_a_presence: PointerBytes::present_copy(&[0x04; 20]),
                     new_password: vec![0x05; 8].into(),
+                    new_password_presence: PointerBytes::present_copy(&[0x05; 8]),
                     new_public_data: vec![0x06; 128].into(),
+                    new_public_data_presence: PointerBytes::present_copy(&[0x06; 128]),
                     new_random_a: vec![0x07; 20].into(),
+                    new_random_a_presence: PointerBytes::present_copy(&[0x07; 20]),
                 })),
             },
             key: ShapeKeyHint::GenericSecret,

@@ -12,7 +12,7 @@ use pkcs11_proxy_ng_types::shape_descriptors::{
 };
 use pkcs11_proxy_ng_types::{
     CkMechanism, CkMechanismParams, CkMechanismType, CkObjectHandle, CkRv, FlatParams, IvParams,
-    KipParams, MECHANISM_PARAMETER_TRANSPORT_VERSION, MechanismRegistry, SecretBytes,
+    KipParams, MECHANISM_PARAMETER_TRANSPORT_VERSION, MechanismRegistry, PointerBytes, SecretBytes,
     ValidatedMechanismParams,
 };
 use std::collections::{HashMap, HashSet};
@@ -249,7 +249,9 @@ fn r12_nested_null_converts() {
         params: Some(CkMechanismParams::Kip(KipParams {
             mechanism: Box::new(null_mechanism(7)),
             key_handle: CkObjectHandle(0),
+            seed_presence: PointerBytes::present_copy(&[]),
             seed: SecretBytes::copy_from_slice(&[]),
+            mechanism_is_null: false,
         })),
     };
     let validated = validate_for_ffi(&mech).expect("KIP validates");
@@ -279,7 +281,9 @@ fn r12_nested_flat_and_raw_rejected() {
             params: Some(CkMechanismParams::Kip(KipParams {
                 mechanism: Box::new(nested),
                 key_handle: CkObjectHandle(0),
+                seed_presence: PointerBytes::present_copy(&[]),
                 seed: SecretBytes::copy_from_slice(&[]),
+                mechanism_is_null: false,
             })),
         };
         let validated = validate_for_ffi(&mech).expect("outer KIP validates");

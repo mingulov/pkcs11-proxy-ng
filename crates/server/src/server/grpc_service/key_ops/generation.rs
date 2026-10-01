@@ -1050,8 +1050,8 @@ mod tests {
     use crate::server::handle_map::BackendHandle;
     use pkcs11_proxy_ng_backend::MockBackend;
     use pkcs11_proxy_ng_types::{
-        CkMechanism, CkMechanismType, CkSlotId, MechanismRegistry, PrfDataParam,
-        Sp800108FeedbackKdfParams, Sp800108KdfParams,
+        CkMechanism, CkMechanismType, CkSlotId, MechanismRegistry, PointerArray, PointerBytes,
+        PrfDataParam, Sp800108FeedbackKdfParams, Sp800108KdfParams,
     };
 
     /// Build a minimal `HandlerContext` with no per-object policy (fast path for
@@ -1088,12 +1088,18 @@ mod tests {
         let backend_key = BackendHandle(0xABCD_0102);
         let virtual_key =
             ctx_mgr.get_context(&ctx_id, |c| c.object_handles.insert(backend_key)).await.unwrap();
+        let handle_value = virtual_key.0.to_ne_bytes().to_vec();
+        let data_params = vec![PrfDataParam {
+            type_: CK_SP800_108_KEY_HANDLE,
+            value: handle_value.clone().into(),
+            value_presence: PointerBytes::present_copy(&handle_value),
+        }];
         let params = CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
             prf_type: CkMechanismType::SHA256,
-            data_params: vec![PrfDataParam {
-                type_: CK_SP800_108_KEY_HANDLE,
-                value: virtual_key.0.to_ne_bytes().to_vec().into(),
-            }],
+            data_params_presence: PointerArray::present(data_params.clone()),
+            iv_presence: PointerBytes::present_copy(&[0xA5; 16]),
+            additional_derived_keys_presence: PointerArray::present(Vec::new()),
+            data_params,
             iv: vec![0xA5; 16],
             additional_derived_keys: Vec::new(),
         });
@@ -1126,12 +1132,16 @@ mod tests {
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 16));
         let ctx = make_ctx(&ctx_mgr);
         let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+        let data_params = vec![PrfDataParam {
+            type_: CK_SP800_108_KEY_HANDLE,
+            value: vec![1, 2, 3].into(),
+            value_presence: PointerBytes::present_copy(&[1, 2, 3]),
+        }];
         let params = CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
             prf_type: CkMechanismType::SHA256,
-            data_params: vec![PrfDataParam {
-                type_: CK_SP800_108_KEY_HANDLE,
-                value: vec![1, 2, 3].into(),
-            }],
+            data_params_presence: PointerArray::present(data_params.clone()),
+            additional_derived_keys_presence: PointerArray::present(Vec::new()),
+            data_params,
             additional_derived_keys: Vec::new(),
         });
         let validated = validated_for_resolver_tests(
@@ -1164,8 +1174,18 @@ mod tests {
         let input = (virtual_key.0 as u32).to_ne_bytes().to_vec();
         let params = CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
             prf_type: CkMechanismType(cryptoki_sys::CKM_SHA256_HMAC as u64),
-            data_params: vec![PrfDataParam { type_: CK_SP800_108_KEY_HANDLE, value: input.into() }],
+            data_params: vec![PrfDataParam {
+                type_: CK_SP800_108_KEY_HANDLE,
+                value: (input).clone().into(),
+                value_presence: PointerBytes::present_copy(&input),
+            }],
+            data_params_presence: PointerArray::present(vec![PrfDataParam {
+                type_: CK_SP800_108_KEY_HANDLE,
+                value: (input).clone().into(),
+                value_presence: PointerBytes::present_copy(&input),
+            }]),
             additional_derived_keys: vec![],
+            additional_derived_keys_presence: PointerArray::present(vec![]),
         });
         let validated = validated_for_resolver_tests(
             params,
@@ -1218,9 +1238,16 @@ mod tests {
             prf_type: CkMechanismType::SHA256,
             data_params: vec![PrfDataParam {
                 type_: CK_SP800_108_KEY_HANDLE,
-                value: virtual_key.0.to_ne_bytes().to_vec().into(),
+                value: (virtual_key.0.to_ne_bytes().to_vec()).clone().into(),
+                value_presence: PointerBytes::present_copy(&virtual_key.0.to_ne_bytes()),
             }],
+            data_params_presence: PointerArray::present(vec![PrfDataParam {
+                type_: CK_SP800_108_KEY_HANDLE,
+                value: (virtual_key.0.to_ne_bytes().to_vec()).clone().into(),
+                value_presence: PointerBytes::present_copy(&virtual_key.0.to_ne_bytes()),
+            }]),
             additional_derived_keys: Vec::new(),
+            additional_derived_keys_presence: PointerArray::present(Vec::new()),
         });
         let validated = validated_for_resolver_tests(
             params,
@@ -1249,9 +1276,16 @@ mod tests {
             prf_type: CkMechanismType::SHA256,
             data_params: vec![PrfDataParam {
                 type_: CK_SP800_108_KEY_HANDLE,
-                value: virtual_key.0.to_ne_bytes().to_vec().into(),
+                value: (virtual_key.0.to_ne_bytes().to_vec()).clone().into(),
+                value_presence: PointerBytes::present_copy(&virtual_key.0.to_ne_bytes()),
             }],
+            data_params_presence: PointerArray::present(vec![PrfDataParam {
+                type_: CK_SP800_108_KEY_HANDLE,
+                value: (virtual_key.0.to_ne_bytes().to_vec()).clone().into(),
+                value_presence: PointerBytes::present_copy(&virtual_key.0.to_ne_bytes()),
+            }]),
             additional_derived_keys: Vec::new(),
+            additional_derived_keys_presence: PointerArray::present(Vec::new()),
         });
         let validated2 = validated_for_resolver_tests(
             params2,
@@ -1276,9 +1310,16 @@ mod tests {
             prf_type: CkMechanismType::SHA256,
             data_params: vec![PrfDataParam {
                 type_: CK_SP800_108_KEY_HANDLE,
-                value: virtual_key.0.to_ne_bytes().to_vec().into(),
+                value: (virtual_key.0.to_ne_bytes().to_vec()).clone().into(),
+                value_presence: PointerBytes::present_copy(&virtual_key.0.to_ne_bytes()),
             }],
+            data_params_presence: PointerArray::present(vec![PrfDataParam {
+                type_: CK_SP800_108_KEY_HANDLE,
+                value: (virtual_key.0.to_ne_bytes().to_vec()).clone().into(),
+                value_presence: PointerBytes::present_copy(&virtual_key.0.to_ne_bytes()),
+            }]),
             additional_derived_keys: Vec::new(),
+            additional_derived_keys_presence: PointerArray::present(Vec::new()),
         });
         let validated3 = validated_for_resolver_tests(
             params3,
@@ -1326,14 +1367,22 @@ mod tests {
             key_size_bits: 128,
             iv_size_bits: 0,
             is_export: false,
-            random_info: SslRandomData { client_random: vec![1; 32], server_random: vec![2; 32] },
+            random_info: SslRandomData {
+                client_random_presence: PointerBytes::present_copy(&[1; 32]),
+                server_random_presence: PointerBytes::present_copy(&[2; 32]),
+                client_random: vec![1; 32],
+                server_random: vec![2; 32],
+            },
             prf_hash_mechanism: CkMechanismType(0),
             client_mac_secret_handle: CkObjectHandle(0xA1),
             server_mac_secret_handle: CkObjectHandle(0),
             client_key_handle: CkObjectHandle(0xA2),
             server_key_handle: CkObjectHandle(0xA3),
             client_iv: Vec::new().into(),
+            client_iv_presence: PointerBytes::present_copy(&[]),
             server_iv: Vec::new().into(),
+            server_iv_presence: PointerBytes::present_copy(&[]),
+            returned_key_material_is_null: false,
         });
         virtualize_key_mat_out_handles(&ctx_mgr, &ctx_id, virtual_session, false, &mut ssl3).await;
         let CkMechanismParams::Ssl3KeyMat(ssl3) = &ssl3 else { unreachable!() };
@@ -1360,10 +1409,17 @@ mod tests {
             iv_size_bits: 0,
             sequence_number: 0,
             is_export: false,
-            random_info: WtlsRandomData { client_random: vec![3; 16], server_random: vec![4; 16] },
+            random_info: WtlsRandomData {
+                client_random_presence: PointerBytes::present_copy(&[3; 16]),
+                server_random_presence: PointerBytes::present_copy(&[4; 16]),
+                client_random: vec![3; 16],
+                server_random: vec![4; 16],
+            },
             mac_secret_handle: CkObjectHandle(0xB1),
             key_handle: CkObjectHandle(0),
             iv: Vec::new().into(),
+            iv_presence: PointerBytes::present_copy(&[]),
+            returned_key_material_is_null: false,
         });
         virtualize_key_mat_out_handles(&ctx_mgr, &ctx_id, virtual_session, false, &mut wtls).await;
         let CkMechanismParams::WtlsKeyMat(wtls) = &wtls else { unreachable!() };
@@ -1382,7 +1438,9 @@ mod tests {
         let mut other = CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
             prf_type: CkMechanismType::SHA256,
             data_params: Vec::new(),
+            data_params_presence: PointerArray::present(Vec::new()),
             additional_derived_keys: Vec::new(),
+            additional_derived_keys_presence: PointerArray::present(Vec::new()),
         });
         virtualize_key_mat_out_handles(&ctx_mgr, &ctx_id, virtual_session, false, &mut other).await;
         assert!(matches!(other, CkMechanismParams::Sp800108Kdf(_)));
@@ -1416,14 +1474,22 @@ mod tests {
             key_size_bits: 128,
             iv_size_bits: 0,
             is_export: false,
-            random_info: SslRandomData { client_random: vec![1; 32], server_random: vec![2; 32] },
+            random_info: SslRandomData {
+                client_random_presence: PointerBytes::present_copy(&[1; 32]),
+                server_random_presence: PointerBytes::present_copy(&[2; 32]),
+                client_random: vec![1; 32],
+                server_random: vec![2; 32],
+            },
             prf_hash_mechanism: CkMechanismType(0),
             client_mac_secret_handle: CkObjectHandle(0),
             server_mac_secret_handle: CkObjectHandle(0),
             client_key_handle: CkObjectHandle(0xA2),
             server_key_handle: CkObjectHandle(0),
             client_iv: Vec::new().into(),
+            client_iv_presence: PointerBytes::present_copy(&[]),
             server_iv: Vec::new().into(),
+            server_iv_presence: PointerBytes::present_copy(&[]),
+            returned_key_material_is_null: false,
         });
         virtualize_key_mat_out_handles(&ctx_mgr, &ctx_id, virtual_session, false, &mut ssl3).await;
         let CkMechanismParams::Ssl3KeyMat(ssl3) = &ssl3 else { unreachable!() };
@@ -1433,10 +1499,19 @@ mod tests {
         let mut kdf = CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
             prf_type: CkMechanismType::SHA256,
             data_params: Vec::new(),
+            data_params_presence: PointerArray::present(Vec::new()),
             additional_derived_keys: vec![Sp800108DerivedKey {
                 template: Vec::new(),
+                template_presence: PointerArray::present(Vec::new()),
                 key_handle: CkObjectHandle(0xC1),
+                ph_key_is_null: false,
             }],
+            additional_derived_keys_presence: PointerArray::present(vec![Sp800108DerivedKey {
+                template: Vec::new(),
+                template_presence: PointerArray::present(Vec::new()),
+                key_handle: CkObjectHandle(0xC1),
+                ph_key_is_null: false,
+            }]),
         });
         virtualize_sp800_108_additional_handles(&ctx_mgr, &ctx_id, virtual_session, &mut kdf).await;
         let CkMechanismParams::Sp800108Kdf(kdf) = &kdf else { unreachable!() };
@@ -1528,16 +1603,47 @@ mod tests {
         let mut kdf = CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
             prf_type: CkMechanismType::SHA256,
             data_params: Vec::new(),
+            data_params_presence: PointerArray::present(Vec::new()),
             additional_derived_keys: vec![
-                Sp800108DerivedKey { template: Vec::new(), key_handle: CkObjectHandle(0xC1) },
+                Sp800108DerivedKey {
+                    template: Vec::new(),
+                    template_presence: PointerArray::present(Vec::new()),
+                    key_handle: CkObjectHandle(0xC1),
+                    ph_key_is_null: false,
+                },
                 Sp800108DerivedKey {
                     template: vec![CkAttribute {
                         attr_type: CkAttributeType::TOKEN,
                         value: Some(CkAttributeValue::Bool(true)),
                     }],
+                    template_presence: PointerArray::present(vec![CkAttribute {
+                        attr_type: CkAttributeType::TOKEN,
+                        value: Some(CkAttributeValue::Bool(true)),
+                    }]),
                     key_handle: CkObjectHandle(0xC2),
+                    ph_key_is_null: false,
                 },
             ],
+            additional_derived_keys_presence: PointerArray::present(vec![
+                Sp800108DerivedKey {
+                    template: Vec::new(),
+                    template_presence: PointerArray::present(Vec::new()),
+                    key_handle: CkObjectHandle(0xC1),
+                    ph_key_is_null: false,
+                },
+                Sp800108DerivedKey {
+                    template: vec![CkAttribute {
+                        attr_type: CkAttributeType::TOKEN,
+                        value: Some(CkAttributeValue::Bool(true)),
+                    }],
+                    template_presence: PointerArray::present(vec![CkAttribute {
+                        attr_type: CkAttributeType::TOKEN,
+                        value: Some(CkAttributeValue::Bool(true)),
+                    }]),
+                    key_handle: CkObjectHandle(0xC2),
+                    ph_key_is_null: false,
+                },
+            ]),
         });
         virtualize_sp800_108_additional_handles(&ctx_mgr, &ctx_id, virtual_session, &mut kdf).await;
         let CkMechanismParams::Sp800108Kdf(kdf) = &kdf else { unreachable!() };
@@ -1549,14 +1655,22 @@ mod tests {
             key_size_bits: 128,
             iv_size_bits: 0,
             is_export: false,
-            random_info: SslRandomData { client_random: vec![1; 32], server_random: vec![2; 32] },
+            random_info: SslRandomData {
+                client_random_presence: PointerBytes::present_copy(&[1; 32]),
+                server_random_presence: PointerBytes::present_copy(&[2; 32]),
+                client_random: vec![1; 32],
+                server_random: vec![2; 32],
+            },
             prf_hash_mechanism: CkMechanismType(0),
             client_mac_secret_handle: CkObjectHandle(0),
             server_mac_secret_handle: CkObjectHandle(0),
             client_key_handle: CkObjectHandle(0xA2),
             server_key_handle: CkObjectHandle(0),
             client_iv: Vec::new().into(),
+            client_iv_presence: PointerBytes::present_copy(&[]),
             server_iv: Vec::new().into(),
+            server_iv_presence: PointerBytes::present_copy(&[]),
+            returned_key_material_is_null: false,
         });
         virtualize_key_mat_out_handles(&ctx_mgr, &ctx_id, virtual_session, false, &mut ssl3).await;
         let CkMechanismParams::Ssl3KeyMat(ssl3) = &ssl3 else { unreachable!() };

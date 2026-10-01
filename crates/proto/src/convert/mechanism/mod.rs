@@ -16,13 +16,17 @@ use pkcs11_proxy_ng_types::{
     Ecdh2DeriveParams, EcdhAesKeyWrapParams, EcmqvDeriveParams, EddsaParams, ExtractParams,
     FlatParams, GcmParams, GcmWrapParams, Gostr3410DeriveParams, Gostr3410KeyWrapParams,
     HkdfParams, Ike1ExtendedDeriveParams, Ike1PrfDeriveParams, Ike2PrfPlusDeriveParams,
-    IkePrfDeriveParams, IvParams, KeyDerivationStringData, KeyWrapSetOaepParams, KmacParams,
-    MECHANISM_PARAMETER_TRANSPORT_VERSION, MacGeneralParams, MuGenParams, ObjectHandleParam,
-    PbeParams, Pkcs5Pbkd2Params, PointerBytes, RawMechanismParams, Rc2CbcParams,
-    Rc2MacGeneralParams, Rc5CbcParams, Rc5MacGeneralParams, Rc5Params, RsaAesKeyWrapParams,
-    RsaPkcsOaepParams, RsaPkcsPssParams, Salsa20ChaCha20Poly1305Params, Salsa20Params, SecretBytes,
-    SeedCbcEncryptDataParams, SignAdditionalContext, TlsMacParams, X942Dh1DeriveParams,
-    X942Dh2DeriveParams, X942MqvDeriveParams, XeddsaParams,
+    IkePrfDeriveParams, IvParams, KeaDeriveParams, KeyDerivationStringData, KeyWrapSetOaepParams,
+    KipParams, KmacParams, MECHANISM_PARAMETER_TRANSPORT_VERSION, MacGeneralParams, MuGenParams,
+    ObjectHandleParam, OtpParam, OtpParams, PbeParams, Pkcs5Pbkd2Params, PointerArray,
+    PointerBytes, PrfDataParam, RawMechanismParams, Rc2CbcParams, Rc2MacGeneralParams,
+    Rc5CbcParams, Rc5MacGeneralParams, Rc5Params, RsaAesKeyWrapParams, RsaPkcsOaepParams,
+    RsaPkcsPssParams, Salsa20ChaCha20Poly1305Params, Salsa20Params, SecretBytes,
+    SeedCbcEncryptDataParams, SignAdditionalContext, SkipjackPrivateWrapParams,
+    SkipjackRelayxParams, Sp800108FeedbackKdfParams, Sp800108KdfParams, Ssl3KeyMatParams,
+    Ssl3MasterKeyDeriveParams, Tls12ExtendedMasterKeyDeriveParams, Tls12MasterKeyDeriveParams,
+    TlsKdfParams, TlsMacParams, TlsPrfParams, WtlsKeyMatParams, WtlsMasterKeyDeriveParams,
+    WtlsPrfParams, X942Dh1DeriveParams, X942Dh2DeriveParams, X942MqvDeriveParams, XeddsaParams,
 };
 
 /// Decode one bool-less (bytes, `*_null_len`) wire pair under `version`
@@ -96,15 +100,129 @@ pub(crate) fn pointer_to_wire(presence: &PointerBytes) -> (Vec<u8>, Option<u64>)
     }
 }
 
-/// R17 v1 encode of one classic params struct (S2 §3/§5): the presence
-/// dual of [`FromWire`]. Each R17 input-pointer family implements
-/// `ToWireV1<its wire message>` (inline arms live in
-/// [`encode_r17_v1_params`]; delegated families implement this trait in
-/// their family module); the version-threaded entry calls it and stamps
-/// version 1. Legacy `*_null` bools are forced unset (S2 §3: a v1
-/// encoder MUST leave legacy bools unset).
+/// R17/R18 v1 encode of one classic params struct (S2 §3/§5/§8): the
+/// presence dual of [`FromWire`]. Each input-pointer (R17) and tail
+/// (R18) family implements `ToWireV1<its wire message>` (inline arms
+/// live in [`encode_r17_v1_params`]; delegated families implement this
+/// trait in their family module); the version-threaded entry calls it
+/// and stamps version 1. Legacy `*_null` bools are forced unset (S2 §3:
+/// a v1 encoder MUST leave legacy bools unset). Families whose v1
+/// encode is fallible (nested mechanism/template refusal: KIP,
+/// OTP/SP800-108) keep inline arms in
+/// [`encode_r18_tail_v1_params`] instead of this infallible trait.
 pub(crate) trait ToWireV1<W> {
     fn to_wire_v1(&self) -> W;
+}
+
+/// Decode one counted-array (`repeated`, `*_null_count`) wire pair (R18
+/// tail, S2 §8): `Some(count)` = NULL with exactly that count (the
+/// array must be empty); absent = non-NULL with `len == items.len()`
+/// (including non-NULL/zero). Count envelopes are v1-only: set on a
+/// version-0 message they are contradictory metadata (mirrors
+/// [`pointer_from_wire`] — no v0 encoder emits them, so only crafted
+/// input carries them). Returns the legacy array alongside the peer so
+/// elements convert once (element conversion is fallible: nested
+/// templates refuse with `PARAM_INVALID`).
+pub(crate) fn pointer_array_from_wire<T: Clone, P>(
+    items: &[P],
+    null_count: Option<u64>,
+    version: u32,
+    convert: impl FnMut(&P) -> Result<T, CkRv>,
+) -> Result<(Vec<T>, PointerArray<T>), CkRv> {
+    match null_count {
+        Some(declared_count) => {
+            if version == 0 || !items.is_empty() {
+                return Err(CkRv::MECHANISM_PARAM_INVALID);
+            }
+            Ok((Vec::new(), PointerArray::null_count(declared_count)))
+        }
+        None => {
+            let converted: Vec<T> = items.iter().map(convert).collect::<Result<Vec<_>, _>>()?;
+            Ok((converted.clone(), PointerArray::present(converted)))
+        }
+    }
+}
+
+/// Encode one array-presence peer (R18 tail production direction of
+/// [`pointer_array_from_wire`], S2 §8): NULL (any count, including
+/// zero) travels as an empty array + `Some(declared_count)`; Present
+/// travels as its converted elements + `None` (including
+/// non-NULL/zero). The peer is authoritative: callers pass the
+/// `PointerArray` member, never the legacy array, so a NULL arm can
+/// never ride non-empty elements. Fallible: the nested-template
+/// refusal (W1-C8-01) propagates to the caller.
+pub(crate) fn pointer_array_to_wire<T, W>(
+    presence: &PointerArray<T>,
+    convert: impl FnMut(&T) -> Result<W, CkRv>,
+) -> Result<(Vec<W>, Option<u64>), CkRv> {
+    match presence {
+        PointerArray::Present(items) => {
+            let converted: Vec<W> = items.iter().map(convert).collect::<Result<Vec<_>, _>>()?;
+            Ok((converted, None))
+        }
+        PointerArray::Null { declared_count } => Ok((Vec::new(), Some(*declared_count))),
+    }
+}
+
+/// Decode one length-less `*_null` bool envelope (R18 tail, S2 §8:
+/// nested-mechanism, version, output-length, output-handle, and
+/// returned-key-material null bits). No v0 encoder emits them, so
+/// `Some` at version 0 is contradictory metadata. Canonical v1 form is
+/// absent = non-NULL, `Some(true)` = NULL; `Some(false)` is a dual
+/// representation of non-NULL (S2 §3 "no dual representations") and is
+/// rejected. A claimed NULL additionally requires its forced zero/empty
+/// companions (`forced_zero`, e.g. zeroed version scalars), else the
+/// message contradicts itself.
+pub(crate) fn null_bit_from_wire(
+    null: Option<bool>,
+    forced_zero: bool,
+    version: u32,
+) -> Result<bool, CkRv> {
+    match null {
+        None => Ok(false),
+        Some(_) if version == 0 => Err(CkRv::MECHANISM_PARAM_INVALID),
+        Some(true) => {
+            if forced_zero {
+                Ok(true)
+            } else {
+                Err(CkRv::MECHANISM_PARAM_INVALID)
+            }
+        }
+        // Explicit-false is a second spelling of absent (non-NULL).
+        Some(false) => Err(CkRv::MECHANISM_PARAM_INVALID),
+    }
+}
+
+/// Encode one null bit (R18 tail production direction of
+/// [`null_bit_from_wire`]): NULL travels as `Some(true)`; non-NULL
+/// travels as absent (canonical v1 — never explicit `Some(false)`).
+pub(crate) fn null_bit_to_wire(is_null: bool) -> Option<bool> {
+    is_null.then_some(true)
+}
+
+/// Shared-length agreement for companion legs (R18 tail: KEA RandomA/B
+/// share the one C `ulRandomLen`, Skipjack PrimeP/BaseG share the one C
+/// `ulPAndGLen`). The C struct carries ONE length, so under v1 every
+/// companion leg's effective length ([`PointerBytes::declared_len`]:
+/// byte count when present, declared length when NULL) MUST agree —
+/// any disagreement is crafted input (the shim always emits agreement;
+/// no legitimate call disagrees). v0 keeps legacy behavior exactly:
+/// legacy members carry no per-leg lengths, so no check runs there.
+/// (Enforced here at version-threaded decode only: transport
+/// validation sees version-blind domain values, so a validator-side
+/// check would newly reject legal v0 traffic with mismatched legacy
+/// lengths.)
+pub(crate) fn check_shared_len_agreement(version: u32, legs: &[&PointerBytes]) -> Result<(), CkRv> {
+    if version != MECHANISM_PARAMETER_TRANSPORT_VERSION {
+        return Ok(());
+    }
+    if let Some((first, rest)) = legs.split_first() {
+        let want = first.declared_len();
+        if rest.iter().any(|leg| leg.declared_len() != want) {
+            return Err(CkRv::MECHANISM_PARAM_INVALID);
+        }
+    }
+    Ok(())
 }
 
 impl TryFrom<&CkMechanism> for v1_proto::Mechanism {
@@ -587,18 +705,19 @@ impl TryFrom<&CkMechanism> for v1_proto::Mechanism {
     }
 }
 
-/// Capability-gated classic wire encoding (R17; S2 §3/§5: the shim emits
-/// v1 for the input-pointer families, never legacy `Raw` under v1).
+/// Capability-gated classic wire encoding (R17+R18; S2 §3/§5/§8: the
+/// shim emits v1 for the input-pointer and tail families, never legacy
+/// `Raw` under v1).
 ///
 /// `transport_version` is the negotiated
 /// `mechanism_parameter_transport_version` capability (discovery value, 0
 /// when absent). At capability 0 the encoding delegates to the legacy
 /// `TryFrom` exactly (bit-identical, version 0). At capability ≥ 1 —
 /// including capabilities newer than this encoder, which still emits the
-/// v1 form it knows — each R17 input-pointer family encodes
-/// presence-based (NULL = empty bytes + `*_null_len`, legacy bools forced
-/// unset) with the outer stamp 1; every other variant (tail, scalar,
-/// byte-buffer, Flat/Null, absent) takes the identical legacy path
+/// v1 form it knows — each R17 input-pointer family and each R18 tail
+/// family encodes presence-based (NULL = empty bytes + envelope) with
+/// the outer stamp 1; every other variant (scalar, byte-buffer,
+/// Flat/Null, absent, KEM, vendor) takes the identical legacy path
 /// (Flat/Null keep their stored stamp).
 pub fn to_wire_with_transport_version(
     m: &CkMechanism,
@@ -607,12 +726,16 @@ pub fn to_wire_with_transport_version(
     if transport_version < MECHANISM_PARAMETER_TRANSPORT_VERSION {
         return v1_proto::Mechanism::try_from(m);
     }
-    match encode_r17_v1_params(m.params.as_ref()) {
-        Some(params) => Ok(v1_proto::Mechanism {
-            mechanism_type: m.mechanism_type.0,
-            params: Some(params),
-            parameter_encoding_version: MECHANISM_PARAMETER_TRANSPORT_VERSION,
-        }),
+    let stamp_v1 = |params: v1_proto::mechanism::Params| v1_proto::Mechanism {
+        mechanism_type: m.mechanism_type.0,
+        params: Some(params),
+        parameter_encoding_version: MECHANISM_PARAMETER_TRANSPORT_VERSION,
+    };
+    if let Some(params) = encode_r17_v1_params(m.params.as_ref()) {
+        return Ok(stamp_v1(params));
+    }
+    match encode_r18_tail_v1_params(m.params.as_ref())? {
+        Some(params) => Ok(stamp_v1(params)),
         None => v1_proto::Mechanism::try_from(m),
     }
 }
@@ -876,6 +999,133 @@ fn encode_r17_v1_params(params: Option<&CkMechanismParams>) -> Option<v1_proto::
         }
         // Non-R17 variants fall back to the identical legacy encode.
         _ => None,
+    }
+}
+
+/// v1 presence encode for the 16 R18 tail shapes with envelopes (S2 §8
+/// tail: KEA/KIP/OTP/SP800-108/Skipjack/TLS-WTLS; TlsMac is the scalar
+/// empty row and stays on the legacy path): `Some` for a tail family,
+/// `None` for every other variant (the entry falls back to the
+/// identical legacy encode). Reviewer-checked against
+/// `R18_TAIL_TABLE` and the R18 shim dispatch predicate. Fallible:
+/// the nested-mechanism/template refusals (KIP, SP800-108) propagate —
+/// a v1 encoder must refuse exactly where the v0 encoder refuses, never
+/// silently drop content.
+fn encode_r18_tail_v1_params(
+    params: Option<&CkMechanismParams>,
+) -> Result<Option<v1_proto::mechanism::Params>, CkRv> {
+    match params {
+        // Delegated tail families implement `ToWireV1` in their family module.
+        Some(CkMechanismParams::KeaDerive(p)) => {
+            Ok(Some(v1_proto::mechanism::Params::KeaDeriveParams(p.to_wire_v1())))
+        }
+        Some(CkMechanismParams::SkipjackPrivateWrap(p)) => {
+            Ok(Some(v1_proto::mechanism::Params::SkipjackPrivateWrapParams(p.to_wire_v1())))
+        }
+        Some(CkMechanismParams::SkipjackRelayx(p)) => {
+            Ok(Some(v1_proto::mechanism::Params::SkipjackRelayxParams(p.to_wire_v1())))
+        }
+        Some(CkMechanismParams::TlsPrf(p)) => {
+            Ok(Some(v1_proto::mechanism::Params::TlsPrfParams(p.to_wire_v1())))
+        }
+        Some(CkMechanismParams::TlsKdf(p)) => {
+            Ok(Some(v1_proto::mechanism::Params::TlsKdfParams(p.to_wire_v1())))
+        }
+        Some(CkMechanismParams::Ssl3MasterKeyDerive(p)) => {
+            Ok(Some(v1_proto::mechanism::Params::Ssl3MasterKeyDeriveParams(p.to_wire_v1())))
+        }
+        Some(CkMechanismParams::Tls12MasterKeyDerive(p)) => {
+            Ok(Some(v1_proto::mechanism::Params::Tls12MasterKeyDeriveParams(p.to_wire_v1())))
+        }
+        Some(CkMechanismParams::Tls12ExtendedMasterKeyDerive(p)) => Ok(Some(
+            v1_proto::mechanism::Params::Tls12ExtendedMasterKeyDeriveParams(p.to_wire_v1()),
+        )),
+        Some(CkMechanismParams::Ssl3KeyMat(p)) => {
+            Ok(Some(v1_proto::mechanism::Params::Ssl3KeyMatParams(p.to_wire_v1())))
+        }
+        Some(CkMechanismParams::WtlsMasterKeyDerive(p)) => {
+            Ok(Some(v1_proto::mechanism::Params::WtlsMasterKeyDeriveParams(p.to_wire_v1())))
+        }
+        Some(CkMechanismParams::WtlsPrf(p)) => {
+            Ok(Some(v1_proto::mechanism::Params::WtlsPrfParams(p.to_wire_v1())))
+        }
+        Some(CkMechanismParams::WtlsKeyMat(p)) => {
+            Ok(Some(v1_proto::mechanism::Params::WtlsKeyMatParams(p.to_wire_v1())))
+        }
+        // Fallible tail families keep inline arms (see `ToWireV1` docs).
+        Some(CkMechanismParams::Otp(p)) => {
+            let (params, params_null_count) =
+                pointer_array_to_wire(&p.params_presence, |item: &OtpParam| Ok(item.to_wire_v1()))?;
+            Ok(Some(v1_proto::mechanism::Params::OtpParams(v1_proto::OtpParams {
+                params,
+                params_null_count,
+            })))
+        }
+        Some(CkMechanismParams::Kip(p)) => {
+            let (seed, seed_null_len) = pointer_to_wire(&p.seed_presence);
+            // A NULL nested mechanism rides `mechanism_null` with NO
+            // nested message; a present one encodes under the negotiated
+            // capability (v1-in-v1: a nested SP800-108 NULL template
+            // needs its own v1 envelope — nesting v0 would conflate it).
+            let mechanism = if p.mechanism_is_null {
+                None
+            } else {
+                Some(Box::new(to_wire_with_transport_version(
+                    &p.mechanism,
+                    MECHANISM_PARAMETER_TRANSPORT_VERSION,
+                )?))
+            };
+            Ok(Some(v1_proto::mechanism::Params::KipParams(Box::new(v1_proto::KipParams {
+                mechanism,
+                key_handle: p.key_handle.0,
+                seed,
+                mechanism_null: null_bit_to_wire(p.mechanism_is_null),
+                seed_null_len,
+            }))))
+        }
+        Some(CkMechanismParams::Sp800108Kdf(p)) => {
+            let (data_params, data_params_null_count) =
+                pointer_array_to_wire(&p.data_params_presence, |item: &PrfDataParam| {
+                    Ok(item.to_wire_v1())
+                })?;
+            let (additional_derived_keys, additional_derived_keys_null_count) =
+                pointer_array_to_wire(
+                    &p.additional_derived_keys_presence,
+                    advanced_params::sp800_108_derived_key_to_wire_v1,
+                )?;
+            Ok(Some(v1_proto::mechanism::Params::Sp800108KdfParams(v1_proto::Sp800108KdfParams {
+                prf_type: p.prf_type.0,
+                data_params,
+                additional_derived_keys,
+                data_params_null_count,
+                additional_derived_keys_null_count,
+            })))
+        }
+        Some(CkMechanismParams::Sp800108FeedbackKdf(p)) => {
+            let (data_params, data_params_null_count) =
+                pointer_array_to_wire(&p.data_params_presence, |item: &PrfDataParam| {
+                    Ok(item.to_wire_v1())
+                })?;
+            let (iv, iv_null_len) = pointer_to_wire(&p.iv_presence);
+            let (additional_derived_keys, additional_derived_keys_null_count) =
+                pointer_array_to_wire(
+                    &p.additional_derived_keys_presence,
+                    advanced_params::sp800_108_derived_key_to_wire_v1,
+                )?;
+            Ok(Some(v1_proto::mechanism::Params::Sp800108FeedbackKdfParams(
+                v1_proto::Sp800108FeedbackKdfParams {
+                    prf_type: p.prf_type.0,
+                    data_params,
+                    iv,
+                    additional_derived_keys,
+                    data_params_null_count,
+                    iv_null_len,
+                    additional_derived_keys_null_count,
+                },
+            )))
+        }
+        // Non-tail variants fall back to the identical legacy encode.
+        _ => Ok(None),
     }
 }
 
@@ -1249,7 +1499,7 @@ impl TryFrom<&v1_proto::Mechanism> for CkMechanism {
                 CkMechanismParams::Gostr3410Derive(Gostr3410DeriveParams::from_wire(p, version)?),
             ),
             Some(v1_proto::mechanism::Params::KeaDeriveParams(p)) => {
-                Some(CkMechanismParams::KeaDerive(p.into()))
+                Some(CkMechanismParams::KeaDerive(KeaDeriveParams::from_wire(p, version)?))
             }
             // Key wrapping
             Some(v1_proto::mechanism::Params::EcdhAesKeyWrapParams(p)) => Some(
@@ -1273,31 +1523,39 @@ impl TryFrom<&v1_proto::Mechanism> for CkMechanism {
             }
             // TLS/SSL
             Some(v1_proto::mechanism::Params::TlsPrfParams(p)) => {
-                Some(CkMechanismParams::TlsPrf(p.into()))
+                Some(CkMechanismParams::TlsPrf(TlsPrfParams::from_wire(p, version)?))
             }
             Some(v1_proto::mechanism::Params::TlsKdfParams(p)) => {
-                Some(CkMechanismParams::TlsKdf(p.try_into()?))
+                Some(CkMechanismParams::TlsKdf(TlsKdfParams::from_wire(p, version)?))
             }
             Some(v1_proto::mechanism::Params::Ssl3MasterKeyDeriveParams(p)) => {
-                Some(CkMechanismParams::Ssl3MasterKeyDerive(p.try_into()?))
+                Some(CkMechanismParams::Ssl3MasterKeyDerive(Ssl3MasterKeyDeriveParams::from_wire(
+                    p, version,
+                )?))
             }
             Some(v1_proto::mechanism::Params::Tls12MasterKeyDeriveParams(p)) => {
-                Some(CkMechanismParams::Tls12MasterKeyDerive(p.try_into()?))
+                Some(CkMechanismParams::Tls12MasterKeyDerive(
+                    Tls12MasterKeyDeriveParams::from_wire(p, version)?,
+                ))
             }
             Some(v1_proto::mechanism::Params::Tls12ExtendedMasterKeyDeriveParams(p)) => {
-                Some(CkMechanismParams::Tls12ExtendedMasterKeyDerive(p.into()))
+                Some(CkMechanismParams::Tls12ExtendedMasterKeyDerive(
+                    Tls12ExtendedMasterKeyDeriveParams::from_wire(p, version)?,
+                ))
             }
             Some(v1_proto::mechanism::Params::Ssl3KeyMatParams(p)) => {
-                Some(CkMechanismParams::Ssl3KeyMat(p.try_into()?))
+                Some(CkMechanismParams::Ssl3KeyMat(Ssl3KeyMatParams::from_wire(p, version)?))
             }
             Some(v1_proto::mechanism::Params::WtlsMasterKeyDeriveParams(p)) => {
-                Some(CkMechanismParams::WtlsMasterKeyDerive(p.try_into()?))
+                Some(CkMechanismParams::WtlsMasterKeyDerive(WtlsMasterKeyDeriveParams::from_wire(
+                    p, version,
+                )?))
             }
             Some(v1_proto::mechanism::Params::WtlsPrfParams(p)) => {
-                Some(CkMechanismParams::WtlsPrf(p.into()))
+                Some(CkMechanismParams::WtlsPrf(WtlsPrfParams::from_wire(p, version)?))
             }
             Some(v1_proto::mechanism::Params::WtlsKeyMatParams(p)) => {
-                Some(CkMechanismParams::WtlsKeyMat(p.try_into()?))
+                Some(CkMechanismParams::WtlsKeyMat(WtlsKeyMatParams::from_wire(p, version)?))
             }
             // IKE/IPSec
             Some(v1_proto::mechanism::Params::IkePrfDeriveParams(p)) => {
@@ -1318,10 +1576,12 @@ impl TryFrom<&v1_proto::Mechanism> for CkMechanism {
             }
             // SP800-108 KDF
             Some(v1_proto::mechanism::Params::Sp800108KdfParams(p)) => {
-                Some(CkMechanismParams::Sp800108Kdf(p.into()))
+                Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams::from_wire(p, version)?))
             }
             Some(v1_proto::mechanism::Params::Sp800108FeedbackKdfParams(p)) => {
-                Some(CkMechanismParams::Sp800108FeedbackKdf(p.into()))
+                Some(CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams::from_wire(
+                    p, version,
+                )?))
             }
             // Signal protocol
             Some(v1_proto::mechanism::Params::X3dhInitiateParams(p)) => {
@@ -1338,20 +1598,22 @@ impl TryFrom<&v1_proto::Mechanism> for CkMechanism {
             }
             // Miscellaneous
             Some(v1_proto::mechanism::Params::OtpParams(p)) => {
-                Some(CkMechanismParams::Otp(p.into()))
+                Some(CkMechanismParams::Otp(OtpParams::from_wire(p, version)?))
             }
             Some(v1_proto::mechanism::Params::KipParams(p)) => {
-                Some(CkMechanismParams::Kip(p.as_ref().try_into()?))
+                Some(CkMechanismParams::Kip(KipParams::from_wire(p.as_ref(), version)?))
             }
             Some(v1_proto::mechanism::Params::CmsSigParams(p)) => {
                 Some(CkMechanismParams::CmsSig(p.as_ref().try_into()?))
             }
             Some(v1_proto::mechanism::Params::SkipjackPrivateWrapParams(p)) => {
-                Some(CkMechanismParams::SkipjackPrivateWrap(p.into()))
+                Some(CkMechanismParams::SkipjackPrivateWrap(SkipjackPrivateWrapParams::from_wire(
+                    p, version,
+                )?))
             }
-            Some(v1_proto::mechanism::Params::SkipjackRelayxParams(p)) => {
-                Some(CkMechanismParams::SkipjackRelayx(p.into()))
-            }
+            Some(v1_proto::mechanism::Params::SkipjackRelayxParams(p)) => Some(
+                CkMechanismParams::SkipjackRelayx(SkipjackRelayxParams::from_wire(p, version)?),
+            ),
             // Generic / vendor parameter shapes
             Some(v1_proto::mechanism::Params::MacGeneralParams(p)) => {
                 Some(CkMechanismParams::MacGeneral(MacGeneralParams { mac_length: p.mac_length }))

@@ -23,8 +23,8 @@ mod support;
 use pkcs11_proxy_ng_client::Pkcs11Client;
 use pkcs11_proxy_ng_types::{
     CkAttribute, CkAttributeType, CkAttributeValue, CkKeyType, CkMechanism, CkMechanismParams,
-    CkMechanismType, CkObjectClass, CkObjectHandle, CkSessionHandle, Ssl3MasterKeyDeriveParams,
-    SslRandomData,
+    CkMechanismType, CkObjectClass, CkObjectHandle, CkSessionHandle, PointerBytes,
+    Ssl3MasterKeyDeriveParams, SslRandomData,
 };
 use support::{
     CKA_DERIVE, DaemonHarness, ProviderFixture, ensure_user_token, initialized_client,
@@ -89,10 +89,13 @@ async fn nss_ssl3_master_key_derive_reports_negotiated_version() -> Result<(), S
         params: Some(CkMechanismParams::Ssl3MasterKeyDerive(Ssl3MasterKeyDeriveParams {
             random_info: SslRandomData {
                 client_random: vec![0x11; 32],
+                client_random_presence: PointerBytes::present_copy(&[0x11; 32]),
                 server_random: vec![0x22; 32],
+                server_random_presence: PointerBytes::present_copy(&[0x22; 32]),
             },
             version_major: 3,
             version_minor: 0,
+            version_is_null: false,
         })),
     };
     let derive_template = vec![
