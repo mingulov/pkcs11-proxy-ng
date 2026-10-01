@@ -2456,6 +2456,7 @@ async fn sign_init_rv(
             mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {
                 mechanism_type: CkMechanismType::RSA_PKCS.0,
                 params: None,
+                parameter_encoding_version: 0,
             }),
             key_handle: key,
         }),
@@ -2665,6 +2666,7 @@ async fn generate_private_key_while_logged_out_is_refused() {
                     mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {
                         mechanism_type: CkMechanismType::AES_KEY_GEN.0,
                         params: None,
+                        parameter_encoding_version: 0,
                     }),
                     template,
 
@@ -3841,6 +3843,7 @@ async fn audit_generate_key_emits_key_mgmt_record() {
             mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {
                 mechanism_type: CkMechanismType::AES_KEY_GEN.0,
                 params: None,
+                parameter_encoding_version: 0,
             }),
             template: vec![],
 
@@ -3918,6 +3921,7 @@ async fn fail_closed_generate_key_saturated_sink_reports_function_failed() {
             mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {
                 mechanism_type: CkMechanismType::AES_KEY_GEN.0,
                 params: None,
+                parameter_encoding_version: 0,
             }),
             template: vec![],
 
@@ -3969,6 +3973,7 @@ async fn audit_off_generate_key_byte_identical() {
             mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {
                 mechanism_type: CkMechanismType::AES_KEY_GEN.0,
                 params: None,
+                parameter_encoding_version: 0,
             }),
             template: vec![],
 
@@ -5168,6 +5173,7 @@ async fn mint_gate_denies_generate_key_of_denied_class() {
             mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {
                 mechanism_type: CkMechanismType::AES_KEY_GEN.0,
                 params: None,
+                parameter_encoding_version: 0,
             }),
             template: vec![],
             template_null: false,
@@ -5195,6 +5201,7 @@ async fn mint_gate_allows_generate_when_class_listed() {
             mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {
                 mechanism_type: CkMechanismType::AES_KEY_GEN.0,
                 params: None,
+                parameter_encoding_version: 0,
             }),
             template: vec![],
             template_null: false,
@@ -5225,6 +5232,7 @@ async fn mint_gate_denies_keypair_when_private_class_denied() {
             mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {
                 mechanism_type: CkMechanismType::RSA_PKCS_KEY_PAIR_GEN.0,
                 params: None,
+                parameter_encoding_version: 0,
             }),
             public_key_template: vec![],
             public_template_null: false,

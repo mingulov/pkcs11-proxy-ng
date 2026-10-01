@@ -416,7 +416,12 @@ impl TryFrom<&CkMechanism> for v1_proto::Mechanism {
                 Some(v1_proto::mechanism::Params::VendorObjectInsertParams(p.into()))
             }
         };
-        Ok(v1_proto::Mechanism { mechanism_type: m.mechanism_type.0, params })
+        // R6: legacy encode stays version 0 (v1 emission is a later task).
+        Ok(v1_proto::Mechanism {
+            mechanism_type: m.mechanism_type.0,
+            params,
+            parameter_encoding_version: 0,
+        })
     }
 }
 

@@ -297,7 +297,7 @@ async fn invoke(
 }
 
 fn mechanism(kind: CkMechanismType) -> Option<Mechanism> {
-    Some(Mechanism { mechanism_type: kind.0, params: None })
+    Some(Mechanism { mechanism_type: kind.0, params: None, parameter_encoding_version: 0 })
 }
 
 async fn clean_operation(client: &mut Client, index: usize, entry: Entry) {

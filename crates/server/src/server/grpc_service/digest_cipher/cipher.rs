@@ -605,6 +605,7 @@ mod tests {
             mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {
                 mechanism_type: mech_type.0,
                 params: None,
+                parameter_encoding_version: 0,
             }),
             key_handle: 0,
         }

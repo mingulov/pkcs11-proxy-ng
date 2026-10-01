@@ -634,6 +634,7 @@ fn rsa_aes_key_wrap_rejects_missing_nested_oaep_params() {
         params: Some(v1_proto::mechanism::Params::RsaAesKeyWrapParams(
             v1_proto::RsaAesKeyWrapParams { aes_key_bits: 128, oaep_params: None },
         )),
+        parameter_encoding_version: 0,
     };
 
     expect_mechanism_param_invalid(proto);
@@ -1216,6 +1217,7 @@ fn tls_kdf_params_reject_missing_random_info() {
             random_info: None,
             context_data: vec![],
         })),
+        parameter_encoding_version: 0,
     };
 
     expect_mechanism_param_invalid(proto);
@@ -1272,6 +1274,7 @@ fn ssl3_master_key_derive_rejects_missing_random_info() {
                 version_minor: 0,
             },
         )),
+        parameter_encoding_version: 0,
     };
 
     expect_mechanism_param_invalid(proto);
@@ -1311,6 +1314,7 @@ fn tls12_master_key_derive_rejects_missing_random_info() {
                 prf_hash_mechanism: 0x250,
             },
         )),
+        parameter_encoding_version: 0,
     };
 
     expect_mechanism_param_invalid(proto);
@@ -1393,6 +1397,7 @@ fn ssl3_key_mat_params_rejects_missing_random_info() {
             client_iv: vec![0xA1; 16],
             server_iv: vec![0xB1; 16],
         })),
+        parameter_encoding_version: 0,
     };
 
     expect_mechanism_param_invalid(proto);
@@ -1431,6 +1436,7 @@ fn wtls_master_key_derive_rejects_missing_random_info() {
                 version: 1,
             },
         )),
+        parameter_encoding_version: 0,
     };
 
     expect_mechanism_param_invalid(proto);
@@ -1511,6 +1517,7 @@ fn wtls_key_mat_params_rejects_missing_random_info() {
             key_handle: 202,
             iv: vec![0xA1; 8],
         })),
+        parameter_encoding_version: 0,
     };
 
     expect_mechanism_param_invalid(proto);
@@ -1958,6 +1965,7 @@ fn kip_params_reject_missing_nested_mechanism() {
             key_handle: 0xBEEF,
             seed: vec![0xAA],
         }))),
+        parameter_encoding_version: 0,
     };
 
     expect_mechanism_param_invalid(proto);
@@ -1997,12 +2005,14 @@ fn cms_sig_params_reject_missing_digest_mechanism() {
             signing_mechanism: Some(Box::new(v1_proto::Mechanism {
                 mechanism_type: CkMechanismType::RSA_PKCS.0,
                 params: None,
+                parameter_encoding_version: 0,
             })),
             digest_mechanism: None,
             content_type: "1.2.840.113549.1.7.1".to_string(),
             requested_attributes: vec![],
             required_attributes: vec![],
         }))),
+        parameter_encoding_version: 0,
     };
 
     expect_mechanism_param_invalid(proto);
@@ -2019,11 +2029,13 @@ fn cms_sig_params_reject_missing_signing_mechanism() {
             digest_mechanism: Some(Box::new(v1_proto::Mechanism {
                 mechanism_type: CkMechanismType::SHA256.0,
                 params: None,
+                parameter_encoding_version: 0,
             })),
             content_type: "1.2.840.113549.1.7.1".to_string(),
             requested_attributes: vec![],
             required_attributes: vec![],
         }))),
+        parameter_encoding_version: 0,
     };
 
     expect_mechanism_param_invalid(proto);
@@ -2339,14 +2351,17 @@ fn ecies_params_reject_missing_mac_mechanism() {
             derivation_mechanism: Some(Box::new(v1_proto::Mechanism {
                 mechanism_type: CkMechanismType::ECDH1_DERIVE.0,
                 params: None,
+                parameter_encoding_version: 0,
             })),
             encryption_mechanism: Some(Box::new(v1_proto::Mechanism {
                 mechanism_type: CkMechanismType::AES_CBC.0,
                 params: None,
+                parameter_encoding_version: 0,
             })),
             mac_mechanism: None,
             shared_data: vec![],
         }))),
+        parameter_encoding_version: 0,
     };
 
     expect_mechanism_param_invalid(proto);
@@ -2362,13 +2377,16 @@ fn ecies_params_reject_missing_derivation_mechanism() {
             encryption_mechanism: Some(Box::new(v1_proto::Mechanism {
                 mechanism_type: CkMechanismType::AES_CBC.0,
                 params: None,
+                parameter_encoding_version: 0,
             })),
             mac_mechanism: Some(Box::new(v1_proto::Mechanism {
                 mechanism_type: CkMechanismType::SHA256.0,
                 params: None,
+                parameter_encoding_version: 0,
             })),
             shared_data: vec![],
         }))),
+        parameter_encoding_version: 0,
     };
 
     expect_mechanism_param_invalid(proto);
@@ -2383,14 +2401,17 @@ fn ecies_params_reject_missing_encryption_mechanism() {
             derivation_mechanism: Some(Box::new(v1_proto::Mechanism {
                 mechanism_type: CkMechanismType::ECDH1_DERIVE.0,
                 params: None,
+                parameter_encoding_version: 0,
             })),
             encryption_mechanism: None,
             mac_mechanism: Some(Box::new(v1_proto::Mechanism {
                 mechanism_type: CkMechanismType::SHA256.0,
                 params: None,
+                parameter_encoding_version: 0,
             })),
             shared_data: vec![],
         }))),
+        parameter_encoding_version: 0,
     };
 
     expect_mechanism_param_invalid(proto);
@@ -2660,4 +2681,914 @@ fn oaep_source_null_round_trip() {
             _ => panic!("wrong variant"),
         }
     }
+}
+
+// R6 golden tests: classic v1 wire schema (S2 §3). Additive only: legacy
+// encodings decode exactly as before the v1 fields landed, and Flat/Null
+// round-trip at the prost layer while conversion stays fail-closed
+// (acceptance is R9+; fingerprint computation is R7).
+
+#[test]
+fn r6_legacy_decode_stability_all_oneof_members() {
+    use prost::Message as _;
+    // Every pre-R6 `Mechanism.params` arm (tags 2–80: 79 members, matching
+    // the AGENTS.md §13 historical count): tag, field name, default-valued
+    // arm, golden wire bytes, default-message conversion outcome. Each
+    // golden is field 1 (`mechanism_type` 0x9999) + the arm's tag key +
+    // empty message; any tag renumbering or new-byte emission on legacy
+    // values breaks the equality below. Per-variant value fidelity stays
+    // pinned by the existing per-member round-trip tests above.
+    type MemberRow<'a> = (u32, &'a str, v1_proto::mechanism::Params, Vec<u8>, Result<(), CkRv>);
+    let members: Vec<MemberRow<'_>> = vec![
+        (
+            2u32,
+            "rsa_pkcs_pss_params",
+            v1_proto::mechanism::Params::RsaPkcsPssParams(v1_proto::RsaPkcsPssParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0x12, 0x00],
+            Ok(()),
+        ),
+        (
+            3u32,
+            "rsa_pkcs_oaep_params",
+            v1_proto::mechanism::Params::RsaPkcsOaepParams(v1_proto::RsaPkcsOaepParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0x1A, 0x00],
+            Ok(()),
+        ),
+        (
+            4u32,
+            "gcm_params",
+            v1_proto::mechanism::Params::GcmParams(v1_proto::GcmParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0x22, 0x00],
+            Ok(()),
+        ),
+        (
+            5u32,
+            "ecdh1_derive_params",
+            v1_proto::mechanism::Params::Ecdh1DeriveParams(v1_proto::Ecdh1DeriveParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0x2A, 0x00],
+            Ok(()),
+        ),
+        (
+            6u32,
+            "iv_params",
+            v1_proto::mechanism::Params::IvParams(v1_proto::IvParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0x32, 0x00],
+            Ok(()),
+        ),
+        (
+            7u32,
+            "aes_ctr_params",
+            v1_proto::mechanism::Params::AesCtrParams(v1_proto::AesCtrParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0x3A, 0x00],
+            Ok(()),
+        ),
+        (
+            8u32,
+            "ccm_params",
+            v1_proto::mechanism::Params::CcmParams(v1_proto::CcmParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0x42, 0x00],
+            Ok(()),
+        ),
+        (
+            9u32,
+            "aes_cbc_encrypt_data_params",
+            v1_proto::mechanism::Params::AesCbcEncryptDataParams(
+                v1_proto::AesCbcEncryptDataParams::default(),
+            ),
+            vec![0x08, 0x99, 0xB3, 0x02, 0x4A, 0x00],
+            Ok(()),
+        ),
+        (
+            10u32,
+            "des_cbc_encrypt_data_params",
+            v1_proto::mechanism::Params::DesCbcEncryptDataParams(
+                v1_proto::DesCbcEncryptDataParams::default(),
+            ),
+            vec![0x08, 0x99, 0xB3, 0x02, 0x52, 0x00],
+            Ok(()),
+        ),
+        (
+            11u32,
+            "aria_cbc_encrypt_data_params",
+            v1_proto::mechanism::Params::AriaCbcEncryptDataParams(
+                v1_proto::AriaCbcEncryptDataParams::default(),
+            ),
+            vec![0x08, 0x99, 0xB3, 0x02, 0x5A, 0x00],
+            Ok(()),
+        ),
+        (
+            12u32,
+            "camellia_cbc_encrypt_data_params",
+            v1_proto::mechanism::Params::CamelliaCbcEncryptDataParams(
+                v1_proto::CamelliaCbcEncryptDataParams::default(),
+            ),
+            vec![0x08, 0x99, 0xB3, 0x02, 0x62, 0x00],
+            Ok(()),
+        ),
+        (
+            13u32,
+            "camellia_ctr_params",
+            v1_proto::mechanism::Params::CamelliaCtrParams(v1_proto::CamelliaCtrParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0x6A, 0x00],
+            Ok(()),
+        ),
+        (
+            14u32,
+            "seed_cbc_encrypt_data_params",
+            v1_proto::mechanism::Params::SeedCbcEncryptDataParams(
+                v1_proto::SeedCbcEncryptDataParams::default(),
+            ),
+            vec![0x08, 0x99, 0xB3, 0x02, 0x72, 0x00],
+            Ok(()),
+        ),
+        (
+            15u32,
+            "rc2_cbc_params",
+            v1_proto::mechanism::Params::Rc2CbcParams(v1_proto::Rc2CbcParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0x7A, 0x00],
+            Ok(()),
+        ),
+        (
+            16u32,
+            "rc2_mac_general_params",
+            v1_proto::mechanism::Params::Rc2MacGeneralParams(
+                v1_proto::Rc2MacGeneralParams::default(),
+            ),
+            vec![0x08, 0x99, 0xB3, 0x02, 0x82, 0x01, 0x00],
+            Ok(()),
+        ),
+        (
+            17u32,
+            "rc5_params",
+            v1_proto::mechanism::Params::Rc5Params(v1_proto::Rc5Params::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0x8A, 0x01, 0x00],
+            Ok(()),
+        ),
+        (
+            18u32,
+            "rc5_cbc_params",
+            v1_proto::mechanism::Params::Rc5CbcParams(v1_proto::Rc5CbcParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0x92, 0x01, 0x00],
+            Ok(()),
+        ),
+        (
+            19u32,
+            "rc5_mac_general_params",
+            v1_proto::mechanism::Params::Rc5MacGeneralParams(
+                v1_proto::Rc5MacGeneralParams::default(),
+            ),
+            vec![0x08, 0x99, 0xB3, 0x02, 0x9A, 0x01, 0x00],
+            Ok(()),
+        ),
+        (
+            20u32,
+            "chacha20_params",
+            v1_proto::mechanism::Params::Chacha20Params(v1_proto::ChaCha20Params::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xA2, 0x01, 0x00],
+            Ok(()),
+        ),
+        (
+            21u32,
+            "salsa20_params",
+            v1_proto::mechanism::Params::Salsa20Params(v1_proto::Salsa20Params::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xAA, 0x01, 0x00],
+            Ok(()),
+        ),
+        (
+            22u32,
+            "salsa20_chacha20_poly1305_params",
+            v1_proto::mechanism::Params::Salsa20Chacha20Poly1305Params(
+                v1_proto::Salsa20ChaCha20Poly1305Params::default(),
+            ),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xB2, 0x01, 0x00],
+            Ok(()),
+        ),
+        (
+            23u32,
+            "gcm_wrap_params",
+            v1_proto::mechanism::Params::GcmWrapParams(v1_proto::GcmWrapParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xBA, 0x01, 0x00],
+            Ok(()),
+        ),
+        (
+            24u32,
+            "ccm_wrap_params",
+            v1_proto::mechanism::Params::CcmWrapParams(v1_proto::CcmWrapParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xC2, 0x01, 0x00],
+            Ok(()),
+        ),
+        (
+            25u32,
+            "ecdh2_derive_params",
+            v1_proto::mechanism::Params::Ecdh2DeriveParams(v1_proto::Ecdh2DeriveParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xCA, 0x01, 0x00],
+            Ok(()),
+        ),
+        (
+            26u32,
+            "ecmqv_derive_params",
+            v1_proto::mechanism::Params::EcmqvDeriveParams(v1_proto::EcmqvDeriveParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xD2, 0x01, 0x00],
+            Ok(()),
+        ),
+        (
+            27u32,
+            "x942_dh1_derive_params",
+            v1_proto::mechanism::Params::X942Dh1DeriveParams(
+                v1_proto::X942Dh1DeriveParams::default(),
+            ),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xDA, 0x01, 0x00],
+            Ok(()),
+        ),
+        (
+            28u32,
+            "x942_dh2_derive_params",
+            v1_proto::mechanism::Params::X942Dh2DeriveParams(
+                v1_proto::X942Dh2DeriveParams::default(),
+            ),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xE2, 0x01, 0x00],
+            Ok(()),
+        ),
+        (
+            29u32,
+            "x942_mqv_derive_params",
+            v1_proto::mechanism::Params::X942MqvDeriveParams(
+                v1_proto::X942MqvDeriveParams::default(),
+            ),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xEA, 0x01, 0x00],
+            Ok(()),
+        ),
+        (
+            30u32,
+            "hkdf_params",
+            v1_proto::mechanism::Params::HkdfParams(v1_proto::HkdfParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xF2, 0x01, 0x00],
+            Ok(()),
+        ),
+        (
+            31u32,
+            "eddsa_params",
+            v1_proto::mechanism::Params::EddsaParams(v1_proto::EddsaParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xFA, 0x01, 0x00],
+            Ok(()),
+        ),
+        (
+            32u32,
+            "xeddsa_params",
+            v1_proto::mechanism::Params::XeddsaParams(v1_proto::XeddsaParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0x82, 0x02, 0x00],
+            Ok(()),
+        ),
+        (
+            33u32,
+            "gostr3410_derive_params",
+            v1_proto::mechanism::Params::Gostr3410DeriveParams(
+                v1_proto::Gostr3410DeriveParams::default(),
+            ),
+            vec![0x08, 0x99, 0xB3, 0x02, 0x8A, 0x02, 0x00],
+            Ok(()),
+        ),
+        (
+            34u32,
+            "kea_derive_params",
+            v1_proto::mechanism::Params::KeaDeriveParams(v1_proto::KeaDeriveParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0x92, 0x02, 0x00],
+            Ok(()),
+        ),
+        (
+            35u32,
+            "ecdh_aes_key_wrap_params",
+            v1_proto::mechanism::Params::EcdhAesKeyWrapParams(
+                v1_proto::EcdhAesKeyWrapParams::default(),
+            ),
+            vec![0x08, 0x99, 0xB3, 0x02, 0x9A, 0x02, 0x00],
+            Ok(()),
+        ),
+        (
+            36u32,
+            "rsa_aes_key_wrap_params",
+            v1_proto::mechanism::Params::RsaAesKeyWrapParams(
+                v1_proto::RsaAesKeyWrapParams::default(),
+            ),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xA2, 0x02, 0x00],
+            Err(CkRv::MECHANISM_PARAM_INVALID),
+        ),
+        (
+            37u32,
+            "gostr3410_key_wrap_params",
+            v1_proto::mechanism::Params::Gostr3410KeyWrapParams(
+                v1_proto::Gostr3410KeyWrapParams::default(),
+            ),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xAA, 0x02, 0x00],
+            Ok(()),
+        ),
+        (
+            38u32,
+            "key_wrap_set_oaep_params",
+            v1_proto::mechanism::Params::KeyWrapSetOaepParams(
+                v1_proto::KeyWrapSetOaepParams::default(),
+            ),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xB2, 0x02, 0x00],
+            Ok(()),
+        ),
+        (
+            39u32,
+            "pbe_params",
+            v1_proto::mechanism::Params::PbeParams(v1_proto::PbeParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xBA, 0x02, 0x00],
+            Ok(()),
+        ),
+        (
+            40u32,
+            "pkcs5_pbkd2_params",
+            v1_proto::mechanism::Params::Pkcs5Pbkd2Params(v1_proto::Pkcs5Pbkd2Params::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xC2, 0x02, 0x00],
+            Ok(()),
+        ),
+        (
+            41u32,
+            "tls_mac_params",
+            v1_proto::mechanism::Params::TlsMacParams(v1_proto::TlsMacParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xCA, 0x02, 0x00],
+            Ok(()),
+        ),
+        (
+            42u32,
+            "tls_prf_params",
+            v1_proto::mechanism::Params::TlsPrfParams(v1_proto::TlsPrfParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xD2, 0x02, 0x00],
+            Ok(()),
+        ),
+        (
+            43u32,
+            "tls_kdf_params",
+            v1_proto::mechanism::Params::TlsKdfParams(v1_proto::TlsKdfParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xDA, 0x02, 0x00],
+            Err(CkRv::MECHANISM_PARAM_INVALID),
+        ),
+        (
+            44u32,
+            "ssl3_master_key_derive_params",
+            v1_proto::mechanism::Params::Ssl3MasterKeyDeriveParams(
+                v1_proto::Ssl3MasterKeyDeriveParams::default(),
+            ),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xE2, 0x02, 0x00],
+            Err(CkRv::MECHANISM_PARAM_INVALID),
+        ),
+        (
+            45u32,
+            "tls12_master_key_derive_params",
+            v1_proto::mechanism::Params::Tls12MasterKeyDeriveParams(
+                v1_proto::Tls12MasterKeyDeriveParams::default(),
+            ),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xEA, 0x02, 0x00],
+            Err(CkRv::MECHANISM_PARAM_INVALID),
+        ),
+        (
+            46u32,
+            "tls12_extended_master_key_derive_params",
+            v1_proto::mechanism::Params::Tls12ExtendedMasterKeyDeriveParams(
+                v1_proto::Tls12ExtendedMasterKeyDeriveParams::default(),
+            ),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xF2, 0x02, 0x00],
+            Ok(()),
+        ),
+        (
+            47u32,
+            "ssl3_key_mat_params",
+            v1_proto::mechanism::Params::Ssl3KeyMatParams(v1_proto::Ssl3KeyMatParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xFA, 0x02, 0x00],
+            Err(CkRv::MECHANISM_PARAM_INVALID),
+        ),
+        (
+            48u32,
+            "wtls_master_key_derive_params",
+            v1_proto::mechanism::Params::WtlsMasterKeyDeriveParams(
+                v1_proto::WtlsMasterKeyDeriveParams::default(),
+            ),
+            vec![0x08, 0x99, 0xB3, 0x02, 0x82, 0x03, 0x00],
+            Err(CkRv::MECHANISM_PARAM_INVALID),
+        ),
+        (
+            49u32,
+            "wtls_prf_params",
+            v1_proto::mechanism::Params::WtlsPrfParams(v1_proto::WtlsPrfParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0x8A, 0x03, 0x00],
+            Ok(()),
+        ),
+        (
+            50u32,
+            "wtls_key_mat_params",
+            v1_proto::mechanism::Params::WtlsKeyMatParams(v1_proto::WtlsKeyMatParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0x92, 0x03, 0x00],
+            Err(CkRv::MECHANISM_PARAM_INVALID),
+        ),
+        (
+            51u32,
+            "ike_prf_derive_params",
+            v1_proto::mechanism::Params::IkePrfDeriveParams(v1_proto::IkePrfDeriveParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0x9A, 0x03, 0x00],
+            Ok(()),
+        ),
+        (
+            52u32,
+            "ike1_prf_derive_params",
+            v1_proto::mechanism::Params::Ike1PrfDeriveParams(
+                v1_proto::Ike1PrfDeriveParams::default(),
+            ),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xA2, 0x03, 0x00],
+            Ok(()),
+        ),
+        (
+            53u32,
+            "ike1_extended_derive_params",
+            v1_proto::mechanism::Params::Ike1ExtendedDeriveParams(
+                v1_proto::Ike1ExtendedDeriveParams::default(),
+            ),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xAA, 0x03, 0x00],
+            Ok(()),
+        ),
+        (
+            54u32,
+            "ike2_prf_plus_derive_params",
+            v1_proto::mechanism::Params::Ike2PrfPlusDeriveParams(
+                v1_proto::Ike2PrfPlusDeriveParams::default(),
+            ),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xB2, 0x03, 0x00],
+            Ok(()),
+        ),
+        (
+            55u32,
+            "sp800_108_kdf_params",
+            v1_proto::mechanism::Params::Sp800108KdfParams(v1_proto::Sp800108KdfParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xBA, 0x03, 0x00],
+            Ok(()),
+        ),
+        (
+            56u32,
+            "sp800_108_feedback_kdf_params",
+            v1_proto::mechanism::Params::Sp800108FeedbackKdfParams(
+                v1_proto::Sp800108FeedbackKdfParams::default(),
+            ),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xC2, 0x03, 0x00],
+            Ok(()),
+        ),
+        (
+            57u32,
+            "x3dh_initiate_params",
+            v1_proto::mechanism::Params::X3dhInitiateParams(v1_proto::X3dhInitiateParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xCA, 0x03, 0x00],
+            Ok(()),
+        ),
+        (
+            58u32,
+            "x3dh_respond_params",
+            v1_proto::mechanism::Params::X3dhRespondParams(v1_proto::X3dhRespondParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xD2, 0x03, 0x00],
+            Ok(()),
+        ),
+        (
+            59u32,
+            "x2_ratchet_initialize_params",
+            v1_proto::mechanism::Params::X2RatchetInitializeParams(
+                v1_proto::X2RatchetInitializeParams::default(),
+            ),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xDA, 0x03, 0x00],
+            Ok(()),
+        ),
+        (
+            60u32,
+            "x2_ratchet_respond_params",
+            v1_proto::mechanism::Params::X2RatchetRespondParams(
+                v1_proto::X2RatchetRespondParams::default(),
+            ),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xE2, 0x03, 0x00],
+            Ok(()),
+        ),
+        (
+            61u32,
+            "otp_params",
+            v1_proto::mechanism::Params::OtpParams(v1_proto::OtpParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xEA, 0x03, 0x00],
+            Ok(()),
+        ),
+        (
+            62u32,
+            "kip_params",
+            v1_proto::mechanism::Params::KipParams(Box::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xF2, 0x03, 0x00],
+            Err(CkRv::MECHANISM_PARAM_INVALID),
+        ),
+        (
+            63u32,
+            "cms_sig_params",
+            v1_proto::mechanism::Params::CmsSigParams(Box::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xFA, 0x03, 0x00],
+            Err(CkRv::MECHANISM_PARAM_INVALID),
+        ),
+        (
+            64u32,
+            "skipjack_private_wrap_params",
+            v1_proto::mechanism::Params::SkipjackPrivateWrapParams(
+                v1_proto::SkipjackPrivateWrapParams::default(),
+            ),
+            vec![0x08, 0x99, 0xB3, 0x02, 0x82, 0x04, 0x00],
+            Ok(()),
+        ),
+        (
+            65u32,
+            "skipjack_relayx_params",
+            v1_proto::mechanism::Params::SkipjackRelayxParams(
+                v1_proto::SkipjackRelayxParams::default(),
+            ),
+            vec![0x08, 0x99, 0xB3, 0x02, 0x8A, 0x04, 0x00],
+            Ok(()),
+        ),
+        (
+            66u32,
+            "mac_general_params",
+            v1_proto::mechanism::Params::MacGeneralParams(v1_proto::MacGeneralParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0x92, 0x04, 0x00],
+            Ok(()),
+        ),
+        (
+            67u32,
+            "key_derivation_string_data",
+            v1_proto::mechanism::Params::KeyDerivationStringData(
+                v1_proto::KeyDerivationStringData::default(),
+            ),
+            vec![0x08, 0x99, 0xB3, 0x02, 0x9A, 0x04, 0x00],
+            Ok(()),
+        ),
+        (
+            68u32,
+            "raw_mechanism_params",
+            v1_proto::mechanism::Params::RawMechanismParams(v1_proto::RawMechanismParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xA2, 0x04, 0x00],
+            Ok(()),
+        ),
+        (
+            69u32,
+            "ecies_params",
+            v1_proto::mechanism::Params::EciesParams(Box::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xAA, 0x04, 0x00],
+            Err(CkRv::MECHANISM_PARAM_INVALID),
+        ),
+        (
+            70u32,
+            "aes_cmac_key_derivation_params",
+            v1_proto::mechanism::Params::AesCmacKeyDerivationParams(
+                v1_proto::AesCmacKeyDerivationParams::default(),
+            ),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xB2, 0x04, 0x00],
+            Ok(()),
+        ),
+        (
+            71u32,
+            "dilithium_params",
+            v1_proto::mechanism::Params::DilithiumParams(v1_proto::DilithiumParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xBA, 0x04, 0x00],
+            Ok(()),
+        ),
+        (
+            72u32,
+            "kyber_params",
+            v1_proto::mechanism::Params::KyberParams(v1_proto::KyberParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xC2, 0x04, 0x00],
+            Ok(()),
+        ),
+        (
+            73u32,
+            "hd_key_derive_params",
+            v1_proto::mechanism::Params::HdKeyDeriveParams(v1_proto::HdKeyDeriveParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xCA, 0x04, 0x00],
+            Ok(()),
+        ),
+        (
+            74u32,
+            "vendor_object_extract_params",
+            v1_proto::mechanism::Params::VendorObjectExtractParams(
+                v1_proto::VendorObjectExtractParams::default(),
+            ),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xD2, 0x04, 0x00],
+            Ok(()),
+        ),
+        (
+            75u32,
+            "vendor_object_insert_params",
+            v1_proto::mechanism::Params::VendorObjectInsertParams(
+                v1_proto::VendorObjectInsertParams::default(),
+            ),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xDA, 0x04, 0x00],
+            Ok(()),
+        ),
+        (
+            76u32,
+            "object_handle_param",
+            v1_proto::mechanism::Params::ObjectHandleParam(v1_proto::ObjectHandleParam::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xE2, 0x04, 0x00],
+            Ok(()),
+        ),
+        (
+            77u32,
+            "sign_additional_context",
+            v1_proto::mechanism::Params::SignAdditionalContext(
+                v1_proto::SignAdditionalContext::default(),
+            ),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xEA, 0x04, 0x00],
+            Ok(()),
+        ),
+        (
+            78u32,
+            "extract_params",
+            v1_proto::mechanism::Params::ExtractParams(v1_proto::ExtractParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xF2, 0x04, 0x00],
+            Ok(()),
+        ),
+        (
+            79u32,
+            "kmac_params",
+            v1_proto::mechanism::Params::KmacParams(v1_proto::KmacParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0xFA, 0x04, 0x00],
+            Ok(()),
+        ),
+        (
+            80u32,
+            "mu_gen_params",
+            v1_proto::mechanism::Params::MuGenParams(v1_proto::MuGenParams::default()),
+            vec![0x08, 0x99, 0xB3, 0x02, 0x82, 0x05, 0x00],
+            Ok(()),
+        ),
+    ];
+    assert_eq!(members.len(), 79, "one row per pre-R6 oneof tag 2..=80");
+    let mut tags: Vec<u32> = members.iter().map(|row| row.0).collect();
+    tags.sort_unstable();
+    assert_eq!(tags, (2u32..=80u32).collect::<Vec<_>>(), "tags must cover 2..=80 exactly");
+    for (tag, name, params, golden, expected) in members {
+        let wire = v1_proto::Mechanism {
+            mechanism_type: 0x9999,
+            params: Some(params.clone()),
+            parameter_encoding_version: 0,
+        };
+        // Legacy encode emits no new bytes (version 0 is never serialized).
+        assert_eq!(wire.encode_to_vec(), golden, "{name} (tag {tag}) golden bytes");
+        let decoded = v1_proto::Mechanism::decode(golden.as_slice()).unwrap();
+        assert_eq!(decoded, wire, "{name} (tag {tag}) must decode bit-identically");
+        // Conversion outcome pinned: default-valued messages convert as today.
+        let outcome = CkMechanism::try_from(&decoded).map(|_| ());
+        assert_eq!(outcome, expected, "{name} (tag {tag}) conversion outcome");
+        if outcome.is_ok() {
+            let back = CkMechanism::try_from(&decoded).unwrap();
+            assert_eq!(back.mechanism_type.0, 0x9999);
+            assert!(back.params.is_some());
+        }
+        // Legacy conversion is version-blind: a newer version alongside a
+        // legacy arm changes nothing (R6 pins current behavior; R9 adds v1
+        // enforcement).
+        let versioned = v1_proto::Mechanism {
+            mechanism_type: 0x9999,
+            params: Some(params),
+            parameter_encoding_version: 99,
+        };
+        let versioned_outcome = CkMechanism::try_from(&versioned).map(|_| ());
+        assert_eq!(versioned_outcome, expected, "{name} (tag {tag}) version-99 outcome");
+    }
+}
+
+#[test]
+fn r6_v1_wire_tags_pin_flat_null_and_version_placement() {
+    use prost::Message as _;
+    // R2 enum reuse pin: the v1 contract shares one ABI vocabulary.
+    assert_eq!(v1_proto::MechanismParamAbi::Lp64NativeLe as i32, 1);
+    // Pins Mechanism tags 81 (flat, LEN) and 83 (version, varint) plus
+    // FlatMechanismParams tags 1 (data, LEN), 2 (declared_len, varint),
+    // 3 (source_abi, varint enum) and 4 (fingerprint, fixed64).
+    // Hand-computed, not round-tripped. The fingerprint value below is an
+    // opaque placeholder: derivation is R7, R6 pins only the wire field.
+    let flat_golden = [
+        0x08, 0x99, 0xB3, 0x02, // mechanism_type 0x9999
+        0x8A, 0x05, 0x11, // tag 81, LEN, 17 bytes
+        0x0A, 0x02, 0x41, 0x42, // data "AB"
+        0x10, 0x02, // declared_len 2
+        0x18, 0x01, // source_abi LP64_NATIVE_LE
+        0x21, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, // fingerprint
+        0x98, 0x05, 0x01, // tag 83, version 1
+    ];
+    let flat = v1_proto::Mechanism {
+        mechanism_type: 0x9999,
+        params: Some(v1_proto::mechanism::Params::FlatMechanismParams(
+            v1_proto::FlatMechanismParams {
+                data: b"AB".to_vec(),
+                declared_len: 2,
+                source_abi: v1_proto::MechanismParamAbi::Lp64NativeLe as i32,
+                shape_layout_fingerprint: 0x0102_0304_0506_0708,
+            },
+        )),
+        parameter_encoding_version: 1,
+    };
+    assert_eq!(flat.encode_to_vec(), flat_golden);
+    assert_eq!(v1_proto::Mechanism::decode(flat_golden.as_slice()).unwrap(), flat);
+    // Pins Mechanism tag 82 (null, LEN) plus NullMechanismParams tag 1
+    // (declared_len, varint). NULL + nonzero length needs no bytes.
+    let null_golden = [
+        0x08, 0x99, 0xB3, 0x02, // mechanism_type 0x9999
+        0x92, 0x05, 0x02, // tag 82, LEN, 2 bytes
+        0x08, 0x05, // declared_len 5
+        0x98, 0x05, 0x01, // tag 83, version 1
+    ];
+    let null = v1_proto::Mechanism {
+        mechanism_type: 0x9999,
+        params: Some(v1_proto::mechanism::Params::NullMechanismParams(
+            v1_proto::NullMechanismParams { declared_len: 5 },
+        )),
+        parameter_encoding_version: 1,
+    };
+    assert_eq!(null.encode_to_vec(), null_golden);
+    assert_eq!(v1_proto::Mechanism::decode(null_golden.as_slice()).unwrap(), null);
+}
+
+#[test]
+fn r6_v1_presence_matrix_fail_closed_until_r9() {
+    use prost::Message as _;
+    let flat = || {
+        Some(v1_proto::mechanism::Params::FlatMechanismParams(v1_proto::FlatMechanismParams {
+            data: vec![0xA5; 16],
+            declared_len: 16,
+            source_abi: v1_proto::MechanismParamAbi::Lp64NativeLe as i32,
+            shape_layout_fingerprint: 0,
+        }))
+    };
+    let null = || {
+        Some(v1_proto::mechanism::Params::NullMechanismParams(v1_proto::NullMechanismParams {
+            declared_len: 16,
+        }))
+    };
+    // Flat/Null × {0, 1, newer}: prost round-trips every combination, and
+    // conversion fails closed at every version (acceptance is R9+).
+    for (name, params) in [("flat", flat()), ("null", null())] {
+        for version in [0u32, 1, 2, u32::MAX] {
+            let wire = v1_proto::Mechanism {
+                mechanism_type: 0x1082, // CKM_AES_GCM
+                params: params.clone(),
+                parameter_encoding_version: version,
+            };
+            let round_tripped =
+                v1_proto::Mechanism::decode(wire.encode_to_vec().as_slice()).unwrap();
+            assert_eq!(round_tripped, wire, "{name} version {version} must round-trip");
+            // TODO(R9): v1 acceptance flips the version-1 row to Ok.
+            assert_eq!(
+                CkMechanism::try_from(&wire),
+                Err(CkRv::MECHANISM_PARAM_INVALID),
+                "{name} version {version} must fail closed until R9",
+            );
+        }
+    }
+    // Absent oneof stays convertible at any version (parameterless).
+    for version in [0u32, 1, 99] {
+        let wire = v1_proto::Mechanism {
+            mechanism_type: 0x1082,
+            params: None,
+            parameter_encoding_version: version,
+        };
+        let back = CkMechanism::try_from(&wire).unwrap();
+        assert!(back.params.is_none());
+    }
+    // Legacy typed arms convert identically with and without v1 versions.
+    let legacy = v1_proto::GcmParams {
+        iv: vec![0x01; 12],
+        iv_bits: 96,
+        aad: Vec::new(),
+        tag_bits: 128,
+        iv_buffer_len: 0,
+        iv_null: false,
+        aad_null: false,
+    };
+    let baseline = CkMechanism::try_from(&v1_proto::Mechanism {
+        mechanism_type: 0x1082,
+        params: Some(v1_proto::mechanism::Params::GcmParams(legacy.clone())),
+        parameter_encoding_version: 0,
+    })
+    .unwrap();
+    for version in [1u32, 99] {
+        let wire = v1_proto::Mechanism {
+            mechanism_type: 0x1082,
+            params: Some(v1_proto::mechanism::Params::GcmParams(legacy.clone())),
+            parameter_encoding_version: version,
+        };
+        assert_eq!(
+            CkMechanism::try_from(&wire).unwrap(),
+            baseline,
+            "legacy GCM conversion must ignore version {version}",
+        );
+    }
+}
+
+#[test]
+fn r6_contradictory_metadata_vectors() {
+    // Legacy NULL-bool set in a v1-stamped message: conversion still honors
+    // the legacy meaning (version-blind until R9).
+    // TODO(R9): S2 §3 reconciliation rejects this as contradictory metadata.
+    let legacy_bool_v1 = v1_proto::Mechanism {
+        mechanism_type: 0x1082,
+        params: Some(v1_proto::mechanism::Params::GcmParams(v1_proto::GcmParams {
+            iv: Vec::new(),
+            iv_bits: 0,
+            aad: Vec::new(),
+            tag_bits: 0,
+            iv_buffer_len: 0,
+            iv_null: true,
+            aad_null: false,
+        })),
+        parameter_encoding_version: 1,
+    };
+    let back = CkMechanism::try_from(&legacy_bool_v1).unwrap();
+    assert!(matches!(back.params, Some(CkMechanismParams::Gcm(_))));
+    // Flat with version 0: contradictory (Flat is valid only with v1).
+    let flat_v0 = v1_proto::Mechanism {
+        mechanism_type: 0x1082,
+        params: Some(v1_proto::mechanism::Params::FlatMechanismParams(
+            v1_proto::FlatMechanismParams {
+                data: b"AB".to_vec(),
+                declared_len: 2,
+                source_abi: v1_proto::MechanismParamAbi::Lp64NativeLe as i32,
+                shape_layout_fingerprint: 0,
+            },
+        )),
+        parameter_encoding_version: 0,
+    };
+    assert_eq!(CkMechanism::try_from(&flat_v0), Err(CkRv::MECHANISM_PARAM_INVALID));
+    // Flat length mismatch (data.len() != declared_len): contradictory.
+    let flat_mismatch = v1_proto::Mechanism {
+        mechanism_type: 0x1082,
+        params: Some(v1_proto::mechanism::Params::FlatMechanismParams(
+            v1_proto::FlatMechanismParams {
+                data: b"ABC".to_vec(),
+                declared_len: 2,
+                source_abi: v1_proto::MechanismParamAbi::Lp64NativeLe as i32,
+                shape_layout_fingerprint: 0,
+            },
+        )),
+        parameter_encoding_version: 1,
+    };
+    assert_eq!(CkMechanism::try_from(&flat_mismatch), Err(CkRv::MECHANISM_PARAM_INVALID));
+    // Null with version 0: contradictory (Null is valid only with v1).
+    let null_v0 = v1_proto::Mechanism {
+        mechanism_type: 0x1082,
+        params: Some(v1_proto::mechanism::Params::NullMechanismParams(
+            v1_proto::NullMechanismParams { declared_len: 7 },
+        )),
+        parameter_encoding_version: 0,
+    };
+    assert_eq!(CkMechanism::try_from(&null_v0), Err(CkRv::MECHANISM_PARAM_INVALID));
+    // Message-opaque/version mismatch (R2 wire, R3 validation): opaque
+    // bytes without version 1 stay rejected with PARAM_INVALID.
+    let opaque_v0 = v1_proto::MessageParameter {
+        params: Some(v1_proto::message_parameter::Params::OpaqueMessageParams(
+            v1_proto::OpaqueMessageParams { data: b"AB".to_vec(), declared_len: 2 },
+        )),
+        parameter_encoding_version: 0,
+    };
+    assert_eq!(
+        super::super::message_params::validate_structured_wire_parameter(&opaque_v0),
+        Err(CkRv::MECHANISM_PARAM_INVALID),
+    );
+}
+
+#[test]
+fn r6_old_new_mix() {
+    use prost::Message as _;
+    // New decoder × old encoder output: pre-v1 bytes (no version field)
+    // decode exactly as before — the tag-4 GCM row of the stability table.
+    let legacy_golden = [0x08, 0x99, 0xB3, 0x02, 0x22, 0x00];
+    let decoded = v1_proto::Mechanism::decode(legacy_golden.as_slice()).unwrap();
+    assert_eq!(decoded.parameter_encoding_version, 0);
+    assert_eq!(
+        decoded.params,
+        Some(v1_proto::mechanism::Params::GcmParams(v1_proto::GcmParams::default())),
+    );
+    let back = CkMechanism::try_from(&decoded).unwrap();
+    assert!(matches!(back.params, Some(CkMechanismParams::Gcm(_))));
+    // Unknown-field tolerance (the property old decoders rely on when a new
+    // encoder emits tags they do not know): trailing tag-99 bytes change
+    // nothing at decode.
+    let mut future = legacy_golden.to_vec();
+    future.extend_from_slice(&[0x9A, 0x06, 0x02, 0x5A, 0x5A]);
+    assert_eq!(v1_proto::Mechanism::decode(future.as_slice()).unwrap(), decoded);
+    // New encoder, legacy value: conversion emits version 0 with no new
+    // bytes — byte-identical to the old encoder's output.
+    let legacy = CkMechanism {
+        mechanism_type: CkMechanismType(0x9999),
+        params: Some(CkMechanismParams::Gcm(GcmParams {
+            iv: Vec::new(),
+            iv_bits: 0,
+            aad: Vec::new().into(),
+            tag_bits: 0,
+            iv_buffer_len: 0,
+            iv_null: false,
+            aad_null: false,
+        })),
+    };
+    let encoded = v1_proto::Mechanism::try_from(&legacy).unwrap();
+    assert_eq!(encoded.parameter_encoding_version, 0);
+    assert_eq!(encoded.encode_to_vec(), legacy_golden);
 }

@@ -198,7 +198,7 @@ fn boxed_back_edge_skip_preserves_drop_wipe_chain() {
         assert!(!field.is_empty(), "skipped {site} names an empty field");
     }
 
-    let mechanism = || Mechanism { mechanism_type: 1, params: None };
+    let mechanism = || Mechanism { mechanism_type: 1, params: None, parameter_encoding_version: 0 };
     let mut kip =
         KipParams { mechanism: Some(Box::new(mechanism())), key_handle: 9, seed: vec![0xA5u8; 8] };
     assert_canary_nonempty("KipParams.seed", &kip.seed);

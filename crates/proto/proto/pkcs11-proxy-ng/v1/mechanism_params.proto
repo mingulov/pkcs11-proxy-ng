@@ -778,3 +778,27 @@ message OpaqueMessageParams {
   bytes data = 1;
   uint64 declared_len = 2;
 }
+
+// Versioned flat classic parameter (R6 v1 encoding, S2 §3). `Flat` means:
+// `pParameter != NULL`, `ulParameterLen == declared_len == data.len()`;
+// only those bytes are caller input — adjacent caller memory is explicitly
+// outside the fidelity contract. The 64 KiB outer-parameter cap applies.
+// `source_abi` is the caller-side native struct ABI (R2 `MechanismParamAbi`
+// vocabulary); struct prefixes require exact ABI equality on both edges.
+// `shape_layout_fingerprint` is the S2 §3 layout fingerprint slot (FNV-1a
+// 64 over the canonical shape tuple; derivation is a later task — R6 pins
+// only this wire field). Valid only with `parameter_encoding_version == 1`.
+message FlatMechanismParams {
+  bytes data = 1;
+  uint64 declared_len = 2;
+  MechanismParamAbi source_abi = 3;
+  fixed64 shape_layout_fingerprint = 4;
+}
+
+// Versioned NULL classic parameter (R6 v1 encoding, S2 §3). `Null` means:
+// `pParameter == NULL`, `ulParameterLen == declared_len`; no bytes cross,
+// so no cap applies — only native `CK_ULONG` narrowing. Valid only with
+// `parameter_encoding_version == 1`.
+message NullMechanismParams {
+  uint64 declared_len = 1;
+}

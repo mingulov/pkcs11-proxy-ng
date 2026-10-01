@@ -153,7 +153,11 @@ async fn mechanism_grants_follow_session_backend_slot_with_warm_and_cold_cache()
                     client_context_id: client.context.clone(),
                     session_handle: client.sessions[index],
                     key_handle: keys[index],
-                    mechanism: Some(Mechanism { mechanism_type: mechanism.0, params: None }),
+                    mechanism: Some(Mechanism {
+                        mechanism_type: mechanism.0,
+                        params: None,
+                        parameter_encoding_version: 0,
+                    }),
                 })
                 .await
                 .unwrap()
@@ -345,6 +349,7 @@ async fn ordinary_wrap_extract_grant_follows_session_backend_slot() {
                 mechanism: Some(Mechanism {
                     mechanism_type: CkMechanismType::RSA_PKCS.0,
                     params: None,
+                    parameter_encoding_version: 0,
                 }),
             })
             .await

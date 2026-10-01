@@ -356,6 +356,7 @@ mod sanitize_inputs_tests {
                 mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {
                     mechanism_type: CkMechanismType::RSA_PKCS_KEY_PAIR_GEN.0,
                     params: None,
+                    parameter_encoding_version: 0,
                 }),
                 template: vec![],
 
@@ -376,6 +377,7 @@ mod sanitize_inputs_tests {
                 mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {
                     mechanism_type: CkMechanismType::RSA_PKCS.0,
                     params: None,
+                    parameter_encoding_version: 0,
                 }),
             }),
         )
