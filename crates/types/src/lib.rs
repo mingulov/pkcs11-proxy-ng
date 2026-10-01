@@ -10,6 +10,7 @@ pub mod object;
 pub mod output;
 pub mod secret;
 pub mod session;
+pub mod shape_descriptors;
 pub mod slot;
 pub mod width;
 
