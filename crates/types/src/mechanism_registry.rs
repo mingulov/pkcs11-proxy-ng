@@ -194,12 +194,16 @@ impl MechanismRegistry {
     }
 
     /// Reject every `[[params]]` shape name in `config` that the proxy
-    /// does not implement (W1-L8-06). `known` is the shape-name allowlist
-    /// — exactly the shapes named by the embedded default registry — and
-    /// `source` names the file/content for the error. A typo'd shape
-    /// previously loaded, hashed a revision, and served while enforcement
-    /// silently differed from operator intent; it now fails load naming
-    /// the shape.
+    /// does not implement (W1-L8-06; S2 §4 TOML bind-only rule: TOML may
+    /// bind a mechanism to an already compiled descriptor, never create
+    /// one — and `deny_unknown_fields` on the schema blocks layout keys,
+    /// so TOML cannot alter a descriptor either). `known` is the
+    /// shape-name allowlist — exactly the shapes named by the embedded
+    /// default registry, every one of which resolves to a compiled
+    /// descriptor (see `shape_descriptors`) — and `source` names the
+    /// file/content for the error. A typo'd shape previously loaded,
+    /// hashed a revision, and served while enforcement silently differed
+    /// from operator intent; it now fails load naming the shape.
     fn check_shapes_known(
         config: &TomlConfig,
         known: &HashSet<String>,
@@ -1871,5 +1875,96 @@ mod tests {
             mozilla.is_parameterless(0xCE534351),
             "nss CKM_NSS_AES_KEY_WRAP must register as parameterless"
         );
+    }
+
+    // S2 §4 TOML rule: TOML may bind a mechanism to an already compiled
+    // descriptor; it cannot create or alter one. Every embedded shape name
+    // must resolve to a compiled descriptor (positive side of bind-only).
+    #[test]
+    fn embedded_toml_shape_names_all_resolve_to_compiled_descriptors() {
+        use crate::shape_descriptors::ShapeResolver;
+        let reg = MechanismRegistry::load_with_override_str(None).unwrap();
+        let mut names: Vec<&str> = reg.param_shapes_view().values().map(|s| s.as_str()).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), 56, "embedded registry shape count pin");
+        for name in names {
+            assert!(
+                ShapeResolver::descriptor(name).is_some(),
+                "embedded shape \"{name}\" has no compiled descriptor"
+            );
+        }
+    }
+
+    // S2 §4 TOML rule (completeness pin): compiled shapes that the
+    // embedded registry does not bind must be exactly the documented set
+    // (operation-selected wrap layouts, the parameterless marker, and
+    // reader-only shapes awaiting registry coverage). A new unbindable
+    // descriptor trips this test for triage.
+    #[test]
+    fn compiled_but_unbindable_shapes_are_exactly_documented() {
+        use std::collections::HashSet;
+
+        use crate::shape_descriptors::SHAPE_DESCRIPTORS;
+        let reg = MechanismRegistry::load_with_override_str(None).unwrap();
+        let bound: HashSet<&str> = reg.param_shapes_view().values().map(|s| s.as_str()).collect();
+        let mut unbound: Vec<&str> =
+            SHAPE_DESCRIPTORS.iter().map(|d| d.name).filter(|n| !bound.contains(n)).collect();
+        unbound.sort_unstable();
+        // Sorted; grouped by reason: operation-selected wrap layouts
+        // (never registry-bound), the synthetic parameterless marker,
+        // and reader-only shapes (shim parses them; no mechanism bound
+        // yet — registry coverage is an R21 manifest item).
+        assert_eq!(
+            unbound,
+            [
+                "ccm_wrap",              // operation-selected
+                "ecdh2_derive",          // reader-only
+                "gcm_wrap",              // operation-selected
+                "kip",                   // reader-only
+                "kmac",                  // reader-only
+                "mu_gen",                // reader-only
+                "otp",                   // reader-only
+                "parameterless",         // synthetic marker
+                "skipjack_private_wrap", // reader-only
+                "skipjack_relayx",       // reader-only
+                "wtls_prf",              // reader-only
+                "x942_mqv_derive",       // reader-only
+            ]
+        );
+    }
+
+    // S2 §4 TOML rule (negative pin): an unknown shape name in an
+    // override is rejected loudly — TOML cannot create a descriptor.
+    #[test]
+    fn override_with_unknown_shape_fails_loudly() {
+        let override_toml = "[[params]]\nshape = \"not_a_real_shape\"\nmechanisms = [0x1087]\n";
+        let err = MechanismRegistry::load_with_override_str(Some(override_toml)).unwrap_err();
+        assert!(
+            err.contains("not_a_real_shape"),
+            "unknown shape must fail load naming the shape, got: {err}"
+        );
+    }
+
+    // S2 §4 TOML rule (negative pin): layout keys inside [[params]] are
+    // rejected loudly — TOML cannot alter a descriptor. (Pin: already
+    // enforced by deny_unknown_fields at HEAD; this names the S2 rule.)
+    #[test]
+    fn override_rejects_layout_keys() {
+        for key in [
+            "native_size",
+            "first_unsafe_offset",
+            "outer_kind",
+            "layout_fingerprint",
+            "contains_virtual_handle",
+        ] {
+            let override_toml =
+                format!("[[params]]\nshape = \"gcm\"\nmechanisms = [0x80001087]\n{key} = 1\n");
+            let err = MechanismRegistry::load_with_override_str(Some(&override_toml)).unwrap_err();
+            assert!(
+                err.contains(key),
+                "layout key {key} must fail load naming the key, got: {err}"
+            );
+        }
     }
 }
