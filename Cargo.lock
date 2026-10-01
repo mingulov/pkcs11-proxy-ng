@@ -1394,11 +1394,13 @@ version = "0.2.0"
 dependencies = [
  "cryptoki-sys",
  "dashmap",
+ "libc",
  "libloading",
  "pkcs11-module",
  "pkcs11-proxy-ng-proto",
  "pkcs11-proxy-ng-types",
  "tracing",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 

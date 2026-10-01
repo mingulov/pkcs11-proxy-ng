@@ -7,7 +7,7 @@ use super::*;
 
 #[cfg(test)]
 mod mechanism_to_ffi_tests {
-    use super::mechanism_to_ffi;
+    use super::{mechanism_to_ffi, validate_for_ffi, validated_mechanism_for_tests};
     use pkcs11_proxy_ng_types::{
         AesCmacKeyDerivationParams, AesCtrParams, CcmParams, CkMechanism, CkMechanismParams,
         CkMechanismType, CkMgf, CkOaepSource, CkObjectHandle, CkPbkdf2Prf, CkPbkdf2SaltSource,
@@ -22,8 +22,11 @@ mod mechanism_to_ffi_tests {
     };
 
     fn convert(mechanism_type: CkMechanismType, params: CkMechanismParams) -> super::FfiMechanism {
-        mechanism_to_ffi(&CkMechanism { mechanism_type, params: Some(params) })
-            .expect("mechanism converts to ffi")
+        mechanism_to_ffi(&validated_mechanism_for_tests(&CkMechanism {
+            mechanism_type,
+            params: Some(params),
+        }))
+        .expect("mechanism converts to ffi")
     }
 
     #[test]
@@ -48,10 +51,13 @@ mod mechanism_to_ffi_tests {
         for _ in 0..16 {
             mech = nest(mech);
         }
-        assert!(mechanism_to_ffi(&mech).is_ok(), "16 nested nodes must convert");
+        assert!(
+            mechanism_to_ffi(&validated_mechanism_for_tests(&mech)).is_ok(),
+            "16 nested nodes must convert"
+        );
         let deep = nest(mech);
         assert_eq!(
-            mechanism_to_ffi(&deep).err(),
+            mechanism_to_ffi(&validated_mechanism_for_tests(&deep)).err(),
             Some(CkRv::MECHANISM_PARAM_INVALID),
             "17th nested node must be rejected before recursion"
         );
@@ -78,12 +84,12 @@ mod mechanism_to_ffi_tests {
         // T05: valid versions convert; any out-of-byte version is
         // MECHANISM_PARAM_INVALID, including valid-first/invalid-second;
         // the 0.0 DH sentinel still converts (NULL version preserved).
-        assert!(mechanism_to_ffi(&tls12_mech(3, 3)).is_ok());
-        assert!(mechanism_to_ffi(&tls12_mech(0, 0)).is_ok());
-        assert!(mechanism_to_ffi(&tls12_mech(255, 255)).is_ok());
+        assert!(mechanism_to_ffi(&validated_mechanism_for_tests(&tls12_mech(3, 3))).is_ok());
+        assert!(mechanism_to_ffi(&validated_mechanism_for_tests(&tls12_mech(0, 0))).is_ok());
+        assert!(mechanism_to_ffi(&validated_mechanism_for_tests(&tls12_mech(255, 255))).is_ok());
         for (major, minor) in [(3, 256), (256, 3), (256, 256), (u32::MAX, 0), (0, u32::MAX)] {
             assert_eq!(
-                mechanism_to_ffi(&tls12_mech(major, minor)).err(),
+                mechanism_to_ffi(&validated_mechanism_for_tests(&tls12_mech(major, minor))).err(),
                 Some(CkRv::MECHANISM_PARAM_INVALID),
                 "TLS12 version {major}.{minor} must be rejected"
             );
@@ -112,18 +118,18 @@ mod mechanism_to_ffi_tests {
                 },
             )),
         };
-        assert!(mechanism_to_ffi(&ssl3(3, 0)).is_ok());
-        assert!(mechanism_to_ffi(&ssl3(0, 0)).is_ok());
-        assert!(mechanism_to_ffi(&ext(3, 3)).is_ok());
-        assert!(mechanism_to_ffi(&ext(0, 0)).is_ok());
+        assert!(mechanism_to_ffi(&validated_mechanism_for_tests(&ssl3(3, 0))).is_ok());
+        assert!(mechanism_to_ffi(&validated_mechanism_for_tests(&ssl3(0, 0))).is_ok());
+        assert!(mechanism_to_ffi(&validated_mechanism_for_tests(&ext(3, 3))).is_ok());
+        assert!(mechanism_to_ffi(&validated_mechanism_for_tests(&ext(0, 0))).is_ok());
         for (major, minor) in [(3, 256), (256, 3), (u32::MAX, u32::MAX)] {
             assert_eq!(
-                mechanism_to_ffi(&ssl3(major, minor)).err(),
+                mechanism_to_ffi(&validated_mechanism_for_tests(&ssl3(major, minor))).err(),
                 Some(CkRv::MECHANISM_PARAM_INVALID),
                 "SSL3 version {major}.{minor} must be rejected"
             );
             assert_eq!(
-                mechanism_to_ffi(&ext(major, minor)).err(),
+                mechanism_to_ffi(&validated_mechanism_for_tests(&ext(major, minor))).err(),
                 Some(CkRv::MECHANISM_PARAM_INVALID),
                 "TLS12-extended version {major}.{minor} must be rejected"
             );
@@ -164,27 +170,27 @@ mod mechanism_to_ffi_tests {
                 version,
             })),
         };
-        assert!(mechanism_to_ffi(&kwso(1)).is_ok());
-        assert!(mechanism_to_ffi(&ike1(1)).is_ok());
-        assert!(mechanism_to_ffi(&wtls(1)).is_ok());
+        assert!(mechanism_to_ffi(&validated_mechanism_for_tests(&kwso(1))).is_ok());
+        assert!(mechanism_to_ffi(&validated_mechanism_for_tests(&ike1(1))).is_ok());
+        assert!(mechanism_to_ffi(&validated_mechanism_for_tests(&wtls(1))).is_ok());
         // Upper boundary is inclusive at every arm (an over-strict arm
         // rejecting 255 must fail here, not just at the helper).
-        assert!(mechanism_to_ffi(&kwso(255)).is_ok());
-        assert!(mechanism_to_ffi(&ike1(255)).is_ok());
-        assert!(mechanism_to_ffi(&wtls(255)).is_ok());
+        assert!(mechanism_to_ffi(&validated_mechanism_for_tests(&kwso(255))).is_ok());
+        assert!(mechanism_to_ffi(&validated_mechanism_for_tests(&ike1(255))).is_ok());
+        assert!(mechanism_to_ffi(&validated_mechanism_for_tests(&wtls(255))).is_ok());
         for bad in [256, u32::MAX] {
             assert_eq!(
-                mechanism_to_ffi(&kwso(bad)).err(),
+                mechanism_to_ffi(&validated_mechanism_for_tests(&kwso(bad))).err(),
                 Some(CkRv::MECHANISM_PARAM_INVALID),
                 "OAEP bc {bad} must be rejected"
             );
             assert_eq!(
-                mechanism_to_ffi(&ike1(bad)).err(),
+                mechanism_to_ffi(&validated_mechanism_for_tests(&ike1(bad))).err(),
                 Some(CkRv::MECHANISM_PARAM_INVALID),
                 "IKE1 key_number {bad} must be rejected"
             );
             assert_eq!(
-                mechanism_to_ffi(&wtls(bad)).err(),
+                mechanism_to_ffi(&validated_mechanism_for_tests(&wtls(bad))).err(),
                 Some(CkRv::MECHANISM_PARAM_INVALID),
                 "WTLS version {bad} must be rejected"
             );
@@ -198,7 +204,7 @@ mod mechanism_to_ffi_tests {
         // mechanism than the client requested. Reject instead (D4).
         let mech =
             CkMechanism { mechanism_type: CkMechanismType(0x1_0000_0000 + 0x1081), params: None };
-        let result = mechanism_to_ffi(&mech);
+        let result = mechanism_to_ffi(&validated_mechanism_for_tests(&mech));
         if std::mem::size_of::<cryptoki_sys::CK_ULONG>() == 4 {
             assert_eq!(result.err(), Some(CkRv::FUNCTION_FAILED));
         } else {
@@ -219,7 +225,7 @@ mod mechanism_to_ffi_tests {
                 salt_len: 0x1_0000_0001,
             })),
         };
-        let result = mechanism_to_ffi(&mech);
+        let result = mechanism_to_ffi(&validated_mechanism_for_tests(&mech));
         if std::mem::size_of::<cryptoki_sys::CK_ULONG>() == 4 {
             assert_eq!(result.err(), Some(CkRv::FUNCTION_FAILED));
         } else {
@@ -288,7 +294,19 @@ mod mechanism_to_ffi_tests {
         for (name, params) in cases {
             let mechanism =
                 CkMechanism { mechanism_type: CkMechanismType(0x8000_0000), params: Some(params) };
-            match mechanism_to_ffi(&mechanism) {
+            // R12: Raw is rejected at the validation gate; the
+            // vendor-typed cases pass validation (variant-driven
+            // passthrough) and are rejected at FFI reconstruction.
+            // Both layers report `MECHANISM_PARAM_INVALID`.
+            let validated = match validate_for_ffi(&mechanism) {
+                Ok(validated) => validated,
+                Err(err) => {
+                    assert_eq!(name, "Raw", "only Raw fails at the validation gate");
+                    assert_eq!(err, CkRv::MECHANISM_PARAM_INVALID, "{name} (validation gate)");
+                    continue;
+                }
+            };
+            match mechanism_to_ffi(&validated) {
                 Err(err) => assert_eq!(err, CkRv::MECHANISM_PARAM_INVALID, "{name}"),
                 Ok(_) => panic!("{name} should be rejected before backend FFI reconstruction"),
             }
@@ -388,7 +406,8 @@ mod mechanism_to_ffi_tests {
         ];
         for (id, name) in pqc_ids {
             let mech = CkMechanism { mechanism_type: id, params: None };
-            let ffi = mechanism_to_ffi(&mech).expect("official PQC flows parameterless");
+            let ffi = mechanism_to_ffi(&validated_mechanism_for_tests(&mech))
+                .expect("official PQC flows parameterless");
             let native = ffi.ck_mechanism();
             assert!(native.pParameter.is_null(), "{name}: NULL params on the wire");
             // E0793: CK_MECHANISM is packed on Windows; assert on a by-value copy.
@@ -548,7 +567,7 @@ mod mechanism_to_ffi_tests {
     // allocated, on every width topology.
     #[test]
     fn gcm_absurd_iv_buffer_len_rejects_without_allocating() {
-        let result = mechanism_to_ffi(&CkMechanism {
+        let result = mechanism_to_ffi(&validated_mechanism_for_tests(&CkMechanism {
             mechanism_type: CkMechanismType::AES_GCM,
             params: Some(CkMechanismParams::Gcm(GcmParams {
                 iv: Vec::new(),
@@ -560,7 +579,7 @@ mod mechanism_to_ffi_tests {
                 iv_null: false,
                 aad_null: false,
             })),
-        });
+        }));
         assert_eq!(result.err(), Some(CkRv::MECHANISM_PARAM_INVALID));
     }
 
@@ -1747,7 +1766,7 @@ mod output_params_equal_tests {
     //! every mechanism-out arm, so `call_bytes_exact_with_mechanism_output`
     //! can reuse the pre-call snapshot when the provider wrote nothing and
     //! snapshot once per call instead of twice.
-    use super::mechanism_to_ffi;
+    use super::{mechanism_to_ffi, validated_mechanism_for_tests};
     use pkcs11_proxy_ng_types::{
         CkAttribute, CkAttributeType, CkAttributeValue, CkMechanism, CkMechanismParams,
         CkMechanismType, CkObjectHandle, GcmParams, PbeParams, PrfDataParam, SecretBytes,
@@ -1757,8 +1776,11 @@ mod output_params_equal_tests {
     };
 
     fn convert(mechanism_type: CkMechanismType, params: CkMechanismParams) -> super::FfiMechanism {
-        mechanism_to_ffi(&CkMechanism { mechanism_type, params: Some(params) })
-            .expect("mechanism converts to ffi")
+        mechanism_to_ffi(&validated_mechanism_for_tests(&CkMechanism {
+            mechanism_type,
+            params: Some(params),
+        }))
+        .expect("mechanism converts to ffi")
     }
 
     fn gcm_fixture() -> CkMechanismParams {
@@ -1957,10 +1979,10 @@ mod output_params_equal_tests {
             );
         }
         // Parameterless mechanisms produce no output params on either side.
-        let no_param = mechanism_to_ffi(&CkMechanism {
+        let no_param = mechanism_to_ffi(&validated_mechanism_for_tests(&CkMechanism {
             mechanism_type: CkMechanismType::SHA256,
             params: None,
-        })
+        }))
         .expect("parameterless converts");
         assert_eq!(no_param.output_params(), None);
         assert!(no_param.output_params_equal(&None));
@@ -2088,20 +2110,22 @@ mod output_params_equal_tests {
         let mechanism =
             CkMechanism { mechanism_type: CkMechanismType::AES_GCM, params: Some(gcm_fixture()) };
         // Warm up once so first-touch allocation is out of the window.
-        let ffi = mechanism_to_ffi(&mechanism).expect("gcm converts");
+        let ffi =
+            mechanism_to_ffi(&validated_mechanism_for_tests(&mechanism)).expect("gcm converts");
         let snapshot = ffi.output_params();
         assert!(ffi.output_params_equal(&snapshot));
         const ITERS: u32 = 2000;
         let start = std::time::Instant::now();
         for _ in 0..ITERS {
-            let ffi = mechanism_to_ffi(&mechanism).expect("gcm converts");
+            let ffi =
+                mechanism_to_ffi(&validated_mechanism_for_tests(&mechanism)).expect("gcm converts");
             let snapshot = ffi.output_params();
             assert!(ffi.output_params_equal(&snapshot));
         }
         let elapsed = start.elapsed();
         let ns_per_iter = elapsed.as_nanos() / u128::from(ITERS);
         eprintln!(
-            "task33-hotspot: mechanism_to_ffi(GCM-12B-iv)+output_params+equal = {ns_per_iter} ns/iter over {ITERS} iters"
+            "task33-hotspot: mechanism_to_ffi(&validated_mechanism_for_tests(GCM-12B-iv))+output_params+equal = {ns_per_iter} ns/iter over {ITERS} iters"
         );
         assert!(ns_per_iter < 1_000_000, "hotspot blew past 1ms/iter: {ns_per_iter} ns");
     }

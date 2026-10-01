@@ -2023,7 +2023,10 @@ mod tests {
 
     fn seed_cache(backend: &FfiBackend) {
         let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
-        let ffi_mechanism = ffi_conversion::mechanism_to_ffi(&mechanism).unwrap();
+        let ffi_mechanism = ffi_conversion::mechanism_to_ffi(
+            &ffi_conversion::validated_mechanism_for_tests(&mechanism),
+        )
+        .unwrap();
         backend.mech_cache.insert((7, OperationFamily::Sign), ffi_mechanism);
         backend.last_init_family.insert(7, OperationFamily::Sign);
         // Use the public path so the forward map and reverse index stay in sync.
@@ -2115,7 +2118,10 @@ mod tests {
     fn seed_bulk_cache(backend: &FfiBackend) {
         let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
         for session in 1000..3000u64 {
-            let ffi_mechanism = ffi_conversion::mechanism_to_ffi(&mechanism).unwrap();
+            let ffi_mechanism = ffi_conversion::mechanism_to_ffi(
+                &ffi_conversion::validated_mechanism_for_tests(&mechanism),
+            )
+            .unwrap();
             backend.mech_cache.insert((session, OperationFamily::Sign), ffi_mechanism);
         }
     }
@@ -2289,13 +2295,14 @@ mod tests {
         let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
         // Ordinary choke under test: admit like the `ffi_*` boundary would.
         let admission = backend.lifecycle_domain.admit_ordinary().expect("open domain admits");
+        let validated = ffi_conversion::validated_mechanism_for_tests(&mechanism);
         let err = backend
             .call_init_with_mechanism(
                 &admission,
                 CkSessionHandle(7),
                 OperationFamily::Sign,
                 Some(0u8),
-                &mechanism,
+                &validated,
                 |_, _| {
                     // Deterministic race simulation: the incarnation turns
                     // over while the native Init runs (successful Finalize,
@@ -2323,13 +2330,14 @@ mod tests {
         let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
         // Ordinary choke under test: admit like the `ffi_*` boundary would.
         let admission = backend.lifecycle_domain.admit_ordinary().expect("open domain admits");
+        let validated = ffi_conversion::validated_mechanism_for_tests(&mechanism);
         let err = backend
             .call_init_with_mechanism_output(
                 &admission,
                 CkSessionHandle(7),
                 OperationFamily::Sign,
                 Some(0u8),
-                &mechanism,
+                &validated,
                 |_, _| {
                     // Same legitimate turnover as above (F-08: failed
                     // Finalize can no longer open a new cycle).
@@ -2369,7 +2377,10 @@ mod tests {
             let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
             backend.mech_cache.insert(
                 (session, OperationFamily::Sign),
-                ffi_conversion::mechanism_to_ffi(&mechanism).unwrap(),
+                ffi_conversion::mechanism_to_ffi(&ffi_conversion::validated_mechanism_for_tests(
+                    &mechanism,
+                ))
+                .unwrap(),
             );
             backend.remember_session_slot(CkSessionHandle(session as u64), CkSlotId(slot as u64));
         }
@@ -2377,10 +2388,9 @@ mod tests {
         // every family of the evicted sessions, not just one entry.
         backend.mech_cache.insert(
             (7, OperationFamily::Encrypt),
-            ffi_conversion::mechanism_to_ffi(&CkMechanism {
-                mechanism_type: CkMechanismType::RSA_PKCS,
-                params: None,
-            })
+            ffi_conversion::mechanism_to_ffi(&ffi_conversion::validated_mechanism_for_tests(
+                &CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None },
+            ))
             .unwrap(),
         );
 
@@ -2408,19 +2418,17 @@ mod tests {
         for family in OperationFamily::ALL {
             backend.mech_cache.insert(
                 (7, family),
-                ffi_conversion::mechanism_to_ffi(&CkMechanism {
-                    mechanism_type: CkMechanismType::RSA_PKCS,
-                    params: None,
-                })
+                ffi_conversion::mechanism_to_ffi(&ffi_conversion::validated_mechanism_for_tests(
+                    &CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None },
+                ))
                 .unwrap(),
             );
         }
         backend.mech_cache.insert(
             (8, OperationFamily::Sign),
-            ffi_conversion::mechanism_to_ffi(&CkMechanism {
-                mechanism_type: CkMechanismType::RSA_PKCS,
-                params: None,
-            })
+            ffi_conversion::mechanism_to_ffi(&ffi_conversion::validated_mechanism_for_tests(
+                &CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None },
+            ))
             .unwrap(),
         );
         backend.last_init_family.insert(7, OperationFamily::Sign);

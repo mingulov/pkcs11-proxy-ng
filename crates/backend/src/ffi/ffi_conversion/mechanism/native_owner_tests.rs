@@ -24,7 +24,8 @@ fn pss_input() -> CkMechanism {
 /// and contents across a production-style owner move.
 #[test]
 fn native_owner_pss_retained_root_survives_moves_and_snapshots() {
-    let ffi = mechanism_to_ffi(&pss_input()).expect("PSS parameters convert");
+    let ffi = mechanism_to_ffi(&validated_mechanism_for_tests(&pss_input()))
+        .expect("PSS parameters convert");
     let parameter_pointer = ffi.ck_mechanism().pParameter;
     assert!(!parameter_pointer.is_null(), "PSS keeps a live parameter root");
     // SAFETY: the owner is alive and unchanged; read once before the move.

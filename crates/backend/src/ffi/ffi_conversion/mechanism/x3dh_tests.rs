@@ -149,7 +149,8 @@ fn assert_native_readback(ffi: &FfiMechanism, expected: [u64; 6]) {
 
 #[test]
 fn x3dh_respond_native_pointers_belong_to_live_backing() {
-    let ffi = mechanism_to_ffi(&input(VALUES)).expect("X3DH response converts");
+    let ffi = mechanism_to_ffi(&validated_mechanism_for_tests(&input(VALUES)))
+        .expect("X3DH response converts");
     assert_live_backing(&ffi);
 }
 
@@ -167,7 +168,8 @@ fn x3dh_respond_four_pointees_keep_native_width_after_owner_move() {
     } else {
         VALUES
     };
-    let ffi = mechanism_to_ffi(&input(values)).expect("native-width values convert");
+    let ffi = mechanism_to_ffi(&validated_mechanism_for_tests(&input(values)))
+        .expect("native-width values convert");
     assert_live_backing(&ffi);
     let parameter_pointer = ffi.ck_mechanism().pParameter;
     let boxed_owner = Box::new(ffi);
@@ -183,7 +185,8 @@ fn x3dh_respond_four_pointees_keep_native_width_after_owner_move() {
 
 #[test]
 fn x3dh_respond_oracle_reads_all_four_owned_pointees_once() {
-    let ffi = mechanism_to_ffi(&input(VALUES)).expect("X3DH response converts");
+    let ffi = mechanism_to_ffi(&validated_mechanism_for_tests(&input(VALUES)))
+        .expect("X3DH response converts");
     assert_native_readback(&ffi, VALUES);
 }
 
@@ -194,7 +197,7 @@ fn x3dh_respond_narrow_handles_and_kdf_reject_before_native_call() {
         for wide in [0x1_23456789, u64::MAX] {
             let mut values = VALUES;
             values[index] = wide;
-            let result = mechanism_to_ffi(&input(values));
+            let result = mechanism_to_ffi(&validated_mechanism_for_tests(&input(values)));
             if std::mem::size_of::<CK_ULONG>() == 4 {
                 assert_eq!(result.err(), Some(CkRv::FUNCTION_FAILED), "{name}: {wide:#x}");
             } else {

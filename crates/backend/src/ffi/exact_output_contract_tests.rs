@@ -558,10 +558,11 @@ fn classic_gcm_initialized_error_iv_effect() {
     let choke_domain = crate::ffi::native_domain::LifecycleDomain::new();
     choke_domain.open_for_tests();
     let choke_admission = choke_domain.admit_ordinary().expect("test domain admits");
+    let validated = super::ffi_conversion::validated_mechanism_for_tests(&mechanism);
     let (output, effects) = FfiBackend::call_bytes_exact_with_mechanism_output(
         &choke_admission,
         Some(()),
-        &mechanism,
+        &validated,
         &CkOutputBufferSpec { buffer_present: true, buffer_len: 4, length_pointer_null: false },
         |(), native, _, length| {
             // Benign native-provider effect: write within an initialized owned IV.
@@ -632,10 +633,11 @@ fn classic_gcm_error_effect_matrix_data_query_and_missing_length() {
                 let choke_domain = crate::ffi::native_domain::LifecycleDomain::new();
                 choke_domain.open_for_tests();
                 let choke_admission = choke_domain.admit_ordinary().expect("test domain admits");
+                let validated = super::ffi_conversion::validated_mechanism_for_tests(&mechanism);
                 let (output, effects) = FfiBackend::call_bytes_exact_with_mechanism_output(
                     &choke_admission,
                     Some(()),
-                    &mechanism,
+                    &validated,
                     spec,
                     |(), native, _, length| {
                         if write {
@@ -739,10 +741,11 @@ fn classic_gcm_ok_effect_unchanged_data_and_missing_length() {
         let choke_domain = crate::ffi::native_domain::LifecycleDomain::new();
         choke_domain.open_for_tests();
         let choke_admission = choke_domain.admit_ordinary().expect("test domain admits");
+        let validated = super::ffi_conversion::validated_mechanism_for_tests(&mechanism);
         let (output, effects) = FfiBackend::call_bytes_exact_with_mechanism_output(
             &choke_admission,
             Some(()),
-            &mechanism,
+            &validated,
             spec,
             |(), _, _, length| {
                 if !length.is_null() {
@@ -789,10 +792,11 @@ fn mechanism_output_path_snapshots_once_when_provider_writes_nothing() {
     choke_domain.open_for_tests();
     let choke_admission = choke_domain.admit_ordinary().expect("test domain admits");
     FfiMechanism::reset_output_params_calls_for_tests();
+    let validated = super::ffi_conversion::validated_mechanism_for_tests(&mechanism);
     let (output, effects) = FfiBackend::call_bytes_exact_with_mechanism_output(
         &choke_admission,
         Some(()),
-        &mechanism,
+        &validated,
         &CkOutputBufferSpec { buffer_present: true, buffer_len: 4, length_pointer_null: false },
         |(), _, _, length| {
             if !length.is_null() {
@@ -832,10 +836,11 @@ fn mechanism_output_path_resnapshots_only_when_provider_writes() {
     choke_domain.open_for_tests();
     let choke_admission = choke_domain.admit_ordinary().expect("test domain admits");
     FfiMechanism::reset_output_params_calls_for_tests();
+    let validated = super::ffi_conversion::validated_mechanism_for_tests(&mechanism);
     let (output, effects) = FfiBackend::call_bytes_exact_with_mechanism_output(
         &choke_admission,
         Some(()),
-        &mechanism,
+        &validated,
         &CkOutputBufferSpec { buffer_present: true, buffer_len: 4, length_pointer_null: false },
         |(), native, _, length| {
             let gcm = unsafe { &*native.pParameter.cast::<cryptoki_sys::CK_GCM_PARAMS>() };

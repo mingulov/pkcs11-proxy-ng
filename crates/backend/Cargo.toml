@@ -39,5 +39,13 @@ tracing.workspace = true
 zeroize = { workspace = true }
 dashmap = { workspace = true }
 
+# R12 (S2 §6/§16): OS page-mapping primitives for `GuardedBytes` — unix
+# mmap/mprotect/munmap via libc, Windows VirtualAlloc/VirtualFree via
+# windows-sys. Both already in the lock closure; no new crate introduced.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Diagnostics_Debug", "Win32_System_Memory", "Win32_System_SystemInformation"] }
+
 [lints]
 workspace = true

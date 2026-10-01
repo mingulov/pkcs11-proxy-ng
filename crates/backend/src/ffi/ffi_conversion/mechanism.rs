@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::ffi::native_allocation::NativeAllocation;
+use pkcs11_proxy_ng_types::shape_descriptors::{Operation, ParamAbi};
 
 // Thread-local `output_params()` call count (W1-C4-04). Thread-local —
 // not global — so parallel tests cannot perturb each other's deltas;
@@ -16,6 +17,10 @@ std::thread_local! {
 
 #[cfg(test)]
 mod native_owner_tests;
+#[cfg(test)]
+mod r12_flat_null_tests;
+#[cfg(test)]
+mod r12_init_retention_tests;
 #[cfg(test)]
 mod x3dh_tests;
 
@@ -158,6 +163,27 @@ impl FfiMechanism {
     /// Build an `FfiMechanism` with no parameter (`pParameter = NULL`).
     fn no_param(mech_type: cryptoki_sys::CK_MECHANISM_TYPE) -> Self {
         Self::with_param(mech_type, std::ptr::null_mut(), 0, FfiParamBacking::None)
+    }
+
+    /// Build an `FfiMechanism` with an explicit NULL parameter carrying a
+    /// narrowed length (R12, S2 §6: validated `Null{n}` → NULL + `n`).
+    /// Unlike [`Self::no_param`] (which hardcodes zero), the declared
+    /// length survives: some providers dereference NULL only when the
+    /// length is nonzero, and crash parity needs the exact length.
+    fn with_null_param(
+        mech_type: cryptoki_sys::CK_MECHANISM_TYPE,
+        len: cryptoki_sys::CK_ULONG,
+    ) -> Self {
+        // The outer is heap-allocated (uniform outer): its address must
+        // survive the constructing frame for retained providers. Built
+        // directly (not via `with_param`) so the already-narrowed native
+        // length is stored exactly, with no `usize` round-trip.
+        let outer = NativeAllocation::from_box(Box::new(cryptoki_sys::CK_MECHANISM {
+            mechanism: mech_type,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: len,
+        }));
+        Self { outer, _backing: FfiParamBacking::None }
     }
 
     /// Build an `FfiMechanism` from a `Box<T>` C-struct: derives the
@@ -844,6 +870,22 @@ enum FfiParamBacking {
     /// Single native `CK_ULONG` parameter (MacGeneral, Extract,
     /// ObjectHandle): typed, aligned `NativeAllocation`, not a byte Vec.
     Ulong(NativeAllocation<cryptoki_sys::CK_ULONG>),
+    /// Validated Flat extent in guarded page storage (R12, S2 §6):
+    /// exact bytes ending where the zeroed data mapping ends, followed
+    /// by a no-access guard page (see [`GuardedBytes`]). Only ever built
+    /// from a [`ValidatedMechanismParams`] Flat — an unvalidated public
+    /// `Flat` value can never reach this variant (the constructor takes
+    /// the newtype, never a bare `CkMechanism`).
+    ///
+    /// Output effects (S2 §6, decided): native writes into this backing
+    /// are NOT returned — `output_params()` has no arm for `Flat` and
+    /// yields `None` via its wildcard, even on Init RPCs whose responses
+    /// already carry `mechanism_out`. Pinned by
+    /// `r12_flat_output_suppressed*`. Likewise the authenticated-path
+    /// probes (`validate_authenticated_inputs`, `authenticated_output`)
+    /// hit their wildcards (`DEVICE_ERROR` / `PARAM_INVALID`):
+    /// fail-closed until a later phase wires Flat there deliberately.
+    Flat(GuardedBytes),
     /// Scalar-only C struct stored as a pinned Box (PSS, RC5, RC2MacGeneral, etc.)
     Pss(NativeAllocation<cryptoki_sys::CK_RSA_PKCS_PSS_PARAMS>),
     Rc5(NativeAllocation<cryptoki_sys::CK_RC5_PARAMS>),
@@ -1201,15 +1243,21 @@ pub(in crate::ffi) struct FfiMuGenParams {
     pub(in crate::ffi) ul_ctx_len: cryptoki_sys::CK_ULONG,
 }
 
-/// Convert a `CkMechanism` to an `FfiMechanism` for FFI calls.
+/// Convert a validated mechanism to an `FfiMechanism` for FFI calls.
+///
+/// Takes ONLY [`ValidatedMechanismParams`] (R12, S2 §6): a public `Flat`
+/// value can never bypass validation, because no constructor from a bare
+/// `CkMechanism` exists on this path — every entry funnels through
+/// [`validate_for_ffi`] (backend-local backstop) or arrives pre-validated
+/// from the server (post-R13).
 ///
 /// Parameterless mechanisms use null `pParameter`.  Parameterized mechanisms
 /// allocate the appropriate C struct on the heap (via `Box`) so that
 /// `pParameter` has a stable address for the lifetime of the returned
 /// `FfiMechanism`.
 ///
-/// Takes `&CkMechanism` by reference and clones each parameter buffer (IV, AAD,
-/// salt, …) into the `FfiParamBacking`. Taking it *by value* to move those
+/// Takes `&ValidatedMechanismParams` by reference and clones each parameter
+/// buffer (IV, AAD, salt, …) into the `FfiParamBacking`. Taking it *by value* to move those
 /// buffers (M10) was evaluated and deliberately not adopted: it would require
 /// changing every `Pkcs11Backend` crypto method to own its `CkMechanism`,
 /// rippling through all backend implementors and every server call site — the
@@ -1238,20 +1286,106 @@ pub(in crate::ffi) struct FfiMuGenParams {
 /// is rejected before recursion.
 const MAX_NESTED_MECHANISMS: u8 = 16;
 
-pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism> {
-    mechanism_to_ffi_at_depth(mechanism, 0)
+/// Backend-local transport validation (R12, pre-R13 backstop).
+///
+/// The backend owns no mechanism registry (the daemon's configured
+/// registry lives server-side), so this validates against a static EMPTY
+/// registry — no bindings, no exclusions — with `Operation::General` and
+/// host-width ABIs. Consequences, each load-bearing and pinned:
+///
+/// * typed params and parameterless (`None`) pass through: the typed
+///   path is variant-driven, not registry-driven (R9), and the backend
+///   never enforced operator exclusion at FFI — behavior identical;
+/// * legacy `Raw` is rejected (`PARAM_INVALID`), exactly as the FFI
+///   match arm did before R12 — same RV, earlier layer;
+/// * `Flat` is ALWAYS rejected (`PARAM_INVALID` — `UnknownShape`, or
+///   `VendorWithoutAllowlist` for vendor IDs; every reason maps to
+///   `PARAM_INVALID`): no binding exists to grant it, and validating
+///   Flat against a guessed registry (e.g. the embedded default) would
+///   bypass operator exclusion — fail closed instead. Server-validated
+///   Flat arrives post-R13, when the server passes the newtype itself
+///   (R13 removes the top-level uses of this funnel and retypes the
+///   backend entries);
+/// * `Null` validates fully here: NULL + narrowed length needs no
+///   descriptor (S2 §6 RV table), only the member-version check and a
+///   width-only narrowing — both registry-independent.
+/// * nested nodes (KIP/CMS — the only arms that recurse) keep using this
+///   funnel permanently: neither the server (typed passthrough, no
+///   recursion) nor this layer pre-validates them, so each nested node
+///   is validated at descent. Nested typed/`None`/`Null` convert;
+///   nested `Flat`/`Raw` stay rejected. (Carry for the R13/R18 nested
+///   tracking: nested Flat emission exists shim-side (R11 re-gather);
+///   backend nested-Flat acceptance needs recursive validation, which is
+///   NOT this funnel.)
+///
+/// The ABI choice is width-derived (`CK_ULONG` width only) rather than
+/// `ParamAbi::native()`: only the width is load-bearing here (Null
+/// narrowing is width-only; Flat is always denied so ABI equality is
+/// moot; typed/`None` never read the ABI). This also keeps big-endian
+/// targets working, where `native()` is `None`.
+pub(in crate::ffi) fn validate_for_ffi(
+    mechanism: &CkMechanism,
+) -> CkResult<ValidatedMechanismParams> {
+    static EMPTY_REGISTRY: std::sync::OnceLock<MechanismRegistry> = std::sync::OnceLock::new();
+    let registry = EMPTY_REGISTRY.get_or_init(|| {
+        MechanismRegistry::from_parts(
+            std::collections::HashMap::new(),
+            std::collections::HashSet::new(),
+            std::collections::HashSet::new(),
+            DiscoveryMode::Transparent,
+            String::from("r12-empty-backstop"),
+        )
+    });
+    // Width-derived host ABI (see the doc comment above): 8-byte
+    // `CK_ULONG` behaves as LP64, 4-byte as ILP32 — only `ulong_size()`
+    // is ever consulted on this path.
+    let host_abi = if std::mem::size_of::<cryptoki_sys::CK_ULONG>() >= 8 {
+        ParamAbi::Lp64NativeLe
+    } else {
+        ParamAbi::Ilp32NativeLe
+    };
+    ValidatedMechanismParams::validate(mechanism, registry, Operation::General, host_abi, host_abi)
+}
+
+/// Test funnel: `validate_for_ffi`, unwrapped. Every pre-R12 test that
+/// fed `&CkMechanism` straight into `mechanism_to_ffi` now funnels
+/// through here — typed/`None` pass identically, so all pre-existing
+/// assertions keep their meaning; only the boundary moved.
+#[cfg(test)]
+pub(in crate::ffi) fn validated_mechanism_for_tests(
+    mechanism: &CkMechanism,
+) -> ValidatedMechanismParams {
+    validate_for_ffi(mechanism).expect("test mechanism validates for FFI")
+}
+
+pub(in crate::ffi) fn mechanism_to_ffi(
+    validated: &ValidatedMechanismParams,
+) -> CkResult<FfiMechanism> {
+    mechanism_to_ffi_at_depth(validated, 0)
 }
 
 /// Recurse one nesting level (KIP/CMS nested mechanisms), rejecting the
 /// 17th nested mechanism before descending.
+///
+/// Nested nodes arrive unvalidated (the server validates the top level
+/// only), so each is validated at descent through [`validate_for_ffi`]:
+/// nested typed/`None` convert exactly like the top level, nested `Null`
+/// converts too (new in R12 — NULL + narrowed length needs no descriptor
+/// at any depth, so the uniform rule accepts it), while nested
+/// `Flat`/`Raw` stay rejected — same as before R12.
 fn nested_mechanism_to_ffi(mechanism: &CkMechanism, depth: u8) -> CkResult<FfiMechanism> {
     if depth >= MAX_NESTED_MECHANISMS {
         return Err(CkRv::MECHANISM_PARAM_INVALID);
     }
-    mechanism_to_ffi_at_depth(mechanism, depth + 1)
+    let validated = validate_for_ffi(mechanism)?;
+    mechanism_to_ffi_at_depth(&validated, depth + 1)
 }
 
-fn mechanism_to_ffi_at_depth(mechanism: &CkMechanism, depth: u8) -> CkResult<FfiMechanism> {
+fn mechanism_to_ffi_at_depth(
+    validated: &ValidatedMechanismParams,
+    depth: u8,
+) -> CkResult<FfiMechanism> {
+    let mechanism = validated.mechanism();
     let mech_type = narrow_wire_ulong(mechanism.mechanism_type.0)?;
 
     let params = match &mechanism.params {
@@ -1802,16 +1936,36 @@ fn mechanism_to_ffi_at_depth(mechanism: &CkMechanism, depth: u8) -> CkResult<Ffi
         // garbage addresses and segfault. Safe mechanisms are modeled with
         // explicit parameter shapes that properly serialize pointer-bearing
         // fields. Unknown mechanisms must be added to the TOML registry.
+        // STAYS rejecting (R12): validation rejects Raw before this arm is
+        // reachable, so this is now defense-in-depth plus exhaustiveness —
+        // never a live path, never removed.
         CkMechanismParams::Raw(_) => Err(CkRv::MECHANISM_PARAM_INVALID),
 
-        // -- Flat/Null (R9): reject until the validated path lands ---------
-        // Unvalidated v1 values must never reach FFI reconstruction: R12
-        // retypes this function to accept only `ValidatedMechanismParams`
-        // and adds the guarded Flat / with_null_param arms there. Until
-        // then, fail closed (this also preserves the pre-R9 external
-        // behavior for v1 wire input, which conversion used to reject).
-        CkMechanismParams::Flat(_) | CkMechanismParams::Null { .. } => {
-            Err(CkRv::MECHANISM_PARAM_INVALID)
+        // -- Flat: guarded reconstruction (R12, S2 §6) ----------------------
+        // Validated Flat only (this function takes the newtype): exact
+        // bytes into `GuardedBytes`, `ulParameterLen` exactly
+        // `declared_len`. Validation guarantees `bytes.len() ==
+        // declared_len <= 64 KiB`; the debug assertion pins the shape
+        // this arm relies on.
+        CkMechanismParams::Flat(p) => {
+            debug_assert_eq!(
+                p.bytes.expose(|b| b.len()) as u64,
+                p.declared_len,
+                "validated Flat carries exactly declared_len bytes"
+            );
+            let guarded = p.bytes.expose(GuardedBytes::new)?;
+            let len = guarded.declared_len();
+            let ptr = guarded.as_ptr();
+            Ok(FfiMechanism::with_param(mech_type, ptr, len, FfiParamBacking::Flat(guarded)))
+        }
+
+        // -- Null: NULL + narrowed length (R12, S2 §6) ----------------------
+        // No descriptor needed; validation already narrowed for the
+        // backend width, so this narrowing is infallible in practice —
+        // kept checked (same `FUNCTION_FAILED` RV) as defense in depth.
+        CkMechanismParams::Null { declared_len, .. } => {
+            let len = narrow_wire_ulong(*declared_len)?;
+            Ok(FfiMechanism::with_null_param(mech_type, len))
         }
 
         // -- TLS 1.2 Master Key Derive: nested SSL3_RANDOM_DATA + pVersion ---

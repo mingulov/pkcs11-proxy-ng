@@ -24,7 +24,8 @@ impl FfiBackend {
         let fl = self.func_list_3_2.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let function = unsafe { (*fl).C_EncapsulateKey }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
-        let mut ffi_mech = mechanism_to_ffi(mechanism)?;
+        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
+        let mut ffi_mech = mechanism_to_ffi(&validated)?;
         let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
 
         let h_session = Self::session_handle(session)?;
@@ -66,7 +67,8 @@ impl FfiBackend {
         let fl = self.func_list_3_2.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let function = unsafe { (*fl).C_EncapsulateKey }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
-        let mut ffi_mech = mechanism_to_ffi(mechanism)?;
+        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
+        let mut ffi_mech = mechanism_to_ffi(&validated)?;
         let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let h_session = Self::session_handle(session)?;
         let h_pubkey = Self::object_handle(public_key)?;
@@ -125,7 +127,8 @@ impl FfiBackend {
         use super::ffi_conversion::FfiAttrs;
 
         let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
-        let mut ffi_mech = mechanism_to_ffi(mechanism)?;
+        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
+        let mut ffi_mech = mechanism_to_ffi(&validated)?;
         let (ct_ptr, ct_len) = ciphertext.as_ptr_len();
         let mut key_handle: cryptoki_sys::CK_OBJECT_HANDLE = 0;
 
