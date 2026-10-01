@@ -21,20 +21,20 @@
 //! compiled descriptors plus the reviewed bindings.
 //!
 //! The manifest is live, not decorative: [`manifest_complete`] — the machine
-//! half of the S2 §11 Phase-2 gate — reads the embedded TOML. R21 flips the
-//! tail bindings to complete (plus regeneration) once the Phase-3 rows land;
-//! R23 asserts [`manifest_complete`] at advertisement time and refuses to
-//! advertise v1 while it is false. Until R21 the predicate is pinned false
-//! with the exact pending list
-//! (`manifest_incomplete_by_construction_until_r21`).
+//! half of the S2 §11 Phase-2 gate — reads the embedded TOML. R21 flipped
+//! the tail bindings to complete (plus regeneration) once the Phase-3 rows
+//! landed; R23 asserts [`manifest_complete`] at advertisement time and
+//! refuses to advertise v1 while it is false. The predicate is pinned true
+//! (`r21_manifest_complete_after_phase3`) and the manifest bytes are pinned
+//! by the freeze digest (`r21_manifest_digest_freeze`).
 //!
 //! The manifest ↔ proto cross-check lives in this crate (not in `proto`)
 //! because the dependency runs `proto → types`: `types` cannot name the
 //! generated wire types, so the tests match wire-message names against the
 //! `.proto` sources via `include_str!` (same repository — standalone-safe).
-//! Presence-field coverage is asserted COMPLETE only in R21; here the tests
-//! assert the input-pointer wire messages exist and the tail is explicitly
-//! listed as pending.
+//! Presence-field coverage is COMPLETE since R21: every manifest shape
+//! carries its wire envelope + domain conversion + shim reader + backend
+//! reconstruction (cross-crate Nelson checks in `manifest_tests`).
 //!
 //! No behavior change: this module is unwired tables + tests (R8 is Phase 1).
 
@@ -42,16 +42,18 @@ use std::sync::OnceLock;
 
 use serde::Deserialize;
 
-use self::ManifestStatus::{Complete, PendingTail};
+use self::ManifestStatus::Complete;
 use crate::shape_descriptors::{Operation, OuterKind, ParamAbi, ResolvedShape, ShapeResolver};
 
 // ─── Human-attested bindings (single edit point) ──────────────────────────────
 
 /// Completion status of one manifest entry.
 ///
-/// R21 flips every [`ManifestStatus::PendingTail`] to
+/// R21 flipped every [`ManifestStatus::PendingTail`] to
 /// [`ManifestStatus::Complete`] (plus TOML regeneration) once the Phase-3
-/// tail rows land; only then may [`manifest_complete`] return true.
+/// tail rows landed; only then could [`manifest_complete`] return true.
+/// The `PendingTail` variant is retained for wire-format history (old
+/// TOML snapshots still parse) — no live entry carries it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum ManifestStatus {
     /// Wire envelope + transport representation complete for v1.
@@ -151,20 +153,20 @@ pub const SHAPE_BINDINGS: &[ShapeBinding] = &[
     bind("ike_prf_derive", &["IkePrfDeriveParams"], Complete, &[], V1),
     bind("iv", &["IvParams"], Complete, &[], V1),
     // S2 §8 "KEA" (tail: RandomA/RandomB role-dependent in/out).
-    bind("kea_derive", &["KeaDeriveParams"], PendingTail, &[2, 3], V1),
+    bind("kea_derive", &["KeaDeriveParams"], Complete, &[2, 3], V1),
     // S2 §8 "KDF string-data".
     bind("key_derivation_string", &["KeyDerivationStringData"], Complete, &[], V1),
     // S2 §8 "OAEP" (SET cousin rides the same family).
     bind("key_wrap_set_oaep", &["KeyWrapSetOaepParams"], Complete, &[], V1),
     // S2 §8 "KIP" (tail: nested mechanism; input-only fields).
-    bind("kip", &["KipParams"], PendingTail, &[], V1),
+    bind("kip", &["KipParams"], Complete, &[], V1),
     // S2 §8 "KMAC".
     bind("kmac", &["KmacParams"], Complete, &[], V1),
     bind("mac_general", &["MacGeneralParams"], Complete, &[], V1),
     bind("mu_gen", &["MuGenParams"], Complete, &[], V1),
     bind("object_handle", &["ObjectHandleParam"], Complete, &[], V1),
     // S2 §8 "OTP/SP800-108" (tail: counted struct array; input-only).
-    bind("otp", &["OtpParams"], PendingTail, &[], V1),
+    bind("otp", &["OtpParams"], Complete, &[], V1),
     // The parameterless marker rides the unset oneof: no wire message.
     bind("parameterless", &[], Complete, &[], V1),
     // S2 §8 "PBE".
@@ -189,13 +191,13 @@ pub const SHAPE_BINDINGS: &[ShapeBinding] = &[
     // One wire message covers both forms (`hash` selects the variant).
     bind("sign_additional_context", &["SignAdditionalContext"], Complete, &[], V1),
     // S2 §8 "Skipjack" (tail: counted/length-led inputs; input-only).
-    bind("skipjack_private_wrap", &["SkipjackPrivateWrapParams"], PendingTail, &[], V1),
-    bind("skipjack_relayx", &["SkipjackRelayxParams"], PendingTail, &[], V1),
+    bind("skipjack_private_wrap", &["SkipjackPrivateWrapParams"], Complete, &[], V1),
+    bind("skipjack_relayx", &["SkipjackRelayxParams"], Complete, &[], V1),
     // S2 §8 "OTP/SP800-108" (tail: output = additional-derived-keys array).
-    bind("sp800_108_feedback_kdf", &["Sp800108FeedbackKdfParams"], PendingTail, &[6], V1),
-    bind("sp800_108_kdf", &["Sp800108KdfParams"], PendingTail, &[4], V1),
+    bind("sp800_108_feedback_kdf", &["Sp800108FeedbackKdfParams"], Complete, &[6], V1),
+    bind("sp800_108_kdf", &["Sp800108KdfParams"], Complete, &[4], V1),
     // S2 §8 "key-mat" (tail: output = returned key material).
-    bind("ssl3_key_mat", &["Ssl3KeyMatParams"], PendingTail, &[5], V1),
+    bind("ssl3_key_mat", &["Ssl3KeyMatParams"], Complete, &[5], V1),
     // S2 §8 TLS-input shapes (Flat-covered: no output fields).
     bind("ssl3_master_key_derive", &["Ssl3MasterKeyDeriveParams"], Complete, &[], V1),
     bind(
@@ -209,10 +211,10 @@ pub const SHAPE_BINDINGS: &[ShapeBinding] = &[
     bind("tls_kdf", &["TlsKdfParams"], Complete, &[], V1),
     bind("tls_mac", &["TlsMacParams"], Complete, &[], V1),
     // S2 §8 "TLS/WTLS envelopes" (tail: output = pOutput + length pointer).
-    bind("tls_prf", &["TlsPrfParams"], PendingTail, &[4, 5], V1),
-    bind("wtls_key_mat", &["WtlsKeyMatParams"], PendingTail, &[7], V1),
+    bind("tls_prf", &["TlsPrfParams"], Complete, &[4, 5], V1),
+    bind("wtls_key_mat", &["WtlsKeyMatParams"], Complete, &[7], V1),
     bind("wtls_master_key_derive", &["WtlsMasterKeyDeriveParams"], Complete, &[], V1),
-    bind("wtls_prf", &["WtlsPrfParams"], PendingTail, &[5, 6], V1),
+    bind("wtls_prf", &["WtlsPrfParams"], Complete, &[5, 6], V1),
     // S2 §8 "X9.42 DH/MQV".
     bind("x942_dh1_derive", &["X942Dh1DeriveParams"], Complete, &[], V1),
     bind("x942_dh2_derive", &["X942Dh2DeriveParams"], Complete, &[], V1),
@@ -309,16 +311,17 @@ pub fn manifest_shape(name: &str) -> Option<&'static ManifestShape> {
 }
 
 /// Machine half of the S2 §11 Phase-2 gate: true only when every manifest
-/// entry is complete. R21 flips this to true (tail rows complete); R23
+/// entry is complete. R21 flipped this to true (tail rows complete); R23
 /// asserts it at advertisement time and refuses v1 while it is false.
-/// Pinned false with the exact pending list until R21.
+/// Pinned true (`r21_manifest_complete_after_phase3`).
 pub fn manifest_complete() -> bool {
     // Fail closed on an empty manifest: `all()` is vacuously true.
     !manifest().shape.is_empty()
         && manifest().shape.iter().all(|entry| entry.status == ManifestStatus::Complete)
 }
 
-/// Shape IDs still pending (the tail until R21), in manifest order.
+/// Shape IDs still pending (empty since R21 completed the tail), in
+/// manifest order.
 pub fn pending_shapes() -> Vec<&'static str> {
     manifest()
         .shape
@@ -795,11 +798,30 @@ mod manifest_tests {
     }
 
     #[test]
-    fn manifest_incomplete_by_construction_until_r21() {
-        assert!(!super::manifest_complete(), "R21 flips this pin (tail pending until then)");
+    fn r21_manifest_complete_after_phase3() {
+        assert!(
+            super::manifest_complete(),
+            "R21: every manifest entry is complete (Phase-3 rows landed)"
+        );
+        assert!(
+            super::pending_shapes().is_empty(),
+            "R21: no shape may remain pending, got {:?}",
+            super::pending_shapes()
+        );
+    }
+
+    #[test]
+    fn r21_tail_complete_and_exactly_nested_or_output() {
+        // The exact R8 pending tail (kept as the completed-tail pin): the
+        // NestedOrOutput set, every member Complete since R21.
+        let tail: BTreeSet<&str> = SHAPE_DESCRIPTORS
+            .iter()
+            .filter(|descriptor| descriptor.outer_kind == OuterKind::NestedOrOutput)
+            .map(|descriptor| descriptor.name)
+            .collect();
         assert_eq!(
-            super::pending_shapes(),
-            vec![
+            tail,
+            BTreeSet::from([
                 "kea_derive",
                 "kip",
                 "otp",
@@ -811,20 +833,17 @@ mod manifest_tests {
                 "tls_prf",
                 "wtls_key_mat",
                 "wtls_prf",
-            ],
-            "exact pending tail (R21 completes it)"
+            ]),
+            "completed tail must equal the NestedOrOutput set"
         );
-    }
-
-    #[test]
-    fn pending_tail_is_exactly_nested_or_output() {
-        let tail: BTreeSet<&str> = SHAPE_DESCRIPTORS
-            .iter()
-            .filter(|descriptor| descriptor.outer_kind == OuterKind::NestedOrOutput)
-            .map(|descriptor| descriptor.name)
-            .collect();
-        let pending: BTreeSet<&str> = super::pending_shapes().into_iter().collect();
-        assert_eq!(pending, tail, "pending set must equal the NestedOrOutput set");
+        for shape in &tail {
+            let entry = super::manifest_shape(shape).expect("tail entry in manifest");
+            assert_eq!(
+                entry.status,
+                ManifestStatus::Complete,
+                "R21 completed the tail: {shape} must be Complete"
+            );
+        }
     }
 
     #[test]
@@ -1728,10 +1747,13 @@ mod manifest_tests {
             );
         }
         // No silent omission in either direction: the table is exactly
-        // the PendingTail set + the R16-deferred TLS-input set + tls_mac.
-        // (PendingTail stays pending until R19+R21 — the manifest is
-        // still incomplete; this pins the exact pending tail list.)
-        let mut expected: BTreeSet<&str> = super::pending_shapes().into_iter().collect();
+        // the completed tail (NestedOrOutput, R21) + the R16-deferred
+        // TLS-input set + tls_mac.
+        let mut expected: BTreeSet<&str> = SHAPE_DESCRIPTORS
+            .iter()
+            .filter(|descriptor| descriptor.outer_kind == OuterKind::NestedOrOutput)
+            .map(|descriptor| descriptor.name)
+            .collect();
         for shape in R16_R18_TLS_SET {
             expected.insert(shape);
         }
@@ -1757,9 +1779,18 @@ mod manifest_tests {
                 "wtls_master_key_derive",
                 "wtls_prf",
             ]),
-            "exact R18 tail scope (pending tail + TLS-input + tls_mac)"
+            "exact R18 tail scope (completed tail + TLS-input + tls_mac)"
         );
         assert_eq!(table_shapes, expected, "tail table must equal the exact R18 tail scope");
+        // R21: the whole R18 scope is Complete (the tail half flipped here).
+        for shape in &table_shapes {
+            let entry = super::manifest_shape(shape).expect("tail entry in manifest");
+            assert_eq!(
+                entry.status,
+                ManifestStatus::Complete,
+                "R21 completed the tail scope: {shape} must be Complete"
+            );
+        }
     }
 
     #[test]
@@ -1858,5 +1889,522 @@ mod manifest_tests {
                 "{message} carries no envelope field"
             );
         }
+    }
+
+    // ─── R21: Phase-3 completion + freeze (S2 §8/§11) ────────────────────────
+    //
+    // COMPLETE presence-field coverage: every manifest shape carries its
+    // wire envelope + domain conversion + shim reader + backend
+    // reconstruction. Each row below names the R-task that delivered it;
+    // rows delivered pre-campaign say so (the R21 pin, not the code, is
+    // new). Cross-crate by `include_str!` (the dependency runs
+    // proto/shim/backend → types, so the tests match identifiers against
+    // the sibling sources — same repository, standalone-safe).
+
+    /// R21 no-envelope table: `(S2 §8 family, shape, wire message, why no
+    /// envelope)`. Scalar shapes have no pointers to envelop; the
+    /// byte-buffer form (`iv`) expresses NULL at the OUTER layer (D3
+    /// `Null`), never per-field. The union test pins this table against
+    /// the live manifest in both directions (no silent omission, no
+    /// silent addition).
+    const R21_NO_ENVELOPE_SHAPES: &[(&str, &str, &str, &str)] = &[
+        ("CTR", "aes_ctr", "AesCtrParams", "scalar: fixed array + counter, no pointer"),
+        ("CTR", "camellia_ctr", "CamelliaCtrParams", "scalar: fixed array + counter, no pointer"),
+        ("RC2", "rc2_cbc", "Rc2CbcParams", "scalar: fixed IV array, no pointer"),
+        ("RC2", "rc2_mac_general", "Rc2MacGeneralParams", "scalar: fixed IV array, no pointer"),
+        ("RC5", "rc5", "Rc5Params", "scalar: wordsize/rounds only, no pointer"),
+        (
+            "RC5",
+            "rc5_mac_general",
+            "Rc5MacGeneralParams",
+            "scalar: wordsize/rounds/mac-len, no pointer",
+        ),
+        ("PSS-flat", "rsa_pss", "RsaPkcsPssParams", "scalar: algs + salt len, no pointer"),
+        ("EdDSA", "xeddsa", "XeddsaParams", "scalar: prehash flag only, no pointer"),
+        ("scalar misc", "mac_general", "MacGeneralParams", "scalar: mac len only, no pointer"),
+        ("scalar misc", "extract", "ExtractParams", "scalar: handle + bit flag, no pointer"),
+        ("scalar misc", "object_handle", "ObjectHandleParam", "scalar: single handle, no pointer"),
+        ("byte-buffer", "iv", "IvParams", "byte-buffer: NULL rides the outer Null layer (D3)"),
+    ];
+
+    /// Prost oneof-variant overrides: the variant derives from the
+    /// snake_case FIELD name, which round-trips to the message name for
+    /// every manifest message except these two (`ChaCha` → `chacha` →
+    /// `Chacha`). The conversion test pins this map exact in both
+    /// directions (each override necessary + sufficient, nothing else
+    /// needs one).
+    const R21_PROST_ONEOF_OVERRIDES: &[(&str, &str)] = &[
+        ("ChaCha20Params", "Chacha20Params"),
+        ("Salsa20ChaCha20Poly1305Params", "Salsa20Chacha20Poly1305Params"),
+    ];
+
+    /// Sibling-crate sources for the cross-crate Nelson checks (same
+    /// repository — standalone-safe, like the `.proto` includes above).
+    const PROTO_CONVERT_MOD: &str = include_str!("../../proto/src/convert/mechanism/mod.rs");
+    const SHIM_MECHANISM_READ: &str =
+        include_str!("../../shim/src/dispatch/general/helpers/mechanism_read.rs");
+    const BACKEND_MECHANISM: &str =
+        include_str!("../../backend/src/ffi/ffi_conversion/mechanism.rs");
+
+    /// Lines of `source` before the line containing `end`, with full-line
+    /// `//` comments stripped (doc comments quote identifiers — code
+    /// mentions only). Panics unless `end` occurs exactly once.
+    fn code_span_before(source: &'static str, end: &str) -> Vec<&'static str> {
+        let lines: Vec<&str> = source.lines().collect();
+        let positions: Vec<usize> =
+            lines.iter().enumerate().filter(|(_, l)| l.contains(end)).map(|(i, _)| i).collect();
+        assert_eq!(positions.len(), 1, "anchor `{end}` must occur exactly once");
+        lines[..positions[0]]
+            .iter()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .copied()
+            .collect()
+    }
+
+    /// Lines of `source` from the line containing `start` (inclusive) to
+    /// the line containing `end` (exclusive), with full-line `//`
+    /// comments stripped. Panics unless both anchors occur exactly once,
+    /// in order.
+    fn code_span_between(source: &'static str, start: &str, end: &str) -> Vec<&'static str> {
+        let lines: Vec<&str> = source.lines().collect();
+        let at = |anchor: &str| {
+            let positions: Vec<usize> = lines
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| l.contains(anchor))
+                .map(|(i, _)| i)
+                .collect();
+            assert_eq!(positions.len(), 1, "anchor `{anchor}` must occur exactly once");
+            positions[0]
+        };
+        let (lo, hi) = (at(start), at(end));
+        assert!(lo < hi, "anchor `{start}` must precede anchor `{end}`");
+        lines[lo..hi].iter().filter(|l| !l.trim_start().starts_with("//")).copied().collect()
+    }
+
+    /// Whether any line of `span` contains `needle`.
+    fn span_contains(span: &[&str], needle: &str) -> bool {
+        span.iter().any(|line| line.contains(needle))
+    }
+
+    /// Shape IDs referenced as `Some("shape")` in `span` (shim reader
+    /// arms). Tokens are restricted to `[a-z0-9_]+` so error strings can
+    /// never match.
+    fn some_shape_tokens(span: &[&'static str]) -> BTreeSet<&'static str> {
+        let mut shapes = BTreeSet::new();
+        for line in span {
+            for part in line.split("Some(\"").skip(1) {
+                let token = part.split('"').next().unwrap_or("");
+                if !token.is_empty()
+                    && token
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c == '_' || c.is_ascii_digit())
+                {
+                    shapes.insert(token);
+                }
+            }
+        }
+        shapes
+    }
+
+    /// Every `"snake"` token in `span` (shim dispatch predicates list
+    /// shapes as `"a" | "b"` across lines, so the `Some("` prefix cannot
+    /// anchor them). Tokens are restricted to `[a-z0-9_]+`.
+    fn quoted_snake_tokens(span: &[&'static str]) -> BTreeSet<&'static str> {
+        let mut tokens = BTreeSet::new();
+        for line in span {
+            let mut rest = *line;
+            while let Some(open) = rest.find('"') {
+                rest = &rest[open + 1..];
+                let Some(close) = rest.find('"') else { break };
+                let token = &rest[..close];
+                if !token.is_empty()
+                    && token
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c == '_' || c.is_ascii_digit())
+                {
+                    tokens.insert(token);
+                }
+                rest = &rest[close + 1..];
+            }
+        }
+        tokens
+    }
+
+    /// `CkMechanismParams` variant for a wire message: the message name
+    /// minus its `Params`/`Param`/`Data` suffix (`IvParams` → `Iv`,
+    /// `ObjectHandleParam` → `ObjectHandle`, `KeyDerivationStringData` →
+    /// `KeyDerivationString`, `SignAdditionalContext` unchanged). The
+    /// conversion/backend tests fail loudly on any message this rule
+    /// mis-derives.
+    fn domain_variant(message: &str) -> &str {
+        for suffix in ["Params", "Param", "Data"] {
+            if let Some(variant) = message.strip_suffix(suffix).filter(|v| !v.is_empty()) {
+                return variant;
+            }
+        }
+        message
+    }
+
+    /// `Mechanism.params` oneof variant for a wire message: the message
+    /// name, except the [`R21_PROST_ONEOF_OVERRIDES`] prost renames.
+    fn oneof_variant(message: &str) -> &str {
+        R21_PROST_ONEOF_OVERRIDES
+            .iter()
+            .find(|(name, _)| *name == message)
+            .map(|(_, variant)| *variant)
+            .unwrap_or(message)
+    }
+
+    /// Source lines of the top-level `message {name} {...}` block,
+    /// wherever it lives (`mechanism_params.proto` or `types.proto`).
+    fn message_block_lines_either(name: &str) -> Vec<&'static str> {
+        for source in [MECHANISM_PARAMS_PROTO, TYPES_PROTO] {
+            let found = source.lines().any(|line| {
+                let line = line.trim_start();
+                line.starts_with(&format!("message {name} "))
+                    || line.starts_with(&format!("message {name}{{"))
+            });
+            if found {
+                return message_block_lines_in(source, name);
+            }
+        }
+        panic!("message {name} not found in either .proto source");
+    }
+
+    #[test]
+    fn r21_envelope_union_covers_every_manifest_shape() {
+        let r16: BTreeSet<&str> = R16_PRESENCE_TABLE.iter().map(|row| row.1).collect();
+        let r18: BTreeSet<&str> = R18_TAIL_TABLE.iter().map(|row| row.1).collect();
+        let no_envelope: BTreeSet<&str> = R21_NO_ENVELOPE_SHAPES.iter().map(|row| row.1).collect();
+        assert_eq!(r16.len(), R16_PRESENCE_TABLE.len(), "R16 table: one row per shape");
+        assert_eq!(r18.len(), R18_TAIL_TABLE.len(), "R18 table: one row per shape");
+        assert_eq!(
+            no_envelope.len(),
+            12,
+            "R21 no-envelope table: exactly the 12 scalar/byte-buffer shapes"
+        );
+        // Pairwise disjoint: every shape has exactly one envelope story.
+        assert!(r16.intersection(&r18).next().is_none(), "R16/R18 tables must be disjoint");
+        assert!(
+            r16.intersection(&no_envelope).next().is_none()
+                && r18.intersection(&no_envelope).next().is_none(),
+            "no-envelope shapes must sit outside both presence tables"
+        );
+        assert!(
+            !r16.contains("gcm_compat")
+                && !r18.contains("gcm_compat")
+                && !no_envelope.contains("gcm_compat"),
+            "gcm_compat rides the shared gcm row (asserted below), never its own"
+        );
+        // Union + the two special rows == the manifest exactly.
+        let mut union = r16.clone();
+        union.extend(r18.iter().copied());
+        union.extend(no_envelope.iter().copied());
+        union.insert("gcm_compat");
+        union.insert("parameterless");
+        let in_manifest: BTreeSet<&str> =
+            super::manifest().shape.iter().map(|entry| entry.name.as_str()).collect();
+        assert_eq!(in_manifest.len(), 68, "manifest shape count pin");
+        assert_eq!(union, in_manifest, "envelope union must equal the manifest exactly");
+        // Every S2 §8 family is fully classified (MGF keeps its vacuous pin).
+        for (family, shapes) in S2_SECTION_8_FAMILIES {
+            if family.starts_with("MGF ") {
+                assert!(shapes.is_empty(), "MGF keeps its no-standalone-shape pin");
+                continue;
+            }
+            for shape in *shapes {
+                assert!(
+                    union.contains(shape),
+                    "S2 §8 family {family} shape {shape} has no envelope row"
+                );
+            }
+        }
+        // No-envelope rows (owner R21): the wire block carries no
+        // presence/count/null-bit line at all.
+        for (family, shape, message, why) in R21_NO_ENVELOPE_SHAPES {
+            let entry = super::manifest_shape(shape)
+                .unwrap_or_else(|| panic!("R21 names unknown shape {shape}"));
+            assert!(
+                entry.wire_messages.iter().any(|bound| bound == message),
+                "R21/{family}/{shape} must bind {message}"
+            );
+            assert!(
+                why.len() > "scalar: ".len(),
+                "R21/{shape} must record why no envelope is needed"
+            );
+            let block = message_block_lines_either(message);
+            assert!(
+                !block.iter().any(|line| {
+                    line.contains("_null") || line.trim_start().starts_with("optional ")
+                }),
+                "R21/{family}/{shape}: {message} must carry no envelope field ({why})"
+            );
+        }
+        // gcm_compat (owner R16 for the struct form via the shared gcm
+        // row; the bare-IV byte form needs no envelope, like `iv`).
+        let compat = super::manifest_shape("gcm_compat").expect("gcm_compat entry");
+        assert_eq!(
+            compat.wire_messages,
+            vec!["IvParams".to_string(), "GcmParams".to_string()],
+            "gcm_compat still binds both typed messages"
+        );
+        assert!(r16.contains("gcm"), "gcm_compat struct form rides the R16 gcm row");
+        // parameterless (owner R8): rides the unset oneof, no message.
+        let marker = super::manifest_shape("parameterless").expect("parameterless entry");
+        assert!(marker.wire_messages.is_empty(), "parameterless binds no wire message");
+    }
+
+    #[test]
+    fn r21_domain_conversion_dispatches_every_wire_message() {
+        // Encode = everything above the legacy-bool scan (v0 `try_from`
+        // + `to_wire_with_transport_version` + both v1 encoders); decode =
+        // the wire `try_from` (the trailing `MechanismInfo` impls convert
+        // no params).
+        let encode = code_span_before(PROTO_CONVERT_MOD, "fn has_set_legacy_null_bool(");
+        let decode = code_span_between(
+            PROTO_CONVERT_MOD,
+            "fn try_from(m: &v1_proto::Mechanism)",
+            "fn from(m: &CkMechanismInfo)",
+        );
+        let r16: BTreeSet<&str> = R16_PRESENCE_TABLE.iter().map(|row| row.1).collect();
+        let r18: BTreeSet<&str> = R18_TAIL_TABLE.iter().map(|row| row.1).collect();
+        let conversion_owner = |shape: &str| {
+            if r16.contains(shape) || shape == "gcm_compat" {
+                "R16(decode)+R17(v1 encode)+R19(legacy removal)"
+            } else if r18.contains(shape) {
+                "R18(v1 encode+decode)"
+            } else {
+                "pre-campaign(R21 dispatch pin)"
+            }
+        };
+        let mut messages = 0;
+        for entry in super::manifest().shape.iter() {
+            for message in entry.wire_messages.iter() {
+                messages += 1;
+                let owner = conversion_owner(entry.name.as_str());
+                let oneof = format!("Params::{}", oneof_variant(message));
+                let variant = format!("CkMechanismParams::{}", domain_variant(message));
+                assert!(
+                    span_contains(&encode, &oneof),
+                    "{owner}: encode must dispatch {message} ({} row {})",
+                    entry.name,
+                    oneof
+                );
+                assert!(
+                    span_contains(&decode, &oneof),
+                    "{owner}: decode must dispatch {message} ({} row {})",
+                    entry.name,
+                    oneof
+                );
+                assert!(
+                    span_contains(&encode, &variant),
+                    "{owner}: encode must convert domain {} ({} row)",
+                    variant,
+                    entry.name
+                );
+                assert!(
+                    span_contains(&decode, &variant),
+                    "{owner}: decode must convert domain {} ({} row)",
+                    variant,
+                    entry.name
+                );
+            }
+        }
+        assert_eq!(messages, 68, "per-row wire-message count pin (66 distinct + gcm_compat dual)");
+        // Override map exact in both directions: each override is
+        // necessary (default name absent both halves) and sufficient
+        // (override present both halves — already asserted above); every
+        // other message round-trips under its own name (also above).
+        for (message, variant) in R21_PROST_ONEOF_OVERRIDES {
+            let default = format!("Params::{message}");
+            assert!(
+                !span_contains(&encode, &default) && !span_contains(&decode, &default),
+                "override {message} → {variant} must be necessary (default absent)"
+            );
+        }
+        assert_eq!(
+            R21_PROST_ONEOF_OVERRIDES.len(),
+            2,
+            "exactly the two ChaCha prost renames (any third is a new finding)"
+        );
+    }
+
+    #[test]
+    fn r21_shim_v1_reader_covers_every_shape() {
+        let pred17 =
+            code_span_between(SHIM_MECHANISM_READ, "fn is_r17_v1_shape(", "fn is_r18_tail_shape(");
+        let pred18 = code_span_between(
+            SHIM_MECHANISM_READ,
+            "fn is_r18_tail_shape(",
+            "fn read_v1_typed_params(",
+        );
+        let typed = code_span_between(
+            SHIM_MECHANISM_READ,
+            "fn read_v1_typed_params(",
+            "fn read_v1_tail_params(",
+        );
+        let tail = code_span_between(
+            SHIM_MECHANISM_READ,
+            "fn read_v1_tail_params(",
+            "fn read_mechanism_with_shape_budgeted(",
+        );
+        let budgeted = code_span_between(
+            SHIM_MECHANISM_READ,
+            "fn read_mechanism_with_shape_budgeted(",
+            "fn gcm_iv_buffer_len(",
+        );
+        let r16: BTreeSet<&str> = R16_PRESENCE_TABLE.iter().map(|row| row.1).collect();
+        let r18: BTreeSet<&str> = R18_TAIL_TABLE.iter().map(|row| row.1).collect();
+        let mut typed_shapes = r16.clone();
+        typed_shapes.insert("gcm_compat");
+        // Predicates route exactly the reader sets (R17 38 + R18 17),
+        // disjoint from each other.
+        assert_eq!(
+            quoted_snake_tokens(&pred17),
+            typed_shapes,
+            "is_r17_v1_shape (R17) must list exactly the 38 typed shapes"
+        );
+        assert_eq!(
+            quoted_snake_tokens(&pred18),
+            r18,
+            "is_r18_tail_shape (R18) must list exactly the 17 tail shapes"
+        );
+        assert_eq!(
+            some_shape_tokens(&typed),
+            typed_shapes,
+            "read_v1_typed_params (R17) must arm exactly the 38 typed shapes"
+        );
+        assert_eq!(
+            some_shape_tokens(&tail),
+            r18,
+            "read_v1_tail_params (R18) must arm exactly the 17 tail shapes"
+        );
+        assert!(
+            typed_shapes.intersection(&r18).next().is_none(),
+            "R17/R18 reader sets must be disjoint"
+        );
+        // The pre-existing typed reader arms every non-parameterless
+        // shape; scalar/byte-buffer shapes reach it through the R17 v1
+        // fallback (wired below), whose Raw fallbacks v1 rejects locally.
+        let budgeted_shapes = some_shape_tokens(&budgeted);
+        let mut all_but_marker: BTreeSet<&str> =
+            super::manifest().shape.iter().map(|entry| entry.name.as_str()).collect();
+        assert!(all_but_marker.remove("parameterless"), "parameterless entry exists");
+        assert_eq!(
+            budgeted_shapes, all_but_marker,
+            "budgeted typed reader must arm every non-parameterless shape"
+        );
+        // parameterless (owner R11) rides the outer None/Flat path: no
+        // reader arm anywhere.
+        for (region, span) in [
+            ("is_r17_v1_shape", &pred17),
+            ("is_r18_tail_shape", &pred18),
+            ("typed", &typed),
+            ("tail", &tail),
+            ("budgeted", &budgeted),
+        ] {
+            assert!(
+                !span_contains(span, "\"parameterless\""),
+                "R11: parameterless must have no {region} arm"
+            );
+        }
+        // Fallback wiring (owner R17): the v1 typed branch tries the
+        // step-1 readers first, then the existing reader with Raw
+        // rejected locally (never emitted on v1).
+        let fallback = code_span_between(
+            SHIM_MECHANISM_READ,
+            "fn read_typed_under_v1(",
+            "fn read_flat_under_v1(",
+        );
+        for symbol in [
+            "is_r17_v1_shape",
+            "read_v1_typed_params",
+            "is_r18_tail_shape",
+            "read_v1_tail_params",
+            "read_mechanism_with_shape_budgeted",
+            "CkMechanismParams::Raw",
+            "MECHANISM_PARAM_INVALID",
+        ] {
+            assert!(span_contains(&fallback, symbol), "R17 fallback must reference {symbol}");
+        }
+    }
+
+    #[test]
+    fn r21_backend_reconstruction_covers_every_variant() {
+        let body = code_span_between(
+            BACKEND_MECHANISM,
+            "fn mechanism_to_ffi_at_depth(",
+            "fn gcm_iv_capacity(",
+        );
+        let r16: BTreeSet<&str> = R16_PRESENCE_TABLE.iter().map(|row| row.1).collect();
+        let r18: BTreeSet<&str> = R18_TAIL_TABLE.iter().map(|row| row.1).collect();
+        let backend_owner = |shape: &str| {
+            if r16.contains(shape) || r18.contains(shape) || shape == "gcm_compat" {
+                "R19(mechanism_to_ffi_at_depth)"
+            } else {
+                "pre-campaign arm(R21 pin: scalar/byte-buffer, no presence)"
+            }
+        };
+        let mut variants = 0;
+        for entry in super::manifest().shape.iter() {
+            for message in entry.wire_messages.iter() {
+                variants += 1;
+                let arm = format!("CkMechanismParams::{}", domain_variant(message));
+                let armed = body.iter().any(|line| line.contains(&arm) && line.contains("=>"));
+                assert!(
+                    armed,
+                    "{}: backend must reconstruct {} ({} row {arm})",
+                    backend_owner(entry.name.as_str()),
+                    entry.name,
+                    message
+                );
+            }
+        }
+        assert_eq!(variants, 68, "per-row variant count pin (66 distinct + gcm_compat dual)");
+        // parameterless rides None (current arm form via the R12
+        // mechanism_to_ffi rework; origin pre-campaign).
+        assert!(
+            body.iter().any(|line| line.contains("None")
+                && line.contains("=>")
+                && line.contains("no_param")),
+            "R12: backend must map params None (parameterless) via no_param"
+        );
+        // Generic envelopes need no per-shape arm (owner R12).
+        for generic in ["CkMechanismParams::Flat", "CkMechanismParams::Null"] {
+            assert!(
+                body.iter().any(|line| line.contains(generic) && line.contains("=>")),
+                "R12: backend must reconstruct generic {generic}"
+            );
+        }
+    }
+
+    /// FNV-1a 64 over bytes: std-only and deterministic across runs (the
+    /// freeze digest must not depend on a random seed).
+    fn fnv1a_64(bytes: &[u8]) -> u64 {
+        let mut hash = 0xcbf29ce484222325u64;
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash
+    }
+
+    /// Frozen manifest digest (R21): FNV-1a 64 of the checked-in
+    /// [`MANIFEST_TOML`](super::MANIFEST_TOML). Manifest entries are
+    /// immutable from here — any later layout change requires a new
+    /// transport version (S2 §3 fingerprint freeze). A digest change
+    /// without a version bump fails REVIEW, not the test: the test pins
+    /// the value; the R-task review verdicts any change.
+    const MANIFEST_DIGEST: u64 = 0x8f88efabb3d6cbab;
+
+    #[test]
+    fn r21_manifest_digest_freeze() {
+        assert_eq!(
+            fnv1a_64(super::MANIFEST_TOML.as_bytes()),
+            MANIFEST_DIGEST,
+            "frozen manifest digest changed: review any manifest edit against \
+             S2 §8 + the S2 §3 version rule before updating MANIFEST_DIGEST"
+        );
     }
 }
