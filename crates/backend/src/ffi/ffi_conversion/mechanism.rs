@@ -1804,6 +1804,16 @@ fn mechanism_to_ffi_at_depth(mechanism: &CkMechanism, depth: u8) -> CkResult<Ffi
         // fields. Unknown mechanisms must be added to the TOML registry.
         CkMechanismParams::Raw(_) => Err(CkRv::MECHANISM_PARAM_INVALID),
 
+        // -- Flat/Null (R9): reject until the validated path lands ---------
+        // Unvalidated v1 values must never reach FFI reconstruction: R12
+        // retypes this function to accept only `ValidatedMechanismParams`
+        // and adds the guarded Flat / with_null_param arms there. Until
+        // then, fail closed (this also preserves the pre-R9 external
+        // behavior for v1 wire input, which conversion used to reject).
+        CkMechanismParams::Flat(_) | CkMechanismParams::Null { .. } => {
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        }
+
         // -- TLS 1.2 Master Key Derive: nested SSL3_RANDOM_DATA + pVersion ---
         CkMechanismParams::Tls12MasterKeyDerive(p) => {
             let mut client_random = Zeroizing::new(p.random_info.client_random.clone());

@@ -7,16 +7,17 @@ use crate::pkcs11_proxy_ng::v1 as v1_proto;
 // boundary (response/request construction); the standing justification lives in
 // `secret_boundary` docs. No plain copy is retained past the enclosing encode.
 use crate::secret_boundary::secret_to_plain;
+use pkcs11_proxy_ng_types::shape_descriptors::ParamAbi;
 use pkcs11_proxy_ng_types::{
     AesCbcEncryptDataParams, AesCtrParams, AriaCbcEncryptDataParams, CamelliaCbcEncryptDataParams,
     CamelliaCtrParams, CcmParams, CcmWrapParams, ChaCha20Params, CkGeneratorFunction, CkKdf,
     CkMechanism, CkMechanismFlags, CkMechanismInfo, CkMechanismParams, CkMechanismType, CkMgf,
     CkOaepSource, CkObjectHandle, CkRv, DesCbcEncryptDataParams, Ecdh1DeriveParams, ExtractParams,
-    GcmParams, GcmWrapParams, IvParams, KeyDerivationStringData, KmacParams, MacGeneralParams,
-    MuGenParams, ObjectHandleParam, RawMechanismParams, Rc2CbcParams, Rc2MacGeneralParams,
-    Rc5CbcParams, Rc5MacGeneralParams, Rc5Params, RsaPkcsOaepParams, RsaPkcsPssParams,
-    Salsa20ChaCha20Poly1305Params, Salsa20Params, SecretBytes, SeedCbcEncryptDataParams,
-    SignAdditionalContext, TlsMacParams, XeddsaParams,
+    FlatParams, GcmParams, GcmWrapParams, IvParams, KeyDerivationStringData, KmacParams,
+    MECHANISM_PARAMETER_TRANSPORT_VERSION, MacGeneralParams, MuGenParams, ObjectHandleParam,
+    RawMechanismParams, Rc2CbcParams, Rc2MacGeneralParams, Rc5CbcParams, Rc5MacGeneralParams,
+    Rc5Params, RsaPkcsOaepParams, RsaPkcsPssParams, Salsa20ChaCha20Poly1305Params, Salsa20Params,
+    SecretBytes, SeedCbcEncryptDataParams, SignAdditionalContext, TlsMacParams, XeddsaParams,
 };
 
 impl TryFrom<&CkMechanism> for v1_proto::Mechanism {
@@ -392,6 +393,21 @@ impl TryFrom<&CkMechanism> for v1_proto::Mechanism {
                     v1_proto::RawMechanismParams { data: secret_to_plain(&p.data) },
                 ))
             }
+            // Versioned representable parameters (S2 §3/§6; R9): the stored
+            // (threaded) version rides out; validation owns its enforcement.
+            Some(CkMechanismParams::Flat(p)) => Some(
+                v1_proto::mechanism::Params::FlatMechanismParams(v1_proto::FlatMechanismParams {
+                    data: secret_to_plain(&p.bytes),
+                    declared_len: p.declared_len,
+                    source_abi: domain_abi_to_wire(p.source_abi),
+                    shape_layout_fingerprint: p.fingerprint,
+                }),
+            ),
+            Some(CkMechanismParams::Null { declared_len, .. }) => {
+                Some(v1_proto::mechanism::Params::NullMechanismParams(
+                    v1_proto::NullMechanismParams { declared_len: *declared_len },
+                ))
+            }
             // Vendor-specific parameter shapes
             Some(CkMechanismParams::Ecies(p)) => {
                 let proto_ecies: v1_proto::EciesParams = p.try_into()?;
@@ -416,12 +432,99 @@ impl TryFrom<&CkMechanism> for v1_proto::Mechanism {
                 Some(v1_proto::mechanism::Params::VendorObjectInsertParams(p.into()))
             }
         };
-        // R6: legacy encode stays version 0 (v1 emission is a later task).
+        // R9: v1 members emit their stored (threaded) version; every legacy
+        // member keeps emitting version 0 (bit-identical to the R6 encoder).
+        let version = match &m.params {
+            Some(CkMechanismParams::Flat(p)) => p.version,
+            Some(CkMechanismParams::Null { version, .. }) => *version,
+            _ => 0,
+        };
         Ok(v1_proto::Mechanism {
             mechanism_type: m.mechanism_type.0,
             params,
-            parameter_encoding_version: 0,
+            parameter_encoding_version: version,
         })
+    }
+}
+
+/// Map a wire `MechanismParamAbi` value to the domain ABI: known values
+/// map directly; `UNSPECIFIED`/unrecognized values thread through as
+/// `None` (transport validation rejects them — validation owns the ABI
+/// match, conversion only threads).
+fn wire_abi_to_domain(abi: i32) -> Option<ParamAbi> {
+    match v1_proto::MechanismParamAbi::try_from(abi).ok()? {
+        v1_proto::MechanismParamAbi::Unspecified => None,
+        v1_proto::MechanismParamAbi::Lp64NativeLe => Some(ParamAbi::Lp64NativeLe),
+        v1_proto::MechanismParamAbi::Ilp32NativeLe => Some(ParamAbi::Ilp32NativeLe),
+        v1_proto::MechanismParamAbi::Llp64Packed1Le => Some(ParamAbi::Llp64Packed1Le),
+    }
+}
+
+/// Map a domain ABI back to the wire: `None` re-encodes as `UNSPECIFIED`
+/// (faithful round-trip of an unknown/unspecified sender ABI).
+fn domain_abi_to_wire(abi: Option<ParamAbi>) -> i32 {
+    match abi {
+        None => v1_proto::MechanismParamAbi::Unspecified as i32,
+        Some(ParamAbi::Lp64NativeLe) => v1_proto::MechanismParamAbi::Lp64NativeLe as i32,
+        Some(ParamAbi::Ilp32NativeLe) => v1_proto::MechanismParamAbi::Ilp32NativeLe as i32,
+        Some(ParamAbi::Llp64Packed1Le) => v1_proto::MechanismParamAbi::Llp64Packed1Le as i32,
+    }
+}
+
+/// Decode a v1 Flat member: valid only with version 1 (S2 §3), with the
+/// materialized bytes exactly the declared extent.
+fn flat_from_wire(p: &v1_proto::FlatMechanismParams, version: u32) -> Result<FlatParams, CkRv> {
+    if version < MECHANISM_PARAMETER_TRANSPORT_VERSION {
+        // Flat with a legacy stamp is contradictory metadata (R6-pinned).
+        return Err(CkRv::MECHANISM_PARAM_INVALID);
+    }
+    if version > MECHANISM_PARAMETER_TRANSPORT_VERSION {
+        return Err(CkRv::FUNCTION_NOT_SUPPORTED);
+    }
+    let declared = usize::try_from(p.declared_len).map_err(|_| CkRv::MECHANISM_PARAM_INVALID)?;
+    if p.data.len() != declared {
+        return Err(CkRv::MECHANISM_PARAM_INVALID);
+    }
+    Ok(FlatParams {
+        bytes: SecretBytes::copy_from_slice(&p.data),
+        declared_len: p.declared_len,
+        source_abi: wire_abi_to_domain(p.source_abi),
+        fingerprint: p.shape_layout_fingerprint,
+        version,
+    })
+}
+
+/// Decode a v1 Null member: valid only with version 1 (S2 §3); no bytes,
+/// so neither the cap nor length equality applies at decode.
+fn null_from_wire(
+    p: &v1_proto::NullMechanismParams,
+    version: u32,
+) -> Result<CkMechanismParams, CkRv> {
+    if version < MECHANISM_PARAMETER_TRANSPORT_VERSION {
+        // Null with a legacy stamp is contradictory metadata (R6-pinned).
+        return Err(CkRv::MECHANISM_PARAM_INVALID);
+    }
+    if version > MECHANISM_PARAMETER_TRANSPORT_VERSION {
+        return Err(CkRv::FUNCTION_NOT_SUPPORTED);
+    }
+    Ok(CkMechanismParams::Null { declared_len: p.declared_len, version })
+}
+
+/// Whether a decoded oneof member carries any SET legacy `*_null` bool
+/// (S2 §3 NULL-bool reconciliation: v1 is presence-only, so a v1 decoder
+/// rejects any set legacy bool as contradictory metadata). Covers every
+/// legacy bool site in the classic conversion, including the nested
+/// RSA-AES-wrap OAEP params. Nested `Mechanism` messages (ECIES) recurse
+/// through the same entry point, so their bools are gated per message.
+fn has_set_legacy_null_bool(params: &Option<v1_proto::mechanism::Params>) -> bool {
+    match params {
+        Some(v1_proto::mechanism::Params::RsaPkcsOaepParams(p)) => p.source_null,
+        Some(v1_proto::mechanism::Params::GcmParams(p)) => p.iv_null || p.aad_null,
+        Some(v1_proto::mechanism::Params::CcmParams(p)) => p.nonce_null || p.aad_null,
+        Some(v1_proto::mechanism::Params::RsaAesKeyWrapParams(p)) => {
+            p.oaep_params.as_ref().is_some_and(|o| o.source_null)
+        }
+        _ => false,
     }
 }
 
@@ -429,6 +532,27 @@ impl TryFrom<&v1_proto::Mechanism> for CkMechanism {
     type Error = CkRv;
 
     fn try_from(m: &v1_proto::Mechanism) -> Result<Self, Self::Error> {
+        let version = m.parameter_encoding_version;
+        match &m.params {
+            // Unencoded messages stay version-blind (R6-pinned): nothing to
+            // misread in an absent oneof, and legacy Raw fails closed later
+            // at transport validation uniformly across versions.
+            None | Some(v1_proto::mechanism::Params::RawMechanismParams(_)) => {}
+            Some(_) => {
+                // S2 §3: a per-message version newer than this daemon on an
+                // encoded member is FUNCTION_NOT_SUPPORTED pre-entry. (R6
+                // pinned version-blindness as current behavior with "R9 adds
+                // v1 enforcement" — this is that enforcement.)
+                if version > MECHANISM_PARAMETER_TRANSPORT_VERSION {
+                    return Err(CkRv::FUNCTION_NOT_SUPPORTED);
+                }
+                // S2 §3 NULL-bool reconciliation (TODO(R9) in the R6
+                // contradictory-metadata vectors).
+                if version != 0 && has_set_legacy_null_bool(&m.params) {
+                    return Err(CkRv::MECHANISM_PARAM_INVALID);
+                }
+            }
+        }
         let params = match &m.params {
             None => None,
             Some(v1_proto::mechanism::Params::RsaPkcsPssParams(p)) => {
@@ -770,6 +894,13 @@ impl TryFrom<&v1_proto::Mechanism> for CkMechanism {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
                     data: SecretBytes::copy_from_slice(&p.data),
                 }))
+            }
+            // Versioned representable parameters (S2 §3/§6; R9).
+            Some(v1_proto::mechanism::Params::FlatMechanismParams(p)) => {
+                Some(CkMechanismParams::Flat(flat_from_wire(p, m.parameter_encoding_version)?))
+            }
+            Some(v1_proto::mechanism::Params::NullMechanismParams(p)) => {
+                Some(null_from_wire(p, m.parameter_encoding_version)?)
             }
             // Vendor-specific parameter shapes
             Some(v1_proto::mechanism::Params::EciesParams(p)) => {
