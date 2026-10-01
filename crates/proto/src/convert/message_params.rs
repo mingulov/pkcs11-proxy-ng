@@ -531,7 +531,8 @@ impl From<&MessageParameter> for v1_proto::MessageParameter {
                 v1_proto::message_parameter::Params::SalsaChachaMessageParams(p.into())
             }
         };
-        v1_proto::MessageParameter { params: Some(params) }
+        // R2: legacy encode stays version 0 (v1 emission is R5).
+        v1_proto::MessageParameter { params: Some(params), parameter_encoding_version: 0 }
     }
 }
 
@@ -570,6 +571,11 @@ fn validate_structured_wire_params(
             p.tag.len(),
             p.tag_null_len,
         ),
+        // R2: fail-closed until R3 defines v1 acceptance (opaque valid only
+        // with version 1; legacy raw stays rejected at every version).
+        v1_proto::message_parameter::Params::OpaqueMessageParams(_) => {
+            Err(pkcs11_proxy_ng_types::CkRv::MECHANISM_PARAM_INVALID)
+        }
     }
 }
 
@@ -603,6 +609,12 @@ impl TryFrom<&v1_proto::MessageParameter> for MessageParameter {
                 let parameter = MessageParameter::SalaChacha(p.into());
                 Ok(parameter)
             }
+            // R2: decode passes opaque bytes through at any version (unknown
+            // versions must not fail decode); enforcement is validation
+            // behavior (R3/R4).
+            Some(v1_proto::message_parameter::Params::OpaqueMessageParams(p)) => {
+                Ok(MessageParameter::Raw(SecretBytes::copy_from_slice(&p.data)))
+            }
             None => Err(super::ABSENT_MESSAGE_ONEOF_RV),
         }
     }
@@ -626,13 +638,21 @@ impl MessageParameter {
         // buffer with `mem::take`.
         let mut taken = p.params.take();
         if let Some(params) = taken.as_ref()
-            && !matches!(params, v1_proto::message_parameter::Params::Raw(_))
+            && !matches!(
+                params,
+                v1_proto::message_parameter::Params::Raw(_)
+                    | v1_proto::message_parameter::Params::OpaqueMessageParams(_)
+            )
         {
             validate_structured_wire_params(params)?;
         }
         match taken.as_mut() {
             Some(v1_proto::message_parameter::Params::Raw(data)) => {
                 Ok(MessageParameter::Raw(SecretBytes::new(std::mem::take(data))))
+            }
+            // R2: owned passthrough mirrors the borrowed decode (no copy).
+            Some(v1_proto::message_parameter::Params::OpaqueMessageParams(p)) => {
+                Ok(MessageParameter::Raw(SecretBytes::new(std::mem::take(&mut p.data))))
             }
             Some(v1_proto::message_parameter::Params::GcmMessageParams(p)) => {
                 Ok(MessageParameter::GcmMessage((&*p).into()))
@@ -869,7 +889,7 @@ mod tests {
     #[test]
     fn message_parameter_none_returns_error() {
         // W1-C8-03: absent oneof must report the documented sibling-wide RV.
-        let proto = v1_proto::MessageParameter { params: None };
+        let proto = v1_proto::MessageParameter { params: None, parameter_encoding_version: 0 };
         assert_eq!(
             MessageParameter::try_from(&proto),
             Err(crate::convert::ABSENT_MESSAGE_ONEOF_RV),
@@ -932,6 +952,7 @@ mod tests {
                     tag_null_len: None,
                 },
             )),
+            parameter_encoding_version: 0,
         };
 
         assert_eq!(
@@ -954,6 +975,7 @@ mod tests {
                     tag_null_len: None,
                 },
             )),
+            parameter_encoding_version: 0,
         };
         let wrong_ccm_nonce = v1_proto::MessageParameter {
             params: Some(v1_proto::message_parameter::Params::CcmMessageParams(
@@ -968,6 +990,7 @@ mod tests {
                     mac_null_len: None,
                 },
             )),
+            parameter_encoding_version: 0,
         };
 
         assert!(MessageParameter::try_from(&wrong_gcm_tag).is_err());
@@ -988,6 +1011,7 @@ mod tests {
                     tag_null_len: None,
                 },
             )),
+            parameter_encoding_version: 0,
         };
         let mut bytes_form = valid.clone();
         let Some(v1_proto::message_parameter::Params::SalsaChachaMessageParams(params)) =
@@ -1145,11 +1169,191 @@ mod tests {
         for data in [vec![], vec![0xA5]] {
             let wire = v1_proto::MessageParameter {
                 params: Some(v1_proto::message_parameter::Params::Raw(data)),
+                parameter_encoding_version: 0,
             };
             assert_eq!(
                 validate_structured_wire_parameter(&wire),
                 Err(pkcs11_proxy_ng_types::CkRv::MECHANISM_PARAM_INVALID),
             );
         }
+    }
+
+    // R2 golden tests: v1 message-opaque wire encoding (S2 §3 + F1 ruling)
+    // and the discovery capability. Additive only: legacy encodings must
+    // decode bit-identically before and after the v1 fields land.
+
+    #[test]
+    fn legacy_version_zero_message_decodes_bit_identically() {
+        use prost::Message as _;
+        // Golden wire bytes produced by the pre-v1 schema (oneof only, no
+        // version field): field 1 (raw, LEN) pins the legacy encoding.
+        for (payload, golden) in
+            [(&[][..], &[0x0A, 0x00][..]), (b"AB".as_slice(), &[0x0A, 0x02, 0x41, 0x42][..])]
+        {
+            let decoded = v1_proto::MessageParameter::decode(golden).unwrap();
+            assert_eq!(decoded.parameter_encoding_version, 0);
+            assert_eq!(
+                decoded.params,
+                Some(v1_proto::message_parameter::Params::Raw(payload.to_vec())),
+            );
+            assert_eq!(
+                MessageParameter::try_from(&decoded).unwrap(),
+                MessageParameter::Raw(SecretBytes::copy_from_slice(payload)),
+            );
+            // v1 encode of a legacy value emits no new bytes.
+            let encoded = v1_proto::MessageParameter::from(&MessageParameter::Raw(
+                SecretBytes::copy_from_slice(payload),
+            ));
+            assert_eq!(encoded.parameter_encoding_version, 0);
+            assert_eq!(encoded.encode_to_vec(), golden);
+        }
+        // Default structured arm: field 2 (LEN, empty) is the whole message.
+        let golden = [0x12, 0x00];
+        let decoded = v1_proto::MessageParameter::decode(golden.as_slice()).unwrap();
+        assert_eq!(decoded.parameter_encoding_version, 0);
+        assert_eq!(
+            decoded.params,
+            Some(v1_proto::message_parameter::Params::GcmMessageParams(
+                v1_proto::GcmMessageParams::default(),
+            )),
+        );
+    }
+
+    #[test]
+    fn v1_wire_tags_pin_opaque_and_version_placement() {
+        use prost::Message as _;
+        // Pins MessageParameter tags 5 (opaque, LEN) and 6 (version, varint)
+        // plus OpaqueMessageParams tags 1 (data, LEN) and 2 (declared_len,
+        // varint). Hand-computed, not round-tripped.
+        let golden = [0x2A, 0x06, 0x0A, 0x02, 0x41, 0x42, 0x10, 0x02, 0x30, 0x01];
+        let wire = v1_proto::MessageParameter {
+            params: Some(v1_proto::message_parameter::Params::OpaqueMessageParams(
+                v1_proto::OpaqueMessageParams { data: b"AB".to_vec(), declared_len: 2 },
+            )),
+            parameter_encoding_version: 1,
+        };
+        assert_eq!(wire.encode_to_vec(), golden);
+        let decoded = v1_proto::MessageParameter::decode(golden.as_slice()).unwrap();
+        assert_eq!(decoded, wire);
+    }
+
+    #[test]
+    fn v1_presence_matrix_round_trips() {
+        use prost::Message as _;
+        let opaque = || {
+            Some(v1_proto::message_parameter::Params::OpaqueMessageParams(
+                v1_proto::OpaqueMessageParams { data: vec![0xA5; 16], declared_len: 16 },
+            ))
+        };
+        let structured = || {
+            Some(v1_proto::message_parameter::Params::GcmMessageParams(
+                v1_proto::GcmMessageParams::default(),
+            ))
+        };
+        for (name, params) in [("absent", None), ("opaque", opaque()), ("structured", structured())]
+        {
+            for version in [0u32, 1u32] {
+                let wire = v1_proto::MessageParameter {
+                    params: params.clone(),
+                    parameter_encoding_version: version,
+                };
+                let round_tripped =
+                    v1_proto::MessageParameter::decode(wire.encode_to_vec().as_slice()).unwrap();
+                assert_eq!(round_tripped, wire, "{name} version {version} must round-trip");
+            }
+        }
+        // Decode passes opaque bytes through at either version; enforcement
+        // (including the version-0 contradiction) is validation behavior.
+        for version in [0u32, 1u32] {
+            let wire = v1_proto::MessageParameter {
+                params: opaque(),
+                parameter_encoding_version: version,
+            };
+            assert_eq!(
+                MessageParameter::try_from(&wire).unwrap(),
+                MessageParameter::Raw(SecretBytes::copy_from_slice(&[0xA5; 16])),
+                "version {version} opaque must pass decode",
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_version_passes_through_decode() {
+        use prost::Message as _;
+        // Rejection of too-new versions is enforcement behavior (R4); decode
+        // itself must not fail.
+        for version in [2u32, 7, 99, u32::MAX] {
+            let wire = v1_proto::MessageParameter {
+                params: Some(v1_proto::message_parameter::Params::OpaqueMessageParams(
+                    v1_proto::OpaqueMessageParams { data: b"AB".to_vec(), declared_len: 2 },
+                )),
+                parameter_encoding_version: version,
+            };
+            let decoded =
+                v1_proto::MessageParameter::decode(wire.encode_to_vec().as_slice()).unwrap();
+            assert_eq!(decoded.parameter_encoding_version, version);
+            assert_eq!(
+                MessageParameter::try_from(&decoded).unwrap(),
+                MessageParameter::Raw(SecretBytes::copy_from_slice(b"AB")),
+                "version {version} must pass borrowed decode",
+            );
+            assert_eq!(
+                MessageParameter::try_from_owned(decoded).unwrap(),
+                MessageParameter::Raw(SecretBytes::copy_from_slice(b"AB")),
+                "version {version} must pass owned decode",
+            );
+        }
+        // Legacy arms are equally version-blind at decode.
+        let legacy = v1_proto::MessageParameter {
+            params: Some(v1_proto::message_parameter::Params::Raw(b"AB".to_vec())),
+            parameter_encoding_version: 99,
+        };
+        assert!(MessageParameter::try_from(&legacy).is_ok());
+        let missing = v1_proto::MessageParameter { params: None, parameter_encoding_version: 99 };
+        assert_eq!(
+            MessageParameter::try_from(&missing),
+            Err(crate::convert::ABSENT_MESSAGE_ONEOF_RV),
+        );
+    }
+
+    #[test]
+    fn discovery_capability_fields_round_trip() {
+        use prost::Message as _;
+        // Absent from older daemons: legacy decode yields None/None.
+        let legacy = v1_proto::GetBackendInterfacesResponse::decode([].as_slice()).unwrap();
+        assert_eq!(legacy.mechanism_parameter_transport_version, None);
+        assert_eq!(legacy.backend_mechanism_abi, None);
+        // Pins discovery tags 9 (version, varint) and 10 (abi, varint enum).
+        let golden = [0x48, 0x01, 0x50, 0x01];
+        let wire = v1_proto::GetBackendInterfacesResponse {
+            mechanism_parameter_transport_version: Some(1),
+            backend_mechanism_abi: Some(v1_proto::MechanismParamAbi::Lp64NativeLe as i32),
+            ..Default::default()
+        };
+        assert_eq!(wire.encode_to_vec(), golden);
+        let decoded = v1_proto::GetBackendInterfacesResponse::decode(golden.as_slice()).unwrap();
+        assert_eq!(decoded.mechanism_parameter_transport_version, Some(1));
+        assert_eq!(
+            decoded.backend_mechanism_abi,
+            Some(v1_proto::MechanismParamAbi::Lp64NativeLe as i32),
+        );
+    }
+
+    #[test]
+    fn mechanism_param_abi_enum_values_are_pinned() {
+        use v1_proto::MechanismParamAbi as Abi;
+        assert_eq!(Abi::Unspecified as i32, 0);
+        assert_eq!(Abi::Lp64NativeLe as i32, 1);
+        assert_eq!(Abi::Ilp32NativeLe as i32, 2);
+        assert_eq!(Abi::Llp64Packed1Le as i32, 3);
+        for (raw, expected) in [
+            (0, Abi::Unspecified),
+            (1, Abi::Lp64NativeLe),
+            (2, Abi::Ilp32NativeLe),
+            (3, Abi::Llp64Packed1Le),
+        ] {
+            assert_eq!(Abi::try_from(raw), Ok(expected));
+        }
+        assert!(Abi::try_from(4).is_err());
     }
 }

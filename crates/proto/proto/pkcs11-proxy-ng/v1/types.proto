@@ -320,7 +320,18 @@ message MessageParameter {
     GcmMessageParams gcm_message_params = 2;
     CcmMessageParams ccm_message_params = 3;
     Salsa20ChaCha20Poly1305MessageParams salsa_chacha_message_params = 4;
+    // F1 v1 encoding (S2 §3): versioned opaque bytes for message params with
+    // no typed shape. Valid only with `parameter_encoding_version == 1`.
+    OpaqueMessageParams opaque_message_params = 5;
   }
+  // Mechanism-parameter transport version (S2 §3). Absent/zero = legacy
+  // encoding, legacy decode. 1 = this contract: `opaque_message_params`
+  // carries exact caller bytes with `declared_len`. A newer daemon keeps
+  // accepting older encodings; a v1 shim facing capability 2 uses v1. A
+  // per-message version newer than the daemon understands is
+  // FUNCTION_NOT_SUPPORTED pre-entry. Legacy `raw` is rejected with
+  // PARAM_INVALID at every version.
+  uint32 parameter_encoding_version = 6;
 }
 
 // CK_ASYNC_DATA — result structure for C_AsyncComplete.
@@ -1719,6 +1730,15 @@ message GetBackendInterfacesResponse {
   optional bool pointer_safe_message_parameters = 6;
   optional bool pointer_safe_authenticated_parameters = 7;
   optional uint32 exact_output_effects_version = 8;
+  // Mechanism-parameter transport capability (S2 §3): the highest v1
+  // encoding version the daemon accepts. Absent/zero = legacy only. One
+  // version number governs classic + message v1. Versions are monotonic
+  // maximum capabilities: a discovery capability newer than the shim knows
+  // is NOT an error (the shim uses the newest version it understands).
+  optional uint32 mechanism_parameter_transport_version = 9;
+  // Daemon's native mechanism-parameter ABI (see MechanismParamAbi).
+  // Absent = unspecified (legacy daemon).
+  optional MechanismParamAbi backend_mechanism_abi = 10;
 }
 
 // Server-driven mechanism parameter registry payload. Carries the

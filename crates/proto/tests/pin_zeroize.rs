@@ -390,7 +390,10 @@ fn unknown_vendor_checkpoint() {
     spec.zeroize();
     assert!(spec.value.is_none(), "ParameterRoundtripSpec.value must not survive zeroize");
 
-    let mut parameter = MessageParameter { params: Some(MessageParams::Raw(vec![0x5Au8; 8])) };
+    let mut parameter = MessageParameter {
+        params: Some(MessageParams::Raw(vec![0x5Au8; 8])),
+        parameter_encoding_version: 0,
+    };
     parameter.zeroize();
     assert!(parameter.params.is_none(), "MessageParameter.params must not survive zeroize");
 }

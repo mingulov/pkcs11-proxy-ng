@@ -169,6 +169,10 @@ pub(super) async fn get_backend_interfaces(
         backend_byte_order: Some(backend.abi_byte_order()),
         backend_attribute_stride: Some(backend.abi_attribute_stride()),
         pointer_safe_message_parameters: Some(true),
+        // R2: capability lands unadvertised (R23 flips per D1(a)); R4 wires
+        // the daemon's actual values here.
+        mechanism_parameter_transport_version: None,
+        backend_mechanism_abi: None,
     };
     if let Ok(mut cache) = DISCOVERY_CACHE.lock() {
         cache.put(now, backend_id, &registry_payload, response.clone());

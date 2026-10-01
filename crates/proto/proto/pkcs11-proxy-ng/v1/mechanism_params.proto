@@ -749,3 +749,32 @@ message VendorObjectInsertParams {
   bytes context = 2;
   bytes object_data = 3;
 }
+
+// ---------------------------------------------------------------------------
+// Mechanism parameter transport versioning (S2 §3; F1 message-opaque v1)
+// ---------------------------------------------------------------------------
+
+// Native C ABI of the daemon's mechanism-parameter structs, advertised via
+// GetBackendInterfacesResponse.backend_mechanism_abi. The v1 opaque contract
+// reconstructs caller bytes under this layout; daemons and shims that
+// disagree on layout must not exchange v1 opaque bytes.
+enum MechanismParamAbi {
+  MECHANISM_PARAM_ABI_UNSPECIFIED = 0;
+  // LP64 little-endian (Linux x86_64/aarch64): 8-byte CK_ULONG, natural
+  // alignment.
+  MECHANISM_PARAM_ABI_LP64_NATIVE_LE = 1;
+  // ILP32 little-endian: 4-byte CK_ULONG, natural alignment.
+  MECHANISM_PARAM_ABI_ILP32_NATIVE_LE = 2;
+  // LLP64 little-endian, 1-byte packed (Windows-style): 4-byte CK_ULONG
+  // with packed-struct layout.
+  MECHANISM_PARAM_ABI_LLP64_PACKED1_LE = 3;
+}
+
+// Versioned opaque message parameter (F1 v1 encoding). `data` holds exactly
+// `declared_len` bytes; the 64 KiB outer-parameter cap applies. NULL is not
+// expressible here — NULL message params keep their existing `*_null_len`
+// encoding. Valid only with `parameter_encoding_version == 1` (R2 step 4).
+message OpaqueMessageParams {
+  bytes data = 1;
+  uint64 declared_len = 2;
+}

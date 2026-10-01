@@ -284,7 +284,10 @@ fn authenticated_output_owned_matches_borrowed_error_exits() {
     );
     // Structured acknowledgement with absent params.
     let empty_message = AuthenticatedMechanismOutput {
-        output: Some(WireOutput::MessageParameter(WireMessageParameter { params: None })),
+        output: Some(WireOutput::MessageParameter(WireMessageParameter {
+            params: None,
+            parameter_encoding_version: 0,
+        })),
     };
     assert_eq!(AuthenticatedOutput::try_from(&empty_message).unwrap_err(), CkRv::ARGUMENTS_BAD);
     assert_eq!(
@@ -295,6 +298,7 @@ fn authenticated_output_owned_matches_borrowed_error_exits() {
     let raw_message = AuthenticatedMechanismOutput {
         output: Some(WireOutput::MessageParameter(WireMessageParameter {
             params: Some(WireParams::Raw(canary())),
+            parameter_encoding_version: 0,
         })),
     };
     assert_eq!(
@@ -312,6 +316,7 @@ fn authenticated_output_owned_matches_borrowed_error_exits() {
     let bad_gcm = AuthenticatedMechanismOutput {
         output: Some(WireOutput::MessageParameter(WireMessageParameter {
             params: Some(WireParams::GcmMessageParams(invalid_gcm)),
+            parameter_encoding_version: 0,
         })),
     };
     assert_eq!(AuthenticatedOutput::try_from(&bad_gcm).unwrap_err(), CkRv::MECHANISM_PARAM_INVALID);
@@ -330,14 +335,17 @@ fn authenticated_output_owned_matches_borrowed_error_exits() {
 #[test]
 fn message_parameter_owned_matches_borrowed_error_exits() {
     // Absent oneof.
-    let missing = WireMessageParameter { params: None };
+    let missing = WireMessageParameter { params: None, parameter_encoding_version: 0 };
     assert_eq!(MessageParameter::try_from(&missing).unwrap_err(), CkRv::ARGUMENTS_BAD);
     assert_eq!(MessageParameter::try_from_owned(missing).unwrap_err(), CkRv::ARGUMENTS_BAD);
     // Invalid structured arm (tag_bits > 128). Struct-update syntax cannot
     // move fields out of a `ZeroizeOnDrop` message, so mutate a bound default.
     let mut invalid_gcm = GcmMessageParams::default();
     invalid_gcm.tag_bits = 129;
-    let bad_gcm = WireMessageParameter { params: Some(WireParams::GcmMessageParams(invalid_gcm)) };
+    let bad_gcm = WireMessageParameter {
+        params: Some(WireParams::GcmMessageParams(invalid_gcm)),
+        parameter_encoding_version: 0,
+    };
     assert_eq!(MessageParameter::try_from(&bad_gcm).unwrap_err(), CkRv::MECHANISM_PARAM_INVALID);
     assert_eq!(
         MessageParameter::try_from_owned(bad_gcm).unwrap_err(),
@@ -347,7 +355,10 @@ fn message_parameter_owned_matches_borrowed_error_exits() {
 
 #[test]
 fn message_parameter_raw_adopts_allocation() {
-    let message = WireMessageParameter { params: Some(WireParams::Raw(canary())) };
+    let message = WireMessageParameter {
+        params: Some(WireParams::Raw(canary())),
+        parameter_encoding_version: 0,
+    };
     let original = match message.params.as_ref() {
         Some(WireParams::Raw(data)) => data.as_ptr(),
         _ => panic!("fixture must hold the Raw arm"),
