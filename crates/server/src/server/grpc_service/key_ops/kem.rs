@@ -14,11 +14,16 @@ use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
 
+use pkcs11_proxy_ng_types::shape_descriptors::Operation;
 use pkcs11_proxy_ng_types::{CkObjectHandle, CkOutputBufferSpec, CkRv};
 
 use super::super::authorization::mechanism_permitted;
 use super::super::convert_template_opt;
 use super::super::mechanism_handles::remap_mechanism_handles;
+use super::super::mechanism_input::{
+    check_operator_exclusion, current_registry_snapshot, daemon_validation_abis,
+    validate_mechanism_transport,
+};
 use super::super::service_utils::{
     ExactCompletion, check_sanitize, ensure_private_mint_allowed, input_from_wire, parse_mechanism,
     register_session_object_handle, resolve_session_and_key, spawn_backend, spawn_backend_exact,
@@ -56,7 +61,19 @@ pub(crate) async fn encapsulate_key(
         }
     };
 
-    let mut mechanism = match parse_mechanism(req.mechanism) {
+    // S2 §6: single registry snapshot feeds exclusion and transport
+    // validation for this request.
+    let registry = match current_registry_snapshot(ctx) {
+        Ok(registry) => registry,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyResponse {
+                ck_rv: rv.0,
+                ciphertext: Vec::new(),
+                key_handle: 0,
+            }));
+        }
+    };
+    let mechanism = match parse_mechanism(req.mechanism) {
         Ok(mechanism) => mechanism,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyResponse {
@@ -66,6 +83,14 @@ pub(crate) async fn encapsulate_key(
             }));
         }
     };
+    // S2 §6: operator exclusion precedes authorization.
+    if let Err(rv) = check_operator_exclusion(&registry, mechanism.mechanism_type) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyResponse {
+            ck_rv: rv.0,
+            ciphertext: Vec::new(),
+            key_handle: 0,
+        }));
+    }
 
     if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
         return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyResponse {
@@ -75,17 +100,39 @@ pub(crate) async fn encapsulate_key(
         }));
     }
 
+    // S2 §6: transport validation (representable-shape gate) over the
+    // single snapshot precedes handle translation.
+    let (daemon_native_abi, daemon_width_abi) = daemon_validation_abis();
+    let validated = match validate_mechanism_transport(
+        &registry,
+        &mechanism,
+        Operation::General,
+        daemon_native_abi,
+        daemon_width_abi,
+    ) {
+        Ok(validated) => validated,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyResponse {
+                ck_rv: rv.0,
+                ciphertext: Vec::new(),
+                key_handle: 0,
+            }));
+        }
+    };
     // B1: remap object handles embedded in the mechanism parameters;
     // gate each through per-object authz when active (C1).
-    if let Err(rv) =
-        remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
-    {
-        return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyResponse {
-            ck_rv: rv.0,
-            ciphertext: Vec::new(),
-            key_handle: 0,
-        }));
-    }
+    let validated =
+        match remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, validated).await
+        {
+            Ok(validated) => validated,
+            Err(rv) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyResponse {
+                    ck_rv: rv.0,
+                    ciphertext: Vec::new(),
+                    key_handle: 0,
+                }));
+            }
+        };
 
     let template = match convert_template_opt(&req.template, req.template_null) {
         Ok(template) => template,
@@ -118,8 +165,9 @@ pub(crate) async fn encapsulate_key(
     let is_private = template_declares_private_object(template_view);
     let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
+    // TODO(R20): insert sanitize_mechanism_input(validated) → backend call.
     let result = spawn_backend(move || {
-        backend.encapsulate_key(session, &mechanism, public_key, template.as_deref())
+        backend.encapsulate_key(session, &validated, public_key, template.as_deref())
     })
     .await?;
 
@@ -171,7 +219,18 @@ pub(crate) async fn decapsulate_key(
             }
         };
 
-    let mut mechanism = match parse_mechanism(req.mechanism) {
+    // S2 §6: single registry snapshot feeds exclusion and transport
+    // validation for this request.
+    let registry = match current_registry_snapshot(ctx) {
+        Ok(registry) => registry,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::DecapsulateKeyResponse {
+                ck_rv: rv.0,
+                key_handle: 0,
+            }));
+        }
+    };
+    let mechanism = match parse_mechanism(req.mechanism) {
         Ok(mechanism) => mechanism,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::DecapsulateKeyResponse {
@@ -180,6 +239,13 @@ pub(crate) async fn decapsulate_key(
             }));
         }
     };
+    // S2 §6: operator exclusion precedes authorization.
+    if let Err(rv) = check_operator_exclusion(&registry, mechanism.mechanism_type) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::DecapsulateKeyResponse {
+            ck_rv: rv.0,
+            key_handle: 0,
+        }));
+    }
 
     if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
         return Ok(Response::new(pkcs11_proxy_ng_proto::DecapsulateKeyResponse {
@@ -188,16 +254,37 @@ pub(crate) async fn decapsulate_key(
         }));
     }
 
+    // S2 §6: transport validation (representable-shape gate) over the
+    // single snapshot precedes handle translation.
+    let (daemon_native_abi, daemon_width_abi) = daemon_validation_abis();
+    let validated = match validate_mechanism_transport(
+        &registry,
+        &mechanism,
+        Operation::General,
+        daemon_native_abi,
+        daemon_width_abi,
+    ) {
+        Ok(validated) => validated,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::DecapsulateKeyResponse {
+                ck_rv: rv.0,
+                key_handle: 0,
+            }));
+        }
+    };
     // B1: remap object handles embedded in the mechanism parameters;
     // gate each through per-object authz when active (C1).
-    if let Err(rv) =
-        remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
-    {
-        return Ok(Response::new(pkcs11_proxy_ng_proto::DecapsulateKeyResponse {
-            ck_rv: rv.0,
-            key_handle: 0,
-        }));
-    }
+    let validated =
+        match remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, validated).await
+        {
+            Ok(validated) => validated,
+            Err(rv) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::DecapsulateKeyResponse {
+                    ck_rv: rv.0,
+                    key_handle: 0,
+                }));
+            }
+        };
 
     let template = match convert_template_opt(&req.template, req.template_null) {
         Ok(template) => template,
@@ -239,10 +326,11 @@ pub(crate) async fn decapsulate_key(
         }));
     }
     let backend = Arc::clone(backend_ref);
+    // TODO(R20): insert sanitize_mechanism_input(validated) → backend call.
     let result = spawn_backend(move || {
         backend.decapsulate_key(
             session,
-            &mechanism,
+            &validated,
             private_key,
             template.as_deref(),
             input_from_wire(&ciphertext, ciphertext_null_len),
@@ -309,7 +397,24 @@ pub(crate) async fn encapsulate_key_exact(
         }
     };
 
-    let mut mechanism = match parse_mechanism(req.mechanism) {
+    // S2 §6: single registry snapshot feeds exclusion and transport
+    // validation for this request.
+    let registry = match current_registry_snapshot(ctx) {
+        Ok(registry) => registry,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
+                result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
+                    apply_returned_len: Some(false),
+                    apply_object_handle: Some(false),
+                    ck_rv: rv.0,
+                    returned_len: 0,
+                    value: None,
+                    object_handle: 0,
+                }),
+            }));
+        }
+    };
+    let mechanism = match parse_mechanism(req.mechanism) {
         Ok(mechanism) => mechanism,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
@@ -324,6 +429,19 @@ pub(crate) async fn encapsulate_key_exact(
             }));
         }
     };
+    // S2 §6: operator exclusion precedes authorization.
+    if let Err(rv) = check_operator_exclusion(&registry, mechanism.mechanism_type) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
+            result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
+                apply_returned_len: Some(false),
+                apply_object_handle: Some(false),
+                ck_rv: rv.0,
+                returned_len: 0,
+                value: None,
+                object_handle: 0,
+            }),
+        }));
+    }
 
     if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
         return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
@@ -338,22 +456,49 @@ pub(crate) async fn encapsulate_key_exact(
         }));
     }
 
+    // S2 §6: transport validation (representable-shape gate) over the
+    // single snapshot precedes handle translation.
+    let (daemon_native_abi, daemon_width_abi) = daemon_validation_abis();
+    let validated = match validate_mechanism_transport(
+        &registry,
+        &mechanism,
+        Operation::General,
+        daemon_native_abi,
+        daemon_width_abi,
+    ) {
+        Ok(validated) => validated,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
+                result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
+                    apply_returned_len: Some(false),
+                    apply_object_handle: Some(false),
+                    ck_rv: rv.0,
+                    returned_len: 0,
+                    value: None,
+                    object_handle: 0,
+                }),
+            }));
+        }
+    };
     // B1: remap object handles embedded in the mechanism parameters;
     // gate each through per-object authz when active (C1).
-    if let Err(rv) =
-        remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
-    {
-        return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
-            result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
-                apply_returned_len: Some(false),
-                apply_object_handle: Some(false),
-                ck_rv: rv.0,
-                returned_len: 0,
-                value: None,
-                object_handle: 0,
-            }),
-        }));
-    }
+    let validated =
+        match remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, validated).await
+        {
+            Ok(validated) => validated,
+            Err(rv) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
+                    result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
+                        apply_returned_len: Some(false),
+                        apply_object_handle: Some(false),
+                        ck_rv: rv.0,
+                        returned_len: 0,
+                        value: None,
+                        object_handle: 0,
+                    }),
+                }));
+            }
+        };
 
     let template = match convert_template_opt(&req.template, req.template_null) {
         Ok(template) => template,
@@ -403,10 +548,11 @@ pub(crate) async fn encapsulate_key_exact(
     let is_private = template_declares_private_object(template_view);
     let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
+    // TODO(R20): insert sanitize_mechanism_input(validated) → backend call.
     let result = spawn_backend_exact(move || {
         ExactCompletion::capture(backend.encapsulate_key_exact(
             session,
-            &mechanism,
+            &validated,
             public_key,
             template.as_deref(),
             &spec,

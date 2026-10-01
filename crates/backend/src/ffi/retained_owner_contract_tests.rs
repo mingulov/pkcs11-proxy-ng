@@ -66,7 +66,13 @@ fn init_and_encrypt(
 ) -> SecretBytes {
     reset_oracle(controls, 16);
     let gcm = gcm_mechanism();
-    backend.ffi_encrypt_init_with_output(session, &gcm, CkObjectHandle(1)).unwrap();
+    backend
+        .ffi_encrypt_init_with_output(
+            session,
+            &validated_mechanism_for_tests(&gcm),
+            CkObjectHandle(1),
+        )
+        .unwrap();
     backend.ffi_encrypt(session, CkInBuf::Bytes(b"data")).unwrap()
 }
 
@@ -280,7 +286,13 @@ fn native_owner_call_readback_is_one_transaction() {
     // no second Init can interleave, and the backend-side retained graph
     // is already in its family slot before the native readback completes.
     let gcm = gcm_mechanism();
-    backend.ffi_encrypt_init_with_output(session, &gcm, CkObjectHandle(1)).unwrap();
+    backend
+        .ffi_encrypt_init_with_output(
+            session,
+            &validated_mechanism_for_tests(&gcm),
+            CkObjectHandle(1),
+        )
+        .unwrap();
     assert!(backend.mech_cache.contains_key(&(session.0, OperationFamily::Encrypt)));
     unsafe {
         RetainedOracle_ArmGate(RETAINED_OP_ENCRYPT);

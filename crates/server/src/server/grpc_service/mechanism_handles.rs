@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 
 use pkcs11_proxy_ng_types::{
-    CkMechanism, CkMechanismParams, CkObjectHandle, CkRv, CkSessionHandle,
+    CkMechanismParams, CkObjectHandle, CkRv, CkSessionHandle, ValidatedMechanismParams,
 };
 
 use super::super::context_manager::ClientContextId;
@@ -63,16 +63,21 @@ use super::super::handle_map::{BackendHandle, VirtualHandle};
 /// `CKR_USER_NOT_LOGGED_IN` if a private embedded key is used while the
 /// caller is logically logged out, `CKR_OBJECT_HANDLE_INVALID` if any
 /// embedded handle is not owned by the caller or is denied by object/class
-/// policy. A mechanism with no parameters is a no-op.
+/// policy. A mechanism with no parameters is returned unchanged.
+///
+/// S2 §6 ownership: consumes the validated newtype and returns it —
+/// substitution of virtual→native handle integers preserves every
+/// validated property (lengths, caps, shape binding, ABI) by construction
+/// (see [`ValidatedMechanismParams::substitute_handles`]).
 pub(super) async fn remap_mechanism_handles(
     ctx: &super::HandlerContext,
     ctx_id: &ClientContextId,
     virtual_session_handle: u64,
     backend_session_handle: u64,
-    mechanism: &mut CkMechanism,
-) -> Result<(), CkRv> {
-    let Some(params) = mechanism.params.as_mut() else {
-        return Ok(());
+    validated: ValidatedMechanismParams,
+) -> Result<ValidatedMechanismParams, CkRv> {
+    let Some(params) = validated.mechanism().params.as_ref() else {
+        return Ok(validated);
     };
 
     if !ctx.token_policy.per_object_active() && !ctx.token_policy.per_class_active() {
@@ -81,7 +86,7 @@ pub(super) async fn remap_mechanism_handles(
         // acquisition, D6(1)-check each pair, then remap.
         let virtual_handles = collect_param_handles(params);
         if virtual_handles.is_empty() {
-            return Ok(()); // no embedded handles → nothing to remap
+            return Ok(validated); // no embedded handles → nothing to remap
         }
         let resolved: Vec<(u64, Option<u64>)> = match ctx
             .context_manager
@@ -114,7 +119,7 @@ pub(super) async fn remap_mechanism_handles(
         }
         let remapped: HashMap<u64, u64> =
             resolved.into_iter().filter_map(|(vh, bh)| bh.map(|b| (vh, b))).collect();
-        return remap_param_handles(params, &|h| remapped.get(&h).copied());
+        return substitute_validated_handles(validated, &|h| remapped.get(&h).copied());
     }
 
     // Gating path — object or class policy is active.
@@ -122,7 +127,7 @@ pub(super) async fn remap_mechanism_handles(
     // Phase 1: collect all non-zero embedded virtual handles.
     let virtual_handles = collect_param_handles(params);
     if virtual_handles.is_empty() {
-        return Ok(()); // no embedded handles → nothing to remap
+        return Ok(validated); // no embedded handles → nothing to remap
     }
 
     // Phase 2: resolve each virtual handle to a backend handle inside the
@@ -192,10 +197,33 @@ pub(super) async fn remap_mechanism_handles(
     //   not applicable" — a semantically different (and potentially insecure)
     //   operation, not a hard error.
     // · Some(bh != 0)         → permitted handle, use as-is.
-    remap_param_handles(params, &|h| match gated.get(&h).copied() {
+    substitute_validated_handles(validated, &|h| match gated.get(&h).copied() {
         Some(0) | None => None, // denied, fail-closed, or collect bug → reject
         other => other,
     })
+}
+
+/// Apply `resolve` to every embedded handle inside `validated`, consuming
+/// and returning the newtype (S2 §6). The fallible walk runs inside the
+/// substitution closure; on error the (possibly partially substituted)
+/// newtype is dropped and the RV returned, so no partial state escapes.
+fn substitute_validated_handles(
+    validated: ValidatedMechanismParams,
+    resolve: &impl Fn(u64) -> Option<u64>,
+) -> Result<ValidatedMechanismParams, CkRv> {
+    let mut failure = None;
+    let validated = validated.substitute_handles(|mechanism| {
+        let Some(params) = mechanism.params.as_mut() else {
+            return;
+        };
+        if let Err(rv) = remap_param_handles(params, resolve) {
+            failure = Some(rv);
+        }
+    });
+    match failure {
+        None => Ok(validated),
+        Some(rv) => Err(rv),
+    }
 }
 
 /// Collect all non-zero embedded object-handle values from `params`.
@@ -565,9 +593,28 @@ pub(super) fn remap_param_handles(
 
 #[cfg(test)]
 mod tests {
+    use super::super::mechanism_input::{daemon_validation_abis, validate_mechanism_transport};
     use super::*;
-    use pkcs11_proxy_ng_types::{HkdfParams, IvParams, X3dhInitiateParams};
+    use pkcs11_proxy_ng_types::shape_descriptors::Operation;
+    use pkcs11_proxy_ng_types::{
+        CkMechanism, HkdfParams, IvParams, MechanismRegistry, X3dhInitiateParams,
+    };
     use std::collections::HashMap;
+
+    /// Validate a typed mechanism for remap unit tests (typed passthrough
+    /// over the embedded default registry).
+    fn validated_for_remap_tests(mechanism: &CkMechanism) -> ValidatedMechanismParams {
+        let registry = MechanismRegistry::load(None).expect("embedded registry loads");
+        let (native_abi, width_abi) = daemon_validation_abis();
+        validate_mechanism_transport(
+            &registry,
+            mechanism,
+            Operation::General,
+            native_abi,
+            width_abi,
+        )
+        .expect("typed params pass transport validation")
+    }
 
     /// Build a resolver mapping the given virtual->backend pairs; unknown
     /// virtual handles resolve to `None`.
@@ -867,7 +914,7 @@ mod tests {
         );
 
         // Build an HKDF mechanism embedding `vo` as the salt_key_handle.
-        let mut mechanism = CkMechanism {
+        let mechanism = CkMechanism {
             mechanism_type: pkcs11_proxy_ng_types::CkMechanismType(0),
             params: Some(CkMechanismParams::Hkdf(HkdfParams {
                 extract: true,
@@ -880,9 +927,11 @@ mod tests {
             })),
         };
 
-        let result = remap_mechanism_handles(&ctx, &ctx_id, vs, bs, &mut mechanism).await;
+        let result =
+            remap_mechanism_handles(&ctx, &ctx_id, vs, bs, validated_for_remap_tests(&mechanism))
+                .await;
         assert_eq!(
-            result,
+            result.map(|_| ()),
             Err(CkRv::OBJECT_HANDLE_INVALID),
             "denied embedded handle must produce OBJECT_HANDLE_INVALID (C1)"
         );
@@ -897,7 +946,7 @@ mod tests {
         const ALLOWED_UID: &[u8] = &[0xaa, 0xbb, 0xcc];
         let (ctx, ctx_id, vs, bs, vo) = setup_c1_test(Some(ALLOWED_UID.to_vec())).await;
 
-        let mut mechanism = CkMechanism {
+        let mechanism = CkMechanism {
             mechanism_type: pkcs11_proxy_ng_types::CkMechanismType(0),
             params: Some(CkMechanismParams::Hkdf(HkdfParams {
                 extract: true,
@@ -910,15 +959,67 @@ mod tests {
             })),
         };
 
-        let result = remap_mechanism_handles(&ctx, &ctx_id, vs, bs, &mut mechanism).await;
-        assert!(result.is_ok(), "allowed embedded handle must remap successfully (C1): {result:?}");
+        let result =
+            remap_mechanism_handles(&ctx, &ctx_id, vs, bs, validated_for_remap_tests(&mechanism))
+                .await;
+        let validated = result.expect("allowed embedded handle must remap successfully (C1)");
         // The handle must remain non-zero (0 would mean denied/not-found).
-        let CkMechanism { params: Some(CkMechanismParams::Hkdf(out)), .. } = mechanism else {
+        let CkMechanism { params: Some(CkMechanismParams::Hkdf(out)), .. } = validated.into_inner()
+        else {
             panic!("mechanism params must still be Hkdf after remap");
         };
         assert_ne!(
             out.salt_key_handle.0, 0,
             "remapped backend handle must be non-zero for allowed object"
         );
+    }
+
+    /// R13 remap round-trip: virtual→native substitution changes ONLY the
+    /// embedded handle — mechanism binding, byte lengths, flags, and the
+    /// (absent) Flat grant are preserved.
+    #[tokio::test]
+    async fn remap_round_trip_preserves_everything_but_the_handle() {
+        use pkcs11_proxy_ng_types::CkMechanism;
+
+        const ALLOWED_UID: &[u8] = &[0xaa, 0xbb, 0xcc];
+        let (ctx, ctx_id, vs, bs, vo) = setup_c1_test(Some(ALLOWED_UID.to_vec())).await;
+
+        let mechanism = CkMechanism {
+            mechanism_type: pkcs11_proxy_ng_types::CkMechanismType(0x294),
+            params: Some(CkMechanismParams::Hkdf(HkdfParams {
+                extract: true,
+                expand: false,
+                prf_hash_mechanism: pkcs11_proxy_ng_types::CkMechanismType(0x250),
+                salt_type: 3,
+                salt: vec![1, 2, 3, 4, 5].into(),
+                salt_key_handle: CkObjectHandle(vo),
+                info: vec![9, 9].into(),
+            })),
+        };
+        let before = mechanism.clone();
+        let validated = validated_for_remap_tests(&mechanism);
+        assert!(validated.flat_grant().is_none());
+        let remapped =
+            remap_mechanism_handles(&ctx, &ctx_id, vs, bs, validated).await.expect("remap");
+        assert!(remapped.flat_grant().is_none());
+        assert_eq!(remapped.mechanism().mechanism_type, before.mechanism_type);
+        let (Some(CkMechanismParams::Hkdf(got)), Some(CkMechanismParams::Hkdf(want))) =
+            (remapped.mechanism().params.clone(), before.params.clone())
+        else {
+            panic!("typed params must survive remap");
+        };
+        // The substituted value is the resolved backend handle (the
+        // fixture mapping may be identity, so pin the resolution).
+        let backend_handle = ctx
+            .context_manager
+            .get_context(&ctx_id, |lci| lci.object_handles.resolve(VirtualHandle(vo)))
+            .await
+            .and_then(|resolved| resolved)
+            .expect("fixture virtual handle resolves");
+        assert_eq!(got.salt_key_handle.0, backend_handle.0);
+        assert_ne!(got.salt_key_handle.0, 0, "backend handle must be non-zero");
+        let mut normalized = got.clone();
+        normalized.salt_key_handle = want.salt_key_handle;
+        assert_eq!(normalized, want, "only the embedded handle may change");
     }
 }

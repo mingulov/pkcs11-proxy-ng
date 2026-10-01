@@ -1643,6 +1643,217 @@ impl ValidatedMechanismParams {
     pub fn flat_grant(&self) -> Option<FlatGrant> {
         self.flat_grant
     }
+
+    /// Substitute embedded virtual handle integers with backend values
+    /// (R13 handle remapping, S2 §6).
+    ///
+    /// Consumes the newtype and returns it: `f` must only rewrite embedded
+    /// `CK_OBJECT_HANDLE` fields (the remapper's contract — Flat/Null/None
+    /// carry no handles, and typed substitution touches handle fields
+    /// only). Every validated property (lengths, caps, shape binding, ABI)
+    /// is preserved by construction — the stored `flat_grant` is carried
+    /// over untouched — and debug builds re-check the cheap invariant that
+    /// nothing BUT handle fields changed (both sides compared with all
+    /// embedded handles normalized to zero).
+    pub fn substitute_handles(mut self, f: impl FnOnce(&mut CkMechanism)) -> Self {
+        let before = normalized_for_handle_compare(&self.mechanism);
+        f(&mut self.mechanism);
+        debug_assert_eq!(
+            normalized_for_handle_compare(&self.mechanism),
+            before,
+            "handle substitution must preserve every validated property"
+        );
+        self
+    }
+}
+
+/// Clone `mechanism` with every embedded object-handle field zeroed, for
+/// the [`ValidatedMechanismParams::substitute_handles`] debug assertion.
+///
+/// Exhaustive over `CkMechanismParams` by construction (no wildcard): the
+/// handle-bearing list mirrors the server remapper
+/// (`crates/server/src/server/grpc_service/mechanism_handles.rs`) — a new
+/// variant fails to compile here until classified, so the two lists cannot
+/// silently drift. SP800-108 byte-encoded key-handle values are zeroed
+/// (lengths preserved) so its dedicated substitution compares equal.
+fn normalized_for_handle_compare(mechanism: &CkMechanism) -> CkMechanism {
+    let mut normalized = mechanism.clone();
+    if let Some(params) = normalized.params.as_mut() {
+        zero_embedded_handles(params);
+    }
+    normalized
+}
+
+/// PKCS#11 `CK_SP800_108_KEY_HANDLE` data-parameter type (`0x00000005`):
+/// a SP800-108 `data_params` entry carrying the byte-encoded input key
+/// handle. (Mirrors the server resolver's constant; kept in sync by the
+/// SP800-108 substitution tests.)
+pub(crate) const SP800_108_KEY_HANDLE_TYPE: u64 = 0x0000_0005;
+
+/// Zero the byte-encoded key-handle values of SP800-108 `data_params`
+/// entries (zero-filled, lengths preserved).
+fn zero_sp800_108_key_handle_values(data_params: &mut [PrfDataParam]) {
+    for data_param in data_params {
+        if data_param.type_ != SP800_108_KEY_HANDLE_TYPE {
+            continue;
+        }
+        let len = data_param.value.expose(|bytes| bytes.len());
+        data_param.value = SecretBytes::new(vec![0u8; len]);
+    }
+}
+
+fn zero_embedded_handles(params: &mut CkMechanismParams) {
+    use CkMechanismParams as P;
+    match params {
+        P::Hkdf(p) => p.salt_key_handle.0 = 0,
+        P::Ecdh2Derive(p) => p.private_data_handle.0 = 0,
+        P::EcmqvDerive(p) => {
+            p.private_data_handle.0 = 0;
+            p.public_key_handle.0 = 0;
+        }
+        P::X942Dh2Derive(p) => p.private_data_handle.0 = 0,
+        P::X942MqvDerive(p) => {
+            p.private_data_handle.0 = 0;
+            p.public_key_handle.0 = 0;
+        }
+        P::Gostr3410KeyWrap(p) => p.key_handle.0 = 0,
+        P::Ssl3KeyMat(p) => {
+            p.client_mac_secret_handle.0 = 0;
+            p.server_mac_secret_handle.0 = 0;
+            p.client_key_handle.0 = 0;
+            p.server_key_handle.0 = 0;
+        }
+        P::WtlsKeyMat(p) => {
+            p.mac_secret_handle.0 = 0;
+            p.key_handle.0 = 0;
+        }
+        P::IkePrfDerive(p) => p.new_key_handle.0 = 0,
+        P::Ike1PrfDerive(p) => {
+            p.keygxy_handle.0 = 0;
+            p.prev_key_handle.0 = 0;
+        }
+        P::Ike1ExtendedDerive(p) => p.keygxy_handle.0 = 0,
+        P::Ike2PrfPlusDerive(p) => p.seed_key_handle.0 = 0,
+        P::X3dhInitiate(p) => {
+            p.peer_identity_handle.0 = 0;
+            p.peer_prekey_handle.0 = 0;
+            p.onetime_key_handle.0 = 0;
+            p.own_identity_handle.0 = 0;
+            p.own_ephemeral_handle.0 = 0;
+        }
+        P::X3dhRespond(p) => {
+            p.identity_handle.0 = 0;
+            p.prekey_handle.0 = 0;
+            p.onetime_key_handle.0 = 0;
+            p.initiator_identity_handle.0 = 0;
+            p.initiator_ephemeral_handle.0 = 0;
+        }
+        P::X2RatchetInitialize(p) => {
+            p.peer_public_prekey_handle.0 = 0;
+            p.peer_public_identity_handle.0 = 0;
+            p.own_public_identity_handle.0 = 0;
+        }
+        P::X2RatchetRespond(p) => {
+            p.own_prekey_handle.0 = 0;
+            p.initiator_identity_handle.0 = 0;
+            p.own_identity_handle.0 = 0;
+        }
+        P::Kip(p) => {
+            p.key_handle.0 = 0;
+            if let Some(inner) = p.mechanism.params.as_mut() {
+                zero_embedded_handles(inner);
+            }
+        }
+        P::Ecies(p) => {
+            if let Some(inner) = p.derivation_mechanism.params.as_mut() {
+                zero_embedded_handles(inner);
+            }
+            if let Some(inner) = p.encryption_mechanism.params.as_mut() {
+                zero_embedded_handles(inner);
+            }
+            if let Some(inner) = p.mac_mechanism.params.as_mut() {
+                zero_embedded_handles(inner);
+            }
+        }
+        P::ObjectHandle(p) => p.handle.0 = 0,
+        P::Kmac(p) => p.key_handle.0 = 0,
+        P::MuGen(p) => p.key_handle.0 = 0,
+        P::Kyber(p) => p.secret_handle.0 = 0,
+        P::CmsSig(p) => {
+            p.certificate_handle.0 = 0;
+            if let Some(inner) = p.signing_mechanism.params.as_mut() {
+                zero_embedded_handles(inner);
+            }
+            if let Some(inner) = p.digest_mechanism.params.as_mut() {
+                zero_embedded_handles(inner);
+            }
+        }
+
+        // SP800-108: the input key handle is byte-encoded inside
+        // KEY_HANDLE `data_params` values (resolved by the server's
+        // dedicated path); normalize those values (zero-filled, length
+        // preserved) so handle substitution compares equal.
+        P::Sp800108Kdf(p) => zero_sp800_108_key_handle_values(&mut p.data_params),
+        P::Sp800108FeedbackKdf(p) => zero_sp800_108_key_handle_values(&mut p.data_params),
+
+        // No embedded object handles.
+        P::RsaPkcsPss(_)
+        | P::RsaPkcsOaep(_)
+        | P::Gcm(_)
+        | P::Ecdh1Derive(_)
+        | P::Iv(_)
+        | P::Rc5(_)
+        | P::Rc5MacGeneral(_)
+        | P::Rc2MacGeneral(_)
+        | P::Xeddsa(_)
+        | P::TlsMac(_)
+        | P::AesCtr(_)
+        | P::CamelliaCtr(_)
+        | P::Rc2Cbc(_)
+        | P::Rc5Cbc(_)
+        | P::AesCbcEncryptData(_)
+        | P::DesCbcEncryptData(_)
+        | P::AriaCbcEncryptData(_)
+        | P::CamelliaCbcEncryptData(_)
+        | P::SeedCbcEncryptData(_)
+        | P::Ccm(_)
+        | P::ChaCha20(_)
+        | P::Salsa20(_)
+        | P::Salsa20ChaCha20Poly1305(_)
+        | P::GcmWrap(_)
+        | P::CcmWrap(_)
+        | P::X942Dh1Derive(_)
+        | P::Eddsa(_)
+        | P::Gostr3410Derive(_)
+        | P::KeaDerive(_)
+        | P::EcdhAesKeyWrap(_)
+        | P::RsaAesKeyWrap(_)
+        | P::KeyWrapSetOaep(_)
+        | P::Pbe(_)
+        | P::Pkcs5Pbkd2(_)
+        | P::TlsPrf(_)
+        | P::TlsKdf(_)
+        | P::Ssl3MasterKeyDerive(_)
+        | P::Tls12MasterKeyDerive(_)
+        | P::Tls12ExtendedMasterKeyDerive(_)
+        | P::WtlsMasterKeyDerive(_)
+        | P::WtlsPrf(_)
+        | P::Otp(_)
+        | P::SkipjackPrivateWrap(_)
+        | P::SkipjackRelayx(_)
+        | P::MacGeneral(_)
+        | P::Extract(_)
+        | P::SignAdditionalContext(_)
+        | P::KeyDerivationString(_)
+        | P::Raw(_)
+        | P::AesCmacKeyDerivation(_)
+        | P::Dilithium(_)
+        | P::HdKeyDerive(_)
+        | P::VendorObjectExtract(_)
+        | P::VendorObjectInsert(_)
+        | P::Flat(_)
+        | P::Null { .. } => {}
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3507,5 +3718,54 @@ mod validated_params_tests {
         let mut vec = Vec::new();
         assert_eq!(super::reserve_or_host_memory(&mut vec, usize::MAX), Err(CkRv::HOST_MEMORY));
         assert_eq!(super::reserve_or_host_memory(&mut vec, 16), Ok(()));
+    }
+
+    #[test]
+    fn substitute_handles_round_trip_preserves_validated_properties() {
+        // R13 remap round-trip, unit level: substitution swaps the embedded
+        // handle (virtual → backend) while lengths, binding, and the grant
+        // (caps/ABI) carry over unchanged.
+        let registry = registry_with_binding(AES_CBC, "iv");
+        // Typed HKDF: only the salt-key handle may change.
+        let hkdf = CkMechanism {
+            mechanism_type: CkMechanismType(AES_CBC),
+            params: Some(CkMechanismParams::Hkdf(HkdfParams {
+                extract: true,
+                expand: true,
+                prf_hash_mechanism: CkMechanismType::SHA256,
+                salt_type: 1,
+                salt: SecretBytes::copy_from_slice(b"salty"),
+                salt_key_handle: CkObjectHandle(11),
+                info: SecretBytes::copy_from_slice(b"context"),
+            })),
+        };
+        let before = hkdf.clone();
+        let validated = validate(&registry, &hkdf).unwrap();
+        assert!(validated.flat_grant().is_none());
+        let substituted = validated.substitute_handles(|mechanism| {
+            let Some(CkMechanismParams::Hkdf(params)) = mechanism.params.as_mut() else {
+                panic!("typed params must survive validation");
+            };
+            params.salt_key_handle = CkObjectHandle(77);
+        });
+        assert!(substituted.flat_grant().is_none());
+        assert_eq!(substituted.mechanism().mechanism_type, before.mechanism_type);
+        let (Some(CkMechanismParams::Hkdf(got)), Some(CkMechanismParams::Hkdf(want))) =
+            (substituted.mechanism().params.clone(), before.params.clone())
+        else {
+            panic!("typed params must survive substitution");
+        };
+        assert_eq!(got.salt_key_handle, CkObjectHandle(77));
+        let mut normalized = got.clone();
+        normalized.salt_key_handle = want.salt_key_handle;
+        assert_eq!(normalized, want, "only the embedded handle may change");
+        // Eligible Flat: the grant (fingerprint/caps/ABI) is carried over
+        // verbatim and the bytes are untouched.
+        let (flat, _) = flat_mechanism(AES_CBC, 16, Some(ParamAbi::Lp64NativeLe));
+        let validated = validate(&registry, &flat).unwrap();
+        let grant = validated.flat_grant().expect("iv Flat must be eligible");
+        let substituted = validated.substitute_handles(|_| {});
+        assert_eq!(substituted.flat_grant(), Some(grant));
+        assert_eq!(substituted.mechanism(), &flat);
     }
 }

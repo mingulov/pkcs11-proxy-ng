@@ -142,7 +142,8 @@ fn generate_key_pair_handles_are_live() {
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
     let mech = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS_KEY_PAIR_GEN, params: None };
-    let (pub_h, priv_h) = backend.generate_key_pair(session, &mech, Some(&[]), Some(&[])).unwrap();
+    let (pub_h, priv_h) =
+        backend.generate_key_pair(session, &validated(&mech), Some(&[]), Some(&[])).unwrap();
     assert!(backend.get_object_size(session, pub_h).is_ok());
     assert!(backend.get_object_size(session, priv_h).is_ok());
 }
@@ -197,7 +198,7 @@ fn object_handles_are_unique_and_non_overlapping() {
     let o3 = backend
         .generate_key(
             session,
-            &CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None },
+            &validated(&CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None }),
             Some(&[]),
         )
         .unwrap();
@@ -645,7 +646,7 @@ fn get_op_state_no_op_returns_operation_not_initialized() {
 fn get_op_state_sign_active_returns_blob() {
     let (backend, session) = setup_with_session();
     let mech = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
-    backend.sign_init(session, &mech, CkObjectHandle(1)).unwrap();
+    backend.sign_init(session, &validated(&mech), CkObjectHandle(1)).unwrap();
     let blob = backend.get_operation_state(session).unwrap();
     assert_eq!(blob, vec![0xC9u8, 0xEA, 1].into());
 }
@@ -663,7 +664,7 @@ fn get_op_state_find_objects_active_returns_operation_not_initialized() {
 fn get_op_state_does_not_clear_active_operation() {
     let (backend, session) = setup_with_session();
     let mech = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
-    backend.sign_init(session, &mech, CkObjectHandle(1)).unwrap();
+    backend.sign_init(session, &validated(&mech), CkObjectHandle(1)).unwrap();
     let _blob = backend.get_operation_state(session).unwrap();
     backend.sign_update(session, CkInBuf::Bytes(&[0x01, 0x02])).unwrap();
 }
@@ -672,7 +673,7 @@ fn get_op_state_does_not_clear_active_operation() {
 fn set_op_state_restores_sign_on_same_session() {
     let (backend, session) = setup_with_session();
     let mech = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
-    backend.sign_init(session, &mech, CkObjectHandle(1)).unwrap();
+    backend.sign_init(session, &validated(&mech), CkObjectHandle(1)).unwrap();
     let blob = backend.get_operation_state(session).unwrap();
     let blob_bytes = blob.expose(|raw| raw.to_vec());
     backend.sign_final(session).unwrap();
@@ -692,7 +693,7 @@ fn set_op_state_transfers_to_different_session() {
     let (backend, session_a) = setup_with_session();
     let session_b = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
     let mech = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
-    backend.sign_init(session_a, &mech, CkObjectHandle(1)).unwrap();
+    backend.sign_init(session_a, &validated(&mech), CkObjectHandle(1)).unwrap();
     let blob = backend.get_operation_state(session_a).unwrap();
     let blob_bytes = blob.expose(|raw| raw.to_vec());
     backend
@@ -747,7 +748,7 @@ fn set_op_state_unknown_op_byte_returns_saved_state_invalid() {
 fn set_op_state_when_active_returns_operation_active() {
     let (backend, session) = setup_with_session();
     let mech = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
-    backend.sign_init(session, &mech, CkObjectHandle(1)).unwrap();
+    backend.sign_init(session, &validated(&mech), CkObjectHandle(1)).unwrap();
     let blob = vec![0xC9u8, 0xEA, 2];
     let rv = backend
         .set_operation_state(session, CkInBuf::Bytes(&blob), CkObjectHandle(0), CkObjectHandle(0))
@@ -771,18 +772,20 @@ fn get_set_op_state_all_op_types_roundtrip() {
         let (backend, session) = setup_with_session();
         let mech = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
         match op {
-            Sign => backend.sign_init(session, &mech, CkObjectHandle(1)).unwrap(),
-            SignRecover => backend.sign_recover_init(session, &mech, CkObjectHandle(1)).unwrap(),
-            Verify => backend.verify_init(session, &mech, CkObjectHandle(1)).unwrap(),
-            VerifyRecover => {
-                backend.verify_recover_init(session, &mech, CkObjectHandle(1)).unwrap();
+            Sign => backend.sign_init(session, &validated(&mech), CkObjectHandle(1)).unwrap(),
+            SignRecover => {
+                backend.sign_recover_init(session, &validated(&mech), CkObjectHandle(1)).unwrap()
             }
-            Digest => backend.digest_init(session, &mech).unwrap(),
+            Verify => backend.verify_init(session, &validated(&mech), CkObjectHandle(1)).unwrap(),
+            VerifyRecover => {
+                backend.verify_recover_init(session, &validated(&mech), CkObjectHandle(1)).unwrap();
+            }
+            Digest => backend.digest_init(session, &validated(&mech)).unwrap(),
             Encrypt => {
-                backend.encrypt_init(session, &mech, CkObjectHandle(1)).unwrap();
+                backend.encrypt_init(session, &validated(&mech), CkObjectHandle(1)).unwrap();
             }
             Decrypt => {
-                backend.decrypt_init(session, &mech, CkObjectHandle(1)).unwrap();
+                backend.decrypt_init(session, &validated(&mech), CkObjectHandle(1)).unwrap();
             }
             FindObjects => unreachable!("object search state is not cryptographic operation state"),
         }
@@ -972,7 +975,7 @@ fn injected_error_blocks_sign_init() {
     let s = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
     backend.inject_error(CkRv::DEVICE_REMOVED);
     let mech = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
-    let err = backend.sign_init(s, &mech, CkObjectHandle(1)).unwrap_err();
+    let err = backend.sign_init(s, &validated(&mech), CkObjectHandle(1)).unwrap_err();
     assert_eq!(err, CkRv::DEVICE_REMOVED);
 }
 
@@ -983,7 +986,7 @@ fn injected_error_blocks_encrypt_init() {
     let s = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
     backend.inject_error(CkRv::DEVICE_ERROR);
     let mech = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
-    let err = backend.encrypt_init(s, &mech, CkObjectHandle(1)).unwrap_err();
+    let err = backend.encrypt_init(s, &validated(&mech), CkObjectHandle(1)).unwrap_err();
     assert_eq!(err, CkRv::DEVICE_ERROR);
 }
 
@@ -994,7 +997,7 @@ fn injected_error_blocks_generate_key_pair() {
     let s = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
     backend.inject_error(CkRv::DEVICE_REMOVED);
     let mech = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS_KEY_PAIR_GEN, params: None };
-    let err = backend.generate_key_pair(s, &mech, Some(&[]), Some(&[])).unwrap_err();
+    let err = backend.generate_key_pair(s, &validated(&mech), Some(&[]), Some(&[])).unwrap_err();
     assert_eq!(err, CkRv::DEVICE_REMOVED);
 }
 

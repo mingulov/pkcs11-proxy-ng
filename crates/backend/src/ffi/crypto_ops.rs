@@ -7,20 +7,19 @@ impl FfiBackend {
     pub(super) fn ffi_sign_init(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         key: CkObjectHandle,
     ) -> CkResult<()> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let h_session = Self::session_handle(session)?;
         let h_key = Self::object_handle(key)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
-        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
         self.call_init_with_mechanism(
             &admission,
             session,
             OperationFamily::Sign,
             unsafe { (*self.func_list).C_SignInit },
-            &validated,
+            mechanism,
             |function, mech| unsafe { function(h_session, mech, h_key) },
         )
     }
@@ -79,16 +78,15 @@ impl FfiBackend {
     pub(super) fn ffi_sign_recover_init(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         key: CkObjectHandle,
     ) -> CkResult<()> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
-        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
         Self::call_unit_with_mechanism(
             &admission,
             unsafe { (*self.func_list).C_SignRecoverInit },
-            &validated,
+            mechanism,
             |function, mech| mechanism_key_init!(session, mechanism, key, function, mech),
         )
     }
@@ -196,16 +194,15 @@ impl FfiBackend {
     pub(super) fn ffi_verify_recover_init(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         key: CkObjectHandle,
     ) -> CkResult<()> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
-        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
         Self::call_unit_with_mechanism(
             &admission,
             unsafe { (*self.func_list).C_VerifyRecoverInit },
-            &validated,
+            mechanism,
             |function, mech| mechanism_key_init!(session, mechanism, key, function, mech),
         )
     }
@@ -242,18 +239,17 @@ impl FfiBackend {
     pub(super) fn ffi_verify_init(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         key: CkObjectHandle,
     ) -> CkResult<()> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
-        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
         self.call_init_with_mechanism(
             &admission,
             session,
             OperationFamily::Verify,
             unsafe { (*self.func_list).C_VerifyInit },
-            &validated,
+            mechanism,
             |function, mech| mechanism_key_init!(session, mechanism, key, function, mech),
         )
     }
@@ -320,18 +316,17 @@ impl FfiBackend {
     pub(super) fn ffi_digest_init(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
     ) -> CkResult<()> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let h_session = Self::session_handle(session)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
-        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
         self.call_init_with_mechanism(
             &admission,
             session,
             OperationFamily::Digest,
             unsafe { (*self.func_list).C_DigestInit },
-            &validated,
+            mechanism,
             |function, mech| unsafe { function(h_session, mech) },
         )
     }
@@ -443,18 +438,17 @@ impl FfiBackend {
     pub(super) fn ffi_encrypt_init_with_output(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         key: CkObjectHandle,
     ) -> CkResult<Option<CkMechanismParams>> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
-        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
         self.call_init_with_mechanism_output(
             &admission,
             session,
             OperationFamily::Encrypt,
             unsafe { (*self.func_list).C_EncryptInit },
-            &validated,
+            mechanism,
             |function, mech| mechanism_key_init!(session, mechanism, key, function, mech),
         )
     }
@@ -519,18 +513,17 @@ impl FfiBackend {
     pub(super) fn ffi_decrypt_init(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         key: CkObjectHandle,
     ) -> CkResult<Option<CkMechanismParams>> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
-        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
         self.call_init_with_mechanism_output(
             &admission,
             session,
             OperationFamily::Decrypt,
             unsafe { (*self.func_list).C_DecryptInit },
-            &validated,
+            mechanism,
             |function, mech| mechanism_key_init!(session, mechanism, key, function, mech),
         )
     }
@@ -1012,13 +1005,21 @@ mod tests {
                 aad_null: false,
             })),
         };
-        let encrypt_out =
-            backend.ffi_encrypt_init_with_output(session, &gcm, CkObjectHandle(1)).unwrap();
+        let encrypt_out = backend
+            .ffi_encrypt_init_with_output(
+                session,
+                &validated_mechanism_for_tests(&gcm),
+                CkObjectHandle(1),
+            )
+            .unwrap();
         assert_eq!(encrypt_out, gcm.params);
         backend
             .ffi_digest_init(
                 session,
-                &CkMechanism { mechanism_type: CkMechanismType::SHA256, params: None },
+                &validated_mechanism_for_tests(&CkMechanism {
+                    mechanism_type: CkMechanismType::SHA256,
+                    params: None,
+                }),
             )
             .unwrap();
         // The later DigestInit must not evict the Encrypt family graph.
@@ -1061,12 +1062,24 @@ mod tests {
                 aad_null: false,
             })),
         };
-        backend.ffi_encrypt_init_with_output(session, &gcm, CkObjectHandle(1)).unwrap();
+        backend
+            .ffi_encrypt_init_with_output(
+                session,
+                &validated_mechanism_for_tests(&gcm),
+                CkObjectHandle(1),
+            )
+            .unwrap();
         // A failed re-Init must not disturb the live owner: same slot,
         // same output, same last-Init marker.
         functions.C_EncryptInit = Some(encrypt_init_fails);
         assert_eq!(
-            backend.ffi_encrypt_init_with_output(session, &gcm, CkObjectHandle(1)).unwrap_err(),
+            backend
+                .ffi_encrypt_init_with_output(
+                    session,
+                    &validated_mechanism_for_tests(&gcm),
+                    CkObjectHandle(1)
+                )
+                .unwrap_err(),
             CkRv::FUNCTION_FAILED
         );
         assert!(backend.mech_cache.contains_key(&(session.0, OperationFamily::Encrypt)));
@@ -1105,7 +1118,13 @@ mod tests {
         // A failed FIRST Init on an empty slot publishes nothing: no cache
         // entry, no last-Init marker.
         assert_eq!(
-            backend.ffi_encrypt_init_with_output(session, &gcm, CkObjectHandle(1)).unwrap_err(),
+            backend
+                .ffi_encrypt_init_with_output(
+                    session,
+                    &validated_mechanism_for_tests(&gcm),
+                    CkObjectHandle(1)
+                )
+                .unwrap_err(),
             CkRv::FUNCTION_FAILED
         );
         assert!(
@@ -1137,17 +1156,35 @@ mod tests {
                 aad_null: false,
             })),
         };
-        let first = backend.ffi_encrypt_init_with_output(session, &gcm, CkObjectHandle(1)).unwrap();
+        let first = backend
+            .ffi_encrypt_init_with_output(
+                session,
+                &validated_mechanism_for_tests(&gcm),
+                CkObjectHandle(1),
+            )
+            .unwrap();
         assert_eq!(first, gcm.params);
         // Two consecutive failed re-Inits must still preserve the original
         // graph bytes and the last-Init marker.
         functions.C_EncryptInit = Some(encrypt_init_fails);
         assert_eq!(
-            backend.ffi_encrypt_init_with_output(session, &gcm, CkObjectHandle(1)).unwrap_err(),
+            backend
+                .ffi_encrypt_init_with_output(
+                    session,
+                    &validated_mechanism_for_tests(&gcm),
+                    CkObjectHandle(1)
+                )
+                .unwrap_err(),
             CkRv::FUNCTION_FAILED
         );
         assert_eq!(
-            backend.ffi_encrypt_init_with_output(session, &gcm, CkObjectHandle(1)).unwrap_err(),
+            backend
+                .ffi_encrypt_init_with_output(
+                    session,
+                    &validated_mechanism_for_tests(&gcm),
+                    CkObjectHandle(1)
+                )
+                .unwrap_err(),
             CkRv::FUNCTION_FAILED
         );
         assert_eq!(
@@ -1317,7 +1354,11 @@ mod tests {
         let (backend, _functions) = backend_with_init_stubs();
         assert_eq!(
             backend
-                .ffi_sign_init(CkSessionHandle(7), &rsa_pkcs_mechanism(), CkObjectHandle(9))
+                .ffi_sign_init(
+                    CkSessionHandle(7),
+                    &validated_mechanism_for_tests(&rsa_pkcs_mechanism()),
+                    CkObjectHandle(9)
+                )
                 .unwrap_err(),
             CkRv::CRYPTOKI_NOT_INITIALIZED
         );
@@ -1329,7 +1370,11 @@ mod tests {
         let (backend, _functions) = backend_with_init_stubs();
         backend.lifecycle_domain.open_for_tests();
         backend
-            .ffi_sign_init(CkSessionHandle(7), &rsa_pkcs_mechanism(), CkObjectHandle(9))
+            .ffi_sign_init(
+                CkSessionHandle(7),
+                &validated_mechanism_for_tests(&rsa_pkcs_mechanism()),
+                CkObjectHandle(9),
+            )
             .unwrap();
         assert!(backend.mech_cache.contains_key(&(7, OperationFamily::Sign)));
     }
@@ -1341,7 +1386,11 @@ mod tests {
         let (backend, _functions) = backend_with_init_stubs();
         assert_eq!(
             backend
-                .ffi_sign_recover_init(CkSessionHandle(7), &rsa_pkcs_mechanism(), CkObjectHandle(9))
+                .ffi_sign_recover_init(
+                    CkSessionHandle(7),
+                    &validated_mechanism_for_tests(&rsa_pkcs_mechanism()),
+                    CkObjectHandle(9)
+                )
                 .unwrap_err(),
             CkRv::CRYPTOKI_NOT_INITIALIZED
         );
@@ -1353,7 +1402,11 @@ mod tests {
         let (backend, _functions) = backend_with_init_stubs();
         backend.lifecycle_domain.open_for_tests();
         backend
-            .ffi_sign_recover_init(CkSessionHandle(7), &rsa_pkcs_mechanism(), CkObjectHandle(9))
+            .ffi_sign_recover_init(
+                CkSessionHandle(7),
+                &validated_mechanism_for_tests(&rsa_pkcs_mechanism()),
+                CkObjectHandle(9),
+            )
             .unwrap();
     }
 
@@ -1376,7 +1429,11 @@ mod tests {
         };
         assert_eq!(
             backend
-                .ffi_encrypt_init_with_output(CkSessionHandle(7), &gcm, CkObjectHandle(1))
+                .ffi_encrypt_init_with_output(
+                    CkSessionHandle(7),
+                    &validated_mechanism_for_tests(&gcm),
+                    CkObjectHandle(1)
+                )
                 .unwrap_err(),
             CkRv::CRYPTOKI_NOT_INITIALIZED
         );
@@ -1399,7 +1456,13 @@ mod tests {
                 aad_null: false,
             })),
         };
-        backend.ffi_encrypt_init_with_output(CkSessionHandle(7), &gcm, CkObjectHandle(1)).unwrap();
+        backend
+            .ffi_encrypt_init_with_output(
+                CkSessionHandle(7),
+                &validated_mechanism_for_tests(&gcm),
+                CkObjectHandle(1),
+            )
+            .unwrap();
         assert!(backend.mech_cache.contains_key(&(7, OperationFamily::Encrypt)));
     }
 
@@ -1439,7 +1502,11 @@ mod tests {
         let (done_tx, done_rx) = mpsc::channel();
         std::thread::scope(|scope| {
             let worker = scope.spawn(|| {
-                backend.ffi_sign_init(CkSessionHandle(7), &rsa_pkcs_mechanism(), CkObjectHandle(9))
+                backend.ffi_sign_init(
+                    CkSessionHandle(7),
+                    &validated_mechanism_for_tests(&rsa_pkcs_mechanism()),
+                    CkObjectHandle(9),
+                )
             });
             entered_rx
                 .recv_timeout(Duration::from_secs(5))

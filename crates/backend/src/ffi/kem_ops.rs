@@ -1,3 +1,5 @@
+#[cfg(test)]
+use super::validated_mechanism_for_tests;
 use super::{FfiBackend, call_3x_fn, ffi_conversion::mechanism_to_ffi};
 use pkcs11_proxy_ng_types::*;
 
@@ -13,7 +15,7 @@ impl FfiBackend {
     pub(super) fn ffi_encapsulate_key_exact(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         public_key: CkObjectHandle,
         template: Option<&[CkAttribute]>,
         spec: &CkOutputBufferSpec,
@@ -24,8 +26,7 @@ impl FfiBackend {
         let fl = self.func_list_3_2.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let function = unsafe { (*fl).C_EncapsulateKey }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
-        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
-        let mut ffi_mech = mechanism_to_ffi(&validated)?;
+        let mut ffi_mech = mechanism_to_ffi(mechanism)?;
         let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
 
         let h_session = Self::session_handle(session)?;
@@ -57,7 +58,7 @@ impl FfiBackend {
     pub(super) fn ffi_encapsulate_key(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         public_key: CkObjectHandle,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<(SecretBytes, CkObjectHandle)> {
@@ -67,8 +68,7 @@ impl FfiBackend {
         let fl = self.func_list_3_2.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let function = unsafe { (*fl).C_EncapsulateKey }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
-        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
-        let mut ffi_mech = mechanism_to_ffi(&validated)?;
+        let mut ffi_mech = mechanism_to_ffi(mechanism)?;
         let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let h_session = Self::session_handle(session)?;
         let h_pubkey = Self::object_handle(public_key)?;
@@ -118,7 +118,7 @@ impl FfiBackend {
     pub(super) fn ffi_decapsulate_key(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         private_key: CkObjectHandle,
         template: Option<&[CkAttribute]>,
         ciphertext: CkInBuf<'_>,
@@ -127,8 +127,7 @@ impl FfiBackend {
         use super::ffi_conversion::FfiAttrs;
 
         let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
-        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
-        let mut ffi_mech = mechanism_to_ffi(&validated)?;
+        let mut ffi_mech = mechanism_to_ffi(mechanism)?;
         let (ct_ptr, ct_len) = ciphertext.as_ptr_len();
         let mut key_handle: cryptoki_sys::CK_OBJECT_HANDLE = 0;
 
@@ -205,7 +204,7 @@ mod tests {
             backend
                 .ffi_encapsulate_key_exact(
                     CkSessionHandle(1),
-                    &mechanism,
+                    &validated_mechanism_for_tests(&mechanism),
                     CkObjectHandle(2),
                     Some(&[]),
                     &output_spec,
@@ -227,7 +226,7 @@ mod tests {
         let result = backend
             .ffi_encapsulate_key_exact(
                 CkSessionHandle(1),
-                &mechanism,
+                &validated_mechanism_for_tests(&mechanism),
                 CkObjectHandle(2),
                 Some(&[]),
                 &output_spec,
@@ -245,7 +244,12 @@ mod tests {
         let mechanism = CkMechanism { mechanism_type: CkMechanismType::ML_KEM, params: None };
         assert_eq!(
             backend
-                .ffi_encapsulate_key(CkSessionHandle(1), &mechanism, CkObjectHandle(2), None)
+                .ffi_encapsulate_key(
+                    CkSessionHandle(1),
+                    &validated_mechanism_for_tests(&mechanism),
+                    CkObjectHandle(2),
+                    None
+                )
                 .unwrap_err(),
             CkRv::CRYPTOKI_NOT_INITIALIZED
         );
@@ -259,7 +263,12 @@ mod tests {
         backend.lifecycle_domain.open_for_tests();
         let mechanism = CkMechanism { mechanism_type: CkMechanismType::ML_KEM, params: None };
         let (_ciphertext, handle) = backend
-            .ffi_encapsulate_key(CkSessionHandle(1), &mechanism, CkObjectHandle(2), None)
+            .ffi_encapsulate_key(
+                CkSessionHandle(1),
+                &validated_mechanism_for_tests(&mechanism),
+                CkObjectHandle(2),
+                None,
+            )
             .unwrap();
         assert_eq!(handle, CkObjectHandle(0x44));
     }
@@ -280,7 +289,7 @@ mod tests {
         let result = backend
             .ffi_encapsulate_key_exact(
                 CkSessionHandle(1),
-                &mechanism,
+                &validated_mechanism_for_tests(&mechanism),
                 CkObjectHandle(2),
                 Some(&[]),
                 &output_spec,

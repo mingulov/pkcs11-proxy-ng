@@ -15,11 +15,16 @@ use pkcs11_proxy_ng_proto::convert::authenticated::{
 // boundary (response/request construction); the standing justification lives in
 // `secret_boundary` docs. No plain copy is retained past the enclosing encode.
 use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
+use pkcs11_proxy_ng_types::shape_descriptors::Operation;
 use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv, SecretBytes};
 
 use super::super::authorization::mechanism_permitted;
 use super::super::convert_template_opt;
 use super::super::mechanism_handles::remap_mechanism_handles;
+use super::super::mechanism_input::{
+    check_operator_exclusion, current_registry_snapshot, daemon_validation_abis,
+    validate_mechanism_transport,
+};
 use super::super::service_utils::{
     check_sanitize, ensure_private_mint_allowed, input_from_wire, parse_mechanism,
     register_session_object_handle, spawn_backend, template_declares_private_object,
@@ -60,14 +65,15 @@ pub(crate) async fn wrap_key_authenticated(
             return Ok(Err(rv));
         }
         let parameter = match req.authenticated_parameters.as_ref() {
-            Some(envelope) => match decode_parameters(&p.mechanism, envelope) {
+            Some(envelope) => match decode_parameters(p.mechanism.mechanism(), envelope) {
                 Ok(parameter) => Some(parameter),
                 Err(rv) => return Ok(Err(rv)),
             },
-            None if legacy_parameter_supported(&p.mechanism) => None,
+            None if legacy_parameter_supported(p.mechanism.mechanism()) => None,
             None => return Ok(Err(CkRv::FUNCTION_NOT_SUPPORTED)),
         };
         let backend = Arc::clone(&ctx.backend);
+        // TODO(R20): insert sanitize_mechanism_input(p.mechanism) → backend call.
         spawn_backend(move || {
             associated_data.expose(|aad_raw| {
                 if let Some(parameter) = parameter {
@@ -80,7 +86,7 @@ pub(crate) async fn wrap_key_authenticated(
                         input_from_wire(aad_raw, req.associated_data_null_len),
                     )?;
                     output
-                        .validate_for(&p.mechanism, parameter.as_ref())
+                        .validate_for(p.mechanism.mechanism(), parameter.as_ref())
                         .map_err(|_| CkRv::DEVICE_ERROR)?;
                     Ok((bytes, Vec::new(), Some((&output).try_into()?)))
                 } else {
@@ -181,7 +187,20 @@ async fn unwrap_key_authenticated_impl(
         }
     };
 
-    let mut mechanism = match parse_mechanism(std::mem::take(&mut req.mechanism)) {
+    // S2 §6: single registry snapshot feeds exclusion and transport
+    // validation for this request.
+    let registry = match current_registry_snapshot(ctx) {
+        Ok(registry) => registry,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
+                authenticated_output: None,
+                ck_rv: rv.0,
+                key_handle: 0,
+                mechanism_parameter_out: Vec::new(),
+            }));
+        }
+    };
+    let mechanism = match parse_mechanism(std::mem::take(&mut req.mechanism)) {
         Ok(mechanism) => mechanism,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
@@ -192,6 +211,15 @@ async fn unwrap_key_authenticated_impl(
             }));
         }
     };
+    // S2 §6: operator exclusion precedes authorization.
+    if let Err(rv) = check_operator_exclusion(&registry, mechanism.mechanism_type) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
+            authenticated_output: None,
+            ck_rv: rv.0,
+            key_handle: 0,
+            mechanism_parameter_out: Vec::new(),
+        }));
+    }
 
     // Mechanism policy gate (G3-PR3 Task 3): deny before backend call when the
     // principal's grant does not include this unwrapping mechanism.
@@ -206,18 +234,41 @@ async fn unwrap_key_authenticated_impl(
         }));
     }
 
+    // S2 §6: transport validation (representable-shape gate) over the
+    // single snapshot precedes handle translation.
+    let (daemon_native_abi, daemon_width_abi) = daemon_validation_abis();
+    let validated = match validate_mechanism_transport(
+        &registry,
+        &mechanism,
+        Operation::General,
+        daemon_native_abi,
+        daemon_width_abi,
+    ) {
+        Ok(validated) => validated,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
+                authenticated_output: None,
+                ck_rv: rv.0,
+                key_handle: 0,
+                mechanism_parameter_out: Vec::new(),
+            }));
+        }
+    };
     // B1: remap object handles embedded in the mechanism parameters;
     // gate each through per-object authz when active (C1).
-    if let Err(rv) =
-        remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
-    {
-        return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
-            authenticated_output: None,
-            ck_rv: rv.0,
-            key_handle: 0,
-            mechanism_parameter_out: Vec::new(),
-        }));
-    }
+    let validated =
+        match remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, validated).await
+        {
+            Ok(validated) => validated,
+            Err(rv) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
+                    authenticated_output: None,
+                    ck_rv: rv.0,
+                    key_handle: 0,
+                    mechanism_parameter_out: Vec::new(),
+                }));
+            }
+        };
 
     let template = match convert_template_opt(&req.template, req.template_null) {
         Ok(template) => template,
@@ -269,7 +320,7 @@ async fn unwrap_key_authenticated_impl(
     }
     // An authenticated-unwrapped key is a session object unless CKA_TOKEN is set (B2).
     let parameter = match req.authenticated_parameters.as_ref() {
-        Some(envelope) => match decode_parameters(&mechanism, envelope) {
+        Some(envelope) => match decode_parameters(validated.mechanism(), envelope) {
             Ok(parameter) => Some(parameter),
             Err(rv) => {
                 // T12: `UnwrapKeyAuthenticatedResponse` is `ZeroizeOnDrop`;
@@ -282,7 +333,7 @@ async fn unwrap_key_authenticated_impl(
                 }));
             }
         },
-        None if legacy_parameter_supported(&mechanism) => None,
+        None if legacy_parameter_supported(validated.mechanism()) => None,
         None => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
                 authenticated_output: None,
@@ -297,6 +348,7 @@ async fn unwrap_key_authenticated_impl(
     let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
     let object_cleanup = Arc::clone(&ctx.object_cleanup);
+    // TODO(R20): insert sanitize_mechanism_input(validated) → backend call.
     let result = spawn_backend(move || {
         wrapped_key.expose(|wrapped_raw| {
             aad.expose(|aad_raw| {
@@ -304,7 +356,7 @@ async fn unwrap_key_authenticated_impl(
                 if let Some(parameter) = parameter {
                     let (key, output) = backend.unwrap_key_authenticated_typed(
                         session,
-                        &mechanism,
+                        &validated,
                         parameter.as_ref(),
                         unwrapping_key,
                         input_from_wire(wrapped_raw, wrapped_key_null_len),
@@ -318,7 +370,7 @@ async fn unwrap_key_authenticated_impl(
                         key,
                     );
                     output
-                        .validate_for(&mechanism, parameter.as_ref())
+                        .validate_for(validated.mechanism(), parameter.as_ref())
                         .map_err(|_| CkRv::DEVICE_ERROR)?;
                     let wire_output = Some((&output).try_into()?);
                     Ok((created.transfer(), Vec::new(), wire_output))
@@ -326,7 +378,7 @@ async fn unwrap_key_authenticated_impl(
                     backend
                         .unwrap_key_authenticated(
                             session,
-                            &mechanism,
+                            &validated,
                             unwrapping_key,
                             input_from_wire(wrapped_raw, wrapped_key_null_len),
                             template.as_deref(),

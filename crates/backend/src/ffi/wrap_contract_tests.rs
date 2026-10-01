@@ -136,7 +136,7 @@ fn exact_wrap_native_pointer_classes_each_call_once() {
             let rv = if auth {
                 b.ffi_wrap_key_authenticated_exact(
                     CkSessionHandle(4),
-                    &mechanism(),
+                    &validated_mechanism_for_tests(&mechanism()),
                     CkObjectHandle(8),
                     CkObjectHandle(9),
                     CkInBuf::Bytes(&[]),
@@ -147,7 +147,7 @@ fn exact_wrap_native_pointer_classes_each_call_once() {
             } else {
                 b.ffi_wrap_key_exact_with_output(
                     CkSessionHandle(4),
-                    &mechanism(),
+                    &validated_mechanism_for_tests(&mechanism()),
                     CkObjectHandle(8),
                     CkObjectHandle(9),
                     &spec,
@@ -177,7 +177,7 @@ fn ordinary_wrap_native_sizing_calls_twice_and_stops_on_error() {
             let result = if auth {
                 b.ffi_wrap_key_authenticated(
                     CkSessionHandle(4),
-                    &mechanism(),
+                    &validated_mechanism_for_tests(&mechanism()),
                     CkObjectHandle(8),
                     CkObjectHandle(9),
                     CkInBuf::Bytes(&[]),
@@ -186,7 +186,7 @@ fn ordinary_wrap_native_sizing_calls_twice_and_stops_on_error() {
             } else {
                 b.ffi_wrap_key(
                     CkSessionHandle(4),
-                    &mechanism(),
+                    &validated_mechanism_for_tests(&mechanism()),
                     CkObjectHandle(8),
                     CkObjectHandle(9),
                 )
@@ -220,7 +220,7 @@ fn native_owner_authenticated_validation_precedes_second_call() {
     let err = b
         .ffi_wrap_authenticated_typed(
             CkSessionHandle(4),
-            &mechanism(),
+            &validated_mechanism_for_tests(&mechanism()),
             None,
             CkObjectHandle(8),
             CkObjectHandle(9),
@@ -282,7 +282,7 @@ fn ordinary_wrap_error_iv_effect_matches_one_shot_rule() {
     let (output, effects) = b
         .ffi_wrap_key_exact_with_output(
             CkSessionHandle(4),
-            &mechanism,
+            &validated_mechanism_for_tests(&mechanism),
             CkObjectHandle(8),
             CkObjectHandle(9),
             &CkOutputBufferSpec { buffer_present: true, buffer_len: 4, length_pointer_null: false },
@@ -297,7 +297,7 @@ fn ordinary_wrap_error_iv_effect_matches_one_shot_rule() {
     let (output, effects) = b
         .ffi_wrap_key_exact_with_output(
             CkSessionHandle(4),
-            &mechanism,
+            &validated_mechanism_for_tests(&mechanism),
             CkObjectHandle(8),
             CkObjectHandle(9),
             &CkOutputBufferSpec {
@@ -322,7 +322,7 @@ fn wrap_authenticated_exact_typed_denied_before_lifecycle_open() {
     assert_eq!(
         b.ffi_wrap_authenticated_exact_typed(
             CkSessionHandle(4),
-            &mechanism(),
+            &validated_mechanism_for_tests(&mechanism()),
             None,
             CkObjectHandle(8),
             CkObjectHandle(9),
@@ -345,7 +345,7 @@ fn wrap_authenticated_exact_typed_admitted_after_lifecycle_open() {
     let (output, _effects) = b
         .ffi_wrap_authenticated_exact_typed(
             CkSessionHandle(4),
-            &mechanism(),
+            &validated_mechanism_for_tests(&mechanism()),
             None,
             CkObjectHandle(8),
             CkObjectHandle(9),
@@ -367,7 +367,7 @@ fn wrap_authenticated_typed_denied_before_lifecycle_open() {
     assert_eq!(
         b.ffi_wrap_authenticated_typed(
             CkSessionHandle(4),
-            &mechanism(),
+            &validated_mechanism_for_tests(&mechanism()),
             None,
             CkObjectHandle(8),
             CkObjectHandle(9),
@@ -389,7 +389,7 @@ fn wrap_authenticated_typed_admitted_after_lifecycle_open() {
     let (wrapped, _effects) = b
         .ffi_wrap_authenticated_typed(
             CkSessionHandle(4),
-            &mechanism(),
+            &validated_mechanism_for_tests(&mechanism()),
             None,
             CkObjectHandle(8),
             CkObjectHandle(9),
@@ -408,7 +408,7 @@ fn unwrap_authenticated_typed_denied_before_lifecycle_open() {
     assert_eq!(
         b.ffi_unwrap_authenticated_typed(
             CkSessionHandle(4),
-            &mechanism(),
+            &validated_mechanism_for_tests(&mechanism()),
             None,
             CkObjectHandle(8),
             CkInBuf::Bytes(&[0u8; 8]),
@@ -429,7 +429,7 @@ fn unwrap_authenticated_typed_admitted_after_lifecycle_open() {
     let (handle, _effects) = b
         .ffi_unwrap_authenticated_typed(
             CkSessionHandle(4),
-            &mechanism(),
+            &validated_mechanism_for_tests(&mechanism()),
             None,
             CkObjectHandle(8),
             CkInBuf::Bytes(&[0u8; 8]),

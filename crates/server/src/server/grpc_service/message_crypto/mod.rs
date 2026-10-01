@@ -29,6 +29,7 @@ use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
 use pkcs11_proxy_ng_proto::version::{
     exact_effects_version_rejected, exact_output_effects_version_supported,
 };
+use pkcs11_proxy_ng_types::shape_descriptors::Operation;
 use pkcs11_proxy_ng_types::*;
 
 use super::super::context_manager::{
@@ -37,6 +38,10 @@ use super::super::context_manager::{
 use super::super::handle_map::VirtualHandle;
 use super::authorization::mechanism_permitted;
 use super::mechanism_handles::remap_mechanism_handles;
+use super::mechanism_input::{
+    check_operator_exclusion, current_registry_snapshot, daemon_validation_abis,
+    validate_mechanism_transport,
+};
 use super::service_utils::{
     check_sanitize, ck_rv_only, input_from_wire, parse_mechanism, resolve_session,
     resolve_session_and_key, spawn_backend, spawn_backend_with_optional_timeout,
@@ -134,6 +139,7 @@ fn native_message_parameter_len(parameter: &MessageParameter) -> u64 {
 
 fn validate_message_init_contract(
     ctx: &HandlerContext,
+    registry: &MechanismRegistry,
     mechanism_type: CkMechanismType,
     mechanism_had_params: bool,
     wire_shape: Option<i32>,
@@ -150,10 +156,8 @@ fn validate_message_init_contract(
     let requested_shape = MessageParameterShape::try_from_proto_i32(
         wire_shape.ok_or(CkRv::MECHANISM_PARAM_INVALID)?,
     )?;
-    // W1-C3-26: a poisoned registry lock fails closed with
-    // DEVICE_ERROR (internal daemon fault), never a panic.
-    let registry =
-        ctx.mechanism_registry_source.current_registry().map_err(|_| CkRv::DEVICE_ERROR)?;
+    // R13: `registry` is the request's single snapshot (acquired by the
+    // caller — W1-C3-26 poison failure surfaces there as DEVICE_ERROR).
     let derived_shape =
         MessageParameterShape::from_registry_name(registry.param_shape(mechanism_type.0));
     if requested_shape != derived_shape {
@@ -493,8 +497,22 @@ async fn message_encrypt_init_with_timeout(
                 }
             };
 
+        // R13 (S2 §6): this request's single registry snapshot feeds the
+        // contract check, exclusion, transport validation, and the shape
+        // lookup below. W1-C3-26: poison fails closed with DEVICE_ERROR.
+        let registry = match current_registry_snapshot(ctx) {
+            Ok(registry) => registry,
+            Err(rv) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::MessageEncryptInitResponse {
+                    ck_rv: rv.0,
+                    ..Default::default()
+                }));
+            }
+        };
+
         let contract = match validate_message_init_contract(
             ctx,
+            &registry,
             mechanism_type,
             mechanism_had_params,
             wire_shape,
@@ -522,7 +540,7 @@ async fn message_encrypt_init_with_timeout(
                 }
             };
 
-        let mut mechanism = match parse_mechanism(req.mechanism) {
+        let mechanism = match parse_mechanism(req.mechanism) {
             Ok(m) => m,
             Err(rv) => {
                 return Ok(Response::new(pkcs11_proxy_ng_proto::MessageEncryptInitResponse {
@@ -531,6 +549,14 @@ async fn message_encrypt_init_with_timeout(
                 }));
             }
         };
+
+        // R13 (S2 §6): operator exclusion → MECHANISM_INVALID before auth.
+        if let Err(rv) = check_operator_exclusion(&registry, mechanism.mechanism_type) {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageEncryptInitResponse {
+                ck_rv: rv.0,
+                ..Default::default()
+            }));
+        }
 
         // Mechanism policy gate (G3-PR3 Task 3).
         // W1-C1-13: the gate runs before remap on every init handler so identical
@@ -542,17 +568,42 @@ async fn message_encrypt_init_with_timeout(
             }));
         }
 
+        // R13 (S2 §6): transport validation → validated newtype.
+        let (local_abi, backend_abi) = daemon_validation_abis();
+        let validated = match validate_mechanism_transport(
+            &registry,
+            &mechanism,
+            Operation::General,
+            local_abi,
+            backend_abi,
+        ) {
+            Ok(validated) => validated,
+            Err(rv) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::MessageEncryptInitResponse {
+                    ck_rv: rv.0,
+                    ..Default::default()
+                }));
+            }
+        };
+
         // B1: remap object handles embedded in the mechanism parameters;
         // gate each through per-object authz when active (C1).
-        if let Err(rv) =
-            remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism)
+        let validated =
+            match remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, validated)
                 .await
-        {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageEncryptInitResponse {
-                ck_rv: rv.0,
-                ..Default::default()
-            }));
-        }
+            {
+                Ok(validated) => validated,
+                Err(rv) => {
+                    return Ok(Response::new(pkcs11_proxy_ng_proto::MessageEncryptInitResponse {
+                        ck_rv: rv.0,
+                        ..Default::default()
+                    }));
+                }
+            };
+
+        // R13 named marker: R20 inserts `sanitize_mechanism_input` here,
+        // between handle remapping and the backend call.
+        // TODO(R20): insert sanitize_mechanism_input(validated) → backend call.
 
         let backend = Arc::clone(backend_ref);
         let init_param_for_response = init_param.clone();
@@ -566,27 +617,11 @@ async fn message_encrypt_init_with_timeout(
             .as_ref()
             .map(|param| param.parameter_encoding_version)
             .unwrap_or(0);
-        // W1-C3-26: a poisoned registry lock fails closed with
-        // DEVICE_ERROR (internal daemon fault), never a panic. The lock
-        // is still only acquired when no contract supplied the shape.
         let installed_shape = match contract.as_ref() {
             Some(contract) => contract.shape,
-            None => {
-                let registry = match ctx.mechanism_registry_source.current_registry() {
-                    Ok(registry) => registry,
-                    Err(_) => {
-                        return Ok(Response::new(
-                            pkcs11_proxy_ng_proto::MessageEncryptInitResponse {
-                                ck_rv: CkRv::DEVICE_ERROR.0,
-                                ..Default::default()
-                            },
-                        ));
-                    }
-                };
-                MessageParameterShape::from_registry_name(
-                    registry.param_shape(mechanism.mechanism_type.0),
-                )
-            }
+            None => MessageParameterShape::from_registry_name(
+                registry.param_shape(mechanism.mechanism_type.0),
+            ),
         };
         let mut transition = MessageOperationTransition::begin(operation);
         let result = if let Some(ref contract) = contract {
@@ -595,7 +630,7 @@ async fn message_encrypt_init_with_timeout(
                 transition.mark_started();
                 let provider_result = backend.message_encrypt_init_contract(
                     session,
-                    &mechanism,
+                    &validated,
                     init_param.as_ref(),
                     key,
                     &provider_spec,
@@ -623,7 +658,7 @@ async fn message_encrypt_init_with_timeout(
                 transition.mark_started();
                 let result = backend.message_encrypt_init(
                     session,
-                    Some(&mechanism),
+                    Some(&validated),
                     init_param.as_ref(),
                     key,
                 );
@@ -854,8 +889,22 @@ async fn message_decrypt_init_with_timeout(
                 }
             };
 
+        // R13 (S2 §6): this request's single registry snapshot feeds the
+        // contract check, exclusion, transport validation, and the shape
+        // lookup below. W1-C3-26: poison fails closed with DEVICE_ERROR.
+        let registry = match current_registry_snapshot(ctx) {
+            Ok(registry) => registry,
+            Err(rv) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::MessageDecryptInitResponse {
+                    ck_rv: rv.0,
+                    ..Default::default()
+                }));
+            }
+        };
+
         let contract = match validate_message_init_contract(
             ctx,
+            &registry,
             mechanism_type,
             mechanism_had_params,
             wire_shape,
@@ -883,7 +932,7 @@ async fn message_decrypt_init_with_timeout(
                 }
             };
 
-        let mut mechanism = match parse_mechanism(req.mechanism) {
+        let mechanism = match parse_mechanism(req.mechanism) {
             Ok(m) => m,
             Err(rv) => {
                 return Ok(Response::new(pkcs11_proxy_ng_proto::MessageDecryptInitResponse {
@@ -892,6 +941,14 @@ async fn message_decrypt_init_with_timeout(
                 }));
             }
         };
+
+        // R13 (S2 §6): operator exclusion → MECHANISM_INVALID before auth.
+        if let Err(rv) = check_operator_exclusion(&registry, mechanism.mechanism_type) {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageDecryptInitResponse {
+                ck_rv: rv.0,
+                ..Default::default()
+            }));
+        }
 
         // Mechanism policy gate (G3-PR3 Task 3).
         // W1-C1-13: the gate runs before remap on every init handler so identical
@@ -903,17 +960,42 @@ async fn message_decrypt_init_with_timeout(
             }));
         }
 
+        // R13 (S2 §6): transport validation → validated newtype.
+        let (local_abi, backend_abi) = daemon_validation_abis();
+        let validated = match validate_mechanism_transport(
+            &registry,
+            &mechanism,
+            Operation::General,
+            local_abi,
+            backend_abi,
+        ) {
+            Ok(validated) => validated,
+            Err(rv) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::MessageDecryptInitResponse {
+                    ck_rv: rv.0,
+                    ..Default::default()
+                }));
+            }
+        };
+
         // B1: remap object handles embedded in the mechanism parameters;
         // gate each through per-object authz when active (C1).
-        if let Err(rv) =
-            remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism)
+        let validated =
+            match remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, validated)
                 .await
-        {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageDecryptInitResponse {
-                ck_rv: rv.0,
-                ..Default::default()
-            }));
-        }
+            {
+                Ok(validated) => validated,
+                Err(rv) => {
+                    return Ok(Response::new(pkcs11_proxy_ng_proto::MessageDecryptInitResponse {
+                        ck_rv: rv.0,
+                        ..Default::default()
+                    }));
+                }
+            };
+
+        // R13 named marker: R20 inserts `sanitize_mechanism_input` here,
+        // between handle remapping and the backend call.
+        // TODO(R20): insert sanitize_mechanism_input(validated) → backend call.
 
         let backend = Arc::clone(backend_ref);
         let init_param_for_response = init_param.clone();
@@ -927,27 +1009,11 @@ async fn message_decrypt_init_with_timeout(
             .as_ref()
             .map(|param| param.parameter_encoding_version)
             .unwrap_or(0);
-        // W1-C3-26: a poisoned registry lock fails closed with
-        // DEVICE_ERROR (internal daemon fault), never a panic. The lock
-        // is still only acquired when no contract supplied the shape.
         let installed_shape = match contract.as_ref() {
             Some(contract) => contract.shape,
-            None => {
-                let registry = match ctx.mechanism_registry_source.current_registry() {
-                    Ok(registry) => registry,
-                    Err(_) => {
-                        return Ok(Response::new(
-                            pkcs11_proxy_ng_proto::MessageDecryptInitResponse {
-                                ck_rv: CkRv::DEVICE_ERROR.0,
-                                ..Default::default()
-                            },
-                        ));
-                    }
-                };
-                MessageParameterShape::from_registry_name(
-                    registry.param_shape(mechanism.mechanism_type.0),
-                )
-            }
+            None => MessageParameterShape::from_registry_name(
+                registry.param_shape(mechanism.mechanism_type.0),
+            ),
         };
         let mut transition = MessageOperationTransition::begin(operation);
         let result = if let Some(ref contract) = contract {
@@ -956,7 +1022,7 @@ async fn message_decrypt_init_with_timeout(
                 transition.mark_started();
                 let provider_result = backend.message_decrypt_init_contract(
                     session,
-                    &mechanism,
+                    &validated,
                     init_param.as_ref(),
                     key,
                     &provider_spec,
@@ -984,7 +1050,7 @@ async fn message_decrypt_init_with_timeout(
                 transition.mark_started();
                 let result = backend.message_decrypt_init(
                     session,
-                    Some(&mechanism),
+                    Some(&validated),
                     init_param.as_ref(),
                     key,
                 );
@@ -1200,7 +1266,7 @@ pub(crate) async fn message_sign_init(
                 }
             };
 
-        let mut mechanism = match parse_mechanism(req.mechanism) {
+        let mechanism = match parse_mechanism(req.mechanism) {
             Ok(m) => m,
             Err(rv) => {
                 return Ok(Response::new(pkcs11_proxy_ng_proto::MessageSignInitResponse {
@@ -1208,6 +1274,25 @@ pub(crate) async fn message_sign_init(
                 }));
             }
         };
+
+        // R13 (S2 §6): this request's single registry snapshot feeds
+        // exclusion and transport validation. W1-C3-26: poison fails
+        // closed with DEVICE_ERROR.
+        let registry = match current_registry_snapshot(ctx) {
+            Ok(registry) => registry,
+            Err(rv) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::MessageSignInitResponse {
+                    ck_rv: rv.0,
+                }));
+            }
+        };
+
+        // R13 (S2 §6): operator exclusion → MECHANISM_INVALID before auth.
+        if let Err(rv) = check_operator_exclusion(&registry, mechanism.mechanism_type) {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageSignInitResponse {
+                ck_rv: rv.0,
+            }));
+        }
 
         // Mechanism policy gate (G3-PR3 Task 3).
         // W1-C1-13: the gate runs before remap on every init handler so identical
@@ -1218,22 +1303,46 @@ pub(crate) async fn message_sign_init(
             }));
         }
 
+        // R13 (S2 §6): transport validation → validated newtype.
+        let (local_abi, backend_abi) = daemon_validation_abis();
+        let validated = match validate_mechanism_transport(
+            &registry,
+            &mechanism,
+            Operation::General,
+            local_abi,
+            backend_abi,
+        ) {
+            Ok(validated) => validated,
+            Err(rv) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::MessageSignInitResponse {
+                    ck_rv: rv.0,
+                }));
+            }
+        };
+
         // B1: remap object handles embedded in the mechanism parameters;
         // gate each through per-object authz when active (C1).
-        if let Err(rv) =
-            remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism)
+        let validated =
+            match remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, validated)
                 .await
-        {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageSignInitResponse {
-                ck_rv: rv.0,
-            }));
-        }
+            {
+                Ok(validated) => validated,
+                Err(rv) => {
+                    return Ok(Response::new(pkcs11_proxy_ng_proto::MessageSignInitResponse {
+                        ck_rv: rv.0,
+                    }));
+                }
+            };
+
+        // R13 named marker: R20 inserts `sanitize_mechanism_input` here,
+        // between handle remapping and the backend call.
+        // TODO(R20): insert sanitize_mechanism_input(validated) → backend call.
 
         let backend = Arc::clone(backend_ref);
         let mut transition = MessageOperationTransition::begin(operation);
         let result = spawn_backend(move || {
             transition.mark_started();
-            let result = backend.message_sign_init(session, Some(&mechanism), key);
+            let result = backend.message_sign_init(session, Some(&validated), key);
             transition.settle(&result, Some(MessageParameterShape::Unmodeled));
             result
         })
@@ -1383,7 +1492,7 @@ pub(crate) async fn message_verify_init(
                 }
             };
 
-        let mut mechanism = match parse_mechanism(req.mechanism) {
+        let mechanism = match parse_mechanism(req.mechanism) {
             Ok(m) => m,
             Err(rv) => {
                 return Ok(Response::new(pkcs11_proxy_ng_proto::MessageVerifyInitResponse {
@@ -1391,6 +1500,25 @@ pub(crate) async fn message_verify_init(
                 }));
             }
         };
+
+        // R13 (S2 §6): this request's single registry snapshot feeds
+        // exclusion and transport validation. W1-C3-26: poison fails
+        // closed with DEVICE_ERROR.
+        let registry = match current_registry_snapshot(ctx) {
+            Ok(registry) => registry,
+            Err(rv) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::MessageVerifyInitResponse {
+                    ck_rv: rv.0,
+                }));
+            }
+        };
+
+        // R13 (S2 §6): operator exclusion → MECHANISM_INVALID before auth.
+        if let Err(rv) = check_operator_exclusion(&registry, mechanism.mechanism_type) {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageVerifyInitResponse {
+                ck_rv: rv.0,
+            }));
+        }
 
         // Mechanism policy gate (G3-PR3 Task 3).
         // W1-C1-13: the gate runs before remap on every init handler so identical
@@ -1401,22 +1529,46 @@ pub(crate) async fn message_verify_init(
             }));
         }
 
+        // R13 (S2 §6): transport validation → validated newtype.
+        let (local_abi, backend_abi) = daemon_validation_abis();
+        let validated = match validate_mechanism_transport(
+            &registry,
+            &mechanism,
+            Operation::General,
+            local_abi,
+            backend_abi,
+        ) {
+            Ok(validated) => validated,
+            Err(rv) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::MessageVerifyInitResponse {
+                    ck_rv: rv.0,
+                }));
+            }
+        };
+
         // B1: remap object handles embedded in the mechanism parameters;
         // gate each through per-object authz when active (C1).
-        if let Err(rv) =
-            remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism)
+        let validated =
+            match remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, validated)
                 .await
-        {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageVerifyInitResponse {
-                ck_rv: rv.0,
-            }));
-        }
+            {
+                Ok(validated) => validated,
+                Err(rv) => {
+                    return Ok(Response::new(pkcs11_proxy_ng_proto::MessageVerifyInitResponse {
+                        ck_rv: rv.0,
+                    }));
+                }
+            };
+
+        // R13 named marker: R20 inserts `sanitize_mechanism_input` here,
+        // between handle remapping and the backend call.
+        // TODO(R20): insert sanitize_mechanism_input(validated) → backend call.
 
         let backend = Arc::clone(backend_ref);
         let mut transition = MessageOperationTransition::begin(operation);
         let result = spawn_backend(move || {
             transition.mark_started();
-            let result = backend.message_verify_init(session, Some(&mechanism), key);
+            let result = backend.message_verify_init(session, Some(&validated), key);
             transition.settle(&result, Some(MessageParameterShape::Unmodeled));
             result
         })

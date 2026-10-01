@@ -19,27 +19,29 @@ struct NativeParameter<'a> {
 }
 
 impl<'a> NativeParameter<'a> {
-    fn new(mechanism: &'a CkMechanism, parameter: Option<&'a MessageParameter>) -> CkResult<Self> {
-        validate_input(mechanism, parameter)?;
+    fn new(
+        mechanism: &'a ValidatedMechanismParams,
+        parameter: Option<&'a MessageParameter>,
+    ) -> CkResult<Self> {
+        // R13: the server validates before the backend call; this layer
+        // converts the proof newtype directly (no re-validation funnel).
+        validate_input(mechanism.mechanism(), parameter)?;
         let storage = if let Some(parameter) = parameter {
             NativeStorage::Message(
                 super::message_ops::build_message_init_mechanism(
-                    mechanism.mechanism_type.0,
+                    mechanism.mechanism().mechanism_type.0,
                     parameter,
                 )?,
                 parameter,
             )
         } else {
-            NativeStorage::Mechanism({
-                let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
-                mechanism_to_ffi(&validated)?
-            })
+            NativeStorage::Mechanism(mechanism_to_ffi(mechanism)?)
         };
         let original = match &storage {
             NativeStorage::Mechanism(ffi) => ffi.ck_mechanism(),
             NativeStorage::Message(ffi, _) => ffi.ck_mechanism,
         };
-        Ok(Self { storage, original, input: mechanism })
+        Ok(Self { storage, original, input: mechanism.mechanism() })
     }
 
     fn pointer(&mut self) -> cryptoki_sys::CK_MECHANISM_PTR {
@@ -75,7 +77,7 @@ impl<'a> NativeParameter<'a> {
 }
 
 fn with_parameter<T>(
-    mechanism: &CkMechanism,
+    mechanism: &ValidatedMechanismParams,
     parameter: Option<&MessageParameter>,
     call: impl FnOnce(&mut NativeParameter<'_>) -> CkResult<T>,
 ) -> CkResult<(T, AuthenticatedOutput)> {
@@ -89,7 +91,7 @@ impl FfiBackend {
     pub(super) fn ffi_wrap_authenticated_typed(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         parameter: Option<&MessageParameter>,
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
@@ -148,7 +150,7 @@ impl FfiBackend {
     pub(super) fn ffi_wrap_authenticated_exact_typed(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         parameter: Option<&MessageParameter>,
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
@@ -206,7 +208,7 @@ impl FfiBackend {
     pub(super) fn ffi_unwrap_authenticated_typed(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         parameter: Option<&MessageParameter>,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,

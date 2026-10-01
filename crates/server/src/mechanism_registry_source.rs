@@ -19,6 +19,11 @@ use sha2::{Digest, Sha256};
 pub struct MechanismRegistrySource {
     snapshot: Arc<RwLock<Arc<RegistrySnapshot>>>,
     config_path: Option<PathBuf>,
+    /// R13 single-snapshot property: counts `current_registry()` calls so
+    /// handler tests can prove one snapshot per request. Test-only —
+    /// zero production overhead or behavior.
+    #[cfg(test)]
+    current_registry_calls: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 struct RegistrySnapshot {
@@ -34,6 +39,8 @@ impl MechanismRegistrySource {
         Ok(Self {
             snapshot: Arc::new(RwLock::new(Arc::new(snapshot))),
             config_path: config_path.map(Path::to_path_buf),
+            #[cfg(test)]
+            current_registry_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })
     }
 
@@ -54,10 +61,19 @@ impl MechanismRegistrySource {
     /// W1-C3-26: a poisoned lock fails closed with an error, never an
     /// expect-panic on the request path.
     pub fn current_registry(&self) -> Result<Arc<MechanismRegistry>, String> {
+        #[cfg(test)]
+        self.current_registry_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.snapshot
             .read()
             .map(|snapshot| snapshot.registry.clone())
             .map_err(|_| "mechanism registry lock poisoned; failing closed".to_string())
+    }
+
+    /// R13 single-snapshot probe: how many `current_registry()` calls this
+    /// source has served. Test-only.
+    #[cfg(test)]
+    pub fn current_registry_calls(&self) -> usize {
+        self.current_registry_calls.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Reload the registry from disk. Used by the daemon's SIGHUP

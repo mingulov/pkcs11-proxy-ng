@@ -1965,10 +1965,15 @@ impl Pkcs11Backend for MockBackend {
     ) -> CkResult<(CkRv, Vec<CkAttributeQueryResult>)> {
         self.get_attribute_value_exact_impl(session, object, queries)
     }
-    fn sign_init(&self, s: CkSessionHandle, m: &CkMechanism, k: CkObjectHandle) -> CkResult<()> {
-        self.record_mechanism_entry(MockMechanismEntry::SignInit, Some(m));
-        self.require_mechanism_workflow_for_session(s, m, CkMechanismFlags::SIGN)?;
-        self.sign_init_impl(s, m, k)
+    fn sign_init(
+        &self,
+        s: CkSessionHandle,
+        m: &ValidatedMechanismParams,
+        k: CkObjectHandle,
+    ) -> CkResult<()> {
+        self.record_mechanism_entry(MockMechanismEntry::SignInit, Some(m.mechanism()));
+        self.require_mechanism_workflow_for_session(s, m.mechanism(), CkMechanismFlags::SIGN)?;
+        self.sign_init_impl(s, m.mechanism(), k)
     }
     fn sign_init_cancel(&self, s: CkSessionHandle) -> CkResult<()> {
         self.init_cancel_impl(s, MultiPartOp::Sign)
@@ -1987,11 +1992,15 @@ impl Pkcs11Backend for MockBackend {
     fn sign_recover_init(
         &self,
         s: CkSessionHandle,
-        m: &CkMechanism,
+        m: &ValidatedMechanismParams,
         k: CkObjectHandle,
     ) -> CkResult<()> {
-        self.require_mechanism_workflow_for_session(s, m, CkMechanismFlags::SIGN_RECOVER)?;
-        self.begin_keyed_op_with_mechanism(s, m, k, MultiPartOp::SignRecover)
+        self.require_mechanism_workflow_for_session(
+            s,
+            m.mechanism(),
+            CkMechanismFlags::SIGN_RECOVER,
+        )?;
+        self.begin_keyed_op_with_mechanism(s, m.mechanism(), k, MultiPartOp::SignRecover)
     }
     fn sign_recover_init_cancel(&self, s: CkSessionHandle) -> CkResult<()> {
         self.init_cancel_impl(s, MultiPartOp::SignRecover)
@@ -2004,11 +2013,15 @@ impl Pkcs11Backend for MockBackend {
     fn verify_recover_init(
         &self,
         s: CkSessionHandle,
-        m: &CkMechanism,
+        m: &ValidatedMechanismParams,
         k: CkObjectHandle,
     ) -> CkResult<()> {
-        self.require_mechanism_workflow_for_session(s, m, CkMechanismFlags::VERIFY_RECOVER)?;
-        self.begin_keyed_op_with_mechanism(s, m, k, MultiPartOp::VerifyRecover)
+        self.require_mechanism_workflow_for_session(
+            s,
+            m.mechanism(),
+            CkMechanismFlags::VERIFY_RECOVER,
+        )?;
+        self.begin_keyed_op_with_mechanism(s, m.mechanism(), k, MultiPartOp::VerifyRecover)
     }
     fn verify_recover_init_cancel(&self, s: CkSessionHandle) -> CkResult<()> {
         self.init_cancel_impl(s, MultiPartOp::VerifyRecover)
@@ -2019,9 +2032,14 @@ impl Pkcs11Backend for MockBackend {
         self.verify_recover_impl()
     }
 
-    fn verify_init(&self, s: CkSessionHandle, m: &CkMechanism, k: CkObjectHandle) -> CkResult<()> {
-        self.require_mechanism_workflow_for_session(s, m, CkMechanismFlags::VERIFY)?;
-        self.verify_init_impl(s, m, k)
+    fn verify_init(
+        &self,
+        s: CkSessionHandle,
+        m: &ValidatedMechanismParams,
+        k: CkObjectHandle,
+    ) -> CkResult<()> {
+        self.require_mechanism_workflow_for_session(s, m.mechanism(), CkMechanismFlags::VERIFY)?;
+        self.verify_init_impl(s, m.mechanism(), k)
     }
     fn verify_init_cancel(&self, s: CkSessionHandle) -> CkResult<()> {
         self.init_cancel_impl(s, MultiPartOp::Verify)
@@ -2059,11 +2077,11 @@ impl Pkcs11Backend for MockBackend {
         }
         Ok(())
     }
-    fn digest_init(&self, s: CkSessionHandle, m: &CkMechanism) -> CkResult<()> {
-        self.record_mechanism_entry(MockMechanismEntry::DigestInit, Some(m));
-        self.require_mechanism_workflow_for_session(s, m, CkMechanismFlags::DIGEST)?;
+    fn digest_init(&self, s: CkSessionHandle, m: &ValidatedMechanismParams) -> CkResult<()> {
+        self.record_mechanism_entry(MockMechanismEntry::DigestInit, Some(m.mechanism()));
+        self.require_mechanism_workflow_for_session(s, m.mechanism(), CkMechanismFlags::DIGEST)?;
         self.digest_init_impl(s)?;
-        self.session_digest_mechanism.lock().unwrap().insert(s.0, m.mechanism_type);
+        self.session_digest_mechanism.lock().unwrap().insert(s.0, m.mechanism().mechanism_type);
         Ok(())
     }
     fn digest_init_cancel(&self, s: CkSessionHandle) -> CkResult<()> {
@@ -2104,10 +2122,10 @@ impl Pkcs11Backend for MockBackend {
     fn encrypt_init(
         &self,
         s: CkSessionHandle,
-        m: &CkMechanism,
+        m: &ValidatedMechanismParams,
         k: CkObjectHandle,
     ) -> CkResult<Option<CkMechanismParams>> {
-        self.require_mechanism_workflow_for_session(s, m, CkMechanismFlags::ENCRYPT)?;
+        self.require_mechanism_workflow_for_session(s, m.mechanism(), CkMechanismFlags::ENCRYPT)?;
         self.encrypt_init_impl(s, k)?;
         // Injected test output wins; otherwise IV-generating GCM-wrap
         // params produce a deterministic writeback.
@@ -2116,7 +2134,7 @@ impl Pkcs11Backend for MockBackend {
             .lock()
             .unwrap()
             .clone()
-            .or_else(|| Self::generated_iv_writeback(s, m));
+            .or_else(|| Self::generated_iv_writeback(s, m.mechanism()));
         match &output {
             Some(params) => {
                 self.session_mechanism_output.lock().unwrap().insert(s.0, params.clone());
@@ -2143,10 +2161,10 @@ impl Pkcs11Backend for MockBackend {
     fn decrypt_init(
         &self,
         s: CkSessionHandle,
-        m: &CkMechanism,
+        m: &ValidatedMechanismParams,
         k: CkObjectHandle,
     ) -> CkResult<Option<CkMechanismParams>> {
-        self.require_mechanism_workflow_for_session(s, m, CkMechanismFlags::DECRYPT)?;
+        self.require_mechanism_workflow_for_session(s, m.mechanism(), CkMechanismFlags::DECRYPT)?;
         self.decrypt_init_impl(s, k).map(|_| None)
     }
     fn decrypt_init_cancel(&self, s: CkSessionHandle) -> CkResult<()> {
@@ -2168,15 +2186,19 @@ impl Pkcs11Backend for MockBackend {
     fn derive_key(
         &self,
         session: CkSessionHandle,
-        m: &CkMechanism,
+        m: &ValidatedMechanismParams,
         base_key: CkObjectHandle,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
-        self.record_mechanism_entry(MockMechanismEntry::DeriveKey, Some(m));
-        self.require_mechanism_workflow_for_session(session, m, CkMechanismFlags::DERIVE)?;
+        self.record_mechanism_entry(MockMechanismEntry::DeriveKey, Some(m.mechanism()));
+        self.require_mechanism_workflow_for_session(
+            session,
+            m.mechanism(),
+            CkMechanismFlags::DERIVE,
+        )?;
         let state = self.state.lock().unwrap();
         self.require_live_key(&state, session, base_key)?;
-        self.validate_source_grounded_param_handles(&state, m)?;
+        self.validate_source_grounded_param_handles(&state, m.mechanism())?;
         drop(state);
         self.derive_key_impl(session, template.unwrap_or(&[]))
     }
@@ -2184,7 +2206,7 @@ impl Pkcs11Backend for MockBackend {
     fn derive_key_with_output(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         base_key: CkObjectHandle,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
@@ -2199,14 +2221,14 @@ impl Pkcs11Backend for MockBackend {
     fn derive_key_with_output_result(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         base_key: CkObjectHandle,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<CkDeriveKeyOutputResult> {
-        self.record_mechanism_entry(MockMechanismEntry::DeriveKey, Some(mechanism));
+        self.record_mechanism_entry(MockMechanismEntry::DeriveKey, Some(mechanism.mechanism()));
         if let Err(rv) = self.require_mechanism_workflow_for_session(
             session,
-            mechanism,
+            mechanism.mechanism(),
             CkMechanismFlags::DERIVE,
         ) {
             return Ok(CkDeriveKeyOutputResult::error(rv, None));
@@ -2215,7 +2237,8 @@ impl Pkcs11Backend for MockBackend {
         if let Err(rv) = self.require_live_key(&state, session, base_key) {
             return Ok(CkDeriveKeyOutputResult::error(rv, None));
         }
-        if let Err(rv) = self.validate_source_grounded_param_handles(&state, mechanism) {
+        if let Err(rv) = self.validate_source_grounded_param_handles(&state, mechanism.mechanism())
+        {
             return Ok(CkDeriveKeyOutputResult::error(rv, None));
         }
         drop(state);
@@ -2223,18 +2246,30 @@ impl Pkcs11Backend for MockBackend {
             let handle = self.derive_key_impl(session, template.unwrap_or(&[]))?;
             return Ok(CkDeriveKeyOutputResult::ok(handle, Some(output)));
         }
-        self.derive_key_with_sp800_108_output_result(session, mechanism, template.unwrap_or(&[]))
+        self.derive_key_with_sp800_108_output_result(
+            session,
+            mechanism.mechanism(),
+            template.unwrap_or(&[]),
+        )
     }
 
     fn wrap_key(
         &self,
         s: CkSessionHandle,
-        m: &CkMechanism,
+        m: &ValidatedMechanismParams,
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
     ) -> CkResult<SecretBytes> {
-        self.record_wrap_entry(MockWrapEntry::Wrap, s, m, wrapping_key, key, None, None)?;
-        self.require_mechanism_workflow_for_session(s, m, CkMechanismFlags::WRAP)?;
+        self.record_wrap_entry(
+            MockWrapEntry::Wrap,
+            s,
+            m.mechanism(),
+            wrapping_key,
+            key,
+            None,
+            None,
+        )?;
+        self.require_mechanism_workflow_for_session(s, m.mechanism(), CkMechanismFlags::WRAP)?;
         let state = self.state.lock().unwrap();
         self.require_live_keys(&state, s, &[wrapping_key, key])?;
         self.wrap_key_impl()
@@ -2242,13 +2277,17 @@ impl Pkcs11Backend for MockBackend {
     fn unwrap_key(
         &self,
         session: CkSessionHandle,
-        m: &CkMechanism,
+        m: &ValidatedMechanismParams,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
         let _ = self.resolve_input(wrapped_key)?;
-        self.require_mechanism_workflow_for_session(session, m, CkMechanismFlags::UNWRAP)?;
+        self.require_mechanism_workflow_for_session(
+            session,
+            m.mechanism(),
+            CkMechanismFlags::UNWRAP,
+        )?;
         let state = self.state.lock().unwrap();
         self.require_live_key(&state, session, unwrapping_key)?;
         drop(state);
@@ -2257,17 +2296,21 @@ impl Pkcs11Backend for MockBackend {
     fn generate_key(
         &self,
         session: CkSessionHandle,
-        m: &CkMechanism,
+        m: &ValidatedMechanismParams,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
-        self.record_mechanism_entry(MockMechanismEntry::GenerateKey, Some(m));
-        self.require_mechanism_workflow_for_session(session, m, CkMechanismFlags::GENERATE)?;
+        self.record_mechanism_entry(MockMechanismEntry::GenerateKey, Some(m.mechanism()));
+        self.require_mechanism_workflow_for_session(
+            session,
+            m.mechanism(),
+            CkMechanismFlags::GENERATE,
+        )?;
         let handle = self.generate_key_impl(session, template.unwrap_or(&[]))?;
         // CKO_SECRET_KEY, with the key type derived from the mechanism.
         self.synthesize_default_key_attributes(
             handle,
             0x0000_0004,
-            session_ops::mock_secret_key_type(m.mechanism_type),
+            session_ops::mock_secret_key_type(m.mechanism().mechanism_type),
         );
         Ok(handle)
     }
@@ -2311,19 +2354,19 @@ impl Pkcs11Backend for MockBackend {
     fn generate_key_pair(
         &self,
         session: CkSessionHandle,
-        m: &CkMechanism,
+        m: &ValidatedMechanismParams,
         public_template: Option<&[CkAttribute]>,
         private_template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, CkObjectHandle)> {
-        self.record_mechanism_entry(MockMechanismEntry::GenerateKeyPair, Some(m));
+        self.record_mechanism_entry(MockMechanismEntry::GenerateKeyPair, Some(m.mechanism()));
         self.keygen_templates.lock().unwrap().push((
-            m.clone(),
+            m.mechanism().clone(),
             public_template.map(|t| t.to_vec()),
             private_template.map(|t| t.to_vec()),
         ));
         self.require_mechanism_workflow_for_session(
             session,
-            m,
+            m.mechanism(),
             CkMechanismFlags::GENERATE_KEY_PAIR,
         )?;
         let (public, private) = self.generate_key_pair_impl(
@@ -2331,7 +2374,7 @@ impl Pkcs11Backend for MockBackend {
             public_template.unwrap_or(&[]),
             private_template.unwrap_or(&[]),
         )?;
-        let key_type = session_ops::mock_pair_key_type(m.mechanism_type);
+        let key_type = session_ops::mock_pair_key_type(m.mechanism().mechanism_type);
         self.synthesize_default_key_attributes(public, 0x0000_0002, key_type); // CKO_PUBLIC_KEY
         self.synthesize_default_key_attributes(private, 0x0000_0003, key_type); // CKO_PRIVATE_KEY
         Ok((public, private))
@@ -2544,7 +2587,7 @@ impl Pkcs11Backend for MockBackend {
     fn wrap_key_exact(
         &self,
         s: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
         spec: &CkOutputBufferSpec,
@@ -2552,13 +2595,17 @@ impl Pkcs11Backend for MockBackend {
         self.record_wrap_entry(
             MockWrapEntry::Exact,
             s,
-            mechanism,
+            mechanism.mechanism(),
             wrapping_key,
             key,
             Some(spec),
             None,
         )?;
-        self.require_mechanism_workflow_for_session(s, mechanism, CkMechanismFlags::WRAP)?;
+        self.require_mechanism_workflow_for_session(
+            s,
+            mechanism.mechanism(),
+            CkMechanismFlags::WRAP,
+        )?;
         let state = self.state.lock().unwrap();
         self.require_live_keys(&state, s, &[wrapping_key, key])?;
         self.wrap_key_exact_impl(spec)
@@ -2567,7 +2614,7 @@ impl Pkcs11Backend for MockBackend {
     fn wrap_key_exact_with_output(
         &self,
         s: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
         spec: &CkOutputBufferSpec,
@@ -2594,17 +2641,25 @@ impl Pkcs11Backend for MockBackend {
     fn encapsulate_key(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         public_key: CkObjectHandle,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<(SecretBytes, CkObjectHandle)> {
-        self.record_mechanism_entry(MockMechanismEntry::EncapsulateKey, Some(mechanism));
+        self.record_mechanism_entry(
+            MockMechanismEntry::EncapsulateKey,
+            Some(mechanism.mechanism()),
+        );
         self.require_mechanism_workflow_for_session(
             session,
-            mechanism,
+            mechanism.mechanism(),
             CkMechanismFlags::ENCAPSULATE,
         )?;
-        self.encapsulate_key_impl(session, mechanism, public_key, template.unwrap_or(&[]))
+        self.encapsulate_key_impl(
+            session,
+            mechanism.mechanism(),
+            public_key,
+            template.unwrap_or(&[]),
+        )
     }
 
     // --- Track C Task 2: Exact KEM trait method ---
@@ -2612,20 +2667,23 @@ impl Pkcs11Backend for MockBackend {
     fn encapsulate_key_exact(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         public_key: CkObjectHandle,
         template: Option<&[CkAttribute]>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputAndHandleResult> {
-        self.record_mechanism_entry(MockMechanismEntry::EncapsulateKeyExact, Some(mechanism));
+        self.record_mechanism_entry(
+            MockMechanismEntry::EncapsulateKeyExact,
+            Some(mechanism.mechanism()),
+        );
         self.require_mechanism_workflow_for_session(
             session,
-            mechanism,
+            mechanism.mechanism(),
             CkMechanismFlags::ENCAPSULATE,
         )?;
         self.encapsulate_key_exact_impl(
             session,
-            mechanism,
+            mechanism.mechanism(),
             public_key,
             template.unwrap_or(&[]),
             spec,
@@ -3021,7 +3079,7 @@ impl Pkcs11Backend for MockBackend {
     fn wrap_key_authenticated_exact(
         &self,
         s: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
         aad: CkInBuf<'_>,
@@ -3031,14 +3089,18 @@ impl Pkcs11Backend for MockBackend {
         self.record_wrap_entry(
             MockWrapEntry::AuthenticatedExact,
             s,
-            mechanism,
+            mechanism.mechanism(),
             wrapping_key,
             key,
             Some(output_spec),
             Some(aad),
         )?;
         let _ = self.resolve_input(aad)?;
-        self.require_mechanism_workflow_for_session(s, mechanism, CkMechanismFlags::WRAP)?;
+        self.require_mechanism_workflow_for_session(
+            s,
+            mechanism.mechanism(),
+            CkMechanismFlags::WRAP,
+        )?;
         let state = self.state.lock().unwrap();
         self.require_live_keys(&state, s, &[wrapping_key, key])?;
         self.wrap_key_authenticated_exact_impl(output_spec, param_out_spec)
@@ -3154,16 +3216,19 @@ impl Pkcs11Backend for MockBackend {
     fn decapsulate_key(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         private_key: CkObjectHandle,
         template: Option<&[CkAttribute]>,
         ciphertext: CkInBuf<'_>,
     ) -> CkResult<CkObjectHandle> {
-        self.record_mechanism_entry(MockMechanismEntry::DecapsulateKey, Some(mechanism));
+        self.record_mechanism_entry(
+            MockMechanismEntry::DecapsulateKey,
+            Some(mechanism.mechanism()),
+        );
         let _ = self.resolve_input(ciphertext)?;
         self.require_mechanism_workflow_for_session(
             session,
-            mechanism,
+            mechanism.mechanism(),
             CkMechanismFlags::DECAPSULATE,
         )?;
         let mut state = self.state.lock().unwrap();
@@ -3174,7 +3239,7 @@ impl Pkcs11Backend for MockBackend {
     fn message_encrypt_init(
         &self,
         session: CkSessionHandle,
-        mechanism: Option<&CkMechanism>,
+        mechanism: Option<&ValidatedMechanismParams>,
         _init_param: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         key: CkObjectHandle,
     ) -> CkResult<()> {
@@ -3185,7 +3250,7 @@ impl Pkcs11Backend for MockBackend {
         self.require_live_key_for_optional_mechanism_workflow(
             &state,
             session,
-            mechanism,
+            mechanism.map(ValidatedMechanismParams::mechanism),
             key,
             CkMechanismFlags::MESSAGE_ENCRYPT,
         )
@@ -3194,7 +3259,7 @@ impl Pkcs11Backend for MockBackend {
     fn message_encrypt_init_contract(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         init_param: Option<&MessageParameter>,
         key: CkObjectHandle,
         provider_spec: &CkParameterRoundtripSpec,
@@ -3294,7 +3359,7 @@ impl Pkcs11Backend for MockBackend {
     fn message_decrypt_init(
         &self,
         session: CkSessionHandle,
-        mechanism: Option<&CkMechanism>,
+        mechanism: Option<&ValidatedMechanismParams>,
         _init_param: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         key: CkObjectHandle,
     ) -> CkResult<()> {
@@ -3305,7 +3370,7 @@ impl Pkcs11Backend for MockBackend {
         self.require_live_key_for_optional_mechanism_workflow(
             &state,
             session,
-            mechanism,
+            mechanism.map(ValidatedMechanismParams::mechanism),
             key,
             CkMechanismFlags::MESSAGE_DECRYPT,
         )
@@ -3314,7 +3379,7 @@ impl Pkcs11Backend for MockBackend {
     fn message_decrypt_init_contract(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         init_param: Option<&MessageParameter>,
         key: CkObjectHandle,
         provider_spec: &CkParameterRoundtripSpec,
@@ -3403,14 +3468,14 @@ impl Pkcs11Backend for MockBackend {
     fn message_sign_init(
         &self,
         session: CkSessionHandle,
-        mechanism: Option<&CkMechanism>,
+        mechanism: Option<&ValidatedMechanismParams>,
         key: CkObjectHandle,
     ) -> CkResult<()> {
         let state = self.state.lock().unwrap();
         self.require_live_key_for_optional_mechanism_workflow(
             &state,
             session,
-            mechanism,
+            mechanism.map(ValidatedMechanismParams::mechanism),
             key,
             CkMechanismFlags::MESSAGE_SIGN,
         )
@@ -3510,14 +3575,14 @@ impl Pkcs11Backend for MockBackend {
     fn message_verify_init(
         &self,
         session: CkSessionHandle,
-        mechanism: Option<&CkMechanism>,
+        mechanism: Option<&ValidatedMechanismParams>,
         key: CkObjectHandle,
     ) -> CkResult<()> {
         let state = self.state.lock().unwrap();
         self.require_live_key_for_optional_mechanism_workflow(
             &state,
             session,
-            mechanism,
+            mechanism.map(ValidatedMechanismParams::mechanism),
             key,
             CkMechanismFlags::MESSAGE_VERIFY,
         )
@@ -3655,7 +3720,7 @@ impl Pkcs11Backend for MockBackend {
     fn verify_signature_init(
         &self,
         session: CkSessionHandle,
-        mechanism: Option<&CkMechanism>,
+        mechanism: Option<&ValidatedMechanismParams>,
         key: CkObjectHandle,
         signature: CkInBuf<'_>,
     ) -> CkResult<()> {
@@ -3665,13 +3730,13 @@ impl Pkcs11Backend for MockBackend {
             } else {
                 MockMechanismEntry::VerifySignatureCancel
             },
-            mechanism,
+            mechanism.map(ValidatedMechanismParams::mechanism),
         );
         let state = self.state.lock().unwrap();
         self.require_live_key_for_optional_mechanism_workflow(
             &state,
             session,
-            mechanism,
+            mechanism.map(ValidatedMechanismParams::mechanism),
             key,
             CkMechanismFlags::VERIFY,
         )?;
@@ -3731,14 +3796,14 @@ impl Pkcs11Backend for MockBackend {
     fn wrap_key_authenticated_typed(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         parameter: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
         aad: CkInBuf<'_>,
     ) -> CkResult<(SecretBytes, pkcs11_proxy_ng_proto::convert::authenticated::AuthenticatedOutput)>
     {
-        let output = self.authenticated_output(mechanism, parameter)?;
+        let output = self.authenticated_output(mechanism.mechanism(), parameter)?;
         let (bytes, _) = self.wrap_key_authenticated(session, mechanism, wrapping_key, key, aad)?;
         Ok((bytes, output))
     }
@@ -3746,7 +3811,7 @@ impl Pkcs11Backend for MockBackend {
     fn wrap_key_authenticated_exact_typed(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         parameter: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
@@ -3756,7 +3821,7 @@ impl Pkcs11Backend for MockBackend {
         CkOutputBufferResult,
         pkcs11_proxy_ng_proto::convert::authenticated::AuthenticatedOutput,
     )> {
-        let output = self.authenticated_output(mechanism, parameter)?;
+        let output = self.authenticated_output(mechanism.mechanism(), parameter)?;
         let (bytes, _) = self.wrap_key_authenticated_exact(
             session,
             mechanism,
@@ -3792,7 +3857,7 @@ impl Pkcs11Backend for MockBackend {
     fn unwrap_key_authenticated_typed(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         parameter: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
@@ -3802,7 +3867,7 @@ impl Pkcs11Backend for MockBackend {
         CkObjectHandle,
         pkcs11_proxy_ng_proto::convert::authenticated::AuthenticatedOutput,
     )> {
-        let output = self.authenticated_output(mechanism, parameter)?;
+        let output = self.authenticated_output(mechanism.mechanism(), parameter)?;
         let (key, _) = self.unwrap_key_authenticated(
             session,
             mechanism,
@@ -3826,7 +3891,7 @@ impl Pkcs11Backend for MockBackend {
     fn wrap_key_authenticated(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
         aad: CkInBuf<'_>,
@@ -3834,14 +3899,18 @@ impl Pkcs11Backend for MockBackend {
         self.record_wrap_entry(
             MockWrapEntry::Authenticated,
             session,
-            mechanism,
+            mechanism.mechanism(),
             wrapping_key,
             key,
             None,
             Some(aad),
         )?;
         let _ = self.resolve_input(aad)?;
-        self.require_mechanism_workflow_for_session(session, mechanism, CkMechanismFlags::WRAP)?;
+        self.require_mechanism_workflow_for_session(
+            session,
+            mechanism.mechanism(),
+            CkMechanismFlags::WRAP,
+        )?;
         let state = self.state.lock().unwrap();
         self.require_live_keys(&state, session, &[wrapping_key, key])?;
         Ok((self.wrap_key_impl()?.into(), vec![0xCC; 12].into()))
@@ -3850,7 +3919,7 @@ impl Pkcs11Backend for MockBackend {
     fn unwrap_key_authenticated(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
         template: Option<&[CkAttribute]>,
@@ -3859,7 +3928,7 @@ impl Pkcs11Backend for MockBackend {
         self.record_wrap_entry(
             MockWrapEntry::UnwrapAuthenticated,
             session,
-            mechanism,
+            mechanism.mechanism(),
             unwrapping_key,
             CkObjectHandle(0),
             None,
@@ -3867,7 +3936,11 @@ impl Pkcs11Backend for MockBackend {
         )?;
         let _ = self.resolve_input(wrapped_key)?;
         let _ = self.resolve_input(aad)?;
-        self.require_mechanism_workflow_for_session(session, mechanism, CkMechanismFlags::UNWRAP)?;
+        self.require_mechanism_workflow_for_session(
+            session,
+            mechanism.mechanism(),
+            CkMechanismFlags::UNWRAP,
+        )?;
         let mut state = self.state.lock().unwrap();
         self.require_live_key(&state, session, unwrapping_key)?;
         Ok((

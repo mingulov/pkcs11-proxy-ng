@@ -47,140 +47,85 @@ fn mechanism_bearing_workflows_reject_unadvertised_mechanisms() {
     let param_spec = CkParameterRoundtripSpec { buffer_present: true, buffer_len: 16, value: None };
 
     let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
-    assert_eq!(backend.sign_init(session, &mechanism, key).unwrap_err(), CkRv::MECHANISM_INVALID);
-
-    let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
-    assert_eq!(backend.verify_init(session, &mechanism, key).unwrap_err(), CkRv::MECHANISM_INVALID);
-
-    let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
     assert_eq!(
-        backend.sign_recover_init(session, &mechanism, key).unwrap_err(),
+        backend.sign_init(session, &validated(&mechanism), key).unwrap_err(),
         CkRv::MECHANISM_INVALID
     );
 
     let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
     assert_eq!(
-        backend.verify_recover_init(session, &mechanism, key).unwrap_err(),
-        CkRv::MECHANISM_INVALID
-    );
-
-    let (backend, session, _, _, mechanism) = unsupported_mechanism_fixture();
-    assert_eq!(backend.digest_init(session, &mechanism).unwrap_err(), CkRv::MECHANISM_INVALID);
-
-    let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
-    assert_eq!(
-        backend.encrypt_init(session, &mechanism, key).unwrap_err(),
+        backend.verify_init(session, &validated(&mechanism), key).unwrap_err(),
         CkRv::MECHANISM_INVALID
     );
 
     let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
     assert_eq!(
-        backend.decrypt_init(session, &mechanism, key).unwrap_err(),
+        backend.sign_recover_init(session, &validated(&mechanism), key).unwrap_err(),
         CkRv::MECHANISM_INVALID
     );
 
     let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
     assert_eq!(
-        backend.derive_key(session, &mechanism, key, Some(&[])).unwrap_err(),
-        CkRv::MECHANISM_INVALID
-    );
-
-    let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
-    assert_eq!(
-        backend.derive_key_with_output(session, &mechanism, key, Some(&[])).unwrap_err(),
-        CkRv::MECHANISM_INVALID
-    );
-
-    let (backend, session, key, other_key, mechanism) = unsupported_mechanism_fixture();
-    assert_eq!(
-        backend.wrap_key(session, &mechanism, key, other_key).unwrap_err(),
-        CkRv::MECHANISM_INVALID
-    );
-
-    let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
-    assert_eq!(
-        backend
-            .unwrap_key(session, &mechanism, key, CkInBuf::Bytes(b"wrapped"), Some(&[]))
-            .unwrap_err(),
+        backend.verify_recover_init(session, &validated(&mechanism), key).unwrap_err(),
         CkRv::MECHANISM_INVALID
     );
 
     let (backend, session, _, _, mechanism) = unsupported_mechanism_fixture();
     assert_eq!(
-        backend.generate_key(session, &mechanism, Some(&[])).unwrap_err(),
+        backend.digest_init(session, &validated(&mechanism)).unwrap_err(),
+        CkRv::MECHANISM_INVALID
+    );
+
+    let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
+    assert_eq!(
+        backend.encrypt_init(session, &validated(&mechanism), key).unwrap_err(),
+        CkRv::MECHANISM_INVALID
+    );
+
+    let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
+    assert_eq!(
+        backend.decrypt_init(session, &validated(&mechanism), key).unwrap_err(),
+        CkRv::MECHANISM_INVALID
+    );
+
+    let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
+    assert_eq!(
+        backend.derive_key(session, &validated(&mechanism), key, Some(&[])).unwrap_err(),
+        CkRv::MECHANISM_INVALID
+    );
+
+    let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
+    assert_eq!(
+        backend
+            .derive_key_with_output(session, &validated(&mechanism), key, Some(&[]))
+            .unwrap_err(),
+        CkRv::MECHANISM_INVALID
+    );
+
+    let (backend, session, key, other_key, mechanism) = unsupported_mechanism_fixture();
+    assert_eq!(
+        backend.wrap_key(session, &validated(&mechanism), key, other_key).unwrap_err(),
+        CkRv::MECHANISM_INVALID
+    );
+
+    let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
+    assert_eq!(
+        backend
+            .unwrap_key(session, &validated(&mechanism), key, CkInBuf::Bytes(b"wrapped"), Some(&[]))
+            .unwrap_err(),
         CkRv::MECHANISM_INVALID
     );
 
     let (backend, session, _, _, mechanism) = unsupported_mechanism_fixture();
     assert_eq!(
-        backend.generate_key_pair(session, &mechanism, Some(&[]), Some(&[])).unwrap_err(),
+        backend.generate_key(session, &validated(&mechanism), Some(&[])).unwrap_err(),
         CkRv::MECHANISM_INVALID
     );
 
-    let (backend, session, key, other_key, mechanism) = unsupported_mechanism_fixture();
-    assert_eq!(
-        backend.wrap_key_exact(session, &mechanism, key, other_key, &output_spec).unwrap_err(),
-        CkRv::MECHANISM_INVALID
-    );
-
-    let (backend, session, key, other_key, mechanism) = unsupported_mechanism_fixture();
+    let (backend, session, _, _, mechanism) = unsupported_mechanism_fixture();
     assert_eq!(
         backend
-            .wrap_key_exact_with_output(session, &mechanism, key, other_key, &output_spec)
-            .unwrap_err(),
-        CkRv::MECHANISM_INVALID
-    );
-
-    let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
-    assert_eq!(
-        backend.encapsulate_key(session, &mechanism, key, Some(&[])).unwrap_err(),
-        CkRv::MECHANISM_INVALID
-    );
-
-    let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
-    assert_eq!(
-        backend
-            .encapsulate_key_exact(session, &mechanism, key, Some(&[]), &output_spec)
-            .unwrap_err(),
-        CkRv::MECHANISM_INVALID
-    );
-
-    let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
-    assert_eq!(
-        backend
-            .decapsulate_key(session, &mechanism, key, Some(&[]), CkInBuf::Bytes(b"ciphertext"))
-            .unwrap_err(),
-        CkRv::MECHANISM_INVALID
-    );
-
-    let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
-    assert_eq!(
-        backend.message_encrypt_init(session, Some(&mechanism), None, key).unwrap_err(),
-        CkRv::MECHANISM_INVALID
-    );
-
-    let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
-    assert_eq!(
-        backend.message_decrypt_init(session, Some(&mechanism), None, key).unwrap_err(),
-        CkRv::MECHANISM_INVALID
-    );
-
-    let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
-    assert_eq!(
-        backend.message_sign_init(session, Some(&mechanism), key).unwrap_err(),
-        CkRv::MECHANISM_INVALID
-    );
-
-    let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
-    assert_eq!(
-        backend.message_verify_init(session, Some(&mechanism), key).unwrap_err(),
-        CkRv::MECHANISM_INVALID
-    );
-
-    let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
-    assert_eq!(
-        backend
-            .verify_signature_init(session, Some(&mechanism), key, CkInBuf::Bytes(b"sig"))
+            .generate_key_pair(session, &validated(&mechanism), Some(&[]), Some(&[]))
             .unwrap_err(),
         CkRv::MECHANISM_INVALID
     );
@@ -188,7 +133,100 @@ fn mechanism_bearing_workflows_reject_unadvertised_mechanisms() {
     let (backend, session, key, other_key, mechanism) = unsupported_mechanism_fixture();
     assert_eq!(
         backend
-            .wrap_key_authenticated(session, &mechanism, key, other_key, CkInBuf::Bytes(b"aad"))
+            .wrap_key_exact(session, &validated(&mechanism), key, other_key, &output_spec)
+            .unwrap_err(),
+        CkRv::MECHANISM_INVALID
+    );
+
+    let (backend, session, key, other_key, mechanism) = unsupported_mechanism_fixture();
+    assert_eq!(
+        backend
+            .wrap_key_exact_with_output(
+                session,
+                &validated(&mechanism),
+                key,
+                other_key,
+                &output_spec
+            )
+            .unwrap_err(),
+        CkRv::MECHANISM_INVALID
+    );
+
+    let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
+    assert_eq!(
+        backend.encapsulate_key(session, &validated(&mechanism), key, Some(&[])).unwrap_err(),
+        CkRv::MECHANISM_INVALID
+    );
+
+    let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
+    assert_eq!(
+        backend
+            .encapsulate_key_exact(session, &validated(&mechanism), key, Some(&[]), &output_spec)
+            .unwrap_err(),
+        CkRv::MECHANISM_INVALID
+    );
+
+    let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
+    assert_eq!(
+        backend
+            .decapsulate_key(
+                session,
+                &validated(&mechanism),
+                key,
+                Some(&[]),
+                CkInBuf::Bytes(b"ciphertext")
+            )
+            .unwrap_err(),
+        CkRv::MECHANISM_INVALID
+    );
+
+    let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
+    assert_eq!(
+        backend.message_encrypt_init(session, Some(&validated(&mechanism)), None, key).unwrap_err(),
+        CkRv::MECHANISM_INVALID
+    );
+
+    let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
+    assert_eq!(
+        backend.message_decrypt_init(session, Some(&validated(&mechanism)), None, key).unwrap_err(),
+        CkRv::MECHANISM_INVALID
+    );
+
+    let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
+    assert_eq!(
+        backend.message_sign_init(session, Some(&validated(&mechanism)), key).unwrap_err(),
+        CkRv::MECHANISM_INVALID
+    );
+
+    let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
+    assert_eq!(
+        backend.message_verify_init(session, Some(&validated(&mechanism)), key).unwrap_err(),
+        CkRv::MECHANISM_INVALID
+    );
+
+    let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
+    assert_eq!(
+        backend
+            .verify_signature_init(
+                session,
+                Some(&validated(&mechanism)),
+                key,
+                CkInBuf::Bytes(b"sig")
+            )
+            .unwrap_err(),
+        CkRv::MECHANISM_INVALID
+    );
+
+    let (backend, session, key, other_key, mechanism) = unsupported_mechanism_fixture();
+    assert_eq!(
+        backend
+            .wrap_key_authenticated(
+                session,
+                &validated(&mechanism),
+                key,
+                other_key,
+                CkInBuf::Bytes(b"aad")
+            )
             .unwrap_err(),
         CkRv::MECHANISM_INVALID
     );
@@ -198,7 +236,7 @@ fn mechanism_bearing_workflows_reject_unadvertised_mechanisms() {
         backend
             .unwrap_key_authenticated(
                 session,
-                &mechanism,
+                &validated(&mechanism),
                 key,
                 CkInBuf::Bytes(b"wrapped"),
                 Some(&[]),
@@ -213,7 +251,7 @@ fn mechanism_bearing_workflows_reject_unadvertised_mechanisms() {
         backend
             .wrap_key_authenticated_exact(
                 session,
-                &mechanism,
+                &validated(&mechanism),
                 key,
                 other_key,
                 CkInBuf::Bytes(b"aad"),
@@ -349,7 +387,7 @@ fn registry_backed_mock_validates_mechanism_param_presence() {
     // real token would reject it.
     let gcm_no_params = CkMechanism { mechanism_type: CkMechanismType::AES_GCM, params: None };
     assert_eq!(
-        backend.encrypt_init(session, &gcm_no_params, key).unwrap_err(),
+        backend.encrypt_init(session, &validated(&gcm_no_params), key).unwrap_err(),
         CkRv::MECHANISM_PARAM_INVALID,
         "AES-GCM without params"
     );
@@ -360,14 +398,14 @@ fn registry_backed_mock_validates_mechanism_param_presence() {
         params: Some(CkMechanismParams::Iv(IvParams { iv: vec![0; 16] })),
     };
     assert_eq!(
-        backend.digest_init(session, &sha_with_params).unwrap_err(),
+        backend.digest_init(session, &validated(&sha_with_params)).unwrap_err(),
         CkRv::MECHANISM_PARAM_INVALID,
         "SHA-256 with stray params"
     );
 
     // The valid pairings still initialize.
     let sha = CkMechanism { mechanism_type: CkMechanismType::SHA256, params: None };
-    backend.digest_init(session, &sha).expect("parameterless SHA-256");
+    backend.digest_init(session, &validated(&sha)).expect("parameterless SHA-256");
     backend.digest_init_cancel(session).unwrap();
 
     let gcm = CkMechanism {
@@ -383,7 +421,7 @@ fn registry_backed_mock_validates_mechanism_param_presence() {
             aad_null: false,
         })),
     };
-    backend.encrypt_init(session, &gcm, key).expect("GCM with params");
+    backend.encrypt_init(session, &validated(&gcm), key).expect("GCM with params");
 }
 
 #[test]
@@ -395,7 +433,9 @@ fn registryless_mock_stays_permissive_about_params() {
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
     let gcm_no_params = CkMechanism { mechanism_type: CkMechanismType::AES_GCM, params: None };
     let key = backend.create_object(session, Some(&[])).unwrap();
-    backend.encrypt_init(session, &gcm_no_params, key).expect("no registry, no validation");
+    backend
+        .encrypt_init(session, &validated(&gcm_no_params), key)
+        .expect("no registry, no validation");
 }
 
 #[test]
@@ -416,7 +456,7 @@ fn gcm_wrap_iv_generation_is_deterministic_and_preserves_fixed_prefix() {
         })),
     };
 
-    let output = backend.encrypt_init(session, &mech, key).unwrap();
+    let output = backend.encrypt_init(session, &validated(&mech), key).unwrap();
     let Some(CkMechanismParams::GcmWrap(generated)) = output else {
         panic!("generator != NO_GENERATE must yield writeback params, got {output:?}");
     };
@@ -426,7 +466,7 @@ fn gcm_wrap_iv_generation_is_deterministic_and_preserves_fixed_prefix() {
 
     // Determinism: the same session re-initializing gets the same IV.
     backend.encrypt_init_cancel(session).unwrap();
-    let again = backend.encrypt_init(session, &mech, key).unwrap();
+    let again = backend.encrypt_init(session, &validated(&mech), key).unwrap();
     assert_eq!(again, Some(CkMechanismParams::GcmWrap(generated)));
 
     // NO_GENERATE yields no writeback.
@@ -441,7 +481,7 @@ fn gcm_wrap_iv_generation_is_deterministic_and_preserves_fixed_prefix() {
             tag_bits: 128,
         })),
     };
-    assert_eq!(backend.encrypt_init(session, &mech_no_gen, key).unwrap(), None);
+    assert_eq!(backend.encrypt_init(session, &validated(&mech_no_gen), key).unwrap(), None);
 }
 
 #[test]
@@ -515,7 +555,7 @@ fn generated_secret_key_value_has_requested_value_len() {
         attr_type: CkAttributeType::VALUE_LEN,
         value: Some(CkAttributeValue::Ulong(32)),
     }];
-    let key = backend.generate_key(session, &mech, Some(&template)).unwrap();
+    let key = backend.generate_key(session, &validated(&mech), Some(&template)).unwrap();
 
     let (rv, results) = backend
         .get_attribute_value_exact(
@@ -549,7 +589,7 @@ fn explicit_value_wins_over_value_len_synthesis() {
             value: Some(CkAttributeValue::Bytes(vec![0xAB; 4].into())),
         },
     ];
-    let key = backend.generate_key(session, &mech, Some(&template)).unwrap();
+    let key = backend.generate_key(session, &validated(&mech), Some(&template)).unwrap();
     let (_rv, results) = backend
         .get_attribute_value_exact(
             session,
@@ -573,7 +613,7 @@ fn generate_key_synthesizes_class_and_key_type() {
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
     let mech = CkMechanism { mechanism_type: CkMechanismType::AES_KEY_GEN, params: None };
-    let key = backend.generate_key(session, &mech, Some(&[])).unwrap();
+    let key = backend.generate_key(session, &validated(&mech), Some(&[])).unwrap();
 
     let query = |t: CkAttributeType| CkAttributeQuery {
         attr_type: t,
@@ -612,7 +652,7 @@ fn generate_key_template_overrides_synthesized_class() {
         attr_type: CkAttributeType::CLASS,
         value: Some(CkAttributeValue::Ulong(0x99)),
     }];
-    let key = backend.generate_key(session, &mech, Some(&template)).unwrap();
+    let key = backend.generate_key(session, &validated(&mech), Some(&template)).unwrap();
     let (_rv, results) = backend
         .get_attribute_value_exact(
             session,

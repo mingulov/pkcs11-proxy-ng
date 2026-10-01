@@ -15,7 +15,7 @@ impl FfiBackend {
     pub(super) fn ffi_derive_key(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         base_key: CkObjectHandle,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
@@ -25,11 +25,10 @@ impl FfiBackend {
         let h_base_key = Self::object_handle(base_key)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
         let ck_attr_len = Self::ffi_attr_len(&ffi_attrs)?;
-        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
         Self::call_object_with_mechanism(
             &admission,
             unsafe { (*self.func_list).C_DeriveKey },
-            &validated,
+            mechanism,
             |function, mech, handle| unsafe {
                 function(
                     h_session,
@@ -50,7 +49,7 @@ impl FfiBackend {
     pub(super) fn ffi_derive_key_with_output(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         base_key: CkObjectHandle,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
@@ -60,11 +59,10 @@ impl FfiBackend {
         let h_base_key = Self::object_handle(base_key)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
         let ck_attr_len = Self::ffi_attr_len(&ffi_attrs)?;
-        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
         Self::call_object_with_mechanism_output(
             &admission,
             unsafe { (*self.func_list).C_DeriveKey },
-            &validated,
+            mechanism,
             |function, mech, handle| unsafe {
                 function(
                     h_session,
@@ -81,7 +79,7 @@ impl FfiBackend {
     pub(super) fn ffi_derive_key_with_output_result(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         base_key: CkObjectHandle,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<crate::traits::CkDeriveKeyOutputResult> {
@@ -91,11 +89,10 @@ impl FfiBackend {
         let h_base_key = Self::object_handle(base_key)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
         let ck_attr_len = Self::ffi_attr_len(&ffi_attrs)?;
-        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
         Self::call_object_with_mechanism_output_result(
             &admission,
             unsafe { (*self.func_list).C_DeriveKey },
-            &validated,
+            mechanism,
             |function, mech, handle| unsafe {
                 function(
                     h_session,
@@ -112,7 +109,7 @@ impl FfiBackend {
     pub(super) fn ffi_wrap_key(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
     ) -> CkResult<SecretBytes> {
@@ -121,11 +118,10 @@ impl FfiBackend {
         let h_wrapping_key = Self::object_handle(wrapping_key)?;
         let h_key = Self::object_handle(key)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
-        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
         Self::call_bytes_with_mechanism(
             &admission,
             unsafe { (*self.func_list).C_WrapKey },
-            &validated,
+            mechanism,
             |function, mech, output, output_len| unsafe {
                 function(h_session, mech, h_wrapping_key, h_key, output, output_len)
             },
@@ -135,7 +131,7 @@ impl FfiBackend {
     pub(super) fn ffi_wrap_key_exact(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
         spec: &CkOutputBufferSpec,
@@ -145,11 +141,10 @@ impl FfiBackend {
         let h_wrapping_key = Self::object_handle(wrapping_key)?;
         let h_key = Self::object_handle(key)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
-        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
         Self::call_bytes_exact_with_mechanism(
             &admission,
             unsafe { (*self.func_list).C_WrapKey },
-            &validated,
+            mechanism,
             spec,
             |function, mech, output, output_len| unsafe {
                 function(h_session, mech, h_wrapping_key, h_key, output, output_len)
@@ -164,7 +159,7 @@ impl FfiBackend {
     pub(super) fn ffi_wrap_key_exact_with_output(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
         spec: &CkOutputBufferSpec,
@@ -174,11 +169,10 @@ impl FfiBackend {
         let h_wrapping_key = Self::object_handle(wrapping_key)?;
         let h_key = Self::object_handle(key)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
-        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
         Self::call_bytes_exact_with_mechanism_output(
             &admission,
             unsafe { (*self.func_list).C_WrapKey },
-            &validated,
+            mechanism,
             spec,
             |function, mech, output, output_len| unsafe {
                 function(h_session, mech, h_wrapping_key, h_key, output, output_len)
@@ -189,7 +183,7 @@ impl FfiBackend {
     pub(super) fn ffi_unwrap_key(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
         template: Option<&[CkAttribute]>,
@@ -202,11 +196,10 @@ impl FfiBackend {
         let _session_fence = self.session_fences.enter(&admission, session)?;
         let ck_wk_len = Self::ulong_len_u64(wk_len)?;
         let ck_attr_len = Self::ffi_attr_len(&ffi_attrs)?;
-        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
         Self::call_object_with_mechanism(
             &admission,
             unsafe { (*self.func_list).C_UnwrapKey },
-            &validated,
+            mechanism,
             |function, mech, handle| unsafe {
                 function(
                     h_session,
@@ -225,7 +218,7 @@ impl FfiBackend {
     pub(super) fn ffi_generate_key(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
@@ -233,11 +226,10 @@ impl FfiBackend {
         let h_session = Self::session_handle(session)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
         let ck_attr_len = Self::ffi_attr_len(&ffi_attrs)?;
-        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
         Self::call_object_with_mechanism(
             &admission,
             unsafe { (*self.func_list).C_GenerateKey },
-            &validated,
+            mechanism,
             |function, mech, handle| unsafe {
                 function(h_session, mech, Self::ffi_attr_ptr(&ffi_attrs), ck_attr_len, handle)
             },
@@ -249,7 +241,7 @@ impl FfiBackend {
     pub(super) fn ffi_generate_key_with_output(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
@@ -257,11 +249,10 @@ impl FfiBackend {
         let h_session = Self::session_handle(session)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
         let ck_attr_len = Self::ffi_attr_len(&ffi_attrs)?;
-        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
         Self::call_object_with_mechanism_output(
             &admission,
             unsafe { (*self.func_list).C_GenerateKey },
-            &validated,
+            mechanism,
             |function, mech, handle| unsafe {
                 function(h_session, mech, Self::ffi_attr_ptr(&ffi_attrs), ck_attr_len, handle)
             },
@@ -271,7 +262,7 @@ impl FfiBackend {
     pub(super) fn ffi_generate_key_pair(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         pub_template: Option<&[CkAttribute]>,
         priv_template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, CkObjectHandle)> {
@@ -282,11 +273,10 @@ impl FfiBackend {
         let _session_fence = self.session_fences.enter(&admission, session)?;
         let ck_pub_attr_len = Self::ffi_attr_len(&pub_ffi)?;
         let ck_priv_attr_len = Self::ffi_attr_len(&priv_ffi)?;
-        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
         Self::call_object_pair_with_mechanism(
             &admission,
             unsafe { (*self.func_list).C_GenerateKeyPair },
-            &validated,
+            mechanism,
             |function, mech, public_handle, private_handle| unsafe {
                 function(
                     h_session,
@@ -762,7 +752,12 @@ mod lifecycle_mech_tests {
         let (backend, _functions) = backend_with_mech_stubs();
         assert_eq!(
             backend
-                .ffi_derive_key(CkSessionHandle(7), &cbc_mechanism(), CkObjectHandle(9), None)
+                .ffi_derive_key(
+                    CkSessionHandle(7),
+                    &validated_mechanism_for_tests(&cbc_mechanism()),
+                    CkObjectHandle(9),
+                    None
+                )
                 .unwrap_err(),
             CkRv::CRYPTOKI_NOT_INITIALIZED
         );
@@ -774,7 +769,12 @@ mod lifecycle_mech_tests {
         backend.lifecycle_domain.open_for_tests();
         assert_eq!(
             backend
-                .ffi_derive_key(CkSessionHandle(7), &cbc_mechanism(), CkObjectHandle(9), None)
+                .ffi_derive_key(
+                    CkSessionHandle(7),
+                    &validated_mechanism_for_tests(&cbc_mechanism()),
+                    CkObjectHandle(9),
+                    None
+                )
                 .unwrap(),
             CkObjectHandle(51)
         );
@@ -788,7 +788,7 @@ mod lifecycle_mech_tests {
             backend
                 .ffi_derive_key_with_output(
                     CkSessionHandle(7),
-                    &cbc_mechanism(),
+                    &validated_mechanism_for_tests(&cbc_mechanism()),
                     CkObjectHandle(9),
                     None
                 )
@@ -804,7 +804,7 @@ mod lifecycle_mech_tests {
         let (handle, _) = backend
             .ffi_derive_key_with_output(
                 CkSessionHandle(7),
-                &cbc_mechanism(),
+                &validated_mechanism_for_tests(&cbc_mechanism()),
                 CkObjectHandle(9),
                 None,
             )
@@ -831,7 +831,12 @@ mod lifecycle_mech_tests {
             })),
         };
         let (handle, mech_out) = backend
-            .ffi_derive_key_with_output(CkSessionHandle(7), &mechanism, CkObjectHandle(9), None)
+            .ffi_derive_key_with_output(
+                CkSessionHandle(7),
+                &validated_mechanism_for_tests(&mechanism),
+                CkObjectHandle(9),
+                None,
+            )
             .unwrap();
         assert_eq!(handle, CkObjectHandle(52));
         match mech_out {
@@ -860,7 +865,12 @@ mod lifecycle_mech_tests {
             })),
         };
         let (handle, mech_out) = backend
-            .ffi_derive_key_with_output(CkSessionHandle(7), &mechanism, CkObjectHandle(9), None)
+            .ffi_derive_key_with_output(
+                CkSessionHandle(7),
+                &validated_mechanism_for_tests(&mechanism),
+                CkObjectHandle(9),
+                None,
+            )
             .unwrap();
         assert_eq!(handle, CkObjectHandle(52));
         match mech_out {
@@ -891,7 +901,12 @@ mod lifecycle_mech_tests {
             })),
         };
         let (handle, mech_out) = backend
-            .ffi_derive_key_with_output(CkSessionHandle(7), &mechanism, CkObjectHandle(9), None)
+            .ffi_derive_key_with_output(
+                CkSessionHandle(7),
+                &validated_mechanism_for_tests(&mechanism),
+                CkObjectHandle(9),
+                None,
+            )
             .unwrap();
         assert_eq!(handle, CkObjectHandle(52));
         match mech_out {
@@ -911,7 +926,7 @@ mod lifecycle_mech_tests {
             backend
                 .ffi_derive_key_with_output_result(
                     CkSessionHandle(7),
-                    &cbc_mechanism(),
+                    &validated_mechanism_for_tests(&cbc_mechanism()),
                     CkObjectHandle(9),
                     None
                 )
@@ -927,7 +942,7 @@ mod lifecycle_mech_tests {
         let result = backend
             .ffi_derive_key_with_output_result(
                 CkSessionHandle(7),
-                &cbc_mechanism(),
+                &validated_mechanism_for_tests(&cbc_mechanism()),
                 CkObjectHandle(9),
                 None,
             )
@@ -944,7 +959,7 @@ mod lifecycle_mech_tests {
             backend
                 .ffi_wrap_key(
                     CkSessionHandle(7),
-                    &cbc_mechanism(),
+                    &validated_mechanism_for_tests(&cbc_mechanism()),
                     CkObjectHandle(8),
                     CkObjectHandle(9)
                 )
@@ -960,7 +975,7 @@ mod lifecycle_mech_tests {
         let bytes = backend
             .ffi_wrap_key(
                 CkSessionHandle(7),
-                &cbc_mechanism(),
+                &validated_mechanism_for_tests(&cbc_mechanism()),
                 CkObjectHandle(8),
                 CkObjectHandle(9),
             )
@@ -976,7 +991,7 @@ mod lifecycle_mech_tests {
             backend
                 .ffi_wrap_key_exact(
                     CkSessionHandle(7),
-                    &cbc_mechanism(),
+                    &validated_mechanism_for_tests(&cbc_mechanism()),
                     CkObjectHandle(8),
                     CkObjectHandle(9),
                     &data_spec(),
@@ -993,7 +1008,7 @@ mod lifecycle_mech_tests {
         let result = backend
             .ffi_wrap_key_exact(
                 CkSessionHandle(7),
-                &cbc_mechanism(),
+                &validated_mechanism_for_tests(&cbc_mechanism()),
                 CkObjectHandle(8),
                 CkObjectHandle(9),
                 &data_spec(),
@@ -1010,7 +1025,7 @@ mod lifecycle_mech_tests {
             backend
                 .ffi_wrap_key_exact_with_output(
                     CkSessionHandle(7),
-                    &cbc_mechanism(),
+                    &validated_mechanism_for_tests(&cbc_mechanism()),
                     CkObjectHandle(8),
                     CkObjectHandle(9),
                     &data_spec(),
@@ -1027,7 +1042,7 @@ mod lifecycle_mech_tests {
         let (result, _) = backend
             .ffi_wrap_key_exact_with_output(
                 CkSessionHandle(7),
-                &cbc_mechanism(),
+                &validated_mechanism_for_tests(&cbc_mechanism()),
                 CkObjectHandle(8),
                 CkObjectHandle(9),
                 &data_spec(),
@@ -1042,7 +1057,12 @@ mod lifecycle_mech_tests {
         let (backend, _functions) = backend_with_mech_stubs();
         assert_eq!(
             backend
-                .ffi_generate_key_pair(CkSessionHandle(7), &cbc_mechanism(), None, None)
+                .ffi_generate_key_pair(
+                    CkSessionHandle(7),
+                    &validated_mechanism_for_tests(&cbc_mechanism()),
+                    None,
+                    None
+                )
                 .unwrap_err(),
             CkRv::CRYPTOKI_NOT_INITIALIZED
         );
@@ -1054,7 +1074,12 @@ mod lifecycle_mech_tests {
         backend.lifecycle_domain.open_for_tests();
         assert_eq!(
             backend
-                .ffi_generate_key_pair(CkSessionHandle(7), &cbc_mechanism(), None, None)
+                .ffi_generate_key_pair(
+                    CkSessionHandle(7),
+                    &validated_mechanism_for_tests(&cbc_mechanism()),
+                    None,
+                    None
+                )
                 .unwrap(),
             (CkObjectHandle(61), CkObjectHandle(62))
         );
@@ -1105,7 +1130,7 @@ mod lifecycle_mech_tests {
             let worker = scope.spawn(|| {
                 backend.ffi_derive_key(
                     CkSessionHandle(7),
-                    &cbc_mechanism(),
+                    &validated_mechanism_for_tests(&cbc_mechanism()),
                     CkObjectHandle(9),
                     None,
                 )
@@ -1238,7 +1263,12 @@ mod derive_malformed_byte_tests {
         let (backend, _functions) = backend_with_counting_derive();
         backend.lifecycle_domain.open_for_tests();
         let err = backend
-            .ffi_derive_key(CkSessionHandle(7), &tls12_mech(3, 256), CkObjectHandle(9), None)
+            .ffi_derive_key(
+                CkSessionHandle(7),
+                &validated_mechanism_for_tests(&tls12_mech(3, 256)),
+                CkObjectHandle(9),
+                None,
+            )
             .unwrap_err();
         assert_eq!(err, CkRv::MECHANISM_PARAM_INVALID);
         assert_eq!(DERIVE_CALLS.load(Ordering::SeqCst), 0);
@@ -1252,7 +1282,12 @@ mod derive_malformed_byte_tests {
         let (backend, _functions) = backend_with_counting_derive();
         backend.lifecycle_domain.open_for_tests();
         let handle = backend
-            .ffi_derive_key(CkSessionHandle(7), &tls12_mech(3, 3), CkObjectHandle(9), None)
+            .ffi_derive_key(
+                CkSessionHandle(7),
+                &validated_mechanism_for_tests(&tls12_mech(3, 3)),
+                CkObjectHandle(9),
+                None,
+            )
             .unwrap();
         assert_eq!(DERIVE_CALLS.load(Ordering::SeqCst), 1);
         assert_eq!(handle, CkObjectHandle(51));

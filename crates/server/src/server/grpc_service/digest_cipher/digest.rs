@@ -7,11 +7,16 @@ use std::time::Instant;
 
 use pkcs11_proxy_ng_audit::EventClass;
 use pkcs11_proxy_ng_types::SecretBytes;
+use pkcs11_proxy_ng_types::shape_descriptors::Operation;
 use tonic::{Request, Response, Status};
 
 use super::super::authorization::mechanism_permitted;
 use super::super::ck_result_to_rv;
 use super::super::mechanism_handles::remap_mechanism_handles;
+use super::super::mechanism_input::{
+    check_operator_exclusion, current_registry_snapshot, daemon_validation_abis,
+    validate_mechanism_transport,
+};
 use super::super::service_utils::{
     check_sanitize, ck_rv_only, input_from_wire, parse_mechanism, resolve_session,
     resolve_session_and_key, spawn_backend,
@@ -52,12 +57,27 @@ pub(crate) async fn digest_init(
         }));
     }
 
-    let mut mechanism = match parse_mechanism(req.mechanism) {
+    let mechanism = match parse_mechanism(req.mechanism) {
         Ok(mechanism) => mechanism,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::DigestInitResponse { ck_rv: rv.0 }));
         }
     };
+
+    // R13 (S2 §6): this request's single registry snapshot feeds exclusion
+    // and transport validation. W1-C3-26: poison fails closed with
+    // DEVICE_ERROR.
+    let registry = match current_registry_snapshot(ctx) {
+        Ok(registry) => registry,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::DigestInitResponse { ck_rv: rv.0 }));
+        }
+    };
+
+    // R13 (S2 §6): operator exclusion → MECHANISM_INVALID before auth.
+    if let Err(rv) = check_operator_exclusion(&registry, mechanism.mechanism_type) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::DigestInitResponse { ck_rv: rv.0 }));
+    }
 
     if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
         return Ok(Response::new(pkcs11_proxy_ng_proto::DigestInitResponse {
@@ -65,14 +85,38 @@ pub(crate) async fn digest_init(
         }));
     }
 
-    if let Err(rv) =
-        remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
-    {
-        return Ok(Response::new(pkcs11_proxy_ng_proto::DigestInitResponse { ck_rv: rv.0 }));
-    }
+    // R13 (S2 §6): transport validation → validated newtype.
+    let (local_abi, backend_abi) = daemon_validation_abis();
+    let validated = match validate_mechanism_transport(
+        &registry,
+        &mechanism,
+        Operation::General,
+        local_abi,
+        backend_abi,
+    ) {
+        Ok(validated) => validated,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::DigestInitResponse { ck_rv: rv.0 }));
+        }
+    };
+
+    let validated =
+        match remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, validated).await
+        {
+            Ok(validated) => validated,
+            Err(rv) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::DigestInitResponse {
+                    ck_rv: rv.0,
+                }));
+            }
+        };
+
+    // R13 named marker: R20 inserts `sanitize_mechanism_input` here,
+    // between handle remapping and the backend call.
+    // TODO(R20): insert sanitize_mechanism_input(validated) → backend call.
 
     let backend = Arc::clone(backend_ref);
-    let result = spawn_backend(move || backend.digest_init(session, &mechanism)).await?;
+    let result = spawn_backend(move || backend.digest_init(session, &validated)).await?;
     Ok(Response::new(pkcs11_proxy_ng_proto::DigestInitResponse { ck_rv: ck_rv_only(result) }))
 }
 

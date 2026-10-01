@@ -17,7 +17,11 @@ mod constructor_child_tests;
 #[path = "ffi/crypto_ops.rs"]
 mod crypto_ops;
 #[path = "ffi/ffi_conversion/mod.rs"]
-mod ffi_conversion;
+pub(crate) mod ffi_conversion;
+// R13: test-only funnel so backend tests outside `ffi/` can feed retyped
+// trait/entries (typed/`None` test mechanisms pass the local backstop).
+#[cfg(test)]
+pub(crate) use ffi_conversion::mechanism::validated_mechanism_for_tests;
 #[path = "ffi/interface_caps.rs"]
 mod interface_caps;
 #[path = "ffi/kem_ops.rs"]
@@ -672,7 +676,7 @@ impl Pkcs11Backend for FfiBackend {
     fn sign_init(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         key: CkObjectHandle,
     ) -> CkResult<()> {
         self.ffi_sign_init(session, mechanism, key)
@@ -697,7 +701,7 @@ impl Pkcs11Backend for FfiBackend {
     fn sign_recover_init(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         key: CkObjectHandle,
     ) -> CkResult<()> {
         self.ffi_sign_recover_init(session, mechanism, key)
@@ -749,7 +753,7 @@ impl Pkcs11Backend for FfiBackend {
     fn verify_recover_init(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         key: CkObjectHandle,
     ) -> CkResult<()> {
         self.ffi_verify_recover_init(session, mechanism, key)
@@ -770,7 +774,7 @@ impl Pkcs11Backend for FfiBackend {
     fn verify_init(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         key: CkObjectHandle,
     ) -> CkResult<()> {
         self.ffi_verify_init(session, mechanism, key)
@@ -797,7 +801,11 @@ impl Pkcs11Backend for FfiBackend {
         self.ffi_verify_final(session, signature)
     }
 
-    fn digest_init(&self, session: CkSessionHandle, mechanism: &CkMechanism) -> CkResult<()> {
+    fn digest_init(
+        &self,
+        session: CkSessionHandle,
+        mechanism: &ValidatedMechanismParams,
+    ) -> CkResult<()> {
         self.ffi_digest_init(session, mechanism)
     }
 
@@ -841,7 +849,7 @@ impl Pkcs11Backend for FfiBackend {
     fn encrypt_init(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         key: CkObjectHandle,
     ) -> CkResult<Option<CkMechanismParams>> {
         self.ffi_encrypt_init_with_output(session, mechanism, key)
@@ -866,7 +874,7 @@ impl Pkcs11Backend for FfiBackend {
     fn decrypt_init(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         key: CkObjectHandle,
     ) -> CkResult<Option<CkMechanismParams>> {
         self.ffi_decrypt_init(session, mechanism, key)
@@ -972,7 +980,7 @@ impl Pkcs11Backend for FfiBackend {
     fn derive_key(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         base_key: CkObjectHandle,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
@@ -982,7 +990,7 @@ impl Pkcs11Backend for FfiBackend {
     fn derive_key_with_output(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         base_key: CkObjectHandle,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
@@ -992,7 +1000,7 @@ impl Pkcs11Backend for FfiBackend {
     fn derive_key_with_output_result(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         base_key: CkObjectHandle,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<CkDeriveKeyOutputResult> {
@@ -1002,7 +1010,7 @@ impl Pkcs11Backend for FfiBackend {
     fn wrap_key(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
     ) -> CkResult<SecretBytes> {
@@ -1012,7 +1020,7 @@ impl Pkcs11Backend for FfiBackend {
     fn wrap_key_exact(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
         spec: &CkOutputBufferSpec,
@@ -1023,7 +1031,7 @@ impl Pkcs11Backend for FfiBackend {
     fn wrap_key_exact_with_output(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
         spec: &CkOutputBufferSpec,
@@ -1034,7 +1042,7 @@ impl Pkcs11Backend for FfiBackend {
     fn unwrap_key(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
         template: Option<&[CkAttribute]>,
@@ -1045,7 +1053,7 @@ impl Pkcs11Backend for FfiBackend {
     fn generate_key(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
         self.ffi_generate_key(session, mechanism, template)
@@ -1054,7 +1062,7 @@ impl Pkcs11Backend for FfiBackend {
     fn generate_key_with_output(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
         self.ffi_generate_key_with_output(session, mechanism, template)
@@ -1104,7 +1112,7 @@ impl Pkcs11Backend for FfiBackend {
     fn generate_key_pair(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         pub_template: Option<&[CkAttribute]>,
         priv_template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, CkObjectHandle)> {
@@ -1252,7 +1260,7 @@ impl Pkcs11Backend for FfiBackend {
     fn encapsulate_key_exact(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         public_key: CkObjectHandle,
         template: Option<&[CkAttribute]>,
         spec: &CkOutputBufferSpec,
@@ -1263,7 +1271,7 @@ impl Pkcs11Backend for FfiBackend {
     fn encapsulate_key(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         public_key: CkObjectHandle,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<(SecretBytes, CkObjectHandle)> {
@@ -1273,7 +1281,7 @@ impl Pkcs11Backend for FfiBackend {
     fn decapsulate_key(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         private_key: CkObjectHandle,
         template: Option<&[CkAttribute]>,
         ciphertext: CkInBuf<'_>,
@@ -1286,7 +1294,7 @@ impl Pkcs11Backend for FfiBackend {
     fn message_encrypt_init(
         &self,
         session: CkSessionHandle,
-        mechanism: Option<&CkMechanism>,
+        mechanism: Option<&ValidatedMechanismParams>,
         init_param: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         key: CkObjectHandle,
     ) -> CkResult<()> {
@@ -1296,7 +1304,7 @@ impl Pkcs11Backend for FfiBackend {
     fn message_encrypt_init_contract(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         init_param: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         key: CkObjectHandle,
         provider_spec: &CkParameterRoundtripSpec,
@@ -1311,7 +1319,7 @@ impl Pkcs11Backend for FfiBackend {
     fn message_decrypt_init(
         &self,
         session: CkSessionHandle,
-        mechanism: Option<&CkMechanism>,
+        mechanism: Option<&ValidatedMechanismParams>,
         init_param: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         key: CkObjectHandle,
     ) -> CkResult<()> {
@@ -1321,7 +1329,7 @@ impl Pkcs11Backend for FfiBackend {
     fn message_decrypt_init_contract(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         init_param: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         key: CkObjectHandle,
         provider_spec: &CkParameterRoundtripSpec,
@@ -1336,7 +1344,7 @@ impl Pkcs11Backend for FfiBackend {
     fn message_sign_init(
         &self,
         session: CkSessionHandle,
-        mechanism: Option<&CkMechanism>,
+        mechanism: Option<&ValidatedMechanismParams>,
         key: CkObjectHandle,
     ) -> CkResult<()> {
         self.ffi_message_sign_init(session, mechanism, key)
@@ -1349,7 +1357,7 @@ impl Pkcs11Backend for FfiBackend {
     fn message_verify_init(
         &self,
         session: CkSessionHandle,
-        mechanism: Option<&CkMechanism>,
+        mechanism: Option<&ValidatedMechanismParams>,
         key: CkObjectHandle,
     ) -> CkResult<()> {
         self.ffi_message_verify_init(session, mechanism, key)
@@ -1540,7 +1548,7 @@ impl Pkcs11Backend for FfiBackend {
     fn verify_signature_init(
         &self,
         session: CkSessionHandle,
-        mechanism: Option<&CkMechanism>,
+        mechanism: Option<&ValidatedMechanismParams>,
         key: CkObjectHandle,
         signature: CkInBuf<'_>,
     ) -> CkResult<()> {
@@ -1568,7 +1576,7 @@ impl Pkcs11Backend for FfiBackend {
     fn wrap_key_authenticated(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
         aad: CkInBuf<'_>,
@@ -1579,7 +1587,7 @@ impl Pkcs11Backend for FfiBackend {
     fn wrap_key_authenticated_typed(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         parameter: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
@@ -1592,7 +1600,7 @@ impl Pkcs11Backend for FfiBackend {
     fn wrap_key_authenticated_exact_typed(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         parameter: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
@@ -1616,7 +1624,7 @@ impl Pkcs11Backend for FfiBackend {
     fn unwrap_key_authenticated_typed(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         parameter: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
@@ -1640,7 +1648,7 @@ impl Pkcs11Backend for FfiBackend {
     fn unwrap_key_authenticated(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
         template: Option<&[CkAttribute]>,
@@ -1759,7 +1767,7 @@ impl Pkcs11Backend for FfiBackend {
     fn wrap_key_authenticated_exact(
         &self,
         session: CkSessionHandle,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
         aad: CkInBuf<'_>,

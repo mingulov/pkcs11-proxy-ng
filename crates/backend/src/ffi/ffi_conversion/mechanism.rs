@@ -1352,9 +1352,7 @@ pub(in crate::ffi) fn validate_for_ffi(
 /// through here — typed/`None` pass identically, so all pre-existing
 /// assertions keep their meaning; only the boundary moved.
 #[cfg(test)]
-pub(in crate::ffi) fn validated_mechanism_for_tests(
-    mechanism: &CkMechanism,
-) -> ValidatedMechanismParams {
+pub(crate) fn validated_mechanism_for_tests(mechanism: &CkMechanism) -> ValidatedMechanismParams {
     validate_for_ffi(mechanism).expect("test mechanism validates for FFI")
 }
 

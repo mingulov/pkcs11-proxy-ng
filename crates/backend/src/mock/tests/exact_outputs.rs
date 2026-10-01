@@ -12,7 +12,7 @@ fn null_output_length_classic_cipher_operations_follow_provider_owned_lifecycle(
         CkOutputBufferSpec { buffer_present: true, buffer_len: 0, length_pointer_null: true };
 
     for update in [false, true] {
-        backend.encrypt_init(session, &mechanism, key).unwrap();
+        backend.encrypt_init(session, &validated(&mechanism), key).unwrap();
         let before = backend.data_op_call_count();
         let result = if update {
             backend.encrypt_update_exact(session, CkInBuf::Bytes(b"data"), &missing)
@@ -24,12 +24,12 @@ fn null_output_length_classic_cipher_operations_follow_provider_owned_lifecycle(
         assert_eq!(result.returned_len, None);
         assert_eq!(result.value, None);
         assert_eq!(backend.data_op_call_count(), before + 1);
-        backend.encrypt_init(session, &mechanism, key).unwrap();
+        backend.encrypt_init(session, &validated(&mechanism), key).unwrap();
         backend.encrypt_init_cancel(session).unwrap();
     }
 
     for update in [false, true] {
-        backend.decrypt_init(session, &mechanism, key).unwrap();
+        backend.decrypt_init(session, &validated(&mechanism), key).unwrap();
         let before = backend.data_op_call_count();
         let result = if update {
             backend.decrypt_update_exact(session, CkInBuf::Bytes(b"data"), &missing)
@@ -41,7 +41,7 @@ fn null_output_length_classic_cipher_operations_follow_provider_owned_lifecycle(
         assert_eq!(result.returned_len, None);
         assert_eq!(result.value, None);
         assert_eq!(backend.data_op_call_count(), before + 1);
-        backend.decrypt_init(session, &mechanism, key).unwrap();
+        backend.decrypt_init(session, &validated(&mechanism), key).unwrap();
         backend.decrypt_init_cancel(session).unwrap();
     }
 }
@@ -118,7 +118,7 @@ fn typed_message_exact_paths_return_structured_mock_outputs() {
             let init_ack = if encrypt {
                 backend.message_encrypt_init_contract(
                     session,
-                    &mechanism,
+                    &validated(&mechanism),
                     Some(parameter),
                     key,
                     provider_spec,
@@ -126,7 +126,7 @@ fn typed_message_exact_paths_return_structured_mock_outputs() {
             } else {
                 backend.message_decrypt_init_contract(
                     session,
-                    &mechanism,
+                    &validated(&mechanism),
                     Some(parameter),
                     key,
                     provider_spec,
@@ -338,7 +338,7 @@ fn encapsulate_key_returns_live_key_with_template_attributes() {
     let (ciphertext, encapsulated_key) = backend
         .encapsulate_key(
             session,
-            &mechanism,
+            &validated(&mechanism),
             public_key,
             Some(&[CkAttribute {
                 attr_type: CkAttributeType::LABEL,
@@ -375,7 +375,7 @@ fn encapsulate_key_exact_data_query_returns_live_key_with_template_attributes() 
     let result = backend
         .encapsulate_key_exact(
             session,
-            &mechanism,
+            &validated(&mechanism),
             public_key,
             Some(&[CkAttribute {
                 attr_type: CkAttributeType::LABEL,
@@ -415,7 +415,7 @@ fn encapsulate_key_exact_non_data_queries_do_not_allocate_key() {
     let size_query = backend
         .encapsulate_key_exact(
             session,
-            &mechanism,
+            &validated(&mechanism),
             public_key,
             Some(&[]),
             &CkOutputBufferSpec {
@@ -431,7 +431,7 @@ fn encapsulate_key_exact_non_data_queries_do_not_allocate_key() {
     let too_small = backend
         .encapsulate_key_exact(
             session,
-            &mechanism,
+            &validated(&mechanism),
             public_key,
             Some(&[]),
             &CkOutputBufferSpec { buffer_present: true, buffer_len: 1, length_pointer_null: false },
@@ -471,16 +471,18 @@ fn full_registry_mock_accepts_every_registered_mechanism_for_exact_wrap_workflow
 
         let size_spec =
             CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: false };
-        let size_result =
-            backend.wrap_key_exact(session, &mechanism, wrapping_key, key, &size_spec).unwrap();
+        let size_result = backend
+            .wrap_key_exact(session, &validated(&mechanism), wrapping_key, key, &size_spec)
+            .unwrap();
         assert_eq!(size_result.ck_rv, CkRv::OK);
         assert_eq!(size_result.returned_len, Some(4));
         assert!(size_result.value.is_none());
 
         let data_spec =
             CkOutputBufferSpec { buffer_present: true, buffer_len: 4, length_pointer_null: false };
-        let data_result =
-            backend.wrap_key_exact(session, &mechanism, wrapping_key, key, &data_spec).unwrap();
+        let data_result = backend
+            .wrap_key_exact(session, &validated(&mechanism), wrapping_key, key, &data_spec)
+            .unwrap();
         assert_eq!(data_result.ck_rv, CkRv::OK);
         assert_eq!(data_result.value, Some(SecretBytes::new(vec![0xDE, 0xAD, 0xBE, 0xEF])));
 
@@ -507,7 +509,7 @@ fn official_mechanism_mock_accepts_every_official_mechanism_across_exact_output_
         assert_exact_byte_size_and_data("sign_exact", *mechanism_type, |spec| {
             let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
             let key = live_key(&backend, session);
-            backend.sign_init(session, &mechanism, key).unwrap();
+            backend.sign_init(session, &validated(&mechanism), key).unwrap();
             let result = backend.sign_exact(session, CkInBuf::Bytes(data), spec);
             backend.close_session(session).unwrap();
             result
@@ -516,7 +518,7 @@ fn official_mechanism_mock_accepts_every_official_mechanism_across_exact_output_
         assert_exact_byte_size_and_data("sign_final_exact", *mechanism_type, |spec| {
             let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
             let key = live_key(&backend, session);
-            backend.sign_init(session, &mechanism, key).unwrap();
+            backend.sign_init(session, &validated(&mechanism), key).unwrap();
             backend.sign_update(session, CkInBuf::Bytes(data)).unwrap();
             let result = backend.sign_final_exact(session, spec);
             backend.close_session(session).unwrap();
@@ -526,7 +528,7 @@ fn official_mechanism_mock_accepts_every_official_mechanism_across_exact_output_
         assert_exact_byte_size_and_data("sign_recover_exact", *mechanism_type, |spec| {
             let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
             let key = live_key(&backend, session);
-            backend.sign_recover_init(session, &mechanism, key).unwrap();
+            backend.sign_recover_init(session, &validated(&mechanism), key).unwrap();
             let result = backend.sign_recover_exact(session, CkInBuf::Bytes(data), spec);
             backend.close_session(session).unwrap();
             result
@@ -535,7 +537,7 @@ fn official_mechanism_mock_accepts_every_official_mechanism_across_exact_output_
         assert_exact_byte_size_and_data("verify_recover_exact", *mechanism_type, |spec| {
             let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
             let key = live_key(&backend, session);
-            backend.verify_recover_init(session, &mechanism, key).unwrap();
+            backend.verify_recover_init(session, &validated(&mechanism), key).unwrap();
             let result = backend.verify_recover_exact(session, CkInBuf::Bytes(data), spec);
             backend.close_session(session).unwrap();
             result
@@ -543,7 +545,7 @@ fn official_mechanism_mock_accepts_every_official_mechanism_across_exact_output_
 
         assert_exact_byte_size_and_data("digest_exact", *mechanism_type, |spec| {
             let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-            backend.digest_init(session, &mechanism).unwrap();
+            backend.digest_init(session, &validated(&mechanism)).unwrap();
             let result = backend.digest_exact(session, CkInBuf::Bytes(data), spec);
             backend.close_session(session).unwrap();
             result
@@ -551,7 +553,7 @@ fn official_mechanism_mock_accepts_every_official_mechanism_across_exact_output_
 
         assert_exact_byte_size_and_data("digest_final_exact", *mechanism_type, |spec| {
             let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-            backend.digest_init(session, &mechanism).unwrap();
+            backend.digest_init(session, &validated(&mechanism)).unwrap();
             backend.digest_update(session, CkInBuf::Bytes(data)).unwrap();
             let result = backend.digest_final_exact(session, spec);
             backend.close_session(session).unwrap();
@@ -561,7 +563,7 @@ fn official_mechanism_mock_accepts_every_official_mechanism_across_exact_output_
         assert_exact_byte_size_and_data("encrypt_exact", *mechanism_type, |spec| {
             let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
             let key = live_key(&backend, session);
-            backend.encrypt_init(session, &mechanism, key).unwrap();
+            backend.encrypt_init(session, &validated(&mechanism), key).unwrap();
             let result = backend.encrypt_exact(session, CkInBuf::Bytes(data), spec);
             backend.close_session(session).unwrap();
             result
@@ -570,7 +572,7 @@ fn official_mechanism_mock_accepts_every_official_mechanism_across_exact_output_
         assert_exact_byte_size_and_data("encrypt_update_exact", *mechanism_type, |spec| {
             let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
             let key = live_key(&backend, session);
-            backend.encrypt_init(session, &mechanism, key).unwrap();
+            backend.encrypt_init(session, &validated(&mechanism), key).unwrap();
             let result = backend.encrypt_update_exact(session, CkInBuf::Bytes(data), spec);
             backend.close_session(session).unwrap();
             result
@@ -579,7 +581,7 @@ fn official_mechanism_mock_accepts_every_official_mechanism_across_exact_output_
         assert_exact_byte_size_and_data("encrypt_final_exact", *mechanism_type, |spec| {
             let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
             let key = live_key(&backend, session);
-            backend.encrypt_init(session, &mechanism, key).unwrap();
+            backend.encrypt_init(session, &validated(&mechanism), key).unwrap();
             let result = backend.encrypt_final_exact(session, spec);
             backend.close_session(session).unwrap();
             result
@@ -589,7 +591,7 @@ fn official_mechanism_mock_accepts_every_official_mechanism_across_exact_output_
         assert_exact_byte_size_and_data("decrypt_exact", *mechanism_type, |spec| {
             let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
             let key = live_key(&backend, session);
-            backend.decrypt_init(session, &mechanism, key).unwrap();
+            backend.decrypt_init(session, &validated(&mechanism), key).unwrap();
             let result = backend.decrypt_exact(session, CkInBuf::Bytes(&ciphertext), spec);
             backend.close_session(session).unwrap();
             result
@@ -598,7 +600,7 @@ fn official_mechanism_mock_accepts_every_official_mechanism_across_exact_output_
         assert_exact_byte_size_and_data("decrypt_update_exact", *mechanism_type, |spec| {
             let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
             let key = live_key(&backend, session);
-            backend.decrypt_init(session, &mechanism, key).unwrap();
+            backend.decrypt_init(session, &validated(&mechanism), key).unwrap();
             let result = backend.decrypt_update_exact(session, CkInBuf::Bytes(&ciphertext), spec);
             backend.close_session(session).unwrap();
             result
@@ -607,7 +609,7 @@ fn official_mechanism_mock_accepts_every_official_mechanism_across_exact_output_
         assert_exact_byte_size_and_data("decrypt_final_exact", *mechanism_type, |spec| {
             let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
             let key = live_key(&backend, session);
-            backend.decrypt_init(session, &mechanism, key).unwrap();
+            backend.decrypt_init(session, &validated(&mechanism), key).unwrap();
             let result = backend.decrypt_final_exact(session, spec);
             backend.close_session(session).unwrap();
             result
@@ -642,7 +644,8 @@ fn official_mechanism_mock_accepts_every_official_mechanism_across_exact_output_
             let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
             let wrapping_key = live_key(&backend, session);
             let key = live_key(&backend, session);
-            let result = backend.wrap_key_exact(session, &mechanism, wrapping_key, key, spec);
+            let result =
+                backend.wrap_key_exact(session, &validated(&mechanism), wrapping_key, key, spec);
             backend.close_session(session).unwrap();
             result
         });
@@ -650,7 +653,7 @@ fn official_mechanism_mock_accepts_every_official_mechanism_across_exact_output_
         assert_exact_byte_size_and_data("get_operation_state_exact", *mechanism_type, |spec| {
             let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
             let key = live_key(&backend, session);
-            backend.sign_init(session, &mechanism, key).unwrap();
+            backend.sign_init(session, &validated(&mechanism), key).unwrap();
             let result = backend.get_operation_state_exact(session, spec);
             backend.close_session(session).unwrap();
             result
@@ -661,7 +664,7 @@ fn official_mechanism_mock_accepts_every_official_mechanism_across_exact_output_
             let key = live_key(&backend, session);
             let result = backend.encapsulate_key_exact(
                 session,
-                &mechanism,
+                &validated(&mechanism),
                 key,
                 Some(&[label_attr("kem")]),
                 spec,
@@ -676,7 +679,7 @@ fn official_mechanism_mock_accepts_every_official_mechanism_across_exact_output_
             |output_spec, param_spec| {
                 let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
                 let key = live_key(&backend, session);
-                backend.encrypt_init(session, &mechanism, key).unwrap();
+                backend.encrypt_init(session, &validated(&mechanism), key).unwrap();
                 let result = backend.encrypt_message_exact(
                     session,
                     parameter,
@@ -696,7 +699,7 @@ fn official_mechanism_mock_accepts_every_official_mechanism_across_exact_output_
             |output_spec, param_spec| {
                 let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
                 let key = live_key(&backend, session);
-                backend.decrypt_init(session, &mechanism, key).unwrap();
+                backend.decrypt_init(session, &validated(&mechanism), key).unwrap();
                 let result = backend.decrypt_message_exact(
                     session,
                     parameter,
@@ -716,7 +719,7 @@ fn official_mechanism_mock_accepts_every_official_mechanism_across_exact_output_
             |output_spec, param_spec| {
                 let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
                 let key = live_key(&backend, session);
-                backend.sign_init(session, &mechanism, key).unwrap();
+                backend.sign_init(session, &validated(&mechanism), key).unwrap();
                 let result = backend.sign_message_exact(
                     session,
                     parameter,
@@ -735,7 +738,7 @@ fn official_mechanism_mock_accepts_every_official_mechanism_across_exact_output_
             |output_spec, param_spec| {
                 let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
                 let key = live_key(&backend, session);
-                backend.encrypt_init(session, &mechanism, key).unwrap();
+                backend.encrypt_init(session, &validated(&mechanism), key).unwrap();
                 let result = backend.encrypt_message_next_exact(
                     session,
                     parameter,
@@ -755,7 +758,7 @@ fn official_mechanism_mock_accepts_every_official_mechanism_across_exact_output_
             |output_spec, param_spec| {
                 let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
                 let key = live_key(&backend, session);
-                backend.decrypt_init(session, &mechanism, key).unwrap();
+                backend.decrypt_init(session, &validated(&mechanism), key).unwrap();
                 let result = backend.decrypt_message_next_exact(
                     session,
                     parameter,
@@ -775,7 +778,7 @@ fn official_mechanism_mock_accepts_every_official_mechanism_across_exact_output_
             |output_spec, param_spec| {
                 let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
                 let key = live_key(&backend, session);
-                backend.sign_init(session, &mechanism, key).unwrap();
+                backend.sign_init(session, &validated(&mechanism), key).unwrap();
                 let result = backend.sign_message_next_exact(
                     session,
                     parameter,
@@ -797,7 +800,7 @@ fn official_mechanism_mock_accepts_every_official_mechanism_across_exact_output_
                 let key = live_key(&backend, session);
                 let result = backend.wrap_key_authenticated_exact(
                     session,
-                    &mechanism,
+                    &validated(&mechanism),
                     wrapping_key,
                     key,
                     CkInBuf::Bytes(b"aad"),
@@ -822,19 +825,19 @@ fn verify_rejects_signature_that_does_not_match_sign_echo() {
     let key = backend.create_object(session, Some(&[])).unwrap();
     let mech = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
 
-    backend.sign_init(session, &mech, key).unwrap();
+    backend.sign_init(session, &validated(&mech), key).unwrap();
     let signature = backend.sign(session, CkInBuf::Bytes(b"the data")).unwrap();
     let signature_bytes = signature.expose(|raw| raw.to_vec());
 
     // Correct signature over the same data verifies.
-    backend.verify_init(session, &mech, key).unwrap();
+    backend.verify_init(session, &validated(&mech), key).unwrap();
     backend.verify(session, CkInBuf::Bytes(b"the data"), CkInBuf::Bytes(&signature_bytes)).unwrap();
 
     // One flipped signature byte is rejected.
     let mut tampered = signature.clone();
     tampered.expose_mut(|raw| raw[0] ^= 0x01);
     let tampered_bytes = tampered.expose(|raw| raw.to_vec());
-    backend.verify_init(session, &mech, key).unwrap();
+    backend.verify_init(session, &validated(&mech), key).unwrap();
     assert_eq!(
         backend
             .verify(session, CkInBuf::Bytes(b"the data"), CkInBuf::Bytes(&tampered_bytes))
@@ -844,7 +847,7 @@ fn verify_rejects_signature_that_does_not_match_sign_echo() {
 
     // A signature over DIFFERENT data is rejected (the data reached the
     // backend intact only if the echo matches).
-    backend.verify_init(session, &mech, key).unwrap();
+    backend.verify_init(session, &validated(&mech), key).unwrap();
     assert_eq!(
         backend
             .verify(session, CkInBuf::Bytes(b"other data"), CkInBuf::Bytes(&signature_bytes))
@@ -873,7 +876,7 @@ fn r4_v1_opaque_raw_accepted_by_message_gates() {
         let init_ack = if encrypt {
             backend.message_encrypt_init_contract(
                 session,
-                &mechanism,
+                &validated(&mechanism),
                 Some(&raw),
                 key,
                 &provider_spec,
@@ -881,7 +884,7 @@ fn r4_v1_opaque_raw_accepted_by_message_gates() {
         } else {
             backend.message_decrypt_init_contract(
                 session,
-                &mechanism,
+                &validated(&mechanism),
                 Some(&raw),
                 key,
                 &provider_spec,
