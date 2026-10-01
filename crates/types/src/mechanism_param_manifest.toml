@@ -601,7 +601,7 @@ outer_kind = "NestedOrOutput"
 operations = ["General", "WrapKey"]
 virtual_handle = false
 min_transport_version = 1
-status = "pending-tail"
+status = "complete"
 wire_messages = ["KeaDeriveParams"]
 output_fields = [2, 3]
 
@@ -670,7 +670,7 @@ outer_kind = "NestedOrOutput"
 operations = ["General", "WrapKey"]
 virtual_handle = true
 min_transport_version = 1
-status = "pending-tail"
+status = "complete"
 wire_messages = ["KipParams"]
 output_fields = []
 
@@ -782,7 +782,7 @@ outer_kind = "NestedOrOutput"
 operations = ["General", "WrapKey"]
 virtual_handle = false
 min_transport_version = 1
-status = "pending-tail"
+status = "complete"
 wire_messages = ["OtpParams"]
 output_fields = []
 
@@ -1142,7 +1142,7 @@ outer_kind = "NestedOrOutput"
 operations = ["General", "WrapKey"]
 virtual_handle = false
 min_transport_version = 1
-status = "pending-tail"
+status = "complete"
 wire_messages = ["SkipjackPrivateWrapParams"]
 output_fields = []
 
@@ -1165,7 +1165,7 @@ outer_kind = "NestedOrOutput"
 operations = ["General", "WrapKey"]
 virtual_handle = false
 min_transport_version = 1
-status = "pending-tail"
+status = "complete"
 wire_messages = ["SkipjackRelayxParams"]
 output_fields = []
 
@@ -1188,7 +1188,7 @@ outer_kind = "NestedOrOutput"
 operations = ["General", "WrapKey"]
 virtual_handle = false
 min_transport_version = 1
-status = "pending-tail"
+status = "complete"
 wire_messages = ["Sp800108FeedbackKdfParams"]
 output_fields = [6]
 
@@ -1211,7 +1211,7 @@ outer_kind = "NestedOrOutput"
 operations = ["General", "WrapKey"]
 virtual_handle = false
 min_transport_version = 1
-status = "pending-tail"
+status = "complete"
 wire_messages = ["Sp800108KdfParams"]
 output_fields = [4]
 
@@ -1234,7 +1234,7 @@ outer_kind = "NestedOrOutput"
 operations = ["General", "WrapKey"]
 virtual_handle = false
 min_transport_version = 1
-status = "pending-tail"
+status = "complete"
 wire_messages = ["Ssl3KeyMatParams"]
 output_fields = [5]
 
@@ -1382,7 +1382,7 @@ outer_kind = "NestedOrOutput"
 operations = ["General", "WrapKey"]
 virtual_handle = false
 min_transport_version = 1
-status = "pending-tail"
+status = "complete"
 wire_messages = ["TlsPrfParams"]
 output_fields = [4, 5]
 
@@ -1405,7 +1405,7 @@ outer_kind = "NestedOrOutput"
 operations = ["General", "WrapKey"]
 virtual_handle = false
 min_transport_version = 1
-status = "pending-tail"
+status = "complete"
 wire_messages = ["WtlsKeyMatParams"]
 output_fields = [7]
 
@@ -1451,7 +1451,7 @@ outer_kind = "NestedOrOutput"
 operations = ["General", "WrapKey"]
 virtual_handle = false
 min_transport_version = 1
-status = "pending-tail"
+status = "complete"
 wire_messages = ["WtlsPrfParams"]
 output_fields = [5, 6]
 
