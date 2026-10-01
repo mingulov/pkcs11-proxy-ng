@@ -824,10 +824,14 @@ mod lifecycle_mech_tests {
         let mechanism = CkMechanism {
             mechanism_type: CkMechanismType::TLS_PRF,
             params: Some(CkMechanismParams::TlsPrf(TlsPrfParams {
-                seed: vec![0xA1; 32].into(),
-                label: b"master secret".to_vec().into(),
+                seed_presence: PointerBytes::present_copy(&[0xA1; 32]),
+                label_presence: PointerBytes::present_copy(b"master secret"),
+                seed: (vec![0xA1; 32]).into(),
+                label: (b"master secret".to_vec()).into(),
                 output_len: 48,
                 output: Vec::new().into(),
+                output_is_null: false,
+                output_len_is_null: false,
             })),
         };
         let (handle, mech_out) = backend
@@ -858,10 +862,14 @@ mod lifecycle_mech_tests {
             mechanism_type: CkMechanismType::WTLS_PRF,
             params: Some(CkMechanismParams::WtlsPrf(WtlsPrfParams {
                 digest_mechanism: CkMechanismType::SHA256,
-                seed: vec![0xC1; 20].into(),
-                label: vec![0xD1; 8].into(),
+                seed_presence: PointerBytes::present_copy(&[0xC1; 20]),
+                label_presence: PointerBytes::present_copy(&[0xD1; 8]),
+                seed: (vec![0xC1; 20]).into(),
+                label: (vec![0xD1; 8]).into(),
                 output_len: 20,
                 output: Vec::new().into(),
+                output_is_null: false,
+                output_len_is_null: false,
             })),
         };
         let (handle, mech_out) = backend
@@ -893,11 +901,14 @@ mod lifecycle_mech_tests {
             mechanism_type: CkMechanismType::SSL3_MASTER_KEY_DERIVE,
             params: Some(CkMechanismParams::Ssl3MasterKeyDerive(Ssl3MasterKeyDeriveParams {
                 random_info: SslRandomData {
+                    client_random_presence: PointerBytes::present_copy(&[0x11; 32]),
+                    server_random_presence: PointerBytes::present_copy(&[0x22; 32]),
                     client_random: vec![0x11; 32],
                     server_random: vec![0x22; 32],
                 },
                 version_major: 3,
                 version_minor: 0,
+                version_is_null: false,
             })),
         };
         let (handle, mech_out) = backend
@@ -1244,12 +1255,15 @@ mod derive_malformed_byte_tests {
             mechanism_type: CkMechanismType::TLS12_MASTER_KEY_DERIVE,
             params: Some(CkMechanismParams::Tls12MasterKeyDerive(Tls12MasterKeyDeriveParams {
                 random_info: SslRandomData {
+                    client_random_presence: PointerBytes::present_copy(&[0x11; 32]),
+                    server_random_presence: PointerBytes::present_copy(&[0x22; 32]),
                     client_random: vec![0x11; 32],
                     server_random: vec![0x22; 32],
                 },
                 version_major: major,
                 version_minor: minor,
                 prf_hash_mechanism: CkMechanismType::SHA256,
+                version_is_null: false,
             })),
         }
     }

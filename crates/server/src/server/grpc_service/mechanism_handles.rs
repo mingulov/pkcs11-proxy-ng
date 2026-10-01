@@ -733,7 +733,9 @@ mod tests {
         CkMechanismParams::Kip(pkcs11_proxy_ng_types::KipParams {
             mechanism: Box::new(with_params(inner)),
             key_handle: CkObjectHandle(key_handle),
+            mechanism_is_null: false,
             seed: Vec::new().into(),
+            seed_presence: PointerBytes::present_copy(&[]),
         })
     }
 

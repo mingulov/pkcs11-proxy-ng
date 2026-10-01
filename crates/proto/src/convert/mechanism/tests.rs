@@ -8,7 +8,7 @@ use pkcs11_proxy_ng_types::{
     Ike1ExtendedDeriveParams, Ike1PrfDeriveParams, Ike2PrfPlusDeriveParams, IkePrfDeriveParams,
     IvParams, KeaDeriveParams, KeyDerivationStringData, KeyWrapSetOaepParams, KipParams,
     KmacParams, KyberParams, MacGeneralParams, MuGenParams, ObjectHandleParam, OtpParam, OtpParams,
-    PbeParams, Pkcs5Pbkd2Params, PointerBytes, PrfDataParam, RawMechanismParams,
+    PbeParams, Pkcs5Pbkd2Params, PointerArray, PointerBytes, PrfDataParam, RawMechanismParams,
     RsaAesKeyWrapParams, SignAdditionalContext, SkipjackPrivateWrapParams, SkipjackRelayxParams,
     Sp800108DerivedKey, Sp800108FeedbackKdfParams, Sp800108KdfParams, Ssl3KeyMatParams,
     Ssl3MasterKeyDeriveParams, SslRandomData, Tls12ExtendedMasterKeyDeriveParams,
@@ -597,6 +597,9 @@ fn kea_derive_round_trip() {
         random_a: vec![0x11; 128],
         random_b: vec![0x22; 128],
         public_data: vec![0x33; 128],
+        random_a_presence: PointerBytes::present_copy(&[0x11; 128]),
+        random_b_presence: PointerBytes::present_copy(&[0x22; 128]),
+        public_data_presence: PointerBytes::present_copy(&[0x33; 128]),
     });
     match round_trip(params) {
         CkMechanismParams::KeaDerive(p) => {
@@ -1249,6 +1252,10 @@ fn tls_prf_params_round_trip() {
         output_len: 48,
         // W1-C5-01: the provider-written output must survive the trip.
         output: vec![0x5A; 48].into(),
+        seed_presence: PointerBytes::present_copy(&[0x01; 32]),
+        label_presence: PointerBytes::present_copy(&[0x6D, 0x61, 0x73, 0x74]),
+        output_is_null: false,
+        output_len_is_null: false,
     }));
     match p {
         CkMechanismParams::TlsPrf(v) => {
@@ -1266,8 +1273,15 @@ fn tls_kdf_params_round_trip() {
     let p = round_trip(CkMechanismParams::TlsKdf(TlsKdfParams {
         prf_mechanism: CkMechanismType(0x250),
         label: vec![0x6B, 0x65, 0x79].into(), // "key"
-        random_info: SslRandomData { client_random: vec![0xAA; 32], server_random: vec![0xBB; 32] },
+        random_info: SslRandomData {
+            client_random: vec![0xAA; 32],
+            server_random: vec![0xBB; 32],
+            client_random_presence: PointerBytes::present_copy(&[0xAA; 32]),
+            server_random_presence: PointerBytes::present_copy(&[0xBB; 32]),
+        },
         context_data: vec![0xCC; 16].into(),
+        label_presence: PointerBytes::present_copy(&[0x6B, 0x65, 0x79]),
+        context_data_presence: PointerBytes::present_copy(&[0xCC; 16]),
     }));
     match p {
         CkMechanismParams::TlsKdf(v) => {
@@ -1290,6 +1304,8 @@ fn tls_kdf_params_reject_missing_random_info() {
             label: b"key".to_vec(),
             random_info: None,
             context_data: vec![],
+            label_null_len: None,
+            context_data_null_len: None,
         })),
         parameter_encoding_version: 0,
     };
@@ -1302,8 +1318,15 @@ fn tls_kdf_params_preserve_present_empty_random_info() {
     let p = round_trip(CkMechanismParams::TlsKdf(TlsKdfParams {
         prf_mechanism: CkMechanismType::SHA256,
         label: vec![].into(),
-        random_info: SslRandomData { client_random: vec![], server_random: vec![] },
+        random_info: SslRandomData {
+            client_random: vec![],
+            server_random: vec![],
+            client_random_presence: PointerBytes::present_copy(&[]),
+            server_random_presence: PointerBytes::present_copy(&[]),
+        },
         context_data: vec![].into(),
+        label_presence: PointerBytes::present_copy(&[]),
+        context_data_presence: PointerBytes::present_copy(&[]),
     }));
 
     match p {
@@ -1320,9 +1343,15 @@ fn tls_kdf_params_preserve_present_empty_random_info() {
 #[test]
 fn ssl3_master_key_derive_round_trip() {
     let p = round_trip(CkMechanismParams::Ssl3MasterKeyDerive(Ssl3MasterKeyDeriveParams {
-        random_info: SslRandomData { client_random: vec![0x11; 32], server_random: vec![0x22; 32] },
+        random_info: SslRandomData {
+            client_random: vec![0x11; 32],
+            server_random: vec![0x22; 32],
+            client_random_presence: PointerBytes::present_copy(&[0x11; 32]),
+            server_random_presence: PointerBytes::present_copy(&[0x22; 32]),
+        },
         version_major: 3,
         version_minor: 0,
+        version_is_null: false,
     }));
     match p {
         CkMechanismParams::Ssl3MasterKeyDerive(v) => {
@@ -1346,6 +1375,7 @@ fn ssl3_master_key_derive_rejects_missing_random_info() {
                 random_info: None,
                 version_major: 3,
                 version_minor: 0,
+                version_null: None,
             },
         )),
         parameter_encoding_version: 0,
@@ -1357,10 +1387,16 @@ fn ssl3_master_key_derive_rejects_missing_random_info() {
 #[test]
 fn tls12_master_key_derive_round_trip() {
     let p = round_trip(CkMechanismParams::Tls12MasterKeyDerive(Tls12MasterKeyDeriveParams {
-        random_info: SslRandomData { client_random: vec![0x33; 32], server_random: vec![0x44; 32] },
+        random_info: SslRandomData {
+            client_random: vec![0x33; 32],
+            server_random: vec![0x44; 32],
+            client_random_presence: PointerBytes::present_copy(&[0x33; 32]),
+            server_random_presence: PointerBytes::present_copy(&[0x44; 32]),
+        },
         version_major: 3,
         version_minor: 3,
         prf_hash_mechanism: CkMechanismType(0x250),
+        version_is_null: false,
     }));
     match p {
         CkMechanismParams::Tls12MasterKeyDerive(v) => {
@@ -1386,6 +1422,7 @@ fn tls12_master_key_derive_rejects_missing_random_info() {
                 version_major: 3,
                 version_minor: 3,
                 prf_hash_mechanism: 0x250,
+                version_null: None,
             },
         )),
         parameter_encoding_version: 0,
@@ -1402,6 +1439,8 @@ fn tls12_extended_master_key_derive_round_trip() {
             session_hash: vec![0x55; 48],
             version_major: 3,
             version_minor: 3,
+            session_hash_presence: PointerBytes::present_copy(&[0x55; 48]),
+            version_is_null: false,
         },
     ));
     match p {
@@ -1422,7 +1461,12 @@ fn ssl3_key_mat_params_round_trip() {
         key_size_bits: 128,
         iv_size_bits: 128,
         is_export: false,
-        random_info: SslRandomData { client_random: vec![0x66; 32], server_random: vec![0x77; 32] },
+        random_info: SslRandomData {
+            client_random: vec![0x66; 32],
+            server_random: vec![0x77; 32],
+            client_random_presence: PointerBytes::present_copy(&[0x66; 32]),
+            server_random_presence: PointerBytes::present_copy(&[0x77; 32]),
+        },
         prf_hash_mechanism: CkMechanismType(0x250),
         client_mac_secret_handle: CkObjectHandle(101),
         server_mac_secret_handle: CkObjectHandle(102),
@@ -1430,6 +1474,9 @@ fn ssl3_key_mat_params_round_trip() {
         server_key_handle: CkObjectHandle(202),
         client_iv: vec![0xA1; 16].into(),
         server_iv: vec![0xB1; 16].into(),
+        client_iv_presence: PointerBytes::present_copy(&[0xA1; 16]),
+        server_iv_presence: PointerBytes::present_copy(&[0xB1; 16]),
+        returned_key_material_is_null: false,
     }));
     match p {
         CkMechanismParams::Ssl3KeyMat(v) => {
@@ -1470,6 +1517,9 @@ fn ssl3_key_mat_params_rejects_missing_random_info() {
             server_key_handle: 202,
             client_iv: vec![0xA1; 16],
             server_iv: vec![0xB1; 16],
+            returned_key_material_null: None,
+            client_iv_null_len: None,
+            server_iv_null_len: None,
         })),
         parameter_encoding_version: 0,
     };
@@ -1484,8 +1534,11 @@ fn wtls_master_key_derive_round_trip() {
         random_info: WtlsRandomData {
             client_random: vec![0x88; 16],
             server_random: vec![0x99; 16],
+            client_random_presence: PointerBytes::present_copy(&[0x88; 16]),
+            server_random_presence: PointerBytes::present_copy(&[0x99; 16]),
         },
         version: 1,
+        version_is_null: false,
     }));
     match p {
         CkMechanismParams::WtlsMasterKeyDerive(v) => {
@@ -1508,6 +1561,7 @@ fn wtls_master_key_derive_rejects_missing_random_info() {
                 digest_mechanism: CkMechanismType::SHA256.0,
                 random_info: None,
                 version: 1,
+                version_null: None,
             },
         )),
         parameter_encoding_version: 0,
@@ -1525,6 +1579,10 @@ fn wtls_prf_params_round_trip() {
         output_len: 32,
         // W1-C5-01: the provider-written output must survive the trip.
         output: vec![0xA5; 32].into(),
+        seed_presence: PointerBytes::present_copy(&[0xAA; 20]),
+        label_presence: PointerBytes::present_copy(&[0xBB; 10]),
+        output_is_null: false,
+        output_len_is_null: false,
     }));
     match p {
         CkMechanismParams::WtlsPrf(v) => {
@@ -1550,10 +1608,14 @@ fn wtls_key_mat_params_round_trip() {
         random_info: WtlsRandomData {
             client_random: vec![0xCC; 16],
             server_random: vec![0xDD; 16],
+            client_random_presence: PointerBytes::present_copy(&[0xCC; 16]),
+            server_random_presence: PointerBytes::present_copy(&[0xDD; 16]),
         },
         mac_secret_handle: CkObjectHandle(101),
         key_handle: CkObjectHandle(202),
         iv: vec![0xA1; 8].into(),
+        iv_presence: PointerBytes::present_copy(&[0xA1; 8]),
+        returned_key_material_is_null: false,
     }));
     match p {
         CkMechanismParams::WtlsKeyMat(v) => {
@@ -1590,6 +1652,8 @@ fn wtls_key_mat_params_rejects_missing_random_info() {
             mac_secret_handle: 101,
             key_handle: 202,
             iv: vec![0xA1; 8],
+            returned_key_material_null: None,
+            iv_null_len: None,
         })),
         parameter_encoding_version: 0,
     };
@@ -1703,8 +1767,16 @@ fn sp800_108_kdf_params_round_trip() {
     let p = round_trip(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
         prf_type: CkMechanismType(0x250),
         data_params: vec![
-            PrfDataParam { type_: 1, value: vec![0xAA; 4].into() },
-            PrfDataParam { type_: 2, value: vec![0xBB; 8].into() },
+            PrfDataParam {
+                type_: 1,
+                value: vec![0xAA; 4].into(),
+                value_presence: PointerBytes::present_copy(&[0xAA; 4]),
+            },
+            PrfDataParam {
+                type_: 2,
+                value: vec![0xBB; 8].into(),
+                value_presence: PointerBytes::present_copy(&[0xBB; 8]),
+            },
         ],
         additional_derived_keys: vec![Sp800108DerivedKey {
             template: vec![
@@ -1718,7 +1790,54 @@ fn sp800_108_kdf_params_round_trip() {
                 },
             ],
             key_handle: CkObjectHandle(0xAA55),
+            template_presence: PointerArray::present(vec![
+                CkAttribute {
+                    attr_type: CkAttributeType::LABEL,
+                    value: Some(CkAttributeValue::String("extra-a".to_string().into())),
+                },
+                CkAttribute {
+                    attr_type: CkAttributeType::VALUE_LEN,
+                    value: Some(CkAttributeValue::Ulong(32)),
+                },
+            ]),
+            ph_key_is_null: false,
         }],
+        data_params_presence: PointerArray::present(vec![
+            PrfDataParam {
+                type_: 1,
+                value: vec![0xAA; 4].into(),
+                value_presence: PointerBytes::present_copy(&[0xAA; 4]),
+            },
+            PrfDataParam {
+                type_: 2,
+                value: vec![0xBB; 8].into(),
+                value_presence: PointerBytes::present_copy(&[0xBB; 8]),
+            },
+        ]),
+        additional_derived_keys_presence: PointerArray::present(vec![Sp800108DerivedKey {
+            template: vec![
+                CkAttribute {
+                    attr_type: CkAttributeType::LABEL,
+                    value: Some(CkAttributeValue::String("extra-a".to_string().into())),
+                },
+                CkAttribute {
+                    attr_type: CkAttributeType::VALUE_LEN,
+                    value: Some(CkAttributeValue::Ulong(32)),
+                },
+            ],
+            key_handle: CkObjectHandle(0xAA55),
+            template_presence: PointerArray::present(vec![
+                CkAttribute {
+                    attr_type: CkAttributeType::LABEL,
+                    value: Some(CkAttributeValue::String("extra-a".to_string().into())),
+                },
+                CkAttribute {
+                    attr_type: CkAttributeType::VALUE_LEN,
+                    value: Some(CkAttributeValue::Ulong(32)),
+                },
+            ]),
+            ph_key_is_null: false,
+        }]),
     }));
     match p {
         CkMechanismParams::Sp800108Kdf(v) => {
@@ -1740,7 +1859,11 @@ fn sp800_108_kdf_params_round_trip() {
 fn sp800_108_feedback_kdf_params_round_trip() {
     let p = round_trip(CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
         prf_type: CkMechanismType(0x260),
-        data_params: vec![PrfDataParam { type_: 3, value: vec![0xCC; 16].into() }],
+        data_params: vec![PrfDataParam {
+            type_: 3,
+            value: vec![0xCC; 16].into(),
+            value_presence: PointerBytes::present_copy(&[0xCC; 16]),
+        }],
         iv: vec![0xDD; 16],
         additional_derived_keys: vec![Sp800108DerivedKey {
             template: vec![CkAttribute {
@@ -1748,7 +1871,30 @@ fn sp800_108_feedback_kdf_params_round_trip() {
                 value: Some(CkAttributeValue::Ulong(16)),
             }],
             key_handle: CkObjectHandle(0xBB66),
+            template_presence: PointerArray::present(vec![CkAttribute {
+                attr_type: CkAttributeType::VALUE_LEN,
+                value: Some(CkAttributeValue::Ulong(16)),
+            }]),
+            ph_key_is_null: false,
         }],
+        data_params_presence: PointerArray::present(vec![PrfDataParam {
+            type_: 3,
+            value: vec![0xCC; 16].into(),
+            value_presence: PointerBytes::present_copy(&[0xCC; 16]),
+        }]),
+        iv_presence: PointerBytes::present_copy(&[0xDD; 16]),
+        additional_derived_keys_presence: PointerArray::present(vec![Sp800108DerivedKey {
+            template: vec![CkAttribute {
+                attr_type: CkAttributeType::VALUE_LEN,
+                value: Some(CkAttributeValue::Ulong(16)),
+            }],
+            key_handle: CkObjectHandle(0xBB66),
+            template_presence: PointerArray::present(vec![CkAttribute {
+                attr_type: CkAttributeType::VALUE_LEN,
+                value: Some(CkAttributeValue::Ulong(16)),
+            }]),
+            ph_key_is_null: false,
+        }]),
     }));
     match p {
         CkMechanismParams::Sp800108FeedbackKdf(v) => {
@@ -1768,6 +1914,8 @@ fn sp800_108_kdf_empty_data_params_round_trip() {
         prf_type: CkMechanismType(1),
         data_params: vec![],
         additional_derived_keys: vec![],
+        data_params_presence: PointerArray::present(vec![]),
+        additional_derived_keys_presence: PointerArray::present(vec![]),
     }));
     match p {
         CkMechanismParams::Sp800108Kdf(v) => {
@@ -1785,19 +1933,29 @@ fn sp800_108_kdf_nested_template_refused_loudly() {
     // sub-template is not representable in Sp800108Attribute; the
     // Rust→Proto conversion must refuse it with an explicit error
     // instead of silently encoding it as value-absent.
+    let template = vec![CkAttribute {
+        attr_type: CkAttributeType::WRAP_TEMPLATE,
+        value: Some(CkAttributeValue::NestedTemplate(vec![CkAttribute {
+            attr_type: CkAttributeType::CLASS,
+            value: Some(CkAttributeValue::Ulong(4)),
+        }])),
+    }];
     let params = Sp800108KdfParams {
         prf_type: CkMechanismType(0x250),
         data_params: vec![],
         additional_derived_keys: vec![Sp800108DerivedKey {
-            template: vec![CkAttribute {
-                attr_type: CkAttributeType::WRAP_TEMPLATE,
-                value: Some(CkAttributeValue::NestedTemplate(vec![CkAttribute {
-                    attr_type: CkAttributeType::CLASS,
-                    value: Some(CkAttributeValue::Ulong(4)),
-                }])),
-            }],
+            template: template.clone(),
             key_handle: CkObjectHandle(0),
+            template_presence: PointerArray::present(template.clone()),
+            ph_key_is_null: false,
         }],
+        data_params_presence: PointerArray::present(vec![]),
+        additional_derived_keys_presence: PointerArray::present(vec![Sp800108DerivedKey {
+            template: template.clone(),
+            key_handle: CkObjectHandle(0),
+            template_presence: PointerArray::present(template),
+            ph_key_is_null: false,
+        }]),
     };
     let err = v1_proto::Sp800108KdfParams::try_from(&params)
         .expect_err("nested template must be refused loudly");
@@ -1815,17 +1973,28 @@ fn sp800_108_kdf_nested_template_refused_loudly() {
 #[test]
 fn sp800_108_feedback_kdf_nested_template_refused_loudly() {
     // W1-C8-01: same loud refusal for the feedback-KDF shape.
+    let template = vec![CkAttribute {
+        attr_type: CkAttributeType::WRAP_TEMPLATE,
+        value: Some(CkAttributeValue::NestedTemplate(vec![])),
+    }];
     let params = Sp800108FeedbackKdfParams {
         prf_type: CkMechanismType(0x260),
         data_params: vec![],
         iv: vec![],
         additional_derived_keys: vec![Sp800108DerivedKey {
-            template: vec![CkAttribute {
-                attr_type: CkAttributeType::WRAP_TEMPLATE,
-                value: Some(CkAttributeValue::NestedTemplate(vec![])),
-            }],
+            template: template.clone(),
             key_handle: CkObjectHandle(0),
+            template_presence: PointerArray::present(template.clone()),
+            ph_key_is_null: false,
         }],
+        data_params_presence: PointerArray::present(vec![]),
+        iv_presence: PointerBytes::present_copy(&[]),
+        additional_derived_keys_presence: PointerArray::present(vec![Sp800108DerivedKey {
+            template: template.clone(),
+            key_handle: CkObjectHandle(0),
+            template_presence: PointerArray::present(template),
+            ph_key_is_null: false,
+        }]),
     };
     let err = v1_proto::Sp800108FeedbackKdfParams::try_from(&params)
         .expect_err("nested template must be refused loudly");
@@ -1856,13 +2025,33 @@ fn kip_embedded_sp800_108_nested_template_refused_loudly() {
                     value: Some(CkAttributeValue::NestedTemplate(vec![])),
                 }],
                 key_handle: CkObjectHandle(0),
+                template_presence: PointerArray::present(vec![CkAttribute {
+                    attr_type: CkAttributeType::WRAP_TEMPLATE,
+                    value: Some(CkAttributeValue::NestedTemplate(vec![])),
+                }]),
+                ph_key_is_null: false,
             }],
+            data_params_presence: PointerArray::present(vec![]),
+            additional_derived_keys_presence: PointerArray::present(vec![Sp800108DerivedKey {
+                template: vec![CkAttribute {
+                    attr_type: CkAttributeType::WRAP_TEMPLATE,
+                    value: Some(CkAttributeValue::NestedTemplate(vec![])),
+                }],
+                key_handle: CkObjectHandle(0),
+                template_presence: PointerArray::present(vec![CkAttribute {
+                    attr_type: CkAttributeType::WRAP_TEMPLATE,
+                    value: Some(CkAttributeValue::NestedTemplate(vec![])),
+                }]),
+                ph_key_is_null: false,
+            }]),
         })),
     };
     let params = KipParams {
         mechanism: Box::new(nested),
         key_handle: CkObjectHandle(0xBEEF),
         seed: vec![0xAA; 16].into(),
+        seed_presence: PointerBytes::present_copy(&[0xAA; 16]),
+        mechanism_is_null: false,
     };
     let err = v1_proto::KipParams::try_from(&params)
         .expect_err("embedded nested template must be refused loudly");
@@ -1990,11 +2179,21 @@ fn x2_ratchet_respond_round_trip() {
 
 #[test]
 fn otp_params_round_trip() {
+    let params_vec = vec![
+        OtpParam {
+            type_: 1,
+            value: vec![0x01; 6].into(),
+            value_presence: PointerBytes::present_copy(&[0x01; 6]),
+        },
+        OtpParam {
+            type_: 2,
+            value: vec![0x02; 4].into(),
+            value_presence: PointerBytes::present_copy(&[0x02; 4]),
+        },
+    ];
     let p = round_trip(CkMechanismParams::Otp(OtpParams {
-        params: vec![
-            OtpParam { type_: 1, value: vec![0x01; 6].into() },
-            OtpParam { type_: 2, value: vec![0x02; 4].into() },
-        ],
+        params: params_vec.clone(),
+        params_presence: PointerArray::present(params_vec),
     }));
     match p {
         CkMechanismParams::Otp(v) => {
@@ -2010,7 +2209,10 @@ fn otp_params_round_trip() {
 
 #[test]
 fn otp_params_empty_round_trip() {
-    let p = round_trip(CkMechanismParams::Otp(OtpParams { params: vec![] }));
+    let p = round_trip(CkMechanismParams::Otp(OtpParams {
+        params: vec![],
+        params_presence: PointerArray::present(vec![]),
+    }));
     match p {
         CkMechanismParams::Otp(v) => assert!(v.params.is_empty()),
         _ => panic!("wrong variant"),
@@ -2024,6 +2226,8 @@ fn kip_params_round_trip() {
         mechanism: Box::new(nested),
         key_handle: CkObjectHandle(0xBEEF),
         seed: vec![0xAA; 16].into(),
+        seed_presence: PointerBytes::present_copy(&[0xAA; 16]),
+        mechanism_is_null: false,
     }));
     match p {
         CkMechanismParams::Kip(v) => {
@@ -2044,6 +2248,8 @@ fn kip_params_reject_missing_nested_mechanism() {
             mechanism: None,
             key_handle: 0xBEEF,
             seed: vec![0xAA],
+            mechanism_null: None,
+            seed_null_len: None,
         }))),
         parameter_encoding_version: 0,
     };
@@ -2131,6 +2337,12 @@ fn skipjack_private_wrap_round_trip() {
         prime_p: vec![0x33; 128],
         base_g: vec![0x44; 128],
         subprime_q: vec![0x55; 20],
+        password_presence: PointerBytes::present_copy(&[0x70, 0x61, 0x73, 0x73]),
+        public_data_presence: PointerBytes::present_copy(&[0x11; 128]),
+        random_a_presence: PointerBytes::present_copy(&[0x22; 20]),
+        prime_p_presence: PointerBytes::present_copy(&[0x33; 128]),
+        base_g_presence: PointerBytes::present_copy(&[0x44; 128]),
+        subprime_q_presence: PointerBytes::present_copy(&[0x55; 20]),
     }));
     match p {
         CkMechanismParams::SkipjackPrivateWrap(v) => {
@@ -2156,6 +2368,13 @@ fn skipjack_relayx_round_trip() {
         new_password: vec![0x05; 8].into(),
         new_public_data: vec![0x06; 128].into(),
         new_random_a: vec![0x07; 20].into(),
+        old_wrapped_x_presence: PointerBytes::present_copy(&[0x01; 24]),
+        old_password_presence: PointerBytes::present_copy(&[0x02; 8]),
+        old_public_data_presence: PointerBytes::present_copy(&[0x03; 128]),
+        old_random_a_presence: PointerBytes::present_copy(&[0x04; 20]),
+        new_password_presence: PointerBytes::present_copy(&[0x05; 8]),
+        new_public_data_presence: PointerBytes::present_copy(&[0x06; 128]),
+        new_random_a_presence: PointerBytes::present_copy(&[0x07; 20]),
     }));
     match p {
         CkMechanismParams::SkipjackRelayx(v) => {
@@ -2186,6 +2405,12 @@ fn skipjack_private_wrap_adopting_conversion_wipes_source() {
         prime_p: vec![0x33; 128],
         base_g: vec![0x44; 128],
         subprime_q: vec![0x55; 20],
+        password_null_len: None,
+        public_data_null_len: None,
+        random_a_null_len: None,
+        prime_p_null_len: None,
+        base_g_null_len: None,
+        subprime_q_null_len: None,
     };
     let adopted = SkipjackPrivateWrapParams::from(&mut proto);
     // Source buffers adopted out: no secret bytes remain in the prost message.
@@ -2213,6 +2438,13 @@ fn skipjack_relayx_adopting_conversion_wipes_source() {
         new_password: canary_new.clone(),
         new_public_data: vec![0x06; 128],
         new_random_a: vec![0x07; 20],
+        old_wrapped_x_null_len: None,
+        old_password_null_len: None,
+        old_public_data_null_len: None,
+        old_random_a_null_len: None,
+        new_password_null_len: None,
+        new_public_data_null_len: None,
+        new_random_a_null_len: None,
     };
     let adopted = SkipjackRelayxParams::from(&mut proto);
     // Every source buffer adopted out; nothing secret remains behind.
@@ -2249,6 +2481,12 @@ fn skipjack_prost_messages_zeroize_wipes_passwords() {
         prime_p: Vec::new(),
         base_g: Vec::new(),
         subprime_q: Vec::new(),
+        password_null_len: None,
+        public_data_null_len: None,
+        random_a_null_len: None,
+        prime_p_null_len: None,
+        base_g_null_len: None,
+        subprime_q_null_len: None,
     };
     private_wrap.zeroize();
     assert!(private_wrap.password.iter().all(|&byte| byte == 0));
@@ -2260,6 +2498,13 @@ fn skipjack_prost_messages_zeroize_wipes_passwords() {
         new_password: vec![0x5Au8; 8],
         new_public_data: Vec::new(),
         new_random_a: Vec::new(),
+        old_wrapped_x_null_len: None,
+        old_password_null_len: None,
+        old_public_data_null_len: None,
+        old_random_a_null_len: None,
+        new_password_null_len: None,
+        new_public_data_null_len: None,
+        new_random_a_null_len: None,
     };
     relayx.zeroize();
     assert!(relayx.old_password.iter().all(|&byte| byte == 0));
@@ -6081,6 +6326,9 @@ fn r17_encode_v0_is_legacy_identical() {
             random_a: vec![4; 8],
             random_b: Vec::new(),
             public_data: vec![5; 16],
+            random_a_presence: PointerBytes::present_copy(&[4; 8]),
+            random_b_presence: PointerBytes::present_copy(&[]),
+            public_data_presence: PointerBytes::present_copy(&[5; 16]),
         })),
     ];
     for params in cases {
@@ -6129,18 +6377,29 @@ fn r17_encode_v1_newer_capability_still_v1() {
 
 #[test]
 fn r17_encode_v1_non_r17_families_stay_v0_shaped() {
-    // Tail/scalar/output families take the identical legacy path at every
-    // capability (R18 owns the tail; scalar shapes have no presence).
-    let kea = r17_mech(Some(CkMechanismParams::KeaDerive(KeaDeriveParams {
-        is_sender: false,
-        random_a: vec![1; 4],
-        random_b: vec![2; 4],
-        public_data: Vec::new(),
-    })));
-    for version in [0, 1, 2] {
-        let wire = super::to_wire_with_transport_version(&kea, version).unwrap();
-        assert_eq!(wire, v1_proto::Mechanism::try_from(&kea).unwrap());
-        assert_eq!(wire.parameter_encoding_version, 0, "capability {version}");
+    // Scalar/output families take the identical legacy path at every
+    // capability (scalar shapes have no presence). R18 owns the tail:
+    // KEA moved to the v1 tail encoder (S2 §8), so this pin now covers
+    // scalar shapes only (TlsMac is the R18 scalar empty row).
+    let scalar_cases = [
+        CkMechanismParams::TlsMac(pkcs11_proxy_ng_types::TlsMacParams {
+            prf_hash_mechanism: CkMechanismType::SHA256,
+            mac_length: 32,
+            server_or_client: 1,
+        }),
+        CkMechanismParams::RsaPkcsPss(pkcs11_proxy_ng_types::RsaPkcsPssParams {
+            hash_alg: CkMechanismType::SHA256,
+            mgf: CkMgf(1),
+            salt_len: 32,
+        }),
+    ];
+    for params in scalar_cases {
+        let m = r17_mech(Some(params));
+        for version in [0, 1, 2] {
+            let wire = super::to_wire_with_transport_version(&m, version).unwrap();
+            assert_eq!(wire, v1_proto::Mechanism::try_from(&m).unwrap());
+            assert_eq!(wire.parameter_encoding_version, 0, "capability {version}");
+        }
     }
     // Flat/Null keep their stored (R11-threaded) stamp, untouched.
     let flat = r17_mech(Some(CkMechanismParams::Flat(FlatParams {
@@ -7575,5 +7834,854 @@ fn r17_encode_v1_ike2_prf_plus_derive() {
             assert_eq!(p.seed_data_null_len, None);
         }
         other => panic!("must emit Ike2PrfPlusDeriveParams, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// R18: exotic-tail envelopes (S2 §8 tail, D1(a)) — subphase T
+// ---------------------------------------------------------------------------
+//
+// RED/GREEN: these tests fail on the pre-R18 tree (tail families encode
+// v0-shaped and decode ignores envelopes) and pass once the tail
+// FromWire/ToWireV1 conversions land. Written first (TDD RED).
+
+/// Minimal all-present SslRandomData for R18 encode-shape tests.
+fn r18_ssl_random() -> SslRandomData {
+    SslRandomData {
+        client_random: vec![0x11; 32],
+        server_random: vec![0x22; 32],
+        client_random_presence: PointerBytes::present_copy(&[0x11; 32]),
+        server_random_presence: PointerBytes::present_copy(&[0x22; 32]),
+    }
+}
+
+/// Minimal all-present WtlsRandomData for R18 encode-shape tests.
+fn r18_wtls_random() -> WtlsRandomData {
+    WtlsRandomData {
+        client_random: vec![0x11; 20],
+        server_random: vec![0x22; 20],
+        client_random_presence: PointerBytes::present_copy(&[0x11; 20]),
+        server_random_presence: PointerBytes::present_copy(&[0x22; 20]),
+    }
+}
+
+/// One all-present domain value per R18 tail family (16 v1 arms; TlsMac
+/// is the scalar empty row and stays v0 — see `r18_tls_mac_stays_v0`).
+fn r18_tail_present_cases() -> Vec<(&'static str, CkMechanismParams)> {
+    vec![
+        (
+            "kea_derive",
+            CkMechanismParams::KeaDerive(KeaDeriveParams {
+                is_sender: true,
+                random_a: vec![1; 8],
+                random_b: vec![2; 8],
+                public_data: vec![3; 16],
+                random_a_presence: PointerBytes::present_copy(&[1; 8]),
+                random_b_presence: PointerBytes::present_copy(&[2; 8]),
+                public_data_presence: PointerBytes::present_copy(&[3; 16]),
+            }),
+        ),
+        (
+            "skipjack_private_wrap",
+            CkMechanismParams::SkipjackPrivateWrap(SkipjackPrivateWrapParams {
+                password: vec![0x70; 4].into(),
+                public_data: vec![0x11; 8],
+                password_length: 4,
+                random_a: vec![0x22; 8],
+                prime_p: vec![0x33; 8],
+                base_g: vec![0x44; 8],
+                subprime_q: vec![0x55; 8],
+                password_presence: PointerBytes::present_copy(&[0x70; 4]),
+                public_data_presence: PointerBytes::present_copy(&[0x11; 8]),
+                random_a_presence: PointerBytes::present_copy(&[0x22; 8]),
+                prime_p_presence: PointerBytes::present_copy(&[0x33; 8]),
+                base_g_presence: PointerBytes::present_copy(&[0x44; 8]),
+                subprime_q_presence: PointerBytes::present_copy(&[0x55; 8]),
+            }),
+        ),
+        (
+            "skipjack_relayx",
+            CkMechanismParams::SkipjackRelayx(SkipjackRelayxParams {
+                old_wrapped_x: vec![0x01; 4].into(),
+                old_password: vec![0x02; 4].into(),
+                old_public_data: vec![0x03; 4].into(),
+                old_random_a: vec![0x04; 4].into(),
+                new_password: vec![0x05; 4].into(),
+                new_public_data: vec![0x06; 4].into(),
+                new_random_a: vec![0x07; 4].into(),
+                old_wrapped_x_presence: PointerBytes::present_copy(&[0x01; 4]),
+                old_password_presence: PointerBytes::present_copy(&[0x02; 4]),
+                old_public_data_presence: PointerBytes::present_copy(&[0x03; 4]),
+                old_random_a_presence: PointerBytes::present_copy(&[0x04; 4]),
+                new_password_presence: PointerBytes::present_copy(&[0x05; 4]),
+                new_public_data_presence: PointerBytes::present_copy(&[0x06; 4]),
+                new_random_a_presence: PointerBytes::present_copy(&[0x07; 4]),
+            }),
+        ),
+        (
+            "otp",
+            CkMechanismParams::Otp(OtpParams {
+                params: vec![OtpParam {
+                    type_: 1,
+                    value: vec![0x01; 6].into(),
+                    value_presence: PointerBytes::present_copy(&[0x01; 6]),
+                }],
+                params_presence: PointerArray::present(vec![OtpParam {
+                    type_: 1,
+                    value: vec![0x01; 6].into(),
+                    value_presence: PointerBytes::present_copy(&[0x01; 6]),
+                }]),
+            }),
+        ),
+        (
+            "kip",
+            CkMechanismParams::Kip(KipParams {
+                mechanism: Box::new(CkMechanism {
+                    mechanism_type: CkMechanismType::SHA256,
+                    params: None,
+                }),
+                key_handle: CkObjectHandle(0xBEEF),
+                seed: vec![0xAA; 16].into(),
+                seed_presence: PointerBytes::present_copy(&[0xAA; 16]),
+                mechanism_is_null: false,
+            }),
+        ),
+        (
+            "sp800_108_kdf",
+            CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
+                prf_type: CkMechanismType(0x250),
+                data_params: vec![],
+                additional_derived_keys: vec![],
+                data_params_presence: PointerArray::present(vec![]),
+                additional_derived_keys_presence: PointerArray::present(vec![]),
+            }),
+        ),
+        (
+            "sp800_108_feedback_kdf",
+            CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
+                prf_type: CkMechanismType(0x260),
+                data_params: vec![],
+                iv: vec![0xDD; 16],
+                additional_derived_keys: vec![],
+                data_params_presence: PointerArray::present(vec![]),
+                iv_presence: PointerBytes::present_copy(&[0xDD; 16]),
+                additional_derived_keys_presence: PointerArray::present(vec![]),
+            }),
+        ),
+        (
+            "tls_prf",
+            CkMechanismParams::TlsPrf(TlsPrfParams {
+                seed: vec![0xA1; 8].into(),
+                label: vec![0xB2; 4].into(),
+                output_len: 32,
+                output: SecretBytes::copy_from_slice(&[]),
+                seed_presence: PointerBytes::present_copy(&[0xA1; 8]),
+                label_presence: PointerBytes::present_copy(&[0xB2; 4]),
+                output_is_null: false,
+                output_len_is_null: false,
+            }),
+        ),
+        (
+            "tls_kdf",
+            CkMechanismParams::TlsKdf(TlsKdfParams {
+                prf_mechanism: CkMechanismType(0x250),
+                label: vec![0xC3; 4].into(),
+                random_info: r18_ssl_random(),
+                context_data: vec![0xD4; 8].into(),
+                label_presence: PointerBytes::present_copy(&[0xC3; 4]),
+                context_data_presence: PointerBytes::present_copy(&[0xD4; 8]),
+            }),
+        ),
+        (
+            "ssl3_master_key_derive",
+            CkMechanismParams::Ssl3MasterKeyDerive(Ssl3MasterKeyDeriveParams {
+                random_info: r18_ssl_random(),
+                version_major: 3,
+                version_minor: 0,
+                version_is_null: false,
+            }),
+        ),
+        (
+            "tls12_master_key_derive",
+            CkMechanismParams::Tls12MasterKeyDerive(Tls12MasterKeyDeriveParams {
+                random_info: r18_ssl_random(),
+                version_major: 3,
+                version_minor: 3,
+                prf_hash_mechanism: CkMechanismType::SHA256,
+                version_is_null: false,
+            }),
+        ),
+        (
+            "tls12_extended_master_key_derive",
+            CkMechanismParams::Tls12ExtendedMasterKeyDerive(Tls12ExtendedMasterKeyDeriveParams {
+                prf_hash_mechanism: CkMechanismType::SHA256,
+                session_hash: vec![0xE5; 32],
+                version_major: 3,
+                version_minor: 3,
+                session_hash_presence: PointerBytes::present_copy(&[0xE5; 32]),
+                version_is_null: false,
+            }),
+        ),
+        (
+            "ssl3_key_mat",
+            CkMechanismParams::Ssl3KeyMat(Ssl3KeyMatParams {
+                mac_size_bits: 128,
+                key_size_bits: 128,
+                iv_size_bits: 64,
+                is_export: false,
+                random_info: r18_ssl_random(),
+                prf_hash_mechanism: CkMechanismType::SHA256,
+                client_mac_secret_handle: CkObjectHandle(1),
+                server_mac_secret_handle: CkObjectHandle(2),
+                client_key_handle: CkObjectHandle(3),
+                server_key_handle: CkObjectHandle(4),
+                client_iv: vec![0xF1; 8].into(),
+                server_iv: vec![0xF2; 8].into(),
+                client_iv_presence: PointerBytes::present_copy(&[0xF1; 8]),
+                server_iv_presence: PointerBytes::present_copy(&[0xF2; 8]),
+                returned_key_material_is_null: false,
+            }),
+        ),
+        (
+            "wtls_master_key_derive",
+            CkMechanismParams::WtlsMasterKeyDerive(WtlsMasterKeyDeriveParams {
+                digest_mechanism: CkMechanismType::SHA256,
+                random_info: r18_wtls_random(),
+                version: 1,
+                version_is_null: false,
+            }),
+        ),
+        (
+            "wtls_prf",
+            CkMechanismParams::WtlsPrf(WtlsPrfParams {
+                digest_mechanism: CkMechanismType::SHA256,
+                seed: vec![0xA1; 8].into(),
+                label: vec![0xB2; 4].into(),
+                output_len: 20,
+                output: SecretBytes::copy_from_slice(&[]),
+                seed_presence: PointerBytes::present_copy(&[0xA1; 8]),
+                label_presence: PointerBytes::present_copy(&[0xB2; 4]),
+                output_is_null: false,
+                output_len_is_null: false,
+            }),
+        ),
+        (
+            "wtls_key_mat",
+            CkMechanismParams::WtlsKeyMat(WtlsKeyMatParams {
+                digest_mechanism: CkMechanismType::SHA256,
+                mac_size_bits: 64,
+                key_size_bits: 40,
+                iv_size_bits: 40,
+                sequence_number: 7,
+                is_export: false,
+                random_info: r18_wtls_random(),
+                mac_secret_handle: CkObjectHandle(11),
+                key_handle: CkObjectHandle(12),
+                iv: vec![0xF3; 8].into(),
+                iv_presence: PointerBytes::present_copy(&[0xF3; 8]),
+                returned_key_material_is_null: false,
+            }),
+        ),
+    ]
+}
+
+#[test]
+fn r18_tail_families_stamp_v1_at_capability_1() {
+    // Every R18 tail family (S2 §8 tail: KEA/KIP/OTP/SP800-108/Skipjack/
+    // TLS-WTLS) encodes presence-based with the outer stamp 1 at
+    // capability ≥ 1. TlsMac is the scalar empty row (no arm).
+    let cases = r18_tail_present_cases();
+    assert_eq!(cases.len(), 16, "16 v1 tail arms (17th shape TlsMac stays v0)");
+    for (family, params) in cases {
+        let m = r17_mech(Some(params));
+        let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+        assert_eq!(wire.parameter_encoding_version, 1, "{family} must stamp v1 at capability 1");
+    }
+}
+
+#[test]
+fn r18_tls_mac_stays_v0() {
+    // TlsMac is scalar-only (the R18 "empty row"): no envelopes, so the
+    // v1 encode is the identical legacy path (no arm, stamp 0).
+    let m = r17_mech(Some(CkMechanismParams::TlsMac(pkcs11_proxy_ng_types::TlsMacParams {
+        prf_hash_mechanism: CkMechanismType::SHA256,
+        mac_length: 32,
+        server_or_client: 1,
+    })));
+    let legacy = v1_proto::Mechanism::try_from(&m).unwrap();
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire, legacy, "scalar tail row stays on the legacy encode");
+    assert_eq!(wire.parameter_encoding_version, 0);
+}
+
+#[test]
+fn r18_kea_null_a_v1_round_trip() {
+    // KEA companions: NULL A with declared length rides the envelope and
+    // survives the v1 round trip; the shared length agrees (8 == 8).
+    let params = CkMechanismParams::KeaDerive(KeaDeriveParams {
+        is_sender: false,
+        random_a: Vec::new(),
+        random_b: vec![2; 8],
+        public_data: Vec::new(),
+        random_a_presence: PointerBytes::null_len(8),
+        random_b_presence: PointerBytes::present_copy(&[2; 8]),
+        public_data_presence: PointerBytes::present_copy(&[]),
+    });
+    let m = r17_mech(Some(params));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::KeaDeriveParams(p)) => {
+            assert!(p.random_a.is_empty());
+            assert_eq!(p.random_a_null_len, Some(8));
+            assert_eq!(p.random_b, vec![2; 8]);
+            assert_eq!(p.random_b_null_len, None);
+        }
+        other => panic!("must emit KeaDeriveParams, got {other:?}"),
+    }
+    let back = CkMechanism::try_from(&wire).unwrap();
+    match back.params {
+        Some(CkMechanismParams::KeaDerive(v)) => {
+            assert_eq!(v.random_a_presence, PointerBytes::null_len(8));
+            assert!(v.random_a.is_empty());
+            assert_eq!(v.random_b_presence, PointerBytes::present_copy(&[2; 8]));
+        }
+        other => panic!("wrong variant: {other:?}"),
+    }
+}
+
+#[test]
+fn r18_sp800108_null_template_closes_residual() {
+    // ADR-0010 Scope-2 class-4 residual: a NULL SP800-108 pTemplate used
+    // to conflate with an empty template. Under v1 it rides
+    // template_null_count + empty template and decodes back to Null.
+    let key = Sp800108DerivedKey {
+        template: vec![],
+        key_handle: CkObjectHandle(0xAA55),
+        template_presence: PointerArray::null_count(2),
+        ph_key_is_null: false,
+    };
+    let params = CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
+        prf_type: CkMechanismType(0x250),
+        data_params: vec![],
+        additional_derived_keys: vec![key],
+        data_params_presence: PointerArray::present(vec![]),
+        additional_derived_keys_presence: PointerArray::present(vec![Sp800108DerivedKey {
+            template: vec![],
+            key_handle: CkObjectHandle(0xAA55),
+            template_presence: PointerArray::null_count(2),
+            ph_key_is_null: false,
+        }]),
+    });
+    let m = r17_mech(Some(params));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::Sp800108KdfParams(p)) => {
+            assert_eq!(p.additional_derived_keys.len(), 1);
+            let dk = &p.additional_derived_keys[0];
+            assert!(dk.template.is_empty());
+            assert_eq!(dk.template_null_count, Some(2));
+        }
+        other => panic!("must emit Sp800108KdfParams, got {other:?}"),
+    }
+    let back = CkMechanism::try_from(&wire).unwrap();
+    match back.params {
+        Some(CkMechanismParams::Sp800108Kdf(v)) => {
+            assert_eq!(v.additional_derived_keys.len(), 1);
+            assert!(v.additional_derived_keys[0].template.is_empty());
+            assert_eq!(v.additional_derived_keys[0].template_presence, PointerArray::null_count(2));
+        }
+        other => panic!("wrong variant: {other:?}"),
+    }
+}
+
+#[test]
+fn r18_kip_null_nested_round_trip() {
+    // KIP nesting presence: NULL pMechanism rides mechanism_null with no
+    // nested message and decodes to the canonical placeholder + set bit.
+    let params = CkMechanismParams::Kip(KipParams {
+        mechanism: Box::new(KipParams::NULL_NESTED_MECHANISM),
+        key_handle: CkObjectHandle(0xBEEF),
+        seed: SecretBytes::copy_from_slice(&[]),
+        seed_presence: PointerBytes::null_len(0),
+        mechanism_is_null: true,
+    });
+    let m = r17_mech(Some(params));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::KipParams(p)) => {
+            assert!(p.mechanism.is_none());
+            assert_eq!(p.mechanism_null, Some(true));
+            assert!(p.seed.is_empty());
+            assert_eq!(p.seed_null_len, Some(0));
+        }
+        other => panic!("must emit KipParams, got {other:?}"),
+    }
+    let back = CkMechanism::try_from(&wire).unwrap();
+    match back.params {
+        Some(CkMechanismParams::Kip(v)) => {
+            assert!(v.mechanism_is_null);
+            assert_eq!(*v.mechanism, KipParams::NULL_NESTED_MECHANISM);
+            assert_eq!(v.seed_presence, PointerBytes::null_len(0));
+        }
+        other => panic!("wrong variant: {other:?}"),
+    }
+}
+
+#[test]
+fn r18_tls_output_null_bits_round_trip() {
+    // TLS output envelopes: NULL pOutput / pulOutputLen ride the bool bits
+    // with forced-zero companions and decode back set.
+    let params = CkMechanismParams::TlsPrf(TlsPrfParams {
+        seed: vec![0xA1; 8].into(),
+        label: vec![0xB2; 4].into(),
+        output_len: 0,
+        output: SecretBytes::copy_from_slice(&[]),
+        seed_presence: PointerBytes::present_copy(&[0xA1; 8]),
+        label_presence: PointerBytes::present_copy(&[0xB2; 4]),
+        output_is_null: true,
+        output_len_is_null: true,
+    });
+    let m = r17_mech(Some(params));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::TlsPrfParams(p)) => {
+            assert_eq!(p.output_null, Some(true));
+            assert_eq!(p.output_len_null, Some(true));
+        }
+        other => panic!("must emit TlsPrfParams, got {other:?}"),
+    }
+    let back = CkMechanism::try_from(&wire).unwrap();
+    match back.params {
+        Some(CkMechanismParams::TlsPrf(v)) => {
+            assert!(v.output_is_null);
+            assert!(v.output_len_is_null);
+            assert_eq!(v.output_len, 0);
+        }
+        other => panic!("wrong variant: {other:?}"),
+    }
+}
+
+#[test]
+fn r18_otp_null_array_round_trip() {
+    // OTP array presence: NULL pParams with count rides params_null_count
+    // + empty array and decodes back to Null (count-0 edge below).
+    let params = CkMechanismParams::Otp(OtpParams {
+        params: vec![],
+        params_presence: PointerArray::null_count(3),
+    });
+    let m = r17_mech(Some(params));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::OtpParams(p)) => {
+            assert!(p.params.is_empty());
+            assert_eq!(p.params_null_count, Some(3));
+        }
+        other => panic!("must emit OtpParams, got {other:?}"),
+    }
+    let back = CkMechanism::try_from(&wire).unwrap();
+    match back.params {
+        Some(CkMechanismParams::Otp(v)) => {
+            assert!(v.params.is_empty());
+            assert_eq!(v.params_presence, PointerArray::null_count(3));
+        }
+        other => panic!("wrong variant: {other:?}"),
+    }
+}
+
+#[test]
+fn r18_v0_tail_envelope_is_contradictory() {
+    // No v0 encoder emits tail envelopes: a set envelope on a version-0
+    // message is contradictory metadata (mirrors the R9 legacy-bool
+    // rule for the new fields — per-field, since these are Optionals).
+    let proto = v1_proto::Mechanism {
+        mechanism_type: 0x1087,
+        params: Some(v1_proto::mechanism::Params::TlsPrfParams(v1_proto::TlsPrfParams {
+            seed: vec![],
+            label: vec![],
+            output_len: 0,
+            output: vec![],
+            seed_null_len: Some(4),
+            label_null_len: None,
+            output_null: None,
+            output_len_null: None,
+        })),
+        parameter_encoding_version: 0,
+    };
+    expect_mechanism_param_invalid(proto);
+}
+
+#[test]
+fn r18_v0_tail_null_bit_is_contradictory() {
+    // Same rule for the bool envelopes: set at v0 → reject.
+    let proto = v1_proto::Mechanism {
+        mechanism_type: 0x1087,
+        params: Some(v1_proto::mechanism::Params::TlsPrfParams(v1_proto::TlsPrfParams {
+            seed: vec![],
+            label: vec![],
+            output_len: 0,
+            output: vec![],
+            seed_null_len: None,
+            label_null_len: None,
+            output_null: Some(true),
+            output_len_null: None,
+        })),
+        parameter_encoding_version: 0,
+    };
+    expect_mechanism_param_invalid(proto);
+}
+
+#[test]
+fn r18_v1_explicit_false_null_bit_is_dual() {
+    // S2 §3 "no dual representations": v1 canonical non-NULL is an
+    // ABSENT bit; explicit Some(false) is a second spelling → reject.
+    let proto = v1_proto::Mechanism {
+        mechanism_type: 0x1087,
+        params: Some(v1_proto::mechanism::Params::TlsPrfParams(v1_proto::TlsPrfParams {
+            seed: vec![],
+            label: vec![],
+            output_len: 0,
+            output: vec![],
+            seed_null_len: None,
+            label_null_len: None,
+            output_null: Some(false),
+            output_len_null: None,
+        })),
+        parameter_encoding_version: 1,
+    };
+    expect_mechanism_param_invalid(proto);
+}
+
+#[test]
+fn r18_shared_len_disagreement_rejected() {
+    // KEA RandomA/B share the one C ulRandomLen: under v1 every
+    // companion leg's effective length must agree (the shim always emits
+    // agreement, so disagreement is crafted input).
+    let proto = v1_proto::Mechanism {
+        mechanism_type: 0x1087,
+        params: Some(v1_proto::mechanism::Params::KeaDeriveParams(v1_proto::KeaDeriveParams {
+            is_sender: false,
+            random_a: vec![],
+            random_b: vec![],
+            public_data: vec![],
+            random_a_null_len: Some(4),
+            random_b_null_len: Some(8),
+            public_data_null_len: None,
+        })),
+        parameter_encoding_version: 1,
+    };
+    expect_mechanism_param_invalid(proto);
+}
+
+#[test]
+fn r18_kem_rides_general_mechanism_path() {
+    // S2 §8: KEM needs no new envelope — Kyber/Dilithium encode via the
+    // identical legacy path at every capability (no arm, stamp 0).
+    for params in [
+        CkMechanismParams::Kyber(KyberParams {
+            version: 1,
+            mode: 2,
+            secret_handle: CkObjectHandle(9),
+            shared_data: vec![0xAA; 8].into(),
+            blob: vec![0xBB; 8].into(),
+        }),
+        CkMechanismParams::Dilithium(DilithiumParams { version: 1, mode: 2 }),
+    ] {
+        let m = r17_mech(Some(params));
+        let legacy = v1_proto::Mechanism::try_from(&m).unwrap();
+        let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+        assert_eq!(wire, legacy, "KEM has no v1 arm (general Mechanism path)");
+        assert_eq!(wire.parameter_encoding_version, 0);
+    }
+}
+
+/// Encode one domain value at capability 1 and decode it back (NULL-edge
+/// matrix shorthand).
+fn r18_wire_round_trip(params: CkMechanismParams) -> (v1_proto::Mechanism, CkMechanism) {
+    let m = r17_mech(Some(params));
+    let wire = super::to_wire_with_transport_version(&m, 1).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    let back = CkMechanism::try_from(&wire).unwrap();
+    (wire, back)
+}
+
+#[test]
+fn r18_tail_null_edges_round_trip() {
+    // Per-tail-family NULL-edge matrix (S2 §8 tail): one NULL envelope
+    // leg per remaining family, each surviving the v1 round trip with
+    // its declared length/count/bit intact.
+    // Skipjack companions: NULL PrimeP + present BaseG (shared length).
+    let (wire, back) =
+        r18_wire_round_trip(CkMechanismParams::SkipjackPrivateWrap(SkipjackPrivateWrapParams {
+            password: vec![0x70; 4].into(),
+            public_data: vec![0x11; 8],
+            password_length: 4,
+            random_a: vec![0x22; 8],
+            prime_p: Vec::new(),
+            base_g: vec![0x44; 8],
+            subprime_q: vec![0x55; 8],
+            password_presence: PointerBytes::present_copy(&[0x70; 4]),
+            public_data_presence: PointerBytes::present_copy(&[0x11; 8]),
+            random_a_presence: PointerBytes::present_copy(&[0x22; 8]),
+            prime_p_presence: PointerBytes::null_len(8),
+            base_g_presence: PointerBytes::present_copy(&[0x44; 8]),
+            subprime_q_presence: PointerBytes::present_copy(&[0x55; 8]),
+        }));
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::SkipjackPrivateWrapParams(p)) => {
+            assert_eq!(p.prime_p_null_len, Some(8));
+            assert_eq!(p.base_g_null_len, None);
+        }
+        other => panic!("must emit SkipjackPrivateWrapParams, got {other:?}"),
+    }
+    match back.params {
+        Some(CkMechanismParams::SkipjackPrivateWrap(v)) => {
+            assert_eq!(v.prime_p_presence, PointerBytes::null_len(8));
+            assert!(v.prime_p.is_empty());
+        }
+        other => panic!("wrong variant: {other:?}"),
+    }
+
+    // RelayX: NULL old password.
+    let (wire, back) =
+        r18_wire_round_trip(CkMechanismParams::SkipjackRelayx(SkipjackRelayxParams {
+            old_wrapped_x: vec![0x01; 4].into(),
+            old_password: SecretBytes::copy_from_slice(&[]),
+            old_public_data: vec![0x03; 4].into(),
+            old_random_a: vec![0x04; 4].into(),
+            new_password: vec![0x05; 4].into(),
+            new_public_data: vec![0x06; 4].into(),
+            new_random_a: vec![0x07; 4].into(),
+            old_wrapped_x_presence: PointerBytes::present_copy(&[0x01; 4]),
+            old_password_presence: PointerBytes::null_len(6),
+            old_public_data_presence: PointerBytes::present_copy(&[0x03; 4]),
+            old_random_a_presence: PointerBytes::present_copy(&[0x04; 4]),
+            new_password_presence: PointerBytes::present_copy(&[0x05; 4]),
+            new_public_data_presence: PointerBytes::present_copy(&[0x06; 4]),
+            new_random_a_presence: PointerBytes::present_copy(&[0x07; 4]),
+        }));
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::SkipjackRelayxParams(p)) => {
+            assert_eq!(p.old_password_null_len, Some(6));
+            assert_eq!(p.old_wrapped_x_null_len, None);
+        }
+        other => panic!("must emit SkipjackRelayxParams, got {other:?}"),
+    }
+    match back.params {
+        Some(CkMechanismParams::SkipjackRelayx(v)) => {
+            assert_eq!(v.old_password_presence, PointerBytes::null_len(6));
+        }
+        other => panic!("wrong variant: {other:?}"),
+    }
+
+    // SSL3 key-mat: set returned-material bit + NULL IV legs.
+    let (wire, back) = r18_wire_round_trip(CkMechanismParams::Ssl3KeyMat(Ssl3KeyMatParams {
+        mac_size_bits: 128,
+        key_size_bits: 128,
+        iv_size_bits: 64,
+        is_export: false,
+        random_info: r18_ssl_random(),
+        prf_hash_mechanism: CkMechanismType::SHA256,
+        client_mac_secret_handle: CkObjectHandle(0),
+        server_mac_secret_handle: CkObjectHandle(0),
+        client_key_handle: CkObjectHandle(0),
+        server_key_handle: CkObjectHandle(0),
+        client_iv: SecretBytes::copy_from_slice(&[]),
+        server_iv: SecretBytes::copy_from_slice(&[]),
+        client_iv_presence: PointerBytes::null_len(8),
+        server_iv_presence: PointerBytes::null_len(8),
+        returned_key_material_is_null: true,
+    }));
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::Ssl3KeyMatParams(p)) => {
+            assert_eq!(p.returned_key_material_null, Some(true));
+            assert_eq!(p.client_iv_null_len, Some(8));
+            assert_eq!(p.server_iv_null_len, Some(8));
+        }
+        other => panic!("must emit Ssl3KeyMatParams, got {other:?}"),
+    }
+    match back.params {
+        Some(CkMechanismParams::Ssl3KeyMat(v)) => {
+            assert!(v.returned_key_material_is_null);
+            assert_eq!(v.client_iv_presence, PointerBytes::null_len(8));
+            assert_eq!(v.server_iv_presence, PointerBytes::null_len(8));
+        }
+        other => panic!("wrong variant: {other:?}"),
+    }
+
+    // TLS12 master: set version bit.
+    let (wire, back) =
+        r18_wire_round_trip(CkMechanismParams::Tls12MasterKeyDerive(Tls12MasterKeyDeriveParams {
+            random_info: r18_ssl_random(),
+            version_major: 0,
+            version_minor: 0,
+            prf_hash_mechanism: CkMechanismType::SHA256,
+            version_is_null: true,
+        }));
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::Tls12MasterKeyDeriveParams(p)) => {
+            assert_eq!(p.version_null, Some(true));
+        }
+        other => panic!("must emit Tls12MasterKeyDeriveParams, got {other:?}"),
+    }
+    match back.params {
+        Some(CkMechanismParams::Tls12MasterKeyDerive(v)) => {
+            assert!(v.version_is_null);
+            assert_eq!((v.version_major, v.version_minor), (0, 0));
+        }
+        other => panic!("wrong variant: {other:?}"),
+    }
+
+    // TLS KDF: NULL label + NULL server random.
+    let (wire, back) = r18_wire_round_trip(CkMechanismParams::TlsKdf(TlsKdfParams {
+        prf_mechanism: CkMechanismType(0x250),
+        label: SecretBytes::copy_from_slice(&[]),
+        random_info: SslRandomData {
+            client_random: vec![0x11; 32],
+            server_random: Vec::new(),
+            client_random_presence: PointerBytes::present_copy(&[0x11; 32]),
+            server_random_presence: PointerBytes::null_len(32),
+        },
+        context_data: vec![0xD4; 8].into(),
+        label_presence: PointerBytes::null_len(3),
+        context_data_presence: PointerBytes::present_copy(&[0xD4; 8]),
+    }));
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::TlsKdfParams(p)) => {
+            assert_eq!(p.label_null_len, Some(3));
+            assert_eq!(p.context_data_null_len, None);
+            let ri = p.random_info.as_ref().expect("random_info");
+            assert_eq!(ri.client_random_null_len, None);
+            assert_eq!(ri.server_random_null_len, Some(32));
+        }
+        other => panic!("must emit TlsKdfParams, got {other:?}"),
+    }
+    match back.params {
+        Some(CkMechanismParams::TlsKdf(v)) => {
+            assert_eq!(v.label_presence, PointerBytes::null_len(3));
+            assert_eq!(v.random_info.server_random_presence, PointerBytes::null_len(32));
+        }
+        other => panic!("wrong variant: {other:?}"),
+    }
+
+    // TLS12 extended master: NULL session hash.
+    let (wire, back) = r18_wire_round_trip(CkMechanismParams::Tls12ExtendedMasterKeyDerive(
+        Tls12ExtendedMasterKeyDeriveParams {
+            prf_hash_mechanism: CkMechanismType::SHA256,
+            session_hash: Vec::new(),
+            version_major: 3,
+            version_minor: 3,
+            session_hash_presence: PointerBytes::null_len(48),
+            version_is_null: false,
+        },
+    ));
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::Tls12ExtendedMasterKeyDeriveParams(p)) => {
+            assert_eq!(p.session_hash_null_len, Some(48));
+            assert_eq!(p.version_null, None);
+        }
+        other => panic!("must emit Tls12ExtendedMasterKeyDeriveParams, got {other:?}"),
+    }
+    match back.params {
+        Some(CkMechanismParams::Tls12ExtendedMasterKeyDerive(v)) => {
+            assert_eq!(v.session_hash_presence, PointerBytes::null_len(48));
+            assert!(!v.version_is_null);
+        }
+        other => panic!("wrong variant: {other:?}"),
+    }
+
+    // WTLS key-mat: set returned-material bit.
+    let (wire, back) = r18_wire_round_trip(CkMechanismParams::WtlsKeyMat(WtlsKeyMatParams {
+        digest_mechanism: CkMechanismType::SHA256,
+        mac_size_bits: 64,
+        key_size_bits: 40,
+        iv_size_bits: 40,
+        sequence_number: 7,
+        is_export: false,
+        random_info: r18_wtls_random(),
+        mac_secret_handle: CkObjectHandle(0),
+        key_handle: CkObjectHandle(0),
+        iv: SecretBytes::copy_from_slice(&[]),
+        iv_presence: PointerBytes::null_len(5),
+        returned_key_material_is_null: true,
+    }));
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::WtlsKeyMatParams(p)) => {
+            assert_eq!(p.returned_key_material_null, Some(true));
+            assert_eq!(p.iv_null_len, Some(5));
+        }
+        other => panic!("must emit WtlsKeyMatParams, got {other:?}"),
+    }
+    match back.params {
+        Some(CkMechanismParams::WtlsKeyMat(v)) => {
+            assert!(v.returned_key_material_is_null);
+            assert_eq!(v.iv_presence, PointerBytes::null_len(5));
+        }
+        other => panic!("wrong variant: {other:?}"),
+    }
+
+    // SP800-108 KDF: NULL data-params + NULL derived-keys arrays.
+    let (wire, back) = r18_wire_round_trip(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
+        prf_type: CkMechanismType(0x250),
+        data_params: vec![],
+        additional_derived_keys: vec![],
+        data_params_presence: PointerArray::null_count(2),
+        additional_derived_keys_presence: PointerArray::null_count(1),
+    }));
+    match &wire.params {
+        Some(v1_proto::mechanism::Params::Sp800108KdfParams(p)) => {
+            assert_eq!(p.data_params_null_count, Some(2));
+            assert_eq!(p.additional_derived_keys_null_count, Some(1));
+        }
+        other => panic!("must emit Sp800108KdfParams, got {other:?}"),
+    }
+    match back.params {
+        Some(CkMechanismParams::Sp800108Kdf(v)) => {
+            assert_eq!(v.data_params_presence, PointerArray::null_count(2));
+            assert_eq!(v.additional_derived_keys_presence, PointerArray::null_count(1));
+        }
+        other => panic!("wrong variant: {other:?}"),
+    }
+}
+
+#[test]
+fn r18_count_zero_edges_stay_distinct() {
+    // Count-0/empty edges (S2 §3): NULL-with-zero (`Null{0}`) and
+    // present-empty (`Present([])`) are distinct v1 spellings on both
+    // sides of the wire — never conflated, in either direction.
+    for (name, presence, expect_some) in [
+        ("null-0", PointerArray::null_count(0), true),
+        ("present-empty", PointerArray::present(vec![]), false),
+    ] {
+        let params =
+            CkMechanismParams::Otp(OtpParams { params: vec![], params_presence: presence });
+        let (wire, back) = r18_wire_round_trip(params);
+        match &wire.params {
+            Some(v1_proto::mechanism::Params::OtpParams(p)) => {
+                assert_eq!(
+                    p.params_null_count.is_some(),
+                    expect_some,
+                    "{name}: envelope set-ness must survive"
+                );
+                if expect_some {
+                    assert_eq!(p.params_null_count, Some(0));
+                }
+            }
+            other => panic!("must emit OtpParams, got {other:?}"),
+        }
+        match back.params {
+            Some(CkMechanismParams::Otp(v)) => {
+                if expect_some {
+                    assert_eq!(v.params_presence, PointerArray::null_count(0), "{name}");
+                } else {
+                    assert_eq!(v.params_presence, PointerArray::present(vec![]), "{name}");
+                }
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
     }
 }

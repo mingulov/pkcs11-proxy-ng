@@ -1387,10 +1387,16 @@ fn write_mechanism_output_params_writes_tls12_pversion() {
     };
 
     let mech_out = CkMechanismParams::Tls12MasterKeyDerive(Tls12MasterKeyDeriveParams {
-        random_info: SslRandomData { client_random: vec![], server_random: vec![] },
+        random_info: SslRandomData {
+            client_random_presence: PointerBytes::present_copy(&[]),
+            server_random_presence: PointerBytes::present_copy(&[]),
+            client_random: vec![],
+            server_random: vec![],
+        },
         version_major: 3,
         version_minor: 3, // TLS 1.2
         prf_hash_mechanism: CkMechanismType::SHA256,
+        version_is_null: false,
     });
 
     unsafe {
@@ -1510,10 +1516,14 @@ fn write_mechanism_output_params_writes_tls_prf_output() {
 
     let prf_bytes = vec![0x5Au8; 32];
     let mech_out = CkMechanismParams::TlsPrf(TlsPrfParams {
+        seed_presence: PointerBytes::present_copy(&(Vec::new())),
         seed: Vec::new().into(),
+        label_presence: PointerBytes::present_copy(&(Vec::new())),
         label: Vec::new().into(),
         output_len: 32,
         output: prf_bytes.clone().into(),
+        output_is_null: false,
+        output_len_is_null: false,
     });
 
     unsafe {
@@ -1552,10 +1562,14 @@ fn write_mechanism_output_params_writes_wtls_prf_output() {
     let prf_bytes = vec![0xA5u8; 20];
     let mech_out = CkMechanismParams::WtlsPrf(WtlsPrfParams {
         digest_mechanism: CkMechanismType::SHA256,
+        seed_presence: PointerBytes::present_copy(&(Vec::new())),
         seed: Vec::new().into(),
+        label_presence: PointerBytes::present_copy(&(Vec::new())),
         label: Vec::new().into(),
         output_len: 20,
         output: prf_bytes.clone().into(),
+        output_is_null: false,
+        output_len_is_null: false,
     });
 
     unsafe {
@@ -1587,10 +1601,14 @@ fn write_mechanism_output_params_prf_safe_when_output_null() {
         ulParameterLen: std::mem::size_of::<CK_TLS_PRF_PARAMS>() as CK_ULONG,
     };
     let mech_out = CkMechanismParams::TlsPrf(TlsPrfParams {
+        seed_presence: PointerBytes::present_copy(&(Vec::new())),
         seed: Vec::new().into(),
+        label_presence: PointerBytes::present_copy(&(Vec::new())),
         label: Vec::new().into(),
         output_len: 8,
         output: vec![0x5Au8; 8].into(),
+        output_is_null: false,
+        output_len_is_null: false,
     });
     unsafe {
         super::prepare_mechanism_output_params(&mut mechanism, &mech_out)
@@ -1625,9 +1643,15 @@ fn write_mechanism_output_params_writes_ssl3_master_key_version() {
     };
 
     let mech_out = CkMechanismParams::Ssl3MasterKeyDerive(Ssl3MasterKeyDeriveParams {
-        random_info: SslRandomData { client_random: vec![], server_random: vec![] },
+        random_info: SslRandomData {
+            client_random_presence: PointerBytes::present_copy(&[]),
+            server_random_presence: PointerBytes::present_copy(&[]),
+            client_random: vec![],
+            server_random: vec![],
+        },
         version_major: 3,
         version_minor: 0,
+        version_is_null: false,
     });
 
     unsafe {
@@ -1666,10 +1690,16 @@ fn write_mechanism_output_params_tls12_safe_when_pversion_null() {
     };
 
     let mech_out = CkMechanismParams::Tls12MasterKeyDerive(Tls12MasterKeyDeriveParams {
-        random_info: SslRandomData { client_random: vec![], server_random: vec![] },
+        random_info: SslRandomData {
+            client_random_presence: PointerBytes::present_copy(&[]),
+            server_random_presence: PointerBytes::present_copy(&[]),
+            client_random: vec![],
+            server_random: vec![],
+        },
         version_major: 3,
         version_minor: 3,
         prf_hash_mechanism: CkMechanismType::SHA256,
+        version_is_null: false,
     });
 
     unsafe {
@@ -1724,10 +1754,13 @@ fn wtls_master_key_derive_reads_version_byte_and_writes_it_back() {
     let mech_out = CkMechanismParams::WtlsMasterKeyDerive(WtlsMasterKeyDeriveParams {
         digest_mechanism: CkMechanismType::SHA256,
         random_info: WtlsRandomData {
+            client_random_presence: PointerBytes::present_copy(&client_random),
+            server_random_presence: PointerBytes::present_copy(&server_random),
             client_random: client_random.to_vec(),
             server_random: server_random.to_vec(),
         },
         version: 2,
+        version_is_null: false,
     });
     unsafe {
         super::prepare_mechanism_output_params(&mut mechanism, &mech_out)
@@ -1800,12 +1833,16 @@ fn wtls_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
         sequence_number: 7,
         is_export: true,
         random_info: WtlsRandomData {
+            client_random_presence: PointerBytes::present_copy(&client_random),
+            server_random_presence: PointerBytes::present_copy(&server_random),
             client_random: client_random.to_vec(),
             server_random: server_random.to_vec(),
         },
         mac_secret_handle: CkObjectHandle(101),
         key_handle: CkObjectHandle(202),
+        iv_presence: PointerBytes::present_copy(&[0xA1, 0xA2, 0xA3, 0xA4]),
         iv: vec![0xA1, 0xA2, 0xA3, 0xA4].into(),
+        returned_key_material_is_null: false,
     });
     unsafe {
         super::prepare_mechanism_output_params(&mut mechanism, &mech_out)
@@ -1889,6 +1926,8 @@ fn ssl3_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
         iv_size_bits: 32,
         is_export: false,
         random_info: SslRandomData {
+            client_random_presence: PointerBytes::present_copy(&client_random),
+            server_random_presence: PointerBytes::present_copy(&server_random),
             client_random: client_random.to_vec(),
             server_random: server_random.to_vec(),
         },
@@ -1897,8 +1936,11 @@ fn ssl3_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
         server_mac_secret_handle: CkObjectHandle(102),
         client_key_handle: CkObjectHandle(201),
         server_key_handle: CkObjectHandle(202),
+        client_iv_presence: PointerBytes::present_copy(&[0xA1, 0xA2, 0xA3, 0xA4]),
         client_iv: vec![0xA1, 0xA2, 0xA3, 0xA4].into(),
+        server_iv_presence: PointerBytes::present_copy(&[0xB1, 0xB2, 0xB3, 0xB4]),
         server_iv: vec![0xB1, 0xB2, 0xB3, 0xB4].into(),
+        returned_key_material_is_null: false,
     });
     unsafe {
         super::prepare_mechanism_output_params(&mut mechanism, &mech_out)

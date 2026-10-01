@@ -8,8 +8,9 @@ use super::{
 use cryptoki_sys::*;
 use pkcs11_proxy_ng_types::{
     CkAttribute, CkMechanismParams, CkMechanismType, CkObjectHandle, CkOutputBufferResult,
-    CkOutputBufferSpec, CkRv, GcmParams, PointerBytes, SecretBytes, Sp800108DerivedKey,
-    Sp800108KdfParams, Tls12MasterKeyDeriveParams, TlsPrfParams, WtlsKeyMatParams, WtlsRandomData,
+    CkOutputBufferSpec, CkRv, GcmParams, PointerArray, PointerBytes, SecretBytes,
+    Sp800108DerivedKey, Sp800108KdfParams, Tls12MasterKeyDeriveParams, TlsPrfParams,
+    WtlsKeyMatParams, WtlsRandomData,
 };
 
 /// Fixtures are built in two steps so nothing moves after its address
@@ -40,12 +41,15 @@ fn tls12_mechanism(params: &mut CK_TLS12_MASTER_KEY_DERIVE_PARAMS) -> CK_MECHANI
 fn tls12_out(major: u32, minor: u32) -> CkMechanismParams {
     CkMechanismParams::Tls12MasterKeyDerive(Tls12MasterKeyDeriveParams {
         random_info: pkcs11_proxy_ng_types::SslRandomData {
+            client_random_presence: PointerBytes::present_copy(&[]),
+            server_random_presence: PointerBytes::present_copy(&[]),
             client_random: vec![],
             server_random: vec![],
         },
         version_major: major,
         version_minor: minor,
         prf_hash_mechanism: CkMechanismType::SHA256,
+        version_is_null: false,
     })
 }
 
@@ -97,16 +101,21 @@ fn sp800_mechanism(params: &mut CK_SP800_108_KDF_PARAMS) -> CK_MECHANISM {
 }
 
 fn sp800_out(handles: &[u64]) -> CkMechanismParams {
+    let additional_derived_keys: Vec<Sp800108DerivedKey> = handles
+        .iter()
+        .map(|h| Sp800108DerivedKey {
+            template_presence: PointerArray::present(Vec::new()),
+            ph_key_is_null: false,
+            template: Vec::<CkAttribute>::new(),
+            key_handle: CkObjectHandle(*h),
+        })
+        .collect();
     CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
         prf_type: CkMechanismType::SHA256,
+        data_params_presence: PointerArray::present(Vec::new()),
+        additional_derived_keys_presence: PointerArray::present(additional_derived_keys.clone()),
         data_params: vec![],
-        additional_derived_keys: handles
-            .iter()
-            .map(|h| Sp800108DerivedKey {
-                template: Vec::<CkAttribute>::new(),
-                key_handle: CkObjectHandle(*h),
-            })
-            .collect(),
+        additional_derived_keys,
     })
 }
 
@@ -447,10 +456,17 @@ fn transactional_wtls_keymat_overlong_iv_preserves_handles_and_iv() {
         iv_size_bits: 64,
         sequence_number: 0,
         is_export: false,
-        random_info: WtlsRandomData { client_random: vec![], server_random: vec![] },
+        random_info: WtlsRandomData {
+            client_random_presence: PointerBytes::present_copy(&[]),
+            server_random_presence: PointerBytes::present_copy(&[]),
+            client_random: vec![],
+            server_random: vec![],
+        },
         mac_secret_handle: CkObjectHandle(11),
         key_handle: CkObjectHandle(12),
+        iv_presence: PointerBytes::present_copy(&[0xE2; 12]),
         iv: SecretBytes::copy_from_slice(&[0xE2; 12]),
+        returned_key_material_is_null: false,
     });
     let prepared = unsafe { prepare_mechanism_output_params(&mut mechanism, &bad_mech) };
     assert!(matches!(prepared, Err(CkRv::GENERAL_ERROR)));
@@ -478,10 +494,14 @@ fn transactional_tls_prf_overlong_output_preserves_buffer_and_len() {
         ulParameterLen: std::mem::size_of::<CK_TLS_PRF_PARAMS>() as CK_ULONG,
     };
     let bad_mech = CkMechanismParams::TlsPrf(TlsPrfParams {
+        seed_presence: PointerBytes::present_copy(&[]),
+        label_presence: PointerBytes::present_copy(&[]),
         seed: SecretBytes::copy_from_slice(&[]),
         label: SecretBytes::copy_from_slice(&[]),
         output_len: 16,
         output: SecretBytes::copy_from_slice(&[0xF2; 20]),
+        output_is_null: false,
+        output_len_is_null: false,
     });
     let prepared = unsafe { prepare_mechanism_output_params(&mut mechanism, &bad_mech) };
     assert!(matches!(prepared, Err(CkRv::GENERAL_ERROR)));

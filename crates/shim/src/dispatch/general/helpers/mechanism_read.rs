@@ -4,6 +4,7 @@
 //! auditability), plus the shared raw-parameter utilities.
 
 use super::*;
+use pkcs11_proxy_ng_types::PointerArray;
 use pkcs11_proxy_ng_types::PointerBytes;
 use pkcs11_proxy_ng_types::shape_descriptors::{
     FlatDecision, FlatRequest, Operation, OperationContext, OuterKind, ParamAbi, ResolvedShape,
@@ -446,7 +447,8 @@ unsafe fn read_mechanism_v1(
     );
     // Typed-or-Flat per descriptor (S2 §5 per-shape algorithm; the
     // typed branch dispatches R17 input-pointer shapes to the step-1
-    // readers and every other shape to the existing typed reader):
+    // readers, R18 tail shapes to the tail step-1 readers, and every
+    // other shape to the existing typed reader):
     // - parameterless forms ride Flat (S2 §4: parameterless-shaped bytes
     //   may carry arbitrary flat bytes to the cap), like the unbound
     //   parameterless-only case below;
@@ -458,8 +460,8 @@ unsafe fn read_mechanism_v1(
     //   transport-limit RV (PARAM_INVALID) — in particular,
     //   pointer-bearing oversized structs stay rejected (residual limit;
     //   typed-plus-tail only on provider evidence, NOT this task);
-    // - nested/output forms ride typed envelopes only (R18): until then
-    //   the reader keeps its native length tolerance;
+    // - nested/output forms ride typed envelopes only (R18 tail
+    //   step-1 readers — presence/count/output envelopes, never `Raw`);
     // - unresolvable (unbound/unknown shape) -> Flat branch, where
     //   `decide_flat` grants parameterless-only and denies the rest
     //   (unknown/vendor/nested/over-cap -> PARAM_INVALID).
@@ -482,8 +484,10 @@ unsafe fn read_mechanism_v1(
 }
 
 /// Typed branch under v1: R17 input-pointer shapes take the step-1
-/// readers ([`read_v1_typed_params`] — NULL-aware, never `Raw`); every
-/// other shape takes the EXISTING typed reader unchanged, except its
+/// readers ([`read_v1_typed_params`] — NULL-aware, never `Raw`); R18
+/// tail shapes take the tail step-1 readers ([`read_v1_tail_params`] —
+/// presence/count/output envelopes, never `Raw`); every other shape
+/// takes the EXISTING typed reader unchanged, except its
 /// legacy-`Raw` fallbacks, which v1 cannot emit: full-extent or
 /// degenerate-struct bytes that would have ridden `Raw` fail locally
 /// with `PARAM_INVALID` (no wire emission). `None` is unreachable (the
@@ -501,6 +505,15 @@ unsafe fn read_typed_under_v1(
     if is_r17_v1_shape(shape) {
         let params = unsafe {
             read_v1_typed_params(c_mech.pParameter, c_mech.ulParameterLen as usize, shape)?
+        };
+        return Ok(CkMechanism {
+            mechanism_type: CkMechanismType(c_mech.mechanism.into()),
+            params: Some(params),
+        });
+    }
+    if is_r18_tail_shape(shape) {
+        let params = unsafe {
+            read_v1_tail_params(c_mech.pParameter, c_mech.ulParameterLen as usize, shape, budget)?
         };
         return Ok(CkMechanism {
             mechanism_type: CkMechanismType(c_mech.mechanism.into()),
@@ -727,7 +740,9 @@ unsafe fn read_gcm_struct_params(
 /// `gcm_compat` (whose struct half rides the GCM v1 reader) take the
 /// step-1 readers; every other shape (scalar, byte-buffer, R18 tail,
 /// unknown) keeps the legacy reader with `Raw` mapped to
-/// `PARAM_INVALID`. Reviewer-checked against `R16_PRESENCE_TABLE`.
+/// `PARAM_INVALID` — except the R18 tail shapes, which take the tail
+/// step-1 readers ([`is_r18_tail_shape`]). Reviewer-checked against
+/// `R16_PRESENCE_TABLE`.
 pub(crate) fn is_r17_v1_shape(shape: Option<&str>) -> bool {
     matches!(
         shape,
@@ -770,6 +785,35 @@ pub(crate) fn is_r17_v1_shape(shape: Option<&str>) -> bool {
                 | "ike1_prf_derive"
                 | "ike1_extended_derive"
                 | "ike2_prf_plus_derive",
+        )
+    )
+}
+
+/// R18 tail-shape dispatch: the 17 S2 §8 exotic-tail shapes take the
+/// tail step-1 readers ([`read_v1_tail_params`] — presence/count/output
+/// envelopes, never `Raw`). Disjoint from [`is_r17_v1_shape`].
+/// Reviewer-checked against `R18_TAIL_TABLE` (the 17-shape R18 scope).
+pub(crate) fn is_r18_tail_shape(shape: Option<&str>) -> bool {
+    matches!(
+        shape,
+        Some(
+            "tls_mac"
+                | "tls_prf"
+                | "tls_kdf"
+                | "ssl3_master_key_derive"
+                | "tls12_master_key_derive"
+                | "tls12_extended_master_key_derive"
+                | "ssl3_key_mat"
+                | "wtls_master_key_derive"
+                | "wtls_prf"
+                | "wtls_key_mat"
+                | "kea_derive"
+                | "kip"
+                | "otp"
+                | "skipjack_private_wrap"
+                | "skipjack_relayx"
+                | "sp800_108_kdf"
+                | "sp800_108_feedback_kdf",
         )
     )
 }
@@ -1648,6 +1692,826 @@ unsafe fn read_v1_typed_params(
         }
 
         // Unreachable (the dispatcher only routes v1 shapes here): fail
+        // closed rather than conflate.
+        _ => Err(CkRv::MECHANISM_PARAM_INVALID),
+    }
+}
+
+/// Read one counted caller array under v1 (R18 tail step-1): NULL
+/// records its declared count without dereference (D3: no cap, no
+/// elements materialize); non-NULL/zero records `Present(empty)`;
+/// non-NULL/positive copies each element under the template-count cap
+/// (`PARAM_INVALID` before any dereference past it). Returns the legacy
+/// mirror vec + the authoritative `PointerArray` peer (the v1 wire
+/// encode reads the peer; the legacy vec mirrors it elementwise so the
+/// value satisfies `check_typed_presence`).
+///
+/// Element payloads are INDEPENDENT (R17 step-1 discipline): a NULL
+/// element value with a declared length records that element's `Null`
+/// peer instead of discarding the whole array into `Raw` (the legacy
+/// arm's mixed-field rejection is gone on the v1 path).
+///
+/// # Safety
+///
+/// When `params` is non-null with nonzero `count`, it must designate
+/// `count` readable `CK_OTP_PARAM` entries whose non-null `pValue`
+/// pointers are readable for their `ulValueLen` bytes. NULL is never
+/// dereferenced at any count.
+unsafe fn read_otp_array_v1(
+    params: *mut CK_OTP_PARAM,
+    count: CK_ULONG,
+) -> CkResult<(Vec<OtpParam>, PointerArray<OtpParam>)> {
+    if params.is_null() {
+        // NULL: record the declared count, never dereference (D3 — the
+        // count cap cannot apply: no elements materialize).
+        return Ok((Vec::new(), PointerArray::null_count(count as u64)));
+    }
+    if count == 0 {
+        return Ok((Vec::new(), PointerArray::present(Vec::new())));
+    }
+    // Typed caller array: extent first, then per-element unaligned
+    // copies (never an aligned slice over caller memory).
+    checked_extent(
+        params as usize,
+        count as u64,
+        std::mem::size_of::<CK_OTP_PARAM>(),
+        MAX_TEMPLATE_COUNT.saturating_mul(std::mem::size_of::<CK_OTP_PARAM>()),
+    )
+    .map_err(|_| CkRv::MECHANISM_PARAM_INVALID)?;
+    let n = count as usize;
+    if n > MAX_TEMPLATE_COUNT {
+        return Err(CkRv::MECHANISM_PARAM_INVALID);
+    }
+    let mut converted = Vec::with_capacity(n);
+    for index in 0..n {
+        // Safety: index < n, covered by the checked extent above.
+        let param = unsafe { params.add(index).read_unaligned() };
+        let (value, value_presence) =
+            unsafe { read_pointer_field_v1(param.pValue as *const u8, param.ulValueLen)? };
+        converted.push(OtpParam { type_: param.type_ as u64, value_presence, value: value.into() });
+    }
+    Ok((converted.clone(), PointerArray::present(converted)))
+}
+
+/// v1 edition of [`read_sp800_108_data_params`] (R18 tail step-1):
+/// NULL records its declared count (D3); element values are
+/// independent (a NULL element value records that element's `Null`
+/// peer instead of rejecting the whole array).
+///
+/// # Safety
+///
+/// When `data_params` is non-null with nonzero `count`, it must
+/// designate `count` readable `CK_PRF_DATA_PARAM` entries whose
+/// non-null `pValue` pointers are readable for their `ulValueLen`
+/// bytes. NULL is never dereferenced at any count.
+unsafe fn read_sp800_108_data_params_v1(
+    data_params: *mut CK_PRF_DATA_PARAM,
+    count: CK_ULONG,
+) -> CkResult<(Vec<PrfDataParam>, PointerArray<PrfDataParam>)> {
+    if data_params.is_null() {
+        return Ok((Vec::new(), PointerArray::null_count(count as u64)));
+    }
+    if count == 0 {
+        return Ok((Vec::new(), PointerArray::present(Vec::new())));
+    }
+    checked_extent(
+        data_params as usize,
+        count as u64,
+        std::mem::size_of::<CK_PRF_DATA_PARAM>(),
+        MAX_TEMPLATE_COUNT.saturating_mul(std::mem::size_of::<CK_PRF_DATA_PARAM>()),
+    )
+    .map_err(|_| CkRv::MECHANISM_PARAM_INVALID)?;
+    let n = count as usize;
+    if n > MAX_TEMPLATE_COUNT {
+        return Err(CkRv::MECHANISM_PARAM_INVALID);
+    }
+    let mut converted = Vec::with_capacity(n);
+    for index in 0..n {
+        // Safety: index < n, covered by the checked extent above.
+        let param = unsafe { data_params.add(index).read_unaligned() };
+        let (value, value_presence) =
+            unsafe { read_pointer_field_v1(param.pValue as *const u8, param.ulValueLen)? };
+        converted.push(PrfDataParam {
+            type_: param.type_ as u64,
+            value_presence,
+            value: value.into(),
+        });
+    }
+    Ok((converted.clone(), PointerArray::present(converted)))
+}
+
+/// v1 edition of [`read_sp800_108_derived_keys`] (R18 tail step-1).
+/// NULL arrays record their declared count (D3); per derived key, a
+/// NULL `pTemplate` records the `Null{count}` template peer (this
+/// closes the ADR-0010 Scope-2 class-4 `pTemplate` null-bit residual —
+/// the legacy arm could only conflate it to empty or flee to `Raw`)
+/// and a NULL `phKey` sets the output-handle null bit. Template
+/// content errors still propagate loudly (W1-L12-10).
+///
+/// # Safety
+///
+/// When `derived_keys` is non-null with nonzero `count`, it must
+/// designate `count` readable `CK_DERIVED_KEY` entries, each non-null
+/// `pTemplate` satisfying the [`ck_attrs_to_rust_checked`] contract
+/// for its `ulAttributeCount`, and each non-null `phKey` readable for
+/// one handle. NULL is never dereferenced at any count.
+unsafe fn read_sp800_108_derived_keys_v1(
+    derived_keys: *mut CK_DERIVED_KEY,
+    count: CK_ULONG,
+) -> CkResult<(Vec<Sp800108DerivedKey>, PointerArray<Sp800108DerivedKey>)> {
+    if derived_keys.is_null() {
+        return Ok((Vec::new(), PointerArray::null_count(count as u64)));
+    }
+    if count == 0 {
+        return Ok((Vec::new(), PointerArray::present(Vec::new())));
+    }
+    checked_extent(
+        derived_keys as usize,
+        count as u64,
+        std::mem::size_of::<CK_DERIVED_KEY>(),
+        MAX_TEMPLATE_COUNT.saturating_mul(std::mem::size_of::<CK_DERIVED_KEY>()),
+    )
+    .map_err(|_| CkRv::MECHANISM_PARAM_INVALID)?;
+    let n = count as usize;
+    if n > MAX_TEMPLATE_COUNT {
+        return Err(CkRv::MECHANISM_PARAM_INVALID);
+    }
+    let mut converted = Vec::with_capacity(n);
+    for index in 0..n {
+        // Safety: index < n, covered by the checked extent above.
+        let derived = unsafe { derived_keys.add(index).read_unaligned() };
+        let (template, template_presence) = if derived.pTemplate.is_null() {
+            // NULL template: record the declared attribute count,
+            // never invoke the attribute reader (D3).
+            (Vec::new(), PointerArray::null_count(derived.ulAttributeCount as u64))
+        } else {
+            let template =
+                unsafe { ck_attrs_to_rust_checked(derived.pTemplate, derived.ulAttributeCount)? };
+            let presence = PointerArray::present(template.clone());
+            (template, presence)
+        };
+        let ph_key_is_null = derived.phKey.is_null();
+        let key_handle =
+            if ph_key_is_null { 0 } else { unsafe { derived.phKey.read_unaligned() as u64 } };
+        converted.push(Sp800108DerivedKey {
+            template_presence,
+            ph_key_is_null,
+            template,
+            key_handle: CkObjectHandle(key_handle),
+        });
+    }
+    Ok((converted.clone(), PointerArray::present(converted)))
+}
+
+/// v1 typed readers for the R18 exotic-tail shapes (S2 §8 tail, S2 §5
+/// step-1 discipline — the R17 discipline extended to presence/count/
+/// output envelopes): canonical struct reads with every embedded field
+/// independent; short buffers fail closed with `PARAM_INVALID` (never
+/// `Raw` — v1 never emits legacy `Raw`). Only routed for
+/// [`is_r18_tail_shape`] shapes (the dispatcher guarantees it).
+///
+/// Envelope summary per family:
+/// - TLS/WTLS random pairs, KDF label/context, session hash, KEA
+///   A/B + public data, Skipjack companions: byte-pointer envelopes
+///   via [`read_pointer_field_v1`] (shared lengths are read
+///   independently per pointer; agreement is the proto decoder's job).
+/// - PRF outputs, master versions, key-mat returned material, KIP
+///   nesting, SP800-108 output handles: length-less null bits (mirrors
+///   zeroed when the bit is set).
+/// - OTP params, SP800-108 data params / derived keys / templates:
+///   counted-array envelopes via the `_v1` helpers above.
+///
+/// The KIP arm drops the legacy nested-length peek: v1 has no outer
+/// length cap (D3) and the nested node routes through the same v1
+/// router with per-field caps; depth/cycle enforcement stays at budget
+/// entry. `pOutput` bytes are still never read (W1-C5-01).
+///
+/// # Safety
+///
+/// `param_ptr` must designate `param_len` readable bytes.
+unsafe fn read_v1_tail_params(
+    param_ptr: *mut std::ffi::c_void,
+    param_len: usize,
+    shape: Option<&str>,
+    budget: &mut NestingBudget,
+) -> CkResult<CkMechanismParams> {
+    match shape {
+        Some("tls_mac") => {
+            if param_len < std::mem::size_of::<CK_TLS_MAC_PARAMS>() {
+                return Err(CkRv::MECHANISM_PARAM_INVALID);
+            }
+            // Safety: pParameter points to a valid CK_TLS_MAC_PARAMS.
+            let tls = unsafe { read_param_struct(param_ptr as *const CK_TLS_MAC_PARAMS)? };
+            Ok(CkMechanismParams::TlsMac(TlsMacParams {
+                prf_hash_mechanism: CkMechanismType(tls.prfHashMechanism as u64),
+                mac_length: tls.ulMacLength as u64,
+                server_or_client: tls.ulServerOrClient as u64,
+            }))
+        }
+
+        Some("wtls_master_key_derive") => {
+            if param_len < std::mem::size_of::<CK_WTLS_MASTER_KEY_DERIVE_PARAMS>() {
+                return Err(CkRv::MECHANISM_PARAM_INVALID);
+            }
+            let p =
+                unsafe { read_param_struct(param_ptr as *const CK_WTLS_MASTER_KEY_DERIVE_PARAMS)? };
+            let (client_random, client_random_presence) = unsafe {
+                read_pointer_field_v1(
+                    p.RandomInfo.pClientRandom as *const u8,
+                    p.RandomInfo.ulClientRandomLen,
+                )?
+            };
+            let (server_random, server_random_presence) = unsafe {
+                read_pointer_field_v1(
+                    p.RandomInfo.pServerRandom as *const u8,
+                    p.RandomInfo.ulServerRandomLen,
+                )?
+            };
+            let version_is_null = p.pVersion.is_null();
+            let version =
+                if version_is_null { 0 } else { unsafe { p.pVersion.read_unaligned() as u32 } };
+            Ok(CkMechanismParams::WtlsMasterKeyDerive(WtlsMasterKeyDeriveParams {
+                digest_mechanism: CkMechanismType(p.DigestMechanism as u64),
+                random_info: WtlsRandomData {
+                    client_random_presence,
+                    server_random_presence,
+                    client_random,
+                    server_random,
+                },
+                version,
+                version_is_null,
+            }))
+        }
+
+        Some("wtls_prf") => {
+            if param_len < std::mem::size_of::<CK_WTLS_PRF_PARAMS>() {
+                return Err(CkRv::MECHANISM_PARAM_INVALID);
+            }
+            // Safety: pParameter points to a valid CK_WTLS_PRF_PARAMS.
+            let p = unsafe { read_param_struct(param_ptr as *const CK_WTLS_PRF_PARAMS)? };
+            let (seed, seed_presence) =
+                unsafe { read_pointer_field_v1(p.pSeed as *const u8, p.ulSeedLen)? };
+            let (label, label_presence) =
+                unsafe { read_pointer_field_v1(p.pLabel as *const u8, p.ulLabelLen)? };
+            let output_is_null = p.pOutput.is_null();
+            let output_len_is_null = p.pulOutputLen.is_null();
+            let output_len = if output_len_is_null {
+                0
+            } else {
+                unsafe { p.pulOutputLen.read_unaligned() as u64 }
+            };
+            Ok(CkMechanismParams::WtlsPrf(WtlsPrfParams {
+                digest_mechanism: CkMechanismType(p.DigestMechanism as u64),
+                seed_presence,
+                label_presence,
+                seed: seed.into(),
+                label: label.into(),
+                output_len,
+                // W1-C5-01: `pOutput` is OUT — never read the
+                // caller's uninitialized buffer into the request.
+                output: Vec::new().into(),
+                output_is_null,
+                output_len_is_null,
+            }))
+        }
+
+        Some("wtls_key_mat") => {
+            if param_len < std::mem::size_of::<CK_WTLS_KEY_MAT_PARAMS>() {
+                return Err(CkRv::MECHANISM_PARAM_INVALID);
+            }
+            // Safety: pParameter points to a valid CK_WTLS_KEY_MAT_PARAMS.
+            let p = unsafe { read_param_struct(param_ptr as *const CK_WTLS_KEY_MAT_PARAMS)? };
+            // Bits-governed IV length: keep the legacy ceiling
+            // pre-check (the R17 discipline's call-site companion rule).
+            let requested_iv_len = ((p.ulIVSizeInBits as usize).saturating_add(7)) / 8;
+            if requested_iv_len > MAX_SERIALIZABLE_BYTES {
+                return Err(CkRv::MECHANISM_PARAM_INVALID);
+            }
+            let (client_random, client_random_presence) = unsafe {
+                read_pointer_field_v1(
+                    p.RandomInfo.pClientRandom as *const u8,
+                    p.RandomInfo.ulClientRandomLen,
+                )?
+            };
+            let (server_random, server_random_presence) = unsafe {
+                read_pointer_field_v1(
+                    p.RandomInfo.pServerRandom as *const u8,
+                    p.RandomInfo.ulServerRandomLen,
+                )?
+            };
+            let returned_key_material_is_null = p.pReturnedKeyMaterial.is_null();
+            let (mac_secret_handle, key_handle, iv, iv_presence) = if returned_key_material_is_null
+            {
+                // NULL returned material: handles zero, IV records its
+                // bits-derived length without dereference (D3).
+                (
+                    CkObjectHandle(0),
+                    CkObjectHandle(0),
+                    Vec::new(),
+                    PointerBytes::null_len(requested_iv_len as u64),
+                )
+            } else {
+                let output = unsafe { read_param_struct(p.pReturnedKeyMaterial)? };
+                let (iv, iv_presence) = unsafe {
+                    read_pointer_field_v1(output.pIV as *const u8, requested_iv_len as CK_ULONG)?
+                };
+                (
+                    CkObjectHandle(output.hMacSecret as u64),
+                    CkObjectHandle(output.hKey as u64),
+                    iv,
+                    iv_presence,
+                )
+            };
+            Ok(CkMechanismParams::WtlsKeyMat(WtlsKeyMatParams {
+                digest_mechanism: CkMechanismType(p.DigestMechanism as u64),
+                mac_size_bits: p.ulMacSizeInBits as u64,
+                key_size_bits: p.ulKeySizeInBits as u64,
+                iv_size_bits: p.ulIVSizeInBits as u64,
+                sequence_number: p.ulSequenceNumber as u64,
+                is_export: p.bIsExport != 0,
+                random_info: WtlsRandomData {
+                    client_random_presence,
+                    server_random_presence,
+                    client_random,
+                    server_random,
+                },
+                mac_secret_handle,
+                key_handle,
+                iv_presence,
+                iv: iv.into(),
+                returned_key_material_is_null,
+            }))
+        }
+
+        Some("tls12_master_key_derive") => {
+            if param_len < std::mem::size_of::<CK_TLS12_MASTER_KEY_DERIVE_PARAMS>() {
+                return Err(CkRv::MECHANISM_PARAM_INVALID);
+            }
+            let p = unsafe {
+                read_param_struct(param_ptr as *const CK_TLS12_MASTER_KEY_DERIVE_PARAMS)?
+            };
+            let (client_random, client_random_presence) = unsafe {
+                read_pointer_field_v1(
+                    p.RandomInfo.pClientRandom as *const u8,
+                    p.RandomInfo.ulClientRandomLen,
+                )?
+            };
+            let (server_random, server_random_presence) = unsafe {
+                read_pointer_field_v1(
+                    p.RandomInfo.pServerRandom as *const u8,
+                    p.RandomInfo.ulServerRandomLen,
+                )?
+            };
+            let version_is_null = p.pVersion.is_null();
+            let (version_major, version_minor) = if version_is_null {
+                (0, 0)
+            } else {
+                let v = unsafe { read_param_struct(p.pVersion as *const CK_VERSION)? };
+                (v.major as u32, v.minor as u32)
+            };
+            Ok(CkMechanismParams::Tls12MasterKeyDerive(Tls12MasterKeyDeriveParams {
+                random_info: SslRandomData {
+                    client_random_presence,
+                    server_random_presence,
+                    client_random,
+                    server_random,
+                },
+                version_major,
+                version_minor,
+                prf_hash_mechanism: CkMechanismType(p.prfHashMechanism as u64),
+                version_is_null,
+            }))
+        }
+
+        Some("tls_prf") => {
+            if param_len < std::mem::size_of::<CK_TLS_PRF_PARAMS>() {
+                return Err(CkRv::MECHANISM_PARAM_INVALID);
+            }
+            // Safety: pParameter points to a valid CK_TLS_PRF_PARAMS.
+            let p = unsafe { read_param_struct(param_ptr as *const CK_TLS_PRF_PARAMS)? };
+            let (seed, seed_presence) =
+                unsafe { read_pointer_field_v1(p.pSeed as *const u8, p.ulSeedLen)? };
+            let (label, label_presence) =
+                unsafe { read_pointer_field_v1(p.pLabel as *const u8, p.ulLabelLen)? };
+            let output_is_null = p.pOutput.is_null();
+            let output_len_is_null = p.pulOutputLen.is_null();
+            let output_len = if output_len_is_null {
+                0u64
+            } else {
+                (unsafe { p.pulOutputLen.read_unaligned() }) as u64
+            };
+            Ok(CkMechanismParams::TlsPrf(TlsPrfParams {
+                seed_presence,
+                label_presence,
+                seed: seed.into(),
+                label: label.into(),
+                output_len,
+                // W1-C5-01: `pOutput` is OUT — never read the
+                // caller's uninitialized buffer into the request.
+                output: Vec::new().into(),
+                output_is_null,
+                output_len_is_null,
+            }))
+        }
+
+        Some("tls_kdf") => {
+            if param_len < std::mem::size_of::<CK_TLS_KDF_PARAMS>() {
+                return Err(CkRv::MECHANISM_PARAM_INVALID);
+            }
+            // Safety: pParameter points to a valid CK_TLS_KDF_PARAMS.
+            let p = unsafe { read_param_struct(param_ptr as *const CK_TLS_KDF_PARAMS)? };
+            let (label, label_presence) =
+                unsafe { read_pointer_field_v1(p.pLabel as *const u8, p.ulLabelLength)? };
+            let (client_random, client_random_presence) = unsafe {
+                read_pointer_field_v1(
+                    p.RandomInfo.pClientRandom as *const u8,
+                    p.RandomInfo.ulClientRandomLen,
+                )?
+            };
+            let (server_random, server_random_presence) = unsafe {
+                read_pointer_field_v1(
+                    p.RandomInfo.pServerRandom as *const u8,
+                    p.RandomInfo.ulServerRandomLen,
+                )?
+            };
+            let (context_data, context_data_presence) = unsafe {
+                read_pointer_field_v1(p.pContextData as *const u8, p.ulContextDataLength)?
+            };
+            Ok(CkMechanismParams::TlsKdf(TlsKdfParams {
+                prf_mechanism: CkMechanismType(p.prfMechanism as u64),
+                label_presence,
+                label: label.into(),
+                random_info: SslRandomData {
+                    client_random_presence,
+                    server_random_presence,
+                    client_random,
+                    server_random,
+                },
+                context_data_presence,
+                context_data: context_data.into(),
+            }))
+        }
+
+        Some("ssl3_master_key_derive") => {
+            if param_len < std::mem::size_of::<CK_SSL3_MASTER_KEY_DERIVE_PARAMS>() {
+                return Err(CkRv::MECHANISM_PARAM_INVALID);
+            }
+            let p =
+                unsafe { read_param_struct(param_ptr as *const CK_SSL3_MASTER_KEY_DERIVE_PARAMS)? };
+            let (client_random, client_random_presence) = unsafe {
+                read_pointer_field_v1(
+                    p.RandomInfo.pClientRandom as *const u8,
+                    p.RandomInfo.ulClientRandomLen,
+                )?
+            };
+            let (server_random, server_random_presence) = unsafe {
+                read_pointer_field_v1(
+                    p.RandomInfo.pServerRandom as *const u8,
+                    p.RandomInfo.ulServerRandomLen,
+                )?
+            };
+            let version_is_null = p.pVersion.is_null();
+            let (version_major, version_minor) = if version_is_null {
+                (0, 0)
+            } else {
+                let v = unsafe { read_param_struct(p.pVersion as *const CK_VERSION)? };
+                (v.major as u32, v.minor as u32)
+            };
+            Ok(CkMechanismParams::Ssl3MasterKeyDerive(Ssl3MasterKeyDeriveParams {
+                random_info: SslRandomData {
+                    client_random_presence,
+                    server_random_presence,
+                    client_random,
+                    server_random,
+                },
+                version_major,
+                version_minor,
+                version_is_null,
+            }))
+        }
+
+        Some("tls12_extended_master_key_derive") => {
+            if param_len < std::mem::size_of::<CK_TLS12_EXTENDED_MASTER_KEY_DERIVE_PARAMS>() {
+                return Err(CkRv::MECHANISM_PARAM_INVALID);
+            }
+            let p = unsafe {
+                read_param_struct(param_ptr as *const CK_TLS12_EXTENDED_MASTER_KEY_DERIVE_PARAMS)?
+            };
+            let (session_hash, session_hash_presence) =
+                unsafe { read_pointer_field_v1(p.pSessionHash as *const u8, p.ulSessionHashLen)? };
+            let version_is_null = p.pVersion.is_null();
+            let (version_major, version_minor) = if version_is_null {
+                (0, 0)
+            } else {
+                let v = unsafe { read_param_struct(p.pVersion as *const CK_VERSION)? };
+                (v.major as u32, v.minor as u32)
+            };
+            Ok(CkMechanismParams::Tls12ExtendedMasterKeyDerive(
+                Tls12ExtendedMasterKeyDeriveParams {
+                    prf_hash_mechanism: CkMechanismType(p.prfHashMechanism as u64),
+                    session_hash_presence,
+                    session_hash,
+                    version_major,
+                    version_minor,
+                    version_is_null,
+                },
+            ))
+        }
+
+        Some("ssl3_key_mat") => {
+            // Accept both CK_SSL3_KEY_MAT_PARAMS and CK_TLS12_KEY_MAT_PARAMS.
+            // TLS12 is a superset with an extra prfHashMechanism field at the end.
+            let ssl3_size = std::mem::size_of::<CK_SSL3_KEY_MAT_PARAMS>();
+            let tls12_size = std::mem::size_of::<CK_TLS12_KEY_MAT_PARAMS>();
+            if param_len < ssl3_size {
+                return Err(CkRv::MECHANISM_PARAM_INVALID);
+            }
+            // Safety: pParameter points to a valid CK_SSL3_KEY_MAT_PARAMS.
+            let p = unsafe { read_param_struct(param_ptr as *const CK_SSL3_KEY_MAT_PARAMS)? };
+            // Bits-governed IV length: keep the legacy ceiling
+            // pre-check (the R17 discipline's call-site companion rule).
+            let requested_iv_len = ((p.ulIVSizeInBits as usize).saturating_add(7)) / 8;
+            if requested_iv_len > MAX_SERIALIZABLE_BYTES {
+                return Err(CkRv::MECHANISM_PARAM_INVALID);
+            }
+            let (client_random, client_random_presence) = unsafe {
+                read_pointer_field_v1(
+                    p.RandomInfo.pClientRandom as *const u8,
+                    p.RandomInfo.ulClientRandomLen,
+                )?
+            };
+            let (server_random, server_random_presence) = unsafe {
+                read_pointer_field_v1(
+                    p.RandomInfo.pServerRandom as *const u8,
+                    p.RandomInfo.ulServerRandomLen,
+                )?
+            };
+            let returned_key_material_is_null = p.pReturnedKeyMaterial.is_null();
+            let (
+                client_mac_secret_handle,
+                server_mac_secret_handle,
+                client_key_handle,
+                server_key_handle,
+                client_iv,
+                client_iv_presence,
+                server_iv,
+                server_iv_presence,
+            ) = if returned_key_material_is_null {
+                // NULL returned material: handles zero, IVs record
+                // their bits-derived length without dereference (D3).
+                (
+                    CkObjectHandle(0),
+                    CkObjectHandle(0),
+                    CkObjectHandle(0),
+                    CkObjectHandle(0),
+                    Vec::new(),
+                    PointerBytes::null_len(requested_iv_len as u64),
+                    Vec::new(),
+                    PointerBytes::null_len(requested_iv_len as u64),
+                )
+            } else {
+                let output = unsafe { read_param_struct(p.pReturnedKeyMaterial)? };
+                let (client_iv, client_iv_presence) = unsafe {
+                    read_pointer_field_v1(
+                        output.pIVClient as *const u8,
+                        requested_iv_len as CK_ULONG,
+                    )?
+                };
+                let (server_iv, server_iv_presence) = unsafe {
+                    read_pointer_field_v1(
+                        output.pIVServer as *const u8,
+                        requested_iv_len as CK_ULONG,
+                    )?
+                };
+                (
+                    CkObjectHandle(output.hClientMacSecret as u64),
+                    CkObjectHandle(output.hServerMacSecret as u64),
+                    CkObjectHandle(output.hClientKey as u64),
+                    CkObjectHandle(output.hServerKey as u64),
+                    client_iv,
+                    client_iv_presence,
+                    server_iv,
+                    server_iv_presence,
+                )
+            };
+            let prf_hash_mechanism = if param_len >= tls12_size {
+                let t = unsafe { read_param_struct(param_ptr as *const CK_TLS12_KEY_MAT_PARAMS)? };
+                t.prfHashMechanism as u64
+            } else {
+                0
+            };
+            Ok(CkMechanismParams::Ssl3KeyMat(Ssl3KeyMatParams {
+                mac_size_bits: p.ulMacSizeInBits as u64,
+                key_size_bits: p.ulKeySizeInBits as u64,
+                iv_size_bits: p.ulIVSizeInBits as u64,
+                is_export: p.bIsExport != 0,
+                random_info: SslRandomData {
+                    client_random_presence,
+                    server_random_presence,
+                    client_random,
+                    server_random,
+                },
+                prf_hash_mechanism: CkMechanismType(prf_hash_mechanism),
+                client_mac_secret_handle,
+                server_mac_secret_handle,
+                client_key_handle,
+                server_key_handle,
+                client_iv_presence,
+                server_iv_presence,
+                client_iv: client_iv.into(),
+                server_iv: server_iv.into(),
+                returned_key_material_is_null,
+            }))
+        }
+
+        Some("kea_derive") => {
+            if param_len < std::mem::size_of::<CK_KEA_DERIVE_PARAMS>() {
+                return Err(CkRv::MECHANISM_PARAM_INVALID);
+            }
+            // Safety: pParameter points to a valid CK_KEA_DERIVE_PARAMS.
+            let p = unsafe { read_param_struct(param_ptr as *const CK_KEA_DERIVE_PARAMS)? };
+            // Shared-length companions: each pointer is read
+            // INDEPENDENTLY against the shared length (a NULL B beside
+            // a valid A stays ONE typed message); agreement is the
+            // proto decoder's job, not the reader's.
+            let (random_a, random_a_presence) =
+                unsafe { read_pointer_field_v1(p.RandomA as *const u8, p.ulRandomLen)? };
+            let (random_b, random_b_presence) =
+                unsafe { read_pointer_field_v1(p.RandomB as *const u8, p.ulRandomLen)? };
+            let (public_data, public_data_presence) =
+                unsafe { read_pointer_field_v1(p.PublicData as *const u8, p.ulPublicDataLen)? };
+            Ok(CkMechanismParams::KeaDerive(KeaDeriveParams {
+                is_sender: p.isSender != 0,
+                random_a_presence,
+                random_b_presence,
+                public_data_presence,
+                random_a,
+                random_b,
+                public_data,
+            }))
+        }
+
+        Some("kip") => {
+            if param_len < std::mem::size_of::<CK_KIP_PARAMS>() {
+                return Err(CkRv::MECHANISM_PARAM_INVALID);
+            }
+            // Safety: pParameter points to a valid CK_KIP_PARAMS.
+            let p = unsafe { read_param_struct(param_ptr as *const CK_KIP_PARAMS)? };
+            let (mechanism, mechanism_is_null) = if p.pMechanism.is_null() {
+                // NULL nesting: the canonical placeholder + the set
+                // nesting bit (the v1 decoder's `(None, true)` arm).
+                (Box::new(KipParams::NULL_NESTED_MECHANISM), true)
+            } else {
+                // Depth and cycle enforcement at budget entry; the
+                // legacy nested-length peek is gone (v1 has no outer
+                // cap — D3 — and the nested node routes through the
+                // same v1 router with per-field caps).
+                budget.enter(p.pMechanism as usize)?;
+                let nested = unsafe { read_nested_mechanism_for_transport(p.pMechanism, budget) };
+                budget.exit();
+                (Box::new(nested?), false)
+            };
+            let (seed, seed_presence) =
+                unsafe { read_pointer_field_v1(p.pSeed as *const u8, p.ulSeedLen)? };
+            Ok(CkMechanismParams::Kip(KipParams {
+                mechanism,
+                key_handle: CkObjectHandle(p.hKey as u64),
+                seed_presence,
+                seed: seed.into(),
+                mechanism_is_null,
+            }))
+        }
+
+        Some("otp") => {
+            if param_len < std::mem::size_of::<CK_OTP_PARAMS>() {
+                return Err(CkRv::MECHANISM_PARAM_INVALID);
+            }
+            // Safety: pParameter points to a valid CK_OTP_PARAMS.
+            let p = unsafe { read_param_struct(param_ptr as *const CK_OTP_PARAMS)? };
+            let (params, params_presence) = unsafe { read_otp_array_v1(p.pParams, p.ulCount)? };
+            Ok(CkMechanismParams::Otp(OtpParams { params, params_presence }))
+        }
+
+        Some("skipjack_private_wrap") => {
+            if param_len < std::mem::size_of::<CK_SKIPJACK_PRIVATE_WRAP_PARAMS>() {
+                return Err(CkRv::MECHANISM_PARAM_INVALID);
+            }
+            let p =
+                unsafe { read_param_struct(param_ptr as *const CK_SKIPJACK_PRIVATE_WRAP_PARAMS)? };
+            let (password, password_presence) =
+                unsafe { read_pointer_field_v1(p.pPassword as *const u8, p.ulPasswordLen)? };
+            let (public_data, public_data_presence) =
+                unsafe { read_pointer_field_v1(p.pPublicData as *const u8, p.ulPublicDataLen)? };
+            let (random_a, random_a_presence) =
+                unsafe { read_pointer_field_v1(p.pRandomA as *const u8, p.ulRandomLen)? };
+            // Shared-length companions (see the KEA arm).
+            let (prime_p, prime_p_presence) =
+                unsafe { read_pointer_field_v1(p.pPrimeP as *const u8, p.ulPAndGLen)? };
+            let (base_g, base_g_presence) =
+                unsafe { read_pointer_field_v1(p.pBaseG as *const u8, p.ulPAndGLen)? };
+            let (subprime_q, subprime_q_presence) =
+                unsafe { read_pointer_field_v1(p.pSubprimeQ as *const u8, p.ulQLen)? };
+            Ok(CkMechanismParams::SkipjackPrivateWrap(SkipjackPrivateWrapParams {
+                password_presence,
+                public_data_presence,
+                random_a_presence,
+                prime_p_presence,
+                base_g_presence,
+                subprime_q_presence,
+                password: password.into(),
+                public_data,
+                password_length: p.ulPasswordLen as u64,
+                random_a,
+                prime_p,
+                base_g,
+                subprime_q,
+            }))
+        }
+
+        Some("skipjack_relayx") => {
+            if param_len < std::mem::size_of::<CK_SKIPJACK_RELAYX_PARAMS>() {
+                return Err(CkRv::MECHANISM_PARAM_INVALID);
+            }
+            let p = unsafe { read_param_struct(param_ptr as *const CK_SKIPJACK_RELAYX_PARAMS)? };
+            let (old_wrapped_x, old_wrapped_x_presence) =
+                unsafe { read_pointer_field_v1(p.pOldWrappedX as *const u8, p.ulOldWrappedXLen)? };
+            let (old_password, old_password_presence) =
+                unsafe { read_pointer_field_v1(p.pOldPassword as *const u8, p.ulOldPasswordLen)? };
+            let (old_public_data, old_public_data_presence) = unsafe {
+                read_pointer_field_v1(p.pOldPublicData as *const u8, p.ulOldPublicDataLen)?
+            };
+            let (old_random_a, old_random_a_presence) =
+                unsafe { read_pointer_field_v1(p.pOldRandomA as *const u8, p.ulOldRandomLen)? };
+            let (new_password, new_password_presence) =
+                unsafe { read_pointer_field_v1(p.pNewPassword as *const u8, p.ulNewPasswordLen)? };
+            let (new_public_data, new_public_data_presence) = unsafe {
+                read_pointer_field_v1(p.pNewPublicData as *const u8, p.ulNewPublicDataLen)?
+            };
+            let (new_random_a, new_random_a_presence) =
+                unsafe { read_pointer_field_v1(p.pNewRandomA as *const u8, p.ulNewRandomLen)? };
+            Ok(CkMechanismParams::SkipjackRelayx(SkipjackRelayxParams {
+                old_wrapped_x_presence,
+                old_password_presence,
+                old_public_data_presence,
+                old_random_a_presence,
+                new_password_presence,
+                new_public_data_presence,
+                new_random_a_presence,
+                old_wrapped_x: old_wrapped_x.into(),
+                old_password: old_password.into(),
+                old_public_data: old_public_data.into(),
+                old_random_a: old_random_a.into(),
+                new_password: new_password.into(),
+                new_public_data: new_public_data.into(),
+                new_random_a: new_random_a.into(),
+            }))
+        }
+
+        Some("sp800_108_kdf") => {
+            if param_len < std::mem::size_of::<CK_SP800_108_KDF_PARAMS>() {
+                return Err(CkRv::MECHANISM_PARAM_INVALID);
+            }
+            // Safety: pParameter points to a valid CK_SP800_108_KDF_PARAMS.
+            let p = unsafe { read_param_struct(param_ptr as *const CK_SP800_108_KDF_PARAMS)? };
+            let (data_params, data_params_presence) =
+                unsafe { read_sp800_108_data_params_v1(p.pDataParams, p.ulNumberOfDataParams)? };
+            let (additional_derived_keys, additional_derived_keys_presence) = unsafe {
+                read_sp800_108_derived_keys_v1(p.pAdditionalDerivedKeys, p.ulAdditionalDerivedKeys)?
+            };
+            Ok(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
+                prf_type: CkMechanismType(p.prfType as u64),
+                data_params_presence,
+                additional_derived_keys_presence,
+                data_params,
+                additional_derived_keys,
+            }))
+        }
+
+        Some("sp800_108_feedback_kdf") => {
+            if param_len < std::mem::size_of::<CK_SP800_108_FEEDBACK_KDF_PARAMS>() {
+                return Err(CkRv::MECHANISM_PARAM_INVALID);
+            }
+            let p =
+                unsafe { read_param_struct(param_ptr as *const CK_SP800_108_FEEDBACK_KDF_PARAMS)? };
+            let (data_params, data_params_presence) =
+                unsafe { read_sp800_108_data_params_v1(p.pDataParams, p.ulNumberOfDataParams)? };
+            let (iv, iv_presence) =
+                unsafe { read_pointer_field_v1(p.pIV as *const u8, p.ulIVLen)? };
+            let (additional_derived_keys, additional_derived_keys_presence) = unsafe {
+                read_sp800_108_derived_keys_v1(p.pAdditionalDerivedKeys, p.ulAdditionalDerivedKeys)?
+            };
+            Ok(CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
+                prf_type: CkMechanismType(p.prfType as u64),
+                data_params_presence,
+                iv_presence,
+                additional_derived_keys_presence,
+                data_params,
+                iv,
+                additional_derived_keys,
+            }))
+        }
+
+        // Unreachable (the dispatcher only routes tail shapes here): fail
         // closed rather than conflate.
         _ => Err(CkRv::MECHANISM_PARAM_INVALID),
     }
@@ -2810,8 +3674,14 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     };
                     Some(CkMechanismParams::WtlsMasterKeyDerive(WtlsMasterKeyDeriveParams {
                         digest_mechanism: CkMechanismType(p.DigestMechanism as u64),
-                        random_info: WtlsRandomData { client_random, server_random },
+                        random_info: WtlsRandomData {
+                            client_random_presence: PointerBytes::present_copy(&client_random),
+                            server_random_presence: PointerBytes::present_copy(&server_random),
+                            client_random,
+                            server_random,
+                        },
                         version,
+                        version_is_null: false,
                     }))
                 }
             }
@@ -2848,12 +3718,16 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     };
                     Some(CkMechanismParams::WtlsPrf(WtlsPrfParams {
                         digest_mechanism: CkMechanismType(p.DigestMechanism as u64),
+                        seed_presence: PointerBytes::present_copy(&seed),
+                        label_presence: PointerBytes::present_copy(&label),
                         seed: seed.into(),
                         label: label.into(),
                         output_len,
                         // W1-C5-01: `pOutput` is OUT — never read the
                         // caller's uninitialized buffer into the request.
                         output: Vec::new().into(),
+                        output_is_null: false,
+                        output_len_is_null: false,
                     }))
                 }
             }
@@ -2921,10 +3795,17 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                             iv_size_bits: p.ulIVSizeInBits as u64,
                             sequence_number: p.ulSequenceNumber as u64,
                             is_export: p.bIsExport != 0,
-                            random_info: WtlsRandomData { client_random, server_random },
+                            random_info: WtlsRandomData {
+                                client_random_presence: PointerBytes::present_copy(&client_random),
+                                server_random_presence: PointerBytes::present_copy(&server_random),
+                                client_random,
+                                server_random,
+                            },
                             mac_secret_handle: CkObjectHandle(output.hMacSecret as u64),
                             key_handle: CkObjectHandle(output.hKey as u64),
+                            iv_presence: PointerBytes::present_copy(&iv),
                             iv: iv.into(),
+                            returned_key_material_is_null: false,
                         }))
                     }
                 }
@@ -2982,10 +3863,16 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                         (v.major as u32, v.minor as u32)
                     };
                     Some(CkMechanismParams::Tls12MasterKeyDerive(Tls12MasterKeyDeriveParams {
-                        random_info: SslRandomData { client_random, server_random },
+                        random_info: SslRandomData {
+                            client_random_presence: PointerBytes::present_copy(&client_random),
+                            server_random_presence: PointerBytes::present_copy(&server_random),
+                            client_random,
+                            server_random,
+                        },
                         version_major,
                         version_minor,
                         prf_hash_mechanism: CkMechanismType(p.prfHashMechanism as u64),
+                        version_is_null: false,
                     }))
                 }
             }
@@ -3021,12 +3908,16 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                         (unsafe { p.pulOutputLen.read_unaligned() }) as u64
                     };
                     Some(CkMechanismParams::TlsPrf(TlsPrfParams {
+                        seed_presence: PointerBytes::present_copy(&seed),
+                        label_presence: PointerBytes::present_copy(&label),
                         seed: seed.into(),
                         label: label.into(),
                         output_len,
                         // W1-C5-01: `pOutput` is OUT — never read the
                         // caller's uninitialized buffer into the request.
                         output: Vec::new().into(),
+                        output_is_null: false,
+                        output_len_is_null: false,
                     }))
                 }
             }
@@ -3094,8 +3985,15 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     };
                     Some(CkMechanismParams::TlsKdf(TlsKdfParams {
                         prf_mechanism: CkMechanismType(p.prfMechanism as u64),
+                        label_presence: PointerBytes::present_copy(&label),
                         label: label.into(),
-                        random_info: SslRandomData { client_random, server_random },
+                        random_info: SslRandomData {
+                            client_random_presence: PointerBytes::present_copy(&client_random),
+                            server_random_presence: PointerBytes::present_copy(&server_random),
+                            client_random,
+                            server_random,
+                        },
+                        context_data_presence: PointerBytes::present_copy(&context_data),
                         context_data: context_data.into(),
                     }))
                 }
@@ -3153,9 +4051,15 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                         (v.major as u32, v.minor as u32)
                     };
                     Some(CkMechanismParams::Ssl3MasterKeyDerive(Ssl3MasterKeyDeriveParams {
-                        random_info: SslRandomData { client_random, server_random },
+                        random_info: SslRandomData {
+                            client_random_presence: PointerBytes::present_copy(&client_random),
+                            server_random_presence: PointerBytes::present_copy(&server_random),
+                            client_random,
+                            server_random,
+                        },
                         version_major,
                         version_minor,
+                        version_is_null: false,
                     }))
                 }
             }
@@ -3194,9 +4098,11 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                 Some(CkMechanismParams::Tls12ExtendedMasterKeyDerive(
                     Tls12ExtendedMasterKeyDeriveParams {
                         prf_hash_mechanism: CkMechanismType(p.prfHashMechanism as u64),
+                        session_hash_presence: PointerBytes::present_copy(&session_hash),
                         session_hash,
                         version_major,
                         version_minor,
+                        version_is_null: false,
                     },
                 ))
             }
@@ -3283,7 +4189,12 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                             key_size_bits: p.ulKeySizeInBits as u64,
                             iv_size_bits: p.ulIVSizeInBits as u64,
                             is_export: p.bIsExport != 0,
-                            random_info: SslRandomData { client_random, server_random },
+                            random_info: SslRandomData {
+                                client_random_presence: PointerBytes::present_copy(&client_random),
+                                server_random_presence: PointerBytes::present_copy(&server_random),
+                                client_random,
+                                server_random,
+                            },
                             prf_hash_mechanism: CkMechanismType(prf_hash_mechanism),
                             client_mac_secret_handle: CkObjectHandle(
                                 output.hClientMacSecret as u64,
@@ -3293,8 +4204,11 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                             ),
                             client_key_handle: CkObjectHandle(output.hClientKey as u64),
                             server_key_handle: CkObjectHandle(output.hServerKey as u64),
+                            client_iv_presence: PointerBytes::present_copy(&client_iv),
+                            server_iv_presence: PointerBytes::present_copy(&server_iv),
                             client_iv: client_iv.into(),
                             server_iv: server_iv.into(),
+                            returned_key_material_is_null: false,
                         }))
                     }
                 }
@@ -3745,6 +4659,9 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     };
                     Some(CkMechanismParams::KeaDerive(KeaDeriveParams {
                         is_sender: p.isSender != 0,
+                        random_a_presence: PointerBytes::present_copy(&random_a),
+                        random_b_presence: PointerBytes::present_copy(&random_b),
+                        public_data_presence: PointerBytes::present_copy(&public_data),
                         random_a,
                         random_b,
                         public_data,
@@ -3930,7 +4847,9 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     Some(CkMechanismParams::Kip(KipParams {
                         mechanism: Box::new(mechanism),
                         key_handle: CkObjectHandle(p.hKey as u64),
+                        seed_presence: PointerBytes::present_copy(&seed),
                         seed: seed.into(),
+                        mechanism_is_null: false,
                     }))
                 }
             }
@@ -3948,7 +4867,10 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                 {
                     Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else if p.pParams.is_null() || p.ulCount == 0 {
-                    Some(CkMechanismParams::Otp(OtpParams { params: Vec::new() }))
+                    Some(CkMechanismParams::Otp(OtpParams {
+                        params: Vec::new(),
+                        params_presence: PointerArray::present(Vec::new()),
+                    }))
                 } else {
                     // Typed caller array: validate the extent, then copy
                     // each element unaligned (never an aligned slice over
@@ -3980,10 +4902,18 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                                 let value = unsafe {
                                     payload_bytes(param.pValue as *const u8, param.ulValueLen)?
                                 };
-                                Ok(OtpParam { type_: param.type_ as u64, value: value.into() })
+                                Ok(OtpParam {
+                                    type_: param.type_ as u64,
+                                    value_presence: PointerBytes::present_copy(&value),
+                                    value: value.into(),
+                                })
                             })
                             .collect();
-                        Some(CkMechanismParams::Otp(OtpParams { params: converted? }))
+                        let converted: Vec<OtpParam> = converted?;
+                        Some(CkMechanismParams::Otp(OtpParams {
+                            params_presence: PointerArray::present(converted.clone()),
+                            params: converted,
+                        }))
                     }
                 }
             }
@@ -4043,6 +4973,12 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                         unsafe { payload_bytes(p.pSubprimeQ as *const u8, p.ulQLen)? }
                     };
                     Some(CkMechanismParams::SkipjackPrivateWrap(SkipjackPrivateWrapParams {
+                        password_presence: PointerBytes::present_copy(&password),
+                        public_data_presence: PointerBytes::present_copy(&public_data),
+                        random_a_presence: PointerBytes::present_copy(&random_a),
+                        prime_p_presence: PointerBytes::present_copy(&prime_p),
+                        base_g_presence: PointerBytes::present_copy(&base_g),
+                        subprime_q_presence: PointerBytes::present_copy(&subprime_q),
                         password: password.into(),
                         public_data,
                         password_length: p.ulPasswordLen as u64,
@@ -4122,6 +5058,13 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                         unsafe { payload_bytes(p.pNewRandomA as *const u8, p.ulNewRandomLen)? }
                     };
                     Some(CkMechanismParams::SkipjackRelayx(SkipjackRelayxParams {
+                        old_wrapped_x_presence: PointerBytes::present_copy(&old_wrapped_x),
+                        old_password_presence: PointerBytes::present_copy(&old_password),
+                        old_public_data_presence: PointerBytes::present_copy(&old_public_data),
+                        old_random_a_presence: PointerBytes::present_copy(&old_random_a),
+                        new_password_presence: PointerBytes::present_copy(&new_password),
+                        new_public_data_presence: PointerBytes::present_copy(&new_public_data),
+                        new_random_a_presence: PointerBytes::present_copy(&new_random_a),
                         old_wrapped_x: old_wrapped_x.into(),
                         old_password: old_password.into(),
                         old_public_data: old_public_data.into(),
@@ -4150,17 +5093,23 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                 } {
                     Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
+                    let data_params = unsafe {
+                        read_sp800_108_data_params(p.pDataParams, p.ulNumberOfDataParams)?
+                    };
+                    let additional_derived_keys = unsafe {
+                        read_sp800_108_derived_keys(
+                            p.pAdditionalDerivedKeys,
+                            p.ulAdditionalDerivedKeys,
+                        )?
+                    };
                     Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
                         prf_type: CkMechanismType(p.prfType as u64),
-                        data_params: unsafe {
-                            read_sp800_108_data_params(p.pDataParams, p.ulNumberOfDataParams)?
-                        },
-                        additional_derived_keys: unsafe {
-                            read_sp800_108_derived_keys(
-                                p.pAdditionalDerivedKeys,
-                                p.ulAdditionalDerivedKeys,
-                            )?
-                        },
+                        data_params_presence: PointerArray::present(data_params.clone()),
+                        additional_derived_keys_presence: PointerArray::present(
+                            additional_derived_keys.clone(),
+                        ),
+                        data_params,
+                        additional_derived_keys,
                     }))
                 }
             }
@@ -4192,18 +5141,25 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     } else {
                         unsafe { payload_bytes(p.pIV as *const u8, p.ulIVLen)? }
                     };
+                    let data_params = unsafe {
+                        read_sp800_108_data_params(p.pDataParams, p.ulNumberOfDataParams)?
+                    };
+                    let additional_derived_keys = unsafe {
+                        read_sp800_108_derived_keys(
+                            p.pAdditionalDerivedKeys,
+                            p.ulAdditionalDerivedKeys,
+                        )?
+                    };
                     Some(CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
                         prf_type: CkMechanismType(p.prfType as u64),
-                        data_params: unsafe {
-                            read_sp800_108_data_params(p.pDataParams, p.ulNumberOfDataParams)?
-                        },
+                        data_params_presence: PointerArray::present(data_params.clone()),
+                        iv_presence: PointerBytes::present_copy(&iv),
+                        additional_derived_keys_presence: PointerArray::present(
+                            additional_derived_keys.clone(),
+                        ),
+                        data_params,
                         iv,
-                        additional_derived_keys: unsafe {
-                            read_sp800_108_derived_keys(
-                                p.pAdditionalDerivedKeys,
-                                p.ulAdditionalDerivedKeys,
-                            )?
-                        },
+                        additional_derived_keys,
                     }))
                 }
             }
@@ -4263,7 +5219,11 @@ unsafe fn read_sp800_108_data_params(
         // Safety: index < n, covered by the checked extent above.
         let param = unsafe { data_params.add(index).read_unaligned() };
         let value = unsafe { payload_bytes(param.pValue as *const u8, param.ulValueLen)? };
-        out.push(PrfDataParam { type_: param.type_ as u64, value: value.into() });
+        out.push(PrfDataParam {
+            type_: param.type_ as u64,
+            value_presence: PointerBytes::present_copy(&value),
+            value: value.into(),
+        });
     }
     Ok(out)
 }
@@ -4361,7 +5321,12 @@ unsafe fn read_sp800_108_derived_keys(
             } else {
                 unsafe { derived.phKey.read_unaligned() as u64 }
             };
-            Ok(Sp800108DerivedKey { template, key_handle: CkObjectHandle(key_handle) })
+            Ok(Sp800108DerivedKey {
+                template_presence: PointerArray::present(template.clone()),
+                ph_key_is_null: false,
+                template,
+                key_handle: CkObjectHandle(key_handle),
+            })
         })
         .collect()
 }

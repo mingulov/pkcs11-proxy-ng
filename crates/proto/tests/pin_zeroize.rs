@@ -118,7 +118,7 @@ fn otp_param_value_zeroizes_and_wipes_on_drop() {
     fn assert_wiped_on_drop<T: zeroize::ZeroizeOnDrop>() {}
     assert_wiped_on_drop::<OtpParam>();
 
-    let mut otp = OtpParam { r#type: 1, value: vec![0xA5u8; 8] };
+    let mut otp = OtpParam { r#type: 1, value: vec![0xA5u8; 8], value_null_len: None };
     assert_canary_nonempty("OtpParam.value", &otp.value);
     otp.zeroize();
     assert!(otp.value.iter().all(|byte| *byte == 0), "OtpParam.value must not survive zeroize");
@@ -199,8 +199,13 @@ fn boxed_back_edge_skip_preserves_drop_wipe_chain() {
     }
 
     let mechanism = || Mechanism { mechanism_type: 1, params: None, parameter_encoding_version: 0 };
-    let mut kip =
-        KipParams { mechanism: Some(Box::new(mechanism())), key_handle: 9, seed: vec![0xA5u8; 8] };
+    let mut kip = KipParams {
+        mechanism: Some(Box::new(mechanism())),
+        key_handle: 9,
+        seed: vec![0xA5u8; 8],
+        mechanism_null: None,
+        seed_null_len: None,
+    };
     assert_canary_nonempty("KipParams.seed", &kip.seed);
     kip.zeroize();
     assert!(kip.seed.iter().all(|byte| *byte == 0), "KipParams.seed must not survive zeroize");
