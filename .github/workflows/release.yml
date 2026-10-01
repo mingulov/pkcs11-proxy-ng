@@ -205,6 +205,16 @@ jobs:
           ref: ${{ inputs.tag }}
           fetch-depth: 1
 
+      # R10 (S2 §11): the test-only v1-enable cfg must never reach packaged
+      # artifacts. Fail loudly if RUSTFLAGS carries it.
+      - name: Reject test-only mechanism-params cfg
+        run: |
+          set -euo pipefail
+          if [[ "${RUSTFLAGS:-}" == *"pkcs11_proxy_test_mechanism_params_v1"* ]]; then
+            echo "::error::RUSTFLAGS carries the test-only cfg pkcs11_proxy_test_mechanism_params_v1; refusing."
+            exit 1
+          fi
+
       - name: Install Python for release checks
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
