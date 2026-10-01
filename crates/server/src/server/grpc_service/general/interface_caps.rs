@@ -103,6 +103,76 @@ fn daemon_mechanism_param_abi(ulong_size: u32, byte_order: u32) -> Option<i32> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// R10 test-only v1-enable override (S2 §11 Phase 2)
+// ---------------------------------------------------------------------------
+//
+// Custom build cfg `pkcs11_proxy_test_mechanism_params_v1`, ABSENT from
+// normal builds: enable it ONLY via
+// `RUSTFLAGS="--cfg pkcs11_proxy_test_mechanism_params_v1"` with a SEPARATE
+// target dir (`CARGO_TARGET_DIR=/tmp/tgt-v1test`) so override artifacts
+// never share fingerprints with normal builds. NO public Cargo feature:
+// without the cfg this section compiles to stubs and the env name/value
+// strings below are absent from the binary (pinned by the R10 step-7 tests
+// + the artifact-absence check).
+//
+// Under the cfg ONLY, the exact-value env
+// `PKCS11_PROXY_TEST_MECHANISM_PARAMS_V1=enable-v1-test-only` forces
+// discovery to advertise v1; missing/invalid fails closed to the R4
+// hard-0. Sibling read sites (same contract, own copies — no public API):
+// the shim snapshot (`shim/.../interface_probe.rs`) and the daemon startup
+// marker (`server/src/main.rs`).
+
+/// Env var arming the test-only v1 override; cfg-gated so normal binaries
+/// carry neither this name nor the enable value.
+#[cfg(pkcs11_proxy_test_mechanism_params_v1)]
+const R10_OVERRIDE_ENV_VAR: &str = "PKCS11_PROXY_TEST_MECHANISM_PARAMS_V1";
+/// The single accepted override value; cfg-gated (see above).
+#[cfg(pkcs11_proxy_test_mechanism_params_v1)]
+const R10_OVERRIDE_ENABLE_VALUE: &str = "enable-v1-test-only";
+
+/// Pure exact-value check (unit tested under the cfg): only the exact
+/// enable value arms the override — anything else fails closed.
+#[cfg(pkcs11_proxy_test_mechanism_params_v1)]
+fn is_override_enable_value(value: Option<&std::ffi::OsStr>) -> bool {
+    value == Some(std::ffi::OsStr::new(R10_OVERRIDE_ENABLE_VALUE))
+}
+
+/// Whether the test-only v1 override is armed: the custom cfg compiled it
+/// in AND the env carries the exact enable value. Without the cfg this is
+/// a `false` stub (no env read, no strings in the binary).
+#[cfg(pkcs11_proxy_test_mechanism_params_v1)]
+fn test_mechanism_params_v1_override_enabled() -> bool {
+    is_override_enable_value(std::env::var_os(R10_OVERRIDE_ENV_VAR).as_deref())
+}
+/// R10 override predicate without the cfg: hard `false` (step 7 — the env
+/// is inert in normal builds).
+#[cfg(not(pkcs11_proxy_test_mechanism_params_v1))]
+fn test_mechanism_params_v1_override_enabled() -> bool {
+    false
+}
+
+/// Resolve the discovery advertisement for the v1 capability (pure, unit
+/// tested in both modes): armed (cfg + exact env) advertises transport 1
+/// with the derived daemon ABI; anything else stays hard-0/absent.
+/// Without the cfg the armed branch does not exist (unconditional
+/// `(None, None)` — production stays hard-0 until R23).
+#[cfg(pkcs11_proxy_test_mechanism_params_v1)]
+fn override_advertisement(
+    derived_abi: Option<i32>,
+    override_active: bool,
+) -> (Option<u32>, Option<i32>) {
+    if override_active { (Some(1), derived_abi) } else { (None, None) }
+}
+/// R10 advertisement resolution without the cfg: unconditional hard-0.
+#[cfg(not(pkcs11_proxy_test_mechanism_params_v1))]
+fn override_advertisement(
+    _derived_abi: Option<i32>,
+    _override_active: bool,
+) -> (Option<u32>, Option<i32>) {
+    (None, None)
+}
+
 /// Handler for GetBackendInterfaces RPC.
 ///
 /// Context-free: no client_context_id required.
@@ -152,10 +222,20 @@ pub(super) async fn get_backend_interfaces(
     let registry_payload = registry_source.current().map_err(Status::internal)?;
     let now = Instant::now();
 
+    // R10: test-only v1-enable override (S2 §11 Phase 2) — under the custom
+    // cfg ONLY, the exact-value env forces advertisement of v1; production
+    // stays hard-0/absent until R23 (TODO(R23) below stays). Read once so
+    // the cache bypass and the advertisement below agree.
+    let override_active = test_mechanism_params_v1_override_enabled();
+
     // W1-L13-22: serve a fresh cached rendering when the backend and the
     // payload revision both match. A poisoned cache lock degrades to
     // uncached behavior (render fresh, store nothing) — never an error.
-    if let Ok(cache) = DISCOVERY_CACHE.lock()
+    // Override-active calls bypass the cache (test-only): env windows are
+    // transient, and a cached legacy rendering must never pin an armed call
+    // (nor may an armed rendering be served to a legacy call).
+    if !override_active
+        && let Ok(cache) = DISCOVERY_CACHE.lock()
         && let Some(cached) = cache.get(now, backend_id, &registry_payload)
     {
         return Ok(Response::new(cached));
@@ -178,9 +258,15 @@ pub(super) async fn get_backend_interfaces(
     // R4 plumbing: the daemon's actual ABI value is derived live from the
     // backend's runtime ABI properties (covered by
     // `r4_daemon_mechanism_param_abi_derivation`), but stays deliberately
-    // unadvertised — see TODO(R23) below.
+    // unadvertised — see TODO(R23) below. (The R10 test override below is
+    // the sole exception, and only under the custom cfg.)
     let _unadvertised_mechanism_abi =
         daemon_mechanism_param_abi(backend.abi_ulong_size(), backend.abi_byte_order());
+
+    // R10: resolve the advertisement through the override (hard-0/absent in
+    // production until R23; forced v1 under the custom cfg + exact env).
+    let (mechanism_parameter_transport_version, backend_mechanism_abi) =
+        override_advertisement(_unadvertised_mechanism_abi, override_active);
 
     let response = pkcs11_proxy_ng_proto::GetBackendInterfacesResponse {
         exact_output_effects_version: Some(1),
@@ -195,11 +281,14 @@ pub(super) async fn get_backend_interfaces(
         // computed `_unadvertised_mechanism_abi` value above plus transport
         // version 1) once the full classic inventory converts per D1(a).
         // Until then the capability stays hard-0/absent: acceptance code
-        // lands now, advertisement does not.
-        mechanism_parameter_transport_version: None,
-        backend_mechanism_abi: None,
+        // lands now, advertisement does not. (The R10 override above forces
+        // v1 under the custom cfg ONLY for tests; R23 keeps it.)
+        mechanism_parameter_transport_version,
+        backend_mechanism_abi,
     };
-    if let Ok(mut cache) = DISCOVERY_CACHE.lock() {
+    // Override-active calls bypass the cache (see above): never store an
+    // armed rendering where a legacy call could hit it.
+    if !override_active && let Ok(mut cache) = DISCOVERY_CACHE.lock() {
         cache.put(now, backend_id, &registry_payload, response.clone());
     }
     Ok(Response::new(response))
@@ -212,6 +301,19 @@ mod tests {
     use pkcs11_proxy_ng_backend::MockBackend;
 
     use super::*;
+
+    /// Serializes R10 override-env windows against the R4 unadvertised pin:
+    /// the env var is process-global, so the R10 test's armed window must
+    /// not overlap the R4 test's hard-0 assertion (cfg builds only — in
+    /// normal builds the env is never read). Held across set → handler
+    /// call(s) → unset. Async-aware (tokio mutex, `LOG_CAPTURE_LOCK`
+    /// precedent) because the handler calls await.
+    static OVERRIDE_ENV_TEST_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> =
+        std::sync::OnceLock::new();
+
+    async fn override_env_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+        OVERRIDE_ENV_TEST_LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await
+    }
 
     #[tokio::test]
     async fn pointer_safe_message_backend_interfaces_advertises_true() {
@@ -534,8 +636,12 @@ mod tests {
     /// R4: the v1 mechanism-parameter capability stays unadvertised until
     /// R23 flips it after the full classic inventory converts (D1(a)).
     /// Acceptance code lands now; advertisement does not.
+    /// (R10 test-only addition: holds the override-env guard so the R10
+    /// test's armed window cannot overlap this hard-0 assertion in cfg
+    /// builds. Pin semantics unchanged.)
     #[tokio::test]
     async fn r4_mechanism_parameter_capability_unadvertised_until_r23() {
+        let _guard = override_env_test_guard().await;
         let context_manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
         let backend = Arc::new(MockBackend::default_test());
         backend.initialize().expect("initialize mock backend");
@@ -562,6 +668,108 @@ mod tests {
         );
     }
 
+    /// R10 (S2 §11 Phase 2 test-only v1-enable override): under the custom
+    /// cfg, the exact-value env arms the override and discovery advertises
+    /// v1 (transport 1 + the derived daemon ABI); missing/invalid values
+    /// fail closed to the R4 hard-0. RED without the R10 plumbing (None).
+    #[tokio::test]
+    #[cfg(pkcs11_proxy_test_mechanism_params_v1)]
+    async fn r10_override_exact_env_advertises_v1_under_cfg() {
+        let _guard = override_env_test_guard().await;
+        let context_manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        let backend = Arc::new(MockBackend::default_test());
+        backend.initialize().expect("initialize mock backend");
+        let backend: Arc<dyn Pkcs11Backend> = backend;
+        let registry = MechanismRegistrySource::load(None).expect("load embedded registry");
+        let expected_abi =
+            daemon_mechanism_param_abi(backend.abi_ulong_size(), backend.abi_byte_order());
+
+        async fn call(
+            context_manager: &Arc<ContextManager>,
+            backend: &Arc<dyn Pkcs11Backend>,
+            registry: &MechanismRegistrySource,
+        ) -> pkcs11_proxy_ng_proto::GetBackendInterfacesResponse {
+            get_backend_interfaces(
+                context_manager,
+                backend,
+                registry,
+                Request::new(pkcs11_proxy_ng_proto::GetBackendInterfacesRequest {}),
+            )
+            .await
+            .expect("GetBackendInterfaces should succeed")
+            .into_inner()
+        }
+
+        // Missing env fails closed (legacy hard-0).
+        let missing = call(&context_manager, &backend, &registry).await;
+        assert_eq!(missing.mechanism_parameter_transport_version, None);
+        assert_eq!(missing.backend_mechanism_abi, None);
+
+        // Invalid value fails closed.
+        unsafe {
+            std::env::set_var("PKCS11_PROXY_TEST_MECHANISM_PARAMS_V1", "yes-please");
+        }
+        let invalid = call(&context_manager, &backend, &registry).await;
+        assert_eq!(invalid.mechanism_parameter_transport_version, None);
+        assert_eq!(invalid.backend_mechanism_abi, None);
+
+        // Exact value arms the override (bypasses the discovery cache: the
+        // legacy rendering above must not pin this call to None).
+        unsafe {
+            std::env::set_var("PKCS11_PROXY_TEST_MECHANISM_PARAMS_V1", "enable-v1-test-only");
+        }
+        let armed = call(&context_manager, &backend, &registry).await;
+        unsafe {
+            std::env::remove_var("PKCS11_PROXY_TEST_MECHANISM_PARAMS_V1");
+        }
+        assert_eq!(
+            armed.mechanism_parameter_transport_version,
+            Some(1),
+            "exact-value env must advertise v1 under the test cfg"
+        );
+        assert_eq!(armed.backend_mechanism_abi, expected_abi);
+
+        // Unset again → legacy.
+        let unset = call(&context_manager, &backend, &registry).await;
+        assert_eq!(unset.mechanism_parameter_transport_version, None);
+        assert_eq!(unset.backend_mechanism_abi, None);
+    }
+
+    /// R10 step 7 (S2 §11): without the test cfg, the exact-value env is
+    /// inert — discovery stays at the R4 hard-0. This test FAILS if the env
+    /// ever takes effect in a normal build.
+    #[tokio::test]
+    #[cfg(not(pkcs11_proxy_test_mechanism_params_v1))]
+    async fn r10_override_env_inert_without_cfg() {
+        let _guard = override_env_test_guard().await;
+        let context_manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        let backend = Arc::new(MockBackend::default_test());
+        backend.initialize().expect("initialize mock backend");
+        let backend: Arc<dyn Pkcs11Backend> = backend;
+        let registry = MechanismRegistrySource::load(None).expect("load embedded registry");
+
+        unsafe {
+            std::env::set_var("PKCS11_PROXY_TEST_MECHANISM_PARAMS_V1", "enable-v1-test-only");
+        }
+        let response = get_backend_interfaces(
+            &context_manager,
+            &backend,
+            &registry,
+            Request::new(pkcs11_proxy_ng_proto::GetBackendInterfacesRequest {}),
+        )
+        .await
+        .expect("GetBackendInterfaces should succeed")
+        .into_inner();
+        unsafe {
+            std::env::remove_var("PKCS11_PROXY_TEST_MECHANISM_PARAMS_V1");
+        }
+        assert_eq!(
+            response.mechanism_parameter_transport_version, None,
+            "env must be inert without the test cfg (legacy hard-0)"
+        );
+        assert_eq!(response.backend_mechanism_abi, None);
+    }
+
     /// R4: the ABI derivation maps the backend's runtime properties to the
     /// exact v1 ABI, and stays silent (`None`) wherever no v1 ABI exactly
     /// matches — never a per-target hardcoded literal.
@@ -577,5 +785,49 @@ mod tests {
                 "no exact v1 ABI for ulong_size={ulong_size} byte_order={byte_order}",
             );
         }
+    }
+
+    /// R10 pure exact-value policy (cfg-gated, like the strings it checks):
+    /// only the exact enable value arms the override — everything else
+    /// fails closed.
+    #[test]
+    #[cfg(pkcs11_proxy_test_mechanism_params_v1)]
+    fn r10_override_enable_value_is_exact() {
+        use std::ffi::OsStr;
+        assert!(is_override_enable_value(Some(OsStr::new("enable-v1-test-only"))));
+        for bad in [
+            None,
+            Some(OsStr::new("")),
+            Some(OsStr::new("yes-please")),
+            Some(OsStr::new("ENABLE-V1-TEST-ONLY")),
+            Some(OsStr::new("enable-v1-test-only ")),
+        ] {
+            assert!(!is_override_enable_value(bad), "must fail closed: {bad:?}");
+        }
+    }
+
+    /// R10 advertisement resolution under the cfg (pure): armed advertises
+    /// v1 with the derived daemon ABI; disarmed stays hard-0.
+    #[test]
+    #[cfg(pkcs11_proxy_test_mechanism_params_v1)]
+    fn r10_override_advertisement_armed_advertises_v1() {
+        use pkcs11_proxy_ng_proto::MechanismParamAbi as Abi;
+        let abi = Some(Abi::Lp64NativeLe as i32);
+        assert_eq!(override_advertisement(abi, true), (Some(1), abi));
+        assert_eq!(override_advertisement(abi, false), (None, None));
+        assert_eq!(override_advertisement(None, true), (Some(1), None));
+    }
+
+    /// R10 step 7 (code-level): without the cfg the predicate is a `false`
+    /// stub and the resolution is an unconditional hard-0 — even an armed
+    /// input cannot advertise, because the branch is compiled out.
+    #[test]
+    #[cfg(not(pkcs11_proxy_test_mechanism_params_v1))]
+    fn r10_override_advertisement_inert_without_cfg() {
+        use pkcs11_proxy_ng_proto::MechanismParamAbi as Abi;
+        let abi = Some(Abi::Lp64NativeLe as i32);
+        assert!(!test_mechanism_params_v1_override_enabled());
+        assert_eq!(override_advertisement(abi, true), (None, None));
+        assert_eq!(override_advertisement(abi, false), (None, None));
     }
 }

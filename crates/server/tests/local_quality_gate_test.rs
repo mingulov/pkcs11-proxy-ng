@@ -2015,3 +2015,75 @@ fn pkcs11_module_dep_documents_single_maintainer_residual() {
     );
     assert!(lowered.contains("fallback"), "backend Cargo.toml should record the fallback plan");
 }
+
+/// Count occurrences of `step` lines inside the `job:` section of a workflow
+/// (from the `  <job>:` header to the next same-indent header or EOF).
+fn step_occurrences_in_job(workflow: &str, job: &str, step: &str) -> usize {
+    let header = format!("  {job}:");
+    let mut in_job = false;
+    let mut count = 0;
+    for line in workflow.lines() {
+        if line == header {
+            in_job = true;
+            continue;
+        }
+        // A new two-space `key:` header ends the job section (job bodies
+        // indent deeper; the key itself carries no spaces).
+        if in_job && line.starts_with("  ") && !line.starts_with("   ") {
+            let key = &line[2..];
+            if key.ends_with(':') && !key.contains([' ', '\t']) {
+                break;
+            }
+        }
+        if in_job && line.contains(step) {
+            count += 1;
+        }
+    }
+    count
+}
+
+#[test]
+fn r10_packaging_workflows_reject_test_mechanism_params_cfg() {
+    // R10 step 6 (S2 §11): the test-only v1-enable cfg must never reach
+    // packaged or published artifacts — the packaging workflows fail loudly
+    // when RUSTFLAGS carries it. cut-release verifies on main before the tag
+    // exists (its `verify` job runs the cargo gates); publish stages the
+    // immutable candidate (`preflight` is its first gate); release compiles
+    // the shipped binaries (each `binary-*` job builds). None of the three
+    // sets RUSTFLAGS today (only ci.yml's musl job does) — this pins the
+    // rejection so a future RUSTFLAGS addition cannot smuggle the cfg in.
+    let root = workspace_root();
+    let step = "Reject test-only mechanism-params cfg";
+    for (file, jobs) in [
+        ("cut-release.yml", vec!["verify"]),
+        ("publish.yml", vec!["preflight"]),
+        ("release.yml", vec!["binary-linux", "binary-windows", "binary-macos"]),
+    ] {
+        let workflow = fs::read_to_string(root.join(".github/workflows").join(file))
+            .unwrap_or_else(|_| panic!(".github/workflows/{file} should be readable"));
+        for job in &jobs {
+            assert_eq!(
+                step_occurrences_in_job(&workflow, job, step),
+                1,
+                "{file} job `{job}` should carry exactly one `{step}` step"
+            );
+        }
+        assert!(
+            workflow.contains("pkcs11_proxy_test_mechanism_params_v1"),
+            "{file} rejection should name the test cfg"
+        );
+        assert!(
+            workflow.contains("::error::"),
+            "{file} rejection should fail loudly with ::error::"
+        );
+        // The cfg string appears only inside the rejection steps (once in
+        // the RUSTFLAGS match, once in the error text): no workflow sets or
+        // forwards RUSTFLAGS carrying it.
+        let occurrences = workflow.matches("pkcs11_proxy_test_mechanism_params_v1").count();
+        assert_eq!(
+            occurrences,
+            2 * jobs.len(),
+            "{file} should mention the test cfg only in its rejection steps"
+        );
+    }
+}
