@@ -2,52 +2,274 @@
 // load-bearing on 32-bit targets (CK_ULONG=u32); the allow keeps them portable.
 #![allow(clippy::unnecessary_cast)]
 use super::{
-    MAX_MECHANISM_PARAM_STRUCT_LEN, MAX_NESTED_MECHANISMS, NestingBudget,
-    prepare_mechanism_output_params, read_mechanism, read_mechanism_with_shape,
-    read_mechanism_with_shape_budgeted, read_raw_bytes, read_wrap_key_mechanism,
-    validate_mechanism,
+    MAX_MECHANISM_PARAM_STRUCT_LEN, MAX_NESTED_MECHANISMS, NestingBudget, Operation,
+    prepare_mechanism_output_params, read_mechanism_for_transport,
+    read_mechanism_for_transport_with_snapshots, read_mechanism_with_shape,
+    read_mechanism_with_shape_budgeted, read_raw_bytes,
 };
 use cryptoki_sys::*;
+use pkcs11_proxy_ng_types::mechanism_registry::DiscoveryMode;
+use pkcs11_proxy_ng_types::shape_descriptors::{
+    ABI_EXEMPT_FINGERPRINT, OperationContext, ParamAbi, ShapeResolver,
+};
 use pkcs11_proxy_ng_types::{
     CcmParams, CcmWrapParams, ChaCha20Params, CkAttributeType, CkAttributeValue,
     CkGeneratorFunction, CkKdf, CkMechanism, CkMechanismParams, CkMechanismType, CkMgf,
-    CkOaepSource, CkObjectHandle, CkPbkdf2Prf, CkPbkdf2SaltSource, CkRv, ExtractParams, GcmParams,
-    GcmWrapParams, IvParams, KeyWrapSetOaepParams, KipParams, KmacParams, MacGeneralParams,
-    MechanismRegistry, MuGenParams, RsaAesKeyWrapParams, RsaPkcsOaepParams, RsaPkcsPssParams,
-    Salsa20ChaCha20Poly1305Params, SecretBytes, SignAdditionalContext, Sp800108DerivedKey,
-    Sp800108FeedbackKdfParams, Sp800108KdfParams, TlsPrfParams,
+    CkOaepSource, CkObjectHandle, CkPbkdf2Prf, CkPbkdf2SaltSource, CkRv, ExtractParams, FlatParams,
+    GcmParams, GcmWrapParams, IvParams, KeyWrapSetOaepParams, KipParams, KmacParams,
+    MECHANISM_PARAMETER_TRANSPORT_VERSION, MacGeneralParams, MechanismRegistry, MuGenParams,
+    RsaAesKeyWrapParams, RsaPkcsOaepParams, RsaPkcsPssParams, Salsa20ChaCha20Poly1305Params,
+    SecretBytes, SignAdditionalContext, Sp800108DerivedKey, Sp800108FeedbackKdfParams,
+    Sp800108KdfParams, TlsPrfParams,
 };
 
-fn ensure_registry() {
+fn cached_default_registry() -> MechanismRegistry {
     // Load-once: the embedded default never changes within a test binary,
     // so parsing TOML on every call only burns time (minutes per call
-    // under Miri across ~50 read_ck_mechanism tests). Each caller still
-    // gets a fresh clone installed globally, exactly as before.
+    // under Miri across ~50 read_ck_mechanism tests).
     static DEFAULT: std::sync::OnceLock<MechanismRegistry> = std::sync::OnceLock::new();
-    let registry = DEFAULT
+    DEFAULT
         .get_or_init(|| MechanismRegistry::load(None).expect("default mechanism registry"))
-        .clone();
-    crate::state::replace_mechanism_registry(registry);
+        .clone()
 }
 
-/// Test read of a mechanism's typed params via `read_mechanism`.
+fn ensure_registry() {
+    // Each caller still gets a fresh clone installed globally, exactly as
+    // before (needed by the production entry + nested reads, which gather
+    // the registry from global state).
+    crate::state::replace_mechanism_registry(cached_default_registry());
+}
+
+/// Clone of the embedded default registry WITHOUT installing it globally:
+/// the snapshot core takes `&MechanismRegistry`, so injected-snapshot
+/// tests run hermetically (no global state).
+fn default_registry() -> MechanismRegistry {
+    cached_default_registry()
+}
+
+/// Test read of a mechanism's typed params via the legacy branch of
+/// `read_mechanism_for_transport` (capability 0, default registry).
 ///
 /// # Safety
 ///
-/// The `read_mechanism` parameter contract: `mechanism.pParameter`, when
-/// non-null with nonzero length, must designate `ulParameterLen` readable
-/// bytes containing the appropriate C struct (the `&` borrow already
-/// upholds the struct-validity half).
+/// The reader contract: `mechanism.pParameter`, when non-null with nonzero
+/// length, must designate `ulParameterLen` readable bytes containing the
+/// appropriate C struct (the `&` borrow already upholds the
+/// struct-validity half).
 unsafe fn read_ck_mechanism(mechanism: &CK_MECHANISM) -> CkMechanismParams {
-    ensure_registry();
-    unsafe { read_mechanism(mechanism) }.expect("read mechanism").params.expect("mechanism params")
+    // Hermetic: the snapshot core takes `&MechanismRegistry`, so no global
+    // install is needed (KIP is unbound in the default registry, so no
+    // nested read can reach the global gatherers from here).
+    let registry = default_registry();
+    unsafe {
+        read_mechanism_for_transport_with_snapshots(
+            mechanism,
+            &registry,
+            0,
+            ParamAbi::native(),
+            ParamAbi::native(),
+            Operation::General,
+            false,
+            &mut NestingBudget::new(),
+        )
+    }
+    .expect("read mechanism")
+    .params
+    .expect("mechanism params")
+}
+
+// ---------------------------------------------------------------------------
+// R11 helpers: snapshot-core reads with injected capability/ABI/operation.
+// ---------------------------------------------------------------------------
+
+const R11_LP64: ParamAbi = ParamAbi::Lp64NativeLe;
+const R11_ILP32: ParamAbi = ParamAbi::Ilp32NativeLe;
+
+/// v1 read (capability 1, LP64 pair) for R11 emission tests. ABIs are
+/// injected explicitly (never `native()`) so the tests are deterministic
+/// on every host; lengths are chosen ABI-unambiguous (noncanonical under
+/// every v1 ABI) and expected fingerprints are computed via R7 (R7 owns
+/// the golden values).
+///
+/// # Safety
+///
+/// Same contract as the snapshot core.
+unsafe fn read_r11_v1(
+    mechanism: &CK_MECHANISM,
+    registry: &MechanismRegistry,
+    operation: Operation,
+) -> Result<CkMechanism, CkRv> {
+    unsafe {
+        read_mechanism_for_transport_with_snapshots(
+            mechanism,
+            registry,
+            1,
+            Some(R11_LP64),
+            Some(R11_LP64),
+            operation,
+            false,
+            &mut NestingBudget::new(),
+        )
+    }
+}
+
+/// Legacy read (capability 0) for R11 identity tests. Snapshots are
+/// deliberately `None`: the legacy branch must ignore them (it consults
+/// neither ABI), so `None` proves ignorance as well as identity.
+///
+/// # Safety
+///
+/// Same contract as the snapshot core.
+unsafe fn read_r11_legacy(
+    mechanism: &CK_MECHANISM,
+    registry: &MechanismRegistry,
+    operation: Operation,
+) -> Result<CkMechanism, CkRv> {
+    unsafe {
+        read_mechanism_for_transport_with_snapshots(
+            mechanism,
+            registry,
+            0,
+            None,
+            None,
+            operation,
+            false,
+            &mut NestingBudget::new(),
+        )
+    }
+}
+
+/// Custom registry for exclusion/unbound/vendor R11 tests.
+fn r11_registry(
+    bindings: &[(&str, u64)],
+    parameterless: &[u64],
+    excluded: &[u64],
+) -> MechanismRegistry {
+    MechanismRegistry::from_parts(
+        bindings.iter().map(|(shape, mech)| (*mech, shape.to_string())).collect(),
+        parameterless.iter().copied().collect(),
+        excluded.iter().copied().collect(),
+        DiscoveryMode::Transparent,
+        "r11-test".to_string(),
+    )
+}
+
+fn r11_mechanism(mech: u64, p_parameter: CK_VOID_PTR, ul_parameter_len: CK_ULONG) -> CK_MECHANISM {
+    CK_MECHANISM {
+        mechanism: mech as CK_MECHANISM_TYPE,
+        pParameter: p_parameter,
+        ulParameterLen: ul_parameter_len,
+    }
+}
+
+/// Expected R7 wire fingerprint for `shape` at `length` under `abi` (the
+/// resolver selects the same form the reader routes on).
+fn r11_expected_fingerprint_for_abi(
+    shape: &str,
+    mechanism: u64,
+    length: u64,
+    abi: ParamAbi,
+) -> u64 {
+    ShapeResolver::resolve(
+        Some(shape),
+        OperationContext { mechanism, operation: Operation::General, length },
+        abi,
+    )
+    .expect("R11 fixture shape must resolve")
+    .fingerprint(abi)
+}
+
+/// Expected R7 wire fingerprint for `shape` at `length` under LP64.
+fn r11_expected_fingerprint(shape: &str, mechanism: u64, length: u64) -> u64 {
+    r11_expected_fingerprint_for_abi(shape, mechanism, length, R11_LP64)
+}
+
+/// v1 read with the HOST-native local ABI (for struct-canonical fixtures,
+/// which are host-native): backend = local (same-ABI pair). Portable: on
+/// big-endian hosts `native()` is `None` and the reader takes the
+/// typed-fallback path with identical typed assertions.
+unsafe fn read_r11_v1_native_abi(
+    mechanism: &CK_MECHANISM,
+    registry: &MechanismRegistry,
+    operation: Operation,
+) -> Result<CkMechanism, CkRv> {
+    let abi = ParamAbi::native();
+    unsafe {
+        read_mechanism_for_transport_with_snapshots(
+            mechanism,
+            registry,
+            1,
+            abi,
+            abi,
+            operation,
+            false,
+            &mut NestingBudget::new(),
+        )
+    }
+}
+
+/// v1 read with explicit local/backend ABIs (width-matrix tests).
+unsafe fn read_r11_v1_abis(
+    mechanism: &CK_MECHANISM,
+    registry: &MechanismRegistry,
+    operation: Operation,
+    local_abi: Option<ParamAbi>,
+    backend_abi: Option<ParamAbi>,
+) -> Result<CkMechanism, CkRv> {
+    unsafe {
+        read_mechanism_for_transport_with_snapshots(
+            mechanism,
+            registry,
+            1,
+            local_abi,
+            backend_abi,
+            operation,
+            false,
+            &mut NestingBudget::new(),
+        )
+    }
+}
+
+/// Host-native `CK_GCM_PARAMS` over caller-owned buffers (the struct copies
+/// the pointers; the caller keeps the buffers alive through the read).
+fn r11_gcm_params(iv: *mut u8, iv_len: CK_ULONG, aad: *mut u8, aad_len: CK_ULONG) -> CK_GCM_PARAMS {
+    CK_GCM_PARAMS {
+        pIv: iv,
+        ulIvLen: iv_len,
+        ulIvBits: 96,
+        pAAD: aad,
+        ulAADLen: aad_len,
+        ulTagBits: 128,
+    }
+}
+
+/// Assert the v1 Flat envelope (declared length, threaded version, source
+/// ABI, wire fingerprint) plus verbatim bytes.
+fn r11_assert_flat(p: &FlatParams, expected: &[u8], fingerprint: u64) {
+    assert_eq!(p.declared_len, expected.len() as u64);
+    assert_eq!(p.version, MECHANISM_PARAMETER_TRANSPORT_VERSION);
+    assert_eq!(p.source_abi, Some(R11_LP64));
+    assert_eq!(p.fingerprint, fingerprint);
+    p.bytes.expose(|bytes| assert_eq!(bytes, expected));
+}
+
+/// Assert a v1 Null member (declared length + threaded version, no bytes).
+fn r11_assert_null(params: &Option<CkMechanismParams>, declared_len: u64) {
+    match params {
+        Some(CkMechanismParams::Null { declared_len: n, version }) => {
+            assert_eq!(*n, declared_len);
+            assert_eq!(*version, MECHANISM_PARAMETER_TRANSPORT_VERSION);
+        }
+        other => panic!("expected v1 Null({declared_len}), got {other:?}"),
+    }
 }
 
 #[test]
 fn read_raw_bytes_overlong_errors_while_empty_stays_empty() {
     // W1-L12-06: the raw-bytes reader must not conflate "overlong" with
     // "empty" — overlong is an explicit MECHANISM_PARAM_INVALID error
-    // (matching the `validate_mechanism` entry gate), empty stays empty.
+    // (matching the `read_mechanism_for_transport` legacy entry gate),
+    // empty stays empty.
     let overlong = MAX_MECHANISM_PARAM_STRUCT_LEN + 1;
     // No memory is touched on the overlong path, so a null pointer is
     // a valid probe for the length check itself.
@@ -70,7 +292,7 @@ fn read_raw_bytes_overlong_errors_while_empty_stays_empty() {
 
 #[test]
 fn unsafe_official_lengthless_parameter_shapes_are_rejected_before_shim_read() {
-    ensure_registry();
+    let registry = default_registry();
     let mut opaque = [0xA5u8];
 
     for mechanism_type in [
@@ -86,13 +308,17 @@ fn unsafe_official_lengthless_parameter_shapes_are_rejected_before_shim_read() {
             ulParameterLen: opaque.len() as CK_ULONG,
         };
 
-        let rv = unsafe { validate_mechanism(&mechanism) };
-
-        assert_eq!(
-            rv,
-            CkRv::MECHANISM_PARAM_INVALID.0 as CK_RV,
-            "0x{mechanism_type:08X} should reject unmodeled caller-owned pointer shapes"
-        );
+        // Unbound + unlisted under both capabilities: legacy rejects via
+        // the fused `check_operation`, v1 via UnknownShape. Same RV.
+        for (name, result) in [
+            ("legacy", unsafe { read_r11_legacy(&mechanism, &registry, Operation::General) }),
+            ("v1", unsafe { read_r11_v1(&mechanism, &registry, Operation::General) }),
+        ] {
+            assert!(
+                matches!(result, Err(CkRv::MECHANISM_PARAM_INVALID)),
+                "0x{mechanism_type:08X} should reject unmodeled caller-owned pointer shapes ({name})"
+            );
+        }
     }
 }
 
@@ -487,7 +713,7 @@ fn reads_authenticated_wrap_parameter_structs() {
 
 #[test]
 fn wrap_key_reader_uses_v32_aead_wrap_shapes() {
-    ensure_registry();
+    let registry = default_registry();
 
     let mut iv = [0x11u8; 12];
     let mut gcm_aad = [0xA1u8, 0xA2];
@@ -505,7 +731,7 @@ fn wrap_key_reader_uses_v32_aead_wrap_shapes() {
         pParameter: &mut gcm_wrap as *mut _ as CK_VOID_PTR,
         ulParameterLen: std::mem::size_of::<CK_GCM_WRAP_PARAMS>() as CK_ULONG,
     };
-    match unsafe { read_wrap_key_mechanism(&mechanism) }
+    match unsafe { read_r11_legacy(&mechanism, &registry, Operation::WrapKey) }
         .expect("read mechanism")
         .params
         .expect("params")
@@ -516,6 +742,19 @@ fn wrap_key_reader_uses_v32_aead_wrap_shapes() {
             assert_eq!(aad, SecretBytes::copy_from_slice(&[0xA1, 0xA2]));
         }
         other => panic!("unexpected GCM wrap-key params: {other:?}"),
+    }
+    // R11 v1 leg: exact wrap size under WrapKey is canonical for the wrap
+    // layout → same typed output via the v1 path.
+    match unsafe { read_r11_v1(&mechanism, &registry, Operation::WrapKey) }
+        .expect("read mechanism")
+        .params
+        .expect("params")
+    {
+        CkMechanismParams::GcmWrap(GcmWrapParams { iv, aad, .. }) => {
+            assert_eq!(iv, [0x11; 12]);
+            assert_eq!(aad, SecretBytes::copy_from_slice(&[0xA1, 0xA2]));
+        }
+        other => panic!("v1 WrapKey must stay typed GcmWrap, got {other:?}"),
     }
 
     let mut nonce = [0x22u8; 12];
@@ -535,7 +774,7 @@ fn wrap_key_reader_uses_v32_aead_wrap_shapes() {
         pParameter: &mut ccm_wrap as *mut _ as CK_VOID_PTR,
         ulParameterLen: std::mem::size_of::<CK_CCM_WRAP_PARAMS>() as CK_ULONG,
     };
-    match unsafe { read_wrap_key_mechanism(&mechanism) }
+    match unsafe { read_r11_legacy(&mechanism, &registry, Operation::WrapKey) }
         .expect("read mechanism")
         .params
         .expect("params")
@@ -556,11 +795,25 @@ fn wrap_key_reader_uses_v32_aead_wrap_shapes() {
         }
         other => panic!("unexpected CCM wrap-key params: {other:?}"),
     }
+    // R11 v1 leg: exact wrap size under WrapKey is canonical for the wrap
+    // layout → same typed output via the v1 path.
+    match unsafe { read_r11_v1(&mechanism, &registry, Operation::WrapKey) }
+        .expect("read mechanism")
+        .params
+        .expect("params")
+    {
+        CkMechanismParams::CcmWrap(CcmWrapParams { data_len, nonce, mac_len, .. }) => {
+            assert_eq!(data_len, 16);
+            assert_eq!(nonce, [0x22; 12]);
+            assert_eq!(mac_len, 16);
+        }
+        other => panic!("v1 WrapKey must stay typed CcmWrap, got {other:?}"),
+    }
 }
 
 #[test]
 fn wrap_key_reader_uses_wrap_shapes_only_on_exact_v32_size() {
-    ensure_registry();
+    let registry = default_registry();
 
     #[repr(C)]
     struct GcmWithPadding {
@@ -595,7 +848,7 @@ fn wrap_key_reader_uses_wrap_shapes_only_on_exact_v32_size() {
         pParameter: &mut gcm_padded as *mut _ as CK_VOID_PTR,
         ulParameterLen: std::mem::size_of::<GcmWithPadding>() as CK_ULONG,
     };
-    match unsafe { read_wrap_key_mechanism(&mechanism) }
+    match unsafe { read_r11_legacy(&mechanism, &registry, Operation::WrapKey) }
         .expect("read mechanism")
         .params
         .expect("params")
@@ -607,6 +860,16 @@ fn wrap_key_reader_uses_wrap_shapes_only_on_exact_v32_size() {
         }
         other => panic!("larger non-wrap GCM params must not be parsed as wrap: {other:?}"),
     }
+    // R11 v1 leg: the same oversized input is noncanonical for a pointer
+    // struct — Flat cannot reach past the safe prefix (S2 §5 residual
+    // limit; typed-plus-tail only on provider evidence) → MPI.
+    assert!(
+        matches!(
+            unsafe { read_r11_v1(&mechanism, &registry, Operation::WrapKey) },
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        ),
+        "v1 must reject pointer-bearing oversized GCM (residual limit)"
+    );
 
     let mut nonce = [0x44u8; 12];
     let mut ccm_aad = [0xD1u8, 0xD2];
@@ -626,7 +889,7 @@ fn wrap_key_reader_uses_wrap_shapes_only_on_exact_v32_size() {
         pParameter: &mut ccm_padded as *mut _ as CK_VOID_PTR,
         ulParameterLen: std::mem::size_of::<CcmWithPadding>() as CK_ULONG,
     };
-    match unsafe { read_wrap_key_mechanism(&mechanism) }
+    match unsafe { read_r11_legacy(&mechanism, &registry, Operation::WrapKey) }
         .expect("read mechanism")
         .params
         .expect("params")
@@ -639,6 +902,14 @@ fn wrap_key_reader_uses_wrap_shapes_only_on_exact_v32_size() {
         }
         other => panic!("larger non-wrap CCM params must not be parsed as wrap: {other:?}"),
     }
+    // R11 v1 leg: residual limit, CCM half (see the GCM leg above).
+    assert!(
+        matches!(
+            unsafe { read_r11_v1(&mechanism, &registry, Operation::WrapKey) },
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        ),
+        "v1 must reject pointer-bearing oversized CCM (residual limit)"
+    );
 }
 
 #[test]
@@ -1980,6 +2251,10 @@ fn reads_otp_and_skipjack_parameter_structs() {
 fn reads_kip_parameter_struct_with_nested_mechanism() {
     const CKM_TEST_KIP: CK_MECHANISM_TYPE = 0x8000_1030;
 
+    // Guarded + pinned to legacy: the nested KIP read gathers the
+    // global registry/capability snapshots.
+    let _guard = crate::tests::shim_state_test_guard();
+    crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(0);
     ensure_registry();
 
     let mut nested = CK_MECHANISM {
@@ -2501,7 +2776,6 @@ fn sp800_108_feedback_reads_additional_keys_and_writes_handles_back() {
 /// the read succeeds and the assertion targets the fallback shape.)
 #[test]
 fn gcm_aad_unmaterializable_len_rejected_not_wild_read() {
-    ensure_registry();
     let mut gcm = CK_GCM_PARAMS {
         pIv: std::ptr::null_mut(),
         ulIvLen: 0,
@@ -2534,7 +2808,6 @@ fn gcm_aad_unmaterializable_len_rejected_not_wild_read() {
 /// `slice::from_raw_parts` with an absurd length.
 #[test]
 fn rsa_oaep_unmaterializable_source_data_len_falls_back_to_raw() {
-    ensure_registry();
     let mut oaep = CK_RSA_PKCS_OAEP_PARAMS {
         hashAlg: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
         mgf: 1,
@@ -2565,7 +2838,6 @@ fn rsa_oaep_unmaterializable_source_data_len_falls_back_to_raw() {
 /// length.
 #[test]
 fn pbe_password_unmaterializable_len_rejected_not_wild_read() {
-    ensure_registry();
     let mut pbe = CK_PBE_PARAMS {
         pInitVector: std::ptr::null_mut(),
         pPassword: std::ptr::dangling_mut::<u8>(),
@@ -2596,7 +2868,6 @@ fn pbe_password_unmaterializable_len_rejected_not_wild_read() {
 /// derived byte count.
 #[test]
 fn salsa20_nonce_unmaterializable_bits_rejected_not_wild_read() {
-    ensure_registry();
     let mut salsa20 = CK_SALSA20_PARAMS {
         pBlockCounter: std::ptr::dangling_mut::<u8>(),
         pNonce: std::ptr::dangling_mut::<u8>(),
@@ -2870,6 +3141,11 @@ fn live_bytes(data: &[u8]) -> (Vec<u8>, *mut u8) {
 
 #[test]
 fn misaligned_outer_mechanism_and_oaep_params_read() {
+    // Production entry (the only misaligned-safe entry: it reads the outer
+    // struct unaligned exactly once). Guarded + pinned to legacy: the entry
+    // gathers the global capability snapshot.
+    let _guard = crate::tests::shim_state_test_guard();
+    crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(0);
     ensure_registry();
     let (_src_backing, src) = live_bytes(&[0xA0, 0xA1, 0xA2]);
     let oaep = CK_RSA_PKCS_OAEP_PARAMS {
@@ -2886,7 +3162,7 @@ fn misaligned_outer_mechanism_and_oaep_params_read() {
         ulParameterLen: std::mem::size_of::<CK_RSA_PKCS_OAEP_PARAMS>() as CK_ULONG,
     };
     let (_mech_backing, mech_ptr) = misaligned_copy(mechanism);
-    match unsafe { read_mechanism(mech_ptr) } {
+    match unsafe { read_mechanism_for_transport(mech_ptr, Operation::General) } {
         Ok(CkMechanism { params: Some(CkMechanismParams::RsaPkcsOaep(parsed)), .. }) => {
             assert_eq!(parsed.source_data, SecretBytes::copy_from_slice(&[0xA0, 0xA1, 0xA2]));
         }
@@ -3063,6 +3339,10 @@ fn kip_nested_rsa_mechanism() -> CK_MECHANISM {
 
 #[test]
 fn misaligned_kip_nested_records_read() {
+    // Guarded + pinned to legacy: the nested KIP read gathers the
+    // global registry/capability snapshots.
+    let _guard = crate::tests::shim_state_test_guard();
+    crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(0);
     ensure_registry();
     let (_nested_backing, nested_ptr) = misaligned_copy(kip_nested_rsa_mechanism());
     let (_seed_backing, seed) = live_bytes(&[0xF0, 0xF1]);
@@ -3093,6 +3373,10 @@ fn misaligned_kip_nested_records_read() {
 
 #[test]
 fn kip_valid_nested_mechanism_roundtrips() {
+    // Guarded + pinned to legacy: the nested KIP read gathers the
+    // global registry/capability snapshots.
+    let _guard = crate::tests::shim_state_test_guard();
+    crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(0);
     ensure_registry();
     let mut nested = kip_nested_rsa_mechanism();
     let mut seed = [0xF2u8, 0xF3, 0xF4];
@@ -3122,6 +3406,10 @@ fn kip_valid_nested_mechanism_roundtrips() {
 
 #[test]
 fn kip_self_cycle_is_rejected() {
+    // Guarded + pinned to legacy: the nested KIP read gathers the
+    // global registry/capability snapshots.
+    let _guard = crate::tests::shim_state_test_guard();
+    crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(0);
     ensure_registry();
     let mut nested = kip_nested_rsa_mechanism();
     let nested_addr = &mut nested as *mut CK_MECHANISM as usize;
@@ -3153,6 +3441,10 @@ fn kip_self_cycle_is_rejected() {
 
 #[test]
 fn kip_depth_limit_is_enforced() {
+    // Guarded + pinned to legacy: the nested KIP read gathers the
+    // global registry/capability snapshots.
+    let _guard = crate::tests::shim_state_test_guard();
+    crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(0);
     ensure_registry();
     assert_eq!(MAX_NESTED_MECHANISMS, 16, "shim/backend depth bound must match");
     let mut nested = kip_nested_rsa_mechanism();
@@ -3202,4 +3494,1329 @@ fn nesting_budget_pins_sixteen_node_limit() {
     let mut budget = NestingBudget::new();
     budget.enter(0x3000).expect("first entry fits");
     assert!(matches!(budget.enter(0x3000), Err(CkRv::MECHANISM_PARAM_INVALID)));
+}
+
+// ---------------------------------------------------------------------------
+// R11 (S2 §5): shim Flat/Null emission probes (S2 §12 Flat subset)
+// ---------------------------------------------------------------------------
+//
+// Each probe below is a named test. TDD RED: all six failed pre-change
+// (legacy Raw/None where v1 Flat/Null is expected); GREEN after.
+
+#[test]
+fn r11_flat_sha256_with_16_bytes() {
+    let registry = default_registry();
+    let mut data = [0x5Au8; 16];
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
+        pParameter: data.as_mut_ptr() as CK_VOID_PTR,
+        ulParameterLen: data.len() as CK_ULONG,
+    };
+    let params = unsafe { read_r11_v1(&mechanism, &registry, Operation::General) }
+        .expect("read mechanism")
+        .params;
+    match &params {
+        Some(CkMechanismParams::Flat(p)) => {
+            r11_assert_flat(p, &data, ABI_EXEMPT_FINGERPRINT);
+        }
+        other => panic!("SHA-256+16B must emit v1 Flat, got {other:?}"),
+    }
+}
+
+#[test]
+fn r11_flat_3_byte_pss() {
+    let registry = default_registry();
+    let mut data = [0x01u8, 0x02, 0x03];
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::RSA_PKCS_PSS.0 as CK_MECHANISM_TYPE,
+        pParameter: data.as_mut_ptr() as CK_VOID_PTR,
+        ulParameterLen: data.len() as CK_ULONG,
+    };
+    let params = unsafe { read_r11_v1(&mechanism, &registry, Operation::General) }
+        .expect("read mechanism")
+        .params;
+    match &params {
+        Some(CkMechanismParams::Flat(p)) => {
+            r11_assert_flat(
+                p,
+                &data,
+                r11_expected_fingerprint("rsa_pss", CkMechanismType::RSA_PKCS_PSS.0, 3),
+            );
+        }
+        other => panic!("3-byte PSS must emit v1 Flat, got {other:?}"),
+    }
+}
+
+#[test]
+fn r11_flat_1_byte_eddsa() {
+    let registry = default_registry();
+    let mut data = [0x07u8];
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::EDDSA.0 as CK_MECHANISM_TYPE,
+        pParameter: data.as_mut_ptr() as CK_VOID_PTR,
+        ulParameterLen: data.len() as CK_ULONG,
+    };
+    let params = unsafe { read_r11_v1(&mechanism, &registry, Operation::General) }
+        .expect("read mechanism")
+        .params;
+    match &params {
+        Some(CkMechanismParams::Flat(p)) => {
+            r11_assert_flat(
+                p,
+                &data,
+                r11_expected_fingerprint("eddsa", CkMechanismType::EDDSA.0, 1),
+            );
+        }
+        other => panic!("1-byte EdDSA must emit v1 Flat, got {other:?}"),
+    }
+}
+
+#[test]
+fn r11_outer_null_nonzero_is_null_not_none() {
+    let registry = default_registry();
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 5,
+    };
+    let params = unsafe { read_r11_v1(&mechanism, &registry, Operation::General) }
+        .expect("read mechanism")
+        .params;
+    r11_assert_null(&params, 5);
+}
+
+#[test]
+fn r11_outer_nonnull_empty_is_empty_flat_not_none() {
+    let registry = default_registry();
+    let mut data = [0x5Au8; 1];
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::AES_CBC.0 as CK_MECHANISM_TYPE,
+        pParameter: data.as_mut_ptr() as CK_VOID_PTR,
+        ulParameterLen: 0,
+    };
+    let params = unsafe { read_r11_v1(&mechanism, &registry, Operation::General) }
+        .expect("read mechanism")
+        .params;
+    match &params {
+        Some(CkMechanismParams::Flat(p)) => {
+            r11_assert_flat(p, &[], ABI_EXEMPT_FINGERPRINT);
+        }
+        other => panic!("(non-NULL,0) must emit empty v1 Flat, got {other:?}"),
+    }
+}
+
+#[test]
+fn r11_null_huge_forwards_without_deref() {
+    let registry = default_registry();
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 1024 * 1024 * 1024,
+    };
+    let params = unsafe { read_r11_v1(&mechanism, &registry, Operation::General) }
+        .expect("read mechanism")
+        .params;
+    r11_assert_null(&params, 1024 * 1024 * 1024);
+}
+
+#[test]
+fn r11_outer_null_empty_distinctness() {
+    // S2 §12 probe: the 4-cell outer matrix under v1. NULL and empty are
+    // never conflated, in either direction.
+    const UNKNOWN: u64 = 0x0000_9999;
+    let registry = default_registry();
+    let mut data = [0x5Au8; 16];
+    let live = data.as_mut_ptr() as CK_VOID_PTR;
+
+    // (NULL,0) -> None, descriptor-independent (bound, parameterless-only,
+    // and unknown mechanisms alike).
+    for mech in [CkMechanismType::RSA_PKCS_PSS.0, CkMechanismType::SHA256.0, UNKNOWN] {
+        let mechanism = r11_mechanism(mech, std::ptr::null_mut(), 0);
+        let params = unsafe { read_r11_v1(&mechanism, &registry, Operation::General) }
+            .expect("read mechanism")
+            .params;
+        assert_eq!(params, None, "(NULL,0) must stay None for 0x{mech:08X}");
+    }
+    // (NULL,5) -> Null (unknown mechanisms forward Null with no descriptor).
+    for mech in [CkMechanismType::RSA_PKCS_PSS.0, CkMechanismType::SHA256.0, UNKNOWN] {
+        let mechanism = r11_mechanism(mech, std::ptr::null_mut(), 5);
+        let params = unsafe { read_r11_v1(&mechanism, &registry, Operation::General) }
+            .expect("read mechanism")
+            .params;
+        r11_assert_null(&params, 5);
+    }
+    // (non-NULL,0) -> empty Flat (parameterless-only and struct-bound);
+    // unknown mechanisms cannot form one -> MPI.
+    for (mech, shape) in
+        [(CkMechanismType::SHA256.0, None), (CkMechanismType::RSA_PKCS_PSS.0, Some("rsa_pss"))]
+    {
+        let mechanism = r11_mechanism(mech, live, 0);
+        let params = unsafe { read_r11_v1(&mechanism, &registry, Operation::General) }
+            .expect("read mechanism")
+            .params;
+        match &params {
+            Some(CkMechanismParams::Flat(p)) => {
+                let fingerprint = shape
+                    .map(|s| r11_expected_fingerprint(s, mech, 0))
+                    .unwrap_or(ABI_EXEMPT_FINGERPRINT);
+                r11_assert_flat(p, &[], fingerprint);
+            }
+            other => panic!("(non-NULL,0) must emit empty Flat for 0x{mech:08X}, got {other:?}"),
+        }
+    }
+    let mechanism = r11_mechanism(UNKNOWN, live, 0);
+    assert!(
+        matches!(
+            unsafe { read_r11_v1(&mechanism, &registry, Operation::General) },
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        ),
+        "(non-NULL,0) with an unknown mechanism must be MPI (UnknownShape)"
+    );
+    // (non-NULL,16) -> Flat for representable shapes, MPI for unknown.
+    let mechanism = r11_mechanism(CkMechanismType::SHA256.0, live, 16);
+    let params = unsafe { read_r11_v1(&mechanism, &registry, Operation::General) }
+        .expect("read mechanism")
+        .params;
+    match &params {
+        Some(CkMechanismParams::Flat(p)) => r11_assert_flat(p, &data, ABI_EXEMPT_FINGERPRINT),
+        other => panic!("SHA-256+16B must emit v1 Flat, got {other:?}"),
+    }
+    let mechanism = r11_mechanism(UNKNOWN, live, 16);
+    assert!(
+        matches!(
+            unsafe { read_r11_v1(&mechanism, &registry, Operation::General) },
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        ),
+        "unknown mechanism with params must be MPI (UnknownShape)"
+    );
+}
+
+#[test]
+fn r11_over_limit_no_deref() {
+    // S2 §12 probe: over-cap Flat extents are denied BEFORE any dereference
+    // (the pointer below is dangling — a dereference would fault / be Miri
+    // UB). NULL lengths ignore the cap entirely (D3: no bytes materialize).
+    let registry = default_registry();
+    let dangling = std::ptr::dangling_mut::<u8>().cast::<std::ffi::c_void>();
+    let mechanism = r11_mechanism(CkMechanismType::SHA256.0, dangling, 100 * 1024);
+    assert!(
+        matches!(
+            unsafe { read_r11_v1(&mechanism, &registry, Operation::General) },
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        ),
+        "100 KiB Flat extent must be MPI without dereference (OverCap)"
+    );
+    let mechanism = r11_mechanism(CkMechanismType::SHA256.0, std::ptr::null_mut(), 100 * 1024);
+    let params = unsafe { read_r11_v1(&mechanism, &registry, Operation::General) }
+        .expect("read mechanism")
+        .params;
+    r11_assert_null(&params, 100 * 1024);
+}
+
+#[test]
+fn r11_legacy_capability_preservation() {
+    // S2 §12 probe: under legacy capability the new call preserves the old
+    // behavior EXACTLY — including legacy `Raw` emission for old daemons
+    // and the NULL/empty collapse.
+    let registry = default_registry();
+
+    // Short structs ride legacy Raw (verbatim bytes) for old daemons.
+    let mut data = [0x01u8, 0x02, 0x03];
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::RSA_PKCS_PSS.0 as CK_MECHANISM_TYPE,
+        pParameter: data.as_mut_ptr() as CK_VOID_PTR,
+        ulParameterLen: data.len() as CK_ULONG,
+    };
+    match unsafe { read_r11_legacy(&mechanism, &registry, Operation::General) }
+        .expect("read mechanism")
+        .params
+    {
+        Some(CkMechanismParams::Raw(p)) => {
+            p.data.expose(|bytes| assert_eq!(bytes, &data));
+        }
+        other => panic!("legacy short PSS must emit Raw, got {other:?}"),
+    }
+
+    // NULL/empty collapse preserved (v1 distinguishes; legacy does not).
+    let mechanism = r11_mechanism(CkMechanismType::SHA256.0, std::ptr::null_mut(), 5);
+    let params = unsafe { read_r11_legacy(&mechanism, &registry, Operation::General) }
+        .expect("read mechanism")
+        .params;
+    assert_eq!(params, None, "legacy (NULL,5) must collapse to None");
+    let mechanism = r11_mechanism(CkMechanismType::AES_CBC.0, data.as_mut_ptr().cast(), 0);
+    let params = unsafe { read_r11_legacy(&mechanism, &registry, Operation::General) }
+        .expect("read mechanism")
+        .params;
+    assert_eq!(params, None, "legacy (non-NULL,0) must collapse to None");
+
+    // Overlong outer lengths trip the entry gate without dereference.
+    let dangling = std::ptr::dangling_mut::<u8>().cast::<std::ffi::c_void>();
+    let mechanism = r11_mechanism(CkMechanismType::AES_CBC.0, dangling, 100 * 1024);
+    assert!(
+        matches!(
+            unsafe { read_r11_legacy(&mechanism, &registry, Operation::General) },
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        ),
+        "legacy overlong extent must be MPI without dereference"
+    );
+
+    // Canonical typed reads are unchanged under legacy.
+    let mut iv = [0x11u8; 12];
+    let mut aad = [0xA1u8, 0xA2];
+    let gcm = r11_gcm_params(iv.as_mut_ptr(), 12, aad.as_mut_ptr(), 2);
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::AES_GCM.0 as CK_MECHANISM_TYPE,
+        pParameter: &gcm as *const _ as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_GCM_PARAMS>() as CK_ULONG,
+    };
+    match unsafe { read_r11_legacy(&mechanism, &registry, Operation::General) }
+        .expect("read mechanism")
+        .params
+    {
+        Some(CkMechanismParams::Gcm(_)) => {}
+        other => panic!("legacy canonical GCM must stay typed, got {other:?}"),
+    }
+
+    // Wrap-sized GCM under General ignores the wrap layouts in legacy too
+    // (registry shape "gcm", noncanonical length -> Raw).
+    // `ivGenerator: 0` (not `CKG_GENERATE`): reinterpreted as CK_GCM_PARAMS,
+    // that field becomes pAAD=NULL while ulAADLen becomes the (always
+    // nonzero) `pAAD` address bits, so the missing-embedded-pointer guard
+    // yields Raw deterministically on every platform. Any nonzero generator
+    // makes the outcome address-magnitude-dependent instead (native stack
+    // addresses trip the length cap; Miri's small addresses pass it and the
+    // copy faults) — see the Miri UB this leg caught pre-commit.
+    let mut wrap = CK_GCM_WRAP_PARAMS {
+        pIv: iv.as_mut_ptr(),
+        ulIvLen: iv.len() as CK_ULONG,
+        ulIvFixedBits: 32,
+        ivGenerator: 0,
+        pAAD: aad.as_mut_ptr(),
+        ulAADLen: aad.len() as CK_ULONG,
+        ulTagBits: 128,
+    };
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::AES_GCM.0 as CK_MECHANISM_TYPE,
+        pParameter: &mut wrap as *mut _ as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_GCM_WRAP_PARAMS>() as CK_ULONG,
+    };
+    match unsafe { read_r11_legacy(&mechanism, &registry, Operation::General) }
+        .expect("read mechanism")
+        .params
+    {
+        Some(CkMechanismParams::Raw(_)) => {}
+        other => panic!("legacy General + wrap-sized GCM must emit Raw, got {other:?}"),
+    }
+}
+
+#[test]
+fn r11_gcm_compat_union_routing() {
+    // `gcm_compat` is a byte-buffer/struct union selected by length (S2 §4):
+    // short buffers stay typed Iv bytes, struct-sized buffers parse as the
+    // GCM struct, longer-than-struct buffers are noncanonical for a pointer
+    // struct -> MPI (residual limit).
+    let registry = default_registry();
+    let mut short = [0x5Au8; 16];
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::AES_GMAC.0 as CK_MECHANISM_TYPE,
+        pParameter: short.as_mut_ptr() as CK_VOID_PTR,
+        ulParameterLen: short.len() as CK_ULONG,
+    };
+    match unsafe { read_r11_v1_native_abi(&mechanism, &registry, Operation::General) }
+        .expect("read mechanism")
+        .params
+    {
+        Some(CkMechanismParams::Iv(IvParams { iv })) => assert_eq!(iv, short),
+        other => panic!("short GMAC must stay typed Iv bytes, got {other:?}"),
+    }
+
+    let mut iv = [0x11u8; 12];
+    let mut aad = [0xA1u8, 0xA2];
+    let gcm = r11_gcm_params(iv.as_mut_ptr(), 12, aad.as_mut_ptr(), 2);
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::AES_GMAC.0 as CK_MECHANISM_TYPE,
+        pParameter: &gcm as *const _ as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_GCM_PARAMS>() as CK_ULONG,
+    };
+    match unsafe { read_r11_v1_native_abi(&mechanism, &registry, Operation::General) }
+        .expect("read mechanism")
+        .params
+    {
+        Some(CkMechanismParams::Gcm(_)) => {}
+        other => panic!("struct-sized GMAC must parse as the GCM struct, got {other:?}"),
+    }
+
+    let mut long = [0x5Au8; 64];
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::AES_GMAC.0 as CK_MECHANISM_TYPE,
+        pParameter: long.as_mut_ptr() as CK_VOID_PTR,
+        ulParameterLen: long.len() as CK_ULONG,
+    };
+    assert!(
+        matches!(
+            unsafe { read_r11_v1_native_abi(&mechanism, &registry, Operation::General) },
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        ),
+        "oversized GMAC must be MPI (struct noncanonical, prefix too long)"
+    );
+}
+
+#[test]
+fn r11_wrap_key_operation_context() {
+    // Operation context is load-bearing (S2 §4, R7
+    // `general_operation_ignores_wrap_layouts`): the SAME (mechanism,
+    // length) selects the wrap layout under WrapKey and rejects under
+    // General; non-wrap sizes under WrapKey fall back to the registry.
+    let registry = default_registry();
+    let mut iv = [0x11u8; 12];
+    let mut aad = [0xA1u8, 0xA2];
+    let mut wrap = CK_GCM_WRAP_PARAMS {
+        pIv: iv.as_mut_ptr(),
+        ulIvLen: iv.len() as CK_ULONG,
+        ulIvFixedBits: 32,
+        ivGenerator: CKG_GENERATE as _,
+        pAAD: aad.as_mut_ptr(),
+        ulAADLen: aad.len() as CK_ULONG,
+        ulTagBits: 128,
+    };
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::AES_GCM.0 as CK_MECHANISM_TYPE,
+        pParameter: &mut wrap as *mut _ as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_GCM_WRAP_PARAMS>() as CK_ULONG,
+    };
+    match unsafe { read_r11_v1_native_abi(&mechanism, &registry, Operation::WrapKey) }
+        .expect("read mechanism")
+        .params
+    {
+        Some(CkMechanismParams::GcmWrap(_)) => {}
+        other => panic!("WrapKey + wrap-sized GCM must select GcmWrap, got {other:?}"),
+    }
+    assert!(
+        matches!(
+            unsafe { read_r11_v1_native_abi(&mechanism, &registry, Operation::General) },
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        ),
+        "General + wrap-sized GCM must be MPI (wrap layouts ignored)"
+    );
+
+    // CCM half: General ignores the wrap layout too.
+    let mut nonce = [0x22u8; 12];
+    let mut ccm_aad = [0xB1u8, 0xB2, 0xB3];
+    let mut ccm_wrap = CK_CCM_WRAP_PARAMS {
+        ulDataLen: 16,
+        pNonce: nonce.as_mut_ptr(),
+        ulNonceLen: nonce.len() as CK_ULONG,
+        ulNonceFixedBits: 0,
+        nonceGenerator: CKG_GENERATE as _,
+        pAAD: ccm_aad.as_mut_ptr(),
+        ulAADLen: ccm_aad.len() as CK_ULONG,
+        ulMACLen: 16,
+    };
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::AES_CCM.0 as CK_MECHANISM_TYPE,
+        pParameter: &mut ccm_wrap as *mut _ as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_CCM_WRAP_PARAMS>() as CK_ULONG,
+    };
+    assert!(
+        matches!(
+            unsafe { read_r11_v1_native_abi(&mechanism, &registry, Operation::General) },
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        ),
+        "General + wrap-sized CCM must be MPI (wrap layouts ignored)"
+    );
+
+    // WrapKey with a non-wrap size falls back to the registry binding.
+    let gcm = r11_gcm_params(iv.as_mut_ptr(), 12, aad.as_mut_ptr(), 2);
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::AES_GCM.0 as CK_MECHANISM_TYPE,
+        pParameter: &gcm as *const _ as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_GCM_PARAMS>() as CK_ULONG,
+    };
+    match unsafe { read_r11_v1_native_abi(&mechanism, &registry, Operation::WrapKey) }
+        .expect("read mechanism")
+        .params
+    {
+        Some(CkMechanismParams::Gcm(_)) => {}
+        other => panic!("WrapKey + struct-sized GCM must fall back to Gcm, got {other:?}"),
+    }
+}
+
+#[test]
+fn r11_null_pointer_never_dereferenced() {
+    // Unreadable-pointer rule (S2 §5): only NULL (never dereferenced) is
+    // unconditionally safe. Every length — including CK_ULONG::MAX, whose
+    // narrowing is the daemon's job — forwards as Null with no descriptor
+    // lookup and no memory access. The Miri run proves the no-deref half
+    // (a NULL dereference is instant UB).
+    const UNKNOWN: u64 = 0x0000_9999;
+    let registry = default_registry();
+    // A companion-set shape binding (R7 `kea_derive` carries one): outer
+    // NULL still forwards — no struct is read, so no companion exists.
+    let kea_registry = r11_registry(&[("kea_derive", 0x0000_9998)], &[], &[]);
+    for length in [1u64, 5, 1024 * 1024 * 1024, CK_ULONG::MAX as u64] {
+        let length = length as CK_ULONG;
+        for (mech, registry) in [
+            (CkMechanismType::SHA256.0, &registry),
+            (CkMechanismType::RSA_PKCS_PSS.0, &registry),
+            (UNKNOWN, &registry),
+            (0x0000_9998, &kea_registry),
+        ] {
+            let mechanism = r11_mechanism(mech, std::ptr::null_mut(), length);
+            let params = unsafe { read_r11_v1(&mechanism, registry, Operation::General) }
+                .expect("read mechanism")
+                .params;
+            r11_assert_null(&params, length as u64);
+        }
+    }
+}
+
+#[test]
+fn r11_width_same_abi_struct_prefix_ok() {
+    // S2 §5 width rule, same-ABI leg on a non-LP64 pair: struct-prefix Flat
+    // carries the local fingerprint and source ABI.
+    let registry = default_registry();
+    let mut data = [0x01u8, 0x02, 0x03];
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::RSA_PKCS_PSS.0 as CK_MECHANISM_TYPE,
+        pParameter: data.as_mut_ptr() as CK_VOID_PTR,
+        ulParameterLen: data.len() as CK_ULONG,
+    };
+    let params = unsafe {
+        read_r11_v1_abis(
+            &mechanism,
+            &registry,
+            Operation::General,
+            Some(R11_ILP32),
+            Some(R11_ILP32),
+        )
+    }
+    .expect("read mechanism")
+    .params;
+    match &params {
+        Some(CkMechanismParams::Flat(p)) => {
+            assert_eq!(p.declared_len, 3);
+            assert_eq!(p.version, MECHANISM_PARAMETER_TRANSPORT_VERSION);
+            assert_eq!(p.source_abi, Some(R11_ILP32));
+            assert_eq!(
+                p.fingerprint,
+                r11_expected_fingerprint_for_abi(
+                    "rsa_pss",
+                    CkMechanismType::RSA_PKCS_PSS.0,
+                    3,
+                    R11_ILP32
+                )
+            );
+            p.bytes.expose(|bytes| assert_eq!(bytes, &data));
+        }
+        other => panic!("same-ABI struct prefix must emit Flat, got {other:?}"),
+    }
+}
+
+#[test]
+fn r11_width_cross_abi_struct_prefix_rejected() {
+    // S2 §5 width rule: struct prefixes require identical layouts, else
+    // explicit PARAM_INVALID — in both directions.
+    let registry = default_registry();
+    let mut data = [0x01u8, 0x02, 0x03];
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::RSA_PKCS_PSS.0 as CK_MECHANISM_TYPE,
+        pParameter: data.as_mut_ptr() as CK_VOID_PTR,
+        ulParameterLen: data.len() as CK_ULONG,
+    };
+    for (local, backend) in [(Some(R11_LP64), Some(R11_ILP32)), (Some(R11_ILP32), Some(R11_LP64))] {
+        assert!(
+            matches!(
+                unsafe {
+                    read_r11_v1_abis(&mechanism, &registry, Operation::General, local, backend)
+                },
+                Err(CkRv::MECHANISM_PARAM_INVALID)
+            ),
+            "cross-ABI struct prefix ({local:?} -> {backend:?}) must be MPI"
+        );
+    }
+}
+
+#[test]
+fn r11_width_unknown_backend_abi_rejects_struct_prefix() {
+    // An unknown backend ABI fails closed for struct prefixes (layouts
+    // cannot be proven identical).
+    let registry = default_registry();
+    let mut data = [0x01u8, 0x02, 0x03];
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::RSA_PKCS_PSS.0 as CK_MECHANISM_TYPE,
+        pParameter: data.as_mut_ptr() as CK_VOID_PTR,
+        ulParameterLen: data.len() as CK_ULONG,
+    };
+    assert!(
+        matches!(
+            unsafe {
+                read_r11_v1_abis(&mechanism, &registry, Operation::General, Some(R11_LP64), None)
+            },
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        ),
+        "struct prefix with unknown backend ABI must be MPI"
+    );
+}
+
+#[test]
+fn r11_width_bare_flat_crosses_abis() {
+    // S2 §5 width rule: parameterless and byte-buffer Flat cross ABIs
+    // (backend ignored — `None` proves it); NULL carries no ABI at all.
+    let registry = default_registry();
+    let mut data = [0x5Au8; 16];
+    let live = data.as_mut_ptr() as CK_VOID_PTR;
+
+    let mechanism = r11_mechanism(CkMechanismType::SHA256.0, live, 16);
+    let params = unsafe {
+        read_r11_v1_abis(&mechanism, &registry, Operation::General, Some(R11_LP64), Some(R11_ILP32))
+    }
+    .expect("read mechanism")
+    .params;
+    match &params {
+        Some(CkMechanismParams::Flat(p)) => r11_assert_flat(p, &data, ABI_EXEMPT_FINGERPRINT),
+        other => panic!("cross-ABI parameterless Flat must emit, got {other:?}"),
+    }
+
+    let mechanism = r11_mechanism(CkMechanismType::SHA256.0, live, 0);
+    let params = unsafe {
+        read_r11_v1_abis(&mechanism, &registry, Operation::General, Some(R11_LP64), None)
+    }
+    .expect("read mechanism")
+    .params;
+    match &params {
+        Some(CkMechanismParams::Flat(p)) => r11_assert_flat(p, &[], ABI_EXEMPT_FINGERPRINT),
+        other => panic!("empty Flat must emit with unknown backend ABI, got {other:?}"),
+    }
+
+    // Byte-buffer shapes keep their (ABI-independent) typed encoding across
+    // ABIs.
+    let mechanism = r11_mechanism(CkMechanismType::AES_CBC.0, live, 16);
+    let params = unsafe {
+        read_r11_v1_abis(&mechanism, &registry, Operation::General, Some(R11_LP64), Some(R11_ILP32))
+    }
+    .expect("read mechanism")
+    .params;
+    match &params {
+        Some(CkMechanismParams::Iv(IvParams { iv })) => assert_eq!(iv.as_slice(), data),
+        other => panic!("cross-ABI byte-buffer input must stay typed Iv, got {other:?}"),
+    }
+
+    let mechanism = r11_mechanism(CkMechanismType::RSA_PKCS_PSS.0, std::ptr::null_mut(), 7);
+    let params = unsafe {
+        read_r11_v1_abis(&mechanism, &registry, Operation::General, Some(R11_LP64), None)
+    }
+    .expect("read mechanism")
+    .params;
+    r11_assert_null(&params, 7);
+}
+
+#[test]
+fn r11_d3_null_huge_forwards_freely() {
+    // D3: NULL lengths above 512 MiB forward freely (no bytes materialize)
+    // — for unknown mechanisms (no descriptor needed) and even for
+    // companion-set shapes, where the shared-length exception is vacuous
+    // at the outer level (no struct is read, so no companion can share
+    // the length; R17 enforces the exception per field on the typed path).
+    const HUGE: CK_ULONG = 1024 * 1024 * 1024;
+    let registry = default_registry();
+    let kea_registry = r11_registry(&[("kea_derive", 0x0000_9998)], &[], &[]);
+    for (mech, registry) in [(0x0000_9999u64, &registry), (0x0000_9998, &kea_registry)] {
+        let mechanism = r11_mechanism(mech, std::ptr::null_mut(), HUGE);
+        let params = unsafe { read_r11_v1(&mechanism, registry, Operation::General) }
+            .expect("read mechanism")
+            .params;
+        r11_assert_null(&params, HUGE as u64);
+    }
+}
+
+#[test]
+fn r11_d3_governed_companion_stays_capped() {
+    // D3 exception half: a governed (materialized) companion stays capped
+    // at 512 MiB. Canonical GCM with a 600 MiB AAD declaration cannot ride
+    // the typed path (the embedded copy is unmaterializable) and cannot
+    // ride Flat (full native image) -> local MPI, with no 600 MB copy
+    // attempted (the length guard short-circuits before any materialization;
+    // R17 will type this input once presence fields exist).
+    let registry = default_registry();
+    let mut aad = [0xA1u8];
+    let gcm = CK_GCM_PARAMS {
+        pIv: std::ptr::null_mut(),
+        ulIvLen: 12,
+        ulIvBits: 96,
+        pAAD: aad.as_mut_ptr(),
+        ulAADLen: 600 * 1024 * 1024,
+        ulTagBits: 128,
+    };
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::AES_GCM.0 as CK_MECHANISM_TYPE,
+        pParameter: &gcm as *const _ as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_GCM_PARAMS>() as CK_ULONG,
+    };
+    assert!(
+        matches!(
+            unsafe { read_r11_v1_native_abi(&mechanism, &registry, Operation::General) },
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        ),
+        "canonical GCM with an over-cap companion must be MPI (cap preserved)"
+    );
+}
+
+#[test]
+fn r11_v1_never_emits_legacy_raw() {
+    // Under v1 the shim NEVER emits legacy Raw (S2 §5): every input the
+    // legacy reader would forward as Raw becomes Flat or local MPI.
+    let registry = default_registry();
+    let kip_registry = r11_registry(&[("kip", CkMechanismType::KIP_DERIVE.0)], &[], &[]);
+
+    // Short structs -> Flat.
+    for (name, mech, shape, bytes) in [
+        ("short-pss", CkMechanismType::RSA_PKCS_PSS.0, "rsa_pss", vec![0x01u8, 0x02, 0x03]),
+        ("short-eddsa", CkMechanismType::EDDSA.0, "eddsa", vec![0x07u8]),
+    ] {
+        let mut bytes = bytes;
+        let mechanism = CK_MECHANISM {
+            mechanism: mech as CK_MECHANISM_TYPE,
+            pParameter: bytes.as_mut_ptr() as CK_VOID_PTR,
+            ulParameterLen: bytes.len() as CK_ULONG,
+        };
+        let params = unsafe { read_r11_v1(&mechanism, &registry, Operation::General) }
+            .expect("read mechanism")
+            .params;
+        match &params {
+            Some(CkMechanismParams::Flat(p)) => {
+                r11_assert_flat(
+                    p,
+                    &bytes,
+                    r11_expected_fingerprint(shape, mech, bytes.len() as u64),
+                );
+            }
+            other => panic!("{name} must emit Flat under v1, got {other:?}"),
+        }
+    }
+
+    // Degenerate canonical structs -> MPI (typed-v1 presence is R17).
+    let mut aad = [0xA1u8, 0xA2];
+    let gcm = CK_GCM_PARAMS {
+        pIv: std::ptr::null_mut(),
+        ulIvLen: 12,
+        ulIvBits: 96,
+        pAAD: aad.as_mut_ptr(),
+        ulAADLen: aad.len() as CK_ULONG,
+        ulTagBits: 128,
+    };
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::AES_GCM.0 as CK_MECHANISM_TYPE,
+        pParameter: &gcm as *const _ as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_GCM_PARAMS>() as CK_ULONG,
+    };
+    assert!(
+        matches!(
+            unsafe { read_r11_v1_native_abi(&mechanism, &registry, Operation::General) },
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        ),
+        "degenerate canonical GCM must be MPI under v1 (never Raw)"
+    );
+
+    // Short nested/output shapes -> MPI (typed envelopes only, R18).
+    let mut short = [0x5Au8; 4];
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::KIP_DERIVE.0 as CK_MECHANISM_TYPE,
+        pParameter: short.as_mut_ptr() as CK_VOID_PTR,
+        ulParameterLen: short.len() as CK_ULONG,
+    };
+    assert!(
+        matches!(
+            unsafe { read_r11_v1_native_abi(&mechanism, &kip_registry, Operation::General) },
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        ),
+        "short KIP must be MPI under v1 (never Raw)"
+    );
+
+    // Unknown mechanisms with params -> MPI.
+    let mechanism = CK_MECHANISM {
+        mechanism: 0x0000_9999,
+        pParameter: short.as_mut_ptr() as CK_VOID_PTR,
+        ulParameterLen: short.len() as CK_ULONG,
+    };
+    assert!(
+        matches!(
+            unsafe { read_r11_v1(&mechanism, &registry, Operation::General) },
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        ),
+        "unknown mechanism with params must be MPI under v1 (never Raw)"
+    );
+}
+
+#[test]
+fn r11_excluded_mechanism_rejected() {
+    // S2 §4 rule 1: operator exclusion wins — under BOTH capabilities and
+    // for every outer class, including parameterless invocations.
+    let excluded = CkMechanismType::RSA_PKCS_PSS.0;
+    let registry = r11_registry(&[("rsa_pss", excluded)], &[], &[excluded]);
+    let mut data = [0x01u8, 0x02, 0x03];
+    let live = data.as_mut_ptr() as CK_VOID_PTR;
+    let pss = CK_RSA_PKCS_PSS_PARAMS {
+        hashAlg: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
+        mgf: 1,
+        sLen: 32,
+    };
+
+    let cases: Vec<(&str, CK_MECHANISM)> = vec![
+        ("null-empty", r11_mechanism(excluded, std::ptr::null_mut(), 0)),
+        ("null-nonzero", r11_mechanism(excluded, std::ptr::null_mut(), 5)),
+        ("nonnull-empty", r11_mechanism(excluded, live, 0)),
+        ("short", r11_mechanism(excluded, live, 3)),
+        (
+            "canonical",
+            CK_MECHANISM {
+                mechanism: excluded as CK_MECHANISM_TYPE,
+                pParameter: &pss as *const _ as CK_VOID_PTR,
+                ulParameterLen: std::mem::size_of::<CK_RSA_PKCS_PSS_PARAMS>() as CK_ULONG,
+            },
+        ),
+    ];
+    for (name, mechanism) in &cases {
+        for (cap, result) in [
+            ("legacy", unsafe { read_r11_legacy(mechanism, &registry, Operation::General) }),
+            ("v1-lp64", unsafe {
+                read_r11_v1_native_abi(mechanism, &registry, Operation::General)
+            }),
+        ] {
+            assert!(
+                matches!(result, Err(CkRv::MECHANISM_INVALID)),
+                "excluded mechanism must be MI ({name}, {cap})"
+            );
+        }
+    }
+}
+
+#[test]
+fn r11_unknown_mechanism_matrix() {
+    // Unknown mechanisms: v1 forwards NULL (no descriptor needed, S2 §6 RV
+    // table) and rejects non-NULL with MPI; legacy collapses NULL/empty to
+    // None and rejects non-NULL/nonzero with MPI.
+    const UNKNOWN: u64 = 0x0000_9999;
+    let registry = default_registry();
+    let mut data = [0x5Au8; 7];
+    let live = data.as_mut_ptr() as CK_VOID_PTR;
+
+    let mechanism = r11_mechanism(UNKNOWN, std::ptr::null_mut(), 0);
+    for (cap, result) in [
+        ("legacy", unsafe { read_r11_legacy(&mechanism, &registry, Operation::General) }),
+        ("v1", unsafe { read_r11_v1(&mechanism, &registry, Operation::General) }),
+    ] {
+        let params = result.expect("read mechanism").params;
+        assert_eq!(params, None, "(NULL,0) must stay None ({cap})");
+    }
+
+    let mechanism = r11_mechanism(UNKNOWN, std::ptr::null_mut(), 7);
+    let params = unsafe { read_r11_legacy(&mechanism, &registry, Operation::General) }
+        .expect("read mechanism")
+        .params;
+    assert_eq!(params, None, "legacy (NULL,7) must collapse to None");
+    let params = unsafe { read_r11_v1(&mechanism, &registry, Operation::General) }
+        .expect("read mechanism")
+        .params;
+    r11_assert_null(&params, 7);
+
+    let mechanism = r11_mechanism(UNKNOWN, live, 0);
+    let params = unsafe { read_r11_legacy(&mechanism, &registry, Operation::General) }
+        .expect("read mechanism")
+        .params;
+    assert_eq!(params, None, "legacy (non-NULL,0) must collapse to None");
+    assert!(
+        matches!(
+            unsafe { read_r11_v1(&mechanism, &registry, Operation::General) },
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        ),
+        "v1 (non-NULL,0) with unknown mechanism must be MPI"
+    );
+
+    let mechanism = r11_mechanism(UNKNOWN, live, 7);
+    for (cap, result) in [
+        ("legacy", unsafe { read_r11_legacy(&mechanism, &registry, Operation::General) }),
+        ("v1", unsafe { read_r11_v1(&mechanism, &registry, Operation::General) }),
+    ] {
+        assert!(
+            matches!(result, Err(CkRv::MECHANISM_PARAM_INVALID)),
+            "unknown mechanism with params must be MPI ({cap})"
+        );
+    }
+}
+
+#[test]
+fn r11_vendor_flat_requires_allowlist() {
+    // S2 §4 TOML rule: TOML may bind a mechanism to a compiled descriptor
+    // but can never authorize vendor Flat (the v1 allowlist is empty) — a
+    // TOML-bound vendor mechanism with a noncanonical length is MPI under
+    // v1 (legacy still emits Raw for old daemons). Canonical lengths stay
+    // typed under both.
+    const VENDOR: u64 = 0x8000_0001;
+    let registry = r11_registry(&[("rsa_pss", VENDOR)], &[], &[]);
+    let mut data = [0x01u8, 0x02, 0x03];
+    let mechanism = CK_MECHANISM {
+        mechanism: VENDOR as CK_MECHANISM_TYPE,
+        pParameter: data.as_mut_ptr() as CK_VOID_PTR,
+        ulParameterLen: data.len() as CK_ULONG,
+    };
+    assert!(
+        matches!(
+            unsafe { read_r11_v1(&mechanism, &registry, Operation::General) },
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        ),
+        "vendor noncanonical length must be MPI under v1 (no allowlist entry)"
+    );
+    match unsafe { read_r11_legacy(&mechanism, &registry, Operation::General) }
+        .expect("read mechanism")
+        .params
+    {
+        Some(CkMechanismParams::Raw(_)) => {}
+        other => panic!("legacy vendor short input must emit Raw, got {other:?}"),
+    }
+
+    let pss = CK_RSA_PKCS_PSS_PARAMS {
+        hashAlg: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
+        mgf: 1,
+        sLen: 32,
+    };
+    let mechanism = CK_MECHANISM {
+        mechanism: VENDOR as CK_MECHANISM_TYPE,
+        pParameter: &pss as *const _ as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_RSA_PKCS_PSS_PARAMS>() as CK_ULONG,
+    };
+    match unsafe { read_r11_v1_native_abi(&mechanism, &registry, Operation::General) }
+        .expect("read mechanism")
+        .params
+    {
+        Some(CkMechanismParams::RsaPkcsPss(_)) => {}
+        other => panic!("canonical vendor input must stay typed under v1, got {other:?}"),
+    }
+}
+
+#[test]
+fn r11_v1_canonical_stays_typed() {
+    // Canonical lengths route to the EXISTING typed reader unchanged (R17
+    // owns the typed rework): struct params parse, byte-buffer shapes keep
+    // their legacy typed encoding (still valid under v1, S2 §3).
+    let registry = default_registry();
+
+    let mut iv = [0x11u8; 12];
+    let mut aad = [0xA1u8, 0xA2];
+    let gcm = r11_gcm_params(iv.as_mut_ptr(), 12, aad.as_mut_ptr(), 2);
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::AES_GCM.0 as CK_MECHANISM_TYPE,
+        pParameter: &gcm as *const _ as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_GCM_PARAMS>() as CK_ULONG,
+    };
+    match unsafe { read_r11_v1_native_abi(&mechanism, &registry, Operation::General) }
+        .expect("read mechanism")
+        .params
+    {
+        Some(CkMechanismParams::Gcm(_)) => {}
+        other => panic!("canonical GCM must stay typed under v1, got {other:?}"),
+    }
+
+    let pss = CK_RSA_PKCS_PSS_PARAMS {
+        hashAlg: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
+        mgf: 1,
+        sLen: 32,
+    };
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::RSA_PKCS_PSS.0 as CK_MECHANISM_TYPE,
+        pParameter: &pss as *const _ as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_RSA_PKCS_PSS_PARAMS>() as CK_ULONG,
+    };
+    match unsafe { read_r11_v1_native_abi(&mechanism, &registry, Operation::General) }
+        .expect("read mechanism")
+        .params
+    {
+        Some(CkMechanismParams::RsaPkcsPss(_)) => {}
+        other => panic!("canonical PSS must stay typed under v1, got {other:?}"),
+    }
+
+    let mut bytes = [0x5Au8; 16];
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::AES_CBC.0 as CK_MECHANISM_TYPE,
+        pParameter: bytes.as_mut_ptr() as CK_VOID_PTR,
+        ulParameterLen: bytes.len() as CK_ULONG,
+    };
+    match unsafe { read_r11_v1_native_abi(&mechanism, &registry, Operation::General) }
+        .expect("read mechanism")
+        .params
+    {
+        Some(CkMechanismParams::Iv(IvParams { iv })) => assert_eq!(iv, bytes),
+        other => panic!("byte-buffer input must stay typed Iv under v1, got {other:?}"),
+    }
+}
+
+#[test]
+fn r11_nested_legacy_skips_validate_fusion() {
+    // Nested KIP nodes under legacy reproduce the old nested read EXACTLY:
+    // no validate-fusion (excluded nested mechanisms forward, unknown
+    // nested mechanisms with params ride nested Raw) — validation was
+    // top-level-only. Guarded: the nested helper gathers global snapshots;
+    // the custom registry + legacy pin are restored before return.
+    const EXCLUDED_NESTED: u64 = 0x0000_9997;
+    let _guard = crate::tests::shim_state_test_guard();
+    crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(0);
+    crate::state::replace_mechanism_registry(r11_registry(&[], &[], &[EXCLUDED_NESTED]));
+
+    // Excluded nested (NULL,0) forwards (top-level would be MI).
+    let mut nested = r11_mechanism(EXCLUDED_NESTED, std::ptr::null_mut(), 0);
+    let mut seed = [0xF2u8, 0xF3];
+    let kip = CK_KIP_PARAMS {
+        pMechanism: &mut nested,
+        hKey: 0x43,
+        pSeed: seed.as_mut_ptr(),
+        ulSeedLen: seed.len() as CK_ULONG,
+    };
+    let mechanism = CK_MECHANISM {
+        mechanism: CKM_KIP_DERIVE,
+        pParameter: &kip as *const _ as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_KIP_PARAMS>() as CK_ULONG,
+    };
+    match unsafe { read_mechanism_with_shape(&mechanism, Some("kip")) }
+        .expect("read mechanism")
+        .params
+    {
+        Some(CkMechanismParams::Kip(KipParams { mechanism, .. })) => {
+            assert_eq!(mechanism.mechanism_type.0, EXCLUDED_NESTED);
+            assert_eq!(mechanism.params, None);
+        }
+        other => panic!("excluded nested (NULL,0) must forward in legacy, got {other:?}"),
+    }
+
+    // Unknown nested with params rides nested Raw (top-level would be MPI).
+    let mut bytes = [0xE0u8, 0xE1, 0xE2, 0xE3];
+    let mut nested = r11_mechanism(0x0000_9999, bytes.as_mut_ptr().cast(), 4);
+    let kip = CK_KIP_PARAMS {
+        pMechanism: &mut nested,
+        hKey: 0x44,
+        pSeed: seed.as_mut_ptr(),
+        ulSeedLen: seed.len() as CK_ULONG,
+    };
+    let mechanism = CK_MECHANISM {
+        mechanism: CKM_KIP_DERIVE,
+        pParameter: &kip as *const _ as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_KIP_PARAMS>() as CK_ULONG,
+    };
+    match unsafe { read_mechanism_with_shape(&mechanism, Some("kip")) }
+        .expect("read mechanism")
+        .params
+    {
+        Some(CkMechanismParams::Kip(KipParams { mechanism, .. })) => match &mechanism.params {
+            Some(CkMechanismParams::Raw(p)) => {
+                p.data.expose(|b| assert_eq!(b, &bytes));
+            }
+            other => panic!("unknown nested params must ride nested Raw, got {other:?}"),
+        },
+        other => panic!("KIP with unknown nested params must parse in legacy, got {other:?}"),
+    }
+
+    ensure_registry();
+}
+
+#[test]
+fn r11_nested_v1_outer_classification() {
+    // Nested KIP nodes under v1 get full v1 semantics through the nested
+    // helper (one snapshot per node): a nested (NULL,n) becomes Null, never
+    // collapsed. Guarded: global snapshots; restored before return.
+    let _guard = crate::tests::shim_state_test_guard();
+    crate::state::replace_mechanism_registry(r11_registry(
+        &[("kip", CkMechanismType::KIP_DERIVE.0)],
+        &[],
+        &[],
+    ));
+    crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(1);
+
+    let mut nested = r11_mechanism(CkMechanismType::SHA256.0, std::ptr::null_mut(), 5);
+    let mut seed = [0xF2u8, 0xF3];
+    let kip = CK_KIP_PARAMS {
+        pMechanism: &mut nested,
+        hKey: 0x43,
+        pSeed: seed.as_mut_ptr(),
+        ulSeedLen: seed.len() as CK_ULONG,
+    };
+    let mechanism = CK_MECHANISM {
+        mechanism: CKM_KIP_DERIVE,
+        pParameter: &kip as *const _ as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_KIP_PARAMS>() as CK_ULONG,
+    };
+    match unsafe { read_mechanism_with_shape(&mechanism, Some("kip")) }
+        .expect("read mechanism")
+        .params
+    {
+        Some(CkMechanismParams::Kip(KipParams { mechanism, .. })) => {
+            r11_assert_null(&mechanism.params, 5);
+        }
+        other => panic!("nested (NULL,5) must be Null under v1, got {other:?}"),
+    }
+
+    crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(0);
+    ensure_registry();
+}
+
+#[test]
+fn r11_nested_core_skips_exclusion() {
+    // The nested contract, hermetically: nested nodes skip exclusion under
+    // BOTH capabilities (legacy parity: validation was top-level-only;
+    // daemon R9 does not recurse into nested params).
+    let excluded = CkMechanismType::RSA_PKCS_PSS.0;
+    let registry = r11_registry(&[("rsa_pss", excluded)], &[], &[excluded]);
+    let mechanism = r11_mechanism(excluded, std::ptr::null_mut(), 0);
+    for capability in [0u32, 1] {
+        let params = unsafe {
+            read_mechanism_for_transport_with_snapshots(
+                &mechanism,
+                &registry,
+                capability,
+                Some(R11_LP64),
+                Some(R11_LP64),
+                Operation::General,
+                true,
+                &mut NestingBudget::new(),
+            )
+        }
+        .expect("read mechanism")
+        .params;
+        assert_eq!(params, None, "nested (NULL,0) must forward (capability {capability})");
+    }
+    // Nested legacy also skips the shape gate: unknown nested params ride
+    // nested Raw.
+    let mut bytes = [0xE0u8, 0xE1];
+    let mechanism = r11_mechanism(0x0000_9999, bytes.as_mut_ptr().cast(), 2);
+    let params = unsafe {
+        read_mechanism_for_transport_with_snapshots(
+            &mechanism,
+            &registry,
+            0,
+            Some(R11_LP64),
+            Some(R11_LP64),
+            Operation::General,
+            true,
+            &mut NestingBudget::new(),
+        )
+    }
+    .expect("read mechanism")
+    .params;
+    match &params {
+        Some(CkMechanismParams::Raw(p)) => {
+            p.data.expose(|b| assert_eq!(b, &bytes));
+        }
+        other => panic!("nested legacy unknown params must ride Raw, got {other:?}"),
+    }
+}
+
+#[test]
+fn r11_production_entry_gathers_global_snapshots() {
+    // The pointer-level production entry consumes the R5/R10 snapshot API
+    // unchanged (global capability; registry + ABI from global state):
+    // legacy globals reproduce legacy behavior, v1 globals switch the same
+    // call to v1 emission. Guarded + restored (capability-mutating).
+    let _guard = crate::tests::shim_state_test_guard();
+    ensure_registry();
+    crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(0);
+
+    let mut data = [0x01u8, 0x02, 0x03];
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::RSA_PKCS_PSS.0 as CK_MECHANISM_TYPE,
+        pParameter: data.as_mut_ptr() as CK_VOID_PTR,
+        ulParameterLen: data.len() as CK_ULONG,
+    };
+    match unsafe { read_mechanism_for_transport(&mechanism, Operation::General) }
+        .expect("read mechanism")
+        .params
+    {
+        Some(CkMechanismParams::Raw(_)) => {}
+        other => panic!("production entry with legacy globals must emit Raw, got {other:?}"),
+    }
+
+    crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(1);
+    let mut bytes = [0x5Au8; 16];
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
+        pParameter: bytes.as_mut_ptr() as CK_VOID_PTR,
+        ulParameterLen: bytes.len() as CK_ULONG,
+    };
+    // Bare Flat crosses ABIs on every host (no struct layout involved).
+    match unsafe { read_mechanism_for_transport(&mechanism, Operation::General) }
+        .expect("read mechanism")
+        .params
+    {
+        Some(CkMechanismParams::Flat(p)) => {
+            assert_eq!(p.declared_len, 16);
+            assert_eq!(p.version, MECHANISM_PARAMETER_TRANSPORT_VERSION);
+            assert_eq!(p.fingerprint, ABI_EXEMPT_FINGERPRINT);
+            p.bytes.expose(|b| assert_eq!(b, &bytes));
+        }
+        other => panic!("production entry with v1 globals must emit Flat, got {other:?}"),
+    }
+    let mechanism = r11_mechanism(CkMechanismType::SHA256.0, std::ptr::null_mut(), 5);
+    let params = unsafe { read_mechanism_for_transport(&mechanism, Operation::General) }
+        .expect("read mechanism")
+        .params;
+    r11_assert_null(&params, 5);
+
+    crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(0);
+}
+
+#[test]
+fn r11_no_native_abi_typed_only_no_flat() {
+    // Without a v1 ABI for this target (`local_abi == None`, i.e.
+    // big-endian) the shim can never emit well-formed Flat (no source ABI
+    // to name): the typed path still works via native mirrors, legacy Raw
+    // stays banned, and (non-NULL,0) cannot collapse to None.
+    let registry = default_registry();
+    let mut data = [0x01u8, 0x02, 0x03];
+    let live = data.as_mut_ptr() as CK_VOID_PTR;
+
+    let mechanism = r11_mechanism(CkMechanismType::SHA256.0, live, 0);
+    assert!(
+        matches!(
+            unsafe {
+                read_mechanism_for_transport_with_snapshots(
+                    &mechanism,
+                    &registry,
+                    1,
+                    None,
+                    None,
+                    Operation::General,
+                    false,
+                    &mut NestingBudget::new(),
+                )
+            },
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        ),
+        "(non-NULL,0) without a native ABI must be MPI (no Flat, no collapse)"
+    );
+
+    let mechanism = r11_mechanism(CkMechanismType::RSA_PKCS_PSS.0, live, 3);
+    assert!(
+        matches!(
+            unsafe {
+                read_mechanism_for_transport_with_snapshots(
+                    &mechanism,
+                    &registry,
+                    1,
+                    None,
+                    None,
+                    Operation::General,
+                    false,
+                    &mut NestingBudget::new(),
+                )
+            },
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        ),
+        "short struct without a native ABI must be MPI (typed reader Raw banned)"
+    );
+
+    let pss = CK_RSA_PKCS_PSS_PARAMS {
+        hashAlg: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
+        mgf: 1,
+        sLen: 32,
+    };
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::RSA_PKCS_PSS.0 as CK_MECHANISM_TYPE,
+        pParameter: &pss as *const _ as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_RSA_PKCS_PSS_PARAMS>() as CK_ULONG,
+    };
+    match unsafe {
+        read_mechanism_for_transport_with_snapshots(
+            &mechanism,
+            &registry,
+            1,
+            None,
+            None,
+            Operation::General,
+            false,
+            &mut NestingBudget::new(),
+        )
+    }
+    .expect("read mechanism")
+    .params
+    {
+        Some(CkMechanismParams::RsaPkcsPss(_)) => {}
+        other => panic!("canonical struct without a native ABI must stay typed, got {other:?}"),
+    }
+}
+
+#[test]
+fn r11_synthetic_parameterless_binding_rides_flat() {
+    // A mechanism bound to the synthetic `parameterless` marker shape rides
+    // Flat under v1 (S2 §4: parameterless-shaped bytes may carry arbitrary
+    // flat bytes to the cap) — daemon-consistent (`decide_flat` grants the
+    // bare form on both edges).
+    let registry = r11_registry(&[("parameterless", 0x0000_9998)], &[], &[]);
+    let mut data = [0x5Au8; 16];
+    let mechanism = CK_MECHANISM {
+        mechanism: 0x0000_9998,
+        pParameter: data.as_mut_ptr() as CK_VOID_PTR,
+        ulParameterLen: data.len() as CK_ULONG,
+    };
+    let params = unsafe { read_r11_v1(&mechanism, &registry, Operation::General) }
+        .expect("read mechanism")
+        .params;
+    match &params {
+        Some(CkMechanismParams::Flat(p)) => r11_assert_flat(p, &data, ABI_EXEMPT_FINGERPRINT),
+        other => panic!("parameterless-bound bytes must ride Flat, got {other:?}"),
+    }
+}
+
+#[test]
+fn r11_v1_canonical_kip_stays_typed() {
+    // Nested/output forms ride the typed path under v1 (R18 owns their
+    // envelopes): canonical KIP parses through the v1 router with v1
+    // semantics at the nested node. Guarded: the nested helper gathers
+    // global snapshots; restored before return.
+    let _guard = crate::tests::shim_state_test_guard();
+    let kip_registry = r11_registry(&[("kip", CkMechanismType::KIP_DERIVE.0)], &[], &[]);
+    crate::state::replace_mechanism_registry(kip_registry.clone());
+    crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(1);
+
+    let mut nested = r11_mechanism(CkMechanismType::SHA256.0, std::ptr::null_mut(), 5);
+    let mut seed = [0xF2u8, 0xF3, 0xF4];
+    let kip = CK_KIP_PARAMS {
+        pMechanism: &mut nested,
+        hKey: 0x43,
+        pSeed: seed.as_mut_ptr(),
+        ulSeedLen: seed.len() as CK_ULONG,
+    };
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::KIP_DERIVE.0 as CK_MECHANISM_TYPE,
+        pParameter: &kip as *const _ as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_KIP_PARAMS>() as CK_ULONG,
+    };
+    let params = unsafe { read_r11_v1_native_abi(&mechanism, &kip_registry, Operation::General) }
+        .expect("read mechanism")
+        .params;
+    match &params {
+        Some(CkMechanismParams::Kip(KipParams { mechanism, key_handle, seed })) => {
+            assert_eq!(mechanism.mechanism_type.0, CkMechanismType::SHA256.0);
+            assert_eq!(key_handle.0, 0x43);
+            assert_eq!(seed, &SecretBytes::copy_from_slice(&[0xF2, 0xF3, 0xF4]));
+            r11_assert_null(&mechanism.params, 5);
+        }
+        other => panic!("canonical KIP must stay typed under v1, got {other:?}"),
+    }
+
+    crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(0);
+    ensure_registry();
+}
+
+#[test]
+fn r11_wrapping_extent_rejected_without_deref() {
+    // Arithmetic-invalid extents are rejected without dereference even when
+    // the Flat grant would allow the length: the capped raw reader
+    // re-checks the extent rather than trust the grant. (The pointer below
+    // is bogus — a dereference would fault / be Miri UB.)
+    let registry = default_registry();
+    let bogus = usize::MAX as *mut u8 as CK_VOID_PTR;
+    let mechanism = r11_mechanism(CkMechanismType::SHA256.0, bogus, 100);
+    assert!(
+        matches!(
+            unsafe { read_r11_v1(&mechanism, &registry, Operation::General) },
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        ),
+        "wrapping extent must be MPI without dereference"
+    );
 }

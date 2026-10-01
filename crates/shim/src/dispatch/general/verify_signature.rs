@@ -36,11 +36,7 @@ pub unsafe extern "C" fn c_verify_signature_init(
             if !state::is_session_known(h_session) {
                 return rv_err(CkRv::SESSION_HANDLE_INVALID);
             }
-            let rv = unsafe { validate_mechanism(p_mechanism) };
-            if rv != rv_ok() {
-                return rv;
-            }
-            Some(match unsafe { read_mechanism(p_mechanism) } {
+            Some(match unsafe { read_mechanism_for_transport(p_mechanism, Operation::General) } {
                 Ok(mech) => mech,
                 Err(e) => return rv_err(e),
             })

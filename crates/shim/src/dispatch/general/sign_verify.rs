@@ -4,9 +4,9 @@ use pkcs11_proxy_ng_types::*;
 use crate::state;
 
 use super::helpers::{
-    catch_panics, classify_input, dispatch_byte_output_exact, dispatch_byte_output_exact_no_input,
-    input_buf_to_ck_in_buf, read_mechanism, rv_err, rv_ok, unit_result_to_rv, validate_mechanism,
-    with_client,
+    Operation, catch_panics, classify_input, dispatch_byte_output_exact,
+    dispatch_byte_output_exact_no_input, input_buf_to_ck_in_buf, read_mechanism_for_transport,
+    rv_err, unit_result_to_rv, with_client,
 };
 
 pub unsafe extern "C" fn c_sign_init(
@@ -29,11 +29,7 @@ pub unsafe extern "C" fn c_sign_init(
         if !state::is_session_known(h_session) {
             return rv_err(CkRv::SESSION_HANDLE_INVALID);
         }
-        let rv = unsafe { validate_mechanism(p_mechanism) };
-        if rv != rv_ok() {
-            return rv;
-        }
-        let mech = match unsafe { read_mechanism(p_mechanism) } {
+        let mech = match unsafe { read_mechanism_for_transport(p_mechanism, Operation::General) } {
             Ok(mech) => mech,
             Err(e) => return rv_err(e),
         };
@@ -119,11 +115,7 @@ pub unsafe extern "C" fn c_verify_init(
         if !state::is_session_known(h_session) {
             return rv_err(CkRv::SESSION_HANDLE_INVALID);
         }
-        let rv = unsafe { validate_mechanism(p_mechanism) };
-        if rv != rv_ok() {
-            return rv;
-        }
-        let mech = match unsafe { read_mechanism(p_mechanism) } {
+        let mech = match unsafe { read_mechanism_for_transport(p_mechanism, Operation::General) } {
             Ok(mech) => mech,
             Err(e) => return rv_err(e),
         };
@@ -220,11 +212,7 @@ pub unsafe extern "C" fn c_sign_recover_init(
         if !state::is_session_known(h_session) {
             return rv_err(CkRv::SESSION_HANDLE_INVALID);
         }
-        let rv = unsafe { validate_mechanism(p_mechanism) };
-        if rv != rv_ok() {
-            return rv;
-        }
-        let mech = match unsafe { read_mechanism(p_mechanism) } {
+        let mech = match unsafe { read_mechanism_for_transport(p_mechanism, Operation::General) } {
             Ok(mech) => mech,
             Err(e) => return rv_err(e),
         };
@@ -277,11 +265,7 @@ pub unsafe extern "C" fn c_verify_recover_init(
         if !state::is_session_known(h_session) {
             return rv_err(CkRv::SESSION_HANDLE_INVALID);
         }
-        let rv = unsafe { validate_mechanism(p_mechanism) };
-        if rv != rv_ok() {
-            return rv;
-        }
-        let mech = match unsafe { read_mechanism(p_mechanism) } {
+        let mech = match unsafe { read_mechanism_for_transport(p_mechanism, Operation::General) } {
             Ok(mech) => mech,
             Err(e) => return rv_err(e),
         };
