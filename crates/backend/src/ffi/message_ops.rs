@@ -4224,9 +4224,10 @@ mod tests {
         assert_eq!(backend_bytes, RAW_CBC_CT1.as_slice());
         assert_eq!(ack.ck_rv, CkRv::OK);
         assert_eq!(ack.returned_len, 16);
-        // Opaque params carry no structured effects under current proto
-        // semantics; pin that rather than ignoring the third element.
-        assert_eq!(effects, MessageEffects::Invalid(OutputContractViolation::ParameterIntegrity));
+        // Opaque input yields no structured effects: byte-identical provider
+        // bytes capture as `None` (R3); pin that rather than ignoring the
+        // third element.
+        assert_eq!(effects, MessageEffects::None);
         let (backend_param, backend_input) = raw_cbc_recorded();
         assert_eq!(backend_param, RAW_CBC_IV.as_slice());
         assert_eq!(backend_input, RAW_CBC_PT1.as_slice());
