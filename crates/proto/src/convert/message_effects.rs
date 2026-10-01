@@ -7,6 +7,8 @@ use pkcs11_proxy_ng_types::{
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum MessageEffects {
+    /// No effects — opaque input the provider wrote nothing back to.
+    None,
     Gcm {
         iv: Option<Vec<u8>>,
         tag: Option<Vec<u8>>,
@@ -97,6 +99,10 @@ impl MessageEffects {
             (MessageParameter::SalaChacha(a), MessageParameter::SalaChacha(b)) => {
                 Self::Salsa { tag: (auth && a.tag_null_len.is_none()).then(|| b.tag.clone()) }
             }
+            // Opaque input carries no structured effects: byte-identical
+            // pairs (established by `same_layout_and_scalars` above) yield
+            // no effects; any Raw mismatch already returned Invalid above.
+            (MessageParameter::Raw(_), MessageParameter::Raw(_)) => Self::None,
             _ => Self::Invalid(OutputContractViolation::ParameterIntegrity),
         }
     }
@@ -120,6 +126,8 @@ impl MessageEffects {
                 valid(nonce, a) && valid(mac, b)
             }
             (Self::Salsa { tag }, Self::Salsa { tag: a }) => valid(tag, a),
+            // No-effects output is valid only against no-effects input.
+            (Self::None, Self::None) => true,
             _ => false,
         };
         let fixed_prefix_matches = |output: &Option<Vec<u8>>, original: &[u8], bits: u64| {
@@ -169,6 +177,10 @@ impl TryFrom<&MessageEffects> for wire::MessageParameterEffects {
                 Effect::Salsa(wire::SalsaMessageEffects { tag: tag.clone() })
             }
             MessageEffects::Invalid(_) => return Err(CkRv::DEVICE_ERROR),
+            // Success with no output: an empty effects message. (Decoding a
+            // present-but-empty effects message stays an error — a received
+            // empty oneof is malformed, never a `None` claim.)
+            MessageEffects::None => return Ok(Self { effect: None }),
         };
         Ok(Self { effect: Some(effect) })
     }
@@ -401,5 +413,121 @@ mod tests {
         let rendered = format!("{effect:?}");
         assert!(rendered.contains("REDACTED"));
         assert!(!rendered.contains("201"));
+    }
+
+    // R3: Raw effects matrix — byte-identical opaque pairs capture `None`
+    // ("no effects"); any Raw mismatch stays `Invalid(ParameterIntegrity)`.
+    // The three structured shapes are unchanged (pinned by the mode /
+    // direction / stage / RV matrix test above).
+
+    fn r3_raw_context(
+        mode: ParameterEffectCallMode,
+        encrypt: bool,
+        rv: CkRv,
+    ) -> MessageEffectContext {
+        MessageEffectContext { mode, encrypt, generated_stage: true, auth_stage: true, rv }
+    }
+
+    #[test]
+    fn r3_capture_raw_identical_yields_none() {
+        let input = MessageParameter::Raw(vec![0x01; 16].into());
+        let identical = MessageParameter::Raw(vec![0x01; 16].into());
+        for mode in [
+            ParameterEffectCallMode::Begin,
+            ParameterEffectCallMode::SizeQuery,
+            ParameterEffectCallMode::Data,
+            ParameterEffectCallMode::MissingLength,
+        ] {
+            for encrypt in [false, true] {
+                for rv in [CkRv::OK, CkRv::BUFFER_TOO_SMALL, CkRv::FUNCTION_FAILED] {
+                    assert_eq!(
+                        MessageEffects::capture(
+                            &input,
+                            &identical,
+                            r3_raw_context(mode, encrypt, rv)
+                        ),
+                        MessageEffects::None,
+                        "mode={mode:?} encrypt={encrypt} rv={rv:?}",
+                    );
+                }
+            }
+        }
+        // Empty opaque pairs are byte-identical too.
+        let empty = MessageParameter::Raw(vec![].into());
+        assert_eq!(
+            MessageEffects::capture(
+                &empty,
+                &empty.clone(),
+                r3_raw_context(ParameterEffectCallMode::Data, true, CkRv::OK),
+            ),
+            MessageEffects::None,
+        );
+    }
+
+    #[test]
+    fn r3_capture_raw_mismatch_yields_invalid() {
+        use crate::convert::message_params::GcmMessageParams;
+        let input = MessageParameter::Raw(vec![0x01; 16].into());
+        let mut mutated_bytes = vec![0x01; 16];
+        mutated_bytes[15] ^= 0xFF;
+        let gcm = MessageParameter::GcmMessage(GcmMessageParams {
+            iv: vec![0x01; 12],
+            iv_null_len: None,
+            iv_fixed_bits: 0,
+            iv_generator: 0,
+            tag: vec![0xAA; 16],
+            tag_null_len: None,
+            tag_bits: 128,
+        });
+        let context = r3_raw_context(ParameterEffectCallMode::Data, true, CkRv::OK);
+        for output in [
+            MessageParameter::Raw(mutated_bytes.into()),
+            MessageParameter::Raw(vec![0x01; 15].into()),
+            MessageParameter::Raw(vec![].into()),
+            gcm.clone(),
+        ] {
+            assert_eq!(
+                MessageEffects::capture(&input, &output, context),
+                MessageEffects::Invalid(OutputContractViolation::ParameterIntegrity),
+            );
+        }
+        assert_eq!(
+            MessageEffects::capture(&gcm, &input, context),
+            MessageEffects::Invalid(OutputContractViolation::ParameterIntegrity),
+        );
+    }
+
+    #[test]
+    fn r3_none_effect_validates_for_raw_only() {
+        use crate::convert::message_params::GcmMessageParams;
+        let raw = MessageParameter::Raw(vec![0x01; 16].into());
+        let gcm = MessageParameter::GcmMessage(GcmMessageParams {
+            iv: vec![0x01; 12],
+            iv_null_len: None,
+            iv_fixed_bits: 0,
+            iv_generator: 0,
+            tag: vec![0xAA; 16],
+            tag_null_len: None,
+            tag_bits: 128,
+        });
+        let context = r3_raw_context(ParameterEffectCallMode::Data, true, CkRv::OK);
+        // Hits the new `(None, None)` arm: success with no output.
+        assert_eq!(MessageEffects::None.validate_for(&raw, context), Ok(()));
+        // Cross-shape effects stay mismatches (never silently accepted).
+        assert_eq!(MessageEffects::None.validate_for(&gcm, context), Err(CkRv::DEVICE_ERROR));
+        assert_eq!(
+            MessageEffects::Gcm { iv: None, tag: None }.validate_for(&raw, context),
+            Err(CkRv::DEVICE_ERROR)
+        );
+    }
+
+    #[test]
+    fn r3_none_effect_encodes_to_empty_wire_message() {
+        // Hits the new `None` encode arm: success with no output bytes —
+        // never DEVICE_ERROR. (Decoding a present-but-empty effects message
+        // stays an error; see `absent_effect_oneof_decodes_to_unified_rv`.)
+        let wire = wire::MessageParameterEffects::try_from(&MessageEffects::None).unwrap();
+        assert_eq!(wire.effect, None);
+        assert!(wire::MessageParameterEffects::try_from(&MessageEffects::None).is_ok());
     }
 }

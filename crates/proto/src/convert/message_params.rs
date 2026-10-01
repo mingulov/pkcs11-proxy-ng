@@ -103,6 +103,15 @@ pub enum MessageParameter {
 
 const MAX_MESSAGE_PARAMETER_BYTES: u64 = 512 * 1024 * 1024;
 
+/// Highest per-message `parameter_encoding_version` this daemon understands
+/// (S2 §3 monotonic capabilities). A version above this on a received
+/// message is `FUNCTION_NOT_SUPPORTED` pre-entry (S2 §6 RV table).
+pub const SUPPORTED_MESSAGE_PARAMETER_TRANSPORT_VERSION: u32 = 1;
+
+/// 64 KiB outer-parameter cap for v1 opaque message params (S2 §3): the
+/// declared extent, not just the materialized buffer, must fit.
+const MAX_OPAQUE_MESSAGE_PARAMETER_BYTES: u64 = 64 * 1024;
+
 fn pointer_extent_len(
     bytes_len: usize,
     null_len: Option<u64>,
@@ -271,6 +280,9 @@ impl Salsa20ChaCha20Poly1305MessageParams {
 impl MessageParameter {
     pub fn same_layout_and_scalars(&self, other: &Self) -> bool {
         match (self, other) {
+            // Opaque bytes carry no layout/scalars: identity is byte
+            // equality (compared without copying out of the wiping owner).
+            (Self::Raw(left), Self::Raw(right)) => left.expose(|a| right.expose(|b| a == b)),
             (Self::GcmMessage(left), Self::GcmMessage(right)) => {
                 left.iv.len() == right.iv.len()
                     && left.iv_null_len == right.iv_null_len
@@ -316,7 +328,9 @@ impl MessageParameter {
 
     pub fn validate_structured(&self) -> Result<(), pkcs11_proxy_ng_types::CkRv> {
         match self {
-            Self::Raw(_) => Err(pkcs11_proxy_ng_types::CkRv::MECHANISM_PARAM_INVALID),
+            // Opaque bytes carry no layout/scalars to check; length and cap
+            // were enforced at the wire boundary (R3 v1 acceptance).
+            Self::Raw(_) => Ok(()),
             Self::GcmMessage(params) => params.validate_structured(),
             Self::CcmMessage(params) => params.validate_structured(),
             Self::SalaChacha(params) => params.validate_structured(),
@@ -329,7 +343,14 @@ impl MessageParameter {
     /// second set of backing buffers.
     pub fn validate_for_native_ulong(&self, max: u64) -> Result<(), pkcs11_proxy_ng_types::CkRv> {
         match self {
-            Self::Raw(_) => Err(pkcs11_proxy_ng_types::CkRv::MECHANISM_PARAM_INVALID),
+            // Only the byte length crosses into native width; a length that
+            // cannot narrow to backend `CK_ULONG` is `FUNCTION_FAILED`
+            // (S2 §6 RV table), not a shape violation.
+            Self::Raw(bytes) => {
+                let len = u64::try_from(bytes.len())
+                    .map_err(|_| pkcs11_proxy_ng_types::CkRv::FUNCTION_FAILED)?;
+                if len <= max { Ok(()) } else { Err(pkcs11_proxy_ng_types::CkRv::FUNCTION_FAILED) }
+            }
             Self::GcmMessage(params) => params.validate_for_native_ulong(max),
             Self::CcmMessage(params) => params.validate_for_native_ulong(max),
             Self::SalaChacha(params) => params.validate_for_native_ulong(max),
@@ -381,6 +402,7 @@ impl MessageParameterShape {
             (Self::Gcm, MessageParameter::GcmMessage(_))
                 | (Self::Ccm, MessageParameter::CcmMessage(_))
                 | (Self::SalsaChacha, MessageParameter::SalaChacha(_))
+                | (Self::Unmodeled, MessageParameter::Raw(_))
         )
     }
 }
@@ -536,45 +558,95 @@ impl From<&MessageParameter> for v1_proto::MessageParameter {
     }
 }
 
+/// Per-message version newer than the daemon understands is
+/// `FUNCTION_NOT_SUPPORTED` pre-entry (S2 §6 RV table).
+fn check_wire_version(version: u32) -> Result<(), pkcs11_proxy_ng_types::CkRv> {
+    if version > SUPPORTED_MESSAGE_PARAMETER_TRANSPORT_VERSION {
+        return Err(pkcs11_proxy_ng_types::CkRv::FUNCTION_NOT_SUPPORTED);
+    }
+    Ok(())
+}
+
+/// Validate v1 opaque bytes: the encoding is valid only with version 1, the
+/// declared extent must fit the 64 KiB outer cap, and the materialized bytes
+/// must be exactly the declared extent (S2 §3 + §6 RV table).
+fn validate_opaque_wire_params(
+    opaque: &v1_proto::OpaqueMessageParams,
+    version: u32,
+) -> Result<(), pkcs11_proxy_ng_types::CkRv> {
+    use pkcs11_proxy_ng_types::CkRv;
+    if version != SUPPORTED_MESSAGE_PARAMETER_TRANSPORT_VERSION {
+        // No silent downgrade across versions: opaque is the v1 encoding and
+        // nothing else. Version 0/absent + opaque present is contradictory
+        // metadata; anything newer is beyond this daemon.
+        return Err(if version < SUPPORTED_MESSAGE_PARAMETER_TRANSPORT_VERSION {
+            CkRv::MECHANISM_PARAM_INVALID
+        } else {
+            CkRv::FUNCTION_NOT_SUPPORTED
+        });
+    }
+    if opaque.declared_len > MAX_OPAQUE_MESSAGE_PARAMETER_BYTES {
+        return Err(CkRv::MECHANISM_PARAM_INVALID);
+    }
+    let declared =
+        usize::try_from(opaque.declared_len).map_err(|_| CkRv::MECHANISM_PARAM_INVALID)?;
+    if opaque.data.len() != declared {
+        return Err(CkRv::MECHANISM_PARAM_INVALID);
+    }
+    Ok(())
+}
+
 /// Validate an attacker-controlled structured wire parameter by borrowing its
 /// protobuf buffers. This must run before cloning them into the owned native
 /// representation at the daemon trust boundary.
 fn validate_structured_wire_params(
     params: &v1_proto::message_parameter::Params,
+    version: u32,
 ) -> Result<(), pkcs11_proxy_ng_types::CkRv> {
     match params {
+        // Legacy `raw` fails closed at every version, including versions
+        // newer than this daemon (S2 §3; checked before the version gate).
         v1_proto::message_parameter::Params::Raw(_) => {
             Err(pkcs11_proxy_ng_types::CkRv::MECHANISM_PARAM_INVALID)
         }
-        v1_proto::message_parameter::Params::GcmMessageParams(p) => validate_gcm_fields(
-            p.iv.len(),
-            p.iv_null_len,
-            p.iv_fixed_bits,
-            p.iv_generator,
-            p.tag.len(),
-            p.tag_null_len,
-            p.tag_bits,
-        ),
-        v1_proto::message_parameter::Params::CcmMessageParams(p) => validate_ccm_fields(
-            p.nonce.len(),
-            p.nonce_null_len,
-            p.nonce_fixed_bits,
-            p.nonce_generator,
-            p.mac.len(),
-            p.mac_null_len,
-            p.mac_len,
-        ),
-        v1_proto::message_parameter::Params::SalsaChachaMessageParams(p) => validate_salsa_fields(
-            p.nonce.len(),
-            p.nonce_bits,
-            p.nonce_null_len,
-            p.tag.len(),
-            p.tag_null_len,
-        ),
-        // R2: fail-closed until R3 defines v1 acceptance (opaque valid only
-        // with version 1; legacy raw stays rejected at every version).
-        v1_proto::message_parameter::Params::OpaqueMessageParams(_) => {
-            Err(pkcs11_proxy_ng_types::CkRv::MECHANISM_PARAM_INVALID)
+        v1_proto::message_parameter::Params::GcmMessageParams(p) => {
+            check_wire_version(version)?;
+            validate_gcm_fields(
+                p.iv.len(),
+                p.iv_null_len,
+                p.iv_fixed_bits,
+                p.iv_generator,
+                p.tag.len(),
+                p.tag_null_len,
+                p.tag_bits,
+            )
+        }
+        v1_proto::message_parameter::Params::CcmMessageParams(p) => {
+            check_wire_version(version)?;
+            validate_ccm_fields(
+                p.nonce.len(),
+                p.nonce_null_len,
+                p.nonce_fixed_bits,
+                p.nonce_generator,
+                p.mac.len(),
+                p.mac_null_len,
+                p.mac_len,
+            )
+        }
+        v1_proto::message_parameter::Params::SalsaChachaMessageParams(p) => {
+            check_wire_version(version)?;
+            validate_salsa_fields(
+                p.nonce.len(),
+                p.nonce_bits,
+                p.nonce_null_len,
+                p.tag.len(),
+                p.tag_null_len,
+            )
+        }
+        // R3 v1 acceptance: opaque bytes are the Unmodeled shape's v1
+        // representation (replaces R2's blanket placeholder rejection).
+        v1_proto::message_parameter::Params::OpaqueMessageParams(p) => {
+            validate_opaque_wire_params(p, version)
         }
     }
 }
@@ -583,7 +655,7 @@ pub fn validate_structured_wire_parameter(
     parameter: &v1_proto::MessageParameter,
 ) -> Result<(), pkcs11_proxy_ng_types::CkRv> {
     let params = parameter.params.as_ref().ok_or(super::ABSENT_MESSAGE_ONEOF_RV)?;
-    validate_structured_wire_params(params)
+    validate_structured_wire_params(params, parameter.parameter_encoding_version)
 }
 
 impl TryFrom<&v1_proto::MessageParameter> for MessageParameter {
@@ -595,17 +667,20 @@ impl TryFrom<&v1_proto::MessageParameter> for MessageParameter {
                 Ok(MessageParameter::Raw(SecretBytes::copy_from_slice(data)))
             }
             Some(params @ v1_proto::message_parameter::Params::GcmMessageParams(p)) => {
-                validate_structured_wire_params(params)?;
+                // Decode stays version-blind (R2): field validation only;
+                // version enforcement is validation behavior, applied by
+                // `validate_structured_wire_parameter` pre-entry.
+                validate_structured_wire_params(params, 0)?;
                 let parameter = MessageParameter::GcmMessage(p.into());
                 Ok(parameter)
             }
             Some(params @ v1_proto::message_parameter::Params::CcmMessageParams(p)) => {
-                validate_structured_wire_params(params)?;
+                validate_structured_wire_params(params, 0)?;
                 let parameter = MessageParameter::CcmMessage(p.into());
                 Ok(parameter)
             }
             Some(params @ v1_proto::message_parameter::Params::SalsaChachaMessageParams(p)) => {
-                validate_structured_wire_params(params)?;
+                validate_structured_wire_params(params, 0)?;
                 let parameter = MessageParameter::SalaChacha(p.into());
                 Ok(parameter)
             }
@@ -644,7 +719,8 @@ impl MessageParameter {
                     | v1_proto::message_parameter::Params::OpaqueMessageParams(_)
             )
         {
-            validate_structured_wire_params(params)?;
+            // Decode stays version-blind (R2): field validation only.
+            validate_structured_wire_params(params, 0)?;
         }
         match taken.as_mut() {
             Some(v1_proto::message_parameter::Params::Raw(data)) => {
@@ -1337,6 +1413,230 @@ mod tests {
             decoded.backend_mechanism_abi,
             Some(v1_proto::MechanismParamAbi::Lp64NativeLe as i32),
         );
+    }
+
+    // R3: v1 opaque acceptance matrix (S2 §3 version/legacy rules + S2 §6
+    // RV table). Decode-side only: `TryFrom`/`try_from_owned` still never
+    // fail on opaque (R2 passthrough intact); these pins cover
+    // `validate_structured_wire_parameter` enforcement.
+
+    fn opaque_wire(data: Vec<u8>, declared_len: u64, version: u32) -> v1_proto::MessageParameter {
+        v1_proto::MessageParameter {
+            params: Some(v1_proto::message_parameter::Params::OpaqueMessageParams(
+                v1_proto::OpaqueMessageParams { data, declared_len },
+            )),
+            parameter_encoding_version: version,
+        }
+    }
+
+    fn valid_gcm_wire(version: u32) -> v1_proto::MessageParameter {
+        v1_proto::MessageParameter {
+            params: Some(v1_proto::message_parameter::Params::GcmMessageParams(
+                v1_proto::GcmMessageParams {
+                    iv: vec![0x11; 12],
+                    iv_fixed_bits: 0,
+                    iv_generator: 0,
+                    tag: vec![0x22; 16],
+                    tag_bits: 128,
+                    iv_null_len: None,
+                    tag_null_len: None,
+                },
+            )),
+            parameter_encoding_version: version,
+        }
+    }
+
+    #[test]
+    fn r3_v1_opaque_exact_bytes_accept_and_decode_to_raw() {
+        for data in [b"AB".to_vec(), vec![], vec![0xA5; 16]] {
+            let wire = opaque_wire(data.clone(), data.len() as u64, 1);
+            assert_eq!(validate_structured_wire_parameter(&wire), Ok(()));
+            assert_eq!(
+                MessageParameter::try_from(&wire).unwrap(),
+                MessageParameter::Raw(SecretBytes::copy_from_slice(&data)),
+            );
+            assert_eq!(
+                MessageParameter::try_from_owned(wire).unwrap(),
+                MessageParameter::Raw(SecretBytes::copy_from_slice(&data)),
+            );
+        }
+    }
+
+    #[test]
+    fn r3_legacy_raw_rejected_at_every_version() {
+        // Fail-closed preserved: legacy `raw` is never a v1 representation.
+        for version in [0u32, 1, 2, 99, u32::MAX] {
+            for data in [vec![], vec![0xA5]] {
+                let wire = v1_proto::MessageParameter {
+                    params: Some(v1_proto::message_parameter::Params::Raw(data)),
+                    parameter_encoding_version: version,
+                };
+                assert_eq!(
+                    validate_structured_wire_parameter(&wire),
+                    Err(pkcs11_proxy_ng_types::CkRv::MECHANISM_PARAM_INVALID),
+                    "legacy raw must reject at version {version}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn r3_newer_version_is_function_not_supported_pre_entry() {
+        use pkcs11_proxy_ng_types::CkRv;
+        for version in [2u32, 99, u32::MAX] {
+            assert_eq!(
+                validate_structured_wire_parameter(&opaque_wire(b"AB".to_vec(), 2, version)),
+                Err(CkRv::FUNCTION_NOT_SUPPORTED),
+                "opaque at version {version}",
+            );
+            assert_eq!(
+                validate_structured_wire_parameter(&valid_gcm_wire(version)),
+                Err(CkRv::FUNCTION_NOT_SUPPORTED),
+                "structured at version {version}",
+            );
+        }
+        // The absent oneof is unparsable at any version (existing behavior
+        // preserved; T4 parse-failure deferral sees it before any version
+        // gate).
+        let missing = v1_proto::MessageParameter { params: None, parameter_encoding_version: 99 };
+        assert_eq!(
+            validate_structured_wire_parameter(&missing),
+            Err(crate::convert::ABSENT_MESSAGE_ONEOF_RV),
+        );
+    }
+
+    #[test]
+    fn r3_version_zero_opaque_is_contradictory_metadata() {
+        assert_eq!(
+            validate_structured_wire_parameter(&opaque_wire(b"AB".to_vec(), 2, 0)),
+            Err(pkcs11_proxy_ng_types::CkRv::MECHANISM_PARAM_INVALID),
+        );
+    }
+
+    #[test]
+    fn r3_opaque_length_mismatch_is_param_invalid() {
+        use pkcs11_proxy_ng_types::CkRv;
+        for (data, declared_len) in
+            [(b"AB".to_vec(), 3u64), (b"AB".to_vec(), 1u64), (vec![], 1u64), (vec![0xA5; 16], 0u64)]
+        {
+            assert_eq!(
+                validate_structured_wire_parameter(&opaque_wire(data, declared_len, 1)),
+                Err(CkRv::MECHANISM_PARAM_INVALID),
+            );
+        }
+    }
+
+    #[test]
+    fn r3_opaque_64kib_cap_boundary() {
+        use pkcs11_proxy_ng_types::CkRv;
+        // Exactly 64 KiB is representable; one byte over is a cap violation.
+        let at_cap = vec![0xA5; 64 * 1024];
+        assert_eq!(
+            validate_structured_wire_parameter(&opaque_wire(at_cap.clone(), 64 * 1024, 1)),
+            Ok(())
+        );
+        let over_cap = vec![0xA5; 64 * 1024 + 1];
+        assert_eq!(
+            validate_structured_wire_parameter(&opaque_wire(over_cap, 64 * 1024 + 1, 1)),
+            Err(CkRv::MECHANISM_PARAM_INVALID),
+        );
+        // Declared length over the cap rejects even when the bytes are short
+        // (cap checked on the declared extent, not the materialized buffer).
+        assert_eq!(
+            validate_structured_wire_parameter(&opaque_wire(vec![0xA5; 16], 64 * 1024 + 1, 1)),
+            Err(CkRv::MECHANISM_PARAM_INVALID),
+        );
+        assert_eq!(
+            validate_structured_wire_parameter(&opaque_wire(vec![], u64::MAX, 1)),
+            Err(CkRv::MECHANISM_PARAM_INVALID),
+        );
+    }
+
+    #[test]
+    fn r3_unmodeled_shape_matches_raw_only() {
+        let raw = MessageParameter::Raw(vec![0x01; 16].into());
+        let gcm = MessageParameter::GcmMessage(GcmMessageParams {
+            iv: vec![0x01; 12],
+            iv_null_len: None,
+            iv_fixed_bits: 0,
+            iv_generator: 0,
+            tag: vec![0xAA; 16],
+            tag_null_len: None,
+            tag_bits: 128,
+        });
+        let ccm = MessageParameter::CcmMessage(CcmMessageParams {
+            data_len: 0,
+            nonce: vec![0x02; 7],
+            nonce_null_len: None,
+            nonce_fixed_bits: 0,
+            nonce_generator: 0,
+            mac: vec![0xBB; 8],
+            mac_null_len: None,
+            mac_len: 8,
+        });
+        let salsa = MessageParameter::SalaChacha(Salsa20ChaCha20Poly1305MessageParams {
+            nonce: vec![0x03; 12],
+            nonce_bits: 96,
+            nonce_null_len: None,
+            tag: vec![0xCC; 16],
+            tag_null_len: None,
+        });
+        // New arm: opaque bytes are the Unmodeled shape's v1 representation.
+        assert!(MessageParameterShape::Unmodeled.matches(&raw));
+        // Every other arm unchanged.
+        assert!(!MessageParameterShape::Unmodeled.matches(&gcm));
+        assert!(!MessageParameterShape::Unmodeled.matches(&ccm));
+        assert!(!MessageParameterShape::Unmodeled.matches(&salsa));
+        assert!(!MessageParameterShape::Gcm.matches(&raw));
+        assert!(!MessageParameterShape::Ccm.matches(&raw));
+        assert!(!MessageParameterShape::SalsaChacha.matches(&raw));
+        assert!(MessageParameterShape::Gcm.matches(&gcm));
+        assert!(MessageParameterShape::Ccm.matches(&ccm));
+        assert!(MessageParameterShape::SalsaChacha.matches(&salsa));
+        assert!(!MessageParameterShape::Gcm.matches(&ccm));
+    }
+
+    #[test]
+    fn r3_raw_validates_structured_and_narrows_native_ulong() {
+        use pkcs11_proxy_ng_types::CkRv;
+        let raw = MessageParameter::Raw(vec![0x01; 16].into());
+        // Opaque bytes carry no layout/scalars: shape validation accepts.
+        assert_eq!(raw.validate_structured(), Ok(()));
+        // Only the byte length crosses into native width (S2 §6: a u64 that
+        // cannot narrow to backend CK_ULONG is FUNCTION_FAILED).
+        assert_eq!(raw.validate_for_native_ulong(u64::MAX), Ok(()));
+        assert_eq!(raw.validate_for_native_ulong(16), Ok(()));
+        assert_eq!(raw.validate_for_native_ulong(15), Err(CkRv::FUNCTION_FAILED));
+        assert_eq!(raw.validate_for_native_ulong(0), Err(CkRv::FUNCTION_FAILED));
+        let empty = MessageParameter::Raw(vec![].into());
+        assert_eq!(empty.validate_structured(), Ok(()));
+        assert_eq!(empty.validate_for_native_ulong(0), Ok(()));
+    }
+
+    #[test]
+    fn r3_raw_same_layout_is_byte_equality() {
+        let raw = MessageParameter::Raw(vec![0x01; 16].into());
+        let identical = MessageParameter::Raw(vec![0x01; 16].into());
+        let mutated = MessageParameter::Raw({
+            let mut bytes = vec![0x01; 16];
+            bytes[0] ^= 0xFF;
+            bytes.into()
+        });
+        let short = MessageParameter::Raw(vec![0x01; 15].into());
+        let gcm = MessageParameter::GcmMessage(GcmMessageParams {
+            iv: vec![0x01; 12],
+            iv_null_len: None,
+            iv_fixed_bits: 0,
+            iv_generator: 0,
+            tag: vec![0xAA; 16],
+            tag_null_len: None,
+            tag_bits: 128,
+        });
+        assert!(raw.same_layout_and_scalars(&identical));
+        assert!(!raw.same_layout_and_scalars(&mutated));
+        assert!(!raw.same_layout_and_scalars(&short));
+        assert!(!raw.same_layout_and_scalars(&gcm));
+        assert!(!gcm.same_layout_and_scalars(&raw));
     }
 
     #[test]

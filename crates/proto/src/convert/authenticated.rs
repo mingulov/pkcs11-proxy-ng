@@ -313,6 +313,41 @@ mod tests {
         );
     }
 
+    // R3: `validate_input`/`validate_for` accept Raw input for Unmodeled-shape
+    // mechanisms via the new `matches` + `validate_structured` arms (no
+    // new arms here); shape binding for typed mechanisms is unchanged.
+    #[test]
+    fn r3_raw_input_accepted_for_unmodeled_mechanism_only() {
+        let unmodeled = CkMechanism { mechanism_type: CkMechanismType::AES_CBC, params: None };
+        let typed = CkMechanism { mechanism_type: CkMechanismType::AES_GCM, params: None };
+        let raw = MessageParameter::Raw(vec![0x01; 16].into());
+        assert_eq!(validate_input(&unmodeled, Some(&raw)), Ok(()));
+        assert_eq!(validate_input(&typed, Some(&raw)), Err(CkRv::MECHANISM_PARAM_INVALID),);
+        // End-to-end through the wire: v1-opaque decodes to accepted Raw.
+        let wire = wire::AuthenticatedParameters {
+            message_parameter: Some(wire::MessageParameter {
+                params: Some(wire::message_parameter::Params::OpaqueMessageParams(
+                    wire::OpaqueMessageParams { data: vec![0x01; 16], declared_len: 16 },
+                )),
+                parameter_encoding_version: 1,
+            }),
+        };
+        assert_eq!(decode_parameters(&unmodeled, &wire), Ok(Some(raw.clone())));
+        assert_eq!(decode_parameters(&typed, &wire), Err(CkRv::MECHANISM_PARAM_INVALID),);
+        // Exact-output validation: identical opaque output validates, a
+        // provider rewrite stays a contract violation.
+        let identical = MessageParameter::Raw(vec![0x01; 16].into());
+        assert_eq!(
+            AuthenticatedOutput::Message(identical).validate_for(&unmodeled, Some(&raw)),
+            Ok(())
+        );
+        let mutated = MessageParameter::Raw(vec![0x02; 16].into());
+        assert_eq!(
+            AuthenticatedOutput::Message(mutated).validate_for(&unmodeled, Some(&raw)),
+            Err(CkRv::MECHANISM_PARAM_INVALID),
+        );
+    }
+
     #[test]
     fn authenticated_conversion_binds_parameter_layout_to_mechanism() {
         for mechanism in [
