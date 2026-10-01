@@ -30,7 +30,10 @@ impl<'a> NativeParameter<'a> {
                 parameter,
             )
         } else {
-            NativeStorage::Mechanism(mechanism_to_ffi(mechanism)?)
+            NativeStorage::Mechanism({
+                let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
+                mechanism_to_ffi(&validated)?
+            })
         };
         let original = match &storage {
             NativeStorage::Mechanism(ffi) => ffi.ck_mechanism(),

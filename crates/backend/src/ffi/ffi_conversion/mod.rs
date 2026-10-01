@@ -54,8 +54,10 @@ pub(super) fn session_state_from_ck(state: CK_STATE) -> CkSessionState {
 /// targets). To pass a correctly-sized value to C, convert to native `CK_ULONG` bytes and
 /// keep those bytes alive alongside the attribute array.
 mod attrs;
+mod guarded;
 mod mechanism;
 mod tests;
 
 pub(in crate::ffi) use attrs::*;
+pub(in crate::ffi) use guarded::*;
 pub(in crate::ffi) use mechanism::*;

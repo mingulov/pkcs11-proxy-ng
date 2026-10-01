@@ -355,7 +355,10 @@ mod tests {
 
     fn seed_sign_slot(backend: &FfiBackend, session: CkSessionHandle, slot: CkSlotId) {
         let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
-        let ffi_mechanism = super::super::ffi_conversion::mechanism_to_ffi(&mechanism).unwrap();
+        let ffi_mechanism = super::super::ffi_conversion::mechanism_to_ffi(
+            &super::super::ffi_conversion::validated_mechanism_for_tests(&mechanism),
+        )
+        .unwrap();
         backend.mech_cache.insert((session.0, OperationFamily::Sign), ffi_mechanism);
         backend.last_init_family.insert(session.0, OperationFamily::Sign);
         backend.remember_session_slot(session, slot);

@@ -487,7 +487,9 @@ fn run_s5_retained() -> ! {
         mechanism_type: pkcs11_proxy_ng_types::CkMechanismType::RSA_PKCS,
         params: None,
     };
-    let retained = match super::ffi_conversion::mechanism_to_ffi(&mechanism) {
+    let retained = match super::ffi_conversion::mechanism_to_ffi(
+        &super::ffi_conversion::validated_mechanism_for_tests(&mechanism),
+    ) {
         Ok(retained) => retained,
         Err(_) => std::process::exit(22),
     };
@@ -600,7 +602,9 @@ fn run_s10_unsettled() -> ! {
         mechanism_type: pkcs11_proxy_ng_types::CkMechanismType::RSA_PKCS,
         params: None,
     };
-    let retained = match super::ffi_conversion::mechanism_to_ffi(&mechanism) {
+    let retained = match super::ffi_conversion::mechanism_to_ffi(
+        &super::ffi_conversion::validated_mechanism_for_tests(&mechanism),
+    ) {
         Ok(retained) => retained,
         Err(_) => std::process::exit(22),
     };

@@ -481,7 +481,8 @@ impl FfiBackend {
                 )
             }
             (Some(mech), None) => {
-                let ffi_mech = mechanism_to_ffi(mech)?;
+                let validated = super::ffi_conversion::validate_for_ffi(mech)?;
+                let ffi_mech = mechanism_to_ffi(&validated)?;
                 call_3x_fn!(
                     &admission,
                     self,
@@ -541,7 +542,8 @@ impl FfiBackend {
             {
                 return Err(CkRv::MECHANISM_PARAM_INVALID);
             }
-            let mut ffi_mech = mechanism_to_ffi(mechanism)?;
+            let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
+            let mut ffi_mech = mechanism_to_ffi(&validated)?;
             if ffi_mech.ck_mechanism().pParameter.is_null()
                 && ffi_mech.ck_mechanism().ulParameterLen == 0
             {
@@ -611,7 +613,8 @@ impl FfiBackend {
                 )
             }
             (Some(mech), None) => {
-                let ffi_mech = mechanism_to_ffi(mech)?;
+                let validated = super::ffi_conversion::validate_for_ffi(mech)?;
+                let ffi_mech = mechanism_to_ffi(&validated)?;
                 call_3x_fn!(
                     &admission,
                     self,
@@ -671,7 +674,8 @@ impl FfiBackend {
             {
                 return Err(CkRv::MECHANISM_PARAM_INVALID);
             }
-            let mut ffi_mech = mechanism_to_ffi(mechanism)?;
+            let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
+            let mut ffi_mech = mechanism_to_ffi(&validated)?;
             if ffi_mech.ck_mechanism().pParameter.is_null()
                 && ffi_mech.ck_mechanism().ulParameterLen == 0
             {
@@ -726,7 +730,8 @@ impl FfiBackend {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         match mechanism {
             Some(mech) => {
-                let ffi_mech = mechanism_to_ffi(mech)?;
+                let validated = super::ffi_conversion::validate_for_ffi(mech)?;
+                let ffi_mech = mechanism_to_ffi(&validated)?;
                 let _session_fence = self.session_fences.enter(&admission, session)?;
                 call_3x_fn!(
                     &admission,
@@ -776,7 +781,8 @@ impl FfiBackend {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         match mechanism {
             Some(mech) => {
-                let ffi_mech = mechanism_to_ffi(mech)?;
+                let validated = super::ffi_conversion::validate_for_ffi(mech)?;
+                let ffi_mech = mechanism_to_ffi(&validated)?;
                 let _session_fence = self.session_fences.enter(&admission, session)?;
                 call_3x_fn!(
                     &admission,

@@ -14,12 +14,13 @@ impl FfiBackend {
         let h_session = Self::session_handle(session)?;
         let h_key = Self::object_handle(key)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
         self.call_init_with_mechanism(
             &admission,
             session,
             OperationFamily::Sign,
             unsafe { (*self.func_list).C_SignInit },
-            mechanism,
+            &validated,
             |function, mech| unsafe { function(h_session, mech, h_key) },
         )
     }
@@ -83,10 +84,11 @@ impl FfiBackend {
     ) -> CkResult<()> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
         Self::call_unit_with_mechanism(
             &admission,
             unsafe { (*self.func_list).C_SignRecoverInit },
-            mechanism,
+            &validated,
             |function, mech| mechanism_key_init!(session, mechanism, key, function, mech),
         )
     }
@@ -199,10 +201,11 @@ impl FfiBackend {
     ) -> CkResult<()> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
         Self::call_unit_with_mechanism(
             &admission,
             unsafe { (*self.func_list).C_VerifyRecoverInit },
-            mechanism,
+            &validated,
             |function, mech| mechanism_key_init!(session, mechanism, key, function, mech),
         )
     }
@@ -244,12 +247,13 @@ impl FfiBackend {
     ) -> CkResult<()> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
         self.call_init_with_mechanism(
             &admission,
             session,
             OperationFamily::Verify,
             unsafe { (*self.func_list).C_VerifyInit },
-            mechanism,
+            &validated,
             |function, mech| mechanism_key_init!(session, mechanism, key, function, mech),
         )
     }
@@ -321,12 +325,13 @@ impl FfiBackend {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let h_session = Self::session_handle(session)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
         self.call_init_with_mechanism(
             &admission,
             session,
             OperationFamily::Digest,
             unsafe { (*self.func_list).C_DigestInit },
-            mechanism,
+            &validated,
             |function, mech| unsafe { function(h_session, mech) },
         )
     }
@@ -443,12 +448,13 @@ impl FfiBackend {
     ) -> CkResult<Option<CkMechanismParams>> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
         self.call_init_with_mechanism_output(
             &admission,
             session,
             OperationFamily::Encrypt,
             unsafe { (*self.func_list).C_EncryptInit },
-            mechanism,
+            &validated,
             |function, mech| mechanism_key_init!(session, mechanism, key, function, mech),
         )
     }
@@ -518,12 +524,13 @@ impl FfiBackend {
     ) -> CkResult<Option<CkMechanismParams>> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
         self.call_init_with_mechanism_output(
             &admission,
             session,
             OperationFamily::Decrypt,
             unsafe { (*self.func_list).C_DecryptInit },
-            mechanism,
+            &validated,
             |function, mech| mechanism_key_init!(session, mechanism, key, function, mech),
         )
     }
@@ -770,7 +777,10 @@ mod tests {
         };
         backend.mech_cache.insert(
             (session.0, OperationFamily::Encrypt),
-            super::super::ffi_conversion::mechanism_to_ffi(&mechanism).unwrap(),
+            super::super::ffi_conversion::mechanism_to_ffi(
+                &super::super::ffi_conversion::validated_mechanism_for_tests(&mechanism),
+            )
+            .unwrap(),
         );
 
         let (_, missing_output) = backend
@@ -864,7 +874,10 @@ mod tests {
                 aad_null: false,
             })),
         };
-        let ffi_mech = super::super::ffi_conversion::mechanism_to_ffi(&mechanism).unwrap();
+        let ffi_mech = super::super::ffi_conversion::mechanism_to_ffi(
+            &super::super::ffi_conversion::validated_mechanism_for_tests(&mechanism),
+        )
+        .unwrap();
         // Publish the retained IV root for the stub before inserting: the
         // owned IV buffer address is stable across the move into the slot.
         let outer = ffi_mech.ck_mechanism();

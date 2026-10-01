@@ -347,7 +347,7 @@ impl FfiBackend {
     pub(super) fn call_unit_with_mechanism<TFunction, F>(
         _admission: &OrdinaryGuard,
         function: Option<TFunction>,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         call: F,
     ) -> CkResult<()>
     where
@@ -365,13 +365,17 @@ impl FfiBackend {
     /// alive until the same family's next Init, cancel, or session close,
     /// for backends that store mechanism pointers. Other families' slots
     /// are untouched, so dual operations (Encrypt + Digest) coexist.
+    /// Flat backing travels through this same retention (R12, S2 §6);
+    /// failed Init publishes nothing (pinned for Flat by
+    /// `r12_init_flat_backing_retained` /
+    /// `r12_failed_init_publishes_nothing_flat`).
     pub(super) fn call_init_with_mechanism<TFunction, F>(
         &self,
         _admission: &OrdinaryGuard,
         session: CkSessionHandle,
         family: OperationFamily,
         function: Option<TFunction>,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         call: F,
     ) -> CkResult<()>
     where
@@ -401,7 +405,7 @@ impl FfiBackend {
         session: CkSessionHandle,
         family: OperationFamily,
         function: Option<TFunction>,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         call: F,
     ) -> CkResult<Option<CkMechanismParams>>
     where
@@ -526,7 +530,7 @@ impl FfiBackend {
     pub(super) fn call_bytes_with_mechanism<TFunction, F>(
         _admission: &OrdinaryGuard,
         function: Option<TFunction>,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         mut call: F,
     ) -> CkResult<SecretBytes>
     where
@@ -548,7 +552,7 @@ impl FfiBackend {
     pub(super) fn call_object_with_mechanism<TFunction, F>(
         _admission: &OrdinaryGuard,
         function: Option<TFunction>,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         mut call: F,
     ) -> CkResult<CkObjectHandle>
     where
@@ -655,7 +659,7 @@ impl FfiBackend {
     pub(super) fn call_bytes_exact_with_mechanism<TFunction, F>(
         _admission: &OrdinaryGuard,
         function: Option<TFunction>,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         spec: &CkOutputBufferSpec,
         mut call: F,
     ) -> CkResult<CkOutputBufferResult>
@@ -683,7 +687,7 @@ impl FfiBackend {
     pub(super) fn call_object_with_mechanism_output<TFunction, F>(
         _admission: &OrdinaryGuard,
         function: Option<TFunction>,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         mut call: F,
     ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)>
     where
@@ -706,7 +710,7 @@ impl FfiBackend {
     pub(super) fn call_object_with_mechanism_output_result<TFunction, F>(
         _admission: &OrdinaryGuard,
         function: Option<TFunction>,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         mut call: F,
     ) -> CkResult<CkDeriveKeyOutputResult>
     where
@@ -750,7 +754,7 @@ impl FfiBackend {
     pub(super) fn call_bytes_exact_with_mechanism_output<TFunction, F>(
         _admission: &OrdinaryGuard,
         function: Option<TFunction>,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         spec: &CkOutputBufferSpec,
         mut call: F,
     ) -> CkResult<(CkOutputBufferResult, Option<CkMechanismParams>)>
@@ -857,7 +861,7 @@ impl FfiBackend {
     pub(super) fn call_object_pair_with_mechanism<TFunction, F>(
         _admission: &OrdinaryGuard,
         function: Option<TFunction>,
-        mechanism: &CkMechanism,
+        mechanism: &ValidatedMechanismParams,
         mut call: F,
     ) -> CkResult<(CkObjectHandle, CkObjectHandle)>
     where

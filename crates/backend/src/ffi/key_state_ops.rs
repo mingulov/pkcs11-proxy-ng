@@ -25,10 +25,11 @@ impl FfiBackend {
         let h_base_key = Self::object_handle(base_key)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
         let ck_attr_len = Self::ffi_attr_len(&ffi_attrs)?;
+        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
         Self::call_object_with_mechanism(
             &admission,
             unsafe { (*self.func_list).C_DeriveKey },
-            mechanism,
+            &validated,
             |function, mech, handle| unsafe {
                 function(
                     h_session,
@@ -59,10 +60,11 @@ impl FfiBackend {
         let h_base_key = Self::object_handle(base_key)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
         let ck_attr_len = Self::ffi_attr_len(&ffi_attrs)?;
+        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
         Self::call_object_with_mechanism_output(
             &admission,
             unsafe { (*self.func_list).C_DeriveKey },
-            mechanism,
+            &validated,
             |function, mech, handle| unsafe {
                 function(
                     h_session,
@@ -89,10 +91,11 @@ impl FfiBackend {
         let h_base_key = Self::object_handle(base_key)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
         let ck_attr_len = Self::ffi_attr_len(&ffi_attrs)?;
+        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
         Self::call_object_with_mechanism_output_result(
             &admission,
             unsafe { (*self.func_list).C_DeriveKey },
-            mechanism,
+            &validated,
             |function, mech, handle| unsafe {
                 function(
                     h_session,
@@ -118,10 +121,11 @@ impl FfiBackend {
         let h_wrapping_key = Self::object_handle(wrapping_key)?;
         let h_key = Self::object_handle(key)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
         Self::call_bytes_with_mechanism(
             &admission,
             unsafe { (*self.func_list).C_WrapKey },
-            mechanism,
+            &validated,
             |function, mech, output, output_len| unsafe {
                 function(h_session, mech, h_wrapping_key, h_key, output, output_len)
             },
@@ -141,10 +145,11 @@ impl FfiBackend {
         let h_wrapping_key = Self::object_handle(wrapping_key)?;
         let h_key = Self::object_handle(key)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
         Self::call_bytes_exact_with_mechanism(
             &admission,
             unsafe { (*self.func_list).C_WrapKey },
-            mechanism,
+            &validated,
             spec,
             |function, mech, output, output_len| unsafe {
                 function(h_session, mech, h_wrapping_key, h_key, output, output_len)
@@ -169,10 +174,11 @@ impl FfiBackend {
         let h_wrapping_key = Self::object_handle(wrapping_key)?;
         let h_key = Self::object_handle(key)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
         Self::call_bytes_exact_with_mechanism_output(
             &admission,
             unsafe { (*self.func_list).C_WrapKey },
-            mechanism,
+            &validated,
             spec,
             |function, mech, output, output_len| unsafe {
                 function(h_session, mech, h_wrapping_key, h_key, output, output_len)
@@ -196,10 +202,11 @@ impl FfiBackend {
         let _session_fence = self.session_fences.enter(&admission, session)?;
         let ck_wk_len = Self::ulong_len_u64(wk_len)?;
         let ck_attr_len = Self::ffi_attr_len(&ffi_attrs)?;
+        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
         Self::call_object_with_mechanism(
             &admission,
             unsafe { (*self.func_list).C_UnwrapKey },
-            mechanism,
+            &validated,
             |function, mech, handle| unsafe {
                 function(
                     h_session,
@@ -226,10 +233,11 @@ impl FfiBackend {
         let h_session = Self::session_handle(session)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
         let ck_attr_len = Self::ffi_attr_len(&ffi_attrs)?;
+        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
         Self::call_object_with_mechanism(
             &admission,
             unsafe { (*self.func_list).C_GenerateKey },
-            mechanism,
+            &validated,
             |function, mech, handle| unsafe {
                 function(h_session, mech, Self::ffi_attr_ptr(&ffi_attrs), ck_attr_len, handle)
             },
@@ -249,10 +257,11 @@ impl FfiBackend {
         let h_session = Self::session_handle(session)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
         let ck_attr_len = Self::ffi_attr_len(&ffi_attrs)?;
+        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
         Self::call_object_with_mechanism_output(
             &admission,
             unsafe { (*self.func_list).C_GenerateKey },
-            mechanism,
+            &validated,
             |function, mech, handle| unsafe {
                 function(h_session, mech, Self::ffi_attr_ptr(&ffi_attrs), ck_attr_len, handle)
             },
@@ -273,10 +282,11 @@ impl FfiBackend {
         let _session_fence = self.session_fences.enter(&admission, session)?;
         let ck_pub_attr_len = Self::ffi_attr_len(&pub_ffi)?;
         let ck_priv_attr_len = Self::ffi_attr_len(&priv_ffi)?;
+        let validated = super::ffi_conversion::validate_for_ffi(mechanism)?;
         Self::call_object_pair_with_mechanism(
             &admission,
             unsafe { (*self.func_list).C_GenerateKeyPair },
-            mechanism,
+            &validated,
             |function, mech, public_handle, private_handle| unsafe {
                 function(
                     h_session,
