@@ -2090,3 +2090,157 @@ fn r10_packaging_workflows_reject_test_mechanism_params_cfg() {
         );
     }
 }
+
+/// R14 completeness gate, transport-validation half (S2 §12): every
+/// handler calling `parse_mechanism` also invokes
+/// `validate_mechanism_transport` on the result before any backend call.
+///
+/// The scan walks `crates/server/src/server/`, discovers every
+/// `parse_mechanism(` call site (excluding the definition, test sources,
+/// and `cfg(test)` tails), and asserts: (1) the `grpc_service/` sites
+/// equal the R13 21-site expectation exactly — a new handler calling
+/// `parse_mechanism` fails here until wired; (2) each wired site invokes
+/// `validate_mechanism_transport(` after the parse and before
+/// `remap_mechanism_handles(` — the validated-newtype handoff feeding
+/// the backend call in R13's pipeline, so validate-before-remap is
+/// validate-before-backend; (3) the only `parse_mechanism(` callers
+/// outside `grpc_service/` are the pinned `server/auth/` namesakes (a
+/// string→type policy parser with no FFI — it takes no transport
+/// validation per R13).
+///
+/// TRANSPORT-ONLY UNTIL R20: the sanitizer half of the completeness gate
+/// lands in R20, which extends this scan to the sanitizer stage. The
+/// handoff point is the named `TODO(R20)` marker at each wired site's
+/// backend call (asserted present below); until then this gate pins the
+/// transport half only.
+#[test]
+fn every_parse_mechanism_site_validates_transport_before_backend() {
+    // The R13 21-site expectation: (grpc_service/-relative file, anchor
+    // count). A new parse_mechanism caller changes this map and fails
+    // until wired + listed.
+    const WIRE_SITES: &[(&str, usize)] = &[
+        ("message_crypto/mod.rs", 4),
+        ("digest_cipher/digest.rs", 1),
+        ("digest_cipher/cipher.rs", 2),
+        ("key_ops/generation.rs", 3),
+        ("key_ops/kem.rs", 3),
+        ("key_ops/wrapping.rs", 1),
+        ("key_ops/authenticated_wrap.rs", 1),
+        ("key_ops/wrap_preparation.rs", 1),
+        ("sign_verify/sign.rs", 2),
+        ("sign_verify/verify.rs", 2),
+        ("sign_verify/verify_signature.rs", 1),
+    ];
+    // The server/auth/ namesake callers (string→type policy parsing, no
+    // FFI): pinned so a second namesake — or a real caller outside
+    // grpc_service/ — fails explicitly instead of slipping through.
+    const NAMESAKE_SITES: &[(&str, usize)] = &[("auth/policy.rs", 1)];
+
+    let server_root = workspace_root().join("crates/server/src/server");
+    let mut wired: Vec<(String, usize)> = Vec::new();
+    let mut namesakes: Vec<(String, usize)> = Vec::new();
+    let mut r20_markers = 0;
+    for source in rust_sources_under(&server_root) {
+        let file_name = source.file_name().expect("source file name").to_string_lossy().to_string();
+        if file_name.contains("tests") || file_name == "tests.rs" {
+            continue;
+        }
+        let text = fs::read_to_string(&source).expect("Rust source should be readable");
+        // Test-module tails trail the prod code; scan the prod head only.
+        // Cut only where the cfg attribute gates a `mod` — a bare
+        // `#[cfg(test)]` also marks small test helpers mid-file (e.g. in
+        // auth/policy.rs), which must not truncate the scan.
+        let prod = prod_head_before_test_module(&text);
+        // Anchors: `parse_mechanism(` call lines, excluding the `fn`
+        // definition lines (service_utils.rs, auth/grant.rs).
+        let mut anchors = Vec::new();
+        for (index, _) in prod.match_indices("parse_mechanism(") {
+            let line_start = prod[..index].rfind('\n').map(|i| i + 1).unwrap_or(0);
+            let line_end = prod[index..].find('\n').map(|i| index + i).unwrap_or(prod.len());
+            if prod[line_start..line_end].contains("fn parse_mechanism") {
+                continue;
+            }
+            anchors.push(index);
+        }
+        if anchors.is_empty() {
+            continue;
+        }
+        let rel = source
+            .strip_prefix(&server_root)
+            .expect("source should be under the server tree")
+            .display()
+            .to_string();
+        if let Some(short) = rel.strip_prefix("grpc_service/") {
+            let short = short.to_string();
+            wired.push((short.clone(), anchors.len()));
+            // Per-site window: from each anchor to the next (last runs to
+            // the end of the prod head).
+            let mut bounds: Vec<usize> = anchors.clone();
+            bounds.push(prod.len());
+            for (site, window) in bounds.windows(2).enumerate() {
+                let (start, end) = (window[0], window[1]);
+                let body = &prod[start..end];
+                let validate = body.find("validate_mechanism_transport(").unwrap_or_else(|| {
+                    panic!(
+                        "{short} site {site}: parse_mechanism result never reaches validate_mechanism_transport (R14)"
+                    )
+                });
+                let remap = body.find("remap_mechanism_handles(").unwrap_or_else(|| {
+                    panic!("{short} site {site}: missing remap_mechanism_handles handoff (R14)")
+                });
+                assert!(
+                    validate < remap,
+                    "{short} site {site}: validate_mechanism_transport must precede the remap/backend handoff (R14)"
+                );
+            }
+        } else {
+            namesakes.push((rel, anchors.len()));
+        }
+        r20_markers += prod.matches("TODO(R20)").count();
+    }
+
+    wired.sort();
+    let mut expected_wired: Vec<(String, usize)> =
+        WIRE_SITES.iter().map(|(file, count)| ((*file).to_string(), *count)).collect();
+    expected_wired.sort();
+    assert_eq!(
+        wired, expected_wired,
+        "grpc_service parse_mechanism sites changed — wire the new site(s) through validate_mechanism_transport and list them (R14)"
+    );
+
+    namesakes.sort();
+    let mut expected_namesakes: Vec<(String, usize)> =
+        NAMESAKE_SITES.iter().map(|(file, count)| ((*file).to_string(), *count)).collect();
+    expected_namesakes.sort();
+    assert_eq!(
+        namesakes, expected_namesakes,
+        "non-handler parse_mechanism callers changed — allowlist the new namesake explicitly or wire it (R14)"
+    );
+
+    // The R20 handoff exists: the sanitizer half of this gate extends the
+    // scan to these markers (see the doc comment above).
+    assert!(r20_markers > 0, "expected TODO(R20) sanitizer-handoff markers under grpc_service/");
+}
+
+/// Production head of a source file: cut the `cfg(test)`-gated test
+/// module tail (both `#[cfg(test)]` and `#[cfg(all(test, ...))]`
+/// spellings — but only when the attribute gates a `mod`, never a
+/// test-only helper or import).
+fn prod_head_before_test_module(text: &str) -> &str {
+    let mut cut = text.len();
+    for spelling in ["#[cfg(test)]", "#[cfg(all(test"] {
+        let mut search = 0;
+        while let Some(found) = text[search..].find(spelling) {
+            let attr_at = search + found;
+            let rest = &text[attr_at..];
+            let attr_end = rest.find(']').map(|i| attr_at + i + 1).unwrap_or(text.len());
+            let after = text[attr_end..].trim_start_matches([' ', '\t', '\r', '\n']);
+            if after.starts_with("mod ") {
+                cut = cut.min(attr_at);
+                break;
+            }
+            search = attr_end;
+        }
+    }
+    text[..cut].trim_end()
+}
