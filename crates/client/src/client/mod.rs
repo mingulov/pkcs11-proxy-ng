@@ -151,8 +151,18 @@ impl Pkcs11Client {
         template.into_iter().map(pkcs11_proxy_ng_proto::Attribute::from).collect()
     }
 
-    fn proto_mechanism(mechanism: &CkMechanism) -> CkResult<pkcs11_proxy_ng_proto::Mechanism> {
-        pkcs11_proxy_ng_proto::Mechanism::try_from(mechanism)
+    /// R17: capability-threaded classic mechanism encode (R5 precedent):
+    /// the cached `mechanism_parameter_transport_version` selects the v0
+    /// legacy bytes (capability 0, bit-identical to the legacy `TryFrom`)
+    /// or the v1 presence form (capability ≥ 1).
+    fn proto_mechanism(
+        &self,
+        mechanism: &CkMechanism,
+    ) -> CkResult<pkcs11_proxy_ng_proto::Mechanism> {
+        pkcs11_proxy_ng_proto::convert::mechanism::to_wire_with_transport_version(
+            mechanism,
+            self.mechanism_parameter_transport_version(),
+        )
     }
 
     /// Returns the stored context_id or `CKR_CRYPTOKI_NOT_INITIALIZED`.

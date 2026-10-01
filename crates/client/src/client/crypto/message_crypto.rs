@@ -187,7 +187,7 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
             mechanism: mechanism
-                .map(Self::proto_mechanism)
+                .map(|m| self.proto_mechanism(m))
                 .transpose()
                 .map_err(MessageCallError::backend)?,
             key_handle: key.0,
@@ -222,7 +222,7 @@ impl Pkcs11Client {
         let req = pkcs11_proxy_ng_proto::MessageEncryptInitRequest {
             client_context_id: ctx,
             session_handle: session.0,
-            mechanism: Some(Self::proto_mechanism(mechanism).map_err(MessageCallError::backend)?),
+            mechanism: Some(self.proto_mechanism(mechanism).map_err(MessageCallError::backend)?),
             key_handle: key.0,
             init_message_parameter: self.proto_message_parameter(init_param)?,
             parameter_out_spec: Some(Self::proto_parameter_roundtrip_spec(envelope)),
@@ -299,7 +299,7 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
             mechanism: mechanism
-                .map(Self::proto_mechanism)
+                .map(|m| self.proto_mechanism(m))
                 .transpose()
                 .map_err(MessageCallError::backend)?,
             key_handle: key.0,
@@ -331,7 +331,7 @@ impl Pkcs11Client {
         let req = pkcs11_proxy_ng_proto::MessageDecryptInitRequest {
             client_context_id: ctx,
             session_handle: session.0,
-            mechanism: Some(Self::proto_mechanism(mechanism).map_err(MessageCallError::backend)?),
+            mechanism: Some(self.proto_mechanism(mechanism).map_err(MessageCallError::backend)?),
             key_handle: key.0,
             init_message_parameter: self.proto_message_parameter(init_param)?,
             parameter_out_spec: Some(Self::proto_parameter_roundtrip_spec(envelope)),
@@ -404,7 +404,7 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
             mechanism: mechanism
-                .map(Self::proto_mechanism)
+                .map(|m| self.proto_mechanism(m))
                 .transpose()
                 .map_err(MessageCallError::backend)?,
             key_handle: key.0,
@@ -470,7 +470,7 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
             mechanism: mechanism
-                .map(Self::proto_mechanism)
+                .map(|m| self.proto_mechanism(m))
                 .transpose()
                 .map_err(MessageCallError::backend)?,
             key_handle: key.0,

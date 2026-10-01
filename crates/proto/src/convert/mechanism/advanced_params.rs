@@ -6,7 +6,7 @@ use crate::pkcs11_proxy_ng::v1::sp800108_attribute;
 // ADR-0013 §5: every `secret_to_plain` use in this file is a prost wire-encoding
 // boundary (response/request construction); the standing justification lives in
 // `secret_boundary` docs. No plain copy is retained past the enclosing encode.
-use super::{FromWire, pointer_from_wire};
+use super::{FromWire, ToWireV1, pointer_from_wire, pointer_to_wire};
 use crate::secret_boundary::{secret_to_plain, secret_to_plain_string};
 use pkcs11_proxy_ng_types::{
     AesCmacKeyDerivationParams, CkAttribute, CkAttributeType, CkAttributeValue, CkKdf, CkMechanism,
@@ -34,6 +34,25 @@ impl From<&IkePrfDeriveParams> for v1_proto::IkePrfDeriveParams {
             // R16: production encode stays v0-shaped.
             ni_null_len: None,
             nr_null_len: None,
+        }
+    }
+}
+
+impl ToWireV1<v1_proto::IkePrfDeriveParams> for IkePrfDeriveParams {
+    // R17: presence-based v1 (peers authoritative; legacy `From` above
+    // stays the v0 encode).
+    fn to_wire_v1(&self) -> v1_proto::IkePrfDeriveParams {
+        let (ni, ni_null_len) = pointer_to_wire(&self.ni_presence);
+        let (nr, nr_null_len) = pointer_to_wire(&self.nr_presence);
+        v1_proto::IkePrfDeriveParams {
+            prf_mechanism: self.prf_mechanism.0,
+            data_as_key: self.data_as_key,
+            rekey: self.rekey,
+            ni,
+            nr,
+            new_key_handle: self.new_key_handle.0,
+            ni_null_len,
+            nr_null_len,
         }
     }
 }
@@ -75,6 +94,26 @@ impl From<&Ike1PrfDeriveParams> for v1_proto::Ike1PrfDeriveParams {
     }
 }
 
+impl ToWireV1<v1_proto::Ike1PrfDeriveParams> for Ike1PrfDeriveParams {
+    // R17: presence-based v1 (peers authoritative; legacy `From` above
+    // stays the v0 encode).
+    fn to_wire_v1(&self) -> v1_proto::Ike1PrfDeriveParams {
+        let (ckyi, ckyi_null_len) = pointer_to_wire(&self.ckyi_presence);
+        let (ckyr, ckyr_null_len) = pointer_to_wire(&self.ckyr_presence);
+        v1_proto::Ike1PrfDeriveParams {
+            prf_mechanism: self.prf_mechanism.0,
+            has_prev_key: self.has_prev_key,
+            keygxy_handle: self.keygxy_handle.0,
+            prev_key_handle: self.prev_key_handle.0,
+            ckyi,
+            ckyr,
+            key_number: self.key_number,
+            ckyi_null_len,
+            ckyr_null_len,
+        }
+    }
+}
+
 impl FromWire<v1_proto::Ike1PrfDeriveParams> for Ike1PrfDeriveParams {
     // R16: fallible + version-threaded (presence needs the outer stamp).
     fn from_wire(p: &v1_proto::Ike1PrfDeriveParams, version: u32) -> Result<Self, CkRv> {
@@ -109,6 +148,21 @@ impl From<&Ike1ExtendedDeriveParams> for v1_proto::Ike1ExtendedDeriveParams {
     }
 }
 
+impl ToWireV1<v1_proto::Ike1ExtendedDeriveParams> for Ike1ExtendedDeriveParams {
+    // R17: presence-based v1 (peers authoritative; legacy `From` above
+    // stays the v0 encode).
+    fn to_wire_v1(&self) -> v1_proto::Ike1ExtendedDeriveParams {
+        let (extra_data, extra_data_null_len) = pointer_to_wire(&self.extra_data_presence);
+        v1_proto::Ike1ExtendedDeriveParams {
+            prf_mechanism: self.prf_mechanism.0,
+            has_keygxy: self.has_keygxy,
+            keygxy_handle: self.keygxy_handle.0,
+            extra_data,
+            extra_data_null_len,
+        }
+    }
+}
+
 impl FromWire<v1_proto::Ike1ExtendedDeriveParams> for Ike1ExtendedDeriveParams {
     // R16: fallible + version-threaded (presence needs the outer stamp).
     fn from_wire(p: &v1_proto::Ike1ExtendedDeriveParams, version: u32) -> Result<Self, CkRv> {
@@ -135,6 +189,21 @@ impl From<&Ike2PrfPlusDeriveParams> for v1_proto::Ike2PrfPlusDeriveParams {
             seed_data: secret_to_plain(&p.seed_data),
             // R16: production encode stays v0-shaped.
             seed_data_null_len: None,
+        }
+    }
+}
+
+impl ToWireV1<v1_proto::Ike2PrfPlusDeriveParams> for Ike2PrfPlusDeriveParams {
+    // R17: presence-based v1 (peers authoritative; legacy `From` above
+    // stays the v0 encode).
+    fn to_wire_v1(&self) -> v1_proto::Ike2PrfPlusDeriveParams {
+        let (seed_data, seed_data_null_len) = pointer_to_wire(&self.seed_data_presence);
+        v1_proto::Ike2PrfPlusDeriveParams {
+            prf_mechanism: self.prf_mechanism.0,
+            has_seed_key: self.has_seed_key,
+            seed_key_handle: self.seed_key_handle.0,
+            seed_data,
+            seed_data_null_len,
         }
     }
 }
