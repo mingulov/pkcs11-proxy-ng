@@ -96,7 +96,10 @@ fn decode_structured_message_parameter(
 
 fn message_parameter_has_null_positive(parameter: &MessageParameter) -> bool {
     match parameter {
-        MessageParameter::Raw(_) => true,
+        // R4 (S2-mandated): a v1-opaque param is a present buffer, not a
+        // null-positive — it no longer takes the sanitize-gated AB path.
+        // Legacy raw never reaches here (R3 rejects it at decode).
+        MessageParameter::Raw(_) => false,
         MessageParameter::GcmMessage(params) => {
             params.iv_null_len.is_some_and(|len| len > 0)
                 || (params.tag_null_len.is_some() && params.tag_bits > 0)
@@ -123,7 +126,9 @@ fn native_message_parameter_len(parameter: &MessageParameter) -> u64 {
         MessageParameter::SalaChacha(_) => {
             std::mem::size_of::<cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS>() as u64
         }
-        MessageParameter::Raw(_) => 0,
+        // R4: opaque bytes carry no struct layout — the native footprint
+        // is the byte length itself (mirrors T1's backend arm).
+        MessageParameter::Raw(raw) => raw.len() as u64,
     }
 }
 
@@ -4679,5 +4684,344 @@ mod lifecycle_transition_tests {
             Some(0),
             "invalid client-selected handles must not grow operation state",
         );
+    }
+}
+
+#[cfg(test)]
+mod r4_v1_opaque_tests {
+    use super::*;
+    use crate::server::context_manager::ContextManager;
+    use crate::server::grpc_service::service_utils::register_session_handle;
+    use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend, mock::MockMessageLifecycleAction};
+    use pkcs11_proxy_ng_proto::convert::message_params::GcmMessageParams;
+
+    #[derive(Clone, Copy, Debug)]
+    enum Direction {
+        Encrypt,
+        Decrypt,
+    }
+
+    fn operation_kind(direction: Direction) -> ServerMessageOperation {
+        match direction {
+            Direction::Encrypt => ServerMessageOperation::Encrypt,
+            Direction::Decrypt => ServerMessageOperation::Decrypt,
+        }
+    }
+
+    /// R4: craft a v1-opaque wire parameter (`opaque_message_params` +
+    /// `parameter_encoding_version == 1`) carrying exactly `data`.
+    fn v1_opaque_wire(data: Vec<u8>) -> pkcs11_proxy_ng_proto::MessageParameter {
+        let declared_len = data.len() as u64;
+        pkcs11_proxy_ng_proto::MessageParameter {
+            params: Some(pkcs11_proxy_ng_proto::message_parameter::Params::OpaqueMessageParams(
+                pkcs11_proxy_ng_proto::OpaqueMessageParams { data, declared_len },
+            )),
+            parameter_encoding_version: 1,
+        }
+    }
+
+    /// AES-CBC is registry shape "iv", which maps to the Unmodeled
+    /// message-parameter shape — the v1-opaque carrier shape.
+    fn type_only_aes_cbc() -> pkcs11_proxy_ng_proto::Mechanism {
+        pkcs11_proxy_ng_proto::Mechanism {
+            mechanism_type: CkMechanismType::AES_CBC.0,
+            params: None,
+        }
+    }
+
+    fn caller_spec(len: u64) -> pkcs11_proxy_ng_proto::ParameterRoundtripSpec {
+        pkcs11_proxy_ng_proto::ParameterRoundtripSpec {
+            buffer_present: true,
+            buffer_len: len,
+            value: None,
+        }
+    }
+
+    async fn setup(
+        direction: Direction,
+        installed_shape: Option<MessageParameterShape>,
+    ) -> (HandlerContext, Arc<MockBackend>, ClientContextId, u64) {
+        let mock = Arc::new(MockBackend::default_test());
+        mock.initialize().unwrap();
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        manager.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let context_id = manager.create_context(None).await.unwrap();
+        let raw_session = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
+        let virtual_session = register_session_handle(
+            &manager,
+            &context_id,
+            raw_session,
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+        )
+        .await
+        .unwrap();
+        manager
+            .message_operation_lock(
+                &context_id,
+                VirtualHandle(virtual_session),
+                operation_kind(direction),
+            )
+            .await
+            .unwrap()
+            .lock()
+            .await
+            .shape = installed_shape;
+        (HandlerContext::for_test(&manager, &backend), mock, context_id, virtual_session)
+    }
+
+    /// R4: a v1-opaque init parameter (Unmodeled shape + Raw bytes) is
+    /// accepted through the init contract in both directions, with and
+    /// without sanitization — the S2-mandated null-positive flip means a
+    /// present opaque buffer no longer sanitize-rejects. The provider
+    /// footprint is the opaque byte length (mirrors T1's backend arm).
+    #[tokio::test]
+    async fn r4_v1_opaque_init_accepted_encrypt_decrypt() {
+        for sanitize in [false, true] {
+            for direction in [Direction::Encrypt, Direction::Decrypt] {
+                let (mut ctx, mock, context_id, session) = setup(direction, None).await;
+                ctx.sanitize_inputs = sanitize;
+                mock.set_next_message_lifecycle_action(MockMessageLifecycleAction::Return(
+                    CkRv::OK,
+                ));
+                let calls_before = mock.message_init_contract_call_count();
+
+                let (ck_rv, parameter_result, parameter_shape) = match direction {
+                    Direction::Encrypt => {
+                        let response = message_encrypt_init(
+                            &ctx,
+                            Request::new(pkcs11_proxy_ng_proto::MessageEncryptInitRequest {
+                                client_context_id: context_id.0.clone(),
+                                session_handle: session,
+                                mechanism: Some(type_only_aes_cbc()),
+                                key_handle: 0,
+                                init_message_parameter: Some(v1_opaque_wire(vec![0xA5; 16])),
+                                parameter_out_spec: Some(caller_spec(16)),
+                                parameter_shape: Some(
+                                    MessageParameterShape::Unmodeled.to_proto_i32(),
+                                ),
+                            }),
+                        )
+                        .await
+                        .unwrap()
+                        .into_inner();
+                        (response.ck_rv, response.parameter_result, response.parameter_shape)
+                    }
+                    Direction::Decrypt => {
+                        let response = message_decrypt_init(
+                            &ctx,
+                            Request::new(pkcs11_proxy_ng_proto::MessageDecryptInitRequest {
+                                client_context_id: context_id.0.clone(),
+                                session_handle: session,
+                                mechanism: Some(type_only_aes_cbc()),
+                                key_handle: 0,
+                                init_message_parameter: Some(v1_opaque_wire(vec![0xA5; 16])),
+                                parameter_out_spec: Some(caller_spec(16)),
+                                parameter_shape: Some(
+                                    MessageParameterShape::Unmodeled.to_proto_i32(),
+                                ),
+                            }),
+                        )
+                        .await
+                        .unwrap()
+                        .into_inner();
+                        (response.ck_rv, response.parameter_result, response.parameter_shape)
+                    }
+                };
+                assert_eq!(ck_rv, CkRv::OK.0, "{direction:?} sanitize={sanitize}");
+                assert_eq!(
+                    mock.message_init_contract_call_count(),
+                    calls_before + 1,
+                    "v1-opaque init must reach the provider: {direction:?} sanitize={sanitize}",
+                );
+                let (parameter, provider_spec) =
+                    mock.last_message_init_contract().expect("mock records the init contract");
+                assert!(
+                    matches!(parameter, MessageParameter::Raw(_)),
+                    "exact opaque bytes reach the provider"
+                );
+                assert!(provider_spec.buffer_present);
+                assert_eq!(
+                    provider_spec.buffer_len, 16,
+                    "provider footprint is the opaque byte length"
+                );
+                assert_eq!(
+                    parameter_shape,
+                    Some(MessageParameterShape::Unmodeled.to_proto_i32()),
+                    "installed shape is Unmodeled"
+                );
+                let acknowledgement = parameter_result.expect("init ack");
+                assert_eq!(acknowledgement.ck_rv, CkRv::OK.0);
+                assert_eq!(acknowledgement.returned_len, 16);
+                assert_eq!(acknowledgement.value, Some(Vec::new()));
+            }
+        }
+    }
+
+    /// R4: a v1-opaque Begin parameter is accepted through the Begin
+    /// contract in both directions, with and without sanitization.
+    #[tokio::test]
+    async fn r4_v1_opaque_begin_accepted_encrypt_decrypt() {
+        for sanitize in [false, true] {
+            for direction in [Direction::Encrypt, Direction::Decrypt] {
+                let (mut ctx, mock, context_id, session) =
+                    setup(direction, Some(MessageParameterShape::Unmodeled)).await;
+                ctx.sanitize_inputs = sanitize;
+                let calls_before = mock.message_begin_call_count();
+
+                let (ck_rv, parameter_result) = match direction {
+                    Direction::Encrypt => {
+                        // T12: `EncryptMessageBeginResponse` is
+                        // `ZeroizeOnDrop`; take the field instead of moving it.
+                        let mut response = encrypt_message_begin(
+                            &ctx,
+                            Request::new(pkcs11_proxy_ng_proto::EncryptMessageBeginRequest {
+                                exact_output_effects_version: 1,
+                                client_context_id: context_id.0.clone(),
+                                session_handle: session,
+                                parameter: Vec::new(),
+                                associated_data: Vec::new(),
+                                associated_data_null_len: None,
+                                parameter_out_spec: Some(caller_spec(16)),
+                                message_parameter: Some(v1_opaque_wire(vec![0xA5; 16])),
+                            }),
+                        )
+                        .await
+                        .unwrap()
+                        .into_inner();
+                        (response.ck_rv, std::mem::take(&mut response.parameter_result))
+                    }
+                    Direction::Decrypt => {
+                        // T12: `DecryptMessageBeginResponse` is
+                        // `ZeroizeOnDrop`; take the field instead of moving it.
+                        let mut response = decrypt_message_begin(
+                            &ctx,
+                            Request::new(pkcs11_proxy_ng_proto::DecryptMessageBeginRequest {
+                                exact_output_effects_version: 1,
+                                client_context_id: context_id.0.clone(),
+                                session_handle: session,
+                                parameter: Vec::new(),
+                                associated_data: Vec::new(),
+                                associated_data_null_len: None,
+                                parameter_out_spec: Some(caller_spec(16)),
+                                message_parameter: Some(v1_opaque_wire(vec![0xA5; 16])),
+                            }),
+                        )
+                        .await
+                        .unwrap()
+                        .into_inner();
+                        (response.ck_rv, std::mem::take(&mut response.parameter_result))
+                    }
+                };
+                assert_eq!(ck_rv, CkRv::OK.0, "{direction:?} sanitize={sanitize}");
+                assert_eq!(
+                    mock.message_begin_call_count(),
+                    calls_before + 1,
+                    "v1-opaque Begin must reach the provider: {direction:?} sanitize={sanitize}",
+                );
+                let acknowledgement = parameter_result.expect("Begin ack");
+                assert_eq!(acknowledgement.ck_rv, CkRv::OK.0);
+                assert_eq!(acknowledgement.returned_len, 16);
+                assert_eq!(acknowledgement.value, Some(Vec::new()));
+            }
+        }
+    }
+
+    /// R4: the Begin contract's provider footprint for v1-opaque bytes is
+    /// the byte length itself (mirrors T1's backend arm), in both
+    /// sanitize modes.
+    #[test]
+    fn r4_begin_contract_provider_len_is_opaque_byte_length() {
+        let wire = v1_opaque_wire(vec![0xA5; 16]);
+        let spec = caller_spec(16);
+        for sanitize in [false, true] {
+            let contract = validate_message_begin_contract(
+                sanitize,
+                MessageParameterShape::Unmodeled,
+                &[],
+                Some(&spec),
+                Some(&wire),
+            )
+            .expect("v1-opaque satisfies the Begin contract");
+            let contract = contract.expect("contract present");
+            assert!(contract.provider_spec.buffer_present);
+            assert_eq!(
+                contract.provider_spec.buffer_len, 16,
+                "provider footprint is the opaque byte length (sanitize={sanitize})"
+            );
+            assert!(
+                matches!(contract.parameter, Some(MessageParameter::Raw(_))),
+                "exact opaque bytes are carried through"
+            );
+        }
+    }
+
+    /// R4 pin: init/Begin decode keeps the R3 rejection RVs — legacy `raw`
+    /// at any version is fail-closed MPI, a per-message version newer than
+    /// the daemon is FNS pre-entry, and v1-opaque decodes to Raw.
+    #[test]
+    fn r4_decode_keeps_r3_rejection_rvs() {
+        for version in [0, 1] {
+            let legacy = pkcs11_proxy_ng_proto::MessageParameter {
+                params: Some(pkcs11_proxy_ng_proto::message_parameter::Params::Raw(vec![0xA5; 16])),
+                parameter_encoding_version: version,
+            };
+            assert_eq!(
+                decode_structured_message_parameter(Some(&legacy)),
+                Err(CkRv::MECHANISM_PARAM_INVALID),
+                "legacy raw v{version} stays fail-closed",
+            );
+        }
+        let mut newer = v1_opaque_wire(vec![0xA5; 16]);
+        newer.parameter_encoding_version = 2;
+        assert_eq!(
+            decode_structured_message_parameter(Some(&newer)),
+            Err(CkRv::FUNCTION_NOT_SUPPORTED),
+            "version-newer stays FNS pre-entry",
+        );
+        let decoded = decode_structured_message_parameter(Some(&v1_opaque_wire(vec![0xA5; 16])))
+            .unwrap()
+            .unwrap();
+        assert!(matches!(decoded, MessageParameter::Raw(_)));
+        assert_eq!(decode_structured_message_parameter(None).unwrap(), None);
+    }
+
+    /// R4: a v1-opaque parameter is a present buffer, not a null-positive
+    /// (S2-mandated flip: it no longer takes the sanitize-gated AB path),
+    /// and its native footprint is the byte length itself (mirrors T1's
+    /// backend arm). Structured shapes are bit-identical.
+    #[test]
+    fn r4_raw_null_positive_and_native_len() {
+        let raw = MessageParameter::Raw(SecretBytes::new(vec![0xA5; 16]));
+        assert!(!message_parameter_has_null_positive(&raw));
+        assert_eq!(native_message_parameter_len(&raw), 16);
+        let empty_raw = MessageParameter::Raw(SecretBytes::new(Vec::new()));
+        assert!(!message_parameter_has_null_positive(&empty_raw));
+        assert_eq!(native_message_parameter_len(&empty_raw), 0);
+
+        let well_formed = MessageParameter::GcmMessage(GcmMessageParams {
+            iv: vec![0x11; 12],
+            iv_null_len: None,
+            iv_fixed_bits: 96,
+            iv_generator: 0,
+            tag: vec![0; 16],
+            tag_null_len: None,
+            tag_bits: 128,
+        });
+        assert!(!message_parameter_has_null_positive(&well_formed));
+        assert_eq!(
+            native_message_parameter_len(&well_formed),
+            std::mem::size_of::<cryptoki_sys::CK_GCM_MESSAGE_PARAMS>() as u64
+        );
+        let null_positive = MessageParameter::GcmMessage(GcmMessageParams {
+            iv: Vec::new(),
+            iv_null_len: Some(12),
+            iv_fixed_bits: 96,
+            iv_generator: 0,
+            tag: vec![0; 16],
+            tag_null_len: None,
+            tag_bits: 128,
+        });
+        assert!(message_parameter_has_null_positive(&null_positive));
     }
 }

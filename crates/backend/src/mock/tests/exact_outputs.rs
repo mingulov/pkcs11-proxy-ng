@@ -852,3 +852,69 @@ fn verify_rejects_signature_that_does_not_match_sign_echo() {
         CkRv::SIGNATURE_INVALID,
     );
 }
+
+/// R4 step 4: the mock's message gates accept R3-validated v1-opaque
+/// (Raw) bytes through all four `validate_structured` gates (Init
+/// contract + Begin, both directions). The mock stays a strict oracle:
+/// structured validation is unchanged (see the pins above) and the
+/// `resolve_input` discipline is untouched.
+#[test]
+fn r4_v1_opaque_raw_accepted_by_message_gates() {
+    let backend = MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::AES_GCM]);
+    backend.initialize().unwrap();
+    let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let key = live_key(&backend, session);
+    let mechanism = CkMechanism { mechanism_type: CkMechanismType::AES_GCM, params: None };
+    let raw = MessageParameter::Raw(SecretBytes::new(vec![0xA5; 16]));
+    let provider_spec =
+        CkParameterRoundtripSpec { buffer_present: true, buffer_len: 16, value: None };
+    for encrypt in [true, false] {
+        let direction = if encrypt { "Encrypt" } else { "Decrypt" };
+        let init_ack = if encrypt {
+            backend.message_encrypt_init_contract(
+                session,
+                &mechanism,
+                Some(&raw),
+                key,
+                &provider_spec,
+            )
+        } else {
+            backend.message_decrypt_init_contract(
+                session,
+                &mechanism,
+                Some(&raw),
+                key,
+                &provider_spec,
+            )
+        }
+        .unwrap_or_else(|rv| panic!("{direction} Init rejects v1-opaque: {rv:?}"));
+        assert_eq!(init_ack.ck_rv, CkRv::OK, "{direction} Init rv");
+        assert_eq!(init_ack.returned_len, 16, "{direction} Init native length");
+        assert_eq!(init_ack.value, Some(SecretBytes::new(Vec::new())), "{direction} Init presence");
+
+        let (begin_ack, begin_effects) = if encrypt {
+            backend.encrypt_message_begin_msg(session, &raw, CkInBuf::Bytes(b"aad"), &provider_spec)
+        } else {
+            backend.decrypt_message_begin_msg(session, &raw, CkInBuf::Bytes(b"aad"), &provider_spec)
+        }
+        .unwrap_or_else(|rv| panic!("{direction} Begin rejects v1-opaque: {rv:?}"));
+        assert_eq!(begin_ack.ck_rv, CkRv::OK, "{direction} Begin rv");
+        assert_eq!(begin_ack.returned_len, 16, "{direction} Begin native length");
+        // A byte-identical opaque round-trip carries no effects (R3 None).
+        assert!(
+            begin_effects
+                .validate_for(
+                    &raw,
+                    pkcs11_proxy_ng_proto::convert::message_effects::MessageEffectContext {
+                        mode: ParameterEffectCallMode::Begin,
+                        encrypt,
+                        generated_stage: true,
+                        auth_stage: false,
+                        rv: begin_ack.ck_rv
+                    }
+                )
+                .is_ok(),
+            "{direction} Begin no-effects validation",
+        );
+    }
+}
