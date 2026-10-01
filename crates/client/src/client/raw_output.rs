@@ -14,6 +14,7 @@ use pkcs11_proxy_ng_types::{
 
 use super::Pkcs11Client;
 use pkcs11_proxy_ng_proto::convert::message_effects::{MessageEffectContext, MessageEffects};
+use pkcs11_proxy_ng_proto::convert::message_params::MessageParameter;
 
 pub type ParameterOutputExactDecoded =
     (CkOutputBufferResult, CkParameterRoundtripResult, Option<MessageEffects>);
@@ -75,7 +76,18 @@ fn decode_parameter_output_exact_response(
     }
     let response_parameter = match (request_parameter, response.message_effects.as_ref()) {
         (Some(request), Some(wire)) => {
-            let effects = MessageEffects::try_from(wire)?;
+            // R5/F1 (controller ruling): the R3 None-effects wire signal
+            // (`message_effects: Some(empty)`) decodes to
+            // `MessageEffects::None` for a `Raw` request only — a
+            // Raw request exists solely on the v1 path, so no legacy
+            // exchange can present this pair. Every other
+            // `(request, Some(empty))` combination keeps flowing through
+            // the unchanged `TryFrom`, which rejects the empty oneof
+            // with `ARGUMENTS_BAD`.
+            let effects = match (request, wire.effect.as_ref()) {
+                (MessageParameter::Raw(_), None) => MessageEffects::None,
+                _ => MessageEffects::try_from(wire)?,
+            };
             effects
                 .validate_for(
                     request,
@@ -158,6 +170,24 @@ impl Pkcs11Client {
         spec: &CkParameterRoundtripSpec,
     ) -> v1_proto::ParameterRoundtripSpec {
         spec.into()
+    }
+
+    /// Encode an optional message parameter for the wire under this
+    /// connection's cached transport capability (R5/F1): v1-opaque at
+    /// ≥ 1, bit-identical legacy encoding otherwise. A value the v1
+    /// encoding cannot represent (over the 64 KiB outer cap) fails HERE
+    /// with a backend-origin `MECHANISM_PARAM_INVALID` — the caller's `?`
+    /// emits no RPC.
+    pub(crate) fn proto_message_parameter(
+        &self,
+        parameter: Option<&MessageParameter>,
+    ) -> Result<Option<v1_proto::MessageParameter>, MessageCallError> {
+        parameter
+            .map(|value| {
+                value.to_wire_with_transport_version(self.mechanism_parameter_transport_version())
+            })
+            .transpose()
+            .map_err(MessageCallError::backend)
     }
 
     pub(crate) fn proto_attribute_queries(
@@ -255,7 +285,7 @@ impl Pkcs11Client {
                 .map_err(MessageCallError::backend)?,
             wrapping_key_handle,
             key_handle,
-            message_parameter: message_parameter.map(pkcs11_proxy_ng_proto::MessageParameter::from),
+            message_parameter: self.proto_message_parameter(message_parameter)?,
             input_data_null_len: None,
             associated_data_null_len: None,
         };
@@ -471,7 +501,7 @@ mod message_contract_tests {
     async fn require_supported_cached_version_needs_no_probe() {
         let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
         let mut client = Pkcs11Client::from_channel(channel);
-        client.note_backend_probe(1, true);
+        client.note_backend_probe(1, true, 0);
         assert!(client.require_exact_output_effects().await.is_ok());
     }
 
@@ -481,7 +511,7 @@ mod message_contract_tests {
     async fn require_unsupported_cached_version_fails_closed() {
         let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
         let mut client = Pkcs11Client::from_channel(channel);
-        client.note_backend_probe(99, true);
+        client.note_backend_probe(99, true, 0);
         assert_eq!(client.require_exact_output_effects().await, Err(CkRv::FUNCTION_NOT_SUPPORTED));
     }
 
@@ -929,5 +959,208 @@ mod message_contract_tests {
         assert_eq!(parameter.returned_len, 0);
         assert_eq!(parameter.value, Some(SecretBytes::new(Vec::new())));
         assert!(message.is_none());
+    }
+
+    fn r5_success_response_with_effects(
+        message_effects: Option<v1_proto::MessageParameterEffects>,
+    ) -> pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+        pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+            message_effects,
+            authenticated_output: None,
+            output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
+                apply_returned_len: Some(true),
+                ck_rv: CkRv::OK.0,
+                returned_len: 16,
+                value: Some(vec![0x31; 16]),
+            }),
+            parameter_result: Some(pkcs11_proxy_ng_proto::ParameterRoundtripResult {
+                ck_rv: CkRv::OK.0,
+                returned_len: 16,
+                value: Some(Vec::new()),
+            }),
+            message_parameter_out: None,
+        }
+    }
+
+    /// R5/F1 (controller ruling): a Raw request paired with the R3
+    /// None-effects wire signal (`message_effects: Some(empty)`) decodes to
+    /// `MessageEffects::None` (the existing `validate_for` confirms the
+    /// `(None, None)` pair). RED pre-R5: the empty wire oneof fails
+    /// `TryFrom` with `ARGUMENTS_BAD`.
+    #[test]
+    fn r5_raw_request_with_empty_effects_wire_decodes_to_none() {
+        let request = MessageParameter::Raw(vec![0xA5; 16].into());
+        let output_spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 16, length_pointer_null: false };
+        let parameter_spec =
+            CkParameterRoundtripSpec { buffer_present: true, buffer_len: 16, value: None };
+        let response = r5_success_response_with_effects(Some(v1_proto::MessageParameterEffects {
+            effect: None,
+        }));
+        let (_, _, effects) = decode_parameter_output_exact_response(
+            response,
+            &output_spec,
+            &parameter_spec,
+            Some(&request),
+            ParameterOutputFunction::EncryptMessage,
+            0,
+        )
+        .expect("Raw request + empty effects wire decodes to None");
+        assert_eq!(effects, Some(MessageEffects::None));
+    }
+
+    /// R5/F1 ruling matrix pins (green before AND after): every other
+    /// `(request, Some(empty))` combination keeps `ARGUMENTS_BAD`
+    /// (`TryFrom` unchanged); `(None, None)` still decodes to no effects;
+    /// a Raw request with a non-empty structured effects message keeps the
+    /// `validate_for` rejection.
+    #[test]
+    fn r5_empty_effects_wire_matrix_pins() {
+        let output_spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 16, length_pointer_null: false };
+        let parameter_spec =
+            CkParameterRoundtripSpec { buffer_present: true, buffer_len: 16, value: None };
+        let empty = || Some(v1_proto::MessageParameterEffects { effect: None });
+
+        for (label, request) in [("gcm", gcm_parameter()), ("ccm", ccm_parameter())] {
+            let error = decode_parameter_output_exact_response(
+                r5_success_response_with_effects(empty()),
+                &output_spec,
+                &parameter_spec,
+                Some(&request),
+                ParameterOutputFunction::EncryptMessage,
+                0,
+            )
+            .unwrap_err();
+            assert_eq!(error, CkRv::ARGUMENTS_BAD, "{label} + empty effects wire");
+        }
+
+        let (_, _, effects) = decode_parameter_output_exact_response(
+            r5_success_response_with_effects(None),
+            &output_spec,
+            &parameter_spec,
+            None,
+            ParameterOutputFunction::EncryptMessage,
+            0,
+        )
+        .expect("(None, None) still decodes");
+        assert!(effects.is_none());
+
+        let request = MessageParameter::Raw(vec![0xA5; 16].into());
+        let structured_wire = v1_proto::MessageParameterEffects {
+            effect: Some(v1_proto::message_parameter_effects::Effect::Gcm(
+                v1_proto::GcmMessageEffects { iv: Some(vec![0x42; 12]), tag: None },
+            )),
+        };
+        let error = decode_parameter_output_exact_response(
+            r5_success_response_with_effects(Some(structured_wire)),
+            &output_spec,
+            &parameter_spec,
+            Some(&request),
+            ParameterOutputFunction::EncryptMessage,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(error, CkRv::FUNCTION_NOT_SUPPORTED, "Raw + structured effects wire");
+    }
+
+    fn r5_client_with_transport_version(version: u32) -> Pkcs11Client {
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
+        let client = Pkcs11Client::from_channel(channel);
+        client.set_mechanism_parameter_transport_version_for_tests(version);
+        assert_eq!(client.mechanism_parameter_transport_version(), version);
+        client
+    }
+
+    /// R5/F1 client encode matrix: at legacy capability the helper emits
+    /// bit-identical legacy bytes; at capability ≥ 1 a `Raw` IV emits
+    /// v1-opaque (exact bytes, declared length, version 1); structured
+    /// values keep the legacy encoding at every capability.
+    #[tokio::test]
+    async fn r5_proto_message_parameter_encode_matrix() {
+        let raw16 = MessageParameter::Raw(vec![0xA5; 16].into());
+
+        let legacy = r5_client_with_transport_version(0);
+        let wire = legacy
+            .proto_message_parameter(Some(&raw16))
+            .expect("legacy encodes")
+            .expect("Some in, Some out");
+        assert_eq!(wire, pkcs11_proxy_ng_proto::MessageParameter::from(&raw16));
+        assert!(legacy.proto_message_parameter(None).expect("None encodes").is_none());
+
+        for version in [1, 2] {
+            let client = r5_client_with_transport_version(version);
+            let wire = client
+                .proto_message_parameter(Some(&raw16))
+                .expect("v1 encodes Raw")
+                .expect("Some in, Some out");
+            assert_eq!(wire.parameter_encoding_version, 1, "capability {version}");
+            match &wire.params {
+                Some(pkcs11_proxy_ng_proto::message_parameter::Params::OpaqueMessageParams(
+                    opaque,
+                )) => {
+                    assert_eq!(opaque.data, vec![0xA5; 16]);
+                    assert_eq!(opaque.declared_len, 16);
+                }
+                other => panic!("capability {version} must emit opaque, got {other:?}"),
+            }
+        }
+
+        let client = r5_client_with_transport_version(1);
+        let structured = gcm_parameter();
+        let wire = client
+            .proto_message_parameter(Some(&structured))
+            .expect("structured encodes")
+            .expect("Some in, Some out");
+        assert_eq!(wire, pkcs11_proxy_ng_proto::MessageParameter::from(&structured));
+    }
+
+    /// R5/F1: an over-64 KiB `Raw` value fails LOCALLY with a
+    /// backend-origin `MECHANISM_PARAM_INVALID` under v1 (no RPC is
+    /// attempted — the channel is dead, so any emission would surface a
+    /// transport error instead).
+    #[tokio::test]
+    async fn r5_over_cap_raw_fails_locally_without_wire_emission() {
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
+        let mut client = Pkcs11Client::from_channel(channel);
+        client.restore_context_id(Some("r5-no-emission".to_string()));
+        client.set_mechanism_parameter_transport_version_for_tests(1);
+        let big = MessageParameter::Raw(vec![0xA5; 64 * 1024 + 1].into());
+        let mechanism = CkMechanism {
+            mechanism_type: pkcs11_proxy_ng_types::CkMechanismType::AES_CBC,
+            params: None,
+        };
+        let envelope =
+            CkParameterRoundtripSpec { buffer_present: true, buffer_len: 16, value: None };
+        let error = client
+            .message_encrypt_init_contract(
+                CkSessionHandle(7),
+                &mechanism,
+                Some(&big),
+                CkObjectHandle(1),
+                &envelope,
+                pkcs11_proxy_ng_proto::convert::message_params::MessageParameterShape::Unmodeled,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.ck_rv, CkRv::MECHANISM_PARAM_INVALID);
+        assert_eq!(error.origin, crate::MessageCallErrorOrigin::Backend);
+
+        // Control: a representable value on the same dead channel proceeds
+        // to the RPC (transport error), proving the helper only gates the
+        // unrepresentable case.
+        let small = MessageParameter::Raw(vec![0xA5; 16].into());
+        let error = client
+            .message_encrypt_init_contract(
+                CkSessionHandle(7),
+                &mechanism,
+                Some(&small),
+                CkObjectHandle(1),
+                &envelope,
+                pkcs11_proxy_ng_proto::convert::message_params::MessageParameterShape::Unmodeled,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.origin, crate::MessageCallErrorOrigin::Transport);
     }
 }

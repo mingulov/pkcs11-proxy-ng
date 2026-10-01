@@ -1799,3 +1799,21 @@ fn pre_probe_fallback_catalog_shape_is_pinned_transient() {
         .collect();
     assert_eq!(versions, [(2, 40), (3, 0), (3, 2)], "fallback shape is the optimistic transient");
 }
+
+/// R5/F1 snapshot-API storage: the test injection round-trips through the
+/// public snapshot read, and `clear_cache` resets it to legacy 0. Guarded:
+/// the snapshot is process-global, like the probe cache.
+#[test]
+fn r5_transport_version_snapshot_storage_round_trip() {
+    let _guard = shim_state_test_guard();
+    crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(1);
+    assert_eq!(crate::interface_probe::mechanism_parameter_transport_version(), 1);
+    crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(2);
+    assert_eq!(crate::interface_probe::mechanism_parameter_transport_version(), 2);
+    crate::interface_probe::clear_cache();
+    assert_eq!(
+        crate::interface_probe::mechanism_parameter_transport_version(),
+        0,
+        "clear_cache resets the snapshot to legacy",
+    );
+}

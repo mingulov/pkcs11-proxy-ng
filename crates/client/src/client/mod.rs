@@ -124,6 +124,11 @@ pub struct Pkcs11Client {
     /// 0 = unknown (probe), 1 = no, 2 = yes. Shared across clones; every
     /// fresh probe overwrites it and reconnect resets it to unknown.
     typed_auth_capability: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    /// Cached `mechanism_parameter_transport_version` discovery capability
+    /// (R5/F1): 0 = legacy encoding. Shared across clones like the other
+    /// probe caches; every fresh probe overwrites it and reconnect resets
+    /// it to 0.
+    mechanism_parameter_transport_version: std::sync::Arc<std::sync::atomic::AtomicU32>,
     grpc: GrpcClient<RpcDeadline<tonic::transport::Channel>>,
     /// The channel wrapped by `grpc`, kept so [`Pkcs11Client::set_rpc_timeout`]
     /// and [`reconnect`][Pkcs11Client::reconnect] can rebuild the gRPC client
