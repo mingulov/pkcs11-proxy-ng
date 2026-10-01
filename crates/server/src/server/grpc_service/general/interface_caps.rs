@@ -88,6 +88,21 @@ impl DiscoveryCache {
 static DISCOVERY_CACHE: LazyLock<Mutex<DiscoveryCache>> =
     LazyLock::new(|| Mutex::new(DiscoveryCache::default()));
 
+/// R4: derive the daemon's `MechanismParamAbi` advertisement value from
+/// the backend's runtime ABI properties — `sizeof(CK_ULONG)` in bytes and
+/// the wire byte order (1 = LE, 2 = BE) — never a per-target hardcoded
+/// literal. Returns `None` where no v1 ABI exactly matches (big-endian
+/// and unknown widths stay silent rather than advertise a wrong layout;
+/// LLP64 discrimination would ride a future stride input).
+fn daemon_mechanism_param_abi(ulong_size: u32, byte_order: u32) -> Option<i32> {
+    use pkcs11_proxy_ng_proto::MechanismParamAbi as Abi;
+    match (ulong_size, byte_order) {
+        (8, 1) => Some(Abi::Lp64NativeLe as i32),
+        (4, 1) => Some(Abi::Ilp32NativeLe as i32),
+        _ => None,
+    }
+}
+
 /// Handler for GetBackendInterfaces RPC.
 ///
 /// Context-free: no client_context_id required.
@@ -160,6 +175,13 @@ pub(super) async fn get_backend_interfaces(
         })
         .collect();
 
+    // R4 plumbing: the daemon's actual ABI value is derived live from the
+    // backend's runtime ABI properties (covered by
+    // `r4_daemon_mechanism_param_abi_derivation`), but stays deliberately
+    // unadvertised — see TODO(R23) below.
+    let _unadvertised_mechanism_abi =
+        daemon_mechanism_param_abi(backend.abi_ulong_size(), backend.abi_byte_order());
+
     let response = pkcs11_proxy_ng_proto::GetBackendInterfacesResponse {
         exact_output_effects_version: Some(1),
         pointer_safe_authenticated_parameters: Some(true),
@@ -169,8 +191,11 @@ pub(super) async fn get_backend_interfaces(
         backend_byte_order: Some(backend.abi_byte_order()),
         backend_attribute_stride: Some(backend.abi_attribute_stride()),
         pointer_safe_message_parameters: Some(true),
-        // R2: capability lands unadvertised (R23 flips per D1(a)); R4 wires
-        // the daemon's actual values here.
+        // TODO(R23): advertise the v1 mechanism-parameter capability (the
+        // computed `_unadvertised_mechanism_abi` value above plus transport
+        // version 1) once the full classic inventory converts per D1(a).
+        // Until then the capability stays hard-0/absent: acceptance code
+        // lands now, advertisement does not.
         mechanism_parameter_transport_version: None,
         backend_mechanism_abi: None,
     };
@@ -504,5 +529,53 @@ mod tests {
             "old backend must miss after a sequential backend swap evicts the single entry"
         );
         assert!(cache.get(t1, 8, &payload_b).is_some(), "new backend must hit after its own put");
+    }
+
+    /// R4: the v1 mechanism-parameter capability stays unadvertised until
+    /// R23 flips it after the full classic inventory converts (D1(a)).
+    /// Acceptance code lands now; advertisement does not.
+    #[tokio::test]
+    async fn r4_mechanism_parameter_capability_unadvertised_until_r23() {
+        let context_manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        let backend = Arc::new(MockBackend::default_test());
+        backend.initialize().expect("initialize mock backend");
+        let backend: Arc<dyn Pkcs11Backend> = backend;
+        let registry = MechanismRegistrySource::load(None).expect("load embedded registry");
+
+        let response = get_backend_interfaces(
+            &context_manager,
+            &backend,
+            &registry,
+            Request::new(pkcs11_proxy_ng_proto::GetBackendInterfacesRequest {}),
+        )
+        .await
+        .expect("GetBackendInterfaces should succeed")
+        .into_inner();
+
+        assert_eq!(
+            response.mechanism_parameter_transport_version, None,
+            "v1 transport version stays unadvertised until R23"
+        );
+        assert_eq!(
+            response.backend_mechanism_abi, None,
+            "daemon mechanism ABI stays unadvertised until R23"
+        );
+    }
+
+    /// R4: the ABI derivation maps the backend's runtime properties to the
+    /// exact v1 ABI, and stays silent (`None`) wherever no v1 ABI exactly
+    /// matches — never a per-target hardcoded literal.
+    #[test]
+    fn r4_daemon_mechanism_param_abi_derivation() {
+        use pkcs11_proxy_ng_proto::MechanismParamAbi as Abi;
+        assert_eq!(daemon_mechanism_param_abi(8, 1), Some(Abi::Lp64NativeLe as i32));
+        assert_eq!(daemon_mechanism_param_abi(4, 1), Some(Abi::Ilp32NativeLe as i32));
+        for (ulong_size, byte_order) in [(8, 2), (4, 2), (16, 1), (0, 1), (8, 0), (8, 3)] {
+            assert_eq!(
+                daemon_mechanism_param_abi(ulong_size, byte_order),
+                None,
+                "no exact v1 ABI for ulong_size={ulong_size} byte_order={byte_order}",
+            );
+        }
     }
 }

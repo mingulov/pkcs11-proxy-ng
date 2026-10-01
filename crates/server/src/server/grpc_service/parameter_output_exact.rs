@@ -40,7 +40,9 @@ fn native_message_parameter_len(parameter: &MessageParameter) -> CkResult<u64> {
         MessageParameter::SalaChacha(_) => {
             Ok(std::mem::size_of::<cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS>() as u64)
         }
-        MessageParameter::Raw(_) => Err(CkRv::MECHANISM_PARAM_INVALID),
+        // R4: opaque bytes carry no struct layout — the native footprint
+        // is the byte length itself (mirrors T1's backend arm).
+        MessageParameter::Raw(raw) => Ok(raw.len() as u64),
     }
 }
 
@@ -67,7 +69,10 @@ fn translate_parameter_ack(
 
 fn message_parameter_has_null_positive(parameter: &MessageParameter) -> bool {
     match parameter {
-        MessageParameter::Raw(_) => true,
+        // R4 (S2-mandated): a v1-opaque param is a present buffer, not a
+        // null-positive — it no longer takes the sanitize-gated AB path.
+        // Legacy raw never reaches here (R3 rejects it at decode).
+        MessageParameter::Raw(_) => false,
         MessageParameter::GcmMessage(params) => {
             params.iv_null_len.is_some_and(|len| len > 0)
                 || params.tag_null_len.is_some_and(|len| len > 0)
@@ -389,9 +394,10 @@ pub(super) async fn parameter_output_exact(
                     }
                     param_out_spec.clone()
                 }
-                (MessageParameterShape::Unmodeled, Some(_)) => {
-                    return Ok(Response::new(error_response(CkRv::MECHANISM_PARAM_INVALID)));
-                }
+                // R4: no Unmodeled carve-out — (Unmodeled, Raw) is the
+                // v1-opaque representation and flows through the generic
+                // shape-validated arm below (any other Unmodeled pairing
+                // still fails `validate_structured_shape` with MPI).
                 (shape, Some(parameter)) => {
                     if parameter.validate_structured_shape(shape).is_err()
                         || !param_out_spec.buffer_present
@@ -1830,5 +1836,192 @@ mod ambiguity_tests {
         request.message_parameter = Some(absent_oneof);
         let rv = exact_message_ck_rv(&handler, request).await;
         assert_eq!(rv, CkRv::ARGUMENTS_BAD.0, "absent-oneof control");
+    }
+
+    /// R4: craft a v1-opaque wire parameter (`opaque_message_params` +
+    /// `parameter_encoding_version == 1`) carrying exactly `data`.
+    fn v1_opaque_wire(data: Vec<u8>) -> pkcs11_proxy_ng_proto::MessageParameter {
+        let declared_len = data.len() as u64;
+        pkcs11_proxy_ng_proto::MessageParameter {
+            params: Some(pkcs11_proxy_ng_proto::message_parameter::Params::OpaqueMessageParams(
+                pkcs11_proxy_ng_proto::OpaqueMessageParams { data, declared_len },
+            )),
+            parameter_encoding_version: 1,
+        }
+    }
+
+    /// R4: a v1-opaque message parameter (Unmodeled shape + Raw bytes) is
+    /// accepted end-to-end on the one-shot and Next paths in both
+    /// directions, with and without sanitization — the R3-decoded bytes
+    /// reach the provider, which acks the exact byte length, and success
+    /// carries a (no-output) effects carrier.
+    #[tokio::test]
+    async fn r4_v1_opaque_oneshot_and_next_accepted_encrypt_decrypt() {
+        for sanitize in [false, true] {
+            for function in [
+                ParameterOutputFunction::EncryptMessage,
+                ParameterOutputFunction::DecryptMessage,
+                ParameterOutputFunction::EncryptMessageNext,
+                ParameterOutputFunction::DecryptMessageNext,
+            ] {
+                let mock = Arc::new(MockBackend::default_test());
+                mock.initialize().unwrap();
+                let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+                let manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+                manager.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+                let context_id = manager.create_context(None).await.unwrap();
+                let mut handler = HandlerContext::for_test(&manager, &backend);
+                handler.sanitize_inputs = sanitize;
+                let virtual_session =
+                    registered_virtual_session(&manager, &context_id, &mock).await;
+                let kind = match function {
+                    ParameterOutputFunction::EncryptMessage
+                    | ParameterOutputFunction::EncryptMessageNext => MessageOperation::Encrypt,
+                    ParameterOutputFunction::DecryptMessage
+                    | ParameterOutputFunction::DecryptMessageNext => MessageOperation::Decrypt,
+                    _ => unreachable!(),
+                };
+                manager
+                    .message_operation_lock(&context_id, VirtualHandle(virtual_session), kind)
+                    .await
+                    .unwrap()
+                    .lock()
+                    .await
+                    .shape = Some(MessageParameterShape::Unmodeled);
+                let calls_before = mock.message_parameter_call_count();
+
+                let mut request =
+                    exact_message_request(&context_id.0, virtual_session, function, None, None);
+                request.message_parameter = Some(v1_opaque_wire(vec![0xA5; 16]));
+                request.parameter_out_spec = Some(pkcs11_proxy_ng_proto::ParameterRoundtripSpec {
+                    buffer_present: true,
+                    buffer_len: 16,
+                    value: None,
+                });
+                let response = parameter_output_exact(&handler, Request::new(request))
+                    .await
+                    .unwrap()
+                    .into_inner();
+                let output = response.output_result.expect("exact response carries output");
+                assert_eq!(output.ck_rv, CkRv::OK.0, "function {function:?} sanitize={sanitize}");
+                assert_eq!(
+                    mock.message_parameter_call_count(),
+                    calls_before + 1,
+                    "v1-opaque must reach the provider: {function:?} sanitize={sanitize}",
+                );
+                let ack = response.parameter_result.expect("exact response carries param ack");
+                assert_eq!(ack.ck_rv, CkRv::OK.0);
+                assert_eq!(ack.returned_len, 16);
+                assert_eq!(ack.value, Some(Vec::new()));
+                assert!(
+                    response.message_effects.is_some(),
+                    "success carries a (None, no-output) effects carrier"
+                );
+            }
+        }
+    }
+
+    /// R4 pin: undecodable message encodings keep their R3 RVs at the
+    /// one-shot/Next layer in both sanitize modes — legacy `raw` (any
+    /// version) is fail-closed MPI, a per-message version newer than the
+    /// daemon is FNS, and a v1-opaque body under version 0 is
+    /// contradictory-metadata MPI. Undecodable bytes never take the
+    /// sanitize-gated AB path.
+    #[tokio::test]
+    async fn r4_undecodable_message_encodings_keep_r3_rvs() {
+        let legacy_raw_v0 = pkcs11_proxy_ng_proto::MessageParameter {
+            params: Some(pkcs11_proxy_ng_proto::message_parameter::Params::Raw(vec![0xA5; 16])),
+            parameter_encoding_version: 0,
+        };
+        let legacy_raw_v1 = pkcs11_proxy_ng_proto::MessageParameter {
+            params: Some(pkcs11_proxy_ng_proto::message_parameter::Params::Raw(vec![0xA5; 16])),
+            parameter_encoding_version: 1,
+        };
+        let mut newer_version = v1_opaque_wire(vec![0xA5; 16]);
+        newer_version.parameter_encoding_version = 2;
+        let mut contradictory = v1_opaque_wire(vec![0xA5; 16]);
+        contradictory.parameter_encoding_version = 0;
+        let vectors = [
+            ("legacy-raw v0", legacy_raw_v0, CkRv::MECHANISM_PARAM_INVALID),
+            ("legacy-raw v1", legacy_raw_v1, CkRv::MECHANISM_PARAM_INVALID),
+            ("version-newer", newer_version, CkRv::FUNCTION_NOT_SUPPORTED),
+            ("opaque-under-v0", contradictory, CkRv::MECHANISM_PARAM_INVALID),
+        ];
+        for sanitize in [false, true] {
+            for function in [
+                ParameterOutputFunction::EncryptMessage,
+                ParameterOutputFunction::DecryptMessage,
+                ParameterOutputFunction::EncryptMessageNext,
+                ParameterOutputFunction::DecryptMessageNext,
+            ] {
+                let mock = Arc::new(MockBackend::default_test());
+                mock.initialize().unwrap();
+                let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+                let manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+                manager.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+                let context_id = manager.create_context(None).await.unwrap();
+                let mut handler = HandlerContext::for_test(&manager, &backend);
+                handler.sanitize_inputs = sanitize;
+                let virtual_session =
+                    registered_virtual_session(&manager, &context_id, &mock).await;
+                let kind = match function {
+                    ParameterOutputFunction::EncryptMessage
+                    | ParameterOutputFunction::EncryptMessageNext => MessageOperation::Encrypt,
+                    ParameterOutputFunction::DecryptMessage
+                    | ParameterOutputFunction::DecryptMessageNext => MessageOperation::Decrypt,
+                    _ => unreachable!(),
+                };
+                manager
+                    .message_operation_lock(&context_id, VirtualHandle(virtual_session), kind)
+                    .await
+                    .unwrap()
+                    .lock()
+                    .await
+                    .shape = Some(MessageParameterShape::Unmodeled);
+                let calls_before = mock.message_parameter_call_count();
+                for (label, wire, expected) in &vectors {
+                    let mut request =
+                        exact_message_request(&context_id.0, virtual_session, function, None, None);
+                    request.message_parameter = Some(wire.clone());
+                    request.parameter_out_spec =
+                        Some(pkcs11_proxy_ng_proto::ParameterRoundtripSpec {
+                            buffer_present: true,
+                            buffer_len: 16,
+                            value: None,
+                        });
+                    let rv = exact_message_ck_rv(&handler, request).await;
+                    assert_eq!(rv, expected.0, "{label} function {function:?} sanitize={sanitize}");
+                }
+                assert_eq!(
+                    mock.message_parameter_call_count(),
+                    calls_before,
+                    "undecodable bytes must not reach the provider: {function:?} \
+                     sanitize={sanitize}",
+                );
+            }
+        }
+    }
+
+    /// R4: a v1-opaque parameter is a present buffer, not a null-positive
+    /// (S2-mandated flip: it no longer takes the sanitize-gated AB path),
+    /// and its native footprint is the byte length itself (mirrors T1's
+    /// backend arm). Structured shapes are bit-identical.
+    #[test]
+    fn r4_raw_null_positive_and_native_len() {
+        let raw = MessageParameter::Raw(SecretBytes::new(vec![0xA5; 16]));
+        assert!(!message_parameter_has_null_positive(&raw));
+        assert_eq!(native_message_parameter_len(&raw), Ok(16));
+        let empty_raw = MessageParameter::Raw(SecretBytes::new(Vec::new()));
+        assert!(!message_parameter_has_null_positive(&empty_raw));
+        assert_eq!(native_message_parameter_len(&empty_raw), Ok(0));
+
+        let well_formed = gcm_wire(vec![0x11; 12], None);
+        assert!(!message_parameter_has_null_positive(&well_formed));
+        assert_eq!(
+            native_message_parameter_len(&well_formed),
+            Ok(std::mem::size_of::<cryptoki_sys::CK_GCM_MESSAGE_PARAMS>() as u64)
+        );
+        let null_positive = gcm_wire(Vec::new(), Some(12));
+        assert!(message_parameter_has_null_positive(&null_positive));
     }
 }
