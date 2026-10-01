@@ -361,7 +361,11 @@ fn push_param_handles(params: &CkMechanismParams, out: &mut Vec<u64>) {
         | P::Dilithium(_)
         | P::HdKeyDerive(_)
         | P::VendorObjectExtract(_)
-        | P::VendorObjectInsert(_) => {}
+        | P::VendorObjectInsert(_)
+        // R9: Flat cannot reach handle fields (safe-prefix rule); Null has
+        // no bytes. Both are handle-free by construction.
+        | P::Flat(_)
+        | P::Null { .. } => {}
     }
 }
 
@@ -551,7 +555,10 @@ pub(super) fn remap_param_handles(
         | P::Dilithium(_)
         | P::HdKeyDerive(_)
         | P::VendorObjectExtract(_)
-        | P::VendorObjectInsert(_) => {}
+        | P::VendorObjectInsert(_)
+        // R9: handle-free (see push_param_handles) — remapping is a no-op.
+        | P::Flat(_)
+        | P::Null { .. } => {}
     }
     Ok(())
 }

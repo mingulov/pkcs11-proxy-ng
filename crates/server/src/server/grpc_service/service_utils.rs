@@ -794,6 +794,11 @@ pub(super) fn mechanism_output_to_proto(
         | CkMechanismParams::MuGen(_)
         | CkMechanismParams::KeyDerivationString(_)
         | CkMechanismParams::Raw(_)
+        // R9: Flat output effects (S2 §6) — native writes into Flat backing
+        // are NOT returned to the caller, so Flat never surfaces
+        // `mechanism_out`; Null has no bytes to surface.
+        | CkMechanismParams::Flat(_)
+        | CkMechanismParams::Null { .. }
         | CkMechanismParams::Ecies(_)
         | CkMechanismParams::AesCmacKeyDerivation(_)
         | CkMechanismParams::Dilithium(_)

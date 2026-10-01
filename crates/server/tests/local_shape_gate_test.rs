@@ -53,6 +53,13 @@ fn local_shape_issues(
         "wtls_prf",
         "x942_mqv_derive",
     ];
+    // R9: v1 transport envelopes, unwired until R12 (FFI reconstruction) /
+    // R13 (handler wiring) with E2E in R15 — exempt from the real-backend
+    // driver until then. (Null is a struct variant, invisible to the
+    // tuple-variant parser below; listed here so the exemption stays
+    // symmetric if its shape changes. TODO(R12): remove once Flat/Null
+    // gain driver cases — the staleness check below forces it.)
+    const UNWIRED_VARIANTS: &[&str] = &["Flat", "Null"];
     let variants = enum_variants(enum_source);
     let toml_shapes: BTreeSet<String> = toml_source
         .lines()
@@ -83,10 +90,20 @@ fn local_shape_issues(
         issues.push("one or more local shape inventories are empty".to_owned());
     }
     for variant in variants.difference(&driver_variants) {
+        if UNWIRED_VARIANTS.contains(&variant.as_str()) {
+            continue;
+        }
         issues.push(format!("real-backend driver missing enum variant {variant}"));
     }
     for variant in driver_variants.difference(&variants) {
         issues.push(format!("real-backend driver has stale variant {variant}"));
+    }
+    for exempt in UNWIRED_VARIANTS {
+        if variants.contains(*exempt) && driver_variants.contains(*exempt) {
+            issues.push(format!(
+                "stale R9 unwired-variant exemption for {exempt}: remove it (TODO(R12))"
+            ));
+        }
     }
     for shape in &shim_shapes {
         if !NON_DEFAULT_ARMS.contains(&shape.as_str()) && !toml_shapes.contains(shape) {

@@ -3342,16 +3342,21 @@ fn r6_legacy_decode_stability_all_oneof_members() {
             assert_eq!(back.mechanism_type.0, 0x9999);
             assert!(back.params.is_some());
         }
-        // Legacy conversion is version-blind: a newer version alongside a
-        // legacy arm changes nothing (R6 pins current behavior; R9 adds v1
-        // enforcement).
+        // R9 v1 enforcement (S2 §3): a newer version alongside an encoded
+        // legacy arm is FUNCTION_NOT_SUPPORTED pre-entry (R6 pinned
+        // version-blindness as current behavior with "R9 adds v1
+        // enforcement"). The legacy Raw arm (tag 68) is the exception: it
+        // stays version-blind at conversion and fails closed later at
+        // transport validation uniformly across versions.
         let versioned = v1_proto::Mechanism {
             mechanism_type: 0x9999,
             params: Some(params),
             parameter_encoding_version: 99,
         };
         let versioned_outcome = CkMechanism::try_from(&versioned).map(|_| ());
-        assert_eq!(versioned_outcome, expected, "{name} (tag {tag}) version-99 outcome");
+        let versioned_expected =
+            if tag == 68 { expected } else { Err(CkRv::FUNCTION_NOT_SUPPORTED) };
+        assert_eq!(versioned_outcome, versioned_expected, "{name} (tag {tag}) version-99 outcome");
     }
 }
 
@@ -3408,7 +3413,10 @@ fn r6_v1_wire_tags_pin_flat_null_and_version_placement() {
 }
 
 #[test]
-fn r6_v1_presence_matrix_fail_closed_until_r9() {
+fn r9_v1_presence_matrix_acceptance() {
+    // Ex-R6 presence matrix (`r6_v1_presence_matrix_fail_closed_until_r9`):
+    // R9 resolves its TODO(R9) — the version-1 row converts, newer versions
+    // report FUNCTION_NOT_SUPPORTED, version 0 stays contradictory.
     use prost::Message as _;
     let flat = || {
         Some(v1_proto::mechanism::Params::FlatMechanismParams(v1_proto::FlatMechanismParams {
@@ -3423,8 +3431,10 @@ fn r6_v1_presence_matrix_fail_closed_until_r9() {
             declared_len: 16,
         }))
     };
-    // Flat/Null × {0, 1, newer}: prost round-trips every combination, and
-    // conversion fails closed at every version (acceptance is R9+).
+    // Flat/Null × {0, 1, newer}: prost round-trips every combination.
+    // R9 acceptance (TODO(R9) resolved): version 1 converts; version 0 is
+    // contradictory metadata (Flat/Null are valid only with v1); anything
+    // newer is FUNCTION_NOT_SUPPORTED pre-entry (S2 §3).
     for (name, params) in [("flat", flat()), ("null", null())] {
         for version in [0u32, 1, 2, u32::MAX] {
             let wire = v1_proto::Mechanism {
@@ -3435,12 +3445,15 @@ fn r6_v1_presence_matrix_fail_closed_until_r9() {
             let round_tripped =
                 v1_proto::Mechanism::decode(wire.encode_to_vec().as_slice()).unwrap();
             assert_eq!(round_tripped, wire, "{name} version {version} must round-trip");
-            // TODO(R9): v1 acceptance flips the version-1 row to Ok.
-            assert_eq!(
-                CkMechanism::try_from(&wire),
-                Err(CkRv::MECHANISM_PARAM_INVALID),
-                "{name} version {version} must fail closed until R9",
-            );
+            let outcome = CkMechanism::try_from(&wire).map(|_| ());
+            let expected = if version == 0 {
+                Err(CkRv::MECHANISM_PARAM_INVALID)
+            } else if version == 1 {
+                Ok(())
+            } else {
+                Err(CkRv::FUNCTION_NOT_SUPPORTED)
+            };
+            assert_eq!(outcome, expected, "{name} version {version} conversion outcome");
         }
     }
     // Absent oneof stays convertible at any version (parameterless).
@@ -3453,7 +3466,8 @@ fn r6_v1_presence_matrix_fail_closed_until_r9() {
         let back = CkMechanism::try_from(&wire).unwrap();
         assert!(back.params.is_none());
     }
-    // Legacy typed arms convert identically with and without v1 versions.
+    // Legacy typed arms with unset bools convert identically with and
+    // without version 1 (absence is consistent with v1 presence semantics).
     let legacy = v1_proto::GcmParams {
         iv: vec![0x01; 12],
         iv_bits: 96,
@@ -3469,25 +3483,36 @@ fn r6_v1_presence_matrix_fail_closed_until_r9() {
         parameter_encoding_version: 0,
     })
     .unwrap();
-    for version in [1u32, 99] {
-        let wire = v1_proto::Mechanism {
-            mechanism_type: 0x1082,
-            params: Some(v1_proto::mechanism::Params::GcmParams(legacy.clone())),
-            parameter_encoding_version: version,
-        };
-        assert_eq!(
-            CkMechanism::try_from(&wire).unwrap(),
-            baseline,
-            "legacy GCM conversion must ignore version {version}",
-        );
-    }
+    let wire_v1 = v1_proto::Mechanism {
+        mechanism_type: 0x1082,
+        params: Some(v1_proto::mechanism::Params::GcmParams(legacy.clone())),
+        parameter_encoding_version: 1,
+    };
+    assert_eq!(
+        CkMechanism::try_from(&wire_v1).unwrap(),
+        baseline,
+        "legacy GCM conversion must ignore version 1",
+    );
+    // R9 v1 enforcement (S2 §3): a version newer than the daemon on an
+    // encoded member is FUNCTION_NOT_SUPPORTED pre-entry — even for
+    // legacy-typed arms (R6 pinned version-blindness as current behavior
+    // with "R9 adds v1 enforcement").
+    let wire_newer = v1_proto::Mechanism {
+        mechanism_type: 0x1082,
+        params: Some(v1_proto::mechanism::Params::GcmParams(legacy.clone())),
+        parameter_encoding_version: 99,
+    };
+    assert_eq!(
+        CkMechanism::try_from(&wire_newer),
+        Err(CkRv::FUNCTION_NOT_SUPPORTED),
+        "legacy GCM with a newer version must be FUNCTION_NOT_SUPPORTED",
+    );
 }
 
 #[test]
 fn r6_contradictory_metadata_vectors() {
-    // Legacy NULL-bool set in a v1-stamped message: conversion still honors
-    // the legacy meaning (version-blind until R9).
-    // TODO(R9): S2 §3 reconciliation rejects this as contradictory metadata.
+    // Legacy NULL-bool set in a v1-stamped message: S2 §3 reconciliation
+    // rejects it as contradictory metadata (TODO(R9) resolved).
     let legacy_bool_v1 = v1_proto::Mechanism {
         mechanism_type: 0x1082,
         params: Some(v1_proto::mechanism::Params::GcmParams(v1_proto::GcmParams {
@@ -3501,8 +3526,7 @@ fn r6_contradictory_metadata_vectors() {
         })),
         parameter_encoding_version: 1,
     };
-    let back = CkMechanism::try_from(&legacy_bool_v1).unwrap();
-    assert!(matches!(back.params, Some(CkMechanismParams::Gcm(_))));
+    assert_eq!(CkMechanism::try_from(&legacy_bool_v1), Err(CkRv::MECHANISM_PARAM_INVALID));
     // Flat with version 0: contradictory (Flat is valid only with v1).
     let flat_v0 = v1_proto::Mechanism {
         mechanism_type: 0x1082,
@@ -3591,4 +3615,308 @@ fn r6_old_new_mix() {
     let encoded = v1_proto::Mechanism::try_from(&legacy).unwrap();
     assert_eq!(encoded.parameter_encoding_version, 0);
     assert_eq!(encoded.encode_to_vec(), legacy_golden);
+}
+
+// ---------------------------------------------------------------------------
+// R9: v1 Flat/Null domain conversion (S2 §3/§6). Tests first (TDD RED):
+// Flat/Null decode currently fails closed (R6 catch-all), so the v1
+// acceptance assertions below fail until conversion lands.
+// ---------------------------------------------------------------------------
+
+fn r9_flat_wire(data: Vec<u8>, declared_len: u64, abi: i32, version: u32) -> v1_proto::Mechanism {
+    v1_proto::Mechanism {
+        mechanism_type: 0x1082,
+        params: Some(v1_proto::mechanism::Params::FlatMechanismParams(
+            v1_proto::FlatMechanismParams {
+                data,
+                declared_len,
+                source_abi: abi,
+                shape_layout_fingerprint: 0x0102_0304_0506_0708,
+            },
+        )),
+        parameter_encoding_version: version,
+    }
+}
+
+fn r9_null_wire(declared_len: u64, version: u32) -> v1_proto::Mechanism {
+    v1_proto::Mechanism {
+        mechanism_type: 0x1082,
+        params: Some(v1_proto::mechanism::Params::NullMechanismParams(
+            v1_proto::NullMechanismParams { declared_len },
+        )),
+        parameter_encoding_version: version,
+    }
+}
+
+#[test]
+fn r9_flat_v1_decodes_and_threads_every_field() {
+    use pkcs11_proxy_ng_types::shape_descriptors::ParamAbi;
+    let wire = r9_flat_wire(b"AB".to_vec(), 2, v1_proto::MechanismParamAbi::Lp64NativeLe as i32, 1);
+    let back = CkMechanism::try_from(&wire).unwrap();
+    assert_eq!(back.mechanism_type.0, 0x1082);
+    let Some(CkMechanismParams::Flat(flat)) = back.params else {
+        panic!("v1 Flat must decode to the Flat domain variant")
+    };
+    flat.bytes.expose(|b| assert_eq!(b, b"AB"));
+    assert_eq!(flat.declared_len, 2);
+    assert_eq!(flat.source_abi, Some(ParamAbi::Lp64NativeLe));
+    assert_eq!(flat.fingerprint, 0x0102_0304_0506_0708);
+    assert_eq!(flat.version, 1);
+    // ILP32 and LLP64-pack1 thread through distinctly.
+    for (wire_abi, domain_abi) in [
+        (v1_proto::MechanismParamAbi::Ilp32NativeLe, ParamAbi::Ilp32NativeLe),
+        (v1_proto::MechanismParamAbi::Llp64Packed1Le, ParamAbi::Llp64Packed1Le),
+    ] {
+        let back =
+            CkMechanism::try_from(&r9_flat_wire(b"AB".to_vec(), 2, wire_abi as i32, 1)).unwrap();
+        let Some(CkMechanismParams::Flat(flat)) = back.params else {
+            panic!("must decode to Flat")
+        };
+        assert_eq!(flat.source_abi, Some(domain_abi));
+    }
+}
+
+#[test]
+fn r9_null_v1_decodes_and_threads_version() {
+    let back = CkMechanism::try_from(&r9_null_wire(41, 1)).unwrap();
+    assert_eq!(back.mechanism_type.0, 0x1082);
+    assert_eq!(back.params, Some(CkMechanismParams::Null { declared_len: 41, version: 1 }));
+}
+
+#[test]
+fn r9_flat_null_v1_wire_round_trip() {
+    // wire → domain → wire is byte-identical for v1 members.
+    for wire in [
+        r9_flat_wire(b"AB".to_vec(), 2, v1_proto::MechanismParamAbi::Lp64NativeLe as i32, 1),
+        r9_flat_wire(Vec::new(), 0, v1_proto::MechanismParamAbi::Ilp32NativeLe as i32, 1),
+        r9_null_wire(0, 1),
+        r9_null_wire(u64::MAX, 1),
+    ] {
+        let domain = CkMechanism::try_from(&wire).unwrap();
+        let back = v1_proto::Mechanism::try_from(&domain).unwrap();
+        assert_eq!(back, wire, "v1 wire→domain→wire must be identical");
+    }
+}
+
+#[test]
+fn r9_unknown_source_abi_threads_as_none() {
+    // UNSPECIFIED (0) and unrecognized values decode to source_abi None;
+    // transport validation rejects them (validation owns the ABI match).
+    for abi in [0, 99, -1] {
+        let back = CkMechanism::try_from(&r9_flat_wire(b"AB".to_vec(), 2, abi, 1)).unwrap();
+        let Some(CkMechanismParams::Flat(flat)) = back.params.clone() else {
+            panic!("must decode to Flat")
+        };
+        assert_eq!(flat.source_abi, None, "wire ABI {abi} must thread as None");
+        // ... and re-encode as UNSPECIFIED (faithful round-trip).
+        let wire = v1_proto::Mechanism::try_from(&CkMechanism {
+            mechanism_type: CkMechanismType(0x1082),
+            params: back.params,
+        })
+        .unwrap();
+        let Some(v1_proto::mechanism::Params::FlatMechanismParams(flat_wire)) =
+            wire.params.as_ref()
+        else {
+            panic!("must encode back to Flat")
+        };
+        assert_eq!(flat_wire.source_abi, v1_proto::MechanismParamAbi::Unspecified as i32);
+    }
+}
+
+#[test]
+fn r9_newer_version_is_function_not_supported() {
+    // S2 §3: per-message version newer than the daemon understands is
+    // FUNCTION_NOT_SUPPORTED pre-entry — for every ENCODED member.
+    let flat = || r9_flat_wire(b"AB".to_vec(), 2, 1, 99).params.clone();
+    let null = || r9_null_wire(7, 99).params.clone();
+    let typed = || Some(v1_proto::mechanism::Params::GcmParams(v1_proto::GcmParams::default()));
+    for (name, params) in [("flat", flat()), ("null", null()), ("typed", typed())] {
+        for version in [2u32, 99, u32::MAX] {
+            let wire = v1_proto::Mechanism {
+                mechanism_type: 0x1082,
+                params: params.clone(),
+                parameter_encoding_version: version,
+            };
+            assert_eq!(
+                CkMechanism::try_from(&wire),
+                Err(CkRv::FUNCTION_NOT_SUPPORTED),
+                "{name} with version {version} must be FUNCTION_NOT_SUPPORTED"
+            );
+        }
+    }
+    // Unencoded messages stay version-blind (R6-pinned): nothing to
+    // misread in an absent oneof, and Raw fails closed later at
+    // transport validation uniformly across versions.
+    for version in [0u32, 1, 2, 99] {
+        let none = v1_proto::Mechanism {
+            mechanism_type: 0x1082,
+            params: None,
+            parameter_encoding_version: version,
+        };
+        assert!(CkMechanism::try_from(&none).unwrap().params.is_none());
+        let raw = v1_proto::Mechanism {
+            mechanism_type: 0x1082,
+            params: Some(v1_proto::mechanism::Params::RawMechanismParams(
+                v1_proto::RawMechanismParams { data: b"AB".to_vec() },
+            )),
+            parameter_encoding_version: version,
+        };
+        assert!(matches!(
+            CkMechanism::try_from(&raw).unwrap().params,
+            Some(CkMechanismParams::Raw(_))
+        ));
+    }
+}
+
+#[test]
+fn r9_legacy_bool_reconciliation_matrix() {
+    // S2 §3 NULL-bool reconciliation: v1 is presence-only — any set legacy
+    // bool in a versioned message is contradictory metadata (PARAM_INVALID).
+    // Every legacy `*_null` bool site in the classic conversion:
+    // Full literals (no struct-update syntax: the generated message types
+    // implement Drop, so field moves out of a default temporary are rejected).
+    let gcm_iv = || {
+        v1_proto::mechanism::Params::GcmParams(v1_proto::GcmParams {
+            iv: Vec::new(),
+            iv_bits: 0,
+            aad: Vec::new(),
+            tag_bits: 0,
+            iv_buffer_len: 0,
+            iv_null: true,
+            aad_null: false,
+        })
+    };
+    let gcm_aad = || {
+        v1_proto::mechanism::Params::GcmParams(v1_proto::GcmParams {
+            iv: Vec::new(),
+            iv_bits: 0,
+            aad: Vec::new(),
+            tag_bits: 0,
+            iv_buffer_len: 0,
+            iv_null: false,
+            aad_null: true,
+        })
+    };
+    let ccm_nonce = || {
+        v1_proto::mechanism::Params::CcmParams(v1_proto::CcmParams {
+            data_len: 0,
+            nonce: Vec::new(),
+            aad: Vec::new(),
+            mac_len: 0,
+            nonce_null: true,
+            aad_null: false,
+        })
+    };
+    let ccm_aad = || {
+        v1_proto::mechanism::Params::CcmParams(v1_proto::CcmParams {
+            data_len: 0,
+            nonce: Vec::new(),
+            aad: Vec::new(),
+            mac_len: 0,
+            nonce_null: false,
+            aad_null: true,
+        })
+    };
+    let oaep_source = || {
+        v1_proto::mechanism::Params::RsaPkcsOaepParams(v1_proto::RsaPkcsOaepParams {
+            hash_alg: 0,
+            mgf: 0,
+            source: 0,
+            source_data: Vec::new(),
+            source_null: true,
+        })
+    };
+    let nested_oaep_source = || {
+        v1_proto::mechanism::Params::RsaAesKeyWrapParams(v1_proto::RsaAesKeyWrapParams {
+            aes_key_bits: 0,
+            oaep_params: Some(v1_proto::RsaPkcsOaepParams {
+                hash_alg: 0,
+                mgf: 0,
+                source: 0,
+                source_data: Vec::new(),
+                source_null: true,
+            }),
+        })
+    };
+    let sites: Vec<(&str, v1_proto::mechanism::Params)> = vec![
+        ("gcm.iv_null", gcm_iv()),
+        ("gcm.aad_null", gcm_aad()),
+        ("ccm.nonce_null", ccm_nonce()),
+        ("ccm.aad_null", ccm_aad()),
+        ("oaep.source_null", oaep_source()),
+        ("rsa_aes_key_wrap.oaep.source_null", nested_oaep_source()),
+    ];
+    for (name, params) in &sites {
+        // Version 0: legacy meaning preserved bit-identically.
+        let legacy = v1_proto::Mechanism {
+            mechanism_type: 0x1082,
+            params: Some(params.clone()),
+            parameter_encoding_version: 0,
+        };
+        assert!(
+            CkMechanism::try_from(&legacy).is_ok(),
+            "{name} set at version 0 must keep its legacy meaning"
+        );
+        // Version 1: contradictory metadata.
+        let versioned = v1_proto::Mechanism {
+            mechanism_type: 0x1082,
+            params: Some(params.clone()),
+            parameter_encoding_version: 1,
+        };
+        assert_eq!(
+            CkMechanism::try_from(&versioned),
+            Err(CkRv::MECHANISM_PARAM_INVALID),
+            "{name} set at version 1 must be contradictory metadata"
+        );
+    }
+    // Unset bools at version 1 stay convertible (R6-pinned version-blind
+    // arm): absence is consistent with v1 presence semantics.
+    let unset = v1_proto::Mechanism {
+        mechanism_type: 0x1082,
+        params: Some(v1_proto::mechanism::Params::GcmParams(v1_proto::GcmParams::default())),
+        parameter_encoding_version: 1,
+    };
+    assert!(matches!(
+        CkMechanism::try_from(&unset).unwrap().params,
+        Some(CkMechanismParams::Gcm(_))
+    ));
+}
+
+#[test]
+fn r9_null_has_no_cap_at_decode() {
+    // Null carries no bytes: only CK_ULONG narrowing applies (validation),
+    // never the 64 KiB cap — even u64::MAX decodes.
+    let back = CkMechanism::try_from(&r9_null_wire(u64::MAX, 1)).unwrap();
+    assert_eq!(back.params, Some(CkMechanismParams::Null { declared_len: u64::MAX, version: 1 }));
+}
+
+#[test]
+fn r9_encode_emits_threaded_version_for_v1_only() {
+    use pkcs11_proxy_ng_types::shape_descriptors::ParamAbi;
+    // Flat/Null encode the stored (threaded) version; every legacy member
+    // keeps emitting version 0 (R6 old/new mix, extended to Raw).
+    let flat = CkMechanism {
+        mechanism_type: CkMechanismType(0x1082),
+        params: Some(CkMechanismParams::Flat(FlatParams {
+            bytes: b"AB".to_vec().into(),
+            declared_len: 2,
+            source_abi: Some(ParamAbi::Lp64NativeLe),
+            fingerprint: 0x0102_0304_0506_0708,
+            version: 1,
+        })),
+    };
+    let wire = v1_proto::Mechanism::try_from(&flat).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    let null = CkMechanism {
+        mechanism_type: CkMechanismType(0x1082),
+        params: Some(CkMechanismParams::Null { declared_len: 7, version: 1 }),
+    };
+    let wire = v1_proto::Mechanism::try_from(&null).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 1);
+    let raw = CkMechanism {
+        mechanism_type: CkMechanismType(0x1082),
+        params: Some(CkMechanismParams::Raw(RawMechanismParams { data: b"AB".to_vec().into() })),
+    };
+    let wire = v1_proto::Mechanism::try_from(&raw).unwrap();
+    assert_eq!(wire.parameter_encoding_version, 0);
 }

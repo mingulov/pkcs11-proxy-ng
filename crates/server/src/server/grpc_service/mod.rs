@@ -23,6 +23,7 @@ mod digest_cipher;
 mod general;
 mod key_ops;
 mod mechanism_handles;
+mod mechanism_input;
 mod message_crypto;
 mod object;
 mod parameter_output_exact;

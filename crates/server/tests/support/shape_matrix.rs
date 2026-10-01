@@ -1272,6 +1272,8 @@ pub fn variant_name(params: &CkMechanismParams) -> &'static str {
         CkMechanismParams::MuGen(_) => "MuGen",
         CkMechanismParams::KeyDerivationString(_) => "KeyDerivationString",
         CkMechanismParams::Raw(_) => "Raw",
+        CkMechanismParams::Flat(_) => "Flat",
+        CkMechanismParams::Null { .. } => "Null",
         CkMechanismParams::Ecies(_) => "Ecies",
         CkMechanismParams::AesCmacKeyDerivation(_) => "AesCmacKeyDerivation",
         CkMechanismParams::Dilithium(_) => "Dilithium",

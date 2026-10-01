@@ -1,6 +1,11 @@
 use crate::attribute::CkAttribute;
+use crate::error::CkRv;
+use crate::mechanism_registry::MechanismRegistry;
 use crate::object::CkObjectHandle;
 use crate::secret::SecretBytes;
+use crate::shape_descriptors::{
+    FlatDecision, FlatGrant, Operation, ParamAbi, decide_flat_for_registry,
+};
 
 /// Mechanism type identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1306,12 +1311,338 @@ pub struct MuGenParams {
     pub context: SecretBytes,
 }
 
-/// Opaque raw parameter bytes — opt-in escape hatch for vendor-specific
-/// mechanisms with scalar-only (non-pointer) parameter structures.
-/// The config registry controls which mechanisms can use this variant.
+/// Opaque raw parameter bytes — legacy wire-compat only (S2 §3/§6).
+///
+/// Historically an opt-in escape hatch for vendor-specific mechanisms;
+/// under the v1 contract transport validation rejects this variant at
+/// every version (`PARAM_INVALID`) and the backend FFI boundary keeps
+/// rejecting it. New representable parameters use [`FlatParams`] /
+/// the [`CkMechanismParams::Null`] variant instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawMechanismParams {
     pub data: SecretBytes,
+}
+
+// ---------------------------------------------------------------------------
+// R9: representable mechanism parameters (S2 §3/§6 + §10)
+// ---------------------------------------------------------------------------
+
+/// Daemon-supported classic mechanism-parameter transport version (S2 §3:
+/// per-message `parameter_encoding_version`; 0/absent = legacy encoding,
+/// 1 = the v1 Flat/Null contract).
+///
+/// Conversion (proto crate) and transport validation (this module's
+/// [`ValidatedMechanismParams::validate`], reached via the server's
+/// `validate_mechanism_transport`) share this single definition so the
+/// "newer than daemon" gate cannot drift between layers. Monotonic
+/// maximum capability: a newer daemon keeps accepting older encodings.
+pub const MECHANISM_PARAMETER_TRANSPORT_VERSION: u32 = 1;
+
+/// Non-contradictory variable-length pointer payload (S2 §6): either
+/// present bytes or NULL with a declared length — never both, never
+/// neither-with-bytes. Replaces vector+bool pairs: NULL-with-bytes and
+/// present-with-undeclared-length are unrepresentable by construction
+/// (each arm carries exactly what its presence claim allows, and no
+/// accessor crosses the arms).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PointerBytes {
+    /// Non-NULL pointer to these bytes (including non-NULL/zero).
+    Present(SecretBytes),
+    /// NULL pointer with this declared length (no bytes cross).
+    Null {
+        /// Declared length (`ulParameterLen`); subject only to native
+        /// `CK_ULONG` narrowing, never to the Flat cap.
+        declared_len: u64,
+    },
+}
+
+impl PointerBytes {
+    /// Whether this is the NULL arm.
+    pub fn is_null(&self) -> bool {
+        matches!(self, Self::Null { .. })
+    }
+
+    /// Declared length: the byte count for [`Self::Present`], the declared
+    /// length for [`Self::Null`].
+    pub fn declared_len(&self) -> u64 {
+        match self {
+            Self::Present(bytes) => bytes.len() as u64,
+            Self::Null { declared_len } => *declared_len,
+        }
+    }
+
+    /// Borrow the present bytes, or `None` for the NULL arm.
+    pub fn as_present(&self) -> Option<&SecretBytes> {
+        match self {
+            Self::Present(bytes) => Some(bytes),
+            Self::Null { .. } => None,
+        }
+    }
+}
+
+/// Non-contradictory fixed-size input-pointer payload (S2 §6 "presence
+/// enums for fixed pointers"): exactly `N` bytes or NULL with a declared
+/// length. Mirrors [`PointerBytes`]; the fixed length is enforced by
+/// construction (the only `Present` constructor takes `[u8; N]`, so a
+/// wrong length cannot be expressed), and NULL-with-bytes stays
+/// unrepresentable via the wrapped [`PointerBytes`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FixedPointerBytes<const N: usize> {
+    inner: PointerBytes,
+}
+
+impl<const N: usize> FixedPointerBytes<N> {
+    /// Non-NULL pointer to exactly `N` bytes.
+    pub fn present(bytes: [u8; N]) -> Self {
+        Self { inner: PointerBytes::Present(SecretBytes::copy_from_slice(&bytes)) }
+    }
+
+    /// NULL pointer with this declared length (no bytes cross).
+    pub fn null(declared_len: u64) -> Self {
+        Self { inner: PointerBytes::Null { declared_len } }
+    }
+
+    /// Whether this is the NULL arm.
+    pub fn is_null(&self) -> bool {
+        self.inner.is_null()
+    }
+
+    /// Declared length: `N` for [`Self::present`], the declared length for
+    /// [`Self::null`].
+    pub fn declared_len(&self) -> u64 {
+        self.inner.declared_len()
+    }
+
+    /// Borrow the wrapped [`PointerBytes`].
+    pub fn as_pointer_bytes(&self) -> &PointerBytes {
+        &self.inner
+    }
+}
+
+/// Non-contradictory output-pointer payload (S2 §6 "presence enums for
+/// output pointers"): a non-NULL caller buffer of known capacity for
+/// provider output, or NULL with a declared length. Output buffers carry
+/// capacity, never input bytes, so no byte field can contradict the
+/// presence arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputPointerBytes {
+    /// Non-NULL caller buffer of `capacity` bytes for provider output.
+    Present {
+        /// Buffer capacity in bytes.
+        capacity: u64,
+    },
+    /// NULL pointer with this declared length.
+    Null {
+        /// Declared length.
+        declared_len: u64,
+    },
+}
+
+impl OutputPointerBytes {
+    /// Whether this is the NULL arm.
+    pub fn is_null(&self) -> bool {
+        matches!(self, Self::Null { .. })
+    }
+
+    /// Buffer capacity for [`Self::Present`], declared length for
+    /// [`Self::Null`].
+    pub fn capacity_or_len(&self) -> u64 {
+        match self {
+            Self::Present { capacity } => *capacity,
+            Self::Null { declared_len } => *declared_len,
+        }
+    }
+}
+
+/// Versioned flat classic parameter (S2 §3/§6): non-NULL caller bytes
+/// with `ulParameterLen == declared_len == bytes.len()`; only those bytes
+/// are caller input (adjacent caller memory is outside the fidelity
+/// contract). The 64 KiB outer cap applies. Opaque bytes are
+/// [`SecretBytes`] (wiped on drop): Flat input may carry key material,
+/// and nothing in the validated path may retain a plain copy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlatParams {
+    /// Caller bytes (exactly `declared_len` long once validated).
+    pub bytes: SecretBytes,
+    /// Declared extent (`ulParameterLen`).
+    pub declared_len: u64,
+    /// Caller-side native struct ABI, or `None` when the wire carried
+    /// `UNSPECIFIED`/unknown (validation rejects: struct prefixes require
+    /// exact ABI equality, so an unknown ABI can never match).
+    pub source_abi: Option<ParamAbi>,
+    /// Wire-sent layout fingerprint (checked against the compiled
+    /// descriptor under the local ABI).
+    pub fingerprint: u64,
+    /// Threaded per-message `parameter_encoding_version`.
+    pub version: u32,
+}
+
+/// Gate a v1-only member's threaded version (S2 §3/§6 RV table): a legacy
+/// stamp on a v1-only encoding is contradictory metadata
+/// (`PARAM_INVALID`); a version newer than this daemon is
+/// `FUNCTION_NOT_SUPPORTED` pre-entry.
+fn check_member_version(version: u32) -> Result<(), CkRv> {
+    if version < MECHANISM_PARAMETER_TRANSPORT_VERSION {
+        return Err(CkRv::MECHANISM_PARAM_INVALID);
+    }
+    if version > MECHANISM_PARAMETER_TRANSPORT_VERSION {
+        return Err(CkRv::FUNCTION_NOT_SUPPORTED);
+    }
+    Ok(())
+}
+
+/// Narrow a wire `u64` declared length to the backend `CK_ULONG` width
+/// (S2 §6 RV table: unnarrowable → `FUNCTION_FAILED`).
+fn narrow_len_for_backend(declared_len: u64, backend_abi: ParamAbi) -> Result<(), CkRv> {
+    if backend_abi.ulong_size() >= 8 {
+        return Ok(());
+    }
+    u32::try_from(declared_len).map(|_| ()).map_err(|_| CkRv::FUNCTION_FAILED)
+}
+
+/// Fallible reservation mapping allocation failure to `HOST_MEMORY` (S2 §6
+/// RV table: genuine sub-cap allocation failure). Split out so the row is
+/// unit-pinnable via a forced `CapacityOverflow`.
+fn reserve_or_host_memory(vec: &mut Vec<u8>, additional: usize) -> Result<(), CkRv> {
+    vec.try_reserve(additional).map_err(|_| CkRv::HOST_MEMORY)
+}
+
+/// Proof that a mechanism's parameters passed daemon transport validation
+/// (S2 §6). Opaque: the only way to obtain one is [`Self::validate`],
+/// which runs every always-on check; `mechanism_to_ffi` (R12) accepts
+/// only this type, so a public `Flat` value can never bypass the
+/// invariant the way a bare enum could.
+///
+/// Handle remapping (R13) consumes the newtype and returns it:
+/// substitution of virtual→native handle integers preserves every
+/// validated property (lengths, caps, shape binding, ABI).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ValidatedMechanismParams {
+    mechanism: CkMechanism,
+    /// `Some` for validated Flat (the stored grant lets later stages reuse
+    /// the resolution without re-deciding policy); `None` otherwise.
+    flat_grant: Option<FlatGrant>,
+}
+
+impl ValidatedMechanismParams {
+    /// Run every always-on transport check (S2 §6): version/oneof
+    /// consistency, length equality, 64 KiB cap, registry binding, safe
+    /// prefix, ABI match, no handles/pointers in Flat, legacy-Raw reject.
+    /// Pure and total: no I/O, no allocation beyond the validated copy.
+    ///
+    /// - `registry` is the daemon's `current_registry()` snapshot for this
+    ///   request (SIGHUP safety: one snapshot feeds exclusion, descriptor
+    ///   resolution, and validation).
+    /// - `operation` is the call-site operation context (WrapKey selects
+    ///   the GCM/CCM wrap layouts by operation+length).
+    /// - `local_abi` is the deciding edge's native ABI; `backend_abi`
+    ///   supplies the backend `CK_ULONG` width for narrowing.
+    ///
+    /// RV mapping (exact, S2 §6): operator exclusion →
+    /// `MECHANISM_INVALID`; unknown mechanism without params → forwarded
+    /// (`Ok`); unknown with params and no descriptor → `PARAM_INVALID`;
+    /// unknown with `Null` → forwarded (`Ok`, no descriptor needed);
+    /// per-message version newer than daemon → `FUNCTION_NOT_SUPPORTED`;
+    /// legacy Raw, unsafe Flat, shape mismatch, contradictory metadata,
+    /// unknown descriptor, ABI mismatch, length mismatch, cap violation →
+    /// `PARAM_INVALID`; genuine sub-cap allocation failure → `HOST_MEMORY`;
+    /// wire u64 unnarrowable to backend `CK_ULONG` → `FUNCTION_FAILED`;
+    /// faithful bytes pass through verbatim.
+    ///
+    /// Typed (non-Flat/Null/Raw) params pass through: the typed path is
+    /// variant-driven, not registry-driven, and keeps its existing
+    /// contract — the descriptor system governs Flat carriage only.
+    pub fn validate(
+        mechanism: &CkMechanism,
+        registry: &MechanismRegistry,
+        operation: Operation,
+        local_abi: ParamAbi,
+        backend_abi: ParamAbi,
+    ) -> Result<Self, CkRv> {
+        let mech_type = mechanism.mechanism_type.0;
+        if registry.excluded_view().contains(&mech_type) {
+            return Err(CkRv::MECHANISM_INVALID);
+        }
+        match &mechanism.params {
+            // Existing transparent contract: unknown or known, parameterless
+            // invocations forward.
+            None => Ok(Self { mechanism: mechanism.clone(), flat_grant: None }),
+            // Legacy Raw fails closed at every version.
+            Some(CkMechanismParams::Raw(_)) => Err(CkRv::MECHANISM_PARAM_INVALID),
+            // NULL + narrowed length needs no descriptor (S2 §6 RV table).
+            Some(CkMechanismParams::Null { declared_len, version }) => {
+                check_member_version(*version)?;
+                narrow_len_for_backend(*declared_len, backend_abi)?;
+                Ok(Self { mechanism: mechanism.clone(), flat_grant: None })
+            }
+            Some(CkMechanismParams::Flat(p)) => {
+                check_member_version(p.version)?;
+                let actual =
+                    u64::try_from(p.bytes.len()).map_err(|_| CkRv::MECHANISM_PARAM_INVALID)?;
+                if actual != p.declared_len {
+                    return Err(CkRv::MECHANISM_PARAM_INVALID);
+                }
+                let peer_abi = p.source_abi.ok_or(CkRv::MECHANISM_PARAM_INVALID)?;
+                let grant = match decide_flat_for_registry(
+                    registry,
+                    mech_type,
+                    operation,
+                    p.declared_len,
+                    p.fingerprint,
+                    peer_abi,
+                    local_abi,
+                ) {
+                    FlatDecision::Eligible(grant) => grant,
+                    // Unreachable (exclusion checked above); mapped anyway
+                    // so a future reorder cannot silently forward.
+                    FlatDecision::Excluded => return Err(CkRv::MECHANISM_INVALID),
+                    // OverCap, VendorWithoutAllowlist, UnknownShape,
+                    // NestedOrOutput, FullNativeImage, AbiMismatch,
+                    // FingerprintMismatch, PrefixTooLong — every R7 denial
+                    // reason is PARAM_INVALID per the S2 §6 RV table.
+                    FlatDecision::Denied(_) => return Err(CkRv::MECHANISM_PARAM_INVALID),
+                };
+                // Post-cap lengths always narrow; the check documents the
+                // invariant at the single narrowing site.
+                narrow_len_for_backend(p.declared_len, backend_abi)?;
+                let mut buf = Vec::new();
+                reserve_or_host_memory(&mut buf, p.bytes.len())?;
+                p.bytes.expose(|bytes| buf.extend_from_slice(bytes));
+                let flat = FlatParams {
+                    bytes: SecretBytes::new(buf),
+                    declared_len: p.declared_len,
+                    source_abi: p.source_abi,
+                    fingerprint: p.fingerprint,
+                    version: p.version,
+                };
+                Ok(Self {
+                    mechanism: CkMechanism {
+                        mechanism_type: mechanism.mechanism_type,
+                        params: Some(CkMechanismParams::Flat(flat)),
+                    },
+                    flat_grant: Some(grant),
+                })
+            }
+            // Typed params: variant-driven contract, unchanged.
+            Some(_) => Ok(Self { mechanism: mechanism.clone(), flat_grant: None }),
+        }
+    }
+
+    /// Borrow the validated mechanism.
+    pub fn mechanism(&self) -> &CkMechanism {
+        &self.mechanism
+    }
+
+    /// Unwrap the validated mechanism (re-entry to FFI still requires the
+    /// newtype — R12 — so unwrapping cannot bypass validation).
+    pub fn into_inner(self) -> CkMechanism {
+        self.mechanism
+    }
+
+    /// The stored Flat grant (`Some` only for validated Flat).
+    pub fn flat_grant(&self) -> Option<FlatGrant> {
+        self.flat_grant
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1474,6 +1805,14 @@ pub enum CkMechanismParams {
     MuGen(MuGenParams),
     KeyDerivationString(KeyDerivationStringData),
     Raw(RawMechanismParams),
+    // Versioned representable parameters (S2 §3/§6; R9)
+    Flat(FlatParams),
+    Null {
+        /// Declared length (`ulParameterLen`); no bytes cross.
+        declared_len: u64,
+        /// Threaded per-message `parameter_encoding_version`.
+        version: u32,
+    },
     // Vendor-specific parameter shapes
     Ecies(EciesParams),
     AesCmacKeyDerivation(AesCmacKeyDerivationParams),
@@ -2632,5 +2971,541 @@ mod tests {
             server_iv: SecretBytes::default(),
         };
         assert!(!format!("{ssl3:?}").contains("super-secret-iv"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// R9: representable mechanism parameters — presence types, Flat/Null domain,
+// validated newtype (S2 §6 + §10). Tests first (TDD RED): these reference
+// the new API before it exists.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod pointer_bytes_tests {
+    use super::*;
+
+    // Non-contradiction core: Present([]) (non-NULL/zero) and Null{0} are
+    // distinct values that never conflate, in either direction.
+    #[test]
+    fn present_empty_and_null_zero_never_conflate() {
+        let present = PointerBytes::Present(SecretBytes::copy_from_slice(b""));
+        let null = PointerBytes::Null { declared_len: 0 };
+        assert_ne!(present, null);
+        assert!(!present.is_null());
+        assert!(null.is_null());
+        assert_eq!(present.declared_len(), 0);
+        assert_eq!(null.declared_len(), 0);
+        assert!(present.as_present().is_some());
+        assert!(null.as_present().is_none());
+    }
+
+    #[test]
+    fn presence_and_bytes_cannot_disagree() {
+        let payload = vec![0xA5u8; 37];
+        let present = PointerBytes::Present(SecretBytes::copy_from_slice(&payload));
+        assert!(!present.is_null());
+        assert_eq!(present.declared_len(), 37);
+        present.as_present().unwrap().expose(|b| assert_eq!(b, payload.as_slice()));
+
+        // NULL-with-bytes is unrepresentable: the Null arm carries no byte
+        // accessor at all (this exhaustive match proves the arm shape).
+        let null = PointerBytes::Null { declared_len: 41 };
+        assert!(null.is_null());
+        assert_eq!(null.declared_len(), 41);
+        match &null {
+            PointerBytes::Present(_) => panic!("Null must not match Present"),
+            PointerBytes::Null { declared_len } => assert_eq!(*declared_len, 41),
+        }
+        // Exhaustive match over a Present value: no wildcard, so any future
+        // contradictory variant breaks this test at compile time.
+        match &present {
+            PointerBytes::Present(bytes) => assert_eq!(bytes.len(), 37),
+            PointerBytes::Null { .. } => panic!("Present must not match Null"),
+        }
+    }
+
+    #[test]
+    fn debug_redacts_present_bytes() {
+        let secret = PointerBytes::Present(SecretBytes::copy_from_slice(b"super-secret-iv"));
+        let dbg = format!("{secret:?}");
+        assert!(!dbg.contains("super-secret-iv"), "payload leaked into Debug: {dbg}");
+    }
+
+    #[test]
+    fn clone_and_eq_follow_presence() {
+        let a = PointerBytes::Present(SecretBytes::copy_from_slice(b"AB"));
+        assert_eq!(a.clone(), a);
+        assert_ne!(
+            a,
+            PointerBytes::Present(SecretBytes::copy_from_slice(b"AC")),
+            "byte inequality must be observable"
+        );
+        assert_eq!(PointerBytes::Null { declared_len: 7 }, PointerBytes::Null { declared_len: 7 });
+        assert_ne!(PointerBytes::Null { declared_len: 7 }, PointerBytes::Null { declared_len: 8 });
+    }
+}
+
+#[cfg(test)]
+mod fixed_pointer_bytes_tests {
+    use super::*;
+
+    #[test]
+    fn present_enforces_exact_length_by_construction() {
+        // The only Present constructor takes [u8; N]: a wrong length cannot
+        // be expressed (this would fail to compile with 15 or 17 bytes).
+        let fixed = FixedPointerBytes::present([0xA5u8; 16]);
+        assert!(!fixed.is_null());
+        assert_eq!(fixed.declared_len(), 16);
+        fixed.as_pointer_bytes().as_present().unwrap().expose(|b| {
+            assert_eq!(b, &[0xA5u8; 16]);
+        });
+    }
+
+    #[test]
+    fn null_carries_only_length() {
+        let null: FixedPointerBytes<16> = FixedPointerBytes::null(9);
+        assert!(null.is_null());
+        assert_eq!(null.declared_len(), 9);
+        assert!(null.as_pointer_bytes().as_present().is_none());
+    }
+
+    #[test]
+    fn present_empty_array_and_null_zero_never_conflate() {
+        let present = FixedPointerBytes::present([]);
+        let null: FixedPointerBytes<0> = FixedPointerBytes::null(0);
+        assert_ne!(present, null);
+        assert!(!present.is_null());
+        assert!(null.is_null());
+    }
+
+    #[test]
+    fn debug_redacts_fixed_bytes() {
+        let fixed = FixedPointerBytes::present(*b"super-secret-iv!!");
+        let dbg = format!("{fixed:?}");
+        assert!(!dbg.contains("super-secret-iv"), "payload leaked into Debug: {dbg}");
+    }
+}
+
+#[cfg(test)]
+mod output_pointer_bytes_tests {
+    use super::*;
+
+    #[test]
+    fn capacity_and_nullness_cannot_disagree() {
+        // Output buffers carry capacity, never input bytes: there is no
+        // byte field to contradict the presence arm.
+        let present = OutputPointerBytes::Present { capacity: 64 };
+        assert!(!present.is_null());
+        assert_eq!(present.capacity_or_len(), 64);
+        match present {
+            OutputPointerBytes::Present { capacity } => assert_eq!(capacity, 64),
+            OutputPointerBytes::Null { .. } => panic!("Present must not match Null"),
+        }
+        let null = OutputPointerBytes::Null { declared_len: 64 };
+        assert!(null.is_null());
+        assert_eq!(null.capacity_or_len(), 64);
+        assert_ne!(present, null);
+        match null {
+            OutputPointerBytes::Present { .. } => panic!("Null must not match Present"),
+            OutputPointerBytes::Null { declared_len } => assert_eq!(declared_len, 64),
+        }
+    }
+}
+
+#[cfg(test)]
+mod flat_null_domain_tests {
+    use super::*;
+    use crate::shape_descriptors::ParamAbi;
+
+    #[test]
+    fn transport_version_is_one() {
+        assert_eq!(MECHANISM_PARAMETER_TRANSPORT_VERSION, 1);
+    }
+
+    #[test]
+    fn flat_params_threads_wire_fields() {
+        let flat = FlatParams {
+            bytes: SecretBytes::copy_from_slice(b"AB"),
+            declared_len: 2,
+            source_abi: Some(ParamAbi::Lp64NativeLe),
+            fingerprint: 0x0102_0304_0506_0708,
+            version: MECHANISM_PARAMETER_TRANSPORT_VERSION,
+        };
+        let params = CkMechanismParams::Flat(flat);
+        let CkMechanismParams::Flat(back) = params else { panic!("must match Flat") };
+        assert_eq!(back.declared_len, 2);
+        assert_eq!(back.source_abi, Some(ParamAbi::Lp64NativeLe));
+        assert_eq!(back.fingerprint, 0x0102_0304_0506_0708);
+        assert_eq!(back.version, 1);
+        back.bytes.expose(|b| assert_eq!(b, b"AB"));
+    }
+
+    #[test]
+    fn null_variant_carries_length_and_version_only() {
+        let params = CkMechanismParams::Null { declared_len: 7, version: 1 };
+        let CkMechanismParams::Null { declared_len, version } = params else {
+            panic!("must match Null")
+        };
+        assert_eq!((declared_len, version), (7, 1));
+    }
+
+    #[test]
+    fn flat_debug_redacts_bytes_but_shows_shape() {
+        let flat = FlatParams {
+            bytes: SecretBytes::copy_from_slice(b"super-secret-flat"),
+            declared_len: 17,
+            source_abi: Some(ParamAbi::Lp64NativeLe),
+            fingerprint: 0xDEAD_BEEF,
+            version: 1,
+        };
+        let dbg = format!("{flat:?}");
+        assert!(!dbg.contains("super-secret-flat"), "payload leaked into Debug: {dbg}");
+        assert!(dbg.contains("17"), "declared_len must stay visible: {dbg}");
+    }
+}
+
+#[cfg(test)]
+mod validated_params_tests {
+    use super::*;
+    use crate::mechanism_registry::{DiscoveryMode, MechanismRegistry};
+    use crate::shape_descriptors::{
+        ABI_EXEMPT_FINGERPRINT, Operation, OperationContext, ParamAbi, ShapeResolver,
+    };
+    use std::collections::{HashMap, HashSet};
+
+    const AES_CBC: u64 = 0x0000_1082;
+    const UNKNOWN_MECH: u64 = 0x0000_9999;
+
+    fn registry_with_binding(mech: u64, shape: &str) -> MechanismRegistry {
+        let mut shapes = HashMap::new();
+        shapes.insert(mech, shape.to_string());
+        MechanismRegistry::from_parts(
+            shapes,
+            HashSet::new(),
+            HashSet::new(),
+            DiscoveryMode::Transparent,
+            "test".to_string(),
+        )
+    }
+
+    fn empty_registry() -> MechanismRegistry {
+        MechanismRegistry::from_parts(
+            HashMap::new(),
+            HashSet::new(),
+            HashSet::new(),
+            DiscoveryMode::Transparent,
+            "test".to_string(),
+        )
+    }
+
+    fn excluded_registry(mech: u64) -> MechanismRegistry {
+        let mut excluded = HashSet::new();
+        excluded.insert(mech);
+        MechanismRegistry::from_parts(
+            HashMap::new(),
+            HashSet::new(),
+            excluded,
+            DiscoveryMode::Transparent,
+            "test".to_string(),
+        )
+    }
+
+    fn validate(
+        registry: &MechanismRegistry,
+        mechanism: &CkMechanism,
+    ) -> Result<ValidatedMechanismParams, CkRv> {
+        ValidatedMechanismParams::validate(
+            mechanism,
+            registry,
+            Operation::General,
+            ParamAbi::Lp64NativeLe,
+            ParamAbi::Lp64NativeLe,
+        )
+    }
+
+    fn flat_mechanism(mech: u64, len: usize, abi: Option<ParamAbi>) -> (CkMechanism, u64) {
+        let resolved = ShapeResolver::resolve(
+            Some("iv"),
+            OperationContext { mechanism: mech, operation: Operation::General, length: len as u64 },
+            ParamAbi::Lp64NativeLe,
+        )
+        .unwrap();
+        let mechanism = CkMechanism {
+            mechanism_type: CkMechanismType(mech),
+            params: Some(CkMechanismParams::Flat(FlatParams {
+                bytes: SecretBytes::copy_from_slice(&vec![0xA5u8; len]),
+                declared_len: len as u64,
+                source_abi: abi,
+                fingerprint: resolved.fingerprint(ParamAbi::Lp64NativeLe),
+                version: MECHANISM_PARAMETER_TRANSPORT_VERSION,
+            })),
+        };
+        (mechanism, resolved.fingerprint(ParamAbi::Lp64NativeLe))
+    }
+
+    #[test]
+    fn exclusion_wins_over_every_param_kind() {
+        let registry = excluded_registry(AES_CBC);
+        let typed = CkMechanism {
+            mechanism_type: CkMechanismType(AES_CBC),
+            params: Some(CkMechanismParams::Iv(IvParams { iv: vec![1, 2, 3] })),
+        };
+        let none = CkMechanism { mechanism_type: CkMechanismType(AES_CBC), params: None };
+        let raw = CkMechanism {
+            mechanism_type: CkMechanismType(AES_CBC),
+            params: Some(CkMechanismParams::Raw(RawMechanismParams {
+                data: SecretBytes::copy_from_slice(b"x"),
+            })),
+        };
+        let null = CkMechanism {
+            mechanism_type: CkMechanismType(AES_CBC),
+            params: Some(CkMechanismParams::Null { declared_len: 0, version: 1 }),
+        };
+        let (flat, _) = flat_mechanism(AES_CBC, 16, Some(ParamAbi::Lp64NativeLe));
+        for (name, mechanism) in
+            [("typed", typed), ("none", none), ("raw", raw), ("null", null), ("flat", flat)]
+        {
+            assert_eq!(
+                validate(&registry, &mechanism),
+                Err(CkRv::MECHANISM_INVALID),
+                "{name} on an excluded mechanism must report MECHANISM_INVALID"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_without_params_forwards() {
+        let registry = empty_registry();
+        let mechanism = CkMechanism { mechanism_type: CkMechanismType(UNKNOWN_MECH), params: None };
+        let validated = validate(&registry, &mechanism).unwrap();
+        assert!(validated.flat_grant().is_none());
+        assert_eq!(validated.mechanism(), &mechanism);
+    }
+
+    #[test]
+    fn typed_params_pass_through_without_descriptor() {
+        // The typed path is variant-driven, not registry-driven: unknown
+        // mechanisms with typed params keep the existing contract (the
+        // descriptor system governs Flat carriage only).
+        let registry = empty_registry();
+        let mechanism = CkMechanism {
+            mechanism_type: CkMechanismType(UNKNOWN_MECH),
+            params: Some(CkMechanismParams::Iv(IvParams { iv: vec![1, 2, 3] })),
+        };
+        let validated = validate(&registry, &mechanism).unwrap();
+        assert!(validated.flat_grant().is_none());
+        assert_eq!(validated.into_inner(), mechanism);
+    }
+
+    #[test]
+    fn legacy_raw_rejected() {
+        let registry = registry_with_binding(AES_CBC, "iv");
+        let mechanism = CkMechanism {
+            mechanism_type: CkMechanismType(AES_CBC),
+            params: Some(CkMechanismParams::Raw(RawMechanismParams {
+                data: SecretBytes::copy_from_slice(b"AB"),
+            })),
+        };
+        assert_eq!(validate(&registry, &mechanism), Err(CkRv::MECHANISM_PARAM_INVALID));
+    }
+
+    #[test]
+    fn null_forwards_without_descriptor() {
+        let registry = empty_registry();
+        let mechanism = CkMechanism {
+            mechanism_type: CkMechanismType(UNKNOWN_MECH),
+            params: Some(CkMechanismParams::Null { declared_len: 41, version: 1 }),
+        };
+        let validated = validate(&registry, &mechanism).unwrap();
+        assert!(validated.flat_grant().is_none());
+        assert_eq!(validated.into_inner(), mechanism);
+    }
+
+    #[test]
+    fn null_version_gates() {
+        let registry = empty_registry();
+        let v0 = CkMechanism {
+            mechanism_type: CkMechanismType(AES_CBC),
+            params: Some(CkMechanismParams::Null { declared_len: 0, version: 0 }),
+        };
+        assert_eq!(
+            validate(&registry, &v0),
+            Err(CkRv::MECHANISM_PARAM_INVALID),
+            "Null with a legacy stamp is contradictory metadata"
+        );
+        let newer = CkMechanism {
+            mechanism_type: CkMechanismType(AES_CBC),
+            params: Some(CkMechanismParams::Null { declared_len: 0, version: 2 }),
+        };
+        assert_eq!(
+            validate(&registry, &newer),
+            Err(CkRv::FUNCTION_NOT_SUPPORTED),
+            "per-message version newer than the daemon"
+        );
+    }
+
+    #[test]
+    fn null_narrowing_to_backend_ck_ulong() {
+        let registry = empty_registry();
+        let huge = CkMechanism {
+            mechanism_type: CkMechanismType(AES_CBC),
+            params: Some(CkMechanismParams::Null {
+                declared_len: u64::from(u32::MAX) + 1,
+                version: 1,
+            }),
+        };
+        // LP64 backend: every u64 narrows.
+        assert!(
+            ValidatedMechanismParams::validate(
+                &huge,
+                &registry,
+                Operation::General,
+                ParamAbi::Lp64NativeLe,
+                ParamAbi::Lp64NativeLe,
+            )
+            .is_ok()
+        );
+        // 32-bit backend: the unnarrowable length fails closed.
+        assert_eq!(
+            ValidatedMechanismParams::validate(
+                &huge,
+                &registry,
+                Operation::General,
+                ParamAbi::Lp64NativeLe,
+                ParamAbi::Ilp32NativeLe,
+            ),
+            Err(CkRv::FUNCTION_FAILED)
+        );
+        // Boundary: u32::MAX still narrows onto a 32-bit backend.
+        let boundary = CkMechanism {
+            mechanism_type: CkMechanismType(AES_CBC),
+            params: Some(CkMechanismParams::Null { declared_len: u64::from(u32::MAX), version: 1 }),
+        };
+        assert!(
+            ValidatedMechanismParams::validate(
+                &boundary,
+                &registry,
+                Operation::General,
+                ParamAbi::Lp64NativeLe,
+                ParamAbi::Ilp32NativeLe,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn flat_version_and_length_gates() {
+        let registry = registry_with_binding(AES_CBC, "iv");
+        let (mut mechanism, _) = flat_mechanism(AES_CBC, 16, Some(ParamAbi::Lp64NativeLe));
+        // Sanity: the well-formed value validates.
+        validate(&registry, &mechanism).unwrap();
+
+        let CkMechanismParams::Flat(flat) = mechanism.params.as_mut().unwrap() else {
+            panic!("test setup must build Flat")
+        };
+        flat.version = 0;
+        assert_eq!(
+            validate(&registry, &mechanism),
+            Err(CkRv::MECHANISM_PARAM_INVALID),
+            "Flat with a legacy stamp is contradictory metadata"
+        );
+        let CkMechanismParams::Flat(flat) = mechanism.params.as_mut().unwrap() else {
+            panic!("test setup must build Flat")
+        };
+        flat.version = 99;
+        assert_eq!(
+            validate(&registry, &mechanism),
+            Err(CkRv::FUNCTION_NOT_SUPPORTED),
+            "per-message version newer than the daemon"
+        );
+        let CkMechanismParams::Flat(flat) = mechanism.params.as_mut().unwrap() else {
+            panic!("test setup must build Flat")
+        };
+        flat.version = 1;
+        flat.declared_len = 15;
+        assert_eq!(
+            validate(&registry, &mechanism),
+            Err(CkRv::MECHANISM_PARAM_INVALID),
+            "declared_len below the byte count is a length mismatch"
+        );
+        let CkMechanismParams::Flat(flat) = mechanism.params.as_mut().unwrap() else {
+            panic!("test setup must build Flat")
+        };
+        flat.declared_len = 17;
+        assert_eq!(
+            validate(&registry, &mechanism),
+            Err(CkRv::MECHANISM_PARAM_INVALID),
+            "declared_len above the byte count is a length mismatch"
+        );
+    }
+
+    #[test]
+    fn flat_unknown_abi_rejected() {
+        let registry = registry_with_binding(AES_CBC, "iv");
+        let (mechanism, _) = flat_mechanism(AES_CBC, 16, None);
+        assert_eq!(
+            validate(&registry, &mechanism),
+            Err(CkRv::MECHANISM_PARAM_INVALID),
+            "Flat without a known source ABI is contradictory metadata"
+        );
+    }
+
+    #[test]
+    fn flat_grant_is_stored_on_success() {
+        let registry = registry_with_binding(AES_CBC, "iv");
+        let (mechanism, fingerprint) = flat_mechanism(AES_CBC, 16, Some(ParamAbi::Lp64NativeLe));
+        assert_eq!(fingerprint, ABI_EXEMPT_FINGERPRINT);
+        let validated = validate(&registry, &mechanism).unwrap();
+        let grant = validated.flat_grant().expect("Flat success must store its grant");
+        assert_eq!(grant.resolved.descriptor.name, "iv");
+        assert_eq!(grant.fingerprint, ABI_EXEMPT_FINGERPRINT);
+        assert_eq!(grant.local_abi, ParamAbi::Lp64NativeLe);
+    }
+
+    #[test]
+    fn unknown_descriptor_fails_closed() {
+        // Unbound mechanism with Flat bytes: no descriptor, no carriage.
+        let registry = empty_registry();
+        let (mechanism, _) = flat_mechanism(UNKNOWN_MECH, 16, Some(ParamAbi::Lp64NativeLe));
+        assert_eq!(validate(&registry, &mechanism), Err(CkRv::MECHANISM_PARAM_INVALID));
+        // Registry bound to a shape that does not exist: fail closed too.
+        let bad = registry_with_binding(AES_CBC, "no_such_shape");
+        let (mechanism, _) = flat_mechanism(AES_CBC, 16, Some(ParamAbi::Lp64NativeLe));
+        assert_eq!(validate(&bad, &mechanism), Err(CkRv::MECHANISM_PARAM_INVALID));
+    }
+
+    #[test]
+    fn validated_flat_bytes_are_verbatim() {
+        // S2 §10: no client address bits are used or interpreted — even
+        // pointer-looking byte patterns pass through untouched.
+        let registry = registry_with_binding(AES_CBC, "iv");
+        let mut address_like = 0x7ffd_aabb_ccdd_eeffu64.to_le_bytes().to_vec();
+        address_like.extend_from_slice(&[0x00; 8]);
+        let mechanism = CkMechanism {
+            mechanism_type: CkMechanismType(AES_CBC),
+            params: Some(CkMechanismParams::Flat(FlatParams {
+                bytes: SecretBytes::copy_from_slice(&address_like),
+                declared_len: address_like.len() as u64,
+                source_abi: Some(ParamAbi::Lp64NativeLe),
+                fingerprint: ABI_EXEMPT_FINGERPRINT,
+                version: MECHANISM_PARAMETER_TRANSPORT_VERSION,
+            })),
+        };
+        let validated = validate(&registry, &mechanism).unwrap();
+        let CkMechanismParams::Flat(back) = validated.mechanism().params.as_ref().unwrap() else {
+            panic!("validated output must stay Flat")
+        };
+        back.bytes.expose(|b| assert_eq!(b, address_like.as_slice()));
+        assert_eq!(back.declared_len, address_like.len() as u64);
+    }
+
+    #[test]
+    fn allocation_failure_maps_to_host_memory() {
+        // The S2 §6 HOST_MEMORY row: genuine sub-cap allocation failure.
+        // `usize::MAX` forces CapacityOverflow deterministically (no real
+        // allocation is attempted), pinning the mapping the Flat clone uses.
+        let mut vec = Vec::new();
+        assert_eq!(super::reserve_or_host_memory(&mut vec, usize::MAX), Err(CkRv::HOST_MEMORY));
+        assert_eq!(super::reserve_or_host_memory(&mut vec, 16), Ok(()));
     }
 }
