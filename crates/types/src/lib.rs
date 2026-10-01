@@ -5,6 +5,7 @@ pub mod input;
 pub mod interface;
 pub mod mechanism;
 pub mod mechanism_official;
+pub mod mechanism_param_manifest;
 pub mod mechanism_registry;
 pub mod object;
 pub mod output;

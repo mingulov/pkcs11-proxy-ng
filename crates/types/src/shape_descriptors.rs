@@ -2085,6 +2085,7 @@ mod resolver_tests {
 
     const LP64: ParamAbi = ParamAbi::Lp64NativeLe;
     const ILP32: ParamAbi = ParamAbi::Ilp32NativeLe;
+    const LLP64: ParamAbi = ParamAbi::Llp64Packed1Le;
     const CKM_AES_GCM: u64 = 0x1087;
     const CKM_AES_CCM: u64 = 0x1088;
     const CKM_AES_GMAC: u64 = 0x108E;
@@ -2189,6 +2190,41 @@ mod resolver_tests {
             selected_name(Some("ccm"), ctx(CKM_AES_CCM, Operation::WrapKey, 32), ILP32),
             ("ccm_wrap", "")
         );
+    }
+
+    #[test]
+    fn wrap_key_selects_wrap_layouts_on_llp64() {
+        // R7 review carry (reviewer probe): LLP64-pack1 CK_GCM_WRAP_PARAMS
+        // is 36 bytes and CK_CCM_WRAP_PARAMS is 40 bytes (packed, so the
+        // bare byte sums). Exact sizes select the wrap layouts; off-by-one
+        // falls back to the registry binding.
+        let gcm_wrap_len =
+            native_size_of(ShapeResolver::descriptor("gcm_wrap").unwrap().fields, LLP64);
+        let ccm_wrap_len =
+            native_size_of(ShapeResolver::descriptor("ccm_wrap").unwrap().fields, LLP64);
+        assert_eq!((gcm_wrap_len, ccm_wrap_len), (36, 40));
+        assert_eq!(
+            selected_name(Some("gcm"), ctx(CKM_AES_GCM, Operation::WrapKey, 36), LLP64),
+            ("gcm_wrap", "")
+        );
+        assert_eq!(
+            selected_name(Some("ccm"), ctx(CKM_AES_CCM, Operation::WrapKey, 40), LLP64),
+            ("ccm_wrap", "")
+        );
+        for length in [35, 37] {
+            assert_eq!(
+                selected_name(Some("gcm"), ctx(CKM_AES_GCM, Operation::WrapKey, length), LLP64),
+                ("gcm", ""),
+                "off-by-one length {length} must fall back to the binding"
+            );
+        }
+        for length in [39, 41] {
+            assert_eq!(
+                selected_name(Some("ccm"), ctx(CKM_AES_CCM, Operation::WrapKey, length), LLP64),
+                ("ccm", ""),
+                "off-by-one length {length} must fall back to the binding"
+            );
+        }
     }
 
     #[test]
