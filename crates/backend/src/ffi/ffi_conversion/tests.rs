@@ -38,11 +38,9 @@ mod mechanism_to_ffi_tests {
             CkMechanism {
                 mechanism_type: CkMechanismType::RSA_PKCS,
                 params: Some(CkMechanismParams::Kip(KipParams {
-                    mechanism: Box::new(inner),
+                    mechanism: Some(Box::new(inner)),
                     key_handle: CkObjectHandle(0),
                     seed_presence: PointerBytes::present_copy(&[]),
-                    seed: SecretBytes::copy_from_slice(&[]),
-                    mechanism_is_null: false,
                 })),
             }
         }
@@ -69,8 +67,6 @@ mod mechanism_to_ffi_tests {
         SslRandomData {
             client_random_presence: PointerBytes::present_copy(&[0x11; 32]),
             server_random_presence: PointerBytes::present_copy(&[0x22; 32]),
-            client_random: vec![0x11; 32],
-            server_random: vec![0x22; 32],
         }
     }
 
@@ -122,7 +118,6 @@ mod mechanism_to_ffi_tests {
                 Tls12ExtendedMasterKeyDeriveParams {
                     prf_hash_mechanism: CkMechanismType::SHA256,
                     session_hash_presence: PointerBytes::present_copy(&[0x33; 48]),
-                    session_hash: vec![0x33; 48],
                     version_major: major,
                     version_minor: minor,
                     version_is_null: false,
@@ -155,7 +150,6 @@ mod mechanism_to_ffi_tests {
             mechanism_type: CkMechanismType(0x0000_0401),
             params: Some(CkMechanismParams::KeyWrapSetOaep(KeyWrapSetOaepParams {
                 bc,
-                x: SecretBytes::copy_from_slice(&[0x44; 8]),
                 x_presence: PointerBytes::present_copy(&[0x44; 8]),
             })),
         };
@@ -166,8 +160,6 @@ mod mechanism_to_ffi_tests {
                 has_prev_key: false,
                 keygxy_handle: CkObjectHandle(1),
                 prev_key_handle: CkObjectHandle(0),
-                ckyi: SecretBytes::copy_from_slice(&[0x55; 8]),
-                ckyr: SecretBytes::copy_from_slice(&[0x66; 8]),
                 key_number,
                 ckyi_presence: PointerBytes::present_copy(&[0x55; 8]),
                 ckyr_presence: PointerBytes::present_copy(&[0x66; 8]),
@@ -180,8 +172,6 @@ mod mechanism_to_ffi_tests {
                 random_info: WtlsRandomData {
                     client_random_presence: PointerBytes::present_copy(&[0xA1, 0xA2]),
                     server_random_presence: PointerBytes::present_copy(&[0xB1, 0xB2]),
-                    client_random: vec![0xA1, 0xA2],
-                    server_random: vec![0xB1, 0xB2],
                 },
                 version,
                 version_is_null: false,
@@ -467,9 +457,7 @@ mod mechanism_to_ffi_tests {
                 hash_alg: CkMechanismType::SHA256,
                 mgf: CkMgf(1),
                 source: CkOaepSource(1),
-                source_data: vec![0xA0, 0xA1, 0xA2].into(),
                 source_data_presence: PointerBytes::from_legacy(&[0xA0, 0xA1, 0xA2], false),
-                source_null: false,
             }),
         );
 
@@ -499,15 +487,11 @@ mod mechanism_to_ffi_tests {
         let ffi = convert(
             CkMechanismType::AES_GCM,
             CkMechanismParams::Gcm(GcmParams {
-                iv: vec![0x10; 12],
                 iv_bits: 96,
                 iv_buffer_len: 12,
-                aad: vec![0xAA, 0xBB, 0xCC].into(),
                 tag_bits: 128,
                 iv_presence: PointerBytes::from_legacy(&[0x10; 12], false),
                 aad_presence: PointerBytes::from_legacy(&[0xAA, 0xBB, 0xCC], false),
-                iv_null: false,
-                aad_null: false,
             }),
         );
 
@@ -544,15 +528,11 @@ mod mechanism_to_ffi_tests {
             let ffi = convert(
                 CkMechanismType::AES_GCM,
                 CkMechanismParams::Gcm(GcmParams {
-                    iv: vec![0x5A; iv_len],
                     iv_bits: 96,
                     iv_buffer_len: buffer_len as u64,
-                    aad: Vec::new().into(),
                     tag_bits: 128,
                     iv_presence: PointerBytes::from_legacy(&vec![0x5A; iv_len], false),
                     aad_presence: PointerBytes::from_legacy(&[], false),
-                    iv_null: false,
-                    aad_null: false,
                 }),
             );
             // SAFETY: the owner is alive and unchanged; snapshot once per
@@ -568,7 +548,11 @@ mod mechanism_to_ffi_tests {
                 Some(CkMechanismParams::Gcm(params)) => params,
                 other => panic!("unexpected output params: {other:?}"),
             };
-            assert_eq!(retained.iv.len(), iv_len, "output IV names the input bytes");
+            assert_eq!(
+                retained.iv_presence.as_present().unwrap().len(),
+                iv_len,
+                "output IV names the input bytes"
+            );
             assert_eq!(
                 retained.iv_buffer_len as usize,
                 iv_len.max(buffer_len),
@@ -589,15 +573,11 @@ mod mechanism_to_ffi_tests {
         let result = mechanism_to_ffi(&validated_mechanism_for_tests(&CkMechanism {
             mechanism_type: CkMechanismType::AES_GCM,
             params: Some(CkMechanismParams::Gcm(GcmParams {
-                iv: Vec::new(),
                 iv_bits: 96,
                 iv_buffer_len: u64::MAX,
-                aad: Vec::new().into(),
                 tag_bits: 128,
                 iv_presence: PointerBytes::from_legacy(&[], false),
                 aad_presence: PointerBytes::from_legacy(&[], false),
-                iv_null: false,
-                aad_null: false,
             })),
         }));
         assert_eq!(result.err(), Some(CkRv::MECHANISM_PARAM_INVALID));
@@ -613,9 +593,6 @@ mod mechanism_to_ffi_tests {
         let ffi = convert(
             CkMechanismType(0x0000_03A1), // CKM_PBE_MD5_DES_CBC
             CkMechanismParams::Pbe(PbeParams {
-                init_vector: vec![0x01; 8].into(),
-                password: password.clone().into(),
-                salt: vec![0x02; 4].into(),
                 iteration: 1000,
                 init_vector_presence: PointerBytes::present_copy(&[0x01; 8]),
                 password_presence: PointerBytes::present_copy(&password),
@@ -639,11 +616,8 @@ mod mechanism_to_ffi_tests {
             CkMechanismType(0x0000_03B0), // CKM_PKCS5_PBKD2
             CkMechanismParams::Pkcs5Pbkd2(Pkcs5Pbkd2Params {
                 salt_source: CkPbkdf2SaltSource(1),
-                salt_source_data: vec![0x09; 8].into(),
                 iterations: 2048,
                 prf: CkPbkdf2Prf(2),
-                prf_data: vec![].into(),
-                password: password.clone().into(),
                 salt_source_data_presence: PointerBytes::present_copy(&[0x09; 8]),
                 prf_data_presence: PointerBytes::present_copy(&[]),
                 password_presence: PointerBytes::present_copy(&password),
@@ -664,15 +638,11 @@ mod mechanism_to_ffi_tests {
         let ffi = convert(
             CkMechanismType::AES_GCM,
             CkMechanismParams::Gcm(GcmParams {
-                iv: Vec::new(),
                 iv_bits: 96,
                 iv_buffer_len: 12,
-                aad: Vec::new().into(),
                 tag_bits: 128,
                 iv_presence: PointerBytes::from_legacy(&[], false),
                 aad_presence: PointerBytes::from_legacy(&[], false),
-                iv_null: false,
-                aad_null: false,
             }),
         );
 
@@ -692,7 +662,10 @@ mod mechanism_to_ffi_tests {
 
         match ffi.output_params() {
             Some(CkMechanismParams::Gcm(params)) => {
-                assert_eq!(params.iv, generated);
+                assert_eq!(
+                    params.iv_presence.as_present().unwrap().expose(|b| b.to_vec()),
+                    generated
+                );
                 assert_eq!(params.iv_buffer_len, 12);
                 assert_eq!(params.iv_bits, 96);
                 assert_eq!(params.tag_bits, 128);
@@ -712,8 +685,6 @@ mod mechanism_to_ffi_tests {
                 random_info: WtlsRandomData {
                     client_random_presence: PointerBytes::present_copy(&[0xA1, 0xA2]),
                     server_random_presence: PointerBytes::present_copy(&[0xB1, 0xB2]),
-                    client_random: vec![0xA1, 0xA2],
-                    server_random: vec![0xB1, 0xB2],
                 },
                 version: 1,
                 version_is_null: false,
@@ -732,8 +703,14 @@ mod mechanism_to_ffi_tests {
         match ffi.output_params() {
             Some(CkMechanismParams::WtlsMasterKeyDerive(params)) => {
                 assert_eq!(params.digest_mechanism.0, CkMechanismType::SHA256.0);
-                assert_eq!(params.random_info.client_random, [0xA1, 0xA2]);
-                assert_eq!(params.random_info.server_random, [0xB1, 0xB2]);
+                assert_eq!(
+                    params.random_info.client_random_presence.as_present().unwrap(),
+                    &SecretBytes::copy_from_slice(&[0xA1, 0xA2])
+                );
+                assert_eq!(
+                    params.random_info.server_random_presence.as_present().unwrap(),
+                    &SecretBytes::copy_from_slice(&[0xB1, 0xB2])
+                );
                 assert_eq!(params.version, 2);
             }
             other => panic!("unexpected output params: {other:?}"),
@@ -750,8 +727,6 @@ mod mechanism_to_ffi_tests {
             CkMechanismParams::TlsPrf(TlsPrfParams {
                 seed_presence: PointerBytes::present_copy(&[0xA1, 0xA2, 0xA3]),
                 label_presence: PointerBytes::present_copy(&[0xB1, 0xB2]),
-                seed: (vec![0xA1, 0xA2, 0xA3]).into(),
-                label: (vec![0xB1, 0xB2]).into(),
                 output_len: 48,
                 output: Vec::new().into(),
                 output_is_null: false,
@@ -773,8 +748,11 @@ mod mechanism_to_ffi_tests {
 
         match ffi.output_params() {
             Some(CkMechanismParams::TlsPrf(params)) => {
-                assert_eq!(params.seed, vec![0xA1, 0xA2, 0xA3].into());
-                assert_eq!(params.label, vec![0xB1, 0xB2].into());
+                assert_eq!(
+                    params.seed_presence.as_present().unwrap(),
+                    &vec![0xA1, 0xA2, 0xA3].into()
+                );
+                assert_eq!(params.label_presence.as_present().unwrap(), &vec![0xB1, 0xB2].into());
                 assert_eq!(params.output_len, 32, "provider-written length");
                 assert_eq!(params.output, vec![0x5A; 32].into(), "provider-written bytes");
             }
@@ -792,8 +770,6 @@ mod mechanism_to_ffi_tests {
                 digest_mechanism: CkMechanismType::SHA256,
                 seed_presence: PointerBytes::present_copy(&[0xC1, 0xC2]),
                 label_presence: PointerBytes::present_copy(&[0xD1]),
-                seed: (vec![0xC1, 0xC2]).into(),
-                label: (vec![0xD1]).into(),
                 output_len: 20,
                 output: Vec::new().into(),
                 output_is_null: false,
@@ -815,8 +791,8 @@ mod mechanism_to_ffi_tests {
         match ffi.output_params() {
             Some(CkMechanismParams::WtlsPrf(params)) => {
                 assert_eq!(params.digest_mechanism.0, CkMechanismType::SHA256.0);
-                assert_eq!(params.seed, vec![0xC1, 0xC2].into());
-                assert_eq!(params.label, vec![0xD1].into());
+                assert_eq!(params.seed_presence.as_present().unwrap(), &vec![0xC1, 0xC2].into());
+                assert_eq!(params.label_presence.as_present().unwrap(), &vec![0xD1].into());
                 assert_eq!(params.output_len, 20, "provider-written length");
                 assert_eq!(params.output, vec![0xA5; 20].into(), "provider-written bytes");
             }
@@ -834,8 +810,6 @@ mod mechanism_to_ffi_tests {
                 random_info: SslRandomData {
                     client_random_presence: PointerBytes::present_copy(&[0x11; 32]),
                     server_random_presence: PointerBytes::present_copy(&[0x22; 32]),
-                    client_random: vec![0x11; 32],
-                    server_random: vec![0x22; 32],
                 },
                 version_major: 3,
                 version_minor: 0,
@@ -855,8 +829,14 @@ mod mechanism_to_ffi_tests {
 
         match ffi.output_params() {
             Some(CkMechanismParams::Ssl3MasterKeyDerive(params)) => {
-                assert_eq!(params.random_info.client_random, [0x11; 32]);
-                assert_eq!(params.random_info.server_random, [0x22; 32]);
+                assert_eq!(
+                    params.random_info.client_random_presence.as_present().unwrap(),
+                    &SecretBytes::copy_from_slice(&[0x11; 32])
+                );
+                assert_eq!(
+                    params.random_info.server_random_presence.as_present().unwrap(),
+                    &SecretBytes::copy_from_slice(&[0x22; 32])
+                );
                 assert_eq!(params.version_major, 3);
                 assert_eq!(params.version_minor, 3, "provider-negotiated version");
             }
@@ -880,13 +860,10 @@ mod mechanism_to_ffi_tests {
                 random_info: WtlsRandomData {
                     client_random_presence: PointerBytes::present_copy(&[0xC1, 0xC2]),
                     server_random_presence: PointerBytes::present_copy(&[0xD1, 0xD2]),
-                    client_random: vec![0xC1, 0xC2],
-                    server_random: vec![0xD1, 0xD2],
                 },
                 mac_secret_handle: CkObjectHandle(0),
                 key_handle: CkObjectHandle(0),
                 iv_presence: PointerBytes::present_copy(&(Vec::new())),
-                iv: (Vec::new()).into(),
                 returned_key_material_is_null: false,
             }),
         );
@@ -910,11 +887,20 @@ mod mechanism_to_ffi_tests {
                 assert_eq!(params.iv_size_bits, 32);
                 assert_eq!(params.sequence_number, 7);
                 assert!(params.is_export);
-                assert_eq!(params.random_info.client_random, [0xC1, 0xC2]);
-                assert_eq!(params.random_info.server_random, [0xD1, 0xD2]);
+                assert_eq!(
+                    params.random_info.client_random_presence.as_present().unwrap(),
+                    &SecretBytes::copy_from_slice(&[0xC1, 0xC2])
+                );
+                assert_eq!(
+                    params.random_info.server_random_presence.as_present().unwrap(),
+                    &SecretBytes::copy_from_slice(&[0xD1, 0xD2])
+                );
                 assert_eq!(params.mac_secret_handle.0, 101);
                 assert_eq!(params.key_handle.0, 202);
-                assert_eq!(params.iv, SecretBytes::copy_from_slice(&[0xA1, 0xA2, 0xA3, 0xA4]));
+                assert_eq!(
+                    params.iv_presence.as_present().unwrap(),
+                    &SecretBytes::copy_from_slice(&[0xA1, 0xA2, 0xA3, 0xA4])
+                );
             }
             other => panic!("unexpected output params: {other:?}"),
         }
@@ -934,8 +920,6 @@ mod mechanism_to_ffi_tests {
                 random_info: SslRandomData {
                     client_random_presence: PointerBytes::present_copy(&[0x11, 0x12]),
                     server_random_presence: PointerBytes::present_copy(&[0x21, 0x22]),
-                    client_random: vec![0x11, 0x12],
-                    server_random: vec![0x21, 0x22],
                 },
                 prf_hash_mechanism: CkMechanismType(0),
                 client_mac_secret_handle: CkObjectHandle(0),
@@ -944,8 +928,6 @@ mod mechanism_to_ffi_tests {
                 server_key_handle: CkObjectHandle(0),
                 client_iv_presence: PointerBytes::present_copy(&(Vec::new())),
                 server_iv_presence: PointerBytes::present_copy(&(Vec::new())),
-                client_iv: (Vec::new()).into(),
-                server_iv: (Vec::new()).into(),
                 returned_key_material_is_null: false,
             }),
         );
@@ -977,20 +959,26 @@ mod mechanism_to_ffi_tests {
                 assert_eq!(params.key_size_bits, 128);
                 assert_eq!(params.iv_size_bits, 32);
                 assert!(!params.is_export);
-                assert_eq!(params.random_info.client_random, [0x11, 0x12]);
-                assert_eq!(params.random_info.server_random, [0x21, 0x22]);
+                assert_eq!(
+                    params.random_info.client_random_presence.as_present().unwrap(),
+                    &SecretBytes::copy_from_slice(&[0x11, 0x12])
+                );
+                assert_eq!(
+                    params.random_info.server_random_presence.as_present().unwrap(),
+                    &SecretBytes::copy_from_slice(&[0x21, 0x22])
+                );
                 assert_eq!(params.prf_hash_mechanism.0, 0);
                 assert_eq!(params.client_mac_secret_handle.0, 101);
                 assert_eq!(params.server_mac_secret_handle.0, 102);
                 assert_eq!(params.client_key_handle.0, 201);
                 assert_eq!(params.server_key_handle.0, 202);
                 assert_eq!(
-                    params.client_iv,
-                    SecretBytes::copy_from_slice(&[0xA1, 0xA2, 0xA3, 0xA4])
+                    params.client_iv_presence.as_present().unwrap(),
+                    &SecretBytes::copy_from_slice(&[0xA1, 0xA2, 0xA3, 0xA4])
                 );
                 assert_eq!(
-                    params.server_iv,
-                    SecretBytes::copy_from_slice(&[0xB1, 0xB2, 0xB3, 0xB4])
+                    params.server_iv_presence.as_present().unwrap(),
+                    &SecretBytes::copy_from_slice(&[0xB1, 0xB2, 0xB3, 0xB4])
                 );
             }
             other => panic!("unexpected output params: {other:?}"),
@@ -1011,8 +999,6 @@ mod mechanism_to_ffi_tests {
                 random_info: SslRandomData {
                     client_random_presence: PointerBytes::present_copy(&[0x31, 0x32]),
                     server_random_presence: PointerBytes::present_copy(&[0x41, 0x42]),
-                    client_random: vec![0x31, 0x32],
-                    server_random: vec![0x41, 0x42],
                 },
                 prf_hash_mechanism: CkMechanismType::SHA256,
                 client_mac_secret_handle: CkObjectHandle(0),
@@ -1021,8 +1007,6 @@ mod mechanism_to_ffi_tests {
                 server_key_handle: CkObjectHandle(0),
                 client_iv_presence: PointerBytes::present_copy(&(Vec::new())),
                 server_iv_presence: PointerBytes::present_copy(&(Vec::new())),
-                client_iv: (Vec::new()).into(),
-                server_iv: (Vec::new()).into(),
                 returned_key_material_is_null: false,
             }),
         );
@@ -1050,20 +1034,26 @@ mod mechanism_to_ffi_tests {
 
         match ffi.output_params() {
             Some(CkMechanismParams::Ssl3KeyMat(params)) => {
-                assert_eq!(params.random_info.client_random, [0x31, 0x32]);
-                assert_eq!(params.random_info.server_random, [0x41, 0x42]);
+                assert_eq!(
+                    params.random_info.client_random_presence.as_present().unwrap(),
+                    &SecretBytes::copy_from_slice(&[0x31, 0x32])
+                );
+                assert_eq!(
+                    params.random_info.server_random_presence.as_present().unwrap(),
+                    &SecretBytes::copy_from_slice(&[0x41, 0x42])
+                );
                 assert_eq!(params.prf_hash_mechanism.0, CkMechanismType::SHA256.0);
                 assert_eq!(params.client_mac_secret_handle.0, 111);
                 assert_eq!(params.server_mac_secret_handle.0, 112);
                 assert_eq!(params.client_key_handle.0, 211);
                 assert_eq!(params.server_key_handle.0, 212);
                 assert_eq!(
-                    params.client_iv,
-                    SecretBytes::copy_from_slice(&[0xC1, 0xC2, 0xC3, 0xC4])
+                    params.client_iv_presence.as_present().unwrap(),
+                    &SecretBytes::copy_from_slice(&[0xC1, 0xC2, 0xC3, 0xC4])
                 );
                 assert_eq!(
-                    params.server_iv,
-                    SecretBytes::copy_from_slice(&[0xD1, 0xD2, 0xD3, 0xD4])
+                    params.server_iv_presence.as_present().unwrap(),
+                    &SecretBytes::copy_from_slice(&[0xD1, 0xD2, 0xD3, 0xD4])
                 );
             }
             other => panic!("unexpected output params: {other:?}"),
@@ -1150,7 +1140,6 @@ mod mechanism_to_ffi_tests {
         let ffi = convert(
             CkMechanismType(0x0000_0501),
             CkMechanismParams::KeyDerivationString(KeyDerivationStringData {
-                data: vec![0xDE, 0xAD, 0xBE, 0xEF].into(),
                 data_presence: PointerBytes::present_copy(&[0xDE, 0xAD, 0xBE, 0xEF]),
             }),
         );
@@ -1177,7 +1166,6 @@ mod mechanism_to_ffi_tests {
             CkMechanismType(0x0000_0502),
             CkMechanismParams::SignAdditionalContext(SignAdditionalContext {
                 hedge_variant: 1,
-                context: vec![0xA1, 0xA2, 0xA3].into(),
                 hash: CkMechanismType(0),
                 context_presence: PointerBytes::present_copy(&[0xA1, 0xA2, 0xA3]),
             }),
@@ -1207,7 +1195,6 @@ mod mechanism_to_ffi_tests {
             CkMechanismType::HASH_ML_DSA,
             CkMechanismParams::SignAdditionalContext(SignAdditionalContext {
                 hedge_variant: 1,
-                context: vec![0xB1, 0xB2].into(),
                 hash: CkMechanismType::SHA256,
                 context_presence: PointerBytes::present_copy(&[0xB1, 0xB2]),
             }),
@@ -1239,7 +1226,6 @@ mod mechanism_to_ffi_tests {
             CkMechanismParams::Kmac(KmacParams {
                 key_handle: CkObjectHandle(0xCAFE),
                 mac_length: 64,
-                customization_string: b"custom".to_vec().into(),
                 customization_string_presence: PointerBytes::present_copy(b"custom"),
             }),
         );
@@ -1271,8 +1257,6 @@ mod mechanism_to_ffi_tests {
             CkMechanismType(0x8000_0002),
             CkMechanismParams::MuGen(MuGenParams {
                 key_handle: CkObjectHandle(0xA11CE),
-                tr: b"precomputed-tr".to_vec().into(),
-                context: b"context".to_vec().into(),
                 tr_presence: PointerBytes::present_copy(b"precomputed-tr"),
                 context_presence: PointerBytes::present_copy(b"context"),
             }),
@@ -1304,15 +1288,11 @@ mod mechanism_to_ffi_tests {
             let ffi = convert(
                 CkMechanismType::AES_GCM,
                 CkMechanismParams::Gcm(GcmParams {
-                    iv: Vec::new(),
                     iv_bits: 0,
                     iv_buffer_len: 0,
-                    aad: Vec::new().into(),
                     tag_bits: 128,
                     iv_presence: PointerBytes::from_legacy(&[], iv_null),
                     aad_presence: PointerBytes::from_legacy(&[], aad_null),
-                    iv_null,
-                    aad_null,
                 }),
             );
             // E0793: CK structs are packed on Windows; assert on by-value copies.
@@ -1337,13 +1317,9 @@ mod mechanism_to_ffi_tests {
                 CkMechanismType::AES_CCM,
                 CkMechanismParams::Ccm(CcmParams {
                     data_len: 16,
-                    nonce: Vec::new(),
-                    aad: Vec::new().into(),
                     mac_len: 12,
                     nonce_presence: PointerBytes::from_legacy(&[], nonce_null),
                     aad_presence: PointerBytes::from_legacy(&[], aad_null),
-                    nonce_null,
-                    aad_null,
                 }),
             );
             // E0793: CK structs are packed on Windows; assert on by-value copies.
@@ -1370,9 +1346,7 @@ mod mechanism_to_ffi_tests {
                     hash_alg: CkMechanismType::SHA256,
                     mgf: CkMgf(1),
                     source: CkOaepSource(1),
-                    source_data: Vec::new().into(),
                     source_data_presence: PointerBytes::from_legacy(&[], source_null),
-                    source_null,
                 }),
             );
             // E0793: CK structs are packed on Windows; assert on by-value copies.
@@ -1400,9 +1374,7 @@ mod mechanism_to_ffi_tests {
                 hash_alg: CkMechanismType::SHA256,
                 mgf: CkMgf(1),
                 source: CkOaepSource(1),
-                source_data: Vec::new().into(),
                 source_data_presence: PointerBytes::from_legacy(&[], source_null),
-                source_null,
             };
             let top = convert(
                 CkMechanismType::RSA_PKCS_OAEP,
@@ -1467,9 +1439,7 @@ mod mechanism_to_ffi_tests {
             hash_alg: CkMechanismType::SHA256,
             mgf: CkMgf(1),
             source: CkOaepSource(1),
-            source_data: vec![0xA0, 0xA1, 0xA2].into(),
             source_data_presence: PointerBytes::from_legacy(&[0xA0, 0xA1, 0xA2], false),
-            source_null: false,
         };
         let nested = convert(
             CkMechanismType::RSA_AES_KEY_WRAP,
@@ -1838,10 +1808,9 @@ mod output_params_equal_tests {
     use pkcs11_proxy_ng_types::{
         CkAttribute, CkAttributeType, CkAttributeValue, CkMechanism, CkMechanismParams,
         CkMechanismType, CkObjectHandle, GcmParams, PbeParams, PointerArray, PointerBytes,
-        PrfDataParam, SecretBytes, Sp800108DerivedKey, Sp800108FeedbackKdfParams,
-        Sp800108KdfParams, Ssl3KeyMatParams, Ssl3MasterKeyDeriveParams, SslRandomData,
-        Tls12MasterKeyDeriveParams, TlsPrfParams, WtlsKeyMatParams, WtlsMasterKeyDeriveParams,
-        WtlsPrfParams, WtlsRandomData,
+        PrfDataParam, Sp800108DerivedKey, Sp800108FeedbackKdfParams, Sp800108KdfParams,
+        Ssl3KeyMatParams, Ssl3MasterKeyDeriveParams, SslRandomData, Tls12MasterKeyDeriveParams,
+        TlsPrfParams, WtlsKeyMatParams, WtlsMasterKeyDeriveParams, WtlsPrfParams, WtlsRandomData,
     };
 
     fn convert(mechanism_type: CkMechanismType, params: CkMechanismParams) -> super::FfiMechanism {
@@ -1854,15 +1823,11 @@ mod output_params_equal_tests {
 
     fn gcm_fixture() -> CkMechanismParams {
         CkMechanismParams::Gcm(GcmParams {
-            iv: vec![0x11; 12],
             iv_bits: 96,
             iv_buffer_len: 12,
-            aad: b"aad-bytes".to_vec().into(),
             tag_bits: 128,
             iv_presence: PointerBytes::from_legacy(&[0x11; 12], false),
             aad_presence: PointerBytes::from_legacy(b"aad-bytes", false),
-            iv_null: false,
-            aad_null: false,
         })
     }
 
@@ -1878,8 +1843,6 @@ mod output_params_equal_tests {
                     random_info: SslRandomData {
                         client_random_presence: PointerBytes::present_copy(&[0x01; 32]),
                         server_random_presence: PointerBytes::present_copy(&[0x02; 32]),
-                        client_random: vec![0x01; 32],
-                        server_random: vec![0x02; 32],
                     },
                     version_major: 3,
                     version_minor: 3,
@@ -1895,8 +1858,6 @@ mod output_params_equal_tests {
                     random_info: WtlsRandomData {
                         client_random_presence: PointerBytes::present_copy(&[0x03; 20]),
                         server_random_presence: PointerBytes::present_copy(&[0x04; 20]),
-                        client_random: vec![0x03; 20],
-                        server_random: vec![0x04; 20],
                     },
                     version: 1,
                     version_is_null: false,
@@ -1915,13 +1876,10 @@ mod output_params_equal_tests {
                     random_info: WtlsRandomData {
                         client_random_presence: PointerBytes::present_copy(&[0x05; 20]),
                         server_random_presence: PointerBytes::present_copy(&[0x06; 20]),
-                        client_random: vec![0x05; 20],
-                        server_random: vec![0x06; 20],
                     },
                     mac_secret_handle: CkObjectHandle(11),
                     key_handle: CkObjectHandle(12),
                     iv_presence: PointerBytes::present_copy(&[0x07; 16]),
-                    iv: (vec![0x07; 16]).into(),
                     returned_key_material_is_null: false,
                 }),
                 "WtlsKeyMat",
@@ -1936,8 +1894,6 @@ mod output_params_equal_tests {
                     random_info: SslRandomData {
                         client_random_presence: PointerBytes::present_copy(&[0x08; 32]),
                         server_random_presence: PointerBytes::present_copy(&[0x09; 32]),
-                        client_random: vec![0x08; 32],
-                        server_random: vec![0x09; 32],
                     },
                     prf_hash_mechanism: CkMechanismType(0),
                     client_mac_secret_handle: CkObjectHandle(21),
@@ -1946,8 +1902,6 @@ mod output_params_equal_tests {
                     server_key_handle: CkObjectHandle(24),
                     client_iv_presence: PointerBytes::present_copy(&[0x0A; 8]),
                     server_iv_presence: PointerBytes::present_copy(&[0x0B; 8]),
-                    client_iv: (vec![0x0A; 8]).into(),
-                    server_iv: (vec![0x0B; 8]).into(),
                     returned_key_material_is_null: false,
                 }),
                 "Ssl3KeyMat",
@@ -1962,8 +1916,6 @@ mod output_params_equal_tests {
                     random_info: SslRandomData {
                         client_random_presence: PointerBytes::present_copy(&[0x0C; 32]),
                         server_random_presence: PointerBytes::present_copy(&[0x0D; 32]),
-                        client_random: vec![0x0C; 32],
-                        server_random: vec![0x0D; 32],
                     },
                     prf_hash_mechanism: CkMechanismType::SHA256,
                     client_mac_secret_handle: CkObjectHandle(31),
@@ -1972,8 +1924,6 @@ mod output_params_equal_tests {
                     server_key_handle: CkObjectHandle(34),
                     client_iv_presence: PointerBytes::present_copy(&[0x0E; 8]),
                     server_iv_presence: PointerBytes::present_copy(&[0x0F; 8]),
-                    client_iv: (vec![0x0E; 8]).into(),
-                    server_iv: (vec![0x0F; 8]).into(),
                     returned_key_material_is_null: false,
                 }),
                 "Tls12KeyMat",
@@ -1985,7 +1935,6 @@ mod output_params_equal_tests {
                     data_params_presence: PointerArray::present(vec![PrfDataParam {
                         type_: 1,
                         value_presence: PointerBytes::present_copy(b"counter"),
-                        value: b"counter".to_vec().into(),
                     }]),
                     additional_derived_keys_presence: PointerArray::present(vec![
                         Sp800108DerivedKey {
@@ -1994,30 +1943,9 @@ mod output_params_equal_tests {
                                 value: Some(CkAttributeValue::String("kdf".to_string().into())),
                             }]),
                             ph_key_is_null: false,
-                            template: vec![CkAttribute {
-                                attr_type: CkAttributeType::LABEL,
-                                value: Some(CkAttributeValue::String("kdf".to_string().into())),
-                            }],
                             key_handle: CkObjectHandle(41),
                         },
                     ]),
-                    data_params: vec![PrfDataParam {
-                        type_: 1,
-                        value_presence: PointerBytes::present_copy(b"counter"),
-                        value: b"counter".to_vec().into(),
-                    }],
-                    additional_derived_keys: vec![Sp800108DerivedKey {
-                        template_presence: PointerArray::present(vec![CkAttribute {
-                            attr_type: CkAttributeType::LABEL,
-                            value: Some(CkAttributeValue::String("kdf".to_string().into())),
-                        }]),
-                        ph_key_is_null: false,
-                        template: vec![CkAttribute {
-                            attr_type: CkAttributeType::LABEL,
-                            value: Some(CkAttributeValue::String("kdf".to_string().into())),
-                        }],
-                        key_handle: CkObjectHandle(41),
-                    }],
                 }),
                 "Sp800108Kdf",
             ),
@@ -2028,7 +1956,6 @@ mod output_params_equal_tests {
                     data_params_presence: PointerArray::present(vec![PrfDataParam {
                         type_: 2,
                         value_presence: PointerBytes::present_copy(b"feedback"),
-                        value: b"feedback".to_vec().into(),
                     }]),
                     iv_presence: PointerBytes::present_copy(&[0x10; 16]),
                     additional_derived_keys_presence: PointerArray::present(vec![
@@ -2038,31 +1965,9 @@ mod output_params_equal_tests {
                                 value: Some(CkAttributeValue::String("fb".to_string().into())),
                             }]),
                             ph_key_is_null: false,
-                            template: vec![CkAttribute {
-                                attr_type: CkAttributeType::LABEL,
-                                value: Some(CkAttributeValue::String("fb".to_string().into())),
-                            }],
                             key_handle: CkObjectHandle(42),
                         },
                     ]),
-                    data_params: vec![PrfDataParam {
-                        type_: 2,
-                        value_presence: PointerBytes::present_copy(b"feedback"),
-                        value: b"feedback".to_vec().into(),
-                    }],
-                    iv: vec![0x10; 16],
-                    additional_derived_keys: vec![Sp800108DerivedKey {
-                        template_presence: PointerArray::present(vec![CkAttribute {
-                            attr_type: CkAttributeType::LABEL,
-                            value: Some(CkAttributeValue::String("fb".to_string().into())),
-                        }]),
-                        ph_key_is_null: false,
-                        template: vec![CkAttribute {
-                            attr_type: CkAttributeType::LABEL,
-                            value: Some(CkAttributeValue::String("fb".to_string().into())),
-                        }],
-                        key_handle: CkObjectHandle(42),
-                    }],
                 }),
                 "Sp800108FeedbackKdf",
             ),
@@ -2071,8 +1976,6 @@ mod output_params_equal_tests {
                 CkMechanismParams::TlsPrf(TlsPrfParams {
                     seed_presence: PointerBytes::present_copy(&[0xA1, 0xA2]),
                     label_presence: PointerBytes::present_copy(&[0xB1]),
-                    seed: (vec![0xA1, 0xA2]).into(),
-                    label: (vec![0xB1]).into(),
                     output_len: 48,
                     output: Vec::new().into(),
                     output_is_null: false,
@@ -2086,8 +1989,6 @@ mod output_params_equal_tests {
                     digest_mechanism: CkMechanismType::SHA256,
                     seed_presence: PointerBytes::present_copy(&[0xC1]),
                     label_presence: PointerBytes::present_copy(&[0xD1]),
-                    seed: (vec![0xC1]).into(),
-                    label: (vec![0xD1]).into(),
                     output_len: 20,
                     output: Vec::new().into(),
                     output_is_null: false,
@@ -2101,8 +2002,6 @@ mod output_params_equal_tests {
                     random_info: SslRandomData {
                         client_random_presence: PointerBytes::present_copy(&[0x11; 32]),
                         server_random_presence: PointerBytes::present_copy(&[0x12; 32]),
-                        client_random: vec![0x11; 32],
-                        server_random: vec![0x12; 32],
                     },
                     version_major: 3,
                     version_minor: 0,
@@ -2113,9 +2012,6 @@ mod output_params_equal_tests {
             (
                 CkMechanismType::PBE_SHA1_DES3_EDE_CBC,
                 CkMechanismParams::Pbe(PbeParams {
-                    init_vector: vec![0x13; 8].into(),
-                    password: b"pw".to_vec().into(),
-                    salt: b"salt".to_vec().into(),
                     iteration: 1000,
                     init_vector_presence: PointerBytes::present_copy(&[0x13; 8]),
                     password_presence: PointerBytes::present_copy(b"pw"),
@@ -2145,15 +2041,14 @@ mod output_params_equal_tests {
         .expect("parameterless converts");
         assert_eq!(no_param.output_params(), None);
         assert!(no_param.output_params_equal(&None));
-        // PBE with an empty IV reports no output on either side.
+        // PBE with a NULL IV reports no output on either side (S2 §6:
+        // only NULL-ness suppresses the IV leg — `Present([])` sizes the
+        // fixed 8-byte IV and echoes it).
         let pbe_null = convert(
             CkMechanismType::PBE_SHA1_DES3_EDE_CBC,
             CkMechanismParams::Pbe(PbeParams {
-                init_vector: Vec::new().into(),
-                password: b"pw".to_vec().into(),
-                salt: b"salt".to_vec().into(),
                 iteration: 1,
-                init_vector_presence: PointerBytes::present_copy(&[]),
+                init_vector_presence: PointerBytes::null_len(8),
                 password_presence: PointerBytes::present_copy(b"pw"),
                 salt_presence: PointerBytes::present_copy(b"salt"),
             }),
@@ -2193,16 +2088,18 @@ mod output_params_equal_tests {
         let CkMechanismParams::Gcm(ref mut p) = tampered else {
             panic!("gcm snapshot shape");
         };
-        p.iv[0] ^= 0xFF;
+        let mut iv = p.iv_presence.as_present().expect("gcm iv present").expose(|b| b.to_vec());
+        iv[0] ^= 0xFF;
+        p.iv_presence = PointerBytes::present_copy(&iv);
         assert!(!gcm.output_params_equal(&Some(tampered)));
         // Tampered AAD: flipping one AAD byte breaks equality.
         let mut tampered = gcm.output_params().expect("gcm snapshot");
         let CkMechanismParams::Gcm(ref mut p) = tampered else {
             panic!("gcm snapshot shape");
         };
-        let mut aad = p.aad.expose(|b| b.to_vec());
+        let mut aad = p.aad_presence.as_present().expect("gcm aad present").expose(|b| b.to_vec());
         aad[0] ^= 0xFF;
-        p.aad = SecretBytes::new(aad);
+        p.aad_presence = PointerBytes::present_copy(&aad);
         assert!(!gcm.output_params_equal(&Some(tampered)));
         // Tampered TLS version breaks equality on the TLS arm.
         let tls = convert(
@@ -2211,8 +2108,6 @@ mod output_params_equal_tests {
                 random_info: SslRandomData {
                     client_random_presence: PointerBytes::present_copy(&[0x01; 32]),
                     server_random_presence: PointerBytes::present_copy(&[0x02; 32]),
-                    client_random: vec![0x01; 32],
-                    server_random: vec![0x02; 32],
                 },
                 version_major: 3,
                 version_minor: 3,

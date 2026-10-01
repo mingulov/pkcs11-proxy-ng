@@ -1460,18 +1460,19 @@ impl MockBackend {
         let Some(CkMechanismParams::GcmWrap(p)) = &mechanism.params else {
             return None;
         };
-        if p.iv_generator.0 <= 1 || p.iv.is_empty() {
+        let iv_input = p.iv_presence.as_present()?.expose(|b| b.to_vec());
+        if p.iv_generator.0 <= 1 || iv_input.is_empty() {
             return None;
         }
-        let fixed_bytes = ((p.iv_fixed_bits as usize) / 8).min(p.iv.len());
-        let mut iv = p.iv[..fixed_bytes].to_vec();
+        let fixed_bytes = ((p.iv_fixed_bits as usize) / 8).min(iv_input.len());
+        let mut iv = iv_input[..fixed_bytes].to_vec();
         iv.extend(echo::echo_bytes(
             "gcm-iv",
-            &[&session.0.to_le_bytes(), &p.iv[..fixed_bytes]],
-            p.iv.len() - fixed_bytes,
+            &[&session.0.to_le_bytes(), &iv_input[..fixed_bytes]],
+            iv_input.len() - fixed_bytes,
         ));
         let mut generated = p.clone();
-        generated.iv = iv;
+        generated.iv_presence = PointerBytes::present_copy(&iv);
         Some(CkMechanismParams::GcmWrap(generated))
     }
 
@@ -1527,28 +1528,42 @@ impl MockBackend {
         let primary = self.allocate_session_object_with_template(&mut state, session, template)?;
         let output = match mechanism.params.as_ref() {
             Some(CkMechanismParams::Sp800108Kdf(params))
-                if !params.additional_derived_keys.is_empty() =>
+                if params
+                    .additional_derived_keys_presence
+                    .as_present()
+                    .is_some_and(|k| !k.is_empty()) =>
             {
                 let mut params = params.clone();
-                for derived_key in &mut params.additional_derived_keys {
-                    derived_key.key_handle = self.allocate_session_object_with_template(
-                        &mut state,
-                        session,
-                        &derived_key.template,
-                    )?;
+                if let Some(keys) = params.additional_derived_keys_presence.as_present_mut() {
+                    for derived_key in keys {
+                        let template = derived_key
+                            .template_presence
+                            .as_present()
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[]);
+                        derived_key.key_handle = self
+                            .allocate_session_object_with_template(&mut state, session, template)?;
+                    }
                 }
                 Some(CkMechanismParams::Sp800108Kdf(params))
             }
             Some(CkMechanismParams::Sp800108FeedbackKdf(params))
-                if !params.additional_derived_keys.is_empty() =>
+                if params
+                    .additional_derived_keys_presence
+                    .as_present()
+                    .is_some_and(|k| !k.is_empty()) =>
             {
                 let mut params = params.clone();
-                for derived_key in &mut params.additional_derived_keys {
-                    derived_key.key_handle = self.allocate_session_object_with_template(
-                        &mut state,
-                        session,
-                        &derived_key.template,
-                    )?;
+                if let Some(keys) = params.additional_derived_keys_presence.as_present_mut() {
+                    for derived_key in keys {
+                        let template = derived_key
+                            .template_presence
+                            .as_present()
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[]);
+                        derived_key.key_handle = self
+                            .allocate_session_object_with_template(&mut state, session, template)?;
+                    }
                 }
                 Some(CkMechanismParams::Sp800108FeedbackKdf(params))
             }
@@ -1565,12 +1580,14 @@ impl MockBackend {
         let (prf_type, data_params, is_counter_mode) = match mechanism.params.as_ref() {
             Some(CkMechanismParams::Sp800108Kdf(params)) => (
                 params.prf_type,
-                &params.data_params,
+                params.data_params_presence.as_present().map(Vec::as_slice).unwrap_or(&[]),
                 mechanism.mechanism_type.0 == CKM_SP800_108_COUNTER_KDF,
             ),
-            Some(CkMechanismParams::Sp800108FeedbackKdf(params)) => {
-                (params.prf_type, &params.data_params, false)
-            }
+            Some(CkMechanismParams::Sp800108FeedbackKdf(params)) => (
+                params.prf_type,
+                params.data_params_presence.as_present().map(Vec::as_slice).unwrap_or(&[]),
+                false,
+            ),
             _ => return Ok(()),
         };
 
@@ -1586,6 +1603,26 @@ impl MockBackend {
         let mut dkm_length_param_count = 0;
 
         for data_param in data_params {
+            // Validation inputs, computed inside `expose` (the legacy
+            // mirror was empty for both NULL and Present([]), so the
+            // NULL leg below preserves the semantics exactly).
+            let (value_len, value_is_empty, dkm_length_valid, key_handle_value) =
+                match &data_param.value_presence {
+                    PointerBytes::Present(secret) => secret.expose(|value| {
+                        (
+                            value.len(),
+                            value.is_empty(),
+                            sp800_108_dkm_length_format_valid(value),
+                            read_sp800_108_key_handle_value(value),
+                        )
+                    }),
+                    PointerBytes::Null { .. } => (
+                        0,
+                        true,
+                        sp800_108_dkm_length_format_valid(&[]),
+                        read_sp800_108_key_handle_value(&[]),
+                    ),
+                };
             match data_param.type_ {
                 CK_SP800_108_ITERATION_VARIABLE
                     if !sp800_108_iteration_variable_payload_valid(is_counter_mode, data_param) =>
@@ -1598,26 +1635,24 @@ impl MockBackend {
                         return Err(CkRv::MECHANISM_PARAM_INVALID);
                     }
                     counter_param_count += 1;
-                    if counter_param_count > 1
-                        || data_param.value.len() != CK_SP800_108_COUNTER_FORMAT_LEN
-                    {
+                    if counter_param_count > 1 || value_len != CK_SP800_108_COUNTER_FORMAT_LEN {
                         return Err(CkRv::MECHANISM_PARAM_INVALID);
                     }
                 }
                 CK_SP800_108_DKM_LENGTH => {
                     dkm_length_param_count += 1;
                     if dkm_length_param_count > 1
-                        || data_param.value.len() != CK_SP800_108_DKM_LENGTH_FORMAT_LEN
-                        || !data_param.value.expose(sp800_108_dkm_length_format_valid)
+                        || value_len != CK_SP800_108_DKM_LENGTH_FORMAT_LEN
+                        || !dkm_length_valid
                     {
                         return Err(CkRv::MECHANISM_PARAM_INVALID);
                     }
                 }
-                CK_SP800_108_BYTE_ARRAY if data_param.value.is_empty() => {
+                CK_SP800_108_BYTE_ARRAY if value_is_empty => {
                     return Err(CkRv::MECHANISM_PARAM_INVALID);
                 }
                 CK_SP800_108_KEY_HANDLE => {
-                    let handle = data_param.value.expose(read_sp800_108_key_handle_value)?;
+                    let handle = key_handle_value?;
                     self.require_live_object(state, CkObjectHandle(handle as u64))?;
                 }
                 _ => {}
@@ -1637,9 +1672,11 @@ impl MockBackend {
         }
 
         let additional_count = match mechanism.params.as_ref() {
-            Some(CkMechanismParams::Sp800108Kdf(params)) => params.additional_derived_keys.len(),
+            Some(CkMechanismParams::Sp800108Kdf(params)) => {
+                params.additional_derived_keys_presence.as_present().map(Vec::len).unwrap_or(0)
+            }
             Some(CkMechanismParams::Sp800108FeedbackKdf(params)) => {
-                params.additional_derived_keys.len()
+                params.additional_derived_keys_presence.as_present().map(Vec::len).unwrap_or(0)
             }
             _ => 0,
         };
@@ -1691,17 +1728,33 @@ fn sp800_108_dkm_length_format_valid(value: &[u8]) -> bool {
 fn sp800_108_template_failure_output(mechanism: &CkMechanism) -> Option<CkMechanismParams> {
     match mechanism.params.as_ref()? {
         CkMechanismParams::Sp800108Kdf(params) => {
-            let failure_index =
-                sp800_108_additional_template_failure_index(&params.additional_derived_keys)?;
+            let present = params
+                .additional_derived_keys_presence
+                .as_present()
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let failure_index = sp800_108_additional_template_failure_index(present)?;
             let mut output = params.clone();
-            output.additional_derived_keys[failure_index].key_handle = CkObjectHandle(0);
+            output
+                .additional_derived_keys_presence
+                .as_present_mut()
+                .expect("failure index implies present keys")[failure_index]
+                .key_handle = CkObjectHandle(0);
             Some(CkMechanismParams::Sp800108Kdf(output))
         }
         CkMechanismParams::Sp800108FeedbackKdf(params) => {
-            let failure_index =
-                sp800_108_additional_template_failure_index(&params.additional_derived_keys)?;
+            let present = params
+                .additional_derived_keys_presence
+                .as_present()
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let failure_index = sp800_108_additional_template_failure_index(present)?;
             let mut output = params.clone();
-            output.additional_derived_keys[failure_index].key_handle = CkObjectHandle(0);
+            output
+                .additional_derived_keys_presence
+                .as_present_mut()
+                .expect("failure index implies present keys")[failure_index]
+                .key_handle = CkObjectHandle(0);
             Some(CkMechanismParams::Sp800108FeedbackKdf(output))
         }
         _ => None,
@@ -1712,9 +1765,11 @@ fn sp800_108_additional_template_failure_index(
     additional_derived_keys: &[Sp800108DerivedKey],
 ) -> Option<usize> {
     additional_derived_keys.iter().position(|derived_key| {
-        derived_key.template.iter().any(|attr| {
-            attr.attr_type == CkAttributeType::VALUE_LEN
-                && matches!(attr.value, Some(CkAttributeValue::Ulong(0)))
+        derived_key.template_presence.as_present().is_some_and(|template| {
+            template.iter().any(|attr| {
+                attr.attr_type == CkAttributeType::VALUE_LEN
+                    && matches!(attr.value, Some(CkAttributeValue::Ulong(0)))
+            })
         })
     })
 }
@@ -1743,15 +1798,19 @@ fn sp800_108_iteration_variable_payload_valid(
     is_counter_mode: bool,
     data_param: &PrfDataParam,
 ) -> bool {
+    let (value_len, value_is_empty) = match &data_param.value_presence {
+        PointerBytes::Present(secret) => secret.expose(|value| (value.len(), value.is_empty())),
+        PointerBytes::Null { .. } => (0, true),
+    };
     if is_counter_mode {
-        return data_param.value.len() == CK_SP800_108_COUNTER_FORMAT_LEN;
+        return value_len == CK_SP800_108_COUNTER_FORMAT_LEN;
     }
 
     // OASIS SP800-108 text is inconsistent for Feedback and Double Pipeline:
     // the CK_PRF_DATA_PARAM field prose says NULL/0, while mode tables and
     // examples also show CK_SP800_108_COUNTER_FORMAT. Accept both shaped forms
     // but reject arbitrary payload lengths.
-    data_param.value.is_empty() || data_param.value.len() == CK_SP800_108_COUNTER_FORMAT_LEN
+    value_is_empty || value_len == CK_SP800_108_COUNTER_FORMAT_LEN
 }
 
 fn read_sp800_108_key_handle_value(value: &[u8]) -> CkResult<u64> {

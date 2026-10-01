@@ -174,9 +174,19 @@ fn prepare_gcm(
     let mut writes = Vec::new();
     if !p_iv.is_null() {
         let capacity = iv_capacity(ul_iv_len, ul_iv_bits)?;
-        writes.push(plan_byte_copy(p_iv, out.iv.clone(), capacity)?);
+        writes.push(plan_byte_copy(
+            p_iv,
+            out.iv_presence
+                .as_present()
+                .map(|b| b.expose(|bytes| bytes.to_vec()))
+                .unwrap_or_default(),
+            capacity,
+        )?);
         let dest_len = unsafe { std::ptr::addr_of_mut!((*gcm).ulIvLen) };
-        writes.push(plan_ulong(dest_len, out.iv.len() as u64)?);
+        writes.push(plan_ulong(
+            dest_len,
+            out.iv_presence.as_present().map(|b| b.len()).unwrap_or(0) as u64,
+        )?);
     }
     let dest_bits = unsafe { std::ptr::addr_of_mut!((*gcm).ulIvBits) };
     writes.push(plan_ulong(dest_bits, out.iv_bits)?);
@@ -197,9 +207,19 @@ fn prepare_gcm_wrap(
     let mut writes = Vec::new();
     if !p_iv.is_null() {
         let capacity = usize::try_from(ul_iv_len).map_err(|_| CkRv::GENERAL_ERROR)?;
-        writes.push(plan_byte_copy(p_iv, out.iv.clone(), capacity)?);
+        writes.push(plan_byte_copy(
+            p_iv,
+            out.iv_presence
+                .as_present()
+                .map(|b| b.expose(|bytes| bytes.to_vec()))
+                .unwrap_or_default(),
+            capacity,
+        )?);
         let dest_len = unsafe { std::ptr::addr_of_mut!((*wrap).ulIvLen) };
-        writes.push(plan_ulong(dest_len, out.iv.len() as u64)?);
+        writes.push(plan_ulong(
+            dest_len,
+            out.iv_presence.as_present().map(|b| b.len()).unwrap_or(0) as u64,
+        )?);
     }
     let dest_fixed = unsafe { std::ptr::addr_of_mut!((*wrap).ulIvFixedBits) };
     writes.push(plan_ulong(dest_fixed, out.iv_fixed_bits)?);
@@ -223,9 +243,19 @@ fn prepare_ccm_wrap(
     let mut writes = Vec::new();
     if !p_nonce.is_null() {
         let capacity = usize::try_from(ul_nonce_len).map_err(|_| CkRv::GENERAL_ERROR)?;
-        writes.push(plan_byte_copy(p_nonce, out.nonce.clone(), capacity)?);
+        writes.push(plan_byte_copy(
+            p_nonce,
+            out.nonce_presence
+                .as_present()
+                .map(|b| b.expose(|bytes| bytes.to_vec()))
+                .unwrap_or_default(),
+            capacity,
+        )?);
         let dest_len = unsafe { std::ptr::addr_of_mut!((*wrap).ulNonceLen) };
-        writes.push(plan_ulong(dest_len, out.nonce.len() as u64)?);
+        writes.push(plan_ulong(
+            dest_len,
+            out.nonce_presence.as_present().map(|b| b.len()).unwrap_or(0) as u64,
+        )?);
     }
     let dest_fixed = unsafe { std::ptr::addr_of_mut!((*wrap).ulNonceFixedBits) };
     writes.push(plan_ulong(dest_fixed, out.nonce_fixed_bits)?);
@@ -356,7 +386,11 @@ fn prepare_pbe(
     shape_gate(p_parameter as CK_VOID_PTR, param_len, std::mem::size_of::<CK_PBE_PARAMS>())?;
     let pbe = p_parameter as *mut CK_PBE_PARAMS;
     let p_iv = unsafe { std::ptr::addr_of!((*pbe).pInitVector).read_unaligned() };
-    let iv = out.init_vector.expose(|bytes| bytes.to_vec());
+    let iv = out
+        .init_vector_presence
+        .as_present()
+        .map(|b| b.expose(|bytes| bytes.to_vec()))
+        .unwrap_or_default();
     if p_iv.is_null() || iv.is_empty() {
         return Ok(Vec::new());
     }
@@ -390,7 +424,11 @@ fn prepare_wtls_keymat(
     let p_iv = unsafe { std::ptr::addr_of!((*output).pIV).read_unaligned() };
     if !p_iv.is_null() {
         let capacity = iv_capacity(0, ul_iv_bits)?;
-        let iv = out.iv.expose(|bytes| bytes.to_vec());
+        let iv = out
+            .iv_presence
+            .as_present()
+            .map(|b| b.expose(|bytes| bytes.to_vec()))
+            .unwrap_or_default();
         writes.push(plan_byte_copy(p_iv, iv, capacity)?);
     }
     Ok(writes)
@@ -425,12 +463,20 @@ fn prepare_ssl3_keymat(
     let capacity = iv_capacity(0, ul_iv_bits)?;
     let p_iv_client = unsafe { std::ptr::addr_of!((*output).pIVClient).read_unaligned() };
     if !p_iv_client.is_null() {
-        let iv = out.client_iv.expose(|bytes| bytes.to_vec());
+        let iv = out
+            .client_iv_presence
+            .as_present()
+            .map(|b| b.expose(|bytes| bytes.to_vec()))
+            .unwrap_or_default();
         writes.push(plan_byte_copy(p_iv_client, iv, capacity)?);
     }
     let p_iv_server = unsafe { std::ptr::addr_of!((*output).pIVServer).read_unaligned() };
     if !p_iv_server.is_null() {
-        let iv = out.server_iv.expose(|bytes| bytes.to_vec());
+        let iv = out
+            .server_iv_presence
+            .as_present()
+            .map(|b| b.expose(|bytes| bytes.to_vec()))
+            .unwrap_or_default();
         writes.push(plan_byte_copy(p_iv_server, iv, capacity)?);
     }
     Ok(writes)
@@ -490,7 +536,11 @@ fn prepare_sp800_kdf(
     let params = p_parameter as *mut CK_SP800_108_KDF_PARAMS;
     let base = unsafe { std::ptr::addr_of!((*params).pAdditionalDerivedKeys).read_unaligned() };
     let count = unsafe { std::ptr::addr_of!((*params).ulAdditionalDerivedKeys).read_unaligned() };
-    plan_sp800_handles(base, count, &out.additional_derived_keys)
+    plan_sp800_handles(
+        base,
+        count,
+        out.additional_derived_keys_presence.as_present().map(Vec::as_slice).unwrap_or(&[]),
+    )
 }
 
 fn prepare_sp800_feedback_kdf(
@@ -506,7 +556,11 @@ fn prepare_sp800_feedback_kdf(
     let params = p_parameter as *mut CK_SP800_108_FEEDBACK_KDF_PARAMS;
     let base = unsafe { std::ptr::addr_of!((*params).pAdditionalDerivedKeys).read_unaligned() };
     let count = unsafe { std::ptr::addr_of!((*params).ulAdditionalDerivedKeys).read_unaligned() };
-    plan_sp800_handles(base, count, &out.additional_derived_keys)
+    plan_sp800_handles(
+        base,
+        count,
+        out.additional_derived_keys_presence.as_present().map(Vec::as_slice).unwrap_or(&[]),
+    )
 }
 
 /// Validate daemon mechanism outputs against the caller's parameter

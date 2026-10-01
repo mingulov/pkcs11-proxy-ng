@@ -553,28 +553,22 @@ mod transport_validation_tests {
     #[test]
     fn r16_typed_presence_consistency_through_entry_point() {
         // The R16 typed gate (S2 §3 "no dual representations") is enforced
-        // through this entry point, not just the pure fn: a consistent
-        // v0 NULL triple validates; a set bool over non-empty legacy
-        // bytes is contradictory metadata (PARAM_INVALID).
+        // through this entry point, not just the pure fn: a NULL IV with a
+        // declared length validates (contradictions are unrepresentable
+        // post-R19 — the peer is the only member).
         let reg = registry(&[("gcm", AES_GCM)], &[], &[]);
-        let gcm = |iv: Vec<u8>, iv_null: bool, iv_presence: PointerBytes| CkMechanism {
+        let gcm = |iv_presence: PointerBytes| CkMechanism {
             mechanism_type: CkMechanismType(AES_GCM),
             params: Some(CkMechanismParams::Gcm(GcmParams {
-                iv,
                 iv_bits: 96,
                 iv_buffer_len: 12,
-                aad: SecretBytes::copy_from_slice(b""),
                 tag_bits: 128,
-                iv_null,
-                aad_null: false,
                 iv_presence,
                 aad_presence: PointerBytes::present_copy(b""),
             })),
         };
-        validate(&reg, &gcm(vec![], true, PointerBytes::null_len(0))).unwrap();
-        assert_eq!(
-            validate(&reg, &gcm(vec![0xA5; 3], true, PointerBytes::null_len(0))),
-            Err(CkRv::MECHANISM_PARAM_INVALID)
-        );
+        validate(&reg, &gcm(PointerBytes::null_len(0))).unwrap();
+        validate(&reg, &gcm(PointerBytes::null_len(41))).unwrap();
+        validate(&reg, &gcm(PointerBytes::present_copy(b"iv-bytes"))).unwrap();
     }
 }

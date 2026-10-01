@@ -196,8 +196,6 @@ fn wrap_mechanism(embedded: u64) -> Option<Mechanism> {
         Mechanism::try_from(&CkMechanism {
             mechanism_type: CkMechanismType::GOSTR3410_KEY_WRAP,
             params: Some(CkMechanismParams::Gostr3410KeyWrap(Gostr3410KeyWrapParams {
-                wrap_oid: vec![1, 2, 3],
-                ukm: vec![7; 8],
                 key_handle: CkObjectHandle(embedded),
                 wrap_oid_presence: PointerBytes::present_copy(&[1, 2, 3]),
                 ukm_presence: PointerBytes::present_copy(&[7; 8]),

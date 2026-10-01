@@ -339,8 +339,8 @@ fn reads_common_mechanism_parameter_structs() {
         ulParameterLen: std::mem::size_of::<CK_RSA_PKCS_OAEP_PARAMS>() as CK_ULONG,
     };
     match unsafe { read_ck_mechanism(&mechanism) } {
-        CkMechanismParams::RsaPkcsOaep(RsaPkcsOaepParams { source_data, .. }) => {
-            assert_eq!(source_data, SecretBytes::copy_from_slice(&[0xA0, 0xA1, 0xA2]));
+        CkMechanismParams::RsaPkcsOaep(RsaPkcsOaepParams { source_data_presence, .. }) => {
+            assert_eq!(source_data_presence, PointerBytes::present_copy(&[0xA0, 0xA1, 0xA2]));
         }
         other => panic!("unexpected OAEP params: {other:?}"),
     }
@@ -379,11 +379,18 @@ fn reads_common_mechanism_parameter_structs() {
         ulParameterLen: std::mem::size_of::<CK_GCM_PARAMS>() as CK_ULONG,
     };
     match unsafe { read_ck_mechanism(&mechanism) } {
-        CkMechanismParams::Gcm(GcmParams { iv, iv_bits, iv_buffer_len, aad, tag_bits, .. }) => {
-            assert_eq!(iv, [0x10; 12]);
+        CkMechanismParams::Gcm(GcmParams {
+            iv_presence,
+            iv_bits,
+            iv_buffer_len,
+            aad_presence,
+            tag_bits,
+            ..
+        }) => {
+            assert_eq!(iv_presence, PointerBytes::present_copy(&[0x10; 12]));
             assert_eq!(iv_bits, 96);
             assert_eq!(iv_buffer_len, 12);
-            assert_eq!(aad, SecretBytes::copy_from_slice(&[0xAA, 0xBB, 0xCC]));
+            assert_eq!(aad_presence, PointerBytes::present_copy(&[0xAA, 0xBB, 0xCC]));
             assert_eq!(tag_bits, 128);
         }
         other => panic!("unexpected GCM params: {other:?}"),
@@ -458,14 +465,13 @@ fn gmac_struct_params_parse_as_gcm_without_forwarding_pointers() {
     };
     match unsafe { read_ck_mechanism(&mechanism) } {
         CkMechanismParams::Gcm(GcmParams {
-            iv, iv_bits, aad, tag_bits, iv_null, aad_null, ..
+            iv_presence, iv_bits, aad_presence, tag_bits, ..
         }) => {
-            assert_eq!(iv, [0x11; 12]);
+            assert_eq!(iv_presence, PointerBytes::present_copy(&[0x11; 12]));
             assert_eq!(iv_bits, 96);
-            assert_eq!(aad, SecretBytes::copy_from_slice(&[]));
+            r17_assert_null_secret(&aad_presence, 0);
             assert_eq!(tag_bits, 128);
-            assert!(!iv_null);
-            assert!(aad_null);
+            assert!(!iv_presence.is_null());
         }
         other => panic!("unexpected GMAC struct params: {other:?}"),
     }
@@ -504,7 +510,12 @@ fn reads_handle_string_and_sign_context_parameter_structs() {
         .params
     {
         Some(CkMechanismParams::KeyDerivationString(params)) => {
-            assert_eq!(params.data, SecretBytes::copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]));
+            assert_eq!(
+                params.data_presence,
+                PointerBytes::present_cloned(&SecretBytes::copy_from_slice(&[
+                    0xDE, 0xAD, 0xBE, 0xEF
+                ]))
+            );
         }
         other => panic!("unexpected key derivation string params: {other:?}"),
     }
@@ -533,7 +544,10 @@ fn reads_handle_string_and_sign_context_parameter_structs() {
     {
         Some(CkMechanismParams::SignAdditionalContext(params)) => {
             assert_eq!(params.hedge_variant, 1);
-            assert_eq!(params.context, SecretBytes::copy_from_slice(&[0xA1, 0xA2, 0xA3]));
+            assert_eq!(
+                params.context_presence,
+                PointerBytes::present_cloned(&SecretBytes::copy_from_slice(&[0xA1, 0xA2, 0xA3]))
+            );
         }
         other => panic!("unexpected sign additional context params: {other:?}"),
     }
@@ -562,7 +576,10 @@ fn reads_signature_parameter_structs() {
     {
         CkMechanismParams::Eddsa(params) => {
             assert!(params.ph_flag);
-            assert_eq!(params.context_data, vec![0xA1, 0xA2, 0xA3].into());
+            assert_eq!(
+                *params.context_data_presence.as_present().unwrap(),
+                vec![0xA1, 0xA2, 0xA3].into()
+            );
         }
         other => panic!("unexpected EdDSA params: {other:?}"),
     }
@@ -607,7 +624,10 @@ fn reads_rsa_wrap_parameter_structs() {
             assert_eq!(oaep_params.hash_alg, CkMechanismType::SHA256);
             assert_eq!(oaep_params.mgf, CkMgf(1));
             assert_eq!(oaep_params.source, CkOaepSource(1));
-            assert_eq!(oaep_params.source_data, SecretBytes::copy_from_slice(&[0xA0, 0xA1, 0xA2]));
+            assert_eq!(
+                oaep_params.source_data_presence,
+                PointerBytes::present_cloned(&SecretBytes::copy_from_slice(&[0xA0, 0xA1, 0xA2]))
+            );
         }
         other => panic!("unexpected RSA-AES key wrap params: {other:?}"),
     }
@@ -621,9 +641,8 @@ fn reads_rsa_wrap_parameter_structs() {
         ulParameterLen: std::mem::size_of::<CK_KEY_WRAP_SET_OAEP_PARAMS>() as CK_ULONG,
     };
     match unsafe { read_ck_mechanism(&mechanism) } {
-        CkMechanismParams::KeyWrapSetOaep(KeyWrapSetOaepParams { bc, x, x_presence }) => {
+        CkMechanismParams::KeyWrapSetOaep(KeyWrapSetOaepParams { bc, x_presence }) => {
             assert_eq!(bc, 7);
-            assert_eq!(x, SecretBytes::copy_from_slice(&[0x51, 0x52, 0x53, 0x54]));
             assert_eq!(x_presence, PointerBytes::present_copy(&[0x51, 0x52, 0x53, 0x54]));
         }
         other => panic!("unexpected SET OAEP key wrap params: {other:?}"),
@@ -657,18 +676,14 @@ fn reads_authenticated_wrap_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::GcmWrap(GcmWrapParams {
-            iv,
             iv_fixed_bits,
             iv_generator,
-            aad,
             tag_bits,
             iv_presence,
             aad_presence,
         }) => {
-            assert_eq!(iv, [0x11; 12]);
             assert_eq!(iv_fixed_bits, 32);
             assert_eq!(iv_generator, CkGeneratorFunction(1));
-            assert_eq!(aad, SecretBytes::copy_from_slice(&[0xA1, 0xA2]));
             assert_eq!(tag_bits, 128);
             assert_eq!(iv_presence, PointerBytes::present_copy(&[0x11; 12]));
             assert_eq!(aad_presence, PointerBytes::present_copy(&[0xA1, 0xA2]));
@@ -700,19 +715,15 @@ fn reads_authenticated_wrap_parameter_structs() {
     {
         CkMechanismParams::CcmWrap(CcmWrapParams {
             data_len,
-            nonce,
             nonce_fixed_bits,
             nonce_generator,
-            aad,
             mac_len,
             nonce_presence,
             aad_presence,
         }) => {
             assert_eq!(data_len, 1024);
-            assert_eq!(nonce, [0x22; 7]);
             assert_eq!(nonce_fixed_bits, 24);
             assert_eq!(nonce_generator, CkGeneratorFunction(2));
-            assert_eq!(aad, SecretBytes::copy_from_slice(&[0xB1, 0xB2, 0xB3]));
             assert_eq!(mac_len, 16);
             assert_eq!(nonce_presence, PointerBytes::present_copy(&[0x22; 7]));
             assert_eq!(aad_presence, PointerBytes::present_copy(&[0xB1, 0xB2, 0xB3]));
@@ -746,10 +757,15 @@ fn wrap_key_reader_uses_v32_aead_wrap_shapes() {
         .params
         .expect("params")
     {
-        CkMechanismParams::GcmWrap(GcmWrapParams { iv, iv_generator, aad, .. }) => {
-            assert_eq!(iv, [0x11; 12]);
+        CkMechanismParams::GcmWrap(GcmWrapParams {
+            iv_presence,
+            iv_generator,
+            aad_presence,
+            ..
+        }) => {
+            assert_eq!(iv_presence, PointerBytes::present_copy(&[0x11; 12]));
             assert_eq!(iv_generator, CkGeneratorFunction(CKG_GENERATE as u64));
-            assert_eq!(aad, SecretBytes::copy_from_slice(&[0xA1, 0xA2]));
+            assert_eq!(aad_presence, PointerBytes::present_copy(&[0xA1, 0xA2]));
         }
         other => panic!("unexpected GCM wrap-key params: {other:?}"),
     }
@@ -760,9 +776,9 @@ fn wrap_key_reader_uses_v32_aead_wrap_shapes() {
         .params
         .expect("params")
     {
-        CkMechanismParams::GcmWrap(GcmWrapParams { iv, aad, .. }) => {
-            assert_eq!(iv, [0x11; 12]);
-            assert_eq!(aad, SecretBytes::copy_from_slice(&[0xA1, 0xA2]));
+        CkMechanismParams::GcmWrap(GcmWrapParams { iv_presence, aad_presence, .. }) => {
+            assert_eq!(iv_presence, PointerBytes::present_copy(&[0x11; 12]));
+            assert_eq!(aad_presence, PointerBytes::present_copy(&[0xA1, 0xA2]));
         }
         other => panic!("v1 WrapKey must stay typed GcmWrap, got {other:?}"),
     }
@@ -791,16 +807,16 @@ fn wrap_key_reader_uses_v32_aead_wrap_shapes() {
     {
         CkMechanismParams::CcmWrap(CcmWrapParams {
             data_len,
-            nonce,
+            nonce_presence,
             nonce_generator,
-            aad,
+            aad_presence,
             mac_len,
             ..
         }) => {
             assert_eq!(data_len, 16);
-            assert_eq!(nonce, [0x22; 12]);
+            assert_eq!(nonce_presence, PointerBytes::present_copy(&[0x22; 12]));
             assert_eq!(nonce_generator, CkGeneratorFunction(CKG_GENERATE as u64));
-            assert_eq!(aad, SecretBytes::copy_from_slice(&[0xB1, 0xB2, 0xB3]));
+            assert_eq!(aad_presence, PointerBytes::present_copy(&[0xB1, 0xB2, 0xB3]));
             assert_eq!(mac_len, 16);
         }
         other => panic!("unexpected CCM wrap-key params: {other:?}"),
@@ -812,9 +828,9 @@ fn wrap_key_reader_uses_v32_aead_wrap_shapes() {
         .params
         .expect("params")
     {
-        CkMechanismParams::CcmWrap(CcmWrapParams { data_len, nonce, mac_len, .. }) => {
+        CkMechanismParams::CcmWrap(CcmWrapParams { data_len, nonce_presence, mac_len, .. }) => {
             assert_eq!(data_len, 16);
-            assert_eq!(nonce, [0x22; 12]);
+            assert_eq!(nonce_presence, PointerBytes::present_copy(&[0x22; 12]));
             assert_eq!(mac_len, 16);
         }
         other => panic!("v1 WrapKey must stay typed CcmWrap, got {other:?}"),
@@ -863,9 +879,9 @@ fn wrap_key_reader_uses_wrap_shapes_only_on_exact_v32_size() {
         .params
         .expect("params")
     {
-        CkMechanismParams::Gcm(GcmParams { iv, aad, tag_bits, .. }) => {
-            assert_eq!(iv, [0x33; 12]);
-            assert_eq!(aad, SecretBytes::copy_from_slice(&[0xC1, 0xC2]));
+        CkMechanismParams::Gcm(GcmParams { iv_presence, aad_presence, tag_bits, .. }) => {
+            assert_eq!(iv_presence, PointerBytes::present_copy(&[0x33; 12]));
+            assert_eq!(aad_presence, PointerBytes::present_copy(&[0xC1, 0xC2]));
             assert_eq!(tag_bits, 128);
         }
         other => panic!("larger non-wrap GCM params must not be parsed as wrap: {other:?}"),
@@ -904,10 +920,16 @@ fn wrap_key_reader_uses_wrap_shapes_only_on_exact_v32_size() {
         .params
         .expect("params")
     {
-        CkMechanismParams::Ccm(CcmParams { data_len, nonce, aad, mac_len, .. }) => {
+        CkMechanismParams::Ccm(CcmParams {
+            data_len,
+            nonce_presence,
+            aad_presence,
+            mac_len,
+            ..
+        }) => {
             assert_eq!(data_len, 16);
-            assert_eq!(nonce, [0x44; 12]);
-            assert_eq!(aad, SecretBytes::copy_from_slice(&[0xD1, 0xD2]));
+            assert_eq!(nonce_presence, PointerBytes::present_copy(&[0x44; 12]));
+            assert_eq!(aad_presence, PointerBytes::present_copy(&[0xD1, 0xD2]));
             assert_eq!(mac_len, 16);
         }
         other => panic!("larger non-wrap CCM params must not be parsed as wrap: {other:?}"),
@@ -940,10 +962,8 @@ fn write_mechanism_output_params_writes_aead_wrap_generated_fields() {
         ulParameterLen: std::mem::size_of::<CK_GCM_WRAP_PARAMS>() as CK_ULONG,
     };
     let output = CkMechanismParams::GcmWrap(GcmWrapParams {
-        iv: vec![1, 2, 3, 4],
         iv_fixed_bits: 0,
         iv_generator: CkGeneratorFunction(CKG_GENERATE as u64),
-        aad: Vec::new().into(),
         tag_bits: 96,
         iv_presence: PointerBytes::present_copy(&[1, 2, 3, 4]),
         aad_presence: PointerBytes::present_copy(&[]),
@@ -975,10 +995,8 @@ fn write_mechanism_output_params_writes_aead_wrap_generated_fields() {
     };
     let output = CkMechanismParams::CcmWrap(CcmWrapParams {
         data_len: 16,
-        nonce: vec![9, 8, 7, 6],
         nonce_fixed_bits: 0,
         nonce_generator: CkGeneratorFunction(CKG_GENERATE as u64),
-        aad: Vec::new().into(),
         mac_len: 12,
         nonce_presence: PointerBytes::present_copy(&[9, 8, 7, 6]),
         aad_presence: PointerBytes::present_copy(&[]),
@@ -1018,22 +1036,13 @@ fn reads_aead_and_chacha_parameter_structs() {
         .params
         .expect("mechanism params")
     {
-        CkMechanismParams::Ccm(CcmParams {
-            data_len,
-            nonce,
-            aad,
-            mac_len,
-            nonce_null,
-            aad_null,
-            nonce_presence,
-            aad_presence,
-        }) => {
+        CkMechanismParams::Ccm(CcmParams { data_len, mac_len, nonce_presence, aad_presence }) => {
             assert_eq!(data_len, 2048);
-            assert_eq!(nonce, [0x31; 11]);
-            assert_eq!(aad, SecretBytes::copy_from_slice(&[0xC1, 0xC2]));
+            assert_eq!(nonce_presence, PointerBytes::present_copy(&[0x31; 11]));
+            assert_eq!(aad_presence, PointerBytes::present_copy(&[0xC1, 0xC2]));
             assert_eq!(mac_len, 12);
-            assert!(!nonce_null);
-            assert!(!aad_null);
+            assert!(!nonce_presence.is_null());
+            assert!(!aad_presence.is_null());
             assert_eq!(nonce_presence, PointerBytes::from_legacy(&[0x31; 11], false));
             assert_eq!(aad_presence, PointerBytes::from_legacy(&[0xC1, 0xC2], false));
         }
@@ -1059,16 +1068,12 @@ fn reads_aead_and_chacha_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::ChaCha20(ChaCha20Params {
-            block_counter,
             block_counter_bits,
-            nonce,
             nonce_bits,
             block_counter_presence,
             nonce_presence,
         }) => {
-            assert_eq!(block_counter, [0x41; 4]);
             assert_eq!(block_counter_bits, 32);
-            assert_eq!(nonce, [0x42; 12]);
             assert_eq!(nonce_bits, 96);
             assert_eq!(block_counter_presence, PointerBytes::present_copy(&[0x41; 4]));
             assert_eq!(nonce_presence, PointerBytes::present_copy(&[0x42; 12]));
@@ -1095,13 +1100,9 @@ fn reads_aead_and_chacha_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::Salsa20ChaCha20Poly1305(Salsa20ChaCha20Poly1305Params {
-            nonce,
-            aad,
             nonce_presence,
             aad_presence,
         }) => {
-            assert_eq!(nonce, [0x51; 12]);
-            assert_eq!(aad, SecretBytes::copy_from_slice(&[0x52, 0x53, 0x54]));
             assert_eq!(nonce_presence, PointerBytes::present_copy(&[0x51; 12]));
             assert_eq!(aad_presence, PointerBytes::present_copy(&[0x52, 0x53, 0x54]));
         }
@@ -1173,7 +1174,10 @@ fn reads_counter_and_encrypt_data_parameter_structs() {
     {
         CkMechanismParams::AesCbcEncryptData(params) => {
             assert_eq!(params.iv, [0xA5; 16]);
-            assert_eq!(params.data, SecretBytes::copy_from_slice(&[0xA2, 0xA3, 0xA4]));
+            assert_eq!(
+                params.data_presence,
+                PointerBytes::present_cloned(&SecretBytes::copy_from_slice(&[0xA2, 0xA3, 0xA4]))
+            );
         }
         other => panic!("unexpected AES CBC encrypt-data params: {other:?}"),
     }
@@ -1196,7 +1200,10 @@ fn reads_counter_and_encrypt_data_parameter_structs() {
     {
         CkMechanismParams::DesCbcEncryptData(params) => {
             assert_eq!(params.iv, [0xD5; 8]);
-            assert_eq!(params.data, SecretBytes::copy_from_slice(&[0xD2, 0xD3]));
+            assert_eq!(
+                params.data_presence,
+                PointerBytes::present_cloned(&SecretBytes::copy_from_slice(&[0xD2, 0xD3]))
+            );
         }
         other => panic!("unexpected DES CBC encrypt-data params: {other:?}"),
     }
@@ -1219,7 +1226,12 @@ fn reads_counter_and_encrypt_data_parameter_structs() {
     {
         CkMechanismParams::AriaCbcEncryptData(params) => {
             assert_eq!(params.iv, [0x15; 16]);
-            assert_eq!(params.data, SecretBytes::copy_from_slice(&[0x12, 0x13, 0x14, 0x15]));
+            assert_eq!(
+                params.data_presence,
+                PointerBytes::present_cloned(&SecretBytes::copy_from_slice(&[
+                    0x12, 0x13, 0x14, 0x15
+                ]))
+            );
         }
         other => panic!("unexpected ARIA CBC encrypt-data params: {other:?}"),
     }
@@ -1242,7 +1254,10 @@ fn reads_counter_and_encrypt_data_parameter_structs() {
     {
         CkMechanismParams::CamelliaCbcEncryptData(params) => {
             assert_eq!(params.iv, [0x25; 16]);
-            assert_eq!(params.data, SecretBytes::copy_from_slice(&[0x22, 0x23, 0x24]));
+            assert_eq!(
+                params.data_presence,
+                PointerBytes::present_cloned(&SecretBytes::copy_from_slice(&[0x22, 0x23, 0x24]))
+            );
         }
         other => panic!("unexpected Camellia CBC encrypt-data params: {other:?}"),
     }
@@ -1265,7 +1280,10 @@ fn reads_counter_and_encrypt_data_parameter_structs() {
     {
         CkMechanismParams::SeedCbcEncryptData(params) => {
             assert_eq!(params.iv, [0x35; 16]);
-            assert_eq!(params.data, SecretBytes::copy_from_slice(&[0x32, 0x33]));
+            assert_eq!(
+                params.data_presence,
+                PointerBytes::present_cloned(&SecretBytes::copy_from_slice(&[0x32, 0x33]))
+            );
         }
         other => panic!("unexpected SEED CBC encrypt-data params: {other:?}"),
     }
@@ -1356,7 +1374,7 @@ fn reads_legacy_rc2_rc5_and_salsa20_parameter_structs() {
         CkMechanismParams::Rc5Cbc(params) => {
             assert_eq!(params.word_size, 32);
             assert_eq!(params.rounds, 18);
-            assert_eq!(params.iv, vec![0xA5; 8]);
+            assert_eq!(params.iv_presence, PointerBytes::present_copy(&[0xA5; 8]));
         }
         other => panic!("unexpected RC5-CBC params: {other:?}"),
     }
@@ -1414,8 +1432,8 @@ fn reads_legacy_rc2_rc5_and_salsa20_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::Salsa20(params) => {
-            assert_eq!(params.block_counter, vec![0x11; 8]);
-            assert_eq!(params.nonce, vec![0x22; 8]);
+            assert_eq!(params.block_counter_presence, PointerBytes::present_copy(&[0x11; 8]));
+            assert_eq!(params.nonce_presence, PointerBytes::present_copy(&[0x22; 8]));
             assert_eq!(params.nonce_bits, 64);
         }
         other => panic!("unexpected Salsa20 params: {other:?}"),
@@ -1476,8 +1494,8 @@ fn reads_tls_ssl_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::TlsPrf(params) => {
-            assert_eq!(params.seed, vec![0xA1, 0xA2, 0xA3].into());
-            assert_eq!(params.label, vec![0xB1, 0xB2].into());
+            assert_eq!(*params.seed_presence.as_present().unwrap(), vec![0xA1, 0xA2, 0xA3].into());
+            assert_eq!(*params.label_presence.as_present().unwrap(), vec![0xB1, 0xB2].into());
             assert_eq!(params.output_len, 12);
         }
         other => panic!("unexpected TLS PRF params: {other:?}"),
@@ -1512,10 +1530,19 @@ fn reads_tls_ssl_parameter_structs() {
     {
         CkMechanismParams::TlsKdf(params) => {
             assert_eq!(params.prf_mechanism.0, CkMechanismType::SHA384.0 as u64);
-            assert_eq!(params.label, vec![0x33, 0x34].into());
-            assert_eq!(params.random_info.client_random, vec![0x11; 4]);
-            assert_eq!(params.random_info.server_random, vec![0x22; 4]);
-            assert_eq!(params.context_data, vec![0x44, 0x45, 0x46].into());
+            assert_eq!(*params.label_presence.as_present().unwrap(), vec![0x33, 0x34].into());
+            assert_eq!(
+                params.random_info.client_random_presence,
+                PointerBytes::present_copy(&[0x11; 4])
+            );
+            assert_eq!(
+                params.random_info.server_random_presence,
+                PointerBytes::present_copy(&[0x22; 4])
+            );
+            assert_eq!(
+                *params.context_data_presence.as_present().unwrap(),
+                vec![0x44, 0x45, 0x46].into()
+            );
         }
         other => panic!("unexpected TLS KDF params: {other:?}"),
     }
@@ -1543,8 +1570,14 @@ fn reads_tls_ssl_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::Ssl3MasterKeyDerive(params) => {
-            assert_eq!(params.random_info.client_random, vec![0x51; 4]);
-            assert_eq!(params.random_info.server_random, vec![0x52; 4]);
+            assert_eq!(
+                params.random_info.client_random_presence,
+                PointerBytes::present_copy(&[0x51; 4])
+            );
+            assert_eq!(
+                params.random_info.server_random_presence,
+                PointerBytes::present_copy(&[0x52; 4])
+            );
             assert_eq!(params.version_major, 3);
             assert_eq!(params.version_minor, 0);
         }
@@ -1572,7 +1605,7 @@ fn reads_tls_ssl_parameter_structs() {
     {
         CkMechanismParams::Tls12ExtendedMasterKeyDerive(params) => {
             assert_eq!(params.prf_hash_mechanism.0, CkMechanismType::SHA512.0 as u64);
-            assert_eq!(params.session_hash, vec![0x61; 8]);
+            assert_eq!(params.session_hash_presence, PointerBytes::present_copy(&[0x61; 8]));
             assert_eq!(params.version_major, 3);
             assert_eq!(params.version_minor, 3);
         }
@@ -1616,9 +1649,9 @@ fn reads_kdf_and_legacy_agreement_parameter_structs() {
             assert!(params.expand);
             assert_eq!(params.prf_hash_mechanism.0, CkMechanismType::SHA256.0 as u64);
             assert_eq!(params.salt_type, 1);
-            assert_eq!(params.salt, vec![0xA1, 0xA2, 0xA3].into());
+            assert_eq!(*params.salt_presence.as_present().unwrap(), vec![0xA1, 0xA2, 0xA3].into());
             assert_eq!(params.salt_key_handle.0, 0x1234);
-            assert_eq!(params.info, vec![0xB1, 0xB2].into());
+            assert_eq!(*params.info_presence.as_present().unwrap(), vec![0xB1, 0xB2].into());
         }
         other => panic!("unexpected HKDF params: {other:?}"),
     }
@@ -1644,8 +1677,11 @@ fn reads_kdf_and_legacy_agreement_parameter_structs() {
     {
         CkMechanismParams::Gostr3410Derive(params) => {
             assert_eq!(params.kdf, CkKdf(1));
-            assert_eq!(params.public_data, vec![0xC1, 0xC2, 0xC3]);
-            assert_eq!(params.ukm, vec![0xD1, 0xD2]);
+            assert_eq!(
+                params.public_data_presence,
+                PointerBytes::present_copy(&[0xC1, 0xC2, 0xC3])
+            );
+            assert_eq!(params.ukm_presence, PointerBytes::present_copy(&[0xD1, 0xD2]));
         }
         other => panic!("unexpected GOSTR3410 derive params: {other:?}"),
     }
@@ -1670,8 +1706,8 @@ fn reads_kdf_and_legacy_agreement_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::Gostr3410KeyWrap(params) => {
-            assert_eq!(params.wrap_oid, vec![0x06, 0x07, 0x2A]);
-            assert_eq!(params.ukm, vec![0xE1, 0xE2, 0xE3, 0xE4]);
+            assert_eq!(params.wrap_oid_presence, PointerBytes::present_copy(&[0x06, 0x07, 0x2A]));
+            assert_eq!(params.ukm_presence, PointerBytes::present_copy(&[0xE1, 0xE2, 0xE3, 0xE4]));
             assert_eq!(params.key_handle.0, 0xBEEF);
         }
         other => panic!("unexpected GOSTR3410 key-wrap params: {other:?}"),
@@ -1700,9 +1736,12 @@ fn reads_kdf_and_legacy_agreement_parameter_structs() {
     {
         CkMechanismParams::KeaDerive(params) => {
             assert!(params.is_sender);
-            assert_eq!(params.random_a, vec![0x11, 0x12]);
-            assert_eq!(params.random_b, vec![0x21, 0x22]);
-            assert_eq!(params.public_data, vec![0x31, 0x32, 0x33]);
+            assert_eq!(params.random_a_presence, PointerBytes::present_copy(&[0x11, 0x12]));
+            assert_eq!(params.random_b_presence, PointerBytes::present_copy(&[0x21, 0x22]));
+            assert_eq!(
+                params.public_data_presence,
+                PointerBytes::present_copy(&[0x31, 0x32, 0x33])
+            );
         }
         other => panic!("unexpected KEA derive params: {other:?}"),
     }
@@ -1733,11 +1772,17 @@ fn reads_kdf_and_legacy_agreement_parameter_structs() {
     {
         CkMechanismParams::Pkcs5Pbkd2(params) => {
             assert_eq!(params.salt_source, CkPbkdf2SaltSource(1));
-            assert_eq!(params.salt_source_data, vec![0x41, 0x42].into());
+            assert_eq!(
+                *params.salt_source_data_presence.as_present().unwrap(),
+                vec![0x41, 0x42].into()
+            );
             assert_eq!(params.iterations, 600_000);
             assert_eq!(params.prf, CkPbkdf2Prf(2));
-            assert_eq!(params.prf_data, vec![0x51].into());
-            assert_eq!(params.password, SecretBytes::copy_from_slice(b"secret"));
+            assert_eq!(*params.prf_data_presence.as_present().unwrap(), vec![0x51].into());
+            assert_eq!(
+                params.password_presence,
+                PointerBytes::present_cloned(&SecretBytes::copy_from_slice(b"secret"))
+            );
         }
         other => panic!("unexpected PKCS#5 PBKD2 params: {other:?}"),
     }
@@ -1773,8 +1818,11 @@ fn reads_ecdh_and_x942_parameter_structs() {
     {
         CkMechanismParams::Ecdh1Derive(params) => {
             assert_eq!(params.kdf, CkKdf(7));
-            assert_eq!(params.shared_data, vec![0xA1, 0xA2].into());
-            assert_eq!(params.public_data, vec![0xB1, 0xB2, 0xB3]);
+            assert_eq!(*params.shared_data_presence.as_present().unwrap(), vec![0xA1, 0xA2].into());
+            assert_eq!(
+                params.public_data_presence,
+                PointerBytes::present_copy(&[0xB1, 0xB2, 0xB3])
+            );
         }
         other => panic!("unexpected ECDH1 derive params: {other:?}"),
     }
@@ -1805,11 +1853,17 @@ fn reads_ecdh_and_x942_parameter_structs() {
     {
         CkMechanismParams::Ecdh2Derive(params) => {
             assert_eq!(params.kdf, CkKdf(8));
-            assert_eq!(params.shared_data, vec![0xC1, 0xC2, 0xC3].into());
-            assert_eq!(params.public_data, vec![0xD1, 0xD2]);
+            assert_eq!(
+                *params.shared_data_presence.as_present().unwrap(),
+                vec![0xC1, 0xC2, 0xC3].into()
+            );
+            assert_eq!(params.public_data_presence, PointerBytes::present_copy(&[0xD1, 0xD2]));
             assert_eq!(params.private_data_len, 32);
             assert_eq!(params.private_data_handle.0, 0x1234);
-            assert_eq!(params.public_data2, vec![0xE1, 0xE2, 0xE3, 0xE4]);
+            assert_eq!(
+                params.public_data2_presence,
+                PointerBytes::present_copy(&[0xE1, 0xE2, 0xE3, 0xE4])
+            );
         }
         other => panic!("unexpected ECDH2 derive params: {other:?}"),
     }
@@ -1841,11 +1895,14 @@ fn reads_ecdh_and_x942_parameter_structs() {
     {
         CkMechanismParams::EcmqvDerive(params) => {
             assert_eq!(params.kdf, CkKdf(9));
-            assert_eq!(params.shared_data, vec![0x11, 0x12].into());
-            assert_eq!(params.public_data, vec![0x21, 0x22, 0x23]);
+            assert_eq!(*params.shared_data_presence.as_present().unwrap(), vec![0x11, 0x12].into());
+            assert_eq!(
+                params.public_data_presence,
+                PointerBytes::present_copy(&[0x21, 0x22, 0x23])
+            );
             assert_eq!(params.private_data_len, 48);
             assert_eq!(params.private_data_handle.0, 0x2345);
-            assert_eq!(params.public_data2, vec![0x31, 0x32]);
+            assert_eq!(params.public_data2_presence, PointerBytes::present_copy(&[0x31, 0x32]));
             assert_eq!(params.public_key_handle.0, 0x3456);
         }
         other => panic!("unexpected ECMQV derive params: {other:?}"),
@@ -1871,7 +1928,10 @@ fn reads_ecdh_and_x942_parameter_structs() {
         CkMechanismParams::EcdhAesKeyWrap(params) => {
             assert_eq!(params.aes_key_bits, 256);
             assert_eq!(params.kdf, CkKdf(10));
-            assert_eq!(params.shared_data, vec![0x41, 0x42, 0x43].into());
+            assert_eq!(
+                *params.shared_data_presence.as_present().unwrap(),
+                vec![0x41, 0x42, 0x43].into()
+            );
         }
         other => panic!("unexpected ECDH AES key-wrap params: {other:?}"),
     }
@@ -1897,8 +1957,11 @@ fn reads_ecdh_and_x942_parameter_structs() {
     {
         CkMechanismParams::X942Dh1Derive(params) => {
             assert_eq!(params.kdf, CkKdf(11));
-            assert_eq!(params.other_info, vec![0x51, 0x52].into());
-            assert_eq!(params.public_data, vec![0x61, 0x62, 0x63]);
+            assert_eq!(*params.other_info_presence.as_present().unwrap(), vec![0x51, 0x52].into());
+            assert_eq!(
+                params.public_data_presence,
+                PointerBytes::present_copy(&[0x61, 0x62, 0x63])
+            );
         }
         other => panic!("unexpected X9.42 DH1 derive params: {other:?}"),
     }
@@ -1929,11 +1992,17 @@ fn reads_ecdh_and_x942_parameter_structs() {
     {
         CkMechanismParams::X942Dh2Derive(params) => {
             assert_eq!(params.kdf, CkKdf(12));
-            assert_eq!(params.other_info, vec![0x71, 0x72, 0x73].into());
-            assert_eq!(params.public_data, vec![0x81, 0x82]);
+            assert_eq!(
+                *params.other_info_presence.as_present().unwrap(),
+                vec![0x71, 0x72, 0x73].into()
+            );
+            assert_eq!(params.public_data_presence, PointerBytes::present_copy(&[0x81, 0x82]));
             assert_eq!(params.private_data_len, 64);
             assert_eq!(params.private_data_handle.0, 0x4567);
-            assert_eq!(params.public_data2, vec![0x91, 0x92, 0x93, 0x94]);
+            assert_eq!(
+                params.public_data2_presence,
+                PointerBytes::present_copy(&[0x91, 0x92, 0x93, 0x94])
+            );
         }
         other => panic!("unexpected X9.42 DH2 derive params: {other:?}"),
     }
@@ -1972,8 +2041,8 @@ fn reads_ike_parameter_structs() {
             assert_eq!(params.prf_mechanism.0, CkMechanismType::SHA256.0 as u64);
             assert!(params.data_as_key);
             assert!(!params.rekey);
-            assert_eq!(params.ni, vec![0xA1, 0xA2, 0xA3].into());
-            assert_eq!(params.nr, vec![0xB1, 0xB2].into());
+            assert_eq!(*params.ni_presence.as_present().unwrap(), vec![0xA1, 0xA2, 0xA3].into());
+            assert_eq!(*params.nr_presence.as_present().unwrap(), vec![0xB1, 0xB2].into());
             assert_eq!(params.new_key_handle.0, 0x1234);
         }
         other => panic!("unexpected IKE PRF derive params: {other:?}"),
@@ -2007,8 +2076,8 @@ fn reads_ike_parameter_structs() {
             assert!(params.has_prev_key);
             assert_eq!(params.keygxy_handle.0, 0x2345);
             assert_eq!(params.prev_key_handle.0, 0x3456);
-            assert_eq!(params.ckyi, vec![0xC1, 0xC2].into());
-            assert_eq!(params.ckyr, vec![0xD1, 0xD2, 0xD3].into());
+            assert_eq!(*params.ckyi_presence.as_present().unwrap(), vec![0xC1, 0xC2].into());
+            assert_eq!(*params.ckyr_presence.as_present().unwrap(), vec![0xD1, 0xD2, 0xD3].into());
             assert_eq!(params.key_number, 3);
         }
         other => panic!("unexpected IKE1 PRF derive params: {other:?}"),
@@ -2036,7 +2105,10 @@ fn reads_ike_parameter_structs() {
             assert_eq!(params.prf_mechanism.0, CkMechanismType::SHA512.0 as u64);
             assert!(params.has_keygxy);
             assert_eq!(params.keygxy_handle.0, 0x4567);
-            assert_eq!(params.extra_data, vec![0xE1, 0xE2, 0xE3, 0xE4].into());
+            assert_eq!(
+                *params.extra_data_presence.as_present().unwrap(),
+                vec![0xE1, 0xE2, 0xE3, 0xE4].into()
+            );
         }
         other => panic!("unexpected IKE1 extended derive params: {other:?}"),
     }
@@ -2063,7 +2135,10 @@ fn reads_ike_parameter_structs() {
             assert_eq!(params.prf_mechanism.0, CkMechanismType::SHA256.0 as u64);
             assert!(params.has_seed_key);
             assert_eq!(params.seed_key_handle.0, 0x5678);
-            assert_eq!(params.seed_data, vec![0xF1, 0xF2, 0xF3].into());
+            assert_eq!(
+                *params.seed_data_presence.as_present().unwrap(),
+                vec![0xF1, 0xF2, 0xF3].into()
+            );
         }
         other => panic!("unexpected IKE2 PRF-plus derive params: {other:?}"),
     }
@@ -2099,8 +2174,8 @@ fn reads_wtls_prf_and_x942_mqv_parameter_structs() {
     {
         CkMechanismParams::WtlsPrf(params) => {
             assert_eq!(params.digest_mechanism.0, CkMechanismType::SHA256.0 as u64);
-            assert_eq!(params.seed, vec![0xA1, 0xA2, 0xA3].into());
-            assert_eq!(params.label, vec![0xB1, 0xB2].into());
+            assert_eq!(*params.seed_presence.as_present().unwrap(), vec![0xA1, 0xA2, 0xA3].into());
+            assert_eq!(*params.label_presence.as_present().unwrap(), vec![0xB1, 0xB2].into());
             assert_eq!(params.output_len, 12);
         }
         other => panic!("unexpected WTLS PRF params: {other:?}"),
@@ -2133,11 +2208,17 @@ fn reads_wtls_prf_and_x942_mqv_parameter_structs() {
     {
         CkMechanismParams::X942MqvDerive(params) => {
             assert_eq!(params.kdf, CkKdf(7));
-            assert_eq!(params.other_info, vec![0xC1, 0xC2].into());
-            assert_eq!(params.public_data, vec![0xD1, 0xD2, 0xD3]);
+            assert_eq!(*params.other_info_presence.as_present().unwrap(), vec![0xC1, 0xC2].into());
+            assert_eq!(
+                params.public_data_presence,
+                PointerBytes::present_copy(&[0xD1, 0xD2, 0xD3])
+            );
             assert_eq!(params.private_data_len, 32);
             assert_eq!(params.private_data_handle.0, 77);
-            assert_eq!(params.public_data2, vec![0xE1, 0xE2, 0xE3, 0xE4]);
+            assert_eq!(
+                params.public_data2_presence,
+                PointerBytes::present_copy(&[0xE1, 0xE2, 0xE3, 0xE4])
+            );
             assert_eq!(params.public_key_handle.0, 88);
         }
         other => panic!("unexpected X9.42 MQV params: {other:?}"),
@@ -2177,11 +2258,23 @@ fn reads_otp_and_skipjack_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::Otp(params) => {
-            assert_eq!(params.params.len(), 2);
-            assert_eq!(params.params[0].type_, 0);
-            assert_eq!(params.params[0].value, vec![0x11, 0x12, 0x13].into());
-            assert_eq!(params.params[1].type_, 1);
-            assert_eq!(params.params[1].value, vec![0x21, 0x22].into());
+            assert_eq!(params.params_presence.as_present().unwrap().len(), 2);
+            assert_eq!(params.params_presence.as_present().unwrap()[0].type_, 0);
+            assert_eq!(
+                *params.params_presence.as_present().unwrap()[0]
+                    .value_presence
+                    .as_present()
+                    .unwrap(),
+                vec![0x11, 0x12, 0x13].into()
+            );
+            assert_eq!(params.params_presence.as_present().unwrap()[1].type_, 1);
+            assert_eq!(
+                *params.params_presence.as_present().unwrap()[1]
+                    .value_presence
+                    .as_present()
+                    .unwrap(),
+                vec![0x21, 0x22].into()
+            );
         }
         other => panic!("unexpected OTP params: {other:?}"),
     }
@@ -2216,13 +2309,19 @@ fn reads_otp_and_skipjack_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::SkipjackPrivateWrap(params) => {
-            assert_eq!(params.password, vec![0x31, 0x32].into());
+            assert_eq!(*params.password_presence.as_present().unwrap(), vec![0x31, 0x32].into());
             assert_eq!(params.password_length, 2);
-            assert_eq!(params.public_data, vec![0x41, 0x42, 0x43]);
-            assert_eq!(params.random_a, vec![0x51, 0x52, 0x53, 0x54]);
-            assert_eq!(params.prime_p, vec![0x61, 0x62]);
-            assert_eq!(params.base_g, vec![0x71, 0x72]);
-            assert_eq!(params.subprime_q, vec![0x81, 0x82, 0x83]);
+            assert_eq!(
+                params.public_data_presence,
+                PointerBytes::present_copy(&[0x41, 0x42, 0x43])
+            );
+            assert_eq!(
+                params.random_a_presence,
+                PointerBytes::present_copy(&[0x51, 0x52, 0x53, 0x54])
+            );
+            assert_eq!(params.prime_p_presence, PointerBytes::present_copy(&[0x61, 0x62]));
+            assert_eq!(params.base_g_presence, PointerBytes::present_copy(&[0x71, 0x72]));
+            assert_eq!(params.subprime_q_presence, PointerBytes::present_copy(&[0x81, 0x82, 0x83]));
         }
         other => panic!("unexpected Skipjack private-wrap params: {other:?}"),
     }
@@ -2261,13 +2360,31 @@ fn reads_otp_and_skipjack_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::SkipjackRelayx(params) => {
-            assert_eq!(params.old_wrapped_x, vec![0x91, 0x92].into());
-            assert_eq!(params.old_password, vec![0xA1, 0xA2, 0xA3].into());
-            assert_eq!(params.old_public_data, vec![0xB1].into());
-            assert_eq!(params.old_random_a, vec![0xC1, 0xC2].into());
-            assert_eq!(params.new_password, vec![0xD1, 0xD2, 0xD3, 0xD4].into());
-            assert_eq!(params.new_public_data, vec![0xE1, 0xE2].into());
-            assert_eq!(params.new_random_a, vec![0xF1, 0xF2, 0xF3].into());
+            assert_eq!(
+                *params.old_wrapped_x_presence.as_present().unwrap(),
+                vec![0x91, 0x92].into()
+            );
+            assert_eq!(
+                *params.old_password_presence.as_present().unwrap(),
+                vec![0xA1, 0xA2, 0xA3].into()
+            );
+            assert_eq!(*params.old_public_data_presence.as_present().unwrap(), vec![0xB1].into());
+            assert_eq!(
+                *params.old_random_a_presence.as_present().unwrap(),
+                vec![0xC1, 0xC2].into()
+            );
+            assert_eq!(
+                *params.new_password_presence.as_present().unwrap(),
+                vec![0xD1, 0xD2, 0xD3, 0xD4].into()
+            );
+            assert_eq!(
+                *params.new_public_data_presence.as_present().unwrap(),
+                vec![0xE1, 0xE2].into()
+            );
+            assert_eq!(
+                *params.new_random_a_presence.as_present().unwrap(),
+                vec![0xF1, 0xF2, 0xF3].into()
+            );
         }
         other => panic!("unexpected Skipjack relayx params: {other:?}"),
     }
@@ -2306,10 +2423,10 @@ fn reads_kip_parameter_struct_with_nested_mechanism() {
         .expect("mechanism params")
     {
         CkMechanismParams::Kip(params) => {
-            assert_eq!(params.mechanism.mechanism_type, CkMechanismType::SHA256);
-            assert!(params.mechanism.params.is_none());
+            assert_eq!(params.mechanism.as_ref().unwrap().mechanism_type, CkMechanismType::SHA256);
+            assert!(params.mechanism.as_ref().unwrap().params.is_none());
             assert_eq!(params.key_handle.0, 99);
-            assert_eq!(params.seed, vec![0x44, 0x45, 0x46].into());
+            assert_eq!(*params.seed_presence.as_present().unwrap(), vec![0x44, 0x45, 0x46].into());
         }
         other => panic!("unexpected KIP params: {other:?}"),
     }
@@ -2381,11 +2498,18 @@ fn gcm_generated_iv_buffer_is_preserved_and_written_back() {
     };
 
     match unsafe { read_ck_mechanism(&mechanism) } {
-        CkMechanismParams::Gcm(GcmParams { iv, iv_bits, iv_buffer_len, aad, tag_bits, .. }) => {
-            assert!(iv.is_empty());
+        CkMechanismParams::Gcm(GcmParams {
+            iv_presence,
+            iv_bits,
+            iv_buffer_len,
+            aad_presence,
+            tag_bits,
+            ..
+        }) => {
+            assert!(iv_presence.as_present().map(|b| b.is_empty()).unwrap_or(true));
             assert_eq!(iv_bits, 96);
             assert_eq!(iv_buffer_len, 12);
-            assert!(aad.is_empty());
+            assert!(aad_presence.as_present().map(|b| b.is_empty()).unwrap_or(true));
             assert_eq!(tag_bits, 128);
         }
         other => panic!("unexpected generated-IV GCM params: {other:?}"),
@@ -2396,16 +2520,11 @@ fn gcm_generated_iv_buffer_is_preserved_and_written_back() {
         prepare_mechanism_output_params(
             &mut mechanism,
             &CkMechanismParams::Gcm(GcmParams {
-                iv: generated.clone(),
                 iv_bits: 96,
                 iv_buffer_len: 12,
-                aad: Vec::new().into(),
                 tag_bits: 128,
                 iv_presence: PointerBytes::from_legacy(&generated, false),
                 aad_presence: PointerBytes::from_legacy(&[], false),
-
-                iv_null: false,
-                aad_null: false,
             }),
         )
     }
@@ -2462,12 +2581,10 @@ fn kmac_params_reads_key_length_and_customization_string() {
         CkMechanismParams::Kmac(KmacParams {
             key_handle,
             mac_length,
-            customization_string,
             customization_string_presence,
         }) => {
             assert_eq!(key_handle.0, 0xCAFE);
             assert_eq!(mac_length, 64);
-            assert_eq!(customization_string, SecretBytes::copy_from_slice(b"custom"));
             assert_eq!(customization_string_presence, PointerBytes::present_copy(b"custom"));
         }
         other => panic!("unexpected KMAC params: {other:?}"),
@@ -2498,16 +2615,8 @@ fn mu_gen_params_reads_key_tr_and_context() {
         .params
         .expect("mechanism params")
     {
-        CkMechanismParams::MuGen(MuGenParams {
-            key_handle,
-            tr,
-            context,
-            tr_presence,
-            context_presence,
-        }) => {
+        CkMechanismParams::MuGen(MuGenParams { key_handle, tr_presence, context_presence }) => {
             assert_eq!(key_handle.0, 0xA11CE);
-            assert_eq!(tr, SecretBytes::copy_from_slice(b"precomputed-tr"));
-            assert_eq!(context, SecretBytes::copy_from_slice(b"context"));
             assert_eq!(tr_presence, PointerBytes::present_copy(b"precomputed-tr"));
             assert_eq!(context_presence, PointerBytes::present_copy(b"context"));
         }
@@ -2772,16 +2881,19 @@ fn sp800_108_feedback_reads_additional_keys_and_writes_handles_back() {
     match unsafe { read_ck_mechanism(&mechanism) } {
         CkMechanismParams::Sp800108FeedbackKdf(params) => {
             assert_eq!(params.prf_type.0, CKM_SHA256_HMAC as u64);
-            assert_eq!(params.iv, vec![0xA5; 16]);
-            assert_eq!(params.additional_derived_keys.len(), 1);
-            let derived = &params.additional_derived_keys[0];
+            assert_eq!(params.iv_presence, PointerBytes::present_copy(&[0xA5; 16]));
+            assert_eq!(params.additional_derived_keys_presence.as_present().unwrap().len(), 1);
+            let derived = &params.additional_derived_keys_presence.as_present().unwrap()[0];
             assert_eq!(derived.key_handle.0, 0);
-            assert_eq!(derived.template.len(), 2);
+            assert_eq!(derived.template_presence.as_present().unwrap().len(), 2);
             assert_eq!(
-                derived.template[0].value,
+                derived.template_presence.as_present().unwrap()[0].value,
                 Some(CkAttributeValue::Bytes(b"extra".to_vec().into()))
             );
-            assert_eq!(derived.template[1].value, Some(CkAttributeValue::Ulong(32)));
+            assert_eq!(
+                derived.template_presence.as_present().unwrap()[1].value,
+                Some(CkAttributeValue::Ulong(32))
+            );
         }
         other => panic!("unexpected SP800-108 feedback params: {other:?}"),
     }
@@ -2796,17 +2908,8 @@ fn sp800_108_feedback_reads_additional_keys_and_writes_handles_back() {
                 additional_derived_keys_presence: PointerArray::present(vec![Sp800108DerivedKey {
                     template_presence: PointerArray::present(Vec::new()),
                     ph_key_is_null: false,
-                    template: Vec::new(),
                     key_handle: CkObjectHandle(0xCAFE),
                 }]),
-                data_params: Vec::new(),
-                iv: vec![0xA5; 16],
-                additional_derived_keys: vec![Sp800108DerivedKey {
-                    template_presence: PointerArray::present(Vec::new()),
-                    ph_key_is_null: false,
-                    template: Vec::new(),
-                    key_handle: CkObjectHandle(0xCAFE),
-                }],
             }),
         )
     }
@@ -2966,10 +3069,10 @@ fn gcm_null_vs_empty_iv_aad_survive_the_read() {
         };
         match unsafe { read_ck_mechanism(&mechanism) } {
             CkMechanismParams::Gcm(gcm) => {
-                assert!(gcm.iv.is_empty());
-                assert!(gcm.aad.expose(|b| b.is_empty()));
-                assert_eq!(gcm.iv_null, iv_null, "pIv nullness must survive");
-                assert_eq!(gcm.aad_null, aad_null, "pAAD nullness must survive");
+                assert!(gcm.iv_presence.as_present().map(|b| b.is_empty()).unwrap_or(true));
+                assert!(gcm.aad_presence.as_present().map(|b| b.is_empty()).unwrap_or(true));
+                assert_eq!(gcm.iv_presence.is_null(), iv_null, "pIv nullness must survive");
+                assert_eq!(gcm.aad_presence.is_null(), aad_null, "pAAD nullness must survive");
             }
             other => panic!("unexpected GCM params: {other:?}"),
         }
@@ -3007,10 +3110,14 @@ fn ccm_null_vs_empty_nonce_aad_survive_the_read() {
             .expect("mechanism params")
         {
             CkMechanismParams::Ccm(ccm) => {
-                assert!(ccm.nonce.is_empty());
-                assert!(ccm.aad.expose(|b| b.is_empty()));
-                assert_eq!(ccm.nonce_null, nonce_null, "pNonce nullness must survive");
-                assert_eq!(ccm.aad_null, aad_null, "pAAD nullness must survive");
+                assert!(ccm.nonce_presence.as_present().map(|b| b.is_empty()).unwrap_or(true));
+                assert!(ccm.aad_presence.as_present().map(|b| b.is_empty()).unwrap_or(true));
+                assert_eq!(
+                    ccm.nonce_presence.is_null(),
+                    nonce_null,
+                    "pNonce nullness must survive"
+                );
+                assert_eq!(ccm.aad_presence.is_null(), aad_null, "pAAD nullness must survive");
             }
             other => panic!("unexpected CCM params: {other:?}"),
         }
@@ -3069,7 +3176,10 @@ fn misaligned_rsa_aes_key_wrap_reads_byte_identical_values() {
             assert_eq!(oaep_params.hash_alg, CkMechanismType::SHA256);
             assert_eq!(oaep_params.mgf, CkMgf(1));
             assert_eq!(oaep_params.source, CkOaepSource(1));
-            assert_eq!(oaep_params.source_data, SecretBytes::copy_from_slice(&[0xA0, 0xA1, 0xA2]));
+            assert_eq!(
+                oaep_params.source_data_presence,
+                PointerBytes::present_cloned(&SecretBytes::copy_from_slice(&[0xA0, 0xA1, 0xA2]))
+            );
         }
         other => panic!("unexpected RSA-AES key wrap params: {other:?}"),
     }
@@ -3120,16 +3230,10 @@ fn misaligned_sign_additional_context_reads_byte_identical_values() {
         {
             Some(CkMechanismParams::SignAdditionalContext(SignAdditionalContext {
                 hedge_variant,
-                context,
                 hash,
                 context_presence,
             })) => {
                 assert_eq!(hedge_variant, 7, "with_hash={with_hash}");
-                assert_eq!(
-                    context,
-                    SecretBytes::copy_from_slice(&[0xB1, 0xB2]),
-                    "with_hash={with_hash}"
-                );
                 assert_eq!(
                     context_presence,
                     PointerBytes::present_copy(&[0xB1, 0xB2]),
@@ -3162,8 +3266,14 @@ fn oaep_null_vs_empty_source_survives_the_read() {
         };
         match unsafe { read_ck_mechanism(&mechanism) } {
             CkMechanismParams::RsaPkcsOaep(oaep) => {
-                assert!(oaep.source_data.expose(|b| b.is_empty()));
-                assert_eq!(oaep.source_null, source_null, "pSourceData nullness must survive");
+                assert!(
+                    oaep.source_data_presence.as_present().map(|b| b.is_empty()).unwrap_or(true)
+                );
+                assert_eq!(
+                    oaep.source_data_presence.is_null(),
+                    source_null,
+                    "pSourceData nullness must survive"
+                );
             }
             other => panic!("unexpected OAEP params: {other:?}"),
         }
@@ -3222,7 +3332,10 @@ fn misaligned_outer_mechanism_and_oaep_params_read() {
     let (_mech_backing, mech_ptr) = misaligned_copy(mechanism);
     match unsafe { read_mechanism_for_transport(mech_ptr, Operation::General) } {
         Ok(CkMechanism { params: Some(CkMechanismParams::RsaPkcsOaep(parsed)), .. }) => {
-            assert_eq!(parsed.source_data, SecretBytes::copy_from_slice(&[0xA0, 0xA1, 0xA2]));
+            assert_eq!(
+                parsed.source_data_presence,
+                PointerBytes::present_cloned(&SecretBytes::copy_from_slice(&[0xA0, 0xA1, 0xA2]))
+            );
         }
         other => panic!("misaligned outer + OAEP must parse, got {other:?}"),
     }
@@ -3281,7 +3394,10 @@ fn misaligned_nested_oaep_reads() {
             ..
         }) => {
             assert_eq!(aes_key_bits, 256);
-            assert_eq!(oaep_params.source_data, SecretBytes::copy_from_slice(&[0xB0, 0xB1]));
+            assert_eq!(
+                oaep_params.source_data_presence,
+                PointerBytes::present_cloned(&SecretBytes::copy_from_slice(&[0xB0, 0xB1]))
+            );
         }
         other => panic!("misaligned nested OAEP must parse, got {other:?}"),
     }
@@ -3308,11 +3424,17 @@ fn misaligned_tls_prf_lengths_read() {
     };
     match unsafe { read_mechanism_with_shape(&mechanism, Some("tls_prf")) } {
         Ok(CkMechanism {
-            params: Some(CkMechanismParams::TlsPrf(TlsPrfParams { seed, label, output_len, .. })),
+            params:
+                Some(CkMechanismParams::TlsPrf(TlsPrfParams {
+                    seed_presence,
+                    label_presence,
+                    output_len,
+                    ..
+                })),
             ..
         }) => {
-            assert_eq!(seed, SecretBytes::copy_from_slice(&[0xC0, 0xC1]));
-            assert_eq!(label, SecretBytes::copy_from_slice(&[0xD0]));
+            assert_eq!(seed_presence, PointerBytes::present_copy(&[0xC0, 0xC1]));
+            assert_eq!(label_presence, PointerBytes::present_copy(&[0xD0]));
             assert_eq!(output_len, 48);
         }
         other => panic!("misaligned TLS PRF must parse, got {other:?}"),
@@ -3343,12 +3465,19 @@ fn misaligned_sp800_prf_array_reads() {
     };
     match unsafe { read_mechanism_with_shape(&mechanism, Some("sp800_108_kdf")) } {
         Ok(CkMechanism {
-            params: Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams { data_params, .. })),
+            params:
+                Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams { data_params_presence, .. })),
             ..
         }) => {
-            assert_eq!(data_params.len(), 2);
-            assert_eq!(data_params[0].value, SecretBytes::copy_from_slice(&[0xE0]));
-            assert_eq!(data_params[1].value, SecretBytes::copy_from_slice(&[0xE1, 0xE2]));
+            assert_eq!(data_params_presence.as_present().unwrap().len(), 2);
+            assert_eq!(
+                data_params_presence.as_present().unwrap()[0].value_presence,
+                PointerBytes::present_cloned(&SecretBytes::copy_from_slice(&[0xE0]))
+            );
+            assert_eq!(
+                data_params_presence.as_present().unwrap()[1].value_presence,
+                PointerBytes::present_cloned(&SecretBytes::copy_from_slice(&[0xE1, 0xE2]))
+            );
         }
         other => panic!("misaligned SP800 array must parse, got {other:?}"),
     }
@@ -3380,12 +3509,16 @@ fn misaligned_sp800_phkey_reads() {
         Ok(CkMechanism {
             params:
                 Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-                    additional_derived_keys, ..
+                    additional_derived_keys_presence,
+                    ..
                 })),
             ..
         }) => {
-            assert_eq!(additional_derived_keys.len(), 1);
-            assert_eq!(additional_derived_keys[0].key_handle.0, 0xDEAD_BEEF);
+            assert_eq!(additional_derived_keys_presence.as_present().unwrap().len(), 1);
+            assert_eq!(
+                additional_derived_keys_presence.as_present().unwrap()[0].key_handle.0,
+                0xDEAD_BEEF
+            );
         }
         other => panic!("misaligned SP800 phKey must parse, got {other:?}"),
     }
@@ -3418,12 +3551,13 @@ fn misaligned_kip_nested_records_read() {
     };
     match unsafe { read_mechanism_with_shape(&mechanism, Some("kip")) } {
         Ok(CkMechanism {
-            params: Some(CkMechanismParams::Kip(KipParams { mechanism, key_handle, seed, .. })),
+            params:
+                Some(CkMechanismParams::Kip(KipParams { mechanism, key_handle, seed_presence, .. })),
             ..
         }) => {
-            assert_eq!(mechanism.mechanism_type.0, CKM_RSA_PKCS as u64);
+            assert_eq!(mechanism.as_ref().unwrap().mechanism_type.0, CKM_RSA_PKCS as u64);
             assert_eq!(key_handle.0, 0x42);
-            assert_eq!(seed, SecretBytes::copy_from_slice(&[0xF0, 0xF1]));
+            assert_eq!(seed_presence, PointerBytes::present_copy(&[0xF0, 0xF1]));
         }
         other => panic!("misaligned KIP nesting must parse, got {other:?}"),
     }
@@ -3451,12 +3585,13 @@ fn kip_valid_nested_mechanism_roundtrips() {
     };
     match unsafe { read_mechanism_with_shape(&mechanism, Some("kip")) } {
         Ok(CkMechanism {
-            params: Some(CkMechanismParams::Kip(KipParams { mechanism, key_handle, seed, .. })),
+            params:
+                Some(CkMechanismParams::Kip(KipParams { mechanism, key_handle, seed_presence, .. })),
             ..
         }) => {
-            assert_eq!(mechanism.mechanism_type.0, CKM_RSA_PKCS as u64);
+            assert_eq!(mechanism.as_ref().unwrap().mechanism_type.0, CKM_RSA_PKCS as u64);
             assert_eq!(key_handle.0, 0x43);
-            assert_eq!(seed, SecretBytes::copy_from_slice(&[0xF2, 0xF3, 0xF4]));
+            assert_eq!(seed_presence, PointerBytes::present_copy(&[0xF2, 0xF3, 0xF4]));
         }
         other => panic!("valid KIP nesting must roundtrip, got {other:?}"),
     }
@@ -4549,8 +4684,8 @@ fn r11_nested_legacy_skips_validate_fusion() {
         .params
     {
         Some(CkMechanismParams::Kip(KipParams { mechanism, .. })) => {
-            assert_eq!(mechanism.mechanism_type.0, EXCLUDED_NESTED);
-            assert_eq!(mechanism.params, None);
+            assert_eq!(mechanism.as_ref().unwrap().mechanism_type.0, EXCLUDED_NESTED);
+            assert_eq!(mechanism.as_ref().unwrap().params, None);
         }
         other => panic!("excluded nested (NULL,0) must forward in legacy, got {other:?}"),
     }
@@ -4573,12 +4708,14 @@ fn r11_nested_legacy_skips_validate_fusion() {
         .expect("read mechanism")
         .params
     {
-        Some(CkMechanismParams::Kip(KipParams { mechanism, .. })) => match &mechanism.params {
-            Some(CkMechanismParams::Raw(p)) => {
-                p.data.expose(|b| assert_eq!(b, &bytes));
+        Some(CkMechanismParams::Kip(KipParams { mechanism, .. })) => {
+            match &mechanism.as_ref().unwrap().params {
+                Some(CkMechanismParams::Raw(p)) => {
+                    p.data.expose(|b| assert_eq!(b, &bytes));
+                }
+                other => panic!("unknown nested params must ride nested Raw, got {other:?}"),
             }
-            other => panic!("unknown nested params must ride nested Raw, got {other:?}"),
-        },
+        }
         other => panic!("KIP with unknown nested params must parse in legacy, got {other:?}"),
     }
 
@@ -4616,7 +4753,7 @@ fn r11_nested_v1_outer_classification() {
         .params
     {
         Some(CkMechanismParams::Kip(KipParams { mechanism, .. })) => {
-            r11_assert_null(&mechanism.params, 5);
+            r11_assert_null(&mechanism.as_ref().unwrap().params, 5);
         }
         other => panic!("nested (NULL,5) must be Null under v1, got {other:?}"),
     }
@@ -4859,11 +4996,13 @@ fn r11_v1_canonical_kip_stays_typed() {
         .expect("read mechanism")
         .params;
     match &params {
-        Some(CkMechanismParams::Kip(KipParams { mechanism, key_handle, seed, .. })) => {
-            assert_eq!(mechanism.mechanism_type.0, CkMechanismType::SHA256.0);
+        Some(CkMechanismParams::Kip(KipParams {
+            mechanism, key_handle, seed_presence, ..
+        })) => {
+            assert_eq!(mechanism.as_ref().unwrap().mechanism_type.0, CkMechanismType::SHA256.0);
             assert_eq!(key_handle.0, 0x43);
-            assert_eq!(seed, &SecretBytes::copy_from_slice(&[0xF2, 0xF3, 0xF4]));
-            r11_assert_null(&mechanism.params, 5);
+            assert_eq!(seed_presence, &PointerBytes::present_copy(&[0xF2, 0xF3, 0xF4]));
+            r11_assert_null(&mechanism.as_ref().unwrap().params, 5);
         }
         other => panic!("canonical KIP must stay typed under v1, got {other:?}"),
     }
@@ -4973,29 +5112,25 @@ fn r17_mech(shape: &str) -> u64 {
     }
 }
 
-/// Assert one v1 typed plain-bytes field: legacy bytes mirror the
-/// present pointee, peer is `Present` of the same bytes.
-fn r17_assert_present(legacy: &[u8], peer: &PointerBytes, expected: &[u8]) {
-    assert_eq!(legacy, expected, "legacy bytes mirror the present pointee");
+/// Assert one v1 typed plain-bytes field: peer is `Present` of the
+/// expected bytes (R19: the legacy mirror is gone, the peer is the value).
+fn r17_assert_present(peer: &PointerBytes, expected: &[u8]) {
     assert_eq!(peer, &PointerBytes::present_copy(expected), "peer is Present(bytes)");
 }
 
 /// Secret-bytes variant of [`r17_assert_present`].
-fn r17_assert_present_secret(legacy: &SecretBytes, peer: &PointerBytes, expected: &[u8]) {
-    legacy.expose(|b| assert_eq!(b, expected, "legacy secret mirrors the present pointee"));
+fn r17_assert_present_secret(peer: &PointerBytes, expected: &[u8]) {
     assert_eq!(peer, &PointerBytes::present_copy(expected), "peer is Present(bytes)");
 }
 
 /// Assert one v1 typed plain-bytes field is NULL with `declared_len`:
-/// legacy bytes stay empty, peer is `Null(n)`.
-fn r17_assert_null(legacy: &[u8], peer: &PointerBytes, declared_len: u64) {
-    assert!(legacy.is_empty(), "NULL legacy bytes stay empty");
+/// peer is `Null(n)` (R19: the legacy mirror is gone).
+fn r17_assert_null(peer: &PointerBytes, declared_len: u64) {
     assert_eq!(peer, &PointerBytes::null_len(declared_len), "peer is Null(n)");
 }
 
 /// Secret-bytes variant of [`r17_assert_null`].
-fn r17_assert_null_secret(legacy: &SecretBytes, peer: &PointerBytes, declared_len: u64) {
-    legacy.expose(|b| assert!(b.is_empty(), "NULL legacy secret stays empty"));
+fn r17_assert_null_secret(peer: &PointerBytes, declared_len: u64) {
     assert_eq!(peer, &PointerBytes::null_len(declared_len), "peer is Null(n)");
 }
 
@@ -5023,10 +5158,9 @@ fn r17_probe_gcm_null_iv_12() {
         .params
     {
         Some(CkMechanismParams::Gcm(p)) => {
-            r17_assert_null(&p.iv, &p.iv_presence, 12);
+            r17_assert_null(&p.iv_presence, 12);
             assert_eq!(p.iv_buffer_len, 0, "NULL IV has no buffer");
-            assert!(!p.iv_null && !p.aad_null, "v1 is presence-only: legacy bools stay clear");
-            r17_assert_present_secret(&p.aad, &p.aad_presence, &aad);
+            r17_assert_present_secret(&p.aad_presence, &aad);
             assert_eq!(p.tag_bits, 128);
         }
         other => panic!("GCM NULL-IV-12 must stay typed under v1, got {other:?}"),
@@ -5058,10 +5192,9 @@ fn r17_probe_gcm_mixed_iv_aad_null_16() {
         .params
     {
         Some(CkMechanismParams::Gcm(p)) => {
-            r17_assert_present(&p.iv, &p.iv_presence, &iv);
+            r17_assert_present(&p.iv_presence, &iv);
             assert_eq!(p.iv_buffer_len, 12);
-            assert!(!p.iv_null && !p.aad_null, "v1 is presence-only: legacy bools stay clear");
-            r17_assert_null_secret(&p.aad, &p.aad_presence, 16);
+            r17_assert_null_secret(&p.aad_presence, 16);
         }
         other => panic!("mixed IV+AAD-NULL-16 must stay typed under v1, got {other:?}"),
     }
@@ -5088,7 +5221,7 @@ fn r17_probe_eddsa_null_ctx() {
     {
         Some(CkMechanismParams::Eddsa(p)) => {
             assert!(!p.ph_flag);
-            r17_assert_null_secret(&p.context_data, &p.context_data_presence, 7);
+            r17_assert_null_secret(&p.context_data_presence, 7);
         }
         other => panic!("EdDSA NULL-ctx must stay typed under v1, got {other:?}"),
     }
@@ -5122,8 +5255,8 @@ fn r17_probe_pointee_copy_before_decision() {
     iv.fill(0xEE);
     match params {
         Some(CkMechanismParams::Gcm(p)) => {
-            r17_assert_present(&p.iv, &p.iv_presence, &[0x11; 12]);
-            r17_assert_null_secret(&p.aad, &p.aad_presence, 16);
+            r17_assert_present(&p.iv_presence, &[0x11; 12]);
+            r17_assert_null_secret(&p.aad_presence, 16);
         }
         other => panic!("mixed GCM must stay typed under v1, got {other:?}"),
     }
@@ -5195,20 +5328,18 @@ fn r17_matrix_rsa_oaep() {
     let mut data = [0xA0u8, 0xA1, 0xA2];
     // ptr/n: copied, Present.
     let p = read(data.as_mut_ptr() as CK_VOID_PTR, data.len() as CK_ULONG);
-    assert!(!p.source_null, "v1 is presence-only");
-    r17_assert_present_secret(&p.source_data, &p.source_data_presence, &data);
+    assert!(!p.source_data_presence.is_null(), "v1 is presence-only");
+    r17_assert_present_secret(&p.source_data_presence, &data);
     // ptr/0: empty, Present.
     let p = read(data.as_mut_ptr() as CK_VOID_PTR, 0);
-    assert!(!p.source_null, "v1 is presence-only");
-    r17_assert_present_secret(&p.source_data, &p.source_data_presence, &[]);
+    assert!(!p.source_data_presence.is_null(), "v1 is presence-only");
+    r17_assert_present_secret(&p.source_data_presence, &[]);
     // NULL/0: Null{0}.
     let p = read(std::ptr::null_mut(), 0);
-    assert!(!p.source_null, "v1 is presence-only");
-    r17_assert_null_secret(&p.source_data, &p.source_data_presence, 0);
+    r17_assert_null_secret(&p.source_data_presence, 0);
     // NULL/n: Null{n}, no dereference.
     let p = read(std::ptr::null_mut(), 9);
-    assert!(!p.source_null, "v1 is presence-only");
-    r17_assert_null_secret(&p.source_data, &p.source_data_presence, 9);
+    r17_assert_null_secret(&p.source_data_presence, 9);
 }
 
 /// R17 embedded-field matrix for `eddsa` (single field).
@@ -5235,13 +5366,13 @@ fn r17_matrix_eddsa() {
     let mut ctx = [0xB1u8, 0xB2];
     let p = read(ctx.as_mut_ptr(), ctx.len() as CK_ULONG);
     assert!(p.ph_flag);
-    r17_assert_present_secret(&p.context_data, &p.context_data_presence, &ctx);
+    r17_assert_present_secret(&p.context_data_presence, &ctx);
     let p = read(ctx.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.context_data, &p.context_data_presence, &[]);
+    r17_assert_present_secret(&p.context_data_presence, &[]);
     let p = read(std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.context_data, &p.context_data_presence, 0);
+    r17_assert_null_secret(&p.context_data_presence, 0);
     let p = read(std::ptr::null_mut(), 11);
-    r17_assert_null_secret(&p.context_data, &p.context_data_presence, 11);
+    r17_assert_null_secret(&p.context_data_presence, 11);
 }
 
 /// R17 embedded-field matrix for `rc5_cbc` (single IV field).
@@ -5268,13 +5399,13 @@ fn r17_matrix_rc5_cbc() {
     let mut iv = [0xC1u8; 8];
     let p = read(iv.as_mut_ptr(), iv.len() as CK_ULONG);
     assert_eq!((p.word_size, p.rounds), (4, 12));
-    r17_assert_present(&p.iv, &p.iv_presence, &iv);
+    r17_assert_present(&p.iv_presence, &iv);
     let p = read(iv.as_mut_ptr(), 0);
-    r17_assert_present(&p.iv, &p.iv_presence, &[]);
+    r17_assert_present(&p.iv_presence, &[]);
     let p = read(std::ptr::null_mut(), 0);
-    r17_assert_null(&p.iv, &p.iv_presence, 0);
+    r17_assert_null(&p.iv_presence, 0);
     let p = read(std::ptr::null_mut(), 8);
-    r17_assert_null(&p.iv, &p.iv_presence, 8);
+    r17_assert_null(&p.iv_presence, 8);
 }
 
 /// R17 embedded-field matrix for `key_derivation_string` (single field).
@@ -5300,13 +5431,13 @@ fn r17_matrix_key_derivation_string() {
     };
     let mut data = [0xDEu8, 0xAD, 0xBE, 0xEF];
     let p = read(data.as_mut_ptr(), data.len() as CK_ULONG);
-    r17_assert_present_secret(&p.data, &p.data_presence, &data);
+    r17_assert_present_secret(&p.data_presence, &data);
     let p = read(data.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.data, &p.data_presence, &[]);
+    r17_assert_present_secret(&p.data_presence, &[]);
     let p = read(std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.data, &p.data_presence, 0);
+    r17_assert_null_secret(&p.data_presence, 0);
     let p = read(std::ptr::null_mut(), 4);
-    r17_assert_null_secret(&p.data, &p.data_presence, 4);
+    r17_assert_null_secret(&p.data_presence, 4);
 }
 
 /// R17 embedded-field matrix for `kmac` (single customization field).
@@ -5338,13 +5469,13 @@ fn r17_matrix_kmac() {
     let mut custom = [0xD1u8, 0xD2, 0xD3];
     let p = read(custom.as_mut_ptr() as CK_VOID_PTR, custom.len() as CK_ULONG);
     assert_eq!((p.key_handle.0, p.mac_length), (7, 32));
-    r17_assert_present_secret(&p.customization_string, &p.customization_string_presence, &custom);
+    r17_assert_present_secret(&p.customization_string_presence, &custom);
     let p = read(custom.as_mut_ptr() as CK_VOID_PTR, 0);
-    r17_assert_present_secret(&p.customization_string, &p.customization_string_presence, &[]);
+    r17_assert_present_secret(&p.customization_string_presence, &[]);
     let p = read(std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.customization_string, &p.customization_string_presence, 0);
+    r17_assert_null_secret(&p.customization_string_presence, 0);
     let p = read(std::ptr::null_mut(), 3);
-    r17_assert_null_secret(&p.customization_string, &p.customization_string_presence, 3);
+    r17_assert_null_secret(&p.customization_string_presence, 3);
 }
 
 /// R17 embedded-field matrix for `key_wrap_set_oaep` (single field).
@@ -5371,13 +5502,13 @@ fn r17_matrix_key_wrap_set_oaep() {
     let mut x = [0xE1u8, 0xE2];
     let p = read(x.as_mut_ptr(), x.len() as CK_ULONG);
     assert_eq!(p.bc, 7);
-    r17_assert_present_secret(&p.x, &p.x_presence, &x);
+    r17_assert_present_secret(&p.x_presence, &x);
     let p = read(x.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.x, &p.x_presence, &[]);
+    r17_assert_present_secret(&p.x_presence, &[]);
     let p = read(std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.x, &p.x_presence, 0);
+    r17_assert_null_secret(&p.x_presence, 0);
     let p = read(std::ptr::null_mut(), 2);
-    r17_assert_null_secret(&p.x, &p.x_presence, 2);
+    r17_assert_null_secret(&p.x_presence, 2);
 }
 
 /// R17 embedded-field matrix for `ike1_extended_derive` (single field).
@@ -5410,13 +5541,13 @@ fn r17_matrix_ike1_extended_derive() {
     let mut extra = [0xF1u8, 0xF2, 0xF3];
     let p = read(extra.as_mut_ptr(), extra.len() as CK_ULONG);
     assert!(!p.has_keygxy);
-    r17_assert_present_secret(&p.extra_data, &p.extra_data_presence, &extra);
+    r17_assert_present_secret(&p.extra_data_presence, &extra);
     let p = read(extra.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.extra_data, &p.extra_data_presence, &[]);
+    r17_assert_present_secret(&p.extra_data_presence, &[]);
     let p = read(std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.extra_data, &p.extra_data_presence, 0);
+    r17_assert_null_secret(&p.extra_data_presence, 0);
     let p = read(std::ptr::null_mut(), 3);
-    r17_assert_null_secret(&p.extra_data, &p.extra_data_presence, 3);
+    r17_assert_null_secret(&p.extra_data_presence, 3);
 }
 
 /// R17 embedded-field matrix for `ike2_prf_plus_derive` (single field).
@@ -5449,13 +5580,13 @@ fn r17_matrix_ike2_prf_plus_derive() {
     let mut seed = [0x01u8, 0x02];
     let p = read(seed.as_mut_ptr(), seed.len() as CK_ULONG);
     assert!(!p.has_seed_key);
-    r17_assert_present_secret(&p.seed_data, &p.seed_data_presence, &seed);
+    r17_assert_present_secret(&p.seed_data_presence, &seed);
     let p = read(seed.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.seed_data, &p.seed_data_presence, &[]);
+    r17_assert_present_secret(&p.seed_data_presence, &[]);
     let p = read(std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.seed_data, &p.seed_data_presence, 0);
+    r17_assert_null_secret(&p.seed_data_presence, 0);
     let p = read(std::ptr::null_mut(), 2);
-    r17_assert_null_secret(&p.seed_data, &p.seed_data_presence, 2);
+    r17_assert_null_secret(&p.seed_data_presence, 2);
 }
 
 /// R17 embedded-field matrix for `ecdh_aes_key_wrap` (single field).
@@ -5487,13 +5618,13 @@ fn r17_matrix_ecdh_aes_key_wrap() {
     let mut shared = [0x03u8, 0x04, 0x05];
     let p = read(shared.as_mut_ptr(), shared.len() as CK_ULONG);
     assert_eq!(p.aes_key_bits, 256);
-    r17_assert_present_secret(&p.shared_data, &p.shared_data_presence, &shared);
+    r17_assert_present_secret(&p.shared_data_presence, &shared);
     let p = read(shared.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.shared_data, &p.shared_data_presence, &[]);
+    r17_assert_present_secret(&p.shared_data_presence, &[]);
     let p = read(std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.shared_data, &p.shared_data_presence, 0);
+    r17_assert_null_secret(&p.shared_data_presence, 0);
     let p = read(std::ptr::null_mut(), 3);
-    r17_assert_null_secret(&p.shared_data, &p.shared_data_presence, 3);
+    r17_assert_null_secret(&p.shared_data_presence, 3);
 }
 
 #[repr(C)]
@@ -5538,16 +5669,16 @@ fn r17_matrix_sign_additional_context() {
     };
     let p = read(&mut base);
     assert_eq!((p.hedge_variant, p.hash.0), (1, 0));
-    r17_assert_present_secret(&p.context, &p.context_presence, &context);
+    r17_assert_present_secret(&p.context_presence, &context);
     base.ul_context_len = 0;
     let p = read(&mut base);
-    r17_assert_present_secret(&p.context, &p.context_presence, &[]);
+    r17_assert_present_secret(&p.context_presence, &[]);
     base.p_context = std::ptr::null_mut();
     let p = read(&mut base);
-    r17_assert_null_secret(&p.context, &p.context_presence, 0);
+    r17_assert_null_secret(&p.context_presence, 0);
     base.ul_context_len = 3;
     let p = read(&mut base);
-    r17_assert_null_secret(&p.context, &p.context_presence, 3);
+    r17_assert_null_secret(&p.context_presence, 3);
     // Trailing-hash layout parses the hash alongside the matrix case.
     let mut hashed = R17HashSignAdditionalContext {
         hedge_variant: 2,
@@ -5568,7 +5699,7 @@ fn r17_matrix_sign_additional_context() {
     {
         Some(CkMechanismParams::SignAdditionalContext(p)) => {
             assert_eq!((p.hedge_variant, p.hash), (2, CkMechanismType::SHA256));
-            r17_assert_null_secret(&p.context, &p.context_presence, 5);
+            r17_assert_null_secret(&p.context_presence, 5);
         }
         other => panic!("hash sign-ctx must stay typed under v1, got {other:?}"),
     }
@@ -5599,13 +5730,13 @@ fn r17_matrix_aes_cbc_encrypt_data() {
     let mut data = [0xA2u8, 0xA3, 0xA4];
     let p = read(data.as_mut_ptr(), data.len() as CK_ULONG);
     assert_eq!(p.iv, [0xA5; 16]);
-    r17_assert_present_secret(&p.data, &p.data_presence, &data);
+    r17_assert_present_secret(&p.data_presence, &data);
     let p = read(data.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.data, &p.data_presence, &[]);
+    r17_assert_present_secret(&p.data_presence, &[]);
     let p = read(std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.data, &p.data_presence, 0);
+    r17_assert_null_secret(&p.data_presence, 0);
     let p = read(std::ptr::null_mut(), 3);
-    r17_assert_null_secret(&p.data, &p.data_presence, 3);
+    r17_assert_null_secret(&p.data_presence, 3);
 }
 
 /// R17 embedded-field matrix for `des_cbc_encrypt_data`.
@@ -5632,13 +5763,13 @@ fn r17_matrix_des_cbc_encrypt_data() {
     let mut data = [0xD2u8, 0xD3];
     let p = read(data.as_mut_ptr(), data.len() as CK_ULONG);
     assert_eq!(p.iv, [0xD5; 8]);
-    r17_assert_present_secret(&p.data, &p.data_presence, &data);
+    r17_assert_present_secret(&p.data_presence, &data);
     let p = read(data.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.data, &p.data_presence, &[]);
+    r17_assert_present_secret(&p.data_presence, &[]);
     let p = read(std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.data, &p.data_presence, 0);
+    r17_assert_null_secret(&p.data_presence, 0);
     let p = read(std::ptr::null_mut(), 2);
-    r17_assert_null_secret(&p.data, &p.data_presence, 2);
+    r17_assert_null_secret(&p.data_presence, 2);
 }
 
 /// R17 embedded-field matrix for `camellia_cbc_encrypt_data`.
@@ -5666,13 +5797,13 @@ fn r17_matrix_camellia_cbc_encrypt_data() {
     let mut data = [0x22u8, 0x23, 0x24];
     let p = read(data.as_mut_ptr(), data.len() as CK_ULONG);
     assert_eq!(p.iv, [0x25; 16]);
-    r17_assert_present_secret(&p.data, &p.data_presence, &data);
+    r17_assert_present_secret(&p.data_presence, &data);
     let p = read(data.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.data, &p.data_presence, &[]);
+    r17_assert_present_secret(&p.data_presence, &[]);
     let p = read(std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.data, &p.data_presence, 0);
+    r17_assert_null_secret(&p.data_presence, 0);
     let p = read(std::ptr::null_mut(), 3);
-    r17_assert_null_secret(&p.data, &p.data_presence, 3);
+    r17_assert_null_secret(&p.data_presence, 3);
 }
 
 /// R17 embedded-field matrix for `aria_cbc_encrypt_data`.
@@ -5699,13 +5830,13 @@ fn r17_matrix_aria_cbc_encrypt_data() {
     let mut data = [0x12u8, 0x13, 0x14, 0x15];
     let p = read(data.as_mut_ptr(), data.len() as CK_ULONG);
     assert_eq!(p.iv, [0x15; 16]);
-    r17_assert_present_secret(&p.data, &p.data_presence, &data);
+    r17_assert_present_secret(&p.data_presence, &data);
     let p = read(data.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.data, &p.data_presence, &[]);
+    r17_assert_present_secret(&p.data_presence, &[]);
     let p = read(std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.data, &p.data_presence, 0);
+    r17_assert_null_secret(&p.data_presence, 0);
     let p = read(std::ptr::null_mut(), 4);
-    r17_assert_null_secret(&p.data, &p.data_presence, 4);
+    r17_assert_null_secret(&p.data_presence, 4);
 }
 
 /// R17 embedded-field matrix for `seed_cbc_encrypt_data`.
@@ -5732,13 +5863,13 @@ fn r17_matrix_seed_cbc_encrypt_data() {
     let mut data = [0x32u8, 0x33];
     let p = read(data.as_mut_ptr(), data.len() as CK_ULONG);
     assert_eq!(p.iv, [0x35; 16]);
-    r17_assert_present_secret(&p.data, &p.data_presence, &data);
+    r17_assert_present_secret(&p.data_presence, &data);
     let p = read(data.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.data, &p.data_presence, &[]);
+    r17_assert_present_secret(&p.data_presence, &[]);
     let p = read(std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.data, &p.data_presence, 0);
+    r17_assert_null_secret(&p.data_presence, 0);
     let p = read(std::ptr::null_mut(), 2);
-    r17_assert_null_secret(&p.data, &p.data_presence, 2);
+    r17_assert_null_secret(&p.data_presence, 2);
 }
 
 /// R17 embedded-field matrix for `gcm` (both fields × NULL/0, NULL/n,
@@ -5774,30 +5905,29 @@ fn r17_matrix_gcm() {
     let mut aad = [0xA1u8, 0xA2];
     // ptr/n × ptr/n.
     let p = read(iv.as_mut_ptr(), 12, aad.as_mut_ptr(), 2);
-    assert!(!p.iv_null && !p.aad_null, "v1 is presence-only");
-    r17_assert_present(&p.iv, &p.iv_presence, &iv);
-    r17_assert_present_secret(&p.aad, &p.aad_presence, &aad);
+    assert!(!p.iv_presence.is_null() && !p.aad_presence.is_null(), "v1 is presence-only");
+    r17_assert_present(&p.iv_presence, &iv);
+    r17_assert_present_secret(&p.aad_presence, &aad);
     // ptr/0 × ptr/0.
     let p = read(iv.as_mut_ptr(), 0, aad.as_mut_ptr(), 0);
-    r17_assert_present(&p.iv, &p.iv_presence, &[]);
-    r17_assert_present_secret(&p.aad, &p.aad_presence, &[]);
+    r17_assert_present(&p.iv_presence, &[]);
+    r17_assert_present_secret(&p.aad_presence, &[]);
     // NULL/0 × NULL/0.
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    assert!(!p.iv_null && !p.aad_null, "v1 is presence-only");
-    r17_assert_null(&p.iv, &p.iv_presence, 0);
-    r17_assert_null_secret(&p.aad, &p.aad_presence, 0);
+    r17_assert_null(&p.iv_presence, 0);
+    r17_assert_null_secret(&p.aad_presence, 0);
     // NULL/n × NULL/m.
     let p = read(std::ptr::null_mut(), 12, std::ptr::null_mut(), 16);
-    r17_assert_null(&p.iv, &p.iv_presence, 12);
-    r17_assert_null_secret(&p.aad, &p.aad_presence, 16);
+    r17_assert_null(&p.iv_presence, 12);
+    r17_assert_null_secret(&p.aad_presence, 16);
     // Mixed: valid IV + NULL AAD.
     let p = read(iv.as_mut_ptr(), 12, std::ptr::null_mut(), 16);
-    r17_assert_present(&p.iv, &p.iv_presence, &iv);
-    r17_assert_null_secret(&p.aad, &p.aad_presence, 16);
+    r17_assert_present(&p.iv_presence, &iv);
+    r17_assert_null_secret(&p.aad_presence, 16);
     // Mixed: NULL IV + valid AAD.
     let p = read(std::ptr::null_mut(), 12, aad.as_mut_ptr(), 2);
-    r17_assert_null(&p.iv, &p.iv_presence, 12);
-    r17_assert_present_secret(&p.aad, &p.aad_presence, &aad);
+    r17_assert_null(&p.iv_presence, 12);
+    r17_assert_present_secret(&p.aad_presence, &aad);
 }
 
 /// R17 embedded-field matrix for `ccm`.
@@ -5832,26 +5962,25 @@ fn r17_matrix_ccm() {
     let mut nonce = [0x21u8; 12];
     let mut aad = [0xA3u8, 0xA4, 0xA5];
     let p = read(nonce.as_mut_ptr(), 12, aad.as_mut_ptr(), 3);
-    assert!(!p.nonce_null && !p.aad_null, "v1 is presence-only");
+    assert!(!p.nonce_presence.is_null() && !p.aad_presence.is_null(), "v1 is presence-only");
     assert_eq!((p.data_len, p.mac_len), (32, 16));
-    r17_assert_present(&p.nonce, &p.nonce_presence, &nonce);
-    r17_assert_present_secret(&p.aad, &p.aad_presence, &aad);
+    r17_assert_present(&p.nonce_presence, &nonce);
+    r17_assert_present_secret(&p.aad_presence, &aad);
     let p = read(nonce.as_mut_ptr(), 0, aad.as_mut_ptr(), 0);
-    r17_assert_present(&p.nonce, &p.nonce_presence, &[]);
-    r17_assert_present_secret(&p.aad, &p.aad_presence, &[]);
+    r17_assert_present(&p.nonce_presence, &[]);
+    r17_assert_present_secret(&p.aad_presence, &[]);
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    assert!(!p.nonce_null && !p.aad_null, "v1 is presence-only");
-    r17_assert_null(&p.nonce, &p.nonce_presence, 0);
-    r17_assert_null_secret(&p.aad, &p.aad_presence, 0);
+    r17_assert_null(&p.nonce_presence, 0);
+    r17_assert_null_secret(&p.aad_presence, 0);
     let p = read(std::ptr::null_mut(), 12, std::ptr::null_mut(), 3);
-    r17_assert_null(&p.nonce, &p.nonce_presence, 12);
-    r17_assert_null_secret(&p.aad, &p.aad_presence, 3);
+    r17_assert_null(&p.nonce_presence, 12);
+    r17_assert_null_secret(&p.aad_presence, 3);
     let p = read(nonce.as_mut_ptr(), 12, std::ptr::null_mut(), 3);
-    r17_assert_present(&p.nonce, &p.nonce_presence, &nonce);
-    r17_assert_null_secret(&p.aad, &p.aad_presence, 3);
+    r17_assert_present(&p.nonce_presence, &nonce);
+    r17_assert_null_secret(&p.aad_presence, 3);
     let p = read(std::ptr::null_mut(), 12, aad.as_mut_ptr(), 3);
-    r17_assert_null(&p.nonce, &p.nonce_presence, 12);
-    r17_assert_present_secret(&p.aad, &p.aad_presence, &aad);
+    r17_assert_null(&p.nonce_presence, 12);
+    r17_assert_present_secret(&p.aad_presence, &aad);
 }
 
 /// R17 embedded-field matrix for `ecdh1_derive`.
@@ -5885,23 +6014,23 @@ fn r17_matrix_ecdh1_derive() {
     let mut shared = [0x31u8, 0x32];
     let mut public = [0x33u8; 65];
     let p = read(shared.as_mut_ptr(), 2, public.as_mut_ptr(), 65);
-    r17_assert_present_secret(&p.shared_data, &p.shared_data_presence, &shared);
-    r17_assert_present(&p.public_data, &p.public_data_presence, &public);
+    r17_assert_present_secret(&p.shared_data_presence, &shared);
+    r17_assert_present(&p.public_data_presence, &public);
     let p = read(shared.as_mut_ptr(), 0, public.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.shared_data, &p.shared_data_presence, &[]);
-    r17_assert_present(&p.public_data, &p.public_data_presence, &[]);
+    r17_assert_present_secret(&p.shared_data_presence, &[]);
+    r17_assert_present(&p.public_data_presence, &[]);
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.shared_data, &p.shared_data_presence, 0);
-    r17_assert_null(&p.public_data, &p.public_data_presence, 0);
+    r17_assert_null_secret(&p.shared_data_presence, 0);
+    r17_assert_null(&p.public_data_presence, 0);
     let p = read(std::ptr::null_mut(), 2, std::ptr::null_mut(), 65);
-    r17_assert_null_secret(&p.shared_data, &p.shared_data_presence, 2);
-    r17_assert_null(&p.public_data, &p.public_data_presence, 65);
+    r17_assert_null_secret(&p.shared_data_presence, 2);
+    r17_assert_null(&p.public_data_presence, 65);
     let p = read(shared.as_mut_ptr(), 2, std::ptr::null_mut(), 65);
-    r17_assert_present_secret(&p.shared_data, &p.shared_data_presence, &shared);
-    r17_assert_null(&p.public_data, &p.public_data_presence, 65);
+    r17_assert_present_secret(&p.shared_data_presence, &shared);
+    r17_assert_null(&p.public_data_presence, 65);
     let p = read(std::ptr::null_mut(), 2, public.as_mut_ptr(), 65);
-    r17_assert_null_secret(&p.shared_data, &p.shared_data_presence, 2);
-    r17_assert_present(&p.public_data, &p.public_data_presence, &public);
+    r17_assert_null_secret(&p.shared_data_presence, 2);
+    r17_assert_present(&p.public_data_presence, &public);
 }
 
 /// R17 embedded-field matrix for `hkdf`.
@@ -5940,23 +6069,23 @@ fn r17_matrix_hkdf() {
     let mut info = [0x42u8, 0x43];
     let p = read(salt.as_mut_ptr(), 32, info.as_mut_ptr(), 2);
     assert!(p.extract && p.expand);
-    r17_assert_present_secret(&p.salt, &p.salt_presence, &salt);
-    r17_assert_present_secret(&p.info, &p.info_presence, &info);
+    r17_assert_present_secret(&p.salt_presence, &salt);
+    r17_assert_present_secret(&p.info_presence, &info);
     let p = read(salt.as_mut_ptr(), 0, info.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.salt, &p.salt_presence, &[]);
-    r17_assert_present_secret(&p.info, &p.info_presence, &[]);
+    r17_assert_present_secret(&p.salt_presence, &[]);
+    r17_assert_present_secret(&p.info_presence, &[]);
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.salt, &p.salt_presence, 0);
-    r17_assert_null_secret(&p.info, &p.info_presence, 0);
+    r17_assert_null_secret(&p.salt_presence, 0);
+    r17_assert_null_secret(&p.info_presence, 0);
     let p = read(std::ptr::null_mut(), 32, std::ptr::null_mut(), 2);
-    r17_assert_null_secret(&p.salt, &p.salt_presence, 32);
-    r17_assert_null_secret(&p.info, &p.info_presence, 2);
+    r17_assert_null_secret(&p.salt_presence, 32);
+    r17_assert_null_secret(&p.info_presence, 2);
     let p = read(salt.as_mut_ptr(), 32, std::ptr::null_mut(), 2);
-    r17_assert_present_secret(&p.salt, &p.salt_presence, &salt);
-    r17_assert_null_secret(&p.info, &p.info_presence, 2);
+    r17_assert_present_secret(&p.salt_presence, &salt);
+    r17_assert_null_secret(&p.info_presence, 2);
     let p = read(std::ptr::null_mut(), 32, info.as_mut_ptr(), 2);
-    r17_assert_null_secret(&p.salt, &p.salt_presence, 32);
-    r17_assert_present_secret(&p.info, &p.info_presence, &info);
+    r17_assert_null_secret(&p.salt_presence, 32);
+    r17_assert_present_secret(&p.info_presence, &info);
 }
 
 /// R17 embedded-field matrix for `chacha20` (bits-governed lengths: a
@@ -5991,35 +6120,35 @@ fn r17_matrix_chacha20() {
     // ptr/n × ptr/n (32 bits = 4 bytes, 96 bits = 12 bytes).
     let p = read(bc.as_mut_ptr(), 32, nonce.as_mut_ptr(), 96);
     assert_eq!((p.block_counter_bits, p.nonce_bits), (32, 96));
-    r17_assert_present(&p.block_counter, &p.block_counter_presence, &bc);
-    r17_assert_present(&p.nonce, &p.nonce_presence, &nonce);
+    r17_assert_present(&p.block_counter_presence, &bc);
+    r17_assert_present(&p.nonce_presence, &nonce);
     // ptr/0-bits × ptr/0-bits: empty, Present.
     let p = read(bc.as_mut_ptr(), 0, nonce.as_mut_ptr(), 0);
-    r17_assert_present(&p.block_counter, &p.block_counter_presence, &[]);
-    r17_assert_present(&p.nonce, &p.nonce_presence, &[]);
+    r17_assert_present(&p.block_counter_presence, &[]);
+    r17_assert_present(&p.nonce_presence, &[]);
     // NULL/0-bits × NULL/0-bits: Null{0}.
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null(&p.block_counter, &p.block_counter_presence, 0);
-    r17_assert_null(&p.nonce, &p.nonce_presence, 0);
+    r17_assert_null(&p.block_counter_presence, 0);
+    r17_assert_null(&p.nonce_presence, 0);
     // NULL/32-bits × NULL/96-bits: Null{derived bytes}.
     let p = read(std::ptr::null_mut(), 32, std::ptr::null_mut(), 96);
-    r17_assert_null(&p.block_counter, &p.block_counter_presence, 4);
-    r17_assert_null(&p.nonce, &p.nonce_presence, 12);
+    r17_assert_null(&p.block_counter_presence, 4);
+    r17_assert_null(&p.nonce_presence, 12);
     // Mixed: valid counter + NULL nonce.
     let p = read(bc.as_mut_ptr(), 32, std::ptr::null_mut(), 96);
-    r17_assert_present(&p.block_counter, &p.block_counter_presence, &bc);
-    r17_assert_null(&p.nonce, &p.nonce_presence, 12);
+    r17_assert_present(&p.block_counter_presence, &bc);
+    r17_assert_null(&p.nonce_presence, 12);
     // Mixed: NULL counter + valid nonce.
     let p = read(std::ptr::null_mut(), 32, nonce.as_mut_ptr(), 96);
-    r17_assert_null(&p.block_counter, &p.block_counter_presence, 4);
-    r17_assert_present(&p.nonce, &p.nonce_presence, &nonce);
+    r17_assert_null(&p.block_counter_presence, 4);
+    r17_assert_present(&p.nonce_presence, &nonce);
     // Non-multiple-of-8 bits round up (legacy `div_ceil` rule preserved).
     let mut bc9 = [0x43u8; 2];
     let p = read(bc9.as_mut_ptr(), 9, nonce.as_mut_ptr(), 96);
-    r17_assert_present(&p.block_counter, &p.block_counter_presence, &bc9);
+    r17_assert_present(&p.block_counter_presence, &bc9);
     let p = read(std::ptr::null_mut(), 9, std::ptr::null_mut(), 0);
-    r17_assert_null(&p.block_counter, &p.block_counter_presence, 2);
-    r17_assert_null(&p.nonce, &p.nonce_presence, 0);
+    r17_assert_null(&p.block_counter_presence, 2);
+    r17_assert_null(&p.nonce_presence, 0);
 }
 
 /// R17 embedded-field matrix for `salsa20` (fixed 8-byte block counter
@@ -6048,23 +6177,23 @@ fn r17_matrix_salsa20() {
     let mut nonce = [0x22u8; 8];
     let p = read(bc.as_mut_ptr(), nonce.as_mut_ptr(), 64);
     assert_eq!(p.nonce_bits, 64);
-    r17_assert_present(&p.block_counter, &p.block_counter_presence, &bc);
-    r17_assert_present(&p.nonce, &p.nonce_presence, &nonce);
+    r17_assert_present(&p.block_counter_presence, &bc);
+    r17_assert_present(&p.nonce_presence, &nonce);
     let p = read(bc.as_mut_ptr(), nonce.as_mut_ptr(), 0);
-    r17_assert_present(&p.block_counter, &p.block_counter_presence, &bc);
-    r17_assert_present(&p.nonce, &p.nonce_presence, &[]);
+    r17_assert_present(&p.block_counter_presence, &bc);
+    r17_assert_present(&p.nonce_presence, &[]);
     let p = read(std::ptr::null_mut(), std::ptr::null_mut(), 0);
-    r17_assert_null(&p.block_counter, &p.block_counter_presence, 8);
-    r17_assert_null(&p.nonce, &p.nonce_presence, 0);
+    r17_assert_null(&p.block_counter_presence, 8);
+    r17_assert_null(&p.nonce_presence, 0);
     let p = read(std::ptr::null_mut(), std::ptr::null_mut(), 64);
-    r17_assert_null(&p.block_counter, &p.block_counter_presence, 8);
-    r17_assert_null(&p.nonce, &p.nonce_presence, 8);
+    r17_assert_null(&p.block_counter_presence, 8);
+    r17_assert_null(&p.nonce_presence, 8);
     let p = read(bc.as_mut_ptr(), std::ptr::null_mut(), 64);
-    r17_assert_present(&p.block_counter, &p.block_counter_presence, &bc);
-    r17_assert_null(&p.nonce, &p.nonce_presence, 8);
+    r17_assert_present(&p.block_counter_presence, &bc);
+    r17_assert_null(&p.nonce_presence, 8);
     let p = read(std::ptr::null_mut(), nonce.as_mut_ptr(), 64);
-    r17_assert_null(&p.block_counter, &p.block_counter_presence, 8);
-    r17_assert_present(&p.nonce, &p.nonce_presence, &nonce);
+    r17_assert_null(&p.block_counter_presence, 8);
+    r17_assert_present(&p.nonce_presence, &nonce);
 }
 
 /// R17 embedded-field matrix for `salsa20_chacha20_poly1305`.
@@ -6097,23 +6226,23 @@ fn r17_matrix_salsa20_chacha20_poly1305() {
     let mut nonce = [0x51u8; 12];
     let mut aad = [0x52u8, 0x53];
     let p = read(nonce.as_mut_ptr(), 12, aad.as_mut_ptr(), 2);
-    r17_assert_present(&p.nonce, &p.nonce_presence, &nonce);
-    r17_assert_present_secret(&p.aad, &p.aad_presence, &aad);
+    r17_assert_present(&p.nonce_presence, &nonce);
+    r17_assert_present_secret(&p.aad_presence, &aad);
     let p = read(nonce.as_mut_ptr(), 0, aad.as_mut_ptr(), 0);
-    r17_assert_present(&p.nonce, &p.nonce_presence, &[]);
-    r17_assert_present_secret(&p.aad, &p.aad_presence, &[]);
+    r17_assert_present(&p.nonce_presence, &[]);
+    r17_assert_present_secret(&p.aad_presence, &[]);
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null(&p.nonce, &p.nonce_presence, 0);
-    r17_assert_null_secret(&p.aad, &p.aad_presence, 0);
+    r17_assert_null(&p.nonce_presence, 0);
+    r17_assert_null_secret(&p.aad_presence, 0);
     let p = read(std::ptr::null_mut(), 12, std::ptr::null_mut(), 2);
-    r17_assert_null(&p.nonce, &p.nonce_presence, 12);
-    r17_assert_null_secret(&p.aad, &p.aad_presence, 2);
+    r17_assert_null(&p.nonce_presence, 12);
+    r17_assert_null_secret(&p.aad_presence, 2);
     let p = read(nonce.as_mut_ptr(), 12, std::ptr::null_mut(), 2);
-    r17_assert_present(&p.nonce, &p.nonce_presence, &nonce);
-    r17_assert_null_secret(&p.aad, &p.aad_presence, 2);
+    r17_assert_present(&p.nonce_presence, &nonce);
+    r17_assert_null_secret(&p.aad_presence, 2);
     let p = read(std::ptr::null_mut(), 12, aad.as_mut_ptr(), 2);
-    r17_assert_null(&p.nonce, &p.nonce_presence, 12);
-    r17_assert_present_secret(&p.aad, &p.aad_presence, &aad);
+    r17_assert_null(&p.nonce_presence, 12);
+    r17_assert_present_secret(&p.aad_presence, &aad);
 }
 
 /// R17 embedded-field matrix for `mu_gen`.
@@ -6147,23 +6276,23 @@ fn r17_matrix_mu_gen() {
     let mut ctx = [0x62u8, 0x63];
     let p = read(tr.as_mut_ptr(), 64, ctx.as_mut_ptr(), 2);
     assert_eq!(p.key_handle.0, 9);
-    r17_assert_present_secret(&p.tr, &p.tr_presence, &tr);
-    r17_assert_present_secret(&p.context, &p.context_presence, &ctx);
+    r17_assert_present_secret(&p.tr_presence, &tr);
+    r17_assert_present_secret(&p.context_presence, &ctx);
     let p = read(tr.as_mut_ptr(), 0, ctx.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.tr, &p.tr_presence, &[]);
-    r17_assert_present_secret(&p.context, &p.context_presence, &[]);
+    r17_assert_present_secret(&p.tr_presence, &[]);
+    r17_assert_present_secret(&p.context_presence, &[]);
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.tr, &p.tr_presence, 0);
-    r17_assert_null_secret(&p.context, &p.context_presence, 0);
+    r17_assert_null_secret(&p.tr_presence, 0);
+    r17_assert_null_secret(&p.context_presence, 0);
     let p = read(std::ptr::null_mut(), 64, std::ptr::null_mut(), 2);
-    r17_assert_null_secret(&p.tr, &p.tr_presence, 64);
-    r17_assert_null_secret(&p.context, &p.context_presence, 2);
+    r17_assert_null_secret(&p.tr_presence, 64);
+    r17_assert_null_secret(&p.context_presence, 2);
     let p = read(tr.as_mut_ptr(), 64, std::ptr::null_mut(), 2);
-    r17_assert_present_secret(&p.tr, &p.tr_presence, &tr);
-    r17_assert_null_secret(&p.context, &p.context_presence, 2);
+    r17_assert_present_secret(&p.tr_presence, &tr);
+    r17_assert_null_secret(&p.context_presence, 2);
     let p = read(std::ptr::null_mut(), 64, ctx.as_mut_ptr(), 2);
-    r17_assert_null_secret(&p.tr, &p.tr_presence, 64);
-    r17_assert_present_secret(&p.context, &p.context_presence, &ctx);
+    r17_assert_null_secret(&p.tr_presence, 64);
+    r17_assert_present_secret(&p.context_presence, &ctx);
 }
 
 /// R17 embedded-field matrix for `x942_dh1_derive`.
@@ -6196,23 +6325,23 @@ fn r17_matrix_x942_dh1_derive() {
     let mut oi = [0x71u8, 0x72];
     let mut public = [0x73u8; 65];
     let p = read(oi.as_mut_ptr(), 2, public.as_mut_ptr(), 65);
-    r17_assert_present_secret(&p.other_info, &p.other_info_presence, &oi);
-    r17_assert_present(&p.public_data, &p.public_data_presence, &public);
+    r17_assert_present_secret(&p.other_info_presence, &oi);
+    r17_assert_present(&p.public_data_presence, &public);
     let p = read(oi.as_mut_ptr(), 0, public.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.other_info, &p.other_info_presence, &[]);
-    r17_assert_present(&p.public_data, &p.public_data_presence, &[]);
+    r17_assert_present_secret(&p.other_info_presence, &[]);
+    r17_assert_present(&p.public_data_presence, &[]);
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.other_info, &p.other_info_presence, 0);
-    r17_assert_null(&p.public_data, &p.public_data_presence, 0);
+    r17_assert_null_secret(&p.other_info_presence, 0);
+    r17_assert_null(&p.public_data_presence, 0);
     let p = read(std::ptr::null_mut(), 2, std::ptr::null_mut(), 65);
-    r17_assert_null_secret(&p.other_info, &p.other_info_presence, 2);
-    r17_assert_null(&p.public_data, &p.public_data_presence, 65);
+    r17_assert_null_secret(&p.other_info_presence, 2);
+    r17_assert_null(&p.public_data_presence, 65);
     let p = read(oi.as_mut_ptr(), 2, std::ptr::null_mut(), 65);
-    r17_assert_present_secret(&p.other_info, &p.other_info_presence, &oi);
-    r17_assert_null(&p.public_data, &p.public_data_presence, 65);
+    r17_assert_present_secret(&p.other_info_presence, &oi);
+    r17_assert_null(&p.public_data_presence, 65);
     let p = read(std::ptr::null_mut(), 2, public.as_mut_ptr(), 65);
-    r17_assert_null_secret(&p.other_info, &p.other_info_presence, 2);
-    r17_assert_present(&p.public_data, &p.public_data_presence, &public);
+    r17_assert_null_secret(&p.other_info_presence, 2);
+    r17_assert_present(&p.public_data_presence, &public);
 }
 
 /// R17 embedded-field matrix for `gostr3410_derive`.
@@ -6245,23 +6374,23 @@ fn r17_matrix_gostr3410_derive() {
     let mut public = [0x74u8; 64];
     let mut ukm = [0x75u8, 0x76];
     let p = read(public.as_mut_ptr(), 64, ukm.as_mut_ptr(), 2);
-    r17_assert_present(&p.public_data, &p.public_data_presence, &public);
-    r17_assert_present(&p.ukm, &p.ukm_presence, &ukm);
+    r17_assert_present(&p.public_data_presence, &public);
+    r17_assert_present(&p.ukm_presence, &ukm);
     let p = read(public.as_mut_ptr(), 0, ukm.as_mut_ptr(), 0);
-    r17_assert_present(&p.public_data, &p.public_data_presence, &[]);
-    r17_assert_present(&p.ukm, &p.ukm_presence, &[]);
+    r17_assert_present(&p.public_data_presence, &[]);
+    r17_assert_present(&p.ukm_presence, &[]);
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null(&p.public_data, &p.public_data_presence, 0);
-    r17_assert_null(&p.ukm, &p.ukm_presence, 0);
+    r17_assert_null(&p.public_data_presence, 0);
+    r17_assert_null(&p.ukm_presence, 0);
     let p = read(std::ptr::null_mut(), 64, std::ptr::null_mut(), 2);
-    r17_assert_null(&p.public_data, &p.public_data_presence, 64);
-    r17_assert_null(&p.ukm, &p.ukm_presence, 2);
+    r17_assert_null(&p.public_data_presence, 64);
+    r17_assert_null(&p.ukm_presence, 2);
     let p = read(public.as_mut_ptr(), 64, std::ptr::null_mut(), 2);
-    r17_assert_present(&p.public_data, &p.public_data_presence, &public);
-    r17_assert_null(&p.ukm, &p.ukm_presence, 2);
+    r17_assert_present(&p.public_data_presence, &public);
+    r17_assert_null(&p.ukm_presence, 2);
     let p = read(std::ptr::null_mut(), 64, ukm.as_mut_ptr(), 2);
-    r17_assert_null(&p.public_data, &p.public_data_presence, 64);
-    r17_assert_present(&p.ukm, &p.ukm_presence, &ukm);
+    r17_assert_null(&p.public_data_presence, 64);
+    r17_assert_present(&p.ukm_presence, &ukm);
 }
 
 /// R17 embedded-field matrix for `gostr3410_key_wrap`.
@@ -6295,23 +6424,23 @@ fn r17_matrix_gostr3410_key_wrap() {
     let mut ukm = [0x7Au8, 0x7B];
     let p = read(oid.as_mut_ptr(), 3, ukm.as_mut_ptr(), 2);
     assert_eq!(p.key_handle.0, 0xBEEF);
-    r17_assert_present(&p.wrap_oid, &p.wrap_oid_presence, &oid);
-    r17_assert_present(&p.ukm, &p.ukm_presence, &ukm);
+    r17_assert_present(&p.wrap_oid_presence, &oid);
+    r17_assert_present(&p.ukm_presence, &ukm);
     let p = read(oid.as_mut_ptr(), 0, ukm.as_mut_ptr(), 0);
-    r17_assert_present(&p.wrap_oid, &p.wrap_oid_presence, &[]);
-    r17_assert_present(&p.ukm, &p.ukm_presence, &[]);
+    r17_assert_present(&p.wrap_oid_presence, &[]);
+    r17_assert_present(&p.ukm_presence, &[]);
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null(&p.wrap_oid, &p.wrap_oid_presence, 0);
-    r17_assert_null(&p.ukm, &p.ukm_presence, 0);
+    r17_assert_null(&p.wrap_oid_presence, 0);
+    r17_assert_null(&p.ukm_presence, 0);
     let p = read(std::ptr::null_mut(), 3, std::ptr::null_mut(), 2);
-    r17_assert_null(&p.wrap_oid, &p.wrap_oid_presence, 3);
-    r17_assert_null(&p.ukm, &p.ukm_presence, 2);
+    r17_assert_null(&p.wrap_oid_presence, 3);
+    r17_assert_null(&p.ukm_presence, 2);
     let p = read(oid.as_mut_ptr(), 3, std::ptr::null_mut(), 2);
-    r17_assert_present(&p.wrap_oid, &p.wrap_oid_presence, &oid);
-    r17_assert_null(&p.ukm, &p.ukm_presence, 2);
+    r17_assert_present(&p.wrap_oid_presence, &oid);
+    r17_assert_null(&p.ukm_presence, 2);
     let p = read(std::ptr::null_mut(), 3, ukm.as_mut_ptr(), 2);
-    r17_assert_null(&p.wrap_oid, &p.wrap_oid_presence, 3);
-    r17_assert_present(&p.ukm, &p.ukm_presence, &ukm);
+    r17_assert_null(&p.wrap_oid_presence, 3);
+    r17_assert_present(&p.ukm_presence, &ukm);
 }
 
 /// R17 embedded-field matrix for `ike_prf_derive`.
@@ -6347,23 +6476,23 @@ fn r17_matrix_ike_prf_derive() {
     let mut ni = [0x81u8, 0x82];
     let mut nr = [0x83u8, 0x84];
     let p = read(ni.as_mut_ptr(), 2, nr.as_mut_ptr(), 2);
-    r17_assert_present_secret(&p.ni, &p.ni_presence, &ni);
-    r17_assert_present_secret(&p.nr, &p.nr_presence, &nr);
+    r17_assert_present_secret(&p.ni_presence, &ni);
+    r17_assert_present_secret(&p.nr_presence, &nr);
     let p = read(ni.as_mut_ptr(), 0, nr.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.ni, &p.ni_presence, &[]);
-    r17_assert_present_secret(&p.nr, &p.nr_presence, &[]);
+    r17_assert_present_secret(&p.ni_presence, &[]);
+    r17_assert_present_secret(&p.nr_presence, &[]);
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.ni, &p.ni_presence, 0);
-    r17_assert_null_secret(&p.nr, &p.nr_presence, 0);
+    r17_assert_null_secret(&p.ni_presence, 0);
+    r17_assert_null_secret(&p.nr_presence, 0);
     let p = read(std::ptr::null_mut(), 2, std::ptr::null_mut(), 2);
-    r17_assert_null_secret(&p.ni, &p.ni_presence, 2);
-    r17_assert_null_secret(&p.nr, &p.nr_presence, 2);
+    r17_assert_null_secret(&p.ni_presence, 2);
+    r17_assert_null_secret(&p.nr_presence, 2);
     let p = read(ni.as_mut_ptr(), 2, std::ptr::null_mut(), 2);
-    r17_assert_present_secret(&p.ni, &p.ni_presence, &ni);
-    r17_assert_null_secret(&p.nr, &p.nr_presence, 2);
+    r17_assert_present_secret(&p.ni_presence, &ni);
+    r17_assert_null_secret(&p.nr_presence, 2);
     let p = read(std::ptr::null_mut(), 2, nr.as_mut_ptr(), 2);
-    r17_assert_null_secret(&p.ni, &p.ni_presence, 2);
-    r17_assert_present_secret(&p.nr, &p.nr_presence, &nr);
+    r17_assert_null_secret(&p.ni_presence, 2);
+    r17_assert_present_secret(&p.nr_presence, &nr);
 }
 
 /// R17 embedded-field matrix for `ike1_prf_derive`.
@@ -6401,23 +6530,23 @@ fn r17_matrix_ike1_prf_derive() {
     let mut ckyr = [0x86u8; 8];
     let p = read(ckyi.as_mut_ptr(), 8, ckyr.as_mut_ptr(), 8);
     assert_eq!(p.key_number, 3);
-    r17_assert_present_secret(&p.ckyi, &p.ckyi_presence, &ckyi);
-    r17_assert_present_secret(&p.ckyr, &p.ckyr_presence, &ckyr);
+    r17_assert_present_secret(&p.ckyi_presence, &ckyi);
+    r17_assert_present_secret(&p.ckyr_presence, &ckyr);
     let p = read(ckyi.as_mut_ptr(), 0, ckyr.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.ckyi, &p.ckyi_presence, &[]);
-    r17_assert_present_secret(&p.ckyr, &p.ckyr_presence, &[]);
+    r17_assert_present_secret(&p.ckyi_presence, &[]);
+    r17_assert_present_secret(&p.ckyr_presence, &[]);
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.ckyi, &p.ckyi_presence, 0);
-    r17_assert_null_secret(&p.ckyr, &p.ckyr_presence, 0);
+    r17_assert_null_secret(&p.ckyi_presence, 0);
+    r17_assert_null_secret(&p.ckyr_presence, 0);
     let p = read(std::ptr::null_mut(), 8, std::ptr::null_mut(), 8);
-    r17_assert_null_secret(&p.ckyi, &p.ckyi_presence, 8);
-    r17_assert_null_secret(&p.ckyr, &p.ckyr_presence, 8);
+    r17_assert_null_secret(&p.ckyi_presence, 8);
+    r17_assert_null_secret(&p.ckyr_presence, 8);
     let p = read(ckyi.as_mut_ptr(), 8, std::ptr::null_mut(), 8);
-    r17_assert_present_secret(&p.ckyi, &p.ckyi_presence, &ckyi);
-    r17_assert_null_secret(&p.ckyr, &p.ckyr_presence, 8);
+    r17_assert_present_secret(&p.ckyi_presence, &ckyi);
+    r17_assert_null_secret(&p.ckyr_presence, 8);
     let p = read(std::ptr::null_mut(), 8, ckyr.as_mut_ptr(), 8);
-    r17_assert_null_secret(&p.ckyi, &p.ckyi_presence, 8);
-    r17_assert_present_secret(&p.ckyr, &p.ckyr_presence, &ckyr);
+    r17_assert_null_secret(&p.ckyi_presence, 8);
+    r17_assert_present_secret(&p.ckyr_presence, &ckyr);
 }
 
 /// R17 embedded-field matrix for `ecdh2_derive` (three fields; the two
@@ -6461,36 +6590,36 @@ fn r17_matrix_ecdh2_derive() {
     let mut public = [0x93u8; 65];
     let mut public2 = [0x94u8; 65];
     let p = read(shared.as_mut_ptr(), 2, public.as_mut_ptr(), 65, public2.as_mut_ptr(), 65);
-    r17_assert_present_secret(&p.shared_data, &p.shared_data_presence, &shared);
-    r17_assert_present(&p.public_data, &p.public_data_presence, &public);
-    r17_assert_present(&p.public_data2, &p.public_data2_presence, &public2);
+    r17_assert_present_secret(&p.shared_data_presence, &shared);
+    r17_assert_present(&p.public_data_presence, &public);
+    r17_assert_present(&p.public_data2_presence, &public2);
     let p = read(shared.as_mut_ptr(), 0, public.as_mut_ptr(), 0, public2.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.shared_data, &p.shared_data_presence, &[]);
-    r17_assert_present(&p.public_data, &p.public_data_presence, &[]);
-    r17_assert_present(&p.public_data2, &p.public_data2_presence, &[]);
+    r17_assert_present_secret(&p.shared_data_presence, &[]);
+    r17_assert_present(&p.public_data_presence, &[]);
+    r17_assert_present(&p.public_data2_presence, &[]);
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.shared_data, &p.shared_data_presence, 0);
-    r17_assert_null(&p.public_data, &p.public_data_presence, 0);
-    r17_assert_null(&p.public_data2, &p.public_data2_presence, 0);
+    r17_assert_null_secret(&p.shared_data_presence, 0);
+    r17_assert_null(&p.public_data_presence, 0);
+    r17_assert_null(&p.public_data2_presence, 0);
     let p = read(std::ptr::null_mut(), 2, std::ptr::null_mut(), 65, std::ptr::null_mut(), 65);
-    r17_assert_null_secret(&p.shared_data, &p.shared_data_presence, 2);
-    r17_assert_null(&p.public_data, &p.public_data_presence, 65);
-    r17_assert_null(&p.public_data2, &p.public_data2_presence, 65);
+    r17_assert_null_secret(&p.shared_data_presence, 2);
+    r17_assert_null(&p.public_data_presence, 65);
+    r17_assert_null(&p.public_data2_presence, 65);
     // Mixed: valid shared/public + NULL public2.
     let p = read(shared.as_mut_ptr(), 2, public.as_mut_ptr(), 65, std::ptr::null_mut(), 65);
-    r17_assert_present_secret(&p.shared_data, &p.shared_data_presence, &shared);
-    r17_assert_present(&p.public_data, &p.public_data_presence, &public);
-    r17_assert_null(&p.public_data2, &p.public_data2_presence, 65);
+    r17_assert_present_secret(&p.shared_data_presence, &shared);
+    r17_assert_present(&p.public_data_presence, &public);
+    r17_assert_null(&p.public_data2_presence, 65);
     // Mixed: NULL shared + valid public/public2.
     let p = read(std::ptr::null_mut(), 2, public.as_mut_ptr(), 65, public2.as_mut_ptr(), 65);
-    r17_assert_null_secret(&p.shared_data, &p.shared_data_presence, 2);
-    r17_assert_present(&p.public_data, &p.public_data_presence, &public);
-    r17_assert_present(&p.public_data2, &p.public_data2_presence, &public2);
+    r17_assert_null_secret(&p.shared_data_presence, 2);
+    r17_assert_present(&p.public_data_presence, &public);
+    r17_assert_present(&p.public_data2_presence, &public2);
     // Mixed: NULL shared/public + valid public2.
     let p = read(std::ptr::null_mut(), 2, std::ptr::null_mut(), 65, public2.as_mut_ptr(), 65);
-    r17_assert_null_secret(&p.shared_data, &p.shared_data_presence, 2);
-    r17_assert_null(&p.public_data, &p.public_data_presence, 65);
-    r17_assert_present(&p.public_data2, &p.public_data2_presence, &public2);
+    r17_assert_null_secret(&p.shared_data_presence, 2);
+    r17_assert_null(&p.public_data_presence, 65);
+    r17_assert_present(&p.public_data2_presence, &public2);
 }
 
 /// R17 embedded-field matrix for `ecmqv_derive`.
@@ -6535,29 +6664,29 @@ fn r17_matrix_ecmqv_derive() {
     let mut public2 = [0xA4u8; 65];
     let p = read(shared.as_mut_ptr(), 2, public.as_mut_ptr(), 65, public2.as_mut_ptr(), 65);
     assert_eq!(p.public_key_handle.0, 0x51);
-    r17_assert_present_secret(&p.shared_data, &p.shared_data_presence, &shared);
-    r17_assert_present(&p.public_data, &p.public_data_presence, &public);
-    r17_assert_present(&p.public_data2, &p.public_data2_presence, &public2);
+    r17_assert_present_secret(&p.shared_data_presence, &shared);
+    r17_assert_present(&p.public_data_presence, &public);
+    r17_assert_present(&p.public_data2_presence, &public2);
     let p = read(shared.as_mut_ptr(), 0, public.as_mut_ptr(), 0, public2.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.shared_data, &p.shared_data_presence, &[]);
-    r17_assert_present(&p.public_data, &p.public_data_presence, &[]);
-    r17_assert_present(&p.public_data2, &p.public_data2_presence, &[]);
+    r17_assert_present_secret(&p.shared_data_presence, &[]);
+    r17_assert_present(&p.public_data_presence, &[]);
+    r17_assert_present(&p.public_data2_presence, &[]);
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.shared_data, &p.shared_data_presence, 0);
-    r17_assert_null(&p.public_data, &p.public_data_presence, 0);
-    r17_assert_null(&p.public_data2, &p.public_data2_presence, 0);
+    r17_assert_null_secret(&p.shared_data_presence, 0);
+    r17_assert_null(&p.public_data_presence, 0);
+    r17_assert_null(&p.public_data2_presence, 0);
     let p = read(std::ptr::null_mut(), 2, std::ptr::null_mut(), 65, std::ptr::null_mut(), 65);
-    r17_assert_null_secret(&p.shared_data, &p.shared_data_presence, 2);
-    r17_assert_null(&p.public_data, &p.public_data_presence, 65);
-    r17_assert_null(&p.public_data2, &p.public_data2_presence, 65);
+    r17_assert_null_secret(&p.shared_data_presence, 2);
+    r17_assert_null(&p.public_data_presence, 65);
+    r17_assert_null(&p.public_data2_presence, 65);
     let p = read(shared.as_mut_ptr(), 2, public.as_mut_ptr(), 65, std::ptr::null_mut(), 65);
-    r17_assert_present_secret(&p.shared_data, &p.shared_data_presence, &shared);
-    r17_assert_present(&p.public_data, &p.public_data_presence, &public);
-    r17_assert_null(&p.public_data2, &p.public_data2_presence, 65);
+    r17_assert_present_secret(&p.shared_data_presence, &shared);
+    r17_assert_present(&p.public_data_presence, &public);
+    r17_assert_null(&p.public_data2_presence, 65);
     let p = read(std::ptr::null_mut(), 2, public.as_mut_ptr(), 65, public2.as_mut_ptr(), 65);
-    r17_assert_null_secret(&p.shared_data, &p.shared_data_presence, 2);
-    r17_assert_present(&p.public_data, &p.public_data_presence, &public);
-    r17_assert_present(&p.public_data2, &p.public_data2_presence, &public2);
+    r17_assert_null_secret(&p.shared_data_presence, 2);
+    r17_assert_present(&p.public_data_presence, &public);
+    r17_assert_present(&p.public_data2_presence, &public2);
 }
 
 /// R17 embedded-field matrix for `x942_dh2_derive`.
@@ -6600,29 +6729,29 @@ fn r17_matrix_x942_dh2_derive() {
     let mut public = [0xB3u8; 65];
     let mut public2 = [0xB4u8; 65];
     let p = read(oi.as_mut_ptr(), 2, public.as_mut_ptr(), 65, public2.as_mut_ptr(), 65);
-    r17_assert_present_secret(&p.other_info, &p.other_info_presence, &oi);
-    r17_assert_present(&p.public_data, &p.public_data_presence, &public);
-    r17_assert_present(&p.public_data2, &p.public_data2_presence, &public2);
+    r17_assert_present_secret(&p.other_info_presence, &oi);
+    r17_assert_present(&p.public_data_presence, &public);
+    r17_assert_present(&p.public_data2_presence, &public2);
     let p = read(oi.as_mut_ptr(), 0, public.as_mut_ptr(), 0, public2.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.other_info, &p.other_info_presence, &[]);
-    r17_assert_present(&p.public_data, &p.public_data_presence, &[]);
-    r17_assert_present(&p.public_data2, &p.public_data2_presence, &[]);
+    r17_assert_present_secret(&p.other_info_presence, &[]);
+    r17_assert_present(&p.public_data_presence, &[]);
+    r17_assert_present(&p.public_data2_presence, &[]);
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.other_info, &p.other_info_presence, 0);
-    r17_assert_null(&p.public_data, &p.public_data_presence, 0);
-    r17_assert_null(&p.public_data2, &p.public_data2_presence, 0);
+    r17_assert_null_secret(&p.other_info_presence, 0);
+    r17_assert_null(&p.public_data_presence, 0);
+    r17_assert_null(&p.public_data2_presence, 0);
     let p = read(std::ptr::null_mut(), 2, std::ptr::null_mut(), 65, std::ptr::null_mut(), 65);
-    r17_assert_null_secret(&p.other_info, &p.other_info_presence, 2);
-    r17_assert_null(&p.public_data, &p.public_data_presence, 65);
-    r17_assert_null(&p.public_data2, &p.public_data2_presence, 65);
+    r17_assert_null_secret(&p.other_info_presence, 2);
+    r17_assert_null(&p.public_data_presence, 65);
+    r17_assert_null(&p.public_data2_presence, 65);
     let p = read(oi.as_mut_ptr(), 2, public.as_mut_ptr(), 65, std::ptr::null_mut(), 65);
-    r17_assert_present_secret(&p.other_info, &p.other_info_presence, &oi);
-    r17_assert_present(&p.public_data, &p.public_data_presence, &public);
-    r17_assert_null(&p.public_data2, &p.public_data2_presence, 65);
+    r17_assert_present_secret(&p.other_info_presence, &oi);
+    r17_assert_present(&p.public_data_presence, &public);
+    r17_assert_null(&p.public_data2_presence, 65);
     let p = read(std::ptr::null_mut(), 2, public.as_mut_ptr(), 65, public2.as_mut_ptr(), 65);
-    r17_assert_null_secret(&p.other_info, &p.other_info_presence, 2);
-    r17_assert_present(&p.public_data, &p.public_data_presence, &public);
-    r17_assert_present(&p.public_data2, &p.public_data2_presence, &public2);
+    r17_assert_null_secret(&p.other_info_presence, 2);
+    r17_assert_present(&p.public_data_presence, &public);
+    r17_assert_present(&p.public_data2_presence, &public2);
 }
 
 /// R17 embedded-field matrix for `x942_mqv_derive` (note the
@@ -6668,29 +6797,29 @@ fn r17_matrix_x942_mqv_derive() {
     let mut public2 = [0xC4u8; 65];
     let p = read(oi.as_mut_ptr(), 2, public.as_mut_ptr(), 65, public2.as_mut_ptr(), 65);
     assert_eq!(p.public_key_handle.0, 0x61);
-    r17_assert_present_secret(&p.other_info, &p.other_info_presence, &oi);
-    r17_assert_present(&p.public_data, &p.public_data_presence, &public);
-    r17_assert_present(&p.public_data2, &p.public_data2_presence, &public2);
+    r17_assert_present_secret(&p.other_info_presence, &oi);
+    r17_assert_present(&p.public_data_presence, &public);
+    r17_assert_present(&p.public_data2_presence, &public2);
     let p = read(oi.as_mut_ptr(), 0, public.as_mut_ptr(), 0, public2.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.other_info, &p.other_info_presence, &[]);
-    r17_assert_present(&p.public_data, &p.public_data_presence, &[]);
-    r17_assert_present(&p.public_data2, &p.public_data2_presence, &[]);
+    r17_assert_present_secret(&p.other_info_presence, &[]);
+    r17_assert_present(&p.public_data_presence, &[]);
+    r17_assert_present(&p.public_data2_presence, &[]);
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.other_info, &p.other_info_presence, 0);
-    r17_assert_null(&p.public_data, &p.public_data_presence, 0);
-    r17_assert_null(&p.public_data2, &p.public_data2_presence, 0);
+    r17_assert_null_secret(&p.other_info_presence, 0);
+    r17_assert_null(&p.public_data_presence, 0);
+    r17_assert_null(&p.public_data2_presence, 0);
     let p = read(std::ptr::null_mut(), 2, std::ptr::null_mut(), 65, std::ptr::null_mut(), 65);
-    r17_assert_null_secret(&p.other_info, &p.other_info_presence, 2);
-    r17_assert_null(&p.public_data, &p.public_data_presence, 65);
-    r17_assert_null(&p.public_data2, &p.public_data2_presence, 65);
+    r17_assert_null_secret(&p.other_info_presence, 2);
+    r17_assert_null(&p.public_data_presence, 65);
+    r17_assert_null(&p.public_data2_presence, 65);
     let p = read(oi.as_mut_ptr(), 2, public.as_mut_ptr(), 65, std::ptr::null_mut(), 65);
-    r17_assert_present_secret(&p.other_info, &p.other_info_presence, &oi);
-    r17_assert_present(&p.public_data, &p.public_data_presence, &public);
-    r17_assert_null(&p.public_data2, &p.public_data2_presence, 65);
+    r17_assert_present_secret(&p.other_info_presence, &oi);
+    r17_assert_present(&p.public_data_presence, &public);
+    r17_assert_null(&p.public_data2_presence, 65);
     let p = read(std::ptr::null_mut(), 2, public.as_mut_ptr(), 65, public2.as_mut_ptr(), 65);
-    r17_assert_null_secret(&p.other_info, &p.other_info_presence, 2);
-    r17_assert_present(&p.public_data, &p.public_data_presence, &public);
-    r17_assert_present(&p.public_data2, &p.public_data2_presence, &public2);
+    r17_assert_null_secret(&p.other_info_presence, 2);
+    r17_assert_present(&p.public_data_presence, &public);
+    r17_assert_present(&p.public_data2_presence, &public2);
 }
 
 /// R17 embedded-field matrix for `pkcs5_pbkd2` (three fields).
@@ -6735,31 +6864,31 @@ fn r17_matrix_pkcs5_pbkd2() {
     let void = |p: *mut u8| p as CK_VOID_PTR;
     let p = read(void(salt.as_mut_ptr()), 2, void(prf.as_mut_ptr()), 1, password.as_mut_ptr(), 6);
     assert_eq!(p.iterations, 600_000);
-    r17_assert_present_secret(&p.salt_source_data, &p.salt_source_data_presence, &salt);
-    r17_assert_present_secret(&p.prf_data, &p.prf_data_presence, &prf);
-    r17_assert_present_secret(&p.password, &p.password_presence, &password);
+    r17_assert_present_secret(&p.salt_source_data_presence, &salt);
+    r17_assert_present_secret(&p.prf_data_presence, &prf);
+    r17_assert_present_secret(&p.password_presence, &password);
     let p = read(void(salt.as_mut_ptr()), 0, void(prf.as_mut_ptr()), 0, password.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.salt_source_data, &p.salt_source_data_presence, &[]);
-    r17_assert_present_secret(&p.prf_data, &p.prf_data_presence, &[]);
-    r17_assert_present_secret(&p.password, &p.password_presence, &[]);
+    r17_assert_present_secret(&p.salt_source_data_presence, &[]);
+    r17_assert_present_secret(&p.prf_data_presence, &[]);
+    r17_assert_present_secret(&p.password_presence, &[]);
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.salt_source_data, &p.salt_source_data_presence, 0);
-    r17_assert_null_secret(&p.prf_data, &p.prf_data_presence, 0);
-    r17_assert_null_secret(&p.password, &p.password_presence, 0);
+    r17_assert_null_secret(&p.salt_source_data_presence, 0);
+    r17_assert_null_secret(&p.prf_data_presence, 0);
+    r17_assert_null_secret(&p.password_presence, 0);
     let p = read(std::ptr::null_mut(), 2, std::ptr::null_mut(), 1, std::ptr::null_mut(), 6);
-    r17_assert_null_secret(&p.salt_source_data, &p.salt_source_data_presence, 2);
-    r17_assert_null_secret(&p.prf_data, &p.prf_data_presence, 1);
-    r17_assert_null_secret(&p.password, &p.password_presence, 6);
+    r17_assert_null_secret(&p.salt_source_data_presence, 2);
+    r17_assert_null_secret(&p.prf_data_presence, 1);
+    r17_assert_null_secret(&p.password_presence, 6);
     // Mixed: valid salt/prf + NULL password.
     let p = read(void(salt.as_mut_ptr()), 2, void(prf.as_mut_ptr()), 1, std::ptr::null_mut(), 6);
-    r17_assert_present_secret(&p.salt_source_data, &p.salt_source_data_presence, &salt);
-    r17_assert_present_secret(&p.prf_data, &p.prf_data_presence, &prf);
-    r17_assert_null_secret(&p.password, &p.password_presence, 6);
+    r17_assert_present_secret(&p.salt_source_data_presence, &salt);
+    r17_assert_present_secret(&p.prf_data_presence, &prf);
+    r17_assert_null_secret(&p.password_presence, 6);
     // Mixed: NULL salt + valid prf/password.
     let p = read(std::ptr::null_mut(), 2, void(prf.as_mut_ptr()), 1, password.as_mut_ptr(), 6);
-    r17_assert_null_secret(&p.salt_source_data, &p.salt_source_data_presence, 2);
-    r17_assert_present_secret(&p.prf_data, &p.prf_data_presence, &prf);
-    r17_assert_present_secret(&p.password, &p.password_presence, &password);
+    r17_assert_null_secret(&p.salt_source_data_presence, 2);
+    r17_assert_present_secret(&p.prf_data_presence, &prf);
+    r17_assert_present_secret(&p.password_presence, &password);
 }
 
 /// R17 embedded-field matrix for `pbe` (fixed 8-byte IV + two
@@ -6800,31 +6929,31 @@ fn r17_matrix_pbe() {
     let mut salt = [0xD4u8; 8];
     let p = read(iv.as_mut_ptr(), password.as_mut_ptr(), 2, salt.as_mut_ptr(), 8);
     assert_eq!(p.iteration, 1);
-    r17_assert_present_secret(&p.init_vector, &p.init_vector_presence, &iv);
-    r17_assert_present_secret(&p.password, &p.password_presence, &password);
-    r17_assert_present_secret(&p.salt, &p.salt_presence, &salt);
+    r17_assert_present_secret(&p.init_vector_presence, &iv);
+    r17_assert_present_secret(&p.password_presence, &password);
+    r17_assert_present_secret(&p.salt_presence, &salt);
     let p = read(iv.as_mut_ptr(), password.as_mut_ptr(), 0, salt.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.init_vector, &p.init_vector_presence, &iv);
-    r17_assert_present_secret(&p.password, &p.password_presence, &[]);
-    r17_assert_present_secret(&p.salt, &p.salt_presence, &[]);
+    r17_assert_present_secret(&p.init_vector_presence, &iv);
+    r17_assert_present_secret(&p.password_presence, &[]);
+    r17_assert_present_secret(&p.salt_presence, &[]);
     let p = read(std::ptr::null_mut(), std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.init_vector, &p.init_vector_presence, 8);
-    r17_assert_null_secret(&p.password, &p.password_presence, 0);
-    r17_assert_null_secret(&p.salt, &p.salt_presence, 0);
+    r17_assert_null_secret(&p.init_vector_presence, 8);
+    r17_assert_null_secret(&p.password_presence, 0);
+    r17_assert_null_secret(&p.salt_presence, 0);
     let p = read(std::ptr::null_mut(), std::ptr::null_mut(), 2, std::ptr::null_mut(), 8);
-    r17_assert_null_secret(&p.init_vector, &p.init_vector_presence, 8);
-    r17_assert_null_secret(&p.password, &p.password_presence, 2);
-    r17_assert_null_secret(&p.salt, &p.salt_presence, 8);
+    r17_assert_null_secret(&p.init_vector_presence, 8);
+    r17_assert_null_secret(&p.password_presence, 2);
+    r17_assert_null_secret(&p.salt_presence, 8);
     // Mixed: valid IV/password + NULL salt.
     let p = read(iv.as_mut_ptr(), password.as_mut_ptr(), 2, std::ptr::null_mut(), 8);
-    r17_assert_present_secret(&p.init_vector, &p.init_vector_presence, &iv);
-    r17_assert_present_secret(&p.password, &p.password_presence, &password);
-    r17_assert_null_secret(&p.salt, &p.salt_presence, 8);
+    r17_assert_present_secret(&p.init_vector_presence, &iv);
+    r17_assert_present_secret(&p.password_presence, &password);
+    r17_assert_null_secret(&p.salt_presence, 8);
     // Mixed: NULL IV + valid password/salt.
     let p = read(std::ptr::null_mut(), password.as_mut_ptr(), 2, salt.as_mut_ptr(), 8);
-    r17_assert_null_secret(&p.init_vector, &p.init_vector_presence, 8);
-    r17_assert_present_secret(&p.password, &p.password_presence, &password);
-    r17_assert_present_secret(&p.salt, &p.salt_presence, &salt);
+    r17_assert_null_secret(&p.init_vector_presence, 8);
+    r17_assert_present_secret(&p.password_presence, &password);
+    r17_assert_present_secret(&p.salt_presence, &salt);
 }
 
 /// R17 embedded-field matrix for `gcm_wrap` (wrap operation context).
@@ -6861,23 +6990,23 @@ fn r17_matrix_gcm_wrap() {
     let mut aad = [0xA1u8, 0xA2];
     let p = read(iv.as_mut_ptr(), 12, aad.as_mut_ptr(), 2);
     assert_eq!(p.iv_fixed_bits, 32);
-    r17_assert_present(&p.iv, &p.iv_presence, &iv);
-    r17_assert_present_secret(&p.aad, &p.aad_presence, &aad);
+    r17_assert_present(&p.iv_presence, &iv);
+    r17_assert_present_secret(&p.aad_presence, &aad);
     let p = read(iv.as_mut_ptr(), 0, aad.as_mut_ptr(), 0);
-    r17_assert_present(&p.iv, &p.iv_presence, &[]);
-    r17_assert_present_secret(&p.aad, &p.aad_presence, &[]);
+    r17_assert_present(&p.iv_presence, &[]);
+    r17_assert_present_secret(&p.aad_presence, &[]);
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null(&p.iv, &p.iv_presence, 0);
-    r17_assert_null_secret(&p.aad, &p.aad_presence, 0);
+    r17_assert_null(&p.iv_presence, 0);
+    r17_assert_null_secret(&p.aad_presence, 0);
     let p = read(std::ptr::null_mut(), 12, std::ptr::null_mut(), 2);
-    r17_assert_null(&p.iv, &p.iv_presence, 12);
-    r17_assert_null_secret(&p.aad, &p.aad_presence, 2);
+    r17_assert_null(&p.iv_presence, 12);
+    r17_assert_null_secret(&p.aad_presence, 2);
     let p = read(iv.as_mut_ptr(), 12, std::ptr::null_mut(), 2);
-    r17_assert_present(&p.iv, &p.iv_presence, &iv);
-    r17_assert_null_secret(&p.aad, &p.aad_presence, 2);
+    r17_assert_present(&p.iv_presence, &iv);
+    r17_assert_null_secret(&p.aad_presence, 2);
     let p = read(std::ptr::null_mut(), 12, aad.as_mut_ptr(), 2);
-    r17_assert_null(&p.iv, &p.iv_presence, 12);
-    r17_assert_present_secret(&p.aad, &p.aad_presence, &aad);
+    r17_assert_null(&p.iv_presence, 12);
+    r17_assert_present_secret(&p.aad_presence, &aad);
 }
 
 /// R17 embedded-field matrix for `ccm_wrap` (wrap operation context).
@@ -6916,23 +7045,23 @@ fn r17_matrix_ccm_wrap() {
     let mut aad = [0xB1u8, 0xB2, 0xB3];
     let p = read(nonce.as_mut_ptr(), 12, aad.as_mut_ptr(), 3);
     assert_eq!((p.data_len, p.mac_len), (16, 16));
-    r17_assert_present(&p.nonce, &p.nonce_presence, &nonce);
-    r17_assert_present_secret(&p.aad, &p.aad_presence, &aad);
+    r17_assert_present(&p.nonce_presence, &nonce);
+    r17_assert_present_secret(&p.aad_presence, &aad);
     let p = read(nonce.as_mut_ptr(), 0, aad.as_mut_ptr(), 0);
-    r17_assert_present(&p.nonce, &p.nonce_presence, &[]);
-    r17_assert_present_secret(&p.aad, &p.aad_presence, &[]);
+    r17_assert_present(&p.nonce_presence, &[]);
+    r17_assert_present_secret(&p.aad_presence, &[]);
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null(&p.nonce, &p.nonce_presence, 0);
-    r17_assert_null_secret(&p.aad, &p.aad_presence, 0);
+    r17_assert_null(&p.nonce_presence, 0);
+    r17_assert_null_secret(&p.aad_presence, 0);
     let p = read(std::ptr::null_mut(), 12, std::ptr::null_mut(), 3);
-    r17_assert_null(&p.nonce, &p.nonce_presence, 12);
-    r17_assert_null_secret(&p.aad, &p.aad_presence, 3);
+    r17_assert_null(&p.nonce_presence, 12);
+    r17_assert_null_secret(&p.aad_presence, 3);
     let p = read(nonce.as_mut_ptr(), 12, std::ptr::null_mut(), 3);
-    r17_assert_present(&p.nonce, &p.nonce_presence, &nonce);
-    r17_assert_null_secret(&p.aad, &p.aad_presence, 3);
+    r17_assert_present(&p.nonce_presence, &nonce);
+    r17_assert_null_secret(&p.aad_presence, 3);
     let p = read(std::ptr::null_mut(), 12, aad.as_mut_ptr(), 3);
-    r17_assert_null(&p.nonce, &p.nonce_presence, 12);
-    r17_assert_present_secret(&p.aad, &p.aad_presence, &aad);
+    r17_assert_null(&p.nonce_presence, 12);
+    r17_assert_present_secret(&p.aad_presence, &aad);
 }
 
 /// R17 `gcm_compat` dual encoding under v1: short buffers stay `Iv`
@@ -6979,8 +7108,8 @@ fn r17_matrix_gcm_compat() {
     .params
     {
         Some(CkMechanismParams::Gcm(p)) => {
-            r17_assert_present(&p.iv, &p.iv_presence, &iv);
-            r17_assert_null_secret(&p.aad, &p.aad_presence, 16);
+            r17_assert_present(&p.iv_presence, &iv);
+            r17_assert_null_secret(&p.aad_presence, 16);
         }
         other => panic!("struct gcm_compat must stay typed GCM under v1, got {other:?}"),
     }
@@ -7002,8 +7131,8 @@ fn r17_matrix_gcm_compat() {
     .params
     {
         Some(CkMechanismParams::Gcm(p)) => {
-            r17_assert_null(&p.iv, &p.iv_presence, 12);
-            r17_assert_present_secret(&p.aad, &p.aad_presence, &aad);
+            r17_assert_null(&p.iv_presence, 12);
+            r17_assert_present_secret(&p.aad_presence, &aad);
         }
         other => panic!("struct gcm_compat must stay typed GCM under v1, got {other:?}"),
     }
@@ -7053,23 +7182,12 @@ fn r17_matrix_rsa_aes_key_wrap() {
         match read(&mut oaep).expect("nested OAEP stays typed under v1").params {
             Some(CkMechanismParams::RsaAesKeyWrap(p)) => {
                 assert_eq!(p.aes_key_bits, 256);
-                assert!(!p.oaep_params.source_null, "v1 is presence-only");
                 match expect_null {
-                    Some(n) => r17_assert_null_secret(
-                        &p.oaep_params.source_data,
-                        &p.oaep_params.source_data_presence,
-                        n,
-                    ),
-                    None if len == 0 => r17_assert_present_secret(
-                        &p.oaep_params.source_data,
-                        &p.oaep_params.source_data_presence,
-                        &[],
-                    ),
-                    None => r17_assert_present_secret(
-                        &p.oaep_params.source_data,
-                        &p.oaep_params.source_data_presence,
-                        &data,
-                    ),
+                    Some(n) => r17_assert_null_secret(&p.oaep_params.source_data_presence, n),
+                    None if len == 0 => {
+                        r17_assert_present_secret(&p.oaep_params.source_data_presence, &[])
+                    }
+                    None => r17_assert_present_secret(&p.oaep_params.source_data_presence, &data),
                 }
             }
             other => panic!("nested OAEP must stay typed under v1, got {other:?}"),
@@ -7111,8 +7229,8 @@ fn r17_d3_null_huge_forwards_per_field() {
     .params
     {
         Some(CkMechanismParams::Gcm(p)) => {
-            r17_assert_null(&p.iv, &p.iv_presence, HUGE as u64);
-            r17_assert_null_secret(&p.aad, &p.aad_presence, CK_ULONG::MAX as u64);
+            r17_assert_null(&p.iv_presence, HUGE as u64);
+            r17_assert_null_secret(&p.aad_presence, CK_ULONG::MAX as u64);
         }
         other => panic!("NULL-huge GCM must stay typed under v1, got {other:?}"),
     }
@@ -7132,8 +7250,8 @@ fn r17_d3_null_huge_forwards_per_field() {
     .params
     {
         Some(CkMechanismParams::Gcm(p)) => {
-            r17_assert_present(&p.iv, &p.iv_presence, &tiny);
-            r17_assert_null_secret(&p.aad, &p.aad_presence, CK_ULONG::MAX as u64);
+            r17_assert_present(&p.iv_presence, &tiny);
+            r17_assert_null_secret(&p.aad_presence, CK_ULONG::MAX as u64);
         }
         other => panic!("mixed tiny-NULL-huge GCM must stay typed under v1, got {other:?}"),
     }
@@ -7173,7 +7291,7 @@ fn r17_d3_null_huge_forwards_per_field() {
     .params
     {
         Some(CkMechanismParams::Eddsa(p)) => {
-            r17_assert_null_secret(&p.context_data, &p.context_data_presence, CK_ULONG::MAX as u64);
+            r17_assert_null_secret(&p.context_data_presence, CK_ULONG::MAX as u64);
         }
         other => panic!("EdDSA NULL-huge must stay typed under v1, got {other:?}"),
     }
@@ -7238,7 +7356,7 @@ fn r17_ceiling_512mib_boundary_per_field() {
     .params
     {
         Some(CkMechanismParams::KeyDerivationString(p)) => {
-            r17_assert_null_secret(&p.data, &p.data_presence, (MAX_SERIALIZABLE_BYTES + 1) as u64);
+            r17_assert_null_secret(&p.data_presence, (MAX_SERIALIZABLE_BYTES + 1) as u64);
         }
         other => panic!("NULL ceiling+1 must stay typed under v1, got {other:?}"),
     }
@@ -7378,8 +7496,8 @@ fn r17_cross_path_each_operation_entry_hits_typed_v1() {
     .params
     {
         Some(CkMechanismParams::Gcm(p)) => {
-            r17_assert_present(&p.iv, &p.iv_presence, &iv);
-            r17_assert_null_secret(&p.aad, &p.aad_presence, 16);
+            r17_assert_present(&p.iv_presence, &iv);
+            r17_assert_null_secret(&p.aad_presence, 16);
         }
         other => panic!("init-path GCM must stay typed under v1, got {other:?}"),
     }
@@ -7407,8 +7525,8 @@ fn r17_cross_path_each_operation_entry_hits_typed_v1() {
     .params
     {
         Some(CkMechanismParams::GcmWrap(p)) => {
-            r17_assert_null(&p.iv, &p.iv_presence, 12);
-            r17_assert_present_secret(&p.aad, &p.aad_presence, &wrap_aad);
+            r17_assert_null(&p.iv_presence, 12);
+            r17_assert_present_secret(&p.aad_presence, &wrap_aad);
         }
         other => panic!("wrap-path GCM-wrap must stay typed under v1, got {other:?}"),
     }
@@ -7433,8 +7551,8 @@ fn r17_cross_path_each_operation_entry_hits_typed_v1() {
     .params
     {
         Some(CkMechanismParams::Ecdh1Derive(p)) => {
-            r17_assert_present_secret(&p.shared_data, &p.shared_data_presence, &shared);
-            r17_assert_null(&p.public_data, &p.public_data_presence, 65);
+            r17_assert_present_secret(&p.shared_data_presence, &shared);
+            r17_assert_null(&p.public_data_presence, 65);
         }
         other => panic!("derive-path ECDH1 must stay typed under v1, got {other:?}"),
     }
@@ -7463,8 +7581,8 @@ fn r17_cross_path_each_operation_entry_hits_typed_v1() {
     .params
     {
         Some(CkMechanismParams::Hkdf(p)) => {
-            r17_assert_null_secret(&p.salt, &p.salt_presence, 32);
-            r17_assert_present_secret(&p.info, &p.info_presence, &info);
+            r17_assert_null_secret(&p.salt_presence, 32);
+            r17_assert_present_secret(&p.info_presence, &info);
         }
         other => panic!("generate-path HKDF must stay typed under v1, got {other:?}"),
     }
@@ -7487,7 +7605,7 @@ fn r17_cross_path_each_operation_entry_hits_typed_v1() {
     .params
     {
         Some(CkMechanismParams::EcdhAesKeyWrap(p)) => {
-            r17_assert_null_secret(&p.shared_data, &p.shared_data_presence, 9);
+            r17_assert_null_secret(&p.shared_data_presence, 9);
         }
         other => panic!("KEM-path ECDH-AES-wrap must stay typed under v1, got {other:?}"),
     }
@@ -7516,8 +7634,8 @@ fn r17_cross_path_each_operation_entry_hits_typed_v1() {
     .params
     {
         Some(CkMechanismParams::CcmWrap(p)) => {
-            r17_assert_present(&p.nonce, &p.nonce_presence, &nonce);
-            r17_assert_null_secret(&p.aad, &p.aad_presence, 5);
+            r17_assert_present(&p.nonce_presence, &nonce);
+            r17_assert_null_secret(&p.aad_presence, 5);
         }
         other => panic!("authenticated-path CCM-wrap must stay typed under v1, got {other:?}"),
     }
@@ -7596,24 +7714,18 @@ unsafe fn r18_read_v1(
     unsafe { read_r11_v1_native_abi(&mechanism, registry, Operation::General) }
 }
 
-/// Assert one v1 counted array is NULL with `declared_count`: legacy
-/// vec stays empty, peer is `Null(n)`.
+/// Assert one v1 counted array is NULL with `declared_count`: peer
+/// is `Null(n)` (R19: the legacy mirror is gone).
 fn r18_assert_null_array<T: PartialEq + std::fmt::Debug>(
-    legacy: &[T],
     peer: &PointerArray<T>,
     declared_count: u64,
 ) {
-    assert!(legacy.is_empty(), "NULL legacy array stays empty");
     assert_eq!(peer, &PointerArray::null_count(declared_count), "peer is Null(n)");
 }
 
-/// Assert one v1 counted array is present-but-empty: legacy vec stays
-/// empty, peer is `Present(empty)`.
-fn r18_assert_present_empty_array<T: PartialEq + std::fmt::Debug>(
-    legacy: &[T],
-    peer: &PointerArray<T>,
-) {
-    assert!(legacy.is_empty(), "empty legacy array stays empty");
+/// Assert one v1 counted array is present-but-empty: peer is
+/// `Present(empty)` (R19: the legacy mirror is gone).
+fn r18_assert_present_empty_array<T: PartialEq + std::fmt::Debug>(peer: &PointerArray<T>) {
     assert_eq!(peer, &PointerArray::present(Vec::new()), "peer is Present(empty)");
 }
 
@@ -7694,8 +7806,8 @@ fn r18_tls_prf_v1_null_seed_stays_typed() {
     .params
     {
         Some(CkMechanismParams::TlsPrf(p)) => {
-            r17_assert_null_secret(&p.seed, &p.seed_presence, 7);
-            r17_assert_present_secret(&p.label, &p.label_presence, &label);
+            r17_assert_null_secret(&p.seed_presence, 7);
+            r17_assert_present_secret(&p.label_presence, &label);
             assert!(p.output_is_null);
             assert!(p.output_len_is_null);
             assert_eq!(p.output_len, 0);
@@ -7735,8 +7847,8 @@ fn r18_tls_prf_v1_output_bits() {
     .params
     {
         Some(CkMechanismParams::TlsPrf(p)) => {
-            r17_assert_present_secret(&p.seed, &p.seed_presence, &seed);
-            r17_assert_present_secret(&p.label, &p.label_presence, &label);
+            r17_assert_present_secret(&p.seed_presence, &seed);
+            r17_assert_present_secret(&p.label_presence, &label);
             assert!(!p.output_is_null);
             assert!(!p.output_len_is_null);
             assert_eq!(p.output_len, 48);
@@ -7779,14 +7891,10 @@ fn r18_tls_kdf_v1_mixed_nulls() {
     {
         Some(CkMechanismParams::TlsKdf(p)) => {
             assert_eq!(p.prf_mechanism.0, CkMechanismType::SHA384.0 as u64);
-            r17_assert_null_secret(&p.label, &p.label_presence, 3);
-            r17_assert_null(&p.random_info.client_random, &p.random_info.client_random_presence, 5);
-            r17_assert_present(
-                &p.random_info.server_random,
-                &p.random_info.server_random_presence,
-                &server_random,
-            );
-            r17_assert_null_secret(&p.context_data, &p.context_data_presence, 0);
+            r17_assert_null_secret(&p.label_presence, 3);
+            r17_assert_null(&p.random_info.client_random_presence, 5);
+            r17_assert_present(&p.random_info.server_random_presence, &server_random);
+            r17_assert_null_secret(&p.context_data_presence, 0);
         }
         other => panic!("mixed-NULL TLS KDF must stay typed under v1, got {other:?}"),
     }
@@ -7820,12 +7928,8 @@ fn r18_ssl3_master_v1_null_version() {
     .params
     {
         Some(CkMechanismParams::Ssl3MasterKeyDerive(p)) => {
-            r17_assert_null(&p.random_info.client_random, &p.random_info.client_random_presence, 0);
-            r17_assert_present(
-                &p.random_info.server_random,
-                &p.random_info.server_random_presence,
-                &server_random,
-            );
+            r17_assert_null(&p.random_info.client_random_presence, 0);
+            r17_assert_present(&p.random_info.server_random_presence, &server_random);
             assert!(p.version_is_null);
             assert_eq!((p.version_major, p.version_minor), (0, 0));
         }
@@ -7863,16 +7967,8 @@ fn r18_tls12_master_v1_present_version() {
     .params
     {
         Some(CkMechanismParams::Tls12MasterKeyDerive(p)) => {
-            r17_assert_present(
-                &p.random_info.client_random,
-                &p.random_info.client_random_presence,
-                &client_random,
-            );
-            r17_assert_present(
-                &p.random_info.server_random,
-                &p.random_info.server_random_presence,
-                &server_random,
-            );
+            r17_assert_present(&p.random_info.client_random_presence, &client_random);
+            r17_assert_present(&p.random_info.server_random_presence, &server_random);
             assert!(!p.version_is_null);
             assert_eq!((p.version_major, p.version_minor), (3, 3));
             assert_eq!(p.prf_hash_mechanism.0, CkMechanismType::SHA256.0 as u64);
@@ -7905,7 +8001,7 @@ fn r18_tls12_extended_v1_null_session_hash() {
     {
         Some(CkMechanismParams::Tls12ExtendedMasterKeyDerive(p)) => {
             assert_eq!(p.prf_hash_mechanism.0, CkMechanismType::SHA512.0 as u64);
-            r17_assert_null(&p.session_hash, &p.session_hash_presence, 9);
+            r17_assert_null(&p.session_hash_presence, 9);
             assert!(p.version_is_null);
             assert_eq!((p.version_major, p.version_minor), (0, 0));
         }
@@ -7946,23 +8042,15 @@ fn r18_ssl3_key_mat_v1_null_returned() {
     .params
     {
         Some(CkMechanismParams::Ssl3KeyMat(p)) => {
-            r17_assert_present(
-                &p.random_info.client_random,
-                &p.random_info.client_random_presence,
-                &client_random,
-            );
-            r17_assert_present(
-                &p.random_info.server_random,
-                &p.random_info.server_random_presence,
-                &server_random,
-            );
+            r17_assert_present(&p.random_info.client_random_presence, &client_random);
+            r17_assert_present(&p.random_info.server_random_presence, &server_random);
             assert!(p.returned_key_material_is_null);
             assert_eq!(p.client_mac_secret_handle.0, 0);
             assert_eq!(p.server_mac_secret_handle.0, 0);
             assert_eq!(p.client_key_handle.0, 0);
             assert_eq!(p.server_key_handle.0, 0);
-            r17_assert_null_secret(&p.client_iv, &p.client_iv_presence, 4);
-            r17_assert_null_secret(&p.server_iv, &p.server_iv_presence, 4);
+            r17_assert_null_secret(&p.client_iv_presence, 4);
+            r17_assert_null_secret(&p.server_iv_presence, 4);
             assert_eq!(p.prf_hash_mechanism.0, 0, "ssl3 form carries no prf");
         }
         other => panic!("NULL-returned SSL3 key-mat must stay typed under v1, got {other:?}"),
@@ -8017,8 +8105,8 @@ fn r18_ssl3_key_mat_v1_tls12_superset_present() {
             assert_eq!(p.server_mac_secret_handle.0, 102);
             assert_eq!(p.client_key_handle.0, 201);
             assert_eq!(p.server_key_handle.0, 202);
-            r17_assert_present_secret(&p.client_iv, &p.client_iv_presence, &client_iv);
-            r17_assert_present_secret(&p.server_iv, &p.server_iv_presence, &server_iv);
+            r17_assert_present_secret(&p.client_iv_presence, &client_iv);
+            r17_assert_present_secret(&p.server_iv_presence, &server_iv);
             assert_eq!(p.prf_hash_mechanism.0, CkMechanismType::SHA256.0 as u64);
         }
         other => panic!("present TLS12 key-mat must stay typed under v1, got {other:?}"),
@@ -8054,12 +8142,8 @@ fn r18_wtls_master_v1_null_version() {
     {
         Some(CkMechanismParams::WtlsMasterKeyDerive(p)) => {
             assert_eq!(p.digest_mechanism.0, CkMechanismType::SHA256.0 as u64);
-            r17_assert_null(&p.random_info.client_random, &p.random_info.client_random_presence, 6);
-            r17_assert_present(
-                &p.random_info.server_random,
-                &p.random_info.server_random_presence,
-                &server_random,
-            );
+            r17_assert_null(&p.random_info.client_random_presence, 6);
+            r17_assert_present(&p.random_info.server_random_presence, &server_random);
             assert!(p.version_is_null);
             assert_eq!(p.version, 0);
         }
@@ -8097,8 +8181,8 @@ fn r18_wtls_prf_v1_output_bits() {
     .params
     {
         Some(CkMechanismParams::WtlsPrf(p)) => {
-            r17_assert_present_secret(&p.seed, &p.seed_presence, &seed);
-            r17_assert_present_secret(&p.label, &p.label_presence, &label);
+            r17_assert_present_secret(&p.seed_presence, &seed);
+            r17_assert_present_secret(&p.label_presence, &label);
             assert!(!p.output_is_null);
             assert!(!p.output_len_is_null);
             assert_eq!(p.output_len, 20);
@@ -8147,7 +8231,7 @@ fn r18_wtls_key_mat_v1_null_returned() {
             assert!(p.returned_key_material_is_null);
             assert_eq!(p.mac_secret_handle.0, 0);
             assert_eq!(p.key_handle.0, 0);
-            r17_assert_null_secret(&p.iv, &p.iv_presence, 4);
+            r17_assert_null_secret(&p.iv_presence, 4);
         }
         other => panic!("NULL-returned WTLS key-mat must stay typed under v1, got {other:?}"),
     }
@@ -8181,9 +8265,9 @@ fn r18_kea_v1_null_b_stays_typed() {
     {
         Some(CkMechanismParams::KeaDerive(p)) => {
             assert!(p.is_sender);
-            r17_assert_present(&p.random_a, &p.random_a_presence, &random_a);
-            r17_assert_null(&p.random_b, &p.random_b_presence, 16);
-            r17_assert_null(&p.public_data, &p.public_data_presence, 0);
+            r17_assert_present(&p.random_a_presence, &random_a);
+            r17_assert_null(&p.random_b_presence, 16);
+            r17_assert_null(&p.public_data_presence, 0);
         }
         other => panic!("NULL-B KEA must stay typed under v1, got {other:?}"),
     }
@@ -8213,10 +8297,9 @@ fn r18_kip_v1_null_nesting() {
     .params
     {
         Some(CkMechanismParams::Kip(p)) => {
-            assert!(p.mechanism_is_null);
-            assert_eq!(*p.mechanism, KipParams::NULL_NESTED_MECHANISM);
+            assert!(p.mechanism.is_none());
             assert_eq!(p.key_handle.0, 0x43);
-            r17_assert_present_secret(&p.seed, &p.seed_presence, &seed);
+            r17_assert_present_secret(&p.seed_presence, &seed);
         }
         other => panic!("NULL-nested KIP must stay typed under v1, got {other:?}"),
     }
@@ -8252,11 +8335,15 @@ fn r18_kip_v1_nested_present() {
     crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(0);
     match params {
         Some(CkMechanismParams::Kip(p)) => {
-            assert!(!p.mechanism_is_null);
-            assert_eq!(p.mechanism.mechanism_type.0, CKM_RSA_PKCS as u64);
-            assert_eq!(p.mechanism.params, None, "nested (NULL,0) forwards paramless");
+            assert!(!p.mechanism.is_none());
+            assert_eq!(p.mechanism.as_ref().unwrap().mechanism_type.0, CKM_RSA_PKCS as u64);
+            assert_eq!(
+                p.mechanism.as_ref().unwrap().params,
+                None,
+                "nested (NULL,0) forwards paramless"
+            );
             assert_eq!(p.key_handle.0, 0x44);
-            r17_assert_present_secret(&p.seed, &p.seed_presence, &seed);
+            r17_assert_present_secret(&p.seed_presence, &seed);
         }
         other => panic!("nested-present KIP must stay typed under v1, got {other:?}"),
     }
@@ -8280,7 +8367,7 @@ fn r18_otp_v1_null_array() {
     .params
     {
         Some(CkMechanismParams::Otp(p)) => {
-            r18_assert_null_array(&p.params, &p.params_presence, 5);
+            r18_assert_null_array(&p.params_presence, 5);
         }
         other => panic!("NULL OTP array must stay typed under v1, got {other:?}"),
     }
@@ -8306,7 +8393,7 @@ fn r18_otp_v1_count_zero_and_over_cap() {
     .params
     {
         Some(CkMechanismParams::Otp(p)) => {
-            r18_assert_present_empty_array(&p.params, &p.params_presence);
+            r18_assert_present_empty_array(&p.params_presence);
         }
         other => panic!("count-0 OTP array must read Present(empty) under v1, got {other:?}"),
     }
@@ -8355,14 +8442,17 @@ fn r18_otp_v1_mixed_element_null() {
     .params
     {
         Some(CkMechanismParams::Otp(p)) => {
-            assert_eq!(p.params.len(), 2);
-            assert_eq!(p.params[0].type_, 1);
-            r17_assert_present_secret(&p.params[0].value, &p.params[0].value_presence, &v0);
-            assert_eq!(p.params[1].type_, 2);
-            r17_assert_null_secret(&p.params[1].value, &p.params[1].value_presence, 4);
+            assert_eq!(p.params_presence.as_present().unwrap().len(), 2);
+            assert_eq!(p.params_presence.as_present().unwrap()[0].type_, 1);
+            r17_assert_present_secret(
+                &p.params_presence.as_present().unwrap()[0].value_presence,
+                &v0,
+            );
+            assert_eq!(p.params_presence.as_present().unwrap()[1].type_, 2);
+            r17_assert_null_secret(&p.params_presence.as_present().unwrap()[1].value_presence, 4);
             assert_eq!(
                 p.params_presence,
-                PointerArray::present(p.params.clone()),
+                p.params_presence.clone(),
                 "array peer mirrors the elements"
             );
         }
@@ -8405,13 +8495,13 @@ fn r18_skipjack_private_wrap_v1_null_prime() {
     .params
     {
         Some(CkMechanismParams::SkipjackPrivateWrap(p)) => {
-            r17_assert_present_secret(&p.password, &p.password_presence, &password);
+            r17_assert_present_secret(&p.password_presence, &password);
             assert_eq!(p.password_length, password.len() as u64);
-            r17_assert_present(&p.public_data, &p.public_data_presence, &public_data);
-            r17_assert_present(&p.random_a, &p.random_a_presence, &random_a);
-            r17_assert_null(&p.prime_p, &p.prime_p_presence, base_g.len() as u64);
-            r17_assert_present(&p.base_g, &p.base_g_presence, &base_g);
-            r17_assert_present(&p.subprime_q, &p.subprime_q_presence, &subprime_q);
+            r17_assert_present(&p.public_data_presence, &public_data);
+            r17_assert_present(&p.random_a_presence, &random_a);
+            r17_assert_null(&p.prime_p_presence, base_g.len() as u64);
+            r17_assert_present(&p.base_g_presence, &base_g);
+            r17_assert_present(&p.subprime_q_presence, &subprime_q);
         }
         other => panic!("NULL-prime Skipjack wrap must stay typed under v1, got {other:?}"),
     }
@@ -8456,21 +8546,13 @@ fn r18_skipjack_relayx_v1_mixed_nulls() {
     .params
     {
         Some(CkMechanismParams::SkipjackRelayx(p)) => {
-            r17_assert_present_secret(&p.old_wrapped_x, &p.old_wrapped_x_presence, &old_wrapped_x);
-            r17_assert_null_secret(&p.old_password, &p.old_password_presence, 6);
-            r17_assert_present_secret(
-                &p.old_public_data,
-                &p.old_public_data_presence,
-                &old_public_data,
-            );
-            r17_assert_present_secret(&p.old_random_a, &p.old_random_a_presence, &old_random_a);
-            r17_assert_present_secret(&p.new_password, &p.new_password_presence, &new_password);
-            r17_assert_present_secret(
-                &p.new_public_data,
-                &p.new_public_data_presence,
-                &new_public_data,
-            );
-            r17_assert_present_secret(&p.new_random_a, &p.new_random_a_presence, &new_random_a);
+            r17_assert_present_secret(&p.old_wrapped_x_presence, &old_wrapped_x);
+            r17_assert_null_secret(&p.old_password_presence, 6);
+            r17_assert_present_secret(&p.old_public_data_presence, &old_public_data);
+            r17_assert_present_secret(&p.old_random_a_presence, &old_random_a);
+            r17_assert_present_secret(&p.new_password_presence, &new_password);
+            r17_assert_present_secret(&p.new_public_data_presence, &new_public_data);
+            r17_assert_present_secret(&p.new_random_a_presence, &new_random_a);
         }
         other => panic!("mixed-NULL Skipjack RelayX must stay typed under v1, got {other:?}"),
     }
@@ -8501,12 +8583,8 @@ fn r18_sp800_108_kdf_v1_null_arrays() {
     {
         Some(CkMechanismParams::Sp800108Kdf(p)) => {
             assert_eq!(p.prf_type.0, 1);
-            r18_assert_null_array(&p.data_params, &p.data_params_presence, 2);
-            r18_assert_null_array(
-                &p.additional_derived_keys,
-                &p.additional_derived_keys_presence,
-                3,
-            );
+            r18_assert_null_array(&p.data_params_presence, 2);
+            r18_assert_null_array(&p.additional_derived_keys_presence, 3);
         }
         other => panic!("NULL-array SP800-108 KDF must stay typed under v1, got {other:?}"),
     }
@@ -8550,15 +8628,17 @@ fn r18_sp800_108_null_template_closes_adr0010_residual() {
     .params
     {
         Some(CkMechanismParams::Sp800108Kdf(p)) => {
-            assert_eq!(p.data_params.len(), 1);
+            assert_eq!(p.data_params_presence.as_present().unwrap().len(), 1);
             r17_assert_present_secret(
-                &p.data_params[0].value,
-                &p.data_params[0].value_presence,
+                &p.data_params_presence.as_present().unwrap()[0].value_presence,
                 &value,
             );
-            assert_eq!(p.additional_derived_keys.len(), 1);
-            let dk = &p.additional_derived_keys[0];
-            assert!(dk.template.is_empty(), "NULL template mirror stays empty");
+            assert_eq!(p.additional_derived_keys_presence.as_present().unwrap().len(), 1);
+            let dk = &p.additional_derived_keys_presence.as_present().unwrap()[0];
+            assert!(
+                dk.template_presence.as_present().map(|b| b.is_empty()).unwrap_or(true),
+                "NULL template mirror stays empty"
+            );
             assert_eq!(
                 dk.template_presence,
                 PointerArray::null_count(3),
@@ -8598,13 +8678,9 @@ fn r18_sp800_108_feedback_v1_iv_null() {
     {
         Some(CkMechanismParams::Sp800108FeedbackKdf(p)) => {
             assert_eq!(p.prf_type.0, 2);
-            r18_assert_null_array(&p.data_params, &p.data_params_presence, 0);
-            r17_assert_null(&p.iv, &p.iv_presence, 11);
-            r18_assert_null_array(
-                &p.additional_derived_keys,
-                &p.additional_derived_keys_presence,
-                1,
-            );
+            r18_assert_null_array(&p.data_params_presence, 0);
+            r17_assert_null(&p.iv_presence, 11);
+            r18_assert_null_array(&p.additional_derived_keys_presence, 1);
         }
         other => panic!("NULL-IV feedback KDF must stay typed under v1, got {other:?}"),
     }
@@ -8711,7 +8787,7 @@ fn r18_legacy_capability_tail_behavior_exact() {
     .params
     {
         Some(CkMechanismParams::TlsPrf(p)) => {
-            r17_assert_null_secret(&p.seed, &p.seed_presence, 7);
+            r17_assert_null_secret(&p.seed_presence, 7);
             assert!(p.output_is_null && p.output_len_is_null);
         }
         other => panic!("NULL-seed TLS PRF must stay typed under v1, got {other:?}"),

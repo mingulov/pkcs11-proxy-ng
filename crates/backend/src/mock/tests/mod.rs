@@ -178,7 +178,6 @@ fn sp800_108_counter_iteration_param() -> PrfDataParam {
     PrfDataParam {
         type_: CK_SP800_108_ITERATION_VARIABLE,
         value_presence: PointerBytes::present_copy(&sp800_108_counter_format_bytes()),
-        value: sp800_108_counter_format_bytes().into(),
     }
 }
 
@@ -188,7 +187,6 @@ fn sp800_108_null_iteration_param() -> PrfDataParam {
     PrfDataParam {
         type_: CK_SP800_108_ITERATION_VARIABLE,
         value_presence: PointerBytes::present_copy(&(Vec::new())),
-        value: (Vec::new()).into(),
     }
 }
 
@@ -317,14 +315,12 @@ fn kip_mechanism(mechanism_type: CkMechanismType, key_handle: CkObjectHandle) ->
     CkMechanism {
         mechanism_type,
         params: Some(CkMechanismParams::Kip(KipParams {
-            mechanism: Box::new(CkMechanism {
+            mechanism: Some(Box::new(CkMechanism {
                 mechanism_type: CkMechanismType::SHA256,
                 params: None,
-            }),
+            })),
             key_handle,
             seed_presence: PointerBytes::present_copy(b"seed"),
-            seed: b"seed".to_vec().into(),
-            mechanism_is_null: false,
         })),
     }
 }
@@ -362,14 +358,10 @@ fn expect_derive_param_handle_invalid(
 
 fn gcm_mechanism_output() -> CkMechanismParams {
     CkMechanismParams::Gcm(GcmParams {
-        iv: vec![0xA5; 12],
         iv_bits: 96,
         iv_buffer_len: 12,
-        aad: b"mock-aad".to_vec().into(),
         tag_bits: 128,
         iv_presence: PointerBytes::from_legacy(&[0xA5; 12], false),
         aad_presence: PointerBytes::from_legacy(b"mock-aad", false),
-        iv_null: false,
-        aad_null: false,
     })
 }

@@ -143,12 +143,8 @@ fn gcm_params(json: &serde_json::Value) -> Result<CkMechanismParams, String> {
     let aad_presence = PointerBytes::present_copy(&aad);
     Ok(CkMechanismParams::Gcm(GcmParams {
         iv_bits: iv.len() as u64 * 8,
-        iv,
         iv_buffer_len: 0,
-        aad: aad.into(),
         tag_bits,
-        iv_null: false,
-        aad_null: false,
         iv_presence,
         aad_presence,
     }))
@@ -167,8 +163,6 @@ fn oaep_params(json: &serde_json::Value) -> Result<CkMechanismParams, String> {
         mgf,
         source: CkOaepSource::DATA_SPECIFIED,
         // Empty label is the (NULL, 0) encoding, preserved end to end.
-        source_null: source_data.is_empty(),
-        source_data: source_data.into(),
         source_data_presence,
     }))
 }
@@ -301,10 +295,17 @@ mod tests {
         let CkMechanismParams::Gcm(params) = mech.params.clone().unwrap() else {
             panic!("expected GCM params, got {:?}", mech.params);
         };
-        assert_eq!(params.iv, hex::decode("00112233445566778899aabb").unwrap());
+        assert_eq!(
+            params.iv_presence.as_present().unwrap().expose(|b| b.to_vec()),
+            hex::decode("00112233445566778899aabb").unwrap()
+        );
         assert_eq!(params.iv_bits, 96);
         assert_eq!(params.tag_bits, 96);
-        params.aad.expose(|aad| assert_eq!(aad, &hex::decode("aabb").unwrap()));
+        params
+            .aad_presence
+            .as_present()
+            .unwrap()
+            .expose(|aad| assert_eq!(aad, &hex::decode("aabb").unwrap()));
     }
 
     #[test]
@@ -318,7 +319,7 @@ mod tests {
         assert_eq!(params.hash_alg, CkMechanismType::SHA256);
         assert_eq!(params.mgf, CkMgf::MGF1_SHA256);
         assert_eq!(params.source, CkOaepSource::DATA_SPECIFIED);
-        assert!(params.source_null);
+        assert!(params.source_data_presence.is_null());
     }
 
     #[test]

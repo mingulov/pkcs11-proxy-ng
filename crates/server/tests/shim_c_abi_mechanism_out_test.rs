@@ -577,16 +577,11 @@ async fn loaded_shim_leaves_init_scope_encrypt_params_untouched_after_encrypt() 
     // The backend produces delayed IV output after Init and the transport
     // carries it; the shim must still not write it into Init-scope memory.
     backend.set_encrypt_exact_output(Some(CkMechanismParams::Gcm(GcmParams {
-        iv: encrypt_generated_iv.clone(),
         iv_bits: 96,
         iv_buffer_len: encrypt_generated_iv.len() as u64,
-        aad: b"aad".to_vec().into(),
         tag_bits: 128,
         iv_presence: PointerBytes::from_legacy(&encrypt_generated_iv, false),
         aad_presence: PointerBytes::from_legacy(b"aad", false),
-
-        iv_null: false,
-        aad_null: false,
     })));
     let (endpoint, _shutdown) = common_3x::mock_daemon(backend).await;
     let _endpoint_guard = EnvRestore::set("PKCS11_PROXY_ENDPOINT", &endpoint);
@@ -778,16 +773,11 @@ async fn loaded_shim_writes_wrap_delayed_iv_to_live_caller_stack() {
 
     let backend = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::AES_GCM]));
     backend.set_wrap_key_exact_output(Some(CkMechanismParams::Gcm(GcmParams {
-        iv: wrap_generated_iv.clone(),
         iv_bits: 96,
         iv_buffer_len: wrap_generated_iv.len() as u64,
-        aad: b"wrap-aad".to_vec().into(),
         tag_bits: 128,
         iv_presence: PointerBytes::from_legacy(&wrap_generated_iv, false),
         aad_presence: PointerBytes::from_legacy(b"wrap-aad", false),
-
-        iv_null: false,
-        aad_null: false,
     })));
     let (endpoint, _shutdown) = common_3x::mock_daemon(backend).await;
     let _endpoint_guard = EnvRestore::set("PKCS11_PROXY_ENDPOINT", &endpoint);

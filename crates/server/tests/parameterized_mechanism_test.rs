@@ -463,16 +463,11 @@ async fn softhsm_aes_gcm_encrypt_decrypt() -> Result<(), String> {
     let gcm_mechanism = CkMechanism {
         mechanism_type: CkMechanismType::AES_GCM,
         params: Some(CkMechanismParams::Gcm(GcmParams {
-            iv: iv.clone(),
             iv_bits: 96,
             iv_buffer_len: iv.len() as u64,
-            aad: aad.clone().into(),
             tag_bits: 128,
             iv_presence: PointerBytes::from_legacy(&iv, false),
             aad_presence: PointerBytes::from_legacy(&aad, false),
-
-            iv_null: false,
-            aad_null: false,
         })),
     };
 
@@ -521,10 +516,8 @@ async fn softhsm_aes_gcm_encrypt_decrypt() -> Result<(), String> {
     let gcm_decrypt_mechanism = CkMechanism {
         mechanism_type: CkMechanismType::AES_GCM,
         params: Some(CkMechanismParams::Gcm(GcmParams {
-            iv,
             iv_bits: 96,
             iv_buffer_len: 12,
-            aad: aad.into(),
             tag_bits: 128,
             iv_presence: PointerBytes::from_legacy(
                 &[0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B],
@@ -534,9 +527,6 @@ async fn softhsm_aes_gcm_encrypt_decrypt() -> Result<(), String> {
                 b"softhsm2 gcm additional authenticated data",
                 false,
             ),
-
-            iv_null: false,
-            aad_null: false,
         })),
     };
     client

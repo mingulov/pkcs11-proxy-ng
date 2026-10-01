@@ -163,13 +163,13 @@ pub(crate) unsafe fn payload_bytes(ptr: *const u8, len: CK_ULONG) -> CkResult<Ve
 pub(crate) unsafe fn read_pointer_field_v1(
     ptr: *const u8,
     len: CK_ULONG,
-) -> CkResult<(Vec<u8>, PointerBytes)> {
+) -> CkResult<PointerBytes> {
     if ptr.is_null() {
         // NULL: record the declared length, never dereference (S2 §5
         // unreadable-pointer rule). D3 applies no cap: no bytes
         // materialize, so even CK_ULONG::MAX forwards (narrowing is the
         // daemon's job).
-        return Ok((Vec::new(), PointerBytes::null_len(len as u64)));
+        return Ok(PointerBytes::null_len(len as u64));
     }
     if !embedded_payload_len_ok(len) {
         // Non-NULL past the ceiling: fail closed before any dereference
@@ -180,8 +180,7 @@ pub(crate) unsafe fn read_pointer_field_v1(
     // `payload_bytes` re-checks the extent arithmetic + ceiling and
     // returns empty for zero length without constructing a slice.
     let bytes = unsafe { payload_bytes(ptr, len)? };
-    let presence = PointerBytes::present_copy(&bytes);
-    Ok((bytes, presence))
+    Ok(PointerBytes::present_copy(&bytes))
 }
 
 /// Read one C `CK_MECHANISM` for transport in a single snapshot (S2 §5).
@@ -722,15 +721,11 @@ unsafe fn read_gcm_struct_params(
     let iv_presence = PointerBytes::from_legacy(&iv, gcm.pIv.is_null());
     let aad_presence = PointerBytes::from_legacy(&aad, gcm.pAAD.is_null());
     Ok(CkMechanismParams::Gcm(GcmParams {
-        iv,
         iv_bits: gcm.ulIvBits as u64,
         iv_buffer_len: gcm_iv_buffer_len(&gcm),
-        aad: aad.into(),
         tag_bits: gcm.ulTagBits as u64,
         // F3/D2: (NULL, 0) vs (ptr, 0) must survive the
         // crossing; (NULL, len > 0) took the Raw path above.
-        iv_null: gcm.pIv.is_null(),
-        aad_null: gcm.pAAD.is_null(),
         iv_presence,
         aad_presence,
     }))
@@ -834,20 +829,15 @@ unsafe fn read_gcm_struct_params_v1(
 ) -> CkResult<CkMechanismParams> {
     // Safety: caller guarantees a struct-sized readable buffer.
     let gcm = unsafe { read_param_struct(param_ptr as *const CK_GCM_PARAMS)? };
-    let (iv, iv_presence) = unsafe { read_pointer_field_v1(gcm.pIv as *const u8, gcm.ulIvLen)? };
-    let (aad, aad_presence) =
-        unsafe { read_pointer_field_v1(gcm.pAAD as *const u8, gcm.ulAADLen)? };
+    let iv_presence = unsafe { read_pointer_field_v1(gcm.pIv as *const u8, gcm.ulIvLen)? };
+    let aad_presence = unsafe { read_pointer_field_v1(gcm.pAAD as *const u8, gcm.ulAADLen)? };
     Ok(CkMechanismParams::Gcm(GcmParams {
-        iv,
         iv_bits: gcm.ulIvBits as u64,
         iv_buffer_len: gcm_iv_buffer_len(&gcm),
-        aad: aad.into(),
         tag_bits: gcm.ulTagBits as u64,
         // v1 is presence-only end-to-end: the legacy bools stay clear
         // (the peer is authoritative) so the value round-trips through
         // the v1 wire encoding bit-identically.
-        iv_null: false,
-        aad_null: false,
         iv_presence,
         aad_presence,
     }))
@@ -875,16 +865,14 @@ unsafe fn read_v1_typed_params(
             }
             // Safety: pParameter points to a valid CK_RSA_PKCS_OAEP_PARAMS.
             let oaep = unsafe { read_param_struct(param_ptr as *const CK_RSA_PKCS_OAEP_PARAMS)? };
-            let (source_data, source_data_presence) = unsafe {
+            let source_data_presence = unsafe {
                 read_pointer_field_v1(oaep.pSourceData as *const u8, oaep.ulSourceDataLen)?
             };
             Ok(CkMechanismParams::RsaPkcsOaep(RsaPkcsOaepParams {
                 hash_alg: CkMechanismType(oaep.hashAlg as u64),
                 mgf: CkMgf(oaep.mgf as u64),
                 source: CkOaepSource(oaep.source as u64),
-                source_data: source_data.into(),
                 // v1 is presence-only end-to-end (see the GCM reader).
-                source_null: false,
                 source_data_presence,
             }))
         }
@@ -913,17 +901,13 @@ unsafe fn read_v1_typed_params(
             }
             // Safety: pParameter points to a valid CK_CCM_PARAMS.
             let ccm = unsafe { read_param_struct(param_ptr as *const CK_CCM_PARAMS)? };
-            let (nonce, nonce_presence) =
+            let nonce_presence =
                 unsafe { read_pointer_field_v1(ccm.pNonce as *const u8, ccm.ulNonceLen)? };
-            let (aad, aad_presence) =
+            let aad_presence =
                 unsafe { read_pointer_field_v1(ccm.pAAD as *const u8, ccm.ulAADLen)? };
             Ok(CkMechanismParams::Ccm(CcmParams {
                 data_len: ccm.ulDataLen as u64,
-                nonce,
-                aad: aad.into(),
                 mac_len: ccm.ulMACLen as u64,
-                nonce_null: false,
-                aad_null: false,
                 nonce_presence,
                 aad_presence,
             }))
@@ -935,16 +919,14 @@ unsafe fn read_v1_typed_params(
             }
             // Safety: pParameter points to a valid CK_ECDH1_DERIVE_PARAMS.
             let ecdh = unsafe { read_param_struct(param_ptr as *const CK_ECDH1_DERIVE_PARAMS)? };
-            let (shared_data, shared_data_presence) = unsafe {
+            let shared_data_presence = unsafe {
                 read_pointer_field_v1(ecdh.pSharedData as *const u8, ecdh.ulSharedDataLen)?
             };
-            let (public_data, public_data_presence) = unsafe {
+            let public_data_presence = unsafe {
                 read_pointer_field_v1(ecdh.pPublicData as *const u8, ecdh.ulPublicDataLen)?
             };
             Ok(CkMechanismParams::Ecdh1Derive(Ecdh1DeriveParams {
                 kdf: CkKdf(ecdh.kdf as u64),
-                shared_data: shared_data.into(),
-                public_data,
                 shared_data_presence,
                 public_data_presence,
             }))
@@ -956,18 +938,16 @@ unsafe fn read_v1_typed_params(
             }
             // Safety: pParameter points to a valid CK_HKDF_PARAMS.
             let hkdf = unsafe { read_param_struct(param_ptr as *const CK_HKDF_PARAMS)? };
-            let (salt, salt_presence) =
+            let salt_presence =
                 unsafe { read_pointer_field_v1(hkdf.pSalt as *const u8, hkdf.ulSaltLen)? };
-            let (info, info_presence) =
+            let info_presence =
                 unsafe { read_pointer_field_v1(hkdf.pInfo as *const u8, hkdf.ulInfoLen)? };
             Ok(CkMechanismParams::Hkdf(HkdfParams {
                 extract: hkdf.bExtract != 0,
                 expand: hkdf.bExpand != 0,
                 prf_hash_mechanism: CkMechanismType(hkdf.prfHashMechanism as u64),
                 salt_type: hkdf.ulSaltType as u64,
-                salt: salt.into(),
                 salt_key_handle: CkObjectHandle(hkdf.hSaltKey as u64),
-                info: info.into(),
                 salt_presence,
                 info_presence,
             }))
@@ -979,12 +959,11 @@ unsafe fn read_v1_typed_params(
             }
             // Safety: pParameter points to a valid CK_EDDSA_PARAMS.
             let eddsa = unsafe { read_param_struct(param_ptr as *const CK_EDDSA_PARAMS)? };
-            let (context_data, context_data_presence) = unsafe {
+            let context_data_presence = unsafe {
                 read_pointer_field_v1(eddsa.pContextData as *const u8, eddsa.ulContextDataLen)?
             };
             Ok(CkMechanismParams::Eddsa(EddsaParams {
                 ph_flag: eddsa.phFlag != 0,
-                context_data: context_data.into(),
                 context_data_presence,
             }))
         }
@@ -1004,15 +983,13 @@ unsafe fn read_v1_typed_params(
                 return Err(CkRv::MECHANISM_PARAM_INVALID);
             }
             // Bits-governed: NULL records the derived byte length.
-            let (block_counter, block_counter_presence) = unsafe {
+            let block_counter_presence = unsafe {
                 read_pointer_field_v1(ch.pBlockCounter as *const u8, bc_bytes as CK_ULONG)?
             };
-            let (nonce, nonce_presence) =
+            let nonce_presence =
                 unsafe { read_pointer_field_v1(ch.pNonce as *const u8, nonce_bytes as CK_ULONG)? };
             Ok(CkMechanismParams::ChaCha20(ChaCha20Params {
-                block_counter,
                 block_counter_bits: ch.blockCounterBits as u64,
-                nonce,
                 nonce_bits: ch.ulNonceBits as u64,
                 block_counter_presence,
                 nonce_presence,
@@ -1031,14 +1008,12 @@ unsafe fn read_v1_typed_params(
                 return Err(CkRv::MECHANISM_PARAM_INVALID);
             }
             // Fixed 8-byte block counter: NULL records the fixed extent.
-            let (block_counter, block_counter_presence) =
+            let block_counter_presence =
                 unsafe { read_pointer_field_v1(salsa.pBlockCounter as *const u8, 8)? };
-            let (nonce, nonce_presence) = unsafe {
+            let nonce_presence = unsafe {
                 read_pointer_field_v1(salsa.pNonce as *const u8, nonce_bytes as CK_ULONG)?
             };
             Ok(CkMechanismParams::Salsa20(Salsa20Params {
-                block_counter,
-                nonce,
                 nonce_bits: salsa.ulNonceBits as u64,
                 block_counter_presence,
                 nonce_presence,
@@ -1054,13 +1029,10 @@ unsafe fn read_v1_typed_params(
             let sp = unsafe {
                 read_param_struct(param_ptr as *const CK_SALSA20_CHACHA20_POLY1305_PARAMS)?
             };
-            let (nonce, nonce_presence) =
+            let nonce_presence =
                 unsafe { read_pointer_field_v1(sp.pNonce as *const u8, sp.ulNonceLen)? };
-            let (aad, aad_presence) =
-                unsafe { read_pointer_field_v1(sp.pAAD as *const u8, sp.ulAADLen)? };
+            let aad_presence = unsafe { read_pointer_field_v1(sp.pAAD as *const u8, sp.ulAADLen)? };
             Ok(CkMechanismParams::Salsa20ChaCha20Poly1305(Salsa20ChaCha20Poly1305Params {
-                nonce,
-                aad: aad.into(),
                 nonce_presence,
                 aad_presence,
             }))
@@ -1074,11 +1046,9 @@ unsafe fn read_v1_typed_params(
             // CK_AES_CBC_ENCRYPT_DATA_PARAMS.
             let s =
                 unsafe { read_param_struct(param_ptr as *const CK_AES_CBC_ENCRYPT_DATA_PARAMS)? };
-            let (data, data_presence) =
-                unsafe { read_pointer_field_v1(s.pData as *const u8, s.length)? };
+            let data_presence = unsafe { read_pointer_field_v1(s.pData as *const u8, s.length)? };
             Ok(CkMechanismParams::AesCbcEncryptData(AesCbcEncryptDataParams {
                 iv: s.iv.to_vec(),
-                data: data.into(),
                 data_presence,
             }))
         }
@@ -1091,11 +1061,9 @@ unsafe fn read_v1_typed_params(
             // CK_DES_CBC_ENCRYPT_DATA_PARAMS.
             let s =
                 unsafe { read_param_struct(param_ptr as *const CK_DES_CBC_ENCRYPT_DATA_PARAMS)? };
-            let (data, data_presence) =
-                unsafe { read_pointer_field_v1(s.pData as *const u8, s.length)? };
+            let data_presence = unsafe { read_pointer_field_v1(s.pData as *const u8, s.length)? };
             Ok(CkMechanismParams::DesCbcEncryptData(DesCbcEncryptDataParams {
                 iv: s.iv.to_vec(),
-                data: data.into(),
                 data_presence,
             }))
         }
@@ -1109,11 +1077,9 @@ unsafe fn read_v1_typed_params(
             let s = unsafe {
                 read_param_struct(param_ptr as *const CK_CAMELLIA_CBC_ENCRYPT_DATA_PARAMS)?
             };
-            let (data, data_presence) =
-                unsafe { read_pointer_field_v1(s.pData as *const u8, s.length)? };
+            let data_presence = unsafe { read_pointer_field_v1(s.pData as *const u8, s.length)? };
             Ok(CkMechanismParams::CamelliaCbcEncryptData(CamelliaCbcEncryptDataParams {
                 iv: s.iv.to_vec(),
-                data: data.into(),
                 data_presence,
             }))
         }
@@ -1126,11 +1092,9 @@ unsafe fn read_v1_typed_params(
             // CK_ARIA_CBC_ENCRYPT_DATA_PARAMS.
             let s =
                 unsafe { read_param_struct(param_ptr as *const CK_ARIA_CBC_ENCRYPT_DATA_PARAMS)? };
-            let (data, data_presence) =
-                unsafe { read_pointer_field_v1(s.pData as *const u8, s.length)? };
+            let data_presence = unsafe { read_pointer_field_v1(s.pData as *const u8, s.length)? };
             Ok(CkMechanismParams::AriaCbcEncryptData(AriaCbcEncryptDataParams {
                 iv: s.iv.to_vec(),
-                data: data.into(),
                 data_presence,
             }))
         }
@@ -1143,11 +1107,9 @@ unsafe fn read_v1_typed_params(
             // CK_SEED_CBC_ENCRYPT_DATA_PARAMS.
             let s =
                 unsafe { read_param_struct(param_ptr as *const CK_SEED_CBC_ENCRYPT_DATA_PARAMS)? };
-            let (data, data_presence) =
-                unsafe { read_pointer_field_v1(s.pData as *const u8, s.length)? };
+            let data_presence = unsafe { read_pointer_field_v1(s.pData as *const u8, s.length)? };
             Ok(CkMechanismParams::SeedCbcEncryptData(SeedCbcEncryptDataParams {
                 iv: s.iv.to_vec(),
-                data: data.into(),
                 data_presence,
             }))
         }
@@ -1160,12 +1122,9 @@ unsafe fn read_v1_typed_params(
             // CK_KEY_DERIVATION_STRING_DATA.
             let kds =
                 unsafe { read_param_struct(param_ptr as *const CK_KEY_DERIVATION_STRING_DATA)? };
-            let (data, data_presence) =
+            let data_presence =
                 unsafe { read_pointer_field_v1(kds.pData as *const u8, kds.ulLen)? };
-            Ok(CkMechanismParams::KeyDerivationString(KeyDerivationStringData {
-                data: data.into(),
-                data_presence,
-            }))
+            Ok(CkMechanismParams::KeyDerivationString(KeyDerivationStringData { data_presence }))
         }
 
         Some("gcm_wrap") => {
@@ -1174,15 +1133,11 @@ unsafe fn read_v1_typed_params(
             }
             // Safety: pParameter points to a valid CK_GCM_WRAP_PARAMS.
             let gw = unsafe { read_param_struct(param_ptr as *const CK_GCM_WRAP_PARAMS)? };
-            let (iv, iv_presence) =
-                unsafe { read_pointer_field_v1(gw.pIv as *const u8, gw.ulIvLen)? };
-            let (aad, aad_presence) =
-                unsafe { read_pointer_field_v1(gw.pAAD as *const u8, gw.ulAADLen)? };
+            let iv_presence = unsafe { read_pointer_field_v1(gw.pIv as *const u8, gw.ulIvLen)? };
+            let aad_presence = unsafe { read_pointer_field_v1(gw.pAAD as *const u8, gw.ulAADLen)? };
             Ok(CkMechanismParams::GcmWrap(GcmWrapParams {
-                iv,
                 iv_fixed_bits: gw.ulIvFixedBits as u64,
                 iv_generator: CkGeneratorFunction(gw.ivGenerator as u64),
-                aad: aad.into(),
                 tag_bits: gw.ulTagBits as u64,
                 iv_presence,
                 aad_presence,
@@ -1195,16 +1150,13 @@ unsafe fn read_v1_typed_params(
             }
             // Safety: pParameter points to a valid CK_CCM_WRAP_PARAMS.
             let cw = unsafe { read_param_struct(param_ptr as *const CK_CCM_WRAP_PARAMS)? };
-            let (nonce, nonce_presence) =
+            let nonce_presence =
                 unsafe { read_pointer_field_v1(cw.pNonce as *const u8, cw.ulNonceLen)? };
-            let (aad, aad_presence) =
-                unsafe { read_pointer_field_v1(cw.pAAD as *const u8, cw.ulAADLen)? };
+            let aad_presence = unsafe { read_pointer_field_v1(cw.pAAD as *const u8, cw.ulAADLen)? };
             Ok(CkMechanismParams::CcmWrap(CcmWrapParams {
                 data_len: cw.ulDataLen as u64,
-                nonce,
                 nonce_fixed_bits: cw.ulNonceFixedBits as u64,
                 nonce_generator: CkGeneratorFunction(cw.nonceGenerator as u64),
-                aad: aad.into(),
                 mac_len: cw.ulMACLen as u64,
                 nonce_presence,
                 aad_presence,
@@ -1217,12 +1169,10 @@ unsafe fn read_v1_typed_params(
             }
             // Safety: pParameter points to a valid CK_RC5_CBC_PARAMS.
             let rc5 = unsafe { read_param_struct(param_ptr as *const CK_RC5_CBC_PARAMS)? };
-            let (iv, iv_presence) =
-                unsafe { read_pointer_field_v1(rc5.pIv as *const u8, rc5.ulIvLen)? };
+            let iv_presence = unsafe { read_pointer_field_v1(rc5.pIv as *const u8, rc5.ulIvLen)? };
             Ok(CkMechanismParams::Rc5Cbc(Rc5CbcParams {
                 word_size: rc5.ulWordsize as u64,
                 rounds: rc5.ulRounds as u64,
-                iv,
                 iv_presence,
             }))
         }
@@ -1263,7 +1213,7 @@ unsafe fn read_v1_typed_params(
             // Safety: oaep_ptr is non-null and points to a valid
             // CK_RSA_PKCS_OAEP_PARAMS (caller contract).
             let oaep = unsafe { read_param_struct(oaep_ptr)? };
-            let (source_data, source_data_presence) = unsafe {
+            let source_data_presence = unsafe {
                 read_pointer_field_v1(oaep.pSourceData as *const u8, oaep.ulSourceDataLen)?
             };
             Ok(CkMechanismParams::RsaAesKeyWrap(RsaAesKeyWrapParams {
@@ -1272,8 +1222,6 @@ unsafe fn read_v1_typed_params(
                     hash_alg: CkMechanismType(oaep.hashAlg as u64),
                     mgf: CkMgf(oaep.mgf as u64),
                     source: CkOaepSource(oaep.source as u64),
-                    source_data: source_data.into(),
-                    source_null: false,
                     source_data_presence,
                 },
             }))
@@ -1306,7 +1254,7 @@ unsafe fn read_v1_typed_params(
             let len_offset = ptr_offset + std::mem::size_of::<*const u8>();
             let ctx_len =
                 unsafe { (param_ptr.add(len_offset) as *const CK_ULONG).read_unaligned() };
-            let (context, context_presence) = unsafe { read_pointer_field_v1(ctx_ptr, ctx_len)? };
+            let context_presence = unsafe { read_pointer_field_v1(ctx_ptr, ctx_len)? };
             let hash = if param_len >= hash_size {
                 let hash_offset = len_offset + std::mem::size_of::<CK_ULONG>();
                 unsafe { (param_ptr.add(hash_offset) as *const CK_ULONG).read_unaligned() as u64 }
@@ -1315,7 +1263,6 @@ unsafe fn read_v1_typed_params(
             };
             Ok(CkMechanismParams::SignAdditionalContext(SignAdditionalContext {
                 hedge_variant: hedge_variant as u64,
-                context: context.into(),
                 hash: CkMechanismType(hash),
                 context_presence,
             }))
@@ -1327,7 +1274,7 @@ unsafe fn read_v1_typed_params(
             }
             // Safety: pParameter points to a valid CkKmacParams.
             let p = unsafe { read_param_struct(param_ptr as *const CkKmacParams)? };
-            let (customization_string, customization_string_presence) = unsafe {
+            let customization_string_presence = unsafe {
                 read_pointer_field_v1(
                     p.p_customization_string as *const u8,
                     p.ul_customization_string_len,
@@ -1336,7 +1283,6 @@ unsafe fn read_v1_typed_params(
             Ok(CkMechanismParams::Kmac(KmacParams {
                 key_handle: CkObjectHandle(p.h_key as u64),
                 mac_length: p.ul_mac_length as u64,
-                customization_string: customization_string.into(),
                 customization_string_presence,
             }))
         }
@@ -1347,14 +1293,11 @@ unsafe fn read_v1_typed_params(
             }
             // Safety: pParameter points to a valid CkMuGenParams.
             let p = unsafe { read_param_struct(param_ptr as *const CkMuGenParams)? };
-            let (tr, tr_presence) =
-                unsafe { read_pointer_field_v1(p.p_tr as *const u8, p.ul_tr_len)? };
-            let (context, context_presence) =
+            let tr_presence = unsafe { read_pointer_field_v1(p.p_tr as *const u8, p.ul_tr_len)? };
+            let context_presence =
                 unsafe { read_pointer_field_v1(p.p_ctx as *const u8, p.ul_ctx_len)? };
             Ok(CkMechanismParams::MuGen(MuGenParams {
                 key_handle: CkObjectHandle(p.h_key as u64),
-                tr: tr.into(),
-                context: context.into(),
                 tr_presence,
                 context_presence,
             }))
@@ -1366,20 +1309,17 @@ unsafe fn read_v1_typed_params(
             }
             // Safety: pParameter points to a valid CK_PKCS5_PBKD2_PARAMS2.
             let p = unsafe { read_param_struct(param_ptr as *const CK_PKCS5_PBKD2_PARAMS2)? };
-            let (salt_source_data, salt_source_data_presence) = unsafe {
+            let salt_source_data_presence = unsafe {
                 read_pointer_field_v1(p.pSaltSourceData as *const u8, p.ulSaltSourceDataLen)?
             };
-            let (prf_data, prf_data_presence) =
+            let prf_data_presence =
                 unsafe { read_pointer_field_v1(p.pPrfData as *const u8, p.ulPrfDataLen)? };
-            let (password, password_presence) =
+            let password_presence =
                 unsafe { read_pointer_field_v1(p.pPassword as *const u8, p.ulPasswordLen)? };
             Ok(CkMechanismParams::Pkcs5Pbkd2(Pkcs5Pbkd2Params {
                 salt_source: CkPbkdf2SaltSource(p.saltSource as u64),
-                salt_source_data: salt_source_data.into(),
                 iterations: p.iterations as u64,
                 prf: CkPbkdf2Prf(p.prf as u64),
-                prf_data: prf_data.into(),
-                password: password.into(),
                 salt_source_data_presence,
                 prf_data_presence,
                 password_presence,
@@ -1395,16 +1335,13 @@ unsafe fn read_v1_typed_params(
             // PBE init vector is typically 8 bytes but length is not explicit
             // in the struct (legacy rule preserved): fixed extent 8, with
             // NULL recording the fixed extent.
-            let (init_vector, init_vector_presence) =
+            let init_vector_presence =
                 unsafe { read_pointer_field_v1(p.pInitVector as *const u8, 8)? };
-            let (password, password_presence) =
+            let password_presence =
                 unsafe { read_pointer_field_v1(p.pPassword as *const u8, p.ulPasswordLen)? };
-            let (salt, salt_presence) =
+            let salt_presence =
                 unsafe { read_pointer_field_v1(p.pSalt as *const u8, p.ulSaltLen)? };
             Ok(CkMechanismParams::Pbe(PbeParams {
-                init_vector: init_vector.into(),
-                password: password.into(),
-                salt: salt.into(),
                 iteration: p.ulIteration as u64,
                 init_vector_presence,
                 password_presence,
@@ -1419,12 +1356,11 @@ unsafe fn read_v1_typed_params(
             // Safety: pParameter points to a valid
             // CK_ECDH_AES_KEY_WRAP_PARAMS.
             let p = unsafe { read_param_struct(param_ptr as *const CK_ECDH_AES_KEY_WRAP_PARAMS)? };
-            let (shared_data, shared_data_presence) =
+            let shared_data_presence =
                 unsafe { read_pointer_field_v1(p.pSharedData as *const u8, p.ulSharedDataLen)? };
             Ok(CkMechanismParams::EcdhAesKeyWrap(EcdhAesKeyWrapParams {
                 aes_key_bits: p.ulAESKeyBits as u64,
                 kdf: CkKdf(p.kdf as u64),
-                shared_data: shared_data.into(),
                 shared_data_presence,
             }))
         }
@@ -1435,19 +1371,16 @@ unsafe fn read_v1_typed_params(
             }
             // Safety: pParameter points to a valid CK_ECDH2_DERIVE_PARAMS.
             let p = unsafe { read_param_struct(param_ptr as *const CK_ECDH2_DERIVE_PARAMS)? };
-            let (shared_data, shared_data_presence) =
+            let shared_data_presence =
                 unsafe { read_pointer_field_v1(p.pSharedData as *const u8, p.ulSharedDataLen)? };
-            let (public_data, public_data_presence) =
+            let public_data_presence =
                 unsafe { read_pointer_field_v1(p.pPublicData as *const u8, p.ulPublicDataLen)? };
-            let (public_data2, public_data2_presence) =
+            let public_data2_presence =
                 unsafe { read_pointer_field_v1(p.pPublicData2 as *const u8, p.ulPublicDataLen2)? };
             Ok(CkMechanismParams::Ecdh2Derive(Ecdh2DeriveParams {
                 kdf: CkKdf(p.kdf as u64),
-                shared_data: shared_data.into(),
-                public_data,
                 private_data_len: p.ulPrivateDataLen as u64,
                 private_data_handle: CkObjectHandle(p.hPrivateData as u64),
-                public_data2,
                 shared_data_presence,
                 public_data_presence,
                 public_data2_presence,
@@ -1460,19 +1393,16 @@ unsafe fn read_v1_typed_params(
             }
             // Safety: pParameter points to a valid CK_ECMQV_DERIVE_PARAMS.
             let p = unsafe { read_param_struct(param_ptr as *const CK_ECMQV_DERIVE_PARAMS)? };
-            let (shared_data, shared_data_presence) =
+            let shared_data_presence =
                 unsafe { read_pointer_field_v1(p.pSharedData as *const u8, p.ulSharedDataLen)? };
-            let (public_data, public_data_presence) =
+            let public_data_presence =
                 unsafe { read_pointer_field_v1(p.pPublicData as *const u8, p.ulPublicDataLen)? };
-            let (public_data2, public_data2_presence) =
+            let public_data2_presence =
                 unsafe { read_pointer_field_v1(p.pPublicData2 as *const u8, p.ulPublicDataLen2)? };
             Ok(CkMechanismParams::EcmqvDerive(EcmqvDeriveParams {
                 kdf: CkKdf(p.kdf as u64),
-                shared_data: shared_data.into(),
-                public_data,
                 private_data_len: p.ulPrivateDataLen as u64,
                 private_data_handle: CkObjectHandle(p.hPrivateData as u64),
-                public_data2,
                 public_key_handle: CkObjectHandle(p.publicKey as u64),
                 shared_data_presence,
                 public_data_presence,
@@ -1487,14 +1417,12 @@ unsafe fn read_v1_typed_params(
             // Safety: pParameter points to a valid
             // CK_X9_42_DH1_DERIVE_PARAMS.
             let p = unsafe { read_param_struct(param_ptr as *const CK_X9_42_DH1_DERIVE_PARAMS)? };
-            let (other_info, other_info_presence) =
+            let other_info_presence =
                 unsafe { read_pointer_field_v1(p.pOtherInfo as *const u8, p.ulOtherInfoLen)? };
-            let (public_data, public_data_presence) =
+            let public_data_presence =
                 unsafe { read_pointer_field_v1(p.pPublicData as *const u8, p.ulPublicDataLen)? };
             Ok(CkMechanismParams::X942Dh1Derive(X942Dh1DeriveParams {
                 kdf: CkKdf(p.kdf as u64),
-                other_info: other_info.into(),
-                public_data,
                 other_info_presence,
                 public_data_presence,
             }))
@@ -1507,19 +1435,16 @@ unsafe fn read_v1_typed_params(
             // Safety: pParameter points to a valid
             // CK_X9_42_DH2_DERIVE_PARAMS.
             let p = unsafe { read_param_struct(param_ptr as *const CK_X9_42_DH2_DERIVE_PARAMS)? };
-            let (other_info, other_info_presence) =
+            let other_info_presence =
                 unsafe { read_pointer_field_v1(p.pOtherInfo as *const u8, p.ulOtherInfoLen)? };
-            let (public_data, public_data_presence) =
+            let public_data_presence =
                 unsafe { read_pointer_field_v1(p.pPublicData as *const u8, p.ulPublicDataLen)? };
-            let (public_data2, public_data2_presence) =
+            let public_data2_presence =
                 unsafe { read_pointer_field_v1(p.pPublicData2 as *const u8, p.ulPublicDataLen2)? };
             Ok(CkMechanismParams::X942Dh2Derive(X942Dh2DeriveParams {
                 kdf: CkKdf(p.kdf as u64),
-                other_info: other_info.into(),
-                public_data,
                 private_data_len: p.ulPrivateDataLen as u64,
                 private_data_handle: CkObjectHandle(p.hPrivateData as u64),
-                public_data2,
                 other_info_presence,
                 public_data_presence,
                 public_data2_presence,
@@ -1533,19 +1458,16 @@ unsafe fn read_v1_typed_params(
             // Safety: pParameter points to a valid
             // CK_X9_42_MQV_DERIVE_PARAMS.
             let p = unsafe { read_param_struct(param_ptr as *const CK_X9_42_MQV_DERIVE_PARAMS)? };
-            let (other_info, other_info_presence) =
+            let other_info_presence =
                 unsafe { read_pointer_field_v1(p.OtherInfo as *const u8, p.ulOtherInfoLen)? };
-            let (public_data, public_data_presence) =
+            let public_data_presence =
                 unsafe { read_pointer_field_v1(p.PublicData as *const u8, p.ulPublicDataLen)? };
-            let (public_data2, public_data2_presence) =
+            let public_data2_presence =
                 unsafe { read_pointer_field_v1(p.PublicData2 as *const u8, p.ulPublicDataLen2)? };
             Ok(CkMechanismParams::X942MqvDerive(X942MqvDeriveParams {
                 kdf: CkKdf(p.kdf as u64),
-                other_info: other_info.into(),
-                public_data,
                 private_data_len: p.ulPrivateDataLen as u64,
                 private_data_handle: CkObjectHandle(p.hPrivateData as u64),
-                public_data2,
                 public_key_handle: CkObjectHandle(p.publicKey as u64),
                 other_info_presence,
                 public_data_presence,
@@ -1560,14 +1482,11 @@ unsafe fn read_v1_typed_params(
             // Safety: pParameter points to a valid
             // CK_GOSTR3410_DERIVE_PARAMS.
             let p = unsafe { read_param_struct(param_ptr as *const CK_GOSTR3410_DERIVE_PARAMS)? };
-            let (public_data, public_data_presence) =
+            let public_data_presence =
                 unsafe { read_pointer_field_v1(p.pPublicData as *const u8, p.ulPublicDataLen)? };
-            let (ukm, ukm_presence) =
-                unsafe { read_pointer_field_v1(p.pUKM as *const u8, p.ulUKMLen)? };
+            let ukm_presence = unsafe { read_pointer_field_v1(p.pUKM as *const u8, p.ulUKMLen)? };
             Ok(CkMechanismParams::Gostr3410Derive(Gostr3410DeriveParams {
                 kdf: CkKdf(p.kdf as u64),
-                public_data,
-                ukm,
                 public_data_presence,
                 ukm_presence,
             }))
@@ -1580,13 +1499,10 @@ unsafe fn read_v1_typed_params(
             // Safety: pParameter points to a valid
             // CK_GOSTR3410_KEY_WRAP_PARAMS.
             let p = unsafe { read_param_struct(param_ptr as *const CK_GOSTR3410_KEY_WRAP_PARAMS)? };
-            let (wrap_oid, wrap_oid_presence) =
+            let wrap_oid_presence =
                 unsafe { read_pointer_field_v1(p.pWrapOID as *const u8, p.ulWrapOIDLen)? };
-            let (ukm, ukm_presence) =
-                unsafe { read_pointer_field_v1(p.pUKM as *const u8, p.ulUKMLen)? };
+            let ukm_presence = unsafe { read_pointer_field_v1(p.pUKM as *const u8, p.ulUKMLen)? };
             Ok(CkMechanismParams::Gostr3410KeyWrap(Gostr3410KeyWrapParams {
-                wrap_oid,
-                ukm,
                 key_handle: CkObjectHandle(p.hKey as u64),
                 wrap_oid_presence,
                 ukm_presence,
@@ -1600,10 +1516,9 @@ unsafe fn read_v1_typed_params(
             // Safety: pParameter points to a valid
             // CK_KEY_WRAP_SET_OAEP_PARAMS.
             let p = unsafe { read_param_struct(param_ptr as *const CK_KEY_WRAP_SET_OAEP_PARAMS)? };
-            let (x, x_presence) = unsafe { read_pointer_field_v1(p.pX as *const u8, p.ulXLen)? };
+            let x_presence = unsafe { read_pointer_field_v1(p.pX as *const u8, p.ulXLen)? };
             Ok(CkMechanismParams::KeyWrapSetOaep(KeyWrapSetOaepParams {
                 bc: p.bBC as u32,
-                x: x.into(),
                 x_presence,
             }))
         }
@@ -1614,16 +1529,12 @@ unsafe fn read_v1_typed_params(
             }
             // Safety: pParameter points to a valid CK_IKE_PRF_DERIVE_PARAMS.
             let p = unsafe { read_param_struct(param_ptr as *const CK_IKE_PRF_DERIVE_PARAMS)? };
-            let (ni, ni_presence) =
-                unsafe { read_pointer_field_v1(p.pNi as *const u8, p.ulNiLen)? };
-            let (nr, nr_presence) =
-                unsafe { read_pointer_field_v1(p.pNr as *const u8, p.ulNrLen)? };
+            let ni_presence = unsafe { read_pointer_field_v1(p.pNi as *const u8, p.ulNiLen)? };
+            let nr_presence = unsafe { read_pointer_field_v1(p.pNr as *const u8, p.ulNrLen)? };
             Ok(CkMechanismParams::IkePrfDerive(IkePrfDeriveParams {
                 prf_mechanism: CkMechanismType(p.prfMechanism as u64),
                 data_as_key: p.bDataAsKey != 0,
                 rekey: p.bRekey != 0,
-                ni: ni.into(),
-                nr: nr.into(),
                 new_key_handle: CkObjectHandle(p.hNewKey as u64),
                 ni_presence,
                 nr_presence,
@@ -1636,17 +1547,15 @@ unsafe fn read_v1_typed_params(
             }
             // Safety: pParameter points to a valid CK_IKE1_PRF_DERIVE_PARAMS.
             let p = unsafe { read_param_struct(param_ptr as *const CK_IKE1_PRF_DERIVE_PARAMS)? };
-            let (ckyi, ckyi_presence) =
+            let ckyi_presence =
                 unsafe { read_pointer_field_v1(p.pCKYi as *const u8, p.ulCKYiLen)? };
-            let (ckyr, ckyr_presence) =
+            let ckyr_presence =
                 unsafe { read_pointer_field_v1(p.pCKYr as *const u8, p.ulCKYrLen)? };
             Ok(CkMechanismParams::Ike1PrfDerive(Ike1PrfDeriveParams {
                 prf_mechanism: CkMechanismType(p.prfMechanism as u64),
                 has_prev_key: p.bHasPrevKey != 0,
                 keygxy_handle: CkObjectHandle(p.hKeygxy as u64),
                 prev_key_handle: CkObjectHandle(p.hPrevKey as u64),
-                ckyi: ckyi.into(),
-                ckyr: ckyr.into(),
                 key_number: p.keyNumber as u32,
                 ckyi_presence,
                 ckyr_presence,
@@ -1661,13 +1570,12 @@ unsafe fn read_v1_typed_params(
             // CK_IKE1_EXTENDED_DERIVE_PARAMS.
             let p =
                 unsafe { read_param_struct(param_ptr as *const CK_IKE1_EXTENDED_DERIVE_PARAMS)? };
-            let (extra_data, extra_data_presence) =
+            let extra_data_presence =
                 unsafe { read_pointer_field_v1(p.pExtraData as *const u8, p.ulExtraDataLen)? };
             Ok(CkMechanismParams::Ike1ExtendedDerive(Ike1ExtendedDeriveParams {
                 prf_mechanism: CkMechanismType(p.prfMechanism as u64),
                 has_keygxy: p.bHasKeygxy != 0,
                 keygxy_handle: CkObjectHandle(p.hKeygxy as u64),
-                extra_data: extra_data.into(),
                 extra_data_presence,
             }))
         }
@@ -1680,13 +1588,12 @@ unsafe fn read_v1_typed_params(
             // CK_IKE2_PRF_PLUS_DERIVE_PARAMS.
             let p =
                 unsafe { read_param_struct(param_ptr as *const CK_IKE2_PRF_PLUS_DERIVE_PARAMS)? };
-            let (seed_data, seed_data_presence) =
+            let seed_data_presence =
                 unsafe { read_pointer_field_v1(p.pSeedData as *const u8, p.ulSeedDataLen)? };
             Ok(CkMechanismParams::Ike2PrfPlusDerive(Ike2PrfPlusDeriveParams {
                 prf_mechanism: CkMechanismType(p.prfMechanism as u64),
                 has_seed_key: p.bHasSeedKey != 0,
                 seed_key_handle: CkObjectHandle(p.hSeedKey as u64),
-                seed_data: seed_data.into(),
                 seed_data_presence,
             }))
         }
@@ -1720,14 +1627,14 @@ unsafe fn read_v1_typed_params(
 unsafe fn read_otp_array_v1(
     params: *mut CK_OTP_PARAM,
     count: CK_ULONG,
-) -> CkResult<(Vec<OtpParam>, PointerArray<OtpParam>)> {
+) -> CkResult<PointerArray<OtpParam>> {
     if params.is_null() {
         // NULL: record the declared count, never dereference (D3 — the
         // count cap cannot apply: no elements materialize).
-        return Ok((Vec::new(), PointerArray::null_count(count as u64)));
+        return Ok(PointerArray::null_count(count as u64));
     }
     if count == 0 {
-        return Ok((Vec::new(), PointerArray::present(Vec::new())));
+        return Ok(PointerArray::present(Vec::new()));
     }
     // Typed caller array: extent first, then per-element unaligned
     // copies (never an aligned slice over caller memory).
@@ -1746,11 +1653,11 @@ unsafe fn read_otp_array_v1(
     for index in 0..n {
         // Safety: index < n, covered by the checked extent above.
         let param = unsafe { params.add(index).read_unaligned() };
-        let (value, value_presence) =
+        let value_presence =
             unsafe { read_pointer_field_v1(param.pValue as *const u8, param.ulValueLen)? };
-        converted.push(OtpParam { type_: param.type_ as u64, value_presence, value: value.into() });
+        converted.push(OtpParam { type_: param.type_ as u64, value_presence });
     }
-    Ok((converted.clone(), PointerArray::present(converted)))
+    Ok(PointerArray::present(converted))
 }
 
 /// v1 edition of [`read_sp800_108_data_params`] (R18 tail step-1):
@@ -1767,12 +1674,12 @@ unsafe fn read_otp_array_v1(
 unsafe fn read_sp800_108_data_params_v1(
     data_params: *mut CK_PRF_DATA_PARAM,
     count: CK_ULONG,
-) -> CkResult<(Vec<PrfDataParam>, PointerArray<PrfDataParam>)> {
+) -> CkResult<PointerArray<PrfDataParam>> {
     if data_params.is_null() {
-        return Ok((Vec::new(), PointerArray::null_count(count as u64)));
+        return Ok(PointerArray::null_count(count as u64));
     }
     if count == 0 {
-        return Ok((Vec::new(), PointerArray::present(Vec::new())));
+        return Ok(PointerArray::present(Vec::new()));
     }
     checked_extent(
         data_params as usize,
@@ -1789,15 +1696,11 @@ unsafe fn read_sp800_108_data_params_v1(
     for index in 0..n {
         // Safety: index < n, covered by the checked extent above.
         let param = unsafe { data_params.add(index).read_unaligned() };
-        let (value, value_presence) =
+        let value_presence =
             unsafe { read_pointer_field_v1(param.pValue as *const u8, param.ulValueLen)? };
-        converted.push(PrfDataParam {
-            type_: param.type_ as u64,
-            value_presence,
-            value: value.into(),
-        });
+        converted.push(PrfDataParam { type_: param.type_ as u64, value_presence });
     }
-    Ok((converted.clone(), PointerArray::present(converted)))
+    Ok(PointerArray::present(converted))
 }
 
 /// v1 edition of [`read_sp800_108_derived_keys`] (R18 tail step-1).
@@ -1818,12 +1721,12 @@ unsafe fn read_sp800_108_data_params_v1(
 unsafe fn read_sp800_108_derived_keys_v1(
     derived_keys: *mut CK_DERIVED_KEY,
     count: CK_ULONG,
-) -> CkResult<(Vec<Sp800108DerivedKey>, PointerArray<Sp800108DerivedKey>)> {
+) -> CkResult<PointerArray<Sp800108DerivedKey>> {
     if derived_keys.is_null() {
-        return Ok((Vec::new(), PointerArray::null_count(count as u64)));
+        return Ok(PointerArray::null_count(count as u64));
     }
     if count == 0 {
-        return Ok((Vec::new(), PointerArray::present(Vec::new())));
+        return Ok(PointerArray::present(Vec::new()));
     }
     checked_extent(
         derived_keys as usize,
@@ -1840,15 +1743,14 @@ unsafe fn read_sp800_108_derived_keys_v1(
     for index in 0..n {
         // Safety: index < n, covered by the checked extent above.
         let derived = unsafe { derived_keys.add(index).read_unaligned() };
-        let (template, template_presence) = if derived.pTemplate.is_null() {
+        let template_presence = if derived.pTemplate.is_null() {
             // NULL template: record the declared attribute count,
             // never invoke the attribute reader (D3).
-            (Vec::new(), PointerArray::null_count(derived.ulAttributeCount as u64))
+            PointerArray::null_count(derived.ulAttributeCount as u64)
         } else {
             let template =
                 unsafe { ck_attrs_to_rust_checked(derived.pTemplate, derived.ulAttributeCount)? };
-            let presence = PointerArray::present(template.clone());
-            (template, presence)
+            PointerArray::present(template)
         };
         let ph_key_is_null = derived.phKey.is_null();
         let key_handle =
@@ -1856,11 +1758,10 @@ unsafe fn read_sp800_108_derived_keys_v1(
         converted.push(Sp800108DerivedKey {
             template_presence,
             ph_key_is_null,
-            template,
             key_handle: CkObjectHandle(key_handle),
         });
     }
-    Ok((converted.clone(), PointerArray::present(converted)))
+    Ok(PointerArray::present(converted))
 }
 
 /// v1 typed readers for the R18 exotic-tail shapes (S2 §8 tail, S2 §5
@@ -1915,13 +1816,13 @@ unsafe fn read_v1_tail_params(
             }
             let p =
                 unsafe { read_param_struct(param_ptr as *const CK_WTLS_MASTER_KEY_DERIVE_PARAMS)? };
-            let (client_random, client_random_presence) = unsafe {
+            let client_random_presence = unsafe {
                 read_pointer_field_v1(
                     p.RandomInfo.pClientRandom as *const u8,
                     p.RandomInfo.ulClientRandomLen,
                 )?
             };
-            let (server_random, server_random_presence) = unsafe {
+            let server_random_presence = unsafe {
                 read_pointer_field_v1(
                     p.RandomInfo.pServerRandom as *const u8,
                     p.RandomInfo.ulServerRandomLen,
@@ -1932,12 +1833,7 @@ unsafe fn read_v1_tail_params(
                 if version_is_null { 0 } else { unsafe { p.pVersion.read_unaligned() as u32 } };
             Ok(CkMechanismParams::WtlsMasterKeyDerive(WtlsMasterKeyDeriveParams {
                 digest_mechanism: CkMechanismType(p.DigestMechanism as u64),
-                random_info: WtlsRandomData {
-                    client_random_presence,
-                    server_random_presence,
-                    client_random,
-                    server_random,
-                },
+                random_info: WtlsRandomData { client_random_presence, server_random_presence },
                 version,
                 version_is_null,
             }))
@@ -1949,9 +1845,9 @@ unsafe fn read_v1_tail_params(
             }
             // Safety: pParameter points to a valid CK_WTLS_PRF_PARAMS.
             let p = unsafe { read_param_struct(param_ptr as *const CK_WTLS_PRF_PARAMS)? };
-            let (seed, seed_presence) =
+            let seed_presence =
                 unsafe { read_pointer_field_v1(p.pSeed as *const u8, p.ulSeedLen)? };
-            let (label, label_presence) =
+            let label_presence =
                 unsafe { read_pointer_field_v1(p.pLabel as *const u8, p.ulLabelLen)? };
             let output_is_null = p.pOutput.is_null();
             let output_len_is_null = p.pulOutputLen.is_null();
@@ -1964,8 +1860,6 @@ unsafe fn read_v1_tail_params(
                 digest_mechanism: CkMechanismType(p.DigestMechanism as u64),
                 seed_presence,
                 label_presence,
-                seed: seed.into(),
-                label: label.into(),
                 output_len,
                 // W1-C5-01: `pOutput` is OUT — never read the
                 // caller's uninitialized buffer into the request.
@@ -1987,38 +1881,35 @@ unsafe fn read_v1_tail_params(
             if requested_iv_len > MAX_SERIALIZABLE_BYTES {
                 return Err(CkRv::MECHANISM_PARAM_INVALID);
             }
-            let (client_random, client_random_presence) = unsafe {
+            let client_random_presence = unsafe {
                 read_pointer_field_v1(
                     p.RandomInfo.pClientRandom as *const u8,
                     p.RandomInfo.ulClientRandomLen,
                 )?
             };
-            let (server_random, server_random_presence) = unsafe {
+            let server_random_presence = unsafe {
                 read_pointer_field_v1(
                     p.RandomInfo.pServerRandom as *const u8,
                     p.RandomInfo.ulServerRandomLen,
                 )?
             };
             let returned_key_material_is_null = p.pReturnedKeyMaterial.is_null();
-            let (mac_secret_handle, key_handle, iv, iv_presence) = if returned_key_material_is_null
-            {
+            let (mac_secret_handle, key_handle, iv_presence) = if returned_key_material_is_null {
                 // NULL returned material: handles zero, IV records its
                 // bits-derived length without dereference (D3).
                 (
                     CkObjectHandle(0),
                     CkObjectHandle(0),
-                    Vec::new(),
                     PointerBytes::null_len(requested_iv_len as u64),
                 )
             } else {
                 let output = unsafe { read_param_struct(p.pReturnedKeyMaterial)? };
-                let (iv, iv_presence) = unsafe {
+                let iv_presence = unsafe {
                     read_pointer_field_v1(output.pIV as *const u8, requested_iv_len as CK_ULONG)?
                 };
                 (
                     CkObjectHandle(output.hMacSecret as u64),
                     CkObjectHandle(output.hKey as u64),
-                    iv,
                     iv_presence,
                 )
             };
@@ -2029,16 +1920,10 @@ unsafe fn read_v1_tail_params(
                 iv_size_bits: p.ulIVSizeInBits as u64,
                 sequence_number: p.ulSequenceNumber as u64,
                 is_export: p.bIsExport != 0,
-                random_info: WtlsRandomData {
-                    client_random_presence,
-                    server_random_presence,
-                    client_random,
-                    server_random,
-                },
+                random_info: WtlsRandomData { client_random_presence, server_random_presence },
                 mac_secret_handle,
                 key_handle,
                 iv_presence,
-                iv: iv.into(),
                 returned_key_material_is_null,
             }))
         }
@@ -2050,13 +1935,13 @@ unsafe fn read_v1_tail_params(
             let p = unsafe {
                 read_param_struct(param_ptr as *const CK_TLS12_MASTER_KEY_DERIVE_PARAMS)?
             };
-            let (client_random, client_random_presence) = unsafe {
+            let client_random_presence = unsafe {
                 read_pointer_field_v1(
                     p.RandomInfo.pClientRandom as *const u8,
                     p.RandomInfo.ulClientRandomLen,
                 )?
             };
-            let (server_random, server_random_presence) = unsafe {
+            let server_random_presence = unsafe {
                 read_pointer_field_v1(
                     p.RandomInfo.pServerRandom as *const u8,
                     p.RandomInfo.ulServerRandomLen,
@@ -2070,12 +1955,7 @@ unsafe fn read_v1_tail_params(
                 (v.major as u32, v.minor as u32)
             };
             Ok(CkMechanismParams::Tls12MasterKeyDerive(Tls12MasterKeyDeriveParams {
-                random_info: SslRandomData {
-                    client_random_presence,
-                    server_random_presence,
-                    client_random,
-                    server_random,
-                },
+                random_info: SslRandomData { client_random_presence, server_random_presence },
                 version_major,
                 version_minor,
                 prf_hash_mechanism: CkMechanismType(p.prfHashMechanism as u64),
@@ -2089,9 +1969,9 @@ unsafe fn read_v1_tail_params(
             }
             // Safety: pParameter points to a valid CK_TLS_PRF_PARAMS.
             let p = unsafe { read_param_struct(param_ptr as *const CK_TLS_PRF_PARAMS)? };
-            let (seed, seed_presence) =
+            let seed_presence =
                 unsafe { read_pointer_field_v1(p.pSeed as *const u8, p.ulSeedLen)? };
-            let (label, label_presence) =
+            let label_presence =
                 unsafe { read_pointer_field_v1(p.pLabel as *const u8, p.ulLabelLen)? };
             let output_is_null = p.pOutput.is_null();
             let output_len_is_null = p.pulOutputLen.is_null();
@@ -2103,8 +1983,6 @@ unsafe fn read_v1_tail_params(
             Ok(CkMechanismParams::TlsPrf(TlsPrfParams {
                 seed_presence,
                 label_presence,
-                seed: seed.into(),
-                label: label.into(),
                 output_len,
                 // W1-C5-01: `pOutput` is OUT — never read the
                 // caller's uninitialized buffer into the request.
@@ -2120,35 +1998,28 @@ unsafe fn read_v1_tail_params(
             }
             // Safety: pParameter points to a valid CK_TLS_KDF_PARAMS.
             let p = unsafe { read_param_struct(param_ptr as *const CK_TLS_KDF_PARAMS)? };
-            let (label, label_presence) =
+            let label_presence =
                 unsafe { read_pointer_field_v1(p.pLabel as *const u8, p.ulLabelLength)? };
-            let (client_random, client_random_presence) = unsafe {
+            let client_random_presence = unsafe {
                 read_pointer_field_v1(
                     p.RandomInfo.pClientRandom as *const u8,
                     p.RandomInfo.ulClientRandomLen,
                 )?
             };
-            let (server_random, server_random_presence) = unsafe {
+            let server_random_presence = unsafe {
                 read_pointer_field_v1(
                     p.RandomInfo.pServerRandom as *const u8,
                     p.RandomInfo.ulServerRandomLen,
                 )?
             };
-            let (context_data, context_data_presence) = unsafe {
+            let context_data_presence = unsafe {
                 read_pointer_field_v1(p.pContextData as *const u8, p.ulContextDataLength)?
             };
             Ok(CkMechanismParams::TlsKdf(TlsKdfParams {
                 prf_mechanism: CkMechanismType(p.prfMechanism as u64),
                 label_presence,
-                label: label.into(),
-                random_info: SslRandomData {
-                    client_random_presence,
-                    server_random_presence,
-                    client_random,
-                    server_random,
-                },
+                random_info: SslRandomData { client_random_presence, server_random_presence },
                 context_data_presence,
-                context_data: context_data.into(),
             }))
         }
 
@@ -2158,13 +2029,13 @@ unsafe fn read_v1_tail_params(
             }
             let p =
                 unsafe { read_param_struct(param_ptr as *const CK_SSL3_MASTER_KEY_DERIVE_PARAMS)? };
-            let (client_random, client_random_presence) = unsafe {
+            let client_random_presence = unsafe {
                 read_pointer_field_v1(
                     p.RandomInfo.pClientRandom as *const u8,
                     p.RandomInfo.ulClientRandomLen,
                 )?
             };
-            let (server_random, server_random_presence) = unsafe {
+            let server_random_presence = unsafe {
                 read_pointer_field_v1(
                     p.RandomInfo.pServerRandom as *const u8,
                     p.RandomInfo.ulServerRandomLen,
@@ -2178,12 +2049,7 @@ unsafe fn read_v1_tail_params(
                 (v.major as u32, v.minor as u32)
             };
             Ok(CkMechanismParams::Ssl3MasterKeyDerive(Ssl3MasterKeyDeriveParams {
-                random_info: SslRandomData {
-                    client_random_presence,
-                    server_random_presence,
-                    client_random,
-                    server_random,
-                },
+                random_info: SslRandomData { client_random_presence, server_random_presence },
                 version_major,
                 version_minor,
                 version_is_null,
@@ -2197,7 +2063,7 @@ unsafe fn read_v1_tail_params(
             let p = unsafe {
                 read_param_struct(param_ptr as *const CK_TLS12_EXTENDED_MASTER_KEY_DERIVE_PARAMS)?
             };
-            let (session_hash, session_hash_presence) =
+            let session_hash_presence =
                 unsafe { read_pointer_field_v1(p.pSessionHash as *const u8, p.ulSessionHashLen)? };
             let version_is_null = p.pVersion.is_null();
             let (version_major, version_minor) = if version_is_null {
@@ -2210,7 +2076,6 @@ unsafe fn read_v1_tail_params(
                 Tls12ExtendedMasterKeyDeriveParams {
                     prf_hash_mechanism: CkMechanismType(p.prfHashMechanism as u64),
                     session_hash_presence,
-                    session_hash,
                     version_major,
                     version_minor,
                     version_is_null,
@@ -2234,13 +2099,13 @@ unsafe fn read_v1_tail_params(
             if requested_iv_len > MAX_SERIALIZABLE_BYTES {
                 return Err(CkRv::MECHANISM_PARAM_INVALID);
             }
-            let (client_random, client_random_presence) = unsafe {
+            let client_random_presence = unsafe {
                 read_pointer_field_v1(
                     p.RandomInfo.pClientRandom as *const u8,
                     p.RandomInfo.ulClientRandomLen,
                 )?
             };
-            let (server_random, server_random_presence) = unsafe {
+            let server_random_presence = unsafe {
                 read_pointer_field_v1(
                     p.RandomInfo.pServerRandom as *const u8,
                     p.RandomInfo.ulServerRandomLen,
@@ -2252,9 +2117,7 @@ unsafe fn read_v1_tail_params(
                 server_mac_secret_handle,
                 client_key_handle,
                 server_key_handle,
-                client_iv,
                 client_iv_presence,
-                server_iv,
                 server_iv_presence,
             ) = if returned_key_material_is_null {
                 // NULL returned material: handles zero, IVs record
@@ -2264,20 +2127,18 @@ unsafe fn read_v1_tail_params(
                     CkObjectHandle(0),
                     CkObjectHandle(0),
                     CkObjectHandle(0),
-                    Vec::new(),
                     PointerBytes::null_len(requested_iv_len as u64),
-                    Vec::new(),
                     PointerBytes::null_len(requested_iv_len as u64),
                 )
             } else {
                 let output = unsafe { read_param_struct(p.pReturnedKeyMaterial)? };
-                let (client_iv, client_iv_presence) = unsafe {
+                let client_iv_presence = unsafe {
                     read_pointer_field_v1(
                         output.pIVClient as *const u8,
                         requested_iv_len as CK_ULONG,
                     )?
                 };
-                let (server_iv, server_iv_presence) = unsafe {
+                let server_iv_presence = unsafe {
                     read_pointer_field_v1(
                         output.pIVServer as *const u8,
                         requested_iv_len as CK_ULONG,
@@ -2288,9 +2149,7 @@ unsafe fn read_v1_tail_params(
                     CkObjectHandle(output.hServerMacSecret as u64),
                     CkObjectHandle(output.hClientKey as u64),
                     CkObjectHandle(output.hServerKey as u64),
-                    client_iv,
                     client_iv_presence,
-                    server_iv,
                     server_iv_presence,
                 )
             };
@@ -2305,12 +2164,7 @@ unsafe fn read_v1_tail_params(
                 key_size_bits: p.ulKeySizeInBits as u64,
                 iv_size_bits: p.ulIVSizeInBits as u64,
                 is_export: p.bIsExport != 0,
-                random_info: SslRandomData {
-                    client_random_presence,
-                    server_random_presence,
-                    client_random,
-                    server_random,
-                },
+                random_info: SslRandomData { client_random_presence, server_random_presence },
                 prf_hash_mechanism: CkMechanismType(prf_hash_mechanism),
                 client_mac_secret_handle,
                 server_mac_secret_handle,
@@ -2318,8 +2172,6 @@ unsafe fn read_v1_tail_params(
                 server_key_handle,
                 client_iv_presence,
                 server_iv_presence,
-                client_iv: client_iv.into(),
-                server_iv: server_iv.into(),
                 returned_key_material_is_null,
             }))
         }
@@ -2334,20 +2186,17 @@ unsafe fn read_v1_tail_params(
             // INDEPENDENTLY against the shared length (a NULL B beside
             // a valid A stays ONE typed message); agreement is the
             // proto decoder's job, not the reader's.
-            let (random_a, random_a_presence) =
+            let random_a_presence =
                 unsafe { read_pointer_field_v1(p.RandomA as *const u8, p.ulRandomLen)? };
-            let (random_b, random_b_presence) =
+            let random_b_presence =
                 unsafe { read_pointer_field_v1(p.RandomB as *const u8, p.ulRandomLen)? };
-            let (public_data, public_data_presence) =
+            let public_data_presence =
                 unsafe { read_pointer_field_v1(p.PublicData as *const u8, p.ulPublicDataLen)? };
             Ok(CkMechanismParams::KeaDerive(KeaDeriveParams {
                 is_sender: p.isSender != 0,
                 random_a_presence,
                 random_b_presence,
                 public_data_presence,
-                random_a,
-                random_b,
-                public_data,
             }))
         }
 
@@ -2357,10 +2206,10 @@ unsafe fn read_v1_tail_params(
             }
             // Safety: pParameter points to a valid CK_KIP_PARAMS.
             let p = unsafe { read_param_struct(param_ptr as *const CK_KIP_PARAMS)? };
-            let (mechanism, mechanism_is_null) = if p.pMechanism.is_null() {
-                // NULL nesting: the canonical placeholder + the set
-                // nesting bit (the v1 decoder's `(None, true)` arm).
-                (Box::new(KipParams::NULL_NESTED_MECHANISM), true)
+            // NULL nesting is `None` (R19 final form); present nesting
+            // boxes the nested node (the v1 decoder's `(None, true)` arm).
+            let mechanism: Option<Box<CkMechanism>> = if p.pMechanism.is_null() {
+                None
             } else {
                 // Depth and cycle enforcement at budget entry; the
                 // legacy nested-length peek is gone (v1 has no outer
@@ -2369,16 +2218,14 @@ unsafe fn read_v1_tail_params(
                 budget.enter(p.pMechanism as usize)?;
                 let nested = unsafe { read_nested_mechanism_for_transport(p.pMechanism, budget) };
                 budget.exit();
-                (Box::new(nested?), false)
+                Some(Box::new(nested?))
             };
-            let (seed, seed_presence) =
+            let seed_presence =
                 unsafe { read_pointer_field_v1(p.pSeed as *const u8, p.ulSeedLen)? };
             Ok(CkMechanismParams::Kip(KipParams {
                 mechanism,
                 key_handle: CkObjectHandle(p.hKey as u64),
                 seed_presence,
-                seed: seed.into(),
-                mechanism_is_null,
             }))
         }
 
@@ -2388,8 +2235,8 @@ unsafe fn read_v1_tail_params(
             }
             // Safety: pParameter points to a valid CK_OTP_PARAMS.
             let p = unsafe { read_param_struct(param_ptr as *const CK_OTP_PARAMS)? };
-            let (params, params_presence) = unsafe { read_otp_array_v1(p.pParams, p.ulCount)? };
-            Ok(CkMechanismParams::Otp(OtpParams { params, params_presence }))
+            let params_presence = unsafe { read_otp_array_v1(p.pParams, p.ulCount)? };
+            Ok(CkMechanismParams::Otp(OtpParams { params_presence }))
         }
 
         Some("skipjack_private_wrap") => {
@@ -2398,18 +2245,18 @@ unsafe fn read_v1_tail_params(
             }
             let p =
                 unsafe { read_param_struct(param_ptr as *const CK_SKIPJACK_PRIVATE_WRAP_PARAMS)? };
-            let (password, password_presence) =
+            let password_presence =
                 unsafe { read_pointer_field_v1(p.pPassword as *const u8, p.ulPasswordLen)? };
-            let (public_data, public_data_presence) =
+            let public_data_presence =
                 unsafe { read_pointer_field_v1(p.pPublicData as *const u8, p.ulPublicDataLen)? };
-            let (random_a, random_a_presence) =
+            let random_a_presence =
                 unsafe { read_pointer_field_v1(p.pRandomA as *const u8, p.ulRandomLen)? };
             // Shared-length companions (see the KEA arm).
-            let (prime_p, prime_p_presence) =
+            let prime_p_presence =
                 unsafe { read_pointer_field_v1(p.pPrimeP as *const u8, p.ulPAndGLen)? };
-            let (base_g, base_g_presence) =
+            let base_g_presence =
                 unsafe { read_pointer_field_v1(p.pBaseG as *const u8, p.ulPAndGLen)? };
-            let (subprime_q, subprime_q_presence) =
+            let subprime_q_presence =
                 unsafe { read_pointer_field_v1(p.pSubprimeQ as *const u8, p.ulQLen)? };
             Ok(CkMechanismParams::SkipjackPrivateWrap(SkipjackPrivateWrapParams {
                 password_presence,
@@ -2418,13 +2265,7 @@ unsafe fn read_v1_tail_params(
                 prime_p_presence,
                 base_g_presence,
                 subprime_q_presence,
-                password: password.into(),
-                public_data,
                 password_length: p.ulPasswordLen as u64,
-                random_a,
-                prime_p,
-                base_g,
-                subprime_q,
             }))
         }
 
@@ -2433,21 +2274,21 @@ unsafe fn read_v1_tail_params(
                 return Err(CkRv::MECHANISM_PARAM_INVALID);
             }
             let p = unsafe { read_param_struct(param_ptr as *const CK_SKIPJACK_RELAYX_PARAMS)? };
-            let (old_wrapped_x, old_wrapped_x_presence) =
+            let old_wrapped_x_presence =
                 unsafe { read_pointer_field_v1(p.pOldWrappedX as *const u8, p.ulOldWrappedXLen)? };
-            let (old_password, old_password_presence) =
+            let old_password_presence =
                 unsafe { read_pointer_field_v1(p.pOldPassword as *const u8, p.ulOldPasswordLen)? };
-            let (old_public_data, old_public_data_presence) = unsafe {
+            let old_public_data_presence = unsafe {
                 read_pointer_field_v1(p.pOldPublicData as *const u8, p.ulOldPublicDataLen)?
             };
-            let (old_random_a, old_random_a_presence) =
+            let old_random_a_presence =
                 unsafe { read_pointer_field_v1(p.pOldRandomA as *const u8, p.ulOldRandomLen)? };
-            let (new_password, new_password_presence) =
+            let new_password_presence =
                 unsafe { read_pointer_field_v1(p.pNewPassword as *const u8, p.ulNewPasswordLen)? };
-            let (new_public_data, new_public_data_presence) = unsafe {
+            let new_public_data_presence = unsafe {
                 read_pointer_field_v1(p.pNewPublicData as *const u8, p.ulNewPublicDataLen)?
             };
-            let (new_random_a, new_random_a_presence) =
+            let new_random_a_presence =
                 unsafe { read_pointer_field_v1(p.pNewRandomA as *const u8, p.ulNewRandomLen)? };
             Ok(CkMechanismParams::SkipjackRelayx(SkipjackRelayxParams {
                 old_wrapped_x_presence,
@@ -2457,13 +2298,6 @@ unsafe fn read_v1_tail_params(
                 new_password_presence,
                 new_public_data_presence,
                 new_random_a_presence,
-                old_wrapped_x: old_wrapped_x.into(),
-                old_password: old_password.into(),
-                old_public_data: old_public_data.into(),
-                old_random_a: old_random_a.into(),
-                new_password: new_password.into(),
-                new_public_data: new_public_data.into(),
-                new_random_a: new_random_a.into(),
             }))
         }
 
@@ -2473,17 +2307,15 @@ unsafe fn read_v1_tail_params(
             }
             // Safety: pParameter points to a valid CK_SP800_108_KDF_PARAMS.
             let p = unsafe { read_param_struct(param_ptr as *const CK_SP800_108_KDF_PARAMS)? };
-            let (data_params, data_params_presence) =
+            let data_params_presence =
                 unsafe { read_sp800_108_data_params_v1(p.pDataParams, p.ulNumberOfDataParams)? };
-            let (additional_derived_keys, additional_derived_keys_presence) = unsafe {
+            let additional_derived_keys_presence = unsafe {
                 read_sp800_108_derived_keys_v1(p.pAdditionalDerivedKeys, p.ulAdditionalDerivedKeys)?
             };
             Ok(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
                 prf_type: CkMechanismType(p.prfType as u64),
                 data_params_presence,
                 additional_derived_keys_presence,
-                data_params,
-                additional_derived_keys,
             }))
         }
 
@@ -2493,11 +2325,10 @@ unsafe fn read_v1_tail_params(
             }
             let p =
                 unsafe { read_param_struct(param_ptr as *const CK_SP800_108_FEEDBACK_KDF_PARAMS)? };
-            let (data_params, data_params_presence) =
+            let data_params_presence =
                 unsafe { read_sp800_108_data_params_v1(p.pDataParams, p.ulNumberOfDataParams)? };
-            let (iv, iv_presence) =
-                unsafe { read_pointer_field_v1(p.pIV as *const u8, p.ulIVLen)? };
-            let (additional_derived_keys, additional_derived_keys_presence) = unsafe {
+            let iv_presence = unsafe { read_pointer_field_v1(p.pIV as *const u8, p.ulIVLen)? };
+            let additional_derived_keys_presence = unsafe {
                 read_sp800_108_derived_keys_v1(p.pAdditionalDerivedKeys, p.ulAdditionalDerivedKeys)?
             };
             Ok(CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
@@ -2505,9 +2336,6 @@ unsafe fn read_v1_tail_params(
                 data_params_presence,
                 iv_presence,
                 additional_derived_keys_presence,
-                data_params,
-                iv,
-                additional_derived_keys,
             }))
         }
 
@@ -2594,10 +2422,8 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                         hash_alg: CkMechanismType(oaep.hashAlg as u64),
                         mgf: CkMgf(oaep.mgf as u64),
                         source: CkOaepSource(oaep.source as u64),
-                        source_data: source_data.into(),
                         // F3/D2: (NULL, 0) vs (ptr, 0) must survive the
                         // crossing; (NULL, len > 0) took the Raw path above.
-                        source_null: oaep.pSourceData.is_null(),
                         source_data_presence,
                     }))
                 }
@@ -2659,11 +2485,7 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     let aad_presence = PointerBytes::from_legacy(&aad, ccm.pAAD.is_null());
                     Some(CkMechanismParams::Ccm(CcmParams {
                         data_len: ccm.ulDataLen as u64,
-                        nonce,
-                        aad: aad.into(),
                         mac_len: ccm.ulMACLen as u64,
-                        nonce_null: ccm.pNonce.is_null(),
-                        aad_null: ccm.pAAD.is_null(),
                         nonce_presence,
                         aad_presence,
                     }))
@@ -2705,8 +2527,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     let public_data_presence = PointerBytes::present_copy(&public_data);
                     Some(CkMechanismParams::Ecdh1Derive(Ecdh1DeriveParams {
                         kdf: CkKdf(ecdh.kdf as u64),
-                        shared_data: shared_data.into(),
-                        public_data,
                         shared_data_presence,
                         public_data_presence,
                     }))
@@ -2776,9 +2596,7 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                         expand: hkdf.bExpand != 0,
                         prf_hash_mechanism: CkMechanismType(hkdf.prfHashMechanism as u64),
                         salt_type: hkdf.ulSaltType as u64,
-                        salt: salt.into(),
                         salt_key_handle: CkObjectHandle(hkdf.hSaltKey as u64),
-                        info: info.into(),
                         salt_presence,
                         info_presence,
                     }))
@@ -2811,7 +2629,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     let context_data_presence = PointerBytes::present_copy(&context_data);
                     Some(CkMechanismParams::Eddsa(EddsaParams {
                         ph_flag: eddsa.phFlag != 0,
-                        context_data: context_data.into(),
                         context_data_presence,
                     }))
                 }
@@ -2853,9 +2670,7 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     let block_counter_presence = PointerBytes::present_copy(&block_counter);
                     let nonce_presence = PointerBytes::present_copy(&nonce);
                     Some(CkMechanismParams::ChaCha20(ChaCha20Params {
-                        block_counter,
                         block_counter_bits: ch.blockCounterBits as u64,
-                        nonce,
                         nonce_bits: ch.ulNonceBits as u64,
                         block_counter_presence,
                         nonce_presence,
@@ -2894,8 +2709,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     let block_counter_presence = PointerBytes::present_copy(&block_counter);
                     let nonce_presence = PointerBytes::present_copy(&nonce);
                     Some(CkMechanismParams::Salsa20(Salsa20Params {
-                        block_counter,
-                        nonce,
                         nonce_bits: salsa.ulNonceBits as u64,
                         block_counter_presence,
                         nonce_presence,
@@ -2935,12 +2748,7 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     let nonce_presence = PointerBytes::present_copy(&nonce);
                     let aad_presence = PointerBytes::present_copy(&aad);
                     Some(CkMechanismParams::Salsa20ChaCha20Poly1305(
-                        Salsa20ChaCha20Poly1305Params {
-                            nonce,
-                            aad: aad.into(),
-                            nonce_presence,
-                            aad_presence,
-                        },
+                        Salsa20ChaCha20Poly1305Params { nonce_presence, aad_presence },
                     ))
                 }
             }
@@ -2969,7 +2777,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     let data_presence = PointerBytes::present_copy(&data);
                     Some(CkMechanismParams::AesCbcEncryptData(AesCbcEncryptDataParams {
                         iv: s.iv.to_vec(),
-                        data: data.into(),
                         data_presence,
                     }))
                 }
@@ -2999,7 +2806,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     let data_presence = PointerBytes::present_copy(&data);
                     Some(CkMechanismParams::DesCbcEncryptData(DesCbcEncryptDataParams {
                         iv: s.iv.to_vec(),
-                        data: data.into(),
                         data_presence,
                     }))
                 }
@@ -3029,7 +2835,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     let data_presence = PointerBytes::present_copy(&data);
                     Some(CkMechanismParams::CamelliaCbcEncryptData(CamelliaCbcEncryptDataParams {
                         iv: s.iv.to_vec(),
-                        data: data.into(),
                         data_presence,
                     }))
                 }
@@ -3059,7 +2864,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     let data_presence = PointerBytes::present_copy(&data);
                     Some(CkMechanismParams::AriaCbcEncryptData(AriaCbcEncryptDataParams {
                         iv: s.iv.to_vec(),
-                        data: data.into(),
                         data_presence,
                     }))
                 }
@@ -3089,7 +2893,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     let data_presence = PointerBytes::present_copy(&data);
                     Some(CkMechanismParams::SeedCbcEncryptData(SeedCbcEncryptDataParams {
                         iv: s.iv.to_vec(),
-                        data: data.into(),
                         data_presence,
                     }))
                 }
@@ -3158,7 +2961,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     };
                     let data_presence = PointerBytes::present_copy(&data);
                     Some(CkMechanismParams::KeyDerivationString(KeyDerivationStringData {
-                        data: data.into(),
                         data_presence,
                     }))
                 }
@@ -3193,10 +2995,8 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     let iv_presence = PointerBytes::present_copy(&iv);
                     let aad_presence = PointerBytes::present_copy(&aad);
                     Some(CkMechanismParams::GcmWrap(GcmWrapParams {
-                        iv,
                         iv_fixed_bits: gw.ulIvFixedBits as u64,
                         iv_generator: CkGeneratorFunction(gw.ivGenerator as u64),
-                        aad: aad.into(),
                         tag_bits: gw.ulTagBits as u64,
                         iv_presence,
                         aad_presence,
@@ -3234,10 +3034,8 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     let aad_presence = PointerBytes::present_copy(&aad);
                     Some(CkMechanismParams::CcmWrap(CcmWrapParams {
                         data_len: cw.ulDataLen as u64,
-                        nonce,
                         nonce_fixed_bits: cw.ulNonceFixedBits as u64,
                         nonce_generator: CkGeneratorFunction(cw.nonceGenerator as u64),
-                        aad: aad.into(),
                         mac_len: cw.ulMACLen as u64,
                         nonce_presence,
                         aad_presence,
@@ -3298,7 +3096,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     Some(CkMechanismParams::Rc5Cbc(Rc5CbcParams {
                         word_size: rc5.ulWordsize as u64,
                         rounds: rc5.ulRounds as u64,
-                        iv,
                         iv_presence,
                     }))
                 }
@@ -3424,8 +3221,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                                 hash_alg: CkMechanismType(oaep.hashAlg as u64),
                                 mgf: CkMgf(oaep.mgf as u64),
                                 source: CkOaepSource(oaep.source as u64),
-                                source_data: source_data.into(),
-                                source_null: oaep.pSourceData.is_null(),
                                 source_data_presence,
                             },
                         }))
@@ -3487,7 +3282,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     let context_presence = PointerBytes::present_copy(&context);
                     Some(CkMechanismParams::SignAdditionalContext(SignAdditionalContext {
                         hedge_variant: hedge_variant as u64,
-                        context: context.into(),
                         hash: CkMechanismType(hash),
                         context_presence,
                     }))
@@ -3526,7 +3320,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     Some(CkMechanismParams::Kmac(KmacParams {
                         key_handle: CkObjectHandle(p.h_key as u64),
                         mac_length: p.ul_mac_length as u64,
-                        customization_string: customization_string.into(),
                         customization_string_presence,
                     }))
                 }
@@ -3561,8 +3354,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     let context_presence = PointerBytes::present_copy(&context);
                     Some(CkMechanismParams::MuGen(MuGenParams {
                         key_handle: CkObjectHandle(p.h_key as u64),
-                        tr: tr.into(),
-                        context: context.into(),
                         tr_presence,
                         context_presence,
                     }))
@@ -3610,11 +3401,8 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     let password_presence = PointerBytes::present_copy(&password);
                     Some(CkMechanismParams::Pkcs5Pbkd2(Pkcs5Pbkd2Params {
                         salt_source: CkPbkdf2SaltSource(p.saltSource as u64),
-                        salt_source_data: salt_source_data.into(),
                         iterations: p.iterations as u64,
                         prf: CkPbkdf2Prf(p.prf as u64),
-                        prf_data: prf_data.into(),
-                        password: password.into(),
                         salt_source_data_presence,
                         prf_data_presence,
                         password_presence,
@@ -3677,8 +3465,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                         random_info: WtlsRandomData {
                             client_random_presence: PointerBytes::present_copy(&client_random),
                             server_random_presence: PointerBytes::present_copy(&server_random),
-                            client_random,
-                            server_random,
                         },
                         version,
                         version_is_null: false,
@@ -3720,8 +3506,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                         digest_mechanism: CkMechanismType(p.DigestMechanism as u64),
                         seed_presence: PointerBytes::present_copy(&seed),
                         label_presence: PointerBytes::present_copy(&label),
-                        seed: seed.into(),
-                        label: label.into(),
                         output_len,
                         // W1-C5-01: `pOutput` is OUT — never read the
                         // caller's uninitialized buffer into the request.
@@ -3798,13 +3582,10 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                             random_info: WtlsRandomData {
                                 client_random_presence: PointerBytes::present_copy(&client_random),
                                 server_random_presence: PointerBytes::present_copy(&server_random),
-                                client_random,
-                                server_random,
                             },
                             mac_secret_handle: CkObjectHandle(output.hMacSecret as u64),
                             key_handle: CkObjectHandle(output.hKey as u64),
                             iv_presence: PointerBytes::present_copy(&iv),
-                            iv: iv.into(),
                             returned_key_material_is_null: false,
                         }))
                     }
@@ -3866,8 +3647,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                         random_info: SslRandomData {
                             client_random_presence: PointerBytes::present_copy(&client_random),
                             server_random_presence: PointerBytes::present_copy(&server_random),
-                            client_random,
-                            server_random,
                         },
                         version_major,
                         version_minor,
@@ -3910,8 +3689,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     Some(CkMechanismParams::TlsPrf(TlsPrfParams {
                         seed_presence: PointerBytes::present_copy(&seed),
                         label_presence: PointerBytes::present_copy(&label),
-                        seed: seed.into(),
-                        label: label.into(),
                         output_len,
                         // W1-C5-01: `pOutput` is OUT — never read the
                         // caller's uninitialized buffer into the request.
@@ -3986,15 +3763,11 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     Some(CkMechanismParams::TlsKdf(TlsKdfParams {
                         prf_mechanism: CkMechanismType(p.prfMechanism as u64),
                         label_presence: PointerBytes::present_copy(&label),
-                        label: label.into(),
                         random_info: SslRandomData {
                             client_random_presence: PointerBytes::present_copy(&client_random),
                             server_random_presence: PointerBytes::present_copy(&server_random),
-                            client_random,
-                            server_random,
                         },
                         context_data_presence: PointerBytes::present_copy(&context_data),
-                        context_data: context_data.into(),
                     }))
                 }
             }
@@ -4054,8 +3827,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                         random_info: SslRandomData {
                             client_random_presence: PointerBytes::present_copy(&client_random),
                             server_random_presence: PointerBytes::present_copy(&server_random),
-                            client_random,
-                            server_random,
                         },
                         version_major,
                         version_minor,
@@ -4099,7 +3870,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     Tls12ExtendedMasterKeyDeriveParams {
                         prf_hash_mechanism: CkMechanismType(p.prfHashMechanism as u64),
                         session_hash_presence: PointerBytes::present_copy(&session_hash),
-                        session_hash,
                         version_major,
                         version_minor,
                         version_is_null: false,
@@ -4192,8 +3962,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                             random_info: SslRandomData {
                                 client_random_presence: PointerBytes::present_copy(&client_random),
                                 server_random_presence: PointerBytes::present_copy(&server_random),
-                                client_random,
-                                server_random,
                             },
                             prf_hash_mechanism: CkMechanismType(prf_hash_mechanism),
                             client_mac_secret_handle: CkObjectHandle(
@@ -4206,8 +3974,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                             server_key_handle: CkObjectHandle(output.hServerKey as u64),
                             client_iv_presence: PointerBytes::present_copy(&client_iv),
                             server_iv_presence: PointerBytes::present_copy(&server_iv),
-                            client_iv: client_iv.into(),
-                            server_iv: server_iv.into(),
                             returned_key_material_is_null: false,
                         }))
                     }
@@ -4248,9 +4014,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     let password_presence = PointerBytes::present_copy(&password);
                     let salt_presence = PointerBytes::present_copy(&salt);
                     Some(CkMechanismParams::Pbe(PbeParams {
-                        init_vector: init_vector.into(),
-                        password: password.into(),
-                        salt: salt.into(),
                         iteration: p.ulIteration as u64,
                         init_vector_presence,
                         password_presence,
@@ -4282,7 +4045,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     Some(CkMechanismParams::EcdhAesKeyWrap(EcdhAesKeyWrapParams {
                         aes_key_bits: p.ulAESKeyBits as u64,
                         kdf: CkKdf(p.kdf as u64),
-                        shared_data: shared_data.into(),
                         shared_data_presence,
                     }))
                 }
@@ -4325,11 +4087,8 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     let public_data2_presence = PointerBytes::present_copy(&public_data2);
                     Some(CkMechanismParams::Ecdh2Derive(Ecdh2DeriveParams {
                         kdf: CkKdf(p.kdf as u64),
-                        shared_data: shared_data.into(),
-                        public_data,
                         private_data_len: p.ulPrivateDataLen as u64,
                         private_data_handle: CkObjectHandle(p.hPrivateData as u64),
-                        public_data2,
                         shared_data_presence,
                         public_data_presence,
                         public_data2_presence,
@@ -4374,11 +4133,8 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     let public_data2_presence = PointerBytes::present_copy(&public_data2);
                     Some(CkMechanismParams::EcmqvDerive(EcmqvDeriveParams {
                         kdf: CkKdf(p.kdf as u64),
-                        shared_data: shared_data.into(),
-                        public_data,
                         private_data_len: p.ulPrivateDataLen as u64,
                         private_data_handle: CkObjectHandle(p.hPrivateData as u64),
-                        public_data2,
                         public_key_handle: CkObjectHandle(p.publicKey as u64),
                         shared_data_presence,
                         public_data_presence,
@@ -4417,8 +4173,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     let public_data_presence = PointerBytes::present_copy(&public_data);
                     Some(CkMechanismParams::X942Dh1Derive(X942Dh1DeriveParams {
                         kdf: CkKdf(p.kdf as u64),
-                        other_info: other_info.into(),
-                        public_data,
                         other_info_presence,
                         public_data_presence,
                     }))
@@ -4463,11 +4217,8 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     let public_data2_presence = PointerBytes::present_copy(&public_data2);
                     Some(CkMechanismParams::X942Dh2Derive(X942Dh2DeriveParams {
                         kdf: CkKdf(p.kdf as u64),
-                        other_info: other_info.into(),
-                        public_data,
                         private_data_len: p.ulPrivateDataLen as u64,
                         private_data_handle: CkObjectHandle(p.hPrivateData as u64),
-                        public_data2,
                         other_info_presence,
                         public_data_presence,
                         public_data2_presence,
@@ -4513,11 +4264,8 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     let public_data2_presence = PointerBytes::present_copy(&public_data2);
                     Some(CkMechanismParams::X942MqvDerive(X942MqvDeriveParams {
                         kdf: CkKdf(p.kdf as u64),
-                        other_info: other_info.into(),
-                        public_data,
                         private_data_len: p.ulPrivateDataLen as u64,
                         private_data_handle: CkObjectHandle(p.hPrivateData as u64),
-                        public_data2,
                         public_key_handle: CkObjectHandle(p.publicKey as u64),
                         other_info_presence,
                         public_data_presence,
@@ -4556,8 +4304,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     let ukm_presence = PointerBytes::present_copy(&ukm);
                     Some(CkMechanismParams::Gostr3410Derive(Gostr3410DeriveParams {
                         kdf: CkKdf(p.kdf as u64),
-                        public_data,
-                        ukm,
                         public_data_presence,
                         ukm_presence,
                     }))
@@ -4593,8 +4339,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     let wrap_oid_presence = PointerBytes::present_copy(&wrap_oid);
                     let ukm_presence = PointerBytes::present_copy(&ukm);
                     Some(CkMechanismParams::Gostr3410KeyWrap(Gostr3410KeyWrapParams {
-                        wrap_oid,
-                        ukm,
                         key_handle: CkObjectHandle(p.hKey as u64),
                         wrap_oid_presence,
                         ukm_presence,
@@ -4622,7 +4366,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     let x_presence = PointerBytes::present_copy(&x);
                     Some(CkMechanismParams::KeyWrapSetOaep(KeyWrapSetOaepParams {
                         bc: p.bBC as u32,
-                        x: x.into(),
                         x_presence,
                     }))
                 }
@@ -4662,9 +4405,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                         random_a_presence: PointerBytes::present_copy(&random_a),
                         random_b_presence: PointerBytes::present_copy(&random_b),
                         public_data_presence: PointerBytes::present_copy(&public_data),
-                        random_a,
-                        random_b,
-                        public_data,
                     }))
                 }
             }
@@ -4700,8 +4440,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                         prf_mechanism: CkMechanismType(p.prfMechanism as u64),
                         data_as_key: p.bDataAsKey != 0,
                         rekey: p.bRekey != 0,
-                        ni: ni.into(),
-                        nr: nr.into(),
                         new_key_handle: CkObjectHandle(p.hNewKey as u64),
                         ni_presence,
                         nr_presence,
@@ -4742,8 +4480,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                         has_prev_key: p.bHasPrevKey != 0,
                         keygxy_handle: CkObjectHandle(p.hKeygxy as u64),
                         prev_key_handle: CkObjectHandle(p.hPrevKey as u64),
-                        ckyi: ckyi.into(),
-                        ckyr: ckyr.into(),
                         key_number: p.keyNumber as u32,
                         ckyi_presence,
                         ckyr_presence,
@@ -4776,7 +4512,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                         prf_mechanism: CkMechanismType(p.prfMechanism as u64),
                         has_keygxy: p.bHasKeygxy != 0,
                         keygxy_handle: CkObjectHandle(p.hKeygxy as u64),
-                        extra_data: extra_data.into(),
                         extra_data_presence,
                     }))
                 }
@@ -4807,7 +4542,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                         prf_mechanism: CkMechanismType(p.prfMechanism as u64),
                         has_seed_key: p.bHasSeedKey != 0,
                         seed_key_handle: CkObjectHandle(p.hSeedKey as u64),
-                        seed_data: seed_data.into(),
                         seed_data_presence,
                     }))
                 }
@@ -4845,11 +4579,9 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     let mechanism = mechanism?;
                     let seed = unsafe { payload_bytes(p.pSeed, p.ulSeedLen)? };
                     Some(CkMechanismParams::Kip(KipParams {
-                        mechanism: Box::new(mechanism),
+                        mechanism: Some(Box::new(mechanism)),
                         key_handle: CkObjectHandle(p.hKey as u64),
                         seed_presence: PointerBytes::present_copy(&seed),
-                        seed: seed.into(),
-                        mechanism_is_null: false,
                     }))
                 }
             }
@@ -4868,7 +4600,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else if p.pParams.is_null() || p.ulCount == 0 {
                     Some(CkMechanismParams::Otp(OtpParams {
-                        params: Vec::new(),
                         params_presence: PointerArray::present(Vec::new()),
                     }))
                 } else {
@@ -4905,14 +4636,12 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                                 Ok(OtpParam {
                                     type_: param.type_ as u64,
                                     value_presence: PointerBytes::present_copy(&value),
-                                    value: value.into(),
                                 })
                             })
                             .collect();
                         let converted: Vec<OtpParam> = converted?;
                         Some(CkMechanismParams::Otp(OtpParams {
                             params_presence: PointerArray::present(converted.clone()),
-                            params: converted,
                         }))
                     }
                 }
@@ -4979,13 +4708,7 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                         prime_p_presence: PointerBytes::present_copy(&prime_p),
                         base_g_presence: PointerBytes::present_copy(&base_g),
                         subprime_q_presence: PointerBytes::present_copy(&subprime_q),
-                        password: password.into(),
-                        public_data,
                         password_length: p.ulPasswordLen as u64,
-                        random_a,
-                        prime_p,
-                        base_g,
-                        subprime_q,
                     }))
                 }
             }
@@ -5065,13 +4788,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                         new_password_presence: PointerBytes::present_copy(&new_password),
                         new_public_data_presence: PointerBytes::present_copy(&new_public_data),
                         new_random_a_presence: PointerBytes::present_copy(&new_random_a),
-                        old_wrapped_x: old_wrapped_x.into(),
-                        old_password: old_password.into(),
-                        old_public_data: old_public_data.into(),
-                        old_random_a: old_random_a.into(),
-                        new_password: new_password.into(),
-                        new_public_data: new_public_data.into(),
-                        new_random_a: new_random_a.into(),
                     }))
                 }
             }
@@ -5108,8 +4824,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                         additional_derived_keys_presence: PointerArray::present(
                             additional_derived_keys.clone(),
                         ),
-                        data_params,
-                        additional_derived_keys,
                     }))
                 }
             }
@@ -5157,9 +4871,6 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                         additional_derived_keys_presence: PointerArray::present(
                             additional_derived_keys.clone(),
                         ),
-                        data_params,
-                        iv,
-                        additional_derived_keys,
                     }))
                 }
             }
@@ -5222,7 +4933,6 @@ unsafe fn read_sp800_108_data_params(
         out.push(PrfDataParam {
             type_: param.type_ as u64,
             value_presence: PointerBytes::present_copy(&value),
-            value: value.into(),
         });
     }
     Ok(out)
@@ -5324,7 +5034,6 @@ unsafe fn read_sp800_108_derived_keys(
             Ok(Sp800108DerivedKey {
                 template_presence: PointerArray::present(template.clone()),
                 ph_key_is_null: false,
-                template,
                 key_handle: CkObjectHandle(key_handle),
             })
         })

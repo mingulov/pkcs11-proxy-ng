@@ -21,8 +21,8 @@ use pkcs11_proxy_ng_types::{
 
 fn ssl_random_to_proto(r: &SslRandomData) -> v1_proto::SslRandomData {
     v1_proto::SslRandomData {
-        client_random: r.client_random.clone(),
-        server_random: r.server_random.clone(),
+        client_random: pointer_to_wire(&r.client_random_presence).0,
+        server_random: pointer_to_wire(&r.server_random_presence).0,
         // R18: v0 encode stays v0-shaped (shim emits v1 in R18 tail arms).
         client_random_null_len: None,
         server_random_null_len: None,
@@ -36,8 +36,6 @@ fn ssl_random_from_proto(r: &v1_proto::SslRandomData) -> SslRandomData {
     SslRandomData {
         client_random_presence: PointerBytes::present_copy(&client_random),
         server_random_presence: PointerBytes::present_copy(&server_random),
-        client_random,
-        server_random,
     }
 }
 
@@ -53,8 +51,8 @@ fn required_ssl_random_from_option(
 
 fn wtls_random_to_proto(r: &WtlsRandomData) -> v1_proto::WtlsRandomData {
     v1_proto::WtlsRandomData {
-        client_random: r.client_random.clone(),
-        server_random: r.server_random.clone(),
+        client_random: pointer_to_wire(&r.client_random_presence).0,
+        server_random: pointer_to_wire(&r.server_random_presence).0,
         // R18: v0 encode stays v0-shaped (shim emits v1 in R18 tail arms).
         client_random_null_len: None,
         server_random_null_len: None,
@@ -68,8 +66,6 @@ fn wtls_random_from_proto(r: &v1_proto::WtlsRandomData) -> WtlsRandomData {
     WtlsRandomData {
         client_random_presence: PointerBytes::present_copy(&client_random),
         server_random_presence: PointerBytes::present_copy(&server_random),
-        client_random,
-        server_random,
     }
 }
 
@@ -86,8 +82,8 @@ fn required_wtls_random_from_option(
 impl From<&TlsPrfParams> for v1_proto::TlsPrfParams {
     fn from(p: &TlsPrfParams) -> Self {
         Self {
-            seed: secret_to_plain(&p.seed),
-            label: secret_to_plain(&p.label),
+            seed: pointer_to_wire(&p.seed_presence).0,
+            label: pointer_to_wire(&p.label_presence).0,
             output_len: p.output_len,
             output: secret_to_plain(&p.output),
             // R18: v0 encode stays v0-shaped (shim emits v1 in R18 tail arms).
@@ -109,8 +105,6 @@ impl From<&v1_proto::TlsPrfParams> for TlsPrfParams {
             label_presence: PointerBytes::present_cloned(&label),
             output_is_null: false,
             output_len_is_null: false,
-            seed,
-            label,
             output_len: p.output_len,
             output: SecretBytes::copy_from_slice(&p.output),
         }
@@ -125,9 +119,9 @@ impl From<&TlsKdfParams> for v1_proto::TlsKdfParams {
     fn from(p: &TlsKdfParams) -> Self {
         Self {
             prf_mechanism: p.prf_mechanism.0,
-            label: secret_to_plain(&p.label),
+            label: pointer_to_wire(&p.label_presence).0,
             random_info: Some(ssl_random_to_proto(&p.random_info)),
-            context_data: secret_to_plain(&p.context_data),
+            context_data: pointer_to_wire(&p.context_data_presence).0,
             // R18: v0 encode stays v0-shaped (shim emits v1 in R18 tail arms).
             label_null_len: None,
             context_data_null_len: None,
@@ -147,8 +141,6 @@ impl TryFrom<&v1_proto::TlsKdfParams> for TlsKdfParams {
             label_presence: PointerBytes::present_cloned(&label),
             random_info: required_ssl_random_from_option(&p.random_info)?,
             context_data_presence: PointerBytes::present_cloned(&context_data),
-            label,
-            context_data,
         })
     }
 }
@@ -221,7 +213,7 @@ impl From<&Tls12ExtendedMasterKeyDeriveParams> for v1_proto::Tls12ExtendedMaster
     fn from(p: &Tls12ExtendedMasterKeyDeriveParams) -> Self {
         Self {
             prf_hash_mechanism: p.prf_hash_mechanism.0,
-            session_hash: p.session_hash.clone(),
+            session_hash: pointer_to_wire(&p.session_hash_presence).0,
             version_major: p.version_major,
             version_minor: p.version_minor,
             // R18: v0 encode stays v0-shaped (shim emits v1 in R18 tail arms).
@@ -241,7 +233,6 @@ impl From<&v1_proto::Tls12ExtendedMasterKeyDeriveParams> for Tls12ExtendedMaster
             version_major: p.version_major,
             version_minor: p.version_minor,
             version_is_null: false,
-            session_hash,
         }
     }
 }
@@ -263,8 +254,8 @@ impl From<&Ssl3KeyMatParams> for v1_proto::Ssl3KeyMatParams {
             server_mac_secret_handle: p.server_mac_secret_handle.0,
             client_key_handle: p.client_key_handle.0,
             server_key_handle: p.server_key_handle.0,
-            client_iv: secret_to_plain(&p.client_iv),
-            server_iv: secret_to_plain(&p.server_iv),
+            client_iv: pointer_to_wire(&p.client_iv_presence).0,
+            server_iv: pointer_to_wire(&p.server_iv_presence).0,
             // R18: v0 encode stays v0-shaped (shim emits v1 in R18 tail arms).
             returned_key_material_null: None,
             client_iv_null_len: None,
@@ -288,8 +279,6 @@ impl TryFrom<&v1_proto::Ssl3KeyMatParams> for Ssl3KeyMatParams {
             server_mac_secret_handle: CkObjectHandle(p.server_mac_secret_handle),
             client_key_handle: CkObjectHandle(p.client_key_handle),
             server_key_handle: CkObjectHandle(p.server_key_handle),
-            client_iv: SecretBytes::copy_from_slice(&p.client_iv),
-            server_iv: SecretBytes::copy_from_slice(&p.server_iv),
             client_iv_presence: PointerBytes::present_copy(&p.client_iv),
             server_iv_presence: PointerBytes::present_copy(&p.server_iv),
             returned_key_material_is_null: false,
@@ -334,8 +323,8 @@ impl From<&WtlsPrfParams> for v1_proto::WtlsPrfParams {
     fn from(p: &WtlsPrfParams) -> Self {
         Self {
             digest_mechanism: p.digest_mechanism.0,
-            seed: secret_to_plain(&p.seed),
-            label: secret_to_plain(&p.label),
+            seed: pointer_to_wire(&p.seed_presence).0,
+            label: pointer_to_wire(&p.label_presence).0,
             output_len: p.output_len,
             output: secret_to_plain(&p.output),
             // R18: v0 encode stays v0-shaped (shim emits v1 in R18 tail arms).
@@ -360,8 +349,6 @@ impl From<&v1_proto::WtlsPrfParams> for WtlsPrfParams {
             output: SecretBytes::copy_from_slice(&p.output),
             output_is_null: false,
             output_len_is_null: false,
-            seed,
-            label,
         }
     }
 }
@@ -382,7 +369,7 @@ impl From<&WtlsKeyMatParams> for v1_proto::WtlsKeyMatParams {
             random_info: Some(wtls_random_to_proto(&p.random_info)),
             mac_secret_handle: p.mac_secret_handle.0,
             key_handle: p.key_handle.0,
-            iv: secret_to_plain(&p.iv),
+            iv: pointer_to_wire(&p.iv_presence).0,
             // R18: v0 encode stays v0-shaped (shim emits v1 in R18 tail arms).
             returned_key_material_null: None,
             iv_null_len: None,
@@ -404,7 +391,6 @@ impl TryFrom<&v1_proto::WtlsKeyMatParams> for WtlsKeyMatParams {
             random_info: required_wtls_random_from_option(&p.random_info)?,
             mac_secret_handle: CkObjectHandle(p.mac_secret_handle),
             key_handle: CkObjectHandle(p.key_handle),
-            iv: SecretBytes::copy_from_slice(&p.iv),
             iv_presence: PointerBytes::present_copy(&p.iv),
             returned_key_material_is_null: false,
         })
@@ -418,8 +404,6 @@ impl TryFrom<&v1_proto::WtlsKeyMatParams> for WtlsKeyMatParams {
 impl FromWire<v1_proto::SslRandomData> for SslRandomData {
     fn from_wire(p: &v1_proto::SslRandomData, version: u32) -> Result<Self, CkRv> {
         Ok(Self {
-            client_random: p.client_random.clone(),
-            server_random: p.server_random.clone(),
             client_random_presence: pointer_from_wire(
                 &p.client_random,
                 p.client_random_null_len,
@@ -450,8 +434,6 @@ impl ToWireV1<v1_proto::SslRandomData> for SslRandomData {
 impl FromWire<v1_proto::WtlsRandomData> for WtlsRandomData {
     fn from_wire(p: &v1_proto::WtlsRandomData, version: u32) -> Result<Self, CkRv> {
         Ok(Self {
-            client_random: p.client_random.clone(),
-            server_random: p.server_random.clone(),
             client_random_presence: pointer_from_wire(
                 &p.client_random,
                 p.client_random_null_len,
@@ -507,8 +489,6 @@ fn required_wtls_random_from_wire(
 impl FromWire<v1_proto::TlsPrfParams> for TlsPrfParams {
     fn from_wire(p: &v1_proto::TlsPrfParams, version: u32) -> Result<Self, CkRv> {
         Ok(Self {
-            seed: SecretBytes::copy_from_slice(&p.seed),
-            label: SecretBytes::copy_from_slice(&p.label),
             output_len: p.output_len,
             output: SecretBytes::copy_from_slice(&p.output),
             seed_presence: pointer_from_wire(&p.seed, p.seed_null_len, version)?,
@@ -540,9 +520,7 @@ impl FromWire<v1_proto::TlsKdfParams> for TlsKdfParams {
     fn from_wire(p: &v1_proto::TlsKdfParams, version: u32) -> Result<Self, CkRv> {
         Ok(Self {
             prf_mechanism: CkMechanismType(p.prf_mechanism),
-            label: SecretBytes::copy_from_slice(&p.label),
             random_info: required_ssl_random_from_wire(&p.random_info, version)?,
-            context_data: SecretBytes::copy_from_slice(&p.context_data),
             label_presence: pointer_from_wire(&p.label, p.label_null_len, version)?,
             context_data_presence: pointer_from_wire(
                 &p.context_data,
@@ -629,7 +607,6 @@ impl FromWire<v1_proto::Tls12ExtendedMasterKeyDeriveParams> for Tls12ExtendedMas
     ) -> Result<Self, CkRv> {
         Ok(Self {
             prf_hash_mechanism: CkMechanismType(p.prf_hash_mechanism),
-            session_hash: p.session_hash.clone(),
             version_major: p.version_major,
             version_minor: p.version_minor,
             session_hash_presence: pointer_from_wire(
@@ -681,8 +658,6 @@ impl FromWire<v1_proto::Ssl3KeyMatParams> for Ssl3KeyMatParams {
             server_mac_secret_handle: CkObjectHandle(p.server_mac_secret_handle),
             client_key_handle: CkObjectHandle(p.client_key_handle),
             server_key_handle: CkObjectHandle(p.server_key_handle),
-            client_iv: SecretBytes::copy_from_slice(&p.client_iv),
-            server_iv: SecretBytes::copy_from_slice(&p.server_iv),
             client_iv_presence: pointer_from_wire(&p.client_iv, p.client_iv_null_len, version)?,
             server_iv_presence: pointer_from_wire(&p.server_iv, p.server_iv_null_len, version)?,
             returned_key_material_is_null: null_bit_from_wire(
@@ -744,8 +719,6 @@ impl FromWire<v1_proto::WtlsPrfParams> for WtlsPrfParams {
     fn from_wire(p: &v1_proto::WtlsPrfParams, version: u32) -> Result<Self, CkRv> {
         Ok(Self {
             digest_mechanism: CkMechanismType(p.digest_mechanism),
-            seed: SecretBytes::copy_from_slice(&p.seed),
-            label: SecretBytes::copy_from_slice(&p.label),
             output_len: p.output_len,
             output: SecretBytes::copy_from_slice(&p.output),
             seed_presence: pointer_from_wire(&p.seed, p.seed_null_len, version)?,
@@ -789,7 +762,6 @@ impl FromWire<v1_proto::WtlsKeyMatParams> for WtlsKeyMatParams {
             random_info: required_wtls_random_from_wire(&p.random_info, version)?,
             mac_secret_handle: CkObjectHandle(p.mac_secret_handle),
             key_handle: CkObjectHandle(p.key_handle),
-            iv: SecretBytes::copy_from_slice(&p.iv),
             iv_presence: pointer_from_wire(&p.iv, p.iv_null_len, version)?,
             returned_key_material_is_null: null_bit_from_wire(
                 p.returned_key_material_null,

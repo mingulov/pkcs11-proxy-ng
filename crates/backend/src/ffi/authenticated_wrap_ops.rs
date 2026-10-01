@@ -423,8 +423,6 @@ mod tests {
         let mechanism = CkMechanism {
             mechanism_type: CkMechanismType::GOSTR3410_KEY_WRAP,
             params: Some(CkMechanismParams::Gostr3410KeyWrap(Gostr3410KeyWrapParams {
-                wrap_oid: vec![1; 3],
-                ukm: vec![2; 8],
                 key_handle: CkObjectHandle(7),
                 wrap_oid_presence: PointerBytes::present_copy(&[1; 3]),
                 ukm_presence: PointerBytes::present_copy(&[2; 8]),
@@ -508,8 +506,6 @@ mod tests {
         let mechanism = CkMechanism {
             mechanism_type: CkMechanismType::GOSTR3410_KEY_WRAP,
             params: Some(CkMechanismParams::Gostr3410KeyWrap(Gostr3410KeyWrapParams {
-                wrap_oid: vec![1; 3],
-                ukm: vec![2; 8],
                 key_handle: CkObjectHandle(7),
                 wrap_oid_presence: PointerBytes::present_copy(&[1; 3]),
                 ukm_presence: PointerBytes::present_copy(&[2; 8]),
@@ -643,8 +639,6 @@ mod tests {
                 CkMechanism {
                     mechanism_type: CkMechanismType::GOSTR3410_KEY_WRAP,
                     params: Some(CkMechanismParams::Gostr3410KeyWrap(Gostr3410KeyWrapParams {
-                        wrap_oid: vec![1; 3],
-                        ukm: vec![2; 8],
                         key_handle: CkObjectHandle(7),
                         wrap_oid_presence: PointerBytes::present_copy(&[1; 3]),
                         ukm_presence: PointerBytes::present_copy(&[2; 8]),

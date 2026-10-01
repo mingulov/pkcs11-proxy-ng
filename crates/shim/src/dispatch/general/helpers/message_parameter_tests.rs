@@ -1390,8 +1390,6 @@ fn write_mechanism_output_params_writes_tls12_pversion() {
         random_info: SslRandomData {
             client_random_presence: PointerBytes::present_copy(&[]),
             server_random_presence: PointerBytes::present_copy(&[]),
-            client_random: vec![],
-            server_random: vec![],
         },
         version_major: 3,
         version_minor: 3, // TLS 1.2
@@ -1435,9 +1433,6 @@ fn write_mechanism_output_params_writes_pbe_init_vector() {
 
     let generated_iv = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
     let mech_out = CkMechanismParams::Pbe(PbeParams {
-        init_vector: generated_iv.clone().into(),
-        password: Vec::new().into(),
-        salt: Vec::new().into(),
         iteration: 1000,
         init_vector_presence: PointerBytes::present_copy(&generated_iv),
         password_presence: PointerBytes::present_copy(&[]),
@@ -1476,9 +1471,6 @@ fn write_mechanism_output_params_pbe_safe_when_init_vector_null() {
         ulParameterLen: std::mem::size_of::<CK_PBE_PARAMS>() as CK_ULONG,
     };
     let mech_out = CkMechanismParams::Pbe(PbeParams {
-        init_vector: vec![9u8; 8].into(),
-        password: Vec::new().into(),
-        salt: Vec::new().into(),
         iteration: 1,
         init_vector_presence: PointerBytes::present_copy(&[9u8; 8]),
         password_presence: PointerBytes::present_copy(&[]),
@@ -1517,9 +1509,7 @@ fn write_mechanism_output_params_writes_tls_prf_output() {
     let prf_bytes = vec![0x5Au8; 32];
     let mech_out = CkMechanismParams::TlsPrf(TlsPrfParams {
         seed_presence: PointerBytes::present_copy(&(Vec::new())),
-        seed: Vec::new().into(),
         label_presence: PointerBytes::present_copy(&(Vec::new())),
-        label: Vec::new().into(),
         output_len: 32,
         output: prf_bytes.clone().into(),
         output_is_null: false,
@@ -1563,9 +1553,7 @@ fn write_mechanism_output_params_writes_wtls_prf_output() {
     let mech_out = CkMechanismParams::WtlsPrf(WtlsPrfParams {
         digest_mechanism: CkMechanismType::SHA256,
         seed_presence: PointerBytes::present_copy(&(Vec::new())),
-        seed: Vec::new().into(),
         label_presence: PointerBytes::present_copy(&(Vec::new())),
-        label: Vec::new().into(),
         output_len: 20,
         output: prf_bytes.clone().into(),
         output_is_null: false,
@@ -1602,9 +1590,7 @@ fn write_mechanism_output_params_prf_safe_when_output_null() {
     };
     let mech_out = CkMechanismParams::TlsPrf(TlsPrfParams {
         seed_presence: PointerBytes::present_copy(&(Vec::new())),
-        seed: Vec::new().into(),
         label_presence: PointerBytes::present_copy(&(Vec::new())),
-        label: Vec::new().into(),
         output_len: 8,
         output: vec![0x5Au8; 8].into(),
         output_is_null: false,
@@ -1646,8 +1632,6 @@ fn write_mechanism_output_params_writes_ssl3_master_key_version() {
         random_info: SslRandomData {
             client_random_presence: PointerBytes::present_copy(&[]),
             server_random_presence: PointerBytes::present_copy(&[]),
-            client_random: vec![],
-            server_random: vec![],
         },
         version_major: 3,
         version_minor: 0,
@@ -1693,8 +1677,6 @@ fn write_mechanism_output_params_tls12_safe_when_pversion_null() {
         random_info: SslRandomData {
             client_random_presence: PointerBytes::present_copy(&[]),
             server_random_presence: PointerBytes::present_copy(&[]),
-            client_random: vec![],
-            server_random: vec![],
         },
         version_major: 3,
         version_minor: 3,
@@ -1744,8 +1726,14 @@ fn wtls_master_key_derive_reads_version_byte_and_writes_it_back() {
     {
         CkMechanismParams::WtlsMasterKeyDerive(params) => {
             assert_eq!(params.digest_mechanism.0, CkMechanismType::SHA256.0 as u64);
-            assert_eq!(params.random_info.client_random, client_random);
-            assert_eq!(params.random_info.server_random, server_random);
+            assert_eq!(
+                params.random_info.client_random_presence,
+                PointerBytes::present_copy(&client_random)
+            );
+            assert_eq!(
+                params.random_info.server_random_presence,
+                PointerBytes::present_copy(&server_random)
+            );
             assert_eq!(params.version, 1);
         }
         other => panic!("unexpected WTLS params: {other:?}"),
@@ -1756,8 +1744,6 @@ fn wtls_master_key_derive_reads_version_byte_and_writes_it_back() {
         random_info: WtlsRandomData {
             client_random_presence: PointerBytes::present_copy(&client_random),
             server_random_presence: PointerBytes::present_copy(&server_random),
-            client_random: client_random.to_vec(),
-            server_random: server_random.to_vec(),
         },
         version: 2,
         version_is_null: false,
@@ -1816,11 +1802,20 @@ fn wtls_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
             assert_eq!(params.iv_size_bits, 32);
             assert_eq!(params.sequence_number, 7);
             assert!(params.is_export);
-            assert_eq!(params.random_info.client_random, client_random);
-            assert_eq!(params.random_info.server_random, server_random);
+            assert_eq!(
+                params.random_info.client_random_presence,
+                PointerBytes::present_copy(&client_random)
+            );
+            assert_eq!(
+                params.random_info.server_random_presence,
+                PointerBytes::present_copy(&server_random)
+            );
             assert_eq!(params.mac_secret_handle.0, 0);
             assert_eq!(params.key_handle.0, 0);
-            assert_eq!(params.iv, SecretBytes::copy_from_slice(&[0u8; 4]));
+            assert_eq!(
+                params.iv_presence,
+                PointerBytes::present_cloned(&SecretBytes::copy_from_slice(&[0u8; 4]))
+            );
         }
         other => panic!("unexpected WTLS key material params: {other:?}"),
     }
@@ -1835,13 +1830,10 @@ fn wtls_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
         random_info: WtlsRandomData {
             client_random_presence: PointerBytes::present_copy(&client_random),
             server_random_presence: PointerBytes::present_copy(&server_random),
-            client_random: client_random.to_vec(),
-            server_random: server_random.to_vec(),
         },
         mac_secret_handle: CkObjectHandle(101),
         key_handle: CkObjectHandle(202),
         iv_presence: PointerBytes::present_copy(&[0xA1, 0xA2, 0xA3, 0xA4]),
-        iv: vec![0xA1, 0xA2, 0xA3, 0xA4].into(),
         returned_key_material_is_null: false,
     });
     unsafe {
@@ -1907,15 +1899,27 @@ fn ssl3_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
             assert_eq!(params.key_size_bits, 128);
             assert_eq!(params.iv_size_bits, 32);
             assert!(!params.is_export);
-            assert_eq!(params.random_info.client_random, client_random);
-            assert_eq!(params.random_info.server_random, server_random);
+            assert_eq!(
+                params.random_info.client_random_presence,
+                PointerBytes::present_copy(&client_random)
+            );
+            assert_eq!(
+                params.random_info.server_random_presence,
+                PointerBytes::present_copy(&server_random)
+            );
             assert_eq!(params.prf_hash_mechanism.0, CkMechanismType::SHA256.0 as u64);
             assert_eq!(params.client_mac_secret_handle.0, 0);
             assert_eq!(params.server_mac_secret_handle.0, 0);
             assert_eq!(params.client_key_handle.0, 0);
             assert_eq!(params.server_key_handle.0, 0);
-            assert_eq!(params.client_iv, SecretBytes::copy_from_slice(&[0u8; 4]));
-            assert_eq!(params.server_iv, SecretBytes::copy_from_slice(&[0u8; 4]));
+            assert_eq!(
+                params.client_iv_presence,
+                PointerBytes::present_cloned(&SecretBytes::copy_from_slice(&[0u8; 4]))
+            );
+            assert_eq!(
+                params.server_iv_presence,
+                PointerBytes::present_cloned(&SecretBytes::copy_from_slice(&[0u8; 4]))
+            );
         }
         other => panic!("unexpected SSL3/TLS key material params: {other:?}"),
     }
@@ -1928,8 +1932,6 @@ fn ssl3_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
         random_info: SslRandomData {
             client_random_presence: PointerBytes::present_copy(&client_random),
             server_random_presence: PointerBytes::present_copy(&server_random),
-            client_random: client_random.to_vec(),
-            server_random: server_random.to_vec(),
         },
         prf_hash_mechanism: CkMechanismType::SHA256,
         client_mac_secret_handle: CkObjectHandle(101),
@@ -1937,9 +1939,7 @@ fn ssl3_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
         client_key_handle: CkObjectHandle(201),
         server_key_handle: CkObjectHandle(202),
         client_iv_presence: PointerBytes::present_copy(&[0xA1, 0xA2, 0xA3, 0xA4]),
-        client_iv: vec![0xA1, 0xA2, 0xA3, 0xA4].into(),
         server_iv_presence: PointerBytes::present_copy(&[0xB1, 0xB2, 0xB3, 0xB4]),
-        server_iv: vec![0xB1, 0xB2, 0xB3, 0xB4].into(),
         returned_key_material_is_null: false,
     });
     unsafe {

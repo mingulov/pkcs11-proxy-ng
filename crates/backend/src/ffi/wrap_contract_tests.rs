@@ -270,15 +270,11 @@ fn ordinary_wrap_error_iv_effect_matches_one_shot_rule() {
     let mechanism = CkMechanism {
         mechanism_type: CkMechanismType::AES_GCM,
         params: Some(CkMechanismParams::Gcm(GcmParams {
-            iv: vec![0x11; 12],
             iv_bits: 96,
             iv_buffer_len: 12,
-            aad: vec![].into(),
             tag_bits: 128,
             iv_presence: PointerBytes::from_legacy(&[0x11; 12], false),
             aad_presence: PointerBytes::from_legacy(&[], false),
-            iv_null: false,
-            aad_null: false,
         })),
     };
     let (output, effects) = b
@@ -295,7 +291,7 @@ fn ordinary_wrap_error_iv_effect_matches_one_shot_rule() {
     let Some(CkMechanismParams::Gcm(gcm)) = effects else {
         panic!("failed wrap must surface the mutated owned GCM IV");
     };
-    assert_eq!(gcm.iv[0], 0x42);
+    assert_eq!(gcm.iv_presence.as_present().unwrap().expose(|b| b[0]), 0x42);
     let (output, effects) = b
         .ffi_wrap_key_exact_with_output(
             CkSessionHandle(4),

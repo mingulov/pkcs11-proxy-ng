@@ -7,10 +7,9 @@ use super::{
 };
 use cryptoki_sys::*;
 use pkcs11_proxy_ng_types::{
-    CkAttribute, CkMechanismParams, CkMechanismType, CkObjectHandle, CkOutputBufferResult,
-    CkOutputBufferSpec, CkRv, GcmParams, PointerArray, PointerBytes, SecretBytes,
-    Sp800108DerivedKey, Sp800108KdfParams, Tls12MasterKeyDeriveParams, TlsPrfParams,
-    WtlsKeyMatParams, WtlsRandomData,
+    CkMechanismParams, CkMechanismType, CkObjectHandle, CkOutputBufferResult, CkOutputBufferSpec,
+    CkRv, GcmParams, PointerArray, PointerBytes, SecretBytes, Sp800108DerivedKey,
+    Sp800108KdfParams, Tls12MasterKeyDeriveParams, TlsPrfParams, WtlsKeyMatParams, WtlsRandomData,
 };
 
 /// Fixtures are built in two steps so nothing moves after its address
@@ -43,8 +42,6 @@ fn tls12_out(major: u32, minor: u32) -> CkMechanismParams {
         random_info: pkcs11_proxy_ng_types::SslRandomData {
             client_random_presence: PointerBytes::present_copy(&[]),
             server_random_presence: PointerBytes::present_copy(&[]),
-            client_random: vec![],
-            server_random: vec![],
         },
         version_major: major,
         version_minor: minor,
@@ -106,7 +103,6 @@ fn sp800_out(handles: &[u64]) -> CkMechanismParams {
         .map(|h| Sp800108DerivedKey {
             template_presence: PointerArray::present(Vec::new()),
             ph_key_is_null: false,
-            template: Vec::<CkAttribute>::new(),
             key_handle: CkObjectHandle(*h),
         })
         .collect();
@@ -114,8 +110,6 @@ fn sp800_out(handles: &[u64]) -> CkMechanismParams {
         prf_type: CkMechanismType::SHA256,
         data_params_presence: PointerArray::present(Vec::new()),
         additional_derived_keys_presence: PointerArray::present(additional_derived_keys.clone()),
-        data_params: vec![],
-        additional_derived_keys,
     })
 }
 
@@ -206,15 +200,11 @@ fn transactional_gcm_overlong_daemon_iv_rejected() {
     let mut params = gcm_params(&mut iv_buf);
     let mut mechanism = gcm_mechanism(&mut params);
     let out = CkMechanismParams::Gcm(GcmParams {
-        iv: vec![0xD0; 16],
         iv_bits: 128,
         iv_buffer_len: 16,
-        aad: Vec::new().into(),
         tag_bits: 96,
         iv_presence: PointerBytes::from_legacy(&[0xD0; 16], false),
         aad_presence: PointerBytes::from_legacy(&[], false),
-        iv_null: false,
-        aad_null: false,
     });
     let prepared = unsafe { prepare_mechanism_output_params(&mut mechanism, &out) };
     assert!(matches!(prepared, Err(CkRv::GENERAL_ERROR)));
@@ -404,9 +394,6 @@ fn transactional_generate_malformed_mechanism_writes_nothing() {
         ulParameterLen: std::mem::size_of::<CK_PBE_PARAMS>() as CK_ULONG,
     };
     let bad_mech = CkMechanismParams::Pbe(pkcs11_proxy_ng_types::PbeParams {
-        init_vector: SecretBytes::copy_from_slice(&[0xD2; 12]),
-        password: SecretBytes::copy_from_slice(&[]),
-        salt: SecretBytes::copy_from_slice(&[]),
         init_vector_presence: PointerBytes::present_copy(&[0xD2; 12]),
         password_presence: PointerBytes::present_copy(&[]),
         salt_presence: PointerBytes::present_copy(&[]),
@@ -459,13 +446,10 @@ fn transactional_wtls_keymat_overlong_iv_preserves_handles_and_iv() {
         random_info: WtlsRandomData {
             client_random_presence: PointerBytes::present_copy(&[]),
             server_random_presence: PointerBytes::present_copy(&[]),
-            client_random: vec![],
-            server_random: vec![],
         },
         mac_secret_handle: CkObjectHandle(11),
         key_handle: CkObjectHandle(12),
         iv_presence: PointerBytes::present_copy(&[0xE2; 12]),
-        iv: SecretBytes::copy_from_slice(&[0xE2; 12]),
         returned_key_material_is_null: false,
     });
     let prepared = unsafe { prepare_mechanism_output_params(&mut mechanism, &bad_mech) };
@@ -496,8 +480,6 @@ fn transactional_tls_prf_overlong_output_preserves_buffer_and_len() {
     let bad_mech = CkMechanismParams::TlsPrf(TlsPrfParams {
         seed_presence: PointerBytes::present_copy(&[]),
         label_presence: PointerBytes::present_copy(&[]),
-        seed: SecretBytes::copy_from_slice(&[]),
-        label: SecretBytes::copy_from_slice(&[]),
         output_len: 16,
         output: SecretBytes::copy_from_slice(&[0xF2; 20]),
         output_is_null: false,

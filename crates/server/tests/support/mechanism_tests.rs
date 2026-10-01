@@ -532,10 +532,7 @@ pub async fn test_rsa_oaep_encrypt_decrypt(
         hash_alg: CKM_SHA_1,
         mgf: CkMgf::MGF1_SHA1,
         source: CkOaepSource::DATA_SPECIFIED,
-        source_data: Vec::new().into(),
         source_data_presence: PointerBytes::from_legacy(&[], true),
-
-        source_null: true,
     };
     let oaep_mechanism = CkMechanism {
         mechanism_type: CkMechanismType::RSA_PKCS_OAEP,
@@ -605,14 +602,17 @@ pub async fn test_ecdh1_derive(
     let bob_ec_point_raw = get_ec_point(client, session, bob_pub).await?;
     let bob_ec_point = strip_der_octet_string(&bob_ec_point_raw);
 
-    // Alice derives a shared secret using Bob's public key.
+    // Alice derives a shared secret using Bob's public key. CKD_NULL
+    // mandates NULL shared data (OASIS elliptic_curves.md), expressed
+    // honestly as Null{0}; the v0 wire carries no ECDH1 null_len, so the
+    // server decode canonicalizes `v0 + CKD_NULL + empty` back to NULL
+    // (spec-forced: no other reading is OASIS-valid). R23's v1 flip
+    // carries the presence explicitly.
     let derive_mechanism = CkMechanism {
         mechanism_type: CkMechanismType::ECDH1_DERIVE,
         params: Some(CkMechanismParams::Ecdh1Derive(Ecdh1DeriveParams {
             kdf: CkKdf::NULL,
-            shared_data: Vec::new().into(),
-            public_data: bob_ec_point.clone(),
-            shared_data_presence: PointerBytes::present_copy(&[]),
+            shared_data_presence: PointerBytes::null_len(0),
             public_data_presence: PointerBytes::present_copy(&bob_ec_point),
         })),
     };
@@ -693,9 +693,7 @@ pub async fn test_hkdf_derive(
             expand: true,
             prf_hash_mechanism: CkMechanismType::SHA256,
             salt_type: CKF_HKDF_SALT_DATA,
-            salt: salt.to_vec().into(),
             salt_key_handle: CkObjectHandle(0), // not used with DATA salt
-            info: info.to_vec().into(),
             salt_presence: PointerBytes::present_copy(salt),
             info_presence: PointerBytes::present_copy(info),
         })),
@@ -772,12 +770,6 @@ pub async fn test_aes_cbc_encrypt_data_derive(
         mechanism_type: CKM_AES_CBC_ENCRYPT_DATA,
         params: Some(CkMechanismParams::AesCbcEncryptData(AesCbcEncryptDataParams {
             iv: vec![0u8; 16],
-            data: b"data to derive key from!"
-                .iter()
-                .copied()
-                .chain(std::iter::repeat_n(0u8, 8))
-                .collect::<Vec<u8>>()
-                .into(), // 32 bytes (multiple of 16)
             data_presence: PointerBytes::present_copy(
                 &[b"data to derive key from!".as_slice(), &[0u8; 8][..]].concat(),
             ),

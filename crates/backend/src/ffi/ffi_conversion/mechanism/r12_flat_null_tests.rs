@@ -247,11 +247,9 @@ fn r12_nested_null_converts() {
     let mech = CkMechanism {
         mechanism_type: CkMechanismType::RSA_PKCS,
         params: Some(CkMechanismParams::Kip(KipParams {
-            mechanism: Box::new(null_mechanism(7)),
+            mechanism: Some(Box::new(null_mechanism(7))),
             key_handle: CkObjectHandle(0),
             seed_presence: PointerBytes::present_copy(&[]),
-            seed: SecretBytes::copy_from_slice(&[]),
-            mechanism_is_null: false,
         })),
     };
     let validated = validate_for_ffi(&mech).expect("KIP validates");
@@ -279,11 +277,9 @@ fn r12_nested_flat_and_raw_rejected() {
         let mech = CkMechanism {
             mechanism_type: CkMechanismType::RSA_PKCS,
             params: Some(CkMechanismParams::Kip(KipParams {
-                mechanism: Box::new(nested),
+                mechanism: Some(Box::new(nested)),
                 key_handle: CkObjectHandle(0),
                 seed_presence: PointerBytes::present_copy(&[]),
-                seed: SecretBytes::copy_from_slice(&[]),
-                mechanism_is_null: false,
             })),
         };
         let validated = validate_for_ffi(&mech).expect("outer KIP validates");
