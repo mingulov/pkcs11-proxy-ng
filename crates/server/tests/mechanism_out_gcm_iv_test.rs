@@ -84,16 +84,11 @@ async fn aes_gcm_aws_convention_iv_round_trip() -> Result<(), String> {
     let mech = CkMechanism {
         mechanism_type: CkMechanismType::AES_GCM,
         params: Some(CkMechanismParams::Gcm(GcmParams {
-            iv: vec![0u8; 12],
             iv_bits: 0,
             iv_buffer_len: 12,
-            aad: Vec::new().into(),
             tag_bits: 128,
             iv_presence: PointerBytes::from_legacy(&[0u8; 12], false),
             aad_presence: PointerBytes::from_legacy(&[], false),
-
-            iv_null: false,
-            aad_null: false,
         })),
     };
     let init_out = client
@@ -104,7 +99,9 @@ async fn aes_gcm_aws_convention_iv_round_trip() -> Result<(), String> {
     // The patched simulator generates the IV during EncryptInit, so
     // mechanism_out from EncryptInit should already carry it.
     let init_iv = match init_out.as_ref() {
-        Some(CkMechanismParams::Gcm(g)) => g.iv.clone(),
+        Some(CkMechanismParams::Gcm(g)) => {
+            g.iv_presence.as_present().map(|b| b.expose(|x| x.to_vec())).unwrap_or_default()
+        }
         _ => Vec::new(),
     };
 
@@ -115,7 +112,9 @@ async fn aes_gcm_aws_convention_iv_round_trip() -> Result<(), String> {
         .map_err(|rv| format!("C_Encrypt failed: CKR 0x{:08X}", rv.0))?;
 
     let encrypt_iv = match encrypt_mech_out.as_ref() {
-        Some(CkMechanismParams::Gcm(g)) => g.iv.clone(),
+        Some(CkMechanismParams::Gcm(g)) => {
+            g.iv_presence.as_present().map(|b| b.expose(|x| x.to_vec())).unwrap_or_default()
+        }
         _ => Vec::new(),
     };
 
@@ -135,16 +134,11 @@ async fn aes_gcm_aws_convention_iv_round_trip() -> Result<(), String> {
     let decrypt_mech = CkMechanism {
         mechanism_type: CkMechanismType::AES_GCM,
         params: Some(CkMechanismParams::Gcm(GcmParams {
-            iv: iv.clone(),
             iv_bits: 96,
             iv_buffer_len: iv.len() as u64,
-            aad: Vec::new().into(),
             tag_bits: 128,
             iv_presence: PointerBytes::from_legacy(&iv, false),
             aad_presence: PointerBytes::from_legacy(&[], false),
-
-            iv_null: false,
-            aad_null: false,
         })),
     };
     client
@@ -180,16 +174,11 @@ async fn aes_gcm_strict_convention_iv_round_trip() -> Result<(), String> {
     let mech = CkMechanism {
         mechanism_type: CkMechanismType::AES_GCM,
         params: Some(CkMechanismParams::Gcm(GcmParams {
-            iv: Vec::new(),
             iv_bits: 96,
             iv_buffer_len: 12,
-            aad: Vec::new().into(),
             tag_bits: 128,
             iv_presence: PointerBytes::from_legacy(&[], false),
             aad_presence: PointerBytes::from_legacy(&[], false),
-
-            iv_null: false,
-            aad_null: false,
         })),
     };
     let init_out = client
@@ -198,7 +187,9 @@ async fn aes_gcm_strict_convention_iv_round_trip() -> Result<(), String> {
         .map_err(|rv| format!("C_EncryptInit failed: CKR 0x{:08X}", rv.0))?;
 
     let iv = match init_out.as_ref() {
-        Some(CkMechanismParams::Gcm(g)) => g.iv.clone(),
+        Some(CkMechanismParams::Gcm(g)) => {
+            g.iv_presence.as_present().map(|b| b.expose(|x| x.to_vec())).unwrap_or_default()
+        }
         _ => Vec::new(),
     };
     assert_eq!(iv.len(), 12, "strict-convention IV writeback must be 12 bytes");

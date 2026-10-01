@@ -1945,16 +1945,11 @@ mod tests {
     #[test]
     fn mechanism_output_to_proto_handles_gcm() {
         let params = CkMechanismParams::Gcm(GcmParams {
-            iv: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
             iv_bits: 96,
             iv_buffer_len: 12,
-            aad: Vec::new().into(),
             tag_bits: 128,
             iv_presence: PointerBytes::from_legacy(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], false),
             aad_presence: PointerBytes::from_legacy(&[], false),
-
-            iv_null: false,
-            aad_null: false,
         });
         let proto_mech = mechanism_output_to_proto(params).expect("gcm should convert");
         // The proto Mechanism's type field should match AES_GCM.
@@ -1965,9 +1960,7 @@ mod tests {
     fn mechanism_output_to_proto_handles_tls12_master_key_derive() {
         let params = CkMechanismParams::Tls12MasterKeyDerive(Tls12MasterKeyDeriveParams {
             random_info: SslRandomData {
-                client_random: vec![0xaa; 32],
                 client_random_presence: PointerBytes::present_copy(&[0xaa; 32]),
-                server_random: vec![0xbb; 32],
                 server_random_presence: PointerBytes::present_copy(&[0xbb; 32]),
             },
             version_major: 3,

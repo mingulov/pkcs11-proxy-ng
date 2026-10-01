@@ -548,15 +548,11 @@ fn classic_gcm_initialized_error_iv_effect() {
     let mechanism = CkMechanism {
         mechanism_type: CkMechanismType::AES_GCM,
         params: Some(CkMechanismParams::Gcm(GcmParams {
-            iv: vec![0x11; 12],
             iv_bits: 96,
             iv_buffer_len: 12,
-            aad: vec![].into(),
             tag_bits: 128,
             iv_presence: PointerBytes::from_legacy(&[0x11; 12], false),
             aad_presence: PointerBytes::from_legacy(&[], false),
-            iv_null: false,
-            aad_null: false,
         })),
     };
     // Direct-choke unit test: admit on a throwaway test domain.
@@ -585,21 +581,17 @@ fn classic_gcm_initialized_error_iv_effect() {
     let Some(CkMechanismParams::Gcm(gcm)) = effects else {
         panic!("initialized classic GCM IV error effect must survive");
     };
-    assert_eq!(gcm.iv[0], 0x42);
+    assert_eq!(gcm.iv_presence.as_present().unwrap().expose(|b| b[0]), 0x42);
 }
 
 #[test]
 fn classic_gcm_error_effect_matrix_data_query_and_missing_length() {
     let input = GcmParams {
-        iv: vec![0x11; 12],
         iv_bits: 96,
         iv_buffer_len: 12,
-        aad: vec![].into(),
         tag_bits: 128,
         iv_presence: PointerBytes::from_legacy(&[0x11; 12], false),
         aad_presence: PointerBytes::from_legacy(&[], false),
-        iv_null: false,
-        aad_null: false,
     };
     let mechanism = CkMechanism {
         mechanism_type: CkMechanismType::AES_GCM,
@@ -688,8 +680,16 @@ fn classic_gcm_error_effect_matrix_data_query_and_missing_length() {
                     let Some(CkMechanismParams::Gcm(gcm)) = &effects else {
                         panic!("{cell}: expected mutated GCM effects, got {effects:?}");
                     };
-                    assert_eq!(gcm.iv[0], 0x42, "{cell}: mutated IV byte");
-                    assert_eq!(gcm.iv.len(), 12, "{cell}: IV length preserved");
+                    assert_eq!(
+                        gcm.iv_presence.as_present().unwrap().expose(|b| b[0]),
+                        0x42,
+                        "{cell}: mutated IV byte"
+                    );
+                    assert_eq!(
+                        gcm.iv_presence.as_present().unwrap().len(),
+                        12,
+                        "{cell}: IV length preserved"
+                    );
                 } else if *rv == CkRv::OK {
                     assert_eq!(
                         effects,
@@ -707,15 +707,11 @@ fn classic_gcm_error_effect_matrix_data_query_and_missing_length() {
 #[test]
 fn classic_gcm_ok_effect_unchanged_data_and_missing_length() {
     let input = GcmParams {
-        iv: vec![0x11; 12],
         iv_bits: 96,
         iv_buffer_len: 12,
-        aad: vec![].into(),
         tag_bits: 128,
         iv_presence: PointerBytes::from_legacy(&[0x11; 12], false),
         aad_presence: PointerBytes::from_legacy(&[], false),
-        iv_null: false,
-        aad_null: false,
     };
     let mechanism = CkMechanism {
         mechanism_type: CkMechanismType::AES_GCM,
@@ -783,15 +779,11 @@ fn mechanism_output_path_snapshots_once_when_provider_writes_nothing() {
     // parallel tests cannot perturb the delta.
     use super::ffi_conversion::FfiMechanism;
     let input = GcmParams {
-        iv: vec![0x11; 12],
         iv_bits: 96,
         iv_buffer_len: 12,
-        aad: vec![].into(),
         tag_bits: 128,
         iv_presence: PointerBytes::from_legacy(&[0x11; 12], false),
         aad_presence: PointerBytes::from_legacy(&[], false),
-        iv_null: false,
-        aad_null: false,
     };
     let mechanism = CkMechanism {
         mechanism_type: CkMechanismType::AES_GCM,
@@ -832,15 +824,11 @@ fn mechanism_output_path_resnapshots_only_when_provider_writes() {
     let mechanism = CkMechanism {
         mechanism_type: CkMechanismType::AES_GCM,
         params: Some(CkMechanismParams::Gcm(GcmParams {
-            iv: vec![0x11; 12],
             iv_bits: 96,
             iv_buffer_len: 12,
-            aad: vec![].into(),
             tag_bits: 128,
             iv_presence: PointerBytes::from_legacy(&[0x11; 12], false),
             aad_presence: PointerBytes::from_legacy(&[], false),
-            iv_null: false,
-            aad_null: false,
         })),
     };
     let choke_domain = crate::ffi::native_domain::LifecycleDomain::new();
@@ -867,7 +855,7 @@ fn mechanism_output_path_resnapshots_only_when_provider_writes() {
     let Some(CkMechanismParams::Gcm(gcm)) = effects else {
         panic!("provider-written IV must surface on the error path");
     };
-    assert_eq!(gcm.iv[0], 0x42);
+    assert_eq!(gcm.iv_presence.as_present().unwrap().expose(|b| b[0]), 0x42);
     assert_eq!(
         FfiMechanism::output_params_calls_for_tests(),
         2,

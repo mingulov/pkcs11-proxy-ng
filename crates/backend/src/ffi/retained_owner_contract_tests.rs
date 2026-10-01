@@ -37,15 +37,11 @@ fn gcm_mechanism() -> CkMechanism {
     CkMechanism {
         mechanism_type: CkMechanismType::AES_GCM,
         params: Some(CkMechanismParams::Gcm(GcmParams {
-            iv: vec![0xA5; 12],
             iv_bits: 96,
             iv_buffer_len: 12,
-            aad: Vec::new().into(),
             tag_bits: 128,
             iv_presence: PointerBytes::from_legacy(&[0xA5; 12], false),
             aad_presence: PointerBytes::from_legacy(&[], false),
-            iv_null: false,
-            aad_null: false,
         })),
     }
 }

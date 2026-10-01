@@ -759,15 +759,11 @@ mod tests {
         let mechanism = CkMechanism {
             mechanism_type: CkMechanismType::AES_GCM,
             params: Some(CkMechanismParams::Gcm(GcmParams {
-                iv: vec![0xA5; 12],
                 iv_bits: 96,
                 iv_buffer_len: 12,
-                aad: Vec::new().into(),
                 tag_bits: 128,
                 iv_presence: PointerBytes::from_legacy(&[0xA5; 12], false),
                 aad_presence: PointerBytes::from_legacy(&[], false),
-                iv_null: false,
-                aad_null: false,
             })),
         };
         backend.mech_cache.insert(
@@ -859,15 +855,11 @@ mod tests {
         let mechanism = CkMechanism {
             mechanism_type: CkMechanismType::AES_GCM,
             params: Some(CkMechanismParams::Gcm(GcmParams {
-                iv: vec![0x11; 12],
                 iv_bits: 96,
                 iv_buffer_len: 12,
-                aad: Vec::new().into(),
                 tag_bits: 128,
                 iv_presence: PointerBytes::from_legacy(&[0x11; 12], false),
                 aad_presence: PointerBytes::from_legacy(&[], false),
-                iv_null: false,
-                aad_null: false,
             })),
         };
         let ffi_mech = super::super::ffi_conversion::mechanism_to_ffi(
@@ -898,7 +890,7 @@ mod tests {
         let Some(CkMechanismParams::Gcm(gcm)) = effects else {
             panic!("failed encrypt must surface the mutated cached GCM IV");
         };
-        assert_eq!(gcm.iv[0], 0x42);
+        assert_eq!(gcm.iv_presence.as_present().unwrap().expose(|b| b[0]), 0x42);
 
         let (plain_backend, _plain_functions) =
             encrypt_backend_with(encrypt_fails_without_mutation);
@@ -949,7 +941,7 @@ mod tests {
         let Some(CkMechanismParams::Gcm(gcm)) = effects else {
             panic!("failed missing-length encrypt must surface the mutated cached GCM IV");
         };
-        assert_eq!(gcm.iv[0], 0x42);
+        assert_eq!(gcm.iv_presence.as_present().unwrap().expose(|b| b[0]), 0x42);
 
         let (plain_backend, _plain_functions) =
             encrypt_backend_with(encrypt_fails_without_mutation);
@@ -998,15 +990,11 @@ mod tests {
         let gcm = CkMechanism {
             mechanism_type: CkMechanismType::AES_GCM,
             params: Some(CkMechanismParams::Gcm(GcmParams {
-                iv: vec![0xA5; 12],
                 iv_bits: 96,
                 iv_buffer_len: 12,
-                aad: Vec::new().into(),
                 tag_bits: 128,
                 iv_presence: PointerBytes::from_legacy(&[0xA5; 12], false),
                 aad_presence: PointerBytes::from_legacy(&[], false),
-                iv_null: false,
-                aad_null: false,
             })),
         };
         let encrypt_out = backend
@@ -1056,15 +1044,11 @@ mod tests {
         let gcm = CkMechanism {
             mechanism_type: CkMechanismType::AES_GCM,
             params: Some(CkMechanismParams::Gcm(GcmParams {
-                iv: vec![0xA5; 12],
                 iv_bits: 96,
                 iv_buffer_len: 12,
-                aad: Vec::new().into(),
                 tag_bits: 128,
                 iv_presence: PointerBytes::from_legacy(&[0xA5; 12], false),
                 aad_presence: PointerBytes::from_legacy(&[], false),
-                iv_null: false,
-                aad_null: false,
             })),
         };
         backend
@@ -1110,15 +1094,11 @@ mod tests {
         let gcm = CkMechanism {
             mechanism_type: CkMechanismType::AES_GCM,
             params: Some(CkMechanismParams::Gcm(GcmParams {
-                iv: vec![0xA5; 12],
                 iv_bits: 96,
                 iv_buffer_len: 12,
-                aad: Vec::new().into(),
                 tag_bits: 128,
                 iv_presence: PointerBytes::from_legacy(&[0xA5; 12], false),
                 aad_presence: PointerBytes::from_legacy(&[], false),
-                iv_null: false,
-                aad_null: false,
             })),
         };
         // A failed FIRST Init on an empty slot publishes nothing: no cache
@@ -1152,15 +1132,11 @@ mod tests {
         let gcm = CkMechanism {
             mechanism_type: CkMechanismType::AES_GCM,
             params: Some(CkMechanismParams::Gcm(GcmParams {
-                iv: vec![0xA5; 12],
                 iv_bits: 96,
                 iv_buffer_len: 12,
-                aad: Vec::new().into(),
                 tag_bits: 128,
                 iv_presence: PointerBytes::from_legacy(&[0xA5; 12], false),
                 aad_presence: PointerBytes::from_legacy(&[], false),
-                iv_null: false,
-                aad_null: false,
             })),
         };
         let first = backend
@@ -1425,15 +1401,11 @@ mod tests {
         let gcm = CkMechanism {
             mechanism_type: CkMechanismType::AES_GCM,
             params: Some(CkMechanismParams::Gcm(GcmParams {
-                iv: vec![0xA5; 12],
                 iv_bits: 96,
                 iv_buffer_len: 12,
-                aad: Vec::new().into(),
                 tag_bits: 128,
                 iv_presence: PointerBytes::from_legacy(&[0xA5; 12], false),
                 aad_presence: PointerBytes::from_legacy(&[], false),
-                iv_null: false,
-                aad_null: false,
             })),
         };
         assert_eq!(
@@ -1456,15 +1428,11 @@ mod tests {
         let gcm = CkMechanism {
             mechanism_type: CkMechanismType::AES_GCM,
             params: Some(CkMechanismParams::Gcm(GcmParams {
-                iv: vec![0xA5; 12],
                 iv_bits: 96,
                 iv_buffer_len: 12,
-                aad: Vec::new().into(),
                 tag_bits: 128,
                 iv_presence: PointerBytes::from_legacy(&[0xA5; 12], false),
                 aad_presence: PointerBytes::from_legacy(&[], false),
-                iv_null: false,
-                aad_null: false,
             })),
         };
         backend

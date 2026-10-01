@@ -24,6 +24,10 @@ mod r12_flat_null_tests;
 #[cfg(test)]
 mod r12_init_retention_tests;
 #[cfg(test)]
+mod r19_init_retention_tests;
+#[cfg(test)]
+mod r19_typed_tail_tests;
+#[cfg(test)]
 mod x3dh_tests;
 
 /// Owns the `CK_MECHANISM` and any backing storage that `pParameter` points
@@ -98,20 +102,28 @@ impl FfiMechanism {
             ) => {
                 // SAFETY: backing is borrowed alive; the copy carries no provenance.
                 let native = unsafe { native.snapshot() };
-                let pointer_matches = |pointer: *mut u8, bytes: &[u8]| {
-                    if bytes.is_empty() {
-                        pointer.is_null()
-                    } else {
-                        std::ptr::eq(pointer, bytes.as_ptr())
+                // S2 §6 (R19): each leg matches its presence peer exactly
+                // (class + declared length + bytes).
+                let leg_matches = |pointer: *mut u8,
+                                   struct_len: cryptoki_sys::CK_ULONG,
+                                   backing: &[u8],
+                                   peer: &PointerBytes| {
+                    match peer {
+                        PointerBytes::Null { declared_len } => {
+                            pointer.is_null()
+                                && struct_len as u64 == *declared_len
+                                && backing.is_empty()
+                        }
+                        PointerBytes::Present(bytes) => bytes.expose(|b| {
+                            !pointer.is_null()
+                                && struct_len as u64 == b.len() as u64
+                                && backing == b
+                        }),
                     }
                 };
-                pointer_matches(native.pWrapOID, oid)
-                    && pointer_matches(native.pUKM, ukm)
-                    && native.ulWrapOIDLen as u64 == input.wrap_oid.len() as u64
-                    && native.ulUKMLen as u64 == input.ukm.len() as u64
+                leg_matches(native.pWrapOID, native.ulWrapOIDLen, oid, &input.wrap_oid_presence)
+                    && leg_matches(native.pUKM, native.ulUKMLen, ukm, &input.ukm_presence)
                     && native.hKey as u64 == input.key_handle.0
-                    && oid.as_slice() == input.wrap_oid.as_slice()
-                    && ukm.as_slice() == input.ukm.as_slice()
             }
             _ => false,
         };
@@ -247,10 +259,10 @@ impl FfiMechanism {
                 e.iv_bits == gcm.ulIvBits as u64
                     && e.iv_buffer_len == iv.len() as u64
                     && e.tag_bits == gcm.ulTagBits as u64
-                    && e.iv_null == gcm.pIv.is_null()
-                    && e.aad_null == gcm.pAAD.is_null()
-                    && e.iv.as_slice() == &iv[..iv_len]
-                    && e.aad.expose(|b| b == &aad[..aad_len])
+                    && e.iv_presence
+                        == presence_from_ffi(gcm.pIv.is_null(), gcm.ulIvLen, &iv[..iv_len])
+                    && e.aad_presence
+                        == presence_from_ffi(gcm.pAAD.is_null(), gcm.ulAADLen, &aad[..aad_len])
             }
             FfiParamBacking::Tls12MasterKeyDerive(tls12, client_random, server_random, version) => {
                 let Some(CkMechanismParams::Tls12MasterKeyDerive(e)) = expected else {
@@ -259,11 +271,26 @@ impl FfiMechanism {
                 // SAFETY: backing is borrowed alive; the copy carries no provenance.
                 let tls12 = unsafe { tls12.snapshot() };
                 // SAFETY: backing is borrowed alive; the copy carries no provenance.
-                let version = unsafe { version.snapshot() };
-                e.random_info.client_random.as_slice() == client_random.as_slice()
-                    && e.random_info.server_random.as_slice() == server_random.as_slice()
-                    && e.version_major == version.major as u32
-                    && e.version_minor == version.minor as u32
+                let version = version.as_ref().map(|cell| unsafe { cell.snapshot() });
+                // A NULL cell echoes zeroed scalars (validation forces the
+                // caller's scalars zero under a set null bit, so the echo
+                // is exact).
+                let (major, minor) = version.map_or((0, 0), |v| (v.major as u32, v.minor as u32));
+                e.random_info.client_random_presence
+                    == presence_from_ffi(
+                        tls12.RandomInfo.pClientRandom.is_null(),
+                        tls12.RandomInfo.ulClientRandomLen,
+                        client_random.as_slice(),
+                    )
+                    && e.random_info.server_random_presence
+                        == presence_from_ffi(
+                            tls12.RandomInfo.pServerRandom.is_null(),
+                            tls12.RandomInfo.ulServerRandomLen,
+                            server_random.as_slice(),
+                        )
+                    && e.version_major == major
+                    && e.version_minor == minor
+                    && e.version_is_null == tls12.pVersion.is_null()
                     && e.prf_hash_mechanism == CkMechanismType(tls12.prfHashMechanism as u64)
             }
             FfiParamBacking::WtlsMasterKeyDerive(wtls, client_random, server_random, version) => {
@@ -273,30 +300,68 @@ impl FfiMechanism {
                 // SAFETY: backing is borrowed alive; the copy carries no provenance.
                 let wtls = unsafe { wtls.snapshot() };
                 e.digest_mechanism == CkMechanismType(wtls.DigestMechanism as u64)
-                    && e.random_info.client_random.as_slice() == client_random.as_slice()
-                    && e.random_info.server_random.as_slice() == server_random.as_slice()
+                    && e.random_info.client_random_presence
+                        == presence_from_ffi(
+                            wtls.RandomInfo.pClientRandom.is_null(),
+                            wtls.RandomInfo.ulClientRandomLen,
+                            client_random.as_slice(),
+                        )
+                    && e.random_info.server_random_presence
+                        == presence_from_ffi(
+                            wtls.RandomInfo.pServerRandom.is_null(),
+                            wtls.RandomInfo.ulServerRandomLen,
+                            server_random.as_slice(),
+                        )
                     && e.version == version.first().copied().unwrap_or_default() as u32
+                    && e.version_is_null == wtls.pVersion.is_null()
             }
-            FfiParamBacking::WtlsKeyMat(wtls, client_random, server_random, key_mat_out, iv) => {
+            FfiParamBacking::WtlsKeyMat(
+                wtls,
+                client_random,
+                server_random,
+                key_mat_out,
+                iv,
+                iv_stored,
+            ) => {
                 let Some(CkMechanismParams::WtlsKeyMat(e)) = expected else { return false };
                 // SAFETY: backing is borrowed alive; the copy carries no provenance.
                 let wtls = unsafe { wtls.snapshot() };
                 // SAFETY: backing is borrowed alive; the copy carries no provenance.
-                let key_mat_out = unsafe { key_mat_out.snapshot() };
-                let iv_len = (((wtls.ulIVSizeInBits as usize).saturating_add(7)) / 8).min(iv.len());
-                let iv_matches =
-                    key_mat_iv_equal(&e.iv, key_mat_out.pIV.is_null(), iv.as_slice(), iv_len);
+                let key_mat_out = key_mat_out.as_ref().map(|out| unsafe { out.snapshot() });
+                let iv_len = bits_to_bytes_ceil(wtls.ulIVSizeInBits).min(iv.len());
+                // A NULL OUT struct echoes the stored peer verbatim (the
+                // provider never saw the IVs); a live one echoes the
+                // stored class with the post-call bytes.
+                let iv_echo = match key_mat_out {
+                    None => iv_stored.clone(),
+                    Some(_) => key_mat_iv_echo(iv_stored, iv.as_slice(), iv_len),
+                };
+                // A NULL OUT struct echoes zeroed handles (validation
+                // forces the caller's handles zero under a set null bit,
+                // so the echo is exact).
+                let (mac, key) = key_mat_out.map_or((0, 0), |o| (o.hMacSecret, o.hKey));
                 e.digest_mechanism == CkMechanismType(wtls.DigestMechanism as u64)
                     && e.mac_size_bits == wtls.ulMacSizeInBits as u64
                     && e.key_size_bits == wtls.ulKeySizeInBits as u64
                     && e.iv_size_bits == wtls.ulIVSizeInBits as u64
                     && e.sequence_number == wtls.ulSequenceNumber as u64
                     && e.is_export == (wtls.bIsExport != 0)
-                    && e.random_info.client_random.as_slice() == client_random.as_slice()
-                    && e.random_info.server_random.as_slice() == server_random.as_slice()
-                    && e.mac_secret_handle == CkObjectHandle(key_mat_out.hMacSecret as u64)
-                    && e.key_handle == CkObjectHandle(key_mat_out.hKey as u64)
-                    && iv_matches
+                    && e.random_info.client_random_presence
+                        == presence_from_ffi(
+                            wtls.RandomInfo.pClientRandom.is_null(),
+                            wtls.RandomInfo.ulClientRandomLen,
+                            client_random.as_slice(),
+                        )
+                    && e.random_info.server_random_presence
+                        == presence_from_ffi(
+                            wtls.RandomInfo.pServerRandom.is_null(),
+                            wtls.RandomInfo.ulServerRandomLen,
+                            server_random.as_slice(),
+                        )
+                    && e.mac_secret_handle == CkObjectHandle(mac as u64)
+                    && e.key_handle == CkObjectHandle(key as u64)
+                    && e.returned_key_material_is_null == wtls.pReturnedKeyMaterial.is_null()
+                    && e.iv_presence == iv_echo
             }
             FfiParamBacking::Ssl3KeyMat(
                 ssl3,
@@ -305,39 +370,61 @@ impl FfiMechanism {
                 key_mat_out,
                 client_iv,
                 server_iv,
+                client_iv_stored,
+                server_iv_stored,
             ) => {
                 let Some(CkMechanismParams::Ssl3KeyMat(e)) = expected else { return false };
                 // SAFETY: backing is borrowed alive; the copy carries no provenance.
                 let ssl3 = unsafe { ssl3.snapshot() };
                 // SAFETY: backing is borrowed alive; the copy carries no provenance.
-                let key_mat_out = unsafe { key_mat_out.snapshot() };
-                let iv_len =
-                    (((ssl3.ulIVSizeInBits as usize).saturating_add(7)) / 8).min(client_iv.len());
+                let key_mat_out = key_mat_out.as_ref().map(|out| unsafe { out.snapshot() });
+                let iv_len = bits_to_bytes_ceil(ssl3.ulIVSizeInBits).min(client_iv.len());
+                // A NULL OUT struct echoes the stored peers verbatim (the
+                // provider never saw the IVs); a live one echoes the
+                // stored classes with the post-call bytes.
+                let client_iv_echo = match key_mat_out {
+                    None => client_iv_stored.clone(),
+                    Some(_) => key_mat_iv_echo(client_iv_stored, client_iv.as_slice(), iv_len),
+                };
+                let server_iv_echo = match key_mat_out {
+                    None => server_iv_stored.clone(),
+                    Some(_) => key_mat_iv_echo(
+                        server_iv_stored,
+                        server_iv.as_slice(),
+                        iv_len.min(server_iv.len()),
+                    ),
+                };
+                // A NULL OUT struct echoes zeroed handles (validation
+                // forces the caller's handles zero under a set null bit,
+                // so the echo is exact).
+                let (client_mac, server_mac, client_key, server_key) = key_mat_out
+                    .map_or((0, 0, 0, 0), |o| {
+                        (o.hClientMacSecret, o.hServerMacSecret, o.hClientKey, o.hServerKey)
+                    });
                 e.mac_size_bits == ssl3.ulMacSizeInBits as u64
                     && e.key_size_bits == ssl3.ulKeySizeInBits as u64
                     && e.iv_size_bits == ssl3.ulIVSizeInBits as u64
                     && e.is_export == (ssl3.bIsExport != 0)
-                    && e.random_info.client_random.as_slice() == client_random.as_slice()
-                    && e.random_info.server_random.as_slice() == server_random.as_slice()
+                    && e.random_info.client_random_presence
+                        == presence_from_ffi(
+                            ssl3.RandomInfo.pClientRandom.is_null(),
+                            ssl3.RandomInfo.ulClientRandomLen,
+                            client_random.as_slice(),
+                        )
+                    && e.random_info.server_random_presence
+                        == presence_from_ffi(
+                            ssl3.RandomInfo.pServerRandom.is_null(),
+                            ssl3.RandomInfo.ulServerRandomLen,
+                            server_random.as_slice(),
+                        )
                     && e.prf_hash_mechanism == CkMechanismType(0)
-                    && e.client_mac_secret_handle
-                        == CkObjectHandle(key_mat_out.hClientMacSecret as u64)
-                    && e.server_mac_secret_handle
-                        == CkObjectHandle(key_mat_out.hServerMacSecret as u64)
-                    && e.client_key_handle == CkObjectHandle(key_mat_out.hClientKey as u64)
-                    && e.server_key_handle == CkObjectHandle(key_mat_out.hServerKey as u64)
-                    && key_mat_iv_equal(
-                        &e.client_iv,
-                        key_mat_out.pIVClient.is_null(),
-                        client_iv.as_slice(),
-                        iv_len,
-                    )
-                    && key_mat_iv_equal(
-                        &e.server_iv,
-                        key_mat_out.pIVServer.is_null(),
-                        server_iv.as_slice(),
-                        iv_len.min(server_iv.len()),
-                    )
+                    && e.client_mac_secret_handle == CkObjectHandle(client_mac as u64)
+                    && e.server_mac_secret_handle == CkObjectHandle(server_mac as u64)
+                    && e.client_key_handle == CkObjectHandle(client_key as u64)
+                    && e.server_key_handle == CkObjectHandle(server_key as u64)
+                    && e.returned_key_material_is_null == ssl3.pReturnedKeyMaterial.is_null()
+                    && e.client_iv_presence == client_iv_echo
+                    && e.server_iv_presence == server_iv_echo
             }
             FfiParamBacking::Tls12KeyMat(
                 tls12,
@@ -346,39 +433,61 @@ impl FfiMechanism {
                 key_mat_out,
                 client_iv,
                 server_iv,
+                client_iv_stored,
+                server_iv_stored,
             ) => {
                 let Some(CkMechanismParams::Ssl3KeyMat(e)) = expected else { return false };
                 // SAFETY: backing is borrowed alive; the copy carries no provenance.
                 let tls12 = unsafe { tls12.snapshot() };
                 // SAFETY: backing is borrowed alive; the copy carries no provenance.
-                let key_mat_out = unsafe { key_mat_out.snapshot() };
-                let iv_len =
-                    (((tls12.ulIVSizeInBits as usize).saturating_add(7)) / 8).min(client_iv.len());
+                let key_mat_out = key_mat_out.as_ref().map(|out| unsafe { out.snapshot() });
+                let iv_len = bits_to_bytes_ceil(tls12.ulIVSizeInBits).min(client_iv.len());
+                // A NULL OUT struct echoes the stored peers verbatim (the
+                // provider never saw the IVs); a live one echoes the
+                // stored classes with the post-call bytes.
+                let client_iv_echo = match key_mat_out {
+                    None => client_iv_stored.clone(),
+                    Some(_) => key_mat_iv_echo(client_iv_stored, client_iv.as_slice(), iv_len),
+                };
+                let server_iv_echo = match key_mat_out {
+                    None => server_iv_stored.clone(),
+                    Some(_) => key_mat_iv_echo(
+                        server_iv_stored,
+                        server_iv.as_slice(),
+                        iv_len.min(server_iv.len()),
+                    ),
+                };
+                // A NULL OUT struct echoes zeroed handles (validation
+                // forces the caller's handles zero under a set null bit,
+                // so the echo is exact).
+                let (client_mac, server_mac, client_key, server_key) = key_mat_out
+                    .map_or((0, 0, 0, 0), |o| {
+                        (o.hClientMacSecret, o.hServerMacSecret, o.hClientKey, o.hServerKey)
+                    });
                 e.mac_size_bits == tls12.ulMacSizeInBits as u64
                     && e.key_size_bits == tls12.ulKeySizeInBits as u64
                     && e.iv_size_bits == tls12.ulIVSizeInBits as u64
                     && e.is_export == (tls12.bIsExport != 0)
-                    && e.random_info.client_random.as_slice() == client_random.as_slice()
-                    && e.random_info.server_random.as_slice() == server_random.as_slice()
+                    && e.random_info.client_random_presence
+                        == presence_from_ffi(
+                            tls12.RandomInfo.pClientRandom.is_null(),
+                            tls12.RandomInfo.ulClientRandomLen,
+                            client_random.as_slice(),
+                        )
+                    && e.random_info.server_random_presence
+                        == presence_from_ffi(
+                            tls12.RandomInfo.pServerRandom.is_null(),
+                            tls12.RandomInfo.ulServerRandomLen,
+                            server_random.as_slice(),
+                        )
                     && e.prf_hash_mechanism == CkMechanismType(tls12.prfHashMechanism as u64)
-                    && e.client_mac_secret_handle
-                        == CkObjectHandle(key_mat_out.hClientMacSecret as u64)
-                    && e.server_mac_secret_handle
-                        == CkObjectHandle(key_mat_out.hServerMacSecret as u64)
-                    && e.client_key_handle == CkObjectHandle(key_mat_out.hClientKey as u64)
-                    && e.server_key_handle == CkObjectHandle(key_mat_out.hServerKey as u64)
-                    && key_mat_iv_equal(
-                        &e.client_iv,
-                        key_mat_out.pIVClient.is_null(),
-                        client_iv.as_slice(),
-                        iv_len,
-                    )
-                    && key_mat_iv_equal(
-                        &e.server_iv,
-                        key_mat_out.pIVServer.is_null(),
-                        server_iv.as_slice(),
-                        iv_len.min(server_iv.len()),
-                    )
+                    && e.client_mac_secret_handle == CkObjectHandle(client_mac as u64)
+                    && e.server_mac_secret_handle == CkObjectHandle(server_mac as u64)
+                    && e.client_key_handle == CkObjectHandle(client_key as u64)
+                    && e.server_key_handle == CkObjectHandle(server_key as u64)
+                    && e.returned_key_material_is_null == tls12.pReturnedKeyMaterial.is_null()
+                    && e.client_iv_presence == client_iv_echo
+                    && e.server_iv_presence == server_iv_echo
             }
             FfiParamBacking::Sp800108Kdf(sp800, data_params, data_buffers, derived_keys) => {
                 // Mirror the `!derived_keys.is_empty()` guard: an empty set
@@ -390,8 +499,17 @@ impl FfiMechanism {
                 // SAFETY: backing is borrowed alive; the copy carries no provenance.
                 let sp800 = unsafe { sp800.snapshot() };
                 e.prf_type == CkMechanismType(sp800.prfType as u64)
-                    && sp800_108_data_params_equal(data_params, data_buffers, &e.data_params)
-                    && sp800_108_derived_keys_equal(derived_keys, &e.additional_derived_keys)
+                    && sp800_108_data_params_equal(
+                        data_params,
+                        data_buffers,
+                        sp800.pDataParams.is_null(),
+                        sp800.ulNumberOfDataParams,
+                        &e.data_params_presence,
+                    )
+                    && sp800_108_derived_keys_equal(
+                        derived_keys,
+                        &e.additional_derived_keys_presence,
+                    )
             }
             FfiParamBacking::Sp800108FeedbackKdf(
                 sp800,
@@ -409,42 +527,93 @@ impl FfiMechanism {
                 // SAFETY: backing is borrowed alive; the copy carries no provenance.
                 let sp800 = unsafe { sp800.snapshot() };
                 e.prf_type == CkMechanismType(sp800.prfType as u64)
-                    && sp800_108_data_params_equal(data_params, data_buffers, &e.data_params)
-                    && e.iv.as_slice() == &iv[..(sp800.ulIVLen as usize).min(iv.len())]
-                    && sp800_108_derived_keys_equal(derived_keys, &e.additional_derived_keys)
+                    && sp800_108_data_params_equal(
+                        data_params,
+                        data_buffers,
+                        sp800.pDataParams.is_null(),
+                        sp800.ulNumberOfDataParams,
+                        &e.data_params_presence,
+                    )
+                    && e.iv_presence
+                        == presence_from_ffi(sp800.pIV.is_null(), sp800.ulIVLen, iv.as_slice())
+                    && sp800_108_derived_keys_equal(
+                        derived_keys,
+                        &e.additional_derived_keys_presence,
+                    )
             }
-            FfiParamBacking::TlsPrf(_tls, seed, label, output, output_len) => {
+            FfiParamBacking::TlsPrf(tls, seed, label, output, output_len) => {
                 let Some(CkMechanismParams::TlsPrf(e)) = expected else { return false };
                 // SAFETY: backing is borrowed alive; the copies carry no provenance.
-                let output_len = unsafe { output_len.snapshot() };
-                let written = (output_len as usize).min(output.len());
-                e.seed.expose(|b| b == seed.as_slice())
-                    && e.label.expose(|b| b == label.as_slice())
+                let tls = unsafe { tls.snapshot() };
+                let written = match output_len.as_ref() {
+                    // SAFETY: backing is borrowed alive; the copy carries no provenance.
+                    Some(cell) => (unsafe { cell.snapshot() } as usize).min(output.len()),
+                    // No length cell: the whole buffer is the written
+                    // extent (a NULL `pulOutputLen` forces `output_len`
+                    // zero, so the buffer is empty-sized — see the arm).
+                    None => output.len(),
+                };
+                e.seed_presence
+                    == presence_from_ffi(tls.pSeed.is_null(), tls.ulSeedLen, seed.as_slice())
+                    && e.label_presence
+                        == presence_from_ffi(tls.pLabel.is_null(), tls.ulLabelLen, label.as_slice())
                     && e.output_len == written as u64
                     && e.output.expose(|b| b == &output[..written])
+                    && e.output_is_null == tls.pOutput.is_null()
+                    && e.output_len_is_null == tls.pulOutputLen.is_null()
             }
             FfiParamBacking::WtlsPrf(wtls, seed, label, output, output_len) => {
                 let Some(CkMechanismParams::WtlsPrf(e)) = expected else { return false };
                 // SAFETY: backing is borrowed alive; the copies carry no provenance.
                 let wtls = unsafe { wtls.snapshot() };
-                let output_len = unsafe { output_len.snapshot() };
-                let written = (output_len as usize).min(output.len());
+                let written = match output_len.as_ref() {
+                    // SAFETY: backing is borrowed alive; the copy carries no provenance.
+                    Some(cell) => (unsafe { cell.snapshot() } as usize).min(output.len()),
+                    // No length cell: the whole buffer is the written
+                    // extent (see the TLS-PRF arm above).
+                    None => output.len(),
+                };
                 e.digest_mechanism == CkMechanismType(wtls.DigestMechanism as u64)
-                    && e.seed.expose(|b| b == seed.as_slice())
-                    && e.label.expose(|b| b == label.as_slice())
+                    && e.seed_presence
+                        == presence_from_ffi(wtls.pSeed.is_null(), wtls.ulSeedLen, seed.as_slice())
+                    && e.label_presence
+                        == presence_from_ffi(
+                            wtls.pLabel.is_null(),
+                            wtls.ulLabelLen,
+                            label.as_slice(),
+                        )
                     && e.output_len == written as u64
                     && e.output.expose(|b| b == &output[..written])
+                    && e.output_is_null == wtls.pOutput.is_null()
+                    && e.output_len_is_null == wtls.pulOutputLen.is_null()
             }
-            FfiParamBacking::Ssl3MasterKeyDerive(_ssl3, client_random, server_random, version) => {
+            FfiParamBacking::Ssl3MasterKeyDerive(ssl3, client_random, server_random, version) => {
                 let Some(CkMechanismParams::Ssl3MasterKeyDerive(e)) = expected else {
                     return false;
                 };
                 // SAFETY: backing is borrowed alive; the copy carries no provenance.
-                let version = unsafe { version.snapshot() };
-                e.random_info.client_random.as_slice() == client_random.as_slice()
-                    && e.random_info.server_random.as_slice() == server_random.as_slice()
-                    && e.version_major == version.major as u32
-                    && e.version_minor == version.minor as u32
+                let ssl3 = unsafe { ssl3.snapshot() };
+                // SAFETY: backing is borrowed alive; the copy carries no provenance.
+                let version = version.as_ref().map(|cell| unsafe { cell.snapshot() });
+                // A NULL cell echoes zeroed scalars (validation forces the
+                // caller's scalars zero under a set null bit, so the echo
+                // is exact).
+                let (major, minor) = version.map_or((0, 0), |v| (v.major as u32, v.minor as u32));
+                e.random_info.client_random_presence
+                    == presence_from_ffi(
+                        ssl3.RandomInfo.pClientRandom.is_null(),
+                        ssl3.RandomInfo.ulClientRandomLen,
+                        client_random.as_slice(),
+                    )
+                    && e.random_info.server_random_presence
+                        == presence_from_ffi(
+                            ssl3.RandomInfo.pServerRandom.is_null(),
+                            ssl3.RandomInfo.ulServerRandomLen,
+                            server_random.as_slice(),
+                        )
+                    && e.version_major == major
+                    && e.version_minor == minor
+                    && e.version_is_null == ssl3.pVersion.is_null()
             }
             FfiParamBacking::Pbe(pbe, init_vector, _password, _salt) => {
                 // SAFETY: backing is borrowed alive; the copy carries no provenance.
@@ -454,10 +623,14 @@ impl FfiMechanism {
                 }
                 let Some(CkMechanismParams::Pbe(e)) = expected else { return false };
                 // `output_params()` surfaces ONLY the IV (full backing
-                // copy); password and salt are always rebuilt empty.
-                e.init_vector.expose(|b| b == init_vector.as_slice())
-                    && e.password.is_empty()
-                    && e.salt.is_empty()
+                // copy); password and salt echo class-faithful redacted
+                // peers (NULL-ness + declared lengths read back the
+                // provider-untouched input legs; the bytes never echo —
+                // AGENTS.md §4).
+                e.init_vector_presence == PointerBytes::present_copy(init_vector)
+                    && e.password_presence
+                        == presence_from_ffi(pbe.pPassword.is_null(), pbe.ulPasswordLen, &[])
+                    && e.salt_presence == presence_from_ffi(pbe.pSalt.is_null(), pbe.ulSaltLen, &[])
                     && e.iteration == pbe.ulIteration as u64
             }
             _ => expected.is_none(),
@@ -474,45 +647,52 @@ impl FfiMechanism {
                 let iv_len = (gcm.ulIvLen as usize).min(iv.len());
                 let aad_len = (gcm.ulAADLen as usize).min(aad.len());
                 Some(CkMechanismParams::Gcm(GcmParams {
-                    iv: iv[..iv_len].to_vec(),
                     iv_bits: gcm.ulIvBits as u64,
                     iv_buffer_len: iv.len() as u64,
-                    aad: aad[..aad_len].to_vec().into(),
                     tag_bits: gcm.ulTagBits as u64,
                     // F3/D2: input pointers are provider-untouched, so the
                     // post-call pointer class still reports the caller's.
-                    iv_null: gcm.pIv.is_null(),
-                    aad_null: gcm.pAAD.is_null(),
-                    // R16: v0-consistent mirrors (native-faithful lengths
-                    // arrive with the R17 readers; this snapshot echoes the
-                    // caller's pointer class only).
-                    iv_presence: PointerBytes::from_legacy(&iv[..iv_len], gcm.pIv.is_null()),
-                    aad_presence: PointerBytes::from_legacy(&aad[..aad_len], gcm.pAAD.is_null()),
+                    // S2 §6 (R19): NULL legs echo the STRUCT length (the
+                    // caller's declared length survives exactly).
+                    iv_presence: presence_from_ffi(gcm.pIv.is_null(), gcm.ulIvLen, &iv[..iv_len]),
+                    aad_presence: presence_from_ffi(
+                        gcm.pAAD.is_null(),
+                        gcm.ulAADLen,
+                        &aad[..aad_len],
+                    ),
                 }))
             }
             FfiParamBacking::Tls12MasterKeyDerive(tls12, client_random, server_random, version) => {
                 // SAFETY: backing is borrowed alive; the copy carries no provenance.
                 let tls12 = unsafe { tls12.snapshot() };
                 // SAFETY: backing is borrowed alive; the copy carries no provenance.
-                let version = unsafe { version.snapshot() };
+                let version = version.as_ref().map(|cell| unsafe { cell.snapshot() });
                 // CK_TLS12_MASTER_KEY_DERIVE_PARAMS.pVersion is OUT —
                 // the HSM writes the negotiated CK_VERSION here when
                 // pVersion is non-NULL. Surface the version_major /
                 // version_minor back to the caller; the random data
                 // and PRF mechanism are unchanged by the derive (those
-                // fields are caller-supplied inputs).
+                // fields are caller-supplied inputs). A NULL cell echoes
+                // zeroed scalars (validation forces the caller's scalars
+                // zero under a set null bit, so the echo is exact).
+                let (major, minor) = version.map_or((0, 0), |v| (v.major as u32, v.minor as u32));
                 Some(CkMechanismParams::Tls12MasterKeyDerive(Tls12MasterKeyDeriveParams {
                     random_info: pkcs11_proxy_ng_types::SslRandomData {
-                        // R18: v0-consistent mirrors of the surfaced bytes.
-                        client_random_presence: PointerBytes::present_copy(client_random),
-                        server_random_presence: PointerBytes::present_copy(server_random),
-                        client_random: client_random.to_vec(),
-                        server_random: server_random.to_vec(),
+                        client_random_presence: presence_from_ffi(
+                            tls12.RandomInfo.pClientRandom.is_null(),
+                            tls12.RandomInfo.ulClientRandomLen,
+                            client_random.as_slice(),
+                        ),
+                        server_random_presence: presence_from_ffi(
+                            tls12.RandomInfo.pServerRandom.is_null(),
+                            tls12.RandomInfo.ulServerRandomLen,
+                            server_random.as_slice(),
+                        ),
                     },
-                    version_major: version.major as u32,
-                    version_minor: version.minor as u32,
+                    version_major: major,
+                    version_minor: minor,
                     prf_hash_mechanism: CkMechanismType(tls12.prfHashMechanism as u64),
-                    version_is_null: false,
+                    version_is_null: tls12.pVersion.is_null(),
                 }))
             }
             FfiParamBacking::WtlsMasterKeyDerive(wtls, client_random, server_random, version) => {
@@ -521,24 +701,45 @@ impl FfiMechanism {
                 Some(CkMechanismParams::WtlsMasterKeyDerive(WtlsMasterKeyDeriveParams {
                     digest_mechanism: CkMechanismType(wtls.DigestMechanism as u64),
                     random_info: WtlsRandomData {
-                        // R18: v0-consistent mirrors of the surfaced bytes.
-                        client_random_presence: PointerBytes::present_copy(client_random),
-                        server_random_presence: PointerBytes::present_copy(server_random),
-                        client_random: client_random.to_vec(),
-                        server_random: server_random.to_vec(),
+                        client_random_presence: presence_from_ffi(
+                            wtls.RandomInfo.pClientRandom.is_null(),
+                            wtls.RandomInfo.ulClientRandomLen,
+                            client_random.as_slice(),
+                        ),
+                        server_random_presence: presence_from_ffi(
+                            wtls.RandomInfo.pServerRandom.is_null(),
+                            wtls.RandomInfo.ulServerRandomLen,
+                            server_random.as_slice(),
+                        ),
                     },
                     version: version.first().copied().unwrap_or_default() as u32,
-                    version_is_null: false,
+                    version_is_null: wtls.pVersion.is_null(),
                 }))
             }
-            FfiParamBacking::WtlsKeyMat(wtls, client_random, server_random, key_mat_out, iv) => {
+            FfiParamBacking::WtlsKeyMat(
+                wtls,
+                client_random,
+                server_random,
+                key_mat_out,
+                iv,
+                iv_stored,
+            ) => {
                 // SAFETY: backing is borrowed alive; the copy carries no provenance.
                 let wtls = unsafe { wtls.snapshot() };
                 // SAFETY: backing is borrowed alive; the copy carries no provenance.
-                let key_mat_out = unsafe { key_mat_out.snapshot() };
-                let iv_len = (((wtls.ulIVSizeInBits as usize).saturating_add(7)) / 8).min(iv.len());
-                let iv: Vec<u8> =
-                    if key_mat_out.pIV.is_null() { Vec::new() } else { iv[..iv_len].to_vec() };
+                let key_mat_out = key_mat_out.as_ref().map(|out| unsafe { out.snapshot() });
+                let iv_len = bits_to_bytes_ceil(wtls.ulIVSizeInBits).min(iv.len());
+                // A NULL OUT struct echoes the stored peer verbatim (the
+                // provider never saw the IVs); a live one echoes the
+                // stored class with the post-call bytes.
+                let iv_echo = match key_mat_out {
+                    None => iv_stored.clone(),
+                    Some(_) => key_mat_iv_echo(iv_stored, iv.as_slice(), iv_len),
+                };
+                // A NULL OUT struct echoes zeroed handles (validation
+                // forces the caller's handles zero under a set null bit,
+                // so the echo is exact).
+                let (mac, key) = key_mat_out.map_or((0, 0), |o| (o.hMacSecret, o.hKey));
                 Some(CkMechanismParams::WtlsKeyMat(WtlsKeyMatParams {
                     digest_mechanism: CkMechanismType(wtls.DigestMechanism as u64),
                     mac_size_bits: wtls.ulMacSizeInBits as u64,
@@ -547,18 +748,21 @@ impl FfiMechanism {
                     sequence_number: wtls.ulSequenceNumber as u64,
                     is_export: wtls.bIsExport != 0,
                     random_info: WtlsRandomData {
-                        // R18: v0-consistent mirrors of the surfaced bytes.
-                        client_random_presence: PointerBytes::present_copy(client_random),
-                        server_random_presence: PointerBytes::present_copy(server_random),
-                        client_random: client_random.to_vec(),
-                        server_random: server_random.to_vec(),
+                        client_random_presence: presence_from_ffi(
+                            wtls.RandomInfo.pClientRandom.is_null(),
+                            wtls.RandomInfo.ulClientRandomLen,
+                            client_random.as_slice(),
+                        ),
+                        server_random_presence: presence_from_ffi(
+                            wtls.RandomInfo.pServerRandom.is_null(),
+                            wtls.RandomInfo.ulServerRandomLen,
+                            server_random.as_slice(),
+                        ),
                     },
-                    mac_secret_handle: CkObjectHandle(key_mat_out.hMacSecret as u64),
-                    key_handle: CkObjectHandle(key_mat_out.hKey as u64),
-                    // R18: v0-consistent mirror of the surfaced bytes.
-                    iv_presence: PointerBytes::present_copy(&iv),
-                    iv: iv.into(),
-                    returned_key_material_is_null: false,
+                    mac_secret_handle: CkObjectHandle(mac as u64),
+                    key_handle: CkObjectHandle(key as u64),
+                    iv_presence: iv_echo.clone(),
+                    returned_key_material_is_null: wtls.pReturnedKeyMaterial.is_null(),
                 }))
             }
             FfiParamBacking::Ssl3KeyMat(
@@ -568,46 +772,61 @@ impl FfiMechanism {
                 key_mat_out,
                 client_iv,
                 server_iv,
+                client_iv_stored,
+                server_iv_stored,
             ) => {
                 // SAFETY: backing is borrowed alive; the copy carries no provenance.
                 let ssl3 = unsafe { ssl3.snapshot() };
                 // SAFETY: backing is borrowed alive; the copy carries no provenance.
-                let key_mat_out = unsafe { key_mat_out.snapshot() };
-                let iv_len =
-                    (((ssl3.ulIVSizeInBits as usize).saturating_add(7)) / 8).min(client_iv.len());
-                let client_iv: Vec<u8> = if key_mat_out.pIVClient.is_null() {
-                    Vec::new()
-                } else {
-                    client_iv[..iv_len].to_vec()
+                let key_mat_out = key_mat_out.as_ref().map(|out| unsafe { out.snapshot() });
+                let iv_len = bits_to_bytes_ceil(ssl3.ulIVSizeInBits).min(client_iv.len());
+                // A NULL OUT struct echoes the stored peers verbatim (the
+                // provider never saw the IVs); a live one echoes the
+                // stored classes with the post-call bytes.
+                let client_iv_echo = match key_mat_out {
+                    None => client_iv_stored.clone(),
+                    Some(_) => key_mat_iv_echo(client_iv_stored, client_iv.as_slice(), iv_len),
                 };
-                let server_iv: Vec<u8> = if key_mat_out.pIVServer.is_null() {
-                    Vec::new()
-                } else {
-                    server_iv[..iv_len.min(server_iv.len())].to_vec()
+                let server_iv_echo = match key_mat_out {
+                    None => server_iv_stored.clone(),
+                    Some(_) => key_mat_iv_echo(
+                        server_iv_stored,
+                        server_iv.as_slice(),
+                        iv_len.min(server_iv.len()),
+                    ),
                 };
+                // A NULL OUT struct echoes zeroed handles (validation
+                // forces the caller's handles zero under a set null bit,
+                // so the echo is exact).
+                let (client_mac, server_mac, client_key, server_key) = key_mat_out
+                    .map_or((0, 0, 0, 0), |o| {
+                        (o.hClientMacSecret, o.hServerMacSecret, o.hClientKey, o.hServerKey)
+                    });
                 Some(CkMechanismParams::Ssl3KeyMat(Ssl3KeyMatParams {
                     mac_size_bits: ssl3.ulMacSizeInBits as u64,
                     key_size_bits: ssl3.ulKeySizeInBits as u64,
                     iv_size_bits: ssl3.ulIVSizeInBits as u64,
                     is_export: ssl3.bIsExport != 0,
                     random_info: pkcs11_proxy_ng_types::SslRandomData {
-                        // R18: v0-consistent mirrors of the surfaced bytes.
-                        client_random_presence: PointerBytes::present_copy(client_random),
-                        server_random_presence: PointerBytes::present_copy(server_random),
-                        client_random: client_random.to_vec(),
-                        server_random: server_random.to_vec(),
+                        client_random_presence: presence_from_ffi(
+                            ssl3.RandomInfo.pClientRandom.is_null(),
+                            ssl3.RandomInfo.ulClientRandomLen,
+                            client_random.as_slice(),
+                        ),
+                        server_random_presence: presence_from_ffi(
+                            ssl3.RandomInfo.pServerRandom.is_null(),
+                            ssl3.RandomInfo.ulServerRandomLen,
+                            server_random.as_slice(),
+                        ),
                     },
                     prf_hash_mechanism: CkMechanismType(0),
-                    client_mac_secret_handle: CkObjectHandle(key_mat_out.hClientMacSecret as u64),
-                    server_mac_secret_handle: CkObjectHandle(key_mat_out.hServerMacSecret as u64),
-                    client_key_handle: CkObjectHandle(key_mat_out.hClientKey as u64),
-                    server_key_handle: CkObjectHandle(key_mat_out.hServerKey as u64),
-                    // R18: v0-consistent mirrors of the surfaced bytes.
-                    client_iv_presence: PointerBytes::present_copy(&client_iv),
-                    server_iv_presence: PointerBytes::present_copy(&server_iv),
-                    client_iv: client_iv.into(),
-                    server_iv: server_iv.into(),
-                    returned_key_material_is_null: false,
+                    client_mac_secret_handle: CkObjectHandle(client_mac as u64),
+                    server_mac_secret_handle: CkObjectHandle(server_mac as u64),
+                    client_key_handle: CkObjectHandle(client_key as u64),
+                    server_key_handle: CkObjectHandle(server_key as u64),
+                    client_iv_presence: client_iv_echo.clone(),
+                    server_iv_presence: server_iv_echo.clone(),
+                    returned_key_material_is_null: ssl3.pReturnedKeyMaterial.is_null(),
                 }))
             }
             FfiParamBacking::Tls12KeyMat(
@@ -617,46 +836,61 @@ impl FfiMechanism {
                 key_mat_out,
                 client_iv,
                 server_iv,
+                client_iv_stored,
+                server_iv_stored,
             ) => {
                 // SAFETY: backing is borrowed alive; the copy carries no provenance.
                 let tls12 = unsafe { tls12.snapshot() };
                 // SAFETY: backing is borrowed alive; the copy carries no provenance.
-                let key_mat_out = unsafe { key_mat_out.snapshot() };
-                let iv_len =
-                    (((tls12.ulIVSizeInBits as usize).saturating_add(7)) / 8).min(client_iv.len());
-                let client_iv: Vec<u8> = if key_mat_out.pIVClient.is_null() {
-                    Vec::new()
-                } else {
-                    client_iv[..iv_len].to_vec()
+                let key_mat_out = key_mat_out.as_ref().map(|out| unsafe { out.snapshot() });
+                let iv_len = bits_to_bytes_ceil(tls12.ulIVSizeInBits).min(client_iv.len());
+                // A NULL OUT struct echoes the stored peers verbatim (the
+                // provider never saw the IVs); a live one echoes the
+                // stored classes with the post-call bytes.
+                let client_iv_echo = match key_mat_out {
+                    None => client_iv_stored.clone(),
+                    Some(_) => key_mat_iv_echo(client_iv_stored, client_iv.as_slice(), iv_len),
                 };
-                let server_iv: Vec<u8> = if key_mat_out.pIVServer.is_null() {
-                    Vec::new()
-                } else {
-                    server_iv[..iv_len.min(server_iv.len())].to_vec()
+                let server_iv_echo = match key_mat_out {
+                    None => server_iv_stored.clone(),
+                    Some(_) => key_mat_iv_echo(
+                        server_iv_stored,
+                        server_iv.as_slice(),
+                        iv_len.min(server_iv.len()),
+                    ),
                 };
+                // A NULL OUT struct echoes zeroed handles (validation
+                // forces the caller's handles zero under a set null bit,
+                // so the echo is exact).
+                let (client_mac, server_mac, client_key, server_key) = key_mat_out
+                    .map_or((0, 0, 0, 0), |o| {
+                        (o.hClientMacSecret, o.hServerMacSecret, o.hClientKey, o.hServerKey)
+                    });
                 Some(CkMechanismParams::Ssl3KeyMat(Ssl3KeyMatParams {
                     mac_size_bits: tls12.ulMacSizeInBits as u64,
                     key_size_bits: tls12.ulKeySizeInBits as u64,
                     iv_size_bits: tls12.ulIVSizeInBits as u64,
                     is_export: tls12.bIsExport != 0,
                     random_info: pkcs11_proxy_ng_types::SslRandomData {
-                        // R18: v0-consistent mirrors of the surfaced bytes.
-                        client_random_presence: PointerBytes::present_copy(client_random),
-                        server_random_presence: PointerBytes::present_copy(server_random),
-                        client_random: client_random.to_vec(),
-                        server_random: server_random.to_vec(),
+                        client_random_presence: presence_from_ffi(
+                            tls12.RandomInfo.pClientRandom.is_null(),
+                            tls12.RandomInfo.ulClientRandomLen,
+                            client_random.as_slice(),
+                        ),
+                        server_random_presence: presence_from_ffi(
+                            tls12.RandomInfo.pServerRandom.is_null(),
+                            tls12.RandomInfo.ulServerRandomLen,
+                            server_random.as_slice(),
+                        ),
                     },
                     prf_hash_mechanism: CkMechanismType(tls12.prfHashMechanism as u64),
-                    client_mac_secret_handle: CkObjectHandle(key_mat_out.hClientMacSecret as u64),
-                    server_mac_secret_handle: CkObjectHandle(key_mat_out.hServerMacSecret as u64),
-                    client_key_handle: CkObjectHandle(key_mat_out.hClientKey as u64),
-                    server_key_handle: CkObjectHandle(key_mat_out.hServerKey as u64),
-                    // R18: v0-consistent mirrors of the surfaced bytes.
-                    client_iv_presence: PointerBytes::present_copy(&client_iv),
-                    server_iv_presence: PointerBytes::present_copy(&server_iv),
-                    client_iv: client_iv.into(),
-                    server_iv: server_iv.into(),
-                    returned_key_material_is_null: false,
+                    client_mac_secret_handle: CkObjectHandle(client_mac as u64),
+                    server_mac_secret_handle: CkObjectHandle(server_mac as u64),
+                    client_key_handle: CkObjectHandle(client_key as u64),
+                    server_key_handle: CkObjectHandle(server_key as u64),
+                    client_iv_presence: client_iv_echo.clone(),
+                    server_iv_presence: server_iv_echo.clone(),
+                    returned_key_material_is_null: tls12.pReturnedKeyMaterial.is_null(),
                 }))
             }
             FfiParamBacking::Sp800108Kdf(sp800, data_params, data_buffers, derived_keys)
@@ -665,16 +899,21 @@ impl FfiMechanism {
                 // SAFETY: backing is borrowed alive; the copy carries no provenance.
                 let sp800 = unsafe { sp800.snapshot() };
                 let data_params = sp800_108_data_params_from_ffi(data_params, data_buffers);
+                // The guard guarantees a non-empty derived-keys set, so the
+                // keys peer is always `Present` here; the data-params array
+                // may still be NULL (inputs round-trip exactly).
+                let data_params_presence = if sp800.pDataParams.is_null() {
+                    PointerArray::null_count(sp800.ulNumberOfDataParams as u64)
+                } else {
+                    PointerArray::present(data_params.clone())
+                };
                 let additional_derived_keys = derived_keys.output_keys();
                 Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
                     prf_type: CkMechanismType(sp800.prfType as u64),
-                    // R18: v0-consistent mirrors of the surfaced arrays.
-                    data_params_presence: PointerArray::present(data_params.clone()),
+                    data_params_presence,
                     additional_derived_keys_presence: PointerArray::present(
                         additional_derived_keys.clone(),
                     ),
-                    data_params,
-                    additional_derived_keys,
                 }))
             }
             FfiParamBacking::Sp800108FeedbackKdf(
@@ -687,75 +926,109 @@ impl FfiMechanism {
                 // SAFETY: backing is borrowed alive; the copy carries no provenance.
                 let sp800 = unsafe { sp800.snapshot() };
                 let data_params = sp800_108_data_params_from_ffi(data_params, data_buffers);
-                let iv: Vec<u8> = iv[..(sp800.ulIVLen as usize).min(iv.len())].to_vec();
+                let data_params_presence = if sp800.pDataParams.is_null() {
+                    PointerArray::null_count(sp800.ulNumberOfDataParams as u64)
+                } else {
+                    PointerArray::present(data_params.clone())
+                };
+                let iv_presence =
+                    presence_from_ffi(sp800.pIV.is_null(), sp800.ulIVLen, iv.as_slice());
                 let additional_derived_keys = derived_keys.output_keys();
                 Some(CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
                     prf_type: CkMechanismType(sp800.prfType as u64),
-                    // R18: v0-consistent mirrors of the surfaced bytes/arrays.
-                    data_params_presence: PointerArray::present(data_params.clone()),
-                    iv_presence: PointerBytes::present_copy(&iv),
+                    data_params_presence,
+                    iv_presence,
                     additional_derived_keys_presence: PointerArray::present(
                         additional_derived_keys.clone(),
                     ),
-                    data_params,
-                    iv,
-                    additional_derived_keys,
                 }))
             }
-            FfiParamBacking::TlsPrf(_tls, seed, label, output, output_len) => {
+            FfiParamBacking::TlsPrf(tls, seed, label, output, output_len) => {
                 // SAFETY: backing is borrowed alive; the copies carry no provenance.
-                let output_len = unsafe { output_len.snapshot() };
+                let tls = unsafe { tls.snapshot() };
                 // `pOutput`/`*pulOutputLen` are OUT — the provider writes
                 // the PRF bytes and the written length (W1-C5-01). Clamp
-                // a misbehaving length to the buffer we allocated.
-                let written = (output_len as usize).min(output.len());
+                // a misbehaving length to the buffer we allocated. With no
+                // length cell the whole buffer is the written extent (a
+                // NULL `pulOutputLen` forces `output_len` zero, so the
+                // buffer is empty-sized — see the arm).
+                let written = match output_len.as_ref() {
+                    // SAFETY: backing is borrowed alive; the copy carries no provenance.
+                    Some(cell) => (unsafe { cell.snapshot() } as usize).min(output.len()),
+                    None => output.len(),
+                };
                 Some(CkMechanismParams::TlsPrf(TlsPrfParams {
-                    // R18: v0-consistent mirrors of the surfaced bytes.
-                    seed_presence: PointerBytes::present_copy(seed),
-                    label_presence: PointerBytes::present_copy(label),
-                    seed: seed.to_vec().into(),
-                    label: label.to_vec().into(),
+                    seed_presence: presence_from_ffi(
+                        tls.pSeed.is_null(),
+                        tls.ulSeedLen,
+                        seed.as_slice(),
+                    ),
+                    label_presence: presence_from_ffi(
+                        tls.pLabel.is_null(),
+                        tls.ulLabelLen,
+                        label.as_slice(),
+                    ),
                     output_len: written as u64,
                     output: output[..written].to_vec().into(),
-                    output_is_null: false,
-                    output_len_is_null: false,
+                    output_is_null: tls.pOutput.is_null(),
+                    output_len_is_null: tls.pulOutputLen.is_null(),
                 }))
             }
             FfiParamBacking::WtlsPrf(wtls, seed, label, output, output_len) => {
                 // SAFETY: backing is borrowed alive; the copies carry no provenance.
                 let wtls = unsafe { wtls.snapshot() };
-                let output_len = unsafe { output_len.snapshot() };
-                let written = (output_len as usize).min(output.len());
+                let written = match output_len.as_ref() {
+                    // SAFETY: backing is borrowed alive; the copy carries no provenance.
+                    Some(cell) => (unsafe { cell.snapshot() } as usize).min(output.len()),
+                    // No length cell: the whole buffer is the written
+                    // extent (see the TLS-PRF arm above).
+                    None => output.len(),
+                };
                 Some(CkMechanismParams::WtlsPrf(WtlsPrfParams {
                     digest_mechanism: CkMechanismType(wtls.DigestMechanism as u64),
-                    // R18: v0-consistent mirrors of the surfaced bytes.
-                    seed_presence: PointerBytes::present_copy(seed),
-                    label_presence: PointerBytes::present_copy(label),
-                    seed: seed.to_vec().into(),
-                    label: label.to_vec().into(),
+                    seed_presence: presence_from_ffi(
+                        wtls.pSeed.is_null(),
+                        wtls.ulSeedLen,
+                        seed.as_slice(),
+                    ),
+                    label_presence: presence_from_ffi(
+                        wtls.pLabel.is_null(),
+                        wtls.ulLabelLen,
+                        label.as_slice(),
+                    ),
                     output_len: written as u64,
                     output: output[..written].to_vec().into(),
-                    output_is_null: false,
-                    output_len_is_null: false,
+                    output_is_null: wtls.pOutput.is_null(),
+                    output_len_is_null: wtls.pulOutputLen.is_null(),
                 }))
             }
-            FfiParamBacking::Ssl3MasterKeyDerive(_ssl3, client_random, server_random, version) => {
+            FfiParamBacking::Ssl3MasterKeyDerive(ssl3, client_random, server_random, version) => {
                 // SAFETY: backing is borrowed alive; the copy carries no provenance.
-                let version = unsafe { version.snapshot() };
+                let ssl3 = unsafe { ssl3.snapshot() };
+                // SAFETY: backing is borrowed alive; the copy carries no provenance.
+                let version = version.as_ref().map(|cell| unsafe { cell.snapshot() });
                 // CK_SSL3_MASTER_KEY_DERIVE_PARAMS.pVersion is OUT —
                 // the provider writes the negotiated CK_VERSION here
-                // (W1-C5-01; mirrors the TLS 1.2 arm above).
+                // (W1-C5-01; mirrors the TLS 1.2 arm above). A NULL cell
+                // echoes zeroed scalars (validation forces the caller's
+                // scalars zero under a set null bit, so the echo is exact).
+                let (major, minor) = version.map_or((0, 0), |v| (v.major as u32, v.minor as u32));
                 Some(CkMechanismParams::Ssl3MasterKeyDerive(Ssl3MasterKeyDeriveParams {
                     random_info: pkcs11_proxy_ng_types::SslRandomData {
-                        // R18: v0-consistent mirrors of the surfaced bytes.
-                        client_random_presence: PointerBytes::present_copy(client_random),
-                        server_random_presence: PointerBytes::present_copy(server_random),
-                        client_random: client_random.to_vec(),
-                        server_random: server_random.to_vec(),
+                        client_random_presence: presence_from_ffi(
+                            ssl3.RandomInfo.pClientRandom.is_null(),
+                            ssl3.RandomInfo.ulClientRandomLen,
+                            client_random.as_slice(),
+                        ),
+                        server_random_presence: presence_from_ffi(
+                            ssl3.RandomInfo.pServerRandom.is_null(),
+                            ssl3.RandomInfo.ulServerRandomLen,
+                            server_random.as_slice(),
+                        ),
                     },
-                    version_major: version.major as u32,
-                    version_minor: version.minor as u32,
-                    version_is_null: false,
+                    version_major: major,
+                    version_minor: minor,
+                    version_is_null: ssl3.pVersion.is_null(),
                 }))
             }
             FfiParamBacking::Pbe(pbe, init_vector, _password, _salt) => {
@@ -767,17 +1040,18 @@ impl FfiMechanism {
                 // CK_PBE_PARAMS.pInitVector is OUT — the HSM writes the generated
                 // 8-byte IV here during PBE key generation. Surface ONLY the IV;
                 // the password and salt are caller-supplied secrets/inputs and
-                // must never be echoed back over the wire (AGENTS.md §4).
+                // must never be echoed back over the wire (AGENTS.md §4) — they
+                // echo class-faithful redacted peers (NULL-ness + declared
+                // lengths read back the provider-untouched input legs).
                 Some(CkMechanismParams::Pbe(PbeParams {
-                    init_vector: init_vector.clone().into(),
-                    password: Vec::new().into(),
-                    salt: Vec::new().into(),
                     iteration: pbe.ulIteration as u64,
-                    // R16: v0-consistent mirrors of the surfaced bytes
-                    // (password/salt stay un-echoed per AGENTS.md §4).
                     init_vector_presence: PointerBytes::present_copy(init_vector),
-                    password_presence: PointerBytes::present_copy(&[]),
-                    salt_presence: PointerBytes::present_copy(&[]),
+                    password_presence: presence_from_ffi(
+                        pbe.pPassword.is_null(),
+                        pbe.ulPasswordLen,
+                        &[],
+                    ),
+                    salt_presence: presence_from_ffi(pbe.pSalt.is_null(), pbe.ulSaltLen, &[]),
                 }))
             }
             _ => None,
@@ -792,11 +1066,10 @@ fn sp800_108_data_params_from_ffi(
     params
         .iter()
         .zip(buffers.iter())
-        .map(|(param, value)| PrfDataParam {
-            type_: param.type_ as u64,
-            // R18: v0-consistent mirror of the surfaced bytes.
-            value_presence: PointerBytes::present_copy(value),
-            value: value.clone().into(),
+        .map(|(param, value)| {
+            let value_presence =
+                presence_from_ffi(param.pValue.is_null(), param.ulValueLen, value.as_slice());
+            PrfDataParam { type_: param.type_ as u64, value_presence }
         })
         .collect()
 }
@@ -818,28 +1091,38 @@ impl FfiMechanism {
 /// Key-material IV comparison for [`FfiMechanism::output_params_equal`]:
 /// mirrors the `output_params()` null-means-empty / clamped-copy rule
 /// without allocating.
-fn key_mat_iv_equal(
-    expected: &pkcs11_proxy_ng_types::SecretBytes,
-    out_ptr_null: bool,
-    backing: &[u8],
-    len: usize,
-) -> bool {
-    if out_ptr_null { expected.is_empty() } else { expected.expose(|b| b == &backing[..len]) }
-}
-
 /// SP800-108 data-params comparison for
-/// [`FfiMechanism::output_params_equal`]: mirrors
-/// `sp800_108_data_params_from_ffi` without allocating.
+/// [`FfiMechanism::output_params_equal`]: mirrors the echo's array-peer
+/// reconstruction without allocating.
 fn sp800_108_data_params_equal(
     params: &[cryptoki_sys::CK_PRF_DATA_PARAM],
     buffers: &[Zeroizing<Vec<u8>>],
-    expected: &[PrfDataParam],
+    struct_null: bool,
+    struct_count: cryptoki_sys::CK_ULONG,
+    expected: &PointerArray<PrfDataParam>,
 ) -> bool {
-    params.len() == expected.len()
-        && buffers.len() == expected.len()
-        && params.iter().zip(buffers.iter()).zip(expected.iter()).all(|((param, value), e)| {
-            e.type_ == param.type_ as u64 && e.value.expose(|b| b == value.as_slice())
-        })
+    match expected {
+        PointerArray::Null { declared_count } => {
+            struct_null
+                && params.is_empty()
+                && buffers.is_empty()
+                && *declared_count == struct_count as u64
+        }
+        PointerArray::Present(items) => {
+            !struct_null
+                && params.len() == items.len()
+                && buffers.len() == items.len()
+                && params.iter().zip(buffers.iter()).zip(items.iter()).all(|((param, value), e)| {
+                    e.type_ == param.type_ as u64
+                        && e.value_presence
+                            == presence_from_ffi(
+                                param.pValue.is_null(),
+                                param.ulValueLen,
+                                value.as_slice(),
+                            )
+                })
+        }
+    }
 }
 
 /// SP800-108 derived-keys comparison for
@@ -847,15 +1130,35 @@ fn sp800_108_data_params_equal(
 /// without allocating.
 fn sp800_108_derived_keys_equal(
     derived_keys: &FfiSp800108DerivedKeys,
-    expected: &[Sp800108DerivedKey],
+    expected: &PointerArray<Sp800108DerivedKey>,
 ) -> bool {
-    derived_keys.original.len() == expected.len()
-        && derived_keys.handles.len() == expected.len()
-        && derived_keys.original.iter().zip(derived_keys.handles.iter()).zip(expected.iter()).all(
-            |((original, handle), e)| {
-                e.template == original.template && e.key_handle == CkObjectHandle(*handle as u64)
-            },
-        )
+    match expected {
+        PointerArray::Null { declared_count } => {
+            derived_keys.is_null && *declared_count == derived_keys.declared_count as u64
+        }
+        PointerArray::Present(items) => {
+            !derived_keys.is_null
+                && derived_keys.original.len() == items.len()
+                && derived_keys.handles.len() == items.len()
+                && derived_keys.derived_keys.len() == items.len()
+                && derived_keys
+                    .original
+                    .iter()
+                    .zip(derived_keys.handles.iter())
+                    .zip(derived_keys.derived_keys.iter())
+                    .zip(items.iter())
+                    .all(|(((original, handle), derived), e)| {
+                        e.template_presence == original.template_presence
+                            && e.ph_key_is_null == derived.phKey.is_null()
+                            && e.key_handle
+                                == if derived.phKey.is_null() {
+                                    original.key_handle
+                                } else {
+                                    CkObjectHandle(*handle as u64)
+                                }
+                    })
+        }
+    }
 }
 
 struct FfiSp800108DerivedKeys {
@@ -863,35 +1166,66 @@ struct FfiSp800108DerivedKeys {
     _templates: Vec<FfiAttrs>,
     handles: Vec<cryptoki_sys::CK_OBJECT_HANDLE>,
     derived_keys: Vec<cryptoki_sys::CK_DERIVED_KEY>,
+    // S2 §6 (R19): the additional-derived-keys array header — NULL-ness
+    // plus the declared count (the elements vector is empty for both
+    // `Null{..}` and `Present([])`, so the header cannot be re-derived
+    // from it).
+    is_null: bool,
+    declared_count: cryptoki_sys::CK_ULONG,
 }
 
 impl FfiSp800108DerivedKeys {
-    fn new(keys: &[Sp800108DerivedKey]) -> CkResult<Self> {
-        let mut templates: Vec<FfiAttrs> = keys
+    fn new(keys: &PointerArray<Sp800108DerivedKey>) -> CkResult<Self> {
+        let (is_null, declared_count) = array_header(keys)?;
+        let present = keys.as_present().map(Vec::as_slice).unwrap_or(&[]);
+        let mut templates: Vec<FfiAttrs> = present
             .iter()
-            .map(|key| FfiAttrs::from_slice(&key.template))
+            .map(|key| {
+                FfiAttrs::from_slice(
+                    key.template_presence.as_present().map(Vec::as_slice).unwrap_or(&[]),
+                )
+            })
             .collect::<CkResult<Vec<_>>>()?;
-        let mut handles: Vec<cryptoki_sys::CK_OBJECT_HANDLE> = keys
+        let mut handles: Vec<cryptoki_sys::CK_OBJECT_HANDLE> = present
             .iter()
             .map(|key| narrow_wire_ulong(key.key_handle.0))
             .collect::<CkResult<Vec<_>>>()?;
         let handle_ptr = handles.as_mut_ptr();
-        let mut derived_keys = Vec::with_capacity(keys.len());
+        let mut derived_keys = Vec::with_capacity(present.len());
 
-        for (index, template) in templates.iter_mut().enumerate() {
-            let template_ptr = if template.attrs.is_empty() {
+        for (index, (key, template)) in present.iter().zip(templates.iter_mut()).enumerate() {
+            // S2 §6 (R19): the template leg follows its presence peer —
+            // `Null{n}` → NULL + narrowed `n`, `Present` → the attribute
+            // array (dangling when empty — `as_mut_ptr` never returns
+            // NULL) + exact count. `phKey` is live iff the caller's was
+            // (`ph_key_is_null` governs; the handle slot stays reserved
+            // so live elements keep their indices).
+            let (template_is_null, template_count) = array_header(&key.template_presence)?;
+            let template_ptr =
+                if template_is_null { std::ptr::null_mut() } else { template.attrs.as_mut_ptr() };
+            // SAFETY: `index` is in bounds; `handle_ptr` designates the
+            // live `handles` vector, which is never reallocated after
+            // this loop (only provider-written through `phKey`).
+            let ph_key = if key.ph_key_is_null {
                 std::ptr::null_mut()
             } else {
-                template.attrs.as_mut_ptr()
+                unsafe { handle_ptr.add(index) }
             };
             derived_keys.push(cryptoki_sys::CK_DERIVED_KEY {
                 pTemplate: template_ptr,
-                ulAttributeCount: template.attrs.len() as cryptoki_sys::CK_ULONG,
-                phKey: unsafe { handle_ptr.add(index) },
+                ulAttributeCount: template_count,
+                phKey: ph_key,
             });
         }
 
-        Ok(Self { original: keys.to_vec(), _templates: templates, handles, derived_keys })
+        Ok(Self {
+            original: present.to_vec(),
+            _templates: templates,
+            handles,
+            derived_keys,
+            is_null,
+            declared_count,
+        })
     }
 
     fn is_empty(&self) -> bool {
@@ -899,27 +1233,38 @@ impl FfiSp800108DerivedKeys {
     }
 
     fn ptr(&mut self) -> *mut cryptoki_sys::CK_DERIVED_KEY {
-        if self.derived_keys.is_empty() {
+        if self.is_null {
             std::ptr::null_mut()
         } else {
+            // `as_mut_ptr` on an empty vector is dangling non-NULL —
+            // exactly the S2 §6 `Present([])` form.
             self.derived_keys.as_mut_ptr()
         }
     }
 
     fn len(&self) -> cryptoki_sys::CK_ULONG {
-        self.derived_keys.len() as cryptoki_sys::CK_ULONG
+        self.declared_count
     }
 
     fn output_keys(&self) -> Vec<Sp800108DerivedKey> {
         self.original
             .iter()
             .zip(self.handles.iter())
-            .map(|(original, handle)| Sp800108DerivedKey {
-                // R18: v0-consistent mirror of the surfaced template.
-                template_presence: PointerArray::present(original.template.clone()),
-                ph_key_is_null: false,
-                template: original.template.clone(),
-                key_handle: CkObjectHandle(*handle as u64),
+            .zip(self.derived_keys.iter())
+            .map(|((original, handle), derived)| Sp800108DerivedKey {
+                // The template is caller input (provider-untouched), so
+                // the echo carries the stored peer verbatim; `phKey`
+                // NULL-ness reads back the C struct (which the arm built
+                // from the caller's bit), and a NULL `phKey` echoes the
+                // caller's handle scalar (the provider wrote nothing).
+                // Legacy `template` mirror (R19 removes it with the member).
+                key_handle: if derived.phKey.is_null() {
+                    original.key_handle
+                } else {
+                    CkObjectHandle(*handle as u64)
+                },
+                template_presence: original.template_presence.clone(),
+                ph_key_is_null: derived.phKey.is_null(),
             })
             .collect()
     }
@@ -1054,14 +1399,18 @@ enum FfiParamBacking {
         NativeAllocation<cryptoki_sys::CK_TLS12_MASTER_KEY_DERIVE_PARAMS>,
         Zeroizing<Vec<u8>>,
         Zeroizing<Vec<u8>>,
-        NativeAllocation<cryptoki_sys::CK_VERSION>,
+        // S2 §6 (R19): the version OUT cell exists iff the caller's
+        // `pVersion` was non-NULL (`None` ⟺ `version_is_null`).
+        Option<NativeAllocation<cryptoki_sys::CK_VERSION>>,
     ),
     TlsPrf(
         NativeAllocation<cryptoki_sys::CK_TLS_PRF_PARAMS>,
         Zeroizing<Vec<u8>>,
         Zeroizing<Vec<u8>>,
         Zeroizing<Vec<u8>>,
-        NativeAllocation<cryptoki_sys::CK_ULONG>,
+        // S2 §6 (R19): the `*pulOutputLen` cell exists iff the caller's
+        // `pulOutputLen` was non-NULL (`None` ⟺ `output_len_is_null`).
+        Option<NativeAllocation<cryptoki_sys::CK_ULONG>>,
     ),
     TlsKdf(
         NativeAllocation<cryptoki_sys::CK_TLS_KDF_PARAMS>,
@@ -1074,28 +1423,45 @@ enum FfiParamBacking {
         NativeAllocation<cryptoki_sys::CK_SSL3_MASTER_KEY_DERIVE_PARAMS>,
         Zeroizing<Vec<u8>>,
         Zeroizing<Vec<u8>>,
-        NativeAllocation<cryptoki_sys::CK_VERSION>,
+        // S2 §6 (R19): the version OUT cell exists iff the caller's
+        // `pVersion` was non-NULL (`None` ⟺ `version_is_null`).
+        Option<NativeAllocation<cryptoki_sys::CK_VERSION>>,
     ),
     Tls12ExtendedMasterKeyDerive(
         NativeAllocation<cryptoki_sys::CK_TLS12_EXTENDED_MASTER_KEY_DERIVE_PARAMS>,
         Zeroizing<Vec<u8>>,
-        NativeAllocation<cryptoki_sys::CK_VERSION>,
+        // S2 §6 (R19): the version OUT cell exists iff the caller's
+        // `pVersion` was non-NULL (`None` ⟺ `version_is_null`).
+        Option<NativeAllocation<cryptoki_sys::CK_VERSION>>,
     ),
     Ssl3KeyMat(
         NativeAllocation<cryptoki_sys::CK_SSL3_KEY_MAT_PARAMS>,
         Zeroizing<Vec<u8>>,
         Zeroizing<Vec<u8>>,
-        NativeAllocation<cryptoki_sys::CK_SSL3_KEY_MAT_OUT>,
+        // S2 §6 (R19): the OUT struct exists iff the caller's
+        // `pReturnedKeyMaterial` was non-NULL (`None` ⟺
+        // `returned_key_material_is_null`).
+        Option<NativeAllocation<cryptoki_sys::CK_SSL3_KEY_MAT_OUT>>,
         Zeroizing<Vec<u8>>,
         Zeroizing<Vec<u8>>,
+        // S2 §6 (R19): the caller's IV legs (the only class record
+        // when the OUT struct is NULL — the IV backings are empty for
+        // both `Null{..}` and zero-capacity `Present`).
+        PointerBytes,
+        PointerBytes,
     ),
     Tls12KeyMat(
         NativeAllocation<cryptoki_sys::CK_TLS12_KEY_MAT_PARAMS>,
         Zeroizing<Vec<u8>>,
         Zeroizing<Vec<u8>>,
-        NativeAllocation<cryptoki_sys::CK_SSL3_KEY_MAT_OUT>,
+        // S2 §6 (R19): the OUT struct exists iff the caller's
+        // `pReturnedKeyMaterial` was non-NULL (see `Ssl3KeyMat`).
+        Option<NativeAllocation<cryptoki_sys::CK_SSL3_KEY_MAT_OUT>>,
         Zeroizing<Vec<u8>>,
         Zeroizing<Vec<u8>>,
+        // S2 §6 (R19): the caller's IV legs (see `Ssl3KeyMat`).
+        PointerBytes,
+        PointerBytes,
     ),
     // Middle field is the caller password — wiped on drop (E1).
     Pbe(
@@ -1180,14 +1546,21 @@ enum FfiParamBacking {
         Zeroizing<Vec<u8>>,
         Zeroizing<Vec<u8>>,
         Zeroizing<Vec<u8>>,
-        NativeAllocation<cryptoki_sys::CK_ULONG>,
+        // S2 §6 (R19): the `*pulOutputLen` cell exists iff the caller's
+        // `pulOutputLen` was non-NULL (`None` ⟺ `output_len_is_null`).
+        Option<NativeAllocation<cryptoki_sys::CK_ULONG>>,
     ),
     WtlsKeyMat(
         NativeAllocation<cryptoki_sys::CK_WTLS_KEY_MAT_PARAMS>,
         Zeroizing<Vec<u8>>,
         Zeroizing<Vec<u8>>,
-        NativeAllocation<cryptoki_sys::CK_WTLS_KEY_MAT_OUT>,
+        // S2 §6 (R19): the OUT struct exists iff the caller's
+        // `pReturnedKeyMaterial` was non-NULL (`None` ⟺
+        // `returned_key_material_is_null`).
+        Option<NativeAllocation<cryptoki_sys::CK_WTLS_KEY_MAT_OUT>>,
         Zeroizing<Vec<u8>>,
+        // S2 §6 (R19): the caller's IV leg (see `Ssl3KeyMat`).
+        PointerBytes,
     ),
     Sp800108Kdf(
         NativeAllocation<cryptoki_sys::CK_SP800_108_KDF_PARAMS>,
@@ -1227,14 +1600,15 @@ enum FfiParamBacking {
         Vec<cryptoki_sys::CK_OTP_PARAM>,
         Vec<Zeroizing<Vec<u8>>>,
     ),
-    // Last field keeps the inner mechanism's own parameter backing alive for as
-    // long as the KIP params reference its C struct (L8 — replaces a mem::forget
-    // that permanently leaked the inner backing).
+    // The nested pair keeps the inner mechanism's C struct and its own
+    // parameter backing alive for as long as the KIP params reference it
+    // (L8 — replaces a mem::forget that permanently leaked the inner
+    // backing). S2 §6 (R19): `None` ⟺ the caller's `pMechanism` was
+    // NULL — no inner conversion runs, nothing is retained.
     Kip(
         NativeAllocation<cryptoki_sys::CK_KIP_PARAMS>,
-        NativeAllocation<cryptoki_sys::CK_MECHANISM>,
+        Option<(NativeAllocation<cryptoki_sys::CK_MECHANISM>, NativeAllocation<FfiParamBacking>)>,
         Zeroizing<Vec<u8>>,
-        NativeAllocation<FfiParamBacking>,
     ),
     CmsSig(
         NativeAllocation<cryptoki_sys::CK_CMS_SIG_PARAMS>,
@@ -1489,89 +1863,89 @@ fn mechanism_to_ffi_at_depth(
 
         // -- RSA-OAEP: struct with pointer to source_data -------------------
         CkMechanismParams::RsaPkcsOaep(p) => {
-            let mut source_data = p.source_data.expose(|b| Zeroizing::new(b.to_vec()));
-            // F3/D2: only a caller-NULL source materializes NULL; an empty
-            // non-NULL source keeps a (dangling) non-NULL pointer with len 0.
-            let (src_ptr, src_len) = if p.source_null {
-                (std::ptr::null_mut(), 0)
-            } else if source_data.is_empty() {
-                (std::ptr::NonNull::<u8>::dangling().as_ptr() as *mut std::ffi::c_void, 0)
-            } else {
-                (source_data.as_mut_ptr() as *mut std::ffi::c_void, source_data.len())
-            };
+            // S2 §6 (R19): the presence peer governs NULL-ness and length.
+            let source = input_leg(&p.source_data_presence)?;
             let oaep = Box::new(cryptoki_sys::CK_RSA_PKCS_OAEP_PARAMS {
                 hashAlg: narrow_wire_ulong(p.hash_alg.0)?,
                 mgf: narrow_wire_ulong(p.mgf.0)?,
                 source: narrow_wire_ulong(p.source.0)?,
-                pSourceData: src_ptr,
-                ulSourceDataLen: src_len as cryptoki_sys::CK_ULONG,
+                pSourceData: source.ptr as *mut std::ffi::c_void,
+                ulSourceDataLen: source.len,
             });
-            Ok(FfiMechanism::from_box(mech_type, oaep, |b| FfiParamBacking::Oaep(b, source_data)))
+            Ok(FfiMechanism::from_box(mech_type, oaep, |b| {
+                FfiParamBacking::Oaep(b, source.backing)
+            }))
         }
 
         // -- GCM: struct with pointers to IV and AAD ------------------------
         CkMechanismParams::Gcm(p) => {
-            let iv_capacity = gcm_iv_capacity(p)?;
-            let input_iv_len = p.iv.len();
-            let mut iv = Zeroizing::new(p.iv.clone());
-            if iv_capacity > iv.len() {
+            // S2 §6 (R19): the presence peers govern NULL-ness and length.
+            let iv_leg = input_leg(&p.iv_presence)?;
+            let aad = input_leg(&p.aad_presence)?;
+            // Generated-IV capacity (unchanged): the retained IV buffer
+            // keeps max(input, iv_buffer_len) writable bytes while the
+            // provider-visible ulIvLen always names the caller input
+            // length. A NULL IV carries no buffer to grow (the capacity
+            // is still validated — an absurd request rejects before any
+            // other allocation either way).
+            let input_iv_len = p.iv_presence.as_present().map(|b| b.len()).unwrap_or(0);
+            let iv_capacity = gcm_iv_capacity(p.iv_buffer_len, input_iv_len)?;
+            let mut iv = iv_leg.backing;
+            if !p.iv_presence.is_null() && iv_capacity > iv.len() {
                 iv.resize(iv_capacity, 0);
             }
-            let mut aad = p.aad.expose(|b| Zeroizing::new(b.to_vec()));
-            // F3/D2: only caller-NULL fields materialize NULL; empty non-NULL
-            // fields keep a (dangling) non-NULL pointer with len 0, mirroring
-            // message_ops::message_pointer. (After the capacity resize above,
-            // `as_mut_ptr` on an empty vec is exactly that dangling pointer.)
-            let iv_ptr = if p.iv_null { std::ptr::null_mut() } else { iv.as_mut_ptr() };
-            let aad_ptr = if p.aad_null { std::ptr::null_mut() } else { aad.as_mut_ptr() };
+            let iv_ptr = if p.iv_presence.is_null() {
+                std::ptr::null_mut()
+            } else if iv.is_empty() {
+                EMPTY_NON_NULL
+            } else {
+                iv.as_mut_ptr()
+            };
             let gcm = Box::new(cryptoki_sys::CK_GCM_PARAMS {
                 pIv: iv_ptr,
-                ulIvLen: input_iv_len as cryptoki_sys::CK_ULONG,
+                ulIvLen: iv_leg.len,
                 ulIvBits: narrow_wire_ulong(p.iv_bits)?,
-                pAAD: aad_ptr,
-                ulAADLen: aad.len() as cryptoki_sys::CK_ULONG,
+                pAAD: aad.ptr,
+                ulAADLen: aad.len,
                 ulTagBits: narrow_wire_ulong(p.tag_bits)?,
             });
-            Ok(FfiMechanism::from_box(mech_type, gcm, |b| FfiParamBacking::Gcm(b, iv, aad)))
+            Ok(FfiMechanism::from_box(mech_type, gcm, |b| FfiParamBacking::Gcm(b, iv, aad.backing)))
         }
 
         // -- CCM: struct with pointers to nonce and AAD ---------------------
         CkMechanismParams::Ccm(p) => {
-            let mut nonce = Zeroizing::new(p.nonce.clone());
-            let mut aad = p.aad.expose(|b| Zeroizing::new(b.to_vec()));
-            // Caller nullness wins over emptiness: an empty non-NULL buffer
-            // keeps a non-NULL pointer with len 0 (wolfpkcs11 rejects
-            // (ptr, 0) at Init but accepts (NULL, 0)).
-            let nonce_ptr = if p.nonce_null { std::ptr::null_mut() } else { nonce.as_mut_ptr() };
-            let aad_ptr = if p.aad_null { std::ptr::null_mut() } else { aad.as_mut_ptr() };
+            // S2 §6 (R19): the presence peers govern NULL-ness and length.
+            // (wolfpkcs11 rejects (ptr, 0) at Init but accepts (NULL, 0) —
+            // the peer distinction is exactly what the provider needs.)
+            let nonce = input_leg(&p.nonce_presence)?;
+            let aad = input_leg(&p.aad_presence)?;
             let ccm = Box::new(cryptoki_sys::CK_CCM_PARAMS {
                 ulDataLen: narrow_wire_ulong(p.data_len)?,
-                pNonce: nonce_ptr,
-                ulNonceLen: nonce.len() as cryptoki_sys::CK_ULONG,
-                pAAD: aad_ptr,
-                ulAADLen: aad.len() as cryptoki_sys::CK_ULONG,
+                pNonce: nonce.ptr,
+                ulNonceLen: nonce.len,
+                pAAD: aad.ptr,
+                ulAADLen: aad.len,
                 ulMACLen: narrow_wire_ulong(p.mac_len)?,
             });
-            Ok(FfiMechanism::from_box(mech_type, ccm, |b| FfiParamBacking::Ccm(b, nonce, aad)))
+            Ok(FfiMechanism::from_box(mech_type, ccm, |b| {
+                FfiParamBacking::Ccm(b, nonce.backing, aad.backing)
+            }))
         }
 
         // -- ECDH1 Derive: struct with pointers to shared + public data -----
         CkMechanismParams::Ecdh1Derive(p) => {
-            let mut shared = p.shared_data.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut public = Zeroizing::new(p.public_data.clone());
-            let shared_ptr =
-                if shared.is_empty() { std::ptr::null_mut() } else { shared.as_mut_ptr() };
-            let public_ptr =
-                if public.is_empty() { std::ptr::null_mut() } else { public.as_mut_ptr() };
+            // S2 §6 (R19): the presence peers govern NULL-ness and length.
+            let shared = input_leg(&p.shared_data_presence)?;
+            let public = input_leg(&p.public_data_presence)?;
             let ecdh = Box::new(cryptoki_sys::CK_ECDH1_DERIVE_PARAMS {
                 kdf: narrow_wire_ulong(p.kdf.0)?,
-                ulSharedDataLen: shared.len() as cryptoki_sys::CK_ULONG,
-                pSharedData: shared_ptr,
-                ulPublicDataLen: public.len() as cryptoki_sys::CK_ULONG,
-                pPublicData: public_ptr,
+                ulSharedDataLen: shared.len,
+                pSharedData: shared.ptr,
+                ulPublicDataLen: public.len,
+                pPublicData: public.ptr,
             });
             Ok(FfiMechanism::from_box(mech_type, ecdh, |b| {
-                FfiParamBacking::Ecdh1(b, shared, public)
+                FfiParamBacking::Ecdh1(b, shared.backing, public.backing)
             }))
         }
 
@@ -1613,15 +1987,15 @@ fn mechanism_to_ffi_at_depth(
 
         // -- RC5-CBC: scalars + pointer to IV -------------------------------
         CkMechanismParams::Rc5Cbc(p) => {
-            let mut iv_buf = Zeroizing::new(p.iv.clone());
-            let iv_ptr = if iv_buf.is_empty() { std::ptr::null_mut() } else { iv_buf.as_mut_ptr() };
+            // S2 §6 (R19): the presence peer governs NULL-ness and length.
+            let iv = input_leg(&p.iv_presence)?;
             let rc5 = Box::new(cryptoki_sys::CK_RC5_CBC_PARAMS {
                 ulWordsize: narrow_wire_ulong(p.word_size)?,
                 ulRounds: narrow_wire_ulong(p.rounds)?,
-                pIv: iv_ptr,
-                ulIvLen: iv_buf.len() as cryptoki_sys::CK_ULONG,
+                pIv: iv.ptr,
+                ulIvLen: iv.len,
             });
-            Ok(FfiMechanism::from_box(mech_type, rc5, |b| FfiParamBacking::Rc5Cbc(b, iv_buf)))
+            Ok(FfiMechanism::from_box(mech_type, rc5, |b| FfiParamBacking::Rc5Cbc(b, iv.backing)))
         }
 
         // -- Trivial scalar-only structs ------------------------------------
@@ -1667,201 +2041,212 @@ fn mechanism_to_ffi_at_depth(
 
         // -- CBC encrypt data variants (fixed IV + pointer to data) ---------
         CkMechanismParams::AesCbcEncryptData(p) => {
-            let mut data = p.data.expose(|b| Zeroizing::new(b.to_vec()));
-            let data_ptr = if data.is_empty() { std::ptr::null_mut() } else { data.as_mut_ptr() };
+            // S2 §6 (R19): the presence peer governs the data leg's
+            // NULL-ness and length; the fixed IV array copies inline.
+            let data = input_leg(&p.data_presence)?;
             let mut iv = [0u8; 16];
             let copy_len = p.iv.len().min(16);
             iv[..copy_len].copy_from_slice(&p.iv[..copy_len]);
             let s = Box::new(cryptoki_sys::CK_AES_CBC_ENCRYPT_DATA_PARAMS {
                 iv,
-                pData: data_ptr,
-                length: data.len() as cryptoki_sys::CK_ULONG,
+                pData: data.ptr,
+                length: data.len,
             });
             Ok(FfiMechanism::from_box(mech_type, s, |b| {
-                FfiParamBacking::AesCbcEncryptData(b, data)
+                FfiParamBacking::AesCbcEncryptData(b, data.backing)
             }))
         }
 
         CkMechanismParams::DesCbcEncryptData(p) => {
-            let mut data = p.data.expose(|b| Zeroizing::new(b.to_vec()));
-            let data_ptr = if data.is_empty() { std::ptr::null_mut() } else { data.as_mut_ptr() };
+            // S2 §6 (R19): the presence peer governs the data leg's
+            // NULL-ness and length; the fixed IV array copies inline.
+            let data = input_leg(&p.data_presence)?;
             let mut iv = [0u8; 8];
             let copy_len = p.iv.len().min(8);
             iv[..copy_len].copy_from_slice(&p.iv[..copy_len]);
             let s = Box::new(cryptoki_sys::CK_DES_CBC_ENCRYPT_DATA_PARAMS {
                 iv,
-                pData: data_ptr,
-                length: data.len() as cryptoki_sys::CK_ULONG,
+                pData: data.ptr,
+                length: data.len,
             });
             Ok(FfiMechanism::from_box(mech_type, s, |b| {
-                FfiParamBacking::DesCbcEncryptData(b, data)
+                FfiParamBacking::DesCbcEncryptData(b, data.backing)
             }))
         }
 
         CkMechanismParams::AriaCbcEncryptData(p) => {
-            let mut data = p.data.expose(|b| Zeroizing::new(b.to_vec()));
-            let data_ptr = if data.is_empty() { std::ptr::null_mut() } else { data.as_mut_ptr() };
+            // S2 §6 (R19): the presence peer governs the data leg's
+            // NULL-ness and length; the fixed IV array copies inline.
+            let data = input_leg(&p.data_presence)?;
             let mut iv = [0u8; 16];
             let copy_len = p.iv.len().min(16);
             iv[..copy_len].copy_from_slice(&p.iv[..copy_len]);
             let s = Box::new(cryptoki_sys::CK_ARIA_CBC_ENCRYPT_DATA_PARAMS {
                 iv,
-                pData: data_ptr,
-                length: data.len() as cryptoki_sys::CK_ULONG,
+                pData: data.ptr,
+                length: data.len,
             });
             Ok(FfiMechanism::from_box(mech_type, s, |b| {
-                FfiParamBacking::AriaCbcEncryptData(b, data)
+                FfiParamBacking::AriaCbcEncryptData(b, data.backing)
             }))
         }
 
         CkMechanismParams::CamelliaCbcEncryptData(p) => {
-            let mut data = p.data.expose(|b| Zeroizing::new(b.to_vec()));
-            let data_ptr = if data.is_empty() { std::ptr::null_mut() } else { data.as_mut_ptr() };
+            // S2 §6 (R19): the presence peer governs the data leg's
+            // NULL-ness and length; the fixed IV array copies inline.
+            let data = input_leg(&p.data_presence)?;
             let mut iv = [0u8; 16];
             let copy_len = p.iv.len().min(16);
             iv[..copy_len].copy_from_slice(&p.iv[..copy_len]);
             let s = Box::new(cryptoki_sys::CK_CAMELLIA_CBC_ENCRYPT_DATA_PARAMS {
                 iv,
-                pData: data_ptr,
-                length: data.len() as cryptoki_sys::CK_ULONG,
+                pData: data.ptr,
+                length: data.len,
             });
             Ok(FfiMechanism::from_box(mech_type, s, |b| {
-                FfiParamBacking::CamelliaCbcEncryptData(b, data)
+                FfiParamBacking::CamelliaCbcEncryptData(b, data.backing)
             }))
         }
 
         CkMechanismParams::SeedCbcEncryptData(p) => {
-            let mut data = p.data.expose(|b| Zeroizing::new(b.to_vec()));
-            let data_ptr = if data.is_empty() { std::ptr::null_mut() } else { data.as_mut_ptr() };
+            // S2 §6 (R19): the presence peer governs the data leg's
+            // NULL-ness and length; the fixed IV array copies inline.
+            let data = input_leg(&p.data_presence)?;
             let mut iv = [0u8; 16];
             let copy_len = p.iv.len().min(16);
             iv[..copy_len].copy_from_slice(&p.iv[..copy_len]);
             let s = Box::new(cryptoki_sys::CK_SEED_CBC_ENCRYPT_DATA_PARAMS {
                 iv,
-                pData: data_ptr,
-                length: data.len() as cryptoki_sys::CK_ULONG,
+                pData: data.ptr,
+                length: data.len,
             });
             Ok(FfiMechanism::from_box(mech_type, s, |b| {
-                FfiParamBacking::SeedCbcEncryptData(b, data)
+                FfiParamBacking::SeedCbcEncryptData(b, data.backing)
             }))
         }
 
         // -- HKDF: struct with pointers to salt and info --------------------
         CkMechanismParams::Hkdf(p) => {
-            let mut salt = p.salt.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut info = p.info.expose(|b| Zeroizing::new(b.to_vec()));
-            let salt_ptr = if salt.is_empty() { std::ptr::null_mut() } else { salt.as_mut_ptr() };
-            let info_ptr = if info.is_empty() { std::ptr::null_mut() } else { info.as_mut_ptr() };
+            // S2 §6 (R19): the presence peers govern NULL-ness and length.
+            let salt = input_leg(&p.salt_presence)?;
+            let info = input_leg(&p.info_presence)?;
             let hkdf = Box::new(cryptoki_sys::CK_HKDF_PARAMS {
                 bExtract: if p.extract { cryptoki_sys::CK_TRUE } else { cryptoki_sys::CK_FALSE },
                 bExpand: if p.expand { cryptoki_sys::CK_TRUE } else { cryptoki_sys::CK_FALSE },
                 prfHashMechanism: narrow_wire_ulong(p.prf_hash_mechanism.0)?,
                 ulSaltType: narrow_wire_ulong(p.salt_type)?,
-                pSalt: salt_ptr,
-                ulSaltLen: salt.len() as cryptoki_sys::CK_ULONG,
+                pSalt: salt.ptr,
+                ulSaltLen: salt.len,
                 hSaltKey: narrow_wire_ulong(p.salt_key_handle.0)?,
-                pInfo: info_ptr,
-                ulInfoLen: info.len() as cryptoki_sys::CK_ULONG,
+                pInfo: info.ptr,
+                ulInfoLen: info.len,
             });
-            Ok(FfiMechanism::from_box(mech_type, hkdf, |b| FfiParamBacking::Hkdf(b, salt, info)))
+            Ok(FfiMechanism::from_box(mech_type, hkdf, |b| {
+                FfiParamBacking::Hkdf(b, salt.backing, info.backing)
+            }))
         }
 
         // -- EdDSA: struct with pointer to context data ---------------------
         CkMechanismParams::Eddsa(p) => {
-            let mut ctx = p.context_data.expose(|b| Zeroizing::new(b.to_vec()));
-            let ctx_ptr = if ctx.is_empty() { std::ptr::null_mut() } else { ctx.as_mut_ptr() };
+            // S2 §6 (R19): the presence peer governs NULL-ness and length.
+            let ctx = input_leg(&p.context_data_presence)?;
             let eddsa = Box::new(cryptoki_sys::CK_EDDSA_PARAMS {
                 phFlag: if p.ph_flag { cryptoki_sys::CK_TRUE } else { cryptoki_sys::CK_FALSE },
-                ulContextDataLen: ctx.len() as cryptoki_sys::CK_ULONG,
-                pContextData: ctx_ptr,
+                ulContextDataLen: ctx.len,
+                pContextData: ctx.ptr,
             });
-            Ok(FfiMechanism::from_box(mech_type, eddsa, |b| FfiParamBacking::Eddsa(b, ctx)))
+            Ok(FfiMechanism::from_box(mech_type, eddsa, |b| FfiParamBacking::Eddsa(b, ctx.backing)))
         }
 
         // -- GCM Wrap: struct with pointers to IV and AAD -------------------
         CkMechanismParams::GcmWrap(p) => {
-            let mut iv = Zeroizing::new(p.iv.clone());
-            let mut aad = p.aad.expose(|b| Zeroizing::new(b.to_vec()));
-            let iv_ptr = if iv.is_empty() { std::ptr::null_mut() } else { iv.as_mut_ptr() };
-            let aad_ptr = if aad.is_empty() { std::ptr::null_mut() } else { aad.as_mut_ptr() };
+            // S2 §6 (R19): the presence peers govern NULL-ness and length.
+            let iv = input_leg(&p.iv_presence)?;
+            let aad = input_leg(&p.aad_presence)?;
             let gw = Box::new(cryptoki_sys::CK_GCM_WRAP_PARAMS {
-                pIv: iv_ptr,
-                ulIvLen: iv.len() as cryptoki_sys::CK_ULONG,
+                pIv: iv.ptr,
+                ulIvLen: iv.len,
                 ulIvFixedBits: narrow_wire_ulong(p.iv_fixed_bits)?,
                 ivGenerator: narrow_wire_ulong(p.iv_generator.0)?,
-                pAAD: aad_ptr,
-                ulAADLen: aad.len() as cryptoki_sys::CK_ULONG,
+                pAAD: aad.ptr,
+                ulAADLen: aad.len,
                 ulTagBits: narrow_wire_ulong(p.tag_bits)?,
             });
-            Ok(FfiMechanism::from_box(mech_type, gw, |b| FfiParamBacking::GcmWrap(b, iv, aad)))
+            Ok(FfiMechanism::from_box(mech_type, gw, |b| {
+                FfiParamBacking::GcmWrap(b, iv.backing, aad.backing)
+            }))
         }
 
         // -- CCM Wrap: struct with pointers to nonce and AAD ----------------
         CkMechanismParams::CcmWrap(p) => {
-            let mut nonce = Zeroizing::new(p.nonce.clone());
-            let mut aad = p.aad.expose(|b| Zeroizing::new(b.to_vec()));
-            let nonce_ptr =
-                if nonce.is_empty() { std::ptr::null_mut() } else { nonce.as_mut_ptr() };
-            let aad_ptr = if aad.is_empty() { std::ptr::null_mut() } else { aad.as_mut_ptr() };
+            // S2 §6 (R19): the presence peers govern NULL-ness and length.
+            let nonce = input_leg(&p.nonce_presence)?;
+            let aad = input_leg(&p.aad_presence)?;
             let cw = Box::new(cryptoki_sys::CK_CCM_WRAP_PARAMS {
                 ulDataLen: narrow_wire_ulong(p.data_len)?,
-                pNonce: nonce_ptr,
-                ulNonceLen: nonce.len() as cryptoki_sys::CK_ULONG,
+                pNonce: nonce.ptr,
+                ulNonceLen: nonce.len,
                 ulNonceFixedBits: narrow_wire_ulong(p.nonce_fixed_bits)?,
                 nonceGenerator: narrow_wire_ulong(p.nonce_generator.0)?,
-                pAAD: aad_ptr,
-                ulAADLen: aad.len() as cryptoki_sys::CK_ULONG,
+                pAAD: aad.ptr,
+                ulAADLen: aad.len,
                 ulMACLen: narrow_wire_ulong(p.mac_len)?,
             });
-            Ok(FfiMechanism::from_box(mech_type, cw, |b| FfiParamBacking::CcmWrap(b, nonce, aad)))
+            Ok(FfiMechanism::from_box(mech_type, cw, |b| {
+                FfiParamBacking::CcmWrap(b, nonce.backing, aad.backing)
+            }))
         }
 
         // -- ChaCha20: struct with pointers to block counter and nonce ------
         CkMechanismParams::ChaCha20(p) => {
-            let mut bc = Zeroizing::new(p.block_counter.clone());
-            let mut nonce = Zeroizing::new(p.nonce.clone());
-            let bc_ptr = if bc.is_empty() { std::ptr::null_mut() } else { bc.as_mut_ptr() };
-            let nonce_ptr =
-                if nonce.is_empty() { std::ptr::null_mut() } else { nonce.as_mut_ptr() };
+            // S2 §6 (R19): the presence peers govern pointer NULL-ness;
+            // the legs are bits-governed fixed reads (no byte-length
+            // fields — the shim's div_ceil(bits, 8) extent), so live
+            // legs normalize to exactly the governed size (sound for
+            // short/empty inputs). The bits scalars narrow first — the
+            // narrowed values size the legs (no 32-bit truncation).
+            let bc_bits = narrow_wire_ulong(p.block_counter_bits)?;
+            let nonce_bits = narrow_wire_ulong(p.nonce_bits)?;
+            let (bc, bc_ptr) = fixed_leg(&p.block_counter_presence, bits_to_bytes_ceil(bc_bits))?;
+            let (nonce, nonce_ptr) = fixed_leg(&p.nonce_presence, bits_to_bytes_ceil(nonce_bits))?;
             let ch = Box::new(cryptoki_sys::CK_CHACHA20_PARAMS {
                 pBlockCounter: bc_ptr,
-                blockCounterBits: narrow_wire_ulong(p.block_counter_bits)?,
+                blockCounterBits: bc_bits,
                 pNonce: nonce_ptr,
-                ulNonceBits: narrow_wire_ulong(p.nonce_bits)?,
+                ulNonceBits: nonce_bits,
             });
             Ok(FfiMechanism::from_box(mech_type, ch, |b| FfiParamBacking::ChaCha20(b, bc, nonce)))
         }
 
         // -- Salsa20: struct with pointers to block counter and nonce -------
         CkMechanismParams::Salsa20(p) => {
-            let mut bc = Zeroizing::new(p.block_counter.clone());
-            let mut nonce = Zeroizing::new(p.nonce.clone());
-            let bc_ptr = if bc.is_empty() { std::ptr::null_mut() } else { bc.as_mut_ptr() };
-            let nonce_ptr =
-                if nonce.is_empty() { std::ptr::null_mut() } else { nonce.as_mut_ptr() };
+            // S2 §6 (R19): as ChaCha20 — the counter is a fixed 8-byte
+            // read (the shim's fixed extent; no bits scalar exists), the
+            // nonce is nonce-bits-governed.
+            let nonce_bits = narrow_wire_ulong(p.nonce_bits)?;
+            let (bc, bc_ptr) = fixed_leg(&p.block_counter_presence, 8)?;
+            let (nonce, nonce_ptr) = fixed_leg(&p.nonce_presence, bits_to_bytes_ceil(nonce_bits))?;
             let sa = Box::new(cryptoki_sys::CK_SALSA20_PARAMS {
                 pBlockCounter: bc_ptr,
                 pNonce: nonce_ptr,
-                ulNonceBits: narrow_wire_ulong(p.nonce_bits)?,
+                ulNonceBits: nonce_bits,
             });
             Ok(FfiMechanism::from_box(mech_type, sa, |b| FfiParamBacking::Salsa20(b, bc, nonce)))
         }
 
         // -- Salsa20/ChaCha20-Poly1305: struct with pointers to nonce + AAD -
         CkMechanismParams::Salsa20ChaCha20Poly1305(p) => {
-            let mut nonce = Zeroizing::new(p.nonce.clone());
-            let mut aad = p.aad.expose(|b| Zeroizing::new(b.to_vec()));
-            let nonce_ptr =
-                if nonce.is_empty() { std::ptr::null_mut() } else { nonce.as_mut_ptr() };
-            let aad_ptr = if aad.is_empty() { std::ptr::null_mut() } else { aad.as_mut_ptr() };
+            // S2 §6 (R19): the presence peers govern NULL-ness and length.
+            let nonce = input_leg(&p.nonce_presence)?;
+            let aad = input_leg(&p.aad_presence)?;
             let sp = Box::new(cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_PARAMS {
-                pNonce: nonce_ptr,
-                ulNonceLen: nonce.len() as cryptoki_sys::CK_ULONG,
-                pAAD: aad_ptr,
-                ulAADLen: aad.len() as cryptoki_sys::CK_ULONG,
+                pNonce: nonce.ptr,
+                ulNonceLen: nonce.len,
+                pAAD: aad.ptr,
+                ulAADLen: aad.len,
             });
             Ok(FfiMechanism::from_box(mech_type, sp, |b| {
-                FfiParamBacking::Salsa20ChaCha20Poly1305(b, nonce, aad)
+                FfiParamBacking::Salsa20ChaCha20Poly1305(b, nonce.backing, aad.backing)
             }))
         }
 
@@ -1881,37 +2266,30 @@ fn mechanism_to_ffi_at_depth(
 
         // -- KeyDerivationStringData: struct with pointer to data -----------
         CkMechanismParams::KeyDerivationString(p) => {
-            let mut data = p.data.expose(|b| Zeroizing::new(b.to_vec()));
-            let data_ptr = if data.is_empty() { std::ptr::null_mut() } else { data.as_mut_ptr() };
+            // S2 §6 (R19): the presence peer governs NULL-ness and length.
+            let data = input_leg(&p.data_presence)?;
             let kds = Box::new(cryptoki_sys::CK_KEY_DERIVATION_STRING_DATA {
-                pData: data_ptr,
-                ulLen: data.len() as cryptoki_sys::CK_ULONG,
+                pData: data.ptr,
+                ulLen: data.len,
             });
             Ok(FfiMechanism::from_box(mech_type, kds, |b| {
-                FfiParamBacking::KeyDerivationString(b, data)
+                FfiParamBacking::KeyDerivationString(b, data.backing)
             }))
         }
 
         // -- RSA-AES key wrap: nested OAEP params pointer ---------------------
         CkMechanismParams::RsaAesKeyWrap(p) => {
-            // Build the nested OAEP params first (same pattern as the Oaep arm)
-            let mut source_data = p.oaep_params.source_data.expose(|b| Zeroizing::new(b.to_vec()));
-            // F3/D2: honor source_null exactly like the top-level Oaep arm; only
-            // a caller-NULL source materializes NULL.
-            let (src_ptr, src_len) = if p.oaep_params.source_null {
-                (std::ptr::null_mut(), 0)
-            } else if source_data.is_empty() {
-                (std::ptr::NonNull::<u8>::dangling().as_ptr() as *mut std::ffi::c_void, 0)
-            } else {
-                (source_data.as_mut_ptr() as *mut std::ffi::c_void, source_data.len())
-            };
+            // Build the nested OAEP params first (same §6 pattern as the
+            // top-level Oaep arm — same `EMPTY_NON_NULL`, so the nested
+            // byte-identity pin holds).
+            let source = input_leg(&p.oaep_params.source_data_presence)?;
             let oaep =
                 NativeAllocation::from_box(Box::new(cryptoki_sys::CK_RSA_PKCS_OAEP_PARAMS {
                     hashAlg: narrow_wire_ulong(p.oaep_params.hash_alg.0)?,
                     mgf: narrow_wire_ulong(p.oaep_params.mgf.0)?,
                     source: narrow_wire_ulong(p.oaep_params.source.0)?,
-                    pSourceData: src_ptr,
-                    ulSourceDataLen: src_len as cryptoki_sys::CK_ULONG,
+                    pSourceData: source.ptr as *mut std::ffi::c_void,
+                    ulSourceDataLen: source.len,
                 }));
             let oaep_ptr = oaep.root() as *mut cryptoki_sys::CK_RSA_PKCS_OAEP_PARAMS;
 
@@ -1928,7 +2306,7 @@ fn mechanism_to_ffi_at_depth(
                 mech_type,
                 ptr,
                 len,
-                FfiParamBacking::RsaAesKeyWrap(wrap_allocation, oaep, source_data),
+                FfiParamBacking::RsaAesKeyWrap(wrap_allocation, oaep, source.backing),
             ))
         }
 
@@ -1942,66 +2320,61 @@ fn mechanism_to_ffi_at_depth(
         //    CK_HASH_SIGN_ADDITIONAL_CONTEXT (hash != 0, generic CKM_HASH_*_DSA).
         //    `from_box` sets the exact ulParameterLen from the chosen struct.
         CkMechanismParams::SignAdditionalContext(p) => {
-            let mut ctx = p.context.expose(|b| Zeroizing::new(b.to_vec()));
-            let ctx_ptr = if ctx.is_empty() { std::ptr::null_mut() } else { ctx.as_mut_ptr() };
+            // S2 §6 (R19): the presence peer governs NULL-ness and length.
+            let ctx = input_leg(&p.context_presence)?;
             let hedge = narrow_wire_ulong(p.hedge_variant)?;
-            let ctx_len = ctx.len() as cryptoki_sys::CK_ULONG;
             if p.hash == CkMechanismType(0) {
                 let sac = Box::new(FfiSignAdditionalContext {
                     hedge_variant: hedge,
-                    p_context: ctx_ptr,
-                    ul_context_len: ctx_len,
+                    p_context: ctx.ptr,
+                    ul_context_len: ctx.len,
                 });
                 Ok(FfiMechanism::from_box(mech_type, sac, |b| {
-                    FfiParamBacking::SignAdditionalContext(b, ctx)
+                    FfiParamBacking::SignAdditionalContext(b, ctx.backing)
                 }))
             } else {
                 let sac = Box::new(FfiHashSignAdditionalContext {
                     hedge_variant: hedge,
-                    p_context: ctx_ptr,
-                    ul_context_len: ctx_len,
+                    p_context: ctx.ptr,
+                    ul_context_len: ctx.len,
                     hash: narrow_wire_ulong(p.hash.0)?,
                 });
                 Ok(FfiMechanism::from_box(mech_type, sac, |b| {
-                    FfiParamBacking::HashSignAdditionalContext(b, ctx)
+                    FfiParamBacking::HashSignAdditionalContext(b, ctx.backing)
                 }))
             }
         }
 
         // -- KMAC: CK_KMAC_PARAMS -----------------------------------------
         CkMechanismParams::Kmac(p) => {
-            let mut customization_string =
-                p.customization_string.expose(|b| Zeroizing::new(b.to_vec()));
-            let customization_ptr = if customization_string.is_empty() {
-                std::ptr::null_mut()
-            } else {
-                customization_string.as_mut_ptr() as cryptoki_sys::CK_VOID_PTR
-            };
+            // S2 §6 (R19): the presence peer governs NULL-ness and length.
+            let custom = input_leg(&p.customization_string_presence)?;
             let kmac = Box::new(FfiKmacParams {
                 h_key: narrow_wire_ulong(p.key_handle.0)?,
                 ul_mac_length: narrow_wire_ulong(p.mac_length)?,
-                p_customization_string: customization_ptr,
-                ul_customization_string_len: customization_string.len() as cryptoki_sys::CK_ULONG,
+                p_customization_string: custom.ptr as cryptoki_sys::CK_VOID_PTR,
+                ul_customization_string_len: custom.len,
             });
             Ok(FfiMechanism::from_box(mech_type, kmac, |b| {
-                FfiParamBacking::Kmac(b, customization_string)
+                FfiParamBacking::Kmac(b, custom.backing)
             }))
         }
 
         // -- ML-DSA external mu generation: CK_MU_GEN_PARAMS ---------------
         CkMechanismParams::MuGen(p) => {
-            let mut tr = p.tr.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut ctx = p.context.expose(|b| Zeroizing::new(b.to_vec()));
-            let tr_ptr = if tr.is_empty() { std::ptr::null_mut() } else { tr.as_mut_ptr() };
-            let ctx_ptr = if ctx.is_empty() { std::ptr::null_mut() } else { ctx.as_mut_ptr() };
+            // S2 §6 (R19): the presence peers govern NULL-ness and length.
+            let tr = input_leg(&p.tr_presence)?;
+            let ctx = input_leg(&p.context_presence)?;
             let mu_gen = Box::new(FfiMuGenParams {
                 h_key: narrow_wire_ulong(p.key_handle.0)?,
-                p_tr: tr_ptr,
-                ul_tr_len: tr.len() as cryptoki_sys::CK_ULONG,
-                p_ctx: ctx_ptr,
-                ul_ctx_len: ctx.len() as cryptoki_sys::CK_ULONG,
+                p_tr: tr.ptr,
+                ul_tr_len: tr.len,
+                p_ctx: ctx.ptr,
+                ul_ctx_len: ctx.len,
             });
-            Ok(FfiMechanism::from_box(mech_type, mu_gen, |b| FfiParamBacking::MuGen(b, tr, ctx)))
+            Ok(FfiMechanism::from_box(mech_type, mu_gen, |b| {
+                FfiParamBacking::MuGen(b, tr.backing, ctx.backing)
+            }))
         }
 
         // -- Raw: reject at FFI boundary to prevent SIGSEGV ------------------
@@ -2045,269 +2418,246 @@ fn mechanism_to_ffi_at_depth(
 
         // -- TLS 1.2 Master Key Derive: nested SSL3_RANDOM_DATA + pVersion ---
         CkMechanismParams::Tls12MasterKeyDerive(p) => {
-            let mut client_random = Zeroizing::new(p.random_info.client_random.clone());
-            let mut server_random = Zeroizing::new(p.random_info.server_random.clone());
-            // pVersion = NULL for DH variants (version is 0.0 sentinel)
-            let version_is_null = p.version_major == 0 && p.version_minor == 0;
-            let version = NativeAllocation::from_box(Box::new(cryptoki_sys::CK_VERSION {
-                major: narrow_wire_byte(p.version_major)?,
-                minor: narrow_wire_byte(p.version_minor)?,
-            }));
-            let client_ptr = if client_random.is_empty() {
-                std::ptr::null_mut()
+            // S2 §6 (R19): the presence peers govern NULL-ness and length;
+            // the version OUT cell follows its null bit (not a 0.0
+            // sentinel), primed with the caller's scalars.
+            let client_random = input_leg(&p.random_info.client_random_presence)?;
+            let server_random = input_leg(&p.random_info.server_random_presence)?;
+            let version = if p.version_is_null {
+                None
             } else {
-                client_random.as_mut_ptr()
+                Some(NativeAllocation::from_box(Box::new(cryptoki_sys::CK_VERSION {
+                    major: narrow_wire_byte(p.version_major)?,
+                    minor: narrow_wire_byte(p.version_minor)?,
+                })))
             };
-            let server_ptr = if server_random.is_empty() {
-                std::ptr::null_mut()
-            } else {
-                server_random.as_mut_ptr()
-            };
-            let version_ptr =
-                if version_is_null { std::ptr::null_mut() } else { version.root() as *mut _ };
             let tls12 = Box::new(cryptoki_sys::CK_TLS12_MASTER_KEY_DERIVE_PARAMS {
                 RandomInfo: cryptoki_sys::CK_SSL3_RANDOM_DATA {
-                    pClientRandom: client_ptr,
-                    ulClientRandomLen: client_random.len() as cryptoki_sys::CK_ULONG,
-                    pServerRandom: server_ptr,
-                    ulServerRandomLen: server_random.len() as cryptoki_sys::CK_ULONG,
+                    pClientRandom: client_random.ptr,
+                    ulClientRandomLen: client_random.len,
+                    pServerRandom: server_random.ptr,
+                    ulServerRandomLen: server_random.len,
                 },
-                pVersion: version_ptr,
+                pVersion: version
+                    .as_ref()
+                    .map_or(std::ptr::null_mut(), |cell| cell.root() as *mut _),
                 prfHashMechanism: narrow_wire_ulong(p.prf_hash_mechanism.0)?,
             });
             Ok(FfiMechanism::from_box(mech_type, tls12, |b| {
-                FfiParamBacking::Tls12MasterKeyDerive(b, client_random, server_random, version)
+                FfiParamBacking::Tls12MasterKeyDerive(
+                    b,
+                    client_random.backing,
+                    server_random.backing,
+                    version,
+                )
             }))
         }
 
         // -- PKCS#5 PBKDF2: struct with 3 embedded pointers ----------------
         CkMechanismParams::Pkcs5Pbkd2(p) => {
-            let mut salt = p.salt_source_data.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut prf_data = p.prf_data.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut password = p.password.expose(|b| Zeroizing::new(b.to_vec()));
-            let salt_ptr =
-                if salt.is_empty() { std::ptr::null_mut() } else { salt.as_mut_ptr() as *mut _ };
-            let prf_ptr = if prf_data.is_empty() {
-                std::ptr::null_mut()
-            } else {
-                prf_data.as_mut_ptr() as *mut _
-            };
-            let pass_ptr =
-                if password.is_empty() { std::ptr::null_mut() } else { password.as_mut_ptr() };
+            // S2 §6 (R19): the presence peers govern NULL-ness and length.
+            let salt = input_leg(&p.salt_source_data_presence)?;
+            let prf_data = input_leg(&p.prf_data_presence)?;
+            let password = input_leg(&p.password_presence)?;
             let pbkd2 = Box::new(cryptoki_sys::CK_PKCS5_PBKD2_PARAMS2 {
                 saltSource: narrow_wire_ulong(p.salt_source.0)?,
-                pSaltSourceData: salt_ptr,
-                ulSaltSourceDataLen: salt.len() as cryptoki_sys::CK_ULONG,
+                pSaltSourceData: salt.ptr as *mut _,
+                ulSaltSourceDataLen: salt.len,
                 iterations: narrow_wire_ulong(p.iterations)?,
                 prf: narrow_wire_ulong(p.prf.0)?,
-                pPrfData: prf_ptr,
-                ulPrfDataLen: prf_data.len() as cryptoki_sys::CK_ULONG,
-                pPassword: pass_ptr,
-                ulPasswordLen: password.len() as cryptoki_sys::CK_ULONG,
+                pPrfData: prf_data.ptr as *mut _,
+                ulPrfDataLen: prf_data.len,
+                pPassword: password.ptr,
+                ulPasswordLen: password.len,
             });
             Ok(FfiMechanism::from_box(mech_type, pbkd2, |b| {
-                FfiParamBacking::Pkcs5Pbkd2(b, salt, prf_data, password)
+                FfiParamBacking::Pkcs5Pbkd2(b, salt.backing, prf_data.backing, password.backing)
             }))
         }
 
         // -- TLS PRF: struct with 4 pointers (seed, label, output, outputLen) --
         CkMechanismParams::TlsPrf(p) => {
-            let mut seed = p.seed.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut label = p.label.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut output = Zeroizing::new(vec![0u8; p.output_len as usize]);
-            let output_len = NativeAllocation::from_box(Box::new(narrow_wire_ulong(p.output_len)?));
-            let seed_ptr = if seed.is_empty() { std::ptr::null_mut() } else { seed.as_mut_ptr() };
-            let label_ptr =
-                if label.is_empty() { std::ptr::null_mut() } else { label.as_mut_ptr() };
-            let output_ptr =
-                if output.is_empty() { std::ptr::null_mut() } else { output.as_mut_ptr() };
+            // S2 §6 (R19): the presence peers govern NULL-ness and length;
+            // the output envelope (buffer + length cell) follows its null
+            // bits, with capacity from the `output_len` scalar.
+            let seed = input_leg(&p.seed_presence)?;
+            let label = input_leg(&p.label_presence)?;
+            let (output, output_ptr) = prf_output_buffer(p.output_len, p.output_is_null)?;
+            let output_len = if p.output_len_is_null {
+                None
+            } else {
+                Some(NativeAllocation::from_box(Box::new(narrow_wire_ulong(p.output_len)?)))
+            };
             let tls = Box::new(cryptoki_sys::CK_TLS_PRF_PARAMS {
-                pSeed: seed_ptr,
-                ulSeedLen: seed.len() as cryptoki_sys::CK_ULONG,
-                pLabel: label_ptr,
-                ulLabelLen: label.len() as cryptoki_sys::CK_ULONG,
+                pSeed: seed.ptr,
+                ulSeedLen: seed.len,
+                pLabel: label.ptr,
+                ulLabelLen: label.len,
                 pOutput: output_ptr,
-                pulOutputLen: output_len.root() as *mut _,
+                pulOutputLen: output_len
+                    .as_ref()
+                    .map_or(std::ptr::null_mut(), |cell| cell.root() as *mut _),
             });
             Ok(FfiMechanism::from_box(mech_type, tls, |b| {
-                FfiParamBacking::TlsPrf(b, seed, label, output, output_len)
+                FfiParamBacking::TlsPrf(b, seed.backing, label.backing, output, output_len)
             }))
         }
 
         // -- TLS KDF: PRF mechanism + label + nested SSL3_RANDOM_DATA + context --
         CkMechanismParams::TlsKdf(p) => {
-            let mut label = p.label.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut client_random = Zeroizing::new(p.random_info.client_random.clone());
-            let mut server_random = Zeroizing::new(p.random_info.server_random.clone());
-            let mut context_data = p.context_data.expose(|b| Zeroizing::new(b.to_vec()));
-            let label_ptr =
-                if label.is_empty() { std::ptr::null_mut() } else { label.as_mut_ptr() };
-            let client_ptr = if client_random.is_empty() {
-                std::ptr::null_mut()
-            } else {
-                client_random.as_mut_ptr()
-            };
-            let server_ptr = if server_random.is_empty() {
-                std::ptr::null_mut()
-            } else {
-                server_random.as_mut_ptr()
-            };
-            let ctx_ptr = if context_data.is_empty() {
-                std::ptr::null_mut()
-            } else {
-                context_data.as_mut_ptr()
-            };
+            // S2 §6 (R19): the presence peers govern NULL-ness and length.
+            let label = input_leg(&p.label_presence)?;
+            let client_random = input_leg(&p.random_info.client_random_presence)?;
+            let server_random = input_leg(&p.random_info.server_random_presence)?;
+            let context_data = input_leg(&p.context_data_presence)?;
             let tls = Box::new(cryptoki_sys::CK_TLS_KDF_PARAMS {
                 prfMechanism: narrow_wire_ulong(p.prf_mechanism.0)?,
-                pLabel: label_ptr,
-                ulLabelLength: label.len() as cryptoki_sys::CK_ULONG,
+                pLabel: label.ptr,
+                ulLabelLength: label.len,
                 RandomInfo: cryptoki_sys::CK_SSL3_RANDOM_DATA {
-                    pClientRandom: client_ptr,
-                    ulClientRandomLen: client_random.len() as cryptoki_sys::CK_ULONG,
-                    pServerRandom: server_ptr,
-                    ulServerRandomLen: server_random.len() as cryptoki_sys::CK_ULONG,
+                    pClientRandom: client_random.ptr,
+                    ulClientRandomLen: client_random.len,
+                    pServerRandom: server_random.ptr,
+                    ulServerRandomLen: server_random.len,
                 },
-                pContextData: ctx_ptr,
-                ulContextDataLength: context_data.len() as cryptoki_sys::CK_ULONG,
+                pContextData: context_data.ptr,
+                ulContextDataLength: context_data.len,
             });
             Ok(FfiMechanism::from_box(mech_type, tls, |b| {
-                FfiParamBacking::TlsKdf(b, label, client_random, server_random, context_data)
+                FfiParamBacking::TlsKdf(
+                    b,
+                    label.backing,
+                    client_random.backing,
+                    server_random.backing,
+                    context_data.backing,
+                )
             }))
         }
 
         // -- SSL3 Master Key Derive: nested SSL3_RANDOM_DATA + pVersion ----------
         CkMechanismParams::Ssl3MasterKeyDerive(p) => {
-            let mut client_random = Zeroizing::new(p.random_info.client_random.clone());
-            let mut server_random = Zeroizing::new(p.random_info.server_random.clone());
-            let version_is_null = p.version_major == 0 && p.version_minor == 0;
-            let version = NativeAllocation::from_box(Box::new(cryptoki_sys::CK_VERSION {
-                major: narrow_wire_byte(p.version_major)?,
-                minor: narrow_wire_byte(p.version_minor)?,
-            }));
-            let client_ptr = if client_random.is_empty() {
-                std::ptr::null_mut()
+            // S2 §6 (R19): the presence peers govern NULL-ness and length;
+            // the version OUT cell follows its null bit (not a 0.0
+            // sentinel), primed with the caller's scalars.
+            let client_random = input_leg(&p.random_info.client_random_presence)?;
+            let server_random = input_leg(&p.random_info.server_random_presence)?;
+            let version = if p.version_is_null {
+                None
             } else {
-                client_random.as_mut_ptr()
-            };
-            let server_ptr = if server_random.is_empty() {
-                std::ptr::null_mut()
-            } else {
-                server_random.as_mut_ptr()
+                Some(NativeAllocation::from_box(Box::new(cryptoki_sys::CK_VERSION {
+                    major: narrow_wire_byte(p.version_major)?,
+                    minor: narrow_wire_byte(p.version_minor)?,
+                })))
             };
             let ssl3 = Box::new(cryptoki_sys::CK_SSL3_MASTER_KEY_DERIVE_PARAMS {
                 RandomInfo: cryptoki_sys::CK_SSL3_RANDOM_DATA {
-                    pClientRandom: client_ptr,
-                    ulClientRandomLen: client_random.len() as cryptoki_sys::CK_ULONG,
-                    pServerRandom: server_ptr,
-                    ulServerRandomLen: server_random.len() as cryptoki_sys::CK_ULONG,
+                    pClientRandom: client_random.ptr,
+                    ulClientRandomLen: client_random.len,
+                    pServerRandom: server_random.ptr,
+                    ulServerRandomLen: server_random.len,
                 },
-                pVersion: if version_is_null {
-                    std::ptr::null_mut()
-                } else {
-                    version.root() as *mut _
-                },
+                pVersion: version
+                    .as_ref()
+                    .map_or(std::ptr::null_mut(), |cell| cell.root() as *mut _),
             });
             Ok(FfiMechanism::from_box(mech_type, ssl3, |b| {
-                FfiParamBacking::Ssl3MasterKeyDerive(b, client_random, server_random, version)
+                FfiParamBacking::Ssl3MasterKeyDerive(
+                    b,
+                    client_random.backing,
+                    server_random.backing,
+                    version,
+                )
             }))
         }
 
         // -- TLS 1.2 Extended Master Key Derive: PRF + session hash + pVersion ----
         CkMechanismParams::Tls12ExtendedMasterKeyDerive(p) => {
-            let mut session_hash = Zeroizing::new(p.session_hash.clone());
-            let version_is_null = p.version_major == 0 && p.version_minor == 0;
-            let version = NativeAllocation::from_box(Box::new(cryptoki_sys::CK_VERSION {
-                major: narrow_wire_byte(p.version_major)?,
-                minor: narrow_wire_byte(p.version_minor)?,
-            }));
-            let hash_ptr = if session_hash.is_empty() {
-                std::ptr::null_mut()
+            // S2 §6 (R19): the presence peer governs NULL-ness and length;
+            // the version OUT cell follows its null bit (not a 0.0
+            // sentinel), primed with the caller's scalars.
+            let session_hash = input_leg(&p.session_hash_presence)?;
+            let version = if p.version_is_null {
+                None
             } else {
-                session_hash.as_mut_ptr()
+                Some(NativeAllocation::from_box(Box::new(cryptoki_sys::CK_VERSION {
+                    major: narrow_wire_byte(p.version_major)?,
+                    minor: narrow_wire_byte(p.version_minor)?,
+                })))
             };
-            let version_ptr =
-                if version_is_null { std::ptr::null_mut() } else { version.root() as *mut _ };
             let ext = Box::new(cryptoki_sys::CK_TLS12_EXTENDED_MASTER_KEY_DERIVE_PARAMS {
                 prfHashMechanism: narrow_wire_ulong(p.prf_hash_mechanism.0)?,
-                pSessionHash: hash_ptr,
-                ulSessionHashLen: session_hash.len() as cryptoki_sys::CK_ULONG,
-                pVersion: version_ptr,
+                pSessionHash: session_hash.ptr,
+                ulSessionHashLen: session_hash.len,
+                pVersion: version
+                    .as_ref()
+                    .map_or(std::ptr::null_mut(), |cell| cell.root() as *mut _),
             });
             Ok(FfiMechanism::from_box(mech_type, ext, |b| {
-                FfiParamBacking::Tls12ExtendedMasterKeyDerive(b, session_hash, version)
+                FfiParamBacking::Tls12ExtendedMasterKeyDerive(b, session_hash.backing, version)
             }))
         }
 
         // -- SSL3/TLS Key Mat: nested random data + output key material -----------
         CkMechanismParams::Ssl3KeyMat(p) => {
-            let mut client_random = Zeroizing::new(p.random_info.client_random.clone());
-            let mut server_random = Zeroizing::new(p.random_info.server_random.clone());
-            let client_ptr = if client_random.is_empty() {
-                std::ptr::null_mut()
+            // S2 §6 (R19): the presence peers govern NULL-ness and length;
+            // the IV legs are OUT legs with bits-derived capacity (no
+            // length field — see `sized_leg`); the OUT struct follows
+            // `returned_key_material_is_null`. The IV size narrows first
+            // — the narrowed value sizes the legs (no 32-bit truncation,
+            // no huge-scalar panic).
+            let client_random = input_leg(&p.random_info.client_random_presence)?;
+            let server_random = input_leg(&p.random_info.server_random_presence)?;
+            let iv_size_bits = narrow_wire_ulong(p.iv_size_bits)?;
+            let iv_bytes = bits_to_bytes_ceil(iv_size_bits);
+            let out_is_null = p.returned_key_material_is_null;
+            let (iv_client, iv_client_ptr) =
+                sized_leg(&p.client_iv_presence, iv_bytes, out_is_null)?;
+            let (iv_server, iv_server_ptr) =
+                sized_leg(&p.server_iv_presence, iv_bytes, out_is_null)?;
+            let key_mat_out = if out_is_null {
+                None
             } else {
-                client_random.as_mut_ptr()
-            };
-            let server_ptr = if server_random.is_empty() {
-                std::ptr::null_mut()
-            } else {
-                server_random.as_mut_ptr()
-            };
-            let iv_bytes = ((p.iv_size_bits as usize).saturating_add(7)) / 8;
-            let mut iv_client = if p.client_iv.is_empty() {
-                Zeroizing::new(vec![0u8; iv_bytes])
-            } else {
-                let mut iv = p.client_iv.expose(|b| Zeroizing::new(b.to_vec()));
-                iv.resize(iv_bytes, 0);
-                iv
-            };
-            let mut iv_server = if p.server_iv.is_empty() {
-                Zeroizing::new(vec![0u8; iv_bytes])
-            } else {
-                let mut iv = p.server_iv.expose(|b| Zeroizing::new(b.to_vec()));
-                iv.resize(iv_bytes, 0);
-                iv
-            };
-            let iv_client_ptr =
-                if iv_client.is_empty() { std::ptr::null_mut() } else { iv_client.as_mut_ptr() };
-            let iv_server_ptr =
-                if iv_server.is_empty() { std::ptr::null_mut() } else { iv_server.as_mut_ptr() };
-            let key_mat_out =
-                NativeAllocation::from_box(Box::new(cryptoki_sys::CK_SSL3_KEY_MAT_OUT {
+                Some(NativeAllocation::from_box(Box::new(cryptoki_sys::CK_SSL3_KEY_MAT_OUT {
                     hClientMacSecret: narrow_wire_ulong(p.client_mac_secret_handle.0)?,
                     hServerMacSecret: narrow_wire_ulong(p.server_mac_secret_handle.0)?,
                     hClientKey: narrow_wire_ulong(p.client_key_handle.0)?,
                     hServerKey: narrow_wire_ulong(p.server_key_handle.0)?,
                     pIVClient: iv_client_ptr,
                     pIVServer: iv_server_ptr,
-                }));
+                })))
+            };
+            let out_ptr =
+                key_mat_out.as_ref().map_or(std::ptr::null_mut(), |out| out.root() as *mut _);
             // Decide whether to use SSL3 or TLS12 key mat based on prf_hash_mechanism:
             // if prf_hash_mechanism == 0, use CK_SSL3_KEY_MAT_PARAMS; else TLS12.
             if p.prf_hash_mechanism == CkMechanismType(0) {
                 let km = Box::new(cryptoki_sys::CK_SSL3_KEY_MAT_PARAMS {
                     ulMacSizeInBits: narrow_wire_ulong(p.mac_size_bits)?,
                     ulKeySizeInBits: narrow_wire_ulong(p.key_size_bits)?,
-                    ulIVSizeInBits: narrow_wire_ulong(p.iv_size_bits)?,
+                    ulIVSizeInBits: iv_size_bits,
                     bIsExport: if p.is_export {
                         cryptoki_sys::CK_TRUE
                     } else {
                         cryptoki_sys::CK_FALSE
                     },
                     RandomInfo: cryptoki_sys::CK_SSL3_RANDOM_DATA {
-                        pClientRandom: client_ptr,
-                        ulClientRandomLen: client_random.len() as cryptoki_sys::CK_ULONG,
-                        pServerRandom: server_ptr,
-                        ulServerRandomLen: server_random.len() as cryptoki_sys::CK_ULONG,
+                        pClientRandom: client_random.ptr,
+                        ulClientRandomLen: client_random.len,
+                        pServerRandom: server_random.ptr,
+                        ulServerRandomLen: server_random.len,
                     },
-                    pReturnedKeyMaterial: key_mat_out.root() as *mut _,
+                    pReturnedKeyMaterial: out_ptr,
                 });
                 Ok(FfiMechanism::from_box(mech_type, km, |b| {
                     FfiParamBacking::Ssl3KeyMat(
                         b,
-                        client_random,
-                        server_random,
+                        client_random.backing,
+                        server_random.backing,
                         key_mat_out,
                         iv_client,
                         iv_server,
+                        p.client_iv_presence.clone(),
+                        p.server_iv_presence.clone(),
                     )
                 }))
             } else {
@@ -2315,29 +2665,31 @@ fn mechanism_to_ffi_at_depth(
                 let km = Box::new(cryptoki_sys::CK_TLS12_KEY_MAT_PARAMS {
                     ulMacSizeInBits: narrow_wire_ulong(p.mac_size_bits)?,
                     ulKeySizeInBits: narrow_wire_ulong(p.key_size_bits)?,
-                    ulIVSizeInBits: narrow_wire_ulong(p.iv_size_bits)?,
+                    ulIVSizeInBits: iv_size_bits,
                     bIsExport: if p.is_export {
                         cryptoki_sys::CK_TRUE
                     } else {
                         cryptoki_sys::CK_FALSE
                     },
                     RandomInfo: cryptoki_sys::CK_SSL3_RANDOM_DATA {
-                        pClientRandom: client_ptr,
-                        ulClientRandomLen: client_random.len() as cryptoki_sys::CK_ULONG,
-                        pServerRandom: server_ptr,
-                        ulServerRandomLen: server_random.len() as cryptoki_sys::CK_ULONG,
+                        pClientRandom: client_random.ptr,
+                        ulClientRandomLen: client_random.len,
+                        pServerRandom: server_random.ptr,
+                        ulServerRandomLen: server_random.len,
                     },
-                    pReturnedKeyMaterial: key_mat_out.root() as *mut _,
+                    pReturnedKeyMaterial: out_ptr,
                     prfHashMechanism: narrow_wire_ulong(p.prf_hash_mechanism.0)?,
                 });
                 Ok(FfiMechanism::from_box(mech_type, km, |b| {
                     FfiParamBacking::Tls12KeyMat(
                         b,
-                        client_random,
-                        server_random,
+                        client_random.backing,
+                        server_random.backing,
                         key_mat_out,
                         iv_client,
                         iv_server,
+                        p.client_iv_presence.clone(),
+                        p.server_iv_presence.clone(),
                     )
                 }))
             }
@@ -2345,279 +2697,242 @@ fn mechanism_to_ffi_at_depth(
 
         // -- PBE: struct with 3 pointers (init_vector, password, salt) -----------
         CkMechanismParams::Pbe(p) => {
-            let mut init_vector = p.init_vector.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut password = p.password.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut salt = p.salt.expose(|b| Zeroizing::new(b.to_vec()));
-            let iv_ptr = if init_vector.is_empty() {
-                std::ptr::null_mut()
-            } else {
-                init_vector.as_mut_ptr()
-            };
-            let pass_ptr =
-                if password.is_empty() { std::ptr::null_mut() } else { password.as_mut_ptr() };
-            let salt_ptr = if salt.is_empty() { std::ptr::null_mut() } else { salt.as_mut_ptr() };
+            // S2 §6 (R19): the presence peers govern NULL-ness and length.
+            // The IV leg has no length field (the provider reads a fixed
+            // 8-byte IV — the shim's fixed extent), so a live IV always
+            // normalizes to exactly 8 bytes (sound for short/empty
+            // inputs, where an exact-sized backing would over-read or
+            // dangle).
+            let (init_vector, init_vector_ptr) = fixed_leg(&p.init_vector_presence, 8)?;
+            let password = input_leg(&p.password_presence)?;
+            let salt = input_leg(&p.salt_presence)?;
             let pbe = Box::new(cryptoki_sys::CK_PBE_PARAMS {
-                pInitVector: iv_ptr,
-                pPassword: pass_ptr,
-                ulPasswordLen: password.len() as cryptoki_sys::CK_ULONG,
-                pSalt: salt_ptr,
-                ulSaltLen: salt.len() as cryptoki_sys::CK_ULONG,
+                pInitVector: init_vector_ptr,
+                pPassword: password.ptr,
+                ulPasswordLen: password.len,
+                pSalt: salt.ptr,
+                ulSaltLen: salt.len,
                 ulIteration: narrow_wire_ulong(p.iteration)?,
             });
             Ok(FfiMechanism::from_box(mech_type, pbe, |b| {
-                FfiParamBacking::Pbe(b, init_vector, password, salt)
+                FfiParamBacking::Pbe(b, init_vector, password.backing, salt.backing)
             }))
         }
 
         // -- ECDH-AES Key Wrap: struct with 1 pointer ---------------------------
         CkMechanismParams::EcdhAesKeyWrap(p) => {
-            let mut shared = p.shared_data.expose(|b| Zeroizing::new(b.to_vec()));
-            let shared_ptr =
-                if shared.is_empty() { std::ptr::null_mut() } else { shared.as_mut_ptr() };
+            // S2 §6 (R19): the presence peer governs NULL-ness and length.
+            let shared = input_leg(&p.shared_data_presence)?;
             let ew = Box::new(cryptoki_sys::CK_ECDH_AES_KEY_WRAP_PARAMS {
                 ulAESKeyBits: narrow_wire_ulong(p.aes_key_bits)?,
                 kdf: narrow_wire_ulong(p.kdf.0)?,
-                ulSharedDataLen: shared.len() as cryptoki_sys::CK_ULONG,
-                pSharedData: shared_ptr,
+                ulSharedDataLen: shared.len,
+                pSharedData: shared.ptr,
             });
             Ok(FfiMechanism::from_box(mech_type, ew, |b| {
-                FfiParamBacking::EcdhAesKeyWrap(b, shared)
+                FfiParamBacking::EcdhAesKeyWrap(b, shared.backing)
             }))
         }
 
         // -- ECDH2 Derive: struct with 3 pointers -------------------------------
         CkMechanismParams::Ecdh2Derive(p) => {
-            let mut shared = p.shared_data.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut public = Zeroizing::new(p.public_data.clone());
-            let mut public2 = Zeroizing::new(p.public_data2.clone());
-            let shared_ptr =
-                if shared.is_empty() { std::ptr::null_mut() } else { shared.as_mut_ptr() };
-            let public_ptr =
-                if public.is_empty() { std::ptr::null_mut() } else { public.as_mut_ptr() };
-            let public2_ptr =
-                if public2.is_empty() { std::ptr::null_mut() } else { public2.as_mut_ptr() };
+            // S2 §6 (R19): the presence peers govern NULL-ness and length.
+            let shared = input_leg(&p.shared_data_presence)?;
+            let public = input_leg(&p.public_data_presence)?;
+            let public2 = input_leg(&p.public_data2_presence)?;
             let ecdh2 = Box::new(cryptoki_sys::CK_ECDH2_DERIVE_PARAMS {
                 kdf: narrow_wire_ulong(p.kdf.0)?,
-                ulSharedDataLen: shared.len() as cryptoki_sys::CK_ULONG,
-                pSharedData: shared_ptr,
-                ulPublicDataLen: public.len() as cryptoki_sys::CK_ULONG,
-                pPublicData: public_ptr,
+                ulSharedDataLen: shared.len,
+                pSharedData: shared.ptr,
+                ulPublicDataLen: public.len,
+                pPublicData: public.ptr,
                 ulPrivateDataLen: narrow_wire_ulong(p.private_data_len)?,
                 hPrivateData: narrow_wire_ulong(p.private_data_handle.0)?,
-                ulPublicDataLen2: public2.len() as cryptoki_sys::CK_ULONG,
-                pPublicData2: public2_ptr,
+                ulPublicDataLen2: public2.len,
+                pPublicData2: public2.ptr,
             });
             Ok(FfiMechanism::from_box(mech_type, ecdh2, |b| {
-                FfiParamBacking::Ecdh2Derive(b, shared, public, public2)
+                FfiParamBacking::Ecdh2Derive(b, shared.backing, public.backing, public2.backing)
             }))
         }
 
         // -- ECMQV Derive: struct with 3 pointers + handle ---------------------
         CkMechanismParams::EcmqvDerive(p) => {
-            let mut shared = p.shared_data.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut public = Zeroizing::new(p.public_data.clone());
-            let mut public2 = Zeroizing::new(p.public_data2.clone());
-            let shared_ptr =
-                if shared.is_empty() { std::ptr::null_mut() } else { shared.as_mut_ptr() };
-            let public_ptr =
-                if public.is_empty() { std::ptr::null_mut() } else { public.as_mut_ptr() };
-            let public2_ptr =
-                if public2.is_empty() { std::ptr::null_mut() } else { public2.as_mut_ptr() };
+            // S2 §6 (R19): the presence peers govern NULL-ness and length.
+            let shared = input_leg(&p.shared_data_presence)?;
+            let public = input_leg(&p.public_data_presence)?;
+            let public2 = input_leg(&p.public_data2_presence)?;
             let ecmqv = Box::new(cryptoki_sys::CK_ECMQV_DERIVE_PARAMS {
                 kdf: narrow_wire_ulong(p.kdf.0)?,
-                ulSharedDataLen: shared.len() as cryptoki_sys::CK_ULONG,
-                pSharedData: shared_ptr,
-                ulPublicDataLen: public.len() as cryptoki_sys::CK_ULONG,
-                pPublicData: public_ptr,
+                ulSharedDataLen: shared.len,
+                pSharedData: shared.ptr,
+                ulPublicDataLen: public.len,
+                pPublicData: public.ptr,
                 ulPrivateDataLen: narrow_wire_ulong(p.private_data_len)?,
                 hPrivateData: narrow_wire_ulong(p.private_data_handle.0)?,
-                ulPublicDataLen2: public2.len() as cryptoki_sys::CK_ULONG,
-                pPublicData2: public2_ptr,
+                ulPublicDataLen2: public2.len,
+                pPublicData2: public2.ptr,
                 publicKey: narrow_wire_ulong(p.public_key_handle.0)?,
             });
             Ok(FfiMechanism::from_box(mech_type, ecmqv, |b| {
-                FfiParamBacking::EcmqvDerive(b, shared, public, public2)
+                FfiParamBacking::EcmqvDerive(b, shared.backing, public.backing, public2.backing)
             }))
         }
 
         // -- X9.42 DH1 Derive: struct with 2 pointers ---------------------------
         CkMechanismParams::X942Dh1Derive(p) => {
-            let mut other_info = p.other_info.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut public_data = Zeroizing::new(p.public_data.clone());
-            let oi_ptr =
-                if other_info.is_empty() { std::ptr::null_mut() } else { other_info.as_mut_ptr() };
-            let pub_ptr = if public_data.is_empty() {
-                std::ptr::null_mut()
-            } else {
-                public_data.as_mut_ptr()
-            };
+            // S2 §6 (R19): the presence peers govern NULL-ness and length.
+            let other_info = input_leg(&p.other_info_presence)?;
+            let public_data = input_leg(&p.public_data_presence)?;
             let x942 = Box::new(cryptoki_sys::CK_X9_42_DH1_DERIVE_PARAMS {
                 kdf: narrow_wire_ulong(p.kdf.0)?,
-                ulOtherInfoLen: other_info.len() as cryptoki_sys::CK_ULONG,
-                pOtherInfo: oi_ptr,
-                ulPublicDataLen: public_data.len() as cryptoki_sys::CK_ULONG,
-                pPublicData: pub_ptr,
+                ulOtherInfoLen: other_info.len,
+                pOtherInfo: other_info.ptr,
+                ulPublicDataLen: public_data.len,
+                pPublicData: public_data.ptr,
             });
             Ok(FfiMechanism::from_box(mech_type, x942, |b| {
-                FfiParamBacking::X942Dh1Derive(b, other_info, public_data)
+                FfiParamBacking::X942Dh1Derive(b, other_info.backing, public_data.backing)
             }))
         }
 
         // -- X9.42 DH2 Derive: struct with 3 pointers + handle ------------------
         CkMechanismParams::X942Dh2Derive(p) => {
-            let mut other_info = p.other_info.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut public_data = Zeroizing::new(p.public_data.clone());
-            let mut public_data2 = Zeroizing::new(p.public_data2.clone());
-            let oi_ptr =
-                if other_info.is_empty() { std::ptr::null_mut() } else { other_info.as_mut_ptr() };
-            let pub_ptr = if public_data.is_empty() {
-                std::ptr::null_mut()
-            } else {
-                public_data.as_mut_ptr()
-            };
-            let pub2_ptr = if public_data2.is_empty() {
-                std::ptr::null_mut()
-            } else {
-                public_data2.as_mut_ptr()
-            };
+            // S2 §6 (R19): the presence peers govern NULL-ness and length.
+            let other_info = input_leg(&p.other_info_presence)?;
+            let public_data = input_leg(&p.public_data_presence)?;
+            let public_data2 = input_leg(&p.public_data2_presence)?;
             let x942 = Box::new(cryptoki_sys::CK_X9_42_DH2_DERIVE_PARAMS {
                 kdf: narrow_wire_ulong(p.kdf.0)?,
-                ulOtherInfoLen: other_info.len() as cryptoki_sys::CK_ULONG,
-                pOtherInfo: oi_ptr,
-                ulPublicDataLen: public_data.len() as cryptoki_sys::CK_ULONG,
-                pPublicData: pub_ptr,
+                ulOtherInfoLen: other_info.len,
+                pOtherInfo: other_info.ptr,
+                ulPublicDataLen: public_data.len,
+                pPublicData: public_data.ptr,
                 ulPrivateDataLen: narrow_wire_ulong(p.private_data_len)?,
                 hPrivateData: narrow_wire_ulong(p.private_data_handle.0)?,
-                ulPublicDataLen2: public_data2.len() as cryptoki_sys::CK_ULONG,
-                pPublicData2: pub2_ptr,
+                ulPublicDataLen2: public_data2.len,
+                pPublicData2: public_data2.ptr,
             });
             Ok(FfiMechanism::from_box(mech_type, x942, |b| {
-                FfiParamBacking::X942Dh2Derive(b, other_info, public_data, public_data2)
+                FfiParamBacking::X942Dh2Derive(
+                    b,
+                    other_info.backing,
+                    public_data.backing,
+                    public_data2.backing,
+                )
             }))
         }
 
         // -- X9.42 MQV Derive: struct with 3 pointers + 2 handles ---------------
         CkMechanismParams::X942MqvDerive(p) => {
-            let mut other_info = p.other_info.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut public_data = Zeroizing::new(p.public_data.clone());
-            let mut public_data2 = Zeroizing::new(p.public_data2.clone());
-            let oi_ptr =
-                if other_info.is_empty() { std::ptr::null_mut() } else { other_info.as_mut_ptr() };
-            let pub_ptr = if public_data.is_empty() {
-                std::ptr::null_mut()
-            } else {
-                public_data.as_mut_ptr()
-            };
-            let pub2_ptr = if public_data2.is_empty() {
-                std::ptr::null_mut()
-            } else {
-                public_data2.as_mut_ptr()
-            };
+            // S2 §6 (R19): the presence peers govern NULL-ness and length.
+            let other_info = input_leg(&p.other_info_presence)?;
+            let public_data = input_leg(&p.public_data_presence)?;
+            let public_data2 = input_leg(&p.public_data2_presence)?;
             let x942 = Box::new(cryptoki_sys::CK_X9_42_MQV_DERIVE_PARAMS {
                 kdf: narrow_wire_ulong(p.kdf.0)?,
-                ulOtherInfoLen: other_info.len() as cryptoki_sys::CK_ULONG,
-                OtherInfo: oi_ptr,
-                ulPublicDataLen: public_data.len() as cryptoki_sys::CK_ULONG,
-                PublicData: pub_ptr,
+                ulOtherInfoLen: other_info.len,
+                OtherInfo: other_info.ptr,
+                ulPublicDataLen: public_data.len,
+                PublicData: public_data.ptr,
                 ulPrivateDataLen: narrow_wire_ulong(p.private_data_len)?,
                 hPrivateData: narrow_wire_ulong(p.private_data_handle.0)?,
-                ulPublicDataLen2: public_data2.len() as cryptoki_sys::CK_ULONG,
-                PublicData2: pub2_ptr,
+                ulPublicDataLen2: public_data2.len,
+                PublicData2: public_data2.ptr,
                 publicKey: narrow_wire_ulong(p.public_key_handle.0)?,
             });
             Ok(FfiMechanism::from_box(mech_type, x942, |b| {
-                FfiParamBacking::X942MqvDerive(b, other_info, public_data, public_data2)
+                FfiParamBacking::X942MqvDerive(
+                    b,
+                    other_info.backing,
+                    public_data.backing,
+                    public_data2.backing,
+                )
             }))
         }
 
         // -- GOSTR3410 Derive: struct with 2 pointers ---------------------------
         CkMechanismParams::Gostr3410Derive(p) => {
-            let mut public_data = Zeroizing::new(p.public_data.clone());
-            let mut ukm = Zeroizing::new(p.ukm.clone());
-            let pub_ptr = if public_data.is_empty() {
-                std::ptr::null_mut()
-            } else {
-                public_data.as_mut_ptr()
-            };
-            let ukm_ptr = if ukm.is_empty() { std::ptr::null_mut() } else { ukm.as_mut_ptr() };
+            // S2 §6 (R19): the presence peers govern NULL-ness and length.
+            let public_data = input_leg(&p.public_data_presence)?;
+            let ukm = input_leg(&p.ukm_presence)?;
             let gost = Box::new(cryptoki_sys::CK_GOSTR3410_DERIVE_PARAMS {
                 kdf: narrow_wire_ulong(p.kdf.0)?,
-                pPublicData: pub_ptr,
-                ulPublicDataLen: public_data.len() as cryptoki_sys::CK_ULONG,
-                pUKM: ukm_ptr,
-                ulUKMLen: ukm.len() as cryptoki_sys::CK_ULONG,
+                pPublicData: public_data.ptr,
+                ulPublicDataLen: public_data.len,
+                pUKM: ukm.ptr,
+                ulUKMLen: ukm.len,
             });
             Ok(FfiMechanism::from_box(mech_type, gost, |b| {
-                FfiParamBacking::Gostr3410Derive(b, public_data, ukm)
+                FfiParamBacking::Gostr3410Derive(b, public_data.backing, ukm.backing)
             }))
         }
 
         // -- GOSTR3410 Key Wrap: struct with 2 pointers + handle ----------------
         CkMechanismParams::Gostr3410KeyWrap(p) => {
-            let mut wrap_oid = Zeroizing::new(p.wrap_oid.clone());
-            let mut ukm = Zeroizing::new(p.ukm.clone());
-            let oid_ptr =
-                if wrap_oid.is_empty() { std::ptr::null_mut() } else { wrap_oid.as_mut_ptr() };
-            let ukm_ptr = if ukm.is_empty() { std::ptr::null_mut() } else { ukm.as_mut_ptr() };
+            // S2 §6 (R19): the presence peers govern NULL-ness and length.
+            let wrap_oid = input_leg(&p.wrap_oid_presence)?;
+            let ukm = input_leg(&p.ukm_presence)?;
             let gost = Box::new(cryptoki_sys::CK_GOSTR3410_KEY_WRAP_PARAMS {
-                pWrapOID: oid_ptr,
-                ulWrapOIDLen: wrap_oid.len() as cryptoki_sys::CK_ULONG,
-                pUKM: ukm_ptr,
-                ulUKMLen: ukm.len() as cryptoki_sys::CK_ULONG,
+                pWrapOID: wrap_oid.ptr,
+                ulWrapOIDLen: wrap_oid.len,
+                pUKM: ukm.ptr,
+                ulUKMLen: ukm.len,
                 hKey: narrow_wire_ulong(p.key_handle.0)?,
             });
             Ok(FfiMechanism::from_box(mech_type, gost, |b| {
-                FfiParamBacking::Gostr3410KeyWrap(b, wrap_oid, ukm)
+                FfiParamBacking::Gostr3410KeyWrap(b, wrap_oid.backing, ukm.backing)
             }))
         }
 
         // -- Key Wrap Set OAEP: struct with 1 pointer ---------------------------
         CkMechanismParams::KeyWrapSetOaep(p) => {
-            let mut x = p.x.expose(|b| Zeroizing::new(b.to_vec()));
-            let x_ptr = if x.is_empty() { std::ptr::null_mut() } else { x.as_mut_ptr() };
+            // S2 §6 (R19): the presence peer governs NULL-ness and length.
+            let x = input_leg(&p.x_presence)?;
             let kw = Box::new(cryptoki_sys::CK_KEY_WRAP_SET_OAEP_PARAMS {
                 bBC: narrow_wire_byte(p.bc)?,
-                pX: x_ptr,
-                ulXLen: x.len() as cryptoki_sys::CK_ULONG,
+                pX: x.ptr,
+                ulXLen: x.len,
             });
-            Ok(FfiMechanism::from_box(mech_type, kw, |b| FfiParamBacking::KeyWrapSetOaep(b, x)))
+            Ok(FfiMechanism::from_box(mech_type, kw, |b| {
+                FfiParamBacking::KeyWrapSetOaep(b, x.backing)
+            }))
         }
 
         // -- KEA Derive: struct with 3 pointers ---------------------------------
         CkMechanismParams::KeaDerive(p) => {
-            let mut random_a = Zeroizing::new(p.random_a.clone());
-            let mut random_b = Zeroizing::new(p.random_b.clone());
-            let mut public_data = Zeroizing::new(p.public_data.clone());
-            let ra_ptr =
-                if random_a.is_empty() { std::ptr::null_mut() } else { random_a.as_mut_ptr() };
-            let rb_ptr =
-                if random_b.is_empty() { std::ptr::null_mut() } else { random_b.as_mut_ptr() };
-            let pub_ptr = if public_data.is_empty() {
-                std::ptr::null_mut()
-            } else {
-                public_data.as_mut_ptr()
-            };
-            // KEA random_a and random_b must have the same length (ulRandomLen)
-            let random_len = random_a.len() as cryptoki_sys::CK_ULONG;
+            // S2 §6 (R19): the presence peers govern NULL-ness and length.
+            // RandomA/B share the one C `ulRandomLen`: v1 decode enforces
+            // strict agreement (`check_shared_len_agreement`), and a
+            // directly-constructed legacy value with mismatched legs
+            // converts with the length following leg A (pinned by
+            // `r19_reconstruct_kea_derive_legacy_mismatch_uses_a`).
+            let random_a = input_leg(&p.random_a_presence)?;
+            let random_b = input_leg(&p.random_b_presence)?;
+            let public_data = input_leg(&p.public_data_presence)?;
             let kea = Box::new(cryptoki_sys::CK_KEA_DERIVE_PARAMS {
                 isSender: if p.is_sender { cryptoki_sys::CK_TRUE } else { cryptoki_sys::CK_FALSE },
-                ulRandomLen: random_len,
-                RandomA: ra_ptr,
-                RandomB: rb_ptr,
-                ulPublicDataLen: public_data.len() as cryptoki_sys::CK_ULONG,
-                PublicData: pub_ptr,
+                ulRandomLen: random_a.len,
+                RandomA: random_a.ptr,
+                RandomB: random_b.ptr,
+                ulPublicDataLen: public_data.len,
+                PublicData: public_data.ptr,
             });
             Ok(FfiMechanism::from_box(mech_type, kea, |b| {
-                FfiParamBacking::KeaDerive(b, random_a, random_b, public_data)
+                FfiParamBacking::KeaDerive(
+                    b,
+                    random_a.backing,
+                    random_b.backing,
+                    public_data.backing,
+                )
             }))
         }
 
         // -- IKE PRF Derive: struct with 2 pointers -----------------------------
         CkMechanismParams::IkePrfDerive(p) => {
-            let mut ni = p.ni.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut nr = p.nr.expose(|b| Zeroizing::new(b.to_vec()));
-            let ni_ptr = if ni.is_empty() { std::ptr::null_mut() } else { ni.as_mut_ptr() };
-            let nr_ptr = if nr.is_empty() { std::ptr::null_mut() } else { nr.as_mut_ptr() };
+            // S2 §6 (R19): the presence peers govern NULL-ness and length.
+            let ni = input_leg(&p.ni_presence)?;
+            let nr = input_leg(&p.nr_presence)?;
             let ike = Box::new(cryptoki_sys::CK_IKE_PRF_DERIVE_PARAMS {
                 prfMechanism: narrow_wire_ulong(p.prf_mechanism.0)?,
                 bDataAsKey: if p.data_as_key {
@@ -2626,21 +2941,22 @@ fn mechanism_to_ffi_at_depth(
                     cryptoki_sys::CK_FALSE
                 },
                 bRekey: if p.rekey { cryptoki_sys::CK_TRUE } else { cryptoki_sys::CK_FALSE },
-                pNi: ni_ptr,
-                ulNiLen: ni.len() as cryptoki_sys::CK_ULONG,
-                pNr: nr_ptr,
-                ulNrLen: nr.len() as cryptoki_sys::CK_ULONG,
+                pNi: ni.ptr,
+                ulNiLen: ni.len,
+                pNr: nr.ptr,
+                ulNrLen: nr.len,
                 hNewKey: narrow_wire_ulong(p.new_key_handle.0)?,
             });
-            Ok(FfiMechanism::from_box(mech_type, ike, |b| FfiParamBacking::IkePrfDerive(b, ni, nr)))
+            Ok(FfiMechanism::from_box(mech_type, ike, |b| {
+                FfiParamBacking::IkePrfDerive(b, ni.backing, nr.backing)
+            }))
         }
 
         // -- IKE1 PRF Derive: struct with 2 pointers + handles ------------------
         CkMechanismParams::Ike1PrfDerive(p) => {
-            let mut ckyi = p.ckyi.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut ckyr = p.ckyr.expose(|b| Zeroizing::new(b.to_vec()));
-            let ckyi_ptr = if ckyi.is_empty() { std::ptr::null_mut() } else { ckyi.as_mut_ptr() };
-            let ckyr_ptr = if ckyr.is_empty() { std::ptr::null_mut() } else { ckyr.as_mut_ptr() };
+            // S2 §6 (R19): the presence peers govern NULL-ness and length.
+            let ckyi = input_leg(&p.ckyi_presence)?;
+            let ckyr = input_leg(&p.ckyr_presence)?;
             let ike = Box::new(cryptoki_sys::CK_IKE1_PRF_DERIVE_PARAMS {
                 prfMechanism: narrow_wire_ulong(p.prf_mechanism.0)?,
                 bHasPrevKey: if p.has_prev_key {
@@ -2650,22 +2966,21 @@ fn mechanism_to_ffi_at_depth(
                 },
                 hKeygxy: narrow_wire_ulong(p.keygxy_handle.0)?,
                 hPrevKey: narrow_wire_ulong(p.prev_key_handle.0)?,
-                pCKYi: ckyi_ptr,
-                ulCKYiLen: ckyi.len() as cryptoki_sys::CK_ULONG,
-                pCKYr: ckyr_ptr,
-                ulCKYrLen: ckyr.len() as cryptoki_sys::CK_ULONG,
+                pCKYi: ckyi.ptr,
+                ulCKYiLen: ckyi.len,
+                pCKYr: ckyr.ptr,
+                ulCKYrLen: ckyr.len,
                 keyNumber: narrow_wire_byte(p.key_number)?,
             });
             Ok(FfiMechanism::from_box(mech_type, ike, |b| {
-                FfiParamBacking::Ike1PrfDerive(b, ckyi, ckyr)
+                FfiParamBacking::Ike1PrfDerive(b, ckyi.backing, ckyr.backing)
             }))
         }
 
         // -- IKE1 Extended Derive: struct with 1 pointer + handle ---------------
         CkMechanismParams::Ike1ExtendedDerive(p) => {
-            let mut extra = p.extra_data.expose(|b| Zeroizing::new(b.to_vec()));
-            let extra_ptr =
-                if extra.is_empty() { std::ptr::null_mut() } else { extra.as_mut_ptr() };
+            // S2 §6 (R19): the presence peer governs NULL-ness and length.
+            let extra = input_leg(&p.extra_data_presence)?;
             let ike = Box::new(cryptoki_sys::CK_IKE1_EXTENDED_DERIVE_PARAMS {
                 prfMechanism: narrow_wire_ulong(p.prf_mechanism.0)?,
                 bHasKeygxy: if p.has_keygxy {
@@ -2674,18 +2989,18 @@ fn mechanism_to_ffi_at_depth(
                     cryptoki_sys::CK_FALSE
                 },
                 hKeygxy: narrow_wire_ulong(p.keygxy_handle.0)?,
-                pExtraData: extra_ptr,
-                ulExtraDataLen: extra.len() as cryptoki_sys::CK_ULONG,
+                pExtraData: extra.ptr,
+                ulExtraDataLen: extra.len,
             });
             Ok(FfiMechanism::from_box(mech_type, ike, |b| {
-                FfiParamBacking::Ike1ExtendedDerive(b, extra)
+                FfiParamBacking::Ike1ExtendedDerive(b, extra.backing)
             }))
         }
 
         // -- IKE2 PRF Plus Derive: struct with 1 pointer + handle ---------------
         CkMechanismParams::Ike2PrfPlusDerive(p) => {
-            let mut seed = p.seed_data.expose(|b| Zeroizing::new(b.to_vec()));
-            let seed_ptr = if seed.is_empty() { std::ptr::null_mut() } else { seed.as_mut_ptr() };
+            // S2 §6 (R19): the presence peer governs NULL-ness and length.
+            let seed = input_leg(&p.seed_data_presence)?;
             let ike = Box::new(cryptoki_sys::CK_IKE2_PRF_PLUS_DERIVE_PARAMS {
                 prfMechanism: narrow_wire_ulong(p.prf_mechanism.0)?,
                 bHasSeedKey: if p.has_seed_key {
@@ -2694,143 +3009,158 @@ fn mechanism_to_ffi_at_depth(
                     cryptoki_sys::CK_FALSE
                 },
                 hSeedKey: narrow_wire_ulong(p.seed_key_handle.0)?,
-                pSeedData: seed_ptr,
-                ulSeedDataLen: seed.len() as cryptoki_sys::CK_ULONG,
+                pSeedData: seed.ptr,
+                ulSeedDataLen: seed.len,
             });
             Ok(FfiMechanism::from_box(mech_type, ike, |b| {
-                FfiParamBacking::Ike2PrfPlusDerive(b, seed)
+                FfiParamBacking::Ike2PrfPlusDerive(b, seed.backing)
             }))
         }
 
         // -- WTLS Master Key Derive: digest mechanism + WTLS random data + pVersion --
         CkMechanismParams::WtlsMasterKeyDerive(p) => {
-            let mut client_random = Zeroizing::new(p.random_info.client_random.clone());
-            let mut server_random = Zeroizing::new(p.random_info.server_random.clone());
-            let mut version_buf = Zeroizing::new(vec![narrow_wire_byte(p.version)?]);
-            let client_ptr = if client_random.is_empty() {
-                std::ptr::null_mut()
+            // S2 §6 (R19): the presence peers govern NULL-ness and length;
+            // the version byte cell follows its null bit (empty backing
+            // ⟺ NULL), primed with the caller's byte when live.
+            let client_random = input_leg(&p.random_info.client_random_presence)?;
+            let server_random = input_leg(&p.random_info.server_random_presence)?;
+            let mut version_buf = if p.version_is_null {
+                Zeroizing::new(Vec::new())
             } else {
-                client_random.as_mut_ptr()
+                Zeroizing::new(vec![narrow_wire_byte(p.version)?])
             };
-            let server_ptr = if server_random.is_empty() {
+            let version_ptr = if version_buf.is_empty() {
                 std::ptr::null_mut()
             } else {
-                server_random.as_mut_ptr()
+                version_buf.as_mut_ptr()
             };
             let wtls = Box::new(cryptoki_sys::CK_WTLS_MASTER_KEY_DERIVE_PARAMS {
                 DigestMechanism: narrow_wire_ulong(p.digest_mechanism.0)?,
                 RandomInfo: cryptoki_sys::CK_WTLS_RANDOM_DATA {
-                    pClientRandom: client_ptr,
-                    ulClientRandomLen: client_random.len() as cryptoki_sys::CK_ULONG,
-                    pServerRandom: server_ptr,
-                    ulServerRandomLen: server_random.len() as cryptoki_sys::CK_ULONG,
+                    pClientRandom: client_random.ptr,
+                    ulClientRandomLen: client_random.len,
+                    pServerRandom: server_random.ptr,
+                    ulServerRandomLen: server_random.len,
                 },
-                pVersion: version_buf.as_mut_ptr(),
+                pVersion: version_ptr,
             });
             Ok(FfiMechanism::from_box(mech_type, wtls, |b| {
-                FfiParamBacking::WtlsMasterKeyDerive(b, client_random, server_random, version_buf)
+                FfiParamBacking::WtlsMasterKeyDerive(
+                    b,
+                    client_random.backing,
+                    server_random.backing,
+                    version_buf,
+                )
             }))
         }
 
         // -- WTLS PRF: digest mechanism + seed + label + output -----------------
         CkMechanismParams::WtlsPrf(p) => {
-            let mut seed = p.seed.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut label = p.label.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut output = Zeroizing::new(vec![0u8; p.output_len as usize]);
-            let output_len = NativeAllocation::from_box(Box::new(narrow_wire_ulong(p.output_len)?));
-            let seed_ptr = if seed.is_empty() { std::ptr::null_mut() } else { seed.as_mut_ptr() };
-            let label_ptr =
-                if label.is_empty() { std::ptr::null_mut() } else { label.as_mut_ptr() };
-            let output_ptr =
-                if output.is_empty() { std::ptr::null_mut() } else { output.as_mut_ptr() };
+            // S2 §6 (R19): the presence peers govern NULL-ness and length;
+            // the output envelope (buffer + length cell) follows its null
+            // bits, with capacity from the `output_len` scalar.
+            let seed = input_leg(&p.seed_presence)?;
+            let label = input_leg(&p.label_presence)?;
+            let (output, output_ptr) = prf_output_buffer(p.output_len, p.output_is_null)?;
+            let output_len = if p.output_len_is_null {
+                None
+            } else {
+                Some(NativeAllocation::from_box(Box::new(narrow_wire_ulong(p.output_len)?)))
+            };
             let wtls = Box::new(cryptoki_sys::CK_WTLS_PRF_PARAMS {
                 DigestMechanism: narrow_wire_ulong(p.digest_mechanism.0)?,
-                pSeed: seed_ptr,
-                ulSeedLen: seed.len() as cryptoki_sys::CK_ULONG,
-                pLabel: label_ptr,
-                ulLabelLen: label.len() as cryptoki_sys::CK_ULONG,
+                pSeed: seed.ptr,
+                ulSeedLen: seed.len,
+                pLabel: label.ptr,
+                ulLabelLen: label.len,
                 pOutput: output_ptr,
-                pulOutputLen: output_len.root() as *mut _,
+                pulOutputLen: output_len
+                    .as_ref()
+                    .map_or(std::ptr::null_mut(), |cell| cell.root() as *mut _),
             });
             Ok(FfiMechanism::from_box(mech_type, wtls, |b| {
-                FfiParamBacking::WtlsPrf(b, seed, label, output, output_len)
+                FfiParamBacking::WtlsPrf(b, seed.backing, label.backing, output, output_len)
             }))
         }
 
         // -- WTLS Key Mat: digest mechanism + nested random data + output -------
         CkMechanismParams::WtlsKeyMat(p) => {
-            let mut client_random = Zeroizing::new(p.random_info.client_random.clone());
-            let mut server_random = Zeroizing::new(p.random_info.server_random.clone());
-            let client_ptr = if client_random.is_empty() {
-                std::ptr::null_mut()
+            // S2 §6 (R19): the presence peers govern NULL-ness and length;
+            // the IV leg is an OUT leg with bits-derived capacity (no
+            // length field — see `sized_leg`); the OUT struct follows
+            // `returned_key_material_is_null`. The IV size narrows first
+            // (no 32-bit truncation, no huge-scalar panic).
+            let client_random = input_leg(&p.random_info.client_random_presence)?;
+            let server_random = input_leg(&p.random_info.server_random_presence)?;
+            let iv_size_bits = narrow_wire_ulong(p.iv_size_bits)?;
+            let iv_bytes = bits_to_bytes_ceil(iv_size_bits);
+            let out_is_null = p.returned_key_material_is_null;
+            let (iv_buf, iv_ptr) = sized_leg(&p.iv_presence, iv_bytes, out_is_null)?;
+            let kmo = if out_is_null {
+                None
             } else {
-                client_random.as_mut_ptr()
+                Some(NativeAllocation::from_box(Box::new(cryptoki_sys::CK_WTLS_KEY_MAT_OUT {
+                    hMacSecret: narrow_wire_ulong(p.mac_secret_handle.0)?,
+                    hKey: narrow_wire_ulong(p.key_handle.0)?,
+                    pIV: iv_ptr,
+                })))
             };
-            let server_ptr = if server_random.is_empty() {
-                std::ptr::null_mut()
-            } else {
-                server_random.as_mut_ptr()
-            };
-            let iv_bytes = ((p.iv_size_bits as usize).saturating_add(7)) / 8;
-            let mut iv_buf = if p.iv.is_empty() {
-                Zeroizing::new(vec![0u8; iv_bytes])
-            } else {
-                let mut iv = p.iv.expose(|b| Zeroizing::new(b.to_vec()));
-                iv.resize(iv_bytes, 0);
-                iv
-            };
-            let iv_ptr = if iv_buf.is_empty() { std::ptr::null_mut() } else { iv_buf.as_mut_ptr() };
-            let kmo = NativeAllocation::from_box(Box::new(cryptoki_sys::CK_WTLS_KEY_MAT_OUT {
-                hMacSecret: narrow_wire_ulong(p.mac_secret_handle.0)?,
-                hKey: narrow_wire_ulong(p.key_handle.0)?,
-                pIV: iv_ptr,
-            }));
             let wtls = Box::new(cryptoki_sys::CK_WTLS_KEY_MAT_PARAMS {
                 DigestMechanism: narrow_wire_ulong(p.digest_mechanism.0)?,
                 ulMacSizeInBits: narrow_wire_ulong(p.mac_size_bits)?,
                 ulKeySizeInBits: narrow_wire_ulong(p.key_size_bits)?,
-                ulIVSizeInBits: narrow_wire_ulong(p.iv_size_bits)?,
+                ulIVSizeInBits: iv_size_bits,
                 ulSequenceNumber: narrow_wire_ulong(p.sequence_number)?,
                 bIsExport: if p.is_export { cryptoki_sys::CK_TRUE } else { cryptoki_sys::CK_FALSE },
                 RandomInfo: cryptoki_sys::CK_WTLS_RANDOM_DATA {
-                    pClientRandom: client_ptr,
-                    ulClientRandomLen: client_random.len() as cryptoki_sys::CK_ULONG,
-                    pServerRandom: server_ptr,
-                    ulServerRandomLen: server_random.len() as cryptoki_sys::CK_ULONG,
+                    pClientRandom: client_random.ptr,
+                    ulClientRandomLen: client_random.len,
+                    pServerRandom: server_random.ptr,
+                    ulServerRandomLen: server_random.len,
                 },
-                pReturnedKeyMaterial: kmo.root() as *mut _,
+                pReturnedKeyMaterial: kmo
+                    .as_ref()
+                    .map_or(std::ptr::null_mut(), |out| out.root() as *mut _),
             });
             Ok(FfiMechanism::from_box(mech_type, wtls, |b| {
-                FfiParamBacking::WtlsKeyMat(b, client_random, server_random, kmo, iv_buf)
+                FfiParamBacking::WtlsKeyMat(
+                    b,
+                    client_random.backing,
+                    server_random.backing,
+                    kmo,
+                    iv_buf,
+                    p.iv_presence.clone(),
+                )
             }))
         }
 
         // -- SP800-108 KDF: PRF type + data params array -------------------------
         CkMechanismParams::Sp800108Kdf(p) => {
+            // S2 §6 (R19): both counted-array headers follow their
+            // presence peers; each data-param value leg follows its own.
+            let (data_is_null, data_count) = array_header(&p.data_params_presence)?;
+            let present = p.data_params_presence.as_present().map(Vec::as_slice).unwrap_or(&[]);
             // Build CK_PRF_DATA_PARAM array and backing buffers
-            let mut buffers: Vec<Zeroizing<Vec<u8>>> = Vec::with_capacity(p.data_params.len());
+            let mut buffers: Vec<Zeroizing<Vec<u8>>> = Vec::with_capacity(present.len());
             let mut c_params: Vec<cryptoki_sys::CK_PRF_DATA_PARAM> =
-                Vec::with_capacity(p.data_params.len());
-            for dp in &p.data_params {
-                let mut buf = dp.value.expose(|b| Zeroizing::new(b.to_vec()));
-                let buf_ptr = if buf.is_empty() {
-                    std::ptr::null_mut()
-                } else {
-                    buf.as_mut_ptr() as *mut std::ffi::c_void
-                };
+                Vec::with_capacity(present.len());
+            for dp in present {
+                let leg = input_leg(&dp.value_presence)?;
                 c_params.push(cryptoki_sys::CK_PRF_DATA_PARAM {
                     type_: narrow_wire_ulong(dp.type_)?,
-                    pValue: buf_ptr,
-                    ulValueLen: buf.len() as cryptoki_sys::CK_ULONG,
+                    pValue: leg.ptr as *mut std::ffi::c_void,
+                    ulValueLen: leg.len,
                 });
-                buffers.push(buf);
+                buffers.push(leg.backing);
             }
-            let data_ptr =
-                if c_params.is_empty() { std::ptr::null_mut() } else { c_params.as_mut_ptr() };
-            let mut derived_keys = FfiSp800108DerivedKeys::new(&p.additional_derived_keys)?;
+            // `as_mut_ptr` on an empty vector is dangling non-NULL —
+            // exactly the S2 §6 `Present([])` form.
+            let data_ptr = if data_is_null { std::ptr::null_mut() } else { c_params.as_mut_ptr() };
+            let mut derived_keys =
+                FfiSp800108DerivedKeys::new(&p.additional_derived_keys_presence)?;
             let sp = Box::new(cryptoki_sys::CK_SP800_108_KDF_PARAMS {
                 prfType: narrow_wire_ulong(p.prf_type.0)?,
-                ulNumberOfDataParams: c_params.len() as cryptoki_sys::CK_ULONG,
+                ulNumberOfDataParams: data_count,
                 pDataParams: data_ptr,
                 ulAdditionalDerivedKeys: derived_keys.len(),
                 pAdditionalDerivedKeys: derived_keys.ptr(),
@@ -2842,39 +3172,40 @@ fn mechanism_to_ffi_at_depth(
 
         // -- SP800-108 Feedback KDF: same + IV ----------------------------------
         CkMechanismParams::Sp800108FeedbackKdf(p) => {
-            let mut buffers: Vec<Zeroizing<Vec<u8>>> = Vec::with_capacity(p.data_params.len());
+            // S2 §6 (R19): both counted-array headers and the IV leg
+            // follow their presence peers; each data-param value leg
+            // follows its own.
+            let (data_is_null, data_count) = array_header(&p.data_params_presence)?;
+            let present = p.data_params_presence.as_present().map(Vec::as_slice).unwrap_or(&[]);
+            let mut buffers: Vec<Zeroizing<Vec<u8>>> = Vec::with_capacity(present.len());
             let mut c_params: Vec<cryptoki_sys::CK_PRF_DATA_PARAM> =
-                Vec::with_capacity(p.data_params.len());
-            for dp in &p.data_params {
-                let mut buf = dp.value.expose(|b| Zeroizing::new(b.to_vec()));
-                let buf_ptr = if buf.is_empty() {
-                    std::ptr::null_mut()
-                } else {
-                    buf.as_mut_ptr() as *mut std::ffi::c_void
-                };
+                Vec::with_capacity(present.len());
+            for dp in present {
+                let leg = input_leg(&dp.value_presence)?;
                 c_params.push(cryptoki_sys::CK_PRF_DATA_PARAM {
                     type_: narrow_wire_ulong(dp.type_)?,
-                    pValue: buf_ptr,
-                    ulValueLen: buf.len() as cryptoki_sys::CK_ULONG,
+                    pValue: leg.ptr as *mut std::ffi::c_void,
+                    ulValueLen: leg.len,
                 });
-                buffers.push(buf);
+                buffers.push(leg.backing);
             }
-            let data_ptr =
-                if c_params.is_empty() { std::ptr::null_mut() } else { c_params.as_mut_ptr() };
-            let mut iv = Zeroizing::new(p.iv.clone());
-            let iv_ptr = if iv.is_empty() { std::ptr::null_mut() } else { iv.as_mut_ptr() };
-            let mut derived_keys = FfiSp800108DerivedKeys::new(&p.additional_derived_keys)?;
+            // `as_mut_ptr` on an empty vector is dangling non-NULL —
+            // exactly the S2 §6 `Present([])` form.
+            let data_ptr = if data_is_null { std::ptr::null_mut() } else { c_params.as_mut_ptr() };
+            let iv = input_leg(&p.iv_presence)?;
+            let mut derived_keys =
+                FfiSp800108DerivedKeys::new(&p.additional_derived_keys_presence)?;
             let sp = Box::new(cryptoki_sys::CK_SP800_108_FEEDBACK_KDF_PARAMS {
                 prfType: narrow_wire_ulong(p.prf_type.0)?,
-                ulNumberOfDataParams: c_params.len() as cryptoki_sys::CK_ULONG,
+                ulNumberOfDataParams: data_count,
                 pDataParams: data_ptr,
-                ulIVLen: iv.len() as cryptoki_sys::CK_ULONG,
-                pIV: iv_ptr,
+                ulIVLen: iv.len,
+                pIV: iv.ptr,
                 ulAdditionalDerivedKeys: derived_keys.len(),
                 pAdditionalDerivedKeys: derived_keys.ptr(),
             });
             Ok(FfiMechanism::from_box(mech_type, sp, |b| {
-                FfiParamBacking::Sp800108FeedbackKdf(b, c_params, buffers, iv, derived_keys)
+                FfiParamBacking::Sp800108FeedbackKdf(b, c_params, buffers, iv.backing, derived_keys)
             }))
         }
 
@@ -2976,28 +3307,25 @@ fn mechanism_to_ffi_at_depth(
 
         // -- OTP: array of CK_OTP_PARAM ----------------------------------------
         CkMechanismParams::Otp(p) => {
-            let mut buffers: Vec<Zeroizing<Vec<u8>>> = Vec::with_capacity(p.params.len());
-            let mut c_params: Vec<cryptoki_sys::CK_OTP_PARAM> = Vec::with_capacity(p.params.len());
-            for op in &p.params {
-                let mut buf = op.value.expose(|b| Zeroizing::new(b.to_vec()));
-                let buf_ptr = if buf.is_empty() {
-                    std::ptr::null_mut()
-                } else {
-                    buf.as_mut_ptr() as *mut std::ffi::c_void
-                };
+            // S2 §6 (R19): the counted-array header follows its presence
+            // peer; each element's value leg follows its own peer.
+            let (is_null, count) = array_header(&p.params_presence)?;
+            let present = p.params_presence.as_present().map(Vec::as_slice).unwrap_or(&[]);
+            let mut buffers: Vec<Zeroizing<Vec<u8>>> = Vec::with_capacity(present.len());
+            let mut c_params: Vec<cryptoki_sys::CK_OTP_PARAM> = Vec::with_capacity(present.len());
+            for op in present {
+                let leg = input_leg(&op.value_presence)?;
                 c_params.push(cryptoki_sys::CK_OTP_PARAM {
                     type_: narrow_wire_ulong(op.type_)?,
-                    pValue: buf_ptr,
-                    ulValueLen: buf.len() as cryptoki_sys::CK_ULONG,
+                    pValue: leg.ptr as *mut std::ffi::c_void,
+                    ulValueLen: leg.len,
                 });
-                buffers.push(buf);
+                buffers.push(leg.backing);
             }
-            let params_ptr =
-                if c_params.is_empty() { std::ptr::null_mut() } else { c_params.as_mut_ptr() };
-            let otp = Box::new(cryptoki_sys::CK_OTP_PARAMS {
-                pParams: params_ptr,
-                ulCount: c_params.len() as cryptoki_sys::CK_ULONG,
-            });
+            // `as_mut_ptr` on an empty vector is dangling non-NULL —
+            // exactly the S2 §6 `Present([])` form.
+            let params_ptr = if is_null { std::ptr::null_mut() } else { c_params.as_mut_ptr() };
+            let otp = Box::new(cryptoki_sys::CK_OTP_PARAMS { pParams: params_ptr, ulCount: count });
             Ok(FfiMechanism::from_box(mech_type, otp, |b| {
                 FfiParamBacking::Otp(b, c_params, buffers)
             }))
@@ -3005,27 +3333,32 @@ fn mechanism_to_ffi_at_depth(
 
         // -- KIP: nested mechanism pointer + seed + handle ----------------------
         CkMechanismParams::Kip(p) => {
-            let inner_ffi = nested_mechanism_to_ffi(&p.mechanism, depth)?;
-            let inner_mech = NativeAllocation::from_box(Box::new(inner_ffi.ck_mechanism()));
-            let mut seed = p.seed.expose(|b| Zeroizing::new(b.to_vec()));
-            let seed_ptr = if seed.is_empty() { std::ptr::null_mut() } else { seed.as_mut_ptr() };
+            // S2 §6 (R19): a NULL `pMechanism` runs no inner conversion
+            // and retains nothing; the seed follows its presence peer.
+            let nested = if let Some(nested_mech) = p.mechanism.as_deref() {
+                let inner_ffi = nested_mechanism_to_ffi(nested_mech, depth)?;
+                let inner_mech = NativeAllocation::from_box(Box::new(inner_ffi.ck_mechanism()));
+                // Keep the inner mechanism's parameter backing alive by
+                // moving it into the KIP backing, so any pointers the
+                // inner C struct holds stay valid for the call and are
+                // freed afterwards (L8 — was a mem::forget that leaked it
+                // permanently).
+                let inner_backing = NativeAllocation::from_box(Box::new(inner_ffi._backing));
+                Some((inner_mech, inner_backing))
+            } else {
+                None
+            };
+            let seed = input_leg(&p.seed_presence)?;
             let kip = Box::new(cryptoki_sys::CK_KIP_PARAMS {
-                pMechanism: inner_mech.root() as *mut _,
+                pMechanism: nested
+                    .as_ref()
+                    .map_or(std::ptr::null_mut(), |nested| nested.0.root() as *mut _),
                 hKey: narrow_wire_ulong(p.key_handle.0)?,
-                pSeed: seed_ptr,
-                ulSeedLen: seed.len() as cryptoki_sys::CK_ULONG,
+                pSeed: seed.ptr,
+                ulSeedLen: seed.len,
             });
-            // Keep the inner mechanism's parameter backing alive by moving it
-            // into the KIP backing, so any pointers the inner C struct holds
-            // stay valid for the call and are freed afterwards (L8 — was a
-            // mem::forget that leaked it permanently).
             Ok(FfiMechanism::from_box(mech_type, kip, |b| {
-                FfiParamBacking::Kip(
-                    b,
-                    inner_mech,
-                    seed,
-                    NativeAllocation::from_box(Box::new(inner_ffi._backing)),
-                )
+                FfiParamBacking::Kip(b, nested, seed.backing)
             }))
         }
 
@@ -3072,126 +3405,81 @@ fn mechanism_to_ffi_at_depth(
 
         // -- Skipjack Private Wrap: struct with many pointers -------------------
         CkMechanismParams::SkipjackPrivateWrap(p) => {
-            let mut password = p.password.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut public_data = Zeroizing::new(p.public_data.clone());
-            let mut random_a = Zeroizing::new(p.random_a.clone());
-            let mut prime_p = Zeroizing::new(p.prime_p.clone());
-            let mut base_g = Zeroizing::new(p.base_g.clone());
-            let mut subprime_q = Zeroizing::new(p.subprime_q.clone());
-            let pass_ptr =
-                if password.is_empty() { std::ptr::null_mut() } else { password.as_mut_ptr() };
-            let pub_ptr = if public_data.is_empty() {
-                std::ptr::null_mut()
-            } else {
-                public_data.as_mut_ptr()
-            };
-            let ra_ptr =
-                if random_a.is_empty() { std::ptr::null_mut() } else { random_a.as_mut_ptr() };
-            let pp_ptr =
-                if prime_p.is_empty() { std::ptr::null_mut() } else { prime_p.as_mut_ptr() };
-            let bg_ptr = if base_g.is_empty() { std::ptr::null_mut() } else { base_g.as_mut_ptr() };
-            let sq_ptr =
-                if subprime_q.is_empty() { std::ptr::null_mut() } else { subprime_q.as_mut_ptr() };
-            // ulPAndGLen = length of prime_p (and base_g, which share the same length)
-            let p_and_g_len = prime_p.len() as cryptoki_sys::CK_ULONG;
-            let q_len = subprime_q.len() as cryptoki_sys::CK_ULONG;
-            let random_len = random_a.len() as cryptoki_sys::CK_ULONG;
+            // S2 §6 (R19): the presence peers govern NULL-ness and length.
+            // PrimeP/BaseG share the one C `ulPAndGLen`: v1 decode enforces
+            // strict agreement (`check_shared_len_agreement`), and a
+            // directly-constructed legacy value with mismatched legs
+            // converts with the length following PrimeP (pinned by
+            // `r19_reconstruct_skipjack_private_wrap_legacy_mismatch_uses_prime_p`).
+            // `ulPasswordLen` stays scalar-authoritative (pinned).
+            let password = input_leg(&p.password_presence)?;
+            let public_data = input_leg(&p.public_data_presence)?;
+            let random_a = input_leg(&p.random_a_presence)?;
+            let prime_p = input_leg(&p.prime_p_presence)?;
+            let base_g = input_leg(&p.base_g_presence)?;
+            let subprime_q = input_leg(&p.subprime_q_presence)?;
             let sj = Box::new(cryptoki_sys::CK_SKIPJACK_PRIVATE_WRAP_PARAMS {
                 ulPasswordLen: narrow_wire_ulong(p.password_length)?,
-                pPassword: pass_ptr,
-                ulPublicDataLen: public_data.len() as cryptoki_sys::CK_ULONG,
-                pPublicData: pub_ptr,
-                ulPAndGLen: p_and_g_len,
-                ulQLen: q_len,
-                ulRandomLen: random_len,
-                pRandomA: ra_ptr,
-                pPrimeP: pp_ptr,
-                pBaseG: bg_ptr,
-                pSubprimeQ: sq_ptr,
+                pPassword: password.ptr,
+                ulPublicDataLen: public_data.len,
+                pPublicData: public_data.ptr,
+                ulPAndGLen: prime_p.len,
+                ulQLen: subprime_q.len,
+                ulRandomLen: random_a.len,
+                pRandomA: random_a.ptr,
+                pPrimeP: prime_p.ptr,
+                pBaseG: base_g.ptr,
+                pSubprimeQ: subprime_q.ptr,
             });
             Ok(FfiMechanism::from_box(mech_type, sj, |b| {
                 FfiParamBacking::SkipjackPrivateWrap(
                     b,
-                    password,
-                    public_data,
-                    random_a,
-                    prime_p,
-                    base_g,
-                    subprime_q,
+                    password.backing,
+                    public_data.backing,
+                    random_a.backing,
+                    prime_p.backing,
+                    base_g.backing,
+                    subprime_q.backing,
                 )
             }))
         }
 
         // -- Skipjack Relayx: struct with 7 pointers ----------------------------
         CkMechanismParams::SkipjackRelayx(p) => {
-            let mut old_wrapped_x = p.old_wrapped_x.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut old_password = p.old_password.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut old_public_data = p.old_public_data.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut old_random_a = p.old_random_a.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut new_password = p.new_password.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut new_public_data = p.new_public_data.expose(|b| Zeroizing::new(b.to_vec()));
-            let mut new_random_a = p.new_random_a.expose(|b| Zeroizing::new(b.to_vec()));
-            let owx_ptr = if old_wrapped_x.is_empty() {
-                std::ptr::null_mut()
-            } else {
-                old_wrapped_x.as_mut_ptr()
-            };
-            let op_ptr = if old_password.is_empty() {
-                std::ptr::null_mut()
-            } else {
-                old_password.as_mut_ptr()
-            };
-            let opd_ptr = if old_public_data.is_empty() {
-                std::ptr::null_mut()
-            } else {
-                old_public_data.as_mut_ptr()
-            };
-            let ora_ptr = if old_random_a.is_empty() {
-                std::ptr::null_mut()
-            } else {
-                old_random_a.as_mut_ptr()
-            };
-            let np_ptr = if new_password.is_empty() {
-                std::ptr::null_mut()
-            } else {
-                new_password.as_mut_ptr()
-            };
-            let npd_ptr = if new_public_data.is_empty() {
-                std::ptr::null_mut()
-            } else {
-                new_public_data.as_mut_ptr()
-            };
-            let nra_ptr = if new_random_a.is_empty() {
-                std::ptr::null_mut()
-            } else {
-                new_random_a.as_mut_ptr()
-            };
+            // S2 §6 (R19): the presence peers govern NULL-ness and length.
+            let old_wrapped_x = input_leg(&p.old_wrapped_x_presence)?;
+            let old_password = input_leg(&p.old_password_presence)?;
+            let old_public_data = input_leg(&p.old_public_data_presence)?;
+            let old_random_a = input_leg(&p.old_random_a_presence)?;
+            let new_password = input_leg(&p.new_password_presence)?;
+            let new_public_data = input_leg(&p.new_public_data_presence)?;
+            let new_random_a = input_leg(&p.new_random_a_presence)?;
             let sj = Box::new(cryptoki_sys::CK_SKIPJACK_RELAYX_PARAMS {
-                ulOldWrappedXLen: old_wrapped_x.len() as cryptoki_sys::CK_ULONG,
-                pOldWrappedX: owx_ptr,
-                ulOldPasswordLen: old_password.len() as cryptoki_sys::CK_ULONG,
-                pOldPassword: op_ptr,
-                ulOldPublicDataLen: old_public_data.len() as cryptoki_sys::CK_ULONG,
-                pOldPublicData: opd_ptr,
-                ulOldRandomLen: old_random_a.len() as cryptoki_sys::CK_ULONG,
-                pOldRandomA: ora_ptr,
-                ulNewPasswordLen: new_password.len() as cryptoki_sys::CK_ULONG,
-                pNewPassword: np_ptr,
-                ulNewPublicDataLen: new_public_data.len() as cryptoki_sys::CK_ULONG,
-                pNewPublicData: npd_ptr,
-                ulNewRandomLen: new_random_a.len() as cryptoki_sys::CK_ULONG,
-                pNewRandomA: nra_ptr,
+                ulOldWrappedXLen: old_wrapped_x.len,
+                pOldWrappedX: old_wrapped_x.ptr,
+                ulOldPasswordLen: old_password.len,
+                pOldPassword: old_password.ptr,
+                ulOldPublicDataLen: old_public_data.len,
+                pOldPublicData: old_public_data.ptr,
+                ulOldRandomLen: old_random_a.len,
+                pOldRandomA: old_random_a.ptr,
+                ulNewPasswordLen: new_password.len,
+                pNewPassword: new_password.ptr,
+                ulNewPublicDataLen: new_public_data.len,
+                pNewPublicData: new_public_data.ptr,
+                ulNewRandomLen: new_random_a.len,
+                pNewRandomA: new_random_a.ptr,
             });
             Ok(FfiMechanism::from_box(mech_type, sj, |b| {
                 FfiParamBacking::SkipjackRelayx(
                     b,
-                    old_wrapped_x,
-                    old_password,
-                    old_public_data,
-                    old_random_a,
-                    new_password,
-                    new_public_data,
-                    new_random_a,
+                    old_wrapped_x.backing,
+                    old_password.backing,
+                    old_public_data.backing,
+                    old_random_a.backing,
+                    new_password.backing,
+                    new_public_data.backing,
+                    new_random_a.backing,
                 )
             }))
         }
@@ -3208,12 +3496,184 @@ fn mechanism_to_ffi_at_depth(
     }
 }
 
-fn gcm_iv_capacity(p: &GcmParams) -> CkResult<usize> {
-    let requested = usize::try_from(p.iv_buffer_len).map_err(|_| CkRv::MECHANISM_PARAM_INVALID)?;
-    let capacity = p.iv.len().max(requested);
+fn gcm_iv_capacity(iv_buffer_len: u64, input_len: usize) -> CkResult<usize> {
+    let requested = usize::try_from(iv_buffer_len).map_err(|_| CkRv::MECHANISM_PARAM_INVALID)?;
+    let capacity = input_len.max(requested);
     const MAX_GCM_IV_BUFFER_LEN: usize = 512 * 1024 * 1024;
     if capacity > MAX_GCM_IV_BUFFER_LEN {
         return Err(CkRv::MECHANISM_PARAM_INVALID);
     }
     Ok(capacity)
+}
+
+// -- R19 (S2 §6): typed input-leg reconstruction -------------------------
+
+/// S2 §6 `Present([])` leg: one stable readable non-NULL address shared
+/// by every empty-present byte leg (top-level and nested alike — the
+/// nested-OAEP byte-identity pin requires top and nested to agree).
+/// Length 0 always accompanies it, but providers may probe readability,
+/// so this designates a real static byte rather than a dangling address.
+static EMPTY_BYTE: u8 = 0;
+const EMPTY_NON_NULL: *mut u8 = &EMPTY_BYTE as *const u8 as *mut u8;
+
+/// One reconstructed S2 §6 input byte-leg: the owned backing (populated
+/// only for `Present(data)`), the provider-visible pointer, and the
+/// declared length.
+struct InputLeg {
+    backing: Zeroizing<Vec<u8>>,
+    ptr: *mut u8,
+    len: cryptoki_sys::CK_ULONG,
+}
+
+/// Reconstruct one S2 §6 input byte-leg from its presence peer.
+/// `Null{n}` → no backing, NULL + narrowed `n` (never allocates — a
+/// huge `declared_len` forwards without touching the allocator);
+/// `Present([])` → no backing, [`EMPTY_NON_NULL`] + 0; `Present(data)` →
+/// owned zeroized copy + exact length (never a client address).
+fn input_leg(presence: &PointerBytes) -> CkResult<InputLeg> {
+    match presence {
+        PointerBytes::Null { declared_len } => Ok(InputLeg {
+            backing: Zeroizing::new(Vec::new()),
+            ptr: std::ptr::null_mut(),
+            len: narrow_wire_ulong(*declared_len)?,
+        }),
+        PointerBytes::Present(bytes) => {
+            let data_len = bytes.len();
+            if data_len == 0 {
+                Ok(InputLeg { backing: Zeroizing::new(Vec::new()), ptr: EMPTY_NON_NULL, len: 0 })
+            } else {
+                let mut backing = bytes.expose(|b| Zeroizing::new(b.to_vec()));
+                let ptr = backing.as_mut_ptr();
+                let len = narrow_wire_ulong(data_len as u64)?;
+                Ok(InputLeg { backing, ptr, len })
+            }
+        }
+    }
+}
+
+/// S2 §6 counted-array header from the presence peer: NULL-ness +
+/// declared count. `Null{n}` → (NULL, narrowed `n`) with no element
+/// work; `Present(items)` → (non-NULL, exact count) — the caller
+/// converts `items` into an exactly-sized owned `Vec<T>` (element-aligned
+/// by construction) and points at it, or at
+/// [`EMPTY_NON_NULL`] when empty.
+fn array_header<T>(presence: &PointerArray<T>) -> CkResult<(bool, cryptoki_sys::CK_ULONG)> {
+    match presence {
+        PointerArray::Null { declared_count } => Ok((true, narrow_wire_ulong(*declared_count)?)),
+        PointerArray::Present(items) => Ok((false, narrow_wire_ulong(items.len() as u64)?)),
+    }
+}
+
+/// Reconstruct one S2 §6 PRF output leg from its envelope: NULL (no
+/// backing) iff `output_is_null`; otherwise a zeroed `output_len`
+/// buffer. The scalar narrows BEFORE allocating (a 32-bit-truncating
+/// scalar errors instead of mis-sizing), and the reservation is
+/// fallible (`HOST_MEMORY` per the S2 §6 RV table — `output_len` is an
+/// uncapped scalar, so `vec![0; n]` would panic on huge values).
+/// Returns the backing plus the provider-visible pointer.
+fn prf_output_buffer(
+    output_len: u64,
+    output_is_null: bool,
+) -> CkResult<(Zeroizing<Vec<u8>>, *mut u8)> {
+    if output_is_null {
+        return Ok((Zeroizing::new(Vec::new()), std::ptr::null_mut()));
+    }
+    let capacity = narrow_wire_ulong(output_len)? as usize;
+    let mut buffer = Vec::new();
+    buffer.try_reserve_exact(capacity).map_err(|_| CkRv::HOST_MEMORY)?;
+    buffer.resize(capacity, 0);
+    let mut buffer = Zeroizing::new(buffer);
+    let ptr = buffer.as_mut_ptr();
+    Ok((buffer, ptr))
+}
+
+/// Bits-to-bytes ceiling for bits-governed legs (ChaCha20/Salsa20
+/// counters and nonces, key-mat IVs): infallible — the input is an
+/// already-narrowed `CK_ULONG`, and `bits / 8 + 1` cannot overflow it.
+fn bits_to_bytes_ceil(bits: cryptoki_sys::CK_ULONG) -> usize {
+    (bits / 8 + cryptoki_sys::CK_ULONG::from(!bits.is_multiple_of(8))) as usize
+}
+
+/// Reconstruct one S2 §6 externally-sized leg (no byte-length field —
+/// the provider reads/writes exactly `size_bytes`): `Null{..}` → no
+/// backing + NULL (the declared length is opaque — no field carries
+/// it); `Present` → live buffer of exactly `size_bytes` (pad/truncate
+/// — the provider reads that many regardless, so an exact-sized
+/// backing would over-read on short inputs and dangle on empty ones).
+/// `Present` is always non-NULL (dangling when `size_bytes` is 0 — the
+/// provider touches nothing then). Reservations are fallible
+/// (`HOST_MEMORY` per the S2 §6 RV table — the size derives from an
+/// uncapped scalar). When `out_is_null` (key-mat IVs with a NULL OUT
+/// struct — never provider-visible), the caller's full bytes are kept
+/// so the echo round-trips exactly.
+fn sized_leg(
+    presence: &PointerBytes,
+    size_bytes: usize,
+    out_is_null: bool,
+) -> CkResult<(Zeroizing<Vec<u8>>, *mut u8)> {
+    match presence {
+        PointerBytes::Null { .. } => Ok((Zeroizing::new(Vec::new()), std::ptr::null_mut())),
+        PointerBytes::Present(bytes) => bytes.expose(|b| {
+            let mut backing = if b.is_empty() {
+                let mut sized = Vec::new();
+                sized.try_reserve_exact(size_bytes).map_err(|_| CkRv::HOST_MEMORY)?;
+                sized.resize(size_bytes, 0);
+                Zeroizing::new(sized)
+            } else if out_is_null {
+                Zeroizing::new(b.to_vec())
+            } else {
+                let mut sized = Zeroizing::new(b.to_vec());
+                let additional = size_bytes.saturating_sub(sized.len());
+                if additional > 0 {
+                    sized.try_reserve_exact(additional).map_err(|_| CkRv::HOST_MEMORY)?;
+                }
+                sized.resize(size_bytes, 0);
+                sized
+            };
+            let ptr = backing.as_mut_ptr();
+            Ok((backing, ptr))
+        }),
+    }
+}
+
+/// Reconstruct one S2 §6 fixed-size provider-read leg (PBE IV,
+/// ChaCha20/Salsa20 counter and nonce): [`sized_leg`] with a live
+/// consumer (caller bytes always normalize to exactly `size_bytes`).
+fn fixed_leg(
+    presence: &PointerBytes,
+    size_bytes: usize,
+) -> CkResult<(Zeroizing<Vec<u8>>, *mut u8)> {
+    sized_leg(presence, size_bytes, false)
+}
+
+/// Echo one S2 §6 input byte-leg from its post-call FFI form (shared by
+/// `output_params` and `output_params_equal`): a NULL pointer echoes
+/// `Null` with the STRUCT length (provider-untouched for inputs, so
+/// the caller's declared length survives exactly); a live pointer
+/// echoes the backing bytes as `Present`.
+fn presence_from_ffi(
+    is_null: bool,
+    struct_len: cryptoki_sys::CK_ULONG,
+    bytes: &[u8],
+) -> PointerBytes {
+    if is_null {
+        PointerBytes::null_len(struct_len as u64)
+    } else {
+        PointerBytes::present_copy(bytes)
+    }
+}
+
+/// Echo one key-mat IV leg (shared by `output_params` and
+/// `output_params_equal`): the stored peer carries the caller's class
+/// (the only record when the OUT struct is NULL, and robust when it is
+/// live — providers write IV bytes, never IV pointers); the backing
+/// carries the post-call bytes (provider-written when the OUT struct
+/// is live, caller bytes otherwise).
+fn key_mat_iv_echo(stored: &PointerBytes, backing: &[u8], iv_len: usize) -> PointerBytes {
+    match stored {
+        PointerBytes::Null { declared_len } => PointerBytes::null_len(*declared_len),
+        PointerBytes::Present(_) => {
+            PointerBytes::present_copy(&backing[..iv_len.min(backing.len())])
+        }
+    }
 }

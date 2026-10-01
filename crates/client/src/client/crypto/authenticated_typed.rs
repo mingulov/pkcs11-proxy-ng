@@ -272,8 +272,6 @@ mod tests {
         let mechanism = CkMechanism {
             mechanism_type: CkMechanismType::GOSTR3410_KEY_WRAP,
             params: Some(CkMechanismParams::Gostr3410KeyWrap(Gostr3410KeyWrapParams {
-                wrap_oid: vec![0; 3],
-                ukm: vec![0; 8],
                 key_handle: CkObjectHandle(17),
                 wrap_oid_presence: PointerBytes::present_copy(&[0; 3]),
                 ukm_presence: PointerBytes::present_copy(&[0; 8]),

@@ -411,15 +411,11 @@ fn registry_backed_mock_validates_mechanism_param_presence() {
     let gcm = CkMechanism {
         mechanism_type: CkMechanismType::AES_GCM,
         params: Some(CkMechanismParams::Gcm(GcmParams {
-            iv: vec![0; 12],
             iv_bits: 96,
             iv_buffer_len: 12,
-            aad: vec![].into(),
             tag_bits: 128,
             iv_presence: PointerBytes::from_legacy(&[0; 12], false),
             aad_presence: PointerBytes::from_legacy(&[], false),
-            iv_null: false,
-            aad_null: false,
         })),
     };
     backend.encrypt_init(session, &validated(&gcm), key).expect("GCM with params");
@@ -449,10 +445,8 @@ fn gcm_wrap_iv_generation_is_deterministic_and_preserves_fixed_prefix() {
     let mech = CkMechanism {
         mechanism_type: CkMechanismType::AES_GCM,
         params: Some(CkMechanismParams::GcmWrap(GcmWrapParams {
-            iv: vec![0xA1, 0xA2, 0xA3, 0xA4, 0, 0, 0, 0, 0, 0, 0, 0],
             iv_fixed_bits: 32,
             iv_generator: CkGeneratorFunction::GENERATE_COUNTER_XOR, // CKG_GENERATE_COUNTER_XOR (4)
-            aad: vec![].into(),
             tag_bits: 128,
             iv_presence: PointerBytes::present_copy(&[
                 0xA1, 0xA2, 0xA3, 0xA4, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -465,9 +459,10 @@ fn gcm_wrap_iv_generation_is_deterministic_and_preserves_fixed_prefix() {
     let Some(CkMechanismParams::GcmWrap(generated)) = output else {
         panic!("generator != NO_GENERATE must yield writeback params, got {output:?}");
     };
-    assert_eq!(generated.iv.len(), 12, "IV length preserved");
-    assert_eq!(&generated.iv[..4], &[0xA1, 0xA2, 0xA3, 0xA4], "fixed prefix preserved");
-    assert_ne!(&generated.iv[4..], &[0u8; 8][..], "generated tail is non-zero");
+    let generated_iv = generated.iv_presence.as_present().unwrap().expose(|b| b.to_vec());
+    assert_eq!(generated_iv.len(), 12, "IV length preserved");
+    assert_eq!(&generated_iv[..4], &[0xA1, 0xA2, 0xA3, 0xA4], "fixed prefix preserved");
+    assert_ne!(&generated_iv[4..], &[0u8; 8][..], "generated tail is non-zero");
 
     // Determinism: the same session re-initializing gets the same IV.
     backend.encrypt_init_cancel(session).unwrap();
@@ -479,10 +474,8 @@ fn gcm_wrap_iv_generation_is_deterministic_and_preserves_fixed_prefix() {
     let mech_no_gen = CkMechanism {
         mechanism_type: CkMechanismType::AES_GCM,
         params: Some(CkMechanismParams::GcmWrap(GcmWrapParams {
-            iv: vec![0; 12],
             iv_fixed_bits: 0,
             iv_generator: CkGeneratorFunction::GENERATE, // CKG_GENERATE (1)
-            aad: vec![].into(),
             tag_bits: 128,
             iv_presence: PointerBytes::present_copy(&[0; 12]),
             aad_presence: PointerBytes::present_copy(&[]),

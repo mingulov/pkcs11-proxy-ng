@@ -55,10 +55,10 @@ impl MockBackend {
         let handles = match params {
             Some(CkMechanismParams::Hkdf(p)) => MockEmbeddedHandles::HkdfSalt(p.salt_key_handle.0),
             Some(CkMechanismParams::Sp800108Kdf(p)) => {
-                MockEmbeddedHandles::Sp800108(encoded_handles(&p.data_params))
+                MockEmbeddedHandles::Sp800108(encoded_handles(&p.data_params_presence))
             }
             Some(CkMechanismParams::Sp800108FeedbackKdf(p)) => {
-                MockEmbeddedHandles::Sp800108(encoded_handles(&p.data_params))
+                MockEmbeddedHandles::Sp800108(encoded_handles(&p.data_params_presence))
             }
             _ => return,
         };
@@ -66,15 +66,18 @@ impl MockBackend {
     }
 }
 
-fn encoded_handles(params: &[PrfDataParam]) -> Vec<(u64, usize)> {
-    params
+fn encoded_handles(params: &PointerArray<PrfDataParam>) -> Vec<(u64, usize)> {
+    let Some(items) = params.as_present() else { return Vec::new() };
+    items
         .iter()
         .filter(|p| p.type_ == CK_SP800_108_KEY_HANDLE)
         .filter_map(|p| {
-            p.value.expose(|value| match value.len() {
-                4 => Some((u32::from_ne_bytes(value.try_into().unwrap()) as u64, 4)),
-                8 => Some((u64::from_ne_bytes(value.try_into().unwrap()), 8)),
-                _ => None,
+            p.value_presence.as_present().and_then(|present| {
+                present.expose(|value| match value.len() {
+                    4 => Some((u32::from_ne_bytes(value.try_into().unwrap()) as u64, 4)),
+                    8 => Some((u64::from_ne_bytes(value.try_into().unwrap()), 8)),
+                    _ => None,
+                })
             })
         })
         .collect()

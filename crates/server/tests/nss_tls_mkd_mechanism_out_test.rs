@@ -88,9 +88,7 @@ async fn nss_ssl3_master_key_derive_reports_negotiated_version() -> Result<(), S
         mechanism_type: CkMechanismType::SSL3_MASTER_KEY_DERIVE,
         params: Some(CkMechanismParams::Ssl3MasterKeyDerive(Ssl3MasterKeyDeriveParams {
             random_info: SslRandomData {
-                client_random: vec![0x11; 32],
                 client_random_presence: PointerBytes::present_copy(&[0x11; 32]),
-                server_random: vec![0x22; 32],
                 server_random_presence: PointerBytes::present_copy(&[0x22; 32]),
             },
             version_major: 3,
@@ -118,8 +116,14 @@ async fn nss_ssl3_master_key_derive_reports_negotiated_version() -> Result<(), S
             // provider-written output, not an input echo.
             assert_eq!(p.version_major, 3, "NSS writes the SSL major version");
             assert_eq!(p.version_minor, 1, "NSS reports the PMSA-embedded version");
-            assert_eq!(p.random_info.client_random, vec![0x11; 32]);
-            assert_eq!(p.random_info.server_random, vec![0x22; 32]);
+            assert_eq!(
+                p.random_info.client_random_presence.as_present().unwrap().expose(|b| b.to_vec()),
+                vec![0x11; 32]
+            );
+            assert_eq!(
+                p.random_info.server_random_presence.as_present().unwrap().expose(|b| b.to_vec()),
+                vec![0x22; 32]
+            );
         }
         other => panic!("expected SSL3-MKD mechanism_out, got {other:?}"),
     }

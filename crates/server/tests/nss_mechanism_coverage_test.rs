@@ -458,16 +458,11 @@ async fn nss_aes_gcm_encrypt_decrypt_parameterized() -> Result<(), String> {
     let gcm_mechanism = CkMechanism {
         mechanism_type: CkMechanismType::AES_GCM,
         params: Some(CkMechanismParams::Gcm(GcmParams {
-            iv: iv.clone(),
             iv_bits: 96, // 12 bytes * 8
             iv_buffer_len: iv.len() as u64,
-            aad: aad.clone().into(),
             tag_bits: 128,
             iv_presence: PointerBytes::from_legacy(&iv, false),
             aad_presence: PointerBytes::from_legacy(&aad, false),
-
-            iv_null: false,
-            aad_null: false,
         })),
     };
 
@@ -516,10 +511,8 @@ async fn nss_aes_gcm_encrypt_decrypt_parameterized() -> Result<(), String> {
     let gcm_decrypt_mechanism = CkMechanism {
         mechanism_type: CkMechanismType::AES_GCM,
         params: Some(CkMechanismParams::Gcm(GcmParams {
-            iv,
             iv_bits: 96,
             iv_buffer_len: 12,
-            aad: aad.into(),
             tag_bits: 128,
             iv_presence: PointerBytes::from_legacy(
                 &[0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B],
@@ -529,9 +522,6 @@ async fn nss_aes_gcm_encrypt_decrypt_parameterized() -> Result<(), String> {
                 b"additional authenticated data for GCM test",
                 false,
             ),
-
-            iv_null: false,
-            aad_null: false,
         })),
     };
     client

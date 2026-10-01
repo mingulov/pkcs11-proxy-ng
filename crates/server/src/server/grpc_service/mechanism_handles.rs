@@ -303,7 +303,7 @@ fn push_param_handles(params: &CkMechanismParams, out: &mut Vec<u64>) {
         }
         P::Kip(p) => {
             push(p.key_handle.0, out);
-            if let Some(inner) = p.mechanism.params.as_ref() {
+            if let Some(inner) = p.mechanism.as_ref().and_then(|nested| nested.params.as_ref()) {
                 push_param_handles(inner, out);
             }
         }
@@ -492,7 +492,7 @@ pub(super) fn remap_param_handles(
             remap_handle(&mut p.key_handle, resolve)?;
             // The nested mechanism may itself carry params with embedded
             // handles, so recurse (mirrors the CmsSig sub-mechanisms).
-            if let Some(inner) = p.mechanism.params.as_mut() {
+            if let Some(inner) = p.mechanism.as_mut().and_then(|nested| nested.params.as_mut()) {
                 remap_param_handles(inner, resolve)?;
             }
         }
@@ -629,9 +629,7 @@ mod tests {
             expand: true,
             prf_hash_mechanism: pkcs11_proxy_ng_types::CkMechanismType(0),
             salt_type: 0,
-            salt: Vec::new().into(),
             salt_key_handle: CkObjectHandle(salt),
-            info: Vec::new().into(),
             salt_presence: PointerBytes::present_copy(&[]),
             info_presence: PointerBytes::present_copy(&[]),
         })
@@ -731,10 +729,8 @@ mod tests {
 
     fn kip(key_handle: u64, inner: CkMechanismParams) -> CkMechanismParams {
         CkMechanismParams::Kip(pkcs11_proxy_ng_types::KipParams {
-            mechanism: Box::new(with_params(inner)),
+            mechanism: Some(Box::new(with_params(inner))),
             key_handle: CkObjectHandle(key_handle),
-            mechanism_is_null: false,
-            seed: Vec::new().into(),
             seed_presence: PointerBytes::present_copy(&[]),
         })
     }
@@ -767,7 +763,11 @@ mod tests {
         remap_param_handles(&mut p, &resolver(&[(7, 700), (9, 900)])).unwrap();
         let CkMechanismParams::Kip(out) = p else { panic!() };
         assert_eq!(out.key_handle.0, 700);
-        let Some(CkMechanismParams::Hkdf(inner)) = out.mechanism.params.as_ref() else { panic!() };
+        let Some(CkMechanismParams::Hkdf(inner)) =
+            out.mechanism.as_ref().and_then(|m| m.params.as_ref())
+        else {
+            panic!()
+        };
         assert_eq!(inner.salt_key_handle.0, 900);
     }
 
@@ -925,9 +925,7 @@ mod tests {
                 expand: true,
                 prf_hash_mechanism: pkcs11_proxy_ng_types::CkMechanismType(0),
                 salt_type: 0,
-                salt: Vec::new().into(),
                 salt_key_handle: CkObjectHandle(vo), // this virtual handle is denied (wrong uid)
-                info: Vec::new().into(),
                 salt_presence: PointerBytes::present_copy(&[]),
                 info_presence: PointerBytes::present_copy(&[]),
             })),
@@ -959,9 +957,7 @@ mod tests {
                 expand: true,
                 prf_hash_mechanism: pkcs11_proxy_ng_types::CkMechanismType(0),
                 salt_type: 0,
-                salt: Vec::new().into(),
                 salt_key_handle: CkObjectHandle(vo), // this virtual handle is allowed
-                info: Vec::new().into(),
                 salt_presence: PointerBytes::present_copy(&[]),
                 info_presence: PointerBytes::present_copy(&[]),
             })),
@@ -999,9 +995,7 @@ mod tests {
                 expand: false,
                 prf_hash_mechanism: pkcs11_proxy_ng_types::CkMechanismType(0x250),
                 salt_type: 3,
-                salt: vec![1, 2, 3, 4, 5].into(),
                 salt_key_handle: CkObjectHandle(vo),
-                info: vec![9, 9].into(),
                 salt_presence: PointerBytes::present_copy(&[1, 2, 3, 4, 5]),
                 info_presence: PointerBytes::present_copy(&[9, 9]),
             })),

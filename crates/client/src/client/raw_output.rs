@@ -1084,13 +1084,9 @@ mod message_contract_tests {
         let mixed = CkMechanism {
             mechanism_type: CkMechanismType::AES_GCM,
             params: Some(CkMechanismParams::Gcm(GcmParams {
-                iv: vec![0x11; 12],
                 iv_bits: 96,
                 iv_buffer_len: 12,
-                aad: SecretBytes::copy_from_slice(&[]),
                 tag_bits: 128,
-                iv_null: false,
-                aad_null: false,
                 iv_presence: PointerBytes::present_copy(&[0x11; 12]),
                 aad_presence: PointerBytes::null_len(16),
             })),
@@ -1123,9 +1119,6 @@ mod message_contract_tests {
             mechanism_type: CkMechanismType(0xFFFF_FFFF),
             params: Some(CkMechanismParams::KeaDerive(KeaDeriveParams {
                 is_sender: true,
-                random_a: vec![1; 4],
-                random_b: vec![2; 4],
-                public_data: Vec::new(),
                 random_a_presence: PointerBytes::present_copy(&[1; 4]),
                 random_b_presence: PointerBytes::present_copy(&[2; 4]),
                 public_data_presence: PointerBytes::present_copy(&[]),
@@ -1151,7 +1144,6 @@ mod message_contract_tests {
         let otp = CkMechanism {
             mechanism_type: CkMechanismType(0xFFFF_FFFE),
             params: Some(CkMechanismParams::Otp(pkcs11_proxy_ng_types::OtpParams {
-                params: Vec::new(),
                 params_presence: pkcs11_proxy_ng_types::PointerArray::null_count(5),
             })),
         };

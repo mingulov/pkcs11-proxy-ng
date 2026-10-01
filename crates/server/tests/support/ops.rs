@@ -472,10 +472,7 @@ pub async fn rsa_oaep_encrypt(
             hash_alg: CkMechanismType::SHA_1,
             mgf: CkMgf::MGF1_SHA1,
             source: CkOaepSource::DATA_SPECIFIED,
-            source_data: Vec::new().into(),
             source_data_presence: PointerBytes::from_legacy(&[], false),
-
-            source_null: false,
         })),
     };
     client

@@ -21,9 +21,7 @@ fn hkdf(handle: u64) -> Option<Mechanism> {
                 expand: true,
                 prf_hash_mechanism: CkMechanismType::SHA256,
                 salt_type: cryptoki_sys::CKF_HKDF_SALT_KEY as u64,
-                salt: vec![].into(),
                 salt_key_handle: CkObjectHandle(handle),
-                info: vec![].into(),
                 salt_presence: PointerBytes::present_copy(&[]),
                 info_presence: PointerBytes::present_copy(&[]),
             })),
@@ -36,12 +34,10 @@ fn sp800108(value: Vec<u8>, feedback: bool) -> Option<Mechanism> {
     let data_params = vec![
         PrfDataParam {
             type_: cryptoki_sys::CK_SP800_108_ITERATION_VARIABLE as u64,
-            value: vec![].into(),
             value_presence: PointerBytes::present_copy(&[]),
         },
         PrfDataParam {
             type_: cryptoki_sys::CK_SP800_108_KEY_HANDLE as u64,
-            value: value.clone().into(),
             value_presence: PointerBytes::present_copy(&value),
         },
     ];
@@ -54,17 +50,12 @@ fn sp800108(value: Vec<u8>, feedback: bool) -> Option<Mechanism> {
                     data_params_presence: PointerArray::present(data_params.clone()),
                     iv_presence: PointerBytes::present_copy(&[]),
                     additional_derived_keys_presence: PointerArray::present(Vec::new()),
-                    data_params,
-                    iv: vec![],
-                    additional_derived_keys: vec![],
                 })
             } else {
                 CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
                     prf_type: CkMechanismType(cryptoki_sys::CKM_SHA256_HMAC as u64),
                     data_params_presence: PointerArray::present(data_params.clone()),
                     additional_derived_keys_presence: PointerArray::present(Vec::new()),
-                    data_params,
-                    additional_derived_keys: vec![],
                 })
             }),
         })

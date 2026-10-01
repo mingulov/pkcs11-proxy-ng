@@ -32,8 +32,8 @@ impl From<&IkePrfDeriveParams> for v1_proto::IkePrfDeriveParams {
             prf_mechanism: p.prf_mechanism.0,
             data_as_key: p.data_as_key,
             rekey: p.rekey,
-            ni: secret_to_plain(&p.ni),
-            nr: secret_to_plain(&p.nr),
+            ni: pointer_to_wire(&p.ni_presence).0,
+            nr: pointer_to_wire(&p.nr_presence).0,
             new_key_handle: p.new_key_handle.0,
             // R16: production encode stays v0-shaped.
             ni_null_len: None,
@@ -68,8 +68,6 @@ impl FromWire<v1_proto::IkePrfDeriveParams> for IkePrfDeriveParams {
             prf_mechanism: CkMechanismType(p.prf_mechanism),
             data_as_key: p.data_as_key,
             rekey: p.rekey,
-            ni: SecretBytes::copy_from_slice(&p.ni),
-            nr: SecretBytes::copy_from_slice(&p.nr),
             new_key_handle: CkObjectHandle(p.new_key_handle),
             ni_presence: pointer_from_wire(&p.ni, p.ni_null_len, version)?,
             nr_presence: pointer_from_wire(&p.nr, p.nr_null_len, version)?,
@@ -88,8 +86,8 @@ impl From<&Ike1PrfDeriveParams> for v1_proto::Ike1PrfDeriveParams {
             has_prev_key: p.has_prev_key,
             keygxy_handle: p.keygxy_handle.0,
             prev_key_handle: p.prev_key_handle.0,
-            ckyi: secret_to_plain(&p.ckyi),
-            ckyr: secret_to_plain(&p.ckyr),
+            ckyi: pointer_to_wire(&p.ckyi_presence).0,
+            ckyr: pointer_to_wire(&p.ckyr_presence).0,
             key_number: p.key_number,
             // R16: production encode stays v0-shaped.
             ckyi_null_len: None,
@@ -126,8 +124,6 @@ impl FromWire<v1_proto::Ike1PrfDeriveParams> for Ike1PrfDeriveParams {
             has_prev_key: p.has_prev_key,
             keygxy_handle: CkObjectHandle(p.keygxy_handle),
             prev_key_handle: CkObjectHandle(p.prev_key_handle),
-            ckyi: SecretBytes::copy_from_slice(&p.ckyi),
-            ckyr: SecretBytes::copy_from_slice(&p.ckyr),
             key_number: p.key_number,
             ckyi_presence: pointer_from_wire(&p.ckyi, p.ckyi_null_len, version)?,
             ckyr_presence: pointer_from_wire(&p.ckyr, p.ckyr_null_len, version)?,
@@ -145,7 +141,7 @@ impl From<&Ike1ExtendedDeriveParams> for v1_proto::Ike1ExtendedDeriveParams {
             prf_mechanism: p.prf_mechanism.0,
             has_keygxy: p.has_keygxy,
             keygxy_handle: p.keygxy_handle.0,
-            extra_data: secret_to_plain(&p.extra_data),
+            extra_data: pointer_to_wire(&p.extra_data_presence).0,
             // R16: production encode stays v0-shaped.
             extra_data_null_len: None,
         }
@@ -174,7 +170,6 @@ impl FromWire<v1_proto::Ike1ExtendedDeriveParams> for Ike1ExtendedDeriveParams {
             prf_mechanism: CkMechanismType(p.prf_mechanism),
             has_keygxy: p.has_keygxy,
             keygxy_handle: CkObjectHandle(p.keygxy_handle),
-            extra_data: SecretBytes::copy_from_slice(&p.extra_data),
             extra_data_presence: pointer_from_wire(&p.extra_data, p.extra_data_null_len, version)?,
         })
     }
@@ -190,7 +185,7 @@ impl From<&Ike2PrfPlusDeriveParams> for v1_proto::Ike2PrfPlusDeriveParams {
             prf_mechanism: p.prf_mechanism.0,
             has_seed_key: p.has_seed_key,
             seed_key_handle: p.seed_key_handle.0,
-            seed_data: secret_to_plain(&p.seed_data),
+            seed_data: pointer_to_wire(&p.seed_data_presence).0,
             // R16: production encode stays v0-shaped.
             seed_data_null_len: None,
         }
@@ -219,7 +214,6 @@ impl FromWire<v1_proto::Ike2PrfPlusDeriveParams> for Ike2PrfPlusDeriveParams {
             prf_mechanism: CkMechanismType(p.prf_mechanism),
             has_seed_key: p.has_seed_key,
             seed_key_handle: CkObjectHandle(p.seed_key_handle),
-            seed_data: SecretBytes::copy_from_slice(&p.seed_data),
             seed_data_presence: pointer_from_wire(&p.seed_data, p.seed_data_null_len, version)?,
         })
     }
@@ -232,7 +226,7 @@ impl FromWire<v1_proto::Ike2PrfPlusDeriveParams> for Ike2PrfPlusDeriveParams {
 fn prf_data_to_proto(p: &PrfDataParam) -> v1_proto::PrfDataParam {
     v1_proto::PrfDataParam {
         r#type: p.type_,
-        value: secret_to_plain(&p.value),
+        value: pointer_to_wire(&p.value_presence).0,
         // R18: v0 encode stays v0-shaped (shim emits v1 in R18 tail arms).
         value_null_len: None,
     }
@@ -240,8 +234,7 @@ fn prf_data_to_proto(p: &PrfDataParam) -> v1_proto::PrfDataParam {
 
 fn prf_data_from_proto(p: &v1_proto::PrfDataParam) -> PrfDataParam {
     // R18: unversioned legacy decode — peers mirror Present (FromWire threads versions).
-    let value = SecretBytes::copy_from_slice(&p.value);
-    PrfDataParam { type_: p.r#type, value_presence: PointerBytes::present_cloned(&value), value }
+    PrfDataParam { type_: p.r#type, value_presence: PointerBytes::present_copy(&p.value) }
 }
 
 fn sp800_108_attribute_to_proto(attr: &CkAttribute) -> Result<v1_proto::Sp800108Attribute, CkRv> {
@@ -285,11 +278,7 @@ fn sp800_108_derived_key_to_proto(
     key: &Sp800108DerivedKey,
 ) -> Result<v1_proto::Sp800108DerivedKey, CkRv> {
     Ok(v1_proto::Sp800108DerivedKey {
-        template: key
-            .template
-            .iter()
-            .map(sp800_108_attribute_to_proto)
-            .collect::<Result<Vec<_>, _>>()?,
+        template: pointer_array_to_wire(&key.template_presence, sp800_108_attribute_to_proto)?.0,
         key_handle: key.key_handle.0,
         // R18: v0 encode stays v0-shaped (shim emits v1 in R18 tail arms).
         template_null_count: None,
@@ -305,7 +294,6 @@ fn sp800_108_derived_key_from_proto(key: &v1_proto::Sp800108DerivedKey) -> Sp800
         template_presence: PointerArray::present(template.clone()),
         key_handle: CkObjectHandle(key.key_handle),
         ph_key_is_null: false,
-        template,
     }
 }
 
@@ -319,12 +307,15 @@ impl TryFrom<&Sp800108KdfParams> for v1_proto::Sp800108KdfParams {
     fn try_from(p: &Sp800108KdfParams) -> Result<Self, Self::Error> {
         Ok(Self {
             prf_type: p.prf_type.0,
-            data_params: p.data_params.iter().map(prf_data_to_proto).collect(),
-            additional_derived_keys: p
-                .additional_derived_keys
-                .iter()
-                .map(sp800_108_derived_key_to_proto)
-                .collect::<Result<Vec<_>, _>>()?,
+            data_params: pointer_array_to_wire(&p.data_params_presence, |dp| {
+                Ok(prf_data_to_proto(dp))
+            })?
+            .0,
+            additional_derived_keys: pointer_array_to_wire(
+                &p.additional_derived_keys_presence,
+                sp800_108_derived_key_to_proto,
+            )?
+            .0,
             // R18: v0 encode stays v0-shaped (shim emits v1 in R18 tail arms).
             data_params_null_count: None,
             additional_derived_keys_null_count: None,
@@ -345,8 +336,6 @@ impl From<&v1_proto::Sp800108KdfParams> for Sp800108KdfParams {
             additional_derived_keys_presence: PointerArray::present(
                 additional_derived_keys.clone(),
             ),
-            data_params,
-            additional_derived_keys,
         }
     }
 }
@@ -361,13 +350,16 @@ impl TryFrom<&Sp800108FeedbackKdfParams> for v1_proto::Sp800108FeedbackKdfParams
     fn try_from(p: &Sp800108FeedbackKdfParams) -> Result<Self, Self::Error> {
         Ok(Self {
             prf_type: p.prf_type.0,
-            data_params: p.data_params.iter().map(prf_data_to_proto).collect(),
-            iv: p.iv.clone(),
-            additional_derived_keys: p
-                .additional_derived_keys
-                .iter()
-                .map(sp800_108_derived_key_to_proto)
-                .collect::<Result<Vec<_>, _>>()?,
+            data_params: pointer_array_to_wire(&p.data_params_presence, |dp| {
+                Ok(prf_data_to_proto(dp))
+            })?
+            .0,
+            iv: pointer_to_wire(&p.iv_presence).0,
+            additional_derived_keys: pointer_array_to_wire(
+                &p.additional_derived_keys_presence,
+                sp800_108_derived_key_to_proto,
+            )?
+            .0,
             // R18: v0 encode stays v0-shaped (shim emits v1 in R18 tail arms).
             data_params_null_count: None,
             iv_null_len: None,
@@ -391,9 +383,6 @@ impl From<&v1_proto::Sp800108FeedbackKdfParams> for Sp800108FeedbackKdfParams {
             additional_derived_keys_presence: PointerArray::present(
                 additional_derived_keys.clone(),
             ),
-            data_params,
-            iv,
-            additional_derived_keys,
         }
     }
 }
@@ -536,15 +525,20 @@ impl From<&OtpParams> for v1_proto::OtpParams {
     fn from(p: &OtpParams) -> Self {
         Self {
             params: p
-                .params
-                .iter()
-                .map(|op| v1_proto::OtpParam {
-                    r#type: op.type_,
-                    value: secret_to_plain(&op.value),
-                    // R18: v0 encode stays v0-shaped (shim emits v1 in R18 tail arms).
-                    value_null_len: None,
+                .params_presence
+                .as_present()
+                .map(|items| {
+                    items
+                        .iter()
+                        .map(|op| v1_proto::OtpParam {
+                            r#type: op.type_,
+                            value: pointer_to_wire(&op.value_presence).0,
+                            // R18: v0 encode stays v0-shaped (shim emits v1 in R18 tail arms).
+                            value_null_len: None,
+                        })
+                        .collect::<Vec<_>>()
                 })
-                .collect(),
+                .unwrap_or_default(),
             // R18: v0 encode stays v0-shaped (shim emits v1 in R18 tail arms).
             params_null_count: None,
         }
@@ -559,14 +553,10 @@ impl From<&v1_proto::OtpParams> for OtpParams {
             .iter()
             .map(|op| {
                 let value = SecretBytes::copy_from_slice(&op.value);
-                OtpParam {
-                    type_: op.r#type,
-                    value_presence: PointerBytes::present_cloned(&value),
-                    value,
-                }
+                OtpParam { type_: op.r#type, value_presence: PointerBytes::present_cloned(&value) }
             })
             .collect();
-        Self { params_presence: PointerArray::present(params.clone()), params }
+        Self { params_presence: PointerArray::present(params) }
     }
 }
 
@@ -596,9 +586,13 @@ impl TryFrom<&KipParams> for v1_proto::KipParams {
 
     fn try_from(p: &KipParams) -> Result<Self, Self::Error> {
         Ok(Self {
-            mechanism: Some(Box::new(mechanism_to_proto(&p.mechanism)?)),
+            // R19: a NULL nesting encodes no nested message (v0 decodes
+            // that as missing-required — loud, like any other
+            // unrepresentable nesting — instead of the silent dummy the
+            // R18 bool+dummy spelling encoded).
+            mechanism: p.mechanism.as_deref().map(mechanism_to_proto).transpose()?.map(Box::new),
             key_handle: p.key_handle.0,
-            seed: secret_to_plain(&p.seed),
+            seed: pointer_to_wire(&p.seed_presence).0,
             // R18: v0 encode stays v0-shaped (shim emits v1 in R18 tail arms).
             mechanism_null: None,
             seed_null_len: None,
@@ -613,11 +607,9 @@ impl TryFrom<&v1_proto::KipParams> for KipParams {
         // R18: unversioned legacy decode — peers mirror Present (FromWire threads versions).
         let seed = SecretBytes::copy_from_slice(&p.seed);
         Ok(Self {
-            mechanism: Box::new(required_mechanism_from_boxed_option(&p.mechanism)?),
+            mechanism: Some(Box::new(required_mechanism_from_boxed_option(&p.mechanism)?)),
             key_handle: CkObjectHandle(p.key_handle),
             seed_presence: PointerBytes::present_cloned(&seed),
-            mechanism_is_null: false,
-            seed,
         })
     }
 }
@@ -665,13 +657,13 @@ impl TryFrom<&v1_proto::CmsSigParams> for CmsSigParams {
 impl From<&SkipjackPrivateWrapParams> for v1_proto::SkipjackPrivateWrapParams {
     fn from(p: &SkipjackPrivateWrapParams) -> Self {
         Self {
-            password: secret_to_plain(&p.password),
-            public_data: p.public_data.clone(),
+            password: pointer_to_wire(&p.password_presence).0,
+            public_data: pointer_to_wire(&p.public_data_presence).0,
             password_length: p.password_length,
-            random_a: p.random_a.clone(),
-            prime_p: p.prime_p.clone(),
-            base_g: p.base_g.clone(),
-            subprime_q: p.subprime_q.clone(),
+            random_a: pointer_to_wire(&p.random_a_presence).0,
+            prime_p: pointer_to_wire(&p.prime_p_presence).0,
+            base_g: pointer_to_wire(&p.base_g_presence).0,
+            subprime_q: pointer_to_wire(&p.subprime_q_presence).0,
             // R18: v0 encode stays v0-shaped (shim emits v1 in R18 tail arms).
             password_null_len: None,
             public_data_null_len: None,
@@ -686,13 +678,7 @@ impl From<&SkipjackPrivateWrapParams> for v1_proto::SkipjackPrivateWrapParams {
 impl From<&v1_proto::SkipjackPrivateWrapParams> for SkipjackPrivateWrapParams {
     fn from(p: &v1_proto::SkipjackPrivateWrapParams) -> Self {
         Self {
-            password: SecretBytes::copy_from_slice(&p.password),
-            public_data: p.public_data.clone(),
             password_length: p.password_length,
-            random_a: p.random_a.clone(),
-            prime_p: p.prime_p.clone(),
-            base_g: p.base_g.clone(),
-            subprime_q: p.subprime_q.clone(),
             password_presence: PointerBytes::present_copy(&p.password),
             public_data_presence: PointerBytes::present_copy(&p.public_data),
             random_a_presence: PointerBytes::present_copy(&p.random_a),
@@ -726,13 +712,7 @@ impl From<&mut v1_proto::SkipjackPrivateWrapParams> for SkipjackPrivateWrapParam
         let base_g_presence = PointerBytes::present_copy(&base_g);
         let subprime_q_presence = PointerBytes::present_copy(&subprime_q);
         Self {
-            password,
-            public_data,
             password_length: p.password_length,
-            random_a,
-            prime_p,
-            base_g,
-            subprime_q,
             password_presence,
             public_data_presence,
             random_a_presence,
@@ -750,13 +730,13 @@ impl From<&mut v1_proto::SkipjackPrivateWrapParams> for SkipjackPrivateWrapParam
 impl From<&SkipjackRelayxParams> for v1_proto::SkipjackRelayxParams {
     fn from(p: &SkipjackRelayxParams) -> Self {
         Self {
-            old_wrapped_x: secret_to_plain(&p.old_wrapped_x),
-            old_password: secret_to_plain(&p.old_password),
-            old_public_data: secret_to_plain(&p.old_public_data),
-            old_random_a: secret_to_plain(&p.old_random_a),
-            new_password: secret_to_plain(&p.new_password),
-            new_public_data: secret_to_plain(&p.new_public_data),
-            new_random_a: secret_to_plain(&p.new_random_a),
+            old_wrapped_x: pointer_to_wire(&p.old_wrapped_x_presence).0,
+            old_password: pointer_to_wire(&p.old_password_presence).0,
+            old_public_data: pointer_to_wire(&p.old_public_data_presence).0,
+            old_random_a: pointer_to_wire(&p.old_random_a_presence).0,
+            new_password: pointer_to_wire(&p.new_password_presence).0,
+            new_public_data: pointer_to_wire(&p.new_public_data_presence).0,
+            new_random_a: pointer_to_wire(&p.new_random_a_presence).0,
             // R18: v0 encode stays v0-shaped (shim emits v1 in R18 tail arms).
             old_wrapped_x_null_len: None,
             old_password_null_len: None,
@@ -772,13 +752,6 @@ impl From<&SkipjackRelayxParams> for v1_proto::SkipjackRelayxParams {
 impl From<&v1_proto::SkipjackRelayxParams> for SkipjackRelayxParams {
     fn from(p: &v1_proto::SkipjackRelayxParams) -> Self {
         Self {
-            old_wrapped_x: SecretBytes::copy_from_slice(&p.old_wrapped_x),
-            old_password: SecretBytes::copy_from_slice(&p.old_password),
-            old_public_data: SecretBytes::copy_from_slice(&p.old_public_data),
-            old_random_a: SecretBytes::copy_from_slice(&p.old_random_a),
-            new_password: SecretBytes::copy_from_slice(&p.new_password),
-            new_public_data: SecretBytes::copy_from_slice(&p.new_public_data),
-            new_random_a: SecretBytes::copy_from_slice(&p.new_random_a),
             old_wrapped_x_presence: PointerBytes::present_copy(&p.old_wrapped_x),
             old_password_presence: PointerBytes::present_copy(&p.old_password),
             old_public_data_presence: PointerBytes::present_copy(&p.old_public_data),
@@ -815,13 +788,6 @@ impl From<&mut v1_proto::SkipjackRelayxParams> for SkipjackRelayxParams {
         let new_public_data_presence = PointerBytes::present_cloned(&new_public_data);
         let new_random_a_presence = PointerBytes::present_cloned(&new_random_a);
         Self {
-            old_wrapped_x,
-            old_password,
-            old_public_data,
-            old_random_a,
-            new_password,
-            new_public_data,
-            new_random_a,
             old_wrapped_x_presence,
             old_password_presence,
             old_public_data_presence,
@@ -1004,7 +970,6 @@ impl FromWire<v1_proto::PrfDataParam> for PrfDataParam {
     fn from_wire(p: &v1_proto::PrfDataParam, version: u32) -> Result<Self, CkRv> {
         Ok(Self {
             type_: p.r#type,
-            value: SecretBytes::copy_from_slice(&p.value),
             value_presence: pointer_from_wire(&p.value, p.value_null_len, version)?,
         })
     }
@@ -1019,14 +984,13 @@ impl ToWireV1<v1_proto::PrfDataParam> for PrfDataParam {
 
 impl FromWire<v1_proto::Sp800108DerivedKey> for Sp800108DerivedKey {
     fn from_wire(p: &v1_proto::Sp800108DerivedKey, version: u32) -> Result<Self, CkRv> {
-        // A NULL pTemplate rides Null{n} + empty legacy template — this
-        // closes the ADR-0010 Scope-2 class-4 null-conflation residual.
-        let (template, template_presence) =
+        // A NULL pTemplate rides Null{n} — this closes the ADR-0010
+        // Scope-2 class-4 null-conflation residual.
+        let template_presence =
             pointer_array_from_wire(&p.template, p.template_null_count, version, |attr| {
                 Ok(sp800_108_attribute_from_proto(attr))
             })?;
         Ok(Self {
-            template,
             key_handle: CkObjectHandle(p.key_handle),
             template_presence,
             ph_key_is_null: null_bit_from_wire(p.ph_key_null, p.key_handle == 0, version)?,
@@ -1052,11 +1016,11 @@ pub(crate) fn sp800_108_derived_key_to_wire_v1(
 
 impl FromWire<v1_proto::Sp800108KdfParams> for Sp800108KdfParams {
     fn from_wire(p: &v1_proto::Sp800108KdfParams, version: u32) -> Result<Self, CkRv> {
-        let (data_params, data_params_presence) =
+        let data_params_presence =
             pointer_array_from_wire(&p.data_params, p.data_params_null_count, version, |item| {
                 PrfDataParam::from_wire(item, version)
             })?;
-        let (additional_derived_keys, additional_derived_keys_presence) = pointer_array_from_wire(
+        let additional_derived_keys_presence = pointer_array_from_wire(
             &p.additional_derived_keys,
             p.additional_derived_keys_null_count,
             version,
@@ -1064,8 +1028,6 @@ impl FromWire<v1_proto::Sp800108KdfParams> for Sp800108KdfParams {
         )?;
         Ok(Self {
             prf_type: CkMechanismType(p.prf_type),
-            data_params,
-            additional_derived_keys,
             data_params_presence,
             additional_derived_keys_presence,
         })
@@ -1074,11 +1036,11 @@ impl FromWire<v1_proto::Sp800108KdfParams> for Sp800108KdfParams {
 
 impl FromWire<v1_proto::Sp800108FeedbackKdfParams> for Sp800108FeedbackKdfParams {
     fn from_wire(p: &v1_proto::Sp800108FeedbackKdfParams, version: u32) -> Result<Self, CkRv> {
-        let (data_params, data_params_presence) =
+        let data_params_presence =
             pointer_array_from_wire(&p.data_params, p.data_params_null_count, version, |item| {
                 PrfDataParam::from_wire(item, version)
             })?;
-        let (additional_derived_keys, additional_derived_keys_presence) = pointer_array_from_wire(
+        let additional_derived_keys_presence = pointer_array_from_wire(
             &p.additional_derived_keys,
             p.additional_derived_keys_null_count,
             version,
@@ -1086,9 +1048,6 @@ impl FromWire<v1_proto::Sp800108FeedbackKdfParams> for Sp800108FeedbackKdfParams
         )?;
         Ok(Self {
             prf_type: CkMechanismType(p.prf_type),
-            data_params,
-            iv: p.iv.clone(),
-            additional_derived_keys,
             data_params_presence,
             iv_presence: pointer_from_wire(&p.iv, p.iv_null_len, version)?,
             additional_derived_keys_presence,
@@ -1100,7 +1059,6 @@ impl FromWire<v1_proto::OtpParam> for OtpParam {
     fn from_wire(p: &v1_proto::OtpParam, version: u32) -> Result<Self, CkRv> {
         Ok(Self {
             type_: p.r#type,
-            value: SecretBytes::copy_from_slice(&p.value),
             value_presence: pointer_from_wire(&p.value, p.value_null_len, version)?,
         })
     }
@@ -1115,11 +1073,11 @@ impl ToWireV1<v1_proto::OtpParam> for OtpParam {
 
 impl FromWire<v1_proto::OtpParams> for OtpParams {
     fn from_wire(p: &v1_proto::OtpParams, version: u32) -> Result<Self, CkRv> {
-        let (params, params_presence) =
+        let params_presence =
             pointer_array_from_wire(&p.params, p.params_null_count, version, |item| {
                 OtpParam::from_wire(item, version)
             })?;
-        Ok(Self { params, params_presence })
+        Ok(Self { params_presence })
     }
 }
 
@@ -1132,16 +1090,14 @@ impl FromWire<v1_proto::KipParams> for KipParams {
         let mechanism_is_null =
             null_bit_from_wire(p.mechanism_null, p.mechanism.is_none(), version)?;
         let mechanism = match (&p.mechanism, mechanism_is_null) {
-            (Some(m), false) => Box::new(CkMechanism::try_from(m.as_ref())?),
-            (None, true) => Box::new(KipParams::NULL_NESTED_MECHANISM),
+            (Some(m), false) => Some(Box::new(CkMechanism::try_from(m.as_ref())?)),
+            (None, true) => None,
             _ => return Err(CkRv::MECHANISM_PARAM_INVALID),
         };
         Ok(Self {
             mechanism,
             key_handle: CkObjectHandle(p.key_handle),
-            seed: SecretBytes::copy_from_slice(&p.seed),
             seed_presence: pointer_from_wire(&p.seed, p.seed_null_len, version)?,
-            mechanism_is_null,
         })
     }
 }
@@ -1158,13 +1114,7 @@ impl FromWire<v1_proto::SkipjackPrivateWrapParams> for SkipjackPrivateWrapParams
         // PrimeP/BaseG share the one C ulPAndGLen (v1-only agreement).
         check_shared_len_agreement(version, &[&prime_p_presence, &base_g_presence])?;
         Ok(Self {
-            password: SecretBytes::copy_from_slice(&p.password),
-            public_data: p.public_data.clone(),
             password_length: p.password_length,
-            random_a: p.random_a.clone(),
-            prime_p: p.prime_p.clone(),
-            base_g: p.base_g.clone(),
-            subprime_q: p.subprime_q.clone(),
             password_presence,
             public_data_presence,
             random_a_presence,
@@ -1204,13 +1154,6 @@ impl ToWireV1<v1_proto::SkipjackPrivateWrapParams> for SkipjackPrivateWrapParams
 impl FromWire<v1_proto::SkipjackRelayxParams> for SkipjackRelayxParams {
     fn from_wire(p: &v1_proto::SkipjackRelayxParams, version: u32) -> Result<Self, CkRv> {
         Ok(Self {
-            old_wrapped_x: SecretBytes::copy_from_slice(&p.old_wrapped_x),
-            old_password: SecretBytes::copy_from_slice(&p.old_password),
-            old_public_data: SecretBytes::copy_from_slice(&p.old_public_data),
-            old_random_a: SecretBytes::copy_from_slice(&p.old_random_a),
-            new_password: SecretBytes::copy_from_slice(&p.new_password),
-            new_public_data: SecretBytes::copy_from_slice(&p.new_public_data),
-            new_random_a: SecretBytes::copy_from_slice(&p.new_random_a),
             old_wrapped_x_presence: pointer_from_wire(
                 &p.old_wrapped_x,
                 p.old_wrapped_x_null_len,

@@ -317,16 +317,11 @@ async fn encrypt_init_returns_gcm_output_params_through_grpc() {
     let backend = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::AES_GCM]));
     let generated_iv = vec![0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB];
     backend.set_encrypt_init_output(Some(CkMechanismParams::Gcm(GcmParams {
-        iv: generated_iv.clone(),
         iv_bits: 96,
         iv_buffer_len: generated_iv.len() as u64,
-        aad: b"aad".to_vec().into(),
         tag_bits: 128,
         iv_presence: PointerBytes::from_legacy(&generated_iv, false),
         aad_presence: PointerBytes::from_legacy(b"aad", false),
-
-        iv_null: false,
-        aad_null: false,
     })));
     let (endpoint, _shutdown) = mock_daemon(backend).await;
     let mut client = init_client(&endpoint).await;
@@ -335,16 +330,11 @@ async fn encrypt_init_returns_gcm_output_params_through_grpc() {
     let mechanism = CkMechanism {
         mechanism_type: CkMechanismType::AES_GCM,
         params: Some(CkMechanismParams::Gcm(GcmParams {
-            iv: vec![],
             iv_bits: 96,
             iv_buffer_len: generated_iv.len() as u64,
-            aad: b"aad".to_vec().into(),
             tag_bits: 128,
             iv_presence: PointerBytes::from_legacy(&[], false),
             aad_presence: PointerBytes::from_legacy(b"aad", false),
-
-            iv_null: false,
-            aad_null: false,
         })),
     };
 
@@ -353,16 +343,11 @@ async fn encrypt_init_returns_gcm_output_params_through_grpc() {
     assert_eq!(
         output,
         Some(CkMechanismParams::Gcm(GcmParams {
-            iv: generated_iv.clone(),
             iv_bits: 96,
             iv_buffer_len: generated_iv.len() as u64,
-            aad: b"aad".to_vec().into(),
             tag_bits: 128,
             iv_presence: PointerBytes::from_legacy(&generated_iv, false),
             aad_presence: PointerBytes::from_legacy(b"aad", false),
-
-            iv_null: false,
-            aad_null: false,
         }))
     );
 }
@@ -372,16 +357,11 @@ async fn simple_encrypt_returns_cached_gcm_output_params_through_grpc() {
     let backend = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::AES_GCM]));
     let generated_iv = vec![0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB];
     backend.set_encrypt_init_output(Some(CkMechanismParams::Gcm(GcmParams {
-        iv: generated_iv.clone(),
         iv_bits: 96,
         iv_buffer_len: generated_iv.len() as u64,
-        aad: b"simple-aad".to_vec().into(),
         tag_bits: 128,
         iv_presence: PointerBytes::from_legacy(&generated_iv, false),
         aad_presence: PointerBytes::from_legacy(b"simple-aad", false),
-
-        iv_null: false,
-        aad_null: false,
     })));
     let (endpoint, _shutdown) = mock_daemon(backend).await;
     let mut client = init_client(&endpoint).await;
@@ -390,16 +370,11 @@ async fn simple_encrypt_returns_cached_gcm_output_params_through_grpc() {
     let mechanism = CkMechanism {
         mechanism_type: CkMechanismType::AES_GCM,
         params: Some(CkMechanismParams::Gcm(GcmParams {
-            iv: vec![],
             iv_bits: 96,
             iv_buffer_len: generated_iv.len() as u64,
-            aad: b"simple-aad".to_vec().into(),
             tag_bits: 128,
             iv_presence: PointerBytes::from_legacy(&[], false),
             aad_presence: PointerBytes::from_legacy(b"simple-aad", false),
-
-            iv_null: false,
-            aad_null: false,
         })),
     };
     let init_output = client.encrypt_init(session, &mechanism, key).await.unwrap();
@@ -414,16 +389,11 @@ async fn simple_encrypt_returns_cached_gcm_output_params_through_grpc() {
     assert_eq!(
         mechanism_out,
         Some(CkMechanismParams::Gcm(GcmParams {
-            iv: generated_iv.clone(),
             iv_bits: 96,
             iv_buffer_len: 12,
-            aad: b"simple-aad".to_vec().into(),
             tag_bits: 128,
             iv_presence: PointerBytes::from_legacy(&generated_iv, false),
             aad_presence: PointerBytes::from_legacy(b"simple-aad", false),
-
-            iv_null: false,
-            aad_null: false,
         }))
     );
 }
@@ -433,16 +403,11 @@ async fn simple_encrypt_returns_late_gcm_output_params_through_grpc() {
     let backend = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::AES_GCM]));
     let generated_iv = vec![0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xEB];
     let expected_output = CkMechanismParams::Gcm(GcmParams {
-        iv: generated_iv.clone(),
         iv_bits: 96,
         iv_buffer_len: generated_iv.len() as u64,
-        aad: b"late-simple-aad".to_vec().into(),
         tag_bits: 128,
         iv_presence: PointerBytes::from_legacy(&generated_iv, false),
         aad_presence: PointerBytes::from_legacy(b"late-simple-aad", false),
-
-        iv_null: false,
-        aad_null: false,
     });
     backend.set_encrypt_operation_output(Some(expected_output.clone()));
     let (endpoint, _shutdown) = mock_daemon(backend).await;
@@ -452,16 +417,11 @@ async fn simple_encrypt_returns_late_gcm_output_params_through_grpc() {
     let mechanism = CkMechanism {
         mechanism_type: CkMechanismType::AES_GCM,
         params: Some(CkMechanismParams::Gcm(GcmParams {
-            iv: vec![],
             iv_bits: 96,
             iv_buffer_len: generated_iv.len() as u64,
-            aad: b"late-simple-aad".to_vec().into(),
             tag_bits: 128,
             iv_presence: PointerBytes::from_legacy(&[], false),
             aad_presence: PointerBytes::from_legacy(b"late-simple-aad", false),
-
-            iv_null: false,
-            aad_null: false,
         })),
     };
     let init_output = client.encrypt_init(session, &mechanism, key).await.unwrap();
@@ -480,16 +440,11 @@ async fn multipart_encrypt_returns_cached_gcm_output_params_through_grpc() {
     let backend = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::AES_GCM]));
     let generated_iv = vec![0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xDB];
     let expected_output = CkMechanismParams::Gcm(GcmParams {
-        iv: generated_iv.clone(),
         iv_bits: 96,
         iv_buffer_len: generated_iv.len() as u64,
-        aad: b"multipart-aad".to_vec().into(),
         tag_bits: 128,
         iv_presence: PointerBytes::from_legacy(&generated_iv, false),
         aad_presence: PointerBytes::from_legacy(b"multipart-aad", false),
-
-        iv_null: false,
-        aad_null: false,
     });
     backend.set_encrypt_init_output(Some(expected_output.clone()));
     let (endpoint, _shutdown) = mock_daemon(backend).await;
@@ -499,16 +454,11 @@ async fn multipart_encrypt_returns_cached_gcm_output_params_through_grpc() {
     let mechanism = CkMechanism {
         mechanism_type: CkMechanismType::AES_GCM,
         params: Some(CkMechanismParams::Gcm(GcmParams {
-            iv: vec![],
             iv_bits: 96,
             iv_buffer_len: generated_iv.len() as u64,
-            aad: b"multipart-aad".to_vec().into(),
             tag_bits: 128,
             iv_presence: PointerBytes::from_legacy(&[], false),
             aad_presence: PointerBytes::from_legacy(b"multipart-aad", false),
-
-            iv_null: false,
-            aad_null: false,
         })),
     };
     let init_output = client.encrypt_init(session, &mechanism, key).await.unwrap();
@@ -532,16 +482,11 @@ async fn multipart_encrypt_returns_late_gcm_output_params_through_grpc() {
     let backend = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::AES_GCM]));
     let generated_iv = vec![0xF0, 0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA, 0xFB];
     let expected_output = CkMechanismParams::Gcm(GcmParams {
-        iv: generated_iv.clone(),
         iv_bits: 96,
         iv_buffer_len: generated_iv.len() as u64,
-        aad: b"late-multipart-aad".to_vec().into(),
         tag_bits: 128,
         iv_presence: PointerBytes::from_legacy(&generated_iv, false),
         aad_presence: PointerBytes::from_legacy(b"late-multipart-aad", false),
-
-        iv_null: false,
-        aad_null: false,
     });
     backend.set_encrypt_operation_output(Some(expected_output.clone()));
     let (endpoint, _shutdown) = mock_daemon(backend).await;
@@ -551,16 +496,11 @@ async fn multipart_encrypt_returns_late_gcm_output_params_through_grpc() {
     let mechanism = CkMechanism {
         mechanism_type: CkMechanismType::AES_GCM,
         params: Some(CkMechanismParams::Gcm(GcmParams {
-            iv: vec![],
             iv_bits: 96,
             iv_buffer_len: generated_iv.len() as u64,
-            aad: b"late-multipart-aad".to_vec().into(),
             tag_bits: 128,
             iv_presence: PointerBytes::from_legacy(&[], false),
             aad_presence: PointerBytes::from_legacy(b"late-multipart-aad", false),
-
-            iv_null: false,
-            aad_null: false,
         })),
     };
     let init_output = client.encrypt_init(session, &mechanism, key).await.unwrap();
@@ -584,16 +524,11 @@ async fn byte_output_exact_encrypt_returns_gcm_output_params_through_grpc() {
     let backend = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::AES_GCM]));
     let generated_iv = vec![0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xCA, 0xCB];
     backend.set_encrypt_exact_output(Some(CkMechanismParams::Gcm(GcmParams {
-        iv: generated_iv.clone(),
         iv_bits: 96,
         iv_buffer_len: generated_iv.len() as u64,
-        aad: b"aad".to_vec().into(),
         tag_bits: 128,
         iv_presence: PointerBytes::from_legacy(&generated_iv, false),
         aad_presence: PointerBytes::from_legacy(b"aad", false),
-
-        iv_null: false,
-        aad_null: false,
     })));
     let (endpoint, _shutdown) = mock_daemon(backend).await;
     let mut client = init_client(&endpoint).await;
@@ -602,16 +537,11 @@ async fn byte_output_exact_encrypt_returns_gcm_output_params_through_grpc() {
     let mechanism = CkMechanism {
         mechanism_type: CkMechanismType::AES_GCM,
         params: Some(CkMechanismParams::Gcm(GcmParams {
-            iv: vec![],
             iv_bits: 96,
             iv_buffer_len: generated_iv.len() as u64,
-            aad: b"aad".to_vec().into(),
             tag_bits: 128,
             iv_presence: PointerBytes::from_legacy(&[], false),
             aad_presence: PointerBytes::from_legacy(b"aad", false),
-
-            iv_null: false,
-            aad_null: false,
         })),
     };
     client.encrypt_init(session, &mechanism, key).await.unwrap();
@@ -661,16 +591,11 @@ async fn byte_output_exact_encrypt_returns_gcm_output_params_through_grpc() {
     assert_eq!(
         data_mechanism_out,
         Some(CkMechanismParams::Gcm(GcmParams {
-            iv: generated_iv.clone(),
             iv_bits: 96,
             iv_buffer_len: generated_iv.len() as u64,
-            aad: b"aad".to_vec().into(),
             tag_bits: 128,
             iv_presence: PointerBytes::from_legacy(&generated_iv, false),
             aad_presence: PointerBytes::from_legacy(b"aad", false),
-
-            iv_null: false,
-            aad_null: false,
         }))
     );
 }
@@ -680,16 +605,11 @@ async fn byte_output_exact_wrap_key_returns_gcm_output_params_through_grpc() {
     let backend = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::AES_GCM]));
     let generated_iv = vec![0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB];
     backend.set_wrap_key_exact_output(Some(CkMechanismParams::Gcm(GcmParams {
-        iv: generated_iv.clone(),
         iv_bits: 96,
         iv_buffer_len: generated_iv.len() as u64,
-        aad: b"wrap-aad".to_vec().into(),
         tag_bits: 128,
         iv_presence: PointerBytes::from_legacy(&generated_iv, false),
         aad_presence: PointerBytes::from_legacy(b"wrap-aad", false),
-
-        iv_null: false,
-        aad_null: false,
     })));
     let (endpoint, _shutdown) = mock_daemon(backend).await;
     let mut client = init_client(&endpoint).await;
@@ -698,16 +618,11 @@ async fn byte_output_exact_wrap_key_returns_gcm_output_params_through_grpc() {
     let mechanism = CkMechanism {
         mechanism_type: CkMechanismType::AES_GCM,
         params: Some(CkMechanismParams::Gcm(GcmParams {
-            iv: vec![],
             iv_bits: 96,
             iv_buffer_len: generated_iv.len() as u64,
-            aad: b"wrap-aad".to_vec().into(),
             tag_bits: 128,
             iv_presence: PointerBytes::from_legacy(&[], false),
             aad_presence: PointerBytes::from_legacy(b"wrap-aad", false),
-
-            iv_null: false,
-            aad_null: false,
         })),
     };
 
@@ -751,16 +666,11 @@ async fn byte_output_exact_wrap_key_returns_gcm_output_params_through_grpc() {
     assert_eq!(
         mechanism_out,
         Some(CkMechanismParams::Gcm(GcmParams {
-            iv: generated_iv.clone(),
             iv_bits: 96,
             iv_buffer_len: 12,
-            aad: b"wrap-aad".to_vec().into(),
             tag_bits: 128,
             iv_presence: PointerBytes::from_legacy(&generated_iv, false),
             aad_presence: PointerBytes::from_legacy(b"wrap-aad", false),
-
-            iv_null: false,
-            aad_null: false,
         }))
     );
 }

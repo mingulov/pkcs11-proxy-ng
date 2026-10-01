@@ -50,13 +50,9 @@ async fn kryoptic_ccm_empty_aad_null_and_nonnull_round_trip() -> Result<(), Stri
                     mechanism_type: CkMechanismType::AES_CCM,
                     params: Some(CkMechanismParams::Ccm(CcmParams {
                         data_len: plaintext.len() as u64,
-                        nonce: nonce.clone(),
-                        aad: Vec::new().into(),
                         mac_len: 16,
                         nonce_presence: PointerBytes::from_legacy(&nonce, false),
                         aad_presence: PointerBytes::from_legacy(&[], aad_null),
-                        nonce_null: false,
-                        aad_null,
                     })),
                 };
                 client.encrypt_init(session, &mechanism, key).await.map_err(|rv| {
