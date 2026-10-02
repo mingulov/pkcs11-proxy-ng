@@ -1259,7 +1259,6 @@ impl FfiSp800108DerivedKeys {
                 // NULL-ness reads back the C struct (which the arm built
                 // from the caller's bit), and a NULL `phKey` echoes the
                 // caller's handle scalar (the provider wrote nothing).
-                // Legacy `template` mirror (R19 removes it with the member).
                 key_handle: if derived.phKey.is_null() {
                     original.key_handle
                 } else {

@@ -965,8 +965,7 @@ pub struct TlsPrfParams {
     /// caller's buffer.
     pub output: SecretBytes,
     // R18 typed presence (S2 §8 tail): non-contradictory NULL/length
-    // peers of the legacy seed/label members (transitional dual
-    // representation; R19 removes the legacy members above).
+    // peers of the C `pSeed`/`pLabel` pointers.
     pub seed_presence: PointerBytes,
     pub label_presence: PointerBytes,
     /// R18 output envelope (S2 §8 tail): whether the caller's `pOutput`
@@ -1075,8 +1074,7 @@ pub struct WtlsPrfParams {
     /// mechanism-out path for shim writeback.
     pub output: SecretBytes,
     // R18 typed presence (S2 §8 tail): non-contradictory NULL/length
-    // peers of the legacy seed/label members (transitional dual
-    // representation; R19 removes the legacy members above).
+    // peers of the C `pSeed`/`pLabel` pointers.
     pub seed_presence: PointerBytes,
     pub label_presence: PointerBytes,
     /// R18 output envelope (S2 §8 tail): whether the caller's `pOutput`
@@ -1566,11 +1564,6 @@ impl PointerBytes {
     /// with length zero, unset bit → the bytes as `Present`.
     pub fn from_legacy(bytes: &[u8], is_null: bool) -> Self {
         if is_null { Self::null_len(0) } else { Self::present_copy(bytes) }
-    }
-
-    /// Secret-bytes variant of [`Self::from_legacy`].
-    pub fn from_legacy_secret(bytes: &SecretBytes, is_null: bool) -> Self {
-        if is_null { Self::null_len(0) } else { Self::present_cloned(bytes) }
     }
 }
 
@@ -4138,6 +4131,85 @@ mod validated_params_tests {
             })),
         };
         assert_eq!(validate(&registry, &mechanism), Err(CkRv::MECHANISM_PARAM_INVALID));
+    }
+
+    #[test]
+    fn null_bit_disagreement_rejected() {
+        // R18(1): a set null bit with non-zeroed scalars is contradictory
+        // metadata (PARAM_INVALID); agreement forwards. (R18 named three
+        // validators; R19 removed check_array_pair/check_kip_nesting with
+        // the dual representation, so the surviving Err branches are the
+        // null-bit pairs plus the SP800-108 derived-key pair below.)
+        let registry = empty_registry();
+        let random = SslRandomData {
+            client_random_presence: PointerBytes::present_copy(&[]),
+            server_random_presence: PointerBytes::present_copy(&[]),
+        };
+        let tls_prf =
+            |output: SecretBytes, output_len: u64, out_null: bool, len_null: bool| CkMechanism {
+                mechanism_type: CkMechanismType(UNKNOWN_MECH),
+                params: Some(CkMechanismParams::TlsPrf(TlsPrfParams {
+                    output_len,
+                    output,
+                    seed_presence: PointerBytes::present_copy(&[]),
+                    label_presence: PointerBytes::present_copy(&[]),
+                    output_is_null: out_null,
+                    output_len_is_null: len_null,
+                })),
+            };
+        // Output pair: NULL bit + non-empty output rejects.
+        assert_eq!(
+            validate(&registry, &tls_prf(SecretBytes::copy_from_slice(&[0xA5]), 1, true, false)),
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        );
+        // Output-length pair: NULL bit + nonzero length rejects.
+        assert_eq!(
+            validate(&registry, &tls_prf(SecretBytes::copy_from_slice(&[]), 7, false, true)),
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        );
+        // Agreement (zeroed scalars + set bits, or unset bits) forwards.
+        assert!(
+            validate(&registry, &tls_prf(SecretBytes::copy_from_slice(&[]), 0, true, true)).is_ok()
+        );
+        assert!(
+            validate(&registry, &tls_prf(SecretBytes::copy_from_slice(&[0xA5]), 1, false, false))
+                .is_ok()
+        );
+        // Version pair (master-key derive): NULL bit + nonzero version rejects.
+        let versioned = |major: u32, minor: u32, is_null: bool| CkMechanism {
+            mechanism_type: CkMechanismType(UNKNOWN_MECH),
+            params: Some(CkMechanismParams::Ssl3MasterKeyDerive(Ssl3MasterKeyDeriveParams {
+                random_info: random.clone(),
+                version_major: major,
+                version_minor: minor,
+                version_is_null: is_null,
+            })),
+        };
+        assert_eq!(validate(&registry, &versioned(3, 0, true)), Err(CkRv::MECHANISM_PARAM_INVALID));
+        assert!(validate(&registry, &versioned(0, 0, true)).is_ok());
+        assert!(validate(&registry, &versioned(3, 0, false)).is_ok());
+    }
+
+    #[test]
+    fn sp800108_derived_key_disagreement_rejected() {
+        // R18(1): SP800-108 `phKey` NULL bit with a nonzero handle
+        // rejects (check_sp800108_derived_key); agreement forwards.
+        let registry = empty_registry();
+        let kdf = |handle: u64, is_null: bool| CkMechanism {
+            mechanism_type: CkMechanismType(UNKNOWN_MECH),
+            params: Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
+                prf_type: CkMechanismType(0),
+                data_params_presence: PointerArray::present(vec![]),
+                additional_derived_keys_presence: PointerArray::present(vec![Sp800108DerivedKey {
+                    key_handle: CkObjectHandle(handle),
+                    template_presence: PointerArray::present(vec![]),
+                    ph_key_is_null: is_null,
+                }]),
+            })),
+        };
+        assert_eq!(validate(&registry, &kdf(14, true)), Err(CkRv::MECHANISM_PARAM_INVALID));
+        assert!(validate(&registry, &kdf(0, true)).is_ok());
+        assert!(validate(&registry, &kdf(14, false)).is_ok());
     }
 
     #[test]
