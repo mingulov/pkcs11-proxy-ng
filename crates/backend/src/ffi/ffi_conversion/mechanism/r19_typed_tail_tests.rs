@@ -126,6 +126,17 @@ fn assert_field<T>(
     assert_eq!(len as u64, expect_len, "{what}: declared length");
 }
 
+#[test]
+fn r19_empty_non_null_deref_probe() {
+    // R19(2): EMPTY_NON_NULL designates a real static byte, never NULL
+    // nor dangling — providers may probe readability of the
+    // `Present([])` leg, so the shared address must dereference.
+    let ptr = super::EMPTY_NON_NULL;
+    assert!(!ptr.is_null(), "empty-present legs share one non-NULL address");
+    // SAFETY: EMPTY_NON_NULL designates the `EMPTY_BYTE` static.
+    assert_eq!(unsafe { *ptr }, 0);
+}
+
 // ---------------------------------------------------------------------------
 // RSA-OAEP (S2 §8 "OAEP")
 // ---------------------------------------------------------------------------

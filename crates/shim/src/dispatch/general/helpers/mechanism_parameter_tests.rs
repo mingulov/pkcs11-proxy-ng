@@ -8687,9 +8687,10 @@ fn r18_sp800_108_feedback_v1_iv_null() {
 }
 
 /// R18 closeout: every nested/output tail shape fails closed with
-/// `PARAM_INVALID` (never `Raw`) on a short buffer. `tls_mac` is
-/// scalar (not nested/output): a short image rides struct-prefix Flat
-/// under same-ABI pairs by design (S2 §5 width rule), pinned below.
+/// `MECHANISM_PARAM_INVALID` (never `Raw`) on a short declared length.
+/// `tls_mac` is scalar (not nested/output): a short image rides
+/// struct-prefix Flat under same-ABI pairs by design (S2 §5 width
+/// rule), pinned below.
 #[test]
 fn r18_tail_short_buffers_fail_closed() {
     let registry = r18_registry();

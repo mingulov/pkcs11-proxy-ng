@@ -4648,15 +4648,19 @@ impl Drop for R5SavedEndpoint {
     }
 }
 
-/// R5/F1: injects transport capability 1 into BOTH edges (the shim
-/// snapshot and the shared-client cache — production feeds both from the
-/// same discovery probe) and restores legacy 0 on drop. The test must
-/// hold `shim_state_test_guard`; a fresh `ShimSession` re-probes (to 1
-/// since the R23 advertisement) anyway, so a leak could only affect the
-/// current test.
-struct R5TransportGuard;
+/// R5/F1 drop-mechanics probe (test-only, mechanics-only): forces
+/// transport capability 1 in scope on BOTH edges (the shim snapshot
+/// and the shared-client cache — production feeds both from the same
+/// discovery probe) and forces legacy 0 on drop. It does NOT
+/// save/restore the probed value: since the R23 advertisement a fresh
+/// `ShimSession` probes to 1, so the forced 0 is a deliberate legacy
+/// simulation, not a restore (the restore test pins the forced-legacy
+/// outcome). The test must hold `shim_state_test_guard`; a fresh
+/// `ShimSession` re-probes (to 1) anyway, so a leak could only affect
+/// the current test.
+struct R5TransportMechanicsGuard;
 
-impl R5TransportGuard {
+impl R5TransportMechanicsGuard {
     fn inject() -> Self {
         crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(1);
         state::runtime().block_on(async {
@@ -4667,7 +4671,7 @@ impl R5TransportGuard {
     }
 }
 
-impl Drop for R5TransportGuard {
+impl Drop for R5TransportMechanicsGuard {
     fn drop(&mut self) {
         crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(0);
         state::runtime().block_on(async {
@@ -4882,7 +4886,7 @@ fn r5_transport_restore_returns_legacy_fail_closed() {
     let shim = ShimSession::new();
     let key = create_object(shim.session);
     {
-        let _v1 = R5TransportGuard::inject();
+        let _v1 = R5TransportMechanicsGuard::inject();
         assert_eq!(crate::interface_probe::mechanism_parameter_transport_version(), 1);
     }
     assert_eq!(crate::interface_probe::mechanism_parameter_transport_version(), 0);

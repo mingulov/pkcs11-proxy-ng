@@ -6062,11 +6062,14 @@ fn r16_presence_helpers_round_trip() {
 }
 
 #[test]
-fn r16_production_encode_never_emits_presence_fields() {
-    // Even a v1-decoded domain value (NULL/41 presence) production-encodes
-    // v0-shaped through the legacy `TryFrom`: legacy bytes only, no
-    // presence fields, version 0. (Since R17 the shim emits v1 through
-    // `to_wire_with_transport_version`; this `TryFrom` stays v0.)
+fn r16_production_encode_never_emits_presence_fields_gcm() {
+    // GCM-representative pin (R16 minor: the name previously implied all
+    // families): even a v1-decoded domain value (NULL/41 presence)
+    // production-encodes v0-shaped through the legacy `TryFrom` —
+    // legacy bytes only, no presence fields, version 0. (Since R17 the
+    // shim emits v1 through `to_wire_with_transport_version`; this
+    // `TryFrom` stays v0. Every family's v0 arm hard-codes the same
+    // `*_null_len: None` shape; GCM pins it once.)
     let domain = CkMechanism {
         mechanism_type: CkMechanismType(0x1087),
         params: Some(CkMechanismParams::Gcm(GcmParams {

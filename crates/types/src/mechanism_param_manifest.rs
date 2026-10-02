@@ -811,6 +811,20 @@ mod manifest_tests {
     }
 
     #[test]
+    fn r21_pending_tail_status_still_parses() {
+        // R21 MINOR-1: the retained `PendingTail` variant keeps old TOML
+        // snapshots parseable — the wire string still deserializes even
+        // though no live entry carries it (pinned complete above).
+        #[derive(serde::Deserialize)]
+        struct StatusProbe {
+            status: ManifestStatus,
+        }
+        let probe: StatusProbe =
+            toml::from_str("status = \"pending-tail\"").expect("old status string parses");
+        assert_eq!(probe.status, ManifestStatus::PendingTail);
+    }
+
+    #[test]
     fn r21_tail_complete_and_exactly_nested_or_output() {
         // The exact R8 pending tail (kept as the completed-tail pin): the
         // NestedOrOutput set, every member Complete since R21.
