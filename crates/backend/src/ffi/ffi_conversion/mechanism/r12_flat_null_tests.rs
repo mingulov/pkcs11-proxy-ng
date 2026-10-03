@@ -390,6 +390,71 @@ fn f6_nested_flat_eligible_under_request_registry_converts() {
     assert_eq!(bytes, vec![0xA5; 4], "nested Flat bytes verbatim");
 }
 
+/// Nested Flat validates under the carried ABIs (NF2): a Windows
+/// RSA-PSS struct-prefix Flat nested in KIP converts when the outer was
+/// validated under LLP64-packed — descent reuses the actual ABIs, never
+/// infers ILP32 from the 4-byte `CK_ULONG` width (word width alone
+/// cannot distinguish ILP32 from LLP64-packed).
+#[test]
+fn nf2_nested_flat_prefix_validates_under_carried_windows_abi() {
+    let win = ParamAbi::Llp64Packed1Le;
+    let mech = CkMechanismType::RSA_PKCS_PSS.0;
+    let resolved = ShapeResolver::resolve(
+        Some("rsa_pss"),
+        OperationContext { mechanism: mech, operation: Operation::General, length: 1 },
+        win,
+    )
+    .expect("rsa_pss descriptor resolves under Windows ABI");
+    let nested = CkMechanism {
+        mechanism_type: CkMechanismType(mech),
+        params: Some(CkMechanismParams::Flat(FlatParams {
+            bytes: SecretBytes::copy_from_slice(&[0x01]),
+            declared_len: 1,
+            source_abi: Some(win),
+            fingerprint: resolved.fingerprint(win),
+            version: MECHANISM_PARAMETER_TRANSPORT_VERSION,
+        })),
+    };
+    let outer = CkMechanism {
+        mechanism_type: CkMechanismType::RSA_PKCS,
+        params: Some(CkMechanismParams::Kip(KipParams {
+            mechanism: Some(Box::new(nested)),
+            key_handle: CkObjectHandle(0),
+            seed_presence: PointerBytes::present_copy(&[]),
+        })),
+    };
+    // Like the post-R13 server on a Windows edge: the outer node is
+    // validated under the actual (LLP64-packed) ABIs.
+    let validated = ValidatedMechanismParams::validate(
+        &outer,
+        &registry_with_bindings(&[("kip", CkMechanismType::RSA_PKCS.0), ("rsa_pss", mech)]),
+        Operation::General,
+        win,
+        win,
+    )
+    .expect("outer KIP validates");
+    let ffi = mechanism_to_ffi(&validated)
+        .expect("Windows nested prefix must convert under the carried ABI");
+    let outer_ffi = ffi.ck_mechanism();
+    assert!(!outer_ffi.pParameter.is_null(), "KIP params must be present");
+    // SAFETY: `pParameter` points at the live `CK_KIP_PARAMS` box.
+    let kip: cryptoki_sys::CK_KIP_PARAMS =
+        unsafe { (outer_ffi.pParameter as *const cryptoki_sys::CK_KIP_PARAMS).read_unaligned() };
+    assert!(!kip.pMechanism.is_null(), "nested mechanism pointer must be live");
+    // SAFETY: `pMechanism` designates the live nested `CK_MECHANISM`
+    // retained in the KIP backing.
+    let inner: cryptoki_sys::CK_MECHANISM = unsafe { kip.pMechanism.read_unaligned() };
+    assert_eq!(inner.mechanism as u64, mech, "nested mechanism id");
+    assert!(!inner.pParameter.is_null(), "nested Flat extent must be non-NULL");
+    assert_eq!(inner.ulParameterLen as u64, 1, "nested declared length");
+    // SAFETY: the nested extent holds exactly `ulParameterLen` bytes.
+    let bytes = unsafe {
+        std::slice::from_raw_parts(inner.pParameter as *const u8, inner.ulParameterLen as usize)
+            .to_vec()
+    };
+    assert_eq!(bytes, vec![0x01], "nested Flat bytes verbatim");
+}
+
 /// Flat output effects, decided (S2 §6): native writes into Flat backing
 /// are NOT returned — `output_params()` yields `None` even after the
 /// provider mutates every extent byte, and the equality probe agrees.

@@ -3019,6 +3019,23 @@ fn f5_dkm_ilp32(method: u32, little_endian: u8, width_in_bits: u32) -> Vec<u8> {
     value
 }
 
+/// Windows LLP64 pack(1) counter-format vector (literal 5 bytes).
+fn f5_counter_packed1(little_endian: u8, width_in_bits: u32) -> Vec<u8> {
+    let mut value = vec![0u8; 5];
+    value[0] = little_endian;
+    value[1..5].copy_from_slice(&width_in_bits.to_ne_bytes());
+    value
+}
+
+/// Windows LLP64 pack(1) DKM-length-format vector (literal 9 bytes).
+fn f5_dkm_packed1(method: u32, little_endian: u8, width_in_bits: u32) -> Vec<u8> {
+    let mut value = vec![0u8; 9];
+    value[0..4].copy_from_slice(&method.to_ne_bytes());
+    value[4] = little_endian;
+    value[5..9].copy_from_slice(&width_in_bits.to_ne_bytes());
+    value
+}
+
 /// By-value copy of data-param element `index` from a live
 /// `pDataParams` array (the probe's `FfiMechanism` is arena-retained,
 /// so every element outlives the test).
@@ -3114,6 +3131,57 @@ fn f5_kdf_counter_bridges_both_client_widths() {
     let rebuilt = f5_counter_at(second.pValue);
     assert_eq!(rebuilt.bLittleEndian, 0, "f5/counter-ilp32: bool byte");
     assert_eq!(rebuilt.ulWidthInBits as u64, 0xAABB_CCDD, "f5/counter-ilp32: width");
+}
+
+#[test]
+fn nf1_kdf_packed_client_layouts_bridge_to_native() {
+    // Windows pack(1) client legs bridge to daemon-native records with
+    // native alignment and value-exact scalars.
+    let ffi = convert(
+        sp800_kdf(
+            PointerArray::present(vec![
+                prf_data(
+                    CK_SP800_108_COUNTER,
+                    PointerBytes::present_copy(&f5_counter_packed1(1, 321)),
+                ),
+                prf_data(
+                    CK_SP800_108_DKM_LENGTH,
+                    PointerBytes::present_copy(&f5_dkm_packed1(2, 0, 512)),
+                ),
+            ]),
+            PointerArray::present(Vec::new()),
+        ),
+        CkMechanismType::SP800_108_COUNTER_KDF,
+    );
+    let p: cryptoki_sys::CK_SP800_108_KDF_PARAMS = param_struct(ffi);
+    assert_eq!(p.ulNumberOfDataParams as u64, 2, "nf1/packed: count");
+    let counter_len = std::mem::size_of::<cryptoki_sys::CK_SP800_108_COUNTER_FORMAT>() as u64;
+    let first = f5_data_elem(p.pDataParams, 0);
+    assert_field(
+        "nf1/packed-counter",
+        first.pValue as *mut u8,
+        first.ulValueLen,
+        false,
+        counter_len,
+    );
+    f5_assert_aligned::<cryptoki_sys::CK_SP800_108_COUNTER_FORMAT>(
+        "nf1/packed-counter",
+        first.pValue,
+    );
+    let rebuilt = f5_counter_at(first.pValue);
+    assert_eq!(rebuilt.bLittleEndian, 1, "nf1/packed-counter: bool byte");
+    assert_eq!(rebuilt.ulWidthInBits as u64, 321, "nf1/packed-counter: width");
+    let dkm_len = std::mem::size_of::<cryptoki_sys::CK_SP800_108_DKM_LENGTH_FORMAT>() as u64;
+    let second = f5_data_elem(p.pDataParams, 1);
+    assert_field("nf1/packed-dkm", second.pValue as *mut u8, second.ulValueLen, false, dkm_len);
+    f5_assert_aligned::<cryptoki_sys::CK_SP800_108_DKM_LENGTH_FORMAT>(
+        "nf1/packed-dkm",
+        second.pValue,
+    );
+    let rebuilt = f5_dkm_at(second.pValue);
+    assert_eq!(rebuilt.dkmLengthMethod as u64, 2, "nf1/packed-dkm: method");
+    assert_eq!(rebuilt.bLittleEndian, 0, "nf1/packed-dkm: bool byte");
+    assert_eq!(rebuilt.ulWidthInBits as u64, 512, "nf1/packed-dkm: width");
 }
 
 #[test]

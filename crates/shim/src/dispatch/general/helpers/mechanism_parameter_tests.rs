@@ -7369,7 +7369,16 @@ fn r17_ceiling_512mib_boundary_per_field() {
 #[test]
 fn f3_chacha20_all_null_huge_forwards() {
     let registry = r17_registry();
-    const HUGE_BITS: CK_ULONG = ((512u64 * 1024 * 1024 + 1) * 8) as CK_ULONG;
+    // NF7: width-dependent huge input — the 64-bit vector overflows a
+    // 4-byte CK_ULONG (truncating to 8 bits), so 4-byte targets use the
+    // maximum representable bit length. Sized off CK_ULONG, not the
+    // pointer (LLP64 pairs 4-byte CK_ULONG with 8-byte pointers).
+    const HUGE_BITS: CK_ULONG = if std::mem::size_of::<CK_ULONG>() >= 8 {
+        ((512u64 * 1024 * 1024 + 1) * 8) as CK_ULONG
+    } else {
+        CK_ULONG::MAX
+    };
+    let huge_bytes = (HUGE_BITS as u64).div_ceil(8);
     let mut chacha = CK_CHACHA20_PARAMS {
         pBlockCounter: std::ptr::null_mut(),
         blockCounterBits: HUGE_BITS,
@@ -7390,7 +7399,7 @@ fn f3_chacha20_all_null_huge_forwards() {
         Some(CkMechanismParams::ChaCha20(p)) => {
             assert_eq!(p.block_counter_bits, HUGE_BITS as u64);
             assert_eq!(p.nonce_bits, CK_ULONG::MAX as u64);
-            r17_assert_null(&p.block_counter_presence, (512u64 * 1024 * 1024 + 1) as u64);
+            r17_assert_null(&p.block_counter_presence, huge_bytes);
             r17_assert_null(&p.nonce_presence, (CK_ULONG::MAX as u64).div_ceil(8));
         }
         other => panic!("all-NULL huge ChaCha20 must stay typed under v1, got {other:?}"),
@@ -7434,8 +7443,14 @@ fn f3_salsa20_all_null_huge_forwards() {
 #[test]
 fn f3_key_mat_all_null_huge_forwards() {
     let registry = r18_registry();
-    const HUGE_BITS: CK_ULONG = ((512u64 * 1024 * 1024 + 1) * 8) as CK_ULONG;
-    const HUGE_BYTES: u64 = (512 * 1024 * 1024 + 1) as u64;
+    // NF7: width-dependent huge input (see the ChaCha20 test above for
+    // the rationale); the expected byte length derives from it.
+    const HUGE_BITS: CK_ULONG = if std::mem::size_of::<CK_ULONG>() >= 8 {
+        ((512u64 * 1024 * 1024 + 1) * 8) as CK_ULONG
+    } else {
+        CK_ULONG::MAX
+    };
+    let huge_bytes = (HUGE_BITS as u64).div_ceil(8);
     let mut key_mat = CK_SSL3_KEY_MAT_PARAMS {
         ulMacSizeInBits: 160,
         ulKeySizeInBits: 128,
@@ -7463,8 +7478,8 @@ fn f3_key_mat_all_null_huge_forwards() {
         Some(CkMechanismParams::Ssl3KeyMat(p)) => {
             assert_eq!(p.iv_size_bits, HUGE_BITS as u64);
             assert!(p.returned_key_material_is_null);
-            r17_assert_null_secret(&p.client_iv_presence, HUGE_BYTES);
-            r17_assert_null_secret(&p.server_iv_presence, HUGE_BYTES);
+            r17_assert_null_secret(&p.client_iv_presence, huge_bytes);
+            r17_assert_null_secret(&p.server_iv_presence, huge_bytes);
         }
         other => panic!("all-NULL huge SSL3 key-mat must stay typed under v1, got {other:?}"),
     }
@@ -7497,9 +7512,118 @@ fn f3_key_mat_all_null_huge_forwards() {
         Some(CkMechanismParams::WtlsKeyMat(p)) => {
             assert_eq!(p.iv_size_bits, HUGE_BITS as u64);
             assert!(p.returned_key_material_is_null);
-            r17_assert_null_secret(&p.iv_presence, HUGE_BYTES);
+            r17_assert_null_secret(&p.iv_presence, huge_bytes);
         }
         other => panic!("all-NULL huge WTLS key-mat must stay typed under v1, got {other:?}"),
+    }
+}
+
+/// NF6: maximum-length key-mat records the exact bits→bytes ceiling —
+/// `saturating_add(7)/8` undercounts NULL IV metadata by one at
+/// `CK_ULONG::MAX` (saturation swallows the +7 round-up), so the
+/// readers use overflow-safe ceiling division (SSL3, TLS12-superset,
+/// and WTLS forms).
+#[test]
+fn nf6_key_mat_max_iv_bits_records_exact_ceiling() {
+    let registry = r18_registry();
+    let expected = (CK_ULONG::MAX as u64).div_ceil(8);
+    let mut ssl3 = CK_SSL3_KEY_MAT_PARAMS {
+        ulMacSizeInBits: 160,
+        ulKeySizeInBits: 128,
+        ulIVSizeInBits: CK_ULONG::MAX,
+        bIsExport: CK_FALSE,
+        RandomInfo: CK_SSL3_RANDOM_DATA {
+            pClientRandom: std::ptr::null_mut(),
+            ulClientRandomLen: 0,
+            pServerRandom: std::ptr::null_mut(),
+            ulServerRandomLen: 0,
+        },
+        pReturnedKeyMaterial: std::ptr::null_mut(),
+    };
+    match unsafe {
+        r18_read_v1(
+            &registry,
+            "ssl3_key_mat",
+            &mut ssl3 as *mut _ as CK_VOID_PTR,
+            std::mem::size_of::<CK_SSL3_KEY_MAT_PARAMS>() as CK_ULONG,
+        )
+    }
+    .expect("max-length SSL3 key-mat forwards under v1")
+    .params
+    {
+        Some(CkMechanismParams::Ssl3KeyMat(p)) => {
+            assert_eq!(p.iv_size_bits, CK_ULONG::MAX as u64);
+            assert!(p.returned_key_material_is_null);
+            r17_assert_null_secret(&p.client_iv_presence, expected);
+            r17_assert_null_secret(&p.server_iv_presence, expected);
+        }
+        other => panic!("max-length SSL3 key-mat must stay typed under v1, got {other:?}"),
+    }
+    let mut tls12 = CK_TLS12_KEY_MAT_PARAMS {
+        ulMacSizeInBits: 160,
+        ulKeySizeInBits: 128,
+        ulIVSizeInBits: CK_ULONG::MAX,
+        bIsExport: CK_FALSE,
+        RandomInfo: CK_SSL3_RANDOM_DATA {
+            pClientRandom: std::ptr::null_mut(),
+            ulClientRandomLen: 0,
+            pServerRandom: std::ptr::null_mut(),
+            ulServerRandomLen: 0,
+        },
+        pReturnedKeyMaterial: std::ptr::null_mut(),
+        prfHashMechanism: CkMechanismType::SHA256.0 as CK_ULONG,
+    };
+    match unsafe {
+        r18_read_v1(
+            &registry,
+            "ssl3_key_mat",
+            &mut tls12 as *mut _ as CK_VOID_PTR,
+            std::mem::size_of::<CK_TLS12_KEY_MAT_PARAMS>() as CK_ULONG,
+        )
+    }
+    .expect("max-length TLS12 key-mat forwards under v1")
+    .params
+    {
+        Some(CkMechanismParams::Ssl3KeyMat(p)) => {
+            assert_eq!(p.iv_size_bits, CK_ULONG::MAX as u64);
+            assert!(p.returned_key_material_is_null);
+            r17_assert_null_secret(&p.client_iv_presence, expected);
+            r17_assert_null_secret(&p.server_iv_presence, expected);
+        }
+        other => panic!("max-length TLS12 key-mat must stay typed under v1, got {other:?}"),
+    }
+    let mut wtls = CK_WTLS_KEY_MAT_PARAMS {
+        DigestMechanism: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
+        ulMacSizeInBits: 160,
+        ulKeySizeInBits: 128,
+        ulIVSizeInBits: CK_ULONG::MAX,
+        ulSequenceNumber: 7,
+        bIsExport: CK_TRUE,
+        RandomInfo: CK_WTLS_RANDOM_DATA {
+            pClientRandom: std::ptr::null_mut(),
+            ulClientRandomLen: 0,
+            pServerRandom: std::ptr::null_mut(),
+            ulServerRandomLen: 0,
+        },
+        pReturnedKeyMaterial: std::ptr::null_mut(),
+    };
+    match unsafe {
+        r18_read_v1(
+            &registry,
+            "wtls_key_mat",
+            &mut wtls as *mut _ as CK_VOID_PTR,
+            std::mem::size_of::<CK_WTLS_KEY_MAT_PARAMS>() as CK_ULONG,
+        )
+    }
+    .expect("max-length WTLS key-mat forwards under v1")
+    .params
+    {
+        Some(CkMechanismParams::WtlsKeyMat(p)) => {
+            assert_eq!(p.iv_size_bits, CK_ULONG::MAX as u64);
+            assert!(p.returned_key_material_is_null);
+            r17_assert_null_secret(&p.iv_presence, expected);
+        }
+        other => panic!("max-length WTLS key-mat must stay typed under v1, got {other:?}"),
     }
 }
 
