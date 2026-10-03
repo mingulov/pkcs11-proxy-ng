@@ -770,8 +770,12 @@ fn wrap_key_reader_uses_v32_aead_wrap_shapes() {
         other => panic!("unexpected GCM wrap-key params: {other:?}"),
     }
     // R11 v1 leg: exact wrap size under WrapKey is canonical for the wrap
-    // layout → same typed output via the v1 path.
-    match unsafe { read_r11_v1(&mechanism, &registry, Operation::WrapKey) }
+    // layout → same typed output via the v1 path. The fixture is a
+    // host-native struct, so the snapshots must name the host ABI (the
+    // LP64-only helper sees a noncanonical length on 4-byte-`CK_ULONG`
+    // hosts and rejects with PARAM_INVALID); same shape as
+    // `r11_wrap_key_operation_context`.
+    match unsafe { read_r11_v1_native_abi(&mechanism, &registry, Operation::WrapKey) }
         .expect("read mechanism")
         .params
         .expect("params")
@@ -821,9 +825,9 @@ fn wrap_key_reader_uses_v32_aead_wrap_shapes() {
         }
         other => panic!("unexpected CCM wrap-key params: {other:?}"),
     }
-    // R11 v1 leg: exact wrap size under WrapKey is canonical for the wrap
-    // layout → same typed output via the v1 path.
-    match unsafe { read_r11_v1(&mechanism, &registry, Operation::WrapKey) }
+    // R11 v1 leg: host-native fixture → host-ABI snapshots (see the GCM
+    // leg above; the LP64-only helper rejects on 4-byte-`CK_ULONG` hosts).
+    match unsafe { read_r11_v1_native_abi(&mechanism, &registry, Operation::WrapKey) }
         .expect("read mechanism")
         .params
         .expect("params")
