@@ -477,6 +477,14 @@ mod manifest_tests {
         })
     }
 
+    /// Checkout line-ending normalization: `include_str!` embeds the file
+    /// byte-exact, so a CRLF checkout (Windows CI) would fail the
+    /// byte-exact and digest pins below. Normalize to LF before comparing
+    /// (same convention as `policy/tests.rs`).
+    fn normalize_eol(text: &str) -> String {
+        text.replace("\r\n", "\n")
+    }
+
     /// `(size, first_unsafe, fingerprint)` for one ABI key of a TOML form.
     fn toml_layout<'a>(
         form: &'a ManifestForm,
@@ -501,11 +509,22 @@ mod manifest_tests {
         }
         assert_eq!(
             rendered,
-            super::MANIFEST_TOML,
+            normalize_eol(super::MANIFEST_TOML),
             "checked-in manifest drifted from regeneration; run \
              UPDATE_MANIFEST=1 cargo test -p pkcs11-proxy-ng-types manifest \
              and review the diff against S2 §8"
         );
+    }
+
+    #[test]
+    fn manifest_pins_tolerate_crlf_checkouts() {
+        // Simulate a CRLF checkout (Windows CI): inject `\r` before every
+        // `\n`, then prove both pins still hold after normalization. The
+        // win32 CI leg is the authentic CRLF gate; this test pins the
+        // normalization behavior on LF machines.
+        let crlf = normalize_eol(super::MANIFEST_TOML).replace('\n', "\r\n");
+        assert_eq!(super::render_manifest(), normalize_eol(&crlf));
+        assert_eq!(fnv1a_64(normalize_eol(&crlf).as_bytes()), MANIFEST_DIGEST);
     }
 
     #[test]
@@ -2404,8 +2423,9 @@ mod manifest_tests {
         hash
     }
 
-    /// Frozen manifest digest (R21): FNV-1a 64 of the checked-in
-    /// [`MANIFEST_TOML`](super::MANIFEST_TOML). Manifest entries are
+    /// Frozen manifest digest (R21): FNV-1a 64 of the LF-normalized
+    /// checked-in [`MANIFEST_TOML`](super::MANIFEST_TOML) (normalization
+    /// keeps the pin checkout-EOL-independent). Manifest entries are
     /// immutable from here — any later layout change requires a new
     /// transport version (S2 §3 fingerprint freeze). A digest change
     /// without a version bump fails REVIEW, not the test: the test pins
@@ -2415,7 +2435,7 @@ mod manifest_tests {
     #[test]
     fn r21_manifest_digest_freeze() {
         assert_eq!(
-            fnv1a_64(super::MANIFEST_TOML.as_bytes()),
+            fnv1a_64(normalize_eol(super::MANIFEST_TOML).as_bytes()),
             MANIFEST_DIGEST,
             "frozen manifest digest changed: review any manifest edit against \
              S2 §8 + the S2 §3 version rule before updating MANIFEST_DIGEST"
