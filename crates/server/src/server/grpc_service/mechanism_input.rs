@@ -47,7 +47,11 @@ pub(super) fn check_operator_exclusion(
 /// The ABIs transport validation decides under (R13): local is this
 /// daemon's compiled native ABI; backend is the in-process provider's
 /// `CK_ULONG` width (the backend FFI runs in this process, so the
-/// daemon's compiled width is the backend's width).
+/// daemon's compiled width is the backend's width). The backend half is
+/// width-derived rather than `native()`: validation consults only its
+/// `ulong_size()` for declared-length narrowing, and packed-32 shares
+/// ILP32's 4-byte width, so the guess stays correct on win32 without
+/// naming the packed variant.
 ///
 /// Big-endian targets (`ParamAbi::native() == None`): v1 layout ABIs are
 /// all little-endian, so no Flat image can match — the width-derived

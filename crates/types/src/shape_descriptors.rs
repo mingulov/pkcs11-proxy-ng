@@ -12,10 +12,10 @@
 //! them without re-deciding policy.
 //!
 //! Layouts derive from one field sequence per shape via C layout rules,
-//! parameterized by [`ParamAbi`] (LP64, ILP32, LLP64-pack1 — the v1 ABI
-//! set, discriminants mirroring the wire `MechanismParamAbi`). The table
-//! holds field *classes*, never byte offsets, so all three ABIs derive
-//! from the same reviewed source. Native sizes and offsets are
+//! parameterized by [`ParamAbi`] (LP64, ILP32, LLP64-pack1, ILP32-pack1 —
+//! the v1 ABI set, discriminants mirroring the wire `MechanismParamAbi`).
+//! The table holds field *classes*, never byte offsets, so all four ABIs
+//! derive from the same reviewed source. Native sizes and offsets are
 //! cross-checked against `cryptoki-sys` on the host ABI in tests.
 //!
 //! Canonical fingerprint encoding (S2 §3 tuple, byte-exact): FNV-1a 64
@@ -70,6 +70,12 @@ pub enum ParamAbi {
     /// LLP64 little-endian, 1-byte packed (Windows-style PKCS#11
     /// headers): 4-byte `CK_ULONG`, 8-byte pointers, alignment 1.
     Llp64Packed1Le = 3,
+    /// ILP32 little-endian, 1-byte packed: 4-byte `CK_ULONG` and
+    /// pointers, alignment 1. The true native win32
+    /// (i686-pc-windows-msvc) layout: cryptoki-sys ships no
+    /// x86-windows bindings, so win32 falls back to its generic
+    /// bindings whose structs carry `#[cfg_attr(windows, repr(packed))]`.
+    Ilp32Packed1Le = 4,
 }
 
 impl ParamAbi {
@@ -77,24 +83,22 @@ impl ParamAbi {
     pub const fn ulong_size(self) -> usize {
         match self {
             Self::Lp64NativeLe => 8,
-            Self::Ilp32NativeLe => 4,
-            Self::Llp64Packed1Le => 4,
+            Self::Ilp32NativeLe | Self::Llp64Packed1Le | Self::Ilp32Packed1Le => 4,
         }
     }
 
     /// Native pointer width in bytes under this ABI.
     pub const fn pointer_size(self) -> usize {
         match self {
-            Self::Lp64NativeLe => 8,
-            Self::Ilp32NativeLe => 4,
-            Self::Llp64Packed1Le => 8,
+            Self::Lp64NativeLe | Self::Llp64Packed1Le => 8,
+            Self::Ilp32NativeLe | Self::Ilp32Packed1Le => 4,
         }
     }
 
-    /// Whether fields pack with alignment 1 (LLP64-pack1 only).
+    /// Whether fields pack with alignment 1 (the two packed ABIs only).
     pub const fn packed(self) -> bool {
         match self {
-            Self::Llp64Packed1Le => true,
+            Self::Llp64Packed1Le | Self::Ilp32Packed1Le => true,
             Self::Lp64NativeLe | Self::Ilp32NativeLe => false,
         }
     }
@@ -109,15 +113,20 @@ impl ParamAbi {
     /// This build target's v1 ABI, or `None` where no v1 ABI exists
     /// (big-endian targets have no little-endian layout).
     ///
-    /// Only 64-bit Windows is LLP64-pack1 (4-byte `CK_ULONG`, 8-byte
-    /// pointers); 32-bit Windows has 4-byte pointers like ILP32, so it
-    /// selects `Ilp32NativeLe` (a width-blind `cfg!(windows)` here
-    /// mis-sized every pointer-bearing struct on win32).
+    /// Both Windows families are packed-1 (Windows-style PKCS#11
+    /// headers): 64-bit Windows is LLP64-pack1 (4-byte `CK_ULONG`,
+    /// 8-byte pointers) and 32-bit Windows is ILP32-pack1 (4-byte
+    /// `CK_ULONG` and pointers). A width-blind `cfg!(windows)` here
+    /// mis-sized every pointer-bearing struct on win32, and a
+    /// packing-blind win32 fallback to `Ilp32NativeLe` mis-sized every
+    /// packing-sensitive struct there instead.
     pub const fn native() -> Option<Self> {
         if !cfg!(target_endian = "little") {
             None
         } else if cfg!(all(windows, target_pointer_width = "64")) {
             Some(Self::Llp64Packed1Le)
+        } else if cfg!(all(windows, target_pointer_width = "32")) {
+            Some(Self::Ilp32Packed1Le)
         } else if cfg!(target_pointer_width = "64") {
             Some(Self::Lp64NativeLe)
         } else {
@@ -1475,22 +1484,23 @@ mod engine_tests {
     #[test]
     fn packed_layout_has_no_padding_over_whole_table() {
         use super::SHAPE_DESCRIPTORS;
-        let pack1 = ParamAbi::Llp64Packed1Le;
-        for d in SHAPE_DESCRIPTORS {
-            assert_eq!(
-                native_size_of(d.fields, pack1),
-                packed_leaf_sum(d.fields, pack1),
-                "packed size must be the bare byte sum for {}",
-                d.name
-            );
-            for a in d.alternate_forms {
+        for pack1 in [ParamAbi::Llp64Packed1Le, ParamAbi::Ilp32Packed1Le] {
+            for d in SHAPE_DESCRIPTORS {
                 assert_eq!(
-                    native_size_of(a.fields, pack1),
-                    packed_leaf_sum(a.fields, pack1),
-                    "packed size must be the bare byte sum for {}#{}",
-                    d.name,
-                    a.name
+                    native_size_of(d.fields, pack1),
+                    packed_leaf_sum(d.fields, pack1),
+                    "packed size must be the bare byte sum for {} on {pack1:?}",
+                    d.name
                 );
+                for a in d.alternate_forms {
+                    assert_eq!(
+                        native_size_of(a.fields, pack1),
+                        packed_leaf_sum(a.fields, pack1),
+                        "packed size must be the bare byte sum for {}#{} on {pack1:?}",
+                        d.name,
+                        a.name
+                    );
+                }
             }
         }
     }
@@ -1536,7 +1546,12 @@ mod engine_tests {
     #[test]
     fn leaf_offsets_monotone_over_whole_table() {
         use super::SHAPE_DESCRIPTORS;
-        for abi in [ParamAbi::Lp64NativeLe, ParamAbi::Ilp32NativeLe, ParamAbi::Llp64Packed1Le] {
+        for abi in [
+            ParamAbi::Lp64NativeLe,
+            ParamAbi::Ilp32NativeLe,
+            ParamAbi::Llp64Packed1Le,
+            ParamAbi::Ilp32Packed1Le,
+        ] {
             for d in SHAPE_DESCRIPTORS {
                 for fields in
                     std::iter::once(d.fields).chain(d.alternate_forms.iter().map(|a| a.fields))
@@ -1762,8 +1777,12 @@ mod fingerprint_tests {
         ShapeResolver, layout_fingerprint,
     };
 
-    const ABIS: [ParamAbi; 3] =
-        [ParamAbi::Lp64NativeLe, ParamAbi::Ilp32NativeLe, ParamAbi::Llp64Packed1Le];
+    const ABIS: [ParamAbi; 4] = [
+        ParamAbi::Lp64NativeLe,
+        ParamAbi::Ilp32NativeLe,
+        ParamAbi::Llp64Packed1Le,
+        ParamAbi::Ilp32Packed1Le,
+    ];
 
     fn fp_of(shape: &str, form: &str, abi: ParamAbi) -> u64 {
         let d = ShapeResolver::descriptor(shape).unwrap();
@@ -1911,6 +1930,40 @@ mod fingerprint_tests {
         // share a fingerprint (the binding is part of the identity).
         for abi in ABIS {
             assert_ne!(fp_of("gcm", "", abi), fp_of("gcm_compat", "struct", abi));
+        }
+    }
+
+    #[test]
+    fn packed32_fingerprints_match_ilp32_where_layouts_identical() {
+        // The S2 §3 tuple carries (shape, ulong-size, byte-order, leaves,
+        // pads) but no packing flag, and packed-32 shares ulong-size and
+        // byte-order with ILP32-natural: packing-insensitive forms share
+        // fingerprints across the two (the ABI enum check, not the
+        // fingerprint, separates those edges — same pattern as the
+        // ILP32/LLP64 identical-set pin above), while forms whose packed
+        // size differs (native_size is in the tuple) always split. The
+        // oracle here is the size relation, the subject the fingerprint
+        // encoding; the exact differs-set values live in
+        // `crosscheck_tests::PACKED32_DIFFERS`.
+        use super::native_size_of;
+        let ilp32 = ParamAbi::Ilp32NativeLe;
+        let packed32 = ParamAbi::Ilp32Packed1Le;
+        let check = |shape: &str, form: &str, fields: &[super::FieldClass]| {
+            let same_size = native_size_of(fields, ilp32) == native_size_of(fields, packed32);
+            let (a, b) = (fp_of(shape, form, ilp32), fp_of(shape, form, packed32));
+            if same_size {
+                assert_eq!(a, b, "unexpected packed-32 split: {shape}#{form}");
+            } else {
+                assert_ne!(a, b, "ABI-blind print: {shape}#{form}");
+            }
+        };
+        for d in SHAPE_DESCRIPTORS {
+            if !d.fields.is_empty() {
+                check(d.name, "", d.fields);
+            }
+            for a in d.alternate_forms {
+                check(d.name, a.name, a.fields);
+            }
         }
     }
 
@@ -2410,8 +2463,12 @@ mod resolver_tests {
             65537,
             u64::MAX,
         ];
-        const ABIS: &[ParamAbi] =
-            &[ParamAbi::Lp64NativeLe, ParamAbi::Ilp32NativeLe, ParamAbi::Llp64Packed1Le];
+        const ABIS: &[ParamAbi] = &[
+            ParamAbi::Lp64NativeLe,
+            ParamAbi::Ilp32NativeLe,
+            ParamAbi::Llp64Packed1Le,
+            ParamAbi::Ilp32Packed1Le,
+        ];
         for d in SHAPE_DESCRIPTORS {
             for op in [Operation::General, Operation::WrapKey] {
                 for len in LENS {
@@ -2881,8 +2938,9 @@ mod eligibility_tests {
 #[cfg(test)]
 mod crosscheck_tests {
     //! Ground the table against `cryptoki-sys` (host ABI) and published
-    //! binding sizes (ILP32) plus hand-derived packed vectors (LLP64).
-    use super::{ParamAbi, ShapeResolver, native_size_of};
+    //! binding sizes (ILP32) plus hand-derived packed vectors (LLP64 and
+    //! ILP32-pack1).
+    use super::{ParamAbi, SHAPE_DESCRIPTORS, ShapeResolver, native_size_of};
 
     fn lp64_size(shape: &str) -> usize {
         let d = ShapeResolver::descriptor(shape).unwrap();
@@ -3239,6 +3297,76 @@ mod crosscheck_tests {
         }
     }
 
+    // The exact ILP32-pack1 differs-set: (shape, form, ILP32-natural size,
+    // packed-32 size) for every form whose natural layout carries padding
+    // (10 shapes, 11 forms — the win32 WOW64 failures were exactly the
+    // packing-sensitive readers of these forms). True native win32 sizes:
+    // cryptoki-sys 0.5.0 has no x86-windows bindings, so win32 uses the
+    // generic `repr(packed)` structs. Host-independent: runs everywhere;
+    // the win32 WOW64 leg is the authentic gate that executes these
+    // layouts against real packed `CK_*` structs.
+    const PACKED32_DIFFERS: &[(&str, &str, usize, usize)] = &[
+        ("eddsa", "", 12, 9),
+        ("hkdf", "", 32, 30),
+        ("ike1_extended_derive", "", 20, 17),
+        ("ike1_prf_derive", "", 36, 30),
+        ("ike2_prf_plus_derive", "", 20, 17),
+        ("ike_prf_derive", "", 28, 26),
+        ("kea_derive", "", 24, 21),
+        ("key_wrap_set_oaep", "", 12, 9),
+        ("ssl3_key_mat", "", 36, 33),
+        ("ssl3_key_mat", "tls12", 40, 37),
+        ("wtls_key_mat", "", 44, 41),
+    ];
+
+    #[test]
+    fn packed32_sizes_match_hand_vectors_with_exact_differs_set() {
+        assert_eq!(PACKED32_DIFFERS.len(), 11);
+        let ilp32 = ParamAbi::Ilp32NativeLe;
+        let packed32 = ParamAbi::Ilp32Packed1Le;
+        // Listed forms carry exactly the pinned sizes on both ABIs.
+        for (shape, form, want_ilp32, want_packed) in PACKED32_DIFFERS {
+            let d = ShapeResolver::descriptor(shape).unwrap();
+            let fields = if form.is_empty() {
+                d.fields
+            } else {
+                d.alternate_forms.iter().find(|a| &a.name == form).unwrap().fields
+            };
+            assert_eq!(native_size_of(fields, ilp32), *want_ilp32, "ILP32 size for {shape}#{form}");
+            assert_eq!(
+                native_size_of(fields, packed32),
+                *want_packed,
+                "packed-32 size for {shape}#{form}"
+            );
+        }
+        // Every other non-bare form is packing-insensitive: packed-32
+        // equals ILP32-natural exactly (the differs-set above is complete).
+        let listed = |shape: &str, form: &str| {
+            PACKED32_DIFFERS.iter().any(|(s, f, _, _)| *s == shape && *f == form)
+        };
+        for d in SHAPE_DESCRIPTORS {
+            if !d.fields.is_empty() && !listed(d.name, "") {
+                assert_eq!(
+                    native_size_of(d.fields, packed32),
+                    native_size_of(d.fields, ilp32),
+                    "unlisted packed-32 split: {}",
+                    d.name
+                );
+            }
+            for a in d.alternate_forms {
+                if !listed(d.name, a.name) {
+                    assert_eq!(
+                        native_size_of(a.fields, packed32),
+                        native_size_of(a.fields, ilp32),
+                        "unlisted packed-32 split: {}#{}",
+                        d.name,
+                        a.name
+                    );
+                }
+            }
+        }
+    }
+
     // `native()` pins, one per little-endian target family: exactly one
     // arm compiles per target (big-endian targets compile none —
     // `native()` is `None` there). The win32 arm executes only on the
@@ -3265,7 +3393,10 @@ mod crosscheck_tests {
 
     #[cfg(all(windows, target_pointer_width = "32", target_endian = "little"))]
     #[test]
-    fn native_abi_is_ilp32_on_win32() {
-        assert_eq!(ParamAbi::native(), Some(ParamAbi::Ilp32NativeLe));
+    fn native_abi_is_packed32_on_win32() {
+        // True native win32 layout is packed-32 (cryptoki-sys generic.rs
+        // `repr(packed)` fallback), not ILP32-natural: the ILP32 pin
+        // mis-sized every packing-sensitive win32 struct (cid-fix-3).
+        assert_eq!(ParamAbi::native(), Some(ParamAbi::Ilp32Packed1Le));
     }
 }

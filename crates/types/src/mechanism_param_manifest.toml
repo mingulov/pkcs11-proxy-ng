@@ -3,7 +3,7 @@
 # Source: SHAPE_DESCRIPTORS (shape_descriptors.rs) + SHAPE_BINDINGS (this module).
 # Regenerate with: UPDATE_MANIFEST=1 cargo test -p pkcs11-proxy-ng-types manifest
 # Any diff to this file is a contract change: review it against S2 §8.
-manifest_version = 1
+manifest_version = 2
 
 [[shape]]
 name = "aes_cbc_encrypt_data"
@@ -27,6 +27,9 @@ ilp32_fingerprint = "0x070a8fd035a28133"
 llp64_size = 28
 llp64_first_unsafe = 16
 llp64_fingerprint = "0xd72035fdda3638b7"
+ilp32p_size = 24
+ilp32p_first_unsafe = 16
+ilp32p_fingerprint = "0x070a8fd035a28133"
 
 [[shape]]
 name = "aes_ctr"
@@ -47,6 +50,8 @@ ilp32_size = 20
 ilp32_fingerprint = "0x2277f9a682862ab3"
 llp64_size = 20
 llp64_fingerprint = "0x2277f9a682862ab3"
+ilp32p_size = 20
+ilp32p_fingerprint = "0x2277f9a682862ab3"
 
 [[shape]]
 name = "aria_cbc_encrypt_data"
@@ -70,6 +75,9 @@ ilp32_fingerprint = "0xea6dfbadbae35618"
 llp64_size = 28
 llp64_first_unsafe = 16
 llp64_fingerprint = "0x1eda7f5fdb09149c"
+ilp32p_size = 24
+ilp32p_first_unsafe = 16
+ilp32p_fingerprint = "0xea6dfbadbae35618"
 
 [[shape]]
 name = "camellia_cbc_encrypt_data"
@@ -93,6 +101,9 @@ ilp32_fingerprint = "0x4e74ab05cd2f65df"
 llp64_size = 28
 llp64_first_unsafe = 16
 llp64_fingerprint = "0x7e5f04d8289bae5b"
+ilp32p_size = 24
+ilp32p_first_unsafe = 16
+ilp32p_fingerprint = "0x4e74ab05cd2f65df"
 
 [[shape]]
 name = "camellia_ctr"
@@ -113,6 +124,8 @@ ilp32_size = 20
 ilp32_fingerprint = "0xbc925db4cd23cb77"
 llp64_size = 20
 llp64_fingerprint = "0xbc925db4cd23cb77"
+ilp32p_size = 20
+ilp32p_fingerprint = "0xbc925db4cd23cb77"
 
 [[shape]]
 name = "ccm"
@@ -136,6 +149,9 @@ ilp32_fingerprint = "0x5a6b0f473d6f5b65"
 llp64_size = 32
 llp64_first_unsafe = 4
 llp64_fingerprint = "0x7f23e30057944d05"
+ilp32p_size = 24
+ilp32p_first_unsafe = 4
+ilp32p_fingerprint = "0x5a6b0f473d6f5b65"
 
 [[shape]]
 name = "ccm_wrap"
@@ -159,6 +175,9 @@ ilp32_fingerprint = "0xccc6a6b6de376fe3"
 llp64_size = 40
 llp64_first_unsafe = 4
 llp64_fingerprint = "0x29c10d553d73941b"
+ilp32p_size = 32
+ilp32p_first_unsafe = 4
+ilp32p_fingerprint = "0xccc6a6b6de376fe3"
 
 [[shape]]
 name = "chacha20"
@@ -182,6 +201,9 @@ ilp32_fingerprint = "0x3e2fbbc16b68c2d7"
 llp64_size = 24
 llp64_first_unsafe = 0
 llp64_fingerprint = "0xe42e4ecce2ce45ef"
+ilp32p_size = 16
+ilp32p_first_unsafe = 0
+ilp32p_fingerprint = "0x3e2fbbc16b68c2d7"
 
 [[shape]]
 name = "des_cbc_encrypt_data"
@@ -205,6 +227,9 @@ ilp32_fingerprint = "0xc2b895354ab7305e"
 llp64_size = 20
 llp64_first_unsafe = 8
 llp64_fingerprint = "0x3a13d77d7dade6ca"
+ilp32p_size = 16
+ilp32p_first_unsafe = 8
+ilp32p_fingerprint = "0xc2b895354ab7305e"
 
 [[shape]]
 name = "ecdh1_derive"
@@ -228,6 +253,9 @@ ilp32_fingerprint = "0xccb048e56734a9ef"
 llp64_size = 28
 llp64_first_unsafe = 8
 llp64_fingerprint = "0xc796efd83ac89d5f"
+ilp32p_size = 20
+ilp32p_first_unsafe = 8
+ilp32p_fingerprint = "0xccb048e56734a9ef"
 
 [[shape]]
 name = "ecdh2_derive"
@@ -251,6 +279,9 @@ ilp32_fingerprint = "0xa5da53a32e60ff94"
 llp64_size = 48
 llp64_first_unsafe = 8
 llp64_fingerprint = "0x427474be074651b4"
+ilp32p_size = 36
+ilp32p_first_unsafe = 8
+ilp32p_fingerprint = "0xa5da53a32e60ff94"
 
 [[shape]]
 name = "ecdh_aes_key_wrap"
@@ -274,6 +305,9 @@ ilp32_fingerprint = "0x85d25b3859ac4b2d"
 llp64_size = 20
 llp64_first_unsafe = 12
 llp64_fingerprint = "0x596ba18347cdb465"
+ilp32p_size = 16
+ilp32p_first_unsafe = 12
+ilp32p_fingerprint = "0x85d25b3859ac4b2d"
 
 [[shape]]
 name = "ecmqv_derive"
@@ -297,6 +331,9 @@ ilp32_fingerprint = "0xa1c87559708b8205"
 llp64_size = 52
 llp64_first_unsafe = 8
 llp64_fingerprint = "0xd85e079ffd8c23b9"
+ilp32p_size = 40
+ilp32p_first_unsafe = 8
+ilp32p_fingerprint = "0xa1c87559708b8205"
 
 [[shape]]
 name = "eddsa"
@@ -320,6 +357,9 @@ ilp32_fingerprint = "0x59c48ad14297c9ba"
 llp64_size = 13
 llp64_first_unsafe = 5
 llp64_fingerprint = "0xcb842821e31b4dec"
+ilp32p_size = 9
+ilp32p_first_unsafe = 5
+ilp32p_fingerprint = "0xc0ee3144235c0da4"
 
 [[shape]]
 name = "extract"
@@ -340,6 +380,8 @@ ilp32_size = 4
 ilp32_fingerprint = "0xc070a3b20b3008b2"
 llp64_size = 4
 llp64_fingerprint = "0xc070a3b20b3008b2"
+ilp32p_size = 4
+ilp32p_fingerprint = "0xc070a3b20b3008b2"
 
 [[shape]]
 name = "gcm"
@@ -363,6 +405,9 @@ ilp32_fingerprint = "0xf32139c5bb04b5f9"
 llp64_size = 32
 llp64_first_unsafe = 0
 llp64_fingerprint = "0xd488837fa60b7e95"
+ilp32p_size = 24
+ilp32p_first_unsafe = 0
+ilp32p_fingerprint = "0xf32139c5bb04b5f9"
 
 [[shape]]
 name = "gcm_compat"
@@ -380,6 +425,7 @@ outer_kind = "ByteBuffer"
 lp64_fingerprint = "0x54504d5845494241"
 ilp32_fingerprint = "0x54504d5845494241"
 llp64_fingerprint = "0x54504d5845494241"
+ilp32p_fingerprint = "0x54504d5845494241"
 
 [[shape.form]]
 name = "struct"
@@ -393,6 +439,9 @@ ilp32_fingerprint = "0xde0ed0342bfcc0fe"
 llp64_size = 32
 llp64_first_unsafe = 0
 llp64_fingerprint = "0x70a639886e65ed12"
+ilp32p_size = 24
+ilp32p_first_unsafe = 0
+ilp32p_fingerprint = "0xde0ed0342bfcc0fe"
 
 [[shape]]
 name = "gcm_wrap"
@@ -416,6 +465,9 @@ ilp32_fingerprint = "0x38b5f71837c8b9b4"
 llp64_size = 36
 llp64_first_unsafe = 0
 llp64_fingerprint = "0x4b14314ab275dfcc"
+ilp32p_size = 28
+ilp32p_first_unsafe = 0
+ilp32p_fingerprint = "0x38b5f71837c8b9b4"
 
 [[shape]]
 name = "gostr3410_derive"
@@ -439,6 +491,9 @@ ilp32_fingerprint = "0xb8fa2bc4fdc6cc73"
 llp64_size = 28
 llp64_first_unsafe = 4
 llp64_fingerprint = "0x664a8e2a4f74b68b"
+ilp32p_size = 20
+ilp32p_first_unsafe = 4
+ilp32p_fingerprint = "0xb8fa2bc4fdc6cc73"
 
 [[shape]]
 name = "gostr3410_key_wrap"
@@ -462,6 +517,9 @@ ilp32_fingerprint = "0x184a1e44cf6eb686"
 llp64_size = 28
 llp64_first_unsafe = 0
 llp64_fingerprint = "0xbbf4a729f2d48216"
+ilp32p_size = 20
+ilp32p_first_unsafe = 0
+ilp32p_fingerprint = "0x184a1e44cf6eb686"
 
 [[shape]]
 name = "hkdf"
@@ -485,6 +543,9 @@ ilp32_fingerprint = "0xa1e21c74d4648b07"
 llp64_size = 38
 llp64_first_unsafe = 10
 llp64_fingerprint = "0xbbe6f61337eb6e82"
+ilp32p_size = 30
+ilp32p_first_unsafe = 10
+ilp32p_fingerprint = "0x51034236f277c7b6"
 
 [[shape]]
 name = "ike1_extended_derive"
@@ -508,6 +569,9 @@ ilp32_fingerprint = "0x7c2e96a41e710012"
 llp64_size = 21
 llp64_first_unsafe = 5
 llp64_fingerprint = "0xfcc66c8f1f61c571"
+ilp32p_size = 17
+ilp32p_first_unsafe = 5
+ilp32p_fingerprint = "0x7655ffa982321c85"
 
 [[shape]]
 name = "ike1_prf_derive"
@@ -531,6 +595,9 @@ ilp32_fingerprint = "0x2f6e6a2766398c48"
 llp64_size = 38
 llp64_first_unsafe = 5
 llp64_fingerprint = "0x51ebc425c3452311"
+ilp32p_size = 30
+ilp32p_first_unsafe = 5
+ilp32p_fingerprint = "0x4554502e5805c021"
 
 [[shape]]
 name = "ike2_prf_plus_derive"
@@ -554,6 +621,9 @@ ilp32_fingerprint = "0xbdf5b092629b9497"
 llp64_size = 21
 llp64_first_unsafe = 5
 llp64_fingerprint = "0x3234d4d118b0b954"
+ilp32p_size = 17
+ilp32p_first_unsafe = 5
+ilp32p_fingerprint = "0x544e64323a4e5b40"
 
 [[shape]]
 name = "ike_prf_derive"
@@ -577,6 +647,9 @@ ilp32_fingerprint = "0xdb47e0f87ec1e431"
 llp64_size = 34
 llp64_first_unsafe = 6
 llp64_fingerprint = "0x72aae78e400ed69c"
+ilp32p_size = 26
+ilp32p_first_unsafe = 6
+ilp32p_fingerprint = "0x04d5bb2adcc131fc"
 
 [[shape]]
 name = "iv"
@@ -594,6 +667,7 @@ outer_kind = "ByteBuffer"
 lp64_fingerprint = "0x54504d5845494241"
 ilp32_fingerprint = "0x54504d5845494241"
 llp64_fingerprint = "0x54504d5845494241"
+ilp32p_fingerprint = "0x54504d5845494241"
 
 [[shape]]
 name = "kea_derive"
@@ -617,6 +691,9 @@ ilp32_fingerprint = "0x991fbc98c5feabf4"
 llp64_size = 33
 llp64_first_unsafe = 5
 llp64_fingerprint = "0xf15d98e8fbefb243"
+ilp32p_size = 21
+ilp32p_first_unsafe = 5
+ilp32p_fingerprint = "0x4ea952b97d5ae24f"
 
 [[shape]]
 name = "key_derivation_string"
@@ -640,6 +717,9 @@ ilp32_fingerprint = "0x357e3d027fd6529d"
 llp64_size = 12
 llp64_first_unsafe = 0
 llp64_fingerprint = "0x63ed3d6639d17a99"
+ilp32p_size = 8
+ilp32p_first_unsafe = 0
+ilp32p_fingerprint = "0x357e3d027fd6529d"
 
 [[shape]]
 name = "key_wrap_set_oaep"
@@ -663,6 +743,9 @@ ilp32_fingerprint = "0xcc16d32751780f30"
 llp64_size = 13
 llp64_first_unsafe = 1
 llp64_fingerprint = "0xfe5ad3cc374545aa"
+ilp32p_size = 9
+ilp32p_first_unsafe = 1
+ilp32p_fingerprint = "0xce7079f9dbd8fd2e"
 
 [[shape]]
 name = "kip"
@@ -686,6 +769,9 @@ ilp32_fingerprint = "0x344b9a9af1685d2e"
 llp64_size = 24
 llp64_first_unsafe = 0
 llp64_fingerprint = "0x44f01e8f2aff1136"
+ilp32p_size = 16
+ilp32p_first_unsafe = 0
+ilp32p_fingerprint = "0x344b9a9af1685d2e"
 
 [[shape]]
 name = "kmac"
@@ -709,6 +795,9 @@ ilp32_fingerprint = "0x34e348ac44f105e1"
 llp64_size = 20
 llp64_first_unsafe = 0
 llp64_fingerprint = "0x5c67d25adadc6e55"
+ilp32p_size = 16
+ilp32p_first_unsafe = 0
+ilp32p_fingerprint = "0x34e348ac44f105e1"
 
 [[shape]]
 name = "mac_general"
@@ -729,6 +818,8 @@ ilp32_size = 4
 ilp32_fingerprint = "0x26d8c5261ac668c7"
 llp64_size = 4
 llp64_fingerprint = "0x26d8c5261ac668c7"
+ilp32p_size = 4
+ilp32p_fingerprint = "0x26d8c5261ac668c7"
 
 [[shape]]
 name = "mu_gen"
@@ -752,6 +843,9 @@ ilp32_fingerprint = "0xe2efbfd56a126285"
 llp64_size = 28
 llp64_first_unsafe = 0
 llp64_fingerprint = "0x76c41374b7ec197d"
+ilp32p_size = 20
+ilp32p_first_unsafe = 0
+ilp32p_fingerprint = "0xe2efbfd56a126285"
 
 [[shape]]
 name = "object_handle"
@@ -775,6 +869,9 @@ ilp32_fingerprint = "0x159540c1c1d057c3"
 llp64_size = 4
 llp64_first_unsafe = 0
 llp64_fingerprint = "0x159540c1c1d057c3"
+ilp32p_size = 4
+ilp32p_first_unsafe = 0
+ilp32p_fingerprint = "0x159540c1c1d057c3"
 
 [[shape]]
 name = "otp"
@@ -798,6 +895,9 @@ ilp32_fingerprint = "0xa7acb37a92545aad"
 llp64_size = 12
 llp64_first_unsafe = 0
 llp64_fingerprint = "0xd61bb3de4c4f82a9"
+ilp32p_size = 8
+ilp32p_first_unsafe = 0
+ilp32p_fingerprint = "0xa7acb37a92545aad"
 
 [[shape]]
 name = "parameterless"
@@ -815,6 +915,7 @@ outer_kind = "Parameterless"
 lp64_fingerprint = "0x54504d5845494241"
 ilp32_fingerprint = "0x54504d5845494241"
 llp64_fingerprint = "0x54504d5845494241"
+ilp32p_fingerprint = "0x54504d5845494241"
 
 [[shape]]
 name = "pbe"
@@ -838,6 +939,9 @@ ilp32_fingerprint = "0x72cc1f587bee5f61"
 llp64_size = 36
 llp64_first_unsafe = 0
 llp64_fingerprint = "0x1b8388c90b5a72a5"
+ilp32p_size = 24
+ilp32p_first_unsafe = 0
+ilp32p_fingerprint = "0x72cc1f587bee5f61"
 
 [[shape]]
 name = "pkcs5_pbkd2"
@@ -861,6 +965,9 @@ ilp32_fingerprint = "0x2f10f46d09e8329f"
 llp64_size = 48
 llp64_first_unsafe = 4
 llp64_fingerprint = "0x201e55bb8d601b7b"
+ilp32p_size = 36
+ilp32p_first_unsafe = 4
+ilp32p_fingerprint = "0x2f10f46d09e8329f"
 
 [[shape]]
 name = "rc2_cbc"
@@ -881,6 +988,8 @@ ilp32_size = 12
 ilp32_fingerprint = "0x2b33a4e067f890ea"
 llp64_size = 12
 llp64_fingerprint = "0x2b33a4e067f890ea"
+ilp32p_size = 12
+ilp32p_fingerprint = "0x2b33a4e067f890ea"
 
 [[shape]]
 name = "rc2_mac_general"
@@ -901,6 +1010,8 @@ ilp32_size = 8
 ilp32_fingerprint = "0xeb013081fca0d9cc"
 llp64_size = 8
 llp64_fingerprint = "0xeb013081fca0d9cc"
+ilp32p_size = 8
+ilp32p_fingerprint = "0xeb013081fca0d9cc"
 
 [[shape]]
 name = "rc5"
@@ -921,6 +1032,8 @@ ilp32_size = 8
 ilp32_fingerprint = "0xcee8ac14aae0c8a2"
 llp64_size = 8
 llp64_fingerprint = "0xcee8ac14aae0c8a2"
+ilp32p_size = 8
+ilp32p_fingerprint = "0xcee8ac14aae0c8a2"
 
 [[shape]]
 name = "rc5_cbc"
@@ -944,6 +1057,9 @@ ilp32_fingerprint = "0x90d0224861dd039d"
 llp64_size = 20
 llp64_first_unsafe = 8
 llp64_fingerprint = "0x694b9899cbf19b29"
+ilp32p_size = 16
+ilp32p_first_unsafe = 8
+ilp32p_fingerprint = "0x90d0224861dd039d"
 
 [[shape]]
 name = "rc5_mac_general"
@@ -964,6 +1080,8 @@ ilp32_size = 12
 ilp32_fingerprint = "0xeff6a1365031be7c"
 llp64_size = 12
 llp64_fingerprint = "0xeff6a1365031be7c"
+ilp32p_size = 12
+ilp32p_fingerprint = "0xeff6a1365031be7c"
 
 [[shape]]
 name = "rsa_aes_key_wrap"
@@ -987,6 +1105,9 @@ ilp32_fingerprint = "0x9cff6f1d5d91e5b0"
 llp64_size = 12
 llp64_first_unsafe = 4
 llp64_fingerprint = "0x8391423eee3867f8"
+ilp32p_size = 8
+ilp32p_first_unsafe = 4
+ilp32p_fingerprint = "0x9cff6f1d5d91e5b0"
 
 [[shape]]
 name = "rsa_oaep"
@@ -1010,6 +1131,9 @@ ilp32_fingerprint = "0x0eb591080d0c5dc6"
 llp64_size = 24
 llp64_first_unsafe = 12
 llp64_fingerprint = "0xef91905fc1c173c2"
+ilp32p_size = 20
+ilp32p_first_unsafe = 12
+ilp32p_fingerprint = "0x0eb591080d0c5dc6"
 
 [[shape]]
 name = "rsa_pss"
@@ -1030,6 +1154,8 @@ ilp32_size = 12
 ilp32_fingerprint = "0xf39cf48d0e9036f6"
 llp64_size = 12
 llp64_fingerprint = "0xf39cf48d0e9036f6"
+ilp32p_size = 12
+ilp32p_fingerprint = "0xf39cf48d0e9036f6"
 
 [[shape]]
 name = "salsa20"
@@ -1053,6 +1179,9 @@ ilp32_fingerprint = "0xccab9b802c2a1883"
 llp64_size = 20
 llp64_first_unsafe = 0
 llp64_fingerprint = "0xc9b90f46548a09ef"
+ilp32p_size = 12
+ilp32p_first_unsafe = 0
+ilp32p_fingerprint = "0xccab9b802c2a1883"
 
 [[shape]]
 name = "salsa20_chacha20_poly1305"
@@ -1076,6 +1205,9 @@ ilp32_fingerprint = "0xf326f4e4b22de2e7"
 llp64_size = 24
 llp64_first_unsafe = 0
 llp64_fingerprint = "0xf0b513e4cfcc4fdf"
+ilp32p_size = 16
+ilp32p_first_unsafe = 0
+ilp32p_fingerprint = "0xf326f4e4b22de2e7"
 
 [[shape]]
 name = "seed_cbc_encrypt_data"
@@ -1099,6 +1231,9 @@ ilp32_fingerprint = "0x977a29f903e03c40"
 llp64_size = 28
 llp64_first_unsafe = 16
 llp64_fingerprint = "0x678fd026a873f3c4"
+ilp32p_size = 24
+ilp32p_first_unsafe = 16
+ilp32p_fingerprint = "0x977a29f903e03c40"
 
 [[shape]]
 name = "sign_additional_context"
@@ -1122,6 +1257,9 @@ ilp32_fingerprint = "0x953242379c018302"
 llp64_size = 16
 llp64_first_unsafe = 4
 llp64_fingerprint = "0x019e3c7d7be66076"
+ilp32p_size = 12
+ilp32p_first_unsafe = 4
+ilp32p_fingerprint = "0x953242379c018302"
 
 [[shape.form]]
 name = "hash"
@@ -1135,6 +1273,9 @@ ilp32_fingerprint = "0xfef2bb332d094d41"
 llp64_size = 20
 llp64_first_unsafe = 4
 llp64_fingerprint = "0x06e7531c0d1913f1"
+ilp32p_size = 16
+ilp32p_first_unsafe = 4
+ilp32p_fingerprint = "0xfef2bb332d094d41"
 
 [[shape]]
 name = "skipjack_private_wrap"
@@ -1158,6 +1299,9 @@ ilp32_fingerprint = "0x2213f05fdfc84c8a"
 llp64_size = 68
 llp64_first_unsafe = 4
 llp64_fingerprint = "0x69b4ac67a37b29b2"
+ilp32p_size = 44
+ilp32p_first_unsafe = 4
+ilp32p_fingerprint = "0x2213f05fdfc84c8a"
 
 [[shape]]
 name = "skipjack_relayx"
@@ -1181,6 +1325,9 @@ ilp32_fingerprint = "0x081d0d0a0a0e17fe"
 llp64_size = 84
 llp64_first_unsafe = 4
 llp64_fingerprint = "0x07e728885e532b76"
+ilp32p_size = 56
+ilp32p_first_unsafe = 4
+ilp32p_fingerprint = "0x081d0d0a0a0e17fe"
 
 [[shape]]
 name = "sp800_108_feedback_kdf"
@@ -1204,6 +1351,9 @@ ilp32_fingerprint = "0xccd48d3e10f08851"
 llp64_size = 40
 llp64_first_unsafe = 8
 llp64_fingerprint = "0x7a00bf3e0f329741"
+ilp32p_size = 28
+ilp32p_first_unsafe = 8
+ilp32p_fingerprint = "0xccd48d3e10f08851"
 
 [[shape]]
 name = "sp800_108_kdf"
@@ -1227,6 +1377,9 @@ ilp32_fingerprint = "0x06d9b88f7aa2c8b0"
 llp64_size = 28
 llp64_first_unsafe = 8
 llp64_fingerprint = "0x00a9a5cafa6fc320"
+ilp32p_size = 20
+ilp32p_first_unsafe = 8
+ilp32p_fingerprint = "0x06d9b88f7aa2c8b0"
 
 [[shape]]
 name = "ssl3_key_mat"
@@ -1250,6 +1403,9 @@ ilp32_fingerprint = "0xbb98baa12311e78c"
 llp64_size = 45
 llp64_first_unsafe = 13
 llp64_fingerprint = "0x5a7e6dce6d1701e3"
+ilp32p_size = 33
+ilp32p_first_unsafe = 13
+ilp32p_fingerprint = "0x286a5319bb53b9ab"
 
 [[shape.form]]
 name = "tls12"
@@ -1263,6 +1419,9 @@ ilp32_fingerprint = "0x3e5c78b2df83de90"
 llp64_size = 49
 llp64_first_unsafe = 13
 llp64_fingerprint = "0x06903f49dc901896"
+ilp32p_size = 37
+ilp32p_first_unsafe = 13
+ilp32p_fingerprint = "0x59c3aa3f4fff346a"
 
 [[shape]]
 name = "ssl3_master_key_derive"
@@ -1286,6 +1445,9 @@ ilp32_fingerprint = "0x0e37287df8ab6776"
 llp64_size = 32
 llp64_first_unsafe = 0
 llp64_fingerprint = "0xe289971abb338676"
+ilp32p_size = 20
+ilp32p_first_unsafe = 0
+ilp32p_fingerprint = "0x0e37287df8ab6776"
 
 [[shape]]
 name = "tls12_extended_master_key_derive"
@@ -1309,6 +1471,9 @@ ilp32_fingerprint = "0xec637e55184575c0"
 llp64_size = 24
 llp64_first_unsafe = 4
 llp64_fingerprint = "0x12bf180225f22b50"
+ilp32p_size = 16
+ilp32p_first_unsafe = 4
+ilp32p_fingerprint = "0xec637e55184575c0"
 
 [[shape]]
 name = "tls12_master_key_derive"
@@ -1332,6 +1497,9 @@ ilp32_fingerprint = "0x7c2f94ce60df5b69"
 llp64_size = 36
 llp64_first_unsafe = 0
 llp64_fingerprint = "0x12bf82caff66c715"
+ilp32p_size = 24
+ilp32p_first_unsafe = 0
+ilp32p_fingerprint = "0x7c2f94ce60df5b69"
 
 [[shape]]
 name = "tls_kdf"
@@ -1355,6 +1523,9 @@ ilp32_fingerprint = "0x5a85d5d30cce4562"
 llp64_size = 52
 llp64_first_unsafe = 4
 llp64_fingerprint = "0xf527bddb1c12ed92"
+ilp32p_size = 36
+ilp32p_first_unsafe = 4
+ilp32p_fingerprint = "0x5a85d5d30cce4562"
 
 [[shape]]
 name = "tls_mac"
@@ -1375,6 +1546,8 @@ ilp32_size = 12
 ilp32_fingerprint = "0x29201fe434acdb0c"
 llp64_size = 12
 llp64_fingerprint = "0x29201fe434acdb0c"
+ilp32p_size = 12
+ilp32p_fingerprint = "0x29201fe434acdb0c"
 
 [[shape]]
 name = "tls_prf"
@@ -1398,6 +1571,9 @@ ilp32_fingerprint = "0x3c54ee5bae298102"
 llp64_size = 40
 llp64_first_unsafe = 0
 llp64_fingerprint = "0xa677d9b9bb9a251e"
+ilp32p_size = 24
+ilp32p_first_unsafe = 0
+ilp32p_fingerprint = "0x3c54ee5bae298102"
 
 [[shape]]
 name = "wtls_key_mat"
@@ -1421,6 +1597,9 @@ ilp32_fingerprint = "0x799d8127f868b6c7"
 llp64_size = 53
 llp64_first_unsafe = 21
 llp64_fingerprint = "0xefb744fa56f62c00"
+ilp32p_size = 41
+ilp32p_first_unsafe = 21
+ilp32p_fingerprint = "0x4f87c1b5539f2d28"
 
 [[shape]]
 name = "wtls_master_key_derive"
@@ -1444,6 +1623,9 @@ ilp32_fingerprint = "0x601d462c98dff930"
 llp64_size = 36
 llp64_first_unsafe = 4
 llp64_fingerprint = "0x0aaa5325500c0198"
+ilp32p_size = 24
+ilp32p_first_unsafe = 4
+ilp32p_fingerprint = "0x601d462c98dff930"
 
 [[shape]]
 name = "wtls_prf"
@@ -1467,6 +1649,9 @@ ilp32_fingerprint = "0x997aa49608a5c287"
 llp64_size = 44
 llp64_first_unsafe = 4
 llp64_fingerprint = "0x1a1f8640378ec353"
+ilp32p_size = 28
+ilp32p_first_unsafe = 4
+ilp32p_fingerprint = "0x997aa49608a5c287"
 
 [[shape]]
 name = "x942_dh1_derive"
@@ -1490,6 +1675,9 @@ ilp32_fingerprint = "0x5a077df375783532"
 llp64_size = 28
 llp64_first_unsafe = 8
 llp64_fingerprint = "0x53d76b2ef5452fa2"
+ilp32p_size = 20
+ilp32p_first_unsafe = 8
+ilp32p_fingerprint = "0x5a077df375783532"
 
 [[shape]]
 name = "x942_dh2_derive"
@@ -1513,6 +1701,9 @@ ilp32_fingerprint = "0x5423775240514ed9"
 llp64_size = 48
 llp64_first_unsafe = 8
 llp64_fingerprint = "0x2c5a5dad598dc879"
+ilp32p_size = 36
+ilp32p_first_unsafe = 8
+ilp32p_fingerprint = "0x5423775240514ed9"
 
 [[shape]]
 name = "x942_mqv_derive"
@@ -1536,6 +1727,9 @@ ilp32_fingerprint = "0xe939f67571ee77fc"
 llp64_size = 52
 llp64_first_unsafe = 8
 llp64_fingerprint = "0x68c9bdbbe54717e0"
+ilp32p_size = 40
+ilp32p_first_unsafe = 8
+ilp32p_fingerprint = "0xe939f67571ee77fc"
 
 [[shape]]
 name = "xeddsa"
@@ -1556,3 +1750,5 @@ ilp32_size = 4
 ilp32_fingerprint = "0x47496ed126a6d059"
 llp64_size = 4
 llp64_fingerprint = "0x47496ed126a6d059"
+ilp32p_size = 4
+ilp32p_fingerprint = "0x47496ed126a6d059"

@@ -1139,6 +1139,7 @@ fn wire_abi_to_domain(abi: i32) -> Option<ParamAbi> {
         v1_proto::MechanismParamAbi::Lp64NativeLe => Some(ParamAbi::Lp64NativeLe),
         v1_proto::MechanismParamAbi::Ilp32NativeLe => Some(ParamAbi::Ilp32NativeLe),
         v1_proto::MechanismParamAbi::Llp64Packed1Le => Some(ParamAbi::Llp64Packed1Le),
+        v1_proto::MechanismParamAbi::Ilp32Packed1Le => Some(ParamAbi::Ilp32Packed1Le),
     }
 }
 
@@ -1150,6 +1151,7 @@ fn domain_abi_to_wire(abi: Option<ParamAbi>) -> i32 {
         Some(ParamAbi::Lp64NativeLe) => v1_proto::MechanismParamAbi::Lp64NativeLe as i32,
         Some(ParamAbi::Ilp32NativeLe) => v1_proto::MechanismParamAbi::Ilp32NativeLe as i32,
         Some(ParamAbi::Llp64Packed1Le) => v1_proto::MechanismParamAbi::Llp64Packed1Le as i32,
+        Some(ParamAbi::Ilp32Packed1Le) => v1_proto::MechanismParamAbi::Ilp32Packed1Le as i32,
     }
 }
 

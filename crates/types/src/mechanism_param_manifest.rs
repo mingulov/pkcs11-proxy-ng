@@ -231,8 +231,10 @@ pub const SHAPE_BINDINGS: &[ShapeBinding] = &[
 pub const MANIFEST_TOML: &str = include_str!("mechanism_param_manifest.toml");
 
 /// Manifest schema version (bumped only by a manifest-format change, which
-/// R21's freeze then treats as a contract change).
-pub const MANIFEST_VERSION: u32 = 1;
+/// R21's freeze then treats as a contract change). Version 2 adds the
+/// fourth per-form ABI key triple (`ilp32p_*`, ILP32-pack1/win32) to the
+/// version-1 `lp64`/`ilp32`/`llp64` columns.
+pub const MANIFEST_VERSION: u32 = 2;
 
 /// Parsed manifest file: schema version + one entry per compiled shape.
 #[derive(Debug, Clone, Deserialize)]
@@ -275,7 +277,8 @@ pub struct ManifestForm {
     pub name: String,
     /// Outer kind of this form.
     pub outer_kind: String,
-    /// Native struct size on LP64 / ILP32 / LLP64-pack1 (`None` when bare).
+    /// Native struct size on LP64 / ILP32 / LLP64-pack1 / ILP32-pack1
+    /// (`None` when bare).
     pub lp64_size: Option<usize>,
     /// First unsafe offset on LP64 (`None` when bare or fully scalar-safe).
     pub lp64_first_unsafe: Option<usize>,
@@ -293,6 +296,12 @@ pub struct ManifestForm {
     pub llp64_first_unsafe: Option<usize>,
     /// Expected wire fingerprint on LLP64-pack1 (`0x…` hex).
     pub llp64_fingerprint: String,
+    /// Native struct size on ILP32-pack1 (win32) (`None` when bare).
+    pub ilp32p_size: Option<usize>,
+    /// First unsafe offset on ILP32-pack1.
+    pub ilp32p_first_unsafe: Option<usize>,
+    /// Expected wire fingerprint on ILP32-pack1 (`0x…` hex).
+    pub ilp32p_fingerprint: String,
 }
 
 // ─── Loader + Phase-2 gate predicate ─────────────────────────────────────────
@@ -333,11 +342,16 @@ pub fn pending_shapes() -> Vec<&'static str> {
 
 // ─── Generator ───────────────────────────────────────────────────────────────
 
-/// v1 ABI set rendered per form, in fixed order.
+/// v1 ABI set rendered per form, in fixed order. Key naming follows the
+/// existing short convention (`lp64`/`ilp32`/`llp64`); the fourth key is
+/// `ilp32p` (ILP32-pack1 — `ilp32` was already taken by the natural
+/// variant, and the `p` suffix mirrors the packed-1 packing all Windows
+/// ABIs share).
 const RENDER_ABIS: &[(&str, ParamAbi)] = &[
     ("lp64", ParamAbi::Lp64NativeLe),
     ("ilp32", ParamAbi::Ilp32NativeLe),
     ("llp64", ParamAbi::Llp64Packed1Le),
+    ("ilp32p", ParamAbi::Ilp32Packed1Le),
 ];
 
 fn operation_name(operation: Operation) -> &'static str {
@@ -486,6 +500,8 @@ mod manifest_tests {
     }
 
     /// `(size, first_unsafe, fingerprint)` for one ABI key of a TOML form.
+    /// Explicit arms only: a catch-all here would silently misroute a
+    /// future key to the wrong ABI column.
     fn toml_layout<'a>(
         form: &'a ManifestForm,
         key: &str,
@@ -493,7 +509,11 @@ mod manifest_tests {
         match key {
             "lp64" => (form.lp64_size, form.lp64_first_unsafe, form.lp64_fingerprint.as_str()),
             "ilp32" => (form.ilp32_size, form.ilp32_first_unsafe, form.ilp32_fingerprint.as_str()),
-            _ => (form.llp64_size, form.llp64_first_unsafe, form.llp64_fingerprint.as_str()),
+            "llp64" => (form.llp64_size, form.llp64_first_unsafe, form.llp64_fingerprint.as_str()),
+            "ilp32p" => {
+                (form.ilp32p_size, form.ilp32p_first_unsafe, form.ilp32p_fingerprint.as_str())
+            }
+            unknown => panic!("unknown manifest ABI key `{unknown}`"),
         }
     }
 
@@ -936,7 +956,13 @@ mod manifest_tests {
     #[test]
     fn min_transport_version_is_one_everywhere() {
         assert_eq!(super::manifest().manifest_version, MANIFEST_VERSION);
-        assert_eq!(MANIFEST_VERSION, 1, "schema version pin");
+        // Schema pin: 2 since the `ilp32p_*` fourth-ABI columns landed
+        // (a manifest-format change per the MANIFEST_VERSION rule). The
+        // per-shape transport version below stays 1: the new ABI value
+        // is additive on the wire (S2 §3 monotonic capabilities — old
+        // peers fail closed on unknown enum values), and no existing
+        // layout value changed, so no new transport version is required.
+        assert_eq!(MANIFEST_VERSION, 2, "schema version pin");
         for entry in super::manifest().shape.iter() {
             assert_eq!(entry.min_transport_version, 1, "v1 carries every shape: {}", entry.name);
         }
@@ -2430,7 +2456,16 @@ mod manifest_tests {
     /// transport version (S2 §3 fingerprint freeze). A digest change
     /// without a version bump fails REVIEW, not the test: the test pins
     /// the value; the R-task review verdicts any change.
-    const MANIFEST_DIGEST: u64 = 0x8f88efabb3d6cbab;
+    ///
+    /// Re-frozen by the packed-32 task (cid-fix-3): REVIEW verdict ACCEPT.
+    /// The only content delta is the additive `ilp32p_*` fourth-ABI column
+    /// (a previously-unmodeled platform — no existing layout value
+    /// changed, so the S2 §3 freeze's "new version" trigger does not
+    /// fire) plus the `manifest_version` 1→2 schema bump those new keys
+    /// require. The wire addition (enum value 4) is additive under the
+    /// S2 §3 monotonic-capability rule: old peers fail closed on unknown
+    /// enum values, so `min_transport_version` stays 1 everywhere.
+    const MANIFEST_DIGEST: u64 = 0x7b04b0942b404910;
 
     #[test]
     fn r21_manifest_digest_freeze() {

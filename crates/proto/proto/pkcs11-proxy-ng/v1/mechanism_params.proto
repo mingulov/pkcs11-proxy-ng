@@ -906,6 +906,12 @@ enum MechanismParamAbi {
   // LLP64 little-endian, 1-byte packed (Windows-style): 4-byte CK_ULONG
   // with packed-struct layout.
   MECHANISM_PARAM_ABI_LLP64_PACKED1_LE = 3;
+  // ILP32 little-endian, 1-byte packed: 4-byte CK_ULONG and pointers
+  // with packed-struct layout. The native win32 (i686-pc-windows-msvc)
+  // ABI. Additive (S2 §3): older peers fail closed on the unknown
+  // value (conversion threads None, validation rejects) rather than
+  // misinterpret it, so no transport bump is required.
+  MECHANISM_PARAM_ABI_ILP32_PACKED1_LE = 4;
 }
 
 // Versioned opaque message parameter (F1 v1 encoding). `data` holds exactly

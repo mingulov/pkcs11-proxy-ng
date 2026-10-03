@@ -93,7 +93,11 @@ static DISCOVERY_CACHE: LazyLock<Mutex<DiscoveryCache>> =
 /// the wire byte order (1 = LE, 2 = BE) — never a per-target hardcoded
 /// literal. Returns `None` where no v1 ABI exactly matches (big-endian
 /// and unknown widths stay silent rather than advertise a wrong layout;
-/// LLP64 discrimination would ride a future stride input).
+/// LLP64 discrimination would ride a future stride input). Deliberately
+/// width-only: a packed win32 backend advertises `Ilp32NativeLe`, which
+/// shares packed-32's 4-byte `CK_ULONG` (no consumer distinguishes the
+/// packed variants from this field — layout decisions use each edge's
+/// own native ABI).
 fn daemon_mechanism_param_abi(ulong_size: u32, byte_order: u32) -> Option<i32> {
     use pkcs11_proxy_ng_proto::MechanismParamAbi as Abi;
     match (ulong_size, byte_order) {
