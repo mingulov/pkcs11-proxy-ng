@@ -35,18 +35,52 @@ const AES_CBC_PAD: u64 = 0x0000_1085;
 const RSA_PSS: u64 = 0x000D;
 const LP64: ParamAbi = ParamAbi::Lp64NativeLe;
 
+/// This test daemon's native v1 ABI (LP64 on 64-bit unix, ILP32 on i686,
+/// LLP64-pack1 on Windows): struct-prefix Flats require source == daemon
+/// ABI (S2 §5 width rule — only parameterless and byte-buffer grants
+/// cross ABIs; the daemon validates under `daemon_validation_abis`,
+/// whose local half is the compiled native ABI), so the struct-prefix
+/// accept vector must be fingerprinted and labeled under the ABI the
+/// tests actually execute with. The LP64 helpers below stay as-is: their
+/// byte-buffer accept vectors cross ABIs and their reject vectors reject
+/// everywhere.
+fn native_abi() -> ParamAbi {
+    ParamAbi::native().expect("v1 ABI exists on little-endian CI targets")
+}
+
+/// Wire encoding of a domain ABI, mirroring production's
+/// `domain_abi_to_wire` (proto convert): matched explicitly so a future
+/// ABI addition fails to compile here rather than mislabel.
+fn source_abi_wire(abi: ParamAbi) -> i32 {
+    match abi {
+        ParamAbi::Lp64NativeLe => pkcs11_proxy_ng_proto::MechanismParamAbi::Lp64NativeLe as i32,
+        ParamAbi::Ilp32NativeLe => pkcs11_proxy_ng_proto::MechanismParamAbi::Ilp32NativeLe as i32,
+        ParamAbi::Llp64Packed1Le => pkcs11_proxy_ng_proto::MechanismParamAbi::Llp64Packed1Le as i32,
+    }
+}
+
 fn expected_fingerprint(mech: u64, operation: Operation, len: u64) -> u64 {
     expected_fingerprint_for_shape("iv", mech, operation, len)
 }
 
 fn expected_fingerprint_for_shape(shape: &str, mech: u64, operation: Operation, len: u64) -> u64 {
+    expected_fingerprint_for_shape_under(shape, mech, operation, len, LP64)
+}
+
+fn expected_fingerprint_for_shape_under(
+    shape: &str,
+    mech: u64,
+    operation: Operation,
+    len: u64,
+    abi: ParamAbi,
+) -> u64 {
     ShapeResolver::resolve(
         Some(shape),
         OperationContext { mechanism: mech, operation, length: len },
-        LP64,
+        abi,
     )
     .unwrap()
-    .fingerprint(LP64)
+    .fingerprint(abi)
 }
 
 fn flat_mechanism(
@@ -106,14 +140,18 @@ fn parameterless_mechanism(mech: u64) -> pkcs11_proxy_ng_proto::Mechanism {
     }
 }
 
-fn empty_flat_mechanism(mech: u64, fingerprint: u64) -> pkcs11_proxy_ng_proto::Mechanism {
+fn empty_flat_mechanism(
+    mech: u64,
+    fingerprint: u64,
+    abi: ParamAbi,
+) -> pkcs11_proxy_ng_proto::Mechanism {
     pkcs11_proxy_ng_proto::Mechanism {
         mechanism_type: mech,
         params: Some(pkcs11_proxy_ng_proto::mechanism::Params::FlatMechanismParams(
             pkcs11_proxy_ng_proto::FlatMechanismParams {
                 data: Vec::new(),
                 declared_len: 0,
-                source_abi: pkcs11_proxy_ng_proto::MechanismParamAbi::Lp64NativeLe as i32,
+                source_abi: source_abi_wire(abi),
                 shape_layout_fingerprint: fingerprint,
             },
         )),
@@ -760,18 +798,22 @@ async fn single_snapshot_per_request_at_message_encrypt_init() {
 #[tokio::test]
 async fn null_and_empty_flat_do_not_conflate() {
     let mechs = || vec![CkMechanismType(RSA_PSS)];
-    let pss_fp = expected_fingerprint_for_shape("rsa_pss", RSA_PSS, Operation::General, 0);
+    // Struct-prefix vector: fingerprint + label under the daemon's native
+    // ABI (LP64 metadata is an AbiMismatch on ILP32 daemons).
+    let abi = native_abi();
+    let pss_fp =
+        expected_fingerprint_for_shape_under("rsa_pss", RSA_PSS, Operation::General, 0, abi);
     // Empty Flat, correct fingerprint: shape path admits the zero prefix.
     let h = Harness::new(mechs()).await;
     assert_eq!(
-        drive_sign_init(&h, Some(empty_flat_mechanism(RSA_PSS, pss_fp))).await,
+        drive_sign_init(&h, Some(empty_flat_mechanism(RSA_PSS, pss_fp, abi))).await,
         CkRv::OK.0,
         "empty-flat-accept",
     );
     // Empty Flat, wrong fingerprint: shape path rejects (not Null-routed).
     let h = Harness::new(mechs()).await;
     assert_eq!(
-        drive_sign_init(&h, Some(empty_flat_mechanism(RSA_PSS, pss_fp.wrapping_add(1)))).await,
+        drive_sign_init(&h, Some(empty_flat_mechanism(RSA_PSS, pss_fp.wrapping_add(1), abi))).await,
         CkRv::MECHANISM_PARAM_INVALID.0,
         "empty-flat-reject",
     );

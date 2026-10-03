@@ -26,19 +26,19 @@ use pkcs11_proxy_ng_types::{
     AesCbcEncryptDataParams, AriaCbcEncryptDataParams, CamelliaCbcEncryptDataParams, CcmParams,
     CcmWrapParams, ChaCha20Params, CkAttribute, CkAttributeType, CkGeneratorFunction, CkKdf,
     CkMechanism, CkMechanismParams, CkMechanismType, CkMgf, CkOaepSource, CkObjectHandle,
-    CkPbkdf2Prf, CkPbkdf2SaltSource, DesCbcEncryptDataParams, Ecdh1DeriveParams, Ecdh2DeriveParams,
-    EcdhAesKeyWrapParams, EcmqvDeriveParams, EddsaParams, GcmParams, GcmWrapParams,
-    Gostr3410DeriveParams, Gostr3410KeyWrapParams, HkdfParams, Ike1ExtendedDeriveParams,
-    Ike1PrfDeriveParams, Ike2PrfPlusDeriveParams, IkePrfDeriveParams, KeaDeriveParams,
-    KeyDerivationStringData, KeyWrapSetOaepParams, KipParams, KmacParams, MuGenParams, OtpParam,
-    OtpParams, PbeParams, Pkcs5Pbkd2Params, PointerArray, PointerBytes, PrfDataParam, Rc5CbcParams,
-    RsaAesKeyWrapParams, RsaPkcsOaepParams, Salsa20ChaCha20Poly1305Params, Salsa20Params,
-    SecretBytes, SeedCbcEncryptDataParams, SignAdditionalContext, SkipjackPrivateWrapParams,
-    SkipjackRelayxParams, Sp800108DerivedKey, Sp800108FeedbackKdfParams, Sp800108KdfParams,
-    Ssl3KeyMatParams, Ssl3MasterKeyDeriveParams, SslRandomData, Tls12ExtendedMasterKeyDeriveParams,
-    Tls12MasterKeyDeriveParams, TlsKdfParams, TlsPrfParams, WtlsKeyMatParams,
-    WtlsMasterKeyDeriveParams, WtlsPrfParams, WtlsRandomData, X942Dh1DeriveParams,
-    X942Dh2DeriveParams, X942MqvDeriveParams,
+    CkPbkdf2Prf, CkPbkdf2SaltSource, CkRv, DesCbcEncryptDataParams, Ecdh1DeriveParams,
+    Ecdh2DeriveParams, EcdhAesKeyWrapParams, EcmqvDeriveParams, EddsaParams, GcmParams,
+    GcmWrapParams, Gostr3410DeriveParams, Gostr3410KeyWrapParams, HkdfParams,
+    Ike1ExtendedDeriveParams, Ike1PrfDeriveParams, Ike2PrfPlusDeriveParams, IkePrfDeriveParams,
+    KeaDeriveParams, KeyDerivationStringData, KeyWrapSetOaepParams, KipParams, KmacParams,
+    MuGenParams, OtpParam, OtpParams, PbeParams, Pkcs5Pbkd2Params, PointerArray, PointerBytes,
+    PrfDataParam, Rc5CbcParams, RsaAesKeyWrapParams, RsaPkcsOaepParams,
+    Salsa20ChaCha20Poly1305Params, Salsa20Params, SecretBytes, SeedCbcEncryptDataParams,
+    SignAdditionalContext, SkipjackPrivateWrapParams, SkipjackRelayxParams, Sp800108DerivedKey,
+    Sp800108FeedbackKdfParams, Sp800108KdfParams, Ssl3KeyMatParams, Ssl3MasterKeyDeriveParams,
+    SslRandomData, Tls12ExtendedMasterKeyDeriveParams, Tls12MasterKeyDeriveParams, TlsKdfParams,
+    TlsPrfParams, WtlsKeyMatParams, WtlsMasterKeyDeriveParams, WtlsPrfParams, WtlsRandomData,
+    X942Dh1DeriveParams, X942Dh2DeriveParams, X942MqvDeriveParams,
 };
 
 // Vendor-range mechanism ids for families without a named
@@ -276,6 +276,37 @@ fn r19_reconstruct_gcm_iv_capacity_zeroed() {
 fn r19_reconstruct_gcm_null_huge_forwards() {
     // D3: a huge NULL declared length forwards as NULL + narrowed length
     // without allocating (an allocation attempt would abort/OOM the test).
+    // D4 (ADR-0011: `narrow_wire_ulong` in `ffi_conversion/mod.rs`): on a
+    // narrow-`CK_ULONG` host a wire value the native type cannot represent
+    // fails loudly (`CKR_FUNCTION_FAILED`), never truncates — a native
+    // module could not have been handed that value either. So `u64::MAX`
+    // forwards only where `CK_ULONG` is 64 bits; on ILP32 this pins the
+    // rejection, plus that the widest representable huge NULL still
+    // forwards. Sized off `CK_ULONG`, not the pointer (NF7 precedent;
+    // same width-conditional shape as x3dh's
+    // `x3dh_respond_narrow_handles_and_kdf_reject_before_native_call`).
+    if std::mem::size_of::<cryptoki_sys::CK_ULONG>() < 8 {
+        let mechanism = CkMechanism {
+            mechanism_type: CkMechanismType::AES_GCM,
+            params: Some(gcm(PointerBytes::null_len(u64::MAX), PointerBytes::null_len(0), 0)),
+        };
+        let validated = validated_mechanism_for_tests(&mechanism);
+        assert_eq!(mechanism_to_ffi(&validated).err(), Some(CkRv::FUNCTION_FAILED));
+        let ffi = convert(
+            gcm(PointerBytes::null_len(u64::from(u32::MAX)), PointerBytes::null_len(0), 0),
+            CkMechanismType::AES_GCM,
+        );
+        let (iv_ptr, iv_len, aad_ptr, aad_len) = gcm_fields(ffi);
+        assert_field(
+            "gcm-huge/null-iv-max-representable",
+            iv_ptr,
+            iv_len,
+            true,
+            u64::from(u32::MAX),
+        );
+        assert_field("gcm-huge/null-aad-0", aad_ptr, aad_len, true, 0);
+        return;
+    }
     let ffi = convert(
         gcm(PointerBytes::null_len(u64::MAX), PointerBytes::null_len(0), 0),
         CkMechanismType::AES_GCM,

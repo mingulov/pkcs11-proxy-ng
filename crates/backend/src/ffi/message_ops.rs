@@ -4192,7 +4192,9 @@ mod tests {
         let empty = MessageParameter::Raw(Vec::new().into());
         let init = build_message_init_mechanism(cryptoki_sys::CKM_AES_CBC as u64, &empty)
             .expect("empty raw message param reconstructs");
-        assert_eq!(init.ck_mechanism.ulParameterLen, 0);
+        // E0793: CK_MECHANISM is packed on Windows; assert on a by-value copy.
+        let param_len = init.ck_mechanism.ulParameterLen;
+        assert_eq!(param_len, 0);
         assert_eq!(native_message_parameter_len(&empty).unwrap(), 0);
         init.validate_authenticated_inputs(&empty).expect("empty raw holder validates");
     }

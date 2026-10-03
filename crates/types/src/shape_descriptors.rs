@@ -2885,9 +2885,16 @@ mod crosscheck_tests {
     }
 
     // Host-ABI cross-checks: the table's LP64 derivation must equal the
-    // linked cryptoki structs byte-for-byte (unix 64-bit only; Windows
-    // cryptoki layouts are unpacked LLP64, a fourth ABI this module does
-    // not model — the v1 packed layout is covered by hand vectors below).
+    // linked cryptoki structs byte-for-byte (unix 64-bit only: on Windows
+    // the linked cryptoki-sys 0.5.0 bindings are `#[repr(C, packed)]`
+    // LLP64-pack1 — 97 of 99 CK_* structs, the 2 plain ones being the
+    // all-u8 CK_DATE/CK_VERSION — so LP64 byte-equality cannot hold there.
+    // Bindgen `size_of` assertions in `x86_64-pc-windows-msvc.rs`, all
+    // align 1: CK_GCM_WRAP_PARAMS 36 (56 LP64), CK_CCM_WRAP_PARAMS 40
+    // (64 LP64), CK_GCM_PARAMS 32 (48 LP64), CK_RSA_PKCS_PSS_PARAMS 12
+    // (24 LP64), CK_MECHANISM 16 (24 LP64). The packed layout, modeled
+    // here as `Llp64Packed1Le`, is covered by the hand-derived vectors
+    // below, which agree with those assertions).
     #[cfg(all(unix, target_pointer_width = "64"))]
     #[test]
     fn lp64_native_sizes_match_cryptoki() {
