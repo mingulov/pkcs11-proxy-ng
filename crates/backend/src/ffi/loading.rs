@@ -105,8 +105,8 @@ impl FfiBackend {
             },
         };
 
-        // Attempt to discover 3.0 and 3.2 function lists. These are optional;
-        // a 2.40-only module will simply leave both as None.
+        // Attempt to discover 3.0, 3.1, and 3.2 function lists. These are
+        // optional; a 2.40-only module will simply leave all as None.
         //
         // Some 3.x modules answer an *explicit* versioned `C_GetInterface`
         // query for {3,0} with a NULL interface even though they implement the
@@ -134,6 +134,29 @@ impl FfiBackend {
         let func_list_3_0 = queried_3_0
             .or_else(|| Self::primary_interface_fallback(func_list, primary_from_interface, 3, 0))
             .map(|ptr| ptr as *const cryptoki_sys::CK_FUNCTION_LIST_3_0);
+        // Issue #28: also discover an explicit {3,1} answer. Modules
+        // answering literal {3,0} AND {3,1} (haskoki shape) must have
+        // both advertised; without this query the {3,1} interface is
+        // invisible to the shim catalog and `C_GetInterface({3,1})`
+        // returns CKR_OK with NULL through the proxy while direct
+        // yields the table. Explicit-only, no primary fallback: a
+        // fallback table here could advertise (3,1) for a module
+        // whose direct {3,1} query returns NULL. The proof gate
+        // additionally requires a 3.1 stamp (OASIS exact-match), so
+        // an upgrade answer never manufactures a (3,1) interface.
+        // Same W1-C4-06 loud-error handling.
+        let queried_3_1 = match get_iface_sym {
+            Some(sym) => match select_versioned(&mut ffi_query(sym), 3, 1) {
+                Ok(ptr) => ptr,
+                Err(e) => {
+                    permit.poison();
+                    return Err(e);
+                }
+            },
+            None => None,
+        };
+        let func_list_3_1 = proven_3_1_answer(queried_3_1)
+            .map(|ptr| ptr as *const cryptoki_sys::CK_FUNCTION_LIST_3_0);
         let queried_3_2 = match get_iface_sym {
             Some(sym) => match select_versioned(&mut ffi_query(sym), 3, 2) {
                 Ok(ptr) => ptr,
@@ -159,6 +182,7 @@ impl FfiBackend {
             _lib: lib,
             func_list,
             func_list_3_0,
+            func_list_3_1,
             func_list_3_2,
             initialize_args,
             mech_cache: dashmap::DashMap::new(),
@@ -412,6 +436,28 @@ fn select_versioned(
 fn answer_version_at_least(ans: &InterfaceAnswer, major: u8, minor: u8) -> bool {
     let reported = unsafe { (*(ans.func_list as *const cryptoki_sys::CK_FUNCTION_LIST)).version };
     reported.major > major || (reported.major == major && reported.minor >= minor)
+}
+
+/// OASIS exact-match proof gate for {3,1} discovery (issue #28, review
+/// finding 2): [`select_versioned`] accepts any stamp ≥ 3.1 (the
+/// downgrade guard), but only a 3.1-stamped answer proves a (3,1)
+/// interface — the spec requires a requested version to match
+/// exactly, so an upgrade answer (e.g. a 3.2 table for a {3,1}
+/// query) is non-conformant and unusable for discovery. Acceptance
+/// (dispatch input) stays distinct from proof (advertised version).
+///
+/// Soundness: leading-`CK_VERSION` read on a non-null
+/// interface-derived table — the same reliance as
+/// [`answer_version_at_least`].
+fn proven_3_1_answer(ans: Option<*mut std::ffi::c_void>) -> Option<*mut std::ffi::c_void> {
+    ans.filter(|ptr| {
+        let table = *ptr as *const cryptoki_sys::CK_FUNCTION_LIST;
+        // SAFETY: `select_versioned` only returns non-null,
+        // interface-derived tables; the leading `CK_VERSION` is the
+        // first field of every `CK_FUNCTION_LIST*` variant.
+        let stamped = unsafe { (*table).version };
+        stamped.major == 3 && stamped.minor == 1
+    })
 }
 
 /// FFI adapter: performs one real `C_GetInterface` query and copies the
@@ -809,6 +855,59 @@ mod tests {
             }
         };
         assert!(select_versioned(&mut std_q, 3, 0).unwrap().is_some());
+    }
+
+    /// Issue #28: the explicit {3,1} discovery query accepts a
+    /// 3.1-stamped answer and rejects a downgraded 3.0-stamped one
+    /// (same F5 guard as the {3,0}/{3,2} queries).
+    #[test]
+    fn versioned_3_1_query_accepts_3_1_and_rejects_downgrade() {
+        let v31 = Box::new(cryptoki_sys::CK_VERSION { major: 3, minor: 1 });
+        let v31_ptr = (&*v31 as *const cryptoki_sys::CK_VERSION).cast_mut().cast();
+        let mut accept_q = |name: Option<&[u8]>, _: Option<cryptoki_sys::CK_VERSION>| match name {
+            Some(_) => Ok(None),
+            None => {
+                Ok(Some(InterfaceAnswer { name: Some(b"PKCS 11".to_vec()), func_list: v31_ptr }))
+            }
+        };
+        assert!(select_versioned(&mut accept_q, 3, 1).unwrap().is_some());
+
+        let v30 = Box::new(cryptoki_sys::CK_VERSION { major: 3, minor: 0 });
+        let v30_ptr = (&*v30 as *const cryptoki_sys::CK_VERSION).cast_mut().cast();
+        let mut downgrade_q = |_: Option<&[u8]>, _: Option<cryptoki_sys::CK_VERSION>| {
+            Ok(Some(InterfaceAnswer { name: Some(b"PKCS 11".to_vec()), func_list: v30_ptr }))
+        };
+        assert!(select_versioned(&mut downgrade_q, 3, 1).unwrap().is_none());
+    }
+
+    /// Issue #28 review finding 2: only a 3.1-stamped {3,1} answer
+    /// proves a (3,1) interface (OASIS exact-match). An upgrade
+    /// answer (3.2 table) and a downgrade answer (3.0 table) both
+    /// fail the proof gate — the downgrade is already rejected by
+    /// `select_versioned`, the upgrade is rejected here so it can
+    /// never manufacture a (3,1) advertisement.
+    #[test]
+    fn proven_3_1_answer_requires_exact_3_1_stamp() {
+        fn boxed_table(major: u8, minor: u8) -> Box<cryptoki_sys::CK_FUNCTION_LIST_3_0> {
+            let mut table = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_0::default());
+            table.version = cryptoki_sys::CK_VERSION { major, minor };
+            table
+        }
+        fn as_query_answer(
+            table: &cryptoki_sys::CK_FUNCTION_LIST_3_0,
+        ) -> Option<*mut std::ffi::c_void> {
+            Some((table as *const cryptoki_sys::CK_FUNCTION_LIST_3_0).cast_mut().cast())
+        }
+        let t31 = boxed_table(3, 1);
+        let t32 = boxed_table(3, 2);
+        let t30 = boxed_table(3, 0);
+        assert!(super::proven_3_1_answer(as_query_answer(&t31)).is_some());
+        assert!(
+            super::proven_3_1_answer(as_query_answer(&t32)).is_none(),
+            "upgrade answer must not prove (3,1)"
+        );
+        assert!(super::proven_3_1_answer(as_query_answer(&t30)).is_none());
+        assert!(super::proven_3_1_answer(None).is_none());
     }
 
     // -- W1-C4-06: bounded provider-name scan ---------------------------

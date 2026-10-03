@@ -95,6 +95,16 @@ mod tests {
         cryptoki_sys::CKR_OK
     }
 
+    static SESSION_CANCEL_3_1_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C" fn counted_session_cancel_3_1(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _flags: cryptoki_sys::CK_FLAGS,
+    ) -> cryptoki_sys::CK_RV {
+        SESSION_CANCEL_3_1_CALLS.fetch_add(1, Ordering::SeqCst);
+        cryptoki_sys::CKR_OK
+    }
+
     unsafe extern "C" fn login_user_ok(
         _session: cryptoki_sys::CK_SESSION_HANDLE,
         _user_type: cryptoki_sys::CK_USER_TYPE,
@@ -236,5 +246,76 @@ mod tests {
         backend.lifecycle_domain.open_for_tests();
         backend.ffi_session_cancel(CkSessionHandle(7), CkFlags(0)).unwrap();
         assert_eq!(SESSION_CANCEL_PROVIDER_CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    /// Inconsistent-tables stub (issue #28, review finding 1): the 3.0
+    /// table may or may not serve `C_SessionCancel`, independently of
+    /// the 3.1 table.
+    fn backend_with_split_session_cancel(
+        in_3_0: bool,
+        in_3_1: bool,
+    ) -> (
+        FfiBackend,
+        Box<cryptoki_sys::CK_FUNCTION_LIST>,
+        Box<cryptoki_sys::CK_FUNCTION_LIST_3_0>,
+        Box<cryptoki_sys::CK_FUNCTION_LIST_3_0>,
+    ) {
+        let mut base = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        let mut table_3_0 = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_0::default());
+        table_3_0.version = cryptoki_sys::CK_VERSION { major: 3, minor: 0 };
+        if in_3_0 {
+            table_3_0.C_SessionCancel = Some(counted_session_cancel);
+        }
+        let mut table_3_1 = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_0::default());
+        table_3_1.version = cryptoki_sys::CK_VERSION { major: 3, minor: 1 };
+        if in_3_1 {
+            table_3_1.C_SessionCancel = Some(counted_session_cancel_3_1);
+        }
+        let backend =
+            FfiBackend::test_backend_with_tables(base.as_mut(), Some(table_3_0.as_ref()), None)
+                .with_3_1_table(Some(table_3_1.as_ref()));
+        (backend, base, table_3_0, table_3_1)
+    }
+
+    /// 3.0-family dispatch resolves the slot from the 3.1 table when
+    /// the 3.0 table lacks it, so an advertised (3,1) function stays
+    /// callable instead of refusing with FUNCTION_NOT_SUPPORTED.
+    #[test]
+    fn session_cancel_falls_back_to_3_1_table_slot() {
+        let _lock = TEST_LOCK.lock().unwrap();
+        SESSION_CANCEL_PROVIDER_CALLS.store(0, Ordering::SeqCst);
+        SESSION_CANCEL_3_1_CALLS.store(0, Ordering::SeqCst);
+        let (backend, _base, _t30, _t31) = backend_with_split_session_cancel(false, true);
+        backend.lifecycle_domain.open_for_tests();
+        backend.ffi_session_cancel(CkSessionHandle(7), CkFlags(0)).unwrap();
+        assert_eq!(SESSION_CANCEL_PROVIDER_CALLS.load(Ordering::SeqCst), 0);
+        assert_eq!(SESSION_CANCEL_3_1_CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    /// The 3.0 table keeps precedence when it serves the slot: the
+    /// fallback only fires where dispatch previously refused.
+    #[test]
+    fn session_cancel_prefers_3_0_table_slot() {
+        let _lock = TEST_LOCK.lock().unwrap();
+        SESSION_CANCEL_PROVIDER_CALLS.store(0, Ordering::SeqCst);
+        SESSION_CANCEL_3_1_CALLS.store(0, Ordering::SeqCst);
+        let (backend, _base, _t30, _t31) = backend_with_split_session_cancel(true, true);
+        backend.lifecycle_domain.open_for_tests();
+        backend.ffi_session_cancel(CkSessionHandle(7), CkFlags(0)).unwrap();
+        assert_eq!(SESSION_CANCEL_PROVIDER_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(SESSION_CANCEL_3_1_CALLS.load(Ordering::SeqCst), 0);
+    }
+
+    /// No table serving the slot still refuses with
+    /// FUNCTION_NOT_SUPPORTED (fallback terminal preserved).
+    #[test]
+    fn session_cancel_refuses_when_no_table_serves_slot() {
+        let _lock = TEST_LOCK.lock().unwrap();
+        let (backend, _base, _t30, _t31) = backend_with_split_session_cancel(false, false);
+        backend.lifecycle_domain.open_for_tests();
+        assert_eq!(
+            backend.ffi_session_cancel(CkSessionHandle(7), CkFlags(0)).unwrap_err(),
+            CkRv::FUNCTION_NOT_SUPPORTED
+        );
     }
 }

@@ -263,6 +263,7 @@ mod tests {
             _lib: crate::ffi::loading::test_library_handle(),
             func_list: base.as_mut(),
             func_list_3_0: None,
+            func_list_3_1: None,
             func_list_3_2: Some(functions.as_ref()),
             initialize_args: None,
             mech_cache: dashmap::DashMap::new(),
