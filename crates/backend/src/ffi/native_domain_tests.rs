@@ -575,6 +575,7 @@ fn native_domain_global_serial_release_drop_recycles_after_full_retirement() {
             _lib: super::loading::test_library_handle(),
             func_list: functions.as_mut() as *mut cryptoki_sys::CK_FUNCTION_LIST,
             func_list_3_0: None,
+            func_list_3_1: None,
             func_list_3_2: None,
             initialize_args: None,
             mech_cache: dashmap::DashMap::new(),

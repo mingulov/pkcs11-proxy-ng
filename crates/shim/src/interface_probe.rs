@@ -1408,6 +1408,32 @@ mod backend_abi_tests {
         );
     }
 
+    /// Issue #28: a haskoki-class probe — backend answers literal {3,0}
+    /// AND {3,1} — must answer both versions with their real,
+    /// distinctly-stamped interfaces.
+    #[test]
+    fn haskoki_probe_answers_3_0_and_3_1() {
+        let probe = vec![
+            iface(2, 40, Vec::new()),
+            iface(3, 0, Vec::new()),
+            iface(3, 1, Vec::new()),
+            iface(3, 2, Vec::new()),
+        ];
+        let mut st = super::build_interface_state(&probe, false);
+        super::fixup_catalog(&mut st);
+        assert_eq!(st.count, 4);
+        let catalog = &st.catalog[..st.count as usize];
+        let name = c"PKCS 11";
+
+        for (major, minor) in [(3u8, 0u8), (3, 1)] {
+            let version = CK_VERSION { major, minor };
+            let hit = find_interface_in_catalog(catalog, Some(name), Some(&version), 0)
+                .unwrap_or_else(|| panic!("{{{major},{minor}}} must resolve"));
+            let stamped = unsafe { *((&*hit).pFunctionList as *const CK_VERSION) };
+            assert_eq!((stamped.major, stamped.minor), (major, minor));
+        }
+    }
+
     /// W1-C7-05: the patched-function-list path NULLs exactly the
     /// backend-reported slots. Non-empty `null_functions` fixtures pin the
     /// patch branch per struct version (2.40 + 3.0 here; 3.2 below).

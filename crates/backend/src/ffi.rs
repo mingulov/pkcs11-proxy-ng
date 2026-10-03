@@ -174,6 +174,35 @@ pub(crate) use session_object_unit;
 // backend trait methods (added in subsequent tasks).
 #[allow(unused_macros)]
 macro_rules! call_3x_fn {
+    // Issue #28 review finding 1: 3.0-family dispatch resolves the
+    // slot from the lowest-version table serving it (3.0, then the
+    // explicit 3.1 answer), so every advertised function stays
+    // callable. 3.1 shares the 3.0 layout, hence the same field
+    // names; cross-table dispatch within the 3.x family follows the
+    // BouncyHSM primary-fallback precedent. Fires only where the 3.0
+    // table lacks the slot — consistent modules (all known) keep
+    // today's behavior bit-for-bit, and refusal still precedes
+    // argument evaluation exactly like the generic arm below (which
+    // keeps serving the 3.2 sites).
+    ($admission:expr, $self:expr, func_list_3_0, $fn_name:ident $(, $arg:expr)*) => {{
+        // B2 admission proof (TF01b): the ascription pins at compile time
+        // that the caller's ordinary guard reaches this native entry; the
+        // guard local stays alive across the call and settlement. A macro
+        // (not a choke fn) because call sites evaluate fallible (`?`)
+        // argument expressions after table resolution — routing through
+        // `call_unit` would force hoisting and change refusal precedence.
+        let _admission: &crate::ffi::native_domain::OrdinaryGuard = $admission;
+        let f = [$self.func_list_3_0, $self.func_list_3_1]
+            .into_iter()
+            .flatten()
+            .find_map(|fl| unsafe { (*fl).$fn_name });
+        let f = match f {
+            Some(f) => f,
+            None => return Err(CkRv::FUNCTION_NOT_SUPPORTED),
+        };
+        let rv = unsafe { f($($arg),*) };
+        FfiBackend::ck_result(rv)
+    }};
     ($admission:expr, $self:expr, $list_field:ident, $fn_name:ident $(, $arg:expr)*) => {{
         // B2 admission proof (TF01b): the ascription pins at compile time
         // that the caller's ordinary guard reaches this native entry; the
@@ -238,6 +267,12 @@ pub struct FfiBackend {
     func_list: *mut cryptoki_sys::CK_FUNCTION_LIST,
     /// PKCS#11 3.0 function list, if the module supports `C_GetInterface`.
     func_list_3_0: Option<*const cryptoki_sys::CK_FUNCTION_LIST_3_0>,
+    /// PKCS#11 3.1 function list from an explicit {3,1} query that
+    /// passed the OASIS exact-match proof gate (3.1 stamp), if the
+    /// module served one. Feeds the (3,1) advertisement null-walk and
+    /// the 3.0-family dispatch fallback. 3.1 shares the 3.0 layout,
+    /// hence the shared `CK_FUNCTION_LIST_3_0` type.
+    func_list_3_1: Option<*const cryptoki_sys::CK_FUNCTION_LIST_3_0>,
     /// PKCS#11 3.2 function list, if the module supports `C_GetInterface`.
     func_list_3_2: Option<*const cryptoki_sys::CK_FUNCTION_LIST_3_2>,
     initialize_args: Option<CString>,
@@ -326,6 +361,7 @@ impl FfiBackend {
             _lib: loading::test_library_handle(),
             func_list,
             func_list_3_0: None,
+            func_list_3_1: None,
             func_list_3_2: None,
             initialize_args: None,
             mech_cache: dashmap::DashMap::new(),
@@ -351,6 +387,7 @@ impl FfiBackend {
             _lib: loading::test_library_handle(),
             func_list,
             func_list_3_0,
+            func_list_3_1: None,
             func_list_3_2,
             initialize_args: None,
             mech_cache: dashmap::DashMap::new(),
@@ -364,6 +401,19 @@ impl FfiBackend {
             session_fences: Default::default(),
             retirement_sentinel: native_domain::RetirementSentinel::unmanaged_test_only(),
         }
+    }
+
+    /// Test-only installer for the 3.1 discovery slot (issue #28): the
+    /// base constructor leaves `func_list_3_1` as `None`; stub tests for
+    /// modules answering an explicit {3,1} query set it here. The table
+    /// `Box` stays caller-owned so the raw pointer cannot dangle.
+    #[cfg(any(test, feature = "native-owner-test-hooks"))]
+    pub fn with_3_1_table(
+        mut self,
+        func_list_3_1: Option<*const cryptoki_sys::CK_FUNCTION_LIST_3_0>,
+    ) -> Self {
+        self.func_list_3_1 = func_list_3_1;
+        self
     }
 }
 

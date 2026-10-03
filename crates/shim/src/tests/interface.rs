@@ -1857,3 +1857,59 @@ fn r5_transport_version_snapshot_storage_round_trip() {
         "clear_cache resets the snapshot to legacy",
     );
 }
+
+/// Issue #28 end-to-end: with a backend advertising 2.40/3.0/3.1/3.2,
+/// the exact issue repro `C_GetInterface(NULL, {3,1}, &interface, 0)`
+/// returns CKR_OK with a usable, 3.1-stamped table through the real
+/// RPC stack, and a slot-list call through that table works.
+#[test]
+fn get_interface_3_1_through_daemon_yields_usable_table() {
+    use super::output_semantics::TestDaemon;
+    use pkcs11_proxy_ng_types::{InterfaceCapabilities, InterfaceInfo};
+    let _guard = shim_state_test_guard();
+    let _saved = SavedConnectEnv::capture();
+    let daemon = TestDaemon::fresh();
+    daemon.backend.set_interface_capabilities(InterfaceCapabilities {
+        interfaces: vec![
+            InterfaceInfo { version_major: 2, version_minor: 40, null_functions: vec![] },
+            InterfaceInfo { version_major: 3, version_minor: 0, null_functions: vec![] },
+            InterfaceInfo { version_major: 3, version_minor: 1, null_functions: vec![] },
+            InterfaceInfo { version_major: 3, version_minor: 2, null_functions: vec![] },
+        ],
+    });
+    unsafe {
+        std::env::set_var("PKCS11_PROXY_ENDPOINT", &daemon.endpoint);
+        std::env::remove_var("PKCS11_PROXY_SOCKET");
+    }
+    crate::state::mark_finalized();
+    crate::interface_probe::clear_cache();
+    crate::state::mark_client_reconnect_required();
+    crate::interface_probe::ensure_probed().expect("probe must succeed");
+    assert_eq!(crate::interface_probe::interface_count(), 4);
+
+    // Exact issue repro: null name, explicit {3,1}.
+    let mut req_ver = CK_VERSION { major: 3, minor: 1 };
+    let mut pp: *mut CK_INTERFACE = std::ptr::null_mut();
+    let rv = unsafe { C_GetInterface(std::ptr::null_mut(), &mut req_ver, &mut pp, 0) };
+    assert_eq!(rv, CKR_OK as CK_RV);
+    assert!(!pp.is_null(), "C_GetInterface({{3,1}}) must yield an interface");
+    let fl = unsafe { (*pp).pFunctionList };
+    assert!(!fl.is_null(), "the {{3,1}} interface must carry a usable function list");
+    let stamped = unsafe { *(fl as *const CK_VERSION) };
+    assert_eq!((stamped.major, stamped.minor), (3, 1));
+
+    // The table must be callable: initialize, then list slots through it.
+    crate::state::ensure_client_connected().expect("connect to fresh daemon");
+    crate::state::runtime()
+        .block_on(async { crate::state::client().lock().await.initialize().await })
+        .expect("init RPC must create the server context");
+    assert!(crate::state::mark_initialized(), "test must own the init flag");
+    let get_slot_list =
+        unsafe { (*(fl as *const CK_FUNCTION_LIST_3_0)).C_GetSlotList }.expect("3.1 slot list");
+    let mut slot_count: CK_ULONG = 0;
+    let rv = unsafe { get_slot_list(CK_FALSE, std::ptr::null_mut(), &mut slot_count) };
+    assert_eq!(rv, CKR_OK as CK_RV);
+    assert_eq!(slot_count, 2, "fresh daemon serves 2 slots");
+    crate::state::mark_finalized();
+    crate::state::mark_client_reconnect_required();
+}

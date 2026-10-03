@@ -30,8 +30,14 @@ macro_rules! two_call_message {
         // B2 admission proof (TF01b): ascribed like `call_3x_fn!` — the
         // two-call shape keeps its bespoke sizing/fill inline.
         let _admission: &crate::ffi::native_domain::OrdinaryGuard = $admission;
-        let fl = $self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
-        let f = unsafe { (*fl).$func_name }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
+        // Issue #28 review finding 1: same 3.0 → 3.1 slot fallback as
+        // `call_3x_fn!` — message functions resolve from the
+        // lowest-version table serving them.
+        let f = [$self.func_list_3_0, $self.func_list_3_1]
+            .into_iter()
+            .flatten()
+            .find_map(|fl| unsafe { (*fl).$func_name })
+            .ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
         let mut out_len: cryptoki_sys::CK_ULONG = 0;
         let rv = unsafe {
