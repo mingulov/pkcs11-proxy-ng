@@ -37,23 +37,44 @@ impl FfiBackend {
 
         // v3.0 if available (list came from a validated versioned {3,0} query):
         if let Some(fl3) = self.func_list_3_0 {
-            // W1-L5-01: the dispatch slot may hold a primary-fallback table
-            // stamped with a different 3.x version (BouncyHSM answers an
-            // explicit {3,0} with NULL, so its 3.1 default interface serves
-            // dispatch). Advertise the version the backend stamped on the
-            // table — 3.1≡3.0 layout, so the same 92-field surface walk
-            // applies — instead of inventing a {3,0} alias. Any other stamp
-            // keeps the slot default (3,0), i.e. today's behavior.
+            // RF-3.0-manufacture: only an explicit answer proves the
+            // module serves {3,0} — the stamp alone cannot tell an
+            // explicit 3.2-stamped {3,0} reply (direct yields a table:
+            // truthful (3,0)) from a 3.2-stamped primary fallback
+            // (explicit {3,0} was NULL: (3,0) would be invented).
+            // W1-L5-01: a fallback contributes the stamped version
+            // instead — (3,1) as before, (3,2) deduped against the
+            // explicit 3.2 slot — and a 3.0-stamped (or
+            // unexpected-stamp) fallback contributes nothing, since
+            // direct {3,0} answered NULL.
             // Soundness: leading-CK_VERSION read on a non-null
             // interface-derived table — the same reliance as
             // `answer_version_at_least`/`primary_interface_fallback`.
+            // A contributed (3,2) walks 104 fields on a genuinely
+            // 3.2-sized primary table (the loader only installs a
+            // 3.2-stamped fallback there), never on a 92-field list.
             let stamped = unsafe { (*fl3).version };
-            let minor = if stamped.major == 3 && stamped.minor == 1 { 1 } else { 0 };
-            // Issue #28: a 3.1-stamped primary fallback in this slot must
-            // not duplicate the explicit {3,1} answer below — the
-            // explicit answer's null walk wins.
-            let shadowed = minor == 1 && self.func_list_3_1.is_some();
-            if !shadowed {
+            let minor = if self.func_list_3_0_explicit {
+                Some(0)
+            } else if stamped.major == 3 && stamped.minor == 1 {
+                Some(1)
+            } else if stamped.major == 3 && stamped.minor == 2 {
+                Some(2)
+            } else {
+                None
+            };
+            // Issue #28: a fallback contribution must not duplicate
+            // the explicit answer's slot below — the explicit
+            // answer's null walk wins. An explicit (3,0) is never
+            // shadowed: it IS the literal answer.
+            let shadowed = match minor {
+                Some(1) => self.func_list_3_1.is_some(),
+                Some(2) => self.func_list_3_2.is_some(),
+                _ => false,
+            };
+            if let Some(minor) = minor
+                && !shadowed
+            {
                 let nulls = nulls_for(
                     fl3 as *const u8,
                     Surface::StandardInterface {
@@ -120,6 +141,7 @@ mod tests {
     fn backend_with_3_slot(
         major: u8,
         minor: u8,
+        explicit_3_0: bool,
     ) -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>, Box<cryptoki_sys::CK_FUNCTION_LIST_3_0>)
     {
         let mut base = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
@@ -127,7 +149,8 @@ mod tests {
         let mut table_3 = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_0::default());
         table_3.version = cryptoki_sys::CK_VERSION { major, minor };
         let backend =
-            FfiBackend::test_backend_with_tables(base.as_mut(), Some(table_3.as_ref()), None);
+            FfiBackend::test_backend_with_tables(base.as_mut(), Some(table_3.as_ref()), None)
+                .with_3_0_explicit(explicit_3_0);
         (backend, base, table_3)
     }
 
@@ -145,7 +168,7 @@ mod tests {
     /// never as an invented (3,0) alias.
     #[test]
     fn capability_report_advertises_stamped_3_1_not_aliased_3_0() {
-        let (backend, _base, _table_3) = backend_with_3_slot(3, 1);
+        let (backend, _base, _table_3) = backend_with_3_slot(3, 1, false);
         let versions = reported_versions(&backend);
         assert!(
             versions.contains(&(3, 1)),
@@ -161,7 +184,7 @@ mod tests {
     /// must not gain a phantom (3,1).
     #[test]
     fn capability_report_keeps_literal_3_0() {
-        let (backend, _base, _table_3) = backend_with_3_slot(3, 0);
+        let (backend, _base, _table_3) = backend_with_3_slot(3, 0, true);
         let versions = reported_versions(&backend);
         assert!(versions.contains(&(3, 0)), "literal 3.0 must be kept: {versions:?}");
         assert!(!versions.contains(&(3, 1)), "no phantom (3,1): {versions:?}");
@@ -237,6 +260,98 @@ mod tests {
         );
     }
 
+    /// Strict-3.2-only stub (RF-3.0-manufacture): explicit {3,0}
+    /// is NULL so the 3.0 slot holds the 3.2-stamped primary fallback,
+    /// while the 3.2 slot holds the explicit answer. The fallback box
+    /// is a real 3.2-sized table (the loader views the primary through
+    /// the 3.0 slot type), so any 104-field walk stays in bounds.
+    fn backend_strict_3_2() -> (
+        FfiBackend,
+        Box<cryptoki_sys::CK_FUNCTION_LIST>,
+        Box<cryptoki_sys::CK_FUNCTION_LIST_3_2>,
+        Box<cryptoki_sys::CK_FUNCTION_LIST_3_2>,
+    ) {
+        let mut base = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        base.version = cryptoki_sys::CK_VERSION { major: 2, minor: 40 };
+        let mut fallback = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_2::default());
+        fallback.version = cryptoki_sys::CK_VERSION { major: 3, minor: 2 };
+        let mut table_3_2 = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_2::default());
+        table_3_2.version = cryptoki_sys::CK_VERSION { major: 3, minor: 2 };
+        let backend = FfiBackend::test_backend_with_tables(
+            base.as_mut(),
+            Some(fallback.as_ref() as *const _ as *const cryptoki_sys::CK_FUNCTION_LIST_3_0),
+            Some(table_3_2.as_ref()),
+        )
+        .with_3_0_explicit(false);
+        (backend, base, fallback, table_3_2)
+    }
+
+    /// RF-3.0-manufacture: a strict-3.2-only module (explicit {3,0}
+    /// NULL, 3.2-stamped primary fallback) must advertise (3,2)
+    /// exactly once and must NOT invent a (3,0) alias.
+    #[test]
+    fn capability_report_strict_3_2_has_no_invented_3_0() {
+        let (backend, _base, _fallback, _table_3_2) = backend_strict_3_2();
+        let versions = reported_versions(&backend);
+        assert!(
+            !versions.contains(&(3, 0)),
+            "no invented (3,0) alias for a NULL {{3,0}} answer: {versions:?}"
+        );
+        assert_eq!(
+            versions.iter().filter(|v| **v == (3, 2)).count(),
+            1,
+            "exactly one (3,2): {versions:?}"
+        );
+    }
+
+    /// RF-3.0-manufacture contribution path: a 3.2-stamped fallback
+    /// with no explicit 3.2 answer contributes (3,2) from the 3.0
+    /// slot instead of inventing (3,0).
+    #[test]
+    fn capability_report_3_2_fallback_contributes_3_2_when_unshadowed() {
+        let mut base = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        base.version = cryptoki_sys::CK_VERSION { major: 2, minor: 40 };
+        let mut fallback = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_2::default());
+        fallback.version = cryptoki_sys::CK_VERSION { major: 3, minor: 2 };
+        let backend = FfiBackend::test_backend_with_tables(
+            base.as_mut(),
+            Some(fallback.as_ref() as *const _ as *const cryptoki_sys::CK_FUNCTION_LIST_3_0),
+            None,
+        )
+        .with_3_0_explicit(false);
+        let versions = reported_versions(&backend);
+        assert!(
+            !versions.contains(&(3, 0)),
+            "no invented (3,0) alias for a NULL {{3,0}} answer: {versions:?}"
+        );
+        assert!(
+            versions.contains(&(3, 2)),
+            "3.2-stamped fallback must contribute (3,2): {versions:?}"
+        );
+        let _ = (base, fallback);
+    }
+
+    /// Control: an EXPLICIT 3.2-stamped {3,0} answer (upgrade reply —
+    /// direct yields a table) keeps advertising a truthful (3,0).
+    /// Provenance, not the stamp alone, decides.
+    #[test]
+    fn capability_report_explicit_3_2_stamped_3_0_stays_truthful() {
+        let mut base = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        base.version = cryptoki_sys::CK_VERSION { major: 2, minor: 40 };
+        let mut table_3_0 = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_0::default());
+        table_3_0.version = cryptoki_sys::CK_VERSION { major: 3, minor: 2 };
+        // Default provenance is explicit: a caller-provided table reads
+        // as a literal answer.
+        let backend =
+            FfiBackend::test_backend_with_tables(base.as_mut(), Some(table_3_0.as_ref()), None);
+        let versions = reported_versions(&backend);
+        assert!(
+            versions.contains(&(3, 0)),
+            "explicit {{3,0}} answer must advertise (3,0): {versions:?}"
+        );
+        let _ = (base, table_3_0);
+    }
+
     /// BouncyHSM + explicit {3,1}: when the 3.0 slot holds the
     /// 3.1-stamped primary fallback AND the 3.1 slot holds the explicit
     /// answer, (3,1) is advertised exactly once and no (3,0) alias
@@ -251,6 +366,7 @@ mod tests {
         table_3_1.version = cryptoki_sys::CK_VERSION { major: 3, minor: 1 };
         let backend =
             FfiBackend::test_backend_with_tables(base.as_mut(), Some(fallback.as_ref()), None)
+                .with_3_0_explicit(false)
                 .with_3_1_table(Some(table_3_1.as_ref()));
         let versions = reported_versions(&backend);
         assert_eq!(

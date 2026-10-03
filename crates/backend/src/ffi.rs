@@ -176,14 +176,16 @@ pub(crate) use session_object_unit;
 macro_rules! call_3x_fn {
     // Issue #28 review finding 1: 3.0-family dispatch resolves the
     // slot from the lowest-version table serving it (3.0, then the
-    // explicit 3.1 answer), so every advertised function stays
-    // callable. 3.1 shares the 3.0 layout, hence the same field
-    // names; cross-table dispatch within the 3.x family follows the
-    // BouncyHSM primary-fallback precedent. Fires only where the 3.0
-    // table lacks the slot — consistent modules (all known) keep
-    // today's behavior bit-for-bit, and refusal still precedes
-    // argument evaluation exactly like the generic arm below (which
-    // keeps serving the 3.2 sites).
+    // explicit 3.1 answer, then the 3.2 table's 3.0 prefix — Task
+    // 1.5 Step 3), so every advertised function stays callable.
+    // 3.1 shares the 3.0 layout, hence the same field names, and
+    // the 3.2 table carries the 3.0 layout as a prefix;
+    // cross-table dispatch within the 3.x family follows the
+    // BouncyHSM primary-fallback precedent. Each link fires only
+    // where every lower table lacks the slot — consistent modules
+    // (all known) keep today's behavior bit-for-bit, and refusal
+    // still precedes argument evaluation exactly like the generic
+    // arm below (which keeps serving the 3.2 sites).
     ($admission:expr, $self:expr, func_list_3_0, $fn_name:ident $(, $arg:expr)*) => {{
         // B2 admission proof (TF01b): the ascription pins at compile time
         // that the caller's ordinary guard reaches this native entry; the
@@ -192,7 +194,7 @@ macro_rules! call_3x_fn {
         // argument expressions after table resolution — routing through
         // `call_unit` would force hoisting and change refusal precedence.
         let _admission: &crate::ffi::native_domain::OrdinaryGuard = $admission;
-        let f = [$self.func_list_3_0, $self.func_list_3_1]
+        let f = [$self.func_list_3_0, $self.func_list_3_1, $self.func_list_3_2_as_3_0_prefix()]
             .into_iter()
             .flatten()
             .find_map(|fl| unsafe { (*fl).$fn_name });
@@ -225,6 +227,27 @@ macro_rules! call_3x_fn {
 }
 #[allow(unused_imports)]
 pub(crate) use call_3x_fn;
+
+impl FfiBackend {
+    /// The 3.2 table viewed as a 3.0-prefix table for 3.0-family
+    /// dispatch fallback (Task 1.5 Step 3): the last link of the
+    /// 3.0→3.1→3.2 chain, so a function the (3,2) advertisement
+    /// shows as callable stays callable. `None` when no 3.2 table
+    /// was discovered.
+    ///
+    /// Soundness: `CK_FUNCTION_LIST_3_2` extends
+    /// `CK_FUNCTION_LIST_3_0` with additional trailing fields
+    /// (PKCS#11 ABI; both `repr(C)` through cryptoki-sys), so
+    /// reading 3.0-prefix fields through the retyped pointer is a
+    /// prefix read — the same reliance as the leading-`CK_VERSION`
+    /// reads. The pointer stays module-owned with the 3.2 slot's
+    /// lifetime (kept alive by `_lib`).
+    pub(crate) fn func_list_3_2_as_3_0_prefix(
+        &self,
+    ) -> Option<*const cryptoki_sys::CK_FUNCTION_LIST_3_0> {
+        self.func_list_3_2.map(|fl| fl as *const cryptoki_sys::CK_FUNCTION_LIST_3_0)
+    }
+}
 
 /// Operation family owning one retained mechanism slot within a session
 /// (C3M.3 vocabulary).  The names are internal ownership labels, not a claim
@@ -267,6 +290,14 @@ pub struct FfiBackend {
     func_list: *mut cryptoki_sys::CK_FUNCTION_LIST,
     /// PKCS#11 3.0 function list, if the module supports `C_GetInterface`.
     func_list_3_0: Option<*const cryptoki_sys::CK_FUNCTION_LIST_3_0>,
+    /// Provenance of [`Self::func_list_3_0`] (RF-3.0-manufacture):
+    /// `true` when the slot holds an explicit versioned {3,0} answer
+    /// (any stamp the module put on its reply), `false` when it holds
+    /// the primary-interface fallback (explicit {3,0} was NULL).
+    /// Advertisement-only: dispatch uses the slot either way, but
+    /// only an explicit answer proves the module serves {3,0}. Read
+    /// only when the slot is `Some`.
+    func_list_3_0_explicit: bool,
     /// PKCS#11 3.1 function list from an explicit {3,1} query that
     /// passed the OASIS exact-match proof gate (3.1 stamp), if the
     /// module served one. Feeds the (3,1) advertisement null-walk and
@@ -361,6 +392,7 @@ impl FfiBackend {
             _lib: loading::test_library_handle(),
             func_list,
             func_list_3_0: None,
+            func_list_3_0_explicit: false,
             func_list_3_1: None,
             func_list_3_2: None,
             initialize_args: None,
@@ -386,6 +418,10 @@ impl FfiBackend {
         Self {
             _lib: loading::test_library_handle(),
             func_list,
+            // A caller-provided table reads as a literal answer; tests
+            // mimicking the primary fallback declare it explicitly via
+            // `with_3_0_explicit(false)`.
+            func_list_3_0_explicit: func_list_3_0.is_some(),
             func_list_3_0,
             func_list_3_1: None,
             func_list_3_2,
@@ -413,6 +449,17 @@ impl FfiBackend {
         func_list_3_1: Option<*const cryptoki_sys::CK_FUNCTION_LIST_3_0>,
     ) -> Self {
         self.func_list_3_1 = func_list_3_1;
+        self
+    }
+
+    /// Test-only provenance installer for the 3.0 slot
+    /// (RF-3.0-manufacture): the base constructor reads a provided
+    /// table as a literal answer; stub tests mimicking the
+    /// primary-interface fallback (explicit {3,0} NULL) set `false`
+    /// here.
+    #[cfg(any(test, feature = "native-owner-test-hooks"))]
+    pub fn with_3_0_explicit(mut self, explicit: bool) -> Self {
+        self.func_list_3_0_explicit = explicit;
         self
     }
 }

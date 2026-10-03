@@ -105,6 +105,16 @@ mod tests {
         cryptoki_sys::CKR_OK
     }
 
+    static SESSION_CANCEL_3_2_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C" fn counted_session_cancel_3_2(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _flags: cryptoki_sys::CK_FLAGS,
+    ) -> cryptoki_sys::CK_RV {
+        SESSION_CANCEL_3_2_CALLS.fetch_add(1, Ordering::SeqCst);
+        cryptoki_sys::CKR_OK
+    }
+
     unsafe extern "C" fn login_user_ok(
         _session: cryptoki_sys::CK_SESSION_HANDLE,
         _user_type: cryptoki_sys::CK_USER_TYPE,
@@ -254,11 +264,13 @@ mod tests {
     fn backend_with_split_session_cancel(
         in_3_0: bool,
         in_3_1: bool,
+        in_3_2: bool,
     ) -> (
         FfiBackend,
         Box<cryptoki_sys::CK_FUNCTION_LIST>,
         Box<cryptoki_sys::CK_FUNCTION_LIST_3_0>,
         Box<cryptoki_sys::CK_FUNCTION_LIST_3_0>,
+        Box<cryptoki_sys::CK_FUNCTION_LIST_3_2>,
     ) {
         let mut base = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
         let mut table_3_0 = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_0::default());
@@ -271,10 +283,18 @@ mod tests {
         if in_3_1 {
             table_3_1.C_SessionCancel = Some(counted_session_cancel_3_1);
         }
-        let backend =
-            FfiBackend::test_backend_with_tables(base.as_mut(), Some(table_3_0.as_ref()), None)
-                .with_3_1_table(Some(table_3_1.as_ref()));
-        (backend, base, table_3_0, table_3_1)
+        let mut table_3_2 = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_2::default());
+        table_3_2.version = cryptoki_sys::CK_VERSION { major: 3, minor: 2 };
+        if in_3_2 {
+            table_3_2.C_SessionCancel = Some(counted_session_cancel_3_2);
+        }
+        let backend = FfiBackend::test_backend_with_tables(
+            base.as_mut(),
+            Some(table_3_0.as_ref()),
+            Some(table_3_2.as_ref()),
+        )
+        .with_3_1_table(Some(table_3_1.as_ref()));
+        (backend, base, table_3_0, table_3_1, table_3_2)
     }
 
     /// 3.0-family dispatch resolves the slot from the 3.1 table when
@@ -285,7 +305,8 @@ mod tests {
         let _lock = TEST_LOCK.lock().unwrap();
         SESSION_CANCEL_PROVIDER_CALLS.store(0, Ordering::SeqCst);
         SESSION_CANCEL_3_1_CALLS.store(0, Ordering::SeqCst);
-        let (backend, _base, _t30, _t31) = backend_with_split_session_cancel(false, true);
+        let (backend, _base, _t30, _t31, _t32) =
+            backend_with_split_session_cancel(false, true, false);
         backend.lifecycle_domain.open_for_tests();
         backend.ffi_session_cancel(CkSessionHandle(7), CkFlags(0)).unwrap();
         assert_eq!(SESSION_CANCEL_PROVIDER_CALLS.load(Ordering::SeqCst), 0);
@@ -299,7 +320,8 @@ mod tests {
         let _lock = TEST_LOCK.lock().unwrap();
         SESSION_CANCEL_PROVIDER_CALLS.store(0, Ordering::SeqCst);
         SESSION_CANCEL_3_1_CALLS.store(0, Ordering::SeqCst);
-        let (backend, _base, _t30, _t31) = backend_with_split_session_cancel(true, true);
+        let (backend, _base, _t30, _t31, _t32) =
+            backend_with_split_session_cancel(true, true, true);
         backend.lifecycle_domain.open_for_tests();
         backend.ffi_session_cancel(CkSessionHandle(7), CkFlags(0)).unwrap();
         assert_eq!(SESSION_CANCEL_PROVIDER_CALLS.load(Ordering::SeqCst), 1);
@@ -311,11 +333,48 @@ mod tests {
     #[test]
     fn session_cancel_refuses_when_no_table_serves_slot() {
         let _lock = TEST_LOCK.lock().unwrap();
-        let (backend, _base, _t30, _t31) = backend_with_split_session_cancel(false, false);
+        let (backend, _base, _t30, _t31, _t32) =
+            backend_with_split_session_cancel(false, false, false);
         backend.lifecycle_domain.open_for_tests();
         assert_eq!(
             backend.ffi_session_cancel(CkSessionHandle(7), CkFlags(0)).unwrap_err(),
             CkRv::FUNCTION_NOT_SUPPORTED
         );
+    }
+
+    /// Task 1.5 Step 3: 3.0-family dispatch resolves the slot from
+    /// the 3.2 table's 3.0 prefix when neither the 3.0 nor the 3.1
+    /// table serves it, so a function the (3,2) advertisement shows
+    /// as callable stays callable instead of refusing.
+    #[test]
+    fn session_cancel_falls_back_to_3_2_table_slot() {
+        let _lock = TEST_LOCK.lock().unwrap();
+        SESSION_CANCEL_PROVIDER_CALLS.store(0, Ordering::SeqCst);
+        SESSION_CANCEL_3_1_CALLS.store(0, Ordering::SeqCst);
+        SESSION_CANCEL_3_2_CALLS.store(0, Ordering::SeqCst);
+        let (backend, _base, _t30, _t31, _t32) =
+            backend_with_split_session_cancel(false, false, true);
+        backend.lifecycle_domain.open_for_tests();
+        backend.ffi_session_cancel(CkSessionHandle(7), CkFlags(0)).unwrap();
+        assert_eq!(SESSION_CANCEL_PROVIDER_CALLS.load(Ordering::SeqCst), 0);
+        assert_eq!(SESSION_CANCEL_3_1_CALLS.load(Ordering::SeqCst), 0);
+        assert_eq!(SESSION_CANCEL_3_2_CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    /// The 3.1 table keeps precedence over the 3.2 table: the 3.2
+    /// link fires only where dispatch previously refused.
+    #[test]
+    fn session_cancel_prefers_3_1_table_slot_over_3_2() {
+        let _lock = TEST_LOCK.lock().unwrap();
+        SESSION_CANCEL_PROVIDER_CALLS.store(0, Ordering::SeqCst);
+        SESSION_CANCEL_3_1_CALLS.store(0, Ordering::SeqCst);
+        SESSION_CANCEL_3_2_CALLS.store(0, Ordering::SeqCst);
+        let (backend, _base, _t30, _t31, _t32) =
+            backend_with_split_session_cancel(false, true, true);
+        backend.lifecycle_domain.open_for_tests();
+        backend.ffi_session_cancel(CkSessionHandle(7), CkFlags(0)).unwrap();
+        assert_eq!(SESSION_CANCEL_PROVIDER_CALLS.load(Ordering::SeqCst), 0);
+        assert_eq!(SESSION_CANCEL_3_1_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(SESSION_CANCEL_3_2_CALLS.load(Ordering::SeqCst), 0);
     }
 }
