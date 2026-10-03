@@ -21,7 +21,7 @@
 //! presence — arms untouched), S2 §8 "MGF" (a scalar enum, not a params
 //! shape) and "PSS-flat" (router-level Flat carriage, R11-pinned).
 
-use super::super::{mechanism_to_ffi, validate_for_ffi};
+use super::super::{mechanism_to_ffi, validated_mechanism_for_tests};
 use pkcs11_proxy_ng_types::{
     AesCbcEncryptDataParams, AriaCbcEncryptDataParams, CamelliaCbcEncryptDataParams, CcmParams,
     CcmWrapParams, ChaCha20Params, CkAttribute, CkAttributeType, CkGeneratorFunction, CkKdf,
@@ -64,11 +64,11 @@ const CKM_TEST_KMAC: u64 = 0x8000_1911;
 const CKM_TEST_MU_GEN: u64 = 0x8000_1912;
 const CKM_TEST_ECDH1_COFACTOR_DERIVE: u64 = 0x8000_1913;
 
-/// Validate (backend-local funnel: typed params pass through) + convert.
+/// Validate (test funnel: binds the pair under test, F1) + convert.
 /// Every typed/tail reconstruction test funnels through here.
 fn convert(params: CkMechanismParams, mechanism_type: CkMechanismType) -> super::FfiMechanism {
     let mechanism = CkMechanism { mechanism_type, params: Some(params) };
-    let validated = validate_for_ffi(&mechanism).expect("test mechanism validates for FFI");
+    let validated = validated_mechanism_for_tests(&mechanism);
     mechanism_to_ffi(&validated).expect("test mechanism reconstructs")
 }
 
@@ -2854,10 +2854,11 @@ fn r19_reconstruct_sp800_108_kdf() {
     assert_eq!(k_count as u64, 0, "sp800-kdf/empty-keys: count");
 
     // Present data params → exact array; per-element value legs
-    // reconstruct (Present bytes verbatim, NULL + length).
+    // reconstruct (Present bytes verbatim, NULL + length). The verbatim
+    // leg rides BYTE_ARRAY (F5: modeled type ids now parse).
     let (d_ptr, d_count, _, _) = probe(sp800_kdf(
         PointerArray::present(vec![
-            prf_data(1, PointerBytes::present_copy(&[0xC3; 3])),
+            prf_data(4, PointerBytes::present_copy(&[0xC3; 3])),
             prf_data(2, PointerBytes::null_len(4)),
         ]),
         PointerArray::present(Vec::new()),
@@ -2953,11 +2954,12 @@ fn r19_reconstruct_sp800_108_feedback_kdf() {
     assert!(!k_ptr.is_null(), "sp800-fb/empty-keys: must be non-NULL");
     assert_eq!(k_count as u64, 0, "sp800-fb/empty-keys: count");
 
-    // Present data → exact bytes/counts on all three legs.
+    // Present data → exact bytes/counts on all three legs (the data
+    // leg rides BYTE_ARRAY — F5: modeled type ids now parse).
     let iv_input = vec![0xC4; 16];
     let attr = CkAttribute { attr_type: CkAttributeType::LABEL, value: None };
     let (d_ptr, d_count, iv_ptr, iv_len, k_ptr, k_count) = probe(sp800_feedback_kdf(
-        PointerArray::present(vec![prf_data(1, PointerBytes::present_copy(&[0xC5; 3]))]),
+        PointerArray::present(vec![prf_data(4, PointerBytes::present_copy(&[0xC5; 3]))]),
         PointerBytes::present_copy(&iv_input),
         PointerArray::present(vec![derived_key(PointerArray::present(vec![attr]), 0, false)]),
     ));
@@ -2972,4 +2974,373 @@ fn r19_reconstruct_sp800_108_feedback_kdf() {
     assert!(!key.pTemplate.is_null(), "sp800-fb/key-template: must be non-NULL");
     assert_eq!(key.ulAttributeCount as u64, 1, "sp800-fb/key-template: count");
     assert!(!key.phKey.is_null(), "sp800-fb/key-phkey: must be non-NULL");
+}
+
+// ---------------------------------------------------------------------------
+// F5: SP800-108 CK_ULONG-bearing payloads rebuild backend-native
+// ---------------------------------------------------------------------------
+
+const CK_SP800_108_ITERATION_VARIABLE: u64 = 0x0000_0001;
+const CK_SP800_108_COUNTER: u64 = 0x0000_0002;
+const CK_SP800_108_DKM_LENGTH: u64 = 0x0000_0003;
+const CK_SP800_108_BYTE_ARRAY: u64 = 0x0000_0004;
+const CK_SP800_108_KEY_HANDLE: u64 = 0x0000_0005;
+
+/// F5 client-layout vectors: literal client widths (never host
+/// `size_of`), so the same test pins ILP32→LP64 bridging on 64-bit CI
+/// and LP64→ILP32 bridging on the win32 CI job.
+fn f5_counter_lp64(little_endian: u8, width_in_bits: u64) -> Vec<u8> {
+    let mut value = vec![0u8; 16];
+    value[0] = little_endian;
+    value[8..16].copy_from_slice(&width_in_bits.to_ne_bytes());
+    value
+}
+
+fn f5_counter_ilp32(little_endian: u8, width_in_bits: u32) -> Vec<u8> {
+    let mut value = vec![0u8; 8];
+    value[0] = little_endian;
+    value[4..8].copy_from_slice(&width_in_bits.to_ne_bytes());
+    value
+}
+
+fn f5_dkm_lp64(method: u64, little_endian: u8, width_in_bits: u64) -> Vec<u8> {
+    let mut value = vec![0u8; 24];
+    value[0..8].copy_from_slice(&method.to_ne_bytes());
+    value[8] = little_endian;
+    value[16..24].copy_from_slice(&width_in_bits.to_ne_bytes());
+    value
+}
+
+fn f5_dkm_ilp32(method: u32, little_endian: u8, width_in_bits: u32) -> Vec<u8> {
+    let mut value = vec![0u8; 12];
+    value[0..4].copy_from_slice(&method.to_ne_bytes());
+    value[4] = little_endian;
+    value[8..12].copy_from_slice(&width_in_bits.to_ne_bytes());
+    value
+}
+
+/// By-value copy of data-param element `index` from a live
+/// `pDataParams` array (the probe's `FfiMechanism` is arena-retained,
+/// so every element outlives the test).
+fn f5_data_elem(
+    d_ptr: *mut cryptoki_sys::CK_PRF_DATA_PARAM,
+    index: usize,
+) -> cryptoki_sys::CK_PRF_DATA_PARAM {
+    assert!(!d_ptr.is_null(), "f5: data array must be live");
+    // SAFETY: `d_ptr` designates more than `index` live elements; the
+    // by-value copy carries no provenance.
+    unsafe { d_ptr.add(index).read_unaligned() }
+}
+
+/// By-value copy of the rebuilt counter format behind `pValue` (only
+/// initialized fields are projected by callers, never padding).
+fn f5_counter_at(pvalue: *mut std::ffi::c_void) -> cryptoki_sys::CK_SP800_108_COUNTER_FORMAT {
+    // SAFETY: `pvalue` designates a live rebuilt counter format owned
+    // by the arena-retained `FfiMechanism`.
+    unsafe { (pvalue as *const cryptoki_sys::CK_SP800_108_COUNTER_FORMAT).read_unaligned() }
+}
+
+/// By-value copy of the rebuilt DKM length format behind `pValue`.
+fn f5_dkm_at(pvalue: *mut std::ffi::c_void) -> cryptoki_sys::CK_SP800_108_DKM_LENGTH_FORMAT {
+    // SAFETY: `pvalue` designates a live rebuilt DKM length format
+    // owned by the arena-retained `FfiMechanism`.
+    unsafe { (pvalue as *const cryptoki_sys::CK_SP800_108_DKM_LENGTH_FORMAT).read_unaligned() }
+}
+
+/// By-value copy of the rebuilt object handle behind `pValue`.
+fn f5_handle_at(pvalue: *mut std::ffi::c_void) -> cryptoki_sys::CK_ULONG {
+    // SAFETY: `pvalue` designates a live rebuilt handle owned by the
+    // arena-retained `FfiMechanism`.
+    unsafe { (pvalue as *const cryptoki_sys::CK_ULONG).read_unaligned() }
+}
+
+/// Pin provider-visible alignment (the F5 defect class: align-1 byte
+/// backing for provider-typed reads).
+fn f5_assert_aligned<T>(what: &str, pvalue: *mut std::ffi::c_void) {
+    assert!(!pvalue.is_null(), "{what}: rebuilt value must be non-NULL");
+    assert_eq!(
+        pvalue as usize % std::mem::align_of::<T>(),
+        0,
+        "{what}: provider-typed read needs native alignment"
+    );
+}
+
+#[test]
+fn f5_kdf_counter_bridges_both_client_widths() {
+    // An above-u32 width only where the daemon can represent it (an
+    // ILP32 daemon rejects the LP64 client's unrepresentable scalar
+    // with FUNCTION_FAILED — the shared narrow rule).
+    let lp64_width: u64 =
+        if std::mem::size_of::<cryptoki_sys::CK_ULONG>() == 8 { 0x1_0000_0001 } else { 129 };
+    let ffi = convert(
+        sp800_kdf(
+            PointerArray::present(vec![
+                prf_data(
+                    CK_SP800_108_COUNTER,
+                    PointerBytes::present_copy(&f5_counter_lp64(1, lp64_width)),
+                ),
+                prf_data(
+                    CK_SP800_108_COUNTER,
+                    PointerBytes::present_copy(&f5_counter_ilp32(0, 0xAABB_CCDD)),
+                ),
+            ]),
+            PointerArray::present(Vec::new()),
+        ),
+        CkMechanismType::SP800_108_COUNTER_KDF,
+    );
+    let p: cryptoki_sys::CK_SP800_108_KDF_PARAMS = param_struct(ffi);
+    let native_len = std::mem::size_of::<cryptoki_sys::CK_SP800_108_COUNTER_FORMAT>() as u64;
+    assert_eq!(p.ulNumberOfDataParams as u64, 2, "f5/counter: count");
+    // LP64-client leg: same-layout rebuild, value-exact.
+    let first = f5_data_elem(p.pDataParams, 0);
+    assert_field("f5/counter-lp64", first.pValue as *mut u8, first.ulValueLen, false, native_len);
+    f5_assert_aligned::<cryptoki_sys::CK_SP800_108_COUNTER_FORMAT>("f5/counter-lp64", first.pValue);
+    let rebuilt = f5_counter_at(first.pValue);
+    assert_eq!(rebuilt.bLittleEndian, 1, "f5/counter-lp64: bool byte");
+    assert_eq!(rebuilt.ulWidthInBits as u64, lp64_width, "f5/counter-lp64: width");
+    // ILP32-client leg: bridged to the daemon-native record.
+    let second = f5_data_elem(p.pDataParams, 1);
+    assert_field(
+        "f5/counter-ilp32",
+        second.pValue as *mut u8,
+        second.ulValueLen,
+        false,
+        native_len,
+    );
+    f5_assert_aligned::<cryptoki_sys::CK_SP800_108_COUNTER_FORMAT>(
+        "f5/counter-ilp32",
+        second.pValue,
+    );
+    let rebuilt = f5_counter_at(second.pValue);
+    assert_eq!(rebuilt.bLittleEndian, 0, "f5/counter-ilp32: bool byte");
+    assert_eq!(rebuilt.ulWidthInBits as u64, 0xAABB_CCDD, "f5/counter-ilp32: width");
+}
+
+#[test]
+fn f5_kdf_dkm_key_iteration_bridge_to_native() {
+    // Above-u32 scalars only where the daemon can represent them (see
+    // the counter test).
+    let narrow = std::mem::size_of::<cryptoki_sys::CK_ULONG>() != 8;
+    let dkm_method: u64 = if narrow { 2 } else { 0x3_0000_0003 };
+    let dkm_width: u64 = if narrow { 257 } else { 0x2_0000_0002 };
+    let key_wide: u64 = if narrow { 0x1122_3344 } else { 0x1122_3344_5566_7788 };
+    let ffi = convert(
+        sp800_kdf(
+            PointerArray::present(vec![
+                prf_data(
+                    CK_SP800_108_DKM_LENGTH,
+                    PointerBytes::present_copy(&f5_dkm_lp64(dkm_method, 1, dkm_width)),
+                ),
+                prf_data(
+                    CK_SP800_108_DKM_LENGTH,
+                    PointerBytes::present_copy(&f5_dkm_ilp32(1, 0, 0x1234_5678)),
+                ),
+                prf_data(
+                    CK_SP800_108_KEY_HANDLE,
+                    PointerBytes::present_copy(&key_wide.to_ne_bytes()),
+                ),
+                prf_data(
+                    CK_SP800_108_KEY_HANDLE,
+                    PointerBytes::present_copy(&0xDEAD_BEEFu32.to_ne_bytes()),
+                ),
+                prf_data(
+                    CK_SP800_108_ITERATION_VARIABLE,
+                    PointerBytes::present_copy(&f5_counter_ilp32(1, 321)),
+                ),
+            ]),
+            PointerArray::present(Vec::new()),
+        ),
+        CkMechanismType::SP800_108_COUNTER_KDF,
+    );
+    let p: cryptoki_sys::CK_SP800_108_KDF_PARAMS = param_struct(ffi);
+    assert_eq!(p.ulNumberOfDataParams as u64, 5, "f5/bridge: count");
+    let dkm_len = std::mem::size_of::<cryptoki_sys::CK_SP800_108_DKM_LENGTH_FORMAT>() as u64;
+    let handle_len = std::mem::size_of::<cryptoki_sys::CK_ULONG>() as u64;
+    let counter_len = std::mem::size_of::<cryptoki_sys::CK_SP800_108_COUNTER_FORMAT>() as u64;
+    // LP64-client DKM leg.
+    let elem = f5_data_elem(p.pDataParams, 0);
+    assert_field("f5/dkm-lp64", elem.pValue as *mut u8, elem.ulValueLen, false, dkm_len);
+    f5_assert_aligned::<cryptoki_sys::CK_SP800_108_DKM_LENGTH_FORMAT>("f5/dkm-lp64", elem.pValue);
+    let rebuilt = f5_dkm_at(elem.pValue);
+    assert_eq!(rebuilt.dkmLengthMethod as u64, dkm_method, "f5/dkm-lp64: method");
+    assert_eq!(rebuilt.bLittleEndian, 1, "f5/dkm-lp64: bool byte");
+    assert_eq!(rebuilt.ulWidthInBits as u64, dkm_width, "f5/dkm-lp64: width");
+    // ILP32-client DKM leg.
+    let elem = f5_data_elem(p.pDataParams, 1);
+    assert_field("f5/dkm-ilp32", elem.pValue as *mut u8, elem.ulValueLen, false, dkm_len);
+    f5_assert_aligned::<cryptoki_sys::CK_SP800_108_DKM_LENGTH_FORMAT>("f5/dkm-ilp32", elem.pValue);
+    let rebuilt = f5_dkm_at(elem.pValue);
+    assert_eq!(rebuilt.dkmLengthMethod as u64, 1, "f5/dkm-ilp32: method");
+    assert_eq!(rebuilt.bLittleEndian, 0, "f5/dkm-ilp32: bool byte");
+    assert_eq!(rebuilt.ulWidthInBits as u64, 0x1234_5678, "f5/dkm-ilp32: width");
+    // 8-byte key leg (LP64-client width on every host).
+    let elem = f5_data_elem(p.pDataParams, 2);
+    assert_field("f5/key-wide", elem.pValue as *mut u8, elem.ulValueLen, false, handle_len);
+    f5_assert_aligned::<cryptoki_sys::CK_ULONG>("f5/key-wide", elem.pValue);
+    assert_eq!(f5_handle_at(elem.pValue) as u64, key_wide, "f5/key-wide: handle");
+    // 4-byte key leg (ILP32-client width on every host).
+    let elem = f5_data_elem(p.pDataParams, 3);
+    assert_field("f5/key-narrow", elem.pValue as *mut u8, elem.ulValueLen, false, handle_len);
+    f5_assert_aligned::<cryptoki_sys::CK_ULONG>("f5/key-narrow", elem.pValue);
+    assert_eq!(f5_handle_at(elem.pValue) as u64, 0xDEAD_BEEF, "f5/key-narrow: handle");
+    // ILP32-client iteration variable (counter-shaped).
+    let elem = f5_data_elem(p.pDataParams, 4);
+    assert_field("f5/iter-ilp32", elem.pValue as *mut u8, elem.ulValueLen, false, counter_len);
+    f5_assert_aligned::<cryptoki_sys::CK_SP800_108_COUNTER_FORMAT>("f5/iter-ilp32", elem.pValue);
+    let rebuilt = f5_counter_at(elem.pValue);
+    assert_eq!(rebuilt.bLittleEndian, 1, "f5/iter-ilp32: bool byte");
+    assert_eq!(rebuilt.ulWidthInBits as u64, 321, "f5/iter-ilp32: width");
+}
+
+#[test]
+fn f5_feedback_kdf_modeled_legs_bridge_to_native() {
+    // One modeled leg per kind through the Feedback arm (the Kdf arm's
+    // matrix above pins the value mapping; this pins the sibling).
+    let ffi = convert(
+        sp800_feedback_kdf(
+            PointerArray::present(vec![
+                prf_data(
+                    CK_SP800_108_COUNTER,
+                    PointerBytes::present_copy(&f5_counter_ilp32(1, 0x51)),
+                ),
+                prf_data(
+                    CK_SP800_108_DKM_LENGTH,
+                    PointerBytes::present_copy(&f5_dkm_ilp32(2, 0, 0x52)),
+                ),
+                prf_data(
+                    CK_SP800_108_KEY_HANDLE,
+                    PointerBytes::present_copy(&0x53u32.to_ne_bytes()),
+                ),
+            ]),
+            PointerBytes::present_copy(&[0xC6; 8]),
+            PointerArray::present(Vec::new()),
+        ),
+        CkMechanismType::SP800_108_FEEDBACK_KDF,
+    );
+    let p: cryptoki_sys::CK_SP800_108_FEEDBACK_KDF_PARAMS = param_struct(ffi);
+    assert_eq!(p.ulNumberOfDataParams as u64, 3, "f5/fb: count");
+    let counter_len = std::mem::size_of::<cryptoki_sys::CK_SP800_108_COUNTER_FORMAT>() as u64;
+    let dkm_len = std::mem::size_of::<cryptoki_sys::CK_SP800_108_DKM_LENGTH_FORMAT>() as u64;
+    let handle_len = std::mem::size_of::<cryptoki_sys::CK_ULONG>() as u64;
+    let elem = f5_data_elem(p.pDataParams, 0);
+    assert_field("f5/fb-counter", elem.pValue as *mut u8, elem.ulValueLen, false, counter_len);
+    f5_assert_aligned::<cryptoki_sys::CK_SP800_108_COUNTER_FORMAT>("f5/fb-counter", elem.pValue);
+    let rebuilt = f5_counter_at(elem.pValue);
+    assert_eq!(rebuilt.bLittleEndian, 1, "f5/fb-counter: bool byte");
+    assert_eq!(rebuilt.ulWidthInBits as u64, 0x51, "f5/fb-counter: width");
+    let elem = f5_data_elem(p.pDataParams, 1);
+    assert_field("f5/fb-dkm", elem.pValue as *mut u8, elem.ulValueLen, false, dkm_len);
+    f5_assert_aligned::<cryptoki_sys::CK_SP800_108_DKM_LENGTH_FORMAT>("f5/fb-dkm", elem.pValue);
+    let rebuilt = f5_dkm_at(elem.pValue);
+    assert_eq!(rebuilt.dkmLengthMethod as u64, 2, "f5/fb-dkm: method");
+    assert_eq!(rebuilt.bLittleEndian, 0, "f5/fb-dkm: bool byte");
+    assert_eq!(rebuilt.ulWidthInBits as u64, 0x52, "f5/fb-dkm: width");
+    let elem = f5_data_elem(p.pDataParams, 2);
+    assert_field("f5/fb-key", elem.pValue as *mut u8, elem.ulValueLen, false, handle_len);
+    f5_assert_aligned::<cryptoki_sys::CK_ULONG>("f5/fb-key", elem.pValue);
+    assert_eq!(f5_handle_at(elem.pValue) as u64, 0x53, "f5/fb-key: handle");
+}
+
+#[test]
+fn f5_kdf_opaque_legs_stay_verbatim() {
+    let ffi = convert(
+        sp800_kdf(
+            PointerArray::present(vec![
+                prf_data(CK_SP800_108_BYTE_ARRAY, PointerBytes::present_copy(&[0xE1; 5])),
+                prf_data(0x00C0_FFEE, PointerBytes::present_copy(&[0xE2; 7])),
+                prf_data(CK_SP800_108_COUNTER, PointerBytes::null_len(9)),
+                prf_data(CK_SP800_108_ITERATION_VARIABLE, PointerBytes::present_copy(&[])),
+            ]),
+            PointerArray::present(Vec::new()),
+        ),
+        CkMechanismType::SP800_108_COUNTER_KDF,
+    );
+    let p: cryptoki_sys::CK_SP800_108_KDF_PARAMS = param_struct(ffi);
+    assert_eq!(p.ulNumberOfDataParams as u64, 4, "f5/opaque: count");
+    // BYTE_ARRAY: opaque bytes verbatim.
+    let elem = f5_data_elem(p.pDataParams, 0);
+    assert_field("f5/opaque-bytes", elem.pValue as *mut u8, elem.ulValueLen, false, 5);
+    assert_eq!(
+        pointee_bytes(elem.pValue as *const u8, elem.ulValueLen as u64),
+        vec![0xE1; 5],
+        "f5/opaque-bytes: bytes"
+    );
+    // Unknown vendor type: opaque passthrough (nothing modeled).
+    let elem = f5_data_elem(p.pDataParams, 1);
+    assert_field("f5/opaque-vendor", elem.pValue as *mut u8, elem.ulValueLen, false, 7);
+    assert_eq!(
+        pointee_bytes(elem.pValue as *const u8, elem.ulValueLen as u64),
+        vec![0xE2; 7],
+        "f5/opaque-vendor: bytes"
+    );
+    // NULL counter: NULL + declared length (presence peer governs).
+    let elem = f5_data_elem(p.pDataParams, 2);
+    assert_field("f5/opaque-null", elem.pValue as *mut u8, elem.ulValueLen, true, 9);
+    // Empty iteration variable: stable non-NULL + 0 (mock-blessed
+    // leniency for non-counter modes).
+    let elem = f5_data_elem(p.pDataParams, 3);
+    assert_field("f5/opaque-iter-empty", elem.pValue as *mut u8, elem.ulValueLen, false, 0);
+}
+
+#[test]
+fn f5_kdf_degenerate_payloads_fail_closed() {
+    for (name, type_, len) in [
+        ("counter-between-widths", CK_SP800_108_COUNTER, 12),
+        ("counter-overlong", CK_SP800_108_COUNTER, 20),
+        ("counter-empty", CK_SP800_108_COUNTER, 0),
+        ("dkm-counter-sized", CK_SP800_108_DKM_LENGTH, 16),
+        ("dkm-short", CK_SP800_108_DKM_LENGTH, 8),
+        ("dkm-empty", CK_SP800_108_DKM_LENGTH, 0),
+        ("key-between-widths", CK_SP800_108_KEY_HANDLE, 6),
+        ("key-overlong", CK_SP800_108_KEY_HANDLE, 12),
+        ("key-empty", CK_SP800_108_KEY_HANDLE, 0),
+        ("iteration-between-widths", CK_SP800_108_ITERATION_VARIABLE, 7),
+    ] {
+        let params = sp800_kdf(
+            PointerArray::present(vec![prf_data(
+                type_,
+                PointerBytes::present_copy(&vec![0xAA; len]),
+            )]),
+            PointerArray::present(Vec::new()),
+        );
+        let mechanism = CkMechanism {
+            mechanism_type: CkMechanismType::SP800_108_COUNTER_KDF,
+            params: Some(params),
+        };
+        assert_eq!(
+            mechanism_to_ffi(&validated_mechanism_for_tests(&mechanism)).err(),
+            Some(pkcs11_proxy_ng_types::CkRv::MECHANISM_PARAM_INVALID),
+            "{name}: unmodelable payload must fail closed"
+        );
+    }
+}
+
+#[test]
+fn f5_kdf_bridged_legs_echo_client_bytes_exactly() {
+    // Bridged legs round-trip the untouched CLIENT bytes (the echo
+    // compares domain-vs-domain, so an ILP32 payload echoes 8 bytes
+    // even though the provider saw a daemon-native record).
+    let ilp32 = f5_counter_ilp32(1, 321);
+    let params = sp800_kdf(
+        PointerArray::present(vec![prf_data(
+            CK_SP800_108_COUNTER,
+            PointerBytes::present_copy(&ilp32),
+        )]),
+        PointerArray::present(vec![derived_key(PointerArray::present(Vec::new()), 0, false)]),
+    );
+    let expected = Some(params.clone());
+    let ffi = convert(params, CkMechanismType::SP800_108_COUNTER_KDF);
+    assert!(ffi.output_params_equal(&expected), "f5/echo: bridged leg echoes its client bytes");
+    let round_tripped = ffi.output_params().expect("f5/echo: output params are produced");
+    let CkMechanismParams::Sp800108Kdf(out) = round_tripped else {
+        panic!("f5/echo: expected Sp800108Kdf output params");
+    };
+    assert_eq!(
+        out.data_params_presence,
+        PointerArray::present(vec![prf_data(
+            CK_SP800_108_COUNTER,
+            PointerBytes::present_copy(&ilp32),
+        )]),
+        "f5/echo: data params round-trip exactly"
+    );
 }

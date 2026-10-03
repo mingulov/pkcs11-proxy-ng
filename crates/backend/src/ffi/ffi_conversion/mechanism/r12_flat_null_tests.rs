@@ -20,8 +20,16 @@ use std::collections::{HashMap, HashSet};
 /// Registry binding `mech` to the byte-buffer `iv` shape (R9 test pattern):
 /// the descriptor `validate` needs to grant Flat.
 fn registry_with_iv_binding(mech: u64) -> MechanismRegistry {
+    registry_with_bindings(&[("iv", mech)])
+}
+
+/// Multi-binding registry for nested tests (F1: outer and nested nodes
+/// each need their own binding — one mech binds one shape).
+fn registry_with_bindings(bindings: &[(&str, u64)]) -> MechanismRegistry {
     let mut shapes = HashMap::new();
-    shapes.insert(mech, "iv".to_string());
+    for (shape, mech) in bindings {
+        shapes.insert(*mech, (*shape).to_string());
+    }
     MechanismRegistry::from_parts(
         shapes,
         HashSet::new(),
@@ -172,24 +180,44 @@ fn r12_funnel_flat_always_denied() {
     assert_eq!(validate_for_ffi(&mech).err(), Some(CkRv::MECHANISM_PARAM_INVALID));
 }
 
-/// Typed params and parameterless mechanisms pass the backend-local gate
-/// identically (variant-driven, registry-independent): pre-R12 behavior
-/// preserved exactly on the FFI path.
+/// Parameterless mechanisms pass the backend-local gate identically:
+/// pre-R12 behavior preserved exactly on the FFI path. (F1: typed
+/// params need bindings, so the old typed half of this pin moved to
+/// `r12_funnel_typed_needs_binding`.)
 #[test]
 fn r12_funnel_typed_and_none_passthrough() {
-    let typed = CkMechanism {
-        mechanism_type: CkMechanismType::AES_CBC,
-        params: Some(CkMechanismParams::Iv(IvParams { iv: vec![0x11; 16] })),
-    };
-    let ffi = mechanism_to_ffi(&validate_for_ffi(&typed).expect("typed validates"))
-        .expect("typed reconstructs");
-    assert_eq!(provider_view(&ffi), vec![0x11; 16]);
     let bare = CkMechanism { mechanism_type: CkMechanismType::SHA256, params: None };
     let ffi = mechanism_to_ffi(&validate_for_ffi(&bare).expect("None validates"))
         .expect("parameterless reconstructs");
     let (ptr, len) = outer_param(&ffi);
     assert!(ptr.is_null());
     assert_eq!(len, 0);
+}
+
+/// F1: typed params are rejected by the registry-less backstop (no
+/// binding exists to authorize them); the same pair validates against
+/// a registry binding it, and reconstructs identically.
+#[test]
+fn r12_funnel_typed_needs_binding() {
+    let typed = CkMechanism {
+        mechanism_type: CkMechanismType::AES_CBC,
+        params: Some(CkMechanismParams::Iv(IvParams { iv: vec![0x11; 16] })),
+    };
+    assert_eq!(
+        validate_for_ffi(&typed).err(),
+        Some(CkRv::MECHANISM_PARAM_INVALID),
+        "unbound typed must fail closed at the backstop"
+    );
+    let validated = ValidatedMechanismParams::validate(
+        &typed,
+        &registry_with_iv_binding(CkMechanismType::AES_CBC.0),
+        Operation::General,
+        ParamAbi::Lp64NativeLe,
+        ParamAbi::Lp64NativeLe,
+    )
+    .expect("bound typed validates");
+    let ffi = mechanism_to_ffi(&validated).expect("typed reconstructs");
+    assert_eq!(provider_view(&ffi), vec![0x11; 16]);
 }
 
 /// Narrowing failure (S2 §6 RV table): a wire u64 declared length the
@@ -241,7 +269,8 @@ fn r12_flat_ilp32_narrowing_exact() {
 
 /// Nested Null converts (uniform rule: NULL + narrowed length needs no
 /// descriptor at any depth). New in R12 — pre-R12 every nested v1 value
-/// was rejected alongside Flat.
+/// was rejected alongside Flat. (F1: the outer KIP validates against a
+/// registry binding its own pair; the nested Null needs no binding.)
 #[test]
 fn r12_nested_null_converts() {
     let mech = CkMechanism {
@@ -252,14 +281,23 @@ fn r12_nested_null_converts() {
             seed_presence: PointerBytes::present_copy(&[]),
         })),
     };
-    let validated = validate_for_ffi(&mech).expect("KIP validates");
+    let validated = ValidatedMechanismParams::validate(
+        &mech,
+        &registry_with_bindings(&[("kip", CkMechanismType::RSA_PKCS.0)]),
+        Operation::General,
+        ParamAbi::Lp64NativeLe,
+        ParamAbi::Lp64NativeLe,
+    )
+    .expect("KIP validates");
     assert!(mechanism_to_ffi(&validated).is_ok(), "nested Null must convert");
 }
 
-/// Nested Flat and nested Raw stay rejected at descent (the nested nodes
-/// are validated through the same registry-less gate: no binding, no
-/// bypass). Carry for the R13/R18 nested tracking: backend nested-Flat
-/// acceptance needs recursive validation, which is NOT this funnel.
+/// Nested Flat stays rejected at descent unless the request's bindings
+/// grant the nested mechanism (F1+F6: the nested node re-validates
+/// against the carried snapshot — here the nested 0x1082 is unbound,
+/// so no binding, no bypass). Nested Raw stays rejected on every path.
+/// Request-validated outers with a bound nested mech accept eligible
+/// nested Flat (pinned by the F6 test below).
 #[test]
 fn r12_nested_flat_and_raw_rejected() {
     for (name, nested) in [
@@ -282,13 +320,74 @@ fn r12_nested_flat_and_raw_rejected() {
                 seed_presence: PointerBytes::present_copy(&[]),
             })),
         };
-        let validated = validate_for_ffi(&mech).expect("outer KIP validates");
+        // F1: the outer KIP validates against its own binding; the
+        // nested node is unbound in this snapshot.
+        let validated = ValidatedMechanismParams::validate(
+            &mech,
+            &registry_with_bindings(&[("kip", CkMechanismType::RSA_PKCS.0)]),
+            Operation::General,
+            ParamAbi::Lp64NativeLe,
+            ParamAbi::Lp64NativeLe,
+        )
+        .expect("outer KIP validates");
         assert_eq!(
             mechanism_to_ffi(&validated).err(),
             Some(CkRv::MECHANISM_PARAM_INVALID),
             "nested {name} must stay rejected"
         );
     }
+}
+
+/// Nested Flat eligible under the request registry converts (F6): the
+/// outer KIP is validated against the request snapshot, and descent
+/// reuses that snapshot — the empty backstop registry only governs the
+/// registry-less `validate_for_ffi` funnel (pinned above). The nested
+/// reconstruction and its backing are retained through descent: the
+/// inner `CK_MECHANISM` is readable via `pMechanism` with verbatim
+/// bytes.
+#[test]
+fn f6_nested_flat_eligible_under_request_registry_converts() {
+    let nested = flat_mechanism(0x0000_1082, &[0xA5; 4]);
+    let mech = CkMechanism {
+        mechanism_type: CkMechanismType::RSA_PKCS,
+        params: Some(CkMechanismParams::Kip(KipParams {
+            mechanism: Some(Box::new(nested)),
+            key_handle: CkObjectHandle(0),
+            seed_presence: PointerBytes::present_copy(&[]),
+        })),
+    };
+    // Like the post-R13 server: validate the outer node against the
+    // request's registry snapshot (F1: binding both the outer KIP pair
+    // and the nested mechanism).
+    let validated = ValidatedMechanismParams::validate(
+        &mech,
+        &registry_with_bindings(&[("kip", CkMechanismType::RSA_PKCS.0), ("iv", 0x0000_1082)]),
+        Operation::General,
+        ParamAbi::Lp64NativeLe,
+        ParamAbi::Lp64NativeLe,
+    )
+    .expect("outer KIP validates against request registry");
+    let ffi = mechanism_to_ffi(&validated).expect("nested eligible Flat must convert");
+    // Retained reconstruction: outer -> CK_KIP_PARAMS -> pMechanism ->
+    // inner CK_MECHANISM with the verbatim Flat bytes.
+    let outer = ffi.ck_mechanism();
+    assert!(!outer.pParameter.is_null(), "KIP params must be present");
+    // SAFETY: `pParameter` points at the live `CK_KIP_PARAMS` box.
+    let kip: cryptoki_sys::CK_KIP_PARAMS =
+        unsafe { (outer.pParameter as *const cryptoki_sys::CK_KIP_PARAMS).read_unaligned() };
+    assert!(!kip.pMechanism.is_null(), "nested mechanism pointer must be live");
+    // SAFETY: `pMechanism` designates the live nested `CK_MECHANISM`
+    // retained in the KIP backing.
+    let inner: cryptoki_sys::CK_MECHANISM = unsafe { kip.pMechanism.read_unaligned() };
+    assert_eq!(inner.mechanism as u64, 0x0000_1082, "nested mechanism id");
+    assert!(!inner.pParameter.is_null(), "nested Flat extent must be non-NULL");
+    assert_eq!(inner.ulParameterLen as u64, 4, "nested declared length");
+    // SAFETY: the nested extent holds exactly `ulParameterLen` bytes.
+    let bytes = unsafe {
+        std::slice::from_raw_parts(inner.pParameter as *const u8, inner.ulParameterLen as usize)
+            .to_vec()
+    };
+    assert_eq!(bytes, vec![0xA5; 4], "nested Flat bytes verbatim");
 }
 
 /// Flat output effects, decided (S2 §6): native writes into Flat backing

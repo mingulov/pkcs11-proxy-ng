@@ -11,7 +11,7 @@
 //! for `dlopen`-touching tests); the pure-conversion matrix in
 //! `r19_typed_tail_tests` IS Miri-clean.
 
-use super::super::{mechanism_to_ffi, validate_for_ffi};
+use super::super::{mechanism_to_ffi, validated_mechanism_for_tests};
 use crate::ffi::{FfiBackend, OperationFamily};
 use pkcs11_proxy_ng_types::{
     CkMechanism, CkMechanismParams, CkMechanismType, CkRv, CkSessionHandle, GcmParams,
@@ -155,13 +155,12 @@ type InitStub = unsafe extern "C" fn(
     cryptoki_sys::CK_OBJECT_HANDLE,
 ) -> cryptoki_sys::CK_RV;
 
-/// Validate (backend-local funnel: typed params pass through).
+/// Validate (test funnel: binds the pair under test, F1).
 fn validate(
     params: CkMechanismParams,
     mechanism_type: CkMechanismType,
 ) -> ValidatedMechanismParams {
-    validate_for_ffi(&CkMechanism { mechanism_type, params: Some(params) })
-        .expect("test mechanism validates for FFI")
+    validated_mechanism_for_tests(&CkMechanism { mechanism_type, params: Some(params) })
 }
 
 /// Successful typed Init retains the §6 reconstruction: the provider

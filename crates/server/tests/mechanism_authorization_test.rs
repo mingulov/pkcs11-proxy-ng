@@ -38,10 +38,15 @@ fn grants(reverse: bool) -> TokenAccessSpec {
 }
 
 async fn fixture_with_grants(grants: [TokenAccessSpec; 2]) -> MtlsFixture {
-    let backend = Arc::new(MockBackend::new(
-        vec![CkSlotId(42), CkSlotId(1)],
-        vec![CkMechanismType::SHA256, CkMechanismType::SHA384],
-    ));
+    fixture_with_grants_and_mechs(grants, vec![CkMechanismType::SHA256, CkMechanismType::SHA384])
+        .await
+}
+
+async fn fixture_with_grants_and_mechs(
+    grants: [TokenAccessSpec; 2],
+    mechs: Vec<CkMechanismType>,
+) -> MtlsFixture {
+    let backend = Arc::new(MockBackend::new(vec![CkSlotId(42), CkSlotId(1)], mechs));
     backend.set_slot_token_identity(CkSlotId(42), "Token42".into(), "serial42".into());
     backend.set_slot_token_identity(CkSlotId(1), "Token1".into(), "serial1".into());
     mtls_fixture::start_mtls_daemon(backend, grants).await

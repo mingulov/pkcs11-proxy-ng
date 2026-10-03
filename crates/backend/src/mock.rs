@@ -1,4 +1,9 @@
 // crates/backend/src/mock.rs
+use crate::sp800_108_data_values::{
+    CK_SP800_108_BYTE_ARRAY, CK_SP800_108_COUNTER, CK_SP800_108_DKM_LENGTH,
+    CK_SP800_108_ITERATION_VARIABLE, CK_SP800_108_KEY_HANDLE, parse_counter_format,
+    parse_dkm_length_format,
+};
 use crate::traits::{CkDeriveKeyOutputResult, Pkcs11Backend};
 use pkcs11_proxy_ng_proto::convert::message_effects::ParameterEffectCallMode;
 use pkcs11_proxy_ng_proto::convert::message_params::MessageParameter;
@@ -72,11 +77,6 @@ pub use self::mock_types::{MockAbi, MockAttributeSlot, MultiPartOp};
 use self::state::{MockState, compute_session_state};
 pub use self::wrap_entry::{MockWrapAction, MockWrapEntry, MockWrapObservation};
 
-const CK_SP800_108_KEY_HANDLE: u64 = 0x0000_0005;
-const CK_SP800_108_ITERATION_VARIABLE: u64 = 0x0000_0001;
-const CK_SP800_108_COUNTER: u64 = 0x0000_0002;
-const CK_SP800_108_DKM_LENGTH: u64 = 0x0000_0003;
-const CK_SP800_108_BYTE_ARRAY: u64 = 0x0000_0004;
 const CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS: u64 = 0x0000_0001;
 const CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS: u64 = 0x0000_0002;
 const CKM_SP800_108_COUNTER_KDF: u64 = 0x0000_03AC;
@@ -92,10 +92,6 @@ const CKM_SHA3_256_HMAC: u64 = 0x0000_02B1;
 const CKM_SHA3_384_HMAC: u64 = 0x0000_02C1;
 const CKM_SHA3_512_HMAC: u64 = 0x0000_02D1;
 const CKM_AES_CMAC: u64 = 0x0000_108A;
-const CK_SP800_108_COUNTER_FORMAT_LEN: usize =
-    std::mem::size_of::<cryptoki_sys::CK_SP800_108_COUNTER_FORMAT>();
-const CK_SP800_108_DKM_LENGTH_FORMAT_LEN: usize =
-    std::mem::size_of::<cryptoki_sys::CK_SP800_108_DKM_LENGTH_FORMAT>();
 
 /// A mock PKCS#11 backend for unit testing the daemon without loading any real module.
 ///
@@ -1605,20 +1601,22 @@ impl MockBackend {
         for data_param in data_params {
             // Validation inputs, computed inside `expose` (the legacy
             // mirror was empty for both NULL and Present([]), so the
-            // NULL leg below preserves the semantics exactly).
-            let (value_len, value_is_empty, dkm_length_valid, key_handle_value) =
+            // NULL leg below preserves the semantics exactly). Shape
+            // checks are width-inferred (F5): both client widths parse,
+            // so no raw length survives here.
+            let (value_is_empty, counter_format_valid, dkm_length_valid, key_handle_value) =
                 match &data_param.value_presence {
                     PointerBytes::Present(secret) => secret.expose(|value| {
                         (
-                            value.len(),
                             value.is_empty(),
+                            parse_counter_format(value).is_ok(),
                             sp800_108_dkm_length_format_valid(value),
                             read_sp800_108_key_handle_value(value),
                         )
                     }),
                     PointerBytes::Null { .. } => (
-                        0,
                         true,
+                        parse_counter_format(&[]).is_ok(),
                         sp800_108_dkm_length_format_valid(&[]),
                         read_sp800_108_key_handle_value(&[]),
                     ),
@@ -1635,16 +1633,13 @@ impl MockBackend {
                         return Err(CkRv::MECHANISM_PARAM_INVALID);
                     }
                     counter_param_count += 1;
-                    if counter_param_count > 1 || value_len != CK_SP800_108_COUNTER_FORMAT_LEN {
+                    if counter_param_count > 1 || !counter_format_valid {
                         return Err(CkRv::MECHANISM_PARAM_INVALID);
                     }
                 }
                 CK_SP800_108_DKM_LENGTH => {
                     dkm_length_param_count += 1;
-                    if dkm_length_param_count > 1
-                        || value_len != CK_SP800_108_DKM_LENGTH_FORMAT_LEN
-                        || !dkm_length_valid
-                    {
+                    if dkm_length_param_count > 1 || !dkm_length_valid {
                         return Err(CkRv::MECHANISM_PARAM_INVALID);
                     }
                 }
@@ -1719,10 +1714,16 @@ fn sp800_108_prf_type_valid(prf_type: u64) -> bool {
 }
 
 fn sp800_108_dkm_length_format_valid(value: &[u8]) -> bool {
-    let Some(method) = read_ck_ulong_prefix(value) else {
-        return false;
-    };
-    matches!(method, CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS | CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS)
+    // Width-inferred (F5): LP64 and ILP32 client layouts both parse;
+    // the method policy itself is unchanged.
+    matches!(
+        parse_dkm_length_format(value),
+        Ok(format)
+            if matches!(
+                format.method,
+                CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS | CK_SP800_108_DKM_LENGTH_SUM_OF_SEGMENTS
+            )
+    )
 }
 
 fn sp800_108_template_failure_output(mechanism: &CkMechanism) -> Option<CkMechanismParams> {
@@ -1774,43 +1775,25 @@ fn sp800_108_additional_template_failure_index(
     })
 }
 
-fn read_ck_ulong_prefix(value: &[u8]) -> Option<u64> {
-    let ulong_len = std::mem::size_of::<cryptoki_sys::CK_ULONG>();
-    if value.len() < ulong_len {
-        return None;
-    }
-    match ulong_len {
-        8 => {
-            let mut bytes = [0u8; 8];
-            bytes.copy_from_slice(&value[..8]);
-            Some(u64::from_ne_bytes(bytes))
-        }
-        4 => {
-            let mut bytes = [0u8; 4];
-            bytes.copy_from_slice(&value[..4]);
-            Some(u32::from_ne_bytes(bytes) as u64)
-        }
-        _ => None,
-    }
-}
-
 fn sp800_108_iteration_variable_payload_valid(
     is_counter_mode: bool,
     data_param: &PrfDataParam,
 ) -> bool {
-    let (value_len, value_is_empty) = match &data_param.value_presence {
-        PointerBytes::Present(secret) => secret.expose(|value| (value.len(), value.is_empty())),
-        PointerBytes::Null { .. } => (0, true),
+    let (value_is_empty, counter_format_valid) = match &data_param.value_presence {
+        PointerBytes::Present(secret) => {
+            secret.expose(|value| (value.is_empty(), parse_counter_format(value).is_ok()))
+        }
+        PointerBytes::Null { .. } => (true, parse_counter_format(&[]).is_ok()),
     };
     if is_counter_mode {
-        return value_len == CK_SP800_108_COUNTER_FORMAT_LEN;
+        return counter_format_valid;
     }
 
     // OASIS SP800-108 text is inconsistent for Feedback and Double Pipeline:
     // the CK_PRF_DATA_PARAM field prose says NULL/0, while mode tables and
     // examples also show CK_SP800_108_COUNTER_FORMAT. Accept both shaped forms
-    // but reject arbitrary payload lengths.
-    value_is_empty || value_len == CK_SP800_108_COUNTER_FORMAT_LEN
+    // but reject arbitrary payload lengths (either client width parses — F5).
+    value_is_empty || counter_format_valid
 }
 
 fn read_sp800_108_key_handle_value(value: &[u8]) -> CkResult<u64> {

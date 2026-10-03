@@ -7362,6 +7362,147 @@ fn r17_ceiling_512mib_boundary_per_field() {
     }
 }
 
+/// F3/D3: bits-derived all-NULL huge forwards (no bytes materialize,
+/// so the materialization ceiling must not fire before the NULL check).
+/// ChaCha20 with NULL block-counter + NULL nonce and huge bit lengths
+/// stays typed with Null peers of the derived byte lengths.
+#[test]
+fn f3_chacha20_all_null_huge_forwards() {
+    let registry = r17_registry();
+    const HUGE_BITS: CK_ULONG = ((512u64 * 1024 * 1024 + 1) * 8) as CK_ULONG;
+    let mut chacha = CK_CHACHA20_PARAMS {
+        pBlockCounter: std::ptr::null_mut(),
+        blockCounterBits: HUGE_BITS,
+        pNonce: std::ptr::null_mut(),
+        ulNonceBits: CK_ULONG::MAX,
+    };
+    match unsafe {
+        r17_read_v1(
+            &registry,
+            "chacha20",
+            &mut chacha as *mut _ as CK_VOID_PTR,
+            std::mem::size_of::<CK_CHACHA20_PARAMS>() as CK_ULONG,
+        )
+    }
+    .expect("all-NULL huge ChaCha20 forwards under v1")
+    .params
+    {
+        Some(CkMechanismParams::ChaCha20(p)) => {
+            assert_eq!(p.block_counter_bits, HUGE_BITS as u64);
+            assert_eq!(p.nonce_bits, CK_ULONG::MAX as u64);
+            r17_assert_null(&p.block_counter_presence, (512u64 * 1024 * 1024 + 1) as u64);
+            r17_assert_null(&p.nonce_presence, (CK_ULONG::MAX as u64).div_ceil(8));
+        }
+        other => panic!("all-NULL huge ChaCha20 must stay typed under v1, got {other:?}"),
+    }
+}
+
+/// F3/D3: Salsa20 with NULL block-counter + NULL nonce and a huge
+/// nonce bit length stays typed (fixed 8-byte counter extent + derived
+/// nonce extent, both Null).
+#[test]
+fn f3_salsa20_all_null_huge_forwards() {
+    let registry = r17_registry();
+    let mut salsa = CK_SALSA20_PARAMS {
+        pBlockCounter: std::ptr::null_mut(),
+        pNonce: std::ptr::null_mut(),
+        ulNonceBits: CK_ULONG::MAX,
+    };
+    match unsafe {
+        r17_read_v1(
+            &registry,
+            "salsa20",
+            &mut salsa as *mut _ as CK_VOID_PTR,
+            std::mem::size_of::<CK_SALSA20_PARAMS>() as CK_ULONG,
+        )
+    }
+    .expect("all-NULL huge Salsa20 forwards under v1")
+    .params
+    {
+        Some(CkMechanismParams::Salsa20(p)) => {
+            assert_eq!(p.nonce_bits, CK_ULONG::MAX as u64);
+            r17_assert_null(&p.block_counter_presence, 8);
+            r17_assert_null(&p.nonce_presence, (CK_ULONG::MAX as u64).div_ceil(8));
+        }
+        other => panic!("all-NULL huge Salsa20 must stay typed under v1, got {other:?}"),
+    }
+}
+
+/// F3/D3: key-mat all-NULL huge forwards — NULL returned material with
+/// a huge IV bit size stays typed with Null IV peers of the derived
+/// length (both SSL3/TLS12 and WTLS forms).
+#[test]
+fn f3_key_mat_all_null_huge_forwards() {
+    let registry = r18_registry();
+    const HUGE_BITS: CK_ULONG = ((512u64 * 1024 * 1024 + 1) * 8) as CK_ULONG;
+    const HUGE_BYTES: u64 = (512 * 1024 * 1024 + 1) as u64;
+    let mut key_mat = CK_SSL3_KEY_MAT_PARAMS {
+        ulMacSizeInBits: 160,
+        ulKeySizeInBits: 128,
+        ulIVSizeInBits: HUGE_BITS,
+        bIsExport: CK_FALSE,
+        RandomInfo: CK_SSL3_RANDOM_DATA {
+            pClientRandom: std::ptr::null_mut(),
+            ulClientRandomLen: 0,
+            pServerRandom: std::ptr::null_mut(),
+            ulServerRandomLen: 0,
+        },
+        pReturnedKeyMaterial: std::ptr::null_mut(),
+    };
+    match unsafe {
+        r18_read_v1(
+            &registry,
+            "ssl3_key_mat",
+            &mut key_mat as *mut _ as CK_VOID_PTR,
+            std::mem::size_of::<CK_SSL3_KEY_MAT_PARAMS>() as CK_ULONG,
+        )
+    }
+    .expect("all-NULL huge SSL3 key-mat forwards under v1")
+    .params
+    {
+        Some(CkMechanismParams::Ssl3KeyMat(p)) => {
+            assert_eq!(p.iv_size_bits, HUGE_BITS as u64);
+            assert!(p.returned_key_material_is_null);
+            r17_assert_null_secret(&p.client_iv_presence, HUGE_BYTES);
+            r17_assert_null_secret(&p.server_iv_presence, HUGE_BYTES);
+        }
+        other => panic!("all-NULL huge SSL3 key-mat must stay typed under v1, got {other:?}"),
+    }
+    let mut wtls = CK_WTLS_KEY_MAT_PARAMS {
+        DigestMechanism: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
+        ulMacSizeInBits: 160,
+        ulKeySizeInBits: 128,
+        ulIVSizeInBits: HUGE_BITS,
+        ulSequenceNumber: 7,
+        bIsExport: CK_TRUE,
+        RandomInfo: CK_WTLS_RANDOM_DATA {
+            pClientRandom: std::ptr::null_mut(),
+            ulClientRandomLen: 0,
+            pServerRandom: std::ptr::null_mut(),
+            ulServerRandomLen: 0,
+        },
+        pReturnedKeyMaterial: std::ptr::null_mut(),
+    };
+    match unsafe {
+        r18_read_v1(
+            &registry,
+            "wtls_key_mat",
+            &mut wtls as *mut _ as CK_VOID_PTR,
+            std::mem::size_of::<CK_WTLS_KEY_MAT_PARAMS>() as CK_ULONG,
+        )
+    }
+    .expect("all-NULL huge WTLS key-mat forwards under v1")
+    .params
+    {
+        Some(CkMechanismParams::WtlsKeyMat(p)) => {
+            assert_eq!(p.iv_size_bits, HUGE_BITS as u64);
+            assert!(p.returned_key_material_is_null);
+            r17_assert_null_secret(&p.iv_presence, HUGE_BYTES);
+        }
+        other => panic!("all-NULL huge WTLS key-mat must stay typed under v1, got {other:?}"),
+    }
+}
+
 /// R17 shared-length exception (S2 §10/D3): the ONLY shapes whose R7
 /// descriptor carries a shared-length group are the two R18-tail shapes
 /// (`kea_derive` RandomA/B, `skipjack_private_wrap` P/G) — so the
@@ -7855,6 +7996,172 @@ fn r18_tls_prf_v1_output_bits() {
             p.output.expose(|b| assert!(b.is_empty(), "OUT bytes never read"));
         }
         other => panic!("present-output TLS PRF must stay typed under v1, got {other:?}"),
+    }
+}
+
+/// F4 (S2 §5 residual limit): a NestedOrOutput extent that is not
+/// exactly a supported native-form size rejects locally — the oversized
+/// byte must not be silently lost by a minimum-enforcing typed reader.
+/// TLS-PRF `sizeof+1` (the finding's example) and a KIP `sizeof+1` both
+/// fail with `PARAM_INVALID`; truncated extents keep their existing
+/// `PARAM_INVALID` (same RV, now from the router's Flat-deny); exact
+/// native sizes keep routing typed (pinned by the neighboring tests).
+#[test]
+fn f4_nested_or_output_inexact_extent_rejected() {
+    let registry = r18_registry();
+    // TLS-PRF sizeof+1: oversized extent rejects (no silent tail loss).
+    #[repr(C)]
+    struct OversizedPrf {
+        prf: CK_TLS_PRF_PARAMS,
+        pad: [u8; 1],
+    }
+    let mut seed = [0xC0u8, 0xC1];
+    let mut label = [0xD0u8];
+    let mut over = OversizedPrf {
+        prf: CK_TLS_PRF_PARAMS {
+            pSeed: seed.as_mut_ptr(),
+            ulSeedLen: seed.len() as CK_ULONG,
+            pLabel: label.as_mut_ptr(),
+            ulLabelLen: label.len() as CK_ULONG,
+            pOutput: std::ptr::null_mut(),
+            pulOutputLen: std::ptr::null_mut(),
+        },
+        pad: [0xEE],
+    };
+    assert_eq!(
+        unsafe {
+            r18_read_v1(
+                &registry,
+                "tls_prf",
+                &mut over as *mut _ as CK_VOID_PTR,
+                std::mem::size_of::<OversizedPrf>() as CK_ULONG,
+            )
+        }
+        .err(),
+        Some(CkRv::MECHANISM_PARAM_INVALID),
+        "TLS-PRF sizeof+1 must reject, not silently drop the tail byte"
+    );
+    // TLS-PRF sizeof-1: truncated extent keeps rejecting.
+    let mut prf = over.prf;
+    assert_eq!(
+        unsafe {
+            r18_read_v1(
+                &registry,
+                "tls_prf",
+                &mut prf as *mut _ as CK_VOID_PTR,
+                (std::mem::size_of::<CK_TLS_PRF_PARAMS>() - 1) as CK_ULONG,
+            )
+        }
+        .err(),
+        Some(CkRv::MECHANISM_PARAM_INVALID),
+        "TLS-PRF sizeof-1 must keep rejecting"
+    );
+    // KIP sizeof+1: a second NestedOrOutput family rejects oversized.
+    #[repr(C)]
+    struct OversizedKip {
+        kip: CK_KIP_PARAMS,
+        pad: [u8; 1],
+    }
+    let mut nested = CK_MECHANISM {
+        mechanism: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut seed_bytes = [0xABu8; 4];
+    let mut over_kip = OversizedKip {
+        kip: CK_KIP_PARAMS {
+            pMechanism: &mut nested,
+            hKey: 0,
+            pSeed: seed_bytes.as_mut_ptr(),
+            ulSeedLen: seed_bytes.len() as CK_ULONG,
+        },
+        pad: [0xEE],
+    };
+    assert_eq!(
+        unsafe {
+            r18_read_v1(
+                &registry,
+                "kip",
+                &mut over_kip as *mut _ as CK_VOID_PTR,
+                std::mem::size_of::<OversizedKip>() as CK_ULONG,
+            )
+        }
+        .err(),
+        Some(CkRv::MECHANISM_PARAM_INVALID),
+        "KIP sizeof+1 must reject, not silently drop the tail byte"
+    );
+}
+
+/// F4 alternate-layout rule: the SSL3/TLS12 key-mat union keeps routing
+/// typed at BOTH supported native sizes (the legitimate alternate
+/// layout), while a between-sizes extent rejects.
+#[test]
+fn f4_key_mat_union_exact_sizes_stay_typed() {
+    let registry = r18_registry();
+    let ssl3_size = std::mem::size_of::<CK_SSL3_KEY_MAT_PARAMS>();
+    let tls12_size = std::mem::size_of::<CK_TLS12_KEY_MAT_PARAMS>();
+    assert!(tls12_size > ssl3_size, "TLS12 is the key-mat superset");
+    let mut key_mat = CK_TLS12_KEY_MAT_PARAMS {
+        ulMacSizeInBits: 160,
+        ulKeySizeInBits: 128,
+        ulIVSizeInBits: 32,
+        bIsExport: CK_FALSE,
+        RandomInfo: CK_SSL3_RANDOM_DATA {
+            pClientRandom: std::ptr::null_mut(),
+            ulClientRandomLen: 0,
+            pServerRandom: std::ptr::null_mut(),
+            ulServerRandomLen: 0,
+        },
+        pReturnedKeyMaterial: std::ptr::null_mut(),
+        prfHashMechanism: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
+    };
+    // TLS12 exact size: typed (alternate layout).
+    match unsafe {
+        r18_read_v1(
+            &registry,
+            "ssl3_key_mat",
+            &mut key_mat as *mut _ as CK_VOID_PTR,
+            tls12_size as CK_ULONG,
+        )
+    }
+    .expect("TLS12 key-mat exact size stays typed")
+    .params
+    {
+        Some(CkMechanismParams::Ssl3KeyMat(p)) => {
+            assert_eq!(p.prf_hash_mechanism.0, CkMechanismType::SHA256.0);
+        }
+        other => panic!("TLS12 key-mat exact size must stay typed, got {other:?}"),
+    }
+    // SSL3 exact size: typed (primary layout).
+    match unsafe {
+        r18_read_v1(
+            &registry,
+            "ssl3_key_mat",
+            &mut key_mat as *mut _ as CK_VOID_PTR,
+            ssl3_size as CK_ULONG,
+        )
+    }
+    .expect("SSL3 key-mat exact size stays typed")
+    .params
+    {
+        Some(CkMechanismParams::Ssl3KeyMat(_)) => {}
+        other => panic!("SSL3 key-mat exact size must stay typed, got {other:?}"),
+    }
+    // Between-sizes: neither native form — rejects.
+    if tls12_size - ssl3_size >= 2 {
+        assert_eq!(
+            unsafe {
+                r18_read_v1(
+                    &registry,
+                    "ssl3_key_mat",
+                    &mut key_mat as *mut _ as CK_VOID_PTR,
+                    (ssl3_size + 1) as CK_ULONG,
+                )
+            }
+            .err(),
+            Some(CkRv::MECHANISM_PARAM_INVALID),
+            "between-sizes key-mat extent must reject"
+        );
     }
 }
 

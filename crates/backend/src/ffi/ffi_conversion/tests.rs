@@ -301,20 +301,24 @@ mod mechanism_to_ffi_tests {
         for (name, params) in cases {
             let mechanism =
                 CkMechanism { mechanism_type: CkMechanismType(0x8000_0000), params: Some(params) };
-            // R12: Raw is rejected at the validation gate; the
-            // vendor-typed cases pass validation (variant-driven
-            // passthrough) and are rejected at FFI reconstruction.
-            // Both layers report `MECHANISM_PARAM_INVALID`.
-            let validated = match validate_for_ffi(&mechanism) {
-                Ok(validated) => validated,
-                Err(err) => {
-                    assert_eq!(name, "Raw", "only Raw fails at the validation gate");
-                    assert_eq!(err, CkRv::MECHANISM_PARAM_INVALID, "{name} (validation gate)");
-                    continue;
-                }
-            };
+            // F1: unbound typed params reject at the validation gate
+            // (the registry-less backstop binds nothing) — same RV as
+            // the old FFI-reconstruction rejection, earlier layer.
+            // Nothing reaches backend FFI either way.
+            assert_eq!(
+                validate_for_ffi(&mechanism).err(),
+                Some(CkRv::MECHANISM_PARAM_INVALID),
+                "{name} (validation gate)"
+            );
+            // The FFI layer still has no reconstruction arm for these
+            // shapes: even a bound pair rejects there (Raw never gets
+            // a proof, so only the typed cases take this half).
+            if name == "Raw" {
+                continue;
+            }
+            let validated = validated_mechanism_for_tests(&mechanism);
             match mechanism_to_ffi(&validated) {
-                Err(err) => assert_eq!(err, CkRv::MECHANISM_PARAM_INVALID, "{name}"),
+                Err(err) => assert_eq!(err, CkRv::MECHANISM_PARAM_INVALID, "{name} (FFI)"),
                 Ok(_) => panic!("{name} should be rejected before backend FFI reconstruction"),
             }
         }
@@ -1932,8 +1936,10 @@ mod output_params_equal_tests {
                 CkMechanismType::SP800_108_COUNTER_KDF,
                 CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
                     prf_type: CkMechanismType(0x0000_0251), // CKM_SHA256_HMAC
+                    // BYTE_ARRAY keeps the opaque-leg pin (F5: modeled
+                    // type ids now parse instead of passing through).
                     data_params_presence: PointerArray::present(vec![PrfDataParam {
-                        type_: 1,
+                        type_: 4,
                         value_presence: PointerBytes::present_copy(b"counter"),
                     }]),
                     additional_derived_keys_presence: PointerArray::present(vec![
@@ -1953,8 +1959,10 @@ mod output_params_equal_tests {
                 CkMechanismType::SP800_108_FEEDBACK_KDF,
                 CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
                     prf_type: CkMechanismType(0x0000_0251), // CKM_SHA256_HMAC
+                    // BYTE_ARRAY keeps the opaque-leg pin (F5: modeled
+                    // type ids now parse instead of passing through).
                     data_params_presence: PointerArray::present(vec![PrfDataParam {
-                        type_: 2,
+                        type_: 4,
                         value_presence: PointerBytes::present_copy(b"feedback"),
                     }]),
                     iv_presence: PointerBytes::present_copy(&[0x10; 16]),

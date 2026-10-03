@@ -103,6 +103,44 @@ fn validated_parameterless_flat(mech_type: u64, bytes: &[u8]) -> ValidatedMechan
     .expect("parameterless Flat validates")
 }
 
+/// Registry binding `mech` to `shape` (F1+F2: the typed pair under
+/// test must be bound to validate).
+fn registry_with_binding(mech: u64, shape: &str) -> MechanismRegistry {
+    let mut shapes = HashMap::new();
+    shapes.insert(mech, shape.to_string());
+    MechanismRegistry::from_parts(
+        shapes,
+        HashSet::new(),
+        HashSet::new(),
+        pkcs11_proxy_ng_types::DiscoveryMode::Transparent,
+        "r20-test".to_string(),
+    )
+}
+
+/// Server-validated typed GCM with a NULL IV leg (F2: embedded NULL —
+/// including huge — rejects under sanitize ON).
+fn validated_gcm_null_iv(mech_type: u64, iv_null_len: u64) -> ValidatedMechanismParams {
+    use pkcs11_proxy_ng_types::{GcmParams, PointerBytes};
+    let mech = CkMechanism {
+        mechanism_type: CkMechanismType(mech_type),
+        params: Some(CkMechanismParams::Gcm(GcmParams {
+            iv_bits: 96,
+            iv_buffer_len: 12,
+            tag_bits: 128,
+            iv_presence: PointerBytes::null_len(iv_null_len),
+            aad_presence: PointerBytes::present_copy(&[0xAA]),
+        })),
+    };
+    ValidatedMechanismParams::validate(
+        &mech,
+        &registry_with_binding(mech_type, "gcm"),
+        Operation::General,
+        ParamAbi::Lp64NativeLe,
+        ParamAbi::Lp64NativeLe,
+    )
+    .expect("bound Gcm validates")
+}
+
 /// Server-validated outer NULL (needs no descriptor).
 fn validated_null(mech_type: u64, declared_len: u64) -> ValidatedMechanismParams {
     let mech = CkMechanism {
@@ -165,6 +203,42 @@ fn r20_on_zero_call_parameterless_flat_rejected() {
             .map(|_| ()),
     };
     let rv = result.expect_err("ON must reject");
+    assert_eq!(rv, CkRv::MECHANISM_PARAM_INVALID, "sanitizer RV");
+    assert_ne!(rv, CkRv::ARGUMENTS_BAD, "never ARGUMENTS_BAD");
+    assert!(
+        CALLS.lock().expect("capture log").is_empty(),
+        "ON/zero-call: the provider must observe zero calls"
+    );
+}
+
+/// F2 ON/zero-call pin, typed+embedded-NULL row: sanitize ON +
+/// GCM with an embedded NULL-huge IV → `PARAM_INVALID` (never
+/// `ARGUMENTS_BAD`) and ZERO provider calls.
+#[test]
+#[cfg_attr(miri, ignore)] // Miri: stub-backed FfiBackend needs dlopen
+fn f2_on_zero_call_typed_embedded_null_huge_rejected() {
+    const HUGE: u64 = 512 * 1024 * 1024 + 1;
+    let _guard = LOCK.lock().expect("test lock");
+    CALLS.lock().expect("capture log").clear();
+    let (backend, _tables) = test_backend();
+    let admission = backend.lifecycle_domain.admit_ordinary().expect("open domain admits");
+    let validated = validated_gcm_null_iv(0x0000_1087, HUGE);
+    // Handler-shaped gate: sanitize first (shared policy), backend call
+    // only when allowed.
+    let result = match validated.check_classic_sanitize_policy(true) {
+        Err(rv) => Err(rv),
+        Ok(()) => backend
+            .call_init_with_mechanism(
+                &admission,
+                CkSessionHandle(7),
+                OperationFamily::Sign,
+                Some(sign_init_ok as InitStub),
+                &validated,
+                |function, mech| unsafe { function(7, mech, 9) },
+            )
+            .map(|_| ()),
+    };
+    let rv = result.expect_err("ON must reject embedded NULL-huge");
     assert_eq!(rv, CkRv::MECHANISM_PARAM_INVALID, "sanitizer RV");
     assert_ne!(rv, CkRv::ARGUMENTS_BAD, "never ARGUMENTS_BAD");
     assert!(

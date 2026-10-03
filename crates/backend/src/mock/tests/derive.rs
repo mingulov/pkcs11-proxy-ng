@@ -1440,3 +1440,180 @@ fn derived_object_stores_its_template_attributes() {
         "derived object's template ulong is readable"
     );
 }
+
+// ---------------------------------------------------------------------------
+// F5: the mock accepts both client widths for modeled SP800-108 payloads
+// (parity with the backend-native FFI rebuild).
+// ---------------------------------------------------------------------------
+
+/// ILP32 counter-format vector (literal 8 bytes — a 32-bit client's
+/// iteration variable / counter on every host).
+fn f5_counter_ilp32(little_endian: u8, width_in_bits: u32) -> Vec<u8> {
+    let mut value = vec![0u8; 8];
+    value[0] = little_endian;
+    value[4..8].copy_from_slice(&width_in_bits.to_ne_bytes());
+    value
+}
+
+/// ILP32 DKM-length-format vector (literal 12 bytes).
+fn f5_dkm_ilp32(method: u32, little_endian: u8, width_in_bits: u32) -> Vec<u8> {
+    let mut value = vec![0u8; 12];
+    value[0..4].copy_from_slice(&method.to_ne_bytes());
+    value[4] = little_endian;
+    value[8..12].copy_from_slice(&width_in_bits.to_ne_bytes());
+    value
+}
+
+#[test]
+fn f5_mock_accepts_ilp32_shaped_modeled_payloads() {
+    const CK_SP800_108_ITERATION_VARIABLE: u64 = 0x0000_0001;
+    const CK_SP800_108_COUNTER: u64 = 0x0000_0002;
+    const CK_SP800_108_DKM_LENGTH: u64 = 0x0000_0003;
+
+    // Counter mode: ILP32 iteration variable + ILP32 DKM length.
+    let backend = MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::SP800_108_COUNTER_KDF]);
+    backend.initialize().unwrap();
+    let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let base_key = live_key(&backend, session);
+    let mechanism = CkMechanism {
+        mechanism_type: CkMechanismType::SP800_108_COUNTER_KDF,
+        params: Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
+            prf_type: CkMechanismType(CKM_SHA256_HMAC),
+            data_params_presence: PointerArray::present(vec![
+                PrfDataParam {
+                    type_: CK_SP800_108_ITERATION_VARIABLE,
+                    value_presence: PointerBytes::present_copy(&f5_counter_ilp32(1, 64)),
+                },
+                PrfDataParam {
+                    type_: CK_SP800_108_DKM_LENGTH,
+                    value_presence: PointerBytes::present_copy(&f5_dkm_ilp32(1, 0, 256)),
+                },
+            ]),
+            additional_derived_keys_presence: PointerArray::present(Vec::new()),
+        })),
+    };
+    let (derived, mechanism_out) = backend
+        .derive_key_with_output(session, &validated(&mechanism), base_key, Some(&[]))
+        .expect("ILP32-shaped counter-mode payloads derive");
+    assert_ne!(derived, CkObjectHandle(0));
+    assert_eq!(mechanism_out, None);
+
+    // Feedback mode: ILP32 counter + ILP32 DKM length.
+    let backend =
+        MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::SP800_108_FEEDBACK_KDF]);
+    backend.initialize().unwrap();
+    let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let base_key = live_key(&backend, session);
+    let mechanism = CkMechanism {
+        mechanism_type: CkMechanismType::SP800_108_FEEDBACK_KDF,
+        params: Some(CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
+            prf_type: CkMechanismType(CKM_SHA256_HMAC),
+            data_params_presence: PointerArray::present(vec![
+                sp800_108_null_iteration_param(),
+                PrfDataParam {
+                    type_: CK_SP800_108_COUNTER,
+                    value_presence: PointerBytes::present_copy(&f5_counter_ilp32(0, 128)),
+                },
+                PrfDataParam {
+                    type_: CK_SP800_108_DKM_LENGTH,
+                    value_presence: PointerBytes::present_copy(&f5_dkm_ilp32(2, 1, 512)),
+                },
+            ]),
+            iv_presence: PointerBytes::present_copy(&[0xA5; 16]),
+            additional_derived_keys_presence: PointerArray::present(Vec::new()),
+        })),
+    };
+    let (derived, mechanism_out) = backend
+        .derive_key_with_output(session, &validated(&mechanism), base_key, Some(&[]))
+        .expect("ILP32-shaped feedback payloads derive");
+    assert_ne!(derived, CkObjectHandle(0));
+    assert_eq!(mechanism_out, None);
+}
+
+#[test]
+fn f5_mock_still_rejects_unmodelable_widths() {
+    const CK_SP800_108_ITERATION_VARIABLE: u64 = 0x0000_0001;
+    const CK_SP800_108_COUNTER: u64 = 0x0000_0002;
+    const CK_SP800_108_DKM_LENGTH: u64 = 0x0000_0003;
+
+    let cases = vec![
+        (
+            "counter-mode iteration rejects between-widths payload",
+            CkMechanismType::SP800_108_COUNTER_KDF,
+            CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
+                prf_type: CkMechanismType(CKM_SHA256_HMAC),
+                data_params_presence: PointerArray::present(vec![PrfDataParam {
+                    type_: CK_SP800_108_ITERATION_VARIABLE,
+                    value_presence: PointerBytes::present_copy(&[0u8; 12]),
+                }]),
+                additional_derived_keys_presence: PointerArray::present(Vec::new()),
+            }),
+        ),
+        (
+            "feedback counter rejects between-widths payload",
+            CkMechanismType::SP800_108_FEEDBACK_KDF,
+            CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
+                prf_type: CkMechanismType(CKM_SHA256_HMAC),
+                data_params_presence: PointerArray::present(vec![
+                    sp800_108_null_iteration_param(),
+                    PrfDataParam {
+                        type_: CK_SP800_108_COUNTER,
+                        value_presence: PointerBytes::present_copy(&[0u8; 12]),
+                    },
+                ]),
+                iv_presence: PointerBytes::present_copy(&[0xA5; 16]),
+                additional_derived_keys_presence: PointerArray::present(Vec::new()),
+            }),
+        ),
+        (
+            "counter-mode DKM rejects counter-sized payload",
+            CkMechanismType::SP800_108_COUNTER_KDF,
+            CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
+                prf_type: CkMechanismType(CKM_SHA256_HMAC),
+                data_params_presence: PointerArray::present(vec![
+                    sp800_108_counter_iteration_param(),
+                    PrfDataParam {
+                        type_: CK_SP800_108_DKM_LENGTH,
+                        value_presence: PointerBytes::present_copy(&[0u8; 16]),
+                    },
+                ]),
+                additional_derived_keys_presence: PointerArray::present(Vec::new()),
+            }),
+        ),
+        (
+            "feedback DKM rejects unknown ILP32 method",
+            CkMechanismType::SP800_108_FEEDBACK_KDF,
+            CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
+                prf_type: CkMechanismType(CKM_SHA256_HMAC),
+                data_params_presence: PointerArray::present(vec![
+                    sp800_108_null_iteration_param(),
+                    PrfDataParam {
+                        type_: CK_SP800_108_DKM_LENGTH,
+                        value_presence: PointerBytes::present_copy(&f5_dkm_ilp32(99, 1, 64)),
+                    },
+                ]),
+                iv_presence: PointerBytes::present_copy(&[0xA5; 16]),
+                additional_derived_keys_presence: PointerArray::present(Vec::new()),
+            }),
+        ),
+    ];
+
+    for (name, mechanism_type, params) in cases {
+        let backend = MockBackend::new(vec![CkSlotId(0)], vec![mechanism_type]);
+        backend.initialize().unwrap();
+        let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+        let base_key = live_key(&backend, session);
+        let mechanism = CkMechanism { mechanism_type, params: Some(params) };
+
+        let err = backend
+            .derive_key_with_output(session, &validated(&mechanism), base_key, Some(&[]))
+            .unwrap_err();
+
+        assert_eq!(err, CkRv::MECHANISM_PARAM_INVALID, "{name}");
+        assert_eq!(
+            backend.destroy_object(session, CkObjectHandle(base_key.0 + 1)).unwrap_err(),
+            CkRv::OBJECT_HANDLE_INVALID,
+            "{name} must not allocate a primary derived object"
+        );
+    }
+}
