@@ -66,10 +66,12 @@ pub(crate) struct Sp800108DkmLengthFormat {
 }
 
 /// Decode a COUNTER (or counter-shaped ITERATION_VARIABLE) payload,
-/// inferring the client `CK_ULONG` width from the length: 16 bytes is
-/// LP64 `{u8, pad[7], u64}` with the width at offset 8, 8 bytes is ILP32
-/// `{u8, pad[3], u32}` with the width at offset 4 (cryptoki-sys bindgen
-/// offsets on both widths — pinned by the layout tests below).
+/// inferring the client layout from the length: 16 bytes is LP64 `{u8,
+/// pad[7], u64}` with the width at offset 8, 8 bytes is ILP32 `{u8,
+/// pad[3], u32}` with the width at offset 4, and 5 bytes is Windows
+/// LLP64 pack(1) `{u8, u32}` with the width at offset 1 (cryptoki-sys
+/// bindgen offsets on all three layouts — pinned by the layout tests
+/// below).
 pub(crate) fn parse_counter_format(value: &[u8]) -> CkResult<Sp800108CounterFormat> {
     match value.len() {
         16 => {
@@ -88,13 +90,23 @@ pub(crate) fn parse_counter_format(value: &[u8]) -> CkResult<Sp800108CounterForm
                 width_in_bits: u32::from_ne_bytes(width) as u64,
             })
         }
+        5 => {
+            let mut width = [0u8; 4];
+            width.copy_from_slice(&value[1..5]);
+            Ok(Sp800108CounterFormat {
+                little_endian: value[0],
+                width_in_bits: u32::from_ne_bytes(width) as u64,
+            })
+        }
         _ => Err(CkRv::MECHANISM_PARAM_INVALID),
     }
 }
 
 /// Decode a DKM_LENGTH payload: 24 bytes is LP64 `{u64, u8, pad[7],
 /// u64}` (method at 0, bool at 8, width at 16), 12 bytes is ILP32
-/// `{u32, u8, pad[3], u32}` (method at 0, bool at 4, width at 8).
+/// `{u32, u8, pad[3], u32}` (method at 0, bool at 4, width at 8), and 9
+/// bytes is Windows LLP64 pack(1) `{u32, u8, u32}` (method at 0, bool
+/// at 4, width at 5).
 pub(crate) fn parse_dkm_length_format(value: &[u8]) -> CkResult<Sp800108DkmLengthFormat> {
     match value.len() {
         24 => {
@@ -113,6 +125,17 @@ pub(crate) fn parse_dkm_length_format(value: &[u8]) -> CkResult<Sp800108DkmLengt
             method.copy_from_slice(&value[0..4]);
             let mut width = [0u8; 4];
             width.copy_from_slice(&value[8..12]);
+            Ok(Sp800108DkmLengthFormat {
+                method: u32::from_ne_bytes(method) as u64,
+                little_endian: value[4],
+                width_in_bits: u32::from_ne_bytes(width) as u64,
+            })
+        }
+        9 => {
+            let mut method = [0u8; 4];
+            method.copy_from_slice(&value[0..4]);
+            let mut width = [0u8; 4];
+            width.copy_from_slice(&value[5..9]);
             Ok(Sp800108DkmLengthFormat {
                 method: u32::from_ne_bytes(method) as u64,
                 little_endian: value[4],
@@ -165,6 +188,15 @@ mod tests {
         value
     }
 
+    /// Windows LLP64 pack(1) counter-format vector (literal 5 bytes:
+    /// `{u8, u32}` with the width at offset 1).
+    fn counter_packed1(little_endian: u8, width_in_bits: u32) -> Vec<u8> {
+        let mut value = vec![0u8; 5];
+        value[0] = little_endian;
+        value[1..5].copy_from_slice(&width_in_bits.to_ne_bytes());
+        value
+    }
+
     /// LP64 DKM-length-format vector (literal 24 bytes).
     fn dkm_lp64(method: u64, little_endian: u8, width_in_bits: u64) -> Vec<u8> {
         let mut value = vec![0u8; 24];
@@ -183,11 +215,50 @@ mod tests {
         value
     }
 
+    /// Windows LLP64 pack(1) DKM-length-format vector (literal 9 bytes:
+    /// `{u32, u8, u32}` with method at 0, bool at 4, width at 5).
+    fn dkm_packed1(method: u32, little_endian: u8, width_in_bits: u32) -> Vec<u8> {
+        let mut value = vec![0u8; 9];
+        value[0..4].copy_from_slice(&method.to_ne_bytes());
+        value[4] = little_endian;
+        value[5..9].copy_from_slice(&width_in_bits.to_ne_bytes());
+        value
+    }
+
     #[test]
     fn counter_format_layout_matches_bindgen_on_host_width() {
         // The parser's byte map must match the bindgen record on every
-        // target: LP64 `{u8, pad[7], u64}` (16 bytes, width at 8), ILP32
-        // `{u8, pad[3], u32}` (8 bytes, width at 4).
+        // target. Unix targets use natural alignment: LP64 `{u8, pad[7],
+        // u64}` (16 bytes, width at 8), ILP32 `{u8, pad[3], u32}` (8
+        // bytes, width at 4). Windows (LLP64) packs Cryptoki structs at
+        // 1 byte (OASIS `pkcs11.h` packing convention: structures "should
+        // be 1-byte aligned", `#pragma pack(push, cryptoki, 1)` on
+        // Windows): `{u8, u32}` (5 bytes, width at 1 — cryptoki-sys
+        // `x86_64-pc-windows-msvc` bindgen asserts size 5 / align 1 /
+        // width at offset 1).
+        if cfg!(windows) {
+            assert_eq!(
+                std::mem::size_of::<cryptoki_sys::CK_SP800_108_COUNTER_FORMAT>(),
+                5,
+                "packed counter format is 5 bytes"
+            );
+            assert_eq!(
+                std::mem::align_of::<cryptoki_sys::CK_SP800_108_COUNTER_FORMAT>(),
+                1,
+                "packed counter format aligns at 1 byte"
+            );
+            assert_eq!(
+                std::mem::offset_of!(cryptoki_sys::CK_SP800_108_COUNTER_FORMAT, bLittleEndian),
+                0,
+                "bool at offset 0"
+            );
+            assert_eq!(
+                std::mem::offset_of!(cryptoki_sys::CK_SP800_108_COUNTER_FORMAT, ulWidthInBits),
+                1,
+                "packed width immediately follows the bool"
+            );
+            return;
+        }
         let ulong = std::mem::size_of::<cryptoki_sys::CK_ULONG>();
         assert_eq!(
             std::mem::size_of::<cryptoki_sys::CK_SP800_108_COUNTER_FORMAT>(),
@@ -213,8 +284,40 @@ mod tests {
 
     #[test]
     fn dkm_length_format_layout_matches_bindgen_on_host_width() {
-        // LP64 `{u64, u8, pad[7], u64}` (24 bytes: 0/8/16), ILP32 `{u32,
-        // u8, pad[3], u32}` (12 bytes: 0/4/8).
+        // Unix natural alignment: LP64 `{u64, u8, pad[7], u64}` (24
+        // bytes: 0/8/16), ILP32 `{u32, u8, pad[3], u32}` (12 bytes:
+        // 0/4/8). Windows pack(1) (see the counter test for the OASIS
+        // citation): `{u32, u8, u32}` (9 bytes: 0/4/5 — cryptoki-sys
+        // `x86_64-pc-windows-msvc` bindgen asserts size 9 / align 1 /
+        // bool at 4 / width at 5).
+        if cfg!(windows) {
+            assert_eq!(
+                std::mem::size_of::<cryptoki_sys::CK_SP800_108_DKM_LENGTH_FORMAT>(),
+                9,
+                "packed DKM format is 9 bytes"
+            );
+            assert_eq!(
+                std::mem::align_of::<cryptoki_sys::CK_SP800_108_DKM_LENGTH_FORMAT>(),
+                1,
+                "packed DKM format aligns at 1 byte"
+            );
+            assert_eq!(
+                std::mem::offset_of!(cryptoki_sys::CK_SP800_108_DKM_LENGTH_FORMAT, dkmLengthMethod),
+                0,
+                "method at offset 0"
+            );
+            assert_eq!(
+                std::mem::offset_of!(cryptoki_sys::CK_SP800_108_DKM_LENGTH_FORMAT, bLittleEndian),
+                4,
+                "packed bool immediately follows the method"
+            );
+            assert_eq!(
+                std::mem::offset_of!(cryptoki_sys::CK_SP800_108_DKM_LENGTH_FORMAT, ulWidthInBits),
+                5,
+                "packed width immediately follows the bool"
+            );
+            return;
+        }
         let ulong = std::mem::size_of::<cryptoki_sys::CK_ULONG>();
         assert_eq!(
             std::mem::size_of::<cryptoki_sys::CK_SP800_108_DKM_LENGTH_FORMAT>(),
@@ -261,14 +364,33 @@ mod tests {
 
     #[test]
     fn parse_counter_format_rejects_unmodelable_lengths() {
-        // 12 is the ILP32 *DKM* size: struct sizes must not cross-talk.
-        for len in [0, 1, 4, 7, 12, 15, 17, 20, 24, 32] {
+        // 12 is the ILP32 *DKM* size, 9 the packed *DKM* size: struct
+        // sizes must not cross-talk.
+        for len in [0, 1, 4, 7, 9, 12, 15, 17, 20, 24, 32] {
             assert_eq!(
                 parse_counter_format(&vec![0u8; len]).unwrap_err(),
                 CkRv::MECHANISM_PARAM_INVALID,
                 "{len}-byte counter payload must fail closed"
             );
         }
+    }
+
+    #[test]
+    fn nf1_counter_format_accepts_windows_packed() {
+        // 5-byte `{u8, u32}` pack(1) record: bool at 0, width at 1 (the
+        // re-review probe bytes `[0, 32, 0, 0, 0]` decode to width 32).
+        let packed = parse_counter_format(&counter_packed1(0, 32)).unwrap();
+        assert_eq!(
+            packed,
+            Sp800108CounterFormat { little_endian: 0, width_in_bits: 32 },
+            "packed counter triple decodes"
+        );
+        let wide = parse_counter_format(&counter_packed1(1, 0xAABB_CCDD)).unwrap();
+        assert_eq!(
+            wide,
+            Sp800108CounterFormat { little_endian: 1, width_in_bits: 0xAABB_CCDD },
+            "packed width widens losslessly"
+        );
     }
 
     #[test]
@@ -297,14 +419,28 @@ mod tests {
 
     #[test]
     fn parse_dkm_length_format_rejects_unmodelable_lengths() {
-        // 8/16 are the counter sizes: struct sizes must not cross-talk.
-        for len in [0, 4, 8, 11, 13, 16, 20, 23, 25] {
+        // 8/16 are the counter sizes, 5 the packed counter size: struct
+        // sizes must not cross-talk.
+        for len in [0, 4, 5, 8, 11, 13, 16, 20, 23, 25] {
             assert_eq!(
                 parse_dkm_length_format(&vec![0u8; len]).unwrap_err(),
                 CkRv::MECHANISM_PARAM_INVALID,
                 "{len}-byte DKM payload must fail closed"
             );
         }
+    }
+
+    #[test]
+    fn nf1_dkm_length_format_accepts_windows_packed() {
+        // 9-byte `{u32, u8, u32}` pack(1) record: method at 0, bool at 4,
+        // width at 5 (the re-review probe bytes decode to method 1, width
+        // 32).
+        let packed = parse_dkm_length_format(&dkm_packed1(1, 0, 32)).unwrap();
+        assert_eq!(
+            packed,
+            Sp800108DkmLengthFormat { method: 1, little_endian: 0, width_in_bits: 32 },
+            "packed DKM triple decodes"
+        );
     }
 
     #[test]

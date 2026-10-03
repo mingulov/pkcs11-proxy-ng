@@ -11,7 +11,9 @@ use crate::sp800_108_data_values::{
 };
 use pkcs11_proxy_ng_types::PointerArray;
 use pkcs11_proxy_ng_types::PointerBytes;
-use pkcs11_proxy_ng_types::shape_descriptors::{Operation, ParamAbi};
+use pkcs11_proxy_ng_types::shape_descriptors::Operation;
+#[cfg(test)]
+use pkcs11_proxy_ng_types::shape_descriptors::ParamAbi;
 
 // Thread-local `output_params()` call count (W1-C4-04). Thread-local —
 // not global — so parallel tests cannot perturb each other's deltas;
@@ -1764,6 +1766,9 @@ const MAX_NESTED_MECHANISMS: u8 = 16;
 /// [`validate_for_ffi`): 8-byte `CK_ULONG` behaves as LP64, 4-byte as
 /// ILP32 — only `ulong_size()` is ever consulted on these paths. This
 /// also keeps big-endian targets working, where `native()` is `None`.
+/// Test-only (NF2): production nested descent reuses the outer value's
+/// carried ABIs instead of this width-derived guess.
+#[cfg(test)]
 fn funnel_host_abi() -> ParamAbi {
     if std::mem::size_of::<cryptoki_sys::CK_ULONG>() >= 8 {
         ParamAbi::Lp64NativeLe
@@ -1800,10 +1805,10 @@ fn funnel_host_abi() -> ParamAbi {
 ///   descriptor (S2 §6 RV table), only the member-version check and a
 ///   width-only narrowing — both registry-independent.
 /// * nested nodes (KIP/CMS — the only arms that recurse) are validated
-///   at descent against the snapshot the outer value carries
-///   ([`ValidatedMechanismParams::registry`], F6): neither the server
-///   (typed passthrough, no recursion) nor this layer pre-validates
-///   them. Through this funnel the carried snapshot is the EMPTY
+///   at descent against the snapshot AND the actual ABIs the outer value
+///   carries ([`ValidatedMechanismParams::registry`], F6; ABIs, NF2):
+///   neither the server (typed passthrough, no recursion) nor this layer
+///   pre-validates them. Through this funnel the carried snapshot is the EMPTY
 ///   backstop, so nested `None`/`Null` convert while nested
 ///   typed/`Flat`/`Raw` stay rejected here; request-validated outers
 ///   (the post-R13 server path) accept nested typed/Flat exactly when
@@ -1883,20 +1888,26 @@ pub(in crate::ffi) fn mechanism_to_ffi(
     mechanism_to_ffi_at_depth(validated, 0)
 }
 
-/// Validate one nested node at descent (F6): same width-derived host
-/// ABI as [`validate_for_ffi`], but against the request's snapshot
-/// carried by the outer validated value — never the empty backstop —
-/// so nested Flat eligibility is decided under the request's bindings.
-/// `Operation::General`: nested KIP/CMS nodes carry no wrap context.
-/// The nested validated value (with its stored Flat grant, if any)
-/// flows into [`mechanism_to_ffi_at_depth`], whose reconstruction and
-/// backing the KIP/CMS arms retain.
+/// Validate one nested node at descent (F6): against the request's
+/// snapshot AND the actual ABIs carried by the outer validated value —
+/// never the empty backstop, never a width-derived guess (word width
+/// alone cannot distinguish ILP32 from LLP64-packed, NF2) — so nested
+/// Flat eligibility is decided under the request's bindings and the
+/// request's deciding edge. `Operation::General`: nested KIP/CMS nodes
+/// carry no wrap context. The nested validated value (with its stored
+/// Flat grant, if any) flows into [`mechanism_to_ffi_at_depth`], whose
+/// reconstruction and backing the KIP/CMS arms retain.
 fn validate_nested_for_ffi(
     mechanism: &CkMechanism,
-    registry: &MechanismRegistry,
+    outer: &ValidatedMechanismParams,
 ) -> CkResult<ValidatedMechanismParams> {
-    let host_abi = funnel_host_abi();
-    ValidatedMechanismParams::validate(mechanism, registry, Operation::General, host_abi, host_abi)
+    ValidatedMechanismParams::validate(
+        mechanism,
+        outer.registry(),
+        Operation::General,
+        outer.local_abi(),
+        outer.backend_abi(),
+    )
 }
 
 /// Recurse one nesting level (KIP/CMS nested mechanisms), rejecting the
@@ -1905,20 +1916,21 @@ fn validate_nested_for_ffi(
 /// Nested nodes arrive unvalidated (the server validates the top level
 /// only), so each is validated at descent through
 /// [`validate_nested_for_ffi`] against the outer value's carried
-/// registry snapshot: nested typed/`None` convert exactly like the top
-/// level, nested `Null` converts too (NULL + narrowed length needs no
-/// descriptor at any depth, so the uniform rule accepts it), nested
-/// Flat converts exactly when the carried bindings grant it, and
-/// nested `Raw` stays rejected always.
+/// registry snapshot and carried ABIs: nested typed/`None` convert
+/// exactly like the top level, nested `Null` converts too (NULL +
+/// narrowed length needs no descriptor at any depth, so the uniform
+/// rule accepts it), nested Flat converts exactly when the carried
+/// bindings grant it under the carried deciding ABI, and nested `Raw`
+/// stays rejected always.
 fn nested_mechanism_to_ffi(
     mechanism: &CkMechanism,
     depth: u8,
-    registry: &MechanismRegistry,
+    outer: &ValidatedMechanismParams,
 ) -> CkResult<FfiMechanism> {
     if depth >= MAX_NESTED_MECHANISMS {
         return Err(CkRv::MECHANISM_PARAM_INVALID);
     }
-    let validated = validate_nested_for_ffi(mechanism, registry)?;
+    let validated = validate_nested_for_ffi(mechanism, outer)?;
     mechanism_to_ffi_at_depth(&validated, depth + 1)
 }
 
@@ -3478,7 +3490,7 @@ fn mechanism_to_ffi_at_depth(
             // S2 §6 (R19): a NULL `pMechanism` runs no inner conversion
             // and retains nothing; the seed follows its presence peer.
             let nested = if let Some(nested_mech) = p.mechanism.as_deref() {
-                let inner_ffi = nested_mechanism_to_ffi(nested_mech, depth, validated.registry())?;
+                let inner_ffi = nested_mechanism_to_ffi(nested_mech, depth, validated)?;
                 let inner_mech = NativeAllocation::from_box(Box::new(inner_ffi.ck_mechanism()));
                 // Keep the inner mechanism's parameter backing alive by
                 // moving it into the KIP backing, so any pointers the
@@ -3506,10 +3518,8 @@ fn mechanism_to_ffi_at_depth(
 
         // -- CMS Sig: nested mechanisms + content type + attribute buffers -------
         CkMechanismParams::CmsSig(p) => {
-            let sign_ffi =
-                nested_mechanism_to_ffi(&p.signing_mechanism, depth, validated.registry())?;
-            let digest_ffi =
-                nested_mechanism_to_ffi(&p.digest_mechanism, depth, validated.registry())?;
+            let sign_ffi = nested_mechanism_to_ffi(&p.signing_mechanism, depth, validated)?;
+            let digest_ffi = nested_mechanism_to_ffi(&p.digest_mechanism, depth, validated)?;
             let sign_mech = NativeAllocation::from_box(Box::new(sign_ffi.ck_mechanism()));
             let digest_mech = NativeAllocation::from_box(Box::new(digest_ffi.ck_mechanism()));
             let mut content_type = Zeroizing::new(p.content_type.as_bytes().to_vec());

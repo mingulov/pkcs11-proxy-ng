@@ -1882,7 +1882,9 @@ unsafe fn read_v1_tail_params(
             // Bits-governed IV length (F3/D3): no call-site ceiling
             // pre-check — NULL legs record the derived length
             // uncapped; the per-leg helper caps non-NULL legs.
-            let requested_iv_len = ((p.ulIVSizeInBits as usize).saturating_add(7)) / 8;
+            // Overflow-safe ceiling (NF6): `saturating_add(7)/8`
+            // undercounts by one at `CK_ULONG::MAX`.
+            let requested_iv_len = (p.ulIVSizeInBits as usize).div_ceil(8);
             let client_random_presence = unsafe {
                 read_pointer_field_v1(
                     p.RandomInfo.pClientRandom as *const u8,
@@ -2098,7 +2100,9 @@ unsafe fn read_v1_tail_params(
             // Bits-governed IV length (F3/D3): no call-site ceiling
             // pre-check — NULL legs record the derived length
             // uncapped; the per-leg helper caps non-NULL legs.
-            let requested_iv_len = ((p.ulIVSizeInBits as usize).saturating_add(7)) / 8;
+            // Overflow-safe ceiling (NF6): `saturating_add(7)/8`
+            // undercounts by one at `CK_ULONG::MAX`.
+            let requested_iv_len = (p.ulIVSizeInBits as usize).div_ceil(8);
             let client_random_presence = unsafe {
                 read_pointer_field_v1(
                     p.RandomInfo.pClientRandom as *const u8,
@@ -3524,7 +3528,8 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                 }))
             } else {
                 let p = unsafe { read_param_struct(param_ptr as *const CK_WTLS_KEY_MAT_PARAMS)? };
-                let requested_iv_len = ((p.ulIVSizeInBits as usize).saturating_add(7)) / 8;
+                // Overflow-safe ceiling (NF6, legacy twin of the v1 arm).
+                let requested_iv_len = (p.ulIVSizeInBits as usize).div_ceil(8);
                 if missing_embedded_pointer(
                     p.RandomInfo.pClientRandom,
                     p.RandomInfo.ulClientRandomLen,
@@ -3889,7 +3894,8 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                 }))
             } else {
                 let p = unsafe { read_param_struct(param_ptr as *const CK_SSL3_KEY_MAT_PARAMS)? };
-                let requested_iv_len = ((p.ulIVSizeInBits as usize).saturating_add(7)) / 8;
+                // Overflow-safe ceiling (NF6, legacy twin of the v1 arm).
+                let requested_iv_len = (p.ulIVSizeInBits as usize).div_ceil(8);
                 if missing_embedded_pointer(
                     p.RandomInfo.pClientRandom,
                     p.RandomInfo.ulClientRandomLen,
@@ -4892,7 +4898,9 @@ pub(crate) fn gcm_iv_buffer_len(gcm: &CK_GCM_PARAMS) -> u64 {
     } else if gcm.ulIvLen > 0 {
         gcm.ulIvLen as u64
     } else {
-        ((gcm.ulIvBits as u64).saturating_add(7)) / 8
+        // Overflow-safe ceiling (NF6): the `saturating_add(7)/8`
+        // form undercounts by one at `u64::MAX`.
+        (gcm.ulIvBits as u64).div_ceil(8)
     }
 }
 

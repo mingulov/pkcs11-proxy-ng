@@ -1791,11 +1791,18 @@ pub struct ValidatedMechanismParams {
     /// bindings as the top level (F6) — S2 §6's "one snapshot per
     /// request" carried in the proof itself.
     registry: MechanismRegistry,
+    /// The ABIs this value was validated under. Nested descent reuses
+    /// them (never a width-derived guess — word width alone cannot
+    /// distinguish ILP32 from LLP64-packed, NF2), and the nested
+    /// sanitize scan classifies nested Flat under the same deciding
+    /// edge as the top level (NF5).
+    local_abi: ParamAbi,
+    backend_abi: ParamAbi,
 }
 
-/// Value equality: the carried snapshot is provenance, not value, so
-/// two validations of equal mechanisms compare equal even across
-/// different snapshots (pre-F6 meaning preserved).
+/// Value equality: the carried snapshot and ABIs are provenance, not
+/// value, so two validations of equal mechanisms compare equal even
+/// across different snapshots or ABIs (pre-F6 meaning preserved).
 impl PartialEq for ValidatedMechanismParams {
     fn eq(&self, other: &Self) -> bool {
         self.mechanism == other.mechanism && self.flat_grant == other.flat_grant
@@ -1982,6 +1989,8 @@ impl ValidatedMechanismParams {
                 mechanism: mechanism.clone(),
                 flat_grant: None,
                 registry: registry.clone(),
+                local_abi,
+                backend_abi,
             }),
             // Legacy Raw fails closed at every version.
             Some(CkMechanismParams::Raw(_)) => Err(CkRv::MECHANISM_PARAM_INVALID),
@@ -1993,6 +2002,8 @@ impl ValidatedMechanismParams {
                     mechanism: mechanism.clone(),
                     flat_grant: None,
                     registry: registry.clone(),
+                    local_abi,
+                    backend_abi,
                 })
             }
             Some(CkMechanismParams::Flat(p)) => {
@@ -2042,6 +2053,8 @@ impl ValidatedMechanismParams {
                     },
                     flat_grant: Some(grant),
                     registry: registry.clone(),
+                    local_abi,
+                    backend_abi,
                 })
             }
             // Typed params: R16 presence/length consistency (S2 §3)
@@ -2059,6 +2072,8 @@ impl ValidatedMechanismParams {
                     mechanism: mechanism.clone(),
                     flat_grant: None,
                     registry: registry.clone(),
+                    local_abi,
+                    backend_abi,
                 })
             }
         }
@@ -2087,10 +2102,26 @@ impl ValidatedMechanismParams {
         &self.registry
     }
 
+    /// The deciding edge's ABI this value was validated under (NF2/NF5):
+    /// nested descent revalidates and the nested sanitize scan
+    /// classifies nested Flat under this ABI — never a width-derived
+    /// guess.
+    pub fn local_abi(&self) -> ParamAbi {
+        self.local_abi
+    }
+
+    /// The backend ABI this value was validated under (NF2): nested
+    /// descent revalidates nested nodes for this same backend width.
+    pub fn backend_abi(&self) -> ParamAbi {
+        self.backend_abi
+    }
+
     /// Classic sanitize policy (S2 §6 matrix; R20). Pure: no I/O, no
-    /// allocation, no registry access — Flat classification reuses the
-    /// stored [`FlatGrant`](crate::shape_descriptors::FlatGrant) instead
-    /// of re-deciding policy.
+    /// allocation — the top-level Flat reuses its stored
+    /// [`FlatGrant`](crate::shape_descriptors::FlatGrant), while nested
+    /// Flat envelopes (which carry no grant) classify against the
+    /// carried registry snapshot under the carried deciding ABI, so the
+    /// same matrix row governs every depth (NF5).
     ///
     /// OFF (default `false`): always `Ok` — stray flat bytes, safe
     /// truncated forms, and outer/embedded NULL-nonzero forward to the
@@ -2225,7 +2256,9 @@ impl ValidatedMechanismParams {
                 | P::VendorObjectExtract(_)
                 | P::VendorObjectInsert(_)),
             ) => {
-                if typed_has_nonzero_embedded_null(params, 0) {
+                let nested =
+                    SanitizeNestedCx { registry: &self.registry, local_abi: self.local_abi };
+                if typed_has_nonzero_embedded_null(params, 0, &nested) {
                     Err(CkRv::MECHANISM_PARAM_INVALID)
                 } else {
                     Ok(())
@@ -2241,9 +2274,9 @@ impl ValidatedMechanismParams {
     /// `CK_OBJECT_HANDLE` fields (the remapper's contract — Flat/Null/None
     /// carry no handles, and typed substitution touches handle fields
     /// only). Every validated property (lengths, caps, shape binding, ABI)
-    /// is preserved by construction — the stored `flat_grant` and the
-    /// carried registry snapshot travel with `self` untouched — and debug
-    /// builds re-check the cheap invariant that
+    /// is preserved by construction — the stored `flat_grant`, the
+    /// carried registry snapshot, and the carried ABIs travel with
+    /// `self` untouched — and debug builds re-check the cheap invariant that
     /// nothing BUT handle fields changed (both sides compared with all
     /// embedded handles normalized to zero).
     pub fn substitute_handles(mut self, f: impl FnOnce(&mut CkMechanism)) -> Self {
@@ -2276,21 +2309,72 @@ fn is_nonzero_null_array<T>(peer: &PointerArray<T>) -> bool {
 /// convert anyway.
 const SANITIZE_NESTING_CAP: u8 = 16;
 
+/// Carried context for the nested sanitize scan (NF5): the snapshot
+/// and deciding ABI the outer value was validated under, so nested
+/// Flat envelopes classify exactly like the top level.
+struct SanitizeNestedCx<'a> {
+    registry: &'a MechanismRegistry,
+    local_abi: ParamAbi,
+}
+
+/// Whether a nested Flat violates sanitize-ON (NF5): the envelope
+/// carries no stored grant, so classify it exactly like the top-level
+/// Flat arm (member version, actual==declared, known source ABI, then
+/// the carried-registry decision under the carried deciding ABI with
+/// `Operation::General` — nested nodes carry no wrap context, as in
+/// backend descent) and apply the same matrix row — only a canonical
+/// byte-buffer grant passes; struct-prefix grants, denials, and
+/// malformed envelopes fail closed. Length narrowing stays with
+/// validation (backend descent narrows through `validate`); the
+/// sanitizer only classifies.
+fn nested_flat_violates(mech_type: u64, flat: &FlatParams, cx: &SanitizeNestedCx) -> bool {
+    if check_member_version(flat.version).is_err() {
+        return true;
+    }
+    let Ok(actual) = u64::try_from(flat.bytes.len()) else {
+        return true;
+    };
+    if actual != flat.declared_len {
+        return true;
+    }
+    let Some(peer_abi) = flat.source_abi else {
+        return true;
+    };
+    match decide_flat_for_registry(
+        cx.registry,
+        mech_type,
+        Operation::General,
+        flat.declared_len,
+        flat.fingerprint,
+        peer_abi,
+        cx.local_abi,
+    ) {
+        FlatDecision::Eligible(grant) => {
+            !matches!(grant.resolved.outer_kind(), OuterKind::ByteBuffer)
+        }
+        FlatDecision::Excluded | FlatDecision::Denied(_) => true,
+    }
+}
+
 /// Whether a (possibly nested) mechanism carries a nonzero embedded
 /// NULL anywhere sanitize polices (F2): a nested outer NULL with
-/// nonzero length, a nested Flat (no grant to classify it — fail
-/// closed), a nested Raw (never validates — fail closed), or nonzero
-/// embedded NULLs inside nested typed params (recursed with a depth
-/// cap; over-deep trees fail closed).
-fn mechanism_has_nonzero_null(mech: &CkMechanism, depth: u8) -> bool {
+/// nonzero length, a nested Flat that is not a canonical byte-buffer
+/// grant under the carried snapshot ([`nested_flat_violates`], NF5), a
+/// nested Raw (never validates — fail closed), or nonzero embedded
+/// NULLs inside nested typed params (recursed with a depth cap;
+/// over-deep trees fail closed).
+fn mechanism_has_nonzero_null(mech: &CkMechanism, depth: u8, cx: &SanitizeNestedCx) -> bool {
     if depth > SANITIZE_NESTING_CAP {
         return true;
     }
     match &mech.params {
         None => false,
         Some(CkMechanismParams::Null { declared_len, .. }) => *declared_len != 0,
-        Some(CkMechanismParams::Flat(_) | CkMechanismParams::Raw(_)) => true,
-        Some(params) => typed_has_nonzero_embedded_null(params, depth),
+        Some(CkMechanismParams::Flat(flat)) => {
+            nested_flat_violates(mech.mechanism_type.0, flat, cx)
+        }
+        Some(CkMechanismParams::Raw(_)) => true,
+        Some(params) => typed_has_nonzero_embedded_null(params, depth, cx),
     }
 }
 
@@ -2306,7 +2390,11 @@ fn mechanism_has_nonzero_null(mech: &CkMechanism, depth: u8) -> bool {
 /// skip this gate (the compiler rejects the omission). Enum order
 /// mirrors the definition. Null-bit bools (`*_is_null`) are output
 /// envelopes, not NULL lengths, and are out of this rule's scope.
-fn typed_has_nonzero_embedded_null(params: &CkMechanismParams, depth: u8) -> bool {
+fn typed_has_nonzero_embedded_null(
+    params: &CkMechanismParams,
+    depth: u8,
+    cx: &SanitizeNestedCx,
+) -> bool {
     use CkMechanismParams as P;
     match params {
         P::RsaPkcsPss(_) => false,
@@ -2437,11 +2525,13 @@ fn typed_has_nonzero_embedded_null(params: &CkMechanismParams, depth: u8) -> boo
         }
         P::Kip(p) => {
             is_nonzero_null(&p.seed_presence)
-                || p.mechanism.as_deref().is_some_and(|m| mechanism_has_nonzero_null(m, depth + 1))
+                || p.mechanism
+                    .as_deref()
+                    .is_some_and(|m| mechanism_has_nonzero_null(m, depth + 1, cx))
         }
         P::CmsSig(p) => {
-            mechanism_has_nonzero_null(&p.signing_mechanism, depth + 1)
-                || mechanism_has_nonzero_null(&p.digest_mechanism, depth + 1)
+            mechanism_has_nonzero_null(&p.signing_mechanism, depth + 1, cx)
+                || mechanism_has_nonzero_null(&p.digest_mechanism, depth + 1, cx)
         }
         P::SkipjackPrivateWrap(p) => {
             is_nonzero_null(&p.password_presence)
@@ -2473,9 +2563,9 @@ fn typed_has_nonzero_embedded_null(params: &CkMechanismParams, depth: u8) -> boo
         // caller cannot silently pass an envelope through here.
         P::Raw(_) | P::Flat(_) | P::Null { .. } => true,
         P::Ecies(p) => {
-            mechanism_has_nonzero_null(&p.derivation_mechanism, depth + 1)
-                || mechanism_has_nonzero_null(&p.encryption_mechanism, depth + 1)
-                || mechanism_has_nonzero_null(&p.mac_mechanism, depth + 1)
+            mechanism_has_nonzero_null(&p.derivation_mechanism, depth + 1, cx)
+                || mechanism_has_nonzero_null(&p.encryption_mechanism, depth + 1, cx)
+                || mechanism_has_nonzero_null(&p.mac_mechanism, depth + 1, cx)
         }
         P::AesCmacKeyDerivation(_) => false,
         P::Dilithium(_) => false,
@@ -4859,6 +4949,123 @@ mod validated_params_tests {
             Err(CkRv::MECHANISM_PARAM_INVALID)
         );
         validated.check_classic_sanitize_policy(false).unwrap();
+    }
+
+    /// NF5 (F2 regression): a canonical byte-buffer Flat nested inside
+    /// KIP sanitizes exactly like the top level — ON allows it. (Pre-fix
+    /// the nested scan rejected every nested Flat.)
+    #[test]
+    fn nf5_nested_byte_buffer_flat_passes_sanitize() {
+        let registry =
+            registry_with_bindings(&[("kip", CkMechanismType::KIP_DERIVE.0), ("iv", AES_CBC)]);
+        let (flat, _) = flat_mechanism(AES_CBC, 16, Some(ParamAbi::Lp64NativeLe));
+        // Top-level control: ON allows the canonical byte-buffer Flat.
+        let top = validate(&registry, &flat).unwrap();
+        top.check_classic_sanitize_policy(true).unwrap();
+        // Nested inside KIP: same matrix row, same verdict.
+        let outer = CkMechanism {
+            mechanism_type: CkMechanismType::KIP_DERIVE,
+            params: Some(CkMechanismParams::Kip(KipParams {
+                mechanism: Some(Box::new(flat)),
+                key_handle: CkObjectHandle(0),
+                seed_presence: PointerBytes::null_len(0),
+            })),
+        };
+        let nested = validate(&registry, &outer).unwrap();
+        nested.check_classic_sanitize_policy(true).unwrap();
+        nested.check_classic_sanitize_policy(false).unwrap();
+    }
+
+    /// NF5 guard: a struct-prefix nested Flat rejects under ON, exactly
+    /// like the top-level struct-prefix row.
+    #[test]
+    fn nf5_nested_struct_prefix_flat_still_rejects() {
+        let mech = CkMechanismType::RSA_PKCS_PSS.0;
+        let registry =
+            registry_with_bindings(&[("kip", CkMechanismType::KIP_DERIVE.0), ("rsa_pss", mech)]);
+        let resolved = ShapeResolver::resolve(
+            Some("rsa_pss"),
+            OperationContext { mechanism: mech, operation: Operation::General, length: 1 },
+            ParamAbi::Lp64NativeLe,
+        )
+        .unwrap();
+        let flat = CkMechanism {
+            mechanism_type: CkMechanismType(mech),
+            params: Some(CkMechanismParams::Flat(FlatParams {
+                bytes: SecretBytes::copy_from_slice(&[0x01]),
+                declared_len: 1,
+                source_abi: Some(ParamAbi::Lp64NativeLe),
+                fingerprint: resolved.fingerprint(ParamAbi::Lp64NativeLe),
+                version: MECHANISM_PARAMETER_TRANSPORT_VERSION,
+            })),
+        };
+        // Top-level control: the prefix grant validates, but ON rejects
+        // the struct-prefix row.
+        let top = validate(&registry, &flat).unwrap();
+        assert_eq!(top.check_classic_sanitize_policy(true), Err(CkRv::MECHANISM_PARAM_INVALID));
+        // Nested inside KIP: same matrix row, same verdict.
+        let outer = CkMechanism {
+            mechanism_type: CkMechanismType::KIP_DERIVE,
+            params: Some(CkMechanismParams::Kip(KipParams {
+                mechanism: Some(Box::new(flat)),
+                key_handle: CkObjectHandle(0),
+                seed_presence: PointerBytes::present_copy(&[]),
+            })),
+        };
+        let nested = validate(&registry, &outer).unwrap();
+        assert_eq!(nested.check_classic_sanitize_policy(true), Err(CkRv::MECHANISM_PARAM_INVALID));
+        nested.check_classic_sanitize_policy(false).unwrap();
+    }
+
+    /// NF5 guard: a nested Flat the carried registry denies (unknown
+    /// shape) fails closed under ON.
+    #[test]
+    fn nf5_nested_denied_flat_still_rejects() {
+        let registry = registry_with_bindings(&[("kip", CkMechanismType::KIP_DERIVE.0)]);
+        let (flat, _) = flat_mechanism(UNKNOWN_MECH, 16, Some(ParamAbi::Lp64NativeLe));
+        let outer = CkMechanism {
+            mechanism_type: CkMechanismType::KIP_DERIVE,
+            params: Some(CkMechanismParams::Kip(KipParams {
+                mechanism: Some(Box::new(flat)),
+                key_handle: CkObjectHandle(0),
+                seed_presence: PointerBytes::present_copy(&[]),
+            })),
+        };
+        let nested = validate(&registry, &outer).unwrap();
+        assert_eq!(nested.check_classic_sanitize_policy(true), Err(CkRv::MECHANISM_PARAM_INVALID));
+        nested.check_classic_sanitize_policy(false).unwrap();
+    }
+
+    /// NF5 guard: classifying nested Flat does not weaken embedded-NULL
+    /// policing — a NULL-huge IV inside a nested typed GCM still rejects.
+    #[test]
+    fn nf5_nested_embedded_null_huge_still_rejects() {
+        const HUGE: u64 = 512 * 1024 * 1024 + 1;
+        let registry = registry_with_bindings(&[
+            ("kip", CkMechanismType::KIP_DERIVE.0),
+            ("gcm", CkMechanismType::AES_GCM.0),
+        ]);
+        let inner = CkMechanism {
+            mechanism_type: CkMechanismType::AES_GCM,
+            params: Some(CkMechanismParams::Gcm(GcmParams {
+                iv_bits: 96,
+                iv_buffer_len: 12,
+                tag_bits: 128,
+                iv_presence: PointerBytes::null_len(HUGE),
+                aad_presence: PointerBytes::from_legacy(&[], false),
+            })),
+        };
+        let outer = CkMechanism {
+            mechanism_type: CkMechanismType::KIP_DERIVE,
+            params: Some(CkMechanismParams::Kip(KipParams {
+                mechanism: Some(Box::new(inner)),
+                key_handle: CkObjectHandle(0),
+                seed_presence: PointerBytes::present_copy(&[]),
+            })),
+        };
+        let nested = validate(&registry, &outer).unwrap();
+        assert_eq!(nested.check_classic_sanitize_policy(true), Err(CkRv::MECHANISM_PARAM_INVALID));
+        nested.check_classic_sanitize_policy(false).unwrap();
     }
 
     /// F1 positive control: bound typed pairs keep forwarding, and the
