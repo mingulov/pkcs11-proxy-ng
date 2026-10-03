@@ -131,6 +131,10 @@ impl FfiBackend {
             },
             None => None,
         };
+        // RF-3.0-manufacture: record whether the 3.0 slot holds an
+        // explicit answer or the primary fallback — advertisement may
+        // only claim (3,0) for the former.
+        let func_list_3_0_explicit = queried_3_0.is_some();
         let func_list_3_0 = queried_3_0
             .or_else(|| Self::primary_interface_fallback(func_list, primary_from_interface, 3, 0))
             .map(|ptr| ptr as *const cryptoki_sys::CK_FUNCTION_LIST_3_0);
@@ -182,6 +186,7 @@ impl FfiBackend {
             _lib: lib,
             func_list,
             func_list_3_0,
+            func_list_3_0_explicit,
             func_list_3_1,
             func_list_3_2,
             initialize_args,

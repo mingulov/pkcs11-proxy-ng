@@ -30,10 +30,11 @@ macro_rules! two_call_message {
         // B2 admission proof (TF01b): ascribed like `call_3x_fn!` — the
         // two-call shape keeps its bespoke sizing/fill inline.
         let _admission: &crate::ffi::native_domain::OrdinaryGuard = $admission;
-        // Issue #28 review finding 1: same 3.0 → 3.1 slot fallback as
-        // `call_3x_fn!` — message functions resolve from the
-        // lowest-version table serving them.
-        let f = [$self.func_list_3_0, $self.func_list_3_1]
+        // Issue #28 review finding 1: same 3.0 → 3.1 → 3.2 slot
+        // fallback as `call_3x_fn!` (Task 1.5 Step 3) — message
+        // functions resolve from the lowest-version table serving
+        // them.
+        let f = [$self.func_list_3_0, $self.func_list_3_1, $self.func_list_3_2_as_3_0_prefix()]
             .into_iter()
             .flatten()
             .find_map(|fl| unsafe { (*fl).$func_name })
