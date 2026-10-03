@@ -5,6 +5,10 @@
 
 use super::*;
 use crate::ffi::native_allocation::NativeAllocation;
+use crate::sp800_108_data_values::{
+    CK_SP800_108_COUNTER, CK_SP800_108_DKM_LENGTH, CK_SP800_108_ITERATION_VARIABLE,
+    CK_SP800_108_KEY_HANDLE, parse_counter_format, parse_dkm_length_format, parse_key_handle_value,
+};
 use pkcs11_proxy_ng_types::PointerArray;
 use pkcs11_proxy_ng_types::PointerBytes;
 use pkcs11_proxy_ng_types::shape_descriptors::{Operation, ParamAbi};
@@ -491,7 +495,13 @@ impl FfiMechanism {
                     && e.client_iv_presence == client_iv_echo
                     && e.server_iv_presence == server_iv_echo
             }
-            FfiParamBacking::Sp800108Kdf(sp800, data_params, data_buffers, derived_keys) => {
+            FfiParamBacking::Sp800108Kdf(
+                sp800,
+                data_params,
+                data_buffers,
+                _natives,
+                derived_keys,
+            ) => {
                 // Mirror the `!derived_keys.is_empty()` guard: an empty set
                 // falls through to `_ => None` on both sides.
                 if derived_keys.is_empty() {
@@ -517,6 +527,7 @@ impl FfiMechanism {
                 sp800,
                 data_params,
                 data_buffers,
+                _natives,
                 iv,
                 derived_keys,
             ) => {
@@ -895,9 +906,13 @@ impl FfiMechanism {
                     returned_key_material_is_null: tls12.pReturnedKeyMaterial.is_null(),
                 }))
             }
-            FfiParamBacking::Sp800108Kdf(sp800, data_params, data_buffers, derived_keys)
-                if !derived_keys.is_empty() =>
-            {
+            FfiParamBacking::Sp800108Kdf(
+                sp800,
+                data_params,
+                data_buffers,
+                _natives,
+                derived_keys,
+            ) if !derived_keys.is_empty() => {
                 // SAFETY: backing is borrowed alive; the copy carries no provenance.
                 let sp800 = unsafe { sp800.snapshot() };
                 let data_params = sp800_108_data_params_from_ffi(data_params, data_buffers);
@@ -922,6 +937,7 @@ impl FfiMechanism {
                 sp800,
                 data_params,
                 data_buffers,
+                _natives,
                 iv,
                 derived_keys,
             ) if !derived_keys.is_empty() => {
@@ -1567,12 +1583,18 @@ enum FfiParamBacking {
         NativeAllocation<cryptoki_sys::CK_SP800_108_KDF_PARAMS>,
         Vec<cryptoki_sys::CK_PRF_DATA_PARAM>,
         Vec<Zeroizing<Vec<u8>>>,
+        // F5: per-leg native value backings, parallel to the params
+        // array (`Some` for rebuilt CK_ULONG-bearing payloads —
+        // ownership only; the echo path round-trips the untouched
+        // client bytes above).
+        Vec<Option<Sp800108NativeValue>>,
         FfiSp800108DerivedKeys,
     ),
     Sp800108FeedbackKdf(
         NativeAllocation<cryptoki_sys::CK_SP800_108_FEEDBACK_KDF_PARAMS>,
         Vec<cryptoki_sys::CK_PRF_DATA_PARAM>,
         Vec<Zeroizing<Vec<u8>>>,
+        Vec<Option<Sp800108NativeValue>>,
         Zeroizing<Vec<u8>>,
         FfiSp800108DerivedKeys,
     ),
@@ -1738,6 +1760,18 @@ pub(in crate::ffi) struct FfiMuGenParams {
 /// is rejected before recursion.
 const MAX_NESTED_MECHANISMS: u8 = 16;
 
+/// Width-derived host ABI shared by the backend-local funnels (see
+/// [`validate_for_ffi`): 8-byte `CK_ULONG` behaves as LP64, 4-byte as
+/// ILP32 — only `ulong_size()` is ever consulted on these paths. This
+/// also keeps big-endian targets working, where `native()` is `None`.
+fn funnel_host_abi() -> ParamAbi {
+    if std::mem::size_of::<cryptoki_sys::CK_ULONG>() >= 8 {
+        ParamAbi::Lp64NativeLe
+    } else {
+        ParamAbi::Ilp32NativeLe
+    }
+}
+
 /// Backend-local transport validation (R12, pre-R13 backstop).
 ///
 /// The backend owns no mechanism registry (the daemon's configured
@@ -1745,9 +1779,13 @@ const MAX_NESTED_MECHANISMS: u8 = 16;
 /// registry — no bindings, no exclusions — with `Operation::General` and
 /// host-width ABIs. Consequences, each load-bearing and pinned:
 ///
-/// * typed params and parameterless (`None`) pass through: the typed
-///   path is variant-driven, not registry-driven (R9), and the backend
-///   never enforced operator exclusion at FFI — behavior identical;
+/// * parameterless (`None`) passes through: the backend never enforced
+///   operator exclusion at FFI — behavior identical;
+/// * typed params are rejected (`PARAM_INVALID`): F1 binds every typed
+///   variant to the mechanism, and the EMPTY backstop binds nothing
+///   (conversion tests needing typed proofs use
+///   [`validated_mechanism_for_tests`], which binds the pair under
+///   test);
 /// * legacy `Raw` is rejected (`PARAM_INVALID`), exactly as the FFI
 ///   match arm did before R12 — same RV, earlier layer;
 /// * `Flat` is ALWAYS rejected (`PARAM_INVALID` — `UnknownShape`, or
@@ -1761,20 +1799,29 @@ const MAX_NESTED_MECHANISMS: u8 = 16;
 /// * `Null` validates fully here: NULL + narrowed length needs no
 ///   descriptor (S2 §6 RV table), only the member-version check and a
 ///   width-only narrowing — both registry-independent.
-/// * nested nodes (KIP/CMS — the only arms that recurse) keep using this
-///   funnel permanently: neither the server (typed passthrough, no
-///   recursion) nor this layer pre-validates them, so each nested node
-///   is validated at descent. Nested typed/`None`/`Null` convert;
-///   nested `Flat`/`Raw` stay rejected. (Carry for the R13/R18 nested
-///   tracking: nested Flat emission exists shim-side (R11 re-gather);
-///   backend nested-Flat acceptance needs recursive validation, which is
-///   NOT this funnel.)
+/// * nested nodes (KIP/CMS — the only arms that recurse) are validated
+///   at descent against the snapshot the outer value carries
+///   ([`ValidatedMechanismParams::registry`], F6): neither the server
+///   (typed passthrough, no recursion) nor this layer pre-validates
+///   them. Through this funnel the carried snapshot is the EMPTY
+///   backstop, so nested `None`/`Null` convert while nested
+///   typed/`Flat`/`Raw` stay rejected here; request-validated outers
+///   (the post-R13 server path) accept nested typed/Flat exactly when
+///   the request's bindings grant them.
+///   (R13/R18 nested tracking carry, resolved by F6 for the request
+///   path; the registry-less backstop keeps rejecting nested typed,
+///   Flat, and Raw.)
 ///
 /// The ABI choice is width-derived (`CK_ULONG` width only) rather than
 /// `ParamAbi::native()`: only the width is load-bearing here (Null
 /// narrowing is width-only; Flat is always denied so ABI equality is
-/// moot; typed/`None` never read the ABI). This also keeps big-endian
+/// moot; `None` never reads the ABI). This also keeps big-endian
 /// targets working, where `native()` is `None`.
+///
+/// Test-only since F1 retyped `mechanism_to_ffi` to take validated
+/// params (the F6 nested path validates at descent instead): the only
+/// remaining callers are the test funnel and `#[cfg(test)]` modules.
+#[cfg(test)]
 pub(in crate::ffi) fn validate_for_ffi(
     mechanism: &CkMechanism,
 ) -> CkResult<ValidatedMechanismParams> {
@@ -1788,24 +1835,46 @@ pub(in crate::ffi) fn validate_for_ffi(
             String::from("r12-empty-backstop"),
         )
     });
-    // Width-derived host ABI (see the doc comment above): 8-byte
-    // `CK_ULONG` behaves as LP64, 4-byte as ILP32 — only `ulong_size()`
-    // is ever consulted on this path.
-    let host_abi = if std::mem::size_of::<cryptoki_sys::CK_ULONG>() >= 8 {
-        ParamAbi::Lp64NativeLe
-    } else {
-        ParamAbi::Ilp32NativeLe
-    };
+    let host_abi = funnel_host_abi();
     ValidatedMechanismParams::validate(mechanism, registry, Operation::General, host_abi, host_abi)
 }
 
-/// Test funnel: `validate_for_ffi`, unwrapped. Every pre-R12 test that
-/// fed `&CkMechanism` straight into `mechanism_to_ffi` now funnels
-/// through here — typed/`None` pass identically, so all pre-existing
-/// assertions keep their meaning; only the boundary moved.
+/// Test funnel: [`validate_for_ffi`] for the registry-independent rows,
+/// a minimal one-entry binding registry for typed pairs (F1).
+///
+/// Every pre-R12 test that fed `&CkMechanism` straight into
+/// `mechanism_to_ffi` funnels through here: typed params validate
+/// against a registry binding the mechanism to the variant's canonical
+/// shape, so conversion tests exercise conversion — binding itself is
+/// pinned in the types/server suites, not here. `None`/`Null`
+/// validate against the empty backstop; `Flat`/`Raw` behave exactly as
+/// through [`validate_for_ffi`] (rejected).
 #[cfg(test)]
 pub(crate) fn validated_mechanism_for_tests(mechanism: &CkMechanism) -> ValidatedMechanismParams {
-    validate_for_ffi(mechanism).expect("test mechanism validates for FFI")
+    let bound_shape = mechanism.params.as_ref().and_then(|params| params.canonical_shape_name());
+    match bound_shape {
+        Some(shape) => {
+            let mut shapes = std::collections::HashMap::new();
+            shapes.insert(mechanism.mechanism_type.0, shape.to_string());
+            let registry = MechanismRegistry::from_parts(
+                shapes,
+                std::collections::HashSet::new(),
+                std::collections::HashSet::new(),
+                DiscoveryMode::Transparent,
+                String::from("test-minimal-binding"),
+            );
+            let host_abi = funnel_host_abi();
+            ValidatedMechanismParams::validate(
+                mechanism,
+                &registry,
+                Operation::General,
+                host_abi,
+                host_abi,
+            )
+            .expect("test mechanism validates for FFI")
+        }
+        None => validate_for_ffi(mechanism).expect("test mechanism validates for FFI"),
+    }
 }
 
 pub(in crate::ffi) fn mechanism_to_ffi(
@@ -1814,20 +1883,42 @@ pub(in crate::ffi) fn mechanism_to_ffi(
     mechanism_to_ffi_at_depth(validated, 0)
 }
 
+/// Validate one nested node at descent (F6): same width-derived host
+/// ABI as [`validate_for_ffi`], but against the request's snapshot
+/// carried by the outer validated value — never the empty backstop —
+/// so nested Flat eligibility is decided under the request's bindings.
+/// `Operation::General`: nested KIP/CMS nodes carry no wrap context.
+/// The nested validated value (with its stored Flat grant, if any)
+/// flows into [`mechanism_to_ffi_at_depth`], whose reconstruction and
+/// backing the KIP/CMS arms retain.
+fn validate_nested_for_ffi(
+    mechanism: &CkMechanism,
+    registry: &MechanismRegistry,
+) -> CkResult<ValidatedMechanismParams> {
+    let host_abi = funnel_host_abi();
+    ValidatedMechanismParams::validate(mechanism, registry, Operation::General, host_abi, host_abi)
+}
+
 /// Recurse one nesting level (KIP/CMS nested mechanisms), rejecting the
 /// 17th nested mechanism before descending.
 ///
 /// Nested nodes arrive unvalidated (the server validates the top level
-/// only), so each is validated at descent through [`validate_for_ffi`]:
-/// nested typed/`None` convert exactly like the top level, nested `Null`
-/// converts too (new in R12 — NULL + narrowed length needs no descriptor
-/// at any depth, so the uniform rule accepts it), while nested
-/// `Flat`/`Raw` stay rejected — same as before R12.
-fn nested_mechanism_to_ffi(mechanism: &CkMechanism, depth: u8) -> CkResult<FfiMechanism> {
+/// only), so each is validated at descent through
+/// [`validate_nested_for_ffi`] against the outer value's carried
+/// registry snapshot: nested typed/`None` convert exactly like the top
+/// level, nested `Null` converts too (NULL + narrowed length needs no
+/// descriptor at any depth, so the uniform rule accepts it), nested
+/// Flat converts exactly when the carried bindings grant it, and
+/// nested `Raw` stays rejected always.
+fn nested_mechanism_to_ffi(
+    mechanism: &CkMechanism,
+    depth: u8,
+    registry: &MechanismRegistry,
+) -> CkResult<FfiMechanism> {
     if depth >= MAX_NESTED_MECHANISMS {
         return Err(CkRv::MECHANISM_PARAM_INVALID);
     }
-    let validated = validate_for_ffi(mechanism)?;
+    let validated = validate_nested_for_ffi(mechanism, registry)?;
     mechanism_to_ffi_at_depth(&validated, depth + 1)
 }
 
@@ -3145,14 +3236,37 @@ fn mechanism_to_ffi_at_depth(
             let mut buffers: Vec<Zeroizing<Vec<u8>>> = Vec::with_capacity(present.len());
             let mut c_params: Vec<cryptoki_sys::CK_PRF_DATA_PARAM> =
                 Vec::with_capacity(present.len());
+            // F5: per-leg native value backings, parallel to `c_params`
+            // (`Some` for rebuilt CK_ULONG-bearing payloads — ownership
+            // only; the echo path round-trips `buffers`).
+            let mut natives: Vec<Option<Sp800108NativeValue>> = Vec::with_capacity(present.len());
             for dp in present {
-                let leg = input_leg(&dp.value_presence)?;
-                c_params.push(cryptoki_sys::CK_PRF_DATA_PARAM {
-                    type_: narrow_wire_ulong(dp.type_)?,
-                    pValue: leg.ptr as *mut std::ffi::c_void,
-                    ulValueLen: leg.len,
-                });
-                buffers.push(leg.backing);
+                // Narrow first: a huge `type_` fails FUNCTION_FAILED
+                // exactly as before (the old leg-then-narrow order ran
+                // an infallible leg for Present values, so type errors
+                // already won these slots).
+                let data_type = narrow_wire_ulong(dp.type_)?;
+                match sp800_108_value_leg(dp.type_, &dp.value_presence)? {
+                    Sp800108ValueLeg::Native { backing, len, echo } => {
+                        c_params.push(cryptoki_sys::CK_PRF_DATA_PARAM {
+                            type_: data_type,
+                            pValue: backing.pvalue(),
+                            ulValueLen: len,
+                        });
+                        buffers.push(echo);
+                        natives.push(Some(backing));
+                    }
+                    Sp800108ValueLeg::Passthrough => {
+                        let leg = input_leg(&dp.value_presence)?;
+                        c_params.push(cryptoki_sys::CK_PRF_DATA_PARAM {
+                            type_: data_type,
+                            pValue: leg.ptr as *mut std::ffi::c_void,
+                            ulValueLen: leg.len,
+                        });
+                        buffers.push(leg.backing);
+                        natives.push(None);
+                    }
+                }
             }
             // `as_mut_ptr` on an empty vector is dangling non-NULL —
             // exactly the S2 §6 `Present([])` form.
@@ -3167,7 +3281,7 @@ fn mechanism_to_ffi_at_depth(
                 pAdditionalDerivedKeys: derived_keys.ptr(),
             });
             Ok(FfiMechanism::from_box(mech_type, sp, |b| {
-                FfiParamBacking::Sp800108Kdf(b, c_params, buffers, derived_keys)
+                FfiParamBacking::Sp800108Kdf(b, c_params, buffers, natives, derived_keys)
             }))
         }
 
@@ -3175,20 +3289,40 @@ fn mechanism_to_ffi_at_depth(
         CkMechanismParams::Sp800108FeedbackKdf(p) => {
             // S2 §6 (R19): both counted-array headers and the IV leg
             // follow their presence peers; each data-param value leg
-            // follows its own.
+            // follows its own (F5: CK_ULONG-bearing values rebuild
+            // backend-native, as in the Kdf arm above).
             let (data_is_null, data_count) = array_header(&p.data_params_presence)?;
             let present = p.data_params_presence.as_present().map(Vec::as_slice).unwrap_or(&[]);
             let mut buffers: Vec<Zeroizing<Vec<u8>>> = Vec::with_capacity(present.len());
             let mut c_params: Vec<cryptoki_sys::CK_PRF_DATA_PARAM> =
                 Vec::with_capacity(present.len());
+            // F5: per-leg native value backings, parallel to `c_params`
+            // (see the Kdf arm).
+            let mut natives: Vec<Option<Sp800108NativeValue>> = Vec::with_capacity(present.len());
             for dp in present {
-                let leg = input_leg(&dp.value_presence)?;
-                c_params.push(cryptoki_sys::CK_PRF_DATA_PARAM {
-                    type_: narrow_wire_ulong(dp.type_)?,
-                    pValue: leg.ptr as *mut std::ffi::c_void,
-                    ulValueLen: leg.len,
-                });
-                buffers.push(leg.backing);
+                // Narrow first (same error precedence as the Kdf arm).
+                let data_type = narrow_wire_ulong(dp.type_)?;
+                match sp800_108_value_leg(dp.type_, &dp.value_presence)? {
+                    Sp800108ValueLeg::Native { backing, len, echo } => {
+                        c_params.push(cryptoki_sys::CK_PRF_DATA_PARAM {
+                            type_: data_type,
+                            pValue: backing.pvalue(),
+                            ulValueLen: len,
+                        });
+                        buffers.push(echo);
+                        natives.push(Some(backing));
+                    }
+                    Sp800108ValueLeg::Passthrough => {
+                        let leg = input_leg(&dp.value_presence)?;
+                        c_params.push(cryptoki_sys::CK_PRF_DATA_PARAM {
+                            type_: data_type,
+                            pValue: leg.ptr as *mut std::ffi::c_void,
+                            ulValueLen: leg.len,
+                        });
+                        buffers.push(leg.backing);
+                        natives.push(None);
+                    }
+                }
             }
             // `as_mut_ptr` on an empty vector is dangling non-NULL —
             // exactly the S2 §6 `Present([])` form.
@@ -3206,7 +3340,14 @@ fn mechanism_to_ffi_at_depth(
                 pAdditionalDerivedKeys: derived_keys.ptr(),
             });
             Ok(FfiMechanism::from_box(mech_type, sp, |b| {
-                FfiParamBacking::Sp800108FeedbackKdf(b, c_params, buffers, iv.backing, derived_keys)
+                FfiParamBacking::Sp800108FeedbackKdf(
+                    b,
+                    c_params,
+                    buffers,
+                    natives,
+                    iv.backing,
+                    derived_keys,
+                )
             }))
         }
 
@@ -3337,7 +3478,7 @@ fn mechanism_to_ffi_at_depth(
             // S2 §6 (R19): a NULL `pMechanism` runs no inner conversion
             // and retains nothing; the seed follows its presence peer.
             let nested = if let Some(nested_mech) = p.mechanism.as_deref() {
-                let inner_ffi = nested_mechanism_to_ffi(nested_mech, depth)?;
+                let inner_ffi = nested_mechanism_to_ffi(nested_mech, depth, validated.registry())?;
                 let inner_mech = NativeAllocation::from_box(Box::new(inner_ffi.ck_mechanism()));
                 // Keep the inner mechanism's parameter backing alive by
                 // moving it into the KIP backing, so any pointers the
@@ -3365,8 +3506,10 @@ fn mechanism_to_ffi_at_depth(
 
         // -- CMS Sig: nested mechanisms + content type + attribute buffers -------
         CkMechanismParams::CmsSig(p) => {
-            let sign_ffi = nested_mechanism_to_ffi(&p.signing_mechanism, depth)?;
-            let digest_ffi = nested_mechanism_to_ffi(&p.digest_mechanism, depth)?;
+            let sign_ffi =
+                nested_mechanism_to_ffi(&p.signing_mechanism, depth, validated.registry())?;
+            let digest_ffi =
+                nested_mechanism_to_ffi(&p.digest_mechanism, depth, validated.registry())?;
             let sign_mech = NativeAllocation::from_box(Box::new(sign_ffi.ck_mechanism()));
             let digest_mech = NativeAllocation::from_box(Box::new(digest_ffi.ck_mechanism()));
             let mut content_type = Zeroizing::new(p.content_type.as_bytes().to_vec());
@@ -3549,6 +3692,109 @@ fn input_leg(presence: &PointerBytes) -> CkResult<InputLeg> {
                 Ok(InputLeg { backing, ptr, len })
             }
         }
+    }
+}
+
+/// One SP800-108 data-param value rebuilt as backend-native storage
+/// (F5): the provider reads these payloads via aligned native loads,
+/// so they cannot ride in align-1 byte backing (R19 rule). The
+/// iteration-variable format shares the counter record.
+enum Sp800108NativeValue {
+    Counter(NativeAllocation<cryptoki_sys::CK_SP800_108_COUNTER_FORMAT>),
+    DkmLength(NativeAllocation<cryptoki_sys::CK_SP800_108_DKM_LENGTH_FORMAT>),
+    KeyHandle(NativeAllocation<cryptoki_sys::CK_ULONG>),
+}
+
+impl Sp800108NativeValue {
+    /// Provider-visible pointer into the owned native allocation.
+    fn pvalue(&self) -> *mut std::ffi::c_void {
+        match self {
+            Sp800108NativeValue::Counter(native) => native.root() as *mut std::ffi::c_void,
+            Sp800108NativeValue::DkmLength(native) => native.root() as *mut std::ffi::c_void,
+            Sp800108NativeValue::KeyHandle(native) => native.root() as *mut std::ffi::c_void,
+        }
+    }
+}
+
+/// One SP800-108 data-param value leg (F5).
+enum Sp800108ValueLeg {
+    /// Rebuilt native backing + provider-visible `ulValueLen` (always
+    /// the backend-native size — a 4-byte ILP32 key handle bridges to
+    /// 8 bytes on an LP64 daemon) + the untouched client bytes the
+    /// echo/retention path round-trips (`presence_from_ffi` ignores the
+    /// struct length for live pointers, so bridged legs echo exactly).
+    Native { backing: Sp800108NativeValue, len: cryptoki_sys::CK_ULONG, echo: Zeroizing<Vec<u8>> },
+    /// The generic [`input_leg`] path (NULL legs, empty iteration
+    /// variables, BYTE_ARRAY, unknown vendor types).
+    Passthrough,
+}
+
+/// Route one SP800-108 data-param value (F5): COUNTER, DKM_LENGTH,
+/// KEY_HANDLE and non-empty ITERATION_VARIABLE payloads parse (client
+/// width inferred from length) and rebuild backend-native; NULL legs,
+/// empty iteration variables (mock-blessed leniency for non-counter
+/// modes), BYTE_ARRAY and unknown vendor types keep [`input_leg`].
+/// Empty COUNTER/DKM_LENGTH/KEY_HANDLE payloads fail closed (OASIS- and
+/// mock-invalid) instead of handing the provider an empty extent to
+/// read a struct from.
+fn sp800_108_value_leg(type_: u64, presence: &PointerBytes) -> CkResult<Sp800108ValueLeg> {
+    let PointerBytes::Present(secret) = presence else {
+        // NULL legs (incl. OASIS NULL+0 iteration variables) keep the
+        // generic NULL leg: NULL-ness follows the presence peer.
+        return Ok(Sp800108ValueLeg::Passthrough);
+    };
+    if secret.is_empty() {
+        if matches!(type_, CK_SP800_108_COUNTER | CK_SP800_108_DKM_LENGTH | CK_SP800_108_KEY_HANDLE)
+        {
+            return Err(CkRv::MECHANISM_PARAM_INVALID);
+        }
+        return Ok(Sp800108ValueLeg::Passthrough);
+    }
+    match type_ {
+        CK_SP800_108_COUNTER | CK_SP800_108_ITERATION_VARIABLE => secret.expose(|value| {
+            let format = parse_counter_format(value)?;
+            let native =
+                NativeAllocation::from_box(Box::new(cryptoki_sys::CK_SP800_108_COUNTER_FORMAT {
+                    bLittleEndian: format.little_endian,
+                    ulWidthInBits: narrow_wire_ulong(format.width_in_bits)?,
+                }));
+            Ok(Sp800108ValueLeg::Native {
+                backing: Sp800108NativeValue::Counter(native),
+                len: narrow_wire_ulong(
+                    std::mem::size_of::<cryptoki_sys::CK_SP800_108_COUNTER_FORMAT>() as u64,
+                )?,
+                echo: Zeroizing::new(value.to_vec()),
+            })
+        }),
+        CK_SP800_108_DKM_LENGTH => secret.expose(|value| {
+            let format = parse_dkm_length_format(value)?;
+            let native = NativeAllocation::from_box(Box::new(
+                cryptoki_sys::CK_SP800_108_DKM_LENGTH_FORMAT {
+                    dkmLengthMethod: narrow_wire_ulong(format.method)?,
+                    bLittleEndian: format.little_endian,
+                    ulWidthInBits: narrow_wire_ulong(format.width_in_bits)?,
+                },
+            ));
+            Ok(Sp800108ValueLeg::Native {
+                backing: Sp800108NativeValue::DkmLength(native),
+                len: narrow_wire_ulong(std::mem::size_of::<
+                    cryptoki_sys::CK_SP800_108_DKM_LENGTH_FORMAT,
+                >() as u64)?,
+                echo: Zeroizing::new(value.to_vec()),
+            })
+        }),
+        CK_SP800_108_KEY_HANDLE => secret.expose(|value| {
+            let handle = parse_key_handle_value(value)?;
+            let native = NativeAllocation::new(narrow_wire_ulong(handle)?);
+            Ok(Sp800108ValueLeg::Native {
+                backing: Sp800108NativeValue::KeyHandle(native),
+                len: narrow_wire_ulong(std::mem::size_of::<cryptoki_sys::CK_ULONG>() as u64)?,
+                echo: Zeroizing::new(value.to_vec()),
+            })
+        }),
+        // Non-empty BYTE_ARRAY and unknown vendor types stay opaque
+        // byte copies (no CK_ULONG content to model).
+        _ => Ok(Sp800108ValueLeg::Passthrough),
     }
 }
 

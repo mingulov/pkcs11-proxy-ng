@@ -2,11 +2,62 @@
 #![allow(clippy::unnecessary_cast)]
 
 use super::*;
-use ::pkcs11_proxy_ng::config::ObjectAclSpec;
+use ::pkcs11_proxy_ng::config::{
+    ExtractPolicyConfig, GrantSpec, ObjectAclSpec, RichGrantConfig, TokenAccessSpec,
+};
 use ::pkcs11_proxy_ng::server::context_manager::ClientContextId;
 use ::pkcs11_proxy_ng::server::handle_map::{BackendHandle, VirtualHandle};
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_backend::mock::MockEmbeddedHandles;
+
+/// F1: embedded-handle tests ride KDF mechs bound to their shapes, so
+/// the mock must advertise them (the shared SHA-only list would answer
+/// `MECHANISM_INVALID` from the mock's support gate).
+fn kdf_mechs() -> Vec<CkMechanismType> {
+    vec![
+        CkMechanismType::SHA256,
+        CkMechanismType::SHA384,
+        CkMechanismType::HKDF_DERIVE,
+        CkMechanismType::SP800_108_COUNTER_KDF,
+        CkMechanismType::SP800_108_FEEDBACK_KDF,
+    ]
+}
+
+/// Grants mirroring `fixture()`'s object policy but with no mechanism
+/// restriction (mechanism grants are not this module's subject; the KDF
+/// mechs under test are not SHA).
+fn unrestricted_mech_grants() -> TokenAccessSpec {
+    TokenAccessSpec::Specific(
+        ["Token42", "Token1"]
+            .into_iter()
+            .map(|label| {
+                GrantSpec::Rich(RichGrantConfig {
+                    token: format!("label:{label}"),
+                    classes: None,
+                    mechanisms: None,
+                    extract: ExtractPolicyConfig::Allow,
+                    objects: None,
+                })
+            })
+            .collect(),
+    )
+}
+
+async fn kdf_fixture() -> MtlsFixture {
+    fixture_with_grants_and_mechs(
+        [unrestricted_mech_grants(), unrestricted_mech_grants()],
+        kdf_mechs(),
+    )
+    .await
+}
+
+async fn embedded_kdf_fixture(class_only: bool) -> MtlsFixture {
+    fixture_with_grants_and_mechs(
+        [embedded_grants(class_only), embedded_grants(class_only)],
+        kdf_mechs(),
+    )
+    .await
+}
 use pkcs11_proxy_ng_types::{
     CkObjectHandle, HkdfParams, PointerArray, PointerBytes, PrfDataParam,
     Sp800108FeedbackKdfParams, Sp800108KdfParams,
@@ -15,7 +66,8 @@ use pkcs11_proxy_ng_types::{
 fn hkdf(handle: u64) -> Option<Mechanism> {
     Some(
         Mechanism::try_from(&CkMechanism {
-            mechanism_type: CkMechanismType::SHA256,
+            // F1: HKDF rides CKM_HKDF_DERIVE (hkdf-bound in the default TOML).
+            mechanism_type: CkMechanismType(0x402A),
             params: Some(CkMechanismParams::Hkdf(HkdfParams {
                 extract: true,
                 expand: true,
@@ -31,10 +83,14 @@ fn hkdf(handle: u64) -> Option<Mechanism> {
 }
 
 fn sp800108(value: Vec<u8>, feedback: bool) -> Option<Mechanism> {
+    // F1: the counter mech engages the mock's counter-mode rule, which
+    // needs a counter-format-sized iteration variable (the feedback path
+    // accepts empty or format-sized, so one filler serves both).
+    let iteration = vec![0u8; std::mem::size_of::<cryptoki_sys::CK_SP800_108_COUNTER_FORMAT>()];
     let data_params = vec![
         PrfDataParam {
             type_: cryptoki_sys::CK_SP800_108_ITERATION_VARIABLE as u64,
-            value_presence: PointerBytes::present_copy(&[]),
+            value_presence: PointerBytes::present_copy(&iteration),
         },
         PrfDataParam {
             type_: cryptoki_sys::CK_SP800_108_KEY_HANDLE as u64,
@@ -43,7 +99,8 @@ fn sp800108(value: Vec<u8>, feedback: bool) -> Option<Mechanism> {
     ];
     Some(
         Mechanism::try_from(&CkMechanism {
-            mechanism_type: CkMechanismType::SHA256,
+            // F1: SP800-108 rides its bound counter/feedback mech numbers.
+            mechanism_type: CkMechanismType(if feedback { 0x03AD } else { 0x03AC }),
             params: Some(if feedback {
                 CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
                     prf_type: CkMechanismType(cryptoki_sys::CKM_SHA256_HMAC as u64),
@@ -78,7 +135,7 @@ async fn native_handles(f: &MtlsFixture, client: &Client) -> (CkSessionHandle, C
 }
 
 async fn owned_and_foreign_remapping(entry: Entry) {
-    let f = fixture().await;
+    let f = kdf_fixture().await;
     // B allocates native objects first, making A's virtual and native handles
     // numerically distinct without fabricating authenticated contexts.
     let mut other = open(&f, true).await;
@@ -207,7 +264,7 @@ async fn stale_token_mapping(
 
 #[tokio::test]
 async fn shared_remapper_enforces_class_only_embedded_policy() {
-    let f = fixture_with_grants([embedded_grants(true), embedded_grants(true)]).await;
+    let f = embedded_kdf_fixture(true).await;
     let mut client = open(&f, false).await;
     let (denied, _) = stale_token_mapping(&f, &client, CkObjectClass::PRIVATE_KEY, 0xa1).await;
     let before = f.backend.mechanism_entry_count(Entry::DeriveKey);
@@ -226,7 +283,7 @@ async fn shared_remapper_enforces_class_only_embedded_policy() {
 }
 
 async fn sp800108_denied_embedded_key(class_only: bool) {
-    let f = fixture_with_grants([embedded_grants(class_only), embedded_grants(class_only)]).await;
+    let f = embedded_kdf_fixture(class_only).await;
     let mut client = open(&f, false).await;
     let (denied, _) = stale_token_mapping(
         &f,
@@ -269,8 +326,7 @@ async fn sp800108_denied_nonzero_handle_never_reaches_backend_as_zero() {
 #[tokio::test]
 async fn sp800108_allowed_handle_uses_real_session_for_metadata_and_preserves_width() {
     for class_only in [false, true] {
-        let f =
-            fixture_with_grants([embedded_grants(class_only), embedded_grants(class_only)]).await;
+        let f = embedded_kdf_fixture(class_only).await;
         let mut client = open(&f, false).await;
         let (allowed, native) =
             stale_token_mapping(&f, &client, CkObjectClass::SECRET_KEY, 0xa1).await;
@@ -294,7 +350,7 @@ async fn sp800108_allowed_handle_uses_real_session_for_metadata_and_preserves_wi
 
 #[tokio::test]
 async fn sp800108_missing_and_malformed_handles_reject_before_dispatch() {
-    let f = fixture().await;
+    let f = kdf_fixture().await;
     let mut client = open(&f, false).await;
     for feedback in [false, true] {
         for (value, expected) in [

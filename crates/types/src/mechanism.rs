@@ -1778,12 +1778,156 @@ fn check_sp800108_derived_key(key: &Sp800108DerivedKey) -> Result<(), CkRv> {
 /// Handle remapping (R13) consumes the newtype and returns it:
 /// substitution of virtual→native handle integers preserves every
 /// validated property (lengths, caps, shape binding, ABI).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct ValidatedMechanismParams {
     mechanism: CkMechanism,
     /// `Some` for validated Flat (the stored grant lets later stages reuse
     /// the resolution without re-deciding policy); `None` otherwise.
     flat_grant: Option<FlatGrant>,
+    /// The registry snapshot this value was validated against: the
+    /// request's `current_registry()` snapshot on the server path, the
+    /// empty backstop in the backend-local funnel. Nested descent
+    /// reuses it so nested Flat eligibility is decided under the same
+    /// bindings as the top level (F6) — S2 §6's "one snapshot per
+    /// request" carried in the proof itself.
+    registry: MechanismRegistry,
+}
+
+/// Value equality: the carried snapshot is provenance, not value, so
+/// two validations of equal mechanisms compare equal even across
+/// different snapshots (pre-F6 meaning preserved).
+impl PartialEq for ValidatedMechanismParams {
+    fn eq(&self, other: &Self) -> bool {
+        self.mechanism == other.mechanism && self.flat_grant == other.flat_grant
+    }
+}
+
+impl CkMechanismParams {
+    /// Canonical registry shape name authorizing this typed variant
+    /// (F1, S2 §4): the binding key the mechanism must carry for this
+    /// variant to validate (modulo the `gcm_compat` union and
+    /// WrapKey operation-selected layouts, applied by the caller).
+    ///
+    /// Exhaustive with no catch-all, so a future variant cannot
+    /// silently skip binding (the compiler rejects the omission).
+    /// Order mirrors the enum definition. `None` for the non-typed
+    /// envelopes (Flat/Null/Raw), whose authorization rules live in
+    /// their own [`ValidatedMechanismParams::validate`] arms.
+    pub fn canonical_shape_name(&self) -> Option<&'static str> {
+        use CkMechanismParams as P;
+        match self {
+            P::RsaPkcsPss(_) => Some("rsa_pss"),
+            P::RsaPkcsOaep(_) => Some("rsa_oaep"),
+            P::Gcm(_) => Some("gcm"),
+            P::Ecdh1Derive(_) => Some("ecdh1_derive"),
+            P::Iv(_) => Some("iv"),
+            P::Rc5(_) => Some("rc5"),
+            P::Rc5MacGeneral(_) => Some("rc5_mac_general"),
+            P::Rc2MacGeneral(_) => Some("rc2_mac_general"),
+            P::Xeddsa(_) => Some("xeddsa"),
+            P::TlsMac(_) => Some("tls_mac"),
+            P::AesCtr(_) => Some("aes_ctr"),
+            P::CamelliaCtr(_) => Some("camellia_ctr"),
+            P::Rc2Cbc(_) => Some("rc2_cbc"),
+            P::Rc5Cbc(_) => Some("rc5_cbc"),
+            P::AesCbcEncryptData(_) => Some("aes_cbc_encrypt_data"),
+            P::DesCbcEncryptData(_) => Some("des_cbc_encrypt_data"),
+            P::AriaCbcEncryptData(_) => Some("aria_cbc_encrypt_data"),
+            P::CamelliaCbcEncryptData(_) => Some("camellia_cbc_encrypt_data"),
+            P::SeedCbcEncryptData(_) => Some("seed_cbc_encrypt_data"),
+            P::Ccm(_) => Some("ccm"),
+            P::ChaCha20(_) => Some("chacha20"),
+            P::Salsa20(_) => Some("salsa20"),
+            P::Salsa20ChaCha20Poly1305(_) => Some("salsa20_chacha20_poly1305"),
+            P::GcmWrap(_) => Some("gcm_wrap"),
+            P::CcmWrap(_) => Some("ccm_wrap"),
+            P::Ecdh2Derive(_) => Some("ecdh2_derive"),
+            P::EcmqvDerive(_) => Some("ecmqv_derive"),
+            P::X942Dh1Derive(_) => Some("x942_dh1_derive"),
+            P::X942Dh2Derive(_) => Some("x942_dh2_derive"),
+            P::X942MqvDerive(_) => Some("x942_mqv_derive"),
+            P::Hkdf(_) => Some("hkdf"),
+            P::Eddsa(_) => Some("eddsa"),
+            P::Gostr3410Derive(_) => Some("gostr3410_derive"),
+            P::KeaDerive(_) => Some("kea_derive"),
+            P::EcdhAesKeyWrap(_) => Some("ecdh_aes_key_wrap"),
+            P::RsaAesKeyWrap(_) => Some("rsa_aes_key_wrap"),
+            P::Gostr3410KeyWrap(_) => Some("gostr3410_key_wrap"),
+            P::KeyWrapSetOaep(_) => Some("key_wrap_set_oaep"),
+            P::Pbe(_) => Some("pbe"),
+            P::Pkcs5Pbkd2(_) => Some("pkcs5_pbkd2"),
+            P::TlsPrf(_) => Some("tls_prf"),
+            P::TlsKdf(_) => Some("tls_kdf"),
+            P::Ssl3MasterKeyDerive(_) => Some("ssl3_master_key_derive"),
+            P::Tls12MasterKeyDerive(_) => Some("tls12_master_key_derive"),
+            P::Tls12ExtendedMasterKeyDerive(_) => Some("tls12_extended_master_key_derive"),
+            P::Ssl3KeyMat(_) => Some("ssl3_key_mat"),
+            P::WtlsMasterKeyDerive(_) => Some("wtls_master_key_derive"),
+            P::WtlsPrf(_) => Some("wtls_prf"),
+            P::WtlsKeyMat(_) => Some("wtls_key_mat"),
+            P::IkePrfDerive(_) => Some("ike_prf_derive"),
+            P::Ike1PrfDerive(_) => Some("ike1_prf_derive"),
+            P::Ike1ExtendedDerive(_) => Some("ike1_extended_derive"),
+            P::Ike2PrfPlusDerive(_) => Some("ike2_prf_plus_derive"),
+            P::Sp800108Kdf(_) => Some("sp800_108_kdf"),
+            P::Sp800108FeedbackKdf(_) => Some("sp800_108_feedback_kdf"),
+            P::X3dhInitiate(_) => Some("x3dh_initiate"),
+            P::X3dhRespond(_) => Some("x3dh_respond"),
+            P::X2RatchetInitialize(_) => Some("x2ratchet_initialize"),
+            P::X2RatchetRespond(_) => Some("x2ratchet_respond"),
+            P::Otp(_) => Some("otp"),
+            P::Kip(_) => Some("kip"),
+            P::CmsSig(_) => Some("cms_sig"),
+            P::SkipjackPrivateWrap(_) => Some("skipjack_private_wrap"),
+            P::SkipjackRelayx(_) => Some("skipjack_relayx"),
+            P::MacGeneral(_) => Some("mac_general"),
+            P::ObjectHandle(_) => Some("object_handle"),
+            P::Extract(_) => Some("extract"),
+            P::SignAdditionalContext(_) => Some("sign_additional_context"),
+            P::Kmac(_) => Some("kmac"),
+            P::MuGen(_) => Some("mu_gen"),
+            P::KeyDerivationString(_) => Some("key_derivation_string"),
+            P::Raw(_) | P::Flat(_) | P::Null { .. } => None,
+            P::Ecies(_) => Some("ecies"),
+            P::AesCmacKeyDerivation(_) => Some("aes_cmac_key_derivation"),
+            P::Dilithium(_) => Some("dilithium"),
+            P::Kyber(_) => Some("kyber"),
+            P::HdKeyDerive(_) => Some("hd_key_derive"),
+            P::VendorObjectExtract(_) => Some("vendor_object_extract"),
+            P::VendorObjectInsert(_) => Some("vendor_object_insert"),
+        }
+    }
+}
+
+/// Whether `registry` authorizes `mech_type` to carry typed params of
+/// `variant_shape` under `operation` (F1, S2 §4 + §6): a direct
+/// binding, the `gcm_compat` union (the manifest binds both typed
+/// messages to it), or the WrapKey operation-selected wrap layouts
+/// (mirrors `ShapeResolver::resolve` + the shim's
+/// `select_reader_shape`: `General` never selects wrap layouts).
+fn typed_shape_authorized(
+    registry: &MechanismRegistry,
+    mech_type: u64,
+    variant_shape: &str,
+    operation: Operation,
+) -> bool {
+    if registry.param_shape(mech_type) == Some(variant_shape) {
+        return true;
+    }
+    if registry.param_shape(mech_type) == Some("gcm_compat")
+        && matches!(variant_shape, "iv" | "gcm")
+    {
+        return true;
+    }
+    if operation == Operation::WrapKey {
+        if mech_type == CkMechanismType::AES_GCM.0 && variant_shape == "gcm_wrap" {
+            return true;
+        }
+        if mech_type == CkMechanismType::AES_CCM.0 && variant_shape == "ccm_wrap" {
+            return true;
+        }
+    }
+    false
 }
 
 impl ValidatedMechanismParams {
@@ -1813,9 +1957,13 @@ impl ValidatedMechanismParams {
     /// faithful bytes pass through verbatim.
     ///
     /// Typed (non-Flat/Null/Raw) params pass the R16 presence/length
-    /// consistency gate ([`check_typed_presence`]): the typed path stays
-    /// variant-driven, not registry-driven — the descriptor system
-    /// governs Flat carriage only.
+    /// consistency gate ([`check_typed_presence`]) AND the F1
+    /// mechanism-to-shape binding gate: the variant's canonical shape
+    /// must be bound to the mechanism (modulo the `gcm_compat` union
+    /// and WrapKey operation-selected layouts) — mismatches and
+    /// descriptorless parameterized mechanisms reject with
+    /// `PARAM_INVALID` (S2 §6 RV table: "shape mismatch" row), because
+    /// no downstream layer re-binds before backend FFI.
     pub fn validate(
         mechanism: &CkMechanism,
         registry: &MechanismRegistry,
@@ -1830,14 +1978,22 @@ impl ValidatedMechanismParams {
         match &mechanism.params {
             // Existing transparent contract: unknown or known, parameterless
             // invocations forward.
-            None => Ok(Self { mechanism: mechanism.clone(), flat_grant: None }),
+            None => Ok(Self {
+                mechanism: mechanism.clone(),
+                flat_grant: None,
+                registry: registry.clone(),
+            }),
             // Legacy Raw fails closed at every version.
             Some(CkMechanismParams::Raw(_)) => Err(CkRv::MECHANISM_PARAM_INVALID),
             // NULL + narrowed length needs no descriptor (S2 §6 RV table).
             Some(CkMechanismParams::Null { declared_len, version }) => {
                 check_member_version(*version)?;
                 narrow_len_for_backend(*declared_len, backend_abi)?;
-                Ok(Self { mechanism: mechanism.clone(), flat_grant: None })
+                Ok(Self {
+                    mechanism: mechanism.clone(),
+                    flat_grant: None,
+                    registry: registry.clone(),
+                })
             }
             Some(CkMechanismParams::Flat(p)) => {
                 check_member_version(p.version)?;
@@ -1885,14 +2041,25 @@ impl ValidatedMechanismParams {
                         params: Some(CkMechanismParams::Flat(flat)),
                     },
                     flat_grant: Some(grant),
+                    registry: registry.clone(),
                 })
             }
             // Typed params: R16 presence/length consistency (S2 §3)
-            // over every input-pointer pair; shapes without presence
-            // peers keep the pass-through contract.
+            // over every input-pointer pair, then the F1 binding gate
+            // (S2 §4 + §6) — shapes without presence peers still bind.
             Some(params) => {
                 check_typed_presence(params)?;
-                Ok(Self { mechanism: mechanism.clone(), flat_grant: None })
+                let authorized = params.canonical_shape_name().is_some_and(|shape| {
+                    typed_shape_authorized(registry, mech_type, shape, operation)
+                });
+                if !authorized {
+                    return Err(CkRv::MECHANISM_PARAM_INVALID);
+                }
+                Ok(Self {
+                    mechanism: mechanism.clone(),
+                    flat_grant: None,
+                    registry: registry.clone(),
+                })
             }
         }
     }
@@ -1913,6 +2080,13 @@ impl ValidatedMechanismParams {
         self.flat_grant
     }
 
+    /// The registry snapshot this value was validated against (F6):
+    /// nested descent reuses it so nested Flat eligibility is decided
+    /// under the request's bindings.
+    pub fn registry(&self) -> &MechanismRegistry {
+        &self.registry
+    }
+
     /// Classic sanitize policy (S2 §6 matrix; R20). Pure: no I/O, no
     /// allocation, no registry access — Flat classification reuses the
     /// stored [`FlatGrant`](crate::shape_descriptors::FlatGrant) instead
@@ -1924,12 +2098,16 @@ impl ValidatedMechanismParams {
     /// Flat → reject; canonical byte-buffer Flat → allow (subject to the
     /// upstream mechanism policy, already enforced before validation);
     /// NULL/nonzero → reject (D3: NULL-huge rejects regardless — no D3
-    /// forwarding under sanitize); legacy Raw → always reject. Every
-    /// rejection is `PARAM_INVALID` (`ARGUMENTS_BAD` stays with the
-    /// pre-existing whole-mechanism/data-pointer gates). Typed params
-    /// pass under both settings: R16 presence/length consistency already
-    /// gated them, and scalar/operation semantics belong to the backend —
-    /// no provider-specific scalar conformance (forbidden by S2 §6).
+    /// forwarding under sanitize), outer AND embedded: typed params
+    /// carrying any embedded NULL with a nonzero declared length/count
+    /// reject, including nested structs, counted arrays, and nested
+    /// mechanisms ([`typed_has_nonzero_embedded_null`]); NULL-zero (the
+    /// canonical null) stays allowed, like the outer row. Legacy Raw →
+    /// always reject. Every rejection is `PARAM_INVALID`
+    /// (`ARGUMENTS_BAD` stays with the pre-existing
+    /// whole-mechanism/data-pointer gates). Scalar/operation semantics
+    /// belong to the backend — no provider-specific scalar conformance
+    /// (forbidden by S2 §6).
     pub fn check_classic_sanitize_policy(&self, sanitize: bool) -> Result<(), CkRv> {
         use CkMechanismParams as P;
         if !sanitize {
@@ -1964,11 +2142,11 @@ impl ValidatedMechanismParams {
             // stays so a future constructor cannot silently forward Raw.
             Some(P::Raw(_)) => Err(CkRv::MECHANISM_PARAM_INVALID),
             // Typed params (exhaustive — no catch-all, so a future variant
-            // cannot silently skip this gate): R16 presence/length
-            // consistency already gated them; scalar/operation semantics
-            // belong to the backend. Enum order mirrors the definition.
+            // cannot silently skip this gate): F2 embedded-NULL rule —
+            // any nonzero declared length/count rejects; NULL-zero and
+            // fully-present params pass. Enum order mirrors the definition.
             Some(
-                P::RsaPkcsPss(_)
+                params @ (P::RsaPkcsPss(_)
                 | P::RsaPkcsOaep(_)
                 | P::Gcm(_)
                 | P::Ecdh1Derive(_)
@@ -2045,8 +2223,14 @@ impl ValidatedMechanismParams {
                 | P::Kyber(_)
                 | P::HdKeyDerive(_)
                 | P::VendorObjectExtract(_)
-                | P::VendorObjectInsert(_),
-            ) => Ok(()),
+                | P::VendorObjectInsert(_)),
+            ) => {
+                if typed_has_nonzero_embedded_null(params, 0) {
+                    Err(CkRv::MECHANISM_PARAM_INVALID)
+                } else {
+                    Ok(())
+                }
+            }
         }
     }
 
@@ -2057,8 +2241,9 @@ impl ValidatedMechanismParams {
     /// `CK_OBJECT_HANDLE` fields (the remapper's contract — Flat/Null/None
     /// carry no handles, and typed substitution touches handle fields
     /// only). Every validated property (lengths, caps, shape binding, ABI)
-    /// is preserved by construction — the stored `flat_grant` is carried
-    /// over untouched — and debug builds re-check the cheap invariant that
+    /// is preserved by construction — the stored `flat_grant` and the
+    /// carried registry snapshot travel with `self` untouched — and debug
+    /// builds re-check the cheap invariant that
     /// nothing BUT handle fields changed (both sides compared with all
     /// embedded handles normalized to zero).
     pub fn substitute_handles(mut self, f: impl FnOnce(&mut CkMechanism)) -> Self {
@@ -2071,6 +2256,263 @@ impl ValidatedMechanismParams {
         );
         self
     }
+}
+
+/// Whether a `PointerBytes` peer is a NULL with a nonzero declared
+/// length (F2 sanitize-ON rule; NULL-zero is the canonical null).
+fn is_nonzero_null(peer: &PointerBytes) -> bool {
+    matches!(peer, PointerBytes::Null { declared_len } if *declared_len != 0)
+}
+
+/// Whether a `PointerArray` peer is a NULL with a nonzero declared
+/// count (F2 sanitize-ON rule; NULL-zero is the canonical null).
+fn is_nonzero_null_array<T>(peer: &PointerArray<T>) -> bool {
+    matches!(peer, PointerArray::Null { declared_count } if *declared_count != 0)
+}
+
+/// Maximum nested-mechanism depth the F2 sanitize scan descends: aligned
+/// with the backend FFI descent cap (`MAX_NESTED_MECHANISMS` = 16), so
+/// the fail-closed over-deep verdict only fires for trees that cannot
+/// convert anyway.
+const SANITIZE_NESTING_CAP: u8 = 16;
+
+/// Whether a (possibly nested) mechanism carries a nonzero embedded
+/// NULL anywhere sanitize polices (F2): a nested outer NULL with
+/// nonzero length, a nested Flat (no grant to classify it — fail
+/// closed), a nested Raw (never validates — fail closed), or nonzero
+/// embedded NULLs inside nested typed params (recursed with a depth
+/// cap; over-deep trees fail closed).
+fn mechanism_has_nonzero_null(mech: &CkMechanism, depth: u8) -> bool {
+    if depth > SANITIZE_NESTING_CAP {
+        return true;
+    }
+    match &mech.params {
+        None => false,
+        Some(CkMechanismParams::Null { declared_len, .. }) => *declared_len != 0,
+        Some(CkMechanismParams::Flat(_) | CkMechanismParams::Raw(_)) => true,
+        Some(params) => typed_has_nonzero_embedded_null(params, depth),
+    }
+}
+
+/// Whether typed params carry any embedded NULL with a nonzero declared
+/// length/count (F2 sanitize-ON rule, S2 §6 matrix "NULL/nonzero →
+/// reject" + D3 "rejects regardless"): every `PointerBytes` /
+/// `PointerArray` field, including nested structs (OAEP-in-wrap,
+/// random-data, PRF params, OTP params, derived-key templates),
+/// counted-array elements, and nested mechanisms (recursed via
+/// [`mechanism_has_nonzero_null`]).
+///
+/// Exhaustive with no catch-all, so a future variant cannot silently
+/// skip this gate (the compiler rejects the omission). Enum order
+/// mirrors the definition. Null-bit bools (`*_is_null`) are output
+/// envelopes, not NULL lengths, and are out of this rule's scope.
+fn typed_has_nonzero_embedded_null(params: &CkMechanismParams, depth: u8) -> bool {
+    use CkMechanismParams as P;
+    match params {
+        P::RsaPkcsPss(_) => false,
+        P::RsaPkcsOaep(p) => is_nonzero_null(&p.source_data_presence),
+        P::Gcm(p) => is_nonzero_null(&p.iv_presence) || is_nonzero_null(&p.aad_presence),
+        P::Ecdh1Derive(p) => {
+            is_nonzero_null(&p.shared_data_presence) || is_nonzero_null(&p.public_data_presence)
+        }
+        P::Iv(_) => false,
+        P::Rc5(_) => false,
+        P::Rc5MacGeneral(_) => false,
+        P::Rc2MacGeneral(_) => false,
+        P::Xeddsa(_) => false,
+        P::TlsMac(_) => false,
+        P::AesCtr(_) => false,
+        P::CamelliaCtr(_) => false,
+        P::Rc2Cbc(_) => false,
+        P::Rc5Cbc(p) => is_nonzero_null(&p.iv_presence),
+        P::AesCbcEncryptData(p) => is_nonzero_null(&p.data_presence),
+        P::DesCbcEncryptData(p) => is_nonzero_null(&p.data_presence),
+        P::AriaCbcEncryptData(p) => is_nonzero_null(&p.data_presence),
+        P::CamelliaCbcEncryptData(p) => is_nonzero_null(&p.data_presence),
+        P::SeedCbcEncryptData(p) => is_nonzero_null(&p.data_presence),
+        P::Ccm(p) => is_nonzero_null(&p.nonce_presence) || is_nonzero_null(&p.aad_presence),
+        P::ChaCha20(p) => {
+            is_nonzero_null(&p.block_counter_presence) || is_nonzero_null(&p.nonce_presence)
+        }
+        P::Salsa20(p) => {
+            is_nonzero_null(&p.block_counter_presence) || is_nonzero_null(&p.nonce_presence)
+        }
+        P::Salsa20ChaCha20Poly1305(p) => {
+            is_nonzero_null(&p.nonce_presence) || is_nonzero_null(&p.aad_presence)
+        }
+        P::GcmWrap(p) => is_nonzero_null(&p.iv_presence) || is_nonzero_null(&p.aad_presence),
+        P::CcmWrap(p) => is_nonzero_null(&p.nonce_presence) || is_nonzero_null(&p.aad_presence),
+        P::Ecdh2Derive(p) => {
+            is_nonzero_null(&p.shared_data_presence)
+                || is_nonzero_null(&p.public_data_presence)
+                || is_nonzero_null(&p.public_data2_presence)
+        }
+        P::EcmqvDerive(p) => {
+            is_nonzero_null(&p.shared_data_presence)
+                || is_nonzero_null(&p.public_data_presence)
+                || is_nonzero_null(&p.public_data2_presence)
+        }
+        P::X942Dh1Derive(p) => {
+            is_nonzero_null(&p.other_info_presence) || is_nonzero_null(&p.public_data_presence)
+        }
+        P::X942Dh2Derive(p) => {
+            is_nonzero_null(&p.other_info_presence)
+                || is_nonzero_null(&p.public_data_presence)
+                || is_nonzero_null(&p.public_data2_presence)
+        }
+        P::X942MqvDerive(p) => {
+            is_nonzero_null(&p.other_info_presence)
+                || is_nonzero_null(&p.public_data_presence)
+                || is_nonzero_null(&p.public_data2_presence)
+        }
+        P::Hkdf(p) => is_nonzero_null(&p.salt_presence) || is_nonzero_null(&p.info_presence),
+        P::Eddsa(p) => is_nonzero_null(&p.context_data_presence),
+        P::Gostr3410Derive(p) => {
+            is_nonzero_null(&p.public_data_presence) || is_nonzero_null(&p.ukm_presence)
+        }
+        P::KeaDerive(p) => {
+            is_nonzero_null(&p.random_a_presence)
+                || is_nonzero_null(&p.random_b_presence)
+                || is_nonzero_null(&p.public_data_presence)
+        }
+        P::EcdhAesKeyWrap(p) => is_nonzero_null(&p.shared_data_presence),
+        P::RsaAesKeyWrap(p) => is_nonzero_null(&p.oaep_params.source_data_presence),
+        P::Gostr3410KeyWrap(p) => {
+            is_nonzero_null(&p.wrap_oid_presence) || is_nonzero_null(&p.ukm_presence)
+        }
+        P::KeyWrapSetOaep(p) => is_nonzero_null(&p.x_presence),
+        P::Pbe(p) => {
+            is_nonzero_null(&p.init_vector_presence)
+                || is_nonzero_null(&p.password_presence)
+                || is_nonzero_null(&p.salt_presence)
+        }
+        P::Pkcs5Pbkd2(p) => {
+            is_nonzero_null(&p.salt_source_data_presence)
+                || is_nonzero_null(&p.prf_data_presence)
+                || is_nonzero_null(&p.password_presence)
+        }
+        P::TlsPrf(p) => is_nonzero_null(&p.seed_presence) || is_nonzero_null(&p.label_presence),
+        P::TlsKdf(p) => {
+            is_nonzero_null(&p.label_presence)
+                || is_nonzero_null(&p.context_data_presence)
+                || ssl_random_has_nonzero_null(&p.random_info)
+        }
+        P::Ssl3MasterKeyDerive(p) => ssl_random_has_nonzero_null(&p.random_info),
+        P::Tls12MasterKeyDerive(p) => ssl_random_has_nonzero_null(&p.random_info),
+        P::Tls12ExtendedMasterKeyDerive(p) => is_nonzero_null(&p.session_hash_presence),
+        P::Ssl3KeyMat(p) => {
+            is_nonzero_null(&p.client_iv_presence)
+                || is_nonzero_null(&p.server_iv_presence)
+                || ssl_random_has_nonzero_null(&p.random_info)
+        }
+        P::WtlsMasterKeyDerive(p) => wtls_random_has_nonzero_null(&p.random_info),
+        P::WtlsPrf(p) => is_nonzero_null(&p.seed_presence) || is_nonzero_null(&p.label_presence),
+        P::WtlsKeyMat(p) => {
+            is_nonzero_null(&p.iv_presence) || wtls_random_has_nonzero_null(&p.random_info)
+        }
+        P::IkePrfDerive(p) => is_nonzero_null(&p.ni_presence) || is_nonzero_null(&p.nr_presence),
+        P::Ike1PrfDerive(p) => {
+            is_nonzero_null(&p.ckyi_presence) || is_nonzero_null(&p.ckyr_presence)
+        }
+        P::Ike1ExtendedDerive(p) => is_nonzero_null(&p.extra_data_presence),
+        P::Ike2PrfPlusDerive(p) => is_nonzero_null(&p.seed_data_presence),
+        P::Sp800108Kdf(p) => {
+            sp800_108_data_has_nonzero_null(&p.data_params_presence)
+                || sp800_108_keys_has_nonzero_null(&p.additional_derived_keys_presence)
+        }
+        P::Sp800108FeedbackKdf(p) => {
+            sp800_108_data_has_nonzero_null(&p.data_params_presence)
+                || is_nonzero_null(&p.iv_presence)
+                || sp800_108_keys_has_nonzero_null(&p.additional_derived_keys_presence)
+        }
+        P::X3dhInitiate(_) => false,
+        P::X3dhRespond(_) => false,
+        P::X2RatchetInitialize(_) => false,
+        P::X2RatchetRespond(_) => false,
+        P::Otp(p) => {
+            is_nonzero_null_array(&p.params_presence)
+                || p.params_presence
+                    .as_present()
+                    .is_some_and(|elems| elems.iter().any(|e| is_nonzero_null(&e.value_presence)))
+        }
+        P::Kip(p) => {
+            is_nonzero_null(&p.seed_presence)
+                || p.mechanism.as_deref().is_some_and(|m| mechanism_has_nonzero_null(m, depth + 1))
+        }
+        P::CmsSig(p) => {
+            mechanism_has_nonzero_null(&p.signing_mechanism, depth + 1)
+                || mechanism_has_nonzero_null(&p.digest_mechanism, depth + 1)
+        }
+        P::SkipjackPrivateWrap(p) => {
+            is_nonzero_null(&p.password_presence)
+                || is_nonzero_null(&p.public_data_presence)
+                || is_nonzero_null(&p.random_a_presence)
+                || is_nonzero_null(&p.prime_p_presence)
+                || is_nonzero_null(&p.base_g_presence)
+                || is_nonzero_null(&p.subprime_q_presence)
+        }
+        P::SkipjackRelayx(p) => {
+            is_nonzero_null(&p.old_wrapped_x_presence)
+                || is_nonzero_null(&p.old_password_presence)
+                || is_nonzero_null(&p.old_public_data_presence)
+                || is_nonzero_null(&p.old_random_a_presence)
+                || is_nonzero_null(&p.new_password_presence)
+                || is_nonzero_null(&p.new_public_data_presence)
+                || is_nonzero_null(&p.new_random_a_presence)
+        }
+        P::MacGeneral(_) => false,
+        P::ObjectHandle(_) => false,
+        P::Extract(_) => false,
+        P::SignAdditionalContext(p) => is_nonzero_null(&p.context_presence),
+        P::Kmac(p) => is_nonzero_null(&p.customization_string_presence),
+        P::MuGen(p) => is_nonzero_null(&p.tr_presence) || is_nonzero_null(&p.context_presence),
+        P::KeyDerivationString(p) => is_nonzero_null(&p.data_presence),
+        // Unreachable from the typed policy arm (it matches typed
+        // variants only) and from nested descent (which routes envelopes
+        // through `mechanism_has_nonzero_null`): fail closed so a future
+        // caller cannot silently pass an envelope through here.
+        P::Raw(_) | P::Flat(_) | P::Null { .. } => true,
+        P::Ecies(p) => {
+            mechanism_has_nonzero_null(&p.derivation_mechanism, depth + 1)
+                || mechanism_has_nonzero_null(&p.encryption_mechanism, depth + 1)
+                || mechanism_has_nonzero_null(&p.mac_mechanism, depth + 1)
+        }
+        P::AesCmacKeyDerivation(_) => false,
+        P::Dilithium(_) => false,
+        P::Kyber(_) => false,
+        P::HdKeyDerive(_) => false,
+        P::VendorObjectExtract(_) => false,
+        P::VendorObjectInsert(_) => false,
+    }
+}
+
+/// F2 helper: nonzero NULLs in an SSL random-data pair.
+fn ssl_random_has_nonzero_null(r: &SslRandomData) -> bool {
+    is_nonzero_null(&r.client_random_presence) || is_nonzero_null(&r.server_random_presence)
+}
+
+/// F2 helper: nonzero NULLs in a WTLS random-data pair.
+fn wtls_random_has_nonzero_null(r: &WtlsRandomData) -> bool {
+    is_nonzero_null(&r.client_random_presence) || is_nonzero_null(&r.server_random_presence)
+}
+
+/// F2 helper: a nonzero NULL data-params array, or a NULL-nonzero value
+/// in any present element.
+fn sp800_108_data_has_nonzero_null(data: &PointerArray<PrfDataParam>) -> bool {
+    is_nonzero_null_array(data)
+        || data
+            .as_present()
+            .is_some_and(|elems| elems.iter().any(|e| is_nonzero_null(&e.value_presence)))
+}
+
+/// F2 helper: a nonzero NULL derived-keys array, or a nonzero NULL
+/// template array in any present element (templates carry attributes,
+/// which hold no NULLs — only the array count is policed).
+fn sp800_108_keys_has_nonzero_null(keys: &PointerArray<Sp800108DerivedKey>) -> bool {
+    is_nonzero_null_array(keys)
+        || keys
+            .as_present()
+            .is_some_and(|elems| elems.iter().any(|k| is_nonzero_null_array(&k.template_presence)))
 }
 
 /// Clone `mechanism` with every embedded object-handle field zeroed, for
@@ -4001,8 +4443,14 @@ mod validated_params_tests {
     const UNKNOWN_MECH: u64 = 0x0000_9999;
 
     fn registry_with_binding(mech: u64, shape: &str) -> MechanismRegistry {
+        registry_with_bindings(&[(shape, mech)])
+    }
+
+    fn registry_with_bindings(bindings: &[(&str, u64)]) -> MechanismRegistry {
         let mut shapes = HashMap::new();
-        shapes.insert(mech, shape.to_string());
+        for (shape, mech) in bindings {
+            shapes.insert(*mech, (*shape).to_string());
+        }
         MechanismRegistry::from_parts(
             shapes,
             HashSet::new(),
@@ -4068,6 +4516,21 @@ mod validated_params_tests {
     }
 
     #[test]
+    fn validated_value_carries_its_registry_snapshot() {
+        // F6: nested descent reuses the validating snapshot, so `validate`
+        // must carry it (notably its bindings) in the proof itself.
+        let registry = registry_with_binding(AES_CBC, "iv");
+        let mechanism = CkMechanism { mechanism_type: CkMechanismType(AES_CBC), params: None };
+        let validated = validate(&registry, &mechanism).unwrap();
+        assert_eq!(validated.registry().param_shape(AES_CBC), Some("iv"));
+        assert_eq!(validated.registry().revision(), registry.revision());
+        // Value equality ignores provenance: same mechanism validated
+        // under different snapshots still compares equal.
+        let other = validate(&empty_registry(), &mechanism).unwrap();
+        assert_eq!(validated, other);
+    }
+
+    #[test]
     fn exclusion_wins_over_every_param_kind() {
         let registry = excluded_registry(AES_CBC);
         let typed = CkMechanism {
@@ -4107,18 +4570,325 @@ mod validated_params_tests {
     }
 
     #[test]
-    fn typed_params_pass_through_without_descriptor() {
-        // The typed path is variant-driven, not registry-driven: unknown
-        // mechanisms with typed params keep the existing contract (the
-        // descriptor system governs Flat carriage only).
+    fn typed_params_rejected_without_descriptor() {
+        // F1: the typed path is BOUND, not variant-driven — unknown
+        // mechanisms with typed params have no descriptor and reject
+        // (S2 §6 RV table: "unknown mechanism with params and no
+        // descriptor → PARAM_INVALID").
         let registry = empty_registry();
         let mechanism = CkMechanism {
             mechanism_type: CkMechanismType(UNKNOWN_MECH),
             params: Some(CkMechanismParams::Iv(IvParams { iv: vec![1, 2, 3] })),
         };
+        assert_eq!(validate(&registry, &mechanism), Err(CkRv::MECHANISM_PARAM_INVALID));
+    }
+
+    /// F1 probe: AES-GCM carrying RSA-PSS parameters must reject (shape
+    /// mismatch) — no downstream layer re-binds before backend FFI, so
+    /// the typed gate must.
+    #[test]
+    fn f1_mismatched_typed_shape_rejected() {
+        let registry = registry_with_binding(CkMechanismType::AES_GCM.0, "gcm");
+        let mechanism = CkMechanism {
+            mechanism_type: CkMechanismType::AES_GCM,
+            params: Some(CkMechanismParams::RsaPkcsPss(RsaPkcsPssParams {
+                hash_alg: CkMechanismType::SHA256,
+                mgf: CkMgf(1),
+                salt_len: 32,
+            })),
+        };
+        assert_eq!(validate(&registry, &mechanism), Err(CkRv::MECHANISM_PARAM_INVALID));
+    }
+
+    /// F1 probe: an unknown mechanism carrying RSA-PSS parameters must
+    /// reject (descriptorless parameterized mechanism, S2 §6 RV table).
+    #[test]
+    fn f1_unknown_mech_typed_params_rejected() {
+        let registry = empty_registry();
+        let mechanism = CkMechanism {
+            mechanism_type: CkMechanismType(UNKNOWN_MECH),
+            params: Some(CkMechanismParams::RsaPkcsPss(RsaPkcsPssParams {
+                hash_alg: CkMechanismType::SHA256,
+                mgf: CkMgf(1),
+                salt_len: 32,
+            })),
+        };
+        assert_eq!(validate(&registry, &mechanism), Err(CkRv::MECHANISM_PARAM_INVALID));
+    }
+
+    /// F1 operation forms: the `gcm_compat` union authorizes both Iv
+    /// and Gcm variants (the manifest binds both typed messages to it);
+    /// any other variant under a compat-bound mech still rejects.
+    #[test]
+    fn f1_gcm_compat_union_authorizes_iv_and_gcm() {
+        const GMAC: u64 = 0x0000_10A6;
+        let registry = registry_with_binding(GMAC, "gcm_compat");
+        let iv = CkMechanism {
+            mechanism_type: CkMechanismType(GMAC),
+            params: Some(CkMechanismParams::Iv(IvParams { iv: vec![1, 2, 3] })),
+        };
+        validate(&registry, &iv).unwrap();
+        let gcm = CkMechanism {
+            mechanism_type: CkMechanismType(GMAC),
+            params: Some(CkMechanismParams::Gcm(GcmParams {
+                iv_bits: 96,
+                iv_buffer_len: 12,
+                tag_bits: 128,
+                iv_presence: PointerBytes::from_legacy(&[0u8; 12], false),
+                aad_presence: PointerBytes::from_legacy(&[], false),
+            })),
+        };
+        validate(&registry, &gcm).unwrap();
+        let other = CkMechanism {
+            mechanism_type: CkMechanismType(GMAC),
+            params: Some(CkMechanismParams::RsaPkcsPss(RsaPkcsPssParams {
+                hash_alg: CkMechanismType::SHA256,
+                mgf: CkMgf(1),
+                salt_len: 32,
+            })),
+        };
+        assert_eq!(validate(&registry, &other), Err(CkRv::MECHANISM_PARAM_INVALID));
+    }
+
+    /// F1 operation forms: WrapKey selects the GCM/CCM wrap layouts
+    /// (mirrors `ShapeResolver::resolve`); `General` never does, and a
+    /// wrap variant under an unrelated mech rejects under both.
+    #[test]
+    fn f1_wrap_operation_selects_wrap_layouts() {
+        let gcm_wrap = || {
+            CkMechanismParams::GcmWrap(GcmWrapParams {
+                iv_fixed_bits: 32,
+                iv_generator: CkGeneratorFunction(1),
+                tag_bits: 128,
+                iv_presence: PointerBytes::from_legacy(&[], false),
+                aad_presence: PointerBytes::from_legacy(&[], false),
+            })
+        };
+        let validate_op = |registry: &MechanismRegistry,
+                           mechanism: &CkMechanism,
+                           operation: Operation|
+         -> Result<ValidatedMechanismParams, CkRv> {
+            ValidatedMechanismParams::validate(
+                mechanism,
+                registry,
+                operation,
+                ParamAbi::Lp64NativeLe,
+                ParamAbi::Lp64NativeLe,
+            )
+        };
+        let bound = registry_with_binding(CkMechanismType::AES_GCM.0, "gcm");
+        let wrap_mech =
+            CkMechanism { mechanism_type: CkMechanismType::AES_GCM, params: Some(gcm_wrap()) };
+        validate_op(&bound, &wrap_mech, Operation::WrapKey).unwrap();
+        assert_eq!(
+            validate_op(&bound, &wrap_mech, Operation::General),
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        );
+        // Direct TOML binding to the wrap shape authorizes under General too.
+        let direct = registry_with_binding(CkMechanismType::AES_GCM.0, "gcm_wrap");
+        validate_op(&direct, &wrap_mech, Operation::General).unwrap();
+        // Unrelated mech + wrap variant: no authorization either way.
+        let other =
+            CkMechanism { mechanism_type: CkMechanismType(UNKNOWN_MECH), params: Some(gcm_wrap()) };
+        let empty = empty_registry();
+        assert_eq!(
+            validate_op(&empty, &other, Operation::WrapKey),
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        );
+        assert_eq!(
+            validate_op(&empty, &other, Operation::General),
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        );
+    }
+
+    /// F1 mapping spot-check: canonical names track the manifest's
+    /// wire-message bindings (the union members map to their primary
+    /// shapes; the union itself is an authorization rule, not a name).
+    #[test]
+    fn f1_canonical_shape_names_spot_check() {
+        use CkMechanismParams as P;
+        assert_eq!(P::Iv(IvParams { iv: vec![] }).canonical_shape_name(), Some("iv"));
+        assert_eq!(
+            P::RsaPkcsPss(RsaPkcsPssParams {
+                hash_alg: CkMechanismType::SHA256,
+                mgf: CkMgf(1),
+                salt_len: 0,
+            })
+            .canonical_shape_name(),
+            Some("rsa_pss")
+        );
+        assert_eq!(
+            P::MacGeneral(MacGeneralParams { mac_length: 0 }).canonical_shape_name(),
+            Some("mac_general")
+        );
+        assert_eq!(
+            P::Flat(FlatParams {
+                bytes: SecretBytes::copy_from_slice(&[]),
+                declared_len: 0,
+                source_abi: None,
+                fingerprint: 0,
+                version: 0,
+            })
+            .canonical_shape_name(),
+            None
+        );
+        assert_eq!(P::Null { declared_len: 0, version: 0 }.canonical_shape_name(), None);
+        assert_eq!(
+            P::Raw(RawMechanismParams { data: SecretBytes::copy_from_slice(&[]) })
+                .canonical_shape_name(),
+            None
+        );
+    }
+
+    /// F2 probe: GCM with an embedded NULL-huge IV rejects under
+    /// sanitize ON (D3 "rejects regardless" is unqualified — it covers
+    /// embedded legs, not just the outer form); OFF still forwards.
+    #[test]
+    fn f2_sanitize_on_rejects_embedded_null_huge() {
+        const HUGE: u64 = 512 * 1024 * 1024 + 1;
+        let registry = registry_with_binding(CkMechanismType::AES_GCM.0, "gcm");
+        let mechanism = CkMechanism {
+            mechanism_type: CkMechanismType::AES_GCM,
+            params: Some(CkMechanismParams::Gcm(GcmParams {
+                iv_bits: 96,
+                iv_buffer_len: 12,
+                tag_bits: 128,
+                iv_presence: PointerBytes::null_len(HUGE),
+                aad_presence: PointerBytes::from_legacy(&[0xAA], false),
+            })),
+        };
+        let validated = validate(&registry, &mechanism).unwrap();
+        assert_eq!(
+            validated.check_classic_sanitize_policy(true),
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        );
+        validated.check_classic_sanitize_policy(false).unwrap();
+    }
+
+    /// F2 probe: the matrix row is "NULL/nonzero → reject" with no size
+    /// qualifier — even a small embedded nonzero NULL rejects under ON.
+    /// NULL-zero (the canonical null) stays allowed, like the outer row.
+    #[test]
+    fn f2_sanitize_on_rejects_embedded_null_nonzero_allows_zero() {
+        let registry = registry_with_binding(CkMechanismType::AES_GCM.0, "gcm");
+        let gcm = |iv: PointerBytes| CkMechanism {
+            mechanism_type: CkMechanismType::AES_GCM,
+            params: Some(CkMechanismParams::Gcm(GcmParams {
+                iv_bits: 96,
+                iv_buffer_len: 12,
+                tag_bits: 128,
+                iv_presence: iv,
+                aad_presence: PointerBytes::from_legacy(&[], false),
+            })),
+        };
+        let small = validate(&registry, &gcm(PointerBytes::null_len(12))).unwrap();
+        assert_eq!(small.check_classic_sanitize_policy(true), Err(CkRv::MECHANISM_PARAM_INVALID));
+        small.check_classic_sanitize_policy(false).unwrap();
+        let zero = validate(&registry, &gcm(PointerBytes::null_len(0))).unwrap();
+        zero.check_classic_sanitize_policy(true).unwrap();
+    }
+
+    /// F2 probe: nested NULL lengths/counts reject under ON — the KIP
+    /// seed leg, an SP800-108 NULL data-params array, an OTP element
+    /// NULL value, and a nested outer NULL.
+    #[test]
+    fn f2_sanitize_on_rejects_nested_nulls() {
+        let registry = registry_with_bindings(&[
+            ("kip", CkMechanismType::KIP_DERIVE.0),
+            ("sp800_108_kdf", CkMechanismType::SP800_108_COUNTER_KDF.0),
+            ("otp", UNKNOWN_MECH),
+        ]);
+        // KIP seed NULL-nonzero.
+        let kip = CkMechanism {
+            mechanism_type: CkMechanismType::KIP_DERIVE,
+            params: Some(CkMechanismParams::Kip(KipParams {
+                mechanism: None,
+                key_handle: CkObjectHandle(0),
+                seed_presence: PointerBytes::null_len(5),
+            })),
+        };
+        let validated = validate(&registry, &kip).unwrap();
+        assert_eq!(
+            validated.check_classic_sanitize_policy(true),
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        );
+        // SP800-108 NULL data-params array (nonzero count).
+        let kdf = CkMechanism {
+            mechanism_type: CkMechanismType::SP800_108_COUNTER_KDF,
+            params: Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
+                prf_type: CkMechanismType::SHA256,
+                data_params_presence: PointerArray::null_count(3),
+                additional_derived_keys_presence: PointerArray::present(vec![]),
+            })),
+        };
+        let validated = validate(&registry, &kdf).unwrap();
+        assert_eq!(
+            validated.check_classic_sanitize_policy(true),
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        );
+        // OTP element with a NULL-nonzero value.
+        let otp = CkMechanism {
+            mechanism_type: CkMechanismType(UNKNOWN_MECH),
+            params: Some(CkMechanismParams::Otp(OtpParams {
+                params_presence: PointerArray::present(vec![OtpParam {
+                    type_: 1,
+                    value_presence: PointerBytes::null_len(2),
+                }]),
+            })),
+        };
+        let validated = validate(&registry, &otp).unwrap();
+        assert_eq!(
+            validated.check_classic_sanitize_policy(true),
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        );
+        // Nested outer NULL-nonzero inside KIP.
+        let nested_null = CkMechanism {
+            mechanism_type: CkMechanismType::KIP_DERIVE,
+            params: Some(CkMechanismParams::Kip(KipParams {
+                mechanism: Some(Box::new(CkMechanism {
+                    mechanism_type: CkMechanismType::SHA256,
+                    params: Some(CkMechanismParams::Null { declared_len: 7, version: 1 }),
+                })),
+                key_handle: CkObjectHandle(0),
+                seed_presence: PointerBytes::present_copy(&[]),
+            })),
+        };
+        let validated = validate(&registry, &nested_null).unwrap();
+        assert_eq!(
+            validated.check_classic_sanitize_policy(true),
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        );
+        validated.check_classic_sanitize_policy(false).unwrap();
+    }
+
+    /// F1 positive control: bound typed pairs keep forwarding, and the
+    /// parameterless/Null transparent rows are untouched.
+    #[test]
+    fn f1_bound_typed_pair_still_forwards() {
+        let registry = registry_with_binding(CkMechanismType::AES_GCM.0, "gcm");
+        let mechanism = CkMechanism {
+            mechanism_type: CkMechanismType::AES_GCM,
+            params: Some(CkMechanismParams::Gcm(GcmParams {
+                iv_bits: 96,
+                iv_buffer_len: 12,
+                tag_bits: 128,
+                iv_presence: PointerBytes::from_legacy(&[0u8; 12], false),
+                aad_presence: PointerBytes::from_legacy(&[0xAA, 0xBB], false),
+            })),
+        };
         let validated = validate(&registry, &mechanism).unwrap();
         assert!(validated.flat_grant().is_none());
         assert_eq!(validated.into_inner(), mechanism);
+        // Transparent rows untouched: unknown without params forwards,
+        // unknown with Null forwards (no descriptor needed).
+        let registry = empty_registry();
+        let bare = CkMechanism { mechanism_type: CkMechanismType(UNKNOWN_MECH), params: None };
+        validate(&registry, &bare).unwrap();
+        let null = CkMechanism {
+            mechanism_type: CkMechanismType(UNKNOWN_MECH),
+            params: Some(CkMechanismParams::Null { declared_len: 5, version: 1 }),
+        };
+        validate(&registry, &null).unwrap();
     }
 
     #[test]
@@ -4140,7 +4910,12 @@ mod validated_params_tests {
         // validators; R19 removed check_array_pair/check_kip_nesting with
         // the dual representation, so the surviving Err branches are the
         // null-bit pairs plus the SP800-108 derived-key pair below.)
-        let registry = empty_registry();
+        // F1: each variant rides a mech bound to its own shape (one mech
+        // binds one shape, so the two families use adjacent numbers).
+        let registry = registry_with_bindings(&[
+            ("tls_prf", UNKNOWN_MECH),
+            ("ssl3_master_key_derive", UNKNOWN_MECH + 1),
+        ]);
         let random = SslRandomData {
             client_random_presence: PointerBytes::present_copy(&[]),
             server_random_presence: PointerBytes::present_copy(&[]),
@@ -4177,7 +4952,7 @@ mod validated_params_tests {
         );
         // Version pair (master-key derive): NULL bit + nonzero version rejects.
         let versioned = |major: u32, minor: u32, is_null: bool| CkMechanism {
-            mechanism_type: CkMechanismType(UNKNOWN_MECH),
+            mechanism_type: CkMechanismType(UNKNOWN_MECH + 1),
             params: Some(CkMechanismParams::Ssl3MasterKeyDerive(Ssl3MasterKeyDeriveParams {
                 random_info: random.clone(),
                 version_major: major,
@@ -4194,7 +4969,8 @@ mod validated_params_tests {
     fn sp800108_derived_key_disagreement_rejected() {
         // R18(1): SP800-108 `phKey` NULL bit with a nonzero handle
         // rejects (check_sp800108_derived_key); agreement forwards.
-        let registry = empty_registry();
+        // F1: the KDF rides a mech bound to its shape.
+        let registry = registry_with_binding(UNKNOWN_MECH, "sp800_108_kdf");
         let kdf = |handle: u64, is_null: bool| CkMechanism {
             mechanism_type: CkMechanismType(UNKNOWN_MECH),
             params: Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
@@ -4417,10 +5193,12 @@ mod validated_params_tests {
         // R13 remap round-trip, unit level: substitution swaps the embedded
         // handle (virtual → backend) while lengths, binding, and the grant
         // (caps/ABI) carry over unchanged.
-        let registry = registry_with_binding(AES_CBC, "iv");
+        // F1: the HKDF rides its own bound mech (AES_CBC stays iv-bound
+        // for the Flat half below — one mech binds one shape).
+        let registry = registry_with_bindings(&[("hkdf", UNKNOWN_MECH), ("iv", AES_CBC)]);
         // Typed HKDF: only the salt-key handle may change.
         let hkdf = CkMechanism {
-            mechanism_type: CkMechanismType(AES_CBC),
+            mechanism_type: CkMechanismType(UNKNOWN_MECH),
             params: Some(CkMechanismParams::Hkdf(HkdfParams {
                 extract: true,
                 expand: true,
@@ -4484,7 +5262,13 @@ mod validated_params_tests {
 
     #[test]
     fn r16_validation_accepts_consistent_presence() {
-        let registry = registry_with_binding(AES_CBC, "iv");
+        // F1: each variant rides a mech bound to its own shape.
+        let registry = registry_with_bindings(&[
+            ("gcm", CkMechanismType::AES_GCM.0),
+            ("hkdf", UNKNOWN_MECH),
+            ("ecdh1_derive", UNKNOWN_MECH + 1),
+            ("rsa_aes_key_wrap", UNKNOWN_MECH + 2),
+        ]);
         // NULL IV + present-empty aad alongside.
         let v0_null = r16_gcm(PointerBytes::null_len(0), PointerBytes::present_copy(b""));
         validate(&registry, &r16_mech(CkMechanismType::AES_GCM.0, v0_null)).unwrap();
@@ -4501,14 +5285,14 @@ mod validated_params_tests {
             salt_presence: PointerBytes::present_copy(b"salty"),
             info_presence: PointerBytes::null_len(12),
         });
-        validate(&registry, &r16_mech(0x0000_1087, hkdf)).unwrap();
+        validate(&registry, &r16_mech(UNKNOWN_MECH, hkdf)).unwrap();
         // Bool-less Vec pair (ECDH1 public data).
         let ecdh1 = CkMechanismParams::Ecdh1Derive(Ecdh1DeriveParams {
             kdf: CkKdf(1),
             shared_data_presence: PointerBytes::present_copy(b""),
             public_data_presence: PointerBytes::present_copy(&[0x04; 65]),
         });
-        validate(&registry, &r16_mech(0x0000_1087, ecdh1)).unwrap();
+        validate(&registry, &r16_mech(UNKNOWN_MECH + 1, ecdh1)).unwrap();
         // Nested OAEP inside RSA-AES wrap.
         let wrap = CkMechanismParams::RsaAesKeyWrap(RsaAesKeyWrapParams {
             aes_key_bits: 128,
@@ -4519,6 +5303,6 @@ mod validated_params_tests {
                 source_data_presence: PointerBytes::present_copy(b""),
             },
         });
-        validate(&registry, &r16_mech(0x0000_1087, wrap)).unwrap();
+        validate(&registry, &r16_mech(UNKNOWN_MECH + 2, wrap)).unwrap();
     }
 }

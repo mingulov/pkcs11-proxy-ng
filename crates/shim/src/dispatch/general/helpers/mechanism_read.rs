@@ -149,9 +149,10 @@ pub(crate) unsafe fn payload_bytes(ptr: *const u8, len: CK_ULONG) -> CkResult<Ve
 /// bytes mirror it so the value satisfies `check_typed_presence`).
 ///
 /// Byte-governed callers pass the struct's length scalar; bits-governed
-/// callers pass the derived byte length (keeping the legacy `>=`
-/// ceiling pre-check at the call site); fixed-size callers pass the
-/// fixed extent. The S2 §10 shared-length exception is vacuous here —
+/// callers pass the derived byte length with NO call-site ceiling
+/// pre-check (F3: the helper enforces the ceiling per non-NULL leg,
+/// so NULL legs record huge derived lengths uncapped); fixed-size
+/// callers pass the fixed extent. The S2 §10 shared-length exception is vacuous here —
 /// no R17 input-pointer family shares a length (pinned by
 /// `r17_shared_length_exception_vacuous_for_v1_input_shapes`;
 /// `kea_derive` + `skipjack_private_wrap` are R18 tail).
@@ -459,8 +460,15 @@ unsafe fn read_mechanism_v1(
     //   transport-limit RV (PARAM_INVALID) — in particular,
     //   pointer-bearing oversized structs stay rejected (residual limit;
     //   typed-plus-tail only on provider evidence, NOT this task);
-    // - nested/output forms ride typed envelopes only (R18 tail
-    //   step-1 readers — presence/count/output envelopes, never `Raw`);
+    // - nested/output forms: exact supported native-form sizes ride
+    //   typed envelopes only (R18 tail step-1 readers —
+    //   presence/count/output envelopes, never `Raw`); anything else
+    //   -> Flat branch, where `decide_flat` denies NestedOrOutput
+    //   (PARAM_INVALID) — in particular pointer-bearing oversized
+    //   extents stay rejected (F4, S2 §5 residual limit). Legitimate
+    //   alternate layouts (the TLS12 key-mat superset) resolve via
+    //   the length-selected alternate, so both exact sizes stay
+    //   typed under the same comparison;
     // - unresolvable (unbound/unknown shape) -> Flat branch, where
     //   `decide_flat` grants parameterless-only and denies the rest
     //   (unknown/vendor/nested/over-cap -> PARAM_INVALID).
@@ -468,10 +476,9 @@ unsafe fn read_mechanism_v1(
         Some(form) => match form.outer_kind() {
             OuterKind::Parameterless => false,
             OuterKind::ByteBuffer => declared_len != 0,
-            OuterKind::ScalarStruct | OuterKind::PointerStruct => {
+            OuterKind::ScalarStruct | OuterKind::PointerStruct | OuterKind::NestedOrOutput => {
                 Some(declared_len) == form.native_size(abi).map(|size| size as u64)
             }
-            OuterKind::NestedOrOutput => declared_len != 0,
         },
         None => false,
     };
@@ -976,12 +983,10 @@ unsafe fn read_v1_typed_params(
             let ch = unsafe { read_param_struct(param_ptr as *const CK_CHACHA20_PARAMS)? };
             let bc_bytes = (ch.blockCounterBits as usize).div_ceil(8);
             let nonce_bytes = (ch.ulNonceBits as usize).div_ceil(8);
-            // `>=`, not `>`: on a 32-bit CK_ULONG target div_ceil(u32::MAX, 8)
-            // equals MAX_SERIALIZABLE_BYTES exactly, so `>` is unreachable and
-            // the guard would wild-read at the boundary (i686 SIGSEGV).
-            if bc_bytes >= MAX_SERIALIZABLE_BYTES || nonce_bytes >= MAX_SERIALIZABLE_BYTES {
-                return Err(CkRv::MECHANISM_PARAM_INVALID);
-            }
+            // F3/D3: no call-site ceiling pre-check — the 512 MiB
+            // materialization limit applies per non-NULL leg inside
+            // `read_pointer_field_v1`; NULL legs record any derived
+            // length without materializing (all-NULL huge forwards).
             // Bits-governed: NULL records the derived byte length.
             let block_counter_presence = unsafe {
                 read_pointer_field_v1(ch.pBlockCounter as *const u8, bc_bytes as CK_ULONG)?
@@ -1003,10 +1008,9 @@ unsafe fn read_v1_typed_params(
             // Safety: pParameter points to a valid CK_SALSA20_PARAMS.
             let salsa = unsafe { read_param_struct(param_ptr as *const CK_SALSA20_PARAMS)? };
             let nonce_bytes = (salsa.ulNonceBits as usize).div_ceil(8);
-            // `>=`, not `>`: see the chacha20 arm (i686 SIGSEGV).
-            if nonce_bytes >= MAX_SERIALIZABLE_BYTES {
-                return Err(CkRv::MECHANISM_PARAM_INVALID);
-            }
+            // F3/D3: no call-site ceiling pre-check (see the chacha20
+            // arm) — the per-leg helper caps non-NULL legs and records
+            // NULL legs uncapped.
             // Fixed 8-byte block counter: NULL records the fixed extent.
             let block_counter_presence =
                 unsafe { read_pointer_field_v1(salsa.pBlockCounter as *const u8, 8)? };
@@ -1875,12 +1879,10 @@ unsafe fn read_v1_tail_params(
             }
             // Safety: pParameter points to a valid CK_WTLS_KEY_MAT_PARAMS.
             let p = unsafe { read_param_struct(param_ptr as *const CK_WTLS_KEY_MAT_PARAMS)? };
-            // Bits-governed IV length: keep the legacy ceiling
-            // pre-check (the R17 discipline's call-site companion rule).
+            // Bits-governed IV length (F3/D3): no call-site ceiling
+            // pre-check — NULL legs record the derived length
+            // uncapped; the per-leg helper caps non-NULL legs.
             let requested_iv_len = ((p.ulIVSizeInBits as usize).saturating_add(7)) / 8;
-            if requested_iv_len > MAX_SERIALIZABLE_BYTES {
-                return Err(CkRv::MECHANISM_PARAM_INVALID);
-            }
             let client_random_presence = unsafe {
                 read_pointer_field_v1(
                     p.RandomInfo.pClientRandom as *const u8,
@@ -2093,12 +2095,10 @@ unsafe fn read_v1_tail_params(
             }
             // Safety: pParameter points to a valid CK_SSL3_KEY_MAT_PARAMS.
             let p = unsafe { read_param_struct(param_ptr as *const CK_SSL3_KEY_MAT_PARAMS)? };
-            // Bits-governed IV length: keep the legacy ceiling
-            // pre-check (the R17 discipline's call-site companion rule).
+            // Bits-governed IV length (F3/D3): no call-site ceiling
+            // pre-check — NULL legs record the derived length
+            // uncapped; the per-leg helper caps non-NULL legs.
             let requested_iv_len = ((p.ulIVSizeInBits as usize).saturating_add(7)) / 8;
-            if requested_iv_len > MAX_SERIALIZABLE_BYTES {
-                return Err(CkRv::MECHANISM_PARAM_INVALID);
-            }
             let client_random_presence = unsafe {
                 read_pointer_field_v1(
                     p.RandomInfo.pClientRandom as *const u8,

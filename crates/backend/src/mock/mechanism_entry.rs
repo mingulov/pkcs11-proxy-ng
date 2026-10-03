@@ -5,6 +5,7 @@
 //! count twice. No mechanism bytes or other payloads are retained.
 
 use super::*;
+use crate::sp800_108_data_values::CK_SP800_108_KEY_HANDLE;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum MockMechanismEntry {

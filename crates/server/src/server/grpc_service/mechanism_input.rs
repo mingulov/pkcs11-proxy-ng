@@ -752,10 +752,11 @@ mod transport_validation_tests {
 
     #[test]
     fn sanitize_on_allows_none_and_typed() {
-        // The matrix governs the outer form (Flat/Null/Raw); typed params
-        // stay allowed under ON — including embedded NULL-nonzero, which
-        // is an R16/R19 typed-path concern, not structure policy. (No
-        // provider-specific scalar conformance — forbidden by S2 §6.)
+        // F2: the matrix governs every form — typed params stay allowed
+        // under ON only when they carry no embedded NULL-nonzero (D3
+        // "rejects regardless" is unqualified; NULL-zero stays allowed
+        // as the canonical null). (No provider-specific scalar
+        // conformance — forbidden by S2 §6.)
         let reg = registry(&[("iv", AES_CBC)], &[], &[]);
         let none =
             validate(&reg, &CkMechanism { mechanism_type: CkMechanismType(AES_CBC), params: None })
@@ -772,7 +773,21 @@ mod transport_validation_tests {
         assert_sanitizer_allow(sanitize_on(&typed), &typed, "typed Iv ON");
         let reg_gcm = registry(&[("gcm", AES_GCM)], &[], &[]);
         let embedded_null = validate(&reg_gcm, &gcm_with_iv(PointerBytes::null_len(12))).unwrap();
-        assert_sanitizer_allow(sanitize_on(&embedded_null), &embedded_null, "typed Gcm+NULL-IV ON");
+        assert_sanitizer_reject(sanitize_on(&embedded_null), "typed Gcm+NULL-IV ON");
+        assert_sanitizer_allow(
+            sanitize_off(&embedded_null),
+            &embedded_null,
+            "typed Gcm+NULL-IV OFF",
+        );
+        let embedded_huge =
+            validate(&reg_gcm, &gcm_with_iv(PointerBytes::null_len(D3_HUGE_NULL_LEN))).unwrap();
+        assert_sanitizer_reject(sanitize_on(&embedded_huge), "typed Gcm+NULL-huge-IV ON");
+        let embedded_zero = validate(&reg_gcm, &gcm_with_iv(PointerBytes::null_len(0))).unwrap();
+        assert_sanitizer_allow(
+            sanitize_on(&embedded_zero),
+            &embedded_zero,
+            "typed Gcm+NULL-0-IV ON",
+        );
     }
 
     #[test]

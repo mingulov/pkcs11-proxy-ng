@@ -919,7 +919,8 @@ mod tests {
 
         // Build an HKDF mechanism embedding `vo` as the salt_key_handle.
         let mechanism = CkMechanism {
-            mechanism_type: pkcs11_proxy_ng_types::CkMechanismType(0),
+            // F1: HKDF rides CKM_HKDF_DERIVE (hkdf-bound in the default TOML).
+            mechanism_type: pkcs11_proxy_ng_types::CkMechanismType(0x402A),
             params: Some(CkMechanismParams::Hkdf(HkdfParams {
                 extract: true,
                 expand: true,
@@ -951,7 +952,8 @@ mod tests {
         let (ctx, ctx_id, vs, bs, vo) = setup_c1_test(Some(ALLOWED_UID.to_vec())).await;
 
         let mechanism = CkMechanism {
-            mechanism_type: pkcs11_proxy_ng_types::CkMechanismType(0),
+            // F1: HKDF rides CKM_HKDF_DERIVE (hkdf-bound in the default TOML).
+            mechanism_type: pkcs11_proxy_ng_types::CkMechanismType(0x402A),
             params: Some(CkMechanismParams::Hkdf(HkdfParams {
                 extract: true,
                 expand: true,
@@ -989,7 +991,8 @@ mod tests {
         let (ctx, ctx_id, vs, bs, vo) = setup_c1_test(Some(ALLOWED_UID.to_vec())).await;
 
         let mechanism = CkMechanism {
-            mechanism_type: pkcs11_proxy_ng_types::CkMechanismType(0x294),
+            // F1: HKDF rides CKM_HKDF_DERIVE (hkdf-bound in the default TOML).
+            mechanism_type: pkcs11_proxy_ng_types::CkMechanismType(0x402A),
             params: Some(CkMechanismParams::Hkdf(HkdfParams {
                 extract: true,
                 expand: false,

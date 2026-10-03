@@ -10,6 +10,7 @@ pub mod ffi;
 pub mod host_abi;
 pub mod mock;
 pub mod object_cleanup;
+mod sp800_108_data_values;
 pub mod test_backend_3x;
 #[cfg(feature = "native-owner-test-hooks")]
 pub mod test_hooks;
