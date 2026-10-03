@@ -108,10 +108,15 @@ impl ParamAbi {
 
     /// This build target's v1 ABI, or `None` where no v1 ABI exists
     /// (big-endian targets have no little-endian layout).
+    ///
+    /// Only 64-bit Windows is LLP64-pack1 (4-byte `CK_ULONG`, 8-byte
+    /// pointers); 32-bit Windows has 4-byte pointers like ILP32, so it
+    /// selects `Ilp32NativeLe` (a width-blind `cfg!(windows)` here
+    /// mis-sized every pointer-bearing struct on win32).
     pub const fn native() -> Option<Self> {
         if !cfg!(target_endian = "little") {
             None
-        } else if cfg!(windows) {
+        } else if cfg!(all(windows, target_pointer_width = "64")) {
             Some(Self::Llp64Packed1Le)
         } else if cfg!(target_pointer_width = "64") {
             Some(Self::Lp64NativeLe)
@@ -3232,5 +3237,35 @@ mod crosscheck_tests {
                 "LLP64-pack1 size for {shape}"
             );
         }
+    }
+
+    // `native()` pins, one per little-endian target family: exactly one
+    // arm compiles per target (big-endian targets compile none —
+    // `native()` is `None` there). The win32 arm executes only on the
+    // win32 WOW64 CI leg (`cross-platform.yml` `win32` job): that leg is
+    // the authentic gate for 32-bit Windows, and a width-blind
+    // `cfg!(windows)` here mis-sized every pointer-bearing win32 struct.
+    #[cfg(all(unix, target_pointer_width = "64", target_endian = "little"))]
+    #[test]
+    fn native_abi_is_lp64_on_unix64() {
+        assert_eq!(ParamAbi::native(), Some(ParamAbi::Lp64NativeLe));
+    }
+
+    #[cfg(all(unix, target_pointer_width = "32", target_endian = "little"))]
+    #[test]
+    fn native_abi_is_ilp32_on_unix32() {
+        assert_eq!(ParamAbi::native(), Some(ParamAbi::Ilp32NativeLe));
+    }
+
+    #[cfg(all(windows, target_pointer_width = "64", target_endian = "little"))]
+    #[test]
+    fn native_abi_is_llp64_on_win64() {
+        assert_eq!(ParamAbi::native(), Some(ParamAbi::Llp64Packed1Le));
+    }
+
+    #[cfg(all(windows, target_pointer_width = "32", target_endian = "little"))]
+    #[test]
+    fn native_abi_is_ilp32_on_win32() {
+        assert_eq!(ParamAbi::native(), Some(ParamAbi::Ilp32NativeLe));
     }
 }
