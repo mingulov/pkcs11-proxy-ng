@@ -658,6 +658,11 @@ unsafe fn read_nested_mechanism_for_transport(
 /// widths, future layouts) yields `None` and struct-prefix Flat fails
 /// closed locally. Pre-probe readers see the D9 fallback width/stride
 /// (LP64); the daemon re-validates authoritatively either way.
+/// Width/stride cannot separate ILP32-natural from ILP32-pack1 (both
+/// are 4-byte ulong with stride 12), so a win32 backend maps here as
+/// `Ilp32NativeLe`: the snapshot feeds only declared-length narrowing
+/// (`ulong_size()`), which both share, never layout or fingerprint
+/// decisions (those use the deciding edge's own native ABI).
 fn backend_abi_snapshot() -> Option<ParamAbi> {
     match (
         crate::interface_probe::backend_ulong_size(),

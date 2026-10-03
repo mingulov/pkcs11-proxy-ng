@@ -1764,8 +1764,11 @@ const MAX_NESTED_MECHANISMS: u8 = 16;
 
 /// Width-derived host ABI shared by the backend-local funnels (see
 /// [`validate_for_ffi`): 8-byte `CK_ULONG` behaves as LP64, 4-byte as
-/// ILP32 — only `ulong_size()` is ever consulted on these paths. This
-/// also keeps big-endian targets working, where `native()` is `None`.
+/// ILP32 — only `ulong_size()` is ever consulted on these paths (Null
+/// narrowing is width-only; Flat is always denied so ABI equality is
+/// moot). Packed-32 shares ILP32's 4-byte `CK_ULONG`, so the guess stays
+/// correct on win32 without naming the packed variant. This also keeps
+/// big-endian targets working, where `native()` is `None`.
 /// Test-only (NF2): production nested descent reuses the outer value's
 /// carried ABIs instead of this width-derived guess.
 #[cfg(test)]

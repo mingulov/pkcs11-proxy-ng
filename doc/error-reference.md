@@ -78,7 +78,7 @@ Also originated by the proxy for:
   A protocol violation, failed closed before any caller memory is
   written.
 - 64-bit daemon `ck_rv` unrepresentable in the host `CK_RV`:
-  on hosts where `CK_ULONG` is 32 bits (ILP32, Windows LLP64) a peer
+  on hosts where `CK_ULONG` is 32 bits (ILP32, 32-bit Windows, Windows LLP64) a peer
   RV above `u32::MAX` saturates here with a shim-side warn. No
   genuine backend emits such values; saturation indicates a
   hostile or buggy peer.

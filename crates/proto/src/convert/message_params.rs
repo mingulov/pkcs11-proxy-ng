@@ -1685,15 +1685,19 @@ mod tests {
         assert_eq!(Abi::Lp64NativeLe as i32, 1);
         assert_eq!(Abi::Ilp32NativeLe as i32, 2);
         assert_eq!(Abi::Llp64Packed1Le as i32, 3);
+        assert_eq!(Abi::Ilp32Packed1Le as i32, 4);
         for (raw, expected) in [
             (0, Abi::Unspecified),
             (1, Abi::Lp64NativeLe),
             (2, Abi::Ilp32NativeLe),
             (3, Abi::Llp64Packed1Le),
+            (4, Abi::Ilp32Packed1Le),
         ] {
             assert_eq!(Abi::try_from(raw), Ok(expected));
         }
-        assert!(Abi::try_from(4).is_err());
+        // Value 4 was the unknown-value sentinel until the packed-32
+        // (win32) ABI claimed it (cid-fix-3); 5 is the new sentinel.
+        assert!(Abi::try_from(5).is_err());
     }
 
     /// R5/F1 encode matrix: legacy capability emits bit-identical legacy

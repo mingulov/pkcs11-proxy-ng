@@ -3873,10 +3873,11 @@ fn r9_flat_v1_decodes_and_threads_every_field() {
     assert_eq!(flat.source_abi, Some(ParamAbi::Lp64NativeLe));
     assert_eq!(flat.fingerprint, 0x0102_0304_0506_0708);
     assert_eq!(flat.version, 1);
-    // ILP32 and LLP64-pack1 thread through distinctly.
+    // ILP32, LLP64-pack1, and ILP32-pack1 thread through distinctly.
     for (wire_abi, domain_abi) in [
         (v1_proto::MechanismParamAbi::Ilp32NativeLe, ParamAbi::Ilp32NativeLe),
         (v1_proto::MechanismParamAbi::Llp64Packed1Le, ParamAbi::Llp64Packed1Le),
+        (v1_proto::MechanismParamAbi::Ilp32Packed1Le, ParamAbi::Ilp32Packed1Le),
     ] {
         let back =
             CkMechanism::try_from(&r9_flat_wire(b"AB".to_vec(), 2, wire_abi as i32, 1)).unwrap();

@@ -56,6 +56,7 @@ fn source_abi_wire(abi: ParamAbi) -> i32 {
         ParamAbi::Lp64NativeLe => pkcs11_proxy_ng_proto::MechanismParamAbi::Lp64NativeLe as i32,
         ParamAbi::Ilp32NativeLe => pkcs11_proxy_ng_proto::MechanismParamAbi::Ilp32NativeLe as i32,
         ParamAbi::Llp64Packed1Le => pkcs11_proxy_ng_proto::MechanismParamAbi::Llp64Packed1Le as i32,
+        ParamAbi::Ilp32Packed1Le => pkcs11_proxy_ng_proto::MechanismParamAbi::Ilp32Packed1Le as i32,
     }
 }
 
