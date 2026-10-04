@@ -1354,6 +1354,173 @@ mod lifecycle_random_tests {
 }
 
 #[cfg(all(test, unix))]
+mod issue3031_null_forwarding_tests {
+    use super::*;
+    use crate::traits::Pkcs11Backend;
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+
+    static DUAL_CALLS: AtomicUsize = AtomicUsize::new(0);
+    /// Which of the five stubs fired (0-3 duals, 4 SignRecover).
+    static DUAL_WHICH: AtomicU64 = AtomicU64::new(u64::MAX);
+    static DUAL_PART_NULL: AtomicBool = AtomicBool::new(false);
+    static DUAL_PART_LEN: AtomicU64 = AtomicU64::new(0);
+    static DUAL_OUT_NULL: AtomicBool = AtomicBool::new(false);
+    static DUAL_LEN_NULL: AtomicBool = AtomicBool::new(false);
+    /// Incoming native out-length cell (`u64::MAX` when NULL).
+    static DUAL_IN_CAP: AtomicU64 = AtomicU64::new(u64::MAX);
+    /// Scripted provider RV (default OK).
+    static DUAL_RV: AtomicU64 = AtomicU64::new(cryptoki_sys::CKR_OK as u64);
+    static DUAL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn record_dual(
+        which: u64,
+        part: cryptoki_sys::CK_BYTE_PTR,
+        part_len: cryptoki_sys::CK_ULONG,
+        out: cryptoki_sys::CK_BYTE_PTR,
+        out_len: cryptoki_sys::CK_ULONG_PTR,
+    ) -> cryptoki_sys::CK_RV {
+        DUAL_CALLS.fetch_add(1, Ordering::SeqCst);
+        DUAL_WHICH.store(which, Ordering::SeqCst);
+        DUAL_PART_NULL.store(part.is_null(), Ordering::SeqCst);
+        DUAL_PART_LEN.store(part_len as u64, Ordering::SeqCst);
+        DUAL_OUT_NULL.store(out.is_null(), Ordering::SeqCst);
+        DUAL_LEN_NULL.store(out_len.is_null(), Ordering::SeqCst);
+        DUAL_IN_CAP.store(
+            if out_len.is_null() { u64::MAX } else { unsafe { *out_len as u64 } },
+            Ordering::SeqCst,
+        );
+        let rv = DUAL_RV.load(Ordering::SeqCst) as cryptoki_sys::CK_RV;
+        if rv == cryptoki_sys::CKR_OK && !out_len.is_null() {
+            unsafe { *out_len = 0 };
+        }
+        rv
+    }
+
+    macro_rules! recording_dual_stub {
+        ($name:ident, $which:expr) => {
+            unsafe extern "C" fn $name(
+                _session: cryptoki_sys::CK_SESSION_HANDLE,
+                part: cryptoki_sys::CK_BYTE_PTR,
+                part_len: cryptoki_sys::CK_ULONG,
+                out: cryptoki_sys::CK_BYTE_PTR,
+                out_len: cryptoki_sys::CK_ULONG_PTR,
+            ) -> cryptoki_sys::CK_RV {
+                record_dual($which, part, part_len, out, out_len)
+            }
+        };
+    }
+
+    recording_dual_stub!(dual_recording_digest_encrypt, 0);
+    recording_dual_stub!(dual_recording_decrypt_digest, 1);
+    recording_dual_stub!(dual_recording_sign_encrypt, 2);
+    recording_dual_stub!(dual_recording_decrypt_verify, 3);
+    recording_dual_stub!(dual_recording_sign_recover, 4);
+
+    fn backend_with_all_five_duals() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_DigestEncryptUpdate = Some(dual_recording_digest_encrypt);
+        functions.C_DecryptDigestUpdate = Some(dual_recording_decrypt_digest);
+        functions.C_SignEncryptUpdate = Some(dual_recording_sign_encrypt);
+        functions.C_DecryptVerifyUpdate = Some(dual_recording_decrypt_verify);
+        functions.C_SignRecover = Some(dual_recording_sign_recover);
+        let backend = FfiBackend::test_backend_with_tables(functions.as_mut(), None, None);
+        (backend, functions)
+    }
+
+    fn reset_dual_fixture() {
+        DUAL_CALLS.store(0, Ordering::SeqCst);
+        DUAL_WHICH.store(u64::MAX, Ordering::SeqCst);
+        DUAL_PART_NULL.store(false, Ordering::SeqCst);
+        DUAL_PART_LEN.store(0, Ordering::SeqCst);
+        DUAL_OUT_NULL.store(false, Ordering::SeqCst);
+        DUAL_LEN_NULL.store(false, Ordering::SeqCst);
+        DUAL_IN_CAP.store(u64::MAX, Ordering::SeqCst);
+    }
+
+    /// Drive both NULL shapes through one `ffi_*_exact` dual/recover
+    /// wrapper: exactly one provider call, to the right slot, with
+    /// NULL-ness + lengths intact, and the scripted provider RV
+    /// propagated (finding 2 — no wrapper-specific short-circuit).
+    macro_rules! drive_null_shapes {
+        ($backend:expr, $method:ident, $which:expr, $name:expr) => {{
+            // NULL part, nonzero length.
+            reset_dual_fixture();
+            let spec = CkOutputBufferSpec {
+                buffer_present: true,
+                buffer_len: 64,
+                length_pointer_null: false,
+            };
+            let out =
+                $backend.$method(CkSessionHandle(7), CkInBuf::Null { len: 16 }, &spec).unwrap();
+            assert_eq!(out.ck_rv, CkRv::DATA_INVALID, "{}: provider RV must propagate", $name);
+            assert_eq!(DUAL_CALLS.load(Ordering::SeqCst), 1, "{}: one provider call", $name);
+            assert_eq!(DUAL_WHICH.load(Ordering::SeqCst), $which, "{}: right provider slot", $name);
+            assert!(DUAL_PART_NULL.load(Ordering::SeqCst), "{}: part must stay NULL", $name);
+            assert_eq!(DUAL_PART_LEN.load(Ordering::SeqCst), 16, "{}: part length", $name);
+            assert!(!DUAL_OUT_NULL.load(Ordering::SeqCst), "{}: out present", $name);
+            assert!(!DUAL_LEN_NULL.load(Ordering::SeqCst), "{}: length present", $name);
+            assert_eq!(
+                DUAL_IN_CAP.load(Ordering::SeqCst),
+                64,
+                "{}: native capacity must survive",
+                $name
+            );
+
+            // Valid part, NULL out-length.
+            reset_dual_fixture();
+            let part = [0x41u8; 16];
+            let spec_null_len = CkOutputBufferSpec {
+                buffer_present: true,
+                buffer_len: 64,
+                length_pointer_null: true,
+            };
+            let out = $backend
+                .$method(CkSessionHandle(7), CkInBuf::Bytes(&part), &spec_null_len)
+                .unwrap();
+            assert_eq!(out.ck_rv, CkRv::DATA_INVALID, "{}: provider RV must propagate", $name);
+            assert_eq!(DUAL_CALLS.load(Ordering::SeqCst), 1, "{}: one provider call", $name);
+            assert_eq!(DUAL_WHICH.load(Ordering::SeqCst), $which, "{}: right provider slot", $name);
+            assert!(!DUAL_PART_NULL.load(Ordering::SeqCst), "{}: part present", $name);
+            assert_eq!(DUAL_PART_LEN.load(Ordering::SeqCst), 16, "{}: part length", $name);
+            assert!(!DUAL_OUT_NULL.load(Ordering::SeqCst), "{}: out present", $name);
+            assert!(DUAL_LEN_NULL.load(Ordering::SeqCst), "{}: length must stay NULL", $name);
+            assert_eq!(
+                DUAL_IN_CAP.load(Ordering::SeqCst),
+                u64::MAX,
+                "{}: NULL length has no capacity cell",
+                $name
+            );
+        }};
+    }
+
+    /// #30/#31: NULL part + NULL out-length reach the provider
+    /// function with NULL-ness intact on ALL five wrappers (finding 2:
+    /// a function-specific short-circuit in any other wrapper must
+    /// fail here, not hide behind one representative). Driven through
+    /// the public `Pkcs11Backend` exact methods — the same entry the
+    /// daemon uses — so the FFI trait delegation is covered, not just
+    /// the private wrappers. The scripted provider RV (`DATA_INVALID`,
+    /// deliberately not AB) must propagate exactly, proving the
+    /// observed RV comes from the provider call rather than
+    /// wrapper-side re-validation.
+    #[test]
+    fn all_five_null_shapes_reach_provider_function() {
+        let _guard = DUAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        DUAL_RV.store(cryptoki_sys::CKR_DATA_INVALID as u64, Ordering::SeqCst);
+        let (backend, _functions) = backend_with_all_five_duals();
+        backend.lifecycle_domain.open_for_tests();
+
+        drive_null_shapes!(backend, digest_encrypt_update_exact, 0, "DigestEncryptUpdate");
+        drive_null_shapes!(backend, decrypt_digest_update_exact, 1, "DecryptDigestUpdate");
+        drive_null_shapes!(backend, sign_encrypt_update_exact, 2, "SignEncryptUpdate");
+        drive_null_shapes!(backend, decrypt_verify_update_exact, 3, "DecryptVerifyUpdate");
+        drive_null_shapes!(backend, sign_recover_exact, 4, "SignRecover");
+
+        DUAL_RV.store(cryptoki_sys::CKR_OK as u64, Ordering::SeqCst);
+    }
+}
+
+#[cfg(all(test, unix))]
 mod slot_wait_tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};

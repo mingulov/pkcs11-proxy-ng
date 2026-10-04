@@ -962,3 +962,682 @@ mod decrypt_null_e2e {
         assert_eq!(rv, CKR_OK as CK_RV);
     }
 }
+
+// ---------------------------------------------------------------------------
+// #30/#31: NULL-shape forwarding on dual-function updates + C_SignRecover.
+//
+// At a48b60b the shim erased NULL parts to empty (→ CKR_OK) and
+// short-circuited NULL out-lengths with AB (no provider call, no
+// termination). These full-stack tests (owned fresh daemons, so the
+// mock call counters are race-free) prove both shapes now reach the
+// backend: AB from the mock's strict Null policy + exactly one
+// backend data-op call per shape.
+// ---------------------------------------------------------------------------
+
+#[cfg(not(miri))] // needs a running daemon (sockets); covered natively
+mod issue3031_null_e2e {
+    use super::super::output_semantics::TestDaemon;
+    use super::super::*;
+    use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
+    use pkcs11_proxy_ng_types::shape_descriptors::{Operation, ParamAbi};
+    use pkcs11_proxy_ng_types::{
+        CkInBuf, CkMechanism, CkMechanismType, CkObjectHandle, CkOutputBufferSpec, CkRv,
+        CkSessionFlags, CkSessionHandle, CkSlotId, MechanismRegistry, ValidatedMechanismParams,
+    };
+
+    struct FinalizeOnDrop;
+
+    impl Drop for FinalizeOnDrop {
+        fn drop(&mut self) {
+            let _ = unsafe { dispatch::general::c_finalize(std::ptr::null_mut()) };
+        }
+    }
+
+    /// Panic-safe connect-env override (restored on drop).
+    struct SavedConnectEnv {
+        endpoint: Option<String>,
+        socket: Option<String>,
+    }
+
+    impl SavedConnectEnv {
+        fn capture() -> Self {
+            Self {
+                endpoint: std::env::var("PKCS11_PROXY_ENDPOINT").ok(),
+                socket: std::env::var("PKCS11_PROXY_SOCKET").ok(),
+            }
+        }
+    }
+
+    impl Drop for SavedConnectEnv {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.endpoint {
+                    Some(v) => std::env::set_var("PKCS11_PROXY_ENDPOINT", v),
+                    None => std::env::remove_var("PKCS11_PROXY_ENDPOINT"),
+                }
+                match &self.socket {
+                    Some(v) => std::env::set_var("PKCS11_PROXY_SOCKET", v),
+                    None => std::env::remove_var("PKCS11_PROXY_SOCKET"),
+                }
+            }
+            crate::interface_probe::clear_cache();
+        }
+    }
+
+    fn rsa_pkcs_mechanism() -> CK_MECHANISM {
+        CK_MECHANISM {
+            mechanism: CKM_RSA_PKCS,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        }
+    }
+
+    fn sha256_mechanism() -> CK_MECHANISM {
+        CK_MECHANISM { mechanism: CKM_SHA256, pParameter: std::ptr::null_mut(), ulParameterLen: 0 }
+    }
+
+    /// Open a further session + key on the first slot (the shim is
+    /// already initialized by `open_session_with_key`).
+    fn open_extra_session_with_key() -> (CK_SESSION_HANDLE, CK_OBJECT_HANDLE) {
+        let mut slot_count: CK_ULONG = 0;
+        let rv = unsafe {
+            dispatch::general::c_get_slot_list(CK_FALSE, std::ptr::null_mut(), &mut slot_count)
+        };
+        assert_eq!(rv, CKR_OK as CK_RV, "GetSlotList count");
+        let mut slots = vec![0 as CK_SLOT_ID; slot_count as usize];
+        let rv = unsafe {
+            dispatch::general::c_get_slot_list(CK_FALSE, slots.as_mut_ptr(), &mut slot_count)
+        };
+        assert_eq!(rv, CKR_OK as CK_RV, "GetSlotList data");
+        let mut session = CK_INVALID_HANDLE;
+        let rv = unsafe {
+            dispatch::general::c_open_session(
+                slots[0],
+                CKF_SERIAL_SESSION,
+                std::ptr::null_mut(),
+                None,
+                &mut session,
+            )
+        };
+        assert_eq!(rv, CKR_OK as CK_RV, "C_OpenSession");
+        let mut key = CK_INVALID_HANDLE;
+        let rv = unsafe {
+            dispatch::general::c_create_object(session, std::ptr::null_mut(), 0, &mut key)
+        };
+        assert_eq!(rv, CKR_OK as CK_RV, "C_CreateObject");
+        (session, key)
+    }
+
+    /// Assert the backend observed exactly this native shape (finding
+    /// 2): function identity, input pointer class + claimed length,
+    /// output-buffer length, length-pointer presence. (The output
+    /// buffer itself is always present in these legs.)
+    fn assert_obs(
+        daemon: &TestDaemon,
+        name: &str,
+        function: &str,
+        input_null: bool,
+        input_len: u64,
+        out_len: u64,
+        length_pointer_null: bool,
+    ) {
+        let obs = daemon.backend.last_data_op_observation().expect("shape must be recorded");
+        assert_eq!(obs.function, function, "{name}: function identity");
+        assert_eq!(obs.input_null, input_null, "{name}: input pointer class");
+        assert_eq!(obs.input_len, input_len, "{name}: claimed input length");
+        assert!(obs.out_buffer_present, "{name}: output buffer presence");
+        assert_eq!(obs.out_buffer_len, out_len, "{name}: output buffer length");
+        assert_eq!(obs.length_pointer_null, length_pointer_null, "{name}: length pointer presence");
+    }
+
+    /// Initialize against the daemon, open a session, create a key.
+    fn open_session_with_key(endpoint: &str) -> (CK_SESSION_HANDLE, CK_OBJECT_HANDLE) {
+        unsafe {
+            std::env::set_var("PKCS11_PROXY_ENDPOINT", endpoint);
+            std::env::remove_var("PKCS11_PROXY_SOCKET");
+        }
+        let rv = unsafe { dispatch::general::c_initialize(std::ptr::null_mut()) };
+        assert_eq!(rv, CKR_OK as CK_RV, "C_Initialize");
+
+        let mut slot_count: CK_ULONG = 0;
+        let rv = unsafe {
+            dispatch::general::c_get_slot_list(CK_FALSE, std::ptr::null_mut(), &mut slot_count)
+        };
+        assert_eq!(rv, CKR_OK as CK_RV, "GetSlotList count");
+
+        let mut slots = vec![0 as CK_SLOT_ID; slot_count as usize];
+        let rv = unsafe {
+            dispatch::general::c_get_slot_list(CK_FALSE, slots.as_mut_ptr(), &mut slot_count)
+        };
+        assert_eq!(rv, CKR_OK as CK_RV, "GetSlotList data");
+
+        let mut session = CK_INVALID_HANDLE;
+        let rv = unsafe {
+            dispatch::general::c_open_session(
+                slots[0],
+                CKF_SERIAL_SESSION,
+                std::ptr::null_mut(),
+                None,
+                &mut session,
+            )
+        };
+        assert_eq!(rv, CKR_OK as CK_RV, "C_OpenSession");
+
+        let mut key = CK_INVALID_HANDLE;
+        let rv = unsafe {
+            dispatch::general::c_create_object(session, std::ptr::null_mut(), 0, &mut key)
+        };
+        assert_eq!(rv, CKR_OK as CK_RV, "C_CreateObject");
+        (session, key)
+    }
+
+    type DualUpdateFn = unsafe extern "C" fn(
+        CK_SESSION_HANDLE,
+        CK_BYTE_PTR,
+        CK_ULONG,
+        CK_BYTE_PTR,
+        CK_ULONG_PTR,
+    ) -> CK_RV;
+
+    /// #30: NULL part + NULL out-length reach the backend on all four
+    /// dual-function entrypoints. The mock's strict Null policy yields
+    /// AB; the +1 call count proves the AB came from the backend, not
+    /// from a reintroduced shim short-circuit or erasure — and the
+    /// shape observation proves function identity, input class/length,
+    /// and output-envelope presence survived intact (finding 2).
+    #[test]
+    fn dual_null_shapes_reach_backend_all_4_entrypoints() {
+        let _guard = shim_state_test_guard();
+        let _saved = SavedConnectEnv::capture();
+        let daemon = TestDaemon::fresh();
+        let _finalize = FinalizeOnDrop;
+        let (session, _key) = open_session_with_key(&daemon.endpoint);
+
+        let entries: [(&str, &str, DualUpdateFn); 4] = [
+            (
+                "DigestEncryptUpdate",
+                "digest_encrypt_update",
+                dispatch::general::c_digest_encrypt_update,
+            ),
+            (
+                "DecryptDigestUpdate",
+                "decrypt_digest_update",
+                dispatch::general::c_decrypt_digest_update,
+            ),
+            ("SignEncryptUpdate", "sign_encrypt_update", dispatch::general::c_sign_encrypt_update),
+            (
+                "DecryptVerifyUpdate",
+                "decrypt_verify_update",
+                dispatch::general::c_decrypt_verify_update,
+            ),
+        ];
+        for (name, observed, entry) in entries {
+            // NULL part, nonzero length.
+            let before = daemon.backend.data_op_call_count();
+            let mut out = vec![0u8; 64];
+            let mut out_len: CK_ULONG = 64;
+            let rv =
+                unsafe { entry(session, std::ptr::null_mut(), 16, out.as_mut_ptr(), &mut out_len) };
+            assert_eq!(
+                rv, CKR_ARGUMENTS_BAD as CK_RV,
+                "{name}: null part must be AB, not erased-OK"
+            );
+            assert_eq!(
+                daemon.backend.data_op_call_count(),
+                before + 1,
+                "{name}: null part must reach the backend"
+            );
+            assert_obs(&daemon, name, observed, true, 16, 64, false);
+
+            // Valid part, NULL out-length.
+            let before = daemon.backend.data_op_call_count();
+            let part = [0x41u8; 16];
+            let rv = unsafe {
+                entry(session, part.as_ptr() as *mut _, 16, out.as_mut_ptr(), std::ptr::null_mut())
+            };
+            assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV, "{name}: null out-length must be AB");
+            assert_eq!(
+                daemon.backend.data_op_call_count(),
+                before + 1,
+                "{name}: null out-length must reach the backend (no short-circuit)"
+            );
+            // NULL length pointer: no capacity cell exists, so the
+            // spec carries buffer_len 0 by design (`output_buffer_spec`).
+            assert_obs(&daemon, name, observed, false, 16, 0, true);
+        }
+    }
+
+    /// #31: NULL data + NULL out-length reach the backend on
+    /// C_SignRecover (same forwarding proof as the dual entrypoints).
+    /// Each shape initializes on an independent session (finding 4):
+    /// the second leg must not depend on the mock retaining the op
+    /// after the first malformed call.
+    #[test]
+    fn sign_recover_null_shapes_reach_backend() {
+        let _guard = shim_state_test_guard();
+        let _saved = SavedConnectEnv::capture();
+        let daemon = TestDaemon::fresh();
+        let _finalize = FinalizeOnDrop;
+        let (session, key) = open_session_with_key(&daemon.endpoint);
+
+        let mut mech = rsa_pkcs_mechanism();
+        let rv = unsafe { dispatch::general::c_sign_recover_init(session, &mut mech, key) };
+        assert_eq!(rv, CKR_OK as CK_RV, "C_SignRecoverInit");
+
+        // NULL data, nonzero length.
+        let before = daemon.backend.data_op_call_count();
+        let mut out = vec![0u8; 512];
+        let mut out_len: CK_ULONG = 512;
+        let rv = unsafe {
+            dispatch::general::c_sign_recover(
+                session,
+                std::ptr::null_mut(),
+                32,
+                out.as_mut_ptr(),
+                &mut out_len,
+            )
+        };
+        assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV, "null data must be AB, not erased-OK");
+        assert_eq!(
+            daemon.backend.data_op_call_count(),
+            before + 1,
+            "null data must reach the backend"
+        );
+        assert_obs(&daemon, "SignRecover", "sign_recover", true, 32, 512, false);
+
+        // Valid data, NULL out-length, on an independent session.
+        let (session_b, key_b) = open_extra_session_with_key();
+        let mut mech_b = rsa_pkcs_mechanism();
+        let rv = unsafe { dispatch::general::c_sign_recover_init(session_b, &mut mech_b, key_b) };
+        assert_eq!(rv, CKR_OK as CK_RV, "C_SignRecoverInit");
+        let before = daemon.backend.data_op_call_count();
+        let data = [0x42u8; 32];
+        let mut out_b = vec![0u8; 512];
+        let rv = unsafe {
+            dispatch::general::c_sign_recover(
+                session_b,
+                data.as_ptr() as *mut _,
+                32,
+                out_b.as_mut_ptr(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV, "null out-length must be AB");
+        assert_eq!(
+            daemon.backend.data_op_call_count(),
+            before + 1,
+            "null out-length must reach the backend (no short-circuit)"
+        );
+        // NULL length pointer: no capacity cell exists, so the
+        // spec carries buffer_len 0 by design (`output_buffer_spec`).
+        assert_obs(&daemon, "SignRecover", "sign_recover", false, 32, 0, true);
+    }
+
+    // --- Joint-termination oracle (finding 3) ---
+
+    /// One dual update entrypoint for the direct leg.
+    #[derive(Clone, Copy)]
+    enum DualKind {
+        DigestEncrypt,
+        DecryptDigest,
+        SignEncrypt,
+        DecryptVerify,
+    }
+
+    /// One dual-leg init for both legs.
+    #[derive(Clone, Copy)]
+    enum InitKind {
+        Digest,
+        Encrypt,
+        Decrypt,
+        Sign,
+        Verify,
+    }
+
+    /// Direct-leg validated mechanism (parameterless → validation is total).
+    fn validated_direct(
+        registry: &MechanismRegistry,
+        abi: ParamAbi,
+        mechanism_type: CkMechanismType,
+    ) -> ValidatedMechanismParams {
+        ValidatedMechanismParams::validate(
+            &CkMechanism { mechanism_type, params: None },
+            registry,
+            Operation::General,
+            abi,
+            abi,
+        )
+        .expect("parameterless mechanism validates")
+    }
+
+    fn direct_update(
+        backend: &MockBackend,
+        kind: DualKind,
+        session: CkSessionHandle,
+        input: CkInBuf<'_>,
+        spec: &CkOutputBufferSpec,
+    ) -> u64 {
+        let result = match kind {
+            DualKind::DigestEncrypt => backend.digest_encrypt_update_exact(session, input, spec),
+            DualKind::DecryptDigest => backend.decrypt_digest_update_exact(session, input, spec),
+            DualKind::SignEncrypt => backend.sign_encrypt_update_exact(session, input, spec),
+            DualKind::DecryptVerify => backend.decrypt_verify_update_exact(session, input, spec),
+        };
+        match result {
+            Ok(out) => out.ck_rv.0,
+            Err(rv) => rv.0,
+        }
+    }
+
+    fn direct_recover(
+        backend: &MockBackend,
+        session: CkSessionHandle,
+        input: CkInBuf<'_>,
+        spec: &CkOutputBufferSpec,
+    ) -> u64 {
+        match backend.sign_recover_exact(session, input, spec) {
+            Ok(out) => out.ck_rv.0,
+            Err(rv) => rv.0,
+        }
+    }
+
+    fn direct_init(
+        backend: &MockBackend,
+        kind: InitKind,
+        session: CkSessionHandle,
+        v_sha: &ValidatedMechanismParams,
+        v_rsa: &ValidatedMechanismParams,
+        key: CkObjectHandle,
+    ) -> u64 {
+        let result = match kind {
+            InitKind::Digest => backend.digest_init(session, v_sha).map(|()| None),
+            InitKind::Encrypt => backend.encrypt_init(session, v_rsa, key),
+            InitKind::Decrypt => backend.decrypt_init(session, v_rsa, key),
+            InitKind::Sign => backend.sign_init(session, v_rsa, key).map(|()| None),
+            InitKind::Verify => backend.verify_init(session, v_rsa, key).map(|()| None),
+        };
+        match result {
+            Ok(_) => CkRv::OK.0,
+            Err(rv) => rv.0,
+        }
+    }
+
+    /// Direct leg of the dual script: init → malformed(null part) →
+    /// follow-up → reinit → well-formed → malformed(null outlen) →
+    /// follow-up → reinit → well-formed. 12 RVs.
+    fn direct_dual_script(
+        backend: &MockBackend,
+        session: CkSessionHandle,
+        init_a: impl Fn() -> u64,
+        init_b: impl Fn() -> u64,
+        kind: DualKind,
+    ) -> Vec<u64> {
+        let part = [0x41u8; 16];
+        let data_spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 64, length_pointer_null: false };
+        let null_spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 64, length_pointer_null: true };
+        vec![
+            init_a(),
+            init_b(),
+            direct_update(backend, kind, session, CkInBuf::Null { len: 16 }, &data_spec),
+            direct_update(backend, kind, session, CkInBuf::Bytes(&part), &data_spec),
+            init_a(),
+            init_b(),
+            direct_update(backend, kind, session, CkInBuf::Bytes(&part), &data_spec),
+            direct_update(backend, kind, session, CkInBuf::Bytes(&part), &null_spec),
+            direct_update(backend, kind, session, CkInBuf::Bytes(&part), &data_spec),
+            init_a(),
+            init_b(),
+            direct_update(backend, kind, session, CkInBuf::Bytes(&part), &data_spec),
+        ]
+    }
+
+    /// Direct leg of the recover script. 10 RVs.
+    fn direct_recover_script(
+        backend: &MockBackend,
+        session: CkSessionHandle,
+        init: impl Fn() -> u64,
+    ) -> Vec<u64> {
+        let data = [0x42u8; 32];
+        let spec = CkOutputBufferSpec {
+            buffer_present: true,
+            buffer_len: 512,
+            length_pointer_null: false,
+        };
+        let null_spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 512, length_pointer_null: true };
+        vec![
+            init(),
+            direct_recover(backend, session, CkInBuf::Null { len: 32 }, &spec),
+            direct_recover(backend, session, CkInBuf::Bytes(&data), &spec),
+            init(),
+            direct_recover(backend, session, CkInBuf::Bytes(&data), &spec),
+            init(),
+            direct_recover(backend, session, CkInBuf::Bytes(&data), &null_spec),
+            direct_recover(backend, session, CkInBuf::Bytes(&data), &spec),
+            init(),
+            direct_recover(backend, session, CkInBuf::Bytes(&data), &spec),
+        ]
+    }
+
+    fn proxied_init(kind: InitKind, session: CK_SESSION_HANDLE, key: CK_OBJECT_HANDLE) -> CK_RV {
+        match kind {
+            InitKind::Digest => {
+                let mut mech = sha256_mechanism();
+                unsafe { dispatch::general::c_digest_init(session, &mut mech as *mut _) }
+            }
+            InitKind::Encrypt => {
+                let mut mech = rsa_pkcs_mechanism();
+                unsafe { dispatch::general::c_encrypt_init(session, &mut mech as *mut _, key) }
+            }
+            InitKind::Decrypt => {
+                let mut mech = rsa_pkcs_mechanism();
+                unsafe { dispatch::general::c_decrypt_init(session, &mut mech as *mut _, key) }
+            }
+            InitKind::Sign => {
+                let mut mech = rsa_pkcs_mechanism();
+                unsafe { dispatch::general::c_sign_init(session, &mut mech as *mut _, key) }
+            }
+            InitKind::Verify => {
+                let mut mech = rsa_pkcs_mechanism();
+                unsafe { dispatch::general::c_verify_init(session, &mut mech as *mut _, key) }
+            }
+        }
+    }
+
+    fn proxied_dual_call(
+        entry: DualUpdateFn,
+        session: CK_SESSION_HANDLE,
+        part: CK_BYTE_PTR,
+        len: CK_ULONG,
+        out: &mut Vec<u8>,
+        out_len: Option<&mut CK_ULONG>,
+    ) -> CK_RV {
+        let len_ptr = out_len.map(|slot| slot as *mut _).unwrap_or(std::ptr::null_mut());
+        unsafe { entry(session, part, len, out.as_mut_ptr(), len_ptr) }
+    }
+
+    /// Proxied leg of the dual script (same 12-call shape as the direct leg).
+    fn proxied_dual_script(
+        init_a: impl Fn() -> CK_RV,
+        init_b: impl Fn() -> CK_RV,
+        entry: DualUpdateFn,
+        session: CK_SESSION_HANDLE,
+    ) -> Vec<CK_RV> {
+        let part = [0x41u8; 16];
+        let mut out = vec![0u8; 64];
+        let live = || part.as_ptr() as *mut _;
+        let mut rvs = Vec::with_capacity(12);
+        rvs.push(init_a());
+        rvs.push(init_b());
+        let mut len: CK_ULONG = 64;
+        rvs.push(proxied_dual_call(
+            entry,
+            session,
+            std::ptr::null_mut(),
+            16,
+            &mut out,
+            Some(&mut len),
+        ));
+        let mut len: CK_ULONG = 64;
+        rvs.push(proxied_dual_call(entry, session, live(), 16, &mut out, Some(&mut len)));
+        rvs.push(init_a());
+        rvs.push(init_b());
+        let mut len: CK_ULONG = 64;
+        rvs.push(proxied_dual_call(entry, session, live(), 16, &mut out, Some(&mut len)));
+        rvs.push(proxied_dual_call(entry, session, live(), 16, &mut out, None));
+        let mut len: CK_ULONG = 64;
+        rvs.push(proxied_dual_call(entry, session, live(), 16, &mut out, Some(&mut len)));
+        rvs.push(init_a());
+        rvs.push(init_b());
+        let mut len: CK_ULONG = 64;
+        rvs.push(proxied_dual_call(entry, session, live(), 16, &mut out, Some(&mut len)));
+        rvs
+    }
+
+    fn proxied_recover_call(
+        session: CK_SESSION_HANDLE,
+        data: CK_BYTE_PTR,
+        len: CK_ULONG,
+        out: &mut Vec<u8>,
+        out_len: Option<&mut CK_ULONG>,
+    ) -> CK_RV {
+        let len_ptr = out_len.map(|slot| slot as *mut _).unwrap_or(std::ptr::null_mut());
+        unsafe { dispatch::general::c_sign_recover(session, data, len, out.as_mut_ptr(), len_ptr) }
+    }
+
+    /// Proxied leg of the recover script (same 10-call shape as the direct leg).
+    fn proxied_recover_script(session: CK_SESSION_HANDLE, key: CK_OBJECT_HANDLE) -> Vec<CK_RV> {
+        let init = || {
+            let mut mech = rsa_pkcs_mechanism();
+            unsafe { dispatch::general::c_sign_recover_init(session, &mut mech, key) }
+        };
+        let data = [0x42u8; 32];
+        let mut out = vec![0u8; 512];
+        let live = || data.as_ptr() as *mut _;
+        let mut rvs = Vec::with_capacity(10);
+        rvs.push(init());
+        let mut len: CK_ULONG = 512;
+        rvs.push(proxied_recover_call(session, std::ptr::null_mut(), 32, &mut out, Some(&mut len)));
+        let mut len: CK_ULONG = 512;
+        rvs.push(proxied_recover_call(session, live(), 32, &mut out, Some(&mut len)));
+        rvs.push(init());
+        let mut len: CK_ULONG = 512;
+        rvs.push(proxied_recover_call(session, live(), 32, &mut out, Some(&mut len)));
+        rvs.push(init());
+        rvs.push(proxied_recover_call(session, live(), 32, &mut out, None));
+        let mut len: CK_ULONG = 512;
+        rvs.push(proxied_recover_call(session, live(), 32, &mut out, Some(&mut len)));
+        rvs.push(init());
+        let mut len: CK_ULONG = 512;
+        rvs.push(proxied_recover_call(session, live(), 32, &mut out, Some(&mut len)));
+        rvs
+    }
+
+    /// #30/#31 joint-termination oracle (finding 3): with the mock in
+    /// terminating-provider mode, the full init → malformed →
+    /// follow-up → reinit sequence for every dual entrypoint plus
+    /// C_SignRecover must produce identical RV sequences with and
+    /// without the proxy in the middle — and both must equal the
+    /// pinned terminating-provider script (AB, CNI follow-up, clean
+    /// reinit; never a retained op, never a wedged 0x90).
+    #[test]
+    #[allow(clippy::unnecessary_cast)] // `as u64` is load-bearing on 32-bit CK_ULONG targets
+    fn terminating_dual_and_recover_direct_matches_proxied() {
+        const OK: u64 = CKR_OK as u64;
+        const AB: u64 = CKR_ARGUMENTS_BAD as u64;
+        const CNI: u64 = CKR_OPERATION_NOT_INITIALIZED as u64;
+        let expected_dual = vec![OK, OK, AB, CNI, OK, OK, OK, AB, CNI, OK, OK, OK];
+        let expected_recover = vec![OK, AB, CNI, OK, OK, OK, AB, CNI, OK, OK];
+
+        // Proxied leg: full stack through an owned daemon in
+        // terminating mode; one session per script for isolation.
+        let _guard = shim_state_test_guard();
+        let _saved = SavedConnectEnv::capture();
+        let daemon = TestDaemon::fresh();
+        daemon.backend.set_terminating_dual_mode(true);
+        let _finalize = FinalizeOnDrop;
+        let _first = open_session_with_key(&daemon.endpoint);
+
+        // Direct leg: the same provider model with no proxy.
+        let direct = MockBackend::default_test();
+        direct.initialize().unwrap();
+        direct.set_terminating_dual_mode(true);
+        let registry = MechanismRegistry::load(None).expect("embedded registry loads");
+        let abi = ParamAbi::native().expect("little-endian test host");
+        let v_sha = validated_direct(&registry, abi, CkMechanismType::SHA256);
+        let v_rsa = validated_direct(&registry, abi, CkMechanismType::RSA_PKCS);
+
+        let duals = [
+            (
+                "DigestEncryptUpdate",
+                DualKind::DigestEncrypt,
+                dispatch::general::c_digest_encrypt_update as DualUpdateFn,
+                InitKind::Digest,
+                InitKind::Encrypt,
+            ),
+            (
+                "DecryptDigestUpdate",
+                DualKind::DecryptDigest,
+                dispatch::general::c_decrypt_digest_update as DualUpdateFn,
+                InitKind::Decrypt,
+                InitKind::Digest,
+            ),
+            (
+                "SignEncryptUpdate",
+                DualKind::SignEncrypt,
+                dispatch::general::c_sign_encrypt_update as DualUpdateFn,
+                InitKind::Sign,
+                InitKind::Encrypt,
+            ),
+            (
+                "DecryptVerifyUpdate",
+                DualKind::DecryptVerify,
+                dispatch::general::c_decrypt_verify_update as DualUpdateFn,
+                InitKind::Decrypt,
+                InitKind::Verify,
+            ),
+        ];
+        for (name, kind, entry, init_a_kind, init_b_kind) in duals {
+            let (session, key) = open_extra_session_with_key();
+            let proxied: Vec<u64> = proxied_dual_script(
+                || proxied_init(init_a_kind, session, key),
+                || proxied_init(init_b_kind, session, key),
+                entry,
+                session,
+            )
+            .into_iter()
+            .map(|rv| rv as u64)
+            .collect();
+            assert_eq!(proxied, expected_dual, "{name}: proxied sequence");
+
+            let dsession = direct.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+            let dkey = direct.create_object(dsession, None).unwrap();
+            let got = direct_dual_script(
+                &direct,
+                dsession,
+                || direct_init(&direct, init_a_kind, dsession, &v_sha, &v_rsa, dkey),
+                || direct_init(&direct, init_b_kind, dsession, &v_sha, &v_rsa, dkey),
+                kind,
+            );
+            assert_eq!(got, expected_dual, "{name}: direct sequence");
+        }
+
+        // Recover script on its own session in both legs.
+        let (session, key) = open_extra_session_with_key();
+        let proxied: Vec<u64> =
+            proxied_recover_script(session, key).into_iter().map(|rv| rv as u64).collect();
+        assert_eq!(proxied, expected_recover, "SignRecover: proxied sequence");
+
+        let dsession = direct.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+        let dkey = direct.create_object(dsession, None).unwrap();
+        let got = direct_recover_script(&direct, dsession, || {
+            match direct.sign_recover_init(dsession, &v_rsa, dkey) {
+                Ok(()) => CkRv::OK.0,
+                Err(rv) => rv.0,
+            }
+        });
+        assert_eq!(got, expected_recover, "SignRecover: direct sequence");
+    }
+}
