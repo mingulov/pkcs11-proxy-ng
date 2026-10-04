@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-04
+
+v0.2.1 is a testing candidate that supersedes the unpublished v0.2.0
+candidate. Its theme is shape truthfulness: caller-NULL versus empty
+distinctions are now preserved exactly across the shim, wire, daemon, and
+backend FFI, with machine-checkable mechanism-parameter shapes and
+transport validation at every server site. See the [candidate
+notes](doc/release/v0.2.1-release-notes.md).
+
+### Added
+
+- Typed presence v1 wire schema (`Flat`/`Null`, version 83) with a
+  machine-checkable mechanism-parameter manifest: shared shape
+  descriptors, resolver, fingerprints, and a Phase-2 gate. The shim emits
+  typed v1 readers with presence; the server validates transport shape
+  (`PointerBytes`, `ValidatedMechanismParams`) at every handler site; the
+  backend reconstructs Flat/Null at the FFI boundary with guarded backing.
+  Verbatim and completeness quality gates pin the behavior, and exotic-tail
+  envelopes cover the remaining input-pointer tail under decision D1(a).
+- End-to-end `C_GetAttributeValue` template presence (FIX-1): a
+  `template_null` wire bit travels from the shim through the daemon to the
+  backend FFI, which materializes a real NULL for absent templates. The
+  daemon fail-closed rejects an absent marker with a non-empty payload.
+  Proven against a real Kryoptic backend, where NULL versus empty is
+  provider-observable.
+- Truthful 3.0 advertisement from slot provenance with 3.0 to 3.1 to 3.2
+  dispatch, plus discovery of explicit `{3,1}` interfaces.
+- Packed-32 (win32 ILP32) as a fourth v1 ABI, with
+  `ParamAbi::native()` for 32-bit Windows.
+- Shim regression nets: read-after-destroy canary (#26), NULL-shape
+  termination/parity net (#30, #31), blocking slot-wait refusal with
+  finalize regression (#25), async fixed-refusal 16-leg matrix (#24), and
+  post-restart stale-handle `0x82` regression (#32).
+- Assurance: cargo-fuzz harnesses with corrected seeds, expanded Miri
+  scope, Kani proofs adopted for the width-translation laws, a coverage
+  ratchet, and secret-boundary canaries with attribute classifier laws.
+- Performance instrumentation: T1 comparator with receipts, RSA/EC keygen
+  template parity gate, sign-pair latency bench receipts, degraded-
+  operation control qualification (T3), and direct-leg bench mode (T4).
+- macOS arm64 bundle packaging with smoke, CI lanes, and install doc.
+- Release engineering: single-invocation workspace repackaging, tag
+  checkout with out-of-repo artifact staging, CI candidate resolution from
+  the green tag run, and cut-release dispatch fixes.
+
+### Fixed
+
+- Message-path shape handling: request-shape validation before session
+  resolution (S1D4), residual auth-blocking gates hoisted above the
+  session lock (SDD T4), NULL/nonzero preservation on `VerifyMessageNext`
+  (S1D3), CK_ULONG-aligned provider-written query output (SDD T5), Raw
+  auth-input negative branch coverage (SDD T1), Raw message parameters
+  accepted at the backend FFI boundary, and D6(1)-gated operations
+  forwarded after a contended PIN login.
+- Verify-then-fix campaigns for independent review findings (F1-F6,
+  NF1-NF7) and the deferred-minor wave (R16/R18/R19/R21/R23).
+- Pre-existing i686/Windows test failures, win32 `ParamAbi::native()`,
+  and win32 manifest failures on CRLF checkouts.
+- Recorded decisions: RF-MC-ORDER option (a) — session arms stay
+  SHI-first with an arm-difference pin; S1D4 AB-beats-stale-session
+  scoped to `sanitize_inputs` on with a spec-precedence pin (#23).
+
+### Known limitations
+
+- All v0.2.0 limits carry forward, including the single logical client in
+  one trusted security domain per daemon/provider instance. The v1
+  typed-presence wire is decode-side only at the Phase-2 gate where
+  noted; mixed shim/daemon versions are unsupported.
+
 ## [0.2.0] - 2026-09-28
 
 v0.2.0 is a testing candidate for one logical client in one trusted security
