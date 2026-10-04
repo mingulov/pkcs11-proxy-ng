@@ -9,13 +9,13 @@ connected to the token or HSM, preserving the backend's results within the
 app ──dlopen──▶ libpkcs11_proxy_ng_shim.so ──gRPC/TLS──▶ pkcs11-proxy-ng (daemon) ──FFI──▶ backend .so (HSM/token)
 ```
 
-> **Current source version: `v0.2.0`.**
+> **Current source version: `v0.2.1`.**
 >
-> This is the `v0.2.0` release line. Until the annotated `v0.2.0` tag and its
+> This is the `v0.2.1` release line. Until the annotated `v0.2.1` tag and its
 > release artifacts are published, an untagged checkout is a release candidate.
 > Release qualification still requires the source-bound receipt and provider
 > evidence in the [`0.x` release checklist](./doc/release/0.x-beta-release-checklist.md).
-**Current source version: `v0.2.0` (unpublished candidate).** See
+**Current source version: `v0.2.1` (unpublished candidate).** See
 [GitHub Releases](https://github.com/mingulov/pkcs11-proxy-ng/releases) for
 published versions, the [support matrix](./doc/release/beta-support-matrix.md)
 for supported environments, and [release documentation](./doc/release/) for
@@ -100,9 +100,9 @@ checking, not by assertion. See the full
 [beta support matrix](./doc/release/beta-support-matrix.md) and the
 [parity methodology](./doc/release/parity-validation.md).
 
-The local `v0.2.0` target adds opt-in gateway, authorization, resilience, and
+The local `v0.2.1` target adds opt-in gateway, authorization, resilience, and
 audit increments. They remain unreleased until the release blockers in the
-candidate [release notes](./doc/release/v0.2.0-release-notes.md) are satisfied.
+candidate [release notes](./doc/release/v0.2.1-release-notes.md) are satisfied.
 
 ## Documentation
 
@@ -172,16 +172,16 @@ Use `--prefix /tmp/pkcs11-proxy-ng-install` to keep the staged layout, or
 
 ## crates.io packages (candidate, unpublished)
 
-Eight crates publish at one synchronized version (`0.2.0` first) with
-exact `=0.2.0` internal requirements. Four are user-facing entry points;
+Eight crates publish at one synchronized version (`0.2.1` first) with
+exact `=0.2.1` internal requirements. Four are user-facing entry points;
 the rest resolve automatically as dependencies:
 
 ```bash
-cargo install pkcs11-proxy-ng --version 0.2.0 --locked        # daemon
-cargo install pkcs11-proxy-ng-cli --version 0.2.0 --locked    # CLI
+cargo install pkcs11-proxy-ng --version 0.2.1 --locked        # daemon
+cargo install pkcs11-proxy-ng-cli --version 0.2.1 --locked    # CLI
 ```
 
-Add `pkcs11-proxy-ng-client = "=0.2.0"` as a dependency for the Rust
+Add `pkcs11-proxy-ng-client = "=0.2.1"` as a dependency for the Rust
 client library. The `pkcs11-proxy-ng-shim` crate builds the loadable
 PKCS#11 module — take it from a GitHub release bundle or OS package,
 never `cargo install` it as a library.

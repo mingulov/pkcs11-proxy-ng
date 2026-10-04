@@ -22,9 +22,9 @@ name = "pkcs11_proxy_ng_shim"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-pkcs11-proxy-ng-types = { version = "=0.2.0", path = "../types" }
-pkcs11-proxy-ng-client = { version = "=0.2.0", path = "../client" }
-pkcs11-proxy-ng-proto = { version = "=0.2.0", path = "../proto" }
+pkcs11-proxy-ng-types = { version = "=0.2.1", path = "../types" }
+pkcs11-proxy-ng-client = { version = "=0.2.1", path = "../client" }
+pkcs11-proxy-ng-proto = { version = "=0.2.1", path = "../proto" }
 cryptoki-sys.workspace = true
 # W1-L16-15: minimal cdylib closure — current-thread runtime + sync/time/net.
 # No signal/process (verified via `cargo tree -p pkcs11-proxy-ng-shim`).
