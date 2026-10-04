@@ -175,7 +175,7 @@ type InitStub = unsafe extern "C" fn(
 /// pin names it back.
 #[test]
 #[cfg_attr(miri, ignore)] // Miri: stub-backed FfiBackend needs dlopen; pure-conversion half runs under Miri
-fn r12_off_one_call_flat_forwards() {
+fn off_one_call_flat_forwards() {
     let _guard = LOCK.lock().expect("test lock");
     CALLS.lock().expect("capture log").clear();
     let (backend, _tables) = test_backend();
@@ -208,7 +208,7 @@ fn r12_off_one_call_flat_forwards() {
 /// narrowed length in exactly one provider call.
 #[test]
 #[cfg_attr(miri, ignore)] // Miri: stub-backed FfiBackend needs dlopen; pure-conversion half runs under Miri
-fn r12_off_one_call_null_forwards() {
+fn off_one_call_null_forwards() {
     let _guard = LOCK.lock().expect("test lock");
     CALLS.lock().expect("capture log").clear();
     let (backend, _tables) = test_backend();
@@ -245,7 +245,7 @@ fn r12_off_one_call_null_forwards() {
 /// session-family slot holds the owner after the call returns.
 #[test]
 #[cfg_attr(miri, ignore)] // Miri: stub-backed FfiBackend needs dlopen; pure-conversion half runs under Miri
-fn r12_init_flat_backing_retained() {
+fn init_flat_backing_retained() {
     let _guard = LOCK.lock().expect("test lock");
     CALLS.lock().expect("capture log").clear();
     let (backend, _tables) = test_backend();
@@ -272,7 +272,7 @@ fn r12_init_flat_backing_retained() {
 /// and no last-Init marker is recorded.
 #[test]
 #[cfg_attr(miri, ignore)] // Miri: stub-backed FfiBackend needs dlopen; pure-conversion half runs under Miri
-fn r12_failed_init_publishes_nothing_flat() {
+fn failed_init_publishes_nothing_flat() {
     let _guard = LOCK.lock().expect("test lock");
     CALLS.lock().expect("capture log").clear();
     let (backend, _tables) = test_backend();
@@ -304,7 +304,7 @@ fn r12_failed_init_publishes_nothing_flat() {
 /// the (mutated) backing is still retained for the session family.
 #[test]
 #[cfg_attr(miri, ignore)] // Miri: stub-backed FfiBackend needs dlopen; pure-conversion half runs under Miri
-fn r12_init_output_flat_suppressed() {
+fn init_output_flat_suppressed() {
     let _guard = LOCK.lock().expect("test lock");
     CALLS.lock().expect("capture log").clear();
     let (backend, _tables) = test_backend();
@@ -337,7 +337,7 @@ fn r12_init_output_flat_suppressed() {
 /// funnel path for typed params (guards against test-harness skew).
 #[test]
 #[cfg_attr(miri, ignore)] // Miri: stub-backed FfiBackend needs dlopen; pure-conversion half runs under Miri
-fn r12_direct_helper_typed_matches_funnel() {
+fn direct_helper_typed_matches_funnel() {
     let _guard = LOCK.lock().expect("test lock");
     CALLS.lock().expect("capture log").clear();
     let (backend, _tables) = test_backend();

@@ -141,7 +141,7 @@ unsafe fn read_r11_legacy(
 }
 
 /// Custom registry for exclusion/unbound/vendor R11 tests.
-fn r11_registry(
+fn custom_registry(
     bindings: &[(&str, u64)],
     parameterless: &[u64],
     excluded: &[u64],
@@ -155,7 +155,11 @@ fn r11_registry(
     )
 }
 
-fn r11_mechanism(mech: u64, p_parameter: CK_VOID_PTR, ul_parameter_len: CK_ULONG) -> CK_MECHANISM {
+fn make_ck_mechanism(
+    mech: u64,
+    p_parameter: CK_VOID_PTR,
+    ul_parameter_len: CK_ULONG,
+) -> CK_MECHANISM {
     CK_MECHANISM {
         mechanism: mech as CK_MECHANISM_TYPE,
         pParameter: p_parameter,
@@ -165,12 +169,7 @@ fn r11_mechanism(mech: u64, p_parameter: CK_VOID_PTR, ul_parameter_len: CK_ULONG
 
 /// Expected R7 wire fingerprint for `shape` at `length` under `abi` (the
 /// resolver selects the same form the reader routes on).
-fn r11_expected_fingerprint_for_abi(
-    shape: &str,
-    mechanism: u64,
-    length: u64,
-    abi: ParamAbi,
-) -> u64 {
+fn expected_fingerprint_for_abi(shape: &str, mechanism: u64, length: u64, abi: ParamAbi) -> u64 {
     ShapeResolver::resolve(
         Some(shape),
         OperationContext { mechanism, operation: Operation::General, length },
@@ -181,8 +180,8 @@ fn r11_expected_fingerprint_for_abi(
 }
 
 /// Expected R7 wire fingerprint for `shape` at `length` under LP64.
-fn r11_expected_fingerprint(shape: &str, mechanism: u64, length: u64) -> u64 {
-    r11_expected_fingerprint_for_abi(shape, mechanism, length, R11_LP64)
+fn expected_fingerprint(shape: &str, mechanism: u64, length: u64) -> u64 {
+    expected_fingerprint_for_abi(shape, mechanism, length, R11_LP64)
 }
 
 /// v1 read with the HOST-native local ABI (for struct-canonical fixtures,
@@ -233,7 +232,7 @@ unsafe fn read_r11_v1_abis(
 
 /// Host-native `CK_GCM_PARAMS` over caller-owned buffers (the struct copies
 /// the pointers; the caller keeps the buffers alive through the read).
-fn r11_gcm_params(iv: *mut u8, iv_len: CK_ULONG, aad: *mut u8, aad_len: CK_ULONG) -> CK_GCM_PARAMS {
+fn gcm_params(iv: *mut u8, iv_len: CK_ULONG, aad: *mut u8, aad_len: CK_ULONG) -> CK_GCM_PARAMS {
     CK_GCM_PARAMS {
         pIv: iv,
         ulIvLen: iv_len,
@@ -246,7 +245,7 @@ fn r11_gcm_params(iv: *mut u8, iv_len: CK_ULONG, aad: *mut u8, aad_len: CK_ULONG
 
 /// Assert the v1 Flat envelope (declared length, threaded version, source
 /// ABI, wire fingerprint) plus verbatim bytes.
-fn r11_assert_flat(p: &FlatParams, expected: &[u8], fingerprint: u64) {
+fn assert_flat(p: &FlatParams, expected: &[u8], fingerprint: u64) {
     assert_eq!(p.declared_len, expected.len() as u64);
     assert_eq!(p.version, MECHANISM_PARAMETER_TRANSPORT_VERSION);
     assert_eq!(p.source_abi, Some(R11_LP64));
@@ -255,7 +254,7 @@ fn r11_assert_flat(p: &FlatParams, expected: &[u8], fingerprint: u64) {
 }
 
 /// Assert a v1 Null member (declared length + threaded version, no bytes).
-fn r11_assert_null(params: &Option<CkMechanismParams>, declared_len: u64) {
+fn assert_null_params(params: &Option<CkMechanismParams>, declared_len: u64) {
     match params {
         Some(CkMechanismParams::Null { declared_len: n, version }) => {
             assert_eq!(*n, declared_len);
@@ -469,7 +468,7 @@ fn gmac_struct_params_parse_as_gcm_without_forwarding_pointers() {
         }) => {
             assert_eq!(iv_presence, PointerBytes::present_copy(&[0x11; 12]));
             assert_eq!(iv_bits, 96);
-            r17_assert_null_secret(&aad_presence, 0);
+            assert_null_secret(&aad_presence, 0);
             assert_eq!(tag_bits, 128);
             assert!(!iv_presence.is_null());
         }
@@ -774,7 +773,7 @@ fn wrap_key_reader_uses_v32_aead_wrap_shapes() {
     // host-native struct, so the snapshots must name the host ABI (the
     // LP64-only helper sees a noncanonical length on 4-byte-`CK_ULONG`
     // hosts and rejects with PARAM_INVALID); same shape as
-    // `r11_wrap_key_operation_context`.
+    // `wrap_key_operation_context`.
     match unsafe { read_r11_v1_native_abi(&mechanism, &registry, Operation::WrapKey) }
         .expect("read mechanism")
         .params
@@ -3701,7 +3700,7 @@ fn nesting_budget_pins_sixteen_node_limit() {
 // (legacy Raw/None where v1 Flat/Null is expected); GREEN after.
 
 #[test]
-fn r11_flat_sha256_with_16_bytes() {
+fn flat_sha256_with_16_bytes() {
     let registry = default_registry();
     let mut data = [0x5Au8; 16];
     let mechanism = CK_MECHANISM {
@@ -3714,14 +3713,14 @@ fn r11_flat_sha256_with_16_bytes() {
         .params;
     match &params {
         Some(CkMechanismParams::Flat(p)) => {
-            r11_assert_flat(p, &data, ABI_EXEMPT_FINGERPRINT);
+            assert_flat(p, &data, ABI_EXEMPT_FINGERPRINT);
         }
         other => panic!("SHA-256+16B must emit v1 Flat, got {other:?}"),
     }
 }
 
 #[test]
-fn r11_flat_3_byte_pss() {
+fn flat_3_byte_pss() {
     let registry = default_registry();
     let mut data = [0x01u8, 0x02, 0x03];
     let mechanism = CK_MECHANISM {
@@ -3734,10 +3733,10 @@ fn r11_flat_3_byte_pss() {
         .params;
     match &params {
         Some(CkMechanismParams::Flat(p)) => {
-            r11_assert_flat(
+            assert_flat(
                 p,
                 &data,
-                r11_expected_fingerprint("rsa_pss", CkMechanismType::RSA_PKCS_PSS.0, 3),
+                expected_fingerprint("rsa_pss", CkMechanismType::RSA_PKCS_PSS.0, 3),
             );
         }
         other => panic!("3-byte PSS must emit v1 Flat, got {other:?}"),
@@ -3745,7 +3744,7 @@ fn r11_flat_3_byte_pss() {
 }
 
 #[test]
-fn r11_flat_1_byte_eddsa() {
+fn flat_1_byte_eddsa() {
     let registry = default_registry();
     let mut data = [0x07u8];
     let mechanism = CK_MECHANISM {
@@ -3758,18 +3757,14 @@ fn r11_flat_1_byte_eddsa() {
         .params;
     match &params {
         Some(CkMechanismParams::Flat(p)) => {
-            r11_assert_flat(
-                p,
-                &data,
-                r11_expected_fingerprint("eddsa", CkMechanismType::EDDSA.0, 1),
-            );
+            assert_flat(p, &data, expected_fingerprint("eddsa", CkMechanismType::EDDSA.0, 1));
         }
         other => panic!("1-byte EdDSA must emit v1 Flat, got {other:?}"),
     }
 }
 
 #[test]
-fn r11_outer_null_nonzero_is_null_not_none() {
+fn outer_null_nonzero_is_null_not_none() {
     let registry = default_registry();
     let mechanism = CK_MECHANISM {
         mechanism: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
@@ -3779,11 +3774,11 @@ fn r11_outer_null_nonzero_is_null_not_none() {
     let params = unsafe { read_r11_v1(&mechanism, &registry, Operation::General) }
         .expect("read mechanism")
         .params;
-    r11_assert_null(&params, 5);
+    assert_null_params(&params, 5);
 }
 
 #[test]
-fn r11_outer_nonnull_empty_is_empty_flat_not_none() {
+fn outer_nonnull_empty_is_empty_flat_not_none() {
     let registry = default_registry();
     let mut data = [0x5Au8; 1];
     let mechanism = CK_MECHANISM {
@@ -3796,14 +3791,14 @@ fn r11_outer_nonnull_empty_is_empty_flat_not_none() {
         .params;
     match &params {
         Some(CkMechanismParams::Flat(p)) => {
-            r11_assert_flat(p, &[], ABI_EXEMPT_FINGERPRINT);
+            assert_flat(p, &[], ABI_EXEMPT_FINGERPRINT);
         }
         other => panic!("(non-NULL,0) must emit empty v1 Flat, got {other:?}"),
     }
 }
 
 #[test]
-fn r11_null_huge_forwards_without_deref() {
+fn null_huge_forwards_without_deref() {
     let registry = default_registry();
     let mechanism = CK_MECHANISM {
         mechanism: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
@@ -3813,11 +3808,11 @@ fn r11_null_huge_forwards_without_deref() {
     let params = unsafe { read_r11_v1(&mechanism, &registry, Operation::General) }
         .expect("read mechanism")
         .params;
-    r11_assert_null(&params, 1024 * 1024 * 1024);
+    assert_null_params(&params, 1024 * 1024 * 1024);
 }
 
 #[test]
-fn r11_outer_null_empty_distinctness() {
+fn outer_null_empty_distinctness() {
     // S2 §12 probe: the 4-cell outer matrix under v1. NULL and empty are
     // never conflated, in either direction.
     const UNKNOWN: u64 = 0x0000_9999;
@@ -3828,7 +3823,7 @@ fn r11_outer_null_empty_distinctness() {
     // (NULL,0) -> None, descriptor-independent (bound, parameterless-only,
     // and unknown mechanisms alike).
     for mech in [CkMechanismType::RSA_PKCS_PSS.0, CkMechanismType::SHA256.0, UNKNOWN] {
-        let mechanism = r11_mechanism(mech, std::ptr::null_mut(), 0);
+        let mechanism = make_ck_mechanism(mech, std::ptr::null_mut(), 0);
         let params = unsafe { read_r11_v1(&mechanism, &registry, Operation::General) }
             .expect("read mechanism")
             .params;
@@ -3836,32 +3831,32 @@ fn r11_outer_null_empty_distinctness() {
     }
     // (NULL,5) -> Null (unknown mechanisms forward Null with no descriptor).
     for mech in [CkMechanismType::RSA_PKCS_PSS.0, CkMechanismType::SHA256.0, UNKNOWN] {
-        let mechanism = r11_mechanism(mech, std::ptr::null_mut(), 5);
+        let mechanism = make_ck_mechanism(mech, std::ptr::null_mut(), 5);
         let params = unsafe { read_r11_v1(&mechanism, &registry, Operation::General) }
             .expect("read mechanism")
             .params;
-        r11_assert_null(&params, 5);
+        assert_null_params(&params, 5);
     }
     // (non-NULL,0) -> empty Flat (parameterless-only and struct-bound);
     // unknown mechanisms cannot form one -> MPI.
     for (mech, shape) in
         [(CkMechanismType::SHA256.0, None), (CkMechanismType::RSA_PKCS_PSS.0, Some("rsa_pss"))]
     {
-        let mechanism = r11_mechanism(mech, live, 0);
+        let mechanism = make_ck_mechanism(mech, live, 0);
         let params = unsafe { read_r11_v1(&mechanism, &registry, Operation::General) }
             .expect("read mechanism")
             .params;
         match &params {
             Some(CkMechanismParams::Flat(p)) => {
                 let fingerprint = shape
-                    .map(|s| r11_expected_fingerprint(s, mech, 0))
+                    .map(|s| expected_fingerprint(s, mech, 0))
                     .unwrap_or(ABI_EXEMPT_FINGERPRINT);
-                r11_assert_flat(p, &[], fingerprint);
+                assert_flat(p, &[], fingerprint);
             }
             other => panic!("(non-NULL,0) must emit empty Flat for 0x{mech:08X}, got {other:?}"),
         }
     }
-    let mechanism = r11_mechanism(UNKNOWN, live, 0);
+    let mechanism = make_ck_mechanism(UNKNOWN, live, 0);
     assert!(
         matches!(
             unsafe { read_r11_v1(&mechanism, &registry, Operation::General) },
@@ -3870,15 +3865,15 @@ fn r11_outer_null_empty_distinctness() {
         "(non-NULL,0) with an unknown mechanism must be MPI (UnknownShape)"
     );
     // (non-NULL,16) -> Flat for representable shapes, MPI for unknown.
-    let mechanism = r11_mechanism(CkMechanismType::SHA256.0, live, 16);
+    let mechanism = make_ck_mechanism(CkMechanismType::SHA256.0, live, 16);
     let params = unsafe { read_r11_v1(&mechanism, &registry, Operation::General) }
         .expect("read mechanism")
         .params;
     match &params {
-        Some(CkMechanismParams::Flat(p)) => r11_assert_flat(p, &data, ABI_EXEMPT_FINGERPRINT),
+        Some(CkMechanismParams::Flat(p)) => assert_flat(p, &data, ABI_EXEMPT_FINGERPRINT),
         other => panic!("SHA-256+16B must emit v1 Flat, got {other:?}"),
     }
-    let mechanism = r11_mechanism(UNKNOWN, live, 16);
+    let mechanism = make_ck_mechanism(UNKNOWN, live, 16);
     assert!(
         matches!(
             unsafe { read_r11_v1(&mechanism, &registry, Operation::General) },
@@ -3889,13 +3884,13 @@ fn r11_outer_null_empty_distinctness() {
 }
 
 #[test]
-fn r11_over_limit_no_deref() {
+fn over_limit_no_deref() {
     // S2 §12 probe: over-cap Flat extents are denied BEFORE any dereference
     // (the pointer below is dangling — a dereference would fault / be Miri
     // UB). NULL lengths ignore the cap entirely (D3: no bytes materialize).
     let registry = default_registry();
     let dangling = std::ptr::dangling_mut::<u8>().cast::<std::ffi::c_void>();
-    let mechanism = r11_mechanism(CkMechanismType::SHA256.0, dangling, 100 * 1024);
+    let mechanism = make_ck_mechanism(CkMechanismType::SHA256.0, dangling, 100 * 1024);
     assert!(
         matches!(
             unsafe { read_r11_v1(&mechanism, &registry, Operation::General) },
@@ -3903,15 +3898,15 @@ fn r11_over_limit_no_deref() {
         ),
         "100 KiB Flat extent must be MPI without dereference (OverCap)"
     );
-    let mechanism = r11_mechanism(CkMechanismType::SHA256.0, std::ptr::null_mut(), 100 * 1024);
+    let mechanism = make_ck_mechanism(CkMechanismType::SHA256.0, std::ptr::null_mut(), 100 * 1024);
     let params = unsafe { read_r11_v1(&mechanism, &registry, Operation::General) }
         .expect("read mechanism")
         .params;
-    r11_assert_null(&params, 100 * 1024);
+    assert_null_params(&params, 100 * 1024);
 }
 
 #[test]
-fn r11_legacy_capability_preservation() {
+fn legacy_capability_preservation() {
     // S2 §12 probe: under legacy capability the new call preserves the old
     // behavior EXACTLY — including legacy `Raw` emission for old daemons
     // and the NULL/empty collapse.
@@ -3935,12 +3930,12 @@ fn r11_legacy_capability_preservation() {
     }
 
     // NULL/empty collapse preserved (v1 distinguishes; legacy does not).
-    let mechanism = r11_mechanism(CkMechanismType::SHA256.0, std::ptr::null_mut(), 5);
+    let mechanism = make_ck_mechanism(CkMechanismType::SHA256.0, std::ptr::null_mut(), 5);
     let params = unsafe { read_r11_legacy(&mechanism, &registry, Operation::General) }
         .expect("read mechanism")
         .params;
     assert_eq!(params, None, "legacy (NULL,5) must collapse to None");
-    let mechanism = r11_mechanism(CkMechanismType::AES_CBC.0, data.as_mut_ptr().cast(), 0);
+    let mechanism = make_ck_mechanism(CkMechanismType::AES_CBC.0, data.as_mut_ptr().cast(), 0);
     let params = unsafe { read_r11_legacy(&mechanism, &registry, Operation::General) }
         .expect("read mechanism")
         .params;
@@ -3948,7 +3943,7 @@ fn r11_legacy_capability_preservation() {
 
     // Overlong outer lengths trip the entry gate without dereference.
     let dangling = std::ptr::dangling_mut::<u8>().cast::<std::ffi::c_void>();
-    let mechanism = r11_mechanism(CkMechanismType::AES_CBC.0, dangling, 100 * 1024);
+    let mechanism = make_ck_mechanism(CkMechanismType::AES_CBC.0, dangling, 100 * 1024);
     assert!(
         matches!(
             unsafe { read_r11_legacy(&mechanism, &registry, Operation::General) },
@@ -3960,7 +3955,7 @@ fn r11_legacy_capability_preservation() {
     // Canonical typed reads are unchanged under legacy.
     let mut iv = [0x11u8; 12];
     let mut aad = [0xA1u8, 0xA2];
-    let gcm = r11_gcm_params(iv.as_mut_ptr(), 12, aad.as_mut_ptr(), 2);
+    let gcm = gcm_params(iv.as_mut_ptr(), 12, aad.as_mut_ptr(), 2);
     let mechanism = CK_MECHANISM {
         mechanism: CkMechanismType::AES_GCM.0 as CK_MECHANISM_TYPE,
         pParameter: &gcm as *const _ as CK_VOID_PTR,
@@ -4007,7 +4002,7 @@ fn r11_legacy_capability_preservation() {
 }
 
 #[test]
-fn r11_gcm_compat_union_routing() {
+fn gcm_compat_union_routing() {
     // `gcm_compat` is a byte-buffer/struct union selected by length (S2 §4):
     // short buffers stay typed Iv bytes, struct-sized buffers parse as the
     // GCM struct, longer-than-struct buffers are noncanonical for a pointer
@@ -4029,7 +4024,7 @@ fn r11_gcm_compat_union_routing() {
 
     let mut iv = [0x11u8; 12];
     let mut aad = [0xA1u8, 0xA2];
-    let gcm = r11_gcm_params(iv.as_mut_ptr(), 12, aad.as_mut_ptr(), 2);
+    let gcm = gcm_params(iv.as_mut_ptr(), 12, aad.as_mut_ptr(), 2);
     let mechanism = CK_MECHANISM {
         mechanism: CkMechanismType::AES_GMAC.0 as CK_MECHANISM_TYPE,
         pParameter: &gcm as *const _ as CK_VOID_PTR,
@@ -4059,7 +4054,7 @@ fn r11_gcm_compat_union_routing() {
 }
 
 #[test]
-fn r11_wrap_key_operation_context() {
+fn wrap_key_operation_context() {
     // Operation context is load-bearing (S2 §4, R7
     // `general_operation_ignores_wrap_layouts`): the SAME (mechanism,
     // length) selects the wrap layout under WrapKey and rejects under
@@ -4123,7 +4118,7 @@ fn r11_wrap_key_operation_context() {
     );
 
     // WrapKey with a non-wrap size falls back to the registry binding.
-    let gcm = r11_gcm_params(iv.as_mut_ptr(), 12, aad.as_mut_ptr(), 2);
+    let gcm = gcm_params(iv.as_mut_ptr(), 12, aad.as_mut_ptr(), 2);
     let mechanism = CK_MECHANISM {
         mechanism: CkMechanismType::AES_GCM.0 as CK_MECHANISM_TYPE,
         pParameter: &gcm as *const _ as CK_VOID_PTR,
@@ -4139,7 +4134,7 @@ fn r11_wrap_key_operation_context() {
 }
 
 #[test]
-fn r11_null_pointer_never_dereferenced() {
+fn null_pointer_never_dereferenced() {
     // Unreadable-pointer rule (S2 §5): only NULL (never dereferenced) is
     // unconditionally safe. Every length — including CK_ULONG::MAX, whose
     // narrowing is the daemon's job — forwards as Null with no descriptor
@@ -4149,7 +4144,7 @@ fn r11_null_pointer_never_dereferenced() {
     let registry = default_registry();
     // A companion-set shape binding (R7 `kea_derive` carries one): outer
     // NULL still forwards — no struct is read, so no companion exists.
-    let kea_registry = r11_registry(&[("kea_derive", 0x0000_9998)], &[], &[]);
+    let kea_registry = custom_registry(&[("kea_derive", 0x0000_9998)], &[], &[]);
     for length in [1u64, 5, 1024 * 1024 * 1024, CK_ULONG::MAX as u64] {
         let length = length as CK_ULONG;
         for (mech, registry) in [
@@ -4158,17 +4153,17 @@ fn r11_null_pointer_never_dereferenced() {
             (UNKNOWN, &registry),
             (0x0000_9998, &kea_registry),
         ] {
-            let mechanism = r11_mechanism(mech, std::ptr::null_mut(), length);
+            let mechanism = make_ck_mechanism(mech, std::ptr::null_mut(), length);
             let params = unsafe { read_r11_v1(&mechanism, registry, Operation::General) }
                 .expect("read mechanism")
                 .params;
-            r11_assert_null(&params, length as u64);
+            assert_null_params(&params, length as u64);
         }
     }
 }
 
 #[test]
-fn r11_width_same_abi_struct_prefix_ok() {
+fn width_same_abi_struct_prefix_ok() {
     // S2 §5 width rule, same-ABI leg on a non-LP64 pair: struct-prefix Flat
     // carries the local fingerprint and source ABI.
     let registry = default_registry();
@@ -4196,7 +4191,7 @@ fn r11_width_same_abi_struct_prefix_ok() {
             assert_eq!(p.source_abi, Some(R11_ILP32));
             assert_eq!(
                 p.fingerprint,
-                r11_expected_fingerprint_for_abi(
+                expected_fingerprint_for_abi(
                     "rsa_pss",
                     CkMechanismType::RSA_PKCS_PSS.0,
                     3,
@@ -4210,7 +4205,7 @@ fn r11_width_same_abi_struct_prefix_ok() {
 }
 
 #[test]
-fn r11_width_cross_abi_struct_prefix_rejected() {
+fn width_cross_abi_struct_prefix_rejected() {
     // S2 §5 width rule: struct prefixes require identical layouts, else
     // explicit PARAM_INVALID — in both directions.
     let registry = default_registry();
@@ -4234,7 +4229,7 @@ fn r11_width_cross_abi_struct_prefix_rejected() {
 }
 
 #[test]
-fn r11_width_unknown_backend_abi_rejects_struct_prefix() {
+fn width_unknown_backend_abi_rejects_struct_prefix() {
     // An unknown backend ABI fails closed for struct prefixes (layouts
     // cannot be proven identical).
     let registry = default_registry();
@@ -4256,38 +4251,38 @@ fn r11_width_unknown_backend_abi_rejects_struct_prefix() {
 }
 
 #[test]
-fn r11_width_bare_flat_crosses_abis() {
+fn width_bare_flat_crosses_abis() {
     // S2 §5 width rule: parameterless and byte-buffer Flat cross ABIs
     // (backend ignored — `None` proves it); NULL carries no ABI at all.
     let registry = default_registry();
     let mut data = [0x5Au8; 16];
     let live = data.as_mut_ptr() as CK_VOID_PTR;
 
-    let mechanism = r11_mechanism(CkMechanismType::SHA256.0, live, 16);
+    let mechanism = make_ck_mechanism(CkMechanismType::SHA256.0, live, 16);
     let params = unsafe {
         read_r11_v1_abis(&mechanism, &registry, Operation::General, Some(R11_LP64), Some(R11_ILP32))
     }
     .expect("read mechanism")
     .params;
     match &params {
-        Some(CkMechanismParams::Flat(p)) => r11_assert_flat(p, &data, ABI_EXEMPT_FINGERPRINT),
+        Some(CkMechanismParams::Flat(p)) => assert_flat(p, &data, ABI_EXEMPT_FINGERPRINT),
         other => panic!("cross-ABI parameterless Flat must emit, got {other:?}"),
     }
 
-    let mechanism = r11_mechanism(CkMechanismType::SHA256.0, live, 0);
+    let mechanism = make_ck_mechanism(CkMechanismType::SHA256.0, live, 0);
     let params = unsafe {
         read_r11_v1_abis(&mechanism, &registry, Operation::General, Some(R11_LP64), None)
     }
     .expect("read mechanism")
     .params;
     match &params {
-        Some(CkMechanismParams::Flat(p)) => r11_assert_flat(p, &[], ABI_EXEMPT_FINGERPRINT),
+        Some(CkMechanismParams::Flat(p)) => assert_flat(p, &[], ABI_EXEMPT_FINGERPRINT),
         other => panic!("empty Flat must emit with unknown backend ABI, got {other:?}"),
     }
 
     // Byte-buffer shapes keep their (ABI-independent) typed encoding across
     // ABIs.
-    let mechanism = r11_mechanism(CkMechanismType::AES_CBC.0, live, 16);
+    let mechanism = make_ck_mechanism(CkMechanismType::AES_CBC.0, live, 16);
     let params = unsafe {
         read_r11_v1_abis(&mechanism, &registry, Operation::General, Some(R11_LP64), Some(R11_ILP32))
     }
@@ -4298,17 +4293,17 @@ fn r11_width_bare_flat_crosses_abis() {
         other => panic!("cross-ABI byte-buffer input must stay typed Iv, got {other:?}"),
     }
 
-    let mechanism = r11_mechanism(CkMechanismType::RSA_PKCS_PSS.0, std::ptr::null_mut(), 7);
+    let mechanism = make_ck_mechanism(CkMechanismType::RSA_PKCS_PSS.0, std::ptr::null_mut(), 7);
     let params = unsafe {
         read_r11_v1_abis(&mechanism, &registry, Operation::General, Some(R11_LP64), None)
     }
     .expect("read mechanism")
     .params;
-    r11_assert_null(&params, 7);
+    assert_null_params(&params, 7);
 }
 
 #[test]
-fn r11_d3_null_huge_forwards_freely() {
+fn d3_null_huge_forwards_freely() {
     // D3: NULL lengths above 512 MiB forward freely (no bytes materialize)
     // — for unknown mechanisms (no descriptor needed) and even for
     // companion-set shapes, where the shared-length exception is vacuous
@@ -4316,18 +4311,18 @@ fn r11_d3_null_huge_forwards_freely() {
     // the length; R17 enforces the exception per field on the typed path).
     const HUGE: CK_ULONG = 1024 * 1024 * 1024;
     let registry = default_registry();
-    let kea_registry = r11_registry(&[("kea_derive", 0x0000_9998)], &[], &[]);
+    let kea_registry = custom_registry(&[("kea_derive", 0x0000_9998)], &[], &[]);
     for (mech, registry) in [(0x0000_9999u64, &registry), (0x0000_9998, &kea_registry)] {
-        let mechanism = r11_mechanism(mech, std::ptr::null_mut(), HUGE);
+        let mechanism = make_ck_mechanism(mech, std::ptr::null_mut(), HUGE);
         let params = unsafe { read_r11_v1(&mechanism, registry, Operation::General) }
             .expect("read mechanism")
             .params;
-        r11_assert_null(&params, HUGE as u64);
+        assert_null_params(&params, HUGE as u64);
     }
 }
 
 #[test]
-fn r11_d3_governed_companion_stays_capped() {
+fn d3_governed_companion_stays_capped() {
     // D3 exception half: a governed (materialized) companion stays capped
     // at 512 MiB. Canonical GCM with a 600 MiB AAD declaration cannot ride
     // the typed path (the embedded copy is unmaterializable) and cannot
@@ -4359,12 +4354,12 @@ fn r11_d3_governed_companion_stays_capped() {
 }
 
 #[test]
-fn r11_v1_never_emits_legacy_raw() {
+fn v1_never_emits_legacy_raw() {
     // Under v1 the shim NEVER emits legacy Raw (S2 §5): every input the
     // legacy reader would forward as Raw becomes Flat, local MPI, or —
     // since R17 — representable typed v1 (S2 §5 step-1 presence reads).
     let registry = default_registry();
-    let kip_registry = r11_registry(&[("kip", CkMechanismType::KIP_DERIVE.0)], &[], &[]);
+    let kip_registry = custom_registry(&[("kip", CkMechanismType::KIP_DERIVE.0)], &[], &[]);
 
     // Short structs -> Flat.
     for (name, mech, shape, bytes) in [
@@ -4382,11 +4377,7 @@ fn r11_v1_never_emits_legacy_raw() {
             .params;
         match &params {
             Some(CkMechanismParams::Flat(p)) => {
-                r11_assert_flat(
-                    p,
-                    &bytes,
-                    r11_expected_fingerprint(shape, mech, bytes.len() as u64),
-                );
+                assert_flat(p, &bytes, expected_fingerprint(shape, mech, bytes.len() as u64));
             }
             other => panic!("{name} must emit Flat under v1, got {other:?}"),
         }
@@ -4456,11 +4447,11 @@ fn r11_v1_never_emits_legacy_raw() {
 }
 
 #[test]
-fn r11_excluded_mechanism_rejected() {
+fn excluded_mechanism_rejected() {
     // S2 §4 rule 1: operator exclusion wins — under BOTH capabilities and
     // for every outer class, including parameterless invocations.
     let excluded = CkMechanismType::RSA_PKCS_PSS.0;
-    let registry = r11_registry(&[("rsa_pss", excluded)], &[], &[excluded]);
+    let registry = custom_registry(&[("rsa_pss", excluded)], &[], &[excluded]);
     let mut data = [0x01u8, 0x02, 0x03];
     let live = data.as_mut_ptr() as CK_VOID_PTR;
     let pss = CK_RSA_PKCS_PSS_PARAMS {
@@ -4470,10 +4461,10 @@ fn r11_excluded_mechanism_rejected() {
     };
 
     let cases: Vec<(&str, CK_MECHANISM)> = vec![
-        ("null-empty", r11_mechanism(excluded, std::ptr::null_mut(), 0)),
-        ("null-nonzero", r11_mechanism(excluded, std::ptr::null_mut(), 5)),
-        ("nonnull-empty", r11_mechanism(excluded, live, 0)),
-        ("short", r11_mechanism(excluded, live, 3)),
+        ("null-empty", make_ck_mechanism(excluded, std::ptr::null_mut(), 0)),
+        ("null-nonzero", make_ck_mechanism(excluded, std::ptr::null_mut(), 5)),
+        ("nonnull-empty", make_ck_mechanism(excluded, live, 0)),
+        ("short", make_ck_mechanism(excluded, live, 3)),
         (
             "canonical",
             CK_MECHANISM {
@@ -4499,7 +4490,7 @@ fn r11_excluded_mechanism_rejected() {
 }
 
 #[test]
-fn r11_unknown_mechanism_matrix() {
+fn unknown_mechanism_matrix() {
     // Unknown mechanisms: v1 forwards NULL (no descriptor needed, S2 §6 RV
     // table) and rejects non-NULL with MPI; legacy collapses NULL/empty to
     // None and rejects non-NULL/nonzero with MPI.
@@ -4508,7 +4499,7 @@ fn r11_unknown_mechanism_matrix() {
     let mut data = [0x5Au8; 7];
     let live = data.as_mut_ptr() as CK_VOID_PTR;
 
-    let mechanism = r11_mechanism(UNKNOWN, std::ptr::null_mut(), 0);
+    let mechanism = make_ck_mechanism(UNKNOWN, std::ptr::null_mut(), 0);
     for (cap, result) in [
         ("legacy", unsafe { read_r11_legacy(&mechanism, &registry, Operation::General) }),
         ("v1", unsafe { read_r11_v1(&mechanism, &registry, Operation::General) }),
@@ -4517,7 +4508,7 @@ fn r11_unknown_mechanism_matrix() {
         assert_eq!(params, None, "(NULL,0) must stay None ({cap})");
     }
 
-    let mechanism = r11_mechanism(UNKNOWN, std::ptr::null_mut(), 7);
+    let mechanism = make_ck_mechanism(UNKNOWN, std::ptr::null_mut(), 7);
     let params = unsafe { read_r11_legacy(&mechanism, &registry, Operation::General) }
         .expect("read mechanism")
         .params;
@@ -4525,9 +4516,9 @@ fn r11_unknown_mechanism_matrix() {
     let params = unsafe { read_r11_v1(&mechanism, &registry, Operation::General) }
         .expect("read mechanism")
         .params;
-    r11_assert_null(&params, 7);
+    assert_null_params(&params, 7);
 
-    let mechanism = r11_mechanism(UNKNOWN, live, 0);
+    let mechanism = make_ck_mechanism(UNKNOWN, live, 0);
     let params = unsafe { read_r11_legacy(&mechanism, &registry, Operation::General) }
         .expect("read mechanism")
         .params;
@@ -4540,7 +4531,7 @@ fn r11_unknown_mechanism_matrix() {
         "v1 (non-NULL,0) with unknown mechanism must be MPI"
     );
 
-    let mechanism = r11_mechanism(UNKNOWN, live, 7);
+    let mechanism = make_ck_mechanism(UNKNOWN, live, 7);
     for (cap, result) in [
         ("legacy", unsafe { read_r11_legacy(&mechanism, &registry, Operation::General) }),
         ("v1", unsafe { read_r11_v1(&mechanism, &registry, Operation::General) }),
@@ -4553,14 +4544,14 @@ fn r11_unknown_mechanism_matrix() {
 }
 
 #[test]
-fn r11_vendor_flat_requires_allowlist() {
+fn vendor_flat_requires_allowlist() {
     // S2 §4 TOML rule: TOML may bind a mechanism to a compiled descriptor
     // but can never authorize vendor Flat (the v1 allowlist is empty) — a
     // TOML-bound vendor mechanism with a noncanonical length is MPI under
     // v1 (legacy still emits Raw for old daemons). Canonical lengths stay
     // typed under both.
     const VENDOR: u64 = 0x8000_0001;
-    let registry = r11_registry(&[("rsa_pss", VENDOR)], &[], &[]);
+    let registry = custom_registry(&[("rsa_pss", VENDOR)], &[], &[]);
     let mut data = [0x01u8, 0x02, 0x03];
     let mechanism = CK_MECHANISM {
         mechanism: VENDOR as CK_MECHANISM_TYPE,
@@ -4602,7 +4593,7 @@ fn r11_vendor_flat_requires_allowlist() {
 }
 
 #[test]
-fn r11_v1_canonical_stays_typed() {
+fn v1_canonical_stays_typed() {
     // Canonical lengths route to the EXISTING typed reader unchanged (R17
     // owns the typed rework): struct params parse, byte-buffer shapes keep
     // their legacy typed encoding (still valid under v1, S2 §3).
@@ -4610,7 +4601,7 @@ fn r11_v1_canonical_stays_typed() {
 
     let mut iv = [0x11u8; 12];
     let mut aad = [0xA1u8, 0xA2];
-    let gcm = r11_gcm_params(iv.as_mut_ptr(), 12, aad.as_mut_ptr(), 2);
+    let gcm = gcm_params(iv.as_mut_ptr(), 12, aad.as_mut_ptr(), 2);
     let mechanism = CK_MECHANISM {
         mechanism: CkMechanismType::AES_GCM.0 as CK_MECHANISM_TYPE,
         pParameter: &gcm as *const _ as CK_VOID_PTR,
@@ -4658,7 +4649,7 @@ fn r11_v1_canonical_stays_typed() {
 }
 
 #[test]
-fn r11_nested_legacy_skips_validate_fusion() {
+fn nested_legacy_skips_validate_fusion() {
     // Nested KIP nodes under legacy reproduce the old nested read EXACTLY:
     // no validate-fusion (excluded nested mechanisms forward, unknown
     // nested mechanisms with params ride nested Raw) — validation was
@@ -4667,10 +4658,10 @@ fn r11_nested_legacy_skips_validate_fusion() {
     const EXCLUDED_NESTED: u64 = 0x0000_9997;
     let _guard = crate::tests::shim_state_test_guard();
     crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(0);
-    crate::state::replace_mechanism_registry(r11_registry(&[], &[], &[EXCLUDED_NESTED]));
+    crate::state::replace_mechanism_registry(custom_registry(&[], &[], &[EXCLUDED_NESTED]));
 
     // Excluded nested (NULL,0) forwards (top-level would be MI).
-    let mut nested = r11_mechanism(EXCLUDED_NESTED, std::ptr::null_mut(), 0);
+    let mut nested = make_ck_mechanism(EXCLUDED_NESTED, std::ptr::null_mut(), 0);
     let mut seed = [0xF2u8, 0xF3];
     let kip = CK_KIP_PARAMS {
         pMechanism: &mut nested,
@@ -4696,7 +4687,7 @@ fn r11_nested_legacy_skips_validate_fusion() {
 
     // Unknown nested with params rides nested Raw (top-level would be MPI).
     let mut bytes = [0xE0u8, 0xE1, 0xE2, 0xE3];
-    let mut nested = r11_mechanism(0x0000_9999, bytes.as_mut_ptr().cast(), 4);
+    let mut nested = make_ck_mechanism(0x0000_9999, bytes.as_mut_ptr().cast(), 4);
     let kip = CK_KIP_PARAMS {
         pMechanism: &mut nested,
         hKey: 0x44,
@@ -4727,19 +4718,19 @@ fn r11_nested_legacy_skips_validate_fusion() {
 }
 
 #[test]
-fn r11_nested_v1_outer_classification() {
+fn nested_v1_outer_classification() {
     // Nested KIP nodes under v1 get full v1 semantics through the nested
     // helper (one snapshot per node): a nested (NULL,n) becomes Null, never
     // collapsed. Guarded: global snapshots; restored before return.
     let _guard = crate::tests::shim_state_test_guard();
-    crate::state::replace_mechanism_registry(r11_registry(
+    crate::state::replace_mechanism_registry(custom_registry(
         &[("kip", CkMechanismType::KIP_DERIVE.0)],
         &[],
         &[],
     ));
     crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(1);
 
-    let mut nested = r11_mechanism(CkMechanismType::SHA256.0, std::ptr::null_mut(), 5);
+    let mut nested = make_ck_mechanism(CkMechanismType::SHA256.0, std::ptr::null_mut(), 5);
     let mut seed = [0xF2u8, 0xF3];
     let kip = CK_KIP_PARAMS {
         pMechanism: &mut nested,
@@ -4757,7 +4748,7 @@ fn r11_nested_v1_outer_classification() {
         .params
     {
         Some(CkMechanismParams::Kip(KipParams { mechanism, .. })) => {
-            r11_assert_null(&mechanism.as_ref().unwrap().params, 5);
+            assert_null_params(&mechanism.as_ref().unwrap().params, 5);
         }
         other => panic!("nested (NULL,5) must be Null under v1, got {other:?}"),
     }
@@ -4767,13 +4758,13 @@ fn r11_nested_v1_outer_classification() {
 }
 
 #[test]
-fn r11_nested_core_skips_exclusion() {
+fn nested_core_skips_exclusion() {
     // The nested contract, hermetically: nested nodes skip exclusion under
     // BOTH capabilities (legacy parity: validation was top-level-only;
     // daemon R9 does not recurse into nested params).
     let excluded = CkMechanismType::RSA_PKCS_PSS.0;
-    let registry = r11_registry(&[("rsa_pss", excluded)], &[], &[excluded]);
-    let mechanism = r11_mechanism(excluded, std::ptr::null_mut(), 0);
+    let registry = custom_registry(&[("rsa_pss", excluded)], &[], &[excluded]);
+    let mechanism = make_ck_mechanism(excluded, std::ptr::null_mut(), 0);
     for capability in [0u32, 1] {
         let params = unsafe {
             read_mechanism_for_transport_with_snapshots(
@@ -4794,7 +4785,7 @@ fn r11_nested_core_skips_exclusion() {
     // Nested legacy also skips the shape gate: unknown nested params ride
     // nested Raw.
     let mut bytes = [0xE0u8, 0xE1];
-    let mechanism = r11_mechanism(0x0000_9999, bytes.as_mut_ptr().cast(), 2);
+    let mechanism = make_ck_mechanism(0x0000_9999, bytes.as_mut_ptr().cast(), 2);
     let params = unsafe {
         read_mechanism_for_transport_with_snapshots(
             &mechanism,
@@ -4818,7 +4809,7 @@ fn r11_nested_core_skips_exclusion() {
 }
 
 #[test]
-fn r11_production_entry_gathers_global_snapshots() {
+fn production_entry_gathers_global_snapshots() {
     // The pointer-level production entry consumes the R5/R10 snapshot API
     // unchanged (global capability; registry + ABI from global state):
     // legacy globals reproduce legacy behavior, v1 globals switch the same
@@ -4861,17 +4852,17 @@ fn r11_production_entry_gathers_global_snapshots() {
         }
         other => panic!("production entry with v1 globals must emit Flat, got {other:?}"),
     }
-    let mechanism = r11_mechanism(CkMechanismType::SHA256.0, std::ptr::null_mut(), 5);
+    let mechanism = make_ck_mechanism(CkMechanismType::SHA256.0, std::ptr::null_mut(), 5);
     let params = unsafe { read_mechanism_for_transport(&mechanism, Operation::General) }
         .expect("read mechanism")
         .params;
-    r11_assert_null(&params, 5);
+    assert_null_params(&params, 5);
 
     crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(0);
 }
 
 #[test]
-fn r11_no_native_abi_typed_only_no_flat() {
+fn no_native_abi_typed_only_no_flat() {
     // Without a v1 ABI for this target (`local_abi == None`, i.e.
     // big-endian) the shim can never emit well-formed Flat (no source ABI
     // to name): the typed path still works via native mirrors, legacy Raw
@@ -4880,7 +4871,7 @@ fn r11_no_native_abi_typed_only_no_flat() {
     let mut data = [0x01u8, 0x02, 0x03];
     let live = data.as_mut_ptr() as CK_VOID_PTR;
 
-    let mechanism = r11_mechanism(CkMechanismType::SHA256.0, live, 0);
+    let mechanism = make_ck_mechanism(CkMechanismType::SHA256.0, live, 0);
     assert!(
         matches!(
             unsafe {
@@ -4900,7 +4891,7 @@ fn r11_no_native_abi_typed_only_no_flat() {
         "(non-NULL,0) without a native ABI must be MPI (no Flat, no collapse)"
     );
 
-    let mechanism = r11_mechanism(CkMechanismType::RSA_PKCS_PSS.0, live, 3);
+    let mechanism = make_ck_mechanism(CkMechanismType::RSA_PKCS_PSS.0, live, 3);
     assert!(
         matches!(
             unsafe {
@@ -4951,12 +4942,12 @@ fn r11_no_native_abi_typed_only_no_flat() {
 }
 
 #[test]
-fn r11_synthetic_parameterless_binding_rides_flat() {
+fn synthetic_parameterless_binding_rides_flat() {
     // A mechanism bound to the synthetic `parameterless` marker shape rides
     // Flat under v1 (S2 §4: parameterless-shaped bytes may carry arbitrary
     // flat bytes to the cap) — daemon-consistent (`decide_flat` grants the
     // bare form on both edges).
-    let registry = r11_registry(&[("parameterless", 0x0000_9998)], &[], &[]);
+    let registry = custom_registry(&[("parameterless", 0x0000_9998)], &[], &[]);
     let mut data = [0x5Au8; 16];
     let mechanism = CK_MECHANISM {
         mechanism: 0x0000_9998,
@@ -4967,23 +4958,23 @@ fn r11_synthetic_parameterless_binding_rides_flat() {
         .expect("read mechanism")
         .params;
     match &params {
-        Some(CkMechanismParams::Flat(p)) => r11_assert_flat(p, &data, ABI_EXEMPT_FINGERPRINT),
+        Some(CkMechanismParams::Flat(p)) => assert_flat(p, &data, ABI_EXEMPT_FINGERPRINT),
         other => panic!("parameterless-bound bytes must ride Flat, got {other:?}"),
     }
 }
 
 #[test]
-fn r11_v1_canonical_kip_stays_typed() {
+fn v1_canonical_kip_stays_typed() {
     // Nested/output forms ride the typed path under v1 (R18 owns their
     // envelopes): canonical KIP parses through the v1 router with v1
     // semantics at the nested node. Guarded: the nested helper gathers
     // global snapshots; restored before return.
     let _guard = crate::tests::shim_state_test_guard();
-    let kip_registry = r11_registry(&[("kip", CkMechanismType::KIP_DERIVE.0)], &[], &[]);
+    let kip_registry = custom_registry(&[("kip", CkMechanismType::KIP_DERIVE.0)], &[], &[]);
     crate::state::replace_mechanism_registry(kip_registry.clone());
     crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(1);
 
-    let mut nested = r11_mechanism(CkMechanismType::SHA256.0, std::ptr::null_mut(), 5);
+    let mut nested = make_ck_mechanism(CkMechanismType::SHA256.0, std::ptr::null_mut(), 5);
     let mut seed = [0xF2u8, 0xF3, 0xF4];
     let kip = CK_KIP_PARAMS {
         pMechanism: &mut nested,
@@ -5006,7 +4997,7 @@ fn r11_v1_canonical_kip_stays_typed() {
             assert_eq!(mechanism.as_ref().unwrap().mechanism_type.0, CkMechanismType::SHA256.0);
             assert_eq!(key_handle.0, 0x43);
             assert_eq!(seed_presence, &PointerBytes::present_copy(&[0xF2, 0xF3, 0xF4]));
-            r11_assert_null(&mechanism.as_ref().unwrap().params, 5);
+            assert_null_params(&mechanism.as_ref().unwrap().params, 5);
         }
         other => panic!("canonical KIP must stay typed under v1, got {other:?}"),
     }
@@ -5016,14 +5007,14 @@ fn r11_v1_canonical_kip_stays_typed() {
 }
 
 #[test]
-fn r11_wrapping_extent_rejected_without_deref() {
+fn wrapping_extent_rejected_without_deref() {
     // Arithmetic-invalid extents are rejected without dereference even when
     // the Flat grant would allow the length: the capped raw reader
     // re-checks the extent rather than trust the grant. (The pointer below
     // is bogus — a dereference would fault / be Miri UB.)
     let registry = default_registry();
     let bogus = usize::MAX as *mut u8 as CK_VOID_PTR;
-    let mechanism = r11_mechanism(CkMechanismType::SHA256.0, bogus, 100);
+    let mechanism = make_ck_mechanism(CkMechanismType::SHA256.0, bogus, 100);
     assert!(
         matches!(
             unsafe { read_r11_v1(&mechanism, &registry, Operation::General) },
@@ -5091,20 +5082,20 @@ const R17_SYN_SHAPES: &[&str] = &[
 
 /// Custom registry for the R17 matrix: no TOML parse (Miri-friendly),
 /// one binding per input-pointer shape.
-fn r17_registry() -> MechanismRegistry {
+fn pointer_shape_matrix_registry() -> MechanismRegistry {
     let mut bindings: Vec<(&str, u64)> =
         vec![("gcm", CkMechanismType::AES_GCM.0), ("ccm", CkMechanismType::AES_CCM.0)];
     bindings.extend(
         R17_SYN_SHAPES.iter().enumerate().map(|(i, shape)| (*shape, R17_SYN_BASE + i as u64)),
     );
     assert_eq!(R17_SYN_SHAPES.len(), 34, "r17 registry binds 33 R16 rows + gcm_compat");
-    r11_registry(&bindings, &[], &[])
+    custom_registry(&bindings, &[], &[])
 }
 
-/// Mechanism number bound to `shape` in [`r17_registry`] (`gcm_wrap` /
+/// Mechanism number bound to `shape` in [`pointer_shape_matrix_registry`] (`gcm_wrap` /
 /// `ccm_wrap` ride the real AES numbers — wrap selection keys on the
 /// number, and the R7 resolver bypasses the binding for wrap sizes).
-fn r17_mech(shape: &str) -> u64 {
+fn pointer_shape_matrix_mech(shape: &str) -> u64 {
     match shape {
         "gcm" | "gcm_wrap" => CkMechanismType::AES_GCM.0,
         "ccm" | "ccm_wrap" => CkMechanismType::AES_CCM.0,
@@ -5118,31 +5109,31 @@ fn r17_mech(shape: &str) -> u64 {
 
 /// Assert one v1 typed plain-bytes field: peer is `Present` of the
 /// expected bytes (R19: the legacy mirror is gone, the peer is the value).
-fn r17_assert_present(peer: &PointerBytes, expected: &[u8]) {
+fn assert_present(peer: &PointerBytes, expected: &[u8]) {
     assert_eq!(peer, &PointerBytes::present_copy(expected), "peer is Present(bytes)");
 }
 
-/// Secret-bytes variant of [`r17_assert_present`].
-fn r17_assert_present_secret(peer: &PointerBytes, expected: &[u8]) {
+/// Secret-bytes variant of [`assert_present`].
+fn assert_present_secret(peer: &PointerBytes, expected: &[u8]) {
     assert_eq!(peer, &PointerBytes::present_copy(expected), "peer is Present(bytes)");
 }
 
 /// Assert one v1 typed plain-bytes field is NULL with `declared_len`:
 /// peer is `Null(n)` (R19: the legacy mirror is gone).
-fn r17_assert_null(peer: &PointerBytes, declared_len: u64) {
+fn assert_null_peer(peer: &PointerBytes, declared_len: u64) {
     assert_eq!(peer, &PointerBytes::null_len(declared_len), "peer is Null(n)");
 }
 
-/// Secret-bytes variant of [`r17_assert_null`].
-fn r17_assert_null_secret(peer: &PointerBytes, declared_len: u64) {
+/// Secret-bytes variant of [`assert_null_peer`].
+fn assert_null_secret(peer: &PointerBytes, declared_len: u64) {
     assert_eq!(peer, &PointerBytes::null_len(declared_len), "peer is Null(n)");
 }
 
 /// S2 §12 typed probe: GCM NULL-IV-12 — a NULL IV with declared length
 /// 12 stays typed (`Null{12}`), beside a valid copied AAD.
 #[test]
-fn r17_probe_gcm_null_iv_12() {
-    let registry = r17_registry();
+fn probe_gcm_null_iv_12() {
+    let registry = pointer_shape_matrix_registry();
     let mut aad = [0xA1u8, 0xA2];
     let gcm = CK_GCM_PARAMS {
         pIv: std::ptr::null_mut(),
@@ -5153,7 +5144,7 @@ fn r17_probe_gcm_null_iv_12() {
         ulTagBits: 128,
     };
     let mechanism = CK_MECHANISM {
-        mechanism: r17_mech("gcm") as CK_MECHANISM_TYPE,
+        mechanism: pointer_shape_matrix_mech("gcm") as CK_MECHANISM_TYPE,
         pParameter: &gcm as *const _ as CK_VOID_PTR,
         ulParameterLen: std::mem::size_of::<CK_GCM_PARAMS>() as CK_ULONG,
     };
@@ -5162,9 +5153,9 @@ fn r17_probe_gcm_null_iv_12() {
         .params
     {
         Some(CkMechanismParams::Gcm(p)) => {
-            r17_assert_null(&p.iv_presence, 12);
+            assert_null_peer(&p.iv_presence, 12);
             assert_eq!(p.iv_buffer_len, 0, "NULL IV has no buffer");
-            r17_assert_present_secret(&p.aad_presence, &aad);
+            assert_present_secret(&p.aad_presence, &aad);
             assert_eq!(p.tag_bits, 128);
         }
         other => panic!("GCM NULL-IV-12 must stay typed under v1, got {other:?}"),
@@ -5175,8 +5166,8 @@ fn r17_probe_gcm_null_iv_12() {
 /// GCM becomes ONE typed message (copied IV + `aad Null{16}`) — the IV
 /// is never discarded into `Raw` again.
 #[test]
-fn r17_probe_gcm_mixed_iv_aad_null_16() {
-    let registry = r17_registry();
+fn probe_gcm_mixed_iv_aad_null_16() {
+    let registry = pointer_shape_matrix_registry();
     let mut iv = [0x11u8; 12];
     let gcm = CK_GCM_PARAMS {
         pIv: iv.as_mut_ptr(),
@@ -5187,7 +5178,7 @@ fn r17_probe_gcm_mixed_iv_aad_null_16() {
         ulTagBits: 128,
     };
     let mechanism = CK_MECHANISM {
-        mechanism: r17_mech("gcm") as CK_MECHANISM_TYPE,
+        mechanism: pointer_shape_matrix_mech("gcm") as CK_MECHANISM_TYPE,
         pParameter: &gcm as *const _ as CK_VOID_PTR,
         ulParameterLen: std::mem::size_of::<CK_GCM_PARAMS>() as CK_ULONG,
     };
@@ -5196,9 +5187,9 @@ fn r17_probe_gcm_mixed_iv_aad_null_16() {
         .params
     {
         Some(CkMechanismParams::Gcm(p)) => {
-            r17_assert_present(&p.iv_presence, &iv);
+            assert_present(&p.iv_presence, &iv);
             assert_eq!(p.iv_buffer_len, 12);
-            r17_assert_null_secret(&p.aad_presence, 16);
+            assert_null_secret(&p.aad_presence, 16);
         }
         other => panic!("mixed IV+AAD-NULL-16 must stay typed under v1, got {other:?}"),
     }
@@ -5207,15 +5198,15 @@ fn r17_probe_gcm_mixed_iv_aad_null_16() {
 /// S2 §12 typed probe: EdDSA NULL-ctx — a NULL context with declared
 /// length stays typed (`Null{n}`), never `Raw`.
 #[test]
-fn r17_probe_eddsa_null_ctx() {
-    let registry = r17_registry();
+fn probe_eddsa_null_ctx() {
+    let registry = pointer_shape_matrix_registry();
     let eddsa = CK_EDDSA_PARAMS {
         phFlag: CK_FALSE,
         ulContextDataLen: 7,
         pContextData: std::ptr::null_mut(),
     };
     let mechanism = CK_MECHANISM {
-        mechanism: r17_mech("eddsa") as CK_MECHANISM_TYPE,
+        mechanism: pointer_shape_matrix_mech("eddsa") as CK_MECHANISM_TYPE,
         pParameter: &eddsa as *const _ as CK_VOID_PTR,
         ulParameterLen: std::mem::size_of::<CK_EDDSA_PARAMS>() as CK_ULONG,
     };
@@ -5225,7 +5216,7 @@ fn r17_probe_eddsa_null_ctx() {
     {
         Some(CkMechanismParams::Eddsa(p)) => {
             assert!(!p.ph_flag);
-            r17_assert_null_secret(&p.context_data_presence, 7);
+            assert_null_secret(&p.context_data_presence, 7);
         }
         other => panic!("EdDSA NULL-ctx must stay typed under v1, got {other:?}"),
     }
@@ -5236,8 +5227,8 @@ fn r17_probe_eddsa_null_ctx() {
 /// it): the copy precedes the returned decision. Uses a mixed shape so
 /// the probe also exercises the NULL arm beside the copied pointee.
 #[test]
-fn r17_probe_pointee_copy_before_decision() {
-    let registry = r17_registry();
+fn probe_pointee_copy_before_decision() {
+    let registry = pointer_shape_matrix_registry();
     let mut iv = [0x11u8; 12];
     let gcm = CK_GCM_PARAMS {
         pIv: iv.as_mut_ptr(),
@@ -5248,7 +5239,7 @@ fn r17_probe_pointee_copy_before_decision() {
         ulTagBits: 128,
     };
     let mechanism = CK_MECHANISM {
-        mechanism: r17_mech("gcm") as CK_MECHANISM_TYPE,
+        mechanism: pointer_shape_matrix_mech("gcm") as CK_MECHANISM_TYPE,
         pParameter: &gcm as *const _ as CK_VOID_PTR,
         ulParameterLen: std::mem::size_of::<CK_GCM_PARAMS>() as CK_ULONG,
     };
@@ -5259,8 +5250,8 @@ fn r17_probe_pointee_copy_before_decision() {
     iv.fill(0xEE);
     match params {
         Some(CkMechanismParams::Gcm(p)) => {
-            r17_assert_present(&p.iv_presence, &[0x11; 12]);
-            r17_assert_null_secret(&p.aad_presence, 16);
+            assert_present(&p.iv_presence, &[0x11; 12]);
+            assert_null_secret(&p.aad_presence, 16);
         }
         other => panic!("mixed GCM must stay typed under v1, got {other:?}"),
     }
@@ -5273,39 +5264,42 @@ fn r17_probe_pointee_copy_before_decision() {
 ///
 /// `p_parameter` must designate `ul_parameter_len` readable bytes
 /// containing the shape's C struct.
-unsafe fn r17_read_v1_op(
+unsafe fn read_v1_pointer_shape_op(
     registry: &MechanismRegistry,
     shape: &str,
     p_parameter: CK_VOID_PTR,
     ul_parameter_len: CK_ULONG,
     operation: Operation,
 ) -> Result<CkMechanism, CkRv> {
-    let mechanism = r11_mechanism(r17_mech(shape), p_parameter, ul_parameter_len);
+    let mechanism =
+        make_ck_mechanism(pointer_shape_matrix_mech(shape), p_parameter, ul_parameter_len);
     unsafe { read_r11_v1_native_abi(&mechanism, registry, operation) }
 }
 
 /// Read one host-native param struct as `shape` under v1/`General`
 /// (matrix shorthand; wrap tests pass [`Operation::WrapKey`] via
-/// [`r17_read_v1_op`]).
+/// [`read_v1_pointer_shape_op`]).
 ///
 /// # Safety
 ///
 /// `p_parameter` must designate `ul_parameter_len` readable bytes
 /// containing the shape's C struct.
-unsafe fn r17_read_v1(
+unsafe fn read_v1_pointer_shape(
     registry: &MechanismRegistry,
     shape: &str,
     p_parameter: CK_VOID_PTR,
     ul_parameter_len: CK_ULONG,
 ) -> Result<CkMechanism, CkRv> {
-    unsafe { r17_read_v1_op(registry, shape, p_parameter, ul_parameter_len, Operation::General) }
+    unsafe {
+        read_v1_pointer_shape_op(registry, shape, p_parameter, ul_parameter_len, Operation::General)
+    }
 }
 
 /// R17 embedded-field matrix for `rsa_oaep` (single field: NULL/0,
 /// NULL/n, ptr/0, ptr/n; no mixed case).
 #[test]
-fn r17_matrix_rsa_oaep() {
-    let registry = r17_registry();
+fn matrix_rsa_oaep() {
+    let registry = pointer_shape_matrix_registry();
     let read = |p: CK_VOID_PTR, len: CK_ULONG| {
         let mut oaep = CK_RSA_PKCS_OAEP_PARAMS {
             hashAlg: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
@@ -5315,7 +5309,7 @@ fn r17_matrix_rsa_oaep() {
             ulSourceDataLen: len,
         };
         match unsafe {
-            r17_read_v1(
+            read_v1_pointer_shape(
                 &registry,
                 "rsa_oaep",
                 &mut oaep as *mut _ as CK_VOID_PTR,
@@ -5333,27 +5327,27 @@ fn r17_matrix_rsa_oaep() {
     // ptr/n: copied, Present.
     let p = read(data.as_mut_ptr() as CK_VOID_PTR, data.len() as CK_ULONG);
     assert!(!p.source_data_presence.is_null(), "v1 is presence-only");
-    r17_assert_present_secret(&p.source_data_presence, &data);
+    assert_present_secret(&p.source_data_presence, &data);
     // ptr/0: empty, Present.
     let p = read(data.as_mut_ptr() as CK_VOID_PTR, 0);
     assert!(!p.source_data_presence.is_null(), "v1 is presence-only");
-    r17_assert_present_secret(&p.source_data_presence, &[]);
+    assert_present_secret(&p.source_data_presence, &[]);
     // NULL/0: Null{0}.
     let p = read(std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.source_data_presence, 0);
+    assert_null_secret(&p.source_data_presence, 0);
     // NULL/n: Null{n}, no dereference.
     let p = read(std::ptr::null_mut(), 9);
-    r17_assert_null_secret(&p.source_data_presence, 9);
+    assert_null_secret(&p.source_data_presence, 9);
 }
 
 /// R17 embedded-field matrix for `eddsa` (single field).
 #[test]
-fn r17_matrix_eddsa() {
-    let registry = r17_registry();
+fn matrix_eddsa() {
+    let registry = pointer_shape_matrix_registry();
     let read = |p: CK_BYTE_PTR, len: CK_ULONG| {
         let mut eddsa = CK_EDDSA_PARAMS { phFlag: CK_TRUE, ulContextDataLen: len, pContextData: p };
         match unsafe {
-            r17_read_v1(
+            read_v1_pointer_shape(
                 &registry,
                 "eddsa",
                 &mut eddsa as *mut _ as CK_VOID_PTR,
@@ -5370,23 +5364,23 @@ fn r17_matrix_eddsa() {
     let mut ctx = [0xB1u8, 0xB2];
     let p = read(ctx.as_mut_ptr(), ctx.len() as CK_ULONG);
     assert!(p.ph_flag);
-    r17_assert_present_secret(&p.context_data_presence, &ctx);
+    assert_present_secret(&p.context_data_presence, &ctx);
     let p = read(ctx.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.context_data_presence, &[]);
+    assert_present_secret(&p.context_data_presence, &[]);
     let p = read(std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.context_data_presence, 0);
+    assert_null_secret(&p.context_data_presence, 0);
     let p = read(std::ptr::null_mut(), 11);
-    r17_assert_null_secret(&p.context_data_presence, 11);
+    assert_null_secret(&p.context_data_presence, 11);
 }
 
 /// R17 embedded-field matrix for `rc5_cbc` (single IV field).
 #[test]
-fn r17_matrix_rc5_cbc() {
-    let registry = r17_registry();
+fn matrix_rc5_cbc() {
+    let registry = pointer_shape_matrix_registry();
     let read = |p: CK_BYTE_PTR, len: CK_ULONG| {
         let mut rc5 = CK_RC5_CBC_PARAMS { ulWordsize: 4, ulRounds: 12, pIv: p, ulIvLen: len };
         match unsafe {
-            r17_read_v1(
+            read_v1_pointer_shape(
                 &registry,
                 "rc5_cbc",
                 &mut rc5 as *mut _ as CK_VOID_PTR,
@@ -5403,23 +5397,23 @@ fn r17_matrix_rc5_cbc() {
     let mut iv = [0xC1u8; 8];
     let p = read(iv.as_mut_ptr(), iv.len() as CK_ULONG);
     assert_eq!((p.word_size, p.rounds), (4, 12));
-    r17_assert_present(&p.iv_presence, &iv);
+    assert_present(&p.iv_presence, &iv);
     let p = read(iv.as_mut_ptr(), 0);
-    r17_assert_present(&p.iv_presence, &[]);
+    assert_present(&p.iv_presence, &[]);
     let p = read(std::ptr::null_mut(), 0);
-    r17_assert_null(&p.iv_presence, 0);
+    assert_null_peer(&p.iv_presence, 0);
     let p = read(std::ptr::null_mut(), 8);
-    r17_assert_null(&p.iv_presence, 8);
+    assert_null_peer(&p.iv_presence, 8);
 }
 
 /// R17 embedded-field matrix for `key_derivation_string` (single field).
 #[test]
-fn r17_matrix_key_derivation_string() {
-    let registry = r17_registry();
+fn matrix_key_derivation_string() {
+    let registry = pointer_shape_matrix_registry();
     let read = |p: CK_BYTE_PTR, len: CK_ULONG| {
         let mut kds = CK_KEY_DERIVATION_STRING_DATA { pData: p, ulLen: len };
         match unsafe {
-            r17_read_v1(
+            read_v1_pointer_shape(
                 &registry,
                 "key_derivation_string",
                 &mut kds as *mut _ as CK_VOID_PTR,
@@ -5435,19 +5429,19 @@ fn r17_matrix_key_derivation_string() {
     };
     let mut data = [0xDEu8, 0xAD, 0xBE, 0xEF];
     let p = read(data.as_mut_ptr(), data.len() as CK_ULONG);
-    r17_assert_present_secret(&p.data_presence, &data);
+    assert_present_secret(&p.data_presence, &data);
     let p = read(data.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.data_presence, &[]);
+    assert_present_secret(&p.data_presence, &[]);
     let p = read(std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.data_presence, 0);
+    assert_null_secret(&p.data_presence, 0);
     let p = read(std::ptr::null_mut(), 4);
-    r17_assert_null_secret(&p.data_presence, 4);
+    assert_null_secret(&p.data_presence, 4);
 }
 
 /// R17 embedded-field matrix for `kmac` (single customization field).
 #[test]
-fn r17_matrix_kmac() {
-    let registry = r17_registry();
+fn matrix_kmac() {
+    let registry = pointer_shape_matrix_registry();
     let read = |p: CK_VOID_PTR, len: CK_ULONG| {
         let mut kmac = super::CkKmacParams {
             h_key: 7,
@@ -5456,7 +5450,7 @@ fn r17_matrix_kmac() {
             ul_customization_string_len: len,
         };
         match unsafe {
-            r17_read_v1(
+            read_v1_pointer_shape(
                 &registry,
                 "kmac",
                 &mut kmac as *mut _ as CK_VOID_PTR,
@@ -5473,23 +5467,23 @@ fn r17_matrix_kmac() {
     let mut custom = [0xD1u8, 0xD2, 0xD3];
     let p = read(custom.as_mut_ptr() as CK_VOID_PTR, custom.len() as CK_ULONG);
     assert_eq!((p.key_handle.0, p.mac_length), (7, 32));
-    r17_assert_present_secret(&p.customization_string_presence, &custom);
+    assert_present_secret(&p.customization_string_presence, &custom);
     let p = read(custom.as_mut_ptr() as CK_VOID_PTR, 0);
-    r17_assert_present_secret(&p.customization_string_presence, &[]);
+    assert_present_secret(&p.customization_string_presence, &[]);
     let p = read(std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.customization_string_presence, 0);
+    assert_null_secret(&p.customization_string_presence, 0);
     let p = read(std::ptr::null_mut(), 3);
-    r17_assert_null_secret(&p.customization_string_presence, 3);
+    assert_null_secret(&p.customization_string_presence, 3);
 }
 
 /// R17 embedded-field matrix for `key_wrap_set_oaep` (single field).
 #[test]
-fn r17_matrix_key_wrap_set_oaep() {
-    let registry = r17_registry();
+fn matrix_key_wrap_set_oaep() {
+    let registry = pointer_shape_matrix_registry();
     let read = |p: CK_BYTE_PTR, len: CK_ULONG| {
         let mut kw = CK_KEY_WRAP_SET_OAEP_PARAMS { bBC: 7, pX: p, ulXLen: len };
         match unsafe {
-            r17_read_v1(
+            read_v1_pointer_shape(
                 &registry,
                 "key_wrap_set_oaep",
                 &mut kw as *mut _ as CK_VOID_PTR,
@@ -5506,19 +5500,19 @@ fn r17_matrix_key_wrap_set_oaep() {
     let mut x = [0xE1u8, 0xE2];
     let p = read(x.as_mut_ptr(), x.len() as CK_ULONG);
     assert_eq!(p.bc, 7);
-    r17_assert_present_secret(&p.x_presence, &x);
+    assert_present_secret(&p.x_presence, &x);
     let p = read(x.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.x_presence, &[]);
+    assert_present_secret(&p.x_presence, &[]);
     let p = read(std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.x_presence, 0);
+    assert_null_secret(&p.x_presence, 0);
     let p = read(std::ptr::null_mut(), 2);
-    r17_assert_null_secret(&p.x_presence, 2);
+    assert_null_secret(&p.x_presence, 2);
 }
 
 /// R17 embedded-field matrix for `ike1_extended_derive` (single field).
 #[test]
-fn r17_matrix_ike1_extended_derive() {
-    let registry = r17_registry();
+fn matrix_ike1_extended_derive() {
+    let registry = pointer_shape_matrix_registry();
     let read = |p: CK_BYTE_PTR, len: CK_ULONG| {
         let mut ike = CK_IKE1_EXTENDED_DERIVE_PARAMS {
             prfMechanism: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
@@ -5528,7 +5522,7 @@ fn r17_matrix_ike1_extended_derive() {
             pExtraData: p,
         };
         match unsafe {
-            r17_read_v1(
+            read_v1_pointer_shape(
                 &registry,
                 "ike1_extended_derive",
                 &mut ike as *mut _ as CK_VOID_PTR,
@@ -5545,19 +5539,19 @@ fn r17_matrix_ike1_extended_derive() {
     let mut extra = [0xF1u8, 0xF2, 0xF3];
     let p = read(extra.as_mut_ptr(), extra.len() as CK_ULONG);
     assert!(!p.has_keygxy);
-    r17_assert_present_secret(&p.extra_data_presence, &extra);
+    assert_present_secret(&p.extra_data_presence, &extra);
     let p = read(extra.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.extra_data_presence, &[]);
+    assert_present_secret(&p.extra_data_presence, &[]);
     let p = read(std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.extra_data_presence, 0);
+    assert_null_secret(&p.extra_data_presence, 0);
     let p = read(std::ptr::null_mut(), 3);
-    r17_assert_null_secret(&p.extra_data_presence, 3);
+    assert_null_secret(&p.extra_data_presence, 3);
 }
 
 /// R17 embedded-field matrix for `ike2_prf_plus_derive` (single field).
 #[test]
-fn r17_matrix_ike2_prf_plus_derive() {
-    let registry = r17_registry();
+fn matrix_ike2_prf_plus_derive() {
+    let registry = pointer_shape_matrix_registry();
     let read = |p: CK_BYTE_PTR, len: CK_ULONG| {
         let mut ike = CK_IKE2_PRF_PLUS_DERIVE_PARAMS {
             prfMechanism: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
@@ -5567,7 +5561,7 @@ fn r17_matrix_ike2_prf_plus_derive() {
             pSeedData: p,
         };
         match unsafe {
-            r17_read_v1(
+            read_v1_pointer_shape(
                 &registry,
                 "ike2_prf_plus_derive",
                 &mut ike as *mut _ as CK_VOID_PTR,
@@ -5584,19 +5578,19 @@ fn r17_matrix_ike2_prf_plus_derive() {
     let mut seed = [0x01u8, 0x02];
     let p = read(seed.as_mut_ptr(), seed.len() as CK_ULONG);
     assert!(!p.has_seed_key);
-    r17_assert_present_secret(&p.seed_data_presence, &seed);
+    assert_present_secret(&p.seed_data_presence, &seed);
     let p = read(seed.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.seed_data_presence, &[]);
+    assert_present_secret(&p.seed_data_presence, &[]);
     let p = read(std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.seed_data_presence, 0);
+    assert_null_secret(&p.seed_data_presence, 0);
     let p = read(std::ptr::null_mut(), 2);
-    r17_assert_null_secret(&p.seed_data_presence, 2);
+    assert_null_secret(&p.seed_data_presence, 2);
 }
 
 /// R17 embedded-field matrix for `ecdh_aes_key_wrap` (single field).
 #[test]
-fn r17_matrix_ecdh_aes_key_wrap() {
-    let registry = r17_registry();
+fn matrix_ecdh_aes_key_wrap() {
+    let registry = pointer_shape_matrix_registry();
     let read = |p: CK_BYTE_PTR, len: CK_ULONG| {
         let mut wrap = CK_ECDH_AES_KEY_WRAP_PARAMS {
             ulAESKeyBits: 256,
@@ -5605,7 +5599,7 @@ fn r17_matrix_ecdh_aes_key_wrap() {
             pSharedData: p,
         };
         match unsafe {
-            r17_read_v1(
+            read_v1_pointer_shape(
                 &registry,
                 "ecdh_aes_key_wrap",
                 &mut wrap as *mut _ as CK_VOID_PTR,
@@ -5622,13 +5616,13 @@ fn r17_matrix_ecdh_aes_key_wrap() {
     let mut shared = [0x03u8, 0x04, 0x05];
     let p = read(shared.as_mut_ptr(), shared.len() as CK_ULONG);
     assert_eq!(p.aes_key_bits, 256);
-    r17_assert_present_secret(&p.shared_data_presence, &shared);
+    assert_present_secret(&p.shared_data_presence, &shared);
     let p = read(shared.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.shared_data_presence, &[]);
+    assert_present_secret(&p.shared_data_presence, &[]);
     let p = read(std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.shared_data_presence, 0);
+    assert_null_secret(&p.shared_data_presence, 0);
     let p = read(std::ptr::null_mut(), 3);
-    r17_assert_null_secret(&p.shared_data_presence, 3);
+    assert_null_secret(&p.shared_data_presence, 3);
 }
 
 #[repr(C)]
@@ -5649,10 +5643,10 @@ struct R17HashSignAdditionalContext {
 /// R17 embedded-field matrix for `sign_additional_context` (single
 /// field; both the base and the trailing-hash layouts).
 #[test]
-fn r17_matrix_sign_additional_context() {
-    let registry = r17_registry();
+fn matrix_sign_additional_context() {
+    let registry = pointer_shape_matrix_registry();
     let read = |ctx: &mut R17SignAdditionalContext| match unsafe {
-        r17_read_v1(
+        read_v1_pointer_shape(
             &registry,
             "sign_additional_context",
             ctx as *mut _ as CK_VOID_PTR,
@@ -5673,16 +5667,16 @@ fn r17_matrix_sign_additional_context() {
     };
     let p = read(&mut base);
     assert_eq!((p.hedge_variant, p.hash.0), (1, 0));
-    r17_assert_present_secret(&p.context_presence, &context);
+    assert_present_secret(&p.context_presence, &context);
     base.ul_context_len = 0;
     let p = read(&mut base);
-    r17_assert_present_secret(&p.context_presence, &[]);
+    assert_present_secret(&p.context_presence, &[]);
     base.p_context = std::ptr::null_mut();
     let p = read(&mut base);
-    r17_assert_null_secret(&p.context_presence, 0);
+    assert_null_secret(&p.context_presence, 0);
     base.ul_context_len = 3;
     let p = read(&mut base);
-    r17_assert_null_secret(&p.context_presence, 3);
+    assert_null_secret(&p.context_presence, 3);
     // Trailing-hash layout parses the hash alongside the matrix case.
     let mut hashed = R17HashSignAdditionalContext {
         hedge_variant: 2,
@@ -5691,7 +5685,7 @@ fn r17_matrix_sign_additional_context() {
         hash: CkMechanismType::SHA256.0 as CK_ULONG,
     };
     match unsafe {
-        r17_read_v1(
+        read_v1_pointer_shape(
             &registry,
             "sign_additional_context",
             &mut hashed as *mut _ as CK_VOID_PTR,
@@ -5703,7 +5697,7 @@ fn r17_matrix_sign_additional_context() {
     {
         Some(CkMechanismParams::SignAdditionalContext(p)) => {
             assert_eq!((p.hedge_variant, p.hash), (2, CkMechanismType::SHA256));
-            r17_assert_null_secret(&p.context_presence, 5);
+            assert_null_secret(&p.context_presence, 5);
         }
         other => panic!("hash sign-ctx must stay typed under v1, got {other:?}"),
     }
@@ -5712,12 +5706,12 @@ fn r17_matrix_sign_additional_context() {
 /// R17 embedded-field matrix for `aes_cbc_encrypt_data` (single `data`
 /// field; the IV is a fixed inline array, not a pointer).
 #[test]
-fn r17_matrix_aes_cbc_encrypt_data() {
-    let registry = r17_registry();
+fn matrix_aes_cbc_encrypt_data() {
+    let registry = pointer_shape_matrix_registry();
     let read = |p: CK_BYTE_PTR, len: CK_ULONG| {
         let mut aes = CK_AES_CBC_ENCRYPT_DATA_PARAMS { iv: [0xA5; 16], pData: p, length: len };
         match unsafe {
-            r17_read_v1(
+            read_v1_pointer_shape(
                 &registry,
                 "aes_cbc_encrypt_data",
                 &mut aes as *mut _ as CK_VOID_PTR,
@@ -5734,23 +5728,23 @@ fn r17_matrix_aes_cbc_encrypt_data() {
     let mut data = [0xA2u8, 0xA3, 0xA4];
     let p = read(data.as_mut_ptr(), data.len() as CK_ULONG);
     assert_eq!(p.iv, [0xA5; 16]);
-    r17_assert_present_secret(&p.data_presence, &data);
+    assert_present_secret(&p.data_presence, &data);
     let p = read(data.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.data_presence, &[]);
+    assert_present_secret(&p.data_presence, &[]);
     let p = read(std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.data_presence, 0);
+    assert_null_secret(&p.data_presence, 0);
     let p = read(std::ptr::null_mut(), 3);
-    r17_assert_null_secret(&p.data_presence, 3);
+    assert_null_secret(&p.data_presence, 3);
 }
 
 /// R17 embedded-field matrix for `des_cbc_encrypt_data`.
 #[test]
-fn r17_matrix_des_cbc_encrypt_data() {
-    let registry = r17_registry();
+fn matrix_des_cbc_encrypt_data() {
+    let registry = pointer_shape_matrix_registry();
     let read = |p: CK_BYTE_PTR, len: CK_ULONG| {
         let mut des = CK_DES_CBC_ENCRYPT_DATA_PARAMS { iv: [0xD5; 8], pData: p, length: len };
         match unsafe {
-            r17_read_v1(
+            read_v1_pointer_shape(
                 &registry,
                 "des_cbc_encrypt_data",
                 &mut des as *mut _ as CK_VOID_PTR,
@@ -5767,24 +5761,24 @@ fn r17_matrix_des_cbc_encrypt_data() {
     let mut data = [0xD2u8, 0xD3];
     let p = read(data.as_mut_ptr(), data.len() as CK_ULONG);
     assert_eq!(p.iv, [0xD5; 8]);
-    r17_assert_present_secret(&p.data_presence, &data);
+    assert_present_secret(&p.data_presence, &data);
     let p = read(data.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.data_presence, &[]);
+    assert_present_secret(&p.data_presence, &[]);
     let p = read(std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.data_presence, 0);
+    assert_null_secret(&p.data_presence, 0);
     let p = read(std::ptr::null_mut(), 2);
-    r17_assert_null_secret(&p.data_presence, 2);
+    assert_null_secret(&p.data_presence, 2);
 }
 
 /// R17 embedded-field matrix for `camellia_cbc_encrypt_data`.
 #[test]
-fn r17_matrix_camellia_cbc_encrypt_data() {
-    let registry = r17_registry();
+fn matrix_camellia_cbc_encrypt_data() {
+    let registry = pointer_shape_matrix_registry();
     let read = |p: CK_BYTE_PTR, len: CK_ULONG| {
         let mut camellia =
             CK_CAMELLIA_CBC_ENCRYPT_DATA_PARAMS { iv: [0x25; 16], pData: p, length: len };
         match unsafe {
-            r17_read_v1(
+            read_v1_pointer_shape(
                 &registry,
                 "camellia_cbc_encrypt_data",
                 &mut camellia as *mut _ as CK_VOID_PTR,
@@ -5801,23 +5795,23 @@ fn r17_matrix_camellia_cbc_encrypt_data() {
     let mut data = [0x22u8, 0x23, 0x24];
     let p = read(data.as_mut_ptr(), data.len() as CK_ULONG);
     assert_eq!(p.iv, [0x25; 16]);
-    r17_assert_present_secret(&p.data_presence, &data);
+    assert_present_secret(&p.data_presence, &data);
     let p = read(data.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.data_presence, &[]);
+    assert_present_secret(&p.data_presence, &[]);
     let p = read(std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.data_presence, 0);
+    assert_null_secret(&p.data_presence, 0);
     let p = read(std::ptr::null_mut(), 3);
-    r17_assert_null_secret(&p.data_presence, 3);
+    assert_null_secret(&p.data_presence, 3);
 }
 
 /// R17 embedded-field matrix for `aria_cbc_encrypt_data`.
 #[test]
-fn r17_matrix_aria_cbc_encrypt_data() {
-    let registry = r17_registry();
+fn matrix_aria_cbc_encrypt_data() {
+    let registry = pointer_shape_matrix_registry();
     let read = |p: CK_BYTE_PTR, len: CK_ULONG| {
         let mut aria = CK_ARIA_CBC_ENCRYPT_DATA_PARAMS { iv: [0x15; 16], pData: p, length: len };
         match unsafe {
-            r17_read_v1(
+            read_v1_pointer_shape(
                 &registry,
                 "aria_cbc_encrypt_data",
                 &mut aria as *mut _ as CK_VOID_PTR,
@@ -5834,23 +5828,23 @@ fn r17_matrix_aria_cbc_encrypt_data() {
     let mut data = [0x12u8, 0x13, 0x14, 0x15];
     let p = read(data.as_mut_ptr(), data.len() as CK_ULONG);
     assert_eq!(p.iv, [0x15; 16]);
-    r17_assert_present_secret(&p.data_presence, &data);
+    assert_present_secret(&p.data_presence, &data);
     let p = read(data.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.data_presence, &[]);
+    assert_present_secret(&p.data_presence, &[]);
     let p = read(std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.data_presence, 0);
+    assert_null_secret(&p.data_presence, 0);
     let p = read(std::ptr::null_mut(), 4);
-    r17_assert_null_secret(&p.data_presence, 4);
+    assert_null_secret(&p.data_presence, 4);
 }
 
 /// R17 embedded-field matrix for `seed_cbc_encrypt_data`.
 #[test]
-fn r17_matrix_seed_cbc_encrypt_data() {
-    let registry = r17_registry();
+fn matrix_seed_cbc_encrypt_data() {
+    let registry = pointer_shape_matrix_registry();
     let read = |p: CK_BYTE_PTR, len: CK_ULONG| {
         let mut seed = CK_SEED_CBC_ENCRYPT_DATA_PARAMS { iv: [0x35; 16], pData: p, length: len };
         match unsafe {
-            r17_read_v1(
+            read_v1_pointer_shape(
                 &registry,
                 "seed_cbc_encrypt_data",
                 &mut seed as *mut _ as CK_VOID_PTR,
@@ -5867,20 +5861,20 @@ fn r17_matrix_seed_cbc_encrypt_data() {
     let mut data = [0x32u8, 0x33];
     let p = read(data.as_mut_ptr(), data.len() as CK_ULONG);
     assert_eq!(p.iv, [0x35; 16]);
-    r17_assert_present_secret(&p.data_presence, &data);
+    assert_present_secret(&p.data_presence, &data);
     let p = read(data.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.data_presence, &[]);
+    assert_present_secret(&p.data_presence, &[]);
     let p = read(std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.data_presence, 0);
+    assert_null_secret(&p.data_presence, 0);
     let p = read(std::ptr::null_mut(), 2);
-    r17_assert_null_secret(&p.data_presence, 2);
+    assert_null_secret(&p.data_presence, 2);
 }
 
 /// R17 embedded-field matrix for `gcm` (both fields × NULL/0, NULL/n,
 /// ptr/0, ptr/n, plus both mixed directions).
 #[test]
-fn r17_matrix_gcm() {
-    let registry = r17_registry();
+fn matrix_gcm() {
+    let registry = pointer_shape_matrix_registry();
     let read = |iv_p: CK_BYTE_PTR, iv_len: CK_ULONG, aad_p: CK_BYTE_PTR, aad_len: CK_ULONG| {
         let mut gcm = CK_GCM_PARAMS {
             pIv: iv_p,
@@ -5891,7 +5885,7 @@ fn r17_matrix_gcm() {
             ulTagBits: 128,
         };
         match unsafe {
-            r17_read_v1(
+            read_v1_pointer_shape(
                 &registry,
                 "gcm",
                 &mut gcm as *mut _ as CK_VOID_PTR,
@@ -5910,34 +5904,34 @@ fn r17_matrix_gcm() {
     // ptr/n × ptr/n.
     let p = read(iv.as_mut_ptr(), 12, aad.as_mut_ptr(), 2);
     assert!(!p.iv_presence.is_null() && !p.aad_presence.is_null(), "v1 is presence-only");
-    r17_assert_present(&p.iv_presence, &iv);
-    r17_assert_present_secret(&p.aad_presence, &aad);
+    assert_present(&p.iv_presence, &iv);
+    assert_present_secret(&p.aad_presence, &aad);
     // ptr/0 × ptr/0.
     let p = read(iv.as_mut_ptr(), 0, aad.as_mut_ptr(), 0);
-    r17_assert_present(&p.iv_presence, &[]);
-    r17_assert_present_secret(&p.aad_presence, &[]);
+    assert_present(&p.iv_presence, &[]);
+    assert_present_secret(&p.aad_presence, &[]);
     // NULL/0 × NULL/0.
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null(&p.iv_presence, 0);
-    r17_assert_null_secret(&p.aad_presence, 0);
+    assert_null_peer(&p.iv_presence, 0);
+    assert_null_secret(&p.aad_presence, 0);
     // NULL/n × NULL/m.
     let p = read(std::ptr::null_mut(), 12, std::ptr::null_mut(), 16);
-    r17_assert_null(&p.iv_presence, 12);
-    r17_assert_null_secret(&p.aad_presence, 16);
+    assert_null_peer(&p.iv_presence, 12);
+    assert_null_secret(&p.aad_presence, 16);
     // Mixed: valid IV + NULL AAD.
     let p = read(iv.as_mut_ptr(), 12, std::ptr::null_mut(), 16);
-    r17_assert_present(&p.iv_presence, &iv);
-    r17_assert_null_secret(&p.aad_presence, 16);
+    assert_present(&p.iv_presence, &iv);
+    assert_null_secret(&p.aad_presence, 16);
     // Mixed: NULL IV + valid AAD.
     let p = read(std::ptr::null_mut(), 12, aad.as_mut_ptr(), 2);
-    r17_assert_null(&p.iv_presence, 12);
-    r17_assert_present_secret(&p.aad_presence, &aad);
+    assert_null_peer(&p.iv_presence, 12);
+    assert_present_secret(&p.aad_presence, &aad);
 }
 
 /// R17 embedded-field matrix for `ccm`.
 #[test]
-fn r17_matrix_ccm() {
-    let registry = r17_registry();
+fn matrix_ccm() {
+    let registry = pointer_shape_matrix_registry();
     let read =
         |nonce_p: CK_BYTE_PTR, nonce_len: CK_ULONG, aad_p: CK_BYTE_PTR, aad_len: CK_ULONG| {
             let mut ccm = CK_CCM_PARAMS {
@@ -5949,7 +5943,7 @@ fn r17_matrix_ccm() {
                 ulMACLen: 16,
             };
             match unsafe {
-                r17_read_v1(
+                read_v1_pointer_shape(
                     &registry,
                     "ccm",
                     &mut ccm as *mut _ as CK_VOID_PTR,
@@ -5968,29 +5962,29 @@ fn r17_matrix_ccm() {
     let p = read(nonce.as_mut_ptr(), 12, aad.as_mut_ptr(), 3);
     assert!(!p.nonce_presence.is_null() && !p.aad_presence.is_null(), "v1 is presence-only");
     assert_eq!((p.data_len, p.mac_len), (32, 16));
-    r17_assert_present(&p.nonce_presence, &nonce);
-    r17_assert_present_secret(&p.aad_presence, &aad);
+    assert_present(&p.nonce_presence, &nonce);
+    assert_present_secret(&p.aad_presence, &aad);
     let p = read(nonce.as_mut_ptr(), 0, aad.as_mut_ptr(), 0);
-    r17_assert_present(&p.nonce_presence, &[]);
-    r17_assert_present_secret(&p.aad_presence, &[]);
+    assert_present(&p.nonce_presence, &[]);
+    assert_present_secret(&p.aad_presence, &[]);
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null(&p.nonce_presence, 0);
-    r17_assert_null_secret(&p.aad_presence, 0);
+    assert_null_peer(&p.nonce_presence, 0);
+    assert_null_secret(&p.aad_presence, 0);
     let p = read(std::ptr::null_mut(), 12, std::ptr::null_mut(), 3);
-    r17_assert_null(&p.nonce_presence, 12);
-    r17_assert_null_secret(&p.aad_presence, 3);
+    assert_null_peer(&p.nonce_presence, 12);
+    assert_null_secret(&p.aad_presence, 3);
     let p = read(nonce.as_mut_ptr(), 12, std::ptr::null_mut(), 3);
-    r17_assert_present(&p.nonce_presence, &nonce);
-    r17_assert_null_secret(&p.aad_presence, 3);
+    assert_present(&p.nonce_presence, &nonce);
+    assert_null_secret(&p.aad_presence, 3);
     let p = read(std::ptr::null_mut(), 12, aad.as_mut_ptr(), 3);
-    r17_assert_null(&p.nonce_presence, 12);
-    r17_assert_present_secret(&p.aad_presence, &aad);
+    assert_null_peer(&p.nonce_presence, 12);
+    assert_present_secret(&p.aad_presence, &aad);
 }
 
 /// R17 embedded-field matrix for `ecdh1_derive`.
 #[test]
-fn r17_matrix_ecdh1_derive() {
-    let registry = r17_registry();
+fn matrix_ecdh1_derive() {
+    let registry = pointer_shape_matrix_registry();
     let read =
         |shared_p: CK_BYTE_PTR, shared_len: CK_ULONG, pub_p: CK_BYTE_PTR, pub_len: CK_ULONG| {
             let mut ecdh = CK_ECDH1_DERIVE_PARAMS {
@@ -6001,7 +5995,7 @@ fn r17_matrix_ecdh1_derive() {
                 pPublicData: pub_p,
             };
             match unsafe {
-                r17_read_v1(
+                read_v1_pointer_shape(
                     &registry,
                     "ecdh1_derive",
                     &mut ecdh as *mut _ as CK_VOID_PTR,
@@ -6018,29 +6012,29 @@ fn r17_matrix_ecdh1_derive() {
     let mut shared = [0x31u8, 0x32];
     let mut public = [0x33u8; 65];
     let p = read(shared.as_mut_ptr(), 2, public.as_mut_ptr(), 65);
-    r17_assert_present_secret(&p.shared_data_presence, &shared);
-    r17_assert_present(&p.public_data_presence, &public);
+    assert_present_secret(&p.shared_data_presence, &shared);
+    assert_present(&p.public_data_presence, &public);
     let p = read(shared.as_mut_ptr(), 0, public.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.shared_data_presence, &[]);
-    r17_assert_present(&p.public_data_presence, &[]);
+    assert_present_secret(&p.shared_data_presence, &[]);
+    assert_present(&p.public_data_presence, &[]);
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.shared_data_presence, 0);
-    r17_assert_null(&p.public_data_presence, 0);
+    assert_null_secret(&p.shared_data_presence, 0);
+    assert_null_peer(&p.public_data_presence, 0);
     let p = read(std::ptr::null_mut(), 2, std::ptr::null_mut(), 65);
-    r17_assert_null_secret(&p.shared_data_presence, 2);
-    r17_assert_null(&p.public_data_presence, 65);
+    assert_null_secret(&p.shared_data_presence, 2);
+    assert_null_peer(&p.public_data_presence, 65);
     let p = read(shared.as_mut_ptr(), 2, std::ptr::null_mut(), 65);
-    r17_assert_present_secret(&p.shared_data_presence, &shared);
-    r17_assert_null(&p.public_data_presence, 65);
+    assert_present_secret(&p.shared_data_presence, &shared);
+    assert_null_peer(&p.public_data_presence, 65);
     let p = read(std::ptr::null_mut(), 2, public.as_mut_ptr(), 65);
-    r17_assert_null_secret(&p.shared_data_presence, 2);
-    r17_assert_present(&p.public_data_presence, &public);
+    assert_null_secret(&p.shared_data_presence, 2);
+    assert_present(&p.public_data_presence, &public);
 }
 
 /// R17 embedded-field matrix for `hkdf`.
 #[test]
-fn r17_matrix_hkdf() {
-    let registry = r17_registry();
+fn matrix_hkdf() {
+    let registry = pointer_shape_matrix_registry();
     let read =
         |salt_p: CK_BYTE_PTR, salt_len: CK_ULONG, info_p: CK_BYTE_PTR, info_len: CK_ULONG| {
             let mut hkdf = CK_HKDF_PARAMS {
@@ -6055,7 +6049,7 @@ fn r17_matrix_hkdf() {
                 ulInfoLen: info_len,
             };
             match unsafe {
-                r17_read_v1(
+                read_v1_pointer_shape(
                     &registry,
                     "hkdf",
                     &mut hkdf as *mut _ as CK_VOID_PTR,
@@ -6073,30 +6067,30 @@ fn r17_matrix_hkdf() {
     let mut info = [0x42u8, 0x43];
     let p = read(salt.as_mut_ptr(), 32, info.as_mut_ptr(), 2);
     assert!(p.extract && p.expand);
-    r17_assert_present_secret(&p.salt_presence, &salt);
-    r17_assert_present_secret(&p.info_presence, &info);
+    assert_present_secret(&p.salt_presence, &salt);
+    assert_present_secret(&p.info_presence, &info);
     let p = read(salt.as_mut_ptr(), 0, info.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.salt_presence, &[]);
-    r17_assert_present_secret(&p.info_presence, &[]);
+    assert_present_secret(&p.salt_presence, &[]);
+    assert_present_secret(&p.info_presence, &[]);
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.salt_presence, 0);
-    r17_assert_null_secret(&p.info_presence, 0);
+    assert_null_secret(&p.salt_presence, 0);
+    assert_null_secret(&p.info_presence, 0);
     let p = read(std::ptr::null_mut(), 32, std::ptr::null_mut(), 2);
-    r17_assert_null_secret(&p.salt_presence, 32);
-    r17_assert_null_secret(&p.info_presence, 2);
+    assert_null_secret(&p.salt_presence, 32);
+    assert_null_secret(&p.info_presence, 2);
     let p = read(salt.as_mut_ptr(), 32, std::ptr::null_mut(), 2);
-    r17_assert_present_secret(&p.salt_presence, &salt);
-    r17_assert_null_secret(&p.info_presence, 2);
+    assert_present_secret(&p.salt_presence, &salt);
+    assert_null_secret(&p.info_presence, 2);
     let p = read(std::ptr::null_mut(), 32, info.as_mut_ptr(), 2);
-    r17_assert_null_secret(&p.salt_presence, 32);
-    r17_assert_present_secret(&p.info_presence, &info);
+    assert_null_secret(&p.salt_presence, 32);
+    assert_present_secret(&p.info_presence, &info);
 }
 
 /// R17 embedded-field matrix for `chacha20` (bits-governed lengths: a
 /// NULL field records the derived byte length `div_ceil(bits, 8)`).
 #[test]
-fn r17_matrix_chacha20() {
-    let registry = r17_registry();
+fn matrix_chacha20() {
+    let registry = pointer_shape_matrix_registry();
     let read = |bc_p: CK_BYTE_PTR, bc_bits: CK_ULONG, n_p: CK_BYTE_PTR, n_bits: CK_ULONG| {
         let mut chacha = CK_CHACHA20_PARAMS {
             pBlockCounter: bc_p,
@@ -6105,7 +6099,7 @@ fn r17_matrix_chacha20() {
             ulNonceBits: n_bits,
         };
         match unsafe {
-            r17_read_v1(
+            read_v1_pointer_shape(
                 &registry,
                 "chacha20",
                 &mut chacha as *mut _ as CK_VOID_PTR,
@@ -6124,46 +6118,46 @@ fn r17_matrix_chacha20() {
     // ptr/n × ptr/n (32 bits = 4 bytes, 96 bits = 12 bytes).
     let p = read(bc.as_mut_ptr(), 32, nonce.as_mut_ptr(), 96);
     assert_eq!((p.block_counter_bits, p.nonce_bits), (32, 96));
-    r17_assert_present(&p.block_counter_presence, &bc);
-    r17_assert_present(&p.nonce_presence, &nonce);
+    assert_present(&p.block_counter_presence, &bc);
+    assert_present(&p.nonce_presence, &nonce);
     // ptr/0-bits × ptr/0-bits: empty, Present.
     let p = read(bc.as_mut_ptr(), 0, nonce.as_mut_ptr(), 0);
-    r17_assert_present(&p.block_counter_presence, &[]);
-    r17_assert_present(&p.nonce_presence, &[]);
+    assert_present(&p.block_counter_presence, &[]);
+    assert_present(&p.nonce_presence, &[]);
     // NULL/0-bits × NULL/0-bits: Null{0}.
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null(&p.block_counter_presence, 0);
-    r17_assert_null(&p.nonce_presence, 0);
+    assert_null_peer(&p.block_counter_presence, 0);
+    assert_null_peer(&p.nonce_presence, 0);
     // NULL/32-bits × NULL/96-bits: Null{derived bytes}.
     let p = read(std::ptr::null_mut(), 32, std::ptr::null_mut(), 96);
-    r17_assert_null(&p.block_counter_presence, 4);
-    r17_assert_null(&p.nonce_presence, 12);
+    assert_null_peer(&p.block_counter_presence, 4);
+    assert_null_peer(&p.nonce_presence, 12);
     // Mixed: valid counter + NULL nonce.
     let p = read(bc.as_mut_ptr(), 32, std::ptr::null_mut(), 96);
-    r17_assert_present(&p.block_counter_presence, &bc);
-    r17_assert_null(&p.nonce_presence, 12);
+    assert_present(&p.block_counter_presence, &bc);
+    assert_null_peer(&p.nonce_presence, 12);
     // Mixed: NULL counter + valid nonce.
     let p = read(std::ptr::null_mut(), 32, nonce.as_mut_ptr(), 96);
-    r17_assert_null(&p.block_counter_presence, 4);
-    r17_assert_present(&p.nonce_presence, &nonce);
+    assert_null_peer(&p.block_counter_presence, 4);
+    assert_present(&p.nonce_presence, &nonce);
     // Non-multiple-of-8 bits round up (legacy `div_ceil` rule preserved).
     let mut bc9 = [0x43u8; 2];
     let p = read(bc9.as_mut_ptr(), 9, nonce.as_mut_ptr(), 96);
-    r17_assert_present(&p.block_counter_presence, &bc9);
+    assert_present(&p.block_counter_presence, &bc9);
     let p = read(std::ptr::null_mut(), 9, std::ptr::null_mut(), 0);
-    r17_assert_null(&p.block_counter_presence, 2);
-    r17_assert_null(&p.nonce_presence, 0);
+    assert_null_peer(&p.block_counter_presence, 2);
+    assert_null_peer(&p.nonce_presence, 0);
 }
 
 /// R17 embedded-field matrix for `salsa20` (fixed 8-byte block counter
 /// + bits-governed nonce: NULL records the fixed/derived extent).
 #[test]
-fn r17_matrix_salsa20() {
-    let registry = r17_registry();
+fn matrix_salsa20() {
+    let registry = pointer_shape_matrix_registry();
     let read = |bc_p: CK_BYTE_PTR, n_p: CK_BYTE_PTR, n_bits: CK_ULONG| {
         let mut salsa = CK_SALSA20_PARAMS { pBlockCounter: bc_p, pNonce: n_p, ulNonceBits: n_bits };
         match unsafe {
-            r17_read_v1(
+            read_v1_pointer_shape(
                 &registry,
                 "salsa20",
                 &mut salsa as *mut _ as CK_VOID_PTR,
@@ -6181,29 +6175,29 @@ fn r17_matrix_salsa20() {
     let mut nonce = [0x22u8; 8];
     let p = read(bc.as_mut_ptr(), nonce.as_mut_ptr(), 64);
     assert_eq!(p.nonce_bits, 64);
-    r17_assert_present(&p.block_counter_presence, &bc);
-    r17_assert_present(&p.nonce_presence, &nonce);
+    assert_present(&p.block_counter_presence, &bc);
+    assert_present(&p.nonce_presence, &nonce);
     let p = read(bc.as_mut_ptr(), nonce.as_mut_ptr(), 0);
-    r17_assert_present(&p.block_counter_presence, &bc);
-    r17_assert_present(&p.nonce_presence, &[]);
+    assert_present(&p.block_counter_presence, &bc);
+    assert_present(&p.nonce_presence, &[]);
     let p = read(std::ptr::null_mut(), std::ptr::null_mut(), 0);
-    r17_assert_null(&p.block_counter_presence, 8);
-    r17_assert_null(&p.nonce_presence, 0);
+    assert_null_peer(&p.block_counter_presence, 8);
+    assert_null_peer(&p.nonce_presence, 0);
     let p = read(std::ptr::null_mut(), std::ptr::null_mut(), 64);
-    r17_assert_null(&p.block_counter_presence, 8);
-    r17_assert_null(&p.nonce_presence, 8);
+    assert_null_peer(&p.block_counter_presence, 8);
+    assert_null_peer(&p.nonce_presence, 8);
     let p = read(bc.as_mut_ptr(), std::ptr::null_mut(), 64);
-    r17_assert_present(&p.block_counter_presence, &bc);
-    r17_assert_null(&p.nonce_presence, 8);
+    assert_present(&p.block_counter_presence, &bc);
+    assert_null_peer(&p.nonce_presence, 8);
     let p = read(std::ptr::null_mut(), nonce.as_mut_ptr(), 64);
-    r17_assert_null(&p.block_counter_presence, 8);
-    r17_assert_present(&p.nonce_presence, &nonce);
+    assert_null_peer(&p.block_counter_presence, 8);
+    assert_present(&p.nonce_presence, &nonce);
 }
 
 /// R17 embedded-field matrix for `salsa20_chacha20_poly1305`.
 #[test]
-fn r17_matrix_salsa20_chacha20_poly1305() {
-    let registry = r17_registry();
+fn matrix_salsa20_chacha20_poly1305() {
+    let registry = pointer_shape_matrix_registry();
     let read =
         |nonce_p: CK_BYTE_PTR, nonce_len: CK_ULONG, aad_p: CK_BYTE_PTR, aad_len: CK_ULONG| {
             let mut sp = CK_SALSA20_CHACHA20_POLY1305_PARAMS {
@@ -6213,7 +6207,7 @@ fn r17_matrix_salsa20_chacha20_poly1305() {
                 ulAADLen: aad_len,
             };
             match unsafe {
-                r17_read_v1(
+                read_v1_pointer_shape(
                     &registry,
                     "salsa20_chacha20_poly1305",
                     &mut sp as *mut _ as CK_VOID_PTR,
@@ -6230,29 +6224,29 @@ fn r17_matrix_salsa20_chacha20_poly1305() {
     let mut nonce = [0x51u8; 12];
     let mut aad = [0x52u8, 0x53];
     let p = read(nonce.as_mut_ptr(), 12, aad.as_mut_ptr(), 2);
-    r17_assert_present(&p.nonce_presence, &nonce);
-    r17_assert_present_secret(&p.aad_presence, &aad);
+    assert_present(&p.nonce_presence, &nonce);
+    assert_present_secret(&p.aad_presence, &aad);
     let p = read(nonce.as_mut_ptr(), 0, aad.as_mut_ptr(), 0);
-    r17_assert_present(&p.nonce_presence, &[]);
-    r17_assert_present_secret(&p.aad_presence, &[]);
+    assert_present(&p.nonce_presence, &[]);
+    assert_present_secret(&p.aad_presence, &[]);
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null(&p.nonce_presence, 0);
-    r17_assert_null_secret(&p.aad_presence, 0);
+    assert_null_peer(&p.nonce_presence, 0);
+    assert_null_secret(&p.aad_presence, 0);
     let p = read(std::ptr::null_mut(), 12, std::ptr::null_mut(), 2);
-    r17_assert_null(&p.nonce_presence, 12);
-    r17_assert_null_secret(&p.aad_presence, 2);
+    assert_null_peer(&p.nonce_presence, 12);
+    assert_null_secret(&p.aad_presence, 2);
     let p = read(nonce.as_mut_ptr(), 12, std::ptr::null_mut(), 2);
-    r17_assert_present(&p.nonce_presence, &nonce);
-    r17_assert_null_secret(&p.aad_presence, 2);
+    assert_present(&p.nonce_presence, &nonce);
+    assert_null_secret(&p.aad_presence, 2);
     let p = read(std::ptr::null_mut(), 12, aad.as_mut_ptr(), 2);
-    r17_assert_null(&p.nonce_presence, 12);
-    r17_assert_present_secret(&p.aad_presence, &aad);
+    assert_null_peer(&p.nonce_presence, 12);
+    assert_present_secret(&p.aad_presence, &aad);
 }
 
 /// R17 embedded-field matrix for `mu_gen`.
 #[test]
-fn r17_matrix_mu_gen() {
-    let registry = r17_registry();
+fn matrix_mu_gen() {
+    let registry = pointer_shape_matrix_registry();
     let read = |tr_p: CK_BYTE_PTR, tr_len: CK_ULONG, ctx_p: CK_BYTE_PTR, ctx_len: CK_ULONG| {
         let mut mu = super::CkMuGenParams {
             h_key: 9,
@@ -6262,7 +6256,7 @@ fn r17_matrix_mu_gen() {
             ul_ctx_len: ctx_len,
         };
         match unsafe {
-            r17_read_v1(
+            read_v1_pointer_shape(
                 &registry,
                 "mu_gen",
                 &mut mu as *mut _ as CK_VOID_PTR,
@@ -6280,29 +6274,29 @@ fn r17_matrix_mu_gen() {
     let mut ctx = [0x62u8, 0x63];
     let p = read(tr.as_mut_ptr(), 64, ctx.as_mut_ptr(), 2);
     assert_eq!(p.key_handle.0, 9);
-    r17_assert_present_secret(&p.tr_presence, &tr);
-    r17_assert_present_secret(&p.context_presence, &ctx);
+    assert_present_secret(&p.tr_presence, &tr);
+    assert_present_secret(&p.context_presence, &ctx);
     let p = read(tr.as_mut_ptr(), 0, ctx.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.tr_presence, &[]);
-    r17_assert_present_secret(&p.context_presence, &[]);
+    assert_present_secret(&p.tr_presence, &[]);
+    assert_present_secret(&p.context_presence, &[]);
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.tr_presence, 0);
-    r17_assert_null_secret(&p.context_presence, 0);
+    assert_null_secret(&p.tr_presence, 0);
+    assert_null_secret(&p.context_presence, 0);
     let p = read(std::ptr::null_mut(), 64, std::ptr::null_mut(), 2);
-    r17_assert_null_secret(&p.tr_presence, 64);
-    r17_assert_null_secret(&p.context_presence, 2);
+    assert_null_secret(&p.tr_presence, 64);
+    assert_null_secret(&p.context_presence, 2);
     let p = read(tr.as_mut_ptr(), 64, std::ptr::null_mut(), 2);
-    r17_assert_present_secret(&p.tr_presence, &tr);
-    r17_assert_null_secret(&p.context_presence, 2);
+    assert_present_secret(&p.tr_presence, &tr);
+    assert_null_secret(&p.context_presence, 2);
     let p = read(std::ptr::null_mut(), 64, ctx.as_mut_ptr(), 2);
-    r17_assert_null_secret(&p.tr_presence, 64);
-    r17_assert_present_secret(&p.context_presence, &ctx);
+    assert_null_secret(&p.tr_presence, 64);
+    assert_present_secret(&p.context_presence, &ctx);
 }
 
 /// R17 embedded-field matrix for `x942_dh1_derive`.
 #[test]
-fn r17_matrix_x942_dh1_derive() {
-    let registry = r17_registry();
+fn matrix_x942_dh1_derive() {
+    let registry = pointer_shape_matrix_registry();
     let read = |oi_p: CK_BYTE_PTR, oi_len: CK_ULONG, pub_p: CK_BYTE_PTR, pub_len: CK_ULONG| {
         let mut dh = CK_X9_42_DH1_DERIVE_PARAMS {
             kdf: 11,
@@ -6312,7 +6306,7 @@ fn r17_matrix_x942_dh1_derive() {
             pPublicData: pub_p,
         };
         match unsafe {
-            r17_read_v1(
+            read_v1_pointer_shape(
                 &registry,
                 "x942_dh1_derive",
                 &mut dh as *mut _ as CK_VOID_PTR,
@@ -6329,29 +6323,29 @@ fn r17_matrix_x942_dh1_derive() {
     let mut oi = [0x71u8, 0x72];
     let mut public = [0x73u8; 65];
     let p = read(oi.as_mut_ptr(), 2, public.as_mut_ptr(), 65);
-    r17_assert_present_secret(&p.other_info_presence, &oi);
-    r17_assert_present(&p.public_data_presence, &public);
+    assert_present_secret(&p.other_info_presence, &oi);
+    assert_present(&p.public_data_presence, &public);
     let p = read(oi.as_mut_ptr(), 0, public.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.other_info_presence, &[]);
-    r17_assert_present(&p.public_data_presence, &[]);
+    assert_present_secret(&p.other_info_presence, &[]);
+    assert_present(&p.public_data_presence, &[]);
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.other_info_presence, 0);
-    r17_assert_null(&p.public_data_presence, 0);
+    assert_null_secret(&p.other_info_presence, 0);
+    assert_null_peer(&p.public_data_presence, 0);
     let p = read(std::ptr::null_mut(), 2, std::ptr::null_mut(), 65);
-    r17_assert_null_secret(&p.other_info_presence, 2);
-    r17_assert_null(&p.public_data_presence, 65);
+    assert_null_secret(&p.other_info_presence, 2);
+    assert_null_peer(&p.public_data_presence, 65);
     let p = read(oi.as_mut_ptr(), 2, std::ptr::null_mut(), 65);
-    r17_assert_present_secret(&p.other_info_presence, &oi);
-    r17_assert_null(&p.public_data_presence, 65);
+    assert_present_secret(&p.other_info_presence, &oi);
+    assert_null_peer(&p.public_data_presence, 65);
     let p = read(std::ptr::null_mut(), 2, public.as_mut_ptr(), 65);
-    r17_assert_null_secret(&p.other_info_presence, 2);
-    r17_assert_present(&p.public_data_presence, &public);
+    assert_null_secret(&p.other_info_presence, 2);
+    assert_present(&p.public_data_presence, &public);
 }
 
 /// R17 embedded-field matrix for `gostr3410_derive`.
 #[test]
-fn r17_matrix_gostr3410_derive() {
-    let registry = r17_registry();
+fn matrix_gostr3410_derive() {
+    let registry = pointer_shape_matrix_registry();
     let read = |pub_p: CK_BYTE_PTR, pub_len: CK_ULONG, ukm_p: CK_BYTE_PTR, ukm_len: CK_ULONG| {
         let mut gost = CK_GOSTR3410_DERIVE_PARAMS {
             kdf: 1,
@@ -6361,7 +6355,7 @@ fn r17_matrix_gostr3410_derive() {
             ulUKMLen: ukm_len,
         };
         match unsafe {
-            r17_read_v1(
+            read_v1_pointer_shape(
                 &registry,
                 "gostr3410_derive",
                 &mut gost as *mut _ as CK_VOID_PTR,
@@ -6378,29 +6372,29 @@ fn r17_matrix_gostr3410_derive() {
     let mut public = [0x74u8; 64];
     let mut ukm = [0x75u8, 0x76];
     let p = read(public.as_mut_ptr(), 64, ukm.as_mut_ptr(), 2);
-    r17_assert_present(&p.public_data_presence, &public);
-    r17_assert_present(&p.ukm_presence, &ukm);
+    assert_present(&p.public_data_presence, &public);
+    assert_present(&p.ukm_presence, &ukm);
     let p = read(public.as_mut_ptr(), 0, ukm.as_mut_ptr(), 0);
-    r17_assert_present(&p.public_data_presence, &[]);
-    r17_assert_present(&p.ukm_presence, &[]);
+    assert_present(&p.public_data_presence, &[]);
+    assert_present(&p.ukm_presence, &[]);
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null(&p.public_data_presence, 0);
-    r17_assert_null(&p.ukm_presence, 0);
+    assert_null_peer(&p.public_data_presence, 0);
+    assert_null_peer(&p.ukm_presence, 0);
     let p = read(std::ptr::null_mut(), 64, std::ptr::null_mut(), 2);
-    r17_assert_null(&p.public_data_presence, 64);
-    r17_assert_null(&p.ukm_presence, 2);
+    assert_null_peer(&p.public_data_presence, 64);
+    assert_null_peer(&p.ukm_presence, 2);
     let p = read(public.as_mut_ptr(), 64, std::ptr::null_mut(), 2);
-    r17_assert_present(&p.public_data_presence, &public);
-    r17_assert_null(&p.ukm_presence, 2);
+    assert_present(&p.public_data_presence, &public);
+    assert_null_peer(&p.ukm_presence, 2);
     let p = read(std::ptr::null_mut(), 64, ukm.as_mut_ptr(), 2);
-    r17_assert_null(&p.public_data_presence, 64);
-    r17_assert_present(&p.ukm_presence, &ukm);
+    assert_null_peer(&p.public_data_presence, 64);
+    assert_present(&p.ukm_presence, &ukm);
 }
 
 /// R17 embedded-field matrix for `gostr3410_key_wrap`.
 #[test]
-fn r17_matrix_gostr3410_key_wrap() {
-    let registry = r17_registry();
+fn matrix_gostr3410_key_wrap() {
+    let registry = pointer_shape_matrix_registry();
     let read = |oid_p: CK_BYTE_PTR, oid_len: CK_ULONG, ukm_p: CK_BYTE_PTR, ukm_len: CK_ULONG| {
         let mut wrap = CK_GOSTR3410_KEY_WRAP_PARAMS {
             pWrapOID: oid_p,
@@ -6410,7 +6404,7 @@ fn r17_matrix_gostr3410_key_wrap() {
             hKey: 0xBEEF,
         };
         match unsafe {
-            r17_read_v1(
+            read_v1_pointer_shape(
                 &registry,
                 "gostr3410_key_wrap",
                 &mut wrap as *mut _ as CK_VOID_PTR,
@@ -6428,29 +6422,29 @@ fn r17_matrix_gostr3410_key_wrap() {
     let mut ukm = [0x7Au8, 0x7B];
     let p = read(oid.as_mut_ptr(), 3, ukm.as_mut_ptr(), 2);
     assert_eq!(p.key_handle.0, 0xBEEF);
-    r17_assert_present(&p.wrap_oid_presence, &oid);
-    r17_assert_present(&p.ukm_presence, &ukm);
+    assert_present(&p.wrap_oid_presence, &oid);
+    assert_present(&p.ukm_presence, &ukm);
     let p = read(oid.as_mut_ptr(), 0, ukm.as_mut_ptr(), 0);
-    r17_assert_present(&p.wrap_oid_presence, &[]);
-    r17_assert_present(&p.ukm_presence, &[]);
+    assert_present(&p.wrap_oid_presence, &[]);
+    assert_present(&p.ukm_presence, &[]);
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null(&p.wrap_oid_presence, 0);
-    r17_assert_null(&p.ukm_presence, 0);
+    assert_null_peer(&p.wrap_oid_presence, 0);
+    assert_null_peer(&p.ukm_presence, 0);
     let p = read(std::ptr::null_mut(), 3, std::ptr::null_mut(), 2);
-    r17_assert_null(&p.wrap_oid_presence, 3);
-    r17_assert_null(&p.ukm_presence, 2);
+    assert_null_peer(&p.wrap_oid_presence, 3);
+    assert_null_peer(&p.ukm_presence, 2);
     let p = read(oid.as_mut_ptr(), 3, std::ptr::null_mut(), 2);
-    r17_assert_present(&p.wrap_oid_presence, &oid);
-    r17_assert_null(&p.ukm_presence, 2);
+    assert_present(&p.wrap_oid_presence, &oid);
+    assert_null_peer(&p.ukm_presence, 2);
     let p = read(std::ptr::null_mut(), 3, ukm.as_mut_ptr(), 2);
-    r17_assert_null(&p.wrap_oid_presence, 3);
-    r17_assert_present(&p.ukm_presence, &ukm);
+    assert_null_peer(&p.wrap_oid_presence, 3);
+    assert_present(&p.ukm_presence, &ukm);
 }
 
 /// R17 embedded-field matrix for `ike_prf_derive`.
 #[test]
-fn r17_matrix_ike_prf_derive() {
-    let registry = r17_registry();
+fn matrix_ike_prf_derive() {
+    let registry = pointer_shape_matrix_registry();
     let read = |ni_p: CK_BYTE_PTR, ni_len: CK_ULONG, nr_p: CK_BYTE_PTR, nr_len: CK_ULONG| {
         let mut ike = CK_IKE_PRF_DERIVE_PARAMS {
             prfMechanism: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
@@ -6463,7 +6457,7 @@ fn r17_matrix_ike_prf_derive() {
             hNewKey: 0,
         };
         match unsafe {
-            r17_read_v1(
+            read_v1_pointer_shape(
                 &registry,
                 "ike_prf_derive",
                 &mut ike as *mut _ as CK_VOID_PTR,
@@ -6480,29 +6474,29 @@ fn r17_matrix_ike_prf_derive() {
     let mut ni = [0x81u8, 0x82];
     let mut nr = [0x83u8, 0x84];
     let p = read(ni.as_mut_ptr(), 2, nr.as_mut_ptr(), 2);
-    r17_assert_present_secret(&p.ni_presence, &ni);
-    r17_assert_present_secret(&p.nr_presence, &nr);
+    assert_present_secret(&p.ni_presence, &ni);
+    assert_present_secret(&p.nr_presence, &nr);
     let p = read(ni.as_mut_ptr(), 0, nr.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.ni_presence, &[]);
-    r17_assert_present_secret(&p.nr_presence, &[]);
+    assert_present_secret(&p.ni_presence, &[]);
+    assert_present_secret(&p.nr_presence, &[]);
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.ni_presence, 0);
-    r17_assert_null_secret(&p.nr_presence, 0);
+    assert_null_secret(&p.ni_presence, 0);
+    assert_null_secret(&p.nr_presence, 0);
     let p = read(std::ptr::null_mut(), 2, std::ptr::null_mut(), 2);
-    r17_assert_null_secret(&p.ni_presence, 2);
-    r17_assert_null_secret(&p.nr_presence, 2);
+    assert_null_secret(&p.ni_presence, 2);
+    assert_null_secret(&p.nr_presence, 2);
     let p = read(ni.as_mut_ptr(), 2, std::ptr::null_mut(), 2);
-    r17_assert_present_secret(&p.ni_presence, &ni);
-    r17_assert_null_secret(&p.nr_presence, 2);
+    assert_present_secret(&p.ni_presence, &ni);
+    assert_null_secret(&p.nr_presence, 2);
     let p = read(std::ptr::null_mut(), 2, nr.as_mut_ptr(), 2);
-    r17_assert_null_secret(&p.ni_presence, 2);
-    r17_assert_present_secret(&p.nr_presence, &nr);
+    assert_null_secret(&p.ni_presence, 2);
+    assert_present_secret(&p.nr_presence, &nr);
 }
 
 /// R17 embedded-field matrix for `ike1_prf_derive`.
 #[test]
-fn r17_matrix_ike1_prf_derive() {
-    let registry = r17_registry();
+fn matrix_ike1_prf_derive() {
+    let registry = pointer_shape_matrix_registry();
     let read = |yi_p: CK_BYTE_PTR, yi_len: CK_ULONG, yr_p: CK_BYTE_PTR, yr_len: CK_ULONG| {
         let mut ike = CK_IKE1_PRF_DERIVE_PARAMS {
             prfMechanism: CkMechanismType::SHA384.0 as CK_MECHANISM_TYPE,
@@ -6516,7 +6510,7 @@ fn r17_matrix_ike1_prf_derive() {
             keyNumber: 3,
         };
         match unsafe {
-            r17_read_v1(
+            read_v1_pointer_shape(
                 &registry,
                 "ike1_prf_derive",
                 &mut ike as *mut _ as CK_VOID_PTR,
@@ -6534,30 +6528,30 @@ fn r17_matrix_ike1_prf_derive() {
     let mut ckyr = [0x86u8; 8];
     let p = read(ckyi.as_mut_ptr(), 8, ckyr.as_mut_ptr(), 8);
     assert_eq!(p.key_number, 3);
-    r17_assert_present_secret(&p.ckyi_presence, &ckyi);
-    r17_assert_present_secret(&p.ckyr_presence, &ckyr);
+    assert_present_secret(&p.ckyi_presence, &ckyi);
+    assert_present_secret(&p.ckyr_presence, &ckyr);
     let p = read(ckyi.as_mut_ptr(), 0, ckyr.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.ckyi_presence, &[]);
-    r17_assert_present_secret(&p.ckyr_presence, &[]);
+    assert_present_secret(&p.ckyi_presence, &[]);
+    assert_present_secret(&p.ckyr_presence, &[]);
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.ckyi_presence, 0);
-    r17_assert_null_secret(&p.ckyr_presence, 0);
+    assert_null_secret(&p.ckyi_presence, 0);
+    assert_null_secret(&p.ckyr_presence, 0);
     let p = read(std::ptr::null_mut(), 8, std::ptr::null_mut(), 8);
-    r17_assert_null_secret(&p.ckyi_presence, 8);
-    r17_assert_null_secret(&p.ckyr_presence, 8);
+    assert_null_secret(&p.ckyi_presence, 8);
+    assert_null_secret(&p.ckyr_presence, 8);
     let p = read(ckyi.as_mut_ptr(), 8, std::ptr::null_mut(), 8);
-    r17_assert_present_secret(&p.ckyi_presence, &ckyi);
-    r17_assert_null_secret(&p.ckyr_presence, 8);
+    assert_present_secret(&p.ckyi_presence, &ckyi);
+    assert_null_secret(&p.ckyr_presence, 8);
     let p = read(std::ptr::null_mut(), 8, ckyr.as_mut_ptr(), 8);
-    r17_assert_null_secret(&p.ckyi_presence, 8);
-    r17_assert_present_secret(&p.ckyr_presence, &ckyr);
+    assert_null_secret(&p.ckyi_presence, 8);
+    assert_present_secret(&p.ckyr_presence, &ckyr);
 }
 
 /// R17 embedded-field matrix for `ecdh2_derive` (three fields; the two
 /// mixed cases pin each direction plus a double-NULL mix).
 #[test]
-fn r17_matrix_ecdh2_derive() {
-    let registry = r17_registry();
+fn matrix_ecdh2_derive() {
+    let registry = pointer_shape_matrix_registry();
     let read = |s_p: CK_BYTE_PTR,
                 s_len: CK_ULONG,
                 p_p: CK_BYTE_PTR,
@@ -6576,7 +6570,7 @@ fn r17_matrix_ecdh2_derive() {
             pPublicData2: p2_p,
         };
         match unsafe {
-            r17_read_v1(
+            read_v1_pointer_shape(
                 &registry,
                 "ecdh2_derive",
                 &mut ecdh as *mut _ as CK_VOID_PTR,
@@ -6594,42 +6588,42 @@ fn r17_matrix_ecdh2_derive() {
     let mut public = [0x93u8; 65];
     let mut public2 = [0x94u8; 65];
     let p = read(shared.as_mut_ptr(), 2, public.as_mut_ptr(), 65, public2.as_mut_ptr(), 65);
-    r17_assert_present_secret(&p.shared_data_presence, &shared);
-    r17_assert_present(&p.public_data_presence, &public);
-    r17_assert_present(&p.public_data2_presence, &public2);
+    assert_present_secret(&p.shared_data_presence, &shared);
+    assert_present(&p.public_data_presence, &public);
+    assert_present(&p.public_data2_presence, &public2);
     let p = read(shared.as_mut_ptr(), 0, public.as_mut_ptr(), 0, public2.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.shared_data_presence, &[]);
-    r17_assert_present(&p.public_data_presence, &[]);
-    r17_assert_present(&p.public_data2_presence, &[]);
+    assert_present_secret(&p.shared_data_presence, &[]);
+    assert_present(&p.public_data_presence, &[]);
+    assert_present(&p.public_data2_presence, &[]);
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.shared_data_presence, 0);
-    r17_assert_null(&p.public_data_presence, 0);
-    r17_assert_null(&p.public_data2_presence, 0);
+    assert_null_secret(&p.shared_data_presence, 0);
+    assert_null_peer(&p.public_data_presence, 0);
+    assert_null_peer(&p.public_data2_presence, 0);
     let p = read(std::ptr::null_mut(), 2, std::ptr::null_mut(), 65, std::ptr::null_mut(), 65);
-    r17_assert_null_secret(&p.shared_data_presence, 2);
-    r17_assert_null(&p.public_data_presence, 65);
-    r17_assert_null(&p.public_data2_presence, 65);
+    assert_null_secret(&p.shared_data_presence, 2);
+    assert_null_peer(&p.public_data_presence, 65);
+    assert_null_peer(&p.public_data2_presence, 65);
     // Mixed: valid shared/public + NULL public2.
     let p = read(shared.as_mut_ptr(), 2, public.as_mut_ptr(), 65, std::ptr::null_mut(), 65);
-    r17_assert_present_secret(&p.shared_data_presence, &shared);
-    r17_assert_present(&p.public_data_presence, &public);
-    r17_assert_null(&p.public_data2_presence, 65);
+    assert_present_secret(&p.shared_data_presence, &shared);
+    assert_present(&p.public_data_presence, &public);
+    assert_null_peer(&p.public_data2_presence, 65);
     // Mixed: NULL shared + valid public/public2.
     let p = read(std::ptr::null_mut(), 2, public.as_mut_ptr(), 65, public2.as_mut_ptr(), 65);
-    r17_assert_null_secret(&p.shared_data_presence, 2);
-    r17_assert_present(&p.public_data_presence, &public);
-    r17_assert_present(&p.public_data2_presence, &public2);
+    assert_null_secret(&p.shared_data_presence, 2);
+    assert_present(&p.public_data_presence, &public);
+    assert_present(&p.public_data2_presence, &public2);
     // Mixed: NULL shared/public + valid public2.
     let p = read(std::ptr::null_mut(), 2, std::ptr::null_mut(), 65, public2.as_mut_ptr(), 65);
-    r17_assert_null_secret(&p.shared_data_presence, 2);
-    r17_assert_null(&p.public_data_presence, 65);
-    r17_assert_present(&p.public_data2_presence, &public2);
+    assert_null_secret(&p.shared_data_presence, 2);
+    assert_null_peer(&p.public_data_presence, 65);
+    assert_present(&p.public_data2_presence, &public2);
 }
 
 /// R17 embedded-field matrix for `ecmqv_derive`.
 #[test]
-fn r17_matrix_ecmqv_derive() {
-    let registry = r17_registry();
+fn matrix_ecmqv_derive() {
+    let registry = pointer_shape_matrix_registry();
     let read = |s_p: CK_BYTE_PTR,
                 s_len: CK_ULONG,
                 p_p: CK_BYTE_PTR,
@@ -6649,7 +6643,7 @@ fn r17_matrix_ecmqv_derive() {
             publicKey: 0x51,
         };
         match unsafe {
-            r17_read_v1(
+            read_v1_pointer_shape(
                 &registry,
                 "ecmqv_derive",
                 &mut ecmqv as *mut _ as CK_VOID_PTR,
@@ -6668,35 +6662,35 @@ fn r17_matrix_ecmqv_derive() {
     let mut public2 = [0xA4u8; 65];
     let p = read(shared.as_mut_ptr(), 2, public.as_mut_ptr(), 65, public2.as_mut_ptr(), 65);
     assert_eq!(p.public_key_handle.0, 0x51);
-    r17_assert_present_secret(&p.shared_data_presence, &shared);
-    r17_assert_present(&p.public_data_presence, &public);
-    r17_assert_present(&p.public_data2_presence, &public2);
+    assert_present_secret(&p.shared_data_presence, &shared);
+    assert_present(&p.public_data_presence, &public);
+    assert_present(&p.public_data2_presence, &public2);
     let p = read(shared.as_mut_ptr(), 0, public.as_mut_ptr(), 0, public2.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.shared_data_presence, &[]);
-    r17_assert_present(&p.public_data_presence, &[]);
-    r17_assert_present(&p.public_data2_presence, &[]);
+    assert_present_secret(&p.shared_data_presence, &[]);
+    assert_present(&p.public_data_presence, &[]);
+    assert_present(&p.public_data2_presence, &[]);
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.shared_data_presence, 0);
-    r17_assert_null(&p.public_data_presence, 0);
-    r17_assert_null(&p.public_data2_presence, 0);
+    assert_null_secret(&p.shared_data_presence, 0);
+    assert_null_peer(&p.public_data_presence, 0);
+    assert_null_peer(&p.public_data2_presence, 0);
     let p = read(std::ptr::null_mut(), 2, std::ptr::null_mut(), 65, std::ptr::null_mut(), 65);
-    r17_assert_null_secret(&p.shared_data_presence, 2);
-    r17_assert_null(&p.public_data_presence, 65);
-    r17_assert_null(&p.public_data2_presence, 65);
+    assert_null_secret(&p.shared_data_presence, 2);
+    assert_null_peer(&p.public_data_presence, 65);
+    assert_null_peer(&p.public_data2_presence, 65);
     let p = read(shared.as_mut_ptr(), 2, public.as_mut_ptr(), 65, std::ptr::null_mut(), 65);
-    r17_assert_present_secret(&p.shared_data_presence, &shared);
-    r17_assert_present(&p.public_data_presence, &public);
-    r17_assert_null(&p.public_data2_presence, 65);
+    assert_present_secret(&p.shared_data_presence, &shared);
+    assert_present(&p.public_data_presence, &public);
+    assert_null_peer(&p.public_data2_presence, 65);
     let p = read(std::ptr::null_mut(), 2, public.as_mut_ptr(), 65, public2.as_mut_ptr(), 65);
-    r17_assert_null_secret(&p.shared_data_presence, 2);
-    r17_assert_present(&p.public_data_presence, &public);
-    r17_assert_present(&p.public_data2_presence, &public2);
+    assert_null_secret(&p.shared_data_presence, 2);
+    assert_present(&p.public_data_presence, &public);
+    assert_present(&p.public_data2_presence, &public2);
 }
 
 /// R17 embedded-field matrix for `x942_dh2_derive`.
 #[test]
-fn r17_matrix_x942_dh2_derive() {
-    let registry = r17_registry();
+fn matrix_x942_dh2_derive() {
+    let registry = pointer_shape_matrix_registry();
     let read = |o_p: CK_BYTE_PTR,
                 o_len: CK_ULONG,
                 p_p: CK_BYTE_PTR,
@@ -6715,7 +6709,7 @@ fn r17_matrix_x942_dh2_derive() {
             pPublicData2: p2_p,
         };
         match unsafe {
-            r17_read_v1(
+            read_v1_pointer_shape(
                 &registry,
                 "x942_dh2_derive",
                 &mut dh as *mut _ as CK_VOID_PTR,
@@ -6733,36 +6727,36 @@ fn r17_matrix_x942_dh2_derive() {
     let mut public = [0xB3u8; 65];
     let mut public2 = [0xB4u8; 65];
     let p = read(oi.as_mut_ptr(), 2, public.as_mut_ptr(), 65, public2.as_mut_ptr(), 65);
-    r17_assert_present_secret(&p.other_info_presence, &oi);
-    r17_assert_present(&p.public_data_presence, &public);
-    r17_assert_present(&p.public_data2_presence, &public2);
+    assert_present_secret(&p.other_info_presence, &oi);
+    assert_present(&p.public_data_presence, &public);
+    assert_present(&p.public_data2_presence, &public2);
     let p = read(oi.as_mut_ptr(), 0, public.as_mut_ptr(), 0, public2.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.other_info_presence, &[]);
-    r17_assert_present(&p.public_data_presence, &[]);
-    r17_assert_present(&p.public_data2_presence, &[]);
+    assert_present_secret(&p.other_info_presence, &[]);
+    assert_present(&p.public_data_presence, &[]);
+    assert_present(&p.public_data2_presence, &[]);
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.other_info_presence, 0);
-    r17_assert_null(&p.public_data_presence, 0);
-    r17_assert_null(&p.public_data2_presence, 0);
+    assert_null_secret(&p.other_info_presence, 0);
+    assert_null_peer(&p.public_data_presence, 0);
+    assert_null_peer(&p.public_data2_presence, 0);
     let p = read(std::ptr::null_mut(), 2, std::ptr::null_mut(), 65, std::ptr::null_mut(), 65);
-    r17_assert_null_secret(&p.other_info_presence, 2);
-    r17_assert_null(&p.public_data_presence, 65);
-    r17_assert_null(&p.public_data2_presence, 65);
+    assert_null_secret(&p.other_info_presence, 2);
+    assert_null_peer(&p.public_data_presence, 65);
+    assert_null_peer(&p.public_data2_presence, 65);
     let p = read(oi.as_mut_ptr(), 2, public.as_mut_ptr(), 65, std::ptr::null_mut(), 65);
-    r17_assert_present_secret(&p.other_info_presence, &oi);
-    r17_assert_present(&p.public_data_presence, &public);
-    r17_assert_null(&p.public_data2_presence, 65);
+    assert_present_secret(&p.other_info_presence, &oi);
+    assert_present(&p.public_data_presence, &public);
+    assert_null_peer(&p.public_data2_presence, 65);
     let p = read(std::ptr::null_mut(), 2, public.as_mut_ptr(), 65, public2.as_mut_ptr(), 65);
-    r17_assert_null_secret(&p.other_info_presence, 2);
-    r17_assert_present(&p.public_data_presence, &public);
-    r17_assert_present(&p.public_data2_presence, &public2);
+    assert_null_secret(&p.other_info_presence, 2);
+    assert_present(&p.public_data_presence, &public);
+    assert_present(&p.public_data2_presence, &public2);
 }
 
 /// R17 embedded-field matrix for `x942_mqv_derive` (note the
 /// non-`p`-prefixed MQV field names).
 #[test]
-fn r17_matrix_x942_mqv_derive() {
-    let registry = r17_registry();
+fn matrix_x942_mqv_derive() {
+    let registry = pointer_shape_matrix_registry();
     let read = |o_p: CK_BYTE_PTR,
                 o_len: CK_ULONG,
                 p_p: CK_BYTE_PTR,
@@ -6782,7 +6776,7 @@ fn r17_matrix_x942_mqv_derive() {
             publicKey: 0x61,
         };
         match unsafe {
-            r17_read_v1(
+            read_v1_pointer_shape(
                 &registry,
                 "x942_mqv_derive",
                 &mut mqv as *mut _ as CK_VOID_PTR,
@@ -6801,35 +6795,35 @@ fn r17_matrix_x942_mqv_derive() {
     let mut public2 = [0xC4u8; 65];
     let p = read(oi.as_mut_ptr(), 2, public.as_mut_ptr(), 65, public2.as_mut_ptr(), 65);
     assert_eq!(p.public_key_handle.0, 0x61);
-    r17_assert_present_secret(&p.other_info_presence, &oi);
-    r17_assert_present(&p.public_data_presence, &public);
-    r17_assert_present(&p.public_data2_presence, &public2);
+    assert_present_secret(&p.other_info_presence, &oi);
+    assert_present(&p.public_data_presence, &public);
+    assert_present(&p.public_data2_presence, &public2);
     let p = read(oi.as_mut_ptr(), 0, public.as_mut_ptr(), 0, public2.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.other_info_presence, &[]);
-    r17_assert_present(&p.public_data_presence, &[]);
-    r17_assert_present(&p.public_data2_presence, &[]);
+    assert_present_secret(&p.other_info_presence, &[]);
+    assert_present(&p.public_data_presence, &[]);
+    assert_present(&p.public_data2_presence, &[]);
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.other_info_presence, 0);
-    r17_assert_null(&p.public_data_presence, 0);
-    r17_assert_null(&p.public_data2_presence, 0);
+    assert_null_secret(&p.other_info_presence, 0);
+    assert_null_peer(&p.public_data_presence, 0);
+    assert_null_peer(&p.public_data2_presence, 0);
     let p = read(std::ptr::null_mut(), 2, std::ptr::null_mut(), 65, std::ptr::null_mut(), 65);
-    r17_assert_null_secret(&p.other_info_presence, 2);
-    r17_assert_null(&p.public_data_presence, 65);
-    r17_assert_null(&p.public_data2_presence, 65);
+    assert_null_secret(&p.other_info_presence, 2);
+    assert_null_peer(&p.public_data_presence, 65);
+    assert_null_peer(&p.public_data2_presence, 65);
     let p = read(oi.as_mut_ptr(), 2, public.as_mut_ptr(), 65, std::ptr::null_mut(), 65);
-    r17_assert_present_secret(&p.other_info_presence, &oi);
-    r17_assert_present(&p.public_data_presence, &public);
-    r17_assert_null(&p.public_data2_presence, 65);
+    assert_present_secret(&p.other_info_presence, &oi);
+    assert_present(&p.public_data_presence, &public);
+    assert_null_peer(&p.public_data2_presence, 65);
     let p = read(std::ptr::null_mut(), 2, public.as_mut_ptr(), 65, public2.as_mut_ptr(), 65);
-    r17_assert_null_secret(&p.other_info_presence, 2);
-    r17_assert_present(&p.public_data_presence, &public);
-    r17_assert_present(&p.public_data2_presence, &public2);
+    assert_null_secret(&p.other_info_presence, 2);
+    assert_present(&p.public_data_presence, &public);
+    assert_present(&p.public_data2_presence, &public2);
 }
 
 /// R17 embedded-field matrix for `pkcs5_pbkd2` (three fields).
 #[test]
-fn r17_matrix_pkcs5_pbkd2() {
-    let registry = r17_registry();
+fn matrix_pkcs5_pbkd2() {
+    let registry = pointer_shape_matrix_registry();
     let read = |s_p: CK_VOID_PTR,
                 s_len: CK_ULONG,
                 d_p: CK_VOID_PTR,
@@ -6848,7 +6842,7 @@ fn r17_matrix_pkcs5_pbkd2() {
             ulPasswordLen: w_len,
         };
         match unsafe {
-            r17_read_v1(
+            read_v1_pointer_shape(
                 &registry,
                 "pkcs5_pbkd2",
                 &mut pbkd2 as *mut _ as CK_VOID_PTR,
@@ -6868,38 +6862,38 @@ fn r17_matrix_pkcs5_pbkd2() {
     let void = |p: *mut u8| p as CK_VOID_PTR;
     let p = read(void(salt.as_mut_ptr()), 2, void(prf.as_mut_ptr()), 1, password.as_mut_ptr(), 6);
     assert_eq!(p.iterations, 600_000);
-    r17_assert_present_secret(&p.salt_source_data_presence, &salt);
-    r17_assert_present_secret(&p.prf_data_presence, &prf);
-    r17_assert_present_secret(&p.password_presence, &password);
+    assert_present_secret(&p.salt_source_data_presence, &salt);
+    assert_present_secret(&p.prf_data_presence, &prf);
+    assert_present_secret(&p.password_presence, &password);
     let p = read(void(salt.as_mut_ptr()), 0, void(prf.as_mut_ptr()), 0, password.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.salt_source_data_presence, &[]);
-    r17_assert_present_secret(&p.prf_data_presence, &[]);
-    r17_assert_present_secret(&p.password_presence, &[]);
+    assert_present_secret(&p.salt_source_data_presence, &[]);
+    assert_present_secret(&p.prf_data_presence, &[]);
+    assert_present_secret(&p.password_presence, &[]);
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.salt_source_data_presence, 0);
-    r17_assert_null_secret(&p.prf_data_presence, 0);
-    r17_assert_null_secret(&p.password_presence, 0);
+    assert_null_secret(&p.salt_source_data_presence, 0);
+    assert_null_secret(&p.prf_data_presence, 0);
+    assert_null_secret(&p.password_presence, 0);
     let p = read(std::ptr::null_mut(), 2, std::ptr::null_mut(), 1, std::ptr::null_mut(), 6);
-    r17_assert_null_secret(&p.salt_source_data_presence, 2);
-    r17_assert_null_secret(&p.prf_data_presence, 1);
-    r17_assert_null_secret(&p.password_presence, 6);
+    assert_null_secret(&p.salt_source_data_presence, 2);
+    assert_null_secret(&p.prf_data_presence, 1);
+    assert_null_secret(&p.password_presence, 6);
     // Mixed: valid salt/prf + NULL password.
     let p = read(void(salt.as_mut_ptr()), 2, void(prf.as_mut_ptr()), 1, std::ptr::null_mut(), 6);
-    r17_assert_present_secret(&p.salt_source_data_presence, &salt);
-    r17_assert_present_secret(&p.prf_data_presence, &prf);
-    r17_assert_null_secret(&p.password_presence, 6);
+    assert_present_secret(&p.salt_source_data_presence, &salt);
+    assert_present_secret(&p.prf_data_presence, &prf);
+    assert_null_secret(&p.password_presence, 6);
     // Mixed: NULL salt + valid prf/password.
     let p = read(std::ptr::null_mut(), 2, void(prf.as_mut_ptr()), 1, password.as_mut_ptr(), 6);
-    r17_assert_null_secret(&p.salt_source_data_presence, 2);
-    r17_assert_present_secret(&p.prf_data_presence, &prf);
-    r17_assert_present_secret(&p.password_presence, &password);
+    assert_null_secret(&p.salt_source_data_presence, 2);
+    assert_present_secret(&p.prf_data_presence, &prf);
+    assert_present_secret(&p.password_presence, &password);
 }
 
 /// R17 embedded-field matrix for `pbe` (fixed 8-byte IV + two
 /// length-governed fields: NULL IV records the fixed extent 8).
 #[test]
-fn r17_matrix_pbe() {
-    let registry = r17_registry();
+fn matrix_pbe() {
+    let registry = pointer_shape_matrix_registry();
     let read = |iv_p: CK_BYTE_PTR,
                 w_p: CK_BYTE_PTR,
                 w_len: CK_ULONG,
@@ -6914,7 +6908,7 @@ fn r17_matrix_pbe() {
             ulIteration: 1,
         };
         match unsafe {
-            r17_read_v1(
+            read_v1_pointer_shape(
                 &registry,
                 "pbe",
                 &mut pbe as *mut _ as CK_VOID_PTR,
@@ -6933,37 +6927,37 @@ fn r17_matrix_pbe() {
     let mut salt = [0xD4u8; 8];
     let p = read(iv.as_mut_ptr(), password.as_mut_ptr(), 2, salt.as_mut_ptr(), 8);
     assert_eq!(p.iteration, 1);
-    r17_assert_present_secret(&p.init_vector_presence, &iv);
-    r17_assert_present_secret(&p.password_presence, &password);
-    r17_assert_present_secret(&p.salt_presence, &salt);
+    assert_present_secret(&p.init_vector_presence, &iv);
+    assert_present_secret(&p.password_presence, &password);
+    assert_present_secret(&p.salt_presence, &salt);
     let p = read(iv.as_mut_ptr(), password.as_mut_ptr(), 0, salt.as_mut_ptr(), 0);
-    r17_assert_present_secret(&p.init_vector_presence, &iv);
-    r17_assert_present_secret(&p.password_presence, &[]);
-    r17_assert_present_secret(&p.salt_presence, &[]);
+    assert_present_secret(&p.init_vector_presence, &iv);
+    assert_present_secret(&p.password_presence, &[]);
+    assert_present_secret(&p.salt_presence, &[]);
     let p = read(std::ptr::null_mut(), std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null_secret(&p.init_vector_presence, 8);
-    r17_assert_null_secret(&p.password_presence, 0);
-    r17_assert_null_secret(&p.salt_presence, 0);
+    assert_null_secret(&p.init_vector_presence, 8);
+    assert_null_secret(&p.password_presence, 0);
+    assert_null_secret(&p.salt_presence, 0);
     let p = read(std::ptr::null_mut(), std::ptr::null_mut(), 2, std::ptr::null_mut(), 8);
-    r17_assert_null_secret(&p.init_vector_presence, 8);
-    r17_assert_null_secret(&p.password_presence, 2);
-    r17_assert_null_secret(&p.salt_presence, 8);
+    assert_null_secret(&p.init_vector_presence, 8);
+    assert_null_secret(&p.password_presence, 2);
+    assert_null_secret(&p.salt_presence, 8);
     // Mixed: valid IV/password + NULL salt.
     let p = read(iv.as_mut_ptr(), password.as_mut_ptr(), 2, std::ptr::null_mut(), 8);
-    r17_assert_present_secret(&p.init_vector_presence, &iv);
-    r17_assert_present_secret(&p.password_presence, &password);
-    r17_assert_null_secret(&p.salt_presence, 8);
+    assert_present_secret(&p.init_vector_presence, &iv);
+    assert_present_secret(&p.password_presence, &password);
+    assert_null_secret(&p.salt_presence, 8);
     // Mixed: NULL IV + valid password/salt.
     let p = read(std::ptr::null_mut(), password.as_mut_ptr(), 2, salt.as_mut_ptr(), 8);
-    r17_assert_null_secret(&p.init_vector_presence, 8);
-    r17_assert_present_secret(&p.password_presence, &password);
-    r17_assert_present_secret(&p.salt_presence, &salt);
+    assert_null_secret(&p.init_vector_presence, 8);
+    assert_present_secret(&p.password_presence, &password);
+    assert_present_secret(&p.salt_presence, &salt);
 }
 
 /// R17 embedded-field matrix for `gcm_wrap` (wrap operation context).
 #[test]
-fn r17_matrix_gcm_wrap() {
-    let registry = r17_registry();
+fn matrix_gcm_wrap() {
+    let registry = pointer_shape_matrix_registry();
     let read = |iv_p: CK_BYTE_PTR, iv_len: CK_ULONG, aad_p: CK_BYTE_PTR, aad_len: CK_ULONG| {
         let mut wrap = CK_GCM_WRAP_PARAMS {
             pIv: iv_p,
@@ -6975,7 +6969,7 @@ fn r17_matrix_gcm_wrap() {
             ulTagBits: 128,
         };
         match unsafe {
-            r17_read_v1_op(
+            read_v1_pointer_shape_op(
                 &registry,
                 "gcm_wrap",
                 &mut wrap as *mut _ as CK_VOID_PTR,
@@ -6994,29 +6988,29 @@ fn r17_matrix_gcm_wrap() {
     let mut aad = [0xA1u8, 0xA2];
     let p = read(iv.as_mut_ptr(), 12, aad.as_mut_ptr(), 2);
     assert_eq!(p.iv_fixed_bits, 32);
-    r17_assert_present(&p.iv_presence, &iv);
-    r17_assert_present_secret(&p.aad_presence, &aad);
+    assert_present(&p.iv_presence, &iv);
+    assert_present_secret(&p.aad_presence, &aad);
     let p = read(iv.as_mut_ptr(), 0, aad.as_mut_ptr(), 0);
-    r17_assert_present(&p.iv_presence, &[]);
-    r17_assert_present_secret(&p.aad_presence, &[]);
+    assert_present(&p.iv_presence, &[]);
+    assert_present_secret(&p.aad_presence, &[]);
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null(&p.iv_presence, 0);
-    r17_assert_null_secret(&p.aad_presence, 0);
+    assert_null_peer(&p.iv_presence, 0);
+    assert_null_secret(&p.aad_presence, 0);
     let p = read(std::ptr::null_mut(), 12, std::ptr::null_mut(), 2);
-    r17_assert_null(&p.iv_presence, 12);
-    r17_assert_null_secret(&p.aad_presence, 2);
+    assert_null_peer(&p.iv_presence, 12);
+    assert_null_secret(&p.aad_presence, 2);
     let p = read(iv.as_mut_ptr(), 12, std::ptr::null_mut(), 2);
-    r17_assert_present(&p.iv_presence, &iv);
-    r17_assert_null_secret(&p.aad_presence, 2);
+    assert_present(&p.iv_presence, &iv);
+    assert_null_secret(&p.aad_presence, 2);
     let p = read(std::ptr::null_mut(), 12, aad.as_mut_ptr(), 2);
-    r17_assert_null(&p.iv_presence, 12);
-    r17_assert_present_secret(&p.aad_presence, &aad);
+    assert_null_peer(&p.iv_presence, 12);
+    assert_present_secret(&p.aad_presence, &aad);
 }
 
 /// R17 embedded-field matrix for `ccm_wrap` (wrap operation context).
 #[test]
-fn r17_matrix_ccm_wrap() {
-    let registry = r17_registry();
+fn matrix_ccm_wrap() {
+    let registry = pointer_shape_matrix_registry();
     let read =
         |nonce_p: CK_BYTE_PTR, nonce_len: CK_ULONG, aad_p: CK_BYTE_PTR, aad_len: CK_ULONG| {
             let mut wrap = CK_CCM_WRAP_PARAMS {
@@ -7030,7 +7024,7 @@ fn r17_matrix_ccm_wrap() {
                 ulMACLen: 16,
             };
             match unsafe {
-                r17_read_v1_op(
+                read_v1_pointer_shape_op(
                     &registry,
                     "ccm_wrap",
                     &mut wrap as *mut _ as CK_VOID_PTR,
@@ -7049,35 +7043,35 @@ fn r17_matrix_ccm_wrap() {
     let mut aad = [0xB1u8, 0xB2, 0xB3];
     let p = read(nonce.as_mut_ptr(), 12, aad.as_mut_ptr(), 3);
     assert_eq!((p.data_len, p.mac_len), (16, 16));
-    r17_assert_present(&p.nonce_presence, &nonce);
-    r17_assert_present_secret(&p.aad_presence, &aad);
+    assert_present(&p.nonce_presence, &nonce);
+    assert_present_secret(&p.aad_presence, &aad);
     let p = read(nonce.as_mut_ptr(), 0, aad.as_mut_ptr(), 0);
-    r17_assert_present(&p.nonce_presence, &[]);
-    r17_assert_present_secret(&p.aad_presence, &[]);
+    assert_present(&p.nonce_presence, &[]);
+    assert_present_secret(&p.aad_presence, &[]);
     let p = read(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-    r17_assert_null(&p.nonce_presence, 0);
-    r17_assert_null_secret(&p.aad_presence, 0);
+    assert_null_peer(&p.nonce_presence, 0);
+    assert_null_secret(&p.aad_presence, 0);
     let p = read(std::ptr::null_mut(), 12, std::ptr::null_mut(), 3);
-    r17_assert_null(&p.nonce_presence, 12);
-    r17_assert_null_secret(&p.aad_presence, 3);
+    assert_null_peer(&p.nonce_presence, 12);
+    assert_null_secret(&p.aad_presence, 3);
     let p = read(nonce.as_mut_ptr(), 12, std::ptr::null_mut(), 3);
-    r17_assert_present(&p.nonce_presence, &nonce);
-    r17_assert_null_secret(&p.aad_presence, 3);
+    assert_present(&p.nonce_presence, &nonce);
+    assert_null_secret(&p.aad_presence, 3);
     let p = read(std::ptr::null_mut(), 12, aad.as_mut_ptr(), 3);
-    r17_assert_null(&p.nonce_presence, 12);
-    r17_assert_present_secret(&p.aad_presence, &aad);
+    assert_null_peer(&p.nonce_presence, 12);
+    assert_present_secret(&p.aad_presence, &aad);
 }
 
 /// R17 `gcm_compat` dual encoding under v1: short buffers stay `Iv`
 /// bytes; struct-sized buffers take the v1 GCM struct reader (mixed
 /// valid+NULL stays typed).
 #[test]
-fn r17_matrix_gcm_compat() {
-    let registry = r17_registry();
+fn matrix_gcm_compat() {
+    let registry = pointer_shape_matrix_registry();
     // Short half: bare IV bytes ride `Iv` (legacy dual encoding kept).
     let mut iv_bytes = [0x11u8; 12];
     match unsafe {
-        r17_read_v1(
+        read_v1_pointer_shape(
             &registry,
             "gcm_compat",
             iv_bytes.as_mut_ptr() as CK_VOID_PTR,
@@ -7101,7 +7095,7 @@ fn r17_matrix_gcm_compat() {
         ulTagBits: 128,
     };
     match unsafe {
-        r17_read_v1(
+        read_v1_pointer_shape(
             &registry,
             "gcm_compat",
             &mut gcm as *mut _ as CK_VOID_PTR,
@@ -7112,8 +7106,8 @@ fn r17_matrix_gcm_compat() {
     .params
     {
         Some(CkMechanismParams::Gcm(p)) => {
-            r17_assert_present(&p.iv_presence, &iv);
-            r17_assert_null_secret(&p.aad_presence, 16);
+            assert_present(&p.iv_presence, &iv);
+            assert_null_secret(&p.aad_presence, 16);
         }
         other => panic!("struct gcm_compat must stay typed GCM under v1, got {other:?}"),
     }
@@ -7124,7 +7118,7 @@ fn r17_matrix_gcm_compat() {
     gcm.pAAD = aad.as_mut_ptr();
     gcm.ulAADLen = aad.len() as CK_ULONG;
     match unsafe {
-        r17_read_v1(
+        read_v1_pointer_shape(
             &registry,
             "gcm_compat",
             &mut gcm as *mut _ as CK_VOID_PTR,
@@ -7135,8 +7129,8 @@ fn r17_matrix_gcm_compat() {
     .params
     {
         Some(CkMechanismParams::Gcm(p)) => {
-            r17_assert_null(&p.iv_presence, 12);
-            r17_assert_present_secret(&p.aad_presence, &aad);
+            assert_null_peer(&p.iv_presence, 12);
+            assert_present_secret(&p.aad_presence, &aad);
         }
         other => panic!("struct gcm_compat must stay typed GCM under v1, got {other:?}"),
     }
@@ -7147,12 +7141,12 @@ fn r17_matrix_gcm_compat() {
 /// concept, and v1 never emits `Raw`); the nested OAEP *fields* take
 /// the step-1 discipline through the shared OAEP envelope.
 #[test]
-fn r17_matrix_rsa_aes_key_wrap() {
-    let registry = r17_registry();
+fn matrix_rsa_aes_key_wrap() {
+    let registry = pointer_shape_matrix_registry();
     let read = |oaep: *mut CK_RSA_PKCS_OAEP_PARAMS| {
         let mut wrap = CK_RSA_AES_KEY_WRAP_PARAMS { ulAESKeyBits: 256, pOAEPParams: oaep };
         unsafe {
-            r17_read_v1(
+            read_v1_pointer_shape(
                 &registry,
                 "rsa_aes_key_wrap",
                 &mut wrap as *mut _ as CK_VOID_PTR,
@@ -7187,11 +7181,11 @@ fn r17_matrix_rsa_aes_key_wrap() {
             Some(CkMechanismParams::RsaAesKeyWrap(p)) => {
                 assert_eq!(p.aes_key_bits, 256);
                 match expect_null {
-                    Some(n) => r17_assert_null_secret(&p.oaep_params.source_data_presence, n),
+                    Some(n) => assert_null_secret(&p.oaep_params.source_data_presence, n),
                     None if len == 0 => {
-                        r17_assert_present_secret(&p.oaep_params.source_data_presence, &[])
+                        assert_present_secret(&p.oaep_params.source_data_presence, &[])
                     }
-                    None => r17_assert_present_secret(&p.oaep_params.source_data_presence, &data),
+                    None => assert_present_secret(&p.oaep_params.source_data_presence, &data),
                 }
             }
             other => panic!("nested OAEP must stay typed under v1, got {other:?}"),
@@ -7204,8 +7198,8 @@ fn r17_matrix_rsa_aes_key_wrap() {
 /// the length is never touched); a non-NULL companion over the ceiling
 /// stays capped (`PARAM_INVALID` without dereference).
 #[test]
-fn r17_d3_null_huge_forwards_per_field() {
-    let registry = r17_registry();
+fn d3_null_huge_forwards_per_field() {
+    let registry = pointer_shape_matrix_registry();
     const HUGE: CK_ULONG = (512 * 1024 * 1024 + 1) as CK_ULONG;
     assert!(HUGE as usize > MAX_SERIALIZABLE_BYTES, "huge exceeds the ceiling");
     let mut tiny = [0x11u8; 4];
@@ -7222,7 +7216,7 @@ fn r17_d3_null_huge_forwards_per_field() {
         ulTagBits: 128,
     };
     match unsafe {
-        r17_read_v1(
+        read_v1_pointer_shape(
             &registry,
             "gcm",
             &mut gcm as *mut _ as CK_VOID_PTR,
@@ -7233,8 +7227,8 @@ fn r17_d3_null_huge_forwards_per_field() {
     .params
     {
         Some(CkMechanismParams::Gcm(p)) => {
-            r17_assert_null(&p.iv_presence, HUGE as u64);
-            r17_assert_null_secret(&p.aad_presence, CK_ULONG::MAX as u64);
+            assert_null_peer(&p.iv_presence, HUGE as u64);
+            assert_null_secret(&p.aad_presence, CK_ULONG::MAX as u64);
         }
         other => panic!("NULL-huge GCM must stay typed under v1, got {other:?}"),
     }
@@ -7243,7 +7237,7 @@ fn r17_d3_null_huge_forwards_per_field() {
     gcm.pIv = tiny_ptr;
     gcm.ulIvLen = tiny.len() as CK_ULONG;
     match unsafe {
-        r17_read_v1(
+        read_v1_pointer_shape(
             &registry,
             "gcm",
             &mut gcm as *mut _ as CK_VOID_PTR,
@@ -7254,8 +7248,8 @@ fn r17_d3_null_huge_forwards_per_field() {
     .params
     {
         Some(CkMechanismParams::Gcm(p)) => {
-            r17_assert_present(&p.iv_presence, &tiny);
-            r17_assert_null_secret(&p.aad_presence, CK_ULONG::MAX as u64);
+            assert_present(&p.iv_presence, &tiny);
+            assert_null_secret(&p.aad_presence, CK_ULONG::MAX as u64);
         }
         other => panic!("mixed tiny-NULL-huge GCM must stay typed under v1, got {other:?}"),
     }
@@ -7266,7 +7260,7 @@ fn r17_d3_null_huge_forwards_per_field() {
     assert!(
         matches!(
             unsafe {
-                r17_read_v1(
+                read_v1_pointer_shape(
                     &registry,
                     "gcm",
                     &mut gcm as *mut _ as CK_VOID_PTR,
@@ -7284,7 +7278,7 @@ fn r17_d3_null_huge_forwards_per_field() {
         pContextData: std::ptr::null_mut(),
     };
     match unsafe {
-        r17_read_v1(
+        read_v1_pointer_shape(
             &registry,
             "eddsa",
             &mut eddsa as *mut _ as CK_VOID_PTR,
@@ -7295,7 +7289,7 @@ fn r17_d3_null_huge_forwards_per_field() {
     .params
     {
         Some(CkMechanismParams::Eddsa(p)) => {
-            r17_assert_null_secret(&p.context_data_presence, CK_ULONG::MAX as u64);
+            assert_null_secret(&p.context_data_presence, CK_ULONG::MAX as u64);
         }
         other => panic!("EdDSA NULL-huge must stay typed under v1, got {other:?}"),
     }
@@ -7304,7 +7298,7 @@ fn r17_d3_null_huge_forwards_per_field() {
     assert!(
         matches!(
             unsafe {
-                r17_read_v1(
+                read_v1_pointer_shape(
                     &registry,
                     "eddsa",
                     &mut eddsa as *mut _ as CK_VOID_PTR,
@@ -7321,12 +7315,12 @@ fn r17_d3_null_huge_forwards_per_field() {
 /// pure length gate admits it), 512 MiB + 1 is not (per-field MPI
 /// without dereference — no 512 MiB allocation in this test).
 #[test]
-fn r17_ceiling_512mib_boundary_per_field() {
+fn ceiling_512mib_boundary_per_field() {
     assert_eq!(MAX_SERIALIZABLE_BYTES, 512 * 1024 * 1024, "S2 §5 ceiling");
     assert!(super::embedded_payload_len_ok((MAX_SERIALIZABLE_BYTES) as CK_ULONG));
     assert!(!super::embedded_payload_len_ok((MAX_SERIALIZABLE_BYTES + 1) as CK_ULONG));
     // Reader level: non-NULL + ceiling+1 with a 1-byte buffer → MPI.
-    let registry = r17_registry();
+    let registry = pointer_shape_matrix_registry();
     let mut one = [0xAAu8];
     let mut kds = CK_KEY_DERIVATION_STRING_DATA {
         pData: one.as_mut_ptr(),
@@ -7335,7 +7329,7 @@ fn r17_ceiling_512mib_boundary_per_field() {
     assert!(
         matches!(
             unsafe {
-                r17_read_v1(
+                read_v1_pointer_shape(
                     &registry,
                     "key_derivation_string",
                     &mut kds as *mut _ as CK_VOID_PTR,
@@ -7349,7 +7343,7 @@ fn r17_ceiling_512mib_boundary_per_field() {
     // NULL + ceiling+1 forwards (D3, no bytes materialize).
     kds.pData = std::ptr::null_mut();
     match unsafe {
-        r17_read_v1(
+        read_v1_pointer_shape(
             &registry,
             "key_derivation_string",
             &mut kds as *mut _ as CK_VOID_PTR,
@@ -7360,7 +7354,7 @@ fn r17_ceiling_512mib_boundary_per_field() {
     .params
     {
         Some(CkMechanismParams::KeyDerivationString(p)) => {
-            r17_assert_null_secret(&p.data_presence, (MAX_SERIALIZABLE_BYTES + 1) as u64);
+            assert_null_secret(&p.data_presence, (MAX_SERIALIZABLE_BYTES + 1) as u64);
         }
         other => panic!("NULL ceiling+1 must stay typed under v1, got {other:?}"),
     }
@@ -7371,8 +7365,8 @@ fn r17_ceiling_512mib_boundary_per_field() {
 /// ChaCha20 with NULL block-counter + NULL nonce and huge bit lengths
 /// stays typed with Null peers of the derived byte lengths.
 #[test]
-fn f3_chacha20_all_null_huge_forwards() {
-    let registry = r17_registry();
+fn chacha20_all_null_huge_forwards() {
+    let registry = pointer_shape_matrix_registry();
     // NF7: width-dependent huge input — the 64-bit vector overflows a
     // 4-byte CK_ULONG (truncating to 8 bits), so 4-byte targets use the
     // maximum representable bit length. Sized off CK_ULONG, not the
@@ -7390,7 +7384,7 @@ fn f3_chacha20_all_null_huge_forwards() {
         ulNonceBits: CK_ULONG::MAX,
     };
     match unsafe {
-        r17_read_v1(
+        read_v1_pointer_shape(
             &registry,
             "chacha20",
             &mut chacha as *mut _ as CK_VOID_PTR,
@@ -7403,8 +7397,8 @@ fn f3_chacha20_all_null_huge_forwards() {
         Some(CkMechanismParams::ChaCha20(p)) => {
             assert_eq!(p.block_counter_bits, HUGE_BITS as u64);
             assert_eq!(p.nonce_bits, CK_ULONG::MAX as u64);
-            r17_assert_null(&p.block_counter_presence, huge_bytes);
-            r17_assert_null(&p.nonce_presence, (CK_ULONG::MAX as u64).div_ceil(8));
+            assert_null_peer(&p.block_counter_presence, huge_bytes);
+            assert_null_peer(&p.nonce_presence, (CK_ULONG::MAX as u64).div_ceil(8));
         }
         other => panic!("all-NULL huge ChaCha20 must stay typed under v1, got {other:?}"),
     }
@@ -7414,15 +7408,15 @@ fn f3_chacha20_all_null_huge_forwards() {
 /// nonce bit length stays typed (fixed 8-byte counter extent + derived
 /// nonce extent, both Null).
 #[test]
-fn f3_salsa20_all_null_huge_forwards() {
-    let registry = r17_registry();
+fn salsa20_all_null_huge_forwards() {
+    let registry = pointer_shape_matrix_registry();
     let mut salsa = CK_SALSA20_PARAMS {
         pBlockCounter: std::ptr::null_mut(),
         pNonce: std::ptr::null_mut(),
         ulNonceBits: CK_ULONG::MAX,
     };
     match unsafe {
-        r17_read_v1(
+        read_v1_pointer_shape(
             &registry,
             "salsa20",
             &mut salsa as *mut _ as CK_VOID_PTR,
@@ -7434,8 +7428,8 @@ fn f3_salsa20_all_null_huge_forwards() {
     {
         Some(CkMechanismParams::Salsa20(p)) => {
             assert_eq!(p.nonce_bits, CK_ULONG::MAX as u64);
-            r17_assert_null(&p.block_counter_presence, 8);
-            r17_assert_null(&p.nonce_presence, (CK_ULONG::MAX as u64).div_ceil(8));
+            assert_null_peer(&p.block_counter_presence, 8);
+            assert_null_peer(&p.nonce_presence, (CK_ULONG::MAX as u64).div_ceil(8));
         }
         other => panic!("all-NULL huge Salsa20 must stay typed under v1, got {other:?}"),
     }
@@ -7445,8 +7439,8 @@ fn f3_salsa20_all_null_huge_forwards() {
 /// a huge IV bit size stays typed with Null IV peers of the derived
 /// length (both SSL3/TLS12 and WTLS forms).
 #[test]
-fn f3_key_mat_all_null_huge_forwards() {
-    let registry = r18_registry();
+fn key_mat_all_null_huge_forwards() {
+    let registry = tail_shape_matrix_registry();
     // NF7: width-dependent huge input (see the ChaCha20 test above for
     // the rationale); the expected byte length derives from it.
     const HUGE_BITS: CK_ULONG = if std::mem::size_of::<CK_ULONG>() >= 8 {
@@ -7469,7 +7463,7 @@ fn f3_key_mat_all_null_huge_forwards() {
         pReturnedKeyMaterial: std::ptr::null_mut(),
     };
     match unsafe {
-        r18_read_v1(
+        read_v1_tail_shape(
             &registry,
             "ssl3_key_mat",
             &mut key_mat as *mut _ as CK_VOID_PTR,
@@ -7482,8 +7476,8 @@ fn f3_key_mat_all_null_huge_forwards() {
         Some(CkMechanismParams::Ssl3KeyMat(p)) => {
             assert_eq!(p.iv_size_bits, HUGE_BITS as u64);
             assert!(p.returned_key_material_is_null);
-            r17_assert_null_secret(&p.client_iv_presence, huge_bytes);
-            r17_assert_null_secret(&p.server_iv_presence, huge_bytes);
+            assert_null_secret(&p.client_iv_presence, huge_bytes);
+            assert_null_secret(&p.server_iv_presence, huge_bytes);
         }
         other => panic!("all-NULL huge SSL3 key-mat must stay typed under v1, got {other:?}"),
     }
@@ -7503,7 +7497,7 @@ fn f3_key_mat_all_null_huge_forwards() {
         pReturnedKeyMaterial: std::ptr::null_mut(),
     };
     match unsafe {
-        r18_read_v1(
+        read_v1_tail_shape(
             &registry,
             "wtls_key_mat",
             &mut wtls as *mut _ as CK_VOID_PTR,
@@ -7516,7 +7510,7 @@ fn f3_key_mat_all_null_huge_forwards() {
         Some(CkMechanismParams::WtlsKeyMat(p)) => {
             assert_eq!(p.iv_size_bits, HUGE_BITS as u64);
             assert!(p.returned_key_material_is_null);
-            r17_assert_null_secret(&p.iv_presence, huge_bytes);
+            assert_null_secret(&p.iv_presence, huge_bytes);
         }
         other => panic!("all-NULL huge WTLS key-mat must stay typed under v1, got {other:?}"),
     }
@@ -7528,8 +7522,8 @@ fn f3_key_mat_all_null_huge_forwards() {
 /// readers use overflow-safe ceiling division (SSL3, TLS12-superset,
 /// and WTLS forms).
 #[test]
-fn nf6_key_mat_max_iv_bits_records_exact_ceiling() {
-    let registry = r18_registry();
+fn key_mat_max_iv_bits_records_exact_ceiling() {
+    let registry = tail_shape_matrix_registry();
     let expected = (CK_ULONG::MAX as u64).div_ceil(8);
     let mut ssl3 = CK_SSL3_KEY_MAT_PARAMS {
         ulMacSizeInBits: 160,
@@ -7545,7 +7539,7 @@ fn nf6_key_mat_max_iv_bits_records_exact_ceiling() {
         pReturnedKeyMaterial: std::ptr::null_mut(),
     };
     match unsafe {
-        r18_read_v1(
+        read_v1_tail_shape(
             &registry,
             "ssl3_key_mat",
             &mut ssl3 as *mut _ as CK_VOID_PTR,
@@ -7558,8 +7552,8 @@ fn nf6_key_mat_max_iv_bits_records_exact_ceiling() {
         Some(CkMechanismParams::Ssl3KeyMat(p)) => {
             assert_eq!(p.iv_size_bits, CK_ULONG::MAX as u64);
             assert!(p.returned_key_material_is_null);
-            r17_assert_null_secret(&p.client_iv_presence, expected);
-            r17_assert_null_secret(&p.server_iv_presence, expected);
+            assert_null_secret(&p.client_iv_presence, expected);
+            assert_null_secret(&p.server_iv_presence, expected);
         }
         other => panic!("max-length SSL3 key-mat must stay typed under v1, got {other:?}"),
     }
@@ -7578,7 +7572,7 @@ fn nf6_key_mat_max_iv_bits_records_exact_ceiling() {
         prfHashMechanism: CkMechanismType::SHA256.0 as CK_ULONG,
     };
     match unsafe {
-        r18_read_v1(
+        read_v1_tail_shape(
             &registry,
             "ssl3_key_mat",
             &mut tls12 as *mut _ as CK_VOID_PTR,
@@ -7591,8 +7585,8 @@ fn nf6_key_mat_max_iv_bits_records_exact_ceiling() {
         Some(CkMechanismParams::Ssl3KeyMat(p)) => {
             assert_eq!(p.iv_size_bits, CK_ULONG::MAX as u64);
             assert!(p.returned_key_material_is_null);
-            r17_assert_null_secret(&p.client_iv_presence, expected);
-            r17_assert_null_secret(&p.server_iv_presence, expected);
+            assert_null_secret(&p.client_iv_presence, expected);
+            assert_null_secret(&p.server_iv_presence, expected);
         }
         other => panic!("max-length TLS12 key-mat must stay typed under v1, got {other:?}"),
     }
@@ -7612,7 +7606,7 @@ fn nf6_key_mat_max_iv_bits_records_exact_ceiling() {
         pReturnedKeyMaterial: std::ptr::null_mut(),
     };
     match unsafe {
-        r18_read_v1(
+        read_v1_tail_shape(
             &registry,
             "wtls_key_mat",
             &mut wtls as *mut _ as CK_VOID_PTR,
@@ -7625,7 +7619,7 @@ fn nf6_key_mat_max_iv_bits_records_exact_ceiling() {
         Some(CkMechanismParams::WtlsKeyMat(p)) => {
             assert_eq!(p.iv_size_bits, CK_ULONG::MAX as u64);
             assert!(p.returned_key_material_is_null);
-            r17_assert_null_secret(&p.iv_presence, expected);
+            assert_null_secret(&p.iv_presence, expected);
         }
         other => panic!("max-length WTLS key-mat must stay typed under v1, got {other:?}"),
     }
@@ -7638,7 +7632,7 @@ fn nf6_key_mat_max_iv_bits_records_exact_ceiling() {
 /// needs no companion check. Drift-proof: a future third sharer, or a
 /// v1 shape gaining a group, fails this test by name.
 #[test]
-fn r17_shared_length_exception_vacuous_for_v1_input_shapes() {
+fn shared_length_exception_vacuous_for_v1_input_shapes() {
     use pkcs11_proxy_ng_types::shape_descriptors::SHAPE_DESCRIPTORS;
     let mut sharers: Vec<&str> = SHAPE_DESCRIPTORS
         .iter()
@@ -7684,14 +7678,14 @@ fn r17_shared_length_exception_vacuous_for_v1_input_shapes() {
 /// locally with `PARAM_INVALID` under v1 — never `Raw` (v1 never emits
 /// legacy `Raw`, S2 §5).
 #[test]
-fn r17_short_struct_fails_closed_without_raw() {
-    let registry = r17_registry();
+fn short_struct_fails_closed_without_raw() {
+    let registry = pointer_shape_matrix_registry();
     // GCM 3 bytes short.
     let mut short = [0x11u8; 8];
     assert!(
         matches!(
             unsafe {
-                r17_read_v1(
+                read_v1_pointer_shape(
                     &registry,
                     "gcm",
                     short.as_mut_ptr() as CK_VOID_PTR,
@@ -7707,7 +7701,7 @@ fn r17_short_struct_fails_closed_without_raw() {
     assert!(
         matches!(
             unsafe {
-                r17_read_v1(
+                read_v1_pointer_shape(
                     &registry,
                     "hkdf",
                     short_hkdf.as_mut_ptr() as CK_VOID_PTR,
@@ -7723,7 +7717,7 @@ fn r17_short_struct_fails_closed_without_raw() {
     assert!(
         matches!(
             unsafe {
-                r17_read_v1(
+                read_v1_pointer_shape(
                     &registry,
                     "rsa_aes_key_wrap",
                     short_rsa.as_mut_ptr() as CK_VOID_PTR,
@@ -7741,8 +7735,8 @@ fn r17_short_struct_fails_closed_without_raw() {
 /// the v1 typed reader (one representative family per path; wrap via
 /// the `WrapKey` operation, the rest via `General`).
 #[test]
-fn r17_cross_path_each_operation_entry_hits_typed_v1() {
-    let registry = r17_registry();
+fn cross_path_each_operation_entry_hits_typed_v1() {
+    let registry = pointer_shape_matrix_registry();
     // Init path rep: GCM mixed valid-IV + NULL-AAD (C_EncryptInit etc.).
     let mut iv = [0x11u8; 12];
     let mut gcm = CK_GCM_PARAMS {
@@ -7754,7 +7748,7 @@ fn r17_cross_path_each_operation_entry_hits_typed_v1() {
         ulTagBits: 128,
     };
     match unsafe {
-        r17_read_v1(
+        read_v1_pointer_shape(
             &registry,
             "gcm",
             &mut gcm as *mut _ as CK_VOID_PTR,
@@ -7765,8 +7759,8 @@ fn r17_cross_path_each_operation_entry_hits_typed_v1() {
     .params
     {
         Some(CkMechanismParams::Gcm(p)) => {
-            r17_assert_present(&p.iv_presence, &iv);
-            r17_assert_null_secret(&p.aad_presence, 16);
+            assert_present(&p.iv_presence, &iv);
+            assert_null_secret(&p.aad_presence, 16);
         }
         other => panic!("init-path GCM must stay typed under v1, got {other:?}"),
     }
@@ -7782,7 +7776,7 @@ fn r17_cross_path_each_operation_entry_hits_typed_v1() {
         ulTagBits: 128,
     };
     match unsafe {
-        r17_read_v1_op(
+        read_v1_pointer_shape_op(
             &registry,
             "gcm_wrap",
             &mut wrap as *mut _ as CK_VOID_PTR,
@@ -7794,8 +7788,8 @@ fn r17_cross_path_each_operation_entry_hits_typed_v1() {
     .params
     {
         Some(CkMechanismParams::GcmWrap(p)) => {
-            r17_assert_null(&p.iv_presence, 12);
-            r17_assert_present_secret(&p.aad_presence, &wrap_aad);
+            assert_null_peer(&p.iv_presence, 12);
+            assert_present_secret(&p.aad_presence, &wrap_aad);
         }
         other => panic!("wrap-path GCM-wrap must stay typed under v1, got {other:?}"),
     }
@@ -7809,7 +7803,7 @@ fn r17_cross_path_each_operation_entry_hits_typed_v1() {
         pPublicData: std::ptr::null_mut(),
     };
     match unsafe {
-        r17_read_v1(
+        read_v1_pointer_shape(
             &registry,
             "ecdh1_derive",
             &mut ecdh as *mut _ as CK_VOID_PTR,
@@ -7820,8 +7814,8 @@ fn r17_cross_path_each_operation_entry_hits_typed_v1() {
     .params
     {
         Some(CkMechanismParams::Ecdh1Derive(p)) => {
-            r17_assert_present_secret(&p.shared_data_presence, &shared);
-            r17_assert_null(&p.public_data_presence, 65);
+            assert_present_secret(&p.shared_data_presence, &shared);
+            assert_null_peer(&p.public_data_presence, 65);
         }
         other => panic!("derive-path ECDH1 must stay typed under v1, got {other:?}"),
     }
@@ -7839,7 +7833,7 @@ fn r17_cross_path_each_operation_entry_hits_typed_v1() {
         ulInfoLen: info.len() as CK_ULONG,
     };
     match unsafe {
-        r17_read_v1(
+        read_v1_pointer_shape(
             &registry,
             "hkdf",
             &mut hkdf as *mut _ as CK_VOID_PTR,
@@ -7850,8 +7844,8 @@ fn r17_cross_path_each_operation_entry_hits_typed_v1() {
     .params
     {
         Some(CkMechanismParams::Hkdf(p)) => {
-            r17_assert_null_secret(&p.salt_presence, 32);
-            r17_assert_present_secret(&p.info_presence, &info);
+            assert_null_secret(&p.salt_presence, 32);
+            assert_present_secret(&p.info_presence, &info);
         }
         other => panic!("generate-path HKDF must stay typed under v1, got {other:?}"),
     }
@@ -7863,7 +7857,7 @@ fn r17_cross_path_each_operation_entry_hits_typed_v1() {
         pSharedData: std::ptr::null_mut(),
     };
     match unsafe {
-        r17_read_v1(
+        read_v1_pointer_shape(
             &registry,
             "ecdh_aes_key_wrap",
             &mut kem as *mut _ as CK_VOID_PTR,
@@ -7874,7 +7868,7 @@ fn r17_cross_path_each_operation_entry_hits_typed_v1() {
     .params
     {
         Some(CkMechanismParams::EcdhAesKeyWrap(p)) => {
-            r17_assert_null_secret(&p.shared_data_presence, 9);
+            assert_null_secret(&p.shared_data_presence, 9);
         }
         other => panic!("KEM-path ECDH-AES-wrap must stay typed under v1, got {other:?}"),
     }
@@ -7891,7 +7885,7 @@ fn r17_cross_path_each_operation_entry_hits_typed_v1() {
         ulMACLen: 16,
     };
     match unsafe {
-        r17_read_v1_op(
+        read_v1_pointer_shape_op(
             &registry,
             "ccm_wrap",
             &mut ccm_wrap as *mut _ as CK_VOID_PTR,
@@ -7903,8 +7897,8 @@ fn r17_cross_path_each_operation_entry_hits_typed_v1() {
     .params
     {
         Some(CkMechanismParams::CcmWrap(p)) => {
-            r17_assert_present(&p.nonce_presence, &nonce);
-            r17_assert_null_secret(&p.aad_presence, 5);
+            assert_present(&p.nonce_presence, &nonce);
+            assert_null_secret(&p.aad_presence, 5);
         }
         other => panic!("authenticated-path CCM-wrap must stay typed under v1, got {other:?}"),
     }
@@ -7947,18 +7941,18 @@ const R18_SYN_SHAPES: &[&str] = &[
 
 /// Custom registry for the R18 matrix: no TOML parse (Miri-friendly),
 /// one binding per tail shape.
-fn r18_registry() -> MechanismRegistry {
+fn tail_shape_matrix_registry() -> MechanismRegistry {
     let bindings: Vec<(&str, u64)> = R18_SYN_SHAPES
         .iter()
         .enumerate()
         .map(|(i, shape)| (*shape, R18_SYN_BASE + i as u64))
         .collect();
     assert_eq!(R18_SYN_SHAPES.len(), 17, "r18 registry binds the 17-shape R18 scope");
-    r11_registry(&bindings, &[], &[])
+    custom_registry(&bindings, &[], &[])
 }
 
-/// Mechanism number bound to `shape` in [`r18_registry`].
-fn r18_mech(shape: &str) -> u64 {
+/// Mechanism number bound to `shape` in [`tail_shape_matrix_registry`].
+fn tail_shape_matrix_mech(shape: &str) -> u64 {
     R18_SYN_SHAPES
         .iter()
         .position(|s| *s == shape)
@@ -7973,35 +7967,32 @@ fn r18_mech(shape: &str) -> u64 {
 ///
 /// `p_parameter` must designate `ul_parameter_len` readable bytes
 /// containing the shape's C struct.
-unsafe fn r18_read_v1(
+unsafe fn read_v1_tail_shape(
     registry: &MechanismRegistry,
     shape: &str,
     p_parameter: CK_VOID_PTR,
     ul_parameter_len: CK_ULONG,
 ) -> Result<CkMechanism, CkRv> {
-    let mechanism = r11_mechanism(r18_mech(shape), p_parameter, ul_parameter_len);
+    let mechanism = make_ck_mechanism(tail_shape_matrix_mech(shape), p_parameter, ul_parameter_len);
     unsafe { read_r11_v1_native_abi(&mechanism, registry, Operation::General) }
 }
 
 /// Assert one v1 counted array is NULL with `declared_count`: peer
 /// is `Null(n)` (R19: the legacy mirror is gone).
-fn r18_assert_null_array<T: PartialEq + std::fmt::Debug>(
-    peer: &PointerArray<T>,
-    declared_count: u64,
-) {
+fn assert_null_array<T: PartialEq + std::fmt::Debug>(peer: &PointerArray<T>, declared_count: u64) {
     assert_eq!(peer, &PointerArray::null_count(declared_count), "peer is Null(n)");
 }
 
 /// Assert one v1 counted array is present-but-empty: peer is
 /// `Present(empty)` (R19: the legacy mirror is gone).
-fn r18_assert_present_empty_array<T: PartialEq + std::fmt::Debug>(peer: &PointerArray<T>) {
+fn assert_present_empty_array<T: PartialEq + std::fmt::Debug>(peer: &PointerArray<T>) {
     assert_eq!(peer, &PointerArray::present(Vec::new()), "peer is Present(empty)");
 }
 
 /// R18 dispatch: the predicate covers exactly the 17-shape tail scope
 /// and stays disjoint from the R17 input-pointer shapes.
 #[test]
-fn r18_dispatch_predicate_covers_tail_scope() {
+fn dispatch_predicate_covers_tail_scope() {
     for shape in R18_SYN_SHAPES {
         assert!(is_r18_tail_shape(Some(shape)), "{shape} must route to the tail readers");
     }
@@ -8017,15 +8008,15 @@ fn r18_dispatch_predicate_covers_tail_scope() {
 /// S2 §8 TLS/WTLS envelopes: TlsMac stays scalar under v1 (no envelope
 /// fields — pinned by the R18 proto `tls_mac_stays_v0` test).
 #[test]
-fn r18_tls_mac_v1_scalar() {
-    let registry = r18_registry();
+fn tls_mac_v1_scalar() {
+    let registry = tail_shape_matrix_registry();
     let mut tls_mac = CK_TLS_MAC_PARAMS {
         prfHashMechanism: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
         ulMacLength: 32,
         ulServerOrClient: 1,
     };
     match unsafe {
-        r18_read_v1(
+        read_v1_tail_shape(
             &registry,
             "tls_mac",
             &mut tls_mac as *mut _ as CK_VOID_PTR,
@@ -8052,8 +8043,8 @@ fn r18_tls_mac_v1_scalar() {
 /// message (the mixed-field fix); NULL output pointers set the
 /// length-less null bits with zeroed mirrors.
 #[test]
-fn r18_tls_prf_v1_null_seed_stays_typed() {
-    let registry = r18_registry();
+fn tls_prf_v1_null_seed_stays_typed() {
+    let registry = tail_shape_matrix_registry();
     let mut label = [0xD0u8, 0xD1];
     let mut prf = CK_TLS_PRF_PARAMS {
         pSeed: std::ptr::null_mut(),
@@ -8064,7 +8055,7 @@ fn r18_tls_prf_v1_null_seed_stays_typed() {
         pulOutputLen: std::ptr::null_mut(),
     };
     match unsafe {
-        r18_read_v1(
+        read_v1_tail_shape(
             &registry,
             "tls_prf",
             &mut prf as *mut _ as CK_VOID_PTR,
@@ -8075,8 +8066,8 @@ fn r18_tls_prf_v1_null_seed_stays_typed() {
     .params
     {
         Some(CkMechanismParams::TlsPrf(p)) => {
-            r17_assert_null_secret(&p.seed_presence, 7);
-            r17_assert_present_secret(&p.label_presence, &label);
+            assert_null_secret(&p.seed_presence, 7);
+            assert_present_secret(&p.label_presence, &label);
             assert!(p.output_is_null);
             assert!(p.output_len_is_null);
             assert_eq!(p.output_len, 0);
@@ -8090,8 +8081,8 @@ fn r18_tls_prf_v1_null_seed_stays_typed() {
 /// bits and mirror the length — but the OUT bytes are never read
 /// (W1-C5-01: the sentinel-filled caller buffer must not leak in).
 #[test]
-fn r18_tls_prf_v1_output_bits() {
-    let registry = r18_registry();
+fn tls_prf_v1_output_bits() {
+    let registry = tail_shape_matrix_registry();
     let mut seed = [0xC0u8, 0xC1];
     let mut label = [0xD0u8];
     let mut output = [0xEEu8; 48];
@@ -8105,7 +8096,7 @@ fn r18_tls_prf_v1_output_bits() {
         pulOutputLen: &mut output_len,
     };
     match unsafe {
-        r18_read_v1(
+        read_v1_tail_shape(
             &registry,
             "tls_prf",
             &mut prf as *mut _ as CK_VOID_PTR,
@@ -8116,8 +8107,8 @@ fn r18_tls_prf_v1_output_bits() {
     .params
     {
         Some(CkMechanismParams::TlsPrf(p)) => {
-            r17_assert_present_secret(&p.seed_presence, &seed);
-            r17_assert_present_secret(&p.label_presence, &label);
+            assert_present_secret(&p.seed_presence, &seed);
+            assert_present_secret(&p.label_presence, &label);
             assert!(!p.output_is_null);
             assert!(!p.output_len_is_null);
             assert_eq!(p.output_len, 48);
@@ -8135,8 +8126,8 @@ fn r18_tls_prf_v1_output_bits() {
 /// `PARAM_INVALID` (same RV, now from the router's Flat-deny); exact
 /// native sizes keep routing typed (pinned by the neighboring tests).
 #[test]
-fn f4_nested_or_output_inexact_extent_rejected() {
-    let registry = r18_registry();
+fn nested_or_output_inexact_extent_rejected() {
+    let registry = tail_shape_matrix_registry();
     // TLS-PRF sizeof+1: oversized extent rejects (no silent tail loss).
     #[repr(C)]
     struct OversizedPrf {
@@ -8158,7 +8149,7 @@ fn f4_nested_or_output_inexact_extent_rejected() {
     };
     assert_eq!(
         unsafe {
-            r18_read_v1(
+            read_v1_tail_shape(
                 &registry,
                 "tls_prf",
                 &mut over as *mut _ as CK_VOID_PTR,
@@ -8173,7 +8164,7 @@ fn f4_nested_or_output_inexact_extent_rejected() {
     let mut prf = over.prf;
     assert_eq!(
         unsafe {
-            r18_read_v1(
+            read_v1_tail_shape(
                 &registry,
                 "tls_prf",
                 &mut prf as *mut _ as CK_VOID_PTR,
@@ -8207,7 +8198,7 @@ fn f4_nested_or_output_inexact_extent_rejected() {
     };
     assert_eq!(
         unsafe {
-            r18_read_v1(
+            read_v1_tail_shape(
                 &registry,
                 "kip",
                 &mut over_kip as *mut _ as CK_VOID_PTR,
@@ -8224,8 +8215,8 @@ fn f4_nested_or_output_inexact_extent_rejected() {
 /// typed at BOTH supported native sizes (the legitimate alternate
 /// layout), while a between-sizes extent rejects.
 #[test]
-fn f4_key_mat_union_exact_sizes_stay_typed() {
-    let registry = r18_registry();
+fn key_mat_union_exact_sizes_stay_typed() {
+    let registry = tail_shape_matrix_registry();
     let ssl3_size = std::mem::size_of::<CK_SSL3_KEY_MAT_PARAMS>();
     let tls12_size = std::mem::size_of::<CK_TLS12_KEY_MAT_PARAMS>();
     assert!(tls12_size > ssl3_size, "TLS12 is the key-mat superset");
@@ -8245,7 +8236,7 @@ fn f4_key_mat_union_exact_sizes_stay_typed() {
     };
     // TLS12 exact size: typed (alternate layout).
     match unsafe {
-        r18_read_v1(
+        read_v1_tail_shape(
             &registry,
             "ssl3_key_mat",
             &mut key_mat as *mut _ as CK_VOID_PTR,
@@ -8262,7 +8253,7 @@ fn f4_key_mat_union_exact_sizes_stay_typed() {
     }
     // SSL3 exact size: typed (primary layout).
     match unsafe {
-        r18_read_v1(
+        read_v1_tail_shape(
             &registry,
             "ssl3_key_mat",
             &mut key_mat as *mut _ as CK_VOID_PTR,
@@ -8279,7 +8270,7 @@ fn f4_key_mat_union_exact_sizes_stay_typed() {
     if tls12_size - ssl3_size >= 2 {
         assert_eq!(
             unsafe {
-                r18_read_v1(
+                read_v1_tail_shape(
                     &registry,
                     "ssl3_key_mat",
                     &mut key_mat as *mut _ as CK_VOID_PTR,
@@ -8297,8 +8288,8 @@ fn f4_key_mat_union_exact_sizes_stay_typed() {
 /// NULL+5, server present, context NULL+0 — the count-0 edge records
 /// `Null{0}`, never conflated with present-empty).
 #[test]
-fn r18_tls_kdf_v1_mixed_nulls() {
-    let registry = r18_registry();
+fn tls_kdf_v1_mixed_nulls() {
+    let registry = tail_shape_matrix_registry();
     let mut server_random = [0x22u8; 4];
     let mut tls_kdf = CK_TLS_KDF_PARAMS {
         prfMechanism: CkMechanismType::SHA384.0 as CK_MECHANISM_TYPE,
@@ -8314,7 +8305,7 @@ fn r18_tls_kdf_v1_mixed_nulls() {
         ulContextDataLength: 0,
     };
     match unsafe {
-        r18_read_v1(
+        read_v1_tail_shape(
             &registry,
             "tls_kdf",
             &mut tls_kdf as *mut _ as CK_VOID_PTR,
@@ -8326,10 +8317,10 @@ fn r18_tls_kdf_v1_mixed_nulls() {
     {
         Some(CkMechanismParams::TlsKdf(p)) => {
             assert_eq!(p.prf_mechanism.0, CkMechanismType::SHA384.0 as u64);
-            r17_assert_null_secret(&p.label_presence, 3);
-            r17_assert_null(&p.random_info.client_random_presence, 5);
-            r17_assert_present(&p.random_info.server_random_presence, &server_random);
-            r17_assert_null_secret(&p.context_data_presence, 0);
+            assert_null_secret(&p.label_presence, 3);
+            assert_null_peer(&p.random_info.client_random_presence, 5);
+            assert_present(&p.random_info.server_random_presence, &server_random);
+            assert_null_secret(&p.context_data_presence, 0);
         }
         other => panic!("mixed-NULL TLS KDF must stay typed under v1, got {other:?}"),
     }
@@ -8339,8 +8330,8 @@ fn r18_tls_kdf_v1_mixed_nulls() {
 /// zeroed mirrors) and a NULL+0 client random beside present server
 /// random.
 #[test]
-fn r18_ssl3_master_v1_null_version() {
-    let registry = r18_registry();
+fn ssl3_master_v1_null_version() {
+    let registry = tail_shape_matrix_registry();
     let mut server_random = [0x52u8; 4];
     let mut ssl3_master = CK_SSL3_MASTER_KEY_DERIVE_PARAMS {
         RandomInfo: CK_SSL3_RANDOM_DATA {
@@ -8352,7 +8343,7 @@ fn r18_ssl3_master_v1_null_version() {
         pVersion: std::ptr::null_mut(),
     };
     match unsafe {
-        r18_read_v1(
+        read_v1_tail_shape(
             &registry,
             "ssl3_master_key_derive",
             &mut ssl3_master as *mut _ as CK_VOID_PTR,
@@ -8363,8 +8354,8 @@ fn r18_ssl3_master_v1_null_version() {
     .params
     {
         Some(CkMechanismParams::Ssl3MasterKeyDerive(p)) => {
-            r17_assert_null(&p.random_info.client_random_presence, 0);
-            r17_assert_present(&p.random_info.server_random_presence, &server_random);
+            assert_null_peer(&p.random_info.client_random_presence, 0);
+            assert_present(&p.random_info.server_random_presence, &server_random);
             assert!(p.version_is_null);
             assert_eq!((p.version_major, p.version_minor), (0, 0));
         }
@@ -8375,8 +8366,8 @@ fn r18_ssl3_master_v1_null_version() {
 /// S2 §8 TLS/WTLS envelopes: TLS12 master with a present version
 /// (values mirrored, bit clear) and present randoms.
 #[test]
-fn r18_tls12_master_v1_present_version() {
-    let registry = r18_registry();
+fn tls12_master_v1_present_version() {
+    let registry = tail_shape_matrix_registry();
     let mut client_random = [0x11u8; 4];
     let mut server_random = [0x22u8; 4];
     let mut version = CK_VERSION { major: 3, minor: 3 };
@@ -8391,7 +8382,7 @@ fn r18_tls12_master_v1_present_version() {
         prfHashMechanism: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
     };
     match unsafe {
-        r18_read_v1(
+        read_v1_tail_shape(
             &registry,
             "tls12_master_key_derive",
             &mut tls12_master as *mut _ as CK_VOID_PTR,
@@ -8402,8 +8393,8 @@ fn r18_tls12_master_v1_present_version() {
     .params
     {
         Some(CkMechanismParams::Tls12MasterKeyDerive(p)) => {
-            r17_assert_present(&p.random_info.client_random_presence, &client_random);
-            r17_assert_present(&p.random_info.server_random_presence, &server_random);
+            assert_present(&p.random_info.client_random_presence, &client_random);
+            assert_present(&p.random_info.server_random_presence, &server_random);
             assert!(!p.version_is_null);
             assert_eq!((p.version_major, p.version_minor), (3, 3));
             assert_eq!(p.prf_hash_mechanism.0, CkMechanismType::SHA256.0 as u64);
@@ -8415,8 +8406,8 @@ fn r18_tls12_master_v1_present_version() {
 /// S2 §8 TLS/WTLS envelopes: TLS12 extended master with NULL
 /// session-hash + NULL version.
 #[test]
-fn r18_tls12_extended_v1_null_session_hash() {
-    let registry = r18_registry();
+fn tls12_extended_v1_null_session_hash() {
+    let registry = tail_shape_matrix_registry();
     let mut tls12_extended = CK_TLS12_EXTENDED_MASTER_KEY_DERIVE_PARAMS {
         prfHashMechanism: CkMechanismType::SHA512.0 as CK_MECHANISM_TYPE,
         pSessionHash: std::ptr::null_mut(),
@@ -8424,7 +8415,7 @@ fn r18_tls12_extended_v1_null_session_hash() {
         pVersion: std::ptr::null_mut(),
     };
     match unsafe {
-        r18_read_v1(
+        read_v1_tail_shape(
             &registry,
             "tls12_extended_master_key_derive",
             &mut tls12_extended as *mut _ as CK_VOID_PTR,
@@ -8436,7 +8427,7 @@ fn r18_tls12_extended_v1_null_session_hash() {
     {
         Some(CkMechanismParams::Tls12ExtendedMasterKeyDerive(p)) => {
             assert_eq!(p.prf_hash_mechanism.0, CkMechanismType::SHA512.0 as u64);
-            r17_assert_null(&p.session_hash_presence, 9);
+            assert_null_peer(&p.session_hash_presence, 9);
             assert!(p.version_is_null);
             assert_eq!((p.version_major, p.version_minor), (0, 0));
         }
@@ -8448,8 +8439,8 @@ fn r18_tls12_extended_v1_null_session_hash() {
 /// set, handles zero, IV peers record the bits-derived length without
 /// dereference) beside present randoms.
 #[test]
-fn r18_ssl3_key_mat_v1_null_returned() {
-    let registry = r18_registry();
+fn ssl3_key_mat_v1_null_returned() {
+    let registry = tail_shape_matrix_registry();
     let mut client_random = [0x11u8, 0x12, 0x13];
     let mut server_random = [0x21u8, 0x22];
     let mut key_mat = CK_SSL3_KEY_MAT_PARAMS {
@@ -8466,7 +8457,7 @@ fn r18_ssl3_key_mat_v1_null_returned() {
         pReturnedKeyMaterial: std::ptr::null_mut(),
     };
     match unsafe {
-        r18_read_v1(
+        read_v1_tail_shape(
             &registry,
             "ssl3_key_mat",
             &mut key_mat as *mut _ as CK_VOID_PTR,
@@ -8477,15 +8468,15 @@ fn r18_ssl3_key_mat_v1_null_returned() {
     .params
     {
         Some(CkMechanismParams::Ssl3KeyMat(p)) => {
-            r17_assert_present(&p.random_info.client_random_presence, &client_random);
-            r17_assert_present(&p.random_info.server_random_presence, &server_random);
+            assert_present(&p.random_info.client_random_presence, &client_random);
+            assert_present(&p.random_info.server_random_presence, &server_random);
             assert!(p.returned_key_material_is_null);
             assert_eq!(p.client_mac_secret_handle.0, 0);
             assert_eq!(p.server_mac_secret_handle.0, 0);
             assert_eq!(p.client_key_handle.0, 0);
             assert_eq!(p.server_key_handle.0, 0);
-            r17_assert_null_secret(&p.client_iv_presence, 4);
-            r17_assert_null_secret(&p.server_iv_presence, 4);
+            assert_null_secret(&p.client_iv_presence, 4);
+            assert_null_secret(&p.server_iv_presence, 4);
             assert_eq!(p.prf_hash_mechanism.0, 0, "ssl3 form carries no prf");
         }
         other => panic!("NULL-returned SSL3 key-mat must stay typed under v1, got {other:?}"),
@@ -8495,8 +8486,8 @@ fn r18_ssl3_key_mat_v1_null_returned() {
 /// S2 §8 key-mat: TLS12 key-mat superset with present returned
 /// material (handles + IVs mirrored, bit clear, prf decoded).
 #[test]
-fn r18_ssl3_key_mat_v1_tls12_superset_present() {
-    let registry = r18_registry();
+fn ssl3_key_mat_v1_tls12_superset_present() {
+    let registry = tail_shape_matrix_registry();
     let mut client_random = [0x11u8, 0x12, 0x13];
     let mut server_random = [0x21u8, 0x22];
     let mut client_iv = [0xA1u8, 0xA2, 0xA3, 0xA4];
@@ -8524,7 +8515,7 @@ fn r18_ssl3_key_mat_v1_tls12_superset_present() {
         prfHashMechanism: CkMechanismType::SHA256.0 as CK_ULONG,
     };
     match unsafe {
-        r18_read_v1(
+        read_v1_tail_shape(
             &registry,
             "ssl3_key_mat",
             &mut key_mat as *mut _ as CK_VOID_PTR,
@@ -8540,8 +8531,8 @@ fn r18_ssl3_key_mat_v1_tls12_superset_present() {
             assert_eq!(p.server_mac_secret_handle.0, 102);
             assert_eq!(p.client_key_handle.0, 201);
             assert_eq!(p.server_key_handle.0, 202);
-            r17_assert_present_secret(&p.client_iv_presence, &client_iv);
-            r17_assert_present_secret(&p.server_iv_presence, &server_iv);
+            assert_present_secret(&p.client_iv_presence, &client_iv);
+            assert_present_secret(&p.server_iv_presence, &server_iv);
             assert_eq!(p.prf_hash_mechanism.0, CkMechanismType::SHA256.0 as u64);
         }
         other => panic!("present TLS12 key-mat must stay typed under v1, got {other:?}"),
@@ -8551,8 +8542,8 @@ fn r18_ssl3_key_mat_v1_tls12_superset_present() {
 /// S2 §8 TLS/WTLS envelopes: WTLS master with NULL version (bit set,
 /// zeroed mirror) beside a NULL client random + present server random.
 #[test]
-fn r18_wtls_master_v1_null_version() {
-    let registry = r18_registry();
+fn wtls_master_v1_null_version() {
+    let registry = tail_shape_matrix_registry();
     let mut server_random = [0x22u8; 4];
     let mut wtls_master = CK_WTLS_MASTER_KEY_DERIVE_PARAMS {
         DigestMechanism: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
@@ -8565,7 +8556,7 @@ fn r18_wtls_master_v1_null_version() {
         pVersion: std::ptr::null_mut(),
     };
     match unsafe {
-        r18_read_v1(
+        read_v1_tail_shape(
             &registry,
             "wtls_master_key_derive",
             &mut wtls_master as *mut _ as CK_VOID_PTR,
@@ -8577,8 +8568,8 @@ fn r18_wtls_master_v1_null_version() {
     {
         Some(CkMechanismParams::WtlsMasterKeyDerive(p)) => {
             assert_eq!(p.digest_mechanism.0, CkMechanismType::SHA256.0 as u64);
-            r17_assert_null(&p.random_info.client_random_presence, 6);
-            r17_assert_present(&p.random_info.server_random_presence, &server_random);
+            assert_null_peer(&p.random_info.client_random_presence, 6);
+            assert_present(&p.random_info.server_random_presence, &server_random);
             assert!(p.version_is_null);
             assert_eq!(p.version, 0);
         }
@@ -8589,8 +8580,8 @@ fn r18_wtls_master_v1_null_version() {
 /// S2 §8 TLS/WTLS envelopes: WTLS PRF output bits mirror the TLS PRF
 /// contract (present pointers clear the bits; OUT bytes never read).
 #[test]
-fn r18_wtls_prf_v1_output_bits() {
-    let registry = r18_registry();
+fn wtls_prf_v1_output_bits() {
+    let registry = tail_shape_matrix_registry();
     let mut seed = [0xA1u8, 0xA2, 0xA3];
     let mut label = [0xB1u8, 0xB2];
     let mut output = [0xEEu8; 20];
@@ -8605,7 +8596,7 @@ fn r18_wtls_prf_v1_output_bits() {
         pulOutputLen: &mut output_len,
     };
     match unsafe {
-        r18_read_v1(
+        read_v1_tail_shape(
             &registry,
             "wtls_prf",
             &mut wtls as *mut _ as CK_VOID_PTR,
@@ -8616,8 +8607,8 @@ fn r18_wtls_prf_v1_output_bits() {
     .params
     {
         Some(CkMechanismParams::WtlsPrf(p)) => {
-            r17_assert_present_secret(&p.seed_presence, &seed);
-            r17_assert_present_secret(&p.label_presence, &label);
+            assert_present_secret(&p.seed_presence, &seed);
+            assert_present_secret(&p.label_presence, &label);
             assert!(!p.output_is_null);
             assert!(!p.output_len_is_null);
             assert_eq!(p.output_len, 20);
@@ -8630,8 +8621,8 @@ fn r18_wtls_prf_v1_output_bits() {
 /// S2 §8 key-mat: WTLS key-mat with NULL returned material (bit set,
 /// handles zero, IV peer records the bits-derived length).
 #[test]
-fn r18_wtls_key_mat_v1_null_returned() {
-    let registry = r18_registry();
+fn wtls_key_mat_v1_null_returned() {
+    let registry = tail_shape_matrix_registry();
     let mut client_random = [0x11u8; 4];
     let mut server_random = [0x22u8; 4];
     let mut key_mat = CK_WTLS_KEY_MAT_PARAMS {
@@ -8650,7 +8641,7 @@ fn r18_wtls_key_mat_v1_null_returned() {
         pReturnedKeyMaterial: std::ptr::null_mut(),
     };
     match unsafe {
-        r18_read_v1(
+        read_v1_tail_shape(
             &registry,
             "wtls_key_mat",
             &mut key_mat as *mut _ as CK_VOID_PTR,
@@ -8666,7 +8657,7 @@ fn r18_wtls_key_mat_v1_null_returned() {
             assert!(p.returned_key_material_is_null);
             assert_eq!(p.mac_secret_handle.0, 0);
             assert_eq!(p.key_handle.0, 0);
-            r17_assert_null_secret(&p.iv_presence, 4);
+            assert_null_secret(&p.iv_presence, 4);
         }
         other => panic!("NULL-returned WTLS key-mat must stay typed under v1, got {other:?}"),
     }
@@ -8676,8 +8667,8 @@ fn r18_wtls_key_mat_v1_null_returned() {
 /// B beside a valid A stays ONE typed message (agreement is the proto
 /// decoder's job, pinned by the R18 `shared_len` tests).
 #[test]
-fn r18_kea_v1_null_b_stays_typed() {
-    let registry = r18_registry();
+fn kea_v1_null_b_stays_typed() {
+    let registry = tail_shape_matrix_registry();
     let mut random_a = [0xAAu8; 16];
     let mut kea = CK_KEA_DERIVE_PARAMS {
         isSender: CK_TRUE,
@@ -8688,7 +8679,7 @@ fn r18_kea_v1_null_b_stays_typed() {
         PublicData: std::ptr::null_mut(),
     };
     match unsafe {
-        r18_read_v1(
+        read_v1_tail_shape(
             &registry,
             "kea_derive",
             &mut kea as *mut _ as CK_VOID_PTR,
@@ -8700,9 +8691,9 @@ fn r18_kea_v1_null_b_stays_typed() {
     {
         Some(CkMechanismParams::KeaDerive(p)) => {
             assert!(p.is_sender);
-            r17_assert_present(&p.random_a_presence, &random_a);
-            r17_assert_null(&p.random_b_presence, 16);
-            r17_assert_null(&p.public_data_presence, 0);
+            assert_present(&p.random_a_presence, &random_a);
+            assert_null_peer(&p.random_b_presence, 16);
+            assert_null_peer(&p.public_data_presence, 0);
         }
         other => panic!("NULL-B KEA must stay typed under v1, got {other:?}"),
     }
@@ -8711,8 +8702,8 @@ fn r18_kea_v1_null_b_stays_typed() {
 /// S2 §8 KIP: NULL nesting records the canonical placeholder + the set
 /// nesting bit (the v1 decoder's `(None, true)` arm).
 #[test]
-fn r18_kip_v1_null_nesting() {
-    let registry = r18_registry();
+fn kip_v1_null_nesting() {
+    let registry = tail_shape_matrix_registry();
     let mut seed = [0xF2u8, 0xF3, 0xF4];
     let mut kip = CK_KIP_PARAMS {
         pMechanism: std::ptr::null_mut(),
@@ -8721,7 +8712,7 @@ fn r18_kip_v1_null_nesting() {
         ulSeedLen: seed.len() as CK_ULONG,
     };
     match unsafe {
-        r18_read_v1(
+        read_v1_tail_shape(
             &registry,
             "kip",
             &mut kip as *mut _ as CK_VOID_PTR,
@@ -8734,7 +8725,7 @@ fn r18_kip_v1_null_nesting() {
         Some(CkMechanismParams::Kip(p)) => {
             assert!(p.mechanism.is_none());
             assert_eq!(p.key_handle.0, 0x43);
-            r17_assert_present_secret(&p.seed_presence, &seed);
+            assert_present_secret(&p.seed_presence, &seed);
         }
         other => panic!("NULL-nested KIP must stay typed under v1, got {other:?}"),
     }
@@ -8744,11 +8735,11 @@ fn r18_kip_v1_null_nesting() {
 /// clear) — guarded + pinned to v1: the nested read gathers the global
 /// registry/capability snapshots.
 #[test]
-fn r18_kip_v1_nested_present() {
+fn kip_v1_nested_present() {
     let _guard = crate::tests::shim_state_test_guard();
     crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(1);
     ensure_registry();
-    let registry = r18_registry();
+    let registry = tail_shape_matrix_registry();
     let mut nested = kip_nested_rsa_mechanism();
     let mut seed = [0xF5u8];
     let mut kip = CK_KIP_PARAMS {
@@ -8758,7 +8749,7 @@ fn r18_kip_v1_nested_present() {
         ulSeedLen: seed.len() as CK_ULONG,
     };
     let params = unsafe {
-        r18_read_v1(
+        read_v1_tail_shape(
             &registry,
             "kip",
             &mut kip as *mut _ as CK_VOID_PTR,
@@ -8778,7 +8769,7 @@ fn r18_kip_v1_nested_present() {
                 "nested (NULL,0) forwards paramless"
             );
             assert_eq!(p.key_handle.0, 0x44);
-            r17_assert_present_secret(&p.seed_presence, &seed);
+            assert_present_secret(&p.seed_presence, &seed);
         }
         other => panic!("nested-present KIP must stay typed under v1, got {other:?}"),
     }
@@ -8787,11 +8778,11 @@ fn r18_kip_v1_nested_present() {
 /// S2 §8 OTP/SP800-108: NULL OTP array records its declared count
 /// (counted-array envelope — the legacy conflation to empty is gone).
 #[test]
-fn r18_otp_v1_null_array() {
-    let registry = r18_registry();
+fn otp_v1_null_array() {
+    let registry = tail_shape_matrix_registry();
     let mut otp = CK_OTP_PARAMS { pParams: std::ptr::null_mut(), ulCount: 5 };
     match unsafe {
-        r18_read_v1(
+        read_v1_tail_shape(
             &registry,
             "otp",
             &mut otp as *mut _ as CK_VOID_PTR,
@@ -8802,7 +8793,7 @@ fn r18_otp_v1_null_array() {
     .params
     {
         Some(CkMechanismParams::Otp(p)) => {
-            r18_assert_null_array(&p.params_presence, 5);
+            assert_null_array(&p.params_presence, 5);
         }
         other => panic!("NULL OTP array must stay typed under v1, got {other:?}"),
     }
@@ -8811,13 +8802,13 @@ fn r18_otp_v1_null_array() {
 /// S2 §8 OTP/SP800-108: count-0 records `Present(empty)` (never
 /// conflated with `Null{0}`); over-cap counts fail closed.
 #[test]
-fn r18_otp_v1_count_zero_and_over_cap() {
-    let registry = r18_registry();
+fn otp_v1_count_zero_and_over_cap() {
+    let registry = tail_shape_matrix_registry();
     let mut probe =
         CK_OTP_PARAM { type_: 1 as CK_OTP_PARAM_TYPE, pValue: std::ptr::null_mut(), ulValueLen: 0 };
     let mut otp = CK_OTP_PARAMS { pParams: &mut probe, ulCount: 0 };
     match unsafe {
-        r18_read_v1(
+        read_v1_tail_shape(
             &registry,
             "otp",
             &mut otp as *mut _ as CK_VOID_PTR,
@@ -8828,7 +8819,7 @@ fn r18_otp_v1_count_zero_and_over_cap() {
     .params
     {
         Some(CkMechanismParams::Otp(p)) => {
-            r18_assert_present_empty_array(&p.params_presence);
+            assert_present_empty_array(&p.params_presence);
         }
         other => panic!("count-0 OTP array must read Present(empty) under v1, got {other:?}"),
     }
@@ -8837,7 +8828,7 @@ fn r18_otp_v1_count_zero_and_over_cap() {
         CK_OTP_PARAMS { pParams: &mut probe, ulCount: (MAX_TEMPLATE_COUNT + 1) as CK_ULONG };
     assert_eq!(
         unsafe {
-            r18_read_v1(
+            read_v1_tail_shape(
                 &registry,
                 "otp",
                 &mut otp as *mut _ as CK_VOID_PTR,
@@ -8853,8 +8844,8 @@ fn r18_otp_v1_count_zero_and_over_cap() {
 /// element value records that element's `Null` peer instead of
 /// rejecting the whole array.
 #[test]
-fn r18_otp_v1_mixed_element_null() {
-    let registry = r18_registry();
+fn otp_v1_mixed_element_null() {
+    let registry = tail_shape_matrix_registry();
     let mut v0 = [0x01u8, 0x02];
     let mut elems = [
         CK_OTP_PARAM {
@@ -8866,7 +8857,7 @@ fn r18_otp_v1_mixed_element_null() {
     ];
     let mut otp = CK_OTP_PARAMS { pParams: elems.as_mut_ptr(), ulCount: elems.len() as CK_ULONG };
     match unsafe {
-        r18_read_v1(
+        read_v1_tail_shape(
             &registry,
             "otp",
             &mut otp as *mut _ as CK_VOID_PTR,
@@ -8879,12 +8870,9 @@ fn r18_otp_v1_mixed_element_null() {
         Some(CkMechanismParams::Otp(p)) => {
             assert_eq!(p.params_presence.as_present().unwrap().len(), 2);
             assert_eq!(p.params_presence.as_present().unwrap()[0].type_, 1);
-            r17_assert_present_secret(
-                &p.params_presence.as_present().unwrap()[0].value_presence,
-                &v0,
-            );
+            assert_present_secret(&p.params_presence.as_present().unwrap()[0].value_presence, &v0);
             assert_eq!(p.params_presence.as_present().unwrap()[1].type_, 2);
-            r17_assert_null_secret(&p.params_presence.as_present().unwrap()[1].value_presence, 4);
+            assert_null_secret(&p.params_presence.as_present().unwrap()[1].value_presence, 4);
             assert_eq!(
                 p.params_presence,
                 p.params_presence.clone(),
@@ -8898,8 +8886,8 @@ fn r18_otp_v1_mixed_element_null() {
 /// S2 §8 Skipjack: shared-length companions read independently — a
 /// NULL PrimeP beside a valid BaseG stays ONE typed message.
 #[test]
-fn r18_skipjack_private_wrap_v1_null_prime() {
-    let registry = r18_registry();
+fn skipjack_private_wrap_v1_null_prime() {
+    let registry = tail_shape_matrix_registry();
     let mut password = [0x31u8, 0x32];
     let mut public_data = [0x41u8, 0x42, 0x43];
     let mut random_a = [0x51u8, 0x52, 0x53, 0x54];
@@ -8919,7 +8907,7 @@ fn r18_skipjack_private_wrap_v1_null_prime() {
         pSubprimeQ: subprime_q.as_mut_ptr(),
     };
     match unsafe {
-        r18_read_v1(
+        read_v1_tail_shape(
             &registry,
             "skipjack_private_wrap",
             &mut private_wrap as *mut _ as CK_VOID_PTR,
@@ -8930,13 +8918,13 @@ fn r18_skipjack_private_wrap_v1_null_prime() {
     .params
     {
         Some(CkMechanismParams::SkipjackPrivateWrap(p)) => {
-            r17_assert_present_secret(&p.password_presence, &password);
+            assert_present_secret(&p.password_presence, &password);
             assert_eq!(p.password_length, password.len() as u64);
-            r17_assert_present(&p.public_data_presence, &public_data);
-            r17_assert_present(&p.random_a_presence, &random_a);
-            r17_assert_null(&p.prime_p_presence, base_g.len() as u64);
-            r17_assert_present(&p.base_g_presence, &base_g);
-            r17_assert_present(&p.subprime_q_presence, &subprime_q);
+            assert_present(&p.public_data_presence, &public_data);
+            assert_present(&p.random_a_presence, &random_a);
+            assert_null_peer(&p.prime_p_presence, base_g.len() as u64);
+            assert_present(&p.base_g_presence, &base_g);
+            assert_present(&p.subprime_q_presence, &subprime_q);
         }
         other => panic!("NULL-prime Skipjack wrap must stay typed under v1, got {other:?}"),
     }
@@ -8945,8 +8933,8 @@ fn r18_skipjack_private_wrap_v1_null_prime() {
 /// S2 §8 Skipjack: RelayX mixed NULLs (old password NULL+6) stay ONE
 /// typed message.
 #[test]
-fn r18_skipjack_relayx_v1_mixed_nulls() {
-    let registry = r18_registry();
+fn skipjack_relayx_v1_mixed_nulls() {
+    let registry = tail_shape_matrix_registry();
     let mut old_wrapped_x = [0x01u8; 8];
     let mut old_public_data = [0x02u8; 4];
     let mut old_random_a = [0x03u8; 4];
@@ -8970,7 +8958,7 @@ fn r18_skipjack_relayx_v1_mixed_nulls() {
         pNewRandomA: new_random_a.as_mut_ptr(),
     };
     match unsafe {
-        r18_read_v1(
+        read_v1_tail_shape(
             &registry,
             "skipjack_relayx",
             &mut relayx as *mut _ as CK_VOID_PTR,
@@ -8981,13 +8969,13 @@ fn r18_skipjack_relayx_v1_mixed_nulls() {
     .params
     {
         Some(CkMechanismParams::SkipjackRelayx(p)) => {
-            r17_assert_present_secret(&p.old_wrapped_x_presence, &old_wrapped_x);
-            r17_assert_null_secret(&p.old_password_presence, 6);
-            r17_assert_present_secret(&p.old_public_data_presence, &old_public_data);
-            r17_assert_present_secret(&p.old_random_a_presence, &old_random_a);
-            r17_assert_present_secret(&p.new_password_presence, &new_password);
-            r17_assert_present_secret(&p.new_public_data_presence, &new_public_data);
-            r17_assert_present_secret(&p.new_random_a_presence, &new_random_a);
+            assert_present_secret(&p.old_wrapped_x_presence, &old_wrapped_x);
+            assert_null_secret(&p.old_password_presence, 6);
+            assert_present_secret(&p.old_public_data_presence, &old_public_data);
+            assert_present_secret(&p.old_random_a_presence, &old_random_a);
+            assert_present_secret(&p.new_password_presence, &new_password);
+            assert_present_secret(&p.new_public_data_presence, &new_public_data);
+            assert_present_secret(&p.new_random_a_presence, &new_random_a);
         }
         other => panic!("mixed-NULL Skipjack RelayX must stay typed under v1, got {other:?}"),
     }
@@ -8996,8 +8984,8 @@ fn r18_skipjack_relayx_v1_mixed_nulls() {
 /// S2 §8 OTP/SP800-108: NULL data-params + NULL derived-keys arrays
 /// record their declared counts.
 #[test]
-fn r18_sp800_108_kdf_v1_null_arrays() {
-    let registry = r18_registry();
+fn sp800_108_kdf_v1_null_arrays() {
+    let registry = tail_shape_matrix_registry();
     let mut params = CK_SP800_108_KDF_PARAMS {
         prfType: 1 as CK_SP800_108_PRF_TYPE,
         ulNumberOfDataParams: 2,
@@ -9006,7 +8994,7 @@ fn r18_sp800_108_kdf_v1_null_arrays() {
         pAdditionalDerivedKeys: std::ptr::null_mut(),
     };
     match unsafe {
-        r18_read_v1(
+        read_v1_tail_shape(
             &registry,
             "sp800_108_kdf",
             &mut params as *mut _ as CK_VOID_PTR,
@@ -9018,8 +9006,8 @@ fn r18_sp800_108_kdf_v1_null_arrays() {
     {
         Some(CkMechanismParams::Sp800108Kdf(p)) => {
             assert_eq!(p.prf_type.0, 1);
-            r18_assert_null_array(&p.data_params_presence, 2);
-            r18_assert_null_array(&p.additional_derived_keys_presence, 3);
+            assert_null_array(&p.data_params_presence, 2);
+            assert_null_array(&p.additional_derived_keys_presence, 3);
         }
         other => panic!("NULL-array SP800-108 KDF must stay typed under v1, got {other:?}"),
     }
@@ -9031,8 +9019,8 @@ fn r18_sp800_108_kdf_v1_null_arrays() {
 /// residual — the legacy arm could only conflate it to empty or flee
 /// to `Raw`); a NULL `phKey` sets the output-handle null bit.
 #[test]
-fn r18_sp800_108_null_template_closes_adr0010_residual() {
-    let registry = r18_registry();
+fn sp800_108_null_template_closes_adr0010_residual() {
+    let registry = tail_shape_matrix_registry();
     let mut value = [0x09u8, 0x08];
     let mut data_params = [CK_PRF_DATA_PARAM {
         type_: 1 as CK_PRF_DATA_TYPE,
@@ -9052,7 +9040,7 @@ fn r18_sp800_108_null_template_closes_adr0010_residual() {
         pAdditionalDerivedKeys: derived_keys.as_mut_ptr(),
     };
     match unsafe {
-        r18_read_v1(
+        read_v1_tail_shape(
             &registry,
             "sp800_108_kdf",
             &mut params as *mut _ as CK_VOID_PTR,
@@ -9064,7 +9052,7 @@ fn r18_sp800_108_null_template_closes_adr0010_residual() {
     {
         Some(CkMechanismParams::Sp800108Kdf(p)) => {
             assert_eq!(p.data_params_presence.as_present().unwrap().len(), 1);
-            r17_assert_present_secret(
+            assert_present_secret(
                 &p.data_params_presence.as_present().unwrap()[0].value_presence,
                 &value,
             );
@@ -9089,8 +9077,8 @@ fn r18_sp800_108_null_template_closes_adr0010_residual() {
 /// S2 §8 OTP/SP800-108: feedback KDF with NULL IV + NULL+0 data-params
 /// (the count-0 edge records `Null{0}`) + NULL derived keys.
 #[test]
-fn r18_sp800_108_feedback_v1_iv_null() {
-    let registry = r18_registry();
+fn sp800_108_feedback_v1_iv_null() {
+    let registry = tail_shape_matrix_registry();
     let mut params = CK_SP800_108_FEEDBACK_KDF_PARAMS {
         prfType: 2 as CK_SP800_108_PRF_TYPE,
         ulNumberOfDataParams: 0,
@@ -9101,7 +9089,7 @@ fn r18_sp800_108_feedback_v1_iv_null() {
         pAdditionalDerivedKeys: std::ptr::null_mut(),
     };
     match unsafe {
-        r18_read_v1(
+        read_v1_tail_shape(
             &registry,
             "sp800_108_feedback_kdf",
             &mut params as *mut _ as CK_VOID_PTR,
@@ -9113,9 +9101,9 @@ fn r18_sp800_108_feedback_v1_iv_null() {
     {
         Some(CkMechanismParams::Sp800108FeedbackKdf(p)) => {
             assert_eq!(p.prf_type.0, 2);
-            r18_assert_null_array(&p.data_params_presence, 0);
-            r17_assert_null(&p.iv_presence, 11);
-            r18_assert_null_array(&p.additional_derived_keys_presence, 1);
+            assert_null_array(&p.data_params_presence, 0);
+            assert_null_peer(&p.iv_presence, 11);
+            assert_null_array(&p.additional_derived_keys_presence, 1);
         }
         other => panic!("NULL-IV feedback KDF must stay typed under v1, got {other:?}"),
     }
@@ -9127,8 +9115,8 @@ fn r18_sp800_108_feedback_v1_iv_null() {
 /// struct-prefix Flat under same-ABI pairs by design (S2 §5 width
 /// rule), pinned below.
 #[test]
-fn r18_tail_short_buffers_fail_closed() {
-    let registry = r18_registry();
+fn tail_short_buffers_fail_closed() {
+    let registry = tail_shape_matrix_registry();
     // Full-size buffers presented one byte short: the failure is the
     // shape gate, not unreadable memory.
     let cases: &[(&str, usize)] = &[
@@ -9157,7 +9145,7 @@ fn r18_tail_short_buffers_fail_closed() {
     for (shape, size) in cases {
         assert!(*size <= backing.len() && *size > 1, "{shape} fixture fits");
         let err = unsafe {
-            r18_read_v1(
+            read_v1_tail_shape(
                 &registry,
                 shape,
                 backing.as_mut_ptr() as CK_VOID_PTR,
@@ -9172,7 +9160,12 @@ fn r18_tail_short_buffers_fail_closed() {
     // pair), never `Raw`, never the typed reader.
     let short = std::mem::size_of::<CK_TLS_MAC_PARAMS>() - 1;
     match unsafe {
-        r18_read_v1(&registry, "tls_mac", backing.as_mut_ptr() as CK_VOID_PTR, short as CK_ULONG)
+        read_v1_tail_shape(
+            &registry,
+            "tls_mac",
+            backing.as_mut_ptr() as CK_VOID_PTR,
+            short as CK_ULONG,
+        )
     }
     .expect("short scalar reads")
     .params
@@ -9188,8 +9181,8 @@ fn r18_tail_short_buffers_fail_closed() {
 /// under capability 0 (behavior EXACTLY preserved) and stays typed
 /// under v1.
 #[test]
-fn r18_legacy_capability_tail_behavior_exact() {
-    let registry = r18_registry();
+fn legacy_capability_tail_behavior_exact() {
+    let registry = tail_shape_matrix_registry();
     let mut label = [0xD0u8, 0xD1];
     let mut prf = CK_TLS_PRF_PARAMS {
         pSeed: std::ptr::null_mut(),
@@ -9199,8 +9192,8 @@ fn r18_legacy_capability_tail_behavior_exact() {
         pOutput: std::ptr::null_mut(),
         pulOutputLen: std::ptr::null_mut(),
     };
-    let mechanism = r11_mechanism(
-        r18_mech("tls_prf"),
+    let mechanism = make_ck_mechanism(
+        tail_shape_matrix_mech("tls_prf"),
         &mut prf as *mut _ as CK_VOID_PTR,
         std::mem::size_of::<CK_TLS_PRF_PARAMS>() as CK_ULONG,
     );
@@ -9212,7 +9205,7 @@ fn r18_legacy_capability_tail_behavior_exact() {
         other => panic!("NULL-seed TLS PRF must stay legacy Raw, got {other:?}"),
     }
     match unsafe {
-        r18_read_v1(
+        read_v1_tail_shape(
             &registry,
             "tls_prf",
             &mut prf as *mut _ as CK_VOID_PTR,
@@ -9223,7 +9216,7 @@ fn r18_legacy_capability_tail_behavior_exact() {
     .params
     {
         Some(CkMechanismParams::TlsPrf(p)) => {
-            r17_assert_null_secret(&p.seed_presence, 7);
+            assert_null_secret(&p.seed_presence, 7);
             assert!(p.output_is_null && p.output_len_is_null);
         }
         other => panic!("NULL-seed TLS PRF must stay typed under v1, got {other:?}"),

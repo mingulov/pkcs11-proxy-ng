@@ -1289,7 +1289,7 @@ mod tests {
     // ── F-04 Test 1: logged-out transparency path hides private objects ──────
 
     #[tokio::test]
-    async fn f04_logged_out_hides_private_objects_transparency_path() {
+    async fn logged_out_hides_private_objects_transparency_path() {
         // Oracle scenario on the transparency path (no per-object/class
         // policy): a logged-out context must observe neither the private
         // object's bare handle nor its count. max_count=1 forces two backend
@@ -1317,7 +1317,7 @@ mod tests {
     // ── F-04 Test 2: logged-in transparency path bit-for-bit unchanged ───────
 
     #[tokio::test]
-    async fn f04_logged_in_sees_all_objects_transparency_path() {
+    async fn logged_in_sees_all_objects_transparency_path() {
         // Control: the identical logged-IN enumeration returns both objects
         // unchanged (single backend batch, no filtering).
         let policy = Arc::new(TokenPolicy::from_config(&AuthConfig::default()).unwrap());
@@ -1341,7 +1341,7 @@ mod tests {
     // ── F-04 Test 3: probe failure hides (fail-closed) ───────────────────────
 
     #[tokio::test]
-    async fn f04_logged_out_probe_failure_hides_object() {
+    async fn logged_out_probe_failure_hides_object() {
         // An object whose CKA_PRIVATE probe fails (attribute absent on a
         // nonconformant backend) has unknown privacy: a logged-out context
         // must not observe it. Fail-closed matches the authz filter in this
@@ -1510,7 +1510,7 @@ mod tests {
     // ── F-04 Test 4: login filter composes with the authz filter ─────────────
 
     #[tokio::test]
-    async fn f04_logged_out_hides_private_under_authz_filter() {
+    async fn logged_out_hides_private_under_authz_filter() {
         // Authz-allowed but private objects must still be hidden from a
         // logged-out caller: both objects carry the allowed uid_A, so the
         // authz filter keeps both and only the login filter drops obj_priv.

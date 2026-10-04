@@ -5,8 +5,8 @@
 //! Shape of the proof, in two halves:
 //!
 //! * The funnel itself — `mechanism_to_ffi` — is proven verbatim by R12's
-//!   stub-backed tests: `r12_off_one_call_flat_forwards`
-//!   and `r12_off_one_call_null_forwards` (capturing `C_SignInit` stubs
+//!   stub-backed tests: `off_one_call_flat_forwards`
+//!   and `off_one_call_null_forwards` (capturing `C_SignInit` stubs
 //!   asserting exact pointer/length/bytes in
 //!   `ffi_conversion/mechanism/r12_init_retention_tests.rs`) plus the
 //!   pure-conversion pins in `r12_flat_null_tests.rs`. This gate asserts
@@ -157,8 +157,7 @@ const FUNNEL_HELPERS: &[&str] = &[
 
 /// R12 stub-backed proof tests this gate routes every family onto: they
 /// must keep existing (name-pinned so the evidence cannot silently go).
-const FUNNEL_PROOF_TESTS: &[&str] =
-    &["r12_off_one_call_flat_forwards", "r12_off_one_call_null_forwards"];
+const FUNNEL_PROOF_TESTS: &[&str] = &["off_one_call_flat_forwards", "off_one_call_null_forwards"];
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

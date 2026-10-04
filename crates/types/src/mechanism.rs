@@ -4677,7 +4677,7 @@ mod validated_params_tests {
     /// mismatch) — no downstream layer re-binds before backend FFI, so
     /// the typed gate must.
     #[test]
-    fn f1_mismatched_typed_shape_rejected() {
+    fn mismatched_typed_shape_rejected() {
         let registry = registry_with_binding(CkMechanismType::AES_GCM.0, "gcm");
         let mechanism = CkMechanism {
             mechanism_type: CkMechanismType::AES_GCM,
@@ -4693,7 +4693,7 @@ mod validated_params_tests {
     /// F1 probe: an unknown mechanism carrying RSA-PSS parameters must
     /// reject (descriptorless parameterized mechanism, S2 §6 RV table).
     #[test]
-    fn f1_unknown_mech_typed_params_rejected() {
+    fn unknown_mech_typed_params_rejected() {
         let registry = empty_registry();
         let mechanism = CkMechanism {
             mechanism_type: CkMechanismType(UNKNOWN_MECH),
@@ -4710,7 +4710,7 @@ mod validated_params_tests {
     /// and Gcm variants (the manifest binds both typed messages to it);
     /// any other variant under a compat-bound mech still rejects.
     #[test]
-    fn f1_gcm_compat_union_authorizes_iv_and_gcm() {
+    fn gcm_compat_union_authorizes_iv_and_gcm() {
         const GMAC: u64 = 0x0000_10A6;
         let registry = registry_with_binding(GMAC, "gcm_compat");
         let iv = CkMechanism {
@@ -4744,7 +4744,7 @@ mod validated_params_tests {
     /// (mirrors `ShapeResolver::resolve`); `General` never does, and a
     /// wrap variant under an unrelated mech rejects under both.
     #[test]
-    fn f1_wrap_operation_selects_wrap_layouts() {
+    fn wrap_operation_selects_wrap_layouts() {
         let gcm_wrap = || {
             CkMechanismParams::GcmWrap(GcmWrapParams {
                 iv_fixed_bits: 32,
@@ -4795,7 +4795,7 @@ mod validated_params_tests {
     /// wire-message bindings (the union members map to their primary
     /// shapes; the union itself is an authorization rule, not a name).
     #[test]
-    fn f1_canonical_shape_names_spot_check() {
+    fn canonical_shape_names_spot_check() {
         use CkMechanismParams as P;
         assert_eq!(P::Iv(IvParams { iv: vec![] }).canonical_shape_name(), Some("iv"));
         assert_eq!(
@@ -4834,7 +4834,7 @@ mod validated_params_tests {
     /// sanitize ON (D3 "rejects regardless" is unqualified — it covers
     /// embedded legs, not just the outer form); OFF still forwards.
     #[test]
-    fn f2_sanitize_on_rejects_embedded_null_huge() {
+    fn sanitize_on_rejects_embedded_null_huge() {
         const HUGE: u64 = 512 * 1024 * 1024 + 1;
         let registry = registry_with_binding(CkMechanismType::AES_GCM.0, "gcm");
         let mechanism = CkMechanism {
@@ -4859,7 +4859,7 @@ mod validated_params_tests {
     /// qualifier — even a small embedded nonzero NULL rejects under ON.
     /// NULL-zero (the canonical null) stays allowed, like the outer row.
     #[test]
-    fn f2_sanitize_on_rejects_embedded_null_nonzero_allows_zero() {
+    fn sanitize_on_rejects_embedded_null_nonzero_allows_zero() {
         let registry = registry_with_binding(CkMechanismType::AES_GCM.0, "gcm");
         let gcm = |iv: PointerBytes| CkMechanism {
             mechanism_type: CkMechanismType::AES_GCM,
@@ -4882,7 +4882,7 @@ mod validated_params_tests {
     /// seed leg, an SP800-108 NULL data-params array, an OTP element
     /// NULL value, and a nested outer NULL.
     #[test]
-    fn f2_sanitize_on_rejects_nested_nulls() {
+    fn sanitize_on_rejects_nested_nulls() {
         let registry = registry_with_bindings(&[
             ("kip", CkMechanismType::KIP_DERIVE.0),
             ("sp800_108_kdf", CkMechanismType::SP800_108_COUNTER_KDF.0),
@@ -4955,7 +4955,7 @@ mod validated_params_tests {
     /// KIP sanitizes exactly like the top level — ON allows it. (Pre-fix
     /// the nested scan rejected every nested Flat.)
     #[test]
-    fn nf5_nested_byte_buffer_flat_passes_sanitize() {
+    fn nested_byte_buffer_flat_passes_sanitize() {
         let registry =
             registry_with_bindings(&[("kip", CkMechanismType::KIP_DERIVE.0), ("iv", AES_CBC)]);
         let (flat, _) = flat_mechanism(AES_CBC, 16, Some(ParamAbi::Lp64NativeLe));
@@ -4979,7 +4979,7 @@ mod validated_params_tests {
     /// NF5 guard: a struct-prefix nested Flat rejects under ON, exactly
     /// like the top-level struct-prefix row.
     #[test]
-    fn nf5_nested_struct_prefix_flat_still_rejects() {
+    fn nested_struct_prefix_flat_still_rejects() {
         let mech = CkMechanismType::RSA_PKCS_PSS.0;
         let registry =
             registry_with_bindings(&[("kip", CkMechanismType::KIP_DERIVE.0), ("rsa_pss", mech)]);
@@ -5020,7 +5020,7 @@ mod validated_params_tests {
     /// NF5 guard: a nested Flat the carried registry denies (unknown
     /// shape) fails closed under ON.
     #[test]
-    fn nf5_nested_denied_flat_still_rejects() {
+    fn nested_denied_flat_still_rejects() {
         let registry = registry_with_bindings(&[("kip", CkMechanismType::KIP_DERIVE.0)]);
         let (flat, _) = flat_mechanism(UNKNOWN_MECH, 16, Some(ParamAbi::Lp64NativeLe));
         let outer = CkMechanism {
@@ -5039,7 +5039,7 @@ mod validated_params_tests {
     /// NF5 guard: classifying nested Flat does not weaken embedded-NULL
     /// policing — a NULL-huge IV inside a nested typed GCM still rejects.
     #[test]
-    fn nf5_nested_embedded_null_huge_still_rejects() {
+    fn nested_embedded_null_huge_still_rejects() {
         const HUGE: u64 = 512 * 1024 * 1024 + 1;
         let registry = registry_with_bindings(&[
             ("kip", CkMechanismType::KIP_DERIVE.0),
@@ -5071,7 +5071,7 @@ mod validated_params_tests {
     /// F1 positive control: bound typed pairs keep forwarding, and the
     /// parameterless/Null transparent rows are untouched.
     #[test]
-    fn f1_bound_typed_pair_still_forwards() {
+    fn bound_typed_pair_still_forwards() {
         let registry = registry_with_binding(CkMechanismType::AES_GCM.0, "gcm");
         let mechanism = CkMechanism {
             mechanism_type: CkMechanismType::AES_GCM,
@@ -5453,11 +5453,11 @@ mod validated_params_tests {
     // plus presence/payload agreement for every pair.
     // ------------------------------------------------------------------
 
-    fn r16_mech(mech: u64, params: CkMechanismParams) -> CkMechanism {
+    fn make_mechanism(mech: u64, params: CkMechanismParams) -> CkMechanism {
         CkMechanism { mechanism_type: CkMechanismType(mech), params: Some(params) }
     }
 
-    fn r16_gcm(iv_presence: PointerBytes, aad_presence: PointerBytes) -> CkMechanismParams {
+    fn make_gcm_params(iv_presence: PointerBytes, aad_presence: PointerBytes) -> CkMechanismParams {
         CkMechanismParams::Gcm(GcmParams {
             iv_bits: 96,
             iv_buffer_len: 12,
@@ -5468,7 +5468,7 @@ mod validated_params_tests {
     }
 
     #[test]
-    fn r16_validation_accepts_consistent_presence() {
+    fn validation_accepts_consistent_presence() {
         // F1: each variant rides a mech bound to its own shape.
         let registry = registry_with_bindings(&[
             ("gcm", CkMechanismType::AES_GCM.0),
@@ -5477,11 +5477,12 @@ mod validated_params_tests {
             ("rsa_aes_key_wrap", UNKNOWN_MECH + 2),
         ]);
         // NULL IV + present-empty aad alongside.
-        let v0_null = r16_gcm(PointerBytes::null_len(0), PointerBytes::present_copy(b""));
-        validate(&registry, &r16_mech(CkMechanismType::AES_GCM.0, v0_null)).unwrap();
+        let v0_null = make_gcm_params(PointerBytes::null_len(0), PointerBytes::present_copy(b""));
+        validate(&registry, &make_mechanism(CkMechanismType::AES_GCM.0, v0_null)).unwrap();
         // NULL with a declared length beside present aad.
-        let v1_null = r16_gcm(PointerBytes::null_len(41), PointerBytes::present_copy(b"tag"));
-        validate(&registry, &r16_mech(CkMechanismType::AES_GCM.0, v1_null)).unwrap();
+        let v1_null =
+            make_gcm_params(PointerBytes::null_len(41), PointerBytes::present_copy(b"tag"));
+        validate(&registry, &make_mechanism(CkMechanismType::AES_GCM.0, v1_null)).unwrap();
         // Bool-less present + NULL pairs (HKDF).
         let hkdf = CkMechanismParams::Hkdf(HkdfParams {
             extract: true,
@@ -5492,14 +5493,14 @@ mod validated_params_tests {
             salt_presence: PointerBytes::present_copy(b"salty"),
             info_presence: PointerBytes::null_len(12),
         });
-        validate(&registry, &r16_mech(UNKNOWN_MECH, hkdf)).unwrap();
+        validate(&registry, &make_mechanism(UNKNOWN_MECH, hkdf)).unwrap();
         // Bool-less Vec pair (ECDH1 public data).
         let ecdh1 = CkMechanismParams::Ecdh1Derive(Ecdh1DeriveParams {
             kdf: CkKdf(1),
             shared_data_presence: PointerBytes::present_copy(b""),
             public_data_presence: PointerBytes::present_copy(&[0x04; 65]),
         });
-        validate(&registry, &r16_mech(UNKNOWN_MECH + 1, ecdh1)).unwrap();
+        validate(&registry, &make_mechanism(UNKNOWN_MECH + 1, ecdh1)).unwrap();
         // Nested OAEP inside RSA-AES wrap.
         let wrap = CkMechanismParams::RsaAesKeyWrap(RsaAesKeyWrapParams {
             aes_key_bits: 128,
@@ -5510,6 +5511,6 @@ mod validated_params_tests {
                 source_data_presence: PointerBytes::present_copy(b""),
             },
         });
-        validate(&registry, &r16_mech(UNKNOWN_MECH + 2, wrap)).unwrap();
+        validate(&registry, &make_mechanism(UNKNOWN_MECH + 2, wrap)).unwrap();
     }
 }

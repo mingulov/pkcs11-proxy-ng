@@ -1431,7 +1431,7 @@ mod begin_contract_tests {
     /// legacy-capability emission (`From` unchanged; legacy-identity pin,
     /// green before AND after).
     #[test]
-    fn r5_audit_raw_message_parameter_encodes_legacy_raw() {
+    fn audit_raw_message_parameter_encodes_legacy_raw() {
         let raw = MessageParameter::Raw(vec![0xA5; 16].into());
         let wire = pkcs11_proxy_ng_proto::MessageParameter::from(&raw);
         assert_eq!(wire.parameter_encoding_version, 0);
@@ -1441,7 +1441,7 @@ mod begin_contract_tests {
         );
     }
 
-    fn r5_begin_acknowledged(
+    fn begin_acknowledged(
         envelope: &CkParameterRoundtripSpec,
     ) -> pkcs11_proxy_ng_proto::ParameterRoundtripResult {
         pkcs11_proxy_ng_proto::ParameterRoundtripResult {
@@ -1456,7 +1456,7 @@ mod begin_contract_tests {
     /// to `MessageEffects::None`. RED pre-R5: the empty wire oneof fails
     /// `TryFrom`, surfacing a protocol error.
     #[test]
-    fn r5_begin_raw_request_with_empty_effects_wire_decodes_to_none() {
+    fn begin_raw_request_with_empty_effects_wire_decodes_to_none() {
         let requested = MessageParameter::Raw(vec![0xA5; 16].into());
         let envelope =
             CkParameterRoundtripSpec { buffer_present: true, buffer_len: 16, value: None };
@@ -1465,7 +1465,7 @@ mod begin_contract_tests {
         let (_, decoded) = decode_message_begin_contract_response(
             CkRv::OK.0,
             &[],
-            Some(r5_begin_acknowledged(&envelope)),
+            Some(begin_acknowledged(&envelope)),
             None,
             Some(&effects),
             &envelope,
@@ -1481,7 +1481,7 @@ mod begin_contract_tests {
     /// error (`TryFrom` unchanged); `(None, None)` still decodes to no
     /// effects.
     #[test]
-    fn r5_begin_empty_effects_wire_matrix_pins() {
+    fn begin_empty_effects_wire_matrix_pins() {
         let envelope =
             CkParameterRoundtripSpec { buffer_present: true, buffer_len: 16, value: None };
         let effects =
@@ -1490,7 +1490,7 @@ mod begin_contract_tests {
             let error = decode_message_begin_contract_response(
                 CkRv::OK.0,
                 &[],
-                Some(r5_begin_acknowledged(&envelope)),
+                Some(begin_acknowledged(&envelope)),
                 None,
                 Some(&effects),
                 &envelope,
@@ -1508,7 +1508,7 @@ mod begin_contract_tests {
         let (_, decoded) = decode_message_begin_contract_response(
             CkRv::OK.0,
             &[],
-            Some(r5_begin_acknowledged(&envelope)),
+            Some(begin_acknowledged(&envelope)),
             None,
             None,
             &envelope,

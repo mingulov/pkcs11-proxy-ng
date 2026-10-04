@@ -116,7 +116,7 @@ fn provider_overwrite(ffi: &mut super::FfiMechanism, fill: u8) {
 /// Validated Flat forwards verbatim — non-NULL pointer, `ulParameterLen`
 /// exactly `declared_len`, exact bytes, no client address bits.
 #[test]
-fn r12_flat_forwards_verbatim() {
+fn flat_forwards_verbatim() {
     let bytes = [0xDE, 0xAD, 0xBE];
     let ffi = mechanism_to_ffi(&validated_flat(&flat_mechanism(0x0000_1082, &bytes)))
         .expect("validated Flat reconstructs");
@@ -132,7 +132,7 @@ fn r12_flat_forwards_verbatim() {
 /// RV table) — including through the backend-local gate, which needs no
 /// registry for Null.
 #[test]
-fn r12_null_forwards_null_with_narrowed_len() {
+fn null_forwards_null_with_narrowed_len() {
     let validated =
         validate_for_ffi(&null_mechanism(12)).expect("Null validates without a registry");
     let ffi = mechanism_to_ffi(&validated).expect("Null reconstructs");
@@ -144,7 +144,7 @@ fn r12_null_forwards_null_with_narrowed_len() {
 /// Empty Flat is still a non-NULL extent of length zero (S2 §6: pointer
 /// non-NULL even at length zero).
 #[test]
-fn r12_flat_empty_is_non_null_zero() {
+fn flat_empty_is_non_null_zero() {
     let ffi = mechanism_to_ffi(&validated_flat(&flat_mechanism(0x0000_1082, &[])))
         .expect("empty Flat reconstructs");
     let (ptr, len) = outer_param(&ffi);
@@ -157,7 +157,7 @@ fn r12_flat_empty_is_non_null_zero() {
 /// the RV stays `MECHANISM_PARAM_INVALID`; the FFI arm itself stays as
 /// unreachable defense-in-depth).
 #[test]
-fn r12_raw_stays_rejected() {
+fn raw_stays_rejected() {
     let mech = CkMechanism {
         mechanism_type: CkMechanismType(0x0000_1082),
         params: Some(CkMechanismParams::Raw(pkcs11_proxy_ng_types::RawMechanismParams {
@@ -172,7 +172,7 @@ fn r12_raw_stays_rejected() {
 /// Guessing (e.g. the embedded default) would bypass operator exclusion.
 /// Server-validated Flat arrives post-R13 via the newtype-taking entries.
 #[test]
-fn r12_funnel_flat_always_denied() {
+fn funnel_flat_always_denied() {
     let mech = flat_mechanism(0x0000_1082, &[0xA5; 8]);
     // Sanity: the same value validates under a bound registry ...
     let _ = validated_flat(&mech);
@@ -183,9 +183,9 @@ fn r12_funnel_flat_always_denied() {
 /// Parameterless mechanisms pass the backend-local gate identically:
 /// pre-R12 behavior preserved exactly on the FFI path. (F1: typed
 /// params need bindings, so the old typed half of this pin moved to
-/// `r12_funnel_typed_needs_binding`.)
+/// `funnel_typed_needs_binding`.)
 #[test]
-fn r12_funnel_typed_and_none_passthrough() {
+fn funnel_typed_and_none_passthrough() {
     let bare = CkMechanism { mechanism_type: CkMechanismType::SHA256, params: None };
     let ffi = mechanism_to_ffi(&validate_for_ffi(&bare).expect("None validates"))
         .expect("parameterless reconstructs");
@@ -198,7 +198,7 @@ fn r12_funnel_typed_and_none_passthrough() {
 /// binding exists to authorize them); the same pair validates against
 /// a registry binding it, and reconstructs identically.
 #[test]
-fn r12_funnel_typed_needs_binding() {
+fn funnel_typed_needs_binding() {
     let typed = CkMechanism {
         mechanism_type: CkMechanismType::AES_CBC,
         params: Some(CkMechanismParams::Iv(IvParams { iv: vec![0x11; 16] })),
@@ -225,7 +225,7 @@ fn r12_funnel_typed_needs_binding() {
 /// `FUNCTION_FAILED`, never truncates. Host-independent: driven by the
 /// `backend_abi` parameter, not the test host width.
 #[test]
-fn r12_null_unnarrowable_is_function_failed() {
+fn null_unnarrowable_is_function_failed() {
     let mech = null_mechanism(u64::MAX);
     let registry = registry_with_iv_binding(mech.mechanism_type.0);
     let result = ValidatedMechanismParams::validate(
@@ -251,7 +251,7 @@ fn r12_null_unnarrowable_is_function_failed() {
 /// R9 carry (Flat+ILP32 narrowing test): Flat validated for a narrow
 /// backend ABI reconstructs with `ulParameterLen` exactly `declared_len`.
 #[test]
-fn r12_flat_ilp32_narrowing_exact() {
+fn flat_ilp32_narrowing_exact() {
     let mech = flat_mechanism(0x0000_1082, &[0xA5; 24]);
     let validated = ValidatedMechanismParams::validate(
         &mech,
@@ -272,7 +272,7 @@ fn r12_flat_ilp32_narrowing_exact() {
 /// was rejected alongside Flat. (F1: the outer KIP validates against a
 /// registry binding its own pair; the nested Null needs no binding.)
 #[test]
-fn r12_nested_null_converts() {
+fn nested_null_converts() {
     let mech = CkMechanism {
         mechanism_type: CkMechanismType::RSA_PKCS,
         params: Some(CkMechanismParams::Kip(KipParams {
@@ -299,7 +299,7 @@ fn r12_nested_null_converts() {
 /// Request-validated outers with a bound nested mech accept eligible
 /// nested Flat (pinned by the F6 test below).
 #[test]
-fn r12_nested_flat_and_raw_rejected() {
+fn nested_flat_and_raw_rejected() {
     for (name, nested) in [
         ("Flat", flat_mechanism(0x0000_1082, &[0xA5; 4])),
         (
@@ -346,7 +346,7 @@ fn r12_nested_flat_and_raw_rejected() {
 /// inner `CK_MECHANISM` is readable via `pMechanism` with verbatim
 /// bytes.
 #[test]
-fn f6_nested_flat_eligible_under_request_registry_converts() {
+fn nested_flat_eligible_under_request_registry_converts() {
     let nested = flat_mechanism(0x0000_1082, &[0xA5; 4]);
     let mech = CkMechanism {
         mechanism_type: CkMechanismType::RSA_PKCS,
@@ -396,7 +396,7 @@ fn f6_nested_flat_eligible_under_request_registry_converts() {
 /// infers ILP32 from the 4-byte `CK_ULONG` width (word width alone
 /// cannot distinguish ILP32 from LLP64-packed).
 #[test]
-fn nf2_nested_flat_prefix_validates_under_carried_windows_abi() {
+fn nested_flat_prefix_validates_under_carried_windows_abi() {
     let win = ParamAbi::Llp64Packed1Le;
     let mech = CkMechanismType::RSA_PKCS_PSS.0;
     let resolved = ShapeResolver::resolve(
@@ -459,7 +459,7 @@ fn nf2_nested_flat_prefix_validates_under_carried_windows_abi() {
 /// are NOT returned — `output_params()` yields `None` even after the
 /// provider mutates every extent byte, and the equality probe agrees.
 #[test]
-fn r12_flat_output_suppressed() {
+fn flat_output_suppressed() {
     let mut ffi = mechanism_to_ffi(&validated_flat(&flat_mechanism(0x0000_1082, &[0x11; 8])))
         .expect("Flat reconstructs");
     assert_eq!(ffi.output_params(), None, "unmutated Flat has no output params");
@@ -473,7 +473,7 @@ fn r12_flat_output_suppressed() {
 
 /// Null (backed by `None` like `no_param`) likewise yields no output.
 #[test]
-fn r12_null_output_is_none() {
+fn null_output_is_none() {
     let validated = validate_for_ffi(&null_mechanism(5)).expect("Null validates");
     let ffi = mechanism_to_ffi(&validated).expect("Null reconstructs");
     assert_eq!(ffi.output_params(), None);
@@ -483,7 +483,7 @@ fn r12_null_output_is_none() {
 /// `no_param` still hardcodes zero — `with_null_param` is the only
 /// NULL-with-length constructor, and the parameterless path is untouched.
 #[test]
-fn r12_no_param_still_zero() {
+fn no_param_still_zero() {
     let bare = CkMechanism { mechanism_type: CkMechanismType::SHA256, params: None };
     let validated = validate_for_ffi(&bare).expect("parameterless validates");
     let ffi = mechanism_to_ffi(&validated).expect("parameterless reconstructs");

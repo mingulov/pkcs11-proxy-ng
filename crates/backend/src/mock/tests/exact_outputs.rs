@@ -862,7 +862,7 @@ fn verify_rejects_signature_that_does_not_match_sign_echo() {
 /// structured validation is unchanged (see the pins above) and the
 /// `resolve_input` discipline is untouched.
 #[test]
-fn r4_v1_opaque_raw_accepted_by_message_gates() {
+fn v1_opaque_raw_accepted_by_message_gates() {
     let backend = MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::AES_GCM]);
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();

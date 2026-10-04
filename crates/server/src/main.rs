@@ -1231,7 +1231,7 @@ auth = "peer_cred"
     /// var, so no guard is needed.
     #[test]
     #[cfg(pkcs11_proxy_test_mechanism_params_v1)]
-    fn r10_override_predicate_reads_exact_env_under_cfg() {
+    fn override_predicate_reads_exact_env_under_cfg() {
         unsafe {
             std::env::remove_var("PKCS11_PROXY_TEST_MECHANISM_PARAMS_V1");
         }
@@ -1254,7 +1254,7 @@ auth = "peer_cred"
     /// the env ever takes effect in a normal daemon build.
     #[test]
     #[cfg(not(pkcs11_proxy_test_mechanism_params_v1))]
-    fn r10_override_env_inert_without_cfg() {
+    fn override_env_inert_without_cfg() {
         unsafe {
             std::env::set_var("PKCS11_PROXY_TEST_MECHANISM_PARAMS_V1", "enable-v1-test-only");
         }

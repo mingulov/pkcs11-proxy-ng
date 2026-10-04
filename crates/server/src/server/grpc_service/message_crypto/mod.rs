@@ -5066,7 +5066,7 @@ mod r4_v1_opaque_tests {
     /// present opaque buffer no longer sanitize-rejects. The provider
     /// footprint is the opaque byte length (mirrors T1's backend arm).
     #[tokio::test]
-    async fn r4_v1_opaque_init_accepted_encrypt_decrypt() {
+    async fn v1_opaque_init_accepted_encrypt_decrypt() {
         for sanitize in [false, true] {
             for direction in [Direction::Encrypt, Direction::Decrypt] {
                 let (mut ctx, mock, context_id, session) = setup(direction, None).await;
@@ -5151,7 +5151,7 @@ mod r4_v1_opaque_tests {
     /// R4: a v1-opaque Begin parameter is accepted through the Begin
     /// contract in both directions, with and without sanitization.
     #[tokio::test]
-    async fn r4_v1_opaque_begin_accepted_encrypt_decrypt() {
+    async fn v1_opaque_begin_accepted_encrypt_decrypt() {
         for sanitize in [false, true] {
             for direction in [Direction::Encrypt, Direction::Decrypt] {
                 let (mut ctx, mock, context_id, session) =
@@ -5221,7 +5221,7 @@ mod r4_v1_opaque_tests {
     /// the byte length itself (mirrors T1's backend arm), in both
     /// sanitize modes.
     #[test]
-    fn r4_begin_contract_provider_len_is_opaque_byte_length() {
+    fn begin_contract_provider_len_is_opaque_byte_length() {
         let wire = v1_opaque_wire(vec![0xA5; 16]);
         let spec = caller_spec(16);
         for sanitize in [false, true] {
@@ -5250,7 +5250,7 @@ mod r4_v1_opaque_tests {
     /// at any version is fail-closed MPI, a per-message version newer than
     /// the daemon is FNS pre-entry, and v1-opaque decodes to Raw.
     #[test]
-    fn r4_decode_keeps_r3_rejection_rvs() {
+    fn decode_keeps_r3_rejection_rvs() {
         for version in [0, 1] {
             let legacy = pkcs11_proxy_ng_proto::MessageParameter {
                 params: Some(pkcs11_proxy_ng_proto::message_parameter::Params::Raw(vec![0xA5; 16])),
@@ -5281,7 +5281,7 @@ mod r4_v1_opaque_tests {
     /// and its native footprint is the byte length itself (mirrors T1's
     /// backend arm). Structured shapes are bit-identical.
     #[test]
-    fn r4_raw_null_positive_and_native_len() {
+    fn raw_null_positive_and_native_len() {
         let raw = MessageParameter::Raw(SecretBytes::new(vec![0xA5; 16]));
         assert!(!message_parameter_has_null_positive(&raw));
         assert_eq!(native_message_parameter_len(&raw), 16);
@@ -5346,7 +5346,7 @@ mod r4_v1_opaque_tests {
     /// a legacy structured request still echoes the bit-identical legacy
     /// bytes. RED pre-R5: the v1 leg echoes legacy `Raw`.
     #[tokio::test]
-    async fn r5_v1_opaque_init_echo_preserves_request_encoding() {
+    async fn v1_opaque_init_echo_preserves_request_encoding() {
         for direction in [Direction::Encrypt, Direction::Decrypt] {
             let (ctx, mock, context_id, session) = setup(direction, None).await;
             mock.set_next_message_lifecycle_action(MockMessageLifecycleAction::Return(CkRv::OK));

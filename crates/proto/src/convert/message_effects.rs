@@ -420,7 +420,7 @@ mod tests {
     // The three structured shapes are unchanged (pinned by the mode /
     // direction / stage / RV matrix test above).
 
-    fn r3_raw_context(
+    fn make_raw_context(
         mode: ParameterEffectCallMode,
         encrypt: bool,
         rv: CkRv,
@@ -429,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    fn r3_capture_raw_identical_yields_none() {
+    fn capture_raw_identical_yields_none() {
         let input = MessageParameter::Raw(vec![0x01; 16].into());
         let identical = MessageParameter::Raw(vec![0x01; 16].into());
         for mode in [
@@ -444,7 +444,7 @@ mod tests {
                         MessageEffects::capture(
                             &input,
                             &identical,
-                            r3_raw_context(mode, encrypt, rv)
+                            make_raw_context(mode, encrypt, rv)
                         ),
                         MessageEffects::None,
                         "mode={mode:?} encrypt={encrypt} rv={rv:?}",
@@ -458,14 +458,14 @@ mod tests {
             MessageEffects::capture(
                 &empty,
                 &empty.clone(),
-                r3_raw_context(ParameterEffectCallMode::Data, true, CkRv::OK),
+                make_raw_context(ParameterEffectCallMode::Data, true, CkRv::OK),
             ),
             MessageEffects::None,
         );
     }
 
     #[test]
-    fn r3_capture_raw_mismatch_yields_invalid() {
+    fn capture_raw_mismatch_yields_invalid() {
         use crate::convert::message_params::GcmMessageParams;
         let input = MessageParameter::Raw(vec![0x01; 16].into());
         let mut mutated_bytes = vec![0x01; 16];
@@ -479,7 +479,7 @@ mod tests {
             tag_null_len: None,
             tag_bits: 128,
         });
-        let context = r3_raw_context(ParameterEffectCallMode::Data, true, CkRv::OK);
+        let context = make_raw_context(ParameterEffectCallMode::Data, true, CkRv::OK);
         for output in [
             MessageParameter::Raw(mutated_bytes.into()),
             MessageParameter::Raw(vec![0x01; 15].into()),
@@ -498,7 +498,7 @@ mod tests {
     }
 
     #[test]
-    fn r3_none_effect_validates_for_raw_only() {
+    fn none_effect_validates_for_raw_only() {
         use crate::convert::message_params::GcmMessageParams;
         let raw = MessageParameter::Raw(vec![0x01; 16].into());
         let gcm = MessageParameter::GcmMessage(GcmMessageParams {
@@ -510,7 +510,7 @@ mod tests {
             tag_null_len: None,
             tag_bits: 128,
         });
-        let context = r3_raw_context(ParameterEffectCallMode::Data, true, CkRv::OK);
+        let context = make_raw_context(ParameterEffectCallMode::Data, true, CkRv::OK);
         // Hits the new `(None, None)` arm: success with no output.
         assert_eq!(MessageEffects::None.validate_for(&raw, context), Ok(()));
         // Cross-shape effects stay mismatches (never silently accepted).
@@ -522,7 +522,7 @@ mod tests {
     }
 
     #[test]
-    fn r3_none_effect_encodes_to_empty_wire_message() {
+    fn none_effect_encodes_to_empty_wire_message() {
         // Hits the new `None` encode arm: success with no output bytes —
         // never DEVICE_ERROR. (Decoding a present-but-empty effects message
         // stays an error; see `absent_effect_oneof_decodes_to_unified_rv`.)

@@ -1448,7 +1448,7 @@ fn derived_object_stores_its_template_attributes() {
 
 /// ILP32 counter-format vector (literal 8 bytes — a 32-bit client's
 /// iteration variable / counter on every host).
-fn f5_counter_ilp32(little_endian: u8, width_in_bits: u32) -> Vec<u8> {
+fn counter_ilp32(little_endian: u8, width_in_bits: u32) -> Vec<u8> {
     let mut value = vec![0u8; 8];
     value[0] = little_endian;
     value[4..8].copy_from_slice(&width_in_bits.to_ne_bytes());
@@ -1456,7 +1456,7 @@ fn f5_counter_ilp32(little_endian: u8, width_in_bits: u32) -> Vec<u8> {
 }
 
 /// ILP32 DKM-length-format vector (literal 12 bytes).
-fn f5_dkm_ilp32(method: u32, little_endian: u8, width_in_bits: u32) -> Vec<u8> {
+fn dkm_ilp32(method: u32, little_endian: u8, width_in_bits: u32) -> Vec<u8> {
     let mut value = vec![0u8; 12];
     value[0..4].copy_from_slice(&method.to_ne_bytes());
     value[4] = little_endian;
@@ -1465,7 +1465,7 @@ fn f5_dkm_ilp32(method: u32, little_endian: u8, width_in_bits: u32) -> Vec<u8> {
 }
 
 #[test]
-fn f5_mock_accepts_ilp32_shaped_modeled_payloads() {
+fn mock_accepts_ilp32_shaped_modeled_payloads() {
     const CK_SP800_108_ITERATION_VARIABLE: u64 = 0x0000_0001;
     const CK_SP800_108_COUNTER: u64 = 0x0000_0002;
     const CK_SP800_108_DKM_LENGTH: u64 = 0x0000_0003;
@@ -1482,11 +1482,11 @@ fn f5_mock_accepts_ilp32_shaped_modeled_payloads() {
             data_params_presence: PointerArray::present(vec![
                 PrfDataParam {
                     type_: CK_SP800_108_ITERATION_VARIABLE,
-                    value_presence: PointerBytes::present_copy(&f5_counter_ilp32(1, 64)),
+                    value_presence: PointerBytes::present_copy(&counter_ilp32(1, 64)),
                 },
                 PrfDataParam {
                     type_: CK_SP800_108_DKM_LENGTH,
-                    value_presence: PointerBytes::present_copy(&f5_dkm_ilp32(1, 0, 256)),
+                    value_presence: PointerBytes::present_copy(&dkm_ilp32(1, 0, 256)),
                 },
             ]),
             additional_derived_keys_presence: PointerArray::present(Vec::new()),
@@ -1512,11 +1512,11 @@ fn f5_mock_accepts_ilp32_shaped_modeled_payloads() {
                 sp800_108_null_iteration_param(),
                 PrfDataParam {
                     type_: CK_SP800_108_COUNTER,
-                    value_presence: PointerBytes::present_copy(&f5_counter_ilp32(0, 128)),
+                    value_presence: PointerBytes::present_copy(&counter_ilp32(0, 128)),
                 },
                 PrfDataParam {
                     type_: CK_SP800_108_DKM_LENGTH,
-                    value_presence: PointerBytes::present_copy(&f5_dkm_ilp32(2, 1, 512)),
+                    value_presence: PointerBytes::present_copy(&dkm_ilp32(2, 1, 512)),
                 },
             ]),
             iv_presence: PointerBytes::present_copy(&[0xA5; 16]),
@@ -1531,7 +1531,7 @@ fn f5_mock_accepts_ilp32_shaped_modeled_payloads() {
 }
 
 #[test]
-fn f5_mock_still_rejects_unmodelable_widths() {
+fn mock_still_rejects_unmodelable_widths() {
     const CK_SP800_108_ITERATION_VARIABLE: u64 = 0x0000_0001;
     const CK_SP800_108_COUNTER: u64 = 0x0000_0002;
     const CK_SP800_108_DKM_LENGTH: u64 = 0x0000_0003;
@@ -1589,7 +1589,7 @@ fn f5_mock_still_rejects_unmodelable_widths() {
                     sp800_108_null_iteration_param(),
                     PrfDataParam {
                         type_: CK_SP800_108_DKM_LENGTH,
-                        value_presence: PointerBytes::present_copy(&f5_dkm_ilp32(99, 1, 64)),
+                        value_presence: PointerBytes::present_copy(&dkm_ilp32(99, 1, 64)),
                     },
                 ]),
                 iv_presence: PointerBytes::present_copy(&[0xA5; 16]),

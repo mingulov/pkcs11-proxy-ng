@@ -1486,7 +1486,7 @@ mod tests {
     }
 
     #[test]
-    fn r3_v1_opaque_exact_bytes_accept_and_decode_to_raw() {
+    fn v1_opaque_exact_bytes_accept_and_decode_to_raw() {
         for data in [b"AB".to_vec(), vec![], vec![0xA5; 16]] {
             let wire = opaque_wire(data.clone(), data.len() as u64, 1);
             assert_eq!(validate_structured_wire_parameter(&wire), Ok(()));
@@ -1502,7 +1502,7 @@ mod tests {
     }
 
     #[test]
-    fn r3_legacy_raw_rejected_at_every_version() {
+    fn legacy_raw_rejected_at_every_version() {
         // Fail-closed preserved: legacy `raw` is never a v1 representation.
         for version in [0u32, 1, 2, 99, u32::MAX] {
             for data in [vec![], vec![0xA5]] {
@@ -1520,7 +1520,7 @@ mod tests {
     }
 
     #[test]
-    fn r3_newer_version_is_function_not_supported_pre_entry() {
+    fn newer_version_is_function_not_supported_pre_entry() {
         use pkcs11_proxy_ng_types::CkRv;
         for version in [2u32, 99, u32::MAX] {
             assert_eq!(
@@ -1545,7 +1545,7 @@ mod tests {
     }
 
     #[test]
-    fn r3_version_zero_opaque_is_contradictory_metadata() {
+    fn version_zero_opaque_is_contradictory_metadata() {
         assert_eq!(
             validate_structured_wire_parameter(&opaque_wire(b"AB".to_vec(), 2, 0)),
             Err(pkcs11_proxy_ng_types::CkRv::MECHANISM_PARAM_INVALID),
@@ -1553,7 +1553,7 @@ mod tests {
     }
 
     #[test]
-    fn r3_opaque_length_mismatch_is_param_invalid() {
+    fn opaque_length_mismatch_is_param_invalid() {
         use pkcs11_proxy_ng_types::CkRv;
         for (data, declared_len) in
             [(b"AB".to_vec(), 3u64), (b"AB".to_vec(), 1u64), (vec![], 1u64), (vec![0xA5; 16], 0u64)]
@@ -1566,7 +1566,7 @@ mod tests {
     }
 
     #[test]
-    fn r3_opaque_64kib_cap_boundary() {
+    fn opaque_64kib_cap_boundary() {
         use pkcs11_proxy_ng_types::CkRv;
         // Exactly 64 KiB is representable; one byte over is a cap violation.
         let at_cap = vec![0xA5; 64 * 1024];
@@ -1592,7 +1592,7 @@ mod tests {
     }
 
     #[test]
-    fn r3_unmodeled_shape_matches_raw_only() {
+    fn unmodeled_shape_matches_raw_only() {
         let raw = MessageParameter::Raw(vec![0x01; 16].into());
         let gcm = MessageParameter::GcmMessage(GcmMessageParams {
             iv: vec![0x01; 12],
@@ -1636,7 +1636,7 @@ mod tests {
     }
 
     #[test]
-    fn r3_raw_validates_structured_and_narrows_native_ulong() {
+    fn raw_validates_structured_and_narrows_native_ulong() {
         use pkcs11_proxy_ng_types::CkRv;
         let raw = MessageParameter::Raw(vec![0x01; 16].into());
         // Opaque bytes carry no layout/scalars: shape validation accepts.
@@ -1653,7 +1653,7 @@ mod tests {
     }
 
     #[test]
-    fn r3_raw_same_layout_is_byte_equality() {
+    fn raw_same_layout_is_byte_equality() {
         let raw = MessageParameter::Raw(vec![0x01; 16].into());
         let identical = MessageParameter::Raw(vec![0x01; 16].into());
         let mutated = MessageParameter::Raw({
@@ -1706,7 +1706,7 @@ mod tests {
     /// form this encoder knows; over-64 KiB fails locally with
     /// `MECHANISM_PARAM_INVALID`.
     #[test]
-    fn r5_to_wire_with_transport_version_matrix() {
+    fn to_wire_with_transport_version_matrix() {
         use pkcs11_proxy_ng_types::CkRv;
         let raw16 = MessageParameter::Raw(vec![0xA5; 16].into());
 
@@ -1754,7 +1754,7 @@ mod tests {
     /// R5/F1: structured arms always use the legacy encoding at every
     /// capability — their contract is unchanged across versions.
     #[test]
-    fn r5_structured_encode_ignores_transport_version() {
+    fn structured_encode_ignores_transport_version() {
         let gcm = MessageParameter::GcmMessage(GcmMessageParams {
             iv: vec![0x01; 12],
             iv_null_len: None,

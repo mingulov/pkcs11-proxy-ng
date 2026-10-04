@@ -961,7 +961,7 @@ mod message_contract_tests {
         assert!(message.is_none());
     }
 
-    fn r5_success_response_with_effects(
+    fn success_response_with_effects(
         message_effects: Option<v1_proto::MessageParameterEffects>,
     ) -> pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
         pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
@@ -988,15 +988,14 @@ mod message_contract_tests {
     /// `(None, None)` pair). RED pre-R5: the empty wire oneof fails
     /// `TryFrom` with `ARGUMENTS_BAD`.
     #[test]
-    fn r5_raw_request_with_empty_effects_wire_decodes_to_none() {
+    fn raw_request_with_empty_effects_wire_decodes_to_none() {
         let request = MessageParameter::Raw(vec![0xA5; 16].into());
         let output_spec =
             CkOutputBufferSpec { buffer_present: true, buffer_len: 16, length_pointer_null: false };
         let parameter_spec =
             CkParameterRoundtripSpec { buffer_present: true, buffer_len: 16, value: None };
-        let response = r5_success_response_with_effects(Some(v1_proto::MessageParameterEffects {
-            effect: None,
-        }));
+        let response =
+            success_response_with_effects(Some(v1_proto::MessageParameterEffects { effect: None }));
         let (_, _, effects) = decode_parameter_output_exact_response(
             response,
             &output_spec,
@@ -1015,7 +1014,7 @@ mod message_contract_tests {
     /// a Raw request with a non-empty structured effects message keeps the
     /// `validate_for` rejection.
     #[test]
-    fn r5_empty_effects_wire_matrix_pins() {
+    fn empty_effects_wire_matrix_pins() {
         let output_spec =
             CkOutputBufferSpec { buffer_present: true, buffer_len: 16, length_pointer_null: false };
         let parameter_spec =
@@ -1024,7 +1023,7 @@ mod message_contract_tests {
 
         for (label, request) in [("gcm", gcm_parameter()), ("ccm", ccm_parameter())] {
             let error = decode_parameter_output_exact_response(
-                r5_success_response_with_effects(empty()),
+                success_response_with_effects(empty()),
                 &output_spec,
                 &parameter_spec,
                 Some(&request),
@@ -1036,7 +1035,7 @@ mod message_contract_tests {
         }
 
         let (_, _, effects) = decode_parameter_output_exact_response(
-            r5_success_response_with_effects(None),
+            success_response_with_effects(None),
             &output_spec,
             &parameter_spec,
             None,
@@ -1053,7 +1052,7 @@ mod message_contract_tests {
             )),
         };
         let error = decode_parameter_output_exact_response(
-            r5_success_response_with_effects(Some(structured_wire)),
+            success_response_with_effects(Some(structured_wire)),
             &output_spec,
             &parameter_spec,
             Some(&request),
@@ -1064,7 +1063,7 @@ mod message_contract_tests {
         assert_eq!(error, CkRv::FUNCTION_NOT_SUPPORTED, "Raw + structured effects wire");
     }
 
-    fn r5_client_with_transport_version(version: u32) -> Pkcs11Client {
+    fn client_with_transport_version(version: u32) -> Pkcs11Client {
         let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
         let client = Pkcs11Client::from_channel(channel);
         client.set_mechanism_parameter_transport_version_for_tests(version);
@@ -1079,7 +1078,7 @@ mod message_contract_tests {
     /// (copied IV + `aad_null_len`, stamp 1, bools unset); a tail family
     /// (KEA) emits v1 presence envelopes at capability ≥ 1 (R18).
     #[tokio::test]
-    async fn r17_proto_mechanism_threads_capability() {
+    async fn proto_mechanism_threads_capability() {
         use pkcs11_proxy_ng_types::{CkMechanismType, GcmParams, KeaDeriveParams, PointerBytes};
         let mixed = CkMechanism {
             mechanism_type: CkMechanismType::AES_GCM,
@@ -1092,13 +1091,13 @@ mod message_contract_tests {
             })),
         };
 
-        let legacy = r5_client_with_transport_version(0);
+        let legacy = client_with_transport_version(0);
         let wire = legacy.proto_mechanism(&mixed).expect("legacy encodes");
         assert_eq!(wire, pkcs11_proxy_ng_proto::Mechanism::try_from(&mixed).unwrap());
         assert_eq!(wire.parameter_encoding_version, 0);
 
         for version in [1, 2] {
-            let client = r5_client_with_transport_version(version);
+            let client = client_with_transport_version(version);
             let wire = client.proto_mechanism(&mixed).expect("v1 encodes");
             assert_eq!(wire.parameter_encoding_version, 1, "capability {version}");
             match &wire.params {
@@ -1124,7 +1123,7 @@ mod message_contract_tests {
                 public_data_presence: PointerBytes::present_copy(&[]),
             })),
         };
-        let client = r5_client_with_transport_version(1);
+        let client = client_with_transport_version(1);
         let wire = client.proto_mechanism(&kea).expect("tail encodes");
         assert_eq!(wire.parameter_encoding_version, 1);
         match &wire.params {
@@ -1147,7 +1146,7 @@ mod message_contract_tests {
                 params_presence: pkcs11_proxy_ng_types::PointerArray::null_count(5),
             })),
         };
-        let legacy = r5_client_with_transport_version(0);
+        let legacy = client_with_transport_version(0);
         let wire = legacy.proto_mechanism(&otp).expect("legacy encodes");
         assert_eq!(wire.parameter_encoding_version, 0);
         match &wire.params {
@@ -1156,7 +1155,7 @@ mod message_contract_tests {
             }
             other => panic!("legacy must emit OtpParams, got {other:?}"),
         }
-        let client = r5_client_with_transport_version(1);
+        let client = client_with_transport_version(1);
         let wire = client.proto_mechanism(&otp).expect("v1 encodes");
         assert_eq!(wire.parameter_encoding_version, 1);
         match &wire.params {
@@ -1173,10 +1172,10 @@ mod message_contract_tests {
     /// v1-opaque (exact bytes, declared length, version 1); structured
     /// values keep the legacy encoding at every capability.
     #[tokio::test]
-    async fn r5_proto_message_parameter_encode_matrix() {
+    async fn proto_message_parameter_encode_matrix() {
         let raw16 = MessageParameter::Raw(vec![0xA5; 16].into());
 
-        let legacy = r5_client_with_transport_version(0);
+        let legacy = client_with_transport_version(0);
         let wire = legacy
             .proto_message_parameter(Some(&raw16))
             .expect("legacy encodes")
@@ -1185,7 +1184,7 @@ mod message_contract_tests {
         assert!(legacy.proto_message_parameter(None).expect("None encodes").is_none());
 
         for version in [1, 2] {
-            let client = r5_client_with_transport_version(version);
+            let client = client_with_transport_version(version);
             let wire = client
                 .proto_message_parameter(Some(&raw16))
                 .expect("v1 encodes Raw")
@@ -1202,7 +1201,7 @@ mod message_contract_tests {
             }
         }
 
-        let client = r5_client_with_transport_version(1);
+        let client = client_with_transport_version(1);
         let structured = gcm_parameter();
         let wire = client
             .proto_message_parameter(Some(&structured))
@@ -1216,7 +1215,7 @@ mod message_contract_tests {
     /// attempted — the channel is dead, so any emission would surface a
     /// transport error instead).
     #[tokio::test]
-    async fn r5_over_cap_raw_fails_locally_without_wire_emission() {
+    async fn over_cap_raw_fails_locally_without_wire_emission() {
         let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
         let mut client = Pkcs11Client::from_channel(channel);
         client.restore_context_id(Some("r5-no-emission".to_string()));

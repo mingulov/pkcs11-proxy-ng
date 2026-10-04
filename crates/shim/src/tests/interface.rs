@@ -1862,7 +1862,7 @@ fn pre_probe_fallback_catalog_shape_is_pinned_transient() {
 /// (snapshot stays 0).
 #[test]
 #[cfg(pkcs11_proxy_test_mechanism_params_v1)]
-fn r10_override_exact_env_forces_v1_snapshot_under_cfg() {
+fn override_exact_env_forces_v1_snapshot_under_cfg() {
     let _guard = shim_state_test_guard();
     crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(0);
     unsafe {
@@ -1881,7 +1881,7 @@ fn r10_override_exact_env_forces_v1_snapshot_under_cfg() {
 /// env ever takes effect in a normal build.
 #[test]
 #[cfg(not(pkcs11_proxy_test_mechanism_params_v1))]
-fn r10_override_env_inert_without_cfg() {
+fn override_env_inert_without_cfg() {
     let _guard = shim_state_test_guard();
     crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(0);
     unsafe {
@@ -1899,7 +1899,7 @@ fn r10_override_env_inert_without_cfg() {
 /// public snapshot read, and `clear_cache` resets it to legacy 0. Guarded:
 /// the snapshot is process-global, like the probe cache.
 #[test]
-fn r5_transport_version_snapshot_storage_round_trip() {
+fn transport_version_snapshot_storage_round_trip() {
     let _guard = shim_state_test_guard();
     crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(1);
     assert_eq!(crate::interface_probe::mechanism_parameter_transport_version(), 1);

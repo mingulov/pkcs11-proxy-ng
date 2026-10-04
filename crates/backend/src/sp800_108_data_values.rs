@@ -376,7 +376,7 @@ mod tests {
     }
 
     #[test]
-    fn nf1_counter_format_accepts_windows_packed() {
+    fn counter_format_accepts_windows_packed() {
         // 5-byte `{u8, u32}` pack(1) record: bool at 0, width at 1 (the
         // re-review probe bytes `[0, 32, 0, 0, 0]` decode to width 32).
         let packed = parse_counter_format(&counter_packed1(0, 32)).unwrap();
@@ -431,7 +431,7 @@ mod tests {
     }
 
     #[test]
-    fn nf1_dkm_length_format_accepts_windows_packed() {
+    fn dkm_length_format_accepts_windows_packed() {
         // 9-byte `{u32, u8, u32}` pack(1) record: method at 0, bool at 4,
         // width at 5 (the re-review probe bytes decode to method 1, width
         // 32).

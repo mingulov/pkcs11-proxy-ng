@@ -1930,7 +1930,7 @@ mod ambiguity_tests {
     /// reach the provider, which acks the exact byte length, and success
     /// carries a (no-output) effects carrier.
     #[tokio::test]
-    async fn r4_v1_opaque_oneshot_and_next_accepted_encrypt_decrypt() {
+    async fn v1_opaque_oneshot_and_next_accepted_encrypt_decrypt() {
         for sanitize in [false, true] {
             for function in [
                 ParameterOutputFunction::EncryptMessage,
@@ -2002,7 +2002,7 @@ mod ambiguity_tests {
     /// contradictory-metadata MPI. Undecodable bytes never take the
     /// sanitize-gated AB path.
     #[tokio::test]
-    async fn r4_undecodable_message_encodings_keep_r3_rvs() {
+    async fn undecodable_message_encodings_keep_r3_rvs() {
         let legacy_raw_v0 = pkcs11_proxy_ng_proto::MessageParameter {
             params: Some(pkcs11_proxy_ng_proto::message_parameter::Params::Raw(vec![0xA5; 16])),
             parameter_encoding_version: 0,
@@ -2081,7 +2081,7 @@ mod ambiguity_tests {
     /// and its native footprint is the byte length itself (mirrors T1's
     /// backend arm). Structured shapes are bit-identical.
     #[test]
-    fn r4_raw_null_positive_and_native_len() {
+    fn raw_null_positive_and_native_len() {
         let raw = MessageParameter::Raw(SecretBytes::new(vec![0xA5; 16]));
         assert!(!message_parameter_has_null_positive(&raw));
         assert_eq!(native_message_parameter_len(&raw), Ok(16));

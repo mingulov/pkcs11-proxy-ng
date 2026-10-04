@@ -2043,7 +2043,7 @@ fn step_occurrences_in_job(workflow: &str, job: &str, step: &str) -> usize {
 }
 
 #[test]
-fn r10_packaging_workflows_reject_test_mechanism_params_cfg() {
+fn packaging_workflows_reject_test_mechanism_params_cfg() {
     // R10 step 6 (S2 §11): the test-only v1-enable cfg must never reach
     // packaged or published artifacts — the packaging workflows fail loudly
     // when RUSTFLAGS carries it. cut-release verifies on main before the tag
