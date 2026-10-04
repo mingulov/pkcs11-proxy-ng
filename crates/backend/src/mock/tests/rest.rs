@@ -98,7 +98,7 @@ fn get_attribute_value_exact_unknown_handle_returns_error() {
         nested: None,
     };
     assert_eq!(
-        backend.get_attribute_value_exact(session, CkObjectHandle(42), &[query]).unwrap_err(),
+        backend.get_attribute_value_exact(session, CkObjectHandle(42), Some(&[query])).unwrap_err(),
         CkRv::OBJECT_HANDLE_INVALID
     );
 }
@@ -489,12 +489,12 @@ fn get_attribute_value_exact_size_query_returns_length_without_bytes() {
         .get_attribute_value_exact(
             session,
             obj,
-            &[CkAttributeQuery {
+            Some(&[CkAttributeQuery {
                 attr_type: CkAttributeType::LABEL,
                 buffer_present: false,
                 buffer_len: 7,
                 nested: None,
-            }],
+            }]),
         )
         .unwrap();
 
@@ -528,12 +528,12 @@ fn get_attribute_value_exact_too_small_returns_backend_length() {
         .get_attribute_value_exact(
             session,
             obj,
-            &[CkAttributeQuery {
+            Some(&[CkAttributeQuery {
                 attr_type: CkAttributeType::LABEL,
                 buffer_present: true,
                 buffer_len: 2,
                 nested: None,
-            }],
+            }]),
         )
         .unwrap();
 
@@ -569,7 +569,7 @@ fn get_attribute_value_exact_mixed_sensitive_and_invalid_preserves_statuses() {
         .get_attribute_value_exact(
             session,
             obj,
-            &[
+            Some(&[
                 CkAttributeQuery {
                     attr_type: CkAttributeType::LABEL,
                     buffer_present: false,
@@ -588,7 +588,7 @@ fn get_attribute_value_exact_mixed_sensitive_and_invalid_preserves_statuses() {
                     buffer_len: 0,
                     nested: None,
                 },
-            ],
+            ]),
         )
         .unwrap();
 

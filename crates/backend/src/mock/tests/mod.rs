@@ -221,12 +221,12 @@ fn assert_mock_label(
         .get_attribute_value_exact(
             session,
             object,
-            &[CkAttributeQuery {
+            Some(&[CkAttributeQuery {
                 attr_type: CkAttributeType::LABEL,
                 buffer_present: true,
                 buffer_len: expected.len() as u64,
                 nested: None,
-            }],
+            }]),
         )
         .unwrap();
     assert_eq!(rv, CkRv::OK);

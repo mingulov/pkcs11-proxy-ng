@@ -551,6 +551,11 @@ message GetAttributeValueExactRequest {
   uint64 object_handle = 3;
   repeated AttributeQuery queries = 4;
   uint32 exact_output_effects_version = 5;
+  // FIX-1 (v0.2.1): true => caller passed (NULL, 0); queries is then empty.
+  // The daemon materializes a NULL template pointer instead of (ptr, 0),
+  // mirroring the Wave 3.5 D2 find-init convention: backends such as
+  // kryoptic answer ARGUMENTS_BAD for NULL and OK for an empty template.
+  bool template_null = 6;
 }
 message GetAttributeValueExactResponse {
   uint64 ck_rv = 1;

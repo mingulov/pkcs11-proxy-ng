@@ -158,7 +158,7 @@ pub trait Pkcs11Backend: Send + Sync {
         &self,
         _session: CkSessionHandle,
         _object: CkObjectHandle,
-        _queries: &[CkAttributeQuery],
+        _queries: Option<&[CkAttributeQuery]>,
     ) -> CkResult<(CkRv, Vec<CkAttributeQueryResult>)> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }

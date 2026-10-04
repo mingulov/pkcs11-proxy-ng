@@ -765,7 +765,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         object: CkObjectHandle,
-        queries: &[CkAttributeQuery],
+        queries: Option<&[CkAttributeQuery]>,
     ) -> CkResult<(CkRv, Vec<CkAttributeQueryResult>)> {
         self.ffi_get_attribute_value_exact(session, object, queries)
     }

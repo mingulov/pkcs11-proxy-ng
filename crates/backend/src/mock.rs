@@ -322,6 +322,9 @@ pub struct MockBackend {
     /// Records pointer-presence only — never secret bytes — so NULL-vs-empty
     /// proxying (W1-C6-07) is observable without retaining credentials.
     login_user_presence: Mutex<Vec<(bool, bool)>>,
+    /// Presence-only observations of backend `get_attribute_value_exact`
+    /// calls: `queries_is_none` per call, in arrival order (FIX-1).
+    gav_exact_presence: Mutex<Vec<bool>>,
     token_info_calls: AtomicUsize,
     /// Count of backend `find_objects` (`C_FindObjects`) calls. Used by the
     /// W1-C1-07 scan-bound test to prove bounded backend round-trips.
@@ -518,6 +521,7 @@ impl MockBackend {
             login_calls: AtomicUsize::new(0),
             login_user_calls: AtomicUsize::new(0),
             login_user_presence: Mutex::new(Vec::new()),
+            gav_exact_presence: Mutex::new(Vec::new()),
             token_info_calls: AtomicUsize::new(0),
             find_objects_calls: AtomicUsize::new(0),
             data_op_calls: AtomicUsize::new(0),
@@ -787,6 +791,13 @@ impl MockBackend {
     /// Presence only — no secret bytes are ever retained.
     pub fn login_user_presence_observations(&self) -> Vec<(bool, bool)> {
         self.login_user_presence.lock().unwrap().clone()
+    }
+
+    /// Snapshot of the presence-only `get_attribute_value_exact`
+    /// observations recorded so far: `queries_is_none` per call, in
+    /// arrival order (FIX-1: NULL vs empty template classes).
+    pub fn gav_exact_presence_observations(&self) -> Vec<bool> {
+        self.gav_exact_presence.lock().unwrap().clone()
     }
 
     /// Number of backend `find_objects` (`C_FindObjects`) calls.
@@ -2161,7 +2172,7 @@ impl Pkcs11Backend for MockBackend {
         &self,
         session: CkSessionHandle,
         object: CkObjectHandle,
-        queries: &[CkAttributeQuery],
+        queries: Option<&[CkAttributeQuery]>,
     ) -> CkResult<(CkRv, Vec<CkAttributeQueryResult>)> {
         self.get_attribute_value_exact_impl(session, object, queries)
     }

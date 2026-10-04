@@ -49,7 +49,7 @@ fn assert_backend_nested_class(abi: MockAbi, object: CK_OBJECT_HANDLE, expected:
         .get_attribute_value_exact(
             session,
             object,
-            &[CkAttributeQuery {
+            Some(&[CkAttributeQuery {
                 attr_type: CkAttributeType::WRAP_TEMPLATE,
                 buffer_present: true,
                 buffer_len: abi.attribute_stride() as u64,
@@ -59,7 +59,7 @@ fn assert_backend_nested_class(abi: MockAbi, object: CK_OBJECT_HANDLE, expected:
                     buffer_len: abi.ulong_width() as u64,
                     nested: None,
                 }]),
-            }],
+            }]),
         )
         .unwrap();
     daemon.backend.close_session(session).unwrap();

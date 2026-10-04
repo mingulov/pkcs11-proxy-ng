@@ -281,7 +281,8 @@ fn ilp32_profile_emits_4_byte_ulongs() {
         buffer_len: 0,
         nested: None,
     }];
-    let (rv, results) = backend.get_attribute_value_exact(session, object, &size_query).unwrap();
+    let (rv, results) =
+        backend.get_attribute_value_exact(session, object, Some(&size_query)).unwrap();
     assert_eq!(rv, CkRv::OK);
     assert_eq!(results[0].returned_len, 4, "ILP32 backend reports 4-byte ulong lengths");
 
@@ -291,7 +292,8 @@ fn ilp32_profile_emits_4_byte_ulongs() {
         buffer_len: 4,
         nested: None,
     }];
-    let (rv, results) = backend.get_attribute_value_exact(session, object, &data_query).unwrap();
+    let (rv, results) =
+        backend.get_attribute_value_exact(session, object, Some(&data_query)).unwrap();
     assert_eq!(rv, CkRv::OK);
     assert_eq!(
         results[0].value,
@@ -322,7 +324,8 @@ fn llp64_profile_reports_16_byte_attribute_stride() {
         buffer_len: 0,
         nested: None,
     }];
-    let (rv, results) = backend.get_attribute_value_exact(session, object, &size_query).unwrap();
+    let (rv, results) =
+        backend.get_attribute_value_exact(session, object, Some(&size_query)).unwrap();
     assert_eq!(rv, CkRv::OK);
     assert_eq!(results[0].returned_len, 2 * 16, "LLP64 packed CK_ATTRIBUTE stride is 16");
 
@@ -346,7 +349,8 @@ fn llp64_profile_reports_16_byte_attribute_stride() {
             },
         ]),
     }];
-    let (rv, results) = backend.get_attribute_value_exact(session, object, &data_query).unwrap();
+    let (rv, results) =
+        backend.get_attribute_value_exact(session, object, Some(&data_query)).unwrap();
     assert_eq!(rv, CkRv::OK);
     let nested = results[0].nested.as_ref().expect("nested results");
     assert_eq!(nested[0].value, Some(SecretBytes::new(MockAbi::Llp64.encode_ulong(3))));
@@ -519,12 +523,12 @@ fn create_object_stores_template_attributes_for_read_back() {
         .get_attribute_value_exact(
             session,
             object,
-            &[
+            Some(&[
                 query(CkAttributeType::CLASS, 4),
                 query(CkAttributeType::TOKEN, 1),
                 query(CkAttributeType::LABEL, 5),
                 query(CkAttributeType(VENDOR_ATTR), 3),
-            ],
+            ]),
         )
         .unwrap();
     assert_eq!(rv, CkRv::OK);
@@ -561,12 +565,12 @@ fn generated_secret_key_value_has_requested_value_len() {
         .get_attribute_value_exact(
             session,
             key,
-            &[CkAttributeQuery {
+            Some(&[CkAttributeQuery {
                 attr_type: CkAttributeType::VALUE,
                 buffer_present: false,
                 buffer_len: 0,
                 nested: None,
-            }],
+            }]),
         )
         .unwrap();
     assert_eq!(rv, CkRv::OK);
@@ -594,12 +598,12 @@ fn explicit_value_wins_over_value_len_synthesis() {
         .get_attribute_value_exact(
             session,
             key,
-            &[CkAttributeQuery {
+            Some(&[CkAttributeQuery {
                 attr_type: CkAttributeType::VALUE,
                 buffer_present: false,
                 buffer_len: 0,
                 nested: None,
-            }],
+            }]),
         )
         .unwrap();
     assert_eq!(results[0].returned_len, 4, "an explicit CKA_VALUE is not overridden");
@@ -625,7 +629,7 @@ fn generate_key_synthesizes_class_and_key_type() {
         .get_attribute_value_exact(
             session,
             key,
-            &[query(CkAttributeType::CLASS), query(CkAttributeType::KEY_TYPE)],
+            Some(&[query(CkAttributeType::CLASS), query(CkAttributeType::KEY_TYPE)]),
         )
         .unwrap();
     assert_eq!(rv, CkRv::OK);
@@ -657,12 +661,12 @@ fn generate_key_template_overrides_synthesized_class() {
         .get_attribute_value_exact(
             session,
             key,
-            &[CkAttributeQuery {
+            Some(&[CkAttributeQuery {
                 attr_type: CkAttributeType::CLASS,
                 buffer_present: true,
                 buffer_len: 8,
                 nested: None,
-            }],
+            }]),
         )
         .unwrap();
     assert_eq!(

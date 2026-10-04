@@ -163,12 +163,12 @@ fn object_management_workflows_reject_invalid_session_without_mutating_objects()
             .get_attribute_value_exact(
                 invalid_session,
                 object,
-                &[CkAttributeQuery {
+                Some(&[CkAttributeQuery {
                     attr_type: CkAttributeType::LABEL,
                     buffer_present: true,
                     buffer_len: 4,
                     nested: None,
-                }],
+                }],)
             )
             .unwrap_err(),
         CkRv::SESSION_HANDLE_INVALID

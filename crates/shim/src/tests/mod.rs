@@ -36,6 +36,8 @@ mod endpoint;
 mod init_args;
 #[cfg(not(miri))] // binds TcpListeners / dials daemons; covered natively
 mod interface;
+#[cfg(not(miri))] // real kryoptic provider + daemon; covered natively
+mod kryoptic_gav_null;
 mod null_pointers;
 #[cfg(not(miri))] // binds TcpListeners (tokio); covered natively
 mod output_semantics;

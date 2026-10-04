@@ -287,12 +287,12 @@ async fn derive_key_mechanism_out_virtualizes_sp800_108_additional_key_handles()
         .get_attribute_value_exact(
             session,
             additional_key,
-            &[CkAttributeQuery {
+            Some(&[CkAttributeQuery {
                 attr_type: CkAttributeType::VALUE_LEN,
                 buffer_present: false,
                 buffer_len: 0,
                 nested: None,
-            }],
+            }]),
         )
         .await
         .unwrap();
@@ -303,12 +303,12 @@ async fn derive_key_mechanism_out_virtualizes_sp800_108_additional_key_handles()
         .get_attribute_value_exact(
             session,
             additional_key,
-            &[CkAttributeQuery {
+            Some(&[CkAttributeQuery {
                 attr_type: CkAttributeType::VALUE_LEN,
                 buffer_present: true,
                 buffer_len: size_results[0].returned_len,
                 nested: None,
-            }],
+            }]),
         )
         .await
         .unwrap();
@@ -373,12 +373,12 @@ async fn derive_key_mechanism_out_virtualizes_sp800_108_double_pipeline_addition
         .get_attribute_value_exact(
             session,
             additional_key,
-            &[CkAttributeQuery {
+            Some(&[CkAttributeQuery {
                 attr_type: CkAttributeType::LABEL,
                 buffer_present: true,
                 buffer_len: "double-pipeline-extra".len() as u64,
                 nested: None,
-            }],
+            }]),
         )
         .await
         .unwrap();
@@ -496,12 +496,12 @@ async fn derive_key_mechanism_out_virtualizes_sp800_108_feedback_additional_key_
         .get_attribute_value_exact(
             session,
             additional_key,
-            &[CkAttributeQuery {
+            Some(&[CkAttributeQuery {
                 attr_type: CkAttributeType::VALUE_LEN,
                 buffer_present: true,
                 buffer_len: 8,
                 nested: None,
-            }],
+            }]),
         )
         .await
         .unwrap();

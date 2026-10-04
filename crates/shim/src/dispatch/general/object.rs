@@ -111,7 +111,10 @@ pub unsafe extern "C" fn c_get_attribute_value(
             }
         }
         let queries: Vec<_> = calls.iter().map(|call| call.query.clone()).collect();
-        match with_client!(client => client.get_attribute_value_exact(CkSessionHandle(h_session as u64), CkObjectHandle(h_object as u64), &queries))
+        // FIX-1: preserve caller (NULL, 0) as None (the Wave 3.5 D2
+        // find-init convention) — (NULL, N>0) was already rejected above.
+        let queries_opt = if p_template.is_null() { None } else { Some(queries.as_slice()) };
+        match with_client!(client => client.get_attribute_value_exact(CkSessionHandle(h_session as u64), CkObjectHandle(h_object as u64), queries_opt))
         {
             Ok((rv, results)) => match exact::prepare(
                 &calls,

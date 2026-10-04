@@ -706,7 +706,7 @@ fn derive_key_with_sp800_108_additional_key_handles_preserves_templates() {
             .get_attribute_value_exact(
                 session,
                 additional_key,
-                &[
+                Some(&[
                     CkAttributeQuery {
                         attr_type: CkAttributeType::VALUE_LEN,
                         buffer_present: false,
@@ -719,7 +719,7 @@ fn derive_key_with_sp800_108_additional_key_handles_preserves_templates() {
                         buffer_len: 0,
                         nested: None,
                     },
-                ],
+                ]),
             )
             .unwrap();
         assert_eq!(rv, CkRv::OK);
@@ -733,7 +733,7 @@ fn derive_key_with_sp800_108_additional_key_handles_preserves_templates() {
             .get_attribute_value_exact(
                 session,
                 additional_key,
-                &[
+                Some(&[
                     CkAttributeQuery {
                         attr_type: CkAttributeType::VALUE_LEN,
                         buffer_present: true,
@@ -746,7 +746,7 @@ fn derive_key_with_sp800_108_additional_key_handles_preserves_templates() {
                         buffer_len: size_results[1].returned_len,
                         nested: None,
                     },
-                ],
+                ]),
             )
             .unwrap();
         assert_eq!(rv, CkRv::OK);
@@ -1165,12 +1165,12 @@ fn derive_key_with_sp800_108_additional_key_handles_rejects_small_attribute_buff
         .get_attribute_value_exact(
             session,
             additional_key,
-            &[CkAttributeQuery {
+            Some(&[CkAttributeQuery {
                 attr_type: CkAttributeType::LABEL,
                 buffer_present: true,
                 buffer_len: 4,
                 nested: None,
-            }],
+            }]),
         )
         .unwrap();
     assert_eq!(rv, CkRv::BUFFER_TOO_SMALL);
@@ -1269,12 +1269,12 @@ fn close_session_clears_sp800_108_session_keys_but_preserves_token_keys() {
                 .get_attribute_value_exact(
                     fresh_session,
                     object,
-                    &[CkAttributeQuery {
+                    Some(&[CkAttributeQuery {
                         attr_type: CkAttributeType::LABEL,
                         buffer_present: false,
                         buffer_len: 0,
                         nested: None,
-                    }],
+                    }],)
                 )
                 .unwrap_err(),
             CkRv::OBJECT_HANDLE_INVALID
@@ -1425,12 +1425,12 @@ fn derived_object_stores_its_template_attributes() {
         .get_attribute_value_exact(
             session,
             derived,
-            &[CkAttributeQuery {
+            Some(&[CkAttributeQuery {
                 attr_type: CkAttributeType::VALUE_LEN,
                 buffer_present: false,
                 buffer_len: 0,
                 nested: None,
-            }],
+            }]),
         )
         .unwrap();
     assert_eq!(rv, CkRv::OK);
