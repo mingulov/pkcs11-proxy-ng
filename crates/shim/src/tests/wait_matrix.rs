@@ -218,3 +218,65 @@ fn wait_unmapped_wide_backend_slot_suppresses_to_no_event() {
     assert_eq!(rv, CKR_NO_EVENT as CK_RV);
     assert_eq!(slot, CANARY_SLOT, "suppressed event must not write the caller slot");
 }
+
+/// #25: blocking flags are a documented local refusal, never a parked
+/// wait — and client Finalize completes afterwards.
+///
+/// At a48b60b the shim held the client mutex across the awaited RPC
+/// while the daemon parked the blocking wait natively, so Finalize
+/// deadlocked (10 s, then SIGTERM; direct finalized with the waiter
+/// released). HEAD refuses blocking waits at daemon admission with
+/// zero native attempts (ownership §"Slot-event scope": local
+/// `CKR_FUNCTION_NOT_SUPPORTED`, no caller output) and the shim
+/// drops the client mutex before the RPC. This pins the refusal leg
+/// of the issue shape: refusal on a worker thread (a parked wait
+/// fails the test instead of wedging the suite), slot cell
+/// untouched, zero backend wait calls, and a completing Finalize.
+/// It does not independently pin the mutex lifetime or Finalize
+/// racing an in-flight waiter; the 30 s bound is a hang watchdog,
+/// not a promptness measurement.
+#[test]
+fn wait_blocking_flags_refused_and_finalize_completes() {
+    let _guard = shim_state_test_guard();
+    let daemon = TestDaemon::shared();
+    ensure_mock_initialized(daemon);
+    let mut session = ShimSession::with_endpoint(&daemon.endpoint);
+    let waits_before = daemon.backend.wait_call_count();
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut slot = CANARY_SLOT;
+        let rv =
+            unsafe { dispatch::general::c_wait_for_slot_event(0, &mut slot, std::ptr::null_mut()) };
+        let _ = tx.send((rv, slot));
+    });
+    let (rv, slot) = match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+        Ok(got) => got,
+        Err(_) => {
+            // Release a hypothetically parked worker before failing so
+            // it cannot consume a later test's queued event on the
+            // shared daemon (logical Finalize does not wake backend
+            // waiters). The sacrificial event wakes a mock-condvar
+            // waiter; drain its report (if any) so the thread exits.
+            daemon.backend.enqueue_slot_event(CkSlotId(0));
+            let _ = rx.recv_timeout(std::time::Duration::from_secs(10));
+            panic!("blocking wait must be refused promptly, never parked (recv timeout)");
+        }
+    };
+    assert_eq!(rv, CKR_FUNCTION_NOT_SUPPORTED as CK_RV);
+    assert_eq!(slot, CANARY_SLOT, "refusal must not write the caller slot");
+    assert_eq!(
+        daemon.backend.wait_call_count(),
+        waits_before,
+        "refused wait must never dispatch to the backend"
+    );
+
+    // The a48b60b deadlock: Finalize completes (no mutex contention
+    // with a parked call). Disarm the session handle first so the
+    // Drop finalizer below stays a harmless second Finalize.
+    let rv = unsafe { dispatch::general::c_close_session(session.session) };
+    assert_eq!(rv, CKR_OK as CK_RV, "C_CloseSession");
+    session.session = CK_INVALID_HANDLE;
+    let rv = unsafe { dispatch::general::c_finalize(std::ptr::null_mut()) };
+    assert_eq!(rv, CKR_OK as CK_RV, "C_Finalize must complete after a refused wait");
+}
