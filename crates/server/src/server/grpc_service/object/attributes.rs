@@ -1853,4 +1853,95 @@ mod tests {
         );
         assert_eq!(attr_value_to_bytes(CkAttributeValue::Bool(true)), vec![1]);
     }
+
+    /// #26, backend-error leg: when the backend reports `Err(CkRv)`, the
+    /// daemon must forward the RV with NO per-attribute results.
+    ///
+    /// The a48b60b daemon attached its zero-filled buffer as the attribute
+    /// "value" regardless of RV; the shim then stored those zeros over the
+    /// caller's buffer. Both exact error arms (off-path and coalesce-fetch)
+    /// return `results: vec![]`. Note this covers only the `Err` channel:
+    /// native FFI errors may instead arrive as `Ok((rv, len-only-results))`
+    /// (observed against live SoftHSM), which forwards the len-only results
+    /// for the shim's len-only writeback — pinned separately by
+    /// `exact_attribute_error_len_only_preserves_caller_buffer`.
+    ///
+    /// Each leg pins the coalescer flag explicitly under the serial guard
+    /// and asserts the backend was reached exactly once, so a resolve
+    /// shortcut returning the same 0x82/empty shape cannot satisfy the pin.
+    async fn exact_backend_error_case(coalesce: bool) {
+        let _guard = crate::server::resilience::CONFIG_TEST_GUARD.lock().await;
+        crate::server::resilience::reset_config_for_test();
+        crate::server::resilience::configure(None, coalesce);
+        let mock = mock_with_attrs();
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let ctx_id = ctx_mgr.create_context(Some(MTLS_IDENTITY.into())).await.unwrap();
+        // Mapping present for backend object 2, but the mock never created
+        // it — resolve succeeds, the backend reports OBJECT_HANDLE_INVALID.
+        ctx_mgr
+            .get_context(&ctx_id, |c| {
+                c.register_session(
+                    BackendHandle(1),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                );
+                c.object_handles.insert(BackendHandle(2));
+            })
+            .await;
+        ctx_mgr.cache_token_info(
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+            "MockToken".into(),
+            "0001".into(),
+        );
+
+        let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        ctx.token_policy = Arc::new(allow_policy());
+
+        let session_handle = ctx_mgr
+            .get_context(&ctx_id, |c| c.session_handles.virtual_handles().next().unwrap().0)
+            .await
+            .unwrap();
+        let object_handle = ctx_mgr
+            .get_context(&ctx_id, |c| c.object_handles.virtual_handles().next().unwrap().0)
+            .await
+            .unwrap();
+
+        let resp = super::get_attribute_value_exact(
+            &ctx,
+            Request::new(pkcs11_proxy_ng_proto::GetAttributeValueExactRequest {
+                exact_output_effects_version: 1,
+                client_context_id: ctx_id.0.clone(),
+                session_handle,
+                object_handle,
+                queries: vec![pkcs11_proxy_ng_proto::AttributeQuery {
+                    attr_type: CkAttributeType::ID.0,
+                    buffer_present: true,
+                    buffer_len: 64,
+                    nested: None,
+                }],
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(resp.ck_rv, CkRv::OBJECT_HANDLE_INVALID.0, "backend 0x82 must surface");
+        assert!(resp.results.is_empty(), "no value bytes on backend error");
+        assert_eq!(
+            mock.attr_get_exact_call_count(),
+            1,
+            "backend Err arm must be reached exactly once (coalesce={coalesce})"
+        );
+        crate::server::resilience::reset_config_for_test();
+    }
+
+    #[tokio::test]
+    async fn exact_backend_error_off_path_returns_rv_with_empty_results() {
+        exact_backend_error_case(false).await;
+    }
+
+    #[tokio::test]
+    async fn exact_backend_error_coalesce_path_returns_rv_with_empty_results() {
+        exact_backend_error_case(true).await;
+    }
 }

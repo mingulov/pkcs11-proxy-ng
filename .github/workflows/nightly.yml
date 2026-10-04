@@ -332,7 +332,8 @@ jobs:
             tests::endpoint \
             tests::regression \
             tests::resource_limits \
-            tests::poison_recovery
+            tests::poison_recovery \
+            exact_attribute_error
           # Shim param-reader suites run as SEPARATE lines (measured
           # 2026-09-30): each passes standalone (56 in ~92 s, 36 in
           # ~12 s, 15 in ~9 s) but the combined 107-test process

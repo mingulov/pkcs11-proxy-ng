@@ -343,6 +343,50 @@ mod lifecycle_output_tests {
         (backend, functions)
     }
 
+    /// #26 canary shape: 0x82, writes `ulValueLen`, no value bytes.
+    /// The provider reports 17 against a 64-byte buffer so the pin proves
+    /// length propagation instead of echoing the input length.
+    unsafe extern "C" fn get_attr_handle_invalid_len_only(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _object: cryptoki_sys::CK_OBJECT_HANDLE,
+        attrs: cryptoki_sys::CK_ATTRIBUTE_PTR,
+        count: cryptoki_sys::CK_ULONG,
+    ) -> cryptoki_sys::CK_RV {
+        if !attrs.is_null() && count >= 1 {
+            unsafe { std::ptr::addr_of_mut!((*attrs).ulValueLen).write(17) };
+        }
+        cryptoki_sys::CKR_OBJECT_HANDLE_INVALID
+    }
+
+    /// #26: a provider 0x82 that writes `ulValueLen` but no value
+    /// bytes must surface len-only results — never the zero-filled
+    /// daemon buffer as a "value". At a48b60b the mapping attached
+    /// daemon bytes regardless of RV and the shim wrote them, zeroing
+    /// the caller canary.
+    #[test]
+    fn get_attribute_value_exact_handle_invalid_carries_len_only() {
+        use crate::traits::Pkcs11Backend;
+        let (backend, _functions) = backend_with_object_stubs();
+        unsafe {
+            (*backend.func_list).C_GetAttributeValue = Some(get_attr_handle_invalid_len_only)
+        };
+        backend.lifecycle_domain.open_for_tests();
+        let queries = [CkAttributeQuery {
+            attr_type: CkAttributeType::VALUE,
+            buffer_present: true,
+            buffer_len: 64,
+            nested: None,
+        }];
+        let (rv, results) = backend
+            .get_attribute_value_exact(CkSessionHandle(7), CkObjectHandle(9), &queries)
+            .unwrap();
+        assert_eq!(rv, CkRv::OBJECT_HANDLE_INVALID);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].returned_len, 17, "provider len 17 must propagate, not echo 64");
+        assert!(results[0].apply_returned_len, "provider len write must surface");
+        assert!(results[0].value.is_none(), "no value bytes on 0x82 — never daemon zeros");
+    }
+
     #[test]
     fn get_attribute_value_denied_before_lifecycle_open() {
         // TF01b `call_raw` ordinary proof: no admission pre-Init.
