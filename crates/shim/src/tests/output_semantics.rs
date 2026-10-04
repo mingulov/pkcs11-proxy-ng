@@ -516,6 +516,49 @@ fn shim_login_user_null_vs_empty_presence_reaches_backend() {
     );
 }
 
+/// FIX-1: `C_GetAttributeValue` must preserve caller-NULL template as
+/// None end to end (the `C_Login`/`C_LoginUser` convention), not flatten
+/// it to an empty query list. A (NULL, 0) call must arrive at the backend
+/// as None while an explicit (non-NULL, 0) call arrives as Some — the two
+/// pointer classes stay distinguishable, exactly like `C_FindObjectsInit`
+/// (Wave 3.5 D2). Backends such as kryoptic answer ARGUMENTS_BAD for NULL
+/// and OK for an empty template.
+#[test]
+fn shim_get_attribute_value_null_vs_empty_presence_reaches_backend() {
+    let _guard = shim_state_test_guard();
+    let daemon = TestDaemon::shared();
+    let shim = ShimSession::new();
+    let object = create_object(shim.session);
+    daemon.backend.set_attribute(
+        backend_object_handle(daemon, object),
+        CkAttributeType::LABEL,
+        MockAttributeSlot::Value(CkAttributeValue::String("key".into())),
+    );
+    let observations_before = daemon.backend.gav_exact_presence_observations().len();
+
+    // Caller-NULL template with zero count.
+    let null_rv = unsafe {
+        dispatch::general::c_get_attribute_value(shim.session, object, std::ptr::null_mut(), 0)
+    };
+    // Explicit-empty template: non-NULL pointer with zero count.
+    let mut empty = [0u8; 1];
+    let empty_rv = unsafe {
+        dispatch::general::c_get_attribute_value(
+            shim.session,
+            object,
+            empty.as_mut_ptr() as CK_ATTRIBUTE_PTR,
+            0,
+        )
+    };
+
+    // The mock answers empty-equivalently for both (no NULL-distinguishing
+    // quirk), but the backend must observe distinct presence classes.
+    assert_eq!(null_rv, CKR_OK as CK_RV);
+    assert_eq!(empty_rv, CKR_OK as CK_RV);
+    let fresh = &daemon.backend.gav_exact_presence_observations()[observations_before..];
+    assert_eq!(fresh, &[true, false], "NULL must arrive as None, empty as Some(&[])");
+}
+
 #[test]
 fn shim_get_attribute_value_null_zero_reaches_empty_query_backend() {
     let _guard = shim_state_test_guard();
@@ -670,12 +713,12 @@ fn raw_client_size_query_returns_length_without_bytes() {
             .get_attribute_value_exact(
                 session,
                 object,
-                &[CkAttributeQuery {
+                Some(&[CkAttributeQuery {
                     attr_type: CkAttributeType::LABEL,
                     buffer_present: false,
                     buffer_len: 9,
                     nested: None,
-                }],
+                }]),
             )
             .await
             .expect("GetAttributeValueExact RPC");
@@ -723,12 +766,12 @@ fn raw_client_too_small_query_preserves_backend_returned_length() {
             .get_attribute_value_exact(
                 session,
                 object,
-                &[CkAttributeQuery {
+                Some(&[CkAttributeQuery {
                     attr_type: CkAttributeType::LABEL,
                     buffer_present: true,
                     buffer_len: 2,
                     nested: None,
-                }],
+                }]),
             )
             .await
             .expect("GetAttributeValueExact RPC");
@@ -776,12 +819,12 @@ fn raw_client_exact_fit_query_returns_backend_bytes() {
             .get_attribute_value_exact(
                 session,
                 object,
-                &[CkAttributeQuery {
+                Some(&[CkAttributeQuery {
                     attr_type: CkAttributeType::LABEL,
                     buffer_present: true,
                     buffer_len: 3,
                     nested: None,
-                }],
+                }]),
             )
             .await
             .expect("GetAttributeValueExact RPC");
@@ -835,7 +878,7 @@ fn raw_client_mixed_sensitive_and_invalid_preserves_per_attribute_status() {
             .get_attribute_value_exact(
                 session,
                 object,
-                &[
+                Some(&[
                     CkAttributeQuery {
                         attr_type: CkAttributeType::LABEL,
                         buffer_present: false,
@@ -854,7 +897,7 @@ fn raw_client_mixed_sensitive_and_invalid_preserves_per_attribute_status() {
                         buffer_len: 0,
                         nested: None,
                     },
-                ],
+                ]),
             )
             .await
             .expect("GetAttributeValueExact RPC");
@@ -4061,12 +4104,12 @@ fn raw_client_nested_template_size_query() {
             .get_attribute_value_exact(
                 session,
                 object,
-                &[CkAttributeQuery {
+                Some(&[CkAttributeQuery {
                     attr_type: CkAttributeType::WRAP_TEMPLATE,
                     buffer_present: false,
                     buffer_len: 0,
                     nested: None,
-                }],
+                }]),
             )
             .await
             .expect("GetAttributeValueExact RPC");
@@ -4124,7 +4167,7 @@ fn raw_client_nested_template_data_query() {
             .get_attribute_value_exact(
                 session,
                 object,
-                &[CkAttributeQuery {
+                Some(&[CkAttributeQuery {
                     attr_type: CkAttributeType::WRAP_TEMPLATE,
                     buffer_present: true,
                     buffer_len: 2 * ck_attr_size,
@@ -4142,7 +4185,7 @@ fn raw_client_nested_template_data_query() {
                             nested: None,
                         },
                     ]),
-                }],
+                }]),
             )
             .await
             .expect("GetAttributeValueExact RPC");

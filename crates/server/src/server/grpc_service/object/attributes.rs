@@ -390,7 +390,22 @@ pub(super) async fn get_attribute_value_exact(
             }
         };
 
-    let queries = req.queries.iter().map(CkAttributeQuery::from).collect::<Vec<_>>();
+    // FIX-1: the template_null bit (Wave 3.5 D2 find-init convention)
+    // distinguishes caller (NULL, 0) from an explicit empty template.
+    // A set bit with a non-empty query list is malformed wire input.
+    let queries_opt = if req.template_null {
+        if !req.queries.is_empty() {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::GetAttributeValueExactResponse {
+                exact_output_effects_version: 1,
+                ck_rv: CkRv::ARGUMENTS_BAD.0,
+                results: vec![],
+            }));
+        }
+        None
+    } else {
+        Some(req.queries.iter().map(CkAttributeQuery::from).collect::<Vec<_>>())
+    };
+    let queries = queries_opt.as_deref().unwrap_or(&[]);
     // Keep only the (Copy) attribute types for post-call alignment validation,
     // then move the full query vector into the backend call — avoids cloning the
     // whole query vector on this hot read path (M8).
@@ -432,7 +447,11 @@ pub(super) async fn get_attribute_value_exact(
     if !crate::server::resilience::coalesce_enabled() {
         let backend = ctx.backend.clone();
         let result = spawn_backend_exact(move || {
-            ExactCompletion::capture(backend.get_attribute_value_exact(session, object, &queries))
+            ExactCompletion::capture(backend.get_attribute_value_exact(
+                session,
+                object,
+                queries_opt.as_deref(),
+            ))
         })
         .await?;
         return match result {
@@ -498,12 +517,16 @@ pub(super) async fn get_attribute_value_exact(
     } else {
         let fetch_query_types: Vec<CkAttributeType> =
             fetch_queries.iter().map(|q| q.attr_type).collect();
+        // FIX-1: a caller-NULL template stays None through the coalesce
+        // path (an empty fetch list from a non-empty query list stays
+        // Some — it cannot happen here since that short-circuits above).
+        let fetch_opt = if queries_opt.is_none() { None } else { Some(fetch_queries) };
         let backend = ctx.backend.clone();
         let result = spawn_backend_exact(move || {
             ExactCompletion::capture(backend.get_attribute_value_exact(
                 session,
                 object,
-                &fetch_queries,
+                fetch_opt.as_deref(),
             ))
         })
         .await?;
@@ -1246,6 +1269,7 @@ mod tests {
             .unwrap();
 
         let make_req = || pkcs11_proxy_ng_proto::GetAttributeValueExactRequest {
+            template_null: false,
             exact_output_effects_version: 1,
             client_context_id: ctx_id.0.clone(),
             session_handle,
@@ -1282,6 +1306,137 @@ mod tests {
         assert_eq!(
             fresh.results, cached_resp.results,
             "exact: per-attr results must be byte-identical to fresh fetch"
+        );
+    }
+
+    /// FIX-1: `template_null=true` with a non-empty query list is malformed
+    /// wire input — the daemon rejects it with ARGUMENTS_BAD without
+    /// invoking the exact backend (fail-closed, mirroring
+    /// `convert_template_opt`). The reject precedes the coalesce branch, so
+    /// no coalescer configuration applies.
+    #[tokio::test]
+    async fn exact_template_null_with_queries_rejects_without_backend_call() {
+        let mock = mock_with_attrs();
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let ctx_id = ctx_mgr.create_context(Some(MTLS_IDENTITY.into())).await.unwrap();
+        ctx_mgr
+            .get_context(&ctx_id, |c| {
+                c.register_session(
+                    BackendHandle(1),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                );
+                c.object_handles.insert(BackendHandle(1));
+            })
+            .await;
+        ctx_mgr.cache_token_info(
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+            "MockToken".into(),
+            "0001".into(),
+        );
+
+        let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        ctx.token_policy = Arc::new(allow_policy());
+
+        let session_handle = ctx_mgr
+            .get_context(&ctx_id, |c| c.session_handles.virtual_handles().next().unwrap().0)
+            .await
+            .unwrap();
+        let object_handle = ctx_mgr
+            .get_context(&ctx_id, |c| c.object_handles.virtual_handles().next().unwrap().0)
+            .await
+            .unwrap();
+
+        let calls_before = mock.attr_get_exact_call_count();
+        let resp = super::get_attribute_value_exact(
+            &ctx,
+            Request::new(pkcs11_proxy_ng_proto::GetAttributeValueExactRequest {
+                template_null: true,
+                exact_output_effects_version: 1,
+                client_context_id: ctx_id.0.clone(),
+                session_handle,
+                object_handle,
+                queries: vec![pkcs11_proxy_ng_proto::AttributeQuery {
+                    attr_type: CkAttributeType::ID.0,
+                    buffer_present: true,
+                    buffer_len: 64,
+                    nested: None,
+                }],
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(resp.ck_rv, CkRv::ARGUMENTS_BAD.0, "malformed NULL+queries must reject");
+        assert!(resp.results.is_empty(), "reject carries no results");
+        assert_eq!(
+            mock.attr_get_exact_call_count(),
+            calls_before,
+            "reject must not invoke the exact backend"
+        );
+    }
+
+    /// FIX-1: a caller-NULL template stays None through the coalesce-ON
+    /// path — the backend observes the NULL presence class (not an empty
+    /// fetch list) and still answers (the empty-template probe is never
+    /// short-circuited).
+    #[tokio::test]
+    async fn exact_null_template_stays_none_through_coalesce_path() {
+        let _coalesce_guard = enable_coalesce().await;
+        let mock = mock_with_attrs();
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let ctx_id = ctx_mgr.create_context(Some(MTLS_IDENTITY.into())).await.unwrap();
+        ctx_mgr
+            .get_context(&ctx_id, |c| {
+                c.register_session(
+                    BackendHandle(1),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                );
+                c.object_handles.insert(BackendHandle(1));
+            })
+            .await;
+        ctx_mgr.cache_token_info(
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+            "MockToken".into(),
+            "0001".into(),
+        );
+
+        let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        ctx.token_policy = Arc::new(allow_policy());
+
+        let session_handle = ctx_mgr
+            .get_context(&ctx_id, |c| c.session_handles.virtual_handles().next().unwrap().0)
+            .await
+            .unwrap();
+        let object_handle = ctx_mgr
+            .get_context(&ctx_id, |c| c.object_handles.virtual_handles().next().unwrap().0)
+            .await
+            .unwrap();
+
+        let presence_before = mock.gav_exact_presence_observations().len();
+        let resp = super::get_attribute_value_exact(
+            &ctx,
+            Request::new(pkcs11_proxy_ng_proto::GetAttributeValueExactRequest {
+                template_null: true,
+                exact_output_effects_version: 1,
+                client_context_id: ctx_id.0.clone(),
+                session_handle,
+                object_handle,
+                queries: vec![],
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(resp.ck_rv, CkRv::OK.0, "mock answers NULL empty-equivalently");
+        assert!(resp.results.is_empty());
+        assert_eq!(
+            &mock.gav_exact_presence_observations()[presence_before..],
+            &[true],
+            "coalesce-ON path must forward None, not Some(&[])"
         );
     }
 
@@ -1325,6 +1480,7 @@ mod tests {
 
         // Step 1: warm the cache with an adequate-buffer data query.
         let data_req = pkcs11_proxy_ng_proto::GetAttributeValueExactRequest {
+            template_null: false,
             exact_output_effects_version: 1,
             client_context_id: ctx_id.0.clone(),
             session_handle,
@@ -1346,6 +1502,7 @@ mod tests {
 
         // Step 2: size query (buffer_present=false) — must be served from cache.
         let size_req = pkcs11_proxy_ng_proto::GetAttributeValueExactRequest {
+            template_null: false,
             exact_output_effects_version: 1,
             client_context_id: ctx_id.0.clone(),
             session_handle,
@@ -1419,6 +1576,7 @@ mod tests {
 
         // Step 1: warm the cache with an adequate-buffer data query.
         let data_req = pkcs11_proxy_ng_proto::GetAttributeValueExactRequest {
+            template_null: false,
             exact_output_effects_version: 1,
             client_context_id: ctx_id.0.clone(),
             session_handle,
@@ -1435,6 +1593,7 @@ mod tests {
 
         // Step 2: buffer-too-small query (buffer_len = 1) — must be served from cache.
         let small_req = pkcs11_proxy_ng_proto::GetAttributeValueExactRequest {
+            template_null: false,
             exact_output_effects_version: 1,
             client_context_id: ctx_id.0.clone(),
             session_handle,
@@ -1649,6 +1808,7 @@ mod tests {
         let object_handle = ctx_mgr_object_virtual(&ctx, &ctx_id).await;
         // Warm the cache: ID ("my-id", 5 bytes) with an adequate buffer.
         let warm = pkcs11_proxy_ng_proto::GetAttributeValueExactRequest {
+            template_null: false,
             exact_output_effects_version: 1,
             client_context_id: ctx_id.0.clone(),
             session_handle,
@@ -1678,6 +1838,7 @@ mod tests {
         super::get_attribute_value_exact(
             ctx,
             Request::new(pkcs11_proxy_ng_proto::GetAttributeValueExactRequest {
+                template_null: false,
                 exact_output_effects_version: 1,
                 client_context_id: ctx_id.0.clone(),
                 session_handle,
@@ -1797,6 +1958,7 @@ mod tests {
         let err = super::get_attribute_value_exact(
             &ctx,
             Request::new(pkcs11_proxy_ng_proto::GetAttributeValueExactRequest {
+                template_null: false,
                 exact_output_effects_version: 2,
                 client_context_id: ctx_id.0.clone(),
                 session_handle,
@@ -1823,6 +1985,7 @@ mod tests {
         let resp = super::get_attribute_value_exact(
             &ctx,
             Request::new(pkcs11_proxy_ng_proto::GetAttributeValueExactRequest {
+                template_null: false,
                 exact_output_effects_version: 1,
                 client_context_id: ctx_id.0.clone(),
                 session_handle: u64::MAX,
@@ -1910,6 +2073,7 @@ mod tests {
         let resp = super::get_attribute_value_exact(
             &ctx,
             Request::new(pkcs11_proxy_ng_proto::GetAttributeValueExactRequest {
+                template_null: false,
                 exact_output_effects_version: 1,
                 client_context_id: ctx_id.0.clone(),
                 session_handle,

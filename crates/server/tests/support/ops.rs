@@ -232,7 +232,12 @@ pub async fn get_attribute_bytes(
         .get_attribute_value_exact(
             session,
             object,
-            &[CkAttributeQuery { attr_type, buffer_present: false, buffer_len: 0, nested: None }],
+            Some(&[CkAttributeQuery {
+                attr_type,
+                buffer_present: false,
+                buffer_len: 0,
+                nested: None,
+            }]),
         )
         .await
         .map_err(|rv| format!("C_GetAttributeValueExact(size) failed: {rv}"))?;
@@ -250,12 +255,12 @@ pub async fn get_attribute_bytes(
         .get_attribute_value_exact(
             session,
             object,
-            &[CkAttributeQuery {
+            Some(&[CkAttributeQuery {
                 attr_type,
                 buffer_present: true,
                 buffer_len: result.returned_len,
                 nested: None,
-            }],
+            }]),
         )
         .await
         .map_err(|rv| format!("C_GetAttributeValueExact(data) failed: {rv}"))?;

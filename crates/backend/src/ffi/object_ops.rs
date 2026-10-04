@@ -105,23 +105,28 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         object: CkObjectHandle,
-        queries: &[CkAttributeQuery],
+        queries: Option<&[CkAttributeQuery]>,
     ) -> CkResult<(CkRv, Vec<CkAttributeQueryResult>)> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
-        let mut ffi_queries = FfiAttributeQueries::from_queries(queries)?;
+        // FIX-1: None materializes a NULL template pointer (the caller
+        // passed (NULL, 0)); Some materializes (ptr, len), including
+        // Some(&[]) as a non-NULL pointer with zero count. Backends such
+        // as kryoptic distinguish the two (ARGUMENTS_BAD vs OK).
+        let queries_slice = queries.unwrap_or(&[]);
+        let mut ffi_queries = FfiAttributeQueries::from_queries(queries_slice)?;
         let h_session = Self::session_handle(session)?;
         let h_object = Self::object_handle(object)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
         let ck_queries_len = Self::ulong_len(ffi_queries.attrs.len())?;
+        let template_ptr =
+            if queries.is_none() { std::ptr::null_mut() } else { ffi_queries.attrs.as_mut_ptr() };
         let rv = Self::call_raw(
             &admission,
             unsafe { (*self.func_list).C_GetAttributeValue },
-            |function| unsafe {
-                function(h_session, h_object, ffi_queries.attrs.as_mut_ptr(), ck_queries_len)
-            },
+            |function| unsafe { function(h_session, h_object, template_ptr, ck_queries_len) },
         )?;
         let backend_rv = CkRv(rv as u64);
-        let results = ffi_queries.readback(queries, backend_rv);
+        let results = ffi_queries.readback(queries_slice, backend_rv);
         Ok((backend_rv, results))
     }
 
@@ -378,7 +383,7 @@ mod lifecycle_output_tests {
             nested: None,
         }];
         let (rv, results) = backend
-            .get_attribute_value_exact(CkSessionHandle(7), CkObjectHandle(9), &queries)
+            .get_attribute_value_exact(CkSessionHandle(7), CkObjectHandle(9), Some(&queries))
             .unwrap();
         assert_eq!(rv, CkRv::OBJECT_HANDLE_INVALID);
         assert_eq!(results.len(), 1);
@@ -613,7 +618,11 @@ mod faithful_overall_rv_tests {
     fn lenient_backend_ok_passes_through_with_markers_preserved() {
         let (backend, _table) = backend_with(Some(lenient_ok_with_too_small_shape));
         let (overall, results) = backend
-            .ffi_get_attribute_value_exact(CkSessionHandle(1), CkObjectHandle(1), &two_queries())
+            .ffi_get_attribute_value_exact(
+                CkSessionHandle(1),
+                CkObjectHandle(1),
+                Some(&two_queries()),
+            )
             .unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(
@@ -638,17 +647,73 @@ mod faithful_overall_rv_tests {
     fn device_error_passes_through_unmodified() {
         let (backend, _table) = backend_with(Some(device_error_backend));
         let (overall, results) = backend
-            .ffi_get_attribute_value_exact(CkSessionHandle(1), CkObjectHandle(1), &two_queries())
+            .ffi_get_attribute_value_exact(
+                CkSessionHandle(1),
+                CkObjectHandle(1),
+                Some(&two_queries()),
+            )
             .unwrap();
         assert_eq!(overall, CkRv::DEVICE_ERROR, "hard backend errors pass through");
         assert_eq!(results.len(), 2);
+    }
+
+    /// RED (FIX-1): a None query set must reach the backend as a NULL
+    /// template pointer with zero count — backends such as kryoptic
+    /// answer ARGUMENTS_BAD for NULL and OK for a non-NULL empty
+    /// template, so the two must stay distinguishable end to end.
+    unsafe extern "C" fn null_asserting_backend(
+        _: cryptoki_sys::CK_SESSION_HANDLE,
+        _: cryptoki_sys::CK_OBJECT_HANDLE,
+        attrs: cryptoki_sys::CK_ATTRIBUTE_PTR,
+        count: cryptoki_sys::CK_ULONG,
+    ) -> cryptoki_sys::CK_RV {
+        assert!(attrs.is_null(), "None queries must forward a NULL template pointer");
+        assert_eq!(count, 0);
+        cryptoki_sys::CKR_OK
+    }
+
+    /// RED (FIX-1): an explicit empty query set must reach the backend
+    /// as a non-NULL template pointer with zero count.
+    unsafe extern "C" fn non_null_asserting_backend(
+        _: cryptoki_sys::CK_SESSION_HANDLE,
+        _: cryptoki_sys::CK_OBJECT_HANDLE,
+        attrs: cryptoki_sys::CK_ATTRIBUTE_PTR,
+        count: cryptoki_sys::CK_ULONG,
+    ) -> cryptoki_sys::CK_RV {
+        assert!(!attrs.is_null(), "Some(&[]) queries must forward a non-NULL pointer");
+        assert_eq!(count, 0);
+        cryptoki_sys::CKR_OK
+    }
+
+    #[test]
+    fn none_queries_forward_null_template_pointer() {
+        let (backend, _table) = backend_with(Some(null_asserting_backend));
+        let (overall, results) = backend
+            .ffi_get_attribute_value_exact(CkSessionHandle(1), CkObjectHandle(1), None)
+            .unwrap();
+        assert_eq!(overall, CkRv::OK);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn empty_queries_forward_non_null_template_pointer() {
+        let (backend, _table) = backend_with(Some(non_null_asserting_backend));
+        let (overall, results) = backend
+            .ffi_get_attribute_value_exact(CkSessionHandle(1), CkObjectHandle(1), Some(&[]))
+            .unwrap();
+        assert_eq!(overall, CkRv::OK);
+        assert!(results.is_empty());
     }
 
     #[test]
     fn strict_backend_buffer_too_small_passes_through_unchanged() {
         let (backend, _table) = backend_with(Some(strict_buffer_too_small));
         let (overall, results) = backend
-            .ffi_get_attribute_value_exact(CkSessionHandle(1), CkObjectHandle(1), &two_queries())
+            .ffi_get_attribute_value_exact(
+                CkSessionHandle(1),
+                CkObjectHandle(1),
+                Some(&two_queries()),
+            )
             .unwrap();
         assert_eq!(
             overall,

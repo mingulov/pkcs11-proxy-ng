@@ -154,10 +154,15 @@ impl MockBackend {
         &self,
         session: CkSessionHandle,
         object: CkObjectHandle,
-        queries: &[CkAttributeQuery],
+        queries: Option<&[CkAttributeQuery]>,
     ) -> CkResult<(CkRv, Vec<CkAttributeQueryResult>)> {
         use std::sync::atomic::Ordering;
         self.attr_get_exact_calls.fetch_add(1, Ordering::SeqCst);
+        // FIX-1: record pointer-presence only (NULL vs empty template).
+        self.gav_exact_presence.lock().unwrap().push(queries.is_none());
+        // The mock answers empty-equivalently for None (no NULL-distinguishing
+        // quirk); real FFI backends receive the materialized NULL pointer.
+        let queries = queries.unwrap_or(&[]);
         if !self.state.lock().unwrap().has_session(session) {
             return Err(CkRv::SESSION_HANDLE_INVALID);
         }

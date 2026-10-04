@@ -352,12 +352,12 @@ fn encapsulate_key_returns_live_key_with_template_attributes() {
         .get_attribute_value_exact(
             session,
             encapsulated_key,
-            &[CkAttributeQuery {
+            Some(&[CkAttributeQuery {
                 attr_type: CkAttributeType::LABEL,
                 buffer_present: true,
                 buffer_len: "kem-output".len() as u64,
                 nested: None,
-            }],
+            }]),
         )
         .unwrap();
     assert_eq!(rv, CkRv::OK);
@@ -392,12 +392,12 @@ fn encapsulate_key_exact_data_query_returns_live_key_with_template_attributes() 
         .get_attribute_value_exact(
             session,
             result.object_handle.expect("successful handle effect"),
-            &[CkAttributeQuery {
+            Some(&[CkAttributeQuery {
                 attr_type: CkAttributeType::LABEL,
                 buffer_present: true,
                 buffer_len: "kem-exact".len() as u64,
                 nested: None,
-            }],
+            }]),
         )
         .unwrap();
     assert_eq!(rv, CkRv::OK);

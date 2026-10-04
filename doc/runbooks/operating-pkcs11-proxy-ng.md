@@ -108,6 +108,10 @@ the observed demo result is not a guarantee for a different provider.
 **Upgrade shim and daemon together.** Mixed versions are unsupported. Older
 peers can lose the distinction between a NULL parameter pointer and a present
 empty buffer for GCM, OAEP, and CCM; providers may return different results.
+Since FIX-1 (v0.2.1) the same applies to `C_GetAttributeValue` templates: a
+new shim against an old daemon (or vice versa) flattens caller-NULL to an
+empty template, so a NULL-distinguishing provider such as kryoptic answers
+`CKR_OK` where the matched pair answers `CKR_ARGUMENTS_BAD`.
 Validate the parameter shapes your deployment uses before the rollout.
 
 **If consumer reports unrecoverable errors during the rollout:**

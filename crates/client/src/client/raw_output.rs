@@ -209,7 +209,7 @@ impl Pkcs11Client {
         &mut self,
         session: CkSessionHandle,
         object: CkObjectHandle,
-        queries: &[CkAttributeQuery],
+        queries: Option<&[CkAttributeQuery]>,
     ) -> Result<(CkRv, Vec<CkAttributeQueryResult>), CkRv> {
         self.require_exact_output_effects().await?;
         let ctx = self.context_id()?;
@@ -218,7 +218,10 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
             object_handle: object.0,
-            queries: Self::proto_attribute_queries(queries),
+            queries: Self::proto_attribute_queries(queries.unwrap_or(&[])),
+            // FIX-1: preserve caller (NULL, 0) across the wire (the
+            // Wave 3.5 D2 find-init convention).
+            template_null: queries.is_none(),
         };
         // T13: adopt the owned results instead of cloning them.
         let mut resp = self

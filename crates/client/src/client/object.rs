@@ -234,7 +234,10 @@ impl Pkcs11Client {
             })
             .collect::<Vec<_>>();
 
-        let (rv, results) = self.get_attribute_value_exact(session, object, &queries).await?;
+        // FIX-1: this convenience path takes a slice (caller NULL-ness is
+        // already erased at this API boundary), so it always sends Some —
+        // behavior unchanged; only the shim's exact path sends None.
+        let (rv, results) = self.get_attribute_value_exact(session, object, Some(&queries)).await?;
         Ok((
             rv,
             results

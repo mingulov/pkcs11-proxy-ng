@@ -170,7 +170,7 @@ impl Pkcs11Backend for TestBackend3x {
         &self,
         s: CkSessionHandle,
         object: CkObjectHandle,
-        queries: &[CkAttributeQuery],
+        queries: Option<&[CkAttributeQuery]>,
     ) -> CkResult<(CkRv, Vec<CkAttributeQueryResult>)> {
         self.inner.get_attribute_value_exact(s, object, queries)
     }
