@@ -479,9 +479,12 @@ pub struct ProxyConfig {
     /// NOTE: a sanitize-mode reject does NOT terminate the active backend
     /// operation the way a module-returned error would (documented divergence).
     /// Ordering note: malformed-beats-stale-session (ARGUMENTS_BAD over
-    /// SESSION_HANDLE_INVALID) applies in this mode only, matching
-    /// haskoki-direct. The default path stays SHI-first per spec §5.1.7
-    /// precedence (5.1.2 beats 5.1.6).
+    /// SESSION_HANDLE_INVALID) applies in this mode only, and only on
+    /// the ParameterOutputExact message variants (S1D4 exception,
+    /// matching haskoki-direct). The dedicated message_crypto session
+    /// arms stay SHI-first in both modes per spec §5.1.7 precedence
+    /// (5.1.2 beats 5.1.6, RF-MC-ORDER decision (a)); the default path
+    /// stays SHI-first everywhere.
     #[serde(default)]
     pub sanitize_inputs: bool,
     /// If set, the daemon exits (nonzero) once the number of stuck backend

@@ -11,6 +11,16 @@
 //! - `C_DecryptMessage` / `C_DecryptMessageBegin` / `C_DecryptMessageNext`
 //! - `C_SignMessage` / `C_SignMessageBegin` / `C_SignMessageNext`
 //! - `C_VerifyMessage` / `C_VerifyMessageBegin` / `C_VerifyMessageNext`
+//!
+//! RF-MC-ORDER (decision (a)): session admission precedes
+//! AB-producing sanitizers in these handlers. A stale session
+//! therefore yields SESSION_HANDLE_INVALID before those checks in
+//! both modes, following PKCS#11 §5.1.7 (5.1.2 beats 5.1.6).
+//! ParameterOutputExact's sanitize-on AB-first gates are the scoped
+//! S1/#23 compatibility exception, not the ordering rule for these
+//! RPCs. sanitize_inputs protects module availability; it does not
+//! promise complete provider fidelity or backend-operation
+//! termination on local rejection.
 
 use pkcs11_proxy_ng_proto::convert::message_effects::ParameterEffectCallMode;
 use std::sync::Arc;
@@ -4894,6 +4904,74 @@ mod lifecycle_transition_tests {
             manager.get_context(&context_id, |context| context.message_operations.len()).await,
             Some(0),
             "invalid client-selected handles must not grow operation state",
+        );
+    }
+
+    /// RF-MC-ORDER decision (a) pin: session arms keep
+    /// session-first ordering in BOTH sanitize modes (PKCS#11
+    /// §5.1.7: 5.1.2 SHI beats 5.1.6 AB) — unlike the exact arms'
+    /// S1D4 sanitize-on AB exception. A stale session carrying a
+    /// NULL/nonzero envelope still yields SHI; the live-session
+    /// control proves the envelope is genuinely AB-triggering with
+    /// sanitize-on, so this pins ordering, not shape handling.
+    #[tokio::test]
+    async fn stale_session_with_null_nonzero_envelope_stays_session_first_in_both_modes() {
+        for sanitize in [false, true] {
+            let (mut ctx, _mock, context_id, _live) = setup(Direction::Encrypt).await;
+            ctx.sanitize_inputs = sanitize;
+            let response = message_encrypt_init(
+                &ctx,
+                Request::new(pkcs11_proxy_ng_proto::MessageEncryptInitRequest {
+                    client_context_id: context_id.0.clone(),
+                    session_handle: 99_001,
+                    mechanism: Some(type_only_aes_gcm()),
+                    key_handle: 0,
+                    init_message_parameter: None,
+                    parameter_out_spec: Some(pkcs11_proxy_ng_proto::ParameterRoundtripSpec {
+                        buffer_present: false,
+                        buffer_len: 32,
+                        value: None,
+                    }),
+                    parameter_shape: Some(MessageParameterShape::Gcm.to_proto_i32()),
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner();
+            assert_eq!(
+                response.ck_rv,
+                CkRv::SESSION_HANDLE_INVALID.0,
+                "stale session must beat malformed envelope (sanitize={sanitize})",
+            );
+        }
+
+        // Control: the same envelope on a live session hits the
+        // sanitize-on AB predicate.
+        let (mut ctx, _mock, context_id, live) = setup(Direction::Encrypt).await;
+        ctx.sanitize_inputs = true;
+        let response = message_encrypt_init(
+            &ctx,
+            Request::new(pkcs11_proxy_ng_proto::MessageEncryptInitRequest {
+                client_context_id: context_id.0.clone(),
+                session_handle: live,
+                mechanism: Some(type_only_aes_gcm()),
+                key_handle: 0,
+                init_message_parameter: None,
+                parameter_out_spec: Some(pkcs11_proxy_ng_proto::ParameterRoundtripSpec {
+                    buffer_present: false,
+                    buffer_len: 32,
+                    value: None,
+                }),
+                parameter_shape: Some(MessageParameterShape::Gcm.to_proto_i32()),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(
+            response.ck_rv,
+            CkRv::ARGUMENTS_BAD.0,
+            "live session must reach the sanitize-on AB predicate",
         );
     }
 }
