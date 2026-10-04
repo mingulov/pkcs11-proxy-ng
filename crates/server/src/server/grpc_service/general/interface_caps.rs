@@ -290,7 +290,7 @@ pub(super) async fn get_backend_interfaces(
 
     // R4 plumbing: the daemon's actual ABI value is derived live from the
     // backend's runtime ABI properties (covered by
-    // `r4_daemon_mechanism_param_abi_derivation`).
+    // `daemon_mechanism_param_abi_derivation`).
     let derived_mechanism_abi =
         daemon_mechanism_param_abi(backend.abi_ulong_size(), backend.abi_byte_order());
 
@@ -681,7 +681,7 @@ mod tests {
     /// (Holds the override-env guard so an R10 armed window cannot overlap
     /// this assertion in cfg builds.)
     #[tokio::test]
-    async fn r23_mechanism_parameter_capability_advertised_v1() {
+    async fn mechanism_parameter_capability_advertised_v1() {
         let _guard = override_env_test_guard().await;
         let context_manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
         let backend = Arc::new(MockBackend::default_test());
@@ -718,11 +718,11 @@ mod tests {
     /// advertises v1 now (manifest complete), so the missing/invalid/unset
     /// arms below expect the production advertisement — the override's
     /// remaining contract is forcing (covered by
-    /// `r23_resolve_override_forces_past_freeze`), not a distinct value.
+    /// `resolve_override_forces_past_freeze`), not a distinct value.
     /// RED without the R10 plumbing pre-R23 (None).
     #[tokio::test]
     #[cfg(pkcs11_proxy_test_mechanism_params_v1)]
-    async fn r10_override_exact_env_advertises_v1_under_cfg() {
+    async fn override_exact_env_advertises_v1_under_cfg() {
         let _guard = override_env_test_guard().await;
         let context_manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
         let backend = Arc::new(MockBackend::default_test());
@@ -789,7 +789,7 @@ mod tests {
     /// in a normal build (the two renderings would differ).
     #[tokio::test]
     #[cfg(not(pkcs11_proxy_test_mechanism_params_v1))]
-    async fn r10_override_env_inert_without_cfg() {
+    async fn override_env_inert_without_cfg() {
         let _guard = override_env_test_guard().await;
         let context_manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
         let backend = Arc::new(MockBackend::default_test());
@@ -837,7 +837,7 @@ mod tests {
     /// exact v1 ABI, and stays silent (`None`) wherever no v1 ABI exactly
     /// matches — never a per-target hardcoded literal.
     #[test]
-    fn r4_daemon_mechanism_param_abi_derivation() {
+    fn daemon_mechanism_param_abi_derivation() {
         use pkcs11_proxy_ng_proto::MechanismParamAbi as Abi;
         assert_eq!(daemon_mechanism_param_abi(8, 1), Some(Abi::Lp64NativeLe as i32));
         assert_eq!(daemon_mechanism_param_abi(4, 1), Some(Abi::Ilp32NativeLe as i32));
@@ -855,7 +855,7 @@ mod tests {
     /// fails closed.
     #[test]
     #[cfg(pkcs11_proxy_test_mechanism_params_v1)]
-    fn r10_override_enable_value_is_exact() {
+    fn override_enable_value_is_exact() {
         use std::ffi::OsStr;
         assert!(is_override_enable_value(Some(OsStr::new("enable-v1-test-only"))));
         for bad in [
@@ -873,7 +873,7 @@ mod tests {
     /// v1 with the derived daemon ABI; disarmed stays hard-0.
     #[test]
     #[cfg(pkcs11_proxy_test_mechanism_params_v1)]
-    fn r10_override_advertisement_armed_advertises_v1() {
+    fn override_advertisement_armed_advertises_v1() {
         use pkcs11_proxy_ng_proto::MechanismParamAbi as Abi;
         let abi = Some(Abi::Lp64NativeLe as i32);
         assert_eq!(override_advertisement(abi, true), (Some(1), abi));
@@ -886,7 +886,7 @@ mod tests {
     /// input cannot advertise, because the branch is compiled out.
     #[test]
     #[cfg(not(pkcs11_proxy_test_mechanism_params_v1))]
-    fn r10_override_advertisement_inert_without_cfg() {
+    fn override_advertisement_inert_without_cfg() {
         use pkcs11_proxy_ng_proto::MechanismParamAbi as Abi;
         let abi = Some(Abi::Lp64NativeLe as i32);
         assert!(!test_mechanism_params_v1_override_enabled());
@@ -900,7 +900,7 @@ mod tests {
     /// advertise a partial v1); an underivable ABI (`None`) still
     /// advertises transport 1 with no ABI rather than a wrong layout.
     #[test]
-    fn r23_resolve_freeze_matrix_production_path() {
+    fn resolve_freeze_matrix_production_path() {
         use pkcs11_proxy_ng_proto::MechanismParamAbi as Abi;
         let abi = Some(Abi::Lp64NativeLe as i32);
         // Complete manifest → production v1 (the flip).
@@ -920,7 +920,7 @@ mod tests {
     /// past a freeze refusal — forcing is its contract (never-ship builds).
     #[test]
     #[cfg(pkcs11_proxy_test_mechanism_params_v1)]
-    fn r23_resolve_override_forces_past_freeze() {
+    fn resolve_override_forces_past_freeze() {
         use pkcs11_proxy_ng_proto::MechanismParamAbi as Abi;
         let abi = Some(Abi::Lp64NativeLe as i32);
         assert_eq!(resolve_mechanism_param_advertisement(abi, false, true), (Some(1), abi));
@@ -928,12 +928,12 @@ mod tests {
     }
 
     /// R23: without the cfg the override arm is doubly inert — the
-    /// predicate stub never arms it (see `r10_override_env_inert_without_cfg`)
+    /// predicate stub never arms it (see `override_env_inert_without_cfg`)
     /// AND the callee is compiled out, so even a forced `true` input
     /// cannot advertise (hard-0 regardless of freeze state).
     #[test]
     #[cfg(not(pkcs11_proxy_test_mechanism_params_v1))]
-    fn r23_resolve_override_input_inert_without_cfg() {
+    fn resolve_override_input_inert_without_cfg() {
         use pkcs11_proxy_ng_proto::MechanismParamAbi as Abi;
         let abi = Some(Abi::Lp64NativeLe as i32);
         assert_eq!(resolve_mechanism_param_advertisement(abi, false, true), (None, None));

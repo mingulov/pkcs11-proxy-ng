@@ -1987,7 +1987,7 @@ fn gcm_message_params_lp64_layout_derives_48() {
 /// stage, including capabilities newer than this reader (which still
 /// applies the v1 rule it knows).
 #[test]
-fn r5_unmodeled_v1_reads_exact_caller_bytes() {
+fn unmodeled_v1_reads_exact_caller_bytes() {
     let iv: Vec<u8> = (0x00..0x10).collect();
     for transport_version in [1, 2] {
         for direction in [MessageParameterDirection::Encrypt, MessageParameterDirection::Decrypt] {
@@ -2024,7 +2024,7 @@ fn r5_unmodeled_v1_reads_exact_caller_bytes() {
 /// zero-length Unmodeled parameters stay `None` (valid, no bytes) at both
 /// legacy and v1 capabilities.
 #[test]
-fn r5_unmodeled_empty_edges_stay_parameter_none_at_both_capabilities() {
+fn unmodeled_empty_edges_stay_parameter_none_at_both_capabilities() {
     for transport_version in [0, 1] {
         for (label, pointer, len) in [
             ("null/zero", std::ptr::null(), 0),
@@ -2055,7 +2055,7 @@ fn r5_unmodeled_empty_edges_stay_parameter_none_at_both_capabilities() {
 /// extent over the 64 KiB outer cap, or a length that cannot narrow to the
 /// address width. Exactly 64 KiB reads fine (boundary pin).
 #[test]
-fn r5_unmodeled_v1_unrepresentable_fails_locally() {
+fn unmodeled_v1_unrepresentable_fails_locally() {
     // Over-cap declared extent: rejected before any byte is read (the
     // pointer is never dereferenced, so dangling is safe here).
     for transport_version in [1, 2] {

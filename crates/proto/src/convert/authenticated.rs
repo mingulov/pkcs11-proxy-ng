@@ -317,7 +317,7 @@ mod tests {
     // mechanisms via the new `matches` + `validate_structured` arms (no
     // new arms here); shape binding for typed mechanisms is unchanged.
     #[test]
-    fn r3_raw_input_accepted_for_unmodeled_mechanism_only() {
+    fn raw_input_accepted_for_unmodeled_mechanism_only() {
         let unmodeled = CkMechanism { mechanism_type: CkMechanismType::AES_CBC, params: None };
         let typed = CkMechanism { mechanism_type: CkMechanismType::AES_GCM, params: None };
         let raw = MessageParameter::Raw(vec![0x01; 16].into());

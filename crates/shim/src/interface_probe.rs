@@ -1668,7 +1668,7 @@ mod backend_abi_tests {
     /// R5/F1 snapshot-API policy: the snapshot is the discovery value, or
     /// 0 when the daemon predates the advertisement (legacy encoding).
     #[test]
-    fn r5_transport_version_snapshot_is_discovery_value_or_zero() {
+    fn transport_version_snapshot_is_discovery_value_or_zero() {
         assert_eq!(resolve_mechanism_parameter_transport_version(None), 0);
         assert_eq!(resolve_mechanism_parameter_transport_version(Some(0)), 0);
         assert_eq!(resolve_mechanism_parameter_transport_version(Some(1)), 1);
@@ -1680,7 +1680,7 @@ mod backend_abi_tests {
     /// fails closed.
     #[test]
     #[cfg(pkcs11_proxy_test_mechanism_params_v1)]
-    fn r10_override_enable_value_is_exact() {
+    fn override_enable_value_is_exact() {
         use std::ffi::OsStr;
         assert!(is_override_enable_value(Some(OsStr::new("enable-v1-test-only"))));
         for bad in [
@@ -1698,7 +1698,7 @@ mod backend_abi_tests {
     /// stub — no env read exists to take effect.
     #[test]
     #[cfg(not(pkcs11_proxy_test_mechanism_params_v1))]
-    fn r10_override_predicate_is_false_stub_without_cfg() {
+    fn override_predicate_is_false_stub_without_cfg() {
         assert!(!test_mechanism_params_v1_override_enabled());
     }
 }

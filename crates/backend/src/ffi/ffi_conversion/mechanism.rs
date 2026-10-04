@@ -1322,7 +1322,7 @@ enum FfiParamBacking {
     /// are NOT returned — `output_params()` has no arm for `Flat` and
     /// yields `None` via its wildcard, even on Init RPCs whose responses
     /// already carry `mechanism_out`. Pinned by
-    /// `r12_flat_output_suppressed*`. Likewise the authenticated-path
+    /// `flat_output_suppressed*`. Likewise the authenticated-path
     /// probes (`validate_authenticated_inputs`, `authenticated_output`)
     /// hit their wildcards (`DEVICE_ERROR` / `PARAM_INVALID`):
     /// fail-closed until a later phase wires Flat there deliberately.
@@ -3013,7 +3013,7 @@ fn mechanism_to_ffi_at_depth(
             // strict agreement (`check_shared_len_agreement`), and a
             // directly-constructed legacy value with mismatched legs
             // converts with the length following leg A (pinned by
-            // `r19_reconstruct_kea_derive_legacy_mismatch_uses_a`).
+            // `reconstruct_kea_derive_legacy_mismatch_uses_a`).
             let random_a = input_leg(&p.random_a_presence)?;
             let random_b = input_leg(&p.random_b_presence)?;
             let public_data = input_leg(&p.public_data_presence)?;
@@ -3567,7 +3567,7 @@ fn mechanism_to_ffi_at_depth(
             // strict agreement (`check_shared_len_agreement`), and a
             // directly-constructed legacy value with mismatched legs
             // converts with the length following PrimeP (pinned by
-            // `r19_reconstruct_skipjack_private_wrap_legacy_mismatch_uses_prime_p`).
+            // `reconstruct_skipjack_private_wrap_legacy_mismatch_uses_prime_p`).
             // `ulPasswordLen` stays scalar-authoritative (pinned).
             let password = input_leg(&p.password_presence)?;
             let public_data = input_leg(&p.public_data_presence)?;

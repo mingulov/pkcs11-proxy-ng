@@ -25,8 +25,8 @@
 //! the tail bindings to complete (plus regeneration) once the Phase-3 rows
 //! landed; R23 asserts [`manifest_complete`] at advertisement time and
 //! refuses to advertise v1 while it is false. The predicate is pinned true
-//! (`r21_manifest_complete_after_phase3`) and the manifest bytes are pinned
-//! by the freeze digest (`r21_manifest_digest_freeze`).
+//! (`manifest_complete_after_phase3`) and the manifest bytes are pinned
+//! by the freeze digest (`manifest_digest_freeze`).
 //!
 //! The manifest ↔ proto cross-check lives in this crate (not in `proto`)
 //! because the dependency runs `proto → types`: `types` cannot name the
@@ -322,7 +322,7 @@ pub fn manifest_shape(name: &str) -> Option<&'static ManifestShape> {
 /// Machine half of the S2 §11 Phase-2 gate: true only when every manifest
 /// entry is complete. R21 flipped this to true (tail rows complete); R23
 /// asserts it at advertisement time and refuses v1 while it is false.
-/// Pinned true (`r21_manifest_complete_after_phase3`).
+/// Pinned true (`manifest_complete_after_phase3`).
 pub fn manifest_complete() -> bool {
     // Fail closed on an empty manifest: `all()` is vacuously true.
     !manifest().shape.is_empty()
@@ -837,7 +837,7 @@ mod manifest_tests {
     }
 
     #[test]
-    fn r21_manifest_complete_after_phase3() {
+    fn manifest_complete_after_phase3() {
         assert!(
             super::manifest_complete(),
             "R21: every manifest entry is complete (Phase-3 rows landed)"
@@ -850,7 +850,7 @@ mod manifest_tests {
     }
 
     #[test]
-    fn r21_pending_tail_status_still_parses() {
+    fn pending_tail_status_still_parses() {
         // R21 MINOR-1: the retained `PendingTail` variant keeps old TOML
         // snapshots parseable — the wire string still deserializes even
         // though no live entry carries it (pinned complete above).
@@ -864,7 +864,7 @@ mod manifest_tests {
     }
 
     #[test]
-    fn r21_tail_complete_and_exactly_nested_or_output() {
+    fn tail_complete_and_exactly_nested_or_output() {
         // The exact R8 pending tail (kept as the completed-tail pin): the
         // NestedOrOutput set, every member Complete since R21.
         let tail: BTreeSet<&str> = SHAPE_DESCRIPTORS
@@ -1309,7 +1309,7 @@ mod manifest_tests {
     }
 
     #[test]
-    fn r16_input_pointer_presence_fields_exist() {
+    fn input_pointer_presence_fields_exist() {
         for (family, shape, message, pre16_max, fields) in R16_PRESENCE_TABLE {
             let block = message_block_lines(message);
             // TAG RULE (binding): lowest free tag per message — the row's
@@ -1353,7 +1353,7 @@ mod manifest_tests {
     }
 
     #[test]
-    fn r16_presence_table_covers_every_input_pointer_shape() {
+    fn presence_table_covers_every_input_pointer_shape() {
         let table_shapes: BTreeSet<&str> = R16_PRESENCE_TABLE.iter().map(|row| row.1).collect();
         assert_eq!(
             table_shapes.len(),
@@ -1676,7 +1676,7 @@ mod manifest_tests {
     }
 
     #[test]
-    fn r18_tail_envelope_fields_exist() {
+    fn tail_envelope_fields_exist() {
         for (family, shape, message, pre18_max, in_types_proto, fields) in R18_TAIL_TABLE {
             let source = if *in_types_proto { TYPES_PROTO } else { MECHANISM_PARAMS_PROTO };
             let block = message_block_lines_in(source, message);
@@ -1749,7 +1749,7 @@ mod manifest_tests {
     }
 
     #[test]
-    fn r18_tail_submessage_envelopes_exist() {
+    fn tail_submessage_envelopes_exist() {
         // Shared/nested sub-messages carry the envelopes their parents
         // reuse (pinned here — they have no manifest shape row of their
         // own, so the table test cannot cover them).
@@ -1792,7 +1792,7 @@ mod manifest_tests {
     }
 
     #[test]
-    fn r18_tail_table_covers_every_tail_shape() {
+    fn tail_table_covers_every_tail_shape() {
         let table_shapes: BTreeSet<&str> = R18_TAIL_TABLE.iter().map(|row| row.1).collect();
         assert_eq!(table_shapes.len(), R18_TAIL_TABLE.len(), "one row per shape (no duplicates)");
         // Every row resolves to a live shape whose wire binding carries
@@ -1853,7 +1853,7 @@ mod manifest_tests {
     }
 
     #[test]
-    fn r18_kem_needs_no_envelope() {
+    fn kem_needs_no_envelope() {
         // S2 §8: KEM rides the general `Mechanism` path — no KEM message
         // gains an envelope field. Each KEM request carries a `Mechanism`
         // member; each KEM response carries none. The only `optional`
@@ -1891,7 +1891,7 @@ mod manifest_tests {
     }
 
     #[test]
-    fn r18_vendor_tail_fail_closed() {
+    fn vendor_tail_fail_closed() {
         use crate::mechanism_registry::MechanismRegistry;
         use crate::shape_descriptors::{
             FlatDecision, FlatDenyReason, FlatRequest, Operation, ParamAbi, decide_flat,
@@ -2132,7 +2132,7 @@ mod manifest_tests {
     }
 
     #[test]
-    fn r21_envelope_union_covers_every_manifest_shape() {
+    fn envelope_union_covers_every_manifest_shape() {
         let r16: BTreeSet<&str> = R16_PRESENCE_TABLE.iter().map(|row| row.1).collect();
         let r18: BTreeSet<&str> = R18_TAIL_TABLE.iter().map(|row| row.1).collect();
         let no_envelope: BTreeSet<&str> = R21_NO_ENVELOPE_SHAPES.iter().map(|row| row.1).collect();
@@ -2215,7 +2215,7 @@ mod manifest_tests {
     }
 
     #[test]
-    fn r21_domain_conversion_dispatches_every_wire_message() {
+    fn domain_conversion_dispatches_every_wire_message() {
         // Encode = everything above the legacy-bool scan (v0 `try_from`
         // + `to_wire_with_transport_version` + both v1 encoders); decode =
         // the wire `try_from` (the trailing `MechanismInfo` impls convert
@@ -2290,7 +2290,7 @@ mod manifest_tests {
     }
 
     #[test]
-    fn r21_shim_v1_reader_covers_every_shape() {
+    fn shim_v1_reader_covers_every_shape() {
         let pred17 =
             code_span_between(SHIM_MECHANISM_READ, "fn is_r17_v1_shape(", "fn is_r18_tail_shape(");
         let pred18 = code_span_between(
@@ -2390,7 +2390,7 @@ mod manifest_tests {
     }
 
     #[test]
-    fn r21_backend_reconstruction_covers_every_variant() {
+    fn backend_reconstruction_covers_every_variant() {
         let body = code_span_between(
             BACKEND_MECHANISM,
             "fn mechanism_to_ffi_at_depth(",
@@ -2468,7 +2468,7 @@ mod manifest_tests {
     const MANIFEST_DIGEST: u64 = 0x7b04b0942b404910;
 
     #[test]
-    fn r21_manifest_digest_freeze() {
+    fn manifest_digest_freeze() {
         assert_eq!(
             fnv1a_64(normalize_eol(super::MANIFEST_TOML).as_bytes()),
             MANIFEST_DIGEST,

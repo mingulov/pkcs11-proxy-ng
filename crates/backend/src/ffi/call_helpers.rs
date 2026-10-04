@@ -367,8 +367,8 @@ impl FfiBackend {
     /// are untouched, so dual operations (Encrypt + Digest) coexist.
     /// Flat backing travels through this same retention (R12, S2 §6);
     /// failed Init publishes nothing (pinned for Flat by
-    /// `r12_init_flat_backing_retained` /
-    /// `r12_failed_init_publishes_nothing_flat`).
+    /// `init_flat_backing_retained` /
+    /// `failed_init_publishes_nothing_flat`).
     pub(super) fn call_init_with_mechanism<TFunction, F>(
         &self,
         _admission: &OrdinaryGuard,

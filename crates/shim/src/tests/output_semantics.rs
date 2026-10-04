@@ -4595,7 +4595,7 @@ const R5_NIST_CBC_PT2: [u8; 16] = [
 /// R23: legacy capability is simulated (the shared `TestDaemon` now probes
 /// to v1) — the legacy-identity pin stays byte-exact against an old daemon.
 #[test]
-fn r5_audit_cbc_message_init_with_iv_fails_closed_locally() {
+fn audit_cbc_message_init_with_iv_fails_closed_locally() {
     let _guard = shim_state_test_guard();
     let shim = ShimSession::new();
     let _legacy = R23LegacyGuard::simulate_old_daemon();
@@ -4715,10 +4715,10 @@ impl Drop for R23LegacyGuard {
 /// R23 flip. The R5 one-shot/multipart legs below prove the client edge
 /// encodes v1 from the same probe end-to-end.
 #[test]
-fn r23_production_probe_records_v1_no_override() {
+fn production_probe_records_v1_no_override() {
     let _guard = shim_state_test_guard();
     let _saved = R5SavedEndpoint::capture();
-    let daemon = r5_cbc_daemon();
+    let daemon = cbc_daemon();
     let _shim = ShimSession::with_endpoint(&daemon.endpoint);
     assert_eq!(
         crate::interface_probe::mechanism_parameter_transport_version(),
@@ -4727,7 +4727,7 @@ fn r23_production_probe_records_v1_no_override() {
     );
 }
 
-fn r5_cbc_daemon() -> TestDaemon {
+fn cbc_daemon() -> TestDaemon {
     TestDaemon::fresh_with_mechanisms(vec![
         CkMechanismType::SHA256,
         CkMechanismType::RSA_PKCS,
@@ -4738,7 +4738,7 @@ fn r5_cbc_daemon() -> TestDaemon {
     ])
 }
 
-fn r5_assert_raw_iv(
+fn assert_raw_iv(
     recorded: Option<pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
     label: &str,
 ) {
@@ -4757,10 +4757,10 @@ fn r5_assert_raw_iv(
 /// R23 (F1-live proof): the capability arrives via PRODUCTION discovery
 /// (no injection, no override) — the real probe records 1 on both edges.
 #[test]
-fn r5_cbc_encrypt_message_one_shot_v1_exact_bytes() {
+fn cbc_encrypt_message_one_shot_v1_exact_bytes() {
     let _guard = shim_state_test_guard();
     let _saved = R5SavedEndpoint::capture();
-    let daemon = r5_cbc_daemon();
+    let daemon = cbc_daemon();
     let shim = ShimSession::with_endpoint(&daemon.endpoint);
     // R23: the production daemon advertises v1 — the real probe path
     // records 1 (RED pre-flip: the hard-0 daemon advertised nothing).
@@ -4784,7 +4784,7 @@ fn r5_cbc_encrypt_message_one_shot_v1_exact_bytes() {
     );
     let (init_param, _) =
         daemon.backend.last_message_init_contract().expect("mock records the init contract");
-    r5_assert_raw_iv(Some(init_param), "v1 init");
+    assert_raw_iv(Some(init_param), "v1 init");
 
     let mut output = [0u8; 16];
     let mut output_len = output.len() as CK_ULONG;
@@ -4805,7 +4805,7 @@ fn r5_cbc_encrypt_message_one_shot_v1_exact_bytes() {
     assert_eq!(output_len as usize, R5_NIST_CBC_PT1.len());
     let expected: Vec<u8> = R5_NIST_CBC_PT1.iter().map(|byte| byte ^ 0x42).collect();
     assert_eq!(output.as_slice(), expected.as_slice(), "mock xor_bytes output");
-    r5_assert_raw_iv(daemon.backend.last_message_parameter_call(), "v1 one-shot");
+    assert_raw_iv(daemon.backend.last_message_parameter_call(), "v1 one-shot");
     assert_eq!(
         test_message_shape(shim.session, state::MessageOperation::Encrypt),
         Some(MessageParameterShape::Unmodeled),
@@ -4818,10 +4818,10 @@ fn r5_cbc_encrypt_message_one_shot_v1_exact_bytes() {
 /// multipart contract with exact bytes and mock-exact output.
 /// R23 (F1-live proof): production discovery feeds v1 (no injection).
 #[test]
-fn r5_cbc_multipart_init_begin_next_v1_exact_bytes() {
+fn cbc_multipart_init_begin_next_v1_exact_bytes() {
     let _guard = shim_state_test_guard();
     let _saved = R5SavedEndpoint::capture();
-    let daemon = r5_cbc_daemon();
+    let daemon = cbc_daemon();
     let shim = ShimSession::with_endpoint(&daemon.endpoint);
     // R23 (F1-live proof): production discovery feeds v1 (no injection).
     assert_eq!(crate::interface_probe::mechanism_parameter_transport_version(), 1);
@@ -4840,7 +4840,7 @@ fn r5_cbc_multipart_init_begin_next_v1_exact_bytes() {
     );
     let (init_param, _) =
         daemon.backend.last_message_init_contract().expect("mock records the init contract");
-    r5_assert_raw_iv(Some(init_param), "v1 multipart init");
+    assert_raw_iv(Some(init_param), "v1 multipart init");
 
     assert_eq!(
         unsafe {
@@ -4855,7 +4855,7 @@ fn r5_cbc_multipart_init_begin_next_v1_exact_bytes() {
         CKR_OK as CK_RV,
         "v1 CBC Begin succeeds",
     );
-    r5_assert_raw_iv(daemon.backend.last_message_parameter_call(), "v1 Begin");
+    assert_raw_iv(daemon.backend.last_message_parameter_call(), "v1 Begin");
 
     let mut part_out = [0u8; 16];
     let mut part_len = part_out.len() as CK_ULONG;
@@ -4875,13 +4875,13 @@ fn r5_cbc_multipart_init_begin_next_v1_exact_bytes() {
     assert_eq!(part_len as usize, R5_NIST_CBC_PT2.len());
     let expected: Vec<u8> = R5_NIST_CBC_PT2.iter().map(|byte| byte ^ 0x42).collect();
     assert_eq!(part_out.as_slice(), expected.as_slice(), "mock xor_bytes part output");
-    r5_assert_raw_iv(daemon.backend.last_message_parameter_call(), "v1 Next");
+    assert_raw_iv(daemon.backend.last_message_parameter_call(), "v1 Next");
 }
 
 /// R5/F1 legacy-identity: dropping the injection restores byte-identical
 /// legacy behavior — the CBC init fails closed locally again.
 #[test]
-fn r5_transport_restore_returns_legacy_fail_closed() {
+fn transport_restore_returns_legacy_fail_closed() {
     let _guard = shim_state_test_guard();
     let shim = ShimSession::new();
     let key = create_object(shim.session);
@@ -4903,7 +4903,7 @@ fn r5_transport_restore_returns_legacy_fail_closed() {
     );
 }
 
-fn r17_gcm_daemon() -> TestDaemon {
+fn gcm_daemon() -> TestDaemon {
     TestDaemon::fresh_with_mechanisms(vec![
         CkMechanismType::SHA256,
         CkMechanismType::AES_ECB,
@@ -4920,10 +4920,10 @@ fn r17_gcm_daemon() -> TestDaemon {
 /// R23: the capability arrives via PRODUCTION discovery (no injection) —
 /// the production-path classic-v1 proof. RED pre-flip (probe records 0).
 #[test]
-fn r17_gcm_mixed_iv_aad_null_16_encrypt_init_v1_succeeds() {
+fn gcm_mixed_iv_aad_null_16_encrypt_init_v1_succeeds() {
     let _guard = shim_state_test_guard();
     let _saved = R5SavedEndpoint::capture();
-    let daemon = r17_gcm_daemon();
+    let daemon = gcm_daemon();
     let shim = ShimSession::with_endpoint(&daemon.endpoint);
     assert_eq!(crate::interface_probe::mechanism_parameter_transport_version(), 1);
 
@@ -4954,10 +4954,10 @@ fn r17_gcm_mixed_iv_aad_null_16_encrypt_init_v1_succeeds() {
 /// locally with `PARAM_INVALID`, byte-identical to pre-R17 (legacy
 /// capability preserves existing behavior exactly).
 #[test]
-fn r17_gcm_mixed_iv_aad_null_16_legacy_stays_fail_closed() {
+fn gcm_mixed_iv_aad_null_16_legacy_stays_fail_closed() {
     let _guard = shim_state_test_guard();
     let _saved = R5SavedEndpoint::capture();
-    let daemon = r17_gcm_daemon();
+    let daemon = gcm_daemon();
     let shim = ShimSession::with_endpoint(&daemon.endpoint);
     assert_eq!(crate::interface_probe::mechanism_parameter_transport_version(), 1);
     let _legacy = R23LegacyGuard::simulate_old_daemon();

@@ -127,7 +127,7 @@ fn assert_field<T>(
 }
 
 #[test]
-fn r19_empty_non_null_deref_probe() {
+fn empty_non_null_deref_probe() {
     // R19(2): EMPTY_NON_NULL designates a real static byte, never NULL
     // nor dangling — providers may probe readability of the
     // `Present([])` leg, so the shared address must dereference.
@@ -151,7 +151,7 @@ fn oaep(source: PointerBytes) -> CkMechanismParams {
 }
 
 #[test]
-fn r19_reconstruct_rsa_oaep() {
+fn reconstruct_rsa_oaep() {
     // Null{n} → NULL + narrow(n) (the peer governs, not the legacy bool).
     let ffi = convert(oaep(PointerBytes::null_len(9)), CkMechanismType::RSA_PKCS_OAEP);
     let p: cryptoki_sys::CK_RSA_PKCS_OAEP_PARAMS = param_struct(ffi);
@@ -199,7 +199,7 @@ fn gcm_fields(
 }
 
 #[test]
-fn r19_reconstruct_gcm() {
+fn reconstruct_gcm() {
     // Null/n → NULL + n on both legs (distinct lengths catch leg swaps).
     let ffi = convert(
         gcm(PointerBytes::null_len(12), PointerBytes::null_len(16), 0),
@@ -254,7 +254,7 @@ fn r19_reconstruct_gcm() {
 }
 
 #[test]
-fn r19_reconstruct_gcm_iv_capacity_zeroed() {
+fn reconstruct_gcm_iv_capacity_zeroed() {
     // Generated-IV capacity: a Present IV shorter than iv_buffer_len →
     // ulIvLen names the input while the retained buffer keeps the full
     // capacity, zero-padded past the input.
@@ -273,7 +273,7 @@ fn r19_reconstruct_gcm_iv_capacity_zeroed() {
 }
 
 #[test]
-fn r19_reconstruct_gcm_null_huge_forwards() {
+fn reconstruct_gcm_null_huge_forwards() {
     // D3: a huge NULL declared length forwards as NULL + narrowed length
     // without allocating (an allocation attempt would abort/OOM the test).
     // D4 (ADR-0011: `narrow_wire_ulong` in `ffi_conversion/mod.rs`): on a
@@ -330,7 +330,7 @@ fn ccm(nonce: PointerBytes, aad: PointerBytes) -> CkMechanismParams {
 }
 
 #[test]
-fn r19_reconstruct_ccm() {
+fn reconstruct_ccm() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType::AES_CCM);
         let p: cryptoki_sys::CK_CCM_PARAMS = param_struct(ffi);
@@ -382,7 +382,7 @@ fn ecdh1(shared: PointerBytes, public: PointerBytes) -> CkMechanismParams {
 }
 
 #[test]
-fn r19_reconstruct_ecdh1_derive() {
+fn reconstruct_ecdh1_derive() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType::ECDH1_DERIVE);
         let p: cryptoki_sys::CK_ECDH1_DERIVE_PARAMS = param_struct(ffi);
@@ -436,7 +436,7 @@ fn ecdh2(shared: PointerBytes, public: PointerBytes, public2: PointerBytes) -> C
 }
 
 #[test]
-fn r19_reconstruct_ecdh2_derive() {
+fn reconstruct_ecdh2_derive() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType(CKM_TEST_ECDH2_DERIVE));
         let p: cryptoki_sys::CK_ECDH2_DERIVE_PARAMS = param_struct(ffi);
@@ -500,7 +500,7 @@ fn ecmqv(shared: PointerBytes, public: PointerBytes, public2: PointerBytes) -> C
 }
 
 #[test]
-fn r19_reconstruct_ecmqv_derive() {
+fn reconstruct_ecmqv_derive() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType::ECMQV_DERIVE);
         let p: cryptoki_sys::CK_ECMQV_DERIVE_PARAMS = param_struct(ffi);
@@ -547,7 +547,7 @@ fn x942_dh1(other: PointerBytes, public: PointerBytes) -> CkMechanismParams {
 }
 
 #[test]
-fn r19_reconstruct_x942_dh1_derive() {
+fn reconstruct_x942_dh1_derive() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType::X9_42_DH_DERIVE);
         let p: cryptoki_sys::CK_X9_42_DH1_DERIVE_PARAMS = param_struct(ffi);
@@ -591,7 +591,7 @@ fn x942_dh2(other: PointerBytes, public: PointerBytes, public2: PointerBytes) ->
 }
 
 #[test]
-fn r19_reconstruct_x942_dh2_derive() {
+fn reconstruct_x942_dh2_derive() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType::X9_42_DH_HYBRID_DERIVE);
         let p: cryptoki_sys::CK_X9_42_DH2_DERIVE_PARAMS = param_struct(ffi);
@@ -642,7 +642,7 @@ fn x942_mqv(other: PointerBytes, public: PointerBytes, public2: PointerBytes) ->
 }
 
 #[test]
-fn r19_reconstruct_x942_mqv_derive() {
+fn reconstruct_x942_mqv_derive() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType::X9_42_DH_HYBRID_DERIVE);
         let p: cryptoki_sys::CK_X9_42_MQV_DERIVE_PARAMS = param_struct(ffi);
@@ -695,7 +695,7 @@ fn hkdf(salt: PointerBytes, info: PointerBytes) -> CkMechanismParams {
 }
 
 #[test]
-fn r19_reconstruct_hkdf() {
+fn reconstruct_hkdf() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType::HKDF_DERIVE);
         let p: cryptoki_sys::CK_HKDF_PARAMS = param_struct(ffi);
@@ -732,7 +732,7 @@ fn eddsa(context: PointerBytes) -> CkMechanismParams {
 }
 
 #[test]
-fn r19_reconstruct_eddsa() {
+fn reconstruct_eddsa() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType::EDDSA);
         let p: cryptoki_sys::CK_EDDSA_PARAMS = param_struct(ffi);
@@ -763,7 +763,7 @@ fn gost_derive(public: PointerBytes, ukm: PointerBytes) -> CkMechanismParams {
 }
 
 #[test]
-fn r19_reconstruct_gostr3410_derive() {
+fn reconstruct_gostr3410_derive() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType::GOSTR3410_DERIVE);
         let p: cryptoki_sys::CK_GOSTR3410_DERIVE_PARAMS = param_struct(ffi);
@@ -799,7 +799,7 @@ fn gost_wrap(oid: PointerBytes, ukm: PointerBytes) -> CkMechanismParams {
 }
 
 #[test]
-fn r19_reconstruct_gostr3410_key_wrap() {
+fn reconstruct_gostr3410_key_wrap() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType::GOSTR3410_KEY_WRAP);
         let p: cryptoki_sys::CK_GOSTR3410_KEY_WRAP_PARAMS = param_struct(ffi);
@@ -836,7 +836,7 @@ fn rc5_cbc(iv: PointerBytes) -> CkMechanismParams {
 }
 
 #[test]
-fn r19_reconstruct_rc5_cbc() {
+fn reconstruct_rc5_cbc() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType(CKM_TEST_RC5_CBC));
         let p: cryptoki_sys::CK_RC5_CBC_PARAMS = param_struct(ffi);
@@ -870,7 +870,7 @@ fn chacha20(counter: PointerBytes, nonce: PointerBytes) -> CkMechanismParams {
 }
 
 #[test]
-fn r19_reconstruct_chacha20() {
+fn reconstruct_chacha20() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType::CHACHA20);
         let p: cryptoki_sys::CK_CHACHA20_PARAMS = param_struct(ffi);
@@ -943,7 +943,7 @@ fn salsa20(counter: PointerBytes, nonce: PointerBytes) -> CkMechanismParams {
 }
 
 #[test]
-fn r19_reconstruct_salsa20() {
+fn reconstruct_salsa20() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType::SALSA20);
         let p: cryptoki_sys::CK_SALSA20_PARAMS = param_struct(ffi);
@@ -1012,7 +1012,7 @@ fn aead_poly1305(nonce: PointerBytes, aad: PointerBytes) -> CkMechanismParams {
 }
 
 #[test]
-fn r19_reconstruct_salsa20_chacha20_poly1305() {
+fn reconstruct_salsa20_chacha20_poly1305() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType(CKM_TEST_SALSA20_CHACHA20_POLY1305));
         let p: cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_PARAMS = param_struct(ffi);
@@ -1052,7 +1052,7 @@ fn aes_cbc_encrypt_data(iv: &[u8], data: PointerBytes) -> CkMechanismParams {
 }
 
 #[test]
-fn r19_reconstruct_aes_cbc_encrypt_data() {
+fn reconstruct_aes_cbc_encrypt_data() {
     let iv = vec![0x7E; 16];
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType::AES_CBC_ENCRYPT_DATA);
@@ -1085,7 +1085,7 @@ fn des_cbc_encrypt_data(iv: &[u8], data: PointerBytes) -> CkMechanismParams {
 }
 
 #[test]
-fn r19_reconstruct_des_cbc_encrypt_data() {
+fn reconstruct_des_cbc_encrypt_data() {
     let iv = vec![0x80; 8];
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType::DES_CBC_ENCRYPT_DATA);
@@ -1113,7 +1113,7 @@ fn aria_cbc_encrypt_data(iv: &[u8], data: PointerBytes) -> CkMechanismParams {
 }
 
 #[test]
-fn r19_reconstruct_aria_cbc_encrypt_data() {
+fn reconstruct_aria_cbc_encrypt_data() {
     let iv = vec![0x82; 16];
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType(CKM_TEST_ARIA_CBC_ENCRYPT_DATA));
@@ -1144,7 +1144,7 @@ fn camellia_cbc_encrypt_data(iv: &[u8], data: PointerBytes) -> CkMechanismParams
 }
 
 #[test]
-fn r19_reconstruct_camellia_cbc_encrypt_data() {
+fn reconstruct_camellia_cbc_encrypt_data() {
     let iv = vec![0x84; 16];
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType(CKM_TEST_CAMELLIA_CBC_ENCRYPT_DATA));
@@ -1173,7 +1173,7 @@ fn seed_cbc_encrypt_data(iv: &[u8], data: PointerBytes) -> CkMechanismParams {
 }
 
 #[test]
-fn r19_reconstruct_seed_cbc_encrypt_data() {
+fn reconstruct_seed_cbc_encrypt_data() {
     let iv = vec![0x86; 16];
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType(CKM_TEST_SEED_CBC_ENCRYPT_DATA));
@@ -1204,7 +1204,7 @@ fn gcm_wrap(iv: PointerBytes, aad: PointerBytes) -> CkMechanismParams {
 }
 
 #[test]
-fn r19_reconstruct_gcm_wrap() {
+fn reconstruct_gcm_wrap() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType(CKM_TEST_GCM_WRAP));
         let p: cryptoki_sys::CK_GCM_WRAP_PARAMS = param_struct(ffi);
@@ -1248,7 +1248,7 @@ fn ccm_wrap(nonce: PointerBytes, aad: PointerBytes) -> CkMechanismParams {
 }
 
 #[test]
-fn r19_reconstruct_ccm_wrap() {
+fn reconstruct_ccm_wrap() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType(CKM_TEST_CCM_WRAP));
         let p: cryptoki_sys::CK_CCM_WRAP_PARAMS = param_struct(ffi);
@@ -1288,7 +1288,7 @@ fn rsa_aes_wrap(source: PointerBytes) -> CkMechanismParams {
 }
 
 #[test]
-fn r19_reconstruct_rsa_aes_key_wrap() {
+fn reconstruct_rsa_aes_key_wrap() {
     // The nesting pointer is always live; the nested OAEP source leg
     // reconstructs per §6 exactly like the top level (byte-identity with
     // the top-level OAEP conversion is pinned by
@@ -1330,7 +1330,7 @@ fn pbkdf2(salt: PointerBytes, prf_data: PointerBytes, password: PointerBytes) ->
 }
 
 #[test]
-fn r19_reconstruct_pkcs5_pbkd2() {
+fn reconstruct_pkcs5_pbkd2() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType::PKCS5_PBKD2);
         let p: cryptoki_sys::CK_PKCS5_PBKD2_PARAMS2 = param_struct(ffi);
@@ -1380,7 +1380,7 @@ fn pbe(iv: PointerBytes, password: PointerBytes, salt: PointerBytes) -> CkMechan
 }
 
 #[test]
-fn r19_reconstruct_pbe() {
+fn reconstruct_pbe() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType::PBA_SHA1_WITH_SHA1_HMAC);
         let p: cryptoki_sys::CK_PBE_PARAMS = param_struct(ffi);
@@ -1448,7 +1448,7 @@ fn ecdh_aes_wrap(shared: PointerBytes) -> CkMechanismParams {
 }
 
 #[test]
-fn r19_reconstruct_ecdh_aes_key_wrap() {
+fn reconstruct_ecdh_aes_key_wrap() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType::ECDH_AES_KEY_WRAP);
         let p: cryptoki_sys::CK_ECDH_AES_KEY_WRAP_PARAMS = param_struct(ffi);
@@ -1475,7 +1475,7 @@ fn set_oaep(bc: u32, x: PointerBytes) -> CkMechanismParams {
 }
 
 #[test]
-fn r19_reconstruct_key_wrap_set_oaep() {
+fn reconstruct_key_wrap_set_oaep() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType(CKM_TEST_KEY_WRAP_SET_OAEP));
         let p: cryptoki_sys::CK_KEY_WRAP_SET_OAEP_PARAMS = param_struct(ffi);
@@ -1505,7 +1505,7 @@ fn sign_ctx(context: PointerBytes, hash: CkMechanismType) -> CkMechanismParams {
 }
 
 #[test]
-fn r19_reconstruct_sign_additional_context() {
+fn reconstruct_sign_additional_context() {
     // Plain form (`hash == 0`): CK_SIGN_ADDITIONAL_CONTEXT.
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType::ML_DSA);
@@ -1526,7 +1526,7 @@ fn r19_reconstruct_sign_additional_context() {
 }
 
 #[test]
-fn r19_reconstruct_hash_sign_additional_context() {
+fn reconstruct_hash_sign_additional_context() {
     // Hash form (`hash != 0`): CK_HASH_SIGN_ADDITIONAL_CONTEXT carries
     // the same context leg plus the explicit hash mechanism.
     let probe = |params: CkMechanismParams| {
@@ -1559,7 +1559,7 @@ fn kmac(customization: PointerBytes) -> CkMechanismParams {
 }
 
 #[test]
-fn r19_reconstruct_kmac() {
+fn reconstruct_kmac() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType(CKM_TEST_KMAC));
         let p: super::FfiKmacParams = param_struct(ffi);
@@ -1590,7 +1590,7 @@ fn mugen(tr: PointerBytes, context: PointerBytes) -> CkMechanismParams {
 }
 
 #[test]
-fn r19_reconstruct_mu_gen() {
+fn reconstruct_mu_gen() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType(CKM_TEST_MU_GEN));
         let p: super::FfiMuGenParams = param_struct(ffi);
@@ -1622,7 +1622,7 @@ fn kdf_string(data: PointerBytes) -> CkMechanismParams {
 }
 
 #[test]
-fn r19_reconstruct_key_derivation_string_data() {
+fn reconstruct_key_derivation_string_data() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType::SHAKE_256_KEY_DERIVATION);
         let p: cryptoki_sys::CK_KEY_DERIVATION_STRING_DATA = param_struct(ffi);
@@ -1656,7 +1656,7 @@ fn ike_prf(ni: PointerBytes, nr: PointerBytes) -> CkMechanismParams {
 }
 
 #[test]
-fn r19_reconstruct_ike_prf_derive() {
+fn reconstruct_ike_prf_derive() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType::IKE_PRF_DERIVE);
         let p: cryptoki_sys::CK_IKE_PRF_DERIVE_PARAMS = param_struct(ffi);
@@ -1696,7 +1696,7 @@ fn ike1_prf(ckyi: PointerBytes, ckyr: PointerBytes) -> CkMechanismParams {
 }
 
 #[test]
-fn r19_reconstruct_ike1_prf_derive() {
+fn reconstruct_ike1_prf_derive() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType::IKE1_PRF_DERIVE);
         let p: cryptoki_sys::CK_IKE1_PRF_DERIVE_PARAMS = param_struct(ffi);
@@ -1738,7 +1738,7 @@ fn ike1_extended(extra: PointerBytes) -> CkMechanismParams {
 }
 
 #[test]
-fn r19_reconstruct_ike1_extended_derive() {
+fn reconstruct_ike1_extended_derive() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType::IKE1_EXTENDED_DERIVE);
         let p: cryptoki_sys::CK_IKE1_EXTENDED_DERIVE_PARAMS = param_struct(ffi);
@@ -1767,7 +1767,7 @@ fn ike2_prf_plus(seed: PointerBytes) -> CkMechanismParams {
 }
 
 #[test]
-fn r19_reconstruct_ike2_prf_plus_derive() {
+fn reconstruct_ike2_prf_plus_derive() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType::IKE2_PRF_PLUS_DERIVE);
         let p: cryptoki_sys::CK_IKE2_PRF_PLUS_DERIVE_PARAMS = param_struct(ffi);
@@ -1804,7 +1804,7 @@ fn kea(
 }
 
 #[test]
-fn r19_reconstruct_kea_derive() {
+fn reconstruct_kea_derive() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType(CKM_TEST_KEA_DERIVE));
         let p: cryptoki_sys::CK_KEA_DERIVE_PARAMS = param_struct(ffi);
@@ -1851,7 +1851,7 @@ fn r19_reconstruct_kea_derive() {
 }
 
 #[test]
-fn r19_reconstruct_kea_derive_legacy_mismatch_uses_a() {
+fn reconstruct_kea_derive_legacy_mismatch_uses_a() {
     // v0-legacy mismatch pin (pre-existing behavior, NOT new §6 shape):
     // v1 decode rejects disagreeing RandomA/B lengths via
     // `check_shared_len_agreement`, but a directly-constructed legacy
@@ -1904,7 +1904,7 @@ fn skipjack_private(
 }
 
 #[test]
-fn r19_reconstruct_skipjack_private_wrap() {
+fn reconstruct_skipjack_private_wrap() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType(CKM_TEST_SKIPJACK_PRIVATE_WRAP));
         let p: cryptoki_sys::CK_SKIPJACK_PRIVATE_WRAP_PARAMS = param_struct(ffi);
@@ -1991,7 +1991,7 @@ fn r19_reconstruct_skipjack_private_wrap() {
 }
 
 #[test]
-fn r19_reconstruct_skipjack_private_wrap_legacy_mismatch_uses_prime_p() {
+fn reconstruct_skipjack_private_wrap_legacy_mismatch_uses_prime_p() {
     // v0-legacy mismatch pin (pre-existing behavior, NOT new §6 shape):
     // v1 decode rejects disagreeing PrimeP/BaseG lengths via
     // `check_shared_len_agreement`, but a directly-constructed legacy
@@ -2045,7 +2045,7 @@ fn skipjack_relayx(
 }
 
 #[test]
-fn r19_reconstruct_skipjack_relayx() {
+fn reconstruct_skipjack_relayx() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType(CKM_TEST_SKIPJACK_RELAYX));
         let p: cryptoki_sys::CK_SKIPJACK_RELAYX_PARAMS = param_struct(ffi);
@@ -2114,7 +2114,7 @@ fn tls_prf(
 }
 
 #[test]
-fn r19_reconstruct_tls_prf() {
+fn reconstruct_tls_prf() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType::TLS_PRF);
         let p: cryptoki_sys::CK_TLS_PRF_PARAMS = param_struct(ffi);
@@ -2178,7 +2178,7 @@ fn tls_kdf(label: PointerBytes, random: SslRandomData, context: PointerBytes) ->
 }
 
 #[test]
-fn r19_reconstruct_tls_kdf() {
+fn reconstruct_tls_kdf() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType::TLS_KDF);
         let p: cryptoki_sys::CK_TLS_KDF_PARAMS = param_struct(ffi);
@@ -2239,7 +2239,7 @@ fn ssl3_master(
 }
 
 #[test]
-fn r19_reconstruct_ssl3_master_key_derive() {
+fn reconstruct_ssl3_master_key_derive() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType::SSL3_MASTER_KEY_DERIVE);
         let p: cryptoki_sys::CK_SSL3_MASTER_KEY_DERIVE_PARAMS = param_struct(ffi);
@@ -2321,7 +2321,7 @@ fn tls12_master(
 }
 
 #[test]
-fn r19_reconstruct_tls12_master_key_derive() {
+fn reconstruct_tls12_master_key_derive() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType::TLS12_MASTER_KEY_DERIVE);
         let p: cryptoki_sys::CK_TLS12_MASTER_KEY_DERIVE_PARAMS = param_struct(ffi);
@@ -2399,7 +2399,7 @@ fn tls12_extended(
 }
 
 #[test]
-fn r19_reconstruct_tls12_extended_master_key_derive() {
+fn reconstruct_tls12_extended_master_key_derive() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType(CKM_TEST_TLS12_EXTENDED_MASTER_KEY_DERIVE));
         let p: cryptoki_sys::CK_TLS12_EXTENDED_MASTER_KEY_DERIVE_PARAMS = param_struct(ffi);
@@ -2429,7 +2429,7 @@ fn r19_reconstruct_tls12_extended_master_key_derive() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn r19_reconstruct_ssl3_key_mat() {
+fn reconstruct_ssl3_key_mat() {
     let params = |random: SslRandomData,
                   client_iv: PointerBytes,
                   server_iv: PointerBytes,
@@ -2549,7 +2549,7 @@ fn wtls_random(client: PointerBytes, server: PointerBytes) -> WtlsRandomData {
 }
 
 #[test]
-fn r19_reconstruct_wtls_master_key_derive() {
+fn reconstruct_wtls_master_key_derive() {
     let params = |random: WtlsRandomData, version: u32, version_is_null: bool| {
         CkMechanismParams::WtlsMasterKeyDerive(WtlsMasterKeyDeriveParams {
             digest_mechanism: CkMechanismType::SHA256,
@@ -2604,7 +2604,7 @@ fn r19_reconstruct_wtls_master_key_derive() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn r19_reconstruct_wtls_prf() {
+fn reconstruct_wtls_prf() {
     let params = |seed: PointerBytes,
                   label: PointerBytes,
                   output_len: u64,
@@ -2663,7 +2663,7 @@ fn r19_reconstruct_wtls_prf() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn r19_reconstruct_wtls_key_mat() {
+fn reconstruct_wtls_key_mat() {
     let params = |random: WtlsRandomData, iv: PointerBytes, returned_null: bool| {
         CkMechanismParams::WtlsKeyMat(WtlsKeyMatParams {
             digest_mechanism: CkMechanismType::SHA256,
@@ -2737,7 +2737,7 @@ fn otp_param(type_: u64, value: PointerBytes) -> OtpParam {
 }
 
 #[test]
-fn r19_reconstruct_otp() {
+fn reconstruct_otp() {
     let params = |presence: PointerArray<OtpParam>| {
         CkMechanismParams::Otp(OtpParams { params_presence: presence })
     };
@@ -2793,7 +2793,7 @@ fn kip_present_nested(seed: PointerBytes) -> CkMechanismParams {
 }
 
 #[test]
-fn r19_reconstruct_kip() {
+fn reconstruct_kip() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType::KIP_DERIVE);
         let p: cryptoki_sys::CK_KIP_PARAMS = param_struct(ffi);
@@ -2862,7 +2862,7 @@ fn sp800_kdf(
 }
 
 #[test]
-fn r19_reconstruct_sp800_108_kdf() {
+fn reconstruct_sp800_108_kdf() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType::SP800_108_COUNTER_KDF);
         let p: cryptoki_sys::CK_SP800_108_KDF_PARAMS = param_struct(ffi);
@@ -2948,7 +2948,7 @@ fn sp800_feedback_kdf(
 }
 
 #[test]
-fn r19_reconstruct_sp800_108_feedback_kdf() {
+fn reconstruct_sp800_108_feedback_kdf() {
     let probe = |params: CkMechanismParams| {
         let ffi = convert(params, CkMechanismType::SP800_108_FEEDBACK_KDF);
         let p: cryptoki_sys::CK_SP800_108_FEEDBACK_KDF_PARAMS = param_struct(ffi);
@@ -3020,21 +3020,21 @@ const CK_SP800_108_KEY_HANDLE: u64 = 0x0000_0005;
 /// F5 client-layout vectors: literal client widths (never host
 /// `size_of`), so the same test pins ILP32→LP64 bridging on 64-bit CI
 /// and LP64→ILP32 bridging on the win32 CI job.
-fn f5_counter_lp64(little_endian: u8, width_in_bits: u64) -> Vec<u8> {
+fn counter_lp64(little_endian: u8, width_in_bits: u64) -> Vec<u8> {
     let mut value = vec![0u8; 16];
     value[0] = little_endian;
     value[8..16].copy_from_slice(&width_in_bits.to_ne_bytes());
     value
 }
 
-fn f5_counter_ilp32(little_endian: u8, width_in_bits: u32) -> Vec<u8> {
+fn counter_ilp32(little_endian: u8, width_in_bits: u32) -> Vec<u8> {
     let mut value = vec![0u8; 8];
     value[0] = little_endian;
     value[4..8].copy_from_slice(&width_in_bits.to_ne_bytes());
     value
 }
 
-fn f5_dkm_lp64(method: u64, little_endian: u8, width_in_bits: u64) -> Vec<u8> {
+fn dkm_lp64(method: u64, little_endian: u8, width_in_bits: u64) -> Vec<u8> {
     let mut value = vec![0u8; 24];
     value[0..8].copy_from_slice(&method.to_ne_bytes());
     value[8] = little_endian;
@@ -3042,7 +3042,7 @@ fn f5_dkm_lp64(method: u64, little_endian: u8, width_in_bits: u64) -> Vec<u8> {
     value
 }
 
-fn f5_dkm_ilp32(method: u32, little_endian: u8, width_in_bits: u32) -> Vec<u8> {
+fn dkm_ilp32(method: u32, little_endian: u8, width_in_bits: u32) -> Vec<u8> {
     let mut value = vec![0u8; 12];
     value[0..4].copy_from_slice(&method.to_ne_bytes());
     value[4] = little_endian;
@@ -3051,7 +3051,7 @@ fn f5_dkm_ilp32(method: u32, little_endian: u8, width_in_bits: u32) -> Vec<u8> {
 }
 
 /// Windows LLP64 pack(1) counter-format vector (literal 5 bytes).
-fn f5_counter_packed1(little_endian: u8, width_in_bits: u32) -> Vec<u8> {
+fn counter_packed1(little_endian: u8, width_in_bits: u32) -> Vec<u8> {
     let mut value = vec![0u8; 5];
     value[0] = little_endian;
     value[1..5].copy_from_slice(&width_in_bits.to_ne_bytes());
@@ -3059,7 +3059,7 @@ fn f5_counter_packed1(little_endian: u8, width_in_bits: u32) -> Vec<u8> {
 }
 
 /// Windows LLP64 pack(1) DKM-length-format vector (literal 9 bytes).
-fn f5_dkm_packed1(method: u32, little_endian: u8, width_in_bits: u32) -> Vec<u8> {
+fn dkm_packed1(method: u32, little_endian: u8, width_in_bits: u32) -> Vec<u8> {
     let mut value = vec![0u8; 9];
     value[0..4].copy_from_slice(&method.to_ne_bytes());
     value[4] = little_endian;
@@ -3070,7 +3070,7 @@ fn f5_dkm_packed1(method: u32, little_endian: u8, width_in_bits: u32) -> Vec<u8>
 /// By-value copy of data-param element `index` from a live
 /// `pDataParams` array (the probe's `FfiMechanism` is arena-retained,
 /// so every element outlives the test).
-fn f5_data_elem(
+fn data_elem(
     d_ptr: *mut cryptoki_sys::CK_PRF_DATA_PARAM,
     index: usize,
 ) -> cryptoki_sys::CK_PRF_DATA_PARAM {
@@ -3082,21 +3082,21 @@ fn f5_data_elem(
 
 /// By-value copy of the rebuilt counter format behind `pValue` (only
 /// initialized fields are projected by callers, never padding).
-fn f5_counter_at(pvalue: *mut std::ffi::c_void) -> cryptoki_sys::CK_SP800_108_COUNTER_FORMAT {
+fn counter_at(pvalue: *mut std::ffi::c_void) -> cryptoki_sys::CK_SP800_108_COUNTER_FORMAT {
     // SAFETY: `pvalue` designates a live rebuilt counter format owned
     // by the arena-retained `FfiMechanism`.
     unsafe { (pvalue as *const cryptoki_sys::CK_SP800_108_COUNTER_FORMAT).read_unaligned() }
 }
 
 /// By-value copy of the rebuilt DKM length format behind `pValue`.
-fn f5_dkm_at(pvalue: *mut std::ffi::c_void) -> cryptoki_sys::CK_SP800_108_DKM_LENGTH_FORMAT {
+fn dkm_at(pvalue: *mut std::ffi::c_void) -> cryptoki_sys::CK_SP800_108_DKM_LENGTH_FORMAT {
     // SAFETY: `pvalue` designates a live rebuilt DKM length format
     // owned by the arena-retained `FfiMechanism`.
     unsafe { (pvalue as *const cryptoki_sys::CK_SP800_108_DKM_LENGTH_FORMAT).read_unaligned() }
 }
 
 /// By-value copy of the rebuilt object handle behind `pValue`.
-fn f5_handle_at(pvalue: *mut std::ffi::c_void) -> cryptoki_sys::CK_ULONG {
+fn handle_at(pvalue: *mut std::ffi::c_void) -> cryptoki_sys::CK_ULONG {
     // SAFETY: `pvalue` designates a live rebuilt handle owned by the
     // arena-retained `FfiMechanism`.
     unsafe { (pvalue as *const cryptoki_sys::CK_ULONG).read_unaligned() }
@@ -3104,7 +3104,7 @@ fn f5_handle_at(pvalue: *mut std::ffi::c_void) -> cryptoki_sys::CK_ULONG {
 
 /// Pin provider-visible alignment (the F5 defect class: align-1 byte
 /// backing for provider-typed reads).
-fn f5_assert_aligned<T>(what: &str, pvalue: *mut std::ffi::c_void) {
+fn assert_aligned<T>(what: &str, pvalue: *mut std::ffi::c_void) {
     assert!(!pvalue.is_null(), "{what}: rebuilt value must be non-NULL");
     assert_eq!(
         pvalue as usize % std::mem::align_of::<T>(),
@@ -3114,7 +3114,7 @@ fn f5_assert_aligned<T>(what: &str, pvalue: *mut std::ffi::c_void) {
 }
 
 #[test]
-fn f5_kdf_counter_bridges_both_client_widths() {
+fn kdf_counter_bridges_both_client_widths() {
     // An above-u32 width only where the daemon can represent it (an
     // ILP32 daemon rejects the LP64 client's unrepresentable scalar
     // with FUNCTION_FAILED — the shared narrow rule).
@@ -3125,11 +3125,11 @@ fn f5_kdf_counter_bridges_both_client_widths() {
             PointerArray::present(vec![
                 prf_data(
                     CK_SP800_108_COUNTER,
-                    PointerBytes::present_copy(&f5_counter_lp64(1, lp64_width)),
+                    PointerBytes::present_copy(&counter_lp64(1, lp64_width)),
                 ),
                 prf_data(
                     CK_SP800_108_COUNTER,
-                    PointerBytes::present_copy(&f5_counter_ilp32(0, 0xAABB_CCDD)),
+                    PointerBytes::present_copy(&counter_ilp32(0, 0xAABB_CCDD)),
                 ),
             ]),
             PointerArray::present(Vec::new()),
@@ -3140,14 +3140,14 @@ fn f5_kdf_counter_bridges_both_client_widths() {
     let native_len = std::mem::size_of::<cryptoki_sys::CK_SP800_108_COUNTER_FORMAT>() as u64;
     assert_eq!(p.ulNumberOfDataParams as u64, 2, "f5/counter: count");
     // LP64-client leg: same-layout rebuild, value-exact.
-    let first = f5_data_elem(p.pDataParams, 0);
+    let first = data_elem(p.pDataParams, 0);
     assert_field("f5/counter-lp64", first.pValue as *mut u8, first.ulValueLen, false, native_len);
-    f5_assert_aligned::<cryptoki_sys::CK_SP800_108_COUNTER_FORMAT>("f5/counter-lp64", first.pValue);
-    let rebuilt = f5_counter_at(first.pValue);
+    assert_aligned::<cryptoki_sys::CK_SP800_108_COUNTER_FORMAT>("f5/counter-lp64", first.pValue);
+    let rebuilt = counter_at(first.pValue);
     assert_eq!(rebuilt.bLittleEndian, 1, "f5/counter-lp64: bool byte");
     assert_eq!(rebuilt.ulWidthInBits as u64, lp64_width, "f5/counter-lp64: width");
     // ILP32-client leg: bridged to the daemon-native record.
-    let second = f5_data_elem(p.pDataParams, 1);
+    let second = data_elem(p.pDataParams, 1);
     assert_field(
         "f5/counter-ilp32",
         second.pValue as *mut u8,
@@ -3155,17 +3155,14 @@ fn f5_kdf_counter_bridges_both_client_widths() {
         false,
         native_len,
     );
-    f5_assert_aligned::<cryptoki_sys::CK_SP800_108_COUNTER_FORMAT>(
-        "f5/counter-ilp32",
-        second.pValue,
-    );
-    let rebuilt = f5_counter_at(second.pValue);
+    assert_aligned::<cryptoki_sys::CK_SP800_108_COUNTER_FORMAT>("f5/counter-ilp32", second.pValue);
+    let rebuilt = counter_at(second.pValue);
     assert_eq!(rebuilt.bLittleEndian, 0, "f5/counter-ilp32: bool byte");
     assert_eq!(rebuilt.ulWidthInBits as u64, 0xAABB_CCDD, "f5/counter-ilp32: width");
 }
 
 #[test]
-fn nf1_kdf_packed_client_layouts_bridge_to_native() {
+fn kdf_packed_client_layouts_bridge_to_native() {
     // Windows pack(1) client legs bridge to daemon-native records with
     // native alignment and value-exact scalars.
     let ffi = convert(
@@ -3173,11 +3170,11 @@ fn nf1_kdf_packed_client_layouts_bridge_to_native() {
             PointerArray::present(vec![
                 prf_data(
                     CK_SP800_108_COUNTER,
-                    PointerBytes::present_copy(&f5_counter_packed1(1, 321)),
+                    PointerBytes::present_copy(&counter_packed1(1, 321)),
                 ),
                 prf_data(
                     CK_SP800_108_DKM_LENGTH,
-                    PointerBytes::present_copy(&f5_dkm_packed1(2, 0, 512)),
+                    PointerBytes::present_copy(&dkm_packed1(2, 0, 512)),
                 ),
             ]),
             PointerArray::present(Vec::new()),
@@ -3187,7 +3184,7 @@ fn nf1_kdf_packed_client_layouts_bridge_to_native() {
     let p: cryptoki_sys::CK_SP800_108_KDF_PARAMS = param_struct(ffi);
     assert_eq!(p.ulNumberOfDataParams as u64, 2, "nf1/packed: count");
     let counter_len = std::mem::size_of::<cryptoki_sys::CK_SP800_108_COUNTER_FORMAT>() as u64;
-    let first = f5_data_elem(p.pDataParams, 0);
+    let first = data_elem(p.pDataParams, 0);
     assert_field(
         "nf1/packed-counter",
         first.pValue as *mut u8,
@@ -3195,28 +3192,22 @@ fn nf1_kdf_packed_client_layouts_bridge_to_native() {
         false,
         counter_len,
     );
-    f5_assert_aligned::<cryptoki_sys::CK_SP800_108_COUNTER_FORMAT>(
-        "nf1/packed-counter",
-        first.pValue,
-    );
-    let rebuilt = f5_counter_at(first.pValue);
+    assert_aligned::<cryptoki_sys::CK_SP800_108_COUNTER_FORMAT>("nf1/packed-counter", first.pValue);
+    let rebuilt = counter_at(first.pValue);
     assert_eq!(rebuilt.bLittleEndian, 1, "nf1/packed-counter: bool byte");
     assert_eq!(rebuilt.ulWidthInBits as u64, 321, "nf1/packed-counter: width");
     let dkm_len = std::mem::size_of::<cryptoki_sys::CK_SP800_108_DKM_LENGTH_FORMAT>() as u64;
-    let second = f5_data_elem(p.pDataParams, 1);
+    let second = data_elem(p.pDataParams, 1);
     assert_field("nf1/packed-dkm", second.pValue as *mut u8, second.ulValueLen, false, dkm_len);
-    f5_assert_aligned::<cryptoki_sys::CK_SP800_108_DKM_LENGTH_FORMAT>(
-        "nf1/packed-dkm",
-        second.pValue,
-    );
-    let rebuilt = f5_dkm_at(second.pValue);
+    assert_aligned::<cryptoki_sys::CK_SP800_108_DKM_LENGTH_FORMAT>("nf1/packed-dkm", second.pValue);
+    let rebuilt = dkm_at(second.pValue);
     assert_eq!(rebuilt.dkmLengthMethod as u64, 2, "nf1/packed-dkm: method");
     assert_eq!(rebuilt.bLittleEndian, 0, "nf1/packed-dkm: bool byte");
     assert_eq!(rebuilt.ulWidthInBits as u64, 512, "nf1/packed-dkm: width");
 }
 
 #[test]
-fn f5_kdf_dkm_key_iteration_bridge_to_native() {
+fn kdf_dkm_key_iteration_bridge_to_native() {
     // Above-u32 scalars only where the daemon can represent them (see
     // the counter test).
     let narrow = std::mem::size_of::<cryptoki_sys::CK_ULONG>() != 8;
@@ -3228,11 +3219,11 @@ fn f5_kdf_dkm_key_iteration_bridge_to_native() {
             PointerArray::present(vec![
                 prf_data(
                     CK_SP800_108_DKM_LENGTH,
-                    PointerBytes::present_copy(&f5_dkm_lp64(dkm_method, 1, dkm_width)),
+                    PointerBytes::present_copy(&dkm_lp64(dkm_method, 1, dkm_width)),
                 ),
                 prf_data(
                     CK_SP800_108_DKM_LENGTH,
-                    PointerBytes::present_copy(&f5_dkm_ilp32(1, 0, 0x1234_5678)),
+                    PointerBytes::present_copy(&dkm_ilp32(1, 0, 0x1234_5678)),
                 ),
                 prf_data(
                     CK_SP800_108_KEY_HANDLE,
@@ -3244,7 +3235,7 @@ fn f5_kdf_dkm_key_iteration_bridge_to_native() {
                 ),
                 prf_data(
                     CK_SP800_108_ITERATION_VARIABLE,
-                    PointerBytes::present_copy(&f5_counter_ilp32(1, 321)),
+                    PointerBytes::present_copy(&counter_ilp32(1, 321)),
                 ),
             ]),
             PointerArray::present(Vec::new()),
@@ -3257,54 +3248,51 @@ fn f5_kdf_dkm_key_iteration_bridge_to_native() {
     let handle_len = std::mem::size_of::<cryptoki_sys::CK_ULONG>() as u64;
     let counter_len = std::mem::size_of::<cryptoki_sys::CK_SP800_108_COUNTER_FORMAT>() as u64;
     // LP64-client DKM leg.
-    let elem = f5_data_elem(p.pDataParams, 0);
+    let elem = data_elem(p.pDataParams, 0);
     assert_field("f5/dkm-lp64", elem.pValue as *mut u8, elem.ulValueLen, false, dkm_len);
-    f5_assert_aligned::<cryptoki_sys::CK_SP800_108_DKM_LENGTH_FORMAT>("f5/dkm-lp64", elem.pValue);
-    let rebuilt = f5_dkm_at(elem.pValue);
+    assert_aligned::<cryptoki_sys::CK_SP800_108_DKM_LENGTH_FORMAT>("f5/dkm-lp64", elem.pValue);
+    let rebuilt = dkm_at(elem.pValue);
     assert_eq!(rebuilt.dkmLengthMethod as u64, dkm_method, "f5/dkm-lp64: method");
     assert_eq!(rebuilt.bLittleEndian, 1, "f5/dkm-lp64: bool byte");
     assert_eq!(rebuilt.ulWidthInBits as u64, dkm_width, "f5/dkm-lp64: width");
     // ILP32-client DKM leg.
-    let elem = f5_data_elem(p.pDataParams, 1);
+    let elem = data_elem(p.pDataParams, 1);
     assert_field("f5/dkm-ilp32", elem.pValue as *mut u8, elem.ulValueLen, false, dkm_len);
-    f5_assert_aligned::<cryptoki_sys::CK_SP800_108_DKM_LENGTH_FORMAT>("f5/dkm-ilp32", elem.pValue);
-    let rebuilt = f5_dkm_at(elem.pValue);
+    assert_aligned::<cryptoki_sys::CK_SP800_108_DKM_LENGTH_FORMAT>("f5/dkm-ilp32", elem.pValue);
+    let rebuilt = dkm_at(elem.pValue);
     assert_eq!(rebuilt.dkmLengthMethod as u64, 1, "f5/dkm-ilp32: method");
     assert_eq!(rebuilt.bLittleEndian, 0, "f5/dkm-ilp32: bool byte");
     assert_eq!(rebuilt.ulWidthInBits as u64, 0x1234_5678, "f5/dkm-ilp32: width");
     // 8-byte key leg (LP64-client width on every host).
-    let elem = f5_data_elem(p.pDataParams, 2);
+    let elem = data_elem(p.pDataParams, 2);
     assert_field("f5/key-wide", elem.pValue as *mut u8, elem.ulValueLen, false, handle_len);
-    f5_assert_aligned::<cryptoki_sys::CK_ULONG>("f5/key-wide", elem.pValue);
-    assert_eq!(f5_handle_at(elem.pValue) as u64, key_wide, "f5/key-wide: handle");
+    assert_aligned::<cryptoki_sys::CK_ULONG>("f5/key-wide", elem.pValue);
+    assert_eq!(handle_at(elem.pValue) as u64, key_wide, "f5/key-wide: handle");
     // 4-byte key leg (ILP32-client width on every host).
-    let elem = f5_data_elem(p.pDataParams, 3);
+    let elem = data_elem(p.pDataParams, 3);
     assert_field("f5/key-narrow", elem.pValue as *mut u8, elem.ulValueLen, false, handle_len);
-    f5_assert_aligned::<cryptoki_sys::CK_ULONG>("f5/key-narrow", elem.pValue);
-    assert_eq!(f5_handle_at(elem.pValue) as u64, 0xDEAD_BEEF, "f5/key-narrow: handle");
+    assert_aligned::<cryptoki_sys::CK_ULONG>("f5/key-narrow", elem.pValue);
+    assert_eq!(handle_at(elem.pValue) as u64, 0xDEAD_BEEF, "f5/key-narrow: handle");
     // ILP32-client iteration variable (counter-shaped).
-    let elem = f5_data_elem(p.pDataParams, 4);
+    let elem = data_elem(p.pDataParams, 4);
     assert_field("f5/iter-ilp32", elem.pValue as *mut u8, elem.ulValueLen, false, counter_len);
-    f5_assert_aligned::<cryptoki_sys::CK_SP800_108_COUNTER_FORMAT>("f5/iter-ilp32", elem.pValue);
-    let rebuilt = f5_counter_at(elem.pValue);
+    assert_aligned::<cryptoki_sys::CK_SP800_108_COUNTER_FORMAT>("f5/iter-ilp32", elem.pValue);
+    let rebuilt = counter_at(elem.pValue);
     assert_eq!(rebuilt.bLittleEndian, 1, "f5/iter-ilp32: bool byte");
     assert_eq!(rebuilt.ulWidthInBits as u64, 321, "f5/iter-ilp32: width");
 }
 
 #[test]
-fn f5_feedback_kdf_modeled_legs_bridge_to_native() {
+fn feedback_kdf_modeled_legs_bridge_to_native() {
     // One modeled leg per kind through the Feedback arm (the Kdf arm's
     // matrix above pins the value mapping; this pins the sibling).
     let ffi = convert(
         sp800_feedback_kdf(
             PointerArray::present(vec![
-                prf_data(
-                    CK_SP800_108_COUNTER,
-                    PointerBytes::present_copy(&f5_counter_ilp32(1, 0x51)),
-                ),
+                prf_data(CK_SP800_108_COUNTER, PointerBytes::present_copy(&counter_ilp32(1, 0x51))),
                 prf_data(
                     CK_SP800_108_DKM_LENGTH,
-                    PointerBytes::present_copy(&f5_dkm_ilp32(2, 0, 0x52)),
+                    PointerBytes::present_copy(&dkm_ilp32(2, 0, 0x52)),
                 ),
                 prf_data(
                     CK_SP800_108_KEY_HANDLE,
@@ -3321,27 +3309,27 @@ fn f5_feedback_kdf_modeled_legs_bridge_to_native() {
     let counter_len = std::mem::size_of::<cryptoki_sys::CK_SP800_108_COUNTER_FORMAT>() as u64;
     let dkm_len = std::mem::size_of::<cryptoki_sys::CK_SP800_108_DKM_LENGTH_FORMAT>() as u64;
     let handle_len = std::mem::size_of::<cryptoki_sys::CK_ULONG>() as u64;
-    let elem = f5_data_elem(p.pDataParams, 0);
+    let elem = data_elem(p.pDataParams, 0);
     assert_field("f5/fb-counter", elem.pValue as *mut u8, elem.ulValueLen, false, counter_len);
-    f5_assert_aligned::<cryptoki_sys::CK_SP800_108_COUNTER_FORMAT>("f5/fb-counter", elem.pValue);
-    let rebuilt = f5_counter_at(elem.pValue);
+    assert_aligned::<cryptoki_sys::CK_SP800_108_COUNTER_FORMAT>("f5/fb-counter", elem.pValue);
+    let rebuilt = counter_at(elem.pValue);
     assert_eq!(rebuilt.bLittleEndian, 1, "f5/fb-counter: bool byte");
     assert_eq!(rebuilt.ulWidthInBits as u64, 0x51, "f5/fb-counter: width");
-    let elem = f5_data_elem(p.pDataParams, 1);
+    let elem = data_elem(p.pDataParams, 1);
     assert_field("f5/fb-dkm", elem.pValue as *mut u8, elem.ulValueLen, false, dkm_len);
-    f5_assert_aligned::<cryptoki_sys::CK_SP800_108_DKM_LENGTH_FORMAT>("f5/fb-dkm", elem.pValue);
-    let rebuilt = f5_dkm_at(elem.pValue);
+    assert_aligned::<cryptoki_sys::CK_SP800_108_DKM_LENGTH_FORMAT>("f5/fb-dkm", elem.pValue);
+    let rebuilt = dkm_at(elem.pValue);
     assert_eq!(rebuilt.dkmLengthMethod as u64, 2, "f5/fb-dkm: method");
     assert_eq!(rebuilt.bLittleEndian, 0, "f5/fb-dkm: bool byte");
     assert_eq!(rebuilt.ulWidthInBits as u64, 0x52, "f5/fb-dkm: width");
-    let elem = f5_data_elem(p.pDataParams, 2);
+    let elem = data_elem(p.pDataParams, 2);
     assert_field("f5/fb-key", elem.pValue as *mut u8, elem.ulValueLen, false, handle_len);
-    f5_assert_aligned::<cryptoki_sys::CK_ULONG>("f5/fb-key", elem.pValue);
-    assert_eq!(f5_handle_at(elem.pValue) as u64, 0x53, "f5/fb-key: handle");
+    assert_aligned::<cryptoki_sys::CK_ULONG>("f5/fb-key", elem.pValue);
+    assert_eq!(handle_at(elem.pValue) as u64, 0x53, "f5/fb-key: handle");
 }
 
 #[test]
-fn f5_kdf_opaque_legs_stay_verbatim() {
+fn kdf_opaque_legs_stay_verbatim() {
     let ffi = convert(
         sp800_kdf(
             PointerArray::present(vec![
@@ -3357,7 +3345,7 @@ fn f5_kdf_opaque_legs_stay_verbatim() {
     let p: cryptoki_sys::CK_SP800_108_KDF_PARAMS = param_struct(ffi);
     assert_eq!(p.ulNumberOfDataParams as u64, 4, "f5/opaque: count");
     // BYTE_ARRAY: opaque bytes verbatim.
-    let elem = f5_data_elem(p.pDataParams, 0);
+    let elem = data_elem(p.pDataParams, 0);
     assert_field("f5/opaque-bytes", elem.pValue as *mut u8, elem.ulValueLen, false, 5);
     assert_eq!(
         pointee_bytes(elem.pValue as *const u8, elem.ulValueLen as u64),
@@ -3365,7 +3353,7 @@ fn f5_kdf_opaque_legs_stay_verbatim() {
         "f5/opaque-bytes: bytes"
     );
     // Unknown vendor type: opaque passthrough (nothing modeled).
-    let elem = f5_data_elem(p.pDataParams, 1);
+    let elem = data_elem(p.pDataParams, 1);
     assert_field("f5/opaque-vendor", elem.pValue as *mut u8, elem.ulValueLen, false, 7);
     assert_eq!(
         pointee_bytes(elem.pValue as *const u8, elem.ulValueLen as u64),
@@ -3373,16 +3361,16 @@ fn f5_kdf_opaque_legs_stay_verbatim() {
         "f5/opaque-vendor: bytes"
     );
     // NULL counter: NULL + declared length (presence peer governs).
-    let elem = f5_data_elem(p.pDataParams, 2);
+    let elem = data_elem(p.pDataParams, 2);
     assert_field("f5/opaque-null", elem.pValue as *mut u8, elem.ulValueLen, true, 9);
     // Empty iteration variable: stable non-NULL + 0 (mock-blessed
     // leniency for non-counter modes).
-    let elem = f5_data_elem(p.pDataParams, 3);
+    let elem = data_elem(p.pDataParams, 3);
     assert_field("f5/opaque-iter-empty", elem.pValue as *mut u8, elem.ulValueLen, false, 0);
 }
 
 #[test]
-fn f5_kdf_degenerate_payloads_fail_closed() {
+fn kdf_degenerate_payloads_fail_closed() {
     for (name, type_, len) in [
         ("counter-between-widths", CK_SP800_108_COUNTER, 12),
         ("counter-overlong", CK_SP800_108_COUNTER, 20),
@@ -3415,11 +3403,11 @@ fn f5_kdf_degenerate_payloads_fail_closed() {
 }
 
 #[test]
-fn f5_kdf_bridged_legs_echo_client_bytes_exactly() {
+fn kdf_bridged_legs_echo_client_bytes_exactly() {
     // Bridged legs round-trip the untouched CLIENT bytes (the echo
     // compares domain-vs-domain, so an ILP32 payload echoes 8 bytes
     // even though the provider saw a daemon-native record).
-    let ilp32 = f5_counter_ilp32(1, 321);
+    let ilp32 = counter_ilp32(1, 321);
     let params = sp800_kdf(
         PointerArray::present(vec![prf_data(
             CK_SP800_108_COUNTER,

@@ -154,7 +154,7 @@ pub(crate) unsafe fn payload_bytes(ptr: *const u8, len: CK_ULONG) -> CkResult<Ve
 /// so NULL legs record huge derived lengths uncapped); fixed-size
 /// callers pass the fixed extent. The S2 §10 shared-length exception is vacuous here —
 /// no R17 input-pointer family shares a length (pinned by
-/// `r17_shared_length_exception_vacuous_for_v1_input_shapes`;
+/// `shared_length_exception_vacuous_for_v1_input_shapes`;
 /// `kea_derive` + `skipjack_private_wrap` are R18 tail).
 ///
 /// # Safety

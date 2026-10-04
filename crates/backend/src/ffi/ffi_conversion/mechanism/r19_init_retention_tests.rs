@@ -168,7 +168,7 @@ fn validate(
 /// IV bytes, and the backing is published for the session family.
 #[test]
 #[cfg_attr(miri, ignore)] // Miri: stub-backed FfiBackend needs dlopen; pure-conversion half runs under Miri
-fn r19_init_typed_gcm_backing_retained() {
+fn init_typed_gcm_backing_retained() {
     let _guard = LOCK.lock().expect("test lock");
     GCM_CALLS.lock().expect("capture log").clear();
     let (backend, _tables) = test_backend();
@@ -233,7 +233,7 @@ fn r19_init_typed_gcm_backing_retained() {
 /// anti-skew pattern), not to claim derive retains.
 #[test]
 #[cfg_attr(miri, ignore)] // Miri: stub-backed FfiBackend needs dlopen; pure-conversion half runs under Miri
-fn r19_init_tail_tls_prf_backing_retained() {
+fn init_tail_tls_prf_backing_retained() {
     let _guard = LOCK.lock().expect("test lock");
     PRF_CALLS.lock().expect("capture log").clear();
     let (backend, _tables) = test_backend();
@@ -285,7 +285,7 @@ fn r19_init_tail_tls_prf_backing_retained() {
 /// retained and no last-Init marker is recorded.
 #[test]
 #[cfg_attr(miri, ignore)] // Miri: stub-backed FfiBackend needs dlopen; pure-conversion half runs under Miri
-fn r19_failed_init_publishes_nothing_typed() {
+fn failed_init_publishes_nothing_typed() {
     let _guard = LOCK.lock().expect("test lock");
     GCM_CALLS.lock().expect("capture log").clear();
     let (backend, _tables) = test_backend();
@@ -331,7 +331,7 @@ fn r19_failed_init_publishes_nothing_typed() {
 /// matrix) because it pins the post-call `output_params` contract the
 /// `_output` Init helper serves.
 #[test]
-fn r19_init_tail_output_echo_preserves_input_class() {
+fn init_tail_output_echo_preserves_input_class() {
     let label = vec![0xCB; 3];
     let validated = validate(
         CkMechanismParams::TlsPrf(TlsPrfParams {

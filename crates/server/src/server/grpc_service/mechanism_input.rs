@@ -582,7 +582,7 @@ mod transport_validation_tests {
     }
 
     #[test]
-    fn r16_typed_presence_consistency_through_entry_point() {
+    fn typed_presence_consistency_through_entry_point() {
         // The R16 typed gate (S2 §3 "no dual representations") is enforced
         // through this entry point, not just the pure fn: a NULL IV with a
         // declared length validates (contradictions are unrepresentable

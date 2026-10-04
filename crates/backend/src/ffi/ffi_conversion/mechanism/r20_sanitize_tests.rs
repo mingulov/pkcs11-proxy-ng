@@ -1,7 +1,7 @@
 //! R20 (S2 §6/§12): sanitize-ON zero-call pins — the R12-deferred
 //! half of the S2 §12 "sanitize ON zero-call / OFF one-call" backend FFI
 //! pair. OFF/one-call lives in `r12_init_retention_tests.rs`
-//! (`r12_off_one_call_flat_forwards` / `r12_off_one_call_null_forwards`);
+//! (`off_one_call_flat_forwards` / `off_one_call_null_forwards`);
 //! this module pins the ON side: a rejectable parameter is rejected with
 //! `PARAM_INVALID` and the provider stub observes ZERO calls.
 //!
@@ -177,11 +177,11 @@ type InitStub = unsafe extern "C" fn(
 ) -> cryptoki_sys::CK_RV;
 
 /// R20 ON/zero-call pin, Flat row (pairs with R12's
-/// `r12_off_one_call_flat_forwards`): sanitize ON + parameterless+Flat
+/// `off_one_call_flat_forwards`): sanitize ON + parameterless+Flat
 /// → `PARAM_INVALID` (never `ARGUMENTS_BAD`) and ZERO provider calls.
 #[test]
 #[cfg_attr(miri, ignore)] // Miri: stub-backed FfiBackend needs dlopen
-fn r20_on_zero_call_parameterless_flat_rejected() {
+fn on_zero_call_parameterless_flat_rejected() {
     let _guard = LOCK.lock().expect("test lock");
     CALLS.lock().expect("capture log").clear();
     let (backend, _tables) = test_backend();
@@ -216,7 +216,7 @@ fn r20_on_zero_call_parameterless_flat_rejected() {
 /// `ARGUMENTS_BAD`) and ZERO provider calls.
 #[test]
 #[cfg_attr(miri, ignore)] // Miri: stub-backed FfiBackend needs dlopen
-fn f2_on_zero_call_typed_embedded_null_huge_rejected() {
+fn on_zero_call_typed_embedded_null_huge_rejected() {
     const HUGE: u64 = 512 * 1024 * 1024 + 1;
     let _guard = LOCK.lock().expect("test lock");
     CALLS.lock().expect("capture log").clear();
@@ -248,11 +248,11 @@ fn f2_on_zero_call_typed_embedded_null_huge_rejected() {
 }
 
 /// R20 ON/zero-call pin, NULL row (pairs with R12's
-/// `r12_off_one_call_null_forwards`): sanitize ON + NULL/nonzero →
+/// `off_one_call_null_forwards`): sanitize ON + NULL/nonzero →
 /// `PARAM_INVALID` and ZERO provider calls.
 #[test]
 #[cfg_attr(miri, ignore)] // Miri: stub-backed FfiBackend needs dlopen
-fn r20_on_zero_call_null_nonzero_rejected() {
+fn on_zero_call_null_nonzero_rejected() {
     let _guard = LOCK.lock().expect("test lock");
     CALLS.lock().expect("capture log").clear();
     let (backend, _tables) = test_backend();
