@@ -1767,3 +1767,155 @@ mod issue26_read_after_destroy {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// #32: a post-restart stale handle must fault 0x82, not resolve.
+//
+// At a48b60b the daemon resolved a handle kept across the client's
+// Finalize/Init cycle against its live durable store (0x150 BTS into
+// the 64-byte buffer); direct returns 0x82. HEAD scopes virtual
+// mappings to the client context, so the stale handle is unknown to
+// the new context and faults. The object itself stays present
+// backend-side (live_object_count() == 1 on the fresh daemon).
+// ---------------------------------------------------------------------------
+
+#[cfg(not(miri))] // needs a running daemon (sockets); covered natively
+mod issue32_stale_handle {
+    use super::super::output_semantics::TestDaemon;
+    use super::super::*;
+
+    struct FinalizeOnDrop;
+
+    impl Drop for FinalizeOnDrop {
+        fn drop(&mut self) {
+            let _ = unsafe { dispatch::general::c_finalize(std::ptr::null_mut()) };
+        }
+    }
+
+    struct SavedConnectEnv {
+        endpoint: Option<std::ffi::OsString>,
+        socket: Option<std::ffi::OsString>,
+    }
+
+    impl SavedConnectEnv {
+        fn capture() -> Self {
+            Self {
+                endpoint: std::env::var_os("PKCS11_PROXY_ENDPOINT"),
+                socket: std::env::var_os("PKCS11_PROXY_SOCKET"),
+            }
+        }
+    }
+
+    impl Drop for SavedConnectEnv {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.endpoint {
+                    Some(v) => std::env::set_var("PKCS11_PROXY_ENDPOINT", v),
+                    None => std::env::remove_var("PKCS11_PROXY_ENDPOINT"),
+                }
+                match &self.socket {
+                    Some(v) => std::env::set_var("PKCS11_PROXY_SOCKET", v),
+                    None => std::env::remove_var("PKCS11_PROXY_SOCKET"),
+                }
+            }
+            crate::interface_probe::clear_cache();
+        }
+    }
+
+    fn initialize(endpoint: &str) {
+        unsafe {
+            std::env::set_var("PKCS11_PROXY_ENDPOINT", endpoint);
+            std::env::remove_var("PKCS11_PROXY_SOCKET");
+        }
+        let rv = unsafe { dispatch::general::c_initialize(std::ptr::null_mut()) };
+        assert_eq!(rv, CKR_OK as CK_RV, "C_Initialize");
+    }
+
+    fn open_session() -> CK_SESSION_HANDLE {
+        let mut slot_count: CK_ULONG = 0;
+        let rv = unsafe {
+            dispatch::general::c_get_slot_list(CK_FALSE, std::ptr::null_mut(), &mut slot_count)
+        };
+        assert_eq!(rv, CKR_OK as CK_RV, "GetSlotList count");
+        let mut slots = vec![0 as CK_SLOT_ID; slot_count as usize];
+        let rv = unsafe {
+            dispatch::general::c_get_slot_list(CK_FALSE, slots.as_mut_ptr(), &mut slot_count)
+        };
+        assert_eq!(rv, CKR_OK as CK_RV, "GetSlotList data");
+        let mut session = CK_INVALID_HANDLE;
+        // RW session: PKCS#11 §5.7.1 requires read/write for token-object
+        // creation (the mock is lenient, but the repro must be spec-shaped).
+        let rv = unsafe {
+            dispatch::general::c_open_session(
+                slots[0],
+                CKF_SERIAL_SESSION | CKF_RW_SESSION,
+                std::ptr::null_mut(),
+                None,
+                &mut session,
+            )
+        };
+        assert_eq!(rv, CKR_OK as CK_RV, "C_OpenSession");
+        session
+    }
+
+    #[test]
+    fn stale_handle_across_restart_faults_object_invalid() {
+        let _guard = shim_state_test_guard();
+        let _saved = SavedConnectEnv::capture();
+        let daemon = TestDaemon::fresh();
+        let _finalize = FinalizeOnDrop;
+
+        // Epoch 1: create a durable token object (the issue's sqlite
+        // shape: token object with a 746-byte value), keep its handle.
+        initialize(&daemon.endpoint);
+        let session1 = open_session();
+        let mut class: CK_ULONG = CKO_DATA;
+        let mut token_flag: CK_BBOOL = CK_TRUE;
+        let mut value = [0x42u8; 746];
+        let mut template = [
+            CK_ATTRIBUTE {
+                type_: CKA_CLASS,
+                pValue: (&mut class as *mut CK_ULONG).cast(),
+                ulValueLen: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
+            },
+            CK_ATTRIBUTE {
+                type_: CKA_TOKEN,
+                pValue: (&mut token_flag as *mut CK_BBOOL).cast(),
+                ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+            },
+            CK_ATTRIBUTE { type_: CKA_VALUE, pValue: value.as_mut_ptr().cast(), ulValueLen: 746 },
+        ];
+        let mut stale = CK_INVALID_HANDLE;
+        let rv = unsafe {
+            dispatch::general::c_create_object(
+                session1,
+                template.as_mut_ptr(),
+                template.len() as CK_ULONG,
+                &mut stale,
+            )
+        };
+        assert_eq!(rv, CKR_OK as CK_RV, "C_CreateObject");
+        let rv = unsafe { dispatch::general::c_finalize(std::ptr::null_mut()) };
+        assert_eq!(rv, CKR_OK as CK_RV, "C_Finalize epoch 1");
+
+        // Epoch 2: fresh session, stale object handle.
+        initialize(&daemon.endpoint);
+        let session2 = open_session();
+        let mut canary = [0xA5u8; 64];
+        let mut attr =
+            CK_ATTRIBUTE { type_: CKA_VALUE, pValue: canary.as_mut_ptr().cast(), ulValueLen: 64 };
+        let rv = unsafe { dispatch::general::c_get_attribute_value(session2, stale, &mut attr, 1) };
+        assert_eq!(rv, CKR_OBJECT_HANDLE_INVALID as CK_RV, "stale handle must fault 0x82");
+        assert_eq!(canary, [0xA5u8; 64], "canary must survive the 0x82 error");
+        assert_eq!(attr.ulValueLen, 64, "length stays 64 (preset, never clobbered)");
+
+        // The object itself is still present backend-side (the mock
+        // find is override-scripted and cannot enumerate, so probe the
+        // live set directly): only the stale handle faults.
+        assert_eq!(
+            daemon.backend.live_object_count(),
+            1,
+            "durable object must survive the client restart"
+        );
+    }
+}
