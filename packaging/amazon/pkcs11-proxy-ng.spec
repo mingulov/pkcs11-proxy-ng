@@ -11,7 +11,7 @@
 # tools and the explicitly namespaced Python 3.11 interpreter.
 
 Name:           pkcs11-proxy-ng
-Version:        0.2.0
+Version:        0.2.1
 Release:        1%{?dist}
 Summary:        Rust PKCS#11 remote proxy
 
@@ -187,6 +187,10 @@ EOF
 exit 0
 
 %changelog
+* Mon Oct 05 2026 Denis Mingulov <denis@mingulov.com> - 0.2.1-1
+- Known-defects fix campaign: v3.1 GetInterface NULL-table fix, NULL-shape
+  termination/parity (#30, #31), caller-NULL GAV template preservation,
+  crash-gate bless tooling for reviewed provider divergences.
 * Wed May 20 2026 Denis Mingulov <denis@mingulov.com> - 0.2.0-1
 - Initial pkcs11-proxy-ng RPM release. Server-driven mechanism
   registry, three-way subpackage split, optional -compat layer.

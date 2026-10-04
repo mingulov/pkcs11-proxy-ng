@@ -1330,7 +1330,7 @@ dependencies = [
 
 [[package]]
 name = "pkcs11-proxy-ng"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bytes",
  "clap",
@@ -1377,7 +1377,7 @@ dependencies = [
 
 [[package]]
 name = "pkcs11-proxy-ng-audit"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -1390,7 +1390,7 @@ dependencies = [
 
 [[package]]
 name = "pkcs11-proxy-ng-backend"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cryptoki-sys",
  "dashmap",
@@ -1406,7 +1406,7 @@ dependencies = [
 
 [[package]]
 name = "pkcs11-proxy-ng-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64 0.22.1",
  "clap",
@@ -1432,7 +1432,7 @@ dependencies = [
 
 [[package]]
 name = "pkcs11-proxy-ng-client"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "http",
  "hyper-util",
@@ -1451,7 +1451,7 @@ dependencies = [
 
 [[package]]
 name = "pkcs11-proxy-ng-proto"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "heck",
  "pkcs11-proxy-ng-types",
@@ -1465,7 +1465,7 @@ dependencies = [
 
 [[package]]
 name = "pkcs11-proxy-ng-shim"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cryptoki-sys",
  "libc",
@@ -1486,7 +1486,7 @@ dependencies = [
 
 [[package]]
 name = "pkcs11-proxy-ng-types"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cryptoki-sys",
  "serde",

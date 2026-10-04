@@ -15,7 +15,7 @@
 # after a one-line PKCS11_PROXY_SOCKET/PKCS11_PROXY_ENDPOINT swap.
 
 pkgname=pkcs11-proxy-ng
-pkgver=0.2.0
+pkgver=0.2.1
 pkgrel=0
 pkgdesc="Rust PKCS#11 remote proxy (next-gen)"
 url="https://github.com/mingulov/pkcs11-proxy-ng"

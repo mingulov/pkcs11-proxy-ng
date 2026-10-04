@@ -36,7 +36,7 @@ on:
   workflow_call:
     inputs:
       tag:
-        description: 'exact stable tag, e.g. v0.2.0'
+        description: 'exact stable tag, e.g. v0.2.1'
         required: true
         type: string
       candidate_run_id:
@@ -54,7 +54,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'exact stable tag, e.g. v0.2.0'
+        description: 'exact stable tag, e.g. v0.2.1'
         required: true
       candidate_run_id:
         description: 'publish run holding the pre-auth candidate'
