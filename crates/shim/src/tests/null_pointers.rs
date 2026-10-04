@@ -995,15 +995,15 @@ mod issue3031_null_e2e {
 
     /// Panic-safe connect-env override (restored on drop).
     struct SavedConnectEnv {
-        endpoint: Option<String>,
-        socket: Option<String>,
+        endpoint: Option<std::ffi::OsString>,
+        socket: Option<std::ffi::OsString>,
     }
 
     impl SavedConnectEnv {
         fn capture() -> Self {
             Self {
-                endpoint: std::env::var("PKCS11_PROXY_ENDPOINT").ok(),
-                socket: std::env::var("PKCS11_PROXY_SOCKET").ok(),
+                endpoint: std::env::var_os("PKCS11_PROXY_ENDPOINT"),
+                socket: std::env::var_os("PKCS11_PROXY_SOCKET"),
             }
         }
     }
@@ -1639,5 +1639,131 @@ mod issue3031_null_e2e {
             }
         });
         assert_eq!(got, expected_recover, "SignRecover: direct sequence");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #26: read-after-destroy must preserve the caller buffer.
+//
+// At a48b60b the daemon attached its zero-filled buffer as the attribute
+// "value" regardless of RV and the shim wrote it, so a 0x82 error zeroed
+// the caller's 64-byte canary. Full-stack pin: RV 0x82, length intact,
+// every canary byte untouched. This leg exercises the daemon's
+// resolve/tombstone rejection (no backend contact); the backend-`Err`
+// arm is pinned server-side by `exact_backend_error_*`. Controlled
+// fixture: PKCS#11 permits host-memory modification on failure
+// (OASIS §5/§5.7.5), so this pins the proxy's no-value writeback,
+// not a universal provider guarantee.
+// ---------------------------------------------------------------------------
+
+#[cfg(not(miri))] // needs a running daemon (sockets); covered natively
+mod issue26_read_after_destroy {
+    use super::super::output_semantics::TestDaemon;
+    use super::super::*;
+
+    struct FinalizeOnDrop;
+
+    impl Drop for FinalizeOnDrop {
+        fn drop(&mut self) {
+            let _ = unsafe { dispatch::general::c_finalize(std::ptr::null_mut()) };
+        }
+    }
+
+    /// Panic-safe connect-env override (restored on drop).
+    struct SavedConnectEnv {
+        endpoint: Option<std::ffi::OsString>,
+        socket: Option<std::ffi::OsString>,
+    }
+
+    impl SavedConnectEnv {
+        fn capture() -> Self {
+            Self {
+                endpoint: std::env::var_os("PKCS11_PROXY_ENDPOINT"),
+                socket: std::env::var_os("PKCS11_PROXY_SOCKET"),
+            }
+        }
+    }
+
+    impl Drop for SavedConnectEnv {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.endpoint {
+                    Some(v) => std::env::set_var("PKCS11_PROXY_ENDPOINT", v),
+                    None => std::env::remove_var("PKCS11_PROXY_ENDPOINT"),
+                }
+                match &self.socket {
+                    Some(v) => std::env::set_var("PKCS11_PROXY_SOCKET", v),
+                    None => std::env::remove_var("PKCS11_PROXY_SOCKET"),
+                }
+            }
+            crate::interface_probe::clear_cache();
+        }
+    }
+
+    /// Initialize against the daemon, open a session, create a key.
+    fn open_session_with_key(endpoint: &str) -> (CK_SESSION_HANDLE, CK_OBJECT_HANDLE) {
+        unsafe {
+            std::env::set_var("PKCS11_PROXY_ENDPOINT", endpoint);
+            std::env::remove_var("PKCS11_PROXY_SOCKET");
+        }
+        let rv = unsafe { dispatch::general::c_initialize(std::ptr::null_mut()) };
+        assert_eq!(rv, CKR_OK as CK_RV, "C_Initialize");
+
+        let mut slot_count: CK_ULONG = 0;
+        let rv = unsafe {
+            dispatch::general::c_get_slot_list(CK_FALSE, std::ptr::null_mut(), &mut slot_count)
+        };
+        assert_eq!(rv, CKR_OK as CK_RV, "GetSlotList count");
+
+        let mut slots = vec![0 as CK_SLOT_ID; slot_count as usize];
+        let rv = unsafe {
+            dispatch::general::c_get_slot_list(CK_FALSE, slots.as_mut_ptr(), &mut slot_count)
+        };
+        assert_eq!(rv, CKR_OK as CK_RV, "GetSlotList data");
+
+        let mut session = CK_INVALID_HANDLE;
+        let rv = unsafe {
+            dispatch::general::c_open_session(
+                slots[0],
+                CKF_SERIAL_SESSION,
+                std::ptr::null_mut(),
+                None,
+                &mut session,
+            )
+        };
+        assert_eq!(rv, CKR_OK as CK_RV, "C_OpenSession");
+
+        let mut key = CK_INVALID_HANDLE;
+        let rv = unsafe {
+            dispatch::general::c_create_object(session, std::ptr::null_mut(), 0, &mut key)
+        };
+        assert_eq!(rv, CKR_OK as CK_RV, "C_CreateObject");
+        (session, key)
+    }
+
+    #[test]
+    fn read_after_destroy_preserves_canary() {
+        let _guard = shim_state_test_guard();
+        let _saved = SavedConnectEnv::capture();
+        let daemon = TestDaemon::fresh();
+        let _finalize = FinalizeOnDrop;
+        let (session, key) = open_session_with_key(&daemon.endpoint);
+
+        let rv = unsafe { dispatch::general::c_destroy_object(session, key) };
+        assert_eq!(rv, CKR_OK as CK_RV, "C_DestroyObject");
+
+        let mut canary = [0xA5u8; 64];
+        let mut attr =
+            CK_ATTRIBUTE { type_: CKA_VALUE, pValue: canary.as_mut_ptr().cast(), ulValueLen: 64 };
+        let exact_calls_before = daemon.backend.attr_get_exact_call_count();
+        let rv = unsafe { dispatch::general::c_get_attribute_value(session, key, &mut attr, 1) };
+        assert_eq!(rv, CKR_OBJECT_HANDLE_INVALID as CK_RV, "read-after-destroy RV");
+        assert_eq!(canary, [0xA5u8; 64], "canary must survive the 0x82 error");
+        assert_eq!(attr.ulValueLen, 64, "length stays 64 (preset, never clobbered)");
+        assert_eq!(
+            daemon.backend.attr_get_exact_call_count(),
+            exact_calls_before,
+            "resolve/tombstone rejection must not contact the backend"
+        );
     }
 }

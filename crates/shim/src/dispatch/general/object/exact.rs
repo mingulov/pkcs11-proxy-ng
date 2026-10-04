@@ -391,6 +391,69 @@ mod tests {
         }
     }
 
+    /// #26: an error RV with len-only results (the read-after-destroy
+    /// shape: 0x82 + provider len write, no value bytes) commits the
+    /// length and leaves the caller buffer untouched — never a
+    /// default/empty value. The daemon reports 17 against the 64-byte
+    /// buffer so the pin proves length propagation. Controlled-fixture
+    /// contract: PKCS#11 permits host-memory modification on failure
+    /// (OASIS §5/§5.7.5), so this pins the proxy's no-value writeback,
+    /// not a universal provider guarantee.
+    #[test]
+    fn exact_attribute_error_len_only_preserves_caller_buffer() {
+        let width = std::mem::size_of::<CK_ULONG>();
+        let stride = std::mem::size_of::<CK_ATTRIBUTE>();
+        let mut canary = [0xa5u8; 64];
+        let mut attr =
+            CK_ATTRIBUTE { type_: CKA_VALUE, pValue: canary.as_mut_ptr().cast(), ulValueLen: 64 };
+        let call = unsafe { capture(&mut attr, false, width, width, stride) }.unwrap();
+        let result = CkAttributeQueryResult {
+            attr_type: CkAttributeType::VALUE,
+            returned_len: 17,
+            apply_returned_len: true,
+            apply_type: false,
+            value: None,
+            ck_rv: None,
+            nested: None,
+        };
+        let (writes, rv) =
+            prepare(&[call], &[result], CkRv::OBJECT_HANDLE_INVALID, width, width, stride).unwrap();
+        assert_eq!(rv, CkRv::OBJECT_HANDLE_INVALID);
+        unsafe { commit(writes) };
+        assert_eq!(canary, [0xa5u8; 64], "caller buffer must survive the error");
+        assert_eq!(attr.ulValueLen, 17, "daemon len 17 must commit, not echo 64");
+    }
+
+    /// #26, legacy-daemon case: value bytes on an error RV are untrusted.
+    ///
+    /// A daemon with the a48b60b defect attaches its zero-filled buffer as
+    /// the "value" regardless of RV. The shim must reject such a result
+    /// outright (`GENERAL_ERROR`) rather than store attacker/zero bytes —
+    /// the 64-byte canary proves no store happened.
+    #[test]
+    fn exact_attribute_error_value_rejected() {
+        let width = std::mem::size_of::<CK_ULONG>();
+        let stride = std::mem::size_of::<CK_ATTRIBUTE>();
+        let mut canary = [0xa5u8; 64];
+        let mut attr =
+            CK_ATTRIBUTE { type_: CKA_VALUE, pValue: canary.as_mut_ptr().cast(), ulValueLen: 64 };
+        let call = unsafe { capture(&mut attr, false, width, width, stride) }.unwrap();
+        let result = CkAttributeQueryResult {
+            attr_type: CkAttributeType::VALUE,
+            returned_len: 64,
+            apply_returned_len: true,
+            apply_type: false,
+            value: Some(vec![0u8; 64].into()),
+            ck_rv: None,
+            nested: None,
+        };
+        let outcome =
+            prepare(&[call], &[result], CkRv::OBJECT_HANDLE_INVALID, width, width, stride);
+        assert!(matches!(outcome, Err(CkRv::GENERAL_ERROR)));
+        assert_eq!(canary, [0xa5u8; 64], "rejected value must not reach the buffer");
+        assert_eq!(attr.ulValueLen, 64, "rejection leaves the struct untouched");
+    }
+
     #[test]
     fn exact_attribute_all_results_validate_before_any_store() {
         let width = std::mem::size_of::<CK_ULONG>();
