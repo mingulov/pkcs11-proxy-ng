@@ -866,21 +866,21 @@ fn all_3_2_out_of_scope_slots_are_nonnull() {
 /// Panic-safe env override for connect-related vars (restored on drop even
 /// when an assertion fails, so later tests keep the suite-pinned values).
 struct SavedConnectEnv {
-    endpoint: Option<String>,
-    socket: Option<String>,
-    attempts: Option<String>,
+    endpoint: Option<std::ffi::OsString>,
+    socket: Option<std::ffi::OsString>,
+    attempts: Option<std::ffi::OsString>,
 }
 
 impl SavedConnectEnv {
     fn capture() -> Self {
         Self {
-            endpoint: std::env::var("PKCS11_PROXY_ENDPOINT").ok(),
-            socket: std::env::var("PKCS11_PROXY_SOCKET").ok(),
-            attempts: std::env::var("PKCS11_PROXY_CONNECT_ATTEMPTS").ok(),
+            endpoint: std::env::var_os("PKCS11_PROXY_ENDPOINT"),
+            socket: std::env::var_os("PKCS11_PROXY_SOCKET"),
+            attempts: std::env::var_os("PKCS11_PROXY_CONNECT_ATTEMPTS"),
         }
     }
 
-    fn restore_var(name: &str, saved: &Option<String>) {
+    fn restore_var(name: &str, saved: &Option<std::ffi::OsString>) {
         unsafe {
             match saved {
                 Some(v) => std::env::set_var(name, v),
@@ -1013,6 +1013,61 @@ fn out_of_scope_3_2_stubs_return_function_not_supported() {
             ),
             CKR_SAVED_STATE_INVALID as CK_RV
         );
+    }
+}
+
+/// #24: the Option-B fixed refusals hold for every session shape and
+/// null shape with sentinels unchanged — the issue's 16-leg matrix
+/// (valid/invalid session × {both non-null, null-name, null-output,
+/// null-both} × {GetID, Join}). Detached async transport is out of
+/// scope (polling only); no job is submitted here, and the fixed
+/// RVs ignore all inputs, including the session handle.
+#[test]
+fn async_fixed_refusals_hold_for_all_session_and_null_shapes() {
+    use super::output_semantics::{ShimSession, TestDaemon};
+    let _guard = shim_state_test_guard();
+    let daemon = TestDaemon::shared();
+    let _session = ShimSession::with_endpoint(&daemon.endpoint);
+    let fl3 = get_3_2_list();
+    let fl = unsafe { &*fl3 };
+    let get_id = fl.C_AsyncGetID.unwrap();
+    let join = fl.C_AsyncJoin.unwrap();
+
+    const SENTINEL: CK_ULONG = CK_ULONG::MAX - 7;
+    const INVALID_SESSION: CK_SESSION_HANDLE = CK_SESSION_HANDLE::MAX;
+    const UNKNOWN_ID: CK_ULONG = CK_ULONG::MAX;
+    let valid_session = _session.session;
+
+    for session in [valid_session, INVALID_SESSION] {
+        for null_name in [false, true] {
+            for null_output in [false, true] {
+                let mut name = *b"C_Digest\0";
+                let selector: *mut CK_UTF8CHAR =
+                    if null_name { std::ptr::null_mut() } else { name.as_mut_ptr() };
+                // GetID leg: id cell sentinel or NULL.
+                let mut id = SENTINEL;
+                let id_ptr: *mut CK_ULONG =
+                    if null_output { std::ptr::null_mut() } else { &mut id };
+                let rv = unsafe { get_id(session, selector, id_ptr) };
+                assert_eq!(
+                    rv, CKR_STATE_UNSAVEABLE as CK_RV,
+                    "GetID must refuse 0x180 (session={session:#x} null_name={null_name} null_output={null_output})"
+                );
+                assert_eq!(id, SENTINEL, "GetID refusal must not write the id cell");
+
+                // Join leg: 32-byte buffer with 16-byte guards, or NULL.
+                // Capacity stays 32 including null-output calls (issue shape).
+                let mut out = [0xa5u8; 64];
+                let output: *mut CK_BYTE =
+                    if null_output { std::ptr::null_mut() } else { out[16..48].as_mut_ptr() };
+                let rv = unsafe { join(session, selector, UNKNOWN_ID, output, 32) };
+                assert_eq!(
+                    rv, CKR_SAVED_STATE_INVALID as CK_RV,
+                    "Join must refuse 0x160 (session={session:#x} null_name={null_name} null_output={null_output})"
+                );
+                assert_eq!(out, [0xa5u8; 64], "Join refusal must not touch buffer or guards");
+            }
+        }
     }
 }
 
