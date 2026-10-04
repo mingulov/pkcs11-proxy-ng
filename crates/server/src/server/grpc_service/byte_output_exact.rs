@@ -311,6 +311,7 @@ mod sanitize_inputs_tests {
     use super::super::digest_cipher::{decrypt_init, encrypt_init};
     use super::byte_output_exact;
     use crate::server::context_manager::{ClientContextId, ContextManager};
+    use crate::server::grpc_service::sign_verify;
     use crate::server::grpc_service::{HandlerContext, Pkcs11ProxyService, session::open_session};
 
     // -----------------------------------------------------------------------
@@ -536,6 +537,154 @@ mod sanitize_inputs_tests {
         assert_eq!(response.returned_len, 0);
         assert_eq!(response.value, None);
         assert_eq!(mock.data_op_call_count(), before + 1);
+    }
+
+    /// #30/#31: NULL part + NULL out-length reach the backend on all
+    /// four dual entrypoints and C_SignRecover (sanitize-off default).
+    /// At a48b60b the shim erased NULL parts to empty (→ CKR_OK) and
+    /// short-circuited NULL out-lengths with AB (no provider call, no
+    /// termination); RV + call count prove the daemon forwards both
+    /// shapes, and the backend shape observation pins function
+    /// identity, input class/length, and envelope presence at the
+    /// backend boundary (finding 2).
+    #[tokio::test]
+    async fn issue3031_null_shapes_forwarded_on_dual_and_recover() {
+        use pkcs11_proxy_ng_proto::ByteOutputFunction as F;
+        let (ctx_mgr, mock, ctx_id, session) = setup_mock_session().await;
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        // Recover op for the SignRecover null-outlen leg (mock require_op).
+        let key_resp = crate::server::grpc_service::key_ops::generate_key(
+            &HandlerContext::for_test(&ctx_mgr, &backend),
+            Request::new(pkcs11_proxy_ng_proto::GenerateKeyRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: session,
+                mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {
+                    mechanism_type: CkMechanismType::RSA_PKCS_KEY_PAIR_GEN.0,
+                    params: None,
+                    parameter_encoding_version: 0,
+                }),
+                template: vec![],
+
+                template_null: false,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        let init_rv = sign_verify::sign_recover_init(
+            &HandlerContext::for_test(&ctx_mgr, &backend),
+            Request::new(pkcs11_proxy_ng_proto::SignRecoverInitRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: session,
+                key_handle: key_resp.key_handle,
+                mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {
+                    mechanism_type: CkMechanismType::RSA_PKCS.0,
+                    params: None,
+                    parameter_encoding_version: 0,
+                }),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .ck_rv;
+        assert_eq!(init_rv, CkRv::OK.0, "setup: sign_recover_init failed");
+        let service = make_service_sanitize_off(ctx_mgr.clone(), backend.clone());
+
+        let cases = [
+            ("DigestEncryptUpdate", "digest_encrypt_update", F::DigestEncryptUpdate as i32),
+            ("DecryptDigestUpdate", "decrypt_digest_update", F::DecryptDigestUpdate as i32),
+            ("SignEncryptUpdate", "sign_encrypt_update", F::SignEncryptUpdate as i32),
+            ("DecryptVerifyUpdate", "decrypt_verify_update", F::DecryptVerifyUpdate as i32),
+            ("SignRecover", "sign_recover", F::SignRecover as i32),
+        ];
+        for (name, observed, function) in cases {
+            // NULL part with nonzero length → mock strict AB + backend reached.
+            let before = mock.data_op_call_count();
+            let result = byte_output_exact(
+                &service.ctx,
+                // T12: `ByteOutputExactRequest` is `ZeroizeOnDrop`;
+                // struct-update syntax is forbidden — all fields spelled out.
+                Request::new(pkcs11_proxy_ng_proto::ByteOutputExactRequest {
+                    exact_output_effects_version: 1,
+                    client_context_id: ctx_id.0.clone(),
+                    session_handle: session,
+                    function,
+                    input_data: vec![],
+                    input_data_null_len: Some(16),
+                    output_spec: Some(pkcs11_proxy_ng_proto::OutputBufferSpec {
+                        buffer_present: true,
+                        buffer_len: 64,
+                        length_pointer_null: false,
+                    }),
+                    mechanism: None,
+                    wrapping_key_handle: 0,
+                    key_handle: 0,
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner()
+            .result
+            .unwrap();
+            assert_eq!(
+                result.ck_rv,
+                CkRv::ARGUMENTS_BAD.0,
+                "{name}: null part must be AB, not erased-OK"
+            );
+            assert_eq!(
+                mock.data_op_call_count(),
+                before + 1,
+                "{name}: null part must reach the backend"
+            );
+            let obs = mock.last_data_op_observation().expect("shape must be recorded");
+            assert_eq!(obs.function, observed, "{name}: function identity");
+            assert!(obs.input_null, "{name}: input class must stay NULL");
+            assert_eq!(obs.input_len, 16, "{name}: claimed input length");
+            assert!(obs.out_buffer_present, "{name}: output presence");
+            assert_eq!(obs.out_buffer_len, 64, "{name}: output length");
+            assert!(!obs.length_pointer_null, "{name}: length presence");
+
+            // NULL out-length → mock AB + backend reached (no short-circuit).
+            let before = mock.data_op_call_count();
+            let result = byte_output_exact(
+                &service.ctx,
+                Request::new(pkcs11_proxy_ng_proto::ByteOutputExactRequest {
+                    exact_output_effects_version: 1,
+                    client_context_id: ctx_id.0.clone(),
+                    session_handle: session,
+                    function,
+                    input_data: b"data".to_vec(),
+                    input_data_null_len: None,
+                    output_spec: Some(pkcs11_proxy_ng_proto::OutputBufferSpec {
+                        buffer_present: true,
+                        buffer_len: 64,
+                        length_pointer_null: true,
+                    }),
+                    mechanism: None,
+                    wrapping_key_handle: 0,
+                    key_handle: 0,
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner()
+            .result
+            .unwrap();
+            assert_eq!(result.ck_rv, CkRv::ARGUMENTS_BAD.0, "{name}: null out-length must be AB");
+            assert_eq!(
+                mock.data_op_call_count(),
+                before + 1,
+                "{name}: null out-length must reach the backend"
+            );
+            let obs = mock.last_data_op_observation().expect("shape must be recorded");
+            assert_eq!(obs.function, observed, "{name}: function identity");
+            assert!(!obs.input_null, "{name}: input class must stay bytes");
+            assert_eq!(obs.input_len, 4, "{name}: input length");
+            assert!(obs.out_buffer_present, "{name}: output presence");
+            assert_eq!(obs.out_buffer_len, 64, "{name}: output length");
+            assert!(obs.length_pointer_null, "{name}: length must stay NULL");
+        }
     }
 
     // -----------------------------------------------------------------------

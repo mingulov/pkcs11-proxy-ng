@@ -9,7 +9,7 @@ use pkcs11_proxy_ng_proto::convert::message_effects::ParameterEffectCallMode;
 use pkcs11_proxy_ng_proto::convert::message_params::MessageParameter;
 use pkcs11_proxy_ng_types::*;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 /// One-shot behavior for the next stateful lifecycle call covered by the
@@ -60,6 +60,38 @@ type FindTemplateGate = Arc<dyn Fn(&[CkAttribute]) -> bool + Send + Sync>;
 /// preserved (`None` vs empty). Named so the keygen log and its drain
 /// stay under the `type_complexity` threshold.
 pub type KeygenTemplate = (CkMechanism, Option<Vec<CkAttribute>>, Option<Vec<CkAttribute>>);
+
+/// Dual/SignRecover exact-call shape observed at the backend trait
+/// boundary (#30/#31 finding 2): which backend method ran, the input
+/// pointer class + claimed length, and the output envelope. Tests
+/// assert this instead of trusting RV + call counts alone: it catches
+/// NULL→empty erasure, length mangling, output/length-pointer
+/// presence erasure, and wrong-function dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MockDataOpObservation {
+    /// Backend trait method that ran (`digest_encrypt_update`,
+    /// `decrypt_digest_update`, `sign_encrypt_update`,
+    /// `decrypt_verify_update`, or `sign_recover`).
+    pub function: &'static str,
+    /// Whether the input arrived as NULL (`CkInBuf::Null`).
+    pub input_null: bool,
+    /// Claimed input length (live slice length or NULL claimed length).
+    pub input_len: u64,
+    /// Whether an output buffer was present.
+    pub out_buffer_present: bool,
+    /// Claimed output-buffer length.
+    pub out_buffer_len: u64,
+    /// Whether the out-length pointer was NULL.
+    pub length_pointer_null: bool,
+}
+
+/// Per-session init flags for terminating mode (`dual_state`).
+const DUAL_DIGEST: u8 = 0x01;
+const DUAL_ENCRYPT: u8 = 0x02;
+const DUAL_DECRYPT: u8 = 0x04;
+const DUAL_SIGN: u8 = 0x08;
+const DUAL_VERIFY: u8 = 0x10;
+const DUAL_RECOVER: u8 = 0x20;
 
 mod crypto_ops;
 pub mod echo;
@@ -122,6 +154,12 @@ const CKM_AES_CMAC: u64 = 0x0000_108A;
 ///
 /// **Large-request cap** (`generate_random`):
 /// Requests for more than `MAX_RANDOM_BYTES` (65 536) bytes return `CKR_DATA_LEN_RANGE`.
+///
+/// **Dual/recover shape observation + terminating mode** (#30/#31):
+/// the five dual/recover exact calls record their [`MockDataOpObservation`]
+/// unconditionally; [`MockBackend::set_terminating_dual_mode`] additionally
+/// switches them (plus the six dual/recover inits) to stateful
+/// terminating-token semantics for the joint-termination oracle.
 pub struct MockBackend {
     wrap_entries: Mutex<Vec<MockWrapObservation>>,
     wrap_action: Mutex<Option<MockWrapAction>>,
@@ -293,6 +331,26 @@ pub struct MockBackend {
     /// every migrated data op that calls it contributes. Used by
     /// sanitize_inputs tests to confirm whether the backend was reached.
     data_op_calls: AtomicUsize,
+    /// Last dual/SignRecover exact-call shape observed at the backend
+    /// trait boundary (#30/#31 finding 2): function identity, input
+    /// pointer class + claimed length, output-buffer presence/length,
+    /// length-pointer presence. Recorded unconditionally (default and
+    /// terminating modes) so full-stack tests can prove native shapes
+    /// survive the proxy instead of trusting RV + call counts.
+    last_data_op: Mutex<Option<MockDataOpObservation>>,
+    /// Terminating-provider oracle mode (#30/#31 finding 3). Default
+    /// off (legacy mock behavior: duals need no init, operations are
+    /// retained across malformed calls). When on, the six dual/recover
+    /// inits record per-session flags in `dual_state` and the five
+    /// dual/recover exact calls model a stateful terminating token:
+    /// uninitialized → CNI, malformed → AB + termination, reinit →
+    /// clean recovery.
+    terminating_duals: AtomicBool,
+    /// Per-session init flags for terminating mode (bitmask of the
+    /// `DUAL_*` constants). Separate from `active_ops`: real tokens
+    /// run the two dual legs as independent state machines, while the
+    /// mock's `active_ops` holds one op per session.
+    dual_state: Mutex<HashMap<u64, u8>>,
     /// Count of message Encrypt/Decrypt Begin trait calls. The loaded C-ABI
     /// contract test uses this independent counter to prove one native call is
     /// dispatched to exactly one backend method.
@@ -463,6 +521,9 @@ impl MockBackend {
             token_info_calls: AtomicUsize::new(0),
             find_objects_calls: AtomicUsize::new(0),
             data_op_calls: AtomicUsize::new(0),
+            last_data_op: Mutex::new(None),
+            terminating_duals: AtomicBool::new(false),
+            dual_state: Mutex::new(HashMap::new()),
             message_begin_calls: AtomicUsize::new(0),
             message_init_contract: Mutex::new(None),
             message_init_contract_calls: AtomicUsize::new(0),
@@ -738,6 +799,18 @@ impl MockBackend {
     /// backend was reached without relying solely on the returned CK_RV.
     pub fn data_op_call_count(&self) -> usize {
         self.data_op_calls.load(Ordering::SeqCst)
+    }
+
+    /// Last dual/SignRecover exact-call shape observed at the backend
+    /// trait boundary (#30/#31 finding 2), or `None` if none ran yet.
+    pub fn last_data_op_observation(&self) -> Option<MockDataOpObservation> {
+        *self.last_data_op.lock().unwrap()
+    }
+
+    /// Enable/disable terminating-provider oracle mode (#30/#31
+    /// finding 3). Default off; the oracle tests flip it on.
+    pub fn set_terminating_dual_mode(&self, on: bool) {
+        self.terminating_duals.store(on, Ordering::SeqCst);
     }
 
     pub fn message_begin_call_count(&self) -> usize {
@@ -1063,6 +1136,91 @@ impl MockBackend {
             CkInBuf::Null { len: 0 } => Ok(&[]),
             CkInBuf::Null { .. } => Err(CkRv::ARGUMENTS_BAD),
         }
+    }
+
+    /// Record the shape of a dual/SignRecover exact call (#30/#31
+    /// finding 2). Unconditional: runs in both default and terminating
+    /// modes, before any validation, so the observation reflects what
+    /// reached the backend even when the call is rejected.
+    fn record_data_op(
+        &self,
+        function: &'static str,
+        input: &CkInBuf<'_>,
+        spec: &CkOutputBufferSpec,
+    ) {
+        let (input_null, input_len) = match *input {
+            CkInBuf::Bytes(b) => (false, b.len() as u64),
+            CkInBuf::Null { len } => (true, len),
+        };
+        *self.last_data_op.lock().unwrap() = Some(MockDataOpObservation {
+            function,
+            input_null,
+            input_len,
+            out_buffer_present: spec.buffer_present,
+            out_buffer_len: spec.buffer_len,
+            length_pointer_null: spec.length_pointer_null,
+        });
+    }
+
+    fn terminating_dual_mode(&self) -> bool {
+        self.terminating_duals.load(Ordering::SeqCst)
+    }
+
+    /// Begin one terminating-mode init leg: `OPERATION_ACTIVE` when
+    /// the leg is already live (real-token behavior), which is also
+    /// what makes reinit-after-malformed discriminate BOTH dual legs
+    /// (a surviving leg answers 0x90 instead of OK).
+    fn begin_dual_flag(&self, session: CkSessionHandle, flag: u8) -> CkResult<()> {
+        let mut map = self.dual_state.lock().unwrap();
+        let entry = map.entry(session.0).or_insert(0);
+        if *entry & flag != 0 {
+            return Err(CkRv::OPERATION_ACTIVE);
+        }
+        *entry |= flag;
+        Ok(())
+    }
+
+    fn clear_dual_flags(&self, session: CkSessionHandle, mask: u8) {
+        if let Some(flags) = self.dual_state.lock().unwrap().get_mut(&session.0) {
+            *flags &= !mask;
+        }
+    }
+
+    /// Terminating-mode gate for the five dual/recover exact calls
+    /// (#30/#31 finding 3): resolves the input (counting the call, per
+    /// the mock convention that input validation precedes op checks),
+    /// requires the init flags for `required`, and rejects a NULL
+    /// out-length. Returns the resolved bytes when the caller should
+    /// proceed with normal output shaping, `Ok(None)` when the
+    /// out-length was NULL (flags cleared — the op terminated — and
+    /// the caller must answer AB with no effects, matching normal-path
+    /// shaping), `Err(AB)` on malformed input (flags cleared, matching
+    /// the normal-path error), or `Err(CNI)` when the op is not
+    /// initialized (the termination pin: a follow-up after a malformed
+    /// call observes CNI, never a retained op).
+    fn terminating_dual_gate<'a>(
+        &self,
+        session: CkSessionHandle,
+        required: u8,
+        input: CkInBuf<'a>,
+        spec: &CkOutputBufferSpec,
+    ) -> CkResult<Option<&'a [u8]>> {
+        let bytes = match self.resolve_input(input) {
+            Ok(bytes) => bytes,
+            Err(rv) => {
+                self.clear_dual_flags(session, required);
+                return Err(rv);
+            }
+        };
+        let flags = self.dual_state.lock().unwrap().get(&session.0).copied().unwrap_or(0);
+        if flags & required != required {
+            return Err(CkRv::OPERATION_NOT_INITIALIZED);
+        }
+        if spec.length_pointer_null {
+            self.clear_dual_flags(session, required);
+            return Ok(None);
+        }
+        Ok(Some(bytes))
     }
 
     /// Builder: set session and object quotas.
@@ -2013,11 +2171,24 @@ impl Pkcs11Backend for MockBackend {
         m: &ValidatedMechanismParams,
         k: CkObjectHandle,
     ) -> CkResult<()> {
+        if self.terminating_dual_mode() {
+            // Terminating oracle: mechanism policy is the caller's job
+            // on this path (both oracle legs validate before reaching
+            // here); record the init flag and skip the single-op
+            // `active_ops` model, which cannot hold a dual pair.
+            self.require_open_session(s)?;
+            return self.begin_dual_flag(s, DUAL_SIGN);
+        }
         self.record_mechanism_entry(MockMechanismEntry::SignInit, Some(m.mechanism()));
         self.require_mechanism_workflow_for_session(s, m.mechanism(), CkMechanismFlags::SIGN)?;
         self.sign_init_impl(s, m.mechanism(), k)
     }
     fn sign_init_cancel(&self, s: CkSessionHandle) -> CkResult<()> {
+        if self.terminating_dual_mode() {
+            self.require_open_session(s)?;
+            self.clear_dual_flags(s, DUAL_SIGN);
+            return Ok(());
+        }
         self.init_cancel_impl(s, MultiPartOp::Sign)
     }
     fn sign(&self, s: CkSessionHandle, d: CkInBuf<'_>) -> CkResult<SecretBytes> {
@@ -2037,6 +2208,11 @@ impl Pkcs11Backend for MockBackend {
         m: &ValidatedMechanismParams,
         k: CkObjectHandle,
     ) -> CkResult<()> {
+        if self.terminating_dual_mode() {
+            // Terminating oracle: record the init flag; see `sign_init`.
+            self.require_open_session(s)?;
+            return self.begin_dual_flag(s, DUAL_RECOVER);
+        }
         self.require_mechanism_workflow_for_session(
             s,
             m.mechanism(),
@@ -2045,6 +2221,11 @@ impl Pkcs11Backend for MockBackend {
         self.begin_keyed_op_with_mechanism(s, m.mechanism(), k, MultiPartOp::SignRecover)
     }
     fn sign_recover_init_cancel(&self, s: CkSessionHandle) -> CkResult<()> {
+        if self.terminating_dual_mode() {
+            self.require_open_session(s)?;
+            self.clear_dual_flags(s, DUAL_RECOVER);
+            return Ok(());
+        }
         self.init_cancel_impl(s, MultiPartOp::SignRecover)
     }
     fn sign_recover(&self, s: CkSessionHandle, d: CkInBuf<'_>) -> CkResult<SecretBytes> {
@@ -2080,10 +2261,20 @@ impl Pkcs11Backend for MockBackend {
         m: &ValidatedMechanismParams,
         k: CkObjectHandle,
     ) -> CkResult<()> {
+        if self.terminating_dual_mode() {
+            // Terminating oracle: record the init flag; see `sign_init`.
+            self.require_open_session(s)?;
+            return self.begin_dual_flag(s, DUAL_VERIFY);
+        }
         self.require_mechanism_workflow_for_session(s, m.mechanism(), CkMechanismFlags::VERIFY)?;
         self.verify_init_impl(s, m.mechanism(), k)
     }
     fn verify_init_cancel(&self, s: CkSessionHandle) -> CkResult<()> {
+        if self.terminating_dual_mode() {
+            self.require_open_session(s)?;
+            self.clear_dual_flags(s, DUAL_VERIFY);
+            return Ok(());
+        }
         self.init_cancel_impl(s, MultiPartOp::Verify)
     }
     fn verify(&self, s: CkSessionHandle, d: CkInBuf<'_>, sig: CkInBuf<'_>) -> CkResult<()> {
@@ -2120,6 +2311,11 @@ impl Pkcs11Backend for MockBackend {
         Ok(())
     }
     fn digest_init(&self, s: CkSessionHandle, m: &ValidatedMechanismParams) -> CkResult<()> {
+        if self.terminating_dual_mode() {
+            // Terminating oracle: record the init flag; see `sign_init`.
+            self.require_open_session(s)?;
+            return self.begin_dual_flag(s, DUAL_DIGEST);
+        }
         self.record_mechanism_entry(MockMechanismEntry::DigestInit, Some(m.mechanism()));
         self.require_mechanism_workflow_for_session(s, m.mechanism(), CkMechanismFlags::DIGEST)?;
         self.digest_init_impl(s)?;
@@ -2127,6 +2323,11 @@ impl Pkcs11Backend for MockBackend {
         Ok(())
     }
     fn digest_init_cancel(&self, s: CkSessionHandle) -> CkResult<()> {
+        if self.terminating_dual_mode() {
+            self.require_open_session(s)?;
+            self.clear_dual_flags(s, DUAL_DIGEST);
+            return Ok(());
+        }
         self.record_mechanism_entry(MockMechanismEntry::DigestInitCancel, None);
         self.session_digest_mechanism.lock().unwrap().remove(&s.0);
         self.init_cancel_impl(s, MultiPartOp::Digest)
@@ -2167,6 +2368,11 @@ impl Pkcs11Backend for MockBackend {
         m: &ValidatedMechanismParams,
         k: CkObjectHandle,
     ) -> CkResult<Option<CkMechanismParams>> {
+        if self.terminating_dual_mode() {
+            // Terminating oracle: record the init flag; see `sign_init`.
+            self.require_open_session(s)?;
+            return self.begin_dual_flag(s, DUAL_ENCRYPT).map(|()| None);
+        }
         self.require_mechanism_workflow_for_session(s, m.mechanism(), CkMechanismFlags::ENCRYPT)?;
         self.encrypt_init_impl(s, k)?;
         // Injected test output wins; otherwise IV-generating GCM-wrap
@@ -2188,6 +2394,11 @@ impl Pkcs11Backend for MockBackend {
         Ok(output)
     }
     fn encrypt_init_cancel(&self, s: CkSessionHandle) -> CkResult<()> {
+        if self.terminating_dual_mode() {
+            self.require_open_session(s)?;
+            self.clear_dual_flags(s, DUAL_ENCRYPT);
+            return Ok(());
+        }
         self.session_mechanism_output.lock().unwrap().remove(&s.0);
         self.init_cancel_impl(s, MultiPartOp::Encrypt)
     }
@@ -2206,10 +2417,20 @@ impl Pkcs11Backend for MockBackend {
         m: &ValidatedMechanismParams,
         k: CkObjectHandle,
     ) -> CkResult<Option<CkMechanismParams>> {
+        if self.terminating_dual_mode() {
+            // Terminating oracle: record the init flag; see `sign_init`.
+            self.require_open_session(s)?;
+            return self.begin_dual_flag(s, DUAL_DECRYPT).map(|()| None);
+        }
         self.require_mechanism_workflow_for_session(s, m.mechanism(), CkMechanismFlags::DECRYPT)?;
         self.decrypt_init_impl(s, k).map(|_| None)
     }
     fn decrypt_init_cancel(&self, s: CkSessionHandle) -> CkResult<()> {
+        if self.terminating_dual_mode() {
+            self.require_open_session(s)?;
+            self.clear_dual_flags(s, DUAL_DECRYPT);
+            return Ok(());
+        }
         self.init_cancel_impl(s, MultiPartOp::Decrypt)
     }
     fn decrypt(&self, s: CkSessionHandle, encrypted_data: CkInBuf<'_>) -> CkResult<SecretBytes> {
@@ -2489,6 +2710,27 @@ impl Pkcs11Backend for MockBackend {
         data: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        self.record_data_op("sign_recover", &data, spec);
+        if self.terminating_dual_mode() {
+            self.require_open_session(s)?;
+            return match self.terminating_dual_gate(s, DUAL_RECOVER, data, spec)? {
+                Some(bytes) => {
+                    // Shape without `exact_terminal_output` (no
+                    // `active_ops` entry exists in this mode — inits
+                    // record dual flags). Only single-pass SUCCESS ends
+                    // the op: size queries and BUFFER_TOO_SMALL retain
+                    // it for the retry, mirroring
+                    // `exact_terminal_output` (real-token behavior).
+                    let shaped = echo::echo_bytes("sign-recover", &[bytes], 2);
+                    let result = CkOutputBufferResult::from_convenience_bytes(&shaped, spec);
+                    if result.ck_rv == CkRv::OK && result.value.is_some() {
+                        self.clear_dual_flags(s, DUAL_RECOVER);
+                    }
+                    Ok(result)
+                }
+                None => Ok(CkOutputBufferResult::no_effects(CkRv::ARGUMENTS_BAD)),
+            };
+        }
         self.sign_recover_exact_impl(s, self.resolve_input(data)?, spec)
     }
 
@@ -2592,6 +2834,14 @@ impl Pkcs11Backend for MockBackend {
         part: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        self.record_data_op("digest_encrypt_update", &part, spec);
+        if self.terminating_dual_mode() {
+            self.require_open_session(s)?;
+            return match self.terminating_dual_gate(s, DUAL_DIGEST | DUAL_ENCRYPT, part, spec)? {
+                Some(bytes) => self.digest_encrypt_update_exact_impl(bytes, spec),
+                None => Ok(CkOutputBufferResult::no_effects(CkRv::ARGUMENTS_BAD)),
+            };
+        }
         self.require_open_session(s)?;
         self.digest_encrypt_update_exact_impl(self.resolve_input(part)?, spec)
     }
@@ -2602,6 +2852,19 @@ impl Pkcs11Backend for MockBackend {
         encrypted_part: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        self.record_data_op("decrypt_digest_update", &encrypted_part, spec);
+        if self.terminating_dual_mode() {
+            self.require_open_session(s)?;
+            return match self.terminating_dual_gate(
+                s,
+                DUAL_DECRYPT | DUAL_DIGEST,
+                encrypted_part,
+                spec,
+            )? {
+                Some(bytes) => self.decrypt_digest_update_exact_impl(bytes, spec),
+                None => Ok(CkOutputBufferResult::no_effects(CkRv::ARGUMENTS_BAD)),
+            };
+        }
         self.require_open_session(s)?;
         self.decrypt_digest_update_exact_impl(self.resolve_input(encrypted_part)?, spec)
     }
@@ -2612,6 +2875,14 @@ impl Pkcs11Backend for MockBackend {
         part: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        self.record_data_op("sign_encrypt_update", &part, spec);
+        if self.terminating_dual_mode() {
+            self.require_open_session(s)?;
+            return match self.terminating_dual_gate(s, DUAL_SIGN | DUAL_ENCRYPT, part, spec)? {
+                Some(bytes) => self.sign_encrypt_update_exact_impl(bytes, spec),
+                None => Ok(CkOutputBufferResult::no_effects(CkRv::ARGUMENTS_BAD)),
+            };
+        }
         self.require_open_session(s)?;
         self.sign_encrypt_update_exact_impl(self.resolve_input(part)?, spec)
     }
@@ -2622,6 +2893,19 @@ impl Pkcs11Backend for MockBackend {
         encrypted_part: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        self.record_data_op("decrypt_verify_update", &encrypted_part, spec);
+        if self.terminating_dual_mode() {
+            self.require_open_session(s)?;
+            return match self.terminating_dual_gate(
+                s,
+                DUAL_DECRYPT | DUAL_VERIFY,
+                encrypted_part,
+                spec,
+            )? {
+                Some(bytes) => self.decrypt_verify_update_exact_impl(bytes, spec),
+                None => Ok(CkOutputBufferResult::no_effects(CkRv::ARGUMENTS_BAD)),
+            };
+        }
         self.require_open_session(s)?;
         self.decrypt_verify_update_exact_impl(self.resolve_input(encrypted_part)?, spec)
     }

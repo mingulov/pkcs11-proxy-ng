@@ -8,6 +8,7 @@ mod find_swap;
 mod profiles;
 mod rest;
 mod session_state;
+mod terminating_duals;
 mod workflows;
 
 use super::*;
