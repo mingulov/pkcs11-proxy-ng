@@ -421,7 +421,7 @@ mod tests {
         assert_eq!(rv, CkRv::OBJECT_HANDLE_INVALID);
         unsafe { commit(writes) };
         assert_eq!(canary, [0xa5u8; 64], "caller buffer must survive the error");
-        assert_eq!(attr.ulValueLen, 17, "daemon len 17 must commit, not echo 64");
+        assert_eq!(attr.ulValueLen as usize, 17, "daemon len 17 must commit, not echo 64");
     }
 
     /// #26, legacy-daemon case: value bytes on an error RV are untrusted.
@@ -451,7 +451,7 @@ mod tests {
             prepare(&[call], &[result], CkRv::OBJECT_HANDLE_INVALID, width, width, stride);
         assert!(matches!(outcome, Err(CkRv::GENERAL_ERROR)));
         assert_eq!(canary, [0xa5u8; 64], "rejected value must not reach the buffer");
-        assert_eq!(attr.ulValueLen, 64, "rejection leaves the struct untouched");
+        assert_eq!(attr.ulValueLen as usize, 64, "rejection leaves the struct untouched");
     }
 
     #[test]

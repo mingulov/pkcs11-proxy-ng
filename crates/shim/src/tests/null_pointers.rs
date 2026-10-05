@@ -1759,7 +1759,7 @@ mod issue26_read_after_destroy {
         let rv = unsafe { dispatch::general::c_get_attribute_value(session, key, &mut attr, 1) };
         assert_eq!(rv, CKR_OBJECT_HANDLE_INVALID as CK_RV, "read-after-destroy RV");
         assert_eq!(canary, [0xA5u8; 64], "canary must survive the 0x82 error");
-        assert_eq!(attr.ulValueLen, 64, "length stays 64 (preset, never clobbered)");
+        assert_eq!(attr.ulValueLen as usize, 64, "length stays 64 (preset, never clobbered)");
         assert_eq!(
             daemon.backend.attr_get_exact_call_count(),
             exact_calls_before,
@@ -1907,7 +1907,7 @@ mod issue32_stale_handle {
         let rv = unsafe { dispatch::general::c_get_attribute_value(session2, stale, &mut attr, 1) };
         assert_eq!(rv, CKR_OBJECT_HANDLE_INVALID as CK_RV, "stale handle must fault 0x82");
         assert_eq!(canary, [0xA5u8; 64], "canary must survive the 0x82 error");
-        assert_eq!(attr.ulValueLen, 64, "length stays 64 (preset, never clobbered)");
+        assert_eq!(attr.ulValueLen as usize, 64, "length stays 64 (preset, never clobbered)");
 
         // The object itself is still present backend-side (the mock
         // find is override-scripted and cannot enumerate, so probe the
