@@ -1928,9 +1928,12 @@ mod issue32_stale_handle {
     // only at daemon shutdown) and backend objects are never
     // enumerated or destroyed, so both memory and SQLite token
     // objects persist for the daemon's lifetime. Per-client teardown
-    // is a v0.3 multi-tenancy question, not a v0.2 defect. Locks the
-    // survival; the RED probe asserting the reporter's literal 0-match
-    // expectation fails with count 1 (verified 2026-10-05).
+    // is a v0.3 multi-tenancy question, not a v0.2 defect. Pins the
+    // full restart lifecycle: token survival, session-object death
+    // with its session, zero native finalize, zero destroy attempts.
+    // RED history: the reporter's literal 0-match expectation fails
+    // with count 1, and a both-survive probe fails with count 1
+    // (verified 2026-10-05).
     #[test]
     fn memory_token_object_survives_client_restart_by_design() {
         let _guard = shim_state_test_guard();
@@ -1938,13 +1941,13 @@ mod issue32_stale_handle {
         let daemon = TestDaemon::fresh();
         let _finalize = FinalizeOnDrop;
 
-        // Epoch 1: create a memory-store token object.
+        // Epoch 1: one token object + one session object.
         initialize(&daemon.endpoint);
         let session1 = open_session();
         let mut class: CK_ULONG = CKO_DATA;
         let mut token_flag: CK_BBOOL = CK_TRUE;
         let mut label = *b"restart-token";
-        let mut template = [
+        let mut token_template = [
             CK_ATTRIBUTE {
                 type_: CKA_CLASS,
                 pValue: (&mut class as *mut CK_ULONG).cast(),
@@ -1961,29 +1964,82 @@ mod issue32_stale_handle {
                 ulValueLen: label.len() as CK_ULONG,
             },
         ];
-        let mut handle = CK_INVALID_HANDLE;
+        let mut token_handle = CK_INVALID_HANDLE;
         let rv = unsafe {
             dispatch::general::c_create_object(
                 session1,
-                template.as_mut_ptr(),
-                template.len() as CK_ULONG,
-                &mut handle,
+                token_template.as_mut_ptr(),
+                token_template.len() as CK_ULONG,
+                &mut token_handle,
             )
         };
-        assert_eq!(rv, CKR_OK as CK_RV, "C_CreateObject");
-        assert_eq!(daemon.backend.live_object_count(), 1, "setup: object exists");
+        assert_eq!(rv, CKR_OK as CK_RV, "create token object");
+        let mut session_template = [CK_ATTRIBUTE {
+            type_: CKA_CLASS,
+            pValue: (&mut class as *mut CK_ULONG).cast(),
+            ulValueLen: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
+        }];
+        let mut session_handle = CK_INVALID_HANDLE;
+        let rv = unsafe {
+            dispatch::general::c_create_object(
+                session1,
+                session_template.as_mut_ptr(),
+                session_template.len() as CK_ULONG,
+                &mut session_handle,
+            )
+        };
+        assert_eq!(rv, CKR_OK as CK_RV, "create session object");
+        assert_eq!(daemon.backend.live_object_count(), 2, "setup: two objects");
+        assert_eq!(daemon.backend.finalize_call_count(), 0, "setup: no finalize yet");
+        assert_eq!(daemon.backend.destroy_call_count(), 0, "setup: no destroy yet");
+
         let rv = unsafe { dispatch::general::c_finalize(std::ptr::null_mut()) };
         assert_eq!(rv, CKR_OK as CK_RV, "C_Finalize epoch 1");
+        // Teardown closes backend sessions (so the session-object purge
+        // below is meaningful, not vacuous) but never finalizes
+        // natively and never destroys objects.
+        assert!(
+            daemon.backend.close_session_call_count() >= 1,
+            "teardown must close backend sessions"
+        );
+        assert_eq!(
+            daemon.backend.finalize_call_count(),
+            0,
+            "logical Finalize must not finalize natively (#27)"
+        );
+        assert_eq!(
+            daemon.backend.destroy_call_count(),
+            0,
+            "teardown must not destroy token objects (#27)"
+        );
 
-        // Epoch 2: by-design survival — the object is still there.
-        // (The mock find is override-scripted and cannot enumerate, so
-        // probe the live set directly, as the stale-handle test above.)
+        // Epoch 2: token object survives, session object died with its
+        // session. (The mock find is override-scripted and cannot
+        // enumerate, so probe the live set directly, as the
+        // stale-handle test above.)
         initialize(&daemon.endpoint);
-        let _session2 = open_session();
+        let session2 = open_session();
         assert_eq!(
             daemon.backend.live_object_count(),
             1,
-            "memory token object must survive the client restart (by design, #27)"
+            "token object survives, session object dies (by design, #27)"
         );
+
+        // Positive control: the destroy counter is live — an explicit
+        // epoch-2 destroy reaches the backend exactly once.
+        let mut fresh = CK_INVALID_HANDLE;
+        let rv = unsafe {
+            dispatch::general::c_create_object(
+                session2,
+                session_template.as_mut_ptr(),
+                session_template.len() as CK_ULONG,
+                &mut fresh,
+            )
+        };
+        assert_eq!(rv, CKR_OK as CK_RV, "create control object");
+        let rv = unsafe { dispatch::general::c_destroy_object(session2, fresh) };
+        assert_eq!(rv, CKR_OK as CK_RV, "destroy control object");
+        assert_eq!(daemon.backend.destroy_call_count(), 1, "destroy counter is live");
+        assert_eq!(daemon.backend.live_object_count(), 1, "only the token object remains");
     }
 }
