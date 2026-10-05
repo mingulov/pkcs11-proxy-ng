@@ -127,9 +127,13 @@ modes). Prepare `main` first with a normal PR containing the dated
    trigger no runs, and publish refuses until that aggregate is
    green). Plain pushes only; races and drift refuse, tags are
    never moved.
-3. `dispatch-publish` runs `publish.yml` from the new tag with the
-   inputs passed through. Upload and release approvals still gate
-   their own environments there; nothing here bypasses them.
+3. `dispatch-publish` waits for the green `CI success (fail-closed
+   aggregate)` check on the new tag commit via the pinned
+   `lewagon/wait-on-check-action` (success-only conclusions; red,
+   missing, or timed-out CI refuses before anything dispatches),
+   then runs `publish.yml` from the new tag with the inputs passed
+   through. Upload and release approvals still gate their own
+   environments there; nothing here bypasses them.
 
 The cut job pushes with `GITHUB_TOKEN`, which works while `main` is
 unprotected (tag pushes from automation do not trigger the

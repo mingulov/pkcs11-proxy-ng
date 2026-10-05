@@ -385,8 +385,18 @@ jobs:
           echo "CARGO_REGISTRY_TOKEN=${CARGO_REGISTRY_BOOTSTRAP_TOKEN}" >> "$GITHUB_ENV"
 
       - name: Authenticate to crates.io (trusted OIDC)
+        id: crates-io-auth
         if: needs.preflight.outputs.mode == 'trusted'
         uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18
+
+      - name: Export trusted token for cargo
+        if: needs.preflight.outputs.mode == 'trusted'
+        run: |
+          set -euo pipefail
+          # The OIDC action only exposes `token` as a step output; cargo
+          # reads CARGO_REGISTRY_TOKEN, so bridge the two here (the
+          # action masks the output, and its post step revokes it).
+          echo "CARGO_REGISTRY_TOKEN=${{ steps.crates-io-auth.outputs.token }}" >> "$GITHUB_ENV"
 
       - name: Publish bounded selection to crates.io
         run: |

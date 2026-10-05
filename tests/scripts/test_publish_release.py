@@ -250,6 +250,31 @@ class PublishEvidenceTests(unittest.TestCase):
         self.assertIn("CARGO_REGISTRY_TOKEN=", text)
         self.assertNotIn("CARGO_REGISTRIES_CRATES_IO_TOKEN", text)
 
+    def test_trusted_token_output_wired_to_registry_token(self):
+        # The OIDC action only exposes `token` as a step output while
+        # cargo reads CARGO_REGISTRY_TOKEN, so the upload job must
+        # bridge the two ("no token found", publish run 37308096794).
+        # The bridge must be trusted-gated so it cannot clobber the
+        # bootstrap export with an empty value in bootstrap mode.
+        workflow = load_workflow(PUBLISH_YML)
+        job = workflow["jobs"]["upload"]
+        steps = [step for step in job.get("steps", [])
+                 if isinstance(step, dict)]
+        auth = [step for step in steps
+                if "crates-io-auth-action@" in str(step.get("uses", ""))]
+        self.assertEqual(len(auth), 1)
+        step_id = auth[0].get("id")
+        self.assertTrue(step_id)
+        bridges = [step for step in steps
+                   if f"steps.{step_id}.outputs.token"
+                   in str(step.get("run", ""))]
+        self.assertEqual(len(bridges), 1)
+        self.assertIn("CARGO_REGISTRY_TOKEN=", bridges[0]["run"])
+        self.assertIn("mode == 'trusted'", str(bridges[0].get("if", "")))
+        order = step_names(job)
+        self.assertLess(order.index(bridges[0]["name"]),
+                        order.index("Publish bounded selection to crates.io"))
+
     def test_no_credentials_in_logged_artifacts(self):
         workflow = load_workflow(PUBLISH_YML)
         text = job_text("upload", workflow)
