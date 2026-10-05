@@ -257,6 +257,17 @@ exist in the daemon's session map, has expired (lease-based
 eviction in `context_manager`), or was opened by a different
 process and the daemon lost the binding (daemon restart).
 
+On forwarded message requests that pass the preceding shim,
+transport, authentication, and context checks, an unmapped session
+returns this value locally *before* argument validation, per
+PKCS#11 error precedence (§5.1.7: session errors beat argument
+errors). No provider call is made and no caller output is changed.
+This can differ from providers that report `CKR_ARGUMENTS_BAD`
+for the same stale-session/malformed-argument combination (issue
+#23 defect 4, accepted limitation); with `sanitize_inputs` on, the
+covered NULL/nonzero predicates precede session admission on the
+exact-output Encrypt/Decrypt/Sign/Next paths only.
+
 **Operator action.** If you see a burst of these after a
 restart/rollout, the symptom is expected — applications should
 re-open sessions on the next call. If they persist, check the

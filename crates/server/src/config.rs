@@ -481,7 +481,8 @@ pub struct ProxyConfig {
     /// Ordering note: malformed-beats-stale-session (ARGUMENTS_BAD over
     /// SESSION_HANDLE_INVALID) applies in this mode only, and only on
     /// the ParameterOutputExact message variants (S1D4 exception,
-    /// matching haskoki-direct). The dedicated message_crypto session
+    /// matching the observed native provider order). The dedicated
+    /// message_crypto session
     /// arms stay SHI-first in both modes per spec §5.1.7 precedence
     /// (5.1.2 beats 5.1.6, RF-MC-ORDER decision (a)); the default path
     /// stays SHI-first everywhere.

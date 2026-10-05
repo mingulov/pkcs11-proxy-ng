@@ -15,9 +15,15 @@
 //!   cargo test -p pkcs11-proxy-ng-shim --lib -- --ignored kryoptic_gav_null
 //! ```
 //!
-//! Both tests are `#[ignore]`, so default CI runs stay green without the
-//! provider. If you opt in with `--ignored` but the module is missing, the
-//! fixture panics with instructions rather than passing silently (L14).
+//! If the module was built against a non-system OpenSSL, put its
+//! `libcrypto.so.4` on the loader path too, e.g.
+//! `LD_LIBRARY_PATH=/path/to/kryodeps/lib`.
+//!
+//! All three tests are `#[ignore]`, so default CI runs stay green without
+//! the provider. If you opt in with `--ignored` but the module is missing,
+//! the fixture panics with instructions rather than passing silently (L14).
+//! The D4 ordering test pins only the observed `C_EncryptMessageBegin`
+//! cases; no claim is made about other native entry points.
 
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -27,7 +33,9 @@ use pkcs11_proxy_ng::server::context_manager::ContextManager;
 use pkcs11_proxy_ng::server::grpc_service::Pkcs11ProxyService;
 use pkcs11_proxy_ng_backend::{FfiBackend, Pkcs11Backend};
 use pkcs11_proxy_ng_proto::Pkcs11ProxyServer;
-use pkcs11_proxy_ng_types::{CkSessionFlags, CkUserType};
+use pkcs11_proxy_ng_types::{
+    CkInBuf, CkParameterRoundtripSpec, CkRv, CkSessionFlags, CkSessionHandle, CkUserType,
+};
 use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
 use tokio::sync::watch;
@@ -293,4 +301,80 @@ fn kryoptic_gav_empty_template_returns_ok() {
         )
     };
     assert_eq!(rv, CKR_OK as CK_RV, "proxied kryoptic GAV(ptr, 0)");
+}
+
+/// Real-kryoptic D4 evidence (#23.4): native `C_EncryptMessageBegin`
+/// validates args/state before session lookup. All four legs answer
+/// `ARGUMENTS_BAD` — stale and valid sessions alike, NULL/8 and
+/// NULL/0 params alike — while `C_GetSessionInfo` on the same stale
+/// handle answers `SESSION_HANDLE_INVALID`, proving session lookup
+/// itself works. Native providers (haskoki per the issue report,
+/// kryoptic per this test) are args-first on message calls; the
+/// proxy's SHI-first default follows the spec letter (§5.1.7) and
+/// differs from both, which is the documented accepted limitation.
+/// A never-opened handle (not close-then-reuse) keeps the
+/// client-side session fence open so every leg reaches native code.
+#[ignore] // requires real kryoptic (PKCS11_PROXY_KRYOPTIC_MODULE)
+#[test]
+fn kryoptic_d4_native_begin_checks_args_before_session() {
+    // Serialize against the GAV tests sharing this backend: only one
+    // USER login may be active, so a concurrent login would fault
+    // USER_ALREADY_LOGGED_IN.
+    let _guard = shim_state_test_guard();
+    let daemon = kryoptic_daemon();
+    let backend = &daemon._backend;
+    let slots = backend.get_slot_list(false).unwrap_or_else(|rv| panic!("slots: {rv}"));
+    let slot = *slots.first().expect("kryoptic must expose a slot");
+    let flags = CkSessionFlags(CkSessionFlags::SERIAL_SESSION.0 | CkSessionFlags::RW_SESSION.0);
+    let session = backend.open_session(slot, flags).unwrap_or_else(|rv| panic!("open: {rv}"));
+    // Panic-safe cleanup: never leak a login/session into the next
+    // test sharing this backend.
+    struct TraitSessionCleanup {
+        backend: Arc<FfiBackend>,
+        session: CkSessionHandle,
+    }
+    impl Drop for TraitSessionCleanup {
+        fn drop(&mut self) {
+            let _ = self.backend.logout(self.session);
+            let _ = self.backend.close_session(self.session);
+        }
+    }
+    let _cleanup = TraitSessionCleanup { backend: daemon._backend.clone(), session };
+    backend
+        .login(session, CkUserType::User, Some(USER_PIN.as_bytes()))
+        .unwrap_or_else(|rv| panic!("user login: {rv}"));
+
+    let stale = CkSessionHandle(99999);
+
+    // Discriminator: no Init/params involved — session lookup answers.
+    match backend.get_session_info(stale) {
+        Err(rv) => {
+            assert_eq!(rv.0, CkRv::SESSION_HANDLE_INVALID.0, "GetSessionInfo(stale) must be SHI")
+        }
+        Ok(_) => panic!("GetSessionInfo(stale) unexpectedly succeeded"),
+    }
+    if let Err(rv) = backend.get_session_info(session) {
+        panic!("GetSessionInfo(valid) unexpectedly failed: {rv}");
+    }
+
+    let malformed = CkParameterRoundtripSpec { buffer_present: false, buffer_len: 8, value: None };
+    let empty_param =
+        CkParameterRoundtripSpec { buffer_present: false, buffer_len: 0, value: None };
+    let no_aad = CkInBuf::Null { len: 0 };
+
+    for (session, spec, label) in [
+        (stale, &malformed, "stale+NULL/8"),
+        (stale, &empty_param, "stale+NULL/0"),
+        (session, &malformed, "valid+NULL/8"),
+        (session, &empty_param, "valid+NULL/0"),
+    ] {
+        let ack = backend
+            .encrypt_message_begin_exact(session, no_aad, spec)
+            .unwrap_or_else(|rv| panic!("begin_exactErr on {label} (no native answer): {rv}"));
+        assert_eq!(
+            ack.ck_rv.0,
+            CkRv::ARGUMENTS_BAD.0,
+            "native Begin({label}) must be args-first AB"
+        );
+    }
 }

@@ -1435,6 +1435,125 @@ fn daemon_operation_not_initialized_preserves_output_canaries() {
     assert_eq!(output_len, 8);
 }
 
+/// S1 defect 4 live-session control (#23.4 solved-package): on a
+/// valid admitted session, a backend-returned `ARGUMENTS_BAD`
+/// passes through the full stack verbatim with exactly one backend
+/// attempt. NULL/nonzero input reaches the default (sanitize-off)
+/// daemon unadmitted-by-shape and the backend feed resolver rejects
+/// it; the proxy must not translate, wrap, or retry it. (Feed
+/// attempts read +2: the NULL/0 AAD resolves Ok and the NULL/8
+/// input fails — both counted.) RED history: asserting OK fails
+/// with 7 (AB).
+#[test]
+fn backend_ab_passes_through_verbatim_with_single_attempt() {
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let key = create_object(shim.session);
+    let mut iv = [0x11_u8; 12];
+    let mut tag = [0_u8; 16];
+    let mut parameter = CK_GCM_MESSAGE_PARAMS {
+        pIv: iv.as_mut_ptr(),
+        ulIvLen: iv.len() as CK_ULONG,
+        ulIvFixedBits: 96,
+        ivGenerator: CKG_NO_GENERATE,
+        pTag: tag.as_mut_ptr(),
+        ulTagBits: 128,
+    };
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_AES_GCM,
+        pParameter: (&mut parameter as *mut CK_GCM_MESSAGE_PARAMS).cast(),
+        ulParameterLen: std::mem::size_of_val(&parameter) as CK_ULONG,
+    };
+    assert_eq!(
+        unsafe { dispatch::general::c_message_encrypt_init(shim.session, &mut mechanism, key) },
+        CKR_OK as CK_RV,
+    );
+    let daemon = TestDaemon::shared();
+    let calls_before = daemon.backend.message_parameter_call_count();
+    let data_before = daemon.backend.data_op_call_count();
+    let mut output = [0xA5_u8; 8];
+    let mut output_len = output.len() as CK_ULONG;
+    let rv = unsafe {
+        dispatch::general::c_encrypt_message(
+            shim.session,
+            (&mut parameter as *mut CK_GCM_MESSAGE_PARAMS).cast(),
+            std::mem::size_of_val(&parameter) as CK_ULONG,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            8,
+            output.as_mut_ptr(),
+            &mut output_len,
+        )
+    };
+    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV, "backend AB must arrive verbatim");
+    assert_eq!(
+        daemon.backend.message_parameter_call_count(),
+        calls_before + 1,
+        "backend reached exactly once (no retry/repeat)"
+    );
+    assert_eq!(
+        daemon.backend.data_op_call_count(),
+        data_before + 2,
+        "both feeds resolved (AAD Ok, input AB)"
+    );
+}
+
+/// S1 defect 4 end-to-end (#23.4 solved-package): a stale session
+/// carrying a NULL/nonzero input shape answers
+/// `SESSION_HANDLE_INVALID` through real shim FFI — never the
+/// observed native args-first `ARGUMENTS_BAD` — with output canaries intact
+/// and zero backend attempts. Layering note: the shim rejects a
+/// closed session with no message shape even earlier
+/// (`OPERATION_NOT_INITIALIZED`, observed 145 in the RED probe), so
+/// the shape is reinstalled to pin the session-resolution RV
+/// exactly. The daemon-side boundary (unmapped virtual session) is
+/// pinned separately by the server scope tests.
+#[test]
+fn stale_session_message_call_yields_shi_without_clobber_or_backend_entry() {
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let session = shim.open_additional_session();
+    let close_rv = unsafe { dispatch::general::c_close_session(session) };
+    assert_eq!(close_rv, CKR_OK as CK_RV);
+    set_test_message_shape(
+        session,
+        state::MessageOperation::Encrypt,
+        MessageParameterShape::Unmodeled,
+    );
+    let daemon = TestDaemon::shared();
+    let calls_before = daemon.backend.message_parameter_call_count();
+    let data_before = daemon.backend.data_op_call_count();
+    let mut output = [0xA5_u8; 8];
+    let mut output_len = output.len() as CK_ULONG;
+    let rv = unsafe {
+        dispatch::general::c_encrypt_message(
+            session,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            8,
+            output.as_mut_ptr(),
+            &mut output_len,
+        )
+    };
+    assert_eq!(rv, CKR_SESSION_HANDLE_INVALID as CK_RV, "stale session must fault SHI, not AB");
+    assert_eq!(output, [0xA5; 8], "SHI refusal must not write output");
+    assert_eq!(output_len, 8, "SHI refusal must not write output length");
+    assert_eq!(
+        daemon.backend.message_parameter_call_count(),
+        calls_before,
+        "SHI refusal must not reach the backend"
+    );
+    assert_eq!(
+        daemon.backend.data_op_call_count(),
+        data_before,
+        "SHI refusal must not start data ops"
+    );
+}
+
 #[test]
 fn device_error_close_clears_authoritative_message_shapes() {
     let _guard = shim_state_test_guard();
