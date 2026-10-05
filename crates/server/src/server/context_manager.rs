@@ -1007,6 +1007,52 @@ impl ContextManager {
             .unwrap_or(false)
     }
 
+    /// Issue #36: mint-recorded privacy bit for a backend object, when
+    /// this context minted it (creation-template declaration). `None`
+    /// for foreign, found (non-minted), or unrecorded objects.
+    pub async fn mint_recorded_private(
+        &self,
+        ctx_id: &ClientContextId,
+        backend_object: CkObjectHandle,
+    ) -> Option<bool> {
+        self.get_context(ctx_id, |ctx| {
+            ctx.object_handles
+                .resolve_backend(BackendHandle(backend_object.0))
+                .and_then(|virtual_object| ctx.object_private.get(&virtual_object).copied())
+        })
+        .await
+        .flatten()
+    }
+
+    /// Issue #35: true when no OTHER live context holds sessions on the
+    /// slot backing `virtual_session`. Sync in-memory scan (no backend
+    /// I/O): session objects die with their owner session
+    /// (spec-mandated), so when sole, an unmapped session handle found
+    /// via our own backend session can only be our own backend-rotated
+    /// object (Haskoki bumps private handles at logout; post-login
+    /// find mints fresh values) or an out-of-band object a direct app
+    /// would equally see — both transparent to admit. With another
+    /// tenant present, unmapped session handles stay hidden
+    /// (CROSS-PROC-001). Unknown sessions fail closed (`false`).
+    pub async fn sole_session_holder_for_session(
+        &self,
+        exclude: &ClientContextId,
+        virtual_session: u64,
+    ) -> bool {
+        let slot = self
+            .get_context(exclude, |ctx| {
+                ctx.session_slots.get(&VirtualHandle(virtual_session)).copied()
+            })
+            .await
+            .flatten();
+        let Some(slot) = slot else {
+            return false;
+        };
+        !self.contexts.iter().any(|entry| {
+            entry.key() != exclude && entry.value().session_slots.values().any(|s| *s == slot)
+        })
+    }
+
     fn cached_token_info_within(
         &self,
         backend_slot: BackendSlotId,

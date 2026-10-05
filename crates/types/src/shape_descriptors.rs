@@ -516,6 +516,52 @@ pub enum OuterKind {
     NestedOrOutput,
 }
 
+/// Issue #37: whether a registry shape may travel the message-opaque
+/// channel (exact caller bytes, no layout handling). The channel
+/// establishes neither layout nor ABI, so only byte-buffer forms may
+/// ride it: every form (primary plus length-selected alternates) must
+/// be [`OuterKind::ByteBuffer`] or [`OuterKind::Parameterless`].
+/// Pointer-bearing struct forms embed client addresses; forwarding
+/// their image hands the provider stale pointers (daemon SIGSEGV —
+/// observed with `CK_CHACHA20_PARAMS` on `C_MessageEncryptInit`).
+/// Scalar structs are refused too (no layout/ABI proof, plus the
+/// handle-bearing `object_handle` exception), as are shapes without a
+/// compiled descriptor: an unknown layout may hide pointers, so
+/// vendor byte-buffer mechanisms need an explicit reviewed binding.
+/// Callers fail fast (clean `MECHANISM_PARAM_INVALID`), including for
+/// empty inits — an install that can never complete must never start,
+/// which transitively closes Begin/Next/OneShot follow-ups.
+pub fn message_opaque_admits_shape(shape_name: Option<&str>) -> bool {
+    fn form_admits(kind: OuterKind) -> bool {
+        matches!(kind, OuterKind::ByteBuffer | OuterKind::Parameterless)
+    }
+    match shape_name.and_then(ShapeResolver::descriptor) {
+        None => false,
+        Some(descriptor) => {
+            form_admits(descriptor.outer_kind)
+                && descriptor.alternate_forms.iter().all(|form| form_admits(form.outer_kind))
+        }
+    }
+}
+
+/// Issue #37: mechanism-level message-opaque admission. Materialized
+/// bytes ride only byte-buffer shapes ([`message_opaque_admits_shape`]
+/// — strict, so parameterless mechanisms with attacker bytes still
+/// refuse). Empty requests additionally admit registry-declared
+/// parameterless mechanisms (e.g. AES_ECB), whose empty init is their
+/// normal form. Unknown mechanisms (no shape entry, not
+/// parameterless) fail closed in both cases.
+pub fn message_opaque_admits_mechanism(
+    registry: &crate::MechanismRegistry,
+    mech_type: u64,
+    materialized: bool,
+) -> bool {
+    if message_opaque_admits_shape(registry.param_shape(mech_type)) {
+        return true;
+    }
+    !materialized && registry.is_parameterless(mech_type)
+}
+
 /// Operation context selecting the parameter layout (S2 §4: the resolver
 /// takes mechanism + operation + length).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1623,6 +1669,30 @@ mod table_tests {
         assert_eq!(kind_of("skipjack_relayx"), NestedOrOutput);
         assert_eq!(kind_of("ssl3_key_mat"), NestedOrOutput);
         assert_eq!(kind_of("tls_prf"), NestedOrOutput);
+    }
+
+    #[test]
+    fn message_opaque_admits_only_byte_buffer_shapes() {
+        // Issue #37: only byte-buffer forms may travel message-opaque
+        // (exact caller bytes, no layout/ABI proof). Struct images
+        // embed stale client addresses (daemon SIGSEGV); unknown
+        // layouts fail closed.
+        use super::message_opaque_admits_shape;
+        assert!(message_opaque_admits_shape(Some("iv")));
+        assert!(message_opaque_admits_shape(Some("parameterless")));
+        // Pointer structs, including via length-selected alternates.
+        assert!(!message_opaque_admits_shape(Some("chacha20")));
+        assert!(!message_opaque_admits_shape(Some("gcm")));
+        assert!(!message_opaque_admits_shape(Some("gcm_compat")));
+        assert!(!message_opaque_admits_shape(Some("tls_prf")));
+        // Scalar structs (no layout/ABI proof; object_handle also
+        // carries a virtual handle past remapping).
+        assert!(!message_opaque_admits_shape(Some("rsa_pss")));
+        assert!(!message_opaque_admits_shape(Some("extract")));
+        assert!(!message_opaque_admits_shape(Some("object_handle")));
+        // Unknown layouts fail closed.
+        assert!(!message_opaque_admits_shape(None));
+        assert!(!message_opaque_admits_shape(Some("no_such_shape")));
     }
 
     #[test]

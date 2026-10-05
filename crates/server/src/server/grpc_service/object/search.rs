@@ -7,9 +7,9 @@ use super::super::super::context_manager::ObjectMetadata;
 use super::super::HandlerContext;
 use super::super::convert_template_opt;
 use super::super::service_utils::{
-    backend_object_known_public, ck_rv_only, context_maps_backend_object,
-    find_result_visible_to_context, register_object_handles, resolve_object_authz_context,
-    resolve_session, session_slot_login_state, spawn_backend,
+    backend_object_known_public, backend_object_token_state, ck_rv_only,
+    context_maps_backend_object, find_result_visible_to_context, register_object_handles,
+    resolve_object_authz_context, resolve_session, session_slot_login_state, spawn_backend,
 };
 
 pub(super) async fn find_objects_init(
@@ -104,6 +104,10 @@ async fn find_objects_with_bound(
     // (Logged-out callers take the F-04 loop below instead.)
     if !ctx.token_policy.per_object_active() && !ctx.token_policy.per_class_active() && logged_in {
         let mut kept_backends = Vec::new();
+        // Issue #35: sole-holder rediscovery admits, tracked separately
+        // so a post-loop sole re-check can discard them if a tenant
+        // raced in mid-find.
+        let mut kept_by_sole_holder = Vec::new();
         let mut scanned: usize = 0;
         loop {
             let batch_backend = ctx.backend.clone();
@@ -133,13 +137,27 @@ async fn find_objects_with_bound(
             }
             scanned += batch.len();
 
+            // Sole-holder check per batch (cheap in-memory scan; also
+            // re-verified after the loop to close the session-open race).
+            let sole_holder =
+                ctx.context_manager.sole_session_holder_for_session(&ctx_id, virtual_session).await;
             for &backend_object in &batch {
                 if find_result_visible_to_context(ctx, &ctx_id, session, backend_object).await {
                     kept_backends.push(backend_object);
+                } else if sole_holder
+                    && backend_object_token_state(ctx, session, backend_object).await == Some(false)
+                {
+                    // Sole on slot + positively session-scoped → our own
+                    // backend-rotated object (Haskoki bumps private
+                    // handles at logout; post-login find mints fresh
+                    // values). Admit with a fresh virtual (direct
+                    // parity: direct clients re-discover fresh handles
+                    // too). Probe failure (None) stays hidden.
+                    kept_by_sole_holder.push(backend_object);
                 }
             }
 
-            if !kept_backends.is_empty() {
+            if !kept_backends.is_empty() || !kept_by_sole_holder.is_empty() {
                 break;
             }
             // W1-C1-07: stop past the configured scan bound. Kept is empty
@@ -156,6 +174,16 @@ async fn find_objects_with_bound(
                 }));
             }
         }
+
+        // Post-loop sole re-verification: if another context opened a
+        // session on our slot mid-find, discard sole-admitted handles
+        // (fail closed against the interleaving).
+        if !kept_by_sole_holder.is_empty()
+            && !ctx.context_manager.sole_session_holder_for_session(&ctx_id, virtual_session).await
+        {
+            kept_by_sole_holder.clear();
+        }
+        kept_backends.extend(kept_by_sole_holder);
 
         return match register_object_handles(&ctx.context_manager, &ctx_id, &kept_backends).await {
             Some(object_handles) => Ok(Response::new(pkcs11_proxy_ng_proto::FindObjectsResponse {
@@ -213,7 +241,7 @@ async fn find_objects_with_bound(
                 // mapped handles and hides foreign session objects before
                 // the privacy probe spends a backend call on them).
                 if find_result_visible_to_context(ctx, &ctx_id, session, backend_object).await
-                    && backend_object_known_public(ctx, session, backend_object).await
+                    && backend_object_known_public(ctx, &ctx_id, session, backend_object).await
                 {
                     kept_backends.push(backend_object);
                 }
@@ -343,7 +371,8 @@ async fn find_objects_with_bound(
                     // no probe; logged-in callers short-circuit with no extra call.
                     if owned_or_token
                         && (logged_in
-                            || backend_object_known_public(ctx, session, backend_object).await)
+                            || backend_object_known_public(ctx, &ctx_id, session, backend_object)
+                                .await)
                     {
                         kept_backends.push(backend_object);
                         kept_metas.push(meta);
@@ -440,6 +469,7 @@ mod tests {
     use crate::server::auth::policy::TokenPolicy;
     use crate::server::context_manager::{ContextManager, LoginState};
     use crate::server::grpc_service::HandlerContext;
+    use crate::server::grpc_service::service_utils::register_session_object_handle;
     use crate::server::handle_map::BackendHandle;
     use crate::server::slot_map::BackendSlotId;
 
@@ -746,6 +776,291 @@ mod tests {
             resp.object_handles.len(),
             0,
             "object with absent CKA_UNIQUE_ID must be fail-closed (dropped)"
+        );
+    }
+
+    /// Issue #36: a backend that omits CKA_PRIVATE for objects minted
+    /// without the flag (Haskoki stores only explicit attributes and
+    /// treats absent as public) must not hide them from logged-out
+    /// find — the mint-recorded bit (public) is honored for
+    /// in-context-minted objects.
+    #[tokio::test]
+    async fn find_objects_honors_mint_recorded_public_on_absent_private() {
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
+        mock.initialize().unwrap();
+        let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
+        let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
+        // Certificate minted WITHOUT CKA_TOKEN/CKA_PRIVATE, like the
+        // issue repro: the mock leaves unset attributes absent, so the
+        // PRIVATE probe answers ATTRIBUTE_TYPE_INVALID (Haskoki-faithful).
+        let cert = mock.create_object(backend_session, Some(&[])).unwrap();
+        mock.set_attribute(
+            cert,
+            CkAttributeType::CLASS,
+            MockAttributeSlot::Value(CkAttributeValue::Ulong(
+                pkcs11_proxy_ng_types::CkObjectClass::CERTIFICATE.0,
+            )),
+        );
+        mock.find_objects_init(backend_session, Some(&[])).unwrap();
+        mock.set_find_objects_result(vec![cert]);
+
+        let backend: Arc<dyn Pkcs11Backend> = mock;
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+        let virtual_session = ctx_mgr
+            .get_context(&ctx_id, |c| {
+                c.register_session(
+                    BackendHandle(backend_session.0),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                )
+            })
+            .await
+            .unwrap();
+        // Minted in-context as public (template lacked CKA_PRIVATE).
+        register_session_object_handle(
+            &ctx_mgr,
+            &ctx_id,
+            virtual_session,
+            cert,
+            false,
+            Some(false),
+        )
+        .await;
+        // Logged out: no login_state entry (public session, never logged in).
+        let ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+
+        let resp = super::find_objects(
+            &ctx,
+            Request::new(pkcs11_proxy_ng_proto::FindObjectsRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: virtual_session.0,
+                max_object_count: 32,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+
+        assert_eq!(resp.ck_rv, CkRv::OK.0);
+        assert_eq!(
+            resp.object_handles.len(),
+            1,
+            "minted-public cert with backend-absent CKA_PRIVATE must be found (direct parity)"
+        );
+    }
+
+    /// Issue #36 (fail-closed preserved): a recorded-private object
+    /// whose backend omits CKA_PRIVATE stays hidden while logged out —
+    /// the fallback only ever admits recorded-public objects.
+    #[tokio::test]
+    async fn find_objects_hides_mint_recorded_private_on_absent_private() {
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
+        mock.initialize().unwrap();
+        let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
+        let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
+        let obj = mock.create_object(backend_session, Some(&[])).unwrap();
+        mock.set_attribute(
+            obj,
+            CkAttributeType::CLASS,
+            MockAttributeSlot::Value(CkAttributeValue::Ulong(
+                pkcs11_proxy_ng_types::CkObjectClass::DATA.0,
+            )),
+        );
+        mock.find_objects_init(backend_session, Some(&[])).unwrap();
+        mock.set_find_objects_result(vec![obj]);
+
+        let backend: Arc<dyn Pkcs11Backend> = mock;
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+        let virtual_session = ctx_mgr
+            .get_context(&ctx_id, |c| {
+                c.register_session(
+                    BackendHandle(backend_session.0),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                )
+            })
+            .await
+            .unwrap();
+        register_session_object_handle(&ctx_mgr, &ctx_id, virtual_session, obj, false, Some(true))
+            .await;
+        let ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+
+        let resp = super::find_objects(
+            &ctx,
+            Request::new(pkcs11_proxy_ng_proto::FindObjectsRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: virtual_session.0,
+                max_object_count: 32,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+
+        assert_eq!(resp.ck_rv, CkRv::OK.0);
+        assert_eq!(
+            resp.object_handles.len(),
+            0,
+            "recorded-private object with absent CKA_PRIVATE must stay hidden while logged out"
+        );
+    }
+
+    /// Issue #35: backends that rotate private-object handles at logout
+    /// (Haskoki bumps generations; post-login find mints fresh values)
+    /// must not strand our objects. Sole on the slot, the fresh
+    /// unmapped session handle is admitted with a fresh virtual
+    /// (direct parity: direct clients re-discover fresh handles too).
+    #[tokio::test]
+    async fn find_objects_admits_rotated_handle_when_sole_on_slot() {
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
+        mock.initialize().unwrap();
+        let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
+        let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
+        // H1 (pre-logout binding) and H2 (post-login fresh binding)
+        // stand in for the same rotated object.
+        let h1 = mock.create_object(backend_session, Some(&[])).unwrap();
+        let h2 = mock.create_object(backend_session, Some(&[])).unwrap();
+        for handle in [h1, h2] {
+            mock.set_attribute(
+                handle,
+                CkAttributeType::CLASS,
+                MockAttributeSlot::Value(CkAttributeValue::Ulong(
+                    pkcs11_proxy_ng_types::CkObjectClass::DATA.0,
+                )),
+            );
+            mock.set_attribute(
+                handle,
+                CkAttributeType::TOKEN,
+                MockAttributeSlot::Value(CkAttributeValue::Bool(false)),
+            );
+            mock.set_attribute(
+                handle,
+                CkAttributeType::PRIVATE,
+                MockAttributeSlot::Value(CkAttributeValue::Bool(true)),
+            );
+        }
+        // Post-login find returns only the fresh handle.
+        mock.find_objects_init(backend_session, Some(&[])).unwrap();
+        mock.set_find_objects_result(vec![h2]);
+
+        let backend: Arc<dyn Pkcs11Backend> = mock;
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
+        let slot = BackendSlotId(CkSlotId(0));
+        ctx_mgr.register_slot(slot).await;
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+        let virtual_session = ctx_mgr
+            .get_context(&ctx_id, |c| c.register_session(BackendHandle(backend_session.0), slot))
+            .await
+            .unwrap();
+        // Minted pre-logout (old binding H1), then logged back in.
+        let old_virtual = register_session_object_handle(
+            &ctx_mgr,
+            &ctx_id,
+            virtual_session,
+            h1,
+            false,
+            Some(true),
+        )
+        .await;
+        ctx_mgr
+            .get_context(&ctx_id, |c| {
+                c.login_state.insert(slot, LoginState::User);
+            })
+            .await;
+        let ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+
+        let resp = super::find_objects(
+            &ctx,
+            Request::new(pkcs11_proxy_ng_proto::FindObjectsRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: virtual_session.0,
+                max_object_count: 32,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+
+        assert_eq!(resp.ck_rv, CkRv::OK.0);
+        assert_eq!(
+            resp.object_handles.len(),
+            1,
+            "sole-holder rediscovery must admit the rotated handle"
+        );
+        assert_ne!(
+            resp.object_handles[0], old_virtual,
+            "rotated handle gets a fresh virtual (old binding is dead, like direct)"
+        );
+    }
+
+    /// Issue #35 (isolation preserved): with another live tenant
+    /// holding a session on the slot, an unmapped session handle stays
+    /// hidden — it may be the other tenant's object.
+    #[tokio::test]
+    async fn find_objects_hides_unmapped_handle_when_slot_shared() {
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
+        mock.initialize().unwrap();
+        let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
+        let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
+        let other_backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
+        let foreign = mock.create_object(other_backend_session, Some(&[])).unwrap();
+        mock.set_attribute(
+            foreign,
+            CkAttributeType::CLASS,
+            MockAttributeSlot::Value(CkAttributeValue::Ulong(
+                pkcs11_proxy_ng_types::CkObjectClass::DATA.0,
+            )),
+        );
+        mock.set_attribute(
+            foreign,
+            CkAttributeType::TOKEN,
+            MockAttributeSlot::Value(CkAttributeValue::Bool(false)),
+        );
+        mock.find_objects_init(backend_session, Some(&[])).unwrap();
+        mock.set_find_objects_result(vec![foreign]);
+
+        let backend: Arc<dyn Pkcs11Backend> = mock;
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
+        let slot = BackendSlotId(CkSlotId(0));
+        ctx_mgr.register_slot(slot).await;
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+        let virtual_session = ctx_mgr
+            .get_context(&ctx_id, |c| c.register_session(BackendHandle(backend_session.0), slot))
+            .await
+            .unwrap();
+        // Another tenant holds a live session on the same slot.
+        let other_ctx = ctx_mgr.create_context(None).await.unwrap();
+        ctx_mgr
+            .get_context(&other_ctx, |c| {
+                c.register_session(BackendHandle(other_backend_session.0), slot)
+            })
+            .await;
+        ctx_mgr
+            .get_context(&ctx_id, |c| {
+                c.login_state.insert(slot, LoginState::User);
+            })
+            .await;
+        let ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+
+        let resp = super::find_objects(
+            &ctx,
+            Request::new(pkcs11_proxy_ng_proto::FindObjectsRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: virtual_session.0,
+                max_object_count: 32,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+
+        assert_eq!(resp.ck_rv, CkRv::OK.0);
+        assert_eq!(
+            resp.object_handles.len(),
+            0,
+            "shared-slot unmapped session handle must stay hidden (CROSS-PROC-001)"
         );
     }
 
@@ -1639,6 +1954,7 @@ mod tests {
         mock.initialize().unwrap();
         let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
+        let other_backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
 
         let obj_sess = mock.create_object(backend_session, Some(&[])).unwrap();
         set_ownership_fixture(&mock, obj_sess, false);
@@ -1660,6 +1976,19 @@ mod tests {
             })
             .await
             .unwrap();
+
+        // Issue #35: a second tenant holds a live session on the same
+        // slot, so these fixtures are genuinely cross-tenant (the
+        // sole-holder rediscovery must not fire here).
+        let other_ctx_id = ctx_mgr.create_context(Some("uid=other".into())).await.unwrap();
+        ctx_mgr
+            .get_context(&other_ctx_id, |c| {
+                c.register_session(
+                    BackendHandle(other_backend_session.0),
+                    BackendSlotId(CkSlotId(0)),
+                )
+            })
+            .await;
 
         let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
         ctx.token_policy = policy;

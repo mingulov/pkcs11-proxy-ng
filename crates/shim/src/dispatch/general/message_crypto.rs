@@ -68,8 +68,24 @@ unsafe fn read_message_init_mechanism(
     // still observe the flag-set/registry-uninstalled window: fail
     // closed with NOT_INITIALIZED instead of panicking (T07, C-B2).
     let registry = state::try_mechanism_registry().map_err(rv_err)?;
-    let shape =
-        MessageParameterShape::from_registry_name(registry.param_shape(c_mech.mechanism as u64));
+    let shape_name = registry.param_shape(c_mech.mechanism as u64);
+    let shape = MessageParameterShape::from_registry_name(shape_name);
+    // Issue #37: only byte-buffer shapes (or empty inits for
+    // registry-declared parameterless mechanisms) may take the
+    // message-opaque path — a materialized struct image embeds client
+    // addresses that would segfault the daemon. Fail fast with clean
+    // MPI otherwise: an install that can never complete must never
+    // start (transitively closes Begin/Next/OneShot follow-ups, which
+    // reuse the installed Unmodeled shape).
+    if shape == MessageParameterShape::Unmodeled
+        && !pkcs11_proxy_ng_types::shape_descriptors::message_opaque_admits_mechanism(
+            &registry,
+            c_mech.mechanism as u64,
+            !c_mech.pParameter.is_null() && c_mech.ulParameterLen != 0,
+        )
+    {
+        return Err(rv_err(CkRv::MECHANISM_PARAM_INVALID));
+    }
     let envelope =
         unsafe { message_parameter_roundtrip_spec(c_mech.pParameter, c_mech.ulParameterLen) }
             .map_err(rv_err)?;

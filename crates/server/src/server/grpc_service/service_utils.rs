@@ -1495,6 +1495,7 @@ async fn backend_object_is_private(
 /// observe private objects).
 pub(super) async fn backend_object_known_public(
     ctx: &HandlerContext,
+    ctx_id: &ClientContextId,
     backend_session: CkSessionHandle,
     backend_object: CkObjectHandle,
 ) -> bool {
@@ -1504,6 +1505,19 @@ pub(super) async fn backend_object_known_public(
         // storage attributes); such objects are token-global metadata —
         // fail open. Anything else stays fail-closed.
         BoolAttrProbe::AttrAbsent => {
+            // Issue #36: backends that omit CKA_PRIVATE for objects
+            // minted without the flag (Haskoki stores only explicit
+            // attributes and treats absent as public — direct finds
+            // such objects while logged out) need the mint-recorded
+            // bit, or every flag-less object hides fail-closed. Honor
+            // it only when this context minted the object as public;
+            // recorded-private, unrecorded, and foreign objects keep
+            // the fail-closed carve-out below.
+            if ctx.context_manager.mint_recorded_private(ctx_id, backend_object).await
+                == Some(false)
+            {
+                return true;
+            }
             backend_object_has_other_class(ctx, backend_session, backend_object).await
         }
         BoolAttrProbe::Failed => false,

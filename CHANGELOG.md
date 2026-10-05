@@ -7,13 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-10-05
+
+v0.2.2 is a testing candidate that follows the published v0.2.1
+release. Its theme is client-blocker repair: three v0.2.1 regressions
+reported against a real client project are fixed with failing-first
+regression tests and A/B base-vs-patched validation. See the [candidate
+notes](doc/release/v0.2.2-release-notes.md).
+
+### Fixed
+
+- Daemon crash on `C_MessageEncryptInit` with `CK_CHACHA20_PARAMS` (#37):
+  unmodeled message-opaque parameter bytes are no longer forwarded
+  verbatim when the mechanism declares a pointer-struct shape. A strict
+  shape gate (`message_opaque_admits_shape`) admits only byte-buffer and
+  parameterless shapes and fails closed on unknown shapes; the shim
+  refuses locally with `CKR_MECHANISM_PARAM_INVALID` (zero RPC), and the
+  server backstop refuses opaque struct images at message-init, plain
+  encrypt/decrypt init, and authenticated-wrap validation. Flat-byte
+  opaque (e.g. CBC IV) and typed classic ChaCha20 paths are unchanged.
+- Private `CKO_DATA` objects lost across logout/login (#35): providers
+  that rotate private handles at logout no longer strand session-scoped
+  objects. Positively session-scoped (`CKA_TOKEN=false`) unmapped
+  handles are admitted when the session is the sole holder on the slot,
+  with post-scan re-verification; shared-slot handles stay hidden per
+  CROSS-PROC-001 isolation.
+- `CKO_CERTIFICATE` objects never found (#36): providers that omit
+  `CKA_PRIVATE` when unset (absent means public) are honored via the
+  mint-record fallback, which admits recorded-public objects and keeps
+  recorded-private, unrecorded, and foreign handles hidden.
+
+### Known limitations
+
+- All v0.2.1 limits carry forward, including the single logical client in
+  one trusted security domain per daemon/provider instance. The v1
+  typed-presence wire is decode-side only at the Phase-2 gate where
+  noted; mixed shim/daemon versions are unsupported. Backend token
+  objects outlive the client's Finalize/Initialize cycle (#27);
+  stale-session message calls answer SHI by default and may differ
+  from args-first native providers (#23 defect 4).
+- Message-path mechanisms whose parameter shape is unmodeled are refused
+  with `CKR_MECHANISM_PARAM_INVALID` instead of forwarding caller bytes;
+  typed support for additional message parameter shapes is future work.
+
 ## [0.2.1] - 2026-10-04
 
-v0.2.1 is a testing candidate that supersedes the unpublished v0.2.0
-candidate. Its theme is shape truthfulness: caller-NULL versus empty
+v0.2.1 is a release that supersedes the published v0.2.0
+release. Its theme is shape truthfulness: caller-NULL versus empty
 distinctions are now preserved exactly across the shim, wire, daemon, and
 backend FFI, with machine-checkable mechanism-parameter shapes and
-transport validation at every server site. See the [candidate
+transport validation at every server site. See the [release
 notes](doc/release/v0.2.1-release-notes.md).
 
 ### Added
@@ -86,10 +129,10 @@ notes](doc/release/v0.2.1-release-notes.md).
 
 ## [0.2.0] - 2026-09-28
 
-v0.2.0 is a testing candidate for one logical client in one trusted security
+v0.2.0 is a release for one logical client in one trusted security
 domain per daemon/provider instance. Restart both before switching independent
 clients or domains. Multi-client isolation and final platform/provider
-validation remain open; see the [candidate notes](doc/release/v0.2.0-release-notes.md).
+validation remain open; see the [release notes](doc/release/v0.2.0-release-notes.md).
 
 ### Added
 
@@ -126,7 +169,7 @@ validation remain open; see the [candidate notes](doc/release/v0.2.0-release-not
   package. Carrier images expose packages at `/apk` or `/rpm`.
 - Windows x64/MSVC daemon and shim builds, a Windows ZIP release bundle, and
   additional Linux cross-width, musl, and platform checks. Validation limits
-  are listed in the [candidate notes](doc/release/v0.2.0-release-notes.md).
+  are listed in the [release notes](doc/release/v0.2.0-release-notes.md).
 - Typed X3DH transport and backend FFI conversion. The shim still rejects
   direct parameterized X3DH calls because their caller pointers lack bounded
   lengths; see [parameter support](doc/oasis-profile-coverage.md).
@@ -326,7 +369,7 @@ validation remain open; see the [candidate notes](doc/release/v0.2.0-release-not
   can be used with it; a static daemon cannot serve native modules.
 - Platform builds, stub tests, and historical provider runs do not qualify the
   final candidate. Current evidence and remaining release work are listed in
-  the [candidate notes](doc/release/v0.2.0-release-notes.md).
+  the [release notes](doc/release/v0.2.0-release-notes.md).
 
 ## [0.1.0] - 2026-05-15
 

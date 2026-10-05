@@ -57,6 +57,21 @@ fn pointer_free_iv_shape(mechanism: CkMechanismType) -> bool {
         .is_ok_and(|registry| registry.param_shape(mechanism.0) == Some("iv"))
 }
 
+/// Issue #37: message-opaque admissibility against the embedded
+/// default registry (same static-cache pattern as
+/// `pointer_free_iv_shape`).
+fn default_registry_opaque_admits(mechanism: CkMechanismType) -> bool {
+    use pkcs11_proxy_ng_types::shape_descriptors::message_opaque_admits_mechanism;
+    static REGISTRY: std::sync::OnceLock<Result<MechanismRegistry, String>> =
+        std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| MechanismRegistry::load_with_override_str(None)).as_ref().is_ok_and(
+        |registry| {
+            // Only called for materialized Raw images (see validate_input).
+            message_opaque_admits_mechanism(registry, mechanism.0, true)
+        },
+    )
+}
+
 pub fn authenticated_shape(mechanism: CkMechanismType) -> MessageParameterShape {
     match mechanism {
         CkMechanismType::AES_GCM => MessageParameterShape::Gcm,
@@ -76,6 +91,19 @@ pub fn validate_input(
         parameter.validate_structured()?;
         if mechanism.params.is_some()
             || !authenticated_shape(mechanism.mechanism_type).matches(parameter)
+        {
+            return Err(CkRv::MECHANISM_PARAM_INVALID);
+        }
+        // Issue #37: the Unmodeled+Raw arm below reaches
+        // `build_message_init_mechanism`, so the same stale-pointer
+        // hole as message init applies (e.g. an opaque
+        // CK_GOSTR3410_KEY_WRAP_PARAMS image escaping typed
+        // reconstruction). Refuse non-admissible shapes here — this
+        // validator is shared by the server wrap/unwrap handlers and
+        // the backend `NativeParameter` constructor.
+        if authenticated_shape(mechanism.mechanism_type) == MessageParameterShape::Unmodeled
+            && matches!(parameter, MessageParameter::Raw(raw) if !raw.is_empty())
+            && !default_registry_opaque_admits(mechanism.mechanism_type)
         {
             return Err(CkRv::MECHANISM_PARAM_INVALID);
         }
@@ -297,6 +325,21 @@ mod tests {
             output: Some(wire::authenticated_mechanism_output::Output::Unchanged(false)),
         };
         assert_eq!(AuthenticatedOutput::try_from(&output), Err(CkRv::MECHANISM_PARAM_INVALID),);
+    }
+
+    #[test]
+    fn validate_input_refuses_opaque_pointer_struct_image() {
+        // Issue #37: Unmodeled+Raw reaches build_message_init_mechanism
+        // (same stale-pointer hole as message init) — e.g. an opaque
+        // CK_GOSTR3410_KEY_WRAP_PARAMS image escaping typed
+        // reconstruction. Flat IVs still pass.
+        let gostr =
+            CkMechanism { mechanism_type: CkMechanismType::GOSTR3410_KEY_WRAP, params: None };
+        let image = MessageParameter::Raw(vec![0xA5u8; 64].into());
+        assert_eq!(validate_input(&gostr, Some(&image)), Err(CkRv::MECHANISM_PARAM_INVALID));
+        let cbc = CkMechanism { mechanism_type: CkMechanismType::AES_CBC, params: None };
+        let iv = MessageParameter::Raw(vec![0x11u8; 16].into());
+        assert_eq!(validate_input(&cbc, Some(&iv)), Ok(()));
     }
 
     #[test]

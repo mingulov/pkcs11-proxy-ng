@@ -1398,6 +1398,65 @@ fn malformed_post_provider_ack_returns_device_error_and_clears_shim_shape() {
     assert_eq!(tag, [0; 16], "malformed response must not write embedded tag");
 }
 
+/// Issue #37: a struct-carrying message init (CK_CHACHA20_PARAMS image)
+/// is refused locally with MPI — the image must never travel
+/// message-opaque (stale client pointers segfault the daemon).
+#[test]
+fn message_encrypt_init_refuses_pointer_struct_image_locally() {
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let daemon = TestDaemon::shared();
+    let lifecycle_before = daemon.backend.message_lifecycle_call_count();
+    let contract_before = daemon.backend.message_init_contract_call_count();
+    let key = create_object(shim.session);
+    let mut counter = [0u8; 4];
+    let mut nonce = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+    let mut parameter = CK_CHACHA20_PARAMS {
+        pBlockCounter: counter.as_mut_ptr(),
+        blockCounterBits: 32,
+        pNonce: nonce.as_mut_ptr(),
+        ulNonceBits: 96,
+    };
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_CHACHA20,
+        pParameter: (&mut parameter as *mut CK_CHACHA20_PARAMS).cast(),
+        ulParameterLen: std::mem::size_of_val(&parameter) as CK_ULONG,
+    };
+    assert_eq!(
+        unsafe { dispatch::general::c_message_encrypt_init(shim.session, &mut mechanism, key) },
+        CKR_MECHANISM_PARAM_INVALID as CK_RV,
+    );
+    assert_eq!(test_message_shape(shim.session, state::MessageOperation::Encrypt), None);
+    // Local refusal: nothing was emitted — the daemon observed zero
+    // message calls for this init.
+    assert_eq!(daemon.backend.message_lifecycle_call_count(), lifecycle_before);
+    assert_eq!(daemon.backend.message_init_contract_call_count(), contract_before);
+}
+
+/// Issue #37 (fail-fast): even an EMPTY message init for a
+/// pointer-struct registry shape is refused locally — an install that
+/// can never complete must never start (transitively closes
+/// Begin/Next/OneShot follow-ups).
+#[test]
+fn message_encrypt_init_refuses_empty_pointer_struct_init_locally() {
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let daemon = TestDaemon::shared();
+    let lifecycle_before = daemon.backend.message_lifecycle_call_count();
+    let key = create_object(shim.session);
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_CHACHA20,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    assert_eq!(
+        unsafe { dispatch::general::c_message_encrypt_init(shim.session, &mut mechanism, key) },
+        CKR_MECHANISM_PARAM_INVALID as CK_RV,
+    );
+    assert_eq!(test_message_shape(shim.session, state::MessageOperation::Encrypt), None);
+    assert_eq!(daemon.backend.message_lifecycle_call_count(), lifecycle_before);
+}
+
 #[test]
 fn daemon_operation_not_initialized_preserves_output_canaries() {
     // S1 defect 2 regression pin (fixed by the Option/apply refactor, not by
