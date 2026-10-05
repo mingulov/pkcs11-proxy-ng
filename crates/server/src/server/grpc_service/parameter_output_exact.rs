@@ -306,11 +306,12 @@ pub(super) async fn parameter_output_exact(
             };
             // S1 defect 4: with sanitize on, AB-yielding request-shape
             // gates run before session resolution, so malformed
-            // requests yield ARGUMENTS_BAD (matching haskoki-direct)
-            // regardless of session validity. Default path keeps
-            // SHI-first per spec §5.1.7 precedence (5.1.2 beats 5.1.6);
-            // matching the quirk there would need an ADR-0010
-            // contract amendment (see the scope pin test below).
+            // requests yield ARGUMENTS_BAD (matching the observed
+            // native provider order, args-before-session) regardless
+            // of session validity. Default path keeps SHI-first per
+            // spec §5.1.7 precedence (5.1.2 beats 5.1.6); matching
+            // provider order there would need an ADR-0010 contract
+            // amendment (see the scope pin test below).
             // Flipped pairs, all AB-beats-X (structurally entailed by the
             // hoist): sanitize vs session (the defect, forced); sanitize vs
             // MPI-spec in both arms (double-malformation only; AB is the
@@ -610,9 +611,9 @@ pub(super) async fn parameter_output_exact(
             // S1 defect 4: with sanitize on, request-shape validation
             // precedes session resolution (as in the Encrypt/Decrypt arm
             // above), so a malformed request yields ARGUMENTS_BAD
-            // (matching haskoki-direct) regardless of session validity
-            // instead of SESSION_HANDLE_INVALID. Default path keeps
-            // SHI-first per spec §5.1.7.
+            // (matching the observed native provider order) regardless
+            // of session validity instead of SESSION_HANDLE_INVALID.
+            // Default path keeps SHI-first per spec §5.1.7.
             if let Err(rv) = check_sanitize(sanitize_inputs, input_data_null_len) {
                 return Ok(Response::new(error_response(rv)));
             }
@@ -1513,11 +1514,13 @@ mod ambiguity_tests {
     /// session yields `SESSION_HANDLE_INVALID` regardless of request
     /// shape — even for malformed (NULL/nonzero) inputs. Spec §5.1.7
     /// precedence (5.1.2 session errors beat 5.1.6 argument errors)
-    /// makes SHI-first the correct backend-independent default; the
-    /// haskoki-direct AB quirk is matched only in sanitize-on mode
-    /// (explicit per-backend fidelity — default-path RV synthesis
-    /// would need an ADR-0010 contract amendment). Guards against
-    /// "fixing" the default path toward the quirk.
+    /// makes SHI-first the spec-literal default; the observed native
+    /// args-first order (haskoki per the issue report, kryoptic per
+    /// `kryoptic_d4_native_begin_checks_args_before_session`) is
+    /// matched only in sanitize-on mode (explicit opt-in fidelity —
+    /// default-path RV synthesis would need an ADR-0010 contract
+    /// amendment). Guards against "fixing" the default path toward
+    /// provider order.
     #[tokio::test]
     async fn invalid_session_yields_shi_sanitize_off_regardless_of_shape() {
         let mock = Arc::new(MockBackend::default_test());
@@ -1750,6 +1753,112 @@ mod ambiguity_tests {
             manager.get_context(&context_id, |context| context.message_operations.len()).await,
             Some(0),
             "shape-first rejection must not allocate operation state",
+        );
+    }
+
+    /// S1 defect 4 scope pin, param_out envelope (#23.4
+    /// solved-package): WITHOUT sanitize, a NULL/nonzero
+    /// parameter-out envelope on an invalid session yields
+    /// `SESSION_HANDLE_INVALID`, not the observed native
+    /// args-first `ARGUMENTS_BAD`. Sanitizer hoisting is opt-in;
+    /// the default keeps SHI-first per spec §5.1.7. Mirrors
+    /// `malformed_param_out_beats_invalid_session` (sanitize-on).
+    /// RED history: a probe asserting provider-order AB fails with
+    /// 179 (SHI).
+    #[tokio::test]
+    async fn malformed_param_out_yields_shi_sanitize_off() {
+        let mock = Arc::new(MockBackend::default_test());
+        mock.initialize().unwrap();
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        manager.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let context_id = manager.create_context(None).await.unwrap();
+        let mut handler = HandlerContext::for_test(&manager, &backend);
+        handler.sanitize_inputs = false;
+        let invalid_session = 10_000u64;
+        let calls_before = mock.message_parameter_call_count();
+        let data_calls_before = mock.data_op_call_count();
+
+        let well_formed_gcm = gcm_wire(vec![0x11; 12], None);
+        let well_formed_wire = pkcs11_proxy_ng_proto::MessageParameter::from(&well_formed_gcm);
+        for function in [
+            ParameterOutputFunction::EncryptMessage,
+            ParameterOutputFunction::DecryptMessage,
+            ParameterOutputFunction::EncryptMessageNext,
+            ParameterOutputFunction::DecryptMessageNext,
+        ] {
+            for message_parameter in [None, Some(well_formed_wire.clone())] {
+                let mut request =
+                    exact_message_request(&context_id.0, invalid_session, function, None, None);
+                request.message_parameter = message_parameter;
+                request.parameter_out_spec = Some(pkcs11_proxy_ng_proto::ParameterRoundtripSpec {
+                    buffer_present: false,
+                    buffer_len: 16,
+                    value: None,
+                });
+                let rv = exact_message_ck_rv(&handler, request).await;
+                assert_eq!(rv, CkRv::SESSION_HANDLE_INVALID.0, "function {function:?}");
+            }
+        }
+
+        assert_eq!(mock.message_parameter_call_count(), calls_before);
+        assert_eq!(mock.data_op_call_count(), data_calls_before);
+        assert_eq!(
+            manager.get_context(&context_id, |context| context.message_operations.len()).await,
+            Some(0),
+            "invalid sessions must not allocate operation state",
+        );
+    }
+
+    /// S1 defect 4 scope pin, embedded parameter (#23.4
+    /// solved-package): WITHOUT sanitize, a successfully-parsed
+    /// null-positive structured message parameter on an invalid
+    /// session yields `SESSION_HANDLE_INVALID`, not the observed
+    /// native args-first `ARGUMENTS_BAD`. Default keeps SHI-first
+    /// per spec §5.1.7. Mirrors
+    /// `malformed_message_parameter_beats_invalid_session`
+    /// (sanitize-on). RED history: a probe asserting provider-order
+    /// AB fails with 179 (SHI).
+    #[tokio::test]
+    async fn malformed_message_parameter_yields_shi_sanitize_off() {
+        let mock = Arc::new(MockBackend::default_test());
+        mock.initialize().unwrap();
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        manager.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let context_id = manager.create_context(None).await.unwrap();
+        let mut handler = HandlerContext::for_test(&manager, &backend);
+        handler.sanitize_inputs = false;
+        let invalid_session = 10_000u64;
+        let calls_before = mock.message_parameter_call_count();
+        let data_calls_before = mock.data_op_call_count();
+
+        let null_positive = gcm_wire(Vec::new(), Some(12));
+        let provider_len = native_message_parameter_len(&null_positive).unwrap();
+        for function in [
+            ParameterOutputFunction::EncryptMessage,
+            ParameterOutputFunction::DecryptMessage,
+            ParameterOutputFunction::EncryptMessageNext,
+            ParameterOutputFunction::DecryptMessageNext,
+        ] {
+            let mut request =
+                exact_message_request(&context_id.0, invalid_session, function, None, None);
+            request.message_parameter = Some((&null_positive).into());
+            request.parameter_out_spec = Some(pkcs11_proxy_ng_proto::ParameterRoundtripSpec {
+                buffer_present: true,
+                buffer_len: provider_len,
+                value: None,
+            });
+            let rv = exact_message_ck_rv(&handler, request).await;
+            assert_eq!(rv, CkRv::SESSION_HANDLE_INVALID.0, "function {function:?}");
+        }
+
+        assert_eq!(mock.message_parameter_call_count(), calls_before);
+        assert_eq!(mock.data_op_call_count(), data_calls_before);
+        assert_eq!(
+            manager.get_context(&context_id, |context| context.message_operations.len()).await,
+            Some(0),
+            "invalid sessions must not allocate operation state",
         );
     }
 

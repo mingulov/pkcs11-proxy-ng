@@ -195,6 +195,23 @@ objects. Evidence: `memory_token_object_survives_client_restart_by_design`
 wanted for provider-backed acceptance. The report's
 `restart-memory-volatile` leg stays DIRECT-ONLY under #27's URL.
 
+**Message-call errors with stale sessions (issue #23 defect 4,
+accepted limitation).** For forwarded message requests that pass the
+preceding shim, transport, authentication, and context checks, an
+unmapped session returns local `CKR_SESSION_HANDLE_INVALID` by
+default, before argument validation. No provider call is made and no
+caller output bytes or lengths change. This follows PKCS#11 error
+precedence (§5.1.7) but can differ from providers that report
+`CKR_ARGUMENTS_BAD` for the same combination. With
+`sanitize_inputs=true`, the covered NULL/nonzero predicates precede
+session admission on the exact-output Encrypt/Decrypt/Sign/Next
+paths only; dedicated message Init/Begin/Final/Verify/feed arms and
+unparsable encodings stay session-first in both modes. Sanitization
+protects provider availability; it does not promise complete
+provider transcript parity. Evidence: the exact-path scope pin plus
+the shim-through-daemon stale-session test; reporter haskoki rerun
+still wanted for transcript acceptance.
+
 ## What existing platform tests show
 
 These are historical results from specific revisions. They do not qualify the

@@ -67,13 +67,22 @@ notes](doc/release/v0.2.1-release-notes.md).
 - Recorded decisions: RF-MC-ORDER option (a) — session arms stay
   SHI-first with an arm-difference pin; S1D4 AB-beats-stale-session
   scoped to `sanitize_inputs` on with a spec-precedence pin (#23).
+- Solved decisions: memory token objects survive the client
+  Finalize/Initialize cycle by design, pinned by a restart-lifecycle
+  lock test (#27, known issue); #23 defect 4 solved as an accepted
+  limitation — default SHI-first per spec §5.1.7 with a sanitize-on
+  AB-first exception, native Kryoptic args-first order pinned as
+  provider evidence.
 
 ### Known limitations
 
 - All v0.2.0 limits carry forward, including the single logical client in
   one trusted security domain per daemon/provider instance. The v1
   typed-presence wire is decode-side only at the Phase-2 gate where
-  noted; mixed shim/daemon versions are unsupported.
+  noted; mixed shim/daemon versions are unsupported. Backend token
+  objects outlive the client's Finalize/Initialize cycle (#27);
+  stale-session message calls answer SHI by default and may differ
+  from args-first native providers (#23 defect 4).
 
 ## [0.2.0] - 2026-09-28
 
