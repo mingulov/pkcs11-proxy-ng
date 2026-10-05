@@ -12,16 +12,17 @@ qualification or provider acceptance.
 
 ## The eight crates and four entry points
 
-All crates publish at one synchronized version (`0.2.2` initially) with
-exact `=0.2.2` internal requirements.. Users touch four entry points; the
+All crates publish at one synchronized version with exact `=X.Y.Z`
+internal requirements (mirrored from the workspace version — see
+`scripts/sync-versions.sh`). Users touch four entry points; the
 other four crates are dependencies that cargo resolves automatically.
 
 | Crate | Entry point | Install / use |
 | --- | --- | --- |
-| `pkcs11-proxy-ng` | gRPC proxy daemon | `cargo install pkcs11-proxy-ng --version 0.2.2 --locked` |
-| `pkcs11-proxy-ng-cli` | Admin/smoke CLI | `cargo install pkcs11-proxy-ng-cli --version 0.2.2 --locked` |
+| `pkcs11-proxy-ng` | gRPC proxy daemon | `cargo install pkcs11-proxy-ng --locked` |
+| `pkcs11-proxy-ng-cli` | Admin/smoke CLI | `cargo install pkcs11-proxy-ng-cli --locked` |
 | `pkcs11-proxy-ng-shim` | PKCS#11 module (`.so`/`.dll`) | Release bundle or OS package only — see below |
-| `pkcs11-proxy-ng-client` | Rust client library | `pkcs11-proxy-ng-client = "=0.2.2"` dependency |
+| `pkcs11-proxy-ng-client` | Rust client library | `pkcs11-proxy-ng-client = "=X.Y.Z"` dependency (substitute the release you use) |
 | `pkcs11-proxy-ng-types` | (dependency) | Resolved automatically |
 | `pkcs11-proxy-ng-proto` | (dependency) | Resolved automatically |
 | `pkcs11-proxy-ng-backend` | (dependency) | Resolved automatically |
@@ -34,7 +35,7 @@ and point the application at the module file (for example
 `/usr/lib/pkcs11/libpkcs11_proxy_ng_shim.so`).
 
 After publication the crates live at `https://crates.io/crates/<name>`
-with API docs at `https://docs.rs/<name>/0.2.2`. The docs.rs follow-up
+with API docs at `https://docs.rs/<name>/latest`. The docs.rs follow-up
 is a maintainer step: after each release, confirm the docs build
 succeeded for all eight crates and fix any rustdoc failure with a
 patch release — docs failures never block the crates upload itself.

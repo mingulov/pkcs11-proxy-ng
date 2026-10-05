@@ -73,4 +73,36 @@ if [[ -z "$CARGO_VERSION" ]]; then
 fi
 check_version_mirrors "$CARGO_VERSION" || exit 1
 
+# (c) Internal "=X.Y.Z" path-dep pins agree with the workspace Cargo
+# version (exact requirements are policy; scripts/sync-versions.sh
+# writes them, this fails closed on drift or unparseable manifests).
+python3 -B - "$CARGO_VERSION" <<'EOF' || exit 1
+import sys
+import tomllib
+from pathlib import Path
+
+expected = f"={sys.argv[1]}"
+fail = False
+for manifest_path in sorted(Path("crates").glob("*/Cargo.toml")):
+    try:
+        manifest = tomllib.loads(manifest_path.read_text())
+    except Exception as exc:  # fail closed on unparseable manifests
+        print(f"cannot parse {manifest_path}: {exc}", file=sys.stderr)
+        fail = True
+        continue
+    for section in ("dependencies", "build-dependencies"):
+        for name, spec in manifest.get(section, {}).items():
+            if not isinstance(spec, dict) or "path" not in spec:
+                continue
+            if name == "pkcs11-proxy-ng" or name.startswith("pkcs11-proxy-ng-"):
+                if spec.get("version") != expected:
+                    print(
+                        f"{manifest_path}: {name} pins {spec.get('version')!r}, "
+                        f"want {expected!r}",
+                        file=sys.stderr,
+                    )
+                    fail = True
+sys.exit(1 if fail else 0)
+EOF
+
 echo "packaging smoke passed (mirrors at $CARGO_VERSION)"
