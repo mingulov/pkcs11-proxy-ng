@@ -173,6 +173,22 @@ fn validate_message_init_contract(
     if requested_shape != derived_shape {
         return Err(CkRv::MECHANISM_PARAM_INVALID);
     }
+    // Issue #37 (daemon-side backstop): an Unmodeled init for a
+    // non-admissible registry shape must never reach the provider — a
+    // materialized struct image embeds client addresses that segfault
+    // the daemon. The shim refuses first; this closes a
+    // compromised-shim path with clean MPI. Fail fast even for empty
+    // params: an install that can never complete must never start
+    // (transitively closes Begin/Next/OneShot follow-ups).
+    if derived_shape == MessageParameterShape::Unmodeled
+        && !pkcs11_proxy_ng_types::shape_descriptors::message_opaque_admits_mechanism(
+            registry,
+            mechanism_type.0,
+            matches!(init_param, Some(MessageParameter::Raw(raw)) if !raw.is_empty()),
+        )
+    {
+        return Err(CkRv::MECHANISM_PARAM_INVALID);
+    }
     let wire_spec = wire_spec.ok_or(CkRv::MECHANISM_PARAM_INVALID)?;
     if wire_spec.value.is_some() {
         return Err(CkRv::MECHANISM_PARAM_INVALID);
@@ -671,6 +687,22 @@ async fn message_encrypt_init_with_timeout(
             })
             .await?
         } else {
+            // Issue #37 (plain empty-init fail-fast): a type-only init
+            // for a non-admissible Unmodeled shape must never install —
+            // an install that can never complete must never start
+            // (transitively closes Begin/Next/OneShot follow-ups).
+            if installed_shape == MessageParameterShape::Unmodeled
+                && !pkcs11_proxy_ng_types::shape_descriptors::message_opaque_admits_mechanism(
+                    &registry,
+                    mechanism.mechanism_type.0,
+                    false,
+                )
+            {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::MessageEncryptInitResponse {
+                    ck_rv: CkRv::MECHANISM_PARAM_INVALID.0,
+                    ..Default::default()
+                }));
+            }
             spawn_backend_with_optional_timeout(timeout_override, move || {
                 transition.mark_started();
                 let result = backend.message_encrypt_init(
@@ -1070,6 +1102,21 @@ async fn message_decrypt_init_with_timeout(
             })
             .await?
         } else {
+            // Issue #37 (plain empty-init fail-fast): see the encrypt
+            // handler — a non-admissible Unmodeled shape must never
+            // install.
+            if installed_shape == MessageParameterShape::Unmodeled
+                && !pkcs11_proxy_ng_types::shape_descriptors::message_opaque_admits_mechanism(
+                    &registry,
+                    mechanism.mechanism_type.0,
+                    false,
+                )
+            {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::MessageDecryptInitResponse {
+                    ck_rv: CkRv::MECHANISM_PARAM_INVALID.0,
+                    ..Default::default()
+                }));
+            }
             spawn_backend_with_optional_timeout(timeout_override, move || {
                 transition.mark_started();
                 let result = backend.message_decrypt_init(

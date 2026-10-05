@@ -439,11 +439,15 @@ pub(super) fn build_message_init_mechanism(
             })
         }
         // Opaque bytes (e.g. a CBC IV): forward a daemon-owned copy,
-        // mirroring the classic-path Iv arm. `MessageParameter::Raw`
-        // carries bytes only, so no client address can be imported; the
-        // provider reads the bytes opaquely exactly as a direct caller
-        // would pass them. Byte reads only: like the classic `Bytes`
-        // backing, this must never back an integer or struct read.
+        // mirroring the classic-path Iv arm. CALLER CONTRACT (issue
+        // #37): this arm must only receive byte-buffer shapes admitted
+        // by `message_opaque_admits_mechanism` (shim init gate, server
+        // init-contract/plain gates, authenticated `validate_input`).
+        // A struct image smuggled in as `Raw` still embeds stale
+        // client addresses — bytes alone cannot prove otherwise, so
+        // admission is enforced at the gates, never here. Byte reads
+        // only: like the classic `Bytes` backing, this must never back
+        // an integer or struct read.
         MessageParameter::Raw(raw) => {
             let ul_len = message_ck_ulong(raw.len() as u64)?;
             let mut backing = raw.expose(|bytes| bytes.to_vec());
@@ -4621,6 +4625,99 @@ mod tests {
             backend.last_init_family.is_empty(),
             "message Inits must not plant a last-Init marker"
         );
+    }
+
+    /// Issue #37: a valid `CK_CHACHA20_PARAMS` struct on `C_MessageEncryptInit`
+    /// must reach the provider intact (readable counter/nonce extents, exact
+    /// bit scalars, `ulParameterLen == sizeof(CK_CHACHA20_PARAMS)`) and the
+    /// call must return — never kill the daemon.
+    #[cfg(unix)]
+    static CHACHA20_CAPTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    #[cfg(unix)]
+    static CHACHA20_CAPTURED: std::sync::Mutex<Option<Chacha20Captured>> =
+        std::sync::Mutex::new(None);
+
+    #[cfg(unix)]
+    struct Chacha20Captured {
+        mechanism: u64,
+        param_len: u64,
+        block_counter_bits: u64,
+        nonce_bits: u64,
+        block_counter: Vec<u8>,
+        nonce: Vec<u8>,
+    }
+
+    #[cfg(unix)]
+    unsafe extern "C" fn capturing_chacha20_message_encrypt_init(
+        _: cryptoki_sys::CK_SESSION_HANDLE,
+        mechanism: *mut cryptoki_sys::CK_MECHANISM,
+        _: cryptoki_sys::CK_OBJECT_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        // A malformed reconstruction (NULL/short/dangling legs) fails the
+        // test here instead of corrupting the provider.
+        let mech = unsafe { mechanism.read() };
+        let params = unsafe { (mech.pParameter as *const cryptoki_sys::CK_CHACHA20_PARAMS).read() };
+        let bc_len = params.blockCounterBits.div_ceil(8) as usize;
+        let nonce_len = params.ulNonceBits.div_ceil(8) as usize;
+        let block_counter =
+            unsafe { std::slice::from_raw_parts(params.pBlockCounter, bc_len) }.to_vec();
+        let nonce = unsafe { std::slice::from_raw_parts(params.pNonce, nonce_len) }.to_vec();
+        *CHACHA20_CAPTURED.lock().unwrap() = Some(Chacha20Captured {
+            mechanism: mech.mechanism as u64,
+            param_len: mech.ulParameterLen as u64,
+            block_counter_bits: params.blockCounterBits as u64,
+            nonce_bits: params.ulNonceBits as u64,
+            block_counter,
+            nonce,
+        });
+        cryptoki_sys::CKR_OK
+    }
+
+    #[cfg(unix)]
+    #[cfg_attr(miri, ignore = "Miri cannot dlopen; covered natively")]
+    #[test]
+    fn message_encrypt_init_forwards_valid_chacha20_struct_intact() {
+        let _guard = CHACHA20_CAPTURE_LOCK.lock().unwrap();
+        *CHACHA20_CAPTURED.lock().unwrap() = None;
+        let mut base = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        let mut functions_3_0 = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_0::default());
+        functions_3_0.C_MessageEncryptInit = Some(capturing_chacha20_message_encrypt_init);
+        let backend =
+            FfiBackend::test_backend_with_tables(base.as_mut(), Some(functions_3_0.as_ref()), None);
+        backend.lifecycle_domain.open_for_tests();
+
+        // Issue #37's exact values: 4-byte counter at 32 bits, 12-byte nonce
+        // at 96 bits.
+        let counter = [0u8, 0, 0, 0];
+        let nonce = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+        let chacha = CkMechanism {
+            mechanism_type: CkMechanismType::CHACHA20,
+            params: Some(CkMechanismParams::ChaCha20(ChaCha20Params {
+                block_counter_bits: 32,
+                nonce_bits: 96,
+                block_counter_presence: PointerBytes::present_copy(&counter),
+                nonce_presence: PointerBytes::present_copy(&nonce),
+            })),
+        };
+        backend
+            .ffi_message_encrypt_init(
+                CkSessionHandle(7),
+                Some(&validated_mechanism_for_tests(&chacha)),
+                None,
+                CkObjectHandle(1),
+            )
+            .expect("valid ChaCha20 message Init reaches the provider");
+
+        let captured = CHACHA20_CAPTURED.lock().unwrap().take().expect("provider observed");
+        assert_eq!(captured.mechanism, CkMechanismType::CHACHA20.0);
+        assert_eq!(
+            captured.param_len,
+            std::mem::size_of::<cryptoki_sys::CK_CHACHA20_PARAMS>() as u64
+        );
+        assert_eq!(captured.block_counter_bits, 32);
+        assert_eq!(captured.nonce_bits, 96);
+        assert_eq!(captured.block_counter, counter);
+        assert_eq!(captured.nonce, nonce);
     }
 
     #[cfg(unix)]

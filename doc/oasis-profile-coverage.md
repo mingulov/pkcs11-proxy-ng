@@ -5,7 +5,7 @@ the proxy. The external-source inventory counts and profile tables are a
 **2026-05-17 research snapshot**, not current qualification evidence; the FFI
 reader limits were updated on 2026-09-22. For release support and
 current validation limits, see the [support matrix](release/beta-support-matrix.md)
-and [candidate notes](release/v0.2.1-release-notes.md).
+and [candidate notes](release/v0.2.2-release-notes.md).
 
 ## Snapshot boundary
 
@@ -209,11 +209,19 @@ path. These three shapes are modelled only for Encrypt/Decrypt: Encrypt is
 output-capable, Decrypt is input-only, and Sign/Verify parameters are
 empty-only. A materialized non-NULL/nonzero unmodelled message parameter
 travels as versioned opaque bytes once the daemon advertises transport
-capability 1 or later: the shim and client forward the exact caller bytes
-with the declared length, and the daemon reconstructs the native parameter
-from those bytes. Against a daemon without the advertisement the legacy
-encoding still fails closed, and classic-path (`CK_MECHANISM`) unmodelled
-parameters are unchanged. The cited MockBackend exact-path tests cover
+capability 1 or later — but only for byte-buffer registry shapes (and
+empty inits for registry-declared parameterless mechanisms): the shim
+and client forward the exact caller bytes with the declared length,
+and the daemon reconstructs the native parameter from those bytes.
+Anything else (pointer-struct shapes such as `CK_CHACHA20_PARAMS`,
+scalar-struct shapes, mixed-layout shapes such as `gcm_compat`, and
+unknown layouts) is refused with `CKR_MECHANISM_PARAM_INVALID` at init
+time, including for empty inits, since an install that can never
+complete must never start (issue #37: opaque struct images embed stale
+client addresses and segfaulted the daemon). Against a daemon without
+the advertisement the legacy encoding still fails closed, and
+classic-path (`CK_MECHANISM`) unmodelled parameters are unchanged. The
+cited MockBackend exact-path tests cover
 synthetic cipher output and
 structured GCM, CCM, and Salsa/ChaCha Encrypt writeback without implying
 structured Sign/Verify or Decrypt writeback.
@@ -333,14 +341,17 @@ can write parameters back; Decrypt is input-only. Sign/Verify accept empty
 parameters only. An unmodeled non-NULL, nonempty message parameter travels as
 versioned opaque bytes once the daemon advertises transport capability 1 or
 later (exact caller bytes with the declared length; the daemon owns
-reconstruction); without the advertisement the legacy encoding is still
-rejected, and classic-path unmodeled parameters are unchanged.
+reconstruction) — restricted to byte-buffer registry shapes; struct,
+scalar-struct, mixed-layout, and unknown shapes are refused with
+`CKR_MECHANISM_PARAM_INVALID` (issue #37); without the advertisement
+the legacy encoding is still rejected, and classic-path unmodeled
+parameters are unchanged.
 
 The tables below describe the recorded test coverage. **Full** means the
 function had an implementation and tests across its applicable layers; it
 does not mean exhaustive provider validation. Later support restrictions,
 including nonblocking-only native slot waits, are in the
-[candidate notes](release/v0.2.1-release-notes.md#current-limits).
+[candidate notes](release/v0.2.2-release-notes.md#current-limits).
 
 ## Profile Area Coverage
 

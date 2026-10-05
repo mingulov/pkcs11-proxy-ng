@@ -5,7 +5,7 @@ Recorded: 2026-03-13
 These tables preserve an early test snapshot. Some limitations below, including
 fork handling and output caching, have since changed. For release support, see
 the [support matrix](release/beta-support-matrix.md); for the current candidate,
-see the [release notes](release/v0.2.1-release-notes.md).
+see the [release notes](release/v0.2.2-release-notes.md).
 
 The snapshot distinguishes three levels for each PKCS#11 operation:
 

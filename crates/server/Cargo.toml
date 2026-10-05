@@ -26,10 +26,10 @@ path = "src/main.rs"
 native-owner-test-hooks = ["pkcs11-proxy-ng-backend/native-owner-test-hooks"]
 
 [dependencies]
-pkcs11-proxy-ng-types = { version = "=0.2.1", path = "../types" }
-pkcs11-proxy-ng-proto = { version = "=0.2.1", path = "../proto" }
-pkcs11-proxy-ng-backend = { version = "=0.2.1", path = "../backend" }
-pkcs11-proxy-ng-audit = { version = "=0.2.1", path = "../audit" }
+pkcs11-proxy-ng-types = { version = "=0.2.2", path = "../types" }
+pkcs11-proxy-ng-proto = { version = "=0.2.2", path = "../proto" }
+pkcs11-proxy-ng-backend = { version = "=0.2.2", path = "../backend" }
+pkcs11-proxy-ng-audit = { version = "=0.2.2", path = "../audit" }
 cryptoki-sys.workspace = true
 serde_json.workspace = true
 clap.workspace = true

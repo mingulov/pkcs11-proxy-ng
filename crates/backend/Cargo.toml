@@ -22,8 +22,8 @@ targets = ["x86_64-unknown-linux-gnu"]
 native-owner-test-hooks = []
 
 [dependencies]
-pkcs11-proxy-ng-types = { version = "=0.2.1", path = "../types" }
-pkcs11-proxy-ng-proto = { version = "=0.2.1", path = "../proto" }
+pkcs11-proxy-ng-types = { version = "=0.2.2", path = "../types" }
+pkcs11-proxy-ng-proto = { version = "=0.2.2", path = "../proto" }
 # Shared module-FFI facts (raw acquisition, function-table layouts) from the
 # published pkcs11-components crates. Default features keep `native`
 # (cryptoki-sys tables + acquisition).

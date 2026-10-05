@@ -17,9 +17,9 @@ name = "pkcs11-proxy-ng-cli"
 path = "src/main.rs"
 
 [dependencies]
-pkcs11-proxy-ng-types = { version = "=0.2.1", path = "../types" }
-pkcs11-proxy-ng-client = { version = "=0.2.1", path = "../client" }
-pkcs11-proxy-ng-audit = { version = "=0.2.1", path = "../audit" }
+pkcs11-proxy-ng-types = { version = "=0.2.2", path = "../types" }
+pkcs11-proxy-ng-client = { version = "=0.2.2", path = "../client" }
+pkcs11-proxy-ng-audit = { version = "=0.2.2", path = "../audit" }
 clap.workspace = true
 # W1-L16-15: #[tokio::main] (multi-thread) + client async surface.
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time", "net"] }

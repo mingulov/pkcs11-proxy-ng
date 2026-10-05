@@ -652,6 +652,72 @@ async fn wired_message_encrypt_init_contract_preempts_params() {
     }
 }
 
+/// Issue #37 (daemon-side backstop): a materialized opaque image for a
+/// pointer-struct registry shape is refused with clean MPI instead of
+/// reaching the provider (stale client addresses segfault the daemon).
+#[tokio::test]
+async fn message_encrypt_init_refuses_opaque_pointer_struct_image() {
+    use pkcs11_proxy_ng_proto::convert::message_params::{MessageParameter, MessageParameterShape};
+    use pkcs11_proxy_ng_types::SecretBytes;
+    const CHACHA20: u64 = 0x0000_1226;
+    let h = Harness::new(vec![CkMechanismType(CHACHA20)]).await;
+    // A 32-byte CK_CHACHA20_PARAMS image, as the pre-fix shim emitted it.
+    let wire_param = MessageParameter::Raw(SecretBytes::new(vec![0xA5u8; 32]))
+        .to_wire_with_transport_version(1)
+        .expect("opaque image encodes");
+    let req = pkcs11_proxy_ng_proto::MessageEncryptInitRequest {
+        client_context_id: h.ctx_id(),
+        session_handle: h.session,
+        mechanism: Some(parameterless_mechanism(CHACHA20)),
+        key_handle: h.key,
+        init_message_parameter: Some(wire_param),
+        parameter_out_spec: Some(pkcs11_proxy_ng_proto::ParameterRoundtripSpec {
+            buffer_present: true,
+            buffer_len: 32,
+            value: None,
+        }),
+        parameter_shape: Some(MessageParameterShape::Unmodeled.to_proto_i32()),
+    };
+    let rv = super::message_crypto::message_encrypt_init(&h.ctx, Request::new(req))
+        .await
+        .unwrap()
+        .into_inner()
+        .ck_rv;
+    assert_eq!(rv, CkRv::MECHANISM_PARAM_INVALID.0);
+}
+
+/// Issue #37 (plain-path fail-fast): a type-only (empty) message init
+/// for a pointer-struct registry shape is refused without installing —
+/// an install that can never complete must never start (transitively
+/// closes Begin/Next/OneShot follow-ups, which reuse the installed
+/// Unmodeled shape).
+#[tokio::test]
+async fn message_encrypt_init_refuses_empty_pointer_struct_init() {
+    const CHACHA20: u64 = 0x0000_1226;
+    let h = Harness::new(vec![CkMechanismType(CHACHA20)]).await;
+    assert_eq!(
+        drive_message_encrypt_init(&h, Some(parameterless_mechanism(CHACHA20))).await,
+        CkRv::MECHANISM_PARAM_INVALID.0,
+    );
+    assert_eq!(
+        drive_message_decrypt_init(&h, Some(parameterless_mechanism(CHACHA20))).await,
+        CkRv::MECHANISM_PARAM_INVALID.0,
+    );
+}
+
+/// Issue #37 (alternate forms): `gcm_compat` resolves ByteBuffer for
+/// short IVs but PointerStruct for struct-sized images — opaque
+/// carriage must refuse it (length-selected alternates considered).
+#[tokio::test]
+async fn message_encrypt_init_refuses_gcm_compat_opaque() {
+    const GMAC: u64 = 0x0000_108E;
+    let h = Harness::new(vec![CkMechanismType(GMAC)]).await;
+    assert_eq!(
+        drive_message_encrypt_init(&h, Some(parameterless_mechanism(GMAC))).await,
+        CkRv::MECHANISM_PARAM_INVALID.0,
+    );
+}
+
 /// Same contract precedence for message decrypt init (see above).
 #[tokio::test]
 async fn wired_message_decrypt_init_contract_preempts_params() {

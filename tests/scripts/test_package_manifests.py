@@ -39,7 +39,7 @@ class PackageManifestTests(unittest.TestCase):
                 package = packages["pkcs11-proxy-ng" if crate == "server" else PREFIX + crate]
                 directory = ROOT / "crates" / crate
                 manifest = tomllib.loads((directory / "Cargo.toml").read_text())
-                self.assertEqual(package["version"], "0.2.1")
+                self.assertEqual(package["version"], "0.2.2")
                 self.assertEqual(package["publish"], ["crates-io"])
                 self.assertEqual(package["repository"], "https://github.com/mingulov/pkcs11-proxy-ng")
                 self.assertEqual(package["readme"], "README.md")
@@ -62,7 +62,7 @@ class PackageManifestTests(unittest.TestCase):
                     for name, spec in manifest.get(section, {}).items():
                         if name.startswith(PREFIX) or name == "pkcs11-proxy-ng":
                             actual.add("server" if name == "pkcs11-proxy-ng" else name.removeprefix(PREFIX))
-                            self.assertEqual(spec.get("version"), "=0.2.1", name)
+                            self.assertEqual(spec.get("version"), "=0.2.2", name)
                             self.assertTrue(spec["path"], name)
                     if section == "dependencies":
                         self.assertEqual(actual, EDGES[crate])

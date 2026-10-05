@@ -26,7 +26,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'release version, e.g. 0.2.1 (stable only)'
+        description: 'release version, e.g. 0.2.2 (stable only)'
         required: true
       mode:
         description: 'publish mode to dispatch after tagging'

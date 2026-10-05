@@ -6,7 +6,7 @@ source revisions and environments. They do not establish provider parity or
 qualify every later revision. Final acceptance requires evidence bound to the
 selected candidate and the claimed target/environment.
 
-v0.2.1 is a **single-logical-client testing baseline**: use one trusted
+v0.2.2 is a **single-logical-client testing baseline**: use one trusted
 security domain per daemon and provider instance. Do not connect mutually
 untrusted clients or share a daemon/provider between independent domains.
 Restart the daemon and its provider instance before changing to an independent
