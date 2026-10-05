@@ -6,10 +6,10 @@ direct-vs-proxied validation, not to aspiration. Anything not listed as
 **Supported** is out of scope for the beta support claim, even if it happens to
 work.
 
-The local `v0.2.2` target is unreleased. Its gateway, authorization, resilience,
+The local target is unreleased. Its gateway, authorization, resilience,
 and audit work is implemented locally and partially covered, but local unit and
 integration coverage is not a provenance-complete transparency matrix. Therefore
-this document makes no `v0.2.2` parity or public support claim.
+this document makes no parity or public support claim for the local target.
 
 ## Selected v0.2 boundary (implementation and qualification pending)
 
@@ -164,9 +164,9 @@ A hard backend crash can affect clients sharing that backend. The
 [operator runbook](../runbooks/operating-pkcs11-proxy-ng.md#4a-crash-isolation--blast-radius--run-multiple-instances)
 describes the multiple-instance and reconnect approach.
 
-## Unreleased v0.2.2 testing scope
+## Unreleased testing scope
 
-`v0.2.2` is a testing candidate, not a public support claim. Use one logical
+The current tree is a testing candidate, not a public support claim. Use one logical
 client in one trusted security domain per daemon and provider instance.
 Restart the daemon and provider before switching to an independent client or
 domain. Do not share an instance between mutually untrusted clients.
@@ -215,7 +215,7 @@ still wanted for transcript acceptance.
 ## What existing platform tests show
 
 These are historical results from specific revisions. They do not qualify the
-current `v0.2.2` candidate. A build, stub load, runtime test, and provider
+current candidate. A build, stub load, runtime test, and provider
 comparison each establish a different level of coverage.
 
 | Platform | Historical coverage and limit |

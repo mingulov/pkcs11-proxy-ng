@@ -8,7 +8,7 @@
 # Dispatch from the tag itself (or a ref whose HEAD equals the tag commit):
 # preflight requires the tag to point at the checked-out HEAD, and the
 # `candidate` job refuses unless the CI-built archives bind to the same tag
-# commit. A dispatch `tag` of `v0.2.2` with `package` `workspace` publishes
+# commit. A dispatch `tag` of `vX.Y.Z` with `package` `workspace` publishes
 # all eight crates in dependency order; an individual package name publishes
 # one member and prints the full follow-up command for the rest.
 #
@@ -53,7 +53,7 @@ on:
         required: false
         default: workspace
       tag:
-        description: 'exact stable tag, e.g. v0.2.2 (dispatch only)'
+        description: 'exact stable tag, e.g. vX.Y.Z (dispatch only)'
         required: true
       qualification-url:
         description: 'HTTPS qualification record URL (upload modes)'

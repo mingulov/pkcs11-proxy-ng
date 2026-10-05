@@ -22,11 +22,18 @@ EDGES = {
 }
 
 
+def workspace_version():
+    """The one source of truth: [workspace.package] version in root Cargo.toml."""
+    manifest = tomllib.loads((ROOT / "Cargo.toml").read_text())
+    return manifest["workspace"]["package"]["version"]
+
+
 class PackageManifestTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         command = ["cargo", "metadata", "--no-deps", "--format-version", "1", "--locked"]
         cls.metadata = json.loads(subprocess.check_output(command, cwd=ROOT, text=True))
+        cls.version = workspace_version()
 
     def test_eight_publishable_packages_with_complete_local_material(self):
         packages = {package["name"]: package for package in self.metadata["packages"]}
@@ -39,7 +46,7 @@ class PackageManifestTests(unittest.TestCase):
                 package = packages["pkcs11-proxy-ng" if crate == "server" else PREFIX + crate]
                 directory = ROOT / "crates" / crate
                 manifest = tomllib.loads((directory / "Cargo.toml").read_text())
-                self.assertEqual(package["version"], "0.2.2")
+                self.assertEqual(package["version"], self.version)
                 self.assertEqual(package["publish"], ["crates-io"])
                 self.assertEqual(package["repository"], "https://github.com/mingulov/pkcs11-proxy-ng")
                 self.assertEqual(package["readme"], "README.md")
@@ -62,7 +69,7 @@ class PackageManifestTests(unittest.TestCase):
                     for name, spec in manifest.get(section, {}).items():
                         if name.startswith(PREFIX) or name == "pkcs11-proxy-ng":
                             actual.add("server" if name == "pkcs11-proxy-ng" else name.removeprefix(PREFIX))
-                            self.assertEqual(spec.get("version"), "=0.2.2", name)
+                            self.assertEqual(spec.get("version"), f"={self.version}", name)
                             self.assertTrue(spec["path"], name)
                     if section == "dependencies":
                         self.assertEqual(actual, EDGES[crate])

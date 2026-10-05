@@ -21,13 +21,13 @@ cd "$ROOT_DIR"
 TAG="${1:-${GITHUB_REF_NAME:-}}"
 if [[ -z "$TAG" ]]; then
     echo "::error::no tag supplied (expected \$1 or \$GITHUB_REF_NAME)" >&2
-    echo "expected a tag like v0.2.2" >&2
+    echo "expected a tag like vX.Y.Z" >&2
     exit 1
 fi
 
 if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
     echo "::error::tag '$TAG' does not match vMAJOR.MINOR.PATCH[-suffix]; refusing to release." >&2
-    echo "expected a tag like v0.2.2" >&2
+    echo "expected a tag like vX.Y.Z" >&2
     exit 1
 fi
 

@@ -314,8 +314,11 @@ class PackageCarriageTests(unittest.TestCase):
                     with self.subTest(part=part, relative=relative):
                         self.assertTrue((folder / relative).is_file(), str(folder / relative))
                         self.assertTrue((folder / relative).read_bytes().strip())
+            apkbuild = (ROOT / "packaging/alpine/APKBUILD").read_text()
+            pkgver = re.search(r"(?m)^pkgver=(.+)$", apkbuild).group(1).strip()
+            pkgrel = re.search(r"(?m)^pkgrel=(.+)$", apkbuild).group(1).strip()
             self.assertEqual((base / "compat-dep").read_text(),
-                             "pkcs11-proxy-ng-shim=0.2.0-r0")
+                             f"pkcs11-proxy-ng-shim={pkgver}-r{pkgrel}")
             self.assertFalse((base / "out/compat/usr/share/licenses").exists())
 
     def test_rpm_build_and_code_file_lists_carry_notices(self):

@@ -5,7 +5,7 @@ the proxy. The external-source inventory counts and profile tables are a
 **2026-05-17 research snapshot**, not current qualification evidence; the FFI
 reader limits were updated on 2026-09-22. For release support and
 current validation limits, see the [support matrix](release/beta-support-matrix.md)
-and [candidate notes](release/v0.2.2-release-notes.md).
+and [candidate notes](release/current.md).
 
 ## Snapshot boundary
 
@@ -351,7 +351,7 @@ The tables below describe the recorded test coverage. **Full** means the
 function had an implementation and tests across its applicable layers; it
 does not mean exhaustive provider validation. Later support restrictions,
 including nonblocking-only native slot waits, are in the
-[candidate notes](release/v0.2.2-release-notes.md#current-limits).
+[candidate notes](release/current.md).
 
 ## Profile Area Coverage
 

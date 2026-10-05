@@ -47,6 +47,14 @@ notes](doc/release/v0.2.2-release-notes.md).
   handle-recycling ABA leg. Out-of-band provider mutation stays an
   accepted residual (see notes).
 
+### Changed
+
+- Version bookkeeping is single-sourced: `scripts/sync-versions.sh`
+  mirrors the workspace `Cargo.toml` version into crate pins,
+  packaging files, and the README token (with a `--check` mode wired
+  into the packaging smoke); docs prose and workflow examples are
+  version-free, so future bumps touch no documentation by hand.
+
 ### Known limitations
 
 - All v0.2.1 limits carry forward, including the single logical client in
