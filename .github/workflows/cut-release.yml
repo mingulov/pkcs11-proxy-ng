@@ -321,7 +321,11 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           allowed-conclusions: success
           wait-interval: 60
-          checks-discovery-timeout: 600
+          # Discovery covers the whole tag-CI run: the aggregate check
+          # only appears once all CI jobs finish (~30-40 min), and the
+          # action fatally exits if the named check never appears
+          # within this window (cut-release run 37309689377).
+          checks-discovery-timeout: 3600
 
       - name: Dispatch publish from the new tag
         env:

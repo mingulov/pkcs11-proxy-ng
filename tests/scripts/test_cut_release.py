@@ -246,6 +246,11 @@ class DispatchJobTests(unittest.TestCase):
                          "CI success (fail-closed aggregate)")
         self.assertEqual(config.get("allowed-conclusions"), "success")
         self.assertIn("needs.cut.outputs.tag", str(config.get("ref", "")))
+        # Discovery must cover the whole tag-CI run: the aggregate
+        # check appears only after all CI jobs finish (run 37309689377
+        # died on a 600s discovery window).
+        self.assertGreaterEqual(int(config.get("checks-discovery-timeout", 0)),
+                                3600)
         permissions = job.get("permissions", {})
         self.assertEqual(permissions.get("checks"), "read")
 
