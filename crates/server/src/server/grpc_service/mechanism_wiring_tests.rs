@@ -705,6 +705,38 @@ async fn message_encrypt_init_refuses_empty_pointer_struct_init() {
     );
 }
 
+/// Review F-05 (explicit empty-parameterless admit): a typed-empty
+/// message init (Unmodeled shape declared, no parameter bytes) for a
+/// registry-declared parameterless mechanism passes the #37 init gate
+/// and installs — the fail-fast must not swallow the normal empty form.
+/// Unlike the `drive_*` helpers (which send no shape and skip the
+/// contract), this builds the full request so the gate actually runs.
+#[tokio::test]
+async fn message_encrypt_init_admits_empty_parameterless_init() {
+    use pkcs11_proxy_ng_proto::convert::message_params::MessageParameterShape;
+    const AES_ECB: u64 = 0x0000_1081;
+    let h = Harness::new(vec![CkMechanismType(AES_ECB)]).await;
+    let req = pkcs11_proxy_ng_proto::MessageEncryptInitRequest {
+        client_context_id: h.ctx_id(),
+        session_handle: h.session,
+        mechanism: Some(parameterless_mechanism(AES_ECB)),
+        key_handle: h.key,
+        init_message_parameter: None,
+        parameter_out_spec: Some(pkcs11_proxy_ng_proto::ParameterRoundtripSpec {
+            buffer_present: false,
+            buffer_len: 0,
+            value: None,
+        }),
+        parameter_shape: Some(MessageParameterShape::Unmodeled.to_proto_i32()),
+    };
+    let rv = super::message_crypto::message_encrypt_init(&h.ctx, Request::new(req))
+        .await
+        .unwrap()
+        .into_inner()
+        .ck_rv;
+    assert_eq!(rv, CkRv::OK.0);
+}
+
 /// Issue #37 (alternate forms): `gcm_compat` resolves ByteBuffer for
 /// short IVs but PointerStruct for struct-sized images — opaque
 /// carriage must refuse it (length-selected alternates considered).

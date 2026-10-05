@@ -28,10 +28,7 @@ impl<'a> NativeParameter<'a> {
         validate_input(mechanism.mechanism(), parameter)?;
         let storage = if let Some(parameter) = parameter {
             NativeStorage::Message(
-                super::message_ops::build_message_init_mechanism(
-                    mechanism.mechanism().mechanism_type.0,
-                    parameter,
-                )?,
+                super::message_ops::build_message_init_mechanism(mechanism, parameter)?,
                 parameter,
             )
         } else {

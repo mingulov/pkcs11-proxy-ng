@@ -346,12 +346,50 @@ fn message_mechanism_for<T>(
 /// `CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS`) or, for unmodeled mechanisms
 /// such as CBC, the opaque parameter bytes themselves (e.g. the IV).
 ///
+/// Review F-01 last-mile backstop: the `Raw` arm below re-checks
+/// message-opaque admission against the request registry snapshot carried
+/// by `mech` — the same snapshot object the server init gate used (S2 §6
+/// one-snapshot-per-request), so this check cannot disagree with the gate:
+/// every init the gate admitted passes here, and any future caller that
+/// bypasses the gate with a struct image (or unknown shape) is refused
+/// with clean MPI instead of handing the provider stale client addresses
+/// (daemon SIGSEGV, #37 crash class). Takes the validated mechanism
+/// (not a bare id) so a mismatched mechanism/registry pair is
+/// unrepresentable.
+pub(super) fn build_message_init_mechanism(
+    mech: &ValidatedMechanismParams,
+    param: &MessageParameter,
+) -> CkResult<MessageInitMechanism> {
+    if let MessageParameter::Raw(raw) = param {
+        let admitted = pkcs11_proxy_ng_types::shape_descriptors::message_opaque_admits_mechanism(
+            mech.registry(),
+            mech.mechanism().mechanism_type.0,
+            !raw.is_empty(),
+        );
+        if !admitted {
+            return Err(CkRv::MECHANISM_PARAM_INVALID);
+        }
+    }
+    build_message_reuse_mechanism(mech.mechanism().mechanism_type.0, param)
+}
+
+/// Materialize message parameter bytes for a follow-up call that reuses an
+/// installed operation (Begin/Next/OneShot): callers pass `0` for the
+/// mechanism id and read only `pParameter`/`ulParameterLen` of the result.
+///
+/// Unchecked by design: admission was decided when the operation was
+/// installed (every install funnels through
+/// [`build_message_init_mechanism`]), and follow-up parameters are
+/// validated against the installed shape by the server. New callers must
+/// only pass install-gated bytes here; anything carrying a fresh mechanism
+/// identity belongs in [`build_message_init_mechanism`].
+///
 /// The server has already derived and validated the registry-selected shape,
 /// caller envelope, and parameter variant before this boundary. Reconstruct
 /// that parameter for the provider-native FFI call and keep every backing
 /// buffer alive for the call; the reconstruction always points at
 /// daemon-owned storage, never at client addresses.
-pub(super) fn build_message_init_mechanism(
+pub(super) fn build_message_reuse_mechanism(
     mech_type: u64,
     param: &MessageParameter,
 ) -> CkResult<MessageInitMechanism> {
@@ -439,15 +477,18 @@ pub(super) fn build_message_init_mechanism(
             })
         }
         // Opaque bytes (e.g. a CBC IV): forward a daemon-owned copy,
-        // mirroring the classic-path Iv arm. CALLER CONTRACT (issue
-        // #37): this arm must only receive byte-buffer shapes admitted
-        // by `message_opaque_admits_mechanism` (shim init gate, server
-        // init-contract/plain gates, authenticated `validate_input`).
-        // A struct image smuggled in as `Raw` still embeds stale
-        // client addresses — bytes alone cannot prove otherwise, so
-        // admission is enforced at the gates, never here. Byte reads
-        // only: like the classic `Bytes` backing, this must never back
-        // an integer or struct read.
+        // mirroring the classic-path Iv arm. Admission (issue #37) is
+        // enforced by the shim init gate, the server
+        // init-contract/plain gates, authenticated `validate_input`,
+        // and — for fresh installs — the
+        // [`build_message_init_mechanism`] backstop above, which
+        // re-checks this same arm against the request registry
+        // snapshot. This arm itself stays a dumb forwarder (reuse
+        // callers pass mechanism id `0`, which carries no registry
+        // identity to check): a struct image smuggled in as `Raw`
+        // still embeds stale client addresses, so install-gated bytes
+        // only. Byte reads only: like the classic `Bytes` backing,
+        // this must never back an integer or struct read.
         MessageParameter::Raw(raw) => {
             let ul_len = message_ck_ulong(raw.len() as u64)?;
             let mut backing = raw.expose(|bytes| bytes.to_vec());
@@ -481,8 +522,7 @@ impl FfiBackend {
         match (mechanism, init_param) {
             // Message-based init: reconstruct CK_*_MESSAGE_PARAMS or forward raw bytes.
             (Some(mech), Some(param)) => {
-                let mut init_mech =
-                    build_message_init_mechanism(mech.mechanism().mechanism_type.0, param)?;
+                let mut init_mech = build_message_init_mechanism(mech, param)?;
                 let _session_fence = self.session_fences.enter(&admission, session)?;
                 call_3x_fn!(
                     &admission,
@@ -531,8 +571,7 @@ impl FfiBackend {
     ) -> CkResult<CkParameterRoundtripResult> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         if let Some(param) = init_param {
-            let mut init_mech =
-                build_message_init_mechanism(mechanism.mechanism().mechanism_type.0, param)?;
+            let mut init_mech = build_message_init_mechanism(mechanism, param)?;
             if !provider_spec.buffer_present
                 || provider_spec.buffer_len != init_mech.ck_mechanism.ulParameterLen as u64
                 || provider_spec.value.is_some()
@@ -613,8 +652,7 @@ impl FfiBackend {
         match (mechanism, init_param) {
             // Message-based init: reconstruct CK_*_MESSAGE_PARAMS or forward raw bytes.
             (Some(mech), Some(param)) => {
-                let mut init_mech =
-                    build_message_init_mechanism(mech.mechanism().mechanism_type.0, param)?;
+                let mut init_mech = build_message_init_mechanism(mech, param)?;
                 let _session_fence = self.session_fences.enter(&admission, session)?;
                 call_3x_fn!(
                     &admission,
@@ -663,8 +701,7 @@ impl FfiBackend {
     ) -> CkResult<CkParameterRoundtripResult> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         if let Some(param) = init_param {
-            let mut init_mech =
-                build_message_init_mechanism(mechanism.mechanism().mechanism_type.0, param)?;
+            let mut init_mech = build_message_init_mechanism(mechanism, param)?;
             if !provider_spec.buffer_present
                 || provider_spec.buffer_len != init_mech.ck_mechanism.ulParameterLen as u64
                 || provider_spec.value.is_some()
@@ -2023,7 +2060,7 @@ impl FfiBackend {
     {
         let mut acknowledgement = message_parameter_ack(msg_param, provider_spec, CkRv::OK)?;
         let (aad_ptr, aad_len) = native_message_input(aad)?;
-        let native = build_message_init_mechanism(0, msg_param)?;
+        let native = build_message_reuse_mechanism(0, msg_param)?;
         let rv = CkRv(call(
             native.ck_mechanism.pParameter,
             native.ck_mechanism.ulParameterLen,
@@ -2109,7 +2146,7 @@ impl FfiBackend {
         let acknowledgement = message_parameter_ack(msg_param, provider_spec, CkRv::OK)?;
         let (input_ptr, input_len) = native_message_input(plaintext)?;
         let (aad_ptr, aad_len) = native_message_input(aad)?;
-        let native = build_message_init_mechanism(0, msg_param)?;
+        let native = build_message_reuse_mechanism(0, msg_param)?;
         let h_session = Self::session_handle(session)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
         let output =
@@ -2158,7 +2195,7 @@ impl FfiBackend {
         let acknowledgement = message_parameter_ack(msg_param, provider_spec, CkRv::OK)?;
         let (input_ptr, input_len) = native_message_input(ciphertext)?;
         let (aad_ptr, aad_len) = native_message_input(aad)?;
-        let native = build_message_init_mechanism(0, msg_param)?;
+        let native = build_message_reuse_mechanism(0, msg_param)?;
         let h_session = Self::session_handle(session)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
         let output =
@@ -2279,7 +2316,7 @@ impl FfiBackend {
         let acknowledgement = message_parameter_ack(msg_param, provider_spec, CkRv::OK)?;
         let (input_ptr, input_len) = native_message_input(plaintext_part)?;
         let flags = native_message_flags(flags)?;
-        let native = build_message_init_mechanism(0, msg_param)?;
+        let native = build_message_reuse_mechanism(0, msg_param)?;
         let h_session = Self::session_handle(session)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
         let output =
@@ -2327,7 +2364,7 @@ impl FfiBackend {
         let acknowledgement = message_parameter_ack(msg_param, provider_spec, CkRv::OK)?;
         let (input_ptr, input_len) = native_message_input(ciphertext_part)?;
         let flags = native_message_flags(flags)?;
-        let native = build_message_init_mechanism(0, msg_param)?;
+        let native = build_message_reuse_mechanism(0, msg_param)?;
         let h_session = Self::session_handle(session)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
         let output =
@@ -4102,7 +4139,8 @@ mod tests {
             tag_bits: 128,
         });
 
-        let init = build_message_init_mechanism(cryptoki_sys::CKM_AES_GCM as u64, &param)
+        let gcm = CkMechanism { mechanism_type: CkMechanismType::AES_GCM, params: None };
+        let init = build_message_init_mechanism(&validated_mechanism_for_tests(&gcm), &param)
             .expect("GCM message params reconstruct");
 
         assert_eq!(u64::from(init.ck_mechanism.mechanism), u64::from(cryptoki_sys::CKM_AES_GCM));
@@ -4144,7 +4182,8 @@ mod tests {
             mac_len: 16,
         });
 
-        let init = build_message_init_mechanism(cryptoki_sys::CKM_AES_CCM as u64, &param)
+        let ccm = CkMechanism { mechanism_type: CkMechanismType::AES_CCM, params: None };
+        let init = build_message_init_mechanism(&validated_mechanism_for_tests(&ccm), &param)
             .expect("CCM message params reconstruct");
 
         assert_eq!(
@@ -4168,7 +4207,8 @@ mod tests {
     #[test]
     fn raw_message_init_reconstructs_daemon_owned_bytes() {
         let param = MessageParameter::Raw(RAW_CBC_IV.to_vec().into());
-        let init = build_message_init_mechanism(cryptoki_sys::CKM_AES_CBC as u64, &param)
+        let validated = validated_with_default_registry(CkMechanismType::AES_CBC);
+        let init = build_message_init_mechanism(&validated, &param)
             .expect("raw message param reconstructs");
         assert_eq!(u64::from(init.ck_mechanism.mechanism), u64::from(cryptoki_sys::CKM_AES_CBC));
         assert_eq!(init.ck_mechanism.ulParameterLen as usize, RAW_CBC_IV.len());
@@ -4201,7 +4241,7 @@ mod tests {
 
         // Empty raw params stay well-shaped: zero length, still owned.
         let empty = MessageParameter::Raw(Vec::new().into());
-        let init = build_message_init_mechanism(cryptoki_sys::CKM_AES_CBC as u64, &empty)
+        let init = build_message_init_mechanism(&validated, &empty)
             .expect("empty raw message param reconstructs");
         // E0793: CK_MECHANISM is packed on Windows; assert on a by-value copy.
         let param_len = init.ck_mechanism.ulParameterLen;
@@ -4293,7 +4333,12 @@ mod tests {
         // Message paths are ordinary: establish post-Initialize state.
         backend.lifecycle_domain.open_for_tests();
 
-        let mechanism = CkMechanism { mechanism_type: CkMechanismType::AES_CBC, params: None };
+        // F-01 backstop: the init path re-checks Raw admission against
+        // the snapshot carried by the validated mechanism, so this test
+        // needs the real default bindings (production always validates
+        // against the request snapshot; the minimal test funnel has no
+        // CBC entry and would fail admission).
+        let validated = validated_with_default_registry(CkMechanismType::AES_CBC);
         let param = MessageParameter::Raw(RAW_CBC_IV.to_vec().into());
         let init_spec =
             CkParameterRoundtripSpec { buffer_present: true, buffer_len: 16, value: None };
@@ -4305,7 +4350,7 @@ mod tests {
         let init_ack = backend
             .ffi_message_encrypt_init_contract(
                 CkSessionHandle(7),
-                &validated_mechanism_for_tests(&mechanism),
+                &validated,
                 Some(&param),
                 CkObjectHandle(1),
                 &init_spec,
@@ -4514,20 +4559,22 @@ mod tests {
             mac_null_len: None,
             mac_len: 16,
         });
-        for (mech_type, param, expected_len) in [
+        for (mechanism_type, param, expected_len) in [
             (
-                cryptoki_sys::CKM_AES_GCM as u64,
+                CkMechanismType::AES_GCM,
                 &gcm_param,
                 std::mem::size_of::<cryptoki_sys::CK_GCM_MESSAGE_PARAMS>(),
             ),
             (
-                cryptoki_sys::CKM_AES_CCM as u64,
+                CkMechanismType::AES_CCM,
                 &ccm_param,
                 std::mem::size_of::<cryptoki_sys::CK_CCM_MESSAGE_PARAMS>(),
             ),
         ] {
+            let mechanism = CkMechanism { mechanism_type, params: None };
+            let validated = validated_mechanism_for_tests(&mechanism);
             let init =
-                build_message_init_mechanism(mech_type, param).expect("envelope reconstructs");
+                build_message_init_mechanism(&validated, param).expect("envelope reconstructs");
             let root = init.ck_mechanism.pParameter;
             assert!(!root.is_null(), "envelope keeps a live root");
             assert_eq!(
@@ -4718,6 +4765,51 @@ mod tests {
         assert_eq!(captured.nonce_bits, 96);
         assert_eq!(captured.block_counter, counter);
         assert_eq!(captured.nonce, nonce);
+    }
+
+    /// Validated mechanism carrying the embedded default registry
+    /// snapshot (F-01 backstop tests): the backstop re-checks Raw
+    /// admission against the snapshot, so tests pinning admit/refuse
+    /// need the real bindings, not the minimal test funnel.
+    fn validated_with_default_registry(
+        mechanism_type: CkMechanismType,
+    ) -> ValidatedMechanismParams {
+        use pkcs11_proxy_ng_types::shape_descriptors::{Operation, ParamAbi};
+        let registry = MechanismRegistry::load(None).expect("embedded default registry");
+        let abi = ParamAbi::native().expect("test host has a native ABI");
+        let mechanism = CkMechanism { mechanism_type, params: None };
+        ValidatedMechanismParams::validate(&mechanism, &registry, Operation::General, abi, abi)
+            .expect("mechanism validates against default registry")
+    }
+
+    #[test]
+    fn message_init_refuses_struct_shaped_raw_at_last_mile() {
+        // Review F-01: a struct image smuggled in as `Raw` must be refused
+        // with clean MPI at the backend boundary even if every init gate
+        // above is bypassed — the image embeds client addresses that would
+        // segfault the daemon (#37 crash class). The check reuses the
+        // request registry snapshot carried by the validated mechanism, so
+        // it cannot disagree with the server gate (same snapshot object).
+        let validated = validated_with_default_registry(CkMechanismType::CHACHA20);
+        let image = vec![0xA5u8; std::mem::size_of::<cryptoki_sys::CK_CHACHA20_PARAMS>()];
+        let raw = MessageParameter::Raw(SecretBytes::copy_from_slice(&image));
+        assert_eq!(
+            build_message_init_mechanism(&validated, &raw).map(|_| ()),
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        );
+    }
+
+    #[test]
+    fn message_init_still_forwards_admitted_byte_buffer_raw() {
+        // Positive control for the F-01 backstop: admitted byte-buffer
+        // traffic (CBC IV) must keep flowing exactly as before.
+        let validated = validated_with_default_registry(CkMechanismType::AES_CBC);
+        let iv = vec![0x11u8; 16];
+        let raw = MessageParameter::Raw(SecretBytes::copy_from_slice(&iv));
+        let native =
+            build_message_init_mechanism(&validated, &raw).expect("admitted CBC IV forwards");
+        assert_eq!(u64::from(native.ck_mechanism.mechanism), CkMechanismType::AES_CBC.0);
+        assert_eq!(native.ck_mechanism.ulParameterLen as usize, iv.len());
     }
 
     #[cfg(unix)]
