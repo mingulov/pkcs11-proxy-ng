@@ -677,6 +677,34 @@ impl ContextManager {
         self.authz_generation.fetch_add(1, Ordering::SeqCst);
     }
 
+    /// Evict every mapping of `backend_object` in EVERY context (review
+    /// F-02): a destroyed backend object is gone for all sessions and all
+    /// contexts, so a mapping left behind in a non-destroying context
+    /// would alias whatever object the provider mints next under the
+    /// recycled handle number (cross-context ABA — the stale
+    /// mint-recorded privacy bit and cached metadata would then describe
+    /// the wrong object). Mirrors the per-context destroy hook exactly
+    /// (mapping, T20 tombstone, session/token metadata, created-set,
+    /// privacy bit, coalesced attributes); the destroyer's own context is
+    /// covered too (idempotent). Synchronous DashMap sweep — no context
+    /// guards are held across entries, and no activity/lease state is
+    /// touched (a maintenance sweep is not client activity).
+    pub fn evict_backend_object_everywhere(&self, backend_object: BackendHandle) {
+        for mut entry in self.contexts.iter_mut() {
+            let ctx = entry.value_mut();
+            let Some(virtual_object) = ctx.object_handles.resolve_backend(backend_object) else {
+                continue;
+            };
+            ctx.object_handles.remove(virtual_object);
+            ctx.destroyed_objects.insert(virtual_object);
+            ctx.object_metadata.remove(&virtual_object);
+            ctx.token_object_metadata.remove(&virtual_object);
+            ctx.created_objects.remove(&virtual_object);
+            ctx.object_private.remove(&virtual_object);
+            ctx.attr_cache.retain(|(attr_vh, _), _| *attr_vh != virtual_object);
+        }
+    }
+
     /// Per-slot login/logout serialization lock (M5). Acquire it (`.lock().await`)
     /// after resolving the slot and hold it across the cross-context login-state
     /// scan, the backend `C_Login`/`C_Logout`, and the `login_state` mutation, so

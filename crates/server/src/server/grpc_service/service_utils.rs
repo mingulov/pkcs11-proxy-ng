@@ -1637,11 +1637,27 @@ async fn backend_object_has_other_class(
 /// context — minted here, or admitted by an earlier vetted find. Such
 /// handles skip the token probe (their visibility was already decided).
 ///
-/// Residual (T2run-fix1 prod M3, flagged 2026-09-19): handle-recycling ABA —
-/// if the provider deletes an object out-of-band and recycles its handle for
-/// a foreign session object, a stale mapping shows it without re-probing.
-/// Narrow (destroy paths remove mappings, so staleness needs provider-side
-/// deletion + handle reuse) and fail-closed everywhere else — accepted.
+/// Residual (T2run-fix1 prod M3, flagged 2026-09-19; narrowed by review
+/// F-02): handle-recycling ABA. The daemon-mediated leg is CLOSED —
+/// `C_DestroyObject` broadcasts eviction to every context
+/// (`ContextManager::evict_backend_object_everywhere`, pinned by
+/// `destroy_object_evicts_mapping_in_other_contexts`), so a mapping can
+/// only go stale when the provider deletes an object OUT-OF-BAND (behind
+/// the daemon's back — a second application sharing the token, outside
+/// the single-client scope) and recycles its handle number. The
+/// mint-recorded privacy bit cannot outlive its mapping either
+/// (`mint_recorded_private` resolves through the live map; unmapped
+/// reads fail closed to `None`).
+///
+/// Two related legs stay open for v0.3: session close and logout evict
+/// only the acting context's session mappings, and there is no global
+/// object→backend-session link to broadcast with (mappings record the
+/// virtual session, which is per-context). The intended design is lazy
+/// per-backend-session epochs: record the epoch at map time, bump it on
+/// close/logout, and treat older-epoch mappings as invalid at resolve
+/// time. A per-slot epoch is NOT acceptable (an unrelated close would
+/// kill legitimate public session handles — spec violation). Fail-closed
+/// everywhere else — accepted.
 pub(super) async fn context_maps_backend_object(
     ctx_mgr: &Arc<ContextManager>,
     ctx_id: &ClientContextId,

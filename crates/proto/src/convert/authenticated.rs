@@ -60,6 +60,19 @@ fn pointer_free_iv_shape(mechanism: CkMechanismType) -> bool {
 /// Issue #37: message-opaque admissibility against the embedded
 /// default registry (same static-cache pattern as
 /// `pointer_free_iv_shape`).
+///
+/// Deliberate asymmetry (review F-01 follow-up): the message-init path
+/// re-checks against the request's effective snapshot (operator
+/// overrides included) via the validated mechanism, while this wrap
+/// validator uses the embedded default at BOTH layers (server
+/// wrap/unwrap handlers via `decode_parameters`, backend via
+/// `NativeParameter::new`). The two wrap layers therefore always agree
+/// (fail-closed together), but an operator override admitting a vendor
+/// wrap mechanism unknown to the default manifest is refused here even
+/// though message-init would admit its twin. Unify on the effective
+/// snapshot if operator wrap overrides appear in practice; that change
+/// EXPANDS admission and needs the same A/B + override-matrix proof as
+/// any gate relaxation.
 fn default_registry_opaque_admits(mechanism: CkMechanismType) -> bool {
     use pkcs11_proxy_ng_types::shape_descriptors::message_opaque_admits_mechanism;
     static REGISTRY: std::sync::OnceLock<Result<MechanismRegistry, String>> =

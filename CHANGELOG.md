@@ -36,6 +36,16 @@ notes](doc/release/v0.2.2-release-notes.md).
   `CKA_PRIVATE` when unset (absent means public) are honored via the
   mint-record fallback, which admits recorded-public objects and keeps
   recorded-private, unrecorded, and foreign handles hidden.
+- Last-mile message-opaque backstop (review F-01): fresh message-init
+  construction re-checks admission against the request registry
+  snapshot carried by the validated mechanism — the same snapshot the
+  server gate used, so the two cannot disagree. Begin/Next/OneShot
+  byte-reuse splits into a separate documented constructor.
+- Cross-context destroy eviction (review F-02): `C_DestroyObject`
+  now evicts the backend handle's mappings, privacy bits, and cached
+  metadata in every context, closing the daemon-mediated
+  handle-recycling ABA leg. Out-of-band provider mutation stays an
+  accepted residual (see notes).
 
 ### Known limitations
 

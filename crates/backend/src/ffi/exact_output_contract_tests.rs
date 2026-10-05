@@ -247,8 +247,12 @@ fn authenticated_null_backing_accepts_aligned_and_partial_fixed_prefixes_without
                 mac_len: 16,
             }),
         ] {
+            let gcm_mech = pkcs11_proxy_ng_types::CkMechanism {
+                mechanism_type: pkcs11_proxy_ng_types::CkMechanismType::AES_GCM,
+                params: None,
+            };
             let native = super::message_ops::build_message_init_mechanism(
-                u64::from(cryptoki_sys::CKM_AES_GCM),
+                &super::validated_mechanism_for_tests(&gcm_mech),
                 &parameter,
             )
             .unwrap();

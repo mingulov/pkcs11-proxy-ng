@@ -1696,6 +1696,54 @@ mod table_tests {
     }
 
     #[test]
+    fn message_opaque_admits_mechanism_logic() {
+        // Review F-04: direct unit cover for the mechanism-level gate.
+        // Byte-buffer shapes admit materialized bytes; struct shapes
+        // refuse in both cases (fail-fast even when empty — an install
+        // that can never complete must never start); parameterless
+        // mechanisms admit empty inits only; unknown mechanisms fail
+        // closed in both cases.
+        use super::message_opaque_admits_mechanism;
+        use crate::mechanism_registry::{DiscoveryMode, MechanismRegistry};
+        let mut shapes = std::collections::HashMap::new();
+        shapes.insert(0x1082u64, "iv".to_string());
+        shapes.insert(0x1226u64, "chacha20".to_string());
+        let mut parameterless = std::collections::HashSet::new();
+        parameterless.insert(0x1081u64);
+        let registry = MechanismRegistry::from_parts(
+            shapes,
+            parameterless,
+            std::collections::HashSet::new(),
+            DiscoveryMode::Transparent,
+            String::from("f04-test"),
+        );
+        assert!(message_opaque_admits_mechanism(&registry, 0x1082, true));
+        assert!(message_opaque_admits_mechanism(&registry, 0x1082, false));
+        assert!(!message_opaque_admits_mechanism(&registry, 0x1226, true));
+        assert!(!message_opaque_admits_mechanism(&registry, 0x1226, false));
+        assert!(message_opaque_admits_mechanism(&registry, 0x1081, false));
+        assert!(!message_opaque_admits_mechanism(&registry, 0x1081, true));
+        assert!(!message_opaque_admits_mechanism(&registry, 0xDEAD_BEEF, true));
+        assert!(!message_opaque_admits_mechanism(&registry, 0xDEAD_BEEF, false));
+    }
+
+    #[test]
+    fn message_opaque_admits_mechanism_real_bindings() {
+        // Review F-04: pin the embedded-manifest bindings the gate
+        // depends on, so a manifest edit cannot silently flip admission.
+        use super::message_opaque_admits_mechanism;
+        use crate::mechanism::CkMechanismType;
+        use crate::mechanism_registry::MechanismRegistry;
+        let registry =
+            MechanismRegistry::load_with_override_str(None).expect("embedded manifest loads");
+        assert!(message_opaque_admits_mechanism(&registry, CkMechanismType::AES_CBC.0, true));
+        assert!(!message_opaque_admits_mechanism(&registry, CkMechanismType::CHACHA20.0, true));
+        assert!(!message_opaque_admits_mechanism(&registry, CkMechanismType::CHACHA20.0, false));
+        assert!(message_opaque_admits_mechanism(&registry, CkMechanismType::AES_ECB.0, false));
+        assert!(!message_opaque_admits_mechanism(&registry, CkMechanismType::AES_ECB.0, true));
+    }
+
+    #[test]
     fn field_presence_matches_kind() {
         use OuterKind::{ByteBuffer, Parameterless};
         for d in SHAPE_DESCRIPTORS {

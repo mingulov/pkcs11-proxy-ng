@@ -3,7 +3,7 @@ use tonic::{Request, Response, Status};
 use pkcs11_proxy_ng_types::{CkAttribute, CkAttributeType, CkAttributeValue, CkRv};
 
 use super::super::super::context_manager::ClientContextId;
-use super::super::super::handle_map::VirtualHandle;
+use super::super::super::handle_map::{BackendHandle, VirtualHandle};
 use super::super::HandlerContext;
 use super::super::convert_template_opt;
 use super::super::service_utils::{
@@ -269,31 +269,15 @@ pub(super) async fn destroy_object(
     // data, inherit created-status or privacy, or serve stale coalesced
     // attributes for the now-destroyed object (B2, G3, G3-PR3 Task 2, R2 I1,
     // D6(1)), and record a destroy tombstone so later uses answer the
-    // handle-invalid family locally (T20). Revoke the daemon-wide authz
-    // generation (W1-L13-18): the freed backend handle may be recycled by
-    // another context's create, which must invalidate every context's
-    // cached token-object metadata.
+    // handle-invalid family locally (T20). The eviction broadcasts to EVERY
+    // context (review F-02): the destroyed backend object is gone globally,
+    // so a mapping left in another context would alias the next object the
+    // provider mints under the recycled number (cross-context ABA). Revoke
+    // the daemon-wide authz generation (W1-L13-18): the freed backend handle
+    // may be recycled by another context's create, which must invalidate
+    // every context's cached token-object metadata.
     if result.is_ok() {
-        let virtual_object = VirtualHandle(req.object_handle);
-        let _ = ctx
-            .context_manager
-            .get_context(&ctx_id, |client_ctx| {
-                client_ctx.object_handles.remove(virtual_object);
-                // T20 tombstone: later uses of this handle answer the
-                // handle-invalid family locally (forward-0's backend
-                // verdict is backend-specific). Mirrors the removal above.
-                client_ctx.destroyed_objects.insert(virtual_object);
-                client_ctx.object_metadata.remove(&virtual_object);
-                client_ctx.token_object_metadata.remove(&virtual_object);
-                client_ctx.created_objects.remove(&virtual_object);
-                client_ctx.object_private.remove(&virtual_object);
-                // I1: evict cached attribute entries for this object (R2 coalescer).
-                // Mirrors object_metadata + created_objects eviction so a recycled
-                // virtual handle cannot return stale cached attributes. Matches the
-                // eviction contract documented on the attr_cache field (context_manager.rs).
-                client_ctx.attr_cache.retain(|(vh, _), _| *vh != virtual_object);
-            })
-            .await;
+        ctx.context_manager.evict_backend_object_everywhere(BackendHandle(object.0));
         ctx.context_manager.revoke_authz_generation();
     }
 
@@ -453,6 +437,98 @@ mod tests {
             ctx_mgr.object_metadata(&ctx_id, 999).await.is_none(),
             "revocation must invalidate unrelated cached token entries"
         );
+    }
+
+    /// Review F-02: a destroyed backend object is gone for EVERYONE —
+    /// mappings in other contexts must be evicted too, or a recycled
+    /// backend handle aliases a live foreign object (cross-context ABA:
+    /// the mint-recorded privacy bit and cached metadata would then
+    /// describe the wrong object).
+    #[tokio::test]
+    async fn destroy_object_evicts_mapping_in_other_contexts() {
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+
+        let backend_session_a = mock.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+        let backend_session_b = mock.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+        let backend_object = mock.create_object(backend_session_a, Some(&[])).unwrap();
+
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let backend_slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
+        ctx_mgr.cache_token_info(
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+            "MockToken".into(),
+            "0001".into(),
+        );
+        let ctx_a = ctx_mgr.create_context(None).await.unwrap();
+        let ctx_b = ctx_mgr.create_context(None).await.unwrap();
+
+        // Both contexts map the same backend object (token object visible
+        // to both); B also holds a recorded privacy bit for it.
+        let (session_vh_a, _) = ctx_mgr
+            .get_context(&ctx_a, |ctx| {
+                let svh = ctx.register_session(BackendHandle(backend_session_a.0), backend_slot);
+                let ovh = ctx.object_handles.insert(BackendHandle(backend_object.0));
+                (svh, ovh)
+            })
+            .await
+            .unwrap();
+        let obj_vh_b = ctx_mgr
+            .get_context(&ctx_b, |ctx| {
+                ctx.register_session(BackendHandle(backend_session_b.0), backend_slot);
+                let ovh = ctx.object_handles.insert(BackendHandle(backend_object.0));
+                ctx.object_private.insert(ovh, false);
+                ovh
+            })
+            .await
+            .unwrap();
+        assert!(
+            ctx_mgr
+                .get_context(&ctx_b, |ctx| {
+                    ctx.object_handles.resolve_backend(BackendHandle(backend_object.0))
+                })
+                .await
+                .flatten()
+                .is_some(),
+            "B must map the object before destroy"
+        );
+
+        let ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        let resp = super::destroy_object(
+            &ctx,
+            Request::new(pkcs11_proxy_ng_proto::DestroyObjectRequest {
+                client_context_id: ctx_a.0.clone(),
+                session_handle: session_vh_a.0,
+                object_handle: ctx_mgr
+                    .get_context(&ctx_a, |c| {
+                        c.object_handles.resolve_backend(BackendHandle(backend_object.0))
+                    })
+                    .await
+                    .flatten()
+                    .unwrap()
+                    .0,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(resp.ck_rv, CkRv::OK.0, "destroy_object must succeed");
+
+        // B's mapping, privacy bit, and metadata must be gone: the backend
+        // object no longer exists, so any use must answer handle-invalid
+        // instead of aliasing a recycled handle.
+        let (mapping, privacy) = ctx_mgr
+            .get_context(&ctx_b, |c| {
+                (
+                    c.object_handles.resolve_backend(BackendHandle(backend_object.0)),
+                    c.object_private.get(&obj_vh_b).copied(),
+                )
+            })
+            .await
+            .unwrap();
+        assert!(mapping.is_none(), "B's stale mapping must be evicted");
+        assert!(privacy.is_none(), "B's stale privacy bit must be evicted");
     }
 
     /// I1 negative: a failed destroy_object must NOT evict the attr_cache entry.
