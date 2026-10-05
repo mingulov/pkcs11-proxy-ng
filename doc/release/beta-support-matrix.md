@@ -180,6 +180,21 @@ embedding process. Independent chains require separate processes. The
 [native ownership contract](native-mechanism-ownership.md) gives the exact
 host, lifetime, and abnormal-stop conditions.
 
+**Client restart and token storage (known issue #27).** Client
+`C_Finalize` retires the logical client context and its handle mappings
+and performs best-effort session cleanup and last-holder logout. It
+does not invoke the provider's native `C_Finalize`, reset its token
+store, or enumerate and destroy token objects, so a subsequent
+`C_Initialize` can rediscover objects retained by the same running
+provider instance. For memory-store providers this differs from a
+direct Finalize/Initialize cycle; client Finalize is not a
+volatile-store reset or erasure boundary. Old client handles stay
+invalid; applications must reopen sessions and rediscover surviving
+objects. Evidence: `memory_token_object_survives_client_restart_by_design`
+(mock full-stack pin); haskoki memory/SQLite lifecycle matrix still
+wanted for provider-backed acceptance. The report's
+`restart-memory-volatile` leg stays DIRECT-ONLY under #27's URL.
+
 ## What existing platform tests show
 
 These are historical results from specific revisions. They do not qualify the

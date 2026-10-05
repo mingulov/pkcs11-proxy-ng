@@ -204,6 +204,24 @@ for nonblocking calls and prevents full native per-application event equivalence
 Logical Finalize removes that client's context and arranges session cleanup;
 it is not native module Finalize or a blocking-wait cancellation mechanism.
 
+Backend objects outlive logical Finalize by design (issue #27, known
+issue; canonical entry in the
+[support matrix](beta-support-matrix.md)): teardown closes only sessions
+unreferenced by live contexts plus best-effort last-holder logout — no
+native provider `C_Finalize` runs on the client path (native retirement
+happens only at daemon shutdown) and backend objects are never
+enumerated or destroyed. A memory-store token object therefore survives
+the client's Finalize/Initialize cycle through the proxy (direct
+Finalize drops the memory store), exactly as SQLite-backed token
+objects already persist for the daemon's lifetime. Client Finalize is
+not a volatile-store reset or erasure boundary — even the same client
+must not depend on it to clear token state. The v0.2 scope is one
+logical client per daemon ("restart both before switching"), so no
+supported deployment shares a daemon across mutually untrusting
+clients; per-client backend-state teardown is a v0.3 multi-tenancy
+question. Locked by
+`memory_token_object_survives_client_restart_by_design`.
+
 The following ordering is mandatory. Existing transport authentication,
 authenticated ownership, quota and logical-context checks remain ahead of
 backend capability results; they cannot be bypassed to reveal module state.
