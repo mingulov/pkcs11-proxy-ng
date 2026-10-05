@@ -1918,4 +1918,72 @@ mod issue32_stale_handle {
             "durable object must survive the client restart"
         );
     }
+
+    // Issue #27, closed as by-design: a memory-store token object
+    // created through the proxy survives the client's C_Finalize +
+    // C_Initialize cycle, while direct Finalize drops the memory
+    // store. Logical Finalize removes only the client context
+    // (sessions + best-effort last-holder logout); no native provider
+    // C_Finalize runs on the client path (native retirement happens
+    // only at daemon shutdown) and backend objects are never
+    // enumerated or destroyed, so both memory and SQLite token
+    // objects persist for the daemon's lifetime. Per-client teardown
+    // is a v0.3 multi-tenancy question, not a v0.2 defect. Locks the
+    // survival; the RED probe asserting the reporter's literal 0-match
+    // expectation fails with count 1 (verified 2026-10-05).
+    #[test]
+    fn memory_token_object_survives_client_restart_by_design() {
+        let _guard = shim_state_test_guard();
+        let _saved = SavedConnectEnv::capture();
+        let daemon = TestDaemon::fresh();
+        let _finalize = FinalizeOnDrop;
+
+        // Epoch 1: create a memory-store token object.
+        initialize(&daemon.endpoint);
+        let session1 = open_session();
+        let mut class: CK_ULONG = CKO_DATA;
+        let mut token_flag: CK_BBOOL = CK_TRUE;
+        let mut label = *b"restart-token";
+        let mut template = [
+            CK_ATTRIBUTE {
+                type_: CKA_CLASS,
+                pValue: (&mut class as *mut CK_ULONG).cast(),
+                ulValueLen: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
+            },
+            CK_ATTRIBUTE {
+                type_: CKA_TOKEN,
+                pValue: (&mut token_flag as *mut CK_BBOOL).cast(),
+                ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+            },
+            CK_ATTRIBUTE {
+                type_: CKA_LABEL,
+                pValue: label.as_mut_ptr().cast(),
+                ulValueLen: label.len() as CK_ULONG,
+            },
+        ];
+        let mut handle = CK_INVALID_HANDLE;
+        let rv = unsafe {
+            dispatch::general::c_create_object(
+                session1,
+                template.as_mut_ptr(),
+                template.len() as CK_ULONG,
+                &mut handle,
+            )
+        };
+        assert_eq!(rv, CKR_OK as CK_RV, "C_CreateObject");
+        assert_eq!(daemon.backend.live_object_count(), 1, "setup: object exists");
+        let rv = unsafe { dispatch::general::c_finalize(std::ptr::null_mut()) };
+        assert_eq!(rv, CKR_OK as CK_RV, "C_Finalize epoch 1");
+
+        // Epoch 2: by-design survival — the object is still there.
+        // (The mock find is override-scripted and cannot enumerate, so
+        // probe the live set directly, as the stale-handle test above.)
+        initialize(&daemon.endpoint);
+        let _session2 = open_session();
+        assert_eq!(
+            daemon.backend.live_object_count(),
+            1,
+            "memory token object must survive the client restart (by design, #27)"
+        );
+    }
 }
