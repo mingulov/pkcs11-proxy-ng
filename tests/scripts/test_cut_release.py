@@ -210,6 +210,45 @@ class DispatchJobTests(unittest.TestCase):
             "permissions", {})
         self.assertEqual(permissions.get("actions"), "write")
 
+    def test_dispatch_waits_for_tag_ci_before_publish(self):
+        # Publish preflight refuses without the green aggregate, so
+        # dispatching before tag CI finishes only produces a spurious
+        # failed publish run (v0.2.0/v0.2.1 race). The wait step must
+        # run before the dispatch step.
+        workflow = load_workflow()
+        job = workflow["jobs"]["dispatch-publish"]
+        steps = [step for step in job.get("steps", [])
+                 if isinstance(step, dict)]
+        wait = [i for i, step in enumerate(steps)
+                if "wait-on-check-action@" in str(step.get("uses", ""))]
+        dispatch = [i for i, step in enumerate(steps)
+                    if "gh workflow run publish.yml" in str(step.get("run", ""))]
+        self.assertEqual(len(wait), 1)
+        self.assertEqual(len(dispatch), 1)
+        self.assertLess(wait[0], dispatch[0])
+
+    def test_dispatch_wait_is_pinned_and_success_only(self):
+        # Supply-chain pinning plus fail-closed conclusions: a skipped
+        # aggregate must refuse, never dispatch.
+        workflow = load_workflow()
+        job = workflow["jobs"]["dispatch-publish"]
+        uses = [str(step.get("uses", "")) for step in job.get("steps", [])
+                if isinstance(step, dict)]
+        pinned = [entry for entry in uses
+                  if "wait-on-check-action@" in entry]
+        self.assertEqual(len(pinned), 1)
+        self.assertRegex(pinned[0], r"wait-on-check-action@[0-9a-f]{40}$")
+        with_args = [step.get("with", {}) for step in job.get("steps", [])
+                     if isinstance(step, dict) and
+                     "wait-on-check-action@" in str(step.get("uses", ""))]
+        config = with_args[0]
+        self.assertEqual(config.get("check-name"),
+                         "CI success (fail-closed aggregate)")
+        self.assertEqual(config.get("allowed-conclusions"), "success")
+        self.assertIn("needs.cut.outputs.tag", str(config.get("ref", "")))
+        permissions = job.get("permissions", {})
+        self.assertEqual(permissions.get("checks"), "read")
+
 
 class WriteReceiptTests(unittest.TestCase):
     def check(self, *args):

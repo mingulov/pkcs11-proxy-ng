@@ -3,10 +3,10 @@
 # One dispatch carries the whole pre-publication path from the Actions
 # tab: this workflow verifies the eight receipt gates plus
 # subject/version/CHANGELOG/tag preconditions on main, cuts an
-# approval-gated receipt-only commit with an annotated tag, then
-# dispatches publish.yml with the inputs passed through once. Upload
-# and release approvals still gate their own environments inside
-# publish/release; nothing here bypasses them.
+# approval-gated receipt-only commit with an annotated tag, waits for
+# green CI on the new tag, then dispatches publish.yml with the inputs
+# passed through once. Upload and release approvals still gate their
+# own environments inside publish/release; nothing here bypasses them.
 #
 # Prerequisites (maintainer, one-time): create the `release-tag`
 # environment with required reviewers. The cut job pushes with
@@ -15,9 +15,10 @@
 # (see the publication guide).
 #
 # Recovery: every partial state has a manual path. Tag pushed but
-# publish never dispatched -> dispatch publish.yml by hand. Commit
-# pushed but tag missing -> push the annotated tag by hand, then
-# dispatch. Tag exists -> this workflow refuses (tags are never moved).
+# publish never dispatched -> wait for green tag CI, then dispatch
+# publish.yml by hand. Commit pushed but tag missing -> push the
+# annotated tag by hand, then dispatch. Tag exists -> this workflow
+# refuses (tags are never moved).
 
 name: cut-release
 
@@ -300,12 +301,28 @@ jobs:
   dispatch-publish:
     name: Dispatch publish.yml
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 75
     needs: [cut]
     permissions:
       contents: read
       actions: write
+      checks: read
     steps:
+      # Publish preflight refuses without the green aggregate, so
+      # dispatching before tag CI finishes only produces a spurious
+      # failed publish run. Wait here instead: conclusions are pinned
+      # to success-only (a skipped aggregate must refuse), and the job
+      # timeout bounds the wait.
+      - name: Wait for green CI on the new tag
+        uses: lewagon/wait-on-check-action@369769072fe522a3a8a85c03c96af1e5242a1994 # v1.9.1
+        with:
+          ref: ${{ needs.cut.outputs.tag }}
+          check-name: "CI success (fail-closed aggregate)"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          allowed-conclusions: success
+          wait-interval: 60
+          checks-discovery-timeout: 600
+
       - name: Dispatch publish from the new tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
