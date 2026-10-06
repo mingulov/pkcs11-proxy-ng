@@ -45,7 +45,7 @@ env:
 jobs:
   provider-matrix:
     name: Provider matrix (Docker)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
 
     steps:
@@ -101,7 +101,7 @@ jobs:
   # independent regression signal for unit tests.
   fast-checks:
     name: Tier 0 sanity (nightly)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -160,7 +160,7 @@ jobs:
   # here (no wine image on the runner) and remain host-run scripts.
   cross-width-live:
     name: Live cross-width matrix (SoftHSM2)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     # W1-L17-22: headroom for the retained-oracle (12 legs, isolated
     # hook-target builds) and SIGTERM drain legs in the live tier.
     timeout-minutes: 60
@@ -177,7 +177,7 @@ jobs:
           # the compat symlink; extract it beside the system instead.
           sudo dpkg --add-architecture i386
           sudo apt-get update -qq
-          # On Ubuntu 24.04 Noble, libssl supplies libcrypto and its provider
+          # On Ubuntu 26.04, libssl supplies libcrypto and its provider
           # modules. The installed multilib packages provide the libc closure.
           apt-get download \
             libsofthsm2:i386 libssl3t64:i386
@@ -223,7 +223,7 @@ jobs:
   # drift is visible run to run.
   coverage:
     name: Coverage (cargo-llvm-cov)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -265,7 +265,7 @@ jobs:
   # Tests that need real time/FFI are already `cfg_attr(miri, ignore)`d.
   miri:
     name: Miri (types + shim parse paths)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -414,7 +414,7 @@ jobs:
   # locally (see doc/development.md).
   fuzz-smoke:
     name: Fuzz smoke (5 targets x 90 s)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -475,7 +475,7 @@ jobs:
   # are unaffected. Pinned verifier; bump only after re-running locally.
   kani:
     name: Kani types proofs (31 harnesses)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

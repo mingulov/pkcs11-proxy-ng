@@ -61,7 +61,7 @@ concurrency:
 jobs:
   verify:
     name: Verify release gates on main
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     outputs:
       verified_sha: ${{ steps.record.outputs.verified_sha }}
@@ -208,7 +208,7 @@ jobs:
 
   cut:
     name: Cut receipt commit and tag (approval-gated)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     needs: [verify]
     environment: release-tag
@@ -300,7 +300,7 @@ jobs:
 
   dispatch-publish:
     name: Dispatch publish.yml
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 75
     needs: [cut]
     permissions:

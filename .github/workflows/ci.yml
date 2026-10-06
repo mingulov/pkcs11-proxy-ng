@@ -6,7 +6,7 @@
 #
 # Checks performed:
 #   cargo fmt --check   — formatting gate
-#   shellcheck          — shell hygiene gate (all scripts/**.sh, pinned 0.11.0)
+#   shellcheck          — shell hygiene gate (all scripts/**.sh, version in mise.toml)
 #   cargo audit         — RustSec advisory gate (workspace + standalone locks)
 #   cargo deny check    — license/ban/source policy gate (workspace + standalone)
 #   cargo build         — compilation gate (all workspace crates)
@@ -28,8 +28,9 @@
 # Supply-chain pinning (W1-L16-09/10/13): every third-party action below is
 # pinned to a commit SHA (trailing `# <tag>` records the tag it was taken
 # from so bumps stay reviewable); the Rust toolchain is the pinned
-# rust-toolchain.toml channel (MSRV keeps 1.88); protoc is setup-protoc at
-# the mise.toml version (36.2). All cargo builds/tests run --locked.
+# rust-toolchain.toml channel, the MSRV floor is the workspace Cargo.toml
+# rust-version, and protoc is setup-protoc at the mise.toml version.
+# All cargo builds/tests run --locked.
 #
 # Job hygiene (W1-L17-07): every job sets timeout-minutes — none inherits
 # the 6h default. The local_quality_gate_test ci_jobs_all_set_timeouts gate
@@ -66,7 +67,7 @@ jobs:
   # ── Tier 0a: formatting ────────────────────────────────────────────────────
   fmt:
     name: Format
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -84,7 +85,7 @@ jobs:
   # ── Tier 0b: dependency advisory audit ────────────────────────────────────
   audit:
     name: Cargo Audit
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     needs: fmt
     steps:
@@ -122,7 +123,7 @@ jobs:
   # RustSec DB; `cargo deny check` additionally gates licenses/bans/sources.
   deny:
     name: Cargo Deny
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     needs: fmt
     steps:
@@ -164,7 +165,7 @@ jobs:
   # directly, needs no Rust toolchain).
   packaging-smoke:
     name: Packaging smoke
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     needs: fmt
     steps:
@@ -174,13 +175,13 @@ jobs:
         run: scripts/packaging-smoke.sh
 
   # ── Tier 0b4: shell hygiene (shellcheck + bash -n) ──────────────────────────
-  # W1-L17-12: mise.toml pins shellcheck 0.11.0 and G-8 requires a clean
+  # W1-L17-12: mise.toml pins shellcheck and G-8 requires a clean
   # shellcheck run; this job enforces it over every scripts/**/*.sh so
   # the release-critical scripts (verify-release-subject, release-dry-run)
   # cannot regress unchecked. Checkout + curl only (no Rust toolchain).
   shellcheck:
     name: ShellCheck
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     needs: fmt
     steps:
@@ -217,7 +218,7 @@ jobs:
   # ── Tier 0c: build, test, clippy ──────────────────────────────────────────
   build-and-test:
     name: Build & Test
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     needs: [fmt, audit, deny]
     steps:
@@ -269,11 +270,11 @@ jobs:
 
   # ── Tier 0d: MSRV check ────────────────────────────────────────────────────
   # Validates that the workspace compiles on the minimum Rust version declared
-  # in the workspace Cargo.toml (currently 1.88).  Separate job so MSRV
+  # in the workspace Cargo.toml rust-version.  Separate job so MSRV
   # failures don't block the main test feedback.
   msrv:
     name: MSRV (1.88)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     needs: fmt
     steps:
@@ -318,7 +319,7 @@ jobs:
   # scripts/run-cross-width-live-test.sh outside the per-PR gate.
   narrow-client-i686:
     name: Narrow CK_ULONG targets (i686)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     needs: fmt
     steps:
@@ -369,7 +370,7 @@ jobs:
   # packaging only.
   windows-client-llp64:
     name: Windows client shim (LLP64, cargo-xwin)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     needs: fmt
     steps:
@@ -423,7 +424,7 @@ jobs:
   # Alpine packaging only.
   musl-x86_64:
     name: musl build (x86_64 static + dynamic)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     needs: fmt
     env:
@@ -512,7 +513,7 @@ jobs:
   # archive-binary jobs below, so packaging itself runs --no-verify.
   package-candidate:
     name: Package candidate (archives + consumer)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 90
     needs: fmt
     env:
@@ -587,7 +588,7 @@ jobs:
   # is a CI candidate, never publication evidence.
   archive-binary-linux:
     name: Archive binary build (Linux GNU) + notices/bundle
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 90
     needs: package-candidate
     env:
@@ -667,7 +668,7 @@ jobs:
   # cross-compiles and inspects, like windows-client-llp64.
   archive-binary-windows:
     name: Archive binary build (Windows MSVC) + notices/bundle
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 120
     needs: package-candidate
     env:
@@ -844,7 +845,7 @@ jobs:
   # build/install was not run locally and is NOT covered by this gate.
   smoke-apk-alpine:
     name: Smoke Alpine APK (build/install/sign)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 90
     needs: fmt
     steps:
@@ -940,7 +941,7 @@ jobs:
   # paths — never workspace binaries.
   smoke-bundle-linux:
     name: Smoke Linux bundle (extracted paths)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     needs: archive-binary-linux
     steps:
@@ -1091,7 +1092,7 @@ jobs:
   # publication call may proceed on a partial gate set.
   ci-success:
     name: CI success (fail-closed aggregate)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     needs: [fmt, audit, deny, packaging-smoke, shellcheck, build-and-test, msrv, narrow-client-i686, windows-client-llp64, musl-x86_64, package-candidate, archive-binary-linux, archive-binary-windows, archive-binary-macos, smoke-apk-alpine, smoke-bundle-linux, smoke-bundle-windows, smoke-bundle-macos]
     if: always()

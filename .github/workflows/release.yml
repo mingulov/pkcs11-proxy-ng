@@ -75,7 +75,7 @@ env:
 jobs:
   recover:
     name: Recover and recheck candidate evidence
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -193,7 +193,7 @@ jobs:
 
   registry-recheck:
     name: Recheck registry before binaries
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     needs: [recover]
     steps:
@@ -257,7 +257,7 @@ jobs:
 
   binary-linux:
     name: Registry-source Linux bundle
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 120
     needs: [recover, registry-recheck]
     env:
@@ -365,7 +365,7 @@ jobs:
 
   binary-windows:
     name: Registry-source Windows bundle
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 120
     needs: [recover, registry-recheck]
     env:
@@ -587,7 +587,7 @@ jobs:
 
   smoke-linux:
     name: Smoke registry Linux bundle (extracted paths)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     needs: [recover, binary-linux]
     steps:
@@ -730,7 +730,7 @@ jobs:
 
   publish:
     name: Publish GitHub release (non-destructive)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     needs: [recover, binary-linux, binary-windows, binary-macos, smoke-linux, smoke-windows, smoke-macos]
     environment: release
