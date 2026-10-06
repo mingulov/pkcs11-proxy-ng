@@ -236,6 +236,12 @@ The last 30-provider comparison run finished with all provider comparisons
 incomplete. New candidate-bound direct/proxy results are needed before
 expanding the public claim.
 
+## Current pooled comparison evidence
+
+<!-- pool-evidence:begin -->
+*No pooled comparison evidence recorded yet.*
+<!-- pool-evidence:end -->
+
 ## Reporting an incompatibility
 
 Open an issue with the provider and version, operation, direct and proxied

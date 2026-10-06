@@ -49,6 +49,7 @@ NEW_REQUIRED_JOBS = (
     "smoke-bundle-linux",
     "smoke-bundle-windows",
     "smoke-bundle-macos",
+    "support-matrix-check",
 )
 AGGREGATE_JOB = "ci-success"
 REQUIRED_JOBS = EXISTING_JOBS + NEW_REQUIRED_JOBS
@@ -156,6 +157,13 @@ class AggregateTests(unittest.TestCase):
         for job_id in NEW_REQUIRED_JOBS:
             with self.subTest(job=job_id):
                 self.assertIn(job_id, workflow["jobs"])
+
+    def test_support_matrix_check_runs_generator(self):
+        workflow = load_workflow()
+        job = workflow["jobs"]["support-matrix-check"]
+        self.assertIn("timeout-minutes", job)
+        text = job_text("support-matrix-check", workflow)
+        self.assertIn("scripts/release/support_matrix.py --check", text)
 
     def test_aggregate_lists_every_required_job(self):
         workflow = load_workflow()

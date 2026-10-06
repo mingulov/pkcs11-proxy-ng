@@ -40,3 +40,20 @@ the raw-output contract.
 For the current candidate, the release gate also requires an explicit 30-provider non-mock
 comparison matrix. Every provider must have a completed result and a recorded
 disposition; incomplete runs do not count as parity evidence.
+
+## Machine-readable evidence export
+
+The [support matrix](beta-support-matrix.md) carries a generated
+"Current pooled comparison evidence" table. Its source is the
+versioned `pool-evidence/v1` export in
+[`pool-evidence.json`](pool-evidence.json): one run identity, the
+proxy candidate and framework commits, and one final-verdict row
+per provider. `scripts/release/support_matrix.py` (stdlib only)
+validates the export fail-closed — a mixed-run merge, a malformed
+identity, an incomplete row without reasons, a FAIL row without a
+disposition, or any mock row refuses — and rewrites only the
+marked table region. Regeneration PRs update the export and the
+table together; `ci.yml` runs the generator in `--check` mode so
+a stale table fails the gate. The export itself is produced from
+the pooled runner's `matrix-summary.json` by maintainer tooling;
+that merge-preserving file is never consumed directly.

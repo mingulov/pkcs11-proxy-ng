@@ -21,6 +21,7 @@ Build, test, and release scripts, with their callers. Paths are relative to
 | `release-dry-run.sh` | Local Linux packaging check and staging; `release.yml` now builds from registry sources instead |
 | `release-windows.sh` | Local Windows ZIP staging; `release.yml` now builds from registry sources instead |
 | `release_checks.py` (`candidate-name`, `evidence-bind`, `evidence-verify`, `evidence-select`, `assets-compare`, `tag-evidence`, `write-receipt`) | `publish.yml` and `release.yml`: pre-auth candidate identity, cross-run evidence selection, non-destructive asset comparison, annotated-tag evidence; `cut-release.yml`: quality-receipt generation |
+| `release/support_matrix.py` | `ci.yml`: validate `doc/release/pool-evidence.json` and regenerate/`--check` the marked table in `doc/release/beta-support-matrix.md` |
 
 The GitLab pipeline builds the Alpine and Amazon carrier images through their
 packaging Dockerfiles. GitHub's packaging smoke gate checks their source metadata,
