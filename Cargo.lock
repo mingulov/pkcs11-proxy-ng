@@ -1424,6 +1424,7 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "tonic-health",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "x509-parser",
