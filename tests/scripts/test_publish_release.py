@@ -678,6 +678,18 @@ class ReleasePublicationTests(unittest.TestCase):
         self.assertLess(text.index("assets-compare"),
                         text.index("run: scripts/release-upload.sh"))
 
+    def test_manifest_build_skips_itself(self):
+        # The prepared-manifest glob must exclude its own output file: the
+        # redirect creates it before the glob runs, so a self-entry hashes
+        # the half-written file and can never match released bytes (this
+        # wedged v0.2.2's retry with a divergent refusal). The manifest
+        # file itself is compared by bytes instead.
+        workflow = load_workflow(RELEASE_YML)
+        text = job_text("publish", workflow)
+        # NOTE: job_text is JSON-escaped, hence the backslashes.
+        self.assertIn('path.name != \\"assets.json\\"', text)
+        self.assertIn("existing/files/assets.json", text)
+
     def test_all_retained_retry_uploads_nothing(self):
         workflow = load_workflow(RELEASE_YML)
         text = job_text("publish", workflow)
