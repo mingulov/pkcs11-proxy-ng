@@ -1928,7 +1928,7 @@ fn ci_cancels_superseded_pr_runs() {
 #[test]
 fn release_write_permission_scoped_to_publish() {
     // W1-L17-21: contents:write sat at workflow scope though only the
-    // publish job (softprops/action-gh-release) needs it; build jobs run
+    // publish job (release-upload.sh) needs it; build jobs run
     // least-privilege read.
     let root = workspace_root();
     let release = fs::read_to_string(root.join(".github/workflows/release.yml"))
