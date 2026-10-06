@@ -841,15 +841,14 @@ jobs:
           done < stage/add.txt
           echo "add_count=${ADD_COUNT}" >> "$GITHUB_OUTPUT"
 
+      # Upload with retries: the softprops action it replaces has a fixed
+      # 10s connect timeout and no retries, which failed v0.2.2 on a
+      # transient uploads.github.com stall (neither the action nor gh
+      # expose a timeout knob). Same create-or-extend semantics over the
+      # staged (missing-only) files; see scripts/release-upload.sh.
       - name: Create or extend the GitHub release
         if: steps.compare.outputs.add_count != '0'
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
-        with:
-          tag_name: ${{ inputs.tag }}
-          name: pkcs11-proxy-ng ${{ inputs.tag }}
-          body_path: RELEASE_NOTES.md
-          files: |
-            stage/*.tar.gz
-            stage/*.zip
-            stage/*.json
-          fail_on_unmatched_files: false
+        run: scripts/release-upload.sh
+        env:
+          RELEASE_TITLE: pkcs11-proxy-ng ${{ inputs.tag }}
+          RELEASE_NOTES: RELEASE_NOTES.md
