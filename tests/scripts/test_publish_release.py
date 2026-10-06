@@ -38,7 +38,7 @@ SCRIPTS_README = ROOT / "scripts" / "README.md"
 
 RELEASE_RUST = "1.98.1"
 MSRV = "1.88.0"
-PROTOC = "36.2"
+MISE_ACTION = "jdx/mise-action@"
 OIDC_AUTH_PIN = "c6f97d42243bad5fab37ca0427f495c86d5b1a18"
 BOOTSTRAP_TOKEN = "CARGO_REGISTRY_BOOTSTRAP_TOKEN"
 STAGING_TOKEN = "CARGO_REGISTRIES_STAGING_TOKEN"
@@ -724,6 +724,7 @@ class StagingWorkflowTests(unittest.TestCase):
         text = job_text("probe", workflow)
         self.assertNotIn("rust-toolchain", text)
         self.assertNotIn("setup-protoc", text)
+        self.assertNotIn("mise-action", text)
         self.assertNotIn("CARGO_TARGET_DIR", text)
 
     def test_dry_run_precedes_real_upload(self):
@@ -781,7 +782,7 @@ class WorkflowPinTests(unittest.TestCase):
             text = Path(path).read_text(encoding="utf-8")
             with self.subTest(path=str(path)):
                 self.assertIn(RELEASE_RUST, text)
-                self.assertIn(PROTOC, text)
+                self.assertIn(MISE_ACTION, text)
                 self.assertNotIn("toolchain: stable", text)
         for path in (PUBLISH_YML, RELEASE_YML):
             text = Path(path).read_text(encoding="utf-8")

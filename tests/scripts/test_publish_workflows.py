@@ -55,7 +55,7 @@ REQUIRED_JOBS = EXISTING_JOBS + NEW_REQUIRED_JOBS
 
 RELEASE_RUST = "1.98.1"
 MSRV = "1.88.0"
-PROTOC = "36.2"
+MISE_ACTION = "jdx/mise-action@"
 SOFTHSM_WIN_SHA256 = (
     "85273BCC1A6B90E877F7BB4F7E90221D57103D8F5241D154A79DD730A135B910"
 )
@@ -212,7 +212,7 @@ class PackageCandidateTests(unittest.TestCase):
         text = CI_YML.read_text(encoding="utf-8")
         self.assertIn(RELEASE_RUST, text)
         self.assertIn(MSRV, text)
-        self.assertIn(f'version: "{PROTOC}"', text)
+        self.assertIn(MISE_ACTION, text)
         self.assertIn("--toolchain 1.98.1", text)
 
     def test_package_candidate_runs_archive_and_consumer_gates(self):

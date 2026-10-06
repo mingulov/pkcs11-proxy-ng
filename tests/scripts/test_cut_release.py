@@ -26,7 +26,7 @@ CUT_YML = ROOT / ".github" / "workflows" / "cut-release.yml"
 RELEASE_TAG_ENV = "release-tag"
 RELEASE_RUST = "1.98.1"
 MSRV = "1.88.0"
-PROTOC = "36.2"
+MISE_ACTION = "jdx/mise-action@"
 AUDIT_VERSION = "0.22.2"
 DENY_VERSION = "0.20.2"
 GATES = ("fmt", "check", "test", "clippy", "msrv", "audit", "deny",
@@ -101,7 +101,7 @@ class CutVerifyTests(unittest.TestCase):
         workflow = load_workflow()
         text = yaml.safe_dump(workflow["jobs"]["verify"],
                               default_flow_style=False)
-        for pin in (RELEASE_RUST, MSRV, PROTOC, AUDIT_VERSION,
+        for pin in (RELEASE_RUST, MSRV, MISE_ACTION, AUDIT_VERSION,
                     DENY_VERSION):
             with self.subTest(pin=pin):
                 self.assertIn(pin, text)
