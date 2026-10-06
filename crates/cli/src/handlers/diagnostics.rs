@@ -209,14 +209,13 @@ struct ProbeFailure {
     code: i32,
 }
 
-/// Connect, check health, and (unless indeterminate) run discovery.
-/// Never initializes a PKCS#11 context: the client is built from the
-/// shared channel and only the context-free probe runs.
-async fn collect(
+/// Connect and check health, returning the shared channel for
+/// discovery. Never initializes a PKCS#11 context.
+async fn connect_and_check(
     endpoint: &str,
     tls_files: Option<ClientTlsFiles>,
     service: &str,
-) -> Result<(ServingStatus, Option<BackendProbe>), ProbeFailure> {
+) -> Result<(ServingStatus, tonic::transport::Channel), ProbeFailure> {
     let fail = |message: String| ProbeFailure { message, code: 2 };
     let built = crate::build_health_endpoint(endpoint, tls_files)
         .map_err(|e| fail(format!("diagnostics setup failed: {e}")))?;
@@ -230,29 +229,29 @@ async fn collect(
         .map_err(|e| fail(format!("diagnostics health check failed: {e}")))?;
     let status = ServingStatus::try_from(status.status).unwrap_or(ServingStatus::Unknown);
     match status {
-        ServingStatus::Serving => {
-            let mut client = Pkcs11Client::from_channel(channel);
-            let probe = client
-                .get_backend_interfaces()
-                .await
-                .map_err(|e| fail(format!("diagnostics discovery failed: {e}")))?;
-            Ok((status, Some(probe)))
-        }
-        ServingStatus::NotServing => {
-            // The daemon answered unhealthy; discovery is best-effort
-            // evidence, not a gate — report whatever it yields.
-            let mut client = Pkcs11Client::from_channel(channel);
-            let probe = client.get_backend_interfaces().await.ok();
-            Ok((status, probe))
-        }
+        ServingStatus::Serving | ServingStatus::NotServing => Ok((status, channel)),
         ServingStatus::Unknown | ServingStatus::ServiceUnknown => {
             Err(fail(format!("diagnostics indeterminate: {status:?}")))
         }
     }
 }
 
+/// Run the context-free discovery probe over an established channel.
+/// Never initializes a PKCS#11 context.
+async fn discover(channel: tonic::transport::Channel) -> Result<BackendProbe, ProbeFailure> {
+    let mut client = Pkcs11Client::from_channel(channel);
+    client.get_backend_interfaces().await.map_err(|e| ProbeFailure {
+        message: format!("diagnostics discovery failed: {e}"),
+        code: 2,
+    })
+}
+
 /// Run the diagnostics probe and print the report; returns the
 /// process exit code (0 SERVING, 1 NOT_SERVING, 2 probe failure).
+/// The deadline covers connect plus health; discovery gets the
+/// remainder. A confirmed NOT_SERVING verdict survives discovery
+/// trouble (error or stall): the report prints with discovery
+/// marked unavailable and the exit stays 1.
 pub(crate) async fn run_diagnostics(
     endpoint: &str,
     tls_files: Option<ClientTlsFiles>,
@@ -268,21 +267,40 @@ pub(crate) async fn run_diagnostics(
         eprintln!("diagnostics: --timeout-secs must be positive");
         return 2;
     }
-    let outcome = tokio::time::timeout(
-        std::time::Duration::from_secs(timeout_secs),
-        collect(endpoint, tls_files, service),
-    )
-    .await;
-    let (status, probe) = match outcome {
-        Err(_) => {
-            eprintln!("diagnostics timed out after {timeout_secs}s");
-            return 2;
-        }
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let (status, channel) =
+        match tokio::time::timeout_at(deadline, connect_and_check(endpoint, tls_files, service))
+            .await
+        {
+            Err(_) => {
+                eprintln!("diagnostics timed out after {timeout_secs}s");
+                return 2;
+            }
+            Ok(Err(failure)) => {
+                eprintln!("{}", failure.message);
+                return failure.code;
+            }
+            Ok(Ok(connected)) => connected,
+        };
+    // Discovery is best-effort evidence under NOT_SERVING, a gate
+    // under SERVING — but either way it must not outlive the
+    // deadline, and its timeout must not erase a health verdict.
+    let probe = match tokio::time::timeout_at(deadline, discover(channel)).await {
+        Ok(Ok(probe)) => Some(probe),
         Ok(Err(failure)) => {
-            eprintln!("{}", failure.message);
-            return failure.code;
+            if status == ServingStatus::Serving {
+                eprintln!("{}", failure.message);
+                return failure.code;
+            }
+            None
         }
-        Ok(Ok(collected)) => collected,
+        Err(_) => {
+            if status == ServingStatus::Serving {
+                eprintln!("diagnostics discovery timed out after {timeout_secs}s");
+                return 2;
+            }
+            None
+        }
     };
     let report =
         DiagnosticReport::from_probe(endpoint, service, status_label(status), probe.as_ref());
