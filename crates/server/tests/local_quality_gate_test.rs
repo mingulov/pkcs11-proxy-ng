@@ -1783,6 +1783,35 @@ fn deny_blocks_main_leg_with_standalone_coverage() {
 }
 
 #[test]
+fn nightly_miri_types_leg_skips_toml_bound_suites() {
+    // 2026-10-06 nightly: the manifest TOML parse stalls under Miri (a
+    // parse-only test exceeded 600 s; the module runs in 0.02 s
+    // natively), hanging the whole Miri job behind it — same pathology
+    // as the earlier mechanism_registry skip. The types leg must skip
+    // both TOML-bound suites and serialize the interpreter so any
+    // future hang stays attributable to one test.
+    let root = workspace_root();
+    let nightly = fs::read_to_string(root.join(".github/workflows/nightly.yml"))
+        .expect(".github/workflows/nightly.yml should be readable");
+    let leg = nightly
+        .split("miri-types:")
+        .nth(1)
+        .expect("nightly should have a miri-types leg")
+        .split("miri-shim:")
+        .next()
+        .expect("miri-shim leg should follow miri-types");
+    for flag in ["--skip mechanism_registry --skip mechanism_param_manifest", "--test-threads=1"] {
+        assert!(leg.contains(flag), "nightly miri-types leg should carry `{flag}`");
+    }
+    let shapes = fs::read_to_string(root.join("crates/types/src/shape_descriptors.rs"))
+        .expect("shape_descriptors.rs should be readable");
+    assert!(
+        shapes.contains("cfg_attr(miri, ignore"),
+        "registry-loading shape_descriptors tests should stay Miri-ignored (each uncached load costs ~50 s)"
+    );
+}
+
+#[test]
 fn release_notes_awk_matches_version_literally() {
     // W1-L17-17: the release-notes awk interpolated the version as regex,
     // so 0.2.0 also matched a hypothetical ## [0x2x0] heading. The version
@@ -1977,25 +2006,26 @@ fn live_tier_wires_retained_oracle_and_sigterm() {
 }
 
 #[test]
-fn nightly_extracts_noble_softhsm_i386_runtime_dependency_closure() {
+fn nightly_extracts_softhsm_i386_runtime_dependency_closure() {
+    // Ubuntu 26.04 i386 closure (was Noble-pinned): the extracted
+    // SoftHSM package needs libssl plus the compression runtimes its
+    // closure links — the 2026-10-06 nightly failed ldd with
+    // libz.so.1 and libzstd.so.1 not found.
     let root = workspace_root();
     let nightly = fs::read_to_string(root.join(".github/workflows/nightly.yml"))
         .expect(".github/workflows/nightly.yml should be readable");
-
-    assert!(
-        nightly.contains("libssl3t64:i386"),
-        "the extracted i386 SoftHSM package needs its libssl3t64 runtime dependency"
-    );
-    assert!(
-        nightly.contains("dpkg -x libssl3t64_*i386.deb /opt/softhsm2-i386/"),
-        "the i386 libssl/libcrypto package should be extracted beside SoftHSM"
-    );
-    for newer_suite_package in ["zlib1g:i386", "libzstd1:i386", "openssl-provider-legacy:i386"] {
+    for package in ["libsofthsm2:i386", "libssl3t64:i386", "zlib1g:i386", "libzstd1:i386"] {
+        let stem = package.strip_suffix(":i386").expect("i386 package");
+        assert!(nightly.contains(package), "nightly should download {package}");
         assert!(
-            !nightly.contains(newer_suite_package),
-            "{newer_suite_package} is not part of the Ubuntu 24.04 Noble libssl closure"
+            nightly.contains(&format!("dpkg -x {stem}_*i386.deb /opt/softhsm2-i386/")),
+            "nightly should extract {package} beside SoftHSM"
         );
     }
+    assert!(
+        !nightly.contains("openssl-provider-legacy:i386"),
+        "openssl-provider-legacy:i386 is not part of the 26.04 libssl closure (providers ship in libssl3t64)"
+    );
 }
 
 #[test]
