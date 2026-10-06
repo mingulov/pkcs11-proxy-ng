@@ -35,11 +35,17 @@ Export contract (``pool-evidence/v1``)::
 
 Validation is fail-closed: a wrong ``format``, a row whose
 ``run_id`` differs (mixed-run merge), a malformed commit, a bad
-gate, a negative or boolean count, an ``INCOMPLETE`` row without
-reasons, a ``FAIL`` row without a disposition, or any
-``pkcs11-mock`` row refuses. An empty ``providers`` map is valid
-and renders a "no evidence yet" placeholder; run identity is then
-vacuous and unchecked.
+gate, a negative or boolean count, a timestamp without an explicit
+offset, or any ``pkcs11-mock`` row refuses. Verdict and
+completion must agree: ``PASS`` needs a completed row with zero
+regressions, zero incompletes, no reasons, and no disposition;
+``FAIL`` needs a completed row with a recorded disposition (a
+zero-count FAIL is allowed — the disposition explains it, e.g. a
+crash mismatch outside these counts); ``INCOMPLETE`` needs an
+incomplete row with reasons and no disposition. Any row with a
+nonzero ``incomplete`` count needs reasons. An empty ``providers``
+map is valid and renders a "no evidence yet" placeholder; run
+identity is then vacuous and unchecked.
 
 Usage::
 
@@ -113,11 +119,17 @@ def validate(evidence):
 
 
 def _parse_time(value):
+    # An explicit offset is required: a bare date or a naive
+    # timestamp leaves the run's instant ambiguous, so it refuses
+    # even though fromisoformat would accept it.
     try:
-        return datetime.datetime.fromisoformat(
+        parsed = datetime.datetime.fromisoformat(
             value.replace("Z", "+00:00"))
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed
 
 
 def _validate_row(name, row, run_id):
@@ -144,17 +156,42 @@ def _validate_row(name, row, run_id):
         if value < 0:
             raise SupportMatrixError(f"{where}: {count} must be >= 0")
     reasons = row.get("incomplete_reasons", [])
-    if gate == "INCOMPLETE" or not row["complete"]:
-        if (not isinstance(reasons, list) or not reasons
-                or not all(isinstance(each, str) and each
-                           for each in reasons)):
+    if (not isinstance(reasons, list)
+            or not all(isinstance(each, str) and each
+                       for each in reasons)):
+        raise SupportMatrixError(
+            f"{where}: incomplete_reasons must be a list of non-empty strings")
+    disposition = row.get("disposition", "")
+    if not isinstance(disposition, str):
+        raise SupportMatrixError(f"{where}: disposition must be a string")
+    complete = row["complete"]
+    if gate == "PASS":
+        if not complete:
+            raise SupportMatrixError(f"{where}: PASS needs complete=true")
+        if row["regressions"] != 0 or row["incomplete"] != 0:
+            raise SupportMatrixError(
+                f"{where}: PASS needs zero regressions and zero incompletes")
+        if reasons:
+            raise SupportMatrixError(f"{where}: PASS takes no incomplete_reasons")
+        if disposition:
+            raise SupportMatrixError(f"{where}: PASS takes no disposition")
+    elif gate == "FAIL":
+        if not complete:
+            raise SupportMatrixError(f"{where}: FAIL needs complete=true")
+        if not disposition:
+            raise SupportMatrixError(
+                f"{where}: FAIL rows need a recorded disposition")
+    else:  # INCOMPLETE
+        if complete:
+            raise SupportMatrixError(f"{where}: INCOMPLETE needs complete=false")
+        if not reasons:
             raise SupportMatrixError(
                 f"{where}: incomplete rows need incomplete_reasons")
-    disposition = row.get("disposition", "")
-    if gate == "FAIL" and not (isinstance(disposition, str)
-                              and disposition):
+        if disposition:
+            raise SupportMatrixError(f"{where}: INCOMPLETE takes no disposition")
+    if row["incomplete"] > 0 and not reasons:
         raise SupportMatrixError(
-            f"{where}: FAIL rows need a recorded disposition")
+            f"{where}: nonzero incomplete count needs incomplete_reasons")
     evidence = row.get("evidence", "")
     if evidence is None:
         raise SupportMatrixError(f"{where}: evidence must be a string")

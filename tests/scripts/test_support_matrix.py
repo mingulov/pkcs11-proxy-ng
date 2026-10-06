@@ -50,6 +50,32 @@ class SupportMatrixValidationTests(unittest.TestCase):
         export = sm.validate({"format": "pool-evidence/v1", "providers": {}})
         self.assertEqual(export["providers"], {})
 
+    def test_valid_verdict_shapes(self):
+        shapes = {
+            "clean-pass": make_row(),
+            "fail-with-cause": make_row(gate="FAIL", regressions=2,
+                                        disposition="triaged drift"),
+            "zero-count-fail": make_row(gate="FAIL",
+                                        disposition="crash mismatch"),
+            "incomplete": make_row(gate="INCOMPLETE", complete=False,
+                                   incomplete=3,
+                                   incomplete_reasons=["shard lost"]),
+            "fail-with-partial": make_row(gate="FAIL", regressions=1,
+                                          incomplete=2,
+                                          incomplete_reasons=["shard lost"],
+                                          disposition="triaged drift"),
+        }
+        for name, row in shapes.items():
+            with self.subTest(shape=name):
+                validated = sm.validate(make_export(providers={"softhsm2": row}))
+                self.assertEqual(validated["providers"]["softhsm2"]["gate"],
+                                 row["gate"])
+
+    def test_explicit_offset_accepted(self):
+        export = make_export(generated_at="2026-10-06T03:14:00+00:00")
+        self.assertEqual(sm.validate(export)["generated_at"],
+                         "2026-10-06T03:14:00+00:00")
+
     def test_rejections(self):
         bad_row = make_row(gate="PASS", complete=True)
         cases = {
@@ -68,6 +94,11 @@ class SupportMatrixValidationTests(unittest.TestCase):
                 "framework.commit must be"),
             "bad-generated-at": (make_export(generated_at="soon"),
                                  "generated_at must be"),
+            "date-only-generated-at": (make_export(generated_at="2026-10-06"),
+                                       "generated_at must be"),
+            "naive-generated-at": (
+                make_export(generated_at="2026-10-06T03:14:00"),
+                "generated_at must be"),
             "bad-provider-name": (
                 make_export(providers={"Soft HSM": bad_row}),
                 "invalid provider name"),
@@ -95,15 +126,53 @@ class SupportMatrixValidationTests(unittest.TestCase):
                     k: v for k, v in make_row().items()
                     if k != "improvements"}}),
                 "improvements must be an integer"),
-            "incomplete-without-reasons": (
-                make_export(providers={"softhsm2": make_row(gate="INCOMPLETE")}),
-                "incomplete rows need incomplete_reasons"),
-            "partial-without-reasons": (
+            "reasons-not-list": (
+                make_export(providers={"softhsm2": make_row(incomplete_reasons="x")}),
+                "incomplete_reasons must be a list"),
+            "disposition-not-string": (
+                make_export(providers={"softhsm2": make_row(disposition=42)}),
+                "disposition must be a string"),
+            "pass-incomplete-row": (
                 make_export(providers={"softhsm2": make_row(complete=False)}),
-                "incomplete rows need incomplete_reasons"),
+                "PASS needs complete=true"),
+            "pass-with-regressions": (
+                make_export(providers={"softhsm2": make_row(regressions=1)}),
+                "PASS needs zero regressions"),
+            "pass-with-incomplete-count": (
+                make_export(providers={"softhsm2": make_row(incomplete=3)}),
+                "PASS needs zero regressions"),
+            "pass-with-reasons": (
+                make_export(providers={"softhsm2": make_row(
+                    incomplete_reasons=["note"])}),
+                "PASS takes no incomplete_reasons"),
+            "pass-with-disposition": (
+                make_export(providers={"softhsm2": make_row(disposition="note")}),
+                "PASS takes no disposition"),
+            "fail-incomplete-row": (
+                make_export(providers={"softhsm2": make_row(gate="FAIL", complete=False,
+                                                            disposition="x")}),
+                "FAIL needs complete=true"),
             "fail-without-disposition": (
                 make_export(providers={"softhsm2": make_row(gate="FAIL")}),
                 "FAIL rows need a recorded disposition"),
+            "fail-with-incomplete-no-reasons": (
+                make_export(providers={"softhsm2": make_row(
+                    gate="FAIL", regressions=1, incomplete=2,
+                    disposition="triaged")}),
+                "nonzero incomplete count needs incomplete_reasons"),
+            "incomplete-complete-row": (
+                make_export(providers={"softhsm2": make_row(
+                    gate="INCOMPLETE", incomplete_reasons=["x"])}),
+                "INCOMPLETE needs complete=false"),
+            "incomplete-without-reasons": (
+                make_export(providers={"softhsm2": make_row(gate="INCOMPLETE",
+                                                            complete=False)}),
+                "incomplete rows need incomplete_reasons"),
+            "incomplete-with-disposition": (
+                make_export(providers={"softhsm2": make_row(
+                    gate="INCOMPLETE", complete=False,
+                    incomplete_reasons=["x"], disposition="note")}),
+                "INCOMPLETE takes no disposition"),
             "evidence-not-string": (
                 make_export(providers={"softhsm2": make_row(evidence=42)}),
                 "evidence must be a string"),
