@@ -750,6 +750,18 @@ jobs:
           ref: ${{ inputs.tag }}
           fetch-depth: 1
 
+      # The tag checkout above predates scripts/release-upload.sh, so fetch
+      # just the script from the workflow ref (the same ref this file runs
+      # from) into a side directory; the tag checkout stays put for notes.
+      - name: Checkout uploader script from workflow ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          sparse-checkout: |
+            scripts/release-upload.sh
+          path: .release-uploader
+
       - name: Install Python for release checks
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
@@ -872,7 +884,7 @@ jobs:
       # staged (missing-only) files; see scripts/release-upload.sh.
       - name: Create or extend the GitHub release
         if: steps.compare.outputs.add_count != '0'
-        run: scripts/release-upload.sh
+        run: .release-uploader/scripts/release-upload.sh
         env:
           RELEASE_TITLE: pkcs11-proxy-ng ${{ inputs.tag }}
           RELEASE_NOTES: RELEASE_NOTES.md

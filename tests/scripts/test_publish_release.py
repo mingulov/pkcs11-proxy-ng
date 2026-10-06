@@ -668,15 +668,28 @@ class ReleasePublicationTests(unittest.TestCase):
     def test_single_combined_asset_path_with_exact_tag(self):
         workflow = load_workflow(RELEASE_YML)
         text = job_text("publish", workflow)
-        self.assertEqual(text.count("run: scripts/release-upload.sh"), 1)
+        self.assertEqual(
+            text.count("run: .release-uploader/scripts/release-upload.sh"), 1)
         self.assertIn("RELEASE_TAG", text)
+
+    def test_uploader_comes_from_workflow_ref_not_tag(self):
+        # The publish job checks out the release TAG for notes, but the tag
+        # predates scripts/release-upload.sh, so the script must be fetched
+        # from the workflow ref into a side directory (v0.2.2's dispatch
+        # failed with 127 without this).
+        workflow = load_workflow(RELEASE_YML)
+        text = job_text("publish", workflow)
+        self.assertIn("sparse-checkout", text)
+        self.assertIn("scripts/release-upload.sh", text)
+        self.assertIn("github.sha", text)
 
     def test_divergent_assets_refuse_before_write(self):
         workflow = load_workflow(RELEASE_YML)
         text = job_text("publish", workflow)
         self.assertIn("assets-compare", text)
-        self.assertLess(text.index("assets-compare"),
-                        text.index("run: scripts/release-upload.sh"))
+        self.assertLess(
+            text.index("assets-compare"),
+            text.index("run: .release-uploader/scripts/release-upload.sh"))
 
     def test_manifest_build_skips_itself(self):
         # The prepared-manifest glob must exclude its own output file: the
