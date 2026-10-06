@@ -16,6 +16,7 @@ controlled fixtures. No real GitHub writes, uploads, tags, or network.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -309,6 +310,107 @@ class PublishEvidenceTests(unittest.TestCase):
         permissions = job.get("permissions", {})
         self.assertEqual(permissions.get("actions"), "write")
         self.assertNotEqual(permissions.get("id-token"), "write")
+
+    def test_dispatch_inputs_artifact_records_recovery_command(self):
+        # A failed release must be recoverable without log-diving
+        # for its inputs: the dispatch-release job records the
+        # exact fresh-dispatch command as an artifact (see
+        # doc/release/recovery.md). It targets main by design (a
+        # post-tag workflow fix needs a fresh dispatch), so the
+        # recorded command must pin --ref main, not the tag. The
+        # record/upload steps run BEFORE the dispatch so a dispatch
+        # failure still leaves the artifact behind.
+        workflow = load_workflow(PUBLISH_YML)
+        job = workflow["jobs"]["dispatch-release"]
+        steps = [step for step in job.get("steps", [])
+                 if isinstance(step, dict)]
+        records = [step for step in steps
+                   if "dispatch-release.sh" in str(step.get("run", ""))]
+        self.assertEqual(len(records), 1)
+        script = records[0]["run"]
+        self.assertIn("gh workflow run release.yml", script)
+        self.assertIn("--ref main", script)
+        # Values are double-quoted: qualification URLs legitimately
+        # contain & and spaces, which break unquoted arguments.
+        for flag in ('-f tag="', '-f candidate_run_id="',
+                     '-f qualification-url="',
+                     '-f qualification-subject="'):
+            with self.subTest(flag=flag):
+                self.assertIn(flag, script)
+        uploads = [step for step in steps
+                   if "actions/upload-artifact@"
+                   in str(step.get("uses", ""))]
+        self.assertEqual(len(uploads), 1)
+        with_ = uploads[0].get("with", {})
+        name = str(with_.get("name", ""))
+        self.assertTrue(name.startswith("dispatch-inputs-"))
+        # Run- and attempt-scoped: a job retry must not collide
+        # with an earlier attempt's artifact (overwrite is false).
+        self.assertRegex(name, r"\$\{{\s*github\.run_id\s*\}\}")
+        self.assertRegex(name, r"\$\{{\s*github\.run_attempt\s*\}\}")
+        self.assertEqual(with_.get("path"),
+                         "dispatch-inputs/dispatch-release.sh")
+        order = step_names(job)
+        dispatch = "Dispatch release from the published tag"
+        self.assertLess(order.index(records[0]["name"]),
+                        order.index(uploads[0]["name"]))
+        self.assertLess(order.index(uploads[0]["name"]),
+                        order.index(dispatch))
+
+    @unittest.skipUnless(shutil.which("bash"), "bash is required to replay the record step")
+    def test_recorded_command_executes_with_exact_arguments(self):
+        # Render the record step with hostile-but-valid values (a
+        # qualification URL containing & and a space), replay it,
+        # and run the generated script against a stub gh: the
+        # recovered command must carry every value exactly.
+        workflow = load_workflow(PUBLISH_YML)
+        job = workflow["jobs"]["dispatch-release"]
+        records = [step for step in job.get("steps", [])
+                   if isinstance(step, dict)
+                   and "dispatch-release.sh" in str(step.get("run", ""))]
+        self.assertEqual(len(records), 1)
+        block = records[0]["run"]
+        values = {
+            "${{ needs.preflight.outputs.tag }}": "v9.9.9",
+            "${{ github.repository }}": "owner/repo",
+            "${{ github.run_id }}": "123",
+            "${{ needs.preflight.outputs.qual_url }}":
+                "https://example.invalid/q?a=1&b=two words",
+            "${{ needs.preflight.outputs.qual_subject }}": "ab12cd34",
+        }
+        for expression, value in values.items():
+            self.assertIn(expression, block)
+            block = block.replace(expression, value)
+        self.assertNotIn("${{", block)
+        tmp = Path(tempfile.mkdtemp(prefix="dispatch-inputs-test-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        bindir = tmp / "bin"
+        bindir.mkdir()
+        gh = bindir / "gh"
+        gh.write_text("#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" >\"$GH_ARGS_LOG\"\n",
+                      encoding="utf-8")
+        gh.chmod(0o755)
+        record = tmp / "record.sh"
+        record.write_text(block, encoding="utf-8")
+        env = dict(os.environ)
+        env.update({
+            "PATH": f"{bindir}{os.pathsep}{env.get('PATH', '')}",
+            "GH_ARGS_LOG": str(tmp / "gh-args.log"),
+        })
+        rendered = tmp / "dispatch-inputs" / "dispatch-release.sh"
+        replay = subprocess.run(["bash", str(record)], cwd=tmp, env=env,
+                                text=True, capture_output=True, timeout=60)
+        self.assertEqual(replay.returncode, 0, replay.stderr)
+        self.assertTrue(rendered.exists())
+        run = subprocess.run(["bash", str(rendered)], cwd=tmp, env=env,
+                             text=True, capture_output=True, timeout=60)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual((tmp / "gh-args.log").read_text(encoding="utf-8").splitlines(),
+                         ["workflow", "run", "release.yml", "--ref", "main",
+                          "-R", "owner/repo", "-f", "tag=v9.9.9",
+                          "-f", "candidate_run_id=123",
+                          "-f", "qualification-url=https://example.invalid/q?a=1&b=two words",
+                          "-f", "qualification-subject=ab12cd34"])
 
     def test_individual_recovery_prints_full_follow_up_command(self):
         workflow = load_workflow(PUBLISH_YML)

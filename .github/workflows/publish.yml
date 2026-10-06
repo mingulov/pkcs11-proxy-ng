@@ -528,6 +528,46 @@ jobs:
       contents: read
       actions: write
     steps:
+      # Recovery artifact: the exact fresh-dispatch command, recorded
+      # BEFORE dispatching so a dispatch failure still leaves it
+      # behind (see doc/release/recovery.md). It intentionally targets
+      # main, not the tag: recovery usually follows a post-tag
+      # workflow fix, and only a fresh main dispatch picks it up
+      # (reruns reuse the frozen workflow file). For a
+      # byte-identical workflow rerun after a purely transient
+      # failure, swap --ref back to the tag.
+      - name: Record recovery dispatch inputs
+        run: |
+          set -euo pipefail
+          mkdir -p dispatch-inputs
+          # Quoted heredoc: GitHub interpolates its expressions
+          # first, then bash writes the rest literally, so the values
+          # land verbatim (hence single backslashes: there is no
+          # shell unescaping pass). Values are double-quoted in the
+          # generated script because qualification URLs legitimately
+          # contain & and spaces.
+          cat > dispatch-inputs/dispatch-release.sh <<'EOF'
+          # Recovery dispatch for ${{ needs.preflight.outputs.tag }} (see
+          # doc/release/recovery.md). Review, then run.
+          gh workflow run release.yml --ref main \
+            -R "${{ github.repository }}" \
+            -f tag="${{ needs.preflight.outputs.tag }}" \
+            -f candidate_run_id="${{ github.run_id }}" \
+            -f qualification-url="${{ needs.preflight.outputs.qual_url }}" \
+            -f qualification-subject="${{ needs.preflight.outputs.qual_subject }}"
+          EOF
+
+      - name: Upload dispatch inputs artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          # Run- and attempt-scoped: a job retry must not collide
+          # with (and fail on) an earlier attempt's artifact.
+          name: dispatch-inputs-${{ needs.preflight.outputs.tag }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dispatch-inputs/dispatch-release.sh
+          retention-days: 90
+          overwrite: false
+          if-no-files-found: error
+
       - name: Dispatch release from the published tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
