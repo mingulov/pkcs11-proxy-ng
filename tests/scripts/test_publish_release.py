@@ -16,6 +16,7 @@ controlled fixtures. No real GitHub writes, uploads, tags, or network.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -714,6 +715,72 @@ class ReleasePublicationTests(unittest.TestCase):
         self.assertNotIn("git push --force", text)
         self.assertNotIn("delete-release", text)
         self.assertNotIn("allowUpdates: true", text)
+
+
+class ReleaseTagCheckoutScriptTests(unittest.TestCase):
+    """Jobs that check out the release tag must not run bare repo scripts.
+
+    The tag predates any file added after it was cut: v0.2.2's publish
+    step died with 127 on ``scripts/release-upload.sh`` for exactly this
+    reason. Repo scripts in tag-checkout jobs must come through the
+    ``.release-uploader/`` side checkout (workflow ref), except a pinned
+    allowlist of scripts old enough to exist in every tag tree.
+    """
+
+    # Scripts predating every release tag; safe to run from a tag tree.
+    TAG_TREE_SCRIPTS = ("verify-release-subject.sh", "verify-quality-receipt.sh")
+
+    def tag_checkout_jobs(self, workflow):
+        jobs = []
+        for job_id, job in workflow["jobs"].items():
+            if "uses" in job or "steps" not in job:
+                continue
+            steps = job["steps"]
+            refs = [str(step.get("with", {}).get("ref", "")) for step in steps]
+            if any("inputs.tag" in ref for ref in refs):
+                jobs.append((job_id, steps))
+        return jobs
+
+    def test_uploader_side_checkout_is_bound(self):
+        # The bare-script guard below exempts `.release-uploader/`
+        # paths; this pins what that exemption resolves to, so a
+        # renamed path, a tag-bound ref, or a widened sparse
+        # selection fails here instead of silently reintroducing
+        # the v0.2.2 exit-127 class.
+        workflow = load_workflow(RELEASE_YML)
+        job = workflow["jobs"]["publish"]
+        steps = [step for step in job.get("steps", [])
+                 if isinstance(step, dict)]
+        side = [step for step in steps
+                if str(step.get("with", {}).get("path", ""))
+                == ".release-uploader"]
+        self.assertEqual(len(side), 1)
+        with_ = side[0]["with"]
+        self.assertIn("github.sha", str(with_.get("ref", "")))
+        self.assertIn("scripts/release-upload.sh",
+                      str(with_.get("sparse-checkout", "")))
+        runs = "\n".join(run_blocks(job))
+        self.assertIn(".release-uploader/scripts/release-upload.sh",
+                      runs)
+
+    def test_no_bare_repo_scripts_in_tag_jobs(self):
+        workflow = load_workflow(RELEASE_YML)
+        jobs = self.tag_checkout_jobs(workflow)
+        self.assertTrue(jobs, "expected tag-checkout jobs in release.yml")
+        for job_id, steps in jobs:
+            with self.subTest(job=job_id):
+                for step in steps:
+                    for line in str(step.get("run", "")).splitlines():
+                        code = line.split("#", 1)[0]
+                        for match in re.finditer(r"scripts/[\w./-]+\.sh", code):
+                            prefix = code[max(0, match.start() - 18):match.start()]
+                            if prefix.endswith(".release-uploader/"):
+                                continue
+                            name = match.group(0).rsplit("/", 1)[-1]
+                            self.assertIn(
+                                name, self.TAG_TREE_SCRIPTS,
+                                f"{job_id}: bare {match.group(0)} may postdate "
+                                "the tag; fetch it from the workflow ref")
 
 
 class StagingWorkflowTests(unittest.TestCase):
