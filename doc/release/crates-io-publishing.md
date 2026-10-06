@@ -45,7 +45,7 @@ patch release — docs failures never block the crates upload itself.
 - Rust **1.98.1** for release builds and packaging; **1.88.0** is the
   MSRV and the registry-consumer gate. `rust-toolchain.toml` pins the
   default channel; CI and publication workflows pin both explicitly.
-- `protoc` **36.1** (`mise.toml` is canonical). No vendored protoc and
+- `protoc` **36.2** (`mise.toml` is canonical). No vendored protoc and
   no alternate code-generation path.
 - Native dependencies per lane: SoftHSM2/OpenSC for provider smokes;
   clang/lld/nasm plus `cargo-xwin 0.23.1` for the Windows MSVC

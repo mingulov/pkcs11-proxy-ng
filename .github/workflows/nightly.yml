@@ -49,12 +49,12 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           submodules: recursive
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Build test image
         run: |
@@ -90,7 +90,7 @@ jobs:
 
       - name: Upload matrix log
         if: always()
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: matrix-log-${{ github.run_id }}
           path: matrix-run.log
@@ -103,24 +103,24 @@ jobs:
     name: Tier 0 sanity (nightly)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install protoc (pinned, matches mise.toml)
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
         with:
           # W1-L16-13: single protoc version everywhere; must match
           # mise.toml.
-          version: "36.1"
+          version: "36.2"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install pinned toolchain with components
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: 1.98.1
           components: rustfmt,clippy
 
       - name: Cache cargo
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -165,7 +165,7 @@ jobs:
     # hook-target builds) and SIGTERM drain legs in the live tier.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install system dependencies
         run: |
@@ -199,11 +199,11 @@ jobs:
         with:
           # W1-L16-13: single protoc version everywhere; must match
           # mise.toml.
-          version: "36.1"
+          version: "36.2"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install pinned toolchain with i686 target
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: 1.98.1
           targets: i686-unknown-linux-gnu
@@ -226,24 +226,24 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install protoc (pinned, matches mise.toml)
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
         with:
           # W1-L16-13: single protoc version everywhere; must match
           # mise.toml.
-          version: "36.1"
+          version: "36.2"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install pinned toolchain with llvm-tools
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: 1.98.1
           components: llvm-tools-preview
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@166cdddc0349c6f3c1da17f66a8fc88ec3bc4dd5 # cargo-llvm-cov
+        uses: taiki-e/install-action@24b35e792c4eb272ee06051198c72db034fd0be3 # cargo-llvm-cov
 
       - name: cargo llvm-cov (workspace)
         run: |
@@ -252,7 +252,7 @@ jobs:
           cargo llvm-cov report --locked --summary-only | tee coverage-summary.txt
 
       - name: Upload coverage artifacts
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: coverage
           path: |
@@ -268,18 +268,18 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install protoc (pinned, matches mise.toml)
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
         with:
           # W1-L16-13: single protoc version everywhere; must match
           # mise.toml.
-          version: "36.1"
+          version: "36.2"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install nightly toolchain with miri
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: nightly
           components: miri
@@ -417,16 +417,16 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install protoc (pinned, matches mise.toml)
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
         with:
-          version: "36.1"
+          version: "36.2"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install nightly toolchain
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: nightly
 
@@ -458,7 +458,7 @@ jobs:
 
       - name: Upload crash artifacts on failure
         if: failure()
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: fuzz-crashes
           path: fuzz/artifacts/
@@ -478,10 +478,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install pinned toolchain
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: 1.98.1
 

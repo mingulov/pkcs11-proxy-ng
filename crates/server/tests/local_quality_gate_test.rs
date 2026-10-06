@@ -1093,6 +1093,11 @@ const XPLAT_PINNED_EXCLUSIONS: &[&str] = &[
     "test_bad_mechanism_with_bad_key_size",
     "(test_null_template_nonzero_count and C_GenerateKey)",
     "test_dh_rejects_tiny_prime",
+    "test_eddsa_context_mismatch_does_not_verify",
+    "test_eddsa_pure_and_ctx_modes_do_not_cross_verify",
+    "test_eddsa_ph_mode_does_not_cross_verify",
+    "test_edwards25519_ctx_null_pointer_roundtrip",
+    "test_edwards25519_ctx_empty_bytes_roundtrip",
 ];
 
 #[test]
@@ -1710,7 +1715,7 @@ fn ci_runs_pinned_shellcheck_over_all_scripts() {
 
 #[test]
 fn artifact_action_versions_are_uniform() {
-    // W1-L17-13: every actions/upload-artifact site pins the same v5 SHA
+    // W1-L17-13: every actions/upload-artifact site pins the same v7 SHA
     // (nightly/xplat lagged on v4 while release/cache used v5).
     let root = workspace_root();
     let mut pins: Vec<(String, String)> = Vec::new();
@@ -1726,8 +1731,8 @@ fn artifact_action_versions_are_uniform() {
             assert_eq!(sha.len(), 40, "upload-artifact pin should be a full SHA: `{line}`");
             pins.push((workflow.to_string(), sha));
             assert!(
-                line.contains("# v5"),
-                "{workflow} upload-artifact pin should be tagged v5: `{line}`"
+                line.contains("# v7"),
+                "{workflow} upload-artifact pin should be tagged v7: `{line}`"
             );
         }
     }

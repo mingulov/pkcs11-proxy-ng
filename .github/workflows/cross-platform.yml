@@ -44,7 +44,10 @@ env:
   CARGO_TERM_COLOR: always
   # Deliberately pinned: bump only after the new pkcs11-check release has
   # been qualified against the current proxy (its suite is the gate).
-  P11CHECK_VERSION: "0.2.0"
+  # 0.2.3 qualified 2026-10-06 by a local direct-vs-proxied run on
+  # SoftHSM 2.6.1 (82,434 nodes, 0 direct/proxied divergences; the 5 new
+  # EdDSA provider-conformance reds below are excluded as atoms 21-25).
+  P11CHECK_VERSION: "0.2.3"
 
 jobs:
   compare:
@@ -71,10 +74,10 @@ jobs:
             experimental: false
 
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: 1.98.1
           # Match rust-toolchain.toml before restoring build artifacts so
@@ -86,14 +89,14 @@ jobs:
         with:
           # W1-L16-13: single protoc version everywhere; must match
           # mise.toml.
-          version: "36.1"
+          version: "36.2"
           # T2run: unauthenticated version-resolution hits the shared
           # GitHub API rate limit (run-8 macOS red); the default token
           # raises the quota.
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
 
@@ -140,7 +143,7 @@ jobs:
         shell: bash
 
       - name: Cache cargo registry and build artifacts
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -176,7 +179,7 @@ jobs:
       # proxy in the loop (direct-phase red, provider crash, or
       # direct==proxied parity); proxy bugs are never excluded.
       # W1-L17-09: this list is gated — local_quality_gate_test
-      # xplat_exclusion_list_matches_pinned_record pins all 20 atoms, so
+      # xplat_exclusion_list_matches_pinned_record pins all 25 atoms, so
       # any add/remove fails until the pinned record + justification move
       # together (exclusion edits trip review). The KAT-only residual stays
       # narrowed explicitly (see scripts/ci-direct-vs-proxy.py); the
@@ -202,6 +205,17 @@ jobs:
       #   rejections); test_dh_rejects_tiny_prime (DH tiny-prime
       #   acceptance); test_null_template_nonzero_count+C_GenerateKey
       #   (NULL-template provider crash, C_GenerateKey param only).
+      # - 5 EdDSA nodes, new in pkcs11-check 0.2.3 (atoms 21-25):
+      #   test_eddsa_context_mismatch_does_not_verify,
+      #   test_eddsa_pure_and_ctx_modes_do_not_cross_verify,
+      #   test_eddsa_ph_mode_does_not_cross_verify,
+      #   test_edwards25519_ctx_null_pointer_roundtrip,
+      #   test_edwards25519_ctx_empty_bytes_roundtrip.
+      #   SoftHSM 2.6.1 ignores CK_EDDSA_PARAMS context ("signature
+      #   verified under a different context"), so all 5 fail direct with
+      #   no proxy in the loop; the 2026-10-06 qualification run showed
+      #   the identical 5 red in both phases with 0 other divergences
+      #   across 82,434 nodes (provider conformance, not proxy behavior).
       # Re-admitted by trial (left in the suite, NOT in the -k below):
       # - test_aead: trial 1 green in-suite on all 3 legs, both phases
       #   (0 failed/crashed; run 35470347373, ubuntu job 105970049189).
@@ -211,13 +225,13 @@ jobs:
       #   exclusion and the CI review M-1 /tmp-only citation.
       - name: Direct-vs-proxied comparison
         env:
-          EXTRA_P11CHECK_ARGS: '--match "(not test_ckr_digest) and (not test_ckr_keygen) and (not test_ckr_sign) and (not test_ckr_verify) and (not test_arithmetic_overflow) and (not test_cve_regression) and (not test_ffi_length_boundary) and (not test_padding_oracle) and (not test_parameter_validation) and (not test_scalar_attr_length_extended) and (not test_tookan) and (not test_mech_negative) and (not test_operation_termination) and (not test_set_attribute or test_set_attribute_after_destroy or test_set_attribute_token_object_in_ro_fails) and (not test_verify_operability) and (not (test_ckr_decrypt and test_key_type_inconsistent)) and (not (test_ckr_encrypt and test_key_size_range)) and (not test_bad_mechanism_with_bad_key_size) and (not (test_null_template_nonzero_count and C_GenerateKey)) and (not test_dh_rejects_tiny_prime)"'
+          EXTRA_P11CHECK_ARGS: '--match "(not test_ckr_digest) and (not test_ckr_keygen) and (not test_ckr_sign) and (not test_ckr_verify) and (not test_arithmetic_overflow) and (not test_cve_regression) and (not test_ffi_length_boundary) and (not test_padding_oracle) and (not test_parameter_validation) and (not test_scalar_attr_length_extended) and (not test_tookan) and (not test_mech_negative) and (not test_operation_termination) and (not test_set_attribute or test_set_attribute_after_destroy or test_set_attribute_token_object_in_ro_fails) and (not test_verify_operability) and (not (test_ckr_decrypt and test_key_type_inconsistent)) and (not (test_ckr_encrypt and test_key_size_range)) and (not test_bad_mechanism_with_bad_key_size) and (not (test_null_template_nonzero_count and C_GenerateKey)) and (not test_dh_rejects_tiny_prime) and (not test_eddsa_context_mismatch_does_not_verify) and (not test_eddsa_pure_and_ctx_modes_do_not_cross_verify) and (not test_eddsa_ph_mode_does_not_cross_verify) and (not test_edwards25519_ctx_null_pointer_roundtrip) and (not test_edwards25519_ctx_empty_bytes_roundtrip)"'
         run: python3 scripts/ci-direct-vs-proxy.py
         shell: bash
 
       - name: Upload comparison artifacts
         if: always()
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: xplat-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
           path: |
@@ -246,10 +260,10 @@ jobs:
     env:
       PKCS11_PROXY_NG_WIN32_STUB_MODULE: ${{ github.workspace }}/target/win32-stub/p11win32stub.dll
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install pinned Rust toolchain with i686 target
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: 1.98.1
           components: rustfmt,clippy
@@ -260,12 +274,12 @@ jobs:
         with:
           # W1-L16-13: single protoc version everywhere; must match
           # mise.toml.
-          version: "36.1"
+          version: "36.2"
           # T2run: same rate-limit hardening as the compare legs.
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Cache cargo registry and build artifacts
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -355,7 +369,7 @@ jobs:
 
       - name: Upload win32 binaries
         if: always()
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: xplat-win32-${{ github.run_id }}
           path: |
