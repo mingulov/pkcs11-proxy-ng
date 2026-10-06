@@ -297,8 +297,12 @@ class SmokeLaneTests(unittest.TestCase):
 
     def test_windows_lane_is_native(self):
         workflow = load_workflow()
-        runs_on = str(workflow["jobs"]["smoke-bundle-windows"].get("runs-on"))
-        self.assertIn("windows", runs_on)
+        job = workflow["jobs"]["smoke-bundle-windows"]
+        images = job.get("strategy", {}).get("matrix", {}).get("os", [])
+        self.assertTrue(images, "smoke-bundle-windows should matrix over Windows images")
+        for image in images:
+            with self.subTest(image=image):
+                self.assertIn("windows", image)
 
     def test_macos_lane_is_native(self):
         workflow = load_workflow()
