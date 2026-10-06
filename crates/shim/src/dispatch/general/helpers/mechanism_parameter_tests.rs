@@ -5710,6 +5710,10 @@ fn matrix_sign_additional_context() {
 // the whole CBC-matrix family (one shared reader path) stays gated on
 // Windows ARM64 until the root cause is found. Narrowly scoped: every
 // other platform/profile runs these tests.
+// Update (PR #44 follow-up): gating did NOT stop the suite crash —
+// the next run segfaulted after matrix_ccm_wrap, outside this
+// family. This gate is containment of the first crash site only;
+// see the win-arm64 header in cross-platform.yml.
 #[cfg(not(all(target_arch = "aarch64", target_os = "windows")))]
 #[test]
 fn matrix_aes_cbc_encrypt_data() {
@@ -5749,6 +5753,10 @@ fn matrix_aes_cbc_encrypt_data() {
 // the whole CBC-matrix family (one shared reader path) stays gated on
 // Windows ARM64 until the root cause is found. Narrowly scoped: every
 // other platform/profile runs these tests.
+// Update (PR #44 follow-up): gating did NOT stop the suite crash —
+// the next run segfaulted after matrix_ccm_wrap, outside this
+// family. This gate is containment of the first crash site only;
+// see the win-arm64 header in cross-platform.yml.
 #[cfg(not(all(target_arch = "aarch64", target_os = "windows")))]
 #[test]
 fn matrix_des_cbc_encrypt_data() {
@@ -5788,6 +5796,10 @@ fn matrix_des_cbc_encrypt_data() {
 // the whole CBC-matrix family (one shared reader path) stays gated on
 // Windows ARM64 until the root cause is found. Narrowly scoped: every
 // other platform/profile runs these tests.
+// Update (PR #44 follow-up): gating did NOT stop the suite crash —
+// the next run segfaulted after matrix_ccm_wrap, outside this
+// family. This gate is containment of the first crash site only;
+// see the win-arm64 header in cross-platform.yml.
 #[cfg(not(all(target_arch = "aarch64", target_os = "windows")))]
 #[test]
 fn matrix_camellia_cbc_encrypt_data() {
@@ -5828,6 +5840,10 @@ fn matrix_camellia_cbc_encrypt_data() {
 // the whole CBC-matrix family (one shared reader path) stays gated on
 // Windows ARM64 until the root cause is found. Narrowly scoped: every
 // other platform/profile runs these tests.
+// Update (PR #44 follow-up): gating did NOT stop the suite crash —
+// the next run segfaulted after matrix_ccm_wrap, outside this
+// family. This gate is containment of the first crash site only;
+// see the win-arm64 header in cross-platform.yml.
 #[cfg(not(all(target_arch = "aarch64", target_os = "windows")))]
 #[test]
 fn matrix_aria_cbc_encrypt_data() {
@@ -5867,6 +5883,10 @@ fn matrix_aria_cbc_encrypt_data() {
 // the whole CBC-matrix family (one shared reader path) stays gated on
 // Windows ARM64 until the root cause is found. Narrowly scoped: every
 // other platform/profile runs these tests.
+// Update (PR #44 follow-up): gating did NOT stop the suite crash —
+// the next run segfaulted after matrix_ccm_wrap, outside this
+// family. This gate is containment of the first crash site only;
+// see the win-arm64 header in cross-platform.yml.
 #[cfg(not(all(target_arch = "aarch64", target_os = "windows")))]
 #[test]
 fn matrix_seed_cbc_encrypt_data() {
