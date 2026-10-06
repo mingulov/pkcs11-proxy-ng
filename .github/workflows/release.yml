@@ -816,6 +816,8 @@ jobs:
           import hashlib, json
           from pathlib import Path
           assets = []
+          # Immune to self-inclusion: the manifest lives at existing/
+          # while globbing existing/files/ (contrast prepared/ below).
           for path in sorted(Path("existing/files").glob("*")):
               if path.is_file():
                   assets.append({"name": path.name,
@@ -827,8 +829,13 @@ jobs:
           import hashlib, json
           from pathlib import Path
           assets = []
+          # The redirect creates prepared/assets.json BEFORE this glob runs,
+          # so exclude it: a self-entry hashes the half-written file and can
+          # never match the released bytes, which wedged v0.2.2's retry with
+          # a divergent refusal (v0.2.1 silently shipped such an entry).
+          # The manifest file itself is compared by bytes below instead.
           for path in sorted(Path("prepared").glob("*")):
-              if path.is_file():
+              if path.is_file() and path.name != "assets.json":
                   assets.append({"name": path.name, "path": str(path),
                                  "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
           print(json.dumps(assets))
@@ -843,6 +850,19 @@ jobs:
             [ -n "$ASSET" ] || continue
             cp "prepared/${ASSET}" stage/
           done < stage/add.txt
+          # The manifest is a published asset but cannot list itself (see
+          # above), so compare it by bytes: missing stages it, identical
+          # skips it, anything else refuses like any divergent asset.
+          if [ -f existing/files/assets.json ]; then
+            if ! cmp -s existing/files/assets.json prepared/assets.json; then
+              echo "::error::released assets.json differs from the prepared manifest; refusing to replace"
+              exit 1
+            fi
+          else
+            cp prepared/assets.json stage/
+            echo "assets.json" >> stage/add.txt
+            ADD_COUNT=$((ADD_COUNT + 1))
+          fi
           echo "add_count=${ADD_COUNT}" >> "$GITHUB_OUTPUT"
 
       # Upload with retries: the softprops action it replaces has a fixed
