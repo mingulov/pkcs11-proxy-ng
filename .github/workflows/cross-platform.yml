@@ -72,6 +72,11 @@ jobs:
             experimental: false
           - os: windows-2022
             experimental: false
+          # windows-2025 (Server 2025 + VS2026) starts experimental;
+          # promote to blocking after the first green leg, per the
+          # macos precedent above.
+          - os: windows-2025
+            experimental: true
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -228,7 +233,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: xplat-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
+          name: xplat-${{ matrix.os }}-${{ runner.arch }}-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/ci-compare-*/direct/results.json
             ${{ runner.temp }}/ci-compare-*/direct/report.jsonl
@@ -239,7 +244,7 @@ jobs:
 
   # ── win32 (i686-pc-windows-msvc) ──────────────────────────────────────────
   # T6b's proof vehicle: native 32-bit build plus the lib suites executed
-  # under WOW64 on windows-2022 (which runs 32-bit test binaries). T2run
+  # under WOW64 on windows-2022/2025 (which run 32-bit test binaries). T2run
   # extends it with a live PE32 loader proof: a minimal 32-bit C stub
   # provider (tests/win32-stub/) compiled with x86 cl.exe, loaded via an
   # env-gated backend test (LoadLibrary + C_GetFunctionList + C_GetInfo).
@@ -249,9 +254,20 @@ jobs:
   # module (out of scope). First green run lands at T2run, which then
   # finishes the win32 doc move.
   win32:
-    name: win32 build + WOW64 tests (i686-pc-windows-msvc)
-    runs-on: windows-2022
+    name: win32 build + WOW64 tests (${{ matrix.os }}, i686-pc-windows-msvc)
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            experimental: false
+          # windows-2025 (VS2026 x86 tools) starts experimental; promote
+          # after the first green leg.
+          - os: windows-2025
+            experimental: true
     env:
       PKCS11_PROXY_NG_WIN32_STUB_MODULE: ${{ github.workspace }}/target/win32-stub/p11win32stub.dll
     steps:
@@ -278,9 +294,9 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: Windows-X86-cargo-win32-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ matrix.os }}-X86-cargo-win32-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            Windows-X86-cargo-win32-
+            ${{ matrix.os }}-X86-cargo-win32-
 
       - name: Build release daemon + shim (win32)
         run: cargo build --locked --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng -p pkcs11-proxy-ng-shim
@@ -365,7 +381,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: xplat-win32-${{ github.run_id }}
+          name: xplat-win32-${{ matrix.os }}-${{ github.run_id }}
           path: |
             target/i686-pc-windows-msvc/release/pkcs11-proxy-ng.exe
             target/i686-pc-windows-msvc/release/pkcs11_proxy_ng_shim.dll

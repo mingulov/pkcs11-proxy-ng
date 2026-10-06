@@ -985,10 +985,14 @@ jobs:
   # and is NOT this native artifact smoke. Windows CRT prerequisites use
   # the runner's own MSVC redist via PATH; no runtime DLLs are bundled.
   smoke-bundle-windows:
-    name: Smoke Windows bundle (native)
-    runs-on: windows-2022
+    name: Smoke Windows bundle (${{ matrix.os }}, native)
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     needs: archive-binary-windows
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -1034,7 +1038,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: smoke-windows-logs-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: smoke-windows-logs-${{ matrix.os }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/smoke-windows/work/
           retention-days: 14
 
