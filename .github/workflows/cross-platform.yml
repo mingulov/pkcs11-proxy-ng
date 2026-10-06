@@ -24,7 +24,9 @@
 # suites green, including the STOP child receipts), windows-x64, plus
 # the standalone `win32` job
 # below (i686-pc-windows-msvc build + WOW64 lib tests; T6b's proof vehicle,
-# first green expected at T2run).
+# first green expected at T2run) and the standalone `win-arm64` job
+# (aarch64-pc-windows-msvc build + native lib tests; experimental, and
+# never a provider comparison — see its header).
 #
 # Auth posture: the daemon runs on loopback TCP with auth="none", the same
 # CI-only shape scripts/test-softhsm2-smoke.sh asserts. Never a default.
@@ -386,4 +388,111 @@ jobs:
             target/i686-pc-windows-msvc/release/pkcs11-proxy-ng.exe
             target/i686-pc-windows-msvc/release/pkcs11_proxy_ng_shim.dll
             target/win32-stub/p11win32stub.dll
+          retention-days: 14
+
+  # ── win-arm64 (aarch64-pc-windows-msvc) ─────────────────────────────────────
+  # Experimental native ARM64 coverage: build plus the lib suites on
+  # windows-11-arm, mirroring the win32 job's shape. Deliberately NOT
+  # the direct-vs-proxied SoftHSM2 comparison: the pinned Windows
+  # SoftHSM2 module is x64-only, and NATIVE_FFI_QUALIFIED excludes
+  # Windows ARM64 (crates/backend/src/ffi/native_domain.rs), so
+  # native provider loading refuses by design. A provider comparison
+  # needs an ARM64 provider module plus an ADR-0014 scope update (out
+  # of scope). Promote (continue-on-error to false) after the first
+  # green leg, per the macos/windows-2025 precedent.
+  win-arm64:
+    name: win-arm64 build + lib tests (windows-11-arm, aarch64-pc-windows-msvc)
+    runs-on: windows-11-arm
+    timeout-minutes: 60
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install pinned Rust toolchain with ARM64 target
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: 1.98.1
+          components: rustfmt,clippy
+          targets: aarch64-pc-windows-msvc
+
+      - name: Install protoc
+        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5
+        with:
+          version: 2026.10.3
+          install_args: "protoc"
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: windows-11-arm-ARM64-cargo-winarm64-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            windows-11-arm-ARM64-cargo-winarm64-
+
+      - name: Build release daemon + shim (win-arm64)
+        run: cargo build --locked --release --target aarch64-pc-windows-msvc -p pkcs11-proxy-ng -p pkcs11-proxy-ng-shim
+        shell: bash
+
+      # vs-shell is composite PowerShell (no Node runtime, no deprecation
+      # warnings); ilammy/msvc-dev-cmd is unmaintained on node20.
+      - name: Set up ARM64 MSVC toolchain
+        uses: egor-tensin/vs-shell@54e4148eac794e4580591c2e0b7750f14b7891fc # v2
+        with:
+          arch: arm64
+
+      # ARM64 runtime for the native test binaries (same 0x7E class as
+      # the x64/x86 legs). PATH exposure, not the hanging vc_redist
+      # installer (see above).
+      - name: Expose MSVC ARM64 runtime
+        run: |
+          VSWHERE="C:/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+          VSDIR=$("$VSWHERE" -latest -property installationPath | tr -d '\r')
+          # The DLLs live under Microsoft.VC*.CRT/, not directly in
+          # the arch dir — find the DLL and expose its directory (the
+          # win32/win64 legs proved both the direct-arch and the
+          # onecore-variant assumptions wrong; same handling here).
+          REDIST_DLL=$(find "$VSDIR/VC/Redist/MSVC" -path '*arm64*' -name 'vcruntime140.dll' -not -path '*onecore*' 2>/dev/null | sort -V | tail -1)
+          if [ -z "$REDIST_DLL" ]; then
+            echo "no arm64 vcruntime140.dll under $VSDIR/VC/Redist/MSVC"
+            ls "$VSDIR/VC/Redist/MSVC" 2>/dev/null || echo "(no Redist/MSVC dir)"
+            exit 1
+          fi
+          REDIST=$(dirname "$REDIST_DLL")
+          echo "$REDIST" >> "$GITHUB_PATH"
+          echo "MSVC arm64 redist: $REDIST"
+        shell: bash
+
+      # An x64 binary running under emulation would still pass tests;
+      # prove the build produced ARM64 machine code ("AA64 machine").
+      - name: Verify ARM64 PE architecture
+        shell: cmd
+        run: |
+          dumpbin /headers target\aarch64-pc-windows-msvc\release\pkcs11-proxy-ng.exe | findstr /C:"AA64 machine"
+          dumpbin /headers target\aarch64-pc-windows-msvc\release\pkcs11_proxy_ng_shim.dll | findstr /C:"AA64 machine"
+
+      - name: Lib test suites (win-arm64, native)
+        run: |
+          # Same GNU-link.exe shadowing as the win32 leg: git-bash
+          # prepends /usr/bin ahead of the dev-cmd MSVC dirs, and
+          # rustc trusts PATH inside a dev prompt — force the MSVC
+          # bindir first or rustc links GNU link.
+          export PATH="$(dirname "$(which cl)"):$PATH"
+          cargo test --locked --release --target aarch64-pc-windows-msvc -p pkcs11-proxy-ng-types
+          cargo test --locked --release --target aarch64-pc-windows-msvc -p pkcs11-proxy-ng-shim --lib
+          cargo test --locked --release --target aarch64-pc-windows-msvc -p pkcs11-proxy-ng-backend --lib
+          cargo test --locked --release --target aarch64-pc-windows-msvc -p pkcs11-proxy-ng --lib
+        shell: bash
+
+      - name: Upload win-arm64 binaries
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: xplat-winarm64-${{ github.run_id }}
+          path: |
+            target/aarch64-pc-windows-msvc/release/pkcs11-proxy-ng.exe
+            target/aarch64-pc-windows-msvc/release/pkcs11_proxy_ng_shim.dll
           retention-days: 14
