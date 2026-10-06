@@ -551,3 +551,76 @@ jobs:
 
       - name: Verify width proofs
         run: cargo kani -p pkcs11-proxy-ng-types --output-format terse
+
+  # ── Release-path probe ────────────────────────────────────────────────────
+  # Exercises the production uploader end to end against a scratch draft
+  # release, then deletes it, so a broken scripts/release-upload.sh (or a
+  # revoked token scope) pages nightly instead of release day. The tag is
+  # unique per run attempt, the release is a draft (never published, so
+  # no watcher notifications even if cleanup fails), and no workflow
+  # triggers on release events — so the create/upload/delete cycle is
+  # side-effect-free. Pinned by tests/scripts/test_nightly_probe.py.
+  release-path-probe:
+    name: Release-path probe (scratch draft)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      PROBE_TAG: nightly-probe-${{ github.run_id }}-${{ github.run_attempt }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Stage probe payload
+        run: |
+          set -euo pipefail
+          mkdir -p probe-stage
+          echo '{"probe": "release-path", "run_id": "${{ github.run_id }}"}' \
+            > probe-stage/probe.json
+          echo "Nightly release-path probe for run ${{ github.run_id }}." \
+            > PROBE_NOTES.md
+          echo "Scratch draft; deleted after the upload round-trip." \
+            >> PROBE_NOTES.md
+
+      # Pre-create as a draft: release-upload.sh only ever creates
+      # published releases, and a leftover probe must never notify.
+      - name: Create scratch draft release
+        run: |
+          set -euo pipefail
+          gh release create "$PROBE_TAG" --draft \
+            -R "${{ github.repository }}" \
+            --title "Nightly probe ${{ github.run_id }}" \
+            --notes-file PROBE_NOTES.md
+
+      - name: Upload probe asset via release-upload.sh
+        run: scripts/release-upload.sh
+        env:
+          RELEASE_TAG: ${{ env.PROBE_TAG }}
+          RELEASE_TITLE: Nightly probe ${{ github.run_id }}
+          RELEASE_NOTES: PROBE_NOTES.md
+          STAGE_DIR: probe-stage
+          UPLOAD_ATTEMPTS: "3"
+          UPLOAD_WINDOW: "120"
+
+      - name: Verify probe asset landed
+        run: |
+          set -euo pipefail
+          gh release view "$PROBE_TAG" -R "${{ github.repository }}" \
+            --json assets -q '.assets[].name' | grep -x probe.json
+          test "$(gh release view "$PROBE_TAG" \
+            -R "${{ github.repository }}" --json isDraft -q .isDraft)" = true
+          rm -rf probe-back && mkdir probe-back
+          gh release download "$PROBE_TAG" -R "${{ github.repository }}" \
+            -p probe.json -D probe-back
+          cmp probe-stage/probe.json probe-back/probe.json
+
+      - name: Delete scratch release
+        if: always()
+        run: |
+          set -euo pipefail
+          if gh release view "$PROBE_TAG" -R "${{ github.repository }}" \
+              >/dev/null 2>&1; then
+            gh release delete "$PROBE_TAG" -R "${{ github.repository }}" \
+              --cleanup-tag --yes
+          fi
