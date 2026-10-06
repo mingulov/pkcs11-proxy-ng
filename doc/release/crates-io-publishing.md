@@ -230,9 +230,11 @@ Every published bundle carries a Sigstore attestation binding it
 to the release tag, tag commit, and qualification — generated in
 the `publish` job after the compare gate, over the full prepared
 set including retained assets, so retries attest every bundle on
-the release. The predicate claims release binding only, never
-"built by this workflow run" (binaries come from registry
-archives). Verify a downloaded bundle with:
+the release, even when nothing new uploads (a complete
+pre-attestation release acquires its attestations on re-run). The
+predicate claims release binding only, never "built by this
+workflow run" (binaries come from registry archives). Verify a
+downloaded bundle with:
 
 ```bash
 gh attestation verify <bundle> \

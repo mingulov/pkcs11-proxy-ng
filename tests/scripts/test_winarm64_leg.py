@@ -91,6 +91,9 @@ class WinArm64LegTests(unittest.TestCase):
                   if "dumpbin" in block and "AA64" in block]
         self.assertEqual(len(checks), 1)
         self.assertIn(TARGET, checks[0])
+        # Both architecture proofs must pass: cmd reports only the
+        # last exit code, so a bare second line would mask the first.
+        self.assertIn("&&", checks[0])
 
     def test_binaries_upload_with_retention(self):
         steps = [step for step in self.job().get("steps", [])

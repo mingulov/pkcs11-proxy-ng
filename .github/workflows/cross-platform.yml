@@ -470,9 +470,10 @@ jobs:
       # prove the build produced ARM64 machine code ("AA64 machine").
       - name: Verify ARM64 PE architecture
         shell: cmd
-        run: |
-          dumpbin /headers target\aarch64-pc-windows-msvc\release\pkcs11-proxy-ng.exe | findstr /C:"AA64 machine"
-          dumpbin /headers target\aarch64-pc-windows-msvc\release\pkcs11_proxy_ng_shim.dll | findstr /C:"AA64 machine"
+        # One && chain: cmd reports only the last command's exit, so
+        # two bare lines would hide a daemon-check failure behind a
+        # passing shim check.
+        run: dumpbin /headers target\aarch64-pc-windows-msvc\release\pkcs11-proxy-ng.exe | findstr /C:"AA64 machine" && dumpbin /headers target\aarch64-pc-windows-msvc\release\pkcs11_proxy_ng_shim.dll | findstr /C:"AA64 machine"
 
       - name: Lib test suites (win-arm64, native)
         run: |

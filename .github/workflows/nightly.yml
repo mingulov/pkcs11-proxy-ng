@@ -621,6 +621,15 @@ jobs:
           set -euo pipefail
           if gh release view "$PROBE_TAG" -R "${{ github.repository }}" \
               >/dev/null 2>&1; then
-            gh release delete "$PROBE_TAG" -R "${{ github.repository }}" \
-              --cleanup-tag --yes
+            gh release delete "$PROBE_TAG" -R "${{ github.repository }}" --yes
+          fi
+          # Drafts may not create their git tag (gh itself warns about
+          # leftover tags only for published releases), and
+          # `gh release delete --cleanup-tag` fails hard on a missing
+          # tag — after a healthy probe that would fail the job. So
+          # remove the tag only when it exists.
+          if gh api "repos/${{ github.repository }}/git/ref/tags/$PROBE_TAG" \
+              >/dev/null 2>&1; then
+            gh api "repos/${{ github.repository }}/git/ref/tags/$PROBE_TAG" \
+              -X DELETE
           fi

@@ -537,25 +537,33 @@ jobs:
       # byte-identical workflow rerun after a purely transient
       # failure, swap --ref back to the tag.
       - name: Record recovery dispatch inputs
+        env:
+          REC_TAG: ${{ needs.preflight.outputs.tag }}
+          REC_RUN_ID: ${{ github.run_id }}
+          REC_QUAL_URL: ${{ needs.preflight.outputs.qual_url }}
+          REC_QUAL_SUBJECT: ${{ needs.preflight.outputs.qual_subject }}
+          REC_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           mkdir -p dispatch-inputs
-          # Quoted heredoc: GitHub interpolates its expressions
-          # first, then bash writes the rest literally, so the values
-          # land verbatim (hence single backslashes: there is no
-          # shell unescaping pass). Values are double-quoted in the
-          # generated script because qualification URLs legitimately
-          # contain & and spaces.
-          cat > dispatch-inputs/dispatch-release.sh <<'EOF'
-          # Recovery dispatch for ${{ needs.preflight.outputs.tag }} (see
-          # doc/release/recovery.md). Review, then run.
-          gh workflow run release.yml --ref main \
-            -R "${{ github.repository }}" \
-            -f tag="${{ needs.preflight.outputs.tag }}" \
-            -f candidate_run_id="${{ github.run_id }}" \
-            -f qualification-url="${{ needs.preflight.outputs.qual_url }}" \
-            -f qualification-subject="${{ needs.preflight.outputs.qual_subject }}"
-          EOF
+          # Values arrive via the environment, where GitHub's
+          # interpolation is literal (the shell never parses it),
+          # then are single-quote-escaped into the generated script:
+          # $(...), backticks, quotes, and & in a value land verbatim
+          # and cannot execute at record or replay time.
+          sq() {
+            printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+          }
+          {
+            echo "# Recovery dispatch for $REC_TAG (see"
+            echo "# doc/release/recovery.md). Review, then run."
+            printf 'gh workflow run release.yml --ref main \\\n'
+            printf '  -R %s \\\n' "$(sq "$REC_REPO")"
+            printf '  -f tag=%s \\\n' "$(sq "$REC_TAG")"
+            printf '  -f candidate_run_id=%s \\\n' "$(sq "$REC_RUN_ID")"
+            printf '  -f qualification-url=%s \\\n' "$(sq "$REC_QUAL_URL")"
+            printf '  -f qualification-subject=%s\n' "$(sq "$REC_QUAL_SUBJECT")"
+          } > dispatch-inputs/dispatch-release.sh
 
       - name: Upload dispatch inputs artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -571,12 +579,20 @@ jobs:
       - name: Dispatch release from the published tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REC_TAG: ${{ needs.preflight.outputs.tag }}
+          REC_RUN_ID: ${{ github.run_id }}
+          REC_QUAL_URL: ${{ needs.preflight.outputs.qual_url }}
+          REC_QUAL_SUBJECT: ${{ needs.preflight.outputs.qual_subject }}
+          REC_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          # Quoted variable use (never interpolated literals): values
+          # with $, backticks, or & pass through verbatim instead of
+          # expanding on the runner.
           gh workflow run release.yml \
-            --ref "${{ needs.preflight.outputs.tag }}" \
-            -R "${{ github.repository }}" \
-            -f tag="${{ needs.preflight.outputs.tag }}" \
-            -f candidate_run_id="${{ github.run_id }}" \
-            -f qualification-url="${{ needs.preflight.outputs.qual_url }}" \
-            -f qualification-subject="${{ needs.preflight.outputs.qual_subject }}"
+            --ref "$REC_TAG" \
+            -R "$REC_REPO" \
+            -f tag="$REC_TAG" \
+            -f candidate_run_id="$REC_RUN_ID" \
+            -f qualification-url="$REC_QUAL_URL" \
+            -f qualification-subject="$REC_QUAL_SUBJECT"
