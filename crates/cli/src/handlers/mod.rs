@@ -1,6 +1,7 @@
 mod admin;
 pub(crate) mod audit;
 mod crypto;
+pub(crate) mod diagnostics;
 mod objects;
 mod query;
 
@@ -74,7 +75,10 @@ pub(crate) fn confirm_destructive(
 pub(crate) fn dispatched_before_client_init(command: &Commands) -> bool {
     matches!(
         command,
-        Commands::ListMechanismNames | Commands::Health { .. } | Commands::Audit { .. }
+        Commands::ListMechanismNames
+            | Commands::Health { .. }
+            | Commands::Diagnostics { .. }
+            | Commands::Audit { .. }
     )
 }
 
@@ -113,13 +117,16 @@ pub(crate) async fn run_command(
         Commands::Random { slot_id, len, format } => {
             query::random(client, slot_id, len, format).await
         }
-        // All three are dispatched in main() before the PKCS#11 client
+        // All four are dispatched in main() before the PKCS#11 client
         // is initialized, so these arms are never reached (W1-C11-20).
         Commands::ListMechanismNames => {
             unreachable!("list-mechanism-names is dispatched in main before client init")
         }
         Commands::Health { .. } => {
             unreachable!("health is dispatched in main before client init")
+        }
+        Commands::Diagnostics { .. } => {
+            unreachable!("diagnostics is dispatched in main before client init")
         }
         Commands::Audit { .. } => {
             unreachable!("audit subcommands are dispatched in main before client init")

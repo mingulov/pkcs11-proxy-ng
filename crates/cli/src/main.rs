@@ -18,12 +18,32 @@ use cli::{AuditCmd, Cli, Commands};
 use handlers::run_command;
 use mechanisms::MECHANISM_NAMES;
 
-/// Build the gRPC endpoint for the `health` probe.
+/// Resolve `--tls-*` flags for a probe command, exiting 2 on unusable
+/// material (probe failure, like a setup/connect/check failure —
+/// never exit 1 via `?`).
+fn probe_tls_files(cli: &Cli, probe: &str) -> Option<ClientTlsFiles> {
+    match ClientTlsFiles::from_optional_paths(
+        cli.tls_ca_cert.clone(),
+        cli.tls_client_cert.clone(),
+        cli.tls_client_key.clone(),
+        cli.tls_domain.clone(),
+    )
+    .map_err(|e| format!("invalid TLS flags: {e}"))
+    {
+        Ok(tls_files) => tls_files,
+        Err(e) => {
+            eprintln!("{probe} probe setup failed: {e}");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// Build the gRPC endpoint for the `health`/`diagnostics` probes.
 ///
 /// `tls_files` carries the daemon TLS material from the `--tls-*` flags
 /// (`None` = plaintext). The probe must present TLS whenever the flags do,
 /// otherwise it fails against a TLS-gated daemon.
-fn build_health_endpoint(
+pub(crate) fn build_health_endpoint(
     endpoint: &str,
     tls_files: Option<ClientTlsFiles>,
 ) -> Result<tonic::transport::Endpoint, String> {
@@ -110,20 +130,7 @@ async fn main() -> Result<(), Box<dyn core::error::Error>> {
         use tonic_health::pb::HealthCheckRequest;
         use tonic_health::pb::health_check_response::ServingStatus;
         use tonic_health::pb::health_client::HealthClient;
-        let tls_files = match ClientTlsFiles::from_optional_paths(
-            cli.tls_ca_cert.clone(),
-            cli.tls_client_cert.clone(),
-            cli.tls_client_key.clone(),
-            cli.tls_domain.clone(),
-        )
-        .map_err(|e| format!("invalid TLS flags: {e}"))
-        {
-            Ok(tls_files) => tls_files,
-            Err(e) => {
-                eprintln!("health probe setup failed: {e}");
-                std::process::exit(2);
-            }
-        };
+        let tls_files = probe_tls_files(&cli, "health");
         let endpoint = match build_health_endpoint(&cli.endpoint, tls_files) {
             Ok(endpoint) => endpoint,
             Err(e) => {
@@ -157,6 +164,25 @@ async fn main() -> Result<(), Box<dyn core::error::Error>> {
             eprintln!("health probe indeterminate: {status:?}");
         }
         std::process::exit(health_exit_code(status));
+    }
+
+    // Passive daemon diagnostics (see handlers::diagnostics): health
+    // plus context-free discovery, before client init so the probe
+    // never consumes the sole admitted context. Same 0/1/2 codes.
+    if let Commands::Diagnostics { service, format, timeout_secs } = &cli.command {
+        let tls_files = probe_tls_files(&cli, "diagnostics");
+        let code = handlers::diagnostics::run_diagnostics(
+            &cli.endpoint,
+            tls_files,
+            service,
+            format,
+            *timeout_secs,
+        )
+        .await;
+        if code == 0 {
+            return Ok(());
+        }
+        std::process::exit(code);
     }
 
     let tls_files = ClientTlsFiles::from_optional_paths(
@@ -199,7 +225,9 @@ fn exit_code_for_error(err: &(dyn core::error::Error + 'static)) -> Option<i32> 
 /// (W1-C11-19): 0 = SERVING, 1 = the daemon answered NOT_SERVING, 2 =
 /// indeterminate (UNKNOWN/SERVICE_UNKNOWN — a probe failure, not a
 /// verdict, like a transport error).
-fn health_exit_code(status: tonic_health::pb::health_check_response::ServingStatus) -> i32 {
+pub(crate) fn health_exit_code(
+    status: tonic_health::pb::health_check_response::ServingStatus,
+) -> i32 {
     use tonic_health::pb::health_check_response::ServingStatus;
     match status {
         ServingStatus::Serving => 0,
