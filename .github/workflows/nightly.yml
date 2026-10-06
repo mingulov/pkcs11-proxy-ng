@@ -176,12 +176,17 @@ jobs:
           sudo dpkg --add-architecture i386
           sudo apt-get update -qq
           # On Ubuntu 26.04, libssl supplies libcrypto and its provider
-          # modules. The installed multilib packages provide the libc closure.
+          # modules, plus the compression runtimes its closure links
+          # (2026-10-06 nightly failed ldd with libz.so.1 and
+          # libzstd.so.1 not found). The installed multilib packages
+          # provide the libc closure.
           apt-get download \
-            libsofthsm2:i386 libssl3t64:i386
+            libsofthsm2:i386 libssl3t64:i386 zlib1g:i386 libzstd1:i386
           sudo mkdir -p /opt/softhsm2-i386
           sudo dpkg -x libsofthsm2_*i386.deb /opt/softhsm2-i386/
           sudo dpkg -x libssl3t64_*i386.deb /opt/softhsm2-i386/
+          sudo dpkg -x zlib1g_*i386.deb /opt/softhsm2-i386/
+          sudo dpkg -x libzstd1_*i386.deb /opt/softhsm2-i386/
           # Second 32-bit provider leg (NSS i386): libsoftokn3 needs its
           # i386 closure (libnspr4 for libnspr4/libplc4/libplds4,
           # libsqlite3-0 for libsqlite3) extracted beside it, and the
@@ -253,14 +258,18 @@ jobs:
             lcov.info
             coverage-summary.txt
 
-  # ── Miri (undefined-behavior interpreter) ─────────────────────────────────
-  # Runs the pure width/translation logic and the shim's unsafe parse paths
-  # (mechanism/message param readers, template input parsing) under Miri.
-  # Tests that need real time/FFI are already `cfg_attr(miri, ignore)`d.
-  miri:
-    name: Miri (types + shim parse paths)
+  # ── Miri legs (undefined-behavior interpreter) ─────────────────────────────
+  # Split 2026-10-06 (was one 45-min job): three independent legs run the
+  # pure width/translation logic, the shim's unsafe parse paths
+  # (mechanism/message param readers, template input parsing), and the
+  # backend lifecycle/registry/mock suites under Miri, so one leg's
+  # slowness can't mask the others' signals (the types leg stalled the
+  # whole job on 2026-10-06). Tests that need real time/FFI are already
+  # `cfg_attr(miri, ignore)`d. Each leg repeats the same setup.
+  miri-types:
+    name: Miri types (width/attribute/logic)
     runs-on: ubuntu-26.04
-    timeout-minutes: 45
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -277,42 +286,62 @@ jobs:
           components: miri
 
       # Scope notes (measured 2026-07-04, expanded 2026-09-28, resharded
-      # 2026-09-30): the types suite runs all-but-registry under Miri
-      # (measured: 114 tests in ~31 s). Only `mechanism_registry::tests`
-      # is skipped (pervasive TOML parsing is too slow under the
-      # interpreter; that edge is covered by fuzz_registry plus the 48
-      # native registry tests instead — Kani registry-query proofs were
-      # attempted and removed as CBMC-intractable, see kani_proofs.rs).
-      # The `--skip` form auto-includes future pure types modules.
-      # Deliberately NOT gated: `mechanism_registry::tests` (above);
-      # the server crate's `consistency_checks` is out of this job's
-      # scope (pure safe string audits, zero unsafe, no UB surface —
-      # assessed 2026-09-30). On the shim, daemon-based
-      # tests:: modules self-gate with #[cfg(not(miri))] in tests/mod.rs
-      # (measured 2026-09-30: 130 passed, 5 ignored in ~101 s across
-      # width_bridge, nested_template_input_tests, not_wild_read plus
-      # the 8 tests:: modules abi_audit, null_pointers,
-      # attribute_classification, dispatch_shape, endpoint, regression,
-      # resource_limits, poison_recovery — poison fixtures use
-      # same-thread catch_unwind; the two TOML-loading registry tests
-      # stay native-only). The backend line
-      # covers the Miri-designed lifecycle/registry state-machine suites
-      # (measured 2026-09-29: 40 tests in ~18 s); dlopen-dependent tests
-      # self-skip under Miri via cfg!(miri) early returns. The raw-pointer
-      # parse paths below are the point.
-      # The mock:: suite is gated PER FILE (measured 2026-09-30): the
-      # one-line `mock::` form times out (20 min, died in workflows after
-      # 159 tests) and profiles+workflows in one process stalls on the
-      # vendor-override test (500 s cap) although every file passes in
-      # isolation and rest+workflows passes combined (129 s) — a
-      # Miri-harness interaction with no UB signal (zero `unsafe` in
-      # mock/; root cause not isolated). Five registry/official-list
-      # matrix tests are cfg_attr(miri, ignore)d with measured notes
-      # (each 240-900 s standalone). All lines use --test-threads=1.
-      # Measured: 187 passed, 5 ignored, ~250 s interpretation total.
-      - name: cargo miri test (width/attribute/logic + shim parse paths)
+      # 2026-09-30, split 2026-10-06): the types suite runs
+      # all-but-TOML under Miri (was 114 tests in ~31 s on 2026-09-30).
+      # Skipped: `mechanism_registry::tests` (pervasive TOML parsing is
+      # too slow under the interpreter; covered by fuzz_registry plus
+      # the native registry tests instead — Kani registry-query proofs
+      # were attempted and removed as CBMC-intractable, see
+      # kani_proofs.rs) and `mechanism_param_manifest::manifest_tests`
+      # (the 41 KB manifest TOML parse stalls under Miri — a parse-only
+      # test exceeded 600 s locally on 2026-10-06 while the module runs
+      # in 0.02 s natively; same pathology as the registry skip, and
+      # these are source-text audit tests with zero unsafe and no UB
+      # surface, still gated natively). Nine registry-loading
+      # shape_descriptors tests carry per-test `cfg_attr(miri, ignore)`
+      # (same message as the shim precedent; every uncached load costs
+      # ~50 s under Miri). The `--skip` form auto-includes future pure
+      # types modules — a new TOML-loading test must take the same
+      # ignore, else this leg stalls again. Deliberately NOT gated: the
+      # two TOML suites above; the server crate's `consistency_checks` is out of
+      # this job's scope (pure safe string audits, zero unsafe, no UB
+      # surface — assessed 2026-09-30). --test-threads=1 serializes the
+      # interpreter (faster than Miri-threaded, and hangs stay
+      # attributable to one test).
+      - name: cargo miri test (types)
         run: |
-          cargo +nightly miri test --locked -p pkcs11-proxy-ng-types --lib -- --skip mechanism_registry
+          cargo +nightly miri test --locked -p pkcs11-proxy-ng-types --lib -- --skip mechanism_registry --skip mechanism_param_manifest --test-threads=1
+
+  miri-shim:
+    name: Miri shim parse paths
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install protoc (pinned, matches mise.toml)
+        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5
+        with:
+          version: 2026.10.3
+          install_args: "protoc"
+
+      - name: Install nightly toolchain with miri
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: nightly
+          components: miri
+
+      # On the shim, daemon-based tests:: modules self-gate with
+      # #[cfg(not(miri))] in tests/mod.rs (measured 2026-09-30:
+      # 130 passed, 5 ignored in ~101 s across width_bridge,
+      # nested_template_input_tests, not_wild_read plus the 8 tests::
+      # modules abi_audit, null_pointers, attribute_classification,
+      # dispatch_shape, endpoint, regression, resource_limits,
+      # poison_recovery — poison fixtures use same-thread catch_unwind;
+      # the two TOML-loading registry tests stay native-only). The
+      # raw-pointer parse paths below are the point.
+      - name: cargo miri test (shim parse paths)
+        run: |
           cargo +nightly miri test --locked -p pkcs11-proxy-ng-shim --lib -- \
             dispatch::general::width_bridge \
             template_input::nested_template_input_tests \
@@ -339,6 +368,43 @@ jobs:
             dispatch::general::helpers::message_parameter_tests --test-threads=1
           cargo +nightly miri test --locked -p pkcs11-proxy-ng-shim --lib -- \
             dispatch::general::helpers::mechanism_writeback_tests --test-threads=1
+
+  miri-backend:
+    name: Miri backend (lifecycle/registry/mock)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install protoc (pinned, matches mise.toml)
+        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5
+        with:
+          version: 2026.10.3
+          install_args: "protoc"
+
+      - name: Install nightly toolchain with miri
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: nightly
+          components: miri
+
+      # The backend leg covers the Miri-designed lifecycle/registry
+      # state-machine suites (measured 2026-09-29: 40 tests in ~18 s);
+      # dlopen-dependent tests self-skip under Miri via cfg!(miri)
+      # early returns.
+      # The mock:: suite is gated PER FILE (measured 2026-09-30): the
+      # one-line `mock::` form times out (20 min, died in workflows after
+      # 159 tests) and profiles+workflows in one process stalls on the
+      # vendor-override test (500 s cap) although every file passes in
+      # isolation and rest+workflows passes combined (129 s) — a
+      # Miri-harness interaction with no UB signal (zero `unsafe` in
+      # mock/; root cause not isolated). Five registry/official-list
+      # matrix tests are cfg_attr(miri, ignore)d with measured notes
+      # (each 240-900 s standalone). All mock lines use
+      # --test-threads=1. Measured: 187 passed, 5 ignored, ~250 s
+      # interpretation total.
+      - name: cargo miri test (backend)
+        run: |
           cargo +nightly miri test --locked -p pkcs11-proxy-ng-backend --lib -- \
             ffi::native_domain_tests \
             ffi::native_domain::tests \

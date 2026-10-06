@@ -1728,6 +1728,7 @@ mod table_tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "embedded TOML loads too slow under Miri; covered natively")]
     fn message_opaque_admits_mechanism_real_bindings() {
         // Review F-04: pin the embedded-manifest bindings the gate
         // depends on, so a manifest edit cannot silently flip admission.
@@ -2699,6 +2700,7 @@ mod eligibility_tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "embedded TOML loads too slow under Miri; covered natively")]
     fn vendor_binding_without_allowlist_denied_flat() {
         // TOML may bind a vendor mechanism to a compiled shape (the
         // registry accepts it) — but that binding alone never authorizes
@@ -2759,6 +2761,7 @@ mod eligibility_tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "embedded TOML loads too slow under Miri; covered natively")]
     fn eddsa_dual_listing_param_shape_wins() {
         // CKM_EDDSA is dual-listed in the embedded registry (parameterless
         // entry + "eddsa" param shape). The param shape wins: a full
@@ -2797,6 +2800,7 @@ mod eligibility_tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "embedded TOML loads too slow under Miri; covered natively")]
     fn parameterless_only_carries_arbitrary_bytes_to_cap() {
         // SHA-256 is parameterless-only: any flat bytes to 64 KiB ride
         // (S2 §1 row 1: SHA-256 + 16 bytes), ABI-independent.
@@ -2846,6 +2850,7 @@ mod eligibility_tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "embedded TOML loads too slow under Miri; covered natively")]
     fn byte_buffer_is_abi_independent() {
         // AES-CBC binds "iv" (raw bytes, no struct): eligible at any
         // length to the cap, on any peer ABI.
@@ -2868,6 +2873,7 @@ mod eligibility_tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "embedded TOML loads too slow under Miri; covered natively")]
     fn scalar_flat_requires_fingerprint_match() {
         // RSA-PSS (3 × CK_ULONG = 24 bytes LP64): noncanonical lengths
         // ride only on fingerprint match; the native image never does.
@@ -2897,6 +2903,7 @@ mod eligibility_tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "embedded TOML loads too slow under Miri; covered natively")]
     fn pointer_prefix_rule() {
         let reg = MechanismRegistry::load_with_override_str(None).unwrap();
         // GCM's first field is a pointer (first unsafe offset 0): only
@@ -2942,6 +2949,7 @@ mod eligibility_tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "embedded TOML loads too slow under Miri; covered natively")]
     fn nested_or_output_never_flat() {
         // Tail shapes ride typed envelopes only (S2 §8); even short
         // prefixes with matching fingerprints are denied Flat.
@@ -3031,6 +3039,7 @@ mod eligibility_tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "embedded TOML loads too slow under Miri; covered natively")]
     fn registry_convenience_matches_core() {
         let reg = MechanismRegistry::load_with_override_str(None).unwrap();
         // Parameterless-only via both APIs.

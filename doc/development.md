@@ -141,13 +141,15 @@ Corpus coverage: `cargo +nightly fuzz coverage <target>` (needs the
 `llvm-tools` nightly component), then `llvm-cov report` against the binary
 under `target/<triple>/coverage/<triple>/release/<target>`.
 
-**Miri**: the types crate (all but the TOML-bound registry suite), the
-shim's raw-pointer parse paths and pure `tests::` suites (ABI audit,
-null-pointer handling, classifier, dispatch shape, endpoint parsing,
-poison recovery, regressions, resource limits), and the backend
+**Miri**: the types crate (all but the TOML-bound registry and manifest
+suites, whose parses stall the interpreter), the shim's raw-pointer
+parse paths and pure `tests::` suites (ABI audit, null-pointer
+handling, classifier, dispatch shape, endpoint parsing, poison
+recovery, regressions, resource limits), and the backend
 lifecycle/registry state-machine, FFI-materialization, and `mock::`
 (per-file lines; the one-line form stalls) suites run under the UB
-interpreter. Five registry/official-list matrix tests are Miri-ignored
+interpreter across three nightly legs (types, shim, backend).
+Five registry/official-list matrix tests are Miri-ignored
 with measured notes (each 240+ s standalone; zero `unsafe` in `mock/`).
 Daemon/socket/fs dependent tests self-gate
 (`#[cfg(not(miri))]` modules, `cfg_attr(miri, ignore)`, or `cfg!(miri)`
