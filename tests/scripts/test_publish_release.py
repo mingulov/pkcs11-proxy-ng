@@ -40,6 +40,9 @@ SCRIPTS_README = ROOT / "scripts" / "README.md"
 
 RELEASE_RUST = "1.98.1"
 MSRV = "1.88.0"
+ATTEST_PIN = "ce27ba3b4a9a139d9a20a4a07d69fabb52f1e5bc"
+ATTEST_PREDICATE = ("https://github.com/mingulov/pkcs11-proxy-ng"
+                    "/release-binding/v1")
 MISE_ACTION = "jdx/mise-action@"
 OIDC_AUTH_PIN = "c6f97d42243bad5fab37ca0427f495c86d5b1a18"
 BOOTSTRAP_TOKEN = "CARGO_REGISTRY_BOOTSTRAP_TOKEN"
@@ -718,14 +721,166 @@ class ReleaseRecoveryTests(unittest.TestCase):
 
     def test_binary_jobs_have_no_registry_token_or_oidc(self):
         workflow = load_workflow(RELEASE_YML)
-        for job_id in ("binary-linux", "binary-windows"):
+        for job_id in ("binary-linux", "binary-windows", "binary-macos"):
             job = workflow["jobs"][job_id]
             permissions = job.get("permissions", {})
             text = job_text(job_id, workflow)
             with self.subTest(job=job_id):
                 self.assertNotEqual(permissions.get("id-token"), "write")
+                self.assertNotEqual(permissions.get("attestations"), "write")
                 self.assertNotIn("CARGO_REGISTRY", text)
                 self.assertNotIn("crates-io-auth-action", text)
+
+    def test_signing_capability_scoped_to_publish_job_only(self):
+        # Only the protected publish job may mint Sigstore
+        # certificates or persist attestations; every other
+        # release.yml job stays OIDC-free.
+        workflow = load_workflow(RELEASE_YML)
+        for scope in ("id-token", "attestations"):
+            with self.subTest(scope=scope):
+                scoped = [job_id for job_id, job
+                          in workflow["jobs"].items()
+                          if job.get("permissions", {}).get(scope)
+                          == "write"]
+                self.assertEqual(scoped, ["publish"])
+
+    def test_publish_signing_boundary_is_exact(self):
+        workflow = load_workflow(RELEASE_YML)
+        permissions = workflow["jobs"]["publish"].get("permissions", {})
+        self.assertEqual(permissions.get("contents"), "write")
+        self.assertEqual(permissions.get("id-token"), "write")
+        self.assertEqual(permissions.get("attestations"), "write")
+        for scope, access in permissions.items():
+            with self.subTest(scope=scope):
+                if scope not in ("contents", "id-token", "attestations"):
+                    self.assertNotEqual(access, "write")
+
+    def test_bundles_attested_after_compare_before_upload(self):
+        # The publish job attests the explicit prepared bundles —
+        # including identical retained ones, which stage/ omits on
+        # retries — after the compare gate and before the upload.
+        # The predicate binds tag, tag commit, and qualification;
+        # stock build provenance would mislead (binaries come from
+        # registry archives, and this workflow may run from main).
+        workflow = load_workflow(RELEASE_YML)
+        job = workflow["jobs"]["publish"]
+        steps = [step for step in job.get("steps", [])
+                 if isinstance(step, dict)]
+        by_id = {step.get("id", ""): step for step in steps}
+        self.assertIn("compare", by_id)
+        self.assertIn("predicate", by_id)
+        predicate = by_id["predicate"]
+        self.assertIn("add_count", str(predicate.get("if", "")))
+        block = predicate.get("run", "")
+        self.assertIn("evidence/qualification-binding.json", block)
+        self.assertIn("prepared/*.tar.gz", block)
+        self.assertIn("prepared/*.zip", block)
+        self.assertIn("attest/release-binding.json", block)
+        self.assertIn("subjects", block)
+        attests = [step for step in steps
+                   if str(step.get("uses", "")).startswith("actions/attest@")]
+        self.assertEqual(len(attests), 1)
+        attest = attests[0]
+        self.assertEqual(attest["uses"], f"actions/attest@{ATTEST_PIN}")
+        self.assertIn("add_count", str(attest.get("if", "")))
+        with_ = attest.get("with", {})
+        self.assertIn("steps.predicate.outputs.subjects",
+                      str(with_.get("subject-path", "")))
+        self.assertEqual(with_.get("predicate-type"), ATTEST_PREDICATE)
+        self.assertEqual(with_.get("predicate-path"),
+                         "attest/release-binding.json")
+        order = [step.get("name", step.get("id", "")) for step in steps]
+        compare_at = order.index("Compare prepared assets with the release")
+        uploads = [step for step in steps
+                   if "scripts/release-upload.sh" in str(step.get("run", ""))]
+        self.assertEqual(len(uploads), 1)
+        upload_at = steps.index(uploads[0])
+        self.assertLess(compare_at, steps.index(predicate))
+        self.assertLess(steps.index(predicate), steps.index(attest))
+        self.assertLess(steps.index(attest), upload_at)
+
+    def test_attestation_verify_command_documented(self):
+        text = GUIDE.read_text(encoding="utf-8")
+        self.assertIn(ATTEST_PREDICATE, text)
+        self.assertIn("gh attestation verify", text)
+        self.assertIn("--signer-workflow", text)
+
+    @unittest.skipUnless(shutil.which("bash"), "bash is required to replay the predicate step")
+    def test_predicate_step_emits_binding_and_subjects(self):
+        # Replay the predicate step against fixture bundles and a
+        # fixture qualification binding: the emitted predicate must
+        # bind tag, tag commit, and qualification, and the subjects
+        # output must list every prepared bundle.
+        workflow = load_workflow(RELEASE_YML)
+        job = workflow["jobs"]["publish"]
+        predicates = [step for step in job.get("steps", [])
+                      if isinstance(step, dict)
+                      and step.get("id") == "predicate"]
+        self.assertEqual(len(predicates), 1)
+        block = predicates[0]["run"]
+        self.assertIn("${{ github.repository }}", block)
+        block = block.replace("${{ github.repository }}", "owner/repo")
+        tmp = Path(tempfile.mkdtemp(prefix="predicate-test-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        (tmp / "prepared").mkdir()
+        (tmp / "prepared" / "b.zip").write_text("zip", encoding="utf-8")
+        (tmp / "prepared" / "a.tar.gz").write_text("tar", encoding="utf-8")
+        (tmp / "evidence").mkdir()
+        (tmp / "evidence" / "qualification-binding.json").write_text(
+            json.dumps({"tag_commit": "c" * 40, "run_id": "123",
+                        "qualification_url": "https://example.invalid/q",
+                        "qualification_subject": "s" * 40}),
+            encoding="utf-8")
+        script = tmp / "predicate.sh"
+        script.write_text(block, encoding="utf-8")
+        env = dict(os.environ)
+        env.update({"RELEASE_TAG": "v9.9.9",
+                    "GITHUB_OUTPUT": str(tmp / "outputs.txt")})
+        proc = subprocess.run(["bash", str(script)], cwd=tmp, env=env,
+                              text=True, capture_output=True, timeout=60)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        predicate = json.loads(
+            (tmp / "attest" / "release-binding.json").read_text(encoding="utf-8"))
+        self.assertEqual(predicate, {
+            "tag": "v9.9.9",
+            "repository": "owner/repo",
+            "tag_commit": "c" * 40,
+            "candidate_run_id": "123",
+            "qualification": {"url": "https://example.invalid/q",
+                             "subject": "s" * 40},
+            "built_from": "registry",
+        })
+        outputs = (tmp / "outputs.txt").read_text(encoding="utf-8")
+        self.assertIn("subjects<<SUBJECTS_EOF\n"
+                      "prepared/a.tar.gz\nprepared/b.zip\n"
+                      "SUBJECTS_EOF\n", outputs)
+
+    @unittest.skipUnless(shutil.which("bash"), "bash is required to replay the predicate step")
+    def test_predicate_step_refuses_empty_prepared(self):
+        workflow = load_workflow(RELEASE_YML)
+        job = workflow["jobs"]["publish"]
+        predicates = [step for step in job.get("steps", [])
+                      if isinstance(step, dict)
+                      and step.get("id") == "predicate"]
+        block = predicates[0]["run"].replace("${{ github.repository }}",
+                                             "owner/repo")
+        tmp = Path(tempfile.mkdtemp(prefix="predicate-empty-test-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        (tmp / "prepared").mkdir()
+        (tmp / "evidence").mkdir()
+        (tmp / "evidence" / "qualification-binding.json").write_text(
+            json.dumps({"tag_commit": "c" * 40, "run_id": "123",
+                        "qualification_url": "https://example.invalid/q",
+                        "qualification_subject": "s" * 40}),
+            encoding="utf-8")
+        script = tmp / "predicate.sh"
+        script.write_text(block, encoding="utf-8")
+        env = dict(os.environ)
+        env.update({"RELEASE_TAG": "v9.9.9",
+                    "GITHUB_OUTPUT": str(tmp / "outputs.txt")})
+        proc = subprocess.run(["bash", str(script)], cwd=tmp, env=env,
+                              text=True, capture_output=True, timeout=60)
+        self.assertNotEqual(proc.returncode, 0)
 
     def test_native_smokes_run_before_publication(self):
         workflow = load_workflow(RELEASE_YML)

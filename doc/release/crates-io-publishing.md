@@ -226,6 +226,21 @@ divergent bytes refuse with both digests named. Retries never
 replace or delete assets and never move tags; a retry where
 everything already matches uploads nothing.
 
+Every published bundle carries a Sigstore attestation binding it
+to the release tag, tag commit, and qualification — generated in
+the `publish` job after the compare gate, over the full prepared
+set including retained assets, so retries attest every bundle on
+the release. The predicate claims release binding only, never
+"built by this workflow run" (binaries come from registry
+archives). Verify a downloaded bundle with:
+
+```bash
+gh attestation verify <bundle> \
+  -R mingulov/pkcs11-proxy-ng \
+  --predicate-type https://github.com/mingulov/pkcs11-proxy-ng/release-binding/v1 \
+  --signer-workflow mingulov/pkcs11-proxy-ng/.github/workflows/release.yml
+```
+
 ## Recovery
 
 - Individual member: dispatch `publish.yml` with `package` set to the
