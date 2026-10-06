@@ -31,9 +31,10 @@ def load_workflow(path):
 
 
 def workflow_triggers(workflow):
-    # YAML 1.1 parses the `on:` key as boolean True; accept either form.
-    triggers = workflow.get("on", workflow.get(True, {}))
-    return triggers if isinstance(triggers, dict) else {}
+    # YAML 1.1 parses the `on:` key as boolean True; accept either
+    # form. Returns the raw value — scalar, list, or mapping — so
+    # `trigger_names` below can normalize every supported form.
+    return workflow.get("on", workflow.get(True, {}))
 
 
 def trigger_names(triggers):
@@ -148,8 +149,15 @@ class ReleasePathProbeTests(unittest.TestCase):
         self.assertEqual(len(deletes), 1)
         delete = deletes[0]
         self.assertEqual(delete.get("if"), "always()")
-        self.assertIn("--cleanup-tag", delete["run"])
+        # --cleanup-tag fails hard when the draft created no git tag,
+        # which would fail a healthy probe: the tag goes only when
+        # an existence check proves it is there.
+        code = "\n".join(line for line in delete["run"].splitlines()
+                         if not line.strip().startswith("#"))
+        self.assertNotIn("--cleanup-tag", code)
         self.assertIn("$PROBE_TAG", delete["run"])
+        self.assertIn("git/ref/tags/", delete["run"])
+        self.assertIn("-X DELETE", delete["run"])
         self.assertEqual(step_names(job)[-1], delete["name"])
 
     def test_no_workflow_triggers_on_release_events(self):
@@ -161,6 +169,25 @@ class ReleasePathProbeTests(unittest.TestCase):
             with self.subTest(workflow=path.name):
                 triggers = workflow_triggers(load_workflow(path))
                 self.assertNotIn("release", trigger_names(triggers))
+
+    def test_trigger_forms_all_detect_release(self):
+        # Mutation pin for the normalizer: scalar, list, and mapping
+        # `on:` forms (plus the YAML 1.1 boolean-True key) must all
+        # surface a release trigger — a mapping-only check would
+        # silently pass the scalar and list forms.
+        for triggers in ("release",
+                         ["push", "release"],
+                         {"release": {"types": ["published"]}},
+                         {"push": {}, "release": {}}):
+            with self.subTest(triggers=triggers):
+                names = trigger_names(workflow_triggers({"on": triggers}))
+                self.assertIn("release", names)
+        names = trigger_names(workflow_triggers({True: "release"}))
+        self.assertIn("release", names)
+        for clean in ("push", ["push", "pull_request"], {"push": {}}, {}, None):
+            with self.subTest(triggers=clean):
+                names = trigger_names(workflow_triggers({"on": clean}))
+                self.assertNotIn("release", names)
 
 
 if __name__ == "__main__":

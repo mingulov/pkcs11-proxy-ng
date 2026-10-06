@@ -889,7 +889,6 @@ jobs:
       # bundle on the release needs an attestation.
       - name: Write release-binding predicate
         id: predicate
-        if: steps.compare.outputs.add_count != '0'
         run: |
           set -euo pipefail
           python3 - <<'EOF'
@@ -926,7 +925,6 @@ jobs:
           EOF
 
       - name: Attest release bundles
-        if: steps.compare.outputs.add_count != '0'
         uses: actions/attest@ce27ba3b4a9a139d9a20a4a07d69fabb52f1e5bc # v2
         with:
           subject-path: ${{ steps.predicate.outputs.subjects }}
