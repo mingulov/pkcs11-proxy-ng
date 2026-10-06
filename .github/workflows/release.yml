@@ -740,6 +740,8 @@ jobs:
     environment: release
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     env:
       RELEASE_TAG: ${{ inputs.tag }}
       GH_TOKEN: ${{ github.token }}
@@ -876,6 +878,60 @@ jobs:
             ADD_COUNT=$((ADD_COUNT + 1))
           fi
           echo "add_count=${ADD_COUNT}" >> "$GITHUB_OUTPUT"
+
+      # Release-binding predicate: the bundles attest to the tag,
+      # tag commit, and qualification that produced them — NOT to
+      # "built by this workflow run" (binaries come from registry
+      # archives in the binary jobs, and this workflow may run from
+      # main, so stock build provenance would mislead). Subjects are
+      # the explicit prepared bundles, including identical retained
+      # ones: on a retry, stage/ holds only missing files, but every
+      # bundle on the release needs an attestation.
+      - name: Write release-binding predicate
+        id: predicate
+        if: steps.compare.outputs.add_count != '0'
+        run: |
+          set -euo pipefail
+          python3 - <<'EOF'
+          import glob
+          import json
+          import os
+          from pathlib import Path
+          bundles = sorted(str(path)
+                           for pattern in ("prepared/*.tar.gz",
+                                           "prepared/*.zip")
+                           for path in glob.glob(pattern))
+          if not bundles:
+              raise SystemExit("::error::no prepared bundles to attest")
+          binding = json.loads(
+              Path("evidence/qualification-binding.json").read_text())
+          predicate = {
+              "tag": os.environ["RELEASE_TAG"],
+              "repository": "${{ github.repository }}",
+              "tag_commit": binding["tag_commit"],
+              "candidate_run_id": binding["run_id"],
+              "qualification": {
+                  "url": binding["qualification_url"],
+                  "subject": binding["qualification_subject"],
+              },
+              "built_from": "registry",
+          }
+          Path("attest").mkdir(exist_ok=True)
+          Path("attest/release-binding.json").write_text(
+              json.dumps(predicate, indent=2) + "\n")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write("subjects<<SUBJECTS_EOF\n")
+              out.write("\n".join(bundles) + "\n")
+              out.write("SUBJECTS_EOF\n")
+          EOF
+
+      - name: Attest release bundles
+        if: steps.compare.outputs.add_count != '0'
+        uses: actions/attest@ce27ba3b4a9a139d9a20a4a07d69fabb52f1e5bc # v2
+        with:
+          subject-path: ${{ steps.predicate.outputs.subjects }}
+          predicate-type: https://github.com/mingulov/pkcs11-proxy-ng/release-binding/v1
+          predicate-path: attest/release-binding.json
 
       # Upload with retries: the softprops action it replaces has a fixed
       # 10s connect timeout and no retries, which failed v0.2.2 on a
