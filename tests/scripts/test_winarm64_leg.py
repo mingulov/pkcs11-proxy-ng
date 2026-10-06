@@ -82,6 +82,11 @@ class WinArm64LegTests(unittest.TestCase):
             with self.subTest(package=package):
                 self.assertIn(package, runs)
         self.assertGreaterEqual(runs.count(f"--target {TARGET}"), 5)
+        # Every suite runs even when an earlier one fails (a
+        # segfaulting suite must not hide the rest); the step still
+        # fails when any suite does.
+        self.assertEqual(runs.count("|| status=1"), 4)
+        self.assertIn('exit "$status"', runs)
 
     def test_pe_architecture_is_verified(self):
         # An x64 binary running under emulation would still pass
