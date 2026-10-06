@@ -29,7 +29,7 @@
 # pinned to a commit SHA (trailing `# <tag>` records the tag it was taken
 # from so bumps stay reviewable); the Rust toolchain is the pinned
 # rust-toolchain.toml channel (MSRV keeps 1.88); protoc is setup-protoc at
-# the mise.toml version (36.1). All cargo builds/tests run --locked.
+# the mise.toml version (36.2). All cargo builds/tests run --locked.
 #
 # Job hygiene (W1-L17-07): every job sets timeout-minutes — none inherits
 # the 6h default. The local_quality_gate_test ci_jobs_all_set_timeouts gate
@@ -69,9 +69,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install pinned toolchain with rustfmt
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           # Must match rust-toolchain.toml (W1-L16-09); the action's
           # RUSTUP_TOOLCHAIN export overrides the file, so the pin is
@@ -88,15 +88,15 @@ jobs:
     timeout-minutes: 15
     needs: fmt
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install pinned toolchain
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: 1.98.1
 
       - name: Cache cargo audit binary
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cargo/bin/cargo-audit
           key: ${{ runner.os }}-cargo-audit-0.22.2
@@ -126,15 +126,15 @@ jobs:
     timeout-minutes: 15
     needs: fmt
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install pinned toolchain
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: 1.98.1
 
       - name: Cache cargo deny binary
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cargo/bin/cargo-deny
           key: ${{ runner.os }}-cargo-deny-0.20.2
@@ -168,7 +168,7 @@ jobs:
     timeout-minutes: 10
     needs: fmt
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: packaging mirrors + syntax
         run: scripts/packaging-smoke.sh
@@ -184,7 +184,7 @@ jobs:
     timeout-minutes: 10
     needs: fmt
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install shellcheck (pinned)
         run: |
@@ -221,7 +221,7 @@ jobs:
     timeout-minutes: 45
     needs: [fmt, audit, deny]
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install protoc (pinned, matches mise.toml)
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
@@ -230,17 +230,17 @@ jobs:
           # mise.toml. The default token raises the API quota for
           # version resolution (same rate-limit hardening as
           # cross-platform.yml).
-          version: "36.1"
+          version: "36.2"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install pinned toolchain with clippy
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: 1.98.1
           components: clippy
 
       - name: Cache cargo registry and build artifacts
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -277,18 +277,18 @@ jobs:
     timeout-minutes: 30
     needs: fmt
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install protoc (pinned, matches mise.toml)
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
         with:
-          version: "36.1"
+          version: "36.2"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       # Hard-coded to match rust-version in workspace Cargo.toml.
       # Update both places when the MSRV is bumped.
       - name: Install Rust 1.88 (MSRV)
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: 1.88
 
@@ -322,7 +322,7 @@ jobs:
     timeout-minutes: 45
     needs: fmt
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install system dependencies (32-bit toolchain for ring)
         run: |
@@ -332,11 +332,11 @@ jobs:
       - name: Install protoc (pinned, matches mise.toml)
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
         with:
-          version: "36.1"
+          version: "36.2"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install pinned toolchain with i686 target
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: 1.98.1
           targets: i686-unknown-linux-gnu
@@ -373,7 +373,7 @@ jobs:
     timeout-minutes: 60
     needs: fmt
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install LLVM (clang/lld/llvm-lib) + nasm
         run: |
@@ -385,11 +385,11 @@ jobs:
       - name: Install protoc (pinned, matches mise.toml)
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
         with:
-          version: "36.1"
+          version: "36.2"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install pinned toolchain with Windows MSVC target
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: 1.98.1
           targets: x86_64-pc-windows-msvc
@@ -430,7 +430,7 @@ jobs:
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
       CC_x86_64_unknown_linux_musl: musl-gcc
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install system dependencies (musl toolchain)
         run: |
@@ -440,11 +440,11 @@ jobs:
       - name: Install protoc (pinned, matches mise.toml)
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
         with:
-          version: "36.1"
+          version: "36.2"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install pinned toolchain with musl target
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: 1.98.1
           targets: x86_64-unknown-linux-musl
@@ -519,7 +519,7 @@ jobs:
       CARGO_BUILD_JOBS: "4"
       CARGO_INCREMENTAL: "0"
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # Both Cargo directories are isolated (the runner context is not
       # available in job-level env, so the temp-based paths are exported
@@ -534,21 +534,21 @@ jobs:
       - name: Install protoc (pinned, matches mise.toml)
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
         with:
-          version: "36.1"
+          version: "36.2"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install pinned toolchain (release)
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: 1.98.1
 
       - name: Install Rust 1.88.0 (consumer MSRV)
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: 1.88.0
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
 
@@ -570,7 +570,7 @@ jobs:
             --package-dir "$CARGO_TARGET_DIR/package" --toolchain 1.88.0
 
       - name: Upload source-bound candidate
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ci-candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -596,7 +596,7 @@ jobs:
     outputs:
       bundle: ${{ steps.stage.outputs.bundle }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # Both Cargo directories are isolated: the global build.build-dir
       # config makes a target dir alone insufficient.
@@ -609,21 +609,21 @@ jobs:
       - name: Install protoc (pinned, matches mise.toml)
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
         with:
-          version: "36.1"
+          version: "36.2"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install pinned toolchain
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: 1.98.1
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
 
       - name: Download source-bound candidate
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: ci-candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/archive-linux/candidate
@@ -652,7 +652,7 @@ jobs:
           echo "bundle=$(basename "${ARCHIVES[0]}")" >> "$GITHUB_OUTPUT"
 
       - name: Upload Linux bundle
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ci-linux-bundle-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/archive-linux/output/staged-bundle/
@@ -676,7 +676,7 @@ jobs:
     outputs:
       bundle: ${{ steps.stage.outputs.bundle }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # Both Cargo directories are isolated: the global build.build-dir
       # config makes a target dir alone insufficient.
@@ -696,11 +696,11 @@ jobs:
       - name: Install protoc (pinned, matches mise.toml)
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
         with:
-          version: "36.1"
+          version: "36.2"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install pinned toolchain with Windows MSVC target
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: 1.98.1
           targets: x86_64-pc-windows-msvc
@@ -709,12 +709,12 @@ jobs:
         run: cargo install cargo-xwin --version 0.23.1 --locked
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
 
       - name: Download source-bound candidate
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: ci-candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/archive-windows/candidate
@@ -743,7 +743,7 @@ jobs:
           echo "bundle=$(basename "${ARCHIVES[0]}")" >> "$GITHUB_OUTPUT"
 
       - name: Upload Windows bundle
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ci-windows-bundle-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/archive-windows/output/staged-bundle/
@@ -768,7 +768,7 @@ jobs:
     outputs:
       bundle: ${{ steps.stage.outputs.bundle }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # Both Cargo directories are isolated: the global build.build-dir
       # config makes a target dir alone insufficient.
@@ -781,21 +781,21 @@ jobs:
       - name: Install protoc (pinned, matches mise.toml)
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
         with:
-          version: "36.1"
+          version: "36.2"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install pinned toolchain
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: 1.98.1
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
 
       - name: Download source-bound candidate
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: ci-candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/archive-macos/candidate
@@ -824,7 +824,7 @@ jobs:
           echo "bundle=$(basename "${ARCHIVES[0]}")" >> "$GITHUB_OUTPUT"
 
       - name: Upload macOS bundle
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ci-macos-bundle-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/archive-macos/output/staged-bundle/
@@ -848,10 +848,10 @@ jobs:
     timeout-minutes: 90
     needs: fmt
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
 
@@ -924,7 +924,7 @@ jobs:
 
       - name: Upload APK smoke evidence
         if: always()
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: smoke-apk-logs-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -944,10 +944,10 @@ jobs:
     timeout-minutes: 60
     needs: archive-binary-linux
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
 
@@ -957,7 +957,7 @@ jobs:
           sudo apt-get install -y softhsm2 opensc
 
       - name: Download Linux bundle
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: ci-linux-bundle-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/smoke-linux/bundle
@@ -972,7 +972,7 @@ jobs:
 
       - name: Upload smoke logs
         if: always()
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: smoke-linux-logs-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/smoke-linux/work/
@@ -993,10 +993,10 @@ jobs:
     timeout-minutes: 60
     needs: archive-binary-windows
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
 
@@ -1019,7 +1019,7 @@ jobs:
         shell: bash
 
       - name: Download Windows bundle
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: ci-windows-bundle-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/smoke-windows/bundle
@@ -1035,7 +1035,7 @@ jobs:
 
       - name: Upload smoke logs
         if: always()
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: smoke-windows-logs-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/smoke-windows/work/
@@ -1052,10 +1052,10 @@ jobs:
     timeout-minutes: 60
     needs: archive-binary-macos
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
 
@@ -1063,7 +1063,7 @@ jobs:
         run: brew install softhsm opensc
 
       - name: Download macOS bundle
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: ci-macos-bundle-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/smoke-macos/bundle
@@ -1078,7 +1078,7 @@ jobs:
 
       - name: Upload smoke logs
         if: always()
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: smoke-macos-logs-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/smoke-macos/work/
@@ -1096,7 +1096,7 @@ jobs:
     needs: [fmt, audit, deny, packaging-smoke, shellcheck, build-and-test, msrv, narrow-client-i686, windows-client-llp64, musl-x86_64, package-candidate, archive-binary-linux, archive-binary-windows, archive-binary-macos, smoke-apk-alpine, smoke-bundle-linux, smoke-bundle-windows, smoke-bundle-macos]
     if: always()
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Refuse unless every required job succeeded
         run: |

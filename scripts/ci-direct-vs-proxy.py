@@ -256,7 +256,9 @@ def differential_jsonl(report_jsonl):
     session-collection ``CollectReport`` records with a blank nodeid,
     which its differential reader rejects ("invalid CollectReport",
     exit 2 -- run-4 ubuntu proved exit-0x2 plus identical summaries
-    while the differential died on line 239). Those records carry no
+    while the differential died on line 239). Still present in 0.2.3
+    (249 blank records per phase in the 2026-10-06 qualification run),
+    so the workaround stays. Those records carry no
     test verdicts (the KAT scope compares TestReport node-ids only),
     so drop exactly them into a same-directory copy (sibling
     results.json provenance still resolves) and compare the copies.

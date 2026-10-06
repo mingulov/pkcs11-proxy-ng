@@ -91,7 +91,7 @@ jobs:
       QUALIFICATION_SUBJECT: ${{ inputs.qualification-subject }}
     steps:
       - name: Checkout tag with full history
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ inputs.tag || github.ref }}
           fetch-depth: 0
@@ -111,7 +111,7 @@ jobs:
         run: git fetch --no-tags origin main:refs/remotes/origin/main
 
       - name: Install Python for release checks
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: '3.12'
 
@@ -194,13 +194,13 @@ jobs:
       # against checkout HEAD and refuses on any change, so this must
       # be the tag commit with nothing downloaded into it.
       - name: Checkout tag commit
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.preflight.outputs.tag_commit }}
           fetch-depth: 1
 
       - name: Install Python for release checks
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: '3.12'
 
@@ -233,7 +233,7 @@ jobs:
           echo "artifact=${ARTIFACT}" >> "$GITHUB_OUTPUT"
 
       - name: Download CI candidate archives
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: ${{ steps.resolve-ci.outputs.artifact }}
           run-id: ${{ steps.resolve-ci.outputs.run_id }}
@@ -270,7 +270,7 @@ jobs:
           echo "artifact=${ARTIFACT}" >> "$GITHUB_OUTPUT"
 
       - name: Upload immutable pre-auth candidate
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: crates-candidate-${{ needs.preflight.outputs.tag_commit }}-${{ github.run_id }}
           path: ${{ runner.temp }}/ci-candidate/
@@ -304,7 +304,7 @@ jobs:
       PUBLISH_ORDER: "pkcs11-proxy-ng-types pkcs11-proxy-ng-audit pkcs11-proxy-ng-proto pkcs11-proxy-ng-client pkcs11-proxy-ng-backend pkcs11-proxy-ng pkcs11-proxy-ng-shim pkcs11-proxy-ng-cli"
     steps:
       - name: Checkout tag without persisted credentials
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.preflight.outputs.tag }}
           fetch-depth: 0
@@ -312,14 +312,14 @@ jobs:
           persist-credentials: false
 
       - name: Install Python for release checks
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: '3.12'
 
       # Cargo here only repackages (--no-verify) and uploads; it never
       # compiles in this credential-capable job (see the header comment).
       - name: Install pinned Cargo for packaging and upload
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: 1.98.1
 
@@ -330,7 +330,7 @@ jobs:
           echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crates-upload/target" >> "$GITHUB_ENV"
 
       - name: Download immutable pre-auth candidate
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: ${{ needs.candidate.outputs.artifact }}
           path: ${{ runner.temp }}/preauth/
@@ -387,7 +387,7 @@ jobs:
       - name: Authenticate to crates.io (trusted OIDC)
         id: crates-io-auth
         if: needs.preflight.outputs.mode == 'trusted'
-        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
 
       - name: Export trusted token for cargo
         if: needs.preflight.outputs.mode == 'trusted'
@@ -428,7 +428,7 @@ jobs:
 
       - name: Retain post-upload evidence
         if: always()
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: postupload-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -454,7 +454,7 @@ jobs:
       # The tag tree: the registry consumer pins externals to the
       # checkout's Cargo.lock, which must be the release's lock.
       - name: Checkout tag commit
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.preflight.outputs.tag_commit }}
           fetch-depth: 1
@@ -470,19 +470,19 @@ jobs:
           fi
 
       - name: Install Python for release checks
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: '3.12'
 
       - name: Install MSRV toolchain for registry consumers
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: 1.88.0
 
       - name: Install protoc (pinned, matches mise.toml)
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
         with:
-          version: "36.1"
+          version: "36.2"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Isolate Cargo build and target directories
@@ -492,7 +492,7 @@ jobs:
           echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crates-verify/target" >> "$GITHUB_ENV"
 
       - name: Download immutable pre-auth candidate
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: ${{ needs.candidate.outputs.artifact }}
           path: ${{ runner.temp }}/preauth/

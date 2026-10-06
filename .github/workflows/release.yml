@@ -92,7 +92,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout tag with full history
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ inputs.tag }}
           fetch-depth: 0
@@ -102,7 +102,7 @@ jobs:
         run: git fetch --no-tags origin main:refs/remotes/origin/main
 
       - name: Install Python for release checks
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: '3.12'
 
@@ -163,7 +163,7 @@ jobs:
           echo "artifact=${ARTIFACT}" >> "$GITHUB_OUTPUT"
 
       - name: Download immutable pre-auth candidate
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: ${{ steps.select.outputs.artifact }}
           run-id: ${{ inputs.candidate_run_id }}
@@ -183,7 +183,7 @@ jobs:
             --expect-run-id "$CANDIDATE_RUN_ID"
 
       - name: Stage recovered evidence for downstream jobs
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-evidence-${{ github.run_id }}
           path: recovered/
@@ -200,7 +200,7 @@ jobs:
       # The tag tree: the registry consumer pins externals to the
       # checkout's Cargo.lock, which must be the release's lock.
       - name: Checkout tag tooling
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ inputs.tag }}
           fetch-depth: 1
@@ -216,19 +216,19 @@ jobs:
           fi
 
       - name: Install Python for release checks
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: '3.12'
 
       - name: Install MSRV toolchain for registry consumers
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: 1.88.0
 
       - name: Install protoc (pinned, matches mise.toml)
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
         with:
-          version: "36.1"
+          version: "36.2"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Isolate Cargo build and target directories
@@ -238,7 +238,7 @@ jobs:
           echo "CARGO_TARGET_DIR=$RUNNER_TEMP/release-recheck/target" >> "$GITHUB_ENV"
 
       - name: Download recovered candidate evidence
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: release-evidence-${{ github.run_id }}
           path: recovered/
@@ -268,7 +268,7 @@ jobs:
       bundle: ${{ steps.stage.outputs.bundle }}
     steps:
       - name: Checkout tag tooling
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ inputs.tag }}
           fetch-depth: 1
@@ -292,21 +292,21 @@ jobs:
       - name: Install protoc (pinned, matches mise.toml)
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
         with:
-          version: "36.1"
+          version: "36.2"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install pinned release toolchain
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: 1.98.1
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
 
       - name: Download recovered candidate evidence
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: release-evidence-${{ github.run_id }}
           path: ${{ runner.temp }}/release-linux/candidate
@@ -356,7 +356,7 @@ jobs:
           echo "bundle=$(basename "${ARCHIVES[0]}")" >> "$GITHUB_OUTPUT"
 
       - name: Upload Linux bundle
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-linux-bundle-${{ inputs.tag }}
           path: ${{ runner.temp }}/release-linux/output/staged-bundle/
@@ -376,7 +376,7 @@ jobs:
       bundle: ${{ steps.stage.outputs.bundle }}
     steps:
       - name: Checkout tag tooling
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ inputs.tag }}
           fetch-depth: 1
@@ -405,11 +405,11 @@ jobs:
       - name: Install protoc (pinned, matches mise.toml)
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
         with:
-          version: "36.1"
+          version: "36.2"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install pinned toolchain with Windows MSVC target
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: 1.98.1
           targets: x86_64-pc-windows-msvc
@@ -418,12 +418,12 @@ jobs:
         run: cargo install cargo-xwin --version 0.23.1 --locked
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
 
       - name: Download recovered candidate evidence
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: release-evidence-${{ github.run_id }}
           path: ${{ runner.temp }}/release-windows/candidate
@@ -472,7 +472,7 @@ jobs:
           echo "bundle=$(basename "${ARCHIVES[0]}")" >> "$GITHUB_OUTPUT"
 
       - name: Upload Windows bundle
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-windows-bundle-${{ inputs.tag }}
           path: ${{ runner.temp }}/release-windows/output/staged-bundle/
@@ -492,7 +492,7 @@ jobs:
       bundle: ${{ steps.stage.outputs.bundle }}
     steps:
       - name: Checkout tag tooling
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ inputs.tag }}
           fetch-depth: 1
@@ -516,21 +516,21 @@ jobs:
       - name: Install protoc (pinned, matches mise.toml)
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
         with:
-          version: "36.1"
+          version: "36.2"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install pinned release toolchain
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: 1.98.1
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
 
       - name: Download recovered candidate evidence
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: release-evidence-${{ github.run_id }}
           path: ${{ runner.temp }}/release-macos/candidate
@@ -578,7 +578,7 @@ jobs:
           echo "bundle=$(basename "${ARCHIVES[0]}")" >> "$GITHUB_OUTPUT"
 
       - name: Upload macOS bundle
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-macos-bundle-${{ inputs.tag }}
           path: ${{ runner.temp }}/release-macos/output/staged-bundle/
@@ -592,13 +592,13 @@ jobs:
     needs: [recover, binary-linux]
     steps:
       - name: Checkout tag tooling
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ inputs.tag }}
           fetch-depth: 1
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
 
@@ -608,7 +608,7 @@ jobs:
           sudo apt-get install -y softhsm2 opensc
 
       - name: Download Linux bundle
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: release-linux-bundle-${{ inputs.tag }}
           path: ${{ runner.temp }}/release-smoke-linux/bundle
@@ -623,7 +623,7 @@ jobs:
 
       - name: Upload smoke logs
         if: always()
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-smoke-linux-logs-${{ github.run_id }}
           path: ${{ runner.temp }}/release-smoke-linux/work/
@@ -636,13 +636,13 @@ jobs:
     needs: [recover, binary-windows]
     steps:
       - name: Checkout tag tooling
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ inputs.tag }}
           fetch-depth: 1
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
 
@@ -664,7 +664,7 @@ jobs:
         shell: bash
 
       - name: Download Windows bundle
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: release-windows-bundle-${{ inputs.tag }}
           path: ${{ runner.temp }}/release-smoke-windows/bundle
@@ -680,7 +680,7 @@ jobs:
 
       - name: Upload smoke logs
         if: always()
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-smoke-windows-logs-${{ github.run_id }}
           path: ${{ runner.temp }}/release-smoke-windows/work/
@@ -693,13 +693,13 @@ jobs:
     needs: [recover, binary-macos]
     steps:
       - name: Checkout tag tooling
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ inputs.tag }}
           fetch-depth: 1
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
 
@@ -707,7 +707,7 @@ jobs:
         run: brew install softhsm opensc
 
       - name: Download macOS bundle
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: release-macos-bundle-${{ inputs.tag }}
           path: ${{ runner.temp }}/release-smoke-macos/bundle
@@ -722,7 +722,7 @@ jobs:
 
       - name: Upload smoke logs
         if: always()
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-smoke-macos-logs-${{ github.run_id }}
           path: ${{ runner.temp }}/release-smoke-macos/work/
@@ -741,36 +741,36 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout tag for release notes
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ inputs.tag }}
           fetch-depth: 1
 
       - name: Install Python for release checks
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: '3.12'
 
       - name: Download prepared Linux bundle
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: release-linux-bundle-${{ inputs.tag }}
           path: prepared/
 
       - name: Download prepared Windows bundle
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: release-windows-bundle-${{ inputs.tag }}
           path: prepared/
 
       - name: Download prepared macOS bundle
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: release-macos-bundle-${{ inputs.tag }}
           path: prepared/
 
       - name: Download recovered candidate evidence
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: release-evidence-${{ github.run_id }}
           path: evidence/
@@ -843,7 +843,7 @@ jobs:
 
       - name: Create or extend the GitHub release
         if: steps.compare.outputs.add_count != '0'
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           tag_name: ${{ inputs.tag }}
           name: pkcs11-proxy-ng ${{ inputs.tag }}
