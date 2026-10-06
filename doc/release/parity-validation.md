@@ -50,9 +50,10 @@ versioned `pool-evidence/v1` export in
 proxy candidate and framework commits, and one final-verdict row
 per provider. `scripts/release/support_matrix.py` (stdlib only)
 validates the export fail-closed — a mixed-run merge, a malformed
-identity, an incomplete row without reasons, a FAIL row without a
-disposition, or any mock row refuses — and rewrites only the
-marked table region. Regeneration PRs update the export and the
+identity, a timestamp without an offset, a verdict/completion
+contradiction (a PASS with regressions, a reasonless incomplete
+row, a dispositionless FAIL), or any mock row refuses — and
+rewrites only the marked table region. Regeneration PRs update the export and the
 table together; `ci.yml` runs the generator in `--check` mode so
 a stale table fails the gate. The export itself is produced from
 the pooled runner's `matrix-summary.json` by maintainer tooling;
