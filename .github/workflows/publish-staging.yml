@@ -31,7 +31,7 @@ env:
 jobs:
   probe:
     name: Generate dependency-free staging probe
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     if: github.ref == 'refs/heads/main'
     outputs:
@@ -73,7 +73,7 @@ jobs:
 
   staging-upload:
     name: Upload probe to staging registry
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     needs: [probe]
     if: github.ref == 'refs/heads/main'
