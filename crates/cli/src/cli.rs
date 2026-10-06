@@ -498,6 +498,23 @@ pub(crate) enum Commands {
         #[arg(long, default_value = "pkcs11_proxy_ng.v1.Pkcs11Proxy")]
         service: String,
     },
+    /// Passive daemon diagnostics: health status plus the context-free
+    /// interface discovery report (backend versions, NULL slots, ABI
+    /// widths, registry revision). Never initializes a PKCS#11
+    /// context, so it is safe under `max_contexts = 1`. Exits 0 if
+    /// SERVING, 1 if NOT_SERVING, 2 if the probe itself fails.
+    Diagnostics {
+        /// gRPC service name to check (same default as `health`).
+        #[arg(long, default_value = "pkcs11_proxy_ng.v1.Pkcs11Proxy")]
+        service: String,
+        /// Output format: `text` or `json`.
+        #[arg(long, default_value = "text")]
+        format: String,
+        /// Overall deadline in seconds for connect, health, and
+        /// discovery. The probe fails closed past it.
+        #[arg(long, default_value_t = 10)]
+        timeout_secs: u64,
+    },
     /// Initialize a token: set the SO PIN and label (erases token contents).
     InitToken {
         /// Slot id (daemon-assigned virtual slot number).
