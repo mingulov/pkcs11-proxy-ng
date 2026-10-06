@@ -85,15 +85,10 @@ jobs:
           components: rustfmt,clippy
 
       - name: Install protoc (all OSes)
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
+        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5
         with:
-          # W1-L16-13: single protoc version everywhere; must match
-          # mise.toml.
-          version: "36.2"
-          # T2run: unauthenticated version-resolution hits the shared
-          # GitHub API rate limit (run-8 macOS red); the default token
-          # raises the quota.
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          version: 2026.10.3
+          install_args: "protoc"
 
       - name: Set up Python 3.12
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
@@ -270,13 +265,10 @@ jobs:
           targets: i686-pc-windows-msvc
 
       - name: Install protoc
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
+        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5
         with:
-          # W1-L16-13: single protoc version everywhere; must match
-          # mise.toml.
-          version: "36.2"
-          # T2run: same rate-limit hardening as the compare legs.
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          version: 2026.10.3
+          install_args: "protoc"
 
       - name: Cache cargo registry and build artifacts
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6

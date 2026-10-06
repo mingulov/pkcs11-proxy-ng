@@ -122,10 +122,10 @@ jobs:
           components: rustfmt, clippy
 
       - name: Install protoc (pinned, matches mise.toml)
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
+        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5
         with:
-          version: "36.2"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          version: 2026.10.3
+          install_args: "protoc"
 
       - name: Install Rust 1.88.0 (MSRV gate)
         run: rustup toolchain install 1.88.0 --profile minimal --component rustc,cargo

@@ -244,7 +244,10 @@ fn supply_chain_pins_are_consistent() {
     }
     assert!(!workflow_texts.is_empty(), "expected workflow files");
 
-    // Protoc: single version across mise, setup-protoc steps, Dockerfile.
+    // Protoc: mise-action installs protoc from the repo mise.toml pin, so
+    // workflows carry no protoc version literals of their own; the mise
+    // binary itself is pinned uniformly. No setup action, no distro
+    // protobuf-compiler anywhere.
     let mise = fs::read_to_string(root.join("mise.toml")).expect("mise.toml should be readable");
     let mise_version = mise
         .lines()
@@ -253,7 +256,11 @@ fn supply_chain_pins_are_consistent() {
     for text in &workflow_texts {
         assert!(
             !text.contains("protobuf-compiler"),
-            "workflows should use pinned setup-protoc, not distro protobuf-compiler"
+            "workflows should use mise-action, not distro protobuf-compiler"
+        );
+        assert!(
+            !text.contains("arduino/setup-protoc"),
+            "workflows should use jdx/mise-action, not the setup-protoc action"
         );
     }
     let dockerfile = fs::read_to_string(root.join("Dockerfile.test"))
@@ -266,18 +273,27 @@ fn supply_chain_pins_are_consistent() {
         dockerfile.contains(&format!("ARG PROTOC_VERSION={mise_version}")),
         "Dockerfile.test protoc should match mise.toml ({mise_version})"
     );
-    let mut setup_protoc_steps = 0;
+    let mut mise_steps = 0;
+    let mut protoc_installs = 0;
+    let mut mise_versions = std::collections::HashSet::new();
     for text in &workflow_texts {
-        setup_protoc_steps += text.matches("uses: arduino/setup-protoc@").count();
+        mise_steps += text.matches("jdx/mise-action@").count();
+        protoc_installs += text.matches("install_args: \"protoc\"").count();
+        for line in text.lines() {
+            if let Some(value) = line.trim().strip_prefix("version: ") {
+                let value = value.trim();
+                if value.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                    mise_versions.insert(value.to_string());
+                }
+            }
+        }
     }
-    assert!(setup_protoc_steps > 0, "expected setup-protoc steps");
-    let mut pinned_protoc_steps = 0;
-    for text in &workflow_texts {
-        pinned_protoc_steps += text.matches(&format!("version: \"{mise_version}\"")).count();
-    }
+    assert!(mise_steps > 0, "expected mise-action steps");
+    assert_eq!(protoc_installs, mise_steps, "every mise-action step should install exactly protoc");
     assert_eq!(
-        pinned_protoc_steps, setup_protoc_steps,
-        "every setup-protoc step should pin protoc {mise_version}"
+        mise_versions.len(),
+        1,
+        "every mise-action step should pin the same mise version, found: {mise_versions:?}"
     );
 
     // Toolchain: rust-toolchain.toml channel mirrored in CI + Dockerfile.
