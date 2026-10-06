@@ -1085,6 +1085,20 @@ jobs:
           path: ${{ runner.temp }}/smoke-macos/work/
           retention-days: 14
 
+  # ── Tier 0y: generated support table ──────────────────────────────────────
+  # The pooled-evidence table in beta-support-matrix.md is generated
+  # from doc/release/pool-evidence.json; regeneration PRs update both
+  # together, and this gate refuses a stale table.
+  support-matrix-check:
+    name: Support matrix matches pooled evidence
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Check generated support table
+        run: python3 scripts/release/support_matrix.py --check
+
   # ── Tier 0z: fail-closed aggregate ──────────────────────────────────────────
   # Stage B: succeeds only when every required job above succeeded. Any
   # skipped/cancelled/failed/missing job refuses via the ci-results
@@ -1094,7 +1108,7 @@ jobs:
     name: CI success (fail-closed aggregate)
     runs-on: ubuntu-26.04
     timeout-minutes: 10
-    needs: [fmt, audit, deny, packaging-smoke, shellcheck, build-and-test, msrv, narrow-client-i686, windows-client-llp64, musl-x86_64, package-candidate, archive-binary-linux, archive-binary-windows, archive-binary-macos, smoke-apk-alpine, smoke-bundle-linux, smoke-bundle-windows, smoke-bundle-macos]
+    needs: [fmt, audit, deny, packaging-smoke, shellcheck, build-and-test, msrv, narrow-client-i686, windows-client-llp64, musl-x86_64, package-candidate, archive-binary-linux, archive-binary-windows, archive-binary-macos, smoke-apk-alpine, smoke-bundle-linux, smoke-bundle-windows, smoke-bundle-macos, support-matrix-check]
     if: always()
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
