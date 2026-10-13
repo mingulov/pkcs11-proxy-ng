@@ -207,6 +207,22 @@ fn c_init_token_valid_label_reaches_client_state() {
 }
 
 #[test]
+fn c_init_token_tab_label_reaches_client_state() {
+    // Q03 phase 1 pin: a valid label carrying non-space whitespace (a
+    // trailing TAB) must parse and reach the client gate — label parsing
+    // must not refuse valid labels. (Phase 2 may only refuse NULL /
+    // invalid-encoding inputs, never these.)
+    let _guard = shim_state_test_guard();
+    let mut label = [b' '; pkcs11_proxy_ng_types::PKCS11_TOKEN_LABEL_LEN];
+    label[0] = b'A';
+    label[1] = b'\t';
+    let rv = unsafe {
+        dispatch::general::c_init_token(0, std::ptr::null_mut(), 0, label.as_ptr() as *mut _)
+    };
+    assert_eq!(rv, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
+}
+
+#[test]
 fn c_get_info_null_p_info_returns_bad_args() {
     let rv = unsafe { dispatch::general::c_get_info(std::ptr::null_mut()) };
     assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);

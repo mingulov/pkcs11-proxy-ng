@@ -936,4 +936,101 @@ mod tests {
             worker.join().expect("worker joins").expect("parked call succeeds");
         });
     }
+
+    /// Q03 phase 1 — counted native-label capture oracle.
+    ///
+    /// A recording `C_InitToken` stub (CHACHA20 capture pattern: stub +
+    /// static `Mutex<Vec<..>>` + capture lock) pins the backend side of
+    /// the label contract: for every valid label the backend makes
+    /// exactly ONE native call carrying exactly the 32 blank-padded
+    /// label bytes through a non-null pointer. The shim-side
+    /// round-trip tests (`output_semantics::q03_*`) pin the other half
+    /// (the trimmed label the backend receives); together they pin the
+    /// full 32-byte path for valid input.
+    static Q03_INIT_TOKEN_CAPTURE_LOCK: Mutex<()> = Mutex::new(());
+    static Q03_INIT_TOKEN_CAPTURED: Mutex<Vec<Q03InitTokenCapture>> = Mutex::new(Vec::new());
+
+    struct Q03InitTokenCapture {
+        slot: cryptoki_sys::CK_SLOT_ID,
+        pin_is_null: bool,
+        pin_len: cryptoki_sys::CK_ULONG,
+        label_is_null: bool,
+        label_bytes: [u8; pkcs11_proxy_ng_types::PKCS11_TOKEN_LABEL_LEN],
+    }
+
+    unsafe extern "C" fn q03_capturing_init_token(
+        slot: cryptoki_sys::CK_SLOT_ID,
+        pin: *mut cryptoki_sys::CK_UTF8CHAR,
+        pin_len: cryptoki_sys::CK_ULONG,
+        label: *mut cryptoki_sys::CK_UTF8CHAR,
+    ) -> cryptoki_sys::CK_RV {
+        let mut label_bytes = [0u8; pkcs11_proxy_ng_types::PKCS11_TOKEN_LABEL_LEN];
+        let label_is_null = label.is_null();
+        if !label_is_null {
+            label_bytes.copy_from_slice(unsafe {
+                std::slice::from_raw_parts(
+                    label as *const u8,
+                    pkcs11_proxy_ng_types::PKCS11_TOKEN_LABEL_LEN,
+                )
+            });
+        }
+        Q03_INIT_TOKEN_CAPTURED.lock().unwrap().push(Q03InitTokenCapture {
+            slot,
+            pin_is_null: pin.is_null(),
+            pin_len,
+            label_is_null,
+            label_bytes,
+        });
+        cryptoki_sys::CKR_OK
+    }
+
+    /// Spec padding, reimplemented locally so the oracle does not share
+    /// code with the padding under test: `label[32]` is blank-padded
+    /// with ASCII spaces.
+    fn q03_blank_pad_32(label: &str) -> [u8; pkcs11_proxy_ng_types::PKCS11_TOKEN_LABEL_LEN] {
+        let bytes = label.as_bytes();
+        assert!(bytes.len() <= pkcs11_proxy_ng_types::PKCS11_TOKEN_LABEL_LEN);
+        let mut out = [b' '; pkcs11_proxy_ng_types::PKCS11_TOKEN_LABEL_LEN];
+        out[..bytes.len()].copy_from_slice(bytes);
+        out
+    }
+
+    #[test]
+    fn q03_ffi_init_token_emits_exactly_32_label_bytes_in_one_native_call() {
+        let _guard = Q03_INIT_TOKEN_CAPTURE_LOCK.lock().unwrap();
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_InitToken = Some(q03_capturing_init_token);
+        let backend = FfiBackend::test_backend_with_tables(functions.as_mut(), None, None);
+        backend.lifecycle_domain.open_for_tests();
+        for label in [
+            "hello",
+            "tökén-héllo",
+            "0123456789abcdef0123456789abcdef",
+            "A\t",
+            "B\u{a0}",
+            "",
+            "C\0D",
+        ] {
+            Q03_INIT_TOKEN_CAPTURED.lock().unwrap().clear();
+            backend
+                .ffi_init_token(CkSlotId(7), Some(b"1234"), label)
+                .expect("stub accepts the valid label");
+            let captured = Q03_INIT_TOKEN_CAPTURED.lock().unwrap();
+            assert_eq!(captured.len(), 1, "exactly one native call for {label:?}");
+            assert_eq!(captured[0].slot, 7, "native call targets the slot for {label:?}");
+            assert!(!captured[0].label_is_null, "native label pointer is non-null for {label:?}");
+            assert_eq!(
+                captured[0].label_bytes,
+                q03_blank_pad_32(label),
+                "native call carries the 32 blank-padded bytes for {label:?}"
+            );
+        }
+        // A NULL SO PIN keeps its (NULL, 0) shape at the native boundary.
+        Q03_INIT_TOKEN_CAPTURED.lock().unwrap().clear();
+        backend.ffi_init_token(CkSlotId(7), None, "hello").expect("stub accepts a NULL SO PIN");
+        let captured = Q03_INIT_TOKEN_CAPTURED.lock().unwrap();
+        assert_eq!(captured.len(), 1, "exactly one native call for a NULL SO PIN");
+        assert!(captured[0].pin_is_null, "NULL SO PIN stays a null pointer");
+        assert_eq!(captured[0].pin_len, 0, "NULL SO PIN carries length 0");
+    }
 }

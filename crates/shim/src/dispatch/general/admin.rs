@@ -19,6 +19,8 @@ pub unsafe extern "C" fn c_init_token(
         // PKCS#11 label is 32 bytes, space-padded; trim trailing spaces for client.
         // W1-L11-10: fallible read like the PIN sites (also rejects an
         // address-range overflow the old panicking reader never checked).
+        // Q03 phase 1: NULL still rewrites to the empty label; the phase-2
+        // refusal policy (awaiting explicit owner acceptance) changes this.
         let label = if p_label.is_null() {
             String::new()
         } else {
@@ -30,7 +32,18 @@ pub unsafe extern "C" fn c_init_token(
                 // in-bounds length, except a hostile near-TOP address.
                 Ok(None) | Err(_) => return rv_err(CkRv::ARGUMENTS_BAD),
             };
-            String::from_utf8_lossy(raw).trim_end().to_string()
+            // Q03 phase 1: valid labels round-trip byte-exact. `label[32]`
+            // is blank-padded, so only trailing ASCII spaces are padding —
+            // strip exactly those, never `trim_end`'s general Unicode
+            // whitespace: a trailing TAB/NBSP is caller bytes the
+            // provider may accept (stock SoftHSM2 stores them verbatim).
+            // Invalid UTF-8 keeps the legacy lossy decoding until the
+            // phase-2 refusal policy is accepted — see the input-contract
+            // note; the 32-byte read extent above is unchanged.
+            match std::str::from_utf8(raw) {
+                Ok(valid) => valid.trim_end_matches(' ').to_string(),
+                Err(_) => String::from_utf8_lossy(raw).trim_end().to_string(),
+            }
         };
         match with_client!(client => client.init_token(CkSlotId(slot_id as u64), so_pin, &label)) {
             Ok(()) => rv_ok(),
