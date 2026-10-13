@@ -5208,6 +5208,203 @@ fn gcm_mixed_iv_aad_null_16_legacy_stays_fail_closed() {
     );
 }
 
+// Q01-P2: after a partial close-all (aggregate transient failure), a
+// dead-but-retained member must answer SESSION_HANDLE_INVALID for an
+// invalid mechanism (native precedence: session resolution before
+// mechanism validation), while the surviving member keeps the local
+// mechanism error and stays usable.
+#[test]
+fn correctness_close_all_partial_failure_dead_member_precedence() {
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let first = shim.session;
+    let second = shim.open_additional_session();
+    let key = create_object(first);
+    let daemon = TestDaemon::shared();
+
+    // One-shot: the first close in the batch fails transiently while the
+    // other succeeds — aggregate FUNCTION_FAILED with one dead member.
+    daemon.backend.set_next_message_lifecycle_action(MockMessageLifecycleAction::Return(
+        CkRv::FUNCTION_FAILED,
+    ));
+    let close_rv = unsafe { dispatch::general::c_close_all_sessions(shim.slot_id) };
+    assert_eq!(close_rv, CKR_FUNCTION_FAILED as CK_RV);
+
+    // Identify the dead member authoritatively (batch order is dynamic).
+    let mut info = std::mem::MaybeUninit::<CK_SESSION_INFO>::uninit();
+    let first_rv = unsafe { dispatch::general::c_get_session_info(first, info.as_mut_ptr()) };
+    let mut info2 = std::mem::MaybeUninit::<CK_SESSION_INFO>::uninit();
+    let second_rv = unsafe { dispatch::general::c_get_session_info(second, info2.as_mut_ptr()) };
+    assert_ne!(first_rv, second_rv, "a partial batch must leave exactly one member dead");
+    let (dead, survivor) =
+        if first_rv == CKR_OK as CK_RV { (second, first) } else { (first, second) };
+
+    // Locally-invalid GCM params (truncated struct image): mechanism
+    // parse fails in the shim with PARAM_INVALID, before any key/handle
+    // use or daemon round-trip.
+    let mut iv = [0xAA_u8; 12];
+    let gcm = CK_GCM_PARAMS {
+        pIv: iv.as_mut_ptr(),
+        ulIvLen: iv.len() as CK_ULONG,
+        ulIvBits: 96,
+        pAAD: std::ptr::null_mut(),
+        ulAADLen: 0,
+        ulTagBits: 128,
+    };
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_AES_GCM,
+        pParameter: &gcm as *const _ as CK_VOID_PTR,
+        ulParameterLen: 1,
+    };
+    assert_eq!(
+        unsafe { dispatch::general::c_encrypt_init(dead, &mut mechanism, key) },
+        CKR_SESSION_HANDLE_INVALID as CK_RV,
+        "a dead-but-retained member must resolve the session before the mechanism"
+    );
+    assert_eq!(
+        unsafe { dispatch::general::c_encrypt_init(survivor, &mut mechanism, key) },
+        CKR_MECHANISM_PARAM_INVALID as CK_RV,
+        "the survivor keeps local mechanism validation"
+    );
+
+    // The survivor stays usable; the dead member stays reconciled.
+    let mut good = sha256_mechanism();
+    assert_eq!(
+        unsafe { dispatch::general::c_digest_init(survivor, &mut good) },
+        CKR_OK as CK_RV,
+        "the surviving member must stay usable after a partial batch"
+    );
+    let mut good2 = sha256_mechanism();
+    assert_eq!(
+        unsafe { dispatch::general::c_digest_init(dead, &mut good2) },
+        CKR_SESSION_HANDLE_INVALID as CK_RV,
+        "the reconciled dead member must keep reporting invalid"
+    );
+}
+
+// Q01-P2 message-continuation pin: a partial close-all must preserve the
+// survivor's message-operation discriminators (the in-flight op
+// continues), while the dead member's state reconciles away once
+// observed dead.
+#[test]
+fn correctness_close_all_partial_failure_preserves_survivor_discriminators() {
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let first = shim.session;
+    let second = shim.open_additional_session();
+    let daemon = TestDaemon::shared();
+
+    // An in-flight GCM message op on BOTH members (shape recorded).
+    for session in [first, second] {
+        let key = create_object(session);
+        let mut iv = [0x11_u8; 12];
+        let mut tag = [0_u8; 16];
+        let mut parameter = CK_GCM_MESSAGE_PARAMS {
+            pIv: iv.as_mut_ptr(),
+            ulIvLen: iv.len() as CK_ULONG,
+            ulIvFixedBits: 96,
+            ivGenerator: CKG_NO_GENERATE,
+            pTag: tag.as_mut_ptr(),
+            ulTagBits: 128,
+        };
+        let mut mechanism = CK_MECHANISM {
+            mechanism: CKM_AES_GCM,
+            pParameter: (&mut parameter as *mut CK_GCM_MESSAGE_PARAMS).cast(),
+            ulParameterLen: std::mem::size_of_val(&parameter) as CK_ULONG,
+        };
+        assert_eq!(
+            unsafe { dispatch::general::c_message_encrypt_init(session, &mut mechanism, key) },
+            CKR_OK as CK_RV,
+        );
+        assert_eq!(
+            test_message_shape(session, state::MessageOperation::Encrypt),
+            Some(MessageParameterShape::Gcm),
+            "setup: the message shape must be recorded"
+        );
+    }
+
+    daemon.backend.set_next_message_lifecycle_action(MockMessageLifecycleAction::Return(
+        CkRv::FUNCTION_FAILED,
+    ));
+    let close_rv = unsafe { dispatch::general::c_close_all_sessions(shim.slot_id) };
+    assert_eq!(close_rv, CKR_FUNCTION_FAILED as CK_RV);
+
+    let mut info = std::mem::MaybeUninit::<CK_SESSION_INFO>::uninit();
+    let first_rv = unsafe { dispatch::general::c_get_session_info(first, info.as_mut_ptr()) };
+    let mut info2 = std::mem::MaybeUninit::<CK_SESSION_INFO>::uninit();
+    let second_rv = unsafe { dispatch::general::c_get_session_info(second, info2.as_mut_ptr()) };
+    assert_ne!(first_rv, second_rv, "a partial batch must leave exactly one member dead");
+    let (dead, survivor) =
+        if first_rv == CKR_OK as CK_RV { (second, first) } else { (first, second) };
+
+    // The survivor's discriminator survives the retained batch, so the
+    // in-flight op continues end to end.
+    assert_eq!(
+        test_message_shape(survivor, state::MessageOperation::Encrypt),
+        Some(MessageParameterShape::Gcm),
+        "a partial batch must preserve the survivor's discriminators"
+    );
+    let data_before = daemon.backend.data_op_call_count();
+    let mut iv = [0x11_u8; 12];
+    let mut tag = [0_u8; 16];
+    let mut parameter = CK_GCM_MESSAGE_PARAMS {
+        pIv: iv.as_mut_ptr(),
+        ulIvLen: iv.len() as CK_ULONG,
+        ulIvFixedBits: 96,
+        ivGenerator: CKG_NO_GENERATE,
+        pTag: tag.as_mut_ptr(),
+        ulTagBits: 128,
+    };
+    let input = [0x22_u8; 8];
+    let mut output = [0u8; 32];
+    let mut output_len = output.len() as CK_ULONG;
+    let cont_rv = unsafe {
+        dispatch::general::c_encrypt_message(
+            survivor,
+            (&mut parameter as *mut CK_GCM_MESSAGE_PARAMS).cast(),
+            std::mem::size_of_val(&parameter) as CK_ULONG,
+            std::ptr::null_mut(),
+            0,
+            input.as_ptr() as CK_BYTE_PTR,
+            input.len() as CK_ULONG,
+            output.as_mut_ptr(),
+            &mut output_len,
+        )
+    };
+    assert_eq!(cont_rv, CKR_OK as CK_RV, "the survivor's in-flight op must continue");
+    assert!(
+        daemon.backend.data_op_call_count() > data_before,
+        "the continuation must reach the backend, not fail locally"
+    );
+
+    // The dead member reconciles away once observed dead: an invalid
+    // mechanism now reports the session error and drops its state.
+    let mut bad_iv = [0xAA_u8; 12];
+    let bad_gcm = CK_GCM_PARAMS {
+        pIv: bad_iv.as_mut_ptr(),
+        ulIvLen: bad_iv.len() as CK_ULONG,
+        ulIvBits: 96,
+        pAAD: std::ptr::null_mut(),
+        ulAADLen: 0,
+        ulTagBits: 128,
+    };
+    let mut bad_mechanism = CK_MECHANISM {
+        mechanism: CKM_AES_GCM,
+        pParameter: &bad_gcm as *const _ as CK_VOID_PTR,
+        ulParameterLen: 1,
+    };
+    assert_eq!(
+        unsafe { dispatch::general::c_encrypt_init(dead, &mut bad_mechanism, CK_INVALID_HANDLE) },
+        CKR_SESSION_HANDLE_INVALID as CK_RV,
+        "a dead-but-retained member must resolve the session before the mechanism"
+    );
+    assert_eq!(
+        test_message_shape(dead, state::MessageOperation::Encrypt),
+        None,
+        "the reconciled dead member drops its discriminators"
+    );
+}
+
 // Q01 maintained oracle: a decoded transient close-all failure must keep
 // the slot's live sessions usable — the daemon stays authoritative and the
 // next Init reaches the backend instead of failing locally.

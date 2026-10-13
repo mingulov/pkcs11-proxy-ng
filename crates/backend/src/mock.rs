@@ -241,6 +241,15 @@ pub struct MockBackend {
     /// analogue for teardown tests (W1-C2-03): wedges the last-holder
     /// logout so eviction boundedness is provable without a real stuck HSM.
     logout_delay: Mutex<Option<std::time::Duration>>,
+    /// Optional blocking delay before `open_session` settles. The
+    /// `close_session`/`logout` analogue for Q01-P1 carrier tests: wedges
+    /// the transient-carrier open so timeout/late-completion ownership is
+    /// provable without a real slow provider.
+    open_session_delay: Mutex<Option<std::time::Duration>>,
+    /// Flags of every `open_session` call in arrival order. Q01-P1 carrier
+    /// tests use it to prove the transient carrier opens read-write when
+    /// releasing an SO login and read-only otherwise.
+    open_session_flags_log: Mutex<Vec<CkSessionFlags>>,
     /// Optional blocking delay applied in [`MockBackend::resolve_input`],
     /// i.e. on entry to every data op (sign/verify/encrypt/decrypt/digest).
     /// T3 degraded-operation tests use it to model a slow backend with
@@ -501,6 +510,8 @@ impl MockBackend {
             injected_close_error: Mutex::new(None),
             close_session_delay: Mutex::new(None),
             logout_delay: Mutex::new(None),
+            open_session_delay: Mutex::new(None),
+            open_session_flags_log: Mutex::new(Vec::new()),
             data_op_delay: Mutex::new(None),
             init_token_gate: Mutex::new(None),
             init_token_error: Mutex::new(None),
@@ -986,6 +997,21 @@ impl MockBackend {
 
     pub fn clear_logout_delay(&self) {
         *self.logout_delay.lock().unwrap() = None;
+    }
+
+    /// Block `open_session` for `delay` before settling. The `logout`
+    /// analogue for Q01-P1 carrier tests (wedged carrier open).
+    pub fn set_open_session_delay(&self, delay: std::time::Duration) {
+        *self.open_session_delay.lock().unwrap() = Some(delay);
+    }
+
+    pub fn clear_open_session_delay(&self) {
+        *self.open_session_delay.lock().unwrap() = None;
+    }
+
+    /// Flags of every `open_session` call so far, in arrival order.
+    pub fn open_session_flags_log(&self) -> Vec<CkSessionFlags> {
+        self.open_session_flags_log.lock().unwrap().clone()
     }
 
     /// Block every data op for `delay` on entry (T3 slow-backend hook).

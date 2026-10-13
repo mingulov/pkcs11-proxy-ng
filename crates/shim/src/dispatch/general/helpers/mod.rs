@@ -694,12 +694,14 @@ mod authenticated_params;
 mod mechanism_read;
 mod mechanism_writeback;
 mod message_params;
+mod suspect_session;
 mod template_input;
 
 pub(crate) use authenticated_params::*;
 pub(crate) use mechanism_read::*;
 pub(crate) use mechanism_writeback::*;
 pub(crate) use message_params::*;
+pub(crate) use suspect_session::*;
 pub(crate) use template_input::*;
 
 #[cfg(test)]

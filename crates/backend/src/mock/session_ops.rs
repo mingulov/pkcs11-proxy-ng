@@ -159,6 +159,14 @@ impl MockBackend {
         self.check_injected()?;
         self.require_known_slot(slot_id)?;
         self.require_token_present(slot_id)?;
+        // Q01-P1 test hooks: wedge the open like `close_session_delay`
+        // wedges closes, and always record the flags (delay read before
+        // the state lock, mirroring close/logout).
+        let delay = *self.open_session_delay.lock().unwrap();
+        if let Some(delay) = delay {
+            std::thread::sleep(delay);
+        }
+        self.open_session_flags_log.lock().unwrap().push(flags);
         let mut state = self.state.lock().unwrap();
         if self.max_sessions > 0 && state.open_sessions.len() as u64 >= self.max_sessions {
             return Err(CkRv::SESSION_COUNT);

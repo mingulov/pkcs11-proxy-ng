@@ -487,6 +487,11 @@ pub struct SlotLogout {
     /// `C_Logout` call. Best-effort: the executor substitutes a live session
     /// when this one raced shut.
     pub via_session: u64,
+    /// The departed context's logical login for the slot. When no live
+    /// carrier survives, the transient carrier opens read-write for an SO
+    /// login (PKCS#11 defines no "R/O SO Functions" state) and read-only
+    /// otherwise (Q01-P1).
+    pub login: LoginState,
 }
 
 /// Backend actions required to tear down one departed context (D6(2)/D9
@@ -571,6 +576,36 @@ pub struct ContextManager {
     /// (transient, inside `session_count_for_principal`). Never acquire
     /// this mutex while holding a contexts guard.
     session_quota_reservations: Arc<std::sync::Mutex<HashMap<String, usize>>>,
+    /// Transient-carrier sessions whose close failed (Q01-P1): stray native
+    /// sessions no mapping owns. Recorded from inside completion ownership
+    /// (so caller timeout/cancellation cannot lose the record) alongside
+    /// the F-01 warn; the next login reconciles the login side. One entry
+    /// per failed carrier close — the carrier runs at most once per
+    /// last-holder-out, so this stays tiny.
+    carrier_cleanup_ledger: Arc<std::sync::Mutex<Vec<UnresolvedCarrierCleanup>>>,
+}
+
+/// A transient-carrier session left open by a failed carrier close
+/// (Q01-P1): native cleanup the daemon could not complete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct UnresolvedCarrierCleanup {
+    /// Slot the carrier was opened on.
+    pub(crate) slot: BackendSlotId,
+    /// Native handle of the stray session.
+    pub(crate) session: u64,
+    /// The close `CK_RV` that stranded it.
+    pub(crate) rv: CkRv,
+}
+
+/// Outcome of one owned transient-carrier sequence (Q01-P1), computed
+/// inside the blocking closure.
+#[derive(Debug)]
+enum TransientCarrierOutcome {
+    /// Open→logout→close all executed; `logout` reports the release. A
+    /// failed close is already ledger-recorded at this point.
+    Settled { logout: CkResult<()> },
+    /// The carrier open failed; nothing was opened, nothing to clean.
+    OpenFailed(CkRv),
 }
 
 /// Maximum age of a cached `(label, serial)` before an authorization check
@@ -660,7 +695,15 @@ impl ContextManager {
             slot_login_holders: Arc::new(DashMap::new()),
             authz_generation: AtomicU64::new(0),
             session_quota_reservations: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            carrier_cleanup_ledger: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
+    }
+
+    /// Snapshot of carrier sessions stranded by failed carrier closes
+    /// (Q01-P1). Empty in the common case.
+    #[cfg(test)]
+    pub(crate) fn unresolved_carrier_cleanups(&self) -> Vec<UnresolvedCarrierCleanup> {
+        self.carrier_cleanup_ledger.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Current daemon-wide authz generation (W1-L13-18). Token-object
@@ -1587,7 +1630,9 @@ impl ContextManager {
             .filter(|h| !self.backend_session_referenced_by_live_context(BackendHandle(*h)))
             .collect();
         let mut slot_logouts = Vec::new();
-        for slot in departed.login_state.keys().copied().collect::<Vec<_>>() {
+        for (slot, login) in
+            departed.login_state.iter().map(|(slot, login)| (*slot, *login)).collect::<Vec<_>>()
+        {
             if self.first_login_state_for_slot_excluding_authoritative(slot, &departed.id).is_some()
             {
                 continue;
@@ -1605,7 +1650,7 @@ impl ContextManager {
                 .next()
                 .or_else(|| self.any_active_backend_session_for_slot(slot));
             if let Some(via_session) = carrier {
-                slot_logouts.push(SlotLogout { slot, via_session });
+                slot_logouts.push(SlotLogout { slot, via_session, login });
             }
         }
         // W1-L13-17: purge the departed context's slots from the holder
@@ -1638,16 +1683,22 @@ impl ContextManager {
     /// Callers run this only after their closes settle, so a retained
     /// logical login (transient close failure) no-ops here and the native
     /// login survives with it — never log out before the outcome is known.
+    ///
+    /// `departed_login` is the logical login the caller just dropped for
+    /// the slot: when no live carrier survives, the transient carrier
+    /// opens read-write for an SO login and read-only otherwise (Q01-P1).
     pub async fn backend_logout_if_last_holder_out(
         &self,
         backend: &Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
         slot: BackendSlotId,
         preferred_session: Option<u64>,
+        departed_login: LoginState,
     ) -> bool {
         self.backend_logout_if_last_holder_out_inner(
             backend,
             slot,
             preferred_session,
+            departed_login,
             TEARDOWN_BACKEND_TIMEOUT,
         )
         .await
@@ -1658,6 +1709,7 @@ impl ContextManager {
         backend: &Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
         slot: BackendSlotId,
         preferred_session: Option<u64>,
+        departed_login: LoginState,
         timeout: Duration,
     ) -> bool {
         // Fast path without the lock: observing any live holder means no logout.
@@ -1665,7 +1717,12 @@ impl ContextManager {
             return false;
         }
         let lock = self.slot_login_lock(slot);
-        let Ok(_guard) = lock.try_lock() else {
+        // Owned guard (Q01-P1): the transient-carrier path moves it into
+        // the blocking closure, so slot serialization survives caller
+        // timeout/cancellation through actual native completion — a late
+        // carrier logout can never steal a login minted after the timeout.
+        // The live-carrier path below just holds it across its spawns.
+        let Ok(guard) = lock.try_lock_owned() else {
             tracing::warn!(
                 slot = slot.0.0,
                 "last-holder backend logout skipped: slot login lock contended"
@@ -1692,10 +1749,21 @@ impl ContextManager {
             // Q01: no live session survived to carry the logout (the
             // closes settled first, so the close path lends no carrier).
             // Open a transient session for the logout instead of assuming
-            // the token auto-logged-out. The slot lock stays held across
-            // it, so a concurrent login is still never stolen.
-            return Self::last_holder_logout_via_transient_carrier(backend, slot, timeout).await;
+            // the token auto-logged-out. The owned serialization guard
+            // moves into the carrier closure with it, so a concurrent
+            // login is still never stolen — even by a late completion
+            // after caller timeout/cancellation.
+            return self
+                .last_holder_logout_via_transient_carrier(
+                    backend,
+                    slot,
+                    departed_login,
+                    guard,
+                    timeout,
+                )
+                .await;
         }
+        let _guard = guard;
         for via in carriers {
             let backend = backend.clone();
             // W1-C2-03: route through spawn_backend so a wedged backend
@@ -1749,54 +1817,77 @@ impl ContextManager {
         self.any_login_state_for_slot(slot)
     }
 
-    /// Q01 transient-carrier logout: open a throwaway read-only session,
-    /// release the backend login through it, and close it again. The caller
-    /// must hold the per-slot login lock with no live holder observed.
+    /// Q01 transient-carrier logout: open a throwaway session, release
+    /// the backend login through it, and close it again. The caller must
+    /// observe no live holder and pass its owned slot-login guard.
     /// Best-effort like every other outcome here: failures warn (F-01) and
     /// the next login reconciles. Returns `true` only when this call
     /// released the backend login.
+    ///
+    /// The carrier opens read-write when releasing an SO login (Q01-P1:
+    /// PKCS#11 defines no "R/O SO Functions" state, so a read-only open
+    /// while the SO is logged in is not portable) and read-only otherwise.
+    ///
+    /// Q01-P1 completion ownership: the whole open→logout→close sequence
+    /// runs inside ONE blocking closure owning the carrier handle, the
+    /// slot-login serialization guard, and the cleanup ledger. The
+    /// blocking task always runs to true native completion, so a caller
+    /// timeout/cancellation only changes what the caller observes (it
+    /// reports unreleased) — it cannot orphan the handle, drop
+    /// serialization early (a late logout stealing a fresh login), or
+    /// lose the unresolved-cleanup record. A wedged backend therefore
+    /// pins this slot's login serialization until it unsticks; login and
+    /// close refuse boundedly (GENERAL_ERROR) meanwhile instead of
+    /// queueing.
     async fn last_holder_logout_via_transient_carrier(
+        &self,
         backend: &Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
         slot: BackendSlotId,
+        departed_login: LoginState,
+        serialization: OwnedMutexGuard<()>,
         timeout: Duration,
     ) -> bool {
-        let open_backend = backend.clone();
-        let temp = match crate::server::grpc_service::service_utils::spawn_backend_with_timeout(
-            timeout,
-            move || open_backend.open_session(slot.0, CkSessionFlags::SERIAL_SESSION),
-        )
-        .await
-        {
-            Ok(Ok(handle)) => handle,
-            Ok(Err(rv)) => {
-                tracing::warn!(
-                    slot = slot.0.0,
-                    rv = rv.0,
-                    "last-holder backend logout skipped: transient carrier open failed"
-                );
-                return false;
-            }
-            Err(status) => {
-                tracing::warn!(
-                    slot = slot.0.0,
-                    error = %status,
-                    "last-holder backend logout spawn failed; backend may stay logged in with no holder"
-                );
-                return false;
-            }
+        let carrier_flags = if departed_login == LoginState::So {
+            CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION
+        } else {
+            CkSessionFlags::SERIAL_SESSION
         };
-        let logout_backend = backend.clone();
-        let released = match crate::server::grpc_service::service_utils::spawn_backend_with_timeout(
+        let ledger = Arc::clone(&self.carrier_cleanup_ledger);
+        let carrier = backend.clone();
+        let outcome = crate::server::grpc_service::service_utils::spawn_backend_with_timeout(
             timeout,
-            move || logout_backend.logout(temp),
+            move || {
+                let _serialization = serialization;
+                let temp = match carrier.open_session(slot.0, carrier_flags) {
+                    Ok(handle) => handle,
+                    Err(rv) => return Ok(TransientCarrierOutcome::OpenFailed(rv)),
+                };
+                let logout = carrier.logout(temp);
+                let close = carrier.close_session(temp);
+                if let Err(rv) = close {
+                    // The stray session stays open AND recorded — the
+                    // record lands from inside completion ownership, so
+                    // even a caller timeout/cancellation cannot lose it.
+                    tracing::warn!(
+                        slot = slot.0.0,
+                        rv = rv.0,
+                        "transient logout carrier close failed; the stray session stays open"
+                    );
+                    ledger
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .push(UnresolvedCarrierCleanup { slot, session: temp.0, rv });
+                }
+                Ok(TransientCarrierOutcome::Settled { logout })
+            },
         )
-        .await
-        {
-            Ok(Ok(())) => {
+        .await;
+        match outcome {
+            Ok(Ok(TransientCarrierOutcome::Settled { logout: Ok(()) })) => {
                 tracing::debug!("last-holder backend logout succeeded");
                 true
             }
-            Ok(Err(rv)) => {
+            Ok(Ok(TransientCarrierOutcome::Settled { logout: Err(rv) })) => {
                 tracing::warn!(
                     slot = slot.0.0,
                     rv = rv.0,
@@ -1804,6 +1895,27 @@ impl ContextManager {
                 );
                 false
             }
+            Ok(Ok(TransientCarrierOutcome::OpenFailed(rv))) => {
+                tracing::warn!(
+                    slot = slot.0.0,
+                    rv = rv.0,
+                    "last-holder backend logout skipped: transient carrier open failed"
+                );
+                false
+            }
+            // Spawn timeout (proxy FUNCTION_FAILED) or breaker refusal
+            // (HOST_MEMORY): the closure still runs to native completion
+            // detached — report unreleased and let the next login
+            // reconcile, exactly like every other best-effort outcome.
+            Ok(Err(rv)) => {
+                tracing::warn!(
+                    slot = slot.0.0,
+                    rv = rv.0,
+                    "last-holder backend logout unobserved (timeout or refusal); \
+                     completion continues detached and the next login reconciles"
+                );
+                false
+            }
             Err(status) => {
                 tracing::warn!(
                     slot = slot.0.0,
@@ -1812,31 +1924,7 @@ impl ContextManager {
                 );
                 false
             }
-        };
-        let close_backend = backend.clone();
-        match crate::server::grpc_service::service_utils::spawn_backend_with_timeout(
-            timeout,
-            move || close_backend.close_session(temp),
-        )
-        .await
-        {
-            Ok(Ok(())) => {}
-            Ok(Err(rv)) => {
-                tracing::warn!(
-                    slot = slot.0.0,
-                    rv = rv.0,
-                    "transient logout carrier close failed; the stray session stays open"
-                );
-            }
-            Err(status) => {
-                tracing::warn!(
-                    slot = slot.0.0,
-                    error = %status,
-                    "transient logout carrier close spawn failed; the stray session stays open"
-                );
-            }
         }
-        released
     }
 
     /// Execute teardown plans: all last-holder logouts first (each rechecked
@@ -1859,17 +1947,33 @@ impl ContextManager {
         plans: Vec<ContextTeardownPlan>,
         timeout: Duration,
     ) {
-        let mut logouts: HashMap<BackendSlotId, u64> = HashMap::new();
+        let mut logouts: HashMap<BackendSlotId, (u64, LoginState)> = HashMap::new();
         let mut closes: Vec<u64> = Vec::new();
         for plan in plans {
             for logout in plan.slot_logouts {
-                logouts.entry(logout.slot).or_insert(logout.via_session);
+                // An SO departure wins the dedup: its read-write carrier
+                // releases either login type, while a read-only carrier
+                // might fail to open while the SO is logged in (Q01-P1).
+                logouts
+                    .entry(logout.slot)
+                    .and_modify(|entry| {
+                        if logout.login == LoginState::So {
+                            *entry = (logout.via_session, logout.login);
+                        }
+                    })
+                    .or_insert((logout.via_session, logout.login));
             }
             closes.extend(plan.sessions_to_close);
         }
-        for (slot, via_session) in logouts {
-            self.backend_logout_if_last_holder_out_inner(backend, slot, Some(via_session), timeout)
-                .await;
+        for (slot, (via_session, login)) in logouts {
+            self.backend_logout_if_last_holder_out_inner(
+                backend,
+                slot,
+                Some(via_session),
+                login,
+                timeout,
+            )
+            .await;
         }
         Self::close_backend_sessions(backend, closes, timeout).await;
     }

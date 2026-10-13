@@ -214,10 +214,15 @@ pub(super) async fn close_session_with_timeout(
 
     // D6(2) snapshot: when this close drops the context's last logical login
     // for its slot, the backend login must be released too (last-context-out)
-    // so a later login PIN-verifies against a logged-out token.
+    // so a later login PIN-verifies against a logged-out token. The login
+    // VALUE travels with the snapshot so the transient carrier opens with
+    // SO-aware flags (Q01-P1).
     let held_login_slot = ctx_mgr
         .get_context(&ctx_id, |ctx| {
-            ctx.session_slots.get(&vh).copied().filter(|slot| ctx.login_state.contains_key(slot))
+            ctx.session_slots
+                .get(&vh)
+                .copied()
+                .and_then(|slot| ctx.login_state.get(&slot).copied().map(|login| (slot, login)))
         })
         .await
         .flatten();
@@ -270,8 +275,8 @@ pub(super) async fn close_session_with_timeout(
     // the close failed transiently (login retained), when sibling sessions
     // keep the login, or when another live context holds it — the native
     // login always survives with a retained logical login.
-    if let Some(slot) = held_login_slot {
-        ctx_mgr.backend_logout_if_last_holder_out(backend_ref, slot, None).await;
+    if let Some((slot, login)) = held_login_slot {
+        ctx_mgr.backend_logout_if_last_holder_out(backend_ref, slot, None, login).await;
     }
     Ok(Response::new(pkcs11_proxy_ng_proto::CloseSessionResponse { ck_rv }))
 }
@@ -333,11 +338,13 @@ pub(super) async fn close_all_sessions(
     // the closes settle terminal.
     // D6(2): snapshot the held login first; the last-holder logout runs
     // after the batch settles (Q01), when a retained login still no-ops
-    // it — never before the outcome is known.
+    // it — never before the outcome is known. The login VALUE travels
+    // with the snapshot so the transient carrier opens with SO-aware
+    // flags (Q01-P1).
     let held_login = ctx_mgr
-        .get_context(&ctx_id, |ctx| ctx.login_state.contains_key(&backend_slot))
+        .get_context(&ctx_id, |ctx| ctx.login_state.get(&backend_slot).copied())
         .await
-        .unwrap_or(false);
+        .flatten();
     let virtual_sessions: Vec<VirtualHandle> = ctx_mgr
         .get_context(&ctx_id, |ctx| {
             ctx.session_slots
@@ -349,6 +356,7 @@ pub(super) async fn close_all_sessions(
         .await
         .unwrap_or_default();
     let mut transitions = Vec::with_capacity(virtual_sessions.len());
+    let mut skipped_suspended = 0usize;
     for vh in virtual_sessions {
         match ctx_mgr.begin_close_session_with_guard(&ctx_id, vh, None) {
             Ok(transition) => transitions.push(transition),
@@ -358,8 +366,25 @@ pub(super) async fn close_all_sessions(
                 }));
             }
             Err(CloseSessionBeginError::SessionMissing) => {
-                // Already suspended by a concurrent singular close, which
-                // owns its completion — skip it here.
+                // The member was suspended by an in-flight singular
+                // close (which owns its completion) or already gone.
+                // Count it ambiguous unless PROVEN gone: a member that
+                // settles-transient between this begin-fail and the
+                // check below reactivates live, and claiming OK for it
+                // would evict shim state for a server-live session.
+                // Absent mappings stay absent (only a suspended owner
+                // can settle one, and it holds the suspended entry),
+                // so proven-gone is stable and OK stays honest (Q01).
+                let gone = ctx_mgr
+                    .get_context(&ctx_id, |ctx| {
+                        ctx.session_handles.resolve(vh).is_none()
+                            && ctx.session_handles.suspended_backend(vh).is_none()
+                    })
+                    .await
+                    .unwrap_or(false);
+                if !gone {
+                    skipped_suspended += 1;
+                }
             }
         }
     }
@@ -368,7 +393,18 @@ pub(super) async fn close_all_sessions(
 
     let count = backend_sessions.len();
     let ck_rv = if backend_sessions.is_empty() {
-        CkRv::OK.0
+        if skipped_suspended > 0 {
+            // Every member is owned by an in-flight singular close.
+            // Claiming OK would evict shim state an owner may still
+            // reactivate (a server-live session unreachable from the
+            // shim); answer the same outcome-ambiguous FUNCTION_FAILED
+            // as a timed-out singular close instead, so the shim
+            // retains and the next call reports the owners' true
+            // settlement.
+            CkRv::FUNCTION_FAILED.0
+        } else {
+            CkRv::OK.0
+        }
     } else {
         // Single spawn_backend call to close all sessions in batch. The
         // transitions move into the blocking closure (singular-path
@@ -397,24 +433,34 @@ pub(super) async fn close_all_sessions(
             }
         })
         .await?;
-        match result {
+        // A suspended member skipped above has an unknown fate owned
+        // elsewhere: the batch cannot honestly claim OK for it (same
+        // ambiguity as the empty-skipped batch — the shim must retain
+        // until the owner settles). A real per-member failure keeps its
+        // own aggregate.
+        let mut batch_rv = match result {
             Ok(()) => CkRv::OK.0,
             Err(rv) => rv.0,
+        };
+        if skipped_suspended > 0 && batch_rv == CkRv::OK.0 {
+            batch_rv = CkRv::FUNCTION_FAILED.0;
         }
+        batch_rv
     };
     // D6(2): release the backend login when the batch dropped the last
     // logical login for the slot (Q01: only after the closes settle — a
     // retained login after a transient or partial failure no-ops the
     // helper, so the native login survives with it; this also covers the
     // race where a concurrent close took the last own session mid-batch).
-    if held_login {
-        ctx_mgr.backend_logout_if_last_holder_out(backend_ref, backend_slot, None).await;
+    if let Some(login) = held_login {
+        ctx_mgr.backend_logout_if_last_holder_out(backend_ref, backend_slot, None, login).await;
     }
 
     debug!(
         context_id = %ctx_id.0,
         slot = req.slot_id,
         closed = count,
+        skipped_suspended,
         "CloseAllSessions completed"
     );
 

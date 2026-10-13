@@ -10,7 +10,8 @@ use crate::state;
 use super::helpers::{
     Operation, catch_panics, classify_input, dispatch_byte_output_exact,
     dispatch_byte_output_exact_no_input, input_buf_to_ck_in_buf, prepare_mechanism_output_params,
-    read_mechanism_for_transport, rv_err, rv_ok, unit_result_to_rv, with_client,
+    read_mechanism_for_transport, reconcile_suspect_session, resolve_suspect_mech_error, rv_err,
+    rv_ok, unit_result_to_rv, with_client,
 };
 
 pub unsafe extern "C" fn c_digest_init(
@@ -33,10 +34,11 @@ pub unsafe extern "C" fn c_digest_init(
         }
         let mech = match unsafe { read_mechanism_for_transport(p_mechanism, Operation::General) } {
             Ok(mech) => mech,
-            Err(e) => return rv_err(e),
+            Err(e) => return rv_err(resolve_suspect_mech_error(h_session, e)),
         };
         let result =
             with_client!(client => client.digest_init(CkSessionHandle(h_session as u64), &mech));
+        reconcile_suspect_session(h_session, &result);
         unit_result_to_rv(result)
     })
 }
@@ -128,13 +130,14 @@ pub unsafe extern "C" fn c_encrypt_init(
         }
         let mech = match unsafe { read_mechanism_for_transport(p_mechanism, Operation::General) } {
             Ok(mech) => mech,
-            Err(e) => return rv_err(e),
+            Err(e) => return rv_err(resolve_suspect_mech_error(h_session, e)),
         };
         let result = with_client!(client => client.encrypt_init(
             CkSessionHandle(h_session as u64),
             &mech,
             CkObjectHandle(h_key as u64),
         ));
+        reconcile_suspect_session(h_session, &result);
         match result {
             Ok(output_params) => {
                 // W1-C6-01: the generated GCM IV is delivered here, inside
@@ -234,13 +237,14 @@ pub unsafe extern "C" fn c_decrypt_init(
         }
         let mech = match unsafe { read_mechanism_for_transport(p_mechanism, Operation::General) } {
             Ok(mech) => mech,
-            Err(e) => return rv_err(e),
+            Err(e) => return rv_err(resolve_suspect_mech_error(h_session, e)),
         };
         let result = with_client!(client => client.decrypt_init(
             CkSessionHandle(h_session as u64),
             &mech,
             CkObjectHandle(h_key as u64),
         ));
+        reconcile_suspect_session(h_session, &result);
         unit_result_to_rv(result)
     })
 }

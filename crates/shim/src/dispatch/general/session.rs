@@ -78,6 +78,16 @@ pub unsafe extern "C" fn c_close_all_sessions(slot_id: CK_SLOT_ID) -> CK_RV {
         if evict_authoritative {
             crate::state::evict_slot_session_caches(slot_id);
         }
+        // Q01-P2: a backend failure with retained state proves nothing
+        // per member — some members may have closed while others
+        // survived. Mark the retained slot sessions suspect so the next
+        // Init reconciles each against the daemon (lazy per-member
+        // settlement without a protocol change).
+        if !evict_authoritative
+            && matches!(&result, Err(error) if error.origin == MessageCallErrorOrigin::Backend)
+        {
+            crate::state::mark_slot_sessions_suspect(slot_id);
+        }
         unit_result_to_rv(result.map_err(|error| error.ck_rv))
     })
 }

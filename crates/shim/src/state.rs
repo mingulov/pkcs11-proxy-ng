@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock, RwLock};
 use std::time::Duration;
@@ -343,6 +343,43 @@ pub(crate) fn is_session_known(h_session: CK_SESSION_HANDLE) -> bool {
 
 fn forget_session_slot(h_session: CK_SESSION_HANDLE) {
     lock_recovering(&SESSION_SLOTS).remove(&h_session);
+    clear_session_suspect(h_session);
+}
+
+/// Sessions retained by a failed close-all batch whose per-member fate
+/// is unknown (Q01-P2): the aggregate `CK_RV` proves nothing per member,
+/// so each stays usable until one authoritative daemon verdict settles
+/// it (evicted when confirmed dead, cleared when confirmed alive).
+/// Bounded by live session count; entries clear on forget, evict, and
+/// full cache resets alongside the maps they annotate.
+static SUSPECT_AFTER_BATCH_FAILURE: LazyLock<Mutex<HashSet<CK_SESSION_HANDLE>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// Mark every session remembered on `slot_id` suspect (see the map
+/// above). Called only when a close-all batch fails with retained
+/// state — never on the steady-state path.
+pub(crate) fn mark_slot_sessions_suspect(slot_id: CK_SLOT_ID) {
+    let sessions: Vec<CK_SESSION_HANDLE> = lock_recovering(&SESSION_SLOTS)
+        .iter()
+        .filter(|(_, slot)| **slot == slot_id)
+        .map(|(session, _)| *session)
+        .collect();
+    if sessions.is_empty() {
+        return;
+    }
+    lock_recovering(&SUSPECT_AFTER_BATCH_FAILURE).extend(sessions);
+}
+
+/// Whether `h_session` was retained by a failed close-all batch and not
+/// yet reconciled against an authoritative daemon verdict.
+pub(crate) fn is_session_suspect(h_session: CK_SESSION_HANDLE) -> bool {
+    lock_recovering(&SUSPECT_AFTER_BATCH_FAILURE).contains(&h_session)
+}
+
+/// Drop the suspect mark: the session proved alive (or is being
+/// forgotten/evicted, which implies settlement).
+pub(crate) fn clear_session_suspect(h_session: CK_SESSION_HANDLE) {
+    lock_recovering(&SUSPECT_AFTER_BATCH_FAILURE).remove(&h_session);
 }
 
 /// Clear every per-session cache across all sessions.
@@ -354,6 +391,7 @@ fn forget_session_slot(h_session: CK_SESSION_HANDLE) {
 pub(crate) fn clear_all_caches() {
     lock_recovering(&SESSION_SLOTS).clear();
     lock_recovering(&MESSAGE_OPERATION_STATES).clear();
+    lock_recovering(&SUSPECT_AFTER_BATCH_FAILURE).clear();
 }
 
 /// Forget session ownership and all message-operation discriminators without

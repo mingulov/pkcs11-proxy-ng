@@ -5497,3 +5497,209 @@ async fn mint_gate_denies_derive_key_of_denied_class() {
     assert_eq!(resp.ck_rv, CkRv::ATTRIBUTE_VALUE_INVALID.0);
     assert_eq!(resp.key_handle, 0);
 }
+
+/// Q01 blocking concern: a close-all whose members are all suspended by
+/// in-flight singular closes must not report OK — their fate is owned
+/// elsewhere and unknown here, so the batch answers outcome-ambiguous
+/// FUNCTION_FAILED (like a timed-out singular close) and the shim
+/// retains until the owners settle.
+#[tokio::test]
+async fn close_all_sessions_racing_singular_close_is_ambiguous() {
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let virtual_slot = ctx_mgr.virtual_slots().await[0];
+
+    let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+    assert_eq!(login_response(&ctx_mgr, &backend, &ctx_id, session).await, CkRv::OK.0);
+
+    // Suspend the only member with an in-flight singular close whose
+    // completion this transition owns.
+    let transition = ctx_mgr.begin_close_session(&ctx_id, VirtualHandle(session)).unwrap();
+    let raced = close_all_sessions(
+        &ctx_mgr,
+        &backend,
+        Request::new(pkcs11_proxy_ng_proto::CloseAllSessionsRequest {
+            client_context_id: ctx_id.0.clone(),
+            slot_id: virtual_slot.0,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(
+        raced.ck_rv,
+        CkRv::FUNCTION_FAILED.0,
+        "a batch that closed nothing must not claim OK"
+    );
+    assert!(
+        ctx_mgr.slot_for_session(&ctx_id, VirtualHandle(session)).await.is_some(),
+        "the raced member stays suspended under its owner's completion"
+    );
+
+    // The owner settles transiently (nothing ran); a retry then closes.
+    drop(transition);
+    let retry = close_all_sessions(
+        &ctx_mgr,
+        &backend,
+        Request::new(pkcs11_proxy_ng_proto::CloseAllSessionsRequest {
+            client_context_id: ctx_id.0.clone(),
+            slot_id: virtual_slot.0,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(retry.ck_rv, CkRv::OK.0);
+    assert_eq!(mock.open_session_count(), 0, "retry must close the backend session");
+}
+
+/// Q01 blocking-concern variant: a batch that closes some members while
+/// others are suspended elsewhere still answers FUNCTION_FAILED — the
+/// suspended members' fate is unknown, so OK would evict shim state an
+/// owner may reactivate.
+#[tokio::test]
+async fn close_all_sessions_with_suspended_member_is_ambiguous() {
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let virtual_slot = ctx_mgr.virtual_slots().await[0];
+
+    let s1 = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+    let s2 = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+    assert_eq!(login_response(&ctx_mgr, &backend, &ctx_id, s1).await, CkRv::OK.0);
+
+    let transition = ctx_mgr.begin_close_session(&ctx_id, VirtualHandle(s1)).unwrap();
+    let raced = close_all_sessions(
+        &ctx_mgr,
+        &backend,
+        Request::new(pkcs11_proxy_ng_proto::CloseAllSessionsRequest {
+            client_context_id: ctx_id.0.clone(),
+            slot_id: virtual_slot.0,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(
+        raced.ck_rv,
+        CkRv::FUNCTION_FAILED.0,
+        "a batch with suspended members must not claim OK"
+    );
+    assert_eq!(mock.open_session_count(), 1, "the batch closes exactly the unowned member");
+    assert!(
+        ctx_mgr.slot_for_session(&ctx_id, VirtualHandle(s2)).await.is_none(),
+        "the closed member's mapping is removed"
+    );
+    let s1_resolved = ctx_mgr
+        .get_context(&ctx_id, |ctx| ctx.session_handles.resolve(VirtualHandle(s1)))
+        .await
+        .unwrap();
+    assert!(s1_resolved.is_none(), "the suspended member stays unresolvable");
+
+    drop(transition);
+    let retry = close_all_sessions(
+        &ctx_mgr,
+        &backend,
+        Request::new(pkcs11_proxy_ng_proto::CloseAllSessionsRequest {
+            client_context_id: ctx_id.0.clone(),
+            slot_id: virtual_slot.0,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(retry.ck_rv, CkRv::OK.0);
+    assert_eq!(mock.open_session_count(), 0, "retry must close the surviving backend session");
+}
+
+/// Q01 blocking-concern stress guard: singular closes racing close-all
+/// batches must never produce OK-with-a-live-member — every OK verdict
+/// implies all pre-existing members settled (closed or
+/// suspended-by-a-completing-owner, both unresolvable). The close
+/// delay keeps racer suspensions wide open so batches land inside
+/// them; the invariant holds with or without overlap.
+#[tokio::test]
+async fn close_all_sessions_racing_stress_never_ok_with_live_member() {
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let virtual_slot = ctx_mgr.virtual_slots().await[0];
+
+    mock.set_close_session_delay(std::time::Duration::from_millis(5));
+    // Two sessions per round: the suite-wide global quota OnceLock
+    // (`open_session_quota_enforced_end_to_end` arms max 2 per principal
+    // for the whole test process) rejects a third concurrent open with
+    // SESSION_COUNT once armed, so this stress shape must stay within
+    // two live sessions per context. The batch still races one racer
+    // over a shared member while owning the other itself.
+    for _ in 0..30 {
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            handles.push(open_test_session(&ctx_mgr, &backend, &ctx_id).await);
+        }
+        let racers: Vec<_> = handles
+            .iter()
+            .step_by(2)
+            .map(|handle| {
+                let ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+                let ctx_id = ctx_id.clone();
+                let handle = *handle;
+                tokio::spawn(async move {
+                    close_session(
+                        &ctx,
+                        Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
+                            client_context_id: ctx_id.0.clone(),
+                            session_handle: handle,
+                        }),
+                    )
+                    .await
+                })
+            })
+            .collect();
+        // Let the racers suspend before batching (overlap
+        // encouragement only — the invariant below holds regardless).
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        let batch_rv = close_all_sessions(
+            &ctx_mgr,
+            &backend,
+            Request::new(pkcs11_proxy_ng_proto::CloseAllSessionsRequest {
+                client_context_id: ctx_id.0.clone(),
+                slot_id: virtual_slot.0,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .ck_rv;
+        for racer in racers {
+            let _ = racer.await;
+        }
+        if batch_rv == CkRv::OK.0 {
+            for handle in &handles {
+                let resolved = ctx_mgr
+                    .get_context(&ctx_id, |ctx| ctx.session_handles.resolve(VirtualHandle(*handle)))
+                    .await
+                    .unwrap();
+                assert!(
+                    resolved.is_none(),
+                    "an OK batch must settle every pre-existing member (handle {handle} live)"
+                );
+            }
+        }
+        assert_eq!(mock.open_session_count(), 0, "every round must drain all backend sessions");
+    }
+    mock.clear_close_session_delay();
+}
