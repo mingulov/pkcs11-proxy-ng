@@ -5986,3 +5986,179 @@ async fn cancelled_close_all_still_runs_post_settle_logout() {
     poll_until_native_logout(&mock, spare, "cancelled close-all").await;
     mock.clear_close_session_delay();
 }
+
+/// F1 round-2: a response timeout must not skip the post-settle logout —
+/// the timeout shapes only the RV, and the last-holder release runs after
+/// true completion. Mirror of `cancelled_close_still_runs_post_settle_logout`
+/// on the timeout path: pre-fix the timeout-time logout no-ops on the
+/// retained login and the late settle leaves no logout owner, so the
+/// spare never flips public.
+#[tokio::test]
+async fn timed_out_close_still_runs_post_settle_logout() {
+    let (ctx_mgr, mock, ctx_id, session) = setup_session_with_mock().await;
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    assert_eq!(login_response(&ctx_mgr, &backend, &ctx_id, session).await, CkRv::OK.0);
+    let spare = mock
+        .open_session(CkSlotId(0), CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION)
+        .unwrap();
+
+    mock.set_close_session_delay(std::time::Duration::from_millis(300));
+    let rv = super::lifecycle::close_session_with_timeout(
+        &ctx_mgr,
+        &backend,
+        Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+        }),
+        Some(std::time::Duration::from_millis(10)),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv;
+    assert_eq!(rv, CkRv::FUNCTION_FAILED.0, "the wedged close must outlive the response timeout");
+
+    // Late settlement still drops the mapping terminally...
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let settled = ctx_mgr
+                .get_context(&ctx_id, |ctx| {
+                    ctx.session_handles.resolve(VirtualHandle(session)).is_none()
+                        && ctx.session_handles.suspended_backend(VirtualHandle(session)).is_none()
+                })
+                .await
+                .unwrap_or(true);
+            if settled {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the wedged close must settle after the timeout");
+    // ...and the late completion still releases the backend login.
+    poll_until_native_logout(&mock, spare, "timed-out singular close").await;
+    mock.clear_close_session_delay();
+}
+
+/// F1 round-2 batch path: a response timeout on close-all must not skip
+/// the post-settle logout either — same completion-ownership discipline
+/// as the singular path (pre-fix the timeout-time logout no-ops on the
+/// retained login and the late batch settle leaves no logout owner).
+#[tokio::test]
+async fn timed_out_close_all_still_runs_post_settle_logout() {
+    let (ctx_mgr, mock, ctx_id, s1) = setup_session_with_mock().await;
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let virtual_slot = ctx_mgr.virtual_slots().await[0];
+    let _s2 = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+    assert_eq!(login_response(&ctx_mgr, &backend, &ctx_id, s1).await, CkRv::OK.0);
+    let spare = mock
+        .open_session(CkSlotId(0), CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION)
+        .unwrap();
+
+    let token_policy = crate::server::auth::policy::TokenPolicy::from_config(
+        &crate::config::AuthConfig::default(),
+    )
+    .expect("default policy");
+    mock.set_close_session_delay(std::time::Duration::from_millis(300));
+    let rv = super::lifecycle::close_all_sessions_with_timeout(
+        &ctx_mgr,
+        &backend,
+        &token_policy,
+        Request::new(pkcs11_proxy_ng_proto::CloseAllSessionsRequest {
+            client_context_id: ctx_id.0.clone(),
+            slot_id: virtual_slot.0,
+        }),
+        Some(std::time::Duration::from_millis(10)),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv;
+    assert_eq!(rv, CkRv::FUNCTION_FAILED.0, "the wedged batch must outlive the response timeout");
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let settled = ctx_mgr
+                .get_context(&ctx_id, |ctx| {
+                    ctx.session_handles.resolve(VirtualHandle(s1)).is_none()
+                        && ctx.session_handles.suspended_backend(VirtualHandle(s1)).is_none()
+                })
+                .await
+                .unwrap_or(true);
+            if settled {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the wedged batch must settle after the timeout");
+    poll_until_native_logout(&mock, spare, "timed-out close-all").await;
+    mock.clear_close_session_delay();
+}
+
+/// F2 round-2: a close whose begin fails while the owner settles
+/// transiently between the begin and the liveness check must never
+/// report the handle dead — a reactivated (live) member answers
+/// FUNCTION_FAILED, never SESSION_HANDLE_INVALID. Pre-fix the arm
+/// checks only the suspended map, so an owner reactivate landing in
+/// the window yields a bogus SHI that evicts live shim state. The
+/// owner never settles terminally here, so SHI is unreachable post-fix
+/// and any SHI is the race.
+#[tokio::test(flavor = "multi_thread")]
+async fn close_racing_reactivated_close_never_reports_handle_invalid() {
+    const ITERS: usize = 200;
+    for _ in 0..ITERS {
+        let mock = Arc::new(MockBackend::default_test());
+        mock.initialize().unwrap();
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+        let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+
+        // Owner flaps the mapping suspended -> live as fast as the
+        // scheduler allows, holding each suspension across a yield so
+        // the racer's begin-fail/check straddles the reactivate.
+        let flap_mgr = Arc::clone(&ctx_mgr);
+        let flap_ctx = ctx_id.clone();
+        let flapper = tokio::spawn(async move {
+            loop {
+                // The racer may win the mapping and really close it —
+                // then the session is terminally gone and flapping ends.
+                if flap_mgr.slot_for_session(&flap_ctx, VirtualHandle(session)).await.is_none() {
+                    break;
+                }
+                match flap_mgr.begin_close_session(&flap_ctx, VirtualHandle(session)) {
+                    Ok(transition) => {
+                        tokio::task::yield_now().await;
+                        drop(transition);
+                    }
+                    Err(_) => {
+                        tokio::task::yield_now().await;
+                    }
+                }
+            }
+        });
+        let rv = close_session_rv(&ctx_mgr, &backend, &ctx_id, session).await;
+        flapper.abort();
+        let _ = flapper.await;
+        assert_ne!(
+            rv,
+            CkRv::SESSION_HANDLE_INVALID.0,
+            "a live-or-suspended member must never read handle-invalid"
+        );
+        // Settle the iteration: the racer either really closed the
+        // session (OK) or hit the flapping owner (ambiguous) — either
+        // way a retry now drains it.
+        if rv != CkRv::OK.0 {
+            assert_eq!(
+                close_session_rv(&ctx_mgr, &backend, &ctx_id, session).await,
+                CkRv::OK.0,
+                "retry after the owner stops flapping must close"
+            );
+        }
+        assert_eq!(mock.open_session_count(), 0);
+    }
+}

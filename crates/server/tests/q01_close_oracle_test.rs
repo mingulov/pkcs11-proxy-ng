@@ -411,3 +411,70 @@ async fn loaded_cancelled_close_settles_late_without_native_leak() -> Result<(),
     daemon.shutdown().await?;
     Ok(())
 }
+
+/// Loaded response-timeout: a close wedged past the daemon timeout
+/// answers FUNCTION_FAILED promptly (the timeout shapes only the RV),
+/// then settles late with exactly one native entry/completion pair —
+/// and the deferred post-settle logout (F1 round-2) still runs the
+/// owned transient-carrier logout afterwards. Mirror of the
+/// cancelled-close oracle on the timeout path.
+#[tokio::test]
+#[ignore] // requires SoftHSM2 + native-owner-test-hooks
+async fn loaded_timed_out_close_releases_login_late() -> Result<(), String> {
+    // Daemon-side 2s timeout: every other test in this binary uses fast
+    // native calls (the cancel oracle's wedge is 1s), so 2s keeps them
+    // far from the timeout however the tests order. OnceLock: first
+    // call in this process wins; only this test configures it.
+    ::pkcs11_proxy_ng::server::grpc_service::service_utils::configure_backend_guard(2, 200);
+    let fixture = ProviderFixture::soft_hsm().await?;
+    let daemon = DaemonHarness::start(&fixture).await?;
+    let mut client = initialized_client(daemon.endpoint()).await?;
+    let slot = ensure_user_token(&mut client, &fixture).await?;
+    let session = open_user_session(&mut client, slot, &fixture.user_pin, true).await?;
+
+    let _ = take_native_session_events();
+    set_native_close_delay_once(Duration::from_secs(6));
+    let started = Instant::now();
+    match client.close_session(session).await {
+        Err(rv) if rv == CkRv::FUNCTION_FAILED => {}
+        other => return Err(format!("timed-out close must answer ambiguous, got {other:?}")),
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(6),
+        "the response timeout must answer before the wedged native call returns"
+    );
+
+    // The native entry landed before the wedge sleep; late completion
+    // settles terminally with exactly one entry/completion pair.
+    let native = wait_for_close_entry(Duration::from_secs(10)).await?;
+    let drained_with_completion =
+        wait_for_close_completion(native, Duration::from_secs(10)).await?;
+    wait_for_handle_invalid(&mut client, session, Duration::from_secs(10)).await?;
+    // F1 round-2: the deferred completion runs the owned carrier logout
+    // even though the response timed out — exactly one carrier sequence
+    // on a fresh handle, then silence.
+    wait_for_carrier_sequence(native, drained_with_completion, Duration::from_secs(10)).await?;
+    assert!(
+        take_native_session_events().is_empty(),
+        "nothing native may run past the member close + carrier sequence (native {native})"
+    );
+    // Same provider truth as the cancel oracle: SoftHSM releases the
+    // login with its last session and the carrier released it again
+    // (best-effort); a fresh session observes the public state and a
+    // fresh login PIN-verifies.
+    let probe = open_public_session(&mut client, slot, true).await?;
+    let info =
+        client.get_session_info(probe).await.map_err(|rv| format!("probe info failed: {rv}"))?;
+    assert_eq!(
+        info.state,
+        CkSessionState::RwPublic,
+        "SoftHSM releases the login with its last session"
+    );
+    client
+        .login(probe, CkUserType::User, Some(fixture.user_pin.as_bytes()))
+        .await
+        .map_err(|rv| format!("fresh login must PIN-verify: {rv}"))?;
+    client.finalize().await.map_err(|rv| format!("client finalize: {rv}"))?;
+    daemon.shutdown().await?;
+    Ok(())
+}
