@@ -26,7 +26,7 @@ use pkcs11_proxy_ng_backend::test_hooks::{
     NativeSessionEvent, set_fail_next_close, set_native_close_delay_once,
     take_native_session_events,
 };
-use pkcs11_proxy_ng_client::Pkcs11Client;
+use pkcs11_proxy_ng_client::{DEFAULT_RPC_TIMEOUT, MessageCallErrorOrigin, Pkcs11Client};
 use pkcs11_proxy_ng_types::*;
 use support::{
     DaemonHarness, ProviderFixture, ensure_user_token, generate_rsa_key_pair, initialized_client,
@@ -462,6 +462,78 @@ async fn loaded_timed_out_close_releases_login_late() -> Result<(), String> {
     // login with its last session and the carrier released it again
     // (best-effort); a fresh session observes the public state and a
     // fresh login PIN-verifies.
+    let probe = open_public_session(&mut client, slot, true).await?;
+    let info =
+        client.get_session_info(probe).await.map_err(|rv| format!("probe info failed: {rv}"))?;
+    assert_eq!(
+        info.state,
+        CkSessionState::RwPublic,
+        "SoftHSM releases the login with its last session"
+    );
+    client
+        .login(probe, CkUserType::User, Some(fixture.user_pin.as_bytes()))
+        .await
+        .map_err(|rv| format!("fresh login must PIN-verify: {rv}"))?;
+    client.finalize().await.map_err(|rv| format!("client finalize: {rv}"))?;
+    daemon.shutdown().await?;
+    Ok(())
+}
+
+/// Loaded client-deadline (Q01 round-4 M1 observable pin): the CLIENT
+/// gives up first — `DeadlineExceeded` surfaces as
+/// FUNCTION_FAILED/Transport, the must-retain ambiguous outcome the
+/// shim pins unit-side — while the wedged native close still runs
+/// detached and settles late with exactly one entry/completion pair +
+/// the deferred carrier logout. Mirror of the daemon-timeout oracle
+/// with the timeout on the client: the 1s client deadline always trips
+/// before any daemon guard (2s when the sibling timeout test
+/// configures it, 30s by default), so this test is order-independent.
+#[tokio::test]
+#[ignore] // requires SoftHSM2 + native-owner-test-hooks
+async fn loaded_client_deadline_close_settles_late_without_native_leak() -> Result<(), String> {
+    let fixture = ProviderFixture::soft_hsm().await?;
+    let daemon = DaemonHarness::start(&fixture).await?;
+    let mut client = initialized_client(daemon.endpoint()).await?;
+    client.set_rpc_timeout(Duration::from_secs(1));
+    let slot = ensure_user_token(&mut client, &fixture).await?;
+    let session = open_user_session(&mut client, slot, &fixture.user_pin, true).await?;
+
+    let _ = take_native_session_events();
+    set_native_close_delay_once(Duration::from_secs(6));
+    let started = Instant::now();
+    match client.close_session_stateful(session).await {
+        Err(error)
+            if error.ck_rv == CkRv::FUNCTION_FAILED
+                && error.origin == MessageCallErrorOrigin::Transport => {}
+        other => {
+            return Err(format!(
+                "client-deadline close must answer ambiguous transport FUNCTION_FAILED, got {other:?}"
+            ));
+        }
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(6),
+        "the client deadline must answer before the wedged native call returns"
+    );
+    client.set_rpc_timeout(DEFAULT_RPC_TIMEOUT);
+
+    // The native entry landed before the wedge sleep; late completion
+    // settles terminally with exactly one entry/completion pair.
+    let native = wait_for_close_entry(Duration::from_secs(10)).await?;
+    let drained_with_completion =
+        wait_for_close_completion(native, Duration::from_secs(10)).await?;
+    wait_for_handle_invalid(&mut client, session, Duration::from_secs(10)).await?;
+    // The detached completion runs the owned carrier logout even
+    // though the client gave up — exactly one carrier sequence on a
+    // fresh handle, then silence.
+    wait_for_carrier_sequence(native, drained_with_completion, Duration::from_secs(10)).await?;
+    assert!(
+        take_native_session_events().is_empty(),
+        "nothing native may run past the member close + carrier sequence (native {native})"
+    );
+    // Same provider truth as the cancel/timeout oracles: SoftHSM
+    // releases the login with its last session and the carrier
+    // released it again (best-effort); a fresh login PIN-verifies.
     let probe = open_public_session(&mut client, slot, true).await?;
     let info =
         client.get_session_info(probe).await.map_err(|rv| format!("probe info failed: {rv}"))?;

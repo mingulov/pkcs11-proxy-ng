@@ -1,5 +1,5 @@
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use pkcs11_proxy_ng::server::context_manager::ContextManager;
 use pkcs11_proxy_ng::server::grpc_service::Pkcs11ProxyService;
@@ -8,15 +8,15 @@ use pkcs11_proxy_ng_backend::{
     MockBackend, Pkcs11Backend,
     mock::{MockAbi, MockAttributeSlot, MockMessageLifecycleAction},
 };
-use pkcs11_proxy_ng_client::Pkcs11Client;
+use pkcs11_proxy_ng_client::{DEFAULT_RPC_TIMEOUT, Pkcs11Client};
 use pkcs11_proxy_ng_proto::Pkcs11ProxyServer;
 use pkcs11_proxy_ng_proto::convert::message_params::MessageParameterShape;
 use pkcs11_proxy_ng_types::{
     CkAttributeQuery, CkAttributeQueryResult, CkAttributeType, CkAttributeValue, CkInBuf,
     CkMechanismParams, CkMechanismType, CkObjectHandle, CkOutputBufferResult, CkOutputBufferSpec,
-    CkParameterRoundtripResult, CkParameterRoundtripSpec, CkRv, CkSessionFlags, CkSlotId,
-    GcmParams, InterfaceCapabilities, InterfaceInfo, ParameterOutputFunction, PointerBytes,
-    encode_native_ulong,
+    CkParameterRoundtripResult, CkParameterRoundtripSpec, CkRv, CkSessionFlags, CkSessionHandle,
+    CkSlotId, GcmParams, InterfaceCapabilities, InterfaceInfo, ParameterOutputFunction,
+    PointerBytes, encode_native_ulong,
 };
 use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
@@ -1253,6 +1253,72 @@ fn test_message_shape(
         .shape
 }
 
+/// Replace the shim's process-global per-RPC deadline (Q01 round-4
+/// deadline tests). Effective immediately; callers restore
+/// `DEFAULT_RPC_TIMEOUT` right after the deadline-shaped call so no
+/// later test inherits a short deadline.
+fn set_shim_rpc_timeout(timeout: Duration) {
+    state::runtime().block_on(async {
+        state::client().lock().await.set_rpc_timeout(timeout);
+    });
+}
+
+/// Poll `C_GetSessionInfo` until it answers `want` or `deadline`
+/// passes. `C_GetSessionInfo` neither reconciles nor evicts, so the
+/// poll observes late settlement without settling suspicion itself.
+fn poll_session_info_rv(session: CK_SESSION_HANDLE, want: CK_RV, deadline: Duration) -> CK_RV {
+    let start = Instant::now();
+    loop {
+        let mut info = std::mem::MaybeUninit::<CK_SESSION_INFO>::uninit();
+        let rv = unsafe { dispatch::general::c_get_session_info(session, info.as_mut_ptr()) };
+        if rv == want || start.elapsed() > deadline {
+            return rv;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A deterministically locally-rejected Init (bad GCM parameter length,
+/// mirroring the Q01-P2 partial-batch pin): `read_mechanism_for_transport`
+/// fails before any key resolution, so the key stays `CK_INVALID_HANDLE`
+/// and a suspect session probes the daemon for native error precedence.
+fn invalid_encrypt_init_rv(session: CK_SESSION_HANDLE) -> CK_RV {
+    let mut bad_iv = [0xAA_u8; 12];
+    let bad_gcm = CK_GCM_PARAMS {
+        pIv: bad_iv.as_mut_ptr(),
+        ulIvLen: bad_iv.len() as CK_ULONG,
+        ulIvBits: 96,
+        pAAD: std::ptr::null_mut(),
+        ulAADLen: 0,
+        ulTagBits: 128,
+    };
+    let mut bad_mechanism = CK_MECHANISM {
+        mechanism: CKM_AES_GCM,
+        pParameter: &bad_gcm as *const _ as CK_VOID_PTR,
+        ulParameterLen: 1,
+    };
+    unsafe { dispatch::general::c_encrypt_init(session, &mut bad_mechanism, CK_INVALID_HANDLE) }
+}
+
+/// Resolve the backend session behind the shim's virtual `session`
+/// (mirrors `backend_object_handle`): the shared daemon holds exactly
+/// one shim context under the state guard.
+fn backend_session_handle(daemon: &TestDaemon, session: CK_SESSION_HANDLE) -> CkSessionHandle {
+    daemon.block_on(async {
+        let context_ids = daemon.context_manager.context_ids();
+        assert_eq!(context_ids.len(), 1, "expected one active shim context");
+        let backend_handle = daemon
+            .context_manager
+            .get_context(&context_ids[0], |ctx| {
+                ctx.session_handles.resolve(VirtualHandle(session as _))
+            })
+            .await
+            .flatten()
+            .expect("backend session handle");
+        CkSessionHandle(backend_handle.0)
+    })
+}
+
 #[test]
 fn message_encrypt_decrypt_final_require_and_clear_only_their_active_shape() {
     let _guard = shim_state_test_guard();
@@ -1674,7 +1740,15 @@ fn general_error_close_preserves_authoritative_message_shapes() {
 }
 
 #[test]
-fn panicked_close_clears_authoritative_message_shapes() {
+fn panicked_close_retains_and_marks_suspect_until_settlement() {
+    // Q01 round 4 (M1): a transport-ambiguous singular close (backend
+    // panic -> tonic Internal -> GENERAL_ERROR/Transport) must NOT evict
+    // before native settlement — the detached server close still owns
+    // the member. The handle stays known + suspect with discriminators
+    // intact. The panicked mapping never settles (the server quarantines
+    // it suspended), so a later Init honestly reports the daemon's
+    // ambiguous FUNCTION_FAILED and stays suspect — never a bogus SHI
+    // eviction for a server-known handle.
     let _guard = shim_state_test_guard();
     let shim = ShimSession::new();
     let session = shim.open_additional_session();
@@ -1687,11 +1761,25 @@ fn panicked_close_clears_authoritative_message_shapes() {
 
     assert_eq!(rv, CKR_GENERAL_ERROR as CK_RV);
     assert_eq!(daemon.backend.close_session_call_count(), calls_before + 1);
+    assert!(state::is_session_known(session), "an ambiguous close must retain the handle");
+    assert!(state::is_session_suspect(session), "an ambiguous close must mark the handle suspect");
     assert_eq!(
         test_message_shape(session, state::MessageOperation::Encrypt),
-        None,
-        "a transport-ambiguous close must clear authoritative shape state",
+        Some(MessageParameterShape::Gcm),
+        "an ambiguous close must preserve authoritative shape state",
     );
+
+    // Settlement honesty: the quarantined member reads ambiguous (the
+    // daemon's verdict), never dead — and stays suspect for the next
+    // verdict instead of evicting.
+    let mut mechanism = sha256_mechanism();
+    let digest_rv = unsafe { dispatch::general::c_digest_init(session, &mut mechanism) };
+    assert_eq!(
+        digest_rv, CKR_FUNCTION_FAILED as CK_RV,
+        "a never-settled member must read ambiguous, not handle-invalid"
+    );
+    assert!(state::is_session_suspect(session), "an ambiguous daemon verdict must stay suspect");
+    assert!(state::is_session_known(session), "an ambiguous verdict must not evict");
 }
 
 #[test]
@@ -5403,6 +5491,255 @@ fn correctness_close_all_partial_failure_preserves_survivor_discriminators() {
         None,
         "the reconciled dead member drops its discriminators"
     );
+}
+
+// Q01 round 4 (M1): a client-deadline singular close (DeadlineExceeded ->
+// FUNCTION_FAILED/Transport) retains + suspects instead of evicting;
+// the detached server close settles OK late and removes the mapping,
+// so an invalid Init then reports SHI (probe-confirmed death) with
+// member-only eviction — never the mechanism error, never a SHI for a
+// live handle.
+#[test]
+fn timed_out_singular_close_retains_until_late_settlement_then_reports_handle_invalid() {
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let session = shim.open_additional_session();
+    set_test_message_shape(session, state::MessageOperation::Encrypt, MessageParameterShape::Gcm);
+
+    let daemon = TestDaemon::shared();
+    daemon.backend.set_close_session_delay(Duration::from_millis(800));
+    set_shim_rpc_timeout(Duration::from_millis(200));
+    let rv = unsafe { dispatch::general::c_close_session(session) };
+    daemon.backend.clear_close_session_delay();
+    set_shim_rpc_timeout(DEFAULT_RPC_TIMEOUT);
+
+    assert_eq!(
+        rv, CKR_FUNCTION_FAILED as CK_RV,
+        "a deadline close must answer transport FUNCTION_FAILED"
+    );
+    assert!(state::is_session_known(session), "a deadline close must retain the handle");
+    assert!(state::is_session_suspect(session), "a deadline close must mark the handle suspect");
+    assert_eq!(
+        test_message_shape(session, state::MessageOperation::Encrypt),
+        Some(MessageParameterShape::Gcm),
+        "a deadline close must preserve authoritative shape state",
+    );
+
+    // Late settlement: the detached close completes OK and removes the
+    // server mapping (polled, not slept).
+    let settled_rv =
+        poll_session_info_rv(session, CKR_SESSION_HANDLE_INVALID as CK_RV, Duration::from_secs(10));
+    assert_eq!(
+        settled_rv, CKR_SESSION_HANDLE_INVALID as CK_RV,
+        "the late OK settlement must remove the server mapping"
+    );
+
+    // Invalid Init on the late-dead member: the session error wins.
+    assert_eq!(
+        invalid_encrypt_init_rv(session),
+        CKR_SESSION_HANDLE_INVALID as CK_RV,
+        "a late-dead member must resolve the session before the mechanism"
+    );
+    assert!(!state::is_session_known(session), "the confirmed-dead member must evict");
+    assert!(
+        !state::is_session_suspect(session),
+        "the confirmed-dead member must clear suspicion with the eviction"
+    );
+    assert_eq!(
+        test_message_shape(session, state::MessageOperation::Encrypt),
+        None,
+        "the confirmed-dead member must drop its discriminators"
+    );
+}
+
+// Q01 round 4 (M1): the alive twin — a deadline close whose late
+// completion settles transiently reactivates the member, and the next
+// valid Init reconciles it (success clears suspicion, the op runs).
+#[test]
+fn timed_out_singular_close_reconciles_alive_member_after_transient_settlement() {
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let session = shim.open_additional_session();
+    set_test_message_shape(session, state::MessageOperation::Encrypt, MessageParameterShape::Gcm);
+
+    let daemon = TestDaemon::shared();
+    daemon.backend.set_close_session_delay(Duration::from_millis(800));
+    daemon.backend.inject_close_error(CkRv::FUNCTION_FAILED);
+    set_shim_rpc_timeout(Duration::from_millis(200));
+    let rv = unsafe { dispatch::general::c_close_session(session) };
+    daemon.backend.clear_close_session_delay();
+    set_shim_rpc_timeout(DEFAULT_RPC_TIMEOUT);
+    // The injected error stays armed: the late completion must observe
+    // the transient failure (cleared right after the poll below).
+
+    assert_eq!(
+        rv, CKR_FUNCTION_FAILED as CK_RV,
+        "a deadline close must answer transport FUNCTION_FAILED"
+    );
+    assert!(state::is_session_known(session), "a deadline close must retain the handle");
+    assert!(state::is_session_suspect(session), "a deadline close must mark the handle suspect");
+
+    // Late transient settlement reactivates the mapping (polled, then
+    // the injection clears before any assert can leak it).
+    let alive_rv = poll_session_info_rv(session, CKR_OK as CK_RV, Duration::from_secs(10));
+    daemon.backend.clear_close_error();
+    assert_eq!(
+        alive_rv, CKR_OK as CK_RV,
+        "the late transient settlement must reactivate the member"
+    );
+
+    // A valid Init reconciles the survivor: the op runs and suspicion
+    // clears without touching the survivor's discriminators.
+    let mut mechanism = sha256_mechanism();
+    let digest_rv = unsafe { dispatch::general::c_digest_init(session, &mut mechanism) };
+    assert_eq!(
+        digest_rv, CKR_OK as CK_RV,
+        "a reactivated member must admit a valid Init after a deadline close"
+    );
+    assert!(!state::is_session_suspect(session), "an alive daemon verdict must clear suspicion");
+    assert!(state::is_session_known(session), "an alive verdict must keep the handle");
+
+    // Cleanup closes terminally now that the late completion landed.
+    assert_eq!(
+        unsafe { dispatch::general::c_close_session(session) },
+        CKR_OK as CK_RV,
+        "a retry after transient settlement must close"
+    );
+}
+
+// Q01 round 4 (M1): the batch path — a deadline close-all
+// (DeadlineExceeded -> FUNCTION_FAILED/Transport, slot-scoped) retains
+// + suspects every member instead of evicting; each late OK settlement
+// then reconciles its member to SHI on next use.
+#[test]
+fn timed_out_close_all_retains_members_until_late_settlement() {
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let first = shim.session;
+    let second = shim.open_additional_session();
+    for session in [first, second] {
+        set_test_message_shape(
+            session,
+            state::MessageOperation::Encrypt,
+            MessageParameterShape::Gcm,
+        );
+    }
+
+    let daemon = TestDaemon::shared();
+    daemon.backend.set_close_session_delay(Duration::from_millis(800));
+    set_shim_rpc_timeout(Duration::from_millis(200));
+    let rv = unsafe { dispatch::general::c_close_all_sessions(shim.slot_id) };
+    daemon.backend.clear_close_session_delay();
+    set_shim_rpc_timeout(DEFAULT_RPC_TIMEOUT);
+
+    assert_eq!(
+        rv, CKR_FUNCTION_FAILED as CK_RV,
+        "a deadline close-all must answer transport FUNCTION_FAILED"
+    );
+    for session in [first, second] {
+        assert!(
+            state::is_session_known(session),
+            "a deadline close-all must retain member {session}"
+        );
+        assert!(
+            state::is_session_suspect(session),
+            "a deadline close-all must mark member {session} suspect"
+        );
+        assert_eq!(
+            test_message_shape(session, state::MessageOperation::Encrypt),
+            Some(MessageParameterShape::Gcm),
+            "a deadline close-all must preserve member {session}'s shape",
+        );
+    }
+
+    // Each late OK settlement removes its mapping; each member then
+    // reconciles to SHI on an invalid Init with member-only eviction.
+    for session in [first, second] {
+        let settled_rv = poll_session_info_rv(
+            session,
+            CKR_SESSION_HANDLE_INVALID as CK_RV,
+            Duration::from_secs(10),
+        );
+        assert_eq!(
+            settled_rv, CKR_SESSION_HANDLE_INVALID as CK_RV,
+            "the late OK settlement must remove member {session}'s mapping"
+        );
+        assert_eq!(
+            invalid_encrypt_init_rv(session),
+            CKR_SESSION_HANDLE_INVALID as CK_RV,
+            "late-dead member {session} must resolve the session before the mechanism"
+        );
+        assert!(!state::is_session_known(session), "confirmed-dead member {session} must evict");
+    }
+}
+
+// Q01 round 4 (M2): a retained singular decoded FUNCTION_FAILED marks
+// the handle suspect (batch parity); when the server session dies late
+// without the shim's knowledge, an invalid Init reports SHI (native
+// error precedence via the suspect probe), while a live member keeps
+// the mechanism error with no probe eviction.
+#[test]
+fn singular_decoded_failure_marks_suspect_and_late_death_reports_handle_invalid() {
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let session = shim.open_additional_session();
+    let control = shim.open_additional_session();
+    set_test_message_shape(session, state::MessageOperation::Encrypt, MessageParameterShape::Gcm);
+
+    let daemon = TestDaemon::shared();
+    // Baseline: the invalid Init shape answers the mechanism error (not
+    // SHI, not OK) on a healthy member.
+    let baseline_mech_rv = invalid_encrypt_init_rv(control);
+    assert_ne!(
+        baseline_mech_rv, CKR_SESSION_HANDLE_INVALID as CK_RV,
+        "setup: the invalid Init must fail on the mechanism, not the session"
+    );
+    assert_ne!(baseline_mech_rv, CKR_OK as CK_RV, "setup: the invalid Init must fail");
+
+    daemon.backend.inject_close_error(CkRv::FUNCTION_FAILED);
+    let rv = unsafe { dispatch::general::c_close_session(session) };
+    daemon.backend.clear_close_error();
+
+    assert_eq!(rv, CKR_FUNCTION_FAILED as CK_RV);
+    assert!(state::is_session_known(session), "a decoded failure must retain the handle");
+    assert!(
+        state::is_session_suspect(session),
+        "a retained singular outcome must mark the handle suspect"
+    );
+    assert_eq!(
+        test_message_shape(session, state::MessageOperation::Encrypt),
+        Some(MessageParameterShape::Gcm),
+        "a decoded failure must preserve authoritative shape state",
+    );
+
+    // Late death: the server-side session dies without the shim's
+    // knowledge (mirrors a late-settling close removing the mapping —
+    // the mapping still resolves, the backend handle is gone).
+    let backend_handle = backend_session_handle(daemon, session);
+    daemon.backend.close_session(backend_handle).expect("kill the backend session");
+
+    // Invalid Init on the late-dead member: the session error wins and
+    // the member reconciles away (member-only eviction).
+    assert_eq!(
+        invalid_encrypt_init_rv(session),
+        CKR_SESSION_HANDLE_INVALID as CK_RV,
+        "a late-dead member must resolve the session before the mechanism"
+    );
+    assert!(!state::is_session_known(session), "the confirmed-dead member must evict");
+    assert_eq!(
+        test_message_shape(session, state::MessageOperation::Encrypt),
+        None,
+        "the confirmed-dead member must drop its discriminators"
+    );
+
+    // Alive-member control: the mechanism error stands, no probe, no
+    // eviction.
+    assert_eq!(
+        invalid_encrypt_init_rv(control),
+        baseline_mech_rv,
+        "a live member must keep the mechanism error"
+    );
+    assert!(state::is_session_known(control), "the live control must stay known");
 }
 
 // Q01 maintained oracle: a decoded transient close-all failure must keep

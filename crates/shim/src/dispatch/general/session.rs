@@ -36,12 +36,18 @@ pub unsafe extern "C" fn c_close_session(h_session: CK_SESSION_HANDLE) -> CK_RV 
         let result = with_client!(client => client.close_session_stateful(
             CkSessionHandle(h_session as u64)
         ));
-        // Authoritative session/message state survives only a decoded
-        // transient provider failure, so a still-valid handle can safely
-        // retry or continue. (W1-C6-04: no disposable output caches remain.)
+        // Authoritative session/message state survives every outcome
+        // that proves nothing terminal, so a still-valid handle can
+        // safely retry or continue. (W1-C6-04: no disposable output
+        // caches remain.) Only success and decoded backend RVs that
+        // prove the handle dead evict: an ambiguous transport/protocol
+        // outcome (deadline, cancel, disconnect) still has the detached
+        // server close in flight, which may settle transiently and
+        // reactivate a live member — evicting first would answer SHI
+        // for a server-live session. (Q01 round 4.)
         let evict_authoritative = match &result {
             Ok(()) => true,
-            Err(error) if error.origin != MessageCallErrorOrigin::Backend => true,
+            Err(error) if error.origin != MessageCallErrorOrigin::Backend => false,
             Err(error) => {
                 error.ck_rv == CkRv::DEVICE_ERROR
                     || error.ck_rv == CkRv::SESSION_CLOSED
@@ -50,6 +56,13 @@ pub unsafe extern "C" fn c_close_session(h_session: CK_SESSION_HANDLE) -> CK_RV 
         };
         if evict_authoritative {
             crate::state::evict_session_authoritative_state(h_session);
+        } else {
+            // Q01 round 4 (M1/M2): a retained outcome settles nothing,
+            // so the member stays usable and is marked suspect for
+            // lazy per-member reconciliation against the next
+            // authoritative daemon verdict — never evicted before
+            // settlement.
+            crate::state::mark_session_suspect(h_session);
         }
         unit_result_to_rv(result.map_err(|error| error.ck_rv))
     })
@@ -65,11 +78,15 @@ pub unsafe extern "C" fn c_close_all_sessions(slot_id: CK_SLOT_ID) -> CK_RV {
         // per-session death only for OK (everything closed) and for
         // SLOT_ID_INVALID / CRYPTOKI_NOT_INITIALIZED (no server-side
         // session can exist for the slot / context) — every other
-        // backend RV leaves survivors possible, so the daemon stays
-        // authoritative and the next call reports the true state.
+        // outcome leaves survivors possible, so the daemon stays
+        // authoritative and the next call reports the true state. An
+        // ambiguous transport/protocol outcome (deadline, cancel,
+        // disconnect) still has the detached server batch in flight —
+        // evicting first would answer SHI for server-live members.
+        // (Q01 round 4.)
         let evict_authoritative = match &result {
             Ok(()) => true,
-            Err(error) if error.origin != MessageCallErrorOrigin::Backend => true,
+            Err(error) if error.origin != MessageCallErrorOrigin::Backend => false,
             Err(error) => {
                 error.ck_rv == CkRv::SLOT_ID_INVALID
                     || error.ck_rv == CkRv::CRYPTOKI_NOT_INITIALIZED
@@ -77,15 +94,13 @@ pub unsafe extern "C" fn c_close_all_sessions(slot_id: CK_SLOT_ID) -> CK_RV {
         };
         if evict_authoritative {
             crate::state::evict_slot_session_caches(slot_id);
-        }
-        // Q01-P2: a backend failure with retained state proves nothing
-        // per member — some members may have closed while others
-        // survived. Mark the retained slot sessions suspect so the next
-        // Init reconciles each against the daemon (lazy per-member
-        // settlement without a protocol change).
-        if !evict_authoritative
-            && matches!(&result, Err(error) if error.origin == MessageCallErrorOrigin::Backend)
-        {
+        } else {
+            // Q01-P2, extended to ambiguous outcomes in round 4 (M1): a
+            // retained batch proves nothing per member — some members
+            // may have closed while others survived (or still settle).
+            // Mark the retained slot sessions suspect so the next Init
+            // reconciles each against the daemon (lazy per-member
+            // settlement without a protocol change).
             crate::state::mark_slot_sessions_suspect(slot_id);
         }
         unit_result_to_rv(result.map_err(|error| error.ck_rv))

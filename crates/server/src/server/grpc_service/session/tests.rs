@@ -6106,9 +6106,63 @@ async fn timed_out_close_all_still_runs_post_settle_logout() {
 /// the window yields a bogus SHI that evicts live shim state. The
 /// owner never settles terminally here, so SHI is unreachable post-fix
 /// and any SHI is the race.
+///
+/// Round-4 hardening (m1): the flapping race alone can pass 200/200
+/// via uncontended OK closes without ever entering the repaired
+/// begin-fail arm. A deterministic arm-entry shot now precedes the
+/// race (an owner-held suspension forces the racer's begin to fail,
+/// proving the arm answers ambiguous), and the race itself runs behind
+/// a start barrier with a branch counter asserting the arm was entered
+/// (in this fixture the mock close never fails, so FUNCTION_FAILED is
+/// reachable ONLY through the begin-fail arm).
 #[tokio::test(flavor = "multi_thread")]
 async fn close_racing_reactivated_close_never_reports_handle_invalid() {
+    // Deterministic repaired-arm entry: the owner suspends and HOLDS
+    // the suspension across the racer, so the racer's begin MUST fail
+    // with SessionMissing and MUST take the both-absent arm — no
+    // scheduling luck. A suspended member is ambiguous, never dead.
+    {
+        let mock = Arc::new(MockBackend::default_test());
+        mock.initialize().unwrap();
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+        let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+
+        let owner = ctx_mgr.begin_close_session(&ctx_id, VirtualHandle(session)).unwrap();
+        assert!(
+            ctx_mgr
+                .get_context(&ctx_id, |ctx| {
+                    ctx.session_handles.suspended_backend(VirtualHandle(session)).is_some()
+                })
+                .await
+                .unwrap(),
+            "setup: the owner-held suspension must be visible before the racer runs"
+        );
+        let rv = close_session_rv(&ctx_mgr, &backend, &ctx_id, session).await;
+        assert_eq!(
+            rv,
+            CkRv::FUNCTION_FAILED.0,
+            "a suspended member must read ambiguous via the repaired begin-fail arm"
+        );
+        drop(owner);
+        assert_eq!(
+            close_session_rv(&ctx_mgr, &backend, &ctx_id, session).await,
+            CkRv::OK.0,
+            "retry after the owner reactivates must close"
+        );
+        assert_eq!(mock.open_session_count(), 0);
+    }
+
+    // Window race: the owner flaps the mapping suspended -> live as
+    // fast as the scheduler allows, holding each suspension across a
+    // yield so the racer's begin-fail/check straddles the reactivate.
+    // A start barrier forces real contention every iteration (no
+    // uncontended pass), and the branch counter proves the repaired
+    // arm was entered alongside never-SHI.
     const ITERS: usize = 200;
+    let mut race_arm_entries: usize = 0;
     for _ in 0..ITERS {
         let mock = Arc::new(MockBackend::default_test());
         mock.initialize().unwrap();
@@ -6118,12 +6172,12 @@ async fn close_racing_reactivated_close_never_reports_handle_invalid() {
         let ctx_id = ctx_mgr.create_context(None).await.unwrap();
         let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
 
-        // Owner flaps the mapping suspended -> live as fast as the
-        // scheduler allows, holding each suspension across a yield so
-        // the racer's begin-fail/check straddles the reactivate.
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let flap_barrier = Arc::clone(&barrier);
         let flap_mgr = Arc::clone(&ctx_mgr);
         let flap_ctx = ctx_id.clone();
         let flapper = tokio::spawn(async move {
+            flap_barrier.wait().await;
             loop {
                 // The racer may win the mapping and really close it —
                 // then the session is terminally gone and flapping ends.
@@ -6141,6 +6195,7 @@ async fn close_racing_reactivated_close_never_reports_handle_invalid() {
                 }
             }
         });
+        barrier.wait().await;
         let rv = close_session_rv(&ctx_mgr, &backend, &ctx_id, session).await;
         flapper.abort();
         let _ = flapper.await;
@@ -6149,6 +6204,12 @@ async fn close_racing_reactivated_close_never_reports_handle_invalid() {
             CkRv::SESSION_HANDLE_INVALID.0,
             "a live-or-suspended member must never read handle-invalid"
         );
+        if rv == CkRv::FUNCTION_FAILED.0 {
+            // The only FUNCTION_FAILED source in this fixture is the
+            // repaired begin-fail arm (the mock close never fails, no
+            // timeouts, no lock contention) — count the entry.
+            race_arm_entries += 1;
+        }
         // Settle the iteration: the racer either really closed the
         // session (OK) or hit the flapping owner (ambiguous) — either
         // way a retry now drains it.
@@ -6161,4 +6222,9 @@ async fn close_racing_reactivated_close_never_reports_handle_invalid() {
         }
         assert_eq!(mock.open_session_count(), 0);
     }
+    assert!(
+        race_arm_entries > 0,
+        "the barrier-forced race must enter the repaired begin-fail arm at least once \
+         across {ITERS} iterations (got {race_arm_entries}); an all-OK run proves nothing"
+    );
 }
