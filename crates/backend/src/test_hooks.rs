@@ -87,6 +87,63 @@ pub fn take_fail_next_close() -> bool {
 
 static FAIL_NEXT_CLOSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// A native session-lifecycle entry observed crossing into a real
+/// provider (Q01 loaded oracle): counted, ordered proof of which native
+/// calls the proxy issued. Recorded at native ENTRY (before the call),
+/// so an entry proves the call started; completion is observed
+/// separately (daemon mapping state, session info).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NativeSessionEvent {
+    /// Native `C_OpenSession` entry on `slot`.
+    OpenSession { slot: u64 },
+    /// Native `C_CloseSession` entry for `session`.
+    CloseSession { session: u64 },
+    /// Native `C_CloseSession` completion for `session`: the provider
+    /// call returned (either outcome). Pairs with the entry above and
+    /// lets cancellation tests wait for true native completion instead
+    /// of inferring it.
+    CloseSessionCompleted { session: u64 },
+    /// Native `C_CloseAllSessions` entry on `slot`.
+    CloseAllSessions { slot: u64 },
+    /// Native `C_Login` entry for `session`.
+    Login { session: u64 },
+    /// Native `C_Logout` entry for `session`.
+    Logout { session: u64 },
+}
+
+static NATIVE_SESSION_EVENTS: Mutex<Vec<(u64, NativeSessionEvent)>> = Mutex::new(Vec::new());
+
+/// Record a native session-lifecycle entry. Returns the assigned
+/// hook-call sequence number (orders entries across kinds).
+pub fn record_native_session_event(event: NativeSessionEvent) -> u64 {
+    let seq = HOOK_SEQ.fetch_add(1, Ordering::Relaxed);
+    NATIVE_SESSION_EVENTS.lock().expect("hook events lock").push((seq, event));
+    seq
+}
+
+/// Take (and clear) all recorded native session-lifecycle entries, in
+/// recording order. Callers clear before each measurement; the log is
+/// process-global, so hook-gated suites run single-threaded.
+pub fn take_native_session_events() -> Vec<(u64, NativeSessionEvent)> {
+    std::mem::take(&mut *NATIVE_SESSION_EVENTS.lock().expect("hook events lock"))
+}
+
+/// One-shot wedge for the next native `C_CloseSession` entry (Q01 loaded
+/// oracle): the entering close sleeps `delay` BEFORE the native call,
+/// so cancellation tests can cancel provably in flight (the entry is
+/// recorded before the sleep). Consumed at entry; normal builds compile
+/// the check out entirely.
+pub fn set_native_close_delay_once(delay: std::time::Duration) {
+    *NATIVE_CLOSE_DELAY.lock().expect("hook delay lock") = Some(delay);
+}
+
+/// Consume one pending native close-entry wedge, if armed.
+pub fn take_native_close_delay() -> Option<std::time::Duration> {
+    NATIVE_CLOSE_DELAY.lock().expect("hook delay lock").take()
+}
+
+static NATIVE_CLOSE_DELAY: Mutex<Option<std::time::Duration>> = Mutex::new(None);
+
 #[cfg(test)]
 mod presence_tests {
     use super::*;
@@ -123,5 +180,30 @@ mod presence_tests {
         set_fail_next_close(true);
         assert!(take_fail_next_close());
         assert!(!take_fail_next_close());
+    }
+
+    #[test]
+    fn native_session_events_round_trip_in_order() {
+        let _ = take_native_session_events();
+        let first = record_native_session_event(NativeSessionEvent::CloseSession { session: 7 });
+        let second = record_native_session_event(NativeSessionEvent::Logout { session: 7 });
+        assert!(second > first, "sequence numbers must order entries");
+        let events = take_native_session_events();
+        assert_eq!(
+            events,
+            vec![
+                (first, NativeSessionEvent::CloseSession { session: 7 }),
+                (second, NativeSessionEvent::Logout { session: 7 }),
+            ]
+        );
+        assert!(take_native_session_events().is_empty());
+    }
+
+    #[test]
+    fn native_close_delay_wedge_arms_and_consumes() {
+        assert_eq!(take_native_close_delay(), None);
+        set_native_close_delay_once(std::time::Duration::from_millis(5));
+        assert_eq!(take_native_close_delay(), Some(std::time::Duration::from_millis(5)));
+        assert_eq!(take_native_close_delay(), None);
     }
 }

@@ -145,6 +145,12 @@ impl FfiBackend {
     ) -> CkResult<CkSessionHandle> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let h_slot = Self::slot_id(slot_id)?;
+        // Hook-gated native-entry log (Q01 loaded oracle; compiled out
+        // of normal builds): entry order/counts, not completion.
+        #[cfg(feature = "native-owner-test-hooks")]
+        crate::test_hooks::record_native_session_event(
+            crate::test_hooks::NativeSessionEvent::OpenSession { slot: slot_id.0 },
+        );
         let handle = Self::call_session_output(
             &admission,
             unsafe { (*self.func_list).C_OpenSession },
@@ -196,10 +202,29 @@ impl FfiBackend {
             self.session_fences.reopen(&close_fence);
             return Err(CkRv::FUNCTION_FAILED);
         }
+        // Hook-gated native-entry log + one-shot entry wedge (Q01 loaded
+        // oracle; compiled out of normal builds). The entry lands BEFORE
+        // the wedge sleep, so cancellation tests observe in-flight
+        // status; injected failures above never reach this point (no
+        // native entry, no event).
+        #[cfg(feature = "native-owner-test-hooks")]
+        crate::test_hooks::record_native_session_event(
+            crate::test_hooks::NativeSessionEvent::CloseSession { session: session.0 },
+        );
+        #[cfg(feature = "native-owner-test-hooks")]
+        if let Some(delay) = crate::test_hooks::take_native_close_delay() {
+            std::thread::sleep(delay);
+        }
         let outcome = Self::call_unit(
             &admission,
             unsafe { (*self.func_list).C_CloseSession },
             |function| unsafe { function(h_session) },
+        );
+        // Hook-gated completion log (Q01 loaded oracle): the native
+        // call returned (either outcome).
+        #[cfg(feature = "native-owner-test-hooks")]
+        crate::test_hooks::record_native_session_event(
+            crate::test_hooks::NativeSessionEvent::CloseSessionCompleted { session: session.0 },
         );
         match outcome {
             Ok(()) => {
@@ -236,6 +261,12 @@ impl FfiBackend {
         // Nothing fallible between fence entry and settlement (see
         // `ffi_close_session`).
         let close_fences = self.session_fences.enter_write_all(&admission, &known);
+        // Hook-gated native-entry log (Q01 loaded oracle; compiled out
+        // of normal builds).
+        #[cfg(feature = "native-owner-test-hooks")]
+        crate::test_hooks::record_native_session_event(
+            crate::test_hooks::NativeSessionEvent::CloseAllSessions { slot: slot_id.0 },
+        );
         let outcome = Self::call_unit(
             &admission,
             unsafe { (*self.func_list).C_CloseAllSessions },
@@ -281,6 +312,12 @@ impl FfiBackend {
         };
         let h_session = Self::session_handle(session)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        // Hook-gated native-entry log (Q01 loaded oracle; compiled out
+        // of normal builds).
+        #[cfg(feature = "native-owner-test-hooks")]
+        crate::test_hooks::record_native_session_event(
+            crate::test_hooks::NativeSessionEvent::Login { session: session.0 },
+        );
         Self::call_unit(&admission, unsafe { (*self.func_list).C_Login }, |function| unsafe {
             function(h_session, user_type as cryptoki_sys::CK_USER_TYPE, pin_ptr, pin_len)
         })
@@ -290,6 +327,12 @@ impl FfiBackend {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let h_session = Self::session_handle(session)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        // Hook-gated native-entry log (Q01 loaded oracle; compiled out
+        // of normal builds).
+        #[cfg(feature = "native-owner-test-hooks")]
+        crate::test_hooks::record_native_session_event(
+            crate::test_hooks::NativeSessionEvent::Logout { session: session.0 },
+        );
         Self::call_unit(&admission, unsafe { (*self.func_list).C_Logout }, |function| unsafe {
             function(h_session)
         })

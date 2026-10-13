@@ -6,7 +6,7 @@ use crate::state;
 use super::helpers::{
     Operation, catch_panics, classify_input, dispatch_byte_output_exact,
     dispatch_byte_output_exact_no_input, input_buf_to_ck_in_buf, read_mechanism_for_transport,
-    rv_err, unit_result_to_rv, with_client,
+    reconcile_suspect_session, resolve_suspect_mech_error, rv_err, unit_result_to_rv, with_client,
 };
 
 pub unsafe extern "C" fn c_sign_init(
@@ -31,13 +31,14 @@ pub unsafe extern "C" fn c_sign_init(
         }
         let mech = match unsafe { read_mechanism_for_transport(p_mechanism, Operation::General) } {
             Ok(mech) => mech,
-            Err(e) => return rv_err(e),
+            Err(e) => return rv_err(resolve_suspect_mech_error(h_session, e)),
         };
         let result = with_client!(client => client.sign_init(
             CkSessionHandle(h_session as u64),
             &mech,
             CkObjectHandle(h_key as u64),
         ));
+        reconcile_suspect_session(h_session, &result);
         unit_result_to_rv(result)
     })
 }
@@ -117,13 +118,15 @@ pub unsafe extern "C" fn c_verify_init(
         }
         let mech = match unsafe { read_mechanism_for_transport(p_mechanism, Operation::General) } {
             Ok(mech) => mech,
-            Err(e) => return rv_err(e),
+            Err(e) => return rv_err(resolve_suspect_mech_error(h_session, e)),
         };
-        unit_result_to_rv(with_client!(client => client.verify_init(
+        let result = with_client!(client => client.verify_init(
             CkSessionHandle(h_session as u64),
             &mech,
             CkObjectHandle(h_key as u64),
-        )))
+        ));
+        reconcile_suspect_session(h_session, &result);
+        unit_result_to_rv(result)
     })
 }
 
@@ -214,13 +217,14 @@ pub unsafe extern "C" fn c_sign_recover_init(
         }
         let mech = match unsafe { read_mechanism_for_transport(p_mechanism, Operation::General) } {
             Ok(mech) => mech,
-            Err(e) => return rv_err(e),
+            Err(e) => return rv_err(resolve_suspect_mech_error(h_session, e)),
         };
         let result = with_client!(client => client.sign_recover_init(
             CkSessionHandle(h_session as u64),
             &mech,
             CkObjectHandle(h_key as u64),
         ));
+        reconcile_suspect_session(h_session, &result);
         unit_result_to_rv(result)
     })
 }
@@ -267,13 +271,14 @@ pub unsafe extern "C" fn c_verify_recover_init(
         }
         let mech = match unsafe { read_mechanism_for_transport(p_mechanism, Operation::General) } {
             Ok(mech) => mech,
-            Err(e) => return rv_err(e),
+            Err(e) => return rv_err(resolve_suspect_mech_error(h_session, e)),
         };
         let result = with_client!(client => client.verify_recover_init(
             CkSessionHandle(h_session as u64),
             &mech,
             CkObjectHandle(h_key as u64),
         ));
+        reconcile_suspect_session(h_session, &result);
         unit_result_to_rv(result)
     })
 }

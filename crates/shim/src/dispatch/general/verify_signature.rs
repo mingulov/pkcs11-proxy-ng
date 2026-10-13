@@ -38,7 +38,7 @@ pub unsafe extern "C" fn c_verify_signature_init(
             }
             Some(match unsafe { read_mechanism_for_transport(p_mechanism, Operation::General) } {
                 Ok(mech) => mech,
-                Err(e) => return rv_err(e),
+                Err(e) => return rv_err(resolve_suspect_mech_error(h_session, e)),
             })
         };
         let signature = match input_buf_to_ck_in_buf(unsafe {
@@ -47,12 +47,14 @@ pub unsafe extern "C" fn c_verify_signature_init(
             Ok(buf) => buf,
             Err(e) => return rv_err(e),
         };
-        unit_result_to_rv(with_client!(client => client.verify_signature_init(
+        let result = with_client!(client => client.verify_signature_init(
             CkSessionHandle(h_session as u64),
             mech.as_ref(),
             CkObjectHandle(h_key as u64),
             signature,
-        )))
+        ));
+        reconcile_suspect_session(h_session, &result);
+        unit_result_to_rv(result)
     })
 }
 

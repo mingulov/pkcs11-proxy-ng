@@ -1486,3 +1486,224 @@ async fn l13_17_indexed_scan_matches_authoritative_scan() {
         Some(LoginState::So)
     );
 }
+
+/// Poll `condition` until true or `deadline_ms` elapses (condition-based
+/// wait: no fixed sleeps, generous CI margins).
+async fn poll_until_ms(condition: impl Fn() -> bool, deadline_ms: u64, what: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(deadline_ms);
+    while !condition() {
+        assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+/// Q01-P1: cancelling the transient-carrier logout mid-`C_Logout` must not
+/// orphan the carrier session — the close still runs to native completion
+/// and no stray session is left behind.
+#[tokio::test]
+async fn q01_carrier_cancel_mid_logout_leaves_no_stray_session() {
+    use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
+
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    let slot = BackendSlotId(CkSlotId(0));
+
+    // Wedge the carrier logout; cancel the helper while it is in flight.
+    mock.set_logout_delay(std::time::Duration::from_millis(300));
+    let cancelled = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        mgr.backend_logout_if_last_holder_out_inner(
+            &backend,
+            slot,
+            None,
+            LoginState::User,
+            std::time::Duration::from_secs(30),
+        ),
+    )
+    .await;
+    assert!(cancelled.is_err(), "setup: the carrier logout must still be in flight");
+    mock.clear_logout_delay();
+
+    // The carrier open provably executed (monotonic log — no race with
+    // the orphan window), so a zero count below proves cleanup, not
+    // a never-opened carrier.
+    poll_until_ms(|| mock.open_session_flags_log().len() == 1, 5000, "carrier open to run").await;
+    poll_until_ms(|| mock.open_session_count() == 0, 5000, "late carrier close to land").await;
+    assert!(
+        mgr.unresolved_carrier_cleanups().is_empty(),
+        "a completed late close resolves itself; nothing stays unresolved"
+    );
+}
+
+/// Q01-P1: when the carrier open times out, the late successful open must
+/// still flow through logout+close inside completion ownership — the native
+/// handle is never dropped unmapped.
+#[tokio::test]
+async fn q01_carrier_open_timeout_completes_cleanup_late() {
+    use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
+
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    let slot = BackendSlotId(CkSlotId(0));
+
+    mock.set_open_session_delay(std::time::Duration::from_millis(300));
+    let released = mgr
+        .backend_logout_if_last_holder_out_inner(
+            &backend,
+            slot,
+            None,
+            LoginState::User,
+            std::time::Duration::from_millis(50),
+        )
+        .await;
+    assert!(!released, "a timed-out carrier reports unreleased");
+    mock.clear_open_session_delay();
+
+    // The wedged open provably executed late (monotonic log), so a zero
+    // count below proves completion-owned cleanup of the late handle.
+    poll_until_ms(|| mock.open_session_flags_log().len() == 1, 5000, "late carrier open to run")
+        .await;
+    poll_until_ms(|| mock.open_session_count() == 0, 5000, "late carrier open to clean up").await;
+    assert!(
+        mgr.unresolved_carrier_cleanups().is_empty(),
+        "a completed late sequence resolves itself; nothing stays unresolved"
+    );
+}
+
+/// Q01-P1: a carrier whose close fails reports the logout honestly and
+/// records the stray session as unresolved cleanup instead of only warning.
+#[tokio::test]
+async fn q01_carrier_close_failure_records_unresolved_cleanup() {
+    use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
+
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    let slot = BackendSlotId(CkSlotId(0));
+
+    // Native login with no context-manager holder/carrier in play (driven
+    // directly on the mock, invisible to the helper's scans).
+    let setup = mock
+        .open_session(CkSlotId(0), CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION)
+        .unwrap();
+    mock.login(setup, CkUserType::User, None).unwrap();
+
+    mock.inject_close_error(CkRv::FUNCTION_FAILED);
+    let released = mgr
+        .backend_logout_if_last_holder_out_inner(
+            &backend,
+            slot,
+            None,
+            LoginState::User,
+            std::time::Duration::from_secs(30),
+        )
+        .await;
+    mock.clear_close_error();
+    assert!(released, "the backend logout succeeded; the close failure must not poison it");
+
+    let unresolved = mgr.unresolved_carrier_cleanups();
+    assert_eq!(unresolved.len(), 1, "the stray carrier session must be recorded");
+    assert_eq!(unresolved[0].slot, slot);
+    assert_eq!(unresolved[0].rv, CkRv::FUNCTION_FAILED);
+    assert_ne!(unresolved[0].session, setup.0, "the record names the carrier, not setup state");
+    assert_eq!(
+        mock.open_session_count(),
+        2,
+        "honest residual: the stray session stays open AND recorded"
+    );
+}
+
+/// Q01-P1: a carrier releasing an SO login opens a read-write session —
+/// PKCS#11 defines no "R/O SO Functions" state, so a read-only carrier
+/// open while the SO is logged in is not portable.
+#[tokio::test]
+async fn q01_carrier_opens_rw_session_for_so_login() {
+    use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
+
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    let slot = BackendSlotId(CkSlotId(0));
+
+    mgr.backend_logout_if_last_holder_out_inner(
+        &backend,
+        slot,
+        None,
+        LoginState::So,
+        std::time::Duration::from_secs(30),
+    )
+    .await;
+    let flags = mock.open_session_flags_log();
+    assert_eq!(flags.len(), 1, "the carrier opens exactly one session");
+    assert!(flags[0].is_rw(), "an SO-releasing carrier must open read-write, got {:?}", flags[0]);
+}
+
+/// Q01-P1 pin: a carrier releasing a User login keeps the established
+/// read-only open.
+#[tokio::test]
+async fn q01_carrier_opens_ro_session_for_user_login() {
+    use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
+
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    let slot = BackendSlotId(CkSlotId(0));
+
+    mgr.backend_logout_if_last_holder_out_inner(
+        &backend,
+        slot,
+        None,
+        LoginState::User,
+        std::time::Duration::from_secs(30),
+    )
+    .await;
+    let flags = mock.open_session_flags_log();
+    assert_eq!(flags.len(), 1, "the carrier opens exactly one session");
+    assert!(!flags[0].is_rw(), "a User-releasing carrier stays read-only, got {:?}", flags[0]);
+}
+
+/// Q01-P1: slot-login serialization survives caller timeout — the lock is
+/// held through actual native completion so a late carrier logout cannot
+/// steal a login minted after the timeout.
+#[tokio::test]
+async fn q01_carrier_holds_slot_serialization_through_native_completion() {
+    use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
+
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    let slot = BackendSlotId(CkSlotId(0));
+
+    mock.set_logout_delay(std::time::Duration::from_millis(500));
+    let released = mgr
+        .backend_logout_if_last_holder_out_inner(
+            &backend,
+            slot,
+            None,
+            LoginState::User,
+            std::time::Duration::from_millis(100),
+        )
+        .await;
+    assert!(!released, "a timed-out carrier reports unreleased");
+    assert!(
+        mgr.slot_login_lock(slot).try_lock_owned().is_err(),
+        "serialization must survive the caller timeout until native completion"
+    );
+    mock.clear_logout_delay();
+
+    poll_until_ms(
+        || mgr.slot_login_lock(slot).try_lock_owned().is_ok(),
+        5000,
+        "slot serialization to release after native completion",
+    )
+    .await;
+    poll_until_ms(|| mock.open_session_count() == 0, 5000, "late carrier close to land").await;
+}
