@@ -74,6 +74,14 @@ static PROBE_INSTALL_LOCK: Mutex<()> = Mutex::new(());
 static BACKEND_ULONG_SIZE: AtomicUsize = AtomicUsize::new(0);
 static BACKEND_ATTRIBUTE_STRIDE: AtomicUsize = AtomicUsize::new(0);
 static POINTER_SAFE_MESSAGE_PARAMETERS: AtomicBool = AtomicBool::new(false);
+/// Set when the cached message-parameter qualification was dropped by a
+/// transport failure and must be re-qualified from a fresh daemon
+/// advertisement before message calls may proceed (Q01 round 5). A fresh
+/// probe install clears it (the advertisement wins); a genuine lack in a
+/// fresh advertisement clears it too (fast fail-closed, no per-call RPC).
+/// A failed re-qualification leaves it set so the next message call
+/// retries — recovery is never silently abandoned.
+static POINTER_SAFE_MESSAGE_PARAMETERS_DIRTY: AtomicBool = AtomicBool::new(false);
 /// Daemon-advertised `mechanism_parameter_transport_version` discovery
 /// capability (R5/F1; S2 §3 monotonic capabilities). `0` = not yet probed,
 /// or a daemon predating the advertisement (legacy encoding); readers
@@ -82,20 +90,94 @@ static MECHANISM_PARAMETER_TRANSPORT_VERSION: AtomicU32 = AtomicU32::new(0);
 
 /// Whether the daemon acknowledged the shape-bound message-parameter contract.
 /// Absence and an in-progress/failed reprobe are both fail-closed.
+///
+/// This reads the cached qualification only. Message entry points must use
+/// [`qualified_pointer_safe_message_parameters`] instead so a qualification
+/// dropped by a transport failure is re-qualified from a fresh daemon
+/// advertisement rather than failing locally for the rest of the lifetime.
 pub fn pointer_safe_message_parameters() -> bool {
     POINTER_SAFE_MESSAGE_PARAMETERS.load(Ordering::Acquire)
 }
 
+/// Whether message calls may proceed: the cached qualification, re-qualified
+/// on demand from a fresh daemon advertisement when a transport failure
+/// dropped it (Q01 round 5). The safety gate is unchanged — a fresh
+/// advertisement genuinely lacking the capability fails closed with no
+/// per-call RPC, and any re-qualification failure fails closed while
+/// leaving the dirty mark so the next message call retries. Never restores
+/// from the stale pre-failure value: only a fresh advertisement installs.
+pub(crate) fn qualified_pointer_safe_message_parameters() -> bool {
+    if pointer_safe_message_parameters() {
+        return true;
+    }
+    if !POINTER_SAFE_MESSAGE_PARAMETERS_DIRTY.load(Ordering::Acquire) {
+        // Genuine lack (or pre-probe): fail closed without network.
+        return false;
+    }
+    requalify_pointer_safe_message_parameters()
+}
+
+/// Re-qualify the message-parameter capability from a fresh daemon
+/// advertisement after transport loss. Consumes the reconnect flag (fresh
+/// channel/DNS via `ensure_client_connected`) before probing so the
+/// advertisement comes from the recovered transport. Returns the freshly
+/// installed qualification; any failure returns false with the dirty mark
+/// left set (fail closed, retry on the next message call).
+fn requalify_pointer_safe_message_parameters() -> bool {
+    // Miri never has a daemon (no sockets): fail closed like `ensure_probed`.
+    if cfg!(miri) {
+        return false;
+    }
+    // Recover the transport first; without a channel there is no fresh
+    // advertisement to consult. Best-effort failures fail closed here —
+    // the message call below would surface the transport error anyway.
+    if state::ensure_client_connected().is_err() {
+        return false;
+    }
+    let probe = state::runtime().block_on(async {
+        // Same clone-before-RPC shape as `probe_backend`: the guard is
+        // dropped before the await so a slow probe never serializes
+        // unrelated calls behind the client mutex.
+        let mut client = state::client().lock().await.clone();
+        client.get_backend_interfaces().await
+    });
+    match probe {
+        Ok(probe) => {
+            record_pointer_safe_message_parameters(probe.pointer_safe_message_parameters);
+            probe.pointer_safe_message_parameters
+        }
+        Err(_) => false,
+    }
+}
+
 fn record_pointer_safe_message_parameters(advertised: bool) {
     POINTER_SAFE_MESSAGE_PARAMETERS.store(advertised, Ordering::Release);
+    // A fresh advertisement is authoritative either way: an installed
+    // qualification needs no re-validation, and a genuine lack fails
+    // closed without a per-call re-probe until the next transport loss.
+    POINTER_SAFE_MESSAGE_PARAMETERS_DIRTY.store(false, Ordering::Release);
 }
 
 fn clear_pointer_safe_message_parameters() {
-    record_pointer_safe_message_parameters(false);
+    POINTER_SAFE_MESSAGE_PARAMETERS.store(false, Ordering::Release);
+    // A cleared qualification must be re-qualified from a fresh
+    // advertisement before message calls may proceed — never reused.
+    POINTER_SAFE_MESSAGE_PARAMETERS_DIRTY.store(true, Ordering::Release);
 }
 
 pub(crate) fn invalidate_pointer_safe_message_parameters() {
     clear_pointer_safe_message_parameters();
+}
+
+/// Test-only simulation of a daemon whose fresh advertisement genuinely
+/// lacks the capability (Q01 round 5): the gate fails closed with no
+/// re-qualification RPC, exactly like a post-probe `false` install.
+/// Production code must never call this — genuine lack arrives via
+/// discovery in `probe_backend`.
+#[cfg(test)]
+pub(crate) fn revoke_pointer_safe_message_parameters_for_tests() {
+    POINTER_SAFE_MESSAGE_PARAMETERS.store(false, Ordering::Release);
+    POINTER_SAFE_MESSAGE_PARAMETERS_DIRTY.store(false, Ordering::Release);
 }
 
 /// Snapshot of the daemon-advertised `mechanism_parameter_transport_version`
@@ -1080,6 +1162,9 @@ pub fn clear_cache() {
     // concurrent probe's side effects or install.
     let _install = PROBE_INSTALL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     clear_pointer_safe_message_parameters();
+    // A cleared cache is a fresh lifetime: drop the re-qualification mark
+    // with the qualification itself — the next C_Initialize re-probes.
+    POINTER_SAFE_MESSAGE_PARAMETERS_DIRTY.store(false, Ordering::Release);
     // Cache-clear (e.g. C_Finalize) also drops the dial-failure cache (W1-C7-01).
     state::clear_pre_init_connect_failure();
     let mut guard = INTERFACE_STATE.write().unwrap_or_else(|e| e.into_inner());
