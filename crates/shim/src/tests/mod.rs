@@ -50,6 +50,8 @@ mod retained_oracle_live;
 mod softhsm_gcm;
 #[cfg(not(miri))] // threaded interleave hammer; covered natively
 mod suspect_interleave;
+#[cfg(not(miri))] // real SoftHSM2 provider via libloading; covered natively
+mod token_label_native_probe;
 #[cfg(not(miri))] // shared daemon fixture; covered natively
 mod wait_matrix;
 

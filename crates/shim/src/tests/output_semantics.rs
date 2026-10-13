@@ -6050,3 +6050,199 @@ fn correctness_close_all_transient_failure_preserves_live_session() {
         "a live session must admit a valid Init after failed CloseAllSessions"
     );
 }
+
+/// Q03 phase 1 — valid token-label preservation: direct/proxy comparisons.
+///
+/// A valid 32-byte caller label must round-trip byte-exact through the
+/// proxy: the shim forwards the label (trailing ASCII spaces are the
+/// PKCS#11 blank padding, implied rather than stored) and the daemon
+/// re-pads it, so `C_GetTokenInfo` must return the original 32 bytes.
+/// Only trailing ASCII `0x20` bytes may be dropped in transit; every
+/// other byte — tabs, non-ASCII whitespace, multibyte UTF-8, embedded
+/// NULs the provider accepts — must survive.
+///
+/// Each vector runs two legs: a DIRECT `MockBackend` control (proving
+/// the mock stores labels verbatim, so any proxy/direct divergence is
+/// proxy normalization loss) and the full PROXY leg (shim `C_InitToken`
+/// → daemon → mock, read back through shim `C_GetTokenInfo`).
+fn q03_pad_label(prefix: &[u8]) -> [u8; pkcs11_proxy_ng_types::PKCS11_TOKEN_LABEL_LEN] {
+    assert!(prefix.len() <= pkcs11_proxy_ng_types::PKCS11_TOKEN_LABEL_LEN);
+    let mut label = [b' '; pkcs11_proxy_ng_types::PKCS11_TOKEN_LABEL_LEN];
+    label[..prefix.len()].copy_from_slice(prefix);
+    label
+}
+
+/// DIRECT leg: the mock stores the trimmed label verbatim.
+fn q03_direct_control_stores_verbatim(trimmed: &str) {
+    let direct = MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::SHA256]);
+    direct
+        .init_token(CkSlotId(0), Some(b"1234"), trimmed)
+        .expect("direct control accepts the valid label");
+    let info = direct.get_token_info(CkSlotId(0)).expect("direct control token info");
+    assert_eq!(info.label, trimmed, "direct control stores the label verbatim");
+}
+
+/// PROXY leg: full shim → daemon → mock round-trip; returns the 32
+/// label bytes observed through `C_GetTokenInfo`.
+fn q03_proxy_round_trip_returns_caller_bytes(
+    label: &[u8; pkcs11_proxy_ng_types::PKCS11_TOKEN_LABEL_LEN],
+) -> [u8; pkcs11_proxy_ng_types::PKCS11_TOKEN_LABEL_LEN] {
+    let _guard = shim_state_test_guard();
+    let _saved = R5SavedEndpoint::capture();
+    let daemon = TestDaemon::fresh();
+    let shim = ShimSession::with_endpoint(&daemon.endpoint);
+    let so_pin = *b"1234";
+    let rv = unsafe {
+        dispatch::general::c_init_token(
+            shim.slot_id,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
+    assert_eq!(rv, CKR_OK as CK_RV, "C_InitToken succeeds");
+    let mut info: CK_TOKEN_INFO = unsafe { std::mem::zeroed() };
+    let rv = unsafe { dispatch::general::c_get_token_info(shim.slot_id, &mut info) };
+    assert_eq!(rv, CKR_OK as CK_RV, "C_GetTokenInfo succeeds");
+    info.label
+}
+
+/// Q03 phase 1: plain ASCII labels round-trip byte-exact.
+#[test]
+fn q03_ascii_label_round_trips_byte_exact() {
+    let label = q03_pad_label(b"hello");
+    q03_direct_control_stores_verbatim("hello");
+    assert_eq!(
+        q03_proxy_round_trip_returns_caller_bytes(&label),
+        label,
+        "proxy must return the 32 caller bytes"
+    );
+}
+
+/// Q03 phase 1: multibyte UTF-8 labels round-trip byte-exact.
+#[test]
+fn q03_multibyte_label_round_trips_byte_exact() {
+    let label = q03_pad_label("tökén-héllo".as_bytes());
+    q03_direct_control_stores_verbatim("tökén-héllo");
+    assert_eq!(
+        q03_proxy_round_trip_returns_caller_bytes(&label),
+        label,
+        "proxy must return the 32 caller bytes"
+    );
+}
+
+/// Q03 phase 1: a full 32-byte label (no padding) round-trips byte-exact.
+#[test]
+fn q03_full_32_byte_label_round_trips_byte_exact() {
+    let label = *b"0123456789abcdef0123456789abcdef";
+    q03_direct_control_stores_verbatim("0123456789abcdef0123456789abcdef");
+    assert_eq!(
+        q03_proxy_round_trip_returns_caller_bytes(&label),
+        label,
+        "proxy must return the 32 caller bytes"
+    );
+}
+
+/// Q03 phase 1: a trailing TAB is caller bytes, not padding — it must
+/// survive (pre-fix `trim_end` strips it: RED).
+#[test]
+fn q03_trailing_tab_label_round_trips_byte_exact() {
+    let label = q03_pad_label(b"A\t");
+    q03_direct_control_stores_verbatim("A\t");
+    assert_eq!(
+        q03_proxy_round_trip_returns_caller_bytes(&label),
+        label,
+        "proxy must preserve the trailing TAB"
+    );
+}
+
+/// Q03 phase 1: trailing non-ASCII whitespace (NBSP) must survive
+/// (pre-fix Unicode `trim_end` strips it: RED).
+#[test]
+fn q03_trailing_nbsp_label_round_trips_byte_exact() {
+    let label = q03_pad_label("B\u{a0}".as_bytes());
+    q03_direct_control_stores_verbatim("B\u{a0}");
+    assert_eq!(
+        q03_proxy_round_trip_returns_caller_bytes(&label),
+        label,
+        "proxy must preserve the trailing NBSP"
+    );
+}
+
+/// Q03 phase 1: an all-spaces label is the empty label; re-padding must
+/// reproduce the 32 caller bytes.
+#[test]
+fn q03_all_spaces_label_round_trips_byte_exact() {
+    let label = [b' '; pkcs11_proxy_ng_types::PKCS11_TOKEN_LABEL_LEN];
+    q03_direct_control_stores_verbatim("");
+    assert_eq!(
+        q03_proxy_round_trip_returns_caller_bytes(&label),
+        label,
+        "proxy must return the 32 caller bytes"
+    );
+}
+
+/// Q03 phase 1: an embedded NUL the provider accepts must survive (the
+/// mock accepts it; real providers may refuse — that refusal must then
+/// propagate, never be normalized away).
+#[test]
+fn q03_embedded_nul_label_round_trips_byte_exact() {
+    let label = q03_pad_label(b"C\0D");
+    q03_direct_control_stores_verbatim("C\0D");
+    assert_eq!(
+        q03_proxy_round_trip_returns_caller_bytes(&label),
+        label,
+        "proxy must preserve the embedded NUL"
+    );
+}
+
+/// Q03 phase 1 CURRENT-BEHAVIOR pin — phase 2 changes this.
+///
+/// A NULL `pLabel` is currently rewritten to the empty label (→ 32
+/// spaces on the wire): this test pins that rewrite end to end so the
+/// phase-2 refusal (`CKR_ARGUMENTS_BAD`, awaiting explicit owner
+/// acceptance) has a clear flip target. Do NOT extend this behavior;
+/// update this test when phase 2 lands.
+#[test]
+fn q03_null_label_currently_rewrites_to_empty_label() {
+    let _guard = shim_state_test_guard();
+    let _saved = R5SavedEndpoint::capture();
+    let daemon = TestDaemon::fresh();
+    let shim = ShimSession::with_endpoint(&daemon.endpoint);
+    let so_pin = *b"1234";
+    let rv = unsafe {
+        dispatch::general::c_init_token(
+            shim.slot_id,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            std::ptr::null_mut(),
+        )
+    };
+    assert_eq!(rv, CKR_OK as CK_RV, "phase-1 NULL label still reinits (phase 2 refuses)");
+    let mut info: CK_TOKEN_INFO = unsafe { std::mem::zeroed() };
+    let rv = unsafe { dispatch::general::c_get_token_info(shim.slot_id, &mut info) };
+    assert_eq!(rv, CKR_OK as CK_RV, "C_GetTokenInfo succeeds");
+    assert_eq!(
+        info.label,
+        [b' '; pkcs11_proxy_ng_types::PKCS11_TOKEN_LABEL_LEN],
+        "phase-1 NULL label currently rewrites to the empty label"
+    );
+}
+
+/// Q03 phase 1 CURRENT-BEHAVIOR pin — phase 2 changes this.
+///
+/// Invalid-UTF-8 label bytes are currently passed through lossy
+/// decoding (U+FFFD substitution): this test pins that substitution
+/// end to end so the phase-2 refusal (`CKR_ARGUMENTS_BAD`, awaiting
+/// explicit owner acceptance) has a clear flip target. Do NOT extend
+/// this behavior; update this test when phase 2 lands.
+#[test]
+fn q03_invalid_utf8_label_currently_decodes_lossy() {
+    let label = q03_pad_label(b"BAD\xff");
+    let expected = q03_pad_label("BAD\u{fffd}".as_bytes());
+    assert_eq!(
+        q03_proxy_round_trip_returns_caller_bytes(&label),
+        expected,
+        "phase-1 invalid UTF-8 currently decodes lossy"
+    );
+}
