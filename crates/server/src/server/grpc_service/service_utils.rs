@@ -847,15 +847,29 @@ pub(super) async fn resolve_session(
     ctx_id: &ClientContextId,
     session_handle: u64,
 ) -> Result<CkSessionHandle, CkRv> {
-    let Some(session) = ctx_mgr
-        .get_context(ctx_id, |ctx| ctx.session_handles.resolve(VirtualHandle(session_handle)))
+    let Some((session, suspended)) = ctx_mgr
+        .get_context(ctx_id, |ctx| {
+            let virt = VirtualHandle(session_handle);
+            (ctx.session_handles.resolve(virt), ctx.session_handles.suspended_backend(virt))
+        })
         .await
     else {
         return Err(CkRv::CRYPTOKI_NOT_INITIALIZED);
     };
 
-    let backend_session = session.ok_or(CkRv::SESSION_HANDLE_INVALID)?;
-    Ok(CkSessionHandle(backend_session.0 as u64))
+    match (session, suspended) {
+        (Some(backend_session), _) => Ok(CkSessionHandle(backend_session.0 as u64)),
+        // F2: suspended by an in-flight close — the handle's fate is
+        // owned elsewhere. Answer outcome-ambiguous FUNCTION_FAILED
+        // (W1-L3-01, the same verdict as a skipped-suspended batch
+        // member or a timed-out close) instead of
+        // SESSION_HANDLE_INVALID, so the shim's lazy suspect
+        // reconciliation stays suspect instead of evicting a member the
+        // owner may reactivate. Proven-gone (neither map names it)
+        // keeps SESSION_HANDLE_INVALID.
+        (None, Some(_)) => Err(CkRv::FUNCTION_FAILED),
+        (None, None) => Err(CkRv::SESSION_HANDLE_INVALID),
+    }
 }
 
 /// Resolve a virtual session to its backend session, owning slot, and current
@@ -1106,11 +1120,13 @@ async fn resolve_session_and_handle(
     object_handle: u64,
     stale_rv: CkRv,
 ) -> Result<(CkSessionHandle, CkObjectHandle), CkRv> {
-    let Some((session, key, destroyed)) = ctx
+    let Some((session, suspended, key, destroyed)) = ctx
         .context_manager
         .get_context(ctx_id, |c| {
+            let virt = VirtualHandle(session_handle);
             (
-                c.session_handles.resolve(VirtualHandle(session_handle)),
+                c.session_handles.resolve(virt),
+                c.session_handles.suspended_backend(virt),
                 c.object_handles.resolve(VirtualHandle(object_handle)),
                 c.destroyed_objects.contains(&VirtualHandle(object_handle)),
             )
@@ -1120,7 +1136,14 @@ async fn resolve_session_and_handle(
         return Err(CkRv::CRYPTOKI_NOT_INITIALIZED);
     };
 
-    let backend_session = session.ok_or(CkRv::SESSION_HANDLE_INVALID)?;
+    // F2: suspended reads ambiguous (same verdict as `resolve_session` —
+    // the suspend may have landed between the caller's first session read
+    // and this second read).
+    let backend_session = match (session, suspended) {
+        (Some(backend), _) => backend,
+        (None, Some(_)) => return Err(CkRv::FUNCTION_FAILED),
+        (None, None) => return Err(CkRv::SESSION_HANDLE_INVALID),
+    };
     // T20 tombstone: a virtual handle removed by an explicit C_DestroyObject
     // names a definitively-gone object — answer the handle-invalid family
     // locally instead of forwarding 0 (whose backend verdict is
@@ -1193,23 +1216,30 @@ pub(super) async fn resolve_session_and_two_objects(
     first_object_handle: u64,
     second_object_handle: u64,
 ) -> Result<(CkSessionHandle, CkObjectHandle, CkObjectHandle), CkRv> {
-    let Some((session, first_object, second_object, first_destroyed, second_destroyed)) = ctx
-        .context_manager
-        .get_context(ctx_id, |c| {
-            (
-                c.session_handles.resolve(VirtualHandle(session_handle)),
-                c.object_handles.resolve(VirtualHandle(first_object_handle)),
-                c.object_handles.resolve(VirtualHandle(second_object_handle)),
-                c.destroyed_objects.contains(&VirtualHandle(first_object_handle)),
-                c.destroyed_objects.contains(&VirtualHandle(second_object_handle)),
-            )
-        })
-        .await
+    let Some((session, suspended, first_object, second_object, first_destroyed, second_destroyed)) =
+        ctx.context_manager
+            .get_context(ctx_id, |c| {
+                let virt = VirtualHandle(session_handle);
+                (
+                    c.session_handles.resolve(virt),
+                    c.session_handles.suspended_backend(virt),
+                    c.object_handles.resolve(VirtualHandle(first_object_handle)),
+                    c.object_handles.resolve(VirtualHandle(second_object_handle)),
+                    c.destroyed_objects.contains(&VirtualHandle(first_object_handle)),
+                    c.destroyed_objects.contains(&VirtualHandle(second_object_handle)),
+                )
+            })
+            .await
     else {
         return Err(CkRv::CRYPTOKI_NOT_INITIALIZED);
     };
 
-    let backend_session = session.ok_or(CkRv::SESSION_HANDLE_INVALID)?;
+    // F2: suspended reads ambiguous (same verdict as `resolve_session`).
+    let backend_session = match (session, suspended) {
+        (Some(backend), _) => backend,
+        (None, Some(_)) => return Err(CkRv::FUNCTION_FAILED),
+        (None, None) => return Err(CkRv::SESSION_HANDLE_INVALID),
+    };
     // T20 tombstones (both handles are keys on the wrap/unwrap path): a
     // destroyed handle answers KEY_HANDLE_INVALID locally instead of
     // forwarding 0; never-existed handles still forward 0.

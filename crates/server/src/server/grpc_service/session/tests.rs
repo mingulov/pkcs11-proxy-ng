@@ -5703,3 +5703,286 @@ async fn close_all_sessions_racing_stress_never_ok_with_live_member() {
     }
     mock.clear_close_session_delay();
 }
+
+/// F2: an op on a session suspended by an in-flight close must answer
+/// outcome-ambiguous FUNCTION_FAILED — never SESSION_HANDLE_INVALID.
+/// SHI would make the shim's lazy suspect reconciliation evict a member
+/// the owner may still reactivate (server-live, shim-gone); FUNCTION_FAILED
+/// keeps it suspect until the owner's settlement is observable.
+#[tokio::test]
+async fn suspended_session_op_answers_ambiguous_not_handle_invalid() {
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+
+    let transition = ctx_mgr.begin_close_session(&ctx_id, VirtualHandle(session)).unwrap();
+    let info_rv = super::get_session_info(
+        &HandlerContext::for_test(&ctx_mgr, &backend),
+        Request::new(pkcs11_proxy_ng_proto::GetSessionInfoRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv;
+    assert_eq!(
+        info_rv,
+        CkRv::FUNCTION_FAILED.0,
+        "a suspended member's fate is owned elsewhere: ambiguous, not handle-invalid"
+    );
+
+    // The owner settles transiently (nothing ran): the member is alive,
+    // proving an SHI verdict here would have evicted a live session.
+    drop(transition);
+    let retry_rv = super::get_session_info(
+        &HandlerContext::for_test(&ctx_mgr, &backend),
+        Request::new(pkcs11_proxy_ng_proto::GetSessionInfoRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv;
+    assert_eq!(retry_rv, CkRv::OK.0, "the reactivated member answers normally");
+}
+
+/// F2 close path: a close racing an in-flight close answers FUNCTION_FAILED
+/// while the member is suspended (a retry after the owner settles then
+/// closes); only a proven-gone handle answers SESSION_HANDLE_INVALID.
+#[tokio::test]
+async fn close_racing_in_flight_close_is_ambiguous() {
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+
+    let transition = ctx_mgr.begin_close_session(&ctx_id, VirtualHandle(session)).unwrap();
+    assert_eq!(
+        close_session_rv(&ctx_mgr, &backend, &ctx_id, session).await,
+        CkRv::FUNCTION_FAILED.0,
+        "a close racing an in-flight close must not claim the handle dead"
+    );
+
+    drop(transition);
+    assert_eq!(
+        close_session_rv(&ctx_mgr, &backend, &ctx_id, session).await,
+        CkRv::OK.0,
+        "retry after the owner settles transiently must close"
+    );
+    assert_eq!(mock.open_session_count(), 0, "retry must close the backend session");
+}
+
+/// F2 pin: a proven-gone handle keeps SESSION_HANDLE_INVALID on both the
+/// op path and the close path — only the suspended state turns ambiguous.
+#[tokio::test]
+async fn gone_session_keeps_handle_invalid() {
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+    assert_eq!(close_session_rv(&ctx_mgr, &backend, &ctx_id, session).await, CkRv::OK.0);
+
+    let info_rv = super::get_session_info(
+        &HandlerContext::for_test(&ctx_mgr, &backend),
+        Request::new(pkcs11_proxy_ng_proto::GetSessionInfoRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv;
+    assert_eq!(info_rv, CkRv::SESSION_HANDLE_INVALID.0, "gone handle stays SHI on the op path");
+    assert_eq!(
+        close_session_rv(&ctx_mgr, &backend, &ctx_id, session).await,
+        CkRv::SESSION_HANDLE_INVALID.0,
+        "gone handle stays SHI on the close path"
+    );
+}
+
+/// F2 second read: the session-and-key resolver maps a suspended session
+/// to FUNCTION_FAILED too, closing the suspend-landed-between-reads TOCTOU
+/// for callers that resolved the session moments earlier.
+#[tokio::test]
+async fn suspended_session_and_key_answers_ambiguous() {
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+
+    let transition = ctx_mgr.begin_close_session(&ctx_id, VirtualHandle(session)).unwrap();
+    let outcome = super::super::service_utils::resolve_session_and_key(
+        &HandlerContext::for_test(&ctx_mgr, &backend),
+        &ctx_id,
+        session,
+        0,
+    )
+    .await;
+    assert_eq!(
+        outcome.unwrap_err(),
+        CkRv::FUNCTION_FAILED,
+        "a suspended session is ambiguous on the second read as well"
+    );
+    drop(transition);
+}
+
+/// Poll until `spare` (a native handle held outside the context manager)
+/// observes the public state — i.e. the daemon's own post-settle logout
+/// released the backend login. Times out (failing the test) when the
+/// logout never runs.
+async fn poll_until_native_logout(mock: &MockBackend, spare: CkSessionHandle, what: &str) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if mock.get_session_info(spare).unwrap().state == CkSessionState::RwPublic {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{what}: the post-settle logout never released the backend login"));
+}
+
+/// F1: aborting a provably in-flight singular close still runs its
+/// post-settle logout — completion ownership, not handler lifetime, owns
+/// the last-holder release. The spare keeps the mock from auto-logging-out
+/// on last close, so only the daemon's own logout flips the spare public.
+#[tokio::test]
+async fn cancelled_close_still_runs_post_settle_logout() {
+    let (ctx_mgr, mock, ctx_id, session) = setup_session_with_mock().await;
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    assert_eq!(login_response(&ctx_mgr, &backend, &ctx_id, session).await, CkRv::OK.0);
+    let spare = mock
+        .open_session(CkSlotId(0), CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION)
+        .unwrap();
+
+    mock.set_close_session_delay(std::time::Duration::from_millis(300));
+    let mgr = Arc::clone(&ctx_mgr);
+    let be = Arc::clone(&backend);
+    let ctx_id_owned = ctx_id.0.clone();
+    let closer = tokio::spawn(async move {
+        super::lifecycle::close_session(
+            &mgr,
+            &be,
+            Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
+                client_context_id: ctx_id_owned,
+                session_handle: session,
+            }),
+        )
+        .await
+    });
+    // Provably in flight before the abort lands.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while mock.close_session_call_count() == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the close must reach the backend before the abort");
+    closer.abort();
+    assert!(closer.await.unwrap_err().is_cancelled(), "the abort must land mid-flight");
+
+    // Late settlement still drops the mapping terminally...
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let settled = ctx_mgr
+                .get_context(&ctx_id, |ctx| {
+                    ctx.session_handles.resolve(VirtualHandle(session)).is_none()
+                        && ctx.session_handles.suspended_backend(VirtualHandle(session)).is_none()
+                })
+                .await
+                .unwrap_or(true);
+            if settled {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the wedged close must settle after the abort");
+    // ...and the detached completion still releases the backend login.
+    poll_until_native_logout(&mock, spare, "cancelled singular close").await;
+    mock.clear_close_session_delay();
+}
+
+/// F1 batch path: aborting a provably in-flight close-all still runs its
+/// post-settle logout.
+#[tokio::test]
+async fn cancelled_close_all_still_runs_post_settle_logout() {
+    let (ctx_mgr, mock, ctx_id, s1) = setup_session_with_mock().await;
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let virtual_slot = ctx_mgr.virtual_slots().await[0];
+    let _s2 = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+    assert_eq!(login_response(&ctx_mgr, &backend, &ctx_id, s1).await, CkRv::OK.0);
+    let spare = mock
+        .open_session(CkSlotId(0), CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION)
+        .unwrap();
+
+    mock.set_close_session_delay(std::time::Duration::from_millis(300));
+    let mgr = Arc::clone(&ctx_mgr);
+    let be = Arc::clone(&backend);
+    let ctx_id_owned = ctx_id.0.clone();
+    let slot = virtual_slot.0;
+    let closer = tokio::spawn(async move {
+        close_all_sessions(
+            &mgr,
+            &be,
+            Request::new(pkcs11_proxy_ng_proto::CloseAllSessionsRequest {
+                client_context_id: ctx_id_owned,
+                slot_id: slot,
+            }),
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while mock.close_session_call_count() == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the batch must reach the backend before the abort");
+    closer.abort();
+    assert!(closer.await.unwrap_err().is_cancelled(), "the abort must land mid-flight");
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let settled = ctx_mgr
+                .get_context(&ctx_id, |ctx| {
+                    ctx.session_handles.resolve(VirtualHandle(s1)).is_none()
+                        && ctx.session_handles.suspended_backend(VirtualHandle(s1)).is_none()
+                })
+                .await
+                .unwrap_or(true);
+            if settled {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the wedged batch must settle after the abort");
+    poll_until_native_logout(&mock, spare, "cancelled close-all").await;
+    mock.clear_close_session_delay();
+}

@@ -593,8 +593,51 @@ pub(crate) struct UnresolvedCarrierCleanup {
     pub(crate) slot: BackendSlotId,
     /// Native handle of the stray session.
     pub(crate) session: u64,
-    /// The close `CK_RV` that stranded it.
-    pub(crate) rv: CkRv,
+    /// The close `CK_RV` that stranded it, when the close returned one.
+    /// `None` when the carrier sequence unwound (backend panic — the
+    /// `Pkcs11Backend` trait states no panic contract, so the call never
+    /// produced an RV and none is invented): the carrier's fate is
+    /// unknown, only that no mapping owns it.
+    pub(crate) rv: Option<CkRv>,
+}
+
+/// Drop guard recording an unresolved carrier when the transient-carrier
+/// sequence unwinds (F3). Armed once the carrier handle exists; disarmed
+/// as soon as the native close returns (success or failure — the
+/// failure path records its own `Some(rv)` entry). On unwind the guard
+/// pushes an `rv: None` entry: the session is mapped nowhere and its
+/// fate is unknown, but the ownership gap is recorded instead of lost.
+struct UnresolvedCarrierGuard {
+    ledger: Arc<std::sync::Mutex<Vec<UnresolvedCarrierCleanup>>>,
+    slot: BackendSlotId,
+    session: u64,
+    armed: bool,
+}
+
+impl UnresolvedCarrierGuard {
+    fn armed(
+        ledger: Arc<std::sync::Mutex<Vec<UnresolvedCarrierCleanup>>>,
+        slot: BackendSlotId,
+        session: u64,
+    ) -> Self {
+        Self { ledger, slot, session, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for UnresolvedCarrierGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.ledger
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(UnresolvedCarrierCleanup { slot: self.slot, session: self.session, rv: None });
+    }
 }
 
 /// Outcome of one owned transient-carrier sequence (Q01-P1), computed
@@ -1862,8 +1905,19 @@ impl ContextManager {
                     Ok(handle) => handle,
                     Err(rv) => return Ok(TransientCarrierOutcome::OpenFailed(rv)),
                 };
+                // F3: arm the unwind record now that a native handle
+                // exists. A panic in the logout or close below unwinds
+                // past the ledger push; the guard records the ownership
+                // gap (`rv: None` — no RV was produced) instead of
+                // losing it.
+                let mut unwind_guard =
+                    UnresolvedCarrierGuard::armed(Arc::clone(&ledger), slot, temp.0);
                 let logout = carrier.logout(temp);
                 let close = carrier.close_session(temp);
+                // The close returned (either outcome), so the unwind
+                // record no longer applies — disarm before the failure
+                // push below to avoid a double record.
+                unwind_guard.disarm();
                 if let Err(rv) = close {
                     // The stray session stays open AND recorded — the
                     // record lands from inside completion ownership, so
@@ -1876,7 +1930,7 @@ impl ContextManager {
                     ledger
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .push(UnresolvedCarrierCleanup { slot, session: temp.0, rv });
+                        .push(UnresolvedCarrierCleanup { slot, session: temp.0, rv: Some(rv) });
                 }
                 Ok(TransientCarrierOutcome::Settled { logout })
             },
