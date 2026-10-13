@@ -8,10 +8,11 @@ use tracing::debug;
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_types::*;
+use tokio::sync::oneshot;
 
 use super::super::super::auth::policy::TokenPolicy;
 use super::super::super::context_manager::{
-    ClientContextId, CloseSessionBeginError, ContextManager,
+    ClientContextId, CloseSessionBeginError, ContextManager, LoginState,
 };
 use super::super::super::handle_map::{BackendHandle, VirtualHandle};
 use super::super::authorization;
@@ -194,6 +195,53 @@ pub(super) async fn close_session(
     close_session_with_timeout(ctx_mgr, backend_ref, request, None).await
 }
 
+/// Run the D6(2) last-holder logout after TRUE close completion (F1
+/// round-2): the blocking closure signals `completed` once its
+/// transition settles, so a response timeout — which returns early
+/// while the native call still runs — cannot consume the logout. When
+/// the signal already landed the logout runs inline before the
+/// response (preserving the synchronous member-then-carrier native
+/// order); otherwise it is deferred to a task that waits for the
+/// still-owned detached completion while the response answers now. A
+/// wedged backend parks that waiter exactly as it parks the blocking
+/// task itself; the helper rechecks under the slot lock, so a late
+/// logout can never steal a login minted after the timeout.
+async fn logout_after_close_completion(
+    ctx_mgr: &Arc<ContextManager>,
+    backend: &Arc<dyn Pkcs11Backend>,
+    held_login: Option<(BackendSlotId, LoginState)>,
+    mut completed: oneshot::Receiver<()>,
+) {
+    let Some((slot, login)) = held_login else {
+        return;
+    };
+    match completed.try_recv() {
+        // Settled inline (Ok), or the closure dropped the sender past
+        // its Drop-guard settlement (Closed, e.g. a panicked close):
+        // the outcome is known, so run the logout now.
+        Ok(()) | Err(oneshot::error::TryRecvError::Closed) => {
+            ctx_mgr.backend_logout_if_last_holder_out(backend, slot, None, login).await;
+        }
+        // Timeout early-return: the blocking task still owns the
+        // transition and the login is still retained. Defer the
+        // logout until the late settlement instead of no-op'ing now
+        // and leaving the late settle with no logout owner.
+        Err(oneshot::error::TryRecvError::Empty) => {
+            let peer = current_peer();
+            let guard = current_context_operation_guard();
+            let ctx_mgr = Arc::clone(ctx_mgr);
+            let backend = Arc::clone(backend);
+            tokio::spawn(scope_peer_admission(
+                peer,
+                scope_context_operation(guard, async move {
+                    let _ = completed.await;
+                    ctx_mgr.backend_logout_if_last_holder_out(&backend, slot, None, login).await;
+                }),
+            ));
+        }
+    }
+}
+
 pub(super) async fn close_session_with_timeout(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
@@ -266,17 +314,17 @@ pub(super) async fn close_session_with_timeout(
         Err(CloseSessionBeginError::SessionMissing) => {
             // F2: the live mapping is missing, but the slot lookup above
             // proved `session_slots` still names this handle — it is
-            // suspended under an in-flight close (or settled terminally
-            // in between). Answer outcome-ambiguous FUNCTION_FAILED
-            // while a suspended entry exists so a racing close does not
-            // evict a member the owner may reactivate; only a
-            // proven-gone handle answers SESSION_HANDLE_INVALID.
-            let suspended = ctx_mgr
-                .get_context(&ctx_id, |ctx| ctx.session_handles.suspended_backend(vh).is_some())
+            // suspended under an in-flight close (or settled in between).
+            // Answer outcome-ambiguous FUNCTION_FAILED unless the handle
+            // is proven gone from BOTH maps (batch-path predicate): the
+            // owner may reactivate between this begin-fail and the check
+            // below, and that live member must never read SHI — the shim
+            // would evict authoritative state for a server-live session.
+            let gone = ctx_mgr
+                .get_context(&ctx_id, |ctx| ctx.session_handles.is_proven_gone(vh))
                 .await
                 .unwrap_or(false);
-            let ck_rv =
-                if suspended { CkRv::FUNCTION_FAILED.0 } else { CkRv::SESSION_HANDLE_INVALID.0 };
+            let ck_rv = if gone { CkRv::SESSION_HANDLE_INVALID.0 } else { CkRv::FUNCTION_FAILED.0 };
             return Ok(Response::new(pkcs11_proxy_ng_proto::CloseSessionResponse { ck_rv }));
         }
     };
@@ -295,10 +343,12 @@ pub(super) async fn close_session_with_timeout(
     // no PIN replay may restore the native one) — the last-holder release
     // below runs only after the close settles.
     let backend = backend_ref.clone();
+    let (completed_tx, completed_rx) = oneshot::channel();
     let operation = move || {
         transition.mark_started();
         let result = backend.close_session(session);
         transition.settle(&result);
+        let _ = completed_tx.send(());
         result
     };
     // F1: the worker await and the post-settle logout run as one detached
@@ -319,10 +369,11 @@ pub(super) async fn close_session_with_timeout(
         // logical login for the slot. Best-effort and self-guarded: no-ops when
         // the close failed transiently (login retained), when sibling sessions
         // keep the login, or when another live context holds it — the native
-        // login always survives with a retained logical login.
-        if let Some((slot, login)) = held_login_slot {
-            ctx_mgr_task.backend_logout_if_last_holder_out(&backend_task, slot, None, login).await;
-        }
+        // login always survives with a retained logical login. Keyed to true
+        // completion (F1 round-2), not to the spawn return, so a response
+        // timeout defers the logout instead of consuming it.
+        logout_after_close_completion(&ctx_mgr_task, &backend_task, held_login_slot, completed_rx)
+            .await;
         Ok(Response::new(pkcs11_proxy_ng_proto::CloseSessionResponse { ck_rv }))
     })
     .await
@@ -333,6 +384,16 @@ pub(super) async fn close_all_sessions(
     backend_ref: &Arc<dyn Pkcs11Backend>,
     token_policy: &TokenPolicy,
     request: Request<pkcs11_proxy_ng_proto::CloseAllSessionsRequest>,
+) -> Result<Response<pkcs11_proxy_ng_proto::CloseAllSessionsResponse>, Status> {
+    close_all_sessions_with_timeout(ctx_mgr, backend_ref, token_policy, request, None).await
+}
+
+pub(super) async fn close_all_sessions_with_timeout(
+    ctx_mgr: &Arc<ContextManager>,
+    backend_ref: &Arc<dyn Pkcs11Backend>,
+    token_policy: &TokenPolicy,
+    request: Request<pkcs11_proxy_ng_proto::CloseAllSessionsRequest>,
+    timeout_override: Option<Duration>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::CloseAllSessionsResponse>, Status> {
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
@@ -423,10 +484,7 @@ pub(super) async fn close_all_sessions(
                 // can settle one, and it holds the suspended entry),
                 // so proven-gone is stable and OK stays honest (Q01).
                 let gone = ctx_mgr
-                    .get_context(&ctx_id, |ctx| {
-                        ctx.session_handles.resolve(vh).is_none()
-                            && ctx.session_handles.suspended_backend(vh).is_none()
-                    })
+                    .get_context(&ctx_id, |ctx| ctx.session_handles.is_proven_gone(vh))
                     .await
                     .unwrap_or(false);
                 if !gone {
@@ -448,7 +506,11 @@ pub(super) async fn close_all_sessions(
     let ctx_id_owned = ctx_id.0.clone();
     let slot_id_raw = req.slot_id;
     await_close_completion_detached(async move {
+        let (completed_tx, completed_rx) = oneshot::channel();
         let ck_rv = if backend_sessions.is_empty() {
+            // Nothing runs: the batch is vacuously complete, so the
+            // post-settle logout below runs inline.
+            let _ = completed_tx.send(());
             if skipped_suspended > 0 {
                 // Every member is owned by an in-flight singular close.
                 // Claiming OK would evict shim state an owner may still
@@ -472,7 +534,7 @@ pub(super) async fn close_all_sessions(
             let sessions: Vec<CkSessionHandle> =
                 backend_sessions.iter().map(|bh| CkSessionHandle(bh.0 as u64)).collect();
             let backend = backend_task.clone();
-            let result = spawn_backend(move || {
+            let result = spawn_backend_with_optional_timeout(timeout_override, move || {
                 let mut transitions = transitions;
                 let mut last_error = None;
                 for (transition, session) in transitions.iter_mut().zip(sessions.iter()) {
@@ -483,6 +545,7 @@ pub(super) async fn close_all_sessions(
                         last_error = Some(rv);
                     }
                 }
+                let _ = completed_tx.send(());
                 match last_error {
                     Some(rv) => Err(rv),
                     None => Ok(()),
@@ -508,11 +571,16 @@ pub(super) async fn close_all_sessions(
         // retained login after a transient or partial failure no-ops the
         // helper, so the native login survives with it; this also covers the
         // race where a concurrent close took the last own session mid-batch).
-        if let Some(login) = held_login {
-            ctx_mgr_task
-                .backend_logout_if_last_holder_out(&backend_task, backend_slot, None, login)
-                .await;
-        }
+        // Keyed to true completion (F1 round-2, singular-path discipline),
+        // not to the spawn return, so a response timeout defers the logout
+        // instead of consuming it.
+        logout_after_close_completion(
+            &ctx_mgr_task,
+            &backend_task,
+            held_login.map(|login| (backend_slot, login)),
+            completed_rx,
+        )
+        .await;
 
         debug!(
             context_id = %ctx_id_owned,

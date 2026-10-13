@@ -172,6 +172,18 @@ const IGNORED_TEST_TAXONOMY: &[IgnoredTestLane] = &[
         ],
     },
     IgnoredTestLane {
+        file: "crates/server/tests/q01_close_oracle_test.rs",
+        reason: "Hook-gated Q01 close-path loaded-oracle coverage (real daemon stack)",
+        commands: &[
+            "cargo test -p pkcs11-proxy-ng --features native-owner-test-hooks --test q01_close_oracle_test -- --ignored --test-threads=1",
+        ],
+        requirements: &[
+            "SoftHSM2 module and softhsm2-util",
+            "NSS softokn libsoftokn3.so and certutil",
+            "native-owner-test-hooks feature build",
+        ],
+    },
+    IgnoredTestLane {
         file: "crates/server/tests/softhsm_fixture_test.rs",
         reason: "SoftHSM2 fixture variant coverage",
         commands: &[

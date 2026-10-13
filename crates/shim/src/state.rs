@@ -342,8 +342,13 @@ pub(crate) fn is_session_known(h_session: CK_SESSION_HANDLE) -> bool {
 }
 
 fn forget_session_slot(h_session: CK_SESSION_HANDLE) {
-    lock_recovering(&SESSION_SLOTS).remove(&h_session);
-    clear_session_suspect(h_session);
+    // F4 round-2: remove the membership and its suspect mark under the
+    // canonical order, so a concurrent mark cannot recreate this
+    // session's mark after the clear.
+    let mut slots = lock_recovering(&SESSION_SLOTS);
+    let mut suspect = lock_recovering(&SUSPECT_AFTER_BATCH_FAILURE);
+    slots.remove(&h_session);
+    suspect.remove(&h_session);
 }
 
 /// Sessions retained by a failed close-all batch whose per-member fate
@@ -352,6 +357,13 @@ fn forget_session_slot(h_session: CK_SESSION_HANDLE) {
 /// it (evicted when confirmed dead, cleared when confirmed alive).
 /// Bounded by live session count; entries clear on forget, evict, and
 /// full cache resets alongside the maps they annotate.
+///
+/// Lock order (F4 round-2): every critical section spanning membership
+/// (`SESSION_SLOTS`) and this map takes `SESSION_SLOTS` FIRST, then
+/// this map — see `mark_slot_sessions_suspect`, `forget_session_slot`,
+/// `evict_slot_session_caches`, and `clear_all_caches`. Single-map
+/// readers take only their own lock. No path takes this map before
+/// `SESSION_SLOTS`, so the order is deadlock-free.
 static SUSPECT_AFTER_BATCH_FAILURE: LazyLock<Mutex<HashSet<CK_SESSION_HANDLE>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
@@ -359,15 +371,17 @@ static SUSPECT_AFTER_BATCH_FAILURE: LazyLock<Mutex<HashSet<CK_SESSION_HANDLE>>> 
 /// above). Called only when a close-all batch fails with retained
 /// state — never on the steady-state path.
 pub(crate) fn mark_slot_sessions_suspect(slot_id: CK_SLOT_ID) {
-    let sessions: Vec<CK_SESSION_HANDLE> = lock_recovering(&SESSION_SLOTS)
-        .iter()
-        .filter(|(_, slot)| **slot == slot_id)
-        .map(|(session, _)| *session)
-        .collect();
+    // F4 round-2: collect and extend under the canonical order — a
+    // removal cannot land between them and orphan a mark for a session
+    // whose membership is already gone.
+    let slots = lock_recovering(&SESSION_SLOTS);
+    let mut suspect = lock_recovering(&SUSPECT_AFTER_BATCH_FAILURE);
+    let sessions: Vec<CK_SESSION_HANDLE> =
+        slots.iter().filter(|(_, slot)| **slot == slot_id).map(|(session, _)| *session).collect();
     if sessions.is_empty() {
         return;
     }
-    lock_recovering(&SUSPECT_AFTER_BATCH_FAILURE).extend(sessions);
+    suspect.extend(sessions);
 }
 
 /// Whether `h_session` was retained by a failed close-all batch and not
@@ -382,6 +396,18 @@ pub(crate) fn clear_session_suspect(h_session: CK_SESSION_HANDLE) {
     lock_recovering(&SUSPECT_AFTER_BATCH_FAILURE).remove(&h_session);
 }
 
+/// Test-only atomic orphan probe (F4 round-2): whether `h_session`
+/// carries a suspect mark without membership, read under the canonical
+/// `SESSION_SLOTS` → `SUSPECT_AFTER_BATCH_FAILURE` lock order. The
+/// interleave hammer samples this while marking races removal; separate
+/// single-lock reads would TOCTOU and are not used.
+#[cfg(test)]
+pub(crate) fn session_suspect_without_membership(h_session: CK_SESSION_HANDLE) -> bool {
+    let slots = lock_recovering(&SESSION_SLOTS);
+    let suspect = lock_recovering(&SUSPECT_AFTER_BATCH_FAILURE);
+    suspect.contains(&h_session) && !slots.contains_key(&h_session)
+}
+
 /// Clear every per-session cache across all sessions.
 ///
 /// W1-C6-04: the 16 two-call byte caches plus the encapsulate cache were
@@ -389,9 +415,15 @@ pub(crate) fn clear_session_suspect(h_session: CK_SESSION_HANDLE) {
 /// they are gone; only session ownership and message-operation
 /// discriminators remain.
 pub(crate) fn clear_all_caches() {
-    lock_recovering(&SESSION_SLOTS).clear();
+    {
+        // F4 round-2: clear memberships and suspect marks under the
+        // canonical order, so a concurrent mark cannot orphan.
+        let mut slots = lock_recovering(&SESSION_SLOTS);
+        let mut suspect = lock_recovering(&SUSPECT_AFTER_BATCH_FAILURE);
+        slots.clear();
+        suspect.clear();
+    }
     lock_recovering(&MESSAGE_OPERATION_STATES).clear();
-    lock_recovering(&SUSPECT_AFTER_BATCH_FAILURE).clear();
 }
 
 /// Forget session ownership and all message-operation discriminators without
@@ -411,19 +443,24 @@ pub(crate) fn evict_session_authoritative_state(h_session: CK_SESSION_HANDLE) {
 /// leave survivors possible keep the state so the daemon stays authoritative.
 pub(crate) fn evict_slot_session_caches(slot_id: CK_SLOT_ID) {
     let sessions = {
-        let mut map = lock_recovering(&SESSION_SLOTS);
-        let sessions: Vec<_> =
-            map.iter().filter(|(_, slot)| **slot == slot_id).map(|(session, _)| *session).collect();
+        // F4 round-2: remove the memberships and their suspect marks
+        // under the canonical order (mirrors `forget_session_slot`), so
+        // a concurrent mark cannot recreate a mark after its clear.
+        let mut slots = lock_recovering(&SESSION_SLOTS);
+        let mut suspect = lock_recovering(&SUSPECT_AFTER_BATCH_FAILURE);
+        let sessions: Vec<_> = slots
+            .iter()
+            .filter(|(_, slot)| **slot == slot_id)
+            .map(|(session, _)| *session)
+            .collect();
         for session in &sessions {
-            map.remove(session);
+            slots.remove(session);
+            suspect.remove(session);
         }
         sessions
     };
 
     for session in sessions {
-        // F4: clear the suspect mark with the session (mirrors
-        // `forget_session_slot`; the map clears on forget, evict, resets).
-        clear_session_suspect(session);
         evict_message_operations(session);
     }
 }

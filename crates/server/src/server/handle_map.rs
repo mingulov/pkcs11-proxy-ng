@@ -87,6 +87,15 @@ impl HandleMap {
         self.suspended_virtual_to_backend.get(&virt).copied()
     }
 
+    /// Whether `virt` is proven gone: absent from BOTH the live map and
+    /// the suspended map. The only SHI-safe verdict for a begin-fail arm —
+    /// a live mapping reactivated between the failed begin and the check
+    /// (F2 round-2) is outcome-ambiguous, never handle-invalid. Shared by
+    /// the singular and batch close paths.
+    pub fn is_proven_gone(&self, virt: VirtualHandle) -> bool {
+        self.resolve(virt).is_none() && self.suspended_backend(virt).is_none()
+    }
+
     /// Reactivate exactly the suspended mapping when the raw handle has not
     /// meanwhile been rebound.  A stale close completion cannot steal an ABA
     /// binding from a newer virtual handle.

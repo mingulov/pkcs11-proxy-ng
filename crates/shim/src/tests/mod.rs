@@ -48,6 +48,8 @@ mod resource_limits;
 mod retained_oracle_live;
 #[cfg(not(miri))] // real SoftHSM2 provider + daemon; covered natively
 mod softhsm_gcm;
+#[cfg(not(miri))] // threaded interleave hammer; covered natively
+mod suspect_interleave;
 #[cfg(not(miri))] // shared daemon fixture; covered natively
 mod wait_matrix;
 
