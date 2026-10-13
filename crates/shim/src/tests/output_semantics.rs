@@ -1,7 +1,7 @@
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use pkcs11_proxy_ng::server::context_manager::ContextManager;
+use pkcs11_proxy_ng::server::context_manager::{ClientContextId, ContextManager};
 use pkcs11_proxy_ng::server::grpc_service::Pkcs11ProxyService;
 use pkcs11_proxy_ng::server::handle_map::VirtualHandle;
 use pkcs11_proxy_ng_backend::{
@@ -155,6 +155,30 @@ impl TestDaemon {
 
     fn block_on<F: std::future::Future>(&self, future: F) -> F::Output {
         self.runtime.block_on(future)
+    }
+
+    /// Live daemon context ids (Q02 no-admission proof): sync DashMap
+    /// read, no runtime hop needed.
+    pub(super) fn live_context_ids(&self) -> Vec<ClientContextId> {
+        self.context_manager.context_ids()
+    }
+
+    /// Live daemon context count (Q02 no-admission proof).
+    pub(super) fn live_context_count(&self) -> usize {
+        self.context_manager.context_count()
+    }
+
+    /// Cumulative daemon admissions (Q02 no-admission proof): monotonic,
+    /// so an admit-then-cleanup sequence stays visible after the live
+    /// set returns to baseline.
+    pub(super) fn total_contexts_created(&self) -> u64 {
+        self.context_manager.total_contexts_created()
+    }
+
+    /// Cumulative daemon removals (Q02 no-admission proof): finalize,
+    /// lease eviction, capacity reclaim.
+    pub(super) fn total_contexts_removed(&self) -> u64 {
+        self.context_manager.total_contexts_removed()
     }
 }
 

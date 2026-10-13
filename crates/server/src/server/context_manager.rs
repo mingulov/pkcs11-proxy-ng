@@ -583,6 +583,17 @@ pub struct ContextManager {
     /// per failed carrier close — the carrier runs at most once per
     /// last-holder-out, so this stays tiny.
     carrier_cleanup_ledger: Arc<std::sync::Mutex<Vec<UnresolvedCarrierCleanup>>>,
+    /// Cumulative admission total (Q02 no-admission proof): every
+    /// successful `create_context` insert. Monotonic — unlike the live
+    /// map size, it survives a later removal, so an admit-then-cleanup
+    /// sequence stays visible. Read only by tests; never by admission
+    /// logic, so it cannot change production behavior.
+    total_contexts_created: AtomicU64,
+    /// Cumulative removal total (Q02 no-admission proof): every context
+    /// taken out of the live map (finalize, lease eviction, capacity
+    /// reclaim). Paired with `total_contexts_created`; read only by
+    /// tests.
+    total_contexts_removed: AtomicU64,
 }
 
 /// A transient-carrier session left open by a failed carrier close
@@ -739,6 +750,8 @@ impl ContextManager {
             authz_generation: AtomicU64::new(0),
             session_quota_reservations: Arc::new(std::sync::Mutex::new(HashMap::new())),
             carrier_cleanup_ledger: Arc::new(std::sync::Mutex::new(Vec::new())),
+            total_contexts_created: AtomicU64::new(0),
+            total_contexts_removed: AtomicU64::new(0),
         }
     }
 
@@ -1315,6 +1328,7 @@ impl ContextManager {
                     for slot in ctx.login_state.keys() {
                         self.note_login_released(id, *slot);
                     }
+                    self.total_contexts_removed.fetch_add(1, Ordering::SeqCst);
                 }
             }
             // Still at capacity? Reject.
@@ -1331,6 +1345,7 @@ impl ContextManager {
         let ctx = LogicalClientInstance::new(identity);
         let id = ctx.id.clone();
         self.contexts.insert(id.clone(), ctx);
+        self.total_contexts_created.fetch_add(1, Ordering::SeqCst);
         Ok(id)
     }
 
@@ -1344,6 +1359,19 @@ impl ContextManager {
     // Not `async`: a DashMap read needs no `.await` (L5).
     pub fn context_ids(&self) -> Vec<ClientContextId> {
         self.contexts.iter().map(|entry| entry.key().clone()).collect()
+    }
+
+    /// Cumulative contexts ever admitted (Q02 no-admission proof).
+    /// Monotonic: an admit-then-cleanup sequence still shows here after
+    /// the live map returns to baseline.
+    pub fn total_contexts_created(&self) -> u64 {
+        self.total_contexts_created.load(Ordering::SeqCst)
+    }
+
+    /// Cumulative contexts ever removed from the live map (Q02
+    /// no-admission proof): finalize, lease eviction, capacity reclaim.
+    pub fn total_contexts_removed(&self) -> u64 {
+        self.total_contexts_removed.load(Ordering::SeqCst)
     }
 
     /// Run `f` against the mutable context for `id`, touching its lease.
@@ -1574,6 +1602,7 @@ impl ContextManager {
             for slot in ctx.login_state.keys() {
                 self.note_login_released(id, *slot);
             }
+            self.total_contexts_removed.fetch_add(1, Ordering::SeqCst);
         }
         removed
     }
@@ -1603,6 +1632,7 @@ impl ContextManager {
             .contexts
             .remove_if(id, |_, ctx| ctx.in_flight.load(Ordering::Relaxed) <= own_guards)
         {
+            self.total_contexts_removed.fetch_add(1, Ordering::SeqCst);
             return RemoveIfIdleOutcome::Removed(Box::new(ctx));
         }
         if self.contexts.contains_key(id) {
@@ -2070,6 +2100,7 @@ impl ContextManager {
                 self.contexts.remove_if(id, |_, ctx| self.is_reapable(ctx, now))
             {
                 evicted.push(id.clone());
+                self.total_contexts_removed.fetch_add(1, Ordering::SeqCst);
                 plans.push(self.plan_removed_context_teardown(&mut ctx));
             }
         }

@@ -680,6 +680,17 @@ pub fn client() -> &'static tokio::sync::Mutex<Pkcs11Client> {
     CLIENT.get().expect("BUG: client() called before ensure_client_connected()")
 }
 
+/// Non-panicking client accessor, test-only: `None` until the first
+/// successful `ensure_client_connected`. Tests that must observe a held
+/// server context WITHOUT trusting the init flag (Q02 no-admission
+/// proof) use this instead of [`client`], so an admit-then-cleanup
+/// defect (admit, finalize, clear the flag, return `BAD`) cannot hide
+/// behind a cleared flag.
+#[cfg(test)]
+pub(crate) fn try_client() -> Option<&'static tokio::sync::Mutex<Pkcs11Client>> {
+    CLIENT.get()
+}
+
 /// Bounded exponential backoff with jitter, matching the resilience
 /// contract:
 ///
