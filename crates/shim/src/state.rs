@@ -351,16 +351,20 @@ fn forget_session_slot(h_session: CK_SESSION_HANDLE) {
     suspect.remove(&h_session);
 }
 
-/// Sessions retained by a failed close-all batch whose per-member fate
-/// is unknown (Q01-P2): the aggregate `CK_RV` proves nothing per member,
-/// so each stays usable until one authoritative daemon verdict settles
-/// it (evicted when confirmed dead, cleared when confirmed alive).
+/// Sessions retained by a failed close — singular or close-all batch —
+/// whose fate is unknown (Q01-P2, extended to singular closes in round
+/// 4): the outcome proves nothing terminal (an ambiguous
+/// transport/protocol outcome still has the detached server close in
+/// flight; a decoded backend failure may still settle late), so each
+/// stays usable until one authoritative daemon verdict settles it
+/// (evicted when confirmed dead, cleared when confirmed alive).
 /// Bounded by live session count; entries clear on forget, evict, and
 /// full cache resets alongside the maps they annotate.
 ///
 /// Lock order (F4 round-2): every critical section spanning membership
 /// (`SESSION_SLOTS`) and this map takes `SESSION_SLOTS` FIRST, then
-/// this map — see `mark_slot_sessions_suspect`, `forget_session_slot`,
+/// this map — see `mark_slot_sessions_suspect`,
+/// `mark_session_suspect`, `forget_session_slot`,
 /// `evict_slot_session_caches`, and `clear_all_caches`. Single-map
 /// readers take only their own lock. No path takes this map before
 /// `SESSION_SLOTS`, so the order is deadlock-free.
@@ -384,8 +388,25 @@ pub(crate) fn mark_slot_sessions_suspect(slot_id: CK_SLOT_ID) {
     suspect.extend(sessions);
 }
 
-/// Whether `h_session` was retained by a failed close-all batch and not
-/// yet reconciled against an authoritative daemon verdict.
+/// Mark one session suspect (see the map above) — the singular-close
+/// counterpart of `mark_slot_sessions_suspect` (Q01 round 4). Called
+/// only when a singular close retains its handle: an ambiguous
+/// transport/protocol outcome (deadline, cancel, disconnect) whose
+/// detached server close is still in flight, or a decoded backend
+/// failure that proves nothing terminal. Membership-gated under the
+/// canonical order: unknown handles are never marked, so a retained
+/// outcome on an already-forgotten handle cannot orphan a mark.
+pub(crate) fn mark_session_suspect(h_session: CK_SESSION_HANDLE) {
+    let slots = lock_recovering(&SESSION_SLOTS);
+    let mut suspect = lock_recovering(&SUSPECT_AFTER_BATCH_FAILURE);
+    if slots.contains_key(&h_session) {
+        suspect.insert(h_session);
+    }
+}
+
+/// Whether `h_session` was retained by a failed close (singular or
+/// batch) and not yet reconciled against an authoritative daemon
+/// verdict.
 pub(crate) fn is_session_suspect(h_session: CK_SESSION_HANDLE) -> bool {
     lock_recovering(&SUSPECT_AFTER_BATCH_FAILURE).contains(&h_session)
 }
@@ -427,8 +448,11 @@ pub(crate) fn clear_all_caches() {
 }
 
 /// Forget session ownership and all message-operation discriminators without
-/// touching the disposable output caches.  Close uses this only for terminal
-/// or outcome-ambiguous results; decoded transient failures keep it intact.
+/// touching the disposable output caches.  Close uses this only for settled
+/// outcomes (Q01 round 4): success or decoded backend RVs that prove the
+/// handle dead. Ambiguous transport/protocol outcomes and other decoded
+/// failures retain the state (marked suspect) so the daemon stays
+/// authoritative — never evicted before settlement.
 pub(crate) fn evict_session_authoritative_state(h_session: CK_SESSION_HANDLE) {
     forget_session_slot(h_session);
     evict_message_operations(h_session);
@@ -438,9 +462,11 @@ pub(crate) fn evict_session_authoritative_state(h_session: CK_SESSION_HANDLE) {
 /// opened on one slot.
 ///
 /// Called from `c_close_all_sessions` only for settled outcomes (Q01):
-/// success, unwitnessed transport/protocol failures, or backend RVs that
-/// prove no server-side session can exist. Decoded backend failures that
-/// leave survivors possible keep the state so the daemon stays authoritative.
+/// success, or backend RVs that prove no server-side session can exist.
+/// Ambiguous transport/protocol outcomes (Q01 round 4) and decoded
+/// backend failures that leave survivors possible keep the state (marked
+/// suspect) so the daemon stays authoritative — never evicted before
+/// settlement.
 pub(crate) fn evict_slot_session_caches(slot_id: CK_SLOT_ID) {
     let sessions = {
         // F4 round-2: remove the memberships and their suspect marks

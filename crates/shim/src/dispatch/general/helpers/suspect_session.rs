@@ -1,12 +1,17 @@
-//! Lazy per-member reconciliation after a failed close-all batch (Q01-P2).
+//! Lazy per-member reconciliation after a failed close (Q01-P2, extended
+//! to singular closes in round 4).
 //!
-//! The batch answers one aggregate `CK_RV`, which proves nothing per
-//! member: some members may have closed while others survived. Carrying
-//! per-member outcomes over the wire would need a protocol change
+//! A retained close outcome proves nothing terminal: the batch answers
+//! one aggregate `CK_RV`, which proves nothing per member (some members
+//! may have closed while others survived), and an ambiguous
+//! transport/protocol outcome — singular or batch — still has the
+//! detached server close in flight. Carrying per-member outcomes over
+//! the wire would need a protocol change
 //! (`CloseAllSessionsResponse` carries only `ck_rv`); instead the shim
-//! marks the retained slot sessions suspect
-//! ([`crate::state::mark_slot_sessions_suspect`]) and reconciles each
-//! one lazily against the next authoritative daemon verdict:
+//! marks the retained sessions suspect
+//! ([`crate::state::mark_slot_sessions_suspect`] /
+//! [`crate::state::mark_session_suspect`]) and reconciles each one
+//! lazily against the next authoritative daemon verdict:
 //!
 //! * a locally-failed mechanism validation probes the daemon once, so a
 //!   dead-but-retained member answers `SESSION_HANDLE_INVALID` (native
@@ -47,9 +52,10 @@ pub(crate) fn probe_session_alive(h_session: CK_SESSION_HANDLE) -> Option<bool> 
 }
 
 /// Settle a locally-failed mechanism validation on a suspect session:
-/// when the session may have died in a retained close-all batch, one
-/// authoritative probe restores native error precedence. Non-suspect
-/// sessions return the local verdict untouched (no extra RPC).
+/// when the session may have died in a retained close (singular or
+/// batch), one authoritative probe restores native error precedence.
+/// Non-suspect sessions return the local verdict untouched (no extra
+/// RPC).
 pub(crate) fn resolve_suspect_mech_error(h_session: CK_SESSION_HANDLE, mech_error: CkRv) -> CkRv {
     if !state::is_session_suspect(h_session) {
         return mech_error;
