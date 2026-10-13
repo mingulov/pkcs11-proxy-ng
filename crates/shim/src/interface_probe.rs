@@ -7,7 +7,7 @@
 //! get the static (all-non-null) function lists; post-`C_Initialize`
 //! callers get the patched versions.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, RwLock};
 
 use cryptoki_sys::*;
@@ -73,15 +73,30 @@ static PROBE_INSTALL_LOCK: Mutex<()> = Mutex::new(());
 /// back to 8 bytes (D9).
 static BACKEND_ULONG_SIZE: AtomicUsize = AtomicUsize::new(0);
 static BACKEND_ATTRIBUTE_STRIDE: AtomicUsize = AtomicUsize::new(0);
-static POINTER_SAFE_MESSAGE_PARAMETERS: AtomicBool = AtomicBool::new(false);
-/// Set when the cached message-parameter qualification was dropped by a
-/// transport failure and must be re-qualified from a fresh daemon
-/// advertisement before message calls may proceed (Q01 round 5). A fresh
-/// probe install clears it (the advertisement wins); a genuine lack in a
-/// fresh advertisement clears it too (fast fail-closed, no per-call RPC).
-/// A failed re-qualification leaves it set so the next message call
-/// retries — recovery is never silently abandoned.
-static POINTER_SAFE_MESSAGE_PARAMETERS_DIRTY: AtomicBool = AtomicBool::new(false);
+/// Message-parameter capability word (Q01 round 6): a single atomic so
+/// publication and invalidation can never tear into `cap=false/dirty=false`
+/// (which skipped re-qualification indefinitely and FNS-blocked surviving
+/// message operations). `ABSENT` is genuine lack (or pre-probe / fresh
+/// lifetime): fail closed with no per-call RPC. `QUALIFIED` is a live
+/// daemon acknowledgement. `DIRTY` is a qualification dropped by transport
+/// loss, re-qualified from a fresh daemon advertisement before message
+/// calls may proceed; a failed re-qualification leaves it set so the next
+/// message call retries — recovery is never silently abandoned.
+const MESSAGE_CAPABILITY_ABSENT: u8 = 0;
+const MESSAGE_CAPABILITY_QUALIFIED: u8 = 1;
+const MESSAGE_CAPABILITY_DIRTY: u8 = 2;
+static MESSAGE_CAPABILITY: AtomicU8 = AtomicU8::new(MESSAGE_CAPABILITY_ABSENT);
+/// Bumped on every invalidation (and fresh-lifetime reset). Probe-reply
+/// installs carry the epoch sampled immediately before their RPC and are
+/// rejected when an invalidation landed after the sample, so a superseded
+/// reply can never erase a newer dirty mark. Installs never bump it.
+static MESSAGE_CAPABILITY_EPOCH: AtomicU64 = AtomicU64::new(0);
+/// Serializes capability writers so an install's epoch check and state
+/// store are atomic with respect to a concurrent invalidation's epoch
+/// bump and state store. Readers use the single-word atomic load and
+/// never take this lock; holders never RPC, await, or take another
+/// lock, so the transport hook cannot deadlock on it.
+static MESSAGE_CAPABILITY_WRITE_LOCK: Mutex<()> = Mutex::new(());
 /// Daemon-advertised `mechanism_parameter_transport_version` discovery
 /// capability (R5/F1; S2 §3 monotonic capabilities). `0` = not yet probed,
 /// or a daemon predating the advertisement (legacy encoding); readers
@@ -96,7 +111,7 @@ static MECHANISM_PARAMETER_TRANSPORT_VERSION: AtomicU32 = AtomicU32::new(0);
 /// dropped by a transport failure is re-qualified from a fresh daemon
 /// advertisement rather than failing locally for the rest of the lifetime.
 pub fn pointer_safe_message_parameters() -> bool {
-    POINTER_SAFE_MESSAGE_PARAMETERS.load(Ordering::Acquire)
+    MESSAGE_CAPABILITY.load(Ordering::Acquire) == MESSAGE_CAPABILITY_QUALIFIED
 }
 
 /// Whether message calls may proceed: the cached qualification, re-qualified
@@ -110,8 +125,9 @@ pub(crate) fn qualified_pointer_safe_message_parameters() -> bool {
     if pointer_safe_message_parameters() {
         return true;
     }
-    if !POINTER_SAFE_MESSAGE_PARAMETERS_DIRTY.load(Ordering::Acquire) {
+    if MESSAGE_CAPABILITY.load(Ordering::Acquire) != MESSAGE_CAPABILITY_DIRTY {
         // Genuine lack (or pre-probe): fail closed without network.
+        // Unknown words fail closed too — never proceed unqualified.
         return false;
     }
     requalify_pointer_safe_message_parameters()
@@ -134,6 +150,9 @@ fn requalify_pointer_safe_message_parameters() -> bool {
     if state::ensure_client_connected().is_err() {
         return false;
     }
+    // Sample after reconnect: only an invalidation that lands after the
+    // advertisement RPC starts supersedes this reply.
+    let pre_rpc_epoch = sample_message_capability_epoch();
     let probe = state::runtime().block_on(async {
         // Same clone-before-RPC shape as `probe_backend`: the guard is
         // dropped before the await so a slow probe never serializes
@@ -143,26 +162,65 @@ fn requalify_pointer_safe_message_parameters() -> bool {
     });
     match probe {
         Ok(probe) => {
-            record_pointer_safe_message_parameters(probe.pointer_safe_message_parameters);
-            probe.pointer_safe_message_parameters
+            // A reply superseded by an invalidation is rejected: the
+            // newer dirty mark stays set and the next message call
+            // retries from a fresher advertisement.
+            if install_pointer_safe_message_parameters(
+                probe.pointer_safe_message_parameters,
+                pre_rpc_epoch,
+            ) {
+                probe.pointer_safe_message_parameters
+            } else {
+                false
+            }
         }
         Err(_) => false,
     }
 }
 
+/// Epoch sampled immediately before a probe-reply RPC; the reply
+/// installs only if no invalidation landed after the sample.
+fn sample_message_capability_epoch() -> u64 {
+    MESSAGE_CAPABILITY_EPOCH.load(Ordering::Acquire)
+}
+
 fn record_pointer_safe_message_parameters(advertised: bool) {
-    POINTER_SAFE_MESSAGE_PARAMETERS.store(advertised, Ordering::Release);
+    let _writes = MESSAGE_CAPABILITY_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // A fresh advertisement is authoritative either way: an installed
     // qualification needs no re-validation, and a genuine lack fails
     // closed without a per-call re-probe until the next transport loss.
-    POINTER_SAFE_MESSAGE_PARAMETERS_DIRTY.store(false, Ordering::Release);
+    // Single atomic store: publication can never tear against a
+    // concurrent invalidation into cap=false/dirty=false.
+    MESSAGE_CAPABILITY.store(
+        if advertised { MESSAGE_CAPABILITY_QUALIFIED } else { MESSAGE_CAPABILITY_ABSENT },
+        Ordering::Release,
+    );
+}
+
+/// Install a probe reply sampled at `pre_rpc_epoch`; rejects the reply
+/// (returns false, newer dirty mark preserved) when an invalidation
+/// landed after the sample, so a superseded reply never erases it. A
+/// rejection leaves recovery to the next message call, which retries
+/// from a fresher advertisement.
+fn install_pointer_safe_message_parameters(advertised: bool, pre_rpc_epoch: u64) -> bool {
+    let _writes = MESSAGE_CAPABILITY_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if MESSAGE_CAPABILITY_EPOCH.load(Ordering::Acquire) != pre_rpc_epoch {
+        return false;
+    }
+    MESSAGE_CAPABILITY.store(
+        if advertised { MESSAGE_CAPABILITY_QUALIFIED } else { MESSAGE_CAPABILITY_ABSENT },
+        Ordering::Release,
+    );
+    true
 }
 
 fn clear_pointer_safe_message_parameters() {
-    POINTER_SAFE_MESSAGE_PARAMETERS.store(false, Ordering::Release);
+    let _writes = MESSAGE_CAPABILITY_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // A cleared qualification must be re-qualified from a fresh
     // advertisement before message calls may proceed — never reused.
-    POINTER_SAFE_MESSAGE_PARAMETERS_DIRTY.store(true, Ordering::Release);
+    // The epoch bump supersedes any probe reply sampled before it.
+    MESSAGE_CAPABILITY_EPOCH.fetch_add(1, Ordering::Release);
+    MESSAGE_CAPABILITY.store(MESSAGE_CAPABILITY_DIRTY, Ordering::Release);
 }
 
 pub(crate) fn invalidate_pointer_safe_message_parameters() {
@@ -176,8 +234,21 @@ pub(crate) fn invalidate_pointer_safe_message_parameters() {
 /// discovery in `probe_backend`.
 #[cfg(test)]
 pub(crate) fn revoke_pointer_safe_message_parameters_for_tests() {
-    POINTER_SAFE_MESSAGE_PARAMETERS.store(false, Ordering::Release);
-    POINTER_SAFE_MESSAGE_PARAMETERS_DIRTY.store(false, Ordering::Release);
+    record_pointer_safe_message_parameters(false);
+}
+
+/// Test-only snapshot of the cached pair as `(capability, dirty)`
+/// (Q01 round 6): the race regression below pins that a
+/// publication/invalidation race never settles on — or observes —
+/// the torn `(false, false)` pair. Pure observer; production logic
+/// untouched.
+#[cfg(test)]
+fn capability_snapshot_for_tests() -> (bool, bool) {
+    match MESSAGE_CAPABILITY.load(Ordering::Acquire) {
+        MESSAGE_CAPABILITY_QUALIFIED => (true, false),
+        MESSAGE_CAPABILITY_DIRTY => (false, true),
+        _ => (false, false),
+    }
 }
 
 /// Snapshot of the daemon-advertised `mechanism_parameter_transport_version`
@@ -1102,15 +1173,19 @@ pub fn ensure_probed() -> Result<(), String> {
         }
     }
     // Slow path: probe and store.
+    let pre_rpc_epoch = sample_message_capability_epoch();
     let st = probe_backend(&install).map_err(|e| e.to_string())?;
     let mut guard = INTERFACE_STATE.write().unwrap_or_else(|e| e.into_inner());
     if guard.is_none() {
         *guard = Some(leak_fixed_state(st));
     }
     // A losing concurrent probe publishes the capability of the state that
-    // actually won installation, never its own stale response.
-    record_pointer_safe_message_parameters(
+    // actually won installation, never its own stale response. A reply
+    // superseded by an invalidation is rejected instead: the newer dirty
+    // mark stays set and the next message call re-qualifies.
+    install_pointer_safe_message_parameters(
         guard.as_ref().is_some_and(|state| state.pointer_safe_message_parameters),
+        pre_rpc_epoch,
     );
     Ok(())
 }
@@ -1132,12 +1207,16 @@ pub fn reprobe() -> Result<(), String> {
     clear_mechanism_parameter_transport_version();
     // A re-probe always dials fresh: drop any cached pre-init failure (W1-C7-01).
     state::clear_pre_init_connect_failure();
+    // Sample after the pre-clear: only an invalidation that lands after
+    // this probe's RPC starts supersedes its reply.
+    let pre_rpc_epoch = sample_message_capability_epoch();
     match probe_backend(&install) {
         Ok(st) => {
             let mut guard = INTERFACE_STATE.write().unwrap_or_else(|e| e.into_inner());
             *guard = Some(leak_fixed_state(st));
-            record_pointer_safe_message_parameters(
+            install_pointer_safe_message_parameters(
                 guard.as_ref().is_some_and(|state| state.pointer_safe_message_parameters),
+                pre_rpc_epoch,
             );
             Ok(())
         }
@@ -1164,7 +1243,9 @@ pub fn clear_cache() {
     clear_pointer_safe_message_parameters();
     // A cleared cache is a fresh lifetime: drop the re-qualification mark
     // with the qualification itself — the next C_Initialize re-probes.
-    POINTER_SAFE_MESSAGE_PARAMETERS_DIRTY.store(false, Ordering::Release);
+    // The pre-clear's epoch bump already supersedes any probe reply
+    // sampled before it.
+    record_pointer_safe_message_parameters(false);
     // Cache-clear (e.g. C_Finalize) also drops the dial-failure cache (W1-C7-01).
     state::clear_pre_init_connect_failure();
     let mut guard = INTERFACE_STATE.write().unwrap_or_else(|e| e.into_inner());
@@ -1649,6 +1730,124 @@ mod backend_abi_tests {
         record_pointer_safe_message_parameters(true);
         clear_pointer_safe_message_parameters();
         assert!(!pointer_safe_message_parameters());
+    }
+
+    /// Q01 round 6 (M1): racing publication against invalidation must
+    /// never tear the capability pair into `(false, false)` — that
+    /// state skips re-qualification indefinitely and FNS-blocks
+    /// surviving message operations. Barrier-started
+    /// publisher/invalidator trios force the interleave every
+    /// iteration (no sleeps); each round must settle on a clean
+    /// publication win `(true, false)` or invalidation win
+    /// `(false, true)`, and no mid-race snapshot may observe the
+    /// torn pair either. Fails against the pre-fix pair of
+    /// independent stores; passes structurally once publication and
+    /// invalidation are single atomic transitions.
+    #[test]
+    #[cfg(not(miri))] // threaded interleave hammer; covered natively
+    fn concurrent_publication_and_invalidation_never_torn() {
+        use std::sync::Barrier;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+
+        use super::capability_snapshot_for_tests;
+
+        let _guard = crate::tests::shim_state_test_guard();
+        // Start qualified so every snapshot reflects a race outcome —
+        // never the legitimate pre-race initial state.
+        record_pointer_safe_message_parameters(true);
+        const ITERATIONS: usize = 3000;
+        let barrier = Barrier::new(3);
+        let writers_done = AtomicUsize::new(0);
+        // A mid-scope panic would strand the writers at the barrier and
+        // hang the join, so rounds record their verdict here and the
+        // test asserts once the scope has joined.
+        let torn = AtomicBool::new(false);
+        let witness = std::sync::Mutex::new((false, false, 0usize, false));
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for _ in 0..ITERATIONS {
+                    barrier.wait();
+                    record_pointer_safe_message_parameters(true);
+                    writers_done.fetch_add(1, AtomicOrdering::Release);
+                    barrier.wait();
+                }
+            });
+            scope.spawn(|| {
+                for _ in 0..ITERATIONS {
+                    barrier.wait();
+                    clear_pointer_safe_message_parameters();
+                    writers_done.fetch_add(1, AtomicOrdering::Release);
+                    barrier.wait();
+                }
+            });
+            for round in 0..ITERATIONS {
+                writers_done.store(0, AtomicOrdering::Relaxed);
+                // Rendezvous: both writers race from here.
+                barrier.wait();
+                while writers_done.load(AtomicOrdering::Acquire) < 2 {
+                    let (capability, dirty) = capability_snapshot_for_tests();
+                    if !capability && !dirty {
+                        torn.store(true, AtomicOrdering::Relaxed);
+                        *witness.lock().unwrap_or_else(|e| e.into_inner()) =
+                            (capability, dirty, round, true);
+                    }
+                }
+                barrier.wait();
+                let (capability, dirty) = capability_snapshot_for_tests();
+                if (capability && !dirty) || (!capability && dirty) {
+                    continue;
+                }
+                torn.store(true, AtomicOrdering::Relaxed);
+                *witness.lock().unwrap_or_else(|e| e.into_inner()) =
+                    (capability, dirty, round, false);
+            }
+        });
+        let (capability, dirty, round, mid_race) =
+            *witness.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            !torn.load(AtomicOrdering::Relaxed),
+            "torn capability pair after publication/invalidation race: \
+             cap={capability}/dirty={dirty} at round {round} \
+             (mid_race={mid_race}); want a clean publication (true/false) \
+             or invalidation (false/true) win — cap=false/dirty=false \
+             skips re-qualification indefinitely",
+        );
+        // Restore the qualified default for later tests.
+        record_pointer_safe_message_parameters(true);
+    }
+
+    /// Q01 round 6 (M1): a probe reply sampled before an invalidation
+    /// must not erase the newer dirty mark when it arrives late.
+    /// GREEN-only by construction: it pins the epoch-guarded install
+    /// API introduced with the fix, which has no pre-fix counterpart
+    /// (the race test above is the pre/post pair for the interleave).
+    #[test]
+    fn superseded_probe_reply_cannot_clear_newer_invalidation() {
+        use super::{
+            capability_snapshot_for_tests, install_pointer_safe_message_parameters,
+            sample_message_capability_epoch,
+        };
+
+        let _guard = crate::tests::shim_state_test_guard();
+        record_pointer_safe_message_parameters(true);
+        // A re-qualification samples the epoch; a transport failure
+        // invalidates before the reply arrives.
+        let stale_epoch = sample_message_capability_epoch();
+        clear_pointer_safe_message_parameters();
+        // The superseded reply is rejected: still fail-closed, dirty kept.
+        assert!(!install_pointer_safe_message_parameters(true, stale_epoch));
+        assert!(!pointer_safe_message_parameters());
+        assert_eq!(capability_snapshot_for_tests(), (false, true));
+        // A reply sampled after the invalidation installs normally.
+        let fresh_epoch = sample_message_capability_epoch();
+        assert!(install_pointer_safe_message_parameters(true, fresh_epoch));
+        assert!(pointer_safe_message_parameters());
+        // A genuine lack installs fail-closed without the dirty mark.
+        let lack_epoch = sample_message_capability_epoch();
+        assert!(install_pointer_safe_message_parameters(false, lack_epoch));
+        assert_eq!(capability_snapshot_for_tests(), (false, false));
+        // Restore the qualified default for later tests.
+        record_pointer_safe_message_parameters(true);
     }
 
     #[test]

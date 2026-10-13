@@ -51,7 +51,13 @@ pub unsafe extern "C" fn c_session_cancel(h_session: CK_SESSION_HANDLE, flags: C
         }
         let message_flags =
             CKF_MESSAGE_ENCRYPT | CKF_MESSAGE_DECRYPT | CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY;
-        if flags & message_flags != 0 && !crate::interface_probe::pointer_safe_message_parameters()
+        // The qualified gate (not the raw cache): after a transport
+        // failure the qualification is re-qualified from a fresh daemon
+        // advertisement here — before the op-state locks, since
+        // re-qualification performs RPC — while a genuine lack still
+        // fails closed locally (Q01 round 6).
+        if flags & message_flags != 0
+            && !crate::interface_probe::qualified_pointer_safe_message_parameters()
         {
             return rv_err(CkRv::FUNCTION_NOT_SUPPORTED);
         }
