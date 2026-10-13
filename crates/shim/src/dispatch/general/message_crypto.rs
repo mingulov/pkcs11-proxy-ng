@@ -18,7 +18,11 @@ type MessageInitRead = (
 fn pointer_safe_message_capability_error() -> Option<CK_RV> {
     if !state::is_initialized() {
         Some(rv_err(CkRv::CRYPTOKI_NOT_INITIALIZED))
-    } else if !crate::interface_probe::pointer_safe_message_parameters() {
+    } else if !crate::interface_probe::qualified_pointer_safe_message_parameters() {
+        // The gate stays first (before pointer reads, op state, and RPC):
+        // a qualification dropped by transport loss is re-qualified from a
+        // fresh daemon advertisement inside the check, while a genuine lack
+        // fails closed locally with no network (Q01 round 5).
         Some(rv_err(CkRv::FUNCTION_NOT_SUPPORTED))
     } else {
         None

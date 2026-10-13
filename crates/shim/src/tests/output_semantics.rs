@@ -14,9 +14,9 @@ use pkcs11_proxy_ng_proto::convert::message_params::MessageParameterShape;
 use pkcs11_proxy_ng_types::{
     CkAttributeQuery, CkAttributeQueryResult, CkAttributeType, CkAttributeValue, CkInBuf,
     CkMechanismParams, CkMechanismType, CkObjectHandle, CkOutputBufferResult, CkOutputBufferSpec,
-    CkParameterRoundtripResult, CkParameterRoundtripSpec, CkRv, CkSessionFlags, CkSessionHandle,
-    CkSlotId, GcmParams, InterfaceCapabilities, InterfaceInfo, ParameterOutputFunction,
-    PointerBytes, encode_native_ulong,
+    CkParameterRoundtripResult, CkParameterRoundtripSpec, CkRv, CkSessionFlags, CkSlotId,
+    GcmParams, InterfaceCapabilities, InterfaceInfo, ParameterOutputFunction, PointerBytes,
+    encode_native_ulong,
 };
 use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
@@ -1300,25 +1300,6 @@ fn invalid_encrypt_init_rv(session: CK_SESSION_HANDLE) -> CK_RV {
     unsafe { dispatch::general::c_encrypt_init(session, &mut bad_mechanism, CK_INVALID_HANDLE) }
 }
 
-/// Resolve the backend session behind the shim's virtual `session`
-/// (mirrors `backend_object_handle`): the shared daemon holds exactly
-/// one shim context under the state guard.
-fn backend_session_handle(daemon: &TestDaemon, session: CK_SESSION_HANDLE) -> CkSessionHandle {
-    daemon.block_on(async {
-        let context_ids = daemon.context_manager.context_ids();
-        assert_eq!(context_ids.len(), 1, "expected one active shim context");
-        let backend_handle = daemon
-            .context_manager
-            .get_context(&context_ids[0], |ctx| {
-                ctx.session_handles.resolve(VirtualHandle(session as _))
-            })
-            .await
-            .flatten()
-            .expect("backend session handle");
-        CkSessionHandle(backend_handle.0)
-    })
-}
-
 #[test]
 fn message_encrypt_decrypt_final_require_and_clear_only_their_active_shape() {
     let _guard = shim_state_test_guard();
@@ -1709,8 +1690,8 @@ fn general_error_close_preserves_authoritative_message_shapes() {
     // session alive and the backend untouched — must NOT evict authoritative
     // state (evict_authoritative flips true→false vs the old DEVICE_ERROR
     // refusal). Contrast device_error_close_... (ambiguous → evict) and
-    // panicked_close_... (transport-ambiguous GENERAL_ERROR → evict, via the
-    // origin != Backend arm).
+    // panicked_close_... (transport-ambiguous GENERAL_ERROR → retain +
+    // suspect until settlement, via the origin != Backend arm).
     let _guard = shim_state_test_guard();
     let shim = ShimSession::new();
     let session = shim.open_additional_session();
@@ -1913,7 +1894,11 @@ fn pointer_safe_message_every_entrypoint_requires_capability_before_pointer_stat
         daemon.backend.message_lifecycle_call_count(),
         daemon.backend.message_parameter_call_count(),
     );
-    crate::interface_probe::invalidate_pointer_safe_message_parameters();
+    // Genuine lack (Q01 round 5): a fresh advertisement without the
+    // capability fails closed with no re-qualification RPC. Transport loss
+    // (`invalidate_...`) instead re-qualifies on the next message call —
+    // see `timed_out_close_requalifies_message_capability_for_surviving_operation`.
+    crate::interface_probe::revoke_pointer_safe_message_parameters_for_tests();
 
     macro_rules! assert_capability_rejected {
         ($name:literal, $call:expr) => {
@@ -5673,11 +5658,14 @@ fn timed_out_close_all_retains_members_until_late_settlement() {
     }
 }
 
-// Q01 round 4 (M2): a retained singular decoded FUNCTION_FAILED marks
-// the handle suspect (batch parity); when the server session dies late
-// without the shim's knowledge, an invalid Init reports SHI (native
-// error precedence via the suspect probe), while a live member keeps
-// the mechanism error with no probe eviction.
+// Q01 round 5 (m1): the exact late-settlement sequence — a retained
+// singular decoded FUNCTION_FAILED marks the handle suspect (batch
+// parity); a retry close under a client deadline then answers transport
+// FUNCTION_FAILED and retains, and its late OK settlement removes the
+// server mapping, so an invalid Init reports SHI (native error precedence
+// via the suspect probe with member-only eviction), while a live member
+// keeps the mechanism error with no probe eviction. No manual
+// native-handle kill: the mapping removal is a real detached settlement.
 #[test]
 fn singular_decoded_failure_marks_suspect_and_late_death_reports_handle_invalid() {
     let _guard = shim_state_test_guard();
@@ -5712,11 +5700,34 @@ fn singular_decoded_failure_marks_suspect_and_late_death_reports_handle_invalid(
         "a decoded failure must preserve authoritative shape state",
     );
 
-    // Late death: the server-side session dies without the shim's
-    // knowledge (mirrors a late-settling close removing the mapping —
-    // the mapping still resolves, the backend handle is gone).
-    let backend_handle = backend_session_handle(daemon, session);
-    daemon.backend.close_session(backend_handle).expect("kill the backend session");
+    // Late death by real settlement: a retry close under a client
+    // deadline (DeadlineExceeded -> FUNCTION_FAILED/Transport) retains +
+    // suspects instead of evicting; the detached server close settles OK
+    // late and removes the server mapping.
+    daemon.backend.set_close_session_delay(Duration::from_millis(800));
+    set_shim_rpc_timeout(Duration::from_millis(200));
+    let retry_rv = unsafe { dispatch::general::c_close_session(session) };
+    daemon.backend.clear_close_session_delay();
+    set_shim_rpc_timeout(DEFAULT_RPC_TIMEOUT);
+
+    assert_eq!(
+        retry_rv, CKR_FUNCTION_FAILED as CK_RV,
+        "a deadline close must answer transport FUNCTION_FAILED"
+    );
+    assert!(state::is_session_known(session), "a deadline close must retain the handle");
+    assert!(state::is_session_suspect(session), "a deadline close must mark the handle suspect");
+    assert_eq!(
+        test_message_shape(session, state::MessageOperation::Encrypt),
+        Some(MessageParameterShape::Gcm),
+        "a deadline close must preserve authoritative shape state",
+    );
+
+    let settled_rv =
+        poll_session_info_rv(session, CKR_SESSION_HANDLE_INVALID as CK_RV, Duration::from_secs(10));
+    assert_eq!(
+        settled_rv, CKR_SESSION_HANDLE_INVALID as CK_RV,
+        "the late OK settlement must remove the server mapping"
+    );
 
     // Invalid Init on the late-dead member: the session error wins and
     // the member reconciles away (member-only eviction).
@@ -5740,6 +5751,148 @@ fn singular_decoded_failure_marks_suspect_and_late_death_reports_handle_invalid(
         "a live member must keep the mechanism error"
     );
     assert!(state::is_session_known(control), "the live control must stay known");
+}
+
+// Q01 round 5 (M): message-capability recovery — a client-deadline
+// singular close (DeadlineExceeded -> FUNCTION_FAILED/Transport) fails
+// the cached message qualification closed via the transport hook, but the
+// next message call re-qualifies from a fresh daemon advertisement
+// instead of failing locally, so a surviving in-flight message op
+// continues end to end after transient settlement reactivates the
+// member. Without the recovery the continuation answers local
+// FUNCTION_NOT_SUPPORTED for the rest of the initialized lifetime.
+#[test]
+fn timed_out_close_requalifies_message_capability_for_surviving_operation() {
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let session = shim.open_additional_session();
+    let daemon = TestDaemon::shared();
+
+    // An in-flight GCM message op (shape recorded, daemon-side op live).
+    let key = create_object(session);
+    let mut iv = [0x11_u8; 12];
+    let mut tag = [0_u8; 16];
+    let mut parameter = CK_GCM_MESSAGE_PARAMS {
+        pIv: iv.as_mut_ptr(),
+        ulIvLen: iv.len() as CK_ULONG,
+        ulIvFixedBits: 96,
+        ivGenerator: CKG_NO_GENERATE,
+        pTag: tag.as_mut_ptr(),
+        ulTagBits: 128,
+    };
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_AES_GCM,
+        pParameter: (&mut parameter as *mut CK_GCM_MESSAGE_PARAMS).cast(),
+        ulParameterLen: std::mem::size_of_val(&parameter) as CK_ULONG,
+    };
+    assert_eq!(
+        unsafe { dispatch::general::c_message_encrypt_init(session, &mut mechanism, key) },
+        CKR_OK as CK_RV,
+        "setup: the message init must install the in-flight op"
+    );
+    assert_eq!(
+        test_message_shape(session, state::MessageOperation::Encrypt),
+        Some(MessageParameterShape::Gcm),
+        "setup: the message shape must be recorded"
+    );
+
+    // Deadline close with transient late settlement (alive-twin pattern).
+    daemon.backend.set_close_session_delay(Duration::from_millis(800));
+    daemon.backend.inject_close_error(CkRv::FUNCTION_FAILED);
+    set_shim_rpc_timeout(Duration::from_millis(200));
+    let rv = unsafe { dispatch::general::c_close_session(session) };
+    daemon.backend.clear_close_session_delay();
+    set_shim_rpc_timeout(DEFAULT_RPC_TIMEOUT);
+    // The injected error stays armed: the late completion must observe
+    // the transient failure (cleared right after the poll below).
+
+    assert_eq!(
+        rv, CKR_FUNCTION_FAILED as CK_RV,
+        "a deadline close must answer transport FUNCTION_FAILED"
+    );
+    assert!(state::is_session_known(session), "a deadline close must retain the handle");
+    assert!(state::is_session_suspect(session), "a deadline close must mark the handle suspect");
+    assert_eq!(
+        test_message_shape(session, state::MessageOperation::Encrypt),
+        Some(MessageParameterShape::Gcm),
+        "a deadline close must preserve authoritative shape state",
+    );
+    assert!(
+        !crate::interface_probe::pointer_safe_message_parameters(),
+        "a transport failure must fail the cached message qualification closed"
+    );
+
+    // Late transient settlement reactivates the mapping (polled, then
+    // the injection clears before any assert can leak it).
+    let alive_rv = poll_session_info_rv(session, CKR_OK as CK_RV, Duration::from_secs(10));
+    daemon.backend.clear_close_error();
+    assert_eq!(
+        alive_rv, CKR_OK as CK_RV,
+        "the late transient settlement must reactivate the member"
+    );
+
+    // Continuation: a real message call must re-qualify the capability
+    // from the fresh advertisement and reach the daemon — never answer
+    // local FUNCTION_NOT_SUPPORTED for the surviving native operation.
+    let data_before = daemon.backend.data_op_call_count();
+    let input = [0x22_u8; 8];
+    let mut output = [0u8; 32];
+    let mut output_len = output.len() as CK_ULONG;
+    let cont_rv = unsafe {
+        dispatch::general::c_encrypt_message(
+            session,
+            (&mut parameter as *mut CK_GCM_MESSAGE_PARAMS).cast(),
+            std::mem::size_of_val(&parameter) as CK_ULONG,
+            std::ptr::null_mut(),
+            0,
+            input.as_ptr() as CK_BYTE_PTR,
+            input.len() as CK_ULONG,
+            output.as_mut_ptr(),
+            &mut output_len,
+        )
+    };
+    assert_eq!(
+        cont_rv, CKR_OK as CK_RV,
+        "the survivor's in-flight message op must continue after timeout+reconnect"
+    );
+    assert!(
+        daemon.backend.data_op_call_count() > data_before,
+        "the continuation must reach the backend, not fail locally"
+    );
+    assert!(state::is_session_known(session), "an alive verdict must keep the handle");
+    assert!(
+        crate::interface_probe::pointer_safe_message_parameters(),
+        "a successful continuation must leave the re-qualified capability installed"
+    );
+
+    // The restored qualification persists: a second continuation runs
+    // without re-qualifying.
+    let mut output2 = [0u8; 32];
+    let mut output2_len = output2.len() as CK_ULONG;
+    let cont2_rv = unsafe {
+        dispatch::general::c_encrypt_message(
+            session,
+            (&mut parameter as *mut CK_GCM_MESSAGE_PARAMS).cast(),
+            std::mem::size_of_val(&parameter) as CK_ULONG,
+            std::ptr::null_mut(),
+            0,
+            input.as_ptr() as CK_BYTE_PTR,
+            input.len() as CK_ULONG,
+            output2.as_mut_ptr(),
+            &mut output2_len,
+        )
+    };
+    assert_eq!(
+        cont2_rv, CKR_OK as CK_RV,
+        "the re-qualified capability must persist for follow-up message calls"
+    );
+
+    // Cleanup closes terminally now that the late completion landed.
+    assert_eq!(
+        unsafe { dispatch::general::c_close_session(session) },
+        CKR_OK as CK_RV,
+        "a retry after transient settlement must close"
+    );
 }
 
 // Q01 maintained oracle: a decoded transient close-all failure must keep
