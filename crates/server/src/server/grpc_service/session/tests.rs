@@ -358,13 +358,13 @@ async fn close_all_sessions_clears_logical_login_state_for_slot() {
 }
 
 #[tokio::test]
-async fn close_all_sessions_releases_backend_login_before_close() {
-    // m-5: an ordinary logged-in close-all must attempt the last-holder
-    // backend logout BEFORE the batch close, using one of the closing
-    // sessions as the preferred carrier (ADR-0002 §7: "the logout rides a
-    // still-open session ... and runs before that context's backend
-    // sessions close"). Pre-fix the logout ran after the closes, found no
-    // carrier single-tenant, WARNed, and left the backend logged in.
+async fn close_all_sessions_releases_backend_login_on_success() {
+    // Q01 (was m-5): an ordinary logged-in close-all must release the
+    // backend login with the daemon's own logout once the batch settles —
+    // after the closes, never before (a pre-close logout would strand the
+    // native login when the batch then fails transiently). With no
+    // surviving session to carry it, the logout rides a transient carrier
+    // session instead of assuming the token auto-logged-out.
     let mock = Arc::new(MockBackend::default_test());
     mock.initialize().unwrap();
     let backend: Arc<dyn Pkcs11Backend> = mock.clone();
@@ -405,18 +405,18 @@ async fn close_all_sessions_releases_backend_login_before_close() {
     assert_eq!(
         mock.logout(spare),
         Err(CkRv::USER_NOT_LOGGED_IN),
-        "close-all must release the backend login via its own pre-close carrier"
+        "close-all must release the backend login via its own post-settle logout"
     );
 }
 
 #[tokio::test]
-async fn close_session_releases_backend_login_before_close() {
-    // T5F (singular-path analogue of m-5): an ordinary logged-in singular
-    // close of the last own session must attempt the last-holder backend
-    // logout BEFORE the backend close, using the closing session as the
-    // preferred carrier (ADR-0002 §7: "the logout rides a still-open
-    // session"). Pre-fix the logout ran after the close, found no carrier
-    // single-tenant, WARNed, and left the backend logged in.
+async fn close_session_releases_backend_login_on_success() {
+    // Q01 (was T5F, singular-path analogue of m-5): an ordinary logged-in
+    // singular close of the last own session must release the backend
+    // login with the daemon's own logout once the close settles — after,
+    // never before (a pre-close logout would strand the native login when
+    // the close then fails transiently). With no surviving session to
+    // carry it, the logout rides a transient carrier session.
     let mock = Arc::new(MockBackend::default_test());
     mock.initialize().unwrap();
     let backend: Arc<dyn Pkcs11Backend> = mock.clone();
@@ -457,7 +457,7 @@ async fn close_session_releases_backend_login_before_close() {
     assert_eq!(
         mock.logout(spare),
         Err(CkRv::USER_NOT_LOGGED_IN),
-        "singular close must release the backend login via its own pre-close carrier"
+        "singular close must release the backend login via its own post-settle logout"
     );
 }
 
@@ -4541,7 +4541,24 @@ async fn close_all_sessions_reactivates_mappings_on_transient_failure() {
 
     // Transient failure (not terminal SESSION_HANDLE_INVALID, not ambiguous
     // DEVICE_ERROR): every close in the batch fails, nothing closes.
+    let raw_s1 = CkSessionHandle(
+        ctx_mgr
+            .get_context(&ctx_id, |ctx| ctx.session_handles.resolve(VirtualHandle(s1)).unwrap().0)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        mock.get_session_info(raw_s1).unwrap().state,
+        CkSessionState::RwUser,
+        "logged-in native control"
+    );
     mock.inject_close_error(CkRv::FUNCTION_FAILED);
+    assert_eq!(mock.close_session(raw_s1), Err(CkRv::FUNCTION_FAILED), "direct provider control");
+    assert_eq!(
+        mock.get_session_info(raw_s1).unwrap().state,
+        CkSessionState::RwUser,
+        "failed direct close keeps native login"
+    );
     let failed = close_all_sessions(
         &ctx_mgr,
         &backend,
@@ -4574,6 +4591,11 @@ async fn close_all_sessions_reactivates_mappings_on_transient_failure() {
     // still close them through the reactivated mappings).
     assert_eq!(mock.open_session_count(), 2, "failed batch must close nothing");
 
+    assert_eq!(
+        mock.get_session_info(raw_s1).unwrap().state,
+        CkSessionState::RwUser,
+        "failed proxied close-all must retain the actual native login as well as logical login"
+    );
     // Retry with a healthy backend closes everything exactly once.
     mock.clear_close_error();
     let retry = close_all_sessions(
@@ -4595,6 +4617,171 @@ async fn close_all_sessions_reactivates_mappings_on_transient_failure() {
         );
     }
     assert_eq!(mock.open_session_count(), 0, "retry must close every backend session");
+}
+
+/// Q01 singular-path analogue of the close-all oracle above: a transient
+/// failure closing the last own session of a held-login slot must retain
+/// the mapping, the logical login, AND the native login — no logout may
+/// run before the outcome is known.
+#[tokio::test]
+async fn close_session_failed_last_close_retains_native_login() {
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+
+    let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+    assert_eq!(login_response(&ctx_mgr, &backend, &ctx_id, session).await, CkRv::OK.0);
+    let raw = CkSessionHandle(
+        ctx_mgr
+            .get_context(&ctx_id, |ctx| {
+                ctx.session_handles.resolve(VirtualHandle(session)).unwrap().0
+            })
+            .await
+            .unwrap(),
+    );
+
+    mock.inject_close_error(CkRv::FUNCTION_FAILED);
+    let failed = close_session(
+        &HandlerContext::for_test(&ctx_mgr, &backend),
+        Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(failed.ck_rv, CkRv::FUNCTION_FAILED.0);
+
+    assert!(
+        ctx_mgr.slot_for_session(&ctx_id, VirtualHandle(session)).await.is_some(),
+        "failed singular close must reactivate the mapping"
+    );
+    let login_state = ctx_mgr
+        .get_context(&ctx_id, |ctx| {
+            ctx.login_state.get(&crate::server::slot_map::BackendSlotId(CkSlotId(0))).copied()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        login_state,
+        Some(LoginState::User),
+        "failed singular close must retain the logical login"
+    );
+    assert_eq!(
+        mock.get_session_info(raw).unwrap().state,
+        CkSessionState::RwUser,
+        "failed singular close must retain the native login"
+    );
+
+    // Retry with a healthy backend closes exactly once and releases everything.
+    mock.clear_close_error();
+    let retry = close_session(
+        &HandlerContext::for_test(&ctx_mgr, &backend),
+        Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(retry.ck_rv, CkRv::OK.0);
+    assert_eq!(mock.open_session_count(), 0, "retry must close the backend session");
+}
+
+/// Q01 partial batch: when one close in the batch fails transiently and
+/// the other succeeds, each mapping settles against its own outcome — the
+/// closed session drops, the survivor reactivates with both logins — and
+/// the aggregate keeps the last-error CK_RV. (Batch order follows map
+/// iteration, so the survivor is identified dynamically.)
+#[tokio::test]
+async fn close_all_sessions_partial_batch_settles_per_session() {
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let virtual_slot = ctx_mgr.virtual_slots().await[0];
+
+    let s1 = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+    let s2 = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+    assert_eq!(login_response(&ctx_mgr, &backend, &ctx_id, s1).await, CkRv::OK.0);
+
+    // One-shot: the first close in the batch fails transiently, the rest
+    // proceed normally.
+    mock.set_next_message_lifecycle_action(MockMessageLifecycleAction::Return(
+        CkRv::FUNCTION_FAILED,
+    ));
+    let partial = close_all_sessions(
+        &ctx_mgr,
+        &backend,
+        Request::new(pkcs11_proxy_ng_proto::CloseAllSessionsRequest {
+            client_context_id: ctx_id.0.clone(),
+            slot_id: virtual_slot.0,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(partial.ck_rv, CkRv::FUNCTION_FAILED.0);
+    assert_eq!(mock.open_session_count(), 1, "partial batch closes exactly one backend session");
+
+    // Exactly one mapping survives, resolving to the open backend session…
+    let mut survivors = Vec::new();
+    for s in [s1, s2] {
+        if let Some(raw) = ctx_mgr
+            .get_context(&ctx_id, |ctx| ctx.session_handles.resolve(VirtualHandle(s)))
+            .await
+            .unwrap()
+        {
+            survivors.push((s, raw));
+        }
+    }
+    assert_eq!(
+        survivors.len(),
+        1,
+        "partial batch must drop the closed session and reactivate the survivor"
+    );
+    let (survivor, raw) = survivors[0];
+    assert_eq!(
+        mock.get_session_info(CkSessionHandle(raw.0)).unwrap().state,
+        CkSessionState::RwUser,
+        "partial batch must retain the survivor's native login"
+    );
+    // …the logical login is retained…
+    let login_state = ctx_mgr
+        .get_context(&ctx_id, |ctx| {
+            ctx.login_state.get(&crate::server::slot_map::BackendSlotId(CkSlotId(0))).copied()
+        })
+        .await
+        .unwrap();
+    assert_eq!(login_state, Some(LoginState::User), "partial batch must retain the logical login");
+
+    // …and a retry closes the survivor exactly once.
+    let retry = close_all_sessions(
+        &ctx_mgr,
+        &backend,
+        Request::new(pkcs11_proxy_ng_proto::CloseAllSessionsRequest {
+            client_context_id: ctx_id.0.clone(),
+            slot_id: virtual_slot.0,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(retry.ck_rv, CkRv::OK.0);
+    assert_eq!(mock.open_session_count(), 0, "retry must close the surviving backend session");
+    assert!(
+        ctx_mgr.slot_for_session(&ctx_id, VirtualHandle(survivor)).await.is_none(),
+        "retry must remove the survivor mapping"
+    );
 }
 
 /// W1-L6-03 characterization: the multi-session success path is identical

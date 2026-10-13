@@ -51,7 +51,8 @@ impl Pkcs11Client {
             session_handle: session.0,
             flags: flags.0,
         };
-        super::stateful_unit_call(self.grpc.session_cancel(req), |response| response.ck_rv).await
+        super::stateful_unit_call(self.grpc.session_cancel(req), true, |response| response.ck_rv)
+            .await
     }
 
     pub async fn get_session_validation_flags(
