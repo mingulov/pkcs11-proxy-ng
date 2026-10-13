@@ -52,18 +52,26 @@ async fn wait_for_close_entry(deadline: Duration) -> Result<u64, String> {
 }
 
 /// Wait for the native `C_CloseSession` COMPLETION for `session`
-/// (the provider call returned). Drains the event log while polling.
-async fn wait_for_close_completion(session: u64, deadline: Duration) -> Result<(), String> {
+/// (the provider call returned). Drains the event log while polling and
+/// returns whatever was drained after the completion in its batch —
+/// the detached completion (F1) starts the carrier immediately, so its
+/// `OpenSession` entry may land in the same drain and must not be lost.
+async fn wait_for_close_completion(
+    session: u64,
+    deadline: Duration,
+) -> Result<Vec<NativeSessionEvent>, String> {
     let start = Instant::now();
     loop {
-        for (_, event) in take_native_session_events() {
+        let drained: Vec<NativeSessionEvent> =
+            take_native_session_events().into_iter().map(|(_, event)| event).collect();
+        for (index, event) in drained.iter().enumerate() {
             if let NativeSessionEvent::CloseSessionCompleted { session: done } = event {
-                if done == session {
-                    return Ok(());
+                if *done != session {
+                    return Err(format!(
+                        "unexpected completion for native {done} while waiting for {session}"
+                    ));
                 }
-                return Err(format!(
-                    "unexpected completion for native {done} while waiting for {session}"
-                ));
+                return Ok(drained[index + 1..].to_vec());
             }
         }
         if start.elapsed() > deadline {
@@ -84,6 +92,9 @@ async fn wait_for_handle_invalid(
     loop {
         match client.get_session_info(session).await {
             Err(rv) if rv == CkRv::SESSION_HANDLE_INVALID => return Ok(()),
+            // F2: FUNCTION_FAILED while the mapping is suspended under an
+            // in-flight close — owned elsewhere, not settled yet. Poll on.
+            Err(rv) if rv == CkRv::FUNCTION_FAILED => {}
             Err(rv) => {
                 return Err(format!("expected SESSION_HANDLE_INVALID, got daemon {rv}"));
             }
@@ -94,6 +105,46 @@ async fn wait_for_handle_invalid(
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+}
+
+/// Poll the native-entry log until exactly the owned transient-carrier
+/// sequence lands (open + logout + close entry/completion on one fresh
+/// handle) or the deadline passes. Returns the carrier's native handle.
+/// Fails on any unexpected native call (e.g. a duplicate member close).
+/// `seed` carries events already drained alongside the member completion.
+async fn wait_for_carrier_sequence(
+    member: u64,
+    seed: Vec<NativeSessionEvent>,
+    deadline: Duration,
+) -> Result<u64, String> {
+    let start = Instant::now();
+    let mut events: Vec<NativeSessionEvent> = seed;
+    loop {
+        events.extend(take_native_session_events().into_iter().map(|(_, event)| event));
+        if events.len() >= 4 {
+            break;
+        }
+        if start.elapsed() > deadline {
+            return Err(format!("timed out waiting for the carrier sequence, got {events:?}"));
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        events.len(),
+        4,
+        "the detached completion runs exactly one carrier sequence, got {events:?}"
+    );
+    let carrier = match (&events[0], &events[1], &events[2], &events[3]) {
+        (
+            NativeSessionEvent::OpenSession { .. },
+            NativeSessionEvent::Logout { session: logged },
+            NativeSessionEvent::CloseSession { session: closing },
+            NativeSessionEvent::CloseSessionCompleted { session: closed },
+        ) if logged == closing && closing == closed => *logged,
+        _ => panic!("unexpected carrier shape: {events:?}"),
+    };
+    assert_ne!(carrier, member, "the carrier is a fresh session, not the member: {events:?}");
+    Ok(carrier)
 }
 
 /// Loaded close-all shape: the server closes each member with its own
@@ -291,9 +342,10 @@ async fn failed_close_workflow(fixture: ProviderFixture) -> Result<(), String> {
 
 /// Loaded cancellation: aborting a close provably in flight still
 /// settles it late with exactly one native entry/completion pair and
-/// no leak. The dropped handler never runs its post-settle logout
-/// (the event log stays empty past the pair); SoftHSM's own
-/// last-close auto-logout releases the login instead.
+/// no leak — and the detached completion (F1) still runs the owned
+/// transient-carrier logout afterwards. While the close is wedged, an op
+/// on the suspended member answers outcome-ambiguous FUNCTION_FAILED
+/// (F2), never SESSION_HANDLE_INVALID.
 #[tokio::test]
 #[ignore] // requires SoftHSM2 + native-owner-test-hooks
 async fn loaded_cancelled_close_settles_late_without_native_leak() -> Result<(), String> {
@@ -309,30 +361,40 @@ async fn loaded_cancelled_close_settles_late_without_native_leak() -> Result<(),
     let close_task = tokio::spawn(async move { closer.close_session(session).await });
     // Provably in flight: the native entry lands before the wedge sleep.
     let native = wait_for_close_entry(Duration::from_secs(10)).await?;
+    // F2: the suspended member's fate is owned by the wedged close —
+    // the daemon must answer ambiguous, not handle-invalid.
+    match client.get_session_info(session).await {
+        Err(rv) if rv == CkRv::FUNCTION_FAILED => {}
+        other => return Err(format!("suspended member must read ambiguous, got {other:?}")),
+    }
     close_task.abort();
     let _ = close_task.await;
 
     // Late completion settles terminally: exactly one entry/completion
     // pair for that handle, no duplicate close, no leaked session. The
-    // completion wait (not a sleep) also guarantees quiescence before
-    // the finalize/shutdown below.
-    wait_for_close_completion(native, Duration::from_secs(10)).await?;
+    // completion wait (not a sleep) also guarantees quiescence of the
+    // member close before the carrier wait below.
+    let drained_with_completion =
+        wait_for_close_completion(native, Duration::from_secs(10)).await?;
     wait_for_handle_invalid(&mut client, session, Duration::from_secs(10)).await?;
+    // F1: the detached completion runs the owned carrier logout even
+    // though the handler was dropped — exactly one carrier sequence on
+    // a fresh handle, then silence.
+    wait_for_carrier_sequence(native, drained_with_completion, Duration::from_secs(10)).await?;
     assert!(
         take_native_session_events().is_empty(),
-        "cancelled close must complete with exactly one native entry (native {native})"
+        "nothing native may run past the member close + carrier sequence (native {native})"
     );
     // Provider truth (SoftHSM 2.6.1): closing the last session
-    // auto-releases the token login — no carrier ran here (the log
-    // above is empty, so the dropped handler never reached its
-    // post-settle logout), yet the token is logged out. A fresh
-    // session therefore observes the public state and a fresh login
-    // PIN-verifies directly with nothing to reconcile. Whether a
-    // holderless login can exist at all is provider-dependent; the
-    // server never relies on auto-logout (the owned carrier still runs
-    // after every observed last-holder-out), and the server-side
-    // mechanism — no orphan, no late steal, serialization through
-    // completion — is pinned by the mock-carrier tests.
+    // auto-releases the token login — and the carrier above released it
+    // again (best-effort; its logout reports USER_NOT_LOGGED_IN into the
+    // daemon log). A fresh session therefore observes the public state
+    // and a fresh login PIN-verifies directly with nothing to reconcile.
+    // Whether a holderless login can exist at all is provider-dependent;
+    // the server never relies on auto-logout (the owned carrier runs
+    // after every last-holder-out, observed or detached), and the
+    // server-side mechanism — no orphan, no late steal, serialization
+    // through completion — is pinned by the mock-carrier tests.
     let probe = open_public_session(&mut client, slot, true).await?;
     let info =
         client.get_session_info(probe).await.map_err(|rv| format!("probe info failed: {rv}"))?;

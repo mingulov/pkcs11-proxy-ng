@@ -1,4 +1,5 @@
 use crate::server::slot_map::BackendSlotId;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,7 +17,8 @@ use super::super::super::handle_map::{BackendHandle, VirtualHandle};
 use super::super::authorization;
 use super::super::service_utils::{
     ck_rv_only, context_exists, current_context_operation_guard, current_peer, login_lock_timeout,
-    principal_quota_key, register_session_handle, resolve_session, resolve_slot, spawn_backend,
+    principal_quota_key, register_session_handle, resolve_session, resolve_slot,
+    scope_context_operation, scope_peer_admission, spawn_backend,
     spawn_backend_with_optional_timeout,
 };
 
@@ -160,6 +162,30 @@ pub(super) async fn open_session(
     }
 }
 
+/// Run close completion (worker await + post-settle logout) detached from
+/// handler cancellation (F1): the spawned task owns the whole sequence to
+/// true completion, so dropping the handler future (tonic timeout, client
+/// disconnect) cannot skip the last-holder logout. The handler still awaits
+/// the task for its response — RV and `Status` semantics are unchanged;
+/// only a cancellation detaches, and the self-guarded logout then still
+/// runs. The request task-locals (peer, operation guard) are re-published
+/// inside so breaker admission and context pinning match the direct path.
+async fn await_close_completion_detached<R, F>(completion: F) -> Result<Response<R>, Status>
+where
+    R: Send + 'static,
+    F: Future<Output = Result<Response<R>, Status>> + Send + 'static,
+{
+    let peer = current_peer();
+    let guard = current_context_operation_guard();
+    let task = tokio::spawn(async move {
+        scope_peer_admission(peer, scope_context_operation(guard, completion)).await
+    });
+    match task.await {
+        Ok(outcome) => outcome,
+        Err(error) => Err(Status::internal(format!("close completion task failed: {error}"))),
+    }
+}
+
 pub(super) async fn close_session(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
@@ -238,9 +264,20 @@ pub(super) async fn close_session_with_timeout(
             }));
         }
         Err(CloseSessionBeginError::SessionMissing) => {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::CloseSessionResponse {
-                ck_rv: CkRv::SESSION_HANDLE_INVALID.0,
-            }));
+            // F2: the live mapping is missing, but the slot lookup above
+            // proved `session_slots` still names this handle — it is
+            // suspended under an in-flight close (or settled terminally
+            // in between). Answer outcome-ambiguous FUNCTION_FAILED
+            // while a suspended entry exists so a racing close does not
+            // evict a member the owner may reactivate; only a
+            // proven-gone handle answers SESSION_HANDLE_INVALID.
+            let suspended = ctx_mgr
+                .get_context(&ctx_id, |ctx| ctx.session_handles.suspended_backend(vh).is_some())
+                .await
+                .unwrap_or(false);
+            let ck_rv =
+                if suspended { CkRv::FUNCTION_FAILED.0 } else { CkRv::SESSION_HANDLE_INVALID.0 };
+            return Ok(Response::new(pkcs11_proxy_ng_proto::CloseSessionResponse { ck_rv }));
         }
     };
 
@@ -264,21 +301,31 @@ pub(super) async fn close_session_with_timeout(
         transition.settle(&result);
         result
     };
-    let result = spawn_backend_with_optional_timeout(timeout_override, operation).await?;
+    // F1: the worker await and the post-settle logout run as one detached
+    // completion — a handler cancellation detaches the await but not the
+    // task, so the logout still runs after the late settlement.
+    let ctx_mgr_task = Arc::clone(ctx_mgr);
+    let backend_task = Arc::clone(backend_ref);
+    let ctx_id_owned = ctx_id.0.clone();
+    let vh_raw = req.session_handle;
+    await_close_completion_detached(async move {
+        let result = spawn_backend_with_optional_timeout(timeout_override, operation).await?;
 
-    let ck_rv = ck_rv_only(result);
-    if ck_rv == CkRv::OK.0 {
-        debug!(context_id = %ctx_id.0, virtual_handle = req.session_handle, "Session closed");
-    }
-    // D6(2): release the backend login when this close dropped the last
-    // logical login for the slot. Best-effort and self-guarded: no-ops when
-    // the close failed transiently (login retained), when sibling sessions
-    // keep the login, or when another live context holds it — the native
-    // login always survives with a retained logical login.
-    if let Some((slot, login)) = held_login_slot {
-        ctx_mgr.backend_logout_if_last_holder_out(backend_ref, slot, None, login).await;
-    }
-    Ok(Response::new(pkcs11_proxy_ng_proto::CloseSessionResponse { ck_rv }))
+        let ck_rv = ck_rv_only(result);
+        if ck_rv == CkRv::OK.0 {
+            debug!(context_id = %ctx_id_owned, virtual_handle = vh_raw, "Session closed");
+        }
+        // D6(2): release the backend login when this close dropped the last
+        // logical login for the slot. Best-effort and self-guarded: no-ops when
+        // the close failed transiently (login retained), when sibling sessions
+        // keep the login, or when another live context holds it — the native
+        // login always survives with a retained logical login.
+        if let Some((slot, login)) = held_login_slot {
+            ctx_mgr_task.backend_logout_if_last_holder_out(&backend_task, slot, None, login).await;
+        }
+        Ok(Response::new(pkcs11_proxy_ng_proto::CloseSessionResponse { ck_rv }))
+    })
+    .await
 }
 
 pub(super) async fn close_all_sessions(
@@ -392,79 +439,92 @@ pub(super) async fn close_all_sessions(
         transitions.iter().map(|t| t.backend_handle()).collect();
 
     let count = backend_sessions.len();
-    let ck_rv = if backend_sessions.is_empty() {
-        if skipped_suspended > 0 {
-            // Every member is owned by an in-flight singular close.
-            // Claiming OK would evict shim state an owner may still
-            // reactivate (a server-live session unreachable from the
-            // shim); answer the same outcome-ambiguous FUNCTION_FAILED
-            // as a timed-out singular close instead, so the shim
-            // retains and the next call reports the owners' true
-            // settlement.
-            CkRv::FUNCTION_FAILED.0
+    // F1: the batch await and the post-settle logout run as one detached
+    // completion (singular-path discipline) — a handler cancellation
+    // detaches the await but not the task, so the logout still runs after
+    // the late settlement.
+    let ctx_mgr_task = Arc::clone(ctx_mgr);
+    let backend_task = Arc::clone(backend_ref);
+    let ctx_id_owned = ctx_id.0.clone();
+    let slot_id_raw = req.slot_id;
+    await_close_completion_detached(async move {
+        let ck_rv = if backend_sessions.is_empty() {
+            if skipped_suspended > 0 {
+                // Every member is owned by an in-flight singular close.
+                // Claiming OK would evict shim state an owner may still
+                // reactivate (a server-live session unreachable from the
+                // shim); answer the same outcome-ambiguous FUNCTION_FAILED
+                // as a timed-out singular close instead, so the shim
+                // retains and the next call reports the owners' true
+                // settlement.
+                CkRv::FUNCTION_FAILED.0
+            } else {
+                CkRv::OK.0
+            }
         } else {
-            CkRv::OK.0
-        }
-    } else {
-        // Single spawn_backend call to close all sessions in batch. The
-        // transitions move into the blocking closure (singular-path
-        // discipline): a timeout/cancellation cannot strand or prematurely
-        // reactivate the suspended handles. Q01: each transition settles
-        // against its own per-session outcome — a partial batch drops the
-        // sessions that actually closed and reactivates the survivors —
-        // while the aggregate keeps the historical last-error CK_RV.
-        let sessions: Vec<CkSessionHandle> =
-            backend_sessions.iter().map(|bh| CkSessionHandle(bh.0 as u64)).collect();
-        let backend = backend_ref.clone();
-        let result = spawn_backend(move || {
-            let mut transitions = transitions;
-            let mut last_error = None;
-            for (transition, session) in transitions.iter_mut().zip(sessions.iter()) {
-                transition.mark_started();
-                let outcome = backend.close_session(*session);
-                transition.settle(&outcome);
-                if let Err(rv) = outcome {
-                    last_error = Some(rv);
+            // Single spawn_backend call to close all sessions in batch. The
+            // transitions move into the blocking closure (singular-path
+            // discipline): a timeout/cancellation cannot strand or prematurely
+            // reactivate the suspended handles. Q01: each transition settles
+            // against its own per-session outcome — a partial batch drops the
+            // sessions that actually closed and reactivates the survivors —
+            // while the aggregate keeps the historical last-error CK_RV.
+            let sessions: Vec<CkSessionHandle> =
+                backend_sessions.iter().map(|bh| CkSessionHandle(bh.0 as u64)).collect();
+            let backend = backend_task.clone();
+            let result = spawn_backend(move || {
+                let mut transitions = transitions;
+                let mut last_error = None;
+                for (transition, session) in transitions.iter_mut().zip(sessions.iter()) {
+                    transition.mark_started();
+                    let outcome = backend.close_session(*session);
+                    transition.settle(&outcome);
+                    if let Err(rv) = outcome {
+                        last_error = Some(rv);
+                    }
                 }
+                match last_error {
+                    Some(rv) => Err(rv),
+                    None => Ok(()),
+                }
+            })
+            .await?;
+            // A suspended member skipped above has an unknown fate owned
+            // elsewhere: the batch cannot honestly claim OK for it (same
+            // ambiguity as the empty-skipped batch — the shim must retain
+            // until the owner settles). A real per-member failure keeps its
+            // own aggregate.
+            let mut batch_rv = match result {
+                Ok(()) => CkRv::OK.0,
+                Err(rv) => rv.0,
+            };
+            if skipped_suspended > 0 && batch_rv == CkRv::OK.0 {
+                batch_rv = CkRv::FUNCTION_FAILED.0;
             }
-            match last_error {
-                Some(rv) => Err(rv),
-                None => Ok(()),
-            }
-        })
-        .await?;
-        // A suspended member skipped above has an unknown fate owned
-        // elsewhere: the batch cannot honestly claim OK for it (same
-        // ambiguity as the empty-skipped batch — the shim must retain
-        // until the owner settles). A real per-member failure keeps its
-        // own aggregate.
-        let mut batch_rv = match result {
-            Ok(()) => CkRv::OK.0,
-            Err(rv) => rv.0,
+            batch_rv
         };
-        if skipped_suspended > 0 && batch_rv == CkRv::OK.0 {
-            batch_rv = CkRv::FUNCTION_FAILED.0;
+        // D6(2): release the backend login when the batch dropped the last
+        // logical login for the slot (Q01: only after the closes settle — a
+        // retained login after a transient or partial failure no-ops the
+        // helper, so the native login survives with it; this also covers the
+        // race where a concurrent close took the last own session mid-batch).
+        if let Some(login) = held_login {
+            ctx_mgr_task
+                .backend_logout_if_last_holder_out(&backend_task, backend_slot, None, login)
+                .await;
         }
-        batch_rv
-    };
-    // D6(2): release the backend login when the batch dropped the last
-    // logical login for the slot (Q01: only after the closes settle — a
-    // retained login after a transient or partial failure no-ops the
-    // helper, so the native login survives with it; this also covers the
-    // race where a concurrent close took the last own session mid-batch).
-    if let Some(login) = held_login {
-        ctx_mgr.backend_logout_if_last_holder_out(backend_ref, backend_slot, None, login).await;
-    }
 
-    debug!(
-        context_id = %ctx_id.0,
-        slot = req.slot_id,
-        closed = count,
-        skipped_suspended,
-        "CloseAllSessions completed"
-    );
+        debug!(
+            context_id = %ctx_id_owned,
+            slot = slot_id_raw,
+            closed = count,
+            skipped_suspended,
+            "CloseAllSessions completed"
+        );
 
-    Ok(Response::new(pkcs11_proxy_ng_proto::CloseAllSessionsResponse { ck_rv }))
+        Ok(Response::new(pkcs11_proxy_ng_proto::CloseAllSessionsResponse { ck_rv }))
+    })
+    .await
 }
 
 pub(super) async fn get_session_info(

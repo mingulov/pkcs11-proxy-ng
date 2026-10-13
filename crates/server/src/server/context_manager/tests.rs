@@ -1609,7 +1609,54 @@ async fn q01_carrier_close_failure_records_unresolved_cleanup() {
     let unresolved = mgr.unresolved_carrier_cleanups();
     assert_eq!(unresolved.len(), 1, "the stray carrier session must be recorded");
     assert_eq!(unresolved[0].slot, slot);
-    assert_eq!(unresolved[0].rv, CkRv::FUNCTION_FAILED);
+    assert_eq!(unresolved[0].rv, Some(CkRv::FUNCTION_FAILED));
+    assert_ne!(unresolved[0].session, setup.0, "the record names the carrier, not setup state");
+    assert_eq!(
+        mock.open_session_count(),
+        2,
+        "honest residual: the stray session stays open AND recorded"
+    );
+}
+
+/// F3: a carrier whose close unwinds (backend panic) still records the
+/// stray session as unresolved cleanup instead of losing the record past
+/// the ledger push.
+#[tokio::test]
+async fn q01_carrier_close_panic_records_unresolved_cleanup() {
+    use pkcs11_proxy_ng_backend::mock::MockMessageLifecycleAction;
+    use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
+
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    let slot = BackendSlotId(CkSlotId(0));
+
+    // Native login with no context-manager holder/carrier in play (driven
+    // directly on the mock, invisible to the helper's scans).
+    let setup = mock
+        .open_session(CkSlotId(0), CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION)
+        .unwrap();
+    mock.login(setup, CkUserType::User, None).unwrap();
+
+    // One-shot panic consumed by the carrier close only (`logout_impl`
+    // does not consult the lifecycle action): the panic fires after the
+    // logout succeeded.
+    mock.set_next_message_lifecycle_action(MockMessageLifecycleAction::Panic);
+    let released = mgr
+        .backend_logout_if_last_holder_out_inner(
+            &backend,
+            slot,
+            None,
+            LoginState::User,
+            std::time::Duration::from_secs(30),
+        )
+        .await;
+    assert!(!released, "a panicking carrier reports unreleased");
+    let unresolved = mgr.unresolved_carrier_cleanups();
+    assert_eq!(unresolved.len(), 1, "the unwind must still record the stray carrier");
+    assert_eq!(unresolved[0].slot, slot);
+    assert_eq!(unresolved[0].rv, None, "no provider RV exists on unwind; none must be invented");
     assert_ne!(unresolved[0].session, setup.0, "the record names the carrier, not setup state");
     assert_eq!(
         mock.open_session_count(),

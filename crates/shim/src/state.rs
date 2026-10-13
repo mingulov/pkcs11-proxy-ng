@@ -421,6 +421,9 @@ pub(crate) fn evict_slot_session_caches(slot_id: CK_SLOT_ID) {
     };
 
     for session in sessions {
+        // F4: clear the suspect mark with the session (mirrors
+        // `forget_session_slot`; the map clears on forget, evict, resets).
+        clear_session_suspect(session);
         evict_message_operations(session);
     }
 }
@@ -958,5 +961,29 @@ mod env_warning_tests {
             "slot must hold exactly one claimant's pid, got {final_pid}"
         );
         assert!(wins.load(Ordering::Relaxed) > 0, "some claim must have won");
+    }
+}
+
+#[cfg(test)]
+mod suspect_tests {
+    use super::*;
+
+    #[test]
+    fn slot_evict_clears_suspect_marks() {
+        // F4: `evict_slot_session_caches` must clear suspect marks like
+        // `forget_session_slot` does (the map's documented contract:
+        // entries clear on forget, evict, and full resets). Otherwise a
+        // leaked mark can mis-mark a recycled numeric handle suspect.
+        let _guard = crate::tests::shim_state_test_guard();
+        clear_all_caches();
+        let slot = 41 as CK_SLOT_ID;
+        let session = 4242 as CK_SESSION_HANDLE;
+        remember_session_slot(session, slot);
+        mark_slot_sessions_suspect(slot);
+        assert!(is_session_suspect(session), "setup: session must read suspect");
+        evict_slot_session_caches(slot);
+        assert!(!is_session_known(session), "evict must forget session ownership");
+        assert!(!is_session_suspect(session), "evict must clear the suspect mark with the session");
+        clear_all_caches();
     }
 }
