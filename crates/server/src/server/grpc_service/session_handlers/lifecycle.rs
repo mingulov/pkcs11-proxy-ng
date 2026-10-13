@@ -247,34 +247,11 @@ pub(super) async fn close_session_with_timeout(
     drop(_login_lock);
 
     let session = CkSessionHandle(transition.backend_handle().0);
-    // T5F: attempt the last-holder logout BEFORE the backend close, using
-    // the closing session as the preferred carrier (singular-path analogue
-    // of the m-5 close-all ordering, ADR-0002 §7: the logout rides a
-    // still-open session). Runs only when this close drops the context's
-    // last own session for a held-login slot; the excluding-self check
-    // observes only other live contexts. Own login stays held across the
-    // close so transient failures retain it (transition semantics). No
-    // routine WARN on the ordinary logged-in singular close.
-    let pre_close_logout_done = match held_login_slot {
-        Some(slot)
-            if ctx_mgr
-                .get_context(&ctx_id, |ctx| {
-                    !ctx.session_slots.iter().any(|(other, s)| *s == slot && *other != vh)
-                })
-                .await
-                .unwrap_or(false) =>
-        {
-            ctx_mgr
-                .backend_logout_if_last_holder_out_excluding(
-                    backend_ref,
-                    slot,
-                    Some(transition.backend_handle().0),
-                    &ctx_id,
-                )
-                .await
-        }
-        _ => false,
-    };
+    // Q01: no logout runs before the backend close. A pre-close logout
+    // would strand the native login when the close then fails transiently
+    // (the transition reactivates the mapping and the logical login, but
+    // no PIN replay may restore the native one) — the last-holder release
+    // below runs only after the close settles.
     let backend = backend_ref.clone();
     let operation = move || {
         transition.mark_started();
@@ -291,12 +268,9 @@ pub(super) async fn close_session_with_timeout(
     // D6(2): release the backend login when this close dropped the last
     // logical login for the slot. Best-effort and self-guarded: no-ops when
     // the close failed transiently (login retained), when sibling sessions
-    // keep the login, or when another live context holds it. Skipped when
-    // the pre-close attempt already released the login — a second backend
-    // logout would answer USER_NOT_LOGGED_IN and WARN.
-    if let Some(slot) = held_login_slot
-        && !pre_close_logout_done
-    {
+    // keep the login, or when another live context holds it — the native
+    // login always survives with a retained logical login.
+    if let Some(slot) = held_login_slot {
         ctx_mgr.backend_logout_if_last_holder_out(backend_ref, slot, None).await;
     }
     Ok(Response::new(pkcs11_proxy_ng_proto::CloseSessionResponse { ck_rv }))
@@ -357,9 +331,9 @@ pub(super) async fn close_all_sessions(
     // failure reactivates them instead of leaking live backend sessions
     // with no mappings. The logical login is likewise dropped only when
     // the closes settle terminal.
-    // D6(2): snapshot the held login first; the last-holder logout below
-    // excludes this context (T5F analogue of the singular pre-close path)
-    // because the own login is still held across the batch close.
+    // D6(2): snapshot the held login first; the last-holder logout runs
+    // after the batch settles (Q01), when a retained login still no-ops
+    // it — never before the outcome is known.
     let held_login = ctx_mgr
         .get_context(&ctx_id, |ctx| ctx.login_state.contains_key(&backend_slot))
         .await
@@ -392,23 +366,6 @@ pub(super) async fn close_all_sessions(
     let backend_sessions: Vec<BackendHandle> =
         transitions.iter().map(|t| t.backend_handle()).collect();
 
-    // m-5: attempt the last-holder logout BEFORE the batch close, using one
-    // of the closing sessions as the preferred carrier (ADR-0002 §7: the
-    // logout rides a still-open session and runs before the departing
-    // context's backend sessions close). The own login is still held, so
-    // the excluding variant keeps the last-holder check exact (T5F). No
-    // routine WARN on the ordinary logged-in close-all.
-    if held_login && let Some(carrier) = backend_sessions.first() {
-        ctx_mgr
-            .backend_logout_if_last_holder_out_excluding(
-                backend_ref,
-                backend_slot,
-                Some(carrier.0 as u64),
-                &ctx_id,
-            )
-            .await;
-    }
-
     let count = backend_sessions.len();
     let ck_rv = if backend_sessions.is_empty() {
         CkRv::OK.0
@@ -416,21 +373,28 @@ pub(super) async fn close_all_sessions(
         // Single spawn_backend call to close all sessions in batch. The
         // transitions move into the blocking closure (singular-path
         // discipline): a timeout/cancellation cannot strand or prematurely
-        // reactivate the suspended handles, and every transition settles
-        // against the one batch outcome.
+        // reactivate the suspended handles. Q01: each transition settles
+        // against its own per-session outcome — a partial batch drops the
+        // sessions that actually closed and reactivates the survivors —
+        // while the aggregate keeps the historical last-error CK_RV.
         let sessions: Vec<CkSessionHandle> =
             backend_sessions.iter().map(|bh| CkSessionHandle(bh.0 as u64)).collect();
         let backend = backend_ref.clone();
         let result = spawn_backend(move || {
             let mut transitions = transitions;
-            for transition in &mut transitions {
+            let mut last_error = None;
+            for (transition, session) in transitions.iter_mut().zip(sessions.iter()) {
                 transition.mark_started();
+                let outcome = backend.close_session(*session);
+                transition.settle(&outcome);
+                if let Err(rv) = outcome {
+                    last_error = Some(rv);
+                }
             }
-            let result = backend.close_sessions(&sessions);
-            for transition in &mut transitions {
-                transition.settle(&result);
+            match last_error {
+                Some(rv) => Err(rv),
+                None => Ok(()),
             }
-            result
         })
         .await?;
         match result {
@@ -438,14 +402,13 @@ pub(super) async fn close_all_sessions(
             Err(rv) => rv.0,
         }
     };
-    // D6(2): post-close fallback for the race where a held login lost its
-    // last own session to a concurrent close between the snapshot and the
-    // suspend above (login implies a session, so this is normally
-    // unreachable): retry via any live session, excluding self as above.
-    if held_login && backend_sessions.is_empty() {
-        ctx_mgr
-            .backend_logout_if_last_holder_out_excluding(backend_ref, backend_slot, None, &ctx_id)
-            .await;
+    // D6(2): release the backend login when the batch dropped the last
+    // logical login for the slot (Q01: only after the closes settle — a
+    // retained login after a transient or partial failure no-ops the
+    // helper, so the native login survives with it; this also covers the
+    // race where a concurrent close took the last own session mid-batch).
+    if held_login {
+        ctx_mgr.backend_logout_if_last_holder_out(backend_ref, backend_slot, None).await;
     }
 
     debug!(

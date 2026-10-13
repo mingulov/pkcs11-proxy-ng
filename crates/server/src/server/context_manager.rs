@@ -1629,13 +1629,15 @@ impl ContextManager {
     /// (F-01 observability): a skipped logout leaves the backend logged in
     /// with no holder, which the next login reconciles (one backend logout +
     /// a single retry — see `login`). `None` carrier falls back to any live
-    /// session; with no open session at all the token may already have
-    /// auto-logged-out. A carrier that raced shut is retried once via a live
-    /// session; every other outcome ends the attempt.
+    /// session; with no open session at all a transient carrier is opened
+    /// for the logout (Q01) instead of assuming auto-logout. A carrier that
+    /// raced shut is retried once via a live session; every other outcome
+    /// ends the attempt.
     ///
-    /// Returns `true` only when this call released the backend login, so a
-    /// caller that already logged out pre-close can skip a post-close retry
-    /// (which would answer `USER_NOT_LOGGED_IN` and warn).
+    /// Returns `true` only when this call released the backend login.
+    /// Callers run this only after their closes settle, so a retained
+    /// logical login (transient close failure) no-ops here and the native
+    /// login survives with it — never log out before the outcome is known.
     pub async fn backend_logout_if_last_holder_out(
         &self,
         backend: &Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
@@ -1646,29 +1648,6 @@ impl ContextManager {
             backend,
             slot,
             preferred_session,
-            None,
-            TEARDOWN_BACKEND_TIMEOUT,
-        )
-        .await
-    }
-
-    /// Same as [`Self::backend_logout_if_last_holder_out`], but the
-    /// last-holder check excludes `exclude`'s own logical login (T5F). Used
-    /// by the singular `close_session` pre-close attempt, where the closing
-    /// context still holds its login: it is dropped only when the close
-    /// settles terminal, so transient close failures retain it.
-    pub async fn backend_logout_if_last_holder_out_excluding(
-        &self,
-        backend: &Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
-        slot: BackendSlotId,
-        preferred_session: Option<u64>,
-        exclude: &ClientContextId,
-    ) -> bool {
-        self.backend_logout_if_last_holder_out_inner(
-            backend,
-            slot,
-            preferred_session,
-            Some(exclude),
             TEARDOWN_BACKEND_TIMEOUT,
         )
         .await
@@ -1679,11 +1658,10 @@ impl ContextManager {
         backend: &Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
         slot: BackendSlotId,
         preferred_session: Option<u64>,
-        exclude: Option<&ClientContextId>,
         timeout: Duration,
     ) -> bool {
         // Fast path without the lock: observing any live holder means no logout.
-        if self.slot_login_held(slot, exclude) {
+        if self.slot_login_held(slot) {
             return false;
         }
         let lock = self.slot_login_lock(slot);
@@ -1697,7 +1675,7 @@ impl ContextManager {
         // Recheck under the lock: a fresh login may have landed since the fast
         // path. The lock serializes this recheck+logout against every login's
         // scan+insert, so a concurrent login is never stolen.
-        if self.slot_login_held(slot, exclude) {
+        if self.slot_login_held(slot) {
             return false;
         }
         let live = self.any_active_backend_session_for_slot(slot);
@@ -1711,11 +1689,12 @@ impl ContextManager {
             carriers.push(via);
         }
         if carriers.is_empty() {
-            tracing::warn!(
-                slot = slot.0.0,
-                "last-holder backend logout skipped: no open session to carry the call"
-            );
-            return false;
+            // Q01: no live session survived to carry the logout (the
+            // closes settled first, so the close path lends no carrier).
+            // Open a transient session for the logout instead of assuming
+            // the token auto-logged-out. The slot lock stays held across
+            // it, so a concurrent login is still never stolen.
+            return Self::last_holder_logout_via_transient_carrier(backend, slot, timeout).await;
         }
         for via in carriers {
             let backend = backend.clone();
@@ -1762,15 +1741,102 @@ impl ContextManager {
         false
     }
 
-    /// Whether any live context holds logical login for `slot`, optionally
-    /// excluding one departing context's own login (T5F pre-close check).
-    fn slot_login_held(&self, slot: BackendSlotId, exclude: Option<&ClientContextId>) -> bool {
-        match exclude {
-            // W1-L13-17: the last-holder recheck guards a real backend
-            // logout — it needs the authoritative scan, not the hint.
-            Some(id) => self.first_login_state_for_slot_excluding_authoritative(slot, id).is_some(),
-            None => self.any_login_state_for_slot(slot),
+    /// Whether any live context holds logical login for `slot` (Q01: the
+    /// last-holder check runs only after closes settle, so no exclusion for
+    /// a departing context's own login remains — a retained login after a
+    /// transient close failure must no-op the logout).
+    fn slot_login_held(&self, slot: BackendSlotId) -> bool {
+        self.any_login_state_for_slot(slot)
+    }
+
+    /// Q01 transient-carrier logout: open a throwaway read-only session,
+    /// release the backend login through it, and close it again. The caller
+    /// must hold the per-slot login lock with no live holder observed.
+    /// Best-effort like every other outcome here: failures warn (F-01) and
+    /// the next login reconciles. Returns `true` only when this call
+    /// released the backend login.
+    async fn last_holder_logout_via_transient_carrier(
+        backend: &Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
+        slot: BackendSlotId,
+        timeout: Duration,
+    ) -> bool {
+        let open_backend = backend.clone();
+        let temp = match crate::server::grpc_service::service_utils::spawn_backend_with_timeout(
+            timeout,
+            move || open_backend.open_session(slot.0, CkSessionFlags::SERIAL_SESSION),
+        )
+        .await
+        {
+            Ok(Ok(handle)) => handle,
+            Ok(Err(rv)) => {
+                tracing::warn!(
+                    slot = slot.0.0,
+                    rv = rv.0,
+                    "last-holder backend logout skipped: transient carrier open failed"
+                );
+                return false;
+            }
+            Err(status) => {
+                tracing::warn!(
+                    slot = slot.0.0,
+                    error = %status,
+                    "last-holder backend logout spawn failed; backend may stay logged in with no holder"
+                );
+                return false;
+            }
+        };
+        let logout_backend = backend.clone();
+        let released = match crate::server::grpc_service::service_utils::spawn_backend_with_timeout(
+            timeout,
+            move || logout_backend.logout(temp),
+        )
+        .await
+        {
+            Ok(Ok(())) => {
+                tracing::debug!("last-holder backend logout succeeded");
+                true
+            }
+            Ok(Err(rv)) => {
+                tracing::warn!(
+                    slot = slot.0.0,
+                    rv = rv.0,
+                    "last-holder backend logout failed; backend may stay logged in with no holder"
+                );
+                false
+            }
+            Err(status) => {
+                tracing::warn!(
+                    slot = slot.0.0,
+                    error = %status,
+                    "last-holder backend logout spawn failed; backend may stay logged in with no holder"
+                );
+                false
+            }
+        };
+        let close_backend = backend.clone();
+        match crate::server::grpc_service::service_utils::spawn_backend_with_timeout(
+            timeout,
+            move || close_backend.close_session(temp),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(rv)) => {
+                tracing::warn!(
+                    slot = slot.0.0,
+                    rv = rv.0,
+                    "transient logout carrier close failed; the stray session stays open"
+                );
+            }
+            Err(status) => {
+                tracing::warn!(
+                    slot = slot.0.0,
+                    error = %status,
+                    "transient logout carrier close spawn failed; the stray session stays open"
+                );
+            }
         }
+        released
     }
 
     /// Execute teardown plans: all last-holder logouts first (each rechecked
@@ -1802,14 +1868,8 @@ impl ContextManager {
             closes.extend(plan.sessions_to_close);
         }
         for (slot, via_session) in logouts {
-            self.backend_logout_if_last_holder_out_inner(
-                backend,
-                slot,
-                Some(via_session),
-                None,
-                timeout,
-            )
-            .await;
+            self.backend_logout_if_last_holder_out_inner(backend, slot, Some(via_session), timeout)
+                .await;
         }
         Self::close_backend_sessions(backend, closes, timeout).await;
     }

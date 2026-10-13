@@ -367,8 +367,10 @@ pub(crate) fn evict_session_authoritative_state(h_session: CK_SESSION_HANDLE) {
 /// Forget session ownership and message-operation discriminators for sessions
 /// opened on one slot.
 ///
-/// Called from `c_close_all_sessions` on the close attempt, unconditionally
-/// (dropped regardless of the server's `CK_RV`).
+/// Called from `c_close_all_sessions` only for settled outcomes (Q01):
+/// success, unwitnessed transport/protocol failures, or backend RVs that
+/// prove no server-side session can exist. Decoded backend failures that
+/// leave survivors possible keep the state so the daemon stays authoritative.
 pub(crate) fn evict_slot_session_caches(slot_id: CK_SLOT_ID) {
     let sessions = {
         let mut map = lock_recovering(&SESSION_SLOTS);

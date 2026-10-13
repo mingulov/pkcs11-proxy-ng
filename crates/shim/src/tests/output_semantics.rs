@@ -1221,11 +1221,14 @@ fn failed_close_all_sessions_still_evicts_slot_session_caches() {
     let close_all_rv = unsafe { dispatch::general::c_close_all_sessions(unknown_slot) };
     assert_ne!(close_all_rv, CKR_OK as CK_RV);
 
-    // `state::evict_slot_session_caches` contract: dropped on the attempt,
-    // regardless of the server's CK_RV.
+    // Q01 settled-eviction contract: an unknown slot proves no server-side
+    // session can exist, so the slot's local state is dropped even though
+    // the call failed (decoded failures that leave survivors possible
+    // retain instead — see
+    // `correctness_close_all_transient_failure_preserves_live_session`).
     assert!(
         !state::is_session_known(phantom_session),
-        "close-all must forget the slot's sessions even on failure"
+        "close-all must forget the slot's sessions when the slot is unknown"
     );
 }
 
@@ -5202,5 +5205,28 @@ fn gcm_mixed_iv_aad_null_16_legacy_stays_fail_closed() {
         unsafe { dispatch::general::c_encrypt_init(shim.session, &mut mechanism, key) },
         CKR_MECHANISM_PARAM_INVALID as CK_RV,
         "legacy mixed GCM init still fails closed locally",
+    );
+}
+
+// Q01 maintained oracle: a decoded transient close-all failure must keep
+// the slot's live sessions usable — the daemon stays authoritative and the
+// next Init reaches the backend instead of failing locally.
+#[test]
+fn correctness_close_all_transient_failure_preserves_live_session() {
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let daemon = TestDaemon::shared();
+    daemon.backend.inject_close_error(CkRv::FUNCTION_FAILED);
+    let close_rv = unsafe { dispatch::general::c_close_all_sessions(shim.slot_id) };
+    daemon.backend.clear_close_error();
+    assert_eq!(close_rv, CKR_FUNCTION_FAILED as CK_RV);
+    let mut info = std::mem::MaybeUninit::<CK_SESSION_INFO>::uninit();
+    let info_rv = unsafe { dispatch::general::c_get_session_info(shim.session, info.as_mut_ptr()) };
+    assert_eq!(info_rv, CKR_OK as CK_RV, "daemon/provider session survived the failure");
+    let mut mechanism = sha256_mechanism();
+    let digest_rv = unsafe { dispatch::general::c_digest_init(shim.session, &mut mechanism) };
+    assert_eq!(
+        digest_rv, CKR_OK as CK_RV,
+        "a live session must admit a valid Init after failed CloseAllSessions"
     );
 }

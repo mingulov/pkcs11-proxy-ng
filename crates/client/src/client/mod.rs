@@ -64,12 +64,16 @@ where
 
 /// Generic core for stateful unit (`ck_rv`-only) session calls (W1-L11-08):
 /// one definition of the transport-error mapping and the backend-`ck_rv`
-/// decode, shared by `close_session_stateful` and `session_cancel_stateful`.
+/// decode, shared by `close_session_stateful`, `session_cancel_stateful`,
+/// and `close_all_sessions_stateful`.
 /// Parameterized by the already-built gRPC call future (which fixes the
 /// request type and method); `ck_rv_of` extracts the `ck_rv` field the
-/// response carries. Session-scoped mapping, matching both callers.
+/// response carries. `is_session_scoped` selects the transport-error mapping
+/// (Q01: close-all stays slot-scoped like its `CkResult` sibling, so a
+/// transport failure keeps answering `TOKEN_NOT_PRESENT`, not `DEVICE_ERROR`).
 pub(crate) async fn stateful_unit_call<Fut, Resp>(
     call: Fut,
+    is_session_scoped: bool,
     ck_rv_of: impl FnOnce(&Resp) -> u64,
 ) -> Result<(), MessageCallError>
 where
@@ -78,7 +82,10 @@ where
     let response = call
         .await
         .map_err(|status| {
-            MessageCallError::transport(crate::error::grpc_status_to_ck_rv(status.code(), true))
+            MessageCallError::transport(crate::error::grpc_status_to_ck_rv(
+                status.code(),
+                is_session_scoped,
+            ))
         })?
         .into_inner();
     let rv = CkRv(ck_rv_of(&response));
@@ -298,10 +305,12 @@ mod tests {
     // slot/token family, which passes `false` (→ TOKEN_NOT_PRESENT).
     // `open_session` is session-scoped (`RpcKind::Session` names
     // `C_OpenSession`); `close_all_sessions` stays slot-scoped (takes a
-    // slot id, no session); `wait_for_slot_event` keeps its pre-existing
-    // `true` (changing the C_WaitForSlotEvent transport RV is out of
-    // scope for this item). Every prod macro invocation carries its flag
-    // on the invocation line, so the scan is exact per line.
+    // slot id, no session) including through the Q01 `stateful_unit_call`
+    // core, whose flag the scan covers like a macro site;
+    // `wait_for_slot_event` keeps its pre-existing `true` (changing the
+    // C_WaitForSlotEvent transport RV is out of scope for this item).
+    // Every prod macro invocation carries its flag on the invocation
+    // line, so the scan is exact per line.
     #[test]
     fn scope_flags_match_session_taxonomy() {
         const SOURCES: &[(&str, &str)] = &[
@@ -340,7 +349,11 @@ mod tests {
         for (name, source) in SOURCES {
             let prod = source.split("#[cfg(test)]").next().unwrap_or(source);
             for (lineno, line) in prod.lines().enumerate() {
-                if !(line.contains("pkcs11_unary_") && line.contains("self.grpc.")) {
+                // Q01: the stateful core carries the same per-RPC scope
+                // flag as the macros, so its invocation lines scan too.
+                if !((line.contains("pkcs11_unary_") || line.contains("stateful_unit_call"))
+                    && line.contains("self.grpc."))
+                {
                     continue;
                 }
                 let after = line.split("self.grpc.").nth(1).unwrap();

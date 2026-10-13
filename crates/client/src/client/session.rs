@@ -57,16 +57,31 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
         };
-        super::stateful_unit_call(self.grpc.close_session(req), |response| response.ck_rv).await
+        super::stateful_unit_call(self.grpc.close_session(req), true, |response| response.ck_rv)
+            .await
     }
 
     pub async fn close_all_sessions(&mut self, slot_id: CkSlotId) -> CkResult<()> {
-        let ctx = self.context_id()?;
+        self.close_all_sessions_stateful(slot_id).await.map_err(|error| error.ck_rv)
+    }
+
+    /// Stateful close-all (Q01): like [`Self::close_session_stateful`], but
+    /// slot-scoped — transport failures keep the `CkResult` sibling's
+    /// `TOKEN_NOT_PRESENT` mapping. The shim settles its slot caches on the
+    /// decoded outcome instead of evicting on the attempt.
+    pub async fn close_all_sessions_stateful(
+        &mut self,
+        slot_id: CkSlotId,
+    ) -> Result<(), MessageCallError> {
+        let ctx = self.context_id().map_err(MessageCallError::backend)?;
         let req = pkcs11_proxy_ng_proto::CloseAllSessionsRequest {
             client_context_id: ctx,
             slot_id: slot_id.0,
         };
-        pkcs11_unary_ok!(self.grpc.close_all_sessions(req), false)
+        super::stateful_unit_call(self.grpc.close_all_sessions(req), false, |response| {
+            response.ck_rv
+        })
+        .await
     }
 
     pub async fn get_session_info(&mut self, session: CkSessionHandle) -> CkResult<CkSessionInfo> {

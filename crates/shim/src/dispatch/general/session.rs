@@ -57,10 +57,28 @@ pub unsafe extern "C" fn c_close_session(h_session: CK_SESSION_HANDLE) -> CK_RV 
 
 pub unsafe extern "C" fn c_close_all_sessions(slot_id: CK_SLOT_ID) -> CK_RV {
     catch_panics(|| {
-        let result = with_client!(client => client.close_all_sessions(CkSlotId(slot_id as u64)));
-        // Evicted on the attempt, regardless of CK_RV (see evict_slot_session_caches).
-        crate::state::evict_slot_session_caches(slot_id);
-        unit_result_to_rv(result)
+        let result = with_client!(client => client.close_all_sessions_stateful(
+            CkSlotId(slot_id as u64)
+        ));
+        // Q01: settle the slot caches on the decoded outcome (singular-close
+        // discipline). The batch answers one aggregate CK_RV, which proves
+        // per-session death only for OK (everything closed) and for
+        // SLOT_ID_INVALID / CRYPTOKI_NOT_INITIALIZED (no server-side
+        // session can exist for the slot / context) — every other
+        // backend RV leaves survivors possible, so the daemon stays
+        // authoritative and the next call reports the true state.
+        let evict_authoritative = match &result {
+            Ok(()) => true,
+            Err(error) if error.origin != MessageCallErrorOrigin::Backend => true,
+            Err(error) => {
+                error.ck_rv == CkRv::SLOT_ID_INVALID
+                    || error.ck_rv == CkRv::CRYPTOKI_NOT_INITIALIZED
+            }
+        };
+        if evict_authoritative {
+            crate::state::evict_slot_session_caches(slot_id);
+        }
+        unit_result_to_rv(result.map_err(|error| error.ck_rv))
     })
 }
 
