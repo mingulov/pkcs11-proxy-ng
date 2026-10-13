@@ -5895,6 +5895,115 @@ fn timed_out_close_requalifies_message_capability_for_surviving_operation() {
     );
 }
 
+// Q01 round 6 (M2): message-flag `C_SessionCancel` routes through the
+// qualified gate, so a cancel issued after a client-deadline close
+// reconnects and re-qualifies instead of answering local
+// FUNCTION_NOT_SUPPORTED for the surviving native operation. The cancel
+// is the FIRST message-path call after reactivation — no continuation
+// may mask the defect by requalifying first (the pre-fix raw check in
+// `c_session_cancel` fails this test with FNS).
+#[test]
+fn timed_out_close_cancel_recovers_message_capability_for_surviving_operation() {
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let session = shim.open_additional_session();
+    let daemon = TestDaemon::shared();
+
+    // An in-flight GCM message op (shape recorded, daemon-side op live).
+    let key = create_object(session);
+    let mut iv = [0x11_u8; 12];
+    let mut tag = [0_u8; 16];
+    let mut parameter = CK_GCM_MESSAGE_PARAMS {
+        pIv: iv.as_mut_ptr(),
+        ulIvLen: iv.len() as CK_ULONG,
+        ulIvFixedBits: 96,
+        ivGenerator: CKG_NO_GENERATE,
+        pTag: tag.as_mut_ptr(),
+        ulTagBits: 128,
+    };
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_AES_GCM,
+        pParameter: (&mut parameter as *mut CK_GCM_MESSAGE_PARAMS).cast(),
+        ulParameterLen: std::mem::size_of_val(&parameter) as CK_ULONG,
+    };
+    assert_eq!(
+        unsafe { dispatch::general::c_message_encrypt_init(session, &mut mechanism, key) },
+        CKR_OK as CK_RV,
+        "setup: the message init must install the in-flight op"
+    );
+    assert_eq!(
+        test_message_shape(session, state::MessageOperation::Encrypt),
+        Some(MessageParameterShape::Gcm),
+        "setup: the message shape must be recorded"
+    );
+
+    // Deadline close with transient late settlement (alive-twin pattern).
+    daemon.backend.set_close_session_delay(Duration::from_millis(800));
+    daemon.backend.inject_close_error(CkRv::FUNCTION_FAILED);
+    set_shim_rpc_timeout(Duration::from_millis(200));
+    let rv = unsafe { dispatch::general::c_close_session(session) };
+    daemon.backend.clear_close_session_delay();
+    set_shim_rpc_timeout(DEFAULT_RPC_TIMEOUT);
+    // The injected error stays armed: the late completion must observe
+    // the transient failure (cleared right after the poll below).
+
+    assert_eq!(
+        rv, CKR_FUNCTION_FAILED as CK_RV,
+        "a deadline close must answer transport FUNCTION_FAILED"
+    );
+    assert!(state::is_session_known(session), "a deadline close must retain the handle");
+    assert!(state::is_session_suspect(session), "a deadline close must mark the handle suspect");
+    assert_eq!(
+        test_message_shape(session, state::MessageOperation::Encrypt),
+        Some(MessageParameterShape::Gcm),
+        "a deadline close must preserve authoritative shape state",
+    );
+    assert!(
+        !crate::interface_probe::pointer_safe_message_parameters(),
+        "a transport failure must fail the cached message qualification closed"
+    );
+
+    // Late transient settlement reactivates the mapping (polled, then
+    // the injection clears before any assert can leak it).
+    let alive_rv = poll_session_info_rv(session, CKR_OK as CK_RV, Duration::from_secs(10));
+    daemon.backend.clear_close_error();
+    assert_eq!(
+        alive_rv, CKR_OK as CK_RV,
+        "the late transient settlement must reactivate the member"
+    );
+
+    // Cancel FIRST: no message continuation runs before it, so only the
+    // qualified gate can recover the dropped qualification. A raw cached
+    // check answers local FUNCTION_NOT_SUPPORTED here forever.
+    let lifecycle_before = daemon.backend.message_lifecycle_call_count();
+    let cancel_rv = unsafe { dispatch::general::c_session_cancel(session, CKF_MESSAGE_ENCRYPT) };
+    assert_eq!(
+        cancel_rv, CKR_OK as CK_RV,
+        "cancel after timeout+reconnect must requalify and reach the backend, \
+         not fail locally with FUNCTION_NOT_SUPPORTED"
+    );
+    assert!(
+        daemon.backend.message_lifecycle_call_count() > lifecycle_before,
+        "the cancel must reach the backend, not fail locally"
+    );
+    assert_eq!(
+        test_message_shape(session, state::MessageOperation::Encrypt),
+        None,
+        "a successful cancel must clear the selected shape"
+    );
+    assert!(
+        crate::interface_probe::pointer_safe_message_parameters(),
+        "a successful cancel must leave the re-qualified capability installed"
+    );
+
+    // Cleanup closes terminally now that the late completion landed.
+    assert_eq!(
+        unsafe { dispatch::general::c_close_session(session) },
+        CKR_OK as CK_RV,
+        "a retry after transient settlement must close"
+    );
+}
+
 // Q01 maintained oracle: a decoded transient close-all failure must keep
 // the slot's live sessions usable — the daemon stays authoritative and the
 // next Init reaches the backend instead of failing locally.
