@@ -10,6 +10,9 @@ use std::path::PathBuf;
 /// Phase 1 decision for `CK_C_INITIALIZE_ARGS`:
 ///
 /// - `pReserved` non-null → `CKR_ARGUMENTS_BAD` (PKCS#11 §5.4 requirement)
+/// - Some, but not all, mutex callbacks non-null → `CKR_ARGUMENTS_BAD`
+///   (PKCS#11 §5.4 all-or-none rule), regardless of flags; shape
+///   validation precedes capability refusal
 /// - All four mutex callbacks non-null WITHOUT `CKF_OS_LOCKING_OK` →
 ///   `CKR_CANT_LOCK` (tokio runtime cannot delegate to caller mutexes)
 /// - All four mutex callbacks non-null WITH `CKF_OS_LOCKING_OK` → accepted
@@ -64,6 +67,18 @@ unsafe fn parse_init_args(p_init_args: CK_VOID_PTR) -> Option<CK_RV> {
         && destroy_mutex.is_some()
         && lock_mutex.is_some()
         && unlock_mutex.is_some();
+    // PKCS#11 §5.4 all-or-none rule: some, but not all, mutex callbacks
+    // is malformed input. Reject before any local init or network state
+    // changes (this runs before `mark_initialized` in `c_initialize`).
+    // Shape validation precedes capability refusal, so a partial set
+    // stays ARGUMENTS_BAD even with CKF_LIBRARY_CANT_CREATE_OS_THREADS.
+    let any_mutex = create_mutex.is_some()
+        || destroy_mutex.is_some()
+        || lock_mutex.is_some()
+        || unlock_mutex.is_some();
+    if any_mutex && !all_mutex {
+        return Some(rv_err(CkRv::ARGUMENTS_BAD));
+    }
     if all_mutex && (args.flags & CKF_OS_LOCKING_OK) == 0 {
         // Caller demands custom mutexes without allowing OS locking — reject.
         return Some(CKR_CANT_LOCK as CK_RV);
