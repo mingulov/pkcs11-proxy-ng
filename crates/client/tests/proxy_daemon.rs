@@ -31,6 +31,7 @@ fn root_reexports_name_downstream_types() {
         pointer_safe_message_parameters: true,
         pointer_safe_authenticated_parameters: false,
         mechanism_parameter_transport_version: None,
+        exact_token_label_version: None,
     };
     assert_eq!(probe.exact_output_effects_version, Some(1));
     // W1-C10-10: downstream names the interface fields (no positional tuple).

@@ -11,6 +11,28 @@ use super::super::super::context_manager::{ClientContextId, ContextManager};
 use super::super::authorization;
 use super::super::service_utils::{context_exists, resolve_session, resolve_slot, spawn_backend};
 
+/// Q03 phase 2: resolve the wire label fields to the backend label —
+/// pure policy, unit tested. The exact field wins when present: len 0
+/// is NULL, len 32 is raw bytes; any other length is malformed and
+/// fails closed with `ARGUMENTS_BAD` (never truncated). Absent (an old
+/// shim's string-only request) keeps the legacy string path.
+fn resolve_init_token_label(
+    label: &str,
+    label_exact: Option<Vec<u8>>,
+) -> CkResult<InitTokenLabel<'_>> {
+    let exact = match label_exact {
+        None => None,
+        Some(bytes) if bytes.is_empty() => Some(ExactTokenLabel::Null),
+        Some(bytes) if bytes.len() == PKCS11_TOKEN_LABEL_LEN => {
+            let mut raw = [0u8; PKCS11_TOKEN_LABEL_LEN];
+            raw.copy_from_slice(&bytes);
+            Some(ExactTokenLabel::Bytes(raw))
+        }
+        Some(_) => return Err(CkRv::ARGUMENTS_BAD),
+    };
+    Ok(InitTokenLabel { text: label, exact })
+}
+
 pub(super) async fn init_token(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
@@ -58,12 +80,21 @@ pub(super) async fn init_token(
     let so_pin = std::mem::take(&mut req.so_pin).map(SecretBytes::new);
     let label_for_log = req.label.clone();
     let label = std::mem::take(&mut req.label);
+    let label_exact = std::mem::take(&mut req.label_exact);
     let backend = backend_ref.clone();
     let ctx_mgr_task = ctx_mgr.clone();
     let result = spawn_backend(move || {
         let so_pin = so_pin.map(SecretBytes::into_zeroizing);
+        // Q03 phase 2: prefer the exact label when present; a
+        // malformed exact length fails closed here — before any
+        // backend call, so the backend is untouched and (as with
+        // every error return) nothing is invalidated.
+        let label = match resolve_init_token_label(&label, label_exact) {
+            Ok(label) => label,
+            Err(rv) => return Err(rv),
+        };
         let outcome =
-            backend.init_token(backend_slot.0, so_pin.as_deref().map(Vec::as_slice), &label);
+            backend.init_token(backend_slot.0, so_pin.as_deref().map(Vec::as_slice), label);
         // T09: invalidate inside backend-completion ownership — before the
         // result is published — so a successful reinit drops the slot's
         // cached label/serial and advances the authz generation even if the
@@ -180,6 +211,41 @@ pub(super) async fn set_pin(
 
 #[cfg(test)]
 mod tests {
+    use super::resolve_init_token_label;
+    use pkcs11_proxy_ng_types::{CkRv, ExactTokenLabel, PKCS11_TOKEN_LABEL_LEN};
+
+    /// Q03 phase 2: the exact field wins when present — len 0 is NULL,
+    /// len 32 is raw bytes — and absent keeps the legacy string path.
+    #[test]
+    fn resolve_init_token_label_prefers_exact() {
+        let legacy = resolve_init_token_label("hello", None).expect("legacy resolves");
+        assert_eq!(legacy.text, "hello");
+        assert_eq!(legacy.exact, None);
+
+        let null =
+            resolve_init_token_label("", Some(vec![])).expect("empty exact resolves to NULL");
+        assert_eq!(null.exact, Some(ExactTokenLabel::Null));
+
+        let mut raw = [b' '; PKCS11_TOKEN_LABEL_LEN];
+        raw[..5].copy_from_slice(b"BAD\xff\xfe");
+        let bytes = resolve_init_token_label("BAD\u{fffd}", Some(raw.to_vec()))
+            .expect("32-byte exact resolves");
+        assert_eq!(bytes.exact, Some(ExactTokenLabel::Bytes(raw)));
+    }
+
+    /// Q03 phase 2: any other exact length is malformed and fails
+    /// closed with `ARGUMENTS_BAD` — never truncated to fit.
+    #[test]
+    fn resolve_init_token_label_rejects_malformed_lengths() {
+        for len in [1, 4, 31, 33, 64] {
+            assert_eq!(
+                resolve_init_token_label("hello", Some(vec![b'X'; len])).unwrap_err(),
+                CkRv::ARGUMENTS_BAD,
+                "len {len} must fail closed, never truncate"
+            );
+        }
+    }
+
     /// The management handlers' PIN holders (SO PIN, user PIN, old/new
     /// PINs) must redact secrets in Debug. Mirrors the holder
     /// constructions in `init_token` / `init_pin` / `set_pin`.

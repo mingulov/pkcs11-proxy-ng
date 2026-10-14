@@ -26,6 +26,35 @@ use pkcs11_proxy_ng_types::*;
 use super::Pkcs11Client;
 use crate::error::MessageCallError;
 
+/// Q03 phase 2: build the `InitTokenRequest` label fields — pure
+/// policy, unit tested. Negotiated (capability ≥ 1, monotonic: a
+/// newer-than-known daemon still gets the v1 shape): the exact field
+/// rides alongside the compat string. Unnegotiated: legacy
+/// string-only when there is no exact form, or when the exact bytes
+/// are valid UTF-8 (the string fallback is lossless by
+/// construction); NULL and invalid-encoding inputs fail closed with
+/// `ARGUMENTS_BAD` — the documented transport limit, never a
+/// rewrite.
+fn init_token_label_fields(
+    label: InitTokenLabel<'_>,
+    exact_token_label_version: u32,
+) -> CkResult<(String, Option<Vec<u8>>)> {
+    let text = label.text.to_string();
+    let Some(exact) = label.exact else { return Ok((text, None)) };
+    if exact_token_label_version >= EXACT_TOKEN_LABEL_VERSION {
+        let wire = match exact {
+            ExactTokenLabel::Null => Vec::new(),
+            ExactTokenLabel::Bytes(bytes) => bytes.to_vec(),
+        };
+        return Ok((text, Some(wire)));
+    }
+    match exact {
+        ExactTokenLabel::Null => Err(CkRv::ARGUMENTS_BAD),
+        ExactTokenLabel::Bytes(bytes) if std::str::from_utf8(&bytes).is_ok() => Ok((text, None)),
+        ExactTokenLabel::Bytes(_) => Err(CkRv::ARGUMENTS_BAD),
+    }
+}
+
 impl Pkcs11Client {
     pub async fn open_session(
         &mut self,
@@ -121,18 +150,30 @@ impl Pkcs11Client {
         pkcs11_unary_ok!(self.grpc.logout(req), true)
     }
 
+    /// Q03 phase 2: initialize the token, forwarding an exact label
+    /// when the daemon negotiated `exact_token_label_version` ≥ 1 and
+    /// degrading gracefully otherwise. A legacy text-only label always
+    /// takes the string path. Unnegotiated, a valid exact label falls
+    /// back to the string path losslessly (blank-pad of the trimmed
+    /// text reproduces the caller bytes); NULL and invalid-encoding
+    /// labels fail closed locally with `CKR_ARGUMENTS_BAD` — a
+    /// documented transport limit, never a silent rewrite — before any
+    /// RPC is attempted.
     pub async fn init_token(
         &mut self,
         slot_id: CkSlotId,
         so_pin: Option<&[u8]>,
-        label: &str,
+        label: InitTokenLabel<'_>,
     ) -> CkResult<()> {
         let ctx = self.context_id()?;
+        let (label, label_exact) =
+            init_token_label_fields(label, self.exact_token_label_version())?;
         let req = pkcs11_proxy_ng_proto::InitTokenRequest {
             client_context_id: ctx,
             slot_id: slot_id.0,
             so_pin: so_pin.map(|p| p.to_vec()),
-            label: label.to_string(),
+            label,
+            label_exact,
         };
         pkcs11_unary_ok!(self.grpc.init_token(req), true)
     }
@@ -234,6 +275,139 @@ mod tests {
         let err =
             client.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).await.unwrap_err();
         assert_eq!(err, CkRv::DEVICE_ERROR);
+    }
+
+    fn q03_pad_label(prefix: &[u8]) -> [u8; PKCS11_TOKEN_LABEL_LEN] {
+        let mut label = [b' '; PKCS11_TOKEN_LABEL_LEN];
+        label[..prefix.len()].copy_from_slice(prefix);
+        label
+    }
+
+    /// Q03 phase 2: negotiated, the exact field rides alongside the
+    /// compat string (NULL as len 0, bytes as len 32); legacy
+    /// text-only labels stay string-only at any capability.
+    #[test]
+    fn init_token_label_fields_negotiated_sends_exact() {
+        let valid = q03_pad_label(b"A\t");
+        let invalid = q03_pad_label(b"BAD\xff\xfe");
+        for version in [EXACT_TOKEN_LABEL_VERSION, EXACT_TOKEN_LABEL_VERSION + 1] {
+            assert_eq!(
+                super::init_token_label_fields(InitTokenLabel::text_only("A\t"), version),
+                Ok(("A\t".to_string(), None)),
+                "text-only stays string-only at v{version}"
+            );
+            assert_eq!(
+                super::init_token_label_fields(
+                    InitTokenLabel { text: "", exact: Some(ExactTokenLabel::Null) },
+                    version,
+                ),
+                Ok(("".to_string(), Some(Vec::new()))),
+                "NULL sends len-0 exact at v{version}"
+            );
+            assert_eq!(
+                super::init_token_label_fields(
+                    InitTokenLabel { text: "A\t", exact: Some(ExactTokenLabel::Bytes(valid)) },
+                    version,
+                ),
+                Ok(("A\t".to_string(), Some(valid.to_vec()))),
+                "valid bytes send len-32 exact at v{version}"
+            );
+            assert_eq!(
+                super::init_token_label_fields(
+                    InitTokenLabel {
+                        text: "BAD\u{fffd}",
+                        exact: Some(ExactTokenLabel::Bytes(invalid)),
+                    },
+                    version,
+                ),
+                Ok(("BAD\u{fffd}".to_string(), Some(invalid.to_vec()))),
+                "invalid bytes send len-32 exact at v{version}"
+            );
+        }
+    }
+
+    /// Q03 phase 2: unnegotiated, valid exact bytes fall back to the
+    /// string path losslessly, while NULL and invalid-encoding bytes
+    /// fail closed with `ARGUMENTS_BAD` — never rewritten.
+    #[test]
+    fn init_token_label_fields_unnegotiated_falls_back_or_refuses() {
+        let valid = q03_pad_label(b"A\t");
+        let invalid = q03_pad_label(b"BAD\xff\xfe");
+        assert_eq!(
+            super::init_token_label_fields(InitTokenLabel::text_only("A\t"), 0),
+            Ok(("A\t".to_string(), None)),
+            "text-only stays string-only unnegotiated"
+        );
+        assert_eq!(
+            super::init_token_label_fields(
+                InitTokenLabel { text: "A\t", exact: Some(ExactTokenLabel::Bytes(valid)) },
+                0,
+            ),
+            Ok(("A\t".to_string(), None)),
+            "valid exact bytes fall back to the string path unnegotiated"
+        );
+        assert_eq!(
+            super::init_token_label_fields(
+                InitTokenLabel { text: "", exact: Some(ExactTokenLabel::Null) },
+                0,
+            )
+            .unwrap_err(),
+            CkRv::ARGUMENTS_BAD,
+            "NULL fails closed unnegotiated, never empty-label reinit"
+        );
+        assert_eq!(
+            super::init_token_label_fields(
+                InitTokenLabel {
+                    text: "BAD\u{fffd}",
+                    exact: Some(ExactTokenLabel::Bytes(invalid)),
+                },
+                0,
+            )
+            .unwrap_err(),
+            CkRv::ARGUMENTS_BAD,
+            "invalid bytes fail closed unnegotiated, never U+FFFD-substituted"
+        );
+    }
+
+    /// Q03 phase 2: the client gate refuses NULL/invalid labels
+    /// locally when unnegotiated — `ARGUMENTS_BAD` before any RPC (an
+    /// attempted RPC against the dead channel would surface as
+    /// transport `DEVICE_ERROR` instead).
+    #[tokio::test]
+    async fn init_token_unnegotiated_exact_refuses_before_any_rpc() {
+        let mut client = dead_channel_client();
+        client.restore_context_id(Some("q03-gate".into()));
+        assert_eq!(client.exact_token_label_version(), 0);
+        let invalid = q03_pad_label(b"BAD\xff\xfe");
+        for label in [
+            InitTokenLabel { text: "", exact: Some(ExactTokenLabel::Null) },
+            InitTokenLabel { text: "BAD\u{fffd}", exact: Some(ExactTokenLabel::Bytes(invalid)) },
+        ] {
+            assert_eq!(
+                client.init_token(CkSlotId(0), Some(b"1234"), label).await.unwrap_err(),
+                CkRv::ARGUMENTS_BAD,
+                "unnegotiated {label:?} must fail closed before any RPC"
+            );
+        }
+    }
+
+    /// Q03 phase 2: the valid-label string fallback really sends the
+    /// RPC unnegotiated — the dead channel answers with transport
+    /// `DEVICE_ERROR`, not a local refusal.
+    #[tokio::test]
+    async fn init_token_unnegotiated_valid_label_sends_string_fallback() {
+        let mut client = dead_channel_client();
+        client.restore_context_id(Some("q03-fallback".into()));
+        let valid = q03_pad_label(b"A\t");
+        let err = client
+            .init_token(
+                CkSlotId(0),
+                Some(b"1234"),
+                InitTokenLabel { text: "A\t", exact: Some(ExactTokenLabel::Bytes(valid)) },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err, CkRv::DEVICE_ERROR, "string fallback must attempt the RPC");
     }
 
     // W1-L3-06: twin of the discovery.rs scan for the 5th absent-info site

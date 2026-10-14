@@ -504,7 +504,7 @@ mod message_contract_tests {
     async fn require_supported_cached_version_needs_no_probe() {
         let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
         let mut client = Pkcs11Client::from_channel(channel);
-        client.note_backend_probe(1, true, 0);
+        client.note_backend_probe(1, true, 0, 0);
         assert!(client.require_exact_output_effects().await.is_ok());
     }
 
@@ -514,7 +514,7 @@ mod message_contract_tests {
     async fn require_unsupported_cached_version_fails_closed() {
         let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
         let mut client = Pkcs11Client::from_channel(channel);
-        client.note_backend_probe(99, true, 0);
+        client.note_backend_probe(99, true, 0, 0);
         assert_eq!(client.require_exact_output_effects().await, Err(CkRv::FUNCTION_NOT_SUPPORTED));
     }
 

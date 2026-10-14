@@ -1,37 +1,38 @@
-//! Q03 phase 1: DIRECT native `C_InitToken` label outcomes on a disposable
+//! Q03: DIRECT native `C_InitToken` label outcomes on a disposable
 //! stock-SoftHSM2 token (never a user token).
 //!
-//! The current proxy cannot forward a NULL label or invalid-encoding label
-//! bytes: the shim rewrites NULL to the empty label and decodes the rest
-//! lossy before the string-only wire format. Before the phase-2 refusal
-//! policy is proposed, this probe records what stock SoftHSM2 actually does
-//! with those inputs when called DIRECTLY — through the provider function
-//! table via `libloading`, bypassing both the proxy and `FfiBackend`
-//! (`ffi_init_token` cannot forward NULL today, so only a direct table
-//! call is ground truth). Run with:
+//! This probe records what stock SoftHSM2 does with NULL,
+//! invalid-encoding, and valid whitespace label bytes when called
+//! DIRECTLY — through the provider function table via `libloading`,
+//! bypassing both the proxy and `FfiBackend` — so the proxy's
+//! provider-decides contract has native ground truth. Run with:
 //!
 //! ```text
 //! cargo test -p pkcs11-proxy-ng-shim --lib -- --ignored token_label_native --nocapture
 //! ```
 //!
-//! The test is `#[ignore]`, so default CI runs stay green without the
-//! provider. If you opt in with `--ignored` but SoftHSM2 is missing, the
-//! fixture panics with instructions rather than passing silently (L14).
-//! Observed values are pinned in-code as native ground truth (the
-//! kryoptic GAV-NULL precedent); the phase-1 input-contract note cites the
-//! recording log under `doc/plans/evidence/2026-10-13-q03-labels/`.
+//! Both tests are `#[ignore]`, so default CI runs stay green without
+//! the provider. If you opt in with `--ignored` but SoftHSM2 is
+//! missing, the fixture panics with instructions rather than passing
+//! silently (L14). Observed values are pinned in-code as native
+//! ground truth (the kryoptic GAV-NULL precedent); the input-contract
+//! note cites the recording log under
+//! `doc/plans/evidence/2026-10-13-q03-labels/`.
+//!
+//! Process isolation (finding 3): the parent test spawns a FRESH
+//! child process (this same test binary, filtered to the child test)
+//! and asserts on its exit status and recording lines. The child
+//! owns `SOFTHSM2_CONF` and the provider lifetime alone in its
+//! process — no coordination with other SoftHSM tests' env windows
+//! or process-lifetime provider handles is needed, and parallel
+//! execution cannot race configuration changes. The parent itself
+//! touches no process-global state (it even strips any inherited
+//! `SOFTHSM2_CONF` from the child env).
 
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
 
 use super::*;
-
-static Q03_NATIVE_PROBE_LOCK: Mutex<()> = Mutex::new(());
-
-fn q03_probe_guard() -> MutexGuard<'static, ()> {
-    Q03_NATIVE_PROBE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-}
 
 /// System search list for stock `libsofthsm2.so` (same list as the
 /// server-suite `ProviderFixture` and `softhsm_gcm.rs`).
@@ -188,22 +189,55 @@ impl Q03DirectProvider {
     }
 }
 
-/// Q03 phase 1: DIRECT native `C_InitToken` label outcomes (native ground
-/// truth, pinned).
+/// Q03: DIRECT native `C_InitToken` label outcomes (native ground
+/// truth, pinned) — via a fresh child process.
 ///
 /// Observed on stock SoftHSM2 2.6.1 (`/usr/lib/softhsm/libsofthsm2.so`;
 /// recording log `record-q03-direct-native-outcomes.log`):
 ///
 /// - trailing TAB: `CKR_OK`, stored verbatim — the provider accepts the
-///   whitespace the pre-fix proxy stripped, so phase-1 preservation is a
-///   fidelity fix, not a tightening;
+///   whitespace the pre-fix proxy stripped;
 /// - invalid UTF-8 (`BAD\xff\xfe`): `CKR_OK`, stored verbatim — this
-///   provider accepts arbitrary label bytes, so a phase-2 local refusal
-///   of invalid encodings would DIVERGE from it (the additive negotiated
-///   exact-label path preserves fidelity instead; see the input-contract
-///   note);
-/// - NULL label: `CKR_ARGUMENTS_BAD` with NO side effects (stored label
-///   unchanged) — a phase-2 local NULL refusal matches this provider.
+///   provider accepts arbitrary label bytes, so the proxy's exact-label
+///   path preserves fidelity by forwarding them (see the
+///   input-contract note);
+/// - NULL label: `CKR_ARGUMENTS_BAD` with the stored label unchanged.
+///
+/// This parent only spawns the child and checks its exit status plus
+/// the `Q03-DIRECT` recording lines; the child owns all provider
+/// contact. Finding 3: no process-global `SOFTHSM2_CONF` or provider
+/// coordination is needed — the child is a fresh process.
+#[ignore]
+#[test]
+fn q03_direct_native_init_token_label_outcomes() {
+    let exe = std::env::current_exe().expect("current test binary");
+    let output = std::process::Command::new(exe)
+        .arg("--exact")
+        .arg("tests::token_label_native_probe::q03_direct_native_probe_child")
+        .arg("--nocapture")
+        .arg("--ignored")
+        .env_remove("SOFTHSM2_CONF")
+        .output()
+        .expect("spawn the isolated probe child");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "isolated probe child must pass exactly its test (status: {:?}):\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+        output.status.code()
+    );
+    for (name, rv) in
+        [("valid-trailing-tab", "0x0"), ("invalid-utf8", "0x0"), ("null-label", "0x7")]
+    {
+        assert!(
+            stderr.contains(&format!("Q03-DIRECT {name}: rv={rv}")),
+            "child must record Q03-DIRECT {name}: rv={rv}:\n--- stderr ---\n{stderr}"
+        );
+    }
+}
+
+/// The isolated probe body: runs ONLY in the fresh child process
+/// spawned above (or when invoked directly with an explicit filter).
 ///
 /// Recording lines use `eprintln!` (unbuffered) so a provider crash in a
 /// later case cannot swallow an earlier case's outcome. Cases run in
@@ -213,8 +247,7 @@ impl Q03DirectProvider {
 // Recording output (read with `-- --nocapture`); production code stays
 // under the workspace print/dbg deny.
 #[allow(clippy::print_stderr)]
-fn q03_direct_native_init_token_label_outcomes() {
-    let _guard = q03_probe_guard();
+fn q03_direct_native_probe_child() {
     let _token = Q03SoftHsmToken::init("Q03BASE");
     let provider = Q03DirectProvider::load();
     provider.initialize();
@@ -241,7 +274,7 @@ fn q03_direct_native_init_token_label_outcomes() {
     assert_eq!(rv_bad, CKR_OK as CK_RV, "SoftHSM2 accepts invalid-UTF-8 label bytes");
     assert_eq!(back_bad, bad, "SoftHSM2 stores invalid-UTF-8 label bytes verbatim");
 
-    // (c) NULL label: clean refusal, token untouched.
+    // (c) NULL label: clean refusal, stored label unchanged.
     let rv_null = provider.init_token_direct(slot, so_pin, std::ptr::null_mut());
     let back_null = provider.token_label_bytes(slot);
     eprintln!("Q03-DIRECT null-label: rv={rv_null:#x} stored={back_null:02x?}");

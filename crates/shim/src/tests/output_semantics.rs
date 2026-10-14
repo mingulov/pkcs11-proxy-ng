@@ -15,8 +15,8 @@ use pkcs11_proxy_ng_types::{
     CkAttributeQuery, CkAttributeQueryResult, CkAttributeType, CkAttributeValue, CkInBuf,
     CkMechanismParams, CkMechanismType, CkObjectHandle, CkOutputBufferResult, CkOutputBufferSpec,
     CkParameterRoundtripResult, CkParameterRoundtripSpec, CkRv, CkSessionFlags, CkSlotId,
-    GcmParams, InterfaceCapabilities, InterfaceInfo, ParameterOutputFunction, PointerBytes,
-    encode_native_ulong,
+    GcmParams, InitTokenLabel, InterfaceCapabilities, InterfaceInfo, ParameterOutputFunction,
+    PointerBytes, encode_native_ulong,
 };
 use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
@@ -6076,7 +6076,7 @@ fn q03_pad_label(prefix: &[u8]) -> [u8; pkcs11_proxy_ng_types::PKCS11_TOKEN_LABE
 fn q03_direct_control_stores_verbatim(trimmed: &str) {
     let direct = MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::SHA256]);
     direct
-        .init_token(CkSlotId(0), Some(b"1234"), trimmed)
+        .init_token(CkSlotId(0), Some(b"1234"), InitTokenLabel::text_only(trimmed))
         .expect("direct control accepts the valid label");
     let info = direct.get_token_info(CkSlotId(0)).expect("direct control token info");
     assert_eq!(info.label, trimmed, "direct control stores the label verbatim");
@@ -6196,19 +6196,197 @@ fn q03_embedded_nul_label_round_trips_byte_exact() {
     );
 }
 
-/// Q03 phase 1 CURRENT-BEHAVIOR pin — phase 2 changes this.
-///
-/// A NULL `pLabel` is currently rewritten to the empty label (→ 32
-/// spaces on the wire): this test pins that rewrite end to end so the
-/// phase-2 refusal (`CKR_ARGUMENTS_BAD`, awaiting explicit owner
-/// acceptance) has a clear flip target. Do NOT extend this behavior;
-/// update this test when phase 2 lands.
+/// Q03 phase 2: a NULL `pLabel` is forwarded to the provider — never
+/// rewritten to the empty label. The mock decides like observed stock
+/// SoftHSM2 (`CKR_ARGUMENTS_BAD`, stored label unchanged); a real
+/// provider's own RV propagates instead of any proxy-side rewrite.
 #[test]
-fn q03_null_label_currently_rewrites_to_empty_label() {
+fn q03_null_label_reaches_provider_without_rewrite() {
     let _guard = shim_state_test_guard();
     let _saved = R5SavedEndpoint::capture();
     let daemon = TestDaemon::fresh();
     let shim = ShimSession::with_endpoint(&daemon.endpoint);
+    let so_pin = *b"1234";
+    let mut before: CK_TOKEN_INFO = unsafe { std::mem::zeroed() };
+    let rv = unsafe { dispatch::general::c_get_token_info(shim.slot_id, &mut before) };
+    assert_eq!(rv, CKR_OK as CK_RV, "baseline C_GetTokenInfo succeeds");
+    let requested_before = daemon.backend.init_token_requested_slots().len();
+    let rv = unsafe {
+        dispatch::general::c_init_token(
+            shim.slot_id,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            std::ptr::null_mut(),
+        )
+    };
+    assert_eq!(
+        rv, CKR_ARGUMENTS_BAD as CK_RV,
+        "NULL label must reach the provider, never rewrite to the empty label"
+    );
+    assert_eq!(
+        daemon.backend.init_token_requested_slots().len(),
+        requested_before + 1,
+        "the provider decided the NULL label — the backend was reached"
+    );
+    let mut after: CK_TOKEN_INFO = unsafe { std::mem::zeroed() };
+    let rv = unsafe { dispatch::general::c_get_token_info(shim.slot_id, &mut after) };
+    assert_eq!(rv, CKR_OK as CK_RV, "C_GetTokenInfo succeeds");
+    assert_eq!(
+        after.label, before.label,
+        "provider NULL refusal leaves the stored label unchanged"
+    );
+}
+
+/// Q03 phase 2: invalid-encoding label bytes are forwarded verbatim —
+/// never U+FFFD-substituted on the `C_InitToken` path. The mock
+/// accepts them like observed stock SoftHSM2; verbatim storage is
+/// asserted through the mock's byte-exact label store.
+#[test]
+fn q03_invalid_utf8_label_forwards_verbatim() {
+    let _guard = shim_state_test_guard();
+    let _saved = R5SavedEndpoint::capture();
+    let daemon = TestDaemon::fresh();
+    let shim = ShimSession::with_endpoint(&daemon.endpoint);
+    let so_pin = *b"1234";
+    let label = q03_pad_label(b"BAD\xff");
+    let rv = unsafe {
+        dispatch::general::c_init_token(
+            shim.slot_id,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
+    assert_eq!(rv, CKR_OK as CK_RV, "provider accepts invalid-encoding label bytes");
+    let slot = *daemon.backend.init_token_requested_slots().last().expect("backend reached");
+    assert_eq!(
+        daemon.backend.token_label_bytes(slot),
+        Some(label),
+        "invalid-encoding bytes are stored verbatim"
+    );
+    // Documented readback limit (NOT the InitToken path): the
+    // `C_GetTokenInfo` readback stays on the pre-existing lossy
+    // `String` path end to end (`CkTokenInfo.label` is a `String`;
+    // the FFI backend renders it with `from_utf8_lossy` too), so it
+    // shows the compat text while the stored bytes stay verbatim.
+    let mut info: CK_TOKEN_INFO = unsafe { std::mem::zeroed() };
+    let rv = unsafe { dispatch::general::c_get_token_info(shim.slot_id, &mut info) };
+    assert_eq!(rv, CKR_OK as CK_RV, "C_GetTokenInfo succeeds");
+    assert_eq!(
+        info.label,
+        q03_pad_label("BAD\u{fffd}".as_bytes()),
+        "readback shows the compat text (documented lossy-readback limit)"
+    );
+}
+
+/// Q03 phase 2 old-daemon simulation: forces the shared client's
+/// exact-label cache to legacy 0 in scope (a fresh `ShimSession`
+/// probes to 1 against the test daemon) and restores 1 on drop. The
+/// caller must hold `shim_state_test_guard`; a fresh `ShimSession`
+/// re-probes (to 1) anyway, so a leak could only affect the current
+/// test. Mirrors `R23LegacyGuard` (the init-token gate lives in the
+/// client, so only the client edge needs injection).
+struct Q03LegacyLabelGuard;
+
+impl Q03LegacyLabelGuard {
+    fn simulate_old_daemon() -> Self {
+        state::runtime().block_on(async {
+            state::client().lock().await.set_exact_token_label_version_for_tests(0);
+        });
+        let version = state::runtime()
+            .block_on(async { state::client().lock().await.exact_token_label_version() });
+        assert_eq!(version, 0, "legacy simulation must force capability 0");
+        Self
+    }
+}
+
+impl Drop for Q03LegacyLabelGuard {
+    fn drop(&mut self) {
+        state::runtime().block_on(async {
+            state::client().lock().await.set_exact_token_label_version_for_tests(1);
+        });
+    }
+}
+
+/// Q03 phase 2: production discovery feeds the exact-label
+/// capability — a fresh session against the test daemon negotiates
+/// v1 with no injection (mirror of the R23 v1 proof).
+#[test]
+fn q03_production_discovery_negotiates_exact_labels() {
+    let _guard = shim_state_test_guard();
+    let _saved = R5SavedEndpoint::capture();
+    let daemon = TestDaemon::fresh();
+    let _shim = ShimSession::with_endpoint(&daemon.endpoint);
+    let version = state::runtime()
+        .block_on(async { state::client().lock().await.exact_token_label_version() });
+    assert_eq!(version, 1, "production discovery must advertise exact-label v1");
+}
+
+/// Q03 phase 2 interop (old/new peer matrix, valid labels): the
+/// exact path (negotiated) and the string path (legacy-forced) store
+/// byte-identical labels for every valid vector — both directions of
+/// the same invariant.
+#[test]
+fn q03_valid_label_exact_and_string_paths_agree() {
+    let _guard = shim_state_test_guard();
+    let _saved = R5SavedEndpoint::capture();
+    let daemon = TestDaemon::fresh();
+    let shim = ShimSession::with_endpoint(&daemon.endpoint);
+    let so_pin = *b"1234";
+    for raw in [
+        q03_pad_label(b"hello"),
+        q03_pad_label("tökén-héllo".as_bytes()),
+        *b"0123456789abcdef0123456789abcdef",
+        q03_pad_label(b"A\t"),
+        q03_pad_label("B\u{a0}".as_bytes()),
+        [b' '; pkcs11_proxy_ng_types::PKCS11_TOKEN_LABEL_LEN],
+        q03_pad_label(b"C\0D"),
+    ] {
+        // Negotiated: the exact path.
+        let rv = unsafe {
+            dispatch::general::c_init_token(
+                shim.slot_id,
+                so_pin.as_ptr() as *mut _,
+                so_pin.len() as CK_ULONG,
+                raw.as_ptr() as *mut _,
+            )
+        };
+        assert_eq!(rv, CKR_OK as CK_RV, "negotiated C_InitToken succeeds for {raw:02x?}");
+        let slot = *daemon.backend.init_token_requested_slots().last().expect("backend reached");
+        let via_exact = daemon.backend.token_label_bytes(slot);
+        // Legacy-forced: the string path.
+        let _legacy = Q03LegacyLabelGuard::simulate_old_daemon();
+        let rv = unsafe {
+            dispatch::general::c_init_token(
+                shim.slot_id,
+                so_pin.as_ptr() as *mut _,
+                so_pin.len() as CK_ULONG,
+                raw.as_ptr() as *mut _,
+            )
+        };
+        assert_eq!(rv, CKR_OK as CK_RV, "legacy C_InitToken succeeds for {raw:02x?}");
+        let slot = *daemon.backend.init_token_requested_slots().last().expect("backend reached");
+        let via_string = daemon.backend.token_label_bytes(slot);
+        drop(_legacy);
+        assert_eq!(via_exact, Some(raw), "exact path stores {raw:02x?} byte-exact");
+        assert_eq!(
+            via_string, via_exact,
+            "string path stores {raw:02x?} byte-identically to the exact path"
+        );
+    }
+}
+
+/// Q03 phase 2 (old/new peer matrix): unnegotiated, a NULL label
+/// fails closed locally with `CKR_ARGUMENTS_BAD` before any RPC —
+/// never rewritten to the empty label.
+#[test]
+fn q03_unnegotiated_null_label_fails_closed_before_any_rpc() {
+    let _guard = shim_state_test_guard();
+    let _saved = R5SavedEndpoint::capture();
+    let daemon = TestDaemon::fresh();
+    let shim = ShimSession::with_endpoint(&daemon.endpoint);
+    let _legacy = Q03LegacyLabelGuard::simulate_old_daemon();
+    let requested_before = daemon.backend.init_token_requested_slots().len();
     let so_pin = *b"1234";
     let rv = unsafe {
         dispatch::general::c_init_token(
@@ -6218,31 +6396,45 @@ fn q03_null_label_currently_rewrites_to_empty_label() {
             std::ptr::null_mut(),
         )
     };
-    assert_eq!(rv, CKR_OK as CK_RV, "phase-1 NULL label still reinits (phase 2 refuses)");
-    let mut info: CK_TOKEN_INFO = unsafe { std::mem::zeroed() };
-    let rv = unsafe { dispatch::general::c_get_token_info(shim.slot_id, &mut info) };
-    assert_eq!(rv, CKR_OK as CK_RV, "C_GetTokenInfo succeeds");
     assert_eq!(
-        info.label,
-        [b' '; pkcs11_proxy_ng_types::PKCS11_TOKEN_LABEL_LEN],
-        "phase-1 NULL label currently rewrites to the empty label"
+        rv, CKR_ARGUMENTS_BAD as CK_RV,
+        "unnegotiated NULL must fail closed, never rewrite to empty"
+    );
+    assert_eq!(
+        daemon.backend.init_token_requested_slots().len(),
+        requested_before,
+        "local refusal sends no RPC and reaches no backend"
     );
 }
 
-/// Q03 phase 1 CURRENT-BEHAVIOR pin — phase 2 changes this.
-///
-/// Invalid-UTF-8 label bytes are currently passed through lossy
-/// decoding (U+FFFD substitution): this test pins that substitution
-/// end to end so the phase-2 refusal (`CKR_ARGUMENTS_BAD`, awaiting
-/// explicit owner acceptance) has a clear flip target. Do NOT extend
-/// this behavior; update this test when phase 2 lands.
+/// Q03 phase 2 (old/new peer matrix): unnegotiated, invalid-encoding
+/// label bytes fail closed locally with `CKR_ARGUMENTS_BAD` before
+/// any RPC — never U+FFFD-substituted.
 #[test]
-fn q03_invalid_utf8_label_currently_decodes_lossy() {
+fn q03_unnegotiated_invalid_label_fails_closed_before_any_rpc() {
+    let _guard = shim_state_test_guard();
+    let _saved = R5SavedEndpoint::capture();
+    let daemon = TestDaemon::fresh();
+    let shim = ShimSession::with_endpoint(&daemon.endpoint);
+    let _legacy = Q03LegacyLabelGuard::simulate_old_daemon();
+    let requested_before = daemon.backend.init_token_requested_slots().len();
+    let so_pin = *b"1234";
     let label = q03_pad_label(b"BAD\xff");
-    let expected = q03_pad_label("BAD\u{fffd}".as_bytes());
+    let rv = unsafe {
+        dispatch::general::c_init_token(
+            shim.slot_id,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
     assert_eq!(
-        q03_proxy_round_trip_returns_caller_bytes(&label),
-        expected,
-        "phase-1 invalid UTF-8 currently decodes lossy"
+        rv, CKR_ARGUMENTS_BAD as CK_RV,
+        "unnegotiated invalid bytes must fail closed, never substitute"
+    );
+    assert_eq!(
+        daemon.backend.init_token_requested_slots().len(),
+        requested_before,
+        "local refusal sends no RPC and reaches no backend"
     );
 }

@@ -90,6 +90,9 @@ fn client_pin_zeroize_clears_pin_fields() {
         slot_id: 7,
         so_pin: pin.map(|p| p.to_vec()),
         label: "token".to_string(),
+        // Text-only label, exactly as `init_token` builds it (no exact
+        // form): the wipe contract covers the PIN field.
+        label_exact: None,
     };
     assert_canary_nonempty(
         "InitTokenRequest.so_pin",

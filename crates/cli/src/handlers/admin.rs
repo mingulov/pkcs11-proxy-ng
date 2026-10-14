@@ -12,8 +12,11 @@ pub(crate) async fn init_token(
     // By-value PIN (W1-L2-11): transfer the wiping allocation into the
     // call; it is wiped on drop afterwards.
     let so = so_pin.into_zeroizing();
+    // Q03 phase 2: CLI labels are Rust `String`s (always valid UTF-8),
+    // so the legacy string-only path carries them losslessly with no
+    // negotiation needed.
     client
-        .init_token(CkSlotId(slot_id), Some(so.as_slice()), &label)
+        .init_token(CkSlotId(slot_id), Some(so.as_slice()), InitTokenLabel::text_only(&label))
         .await
         .map_err(crate::handlers::cli_err("C_InitToken"))?;
     println!("Token initialized successfully.");

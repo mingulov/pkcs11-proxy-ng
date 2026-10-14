@@ -69,7 +69,11 @@ pub async fn ensure_user_token(
             let mut init_errors = Vec::new();
             for slot in slots {
                 match client
-                    .init_token(slot, Some(fixture.so_pin.as_bytes()), &fixture.token_label)
+                    .init_token(
+                        slot,
+                        Some(fixture.so_pin.as_bytes()),
+                        InitTokenLabel::text_only(&fixture.token_label),
+                    )
                     .await
                 {
                     Ok(()) => {

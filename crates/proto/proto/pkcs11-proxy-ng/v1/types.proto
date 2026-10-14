@@ -985,6 +985,13 @@ message InitTokenRequest {
   uint64 slot_id = 2;
   optional bytes so_pin = 3;  // None = NULL pPin pointer
   string label = 4;
+  // Q03 phase 2 exact label (additive, negotiated): absent = legacy
+  // string-only request (old shim); present len 0 = NULL pLabel;
+  // present len 32 = raw caller bytes. Any other length is malformed
+  // and the daemon fails closed with CKR_ARGUMENTS_BAD, never
+  // truncating. `label` stays populated as before for compat; the
+  // daemon prefers this field when present.
+  optional bytes label_exact = 5;
 }
 message InitTokenResponse {
   uint64 ck_rv = 1;
@@ -1767,6 +1774,12 @@ message GetBackendInterfacesResponse {
   // Daemon's native mechanism-parameter ABI (see MechanismParamAbi).
   // Absent = unspecified (legacy daemon).
   optional MechanismParamAbi backend_mechanism_abi = 10;
+  // Exact token-label transport capability (Q03 phase 2): the highest
+  // v1 encoding version the daemon accepts. Absent/zero = legacy
+  // string-only labels. Monotonic maximum capability (S2 §3 style): a
+  // discovery capability newer than the client knows is NOT an error
+  // (the client uses the newest version it understands).
+  optional uint32 exact_token_label_version = 11;
 }
 
 // Server-driven mechanism parameter registry payload. Carries the

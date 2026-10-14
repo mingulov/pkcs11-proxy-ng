@@ -629,6 +629,7 @@ async fn init_token_produces_audit_log_without_so_pin() {
                 slot_id: virtual_slot.0,
                 so_pin: Some(so_pin.clone()),
                 label: "test-token".into(),
+                label_exact: None,
             }),
         )
         .await;
@@ -1829,6 +1830,123 @@ async fn setup_session_with_mock() -> (Arc<ContextManager>, Arc<MockBackend>, Cl
     let ctx_id = ctx_mgr.create_context(None).await.unwrap();
     let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
     (ctx_mgr, mock, ctx_id, session)
+}
+
+async fn init_token_rv(
+    ctx_mgr: &Arc<ContextManager>,
+    backend: &Arc<dyn Pkcs11Backend>,
+    ctx_id: &ClientContextId,
+    slot_id: u64,
+    label: &str,
+    label_exact: Option<Vec<u8>>,
+) -> u64 {
+    init_token(
+        ctx_mgr,
+        backend,
+        Request::new(pkcs11_proxy_ng_proto::InitTokenRequest {
+            client_context_id: ctx_id.0.clone(),
+            slot_id,
+            so_pin: Some(b"test-only-pin".to_vec()),
+            label: label.into(),
+            label_exact,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv
+}
+
+/// Q03 phase 2: a malformed exact length fails closed with
+/// `ARGUMENTS_BAD` before any backend call — the backend is
+/// untouched and the stored label is unchanged (never truncated).
+#[tokio::test]
+async fn init_token_malformed_label_exact_fails_closed_without_backend_call() {
+    let (ctx_mgr, mock, ctx_id, _session) = setup_session_with_mock().await;
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let virtual_slot = ctx_mgr.virtual_slots().await[0];
+    let label_before = mock.get_token_info(CkSlotId(0)).expect("token info").label;
+
+    let rv =
+        init_token_rv(&ctx_mgr, &backend, &ctx_id, virtual_slot.0, "hello", Some(vec![b'X'; 5]))
+            .await;
+    assert_eq!(rv, CkRv::ARGUMENTS_BAD.0);
+    assert!(
+        mock.init_token_requested_slots().is_empty(),
+        "malformed exact must never reach the backend"
+    );
+    assert_eq!(
+        mock.get_token_info(CkSlotId(0)).expect("token info").label,
+        label_before,
+        "malformed exact leaves the stored label unchanged"
+    );
+}
+
+/// Q03 phase 2: an empty exact field is NULL — forwarded to the
+/// provider (the mock refuses like observed SoftHSM2) instead of
+/// being rewritten to the empty label.
+#[tokio::test]
+async fn init_token_empty_label_exact_forwards_null_to_provider() {
+    let (ctx_mgr, mock, ctx_id, _session) = setup_session_with_mock().await;
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let virtual_slot = ctx_mgr.virtual_slots().await[0];
+    let label_before = mock.get_token_info(CkSlotId(0)).expect("token info").label;
+
+    let rv = init_token_rv(&ctx_mgr, &backend, &ctx_id, virtual_slot.0, "", Some(vec![])).await;
+    assert_eq!(rv, CkRv::ARGUMENTS_BAD.0);
+    assert_eq!(
+        mock.init_token_requested_slots(),
+        vec![CkSlotId(0)],
+        "NULL reaches the backend exactly once"
+    );
+    assert_eq!(
+        mock.get_token_info(CkSlotId(0)).expect("token info").label,
+        label_before,
+        "NULL refusal leaves the stored label unchanged"
+    );
+}
+
+/// Q03 phase 2: 32 exact bytes — including invalid-encoding bytes —
+/// are stored verbatim; the compat string field is ignored when the
+/// exact field is present.
+#[tokio::test]
+async fn init_token_32_byte_label_exact_stores_verbatim() {
+    let (ctx_mgr, mock, ctx_id, _session) = setup_session_with_mock().await;
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let virtual_slot = ctx_mgr.virtual_slots().await[0];
+    let mut raw = [b' '; PKCS11_TOKEN_LABEL_LEN];
+    raw[..5].copy_from_slice(b"BAD\xff\xfe");
+
+    let rv = init_token_rv(
+        &ctx_mgr,
+        &backend,
+        &ctx_id,
+        virtual_slot.0,
+        "WRONG-COMPAT-TEXT",
+        Some(raw.to_vec()),
+    )
+    .await;
+    assert_eq!(rv, CkRv::OK.0);
+    assert_eq!(mock.token_label_bytes(CkSlotId(0)), Some(raw), "exact bytes are stored verbatim");
+}
+
+/// Q03 phase 2 (old-shim compat): an absent exact field keeps the
+/// legacy string path byte-for-byte.
+#[tokio::test]
+async fn init_token_absent_label_exact_keeps_legacy_string_path() {
+    let (ctx_mgr, mock, ctx_id, _session) = setup_session_with_mock().await;
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let virtual_slot = ctx_mgr.virtual_slots().await[0];
+    let mut expected = [b' '; PKCS11_TOKEN_LABEL_LEN];
+    expected[..2].copy_from_slice(b"A\t");
+
+    let rv = init_token_rv(&ctx_mgr, &backend, &ctx_id, virtual_slot.0, "A\t", None).await;
+    assert_eq!(rv, CkRv::OK.0);
+    assert_eq!(
+        mock.token_label_bytes(CkSlotId(0)),
+        Some(expected),
+        "legacy string path blank-pads exactly as before"
+    );
 }
 
 #[tokio::test]

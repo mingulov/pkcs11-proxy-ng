@@ -85,6 +85,57 @@ pub fn space_pad_into(dest: &mut [u8], src: &str) {
 /// buffers, label reads, and label pad widths all use this.
 pub const PKCS11_TOKEN_LABEL_LEN: usize = 32;
 
+/// Exact token-label transport capability (Q03 phase 2): the `v1`
+/// `exact_token_label_version` discovery value this build speaks.
+/// Monotonic maximum capability (S2 §3 style): a newer daemon keeps
+/// accepting older requests, and a client gates exact-label emission
+/// on `advertised >= 1`, never on equality.
+pub const EXACT_TOKEN_LABEL_VERSION: u32 = 1;
+
+/// Exact `C_InitToken` label input (Q03 phase 2): label presence plus
+/// the raw 32 caller bytes, carried alongside the legacy string field
+/// and gated by the negotiated `exact_token_label_version` capability.
+///
+/// The proxy NEVER normalizes these: a NULL pointer stays NULL (never
+/// an empty-label reinit) and invalid-encoding bytes stay byte-exact
+/// (never U+FFFD-substituted). The provider accepts or refuses; its RV
+/// propagates unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExactTokenLabel {
+    /// NULL `pLabel`: forward a null label pointer; the provider decides.
+    Null,
+    /// Raw 32 caller bytes (valid or not): forward unmodified through a
+    /// non-null pointer; the provider decides.
+    Bytes([u8; PKCS11_TOKEN_LABEL_LEN]),
+}
+
+/// `C_InitToken` label with its legacy and exact forms (Q03 phase 2).
+///
+/// Pairing invariant: `text` is always populated as the phase-1 string
+/// path populates it (NULL → `""`, valid → trailing-space-trimmed,
+/// invalid → legacy lossy compat), and `exact` carries the raw input
+/// when the caller can express it. Consumers prefer `exact` when the
+/// peer negotiated the capability and fall back to `text` otherwise;
+/// the fallback is lossless exactly for valid UTF-8 inputs (blank-pad
+/// of the trimmed text reproduces the caller bytes), so NULL and
+/// invalid-encoding inputs fail closed with `CKR_ARGUMENTS_BAD`
+/// against an unnegotiated peer instead of being rewritten.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InitTokenLabel<'a> {
+    /// Compat string; authoritative when `exact` is `None` (legacy
+    /// string-only requests from old shims and non-shim clients).
+    pub text: &'a str,
+    /// Exact form; `None` = legacy string-only request.
+    pub exact: Option<ExactTokenLabel>,
+}
+
+impl<'a> InitTokenLabel<'a> {
+    /// Legacy string-only label (old-shim shape): no exact form.
+    pub fn text_only(text: &'a str) -> Self {
+        Self { text, exact: None }
+    }
+}
+
 #[cfg(test)]
 mod space_pad_tests {
     use super::space_pad_into;

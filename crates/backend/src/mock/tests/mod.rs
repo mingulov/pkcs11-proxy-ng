@@ -9,6 +9,7 @@ mod profiles;
 mod rest;
 mod session_state;
 mod terminating_duals;
+mod token_label;
 mod workflows;
 
 use super::*;

@@ -105,6 +105,11 @@ pub struct BackendProbe {
     /// §3 monotonic capabilities). `None` against a daemon that predates
     /// the field — the caller treats it as 0 (legacy encoding).
     pub mechanism_parameter_transport_version: Option<u32>,
+    /// Daemon-advertised `exact_token_label_version` (Q03 phase 2, S2 §3
+    /// monotonic capabilities). `None` against a daemon that predates
+    /// the field — the caller treats it as 0 (legacy string-only
+    /// labels) and fails NULL/invalid-encoding labels closed locally.
+    pub exact_token_label_version: Option<u32>,
 }
 
 fn pointer_safe_message_parameters_from_wire(advertised: Option<bool>) -> bool {
@@ -316,6 +321,7 @@ impl Pkcs11Client {
             exact_effects_version: Default::default(),
             typed_auth_capability: Default::default(),
             mechanism_parameter_transport_version: Default::default(),
+            exact_token_label_version: Default::default(),
             grpc,
             channel,
             context_id: None,
@@ -337,6 +343,7 @@ impl Pkcs11Client {
             exact_effects_version: Default::default(),
             typed_auth_capability: Default::default(),
             mechanism_parameter_transport_version: Default::default(),
+            exact_token_label_version: Default::default(),
             grpc,
             channel,
             context_id: None,
@@ -356,6 +363,7 @@ impl Pkcs11Client {
             exact_effects_version: Default::default(),
             typed_auth_capability: Default::default(),
             mechanism_parameter_transport_version: Default::default(),
+            exact_token_label_version: Default::default(),
             grpc: new_grpc_client(channel.clone(), DEFAULT_RPC_TIMEOUT),
             channel,
             context_id: None,
@@ -473,20 +481,23 @@ impl Pkcs11Client {
     }
 
     /// Record a fresh `GetBackendInterfaces` probe (W1-C10-03): the
-    /// effects version, the typed-auth capability, and the
-    /// mechanism-parameter transport version are always refreshed together
-    /// from the same probe, so a version change can never leave a stale
-    /// capability behind.
+    /// effects version, the typed-auth capability, the
+    /// mechanism-parameter transport version, and the exact-label
+    /// version are always refreshed together from the same probe, so a
+    /// version change can never leave a stale capability behind.
     pub(crate) fn note_backend_probe(
         &self,
         effects_version: u32,
         auth_capable: bool,
         mechanism_parameter_transport_version: u32,
+        exact_token_label_version: u32,
     ) {
         self.exact_effects_version.store(effects_version, std::sync::atomic::Ordering::Release);
         self.note_typed_auth_capability(auth_capable);
         self.mechanism_parameter_transport_version
             .store(mechanism_parameter_transport_version, std::sync::atomic::Ordering::Release);
+        self.exact_token_label_version
+            .store(exact_token_label_version, std::sync::atomic::Ordering::Release);
     }
 
     /// The cached `mechanism_parameter_transport_version` discovery
@@ -505,6 +516,25 @@ impl Pkcs11Client {
     pub fn set_mechanism_parameter_transport_version_for_tests(&self, version: u32) {
         self.mechanism_parameter_transport_version
             .store(version, std::sync::atomic::Ordering::Release);
+    }
+
+    /// The cached `exact_token_label_version` discovery capability (Q03
+    /// phase 2): the daemon-advertised value, or 0 when no probe has
+    /// established one (legacy string-only labels). `init_token` gates
+    /// exact-label emission on this (exact at ≥ 1, string fallback or
+    /// fail-closed at 0). `pub` for cross-crate test observability
+    /// (the shim's old-daemon simulation asserts the injected value).
+    pub fn exact_token_label_version(&self) -> u32 {
+        self.exact_token_label_version.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Test-only injection for the exact-label cache (Q03 phase 2): the
+    /// capability normally arrives via discovery in
+    /// `get_backend_interfaces`; tests inject it only to simulate an
+    /// old daemon's absent advertisement. Production code must never
+    /// call this.
+    pub fn set_exact_token_label_version_for_tests(&self, version: u32) {
+        self.exact_token_label_version.store(version, std::sync::atomic::Ordering::Release);
     }
 
     /// Query the daemon for the backend's interface capabilities. Also
@@ -540,11 +570,13 @@ impl Pkcs11Client {
                 resp.pointer_safe_message_parameters,
             ),
             mechanism_parameter_transport_version: resp.mechanism_parameter_transport_version,
+            exact_token_label_version: resp.exact_token_label_version,
         };
         self.note_backend_probe(
             probe.exact_output_effects_version.unwrap_or(0),
             probe.pointer_safe_authenticated_parameters,
             probe.mechanism_parameter_transport_version.unwrap_or(0),
+            probe.exact_token_label_version.unwrap_or(0),
         );
         Ok(probe)
     }
@@ -571,6 +603,7 @@ impl Pkcs11Client {
                 self.channel = channel;
                 self.exact_effects_version = Default::default();
                 self.mechanism_parameter_transport_version = Default::default();
+                self.exact_token_label_version = Default::default();
                 self.invalidate_typed_auth_capability();
                 if let Some(ref ctx) = self.context_id {
                     let req = pkcs11_proxy_ng_proto::GetSlotListRequest {
@@ -714,19 +747,22 @@ mod tests {
         use std::sync::atomic::Ordering;
         let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
         let client = Pkcs11Client::from_channel(channel);
-        client.note_backend_probe(1, true, 1);
+        client.note_backend_probe(1, true, 1, 1);
         assert_eq!(client.exact_effects_version.load(Ordering::Acquire), 1);
         assert_eq!(client.cached_typed_auth_capability(), Some(true));
         assert_eq!(client.mechanism_parameter_transport_version(), 1);
+        assert_eq!(client.exact_token_label_version(), 1);
         // Same-version re-probe still overwrites with the fresh value.
-        client.note_backend_probe(1, false, 0);
+        client.note_backend_probe(1, false, 0, 0);
         assert_eq!(client.cached_typed_auth_capability(), Some(false));
         assert_eq!(client.mechanism_parameter_transport_version(), 0);
+        assert_eq!(client.exact_token_label_version(), 0);
         // Version change carries the new version's capability.
-        client.note_backend_probe(2, true, 1);
+        client.note_backend_probe(2, true, 1, 1);
         assert_eq!(client.exact_effects_version.load(Ordering::Acquire), 2);
         assert_eq!(client.cached_typed_auth_capability(), Some(true));
         assert_eq!(client.mechanism_parameter_transport_version(), 1);
+        assert_eq!(client.exact_token_label_version(), 1);
     }
 
     /// R5/F1: a fresh client has no transport capability (legacy encoding)
@@ -736,6 +772,15 @@ mod tests {
         let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
         let client = Pkcs11Client::from_channel(channel);
         assert_eq!(client.mechanism_parameter_transport_version(), 0);
+    }
+
+    /// Q03 phase 2: a fresh client has no exact-label capability
+    /// (legacy string-only labels) until a probe establishes one.
+    #[tokio::test]
+    async fn fresh_client_exact_token_label_version_is_legacy_zero() {
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
+        let client = Pkcs11Client::from_channel(channel);
+        assert_eq!(client.exact_token_label_version(), 0);
     }
 
     #[test]
