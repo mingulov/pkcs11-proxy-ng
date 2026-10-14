@@ -185,7 +185,7 @@ const IGNORED_TEST_TAXONOMY: &[IgnoredTestLane] = &[
         ],
 =======
         file: "crates/server/tests/shape_evidence_test.rs",
-        reason: "Shape-evidence oracle controls (attempted vs native-entered vs success)",
+        reason: "Shape-evidence oracle controls (attempted vs init-accepted vs native-entered vs success, with backend-admission layer discrimination)",
         commands: &[
             "cargo test -p pkcs11-proxy-ng --test shape_evidence_test -- --ignored --test-threads=1",
         ],

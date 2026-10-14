@@ -158,23 +158,35 @@ claiming a safe OASIS ABI mapping where the local sources do not provide one.
 Unsupported raw and vendor transport-only variants are likewise intentional
 `mechanism_params_default.toml` omissions under the AGENTS.md §12 exception.
 
-Real-provider evidence for a shape comes in three distinct strengths, and the
-matrix never conflates them. The SoftHSM2 shape driver reports `success` only
-when the RPC returned `Ok`; any error RV is reported as `attempted`
-(RPC-completed, origin unproven), because the same RV value can originate in
-server transport validation, backend FFI reconstruction, or the provider —
-no RV alone proves native execution. A second, explicitly scoped strength is
-`native-entered`: the entry-recording oracle lane (`shape_evidence_test.rs`,
-ignored) returns scenario RVs verbatim while recording native entries
-independently, proving that server-local and backend-local rejects earn no
-native-entry credit even on RV equality with a genuine native error, which
-itself earns native-entry credit but not success credit. That lane is an
-error/origin oracle, not a real provider, and carries that limitation in its
-receipts. A claimed qualified real-provider shape therefore needs either a
-successful meaningful fixture (the dedicated SoftHSM2 round-trip tests, or a
-driver `success`) or an explicitly scoped native-entry/error oracle result
-plus its limitation; attempted shapes and unsupported skips never qualify by
-totals.
+Real-provider evidence for a shape comes in distinct strengths, and the
+matrix never conflates them. The SoftHSM2 shape driver reports `success`
+only when a COMPLETING operation (derive, wrap) returned `Ok`; an init-only
+`Ok` (encrypt-init, sign-init, digest-init — e.g. an EdDSA `sign-init ok`
+that never signs or verifies) is reported as `init-accepted`, explicitly
+unqualified, because opening operation state is not completed cryptographic
+work. Any error RV is reported as `attempted` (RPC-completed, origin
+unproven), because the same RV value can originate in server transport
+validation, backend FFI reconstruction, or the provider — no RV alone
+proves native execution. The summary receipt carries all four buckets
+(meaningful-success, init-accepted, attempted, unsupported-skipped) plus
+the derived RPC-observed total and the explicit native-observation status,
+which reads `unavailable` in the SoftHSM2 lane: attempted shapes there
+carry zero native information, not "zero entries". A second, explicitly
+scoped strength is `native-entered`: the entry-recording oracle lane
+(`shape_evidence_test.rs`, ignored) returns scenario RVs verbatim while
+recording backend admissions and native entries independently, proving
+that the server-local reject (0 admissions, 0 entries) and the
+backend-local reject (1 admission, 0 entries) earn no native-entry credit
+even on RV equality with a genuine native error (1 admission, 1 entry),
+which itself earns native-entry credit but not success credit. That lane
+is an error/origin oracle, not a real provider: every oracle receipt names
+its provider, shape, and operation, both counts, the disposition, and the
+entry-only scope limitation. A claimed qualified real-provider shape
+therefore needs either a successful meaningful fixture (the dedicated
+SoftHSM2 round-trip tests, or a driver `success` — `MatrixReceipt::qualified`
+enforces that only meaningful success counts) or an explicitly scoped
+native-entry/error oracle result plus its limitation; init-accepted,
+attempted, and unsupported-skipped shapes never qualify by totals.
 
 The working `chacha20_salsa20_poly1305.md` prose mentions
 `CK_CHACHA20POLY1305_PARAMS`, but its C definition and the published OASIS
