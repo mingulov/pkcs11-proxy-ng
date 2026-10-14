@@ -2,21 +2,31 @@
 # Tiered test runner (mock-ABI test infrastructure design, 2026-07-02).
 #
 # Tiers (module/naming convention — no cargo features):
-#   unit         pure logic: every workspace package's non-live tests
-#                (types, proto, backend + server libs, client, cli, audit,
-#                shim dispatch units; pkcs11-module now lives upstream in
-#                pkcs11-components and is covered by that repo's own CI)
+#   unit         scoped lib sweep: full suites for types, proto, client,
+#                cli and audit, plus backend/server libs and the shim
+#                dispatch units (pkcs11-module now lives upstream in
+#                pkcs11-components and is covered by that repo's own CI).
+#                A fast subset, not the whole non-live suite.
 #   integration  in-process TestDaemon suites (shim tests::), incl. the
 #                cross-ABI topology suite (tests::cross_abi)
 #   regression   named defect pins: tests::regression plus the canonical
 #                defect tests matched by name (*_not_wild_read,
-#                *_wider_than_native_*, cross_abi)
+#                *_wider_than_native_*, cross_abi). Deliberately overlaps
+#                unit/integration for standalone re-runs; `all` does not
+#                compose these tiers.
 #   live         env-gated real-binary harnesses (daemons + SoftHSM2 /
 #                wine, retained-oracle topologies, SIGTERM drain); each
 #                script skips cleanly when its tooling is absent
-#   all          unit + integration + regression (the plain-CI surface)
+#   all          the plain-CI surface: one canonical
+#                `cargo test --workspace --locked` pass. Cargo enumerates
+#                every current and future test target itself, so this —
+#                not a composition of the focused tiers — is the complete
+#                non-live gate.
 #
 # Plain `cargo test --workspace` runs everything except `live`.
+# `#[ignore]`-gated tests (e.g. shim fork_after_init) are excluded from
+# both `all` and plain CI; run them explicitly per lane, as CI does:
+#   cargo test --locked -p pkcs11-proxy-ng-shim --test fork_after_init -- --ignored
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -49,6 +59,11 @@ run_regression() {
     cargo test -p pkcs11-proxy-ng-backend --lib -- wider_than_native
 }
 
+run_all() {
+    echo "=== tier: all (canonical workspace suite, once) ==="
+    cargo test --workspace --locked
+}
+
 run_live() {
     echo "=== tier: live (skip-clean when tooling is absent) ==="
     scripts/test-daemon-startup-logging.sh
@@ -69,9 +84,7 @@ case "$tier" in
     regression) run_regression ;;
     live) run_live ;;
     all)
-        run_unit
-        run_integration
-        run_regression
+        run_all
         ;;
     *)
         echo "usage: $0 [unit|integration|regression|live|all]" >&2

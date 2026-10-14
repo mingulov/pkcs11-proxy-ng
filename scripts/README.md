@@ -16,7 +16,7 @@ Build, test, and release scripts, with their callers. Paths are relative to
 | `ci-direct-vs-proxy.py` | `cross-platform.yml`: native direct-versus-proxied provider comparisons |
 | `ci-package-smoke.py` | `ci.yml` smoke lanes: reusable installed/extracted artifact contract (APK set, Linux tarball, Windows ZIP); reused for registry bundles before asset approval |
 | `test-matrix.sh` | `nightly.yml` and `Dockerfile.test`: local CI gates and provider/consumer lanes |
-| `run-test-tiers.sh` | `nightly.yml`: live test lanes; also a manual unit/integration/regression runner |
+| `run-test-tiers.sh` | `nightly.yml`: live test lanes; `all` is the manual canonical `cargo test --workspace --locked` pass, unit/integration/regression are scoped subsets |
 | `verify-release-subject.sh` | `publish.yml` and `release.yml`: validate the tag subject and version mirrors |
 | `release-dry-run.sh` | Local Linux packaging check and staging; `release.yml` now builds from registry sources instead |
 | `release-windows.sh` | Local Windows ZIP staging; `release.yml` now builds from registry sources instead |
