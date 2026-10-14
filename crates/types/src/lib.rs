@@ -79,6 +79,21 @@ pub fn space_pad_into(dest: &mut [u8], src: &str) {
     }
 }
 
+/// Decode a blank-padded `CK_TOKEN_INFO.label[32]` field (Q03 phase
+/// 2, B2): the inverse of [`space_pad_into`] for labels. ONLY
+/// trailing ASCII spaces are padding — strip exactly those, never
+/// the generic trimmer's NULs: a terminal data NUL is caller bytes
+/// the provider stored, and dropping it breaks the byte-exact
+/// round-trip (`"C\0"` re-pads to `b"C\0"` + 30 spaces, while `"C"`
+/// re-pads to 31 spaces). Lossy UTF-8 like every other fixed-width
+/// readback (the readback path is `String`-typed).
+///
+/// The single label-decode implementation; the native FFI readback
+/// and the mock readback both call it directly so they cannot drift.
+pub fn unpad_token_label(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).trim_end_matches(' ').to_string()
+}
+
 /// PKCS#11 token-label field width in bytes (`CK_TOKEN_INFO.label` is
 /// `CK_UTF8CHAR label[32]`, blank-padded; likewise the `C_InitToken`
 /// `pLabel` input). Single home for the width (W1-L12-08) — label
@@ -178,5 +193,44 @@ mod space_pad_tests {
         assert_eq!(CANONICAL_UNAVAILABLE, u64::MAX);
         let back = reencode_ulong(&[1, 0, 0, 0], 4, 8, ByteOrder::Little).unwrap();
         assert_eq!(back, vec![1, 0, 0, 0, 0, 0, 0, 0]);
+    }
+}
+
+#[cfg(test)]
+mod unpad_token_label_tests {
+    use super::{PKCS11_TOKEN_LABEL_LEN, space_pad_into, unpad_token_label};
+
+    fn padded(prefix: &[u8]) -> [u8; PKCS11_TOKEN_LABEL_LEN] {
+        let mut label = [b' '; PKCS11_TOKEN_LABEL_LEN];
+        label[..prefix.len()].copy_from_slice(prefix);
+        label
+    }
+
+    #[test]
+    fn terminal_data_nul_survives_and_repad_is_identical() {
+        // Q03 phase 2 (B2): `label[32]` is blank-padded, so ONLY
+        // trailing ASCII spaces are padding — a terminal NUL is
+        // caller bytes (the generic trimmer strips it: RED).
+        let bytes = padded(b"C\0");
+        assert_eq!(unpad_token_label(&bytes), "C\0");
+        let mut repadded = [0u8; PKCS11_TOKEN_LABEL_LEN];
+        space_pad_into(&mut repadded, &unpad_token_label(&bytes));
+        assert_eq!(repadded, bytes);
+    }
+
+    #[test]
+    fn ordinary_vectors_decode() {
+        assert_eq!(unpad_token_label(&padded(b"hello")), "hello");
+        assert_eq!(unpad_token_label(&[b' '; PKCS11_TOKEN_LABEL_LEN]), "");
+        assert_eq!(
+            unpad_token_label(b"0123456789abcdef0123456789abcdef"),
+            "0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(unpad_token_label(&padded(b"A\t")), "A\t");
+        assert_eq!(unpad_token_label(&padded(b"C\0D")), "C\0D");
+        assert_eq!(unpad_token_label(&padded("tökén".as_bytes())), "tökén");
+        // Invalid-encoding bytes stay lossy-compatible (the readback
+        // path is `String`-typed); only spaces trim.
+        assert_eq!(unpad_token_label(&padded(b"BAD\xff\xfe")), "BAD\u{fffd}\u{fffd}");
     }
 }

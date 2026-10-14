@@ -346,6 +346,75 @@ async fn reconnect_shared_channel_is_general_error() {
     assert_eq!(client.reconnect().await.unwrap_err(), CkRv::GENERAL_ERROR);
 }
 
+// Q03 phase 2 (B1): discover v1, finalize, replacement peer,
+// re-initialize — neither lifecycle step may retain the stale v1
+// cache (the review's counterexample: the retained cache would
+// authorize exact emission to a replacement legacy peer, which
+// ignores the exact field and initializes with the empty/lossy
+// compat string).
+#[tokio::test]
+async fn q03_exact_label_capability_reset_across_finalize_replace_reinit() {
+    let daemon = mock_daemon(mock_backend()).await;
+    let port = daemon.port;
+    let mut client = Pkcs11Client::connect(&daemon.endpoint).await.unwrap();
+    client.initialize().await.unwrap();
+    let probe = client.get_backend_interfaces().await.unwrap();
+    assert_eq!(probe.exact_token_label_version, Some(EXACT_TOKEN_LABEL_VERSION));
+    assert_eq!(client.exact_token_label_version(), EXACT_TOKEN_LABEL_VERSION);
+    client.finalize().await.unwrap();
+    assert_eq!(client.exact_token_label_version(), 0, "finalize must drop the probe caches");
+
+    // Replacement peer on the same endpoint (daemon restart).
+    daemon.stop().await;
+    let daemon = mock_daemon_on(mock_backend(), Some(port), None).await;
+    client.initialize().await.unwrap();
+    assert_eq!(
+        client.exact_token_label_version(),
+        0,
+        "re-initialize must not resurrect the stale v1 cache"
+    );
+    daemon.stop().await;
+}
+
+// Q03 phase 2 (B1): after finalize→replace→reinit with no fresh
+// probe, NULL/invalid labels fail closed LOCALLY — `ARGUMENTS_BAD`
+// with zero RPCs, so no exact field is ever emitted to the
+// (possibly legacy) replacement peer.
+#[tokio::test]
+async fn q03_no_exact_emission_to_replacement_peer_without_fresh_probe() {
+    let daemon = mock_daemon(mock_backend()).await;
+    let port = daemon.port;
+    let mut client = Pkcs11Client::connect(&daemon.endpoint).await.unwrap();
+    client.initialize().await.unwrap();
+    client.get_backend_interfaces().await.unwrap();
+    client.finalize().await.unwrap();
+
+    daemon.stop().await;
+    let counter = Arc::new(AtomicUsize::new(0));
+    let daemon = mock_daemon_on(mock_backend(), Some(port), Some(counter.clone())).await;
+    client.initialize().await.unwrap();
+
+    let mut raw = [b' '; PKCS11_TOKEN_LABEL_LEN];
+    raw[..5].copy_from_slice(b"BAD\xff\xfe");
+    for label in [
+        InitTokenLabel { text: "", exact: Some(ExactTokenLabel::Null) },
+        InitTokenLabel { text: "BAD\u{fffd}", exact: Some(ExactTokenLabel::Bytes(raw)) },
+    ] {
+        let baseline = counter.load(Ordering::SeqCst);
+        assert_eq!(
+            client.init_token(CkSlotId(0), Some(b"1234"), label).await.unwrap_err(),
+            CkRv::ARGUMENTS_BAD,
+            "unnegotiated {label:?} must fail closed"
+        );
+        assert_eq!(
+            counter.load(Ordering::SeqCst) - baseline,
+            0,
+            "fail-closed gate must emit no RPC to the replacement peer"
+        );
+    }
+    daemon.stop().await;
+}
+
 // W1-C10-01: healthy RPCs are unaffected by the default deadline.
 #[tokio::test]
 async fn healthy_rpcs_unaffected_by_default_deadline() {

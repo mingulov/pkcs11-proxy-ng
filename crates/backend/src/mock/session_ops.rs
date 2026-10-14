@@ -96,13 +96,27 @@ impl MockBackend {
         self.check_injected()?;
         self.require_known_slot(slot_id)?;
         self.require_token_present(slot_id)?;
-        let (label, serial_number) = self
+        let (identity_label, serial_number) = self
             .token_identities
             .lock()
             .unwrap()
             .get(&slot_id)
             .cloned()
             .unwrap_or_else(|| ("MockToken".into(), "0001".into()));
+        // Q03 phase 2 (N4): the exact store wins when present — decode
+        // it exactly the way the native FFI readback decodes provider
+        // bytes (the compat string is ignored, just as native FFI
+        // ignores it whenever exact bytes exist). Every relabel path
+        // updates both stores together, so a present exact store is
+        // never stale.
+        let label = self
+            .token_label_bytes
+            .lock()
+            .unwrap()
+            .get(&slot_id)
+            .copied()
+            .map(|bytes| unpad_token_label(&bytes))
+            .unwrap_or(identity_label);
         Ok(CkTokenInfo {
             label,
             manufacturer_id: "Mock".into(),
