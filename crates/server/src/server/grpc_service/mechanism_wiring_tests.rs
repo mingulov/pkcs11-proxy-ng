@@ -27,7 +27,7 @@ use tonic::Request;
 
 use super::HandlerContext;
 use super::service_utils::register_session_object_handle;
-use crate::consistency_checks::{find_keyword, read_ident, skip_ws, strip_rust_code};
+use crate::consistency_checks::{find_keyword, skip_ws, strip_rust_code};
 use crate::mechanism_registry_source::MechanismRegistrySource;
 use crate::server::context_manager::{ClientContextId, ContextManager};
 use crate::server::handle_map::{BackendHandle, VirtualHandle};
@@ -931,21 +931,24 @@ async fn null_and_empty_flat_do_not_conflate() {
 //
 // Two gates over one reviewed inventory:
 //  1. Reverse discovery: every `.rs` file under `src/server/grpc_service`
-//     with a real (comment/string-stripped, test-region-excluded)
-//     `parse_mechanism` call site must be listed in `WIRE_SITES` — a new
-//     handler file can no longer slip past the list. `INVENTORY_EXEMPT`
-//     names the reviewed non-handler mentions and `EARLY_GATE_EXEMPT`
-//     the files whose test gates a cut cannot handle; each exemption is
-//     re-validated every run.
+//     with a real (comment/string-stripped) `parse_mechanism` call site
+//     must be listed in `WIRE_SITES` — a new handler file can no longer
+//     slip past the list. Discovery scans whole files with no test-region
+//     cut (a cut boundary could hide production code placed after a test
+//     module), so test code must not call the helper directly: drive
+//     handlers instead, as every existing battery does. A test-region
+//     call would count as a site and fail loud. `INVENTORY_EXEMPT` names
+//     the reviewed non-handler mentions; each exemption is re-validated
+//     every run.
 //  2. Gate order over stripped code: gate markers sitting only in comments
 //     or strings no longer satisfy the check (the pre-Q08 raw-substring
 //     scan accepted them).
 // No new Rust parser or code generator: token/comment handling is the
 // existing `consistency_checks` helpers (`strip_rust_code`,
-// `find_keyword`, `read_ident`, `skip_ws`) plus explicit exemptions.
-// Deliberately uncovered: an aliased helper import (`use ... as pm`)
-// cannot be resolved without import tracking, but its `use` line still
-// mentions the helper, so the mention tripwire forces it into reviewed
+// `find_keyword`, `skip_ws`) plus explicit exemptions. Deliberately
+// uncovered: an aliased helper import (`use ... as pm`) cannot be
+// resolved without import tracking, but its `use` line still mentions
+// the helper, so the mention tripwire forces it into reviewed
 // listing-or-exemption instead of a silent pass.
 // ---------------------------------------------------------------------------
 
@@ -980,25 +983,6 @@ const INVENTORY_EXEMPT: &[&str] = &[
     "service_utils.rs",
 ];
 
-/// Reviewed files whose `#[cfg(test)]` gates do not all open inline test
-/// modules, so a first-gate cut cannot separate test code without item
-/// parsing. Structural-exempt files are scanned whole (a test-region call
-/// there fails loud and forces a restructure or a listing) and must hold
-/// zero call sites. Each entry is re-validated: it must still contain a
-/// non-inline gate (a restructured file drops the exemption).
-const EARLY_GATE_EXEMPT: &[&str] = &[
-    // Early `mod foo;` declarations plus a trailing test module.
-    "service_utils.rs",
-    // Mid-file test `impl HandlerContext`.
-    "context.rs",
-    // Early `mod mechanism_wiring_tests;` declaration plus trailing modules.
-    "mod.rs",
-    // Test-only `async fn` doubles plus an external `mod tests;`.
-    "session.rs",
-    // Test-only `async fn` double.
-    "state_ops/mod.rs",
-];
-
 /// S2 §6 gate calls, in required textual order after `parse_mechanism(`.
 const GATES: &[&str] = &[
     "check_operator_exclusion(",
@@ -1011,72 +995,19 @@ fn grpc_service_root() -> PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server/grpc_service")
 }
 
-/// Scannable code of one file plus whether it needs structural
-/// treatment: the comment/string-stripped source, cut before the first
-/// `#[cfg(test)]` inline test module. Files with a non-inline test gate
-/// (early `mod foo;`, mid-file test `impl`, ...) cannot be cut safely
-/// without item parsing, so they must be listed in `EARLY_GATE_EXEMPT`
-/// and are scanned whole instead (test-region calls there fail loud).
-/// Only the exact `#[cfg(test)]` spelling is recognized; exotic
-/// spellings (`#[cfg(all(test, ...))]`) scan as production code — none
-/// exist under `grpc_service/` today.
-fn scannable_code(text: &str) -> (String, bool) {
-    let stripped = strip_rust_code(text);
-    if gates_are_inline_mods(&stripped) {
-        let cut = stripped.find("#[cfg(test)]").unwrap_or(stripped.len());
-        (stripped[..cut].to_string(), false)
-    } else {
-        (stripped, true)
-    }
-}
-
-/// Whether every `#[cfg(test)]` gate in `stripped` opens an inline
-/// `mod {` (cut-compatible). Gates are located on stripped code, so
-/// comments and strings cannot forge one. No brace matching: anything
-/// else forces a structural exemption (fail-loud).
-fn gates_are_inline_mods(stripped: &str) -> bool {
-    const ATTR: &str = "#[cfg(test)]";
-    let mut search_from = 0;
-    while let Some(rel) = stripped[search_from..].find(ATTR) {
-        let after_attr = search_from + rel + ATTR.len();
-        if !gate_opens_inline_mod(stripped, after_attr) {
-            return false;
-        }
-        search_from = after_attr;
-    }
-    true
-}
-
-/// Whether the `#[cfg(test)]` gate ending at `after_attr` opens an inline
-/// test module (`mod tests {`, possibly `pub`-qualified or same-line).
-/// Only the gate's own line plus the next line are inspected, with the
-/// existing `find_keyword`/`read_ident`/`skip_ws` token helpers: wider
-/// gaps force a structural exemption instead of a silent cut.
-fn gate_opens_inline_mod(stripped: &str, after_attr: usize) -> bool {
-    let end_of_gate_line =
-        stripped[after_attr..].find('\n').map(|i| after_attr + i + 1).unwrap_or(stripped.len());
-    let next_line_end = stripped[end_of_gate_line..]
-        .find('\n')
-        .map(|i| end_of_gate_line + i)
-        .unwrap_or(stripped.len());
-    let window = &stripped[after_attr..next_line_end];
-    let Some(mod_at) = find_keyword(window, 0, "mod") else { return false };
-    let Some((_, after_name)) = read_ident(window, mod_at + "mod".len()) else { return false };
-    window.as_bytes().get(skip_ws(window, after_name)) == Some(&b'{')
-}
-
-/// Byte offsets of real `parse_mechanism` call sites in scannable code:
+/// Byte offsets of real `parse_mechanism` call sites in whole-file
+/// stripped code (no test-region cut: see the header comment for why):
 /// the word-boundary helper name (existing `find_keyword` token
 /// handling) followed by `(` after optional whitespace — so a comment
 /// split across the paren (`parse_mechanism /* c */ (`, blanked to
 /// spaces by the stripper) cannot evade the gate. The shared helper
 /// definition (`fn parse_mechanism (`) is not a site.
-fn call_site_anchors(scannable: &str) -> Vec<usize> {
+fn call_site_anchors(stripped: &str) -> Vec<usize> {
     let mut anchors = Vec::new();
     let mut from = 0;
-    while let Some(index) = find_keyword(scannable, from, "parse_mechanism") {
-        let after = skip_ws(scannable, index + "parse_mechanism".len());
-        if scannable.as_bytes().get(after) == Some(&b'(') && !is_fn_definition(scannable, index) {
+    while let Some(index) = find_keyword(stripped, from, "parse_mechanism") {
+        let after = skip_ws(stripped, index + "parse_mechanism".len());
+        if stripped.as_bytes().get(after) == Some(&b'(') && !is_fn_definition(stripped, index) {
             anchors.push(index);
         }
         from = index + 1;
@@ -1084,7 +1015,7 @@ fn call_site_anchors(scannable: &str) -> Vec<usize> {
     anchors
 }
 
-/// Whether the `parse_mechanism(` occurrence at `index` is a `fn`
+/// Whether the `parse_mechanism` occurrence at `index` is a `fn`
 /// definition (`pub(super) fn parse_mechanism(`, ...) rather than a call.
 fn is_fn_definition(stripped: &str, index: usize) -> bool {
     let before = stripped[..index].trim_end();
@@ -1097,14 +1028,12 @@ fn is_fn_definition(stripped: &str, index: usize) -> bool {
 }
 
 /// Reverse inventory discovery (MAINT-03) over every `.rs` file under
-/// `root`. Keys are `/`-joined relative paths, so the tables match
-/// `WIRE_SITES` on every platform.
+/// `root`, scanned whole (no test-region cut: a cut boundary could hide
+/// production code placed after a test module). Keys are `/`-joined
+/// relative paths, so the tables match `WIRE_SITES` on every platform.
 struct HandlerInventory {
     /// Files holding at least one real call site, mapped to the site count.
     sites: BTreeMap<String, usize>,
-    /// Files whose test gates a cut cannot handle (need a structural
-    /// exemption) — scanned whole.
-    needs_structural: BTreeSet<String>,
     /// Files mentioning the helper without a direct call site (an aliased
     /// import lands here): the mention tripwire forces reviewed
     /// listing-or-exemption instead of a silent pass.
@@ -1112,11 +1041,8 @@ struct HandlerInventory {
 }
 
 fn discover_mechanism_handler_files(root: &Path) -> HandlerInventory {
-    let mut inventory = HandlerInventory {
-        sites: BTreeMap::new(),
-        needs_structural: BTreeSet::new(),
-        mentions_without_sites: BTreeSet::new(),
-    };
+    let mut inventory =
+        HandlerInventory { sites: BTreeMap::new(), mentions_without_sites: BTreeSet::new() };
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let entries =
@@ -1133,26 +1059,20 @@ fn discover_mechanism_handler_files(root: &Path) -> HandlerInventory {
             }
             let text = std::fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-            let (code, needs_structural) = scannable_code(&text);
+            let code = strip_rust_code(&text);
             let anchors = call_site_anchors(&code);
-            if anchors.is_empty()
-                && !needs_structural
-                && find_keyword(&code, 0, "parse_mechanism").is_none()
-            {
+            let mentions = find_keyword(&code, 0, "parse_mechanism").is_some();
+            if anchors.is_empty() && !mentions {
                 continue;
             }
             let rel = path
                 .strip_prefix(root)
                 .unwrap_or_else(|_| panic!("{} escapes {}", path.display(), root.display()));
             let file = rel_slash_path(rel);
-            if !anchors.is_empty() {
-                inventory.sites.insert(file.clone(), anchors.len());
-            }
-            if needs_structural {
-                inventory.needs_structural.insert(file.clone());
-            }
-            if anchors.is_empty() && find_keyword(&code, 0, "parse_mechanism").is_some() {
+            if anchors.is_empty() {
                 inventory.mentions_without_sites.insert(file);
+            } else {
+                inventory.sites.insert(file, anchors.len());
             }
         }
     }
@@ -1166,14 +1086,12 @@ fn rel_slash_path(rel: &Path) -> String {
 }
 
 /// Pure inventory comparison: every discovered handler file must be
-/// listed, every listed file must still be discovered, every file with
-/// non-inline test gates must be structurally exempt, and every
-/// helper mention without a direct call site must be reviewed. Returns
-/// one human-readable problem per violation (empty when the reviewed
+/// listed, every listed file must still be discovered, and every helper
+/// mention without a direct call site must be reviewed. Returns one
+/// human-readable problem per violation (empty when the reviewed
 /// inventory matches reality).
 fn inventory_problems(
     listed: &[(&str, usize)],
-    structural_exempt: &[&str],
     mention_exempt: &[&str],
     inventory: &HandlerInventory,
 ) -> Vec<String> {
@@ -1194,21 +1112,6 @@ fn inventory_problems(
             ));
         }
     }
-    for file in &inventory.needs_structural {
-        if !structural_exempt.contains(&file.as_str()) {
-            problems.push(format!(
-                "non-inline #[cfg(test)] gate in {file} \
-                 (move test gates trailing or add a structural exemption with reason)"
-            ));
-        }
-    }
-    for file in structural_exempt {
-        if !inventory.needs_structural.contains(*file) {
-            problems.push(format!(
-                "stale structural exemption: {file} has only inline test gates now; drop it"
-            ));
-        }
-    }
     for file in &inventory.mentions_without_sites {
         if !mention_exempt.contains(&file.as_str()) {
             problems.push(format!(
@@ -1220,16 +1123,14 @@ fn inventory_problems(
     problems
 }
 
-/// Re-validate every exemption entry against the real tree: a mention
-/// exemption must still mention the helper and must hold zero call
-/// sites; a structural exemption must still contain a non-inline gate
-/// and must hold zero call sites.
+/// Re-validate every `INVENTORY_EXEMPT` entry against the real tree: an
+/// exemption must still mention the helper and must hold zero call sites.
 fn exempt_problems(root: &Path) -> Vec<String> {
     let mut problems = Vec::new();
     for file in INVENTORY_EXEMPT {
         let text =
             std::fs::read_to_string(root.join(file)).unwrap_or_else(|e| panic!("read {file}: {e}"));
-        let (code, _) = scannable_code(&text);
+        let code = strip_rust_code(&text);
         let anchors = call_site_anchors(&code);
         if !anchors.is_empty() {
             problems.push(format!(
@@ -1239,23 +1140,6 @@ fn exempt_problems(root: &Path) -> Vec<String> {
         } else if find_keyword(&code, 0, "parse_mechanism").is_none() {
             problems.push(format!(
                 "{file}: stale mention exemption, no longer mentions parse_mechanism; drop it"
-            ));
-        }
-    }
-    for file in EARLY_GATE_EXEMPT {
-        let text =
-            std::fs::read_to_string(root.join(file)).unwrap_or_else(|e| panic!("read {file}: {e}"));
-        let (code, needs_structural) = scannable_code(&text);
-        let anchors = call_site_anchors(&code);
-        if !anchors.is_empty() {
-            problems.push(format!(
-                "{file}: structurally exempt file gained {} call site(s); \
-                 list it in WIRE_SITES too (it stays structurally exempt)",
-                anchors.len()
-            ));
-        } else if !needs_structural {
-            problems.push(format!(
-                "{file}: stale structural exemption, all test gates are inline now; drop it"
             ));
         }
     }
@@ -1297,18 +1181,13 @@ fn source_scan_pins_gate_order_at_every_wired_site() {
     // Reverse discovery first: the reviewed list must equal reality before
     // the per-file order checks below mean anything.
     let inventory = discover_mechanism_handler_files(&root);
-    let mut problems =
-        inventory_problems(WIRE_SITES, EARLY_GATE_EXEMPT, INVENTORY_EXEMPT, &inventory);
+    let mut problems = inventory_problems(WIRE_SITES, INVENTORY_EXEMPT, &inventory);
     problems.extend(exempt_problems(&root));
     assert!(problems.is_empty(), "handler inventory drift:\n{}", problems.join("\n"));
     for (file, expected_anchors) in WIRE_SITES {
         let text =
             std::fs::read_to_string(root.join(file)).unwrap_or_else(|e| panic!("read {file}: {e}"));
-        let (stripped, needs_structural) = scannable_code(&text);
-        assert!(
-            !needs_structural || EARLY_GATE_EXEMPT.contains(file),
-            "{file}: listed file needs a structural exemption too"
-        );
+        let stripped = strip_rust_code(&text);
         let anchors = call_site_anchors(&stripped);
         assert_eq!(
             anchors.len(),
@@ -1340,7 +1219,7 @@ fn source_scan_rejects_comment_only_gate_markers() {
         let note = "validate_mechanism_transport(";
         backend_call(mechanism).await
     "#;
-    let (stripped, _) = scannable_code(window);
+    let stripped = strip_rust_code(window);
     let result = check_gate_order("comment_only_fixture", 0, &stripped, GATES);
     assert!(
         result.is_err(),
@@ -1353,7 +1232,9 @@ fn source_scan_rejects_comment_only_gate_markers() {
 /// list-only scan (the pre-Q08 shape) never sees this file; if discovery
 /// regresses to list-only, this control fails. The fixture also pins the
 /// evasive forms: a comment split across the paren still counts as a
-/// site, while an aliased import trips the mention tripwire.
+/// site, an aliased import trips the mention tripwire, and a handler
+/// placed after an inline test module is still discovered (whole-file
+/// scan — no cut boundary can hide it).
 #[test]
 fn reverse_discovery_flags_unlisted_handler_file() {
     let dir = tempfile::tempdir().expect("fixture tempdir");
@@ -1385,6 +1266,12 @@ fn reverse_discovery_flags_unlisted_handler_file() {
         "use crate::service_utils::parse_mechanism as pm;\nfn aliased(req: Req) -> Rv {\n    pm(req.mechanism)\n}\n",
     )
     .expect("write aliased fixture");
+    // A handler after an inline test module: no cut boundary may hide it.
+    std::fs::write(
+        dir.path().join("new_handler.rs"),
+        "#[cfg(test)]\nmod tests {}\npub fn new_handler() {\n    let _ = super::service_utils::parse_mechanism(None);\n}\n",
+    )
+    .expect("write handler-after-tests fixture");
     let inventory = discover_mechanism_handler_files(dir.path());
     assert_eq!(
         inventory.sites.get("wired.rs"),
@@ -1404,6 +1291,12 @@ fn reverse_discovery_flags_unlisted_handler_file() {
         "comment-split paren must still count as a site: {:?}",
         inventory.sites
     );
+    assert_eq!(
+        inventory.sites.get("new_handler.rs"),
+        Some(&1),
+        "handler after an inline test module must be discovered: {:?}",
+        inventory.sites
+    );
     assert!(
         !inventory.sites.contains_key("comment_only.rs"),
         "comment-only mention must not count as a handler file: {:?}",
@@ -1419,9 +1312,13 @@ fn reverse_discovery_flags_unlisted_handler_file() {
         "aliased import must trip the mention tripwire: {:?}",
         inventory.mentions_without_sites
     );
-    let problems = inventory_problems(&[("wired.rs", 1)], &[], &[], &inventory);
-    assert_eq!(problems.len(), 3, "unlisted, split-paren and aliased are problems: {problems:?}");
-    for file in ["sneaky_handler.rs", "split_paren.rs", "aliased.rs"] {
+    let problems = inventory_problems(&[("wired.rs", 1)], &[], &inventory);
+    assert_eq!(
+        problems.len(),
+        4,
+        "unlisted, split-paren, aliased and handler-after-tests are problems: {problems:?}"
+    );
+    for file in ["sneaky_handler.rs", "split_paren.rs", "aliased.rs", "new_handler.rs"] {
         assert!(
             problems.iter().any(|p| p.contains(file)),
             "problems must name {file}: {problems:?}"
@@ -1429,54 +1326,30 @@ fn reverse_discovery_flags_unlisted_handler_file() {
     }
 }
 
-/// Test-gate shapes: trailing inline test modules are cut (their calls
-/// contribute no sites), while early `mod foo;` declarations and mid-file
-/// test items force structural treatment instead of a silent cut.
+/// Whole-file visibility: a handler placed after an inline test module
+/// is still discovered — there is no cut boundary that could hide it.
+/// (The reverse — a test-region call — would equally count as a site and
+/// fail loud, which is why test code must drive handlers instead of
+/// calling the helper directly.)
 #[test]
-fn inline_test_gates_cut_and_early_gates_need_structure() {
-    let trailing = "fn handler(req: Req) -> Rv {\n    parse_mechanism(req.mechanism)\n}\n#[cfg(test)]\nmod tests {\n    fn t() {\n        parse_mechanism(None)\n    }\n}\n";
-    let (code, needs_structural) = scannable_code(trailing);
-    assert!(!needs_structural, "trailing inline module is cut-compatible");
-    assert_eq!(call_site_anchors(&code).len(), 1, "test-region call is cut:\n{code}");
-
-    let same_line = "fn h() {}\n#[cfg(test)] mod tests {\n    fn t() {}\n}\n";
-    assert!(!scannable_code(same_line).1, "same-line inline module is cut-compatible");
-
-    let early_decl = "#[cfg(test)]\nmod unit_tests;\nfn handler(req: Req) -> Rv {\n    parse_mechanism(req.mechanism)\n}\n";
-    let (code, needs_structural) = scannable_code(early_decl);
-    assert!(needs_structural, "early `mod foo;` needs structural treatment");
-    assert_eq!(
-        call_site_anchors(&code).len(),
-        1,
-        "production code after an early gate stays visible:\n{code}"
-    );
-
-    let mid_impl = "fn h() {}\n#[cfg(test)]\nimpl Ctx {\n    fn helper() {}\n}\n";
-    assert!(scannable_code(mid_impl).1, "mid-file test impl needs structural treatment");
-
-    // The structural exemption excuses the gate shape but not the
-    // missing listing: the file still needs behavioral coverage.
+fn handler_after_inline_test_module_is_discovered() {
     let dir = tempfile::tempdir().expect("fixture tempdir");
-    std::fs::write(dir.path().join("early_gate.rs"), early_decl).expect("write fixture");
+    std::fs::write(
+        dir.path().join("new_handler.rs"),
+        "#[cfg(test)]\nmod tests {}\npub fn new_handler() {\n    let _ = super::service_utils::parse_mechanism(None);\n}\n",
+    )
+    .expect("write fixture");
     let inventory = discover_mechanism_handler_files(dir.path());
-    assert!(
-        inventory.needs_structural.contains("early_gate.rs"),
-        "early gate must be reported: {:?}",
-        inventory.needs_structural
+    assert_eq!(
+        inventory.sites.get("new_handler.rs"),
+        Some(&1),
+        "qualified call after an inline test module is a site: {:?}",
+        inventory.sites
     );
-    let unexcused = inventory_problems(&[], &[], &[], &inventory);
+    let problems = inventory_problems(&[], &[], &inventory);
     assert!(
-        unexcused.iter().any(|p| p.contains("non-inline")),
-        "unexcused early gate is a problem: {unexcused:?}"
-    );
-    let excused = inventory_problems(&[], &["early_gate.rs"], &[], &inventory);
-    assert!(
-        excused.iter().all(|p| !p.contains("non-inline")),
-        "structural exemption excuses the gate shape: {excused:?}"
-    );
-    assert!(
-        excused.iter().any(|p| p.contains("early_gate.rs")),
-        "structural exemption must not excuse the missing listing: {excused:?}"
+        problems.iter().any(|p| p.contains("new_handler.rs")),
+        "production call after an inline test module must be reported: {problems:?}"
     );
 }
 
@@ -1543,6 +1416,25 @@ fn listed_module_tests() -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
+/// First duplicated battery name in one file's coverage list, if any.
+/// Duplicates must not inflate the per-site battery count (two references
+/// to one battery are one behavioral vector, not two).
+fn find_duplicate_battery<'a>(batteries: &[&'a str]) -> Option<&'a str> {
+    let mut seen = BTreeSet::new();
+    batteries.iter().find(|name| !seen.insert(**name)).copied()
+}
+
+/// Duplicates within one file's battery list satisfy nothing: two
+/// references to one battery are one behavioral vector.
+#[test]
+fn duplicate_batteries_do_not_count() {
+    assert_eq!(find_duplicate_battery(&["wired_a", "wired_b"]), None);
+    assert_eq!(
+        find_duplicate_battery(&["wired_encrypt_init", "wired_encrypt_init"]),
+        Some("wired_encrypt_init")
+    );
+}
+
 #[test]
 fn behavioral_battery_covers_handler_inventory() {
     for (file, sites) in WIRE_SITES {
@@ -1552,8 +1444,13 @@ fn behavioral_battery_covers_handler_inventory() {
             .map(|(_, tests)| *tests)
             .unwrap_or(&[]);
         assert!(
+            find_duplicate_battery(batteries).is_none(),
+            "{file}: duplicate battery {:?} (one battery listed twice is one vector)",
+            find_duplicate_battery(batteries)
+        );
+        assert!(
             batteries.len() >= *sites,
-            "{file}: {sites} call site(s) need at least {sites} behavioral batteries, found {} \
+            "{file}: {sites} call site(s) need at least {sites} distinct behavioral batteries, found {} \
              (textual gate presence alone is not coverage)",
             batteries.len()
         );
