@@ -21,6 +21,26 @@ pub(crate) fn shim_state_test_guard() -> MutexGuard<'static, ()> {
     SHIM_STATE_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Q03 probe child-role sentinel (B3): subprocess-isolated
+/// native-probe parents set this on the spawned child command; the
+/// child body refuses unless it is present, so direct selection can
+/// never run provider contact in the shared harness process.
+#[cfg(not(miri))]
+pub(crate) const Q03_PROBE_CHILD_ROLE: &str = "Q03_PROBE_CHILD_ROLE";
+
+/// Q03 probe child-role guard (B3): call as the FIRST statement of
+/// an isolated probe-child body, before any fixture or provider
+/// contact. Panics (loud refusal) unless the parent-set
+/// [`Q03_PROBE_CHILD_ROLE`] sentinel is present.
+#[cfg(not(miri))]
+pub(crate) fn require_q03_probe_child_role() {
+    assert!(
+        std::env::var_os(Q03_PROBE_CHILD_ROLE).is_some(),
+        "refusing direct selection: {Q03_PROBE_CHILD_ROLE} is not set (this probe body runs \
+         only in the parent-spawned child process, never in the shared test harness)"
+    );
+}
+
 mod abi_audit;
 mod attribute_classification;
 #[cfg(unix)]
@@ -38,6 +58,8 @@ mod init_args;
 mod interface;
 #[cfg(not(miri))] // real kryoptic provider + daemon; covered natively
 mod kryoptic_gav_null;
+#[cfg(not(miri))] // real kryoptic provider via libloading + daemon; covered natively
+mod kryoptic_label_probe;
 mod null_pointers;
 #[cfg(not(miri))] // binds TcpListeners (tokio); covered natively
 mod output_semantics;

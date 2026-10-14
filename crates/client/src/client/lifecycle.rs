@@ -322,6 +322,7 @@ impl Pkcs11Client {
             typed_auth_capability: Default::default(),
             mechanism_parameter_transport_version: Default::default(),
             exact_token_label_version: Default::default(),
+            exact_token_label_context: Default::default(),
             grpc,
             channel,
             context_id: None,
@@ -344,6 +345,7 @@ impl Pkcs11Client {
             typed_auth_capability: Default::default(),
             mechanism_parameter_transport_version: Default::default(),
             exact_token_label_version: Default::default(),
+            exact_token_label_context: Default::default(),
             grpc,
             channel,
             context_id: None,
@@ -364,6 +366,7 @@ impl Pkcs11Client {
             typed_auth_capability: Default::default(),
             mechanism_parameter_transport_version: Default::default(),
             exact_token_label_version: Default::default(),
+            exact_token_label_context: Default::default(),
             grpc: new_grpc_client(channel.clone(), DEFAULT_RPC_TIMEOUT),
             channel,
             context_id: None,
@@ -456,6 +459,14 @@ impl Pkcs11Client {
             response.daemon_effects_version_max,
         )?;
         self.context_id = Some(response.client_context_id);
+        // B1: the new context may live on a replacement peer — drop
+        // every capability probed against the old one (a stale v1
+        // exact-label cache would otherwise authorize exact emission
+        // to a legacy peer, which ignores the exact field and
+        // initializes with the empty/lossy compat string). Fresh
+        // capabilities arrive via the post-init probe (the shim's
+        // `C_Initialize` re-probes; capability gates re-probe on use).
+        self.reset_probe_caches();
         Ok(())
     }
 
@@ -477,14 +488,35 @@ impl Pkcs11Client {
             return Err(rv);
         }
         self.context_id = None;
+        // B1: with the context gone the probe caches are unbound —
+        // drop them so a later re-initialize against a replacement
+        // peer starts unnegotiated (see `initialize`).
+        self.reset_probe_caches();
         Ok(())
+    }
+
+    /// Drop every discovery-probe cache (B1): a lifecycle change may
+    /// have replaced the peer, so capabilities probed against the old
+    /// one must not survive. Store-based, so ALL clones sharing the
+    /// connection observe the reset (replacing the `Arc`s would
+    /// diverge the clones that already hold one).
+    pub(crate) fn reset_probe_caches(&self) {
+        self.exact_effects_version.store(0, std::sync::atomic::Ordering::Release);
+        self.invalidate_typed_auth_capability();
+        self.mechanism_parameter_transport_version.store(0, std::sync::atomic::Ordering::Release);
+        self.exact_token_label_version.store(0, std::sync::atomic::Ordering::Release);
+        *self.exact_token_label_context.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// Record a fresh `GetBackendInterfaces` probe (W1-C10-03): the
     /// effects version, the typed-auth capability, the
     /// mechanism-parameter transport version, and the exact-label
     /// version are always refreshed together from the same probe, so a
-    /// version change can never leave a stale capability behind.
+    /// version change can never leave a stale capability behind. The
+    /// exact-label version is additionally stamped with this clone's
+    /// current `context_id` (B1): `init_token` honors the cached
+    /// version only while the stamp matches, so a v1 cache can never
+    /// authorize exact emission after the context moved on.
     pub(crate) fn note_backend_probe(
         &self,
         effects_version: u32,
@@ -498,6 +530,8 @@ impl Pkcs11Client {
             .store(mechanism_parameter_transport_version, std::sync::atomic::Ordering::Release);
         self.exact_token_label_version
             .store(exact_token_label_version, std::sync::atomic::Ordering::Release);
+        *self.exact_token_label_context.lock().unwrap_or_else(|e| e.into_inner()) =
+            self.context_id.clone();
     }
 
     /// The cached `mechanism_parameter_transport_version` discovery
@@ -521,18 +555,33 @@ impl Pkcs11Client {
     /// The cached `exact_token_label_version` discovery capability (Q03
     /// phase 2): the daemon-advertised value, or 0 when no probe has
     /// established one (legacy string-only labels). `init_token` gates
-    /// exact-label emission on this (exact at ≥ 1, string fallback or
-    /// fail-closed at 0). `pub` for cross-crate test observability
-    /// (the shim's old-daemon simulation asserts the injected value).
+    /// on the context-bound effective value below (exact at ≥ 1,
+    /// string fallback or fail-closed at 0). `pub` for cross-crate
+    /// test observability (the shim's old-daemon simulation asserts
+    /// the injected value).
     pub fn exact_token_label_version(&self) -> u32 {
         self.exact_token_label_version.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// The exact-label capability usable for THIS context (Q03 phase
+    /// 2, B1): the cached discovery value, but only when it was
+    /// probed under the current `context_id` — otherwise 0 (fail
+    /// closed). This is what `init_token` gates on; the raw cached
+    /// value above is observability only.
+    pub(crate) fn effective_exact_token_label_version(&self) -> u32 {
+        let stamped =
+            self.exact_token_label_context.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if stamped == self.context_id { self.exact_token_label_version() } else { 0 }
     }
 
     /// Test-only injection for the exact-label cache (Q03 phase 2): the
     /// capability normally arrives via discovery in
     /// `get_backend_interfaces`; tests inject it only to simulate an
     /// old daemon's absent advertisement. Production code must never
-    /// call this.
+    /// call this. The context stamp is left untouched: inject on a
+    /// client whose context still matches its last probe (as the
+    /// shim's old-daemon simulation does) so the injected value is
+    /// effective.
     pub fn set_exact_token_label_version_for_tests(&self, version: u32) {
         self.exact_token_label_version.store(version, std::sync::atomic::Ordering::Release);
     }
@@ -543,7 +592,10 @@ impl Pkcs11Client {
     /// caller must fall back to its embedded default).
     ///
     /// Context-free (no `C_Initialize` required); safe to call before
-    /// `initialize()`.
+    /// `initialize()`. Capabilities are bound to the probing context
+    /// and dropped by every lifecycle change (B1), so establish them
+    /// AFTER `initialize()` — the shim's `C_Initialize` re-probes —
+    /// and re-probe after any reconnect.
     pub async fn get_backend_interfaces(&mut self) -> Result<BackendProbe, ConnectError> {
         let req = pkcs11_proxy_ng_proto::GetBackendInterfacesRequest {};
         let resp = self
@@ -601,10 +653,10 @@ impl Pkcs11Client {
                     .map_err(|_| CkRv::DEVICE_ERROR)?;
                 self.grpc = new_grpc_client(channel.clone(), self.rpc_timeout);
                 self.channel = channel;
-                self.exact_effects_version = Default::default();
-                self.mechanism_parameter_transport_version = Default::default();
-                self.exact_token_label_version = Default::default();
-                self.invalidate_typed_auth_capability();
+                // B1: store-based reset — every clone sharing the
+                // connection observes it (the old `Arc` replacement
+                // diverged clones that already held one).
+                self.reset_probe_caches();
                 if let Some(ref ctx) = self.context_id {
                     let req = pkcs11_proxy_ng_proto::GetSlotListRequest {
                         client_context_id: ctx.clone(),
@@ -781,6 +833,51 @@ mod tests {
         let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
         let client = Pkcs11Client::from_channel(channel);
         assert_eq!(client.exact_token_label_version(), 0);
+    }
+
+    /// Q03 phase 2 (B1): the lifecycle reset drops every probe cache
+    /// AND the exact-label context stamp, on ALL clones sharing the
+    /// connection (store-based, never `Arc` replacement).
+    #[tokio::test]
+    async fn probe_cache_reset_drops_all_caches_and_stamp_on_every_clone() {
+        use std::sync::atomic::Ordering;
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
+        let client = Pkcs11Client::from_channel(channel);
+        let clone = client.clone();
+        client.note_backend_probe(1, true, 1, 1);
+        assert_eq!(client.exact_token_label_version(), 1);
+        assert_eq!(clone.effective_exact_token_label_version(), 1);
+        client.reset_probe_caches();
+        for c in [&client, &clone] {
+            assert_eq!(c.exact_effects_version.load(Ordering::Acquire), 0);
+            assert_eq!(c.cached_typed_auth_capability(), None);
+            assert_eq!(c.mechanism_parameter_transport_version(), 0);
+            assert_eq!(c.exact_token_label_version(), 0);
+            assert_eq!(c.effective_exact_token_label_version(), 0);
+        }
+    }
+
+    /// Q03 phase 2 (B1): the effective exact-label capability follows
+    /// the stamp — a v1 cache probed under another context reads as 0
+    /// until a fresh probe re-binds it.
+    #[tokio::test]
+    async fn effective_exact_label_version_follows_the_context_stamp() {
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
+        let mut client = Pkcs11Client::from_channel(channel);
+        client.note_backend_probe(1, true, 1, 1);
+        assert_eq!(client.effective_exact_token_label_version(), 1);
+        client.restore_context_id(Some("q03-other-context".into()));
+        assert_eq!(
+            client.effective_exact_token_label_version(),
+            0,
+            "context moved on without a fresh probe: fail closed"
+        );
+        client.note_backend_probe(1, true, 1, 1);
+        assert_eq!(
+            client.effective_exact_token_label_version(),
+            1,
+            "a fresh probe under the current context re-binds v1"
+        );
     }
 
     #[test]

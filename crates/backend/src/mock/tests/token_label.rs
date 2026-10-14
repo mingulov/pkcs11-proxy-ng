@@ -75,6 +75,20 @@ fn q03_mock_exact_bytes_store_verbatim() {
         Some(raw),
         "invalid-encoding bytes are stored verbatim, never U+FFFD-substituted"
     );
+    // Q03 phase 2 (N4): readback derives from the exact store when
+    // present — the lossy decode of the raw bytes (two U+FFFD for
+    // the two invalid bytes), NOT the single-U+FFFD compat text —
+    // mirroring the native FFI readback that ignores the compat
+    // string whenever exact bytes exist.
+    let readback = backend.get_token_info(CkSlotId(0)).expect("token info").label;
+    assert_eq!(
+        readback, "BAD\u{fffd}\u{fffd}",
+        "readback derives from the exact store, not the compat text"
+    );
+    assert_ne!(
+        readback, "BAD\u{fffd}",
+        "readback must not echo the compat string when exact bytes exist"
+    );
 }
 
 #[test]

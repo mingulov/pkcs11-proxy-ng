@@ -1928,6 +1928,15 @@ async fn init_token_32_byte_label_exact_stores_verbatim() {
     .await;
     assert_eq!(rv, CkRv::OK.0);
     assert_eq!(mock.token_label_bytes(CkSlotId(0)), Some(raw), "exact bytes are stored verbatim");
+    // Q03 phase 2 (N4): readback establishes exact-field precedence —
+    // the lossy decode of the exact bytes, never the deliberately
+    // wrong compat string (native FFI ignores that text too).
+    let readback = mock.get_token_info(CkSlotId(0)).expect("token info").label;
+    assert_eq!(readback, "BAD\u{fffd}\u{fffd}", "readback derives from the exact store");
+    assert_ne!(
+        readback, "WRONG-COMPAT-TEXT",
+        "the compat string is ignored when the exact field is present"
+    );
 }
 
 /// Q03 phase 2 (old-shim compat): an absent exact field keeps the

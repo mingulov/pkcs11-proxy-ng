@@ -138,9 +138,17 @@ pub struct Pkcs11Client {
     mechanism_parameter_transport_version: std::sync::Arc<std::sync::atomic::AtomicU32>,
     /// Cached `exact_token_label_version` discovery capability (Q03 phase
     /// 2): 0 = legacy string-only labels. Shared across clones like the
-    /// other probe caches; every fresh probe overwrites it and reconnect
-    /// resets it to 0.
+    /// other probe caches; every fresh probe overwrites it and every
+    /// lifecycle change (initialize/finalize/reconnect) resets it to 0.
     exact_token_label_version: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// The `context_id` that was current on the probing clone when the
+    /// exact-label capability above was cached (Q03 phase 2, B1):
+    /// `None` when no probe has established one. Shared across clones
+    /// like the caches; `init_token` honors the cached version only
+    /// while this stamp still matches its own context, so a v1 cache
+    /// probed against one peer/lifecycle can never authorize exact
+    /// emission after the context moved on.
+    exact_token_label_context: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     grpc: GrpcClient<RpcDeadline<tonic::transport::Channel>>,
     /// The channel wrapped by `grpc`, kept so [`Pkcs11Client::set_rpc_timeout`]
     /// and [`reconnect`][Pkcs11Client::reconnect] can rebuild the gRPC client

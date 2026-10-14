@@ -166,8 +166,11 @@ impl Pkcs11Client {
         label: InitTokenLabel<'_>,
     ) -> CkResult<()> {
         let ctx = self.context_id()?;
+        // B1: gate on the context-bound effective capability, never
+        // the raw cache — a v1 probed under another context must not
+        // authorize exact emission to this (possibly legacy) peer.
         let (label, label_exact) =
-            init_token_label_fields(label, self.exact_token_label_version())?;
+            init_token_label_fields(label, self.effective_exact_token_label_version())?;
         let req = pkcs11_proxy_ng_proto::InitTokenRequest {
             client_context_id: ctx,
             slot_id: slot_id.0,
@@ -387,6 +390,34 @@ mod tests {
                 client.init_token(CkSlotId(0), Some(b"1234"), label).await.unwrap_err(),
                 CkRv::ARGUMENTS_BAD,
                 "unnegotiated {label:?} must fail closed before any RPC"
+            );
+        }
+    }
+
+    /// Q03 phase 2 (B1): a v1 capability probed under a DIFFERENT
+    /// context must not authorize exact emission — NULL/invalid fail
+    /// closed locally (`ARGUMENTS_BAD` before any RPC; an attempted RPC
+    /// against the dead channel would surface as transport
+    /// `DEVICE_ERROR` instead).
+    #[tokio::test]
+    async fn init_token_stale_probe_context_refuses_before_any_rpc() {
+        let mut client = dead_channel_client();
+        client.note_backend_probe(1, true, 1, 1);
+        assert_eq!(client.exact_token_label_version(), 1);
+        // The context changed without a fresh probe (e.g. a context id
+        // propagated from another clone's lifecycle): the stamp no
+        // longer matches, so the cached v1 is unusable.
+        client.restore_context_id(Some("q03-stale-stamp".into()));
+        let mut raw = [b' '; PKCS11_TOKEN_LABEL_LEN];
+        raw[..5].copy_from_slice(b"BAD\xff\xfe");
+        for label in [
+            InitTokenLabel { text: "", exact: Some(ExactTokenLabel::Null) },
+            InitTokenLabel { text: "BAD\u{fffd}", exact: Some(ExactTokenLabel::Bytes(raw)) },
+        ] {
+            assert_eq!(
+                client.init_token(CkSlotId(0), Some(b"1234"), label).await.unwrap_err(),
+                CkRv::ARGUMENTS_BAD,
+                "stale-context {label:?} must fail closed before any RPC"
             );
         }
     }

@@ -35,7 +35,11 @@ pub(super) fn token_info_from_ck(info: &cryptoki_sys::CK_TOKEN_INFO) -> CkTokenI
     let backend_width = std::mem::size_of::<cryptoki_sys::CK_ULONG>();
     let canon = |v: cryptoki_sys::CK_ULONG| canonicalize_ulong(v as u64, backend_width);
     CkTokenInfo {
-        label: utf8_trim(&info.label),
+        // B2: labels trim ONLY trailing blank-padding — a terminal
+        // data NUL is provider-stored caller bytes and must survive
+        // readback. Every other field keeps the pre-existing
+        // spaces+NULs trim (pinned by the `utf8_trim` suite).
+        label: unpad_token_label(&info.label),
         manufacturer_id: utf8_trim(&info.manufacturerID),
         model: utf8_trim(&info.model),
         serial_number: utf8_trim(&info.serialNumber),
@@ -233,6 +237,42 @@ mod tests {
         assert_eq!(out.free_private_memory, canon);
         assert_eq!(out.max_pin_len, 32);
         assert_eq!(out.min_pin_len, 4);
+    }
+
+    /// Q03 phase 2 (B2): FFI-backed readback — a terminal data NUL
+    /// in the provider's 32 label bytes must survive `GetTokenInfo`
+    /// (`b"C\0"` + 30 spaces yields `"C\0"`, and re-padding
+    /// reproduces the identical 32 bytes through the shim's
+    /// `space_pad_into`). The pre-existing `C\0D` vector avoids this
+    /// boundary; the generic trimmer strips the terminal NUL (RED).
+    #[test]
+    fn token_info_label_preserves_terminal_data_nul() {
+        use pkcs11_proxy_ng_types::space_pad_into;
+        let mut label = [b' '; pkcs11_proxy_ng_types::PKCS11_TOKEN_LABEL_LEN];
+        label[0] = b'C';
+        label[1] = 0;
+        let info = cryptoki_sys::CK_TOKEN_INFO { label, ..Default::default() };
+        let out = super::token_info_from_ck(&info);
+        assert_eq!(out.label, "C\0", "terminal data NUL must survive readback");
+        let mut repadded = [0u8; pkcs11_proxy_ng_types::PKCS11_TOKEN_LABEL_LEN];
+        space_pad_into(&mut repadded, &out.label);
+        assert_eq!(
+            repadded, label,
+            "re-padding the read-back label must reproduce the provider bytes"
+        );
+    }
+
+    /// Q03 phase 2 (B2): the NUL-preserving decode is label-only —
+    /// every other fixed-width field keeps the pre-existing
+    /// spaces+NULs trim (pinned by the `utf8_trim` suite).
+    #[test]
+    fn token_info_non_label_fields_still_trim_nuls() {
+        let mut info = cryptoki_sys::CK_TOKEN_INFO::default();
+        info.model[..3].copy_from_slice(b"M\0\0");
+        info.serialNumber[..3].copy_from_slice(b"S\0\0");
+        let out = super::token_info_from_ck(&info);
+        assert_eq!(out.model, "M");
+        assert_eq!(out.serial_number, "S");
     }
 
     #[test]
