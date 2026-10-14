@@ -40,7 +40,12 @@ is present, all 10 mechanism tests plus the 79-shape matrix driver execute
 for real; when it is absent, each test records an honest
 `record_skip!(ProviderMissing)` line and passes without executing. A
 present-but-broken provider still fails loudly. The shape-matrix driver
-asserts `executed + skipped == 79` with zero transport failures.
+classifies each advertised shape as `success` (RPC returned `Ok`) or
+`attempted` (RPC-completed with an error RV, origin unproven — no RV alone
+proves SoftHSM2 was reached) and asserts
+`succeeded + attempted + skipped == 79` with zero transport failures. Only
+`succeeded` shapes qualify as real-provider evidence; attempted shapes and
+unsupported skips never qualify by totals.
 ## Tests using SoftHSM2 in default `cargo test`
 
 `crates/server/tests/parameterized_mechanism_test.rs` runs in default
@@ -49,7 +54,9 @@ mechanism tests against SoftHSM2, including a matrix covering all 79 modeled
 parameter shapes. If SoftHSM2 is unavailable, the tests report
 `record_skip!(ProviderMissing)` and pass without running provider calls. If it
 is available but fails, the tests fail. The matrix checks that each shape was
-either exercised or skipped and that no transport call failed.
+either succeeded, attempted (error RV observed, native origin unproven), or
+honestly skipped, and that no transport call failed. Attempted and skipped
+shapes never qualify as real-provider evidence by totals.
 
 ```bash
 cargo test -p pkcs11-proxy-ng --test parameterized_mechanism_test -- --test-threads=1
@@ -81,6 +88,7 @@ build, set `PKCS11_PROXY_SHIM_LIB=/path/to/libpkcs11_proxy_ng_shim.so`.
 | `crates/server/tests/nss_tls_mkd_mechanism_out_test.rs` | NSS softokn SSL3 master-key-derive mechanism-output coverage | NSS softokn libsoftokn3.so and certutil | `cargo test -p pkcs11-proxy-ng --test nss_tls_mkd_mechanism_out_test -- --ignored --test-threads=1` |
 | `crates/server/tests/provider_matrix_test.rs` | Optional NSS and Kryoptic provider matrix smoke coverage | NSS softokn libsoftokn3.so and certutil; Kryoptic module via PKCS11_PROXY_KRYOPTIC_MODULE | `cargo test -p pkcs11-proxy-ng --test provider_matrix_test nss_softokn_smoke_suite -- --ignored --test-threads=1`<br>`cargo test -p pkcs11-proxy-ng --test provider_matrix_test kryoptic_smoke_suite -- --ignored --test-threads=1` |
 | `crates/server/tests/q01_close_oracle_test.rs` | Hook-gated Q01 close-path loaded-oracle coverage (real daemon stack) | SoftHSM2 module and softhsm2-util; NSS softokn libsoftokn3.so and certutil; native-owner-test-hooks feature build | `cargo test -p pkcs11-proxy-ng --features native-owner-test-hooks --test q01_close_oracle_test -- --ignored --test-threads=1` |
+| `crates/server/tests/shape_evidence_test.rs` | Shape-evidence oracle controls (attempted vs native-entered vs success) | Entry-recording oracle build via PKCS11_PROXY_ENTRY_RECORDING_ORACLE_LIB | `cargo test -p pkcs11-proxy-ng --test shape_evidence_test -- --ignored --test-threads=1` |
 | `crates/server/tests/softhsm_fixture_test.rs` | SoftHSM2 fixture variant coverage | SoftHSM2 module and softhsm2-util | `cargo test -p pkcs11-proxy-ng --test softhsm_fixture_test -- --ignored --test-threads=1` |
 | `crates/server/tests/template_compat_test.rs` | Template compatibility tests using SoftHSM2 | SoftHSM2 module and softhsm2-util | `cargo test -p pkcs11-proxy-ng --test template_compat_test -- --ignored --test-threads=1` |
 | `crates/server/tests/test_hooks_topology_test.rs` | Hook-gated control-plane topology coverage (real daemon subprocess) | SoftHSM2 module and softhsm2-util; native-owner-test-hooks feature build; built workspace binaries | `cargo test -p pkcs11-proxy-ng --features native-owner-test-hooks --test test_hooks_topology_test -- --ignored --test-threads=1` |
@@ -101,6 +109,24 @@ cargo build --locked --manifest-path tests/ffi_oracles/exact_outputs/Cargo.toml 
 PKCS11_PROXY_EXACT_ORACLE_LIB="$PWD/tests/ffi_oracles/exact_outputs/target/debug/libpkcs11_exact_output_oracle.so" \
 PKCS11_PROXY_MISSING_BEGIN_ORACLE_LIB="$PWD/target/missing-begin-oracle/debug/libpkcs11_exact_output_oracle.so" \
   cargo test --locked -p pkcs11-proxy-ng --test noncontract_begin_health_test \
+  -- --ignored --test-threads=1 --nocapture
+```
+
+### Shape-evidence entry-recording oracle gate
+
+From the standalone repository root, build the entry-recording oracle, then
+explicitly load it. The oracle returns scenario RVs verbatim while recording
+native `C_EncryptInit` entries independently, so the controls prove that
+server-local and backend-local rejects earn no native-entry credit even on RV
+equality with a genuine native error — which itself earns native-entry credit
+but not success credit. It is not a real cryptographic provider; this gate
+tests the evidence taxonomy, and its native-entry scope carries that
+limitation explicitly.
+
+```sh
+cargo build --locked --manifest-path tests/ffi_oracles/entry_recording/Cargo.toml
+PKCS11_PROXY_ENTRY_RECORDING_ORACLE_LIB="$PWD/tests/ffi_oracles/entry_recording/target/debug/libpkcs11_entry_recording_oracle.so" \
+  cargo test --locked -p pkcs11-proxy-ng --test shape_evidence_test \
   -- --ignored --test-threads=1 --nocapture
 ```
 

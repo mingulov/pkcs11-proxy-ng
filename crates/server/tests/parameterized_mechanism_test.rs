@@ -16,10 +16,15 @@
 //!
 //! The `softhsm_all_param_shapes_execute` driver additionally covers every
 //! [`CkMechanismParams`] variant (see `support/shape_matrix.rs`): each shape
-//! is pushed through the live stack, mechanisms SoftHSM2 does not implement
-//! are recorded via `record_skip!(MechanismUnsupported)`, and the test
-//! asserts `executed + skipped == 79` with zero transport failures, so a
-//! crash can never masquerade as coverage.
+//! is pushed through the live stack and classified as `success` (the RPC
+//! returned `Ok`) or `attempted` (RPC-completed with an error RV, origin
+//! unproven — no RV alone proves SoftHSM2 was reached). Mechanisms SoftHSM2
+//! does not implement are recorded via `record_skip!(MechanismUnsupported)`,
+//! and the test asserts `succeeded + attempted + skipped == 79` with zero
+//! transport failures, so a crash can never masquerade as coverage. Only
+//! `success` outcomes qualify as real-provider evidence in this lane;
+//! attempted shapes need the entry-recording oracle lane
+//! (`shape_evidence_test.rs`) or a dedicated round-trip test to qualify.
 //!
 //! Run with:
 //! ```sh
@@ -851,10 +856,14 @@ fn generic_derive_template() -> Vec<CkAttribute> {
 }
 
 /// Push one shape through the live stack, dispatching on the mechanism's
-/// advertised operation flags. Any honest CK_RV outcome — success or a
-/// mechanism-level error from the backend — proves the params traversed
-/// Rust -> proto -> gRPC -> Rust -> C -> SoftHSM2; only a transport failure
-/// (caught by the tripwire) or a test-harness error fails the shape.
+/// advertised operation flags, and classify the evidence honestly (Q07):
+/// `Ok` is a successful real-provider operation, while any error RV is
+/// merely attempted — RPC-completed, origin unproven — because the same RV
+/// value can come from server transport validation, backend FFI
+/// reconstruction, or SoftHSM2 itself. No RV alone proves the params
+/// traversed Rust -> proto -> gRPC -> Rust -> C -> SoftHSM2; only a
+/// transport failure (caught by the tripwire) or a test-harness error
+/// fails the shape.
 ///
 /// The caller passes a fresh session per shape (closed afterwards) so a
 /// successful `*_init` never leaks `CKR_OPERATION_ACTIVE` into the next
@@ -865,7 +874,9 @@ async fn execute_shape(
     slot: CkSlotId,
     case: &support::ShapeCase,
     keys: &ShapeKeys,
-) -> Result<String, String> {
+) -> Result<support::ShapeOutcome, String> {
+    use support::ShapeOutcome;
+
     let info = client
         .get_mechanism_info(slot, case.mechanism.mechanism_type)
         .await
@@ -879,42 +890,46 @@ async fn execute_shape(
         return match client.derive_key(session, mechanism, key, Some(&template)).await {
             Ok(handle) => {
                 let _ = client.destroy_object(session, handle).await;
-                Ok("derive ok".to_string())
+                Ok(ShapeOutcome::success("derive ok".to_string()))
             }
-            Err(rv) => Ok(format!("derive -> {rv}")),
+            Err(rv) => Ok(ShapeOutcome::attempted(rv, format!("derive -> {rv}"))),
         };
     }
     if flags & CkMechanismFlags::ENCRYPT.0 != 0 {
         return match client.encrypt_init(session, mechanism, key).await {
-            Ok(mech_out) => Ok(format!("encrypt-init ok (mechanism_out: {})", mech_out.is_some())),
-            Err(rv) => Ok(format!("encrypt-init -> {rv}")),
+            Ok(mech_out) => Ok(ShapeOutcome::success(format!(
+                "encrypt-init ok (mechanism_out: {})",
+                mech_out.is_some()
+            ))),
+            Err(rv) => Ok(ShapeOutcome::attempted(rv, format!("encrypt-init -> {rv}"))),
         };
     }
     if flags & CkMechanismFlags::SIGN.0 != 0 {
         return match client.sign_init(session, mechanism, key).await {
-            Ok(()) => Ok("sign-init ok".to_string()),
-            Err(rv) => Ok(format!("sign-init -> {rv}")),
+            Ok(()) => Ok(ShapeOutcome::success("sign-init ok".to_string())),
+            Err(rv) => Ok(ShapeOutcome::attempted(rv, format!("sign-init -> {rv}"))),
         };
     }
     if flags & CkMechanismFlags::DIGEST.0 != 0 {
         return match client.digest_init(session, mechanism).await {
-            Ok(()) => Ok("digest-init ok".to_string()),
-            Err(rv) => Ok(format!("digest-init -> {rv}")),
+            Ok(()) => Ok(ShapeOutcome::success("digest-init ok".to_string())),
+            Err(rv) => Ok(ShapeOutcome::attempted(rv, format!("digest-init -> {rv}"))),
         };
     }
     if flags & CkMechanismFlags::WRAP.0 != 0 {
         return match client.wrap_key(session, mechanism, key, keys.aes).await {
-            Ok(wrapped) => Ok(format!("wrap ok ({} bytes)", wrapped.len())),
-            Err(rv) => Ok(format!("wrap -> {rv}")),
+            Ok(wrapped) => Ok(ShapeOutcome::success(format!("wrap ok ({} bytes)", wrapped.len()))),
+            Err(rv) => Ok(ShapeOutcome::attempted(rv, format!("wrap -> {rv}"))),
         };
     }
     // No live-operation flag (keygen-only or vendor quirk): still push the
     // params through an init-class call so the Rust -> C conversion executes.
     match client.encrypt_init(session, mechanism, key).await {
-        Ok(mech_out) => {
-            Ok(format!("fallback encrypt-init ok (mechanism_out: {})", mech_out.is_some()))
-        }
-        Err(rv) => Ok(format!("fallback encrypt-init -> {rv}")),
+        Ok(mech_out) => Ok(ShapeOutcome::success(format!(
+            "fallback encrypt-init ok (mechanism_out: {})",
+            mech_out.is_some()
+        ))),
+        Err(rv) => Ok(ShapeOutcome::attempted(rv, format!("fallback encrypt-init -> {rv}"))),
     }
 }
 
@@ -965,7 +980,8 @@ async fn softhsm_all_param_shapes_execute() -> Result<(), String> {
     let keygen_session = open_logged_in_session(&mut client, slot, &fixture.user_pin).await?;
     let keys = ShapeKeys::generate(&mut client, keygen_session).await?;
 
-    let mut executed: u32 = 0;
+    let mut succeeded: u32 = 0;
+    let mut attempted: u32 = 0;
     let mut skipped: u32 = 0;
     for case in &cases {
         let params = case.mechanism.params.as_ref().expect("shape case must carry params");
@@ -985,8 +1001,18 @@ async fn softhsm_all_param_shapes_execute() -> Result<(), String> {
         let shape_session = open_logged_in_session(&mut client, slot, &fixture.user_pin).await?;
         let outcome = execute_shape(&mut client, shape_session, slot, case, &keys).await?;
         client.close_session(shape_session).await.map_err(|rv| rv.to_string())?;
-        eprintln!("shape {} (0x{:08x}): {outcome}", case.variant, case.mechanism.mechanism_type.0);
-        executed += 1;
+        eprintln!(
+            "{}",
+            support::format_shape_line(case.variant, case.mechanism.mechanism_type.0, &outcome)
+        );
+        match outcome.disposition {
+            support::ShapeDisposition::Success => succeeded += 1,
+            // This lane has no entry record: NativeEntered is unclaimable
+            // here (see the shape_evidence_test oracle controls).
+            support::ShapeDisposition::Attempted | support::ShapeDisposition::NativeEntered => {
+                attempted += 1;
+            }
+        }
     }
 
     assert_eq!(
@@ -994,15 +1020,16 @@ async fn softhsm_all_param_shapes_execute() -> Result<(), String> {
         tripwire_before,
         "transport failure during shape matrix: a crash is not coverage"
     );
-    assert_eq!(executed + skipped, cases.len() as u32, "every shape must execute or skip honestly");
+    assert_eq!(
+        succeeded + attempted + skipped,
+        cases.len() as u32,
+        "every shape must succeed, attempt, or skip honestly"
+    );
     assert!(
-        executed >= 1,
-        "SoftHSM2 supports core mechanisms; zero executions means the driver is vacuous"
+        succeeded + attempted >= 1,
+        "SoftHSM2 supports core mechanisms; zero attempts means the driver is vacuous"
     );
-    eprintln!(
-        "shape matrix: {executed} executed, {skipped} honestly skipped ({} total)",
-        cases.len()
-    );
+    eprintln!("{}", support::format_matrix_summary(succeeded, attempted, skipped, cases.len()));
 
     client.logout(keygen_session).await.map_err(|rv| rv.to_string())?;
     client.close_session(keygen_session).await.map_err(|rv| rv.to_string())?;
