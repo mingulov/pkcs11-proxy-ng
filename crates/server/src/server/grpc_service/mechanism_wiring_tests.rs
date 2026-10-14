@@ -9,6 +9,8 @@
 //! GREEN post-wire: the S2 §6 order (exclusion → auth → transport
 //! validation → remap → backend) holds at every site.
 
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,6 +27,7 @@ use tonic::Request;
 
 use super::HandlerContext;
 use super::service_utils::register_session_object_handle;
+use crate::consistency_checks::{skip_ws, strip_rust_code};
 use crate::mechanism_registry_source::MechanismRegistrySource;
 use crate::server::context_manager::{ClientContextId, ContextManager};
 use crate::server::handle_map::{BackendHandle, VirtualHandle};
@@ -922,69 +925,529 @@ async fn null_and_empty_flat_do_not_conflate() {
 }
 
 // ---------------------------------------------------------------------------
-// Source-scan assertion (R14 extends to all sites): at every `parse_mechanism(`
-// call site in the wired handler files, the S2 §6 gate order holds
-// textually: exclusion → auth → transport validation → remap. The anchor
-// count per file also pins the no-bypass invariant (a new `parse_mechanism(`
-// caller without the gates fails this test).
+// Source-scan assertion (R14 extends to all sites), MAINT-03 hardened (Q08):
+// at every `parse_mechanism(` call site in the wired handler files, the S2
+// §6 gate order holds: exclusion → auth → transport validation → remap.
+//
+// Two gates over one reviewed inventory:
+//  1. Reverse discovery: every `.rs` file under `src/server/grpc_service`
+//     with a real (comment/string-stripped, `#[cfg(test)]`-excluded)
+//     `parse_mechanism(` call site must be listed in `WIRE_SITES` — a new
+//     handler file can no longer slip past the list. `INVENTORY_EXEMPT`
+//     names the reviewed non-handler mentions; each exemption is
+//     re-validated (still mentions the marker, still zero call sites).
+//  2. Gate order over stripped code: gate markers sitting only in comments
+//     or strings no longer satisfy the check (the pre-Q08 raw-substring
+//     scan accepted them).
+// No new Rust parser: comment/string handling is the existing
+// `consistency_checks::strip_rust_code` tokenizer.
 // ---------------------------------------------------------------------------
+
+/// Reviewed inventory of mechanism-bearing handler files: (path relative
+/// to `src/server/grpc_service`, expected `parse_mechanism(` call-site
+/// count). The anchor count per file pins the no-bypass invariant (a new
+/// call site without the gates fails the order check); the
+/// reverse-discovery gate pins the list itself (an unlisted handler file
+/// fails the inventory check).
+const WIRE_SITES: &[(&str, usize)] = &[
+    ("message_crypto/mod.rs", 4),
+    ("digest_cipher/digest.rs", 1),
+    ("digest_cipher/cipher.rs", 2),
+    ("key_ops/generation.rs", 3),
+    ("key_ops/kem.rs", 3),
+    ("key_ops/wrapping.rs", 1),
+    ("key_ops/authenticated_wrap.rs", 1),
+    ("key_ops/wrap_preparation.rs", 1),
+    ("sign_verify/sign.rs", 2),
+    ("sign_verify/verify.rs", 2),
+    ("sign_verify/verify_signature.rs", 1),
+];
+
+/// Reviewed non-handler files that textually mention `parse_mechanism(`.
+/// Each exemption is re-validated on every run: the file must still
+/// mention the marker (a stale exemption fails) and must hold zero real
+/// call sites (a handler site fails and belongs in `WIRE_SITES`).
+const INVENTORY_EXEMPT: &[&str] = &[
+    // Holds the shared helper definition (`fn parse_mechanism(`), not a
+    // handler call site.
+    "service_utils.rs",
+];
+
+/// S2 §6 gate calls, in required textual order after `parse_mechanism(`.
+const GATES: &[&str] = &[
+    "check_operator_exclusion(",
+    "mechanism_permitted(",
+    "validate_mechanism_transport(",
+    "remap_mechanism_handles(",
+];
+
+fn grpc_service_root() -> PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server/grpc_service")
+}
+
+/// Production code of a handler file: the comment/string-stripped
+/// source with every `#[cfg(test)]`-gated item blanked to spaces.
+/// Test-gated regions sit in several shapes in-tree (trailing
+/// `mod tests { ... }`, early `mod foo;` declarations in
+/// `service_utils.rs`, a mid-file test `impl` in `context.rs`), so a
+/// first-`#[cfg(test)]` cut would either scan test helpers as production
+/// code or hide production code after an early gate. Blanking preserves
+/// byte offsets. Only the exact `#[cfg(test)]` spelling is recognized;
+/// exotic spellings (`#[cfg(all(test, ...))]`) would scan as production
+/// code — none exist under `grpc_service/` today.
+fn prod_code(text: &str) -> String {
+    blank_cfg_test_regions(&strip_rust_code(text))
+}
+
+/// `stripped` (see [`strip_rust_code`]) with every `#[cfg(test)]`-gated
+/// item blanked: `;`-terminated items (`mod foo;`) through their
+/// semicolon, braced items (`mod tests { ... }`, `impl ... { ... }`,
+/// `fn ... { ... }`) through their balanced closing brace. The `;`-vs-`{`
+/// decision skips nested `(...)`/`[...]`, so a `;` inside a signature
+/// (e.g. `[u8; 4]`) cannot end the item early. A malformed gate blanks
+/// only the attribute itself, leaving the aftermath visible (fail-loud:
+/// stray test code can only add anchors, never hide production sites).
+fn blank_cfg_test_regions(stripped: &str) -> String {
+    const ATTR: &str = "#[cfg(test)]";
+    let mut out = stripped.as_bytes().to_vec();
+    let mut search_from = 0;
+    while let Some(rel) = stripped[search_from..].find(ATTR) {
+        let attr_start = search_from + rel;
+        let mut cursor = attr_start + ATTR.len();
+        // Skip any further attributes (`#[allow(...)]`, ...) on the item.
+        loop {
+            cursor = skip_ws(stripped, cursor);
+            if stripped[cursor..].starts_with("#[") {
+                cursor = skip_balanced(stripped, cursor + 1, b'[', b']').unwrap_or(stripped.len());
+            } else {
+                break;
+            }
+        }
+        let end = item_end(stripped, cursor).unwrap_or(attr_start + ATTR.len());
+        blank_span(&mut out, attr_start, end);
+        search_from = end;
+    }
+    String::from_utf8(out).expect("blanking preserves UTF-8 boundaries")
+}
+
+/// Offset just past the item starting at `cursor`: just past `;` for
+/// declaration items, just past the balanced `}` for braced items.
+/// `None` when the item is malformed (unbalanced, or a `}` arrives first).
+fn item_end(stripped: &str, cursor: usize) -> Option<usize> {
+    let bytes = stripped.as_bytes();
+    let mut i = cursor;
+    let mut paren = 0usize;
+    let mut bracket = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' => paren += 1,
+            b'[' => bracket += 1,
+            b')' => paren = paren.saturating_sub(1),
+            b']' => bracket = bracket.saturating_sub(1),
+            b';' if paren == 0 && bracket == 0 => return Some(i + 1),
+            b'{' if paren == 0 && bracket == 0 => return skip_balanced(stripped, i, b'{', b'}'),
+            b'}' if paren == 0 && bracket == 0 => return None,
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Offset just past the balanced `open..close` pair starting at `start`
+/// (which must hold `open`), or `None` when unbalanced.
+fn skip_balanced(text: &str, start: usize, open: u8, close: u8) -> Option<usize> {
+    let bytes = text.as_bytes();
+    if bytes.get(start) != Some(&open) {
+        return None;
+    }
+    let mut depth = 0usize;
+    for (i, b) in bytes.iter().enumerate().skip(start) {
+        if *b == open {
+            depth += 1;
+        } else if *b == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i + 1);
+            }
+        }
+    }
+    None
+}
+
+fn blank_span(out: &mut [u8], from: usize, to: usize) {
+    let end = to.min(out.len());
+    for b in &mut out[from..end] {
+        if *b != b'\n' {
+            *b = b' ';
+        }
+    }
+}
+
+/// Byte offsets of real `parse_mechanism(` call sites in stripped code.
+/// The shared helper definition (`fn parse_mechanism(`) is not a site.
+fn call_site_anchors(stripped: &str) -> Vec<usize> {
+    stripped
+        .match_indices("parse_mechanism(")
+        .map(|(index, _)| index)
+        .filter(|index| !is_fn_definition(stripped, *index))
+        .collect()
+}
+
+/// Whether the `parse_mechanism(` occurrence at `index` is a `fn`
+/// definition (`pub(super) fn parse_mechanism(`, ...) rather than a call.
+fn is_fn_definition(stripped: &str, index: usize) -> bool {
+    let before = stripped[..index].trim_end();
+    const FN_LEN: usize = 2; // `fn`
+    before.len() >= FN_LEN
+        && before.ends_with("fn")
+        && before.as_bytes()[..before.len() - FN_LEN]
+            .last()
+            .is_none_or(|b| !(b.is_ascii_alphanumeric() || *b == b'_'))
+}
+
+/// Reverse inventory discovery (MAINT-03): every `.rs` file under `root`
+/// holding at least one real `parse_mechanism(` call site, mapped to its
+/// site count. Keys are `/`-joined relative paths, so the table matches
+/// `WIRE_SITES` on every platform.
+fn discover_mechanism_handler_files(root: &Path) -> BTreeMap<String, usize> {
+    let mut discovered = BTreeMap::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries =
+            std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display()));
+        for entry in entries {
+            let path =
+                entry.unwrap_or_else(|e| panic!("read entry in {}: {e}", dir.display())).path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                let text = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+                let anchors = call_site_anchors(&prod_code(&text));
+                if !anchors.is_empty() {
+                    let rel = path.strip_prefix(root).unwrap_or_else(|_| {
+                        panic!("{} escapes {}", path.display(), root.display())
+                    });
+                    discovered.insert(rel_slash_path(rel), anchors.len());
+                }
+            }
+        }
+    }
+    discovered
+}
+
+/// `/`-joined relative path, so discovered keys match `WIRE_SITES` on
+/// every platform (Windows included).
+fn rel_slash_path(rel: &Path) -> String {
+    rel.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/")
+}
+
+/// Pure inventory comparison: every discovered handler file must be
+/// listed, and every listed file must still be discovered. Returns one
+/// human-readable problem per violation (empty when the reviewed
+/// inventory matches reality).
+fn inventory_problems(
+    listed: &[(&str, usize)],
+    discovered: &BTreeMap<String, usize>,
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    for file in discovered.keys() {
+        if !listed.iter().any(|(listed_file, _)| listed_file == file) {
+            problems.push(format!(
+                "unlisted mechanism-bearing handler file: {file} \
+                 (add it to WIRE_SITES with behavioral coverage, or remove its call site)"
+            ));
+        }
+    }
+    for (listed_file, _) in listed {
+        if !discovered.contains_key(*listed_file) {
+            problems.push(format!(
+                "stale WIRE_SITES entry: {listed_file} holds no call site anymore \
+                 (move it to INVENTORY_EXEMPT with a reason, or drop it)"
+            ));
+        }
+    }
+    problems
+}
+
+/// Re-validate every `INVENTORY_EXEMPT` entry against the real tree: an
+/// exemption must still textually mention the marker and must hold zero
+/// real call sites.
+fn exempt_problems(root: &Path) -> Vec<String> {
+    let mut problems = Vec::new();
+    for file in INVENTORY_EXEMPT {
+        let text =
+            std::fs::read_to_string(root.join(file)).unwrap_or_else(|e| panic!("read {file}: {e}"));
+        let anchors = call_site_anchors(&prod_code(&text));
+        if !anchors.is_empty() {
+            problems.push(format!(
+                "{file}: exempt file gained {} call site(s); move it to WIRE_SITES",
+                anchors.len()
+            ));
+        } else if !text.contains("parse_mechanism(") {
+            problems.push(format!(
+                "{file}: stale exemption, no longer mentions parse_mechanism(; drop it"
+            ));
+        }
+    }
+    problems
+}
+
+/// S2 §6 gate order over one stripped anchor window: exclusion → auth →
+/// transport validation → remap. `Ok` when every gate call is present in
+/// order; `Err` naming the first violation otherwise. The window must be
+/// comment/string-stripped: markers in comments or strings are not calls.
+fn check_gate_order(
+    file: &str,
+    site: usize,
+    stripped_window: &str,
+    gates: &[&str],
+) -> Result<(), String> {
+    let mut positions = Vec::with_capacity(gates.len());
+    for gate in gates {
+        match stripped_window.find(gate) {
+            Some(position) => positions.push(position),
+            None => return Err(format!("{file} site {site}: missing gate {gate}")),
+        }
+    }
+    let mut ordered = positions.clone();
+    ordered.sort_unstable();
+    if positions == ordered {
+        Ok(())
+    } else {
+        Err(format!(
+            "{file} site {site}: S2 §6 gate order violated \
+             (want exclusion → auth → validation → remap)"
+        ))
+    }
+}
 
 #[test]
 fn source_scan_pins_gate_order_at_every_wired_site() {
-    const WIRE_SITES: &[(&str, usize)] = &[
-        ("message_crypto/mod.rs", 4),
-        ("digest_cipher/digest.rs", 1),
-        ("digest_cipher/cipher.rs", 2),
-        ("key_ops/generation.rs", 3),
-        ("key_ops/kem.rs", 3),
-        ("key_ops/wrapping.rs", 1),
-        ("key_ops/authenticated_wrap.rs", 1),
-        ("key_ops/wrap_preparation.rs", 1),
-        ("sign_verify/sign.rs", 2),
-        ("sign_verify/verify.rs", 2),
-        ("sign_verify/verify_signature.rs", 1),
-    ];
-    const GATES: &[&str] = &[
-        "check_operator_exclusion(",
-        "mechanism_permitted(",
-        "validate_mechanism_transport(",
-        "remap_mechanism_handles(",
-    ];
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server/grpc_service");
+    let root = grpc_service_root();
+    // Reverse discovery first: the reviewed list must equal reality before
+    // the per-file order checks below mean anything.
+    let discovered = discover_mechanism_handler_files(&root);
+    let mut problems = inventory_problems(WIRE_SITES, &discovered);
+    problems.extend(exempt_problems(&root));
+    assert!(problems.is_empty(), "handler inventory drift:\n{}", problems.join("\n"));
     for (file, expected_anchors) in WIRE_SITES {
         let text =
             std::fs::read_to_string(root.join(file)).unwrap_or_else(|e| panic!("read {file}: {e}"));
-        // Test helpers trail the prod code; scan the prod head only.
-        let prod = match text.find("#[cfg(test)]") {
-            Some(cut) => &text[..cut],
-            None => text.as_str(),
-        };
-        let anchors: Vec<usize> =
-            prod.match_indices("parse_mechanism(").map(|(index, _)| index).collect();
+        let stripped = prod_code(&text);
+        let anchors = call_site_anchors(&stripped);
         assert_eq!(
             anchors.len(),
             *expected_anchors,
             "{file}: parse_mechanism( anchor count changed (new site or bypasser?)"
         );
-        for (site, window) in anchors.windows(2).map(|w| &prod[w[0]..w[1]]).enumerate() {
-            assert_gate_order(file, site, window, GATES);
+        for (site, window) in anchors.windows(2).map(|w| &stripped[w[0]..w[1]]).enumerate() {
+            check_gate_order(file, site, window, GATES).unwrap_or_else(|e| panic!("{e}"));
         }
-        let last = anchors.last().map(|start| &prod[*start..]).expect("at least one anchor");
-        assert_gate_order(file, anchors.len() - 1, last, GATES);
+        let last = anchors.last().map(|start| &stripped[*start..]).expect("at least one anchor");
+        check_gate_order(file, anchors.len() - 1, last, GATES).unwrap_or_else(|e| panic!("{e}"));
     }
 }
 
-fn assert_gate_order(file: &str, site: usize, window: &str, gates: &[&str]) {
-    let mut positions = Vec::with_capacity(gates.len());
-    for gate in gates {
-        let position =
-            window.find(gate).unwrap_or_else(|| panic!("{file} site {site}: missing gate {gate}"));
-        positions.push(position);
-    }
-    let mut ordered = positions.clone();
-    ordered.sort_unstable();
-    assert_eq!(
-        positions, ordered,
-        "{file} site {site}: S2 §6 gate order violated (want exclusion → auth → validation → remap)"
+/// MAINT-03 negative control: gate markers that appear only in comments
+/// or strings must NOT satisfy the order check. The pre-Q08 raw-substring
+/// scan accepted this fixture; if comment stripping regresses, this
+/// control fails.
+#[test]
+fn source_scan_rejects_comment_only_gate_markers() {
+    let window = r#"
+        let mechanism = match parse_mechanism(req.mechanism) {
+            Ok(mechanism) => mechanism,
+            Err(rv) => return Err(rv),
+        };
+        // S2 §6: check_operator_exclusion( before everything (a comment is not a call).
+        /* mechanism_permitted( then validate_mechanism_transport(
+           then remap_mechanism_handles( — all in a block comment. */
+        let note = "validate_mechanism_transport(";
+        backend_call(mechanism).await
+    "#;
+    let stripped = prod_code(window);
+    let result = check_gate_order("comment_only_fixture", 0, &stripped, GATES);
+    assert!(
+        result.is_err(),
+        "comment-only gate markers must fail the S2 §6 order check, got {result:?}"
     );
+}
+
+/// MAINT-03 negative control: reverse discovery must flag a
+/// mechanism-bearing handler file missing from the reviewed inventory. A
+/// list-only scan (the pre-Q08 shape) never sees this file; if discovery
+/// regresses to list-only, this control fails.
+#[test]
+fn reverse_discovery_flags_unlisted_handler_file() {
+    let dir = tempfile::tempdir().expect("fixture tempdir");
+    std::fs::write(
+        dir.path().join("wired.rs"),
+        "fn wired(req: Req) -> Rv {\n    parse_mechanism(req.mechanism)\n}\n",
+    )
+    .expect("write listed fixture");
+    std::fs::write(
+        dir.path().join("sneaky_handler.rs"),
+        "fn sneaky(req: Req) -> Rv {\n    let m = parse_mechanism(req.mechanism);\n    check_operator_exclusion(&r, m.mechanism_type)\n}\n",
+    )
+    .expect("write unlisted fixture");
+    // A comment-only mention must not count as a handler file.
+    std::fs::write(
+        dir.path().join("comment_only.rs"),
+        "// parse_mechanism( mentioned here, never called\nfn plain() {}\n",
+    )
+    .expect("write comment fixture");
+    let discovered = discover_mechanism_handler_files(dir.path());
+    assert_eq!(
+        discovered.get("wired.rs"),
+        Some(&1),
+        "listed-shaped fixture must be discovered: {discovered:?}"
+    );
+    assert_eq!(
+        discovered.get("sneaky_handler.rs"),
+        Some(&1),
+        "unlisted handler must be discovered: {discovered:?}"
+    );
+    assert!(
+        !discovered.contains_key("comment_only.rs"),
+        "comment-only mention must not count as a handler file: {discovered:?}"
+    );
+    let problems = inventory_problems(&[("wired.rs", 1)], &discovered);
+    assert_eq!(problems.len(), 1, "exactly the unlisted file is a problem: {problems:?}");
+    assert!(
+        problems[0].contains("sneaky_handler.rs"),
+        "problem must name the unlisted file: {problems:?}"
+    );
+}
+
+/// `#[cfg(test)]` handling must blank test-gated regions wherever they
+/// sit: an early `mod foo;` declaration or a mid-file test `impl` (both
+/// shapes exist in-tree — `service_utils.rs`, `context.rs`) must not
+/// hide subsequent production code, and test-region calls must not
+/// contribute sites.
+#[test]
+fn cfg_test_blanking_keeps_only_production_sites() {
+    let src = r#"
+#[cfg(test)]
+mod unit_tests;
+fn handler(req: Req) -> Rv {
+    parse_mechanism(req.mechanism)
+}
+#[cfg(test)]
+impl Ctx {
+    fn helper() {
+        parse_mechanism(None)
+    }
+}
+fn second(req: Req) -> Rv {
+    parse_mechanism(req.mechanism)
+}
+#[cfg(test)]
+mod tests {
+    fn t() {
+        parse_mechanism(None)
+    }
+}
+"#;
+    let code = prod_code(src);
+    assert_eq!(
+        code.match_indices("parse_mechanism(").count(),
+        2,
+        "exactly the two production calls survive blanking:\n{code}"
+    );
+    assert_eq!(call_site_anchors(&code).len(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// Behavioral coverage (MAINT-03/Q08): a new handler cannot be covered by
+// textual presence alone. Every `WIRE_SITES` file needs at least one
+// behavioral battery below, and every name below must resolve to a real
+// test in this module (checked via the test binary's own `--list`).
+// ---------------------------------------------------------------------------
+
+/// (handler file, behavioral battery tests exercising its call sites).
+const BEHAVIORAL_COVERAGE: &[(&str, &[&str])] = &[
+    (
+        "message_crypto/mod.rs",
+        &[
+            "wired_message_encrypt_init_contract_preempts_params",
+            "wired_message_encrypt_init_parameterless_accept",
+            "wired_message_decrypt_init_contract_preempts_params",
+            "wired_message_decrypt_init_parameterless_accept",
+            "wired_message_sign_init",
+            "wired_message_verify_init",
+        ],
+    ),
+    ("digest_cipher/digest.rs", &["wired_digest_init"]),
+    ("digest_cipher/cipher.rs", &["wired_encrypt_init", "wired_decrypt_init"]),
+    (
+        "key_ops/generation.rs",
+        &["wired_generate_key_pair", "wired_generate_key", "wired_derive_key"],
+    ),
+    (
+        "key_ops/kem.rs",
+        &["wired_encapsulate_key", "wired_decapsulate_key", "wired_encapsulate_key_exact"],
+    ),
+    // `wrapping.rs` holds `unwrap_key`'s own site; `wrap_key` funnels
+    // through `prepare_wrap` below.
+    ("key_ops/wrapping.rs", &["wired_unwrap_key"]),
+    ("key_ops/authenticated_wrap.rs", &["wired_unwrap_key_authenticated"]),
+    // Shared `prepare_wrap` admission, exercised through ordinary wrap-key.
+    ("key_ops/wrap_preparation.rs", &["wired_wrap_key"]),
+    ("sign_verify/sign.rs", &["wired_sign_init", "wired_sign_recover_init"]),
+    ("sign_verify/verify.rs", &["wired_verify_init", "wired_verify_recover_init"]),
+    ("sign_verify/verify_signature.rs", &["wired_verify_signature_init"]),
+];
+
+/// Full test names (`<module>::<test>: test`) reported by this binary's
+/// own `--list`. A renamed or deleted battery fails the coverage gate
+/// instead of silently covering nothing.
+fn listed_module_tests() -> String {
+    let exe = std::env::current_exe().expect("current test executable");
+    let output = std::process::Command::new(exe)
+        .arg("--list")
+        .output()
+        .expect("list tests of current binary");
+    assert!(
+        output.status.success(),
+        "--list of current test binary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+fn behavioral_battery_covers_handler_inventory() {
+    for (file, _) in WIRE_SITES {
+        let covered = BEHAVIORAL_COVERAGE
+            .iter()
+            .any(|(covered_file, tests)| covered_file == file && !tests.is_empty());
+        assert!(
+            covered,
+            "{file}: listed handler file has no behavioral battery \
+             (textual gate presence alone is not coverage)"
+        );
+    }
+    let listed = listed_module_tests();
+    for (file, tests) in BEHAVIORAL_COVERAGE {
+        assert!(
+            WIRE_SITES.iter().any(|(listed_file, _)| listed_file == file),
+            "{file}: coverage entry names a file outside WIRE_SITES"
+        );
+        for test in *tests {
+            // libtest `--list` omits the crate-name segment that
+            // `module_path!()` carries (`server::...`, not
+            // `pkcs11_proxy_ng::server::...`).
+            let listed_path = match module_path!().split_once("::") {
+                Some((_, rest)) => rest,
+                None => module_path!(),
+            };
+            let full = format!("{listed_path}::{test}: test");
+            assert!(
+                listed.contains(&full),
+                "{file}: behavioral test {test} not found in this binary (--list)"
+            );
+        }
+    }
 }
