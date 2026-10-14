@@ -136,18 +136,51 @@ fn q04_sign_mechanisms() -> Vec<pkcs11_proxy_ng_types::CkMechanismType> {
     ]
 }
 
+/// Expected R7 wire fingerprint for the `rsa_pss` shape at `length`
+/// under `abi` (the resolver selects the same form the reader routes
+/// on — R7 owns the golden values).
+#[cfg(target_endian = "little")]
+fn q04_pss_fingerprint(
+    length: u64,
+    abi: pkcs11_proxy_ng_types::shape_descriptors::ParamAbi,
+) -> u64 {
+    use pkcs11_proxy_ng_types::shape_descriptors::{Operation, OperationContext, ShapeResolver};
+    ShapeResolver::resolve(
+        Some("rsa_pss"),
+        OperationContext {
+            mechanism: pkcs11_proxy_ng_types::CkMechanismType::RSA_PKCS_PSS.0,
+            operation: Operation::General,
+            length,
+        },
+        abi,
+    )
+    .expect("rsa_pss fixture shape must resolve")
+    .fingerprint(abi)
+}
+
 #[test]
 #[cfg(target_endian = "little")]
 fn q04_compatible_pss_prefix_reaches_provider_once() {
     // Q04: a host-ABI daemon shares the shim's layout exactly, so the
     // eligible 3-byte PSS prefix forwards once and the provider's own
     // RV surfaces. On win32 hosts this is the matching-Win32 pair.
+    // The discovery snapshot is asserted first (the F1 host end-to-end
+    // leg); the op-RPC counter pins the positive control for F2 (an
+    // emitted RPC reaches the handler exactly once).
     use pkcs11_proxy_ng_backend::mock::MockMechanismEntry;
+    use pkcs11_proxy_ng_types::shape_descriptors::ParamAbi;
     let _guard = shim_state_test_guard();
     let daemon = TestDaemon::fresh_with_abi_and_mechanisms(MockAbi::host(), q04_sign_mechanisms());
     let shim = ShimSession::with_endpoint(&daemon.endpoint);
+    let local = ParamAbi::native().expect("LE host has a v1 ABI");
+    assert_eq!(
+        crate::interface_probe::backend_mechanism_abi(),
+        Some(local),
+        "live discovery must install the host snapshot"
+    );
     let key = create_object(shim.session);
     assert_eq!(daemon.backend.mechanism_entry_count(MockMechanismEntry::SignInit), 0);
+    assert_eq!(daemon.sign_init_entry_count(), 0);
     let mut prefix = [0x01u8, 0x02, 0x03];
     let mut mechanism = CK_MECHANISM {
         mechanism: pkcs11_proxy_ng_types::CkMechanismType::RSA_PKCS_PSS.0 as CK_MECHANISM_TYPE,
@@ -157,6 +190,11 @@ fn q04_compatible_pss_prefix_reaches_provider_once() {
     let rv = unsafe { dispatch::general::c_sign_init(shim.session, &mut mechanism, key) };
     assert_eq!(rv, CKR_OK as CK_RV, "compatible prefix must surface the provider RV");
     assert_eq!(
+        daemon.sign_init_entry_count(),
+        1,
+        "compatible prefix must emit exactly one operation RPC"
+    );
+    assert_eq!(
         daemon.backend.mechanism_entry_count(MockMechanismEntry::SignInit),
         1,
         "compatible prefix must reach the provider exactly once"
@@ -165,44 +203,310 @@ fn q04_compatible_pss_prefix_reaches_provider_once() {
 
 #[test]
 fn q04_incompatible_pss_prefix_refused_with_zero_provider_attempt() {
-    // Q04: a daemon whose layout differs from the shim's refuses the
-    // struct prefix locally (PARAM_INVALID) with zero provider attempt
+    // Q04/F2: every daemon whose layout differs from the shim's refuses
+    // the struct prefix locally (PARAM_INVALID) with zero operation RPC
     // — the refusal precedes the first RPC on the sign-init path, so no
-    // request is emitted. Prefers the packed profile so LP64 hosts pin
-    // the packed mismatch; win32 hosts pin natural-vs-packed instead.
+    // request is emitted. Each row travels live discovery (the snapshot
+    // is asserted first on LE), and both counters pin the refusal: the
+    // handler-entry counter proves no RPC arrived (a daemon-side
+    // rejection would read 1), while the provider counter stays 0 in
+    // both cases. LP64 hosts pin all three foreign rows including the
+    // packed mismatch; win32 hosts pin natural-vs-packed instead.
     use pkcs11_proxy_ng_backend::mock::MockMechanismEntry;
     use pkcs11_proxy_ng_types::shape_descriptors::ParamAbi;
     let _guard = shim_state_test_guard();
     let local = ParamAbi::native();
-    let (profile, _) = [
-        (MockAbi::Ilp32Packed, ParamAbi::Ilp32Packed1Le),
+    let mut rows = 0;
+    for (profile, expected) in [
+        (MockAbi::Lp64, ParamAbi::Lp64NativeLe),
         (MockAbi::Ilp32, ParamAbi::Ilp32NativeLe),
         (MockAbi::Llp64, ParamAbi::Llp64Packed1Le),
+        (MockAbi::Ilp32Packed, ParamAbi::Ilp32Packed1Le),
+    ] {
+        if Some(expected) == local {
+            continue;
+        }
+        rows += 1;
+        let daemon = TestDaemon::fresh_with_abi_and_mechanisms(profile, q04_sign_mechanisms());
+        let shim = ShimSession::with_endpoint(&daemon.endpoint);
+        if cfg!(target_endian = "little") {
+            assert_eq!(
+                crate::interface_probe::backend_mechanism_abi(),
+                Some(expected),
+                "live discovery must install the {profile:?} snapshot"
+            );
+        }
+        let key = create_object(shim.session);
+        assert_eq!(daemon.backend.mechanism_entry_count(MockMechanismEntry::SignInit), 0);
+        assert_eq!(daemon.sign_init_entry_count(), 0);
+        let mut prefix = [0x01u8, 0x02, 0x03];
+        let mut mechanism = CK_MECHANISM {
+            mechanism: pkcs11_proxy_ng_types::CkMechanismType::RSA_PKCS_PSS.0 as CK_MECHANISM_TYPE,
+            pParameter: prefix.as_mut_ptr() as CK_VOID_PTR,
+            ulParameterLen: prefix.len() as CK_ULONG,
+        };
+        let rv = unsafe { dispatch::general::c_sign_init(shim.session, &mut mechanism, key) };
+        assert_eq!(
+            rv, CKR_MECHANISM_PARAM_INVALID as CK_RV,
+            "incompatible prefix ({local:?} vs {profile:?}) must refuse locally"
+        );
+        assert_eq!(
+            daemon.sign_init_entry_count(),
+            0,
+            "incompatible prefix ({local:?} vs {profile:?}) must emit no operation RPC"
+        );
+        assert_eq!(
+            daemon.backend.mechanism_entry_count(MockMechanismEntry::SignInit),
+            0,
+            "incompatible prefix ({local:?} vs {profile:?}) must never reach the provider"
+        );
+        drop(shim);
+    }
+    assert!(rows >= 1, "some profile must differ from the local ABI");
+}
+
+#[test]
+#[cfg(target_endian = "little")]
+fn q04_live_discovery_snapshot_drives_matching_prefix_per_profile() {
+    // Q04/F1 acceptance: all four matching prefixes traverse the
+    // installed discovery path — backend method -> tag 10 ->
+    // BackendProbe conversion -> snapshot install -> prefix read. Each
+    // row probes a fresh daemon over real gRPC (asserting the installed
+    // snapshot first), then reads the eligible 3-byte PSS prefix through
+    // the production reader, which gathers the backend leg from the
+    // installed snapshot; only the host-determined local leg is injected
+    // (production hardcodes `ParamAbi::native()`, so non-host profiles
+    // cannot travel end-to-end — the host profile additionally does in
+    // `q04_compatible_pss_prefix_reaches_provider_once`). Flat admit +
+    // per-ABI fingerprint for all four, including both packed layouts
+    // width/stride alone cannot name.
+    use pkcs11_proxy_ng_types::shape_descriptors::{Operation, ParamAbi};
+    use pkcs11_proxy_ng_types::{CkMechanismParams, CkMechanismType};
+    let _guard = shim_state_test_guard();
+    for (profile, expected) in [
         (MockAbi::Lp64, ParamAbi::Lp64NativeLe),
-    ]
-    .into_iter()
-    .find(|(_, abi)| Some(*abi) != local)
-    .expect("some profile must differ from the local ABI");
-    let daemon = TestDaemon::fresh_with_abi_and_mechanisms(profile, q04_sign_mechanisms());
+        (MockAbi::Ilp32, ParamAbi::Ilp32NativeLe),
+        (MockAbi::Llp64, ParamAbi::Llp64Packed1Le),
+        (MockAbi::Ilp32Packed, ParamAbi::Ilp32Packed1Le),
+    ] {
+        let daemon = TestDaemon::fresh_with_abi_and_mechanisms(profile, q04_sign_mechanisms());
+        let shim = ShimSession::with_endpoint(&daemon.endpoint);
+        assert_eq!(
+            crate::interface_probe::backend_mechanism_abi(),
+            Some(expected),
+            "live discovery must install the {profile:?} snapshot"
+        );
+        assert_eq!(
+            crate::interface_probe::backend_ulong_size(),
+            profile.ulong_width(),
+            "D2 width for {profile:?}"
+        );
+        assert_eq!(
+            crate::interface_probe::backend_attribute_stride(),
+            profile.attribute_stride(),
+            "D2 stride for {profile:?}"
+        );
+        let mut data = [0x01u8, 0x02, 0x03];
+        let mechanism = CK_MECHANISM {
+            mechanism: CkMechanismType::RSA_PKCS_PSS.0 as CK_MECHANISM_TYPE,
+            pParameter: data.as_mut_ptr() as CK_VOID_PTR,
+            ulParameterLen: data.len() as CK_ULONG,
+        };
+        let params = unsafe {
+            crate::dispatch::general::helpers::read_mechanism_for_transport_with_local_abi(
+                &raw const mechanism,
+                Operation::General,
+                Some(expected),
+            )
+        }
+        .expect("read mechanism")
+        .params;
+        match &params {
+            Some(CkMechanismParams::Flat(p)) => {
+                assert_eq!(p.declared_len, 3);
+                assert_eq!(p.version, pkcs11_proxy_ng_types::MECHANISM_PARAMETER_TRANSPORT_VERSION);
+                assert_eq!(p.source_abi, Some(expected));
+                assert_eq!(
+                    p.fingerprint,
+                    q04_pss_fingerprint(3, expected),
+                    "same-ABI pair {expected:?} must carry the local fingerprint"
+                );
+                p.bytes.expose(|bytes| assert_eq!(bytes, &data));
+            }
+            other => panic!("same-ABI pair {expected:?} must emit Flat, got {other:?}"),
+        }
+        drop(shim);
+    }
+}
+
+#[test]
+#[cfg(target_endian = "little")]
+fn q04_unknown_abi_daemon_refuses_prefix_admits_typed() {
+    // Q04/F2 tag-conflict control: a backend whose ABI contradicts its
+    // own valid width advertisement (Lp64 profile at width 4) makes the
+    // daemon silence tag 10 while transport 1 stays advertised — the
+    // probe succeeds, the snapshot installs as unknown, the struct
+    // prefix fails closed locally with zero operation RPC, and the
+    // ABI-independent typed path still forwards end-to-end (canonical
+    // PSS reaches the provider exactly once).
+    use pkcs11_proxy_ng_backend::mock::MockMechanismEntry;
+    use pkcs11_proxy_ng_types::shape_descriptors::ParamAbi;
+    use pkcs11_proxy_ng_types::{CkMechanismParams, CkMechanismType};
+    let _guard = shim_state_test_guard();
+    let daemon = TestDaemon::fresh_crafted(MockAbi::Lp64, Some(4), Some(1), q04_sign_mechanisms());
     let shim = ShimSession::with_endpoint(&daemon.endpoint);
+    assert_eq!(
+        crate::interface_probe::mechanism_parameter_transport_version(),
+        1,
+        "conflicted daemon must still advertise transport v1"
+    );
+    assert_eq!(
+        crate::interface_probe::backend_mechanism_abi(),
+        None,
+        "conflicted tag must install as an unknown snapshot"
+    );
     let key = create_object(shim.session);
+    // Struct prefix: local MPI, zero RPC, zero provider attempt.
     assert_eq!(daemon.backend.mechanism_entry_count(MockMechanismEntry::SignInit), 0);
+    assert_eq!(daemon.sign_init_entry_count(), 0);
     let mut prefix = [0x01u8, 0x02, 0x03];
     let mut mechanism = CK_MECHANISM {
-        mechanism: pkcs11_proxy_ng_types::CkMechanismType::RSA_PKCS_PSS.0 as CK_MECHANISM_TYPE,
+        mechanism: CkMechanismType::RSA_PKCS_PSS.0 as CK_MECHANISM_TYPE,
         pParameter: prefix.as_mut_ptr() as CK_VOID_PTR,
         ulParameterLen: prefix.len() as CK_ULONG,
     };
     let rv = unsafe { dispatch::general::c_sign_init(shim.session, &mut mechanism, key) };
-    assert_eq!(
-        rv, CKR_MECHANISM_PARAM_INVALID as CK_RV,
-        "incompatible prefix ({local:?} vs {profile:?}) must refuse locally"
-    );
+    assert_eq!(rv, CKR_MECHANISM_PARAM_INVALID as CK_RV, "unknown-ABI prefix must be MPI");
+    assert_eq!(daemon.sign_init_entry_count(), 0, "unknown-ABI prefix must emit no operation RPC");
     assert_eq!(
         daemon.backend.mechanism_entry_count(MockMechanismEntry::SignInit),
         0,
-        "incompatible prefix must never reach the provider"
+        "unknown-ABI prefix must never reach the provider"
     );
+    // Canonical typed PSS: unaffected by the unknown snapshot — the
+    // typed reader applies no layout comparison, so the RPC forwards
+    // and the provider accepts.
+    let pss = CK_RSA_PKCS_PSS_PARAMS {
+        hashAlg: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
+        mgf: 1,
+        sLen: 32,
+    };
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::RSA_PKCS_PSS.0 as CK_MECHANISM_TYPE,
+        pParameter: &pss as *const _ as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_RSA_PKCS_PSS_PARAMS>() as CK_ULONG,
+    };
+    let rv = unsafe { dispatch::general::c_sign_init(shim.session, &mut mechanism, key) };
+    assert_eq!(rv, CKR_OK as CK_RV, "canonical typed PSS must forward with unknown ABI");
+    assert_eq!(
+        daemon.sign_init_entry_count(),
+        1,
+        "canonical typed PSS must emit exactly one operation RPC"
+    );
+    assert_eq!(
+        daemon.backend.mechanism_entry_count(MockMechanismEntry::SignInit),
+        1,
+        "canonical typed PSS must reach the provider exactly once"
+    );
+    // Byte-buffer, parameterless, and NULL forms likewise ignore the
+    // unknown snapshot (read through the installed-snapshot seam: the
+    // backend leg is the live-installed unknown, only the local leg is
+    // injected).
+    use pkcs11_proxy_ng_types::shape_descriptors::Operation;
+    let local = ParamAbi::native().expect("LE host has a v1 ABI");
+    let mut iv = [0xA5u8; 16];
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::AES_CBC.0 as CK_MECHANISM_TYPE,
+        pParameter: iv.as_mut_ptr() as CK_VOID_PTR,
+        ulParameterLen: iv.len() as CK_ULONG,
+    };
+    let params = unsafe {
+        crate::dispatch::general::helpers::read_mechanism_for_transport_with_local_abi(
+            &raw const mechanism,
+            Operation::General,
+            Some(local),
+        )
+    }
+    .expect("read mechanism")
+    .params;
+    match &params {
+        Some(CkMechanismParams::Iv(p)) => assert_eq!(p.iv.as_slice(), iv),
+        other => panic!("byte-buffer input must stay typed Iv with unknown ABI, got {other:?}"),
+    }
+    let mut bare = [0x5Au8; 16];
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
+        pParameter: bare.as_mut_ptr() as CK_VOID_PTR,
+        ulParameterLen: bare.len() as CK_ULONG,
+    };
+    let params = unsafe {
+        crate::dispatch::general::helpers::read_mechanism_for_transport_with_local_abi(
+            &raw const mechanism,
+            Operation::General,
+            Some(local),
+        )
+    }
+    .expect("read mechanism")
+    .params;
+    match &params {
+        Some(CkMechanismParams::Flat(p)) => {
+            assert_eq!(p.declared_len, 16);
+            p.bytes.expose(|bytes| assert_eq!(bytes, &bare));
+        }
+        other => panic!("parameterless Flat must emit with unknown ABI, got {other:?}"),
+    }
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::RSA_PKCS_PSS.0 as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 7,
+    };
+    let params = unsafe {
+        crate::dispatch::general::helpers::read_mechanism_for_transport_with_local_abi(
+            &raw const mechanism,
+            Operation::General,
+            Some(local),
+        )
+    }
+    .expect("read mechanism")
+    .params;
+    match &params {
+        Some(CkMechanismParams::Null { declared_len, .. }) => {
+            assert_eq!(*declared_len, 7);
+        }
+        other => panic!("NULL must forward with unknown ABI, got {other:?}"),
+    }
+}
+
+#[test]
+fn q04_malformed_discovery_refused_at_initialize() {
+    // Q04/F2 malformed control (vs the tag-conflict control above, where
+    // the width/order themselves are valid and only the ABI tag
+    // conflicts): a width outside {4, 8} or a byte order outside the
+    // {1, 2}/absent contract refuses the WHOLE probe loudly — the
+    // wire representation itself is unparseable, so `C_Initialize`
+    // answers the lifecycle-class `GENERAL_ERROR` (never MPI, never
+    // connect-and-corrupt), exactly like the D6 endian refusal.
+    let _guard = shim_state_test_guard();
+    for (profile, width, order, what) in [
+        (MockAbi::Lp64, Some(3), None, "invalid width 3"),
+        (MockAbi::Lp64, Some(0), None, "invalid width 0"),
+        (MockAbi::host(), None, Some(99), "out-of-contract order 99"),
+        (MockAbi::host(), None, Some(0), "out-of-contract order 0"),
+    ] {
+        let daemon = TestDaemon::fresh_crafted(profile, width, order, q04_sign_mechanisms());
+        unsafe {
+            std::env::set_var("PKCS11_PROXY_ENDPOINT", &daemon.endpoint);
+        }
+        let rv = unsafe { dispatch::general::c_initialize(std::ptr::null_mut()) };
+        if rv == CKR_OK as CK_RV {
+            let _ = unsafe { dispatch::general::c_finalize(std::ptr::null_mut()) };
+        }
+        assert_eq!(
+            rv, CKR_GENERAL_ERROR as CK_RV,
+            "malformed discovery ({what}) must refuse C_Initialize loudly"
+        );
+        drop(daemon);
+    }
 }
 
 #[test]

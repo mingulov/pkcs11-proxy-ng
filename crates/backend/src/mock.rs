@@ -438,6 +438,14 @@ pub struct MockBackend {
     /// `None` (default) advertises the host's own byte order, consistent
     /// with the same-endian values [`MockAbi::encode_ulong`] emits.
     advertised_byte_order: Option<u32>,
+    /// Override for the D2 `CK_ULONG` width advertisement (Q04/F2
+    /// crafted-discovery knob). `None` (default) advertises the emulated
+    /// profile's own width. `Some` advertises the given width verbatim —
+    /// including values that contradict the emulated ABI (the daemon then
+    /// silences tag 10 while the width itself stays valid: probe OK,
+    /// snapshot unknown) or are outright invalid (the shim refuses the
+    /// whole probe loudly).
+    advertised_ulong_size: Option<u32>,
     /// Mechanism-parameter presence rules captured from a registry at
     /// construction (`with_mechanism_registry`); `None` (plain `new`)
     /// keeps the mock permissive for existing suites.
@@ -581,6 +589,7 @@ impl MockBackend {
             login_user_gate: Mutex::new(None),
             abi: MockAbi::host(),
             advertised_byte_order: None,
+            advertised_ulong_size: None,
             param_presence: None,
             cryptoki_version: (3, 0),
             find_objects_override: Mutex::new(None),
@@ -1337,16 +1346,31 @@ impl MockBackend {
     /// Advertise big-endian byte order (D2) so tests can pin the client's
     /// D6 refusal path. Values are still emitted in host order: a correct
     /// client must refuse before ever parsing one.
-    pub fn with_big_endian_advertisement(mut self) -> Self {
-        self.advertised_byte_order = Some(2);
-        self
+    pub fn with_big_endian_advertisement(self) -> Self {
+        self.with_byte_order_advertisement(2)
     }
 
     /// Advertise little-endian byte order (D2): the mirror knob for
     /// big-endian hosts, where the big-endian advertisement matches the
     /// client and it is the little-endian one the client must refuse.
-    pub fn with_little_endian_advertisement(mut self) -> Self {
-        self.advertised_byte_order = Some(1);
+    pub fn with_little_endian_advertisement(self) -> Self {
+        self.with_byte_order_advertisement(1)
+    }
+
+    /// Advertise an explicit D2 byte-order code verbatim (Q04/F2
+    /// crafted-discovery knob) — including out-of-contract values the
+    /// shim must refuse loudly at probe.
+    pub fn with_byte_order_advertisement(mut self, order: u32) -> Self {
+        self.advertised_byte_order = Some(order);
+        self
+    }
+
+    /// Advertise an explicit D2 `CK_ULONG` width verbatim (Q04/F2
+    /// crafted-discovery knob) — including widths that contradict the
+    /// emulated ABI (daemon silences tag 10; probe stays OK) or are
+    /// outright invalid (shim refuses the whole probe loudly).
+    pub fn with_ulong_size_advertisement(mut self, size: u32) -> Self {
+        self.advertised_ulong_size = Some(size);
         self
     }
 
@@ -2056,7 +2080,7 @@ fn read_sp800_108_key_handle_value(value: &[u8]) -> CkResult<u64> {
 
 impl Pkcs11Backend for MockBackend {
     fn abi_ulong_size(&self) -> u32 {
-        self.abi.ulong_width() as u32
+        self.advertised_ulong_size.unwrap_or_else(|| self.abi.ulong_width() as u32)
     }
 
     fn abi_byte_order(&self) -> u32 {

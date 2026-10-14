@@ -287,6 +287,51 @@ pub(crate) unsafe fn read_mechanism_for_transport_with_snapshots(
     }
 }
 
+/// Test seam — production entry with the local ABI injected (Q04/F1).
+///
+/// Identical to [`read_mechanism_for_transport`] except the local leg is
+/// a parameter: capability, registry, and the installed backend-ABI
+/// snapshot are gathered from global state exactly as production does.
+/// Live-discovery tests use it to drive a prefix read against a
+/// discovery-installed backend snapshot for profiles other than the
+/// host's own (production hardcodes `ParamAbi::native()` as the local
+/// leg, so only the host profile can travel end-to-end; injecting the
+/// host-determined local leg is faithful — the backend leg under test
+/// always travels the real discovery path).
+///
+/// # Safety
+///
+/// Same contract as [`read_mechanism_for_transport`].
+#[cfg(test)]
+pub(crate) unsafe fn read_mechanism_for_transport_with_local_abi(
+    p_mechanism: *const CK_MECHANISM,
+    operation: Operation,
+    local_abi: Option<ParamAbi>,
+) -> CkResult<CkMechanism> {
+    let c_mech = unsafe { read_param_struct(p_mechanism)? };
+    let capability = crate::interface_probe::mechanism_parameter_transport_version();
+    if capability == 0 {
+        let has_params = !c_mech.pParameter.is_null() && c_mech.ulParameterLen > 0;
+        if has_params && (c_mech.ulParameterLen as usize) > MAX_MECHANISM_PARAM_STRUCT_LEN {
+            return Err(CkRv::MECHANISM_PARAM_INVALID);
+        }
+    }
+    let registry = crate::state::try_mechanism_registry()?;
+    let backend_abi = backend_abi_snapshot();
+    unsafe {
+        read_mechanism_node(
+            &c_mech,
+            &registry,
+            capability,
+            local_abi,
+            backend_abi,
+            operation,
+            &mut NestingBudget::new(),
+            false,
+        )
+    }
+}
+
 /// One mechanism node (top-level or KIP-nested) against explicit snapshots.
 ///
 /// `nested` selects the nested contract (validate-fusion skipped: the old

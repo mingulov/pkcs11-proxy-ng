@@ -29,6 +29,12 @@ pub(crate) async fn sign_init(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::SignInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SignInitResponse>, Status> {
+    // Q04/F2 test-only entry counter: before every validation gate, so a
+    // daemon-side rejection still records the RPC's arrival (the backend
+    // provider-entry counter cannot: it sits behind validation).
+    if let Some(counter) = &ctx.sign_init_entry_count {
+        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
     let sanitize_inputs = ctx.sanitize_inputs;

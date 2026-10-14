@@ -75,6 +75,7 @@ impl Pkcs11ProxyService {
                 mechanism_registry_source,
                 sanitize_inputs: false,
                 audit,
+                sign_init_entry_count: None,
             },
         }
     }
@@ -82,6 +83,18 @@ impl Pkcs11ProxyService {
     /// Enable sanitize_inputs mode for tests that need daemon-side input rejection.
     pub fn with_sanitize_inputs(mut self) -> Self {
         self.ctx.sanitize_inputs = true;
+        self
+    }
+
+    /// Attach a test-only sign-init RPC entry counter (Q04/F2): the
+    /// `sign_init` handler increments it at entry, before any validation.
+    /// The caller keeps the `Arc` and reads it to assert whether an RPC
+    /// arrived. Production callers never attach one (`None`).
+    pub fn with_sign_init_entry_counter(
+        mut self,
+        counter: Arc<std::sync::atomic::AtomicU64>,
+    ) -> Self {
+        self.ctx.sign_init_entry_count = Some(counter);
         self
     }
 
