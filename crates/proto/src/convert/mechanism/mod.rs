@@ -1131,9 +1131,11 @@ fn encode_r18_tail_v1_params(
 
 /// Map a wire `MechanismParamAbi` value to the domain ABI: known values
 /// map directly; `UNSPECIFIED`/unrecognized values thread through as
-/// `None` (transport validation rejects them — validation owns the ABI
-/// match, conversion only threads).
-fn wire_abi_to_domain(abi: i32) -> Option<ParamAbi> {
+/// `None` (validation owns the ABI match, conversion only threads).
+/// Shared by Flat decode and the Q04 discovery conversion (client
+/// `BackendProbe` + shim snapshot resolve use this same map, so the tag-10
+/// meaning cannot drift between the message and discovery paths).
+pub fn mechanism_param_abi_from_wire(abi: i32) -> Option<ParamAbi> {
     match v1_proto::MechanismParamAbi::try_from(abi).ok()? {
         v1_proto::MechanismParamAbi::Unspecified => None,
         v1_proto::MechanismParamAbi::Lp64NativeLe => Some(ParamAbi::Lp64NativeLe),
@@ -1141,6 +1143,14 @@ fn wire_abi_to_domain(abi: i32) -> Option<ParamAbi> {
         v1_proto::MechanismParamAbi::Llp64Packed1Le => Some(ParamAbi::Llp64Packed1Le),
         v1_proto::MechanismParamAbi::Ilp32Packed1Le => Some(ParamAbi::Ilp32Packed1Le),
     }
+}
+
+/// Map a wire `MechanismParamAbi` value to the domain ABI: known values
+/// map directly; `UNSPECIFIED`/unrecognized values thread through as
+/// `None` (transport validation rejects them — validation owns the ABI
+/// match, conversion only threads).
+fn wire_abi_to_domain(abi: i32) -> Option<ParamAbi> {
+    mechanism_param_abi_from_wire(abi)
 }
 
 /// Map a domain ABI back to the wire: `None` re-encodes as `UNSPECIFIED`

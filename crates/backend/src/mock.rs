@@ -2067,6 +2067,12 @@ impl Pkcs11Backend for MockBackend {
         self.abi.attribute_stride() as u32
     }
 
+    fn abi_mechanism_param_abi(
+        &self,
+    ) -> Option<pkcs11_proxy_ng_types::shape_descriptors::ParamAbi> {
+        Some(self.abi.mechanism_param_abi())
+    }
+
     fn initialize(&self) -> CkResult<()> {
         self.initialize_backend()
     }

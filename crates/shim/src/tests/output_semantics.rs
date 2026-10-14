@@ -27,8 +27,10 @@ use tonic::transport::Server;
 use super::*;
 
 static TEST_DAEMON: OnceLock<TestDaemon> = OnceLock::new();
+static TEST_DAEMON_LP64: OnceLock<TestDaemon> = OnceLock::new();
 static TEST_DAEMON_ILP32: OnceLock<TestDaemon> = OnceLock::new();
 static TEST_DAEMON_LLP64: OnceLock<TestDaemon> = OnceLock::new();
+static TEST_DAEMON_ILP32_PACKED: OnceLock<TestDaemon> = OnceLock::new();
 static TEST_DAEMON_FOREIGN_ENDIAN: OnceLock<TestDaemon> = OnceLock::new();
 
 pub(super) struct TestDaemon {
@@ -48,9 +50,10 @@ impl TestDaemon {
     /// (ADR-0011): one in-process singleton per profile.
     pub(super) fn shared_with_abi(abi: MockAbi) -> &'static Self {
         match abi {
+            MockAbi::Lp64 => TEST_DAEMON_LP64.get_or_init(|| Self::start(abi)),
             MockAbi::Ilp32 => TEST_DAEMON_ILP32.get_or_init(|| Self::start(abi)),
             MockAbi::Llp64 => TEST_DAEMON_LLP64.get_or_init(|| Self::start(abi)),
-            _ => Self::shared(),
+            MockAbi::Ilp32Packed => TEST_DAEMON_ILP32_PACKED.get_or_init(|| Self::start(abi)),
         }
     }
 
@@ -85,6 +88,17 @@ impl TestDaemon {
     /// `mechanism_list_count_reflects_filtered_count`).
     pub(super) fn fresh_with_mechanisms(mechanisms: Vec<CkMechanismType>) -> Self {
         Self::start_configured_with_mechanisms(MockAbi::host(), None, mechanisms)
+    }
+
+    /// An owned daemon emulating `abi` and advertising exactly
+    /// `mechanisms` (Q04: cross-ABI provider-attempt tests need both a
+    /// foreign profile and PSS in the slot list, with a zeroed entry
+    /// counter no shared singleton can offer).
+    pub(super) fn fresh_with_abi_and_mechanisms(
+        abi: MockAbi,
+        mechanisms: Vec<CkMechanismType>,
+    ) -> Self {
+        Self::start_configured_with_mechanisms(abi, None, mechanisms)
     }
 
     fn start_configured(abi: MockAbi, advertised_order: Option<u32>) -> Self {

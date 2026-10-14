@@ -379,6 +379,28 @@ fn mock_advertises_its_profile_not_the_host() {
 }
 
 #[test]
+fn mock_advertises_mechanism_abi_per_profile() {
+    // Q04: the mock reports its emulated profile's exact native ABI —
+    // the packed-32 profile is distinct from natural ILP32 despite
+    // sharing its (4, 12) width/stride numbers.
+    use pkcs11_proxy_ng_types::shape_descriptors::ParamAbi;
+    for (profile, expected) in [
+        (MockAbi::Lp64, ParamAbi::Lp64NativeLe),
+        (MockAbi::Ilp32, ParamAbi::Ilp32NativeLe),
+        (MockAbi::Llp64, ParamAbi::Llp64Packed1Le),
+        (MockAbi::Ilp32Packed, ParamAbi::Ilp32Packed1Le),
+    ] {
+        let backend = MockBackend::default_test().with_abi(profile);
+        assert_eq!(backend.abi_mechanism_param_abi(), Some(expected), "ABI for {profile:?}");
+        assert_eq!(
+            backend.abi_ulong_size() as usize,
+            expected.ulong_size(),
+            "width coherence for {profile:?}"
+        );
+    }
+}
+
+#[test]
 fn registry_backed_mock_validates_mechanism_param_presence() {
     let registry = MechanismRegistry::load(None).expect("embedded default registry");
     let backend = MockBackend::with_mechanism_registry(vec![CkSlotId(0)], &registry)

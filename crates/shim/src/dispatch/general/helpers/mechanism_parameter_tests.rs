@@ -85,6 +85,8 @@ unsafe fn read_ck_mechanism(mechanism: &CK_MECHANISM) -> CkMechanismParams {
 
 const R11_LP64: ParamAbi = ParamAbi::Lp64NativeLe;
 const R11_ILP32: ParamAbi = ParamAbi::Ilp32NativeLe;
+const R11_LLP64: ParamAbi = ParamAbi::Llp64Packed1Le;
+const R11_ILP32_PACKED: ParamAbi = ParamAbi::Ilp32Packed1Le;
 
 /// v1 read (capability 1, LP64 pair) for R11 emission tests. ABIs are
 /// injected explicitly (never `native()`) so the tests are deterministic
@@ -4316,6 +4318,273 @@ fn width_bare_flat_crosses_abis() {
     .expect("read mechanism")
     .params;
     assert_null_params(&params, 7);
+}
+
+// ---------------------------------------------------------------------------
+// Q04 discovery chain: wire tag -> proto converter -> shim snapshot resolve
+// -> reader equality. The backend leg always travels the real discovery
+// conversion (the same fns probe install calls); the local leg is injected
+// so every pair is deterministic on every host. The host-native pair is
+// additionally covered end-to-end through live gRPC in cross_abi.rs.
+// ---------------------------------------------------------------------------
+
+/// Q04 backend leg: resolve a discovery tag exactly as probe install does
+/// (shared proto wire map + shim snapshot resolve against the daemon's
+/// advertised width/order).
+fn q04_resolve_discovery_tag(
+    tag: Option<i32>,
+    width: usize,
+    order: Option<u32>,
+) -> Option<ParamAbi> {
+    let abi = pkcs11_proxy_ng_proto::convert::mechanism::mechanism_param_abi_from_wire(tag?);
+    crate::interface_probe::resolve_backend_mechanism_abi(abi, width, order)
+}
+
+#[test]
+fn q04_discovery_chain_same_abi_pairs_admit_pss_prefix() {
+    // All four same-ABI pairs admit an eligible 3-byte PSS struct prefix
+    // whose backend leg comes from real discovery conversion — including
+    // the matching-Win32 pairs width/stride alone cannot distinguish.
+    let registry = default_registry();
+    for (tag, abi, width) in
+        [(1, R11_LP64, 8), (2, R11_ILP32, 4), (3, R11_LLP64, 4), (4, R11_ILP32_PACKED, 4)]
+    {
+        let backend = q04_resolve_discovery_tag(Some(tag), width, Some(1));
+        assert_eq!(backend, Some(abi), "discovery tag {tag} must resolve to {abi:?}");
+        let mut data = [0x01u8, 0x02, 0x03];
+        let mechanism = CK_MECHANISM {
+            mechanism: CkMechanismType::RSA_PKCS_PSS.0 as CK_MECHANISM_TYPE,
+            pParameter: data.as_mut_ptr() as CK_VOID_PTR,
+            ulParameterLen: data.len() as CK_ULONG,
+        };
+        let params = unsafe {
+            read_r11_v1_abis(&mechanism, &registry, Operation::General, Some(abi), backend)
+        }
+        .expect("read mechanism")
+        .params;
+        match &params {
+            Some(CkMechanismParams::Flat(p)) => {
+                assert_eq!(p.declared_len, 3);
+                assert_eq!(p.version, MECHANISM_PARAMETER_TRANSPORT_VERSION);
+                assert_eq!(p.source_abi, Some(abi));
+                assert_eq!(
+                    p.fingerprint,
+                    expected_fingerprint_for_abi(
+                        "rsa_pss",
+                        CkMechanismType::RSA_PKCS_PSS.0,
+                        3,
+                        abi
+                    ),
+                    "same-ABI pair {abi:?} must carry the local fingerprint"
+                );
+                p.bytes.expose(|bytes| assert_eq!(bytes, &data));
+            }
+            other => panic!("same-ABI pair {abi:?} must emit Flat, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn q04_discovery_chain_packed_native_cross_pairs_refuse() {
+    // The width-guess blind spot: ILP32-natural and ILP32-packed share
+    // (ulong 4, stride 12), so only the carried tag-10 ABI separates
+    // them — both cross directions refuse with PARAM_INVALID.
+    let registry = default_registry();
+    let mut data = [0x01u8, 0x02, 0x03];
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::RSA_PKCS_PSS.0 as CK_MECHANISM_TYPE,
+        pParameter: data.as_mut_ptr() as CK_VOID_PTR,
+        ulParameterLen: data.len() as CK_ULONG,
+    };
+    for (tag, local) in [(2, R11_ILP32_PACKED), (4, R11_ILP32), (3, R11_LP64), (1, R11_LLP64)] {
+        let backend = q04_resolve_discovery_tag(Some(tag), 4, Some(1));
+        // (tag 1, width 4) is incoherent by construction — resolve it at
+        // its own width so this pins the CROSS refusal, not the conflict
+        // refusal (conflicts are covered separately below).
+        let backend =
+            if tag == 1 { q04_resolve_discovery_tag(Some(tag), 8, Some(1)) } else { backend };
+        assert!(
+            backend.is_some(),
+            "tag {tag} must resolve (this pins cross-ABI refusal, not unknown-ABI refusal)"
+        );
+        assert!(
+            matches!(
+                unsafe {
+                    read_r11_v1_abis(
+                        &mechanism,
+                        &registry,
+                        Operation::General,
+                        Some(local),
+                        backend,
+                    )
+                },
+                Err(CkRv::MECHANISM_PARAM_INVALID)
+            ),
+            "cross pair (local {local:?}, tag {tag}) must be MPI"
+        );
+    }
+}
+
+#[test]
+fn q04_discovery_chain_unknown_abi_refuses_struct_prefix_admits_bare() {
+    // Absent/unknown/malformed/conflicting discovery metadata resolves to
+    // an unknown backend ABI: struct prefixes fail closed while
+    // ABI-independent parameterless/byte-buffer/parameterless-empty/NULL
+    // forms keep working.
+    let registry = default_registry();
+    let mut data = [0x5Au8; 16];
+    let live = data.as_mut_ptr() as CK_VOID_PTR;
+    // (tag, width, order) rows: absent, unspecified, unrecognized,
+    // width-conflict, order-conflict.
+    let unknown_rows: [(Option<i32>, usize, Option<u32>); 5] = [
+        (None, 8, Some(1)),
+        (Some(0), 8, Some(1)),
+        (Some(99), 8, Some(1)),
+        (Some(1), 4, Some(1)),
+        (Some(2), 4, Some(2)),
+    ];
+    for (tag, width, order) in unknown_rows {
+        let backend = q04_resolve_discovery_tag(tag, width, order);
+        assert_eq!(backend, None, "row ({tag:?}, {width}, {order:?}) must stay unknown");
+        // Struct prefix refuses.
+        let mut prefix = [0x01u8, 0x02, 0x03];
+        let mechanism = CK_MECHANISM {
+            mechanism: CkMechanismType::RSA_PKCS_PSS.0 as CK_MECHANISM_TYPE,
+            pParameter: prefix.as_mut_ptr() as CK_VOID_PTR,
+            ulParameterLen: prefix.len() as CK_ULONG,
+        };
+        assert!(
+            matches!(
+                unsafe {
+                    read_r11_v1_abis(
+                        &mechanism,
+                        &registry,
+                        Operation::General,
+                        Some(R11_LP64),
+                        backend,
+                    )
+                },
+                Err(CkRv::MECHANISM_PARAM_INVALID)
+            ),
+            "struct prefix with unknown backend ABI ({tag:?}, {width}, {order:?}) must be MPI"
+        );
+    }
+    // Bare forms admit with an unknown backend ABI.
+    let mechanism = make_ck_mechanism(CkMechanismType::SHA256.0, live, 16);
+    let params = unsafe {
+        read_r11_v1_abis(&mechanism, &registry, Operation::General, Some(R11_LP64), None)
+    }
+    .expect("read mechanism")
+    .params;
+    match &params {
+        Some(CkMechanismParams::Flat(p)) => assert_flat(p, &data, ABI_EXEMPT_FINGERPRINT),
+        other => panic!("parameterless Flat must emit with unknown backend ABI, got {other:?}"),
+    }
+    let mechanism = make_ck_mechanism(CkMechanismType::SHA256.0, live, 0);
+    let params = unsafe {
+        read_r11_v1_abis(&mechanism, &registry, Operation::General, Some(R11_LP64), None)
+    }
+    .expect("read mechanism")
+    .params;
+    match &params {
+        Some(CkMechanismParams::Flat(p)) => assert_flat(p, &[], ABI_EXEMPT_FINGERPRINT),
+        other => panic!("empty Flat must emit with unknown backend ABI, got {other:?}"),
+    }
+    // Byte-buffer shapes keep their ABI-independent typed encoding.
+    let mechanism = make_ck_mechanism(CkMechanismType::AES_CBC.0, live, 16);
+    let params = unsafe {
+        read_r11_v1_abis(&mechanism, &registry, Operation::General, Some(R11_LP64), None)
+    }
+    .expect("read mechanism")
+    .params;
+    match &params {
+        Some(CkMechanismParams::Iv(IvParams { iv })) => assert_eq!(iv.as_slice(), data),
+        other => panic!("byte-buffer input must stay typed Iv with unknown ABI, got {other:?}"),
+    }
+    // NULL carries no ABI at all.
+    let mechanism = make_ck_mechanism(CkMechanismType::RSA_PKCS_PSS.0, std::ptr::null_mut(), 7);
+    let params = unsafe {
+        read_r11_v1_abis(&mechanism, &registry, Operation::General, Some(R11_LP64), None)
+    }
+    .expect("read mechanism")
+    .params;
+    assert_null_params(&params, 7);
+}
+
+#[test]
+fn q04_discovery_chain_typed_path_ignores_backend_abi() {
+    // Legacy typed paths keep their contract: a canonical native struct
+    // rides the typed reader whatever the backend ABI — even unknown or
+    // cross — because no layout comparison applies to typed reads.
+    let registry = default_registry();
+    let pss = CK_RSA_PKCS_PSS_PARAMS {
+        hashAlg: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
+        mgf: 1,
+        sLen: 32,
+    };
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::RSA_PKCS_PSS.0 as CK_MECHANISM_TYPE,
+        pParameter: &pss as *const _ as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_RSA_PKCS_PSS_PARAMS>() as CK_ULONG,
+    };
+    for backend in [None, Some(R11_ILP32), Some(R11_LLP64)] {
+        let params = unsafe {
+            read_r11_v1_abis(&mechanism, &registry, Operation::General, ParamAbi::native(), backend)
+        }
+        .expect("read mechanism")
+        .params;
+        match params {
+            Some(CkMechanismParams::RsaPkcsPss(RsaPkcsPssParams {
+                hash_alg, salt_len, ..
+            })) => {
+                assert_eq!(hash_alg, CkMechanismType::SHA256);
+                assert_eq!(salt_len, 32);
+            }
+            other => panic!("canonical PSS must stay typed (backend {backend:?}), got {other:?}"),
+        }
+    }
+}
+
+#[test]
+#[cfg(target_endian = "little")]
+fn q04_production_snapshot_drives_struct_prefix_equality() {
+    // The production reader gathers the installed discovery snapshot (not
+    // a width guess): same-ABI snapshot admits, unknown snapshot refuses.
+    // Little-endian only — big-endian hosts have no v1 Flat emission, so
+    // there is no production snapshot decision to pin there (injected
+    // tests above cover BE).
+    let _guard = crate::tests::shim_state_test_guard();
+    let local = ParamAbi::native().expect("LE host has a v1 ABI");
+    ensure_registry();
+    crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(1);
+    let mut data = [0x01u8, 0x02, 0x03];
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::RSA_PKCS_PSS.0 as CK_MECHANISM_TYPE,
+        pParameter: data.as_mut_ptr() as CK_VOID_PTR,
+        ulParameterLen: data.len() as CK_ULONG,
+    };
+    crate::interface_probe::set_backend_mechanism_abi_for_tests(Some(local));
+    let params = unsafe { read_mechanism_for_transport(&raw const mechanism, Operation::General) }
+        .expect("same-ABI snapshot must admit")
+        .params;
+    match &params {
+        Some(CkMechanismParams::Flat(p)) => {
+            assert_eq!(p.declared_len, 3);
+            assert_eq!(p.source_abi, Some(local));
+        }
+        other => panic!("same-ABI snapshot must emit Flat, got {other:?}"),
+    }
+    crate::interface_probe::set_backend_mechanism_abi_for_tests(None);
+    assert!(
+        matches!(
+            unsafe { read_mechanism_for_transport(&raw const mechanism, Operation::General) },
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        ),
+        "unknown snapshot must refuse the struct prefix"
+    );
+    // Restore global defaults for following suites.
+    crate::interface_probe::set_backend_mechanism_abi_for_tests(None);
+    crate::interface_probe::set_mechanism_parameter_transport_version_for_tests(0);
 }
 
 #[test]

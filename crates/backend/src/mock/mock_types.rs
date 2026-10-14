@@ -8,22 +8,25 @@ use pkcs11_proxy_ng_types::*;
 /// LP64 Linux x86_64 (8-byte ulong, 24-byte stride), ILP32 Linux i686
 /// (4, 12), and LLP64 Windows x64 with `#pragma pack(1)` (4, 16 — the
 /// stride is NOT 3x the width, which is exactly why it must be modeled
-/// separately). 32-bit Windows (PE32) needs no fourth profile: the
-/// two numbers this profile models are identical on win32 — `CK_ULONG`
-/// width 4 and `CK_ATTRIBUTE` stride 12 (4+4+4, layout-identical) — so
-/// `Ilp32` models win32 exactly for these two numbers. This is NOT a
-/// general pack(1)≡ILP32 theorem, which is false: e.g. `CK_INFO` is 76
-/// bytes naturally vs 72 packed, and `CK_FUNCTION_LIST` fn fields shift
-/// by 2 (see task-t6b-review.md I1).
+/// separately). 32-bit Windows (PE32) shares natural ILP32's two numbers
+/// (`CK_ULONG` width 4 and `CK_ATTRIBUTE` stride 12, layout-identical),
+/// so the width/stride modeling needs no fourth profile — but win32 is a
+/// distinct packed v1 layout, so the mechanism-ABI identity does: that is
+/// what `Ilp32Packed` is for. This is NOT a general pack(1)≡ILP32 theorem,
+/// which is false: e.g. `CK_INFO` is 76 bytes naturally vs 72 packed, and
+/// `CK_FUNCTION_LIST` fn fields shift by 2 (see task-t6b-review.md I1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MockAbi {
     /// 64-bit Unix: `CK_ULONG` = 8, `CK_ATTRIBUTE` = 8+8+8.
     Lp64,
-    /// 32-bit Unix, and 32-bit Windows (win32 shares both modeled numbers):
-    /// `CK_ULONG` = 4, `CK_ATTRIBUTE` = 4+4+4.
+    /// 32-bit Unix: `CK_ULONG` = 4, `CK_ATTRIBUTE` = 4+4+4.
     Ilp32,
     /// Windows x64, packed(1): `CK_ULONG` = 4, `CK_ATTRIBUTE` = 4+8+4.
     Llp64,
+    /// 32-bit Windows, packed(1): `CK_ULONG` = 4, `CK_ATTRIBUTE` =
+    /// 4+4+4 — the same two numbers as [`MockAbi::Ilp32`] but the packed
+    /// v1 layout (Q04: width/stride alone cannot name it).
+    Ilp32Packed,
 }
 
 impl MockAbi {
@@ -33,6 +36,7 @@ impl MockAbi {
         match std::mem::size_of::<cryptoki_sys::CK_ULONG>() {
             8 => Self::Lp64,
             _ if cfg!(all(windows, target_pointer_width = "64")) => Self::Llp64,
+            _ if cfg!(all(windows, target_pointer_width = "32")) => Self::Ilp32Packed,
             _ => Self::Ilp32,
         }
     }
@@ -41,7 +45,7 @@ impl MockAbi {
     pub fn ulong_width(self) -> usize {
         match self {
             Self::Lp64 => 8,
-            Self::Ilp32 | Self::Llp64 => 4,
+            Self::Ilp32 | Self::Llp64 | Self::Ilp32Packed => 4,
         }
     }
 
@@ -49,8 +53,22 @@ impl MockAbi {
     pub fn attribute_stride(self) -> usize {
         match self {
             Self::Lp64 => 24,
-            Self::Ilp32 => 12,
+            Self::Ilp32 | Self::Ilp32Packed => 12,
             Self::Llp64 => 16,
+        }
+    }
+
+    /// This profile's exact v1 native mechanism-parameter ABI (Q04): the
+    /// packing is part of the profile's identity, never inferred from
+    /// the width (which cannot separate [`MockAbi::Ilp32Packed`] from
+    /// [`MockAbi::Ilp32`]).
+    pub fn mechanism_param_abi(self) -> pkcs11_proxy_ng_types::shape_descriptors::ParamAbi {
+        use pkcs11_proxy_ng_types::shape_descriptors::ParamAbi;
+        match self {
+            Self::Lp64 => ParamAbi::Lp64NativeLe,
+            Self::Ilp32 => ParamAbi::Ilp32NativeLe,
+            Self::Llp64 => ParamAbi::Llp64Packed1Le,
+            Self::Ilp32Packed => ParamAbi::Ilp32Packed1Le,
         }
     }
 
@@ -94,6 +112,8 @@ pub enum MockAttributeSlot {
 
 #[cfg(test)]
 mod mock_abi_tests {
+    use pkcs11_proxy_ng_types::shape_descriptors::ParamAbi;
+
     use super::MockAbi;
 
     #[test]
@@ -105,6 +125,41 @@ mod mock_abi_tests {
         assert_eq!(MockAbi::Lp64.attribute_stride(), 24);
         assert_eq!(MockAbi::Ilp32.attribute_stride(), 12);
         assert_eq!(MockAbi::Llp64.attribute_stride(), 16);
+    }
+
+    #[test]
+    fn mock_abi_packed32_profile_numbers() {
+        // Q04: win32 shares natural ILP32's width/stride numbers (4, 12)
+        // but is a distinct packed layout — the profile models both.
+        assert_eq!(MockAbi::Ilp32Packed.ulong_width(), 4);
+        assert_eq!(MockAbi::Ilp32Packed.attribute_stride(), 12);
+        // Native-order pin (mirrors `mock_abi_encode_ulong_matches_width`).
+        let narrow3: Vec<u8> =
+            if cfg!(target_endian = "little") { vec![3, 0, 0, 0] } else { vec![0, 0, 0, 3] };
+        assert_eq!(MockAbi::Ilp32Packed.encode_ulong(3), narrow3);
+    }
+
+    #[test]
+    fn mock_abi_mechanism_param_abi_mapping() {
+        // Q04: every profile maps to its exact v1 native ABI — packing
+        // is part of the identity, never inferred from the width.
+        assert_eq!(MockAbi::Lp64.mechanism_param_abi(), ParamAbi::Lp64NativeLe);
+        assert_eq!(MockAbi::Ilp32.mechanism_param_abi(), ParamAbi::Ilp32NativeLe);
+        assert_eq!(MockAbi::Llp64.mechanism_param_abi(), ParamAbi::Llp64Packed1Le);
+        assert_eq!(MockAbi::Ilp32Packed.mechanism_param_abi(), ParamAbi::Ilp32Packed1Le);
+    }
+
+    #[test]
+    fn mock_abi_host_matches_native_fact() {
+        // Q04: on little-endian hosts the host profile IS the process's
+        // own v1 ABI (including packed Windows builds); on big-endian
+        // hosts there is no v1 ABI at all (server derivation stays
+        // silent via the byte-order check).
+        if cfg!(target_endian = "little") {
+            assert_eq!(Some(MockAbi::host().mechanism_param_abi()), ParamAbi::native());
+        } else {
+            assert_eq!(ParamAbi::native(), None);
+        }
     }
 
     #[test]

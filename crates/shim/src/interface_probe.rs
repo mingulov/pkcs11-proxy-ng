@@ -13,6 +13,7 @@ use std::sync::{Mutex, RwLock};
 use cryptoki_sys::*;
 use pkcs11_proxy_ng_client::BackendInterface;
 use pkcs11_proxy_ng_types::MechanismRegistry;
+use pkcs11_proxy_ng_types::shape_descriptors::ParamAbi;
 
 use crate::function_registry::{build_function_list, build_function_list_3_x};
 use crate::state;
@@ -102,6 +103,14 @@ static MESSAGE_CAPABILITY_WRITE_LOCK: Mutex<()> = Mutex::new(());
 /// or a daemon predating the advertisement (legacy encoding); readers
 /// treat it as "no v1".
 static MECHANISM_PARAMETER_TRANSPORT_VERSION: AtomicU32 = AtomicU32::new(0);
+/// Daemon-advertised `backend_mechanism_abi` discovery value (Q04/AP-01;
+/// S2 §3): the backend's native v1 ABI as a `ParamAbi` discriminant
+/// (1-4), or `0` = not yet probed, or a daemon predating the field, or an
+/// advertisement that failed coherence validation. Readers treat `0` as
+/// "unknown" and fail closed for struct prefixes. Installed under
+/// [`PROBE_INSTALL_LOCK`] with the width/stride snapshot, so the probe
+/// state is always coherent.
+static BACKEND_MECHANISM_ABI: AtomicU32 = AtomicU32::new(0);
 
 /// Whether the daemon acknowledged the shape-bound message-parameter contract.
 /// Absence and an in-progress/failed reprobe are both fail-closed.
@@ -290,6 +299,78 @@ pub(crate) fn set_mechanism_parameter_transport_version_for_tests(version: u32) 
     MECHANISM_PARAMETER_TRANSPORT_VERSION.store(version, Ordering::Release);
 }
 
+/// Snapshot of the daemon-advertised `backend_mechanism_abi` discovery
+/// value (Q04/AP-01; S2 §3): the backend's native v1 ABI, or `None` when
+/// no probe has established one (legacy daemon, unknown value, or an
+/// advertisement that failed coherence validation). Struct-prefix readers
+/// fail closed on `None`.
+pub fn backend_mechanism_abi() -> Option<ParamAbi> {
+    match BACKEND_MECHANISM_ABI.load(Ordering::Acquire) {
+        1 => Some(ParamAbi::Lp64NativeLe),
+        2 => Some(ParamAbi::Ilp32NativeLe),
+        3 => Some(ParamAbi::Llp64Packed1Le),
+        4 => Some(ParamAbi::Ilp32Packed1Le),
+        _ => None,
+    }
+}
+
+/// Resolve the advertised tag-10 ABI against the RESOLVED probe width
+/// and the advertised byte order (pure policy, unit tested).
+///
+/// - Absent stays unknown (`None`): legacy daemons and underivable
+///   backends fail closed for struct prefixes downstream.
+/// - A recognized ABI whose ulong width differs from the resolved width
+///   (including the D9 fallback width — the client cannot see the
+///   fallback, so this re-check is load-bearing) stays unknown rather
+///   than trust either side.
+/// - A big-endian order stays unknown: every v1 ABI is little-endian.
+///   (On LE hosts a BE order already fails the whole probe upstream in
+///   [`resolve_backend_ulong_size`]; this arm covers BE hosts and
+///   defense in depth.)
+/// - Otherwise the ABI installs verbatim — packing included, never
+///   re-derived from the width.
+pub(crate) fn resolve_backend_mechanism_abi(
+    advertised: Option<ParamAbi>,
+    width: usize,
+    order: Option<u32>,
+) -> Option<ParamAbi> {
+    let abi = advertised?;
+    if abi.ulong_size() != width {
+        return None;
+    }
+    match order {
+        None | Some(1) => Some(abi),
+        _ => None,
+    }
+}
+
+/// Record the resolved tag-10 ABI snapshot. Call with the probe's
+/// validated ABI, resolved width, and advertised order, under
+/// [`PROBE_INSTALL_LOCK`] (see `probe_backend`).
+fn record_backend_mechanism_abi(advertised: Option<ParamAbi>, width: usize, order: Option<u32>) {
+    let resolved = resolve_backend_mechanism_abi(advertised, width, order);
+    if advertised.is_some() && resolved.is_none() {
+        tracing::warn!(
+            "daemon backend_mechanism_abi contradicts its width/order advertisement; \
+             treating the backend ABI as unknown (struct prefixes fail closed)"
+        );
+    }
+    BACKEND_MECHANISM_ABI.store(resolved.map_or(0, |abi| abi as u32), Ordering::Release);
+}
+
+fn clear_backend_mechanism_abi() {
+    BACKEND_MECHANISM_ABI.store(0, Ordering::Release);
+}
+
+/// Test-only injection for the backend-ABI snapshot (Q04): the value
+/// normally arrives via discovery in `probe_backend`; tests inject it
+/// only to drive the production reader without a daemon. Production code
+/// must never call this.
+#[cfg(test)]
+pub(crate) fn set_backend_mechanism_abi_for_tests(abi: Option<ParamAbi>) {
+    BACKEND_MECHANISM_ABI.store(abi.map_or(0, |abi| abi as u32), Ordering::Release);
+}
+
 // ---------------------------------------------------------------------------
 // R10 test-only v1-enable override (S2 §11 Phase 2)
 // ---------------------------------------------------------------------------
@@ -452,12 +533,14 @@ pub(crate) fn resolve_backend_ulong_size(
 }
 
 /// Record the backend's advertised ABI (ADR-0011 D2/D6): `CK_ULONG`
-/// width/byte order and the `CK_ATTRIBUTE` stride.
+/// width/byte order and the `CK_ATTRIBUTE` stride. Returns the resolved
+/// width so the caller can coherently resolve the tag-10 snapshot
+/// against it (Q04).
 fn record_backend_abi(
     size: Option<u32>,
     order: Option<u32>,
     stride: Option<u32>,
-) -> Result<(), String> {
+) -> Result<usize, String> {
     let (width, fell_back) = resolve_backend_ulong_size(size, order)?;
     let stride = resolve_backend_attribute_stride(stride, width)?;
     BACKEND_ULONG_SIZE.store(width, Ordering::Relaxed);
@@ -469,7 +552,7 @@ fn record_backend_abi(
              upgrade the daemon to advertise it."
         );
     }
-    Ok(())
+    Ok(width)
 }
 
 /// Null-terminated name used for all interface entries.
@@ -925,12 +1008,19 @@ fn probe_backend(_install: &std::sync::MutexGuard<'_, ()>) -> Result<InterfaceSt
     // Record the backend CK_ULONG width/byte order for the value bridge
     // (ADR-0011 D2/D6) before anything else uses it. A refusal here is
     // FATAL: the wire representation itself is incompatible.
-    record_backend_abi(
+    let width = record_backend_abi(
         probe.backend_ulong_size,
         probe.backend_byte_order,
         probe.backend_attribute_stride,
     )
     .map_err(ProbeFailure::AbiMismatch)?;
+
+    // Record the daemon-advertised tag-10 mechanism ABI (Q04/AP-01):
+    // resolved against the width above, so the width/ABI snapshot is
+    // always coherent. An unknown/conflicting ABI installs as unknown
+    // (fail-closed for struct prefixes downstream), never fatal — typed
+    // and byte-buffer paths must keep working against such daemons.
+    record_backend_mechanism_abi(probe.backend_mechanism_abi, width, probe.backend_byte_order);
 
     // Record the daemon-advertised mechanism-parameter transport capability
     // (R5/F1): discovery value, or 0 when the daemon predates the field.
@@ -1205,6 +1295,11 @@ pub fn reprobe() -> Result<(), String> {
     // transient probe failure must fall back to legacy emission, never
     // retain a stale v1 snapshot.
     clear_mechanism_parameter_transport_version();
+    // Same fail-closed stance for the tag-10 ABI snapshot (Q04): a
+    // transient probe failure must fail closed for struct prefixes, never
+    // retain a stale backend ABI (the daemon may have restarted with a
+    // different backend).
+    clear_backend_mechanism_abi();
     // A re-probe always dials fresh: drop any cached pre-init failure (W1-C7-01).
     state::clear_pre_init_connect_failure();
     // Sample after the pre-clear: only an invalidation that lands after
@@ -1256,6 +1351,10 @@ pub fn clear_cache() {
     // Drop the advertised transport capability likewise (R5/F1): a fresh
     // probe re-reads it, and pre-probe readers see legacy 0.
     clear_mechanism_parameter_transport_version();
+    // Drop the tag-10 ABI snapshot likewise (Q04): a fresh probe
+    // re-reads it, and pre-probe readers see unknown (fail-closed for
+    // struct prefixes).
+    clear_backend_mechanism_abi();
     // W1-C7-11: reset the revision tracker — the next Initialize may talk
     // to a different daemon, and that must log a fresh install INFO, not
     // a spurious drift WARN against the previous lifetime's revision.
@@ -1984,5 +2083,58 @@ mod backend_abi_tests {
     #[cfg(not(pkcs11_proxy_test_mechanism_params_v1))]
     fn override_predicate_is_false_stub_without_cfg() {
         assert!(!test_mechanism_params_v1_override_enabled());
+    }
+
+    #[test]
+    fn mechanism_abi_snapshot_passes_coherent_advertisement() {
+        // Q04: a tag-10 ABI coherent with the resolved width/order
+        // installs verbatim — all four ABIs, including both packed
+        // layouts width/stride alone cannot name.
+        use pkcs11_proxy_ng_types::shape_descriptors::ParamAbi;
+        for (abi, width) in [
+            (ParamAbi::Lp64NativeLe, 8),
+            (ParamAbi::Ilp32NativeLe, 4),
+            (ParamAbi::Llp64Packed1Le, 4),
+            (ParamAbi::Ilp32Packed1Le, 4),
+        ] {
+            for order in [None, Some(1)] {
+                assert_eq!(
+                    super::resolve_backend_mechanism_abi(Some(abi), width, order),
+                    Some(abi),
+                    "coherent {abi:?} at width {width}, order {order:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mechanism_abi_snapshot_fails_closed_on_unknown_or_conflict() {
+        // Q04: absent ABI, or an ABI contradicting the resolved probe
+        // state, installs as unknown — struct prefixes fail closed
+        // downstream while typed/byte-buffer paths keep working.
+        use pkcs11_proxy_ng_types::shape_descriptors::ParamAbi;
+        // Absent stays unknown at every width.
+        for width in [4, 8] {
+            assert_eq!(super::resolve_backend_mechanism_abi(None, width, Some(1)), None);
+        }
+        // Width conflict (incl. the D9 fallback width: an ILP32 ABI
+        // against an unadvertised width that fell back to 8).
+        assert_eq!(
+            super::resolve_backend_mechanism_abi(Some(ParamAbi::Lp64NativeLe), 4, Some(1)),
+            None,
+        );
+        assert_eq!(
+            super::resolve_backend_mechanism_abi(Some(ParamAbi::Ilp32NativeLe), 8, Some(1)),
+            None,
+        );
+        assert_eq!(
+            super::resolve_backend_mechanism_abi(Some(ParamAbi::Ilp32Packed1Le), 8, None),
+            None,
+        );
+        // Order conflict: every v1 ABI is little-endian.
+        assert_eq!(
+            super::resolve_backend_mechanism_abi(Some(ParamAbi::Ilp32NativeLe), 4, Some(2)),
+            None,
+        );
     }
 }

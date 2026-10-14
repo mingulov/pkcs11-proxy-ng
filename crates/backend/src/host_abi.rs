@@ -21,6 +21,15 @@ pub fn host_byte_order() -> u32 {
     if cfg!(target_endian = "little") { 1 } else { 2 }
 }
 
+/// The daemon backend's exact native v1 mechanism-parameter ABI (Q04):
+/// this build target's compiled layout fact — packing included, never
+/// inferred from the width. `None` where no v1 ABI exists (big-endian
+/// targets have no little-endian layout), in which case discovery stays
+/// silent and struct prefixes fail closed downstream.
+pub fn host_mechanism_param_abi() -> Option<pkcs11_proxy_ng_types::shape_descriptors::ParamAbi> {
+    pkcs11_proxy_ng_types::shape_descriptors::ParamAbi::native()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -38,5 +47,24 @@ mod tests {
         // target's own order, pinned here so a BE build proves the BE arm.
         let want = if cfg!(target_endian = "little") { 1 } else { 2 };
         assert_eq!(host_byte_order(), want);
+    }
+
+    #[test]
+    fn host_mechanism_param_abi_matches_native_fact() {
+        // Q04: the host native-ABI fact is coherent with the sibling
+        // advertisements — a named ABI always agrees with the width and
+        // order this module reports; big-endian hosts name no v1 ABI.
+        use pkcs11_proxy_ng_types::shape_descriptors::ParamAbi;
+        match host_mechanism_param_abi() {
+            Some(abi) => {
+                assert_eq!(ParamAbi::native(), Some(abi));
+                assert_eq!(abi.ulong_size(), host_ulong_size() as usize);
+                assert_eq!(host_byte_order(), 1);
+            }
+            None => {
+                assert_eq!(ParamAbi::native(), None);
+                assert_eq!(host_byte_order(), 2);
+            }
+        }
     }
 }

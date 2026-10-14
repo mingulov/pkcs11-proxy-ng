@@ -344,6 +344,7 @@ mod tests {
             pointer_safe_authenticated_parameters: false,
             mechanism_parameter_transport_version: Some(2),
             exact_token_label_version: Some(1),
+            backend_mechanism_abi: None,
         }
     }
 
