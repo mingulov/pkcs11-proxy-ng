@@ -16,15 +16,19 @@
 //!
 //! The `softhsm_all_param_shapes_execute` driver additionally covers every
 //! [`CkMechanismParams`] variant (see `support/shape_matrix.rs`): each shape
-//! is pushed through the live stack and classified as `success` (the RPC
-//! returned `Ok`) or `attempted` (RPC-completed with an error RV, origin
-//! unproven — no RV alone proves SoftHSM2 was reached). Mechanisms SoftHSM2
-//! does not implement are recorded via `record_skip!(MechanismUnsupported)`,
-//! and the test asserts `succeeded + attempted + skipped == 79` with zero
+//! is pushed through the live stack and classified as `success` (a
+//! COMPLETING operation returned `Ok` — derive or wrap), `init-accepted`
+//! (an init-only call returned `Ok` without doing cryptographic work —
+//! explicitly unqualified), or `attempted` (RPC-completed with an error RV,
+//! origin unproven — no RV alone proves SoftHSM2 was reached). Mechanisms
+//! SoftHSM2 does not implement are recorded via
+//! `record_skip!(MechanismUnsupported)`, and the test asserts
+//! `meaningful + init_accepted + attempted + skipped == 79` with zero
 //! transport failures, so a crash can never masquerade as coverage. Only
-//! `success` outcomes qualify as real-provider evidence in this lane;
-//! attempted shapes need the entry-recording oracle lane
-//! (`shape_evidence_test.rs`) or a dedicated round-trip test to qualify.
+//! meaningful-`success` outcomes qualify as real-provider evidence in this
+//! lane; init-accepted and attempted shapes need a dedicated round-trip
+//! test (or, for origin evidence only, the entry-recording oracle lane in
+//! `shape_evidence_test.rs`) to qualify.
 //!
 //! Run with:
 //! ```sh
@@ -857,11 +861,14 @@ fn generic_derive_template() -> Vec<CkAttribute> {
 
 /// Push one shape through the live stack, dispatching on the mechanism's
 /// advertised operation flags, and classify the evidence honestly (Q07):
-/// `Ok` is a successful real-provider operation, while any error RV is
-/// merely attempted — RPC-completed, origin unproven — because the same RV
-/// value can come from server transport validation, backend FFI
-/// reconstruction, or SoftHSM2 itself. No RV alone proves the params
-/// traversed Rust -> proto -> gRPC -> Rust -> C -> SoftHSM2; only a
+/// `Ok` from a COMPLETING operation (derive, wrap) is a successful
+/// real-provider operation, while `Ok` from an init-only call
+/// (encrypt-init, sign-init, digest-init, fallback init) is merely
+/// init-accepted — operation state opened, no cryptographic work done —
+/// and any error RV is merely attempted — RPC-completed, origin unproven —
+/// because the same RV value can come from server transport validation,
+/// backend FFI reconstruction, or SoftHSM2 itself. No RV alone proves the
+/// params traversed Rust -> proto -> gRPC -> Rust -> C -> SoftHSM2; only a
 /// transport failure (caught by the tripwire) or a test-harness error
 /// fails the shape.
 ///
@@ -897,7 +904,7 @@ async fn execute_shape(
     }
     if flags & CkMechanismFlags::ENCRYPT.0 != 0 {
         return match client.encrypt_init(session, mechanism, key).await {
-            Ok(mech_out) => Ok(ShapeOutcome::success(format!(
+            Ok(mech_out) => Ok(ShapeOutcome::init_accepted(format!(
                 "encrypt-init ok (mechanism_out: {})",
                 mech_out.is_some()
             ))),
@@ -906,13 +913,13 @@ async fn execute_shape(
     }
     if flags & CkMechanismFlags::SIGN.0 != 0 {
         return match client.sign_init(session, mechanism, key).await {
-            Ok(()) => Ok(ShapeOutcome::success("sign-init ok".to_string())),
+            Ok(()) => Ok(ShapeOutcome::init_accepted("sign-init ok".to_string())),
             Err(rv) => Ok(ShapeOutcome::attempted(rv, format!("sign-init -> {rv}"))),
         };
     }
     if flags & CkMechanismFlags::DIGEST.0 != 0 {
         return match client.digest_init(session, mechanism).await {
-            Ok(()) => Ok(ShapeOutcome::success("digest-init ok".to_string())),
+            Ok(()) => Ok(ShapeOutcome::init_accepted("digest-init ok".to_string())),
             Err(rv) => Ok(ShapeOutcome::attempted(rv, format!("digest-init -> {rv}"))),
         };
     }
@@ -925,7 +932,7 @@ async fn execute_shape(
     // No live-operation flag (keygen-only or vendor quirk): still push the
     // params through an init-class call so the Rust -> C conversion executes.
     match client.encrypt_init(session, mechanism, key).await {
-        Ok(mech_out) => Ok(ShapeOutcome::success(format!(
+        Ok(mech_out) => Ok(ShapeOutcome::init_accepted(format!(
             "fallback encrypt-init ok (mechanism_out: {})",
             mech_out.is_some()
         ))),
@@ -981,6 +988,7 @@ async fn softhsm_all_param_shapes_execute() -> Result<(), String> {
     let keys = ShapeKeys::generate(&mut client, keygen_session).await?;
 
     let mut succeeded: u32 = 0;
+    let mut init_accepted: u32 = 0;
     let mut attempted: u32 = 0;
     let mut skipped: u32 = 0;
     for case in &cases {
@@ -1007,6 +1015,7 @@ async fn softhsm_all_param_shapes_execute() -> Result<(), String> {
         );
         match outcome.disposition {
             support::ShapeDisposition::Success => succeeded += 1,
+            support::ShapeDisposition::InitAccepted => init_accepted += 1,
             // This lane has no entry record: NativeEntered is unclaimable
             // here (see the shape_evidence_test oracle controls).
             support::ShapeDisposition::Attempted | support::ShapeDisposition::NativeEntered => {
@@ -1021,15 +1030,30 @@ async fn softhsm_all_param_shapes_execute() -> Result<(), String> {
         "transport failure during shape matrix: a crash is not coverage"
     );
     assert_eq!(
-        succeeded + attempted + skipped,
+        succeeded + init_accepted + attempted + skipped,
         cases.len() as u32,
-        "every shape must succeed, attempt, or skip honestly"
+        "every shape must succeed, init-accept, attempt, or skip honestly"
     );
     assert!(
-        succeeded + attempted >= 1,
+        succeeded + init_accepted + attempted >= 1,
         "SoftHSM2 supports core mechanisms; zero attempts means the driver is vacuous"
     );
-    eprintln!("{}", support::format_matrix_summary(succeeded, attempted, skipped, cases.len()));
+    let receipt = support::MatrixReceipt {
+        meaningful_success: succeeded,
+        init_accepted,
+        attempted,
+        unsupported_skipped: skipped,
+        total: cases.len(),
+        // This lane never observes native entry: attempted shapes carry
+        // zero native information (not "zero entries").
+        native_observation: support::NativeObservation::Unavailable { lane: "softhsm2-driver" },
+    };
+    assert_eq!(
+        receipt.qualified(),
+        succeeded,
+        "only meaningful success qualifies as real-provider evidence"
+    );
+    eprintln!("{}", support::format_matrix_summary(&receipt));
 
     client.logout(keygen_session).await.map_err(|rv| rv.to_string())?;
     client.close_session(keygen_session).await.map_err(|rv| rv.to_string())?;

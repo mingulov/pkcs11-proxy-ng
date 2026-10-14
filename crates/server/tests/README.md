@@ -40,12 +40,17 @@ is present, all 10 mechanism tests plus the 79-shape matrix driver execute
 for real; when it is absent, each test records an honest
 `record_skip!(ProviderMissing)` line and passes without executing. A
 present-but-broken provider still fails loudly. The shape-matrix driver
-classifies each advertised shape as `success` (RPC returned `Ok`) or
-`attempted` (RPC-completed with an error RV, origin unproven — no RV alone
-proves SoftHSM2 was reached) and asserts
-`succeeded + attempted + skipped == 79` with zero transport failures. Only
-`succeeded` shapes qualify as real-provider evidence; attempted shapes and
-unsupported skips never qualify by totals.
+classifies each advertised shape as `success` (a COMPLETING operation —
+derive or wrap — returned `Ok`), `init-accepted` (an init-only call
+returned `Ok` without doing cryptographic work, e.g. an EdDSA `sign-init
+ok` that never signs — explicitly unqualified), or `attempted`
+(RPC-completed with an error RV, origin unproven — no RV alone proves
+SoftHSM2 was reached) and asserts
+`meaningful + init_accepted + attempted + skipped == 79` with zero
+transport failures. Only meaningful-`success` shapes qualify as
+real-provider evidence (`MatrixReceipt::qualified` enforces this);
+init-accepted shapes, attempted shapes, and unsupported skips never
+qualify by totals.
 ## Tests using SoftHSM2 in default `cargo test`
 
 `crates/server/tests/parameterized_mechanism_test.rs` runs in default
@@ -54,9 +59,14 @@ mechanism tests against SoftHSM2, including a matrix covering all 79 modeled
 parameter shapes. If SoftHSM2 is unavailable, the tests report
 `record_skip!(ProviderMissing)` and pass without running provider calls. If it
 is available but fails, the tests fail. The matrix checks that each shape was
-either succeeded, attempted (error RV observed, native origin unproven), or
-honestly skipped, and that no transport call failed. Attempted and skipped
-shapes never qualify as real-provider evidence by totals.
+either a meaningful success (completing operation returned `Ok`),
+init-accepted (init-only `Ok`, unqualified), attempted (error RV observed,
+native origin unproven), or honestly skipped, and that no transport call
+failed. The summary receipt carries all four buckets plus the derived
+RPC-observed total and the explicit native-observation status (`unavailable`
+in this lane — attempted shapes carry zero native information, not "zero
+entries"). Init-accepted, attempted, and skipped shapes never qualify as
+real-provider evidence by totals.
 
 ```bash
 cargo test -p pkcs11-proxy-ng --test parameterized_mechanism_test -- --test-threads=1
@@ -88,7 +98,7 @@ build, set `PKCS11_PROXY_SHIM_LIB=/path/to/libpkcs11_proxy_ng_shim.so`.
 | `crates/server/tests/nss_tls_mkd_mechanism_out_test.rs` | NSS softokn SSL3 master-key-derive mechanism-output coverage | NSS softokn libsoftokn3.so and certutil | `cargo test -p pkcs11-proxy-ng --test nss_tls_mkd_mechanism_out_test -- --ignored --test-threads=1` |
 | `crates/server/tests/provider_matrix_test.rs` | Optional NSS and Kryoptic provider matrix smoke coverage | NSS softokn libsoftokn3.so and certutil; Kryoptic module via PKCS11_PROXY_KRYOPTIC_MODULE | `cargo test -p pkcs11-proxy-ng --test provider_matrix_test nss_softokn_smoke_suite -- --ignored --test-threads=1`<br>`cargo test -p pkcs11-proxy-ng --test provider_matrix_test kryoptic_smoke_suite -- --ignored --test-threads=1` |
 | `crates/server/tests/q01_close_oracle_test.rs` | Hook-gated Q01 close-path loaded-oracle coverage (real daemon stack) | SoftHSM2 module and softhsm2-util; NSS softokn libsoftokn3.so and certutil; native-owner-test-hooks feature build | `cargo test -p pkcs11-proxy-ng --features native-owner-test-hooks --test q01_close_oracle_test -- --ignored --test-threads=1` |
-| `crates/server/tests/shape_evidence_test.rs` | Shape-evidence oracle controls (attempted vs native-entered vs success) | Entry-recording oracle build via PKCS11_PROXY_ENTRY_RECORDING_ORACLE_LIB | `cargo test -p pkcs11-proxy-ng --test shape_evidence_test -- --ignored --test-threads=1` |
+| `crates/server/tests/shape_evidence_test.rs` | Shape-evidence oracle controls (attempted vs init-accepted vs native-entered vs success, with backend-admission layer discrimination) | Entry-recording oracle build via PKCS11_PROXY_ENTRY_RECORDING_ORACLE_LIB | `cargo test -p pkcs11-proxy-ng --test shape_evidence_test -- --ignored --test-threads=1` |
 | `crates/server/tests/softhsm_fixture_test.rs` | SoftHSM2 fixture variant coverage | SoftHSM2 module and softhsm2-util | `cargo test -p pkcs11-proxy-ng --test softhsm_fixture_test -- --ignored --test-threads=1` |
 | `crates/server/tests/template_compat_test.rs` | Template compatibility tests using SoftHSM2 | SoftHSM2 module and softhsm2-util | `cargo test -p pkcs11-proxy-ng --test template_compat_test -- --ignored --test-threads=1` |
 | `crates/server/tests/test_hooks_topology_test.rs` | Hook-gated control-plane topology coverage (real daemon subprocess) | SoftHSM2 module and softhsm2-util; native-owner-test-hooks feature build; built workspace binaries | `cargo test -p pkcs11-proxy-ng --features native-owner-test-hooks --test test_hooks_topology_test -- --ignored --test-threads=1` |
@@ -116,12 +126,15 @@ PKCS11_PROXY_MISSING_BEGIN_ORACLE_LIB="$PWD/target/missing-begin-oracle/debug/li
 
 From the standalone repository root, build the entry-recording oracle, then
 explicitly load it. The oracle returns scenario RVs verbatim while recording
-native `C_EncryptInit` entries independently, so the controls prove that
-server-local and backend-local rejects earn no native-entry credit even on RV
-equality with a genuine native error — which itself earns native-entry credit
-but not success credit. It is not a real cryptographic provider; this gate
-tests the evidence taxonomy, and its native-entry scope carries that
-limitation explicitly.
+native `C_EncryptInit` entries independently, and the harness counts backend
+`encrypt_init` admissions separately, so the controls prove that the
+server-local reject (0 admissions, 0 entries) and the backend-local reject
+(1 admission, 0 entries) earn no native-entry credit even on RV equality
+with a genuine native error (1 admission, 1 entry) — which itself earns
+native-entry credit but not success credit. It is not a real cryptographic
+provider; this gate tests the evidence taxonomy. Every oracle receipt names
+its provider, shape, and operation, both counts, the disposition, and the
+entry-only scope limitation explicitly.
 
 ```sh
 cargo build --locked --manifest-path tests/ffi_oracles/entry_recording/Cargo.toml

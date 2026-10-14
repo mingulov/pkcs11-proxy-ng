@@ -1314,14 +1314,21 @@ pub fn variant_name(params: &CkMechanismParams) -> &'static str {
 // Q07 (MAINT-02) shape-evidence dispositions.
 // ---------------------------------------------------------------------------
 //
-// An RPC outcome and a native execution are different observations. The
-// shape-matrix driver classifies every outcome WITHOUT native entry
-// evidence, so it may claim only two dispositions:
+// An RPC outcome and a native execution are different observations, and an
+// accepted `*_init` is different from a completed cryptographic operation.
+// The shape-matrix driver classifies every outcome WITHOUT native entry
+// evidence, so it may claim only three dispositions:
 //
-// * `Success`: the RPC returned `Ok`. Sound: on the driver's op paths
-//   (`derive_key`, `encrypt_init`, `sign_init`, `digest_init`, `wrap_key`)
+// * `Success`: a COMPLETING operation returned `Ok` (`derive_key`,
+//   `wrap_key`, or a full round trip). Sound: on the driver's op paths
 //   every pre-backend handler return carries an error RV and every `Ok`
-//   flows from a backend `Ok` — no local layer synthesizes success.
+//   flows from a backend `Ok` — no local layer synthesizes success — and
+//   the call did real provider work, not merely opened operation state.
+// * `InitAccepted`: an init-only call returned `Ok` (`encrypt_init`,
+//   `sign_init`, `digest_init`, or the fallback init). The provider
+//   accepted operation state, but no cryptographic work completed: the
+//   Eddsa `sign-init ok`, for example, never signs or verifies. NEVER
+//   qualifies as real-provider evidence.
 // * `Attempted`: the RPC completed with a mechanism-level error RV. The
 //   same RV value can come from server transport validation, backend FFI
 //   reconstruction, or the provider itself, so the origin is unproven.
@@ -1330,12 +1337,33 @@ pub fn variant_name(params: &CkMechanismParams) -> &'static str {
 // `NativeEntered` needs an independent native entry record and is
 // claimable only in the entry-recording oracle lane
 // (`shape_evidence_test.rs`), never against SoftHSM2.
+//
+// Qualification rule (enforced by [`MatrixReceipt::qualified`]): ONLY
+// meaningful `Success` counts as real-provider evidence. `InitAccepted`,
+// `Attempted`, and unsupported skips never qualify, by totals or
+// otherwise.
+
+/// Whether the classified call completes provider work or merely opens
+/// provider operation state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShapeOpClass {
+    /// The call completes the operation (`derive_key`, `wrap_key`, full
+    /// round trip): `Ok` is meaningful success.
+    Meaningful,
+    /// The call only opens operation state (`encrypt_init`, `sign_init`,
+    /// `digest_init`, fallback init): `Ok` is init acceptance, never
+    /// meaningful success.
+    InitOnly,
+}
 
 /// Evidence disposition for one shape attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShapeDisposition {
-    /// The real-provider operation returned `Ok`.
+    /// A completing real-provider operation returned `Ok`.
     Success,
+    /// An init-only call returned `Ok`; no cryptographic work completed.
+    /// Explicitly unqualified: never real-provider evidence.
+    InitAccepted,
     /// RPC completed with an error RV; native origin unproven.
     Attempted,
     /// Independent native entry record exists; error RV observed at entry.
@@ -1347,6 +1375,7 @@ impl ShapeDisposition {
     pub fn tag(self) -> &'static str {
         match self {
             Self::Success => "success",
+            Self::InitAccepted => "init-accepted",
             Self::Attempted => "attempted",
             Self::NativeEntered => "native-entered",
         }
@@ -1366,29 +1395,42 @@ impl ShapeOutcome {
         Self { disposition: ShapeDisposition::Success, detail, rv: None }
     }
 
+    pub fn init_accepted(detail: String) -> Self {
+        Self { disposition: ShapeDisposition::InitAccepted, detail, rv: None }
+    }
+
     pub fn attempted(rv: CkRv, detail: String) -> Self {
         Self { disposition: ShapeDisposition::Attempted, detail, rv: Some(rv) }
     }
 }
 
 /// Classify an RPC outcome WITHOUT entry evidence (the SoftHSM2 lane):
-/// `Ok` is success; any error RV is merely attempted.
-pub fn classify_rv_only<T, E>(result: &Result<T, E>) -> ShapeDisposition {
-    if result.is_ok() { ShapeDisposition::Success } else { ShapeDisposition::Attempted }
+/// `Ok` from a completing operation is success, `Ok` from an init-only
+/// call is init acceptance; any error RV is merely attempted.
+pub fn classify_rv_only<T, E>(result: &Result<T, E>, op: ShapeOpClass) -> ShapeDisposition {
+    match (result.is_ok(), op) {
+        (true, ShapeOpClass::Meaningful) => ShapeDisposition::Success,
+        (true, ShapeOpClass::InitOnly) => ShapeDisposition::InitAccepted,
+        (false, _) => ShapeDisposition::Attempted,
+    }
 }
 
 /// Classify an RPC outcome WITH an independent native entry count (the
-/// oracle lane): `Ok` is success regardless of the count; an error RV
-/// with at least one recorded entry is native-entered, without is
-/// attempted. Native-entered is never success.
+/// oracle lane): `Ok` is success (meaningful op) or init acceptance
+/// (init-only op) regardless of the count; an error RV with at least one
+/// recorded entry is native-entered, without is attempted. Native-entered
+/// is never success, and an entry record never promotes init-only `Ok`
+/// to meaningful success.
 pub fn classify_with_entry_record<T, E>(
     result: &Result<T, E>,
     native_entries: u64,
+    op: ShapeOpClass,
 ) -> ShapeDisposition {
-    match (result.is_ok(), native_entries) {
-        (true, _) => ShapeDisposition::Success,
-        (false, 0) => ShapeDisposition::Attempted,
-        (false, _) => ShapeDisposition::NativeEntered,
+    match (result.is_ok(), native_entries, op) {
+        (true, _, ShapeOpClass::Meaningful) => ShapeDisposition::Success,
+        (true, _, ShapeOpClass::InitOnly) => ShapeDisposition::InitAccepted,
+        (false, 0, _) => ShapeDisposition::Attempted,
+        (false, _, _) => ShapeDisposition::NativeEntered,
     }
 }
 
@@ -1401,11 +1443,84 @@ pub fn format_shape_line(variant: &str, mech_type: u64, outcome: &ShapeOutcome) 
     )
 }
 
-/// Matrix summary receipt line with separate counts per disposition.
-/// Attempted and skipped shapes never add to a qualified total.
-pub fn format_matrix_summary(succeeded: u32, attempted: u32, skipped: u32, total: usize) -> String {
+/// How native execution was observed for a matrix receipt lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeObservation {
+    /// No entry record exists in this lane: attempted shapes carry zero
+    /// native information. This is NOT "zero entries observed" — entry
+    /// observation is unavailable, and the receipt says so explicitly.
+    Unavailable {
+        /// Lane name, e.g. `"softhsm2-driver"`.
+        lane: &'static str,
+    },
+    /// An independent native entry count was observed (oracle lane).
+    Observed {
+        /// Total native entries recorded across the lane's controls.
+        entries: u64,
+    },
+}
+
+impl NativeObservation {
+    fn receipt(self) -> String {
+        match self {
+            Self::Unavailable { lane } => {
+                format!("unavailable ({lane}; no entry record)")
+            }
+            Self::Observed { entries } => format!("observed (entries={entries})"),
+        }
+    }
+}
+
+/// Complete matrix receipt counts. `rpc_observed` is DERIVED
+/// (meaningful + init-accepted + attempted), never passed in, so the
+/// receipt cannot report an inconsistent RPC total.
+pub struct MatrixReceipt {
+    /// Completing operations that returned `Ok`: the ONLY qualifying
+    /// real-provider evidence in the lane.
+    pub meaningful_success: u32,
+    /// Init-only calls that returned `Ok`: explicitly unqualified.
+    pub init_accepted: u32,
+    /// RPC-completed error RVs: origin unproven, never qualifying.
+    pub attempted: u32,
+    /// Unsupported mechanisms: honestly skipped, never qualifying.
+    pub unsupported_skipped: u32,
+    /// Total shapes in the matrix (all four buckets must sum to this).
+    pub total: usize,
+    /// How (or whether) native execution was observed in this lane.
+    pub native_observation: NativeObservation,
+}
+
+impl MatrixReceipt {
+    /// Every shape the RPC layer completed, successfully or not:
+    /// meaningful success + init acceptance + attempted observations.
+    /// Skips never complete an RPC, so they are excluded.
+    pub fn rpc_observed(&self) -> u32 {
+        self.meaningful_success + self.init_accepted + self.attempted
+    }
+
+    /// The qualification rule as code: ONLY meaningful success qualifies
+    /// as real-provider evidence. Init-accepted, attempted, and skipped
+    /// shapes never add to a qualified total.
+    pub fn qualified(&self) -> u32 {
+        self.meaningful_success
+    }
+}
+
+/// Matrix summary receipt line with the complete evidence schema:
+/// meaningful-success, init-accepted (unqualified), attempted (origin
+/// unproven), and unsupported-skipped buckets, plus the derived
+/// RPC-observed total and the explicit native-observation status.
+pub fn format_matrix_summary(receipt: &MatrixReceipt) -> String {
     format!(
-        "shape matrix: {succeeded} succeeded, {attempted} attempted (origin unproven), \
-         {skipped} honestly skipped ({total} total)"
+        "shape matrix: {} meaningful-success, {} init-accepted (unqualified), {} attempted \
+         (origin unproven), {} unsupported-skipped ({} total; {} rpc-observed; \
+         native-observation: {})",
+        receipt.meaningful_success,
+        receipt.init_accepted,
+        receipt.attempted,
+        receipt.unsupported_skipped,
+        receipt.total,
+        receipt.rpc_observed(),
+        receipt.native_observation.receipt(),
     )
 }
