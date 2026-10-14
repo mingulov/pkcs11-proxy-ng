@@ -4321,11 +4321,16 @@ fn width_bare_flat_crosses_abis() {
 }
 
 // ---------------------------------------------------------------------------
-// Q04 discovery chain: wire tag -> proto converter -> shim snapshot resolve
-// -> reader equality. The backend leg always travels the real discovery
-// conversion (the same fns probe install calls); the local leg is injected
-// so every pair is deterministic on every host. The host-native pair is
-// additionally covered end-to-end through live gRPC in cross_abi.rs.
+// Q04 discovery chain (unit pins): wire tag -> proto converter -> shim
+// snapshot resolve -> reader equality. The backend leg travels the real
+// discovery conversion fns (the same fns probe install calls) and the
+// local leg is injected so every pair is deterministic on every host —
+// but this composition bypasses `BackendProbe` conversion and snapshot
+// installation, so it is NOT the acceptance for the installed path: the
+// combined discovery -> installed snapshot -> prefix coverage lives in
+// `cross_abi.rs` (`q04_live_discovery_snapshot_drives_matching_prefix_per_profile`
+// plus the host end-to-end leg in
+// `q04_compatible_pss_prefix_reaches_provider_once`).
 // ---------------------------------------------------------------------------
 
 /// Q04 backend leg: resolve a discovery tag exactly as probe install does

@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -39,6 +40,11 @@ pub(super) struct TestDaemon {
     pub(super) backend: Arc<MockBackend>,
     context_manager: Arc<ContextManager>,
     _shutdown: watch::Sender<bool>,
+    /// Sign-init RPCs that reached the daemon's handler (Q04/F2):
+    /// incremented at handler entry, before validation. Stays 0 when
+    /// the shim refuses locally (no RPC emitted); reads 1 when the
+    /// daemon rejects (the backend provider counter stays 0 in both).
+    sign_init_entries: Arc<AtomicU64>,
 }
 
 impl TestDaemon {
@@ -101,6 +107,26 @@ impl TestDaemon {
         Self::start_configured_with_mechanisms(abi, None, mechanisms)
     }
 
+    /// An owned daemon with crafted discovery advertisements (Q04/F2):
+    /// `ulong_size`/`advertised_order` override the emulated profile's
+    /// own width/order verbatim — including values that contradict the
+    /// profile ABI (daemon silences tag 10; probe stays OK) or are
+    /// outright invalid (shim refuses the whole probe loudly).
+    pub(super) fn fresh_crafted(
+        abi: MockAbi,
+        ulong_size: Option<u32>,
+        advertised_order: Option<u32>,
+        mechanisms: Vec<CkMechanismType>,
+    ) -> Self {
+        Self::start_full(abi, ulong_size, advertised_order, mechanisms)
+    }
+
+    /// Sign-init RPCs that reached this daemon's handler (Q04/F2 entry
+    /// counter, before validation).
+    pub(super) fn sign_init_entry_count(&self) -> u64 {
+        self.sign_init_entries.load(Ordering::Relaxed)
+    }
+
     fn start_configured(abi: MockAbi, advertised_order: Option<u32>) -> Self {
         Self::start_configured_with_mechanisms(
             abi,
@@ -120,15 +146,26 @@ impl TestDaemon {
         advertised_order: Option<u32>,
         mechanisms: Vec<CkMechanismType>,
     ) -> Self {
+        Self::start_full(abi, None, advertised_order, mechanisms)
+    }
+
+    fn start_full(
+        abi: MockAbi,
+        ulong_size: Option<u32>,
+        advertised_order: Option<u32>,
+        mechanisms: Vec<CkMechanismType>,
+    ) -> Self {
         let runtime = Runtime::new().expect("test runtime");
+        let sign_init_entries = Arc::new(AtomicU64::new(0));
+        let service_counter = sign_init_entries.clone();
         let (endpoint, backend, context_manager, shutdown) = runtime.block_on(async {
             let mut mock =
                 MockBackend::new(vec![CkSlotId(0), CkSlotId(1)], mechanisms).with_abi(abi);
-            match advertised_order {
-                None => {}
-                Some(2) => mock = mock.with_big_endian_advertisement(),
-                Some(1) => mock = mock.with_little_endian_advertisement(),
-                Some(other) => panic!("invalid test byte-order advertisement {other}"),
+            if let Some(size) = ulong_size {
+                mock = mock.with_ulong_size_advertisement(size);
+            }
+            if let Some(order) = advertised_order {
+                mock = mock.with_byte_order_advertisement(order);
             }
             let backend = Arc::new(mock);
             backend.set_interface_capabilities(InterfaceCapabilities {
@@ -143,7 +180,8 @@ impl TestDaemon {
             context_manager.populate_slots(&backend_trait).await.expect("populate_slots");
 
             let service =
-                Pkcs11ProxyService::insecure_for_tests(context_manager.clone(), backend_trait);
+                Pkcs11ProxyService::insecure_for_tests(context_manager.clone(), backend_trait)
+                    .with_sign_init_entry_counter(service_counter);
             let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind test daemon");
             let addr = listener.local_addr().expect("local addr");
             let endpoint = format!("http://127.0.0.1:{}", addr.port());
@@ -164,7 +202,7 @@ impl TestDaemon {
             (endpoint, backend, context_manager, shutdown_tx)
         });
 
-        Self { runtime, endpoint, backend, context_manager, _shutdown: shutdown }
+        Self { runtime, endpoint, backend, context_manager, _shutdown: shutdown, sign_init_entries }
     }
 
     fn block_on<F: std::future::Future>(&self, future: F) -> F::Output {

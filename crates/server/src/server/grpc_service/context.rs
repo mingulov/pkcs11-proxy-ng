@@ -13,6 +13,7 @@
 //! `Arc`, a `Copy` mode enum, a `bool`, or a clone-cheap `Option<AuditSink>`.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 
@@ -48,6 +49,14 @@ pub(crate) struct HandlerContext {
     /// Emission is wired in `grpc_service/audit_events.rs`; handlers call
     /// `emit_auth_event` after each auth/key-mgmt/system operation.
     pub(crate) audit: Option<AuditSink>,
+    /// Test-only sign-init RPC entry counter (Q04/F2): when attached via
+    /// `Pkcs11ProxyService::with_sign_init_entry_counter`, the `sign_init`
+    /// handler increments it at entry, before any validation. `None` in
+    /// production (zero overhead: a single branch). Lets tests distinguish
+    /// a shim-local refusal (no RPC emitted, counter stays 0) from a
+    /// daemon-side validation rejection (RPC arrived, counter is 1, while
+    /// the backend provider-entry counter stays 0 in both cases).
+    pub(crate) sign_init_entry_count: Option<Arc<AtomicU64>>,
 }
 
 #[cfg(test)]
@@ -76,6 +85,7 @@ impl HandlerContext {
             unix_auth_mode: UnixAuthMode::None,
             sanitize_inputs: false,
             audit: None,
+            sign_init_entry_count: None,
         }
     }
 }
