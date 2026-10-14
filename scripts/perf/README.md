@@ -73,6 +73,69 @@ restart lifecycle cases live in `shutdown_lifetime_test.rs`.
 - `../release/` packaging and the benches under
   `crates/server/benches/` emit T1 receipts/samples for their runs.
 
+## Harness completion contracts (Q09)
+
+`cold_start_storm.sh` owns exactly the child processes it starts
+(setup steps, N workload processes, one sampler), joins each one under
+a monotonic wall bound, and cleans up on EXIT/INT/TERM. There is no
+unqualified `wait`; completion is file-observable (done-files and row
+files) so an unverifiable process state never burns a whole timeout.
+
+- The verdict is `PASS` or `FAIL_*` with explicit `reasons`; every
+  started run writes a valid versioned JSON summary
+  (`cold-start-summary/1`, atomically) for success and failure records
+  alike. Signals write a terminal `FAIL_INTERRUPTED` record naming the
+  signal and keep their 128+signal exit status.
+- Verdict precedence is `FAIL_WORKLOAD` over `FAIL_CLEANUP` over
+  `FAIL_SAMPLER`: a failed workload outranks everything, unverifiable
+  cleanup outranks bad measurements.
+- Missing/unusable measurements render as `null`, never zero. A run
+  with no usable RSS or CPU dimension, no completed work, an unfinished
+  workload, malformed sampler rows, or unresolved cleanup is
+  non-success with a nonzero exit.
+- Exit status: 0 on `PASS`; 1 on a `FAIL_*` verdict; 2 on usage/setup
+  errors (nothing ran, no summary); 128+signal on signals.
+- A process that is present but unreadable is unknown, never gone:
+  while any `/proc` read genuinely fails, tree cleanup cannot be
+  verified and the verdict fails closed to `FAIL_CLEANUP` with the
+  unverified PIDs in `unresolved_pids`.
+- Owned host jobs run in per-job process groups so blind cleanup
+  still reaches unenumerated descendants (group kill).
+- Workload shims run in an exclusively owned disposable run container
+  (one per run, recorded in `run_container`, carrying a
+  `coldstart-run-id` ownership label). After host joins, the run
+  container is removed authoritatively (`docker rm -f`), which stops
+  every shim inside regardless of host privileges or /proc
+  readability. An unconfirmed removal fails closed to `FAIL_CLEANUP`
+  ("container-side termination could not be verified"). A creation
+  whose acknowledgement never arrives is reconciled before cleanup
+  claims anything: the run is refused (exit 2) or interrupted, and the
+  exit trap verifies the ownership label before removing — absent
+  means nothing was created, anything unverifiable is left in place
+  and fails closed. The harness never host-signals container processes
+  and never selects processes by command text, so foreign processes
+  are unreachable by design.
+- A failed storm-clock read fails closed: before any work starts the
+  run is refused (exit 2); once the storm has started, the run ends
+  `FAIL_WORKLOAD` with null elapsed and an explicit reason.
+- Wall-time quantiles use nearest-rank over successful rows only.
+  `workload_contract` records whether the run is inside the
+  single-logical-client support contract (`N=1`) or diagnostic-only.
+  The effective numeric bounds are echoed in `bounds`.
+- All inputs are canonicalized (explicit base 10, no octal holes) and
+  range-checked before any work starts: N is 1–100000, timeouts and
+  grace are 0–31536000 s, startup sleep and sample interval are
+  0–3600 s. Summary numerics are canonical decimal (no leading zeros);
+  corrupt sampler fields empty exactly their field, and sampler rows
+  that fail the strict shape check count as `malformed_samples`.
+- The `COLD_START_*` environment overrides exist so the harness itself
+  can be tested deterministically; defaults are the production values.
+  `COLD_START_STAT_READER` (default `cat`) selects the command used to
+  read `/proc` state and exists only for failure injection in tests.
+  `COLD_START_CLOCK_CALLER` names each boundary clock call for the
+  test-double clock (failure injection and deterministic durations).
+  See `tests/scripts/test_perf_harnesses.py`.
+
 ## Latency decomposition recipe (T4)
 
 `proxy_latency_histogram` runs the same SignInit+Sign sequence in two
