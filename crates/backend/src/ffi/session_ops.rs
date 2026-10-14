@@ -1,3 +1,4 @@
+use super::ffi_conversion::narrow_wire_ulong;
 use super::*;
 
 impl FfiBackend {
@@ -165,17 +166,15 @@ impl FfiBackend {
         crate::test_hooks::record_native_session_event(
             crate::test_hooks::NativeSessionEvent::OpenSession { slot: slot_id.0 },
         );
+        // Q05: checked narrowing — an unrepresentable flags word fails
+        // loudly here, never truncates into `C_OpenSession` on a narrow
+        // host (same doctrine as `ffi_session_cancel`).
+        let flags = narrow_wire_ulong(flags.0)?;
         let handle = Self::call_session_output(
             &admission,
             unsafe { (*self.func_list).C_OpenSession },
             |function, handle| unsafe {
-                function(
-                    h_slot,
-                    flags.0 as cryptoki_sys::CK_FLAGS,
-                    std::ptr::null_mut(),
-                    None,
-                    handle,
-                )
+                function(h_slot, flags, std::ptr::null_mut(), None, handle)
             },
         )?;
         // Record the session->slot binding so we can drop per-slot
@@ -378,6 +377,8 @@ impl FfiBackend {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::traits::Pkcs11Backend;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Mutex, mpsc};
     use std::time::Duration;
 
@@ -594,6 +595,133 @@ mod tests {
             backend.ffi_open_session(CkSlotId(11), CkSessionFlags::SERIAL_SESSION).unwrap_err(),
             CkRv::CRYPTOKI_NOT_INITIALIZED
         );
+    }
+
+    // Q05: CK_ULONG32 native-call recorder for `C_OpenSession` — counts
+    // native entries and captures each flags word the provider observed,
+    // so truncation and refusal stay distinguishable on narrow hosts.
+    static OPEN_SESSION_PROVIDER_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static OPEN_SESSION_OBSERVED_FLAGS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+    // The open-session counter is process-wide while tests run on
+    // parallel threads: every test asserting absolute counts holds this
+    // lock from reset through final read (repo-wide TEST_LOCK
+    // convention).
+    static OPEN_SESSION_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    unsafe extern "C" fn open_session_counted(
+        _slot: cryptoki_sys::CK_SLOT_ID,
+        flags: cryptoki_sys::CK_FLAGS,
+        _application: cryptoki_sys::CK_VOID_PTR,
+        _notify: cryptoki_sys::CK_NOTIFY,
+        session: *mut cryptoki_sys::CK_SESSION_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        OPEN_SESSION_PROVIDER_CALLS.fetch_add(1, Ordering::SeqCst);
+        OPEN_SESSION_OBSERVED_FLAGS.lock().unwrap().push(flags as u64);
+        if !session.is_null() {
+            unsafe { *session = 41 };
+        }
+        cryptoki_sys::CKR_OK
+    }
+
+    fn backend_with_counted_open_session() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_OpenSession = Some(open_session_counted);
+        let backend = FfiBackend::test_backend_with_tables(functions.as_mut(), None, None);
+        (backend, functions)
+    }
+
+    /// Q05 direct leg: a flags word whose low bits are valid but whose
+    /// value exceeds CK_ULONG32 must be refused with zero native entry
+    /// on a narrow host — never truncated to a valid-looking value.
+    #[test]
+    fn open_session_flags_wider_than_native_are_rejected_before_provider_call() {
+        let _lock = OPEN_SESSION_TEST_LOCK.lock().unwrap();
+        OPEN_SESSION_PROVIDER_CALLS.store(0, Ordering::SeqCst);
+        OPEN_SESSION_OBSERVED_FLAGS.lock().unwrap().clear();
+        let (backend, _functions) = backend_with_counted_open_session();
+        backend.lifecycle_domain.open_for_tests();
+        // 2^32 | RW | SERIAL: valid low bits plus an unrepresentable
+        // high bit (truncation would execute it as plain RW|SERIAL).
+        let wide =
+            (u32::MAX as u64 + 1) | CkSessionFlags::RW_SESSION.0 | CkSessionFlags::SERIAL_SESSION.0;
+
+        let result = backend.ffi_open_session(CkSlotId(11), CkSessionFlags(wide));
+
+        if std::mem::size_of::<cryptoki_sys::CK_ULONG>() == 4 {
+            assert_eq!(result, Err(CkRv::FUNCTION_FAILED), "RV must refuse loudly");
+            assert_eq!(
+                OPEN_SESSION_PROVIDER_CALLS.load(Ordering::SeqCst),
+                0,
+                "narrow host: zero native entry"
+            );
+            assert!(OPEN_SESSION_OBSERVED_FLAGS.lock().unwrap().is_empty());
+        } else {
+            assert_eq!(result.unwrap(), CkSessionHandle(41), "wide host passes through");
+            assert_eq!(OPEN_SESSION_PROVIDER_CALLS.load(Ordering::SeqCst), 1);
+            assert_eq!(*OPEN_SESSION_OBSERVED_FLAGS.lock().unwrap(), vec![wide]);
+        }
+    }
+
+    /// Q05 direct leg: in-range boundary values cross unchanged on every
+    /// width, including u32::MAX (all low bits set, fits narrow hosts).
+    #[test]
+    fn open_session_flags_at_native_boundary_arrive_unchanged() {
+        let _lock = OPEN_SESSION_TEST_LOCK.lock().unwrap();
+        OPEN_SESSION_PROVIDER_CALLS.store(0, Ordering::SeqCst);
+        OPEN_SESSION_OBSERVED_FLAGS.lock().unwrap().clear();
+        let (backend, _functions) = backend_with_counted_open_session();
+        backend.lifecycle_domain.open_for_tests();
+        let boundary = [
+            0u64,
+            (CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION).0,
+            u32::MAX as u64,
+        ];
+
+        for flags in boundary {
+            let result = backend.ffi_open_session(CkSlotId(11), CkSessionFlags(flags));
+            assert_eq!(result.unwrap(), CkSessionHandle(41), "flags {flags:#x} must succeed");
+        }
+
+        assert_eq!(
+            OPEN_SESSION_PROVIDER_CALLS.load(Ordering::SeqCst),
+            3,
+            "one native call per open"
+        );
+        assert_eq!(
+            *OPEN_SESSION_OBSERVED_FLAGS.lock().unwrap(),
+            boundary,
+            "flags words must arrive unchanged"
+        );
+    }
+
+    /// Q05 remote-entry leg: the daemon dispatches through `dyn
+    /// Pkcs11Backend` after proto decode (the server forwards
+    /// `req.flags` losslessly as u64); the narrow backend behind that
+    /// dispatch must refuse the same unrepresentable word with zero
+    /// native entry.
+    #[test]
+    fn trait_open_session_rejects_unrepresentable_flags_before_provider_call() {
+        let _lock = OPEN_SESSION_TEST_LOCK.lock().unwrap();
+        OPEN_SESSION_PROVIDER_CALLS.store(0, Ordering::SeqCst);
+        OPEN_SESSION_OBSERVED_FLAGS.lock().unwrap().clear();
+        let (backend, _functions) = backend_with_counted_open_session();
+        backend.lifecycle_domain.open_for_tests();
+        let backend: std::sync::Arc<dyn Pkcs11Backend> = std::sync::Arc::new(backend);
+        let wide = (u32::MAX as u64 + 1) | CkSessionFlags::SERIAL_SESSION.0;
+
+        let result = backend.open_session(CkSlotId(11), CkSessionFlags(wide));
+
+        if std::mem::size_of::<cryptoki_sys::CK_ULONG>() == 4 {
+            assert_eq!(result, Err(CkRv::FUNCTION_FAILED), "RV must refuse loudly");
+            assert_eq!(
+                OPEN_SESSION_PROVIDER_CALLS.load(Ordering::SeqCst),
+                0,
+                "narrow host: zero native entry"
+            );
+        } else {
+            assert_eq!(result.unwrap(), CkSessionHandle(41), "wide host passes through");
+            assert_eq!(OPEN_SESSION_PROVIDER_CALLS.load(Ordering::SeqCst), 1);
+        }
     }
 
     unsafe extern "C" fn slot_list_ok(
