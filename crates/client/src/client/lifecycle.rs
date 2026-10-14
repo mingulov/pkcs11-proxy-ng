@@ -321,8 +321,7 @@ impl Pkcs11Client {
             exact_effects_version: Default::default(),
             typed_auth_capability: Default::default(),
             mechanism_parameter_transport_version: Default::default(),
-            exact_token_label_version: Default::default(),
-            exact_token_label_context: Default::default(),
+            exact_token_label_probe: Default::default(),
             grpc,
             channel,
             context_id: None,
@@ -344,8 +343,7 @@ impl Pkcs11Client {
             exact_effects_version: Default::default(),
             typed_auth_capability: Default::default(),
             mechanism_parameter_transport_version: Default::default(),
-            exact_token_label_version: Default::default(),
-            exact_token_label_context: Default::default(),
+            exact_token_label_probe: Default::default(),
             grpc,
             channel,
             context_id: None,
@@ -365,8 +363,7 @@ impl Pkcs11Client {
             exact_effects_version: Default::default(),
             typed_auth_capability: Default::default(),
             mechanism_parameter_transport_version: Default::default(),
-            exact_token_label_version: Default::default(),
-            exact_token_label_context: Default::default(),
+            exact_token_label_probe: Default::default(),
             grpc: new_grpc_client(channel.clone(), DEFAULT_RPC_TIMEOUT),
             channel,
             context_id: None,
@@ -504,8 +501,7 @@ impl Pkcs11Client {
         self.exact_effects_version.store(0, std::sync::atomic::Ordering::Release);
         self.invalidate_typed_auth_capability();
         self.mechanism_parameter_transport_version.store(0, std::sync::atomic::Ordering::Release);
-        self.exact_token_label_version.store(0, std::sync::atomic::Ordering::Release);
-        *self.exact_token_label_context.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.exact_token_label_probe.lock().unwrap_or_else(|e| e.into_inner()) = (0, None);
     }
 
     /// Record a fresh `GetBackendInterfaces` probe (W1-C10-03): the
@@ -528,10 +524,11 @@ impl Pkcs11Client {
         self.note_typed_auth_capability(auth_capable);
         self.mechanism_parameter_transport_version
             .store(mechanism_parameter_transport_version, std::sync::atomic::Ordering::Release);
-        self.exact_token_label_version
-            .store(exact_token_label_version, std::sync::atomic::Ordering::Release);
-        *self.exact_token_label_context.lock().unwrap_or_else(|e| e.into_inner()) =
-            self.context_id.clone();
+        // Q03 phase 4: the pair publishes under ONE lock — a
+        // concurrent clone's effective read can never observe this
+        // probe's version with another probe's stamp.
+        *self.exact_token_label_probe.lock().unwrap_or_else(|e| e.into_inner()) =
+            (exact_token_label_version, self.context_id.clone());
     }
 
     /// The cached `mechanism_parameter_transport_version` discovery
@@ -560,7 +557,7 @@ impl Pkcs11Client {
     /// test observability (the shim's old-daemon simulation asserts
     /// the injected value).
     pub fn exact_token_label_version(&self) -> u32 {
-        self.exact_token_label_version.load(std::sync::atomic::Ordering::Acquire)
+        self.exact_token_label_probe.lock().unwrap_or_else(|e| e.into_inner()).0
     }
 
     /// The exact-label capability usable for THIS context (Q03 phase
@@ -569,9 +566,10 @@ impl Pkcs11Client {
     /// closed). This is what `init_token` gates on; the raw cached
     /// value above is observability only.
     pub(crate) fn effective_exact_token_label_version(&self) -> u32 {
-        let stamped =
-            self.exact_token_label_context.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        if stamped == self.context_id { self.exact_token_label_version() } else { 0 }
+        // Q03 phase 4: stamp and version are compared under the SAME
+        // lock hold that read them — the pair can never be torn.
+        let probed = self.exact_token_label_probe.lock().unwrap_or_else(|e| e.into_inner());
+        if probed.1 == self.context_id { probed.0 } else { 0 }
     }
 
     /// Test-only injection for the exact-label cache (Q03 phase 2): the
@@ -583,7 +581,7 @@ impl Pkcs11Client {
     /// shim's old-daemon simulation does) so the injected value is
     /// effective.
     pub fn set_exact_token_label_version_for_tests(&self, version: u32) {
-        self.exact_token_label_version.store(version, std::sync::atomic::Ordering::Release);
+        self.exact_token_label_probe.lock().unwrap_or_else(|e| e.into_inner()).0 = version;
     }
 
     /// Query the daemon for the backend's interface capabilities. Also
@@ -878,6 +876,67 @@ mod tests {
             1,
             "a fresh probe under the current context re-binds v1"
         );
+    }
+
+    /// Q03 phase 4 (p3-blocker): concurrent clones must never observe
+    /// a torn (version, context-stamp) pair. Clone B is bound to a
+    /// legacy peer (stamp B, v0) while clone A completes a
+    /// modern-peer probe (v1, stamp A): B's effective read must stay
+    /// 0 throughout — observing v1 with its own matching stamp would
+    /// authorize exact emission to B's legacy peer (which ignores
+    /// the exact field: NULL→blank / invalid→lossy silent
+    /// substitution).
+    #[tokio::test]
+    async fn concurrent_clones_never_observe_torn_version_stamp_pair() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
+        let mut clone_a = Pkcs11Client::from_channel(channel);
+        clone_a.restore_context_id(Some("q03-race-a".into()));
+        let mut clone_b = clone_a.clone();
+        clone_b.restore_context_id(Some("q03-race-b".into()));
+
+        // Bind the shared pair to B's legacy peer.
+        clone_b.note_backend_probe(1, true, 1, 0);
+        assert_eq!(clone_b.effective_exact_token_label_version(), 0);
+
+        let torn = std::sync::Arc::new(AtomicBool::new(false));
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                let b = clone_b.clone();
+                let torn = torn.clone();
+                let stop = stop.clone();
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        if b.effective_exact_token_label_version() == 1 {
+                            torn.store(true, Ordering::Relaxed);
+                            return;
+                        }
+                    }
+                })
+            })
+            .collect();
+        for _ in 0..5000 {
+            if torn.load(Ordering::Relaxed) {
+                break;
+            }
+            // Re-bind (0, B), then race A's v1 publication against B's
+            // reads: every round re-opens the publication window.
+            clone_b.note_backend_probe(1, true, 1, 0);
+            clone_a.note_backend_probe(1, true, 1, 1);
+        }
+        stop.store(true, Ordering::Relaxed);
+        for reader in readers {
+            reader.join().unwrap();
+        }
+        assert!(
+            !torn.load(Ordering::Relaxed),
+            "clone B observed v1 with its own matching stamp: \
+             torn pair authorized exact emission to a legacy peer"
+        );
+        // Settled state: A's probe won; B stays failed-closed.
+        assert_eq!(clone_b.effective_exact_token_label_version(), 0);
+        assert_eq!(clone_a.effective_exact_token_label_version(), 1);
     }
 
     #[test]
