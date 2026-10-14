@@ -3789,21 +3789,84 @@ mod tests {
     /// Re-execute this test binary in a fresh process for exactly
     /// `child_test`, with `env_key` set so the child body runs its
     /// assertions. Fails with the child's captured output when the child
-    /// fails.
+    /// fails, hangs, or runs anything but its one test to green (libtest
+    /// exits 0 even when `--exact` matches nothing, so the exit status
+    /// alone would let a renamed child silently remove coverage).
     fn run_q08_child(child_test: &str, env_key: &str) {
+        use std::process::Stdio;
         let exe = std::env::current_exe().expect("current test executable");
-        let output = std::process::Command::new(exe)
+        let mut child = std::process::Command::new(exe)
             .args(["--exact", child_test, "--nocapture"])
             .env(env_key, "1")
-            .output()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .expect("spawn isolated child test");
+        // Bounded wait: a hung child fails instead of hanging the suite
+        // (children finish in ~1s; the deadline is a hang guard, not a
+        // bound pin). Child output is harness lines only, far below pipe
+        // capacity, so polling `try_wait` cannot deadlock on a full pipe;
+        // the output is drained at reap time.
+        let start = Instant::now();
+        let deadline = Duration::from_secs(30);
+        let output = loop {
+            match child.try_wait().expect("poll isolated child test") {
+                Some(_) => break child.wait_with_output().expect("reap isolated child test"),
+                None if start.elapsed() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                None => {
+                    let _ = child.kill();
+                    let output = child.wait_with_output().expect("reap timed-out child test");
+                    panic!(
+                        "isolated child {child_test} timed out after {deadline:?}:\n--- stdout ---\n{}\n--- stderr ---\n{}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr),
+                    );
+                }
+            }
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
             output.status.success(),
-            "isolated child {child_test} failed (exit {}):\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            "isolated child {child_test} failed (exit {}):\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
             output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
         );
+        assert!(
+            child_ran_one_passing_test(&stdout),
+            "isolated child {child_test} did not run exactly one passing test \
+             (renamed child, or libtest summary drift — update the guard):\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+        );
+    }
+
+    /// Whether the child's captured stdout proves its one test ran to
+    /// green. Matches the libtest summary line (`test result: ok.
+    /// 1 passed; 0 failed; ...`), whose shape is pinned by
+    /// `q08_child_output_guard_rejects_vacuous_runs` below; a toolchain
+    /// that changes the summary fails loud here, never silently.
+    fn child_ran_one_passing_test(stdout: &str) -> bool {
+        stdout.contains("1 passed; 0 failed")
+    }
+
+    /// The child-output guard must reject vacuous and failed runs:
+    /// libtest exits 0 with `0 passed` when `--exact` matches nothing, so
+    /// the `1 passed; 0 failed` summary line (not the exit status) proves
+    /// the child's assertion body executed.
+    #[test]
+    fn q08_child_output_guard_rejects_vacuous_runs() {
+        // Unmatched `--exact`: exit 0, zero tests ran — must reject.
+        assert!(!child_ran_one_passing_test(
+            "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1009 filtered out; finished in 0.00s\n"
+        ));
+        // The one test ran and failed — must reject.
+        assert!(!child_ran_one_passing_test(
+            "test server::grpc_service::service_utils::tests::q08_child_exact_values ... FAILED\ntest result: FAILED. 0 passed; 1 failed;\n"
+        ));
+        // The one test ran to green — must accept.
+        assert!(child_ran_one_passing_test(
+            "test server::grpc_service::service_utils::tests::q08_child_exact_values ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1008 filtered out; finished in 0.00s\n"
+        ));
     }
 
     #[test]
