@@ -251,44 +251,56 @@ fn shape_line_grammar_carries_disposition() {
 #[test]
 fn matrix_summary_grammar_carries_separate_counts() {
     // Receipt grammar: meaningful-success, init-accepted (unqualified),
-    // attempted (origin unproven), and unsupported-skipped are separate
-    // counts, plus the derived RPC-observed total and the explicit
-    // native-observation status. Only meaningful success qualifies; the
-    // oracle lane's native-entry shapes qualify only with their
-    // entry-record scope limitation (see the ignored controls below).
+    // attempted (origin unproven), native-entered (entry-proven), and
+    // unsupported-skipped are separate counts, plus the derived
+    // RPC-observed total and the explicit native-observation status. Only
+    // meaningful success qualifies; the oracle lane's native-entry shapes
+    // qualify only with their entry-record scope limitation (see the
+    // ignored controls below).
     let driver = MatrixReceipt {
         meaningful_success: 0,
         init_accepted: 4,
         attempted: 5,
+        native_entered: 0,
         unsupported_skipped: 70,
         total: 79,
         native_observation: NativeObservation::Unavailable { lane: "softhsm2-driver" },
     };
-    assert_eq!(driver.rpc_observed(), 9, "rpc-observed derives from the three RPC buckets");
-    assert_eq!(driver.qualified(), 0, "init-accepted/attempted/skipped never qualify");
+    driver.assert_conserved();
+    assert_eq!(driver.rpc_observed(), 9, "rpc-observed derives from the four RPC buckets");
+    assert_eq!(
+        driver.qualified(),
+        0,
+        "init-accepted/attempted/native-entered/skipped never qualify"
+    );
     assert_eq!(
         format_matrix_summary(&driver),
         "shape matrix: 0 meaningful-success, 4 init-accepted (unqualified), 5 attempted \
-         (origin unproven), 70 unsupported-skipped (79 total; 9 rpc-observed; \
+         (origin unproven), 0 native-entered (entry-proven), 70 unsupported-skipped \
+         (79 total; 9 rpc-observed; \
          native-observation: unavailable (softhsm2-driver; no entry record))"
     );
 
-    // The observed variant names its entry count explicitly (oracle lane).
+    // The observed variant accounts its entry-proven RPC in the
+    // native-entered bucket (oracle lane): 2 attempted + 1 native-entered
+    // over 3 controls, all RPC-observed.
     let oracle = MatrixReceipt {
         meaningful_success: 0,
         init_accepted: 0,
         attempted: 2,
+        native_entered: 1,
         unsupported_skipped: 0,
         total: 3,
         native_observation: NativeObservation::Observed { entries: 1 },
     };
-    assert_eq!(oracle.rpc_observed(), 2);
+    oracle.assert_conserved();
+    assert_eq!(oracle.rpc_observed(), 3);
     assert_eq!(oracle.qualified(), 0);
     assert_eq!(
         format_matrix_summary(&oracle),
         "shape matrix: 0 meaningful-success, 0 init-accepted (unqualified), 2 attempted \
-         (origin unproven), 0 unsupported-skipped (3 total; 2 rpc-observed; \
-         native-observation: observed (entries=1))"
+         (origin unproven), 1 native-entered (entry-proven), 0 unsupported-skipped \
+         (3 total; 3 rpc-observed; native-observation: observed (entries=1))"
     );
 }
 

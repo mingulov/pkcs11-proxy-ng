@@ -46,11 +46,12 @@ returned `Ok` without doing cryptographic work, e.g. an EdDSA `sign-init
 ok` that never signs — explicitly unqualified), or `attempted`
 (RPC-completed with an error RV, origin unproven — no RV alone proves
 SoftHSM2 was reached) and asserts
-`meaningful + init_accepted + attempted + skipped == 79` with zero
-transport failures. Only meaningful-`success` shapes qualify as
+`meaningful + init_accepted + attempted + native_entered + skipped == 79`
+with zero transport failures (`native_entered` is pinned at 0 in this
+lane, which has no entry record). Only meaningful-`success` shapes qualify as
 real-provider evidence (`MatrixReceipt::qualified` enforces this);
-init-accepted shapes, attempted shapes, and unsupported skips never
-qualify by totals.
+init-accepted shapes, attempted shapes, native-entered shapes, and
+unsupported skips never qualify by totals.
 ## Tests using SoftHSM2 in default `cargo test`
 
 `crates/server/tests/parameterized_mechanism_test.rs` runs in default
@@ -62,11 +63,13 @@ is available but fails, the tests fail. The matrix checks that each shape was
 either a meaningful success (completing operation returned `Ok`),
 init-accepted (init-only `Ok`, unqualified), attempted (error RV observed,
 native origin unproven), or honestly skipped, and that no transport call
-failed. The summary receipt carries all four buckets plus the derived
+failed. The summary receipt carries all five buckets (entry-proven
+`native-entered` RPCs are pinned at 0 in this lane, which has no entry
+record) plus the derived
 RPC-observed total and the explicit native-observation status (`unavailable`
 in this lane — attempted shapes carry zero native information, not "zero
-entries"). Init-accepted, attempted, and skipped shapes never qualify as
-real-provider evidence by totals.
+entries"). Init-accepted, attempted, native-entered, and skipped shapes
+never qualify as real-provider evidence by totals.
 
 ```bash
 cargo test -p pkcs11-proxy-ng --test parameterized_mechanism_test -- --test-threads=1
