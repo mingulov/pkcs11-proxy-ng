@@ -1340,8 +1340,8 @@ pub fn variant_name(params: &CkMechanismParams) -> &'static str {
 //
 // Qualification rule (enforced by [`MatrixReceipt::qualified`]): ONLY
 // meaningful `Success` counts as real-provider evidence. `InitAccepted`,
-// `Attempted`, and unsupported skips never qualify, by totals or
-// otherwise.
+// `Attempted`, `NativeEntered`, and unsupported skips never qualify, by
+// totals or otherwise.
 
 /// Whether the classified call completes provider work or merely opens
 /// provider operation state.
@@ -1472,8 +1472,8 @@ impl NativeObservation {
 }
 
 /// Complete matrix receipt counts. `rpc_observed` is DERIVED
-/// (meaningful + init-accepted + attempted), never passed in, so the
-/// receipt cannot report an inconsistent RPC total.
+/// (meaningful + init-accepted + attempted + native-entered), never
+/// passed in, so the receipt cannot report an inconsistent RPC total.
 pub struct MatrixReceipt {
     /// Completing operations that returned `Ok`: the ONLY qualifying
     /// real-provider evidence in the lane.
@@ -1482,9 +1482,14 @@ pub struct MatrixReceipt {
     pub init_accepted: u32,
     /// RPC-completed error RVs: origin unproven, never qualifying.
     pub attempted: u32,
+    /// Entry-proven error RPCs (an independent native entry record was
+    /// observed): counted as RPC-observed, never qualifying. Nonzero
+    /// only in lanes with entry observation (the oracle lane); the
+    /// driver lane always reports 0 with `Unavailable` observation.
+    pub native_entered: u32,
     /// Unsupported mechanisms: honestly skipped, never qualifying.
     pub unsupported_skipped: u32,
-    /// Total shapes in the matrix (all four buckets must sum to this).
+    /// Total shapes in the matrix (all five buckets must sum to this).
     pub total: usize,
     /// How (or whether) native execution was observed in this lane.
     pub native_observation: NativeObservation,
@@ -1492,15 +1497,31 @@ pub struct MatrixReceipt {
 
 impl MatrixReceipt {
     /// Every shape the RPC layer completed, successfully or not:
-    /// meaningful success + init acceptance + attempted observations.
-    /// Skips never complete an RPC, so they are excluded.
+    /// meaningful success + init acceptance + attempted observations +
+    /// entry-proven (native-entered) observations. Skips never complete
+    /// an RPC, so they are excluded.
     pub fn rpc_observed(&self) -> u32 {
-        self.meaningful_success + self.init_accepted + self.attempted
+        self.meaningful_success + self.init_accepted + self.attempted + self.native_entered
+    }
+
+    /// Conservation: every counted shape lands in exactly one bucket. A
+    /// receipt whose buckets do not sum to `total` hides or double
+    /// counts a shape, so receipt emission is fail-closed on this.
+    pub fn assert_conserved(&self) {
+        assert_eq!(
+            self.meaningful_success
+                + self.init_accepted
+                + self.attempted
+                + self.native_entered
+                + self.unsupported_skipped,
+            self.total as u32,
+            "receipt buckets must sum to total"
+        );
     }
 
     /// The qualification rule as code: ONLY meaningful success qualifies
-    /// as real-provider evidence. Init-accepted, attempted, and skipped
-    /// shapes never add to a qualified total.
+    /// as real-provider evidence. Init-accepted, attempted,
+    /// native-entered, and skipped shapes never add to a qualified total.
     pub fn qualified(&self) -> u32 {
         self.meaningful_success
     }
@@ -1508,16 +1529,20 @@ impl MatrixReceipt {
 
 /// Matrix summary receipt line with the complete evidence schema:
 /// meaningful-success, init-accepted (unqualified), attempted (origin
-/// unproven), and unsupported-skipped buckets, plus the derived
-/// RPC-observed total and the explicit native-observation status.
+/// unproven), native-entered (entry-proven), and unsupported-skipped
+/// buckets, plus the derived RPC-observed total and the explicit
+/// native-observation status. Fail-closed: panics unless the buckets
+/// conserve `total`.
 pub fn format_matrix_summary(receipt: &MatrixReceipt) -> String {
+    receipt.assert_conserved();
     format!(
         "shape matrix: {} meaningful-success, {} init-accepted (unqualified), {} attempted \
-         (origin unproven), {} unsupported-skipped ({} total; {} rpc-observed; \
-         native-observation: {})",
+         (origin unproven), {} native-entered (entry-proven), {} unsupported-skipped \
+         ({} total; {} rpc-observed; native-observation: {})",
         receipt.meaningful_success,
         receipt.init_accepted,
         receipt.attempted,
+        receipt.native_entered,
         receipt.unsupported_skipped,
         receipt.total,
         receipt.rpc_observed(),

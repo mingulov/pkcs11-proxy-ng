@@ -1042,12 +1042,16 @@ async fn softhsm_all_param_shapes_execute() -> Result<(), String> {
         meaningful_success: succeeded,
         init_accepted,
         attempted,
+        // This lane has no entry record, so entry-proven RPCs are
+        // unclaimable here: the bucket exists, pinned at 0.
+        native_entered: 0,
         unsupported_skipped: skipped,
         total: cases.len(),
         // This lane never observes native entry: attempted shapes carry
         // zero native information (not "zero entries").
         native_observation: support::NativeObservation::Unavailable { lane: "softhsm2-driver" },
     };
+    receipt.assert_conserved();
     assert_eq!(
         receipt.qualified(),
         succeeded,

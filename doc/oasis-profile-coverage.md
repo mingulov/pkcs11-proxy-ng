@@ -167,8 +167,9 @@ unqualified, because opening operation state is not completed cryptographic
 work. Any error RV is reported as `attempted` (RPC-completed, origin
 unproven), because the same RV value can originate in server transport
 validation, backend FFI reconstruction, or the provider — no RV alone
-proves native execution. The summary receipt carries all four buckets
-(meaningful-success, init-accepted, attempted, unsupported-skipped) plus
+proves native execution. The summary receipt carries all five buckets
+(meaningful-success, init-accepted, attempted, native-entered,
+unsupported-skipped) plus
 the derived RPC-observed total and the explicit native-observation status,
 which reads `unavailable` in the SoftHSM2 lane: attempted shapes there
 carry zero native information, not "zero entries". A second, explicitly
@@ -186,7 +187,8 @@ therefore needs either a successful meaningful fixture (the dedicated
 SoftHSM2 round-trip tests, or a driver `success` — `MatrixReceipt::qualified`
 enforces that only meaningful success counts) or an explicitly scoped
 native-entry/error oracle result plus its limitation; init-accepted,
-attempted, and unsupported-skipped shapes never qualify by totals.
+attempted, native-entered, and unsupported-skipped shapes never qualify
+by totals.
 
 The working `chacha20_salsa20_poly1305.md` prose mentions
 `CK_CHACHA20POLY1305_PARAMS`, but its C definition and the published OASIS
