@@ -1,3 +1,4 @@
+use pkcs11_proxy_ng_types::shape_descriptors::ParamAbi;
 use pkcs11_proxy_ng_types::{CkInBuf, *};
 
 /// Structured `C_DeriveKey` result for mechanisms that can mutate caller-owned
@@ -59,6 +60,19 @@ pub trait Pkcs11Backend: Send + Sync {
     /// the packed stride is not derivable from the ulong width).
     fn abi_attribute_stride(&self) -> u32 {
         std::mem::size_of::<cryptoki_sys::CK_ATTRIBUTE>() as u32
+    }
+
+    /// The backend's exact native v1 mechanism-parameter ABI for the tag-10
+    /// discovery advertisement (Q04/AP-01). The FFI backend runs in this
+    /// process, so the host layout fact is the correct default; emulating
+    /// backends override with their emulated profile. `None` where no v1
+    /// ABI exists (big-endian targets) — discovery then omits tag 10 and
+    /// struct prefixes fail closed downstream. Must stay coherent with
+    /// [`Pkcs11Backend::abi_ulong_size`] and
+    /// [`Pkcs11Backend::abi_byte_order`]: the server advertises no ABI
+    /// rather than a self-contradictory one.
+    fn abi_mechanism_param_abi(&self) -> Option<ParamAbi> {
+        crate::host_abi::host_mechanism_param_abi()
     }
 
     fn initialize(&self) -> CkResult<()>;

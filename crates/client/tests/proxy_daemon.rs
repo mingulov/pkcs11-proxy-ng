@@ -32,6 +32,7 @@ fn root_reexports_name_downstream_types() {
         pointer_safe_authenticated_parameters: false,
         mechanism_parameter_transport_version: None,
         exact_token_label_version: None,
+        backend_mechanism_abi: None,
     };
     assert_eq!(probe.exact_output_effects_version, Some(1));
     // W1-C10-10: downstream names the interface fields (no positional tuple).
@@ -424,5 +425,57 @@ async fn healthy_rpcs_unaffected_by_default_deadline() {
     let slots = client.get_slot_list(false).await.unwrap();
     assert!(!slots.is_empty());
     client.finalize().await.unwrap();
+    daemon.stop().await;
+}
+
+// Q04 (AP-01): a live probe retains the daemon's tag-10 ABI per
+// emulated backend profile — the full discovery conversion path,
+// not only the pure helper.
+#[tokio::test]
+async fn probe_retains_backend_mechanism_abi_per_profile() {
+    use pkcs11_proxy_ng_backend::mock::MockAbi;
+    use pkcs11_proxy_ng_types::shape_descriptors::ParamAbi;
+    for (profile, expected) in [
+        (MockAbi::Lp64, ParamAbi::Lp64NativeLe),
+        (MockAbi::Ilp32, ParamAbi::Ilp32NativeLe),
+        (MockAbi::Llp64, ParamAbi::Llp64Packed1Le),
+        (MockAbi::Ilp32Packed, ParamAbi::Ilp32Packed1Le),
+    ] {
+        let backend = Arc::new(
+            MockBackend::new(
+                vec![CkSlotId(0)],
+                vec![CkMechanismType::AES_ECB, CkMechanismType(0x0000_0251)],
+            )
+            .with_abi(profile),
+        );
+        let daemon = mock_daemon(backend).await;
+        let mut client = Pkcs11Client::connect(&daemon.endpoint).await.unwrap();
+        let probe = client.get_backend_interfaces().await.unwrap();
+        assert_eq!(
+            probe.backend_mechanism_abi,
+            Some(expected),
+            "BackendProbe must retain tag 10 for {profile:?}"
+        );
+        daemon.stop().await;
+    }
+}
+
+// Q04 (AP-01): a backend whose ABI is underivable (here: the mock's
+// big-endian advertisement knob, which contradicts every LE v1 ABI)
+// is advertised without tag 10, and the probe retains unknown —
+// struct prefixes fail closed downstream while typed paths work.
+#[tokio::test]
+async fn probe_with_contradictory_order_leaves_abi_unknown() {
+    let backend = Arc::new(
+        MockBackend::new(
+            vec![CkSlotId(0)],
+            vec![CkMechanismType::AES_ECB, CkMechanismType(0x0000_0251)],
+        )
+        .with_big_endian_advertisement(),
+    );
+    let daemon = mock_daemon(backend).await;
+    let mut client = Pkcs11Client::connect(&daemon.endpoint).await.unwrap();
+    let probe = client.get_backend_interfaces().await.unwrap();
+    assert_eq!(probe.backend_mechanism_abi, None, "contradictory order must leave the ABI unknown");
     daemon.stop().await;
 }

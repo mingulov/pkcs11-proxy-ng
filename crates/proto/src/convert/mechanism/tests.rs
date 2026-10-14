@@ -8329,3 +8329,23 @@ fn count_zero_edges_stay_distinct() {
         }
     }
 }
+
+#[test]
+fn mechanism_param_abi_wire_mapping() {
+    // Q04: the shared wire→domain ABI map — all four known values map
+    // directly; UNSPECIFIED and unrecognized values thread through as
+    // None (validation owns the ABI match, conversion only threads).
+    use pkcs11_proxy_ng_types::shape_descriptors::ParamAbi;
+    for (wire, expected) in [
+        (v1_proto::MechanismParamAbi::Lp64NativeLe as i32, Some(ParamAbi::Lp64NativeLe)),
+        (v1_proto::MechanismParamAbi::Ilp32NativeLe as i32, Some(ParamAbi::Ilp32NativeLe)),
+        (v1_proto::MechanismParamAbi::Llp64Packed1Le as i32, Some(ParamAbi::Llp64Packed1Le)),
+        (v1_proto::MechanismParamAbi::Ilp32Packed1Le as i32, Some(ParamAbi::Ilp32Packed1Le)),
+        (v1_proto::MechanismParamAbi::Unspecified as i32, None),
+        (0, None),
+        (99, None),
+        (-1, None),
+    ] {
+        assert_eq!(mechanism_param_abi_from_wire(wire), expected, "wire value {wire}");
+    }
+}

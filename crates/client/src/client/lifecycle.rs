@@ -1,4 +1,5 @@
 use pkcs11_proxy_ng_proto::{MechanismRegistryPayload, Pkcs11ProxyClient as GrpcClient};
+use pkcs11_proxy_ng_types::shape_descriptors::ParamAbi;
 use pkcs11_proxy_ng_types::*;
 use tonic::transport::Channel;
 
@@ -110,10 +111,49 @@ pub struct BackendProbe {
     /// the field — the caller treats it as 0 (legacy string-only
     /// labels) and fails NULL/invalid-encoding labels closed locally.
     pub exact_token_label_version: Option<u32>,
+    /// Daemon-advertised `backend_mechanism_abi` (Q04/AP-01, S2 §3): the
+    /// backend's validated native v1 ABI, or `None` when the daemon
+    /// predates the field, sends an unrecognized value, or contradicts
+    /// its own width/order. The shim installs this in its probe snapshot
+    /// for struct-prefix layout equality; `None` fails closed there for
+    /// ABI-sensitive prefixes while typed/byte-buffer paths work.
+    pub backend_mechanism_abi: Option<ParamAbi>,
 }
 
 fn pointer_safe_message_parameters_from_wire(advertised: Option<bool>) -> bool {
     advertised.unwrap_or(false)
+}
+
+/// Convert the daemon's wire tag-10 `backend_mechanism_abi` to the
+/// validated domain ABI (Q04/AP-01, S2 §3) — pure, so the policy is unit
+/// tested without a daemon.
+///
+/// - Absent (legacy daemon), `UNSPECIFIED`, or unrecognized values stay
+///   unknown (`None`): struct prefixes fail closed downstream.
+/// - A recognized ABI that contradicts the daemon's own advertised width
+///   or byte order is ambiguous and likewise stays unknown, rather than
+///   trust either side (all v1 ABIs are little-endian).
+/// - Otherwise the ABI passes through; the shim re-checks it against its
+///   resolved probe width at snapshot install (covering the D9 fallback
+///   width, which the client cannot see).
+pub(crate) fn backend_mechanism_abi_from_wire(
+    advertised: Option<i32>,
+    ulong_size: Option<u32>,
+    byte_order: Option<u32>,
+) -> Option<ParamAbi> {
+    let abi = pkcs11_proxy_ng_proto::convert::mechanism::mechanism_param_abi_from_wire(advertised?);
+    let abi = abi?;
+    if let Some(width) = ulong_size
+        && abi.ulong_size() as u32 != width
+    {
+        return None;
+    }
+    if let Some(order) = byte_order
+        && order != 1
+    {
+        return None;
+    }
+    Some(abi)
 }
 
 /// Convert wire interface versions without truncation (T05): a
@@ -621,6 +661,11 @@ impl Pkcs11Client {
             ),
             mechanism_parameter_transport_version: resp.mechanism_parameter_transport_version,
             exact_token_label_version: resp.exact_token_label_version,
+            backend_mechanism_abi: backend_mechanism_abi_from_wire(
+                resp.backend_mechanism_abi,
+                resp.backend_ulong_size,
+                resp.backend_byte_order,
+            ),
         };
         self.note_backend_probe(
             probe.exact_output_effects_version.unwrap_or(0),
@@ -1116,6 +1161,78 @@ mod tests {
         assert_eq!(
             super::negotiate_init_version(Some(2), Some(3)),
             Err(CkRv::FUNCTION_NOT_SUPPORTED)
+        );
+    }
+
+    #[test]
+    fn backend_mechanism_abi_from_wire_maps_all_abis() {
+        // Q04: the discovery conversion maps every known tag-10 value to
+        // its domain ABI; absent/unspecified/unrecognized values stay
+        // unknown (fail-closed downstream for struct prefixes).
+        use pkcs11_proxy_ng_proto::MechanismParamAbi as Abi;
+        use pkcs11_proxy_ng_types::shape_descriptors::ParamAbi;
+        for (wire, expected) in [
+            (Abi::Lp64NativeLe as i32, Some(ParamAbi::Lp64NativeLe)),
+            (Abi::Ilp32NativeLe as i32, Some(ParamAbi::Ilp32NativeLe)),
+            (Abi::Llp64Packed1Le as i32, Some(ParamAbi::Llp64Packed1Le)),
+            (Abi::Ilp32Packed1Le as i32, Some(ParamAbi::Ilp32Packed1Le)),
+        ] {
+            assert_eq!(
+                super::backend_mechanism_abi_from_wire(Some(wire), None, None),
+                expected,
+                "wire value {wire}"
+            );
+        }
+        for wire in [None, Some(Abi::Unspecified as i32), Some(0), Some(99), Some(-1)] {
+            assert_eq!(
+                super::backend_mechanism_abi_from_wire(wire, None, None),
+                None,
+                "wire value {wire:?} must stay unknown"
+            );
+        }
+    }
+
+    #[test]
+    fn backend_mechanism_abi_from_wire_rejects_inconsistent_metadata() {
+        // Q04: a tag-10 value that contradicts the daemon's own width or
+        // byte-order advertisement is ambiguous — fail closed to unknown
+        // rather than trust either side.
+        use pkcs11_proxy_ng_proto::MechanismParamAbi as Abi;
+        use pkcs11_proxy_ng_types::shape_descriptors::ParamAbi;
+        // Width conflict: LP64 claims 8-byte ulong, daemon says 4.
+        assert_eq!(
+            super::backend_mechanism_abi_from_wire(
+                Some(Abi::Lp64NativeLe as i32),
+                Some(4),
+                Some(1)
+            ),
+            None,
+        );
+        // Order conflict: every v1 ABI is little-endian.
+        assert_eq!(
+            super::backend_mechanism_abi_from_wire(
+                Some(Abi::Ilp32NativeLe as i32),
+                Some(4),
+                Some(2)
+            ),
+            None,
+        );
+        // Consistent metadata passes through.
+        assert_eq!(
+            super::backend_mechanism_abi_from_wire(
+                Some(Abi::Llp64Packed1Le as i32),
+                Some(4),
+                Some(1)
+            ),
+            Some(ParamAbi::Llp64Packed1Le),
+        );
+        assert_eq!(
+            super::backend_mechanism_abi_from_wire(
+                Some(Abi::Ilp32Packed1Le as i32),
+                Some(4),
+                Some(1)
+            ),
+            Some(ParamAbi::Ilp32Packed1Le),
         );
     }
 }

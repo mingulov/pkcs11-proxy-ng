@@ -1007,6 +1007,10 @@ fn backend_methods_have_proto_rpcs() {
             "abi_attribute_stride",
             "D2-extension advertisement inside GetBackendInterfaces; not a PKCS#11 function",
         ),
+        (
+            "abi_mechanism_param_abi",
+            "Q04 tag-10 advertisement inside GetBackendInterfaces; not a PKCS#11 function",
+        ),
         // Exact-output trait methods sharing the multiplexed ByteOutputExact RPC.
         ("sign_exact", "exact-output variant sharing the ByteOutputExact RPC"),
         ("sign_final_exact", "exact-output variant sharing the ByteOutputExact RPC"),

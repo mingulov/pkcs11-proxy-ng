@@ -653,26 +653,16 @@ unsafe fn read_nested_mechanism_for_transport(
     }
 }
 
-/// Derive the backend's v1 ABI from the probed width/stride snapshot
-/// (ADR-0011 D2): exact pairs map to a v1 ABI, anything else (unmapped
-/// widths, future layouts) yields `None` and struct-prefix Flat fails
-/// closed locally. Pre-probe readers see the D9 fallback width/stride
-/// (LP64); the daemon re-validates authoritatively either way.
-/// Width/stride cannot separate ILP32-natural from ILP32-pack1 (both
-/// are 4-byte ulong with stride 12), so a win32 backend maps here as
-/// `Ilp32NativeLe`: the snapshot feeds only declared-length narrowing
-/// (`ulong_size()`), which both share, never layout or fingerprint
-/// decisions (those use the deciding edge's own native ABI).
+/// Read the backend's v1 ABI from the installed discovery snapshot
+/// (Q04/AP-01, S2 §3): the daemon-advertised tag-10 value, resolved
+/// against the probe width at install. Width/stride alone cannot
+/// separate ILP32-natural from ILP32-pack1 (both are 4-byte ulong with
+/// stride 12), so the ABI is carried, never guessed. Unknown (`None` —
+/// pre-probe, legacy daemon, unrecognized or incoherent advertisement)
+/// fails struct-prefix Flat closed locally; the daemon re-validates
+/// authoritatively either way.
 fn backend_abi_snapshot() -> Option<ParamAbi> {
-    match (
-        crate::interface_probe::backend_ulong_size(),
-        crate::interface_probe::backend_attribute_stride(),
-    ) {
-        (8, 24) => Some(ParamAbi::Lp64NativeLe),
-        (4, 12) => Some(ParamAbi::Ilp32NativeLe),
-        (4, 16) => Some(ParamAbi::Llp64Packed1Le),
-        _ => None,
-    }
+    crate::interface_probe::backend_mechanism_abi()
 }
 
 /// Parse `c_mech` per the registry `shape`, preserving unmodeled params

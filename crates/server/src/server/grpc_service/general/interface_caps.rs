@@ -5,6 +5,7 @@ use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_proto::MechanismRegistryPayload;
+use pkcs11_proxy_ng_types::shape_descriptors::ParamAbi;
 
 use crate::mechanism_registry_source::MechanismRegistrySource;
 use crate::server::rate_limit;
@@ -88,22 +89,33 @@ impl DiscoveryCache {
 static DISCOVERY_CACHE: LazyLock<Mutex<DiscoveryCache>> =
     LazyLock::new(|| Mutex::new(DiscoveryCache::default()));
 
-/// R4: derive the daemon's `MechanismParamAbi` advertisement value from
-/// the backend's runtime ABI properties — `sizeof(CK_ULONG)` in bytes and
-/// the wire byte order (1 = LE, 2 = BE) — never a per-target hardcoded
-/// literal. Returns `None` where no v1 ABI exactly matches (big-endian
-/// and unknown widths stay silent rather than advertise a wrong layout;
-/// LLP64 discrimination would ride a future stride input). Deliberately
-/// width-only: a packed win32 backend advertises `Ilp32NativeLe`, which
-/// shares packed-32's 4-byte `CK_ULONG` (no consumer distinguishes the
-/// packed variants from this field — layout decisions use each edge's
-/// own native ABI).
-fn daemon_mechanism_param_abi(ulong_size: u32, byte_order: u32) -> Option<i32> {
+/// Q04 (AP-01; supersedes the R4 width-only map): derive the daemon's
+/// `MechanismParamAbi` advertisement value from the backend's ACTUAL
+/// native ABI — never a per-target hardcoded literal, never a width
+/// guess (width/stride alone cannot separate packed win32 from natural
+/// ILP32, and the shim uses this field for struct-prefix layout
+/// equality). Returns `None` where no v1 ABI exactly matches: an unknown
+/// backend, a big-endian order (no BE v1 ABI exists), or width/order
+/// metadata contradicting the named ABI — silence rather than a wrong
+/// layout, in which case struct prefixes fail closed downstream.
+fn daemon_mechanism_param_abi(
+    abi: Option<ParamAbi>,
+    ulong_size: u32,
+    byte_order: u32,
+) -> Option<i32> {
     use pkcs11_proxy_ng_proto::MechanismParamAbi as Abi;
-    match (ulong_size, byte_order) {
-        (8, 1) => Some(Abi::Lp64NativeLe as i32),
-        (4, 1) => Some(Abi::Ilp32NativeLe as i32),
-        _ => None,
+    let abi = abi?;
+    // Coherence with the sibling advertisements: the named ABI's ulong
+    // width must equal the advertised width, and every v1 ABI is
+    // little-endian. A self-contradictory backend stays silent.
+    if abi.ulong_size() as u32 != ulong_size || byte_order != 1 {
+        return None;
+    }
+    match abi {
+        ParamAbi::Lp64NativeLe => Some(Abi::Lp64NativeLe as i32),
+        ParamAbi::Ilp32NativeLe => Some(Abi::Ilp32NativeLe as i32),
+        ParamAbi::Llp64Packed1Le => Some(Abi::Llp64Packed1Le as i32),
+        ParamAbi::Ilp32Packed1Le => Some(Abi::Ilp32Packed1Le as i32),
     }
 }
 
@@ -288,11 +300,25 @@ pub(super) async fn get_backend_interfaces(
         })
         .collect();
 
-    // R4 plumbing: the daemon's actual ABI value is derived live from the
-    // backend's runtime ABI properties (covered by
+    // Q04 plumbing: the daemon's actual ABI value is derived live from the
+    // backend's reported native ABI, checked for coherence with its
+    // width/order advertisements (covered by
     // `daemon_mechanism_param_abi_derivation`).
+    let backend_abi = backend.abi_mechanism_param_abi();
     let derived_mechanism_abi =
-        daemon_mechanism_param_abi(backend.abi_ulong_size(), backend.abi_byte_order());
+        daemon_mechanism_param_abi(backend_abi, backend.abi_ulong_size(), backend.abi_byte_order());
+    if backend_abi.is_some() && derived_mechanism_abi.is_none() {
+        // The backend names an ABI its own width/order contradict — a
+        // backend bug. Loud log, silent advertisement (never a wrong
+        // layout); struct prefixes fail closed downstream.
+        tracing::warn!(
+            backend_abi = ?backend_abi,
+            backend_ulong_size = backend.abi_ulong_size(),
+            backend_byte_order = backend.abi_byte_order(),
+            "backend mechanism ABI contradicts its width/order advertisement — \
+             omitting tag 10 (struct prefixes fail closed)"
+        );
+    }
 
     // R23 freeze confirmation (S2 §11 Phase 4 — D1(a) machine enforcement):
     // production advertises v1 only when the R21 manifest is complete.
@@ -719,8 +745,11 @@ mod tests {
         backend.initialize().expect("initialize mock backend");
         let backend: Arc<dyn Pkcs11Backend> = backend;
         let registry = MechanismRegistrySource::load(None).expect("load embedded registry");
-        let expected_abi =
-            daemon_mechanism_param_abi(backend.abi_ulong_size(), backend.abi_byte_order());
+        let expected_abi = daemon_mechanism_param_abi(
+            backend.abi_mechanism_param_abi(),
+            backend.abi_ulong_size(),
+            backend.abi_byte_order(),
+        );
 
         let response = get_backend_interfaces(
             &context_manager,
@@ -760,8 +789,11 @@ mod tests {
         backend.initialize().expect("initialize mock backend");
         let backend: Arc<dyn Pkcs11Backend> = backend;
         let registry = MechanismRegistrySource::load(None).expect("load embedded registry");
-        let expected_abi =
-            daemon_mechanism_param_abi(backend.abi_ulong_size(), backend.abi_byte_order());
+        let expected_abi = daemon_mechanism_param_abi(
+            backend.abi_mechanism_param_abi(),
+            backend.abi_ulong_size(),
+            backend.abi_byte_order(),
+        );
 
         async fn call(
             context_manager: &Arc<ContextManager>,
@@ -827,8 +859,11 @@ mod tests {
         backend.initialize().expect("initialize mock backend");
         let backend: Arc<dyn Pkcs11Backend> = backend;
         let registry = MechanismRegistrySource::load(None).expect("load embedded registry");
-        let expected_abi =
-            daemon_mechanism_param_abi(backend.abi_ulong_size(), backend.abi_byte_order());
+        let expected_abi = daemon_mechanism_param_abi(
+            backend.abi_mechanism_param_abi(),
+            backend.abi_ulong_size(),
+            backend.abi_byte_order(),
+        );
 
         async fn call(
             context_manager: &Arc<ContextManager>,
@@ -864,21 +899,47 @@ mod tests {
         }
     }
 
-    /// R4: the ABI derivation maps the backend's runtime properties to the
-    /// exact v1 ABI, and stays silent (`None`) wherever no v1 ABI exactly
-    /// matches — never a per-target hardcoded literal.
+    /// Q04 (AP-01; supersedes the R4 width-only map): the ABI derivation
+    /// maps the backend's ACTUAL native ABI to the exact tag-10 value —
+    /// all four layouts, including both packed Win32 ABIs — and stays
+    /// silent (`None`) wherever no v1 ABI exactly matches: an unknown
+    /// backend, a big-endian order (no BE v1 ABI exists), or width/order
+    /// metadata contradicting the named ABI. Never a per-target
+    /// hardcoded literal, never a width guess.
     #[test]
     fn daemon_mechanism_param_abi_derivation() {
         use pkcs11_proxy_ng_proto::MechanismParamAbi as Abi;
-        assert_eq!(daemon_mechanism_param_abi(8, 1), Some(Abi::Lp64NativeLe as i32));
-        assert_eq!(daemon_mechanism_param_abi(4, 1), Some(Abi::Ilp32NativeLe as i32));
-        for (ulong_size, byte_order) in [(8, 2), (4, 2), (16, 1), (0, 1), (8, 0), (8, 3)] {
+        use pkcs11_proxy_ng_types::shape_descriptors::ParamAbi;
+        for (abi, width, expected) in [
+            (ParamAbi::Lp64NativeLe, 8, Abi::Lp64NativeLe as i32),
+            (ParamAbi::Ilp32NativeLe, 4, Abi::Ilp32NativeLe as i32),
+            (ParamAbi::Llp64Packed1Le, 4, Abi::Llp64Packed1Le as i32),
+            (ParamAbi::Ilp32Packed1Le, 4, Abi::Ilp32Packed1Le as i32),
+        ] {
             assert_eq!(
-                daemon_mechanism_param_abi(ulong_size, byte_order),
-                None,
-                "no exact v1 ABI for ulong_size={ulong_size} byte_order={byte_order}",
+                daemon_mechanism_param_abi(Some(abi), width, 1),
+                Some(expected),
+                "actual ABI {abi:?} must advertise exactly"
             );
         }
+        // Silence rows: unknown backend, big-endian order, and metadata
+        // contradicting the named ABI.
+        assert_eq!(daemon_mechanism_param_abi(None, 8, 1), None, "unknown backend stays silent");
+        assert_eq!(
+            daemon_mechanism_param_abi(Some(ParamAbi::Lp64NativeLe), 8, 2),
+            None,
+            "big-endian order contradicts every v1 ABI"
+        );
+        assert_eq!(
+            daemon_mechanism_param_abi(Some(ParamAbi::Lp64NativeLe), 4, 1),
+            None,
+            "width contradicting the named ABI stays silent"
+        );
+        assert_eq!(
+            daemon_mechanism_param_abi(Some(ParamAbi::Ilp32NativeLe), 8, 1),
+            None,
+            "width contradicting the named ABI stays silent"
+        );
     }
 
     /// R10 pure exact-value policy (cfg-gated, like the strings it checks):
@@ -969,5 +1030,52 @@ mod tests {
         let abi = Some(Abi::Lp64NativeLe as i32);
         assert_eq!(resolve_mechanism_param_advertisement(abi, false, true), (None, None));
         assert_eq!(resolve_mechanism_param_advertisement(abi, true, true), (None, None));
+    }
+
+    /// Q04 (AP-01): discovery advertises the backend's ACTUAL native
+    /// mechanism ABI per emulated profile — never a width guess. The
+    /// packed Win32 layouts share natural ILP32's `(ulong 4, stride
+    /// 12/16)` numbers, so a width-only derivation misadvertises them
+    /// (win32-packed must be tag 4, not tag 2).
+    #[tokio::test]
+    async fn q04_discovery_advertises_actual_backend_abi_per_profile() {
+        use pkcs11_proxy_ng_backend::mock::MockAbi;
+        use pkcs11_proxy_ng_proto::MechanismParamAbi as Abi;
+        let context_manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        for (profile, expected) in [
+            (MockAbi::Lp64, Abi::Lp64NativeLe as i32),
+            (MockAbi::Ilp32, Abi::Ilp32NativeLe as i32),
+            (MockAbi::Llp64, Abi::Llp64Packed1Le as i32),
+            (MockAbi::Ilp32Packed, Abi::Ilp32Packed1Le as i32),
+        ] {
+            // Fresh registry per profile: the discovery cache keys on the
+            // payload revision Arc, so a shared registry plus allocator
+            // address reuse across sequential backend Arcs could serve a
+            // stale rendering (W1-L13-22 keying caveat). A fresh payload
+            // Arc per iteration forces a deterministic fresh render.
+            let registry = MechanismRegistrySource::load(None).expect("load embedded registry");
+            let backend = Arc::new(MockBackend::default_test().with_abi(profile));
+            backend.initialize().expect("initialize mock backend");
+            let backend: Arc<dyn Pkcs11Backend> = backend;
+            let response = get_backend_interfaces(
+                &context_manager,
+                &backend,
+                &registry,
+                Request::new(pkcs11_proxy_ng_proto::GetBackendInterfacesRequest {}),
+            )
+            .await
+            .expect("GetBackendInterfaces should succeed")
+            .into_inner();
+            assert_eq!(
+                response.mechanism_parameter_transport_version,
+                Some(1),
+                "v1 capability for {profile:?}"
+            );
+            assert_eq!(
+                response.backend_mechanism_abi,
+                Some(expected),
+                "tag 10 must be the backend's actual ABI for {profile:?}"
+            );
+        }
     }
 }
