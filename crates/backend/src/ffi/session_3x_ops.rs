@@ -63,13 +63,17 @@ impl FfiBackend {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let mut flags: cryptoki_sys::CK_FLAGS = 0;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        // Q05: checked narrowing, evaluated after 3.2 table/slot
+        // resolution (like the session narrow above) — an
+        // unrepresentable selector fails loudly, never truncates into
+        // the provider on a narrow host.
         call_3x_fn!(
             &admission,
             self,
             func_list_3_2,
             C_GetSessionValidationFlags,
             Self::session_handle(session)?,
-            flags_type as cryptoki_sys::CK_SESSION_VALIDATION_FLAGS_TYPE,
+            narrow_wire_ulong(flags_type)?,
             &mut flags
         )?;
         Ok(flags as u64)
@@ -79,6 +83,7 @@ impl FfiBackend {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::traits::Pkcs11Backend;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static SESSION_CANCEL_PROVIDER_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -376,5 +381,126 @@ mod tests {
         assert_eq!(SESSION_CANCEL_PROVIDER_CALLS.load(Ordering::SeqCst), 0);
         assert_eq!(SESSION_CANCEL_3_1_CALLS.load(Ordering::SeqCst), 1);
         assert_eq!(SESSION_CANCEL_3_2_CALLS.load(Ordering::SeqCst), 0);
+    }
+
+    // Q05: CK_ULONG32 native-call recorder for
+    // `C_GetSessionValidationFlags` — counts native entries and captures
+    // each selector the provider observed, so truncation and refusal
+    // stay distinguishable on narrow hosts. Guarded by TEST_LOCK like
+    // the cancel counter.
+    static VALIDATION_FLAGS_PROVIDER_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static VALIDATION_FLAGS_OBSERVED: std::sync::Mutex<Vec<u64>> =
+        std::sync::Mutex::new(Vec::new());
+
+    unsafe extern "C" fn counted_get_session_validation_flags(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        flags_type: cryptoki_sys::CK_SESSION_VALIDATION_FLAGS_TYPE,
+        flags: *mut cryptoki_sys::CK_FLAGS,
+    ) -> cryptoki_sys::CK_RV {
+        VALIDATION_FLAGS_PROVIDER_CALLS.fetch_add(1, Ordering::SeqCst);
+        VALIDATION_FLAGS_OBSERVED.lock().unwrap().push(flags_type as u64);
+        if !flags.is_null() {
+            unsafe { *flags = 0xA5 };
+        }
+        cryptoki_sys::CKR_OK
+    }
+
+    fn backend_with_validation_flags()
+    -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>, Box<cryptoki_sys::CK_FUNCTION_LIST_3_2>)
+    {
+        let mut base = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_2::default());
+        functions.C_GetSessionValidationFlags = Some(counted_get_session_validation_flags);
+        let backend =
+            FfiBackend::test_backend_with_tables(base.as_mut(), None, Some(functions.as_ref()));
+        (backend, base, functions)
+    }
+
+    /// Q05 direct leg: an overflowing flags selector must be refused
+    /// with zero native entry on a narrow host — never truncated to a
+    /// different valid-looking selector.
+    #[test]
+    fn validation_flags_selector_wider_than_native_is_rejected_before_provider_call() {
+        let _lock = TEST_LOCK.lock().unwrap();
+        VALIDATION_FLAGS_PROVIDER_CALLS.store(0, Ordering::SeqCst);
+        VALIDATION_FLAGS_OBSERVED.lock().unwrap().clear();
+        let (backend, _base, _functions) = backend_with_validation_flags();
+        backend.lifecycle_domain.open_for_tests();
+        // 2^32: truncation would execute it as selector 0.
+        let wide = u32::MAX as u64 + 1;
+
+        let result = backend.ffi_get_session_validation_flags(CkSessionHandle(7), wide);
+
+        if std::mem::size_of::<cryptoki_sys::CK_ULONG>() == 4 {
+            assert_eq!(result, Err(CkRv::FUNCTION_FAILED), "RV must refuse loudly");
+            assert_eq!(
+                VALIDATION_FLAGS_PROVIDER_CALLS.load(Ordering::SeqCst),
+                0,
+                "narrow host: zero native entry"
+            );
+            assert!(VALIDATION_FLAGS_OBSERVED.lock().unwrap().is_empty());
+        } else {
+            assert_eq!(result.unwrap(), 0xA5, "wide host passes through");
+            assert_eq!(VALIDATION_FLAGS_PROVIDER_CALLS.load(Ordering::SeqCst), 1);
+            assert_eq!(*VALIDATION_FLAGS_OBSERVED.lock().unwrap(), vec![wide]);
+        }
+    }
+
+    /// Q05 direct leg: in-range boundary selectors cross unchanged on
+    /// every width, including u32::MAX (fits narrow hosts).
+    #[test]
+    fn validation_flags_selector_at_native_boundary_arrives_unchanged() {
+        let _lock = TEST_LOCK.lock().unwrap();
+        VALIDATION_FLAGS_PROVIDER_CALLS.store(0, Ordering::SeqCst);
+        VALIDATION_FLAGS_OBSERVED.lock().unwrap().clear();
+        let (backend, _base, _functions) = backend_with_validation_flags();
+        backend.lifecycle_domain.open_for_tests();
+        let boundary = [0u64, 1u64, u32::MAX as u64];
+
+        for flags_type in boundary {
+            let result = backend.ffi_get_session_validation_flags(CkSessionHandle(7), flags_type);
+            assert_eq!(result.unwrap(), 0xA5, "selector {flags_type:#x} must succeed");
+        }
+
+        assert_eq!(
+            VALIDATION_FLAGS_PROVIDER_CALLS.load(Ordering::SeqCst),
+            3,
+            "one native call per query"
+        );
+        assert_eq!(
+            *VALIDATION_FLAGS_OBSERVED.lock().unwrap(),
+            boundary,
+            "selectors must arrive unchanged"
+        );
+    }
+
+    /// Q05 remote-entry leg: the daemon dispatches through `dyn
+    /// Pkcs11Backend` after proto decode (the server forwards
+    /// `req.flags_type` losslessly as u64); the narrow backend behind
+    /// that dispatch must refuse the same overflowing selector with
+    /// zero native entry.
+    #[test]
+    fn trait_validation_flags_rejects_unrepresentable_selector_before_provider_call() {
+        let _lock = TEST_LOCK.lock().unwrap();
+        VALIDATION_FLAGS_PROVIDER_CALLS.store(0, Ordering::SeqCst);
+        VALIDATION_FLAGS_OBSERVED.lock().unwrap().clear();
+        let (backend, _base, _functions) = backend_with_validation_flags();
+        backend.lifecycle_domain.open_for_tests();
+        let backend: std::sync::Arc<dyn Pkcs11Backend> = std::sync::Arc::new(backend);
+        let wide = u32::MAX as u64 + 1;
+
+        let result = backend.get_session_validation_flags(CkSessionHandle(7), wide);
+
+        if std::mem::size_of::<cryptoki_sys::CK_ULONG>() == 4 {
+            assert_eq!(result, Err(CkRv::FUNCTION_FAILED), "RV must refuse loudly");
+            assert_eq!(
+                VALIDATION_FLAGS_PROVIDER_CALLS.load(Ordering::SeqCst),
+                0,
+                "narrow host: zero native entry"
+            );
+        } else {
+            assert_eq!(result.unwrap(), 0xA5, "wide host passes through");
+            assert_eq!(VALIDATION_FLAGS_PROVIDER_CALLS.load(Ordering::SeqCst), 1);
+        }
     }
 }
