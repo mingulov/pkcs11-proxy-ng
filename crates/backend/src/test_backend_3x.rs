@@ -105,7 +105,12 @@ impl Pkcs11Backend for TestBackend3x {
     ) -> CkResult<CkMechanismInfo> {
         self.inner.get_mechanism_info(slot_id, mech)
     }
-    fn init_token(&self, slot_id: CkSlotId, so_pin: Option<&[u8]>, label: &str) -> CkResult<()> {
+    fn init_token(
+        &self,
+        slot_id: CkSlotId,
+        so_pin: Option<&[u8]>,
+        label: InitTokenLabel<'_>,
+    ) -> CkResult<()> {
         self.inner.init_token(slot_id, so_pin, label)
     }
     fn init_pin(&self, session: CkSessionHandle, pin: Option<&[u8]>) -> CkResult<()> {

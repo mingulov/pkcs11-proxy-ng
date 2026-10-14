@@ -35,7 +35,9 @@ fn slot_scoped_workflows_reject_invalid_slot() {
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
 
     assert_eq!(
-        backend.init_token(CkSlotId(99), Some(b"so-pin"), "MockToken").unwrap_err(),
+        backend
+            .init_token(CkSlotId(99), Some(b"so-pin"), InitTokenLabel::text_only("MockToken"))
+            .unwrap_err(),
         CkRv::SLOT_ID_INVALID
     );
     assert_eq!(backend.close_all_sessions(CkSlotId(99)).unwrap_err(), CkRv::SLOT_ID_INVALID);

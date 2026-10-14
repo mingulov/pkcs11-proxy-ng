@@ -83,19 +83,33 @@ impl FfiBackend {
         &self,
         slot_id: CkSlotId,
         so_pin: Option<&[u8]>,
-        label: &str,
+        label: InitTokenLabel<'_>,
     ) -> CkResult<()> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
-        // W1-L11-12: the shared types helper is the single padding impl.
+        // Q03 phase 2: exact labels reach the provider unmodified — NULL
+        // stays a null pointer, raw bytes go through verbatim — and the
+        // provider's accept/refuse propagates. Legacy text blank-pads
+        // exactly as before (W1-L11-12: the shared types helper is the
+        // single padding impl).
         let mut label_buf = [0u8; pkcs11_proxy_ng_types::PKCS11_TOKEN_LABEL_LEN];
-        pkcs11_proxy_ng_types::space_pad_into(&mut label_buf, label);
+        let label_ptr = match label.exact {
+            Some(ExactTokenLabel::Null) => std::ptr::null_mut(),
+            Some(ExactTokenLabel::Bytes(bytes)) => {
+                label_buf = bytes;
+                label_buf.as_mut_ptr()
+            }
+            None => {
+                pkcs11_proxy_ng_types::space_pad_into(&mut label_buf, label.text);
+                label_buf.as_mut_ptr()
+            }
+        };
         let (pin_ptr, pin_len) = match so_pin {
             Some(p) => (p.as_ptr() as *mut _, Self::ulong_len(p.len())?),
             None => (std::ptr::null_mut(), 0),
         };
         let h_slot = Self::slot_id(slot_id)?;
         Self::call_unit(&admission, unsafe { (*self.func_list).C_InitToken }, |function| unsafe {
-            function(h_slot, pin_ptr, pin_len, label_buf.as_mut_ptr())
+            function(h_slot, pin_ptr, pin_len, label_ptr)
         })
     }
 
@@ -1013,7 +1027,11 @@ mod tests {
         ] {
             Q03_INIT_TOKEN_CAPTURED.lock().unwrap().clear();
             backend
-                .ffi_init_token(CkSlotId(7), Some(b"1234"), label)
+                .ffi_init_token(
+                    CkSlotId(7),
+                    Some(b"1234"),
+                    pkcs11_proxy_ng_types::InitTokenLabel::text_only(label),
+                )
                 .expect("stub accepts the valid label");
             let captured = Q03_INIT_TOKEN_CAPTURED.lock().unwrap();
             assert_eq!(captured.len(), 1, "exactly one native call for {label:?}");
@@ -1024,13 +1042,109 @@ mod tests {
                 q03_blank_pad_32(label),
                 "native call carries the 32 blank-padded bytes for {label:?}"
             );
+            // Finding 5: the ordinary (non-null) SO-PIN shape is pinned
+            // too — non-null pointer, exact length — not just NULL.
+            assert!(
+                !captured[0].pin_is_null,
+                "ordinary SO PIN stays a non-null pointer for {label:?}"
+            );
+            assert_eq!(captured[0].pin_len, 4, "ordinary SO PIN carries length 4 for {label:?}");
         }
         // A NULL SO PIN keeps its (NULL, 0) shape at the native boundary.
         Q03_INIT_TOKEN_CAPTURED.lock().unwrap().clear();
-        backend.ffi_init_token(CkSlotId(7), None, "hello").expect("stub accepts a NULL SO PIN");
+        backend
+            .ffi_init_token(
+                CkSlotId(7),
+                None,
+                pkcs11_proxy_ng_types::InitTokenLabel::text_only("hello"),
+            )
+            .expect("stub accepts a NULL SO PIN");
         let captured = Q03_INIT_TOKEN_CAPTURED.lock().unwrap();
         assert_eq!(captured.len(), 1, "exactly one native call for a NULL SO PIN");
         assert!(captured[0].pin_is_null, "NULL SO PIN stays a null pointer");
         assert_eq!(captured[0].pin_len, 0, "NULL SO PIN carries length 0");
+    }
+
+    /// Q03 phase 2: an exact NULL label reaches the native boundary as a
+    /// null pointer — never rewritten to the empty label — in exactly
+    /// one native call, with the ordinary SO-PIN shape intact.
+    #[test]
+    fn q03_ffi_init_token_exact_null_emits_null_pointer() {
+        use pkcs11_proxy_ng_types::{ExactTokenLabel, InitTokenLabel};
+
+        let _guard = Q03_INIT_TOKEN_CAPTURE_LOCK.lock().unwrap();
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_InitToken = Some(q03_capturing_init_token);
+        let backend = FfiBackend::test_backend_with_tables(functions.as_mut(), None, None);
+        backend.lifecycle_domain.open_for_tests();
+        Q03_INIT_TOKEN_CAPTURED.lock().unwrap().clear();
+        backend
+            .ffi_init_token(
+                CkSlotId(7),
+                Some(b"1234"),
+                InitTokenLabel { text: "", exact: Some(ExactTokenLabel::Null) },
+            )
+            .expect("stub records the NULL label call");
+        let captured = Q03_INIT_TOKEN_CAPTURED.lock().unwrap();
+        assert_eq!(captured.len(), 1, "exactly one native call for a NULL label");
+        assert_eq!(captured[0].slot, 7, "native call targets the slot");
+        assert!(captured[0].label_is_null, "NULL label stays a null pointer");
+        assert!(!captured[0].pin_is_null, "ordinary SO PIN stays a non-null pointer");
+        assert_eq!(captured[0].pin_len, 4, "ordinary SO PIN carries length 4");
+    }
+
+    /// Q03 phase 2: exact raw bytes — including invalid-encoding bytes —
+    /// reach the native boundary verbatim through a non-null pointer,
+    /// and the exact path for a valid label emits byte-identically to
+    /// the legacy string path (interop invariant at the FFI boundary).
+    #[test]
+    fn q03_ffi_init_token_exact_bytes_emit_verbatim() {
+        use pkcs11_proxy_ng_types::{ExactTokenLabel, InitTokenLabel};
+
+        let _guard = Q03_INIT_TOKEN_CAPTURE_LOCK.lock().unwrap();
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_InitToken = Some(q03_capturing_init_token);
+        let backend = FfiBackend::test_backend_with_tables(functions.as_mut(), None, None);
+        backend.lifecycle_domain.open_for_tests();
+        // Invalid-encoding bytes go through unmodified — no U+FFFD.
+        let mut invalid = [b' '; pkcs11_proxy_ng_types::PKCS11_TOKEN_LABEL_LEN];
+        invalid[..5].copy_from_slice(b"BAD\xff\xfe");
+        Q03_INIT_TOKEN_CAPTURED.lock().unwrap().clear();
+        backend
+            .ffi_init_token(
+                CkSlotId(7),
+                Some(b"1234"),
+                InitTokenLabel {
+                    text: "BAD\u{fffd}",
+                    exact: Some(ExactTokenLabel::Bytes(invalid)),
+                },
+            )
+            .expect("stub records the invalid-encoding call");
+        let captured = Q03_INIT_TOKEN_CAPTURED.lock().unwrap();
+        assert_eq!(captured.len(), 1, "exactly one native call for invalid-encoding bytes");
+        assert!(!captured[0].label_is_null, "exact bytes use a non-null pointer");
+        assert_eq!(
+            captured[0].label_bytes, invalid,
+            "invalid-encoding bytes reach the provider verbatim"
+        );
+        drop(captured);
+        // Valid label, both paths: byte-identical native bytes.
+        let mut padded = [b' '; pkcs11_proxy_ng_types::PKCS11_TOKEN_LABEL_LEN];
+        padded[..2].copy_from_slice(b"A\t");
+        for label in [
+            InitTokenLabel::text_only("A\t"),
+            InitTokenLabel { text: "A\t", exact: Some(ExactTokenLabel::Bytes(padded)) },
+        ] {
+            Q03_INIT_TOKEN_CAPTURED.lock().unwrap().clear();
+            backend
+                .ffi_init_token(CkSlotId(7), Some(b"1234"), label)
+                .expect("stub records the valid-label call");
+            let captured = Q03_INIT_TOKEN_CAPTURED.lock().unwrap();
+            assert_eq!(captured.len(), 1, "exactly one native call");
+            assert_eq!(
+                captured[0].label_bytes, padded,
+                "string and exact paths emit identical native bytes for {label:?}"
+            );
+        }
     }
 }

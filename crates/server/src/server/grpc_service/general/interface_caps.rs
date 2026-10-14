@@ -325,6 +325,10 @@ pub(super) async fn get_backend_interfaces(
         // converts per D1(a) — see the freeze confirmation above.
         mechanism_parameter_transport_version,
         backend_mechanism_abi,
+        // Q03 phase 2: the daemon accepts the additive exact-label
+        // field on `InitTokenRequest` and forwards it to the provider
+        // unmodified (NULL stays NULL, raw bytes stay byte-exact).
+        exact_token_label_version: Some(pkcs11_proxy_ng_types::EXACT_TOKEN_LABEL_VERSION),
     };
     // Override-active calls bypass the cache (see above): never store an
     // armed rendering where a legacy call could hit it.
@@ -374,6 +378,33 @@ mod tests {
         .into_inner();
 
         assert_eq!(response.pointer_safe_message_parameters, Some(true));
+    }
+
+    /// Q03 phase 2: discovery advertises the exact-label capability —
+    /// the daemon accepts `InitTokenRequest.label_exact` and forwards
+    /// it to the provider unmodified.
+    #[tokio::test]
+    async fn exact_token_label_backend_interfaces_advertises_v1() {
+        let context_manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        let backend = Arc::new(MockBackend::default_test());
+        backend.initialize().expect("initialize mock backend");
+        let backend: Arc<dyn Pkcs11Backend> = backend;
+        let registry = MechanismRegistrySource::load(None).expect("load embedded registry");
+
+        let response = get_backend_interfaces(
+            &context_manager,
+            &backend,
+            &registry,
+            Request::new(pkcs11_proxy_ng_proto::GetBackendInterfacesRequest {}),
+        )
+        .await
+        .expect("GetBackendInterfaces should succeed")
+        .into_inner();
+
+        assert_eq!(
+            response.exact_token_label_version,
+            Some(pkcs11_proxy_ng_types::EXACT_TOKEN_LABEL_VERSION)
+        );
     }
 
     /// W1-C1-14 pin: caps are built infallibly straight from the backend —

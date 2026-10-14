@@ -95,7 +95,17 @@ pub trait Pkcs11Backend: Send + Sync {
         mech: CkMechanismType,
     ) -> CkResult<CkMechanismInfo>;
 
-    fn init_token(&self, slot_id: CkSlotId, so_pin: Option<&[u8]>, label: &str) -> CkResult<()>;
+    /// Q03 phase 2: an exact label (`Null` / `Bytes`) is forwarded to
+    /// the provider unmodified — NULL stays a null pointer (never an
+    /// empty-label reinit), raw bytes stay byte-exact — and the
+    /// provider's accept/refuse propagates. A legacy text-only label
+    /// blank-pads exactly as before.
+    fn init_token(
+        &self,
+        slot_id: CkSlotId,
+        so_pin: Option<&[u8]>,
+        label: InitTokenLabel<'_>,
+    ) -> CkResult<()>;
     fn init_pin(&self, session: CkSessionHandle, pin: Option<&[u8]>) -> CkResult<()>;
     fn set_pin(
         &self,

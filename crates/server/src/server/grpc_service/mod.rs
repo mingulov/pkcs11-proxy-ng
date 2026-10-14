@@ -590,6 +590,7 @@ mod scoped_dispatch_tests {
                     slot_id: slot,
                     so_pin: Some(b"w1-l6-01-so-pin".to_vec()),
                     label: "w1-l6-01-test".into(),
+                    label_exact: None,
                 }))
                 .await
                 .map(|r| r.into_inner().ck_rv),

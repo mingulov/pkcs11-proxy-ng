@@ -566,6 +566,7 @@ async fn slot_queries_and_init_token_resolve_the_requested_virtual_slot() {
                 slot_id,
                 so_pin: Some(b"test-only-pin".to_vec()),
                 label: "reinitialize".into(),
+                label_exact: None,
             })
             .await
             .unwrap()
@@ -583,6 +584,8 @@ async fn init_token(client: &mut Client, slot_id: u64, label: &str) -> u64 {
             slot_id,
             so_pin: Some(b"test-only-pin".to_vec()),
             label: label.into(),
+            // Old-shim shape: string-only requests keep the legacy path.
+            label_exact: None,
         })
         .await
         .unwrap()

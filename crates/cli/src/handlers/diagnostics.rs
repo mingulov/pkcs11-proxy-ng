@@ -37,6 +37,7 @@ pub(crate) struct DiagnosticReport {
     pub(crate) registry_discovery_mode: Option<String>,
     pub(crate) effects_version: Option<u32>,
     pub(crate) transport_version: Option<u32>,
+    pub(crate) exact_label_version: Option<u32>,
     pub(crate) pointer_safe_message_parameters: bool,
     pub(crate) pointer_safe_authenticated_parameters: bool,
 }
@@ -61,6 +62,7 @@ impl DiagnosticReport {
             registry_discovery_mode: None,
             effects_version: None,
             transport_version: None,
+            exact_label_version: None,
             pointer_safe_message_parameters: false,
             pointer_safe_authenticated_parameters: false,
         };
@@ -82,6 +84,7 @@ impl DiagnosticReport {
             }
             report.effects_version = probe.exact_output_effects_version;
             report.transport_version = probe.mechanism_parameter_transport_version;
+            report.exact_label_version = probe.exact_token_label_version;
             report.pointer_safe_message_parameters = probe.pointer_safe_message_parameters;
             report.pointer_safe_authenticated_parameters =
                 probe.pointer_safe_authenticated_parameters;
@@ -132,9 +135,10 @@ impl DiagnosticReport {
             _ => out.push_str("mechanism registry: unknown (legacy daemon)\n"),
         }
         out.push_str(&format!(
-            "effects version: {}, transport version: {}\n",
+            "effects version: {}, transport version: {}, exact-label version: {}\n",
             opt_u32(self.effects_version),
-            opt_u32(self.transport_version)
+            opt_u32(self.transport_version),
+            opt_u32(self.exact_label_version)
         ));
         out.push_str(&format!(
             "pointer-safe parameters: message={} authenticated={}\n",
@@ -172,6 +176,7 @@ impl DiagnosticReport {
             "mechanism_registry": registry,
             "exact_output_effects_version": self.effects_version,
             "mechanism_parameter_transport_version": self.transport_version,
+            "exact_token_label_version": self.exact_label_version,
             "pointer_safe_message_parameters": self.pointer_safe_message_parameters,
             "pointer_safe_authenticated_parameters": self.pointer_safe_authenticated_parameters,
         })
@@ -338,6 +343,7 @@ mod tests {
             pointer_safe_message_parameters: true,
             pointer_safe_authenticated_parameters: false,
             mechanism_parameter_transport_version: Some(2),
+            exact_token_label_version: Some(1),
         }
     }
 
@@ -351,6 +357,7 @@ mod tests {
         assert_eq!(report.interfaces[0].null_functions, vec!["C_X", "C_Y"]);
         assert_eq!(report.backend_ulong_size, Some(8));
         assert_eq!(report.effects_version, Some(3));
+        assert_eq!(report.exact_label_version, Some(1));
         assert!(report.registry_revision.is_none());
         assert!(report.pointer_safe_message_parameters);
         assert!(!report.pointer_safe_authenticated_parameters);
@@ -380,7 +387,7 @@ mod tests {
             "3.2\n",
             "8 bytes, little-endian, attribute stride 32",
             "mechanism registry: unknown (legacy daemon)",
-            "effects version: 3, transport version: 2",
+            "effects version: 3, transport version: 2, exact-label version: 1",
             "message=true authenticated=false",
         ] {
             assert!(text.contains(needle), "missing {needle:?} in:\n{text}");

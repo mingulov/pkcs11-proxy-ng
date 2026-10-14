@@ -203,7 +203,9 @@ async fn pins_never_appear_in_trace_logs() {
     let slot = *slots.first().expect("at least one slot");
 
     // 1. C_InitToken — SO PIN as canary.
-    let _ = client.init_token(slot, Some(SO_PIN_CANARY), "leak-test-token").await;
+    let _ = client
+        .init_token(slot, Some(SO_PIN_CANARY), InitTokenLabel::text_only("leak-test-token"))
+        .await;
     tokio::task::yield_now().await;
     assert_no_canary_in_logs("init_token", &buf.snapshot());
 

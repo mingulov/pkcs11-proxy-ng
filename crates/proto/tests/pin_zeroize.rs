@@ -64,6 +64,8 @@ fn pin_request_messages_zeroize_wipes_secrets() {
         slot_id: 7,
         so_pin: Some(vec![0x3Cu8; 16]),
         label: "token".to_string(),
+        // Text-only label: the wipe contract covers the PIN field.
+        label_exact: None,
     };
     assert_canary_nonempty(
         "InitTokenRequest.so_pin",

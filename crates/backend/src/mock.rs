@@ -226,6 +226,11 @@ pub struct MockBackend {
     /// to token-present to preserve the historical mock behavior.
     token_presence: Mutex<HashMap<CkSlotId, bool>>,
     token_identities: Mutex<HashMap<CkSlotId, (String, String)>>,
+    /// Byte-exact stored label per slot (Q03 phase 2): the 32 bytes the
+    /// last `init_token` stored, verbatim — including invalid-encoding
+    /// bytes the `String`-typed identity above cannot hold. Updated
+    /// together with `token_identities` by every relabel path.
+    token_label_bytes: Mutex<HashMap<CkSlotId, [u8; PKCS11_TOKEN_LABEL_LEN]>>,
     token_info_requested_slots: Mutex<Vec<CkSlotId>>,
     init_token_requested_slots: Mutex<Vec<CkSlotId>>,
     session_info_slot_overrides: Mutex<HashMap<CkSessionHandle, CkSlotId>>,
@@ -517,6 +522,7 @@ impl MockBackend {
             slot_event_condvar: Condvar::new(),
             token_presence: Mutex::new(HashMap::new()),
             token_identities: Mutex::new(HashMap::new()),
+            token_label_bytes: Mutex::new(HashMap::new()),
             token_info_requested_slots: Mutex::new(Vec::new()),
             init_token_requested_slots: Mutex::new(Vec::new()),
             session_info_slot_overrides: Mutex::new(HashMap::new()),
@@ -915,7 +921,17 @@ impl MockBackend {
 
     /// Override only the token's identity; presence and injected errors still apply.
     pub fn set_slot_token_identity(&self, slot: CkSlotId, label: String, serial: String) {
+        let mut bytes = [b' '; PKCS11_TOKEN_LABEL_LEN];
+        space_pad_into(&mut bytes, &label);
+        self.token_label_bytes.lock().unwrap().insert(slot, bytes);
         self.token_identities.lock().unwrap().insert(slot, (label, serial));
+    }
+
+    /// Byte-exact stored label for `slot` (Q03 phase 2): the 32 bytes
+    /// the last `init_token` stored, verbatim. `None` when no relabel
+    /// (or identity override) has recorded one yet.
+    pub fn token_label_bytes(&self, slot: CkSlotId) -> Option<[u8; PKCS11_TOKEN_LABEL_LEN]> {
+        self.token_label_bytes.lock().unwrap().get(&slot).copied()
     }
 
     /// Native token-metadata request arguments, including calls that returned errors.
@@ -2102,7 +2118,12 @@ impl Pkcs11Backend for MockBackend {
         self.mechanism_info(slot_id, mech)
     }
 
-    fn init_token(&self, slot_id: CkSlotId, _so_pin: Option<&[u8]>, label: &str) -> CkResult<()> {
+    fn init_token(
+        &self,
+        slot_id: CkSlotId,
+        _so_pin: Option<&[u8]>,
+        label: InitTokenLabel<'_>,
+    ) -> CkResult<()> {
         self.init_token_requested_slots.lock().unwrap().push(slot_id);
         self.require_known_slot(slot_id)?;
         // T09 one-shot gate: signal entry, park until release, then proceed.
@@ -2119,6 +2140,12 @@ impl Pkcs11Backend for MockBackend {
         if let Some(rv) = injected {
             return Err(rv);
         }
+        // Q03 phase 2: the mock decides exact labels the way observed
+        // stock SoftHSM2 does — NULL is refused with ARGUMENTS_BAD and
+        // touches nothing; raw bytes (valid or not) are stored verbatim.
+        if label.exact == Some(ExactTokenLabel::Null) {
+            return Err(CkRv::ARGUMENTS_BAD);
+        }
         // A real reinit relabels the token: adopt the requested label (keep
         // the serial) so daemon cache invalidation is observable.
         let serial = self
@@ -2128,7 +2155,10 @@ impl Pkcs11Backend for MockBackend {
             .get(&slot_id)
             .map(|(_, serial)| serial.clone())
             .unwrap_or_else(|| "0001".into());
-        self.set_slot_token_identity(slot_id, label.to_string(), serial);
+        self.set_slot_token_identity(slot_id, label.text.to_string(), serial);
+        if let Some(ExactTokenLabel::Bytes(bytes)) = label.exact {
+            self.token_label_bytes.lock().unwrap().insert(slot_id, bytes);
+        }
         self.noop_ok()
     }
 

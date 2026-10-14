@@ -35,6 +35,7 @@ use pkcs11_proxy_ng_backend::{FfiBackend, Pkcs11Backend};
 use pkcs11_proxy_ng_proto::Pkcs11ProxyServer;
 use pkcs11_proxy_ng_types::{
     CkInBuf, CkParameterRoundtripSpec, CkRv, CkSessionFlags, CkSessionHandle, CkUserType,
+    InitTokenLabel,
 };
 use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
@@ -111,7 +112,7 @@ fn kryoptic_daemon() -> &'static KryopticDaemon {
                 .unwrap_or_else(|rv| panic!("kryoptic C_GetSlotList failed: {rv}"));
             let slot = *slots.first().expect("kryoptic must expose a slot");
             backend
-                .init_token(slot, Some(SO_PIN.as_bytes()), TOKEN_LABEL)
+                .init_token(slot, Some(SO_PIN.as_bytes()), InitTokenLabel::text_only(TOKEN_LABEL))
                 .unwrap_or_else(|rv| panic!("kryoptic C_InitToken failed: {rv}"));
             let flags =
                 CkSessionFlags(CkSessionFlags::SERIAL_SESSION.0 | CkSessionFlags::RW_SESSION.0);

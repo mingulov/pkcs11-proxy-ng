@@ -189,7 +189,11 @@ async fn token_reinit_clears_objects() -> Result<(), String> {
 
     // Reinitialize the token with a new label.
     client
-        .init_token(slot, Some(fixture.so_pin.as_bytes()), "reinited-token")
+        .init_token(
+            slot,
+            Some(fixture.so_pin.as_bytes()),
+            InitTokenLabel::text_only("reinited-token"),
+        )
         .await
         .map_err(|rv| format!("C_InitToken failed: {rv}"))?;
 

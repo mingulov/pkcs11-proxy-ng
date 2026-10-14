@@ -208,10 +208,13 @@ fn c_init_token_valid_label_reaches_client_state() {
 
 #[test]
 fn c_init_token_tab_label_reaches_client_state() {
-    // Q03 phase 1 pin: a valid label carrying non-space whitespace (a
-    // trailing TAB) must parse and reach the client gate — label parsing
-    // must not refuse valid labels. (Phase 2 may only refuse NULL /
-    // invalid-encoding inputs, never these.)
+    // Q03 pin: a valid label carrying non-space whitespace (a
+    // trailing TAB) must parse and reach the client gate — label
+    // parsing must never refuse valid labels. (Under the phase-2
+    // contract valid labels always reach the provider — exact when
+    // negotiated, lossless string fallback otherwise; only NULL and
+    // invalid-encoding inputs are provider-decided when negotiated
+    // and locally refused when not.)
     let _guard = shim_state_test_guard();
     let mut label = [b' '; pkcs11_proxy_ng_types::PKCS11_TOKEN_LABEL_LEN];
     label[0] = b'A';
@@ -220,6 +223,23 @@ fn c_init_token_tab_label_reaches_client_state() {
         dispatch::general::c_init_token(0, std::ptr::null_mut(), 0, label.as_ptr() as *mut _)
     };
     assert_eq!(rv, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
+}
+
+#[test]
+fn c_init_token_label_address_range_overflow_returns_bad_args() {
+    // Q03 phase 2 regression pin: a label pointer whose 32-byte
+    // extent wraps the address space fails closed with
+    // CKR_ARGUMENTS_BAD without dereferencing anything (the
+    // W1-L11-10 fallible read rejects the overflow before any memory
+    // access). The outer catch_unwind proves no unwind happens at
+    // all — a panic would surface as CKR_GENERAL_ERROR instead.
+    let _guard = shim_state_test_guard();
+    let hostile = (usize::MAX - 16) as *mut CK_UTF8CHAR;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        dispatch::general::c_init_token(0, std::ptr::null_mut(), 0, hostile)
+    }));
+    let rv = result.expect("near-TOP label pointer must not panic");
+    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
 }
 
 #[test]
