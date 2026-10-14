@@ -1,0 +1,16 @@
+[package]
+name = "pkcs11-entry-recording-oracle"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0 OR MIT"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# W1-L16-14: aligned with the root workspace spec ("0.5").
+cryptoki-sys = "0.5"

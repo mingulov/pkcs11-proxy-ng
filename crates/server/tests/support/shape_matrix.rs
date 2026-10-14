@@ -1309,3 +1309,103 @@ pub fn variant_name(params: &CkMechanismParams) -> &'static str {
         CkMechanismParams::VendorObjectInsert(_) => "VendorObjectInsert",
     }
 }
+
+// ---------------------------------------------------------------------------
+// Q07 (MAINT-02) shape-evidence dispositions.
+// ---------------------------------------------------------------------------
+//
+// An RPC outcome and a native execution are different observations. The
+// shape-matrix driver classifies every outcome WITHOUT native entry
+// evidence, so it may claim only two dispositions:
+//
+// * `Success`: the RPC returned `Ok`. Sound: on the driver's op paths
+//   (`derive_key`, `encrypt_init`, `sign_init`, `digest_init`, `wrap_key`)
+//   every pre-backend handler return carries an error RV and every `Ok`
+//   flows from a backend `Ok` — no local layer synthesizes success.
+// * `Attempted`: the RPC completed with a mechanism-level error RV. The
+//   same RV value can come from server transport validation, backend FFI
+//   reconstruction, or the provider itself, so the origin is unproven.
+//   No RV alone proves origin.
+//
+// `NativeEntered` needs an independent native entry record and is
+// claimable only in the entry-recording oracle lane
+// (`shape_evidence_test.rs`), never against SoftHSM2.
+
+/// Evidence disposition for one shape attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShapeDisposition {
+    /// The real-provider operation returned `Ok`.
+    Success,
+    /// RPC completed with an error RV; native origin unproven.
+    Attempted,
+    /// Independent native entry record exists; error RV observed at entry.
+    NativeEntered,
+}
+
+impl ShapeDisposition {
+    /// Stable receipt tag for per-shape lines and oracle receipts.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Attempted => "attempted",
+            Self::NativeEntered => "native-entered",
+        }
+    }
+}
+
+/// One executed shape's classified outcome. The native RV is preserved
+/// verbatim: the taxonomy re-labels the evidence, never the value.
+pub struct ShapeOutcome {
+    pub disposition: ShapeDisposition,
+    pub detail: String,
+    pub rv: Option<CkRv>,
+}
+
+impl ShapeOutcome {
+    pub fn success(detail: String) -> Self {
+        Self { disposition: ShapeDisposition::Success, detail, rv: None }
+    }
+
+    pub fn attempted(rv: CkRv, detail: String) -> Self {
+        Self { disposition: ShapeDisposition::Attempted, detail, rv: Some(rv) }
+    }
+}
+
+/// Classify an RPC outcome WITHOUT entry evidence (the SoftHSM2 lane):
+/// `Ok` is success; any error RV is merely attempted.
+pub fn classify_rv_only<T, E>(result: &Result<T, E>) -> ShapeDisposition {
+    if result.is_ok() { ShapeDisposition::Success } else { ShapeDisposition::Attempted }
+}
+
+/// Classify an RPC outcome WITH an independent native entry count (the
+/// oracle lane): `Ok` is success regardless of the count; an error RV
+/// with at least one recorded entry is native-entered, without is
+/// attempted. Native-entered is never success.
+pub fn classify_with_entry_record<T, E>(
+    result: &Result<T, E>,
+    native_entries: u64,
+) -> ShapeDisposition {
+    match (result.is_ok(), native_entries) {
+        (true, _) => ShapeDisposition::Success,
+        (false, 0) => ShapeDisposition::Attempted,
+        (false, _) => ShapeDisposition::NativeEntered,
+    }
+}
+
+/// Per-shape receipt line: `shape {variant} (0x{type:08x}): [{tag}] {detail}`.
+pub fn format_shape_line(variant: &str, mech_type: u64, outcome: &ShapeOutcome) -> String {
+    format!(
+        "shape {variant} (0x{mech_type:08x}): [{}] {}",
+        outcome.disposition.tag(),
+        outcome.detail
+    )
+}
+
+/// Matrix summary receipt line with separate counts per disposition.
+/// Attempted and skipped shapes never add to a qualified total.
+pub fn format_matrix_summary(succeeded: u32, attempted: u32, skipped: u32, total: usize) -> String {
+    format!(
+        "shape matrix: {succeeded} succeeded, {attempted} attempted (origin unproven), \
+         {skipped} honestly skipped ({total} total)"
+    )
+}
