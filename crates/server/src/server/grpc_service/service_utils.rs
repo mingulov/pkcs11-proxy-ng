@@ -3761,6 +3761,177 @@ mod tests {
         );
     }
 
+    // --- Q08/MAINT-04: isolated first-write/exact-value configuration tests ---
+    //
+    // `configure_backend_guard` / `configure_login_lock_timeout` write
+    // process-global `OnceLock`s: the first call in the process wins and
+    // later calls are silent no-ops. In-process assertions can therefore
+    // only check positivity (whatever another test configured first also
+    // satisfies them) — which a disconnected no-op setter satisfies too.
+    // The cases below run in a FRESH child process (this same test binary
+    // re-executed with `--exact`), where no earlier call exists, so exact
+    // values, defaults, and first-write-wins are pinned, and the real
+    // `acquire_slot_login_lock` helper runs under a known short bound.
+    // Each child body is gated on its env var and returns immediately in
+    // a normal suite run; the parent spawns the child and asserts its
+    // exit status, quoting the child's output on failure.
+
+    /// Full test name as libtest prints/matches it (the crate-name segment
+    /// that `module_path!()` carries is omitted).
+    fn q08_child_name(short: &str) -> String {
+        let path = match module_path!().split_once("::") {
+            Some((_, rest)) => rest,
+            None => module_path!(),
+        };
+        format!("{path}::{short}")
+    }
+
+    /// Re-execute this test binary in a fresh process for exactly
+    /// `child_test`, with `env_key` set so the child body runs its
+    /// assertions. Fails with the child's captured output when the child
+    /// fails.
+    fn run_q08_child(child_test: &str, env_key: &str) {
+        let exe = std::env::current_exe().expect("current test executable");
+        let output = std::process::Command::new(exe)
+            .args(["--exact", child_test, "--nocapture"])
+            .env(env_key, "1")
+            .output()
+            .expect("spawn isolated child test");
+        assert!(
+            output.status.success(),
+            "isolated child {child_test} failed (exit {}):\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    #[test]
+    fn q08_child_config_defaults() {
+        if std::env::var("Q08_CHILD_CONFIG_DEFAULTS").is_err() {
+            return;
+        }
+        // Fresh process, no configure call: documented defaults apply.
+        assert_eq!(backend_timeout(), Duration::from_secs(30), "default backend timeout");
+        assert_eq!(max_concurrent_backend_calls(), 200, "default backend call cap");
+        assert_eq!(login_lock_timeout(), Duration::from_secs(10), "default login-lock timeout");
+    }
+
+    #[test]
+    fn q08_config_defaults_in_fresh_process() {
+        run_q08_child(&q08_child_name("q08_child_config_defaults"), "Q08_CHILD_CONFIG_DEFAULTS");
+    }
+
+    #[test]
+    fn q08_child_exact_values() {
+        if std::env::var("Q08_CHILD_EXACT_VALUES").is_err() {
+            return;
+        }
+        // First initialization in a fresh process yields exactly the
+        // requested values (a no-op setter leaves the defaults instead).
+        configure_backend_guard(45, 128);
+        configure_login_lock_timeout(7);
+        assert_eq!(backend_timeout(), Duration::from_secs(45), "configured backend timeout");
+        assert_eq!(max_concurrent_backend_calls(), 128, "configured backend call cap");
+        assert_eq!(login_lock_timeout(), Duration::from_secs(7), "configured login-lock timeout");
+    }
+
+    #[test]
+    fn q08_exact_values_in_fresh_process() {
+        run_q08_child(&q08_child_name("q08_child_exact_values"), "Q08_CHILD_EXACT_VALUES");
+    }
+
+    #[test]
+    fn q08_child_first_write_wins() {
+        if std::env::var("Q08_CHILD_FIRST_WRITE_WINS").is_err() {
+            return;
+        }
+        // First initialization wins (AI-02 one-time process contract);
+        // subsequent incompatible initialization leaves values unchanged.
+        configure_backend_guard(45, 128);
+        configure_backend_guard(1, 1);
+        assert_eq!(backend_timeout(), Duration::from_secs(45), "first backend timeout wins");
+        assert_eq!(max_concurrent_backend_calls(), 128, "first backend call cap wins");
+        configure_login_lock_timeout(7);
+        configure_login_lock_timeout(99);
+        assert_eq!(login_lock_timeout(), Duration::from_secs(7), "first login-lock timeout wins");
+    }
+
+    #[test]
+    fn q08_first_write_wins_in_fresh_process() {
+        run_q08_child(&q08_child_name("q08_child_first_write_wins"), "Q08_CHILD_FIRST_WRITE_WINS");
+    }
+
+    #[tokio::test]
+    async fn q08_child_login_lock_held_refuses() {
+        if std::env::var("Q08_CHILD_LOGIN_LOCK_HELD").is_err() {
+            return;
+        }
+        configure_login_lock_timeout(1);
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        let slot = BackendSlotId(CkSlotId(0));
+        // Wedged holder: another tenant pins the per-slot login lock.
+        let held = ctx_mgr.slot_login_lock(slot).lock_owned().await;
+        let start = Instant::now();
+        let result = acquire_slot_login_lock(&ctx_mgr, slot).await;
+        let elapsed = start.elapsed();
+        assert_eq!(
+            result.unwrap_err(),
+            CkRv::GENERAL_ERROR,
+            "held login lock must refuse with the documented proxy-serialization RV"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(500),
+            "refusal must wait out the configured bound, refused after {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(8),
+            "refusal must honor the configured 1s bound, not the 10s default ({elapsed:?})"
+        );
+        // The refusal is transient: once the holder releases, acquisition
+        // succeeds again.
+        drop(held);
+        assert!(
+            acquire_slot_login_lock(&ctx_mgr, slot).await.is_ok(),
+            "acquisition must succeed after the holder releases"
+        );
+    }
+
+    #[test]
+    fn q08_login_lock_held_refuses_in_fresh_process() {
+        run_q08_child(
+            &q08_child_name("q08_child_login_lock_held_refuses"),
+            "Q08_CHILD_LOGIN_LOCK_HELD",
+        );
+    }
+
+    #[tokio::test]
+    async fn q08_child_login_lock_free_succeeds() {
+        if std::env::var("Q08_CHILD_LOGIN_LOCK_FREE").is_err() {
+            return;
+        }
+        // No configure call: the 10s default must not trip normal
+        // (uncontended) login through the real helper.
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        let slot = BackendSlotId(CkSlotId(0));
+        let start = Instant::now();
+        let guard = acquire_slot_login_lock(&ctx_mgr, slot).await;
+        assert!(guard.is_ok(), "uncontended login-lock acquisition must succeed");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "uncontended acquisition must be immediate"
+        );
+        drop(guard);
+    }
+
+    #[test]
+    fn q08_login_lock_free_succeeds_in_fresh_process() {
+        run_q08_child(
+            &q08_child_name("q08_child_login_lock_free_succeeds"),
+            "Q08_CHILD_LOGIN_LOCK_FREE",
+        );
+    }
+
     // --- W1-L7-28: per-connection admission under the global breaker ---
 
     // Final-review F6: the peer admission table is process-global, so the
