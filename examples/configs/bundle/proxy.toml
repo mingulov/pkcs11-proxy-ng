@@ -1,0 +1,80 @@
+# pkcs11-proxy-ng — BINARY-BUNDLE install template.
+#
+# Shipped in the release tarball (`examples/configs/bundle/proxy.toml`)
+# and consumed by INSTALL.md. Copy to `proxy.toml` next to the
+# extracted bundle and substitute the six marked values (backend
+# module, bind address, three certificate paths, socket path) before
+# starting the daemon.
+#
+# Both listeners are enabled: TCP+mTLS (`[listener.remote]`) and the
+# same-host Unix socket (`[listener.local]`). Comment out the section
+# you do not need.
+#
+# File-permission requirements:
+#   server_key   0600 — daemon refuses to start otherwise
+#   server_cert  0644 OK
+#   ca_cert      0644 OK
+#   proxy.toml   0644 OK
+#
+# Readiness probe (CLI over the same mTLS listener; exit 0 = SERVING,
+# 1 = NOT_SERVING, 2 = probe failure). The probe is passive — it never
+# initializes a PKCS#11 context, so it is safe under max_contexts = 1.
+# A plaintext http:// probe against this listener fails by design.
+#   exec: ["./bin/pkcs11-proxy-ng-cli", "--endpoint",
+#          "https://127.0.0.1:7512",
+#          "--tls-ca-cert", "/etc/pkcs11-proxy-ng/tls/ca.crt",
+#          "--tls-client-cert", "/etc/pkcs11-proxy-ng/tls/client.crt",
+#          "--tls-client-key", "/etc/pkcs11-proxy-ng/tls/client.key",
+#          "--tls-domain", "proxy.example.internal", "health"]
+
+[backend]
+# REQUIRED. Path to the backend PKCS#11 module (HSM driver, SoftHSM2,
+# NSS softokn, Kryoptic). The shipped placeholder fails fast at
+# startup — that is intentional.
+module = "/CHANGE_ME/path/to/backend.so"
+
+[proxy]
+# v0.2 testing scope: one logical client in one trusted security
+# domain per daemon/provider instance. Restart the daemon/provider
+# before switching independent clients or domains. This admission
+# limit refuses a second concurrent client; it does not establish
+# multi-client isolation and does not clear native login state.
+max_contexts = 1
+request_timeout_secs = 60
+startup_timeout_secs = 30
+shutdown_grace_secs = 30
+backend_health_consecutive_failures = 3
+max_concurrent_backend_calls = 100
+max_blocking_threads = 256
+# Reject NULL data pointers (len>0) and NULL mechanisms before the backend module.
+# OFF by default (ADR-0010 transparent forwarding). Enable for modules that crash on them.
+# sanitize_inputs = true
+
+[listener.remote]
+# Same-host by default; use the daemon's address (e.g. 0.0.0.0:7512)
+# when remote clients must reach it.
+bind = "127.0.0.1:7512"
+auth = "mtls"
+# REQUIRED. PEM paths for the server identity + client CA (see
+# INSTALL.md step 2 and doc/release/mtls-setup.md).
+ca_cert = "/CHANGE_ME/tls/ca.crt"
+server_cert = "/CHANGE_ME/tls/server.crt"
+server_key = "/CHANGE_ME/tls/server.key"
+allow_insecure_tcp = false
+
+[listener.local]
+# Same-host Unix socket with peer-credential auth (no certificates).
+# Point at a writable directory; the daemon creates the socket with
+# mode 0600. Comment out this section on hosts without Unix sockets.
+path = "/CHANGE_ME/pkcs11-proxy-ng/proxy.sock"
+auth = "peer_cred"
+
+[auth]
+# Bundle quick-start posture: any client with a CA-signed certificate
+# may use all tokens. Use a DEDICATED CA that signs only this
+# deployment's daemon and client certificates — any CA-trusted
+# identity can reserve the single admitted context, even before it is
+# granted any token. For production, set allow_all_authenticated =
+# false and add explicit [[auth.policy]] grants per client identity,
+# following examples/configs/prod/proxy.toml.
+allow_all_authenticated = true

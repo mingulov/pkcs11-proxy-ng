@@ -906,7 +906,7 @@ jobs:
             -v "$GITHUB_WORKSPACE/scripts:/smoke-scripts:ro" \
             -v "${{ runner.temp }}/apk-smoke/work:/smoke-work" \
             "alpine:3.23@sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0" \
-            sh -eu -c 'apk --no-cache add --allow-untrusted --repository /apk pkcs11-proxy-ng-shim pkcs11-proxy-ng-daemon pkcs11-proxy-ng-cli pkcs11-proxy-ng-compat && apk --no-cache add softhsm opensc python3 && python3 /smoke-scripts/ci-package-smoke.py installed-verify --daemon /usr/bin/pkcs11-proxy-ng --shim /usr/lib/pkcs11/libpkcs11_proxy_ng_shim.so --cli /usr/bin/pkcs11-proxy-ng-cli --expected-hashes /apk/payload-hashes.json --record-out /smoke-work/installed-hashes.json && python3 /smoke-scripts/ci-package-smoke.py installed-smoke --daemon /usr/bin/pkcs11-proxy-ng --shim /usr/lib/pkcs11/libpkcs11_proxy_ng_shim.so --cli /usr/bin/pkcs11-proxy-ng-cli --workdir /smoke-work'
+            sh -eu -c 'apk --no-cache add --allow-untrusted --repository /apk pkcs11-proxy-ng-shim pkcs11-proxy-ng-daemon pkcs11-proxy-ng-cli pkcs11-proxy-ng-compat && apk --no-cache add softhsm opensc python3 && python3 /smoke-scripts/ci-package-smoke.py installed-verify --daemon /usr/bin/pkcs11-proxy-ng --shim /usr/lib/pkcs11/libpkcs11_proxy_ng_shim.so --cli /usr/bin/pkcs11-proxy-ng-cli --expected-hashes /apk/payload-hashes.json --record-out /smoke-work/installed-hashes.json && python3 /smoke-scripts/ci-package-smoke.py installed-smoke --daemon /usr/bin/pkcs11-proxy-ng --shim /usr/lib/pkcs11/libpkcs11_proxy_ng_shim.so --cli /usr/bin/pkcs11-proxy-ng-cli --workdir /smoke-work --template /etc/pkcs11-proxy-ng/proxy.toml.default'
 
       - name: Fix smoke workdir ownership for upload
         if: always()

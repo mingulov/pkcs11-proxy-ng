@@ -45,13 +45,13 @@ disable piped core collectors.
 
 ## 1. Install (first deploy)
 
-```bash
-# 1) Build and publish a runnable daemon image to your registry.
-#    The APK carrier image (packaging/alpine/Dockerfile.alpine) is
-#    FROM scratch — it only stages APKs at /apk and cannot run.
-#    Likewise tests/r2_resilience/Dockerfile.daemon builds a test-only
-#    fixture (weak PINs, auth="none"): use it as the pattern for your
-#    runtime Dockerfile, not as a release image.
+Build and publish a runnable daemon image to your registry. The APK
+carrier image (`packaging/alpine/Dockerfile.alpine`) is FROM scratch —
+it only stages APKs at `/apk` and cannot run. Likewise
+`tests/r2_resilience/Dockerfile.daemon` builds a test-only fixture
+(weak PINs, `auth="none"`): use it as the pattern for your runtime
+Dockerfile, not as a release image.
+
 The commands below use the Kubernetes demo manifests, which contain fixed PINs
 and unauthenticated TCP. For a real deployment, use the
 [mTLS guide](../release/mtls-setup.md), set per-client authorization, and
@@ -63,16 +63,15 @@ provide your own runtime image and manifests.
 docker build --build-arg ALPINE_BUILD_IMAGE=alpine:3.23@sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0 \
   -f packaging/alpine/Dockerfile.alpine \
   -t pkcs11-proxy-ng:test-alpine3.23 .
-docker build -f <your-runtime-Dockerfile> \
-  -t <registry>/pkcs11-proxy-ng:<version>-alpine3.23 .
-docker push <registry>/pkcs11-proxy-ng:<version>-alpine3.23
+docker build -f "<your-runtime-Dockerfile>" \
+  -t "<registry>/pkcs11-proxy-ng:<version>-alpine3.23" .
+docker push "<registry>/pkcs11-proxy-ng:<version>-alpine3.23"
 
 # 2) Apply the reference manifests (or your Helm overlay), pointed at
 #    the image you just published.
-kubectl apply -f pkcs11-proxy-ng/examples/k8s/
 kubectl apply -f examples/k8s/
 kubectl -n pkcs11-proxy-demo set image deploy/daemon \
-  daemon=<registry>/pkcs11-proxy-ng:<version>-alpine3.23
+  "daemon=<registry>/pkcs11-proxy-ng:<version>-alpine3.23"
 
 # 3) Edit the ConfigMap to point at your backend module.
 kubectl -n pkcs11-proxy-demo edit configmap daemon-config
@@ -91,10 +90,10 @@ use demo credentials and unauthenticated TCP.
 
 ```bash
 # 1) Bump the image tag in the daemon Deployment.
-kubectl -n <ns> set image deploy/<daemon-deploy> daemon=<registry>/pkcs11-proxy-ng:<new-version>-alpine3.23
+kubectl -n "<ns>" set image "deploy/<daemon-deploy>" "daemon=<registry>/pkcs11-proxy-ng:<new-version>-alpine3.23"
 
 # 2) Watch the rolling update.
-kubectl -n <ns> rollout status deploy/<daemon-deploy>
+kubectl -n "<ns>" rollout status "deploy/<daemon-deploy>"
 
 # 3) Verify consumer traffic stayed clean. If you have the
 #    reference consumer StatefulSet, its log shows
@@ -180,13 +179,13 @@ matched versions.
 
 ```bash
 # kubectl tracks rollout history. List previous revisions:
-kubectl -n <ns> rollout history deploy/<daemon-deploy>
+kubectl -n "<ns>" rollout history "deploy/<daemon-deploy>"
 
 # Roll back to the previous version:
-kubectl -n <ns> rollout undo deploy/<daemon-deploy>
+kubectl -n "<ns>" rollout undo "deploy/<daemon-deploy>"
 
 # Or roll to a specific revision:
-kubectl -n <ns> rollout undo deploy/<daemon-deploy> --to-revision=<N>
+kubectl -n "<ns>" rollout undo "deploy/<daemon-deploy>" "--to-revision=<N>"
 ```
 
 After rollback, verify that consumers reconnect, reopen sessions if needed,
@@ -198,7 +197,7 @@ and can sign or perform their normal operation.
 # Scale up / down (the Service's sessionAffinity keeps existing
 # consumers stuck to their current backend; new consumer pods get
 # the new replica).
-kubectl -n <ns> scale deploy/<daemon-deploy> --replicas=<N>
+kubectl -n "<ns>" scale "deploy/<daemon-deploy>" "--replicas=<N>"
 ```
 
 **Capacity sizing.** Each replica's `proxy.max_concurrent_backend_calls`
@@ -312,25 +311,25 @@ in the macOS bundle.
 
 ```bash
 # 1) Edit the ConfigMap.
-kubectl -n <ns> edit configmap <daemon-config>
+kubectl -n "<ns>" edit configmap "<daemon-config>"
 # (Or update your Helm values and apply.)
 
 # 2) The daemon reloads the registry on SIGHUP. The simplest way
 #    to get the new registry live across all replicas is a rolling restart.
 #    Alternatively, exec into each pod and `kill -HUP 1`.
-kubectl -n <ns> rollout restart deploy/<daemon-deploy>
+kubectl -n "<ns>" rollout restart "deploy/<daemon-deploy>"
 
 # 3) Restart consumer services so their next C_Initialize fetches
 #    the new registry. The shim doesn't background-poll the
 #    registry — it picks up changes only via reprobe (which runs at
 #    every C_Initialize) or full process restart.
-kubectl -n <consumer-ns> rollout restart deploy/<consumer-deploy>
+kubectl -n "<consumer-ns>" rollout restart "deploy/<consumer-deploy>"
 ```
 
 **Confirm the new revision is live.**
 
 ```bash
-kubectl -n <ns> logs deploy/<daemon-deploy> | jq -c 'select(.fields.message=="mechanism registry ready") | .fields'
+kubectl -n "<ns>" logs "deploy/<daemon-deploy>" | jq -c 'select(.fields.message=="mechanism registry ready") | .fields'
 # {"discovery_mode":"transparent","param_shapes":52,"parameterless":162,"revision":"05b1bd2c615bde04"}
 ```
 
@@ -504,19 +503,19 @@ requires pristine state.
 
 ```bash
 # Stream all daemon JSON logs across replicas, jq-parsed:
-kubectl -n <ns> logs -f -l app=<daemon> | jq -c .
+kubectl -n "<ns>" logs -f -l "app=<daemon>" | jq -c .
 
 # Just WARN/ERROR levels:
-kubectl -n <ns> logs -f -l app=<daemon> | jq -c 'select(.level=="WARN" or .level=="ERROR")'
+kubectl -n "<ns>" logs -f -l "app=<daemon>" | jq -c 'select(.level=="WARN" or .level=="ERROR")'
 
 # Watch backend-call counters via the daemon's own internal eviction-task log:
-kubectl -n <ns> logs -f -l app=<daemon> | jq -c 'select(.fields.message | contains("backend call usage"))'
+kubectl -n "<ns>" logs -f -l "app=<daemon>" | jq -c 'select(.fields.message | contains("backend call usage"))'
 
 # Check which mechanism registry revision a daemon replica loaded:
-kubectl -n <ns> logs deploy/<daemon> | jq -c 'select(.fields.message=="mechanism registry ready") | .fields.revision'
+kubectl -n "<ns>" logs "deploy/<daemon>" | jq -c 'select(.fields.message=="mechanism registry ready") | .fields.revision'
 
 # Force a daemon registry reload without restarting:
-kubectl -n <ns> exec deploy/<daemon> -- kill -HUP 1
+kubectl -n "<ns>" exec "deploy/<daemon>" -- kill -HUP 1
 ```
 
 ## 8a. Environment variable overrides

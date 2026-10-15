@@ -1,16 +1,13 @@
 # Kubernetes test deployment
 
-This directory contains the manifests the SRE/ops audit
-exercises. It is an isolated audit/test fixture — not a production
-template and not a recommended starting point. Its `auth = "none"`
-transport and baked-in demo PINs exist so the audit can exercise the
-proxy without credential provisioning; do not promote this fixture
-by copying it into an overlay or chart. Start production from
-`examples/configs/{prod,staging}` with mTLS enabled (see
-These manifests run a three-replica SoftHSM2 demo with a signing consumer.
-They use unauthenticated TCP and fixed demo PINs. For a real deployment,
-configure mTLS and per-client authorization with the
-[staging or production configs](../configs/) (see
+This directory contains the manifests the SRE/ops audit exercises: a
+three-replica SoftHSM2 demo with a signing consumer. It is an isolated
+audit/test fixture — not a production template and not a recommended
+starting point. Its `auth = "none"` transport and baked-in demo PINs
+exist so the audit can exercise the proxy without credential
+provisioning; do not promote this fixture by copying it into an
+overlay or chart. For a real deployment, start from the
+[staging or production configs](../configs/) with mTLS enabled (see
 [mTLS setup](../../doc/release/mtls-setup.md) and the
 [operator runbook](../../doc/runbooks/operating-pkcs11-proxy-ng.md))
 and provision real PINs.
@@ -61,7 +58,6 @@ expects the checkout directory to be named `pkcs11-proxy-ng`.
 
 ```bash
 # 1) Build the pkcs11-proxy-ng images.
-( cd ../../.. && \
 ( cd ../.. && \
   docker build --build-arg ALPINE_BUILD_IMAGE=alpine:3.23@sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0 \
     -f packaging/alpine/Dockerfile.alpine \

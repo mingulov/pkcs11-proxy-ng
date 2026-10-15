@@ -19,6 +19,12 @@ module = "/usr/lib64/libsoftokn3.so"
 # initialize_args = "configdir='sql:/var/lib/nssdb' ..." # via env if needed
 
 [proxy]
+# v0.2 testing scope: one logical client in one trusted security
+# domain per daemon/provider instance. Restart the daemon/provider
+# before switching independent clients or domains. This admission
+# limit refuses a second concurrent client; it does not establish
+# multi-client isolation and does not clear native login state.
+max_contexts = 1
 request_timeout_secs = 60
 startup_timeout_secs = 30
 shutdown_grace_secs = 10
@@ -46,6 +52,9 @@ allow_insecure_tcp = false
 # Explicit grants even in staging: no allow-all baseline. Bare and rich
 # grants may mix in one policy — the bare form keeps the runtime
 # bare-grant default (extraction allowed, all classes/mechanisms).
+# Use a dedicated CA that signs only this deployment's certificates:
+# any CA-trusted identity can reserve the single admitted context
+# (see "Certificate trust scope" in doc/release/mtls-setup.md).
 allow_all_authenticated = false
 
 [[auth.policy]]

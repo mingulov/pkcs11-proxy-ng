@@ -11,7 +11,7 @@ and audit work is implemented locally and partially covered, but local unit and
 integration coverage is not a provenance-complete transparency matrix. Therefore
 this document makes no parity or public support claim for the local target.
 
-## Selected v0.2 boundary (implementation and qualification pending)
+## Selected v0.2 boundary (implemented; candidate qualification separate)
 
 The [native ownership contract](native-mechanism-ownership.md) qualifies live
 production FFI on Linux GNU/musl x86_64/64-bit and x86/32-bit (i686), and —
@@ -60,24 +60,17 @@ unmanaged calls, another runtime copy or shared downstream aggregator aliases
 are excluded. Independent chains need separate processes. Unresolved native
 lifetime selects qualified raw Linux `exit_group(70)`, affecting all threads
 and co-located clients without cleanup, wiping or an audit-tail guarantee.
-All of this enforcement remains implementation/qualification work; the v0.1.0
-support statement below is unchanged.
-
-## Platform
-
-| Dimension | Beta support |
-| --- | --- |
-| OS | Linux |
-| Architecture | `x86_64` |
-| 32-bit / mixed 32-64-bit | **Deferred** — not supported for the public v0.1.0 beta |
-
-## Transport
-# Beta Support Matrix
+This enforcement is implemented; candidate-bound qualification
+(subprocess/topology coverage, provider parity) remains separate work.
+The v0.1.0 support statement below is unchanged.
 
 ## Public v0.1.0 support
 
-This is the support claim for the published `v0.1.0` beta. Behavior outside
-this matrix may work, but has not been validated to the same standard.
+This is the support claim for the published `v0.1.0` beta: Linux
+`x86_64`, over TCP with mutual TLS or a Unix-domain socket with
+peer-credential authentication, against the validated providers below.
+Behavior outside this matrix may work, but has not been validated to
+the same standard.
 
 | Area | Supported scope |
 | --- | --- |
@@ -113,6 +106,7 @@ These remain valuable but do **not** block or qualify the beta:
 - 32-bit and mixed-architecture support
 - Provider/HSM support beyond the validated matrix
 - Performance/throughput guarantees
+- Plain TCP without mTLS (no public support claim; undecided)
 
 ## Known limitations
 
@@ -146,23 +140,7 @@ Open an issue with: provider + version, the operation, the `CK_RV` observed
 direct vs. proxied, and (if possible) the `pkcs11-check` direct and proxied
 reports. Differences that are provider-specific (present without the proxy) are
 documented as known issues rather than treated as proxy bugs.
-| Operating system and architecture | Linux `x86_64` |
-| Transport | TCP with mutual TLS; Unix-domain socket with peer-credential authentication |
-| Providers | SoftHSM2, NSS softokn, Kryoptic |
-
-Plain TCP without mTLS has no public support claim. The beta does not claim
-32-bit or mixed-width support, other providers, production readiness, or
-performance guarantees. See [mTLS setup](mtls-setup.md) for deployment details.
-
-For the listed providers, the claim is that loading the proxy shim does not
-materially change observed PKCS#11 behavior compared with loading the same
-provider directly. [Parity validation](parity-validation.md) explains the
-comparison and how differences are handled. The proxy preserves backend
-`CK_RV` values, including provider-specific error precedence.
-
-A hard backend crash can affect clients sharing that backend. The
-[operator runbook](../runbooks/operating-pkcs11-proxy-ng.md#4a-crash-isolation--blast-radius--run-multiple-instances)
-describes the multiple-instance and reconnect approach.
+See [mTLS setup](mtls-setup.md) for deployment details.
 
 ## Unreleased testing scope
 

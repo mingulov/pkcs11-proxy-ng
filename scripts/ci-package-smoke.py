@@ -6,11 +6,13 @@ then proves real provider operations through them:
 
 * ``linux-bundle``: extract the exact Linux GNU tarball, check
   hashes/materials against its build provenance, and run the extracted
-  daemon/shim/CLI through a SoftHSM session/login/keygen/RSA-sign flow.
+  daemon/shim/CLI through a SoftHSM session/login/keygen/RSA-sign flow
+  over mTLS plus the authenticated Unix socket.
 * ``windows-bundle``: extract the exact Windows MSVC ZIP, check it, and
   execute the packaged daemon/CLI plus the shim DLL through a real
-  provider-backed session via the shipped ``cross_width_smoke.exe``,
-  which needs a live configured daemon/provider and scratch token.
+  provider-backed session via the shipped ``cross_width_smoke.exe``
+  over mTLS, which needs a live configured daemon/provider and scratch
+  token.
 * ``macos-bundle``: extract the exact macOS arm64 tarball, check
   hashes/materials against its build provenance, strip the Gatekeeper
   quarantine xattrs macOS attaches to downloaded archives (byte hashes
@@ -30,11 +32,23 @@ The same contract verifies registry release bundles after publication,
 before GitHub asset approval. All artifact paths are explicit required
 arguments: there is no default and no fallback.
 
+The daemon always runs a shipped template with only named
+provider/port/certificate/socket substitutions: the extracted
+``examples/configs/bundle/proxy.toml`` on Unix bundle lanes, the
+extracted ``proxy.toml.template`` on the Windows lane, and the
+installed ``proxy.toml.default`` (via explicit ``--template``) on
+the installed lane. mTLS lanes mint scratch certificates with
+``openssl``; every lane asserts the daemon logged the rendered
+posture (and no plaintext downgrade on mTLS lanes).
+
 Provider chain exercised on Unix (proves the shim's
 C_GetSlotList -> C_OpenSession -> C_Login -> C_GenerateKey ->
 C_SignInit / C_Sign path end to end against a real backend):
 slot discovery, login, RSA-2048 key generation, SHA256-RSA-PKCS sign
-with a non-trivial signature size check.
+with a non-trivial signature size check, signature verification
+(readback), a token listing over the authenticated Unix socket where
+the template configures it, and a reconnect listing after a daemon
+restart (recovery).
 
 Daemon lifecycle, SoftHSM provisioning, and ZIP safety helpers are
 reused from scripts/ci-direct-vs-proxy.py. Hash enforcement for the
@@ -62,6 +76,7 @@ from pathlib import Path
 SOFTHSM_WIN_SHA256 = "85273BCC1A6B90E877F7BB4F7E90221D57103D8F5241D154A79DD730A135B910"
 
 DAEMON_LOG_TCP_WARN = "listening on tcp without authentication"
+DAEMON_LOG_TCP = "listening on tcp"
 DAEMON_LOG_REGISTRY = "mechanism registry ready"
 
 APK_PACKAGES = (
@@ -178,24 +193,121 @@ def require_daemon_ready(log_path, port, proc, timeout_s=30):
     )
 
 
-def write_daemon_config(path, module, port):
-    module_toml = module.replace("\\", "\\\\")
-    with open(path, "w", encoding="utf-8") as handle:
-        handle.write(
-            "[backend]\n"
-            f'module = "{module_toml}"\n'
-            "\n[proxy]\n"
-            "request_timeout_secs = 30\n"
-            "startup_timeout_secs = 30\n"
-            "shutdown_grace_secs = 30\n"
-            "backend_health_consecutive_failures = 3\n"
-            "\n[listener.remote]\n"
-            f'bind = "127.0.0.1:{port}"\n'
-            'auth = "none"\n'
-            "allow_insecure_tcp = true\n"
-            "\n[auth]\n"
-        )
-    return path
+def _toml_escape(value):
+    return value.replace("\\", "\\\\")
+
+
+def template_posture(template_path):
+    """``(use_mtls, use_uds)`` from a shipped template's active listeners.
+
+    Only uncommented lines count: the installed default documents an
+    mTLS block in comments but ships plaintext.
+    """
+    use_mtls = use_uds = False
+    in_local = False
+    for line in Path(require_file(template_path, "daemon config template")).read_text(
+            encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("["):
+            in_local = stripped == "[listener.local]"
+            use_uds = use_uds or in_local
+            continue
+        if stripped == 'auth = "mtls"':
+            use_mtls = True
+    return use_mtls, use_uds
+
+
+def render_template(template_path, output_path, *, module, port, ca_cert=None,
+                    server_cert=None, server_key=None, socket_path=None):
+    """Render a shipped template with only named substitutions.
+
+    ``module``/``port`` always apply; the certificate paths (a
+    ``generate_mtls_certs`` dict unpacked by the caller) and
+    ``socket_path`` apply when given — and then the template must
+    carry those keys, so template drift fails loudly instead of
+    silently running a different posture. Returns the output path.
+    """
+    require_file(template_path, "daemon config template")
+    lines = Path(template_path).read_text(encoding="utf-8").splitlines()
+    module_toml = _toml_escape(module)
+    want = {"module": module_toml, "bind": str(port)}
+    cert_args = {"ca_cert": ca_cert, "server_cert": server_cert, "server_key": server_key}
+    if any(value is not None for value in cert_args.values()):
+        if any(value is None for value in cert_args.values()):
+            raise SystemExit("certificate substitutions must be given together")
+        want.update({key: _toml_escape(value) for key, value in cert_args.items()})
+    if socket_path is not None:
+        want["path"] = _toml_escape(socket_path)
+    seen = set()
+    rendered = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            key = stripped.split("=", 1)[0].strip()
+            if key in want:
+                seen.add(key)
+                if key == "bind":
+                    address = stripped.split("=", 1)[1].strip().strip('"')
+                    host = address.rsplit(":", 1)[0] if ":" in address else address
+                    line = f'bind = "{host}:{port}"'
+                else:
+                    line = f'{key} = "{want[key]}"'
+        rendered.append(line)
+    missing = set(want) - seen
+    if missing:
+        raise SystemExit(f"template {template_path} lacks named keys: {sorted(missing)}")
+    with open(output_path, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(rendered) + "\n")
+    log(f"rendered {template_path} -> {output_path} ({', '.join(sorted(seen))})")
+    return output_path
+
+
+def generate_mtls_certs(workdir):
+    """Mint a scratch CA + server/client certificates with openssl.
+
+    Returns ``{ca_cert, server_cert, server_key, client_cert,
+    client_key}`` paths. Keys are mode 0600 (the daemon refuses
+    group/other-readable server keys on Unix).
+    """
+    openssl = shutil.which("openssl")
+    if openssl is None:
+        raise SystemExit("openssl not on PATH; required to mint smoke mTLS certificates")
+    certs_dir = os.path.join(require_dir(workdir, "smoke workdir"), "tls")
+    os.makedirs(certs_dir, exist_ok=True)
+    paths = {name: os.path.join(certs_dir, name)
+             for name in ("ca.crt", "ca.key", "server.crt", "server.key",
+                          "server.csr", "client.crt", "client.key", "client.csr")}
+
+    def run_openssl(*args):
+        result = subprocess.run([openssl, *args], text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if result.returncode != 0:
+            raise SystemExit(f"openssl {' '.join(args)} failed:\n{result.stdout[-2000:]}")
+
+    run_openssl("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
+                "-keyout", paths["ca.key"], "-out", paths["ca.crt"],
+                "-subj", "/CN=package-smoke-ca")
+    run_openssl("req", "-newkey", "rsa:2048", "-nodes",
+                "-keyout", paths["server.key"], "-out", paths["server.csr"],
+                "-subj", "/CN=localhost",
+                "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1")
+    run_openssl("x509", "-req", "-in", paths["server.csr"],
+                "-CA", paths["ca.crt"], "-CAkey", paths["ca.key"], "-CAcreateserial",
+                "-days", "2", "-copy_extensions", "copy", "-out", paths["server.crt"])
+    run_openssl("req", "-newkey", "rsa:2048", "-nodes",
+                "-keyout", paths["client.key"], "-out", paths["client.csr"],
+                "-subj", "/CN=package-smoke-client")
+    run_openssl("x509", "-req", "-in", paths["client.csr"],
+                "-CA", paths["ca.crt"], "-CAkey", paths["ca.key"], "-CAcreateserial",
+                "-days", "2", "-out", paths["client.crt"])
+    for name in ("ca.key", "server.key", "client.key"):
+        os.chmod(paths[name], 0o600)
+    log(f"minted smoke mTLS certificates in {certs_dir}")
+    return {"ca_cert": paths["ca.crt"], "server_cert": paths["server.crt"],
+            "server_key": paths["server.key"], "client_cert": paths["client.crt"],
+            "client_key": paths["client.key"]}
 
 
 def write_softhsm_conf(path, token_dir):
@@ -278,12 +390,75 @@ def find_staged(bundle_root, name):
     return str(hits[0])
 
 
-def unix_provider_smoke(daemon, shim, cli, workdir, softhsm_lib=None, softhsm_util=None):
-    """Run the real SoftHSM session/login/keygen/sign flow (Unix)."""
+def find_bundle_template(bundle_root):
+    """Locate the shipped bundle daemon template inside an extraction.
+
+    Several ``proxy.toml`` files ship in the bundle (prod, staging,
+    bundle); exactly the ``examples/configs/bundle/proxy.toml`` path
+    may match.
+    """
+    hits = [item for item in Path(require_dir(bundle_root, "bundle root")).rglob("proxy.toml")
+            if item.is_file()
+            and item.as_posix().endswith("examples/configs/bundle/proxy.toml")]
+    if len(hits) != 1:
+        raise SystemExit(f"bundle has {len(hits)} bundle templates; expected exactly one")
+    return str(hits[0])
+
+
+def start_smoke_daemon(daemon, proxy_toml, daemon_log, port, *, append=False):
+    """Start a smoke-owned daemon; return the Popen handle once bound."""
+    log(f"starting packaged daemon {daemon} on 127.0.0.1:{port}")
+    with open(daemon_log, "ab" if append else "wb") as logfh:
+        env = dict(os.environ)
+        env.setdefault("RUST_LOG", "pkcs11_proxy_ng=info")
+        proc = subprocess.Popen([daemon, proxy_toml], stdout=logfh,
+                                stderr=subprocess.STDOUT, env=env)
+    require_daemon_ready(daemon_log, port, proc)
+    return proc
+
+
+def stop_smoke_daemon(proc):
+    """Terminate a smoke-owned daemon, killing it if it lingers."""
+    log("stopping smoke-owned daemon")
+    proc.terminate()
+    try:
+        proc.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+def assert_daemon_logs(daemon_log, *, mtls, uds):
+    """Check the daemon logged the rendered posture (and no downgrade)."""
+    with open(daemon_log, encoding="utf-8", errors="replace") as handle:
+        daemon_text = handle.read()
+    for needle in (DAEMON_LOG_TCP, DAEMON_LOG_REGISTRY):
+        if needle not in daemon_text:
+            raise SystemExit(f"daemon log missing {needle!r}; see {daemon_log}")
+    if uds and "listening on unix socket" not in daemon_text:
+        raise SystemExit(f"daemon log missing 'listening on unix socket'; see {daemon_log}")
+    if mtls and DAEMON_LOG_TCP_WARN in daemon_text:
+        raise SystemExit(f"mTLS daemon logged plaintext mode; see {daemon_log}")
+    if not mtls and DAEMON_LOG_TCP_WARN not in daemon_text:
+        raise SystemExit(f"plaintext daemon hid its loud warning; see {daemon_log}")
+    log("daemon up; startup assertions observed")
+
+
+def unix_provider_smoke(daemon, shim, cli, workdir, softhsm_lib=None, softhsm_util=None,
+                        *, template):
+    """Run the real SoftHSM session/login/keygen/sign flow (Unix).
+
+    The daemon runs the shipped ``template`` with only named
+    provider/port/certificate/socket substitutions — never a
+    hand-rolled configuration. Bundle lanes exercise mTLS plus the
+    authenticated Unix socket; the installed lane exercises the
+    installed plaintext default.
+    """
     daemon = require_executable(daemon, "daemon binary")
     shim = require_file(shim, "shim library")
     cli = require_executable(cli, "CLI binary")
     workdir = require_dir(workdir, "smoke workdir")
+    if template is None:
+        raise SystemExit("unix smoke requires the shipped template path")
     if softhsm_lib is None or softhsm_util is None:
         softhsm_lib, softhsm_util = _compare.provision_softhsm_unix()
     else:
@@ -300,26 +475,34 @@ def unix_provider_smoke(daemon, shim, cli, workdir, softhsm_lib=None, softhsm_ut
     # Single provisioning source: the flow below addresses the scratch
     # token this shared helper created (its label/PINs).
     _compare.init_scratch_token(softhsm_util)
+    use_mtls, use_uds = template_posture(template)
+    certs = generate_mtls_certs(workdir) if use_mtls else None
+    socket_path = os.path.join(workdir, "proxy.sock") if use_uds else None
     port = free_port()
-    endpoint = f"http://127.0.0.1:{port}"
-    proxy_toml = write_daemon_config(os.path.join(workdir, "proxy.toml"), softhsm_lib, port)
+    render_kwargs = {"module": softhsm_lib, "port": port}
+    if certs is not None:
+        render_kwargs.update({key: certs[key]
+                              for key in ("ca_cert", "server_cert", "server_key")})
+    if socket_path is not None:
+        render_kwargs["socket_path"] = socket_path
+    proxy_toml = render_template(template, os.path.join(workdir, "proxy.toml"),
+                                 **render_kwargs)
     daemon_log = os.path.join(workdir, "daemon.log")
-    log(f"starting packaged daemon {daemon} on {endpoint}")
-    with open(daemon_log, "wb") as logfh:
-        env = dict(os.environ)
-        env.setdefault("RUST_LOG", "pkcs11_proxy_ng=info")
-        proc = subprocess.Popen([daemon, proxy_toml], stdout=logfh,
-                                stderr=subprocess.STDOUT, env=env)
-    try:
-        require_daemon_ready(daemon_log, port, proc)
-        with open(daemon_log, encoding="utf-8", errors="replace") as handle:
-            daemon_text = handle.read()
-        for needle in (DAEMON_LOG_TCP_WARN, DAEMON_LOG_REGISTRY):
-            if needle not in daemon_text:
-                raise SystemExit(f"daemon log missing {needle!r}; see {daemon_log}")
-        log("daemon up; startup assertions observed")
+    if use_mtls:
+        endpoint = f"https://127.0.0.1:{port}"
+        smoke_env = {"PKCS11_PROXY_ENDPOINT": endpoint,
+                     "PKCS11_PROXY_TLS_CA_CERT": certs["ca_cert"],
+                     "PKCS11_PROXY_TLS_CLIENT_CERT": certs["client_cert"],
+                     "PKCS11_PROXY_TLS_CLIENT_KEY": certs["client_key"],
+                     "PKCS11_PROXY_TLS_DOMAIN": "localhost",
+                     "PKCS11_PROXY_CONNECT_TIMEOUT": "10"}
+    else:
+        endpoint = f"http://127.0.0.1:{port}"
         smoke_env = {"PKCS11_PROXY_ENDPOINT": endpoint,
                      "PKCS11_PROXY_CONNECT_TIMEOUT": "10"}
+    proc = start_smoke_daemon(daemon, proxy_toml, daemon_log, port)
+    try:
+        assert_daemon_logs(daemon_log, mtls=use_mtls, uds=use_uds)
         slots = run_provider_step([pkcs11_tool, "--module", shim, "--list-slots"],
                                   "list-slots", env=smoke_env)
         if _compare.TOKEN_LABEL not in slots.stdout:
@@ -335,42 +518,71 @@ def unix_provider_smoke(daemon, shim, cli, workdir, softhsm_lib=None, softhsm_ut
         run_provider_step([pkcs11_tool, "--module", shim, "--token-label", _compare.TOKEN_LABEL,
                            "--login", "--pin", _compare.USER_PIN, "--sign",
                            "--mechanism", "SHA256-RSA-PKCS",
-                           "--input-file", data_path, "--output-file", sig_path],
+                           "--input-file", data_path, "--output-file", sig_path,
+                           "--id", "01"],
                           "sign", env=smoke_env)
         size = os.path.getsize(sig_path)
         if size < 200:
             raise SystemExit(f"signature size {size} too small for RSA-2048")
         log(f"produced {size}-byte RSA-2048 signature through {shim}")
+        run_provider_step([pkcs11_tool, "--module", shim, "--token-label", _compare.TOKEN_LABEL,
+                           "--login", "--pin", _compare.USER_PIN, "--verify",
+                           "--mechanism", "SHA256-RSA-PKCS",
+                           "--input-file", data_path, "--signature-file", sig_path,
+                           "--id", "01"],
+                          "verify", env=smoke_env)
+        log("signature verified back through the proxy (readback)")
+        if use_uds:
+            uds_env = {"PKCS11_PROXY_ENDPOINT": f"unix:{socket_path}",
+                       "PKCS11_PROXY_CONNECT_TIMEOUT": "10"}
+            uds_slots = run_provider_step(
+                [pkcs11_tool, "--module", shim, "--list-slots"],
+                "list-slots-uds", env=uds_env)
+            if _compare.TOKEN_LABEL not in uds_slots.stdout:
+                raise SystemExit(f"token {_compare.TOKEN_LABEL!r} missing over UDS")
+            log("token listed over the authenticated Unix socket")
         run_provider_step([cli, "--version"], "cli-version")
+        # Recovery: a daemon restart drops sessions/handles; a fresh
+        # consumer must reconnect cleanly against the same token store.
+        stop_smoke_daemon(proc)
+        proc = start_smoke_daemon(daemon, proxy_toml, daemon_log, port, append=True)
+        assert_daemon_logs(daemon_log, mtls=use_mtls, uds=use_uds)
+        relist = run_provider_step([pkcs11_tool, "--module", shim, "--list-slots"],
+                                   "list-slots-after-restart", env=smoke_env)
+        if _compare.TOKEN_LABEL not in relist.stdout:
+            raise SystemExit(f"token {_compare.TOKEN_LABEL!r} missing after daemon restart")
+        log("reconnected after daemon restart (recovery)")
     finally:
-        log("stopping smoke-owned daemon")
-        proc.terminate()
-        try:
-            proc.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        stop_smoke_daemon(proc)
     log(f"PASS: {provider_operation_chain()}")
     return {"endpoint": endpoint, "daemon_log": daemon_log}
 
 
-def run_cross_width_smoke(smoke_exe, shim_dll, endpoint):
+def run_cross_width_smoke(smoke_exe, shim_dll, endpoint, extra_env=None):
     """Execute the packaged DLL through a live provider-backed session."""
     smoke_exe = require_executable(smoke_exe, "cross_width_smoke.exe")
     shim_dll = require_file(shim_dll, "shim DLL")
     if not endpoint:
         raise SystemExit("cross_width_smoke needs a live daemon endpoint")
-    return run_provider_step([smoke_exe, shim_dll], "cross-width-smoke",
-                             env={"PKCS11_PROXY_ENDPOINT": endpoint,
-                                  "PKCS11_PROXY_CONNECT_TIMEOUT": "10"})
+    env = {"PKCS11_PROXY_ENDPOINT": endpoint, "PKCS11_PROXY_CONNECT_TIMEOUT": "10"}
+    if extra_env:
+        env.update(extra_env)
+    return run_provider_step([smoke_exe, shim_dll], "cross-width-smoke", env=env)
 
 
-def windows_provider_smoke(daemon, cli, shim_dll, smoke_exe, workdir):
-    """Run the real provider-backed flow on a native Windows runner."""
+def windows_provider_smoke(daemon, cli, shim_dll, smoke_exe, workdir, *, template):
+    """Run the real provider-backed flow on a native Windows runner.
+
+    The daemon runs the shipped Windows template with only named
+    provider/port/certificate substitutions, over mTLS.
+    """
     daemon = require_executable(daemon, "daemon binary")
     cli = require_executable(cli, "CLI binary")
     shim_dll = require_file(shim_dll, "shim DLL")
     smoke_exe = require_executable(smoke_exe, "cross_width_smoke.exe")
     workdir = require_dir(workdir, "smoke workdir")
+    if template is None:
+        raise SystemExit("windows smoke requires the shipped template path")
     softhsm_lib, softhsm_util = _compare.provision_softhsm_windows(workdir)
     log(f"SoftHSM module: {softhsm_lib}")
     token_dir = os.path.join(workdir, "tokens")
@@ -378,32 +590,29 @@ def windows_provider_smoke(daemon, cli, shim_dll, smoke_exe, workdir):
     os.environ["SOFTHSM2_CONF"] = write_softhsm_conf(os.path.join(workdir, "softhsm2.conf"),
                                                     token_dir)
     _compare.init_scratch_token(softhsm_util)
+    use_mtls, _use_uds = template_posture(template)
+    if not use_mtls:
+        raise SystemExit(f"windows template {template} must stay mTLS")
+    certs = generate_mtls_certs(workdir)
     port = free_port()
-    endpoint = f"http://127.0.0.1:{port}"
-    proxy_toml = write_daemon_config(os.path.join(workdir, "proxy.toml"), softhsm_lib, port)
+    endpoint = f"https://127.0.0.1:{port}"
+    proxy_toml = render_template(template, os.path.join(workdir, "proxy.toml"),
+                                 module=softhsm_lib, port=port,
+                                 ca_cert=certs["ca_cert"],
+                                 server_cert=certs["server_cert"],
+                                 server_key=certs["server_key"])
     daemon_log = os.path.join(workdir, "daemon.log")
-    log(f"starting packaged daemon {daemon} on {endpoint}")
-    with open(daemon_log, "wb") as logfh:
-        env = dict(os.environ)
-        env.setdefault("RUST_LOG", "pkcs11_proxy_ng=info")
-        proc = subprocess.Popen([daemon, proxy_toml], stdout=logfh,
-                                stderr=subprocess.STDOUT, env=env)
+    proc = start_smoke_daemon(daemon, proxy_toml, daemon_log, port)
     try:
-        require_daemon_ready(daemon_log, port, proc)
-        with open(daemon_log, encoding="utf-8", errors="replace") as handle:
-            daemon_text = handle.read()
-        for needle in (DAEMON_LOG_TCP_WARN, DAEMON_LOG_REGISTRY):
-            if needle not in daemon_text:
-                raise SystemExit(f"daemon log missing {needle!r}; see {daemon_log}")
-        run_cross_width_smoke(smoke_exe, shim_dll, endpoint)
+        assert_daemon_logs(daemon_log, mtls=True, uds=False)
+        run_cross_width_smoke(smoke_exe, shim_dll, endpoint, extra_env={
+            "PKCS11_PROXY_TLS_CA_CERT": certs["ca_cert"],
+            "PKCS11_PROXY_TLS_CLIENT_CERT": certs["client_cert"],
+            "PKCS11_PROXY_TLS_CLIENT_KEY": certs["client_key"],
+            "PKCS11_PROXY_TLS_DOMAIN": "localhost"})
         run_provider_step([cli, "--version"], "cli-version")
     finally:
-        log("stopping smoke-owned daemon")
-        proc.terminate()
-        try:
-            proc.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        stop_smoke_daemon(proc)
     log("PASS: packaged daemon/CLI/DLL served a live provider-backed session")
     return {"endpoint": endpoint, "daemon_log": daemon_log}
 
@@ -529,7 +738,8 @@ def cmd_linux_bundle(args):
     daemon = find_staged(extracted, "pkcs11-proxy-ng")
     cli = find_staged(extracted, "pkcs11-proxy-ng-cli")
     shim = find_staged(extracted, "libpkcs11_proxy_ng_shim.so")
-    return unix_provider_smoke(daemon, shim, cli, workdir)
+    template = find_bundle_template(extracted)
+    return unix_provider_smoke(daemon, shim, cli, workdir, template=template)
 
 
 def cmd_macos_bundle(args):
@@ -554,7 +764,8 @@ def cmd_macos_bundle(args):
     daemon = find_staged(extracted, "pkcs11-proxy-ng")
     cli = find_staged(extracted, "pkcs11-proxy-ng-cli")
     shim = find_staged(extracted, "libpkcs11_proxy_ng_shim.dylib")
-    return unix_provider_smoke(daemon, shim, cli, workdir)
+    template = find_bundle_template(extracted)
+    return unix_provider_smoke(daemon, shim, cli, workdir, template=template)
 
 
 def cmd_windows_bundle(args):
@@ -571,7 +782,9 @@ def cmd_windows_bundle(args):
     cli = find_staged(extracted, "pkcs11-proxy-ng-cli.exe")
     shim = find_staged(extracted, "pkcs11_proxy_ng_shim.dll")
     smoke_exe = find_staged(extracted, "cross_width_smoke.exe")
-    return windows_provider_smoke(daemon, cli, shim, smoke_exe, workdir)
+    template = find_staged(extracted, "proxy.toml.template")
+    return windows_provider_smoke(daemon, cli, shim, smoke_exe, workdir,
+                                  template=template)
 
 
 def cmd_apk_verify(args):
@@ -584,7 +797,8 @@ def cmd_installed_verify(args):
 
 
 def cmd_installed_smoke(args):
-    return unix_provider_smoke(args.daemon, args.shim, args.cli, args.workdir)
+    return unix_provider_smoke(args.daemon, args.shim, args.cli, args.workdir,
+                               template=args.template)
 
 
 def parse_args(argv=None):
@@ -613,6 +827,9 @@ def parse_args(argv=None):
     installed.add_argument("--shim", required=True)
     installed.add_argument("--cli", required=True)
     installed.add_argument("--workdir", required=True)
+    installed.add_argument("--template", required=True,
+                           help="installed daemon config template "
+                                "(/etc/pkcs11-proxy-ng/proxy.toml.default)")
     return parser.parse_args(argv)
 
 

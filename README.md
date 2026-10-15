@@ -11,12 +11,14 @@ app ──dlopen──▶ libpkcs11_proxy_ng_shim.so ──gRPC/TLS──▶ pkc
 
 > **Current source version: `v<!-- SYNC-VERSION -->0.2.2<!-- /SYNC-VERSION -->`.**
 >
-> This is the current release line. Until its annotated tag and release
-> artifacts are published, an untagged checkout is a release candidate.
-> Release qualification still requires the source-bound receipt and provider
+> Latest published release: [v0.2.2](https://github.com/mingulov/pkcs11-proxy-ng/releases/tag/v0.2.2)
+> (2026-10-06; [release notes](./doc/release/v0.2.2-release-notes.md)).
+> This checkout is later than that tag and carries unreleased work
+> (passive CLI diagnostics, generated support-matrix table, release
+> attestation/recovery tooling, experimental platform legs). Release
+> qualification still requires the source-bound receipt and provider
 > evidence in the [`0.x` release checklist](./doc/release/0.x-beta-release-checklist.md).
-The tree tracks the current release line (an unpublished candidate until
-tagged). See
+See
 [GitHub Releases](https://github.com/mingulov/pkcs11-proxy-ng/releases) for
 published versions, the [support matrix](./doc/release/beta-support-matrix.md)
 for supported environments, and [release documentation](./doc/release/) for
@@ -62,14 +64,16 @@ hand-rolling a config.
 ## Beta scope
 
 The selected v0.2 [native ownership contract](./doc/release/native-mechanism-ownership.md)
-is partially implemented locally and unreleased: mechanism roots and nested
+is implemented: mechanism roots and nested
 output cells live in persistent native allocations (Miri-checked under both
 borrow models), one provider chain per process is enforced by the
-constructor domain with lifecycle-honest retirement, and wire widths are
-checked with rejection proven on i686 hardware. Still pending: DONT_BLOCK-only
-slot waits with shared native event flags, the qualified Linux
-whole-process lifetime stop, session operation slots, subprocess/topology
-qualification, and the provider parity round. The v0.2.0 tail stretch
+constructor domain with lifecycle-honest retirement, wire widths are
+checked with rejection proven on i686 hardware, slot waiting is
+`CKF_DONT_BLOCK`-only with shared native event flags, and the Linux
+whole-process lifetime stop (`exit_group(70)`) fires on the admitted
+targets. What remains is candidate-bound qualification — session
+operation slots, subprocess/topology coverage, and the provider parity
+round — not the enforcement itself. The v0.2.0 tail stretch
 (implemented 2026-09-17) evidences Windows x64/MSVC daemon + shim in both interoperation
 directions on real Windows Server 2022
 (`artifacts/v020-tail-windows-2026-09-16/` legs A/B/C at the workspace root),
@@ -121,28 +125,14 @@ candidate [release notes](./doc/release/current.md) are satisfied.
   every direct-vs-proxied mismatch: proxy bugs get fixed here,
   provider-conformance issues go upstream — never normalized by the proxy
   ([parity triage](./doc/release/parity-validation.md#triage-of-mismatches))
+- [`scripts/README.md`](./scripts/README.md) — CI, release, and manual tools
 
 The PRD, ADRs, architecture overview, audits, and follow-up notes are maintained
 in the separate `pkcs11-proxy-ng-ws` planning workspace. This repository builds,
-tests, and packages releases independently. See the
-[script inventory](./scripts/README.md) for CI, release, and manual tooling.
+tests, and packages releases independently.
 See [configuration examples](./examples/configs/) for local, mTLS, and
 Unix-socket setups. The `staging` and `prod` example names describe settings;
 the current source remains a single-client testing candidate.
-
-## Documentation
-
-- [Development](./doc/development.md) — tools, build, and tests
-- [Operations](./doc/runbooks/operating-pkcs11-proxy-ng.md) — configuration,
-  deployment, and troubleshooting
-- [Error reference](./doc/error-reference.md) — return codes and what to do
-- [PKCS#11 coverage](./doc/oasis-profile-coverage.md) — interfaces, mechanism
-  parameters, and test coverage
-- [Release documentation](./doc/release/) — support, validation, and packaging
-- [Scripts](./scripts/README.md) — CI, release, and manual tools
-
-Design and planning material lives in the separate `pkcs11-proxy-ng-ws`
-workspace. This repository builds, tests, and packages independently.
 
 ## Release dry run
 
@@ -155,11 +145,11 @@ scripts/release-dry-run.sh
 This validates packaging only; provider parity and publication readiness are
 separate release gates.
 
-The script checks and stages these files:
-
 The dry run checks packaging, not provider parity or publication readiness. The
 complete freeze, receipt, tag, and publication procedure is in the
 [`0.x` release checklist](./doc/release/0.x-beta-release-checklist.md).
+
+It stages these files:
 
 | Artifact | Purpose |
 | --- | --- |
@@ -171,12 +161,13 @@ Use `--prefix /tmp/pkcs11-proxy-ng-install` to keep the staged layout, or
 `--skip-build` to check existing `target/release` artifacts. See the
 [development guide](./doc/development.md#provider-tests) for provider tests.
 
-## crates.io packages (candidate, unpublished)
+## crates.io packages
 
 Eight crates publish at one synchronized version with exact `=X.Y.Z`
 internal requirements (mirrored from the workspace version — see
 `scripts/sync-versions.sh`). Four are user-facing entry points;
-the rest resolve automatically as dependencies:
+the rest resolve automatically as dependencies. Version `0.2.2` is
+published; the current checkout is unreleased work past that tag.
 
 ```bash
 cargo install pkcs11-proxy-ng --locked        # daemon
@@ -190,8 +181,7 @@ The `pkcs11-proxy-ng-shim` crate builds the loadable
 PKCS#11 module — take it from a GitHub release bundle or OS package,
 never `cargo install` it as a library.
 
-These commands describe the intended post-publication state; the crates
-are not published yet and the source is not release-qualified. The full
+The current checkout is not release-qualified. The full
 maintainer procedure — prerequisites, protected environments, staging,
 qualification approval, recovery, evidence retention, and docs.rs
 follow-up — is in the
