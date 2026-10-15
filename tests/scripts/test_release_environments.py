@@ -15,6 +15,8 @@ fixtures. No live GitHub calls, uploads, tags, or network.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import sys
 import tempfile
@@ -195,6 +197,102 @@ class ProtectionContractTests(unittest.TestCase):
         with self.assertRaises(Exception):
             self.check(payload)
 
+    def test_null_reviewer_entry_refuses(self):
+        envs = load_environments()
+        entry = env_entry("crates-io")
+        entry["protection_rules"] = [
+            {"type": "required_reviewers", "reviewers": [None]}]
+        with self.assertRaisesRegex(envs.ReleaseError,
+                                    "malformed reviewer"):
+            self.check(list_payload(entry), intended_policies(),
+                       ("crates-io",))
+
+    def test_unrecognized_reviewer_type_refuses(self):
+        envs = load_environments()
+        entry = env_entry("crates-io")
+        entry["protection_rules"] = [
+            {"type": "required_reviewers",
+             "reviewers": [{"type": "Bot",
+                            "reviewer": {"login": "bot", "id": 2}}]}]
+        with self.assertRaisesRegex(envs.ReleaseError,
+                                    "malformed reviewer"):
+            self.check(list_payload(entry), intended_policies(),
+                       ("crates-io",))
+
+    def test_reviewer_without_identifier_refuses(self):
+        envs = load_environments()
+        for reviewers in ([{"type": "User", "reviewer": {}}],
+                          [{"type": "User"}],
+                          ["owner"],
+                          [None, {"type": "User",
+                                  "reviewer": {"login": "o", "id": 1}}]):
+            with self.subTest(reviewers=reviewers):
+                entry = env_entry("crates-io")
+                entry["protection_rules"] = [
+                    {"type": "required_reviewers",
+                     "reviewers": reviewers}]
+                with self.assertRaisesRegex(envs.ReleaseError,
+                                            "malformed reviewer"):
+                    self.check(list_payload(entry), intended_policies(),
+                               ("crates-io",))
+
+    def test_team_reviewer_with_slug_passes(self):
+        entry = env_entry("crates-io")
+        entry["protection_rules"] = [
+            {"type": "required_reviewers",
+             "reviewers": [{"type": "Team",
+                            "reviewer": {"slug": "releasers",
+                                         "id": 7}}]}]
+        self.assertEqual(self.check(list_payload(entry),
+                                    intended_policies(), ("crates-io",)),
+                         ("crates-io",))
+
+    def test_null_protection_rules_refuses_with_release_error(self):
+        envs = load_environments()
+        entry = env_entry("crates-io")
+        entry["protection_rules"] = None
+        with self.assertRaisesRegex(envs.ReleaseError,
+                                    "protection_rules.*malformed"):
+            self.check(list_payload(entry), intended_policies(),
+                       ("crates-io",))
+
+    def test_missing_protected_branches_field_refuses(self):
+        envs = load_environments()
+        entry = env_entry("crates-io")
+        entry["deployment_branch_policy"] = {
+            "custom_branch_policies": True}
+        with self.assertRaisesRegex(envs.ReleaseError, "malformed"):
+            self.check(list_payload(entry), intended_policies(),
+                       ("crates-io",))
+
+    def test_contradictory_policy_flags_refuse(self):
+        envs = load_environments()
+        entry = env_entry("crates-io")
+        entry["deployment_branch_policy"] = {
+            "protected_branches": True, "custom_branch_policies": True}
+        with self.assertRaisesRegex(envs.ReleaseError, "contradictory"):
+            self.check(list_payload(entry), intended_policies(),
+                       ("crates-io",))
+
+    def test_truncated_policy_readback_refuses(self):
+        envs = load_environments()
+        policies = intended_policies()
+        policies["crates-io"] = {
+            "total_count": 2,
+            "branch_policies": [{"name": "v*", "type": "tag"}]}
+        with self.assertRaisesRegex(envs.ReleaseError,
+                                    "crates-io.*incomplete"):
+            self.check(protected_list(), policies)
+
+    def test_policy_readback_without_total_count_refuses(self):
+        envs = load_environments()
+        policies = intended_policies()
+        policies["release"] = {
+            "branch_policies": [{"name": "v*", "type": "tag"}]}
+        with self.assertRaisesRegex(envs.ReleaseError,
+                                    "release.*total_count"):
+            self.check(protected_list(), policies)
+
     def test_malformed_list_payload_refuses(self):
         for payload in ({}, {"total_count": 0}, {"environments": {}},
                         {"environments": "x"}, [], "[]", None, 42):
@@ -244,6 +342,173 @@ class EnvironmentsPreflightCommandTests(unittest.TestCase):
             api = self.write(temp, "env.json", json.dumps(payload))
             self.assertNotEqual(self.check("--api-json", api,
                                            "--environment", "release"), 0)
+
+    def run_cli(self, *args):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            status = self.check(*args)
+        return status, err.getvalue()
+
+    def write_gate(self, temp, entry, policies=None):
+        api = self.write(temp, "env.json",
+                         json.dumps(list_payload(entry)))
+        args = ["--api-json", api, "--environment", entry["name"]]
+        for name, payload in (policies or intended_policies()).items():
+            policy_file = self.write(temp, name + ".json",
+                                     json.dumps(payload))
+            args += ["--policies-json", f"{name}={policy_file}"]
+        return args
+
+    def test_cli_refuses_null_reviewer(self):
+        with tempfile.TemporaryDirectory() as temp:
+            entry = env_entry("crates-io")
+            entry["protection_rules"] = [
+                {"type": "required_reviewers", "reviewers": [None]}]
+            status, err = self.run_cli(*self.write_gate(temp, entry))
+            self.assertNotEqual(status, 0)
+            self.assertIn("malformed reviewer", err)
+
+    def test_cli_refuses_missing_protected_branches(self):
+        with tempfile.TemporaryDirectory() as temp:
+            entry = env_entry("crates-io")
+            entry["deployment_branch_policy"] = {
+                "custom_branch_policies": True}
+            status, err = self.run_cli(*self.write_gate(temp, entry))
+            self.assertNotEqual(status, 0)
+            self.assertIn("malformed", err)
+
+    def test_cli_refuses_contradictory_policy_flags(self):
+        with tempfile.TemporaryDirectory() as temp:
+            entry = env_entry("crates-io")
+            entry["deployment_branch_policy"] = {
+                "protected_branches": True,
+                "custom_branch_policies": True}
+            status, err = self.run_cli(*self.write_gate(temp, entry))
+            self.assertNotEqual(status, 0)
+            self.assertIn("contradictory", err)
+
+    def test_cli_refuses_null_protection_rules(self):
+        with tempfile.TemporaryDirectory() as temp:
+            entry = env_entry("crates-io")
+            entry["protection_rules"] = None
+            status, err = self.run_cli(*self.write_gate(temp, entry))
+            self.assertNotEqual(status, 0)
+            self.assertIn("release check failed: environment 'crates-io'",
+                          err)
+
+    def test_cli_refuses_truncated_policy_readback(self):
+        with tempfile.TemporaryDirectory() as temp:
+            entry = env_entry("crates-io")
+            policies = intended_policies()
+            policies["crates-io"] = {
+                "total_count": 2,
+                "branch_policies": [{"name": "v*", "type": "tag"}]}
+            status, err = self.run_cli(
+                *self.write_gate(temp, entry, policies))
+            self.assertNotEqual(status, 0)
+            self.assertIn("incomplete", err)
+            self.assertIn("crates-io", err)
+
+    def test_cli_refusal_sweep_reproduces_every_message(self):
+        # Reproducible form of the refusal-message sweep: every
+        # fail-closed path re-exercised through the real CLI, each
+        # asserting a nonzero exit and its refusal message.
+        null_reviewer = env_entry("crates-io")
+        null_reviewer["protection_rules"] = [
+            {"type": "required_reviewers", "reviewers": [None]}]
+        missing_flag = env_entry("crates-io")
+        missing_flag["deployment_branch_policy"] = {
+            "custom_branch_policies": True}
+        both_flags = env_entry("crates-io")
+        both_flags["deployment_branch_policy"] = {
+            "protected_branches": True, "custom_branch_policies": True}
+        null_rules = env_entry("crates-io")
+        null_rules["protection_rules"] = None
+        cases = [
+            ("absent-reviewer",
+             [env_entry("crates-io", reviewers=False)],
+             intended_policies(), "crates-io",
+             "has no required-reviewers rule"),
+            ("empty-reviewers",
+             [env_entry("crates-io", empty_reviewers=True)],
+             intended_policies(), "crates-io", "lists no reviewers"),
+            ("missing-env", [env_entry("release-tag")],
+             intended_policies(), "crates-io",
+             "missing from the environments readback"),
+            ("permissive-null", [env_entry("crates-io", policy="null")],
+             intended_policies(), "crates-io",
+             "no deployment restriction"),
+            ("permissive-none", [env_entry("crates-io", policy="none")],
+             intended_policies(), "crates-io",
+             "no deployment restriction"),
+            ("mismatched", [env_entry("crates-io")],
+             {"crates-io": policies_payload(("branch", "main"))},
+             "crates-io", "ref policy mismatch"),
+            ("extra-wildcard", [env_entry("crates-io")],
+             {"crates-io": policies_payload(("tag", "v*"), ("tag", "*"))},
+             "crates-io", "ref policy mismatch"),
+            ("empty-list", [env_entry("crates-io")],
+             {"crates-io": policies_payload()}, "crates-io",
+             "holds no entries"),
+            ("missing-detail", [env_entry("crates-io")], {},
+             "crates-io", "no policy readback was supplied"),
+            ("malformed-entry", [env_entry("crates-io")],
+             {"crates-io": {"total_count": 1,
+                            "branch_policies": [{"id": 1}]}},
+             "crates-io", "nameless entry"),
+            ("protected-only",
+             [env_entry("crates-io", policy="protected")],
+             intended_policies(), "crates-io", "protected-branches-only"),
+            ("unknown-env", [env_entry("staging")], {}, "staging",
+             "no documented protection contract"),
+            ("null-reviewer", [null_reviewer], intended_policies(),
+             "crates-io", "malformed reviewer"),
+            ("missing-protected_branches", [missing_flag],
+             intended_policies(), "crates-io", "is malformed"),
+            ("contradictory", [both_flags], intended_policies(),
+             "crates-io", "contradictory"),
+            ("null-protection-rules", [null_rules], intended_policies(),
+             "crates-io", "protection_rules readback is malformed"),
+            ("truncated", [env_entry("crates-io")],
+             {"crates-io": {"total_count": 2,
+                            "branch_policies": [{"name": "v*",
+                                                 "type": "tag"}]}},
+             "crates-io", "is incomplete"),
+        ]
+        with tempfile.TemporaryDirectory() as temp:
+            for label, entries, policies, env, fragment in cases:
+                with self.subTest(case=label):
+                    api = self.write(temp, label + ".json",
+                                     json.dumps(list_payload(*entries)))
+                    args = ["--api-json", api, "--environment", env]
+                    for name, payload in policies.items():
+                        policy_file = self.write(
+                            temp, f"{label}-{name}.json",
+                            json.dumps(payload))
+                        args += ["--policies-json",
+                                 f"{name}={policy_file}"]
+                    status, err = self.run_cli(*args)
+                    self.assertNotEqual(status, 0, label)
+                    self.assertIn(fragment, err, label)
+            raw_cases = [
+                ("unavailable-malformed-json", "{not json",
+                 "cannot parse"),
+                ("unavailable-list", "[]",
+                 "unavailable or unrecognized"),
+                ("unavailable-shape", '{"environments": {}}',
+                 "unavailable or unrecognized"),
+            ]
+            for label, content, fragment in raw_cases:
+                with self.subTest(case=label):
+                    api = self.write(temp, label + ".json", content)
+                    status, err = self.run_cli("--api-json", api)
+                    self.assertNotEqual(status, 0, label)
+                    self.assertIn(fragment, err, label)
+            with self.subTest(case="unavailable-missing-file"):
+                missing = str(Path(temp) / "no-such.json")
+                status, err = self.run_cli("--api-json", missing)
+                self.assertNotEqual(status, 0)
+                self.assertIn("cannot read", err)
 
     def test_cli_refuses_missing_api_json(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -336,6 +601,14 @@ class ProtectionContractDocTests(unittest.TestCase):
         text = CONTRACT.read_text(encoding="utf-8")
         self.assertIn("public repository", text)
         self.assertIn("private", text)
+
+    def test_contract_doc_documents_readback_completeness(self):
+        text = CONTRACT.read_text(encoding="utf-8")
+        self.assertIn("total_count", text)
+        self.assertIn("contradictory", text)
+        for marker in ("truncated", "per_page"):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, text)
 
 
 if __name__ == "__main__":
