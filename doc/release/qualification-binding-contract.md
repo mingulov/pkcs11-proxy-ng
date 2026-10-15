@@ -48,6 +48,27 @@ provider-selection record sits inside the receipt's own digest
 envelope. All five identity manifests must be bound artifact
 references; a `not_applicable` identity is unbound and refuses.
 
+`comparison.json` carries the `pool-comparison/v1` payload the gate
+parses and reconciles with the record:
+
+```json
+{
+  "format": "pool-comparison/v1",
+  "run_id": "<qualification run id>",
+  "config": "<effective configuration name>",
+  "test_selection": "<test selection name>",
+  "providers": {
+    "<provider>": {"gate": "PASS", "complete": true}
+  }
+}
+```
+
+The receipt must bind it under the `comparison` artifact role, so
+its bytes sit inside the receipt's own digest envelope alongside the
+record. The qualification producer (see Q15) emits this payload; the
+portable envelope hash-checks the bytes while the gate enforces the
+semantics below.
+
 ## Gate policy (enforced)
 
 Every expectation is supplied independently of the record being
@@ -77,10 +98,19 @@ The gate requires:
   non-mock matrix with every row a completed `PASS`. Missing,
   swapped, extra, or mock rows refuse; `INCOMPLETE` and `FAIL` rows
   refuse, even with a recorded disposition.
-- the identity manifests to agree: `framework.json` names the
-  expected framework commit, `provider.json` names the required
-  matrix, `selection.json` names the expected run id and a nonempty
-  test selection, and `config.json` names a nonempty configuration.
+- the digest-bound comparison payload (`pool-comparison/v1`) to name
+  the expected run id and to hold the same required 30-provider
+  matrix with every provider a completed `PASS` — reconciled row by
+  row with the record. A missing `comparison` artifact role,
+  unparsable bytes, a wrong format, or any incomplete, failed,
+  missing, or extra row refuses even when every digest matches.
+- the config/selection identity to agree across all three carriers:
+  the record, the comparison, and the selection manifest all name
+  the expected run id; the config manifest and the comparison name
+  the same nonempty configuration; the selection manifest and the
+  comparison name the same nonempty test selection.
+  `framework.json` names the expected framework commit and
+  `provider.json` names the required matrix.
 
 ## 30-provider matrix (enforced)
 
@@ -139,11 +169,24 @@ block.
 
 Validated evidence is archived alongside provenance with a recorded
 long-term location: `release.yml` stages the exact gate-verified
-bytes as `qualification-record.json` and `qualification-receipt.json`
-release assets next to `inventory.json` and
-`qualification-binding.json`. Release assets do not expire, unlike
-the 90-day run artifacts; the complete acceptance record survives
-without depending on run retention.
+bytes as `qualification-record.json`, `qualification-receipt.json`,
+and `qualification-evidence.tar.gz` release assets next to
+`inventory.json` and `qualification-binding.json`. The archive holds
+the complete evidence directory (`receipt.json` plus the `bundle/`
+lockfile, five identity manifests, comparison, and record),
+preserving the relative layout the portable validator expects.
+Release assets do not expire, unlike the 90-day run artifacts; the
+complete acceptance record survives without depending on run
+retention. The published `assets.json` manifest pins the archive's
+own digest, and the binding pins the receipt/record digests inside
+it, so content stays bound to the release.
+
+To revalidate from the release assets alone: extract
+`qualification-evidence.tar.gz`, take the frozen subject, framework,
+run, and receipt/record digests from `qualification-binding.json`,
+derive the expected tree/lock from the subject's git objects, and
+rerun `qualification-preflight` as below. No qualification-run
+artifact access is needed.
 
 ## Local verification
 

@@ -68,6 +68,9 @@ SUBJECT = "a" * 40
 TREE = "b" * 40
 FRAMEWORK = "c" * 40
 RUN_ID = "37423315928"
+COMPARISON_FORMAT = "pool-comparison/v1"
+CONFIG_NAME = "pooled-release-default"
+SELECTION_NAME = "full-matrix"
 IMMUTABLE_URL = ("https://github.com/example/pkcs11-proxy-ng/blob/"
                  + "d" * 40 + "/qualification/evidence")
 MUTABLE_URL = ("https://github.com/example/pkcs11-proxy-ng/blob/main/"
@@ -116,10 +119,24 @@ def make_record(*, subject=SUBJECT, framework=FRAMEWORK, run_id=RUN_ID,
             "providers": {name: pass_row(run_id) for name in names}}
 
 
+def comparison_row():
+    return {"gate": "PASS", "complete": True}
+
+
+def make_comparison(*, run_id=RUN_ID, config=CONFIG_NAME,
+                    test_selection=SELECTION_NAME, providers=None,
+                    fmt=COMPARISON_FORMAT):
+    names = sorted(EXPECTED_PROVIDERS) if providers is None else providers
+    return {"format": fmt, "run_id": run_id,
+            "config": config, "test_selection": test_selection,
+            "providers": {name: comparison_row() for name in names}}
+
+
 def write_evidence(root, *, subject=SUBJECT, tree=TREE,
                    lock_contents=b"frozen Cargo.lock\n",
                    framework=FRAMEWORK, run_id=RUN_ID, record=None,
-                   receipt_kind="comparison", manifests=None):
+                   receipt_kind="comparison", manifests=None,
+                   comparison=None, comparison_bytes=None):
     """Build a complete evidence dir; return pinned digests + receipt."""
     bundle = Path(root) / "bundle"
     bundle.mkdir(parents=True, exist_ok=True)
@@ -128,9 +145,9 @@ def write_evidence(root, *, subject=SUBJECT, tree=TREE,
     payloads = {"framework": {"commit": framework},
                 "corpora": {"corpora": ["pkcs11-check-corpus-1"]},
                 "provider": {"providers": sorted(EXPECTED_PROVIDERS)},
-                "config": {"config": "pooled-release-default"},
+                "config": {"config": CONFIG_NAME},
                 "selection": {"run_id": run_id,
-                              "test_selection": "full-matrix"}}
+                              "test_selection": SELECTION_NAME}}
     payloads.update(manifests or {})
     refs = {}
     for role, payload in payloads.items():
@@ -138,8 +155,14 @@ def write_evidence(root, *, subject=SUBJECT, tree=TREE,
         (bundle / f"{role}.json").write_bytes(data)
         refs[role] = {"path": f"{role}.json",
                       "sha256": sha256_bytes(data)}
-    comparison = b'{"compared": 30}\n'
-    (bundle / "comparison.json").write_bytes(comparison)
+    if comparison_bytes is not None:
+        comparison_raw = comparison_bytes
+    else:
+        payload = (make_comparison(run_id=run_id)
+                   if comparison is None else comparison)
+        comparison_raw = (json.dumps(payload, sort_keys=True) + "\n").encode(
+            "utf-8")
+    (bundle / "comparison.json").write_bytes(comparison_raw)
     record = make_record() if record is None else record
     record_data = json.dumps(record, sort_keys=True).encode("utf-8")
     (bundle / "pool-evidence.json").write_bytes(record_data)
@@ -157,7 +180,7 @@ def write_evidence(root, *, subject=SUBJECT, tree=TREE,
                "artifacts": {
                    "comparison": {
                        "path": "comparison.json",
-                       "sha256": sha256_bytes(comparison)},
+                       "sha256": sha256_bytes(comparison_raw)},
                    "pool_evidence": {
                        "path": "pool-evidence.json",
                        "sha256": sha256_bytes(record_data)}}}
@@ -316,6 +339,58 @@ class QualificationGateTests(unittest.TestCase):
         params = dict(params, receipt_sha256=sha256_bytes(receipt_data))
         self.assertEqual(self.gate(target, **params), 1)
 
+    def test_refuses_missing_comparison_reference(self):
+        # C1: the receipt must digest-bind comparison evidence. A
+        # receipt carrying only the pool record — with the receipt
+        # digest re-pinned so the envelope is otherwise valid —
+        # cannot qualify publication.
+        target, built, params = self.valid()
+        receipt = dict(built["receipt"])
+        del receipt["artifacts"]["comparison"]
+        receipt_data = json.dumps(receipt, sort_keys=True).encode("utf-8")
+        (target / "receipt.json").write_bytes(receipt_data)
+        params = dict(params, receipt_sha256=sha256_bytes(receipt_data))
+        self.assertEqual(self.gate(target, **params), 1)
+
+    def test_refuses_non_json_comparison(self):
+        # C1: comparison bytes are parsed, not just hash-checked.
+        # The artifact and receipt digests stay valid; only the
+        # comparison semantics change.
+        target = self.workdir / "evidence-nonjson-comparison"
+        built = write_evidence(target, comparison_bytes=b"not json{{{")
+        params = {"lock_sha256": built["lock_sha256"],
+                  "record_sha256": built["record_sha256"],
+                  "receipt_sha256": built["receipt_sha256"]}
+        self.assertEqual(self.gate(target, **params), 1)
+
+    def test_refuses_failed_or_incomplete_comparison_payload(self):
+        # C1: every negative below keeps valid hashes (write_evidence
+        # re-pins the artifact and receipt digests) and changes only
+        # comparison semantics: each must refuse.
+        names = sorted(EXPECTED_PROVIDERS)
+        failed = make_comparison()
+        failed["providers"][names[0]] = {"gate": "FAIL", "complete": True}
+        incomplete = make_comparison()
+        incomplete["providers"][names[0]] = {"gate": "INCOMPLETE",
+                                             "complete": False}
+        cases = {
+            "failed-row": failed,
+            "incomplete-row": incomplete,
+            "missing-row": make_comparison(providers=names[:-1]),
+            "extra-row": make_comparison(
+                providers=names + ["stray-provider"]),
+            "wrong-run": make_comparison(run_id="1"),
+            "wrong-format": make_comparison(fmt="comparison/v9"),
+        }
+        for label, comparison in cases.items():
+            with self.subTest(case=label):
+                target = self.workdir / f"evidence-comparison-{label}"
+                built = write_evidence(target, comparison=comparison)
+                params = {"lock_sha256": built["lock_sha256"],
+                          "record_sha256": built["record_sha256"],
+                          "receipt_sha256": built["receipt_sha256"]}
+                self.assertEqual(self.gate(target, **params), 1)
+
     def test_refuses_missing_extra_or_mock_provider_rows(self):
         names = sorted(EXPECTED_PROVIDERS)
         cases = {
@@ -335,12 +410,19 @@ class QualificationGateTests(unittest.TestCase):
                 self.assertEqual(self.gate(target, **params), 1)
 
     def test_refuses_incomplete_or_failed_comparison(self):
+        # I3: both fixtures are otherwise-valid completed rows, so
+        # refusal must come from the qualification gate (no passing
+        # comparison) — not from support-matrix shape validation. The
+        # FAIL row carries gate="FAIL" with a recorded disposition.
+        import io
+        from contextlib import redirect_stderr
         for gate, mutate in (
                 ("INCOMPLETE",
                  lambda row: row.update(complete=False, gate="INCOMPLETE",
                                         incomplete_reasons=["stalled"])),
                 ("FAIL",
-                 lambda row: row.update(disposition="regression triaged"))):
+                 lambda row: row.update(gate="FAIL",
+                                        disposition="regression triaged"))):
             with self.subTest(gate=gate):
                 target = self.workdir / f"evidence-{gate.lower()}"
                 record = make_record()
@@ -350,7 +432,12 @@ class QualificationGateTests(unittest.TestCase):
                 params = {"lock_sha256": built["lock_sha256"],
                           "record_sha256": built["record_sha256"],
                           "receipt_sha256": built["receipt_sha256"]}
-                self.assertEqual(self.gate(target, **params), 1)
+                buffer = io.StringIO()
+                with redirect_stderr(buffer):
+                    code = self.gate(target, **params)
+                self.assertEqual(code, 1)
+                self.assertIn("has no passing comparison",
+                              buffer.getvalue())
 
     def test_refuses_mixed_run_merge(self):
         target = self.workdir / "evidence-mixed"
@@ -410,6 +497,37 @@ class QualificationGateTests(unittest.TestCase):
             with self.subTest(case=label):
                 target = self.workdir / f"evidence-{label}"
                 built = write_evidence(target, manifests=manifests)
+                args = {"lock_sha256": built["lock_sha256"],
+                        "record_sha256": built["record_sha256"],
+                        "receipt_sha256": built["receipt_sha256"]}
+                self.assertEqual(self.gate(target, **args), 1)
+
+    def test_refuses_config_or_selection_disagreement(self):
+        # I1: nonempty config/test-selection values must agree
+        # across the config manifest, the selection manifest, and
+        # the comparison payload. Every case below keeps valid
+        # hashes; only the identity relationship breaks.
+        disagreements = {
+            "config-manifest-differs":
+                ({"config": {"config": "other-config"}}, None),
+            "selection-manifest-differs":
+                ({"selection": {"run_id": RUN_ID,
+                                "test_selection": "one-test-only"}},
+                 None),
+            "comparison-config-differs":
+                (None, make_comparison(config="other-config")),
+            "comparison-selection-differs":
+                (None, make_comparison(test_selection="one-test-only")),
+            "comparison-config-empty":
+                (None, make_comparison(config="")),
+            "comparison-selection-empty":
+                (None, make_comparison(test_selection="")),
+        }
+        for label, (manifests, comparison) in disagreements.items():
+            with self.subTest(case=label):
+                target = self.workdir / f"evidence-{label}"
+                built = write_evidence(target, manifests=manifests,
+                                       comparison=comparison)
                 args = {"lock_sha256": built["lock_sha256"],
                         "record_sha256": built["record_sha256"],
                         "receipt_sha256": built["receipt_sha256"]}
@@ -640,14 +758,21 @@ class QualificationWorkflowTests(unittest.TestCase):
     def test_validated_record_archived_as_release_asset(self):
         # Durable retention alongside provenance: the validated
         # record and receipt ship as release assets, not just
-        # 90-day run artifacts.
+        # 90-day run artifacts — and the complete validated evidence
+        # bundle ships as an archive preserving the relative layout,
+        # so the portable validator can revalidate after run expiry.
+        # (I2: receipt-only retention leaves no revalidatable bundle
+        # once the qualification artifact expires.)
         job = load_workflow(RELEASE_YML)["jobs"]["publish"]
         text = run_text(job)
         self.assertIn("qualification-record.json", text)
         self.assertIn("qualification-receipt.json", text)
+        self.assertIn("qualification-evidence.tar.gz", text)
         recover = run_text(load_workflow(RELEASE_YML)["jobs"]["recover"])
         self.assertIn("qualification-record.json", recover)
         self.assertIn("qualification-receipt.json", recover)
+        self.assertIn("qualification-evidence.tar.gz", recover)
+        self.assertIn("tar -czf", recover)
 
     def test_attestation_predicate_binds_qualification_identity(self):
         workflow = load_workflow(RELEASE_YML)
@@ -689,6 +814,8 @@ class QualificationDocsTests(unittest.TestCase):
         for marker in ("format_version", "30-provider",
                        "provider-qualification",
                        "qualification-record.json",
+                       "qualification-evidence.tar.gz",
+                       "pool-comparison/v1",
                        "retention", "waiver",
                        "qualification-preflight",
                        "immutable"):
