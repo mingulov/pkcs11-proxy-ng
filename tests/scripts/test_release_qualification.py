@@ -26,6 +26,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -772,7 +775,89 @@ class QualificationWorkflowTests(unittest.TestCase):
         self.assertIn("qualification-record.json", recover)
         self.assertIn("qualification-receipt.json", recover)
         self.assertIn("qualification-evidence.tar.gz", recover)
-        self.assertIn("tar -czf", recover)
+        self.assertIn("tar ", recover)
+
+    def test_recovery_archive_deterministic_across_extraction_metadata(self):
+        # N1: recovery regenerates qualification-evidence.tar.gz on
+        # every retry, and the publish compare gate refuses divergent
+        # bytes — so extraction metadata (timestamps, ownership,
+        # traversal order) must not leak into the archive, or a retry
+        # over identical validated evidence refuses as divergent.
+        # Run the workflow's own archive command twice over
+        # byte-identical evidence with differing mtimes; the digests
+        # must match and pass the real assets-compare.
+        if shutil.which("tar") is None or shutil.which("gzip") is None:
+            raise unittest.SkipTest("tar and gzip are required")
+        if shutil.which("bash") is None:
+            raise unittest.SkipTest("bash is required")
+        job = load_workflow(RELEASE_YML)["jobs"]["recover"]
+        steps = [step for step in job.get("steps", [])
+                 if isinstance(step, dict)
+                 and "qualification-evidence.tar.gz" in step.get("run", "")
+                 and "tar " in step.get("run", "")]
+        self.assertEqual(len(steps), 1)
+        joined, buf = [], ""
+        for line in steps[0]["run"].splitlines():
+            stripped = line.rstrip()
+            if stripped.endswith("\\"):
+                buf += stripped[:-1] + " "
+            else:
+                buf += stripped
+                joined.append(buf)
+                buf = ""
+        if buf:
+            joined.append(buf)
+        commands = [line.strip() for line in joined
+                    if "tar " in line
+                    and "qualification-evidence.tar.gz" in line]
+        self.assertEqual(len(commands), 1)
+        command = commands[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            first = work / "first-evidence"
+            second = work / "second-evidence"
+            first.mkdir()
+            second.mkdir()
+            write_evidence(first)
+            write_evidence(second)
+            # Same validated bytes, differing extraction metadata:
+            # shift every mtime in the second tree (content untouched).
+            shifted = 1_700_000_000
+            for path in sorted(second.rglob("*")):
+                os.utime(path, (shifted, shifted))
+            os.utime(second, (shifted, shifted))
+            digests = []
+            for index, evidence in enumerate((first, second)):
+                archive = work / f"attempt-{index}.tar.gz"
+                adapted = command.replace("$RUNNER_TEMP/qual-evidence",
+                                          str(evidence))
+                adapted = adapted.replace(
+                    "recovered/qualification-evidence.tar.gz",
+                    str(archive))
+                subprocess.run(["bash", "-c", adapted], check=True,
+                               capture_output=True, text=True)
+                digests.append(sha256_bytes(archive.read_bytes()))
+            existing = [{"name": "qualification-evidence.tar.gz",
+                         "sha256": digests[0]}]
+            prepared = [{"name": "qualification-evidence.tar.gz",
+                         "sha256": digests[1],
+                         "path": "prepared/qualification-evidence.tar.gz"}]
+            existing_path = work / "existing.json"
+            prepared_path = work / "prepared.json"
+            existing_path.write_text(json.dumps(existing), encoding="utf-8")
+            prepared_path.write_text(json.dumps(prepared), encoding="utf-8")
+            decision = release_checks.main(
+                ["assets-compare", "--existing-json", str(existing_path),
+                 "--prepared-json", str(prepared_path)], repo=ROOT)
+            self.assertEqual(
+                decision, 0,
+                "retry over identical validated evidence refused: "
+                f"{digests[0]} vs {digests[1]}")
+            self.assertEqual(digests[0], digests[1])
+        for flag in ("--sort=name", "--numeric-owner", "--mtime=",
+                     "--owner=", "--group=", "gzip -n"):
+            with self.subTest(flag=flag):
+                self.assertIn(flag, command)
 
     def test_attestation_predicate_binds_qualification_identity(self):
         workflow = load_workflow(RELEASE_YML)
