@@ -62,6 +62,17 @@ See the [staging](../../examples/configs/staging/proxy.toml) and
 [production](../../examples/configs/prod/proxy.toml) examples for complete
 configurations.
 
+### Certificate trust scope
+
+Use a dedicated CA that signs only this deployment's daemon and
+client certificates. Any identity with a CA-trusted certificate can
+open a transport session and reserve an admission slot — at
+`max_contexts = 1`, one ungranted identity can crowd out the
+legitimate client until its context expires — even before token
+grants are consulted. Token authorization still decides what an
+identity may touch, but it does not decide who may reserve a
+context. Keep the CA population narrow: one deployment, one CA.
+
 ## 4. Client configuration
 
 The shim is configured by environment variables:

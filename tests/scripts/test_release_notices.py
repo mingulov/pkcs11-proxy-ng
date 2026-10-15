@@ -198,8 +198,15 @@ class BundleTests(unittest.TestCase):
             (self.base / name).write_text(name + "\n")
         (self.base / "doc/release").mkdir(parents=True)
         for name in ("beta-support-matrix.md", "mtls-setup.md", "parity-validation.md",
-                     "v0.2.0-release-notes.md"):
+                     "v0.2.0-release-notes.md", "bundle-install.md"):
             (self.base / "doc/release" / name).write_text(name + "\n")
+        (self.base / "doc/runbooks").mkdir(parents=True, exist_ok=True)
+        (self.base / "doc/runbooks/operating-pkcs11-proxy-ng.md").write_text("runbook\n")
+        (self.base / "doc/error-reference.md").write_text("errors\n")
+        for tier in ("prod", "staging", "bundle"):
+            directory = self.base / "examples/configs" / tier
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / "proxy.toml").write_text(f"# {tier}\n")
 
     def test_linux_tar_carries_exact_inputs_and_rejects_stale_notices(self):
         archive = stage_bundle(self.base, self.binaries, self.provenance,
@@ -260,8 +267,8 @@ class BundleTests(unittest.TestCase):
                                self.notices, self.base / "out9", timestamp=1_700_000_000)
         with tarfile.open(archive, "r:gz") as bundle:
             names = {member.name.split("/", 1)[1] for member in bundle if member.isfile()}
-        self.assertIn("doc/v9.9.9-release-notes.md", names)
-        self.assertNotIn("doc/v0.2.0-release-notes.md", names)
+        self.assertIn("doc/release/v9.9.9-release-notes.md", names)
+        self.assertNotIn("doc/release/v0.2.0-release-notes.md", names)
 
 
 class PackageCarriageTests(unittest.TestCase):
@@ -470,8 +477,9 @@ class MacBundleTests(unittest.TestCase):
         with tarfile.open(archive, "r:gz") as bundle:
             names = {member.name.split("/", 1)[1] for member in bundle if member.isfile()}
             self.assertTrue({"bin/pkcs11-proxy-ng", "bin/pkcs11-proxy-ng-cli",
-                             "lib/pkcs11/libpkcs11_proxy_ng_shim.dylib", "doc/macos-install.md",
-                             "doc/v0.2.0-release-notes.md", "THIRD_PARTY_NOTICES",
+                             "lib/pkcs11/libpkcs11_proxy_ng_shim.dylib",
+                             "doc/release/macos-install.md",
+                             "doc/release/v0.2.0-release-notes.md", "THIRD_PARTY_NOTICES",
                              "notice-inventory.json", "build-provenance.json"} <= names)
         (self.binaries / "libpkcs11_proxy_ng_shim.dylib").write_bytes(b"changed")
         with self.assertRaises(ReleaseError):

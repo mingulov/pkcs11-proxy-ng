@@ -5,10 +5,10 @@ validates the path first, and how registry-source GitHub binaries follow.
 This guide describes the checked-in workflows (`.github/workflows/`) and
 the maintainer steps around them.
 
-Status: release candidate. The crates are **not published** and the
-source is **not release-qualified**; nothing here claims otherwise.
-Package checks, smokes, and dry-runs are pre-publication gates, not
-qualification or provider acceptance.
+Status: `0.2.2` published 2026-10-06 (all eight crates, not yanked);
+the current checkout is unreleased work past that tag and is **not
+release-qualified**. Package checks, smokes, and dry-runs are
+pre-publication gates, not qualification or provider acceptance.
 
 ## The eight crates and four entry points
 

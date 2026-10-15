@@ -11,9 +11,19 @@
 # File-permission requirements:
 #   server_key   0600 — daemon refuses to start otherwise
 #
-# Recommended k8s readiness probe (grpc-health-probe):
+# Recommended k8s readiness probe (CLI over the same mTLS listener;
+# exit 0 = SERVING, 1 = NOT_SERVING, 2 = probe failure). The probe is
+# passive — it never initializes a PKCS#11 context, so it is safe
+# under max_contexts = 1. A plaintext http:// probe against this
+# listener fails by design: there is no unauthenticated health port.
+# The --tls-domain override carries the certificate name because the
+# pod-local endpoint is a loopback IP, not the certified DNS name.
 #   exec: ["/usr/bin/pkcs11-proxy-ng-cli", "--endpoint",
-#          "http://127.0.0.1:7512", "health"]
+#          "https://127.0.0.1:7512",
+#          "--tls-ca-cert", "/etc/pkcs11-proxy-ng/tls/ca.crt",
+#          "--tls-client-cert", "/etc/pkcs11-proxy-ng/tls/client.crt",
+#          "--tls-client-key", "/etc/pkcs11-proxy-ng/tls/client.key",
+#          "--tls-domain", "proxy.example.internal", "health"]
 
 [backend]
 # Replace with the real HSM client .so path before deploying.
@@ -22,6 +32,12 @@ module = "/CHANGE_ME/path/to/backend.so"
 # initialize_args = "credentials=/run/secrets/hsm-creds" # use env if it contains a secret
 
 [proxy]
+# v0.2 testing scope: one logical client in one trusted security
+# domain per daemon/provider instance. Restart the daemon/provider
+# before switching independent clients or domains. This admission
+# limit refuses a second concurrent client; it does not establish
+# multi-client isolation and does not clear native login state.
+max_contexts = 1
 # Production runs longer-lived contexts; default 30s is fine but
 # tune up if your apps do heavy session reuse.
 lease_seconds = 30
@@ -62,6 +78,9 @@ allow_insecure_tcp = false
 # auth="none" listener). (Legacy DN identity form,
 # "x509:issuer=...;subject=...", is deprecated: it still parses but
 # logs a migration warning per key — prefer SPKI pins.)
+# Use a dedicated CA that signs only this deployment's certificates:
+# any CA-trusted identity can reserve the single admitted context
+# (see "Certificate trust scope" in doc/release/mtls-setup.md).
 allow_all_authenticated = false
 
 [[auth.policy]]

@@ -5,6 +5,8 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import os
+import re
 from pathlib import Path
 import shutil
 import tarfile
@@ -14,6 +16,13 @@ import zipfile
 from .package_binaries import TARGETS, require_registry_provenance
 from .package_model import ReleaseError, require
 from .package_notices import safe_upstream_relative
+
+#: Immutable online home for bundle links whose targets are not shipped
+#: in the archive. Rewritten links pin the exact staged ``v{version}``
+#: tag — never a mutable branch.
+ONLINE_REPO_BASE = "https://github.com/mingulov/pkcs11-proxy-ng"
+
+_LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 
 EXPECTED_ARTIFACTS = {
     TARGETS[0]: {"pkcs11-proxy-ng": ("pkcs11-proxy-ng", "bin"),
@@ -114,12 +123,122 @@ def validate_prepared_bundle(binaries_dir: Path, provenance_path: Path,
     return provenance, notices
 
 
+def online_blob_url(version: str, repo_relative: str, *, is_dir: bool = False) -> str:
+    """Immutable online reference for a repository path at a staged version."""
+    kind = "tree" if is_dir else "blob"
+    return f"{ONLINE_REPO_BASE}/{kind}/v{version}/{repo_relative}"
+
+
+def bundle_doc_mapping(repo: Path, version: str, target: str | None = None) -> dict[str, Path]:
+    """Repository docs and config templates shipped in the bundle.
+
+    Unix bundles carry the install guide, the runbook/error/support
+    material the guide needs, and complete secure config templates,
+    all at repository-relative paths. The Windows bundle carries only
+    the top-level README/CHANGELOG (its template ships separately);
+    every target's markdown links are repaired by
+    :func:`repair_bundle_markdown_links`.
+    """
+    repo = Path(repo)
+    mapping = {"README.md": repo / "README.md", "CHANGELOG.md": repo / "CHANGELOG.md"}
+    if target == TARGETS[1]:
+        return mapping
+    install = repo / "doc/release/bundle-install.md"
+    require(install.is_file() and not install.is_symlink() and install.stat().st_size > 0,
+            "bundle install guide is missing: expected doc/release/bundle-install.md")
+    mapping["INSTALL.md"] = install
+    notes_name = f"v{version}-release-notes.md"
+    notes_path = repo / "doc/release" / notes_name
+    require(notes_path.is_file() and not notes_path.is_symlink() and
+            notes_path.stat().st_size > 0,
+            f"release notes for version {version} are missing: "
+            f"expected doc/release/{notes_name}")
+    for name in ("beta-support-matrix.md", "mtls-setup.md", "parity-validation.md",
+                 notes_name):
+        mapping[f"doc/release/{name}"] = repo / "doc/release" / name
+    if target == TARGETS[2]:
+        mac_doc = repo / "doc/release/macos-install.md"
+        require(mac_doc.is_file() and not mac_doc.is_symlink() and
+                mac_doc.stat().st_size > 0,
+                "macos-install.md is missing: expected doc/release/macos-install.md")
+        mapping["doc/release/macos-install.md"] = mac_doc
+    for name in ("doc/runbooks/operating-pkcs11-proxy-ng.md", "doc/error-reference.md",
+                 "examples/configs/prod/proxy.toml", "examples/configs/staging/proxy.toml",
+                 "examples/configs/bundle/proxy.toml"):
+        mapping[name] = repo / name
+    return mapping
+
+
+def repair_bundle_markdown_links(stage_root: Path, mapping: dict[str, Path],
+                                 repo: Path, version: str) -> dict[str, list[str]]:
+    """Repair staged markdown links; report ``{staged file: [online URLs]}``.
+
+    Links that already resolve inside the staged tree are kept. A link
+    that misses the staged tree is resolved against its source file in
+    the repository: when the repository target ships in the bundle
+    under another staged path (e.g. the top-level install guide
+    pointing at repository-relative material), the link is rewritten
+    to the bundle-local path; otherwise it is rewritten to an
+    immutable version-pinned online reference. Links broken in the
+    repository itself are left untouched so link checks flag them.
+    """
+    stage_root, repo = Path(stage_root), Path(repo)
+    stage_anchor = stage_root.resolve()
+    repo_anchor = repo.resolve()
+    by_source = {Path(source).resolve(): staged for staged, source in mapping.items()}
+    report: dict[str, list[str]] = {}
+    for staged_rel in sorted(mapping):
+        if not staged_rel.endswith(".md"):
+            continue
+        staged_file = stage_root / staged_rel
+        source_file = Path(mapping[staged_rel])
+        text = staged_file.read_text(encoding="utf-8")
+        rewritten: list[str] = []
+
+        def fix(match: re.Match[str]) -> str:
+            target = match.group(1)
+            if "://" in target or target.startswith(("mailto:", "#")):
+                return match.group(0)
+            bare, sep, frag = target.partition("#")
+            bare = bare.strip().strip("<>")
+            if not bare:
+                return match.group(0)
+            staged_hit = (staged_file.parent / bare).resolve()
+            if staged_hit.is_relative_to(stage_anchor) and staged_hit.exists():
+                return match.group(0)
+            repo_hit = (source_file.parent / bare).resolve()
+            try:
+                repo_rel = repo_hit.relative_to(repo_anchor).as_posix()
+            except ValueError:
+                return match.group(0)
+            if not repo_hit.exists():
+                return match.group(0)
+            suffix = f"{sep}{frag}" if sep else ""
+            if repo_hit in by_source:
+                local = os.path.relpath(stage_anchor / by_source[repo_hit],
+                                        staged_file.parent).replace(os.sep, "/")
+                replacement = local + suffix
+            else:
+                replacement = online_blob_url(version, repo_rel,
+                                              is_dir=repo_hit.is_dir()) + suffix
+                rewritten.append(replacement)
+            start, end = match.span(1)
+            base = match.start(0)
+            whole = match.group(0)
+            return whole[:start - base] + replacement + whole[end - base:]
+
+        staged_file.write_text(_LINK_RE.sub(fix, text), encoding="utf-8")
+        if rewritten:
+            report[staged_rel] = rewritten
+    return report
+
+
 def _bundle_files(repo: Path, binaries_dir: Path, provenance_path: Path,
                   notices_dir: Path, target: str, version: str) -> dict[str, Path]:
     own = notices_dir / f"license-material/pkcs11-proxy-ng-{version}/licenses"
-    files = {"README.md": repo / "README.md", "CHANGELOG.md": repo / "CHANGELOG.md",
-             "LICENSE-APACHE": own / "LICENSE-APACHE", "LICENSE-MIT": own / "LICENSE-MIT",
+    files = {"LICENSE-APACHE": own / "LICENSE-APACHE", "LICENSE-MIT": own / "LICENSE-MIT",
              "build-provenance.json": provenance_path}
+    files.update(bundle_doc_mapping(repo, version, target))
     for item in notices_dir.rglob("*"):
         if item.is_file():
             files[item.relative_to(notices_dir).as_posix()] = item
@@ -129,21 +248,6 @@ def _bundle_files(repo: Path, binaries_dir: Path, provenance_path: Path,
         files.update({"bin/pkcs11-proxy-ng": binaries_dir / "pkcs11-proxy-ng",
                       "bin/pkcs11-proxy-ng-cli": binaries_dir / "pkcs11-proxy-ng-cli",
                       f"lib/pkcs11/{shim_name}": binaries_dir / shim_name})
-        notes_name = f"v{version}-release-notes.md"
-        notes_path = repo / "doc/release" / notes_name
-        require(notes_path.is_file() and not notes_path.is_symlink() and
-                notes_path.stat().st_size > 0,
-                f"release notes for version {version} are missing: "
-                f"expected doc/release/{notes_name}")
-        for name in ("beta-support-matrix.md", "mtls-setup.md", "parity-validation.md",
-                     notes_name):
-            files[f"doc/{name}"] = repo / "doc/release" / name
-        if target == TARGETS[2]:
-            mac_doc = repo / "doc/release/macos-install.md"
-            require(mac_doc.is_file() and not mac_doc.is_symlink() and
-                    mac_doc.stat().st_size > 0,
-                    "macos-install.md is missing: expected doc/release/macos-install.md")
-            files["doc/macos-install.md"] = mac_doc
     else:
         files.update({"bin/pkcs11-proxy-ng.exe": binaries_dir / "pkcs11-proxy-ng.exe",
                       "bin/pkcs11-proxy-ng-cli.exe": binaries_dir / "pkcs11-proxy-ng-cli.exe",
@@ -184,6 +288,11 @@ def stage_bundle(repo: Path, binaries_dir: Path, provenance_path: Path,
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, dest)
         require(_hash(dest) == _hash(source), f"staged file changed: {relative}")
+    # Deterministic link repair on the staged markdown only: bundled
+    # local links resolve in-archive, the rest become immutable
+    # version-pinned online references. The final integrity check
+    # below compares archived bytes against these staged bytes.
+    repair_bundle_markdown_links(stage, mapping, repo, version)
     if target in (TARGETS[0], TARGETS[2]):
         archive = output / f"{name}.tar.gz"
         with archive.open("wb") as stream, gzip.GzipFile(fileobj=stream, mode="wb", filename="", mtime=0) as gz:
@@ -215,6 +324,7 @@ def stage_bundle(repo: Path, binaries_dir: Path, provenance_path: Path,
             contained = {item.filename: bundle.read(item) for item in bundle.infolist()}
     require(set(contained) == {f"{name}/{relative}" for relative in mapping} and
             all(digest == hashlib.sha256(contained[f"{name}/{relative}"]).hexdigest()
-                for relative, digest in {key: _hash(value) for key, value in mapping.items()}.items()),
+                for relative, digest in {key: _hash(stage / key)
+                                          for key in mapping}.items()),
             "final bundle file set or hashes differ")
     return archive

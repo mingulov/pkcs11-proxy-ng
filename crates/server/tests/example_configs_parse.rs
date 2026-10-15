@@ -130,6 +130,47 @@ fn example_fips_parses() {
     assert_example_parses("fips");
 }
 
+/// Load a shipped sample with only filesystem paths redirected to
+/// test doubles (backend module, TLS files, Unix socket, mechanism
+/// registry path). Auth posture, policy, quotas, and guardrails load
+/// exactly as shipped.
+fn load_with_redirected_paths(path: &std::path::Path) -> pkcs11_proxy_ng::config::DaemonConfig {
+    let raw = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let dir = tempfile::tempdir().expect("tempdir");
+    // Existence-only doubles: `load` checks cert files exist;
+    // permission/content checks run at TLS load, not parse.
+    for name in ["ca.crt", "server.crt", "server.key"] {
+        std::fs::write(dir.path().join(name), b"test double").expect("write cert double");
+    }
+    let socket = dir.path().join("proxy.sock");
+    let mut out = String::with_capacity(raw.len());
+    for line in raw.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("module ") || trimmed.starts_with("module=") {
+            out.push_str(&format!("module = \"{}\"\n", dummy_backend_module()));
+        } else if trimmed.starts_with("config_path ") || trimmed.starts_with("config_path=") {
+            out.push_str("# config_path = stripped for test\n");
+        } else if let Some(key) = ["ca_cert", "server_cert", "server_key"].iter().find(|k| {
+            trimmed.starts_with(&format!("{k} ")) || trimmed.starts_with(&format!("{k}="))
+        }) {
+            let file = match *key {
+                "ca_cert" => "ca.crt",
+                "server_cert" => "server.crt",
+                _ => "server.key",
+            };
+            out.push_str(&format!("{key} = \"{}\"\n", dir.path().join(file).display()));
+        } else if trimmed.starts_with("path ") || trimmed.starts_with("path=") {
+            out.push_str(&format!("path = \"{}\"\n", socket.display()));
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    let tmp = write_temp(&out);
+    pkcs11_proxy_ng::config::DaemonConfig::load(tmp.path())
+        .unwrap_or_else(|e| panic!("{} real posture parses: {e:?}", path.display()))
+}
+
 /// T16: prod/staging guidance shows explicit mTLS identity/token grants
 /// and deliberate quotas — validate the REAL posture, not just the
 /// downgraded parse. Only filesystem paths are redirected (module,
@@ -146,36 +187,9 @@ fn example_prod_staging_mtls_policy_parses() {
             raw.contains("auth = \"mtls\""),
             "{tier} guidance must stay mTLS (fixture posture lives in dev/k8s)"
         );
-        let dir = tempfile::tempdir().expect("tempdir");
-        // Existence-only doubles: `load` checks cert files exist;
-        // permission/content checks run at TLS load, not parse.
-        for name in ["ca.crt", "server.crt", "server.key"] {
-            std::fs::write(dir.path().join(name), b"test double").expect("write cert double");
-        }
-        let mut out = String::with_capacity(raw.len());
-        for line in raw.lines() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("module ") || trimmed.starts_with("module=") {
-                out.push_str(&format!("module = \"{}\"\n", dummy_backend_module()));
-            } else if trimmed.starts_with("config_path ") || trimmed.starts_with("config_path=") {
-                out.push_str("# config_path = stripped for test\n");
-            } else if let Some(key) = ["ca_cert", "server_cert", "server_key"].iter().find(|k| {
-                trimmed.starts_with(&format!("{k} ")) || trimmed.starts_with(&format!("{k}="))
-            }) {
-                let file = match *key {
-                    "ca_cert" => "ca.crt",
-                    "server_cert" => "server.crt",
-                    _ => "server.key",
-                };
-                out.push_str(&format!("{key} = \"{}\"\n", dir.path().join(file).display()));
-            } else {
-                out.push_str(line);
-                out.push('\n');
-            }
-        }
-        let tmp = write_temp(&out);
-        let cfg = pkcs11_proxy_ng::config::DaemonConfig::load(tmp.path())
-            .unwrap_or_else(|e| panic!("{tier} mTLS posture parses: {e:?}"));
+        let cfg = load_with_redirected_paths(&p);
+        // Single-client admission guardrail, effective after load.
+        assert_eq!(cfg.proxy.max_contexts, 1, "{tier} must cap contexts at one");
         // Explicit grants, no allow-all baseline (a successful load
         // already ran the full policy validation: identity form, token
         // selectors, classes, mechanisms, extract).
@@ -208,6 +222,60 @@ fn example_prod_staging_mtls_policy_parses() {
             "{tier} quota"
         );
     }
+}
+
+/// The bundle template ships both secure listeners (TCP+mTLS plus
+/// peer-credential Unix socket) with the quick-start allow-all
+/// posture and the admission guardrail — all effective after load.
+#[test]
+fn example_bundle_real_posture_parses() {
+    let p = submodule_root().join("examples/configs/bundle/proxy.toml");
+    let cfg = load_with_redirected_paths(&p);
+    assert_eq!(cfg.proxy.max_contexts, 1, "bundle must cap contexts at one");
+    assert!(cfg.auth.allow_all_authenticated, "bundle keeps the quick-start posture");
+    assert!(cfg.auth.policy.is_empty(), "bundle carries no explicit policy");
+    let remote = cfg.listener.remote.expect("bundle must configure [listener.remote]");
+    assert!(
+        matches!(remote.auth, pkcs11_proxy_ng::config::TcpAuthMode::Mtls),
+        "bundle remote listener must stay mTLS"
+    );
+    let local = cfg.listener.local.expect("bundle must configure [listener.local]");
+    assert!(
+        matches!(local.auth, pkcs11_proxy_ng::config::UnixAuthMode::PeerCred),
+        "bundle local listener must stay peer-credential"
+    );
+}
+
+/// The FIPS sample is a loadable mTLS deployment shape: one pinned
+/// caller identity, no allow-all baseline, guardrail effective.
+#[test]
+fn example_fips_mtls_policy_parses() {
+    let p = submodule_root().join("examples/configs/fips/proxy.toml");
+    let cfg = load_with_redirected_paths(&p);
+    assert_eq!(cfg.proxy.max_contexts, 1, "fips must cap contexts at one");
+    assert!(!cfg.auth.allow_all_authenticated, "fips must not allow-all");
+    assert_eq!(cfg.auth.policy.len(), 1, "fips must carry one explicit policy");
+    assert!(
+        cfg.auth.policy[0].identity.starts_with("x509:spki="),
+        "fips identity must be an SPKI pin"
+    );
+}
+
+/// The Windows bundle template loads with placeholder paths
+/// redirected: mTLS listener, quick-start posture, guardrail
+/// effective.
+#[test]
+fn example_windows_template_real_posture_parses() {
+    let p = submodule_root().join("packaging/windows/proxy.toml.template");
+    let cfg = load_with_redirected_paths(&p);
+    assert_eq!(cfg.proxy.max_contexts, 1, "windows template must cap contexts at one");
+    assert!(cfg.auth.allow_all_authenticated, "windows template keeps its documented posture");
+    let remote = cfg.listener.remote.expect("windows template must configure [listener.remote]");
+    assert!(
+        matches!(remote.auth, pkcs11_proxy_ng::config::TcpAuthMode::Mtls),
+        "windows template must stay mTLS"
+    );
+    assert!(cfg.listener.local.is_none(), "windows has no Unix listener");
 }
 
 #[test]
@@ -419,4 +487,7 @@ allow_insecure_tcp = true
     // Spot-check a few fields filled in from defaults:
     assert!(cfg.proxy.rate_limit_window_secs > 0);
     assert_eq!(cfg.proxy.rate_limit_get_backend_interfaces, 0);
+    // The reusable code default stays 1000; recommended samples set
+    // their own explicit guardrail (SEC-H1).
+    assert_eq!(cfg.proxy.max_contexts, 1000);
 }

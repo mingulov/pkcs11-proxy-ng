@@ -13,6 +13,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -405,6 +406,196 @@ class ApkSetTests(unittest.TestCase):
             mod.verify_installed_hashes(
                 installed["daemon"], installed["shim"], installed["cli"],
                 str(reference))
+
+
+class TemplateRenderTests(unittest.TestCase):
+    TEMPLATE = """\
+[backend]
+module = "/CHANGE_ME/path/to/backend.so"
+
+[proxy]
+max_contexts = 1
+request_timeout_secs = 60
+
+[listener.remote]
+bind = "127.0.0.1:7512"
+auth = "mtls"
+ca_cert = "/CHANGE_ME/tls/ca.crt"
+server_cert = "/CHANGE_ME/tls/server.crt"
+server_key = "/CHANGE_ME/tls/server.key"
+
+[listener.local]
+path = "/CHANGE_ME/proxy.sock"
+auth = "peer_cred"
+
+[auth]
+allow_all_authenticated = true
+"""
+
+    def test_render_substitutes_named_values_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            template = os.path.join(tmp, "proxy.toml")
+            output = os.path.join(tmp, "rendered.toml")
+            Path(template).write_text(self.TEMPLATE)
+            mod.render_template(template, output, module="/real/backend.so", port=44999,
+                                ca_cert="/tls/ca.crt", server_cert="/tls/server.crt",
+                                server_key="/tls/server.key",
+                                socket_path="/run/proxy.sock")
+            rendered = Path(output).read_text(encoding="utf-8")
+            self.assertIn('module = "/real/backend.so"', rendered)
+            self.assertIn('bind = "127.0.0.1:44999"', rendered)
+            self.assertIn('ca_cert = "/tls/ca.crt"', rendered)
+            self.assertIn('server_cert = "/tls/server.crt"', rendered)
+            self.assertIn('server_key = "/tls/server.key"', rendered)
+            self.assertIn('path = "/run/proxy.sock"', rendered)
+            # The shipped posture survives rendering untouched.
+            for needle in ('auth = "mtls"', "max_contexts = 1",
+                           'auth = "peer_cred"', "allow_all_authenticated = true"):
+                self.assertIn(needle, rendered)
+            self.assertNotIn("CHANGE_ME", rendered)
+
+    def test_render_escapes_windows_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            template = os.path.join(tmp, "proxy.toml")
+            output = os.path.join(tmp, "rendered.toml")
+            Path(template).write_text(self.TEMPLATE)
+            mod.render_template(template, output,
+                                module="C:\\Vendor\\backend.dll", port=7512,
+                                ca_cert="C:\\TLS\\ca.pem", server_cert="C:\\TLS\\srv.pem",
+                                server_key="C:\\TLS\\key.pem")
+            rendered = Path(output).read_text(encoding="utf-8")
+            self.assertIn('module = "C:\\\\Vendor\\\\backend.dll"', rendered)
+            self.assertIn('ca_cert = "C:\\\\TLS\\\\ca.pem"', rendered)
+
+    def test_render_refuses_missing_named_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            template = os.path.join(tmp, "proxy.toml")
+            output = os.path.join(tmp, "rendered.toml")
+            Path(template).write_text("[backend]\nmodule = \"/x.so\"\n")
+            with self.assertRaises(SystemExit):
+                mod.render_template(template, output, module="/real.so", port=1,
+                                    ca_cert="/ca", server_cert="/srv", server_key="/key")
+
+    def test_no_hand_rolled_daemon_config(self):
+        # The smoke renders shipped templates; it must not write its
+        # own undocumented plaintext configuration anymore.
+        self.assertFalse(hasattr(mod, "write_daemon_config"),
+                         "hand-rolled write_daemon_config must be removed")
+        self.assertNotIn("allow_insecure_tcp = true",
+                         SCRIPT.read_text(encoding="utf-8"))
+
+
+class BundleTemplateDiscoveryTests(unittest.TestCase):
+    def test_finds_shipped_bundle_template(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "extracted" / "name"
+            for tier in ("prod", "staging", "bundle"):
+                target = root / "examples/configs" / tier / "proxy.toml"
+                target.parent.mkdir(parents=True)
+                target.write_text(f"# {tier}\n")
+            found = mod.find_bundle_template(str(Path(tmp) / "extracted"))
+            self.assertEqual(found, str(root / "examples/configs/bundle/proxy.toml"))
+
+    def test_missing_or_ambiguous_template_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(SystemExit):
+                mod.find_bundle_template(tmp)
+            first = Path(tmp) / "a/examples/configs/bundle/proxy.toml"
+            second = Path(tmp) / "b/examples/configs/bundle/proxy.toml"
+            for target in (first, second):
+                target.parent.mkdir(parents=True)
+                target.write_text("# bundle\n")
+            with self.assertRaises(SystemExit):
+                mod.find_bundle_template(tmp)
+
+
+class SmokeWiringTests(unittest.TestCase):
+    def test_bundle_lanes_pass_shipped_template(self):
+        for command, shim_name in (("linux-bundle", "libpkcs11_proxy_ng_shim.so"),
+                                   ("macos-bundle", "libpkcs11_proxy_ng_shim.dylib")):
+            with self.subTest(command=command):
+                args = mod.parse_args([command, "--bundle", "b", "--workdir", "w"])
+                with tempfile.TemporaryDirectory() as tmp:
+                    template = os.path.join(tmp, "proxy.toml")
+                    Path(template).write_text("# bundle\n")
+                    with mock.patch.object(mod, "require_file",
+                                           side_effect=lambda p, _l: p), \
+                         mock.patch.object(mod, "require_dir",
+                                           side_effect=lambda p, _l: p), \
+                         mock.patch.object(mod, "safe_extract_tarball"), \
+                         mock.patch.object(Path, "rglob",
+                                           return_value=[Path("x/build-provenance.json")]), \
+                         mock.patch.object(mod, "verify_prepared_bundle"), \
+                         mock.patch.object(mod, "find_bundle_template",
+                                           return_value=template), \
+                         mock.patch.object(mod, "find_staged",
+                                           side_effect=["d", "c", shim_name]), \
+                         mock.patch.object(mod, "unix_provider_smoke",
+                                           return_value={}) as smoke:
+                        if command == "linux-bundle":
+                            mod.cmd_linux_bundle(args)
+                        else:
+                            with mock.patch.object(mod.sys, "platform", "linux"):
+                                mod.cmd_macos_bundle(args)
+                    _, kwargs = smoke.call_args
+                    self.assertEqual(kwargs.get("template"), template)
+
+    def test_installed_smoke_requires_template(self):
+        with self.assertRaises(SystemExit) as ctx:
+            mod.parse_args(["installed-smoke", "--daemon", "d", "--shim", "s",
+                            "--cli", "c", "--workdir", "w"])
+        self.assertNotEqual(ctx.exception.code, 0)
+        args = mod.parse_args(["installed-smoke", "--daemon", "d", "--shim", "s",
+                               "--cli", "c", "--workdir", "w", "--template", "t"])
+        with mock.patch.object(mod, "unix_provider_smoke", return_value={}) as smoke:
+            mod.cmd_installed_smoke(args)
+        _, kwargs = smoke.call_args
+        self.assertEqual(kwargs.get("template"), "t")
+
+    def test_windows_lane_passes_shipped_template(self):
+        args = mod.parse_args(["windows-bundle", "--bundle", "b", "--workdir", "w"])
+        with mock.patch.object(mod, "require_file",
+                               side_effect=lambda p, _l: p), \
+             mock.patch.object(mod, "require_dir",
+                               side_effect=lambda p, _l: p), \
+             mock.patch.object(mod.os, "makedirs"), \
+             mock.patch.object(mod, "safe_extract_zip"), \
+             mock.patch.object(mod, "verify_prepared_bundle"), \
+             mock.patch.object(Path, "rglob",
+                               return_value=[Path("x/build-provenance.json")]), \
+             mock.patch.object(mod, "find_staged",
+                               side_effect=["d", "c", "s", "x", "t"]), \
+             mock.patch.object(mod, "windows_provider_smoke",
+                               return_value={}) as smoke:
+            mod.cmd_windows_bundle(args)
+        _, kwargs = smoke.call_args
+        self.assertEqual(kwargs.get("template"), "t")
+
+
+class CertGenerationTests(unittest.TestCase):
+    def test_openssl_certs_verify_against_ca(self):
+        if mod.shutil.which("openssl") is None:
+            self.skipTest("openssl unavailable")
+        with tempfile.TemporaryDirectory() as tmp:
+            certs = mod.generate_mtls_certs(tmp)
+            for role in ("ca_cert", "server_cert", "server_key",
+                         "client_cert", "client_key"):
+                with self.subTest(role=role):
+                    self.assertTrue(os.path.isfile(certs[role]))
+                    self.assertGreater(os.path.getsize(certs[role]), 0)
+            if os.name == "posix":
+                import stat
+                for role in ("server_key", "client_key"):
+                    mode = stat.S_IMODE(os.stat(certs[role]).st_mode)
+                    self.assertEqual(mode, 0o600, role)
+            server = subprocess.run(
+                ["openssl", "verify", "-CAfile", certs["ca_cert"], certs["server_cert"]],
+                capture_output=True, text=True)
+            self.assertEqual(server.returncode, 0, server.stderr)
+            client = subprocess.run(
+                ["openssl", "verify", "-CAfile", certs["ca_cert"], certs["client_cert"]],
+                capture_output=True, text=True)
+            self.assertEqual(client.returncode, 0, client.stderr)
 
 
 class TarballTests(unittest.TestCase):
