@@ -32,6 +32,9 @@ Multi-client isolation is planned for [v0.3](./doc/release/v0.3.0-scope.md).
 
 ## Quick start
 
+Installed from a release bundle? Follow `INSTALL.md` in the extracted
+archive instead of the source-checkout steps below.
+
 This local example uses SoftHSM2 and OpenSC's `pkcs11-tool`.
 
 ```bash
