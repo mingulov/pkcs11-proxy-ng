@@ -174,7 +174,12 @@ and `qualification-evidence.tar.gz` release assets next to
 `inventory.json` and `qualification-binding.json`. The archive holds
 the complete evidence directory (`receipt.json` plus the `bundle/`
 lockfile, five identity manifests, comparison, and record),
-preserving the relative layout the portable validator expects.
+preserving the relative layout the portable validator expects. The
+archive is canonicalized — sorted member order, zeroed ownership, a
+fixed member mtime, and deterministic gzip settings — so every
+recovery retry over identical validated evidence reproduces the
+identical bytes and passes the strict asset comparison instead of
+refusing as divergent.
 Release assets do not expire, unlike the 90-day run artifacts; the
 complete acceptance record survives without depending on run
 retention. The published `assets.json` manifest pins the archive's

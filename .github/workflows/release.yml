@@ -280,8 +280,16 @@ jobs:
             recovered/qualification-record.json
           cp "$RUNNER_TEMP/qual-evidence/receipt.json" \
             recovered/qualification-receipt.json
-          tar -czf recovered/qualification-evidence.tar.gz \
-            -C "$RUNNER_TEMP/qual-evidence" receipt.json bundle
+          # Canonical archive: recovery regenerates this tarball on
+          # every retry and the publish compare gate refuses divergent
+          # bytes, so extraction metadata must not leak into the
+          # digest — sorted members, fixed mtime/ownership, and
+          # deterministic gzip keep identical validated evidence
+          # byte-identical across retries.
+          tar --sort=name --owner=0 --group=0 --numeric-owner \
+            --mtime='1970-01-01' -cf - \
+            -C "$RUNNER_TEMP/qual-evidence" receipt.json bundle \
+            | gzip -n > recovered/qualification-evidence.tar.gz
 
       - name: Stage recovered evidence for downstream jobs
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
