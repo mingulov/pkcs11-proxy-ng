@@ -130,25 +130,41 @@ def verify_environment_protections(
     return tuple(environments)
 
 
+def _is_nonblank_handle(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _is_positive_id(value: Any) -> bool:
+    return (isinstance(value, int) and
+            not isinstance(value, bool) and value > 0)
+
+
 def is_valid_reviewer(reviewer: Any) -> bool:
     """Check one required_reviewers entry against the recognized shape.
 
     The API returns ``{"type": "User"|"Team", "reviewer": {...}}``
-    objects carrying a login/slug/name handle or a numeric id.
+    objects. A User is identified by a non-blank ``login`` or a
+    positive integer ``id``; a Team by a non-blank ``slug`` or a
+    positive integer ``id``. The display ``name`` never counts as
+    an identifier, and a present-but-invalid handle or id refuses
+    even when the other identifier is valid.
     """
     if not isinstance(reviewer, dict):
         return False
-    if reviewer.get("type") not in REVIEWER_TYPES:
+    reviewer_type = reviewer.get("type")
+    if reviewer_type not in REVIEWER_TYPES:
         return False
     identity = reviewer.get("reviewer")
     if not isinstance(identity, dict):
         return False
-    for key in ("login", "slug", "name"):
-        handle = identity.get(key)
-        if isinstance(handle, str) and handle:
-            return True
-    ident = identity.get("id")
-    return isinstance(ident, int) and not isinstance(ident, bool)
+    handle_key = "login" if reviewer_type == "User" else "slug"
+    if handle_key in identity and not _is_nonblank_handle(
+            identity[handle_key]):
+        return False
+    if "id" in identity and not _is_positive_id(identity["id"]):
+        return False
+    return (_is_nonblank_handle(identity.get(handle_key)) or
+            _is_positive_id(identity.get("id")))
 
 
 def read_policy_entries(policies_payload: Any,

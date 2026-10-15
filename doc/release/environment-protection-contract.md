@@ -24,8 +24,11 @@ the Environments API readback:
 - It exists in the `GET /repos/{owner}/{repo}/environments` listing.
 - Its `protection_rules` include a `required_reviewers` rule with at
   least one reviewer, where every reviewer entry is a recognized
-  `User`/`Team` object carrying a login/slug/name handle or numeric
-  id (null, mistyped, or identifier-less entries refuse).
+  `User`/`Team` object with a valid type-appropriate identifier: a
+  `User` carries a non-blank login or a positive id, a `Team` a
+  non-blank slug or a positive id (null, mistyped, identifier-less,
+  display name-only, blank-handle, or non-positive-id entries refuse,
+  as does a present-but-invalid handle or id).
 - Its `deployment_branch_policy` selects exactly the intended refs:
   `protected_branches: false` with `custom_branch_policies: true`
   (never null, never unrestricted, never contradictory, never
@@ -100,7 +103,7 @@ job's credential/mutation steps run:
 | --- | --- |
 | Environment missing from the listing | refuse |
 | No `required_reviewers` rule, or an empty reviewer list | refuse |
-| Malformed reviewer entry (null, unrecognized type, no identifier) | refuse |
+| Malformed reviewer entry (null, unrecognized type, no identifier, display name-only, blank handle, zero/negative id) | refuse |
 | Null or unrestricted `deployment_branch_policy` (permissive) | refuse |
 | Contradictory or malformed policy flags (both true, missing, non-boolean) | refuse |
 | Custom patterns differ from the contract (mismatched, extra, or empty) | refuse |
