@@ -247,6 +247,94 @@ class ProtectionContractTests(unittest.TestCase):
                                     intended_policies(), ("crates-io",)),
                          ("crates-io",))
 
+    def refuse_reviewers(self, reviewers):
+        envs = load_environments()
+        entry = env_entry("crates-io")
+        entry["protection_rules"] = [
+            {"type": "required_reviewers", "reviewers": reviewers}]
+        with self.assertRaisesRegex(envs.ReleaseError,
+                                    "malformed reviewer"):
+            self.check(list_payload(entry), intended_policies(),
+                       ("crates-io",))
+
+    def test_user_display_name_only_refuses(self):
+        self.refuse_reviewers([{"type": "User",
+                                "reviewer": {"name":
+                                             "Release Approver"}}])
+
+    def test_blank_login_refuses(self):
+        for login in (" ", "", "\t"):
+            with self.subTest(login=login):
+                self.refuse_reviewers([{"type": "User",
+                                        "reviewer": {"login": login}}])
+
+    def test_nonpositive_reviewer_id_refuses(self):
+        for ident in (0, -1, True):
+            with self.subTest(id=ident):
+                self.refuse_reviewers([{"type": "User",
+                                        "reviewer": {"id": ident}}])
+
+    def test_team_display_name_only_refuses(self):
+        self.refuse_reviewers([{"type": "Team",
+                                "reviewer": {"name": "Releasers"}}])
+
+    def test_blank_team_slug_refuses(self):
+        for slug in (" ", ""):
+            with self.subTest(slug=slug):
+                self.refuse_reviewers([{"type": "Team",
+                                        "reviewer": {"slug": slug}}])
+
+    def test_cross_type_handle_alone_refuses(self):
+        cases = ([{"type": "User",
+                   "reviewer": {"slug": "releasers"}}],
+                 [{"type": "Team",
+                   "reviewer": {"login": "owner"}}])
+        for reviewers in cases:
+            with self.subTest(reviewers=reviewers):
+                self.refuse_reviewers(reviewers)
+
+    def test_present_but_invalid_identifier_refuses(self):
+        cases = ([{"type": "User",
+                   "reviewer": {"login": "owner", "id": 0}}],
+                 [{"type": "User",
+                   "reviewer": {"login": "owner", "id": -1}}],
+                 [{"type": "Team",
+                   "reviewer": {"slug": "releasers", "id": 0}}],
+                 [{"type": "User",
+                   "reviewer": {"login": " ", "id": 5}}])
+        for reviewers in cases:
+            with self.subTest(reviewers=reviewers):
+                self.refuse_reviewers(reviewers)
+
+    def test_handle_only_reviewer_passes(self):
+        cases = ([{"type": "User", "reviewer": {"login": "owner"}}],
+                 [{"type": "Team",
+                   "reviewer": {"slug": "releasers"}}])
+        for reviewers in cases:
+            with self.subTest(reviewers=reviewers):
+                entry = env_entry("crates-io")
+                entry["protection_rules"] = [
+                    {"type": "required_reviewers",
+                     "reviewers": reviewers}]
+                self.assertEqual(self.check(list_payload(entry),
+                                            intended_policies(),
+                                            ("crates-io",)),
+                                 ("crates-io",))
+
+    def test_id_only_reviewer_passes(self):
+        cases = ([{"type": "User", "reviewer": {"id": 42}}],
+                 [{"type": "Team", "reviewer": {"id": 7}}])
+        for reviewers in cases:
+            with self.subTest(reviewers=reviewers):
+                entry = env_entry("crates-io")
+                entry["protection_rules"] = [
+                    {"type": "required_reviewers",
+                     "reviewers": reviewers}]
+                self.assertEqual(self.check(list_payload(entry),
+                                            intended_policies(),
+                                            ("crates-io",)),
+                                 ("crates-io",))
+
     def test_null_protection_rules_refuses_with_release_error(self):
         envs = load_environments()
         entry = env_entry("crates-io")
@@ -368,6 +456,24 @@ class EnvironmentsPreflightCommandTests(unittest.TestCase):
             self.assertNotEqual(status, 0)
             self.assertIn("malformed reviewer", err)
 
+    def test_cli_refuses_weak_reviewer_identifiers(self):
+        cases = ([{"type": "User",
+                   "reviewer": {"name": "Release Approver"}}],
+                 [{"type": "User", "reviewer": {"login": " "}}],
+                 [{"type": "User", "reviewer": {"id": 0}}],
+                 [{"type": "User", "reviewer": {"id": -1}}])
+        for reviewers in cases:
+            with self.subTest(reviewers=reviewers):
+                with tempfile.TemporaryDirectory() as temp:
+                    entry = env_entry("crates-io")
+                    entry["protection_rules"] = [
+                        {"type": "required_reviewers",
+                         "reviewers": reviewers}]
+                    status, err = self.run_cli(
+                        *self.write_gate(temp, entry))
+                    self.assertNotEqual(status, 0)
+                    self.assertIn("malformed reviewer", err)
+
     def test_cli_refuses_missing_protected_branches(self):
         with tempfile.TemporaryDirectory() as temp:
             entry = env_entry("crates-io")
@@ -424,6 +530,15 @@ class EnvironmentsPreflightCommandTests(unittest.TestCase):
             "protected_branches": True, "custom_branch_policies": True}
         null_rules = env_entry("crates-io")
         null_rules["protection_rules"] = None
+
+        def reviewer_entry(identity, reviewer_type="User"):
+            entry = env_entry("crates-io")
+            entry["protection_rules"] = [
+                {"type": "required_reviewers",
+                 "reviewers": [{"type": reviewer_type,
+                                "reviewer": identity}]}]
+            return entry
+
         cases = [
             ("absent-reviewer",
              [env_entry("crates-io", reviewers=False)],
@@ -474,6 +589,29 @@ class EnvironmentsPreflightCommandTests(unittest.TestCase):
                             "branch_policies": [{"name": "v*",
                                                  "type": "tag"}]}},
              "crates-io", "is incomplete"),
+            ("display-name-only",
+             [reviewer_entry({"name": "Release Approver"})],
+             intended_policies(), "crates-io",
+             "malformed reviewer"),
+            ("blank-login", [reviewer_entry({"login": " "})],
+             intended_policies(), "crates-io",
+             "malformed reviewer"),
+            ("zero-id", [reviewer_entry({"id": 0})],
+             intended_policies(), "crates-io",
+             "malformed reviewer"),
+            ("negative-id", [reviewer_entry({"id": -1})],
+             intended_policies(), "crates-io",
+             "malformed reviewer"),
+            ("team-display-name-only",
+             [reviewer_entry({"name": "Releasers"},
+                             reviewer_type="Team")],
+             intended_policies(), "crates-io",
+             "malformed reviewer"),
+            ("blank-slug",
+             [reviewer_entry({"slug": " "},
+                             reviewer_type="Team")],
+             intended_policies(), "crates-io",
+             "malformed reviewer"),
         ]
         with tempfile.TemporaryDirectory() as temp:
             for label, entries, policies, env, fragment in cases:
@@ -607,6 +745,13 @@ class ProtectionContractDocTests(unittest.TestCase):
         self.assertIn("total_count", text)
         self.assertIn("contradictory", text)
         for marker in ("truncated", "per_page"):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, text)
+
+    def test_contract_doc_documents_reviewer_identity_rule(self):
+        text = CONTRACT.read_text(encoding="utf-8")
+        for marker in ("non-blank login", "non-blank slug",
+                       "positive id", "display name"):
             with self.subTest(marker=marker):
                 self.assertIn(marker, text)
 
