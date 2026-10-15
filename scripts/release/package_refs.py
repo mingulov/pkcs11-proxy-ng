@@ -11,6 +11,9 @@ from .package_model import PACKAGES, ReleaseError, checked_workspace, git, requi
 
 STABLE_REF = re.compile(r"refs/tags/v((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))\Z")
 HEX_SHA = re.compile(r"[0-9a-f]{40,64}\Z")
+HEX40 = re.compile(r"[0-9a-f]{40}\Z")
+HEX64 = re.compile(r"[0-9a-f]{64}\Z")
+QUAL_RUN_ID = re.compile(r"[1-9][0-9]*\Z")
 MODES = ("dry-run", "bootstrap", "trusted")
 PACKAGE_NAMES = ("workspace", *(name for name, _ in PACKAGES))
 
@@ -29,7 +32,12 @@ def qualification_url(url: str) -> bool:
 
 def preflight(repo: Path, ref: str, require_main: bool, mode: str,
               package: str, qualification_subject: str | None,
-              qualification_url_value: str | None) -> tuple[str, str, str]:
+              qualification_url_value: str | None,
+              qualification_run_id: str | None = None,
+              qualification_framework: str | None = None,
+              qualification_record_sha256: str | None = None,
+              qualification_receipt_sha256: str | None = None,
+              ) -> tuple[str, str, str]:
     match = STABLE_REF.fullmatch(ref)
     require(match is not None, "ref must be a full stable refs/tags/vMAJOR.MINOR.PATCH")
     require(mode in MODES, f"invalid publication mode: {mode}")
@@ -57,14 +65,31 @@ def preflight(repo: Path, ref: str, require_main: bool, mode: str,
     result = subprocess.run([str(receipt), ref.removeprefix("refs/tags/")],
                             cwd=repo, text=True, capture_output=True)
     require(result.returncode == 0, f"quality receipt refused: {result.stderr.strip()}")
+    qual_identity = (qualification_run_id, qualification_framework,
+                     qualification_record_sha256,
+                     qualification_receipt_sha256)
     if mode != "dry-run":
-        require(qualification_subject is not None and qualification_url_value is not None,
-                "upload mode requires qualification subject and URL")
+        require(qualification_subject is not None and qualification_url_value is not None
+                and all(value is not None for value in qual_identity),
+                "upload mode requires qualification subject, URL, run id, "
+                "framework, and record/receipt digests")
     if qualification_subject is not None or qualification_url_value is not None:
         require(qualification_subject is not None and HEX_SHA.fullmatch(qualification_subject) is not None and
                 qualification_subject == frozen_parent, "qualification subject must equal frozen parent SHA")
         require(qualification_url_value is not None and qualification_url(qualification_url_value),
                 "qualification URL must be credential-free HTTPS with a host")
+    if qualification_run_id is not None:
+        require(QUAL_RUN_ID.fullmatch(qualification_run_id) is not None,
+                "qualification run id must be a positive integer")
+    if qualification_framework is not None:
+        require(HEX40.fullmatch(qualification_framework) is not None,
+                "qualification framework must be a 40-hex SHA")
+    if qualification_record_sha256 is not None:
+        require(HEX64.fullmatch(qualification_record_sha256) is not None,
+                "qualification record sha256 must be 64-hex")
+    if qualification_receipt_sha256 is not None:
+        require(HEX64.fullmatch(qualification_receipt_sha256) is not None,
+                "qualification receipt sha256 must be 64-hex")
     return version, head, frozen_parent
 
 

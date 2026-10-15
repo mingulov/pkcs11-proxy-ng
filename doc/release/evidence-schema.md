@@ -108,6 +108,15 @@ targets, binaries, manifest contents, provenance, resource limits, test-unit
 completion, and comparison results. Validation here alone does not establish
 those claims or prove that a claimed source produced a binary.
 
+Pre-publication use: the
+[qualification binding contract](./qualification-binding-contract.md)
+wires this validator into the release path. The
+`qualification-preflight` gate requires a candidate-bound `comparison`
+receipt, pins the receipt's own digest plus the provider-selection
+record digest in the version-2 evidence binding, and enforces the
+30-provider non-mock matrix before any publication credential use or
+external mutation.
+
 ## Invalidation
 
 Changing source commit/tree, Cargo.lock, toolchain/target, any release binary,

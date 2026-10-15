@@ -359,6 +359,14 @@ class PublishEvidenceTests(unittest.TestCase):
                       str(env.get("REC_QUAL_URL", "")))
         self.assertIn("needs.preflight.outputs.qual_subject",
                       str(env.get("REC_QUAL_SUBJECT", "")))
+        self.assertIn("needs.preflight.outputs.qual_run_id",
+                      str(env.get("REC_QUAL_RUN_ID", "")))
+        self.assertIn("needs.preflight.outputs.qual_framework",
+                      str(env.get("REC_QUAL_FRAMEWORK", "")))
+        self.assertIn("needs.preflight.outputs.qual_record_sha256",
+                      str(env.get("REC_QUAL_RECORD_SHA256", "")))
+        self.assertIn("needs.preflight.outputs.qual_receipt_sha256",
+                      str(env.get("REC_QUAL_RECEIPT_SHA256", "")))
         self.assertIn("github.repository", str(env.get("REC_REPO", "")))
         script = records[0].get("run", "")
         self.assertNotIn("${{", script)
@@ -366,7 +374,9 @@ class PublishEvidenceTests(unittest.TestCase):
         self.assertIn("--ref main", script)
         self.assertIn("sq()", script)
         for var in ("REC_TAG", "REC_RUN_ID", "REC_QUAL_URL",
-                    "REC_QUAL_SUBJECT", "REC_REPO"):
+                    "REC_QUAL_SUBJECT", "REC_QUAL_RUN_ID",
+                    "REC_QUAL_FRAMEWORK", "REC_QUAL_RECORD_SHA256",
+                    "REC_QUAL_RECEIPT_SHA256", "REC_REPO"):
             with self.subTest(var=var):
                 self.assertIn(f'"$(sq "${var}")"', script)
         uploads = [step for step in steps
@@ -428,6 +438,10 @@ class PublishEvidenceTests(unittest.TestCase):
             "REC_QUAL_URL": ("https://example.invalid/q?a=1&b=$HOME&c=$(touch "
                              f"{tmp_name})&d='q'&e=`id`&f=a b"),
             "REC_QUAL_SUBJECT": "ab12'cd$(id)",
+            "REC_QUAL_RUN_ID": "456&touch",
+            "REC_QUAL_FRAMEWORK": "ef01`id`",
+            "REC_QUAL_RECORD_SHA256": "aa bb$(id)",
+            "REC_QUAL_RECEIPT_SHA256": "cc'dd",
         }
 
     @unittest.skipUnless(shutil.which("bash"), "bash is required to replay the record step")
@@ -473,7 +487,11 @@ class PublishEvidenceTests(unittest.TestCase):
                           "-R", values["REC_REPO"], "-f", f"tag={values['REC_TAG']}",
                           "-f", f"candidate_run_id={values['REC_RUN_ID']}",
                           "-f", f"qualification-url={values['REC_QUAL_URL']}",
-                          "-f", f"qualification-subject={values['REC_QUAL_SUBJECT']}"])
+                          "-f", f"qualification-subject={values['REC_QUAL_SUBJECT']}",
+                          "-f", f"qualification-run-id={values['REC_QUAL_RUN_ID']}",
+                          "-f", f"qualification-framework={values['REC_QUAL_FRAMEWORK']}",
+                          "-f", f"qualification-record-sha256={values['REC_QUAL_RECORD_SHA256']}",
+                          "-f", f"qualification-receipt-sha256={values['REC_QUAL_RECEIPT_SHA256']}"])
         self.assertFalse((tmp / "pwned").exists(),
                          "command substitution in a value must not execute")
 
@@ -499,7 +517,11 @@ class PublishEvidenceTests(unittest.TestCase):
                           "-R", values["REC_REPO"], "-f", f"tag={values['REC_TAG']}",
                           "-f", f"candidate_run_id={values['REC_RUN_ID']}",
                           "-f", f"qualification-url={values['REC_QUAL_URL']}",
-                          "-f", f"qualification-subject={values['REC_QUAL_SUBJECT']}"])
+                          "-f", f"qualification-subject={values['REC_QUAL_SUBJECT']}",
+                          "-f", f"qualification-run-id={values['REC_QUAL_RUN_ID']}",
+                          "-f", f"qualification-framework={values['REC_QUAL_FRAMEWORK']}",
+                          "-f", f"qualification-record-sha256={values['REC_QUAL_RECORD_SHA256']}",
+                          "-f", f"qualification-receipt-sha256={values['REC_QUAL_RECEIPT_SHA256']}"])
         self.assertFalse((tmp / "pwned").exists(),
                          "command substitution in a value must not execute")
 
@@ -920,7 +942,11 @@ class ReleaseRecoveryTests(unittest.TestCase):
         (tmp / "evidence" / "qualification-binding.json").write_text(
             json.dumps({"tag_commit": "c" * 40, "run_id": "123",
                         "qualification_url": "https://example.invalid/q",
-                        "qualification_subject": "s" * 40}),
+                        "qualification_subject": "s" * 40,
+                        "qualification_record_sha256": "1" * 64,
+                        "qualification_receipt_sha256": "2" * 64,
+                        "qualification_run_id": "456",
+                        "qualification_framework": "f" * 40}),
             encoding="utf-8")
         script = tmp / "predicate.sh"
         script.write_text(block, encoding="utf-8")
@@ -938,7 +964,11 @@ class ReleaseRecoveryTests(unittest.TestCase):
             "tag_commit": "c" * 40,
             "candidate_run_id": "123",
             "qualification": {"url": "https://example.invalid/q",
-                             "subject": "s" * 40},
+                             "subject": "s" * 40,
+                             "record_sha256": "1" * 64,
+                             "receipt_sha256": "2" * 64,
+                             "run_id": "456",
+                             "framework": "f" * 40},
             "built_from": "registry",
         })
         outputs = (tmp / "outputs.txt").read_text(encoding="utf-8")
@@ -1243,6 +1273,10 @@ TAG_COMMIT = "6b151b799b59bce4a06f6cb993f8a74a84ae0481"
 RUN_ID = "12345678"
 QUAL_URL = "https://example.invalid/qual/rec-42"
 QUAL_SUBJECT = "abc123def456abc123def456abc123def456abcd"
+QUAL_RUN_ID = "37423315928"
+QUAL_FRAMEWORK = "c" * 40
+QUAL_RECORD_SHA = "1" * 64
+QUAL_RECEIPT_SHA = "2" * 64
 
 
 class CandidateEvidenceTests(unittest.TestCase):
@@ -1277,7 +1311,11 @@ class CandidateEvidenceTests(unittest.TestCase):
         args = ["evidence-bind", "--output", str(binding),
                 "--tag-commit", TAG_COMMIT, "--run-id", RUN_ID,
                 "--qualification-url", QUAL_URL,
-                "--qualification-subject", QUAL_SUBJECT]
+                "--qualification-subject", QUAL_SUBJECT,
+                "--qualification-receipt-sha256", QUAL_RECEIPT_SHA,
+                "--qualification-record-sha256", QUAL_RECORD_SHA,
+                "--qualification-run-id", QUAL_RUN_ID,
+                "--qualification-framework", QUAL_FRAMEWORK]
         for key, value in overrides.items():
             flag = "--" + key.replace("_", "-")
             index = args.index(flag)
@@ -1288,10 +1326,17 @@ class CandidateEvidenceTests(unittest.TestCase):
     def test_evidence_bind_writes_exact_binding(self):
         binding = self.write_binding()
         payload = json.loads(binding.read_text(encoding="utf-8"))
+        self.assertEqual(payload["format_version"], 2)
         self.assertEqual(payload["tag_commit"], TAG_COMMIT)
         self.assertEqual(payload["run_id"], RUN_ID)
         self.assertEqual(payload["qualification_url"], QUAL_URL)
         self.assertEqual(payload["qualification_subject"], QUAL_SUBJECT)
+        self.assertEqual(payload["qualification_receipt_sha256"],
+                         QUAL_RECEIPT_SHA)
+        self.assertEqual(payload["qualification_record_sha256"],
+                         QUAL_RECORD_SHA)
+        self.assertEqual(payload["qualification_run_id"], QUAL_RUN_ID)
+        self.assertEqual(payload["qualification_framework"], QUAL_FRAMEWORK)
 
     def test_evidence_bind_refuses_non_https_url(self):
         binding = self.workdir / "binding.json"
@@ -1299,7 +1344,11 @@ class CandidateEvidenceTests(unittest.TestCase):
             ["evidence-bind", "--output", str(binding),
              "--tag-commit", TAG_COMMIT, "--run-id", RUN_ID,
              "--qualification-url", "http://example.invalid/qual",
-             "--qualification-subject", QUAL_SUBJECT], repo=ROOT)
+             "--qualification-subject", QUAL_SUBJECT,
+             "--qualification-receipt-sha256", QUAL_RECEIPT_SHA,
+             "--qualification-record-sha256", QUAL_RECORD_SHA,
+             "--qualification-run-id", QUAL_RUN_ID,
+             "--qualification-framework", QUAL_FRAMEWORK], repo=ROOT)
         self.assertEqual(code, 1)
         self.assertFalse(binding.exists())
 
@@ -1307,7 +1356,11 @@ class CandidateEvidenceTests(unittest.TestCase):
         args = ["evidence-verify", "--binding", str(binding),
                 "--expect-url", QUAL_URL, "--expect-subject", QUAL_SUBJECT,
                 "--expect-tag-commit", TAG_COMMIT,
-                "--expect-run-id", RUN_ID]
+                "--expect-run-id", RUN_ID,
+                "--expect-receipt-sha256", QUAL_RECEIPT_SHA,
+                "--expect-record-sha256", QUAL_RECORD_SHA,
+                "--expect-qual-run-id", QUAL_RUN_ID,
+                "--expect-framework", QUAL_FRAMEWORK]
         for key, value in overrides.items():
             flag = "--" + key.replace("_", "-")
             index = args.index(flag)
@@ -1322,7 +1375,11 @@ class CandidateEvidenceTests(unittest.TestCase):
         cases = ({"expect_url": QUAL_URL + "/other"},
                  {"expect_subject": "0" * 40},
                  {"expect_tag_commit": "0" * 40},
-                 {"expect_run_id": "999"})
+                 {"expect_run_id": "999"},
+                 {"expect_receipt_sha256": "0" * 64},
+                 {"expect_record_sha256": "0" * 64},
+                 {"expect_qual_run_id": "999"},
+                 {"expect_framework": "0" * 40})
         for overrides in cases:
             with self.subTest(overrides=overrides):
                 self.assertEqual(self.verify(binding, **overrides), 1)

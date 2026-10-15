@@ -15,6 +15,7 @@ from release.package_environments import (PRODUCTION_ENVIRONMENTS, load_json,  #
                                             verify_environment_protections)
 from release.package_evidence import (candidate_name, compare_assets, select_evidence,  # noqa: E402
                                       tag_evidence, verify_binding, write_binding)
+from release.package_qualification import verify_qualification  # noqa: E402
 from release.package_model import ReleaseError  # noqa: E402
 from release.package_notices import collect_workspace_inputs, generate_notices  # noqa: E402
 from release.package_receipt import write_receipt  # noqa: E402
@@ -73,6 +74,10 @@ def main(argv=None, *, repo=None) -> int:
     refs.add_argument("--package", default="workspace")
     refs.add_argument("--qualification-url")
     refs.add_argument("--qualification-subject")
+    refs.add_argument("--qualification-run-id")
+    refs.add_argument("--qualification-framework")
+    refs.add_argument("--qualification-record-sha256")
+    refs.add_argument("--qualification-receipt-sha256")
     probe = commands.add_parser("staging-probe")
     probe.add_argument("--destination", required=True, type=Path)
     probe.add_argument("--run-id", required=True)
@@ -89,12 +94,30 @@ def main(argv=None, *, repo=None) -> int:
     bind.add_argument("--run-id", required=True)
     bind.add_argument("--qualification-url", required=True)
     bind.add_argument("--qualification-subject", required=True)
+    bind.add_argument("--qualification-receipt-sha256", required=True)
+    bind.add_argument("--qualification-record-sha256", required=True)
+    bind.add_argument("--qualification-run-id", required=True)
+    bind.add_argument("--qualification-framework", required=True)
     confirm = commands.add_parser("evidence-verify")
     confirm.add_argument("--binding", required=True, type=Path)
     confirm.add_argument("--expect-url", required=True)
     confirm.add_argument("--expect-subject", required=True)
     confirm.add_argument("--expect-tag-commit", required=True)
     confirm.add_argument("--expect-run-id")
+    confirm.add_argument("--expect-receipt-sha256")
+    confirm.add_argument("--expect-record-sha256")
+    confirm.add_argument("--expect-qual-run-id")
+    confirm.add_argument("--expect-framework")
+    qualgate = commands.add_parser("qualification-preflight")
+    qualgate.add_argument("--evidence-dir", required=True, type=Path)
+    qualgate.add_argument("--expect-commit", required=True)
+    qualgate.add_argument("--expect-tree", required=True)
+    qualgate.add_argument("--expect-lock-sha256", required=True)
+    qualgate.add_argument("--expect-framework", required=True)
+    qualgate.add_argument("--expect-run-id", required=True)
+    qualgate.add_argument("--expect-url", required=True)
+    qualgate.add_argument("--expect-record-sha256", required=True)
+    qualgate.add_argument("--expect-receipt-sha256", required=True)
     select = commands.add_parser("evidence-select")
     select.add_argument("--runs-json", required=True, type=Path)
     select.add_argument("--run-id", required=True)
@@ -128,7 +151,10 @@ def main(argv=None, *, repo=None) -> int:
         if args.command == "preflight":
             version, head, frozen_parent = preflight(
                 repo, args.ref, args.require_main, args.mode, args.package,
-                args.qualification_subject, args.qualification_url)
+                args.qualification_subject, args.qualification_url,
+                args.qualification_run_id, args.qualification_framework,
+                args.qualification_record_sha256,
+                args.qualification_receipt_sha256)
             print(f"preflight: package {args.package} version {version}; tag commit {head}; "
                   f"frozen parent {frozen_parent}")
             return 0
@@ -145,14 +171,40 @@ def main(argv=None, *, repo=None) -> int:
             print(candidate_name(args.tag_commit, args.run_id))
             return 0
         if args.command == "evidence-bind":
-            binding = write_binding(args.output, args.tag_commit, args.run_id,
-                                    args.qualification_url, args.qualification_subject)
+            binding = write_binding(
+                args.output, args.tag_commit, args.run_id,
+                args.qualification_url, args.qualification_subject,
+                receipt_sha256=args.qualification_receipt_sha256,
+                record_sha256=args.qualification_record_sha256,
+                qual_run_id=args.qualification_run_id,
+                framework=args.qualification_framework)
             print(json.dumps({"evidence_bind": binding["artifact"]}, sort_keys=True))
             return 0
         if args.command == "evidence-verify":
             verify_binding(args.binding, args.expect_url, args.expect_subject,
-                           args.expect_tag_commit, args.expect_run_id)
+                           args.expect_tag_commit, args.expect_run_id,
+                           expect_receipt_sha256=args.expect_receipt_sha256,
+                           expect_record_sha256=args.expect_record_sha256,
+                           expect_qual_run_id=args.expect_qual_run_id,
+                           expect_framework=args.expect_framework)
             print(f"evidence-verify: {args.binding} matches expected binding")
+            return 0
+        if args.command == "qualification-preflight":
+            summary = verify_qualification(
+                args.evidence_dir, expect_commit=args.expect_commit,
+                expect_tree=args.expect_tree,
+                expect_lock_sha256=args.expect_lock_sha256,
+                expect_framework=args.expect_framework,
+                expect_run_id=args.expect_run_id,
+                expect_url=args.expect_url,
+                expect_record_sha256=args.expect_record_sha256,
+                expect_receipt_sha256=args.expect_receipt_sha256)
+            print(f"qualification-preflight: subject {summary['subject']}; "
+                  f"framework {summary['framework']}; "
+                  f"run {summary['run_id']}; "
+                  f"{summary['providers']} providers PASS; "
+                  f"record {summary['record_sha256']}; "
+                  f"receipt {summary['receipt_sha256']}")
             return 0
         if args.command == "evidence-select":
             selected = select_evidence(args.runs_json, args.run_id, args.repository,

@@ -51,6 +51,22 @@ on:
         description: 'frozen-subject SHA'
         required: true
         type: string
+      qualification-run-id:
+        description: 'qualification evidence run id'
+        required: true
+        type: string
+      qualification-framework:
+        description: 'qualification framework commit SHA'
+        required: true
+        type: string
+      qualification-record-sha256:
+        description: 'provider-selection record digest'
+        required: true
+        type: string
+      qualification-receipt-sha256:
+        description: 'qualification receipt digest'
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       tag:
@@ -64,6 +80,18 @@ on:
         required: true
       qualification-subject:
         description: 'frozen-subject SHA'
+        required: true
+      qualification-run-id:
+        description: 'qualification evidence run id'
+        required: true
+      qualification-framework:
+        description: 'qualification framework commit SHA'
+        required: true
+      qualification-record-sha256:
+        description: 'provider-selection record digest'
+        required: true
+      qualification-receipt-sha256:
+        description: 'qualification receipt digest'
         required: true
 
 permissions:
@@ -89,6 +117,10 @@ jobs:
       CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
       QUALIFICATION_URL: ${{ inputs.qualification-url }}
       QUALIFICATION_SUBJECT: ${{ inputs.qualification-subject }}
+      QUALIFICATION_RUN_ID: ${{ inputs.qualification-run-id }}
+      QUALIFICATION_FRAMEWORK: ${{ inputs.qualification-framework }}
+      QUALIFICATION_RECORD_SHA256: ${{ inputs.qualification-record-sha256 }}
+      QUALIFICATION_RECEIPT_SHA256: ${{ inputs.qualification-receipt-sha256 }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout tag with full history
@@ -129,6 +161,36 @@ jobs:
             --api-json "$RUNNER_TEMP/release-env-list.json" \
             --environment release \
             --policies-json "release=$RUNNER_TEMP/release-env-policies.json"
+
+      # Qualification gate: re-verify the frozen subject's provider
+      # evidence from the immutable qualification artifact before any
+      # binary job starts (see
+      # doc/release/qualification-binding-contract.md). Composes with
+      # the environments-preflight step above: authorization and
+      # evidence are separate gates; both refuse before the asset
+      # upload. Expected tree/lock come from the frozen subject
+      # (HEAD~1, the pre-receipt parent), never from the evidence
+      # being validated. The validated record and receipt are staged
+      # for durable retention as release assets.
+      - name: Reverify provider qualification evidence
+        run: |
+          set -euo pipefail
+          gh run download "$QUALIFICATION_RUN_ID" \
+            -n provider-qualification \
+            -D "$RUNNER_TEMP/qual-evidence" \
+            -R "$GITHUB_REPOSITORY"
+          EXPECT_TREE="$(git rev-parse 'HEAD~1^{tree}')"
+          EXPECT_LOCK="$(git show 'HEAD~1:Cargo.lock' | sha256sum | cut -d' ' -f1)"
+          python3 scripts/release_checks.py qualification-preflight \
+            --evidence-dir "$RUNNER_TEMP/qual-evidence" \
+            --expect-commit "$QUALIFICATION_SUBJECT" \
+            --expect-tree "$EXPECT_TREE" \
+            --expect-lock-sha256 "$EXPECT_LOCK" \
+            --expect-framework "$QUALIFICATION_FRAMEWORK" \
+            --expect-run-id "$QUALIFICATION_RUN_ID" \
+            --expect-url "$QUALIFICATION_URL" \
+            --expect-record-sha256 "$QUALIFICATION_RECORD_SHA256" \
+            --expect-receipt-sha256 "$QUALIFICATION_RECEIPT_SHA256"
 
       - name: Reinspect tag, source, and qualification binding
         id: recheck
@@ -198,7 +260,23 @@ jobs:
             --expect-url "$QUALIFICATION_URL" \
             --expect-subject "$QUALIFICATION_SUBJECT" \
             --expect-tag-commit "$TAG_COMMIT" \
-            --expect-run-id "$CANDIDATE_RUN_ID"
+            --expect-run-id "$CANDIDATE_RUN_ID" \
+            --expect-receipt-sha256 "$QUALIFICATION_RECEIPT_SHA256" \
+            --expect-record-sha256 "$QUALIFICATION_RECORD_SHA256" \
+            --expect-qual-run-id "$QUALIFICATION_RUN_ID" \
+            --expect-framework "$QUALIFICATION_FRAMEWORK"
+
+      - name: Stage validated qualification record for retention
+        run: |
+          set -euo pipefail
+          # The gate above verified these exact bytes against the
+          # pinned digests; copy (never re-download) them into the
+          # recovered evidence so the publish job retains them as
+          # durable release assets alongside provenance.
+          cp "$RUNNER_TEMP/qual-evidence/bundle/pool-evidence.json" \
+            recovered/qualification-record.json
+          cp "$RUNNER_TEMP/qual-evidence/receipt.json" \
+            recovered/qualification-receipt.json
 
       - name: Stage recovered evidence for downstream jobs
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -857,6 +935,10 @@ jobs:
           print(json.dumps(assets))
           EOF
           cp evidence/inventory.json evidence/qualification-binding.json prepared/
+          # Durable retention: the validated qualification record and
+          # receipt ship as release assets alongside provenance, not
+          # just 90-day run artifacts.
+          cp evidence/qualification-record.json evidence/qualification-receipt.json prepared/
           python3 - <<'EOF' > prepared/assets.json
           import hashlib, json
           from pathlib import Path
@@ -930,6 +1012,12 @@ jobs:
               "qualification": {
                   "url": binding["qualification_url"],
                   "subject": binding["qualification_subject"],
+                  "record_sha256":
+                      binding["qualification_record_sha256"],
+                  "receipt_sha256":
+                      binding["qualification_receipt_sha256"],
+                  "run_id": binding["qualification_run_id"],
+                  "framework": binding["qualification_framework"],
               },
               "built_from": "registry",
           }
