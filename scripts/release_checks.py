@@ -11,6 +11,8 @@ from release.package_archives import inspect_archives  # noqa: E402
 from release.package_binaries import build_binaries  # noqa: E402
 from release.package_bundles import stage_bundle  # noqa: E402
 from release.package_consumers import archive_consumer, registry_consumer  # noqa: E402
+from release.package_environments import (PRODUCTION_ENVIRONMENTS, load_json,  # noqa: E402
+                                            verify_environment_protections)
 from release.package_evidence import (candidate_name, compare_assets, select_evidence,  # noqa: E402
                                       tag_evidence, verify_binding, write_binding)
 from release.package_model import ReleaseError  # noqa: E402
@@ -111,6 +113,10 @@ def main(argv=None, *, repo=None) -> int:
     tagev.add_argument("--tag", required=True)
     tagev.add_argument("--repo", required=True, type=Path)
     tagev.add_argument("--expect-peeled")
+    envgate = commands.add_parser("environments-preflight")
+    envgate.add_argument("--api-json", required=True, type=Path)
+    envgate.add_argument("--environment", action="append", default=None)
+    envgate.add_argument("--policies-json", action="append", default=[])
     receipt = commands.add_parser("write-receipt")
     receipt.add_argument("--version", required=True)
     receipt.add_argument("--subject-sha", required=True)
@@ -162,6 +168,23 @@ def main(argv=None, *, repo=None) -> int:
         if args.command == "tag-evidence":
             evidence = tag_evidence(args.repo, args.tag, args.expect_peeled)
             print(json.dumps({"tag_evidence": evidence}, sort_keys=True))
+            return 0
+        if args.command == "environments-preflight":
+            if args.environment:
+                environments = tuple(args.environment)
+            else:
+                environments = PRODUCTION_ENVIRONMENTS
+            policies = {}
+            for assignment in args.policies_json:
+                name, separator, path = assignment.partition("=")
+                if not separator or not name:
+                    raise ReleaseError(f"invalid --policies-json {assignment!r}: "
+                                       "want NAME=PATH")
+                policies[name] = load_json(Path(path))
+            verified = verify_environment_protections(load_json(args.api_json),
+                                                      policies, environments)
+            print(f"environments-preflight: {', '.join(verified)} carry required "
+                  "reviewers and the intended ref policy")
             return 0
         if args.command == "write-receipt":
             path = write_receipt(args.output, args.version,

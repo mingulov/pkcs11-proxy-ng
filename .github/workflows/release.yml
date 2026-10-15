@@ -112,6 +112,24 @@ jobs:
       - name: Verify quality receipt
         run: scripts/verify-quality-receipt.sh "$RECOVER_TAG"
 
+      # Read-only authorization gate: the live release environment
+      # must carry required reviewers plus the documented ref policy
+      # before the publish job may upload release assets (see
+      # doc/release/environment-protection-contract.md). Fails closed
+      # on missing environment, missing reviewers,
+      # permissive/mismatched ref policy, or unavailable API.
+      - name: Verify release environment protections
+        run: |
+          set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/environments" \
+            > "$RUNNER_TEMP/release-env-list.json"
+          gh api "repos/${GITHUB_REPOSITORY}/environments/release/deployment-branch-policies" \
+            > "$RUNNER_TEMP/release-env-policies.json"
+          python3 scripts/release_checks.py environments-preflight \
+            --api-json "$RUNNER_TEMP/release-env-list.json" \
+            --environment release \
+            --policies-json "release=$RUNNER_TEMP/release-env-policies.json"
+
       - name: Reinspect tag, source, and qualification binding
         id: recheck
         run: |

@@ -174,6 +174,27 @@ jobs:
             exit 1
           fi
 
+      # Read-only authorization gate: the live crates-io
+      # environment must carry required reviewers plus the
+      # documented ref policy before the upload job may touch
+      # registry credentials (see
+      # doc/release/environment-protection-contract.md). Fails
+      # closed on missing environment, missing reviewers,
+      # permissive/mismatched ref policy, or unavailable API.
+      - name: Verify crates-io environment protections
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${{ github.repository }}/environments" \
+            > "$RUNNER_TEMP/crates-io-env-list.json"
+          gh api "repos/${{ github.repository }}/environments/crates-io/deployment-branch-policies" \
+            > "$RUNNER_TEMP/crates-io-env-policies.json"
+          python3 scripts/release_checks.py environments-preflight \
+            --api-json "$RUNNER_TEMP/crates-io-env-list.json" \
+            --environment crates-io \
+            --policies-json "crates-io=$RUNNER_TEMP/crates-io-env-policies.json"
+
   candidate:
     name: Stage immutable pre-auth candidate
     runs-on: ubuntu-26.04

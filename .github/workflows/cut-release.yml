@@ -206,6 +206,26 @@ jobs:
           overwrite: false
           if-no-files-found: error
 
+      # Read-only authorization gate: the live release-tag
+      # environment must carry required reviewers plus the
+      # documented ref policy before the cut job may push any tag
+      # (see doc/release/environment-protection-contract.md). Fails
+      # closed on missing environment, missing reviewers,
+      # permissive/mismatched ref policy, or unavailable API.
+      - name: Verify release-tag environment protections
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${{ github.repository }}/environments" \
+            > "$RUNNER_TEMP/release-tag-env-list.json"
+          gh api "repos/${{ github.repository }}/environments/release-tag/deployment-branch-policies" \
+            > "$RUNNER_TEMP/release-tag-env-policies.json"
+          python3 scripts/release_checks.py environments-preflight \
+            --api-json "$RUNNER_TEMP/release-tag-env-list.json" \
+            --environment release-tag \
+            --policies-json "release-tag=$RUNNER_TEMP/release-tag-env-policies.json"
+
   cut:
     name: Cut receipt commit and tag (approval-gated)
     runs-on: ubuntu-26.04

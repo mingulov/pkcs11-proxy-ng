@@ -181,7 +181,13 @@ workflow. Partial publication never starts binaries.
 - `crates-io`: protected environment with required reviewers and tag
   restrictions, bound to the source-specific qualification record
   (exact HTTPS URL plus the frozen-subject SHA). Approval happens
-  against the preflight summary, never against descriptions.
+  against the preflight summary, never against descriptions. The
+  exact reviewer/ref contract for all three production environments
+  lives in the [protection
+  contract](./environment-protection-contract.md), and the
+  `environments-preflight` gate re-verifies the live readback before
+  any credential use or mutation; a missing environment, missing
+  reviewers, or a permissive/mismatched ref policy refuses there.
 - First publication uses `bootstrap` mode with the
   `CARGO_REGISTRY_BOOTSTRAP_TOKEN` secret. Afterwards, configure one
   trusted-publishing trust record per crate (eight records) and use
