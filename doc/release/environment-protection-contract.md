@@ -23,10 +23,14 @@ the Environments API readback:
 
 - It exists in the `GET /repos/{owner}/{repo}/environments` listing.
 - Its `protection_rules` include a `required_reviewers` rule with at
-  least one reviewer.
-- Its `deployment_branch_policy` restricts deployments to the intended
-  refs (never null, never unrestricted), with custom name patterns
-  matching exactly:
+  least one reviewer, where every reviewer entry is a recognized
+  `User`/`Team` object carrying a login/slug/name handle or numeric
+  id (null, mistyped, or identifier-less entries refuse).
+- Its `deployment_branch_policy` selects exactly the intended refs:
+  `protected_branches: false` with `custom_branch_policies: true`
+  (never null, never unrestricted, never contradictory, never
+  missing/non-boolean flags), with custom name patterns matching
+  exactly:
 
 | Environment | Required reviewers | Deployment refs (selected branches/tags) |
 | --- | --- | --- |
@@ -96,9 +100,12 @@ job's credential/mutation steps run:
 | --- | --- |
 | Environment missing from the listing | refuse |
 | No `required_reviewers` rule, or an empty reviewer list | refuse |
+| Malformed reviewer entry (null, unrecognized type, no identifier) | refuse |
 | Null or unrestricted `deployment_branch_policy` (permissive) | refuse |
+| Contradictory or malformed policy flags (both true, missing, non-boolean) | refuse |
 | Custom patterns differ from the contract (mismatched, extra, or empty) | refuse |
 | Policy detail unavailable while custom policies are enabled | refuse |
+| Truncated policy readback (`total_count` disagrees with captured entries) | refuse |
 | API JSON missing, unreadable, or unrecognized (unavailable API) | refuse |
 
 ## Plan and API limits (handled explicitly)
@@ -119,6 +126,15 @@ job's credential/mutation steps run:
 - Unknown extra API fields are ignored; missing required fields
   refuse. A future API shape change therefore fails loudly instead
   of passing silently.
+- The deployment-branch-policy endpoint paginates
+  (`per_page`/`page`). The helper verifies one captured readback and
+  requires its `total_count` to equal the captured entries; a
+  truncated capture refuses with the environment and endpoint named
+  instead of fetching further pages. Capture with `?per_page=100`
+  (or re-capture every page into one readback) so the verdict
+  covers the complete policy. Production environments carry exactly
+  one pattern each, so a single page always suffices; the check
+  exists to fail closed rather than silently accept a partial read.
 - The gate verifies configuration, not identity: it cannot prove who
   approved a past release, and the historical approval status of
   earlier releases remains unverified.

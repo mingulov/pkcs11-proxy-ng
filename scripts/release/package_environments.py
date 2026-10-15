@@ -3,7 +3,8 @@
 Consumes captured Environments API JSON (the list-environment payload
 plus per-environment deployment-branch-policy payloads) and returns a
 fail-closed verdict: a missing environment, an absent reviewer rule, a
-permissive or mismatched ref policy, or an unavailable/unrecognized
+malformed reviewer entry, a permissive, contradictory, or mismatched
+ref policy, a truncated policy capture, or an unavailable/unrecognized
 readback refuses. This module never calls the network and never
 mutates anything; callers fetch the readback with read-only ``gh api``
 GETs (any account with repository read access) and pass the bytes in.
@@ -20,6 +21,10 @@ from .package_model import ReleaseError, require
 
 PRODUCTION_ENVIRONMENTS = ("release-tag", "crates-io", "release")
 REQUIRED_REVIEWERS_MINIMUM = 1
+
+# Reviewer object types the Environments API returns for a
+# required_reviewers rule; anything else refuses.
+REVIEWER_TYPES = ("User", "Team")
 
 # Intended deployment-branch-policy entries per production environment
 # as (policy type, name pattern) pairs; the live readback must match
@@ -49,7 +54,8 @@ def verify_environment_protections(
 
     Returns the verified names. Raises ReleaseError on any defect:
     unknown contract, missing environment, absent reviewer rule,
-    permissive or mismatched ref policy, or an unrecognized readback.
+    malformed reviewer entry, permissive, contradictory, or mismatched
+    ref policy, truncated policy capture, or an unrecognized readback.
     """
     require(isinstance(environments_payload, dict) and
             isinstance(environments_payload.get("environments"), list),
@@ -66,25 +72,54 @@ def verify_environment_protections(
                 f"environment {name!r} is missing from the environments "
                 "readback; refusing")
         entry = entries[name]
-        reviewers = [rule for rule in entry.get("protection_rules", [])
-                     if isinstance(rule, dict) and
-                     rule.get("type") == "required_reviewers" and
-                     isinstance(rule.get("reviewers"), list) and
-                     len(rule["reviewers"]) >= REQUIRED_REVIEWERS_MINIMUM]
-        require(reviewers,
+        rules = entry.get("protection_rules", [])
+        require(isinstance(rules, list),
+                f"environment {name!r} protection_rules readback is "
+                "malformed (expected a list); refusing")
+        reviewer_rules = []
+        for rule in rules:
+            require(isinstance(rule, dict),
+                    f"environment {name!r} protection_rules readback "
+                    "holds a malformed rule; refusing")
+            if rule.get("type") == "required_reviewers":
+                reviewer_rules.append(rule)
+        require(reviewer_rules,
                 f"environment {name!r} has no required-reviewers rule; refusing")
+        for rule in reviewer_rules:
+            reviewers = rule.get("reviewers")
+            require(isinstance(reviewers, list),
+                    f"environment {name!r} required-reviewers rule holds "
+                    "a malformed reviewer list; refusing")
+            require(len(reviewers) >= REQUIRED_REVIEWERS_MINIMUM,
+                    f"environment {name!r} required-reviewers rule lists "
+                    "no reviewers; refusing")
+            for reviewer in reviewers:
+                require(is_valid_reviewer(reviewer),
+                        f"environment {name!r} required-reviewers rule holds "
+                        "a malformed reviewer entry; refusing")
         policy = entry.get("deployment_branch_policy")
-        require(isinstance(policy, dict) and
-                (policy.get("protected_branches") is True or
-                 policy.get("custom_branch_policies") is True),
+        require(isinstance(policy, dict),
+                f"environment {name!r} has no deployment restriction "
+                "(permissive); refusing")
+        protected = policy.get("protected_branches")
+        custom = policy.get("custom_branch_policies")
+        require(isinstance(protected, bool) and isinstance(custom, bool),
+                f"environment {name!r} deployment_branch_policy is malformed "
+                "(protected_branches and custom_branch_policies must both "
+                "be booleans); refusing")
+        require((protected, custom) != (True, True),
+                f"environment {name!r} has a contradictory "
+                "deployment_branch_policy (protected_branches and "
+                "custom_branch_policies are both true); refusing")
+        require((protected, custom) != (False, False),
                 f"environment {name!r} has no deployment restriction "
                 "(permissive); refusing")
         expected = EXPECTED_POLICIES[name]
-        if policy.get("custom_branch_policies") is True:
+        if custom:
             require(name in policies_payloads,
                     f"environment {name!r} enables custom ref policies but no policy "
                     "readback was supplied; refusing")
-            actual = read_policy_entries(policies_payloads[name])
+            actual = read_policy_entries(policies_payloads[name], name)
             require(actual == set(expected),
                     f"environment {name!r} ref policy mismatch: expected "
                     f"{sorted(expected)}, got {sorted(actual)}; refusing")
@@ -95,16 +130,60 @@ def verify_environment_protections(
     return tuple(environments)
 
 
-def read_policy_entries(policies_payload: Any) -> set[tuple[str, str]]:
+def is_valid_reviewer(reviewer: Any) -> bool:
+    """Check one required_reviewers entry against the recognized shape.
+
+    The API returns ``{"type": "User"|"Team", "reviewer": {...}}``
+    objects carrying a login/slug/name handle or a numeric id.
+    """
+    if not isinstance(reviewer, dict):
+        return False
+    if reviewer.get("type") not in REVIEWER_TYPES:
+        return False
+    identity = reviewer.get("reviewer")
+    if not isinstance(identity, dict):
+        return False
+    for key in ("login", "slug", "name"):
+        handle = identity.get(key)
+        if isinstance(handle, str) and handle:
+            return True
+    ident = identity.get("id")
+    return isinstance(ident, int) and not isinstance(ident, bool)
+
+
+def read_policy_entries(policies_payload: Any,
+                        environment: str) -> set[tuple[str, str]]:
+    """Collect the (type, name) entries of one captured policy readback.
+
+    Read-only/offline: consumes captured list-deployment-branch-policies
+    JSON. Refuses truncated captures (total_count disagreeing with the
+    captured entries) with the environment and endpoint named instead
+    of fetching further pages.
+    """
+    endpoint = "list-deployment-branch-policies"
     require(isinstance(policies_payload, dict) and
             isinstance(policies_payload.get("branch_policies"), list),
-            "deployment-branch-policy readback unavailable or unrecognized: "
-            "expected a mapping with a branch_policies list")
+            f"environment {environment!r} deployment-branch-policy readback "
+            f"unavailable or unrecognized ({endpoint}): expected a mapping "
+            "with a branch_policies list")
+    captured = policies_payload["branch_policies"]
+    total = policies_payload.get("total_count")
+    require(isinstance(total, int) and not isinstance(total, bool),
+            f"environment {environment!r} deployment-branch-policy readback "
+            f"is missing total_count ({endpoint}); refusing")
+    require(total == len(captured),
+            f"environment {environment!r} deployment-branch-policy readback "
+            f"is incomplete ({endpoint}: total_count={total} but "
+            f"{len(captured)} entries captured); re-capture every page; "
+            "refusing")
     entries = set()
-    for item in policies_payload["branch_policies"]:
+    for item in captured:
         require(isinstance(item, dict) and isinstance(item.get("type"), str) and
                 isinstance(item.get("name"), str),
-                "deployment-branch-policy readback holds a nameless entry; refusing")
+                f"environment {environment!r} deployment-branch-policy "
+                "readback holds a nameless entry; refusing")
         entries.add((item["type"], item["name"]))
-    require(entries, "deployment-branch-policy readback holds no entries; refusing")
+    require(entries,
+            f"environment {environment!r} deployment-branch-policy readback "
+            "holds no entries; refusing")
     return entries
