@@ -86,6 +86,9 @@ RECEIPT_FILENAME = "receipt.json"
 RECORD_FILENAME = "pool-evidence.json"
 RECORD_ROLE = "pool_evidence"
 RECEIPT_KIND = "comparison"
+COMPARISON_FILENAME = "comparison.json"
+COMPARISON_ROLE = "comparison"
+COMPARISON_FORMAT = "pool-comparison/v1"
 
 # URL path segments that name a floating ref rather than an immutable
 # subject or version. Case-sensitive: git refs are case-sensitive.
@@ -196,6 +199,56 @@ def _manifest(bundle: Path, identities: dict, role: str) -> dict:
     return manifest
 
 
+def _verify_comparison(bundle: Path, artifacts: dict,
+                     expect_run_id: str) -> dict:
+    """Require, parse, and validate the digest-bound comparison payload.
+
+    The receipt envelope only hash-checks referenced bytes; this
+    enforces the comparison semantics itself (format, run identity,
+    config/selection presence, and a completed PASS for every
+    required provider) and returns the parsed payload so the caller
+    can reconcile it with the record rows and identity manifests.
+    """
+    reference = artifacts.get(COMPARISON_ROLE)
+    require(isinstance(reference, dict)
+            and reference.get("path") == COMPARISON_FILENAME,
+            f"receipt must bind {COMPARISON_FILENAME} as "
+            f"{COMPARISON_ROLE!r}")
+    comparison_path = bundle / COMPARISON_FILENAME
+    require(comparison_path.is_file(),
+            f"comparison evidence {comparison_path} is missing")
+    actual = _sha256_file(comparison_path, "comparison evidence")
+    require(reference.get("sha256") == actual,
+            "comparison evidence sha256 does not match the bound digest")
+    comparison = _load_json(comparison_path, "comparison evidence")
+    require(isinstance(comparison, dict),
+            "comparison evidence must be a JSON object")
+    require(comparison.get("format") == COMPARISON_FORMAT,
+            "comparison evidence format must be "
+            f"{COMPARISON_FORMAT!r}")
+    require(comparison.get("run_id") == expect_run_id,
+            "comparison run id does not match the expected "
+            "qualification run")
+    require(isinstance(comparison.get("config"), str)
+            and bool(comparison["config"].strip()),
+            "comparison evidence names no configuration")
+    require(isinstance(comparison.get("test_selection"), str)
+            and bool(comparison["test_selection"].strip()),
+            "comparison evidence names no test selection")
+    providers = comparison.get("providers")
+    require(isinstance(providers, dict)
+            and set(providers) == REQUIRED_PROVIDER_SET,
+            "comparison evidence must hold exactly the required "
+            "30-provider non-mock matrix")
+    for name in sorted(providers):
+        row = providers[name]
+        require(isinstance(row, dict) and row.get("gate") == "PASS"
+                and row.get("complete") is True,
+                f"provider {name!r} has no passing comparison; "
+                "incomplete or failed rows cannot satisfy qualification")
+    return comparison
+
+
 def verify_qualification(evidence_dir: Path | str, *,
                          expect_commit: str, expect_tree: str,
                          expect_lock_sha256: str, expect_framework: str,
@@ -271,6 +324,10 @@ def verify_qualification(evidence_dir: Path | str, *,
         require(providers[name].get("gate") == "PASS",
                 f"provider {name!r} has no passing comparison; "
                 "incomplete or failed rows cannot satisfy qualification")
+    # Reconciliation: the comparison names the same expected run and
+    # the same required provider set as the record rows above, with
+    # every provider a completed PASS on both sides.
+    comparison = _verify_comparison(bundle, artifacts, expect_run_id)
     identities = receipt.get("identities", {})
     framework_manifest = _manifest(bundle, identities, "framework")
     require(framework_manifest.get("commit") == expect_framework,
@@ -287,10 +344,16 @@ def verify_qualification(evidence_dir: Path | str, *,
     require(isinstance(selection_manifest.get("test_selection"), str)
             and bool(selection_manifest["test_selection"].strip()),
             "test-selection identity names no test selection")
+    require(selection_manifest.get("test_selection")
+            == comparison.get("test_selection"),
+            "test-selection identity does not match the comparison "
+            "evidence")
     config_manifest = _manifest(bundle, identities, "config")
     require(isinstance(config_manifest.get("config"), str)
             and bool(config_manifest["config"].strip()),
             "config identity names no configuration")
+    require(config_manifest.get("config") == comparison.get("config"),
+            "config identity does not match the comparison evidence")
     _manifest(bundle, identities, "corpora")
     return {"subject": expect_commit, "framework": expect_framework,
             "run_id": expect_run_id, "providers": len(REQUIRED_PROVIDERS),

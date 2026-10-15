@@ -170,8 +170,9 @@ jobs:
       # evidence are separate gates; both refuse before the asset
       # upload. Expected tree/lock come from the frozen subject
       # (HEAD~1, the pre-receipt parent), never from the evidence
-      # being validated. The validated record and receipt are staged
-      # for durable retention as release assets.
+      # being validated. The validated record, receipt, and complete
+      # evidence bundle are staged for durable retention as release
+      # assets.
       - name: Reverify provider qualification evidence
         run: |
           set -euo pipefail
@@ -272,11 +273,15 @@ jobs:
           # The gate above verified these exact bytes against the
           # pinned digests; copy (never re-download) them into the
           # recovered evidence so the publish job retains them as
-          # durable release assets alongside provenance.
+          # durable release assets alongside provenance. The archive
+          # preserves the receipt/bundle relative layout so the
+          # portable validator can revalidate after run expiry.
           cp "$RUNNER_TEMP/qual-evidence/bundle/pool-evidence.json" \
             recovered/qualification-record.json
           cp "$RUNNER_TEMP/qual-evidence/receipt.json" \
             recovered/qualification-receipt.json
+          tar -czf recovered/qualification-evidence.tar.gz \
+            -C "$RUNNER_TEMP/qual-evidence" receipt.json bundle
 
       - name: Stage recovered evidence for downstream jobs
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -935,10 +940,13 @@ jobs:
           print(json.dumps(assets))
           EOF
           cp evidence/inventory.json evidence/qualification-binding.json prepared/
-          # Durable retention: the validated qualification record and
-          # receipt ship as release assets alongside provenance, not
-          # just 90-day run artifacts.
+          # Durable retention: the validated qualification record,
+          # receipt, and complete evidence bundle ship as release
+          # assets alongside provenance, not just 90-day run
+          # artifacts. The bundle archive preserves the relative
+          # layout; the assets manifest below pins its digest.
           cp evidence/qualification-record.json evidence/qualification-receipt.json prepared/
+          cp evidence/qualification-evidence.tar.gz prepared/
           python3 - <<'EOF' > prepared/assets.json
           import hashlib, json
           from pathlib import Path
