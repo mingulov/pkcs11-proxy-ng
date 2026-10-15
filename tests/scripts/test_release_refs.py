@@ -77,13 +77,21 @@ class RefFixture(unittest.TestCase):
         return release_checks.main(["preflight", "--ref", "refs/tags/v0.2.0",
                                     "--require-main", *args], repo=self.repo)
 
+    def qual_identity(self):
+        return ("--qualification-run-id", "37423315928",
+                "--qualification-framework", "c" * 40,
+                "--qualification-record-sha256", "1" * 64,
+                "--qualification-receipt-sha256", "2" * 64)
+
     def test_accepts_annotated_clean_main_tag_and_upload_qualification(self):
         self.assertEqual(self.check(), 0)
         self.assertEqual(self.check("--mode", "trusted", "--package", PACKAGES[0][0],
                                     "--qualification-subject", self.subject,
-                                    "--qualification-url", "https://example.invalid/qualification"), 0)
+                                    "--qualification-url", "https://example.invalid/qualification",
+                                    *self.qual_identity()), 0)
         self.assertEqual(self.check("--mode", "bootstrap", "--qualification-subject", self.subject,
-                                    "--qualification-url", "https://example.invalid/qualification"), 0)
+                                    "--qualification-url", "https://example.invalid/qualification",
+                                    *self.qual_identity()), 0)
 
     def test_rejects_bad_refs_and_tag_topologies(self):
         for ref in ("v0.2.0", "refs/heads/main", "refs/tags/v0.2.0-rc1",
@@ -127,6 +135,8 @@ class RefFixture(unittest.TestCase):
             ["preflight", "--ref", "refs/tags/v0.2.0", "--mode", "trusted",
              "--qualification-subject", self.subject,
              "--qualification-url", "https://example.invalid/q"], repo=self.repo), 1)
+        upload = ("--mode", "trusted", "--qualification-subject", self.subject,
+                  "--qualification-url", "https://example.invalid/q")
         for args in (("--package", "surprise"), ("--mode", "release"),
                      ("--mode", "trusted"),
                      ("--mode", "trusted", "--qualification-subject", self.subject),
@@ -138,7 +148,27 @@ class RefFixture(unittest.TestCase):
                      ("--mode", "trusted", "--qualification-subject", self.subject,
                       "--qualification-url", "https://user:secret@example.invalid/q"),
                      ("--mode", "trusted", "--qualification-subject", self.subject,
-                      "--qualification-url", "https:///missing-host")):
+                      "--qualification-url", "https:///missing-host"),
+                     # URL-only qualification no longer suffices: upload
+                     # modes require the full qualification identity.
+                     upload,
+                     upload + self.qual_identity()[:2],
+                     upload + self.qual_identity()[:4],
+                     upload + self.qual_identity()[:6],
+                     # Malformed identity values refuse in any mode.
+                     ("--qualification-run-id", "0"),
+                     ("--qualification-run-id", "abc"),
+                     ("--qualification-framework", "short"),
+                     ("--qualification-record-sha256", "1" * 63),
+                     ("--qualification-receipt-sha256", "zz" + "2" * 62),
+                     upload + ("--qualification-run-id", "0",
+                               "--qualification-framework", "c" * 40,
+                               "--qualification-record-sha256", "1" * 64,
+                               "--qualification-receipt-sha256", "2" * 64),
+                     upload + ("--qualification-run-id", "37423315928",
+                               "--qualification-framework", "short",
+                               "--qualification-record-sha256", "1" * 64,
+                               "--qualification-receipt-sha256", "2" * 64)):
             with self.subTest(args=args):
                 self.assertNotEqual(self.check(*args), 0)
 

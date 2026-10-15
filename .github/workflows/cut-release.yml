@@ -47,6 +47,18 @@ on:
       qualification-subject:
         description: 'frozen-subject SHA (upload modes)'
         required: false
+      qualification-run-id:
+        description: 'qualification evidence run id (upload modes)'
+        required: false
+      qualification-framework:
+        description: 'qualification framework commit SHA (upload modes)'
+        required: false
+      qualification-record-sha256:
+        description: 'provider-selection record digest (upload modes)'
+        required: false
+      qualification-receipt-sha256:
+        description: 'qualification receipt digest (upload modes)'
+        required: false
 
 permissions:
   contents: read
@@ -63,6 +75,9 @@ jobs:
     name: Verify release gates on main
     runs-on: ubuntu-26.04
     timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
     outputs:
       verified_sha: ${{ steps.record.outputs.verified_sha }}
       tag: ${{ steps.record.outputs.tag }}
@@ -92,12 +107,28 @@ jobs:
             exit 1
           fi
           if [[ "${{ inputs.mode }}" != "dry-run" ]]; then
-            if [[ -z "${{ inputs.qualification-url }}" || -z "${{ inputs.qualification-subject }}" ]]; then
-              echo "::error::upload modes require qualification-url and qualification-subject."
+            if [[ -z "${{ inputs.qualification-url }}" || -z "${{ inputs.qualification-subject }}" || -z "${{ inputs.qualification-run-id }}" || -z "${{ inputs.qualification-framework }}" || -z "${{ inputs.qualification-record-sha256 }}" || -z "${{ inputs.qualification-receipt-sha256 }}" ]]; then
+              echo "::error::upload modes require the full qualification identity: url, subject, run-id, framework, record-sha256, receipt-sha256."
               exit 1
             fi
             if [[ ! "${{ inputs.qualification-subject }}" =~ ^[0-9a-f]{40}$ ]]; then
               echo "::error::qualification-subject is not a 40-hex SHA."
+              exit 1
+            fi
+            if [[ ! "${{ inputs.qualification-run-id }}" =~ ^[1-9][0-9]*$ ]]; then
+              echo "::error::qualification-run-id is not a positive integer."
+              exit 1
+            fi
+            if [[ ! "${{ inputs.qualification-framework }}" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::qualification-framework is not a 40-hex SHA."
+              exit 1
+            fi
+            if [[ ! "${{ inputs.qualification-record-sha256 }}" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "::error::qualification-record-sha256 is not a 64-hex digest."
+              exit 1
+            fi
+            if [[ ! "${{ inputs.qualification-receipt-sha256 }}" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "::error::qualification-receipt-sha256 is not a 64-hex digest."
               exit 1
             fi
           fi
@@ -108,6 +139,10 @@ jobs:
           fi
           echo "verified_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          if [[ "${{ inputs.mode }}" != "dry-run" && "${{ inputs.qualification-subject }}" != "$(git rev-parse HEAD)" ]]; then
+            echo "::error::qualification-subject is not the verified HEAD; evidence must qualify this subject."
+            exit 1
+          fi
 
       - name: Isolate Cargo directories
         run: |
@@ -225,6 +260,46 @@ jobs:
             --api-json "$RUNNER_TEMP/release-tag-env-list.json" \
             --environment release-tag \
             --policies-json "release-tag=$RUNNER_TEMP/release-tag-env-policies.json"
+
+      # Qualification gate: the candidate's provider evidence must be
+      # immutable, complete, and bound to the verified subject before
+      # the approval-gated cut job may push any tag (see
+      # doc/release/qualification-binding-contract.md). Composes with
+      # the environments-preflight step above: authorization and
+      # evidence are separate gates; both refuse before mutation.
+      # Dispatches without a qualification run skip this gate; upload
+      # modes were already required to supply the full identity above.
+      - name: Verify provider qualification evidence
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          QUALIFICATION_URL: ${{ inputs.qualification-url }}
+          QUALIFICATION_SUBJECT: ${{ inputs.qualification-subject }}
+          QUALIFICATION_RUN_ID: ${{ inputs.qualification-run-id }}
+          QUALIFICATION_FRAMEWORK: ${{ inputs.qualification-framework }}
+          QUALIFICATION_RECORD_SHA256: ${{ inputs.qualification-record-sha256 }}
+          QUALIFICATION_RECEIPT_SHA256: ${{ inputs.qualification-receipt-sha256 }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${QUALIFICATION_RUN_ID:-}" ]]; then
+            echo "no qualification run supplied; skipping provider-qualification gate."
+            exit 0
+          fi
+          gh run download "$QUALIFICATION_RUN_ID" \
+            -n provider-qualification \
+            -D "$RUNNER_TEMP/qual-evidence" \
+            -R "${{ github.repository }}"
+          EXPECT_TREE="$(git rev-parse 'HEAD^{tree}')"
+          EXPECT_LOCK="$(git show HEAD:Cargo.lock | sha256sum | cut -d' ' -f1)"
+          python3 scripts/release_checks.py qualification-preflight \
+            --evidence-dir "$RUNNER_TEMP/qual-evidence" \
+            --expect-commit "$QUALIFICATION_SUBJECT" \
+            --expect-tree "$EXPECT_TREE" \
+            --expect-lock-sha256 "$EXPECT_LOCK" \
+            --expect-framework "$QUALIFICATION_FRAMEWORK" \
+            --expect-run-id "$QUALIFICATION_RUN_ID" \
+            --expect-url "$QUALIFICATION_URL" \
+            --expect-record-sha256 "$QUALIFICATION_RECORD_SHA256" \
+            --expect-receipt-sha256 "$QUALIFICATION_RECEIPT_SHA256"
 
   cut:
     name: Cut receipt commit and tag (approval-gated)
@@ -359,4 +434,8 @@ jobs:
             -f package="${{ inputs.package }}" \
             -f tag="${{ needs.cut.outputs.tag }}" \
             -f qualification-url="${{ inputs.qualification-url }}" \
-            -f qualification-subject="${{ inputs.qualification-subject }}"
+            -f qualification-subject="${{ inputs.qualification-subject }}" \
+            -f qualification-run-id="${{ inputs.qualification-run-id }}" \
+            -f qualification-framework="${{ inputs.qualification-framework }}" \
+            -f qualification-record-sha256="${{ inputs.qualification-record-sha256 }}" \
+            -f qualification-receipt-sha256="${{ inputs.qualification-receipt-sha256 }}"

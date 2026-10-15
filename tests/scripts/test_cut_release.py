@@ -80,6 +80,10 @@ class CutTriggerTests(unittest.TestCase):
         inputs = triggers["workflow_dispatch"]["inputs"]
         self.assertIn("qualification-url", inputs)
         self.assertIn("qualification-subject", inputs)
+        self.assertIn("qualification-run-id", inputs)
+        self.assertIn("qualification-framework", inputs)
+        self.assertIn("qualification-record-sha256", inputs)
+        self.assertIn("qualification-receipt-sha256", inputs)
 
 
 class CutVerifyTests(unittest.TestCase):
@@ -200,7 +204,10 @@ class DispatchJobTests(unittest.TestCase):
         # or it dies with "fatal: not a git repository".
         self.assertIn('-R "${{ github.repository }}"', run)
         for flag in ("mode=", "package=", "tag=",
-                     "qualification-url=", "qualification-subject="):
+                     "qualification-url=", "qualification-subject=",
+                     "qualification-run-id=", "qualification-framework=",
+                     "qualification-record-sha256=",
+                     "qualification-receipt-sha256="):
             with self.subTest(flag=flag):
                 self.assertIn(flag, run)
 

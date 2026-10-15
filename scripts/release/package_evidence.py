@@ -23,6 +23,13 @@ SHA40 = re.compile(r"[0-9a-f]{40}\Z")
 SHA64 = re.compile(r"[0-9a-f]{64}\Z")
 RUN_ID = re.compile(r"[1-9][0-9]*\Z")
 
+# Binding schema versions. Version 1 is the pre-Q12 URL-only binding;
+# version 2 additionally pins the immutable qualification receipt and
+# provider-selection record. Readers must refuse unknown versions
+# rather than silently misreading an augmented binding.
+FORMAT_VERSION_V1 = 1
+FORMAT_VERSION = 2
+
 
 def candidate_name(tag_commit: str, run_id: str) -> str:
     require(isinstance(tag_commit, str) and SHA40.match(tag_commit) is not None,
@@ -33,19 +40,37 @@ def candidate_name(tag_commit: str, run_id: str) -> str:
 
 
 def write_binding(output: Path, tag_commit: str, run_id: str,
-                  qualification_url: str, qualification_subject: str) -> dict:
+                  qualification_url: str, qualification_subject: str,
+                  *, receipt_sha256: str, record_sha256: str,
+                  qual_run_id: str, framework: str) -> dict:
     require(isinstance(qualification_url, str) and
             qualification_url.startswith("https://"),
             "qualification URL must use https")
     require(isinstance(qualification_subject, str) and
             SHA40.match(qualification_subject) is not None,
             "qualification subject must be a 40-hex SHA")
-    binding = {"format_version": 1,
+    require(isinstance(receipt_sha256, str) and
+            SHA64.match(receipt_sha256) is not None,
+            "qualification receipt sha256 must be 64-hex")
+    require(isinstance(record_sha256, str) and
+            SHA64.match(record_sha256) is not None,
+            "qualification record sha256 must be 64-hex")
+    require(isinstance(qual_run_id, str) and
+            RUN_ID.match(qual_run_id) is not None,
+            "qualification run id must be a positive integer")
+    require(isinstance(framework, str) and
+            SHA40.match(framework) is not None,
+            "qualification framework must be a 40-hex SHA")
+    binding = {"format_version": FORMAT_VERSION,
                "artifact": candidate_name(tag_commit, run_id),
                "tag_commit": tag_commit,
                "run_id": run_id,
                "qualification_url": qualification_url,
-               "qualification_subject": qualification_subject}
+               "qualification_subject": qualification_subject,
+               "qualification_receipt_sha256": receipt_sha256,
+               "qualification_record_sha256": record_sha256,
+               "qualification_run_id": qual_run_id,
+               "qualification_framework": framework}
     try:
         Path(output).write_text(json.dumps(binding, indent=2, sort_keys=True)
                                 + "\n", encoding="utf-8")
@@ -59,13 +84,19 @@ def read_binding(path: Path) -> dict:
         binding = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError, UnicodeError) as exc:
         raise ReleaseError(f"cannot read evidence binding {path}: {exc}") from exc
-    require(isinstance(binding, dict) and binding.get("format_version") == 1,
+    require(isinstance(binding, dict)
+            and binding.get("format_version") in (FORMAT_VERSION_V1,
+                                                  FORMAT_VERSION),
             f"evidence binding {path} has an invalid format")
     return binding
 
 
 def verify_binding(path: Path, expect_url: str, expect_subject: str,
-                   expect_tag_commit: str, expect_run_id: str | None = None) -> dict:
+                   expect_tag_commit: str, expect_run_id: str | None = None,
+                   *, expect_receipt_sha256: str | None = None,
+                   expect_record_sha256: str | None = None,
+                   expect_qual_run_id: str | None = None,
+                   expect_framework: str | None = None) -> dict:
     binding = read_binding(path)
     for key, expected in (("qualification_url", expect_url),
                           ("qualification_subject", expect_subject),
@@ -77,6 +108,24 @@ def verify_binding(path: Path, expect_url: str, expect_subject: str,
         require(str(binding.get("run_id")) == str(expect_run_id),
                 f"evidence binding run_id {binding.get('run_id')!r} "
                 f"does not match expected {expect_run_id!r}")
+    qual_expectations = (
+        ("qualification_receipt_sha256", expect_receipt_sha256),
+        ("qualification_record_sha256", expect_record_sha256),
+        ("qualification_run_id", expect_qual_run_id),
+        ("qualification_framework", expect_framework))
+    if any(expected is not None for _, expected in qual_expectations):
+        require(binding.get("format_version") == FORMAT_VERSION,
+                f"evidence binding {path} predates qualification "
+                "evidence (version 1 URL-only); refusing")
+        for key, expected in qual_expectations:
+            if expected is None:
+                continue
+            actual = binding.get(key)
+            if key == "qualification_run_id":
+                actual, expected = str(actual), str(expected)
+            require(actual == expected,
+                    f"evidence binding {key} {binding.get(key)!r} "
+                    f"does not match expected {expected!r}")
     return binding
 
 
