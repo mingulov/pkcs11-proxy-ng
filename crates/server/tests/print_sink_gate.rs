@@ -84,6 +84,11 @@ const EXPECTED_ALLOW_FILES: &[&str] = &[
     // Keygen parity diagnostic: prints only the refusal RV code, never
     // key material.
     "crates/server/tests/rsa_template_parity_test.rs",
+    // Q07 shape-evidence oracle receipts (control/shape/op names, RV
+    // codes, admission/entry counts, disposition tags — never secrets),
+    // read with `-- --nocapture`. Registered by the Q15 freeze: q07
+    // added the sink without listing it.
+    "crates/server/tests/shape_evidence_test.rs",
     // Example smoke output.
     "crates/shim/examples/cross_width_smoke.rs",
     // Shim live-test diagnostics (ignored-by-default provider tests).
@@ -94,6 +99,13 @@ const EXPECTED_ALLOW_FILES: &[&str] = &[
     // Q16 ownership-investigation transcripts (`Q16:`-prefixed counts /
     // flags, never secrets) read with `-- --nocapture`.
     "crates/server/src/server/grpc_service/session/q16_ownership_tests.rs",
+    // Q03 native label-probe recording transcripts (`Q03-*`-prefixed RV
+    // codes + stored test-label bytes, unbuffered so a provider crash
+    // cannot swallow an earlier case's outcome; never PINs/keys), read
+    // with `-- --nocapture`. Registered by the Q15 freeze: q03 added
+    // these sinks without listing them.
+    "crates/shim/src/tests/token_label_native_probe.rs",
+    "crates/shim/src/tests/kryoptic_label_probe.rs",
 ];
 
 /// This gate names the three lint paths to audit them, so it excludes
