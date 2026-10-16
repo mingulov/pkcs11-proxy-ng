@@ -508,4 +508,133 @@ mod tests {
             .into_inner();
         assert_eq!(again.ck_rv, CkRv::CRYPTOKI_NOT_INITIALIZED.0);
     }
+
+    // --- Q18 (SEC-H2): atomic context guardrail ---
+
+    fn init_request() -> Request<pkcs11_proxy_ng_proto::InitializeRequest> {
+        // Peerless legacy-shaped request: bypasses the init throttle and
+        // negotiates v1, so the race below exercises admission only.
+        Request::new(pkcs11_proxy_ng_proto::InitializeRequest {
+            client_context_id: String::new(),
+            client_effects_version_min: None,
+            client_effects_version_max: None,
+        })
+    }
+
+    /// Race `tasks` Initialize calls past one barrier and collect their
+    /// `ck_rv`s. The barrier aligns the tasks so their admission sequences
+    /// genuinely overlap on the multi-thread runtime; any serialization
+    /// comes only from the admission mechanism under test, never from this
+    /// harness (no locks, no awaits between barrier release and Initialize).
+    async fn race_initializes(
+        ctx_mgr: Arc<ContextManager>,
+        backend: Arc<dyn Pkcs11Backend>,
+        tasks: usize,
+    ) -> Vec<u64> {
+        let barrier = Arc::new(tokio::sync::Barrier::new(tasks));
+        let mut handles = Vec::with_capacity(tasks);
+        for _ in 0..tasks {
+            let ctx_mgr = Arc::clone(&ctx_mgr);
+            let backend = Arc::clone(&backend);
+            let barrier = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                super::initialize(
+                    &ctx_mgr,
+                    &backend,
+                    init_request(),
+                    crate::config::TcpAuthMode::None,
+                    crate::config::UnixAuthMode::None,
+                )
+                .await
+                .unwrap()
+                .into_inner()
+                .ck_rv
+            }));
+        }
+        let mut rvs = Vec::with_capacity(tasks);
+        for handle in handles {
+            rvs.push(handle.await.unwrap());
+        }
+        rvs
+    }
+
+    /// Q18 (SEC-H2): barrier-controlled concurrent Initialize at cap1 mints
+    /// exactly one context; every loser answers the existing cap-refusal RV
+    /// (`CKR_HOST_MEMORY`, the `create_context` refusal — looked up in
+    /// `context_manager.rs`, not invented here).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn q18_barrier_concurrent_initialize_at_cap1_mints_exactly_one() {
+        const TASKS: usize = 32;
+        const ROUNDS: usize = 200;
+        let backend = test_backend();
+        for _ in 0..ROUNDS {
+            let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 1));
+            let rvs = race_initializes(Arc::clone(&ctx_mgr), Arc::clone(&backend), TASKS).await;
+            let oks = rvs.iter().filter(|rv| **rv == CkRv::OK.0).count();
+            for rv in &rvs {
+                assert!(
+                    *rv == CkRv::OK.0 || *rv == CkRv::HOST_MEMORY.0,
+                    "Q18: raced Initialize must answer OK or the existing HOST_MEMORY refusal, got {rv:#x}"
+                );
+            }
+            assert_eq!(oks, 1, "Q18: exactly one Initialize must win the race at cap1");
+            assert_eq!(ctx_mgr.context_count(), 1, "Q18: no over-admission past cap1");
+        }
+    }
+
+    /// Q18 (SEC-H2): finalizing the cap1 holder releases admission capacity
+    /// — a later Initialize is admitted — and the post-release race still
+    /// mints exactly one context (release reuse plus atomicity).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn q18_finalize_releases_capacity_for_later_initialize() {
+        const TASKS: usize = 32;
+        const ROUNDS: usize = 50;
+        let backend = test_backend();
+        for _ in 0..ROUNDS {
+            let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 1));
+            let first = super::initialize(
+                &ctx_mgr,
+                &backend,
+                init_request(),
+                crate::config::TcpAuthMode::None,
+                crate::config::UnixAuthMode::None,
+            )
+            .await
+            .unwrap()
+            .into_inner();
+            assert_eq!(first.ck_rv, CkRv::OK.0);
+            let refused = super::initialize(
+                &ctx_mgr,
+                &backend,
+                init_request(),
+                crate::config::TcpAuthMode::None,
+                crate::config::UnixAuthMode::None,
+            )
+            .await
+            .unwrap()
+            .into_inner();
+            assert_eq!(
+                refused.ck_rv,
+                CkRv::HOST_MEMORY.0,
+                "Q18: second Initialize at cap1 must answer the existing refusal RV"
+            );
+            let finalized = super::finalize(
+                &ctx_mgr,
+                &backend,
+                Request::new(pkcs11_proxy_ng_proto::FinalizeRequest {
+                    client_context_id: first.client_context_id,
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner();
+            assert_eq!(finalized.ck_rv, CkRv::OK.0);
+            assert_eq!(ctx_mgr.context_count(), 0, "Q18: finalize must empty the cap1 manager");
+            let rvs = race_initializes(Arc::clone(&ctx_mgr), Arc::clone(&backend), TASKS).await;
+            let oks = rvs.iter().filter(|rv| **rv == CkRv::OK.0).count();
+            assert_eq!(oks, 1, "Q18: the released slot must admit exactly one racing Initialize");
+            assert_eq!(ctx_mgr.context_count(), 1, "Q18: no over-admission past cap1");
+        }
+    }
 }
