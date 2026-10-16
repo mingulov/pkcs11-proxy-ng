@@ -32,8 +32,12 @@ Multi-client isolation is planned for [v0.3](./doc/release/v0.3.0-scope.md).
 
 ## Quick start
 
-Installed from a release bundle? Follow `INSTALL.md` in the extracted
-archive instead of the source-checkout steps below.
+Installed from a release bundle? On Linux and macOS follow
+`INSTALL.md` in the extracted archive instead of the
+source-checkout steps below. The Windows ZIP carries no
+`INSTALL.md`: start from its `proxy.toml.template` plus the
+`Run-Pkcs11ProxyNg.ps1` supervisor, following [Windows daemon
+operations](./doc/runbooks/operating-pkcs11-proxy-ng.md#4b-windows-daemon-operations-x64msvc).
 
 This local example uses SoftHSM2 and OpenSC's `pkcs11-tool`.
 
@@ -108,8 +112,13 @@ checking, not by assertion. See the full
 [beta support matrix](./doc/release/beta-support-matrix.md) and the
 [parity methodology](./doc/release/parity-validation.md).
 
-The local target adds opt-in gateway, authorization, resilience, and
-audit increments. They remain unreleased until the release blockers in the
+The `v0.2.x` releases carry the opt-in gateway authorization,
+resilience, and audit increments (see the [v0.2.0
+notes](./doc/release/v0.2.0-release-notes.md)). This checkout adds
+post-`v0.2.2` increments — passive CLI diagnostics, the generated
+support-matrix table, release attestation/recovery tooling, and
+experimental platform legs. Both the released increments and the
+post-tag work remain unqualified until the release blockers in the
 candidate [release notes](./doc/release/current.md) are satisfied.
 
 ## Documentation

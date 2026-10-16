@@ -190,6 +190,36 @@ class ProviderOperationTests(unittest.TestCase):
             self.assertIn("startup failed", open(log).read())
 
 
+class DaemonStartupCleanupTests(unittest.TestCase):
+    def test_readiness_timeout_stops_owned_daemon(self):
+        # A slow or stuck provider must not survive a failed smoke:
+        # the startup helper owns the process until it is bound, so
+        # it must terminate it when readiness times out — including
+        # on the restart path, which uses the same helper.
+        with tempfile.TemporaryDirectory() as tmp:
+            log = os.path.join(tmp, "daemon.log")
+            proc = mock.Mock()
+            with mock.patch.object(mod.subprocess, "Popen",
+                                   return_value=proc), \
+                 mock.patch.object(mod, "wait_for_daemon", return_value=False):
+                with self.assertRaises(SystemExit) as ctx:
+                    mod.start_smoke_daemon("daemon", "proxy.toml", log, 1)
+            self.assertIn("did not bind", str(ctx.exception.code),
+                          "the original readiness diagnostic must survive cleanup")
+            proc.terminate.assert_called_once_with()
+
+    def test_stop_waits_after_forced_termination(self):
+        # After SIGKILL the handle must be reaped before any restart,
+        # or the old daemon can still hold the port/socket.
+        proc = mock.Mock()
+        proc.wait.side_effect = [subprocess.TimeoutExpired("daemon", 30), None]
+        mod.stop_smoke_daemon(proc)
+        proc.terminate.assert_called_once_with()
+        proc.kill.assert_called_once_with()
+        self.assertEqual(proc.wait.call_count, 2,
+                         "stop must wait again after killing")
+
+
 class WindowsProvisioningTests(unittest.TestCase):
     def test_pinned_sha_matches_brief_verbatim(self):
         self.assertEqual(mod.SOFTHSM_WIN_SHA256, SOFTHSM_WIN_SHA256)

@@ -200,6 +200,8 @@ class BundleTests(unittest.TestCase):
         for name in ("beta-support-matrix.md", "mtls-setup.md", "parity-validation.md",
                      "v0.2.0-release-notes.md", "bundle-install.md"):
             (self.base / "doc/release" / name).write_text(name + "\n")
+        (self.base / "doc/release/pool-evidence.json").write_text(
+            '{"format": "pool-evidence/v1", "providers": {}}\n')
         (self.base / "doc/runbooks").mkdir(parents=True, exist_ok=True)
         (self.base / "doc/runbooks/operating-pkcs11-proxy-ng.md").write_text("runbook\n")
         (self.base / "doc/error-reference.md").write_text("errors\n")

@@ -133,6 +133,30 @@ class ReleaseStatusTests(unittest.TestCase):
                       f"README must name the latest published release v{latest}")
         self.assertIn("https://github.com/mingulov/pkcs11-proxy-ng/releases", readme)
 
+    def test_readme_does_not_call_released_increments_unreleased(self):
+        # Semantic check beyond the unpublished-wording scan: features
+        # the CHANGELOG records under dated (released) versions must
+        # not be described as unreleased in the README. Authorization
+        # and audit shipped in v0.2.0; only genuinely post-tag work
+        # may be called unreleased.
+        changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        dated = "\n".join(re.findall(
+            r"(?ms)^## \[\d+\.\d+\.\d+\].*?(?=^## \[\d|\Z)", changelog))
+        for feature in ("authorization", "audit"):
+            with self.subTest(feature=feature):
+                self.assertRegex(dated, re.compile(re.escape(feature), re.IGNORECASE),
+                                 f"CHANGELOG premise: {feature} recorded under a dated release")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        offenders = []
+        for paragraph in readme.split("\n\n"):
+            if not re.search(r"unreleased", paragraph, re.IGNORECASE):
+                continue
+            for feature in ("authorization", "audit"):
+                if re.search(feature, paragraph, re.IGNORECASE):
+                    offenders.append(f"{feature} called unreleased: {paragraph[:120]!r}")
+        self.assertEqual(offenders, [],
+                         f"released increments misclassified as unreleased: {offenders}")
+
 
 class AdvertisedShellTests(unittest.TestCase):
     def test_bash_blocks_parse(self):
