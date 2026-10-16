@@ -385,4 +385,6 @@ pub(super) async fn cancel_function(
 }
 
 #[cfg(test)]
+pub(crate) mod q16_ownership_tests;
+#[cfg(test)]
 pub(crate) mod tests;

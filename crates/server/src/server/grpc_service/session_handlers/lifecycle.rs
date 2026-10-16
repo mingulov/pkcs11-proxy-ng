@@ -17,10 +17,10 @@ use super::super::super::context_manager::{
 use super::super::super::handle_map::{BackendHandle, VirtualHandle};
 use super::super::authorization;
 use super::super::service_utils::{
-    ck_rv_only, context_exists, current_context_operation_guard, current_peer, login_lock_timeout,
-    principal_quota_key, register_session_handle, resolve_session, resolve_slot,
-    scope_context_operation, scope_peer_admission, spawn_backend,
-    spawn_backend_with_optional_timeout,
+    OpenSessionCompletionOwner, ck_rv_only, context_exists, current_context_operation_guard,
+    current_peer, login_lock_timeout, principal_quota_key, register_session_handle,
+    resolve_session, resolve_slot, scope_context_operation, scope_peer_admission,
+    spawn_backend, spawn_backend_with_optional_timeout,
 };
 
 pub(super) async fn open_session(
@@ -124,11 +124,26 @@ pub(super) async fn open_session(
         };
 
     let flags = CkSessionFlags(req.flags as u64);
+    // Q16 box 2: own the late result. Without the owner, a caller
+    // cancellation or internal timeout before the awaited result is
+    // consumed discards a late `Ok(handle)` with no mapping and no
+    // close. No `.await` may sit between the `spawn_backend` return
+    // and the settle calls below: disarm/settle must be atomic with
+    // consuming the primary result.
+    let (completion_tx, mut completion_owner) = OpenSessionCompletionOwner::arm(backend_ref);
     let backend = backend_ref.clone();
-    let result = spawn_backend(move || backend.open_session(backend_slot.0, flags)).await?;
+    let result = spawn_backend(move || {
+        let outcome = backend.open_session(backend_slot.0, flags);
+        // `CkResult<CkSessionHandle>` is `Copy`: report the exact
+        // outcome to the owner, then return it as the primary.
+        let _ = completion_tx.send(outcome);
+        outcome
+    })
+    .await?;
 
     match result {
         Ok(backend_session) => {
+            completion_owner.disarm();
             match register_session_handle(ctx_mgr, &ctx_id, backend_session, backend_slot).await {
                 Some(virtual_handle) => {
                     // W1-L6-04: the live count now covers this session —
@@ -156,10 +171,16 @@ pub(super) async fn open_session(
                 }
             }
         }
-        Err(error) => Ok(Response::new(pkcs11_proxy_ng_proto::OpenSessionResponse {
-            ck_rv: error.0,
-            session_handle: 0,
-        })),
+        Err(error) => {
+            // Genuine backend errors disarm (no handle exists); a
+            // still-pending worker (internal timeout) stays armed so
+            // the late result is closed once it completes.
+            completion_owner.settle_on_error();
+            Ok(Response::new(pkcs11_proxy_ng_proto::OpenSessionResponse {
+                ck_rv: error.0,
+                session_handle: 0,
+            }))
+        }
     }
 }
 

@@ -1337,4 +1337,33 @@ mod output_cap_tests {
             assert_eq!(FfiBackend::ulong_len_u64(u64::MAX), Err(CkRv::FUNCTION_FAILED));
         }
     }
+
+    #[test]
+    fn q16_pending_native_return_maps_to_plain_error_envelope() {
+        // Q16 box 3: ordinary exact-output helpers have no PENDING
+        // branch. A native CKR_PENDING return maps to a plain error
+        // envelope (verbatim RV, no output value); the local frame
+        // buffers drop with the call — nothing is retained for a later
+        // completion poll.
+        let domain = super::super::native_domain::LifecycleDomain::new();
+        domain.open_for_tests();
+        let admission = domain.admit_ordinary().expect("test domain admits");
+        let spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 8, length_pointer_null: false };
+        let mut calls = 0;
+        let envelope = FfiBackend::single_call_bytes_exact(
+            &admission,
+            &spec,
+            |output, output_len: *mut cryptoki_sys::CK_ULONG| {
+                calls += 1;
+                assert!(!output.is_null());
+                assert!(!output_len.is_null());
+                CkRv::PENDING.0 as cryptoki_sys::CK_RV
+            },
+        )
+        .expect("provider result envelope");
+        assert_eq!(calls, 1);
+        assert_eq!(envelope.ck_rv, CkRv::PENDING);
+        assert_eq!(envelope.value, None);
+    }
 }

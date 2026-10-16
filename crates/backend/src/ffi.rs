@@ -2776,4 +2776,18 @@ mod tests {
             "sealed domain denies after Finalize under load"
         );
     }
+
+    #[test]
+    fn q16_ffi_async_complete_unsupported() {
+        // Q16 box 3: native AsyncComplete support remains
+        // unimplemented — `FfiBackend` keeps the trait default, so a
+        // provider async operation can never be polled to completion
+        // through the FFI backend.
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        let backend = FfiBackend::test_backend_with_tables(functions.as_mut(), None, None);
+        assert_eq!(
+            Pkcs11Backend::async_complete(&backend, CkSessionHandle(1), "C_Sign"),
+            Err(CkRv::FUNCTION_NOT_SUPPORTED)
+        );
+    }
 }
