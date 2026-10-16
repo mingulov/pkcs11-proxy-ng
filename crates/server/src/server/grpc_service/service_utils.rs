@@ -4061,11 +4061,18 @@ mod tests {
         );
     }
 
-    /// Q16 box 2 (fix round 1): a normally consumed `Ok` disarms — the
+    /// Q16 box 2 (fix round 2): a normally consumed `Ok` disarms — the
     /// register/fallback settlement owns the handle and the owner must
-    /// issue NO settlement close. The handle stays usable (an explicit
-    /// close of it succeeds) and no detached task closes it behind the
-    /// consumer.
+    /// issue NO settlement close. The worker's success copy is queued
+    /// through the REAL channel before disarming (mirroring production,
+    /// where the send strictly precedes the primary return), so a disarm
+    /// that wrongly transferred the receiver to settlement would observe
+    /// `Ok(live)` and close the consumed handle. Proves BOTH: (a) the
+    /// consumed handle remains live and usable (a follow-up use succeeds
+    /// and an explicit close of it succeeds), and (b) the settlement path
+    /// was provably not taken — zero close calls AND the handle still
+    /// natively present, after a settle window in which a wrongly armed
+    /// settler would have fired.
     #[tokio::test]
     async fn open_completion_owner_consumed_success_disarms_without_settlement_close() {
         use pkcs11_proxy_ng_backend::MockBackend;
@@ -4075,27 +4082,45 @@ mod tests {
         let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock.clone();
 
         let live = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
-        let (_tx, mut owner) = OpenSessionCompletionOwner::arm(&backend);
+        let (tx, mut owner) = OpenSessionCompletionOwner::arm(&backend);
+        // Queue the success copy through the real channel BEFORE
+        // disarming. An empty channel would let a transfer-to-settlement
+        // disarm bug pass vacuously (nothing to close).
+        tx.send(Ok(live)).expect("owner awaiting");
         // The consumed-`Ok` arm: ownership transfers to register/fallback.
         owner.disarm();
         assert!(owner.completion.is_none(), "consumed success must disarm");
         drop(owner);
-        // Yield so a wrongly spawned settler would have polled by now.
+        // Settle window: yields plus a sleep, so a wrongly spawned
+        // settler would have polled AND its detached close would have
+        // landed before the assertions below. (Sufficiency is proven by
+        // the RED probe: the deliberately broken disarm fails here.)
         for _ in 0..100 {
             tokio::task::yield_now().await;
         }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // (b) Settlement provably not taken: zero close calls ...
         assert_eq!(
             mock.close_session_call_count(),
             0,
             "disarmed owner must issue no settlement close"
         );
-        assert_eq!(mock.open_session_count(), 1, "consumed handle must remain live");
-        // The handle is still usable: an explicit close of it succeeds.
+        // ... AND the consumed handle still natively present (any
+        // settlement close of `live` would have removed it) ...
+        assert_eq!(
+            mock.open_session_count(),
+            1,
+            "no settlement may have touched the consumed handle"
+        );
+        // (a) ... AND the consumed handle remains usable: a follow-up
+        // use succeeds, then an explicit close of it succeeds.
+        mock.get_session_info(live).expect("consumed handle remains usable");
         mock.close_session(live).expect("consumed handle remains usable");
         assert_eq!(mock.open_session_count(), 0);
         for _ in 0..100 {
             tokio::task::yield_now().await;
         }
+        tokio::time::sleep(Duration::from_millis(200)).await;
         assert_eq!(mock.close_session_call_count(), 1, "only the explicit close ran");
     }
 
