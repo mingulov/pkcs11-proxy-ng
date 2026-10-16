@@ -594,6 +594,16 @@ pub struct ContextManager {
     /// reclaim). Paired with `total_contexts_created`; read only by
     /// tests.
     total_contexts_removed: AtomicU64,
+    /// Outstanding context-admission reservations (Q18/SEC-H2): reserves
+    /// that passed the cap check but have not inserted yet. The cap check
+    /// (`live contexts + outstanding < max_contexts`) and the reserve are
+    /// one critical section under this mutex, so concurrent creators
+    /// cannot both pass the check at cap.
+    ///
+    /// Lock order: admission mutex OUTER, contexts-DashMap shard guards
+    /// INNER (transient, inside the reserve check and the admission-time
+    /// eviction). Never acquire this mutex while holding a contexts guard.
+    context_admission_reservations: Arc<std::sync::Mutex<usize>>,
 }
 
 /// A transient-carrier session left open by a failed carrier close
@@ -724,6 +734,21 @@ impl Drop for SessionQuotaReservation {
     }
 }
 
+/// One outstanding context-admission slot (Q18/SEC-H2), minted by
+/// [`ContextManager::try_reserve_context`]. Dropping it releases the
+/// slot — the release path for construction failure and cancellation
+/// between reserve and insert. Mirrors [`SessionQuotaReservation`].
+pub(crate) struct ContextAdmissionReservation {
+    reservations: Arc<std::sync::Mutex<usize>>,
+}
+
+impl Drop for ContextAdmissionReservation {
+    fn drop(&mut self) {
+        let mut outstanding = self.reservations.lock().unwrap_or_else(|e| e.into_inner());
+        *outstanding = outstanding.saturating_sub(1);
+    }
+}
+
 /// Outcome of [`ContextManager::remove_context_if_idle`].
 pub enum RemoveIfIdleOutcome {
     /// The context was removed; the caller owns teardown. Boxed: the
@@ -752,6 +777,7 @@ impl ContextManager {
             carrier_cleanup_ledger: Arc::new(std::sync::Mutex::new(Vec::new())),
             total_contexts_created: AtomicU64::new(0),
             total_contexts_removed: AtomicU64::new(0),
+            context_admission_reservations: Arc::new(std::sync::Mutex::new(0)),
         }
     }
 
@@ -1296,43 +1322,97 @@ impl ContextManager {
         self.slot_map.read().await.to_virtual(backend_slot)
     }
 
-    pub async fn create_context(&self, identity: Option<String>) -> CkResult<ClientContextId> {
-        // Enforce max context limit. The check + insert is not strictly
-        // atomic across shards (DashMap has no global lock), so under
-        // concurrent context creation the limit may be exceeded
-        // transiently by the number of racing creators — acceptable
-        // because the limit is a soft cap, not a correctness gate.
-        if self.max_contexts > 0 && self.contexts.len() >= self.max_contexts {
-            // Try evicting expired contexts first — but ONLY those holding no
-            // open backend sessions. This path has no backend handle and so
-            // cannot close backend sessions; dropping a context that holds them
-            // would leak them. Contexts with open sessions are reclaimed by the
-            // background reaper (`evict_expired`), which closes them properly
-            // (M4).
-            let now = std::time::Instant::now();
-            let expired: Vec<_> = self
-                .contexts
-                .iter()
-                .filter(|entry| {
-                    self.is_reapable(entry.value(), now)
-                        && entry.value().session_handles.backend_handles().next().is_none()
-                })
-                .map(|entry| entry.key().clone())
-                .collect();
-            for id in &expired {
-                if let Some((_, ctx)) = self.contexts.remove(id) {
-                    // W1-L13-17: purge holder-index entries (sessionless
-                    // evictees hold no login by invariant; the purge is a
-                    // no-op then, and future-proofs the index if that ever
-                    // changes).
-                    for slot in ctx.login_state.keys() {
-                        self.note_login_released(id, *slot);
-                    }
-                    self.total_contexts_removed.fetch_add(1, Ordering::SeqCst);
-                }
+    /// Atomically check the context cap and reserve one admission slot
+    /// when under it (Q18/SEC-H2). Returns `None` (at cap) or
+    /// `Some(reservation)`; the reservation counts toward the cap until
+    /// dropped (uncounted on unlimited managers, where no cap applies).
+    /// `create_context` drops it once the context inserts (the live map
+    /// then covers the slot); construction failure or cancellation
+    /// between reserve and insert drops it and frees the slot — every
+    /// return path releases, so the cap cannot leak.
+    ///
+    /// At capacity the reserve first reclaims expired sessionless contexts
+    /// (the M4 admission-time eviction, unchanged: this path has no
+    /// backend handle and so cannot close backend sessions; contexts
+    /// holding sessions are reclaimed by the background reaper).
+    ///
+    /// Even a strict cap is an admission guardrail, not native isolation:
+    /// admitted contexts still share one backend/native chain, and
+    /// mutually untrusted clients or domains must not share the daemon
+    /// (restart before switching). Multi-client isolation stays deferred.
+    ///
+    /// Lock order: admission mutex OUTER, contexts-DashMap shard guards
+    /// INNER (transient). Never call while holding a contexts guard.
+    ///
+    /// Not `async`: mutex + DashMap ops need no `.await` (L5).
+    pub(crate) fn try_reserve_context(&self) -> Option<ContextAdmissionReservation> {
+        let mut outstanding =
+            self.context_admission_reservations.lock().unwrap_or_else(|e| e.into_inner());
+        if self.max_contexts > 0 && self.contexts.len() + *outstanding >= self.max_contexts {
+            self.evict_expired_sessionless_for_admission();
+            if self.contexts.len() + *outstanding >= self.max_contexts {
+                return None;
             }
-            // Still at capacity? Reject.
-            if self.contexts.len() >= self.max_contexts {
+        }
+        // Unlimited managers (`max_contexts == 0`, the pre-Q18 default in
+        // tests) skip accounting; the guard is an uncounted RAII token
+        // whose drop is a saturating no-op.
+        if self.max_contexts > 0 {
+            *outstanding += 1;
+        }
+        Some(ContextAdmissionReservation {
+            reservations: Arc::clone(&self.context_admission_reservations),
+        })
+    }
+
+    /// Reclaim expired sessionless contexts for one admission attempt
+    /// (M4; called with the admission mutex held). Contexts holding
+    /// backend sessions are left for the background reaper
+    /// (`evict_expired`), which closes them properly.
+    fn evict_expired_sessionless_for_admission(&self) {
+        // ONLY contexts holding no open backend sessions: this path has no
+        // backend handle and so cannot close backend sessions; dropping a
+        // context that holds them would leak them.
+        let now = std::time::Instant::now();
+        let expired: Vec<_> = self
+            .contexts
+            .iter()
+            .filter(|entry| {
+                self.is_reapable(entry.value(), now)
+                    && entry.value().session_handles.backend_handles().next().is_none()
+            })
+            .map(|entry| entry.key().clone())
+            .collect();
+        for id in &expired {
+            if let Some((_, ctx)) = self.contexts.remove(id) {
+                // W1-L13-17: purge holder-index entries (sessionless
+                // evictees hold no login by invariant; the purge is a
+                // no-op then, and future-proofs the index if that ever
+                // changes).
+                for slot in ctx.login_state.keys() {
+                    self.note_login_released(id, *slot);
+                }
+                self.total_contexts_removed.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    pub async fn create_context(&self, identity: Option<String>) -> CkResult<ClientContextId> {
+        // Q18/SEC-H2: atomic admission. The cap check and the reservation
+        // are one critical section under the admission mutex, so
+        // concurrent creators cannot both pass the check at cap (the
+        // pre-Q18 check-then-insert raced). The guard is dropped right
+        // after insertion — the live map then covers the slot — and any
+        // failure or cancellation between reserve and insert drops it and
+        // frees the slot.
+        //
+        // Between insertion and the guard drop the new context counts
+        // twice (live + outstanding); that transient double-count is the
+        // safe direction (a concurrent reserve attempted in that window
+        // is refused, never over-admitted).
+        let reservation = match self.try_reserve_context() {
+            Some(reservation) => reservation,
+            None => {
                 tracing::error!(
                     count = self.contexts.len(),
                     max = self.max_contexts,
@@ -1340,12 +1420,13 @@ impl ContextManager {
                 );
                 return Err(CkRv::HOST_MEMORY);
             }
-        }
+        };
 
         let ctx = LogicalClientInstance::new(identity);
         let id = ctx.id.clone();
         self.contexts.insert(id.clone(), ctx);
         self.total_contexts_created.fetch_add(1, Ordering::SeqCst);
+        drop(reservation);
         Ok(id)
     }
 

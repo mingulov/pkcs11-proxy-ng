@@ -1754,3 +1754,102 @@ async fn q01_carrier_holds_slot_serialization_through_native_completion() {
     .await;
     poll_until_ms(|| mock.open_session_count() == 0, 5000, "late carrier close to land").await;
 }
+
+// --- Q18 (SEC-H2): atomic context guardrail ---
+
+/// Q18 (SEC-H2): an expired sessionless holder at cap1 is reclaimed by the
+/// admission path itself, and the racing creators mint exactly one
+/// replacement — the expired holder is gone, every loser answers the
+/// existing `HOST_MEMORY` refusal, and no capacity leaks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn q18_sessionless_expiry_releases_capacity_for_racing_admission() {
+    const TASKS: usize = 32;
+    const ROUNDS: usize = 50;
+    // One cap1 manager per round, each pre-filled; a single sleep expires
+    // them all (no per-round sleeping).
+    let mut rounds = Vec::with_capacity(ROUNDS);
+    for _ in 0..ROUNDS {
+        let mgr = Arc::new(ContextManager::new(std::time::Duration::from_millis(20), 1));
+        let expired = mgr.create_context(None).await.unwrap();
+        rounds.push((mgr, expired));
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    for (mgr, expired) in &rounds {
+        let barrier = Arc::new(tokio::sync::Barrier::new(TASKS));
+        let mut handles = Vec::with_capacity(TASKS);
+        for _ in 0..TASKS {
+            let mgr = Arc::clone(mgr);
+            let barrier = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                mgr.create_context(None).await
+            }));
+        }
+        let mut oks = 0;
+        for handle in handles {
+            match handle.await.unwrap() {
+                Ok(id) => {
+                    assert_ne!(
+                        id, *expired,
+                        "Q18: the winner must be a fresh context, not the expired holder"
+                    );
+                    oks += 1;
+                }
+                Err(rv) => assert_eq!(
+                    rv,
+                    CkRv::HOST_MEMORY,
+                    "Q18: raced losers must answer the existing refusal RV"
+                ),
+            }
+        }
+        assert_eq!(oks, 1, "Q18: the expired slot must admit exactly one racing creator");
+        assert_eq!(mgr.context_count(), 1, "Q18: no over-admission past cap1");
+        assert!(
+            mgr.context_ids().iter().all(|id| id != expired),
+            "Q18: the expired sessionless holder must be reclaimed by admission"
+        );
+    }
+}
+
+/// Q18 (SEC-H2): a reservation dropped without insertion — the
+/// construction-failure path — releases its slot; a later admission wins it.
+#[tokio::test]
+async fn q18_dropped_reservation_permits_later_admission() {
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 1);
+    let reservation = mgr.try_reserve_context();
+    assert!(reservation.is_some(), "Q18: the first reservation at cap1 must succeed");
+    assert!(
+        mgr.try_reserve_context().is_none(),
+        "Q18: an outstanding reservation must count against the cap"
+    );
+    drop(reservation); // simulate construction failure between reserve and insert
+    let id =
+        mgr.create_context(None).await.expect("Q18: the released slot must admit a later context");
+    assert_eq!(mgr.context_count(), 1);
+    assert_eq!(mgr.context_ids(), vec![id]);
+}
+
+/// Q18 (SEC-H2): cancelling a task parked while holding a reservation
+/// releases its slot; a later admission wins it.
+#[tokio::test]
+async fn q18_cancelled_reservation_permits_later_admission() {
+    let mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 1));
+    let (reserved_tx, reserved_rx) = tokio::sync::oneshot::channel::<()>();
+    let (_hold_tx, hold_rx) = tokio::sync::oneshot::channel::<()>();
+    let holder_mgr = Arc::clone(&mgr);
+    let holder = tokio::spawn(async move {
+        let _reservation = holder_mgr.try_reserve_context().expect("holder reserves first");
+        let _ = reserved_tx.send(());
+        let _ = hold_rx.await; // parked until cancelled
+    });
+    reserved_rx.await.expect("Q18: the holder must reserve before cancellation");
+    assert!(
+        mgr.try_reserve_context().is_none(),
+        "Q18: the held reservation must count against the cap"
+    );
+    holder.abort();
+    let err = holder.await.expect_err("Q18: the aborted holder must not complete");
+    assert!(err.is_cancelled());
+    mgr.create_context(None).await.expect("Q18: the cancelled slot must admit a later context");
+    assert_eq!(mgr.context_count(), 1);
+}
