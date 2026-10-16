@@ -2633,23 +2633,101 @@ mod tests {
         assert!(!classify_backend_outcome(&result));
     }
 
-    #[tokio::test]
-    async fn circuit_breaker_trips_at_limit() {
-        // Temporarily set IN_FLIGHT to a value at/above max to trigger the breaker.
-        let max = max_concurrent_backend_calls();
-        let previous = IN_FLIGHT.load(Ordering::Relaxed);
-        IN_FLIGHT.store(max, Ordering::Relaxed);
+    /// Q15 freeze F1: the breaker-trip exercise shared by
+    /// `circuit_breaker_trips_at_limit` and the pollution regression
+    /// test below, so the regression pins this exact code path. Runs on
+    /// caller-provided dedicated counters — it must not touch the
+    /// process-global `IN_FLIGHT` (concurrent suite tests would observe
+    /// the injected exhaustion as spurious `CKR_HOST_MEMORY`, and a
+    /// stale-snapshot restore could overwrite their legitimate counter
+    /// changes), and each caller needs its own counters (concurrent
+    /// exercise runs would otherwise collide on the pre-filled slots).
+    async fn exercise_breaker_trip_at_limit(
+        counter: &'static AtomicUsize,
+        stuck_gauge: &'static AtomicUsize,
+    ) {
+        let max = 2;
+        let _held = [
+            try_acquire_backend_call(counter, max).expect("first slot"),
+            try_acquire_backend_call(counter, max).expect("second slot"),
+        ];
 
-        let result = spawn_backend(|| Ok(())).await;
+        let result =
+            spawn_backend_with_counters(counter, stuck_gauge, Duration::from_secs(5), max, || {
+                Ok(())
+            })
+            .await;
         let inner = result.expect("spawn_backend should not return Status error");
         assert_eq!(
             inner.unwrap_err(),
             CkRv::HOST_MEMORY,
             "W1-L3-01: breaker trip surfaces HOST_MEMORY (was DEVICE_ERROR)"
         );
+    }
 
-        // Restore previous value so other tests are not affected.
-        IN_FLIGHT.store(previous, Ordering::Relaxed);
+    #[tokio::test]
+    async fn circuit_breaker_trips_at_limit() {
+        static BREAKER_TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+        static BREAKER_TEST_STUCK: AtomicUsize = AtomicUsize::new(0);
+        exercise_breaker_trip_at_limit(&BREAKER_TEST_COUNTER, &BREAKER_TEST_STUCK).await;
+    }
+
+    /// Q15 freeze F1: the breaker-trip exercise must not pollute the
+    /// process-global `IN_FLIGHT` gauge. A sampler thread observes the
+    /// gauge while the exercise runs repeatedly on this thread; any
+    /// observation at/above `max`, or any victim refusal inside such a
+    /// window, proves injected exhaustion (the pre-fix exercise stores
+    /// `max` into the global on every run). Post-fix the exercise
+    /// touches only dedicated counters, so this test is suite-safe
+    /// (legitimate global trips need 200 concurrent calls).
+    #[tokio::test]
+    async fn breaker_trip_exercise_does_not_pollute_global_in_flight() {
+        let max = max_concurrent_backend_calls();
+        let observed_max = Arc::new(AtomicBool::new(false));
+        let victim_refused = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        // Sampler on a dedicated OS thread (not a tokio task:
+        // `#[tokio::test]` defaults to the current-thread runtime, and
+        // the exercise's trip path never suspends, so a task-local
+        // sampler would starve). Tight load-loop observing the gauge;
+        // on a polluted window it also attempts a genuine victim
+        // acquire to prove handlers observe injected exhaustion as a
+        // refusal.
+        let sampler = {
+            let observed_max = Arc::clone(&observed_max);
+            let victim_refused = Arc::clone(&victim_refused);
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    if IN_FLIGHT.load(Ordering::Relaxed) >= max {
+                        observed_max.store(true, Ordering::Relaxed);
+                        // A real handler arriving in this window refuses.
+                        // If the window already closed, the acquire may
+                        // succeed — drop it at once and keep sampling.
+                        if try_acquire_backend_call(&IN_FLIGHT, max).is_none() {
+                            victim_refused.store(true, Ordering::Relaxed);
+                            return;
+                        }
+                    }
+                }
+            })
+        };
+        static POLLUTION_TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+        static POLLUTION_TEST_STUCK: AtomicUsize = AtomicUsize::new(0);
+        for _ in 0..20_000 {
+            exercise_breaker_trip_at_limit(&POLLUTION_TEST_COUNTER, &POLLUTION_TEST_STUCK).await;
+            if victim_refused.load(Ordering::Relaxed) {
+                break;
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        sampler.join().expect("sampler must not panic");
+        assert!(
+            !observed_max.load(Ordering::Relaxed) && !victim_refused.load(Ordering::Relaxed),
+            "trip exercise polluted the global gauge: observed_max={} victim_refused={}",
+            observed_max.load(Ordering::Relaxed),
+            victim_refused.load(Ordering::Relaxed),
+        );
     }
 
     #[tokio::test]
