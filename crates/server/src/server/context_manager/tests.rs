@@ -1765,15 +1765,21 @@ async fn q01_carrier_holds_slot_serialization_through_native_completion() {
 async fn q18_sessionless_expiry_releases_capacity_for_racing_admission() {
     const TASKS: usize = 32;
     const ROUNDS: usize = 50;
-    // One cap1 manager per round, each pre-filled; a single sleep expires
-    // them all (no per-round sleeping).
+    // Q18 fix-1 (review F1): replacements get a LONG (60s) lease while ONLY
+    // the seed is backdated past it (61s old). A contender delayed past the
+    // old 20ms lease can therefore never legally reclaim the fresh
+    // replacement and mint a second winner. Direct map access (not
+    // `get_context`, which would touch the lease and un-expire the seed).
     let mut rounds = Vec::with_capacity(ROUNDS);
     for _ in 0..ROUNDS {
-        let mgr = Arc::new(ContextManager::new(std::time::Duration::from_millis(20), 1));
+        let mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(60), 1));
         let expired = mgr.create_context(None).await.unwrap();
+        let aged = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(61))
+            .expect("Q18: host monotonic clock must predate the test by >61s");
+        mgr.contexts.get_mut(&expired).expect("Q18: fresh seed must be present").last_active = aged;
         rounds.push((mgr, expired));
     }
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     for (mgr, expired) in &rounds {
         let barrier = Arc::new(tokio::sync::Barrier::new(TASKS));
         let mut handles = Vec::with_capacity(TASKS);
@@ -1782,6 +1788,68 @@ async fn q18_sessionless_expiry_releases_capacity_for_racing_admission() {
             let barrier = Arc::clone(&barrier);
             handles.push(tokio::spawn(async move {
                 barrier.wait().await;
+                mgr.create_context(None).await
+            }));
+        }
+        let mut oks = 0;
+        for handle in handles {
+            match handle.await.unwrap() {
+                Ok(id) => {
+                    assert_ne!(
+                        id, *expired,
+                        "Q18: the winner must be a fresh context, not the expired holder"
+                    );
+                    oks += 1;
+                }
+                Err(rv) => assert_eq!(
+                    rv,
+                    CkRv::HOST_MEMORY,
+                    "Q18: raced losers must answer the existing refusal RV"
+                ),
+            }
+        }
+        assert_eq!(oks, 1, "Q18: the expired slot must admit exactly one racing creator");
+        assert_eq!(mgr.context_count(), 1, "Q18: no over-admission past cap1");
+        assert!(
+            mgr.context_ids().iter().all(|id| id != expired),
+            "Q18: the expired sessionless holder must be reclaimed by admission"
+        );
+    }
+}
+
+/// Q18 fix-1 (review F1): one contender is deliberately delayed 200ms past
+/// barrier release — 10x the old 20ms replacement lease — and must still
+/// lose. The replacement it arrives behind holds a 60s lease, so the delay
+/// cannot legally reclaim it into a second winner. Regression test: under
+/// the old fixture this fails with exactly two winners
+/// (`fix1-red-delayed-old-fixture.log`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn q18_expiry_delayed_contender_cannot_reclaim_fresh_replacement() {
+    const TASKS: usize = 32;
+    const ROUNDS: usize = 5;
+    // Same corrected fixture as the main expiry race: 60s lease, ONLY the
+    // seed backdated past it (61s old); no sleep needed.
+    let mut rounds = Vec::with_capacity(ROUNDS);
+    for _ in 0..ROUNDS {
+        let mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(60), 1));
+        let expired = mgr.create_context(None).await.unwrap();
+        let aged = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(61))
+            .expect("Q18: host monotonic clock must predate the test by >61s");
+        mgr.contexts.get_mut(&expired).expect("Q18: fresh seed must be present").last_active = aged;
+        rounds.push((mgr, expired));
+    }
+    for (mgr, expired) in &rounds {
+        let barrier = Arc::new(tokio::sync::Barrier::new(TASKS));
+        let mut handles = Vec::with_capacity(TASKS);
+        for i in 0..TASKS {
+            let mgr = Arc::clone(mgr);
+            let barrier = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                if i == 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
                 mgr.create_context(None).await
             }));
         }
