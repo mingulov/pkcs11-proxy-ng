@@ -66,10 +66,10 @@ AI agents, automation, and human contributors.
 - Avoid undefined behavior even if a caller is buggy; where that is impossible,
   fail early and conservatively.
 - When adding new mechanism parameter types, ensure BOTH directions work:
-  - Proto→Rust (`TryFrom<&proto::Mechanism>`) for server-side deserialization
-  - Rust→C struct (`mechanism_to_ffi()` in `ffi/ffi_conversion.rs`) for backend FFI calls
-  - Rust→Proto (`From<&CkMechanism>`) for client-side serialization
-  Missing any direction causes silent failures at runtime.
+  - Proto→Rust (`TryFrom<&v1_proto::Mechanism> for CkMechanism`) for server-side deserialization
+  - Rust→C struct (`mechanism_to_ffi()` in `crates/backend/src/ffi/ffi_conversion/mechanism.rs`) for backend FFI calls
+  - Rust→Proto (`TryFrom<&CkMechanism> for v1_proto::Mechanism`) for client-side serialization
+  Missing any direction causes silent failures at runtime (see §12).
 
 ## 4. Security Rules
 
@@ -172,34 +172,65 @@ explicitly instead of proceeding by assumption.
 
 ## 12. Mechanism Parameter Rules
 
-When adding a new mechanism parameter shape:
+The complete shape-extension recipe is
+[doc/mechanism-parameter-extension.md](./doc/mechanism-parameter-extension.md) —
+follow it. This section is the mandatory checklist, not a second copy:
 
-1. Add the proto message to `mechanism_params.proto`
-2. Add it to the `Mechanism.params` oneof in `types.proto`
-3. Add the Rust struct + `CkMechanismParams` variant in `types`
-4. Add bidirectional From/TryFrom in `proto` conversion code
-5. Add the C struct reconstruction in `mechanism_to_ffi()` (`ffi/ffi_conversion.rs`)
-6. Add to `mechanism_params_default.toml` for spec-defined mechanisms.
-   Vendor-defined mechanisms (e.g. CloudHSM, Thales) belong in the
-   daemon's runtime registry file (point `[mechanisms].config_path` at
-   it; the embedded default applies when `[mechanisms].config_path` is
-   unset) and are served to shims over gRPC.
-   Vendor mechanisms that reuse an existing parameter shape need no code
-   changes — only a TOML entry. New shapes still require steps 1–5 above.
-   Exception — intentionally undocumented mechanisms need no TOML entry:
-   `CK_CMS_SIG_PARAMS` / `CK_X3DH_*` / `CK_X2RATCHET_*` shapes carry
-   unbounded caller pointers the shim must not parse
-   (`do_not_parse_unbounded_caller_pointers_in_shim`), and working-spec
-   names without published `CKM_*` values (`CKM_KMAC128/256`,
-   `CKM_ML_DSA_EXTERNAL_MU[_GEN]`, `CKM_SHAKE_128/256`) must not get
-   project-local numbers (`do_not_assign_project_local_ckm_values`).
-   Record any new intentional omission in
-   `doc/oasis-profile-coverage.md` instead of adding a TOML shape.
-7. Add a round-trip unit test in `proto`
-8. Add a real-backend integration test if possible
+1. Decide alias vs new shape: a mechanism reusing an already compiled
+   shape needs only a registry binding (rule below), never code.
+2. Proto message (`crates/proto/proto/pkcs11-proxy-ng/v1/mechanism_params.proto`)
+   + `Mechanism.params` oneof member
+   (`crates/proto/proto/pkcs11-proxy-ng/v1/types.proto`; next free number,
+   never reuse).
+3. Domain struct + `CkMechanismParams` variant
+   (`crates/types/src/mechanism.rs`) with `PointerBytes`/`SecretBytes`/
+   handle field vocabulary, plus the `canonical_shape_name()` arm.
+4. Both conversions (`crates/proto/src/convert/mechanism/`:
+   `TryFrom<&CkMechanism>` and `TryFrom<&v1_proto::Mechanism>`) plus a
+   round-trip unit test covering NULL/empty edges.
+5. Shim reader arm with v1 step-1 reader and routing
+   (`crates/shim/src/dispatch/general/helpers/mechanism_read.rs`).
+6. Compiled descriptor + ABI/unsafe-field classification
+   (`SHAPE_DESCRIPTORS` in `crates/types/src/shape_descriptors.rs`).
+7. Manifest binding (`SHAPE_BINDINGS` in
+   `crates/types/src/mechanism_param_manifest.rs`) + regeneration
+   (`UPDATE_MANIFEST=1 cargo test -p pkcs11-proxy-ng-types manifest`)
+   with a reviewed diff.
+8. Native reconstruction (`mechanism_to_ffi_at_depth` +
+   `FfiParamBacking` in
+   `crates/backend/src/ffi/ffi_conversion/mechanism.rs`). Missing this
+   step is the most dangerous omission — proto tests pass but operations
+   fail silently at the FFI boundary with `CKR_MECHANISM_PARAM_INVALID`.
+9. `ValidatedMechanismParams` validation/sanitize/remap classification
+   (`check_typed_presence`, `typed_has_nonzero_embedded_null`,
+   `check_classic_sanitize_policy`, `zero_embedded_handles`, and the
+   server `mechanism_handles.rs` push/remap lists).
+10. Ownership/output/handle/NULL semantics review (manifest
+    `output_fields` + `output_params`/`output_params_equal` arms for
+    output-capable shapes, secret ownership, `substitute_handles`
+    handle translation, NULL/non-NULL-empty end to end).
+11. Registry binding (default TOML or runtime registry file) plus a
+    real-backend driver entry and width tests
+    (`crates/server/tests/support/shape_matrix.rs`,
+    `parameterized_mechanism_test`, `local_shape_gate_test`,
+    established width surfaces).
 
-Missing step 5 is the most dangerous — proto tests pass but operations
-fail silently at the FFI boundary with `CKR_MECHANISM_PARAM_INVALID`.
+Registry rule: spec-defined mechanisms go in the embedded default
+`crates/types/src/mechanism_params_default.toml`. Vendor-defined
+mechanisms (e.g. CloudHSM, Thales) belong in the daemon's runtime
+registry file (point `[mechanisms].config_path` at it; the embedded
+default applies when `[mechanisms].config_path` is unset) and are
+served to shims over gRPC.
+
+Exception — intentionally undocumented mechanisms need no TOML entry:
+`CK_CMS_SIG_PARAMS` / `CK_X3DH_*` / `CK_X2RATCHET_*` shapes carry
+unbounded caller pointers the shim must not parse
+(`do_not_parse_unbounded_caller_pointers_in_shim`), and working-spec
+names without published `CKM_*` values (`CKM_KMAC128/256`,
+`CKM_ML_DSA_EXTERNAL_MU[_GEN]`, `CKM_SHAKE_128/256`) must not get
+project-local numbers (`do_not_assign_project_local_ckm_values`).
+Record any new intentional omission in
+`doc/oasis-profile-coverage.md` instead of adding a TOML shape.
 
 ## 13. Architecture Quick Reference
 

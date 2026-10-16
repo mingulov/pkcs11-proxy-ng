@@ -55,6 +55,17 @@ scripts/release-dry-run.sh
 Set `CARGO_BUILD_JOBS=2` if memory is limited. After updating dependencies,
 repeat these checks, including the Rust 1.88 build and tests.
 
+## Extending mechanism parameter support
+
+New `CK_MECHANISM` parameter shapes follow the complete recipe in
+[mechanism-parameter-extension.md](mechanism-parameter-extension.md)
+(mandatory checklist: `AGENTS.md` §12). It names every edit point and
+gate owner — proto, domain, conversions, shim reader, shape descriptor,
+manifest binding and regeneration, native reconstruction,
+validation/sanitize/remap classification, ownership/output/handle
+semantics, registry binding, and tests — plus the verification commands
+to run from a fresh standalone checkout.
+
 ## Provider tests
 
 These scripts create temporary development tokens and configurations:
