@@ -110,6 +110,17 @@ pub unsafe extern "C" fn c_initialize(p_init_args: CK_VOID_PTR) -> CK_RV {
             return rv_err(CkRv::CRYPTOKI_ALREADY_INITIALIZED);
         }
 
+        // Q15 D2/D3: a fresh C_Initialize must re-read the endpoint and
+        // re-dial, never reuse a channel an earlier lifetime left behind.
+        // A probe without finalize (pre-init C_GetInterface*, or a failed
+        // init RPC that rolled the flag back) leaves (channel→old daemon,
+        // reconnect=false); reusing it would init and probe the WRONG
+        // daemon. `C_Finalize` sets this too; setting it here enforces the
+        // documented "later C_Initialize must re-read connection
+        // configuration" contract on every path. 401s return above, so a
+        // live session never takes this path.
+        state::mark_client_reconnect_required();
+
         // Mark the cached gRPC channel for reconnect ONLY on genuine
         // transport failures (FOLLOWUP-dns-reresolve, resolved by
         // W1-L11-24: follow a daemon whose address changed — every
