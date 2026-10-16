@@ -492,3 +492,54 @@ fn initialize_callback_controls_and_rejection_precedence() {
     );
     assert_eq!(callback_invocations(), 0, "inits must not invoke caller mutex callbacks");
 }
+
+/// Q15 D2/D3: `C_Initialize` must dial the CURRENT endpoint even when a
+/// previous probe left a live channel behind without finalizing.
+///
+/// A test that merely probes (e.g. `C_GetInterface` on an empty cache —
+/// the `all_3_*_out_of_scope_slots_are_nonnull` shape) connects the
+/// shared client and clears the reconnect flag, but never finalizes.
+/// The next `C_Initialize` must NOT reuse that stale channel: the init
+/// RPC must mint the CURRENT daemon's context (D2) and the probe must
+/// install the CURRENT daemon's snapshot (D3). Pre-fix this fails
+/// deterministically (init + probe land on X); post-fix it passes.
+/// Guarded + self-cleaning (finalize at the end); explicit narrow/wide
+/// profiles keep the assertions host-agnostic.
+#[test]
+fn initialize_ignores_stale_channel_left_without_finalize() {
+    use pkcs11_proxy_ng_backend::mock::MockAbi;
+    let _guard = shim_state_test_guard();
+    let daemon_x = TestDaemon::shared_with_abi(MockAbi::Ilp32);
+    let daemon_y = TestDaemon::shared_with_abi(MockAbi::Lp64);
+    // ARM: probe X exactly like a non-finalizing prober — clear state,
+    // force the dial, run one interface probe, then stop (no init, no
+    // finalize), leaving (channel→X, reconnect=false) behind.
+    unsafe {
+        std::env::set_var("PKCS11_PROXY_ENDPOINT", &daemon_x.endpoint);
+        std::env::remove_var("PKCS11_PROXY_SOCKET");
+    }
+    state::mark_finalized();
+    crate::interface_probe::clear_cache();
+    state::mark_client_reconnect_required();
+    crate::interface_probe::ensure_probed().expect("arm probe must install");
+    assert_eq!(crate::interface_probe::backend_ulong_size(), 4, "armed on the narrow daemon");
+    // VICTIM: initialize aimed at Y.
+    unsafe {
+        std::env::set_var("PKCS11_PROXY_ENDPOINT", &daemon_y.endpoint);
+    }
+    let created_before = daemon_y.total_contexts_created();
+    let rv = unsafe { dispatch::general::c_initialize(std::ptr::null_mut()) };
+    assert_eq!(rv, CKR_OK as CK_RV, "init aimed at Y must succeed");
+    assert_eq!(
+        crate::interface_probe::backend_ulong_size(),
+        8,
+        "init must probe the CURRENT endpoint, not the stale channel (D3)"
+    );
+    assert_eq!(
+        daemon_y.total_contexts_created() - created_before,
+        1,
+        "init RPC must mint the CURRENT daemon's context (D2)"
+    );
+    let rv = unsafe { dispatch::general::c_finalize(std::ptr::null_mut()) };
+    assert_eq!(rv, CKR_OK as CK_RV, "cleanup finalize must succeed");
+}
