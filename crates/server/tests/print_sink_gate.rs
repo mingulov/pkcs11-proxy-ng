@@ -91,6 +91,9 @@ const EXPECTED_ALLOW_FILES: &[&str] = &[
     "crates/shim/src/tests/cross_width_live.rs",
     "crates/shim/src/tests/control_channel_live.rs",
     "crates/shim/tests/stress_registry.rs",
+    // Q16 ownership-investigation transcripts (`Q16:`-prefixed counts /
+    // flags, never secrets) read with `-- --nocapture`.
+    "crates/server/src/server/grpc_service/session/q16_ownership_tests.rs",
 ];
 
 /// This gate names the three lint paths to audit them, so it excludes

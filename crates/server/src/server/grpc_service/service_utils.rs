@@ -7,7 +7,7 @@ use std::sync::{LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tonic::Status;
 
 use pkcs11_proxy_ng_types::*;
@@ -511,6 +511,157 @@ where
     match timeout {
         Some(timeout) => spawn_backend_with_timeout(timeout, operation).await,
         None => spawn_backend(operation).await,
+    }
+}
+
+/// Narrow completion owner for a single `OpenSession` backend call
+/// (Q16 box 2). The `open_session` handler registers the native
+/// session only after the awaited `spawn_backend` result returns; a
+/// caller cancellation or internal timeout before then discards a
+/// late `Ok(handle)` with no mapping and no close — a native session
+/// orphan that survives service close-all (mapped handles only) and
+/// context teardown (mapped handles only) until daemon shutdown.
+///
+/// The owner holds a `oneshot` copy of the backend result. The
+/// sender moves into the `spawn_backend` closure, which reports its
+/// outcome immediately after the backend call returns:
+///
+/// * `Ok(handle)` arm: [`Self::disarm`] — ownership transfers to the
+///   existing register/fallback-close settlement, unchanged.
+/// * `Err(_)` arm: [`Self::settle_on_error`] — a present error copy
+///   proves the genuine backend error (the send strictly precedes the
+///   primary return) and disarms with zero behavior change; a present
+///   success copy is a timeout that raced completion and is settled
+///   through the detached close; an absent copy proves the worker is
+///   still out (the internal timeout shape) and stays armed; a
+///   dropped sender (breaker refusal, worker panic) disarms since
+///   nothing will arrive.
+/// * Still armed at `Drop` (early handler return, future
+///   cancellation): a detached settlement task awaits the real
+///   completion and closes a late `Ok(handle)` exactly once through
+///   the normal `spawn_backend` (breaker + timeout). Any other late
+///   outcome settles nothing — no handle exists, and no blind
+///   state-changing call runs on an unknown result.
+///
+/// The late handle is solely owned: it settles here only when no
+/// mapping was published, and nobody else can name a handle that was
+/// never returned or registered. Used ONLY by `open_session`; sibling
+/// creation handlers need their own per-op settlement review.
+pub(super) struct OpenSessionCompletionOwner {
+    completion: Option<oneshot::Receiver<CkResult<CkSessionHandle>>>,
+    backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
+    runtime: tokio::runtime::Handle,
+}
+
+impl OpenSessionCompletionOwner {
+    /// Arm the owner. The returned sender moves into the
+    /// `spawn_backend` closure and reports the backend outcome; the
+    /// owner settles it unless disarmed. Must be called inside the
+    /// runtime (the `open_session` handler always is).
+    pub(super) fn arm(
+        backend: &Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
+    ) -> (oneshot::Sender<CkResult<CkSessionHandle>>, Self) {
+        let (tx, rx) = oneshot::channel();
+        let owner = Self {
+            completion: Some(rx),
+            backend: backend.clone(),
+            runtime: tokio::runtime::Handle::current(),
+        };
+        (tx, owner)
+    }
+
+    /// Disarm: the primary `Ok(handle)` was consumed into the
+    /// register/fallback-close settlement, which now owns it.
+    pub(super) fn disarm(&mut self) {
+        self.completion = None;
+    }
+
+    /// Settle the primary `Err(_)` arm. A reported error copy disarms
+    /// (the backend call genuinely returned the error); a reported
+    /// success copy is a timeout that raced completion and is settled
+    /// here; a still-pending copy keeps the owner armed so `Drop`
+    /// spawns the late closer.
+    pub(super) fn settle_on_error(&mut self) {
+        let Some(rx) = self.completion.as_mut() else {
+            return;
+        };
+        match rx.try_recv() {
+            // Genuine backend error: the send strictly precedes the
+            // primary return, so the copy is always present here and
+            // agrees with it. No handle exists; disarm silently.
+            Ok(Err(_)) => self.completion = None,
+            // Timeout raced completion: the primary is the synthesized
+            // proxy timeout RV, but the worker already reported a real
+            // success. `try_recv` consumed the only copy, so the owner
+            // takes it here — disarm and settle the known handle
+            // through the same detached close the `Drop` settler uses.
+            // No mapping was (or will be) published for it.
+            Ok(Ok(session)) => {
+                self.completion = None;
+                Self::spawn_settlement(&self.runtime, self.backend.clone(), session);
+            }
+            // Worker still out: the primary is the proxy timeout RV.
+            // Stay armed; `Drop` spawns the late closer.
+            Err(oneshot::error::TryRecvError::Empty) => {}
+            // Sender dropped without reporting: breaker/peer refusal
+            // (backend untouched) or worker panic. Nothing will ever
+            // arrive; disarm without a compensating call.
+            Err(oneshot::error::TryRecvError::Closed) => self.completion = None,
+        }
+    }
+
+    /// Spawn the detached settlement close for a known late `session`
+    /// (sole ownership: no mapping was published for it). Shared by
+    /// the timeout-race arm and the `Drop` settler. Failures log
+    /// loudly and keep today's terminal semantics (orphan until
+    /// shutdown); they are never retried.
+    fn spawn_settlement(
+        runtime: &tokio::runtime::Handle,
+        backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
+        session: CkSessionHandle,
+    ) {
+        runtime.spawn(async move {
+            tracing::debug!(session = session.0, "closing late OpenSession result with no consumer");
+            match spawn_backend(move || backend.close_session(session)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(rv)) => tracing::warn!(
+                    session = session.0,
+                    rv = rv.0,
+                    "late OpenSession settlement close failed; native session orphaned until shutdown"
+                ),
+                Err(status) => tracing::warn!(
+                    session = session.0,
+                    status = status.message(),
+                    "late OpenSession settlement close failed; native session orphaned until shutdown"
+                ),
+            }
+        });
+    }
+}
+
+impl Drop for OpenSessionCompletionOwner {
+    fn drop(&mut self) {
+        let Some(rx) = self.completion.take() else {
+            return;
+        };
+        // Armed: the primary result was never consumed into the
+        // register/fallback arms (early timeout return or caller
+        // cancellation). Await the real completion off the handler
+        // and close a late success. The captured `Handle` spawns from
+        // any thread without ambient runtime context; if the runtime
+        // is already gone (daemon shutdown) the settlement task never
+        // polls and shutdown native `Finalize` reaps instead.
+        let backend = self.backend.clone();
+        let runtime = self.runtime.clone();
+        self.runtime.spawn(async move {
+            // Only a late success settles. A late backend error owns no
+            // handle; a dropped sender (worker panic) leaves the outcome
+            // unknown, and no blind close runs — same terminal semantics
+            // as the `Status` path, now explicit.
+            if let Ok(Ok(session)) = rx.await {
+                Self::spawn_settlement(&runtime, backend, session);
+            }
+        });
     }
 }
 
@@ -3807,6 +3958,106 @@ mod tests {
             principal_quota_key(&ctx_mgr, &ctx_id),
             ctx_id.0,
             "peerless contexts keep the context-id key"
+        );
+    }
+
+    /// Q16 box 2: the timeout shape (worker still out when the error arm
+    /// runs) stays armed, and the detached settler closes a late `Ok`
+    /// exactly once. The sender is held without reporting to model a
+    /// worker that has not returned; no 30s timeout is awaited.
+    #[tokio::test]
+    async fn open_completion_owner_timeout_shape_settles_late_success() {
+        use pkcs11_proxy_ng_backend::MockBackend;
+
+        let mock = Arc::new(MockBackend::default_test());
+        mock.initialize().unwrap();
+        let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock.clone();
+
+        let (tx, mut owner) = OpenSessionCompletionOwner::arm(&backend);
+        // Worker still out: no report yet. The error arm must stay armed.
+        owner.settle_on_error();
+        assert!(owner.completion.is_some(), "pending worker must stay armed");
+        drop(owner);
+
+        // The worker now completes with a real session; the settler owns it.
+        let late = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
+        assert_eq!(mock.open_session_count(), 1);
+        tx.send(Ok(late)).expect("settler awaiting");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if mock.open_session_count() == 0 {
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "settler must close the late session");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(mock.close_session_call_count(), 1, "exactly one settlement close");
+    }
+
+    /// Q16 box 2: timeout racing completion — the worker reported a
+    /// real success before the error arm ran (`try_recv` consumes the
+    /// only copy). The owner must settle the known handle itself, not
+    /// stay armed on a consumed channel.
+    #[tokio::test]
+    async fn open_completion_owner_timeout_race_settles_known_success() {
+        use pkcs11_proxy_ng_backend::MockBackend;
+
+        let mock = Arc::new(MockBackend::default_test());
+        mock.initialize().unwrap();
+        let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock.clone();
+
+        let late = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
+        let (tx, mut owner) = OpenSessionCompletionOwner::arm(&backend);
+        tx.send(Ok(late)).expect("owner awaiting");
+        owner.settle_on_error();
+        assert!(owner.completion.is_none(), "consumed copy must disarm");
+        drop(owner);
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if mock.open_session_count() == 0 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "race settlement must close the known session"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(mock.close_session_call_count(), 1, "exactly one settlement close");
+    }
+
+    /// Q16 box 2: a reported genuine error disarms (no task, no close),
+    /// and a late error through an armed owner settles nothing.
+    #[tokio::test]
+    async fn open_completion_owner_error_paths_settle_nothing() {
+        use pkcs11_proxy_ng_backend::MockBackend;
+
+        let mock = Arc::new(MockBackend::default_test());
+        mock.initialize().unwrap();
+        let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock.clone();
+
+        // Genuine backend error: copy present, disarms synchronously.
+        let (tx, mut owner) = OpenSessionCompletionOwner::arm(&backend);
+        tx.send(Err(CkRv::SESSION_COUNT)).expect("owner awaiting");
+        owner.settle_on_error();
+        assert!(owner.completion.is_none(), "genuine error must disarm");
+        drop(owner);
+        assert_eq!(mock.close_session_call_count(), 0, "no settlement close on error");
+
+        // Late backend error through an armed owner: settler no-ops.
+        // The send notifies the settler; yield so its ready `rx` polls
+        // before asserting no close was issued.
+        let (tx, owner) = OpenSessionCompletionOwner::arm(&backend);
+        drop(owner);
+        tx.send(Err(CkRv::DEVICE_ERROR)).expect("settler awaiting");
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            mock.close_session_call_count(),
+            0,
+            "a late error owns no handle and must issue no close"
         );
     }
 }

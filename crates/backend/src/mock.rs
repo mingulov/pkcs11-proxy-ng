@@ -50,6 +50,18 @@ struct InterfaceCapsRendezvous {
     release: std::sync::mpsc::Receiver<()>,
 }
 
+/// One-shot rendezvous gate for slow-open simulation (Q16): the next
+/// `open_session` signals on `entered` with the requested slot and
+/// flags, blocks on `release`, then proceeds with the real
+/// allocation. Taken (not cloned) so only the first call parks —
+/// later calls run normally, which keeps multi-RPC tests
+/// deadlock-free. Carries flags (unlike [`TokenRendezvous`]) so
+/// tests can prove which session flags reached the backend.
+struct OpenSessionRendezvous {
+    entered: std::sync::mpsc::Sender<(CkSlotId, CkSessionFlags)>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
 /// Predicate over a `find_objects_init` template: installed with
 /// [`MockBackend::set_find_template_gate`] so `find_objects` can simulate
 /// class-sensitive search.
@@ -274,6 +286,12 @@ pub struct MockBackend {
     /// Count of `get_interface_capabilities` trait calls reaching the
     /// backend. Discovery tests use it to prove backend reach.
     interface_caps_calls: AtomicUsize,
+    /// One-shot gate for the next `open_session` (Q16): signals entry
+    /// with slot + flags, parks until release, then proceeds with the
+    /// real allocation — modeling a slow provider open whose result
+    /// may arrive after caller cancellation. Set via
+    /// [`MockBackend::set_open_session_gate`].
+    open_session_gate: Mutex<Option<OpenSessionRendezvous>>,
     /// Error that `login` specifically returns (before `login_impl`). Used to
     /// simulate PIN failures (e.g. CKR_PIN_INCORRECT) so tests can exercise
     /// the per-slot failed-login budget without a real PKCS#11 module.
@@ -518,6 +536,7 @@ impl MockBackend {
             token_info_gate: Mutex::new(None),
             interface_caps_gate: Mutex::new(None),
             interface_caps_calls: AtomicUsize::new(0),
+            open_session_gate: Mutex::new(None),
             injected_login_rv: Mutex::new(None),
             encrypt_init_output: Mutex::new(None),
             encrypt_operation_output: Mutex::new(None),
@@ -1068,6 +1087,18 @@ impl MockBackend {
     /// the backend.
     pub fn interface_caps_call_count(&self) -> usize {
         self.interface_caps_calls.load(Ordering::SeqCst)
+    }
+
+    /// Install a one-shot gate for the next `open_session` (Q16): it
+    /// signals `entered` with the requested slot and flags, blocks
+    /// until `release` fires, then proceeds with the real allocation.
+    /// Only the first call parks; later calls run normally.
+    pub fn set_open_session_gate(
+        &self,
+        entered: std::sync::mpsc::Sender<(CkSlotId, CkSessionFlags)>,
+        release: std::sync::mpsc::Receiver<()>,
+    ) {
+        *self.open_session_gate.lock().unwrap() = Some(OpenSessionRendezvous { entered, release });
     }
 
     /// Number of currently open backend sessions. Leak accounting for
@@ -2117,6 +2148,15 @@ impl Pkcs11Backend for MockBackend {
     }
 
     fn open_session(&self, slot_id: CkSlotId, flags: CkSessionFlags) -> CkResult<CkSessionHandle> {
+        // Q16 one-shot gate: signal entry with slot + flags, park until
+        // release, then proceed with the real allocation. Bound before
+        // the branch: an if-let scrutinee take would hold the guard
+        // across the park (temporary lifetime) and wedge later calls.
+        let gate = self.open_session_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            let _ = gate.entered.send((slot_id, flags));
+            let _ = gate.release.recv();
+        }
         self.open_session_impl(slot_id, flags)
     }
 
