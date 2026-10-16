@@ -45,12 +45,25 @@ and use the intentional-omission path instead (see
    number:
    `grep -o '= [0-9]*;' crates/proto/proto/pkcs11-proxy-ng/v1/types.proto | sort -t' ' -k2 -n | tail -3`.
 
+3. Classify every new `bytes`/`string` wire field in
+   `crates/proto/secret-fields.toml`, exactly once: `secret`
+   (fields requiring redacted diagnostics and wiping
+   ownership) or `safe_metadata` (wiping not required — which
+   does not authorize logging, persistence, caching, or
+   disclosure). GCM shows both sides: `GcmParams.aad` is
+   `secret` (`plaintext_decrypted`), `GcmParams.iv` is
+   `safe_metadata` (`public_parameters`).
+
 Gates: the prost build, the build-time oneof cross-validation in
 `crates/proto/src/oneof_check.rs` (redacted-`Debug` coverage for
-the new oneof arm), and the manifest cross-checks in
+the new oneof arm), the manifest cross-checks in
 `crates/types/src/mechanism_param_manifest.rs` (`manifest_tests`
 matches every binding's wire-message names against the `.proto`
-sources, including oneof membership).
+sources, including oneof membership), and
+`manifest_classifies_every_bytes_and_string_field_exactly_once`
+in `crates/types/tests/secret.rs`, which rejects any
+unclassified (or stale) wire field while
+`unclassified_field_policy = "reject"`.
 
 ## Step 2 — Domain type and enum variant
 
@@ -86,17 +99,41 @@ family submodules `advanced_params.rs`, `derivation_params.rs`,
 `tls_params.rs`):
 
 1. `impl TryFrom<&CkMechanism> for v1_proto::Mechanism`
-   (client-side serialization, `mod.rs`).
+   (client-side serialization, `mod.rs`). This is the legacy
+   v0-shaped encode: it sets the `*_null` bools and clears
+   every declared-length envelope (e.g. GCM's `iv_null_len:
+   None`).
 2. `impl TryFrom<&v1_proto::Mechanism> for CkMechanism`
    (server-side deserialization, `mod.rs`).
-3. Add a round-trip unit test in
+3. The negotiated v1 encode behind
+   `to_wire_with_transport_version` (`mod.rs`) — the
+   production serializer the shim uses. At capability < 1 it
+   takes the identical legacy path above; at capability ≥ 1
+   each input-pointer family encodes presence-based (NULL =
+   empty bytes + envelope) with the outer stamp 1. Add the
+   shape's arm to the applicable helper: `encode_r17_v1_params`
+   for input-pointer shapes (inline arm, or a `ToWireV1` impl
+   in the shape's family module for delegated families) or
+   `encode_r18_tail_v1_params` for tail shapes. A v1 encoder
+   MUST leave legacy `*_null` bools unset (S2 §3) and preserve
+   the declared-length envelopes the legacy encoder clears.
+   Both helpers end in a wildcard (`_ => None`) that falls
+   back to the legacy encode, so the compiler does not
+   inventory this omission: a missing v1 arm silently loses
+   NULL/nonzero-length semantics on v1 transports.
+4. Add a round-trip unit test in
    `crates/proto/src/convert/mechanism/tests.rs` covering the
    NULL/empty edges of every pointer peer (see
    `mechanism_gcm_round_trip` and
-   `mechanism_gcm_empty_aad_round_trip`).
+   `mechanism_gcm_empty_aad_round_trip`), plus a v1-encode
+   test through `to_wire_with_transport_version` proving the
+   version stamp, the preserved envelopes, and the unset
+   legacy bools (see `encode_v1_gcm`).
 
-Missing either direction causes silent runtime failures; the
-round-trip test is the minimum proof both exist.
+Missing any encode direction causes silent runtime failures;
+the round-trip test is the minimum proof the `TryFrom` pair
+exists, and the v1-encode test is the minimum proof the
+negotiated path preserves the shape.
 
 ## Step 4 — Shim reader
 
@@ -174,6 +211,23 @@ the provider writes nothing), and `V1` minimum transport
 version. The bindings are the single human edit point; every
 other manifest field derives from the descriptors.
 
+A new shape also needs its manual coverage row — regeneration
+does not write these. All owners live in
+`crates/types/src/mechanism_param_manifest.rs` (`manifest_tests`):
+a `Complete` `PointerStruct` joins `R16_PRESENCE_TABLE`
+(`presence_table_covers_every_input_pointer_shape` asserts the
+table equals the `Complete` `PointerStruct` set minus the R18
+TLS set, so a missing row fails the equality); a tail shape
+joins `R18_TAIL_TABLE` (`tail_table_covers_every_tail_shape`);
+a scalar or byte-buffer shape joins
+`R21_NO_ENVELOPE_SHAPES` with its no-envelope reason. The
+shape's S2 §8 family must appear in
+`S2_SECTION_8_FAMILIES`, and
+`envelope_union_covers_every_manifest_shape` pins the union
+plus the manifest shape count. Update each applicable table
+as a reviewed coverage change — never alter a pin merely to
+obtain green tests.
+
 Then regenerate the checked-in snapshot from the repository
 root and review the diff — any diff is a contract change:
 
@@ -183,14 +237,22 @@ UPDATE_MANIFEST=1 cargo test -p pkcs11-proxy-ng-types manifest
 
 This run rewrites
 `crates/types/src/mechanism_param_manifest.toml` and still
-fails against the stale embedded copy; the next run is green.
-The header of `render_manifest` carries this command verbatim.
+fails against the stale embedded copy; the next run is green
+on the byte-exact snapshot assertion only. The header of
+`render_manifest` carries this command verbatim. Regeneration
+bytes do not update the freeze digest: `manifest_digest_freeze`
+still fails until the manifest change is reviewed against S2
+§8 and the S2 §3 version rule and the freeze-vs-new-version
+decision is made explicitly — re-freeze `MANIFEST_DIGEST`
+only for a reviewed additive change that keeps the current
+transport version, never to silence the gate.
 
 Gates: `generated_manifest_matches_checked_in_file_byte_exact`
 (byte-exact snapshot), the wire-message/oneof cross-checks,
-the S2 §8 family-coverage test, `manifest_complete` (asserted
-at advertisement time — v1 is not advertised while false),
-and `manifest_digest_freeze`.
+the presence/tail/no-envelope table-equality tests, the S2 §8
+family-coverage test, `manifest_complete` (asserted at
+advertisement time — v1 is not advertised while false), and
+`manifest_digest_freeze`.
 
 ## Step 7 — Native reconstruction
 
@@ -263,20 +325,31 @@ This step has no single owner; it is the explicit review of
 the semantics the earlier steps encoded:
 
 1. **Reviewed output fields.** The manifest `output_fields`
-   indices name the top-level fields the provider may write
-   (tail shapes; every index is `Pointer`-class in every form
-   — test-enforced). For output-capable shapes, add matching
-   `output_params` and `output_params_equal` arms in
-   `ffi_conversion/mechanism.rs`: both matches have wildcards
-   (`None` / `expected.is_none()`) that fail closed, so a new
+   indices name the top-level fields the provider may write —
+   and only `NestedOrOutput` (tail) shapes carry them: any
+   other shape must bind `&[]`, and every listed index is
+   `Pointer`-class in every form (both test-enforced), so an
+   empty list on an input-pointer shape says nothing about
+   provider-written output. GCM is such a case: it binds
+   `&[]` yet supports provider-generated IV output through
+   writable IV capacity (`iv_buffer_len` sizing the retained
+   buffer via `gcm_iv_capacity`) with post-call
+   reconstruction in the `output_params` and
+   `output_params_equal` `Gcm` arms of
+   `ffi_conversion/mechanism.rs`. For output-capable shapes,
+   add matching `output_params` and `output_params_equal`
+   arms there: both matches have wildcards (`None` /
+   `expected.is_none()`) that fail closed, so a new
    output-capable variant silently reports no output until its
    arms exist. The `output_params_equal_tests` battery pins
    arm-for-arm agreement including provider-write flips.
 2. **Secret ownership.** Secret-carrying fields are `SecretBytes`
    in the domain type (directly or inside presence peers) and
    `Zeroizing<Vec<u8>>` in FFI backing, so secrets wipe on
-   drop. Never log request payloads (`AGENTS.md` §4); keep the
-   release profile's unwinding so `ZeroizeOnDrop` runs.
+   drop; their wire peers carry the matching `secret`
+   classification in `secret-fields.toml` (step 1). Never log
+   request payloads (`AGENTS.md` §4); keep the release
+   profile's unwinding so `ZeroizeOnDrop` runs.
 3. **Handle translation.** Handle-bearing shapes set
    `contains_virtual_handle` (step 5), classify in
    `zero_embedded_handles` and the server remapper (step 8),
@@ -312,9 +385,9 @@ the semantics the earlier steps encoded:
    extension.
 
 Gates: `local_shape_gate_test` requires every default-TOML
-shape to have a shim reader arm (except the reviewed
-`NON_DEFAULT_ARMS` runtime-only / operator-configured
-shapes) and every shim arm to resolve to a TOML shape; the
+shape to have a shim reader arm, and every shim arm to
+resolve to a TOML shape except the reviewed `NON_DEFAULT_ARMS`
+runtime-only / operator-configured shapes; the
 default-registry suites pin load and query behavior.
 
 ## Step 11 — Tests: round-trip, real backend, width
@@ -398,15 +471,15 @@ Each recipe step resolves to these existing owners:
 
 | Step | Owner for `gcm` |
 |------|-----------------|
-| 1 — proto | `GcmParams` in `mechanism_params.proto`; `gcm_params = 4` in the `Mechanism.params` oneof |
+| 1 — proto | `GcmParams` in `mechanism_params.proto`; `gcm_params = 4` in the `Mechanism.params` oneof; `GcmParams.aad` = secret / `GcmParams.iv` = safe_metadata in `secret-fields.toml` |
 | 2 — domain | `GcmParams` struct + `CkMechanismParams::Gcm` in `crates/types/src/mechanism.rs`; `canonical_shape_name` → `"gcm"` |
-| 3 — conversions | Both `TryFrom` impls in `crates/proto/src/convert/mechanism/mod.rs`; `mechanism_gcm_round_trip` + `mechanism_gcm_empty_aad_round_trip` in `tests.rs` |
-| 4 — reader | `Some("gcm")` arm + `read_gcm_struct_params` / `read_gcm_struct_params_v1` in `mechanism_read.rs`; `"gcm"` in `is_r17_v1_shape` |
+| 3 — conversions | Both `TryFrom` impls + `encode_r17_v1_params` `Gcm` arm behind `to_wire_with_transport_version` in `crates/proto/src/convert/mechanism/mod.rs`; `mechanism_gcm_round_trip` + `mechanism_gcm_empty_aad_round_trip` + `encode_v1_gcm` in `tests.rs` |
+| 4 — reader | `Some("gcm")` arm + `read_gcm_struct_params` / `read_gcm_struct_params_v1` in `mechanism_read.rs`; `"gcm"` in the `is_r17_v1_shape` body |
 | 5 — descriptor | `pointer_shape("gcm", GCM_FIELDS)` in `SHAPE_DESCRIPTORS` (`shape_descriptors.rs`) |
-| 6 — manifest | `bind("gcm", &["GcmParams"], Complete, &[], V1)` in `SHAPE_BINDINGS` |
+| 6 — manifest | `bind("gcm", &["GcmParams"], Complete, &[], V1)` in `SHAPE_BINDINGS`; `gcm` row in `R16_PRESENCE_TABLE`; union + `MANIFEST_DIGEST` pins |
 | 7 — reconstruction | `CkMechanismParams::Gcm` arm in `mechanism_to_ffi_at_depth` + `FfiParamBacking::Gcm` in `crates/backend/src/ffi/ffi_conversion/mechanism.rs`; `gcm_null_flags_materialize_null_pointers` in `tests.rs` |
 | 8 — validation | `P::Gcm` arms in `check_typed_presence`, `typed_has_nonzero_embedded_null`, `check_classic_sanitize_policy`, `zero_embedded_handles`; no-handle listings in `mechanism_handles.rs` |
-| 9 — semantics | `output_fields = &[]`; `output_params` / `output_params_equal` `Gcm` arms; NULL/empty peers end to end |
+| 9 — semantics | `output_fields = &[]` (empty by rule: only tail shapes carry the list); writable IV capacity via `gcm_iv_capacity` + `output_params` / `output_params_equal` `Gcm` arms; NULL/empty peers end to end |
 | 10 — registry | `shape = "gcm"` + `0x1087 # CKM_AES_GCM` in `mechanism_params_default.toml` |
 | 11 — tests | `variant: "Gcm"` in `shape_matrix.rs`; AES-GCM SoftHSM2 tests in `parameterized_mechanism_test.rs` |
 | 12 — verify | Step-12 command block above |

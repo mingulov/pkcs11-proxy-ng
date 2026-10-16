@@ -65,10 +65,10 @@ AI agents, automation, and human contributors.
 - Do not weaken ABI compatibility for PKCS#11 2.40, 3.0, or 3.2 interfaces.
 - Avoid undefined behavior even if a caller is buggy; where that is impossible,
   fail early and conservatively.
-- When adding new mechanism parameter types, ensure BOTH directions work:
+- When adding new mechanism parameter types, ensure every direction works:
   - Proto→Rust (`TryFrom<&v1_proto::Mechanism> for CkMechanism`) for server-side deserialization
   - Rust→C struct (`mechanism_to_ffi()` in `crates/backend/src/ffi/ffi_conversion/mechanism.rs`) for backend FFI calls
-  - Rust→Proto (`TryFrom<&CkMechanism> for v1_proto::Mechanism`) for client-side serialization
+  - Rust→Proto (`TryFrom<&CkMechanism> for v1_proto::Mechanism`) for client-side serialization, plus the negotiated v1 arm (`encode_r17_v1_params` / `encode_r18_tail_v1_params` behind `to_wire_with_transport_version`)
   Missing any direction causes silent failures at runtime (see §12).
 
 ## 4. Security Rules
@@ -181,21 +181,29 @@ follow it. This section is the mandatory checklist, not a second copy:
 2. Proto message (`crates/proto/proto/pkcs11-proxy-ng/v1/mechanism_params.proto`)
    + `Mechanism.params` oneof member
    (`crates/proto/proto/pkcs11-proxy-ng/v1/types.proto`; next free number,
-   never reuse).
+   never reuse) + wire-field classification
+   (`crates/proto/secret-fields.toml`: every new bytes/string field exactly
+   once as `secret` or `safe_metadata`).
 3. Domain struct + `CkMechanismParams` variant
    (`crates/types/src/mechanism.rs`) with `PointerBytes`/`SecretBytes`/
    handle field vocabulary, plus the `canonical_shape_name()` arm.
-4. Both conversions (`crates/proto/src/convert/mechanism/`:
-   `TryFrom<&CkMechanism>` and `TryFrom<&v1_proto::Mechanism>`) plus a
-   round-trip unit test covering NULL/empty edges.
+4. All conversions (`crates/proto/src/convert/mechanism/`:
+   `TryFrom<&CkMechanism>` and `TryFrom<&v1_proto::Mechanism>`, plus the
+   negotiated v1 arm in `encode_r17_v1_params` / `encode_r18_tail_v1_params`
+   behind `to_wire_with_transport_version` — legacy bools unset, envelopes
+   preserved) plus round-trip and v1-encode unit tests covering NULL/empty
+   edges.
 5. Shim reader arm with v1 step-1 reader and routing
    (`crates/shim/src/dispatch/general/helpers/mechanism_read.rs`).
 6. Compiled descriptor + ABI/unsafe-field classification
    (`SHAPE_DESCRIPTORS` in `crates/types/src/shape_descriptors.rs`).
 7. Manifest binding (`SHAPE_BINDINGS` in
-   `crates/types/src/mechanism_param_manifest.rs`) + regeneration
+   `crates/types/src/mechanism_param_manifest.rs`) + the applicable manual
+   coverage row (`R16_PRESENCE_TABLE` / `R18_TAIL_TABLE` /
+   `R21_NO_ENVELOPE_SHAPES` + S2 §8 family) + regeneration
    (`UPDATE_MANIFEST=1 cargo test -p pkcs11-proxy-ng-types manifest`)
-   with a reviewed diff.
+   with a reviewed diff + an explicit `MANIFEST_DIGEST` freeze decision
+   (regen bytes never update the digest).
 8. Native reconstruction (`mechanism_to_ffi_at_depth` +
    `FfiParamBacking` in
    `crates/backend/src/ffi/ffi_conversion/mechanism.rs`). Missing this
@@ -206,9 +214,11 @@ follow it. This section is the mandatory checklist, not a second copy:
    `check_classic_sanitize_policy`, `zero_embedded_handles`, and the
    server `mechanism_handles.rs` push/remap lists).
 10. Ownership/output/handle/NULL semantics review (manifest
-    `output_fields` + `output_params`/`output_params_equal` arms for
-    output-capable shapes, secret ownership, `substitute_handles`
-    handle translation, NULL/non-NULL-empty end to end).
+    `output_fields` — tail shapes only, `&[]` elsewhere by rule — +
+    `output_params`/`output_params_equal` arms and writable-capacity owners
+    for output-capable shapes, secret ownership incl. the wire-field
+    classification, `substitute_handles` handle translation,
+    NULL/non-NULL-empty end to end).
 11. Registry binding (default TOML or runtime registry file) plus a
     real-backend driver entry and width tests
     (`crates/server/tests/support/shape_matrix.rs`,
