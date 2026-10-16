@@ -406,25 +406,43 @@ def find_bundle_template(bundle_root):
 
 
 def start_smoke_daemon(daemon, proxy_toml, daemon_log, port, *, append=False):
-    """Start a smoke-owned daemon; return the Popen handle once bound."""
+    """Start a smoke-owned daemon; return the Popen handle once bound.
+
+    The helper owns the process until readiness succeeds: when the
+    wait times out, the unbound daemon is stopped here (callers only
+    clean up the returned handle) and the original diagnostic is
+    re-raised unchanged.
+    """
     log(f"starting packaged daemon {daemon} on 127.0.0.1:{port}")
     with open(daemon_log, "ab" if append else "wb") as logfh:
         env = dict(os.environ)
         env.setdefault("RUST_LOG", "pkcs11_proxy_ng=info")
         proc = subprocess.Popen([daemon, proxy_toml], stdout=logfh,
                                 stderr=subprocess.STDOUT, env=env)
-    require_daemon_ready(daemon_log, port, proc)
+    try:
+        require_daemon_ready(daemon_log, port, proc)
+    except SystemExit:
+        try:
+            stop_smoke_daemon(proc)
+        except Exception as cleanup_error:  # keep the original diagnostic
+            log(f"cleanup after failed start also failed: {cleanup_error}")
+        raise
     return proc
 
 
 def stop_smoke_daemon(proc):
-    """Terminate a smoke-owned daemon, killing it if it lingers."""
+    """Terminate a smoke-owned daemon, killing it if it lingers.
+
+    Always waits for the exit — including after a forced kill — so a
+    subsequent restart cannot collide with the stopped instance.
+    """
     log("stopping smoke-owned daemon")
     proc.terminate()
     try:
         proc.wait(timeout=30)
     except subprocess.TimeoutExpired:
         proc.kill()
+        proc.wait(timeout=30)
 
 
 def assert_daemon_logs(daemon_log, *, mtls, uds):

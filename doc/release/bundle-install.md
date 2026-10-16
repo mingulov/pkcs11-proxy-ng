@@ -32,6 +32,7 @@ ls bin lib examples/configs doc/release
 | `examples/configs/prod/proxy.toml` | hardened production shape (explicit grants) |
 | `examples/configs/staging/proxy.toml` | staging shape (software token) |
 | `doc/release/mtls-setup.md` | certificate creation for mTLS |
+| `doc/release/pool-evidence.json` | pooled provider-evidence export (empty until the first qualification round) |
 | `doc/runbooks/operating-pkcs11-proxy-ng.md` | deploy, roll out, troubleshoot |
 | `doc/error-reference.md` | every `CK_RV`, with operator actions |
 
@@ -86,10 +87,32 @@ identity to explicit token grants before production, following the
 
 ## 4. Start the daemon
 
+SoftHSM-class backends read their token store from `SOFTHSM2_CONF`
+at process start. When the configured backend is SoftHSM2,
+provision a scratch store **before** starting the daemon — an
+export after startup cannot change the running daemon's provider
+environment:
+
 ```bash
-RUST_LOG=pkcs11_proxy_ng=info LOG_FORMAT=plain \
-  ./bin/pkcs11-proxy-ng proxy.toml
+export SOFTHSM2_CONF="$HOME/softhsm2.conf"
+mkdir -p "$HOME/softhsm-tokens"
+printf 'directories.tokendir = %s\nobjectstore.backend = file\n' \
+  "$HOME/softhsm-tokens" > "$SOFTHSM2_CONF"
+softhsm2-util --init-token --slot 0 --label bundle-demo \
+  --so-pin 1234 --pin 1234
 ```
+
+The `1234` PINs above are scratch-token placeholders, never
+production values. Then start the daemon with the same
+configuration explicitly in its environment:
+
+```bash
+SOFTHSM2_CONF="$HOME/softhsm2.conf" RUST_LOG=pkcs11_proxy_ng=info \
+  LOG_FORMAT=plain ./bin/pkcs11-proxy-ng proxy.toml
+```
+
+(HSM drivers and NSS softokn need no `SOFTHSM2_CONF`; drop that
+assignment when the backend is not SoftHSM2.)
 
 Expect `mechanism registry ready` followed by `listening on tcp`
 (auth `Mtls`) and `listening on unix socket` (auth `PeerCred`). A
@@ -98,7 +121,17 @@ config is plaintext — stop and re-check step 3.
 
 ## 5. Connect a consumer
 
-Point the application at the extracted shim. Over mTLS:
+Point the application at the extracted shim. Select the shim this
+archive ships — the Linux and macOS tarballs differ:
+
+```bash
+# Linux:
+SHIM=./lib/pkcs11/libpkcs11_proxy_ng_shim.so
+# macOS:
+# SHIM=./lib/pkcs11/libpkcs11_proxy_ng_shim.dylib
+```
+
+Over mTLS:
 
 ```bash
 export PKCS11_PROXY_ENDPOINT=https://127.0.0.1:7512
@@ -120,36 +153,28 @@ Verify with a slot listing (here with OpenSC's `pkcs11-tool` as an
 ordinary consumer):
 
 ```bash
-pkcs11-tool --module ./lib/pkcs11/libpkcs11_proxy_ng_shim.so --list-slots
+pkcs11-tool --module "$SHIM" --list-slots
 ```
 
 A token listing over the configured transport confirms the handshake
-and authorization path. To exercise login and signing against a
-scratch SoftHSM2 token, initialize one and run the keygen/sign flow:
+and authorization path. To exercise login and signing, run the
+keygen/sign flow against the scratch SoftHSM2 token provisioned in
+step 4:
 
 ```bash
-export SOFTHSM2_CONF="$HOME/softhsm2.conf"
-mkdir -p "$HOME/softhsm-tokens"
-printf 'directories.tokendir = %s\nobjectstore.backend = file\n' \
-  "$HOME/softhsm-tokens" > "$SOFTHSM2_CONF"
-softhsm2-util --init-token --slot 0 --label bundle-demo \
-  --so-pin 1234 --pin 1234
-pkcs11-tool --module ./lib/pkcs11/libpkcs11_proxy_ng_shim.so \
+pkcs11-tool --module "$SHIM" \
   --token-label bundle-demo --login --pin 1234 --keypairgen \
   --key-type rsa:2048 --label bundle-key --id 01
 echo -n "bundle smoke" > data.bin
-pkcs11-tool --module ./lib/pkcs11/libpkcs11_proxy_ng_shim.so \
+pkcs11-tool --module "$SHIM" \
   --token-label bundle-demo --login --pin 1234 --sign \
   --mechanism SHA256-RSA-PKCS --input-file data.bin \
   --output-file sig.bin
-pkcs11-tool --module ./lib/pkcs11/libpkcs11_proxy_ng_shim.so \
+pkcs11-tool --module "$SHIM" \
   --token-label bundle-demo --login --pin 1234 --verify \
   --mechanism SHA256-RSA-PKCS --input-file data.bin \
   --signature-file sig.bin
 ```
-
-The `1234` PINs above are scratch-token placeholders, never
-production values.
 
 Check daemon readiness with the CLI over the same mTLS listener
 (exit `0` when SERVING, `1` when NOT_SERVING, `2` when the probe

@@ -133,9 +133,10 @@ def bundle_doc_mapping(repo: Path, version: str, target: str | None = None) -> d
     """Repository docs and config templates shipped in the bundle.
 
     Unix bundles carry the install guide, the runbook/error/support
-    material the guide needs, and complete secure config templates,
-    all at repository-relative paths. The Windows bundle carries only
-    the top-level README/CHANGELOG (its template ships separately);
+    material the guide needs, the pooled-evidence export the parity
+    guide cites, and complete secure config templates, all at
+    repository-relative paths. The Windows bundle carries only the
+    top-level README/CHANGELOG (its template ships separately);
     every target's markdown links are repaired by
     :func:`repair_bundle_markdown_links`.
     """
@@ -156,6 +157,10 @@ def bundle_doc_mapping(repo: Path, version: str, target: str | None = None) -> d
     for name in ("beta-support-matrix.md", "mtls-setup.md", "parity-validation.md",
                  notes_name):
         mapping[f"doc/release/{name}"] = repo / "doc/release" / name
+    # The parity guide links this versioned export; it must travel
+    # with the bundle so the reference stays bundle-local (an empty
+    # providers map is valid pre-qualification per support_matrix).
+    mapping["doc/release/pool-evidence.json"] = repo / "doc/release/pool-evidence.json"
     if target == TARGETS[2]:
         mac_doc = repo / "doc/release/macos-install.md"
         require(mac_doc.is_file() and not mac_doc.is_symlink() and

@@ -125,6 +125,7 @@ class BundleMemberTests(notices_tests.BundleTests):
             "doc/release/beta-support-matrix.md",
             "doc/release/mtls-setup.md",
             "doc/release/parity-validation.md",
+            "doc/release/pool-evidence.json",
             "doc/release/v0.2.0-release-notes.md",
             "doc/runbooks/operating-pkcs11-proxy-ng.md",
             "doc/error-reference.md",
@@ -211,6 +212,138 @@ class RealRepoBundleLinkTests(unittest.TestCase):
             with self.subTest(member=member):
                 self.assertIn(member, mapping)
                 self.assertTrue(Path(mapping[member]).is_file(), member)
+
+    def test_online_refs_resolve_at_pinned_tag(self):
+        # Beyond URL spelling: every immutable reference the repair
+        # produces must name a target that exists at the pinned tag
+        # (a same-checkout existence check is not enough — the URL
+        # points at v{version}, not at the working tree).
+        import shutil
+        import subprocess
+        from release.package_bundles import bundle_doc_mapping, repair_bundle_markdown_links
+        if shutil.which("git") is None:
+            self.skipTest("git unavailable")
+        version = workspace_version()
+        tag = f"v{version}"
+        tagged = subprocess.run(["git", "rev-parse", "--verify", tag],
+                                cwd=ROOT, capture_output=True)
+        if tagged.returncode != 0:
+            self.skipTest(f"{tag} unavailable in this checkout")
+        mapping = bundle_doc_mapping(ROOT, version)
+        with tempfile.TemporaryDirectory() as temp:
+            stage = Path(temp) / "stage"
+            for staged_rel, source in mapping.items():
+                dest = stage / staged_rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(Path(source).read_bytes())
+            for name in ("LICENSE-APACHE", "LICENSE-MIT"):
+                (stage / name).write_bytes((ROOT / name).read_bytes())
+            report = repair_bundle_markdown_links(stage, mapping, ROOT, version)
+        missing = []
+        for staged_rel, urls in sorted(report.items()):
+            for url in urls:
+                match = re.match(re.escape(ONLINE_BASE) + r"/(blob|tree)/v([^/]+)/(.+)$",
+                                 url)
+                self.assertIsNotNone(match, f"unexpected online URL shape: {url}")
+                _kind, pinned, target = match.group(1), match.group(2), match.group(3)
+                target = target.split("#", 1)[0]
+                self.assertEqual(pinned, version, f"URL pins the wrong version: {url}")
+                probe = subprocess.run(["git", "cat-file", "-e", f"{tag}:{target}"],
+                                       cwd=ROOT, capture_output=True)
+                if probe.returncode != 0:
+                    missing.append(f"{staged_rel} -> {url}")
+        self.assertEqual(missing, [],
+                         f"online references missing at {tag}: {missing}")
+
+
+class RealRepoBundleGuideTests(unittest.TestCase):
+    """The shipped install guide is operationally reproducible."""
+
+    def test_guide_provisions_token_store_before_daemon_start(self):
+        # The daemon inherits the provider environment at launch; a
+        # SOFTHSM2_CONF exported after startup cannot change it. The
+        # scratch store must be provisioned before the start command,
+        # and the start command must carry the same configuration.
+        guide = (ROOT / "doc/release/bundle-install.md").read_text(encoding="utf-8")
+        provision = guide.find("directories.tokendir")
+        start = guide.find("./bin/pkcs11-proxy-ng proxy.toml")
+        self.assertNotEqual(provision, -1, "guide must provision a scratch token store")
+        self.assertNotEqual(start, -1, "guide must give the daemon start command")
+        self.assertLess(provision, start,
+                        "scratch provisioning must precede the daemon start")
+        start_block = guide[max(0, guide.rfind("```bash", 0, start)):start]
+        self.assertIn("SOFTHSM2_CONF", start_block,
+                      "the daemon launch must carry the scratch configuration")
+
+    def test_guide_selects_platform_correct_shim(self):
+        # The guide targets Linux and macOS tarballs, which ship
+        # different shim names (.so vs .dylib). Consumer commands
+        # must select the shim per platform, never hardcode one.
+        guide = (ROOT / "doc/release/bundle-install.md").read_text(encoding="utf-8")
+        self.assertIn("libpkcs11_proxy_ng_shim.so", guide)
+        self.assertIn("libpkcs11_proxy_ng_shim.dylib", guide)
+        offenders = [line.strip() for line in guide.splitlines()
+                     if "--module" in line and "libpkcs11_proxy_ng_shim.so" in line]
+        self.assertEqual(offenders, [],
+                         f"consumer commands hardcode the Linux shim: {offenders}")
+
+    def test_readme_bundle_route_names_per_platform_entry(self):
+        # Every bundle operator is routed by the README: Unix
+        # archives carry INSTALL.md, while the Windows ZIP carries
+        # the config template plus the supervisor script instead.
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        pointer = [paragraph for paragraph in readme.split("\n\n")
+                   if "Installed from a release bundle" in paragraph]
+        self.assertEqual(len(pointer), 1, "README must route bundle operators once")
+        text = pointer[0]
+        self.assertIn("INSTALL.md", text)
+        self.assertIn("proxy.toml.template", text,
+                      "the bundle route must name the Windows entry point")
+
+
+class BundleTargetEntryTests(unittest.TestCase):
+    """Each archive's advertised entry point and artifact paths."""
+
+    def test_each_target_entry_point_and_artifacts(self):
+        from release.package_bundles import _bundle_files, bundle_doc_mapping
+        from release.package_binaries import TARGETS
+        repo = ROOT
+        with tempfile.TemporaryDirectory() as temp:
+            tmp = Path(temp)
+            binaries = tmp / "binaries"
+            binaries.mkdir()
+            notices = tmp / "notices"
+            notices.mkdir()
+            provenance = tmp / "build-provenance.json"
+            provenance.write_text("{}\n")
+            linux, windows, macos = TARGETS
+            unix_docs = bundle_doc_mapping(repo, workspace_version(), linux)
+            self.assertIn("INSTALL.md", unix_docs,
+                          "Linux bundle entry point must be INSTALL.md")
+            mac_docs = bundle_doc_mapping(repo, workspace_version(), macos)
+            self.assertIn("INSTALL.md", mac_docs)
+            self.assertIn("doc/release/macos-install.md", mac_docs)
+            win_docs = bundle_doc_mapping(repo, workspace_version(), windows)
+            self.assertNotIn("INSTALL.md", win_docs,
+                             "Windows ZIP carries no INSTALL.md")
+            win_files = _bundle_files(repo, binaries, provenance, notices,
+                                      windows, workspace_version())
+            for member in ("proxy.toml.template", "Run-Pkcs11ProxyNg.ps1"):
+                with self.subTest(member=member):
+                    self.assertIn(member, win_files)
+                    self.assertTrue(Path(win_files[member]).is_file(), member)
+            for member in ("bin/pkcs11-proxy-ng.exe", "bin/pkcs11-proxy-ng-cli.exe",
+                           "bin/cross_width_smoke.exe",
+                           "lib/pkcs11_proxy_ng_shim.dll"):
+                with self.subTest(member=member):
+                    self.assertIn(member, win_files,
+                                  "Windows artifact path must be staged")
+            linux_files = _bundle_files(repo, binaries, provenance, notices,
+                                        linux, workspace_version())
+            self.assertIn("lib/pkcs11/libpkcs11_proxy_ng_shim.so", linux_files)
+            mac_files = _bundle_files(repo, binaries, provenance, notices,
+                                      macos, workspace_version())
+            self.assertIn("lib/pkcs11/libpkcs11_proxy_ng_shim.dylib", mac_files)
 
 
 if __name__ == "__main__":
