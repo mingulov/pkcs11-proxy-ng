@@ -15,6 +15,7 @@
 
 use super::{close_all_sessions, open_session};
 use crate::server::context_manager::{ClientContextId, ContextManager};
+use crate::server::grpc_service::service_utils::principal_quota_key;
 use crate::server::slot_map::BackendSlotId;
 use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
 use pkcs11_proxy_ng_types::*;
@@ -58,6 +59,41 @@ fn open_request(
 
 async fn mapped_session_count(ctx_mgr: &Arc<ContextManager>, ctx_id: &ClientContextId) -> usize {
     ctx_mgr.get_context(ctx_id, |ctx| ctx.session_slots.len()).await.unwrap_or(0)
+}
+
+/// Finite per-principal session quota for the Q16 quota observations.
+/// Identical to the `session/tests.rs` quota cfgs (`Some(2)`) — the only
+/// other `configure` writers in this test binary. `configure` is
+/// OnceLock-guarded, so every writer agrees and the read below is stable.
+const Q16_QUOTA_MAX: usize = 2;
+
+/// Activate the global per-principal session quota for a Q16 quota
+/// observation. Returns the principal key when the quota holds the
+/// expected finite value; `None` (skip the test) when a foreign caller
+/// configured another value — the same graceful-skip discipline as the
+/// quota e2e tests. No shared mutex: all in-binary writers pass the
+/// identical cfg, so `configure` is idempotent here.
+fn ensure_q16_quota(ctx_mgr: &ContextManager, ctx_id: &ClientContextId) -> Option<String> {
+    let cfg = crate::config::RateLimitConfig {
+        per_principal_max_in_flight: None,
+        per_principal_max_sessions: Some(Q16_QUOTA_MAX),
+        per_slot_failed_login_budget: None,
+        per_slot_failed_login_cooldown_secs: None,
+    };
+    crate::server::rate_quota::configure(&cfg);
+    if crate::server::rate_quota::per_principal_max_sessions() != Some(Q16_QUOTA_MAX) {
+        return None;
+    }
+    Some(principal_quota_key(ctx_mgr, ctx_id))
+}
+
+/// Quota accounting snapshot: (live sessions, outstanding reservations).
+/// Read-only observation — admits and reserves nothing.
+fn quota_state(ctx_mgr: &ContextManager, key: &str) -> (usize, usize) {
+    (
+        ctx_mgr.session_count_for_principal(key),
+        ctx_mgr.outstanding_session_reservations_for_principal(key),
+    )
 }
 
 /// Poll a backend-count predicate until it holds or fail loudly
@@ -304,4 +340,148 @@ async fn q16_box3_pending_returned_as_plain_error() {
     assert_eq!(response.ck_rv, CkRv::PENDING.0, "PENDING must pass through verbatim");
     assert_eq!(response.session_handle, 0);
     assert_eq!(mock.open_session_count(), 0, "failed open must allocate nothing");
+}
+
+/// Box 1 + F1: the cancel-after-entry case under a FINITE session quota
+/// (`Q16_QUOTA_MAX`). Observes outstanding reservations and live counts
+/// through entry, cancellation, completion, and teardown: the reservation
+/// is held while the worker is parked, released by the cancellation drop
+/// (never leaked), and the late result never enters the live count — the
+/// settlement close retires it instead of leaving an uncounted native
+/// session behind. Quota contract unchanged: observe, don't redesign.
+#[tokio::test]
+async fn q16_box1_quota_observed_through_cancel_after_entry() {
+    let (mock, backend, ctx_mgr, ctx_id, slot) = setup_clean().await;
+    let Some(key) = ensure_q16_quota(&ctx_mgr, &ctx_id) else {
+        eprintln!("Q16: quota configured otherwise; skipping quota observation");
+        return;
+    };
+    let flags = (CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION).0;
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    mock.set_open_session_gate(entered_tx, release_rx);
+
+    let rpc = {
+        let (ctx_mgr, backend, req) =
+            (ctx_mgr.clone(), backend.clone(), open_request(&ctx_id, slot, flags));
+        tokio::spawn(async move { open_session(&ctx_mgr, &backend, req).await })
+    };
+    tokio::task::spawn_blocking(move || {
+        entered_rx.recv_timeout(Duration::from_secs(10)).expect("native entry observed")
+    })
+    .await
+    .unwrap();
+    // Entry: the handler reserved before entering the backend call.
+    let (live, outstanding) = quota_state(&ctx_mgr, &key);
+    eprintln!("Q16: quota at entry live={live} outstanding={outstanding}");
+    assert_eq!(outstanding, 1, "parked open must hold one quota reservation");
+    assert_eq!(live, 0, "parked open must not be live-counted");
+
+    // Cancellation drops the handler future, releasing the reservation.
+    rpc.abort();
+    let aborted = rpc.await.expect_err("aborted join must err");
+    assert!(aborted.is_cancelled(), "handler future must cancel");
+    let (live, outstanding) = quota_state(&ctx_mgr, &key);
+    eprintln!("Q16: quota after cancel live={live} outstanding={outstanding}");
+    assert_eq!(outstanding, 0, "cancelled open must release its quota reservation");
+    assert_eq!(live, 0, "cancelled open must never publish a live session");
+
+    // Completion: the late result settles (one close, exactly once) and
+    // never enters the live count.
+    release_tx.send(()).expect("parked worker alive");
+    await_backend_state(&mock, "late-result settlement", |native, closes| {
+        native == 0 && closes == 1
+    })
+    .await;
+    let (live, outstanding) = quota_state(&ctx_mgr, &key);
+    eprintln!(
+        "Q16: quota after settlement live={live} outstanding={outstanding} native={} closes={}",
+        mock.open_session_count(),
+        mock.close_session_call_count()
+    );
+    assert_eq!(outstanding, 0, "settled open must hold no reservation");
+    assert_eq!(live, 0, "late result must never enter the live count");
+
+    // Teardown: close-all + context teardown leave quota accounting empty.
+    let close_all = close_all_sessions(
+        &ctx_mgr,
+        &backend,
+        Request::new(pkcs11_proxy_ng_proto::CloseAllSessionsRequest {
+            client_context_id: ctx_id.0.clone(),
+            slot_id: slot,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(close_all.ck_rv, CkRv::OK.0);
+    let (live, outstanding) = quota_state(&ctx_mgr, &key);
+    eprintln!("Q16: quota after close-all live={live} outstanding={outstanding}");
+    assert_eq!((live, outstanding), (0, 0), "close-all must not disturb empty quota");
+
+    let mut departed = ctx_mgr.remove_context(&ctx_id).expect("context present");
+    let plan = ctx_mgr.plan_removed_context_teardown(&mut departed);
+    ctx_mgr.execute_teardown_plans(&backend, vec![plan]).await;
+    let (live, outstanding) = quota_state(&ctx_mgr, &key);
+    eprintln!("Q16: quota after teardown live={live} outstanding={outstanding}");
+    assert_eq!((live, outstanding), (0, 0), "teardown must leave quota accounting empty");
+    assert_eq!(mock.open_session_count(), 0, "no native session may survive teardown");
+    assert_eq!(mock.close_session_call_count(), 1, "exactly one settlement close");
+}
+
+/// Box 1 + F1: the registration-failure case under a FINITE session quota.
+/// The reservation survives context removal while the handler is still out
+/// (it counts toward the cap until the open returns), then releases on the
+/// failure return; the fallback close keeps the live count at zero.
+#[tokio::test]
+async fn q16_box1_quota_observed_through_registration_failure() {
+    let (mock, backend, ctx_mgr, ctx_id, slot) = setup_clean().await;
+    let Some(key) = ensure_q16_quota(&ctx_mgr, &ctx_id) else {
+        eprintln!("Q16: quota configured otherwise; skipping quota observation");
+        return;
+    };
+    let flags = (CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION).0;
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    mock.set_open_session_gate(entered_tx, release_rx);
+
+    let rpc = {
+        let (ctx_mgr, backend, req) =
+            (ctx_mgr.clone(), backend.clone(), open_request(&ctx_id, slot, flags));
+        tokio::spawn(async move { open_session(&ctx_mgr, &backend, req).await })
+    };
+    tokio::task::spawn_blocking(move || {
+        entered_rx.recv_timeout(Duration::from_secs(10)).expect("native entry observed")
+    })
+    .await
+    .unwrap();
+    let (live, outstanding) = quota_state(&ctx_mgr, &key);
+    eprintln!("Q16: quota at entry live={live} outstanding={outstanding}");
+    assert_eq!(outstanding, 1, "parked open must hold one quota reservation");
+    assert_eq!(live, 0, "parked open must not be live-counted");
+
+    // Registration can no longer succeed: the context is gone. The
+    // in-flight reservation still counts until the handler returns.
+    ctx_mgr.remove_context(&ctx_id).expect("context present");
+    let (live, outstanding) = quota_state(&ctx_mgr, &key);
+    eprintln!("Q16: quota after context removal live={live} outstanding={outstanding}");
+    assert_eq!(outstanding, 1, "reservation counts until the open returns");
+    assert_eq!(live, 0, "removed context contributes no live sessions");
+
+    release_tx.send(()).expect("parked worker alive");
+    let response = rpc.await.expect("handler joinable").expect("handler status ok").into_inner();
+    let (live, outstanding) = quota_state(&ctx_mgr, &key);
+    eprintln!(
+        "Q16: quota after fallback close live={live} outstanding={outstanding} ck_rv={:#x} native={} closes={}",
+        response.ck_rv,
+        mock.open_session_count(),
+        mock.close_session_call_count()
+    );
+    assert_eq!(response.session_handle, 0, "failed registration must not publish a handle");
+    assert_eq!(mock.open_session_count(), 0, "fallback close must retire the native session");
+    assert_eq!(mock.close_session_call_count(), 1, "exactly one fallback close");
+    assert_eq!(outstanding, 0, "failed open must release its quota reservation");
+    assert_eq!(live, 0, "failed registration must not be live-counted");
 }

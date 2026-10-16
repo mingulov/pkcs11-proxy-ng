@@ -4060,4 +4060,84 @@ mod tests {
             "a late error owns no handle and must issue no close"
         );
     }
+
+    /// Q16 box 2 (fix round 1): a normally consumed `Ok` disarms — the
+    /// register/fallback settlement owns the handle and the owner must
+    /// issue NO settlement close. The handle stays usable (an explicit
+    /// close of it succeeds) and no detached task closes it behind the
+    /// consumer.
+    #[tokio::test]
+    async fn open_completion_owner_consumed_success_disarms_without_settlement_close() {
+        use pkcs11_proxy_ng_backend::MockBackend;
+
+        let mock = Arc::new(MockBackend::default_test());
+        mock.initialize().unwrap();
+        let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock.clone();
+
+        let live = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
+        let (_tx, mut owner) = OpenSessionCompletionOwner::arm(&backend);
+        // The consumed-`Ok` arm: ownership transfers to register/fallback.
+        owner.disarm();
+        assert!(owner.completion.is_none(), "consumed success must disarm");
+        drop(owner);
+        // Yield so a wrongly spawned settler would have polled by now.
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            mock.close_session_call_count(),
+            0,
+            "disarmed owner must issue no settlement close"
+        );
+        assert_eq!(mock.open_session_count(), 1, "consumed handle must remain live");
+        // The handle is still usable: an explicit close of it succeeds.
+        mock.close_session(live).expect("consumed handle remains usable");
+        assert_eq!(mock.open_session_count(), 0);
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(mock.close_session_call_count(), 1, "only the explicit close ran");
+    }
+
+    /// Q16 box 2 (fix round 1): a sender dropped without reporting
+    /// (breaker refusal, worker panic — the backend produced no outcome)
+    /// issues NO compensating close, on either the error arm or the
+    /// armed-`Drop` arm.
+    #[tokio::test]
+    async fn open_completion_owner_closed_sender_settles_nothing() {
+        use pkcs11_proxy_ng_backend::MockBackend;
+
+        let mock = Arc::new(MockBackend::default_test());
+        mock.initialize().unwrap();
+        let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock.clone();
+
+        // Error arm: a dropped sender disarms synchronously.
+        let (tx, mut owner) = OpenSessionCompletionOwner::arm(&backend);
+        drop(tx);
+        owner.settle_on_error();
+        assert!(owner.completion.is_none(), "dropped sender must disarm the error arm");
+        drop(owner);
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            mock.close_session_call_count(),
+            0,
+            "refusal/panic error arm must issue no close"
+        );
+
+        // Armed-`Drop` arm: the settler observes the closed channel and
+        // no-ops — the outcome is unknown, so no blind close runs.
+        let (tx, owner) = OpenSessionCompletionOwner::arm(&backend);
+        drop(tx);
+        drop(owner);
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            mock.close_session_call_count(),
+            0,
+            "closed-sender Drop arm must issue no close"
+        );
+    }
 }

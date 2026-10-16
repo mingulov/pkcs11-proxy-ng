@@ -1645,6 +1645,26 @@ impl ContextManager {
         })
     }
 
+    /// Outstanding (not yet registered-or-released) session-quota
+    /// reservations for `principal_key`. Test-only observer for the Q16
+    /// quota accounting — admits no session and reserves nothing; quota
+    /// callers must still use
+    /// [`Self::try_reserve_session_for_principal`].
+    ///
+    /// Not `async`: mutex + HashMap reads need no `.await` (L5).
+    #[cfg(test)]
+    pub(crate) fn outstanding_session_reservations_for_principal(
+        &self,
+        principal_key: &str,
+    ) -> usize {
+        self.session_quota_reservations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(principal_key)
+            .copied()
+            .unwrap_or(0)
+    }
+
     /// Sum of open sessions across ALL contexts attributable to
     /// `principal_key`. A context matches when ANY of its keys equals the
     /// requested one: its `authenticated_identity` when set, its recorded
