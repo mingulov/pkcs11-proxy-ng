@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import tomllib
 import unittest
 import zipfile
 
@@ -25,6 +26,15 @@ def digest(data):
 
 
 class MaterialTests(unittest.TestCase):
+    def test_reviewed_sibling_versions_are_present_in_workspace_lock(self):
+        locked = {(item["name"], item["version"])
+                  for item in tomllib.loads((ROOT / "Cargo.lock").read_text())["package"]}
+        for leaf, (donor_name, donor_version, _, _) in package_notices.REVIEWED_SIBLINGS.items():
+            with self.subTest(leaf=leaf, donor=(donor_name, donor_version)):
+                self.assertIn(leaf, locked, "reviewed leaf version requires refresh")
+                self.assertIn((donor_name, donor_version), locked,
+                              "reviewed license donor version requires refresh")
+
     def test_workspace_feature_tree_records_shared_build_union(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = Path(temp)
@@ -105,16 +115,20 @@ class MaterialTests(unittest.TestCase):
                    "src/aws_lc_rs_algs.rs": b'#[cfg(test)]\n#[path = "."]\nmod tests {\n#[path = "alg_tests.rs"]\nmod alg_tests;\n}\n',
                    "src/alg_tests.rs": b'include_bytes!("../third-party/chromium/data/verify_signed_data/foo");\n',
                    "src/subject_name/dns_name.rs": b'#[cfg(test)]\nmod tests {\n// adapted from Chromium\n}\n'}
-        material = collect_material("rustls-webpki", "0.103.15", entries)
+        material = collect_material("rustls-webpki", "0.103.16", entries)
         self.assertEqual(material["headers/src/crl/mod.rs.txt"], header_a.rstrip() + b"\n")
         self.assertEqual(material["headers/src/subject_name/mod.rs.txt"], header_b.rstrip() + b"\n")
+        for version in ("0.103.15", "0.103.17"):
+            with self.subTest(version=version), self.assertRaisesRegex(
+                    ReleaseError, "notice review requires refresh"):
+                collect_material("rustls-webpki", version, entries)
         del entries["src/subject_name/mod.rs"]
         with self.assertRaises(ReleaseError):
-            collect_material("rustls-webpki", "0.103.15", entries)
+            collect_material("rustls-webpki", "0.103.16", entries)
         entries["src/subject_name/mod.rs"] = header_b
         entries["src/ring_algs.rs"] = b'mod tests {\n#[path = "alg_tests.rs"]\nmod alg_tests;\n}\n'
         with self.assertRaises(ReleaseError):
-            collect_material("rustls-webpki", "0.103.15", entries)
+            collect_material("rustls-webpki", "0.103.16", entries)
 
     def test_ring_requires_subcomponent_material_and_full_source_supplement(self):
         entries = {"LICENSE": b"ring root\n", "LICENSE-other-bits": b"ISC\n",
