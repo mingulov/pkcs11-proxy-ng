@@ -51,7 +51,9 @@ libloading.workspace = true
 # Dev-only: the ABI audit walks the served function-list tables with the
 # shared module-FFI offset facts (W1-L10-14). Same crates.io version as the
 # backend.
-pkcs11-module = "0.2"
+# 0.2.1 exposes libloading 0.9 Library; keep the 0.8 API shared with
+# cryptoki-sys until the loader migration is reviewed, including consumers.
+pkcs11-module = "=0.2.0"
 
 [lints]
 workspace = true

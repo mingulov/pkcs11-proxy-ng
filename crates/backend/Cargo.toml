@@ -32,7 +32,9 @@ pkcs11-proxy-ng-proto = { version = "=0.2.2", path = "../proto" }
 # no org-owned mirror. Fallback plan, in order: (1) re-publish or mirror the
 # crates and re-point this version requirement; (2) vendor the crate in-tree
 # behind a [patch] section.
-pkcs11-module = "0.2"
+# 0.2.1 exposes libloading 0.9 Library; keep the 0.8 API shared with
+# cryptoki-sys until the loader migration is reviewed, including consumers.
+pkcs11-module = "=0.2.0"
 libloading.workspace = true
 cryptoki-sys.workspace = true
 tracing.workspace = true

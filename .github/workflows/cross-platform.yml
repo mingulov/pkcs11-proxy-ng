@@ -84,7 +84,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: 1.98.1
           # Match rust-toolchain.toml before restoring build artifacts so
@@ -92,9 +92,9 @@ jobs:
           components: rustfmt,clippy
 
       - name: Install protoc (all OSes)
-        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5
+        uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
         with:
-          version: 2026.10.3
+          version: 2026.10.17
           install_args: "protoc"
 
       - name: Set up Python 3.12
@@ -233,7 +233,7 @@ jobs:
 
       - name: Upload comparison artifacts
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: xplat-${{ matrix.os }}-${{ runner.arch }}-${{ github.run_id }}
           path: |
@@ -276,16 +276,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install pinned Rust toolchain with i686 target
-        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: 1.98.1
           components: rustfmt,clippy
           targets: i686-pc-windows-msvc
 
       - name: Install protoc
-        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5
+        uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
         with:
-          version: 2026.10.3
+          version: 2026.10.17
           install_args: "protoc"
 
       - name: Cache cargo registry and build artifacts
@@ -307,7 +307,7 @@ jobs:
       # vs-shell is composite PowerShell (no Node runtime, no deprecation
       # warnings); ilammy/msvc-dev-cmd is unmaintained on node20.
       - name: Set up x86 MSVC toolchain
-        uses: egor-tensin/vs-shell@54e4148eac794e4580591c2e0b7750f14b7891fc # v2
+        uses: egor-tensin/vs-shell@7710434f30f873ff4ab78184b74cc576a10726d6 # v2.2.3
         with:
           arch: x86
 
@@ -381,7 +381,7 @@ jobs:
 
       - name: Upload win32 binaries
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: xplat-win32-${{ matrix.os }}-${{ github.run_id }}
           path: |
@@ -433,16 +433,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install pinned Rust toolchain with ARM64 target
-        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: 1.98.1
           components: rustfmt,clippy
           targets: aarch64-pc-windows-msvc
 
       - name: Install protoc
-        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5
+        uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
         with:
-          version: 2026.10.3
+          version: 2026.10.17
           install_args: "protoc"
 
       - name: Cache cargo registry and build artifacts
@@ -464,7 +464,7 @@ jobs:
       # vs-shell is composite PowerShell (no Node runtime, no deprecation
       # warnings); ilammy/msvc-dev-cmd is unmaintained on node20.
       - name: Set up ARM64 MSVC toolchain
-        uses: egor-tensin/vs-shell@54e4148eac794e4580591c2e0b7750f14b7891fc # v2
+        uses: egor-tensin/vs-shell@7710434f30f873ff4ab78184b74cc576a10726d6 # v2.2.3
         with:
           arch: arm64
 
@@ -519,7 +519,7 @@ jobs:
 
       - name: Upload win-arm64 binaries
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: xplat-winarm64-${{ github.run_id }}
           path: |

@@ -44,7 +44,7 @@ ATTEST_PIN = "ce27ba3b4a9a139d9a20a4a07d69fabb52f1e5bc"
 ATTEST_PREDICATE = ("https://github.com/mingulov/pkcs11-proxy-ng"
                     "/release-binding/v1")
 MISE_ACTION = "jdx/mise-action@"
-OIDC_AUTH_PIN = "c6f97d42243bad5fab37ca0427f495c86d5b1a18"
+OIDC_AUTH_PIN = "3268eb413133e2960fa4ae0e963ca76380c54cd9"
 BOOTSTRAP_TOKEN = "CARGO_REGISTRY_BOOTSTRAP_TOKEN"
 STAGING_TOKEN = "CARGO_REGISTRIES_STAGING_TOKEN"
 PUBLISH_WORKFLOW_PATH = ".github/workflows/publish.yml"
