@@ -41,7 +41,10 @@ EXISTING_JOBS = (
     "musl-x86_64",
 )
 NEW_REQUIRED_JOBS = (
+    "script-regressions",
+    "native-contracts",
     "package-candidate",
+    "package-consumers",
     "archive-binary-linux",
     "archive-binary-windows",
     "archive-binary-macos",
@@ -223,14 +226,17 @@ class PackageCandidateTests(unittest.TestCase):
         self.assertIn(MISE_ACTION, text)
         self.assertIn("--toolchain 1.98.1", text)
 
-    def test_package_candidate_runs_archive_and_consumer_gates(self):
+    def test_package_candidate_runs_archive_gate_and_consumers_remain_required(self):
         workflow = load_workflow()
         text = job_text("package-candidate", workflow)
         self.assertIn("cargo", text)
         self.assertIn("package", text)
         self.assertIn("release_checks.py", text)
         self.assertIn("archives", text)
-        self.assertIn("consumer", text)
+        consumer = workflow["jobs"]["package-consumers"]
+        self.assertEqual(consumer["needs"], "package-candidate")
+        self.assertIn("release_checks.py consumer", job_text("package-consumers", workflow))
+        self.assertIn("package-consumers", workflow["jobs"][AGGREGATE_JOB]["needs"])
 
     def test_candidate_artifact_identifies_source(self):
         workflow = load_workflow()
@@ -241,7 +247,7 @@ class PackageCandidateTests(unittest.TestCase):
 
     def test_cargo_build_and_target_dirs_isolated(self):
         workflow = load_workflow()
-        for job_id in ("package-candidate", "archive-binary-linux",
+        for job_id in ("package-candidate", "package-consumers", "archive-binary-linux",
                        "archive-binary-windows", "archive-binary-macos"):
             with self.subTest(job=job_id):
                 text = job_text(job_id, workflow)
@@ -273,7 +279,7 @@ class BinaryNoticeBundleTests(unittest.TestCase):
 
     def test_downstream_jobs_consume_source_bound_candidate(self):
         workflow = load_workflow()
-        for job_id in ("archive-binary-linux", "archive-binary-windows",
+        for job_id in ("package-consumers", "archive-binary-linux", "archive-binary-windows",
                        "archive-binary-macos"):
             with self.subTest(job=job_id):
                 text = job_text(job_id, workflow)

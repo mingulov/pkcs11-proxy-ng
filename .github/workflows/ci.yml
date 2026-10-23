@@ -1,8 +1,8 @@
 # Tier 0 — Fast PR checks
 #
-# Runs on every push and pull request.  Must complete quickly (< 5 min) to
-# give fast feedback.  Does NOT require any external dependencies beyond the
-# Rust toolchain and protobuf compiler.
+# Runs on every push and pull request. Independent script/native contract
+# checks provide early feedback while the full build/package graph runs.
+# Python/shell prerequisites and native fixture tools are installed explicitly.
 #
 # Checks performed:
 #   cargo fmt --check   — formatting gate
@@ -12,6 +12,8 @@
 #   cargo build         — compilation gate (all workspace crates)
 #   cargo test          — unit + integration tests that don't require #[ignore]
 #   cargo clippy        — linting gate for all targets/features (-D warnings)
+#   script regressions  — complete Python regression suite, no skipped tests
+#   native contracts    — strict fixture-backed native lifetime/ABI contracts
 #   package candidate   — all-eight source archives + inventory + MSRV consumer
 #   archive binaries    — archive-mode Linux/Windows builds + notices + bundles
 #   artifact smokes     — Alpine APK install/sign, extracted Linux/Windows
@@ -216,6 +218,87 @@ jobs:
           ( cd scripts && shellcheck -x "${shell_files[@]}" )
 
   # ── Tier 0c: build, test, clippy ──────────────────────────────────────────
+  script-regressions:
+    name: Script regressions (complete, no skips)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    needs: fmt
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # Release identity/link tests require the recorded version tags.
+          fetch-depth: 0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+
+      - name: Install mandatory script-test tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y bash coreutils git gzip jq openssl tar
+
+      # Script tests exercise Cargo metadata and tiny offline lock fixtures;
+      # they do not build the workspace or contact providers.
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: 1.98.1
+
+      - name: Install pinned script-test dependencies in an isolated environment
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/script-tests"
+          "$RUNNER_TEMP/script-tests/bin/python" -m pip install -r requirements-script-tests.txt
+          echo "$RUNNER_TEMP/script-tests/bin" >> "$GITHUB_PATH"
+
+      - name: Complete public script regression gate
+        run: python3 scripts/run-script-tests.py
+
+  native-contracts:
+    name: Native contracts (strict fixtures)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    needs: fmt
+    env:
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install native fixture build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y build-essential util-linux
+
+      - name: Install protoc (pinned, matches mise.toml)
+        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5
+        with:
+          version: 2026.10.3
+          install_args: "protoc"
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: 1.98.1
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+
+      - name: Strict native contract gate
+        run: python3 scripts/run-native-contracts.py --output "$RUNNER_TEMP/native-contracts/receipt.json"
+
+      - name: Upload native contract receipt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: native-contracts-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-contracts/
+          if-no-files-found: error
+          retention-days: 14
+
   build-and-test:
     name: Build & Test
     runs-on: ubuntu-26.04
@@ -499,16 +582,17 @@ jobs:
           "$MUSL_RELEASE/../static-save/pkcs11-proxy-ng" --version
           "$MUSL_RELEASE/pkcs11-proxy-ng-cli" --version
 
-  # ── Tier 0h: source package candidate (archives + inventory + consumer) ─────
+  # ── Tier 0h: source package candidate (archives + inventory) ────────────────
   # Stage B: packages all eight crates from the clean checkout with the
-  # release compiler, verifies archive identity/inventory, and runs the
-  # MSRV archive-consumer gates. The uploaded candidate artifact is the
+  # release compiler and verifies archive identity/inventory. The uploaded
+  # candidate artifact is the
   # only source-bound input downstream binary/smoke jobs may consume —
   # no shared or untrusted cache of candidate .crate files is used.
-  # Compilation coverage comes from the consumer gate plus the
+  # The independently required consumer gate overlaps binary builds.
+  # Compilation coverage comes from that gate plus the
   # archive-binary jobs below, so packaging itself runs --no-verify.
   package-candidate:
-    name: Package candidate (archives + consumer)
+    name: Package candidate (verified archives)
     runs-on: ubuntu-26.04
     timeout-minutes: 90
     needs: fmt
@@ -560,12 +644,6 @@ jobs:
           python3 scripts/release_checks.py archives \
             --package-dir "$CARGO_TARGET_DIR/package"
 
-      - name: Archive consumer gates (MSRV 1.88.0)
-        run: |
-          set -euo pipefail
-          python3 scripts/release_checks.py consumer \
-            --package-dir "$CARGO_TARGET_DIR/package" --toolchain 1.88.0
-
       - name: Upload source-bound candidate
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -576,6 +654,62 @@ jobs:
             ${{ env.CARGO_TARGET_DIR }}/package/SHA256SUMS
           if-no-files-found: error
           retention-days: 14
+
+  # Consumer qualification is independently required by ci-success. It and
+  # the archive binary jobs consume the same verified source-bound artifact,
+  # so MSRV consumers no longer serialize all downstream binary builds.
+  package-consumers:
+    name: Package consumers (MSRV 1.88.0)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    needs: package-candidate
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Isolate Cargo build and target directories
+        run: |
+          set -euo pipefail
+          echo "CARGO_BUILD_BUILD_DIR=$RUNNER_TEMP/pkg-consumers/build" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/pkg-consumers/target" >> "$GITHUB_ENV"
+
+      - name: Install protoc (pinned, matches mise.toml)
+        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5
+        with:
+          version: 2026.10.3
+          install_args: "protoc"
+
+      - name: Install Rust 1.88.0 (consumer MSRV)
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: 1.88.0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+
+      - name: Download exact source-bound candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ci-candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.CARGO_TARGET_DIR }}/package
+
+      - name: Reverify recorded hashes and source inventory
+        run: |
+          set -euo pipefail
+          (cd "$CARGO_TARGET_DIR/package" && sha256sum -c SHA256SUMS)
+          python3 scripts/release_checks.py archives \
+            --package-dir "$CARGO_TARGET_DIR/package" \
+            --expect-inventory "$CARGO_TARGET_DIR/package/inventory.json"
+
+      - name: Archive consumer gates (MSRV 1.88.0)
+        run: |
+          set -euo pipefail
+          python3 scripts/release_checks.py consumer \
+            --package-dir "$CARGO_TARGET_DIR/package" --toolchain 1.88.0
 
   # ── Tier 0i: archive-mode Linux binary + notices + bundle ───────────────────
   # Stage B: builds the daemon/CLI/shim from the source-bound candidate
@@ -1108,7 +1242,7 @@ jobs:
     name: CI success (fail-closed aggregate)
     runs-on: ubuntu-26.04
     timeout-minutes: 10
-    needs: [fmt, audit, deny, packaging-smoke, shellcheck, build-and-test, msrv, narrow-client-i686, windows-client-llp64, musl-x86_64, package-candidate, archive-binary-linux, archive-binary-windows, archive-binary-macos, smoke-apk-alpine, smoke-bundle-linux, smoke-bundle-windows, smoke-bundle-macos, support-matrix-check]
+    needs: [fmt, audit, deny, packaging-smoke, shellcheck, script-regressions, native-contracts, build-and-test, msrv, narrow-client-i686, windows-client-llp64, musl-x86_64, package-candidate, package-consumers, archive-binary-linux, archive-binary-windows, archive-binary-macos, smoke-apk-alpine, smoke-bundle-linux, smoke-bundle-windows, smoke-bundle-macos, support-matrix-check]
     if: always()
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
