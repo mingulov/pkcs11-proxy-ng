@@ -1,0 +1,41 @@
+{
+  "schema": "mutation-panel-manifest/v1",
+  "cases": [
+    {
+      "id": "handlemap-stale-reverse-remove",
+      "source": "crates/server/src/server/handle_map.rs",
+      "before": "            // A suspended raw handle may already have been recycled and bound\n            // to a newer virtual handle.  Never delete that newer reverse map.\n            if self.backend_to_virtual.get(&backend) == Some(&virt) {\n",
+      "after": "            // A suspended raw handle may already have been recycled and bound\n            // to a newer virtual handle.  Never delete that newer reverse map.\n            if true {\n",
+      "package": "pkcs11-proxy-ng",
+      "target": {"kind": "lib", "name": "pkcs11_proxy_ng"},
+      "primary": "server::handle_map::model_tests::seeded_handle_lifecycle_matches_vector_model",
+      "control": "server::handle_map::tests::allocate_and_resolve",
+      "panic": {
+        "source": "crates/server/src/server/handle_map_model_tests.rs",
+        "fragments": [
+          "assertion `left == right` failed: reverse raw=3: seed=0x1 step=8",
+          "left: None",
+          "right: Some(2)"
+        ]
+      }
+    },
+    {
+      "id": "protected-scanner-always-accept",
+      "source": "crates/proto/src/protected_decode.rs",
+      "before": "    validate_message(index, payload, 0)\n",
+      "after": "    let _ = (index, payload); Ok(())\n",
+      "package": "pkcs11-proxy-ng-proto",
+      "target": {"kind": "test", "name": "protected_wire_metamorphic"},
+      "primary": "duplicate_singular_transformations_are_refused_in_either_order",
+      "control": "unknown_fields_are_opaque_and_unknown_paths_pass_through",
+      "panic": {
+        "source": "crates/proto/tests/protected_wire_metamorphic.rs",
+        "fragments": [
+          "assertion `left == right` failed: value=0 field=0",
+          "left: Ok(())",
+          "right: Err(DuplicateField { message: \"LoginRequest\", number: 1 })"
+        ]
+      }
+    }
+  ]
+}
