@@ -23,11 +23,13 @@ case "$MODE" in
         ;;
 esac
 
-# The four standalone test workspaces (each has [workspace] + own lock).
+# The six standalone test workspaces (each has [workspace] + own lock).
 WORKSPACES=(
     tests/chaos/cert_minter
     tests/r2_resilience/slow_backend
     tests/ffi_oracles/exact_outputs
+    tests/ffi_oracles/entry_recording
+    tests/ffi_oracles/session_lifecycle
     tests/ffi_oracles/retained_mechanisms
 )
 

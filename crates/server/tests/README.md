@@ -83,16 +83,29 @@ From the standalone repository root:
 python3 scripts/run-native-contracts.py --output target/native-contracts/receipt.json
 ```
 
-This required-work gate builds the three deterministic native oracle libraries,
+This required-work gate builds the four deterministic native oracle libraries,
 production shim, and relevant test binaries once through Cargo JSON artifact
 messages. It checks the exact ignored-case inventory in
-`tests/native-contracts.json`, then runs all 19 selected cases serially in fresh
+`tests/native-contracts.json`, then runs all 24 selected cases serially in fresh
 bounded processes. Every case must report one successful test and its exact
 completion marker after the existing native assertions and shutdown. Shape
 controls require exactly one matching named observation with exact numeric
 backend-admission/native-entry counts, and store those observed values;
 loaded exact cases retain their RV, length, pointer-presence and call-count
-assertions. The retention case checks retained native pointer identity.
+assertions. The retention case checks retained native pointer identity. Five session cases check actual native failed closes, login and operation errors,
+partial batches, retired raw-handle reuse and handler cancellation with late
+completion. They use an independent vector of logical leases and bounded native
+observations. Batch member ordering is unspecified; member effects and carrier
+ordering remain exact. Each canonical case uses three seeds and at most16 suffix
+actions per trace, with at most3 live sessions. No cryptographic operation-state
+or concurrent ABA proof is claimed.
+
+For a bounded triage replay of a built session case, set
+`PKCS11_PROXY_SEQUENCE_SEED=0x5eed` and optionally
+`PKCS11_PROXY_SEQUENCE_PREFIX=5` with `PKCS11_PROXY_SESSION_ORACLE_LIB` pointing
+at its built fixture, and run the exact ignored test. Replays emit a distinct
+replay marker; the canonical native gate removes inherited selectors and always
+runs its complete declared session cases.
 
 The JSON receipt identifies source/artifact hashes, selected/executed IDs,
 per-command output and timings, semantic markers, and process cleanup.
@@ -144,6 +157,7 @@ build, set `PKCS11_PROXY_SHIM_LIB=/path/to/libpkcs11_proxy_ng_shim.so`.
 | `crates/server/tests/nss_mechanism_coverage_test.rs` | NSS softokn mechanism coverage | NSS softokn libsoftokn3.so and certutil | `cargo test -p pkcs11-proxy-ng --test nss_mechanism_coverage_test -- --ignored --test-threads=1` |
 | `crates/server/tests/nss_tls_mkd_mechanism_out_test.rs` | NSS softokn SSL3 master-key-derive mechanism-output coverage | NSS softokn libsoftokn3.so and certutil | `cargo test -p pkcs11-proxy-ng --test nss_tls_mkd_mechanism_out_test -- --ignored --test-threads=1` |
 | `crates/server/tests/provider_matrix_test.rs` | Optional NSS and Kryoptic provider matrix smoke coverage | NSS softokn libsoftokn3.so and certutil; Kryoptic module via PKCS11_PROXY_KRYOPTIC_MODULE | `cargo test -p pkcs11-proxy-ng --test provider_matrix_test nss_softokn_smoke_suite -- --ignored --test-threads=1`<br>`cargo test -p pkcs11-proxy-ng --test provider_matrix_test kryoptic_smoke_suite -- --ignored --test-threads=1` |
+| `crates/server/tests/session_sequence_test.rs` | Replayable native session lifecycle sequences | Built session lifecycle oracle via PKCS11_PROXY_SESSION_ORACLE_LIB | `cargo test --locked -p pkcs11-proxy-ng --test session_sequence_test -- --ignored --test-threads=1` |
 | `crates/server/tests/q01_close_oracle_test.rs` | Hook-gated Q01 close-path loaded-oracle coverage (real daemon stack) | SoftHSM2 module and softhsm2-util; NSS softokn libsoftokn3.so and certutil; native-owner-test-hooks feature build | `cargo test -p pkcs11-proxy-ng --features native-owner-test-hooks --test q01_close_oracle_test -- --ignored --test-threads=1` |
 | `crates/server/tests/shape_evidence_test.rs` | Shape-evidence oracle controls (attempted vs init-accepted vs native-entered vs success, with backend-admission layer discrimination) | Entry-recording oracle build via PKCS11_PROXY_ENTRY_RECORDING_ORACLE_LIB | `cargo test -p pkcs11-proxy-ng --test shape_evidence_test -- --ignored --test-threads=1` |
 | `crates/server/tests/softhsm_fixture_test.rs` | SoftHSM2 fixture variant coverage | SoftHSM2 module and softhsm2-util | `cargo test -p pkcs11-proxy-ng --test softhsm_fixture_test -- --ignored --test-threads=1` |

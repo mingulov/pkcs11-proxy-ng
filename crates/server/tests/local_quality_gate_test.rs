@@ -27,6 +27,14 @@ struct IgnoredTestLane {
 
 const IGNORED_TEST_TAXONOMY: &[IgnoredTestLane] = &[
     IgnoredTestLane {
+        file: "crates/server/tests/session_sequence_test.rs",
+        reason: "Replayable native session lifecycle sequences",
+        commands: &[
+            "cargo test --locked -p pkcs11-proxy-ng --test session_sequence_test -- --ignored --test-threads=1",
+        ],
+        requirements: &["Built session lifecycle oracle via PKCS11_PROXY_SESSION_ORACLE_LIB"],
+    },
+    IgnoredTestLane {
         file: "crates/server/tests/bounded_child_test.rs",
         reason: "Sentinel-gated child helpers owned by bounded-harness parent controls",
         commands: &["cargo test --locked -p pkcs11-proxy-ng --test bounded_child_test"],

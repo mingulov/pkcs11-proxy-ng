@@ -91,6 +91,8 @@ const EXPECTED_ALLOW_FILES: &[&str] = &[
     // read with `-- --nocapture`. Registered by the Q15 freeze: q07
     // added the sink without listing it.
     "crates/server/tests/shape_evidence_test.rs",
+    // Session completion/replay IDs, seeds and prefix lengths; no request payloads.
+    "crates/server/tests/session_sequence_test.rs",
     // Example smoke output.
     "crates/shim/examples/cross_width_smoke.rs",
     // Shim live-test diagnostics (ignored-by-default provider tests).
