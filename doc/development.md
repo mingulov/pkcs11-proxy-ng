@@ -124,6 +124,7 @@ remains a separate gate.
 For script work, select exact local modules and retain a timing receipt:
 
 ```bash
+mkdir -p target/script-feedback
 python3 scripts/run-script-tests.py \
     --module test_ci_feedback.py \
     --module test_perf_compare.py \

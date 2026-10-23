@@ -687,6 +687,10 @@ def main(argv=None):
         default=240,
         help="finite positive total work budget; child cleanup has its own bounded backstop",
     )
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if "-h" in argv or "--help" in argv:
+        parser.print_help()
+        return 0
     os.umask(0o077)
     started = time.monotonic()
     # Locate only the receipt/cache paths first. Invalidate a previous PASS

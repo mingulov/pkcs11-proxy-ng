@@ -178,17 +178,29 @@ class TimingResult(unittest.TextTestResult):
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    argv = sys.argv[1:] if argv is None else list(argv)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--timings-json", type=Path,
                         help="write a timing receipt; the parent directory must exist")
     parser.add_argument("--module", action="append", metavar="test_name.py",
                         help="select an exact local module; repeat to select several")
-    args = parser.parse_args(argv)
+    if "-h" in argv or "--help" in argv:
+        parser.print_help()
+        return 0
+    # Admit only one explicit receipt path before parsing unrelated options.
+    # Missing/ambiguous output arguments must never choose a file to overwrite.
+    preliminary = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    preliminary.add_argument("--timings-json", type=Path, action="append")
+    paths, _ = preliminary.parse_known_args(argv)
+    if paths.timings_json is not None and len(paths.timings_json) != 1:
+        parser.error("--timings-json must be supplied at most once")
+    timings_json = paths.timings_json[0] if paths.timings_json else None
     report = {
         "format": "script-regressions/v1",
-        "scope": "complete" if args.module is None else "selected",
+        "scope": "selected" if any(arg == "--module" or arg.startswith("--module=")
+                                   for arg in argv) else "complete",
         "status": "running",
-        "requested_modules": args.module or [],
+        "requested_modules": [],
         "inventory_modules": [], "selected_modules": [],
         "source_ids": {"runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                        "modules": {}},
@@ -207,8 +219,16 @@ def main(argv=None) -> int:
     receipt_started = False
     try:
         # Clear any old passing receipt before preflight/import/test side effects.
-        write_receipt(args.timings_json, report)
+        write_receipt(timings_json, report)
         receipt_started = True
+        try:
+            args = parser.parse_args(argv)
+        except SystemExit:
+            report["status"] = "error"
+            report["error"] = "invalid command-line arguments"
+            raise
+        report.update(scope="complete" if args.module is None else "selected",
+                      requested_modules=args.module or [])
         preflight()
         test_root = ROOT / "tests/scripts"
         inventory = {path.name: path for path in sorted(test_root.glob("test_*.py"))
@@ -272,7 +292,7 @@ def main(argv=None) -> int:
         if count == 0:
             raise RuntimeError("zero tests collected from tests/scripts")
         # A hard exit during a test still leaves a current, nonpassing inventory.
-        write_receipt(args.timings_json, report)
+        write_receipt(timings_json, report)
         scope = ("complete scope" if args.module is None else
                  "selected scope: " + ", ".join(selected))
         print(f"Collected {count} script regression tests ({scope})", file=sys.stderr)
@@ -318,7 +338,7 @@ def main(argv=None) -> int:
         report["module_summed_test_duration_seconds"] = module_sums
         if receipt_started:
             try:
-                write_receipt(args.timings_json, report)
+                write_receipt(timings_json, report)
             except RuntimeError as error:
                 print(error, file=sys.stderr)
                 exit_code = 2
