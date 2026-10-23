@@ -152,7 +152,7 @@ fn seeded_handle_lifecycle_matches_vector_model() {
         Action::Reactivate(3, 3),
         Action::Clear,
     ];
-    for seed in [1_u64, 0x5eed, 0xa897_d83, 0xdead_beef, u64::MAX] {
+    for seed in [1_u64, 0x5eed, 0x0a89_7d83, 0xdead_beef, u64::MAX] {
         let mut rng = seed;
         let mut map = HandleMap::new();
         let mut model = Model { leases: Vec::new(), next_id: 1 };
