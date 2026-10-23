@@ -35,6 +35,7 @@ LOG_LIMIT = 8 * 1024 * 1024
 BUILD_CAP = 90
 TEST_CAP = 10
 AUX_CAP = 30
+EPHEMERAL_REMOVAL_CAP = 60
 INTERRUPTED_SIGNAL = None
 
 
@@ -664,7 +665,7 @@ def remove_ephemeral(path):
         raise PanelError("temporary-directory cleanup timeout")
 
     previous_handler = signal.signal(signal.SIGALRM, expired)
-    previous_timer = signal.setitimer(signal.ITIMER_REAL, 10)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, EPHEMERAL_REMOVAL_CAP)
     try:
         shutil.rmtree(path)
     finally:
@@ -1045,13 +1046,25 @@ def main(argv=None):
             except BaseException as error:
                 cleanup_errors.append(str(error))
         children_gone = helper is None or not helper.owned_children()
+        removal = {
+            "budget_seconds": EPHEMERAL_REMOVAL_CAP,
+            "duration_seconds": 0.0,
+            "attempted": False,
+            "status": "not-created",
+        }
         if scratch is not None:
+            removal_started = time.monotonic()
+            removal["status"] = "failed"
             try:
                 if not children_gone:
                     raise PanelError("owned children remain; preserving their temporary files")
+                removal["attempted"] = True
                 remove_ephemeral(scratch)
+                removal["status"] = "removed"
             except BaseException as error:
                 cleanup_errors.append(f"cleanup: {error}")
+            finally:
+                removal["duration_seconds"] = time.monotonic() - removal_started
         for case in receipt["cases"]:
             for variant in case["variants"]:
                 variant["removed"] = (
@@ -1068,6 +1081,7 @@ def main(argv=None):
             "complete": complete,
             "errors": cleanup_errors,
             "ephemeral_root_removed": scratch is None or not scratch.exists(),
+            "ephemeral_removal": removal,
         }
         if cleanup_errors:
             receipt["error"] = "; ".join([receipt.get("error", ""), *cleanup_errors]).strip("; ")
