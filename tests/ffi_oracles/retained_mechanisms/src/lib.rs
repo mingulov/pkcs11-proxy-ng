@@ -8,8 +8,8 @@
 //!
 //! The observation records addresses and values read through the retained
 //! root; pointer-identity equality is computed test-side from those
-//! recorded addresses. The oracle dereferences no foreign pointer except
-//! that retained root itself — the Init-time snapshot
+//! recorded addresses. Bounded CBC/GCM/KIP observations also follow parameter,
+//! byte, and nested-mechanism legs through published layouts. The Init-time snapshot
 //! (`provider::encrypt_init`) and the Encrypt-time readback
 //! (`provider::encrypt`) are the deliberate retention emulation — and it
 //! never carries secret material: outputs are a fixed canary.
@@ -23,7 +23,8 @@
 //! socket) arrive with the row-9 barrier slice, not here.
 #![allow(non_snake_case, clippy::missing_safety_doc, clippy::unnecessary_cast)]
 use cryptoki_sys::*;
-use std::sync::Mutex;
+use std::collections::BTreeMap;
+use std::sync::{LazyLock, Mutex};
 
 #[cfg(not(test))]
 mod provider;
@@ -72,30 +73,95 @@ pub struct RetainedOracleObservation {
     pub gate_holds_total: u64,
 }
 
+/// Bounded exact public-canary observations. Distinct V1 ABI: never extend the
+/// legacy observation, whose getter has no caller-size argument.
+pub const DEEP_MAX_BYTES: usize = 32;
+pub const DEEP_MAX_NODES: usize = 5;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RetainedOracleDeepNodeV1 {
+    pub mechanism_ptr: u64,
+    pub parameter_ptr: u64,
+    pub mechanism: u64,
+    pub parameter_len: u64,
+    /// GCM IV bits / KIP key handle.
+    pub scalar_a: u64,
+    /// GCM tag bits.
+    pub scalar_b: u64,
+    /// CBC IV, GCM IV, or KIP seed.
+    pub first_ptr: u64,
+    pub first_len: u64,
+    pub first_bytes: [u8; DEEP_MAX_BYTES],
+    /// GCM AAD.
+    pub second_ptr: u64,
+    pub second_len: u64,
+    pub second_bytes: [u8; DEEP_MAX_BYTES],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RetainedOracleDeepGraphV1 {
+    pub valid: u32,
+    pub node_count: u32,
+    pub nodes: [RetainedOracleDeepNodeV1; DEEP_MAX_NODES],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RetainedOracleDeepObservationV1 {
+    pub version: u32,
+    pub graph_equal: u32,
+    pub session: u64,
+    pub init: RetainedOracleDeepGraphV1,
+    pub encrypt: RetainedOracleDeepGraphV1,
+}
+
 struct ProviderState {
-    retained_mech: u64,
+    // Addresses emulate native retention; snapshots contain only public canaries.
+    retained: BTreeMap<u64, (u64, RetainedOracleDeepGraphV1)>,
+    deep: RetainedOracleDeepObservationV1,
+    require_deep_equal: bool,
     initialized: bool,
     next_session: u64,
 }
 
-static STATE: Mutex<(RetainedOracleScenario, RetainedOracleObservation, ProviderState)> =
-    Mutex::new((
-        RetainedOracleScenario { encrypt_rv: 0, output_len: 0, fail_unless_ptr_equal: 0 },
-        RetainedOracleObservation {
-            init_calls: 0,
-            encrypt_calls: 0,
-            init_mech_ptr: 0,
-            encrypt_mech_ptr: 0,
-            init_param_len: 0,
-            encrypt_param_len: 0,
-            encrypt_mech_type: 0,
-            ptr_equal: 0,
-            gate_armed_op: 0,
-            gate_holds_current: 0,
-            gate_holds_total: 0,
-        },
-        ProviderState { retained_mech: 0, initialized: false, next_session: 1 },
-    ));
+static STATE: LazyLock<Mutex<(RetainedOracleScenario, RetainedOracleObservation, ProviderState)>> =
+    LazyLock::new(|| {
+        Mutex::new((
+            RetainedOracleScenario::default(),
+            RetainedOracleObservation::default(),
+            ProviderState {
+                retained: BTreeMap::new(),
+                deep: RetainedOracleDeepObservationV1::default(),
+                require_deep_equal: false,
+                initialized: false,
+                next_session: 1,
+            },
+        ))
+    });
+
+/// V1 getter writes exactly the separate V1 type; legacy getter is unchanged.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn RetainedOracle_GetDeepObservationV1(
+    observation: *mut RetainedOracleDeepObservationV1,
+) -> u32 {
+    if observation.is_null() {
+        return 1;
+    }
+    unsafe { observation.write(lock_state().2.deep) };
+    0
+}
+
+/// Opt-in fail-closed deep comparison. Never changes the legacy scenario ABI.
+#[unsafe(no_mangle)]
+pub extern "C" fn RetainedOracle_RequireDeepEqualV1(enabled: u32) -> u32 {
+    if enabled > 1 {
+        return 1;
+    }
+    lock_state().2.require_deep_equal = enabled == 1;
+    0
+}
 
 fn lock_state() -> std::sync::MutexGuard<
     'static,
@@ -205,7 +271,9 @@ pub extern "C" fn RetainedOracle_ResetObservation() -> u32 {
     drop(gate);
     let mut state = lock_state();
     state.1 = RetainedOracleObservation::default();
-    state.2.retained_mech = 0;
+    state.2.retained.clear();
+    state.2.deep = RetainedOracleDeepObservationV1::default();
+    state.2.require_deep_equal = false;
     0
 }
 
