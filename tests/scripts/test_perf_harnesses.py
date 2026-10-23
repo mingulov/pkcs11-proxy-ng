@@ -600,6 +600,10 @@ def do_rm(args):
     tmp = os.environ.get("STUB_CONTAINER_TMP", "")
     if not tmp:
         return fail("STUB_CONTAINER_TMP is not set")
+    # Model a cleanup CLI that has not reached its removal operation yet.
+    # The owning harness must settle this hold; it never releases itself.
+    if os.environ.get("STUB_DOCKER_RM_PRE_ENTRY_HOLD") == "1":
+        time.sleep(600)
     # The attempt is evidence even when it fails or misses.
     manifest = os.path.join(tmp, "rm-manifest.log")
     with open(manifest, "a") as handle:
@@ -2751,7 +2755,31 @@ class ColdStartHarnessTest(PerfHarnessCase):
         self.assert_no_survivors(outcome)
         self.assertEqual([], self.work_dir_contents())
 
+    def _assert_unverified_clock_removal(self, summary, output, hold_rm):
+        # With no readable monotonic clock, immediate settlement can kill
+        # the cleanup CLI before it reaches removal entry. Either observed
+        # roster is valid; foreign or duplicate removals are never valid.
+        self.assertFalse(summary["cleanup_ok"])
+        self.assertIn(summary["verdict"], ("FAIL_WORKLOAD", "FAIL_CLEANUP"))
+        self.assertIn("container-side termination could not be verified", summary["reasons"])
+        self.assertIn("monotonic clock unreadable during container removal", output)
+        run = self.read_run_manifest()
+        self.assertIsNotNone(run)
+        self.assertEqual(run[0], summary["run_container"])
+        removed = self.read_rm_manifest()
+        self.assertIn(removed, ([], [run[0]]))
+        if hold_rm:
+            # A stub held before entry must be killed, never allowed to
+            # complete its removal operation after the failed bound read.
+            self.assertEqual([], removed)
+
     def test_storm_clock_failure_publishes_terminal_summary(self):
+        self._check_storm_clock_failure_publishes_terminal_summary()
+
+    def test_storm_clock_failure_before_removal_entry(self):
+        self._check_storm_clock_failure_publishes_terminal_summary(hold_rm=True)
+
+    def _check_storm_clock_failure_publishes_terminal_summary(self, hold_rm=False):
         """Round 7 finding 1: a clock failure mid-storm still publishes JSON.
 
         The started-run contract promises a terminal summary for every
@@ -2764,6 +2792,7 @@ class ColdStartHarnessTest(PerfHarnessCase):
             extra_env={
                 "STUB_PKCS11_MODE": "hang",
                 "STUB_MARKER_DIR": str(self.container_tmp),
+                "STUB_DOCKER_RM_PRE_ENTRY_HOLD": "1" if hold_rm else "0",
                 "COLD_START_UPTIME_PATH": str(uptime),
             },
         )
@@ -2822,13 +2851,16 @@ class ColdStartHarnessTest(PerfHarnessCase):
             reasons,
         )
         self.assertIn("monotonic clock unreadable", output)
-        run = self.read_run_manifest()
-        self.assertIsNotNone(run)
-        self.assertEqual([run[0]], self.read_rm_manifest())
-        self.assertEqual(run[0], summary["run_container"])
+        self._assert_unverified_clock_removal(summary, output, hold_rm)
         self.assertEqual([], self.work_dir_contents())
 
     def test_storm_entry_clock_failure_publishes_terminal_summary(self):
+        self._check_storm_entry_clock_failure_publishes_terminal_summary()
+
+    def test_storm_entry_clock_failure_before_removal_entry(self):
+        self._check_storm_entry_clock_failure_publishes_terminal_summary(hold_rm=True)
+
+    def _check_storm_entry_clock_failure_publishes_terminal_summary(self, hold_rm=False):
         """Round 7 finding 1 (entry site): a clock failure as the storm
         starts still publishes JSON — and proves the entry latch fired."""
         self.write_daemon_status()
@@ -2838,6 +2870,7 @@ class ColdStartHarnessTest(PerfHarnessCase):
             "1",
             extra_env={
                 "STUB_PKCS11_MODE": "hang",
+                "STUB_DOCKER_RM_PRE_ENTRY_HOLD": "1" if hold_rm else "0",
                 "COLD_START_UPTIME_PATH": str(uptime),
                 "COLD_START_STORM_ENTRY_HOLD_FILE": str(hold),
             },
@@ -2897,13 +2930,16 @@ class ColdStartHarnessTest(PerfHarnessCase):
         # the first iteration, since the clock stays broken).
         self.assertIn("monotonic clock unreadable at storm start", output)
         self.assertIn("monotonic clock unreadable during storm join", output)
-        run = self.read_run_manifest()
-        self.assertIsNotNone(run)
-        self.assertEqual([run[0]], self.read_rm_manifest())
-        self.assertEqual(run[0], summary["run_container"])
+        self._assert_unverified_clock_removal(summary, output, hold_rm)
         self.assertEqual([], self.work_dir_contents())
 
     def test_sampler_clock_failure_publishes_terminal_summary(self):
+        self._check_sampler_clock_failure_publishes_terminal_summary()
+
+    def test_sampler_clock_failure_before_removal_entry(self):
+        self._check_sampler_clock_failure_publishes_terminal_summary(hold_rm=True)
+
+    def _check_sampler_clock_failure_publishes_terminal_summary(self, hold_rm=False):
         """Round 7 finding 1: a clock failure mid-sampler-stop still
         publishes JSON, with verdict precedence intact."""
         self.write_daemon_status()
@@ -2913,6 +2949,7 @@ class ColdStartHarnessTest(PerfHarnessCase):
             extra_env={
                 "COLD_START_SAMPLE_INTERVAL": "7",
                 "STUB_SLEEP_HANG_ON": "7",
+                "STUB_DOCKER_RM_PRE_ENTRY_HOLD": "1" if hold_rm else "0",
                 "COLD_START_UPTIME_PATH": str(uptime),
             },
         )
@@ -2975,13 +3012,16 @@ class ColdStartHarnessTest(PerfHarnessCase):
             reasons,
         )
         self.assertIn("monotonic clock unreadable during sampler join", output)
-        run = self.read_run_manifest()
-        self.assertIsNotNone(run)
-        self.assertEqual([run[0]], self.read_rm_manifest())
-        self.assertEqual(run[0], summary["run_container"])
+        self._assert_unverified_clock_removal(summary, output, hold_rm)
         self.assertEqual([], self.work_dir_contents())
 
     def test_sampler_entry_clock_failure_publishes_terminal_summary(self):
+        self._check_sampler_entry_clock_failure_publishes_terminal_summary()
+
+    def test_sampler_entry_clock_failure_before_removal_entry(self):
+        self._check_sampler_entry_clock_failure_publishes_terminal_summary(hold_rm=True)
+
+    def _check_sampler_entry_clock_failure_publishes_terminal_summary(self, hold_rm=False):
         """Round 7 finding 1 (entry site): a clock failure as sampler
         stop starts still publishes JSON — and proves the entry latch."""
         self.write_daemon_status()
@@ -2992,6 +3032,7 @@ class ColdStartHarnessTest(PerfHarnessCase):
             extra_env={
                 "COLD_START_SAMPLE_INTERVAL": "7",
                 "STUB_SLEEP_HANG_ON": "7",
+                "STUB_DOCKER_RM_PRE_ENTRY_HOLD": "1" if hold_rm else "0",
                 "COLD_START_UPTIME_PATH": str(uptime),
                 "COLD_START_SAMPLER_ENTRY_HOLD_FILE": str(hold),
             },
@@ -3056,10 +3097,7 @@ class ColdStartHarnessTest(PerfHarnessCase):
         # the first iteration, since the clock stays broken).
         self.assertIn("monotonic clock unreadable at sampler stop", output)
         self.assertIn("monotonic clock unreadable during sampler join", output)
-        run = self.read_run_manifest()
-        self.assertIsNotNone(run)
-        self.assertEqual([run[0]], self.read_rm_manifest())
-        self.assertEqual(run[0], summary["run_container"])
+        self._assert_unverified_clock_removal(summary, output, hold_rm)
         self.assertEqual([], self.work_dir_contents())
 
     def test_run_removal_interrupt_completes_removal(self):
