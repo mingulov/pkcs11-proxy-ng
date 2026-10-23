@@ -169,31 +169,75 @@ def dirty_sources(text):
         )
 
 
+def regular_source_file(root, name):
+    path = root / name
+    if any((root / parent).is_symlink() for parent in PurePosixPath(name).parents):
+        raise PanelError(f"directory source links are refused: {name}")
+    if path.is_symlink() or not path.is_file():
+        raise PanelError(f"source is not a regular file: {name}")
+    return path
+
+
+def source_link_provenance(root, name, literal, regular_names):
+    # The repository's links are direct, canonical relative file links. Link
+    # chains and parent-relative/absolute paths remain deliberately unsupported.
+    destination = (PurePosixPath(name).parent / safe_relative(literal)).as_posix()
+    if destination not in regular_names:
+        raise PanelError(f"source link target is not a committed regular file: {name}")
+    target = regular_source_file(root, destination)
+    return {
+        "link_target": literal,
+        "literal_sha256": hashlib.sha256(literal.encode()).hexdigest(),
+        "resolved_target": destination,
+        "target_sha256": sha256(target),
+    }
+
+
 def caller_inventory(root, listing):
     if not listing.endswith("\0"):
         raise PanelError("empty/truncated tracked source inventory")
-    result = {}
-    for name in listing.split("\0")[:-1]:
+    names = listing.split("\0")[:-1]
+    for name in names:
         safe_relative(name)
-        if not source_relevant(name):
+    links = {name: os.readlink(root / name) for name in names if (root / name).is_symlink()}
+    regular_names = set(names) - set(links)
+    result = {}
+    for name in names:
+        if not source_relevant(name) and name not in links:
             continue
         path = root / name
-        if path.is_symlink() or not path.is_file():
-            raise PanelError(f"caller source is missing or symlinked: {name}")
-        info = path.stat()
+        provenance = (
+            source_link_provenance(root, name, links[name], regular_names)
+            if name in links
+            else None
+        )
+        if provenance is None:
+            regular_source_file(root, name)
+        info = path.lstat()
         result[name] = {
-            "sha256": sha256(path),
+            "sha256": provenance["literal_sha256"] if provenance else sha256(path),
             "device": info.st_dev,
             "inode": info.st_ino,
             "size": info.st_size,
             "mtime_ns": info.st_mtime_ns,
         }
+        if provenance:
+            target = (root / provenance["resolved_target"]).stat()
+            result[name].update(
+                source_link=provenance,
+                target_identity={
+                    "device": target.st_dev,
+                    "inode": target.st_ino,
+                    "size": target.st_size,
+                    "mtime_ns": target.st_mtime_ns,
+                },
+            )
     if not result:
         raise PanelError("source identity inventory is empty")
     return result
 
 
-def file_manifest(root):
+def file_manifest(root, source_links=None):
     result = {}
     for directory, dirs, files in os.walk(root):
         for name in sorted(dirs + files):
@@ -209,12 +253,18 @@ def file_manifest(root):
                 raise PanelError("source snapshot contains a special file")
     if not result:
         raise PanelError("source snapshot is empty")
+    for name, provenance in (source_links or {}).items():
+        if name not in result:
+            raise PanelError("materialized source link is missing")
+        result[name]["source_link"] = provenance
     return result
 
 
 def extract_archive(archive, target):
     target.mkdir()
     seen = set()
+    regular_names = set()
+    links = {}
     total = 0
     with tarfile.open(archive, "r:") as stream:
         for member in stream:
@@ -226,8 +276,14 @@ def extract_archive(archive, target):
             if member.isdir():
                 path.mkdir(parents=True, exist_ok=True)
                 continue
+            if member.issym():
+                if len(member.linkname) > 4096:
+                    raise PanelError("source link target exceeds literal limit")
+                links[name] = member.linkname
+                continue
             if not member.isfile() or member.size > 32 * 1024 * 1024:
-                raise PanelError("archive symlink, hardlink or special/oversized member refused")
+                raise PanelError("archive hardlink or special/oversized member refused")
+            regular_names.add(name)
             total += member.size
             if total > 256 * 1024 * 1024:
                 raise PanelError("source archive exceeds byte limit")
@@ -235,6 +291,23 @@ def extract_archive(archive, target):
             with stream.extractfile(member) as source, path.open("xb") as destination:
                 shutil.copyfileobj(source, destination)
             path.chmod(member.mode & 0o777)
+    if any(parent.as_posix() in links for name in seen for parent in PurePosixPath(name).parents):
+        raise PanelError("directory source links are refused")
+    provenance = {
+        name: source_link_provenance(target, name, literal, regular_names)
+        for name, literal in links.items()
+    }
+    for name, record in provenance.items():
+        source = target / record["resolved_target"]
+        total += source.stat().st_size
+        if total > 256 * 1024 * 1024:
+            raise PanelError("materialized source archive exceeds byte limit")
+        path = target / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with source.open("rb") as original, path.open("xb") as materialized:
+            shutil.copyfileobj(original, materialized)
+        path.chmod(stat.S_IMODE(source.stat().st_mode))
+    return provenance
 
 
 def cache_inventory(root):
@@ -768,13 +841,14 @@ def main(argv=None):
             "archive",
         )
         pristine = scratch / "pristine"
-        extract_archive(archive, pristine)
-        sources = file_manifest(pristine)
+        source_links = extract_archive(archive, pristine)
+        sources = file_manifest(pristine, source_links)
         receipt["source"] = {
             "commit": commit,
             "archive_sha256": sha256(archive),
             "manifest_sha256": canonical_hash(sources),
             "files": sources,
+            "links": source_links,
         }
         channel = tomllib.loads((pristine / "rust-toolchain.toml").read_text())["toolchain"][
             "channel"
@@ -845,7 +919,7 @@ def main(argv=None):
                     (source / case["source"]).write_bytes(
                         original.replace(case["before"].encode(), case["after"].encode(), 1)
                     )
-                expected_sources = file_manifest(source)
+                expected_sources = file_manifest(source, source_links)
                 target = base / "target"
                 variant_result = {
                     "variant": variant,
@@ -908,7 +982,10 @@ def main(argv=None):
                 variant_result["tests"].append(primary)
                 control = panel.test(artifact, case["control"], source, variant_env)
                 variant_result["tests"].append(control)
-                if sha256(artifact) != artifact_hash or file_manifest(source) != expected_sources:
+                if (
+                    sha256(artifact) != artifact_hash
+                    or file_manifest(source, source_links) != expected_sources
+                ):
                     raise PanelError("variant source or compiled artifact changed during execution")
             result["status"] = (
                 "killed" if primary["status"] == "intended-assertion-failed" else "survived"

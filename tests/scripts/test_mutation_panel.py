@@ -90,20 +90,49 @@ class MutationPanelTest(unittest.TestCase):
             elif args[:1] == ['status']:
                 sys.stdout.buffer.write(pathlib.Path(os.environ['FIXTURE_STATUS']).read_bytes())
             elif args == ['ls-files', '-z', '--cached']:
-                for name in ('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml',
-                             'crates/proto/src/protected_decode.rs',
-                             'crates/proto/tests/protected_wire_metamorphic.rs'):
+                names = ['Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml',
+                         'crates/proto/src/protected_decode.rs',
+                         'crates/proto/tests/protected_wire_metamorphic.rs']
+                for name in ('AGENTS.md', 'CLAUDE.md'):
+                    if (root / name).exists() or (root / name).is_symlink(): names.append(name)
+                if (root / 'examples').exists():
+                    for directory, dirs, files in os.walk(root / 'examples'):
+                        for name in dirs[:]:
+                            path = pathlib.Path(directory) / name
+                            if path.is_symlink():
+                                names.append(path.relative_to(root).as_posix())
+                                dirs.remove(name)
+                        names.extend((pathlib.Path(directory) / name).relative_to(root).as_posix()
+                                     for name in files)
+                for name in names:
                     sys.stdout.buffer.write(name.encode() + b'\\0')
             elif args[:2] == ['archive', '--format=tar']:
                 target = next(a.split('=', 1)[1] for a in args if a.startswith('--output='))
                 with tarfile.open(target, 'w') as archive:
                     for name in ('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'crates'):
                         archive.add(root / name, arcname=name)
+                    for name in ('AGENTS.md', 'CLAUDE.md', 'examples'):
+                        if (root / name).exists() or (root / name).is_symlink():
+                            archive.add(root / name, arcname=name)
                     if os.environ['FIXTURE_MODE'] == 'archive_symlink':
                         link = tarfile.TarInfo('escaping-link')
                         link.type = tarfile.SYMTYPE
                         link.linkname = str(root / 'Cargo.toml')
                         archive.addfile(link)
+                    mode = os.environ['FIXTURE_MODE']
+                    links = {'archive_escape': [('link.toml', '../outside.toml')],
+                             'archive_cycle': [('a.toml', 'b.toml'), ('b.toml', 'a.toml')],
+                             'archive_directory': [('link.toml', 'crates')]}.get(mode, [])
+                    for name, target in links:
+                        link = tarfile.TarInfo(name)
+                        link.type = tarfile.SYMTYPE
+                        link.linkname = target
+                        archive.addfile(link)
+                    if mode in ('archive_hardlink', 'archive_special'):
+                        member = tarfile.TarInfo('unsupported.toml')
+                        member.type = tarfile.LNKTYPE if mode == 'archive_hardlink' else tarfile.FIFOTYPE
+                        member.linkname = 'Cargo.toml'
+                        archive.addfile(member)
             else:
                 raise SystemExit('unexpected git arguments: ' + repr(args))
         """,
@@ -224,6 +253,13 @@ class MutationPanelTest(unittest.TestCase):
                 raise SystemExit('wrong build or selected package was not invalidated')
             mutant = 'let _ = (index, payload); Ok(())' in (root / 'crates/proto/src/protected_decode.rs').read_text()
             mode = os.environ['FIXTURE_MODE']
+            if mode == 'internal_links':
+                for alias, source_target in [('CLAUDE.md', 'AGENTS.md'),
+                                      ('examples/cloudhsm-mechanisms.toml', 'examples/vendors/aws-cloudhsm.toml')]:
+                    alias, source_target = root / alias, root / source_target
+                    if (alias.is_symlink() or not alias.is_file() or alias.read_bytes() != source_target.read_bytes()
+                            or alias.stat().st_ino == source_target.stat().st_ino):
+                        raise SystemExit('committed source links need independent private regular bytes')
             if mutant and mode == 'build_error':
                 print('error: controlled compiler failure')
                 print(json.dumps({'reason': 'build-finished', 'success': False}))
@@ -350,6 +386,85 @@ class MutationPanelTest(unittest.TestCase):
         for command in receipt["commands"]:
             self.assertTrue(command["cleanup_complete"])
             self.assertEqual(len(command["log_sha256"]), 64)
+
+    def test_committed_internal_source_links_are_materialized_with_provenance(self):
+        (self.repo / "AGENTS.md").write_text("fixture contributor rules\n")
+        (self.repo / "CLAUDE.md").symlink_to("AGENTS.md")
+        vendors = self.repo / "examples/vendors"
+        vendors.mkdir(parents=True)
+        (vendors / "aws-cloudhsm.toml").write_text("[mechanisms]\nfixture = true\n")
+        (self.repo / "examples/cloudhsm-mechanisms.toml").symlink_to("vendors/aws-cloudhsm.toml")
+        expected = {
+            "CLAUDE.md": ("AGENTS.md", "AGENTS.md"),
+            "examples/cloudhsm-mechanisms.toml": (
+                "vendors/aws-cloudhsm.toml",
+                "examples/vendors/aws-cloudhsm.toml",
+            ),
+        }
+        before = {
+            name: ((self.repo / name).lstat().st_ino, (self.repo / name).readlink())
+            for name in expected
+        }
+        targets = {name: identity(self.repo / target) for name, (_, target) in expected.items()}
+        result, receipt = self.launch("internal_links")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(receipt["status"], "passed")
+        self.assertTrue(receipt["caller_unchanged"])
+        self.assertTrue(receipt["cleanup"]["complete"])
+        self.assertEqual(set(receipt["source"]["links"]), set(expected))
+        for name, (literal, target) in expected.items():
+            provenance = receipt["source"]["links"][name]
+            self.assertEqual(provenance["link_target"], literal)
+            self.assertEqual(provenance["resolved_target"], target)
+            self.assertEqual(
+                provenance["literal_sha256"], hashlib.sha256(literal.encode()).hexdigest()
+            )
+            self.assertEqual(provenance["target_sha256"], targets[name][2])
+            self.assertEqual(receipt["source"]["files"][name]["sha256"], targets[name][2])
+            self.assertEqual(receipt["source"]["files"][name]["source_link"], provenance)
+            self.assertEqual(receipt["caller_sources"][name]["source_link"], provenance)
+            self.assertEqual(
+                ((self.repo / name).lstat().st_ino, (self.repo / name).readlink()), before[name]
+            )
+            self.assertEqual(identity(self.repo / target), targets[name])
+
+    def test_source_link_escapes_cycles_directories_and_archive_specials_are_refused(self):
+        outside = self.base / "outside.toml"
+        outside.write_text("outside sentinel\n")
+        before = identity(outside)
+        for mode in (
+            "source_escape",
+            "source_cycle",
+            "source_directory",
+            "archive_escape",
+            "archive_cycle",
+            "archive_directory",
+            "archive_hardlink",
+            "archive_special",
+        ):
+            with self.subTest(mode=mode):
+                examples = self.repo / "examples"
+                shutil.rmtree(examples, ignore_errors=True)
+                examples.mkdir()
+                if mode == "source_escape":
+                    (examples / "link.toml").symlink_to("../../outside.toml")
+                if mode == "source_cycle":
+                    (examples / "a.toml").symlink_to("b.toml")
+                    (examples / "b.toml").symlink_to("a.toml")
+                if mode == "source_directory":
+                    (examples / "vendors").mkdir()
+                    (examples / "vendors/file.toml").write_text("fixture\n")
+                    (examples / "link.toml").symlink_to("vendors")
+                receipt = self.assert_failed(mode)
+                self.assertTrue(receipt["cleanup"]["complete"])
+                self.assertEqual(receipt["executed_ids"], [])
+                self.assertFalse(
+                    any(
+                        command["kind"] in ("toolchain", "clone", "clean-package", "build", "test")
+                        for command in receipt["commands"]
+                    )
+                )
+                self.assertEqual(identity(outside), before)
 
     def test_surviving_primary_is_not_a_kill(self):
         receipt = self.assert_failed("survived", "survived")
