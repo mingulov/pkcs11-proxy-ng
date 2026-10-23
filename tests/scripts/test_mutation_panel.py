@@ -733,6 +733,66 @@ class MutationPanelTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, receipt["ephemeral_root"], ignore_errors=True)
         self.assertFalse(receipt["cleanup"]["complete"])
 
+    def test_cleanup_uses_finite_cache_sized_budget_and_records_synchronous_timing(self):
+        timer_log = self.base / "cleanup-timer.json"
+        finished = self.base / "cleanup-finished"
+        injection = (
+            "import json, signal, shutil\nfrom pathlib import Path\n"
+            "real_timer = signal.setitimer\nreal_remove = shutil.rmtree\n"
+            "def recorded_timer(which, seconds, interval=0):\n"
+            "    if seconds > 0:\n"
+            "        Path(" + repr(str(timer_log)) + ").write_text(json.dumps(seconds))\n"
+            "    return real_timer(which, seconds, interval)\n"
+            "def recorded_remove(path, *args, **kwargs):\n"
+            "    result = real_remove(path, *args, **kwargs)\n"
+            '    if "pkcs11-mutation-panel-" in str(path):\n'
+            "        Path(" + repr(str(finished)) + ').write_text("removed")\n'
+            "    return result\n"
+            "signal.setitimer = recorded_timer\nshutil.rmtree = recorded_remove\n"
+        )
+        result, receipt = self.launch(injection=injection)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(timer_log.read_text()), 60)
+        self.assertTrue(finished.exists(), "removal must finish before the runner returns")
+        self.assertIn("ephemeral_removal", receipt["cleanup"])
+        removal = receipt["cleanup"]["ephemeral_removal"]
+        self.assertEqual(removal["budget_seconds"], 60)
+        self.assertEqual(removal["status"], "removed")
+        self.assertGreaterEqual(removal["duration_seconds"], 0)
+        self.assertLessEqual(removal["duration_seconds"], receipt["duration_seconds"])
+        self.assertTrue(receipt["cleanup"]["complete"])
+        self.assertFalse(Path(receipt["ephemeral_root"]).exists())
+
+    def test_cleanup_deadline_expiry_stays_failed_with_budget_and_timing(self):
+        timer_log = self.base / "cleanup-timer.json"
+        injection = (
+            "import json, signal, shutil\nfrom pathlib import Path\n"
+            "real_timer = signal.setitimer\nreal_remove = shutil.rmtree\n"
+            "def accelerated_timer(which, seconds, interval=0):\n"
+            "    if seconds > 0:\n"
+            "        Path(" + repr(str(timer_log)) + ").write_text(json.dumps(seconds))\n"
+            "        return real_timer(which, 0.02, interval)\n"
+            "    return real_timer(which, seconds, interval)\n"
+            "def blocked_remove(path, *args, **kwargs):\n"
+            '    if "pkcs11-mutation-panel-" in str(path): signal.pause()\n'
+            "    return real_remove(path, *args, **kwargs)\n"
+            "signal.setitimer = accelerated_timer\nshutil.rmtree = blocked_remove\n"
+        )
+        self.output.write_text('{"status":"passed","prior_run":"sentinel"}\n')
+        receipt = self.assert_failed("killed", "cleanup timeout", injection=injection)
+        self.addCleanup(shutil.rmtree, receipt["ephemeral_root"], ignore_errors=True)
+        self.assertEqual(json.loads(timer_log.read_text()), 60)
+        self.assertEqual(receipt["counts"]["killed"], 1)
+        self.assertFalse(receipt["cleanup"]["complete"])
+        self.assertFalse(receipt["cleanup"]["ephemeral_root_removed"])
+        self.assertTrue(all(command["cleanup_complete"] for command in receipt["commands"]))
+        self.assertIn("ephemeral_removal", receipt["cleanup"])
+        removal = receipt["cleanup"]["ephemeral_removal"]
+        self.assertEqual(removal["budget_seconds"], 60)
+        self.assertEqual(removal["status"], "failed")
+        self.assertGreater(removal["duration_seconds"], 0)
+        self.assertLessEqual(removal["duration_seconds"], receipt["duration_seconds"])
+
     def test_output_inside_source_refuses_without_overwriting_source(self):
         source = self.repo / SOURCE
         original = identity(source)

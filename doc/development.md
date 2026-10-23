@@ -162,7 +162,9 @@ The optional seed target must be a quiescent cache. Seeding requires supported
 reflinks and independent output files; it never uses hardlinks into normal build
 outputs or silently falls back to a large copy. Without a seed, compilation may
 take longer. Receipt output must be outside the checkout and donor cache.
-Compilation and test execution have separate bounded phases. Panel success proves
+Compilation and test execution have separate bounded phases. Temporary-tree
+removal has a separate 60-second safety cap and must finish before success.
+Panel success proves
 that these named assertions detect these mutations, not complete mutation coverage
 or real-provider correctness. Keep the ordinary full Rust/Python, platform and
 release validation contracts for their separately authorized runs.
