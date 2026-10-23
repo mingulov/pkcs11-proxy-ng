@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import runpy
 import shutil
 import signal
 import subprocess
@@ -429,6 +430,104 @@ class MutationPanelTest(unittest.TestCase):
         self.assertEqual(receipt["status"], "failed")
         self.assertTrue(receipt["cleanup"]["complete"])
 
+    def test_creation_boundary_interrupts_retire_entered_child_before_and_after_assignment(self):
+        ownership = runpy.run_path(str(HELPER))
+        for boundary in ("before_return", "after_assignment"):
+            with self.subTest(boundary=boundary):
+                ownership["prepare_child_ownership"]()
+                self.pid_file.unlink(missing_ok=True)
+                self.ready.unlink(missing_ok=True)
+                injection = textwrap.dedent("""
+                    import signal, subprocess, sys, time
+                    from pathlib import Path
+                    real_popen = subprocess.Popen
+                    boundary_fired = False
+                    def selected(process):
+                        return (str(process.args[0]).endswith('mutant-test')
+                                and '--exact' in process.args and 'primary_case' in process.args)
+                    def send_boundary(process):
+                        global boundary_fired
+                        boundary_fired = True
+                        os.kill(os.getpid(), signal.SIGTERM if BOUNDARY == 'before_return' else signal.SIGINT)
+                    def popen_boundary(*args, **kwargs):
+                        process = real_popen(*args, **kwargs)
+                        if selected(process):
+                            Path(os.environ['FIXTURE_PID']).write_text(str(process.pid))
+                            real_wait = process.wait
+                            def guarded_wait(*args, **kwargs):
+                                if all(signal.getsignal(s) == signal.SIG_IGN
+                                       for s in (signal.SIGINT, signal.SIGTERM)):
+                                    Path(os.environ['FIXTURE_READY'] + '.repeated').write_text('sent')
+                                    for _ in range(3):
+                                        os.kill(os.getpid(), signal.SIGINT)
+                                        os.kill(os.getpid(), signal.SIGTERM)
+                                return real_wait(*args, **kwargs)
+                            process.wait = guarded_wait
+                            deadline = time.monotonic() + 3
+                            while not Path(os.environ['FIXTURE_READY']).exists():
+                                if process.poll() is not None or time.monotonic() >= deadline:
+                                    raise RuntimeError('boundary child never entered')
+                                time.sleep(0.005)
+                            if BOUNDARY == 'before_return':
+                                send_boundary(process)
+                        return process
+                    subprocess.Popen = popen_boundary
+                    def trace_boundary(frame, event, arg):
+                        if (BOUNDARY == 'after_assignment' and not boundary_fired
+                                and event == 'line' and frame.f_code.co_name == 'run'
+                                and Path(frame.f_code.co_filename).name == 'run-mutation-panel.py'):
+                            process = frame.f_locals.get('process')
+                            if process is not None and selected(process):
+                                send_boundary(process)
+                        return trace_boundary
+                    if BOUNDARY == 'after_assignment':
+                        sys.settrace(trace_boundary)
+                """).replace("BOUNDARY", repr(boundary))
+                receipt = None
+                pid = None
+                try:
+                    result, receipt = self.launch("interrupt", timeout="8", injection=injection)
+                    self.assertTrue(self.ready.exists(), "real selected child must enter")
+                    self.assertTrue(
+                        self.pid_file.exists(), "created child identity must be recorded"
+                    )
+                    pid = int(self.pid_file.read_text())
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(receipt["status"], "failed")
+                    self.assertFalse(Path(f"/proc/{pid}").exists(), "entered child must be reaped")
+                    self.assertTrue(receipt["cleanup"]["complete"])
+                    self.assertTrue(receipt["cleanup"]["ephemeral_root_removed"])
+                    self.assertTrue(receipt["caller_unchanged"])
+                    self.assertFalse(Path(receipt["ephemeral_root"]).exists())
+                    self.assertTrue(
+                        Path(str(self.ready) + ".repeated").exists(),
+                        "repeated INT/TERM must be exercised during actual settlement",
+                    )
+                    command = next(c for c in receipt["commands"] if c.get("pid") == pid)
+                    self.assertTrue(command["cleanup_complete"])
+                    self.assertTrue(command["root_killed"])
+                finally:
+                    # Rescue only this fixture's adopted children on assertion-first RED.
+                    for child in ownership["owned_children"]():
+                        ownership["kill_owned_pid"](child)
+                        deadline = time.monotonic() + 3
+                        while True:
+                            try:
+                                reaped, _ = os.waitpid(child, os.WNOHANG)
+                            except ChildProcessError:
+                                break
+                            if reaped:
+                                break
+                            if time.monotonic() >= deadline:
+                                raise AssertionError(
+                                    "boundary fixture rescue could not reap owned child"
+                                )
+                            time.sleep(0.005)
+                    if receipt and receipt.get("ephemeral_root"):
+                        shutil.rmtree(receipt["ephemeral_root"], ignore_errors=True)
+                    Path(str(self.ready) + ".repeated").unlink(missing_ok=True)
+                self.assertEqual(ownership["owned_children"](), [])
+
     def test_missing_tool_and_invalid_timeouts_refuse_without_builds(self):
         for timeout in ("nan", "inf", "-inf", "0", "-1"):
             with self.subTest(timeout=timeout):
@@ -440,11 +539,19 @@ class MutationPanelTest(unittest.TestCase):
         self.assertEqual(receipt["executed_ids"], [])
 
     def test_malformed_cli_invalidates_stale_pass(self):
-        for extra in (("--timeout=invalid",), ("--unknown-option",)):
+        for extra in (("--timeout=invalid",), ("--unknown-option",), ("--seed-target",)):
             with self.subTest(extra=extra):
                 self.output.write_text('{"status": "passed"}\n')
                 receipt = self.assert_failed("killed", extra=extra)
                 self.assertEqual(receipt["commands"], [])
+
+    def test_malformed_seed_cannot_replace_a_known_donor_file(self):
+        self.output = self.donor / "receipt.json"
+        self.output.write_text('{"status":"passed","prior_run":"donor sentinel"}\n')
+        before = identity(self.output)
+        result, _ = self.launch(extra=("--seed-target", str(self.donor), "--seed-target"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(identity(self.output), before)
 
     def test_changed_helper_and_new_dirty_source_cannot_pass(self):
         for mode in ("helper_change", "new_dirty_source"):

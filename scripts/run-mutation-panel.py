@@ -35,6 +35,7 @@ LOG_LIMIT = 8 * 1024 * 1024
 BUILD_CAP = 90
 TEST_CAP = 10
 AUX_CAP = 30
+INTERRUPTED_SIGNAL = None
 
 
 class PanelError(RuntimeError):
@@ -284,13 +285,16 @@ def atomic_receipt(path, receipt):
 
 
 class Panel:
-    def __init__(self, receipt, deadline, logs, helper):
+    def __init__(self, receipt, deadline, logs, helper, cleanup_mode=False):
         self.receipt = receipt
         self.deadline = deadline
         self.logs = logs
         self.helper = helper
+        self.cleanup_mode = cleanup_mode
 
     def remaining(self, cap):
+        if not self.cleanup_mode:
+            check_interruption()
         remaining = min(cap, self.deadline - time.monotonic())
         if remaining <= 0:
             raise PanelError("total timeout exhausted")
@@ -325,9 +329,24 @@ class Panel:
                 )
                 entry["pid"] = process.pid
                 try:
-                    process.wait(timeout=timeout)
-                except subprocess.TimeoutExpired:
-                    timed_out = True
+                    # A signal handler must never raise between child creation
+                    # and this guard. Observe its request only after ownership
+                    # is registered, then retire the child in the same finally.
+                    deadline = started + timeout
+                    while True:
+                        if not self.cleanup_mode:
+                            check_interruption()
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            timed_out = True
+                            break
+                        try:
+                            process.wait(timeout=min(0.1, remaining))
+                            break
+                        except subprocess.TimeoutExpired:
+                            pass
+                    if not self.cleanup_mode:
+                        check_interruption()
                 finally:
                     previous = {
                         signum: signal.signal(signum, signal.SIG_IGN)
@@ -554,7 +573,17 @@ class Panel:
 
 
 def interrupt(signum, frame):
-    raise PanelError(f"interrupted by signal {signum}")
+    # Raising asynchronously can lose a child created by Popen before its
+    # returned handle is assigned. Poll the request only inside guarded work;
+    # repeated handled signals cannot interrupt ownership retirement.
+    global INTERRUPTED_SIGNAL
+    if INTERRUPTED_SIGNAL is None:
+        INTERRUPTED_SIGNAL = signum
+
+
+def check_interruption():
+    if INTERRUPTED_SIGNAL is not None:
+        raise PanelError(f"interrupted by signal {INTERRUPTED_SIGNAL}")
 
 
 def remove_ephemeral(path):
@@ -571,6 +600,8 @@ def remove_ephemeral(path):
 
 
 def main(argv=None):
+    global INTERRUPTED_SIGNAL
+    INTERRUPTED_SIGNAL = None
     parser = PanelArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--case", action="append", dest="cases")
@@ -588,7 +619,9 @@ def main(argv=None):
     # before the full parser can reject a malformed timeout/unknown option.
     preliminary = PanelArgumentParser(add_help=False, allow_abbrev=False)
     preliminary.add_argument("--output", type=Path)
-    preliminary.add_argument("--seed-target", type=Path)
+    # A missing seed value is a full-parser error. Keep every supplied cache
+    # path for output protection while still invalidating a known safe output.
+    preliminary.add_argument("--seed-target", type=Path, action="append", nargs="?")
     try:
         paths, _ = preliminary.parse_known_args(argv)
         if paths.output is None:
@@ -596,13 +629,14 @@ def main(argv=None):
     except PanelError as error:
         print(f"mutation-panel failed: {error}", file=sys.stderr)
         return 1
-    donor = paths.seed_target.resolve() if paths.seed_target else None
+    known_donors = [path.resolve() for path in paths.seed_target or [] if path is not None]
+    donor = known_donors[-1] if known_donors else None
     output = paths.output
     if (
         not output.is_absolute()
         or output.is_symlink()
         or output.resolve().is_relative_to(ROOT)
-        or (donor and output.resolve().is_relative_to(donor))
+        or any(output.resolve().is_relative_to(path) for path in known_donors)
         or (output.exists() and (not output.is_file() or output.stat().st_nlink != 1))
     ):
         print(
@@ -641,6 +675,7 @@ def main(argv=None):
         for signum in (signal.SIGINT, signal.SIGTERM):
             signal.signal(signum, interrupt)
         args = parser.parse_args(argv)
+        donor = args.seed_target.resolve() if args.seed_target else None
         receipt.update(
             requested_ref=args.source_ref,
             timeout_seconds=args.timeout if math.isfinite(args.timeout) else None,
@@ -890,6 +925,9 @@ def main(argv=None):
     finally:
         for signum in (signal.SIGINT, signal.SIGTERM):
             signal.signal(signum, signal.SIG_IGN)
+        if INTERRUPTED_SIGNAL is not None:
+            completed = False
+            receipt.setdefault("error", f"interrupted by signal {INTERRUPTED_SIGNAL}")
         cleanup_errors = []
         if inputs:
             try:
@@ -903,7 +941,9 @@ def main(argv=None):
         if caller is not None:
             receipt["caller_unchanged"] = False
             try:
-                cleanup_panel = Panel(receipt, time.monotonic() + 5, panel.logs, helper)
+                cleanup_panel = Panel(
+                    receipt, time.monotonic() + 5, panel.logs, helper, cleanup_mode=True
+                )
                 dirty_sources(
                     cleanup_panel.success(
                         [git, "status", "--porcelain=v1", "-z", "--untracked-files=all"],
