@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -22,9 +25,10 @@ def workflow(name="ci"):
 
 
 class ScriptRunnerTests(unittest.TestCase):
-    def run_fixture(self, body, *, path=None, no_site=False, yaml_version=None):
-        # Copy the real entrypoint into a standalone repository fixture; there
-        # is deliberately no production CLI for narrowing the required suite.
+    def run_fixture(self, body=None, *, path=None, no_site=False, yaml_version=None,
+                    modules=None, args=(), timings=False, receipt_directory=False,
+                    stale_receipt=False):
+        # Exercise the real entrypoint in an independent repository inventory.
         with tempfile.TemporaryDirectory(prefix="script-gate-") as temp:
             root = Path(temp)
             (root / "scripts").mkdir()
@@ -35,8 +39,11 @@ class ScriptRunnerTests(unittest.TestCase):
                             root / "requirements-script-tests.txt")
             if yaml_version is not None:
                 (root / "scripts/yaml.py").write_text(f"__version__ = {yaml_version!r}\n")
+            fixtures = dict(modules or {})
             if body is not None:
-                (root / "tests/scripts/test_fixture.py").write_text(body)
+                fixtures["test_fixture.py"] = body
+            for name, source in fixtures.items():
+                (root / "tests/scripts" / name).write_text(source)
             env = dict(os.environ)
             env.pop("PYTHONPATH", None)
             if path is not None:
@@ -45,8 +52,18 @@ class ScriptRunnerTests(unittest.TestCase):
             if no_site:
                 command.append("-S")
             command.append(str(root / "scripts/run-script-tests.py"))
-            return subprocess.run(command, cwd=root, env=env, text=True,
-                                  capture_output=True, timeout=30)
+            receipt = root / "timings.json"
+            if timings:
+                if receipt_directory:
+                    receipt.mkdir()
+                elif stale_receipt:
+                    receipt.write_text(json.dumps({"status": "passed", "old": True}))
+                command.extend(["--timings-json", str(receipt)])
+            command.extend(args)
+            result = subprocess.run(command, cwd=root, env=env, text=True,
+                                    capture_output=True, timeout=30)
+            result.timings = json.loads(receipt.read_text()) if receipt.is_file() else None
+            return result
 
     def test_pass_runs_discovered_suite(self):
         result = self.run_fixture("import unittest\nclass Gate(unittest.TestCase):\n"
@@ -94,6 +111,323 @@ class ScriptRunnerTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("found 0.0.0", result.stderr)
         self.assertNotIn("must not collect", result.stderr)
+
+    def test_default_receipt_records_complete_inventory_and_distinct_clocks(self):
+        alpha = ("import time, unittest\ntime.sleep(0.02)\n"
+                 "class Gate(unittest.TestCase):\n"
+                 " @classmethod\n def setUpClass(cls): time.sleep(0.02)\n"
+                 " def test_alpha(self): time.sleep(0.02)\n")
+        beta = "import unittest\nclass Gate(unittest.TestCase):\n def test_beta(self): pass\n"
+        result = self.run_fixture(modules={"test_alpha.py": alpha, "test_beta.py": beta},
+                                  timings=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = result.timings
+        self.assertIsNotNone(report, "requested timing receipt is absent")
+        self.assertEqual(report["format"], "script-regressions/v1")
+        self.assertEqual(report["status"], "passed")
+        self.assertEqual(report["scope"], "complete")
+        self.assertEqual(report["inventory_modules"], ["test_alpha.py", "test_beta.py"])
+        self.assertEqual(report["selected_modules"], ["test_alpha.py", "test_beta.py"])
+        self.assertEqual(report["requested_modules"], [])
+        expected = ["test_alpha.Gate.test_alpha", "test_beta.Gate.test_beta"]
+        self.assertEqual(report["collected_ids"], expected)
+        self.assertEqual(report["executed_ids"], expected)
+        self.assertEqual(report["counts"]["collected"], 2)
+        self.assertEqual(report["counts"]["executed"], 2)
+        self.assertEqual([test["status"] for test in report["tests"]], ["passed", "passed"])
+        self.assertEqual([test["module"] for test in report["tests"]],
+                         ["test_alpha.py", "test_beta.py"])
+        self.assertEqual(report["fixture_events"], [])
+        self.assertEqual(report["source_ids"]["runner_sha256"],
+                         hashlib.sha256(RUNNER.read_bytes()).hexdigest())
+        self.assertEqual(report["source_ids"]["modules"], {
+            "test_alpha.py": hashlib.sha256(alpha.encode()).hexdigest(),
+            "test_beta.py": hashlib.sha256(beta.encode()).hexdigest(),
+        })
+        self.assertGreaterEqual(report["collection_duration_seconds"], 0.015)
+        durations = [test["duration_seconds"] for test in report["tests"]]
+        self.assertTrue(all(math.isfinite(value) and value >= 0 for value in durations))
+        self.assertGreaterEqual(durations[0], 0.015)
+        self.assertAlmostEqual(report["summed_test_duration_seconds"], sum(durations))
+        self.assertEqual(report["module_summed_test_duration_seconds"], {
+            "test_alpha.py": durations[0], "test_beta.py": durations[1],
+        })
+        self.assertGreaterEqual(report["run_duration_seconds"] - sum(durations), 0.015)
+        self.assertIn("excluding import", report["module_timing_note"])
+
+    def test_selected_receipt_runs_exact_modules_without_importing_other_files(self):
+        result = self.run_fixture(modules={
+            "test_alpha.py": "import unittest\nclass Gate(unittest.TestCase):\n def test_alpha(self): pass\n",
+            "test_beta.py": "import unittest\nclass Gate(unittest.TestCase):\n def test_beta(self): pass\n",
+            "test_other.py": "raise RuntimeError('unselected import must not run')\n",
+        }, args=("--module", "test_beta.py", "--module", "test_alpha.py"), timings=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = result.timings
+        self.assertIsNotNone(report, "requested timing receipt is absent")
+        self.assertEqual(report["status"], "passed")
+        self.assertEqual(report["scope"], "selected")
+        self.assertEqual(report["requested_modules"], ["test_beta.py", "test_alpha.py"])
+        self.assertEqual(report["selected_modules"], ["test_alpha.py", "test_beta.py"])
+        self.assertEqual(report["inventory_modules"],
+                         ["test_alpha.py", "test_beta.py", "test_other.py"])
+        self.assertEqual(report["collected_ids"],
+                         ["test_alpha.Gate.test_alpha", "test_beta.Gate.test_beta"])
+        self.assertEqual(report["executed_ids"], report["collected_ids"])
+        self.assertEqual(set(report["source_ids"]["modules"]),
+                         {"test_alpha.py", "test_beta.py"})
+        self.assertIn("selected scope", result.stderr.lower())
+        self.assertNotIn("unselected import must not run", result.stderr)
+
+    def test_invalid_module_selections_refuse_before_import(self):
+        for name in ("", "../test_fixture.py", "/tmp/test_fixture.py", "test_*.py",
+                     "test_fixture", "test_fixture.py::Gate", "test_absent.py"):
+            with self.subTest(module=name):
+                result = self.run_fixture("raise RuntimeError('must not collect')\n",
+                                          args=("--module", name), timings=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIsNotNone(result.timings, "requested timing receipt is absent")
+                self.assertEqual(result.timings["status"], "error")
+                self.assertEqual(result.timings["scope"], "selected")
+                self.assertEqual(result.timings["executed_ids"], [])
+                self.assertIn("module", result.stderr.lower())
+                self.assertNotIn("must not collect", result.stderr)
+
+    def test_duplicate_module_selection_refuses_before_import(self):
+        result = self.run_fixture("raise RuntimeError('must not collect')\n", timings=True,
+                                  args=("--module", "test_fixture.py",
+                                        "--module", "test_fixture.py"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIsNotNone(result.timings, "requested timing receipt is absent")
+        self.assertEqual(result.timings["status"], "error")
+        self.assertEqual(result.timings["executed_ids"], [])
+        self.assertIn("duplicate", result.stderr.lower())
+        self.assertNotIn("must not collect", result.stderr)
+
+    def test_glob_filename_cannot_broaden_exact_module_selection(self):
+        result = self.run_fixture(modules={
+            "test_[ab].py": "# not an importable Python module name\n",
+            "test_a.py": "raise RuntimeError('must not collect another module')\n",
+        }, args=("--module", "test_[ab].py"), timings=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIsNotNone(result.timings, "requested timing receipt is absent")
+        self.assertEqual(result.timings["status"], "error")
+        self.assertEqual(result.timings["executed_ids"], [])
+        self.assertNotIn("must not collect another module", result.stderr)
+
+    def test_empty_selected_module_cannot_hide_beside_a_nonempty_module(self):
+        result = self.run_fixture(modules={
+            "test_empty.py": "# no tests\n",
+            "test_good.py": "import unittest\nclass Gate(unittest.TestCase):\n def test_pass(self): pass\n",
+        }, args=("--module", "test_empty.py", "--module", "test_good.py"), timings=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIsNotNone(result.timings, "requested timing receipt is absent")
+        self.assertEqual(result.timings["status"], "error")
+        self.assertEqual(result.timings["executed_ids"], [])
+        self.assertIn("zero tests", result.stderr.lower())
+        self.assertIn("test_empty.py", result.stderr)
+
+    def test_failure_receipt_retains_all_executed_test_timings(self):
+        result = self.run_fixture("import unittest\nclass Gate(unittest.TestCase):\n"
+                                  " def test_a_pass(self): pass\n"
+                                  " def test_b_fail(self): self.fail('fixture failure')\n",
+                                  timings=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIsNotNone(result.timings, "requested timing receipt is absent")
+        report = result.timings
+        self.assertEqual(report["status"], "failed")
+        self.assertEqual(report["counts"]["executed"], 2)
+        self.assertEqual(report["counts"]["failures"], 1)
+        self.assertEqual(report["executed_ids"],
+                         ["test_fixture.Gate.test_a_pass", "test_fixture.Gate.test_b_fail"])
+        self.assertEqual([test["status"] for test in report["tests"]], ["passed", "failed"])
+        self.assertTrue(all(test["duration_seconds"] >= 0 for test in report["tests"]))
+        self.assertIn("fixture failure", report["tests"][1]["detail"])
+
+    def test_partial_execution_cannot_claim_a_passing_scope(self):
+        result = self.run_fixture("import unittest\nclass Gate(unittest.TestCase):\n"
+                                  " def test_a_stop(self): self._outcome.result.stop()\n"
+                                  " def test_b_unexecuted(self): pass\n", timings=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIsNotNone(result.timings, "requested timing receipt is absent")
+        self.assertEqual(result.timings["status"], "failed")
+        self.assertEqual(result.timings["counts"]["collected"], 2)
+        self.assertEqual(result.timings["counts"]["executed"], 1)
+        self.assertEqual(result.timings["executed_ids"], ["test_fixture.Gate.test_a_stop"])
+        self.assertIn("incomplete execution", result.stderr.lower())
+
+    def test_zero_execution_cannot_pass_with_nonzero_collection(self):
+        result = self.run_fixture("import unittest\n"
+                                  "class NoWork(unittest.TestSuite):\n"
+                                  " def run(self, result, debug=False): return result\n"
+                                  "def load_tests(loader, tests, pattern): return NoWork(tests)\n"
+                                  "class Gate(unittest.TestCase):\n def test_pass(self): pass\n",
+                                  timings=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIsNotNone(result.timings, "requested timing receipt is absent")
+        self.assertEqual(result.timings["status"], "failed")
+        self.assertEqual(result.timings["counts"]["collected"], 1)
+        self.assertEqual(result.timings["counts"]["executed"], 0)
+        self.assertEqual(result.timings["executed_ids"], [])
+        self.assertIn("incomplete execution", result.stderr.lower())
+
+    def test_skip_receipt_cannot_claim_success(self):
+        result = self.run_fixture("import unittest\nclass Gate(unittest.TestCase):\n"
+                                  " def test_skip(self): self.skipTest('fixture skip')\n",
+                                  timings=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIsNotNone(result.timings, "requested timing receipt is absent")
+        self.assertEqual(result.timings["status"], "failed")
+        self.assertEqual(result.timings["counts"]["skipped"], 1)
+        self.assertEqual(result.timings["tests"][0]["status"], "skipped")
+        self.assertEqual(result.timings["tests"][0]["detail"], "fixture skip")
+
+    def test_subtest_outcomes_are_preserved_and_fail_the_gate(self):
+        result = self.run_fixture("import unittest\nclass Gate(unittest.TestCase):\n"
+                                  " def test_parts(self):\n"
+                                  "  with self.subTest(part='pass'): pass\n"
+                                  "  with self.subTest(part='fail'): self.fail('subtest failure')\n"
+                                  "  with self.subTest(part='error'): raise ValueError('subtest error')\n"
+                                  "  with self.subTest(part='skip'): self.skipTest('subtest skip')\n",
+                                  timings=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIsNotNone(result.timings, "requested timing receipt is absent")
+        report = result.timings
+        self.assertEqual(report["status"], "failed")
+        self.assertEqual(report["counts"]["collected"], 1)
+        self.assertEqual(report["counts"]["executed"], 1)
+        self.assertEqual(report["counts"]["failures"], 1)
+        self.assertEqual(report["counts"]["errors"], 1)
+        self.assertEqual(report["counts"]["skipped"], 1)
+        test = report["tests"][0]
+        self.assertEqual(test["status"], "error")
+        self.assertEqual([event["status"] for event in test["subtests"]],
+                         ["passed", "failed", "error", "skipped"])
+        self.assertEqual([event["id"] for event in test["subtests"]], [
+            "test_fixture.Gate.test_parts (part='pass')",
+            "test_fixture.Gate.test_parts (part='fail')",
+            "test_fixture.Gate.test_parts (part='error')",
+            "test_fixture.Gate.test_parts (part='skip')",
+        ])
+        self.assertEqual(report["fixture_events"], [])
+
+    def test_unexpected_success_is_visible_and_cannot_pass(self):
+        result = self.run_fixture("import unittest\nclass Gate(unittest.TestCase):\n"
+                                  " @unittest.expectedFailure\n def test_fixed(self): pass\n",
+                                  timings=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIsNotNone(result.timings, "requested timing receipt is absent")
+        self.assertEqual(result.timings["status"], "failed")
+        self.assertEqual(result.timings["counts"]["unexpected_successes"], 1)
+        self.assertEqual(result.timings["tests"][0]["status"], "unexpected_success")
+
+    def test_expected_failure_retains_existing_gate_semantics(self):
+        result = self.run_fixture("import unittest\nclass Gate(unittest.TestCase):\n"
+                                  " @unittest.expectedFailure\n"
+                                  " def test_known(self): self.fail('known failure')\n",
+                                  timings=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIsNotNone(result.timings, "requested timing receipt is absent")
+        self.assertEqual(result.timings["status"], "passed")
+        self.assertEqual(result.timings["counts"]["expected_failures"], 1)
+        self.assertEqual(result.timings["tests"][0]["status"], "expected_failure")
+
+    def test_fixture_error_holders_have_events_without_fabricated_test_runs(self):
+        fixtures = {
+            "setUpClass": ("import unittest\nclass Gate(unittest.TestCase):\n"
+                           " @classmethod\n def setUpClass(cls): raise RuntimeError('fixture setup')\n"
+                           " def test_pass(self): pass\n", 0),
+            "tearDownClass": ("import unittest\nclass Gate(unittest.TestCase):\n"
+                              " @classmethod\n def tearDownClass(cls): raise RuntimeError('fixture teardown')\n"
+                              " def test_pass(self): pass\n", 1),
+            "setUpModule": ("import unittest\n"
+                            "def setUpModule(): raise RuntimeError('module setup')\n"
+                            "class Gate(unittest.TestCase):\n def test_pass(self): pass\n", 0),
+            "tearDownModule": ("import unittest\n"
+                               "def tearDownModule(): raise RuntimeError('module teardown')\n"
+                               "class Gate(unittest.TestCase):\n def test_pass(self): pass\n", 1),
+        }
+        for event_name, (body, executed) in fixtures.items():
+            with self.subTest(fixture=event_name):
+                result = self.run_fixture(body, timings=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIsNotNone(result.timings, "requested timing receipt is absent")
+                report = result.timings
+                self.assertEqual(report["status"], "failed")
+                self.assertEqual(report["counts"]["collected"], 1)
+                self.assertEqual(report["counts"]["executed"], executed)
+                self.assertEqual(report["counts"]["errors"], 1)
+                self.assertEqual(len(report["executed_ids"]), executed)
+                self.assertEqual(len(report["fixture_events"]), 1)
+                event = report["fixture_events"][0]
+                self.assertTrue(event["id"].startswith(event_name + " ("))
+                self.assertEqual(event["status"], "error")
+                self.assertNotIn("duration_seconds", event)
+
+    def test_import_error_receipt_retains_collection_failure(self):
+        result = self.run_fixture("raise RuntimeError('fixture import error')\n", timings=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIsNotNone(result.timings, "requested timing receipt is absent")
+        self.assertEqual(result.timings["status"], "failed")
+        self.assertEqual(result.timings["counts"]["errors"], 1)
+        self.assertTrue(result.timings["collection_errors"])
+        self.assertIn("fixture import error", "\n".join(result.timings["collection_errors"]))
+        self.assertEqual(result.timings["tests"][0]["status"], "error")
+
+    def test_zero_work_and_missing_prerequisites_leave_nonpassing_receipts(self):
+        cases = ((None, {}), ("raise RuntimeError('must not collect')\n", {"path": ""}),
+                 ("raise RuntimeError('must not collect')\n", {"no_site": True}),
+                 ("raise RuntimeError('must not collect')\n", {"yaml_version": "0.0.0"}))
+        for body, options in cases:
+            with self.subTest(options=options):
+                result = self.run_fixture(body, timings=True, stale_receipt=True, **options)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIsNotNone(result.timings, "requested timing receipt is absent")
+                self.assertEqual(result.timings["status"], "error")
+                self.assertEqual(result.timings["executed_ids"], [])
+                self.assertNotIn("old", result.timings)
+                self.assertNotIn("must not collect", result.stderr)
+
+    def test_initial_receipt_write_failure_refuses_before_import(self):
+        result = self.run_fixture("raise RuntimeError('must not collect')\n", timings=True,
+                                  receipt_directory=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("timing receipt", result.stderr.lower())
+        self.assertNotIn("must not collect", result.stderr)
+
+    def test_final_receipt_write_failure_overrides_successful_tests(self):
+        result = self.run_fixture("import pathlib, unittest\nclass Gate(unittest.TestCase):\n"
+                                  " def test_break_output(self):\n"
+                                  "  path = pathlib.Path('timings.json')\n"
+                                  "  path.unlink()\n  path.mkdir()\n", timings=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Ran 1 test", result.stderr)
+        self.assertIn("timing receipt", result.stderr.lower())
+
+    def test_interrupt_replaces_old_success_and_keeps_partial_execution(self):
+        result = self.run_fixture("import unittest\nclass Gate(unittest.TestCase):\n"
+                                  " def test_a_pass(self): pass\n"
+                                  " def test_b_interrupt(self): raise KeyboardInterrupt\n"
+                                  " def test_c_unexecuted(self): pass\n", timings=True,
+                                  stale_receipt=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIsNotNone(result.timings, "requested timing receipt is absent")
+        report = result.timings
+        self.assertEqual(report["status"], "interrupted")
+        self.assertNotIn("old", report)
+        self.assertEqual(report["counts"]["collected"], 3)
+        self.assertEqual(report["counts"]["executed"], 2)
+        self.assertEqual([test["status"] for test in report["tests"]], ["passed", "incomplete"])
+        self.assertTrue(all(test["duration_seconds"] >= 0 for test in report["tests"]))
+
+    def test_abrupt_exit_cannot_leave_a_prior_passing_receipt(self):
+        result = self.run_fixture("import os, unittest\nclass Gate(unittest.TestCase):\n"
+                                  " def test_exit(self): os._exit(7)\n", timings=True,
+                                  stale_receipt=True)
+        self.assertEqual(result.returncode, 7)
+        self.assertIsNotNone(result.timings, "requested timing receipt is absent")
+        self.assertEqual(result.timings["status"], "running")
+        self.assertNotIn("old", result.timings)
+        self.assertEqual(result.timings["collected_ids"], ["test_fixture.Gate.test_exit"])
 
 
 class FeedbackWorkflowTests(unittest.TestCase):
