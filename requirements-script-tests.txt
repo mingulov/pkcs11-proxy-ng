@@ -1,0 +1,2 @@
+# Required by the complete public script regression gate.
+PyYAML==6.0.3
