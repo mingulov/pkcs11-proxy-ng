@@ -143,6 +143,9 @@ changing CI selection.
 The manual panel checks two specific mistakes: stale HandleMap reverse-binding
 removal and bypassed protected-wire scanning. Commit the development source first;
 the tool checks an immutable Git snapshot and refuses relevant dirty source.
+Direct canonical relative links to committed regular source files are materialized
+with link/target provenance; escaping links, link chains and directory links are
+refused. Cache symlinks remain refused.
 It builds and runs each baseline, mutated primary test and positive control in
 separate temporary source/output trees. A compilation error, timeout, wrong panic,
 zero test or failed cleanup is an error, never a killed mutant.
