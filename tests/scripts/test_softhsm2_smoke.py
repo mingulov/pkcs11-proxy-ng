@@ -100,7 +100,7 @@ elif name == "pkcs11-tool":
             require(data.read_bytes() == (root / "proxy-message.bin").read_bytes(), "message changed")
         else:
             (root / "proxy-message.bin").write_bytes(data.read_bytes())
-        if scenario == stage + "-fail":
+        if scenario == stage + "-fail" or (not direct and scenario == "proxy-fail-wedged-shutdown"):
             print("fixture " + stage + " failed", file=sys.stderr)
             raise SystemExit(44 if direct else 43)
         if scenario == stage + "-timeout":
@@ -194,7 +194,7 @@ running = True
 def stop(signum, frame):
     global running
     record("daemon-term")
-    if scenario != "wedged-shutdown":
+    if scenario not in ("wedged-shutdown", "proxy-fail-wedged-shutdown"):
         running = False
 
 signal.signal(signal.SIGTERM, stop)
@@ -301,6 +301,7 @@ class SoftHsmSmokeWorkflowTests(unittest.TestCase):
                 # GNU timeout may give a tool its own process group. Session
                 # identity still binds every fixture descendant to this run.
                 owned = self.session_pids(process.pid)
+                leaked = set(owned)
                 for pid in owned:
                     try:
                         os.kill(pid, signal.SIGKILL)
@@ -318,6 +319,7 @@ class SoftHsmSmokeWorkflowTests(unittest.TestCase):
                     if owned:
                         time.sleep(0.01)
                 self.assertFalse(owned, "fixture descendants were not reaped")
+                self.assertFalse(leaked, "smoke left owned descendants; fixture supervision rescued them")
             elapsed = time.monotonic() - start
             self.assertFalse(timed_out, f"smoke exceeded 8s fixture bound:\n{stdout}\n{stderr}")
             events_path = root / "events.jsonl"
@@ -361,6 +363,13 @@ class SoftHsmSmokeWorkflowTests(unittest.TestCase):
         result, _, _ = self.run_fixture("direct-sign-fail")
         self.assert_failed(result, "fixture direct-sign failed")
         self.assertEqual(result.returncode, 44)
+
+    def test_command_error_survives_forced_shutdown_failure(self):
+        result, events, _ = self.run_fixture("proxy-fail-wedged-shutdown")
+        self.assert_failed(result, "SIGKILL")
+        self.assertIn("fixture proxy-sign failed", result.stderr)
+        self.assertEqual(result.returncode, 43)
+        self.assertNotIn("direct-sign", [event["step"] for event in events])
 
     def test_signatures_must_be_exactly_rsa_2048_size(self):
         for stage in ("proxy-sign", "direct-sign"):
