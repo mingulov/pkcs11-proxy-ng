@@ -148,15 +148,17 @@ cleanup() {
 }
 
 on_exit() {
-    local status=$? cleanup_status=0
-    trap - EXIT
+    # Finish the bounded stop/reap even if another handled signal arrives.
+    # Capture the entry status in the trap argument before changing traps.
+    trap '' EXIT INT TERM
+    local status="$1" cleanup_status=0
     cleanup || cleanup_status=$?
     if [[ "$status" -eq 0 && "$cleanup_status" -ne 0 ]]; then
         status="$cleanup_status"
     fi
     exit "$status"
 }
-trap on_exit EXIT
+trap 'on_exit "$?"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 

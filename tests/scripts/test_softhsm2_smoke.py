@@ -105,6 +105,8 @@ elif name == "pkcs11-tool":
             raise SystemExit(44 if direct else 43)
         if scenario == stage + "-timeout":
             time.sleep(60)
+        if not direct and scenario == "proxy-sign-pause":
+            time.sleep(0.3)
         signature = b"P" * 256
         if scenario == stage + "-empty":
             signature = b""
@@ -247,7 +249,8 @@ class SoftHsmSmokeWorkflowTests(unittest.TestCase):
                     pass
         return result
 
-    def run_fixture(self, scenario="success", *, missing=None, overrides=None):
+    def run_fixture(self, scenario="success", *, missing=None, overrides=None,
+                    interrupt_after=None, interrupt_signal=None):
         with tempfile.TemporaryDirectory(prefix="softhsm-smoke-workflow-") as temp:
             root = Path(temp)
             bindir = root / "bin"
@@ -290,9 +293,27 @@ class SoftHsmSmokeWorkflowTests(unittest.TestCase):
                                        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                        start_new_session=True)
             timed_out = False
+            interrupted = False
             try:
+                if interrupt_after is not None:
+                    deadline = start + 3
+                    events_path = root / "events.jsonl"
+                    while time.monotonic() < deadline and process.poll() is None:
+                        if events_path.exists():
+                            for line in events_path.read_text().splitlines():
+                                try:
+                                    event = json.loads(line)
+                                except json.JSONDecodeError:
+                                    continue  # A concurrent fixture append is not complete yet.
+                                if event["step"] == interrupt_after:
+                                    process.send_signal(interrupt_signal)
+                                    interrupted = True
+                                    break
+                        if interrupted:
+                            break
+                        time.sleep(0.005)
                 try:
-                    stdout, stderr = process.communicate(timeout=8)
+                    stdout, stderr = process.communicate(timeout=max(0.1, start + 8 - time.monotonic()))
                 except subprocess.TimeoutExpired:
                     timed_out = True
                     os.killpg(process.pid, signal.SIGKILL)
@@ -319,9 +340,12 @@ class SoftHsmSmokeWorkflowTests(unittest.TestCase):
                     if owned:
                         time.sleep(0.01)
                 self.assertFalse(owned, "fixture descendants were not reaped")
-                self.assertFalse(leaked, "smoke left owned descendants; fixture supervision rescued them")
+                self.assertFalse(leaked, "smoke left owned descendants; fixture supervision rescued them"
+                                 f" (shell status {process.returncode}):\n{stdout}\n{stderr}")
             elapsed = time.monotonic() - start
             self.assertFalse(timed_out, f"smoke exceeded 8s fixture bound:\n{stdout}\n{stderr}")
+            if interrupt_after is not None:
+                self.assertTrue(interrupted, f"did not inject signal after {interrupt_after}")
             events_path = root / "events.jsonl"
             events = [json.loads(line) for line in events_path.read_text().splitlines()] if events_path.exists() else []
             self.assertEqual(host_config.read_text(), "existing user token configuration\n")
@@ -370,6 +394,30 @@ class SoftHsmSmokeWorkflowTests(unittest.TestCase):
         self.assertIn("fixture proxy-sign failed", result.stderr)
         self.assertEqual(result.returncode, 43)
         self.assertNotIn("direct-sign", [event["step"] for event in events])
+
+    def test_interrupt_during_exit_cleanup_preserves_command_error_and_reaps_daemon(self):
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            with self.subTest(signal=signum.name):
+                result, events, elapsed = self.run_fixture(
+                    "proxy-fail-wedged-shutdown", interrupt_after="daemon-term", interrupt_signal=signum)
+                self.assert_failed(result, "SIGKILL")
+                self.assertEqual(result.returncode, 43, result.stderr)
+                self.assertLess(elapsed, 5)
+                stages = [event["step"] for event in events]
+                self.assertIn("cleanup", stages)
+                self.assertNotIn("direct-sign", stages)
+
+    def test_interrupt_during_healthy_run_preserves_normal_signal_exit_status(self):
+        for signum, status in ((signal.SIGTERM, 143), (signal.SIGINT, 130)):
+            with self.subTest(signal=signum.name):
+                result, events, _ = self.run_fixture(
+                    "proxy-sign-pause", interrupt_after="proxy-sign", interrupt_signal=signum)
+                self.assert_failed(result)
+                self.assertEqual(result.returncode, status, result.stderr)
+                stages = [event["step"] for event in events]
+                self.assertIn("daemon-exit", stages)
+                self.assertIn("cleanup", stages)
+                self.assertNotIn("direct-sign", stages)
 
     def test_signatures_must_be_exactly_rsa_2048_size(self):
         for stage in ("proxy-sign", "direct-sign"):
