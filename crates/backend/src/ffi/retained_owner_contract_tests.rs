@@ -460,14 +460,21 @@ fn delayed_native_generated_presence_and_nested_graph_families() {
                             aad_presence: aad.clone(),
                         })),
                     };
-                    for _ in 0..depth {
+                    for level in 0..depth {
+                        let seed_case = (iv_case + aad_case) % 3;
+                        let seed_presence = if seed_case == 2 {
+                            let bytes = if level == 0 { [0x51, 0x72] } else { [0x94, 0xB6] };
+                            PointerBytes::from_legacy(&bytes, false)
+                        } else {
+                            legs[seed_case].clone()
+                        };
                         mechanism = CkMechanism {
                             mechanism_type: CkMechanismType::KIP_DERIVE,
                             params: Some(CkMechanismParams::Kip(
                                 pkcs11_proxy_ng_types::KipParams {
                                     mechanism: Some(Box::new(mechanism)),
-                                    key_handle: CkObjectHandle(19),
-                                    seed_presence: legs[(iv_case + aad_case) % 3].clone(),
+                                    key_handle: CkObjectHandle(19 + u64::from(level)),
+                                    seed_presence,
                                 },
                             )),
                         };
@@ -501,16 +508,31 @@ fn delayed_native_generated_presence_and_nested_graph_families() {
                     (deep.graph_equal, deep.encrypt.valid, deep.encrypt.node_count),
                     (1, 1, depth + 1)
                 );
-                for index in 0..depth as usize {
+                // Wrapping makes the last constructed KIP the outermost node.
+                // These literal expectations are independent of the construction loop.
+                let expected_levels: &[(u64, [u8; 2])] = match depth {
+                    0 => &[],
+                    1 => &[(19, [0x51, 0x72])],
+                    2 => &[(20, [0x94, 0xB6]), (19, [0x51, 0x72])],
+                    _ => unreachable!(),
+                };
+                for (index, (key, seed)) in expected_levels.iter().enumerate() {
                     let node = deep.encrypt.nodes[index];
                     assert_eq!(node.mechanism, cryptoki_sys::CKM_KIP_DERIVE as u64);
-                    assert_eq!(node.scalar_a, 19);
+                    assert_eq!(
+                        node.scalar_a, *key,
+                        "KIP key at retained outer-to-inner level {index}"
+                    );
                     assert_ne!(deep.encrypt.nodes[index + 1].mechanism_ptr, 0);
                     let seed_case = (iv_case + aad_case) % 3;
                     assert_eq!(node.first_ptr == 0, seed_case == 0);
                     assert_eq!(node.first_len, if seed_case == 2 { 2 } else { 0 });
                     if seed_case == 2 {
-                        assert_eq!(&node.first_bytes[..2], &[0x21, 0x43]);
+                        assert_eq!(
+                            &node.first_bytes[..2],
+                            seed,
+                            "KIP seed at retained outer-to-inner level {index}"
+                        );
                     }
                 }
                 let node = deep.encrypt.nodes[depth as usize];
