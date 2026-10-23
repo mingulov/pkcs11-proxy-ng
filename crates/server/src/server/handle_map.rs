@@ -315,3 +315,7 @@ mod tests {
         assert_eq!(map.backend_handles().collect::<Vec<_>>(), vec![backend]);
     }
 }
+
+#[cfg(test)]
+#[path = "handle_map_model_tests.rs"]
+mod model_tests;
