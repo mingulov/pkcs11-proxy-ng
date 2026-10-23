@@ -352,6 +352,46 @@ class MutationPanelTest(unittest.TestCase):
             self.assertIn(expected, receipt.get("error", "") + json.dumps(receipt["cases"]))
         return receipt
 
+    def test_help_needs_no_output_and_preserves_receipts_without_child_work(self):
+        entrypoint = self.repo / "scripts/run-mutation-panel.py"
+        shutil.copy2(SCRIPT, entrypoint)
+        child_marker = self.base / "help-child.marker"
+        for tool in self.tools.iterdir():
+            self.write_tool(
+                tool.name,
+                f"from pathlib import Path\nPath({str(child_marker)!r}).write_text('called')\n"
+                "raise SystemExit(99)\n",
+            )
+        absent_output = self.base / "absent" / "receipt.json"
+        for option in ("-h", "--help"):
+            for output in (None, self.output, absent_output):
+                with self.subTest(option=option, output=output):
+                    self.output.write_text('{"status": "passed", "old": true}\n')
+                    before = identity(self.output)
+                    command = [sys.executable, str(entrypoint)]
+                    if output is not None:
+                        command.extend(["--output", str(output)])
+                    result = subprocess.run(
+                        [*command, option],
+                        cwd=self.repo,
+                        env=dict(os.environ, PATH=str(self.tools)),
+                        capture_output=True,
+                        text=True,
+                        timeout=3,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    for flag in (
+                        "--output",
+                        "--case",
+                        "--source-ref",
+                        "--seed-target",
+                        "--timeout",
+                    ):
+                        self.assertIn(flag, result.stdout)
+                    self.assertEqual(identity(self.output), before)
+                    self.assertFalse(absent_output.parent.exists())
+                    self.assertFalse(child_marker.exists())
+
     def test_killed_receipt_binds_artifacts_counts_sources_and_preserves_inputs(self):
         before = {
             path: identity(path)

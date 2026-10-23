@@ -55,11 +55,11 @@ class ScriptRunnerTests(unittest.TestCase):
                 command.append("-S")
             command.append(str(root / "scripts/run-script-tests.py"))
             receipt = root / "timings.json"
+            if stale_receipt:
+                receipt.write_text(json.dumps({"status": "passed", "old": True}))
             if timings:
                 if receipt_directory:
                     receipt.mkdir()
-                elif stale_receipt:
-                    receipt.write_text(json.dumps({"status": "passed", "old": True}))
                 command.extend(["--timings-json", str(receipt)])
             command.extend(args)
             result = subprocess.run(command, cwd=root, env=env, text=True,
@@ -499,6 +499,55 @@ class ScriptRunnerTests(unittest.TestCase):
                 self.assertEqual(result.timings["executed_ids"], [])
                 self.assertNotIn("old", result.timings)
                 self.assertNotIn("must not collect", result.stderr)
+
+    def test_malformed_arguments_replace_old_success_before_import(self):
+        body = ("from pathlib import Path\nimport unittest\n"
+                "Path('import.marker').write_text('imported')\n"
+                "class Gate(unittest.TestCase):\n"
+                " def test_run(self): Path('execution.marker').write_text('executed')\n")
+        for args in (("--module",), ("--unknown-option",)):
+            with self.subTest(args=args):
+                result = self.run_fixture(body, args=args, timings=True, stale_receipt=True)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIsNotNone(result.timings, "requested timing receipt is absent")
+                self.assertNotEqual(result.timings["status"], "passed")
+                self.assertNotIn("old", result.timings)
+                self.assertEqual(result.timings["counts"]["collected"], 0)
+                self.assertEqual(result.timings["counts"]["executed"], 0)
+                self.assertEqual(result.timings["collected_ids"], [])
+                self.assertEqual(result.timings["executed_ids"], [])
+                self.assertEqual(result.timings["tests"], [])
+                self.assertEqual(result.timings["source_ids"]["runner_sha256"],
+                                 hashlib.sha256(RUNNER.read_bytes()).hexdigest())
+                self.assertEqual(result.markers, {})
+
+    def test_help_preserves_old_success_without_import(self):
+        for option in ("-h", "--help"):
+            for timings in (False, True):
+                with self.subTest(option=option, timings=timings):
+                    result = self.run_fixture(
+                        "from pathlib import Path\nPath('import.marker').write_text('imported')\n",
+                        args=(option,), timings=timings, stale_receipt=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("--module", result.stdout)
+                    self.assertIn("--timings-json", result.stdout)
+                    self.assertEqual(result.timings, {"status": "passed", "old": True})
+                    self.assertEqual(result.markers, {})
+
+    def test_ambiguous_or_unknown_timing_arguments_do_not_choose_an_output(self):
+        for timings, args in (
+            (True, ("--timings-json",)),
+            (True, ("--timings-json", "timings.json")),
+            (False, ("--timings-jso", "timings.json")),
+            (False, ("--timings-json-unknown", "timings.json")),
+        ):
+            with self.subTest(timings=timings, args=args):
+                result = self.run_fixture(
+                    "from pathlib import Path\nPath('import.marker').write_text('imported')\n",
+                    args=args, timings=timings, stale_receipt=True)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(result.timings, {"status": "passed", "old": True})
+                self.assertEqual(result.markers, {})
 
     def test_initial_receipt_write_failure_refuses_before_import(self):
         result = self.run_fixture("raise RuntimeError('must not collect')\n", timings=True,
