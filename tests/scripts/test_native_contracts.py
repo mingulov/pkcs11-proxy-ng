@@ -21,7 +21,7 @@ class NativeContractsTest(unittest.TestCase):
         (self.root / 'tests').mkdir()
         self.output = self.root / 'receipt.json'
 
-    def run_gate(self, mode='ok', extra=(), polluted=False):
+    def run_gate(self, mode='ok', extra=(), polluted=False, timeout='0.3'):
         self.assertTrue(SCRIPT.is_file(), 'native contract runner must exist')
         shutil.copy2(SCRIPT, self.root / 'scripts/run-native-contracts.py')
         manifest = {'schema': 'native-contract-manifest/v1', 'builds': [
@@ -92,8 +92,9 @@ if os.environ['FIXTURE_MODE'] == 'missing': p.unlink()
                                 "    original(self)\n"
                                 "tempfile.TemporaryDirectory.cleanup = fail\n"
                                 "runpy.run_path(" + repr(str(self.root / 'scripts/run-native-contracts.py')) + ", run_name='__main__')\n")
+        timeout_args = [] if timeout is None else ['--timeout', timeout]
         return subprocess.run([sys.executable, str(launcher),
-                               '--output', str(self.output), '--timeout', '0.3', *extra],
+                               '--output', str(self.output), *timeout_args, *extra],
                               env=env, capture_output=True, text=True, timeout=8)
 
     def test_success_receipt_and_polluted_environment(self):
@@ -108,6 +109,26 @@ if os.environ['FIXTURE_MODE'] == 'missing': p.unlink()
         self.assertIn('sha256', receipt['artifacts']['test-bin'])
         self.assertEqual(receipt['cases'][0]['native_evidence'],
                          {'control': 'native-entry', 'backend_admissions': 1, 'native_entries': 1})
+
+    def test_invalid_timeout_refuses_before_any_child_launch(self):
+        for timeout in ('nan', 'inf', '-inf', '0', '-0.1'):
+            with self.subTest(timeout=timeout):
+                p = self.run_gate(extra=[f'--timeout={timeout}'])
+                self.assertNotEqual(p.returncode, 0, p.stdout)
+                receipt = json.loads(self.output.read_text())
+                self.assertEqual(receipt['status'], 'failed')
+                self.assertEqual(receipt['commands'], [])
+                self.assertEqual(receipt['executed_ids'], [])
+                self.assertIn('timeout', receipt['error'])
+                self.assertIn('native-contract failed:', p.stderr)
+                self.assertTrue(receipt['cleanup']['complete'])
+
+    def test_default_timeout_executes_selected_case(self):
+        p = self.run_gate(timeout=None)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        receipt = json.loads(self.output.read_text())
+        self.assertEqual(receipt['status'], 'passed')
+        self.assertEqual(receipt['executed_ids'], ['native_case'])
 
     def test_fail_closed_controls(self):
         for mode in ('tool', 'missing', 'empty', 'empty_manifest', 'renamed', 'early', 'fail', 'zero',

@@ -4,6 +4,7 @@ import argparse
 import ctypes
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -186,8 +187,8 @@ def main(argv=None):
     exit_code = 1
     completed_status = None
     try:
-        if args.timeout <= 0:
-            raise GateError('timeout must be positive')
+        if not math.isfinite(args.timeout) or args.timeout <= 0:
+            raise GateError('timeout must be finite and positive')
         manifest, ids = load_manifest(root)
         receipt.update(selected_ids=ids, excluded=manifest['excluded'],
                        manifest_sha256=digest(root / 'tests/native-contracts.json'))
