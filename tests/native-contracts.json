@@ -1,0 +1,292 @@
+{
+  "schema": "native-contract-manifest/v1",
+  "builds": [
+    {
+      "id": "exact-oracle",
+      "args": [
+        "build",
+        "--locked",
+        "--manifest-path",
+        "tests/ffi_oracles/exact_outputs/Cargo.toml"
+      ],
+      "artifacts": [
+        {
+          "id": "exact-oracle",
+          "target": "pkcs11_exact_output_oracle",
+          "kind": "cdylib"
+        }
+      ]
+    },
+    {
+      "id": "entry-oracle",
+      "args": [
+        "build",
+        "--locked",
+        "--manifest-path",
+        "tests/ffi_oracles/entry_recording/Cargo.toml"
+      ],
+      "artifacts": [
+        {
+          "id": "entry-oracle",
+          "target": "pkcs11_entry_recording_oracle",
+          "kind": "cdylib"
+        }
+      ]
+    },
+    {
+      "id": "retained-oracle",
+      "args": [
+        "build",
+        "--locked",
+        "--manifest-path",
+        "tests/ffi_oracles/retained_mechanisms/Cargo.toml"
+      ],
+      "artifacts": [
+        {
+          "id": "retained-oracle",
+          "target": "pkcs11_retained_mechanism_oracle",
+          "kind": "cdylib"
+        }
+      ]
+    },
+    {
+      "id": "shim",
+      "args": [
+        "build",
+        "--locked",
+        "-p",
+        "pkcs11-proxy-ng-shim"
+      ],
+      "artifacts": [
+        {
+          "id": "shim",
+          "target": "pkcs11_proxy_ng_shim",
+          "kind": "cdylib"
+        }
+      ]
+    },
+    {
+      "id": "server-tests",
+      "args": [
+        "test",
+        "--locked",
+        "--no-run",
+        "-p",
+        "pkcs11-proxy-ng",
+        "--test",
+        "exact_output_error_test",
+        "--test",
+        "shape_evidence_test"
+      ],
+      "artifacts": [
+        {
+          "id": "exact-tests",
+          "target": "exact_output_error_test",
+          "kind": "test",
+          "executable": true
+        },
+        {
+          "id": "entry-tests",
+          "target": "shape_evidence_test",
+          "kind": "test",
+          "executable": true
+        }
+      ]
+    },
+    {
+      "id": "backend-tests",
+      "args": [
+        "test",
+        "--locked",
+        "--no-run",
+        "-p",
+        "pkcs11-proxy-ng-backend",
+        "--lib"
+      ],
+      "artifacts": [
+        {
+          "id": "backend-tests",
+          "target": "pkcs11_proxy_ng_backend",
+          "kind": "lib",
+          "executable": true
+        }
+      ]
+    }
+  ],
+  "sources": [
+    "Cargo.toml",
+    "Cargo.lock",
+    "build.rs",
+    "crates/**/*.rs",
+    "crates/**/Cargo.toml",
+    "crates/**/*.proto",
+    "crates/**/*.toml",
+    "tests/ffi_oracles/**/*.rs",
+    "tests/ffi_oracles/**/Cargo.toml",
+    "tests/ffi_oracles/**/Cargo.lock",
+    "scripts/run-native-contracts.py"
+  ],
+  "environment": {
+    "PKCS11_PROXY_SHIM_LIB": "shim",
+    "PKCS11_PROXY_EXACT_ORACLE_LIB": "exact-oracle",
+    "PKCS11_PROXY_ENTRY_RECORDING_ORACLE_LIB": "entry-oracle",
+    "PKCS11_PROXY_RETAINED_ORACLE_LIB": "retained-oracle"
+  },
+  "lanes": [
+    {
+      "artifact": "exact-tests",
+      "ignored": true,
+      "prefix": "loaded::",
+      "cases": [
+        {
+          "id": "loaded::exact_byte_error_effects_roundtrip_through_loaded_shim_and_native_oracle",
+          "markers": [
+            "native-contract-complete:loaded::exact_byte_error_effects_roundtrip_through_loaded_shim_and_native_oracle"
+          ]
+        },
+        {
+          "id": "loaded::exact_message_error_effects_roundtrip_without_changing_operation_settlement",
+          "markers": [
+            "native-contract-complete:loaded::exact_message_error_effects_roundtrip_without_changing_operation_settlement"
+          ]
+        },
+        {
+          "id": "loaded::exact_begin_error_effects_preserve_initialized_iv_and_operation",
+          "markers": [
+            "native-contract-complete:loaded::exact_begin_error_effects_preserve_initialized_iv_and_operation"
+          ]
+        },
+        {
+          "id": "loaded::exported_standard_sign_rejects_nonempty_parameters_before_native_or_memory_access",
+          "markers": [
+            "native-contract-complete:loaded::exported_standard_sign_rejects_nonempty_parameters_before_native_or_memory_access"
+          ]
+        },
+        {
+          "id": "loaded::exact_auth_wrap_error_effects_use_typed_c2b_outputs",
+          "markers": [
+            "native-contract-complete:loaded::exact_auth_wrap_error_effects_use_typed_c2b_outputs"
+          ]
+        },
+        {
+          "id": "loaded::invalid_native_parameter_completion_suppresses_all_channels_and_clears_operation",
+          "markers": [
+            "native-contract-complete:loaded::invalid_native_parameter_completion_suppresses_all_channels_and_clears_operation"
+          ]
+        },
+        {
+          "id": "loaded::exact_preprovider_rejections_leave_all_caller_outputs_untouched",
+          "markers": [
+            "native-contract-complete:loaded::exact_preprovider_rejections_leave_all_caller_outputs_untouched"
+          ]
+        },
+        {
+          "id": "loaded::exact_attribute_partial_errors_and_nested_bounds_roundtrip",
+          "markers": [
+            "native-contract-complete:loaded::exact_attribute_partial_errors_and_nested_bounds_roundtrip"
+          ]
+        },
+        {
+          "id": "loaded::fix_round_one::fix_round_one_attribute_ordinary_error_zero_ambiguity_is_absent",
+          "markers": [
+            "native-contract-complete:loaded::fix_round_one::fix_round_one_attribute_ordinary_error_zero_ambiguity_is_absent"
+          ]
+        },
+        {
+          "id": "loaded::fix_round_one::fix_round_one_generated_outputs_respect_query_vs_begin",
+          "markers": [
+            "native-contract-complete:loaded::fix_round_one::fix_round_one_generated_outputs_respect_query_vs_begin"
+          ]
+        },
+        {
+          "id": "loaded::fix_round_one::fix_round_one_typed_parameter_query_data_mode_matrix",
+          "markers": [
+            "native-contract-complete:loaded::fix_round_one::fix_round_one_typed_parameter_query_data_mode_matrix"
+          ]
+        },
+        {
+          "id": "loaded::fix_round_one::fix_round_one_legal_mixed_empty_attribute_queries",
+          "markers": [
+            "native-contract-complete:loaded::fix_round_one::fix_round_one_legal_mixed_empty_attribute_queries"
+          ]
+        },
+        {
+          "id": "loaded::fix_round_one::fix_round_one_partial_attribute_zero_query_effects",
+          "markers": [
+            "native-contract-complete:loaded::fix_round_one::fix_round_one_partial_attribute_zero_query_effects"
+          ]
+        },
+        {
+          "id": "loaded::fix_round_one::fix_round_one_exact_completion_health_classification",
+          "markers": [
+            "native-contract-complete:loaded::fix_round_one::fix_round_one_exact_completion_health_classification"
+          ]
+        },
+        {
+          "id": "loaded::fix_round_one::fix_round_one_successful_size_query_does_not_fabricate_parameter_outputs",
+          "markers": [
+            "native-contract-complete:loaded::fix_round_one::fix_round_one_successful_size_query_does_not_fabricate_parameter_outputs"
+          ]
+        }
+      ]
+    },
+    {
+      "artifact": "entry-tests",
+      "ignored": true,
+      "cases": [
+        {
+          "id": "server_transport_local_reject_earns_no_native_entry",
+          "markers": [
+            "native-contract-complete:server_transport_local_reject_earns_no_native_entry"
+          ],
+          "evidence": {
+            "control": "server-local-reject",
+            "backend_admissions": 0,
+            "native_entries": 0
+          }
+        },
+        {
+          "id": "backend_reconstruction_reject_earns_no_native_entry",
+          "markers": [
+            "native-contract-complete:backend_reconstruction_reject_earns_no_native_entry"
+          ],
+          "evidence": {
+            "control": "backend-reject",
+            "backend_admissions": 1,
+            "native_entries": 0
+          }
+        },
+        {
+          "id": "native_entry_with_same_rv_earns_entry_credit_not_success",
+          "markers": [
+            "native-contract-complete:native_entry_with_same_rv_earns_entry_credit_not_success"
+          ],
+          "evidence": {
+            "control": "native-entry",
+            "backend_admissions": 1,
+            "native_entries": 1
+          }
+        }
+      ]
+    },
+    {
+      "artifact": "backend-tests",
+      "ignored": true,
+      "prefix": "ffi::retained_owner_contract_tests::",
+      "cases": [
+        {
+          "id": "ffi::retained_owner_contract_tests::native_owner_oracle_retains_init_root_across_calls",
+          "markers": [
+            "native-contract-complete:ffi::retained_owner_contract_tests::native_owner_oracle_retains_init_root_across_calls"
+          ]
+        }
+      ]
+    }
+  ],
+  "excluded": [
+    "real-provider cryptography and standalone-daemon smoke",
+    "i686/musl/LLP64/big-endian native topologies and width models",
+    "legacy missing-Begin oracle variant",
+    "full workspace tests, provider matrix, performance, frozen qualification and release acceptance"
+  ]
+}

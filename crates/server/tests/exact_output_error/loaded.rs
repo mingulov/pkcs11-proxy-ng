@@ -1,5 +1,7 @@
 //! Public C-ABI tests also runnable unchanged against the accepted C2B base.
 #![allow(clippy::unnecessary_cast)]
+// Fixed test IDs only, emitted after native assertions and shutdown.
+#![allow(clippy::print_stdout)]
 use super::*;
 use cryptoki_sys::*;
 use libloading::Library;
@@ -106,31 +108,46 @@ impl Harness {
         }
     }
 
-    /// Production-order teardown: client close/finalize, endpoint
-    /// restore, server stop, then backend finalize, then abort+join the
-    /// server task. Every test must call this (not rely on `Drop`).
-    /// Rationale: the shim keeps its idle connection open across
-    /// C_Finalize, so the server's graceful shutdown never completes on
-    /// its own; and without the join, the `#[tokio::test]` runtime drop
-    /// cancels the server task while it still owns an unfinalized
-    /// backend, so the final-owner guard stop-fires 70. Finalizing
-    /// before the abort makes every later drop clean (Release); a
-    /// failed finalize still drops loudly via that same guard.
+    /// Successful teardown checks every required outcome before its caller can
+    /// emit a completion marker. Finalize the native backend before requesting
+    /// server stop, so graceful completion cannot race our explicit finalize.
+    /// The shim retains an idle connection; aborting that now-finalized server
+    /// is expected, but a server panic or failed stop delivery is not.
     async fn shutdown(mut self) {
-        self.teardown_sync();
-        let _ = self.backend.finalize();
-        if let Some(server) = self.server.take() {
-            server.abort();
-            let _ = server.await;
+        self.teardown_done = true;
+        let close_rv = unsafe { (self.functions.C_CloseSession.unwrap())(self.session) };
+        let finalize_rv = unsafe { (self.functions.C_Finalize.unwrap())(ptr::null_mut()) };
+        self.restore_endpoint();
+        let backend_finalize = self.backend.finalize();
+        let stop_delivered = self.stop.take().is_some_and(|stop| stop.send(()).is_ok());
+        let server = self.server.take().expect("explicit shutdown owns its server task");
+        server.abort();
+        let joined = tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("server abort must settle before the cleanup deadline");
+        assert_eq!(close_rv, CKR_OK, "loaded cleanup C_CloseSession failed");
+        assert_eq!(finalize_rv, CKR_OK, "loaded cleanup C_Finalize failed");
+        backend_finalize.expect("loaded cleanup backend finalize failed");
+        assert!(stop_delivered, "loaded cleanup server stop delivery failed");
+        match joined {
+            Ok(()) => {}
+            Err(error) if error.is_cancelled() => {} // this shutdown explicitly aborted it
+            Err(error) => panic!("loaded cleanup server task failed: {error}"),
         }
     }
 
-    /// Synchronous teardown half, shared with `Drop` (panic-path
-    /// best-effort: sends stop but cannot wait — a mid-test panic still
-    /// ends 70 via runtime cancel, which stays loud). Runs once: the
-    /// explicit `shutdown()` consumes the flag so the trailing `Drop`
-    /// does not re-issue close/finalize RPCs.
-    fn teardown_sync(&mut self) {
+    fn restore_endpoint(&self) {
+        unsafe {
+            match &self.previous_endpoint {
+                Some(value) => std::env::set_var("PKCS11_PROXY_ENDPOINT", value),
+                None => std::env::remove_var("PKCS11_PROXY_ENDPOINT"),
+            }
+        }
+    }
+
+    /// Panic-path best effort only. No success marker depends on this path;
+    /// explicit successful shutdown above performs and checks its own cleanup.
+    fn teardown_sync_best_effort(&mut self) {
         if self.teardown_done {
             return;
         }
@@ -138,11 +155,8 @@ impl Harness {
         unsafe {
             (self.functions.C_CloseSession.unwrap())(self.session);
             (self.functions.C_Finalize.unwrap())(ptr::null_mut());
-            match &self.previous_endpoint {
-                Some(value) => std::env::set_var("PKCS11_PROXY_ENDPOINT", value),
-                None => std::env::remove_var("PKCS11_PROXY_ENDPOINT"),
-            }
         }
+        self.restore_endpoint();
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
         }
@@ -182,7 +196,7 @@ impl Harness {
 }
 impl Drop for Harness {
     fn drop(&mut self) {
-        self.teardown_sync();
+        self.teardown_sync_best_effort();
     }
 }
 
@@ -356,6 +370,9 @@ async fn exact_byte_error_effects_roundtrip_through_loaded_shim_and_native_oracl
         failures.join("\n")
     );
     harness.shutdown().await;
+    println!(
+        "native-contract-complete:loaded::exact_byte_error_effects_roundtrip_through_loaded_shim_and_native_oracle"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -414,6 +431,9 @@ async fn exact_message_error_effects_roundtrip_without_changing_operation_settle
         assert_eq!(tag, [0x22; 16]);
     }
     harness.shutdown().await;
+    println!(
+        "native-contract-complete:loaded::exact_message_error_effects_roundtrip_without_changing_operation_settlement"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -464,6 +484,9 @@ async fn exact_begin_error_effects_preserve_initialized_iv_and_operation() {
         assert_eq!(tag, [0xa5; 16]);
     }
     harness.shutdown().await;
+    println!(
+        "native-contract-complete:loaded::exact_begin_error_effects_preserve_initialized_iv_and_operation"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -528,6 +551,9 @@ async fn exported_standard_sign_rejects_nonempty_parameters_before_native_or_mem
         assert_eq!(harness.observation().calls, 0);
     }
     harness.shutdown().await;
+    println!(
+        "native-contract-complete:loaded::exported_standard_sign_rejects_nonempty_parameters_before_native_or_memory_access"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -566,6 +592,9 @@ async fn exact_auth_wrap_error_effects_use_typed_c2b_outputs() {
     assert_eq!(length, 7);
     assert_eq!(iv[0], 0x42);
     harness.shutdown().await;
+    println!(
+        "native-contract-complete:loaded::exact_auth_wrap_error_effects_use_typed_c2b_outputs"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -632,6 +661,9 @@ async fn invalid_native_parameter_completion_suppresses_all_channels_and_clears_
         assert_eq!(harness.observation().calls, 1);
     }
     harness.shutdown().await;
+    println!(
+        "native-contract-complete:loaded::invalid_native_parameter_completion_suppresses_all_channels_and_clears_operation"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -674,6 +706,9 @@ async fn exact_preprovider_rejections_leave_all_caller_outputs_untouched() {
         assert_eq!(harness.observation().calls, u64::from(valid_session));
     }
     harness.shutdown().await;
+    println!(
+        "native-contract-complete:loaded::exact_preprovider_rejections_leave_all_caller_outputs_untouched"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -736,6 +771,107 @@ async fn exact_attribute_partial_errors_and_nested_bounds_roundtrip() {
     assert_eq!(nested.type_, 0x99);
     assert_eq!(sub_value, [0xa5; 4]);
     harness.shutdown().await;
+    println!(
+        "native-contract-complete:loaded::exact_attribute_partial_errors_and_nested_bounds_roundtrip"
+    );
 }
 #[path = "fix_round_one.rs"]
 mod fix_round_one;
+
+#[path = "../support/bounded_child.rs"]
+mod cleanup_control_child;
+
+/// Exercise the actual Harness success teardown with failing C function-table
+/// entries, backend finalize, stop delivery and a panicking server task.
+#[test]
+fn cleanup_failures_withhold_completion_marker() {
+    const SELECTOR: &str = "PKCS11_PROXY_TEST_CLEANUP_CONTROL";
+    const MARKER: &str = "cleanup-control-completed";
+    if let Ok(scenario) = std::env::var(SELECTOR) {
+        unsafe extern "C" fn close(_: CK_SESSION_HANDLE) -> CK_RV {
+            if std::env::var(SELECTOR).as_deref() == Ok("close") {
+                CKR_DEVICE_ERROR
+            } else {
+                CKR_OK
+            }
+        }
+        unsafe extern "C" fn finalize(_: CK_VOID_PTR) -> CK_RV {
+            if std::env::var(SELECTOR).as_deref() == Ok("client-finalize") {
+                CKR_DEVICE_ERROR
+            } else {
+                CKR_OK
+            }
+        }
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(
+            async {
+                let backend = Arc::new(MockBackend::default_test());
+                backend.initialize().unwrap();
+                if scenario == "backend-finalize" {
+                    backend
+                        .set_next_finalize_outcome(Err(pkcs11_proxy_ng_types::CkRv::DEVICE_ERROR));
+                }
+                let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+                // Keep a receiver live for the panic case: stop delivery succeeds,
+                // so only inspecting the join can reject that server panic.
+                let mut receiver = Some(stopped);
+                if scenario == "stop" {
+                    receiver.take();
+                }
+                let panic_server = scenario == "server-panic";
+                let server = tokio::spawn(async move {
+                    if panic_server {
+                        panic!("induced server task panic");
+                    }
+                    std::future::pending::<()>().await;
+                });
+                if panic_server {
+                    while !server.is_finished() {
+                        tokio::task::yield_now().await;
+                    }
+                }
+                let functions = CK_FUNCTION_LIST_3_2 {
+                    C_CloseSession: Some(close),
+                    C_Finalize: Some(finalize),
+                    ..Default::default()
+                };
+                let harness = Harness {
+                    functions,
+                    native: Default::default(),
+                    session: 1,
+                    key: 0,
+                    oracle: libloading::os::unix::Library::this().into(),
+                    _shim: std::mem::ManuallyDrop::new(
+                        libloading::os::unix::Library::this().into(),
+                    ),
+                    stop: Some(stop),
+                    server: Some(server),
+                    backend,
+                    previous_endpoint: std::env::var_os("PKCS11_PROXY_ENDPOINT"),
+                    teardown_done: false,
+                };
+                harness.shutdown().await;
+                drop(receiver);
+                println!("{MARKER}");
+            },
+        );
+        return;
+    }
+    for scenario in ["ok", "close", "client-finalize", "backend-finalize", "stop", "server-panic"] {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", "loaded::cleanup_failures_withhold_completion_marker", "--nocapture"])
+            .env(SELECTOR, scenario);
+        let output = cleanup_control_child::BoundedChild::spawn(&mut command)
+            .unwrap()
+            .wait(Duration::from_secs(5))
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(
+            output.status.success(),
+            scenario == "ok",
+            "scenario={scenario}, stdout={stdout}, stderr={:?}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(stdout.contains(MARKER), scenario == "ok", "scenario={scenario}");
+    }
+}

@@ -27,6 +27,34 @@ struct IgnoredTestLane {
 
 const IGNORED_TEST_TAXONOMY: &[IgnoredTestLane] = &[
     IgnoredTestLane {
+        file: "crates/server/tests/bounded_child_test.rs",
+        reason: "Sentinel-gated child helpers owned by bounded-harness parent controls",
+        commands: &["cargo test --locked -p pkcs11-proxy-ng --test bounded_child_test"],
+        requirements: &[
+            "Linux; ignored helpers are launched only by their owning parent with scenario sentinels",
+        ],
+    },
+    IgnoredTestLane {
+        file: "crates/server/tests/exact_output_error/loaded.rs",
+        reason: "Loaded shim exact-output native contracts",
+        commands: &[
+            "python3 scripts/run-native-contracts.py --output target/native-contracts/receipt.json",
+        ],
+        requirements: &[
+            "Rust, Cargo, flock, a C linker and protoc; built native oracles and shim are managed by the runner",
+        ],
+    },
+    IgnoredTestLane {
+        file: "crates/server/tests/exact_output_error/fix_round_one.rs",
+        reason: "Direct/proxy exact-output regression contracts",
+        commands: &[
+            "python3 scripts/run-native-contracts.py --output target/native-contracts/receipt.json",
+        ],
+        requirements: &[
+            "Rust, Cargo, flock, a C linker and protoc; built native oracles and shim are managed by the runner",
+        ],
+    },
+    IgnoredTestLane {
         file: "crates/server/tests/ccm_pointer_presence_test.rs",
         reason: "Kryoptic AES-CCM empty-AAD round trips",
         commands: &[
@@ -1298,21 +1326,20 @@ fn ignored_test_taxonomy_covers_all_ignored_rust_lanes() {
     let readme = fs::read_to_string(tests_dir.join("README.md"))
         .expect("crates/server/tests/README.md should be readable");
 
-    let ignored_files: BTreeSet<String> = fs::read_dir(&tests_dir)
-        .expect("crates/server/tests should be readable")
-        .map(|entry| entry.expect("test directory entry should be readable").path())
-        .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
+    let ignored_files: BTreeSet<String> = rust_sources_under(&tests_dir)
+        .into_iter()
         .filter(|path| path.file_name().is_some_and(|name| name != "local_quality_gate_test.rs"))
         .filter(|path| {
             fs::read_to_string(path)
                 .expect("Rust test file should be readable")
-                .contains("#[ignore")
+                .lines()
+                .any(|line| line.trim_start().starts_with("#[ignore"))
         })
         .map(|path| {
-            format!(
-                "crates/server/tests/{}",
-                path.file_name().expect("test file should have a name").to_string_lossy()
-            )
+            path.strip_prefix(&root)
+                .expect("test source should be workspace-relative")
+                .to_string_lossy()
+                .replace('\\', "/")
         })
         .collect();
 

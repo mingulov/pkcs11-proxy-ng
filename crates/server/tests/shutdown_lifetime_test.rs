@@ -13,7 +13,11 @@
 //! --test shutdown_lifetime_test`.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
+
+#[path = "support/bounded_child.rs"]
+mod bounded_child;
+use bounded_child::BoundedChild;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -838,35 +842,20 @@ struct ChildOutcome {
 
 /// Spawn the re-entrant child for `scenario` with a fresh marker dir.
 /// A watchdog kills a hung child past the backstop (no immortal test
-/// runner); `wait_with_output` reaps pipes without deadlock.
+/// runner); file-backed diagnostics cannot fill a pipe while it runs.
 fn run_child(scenario: &str) -> (tempfile::TempDir, ChildOutcome) {
     let markers = tempfile::tempdir().expect("marker dir");
-    let mut child = Command::new(std::env::current_exe().expect("current exe"))
+    let mut command = Command::new(std::env::current_exe().expect("current exe"));
+    command
         .arg("--exact")
         .arg("shutdown_lifetime_child_entry")
         .arg("--nocapture")
         .env(SCENARIO_ENV, scenario)
-        .env(MARKER_ENV, markers.path())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn child");
+        .env(MARKER_ENV, markers.path());
+    let child = BoundedChild::spawn(&mut command).expect("spawn child");
     let start = Instant::now();
-    // Bounded reap: children are quiet by construction (no tracing
-    // init; the harness prints a few lines), so piped-output deadlock
-    // is impossible and a `try_wait` loop with kill past the backstop
-    // cannot pin the suite.
-    let output = loop {
-        match child.try_wait().expect("poll child") {
-            Some(_) => break child.wait_with_output().expect("reap child"),
-            None if start.elapsed() >= PARENT_BACKSTOP => {
-                let _ = child.kill();
-                panic!("child {scenario} hung past the parent backstop; killed");
-            }
-            None => std::thread::sleep(Duration::from_millis(20)),
-        }
-    };
+    let output =
+        child.wait(PARENT_BACKSTOP).unwrap_or_else(|error| panic!("child {scenario}: {error}"));
     let elapsed = start.elapsed();
     assert!(
         elapsed < PARENT_BACKSTOP + Duration::from_secs(10),

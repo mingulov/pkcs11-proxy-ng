@@ -1159,6 +1159,7 @@ async fn server_transport_local_reject_earns_no_native_entry() -> Result<(), Str
     );
 
     harness.shutdown().await?;
+    eprintln!("native-contract-complete:server_transport_local_reject_earns_no_native_entry");
     Ok(())
 }
 
@@ -1208,6 +1209,7 @@ async fn backend_reconstruction_reject_earns_no_native_entry() -> Result<(), Str
     );
 
     harness.shutdown().await?;
+    eprintln!("native-contract-complete:backend_reconstruction_reject_earns_no_native_entry");
     Ok(())
 }
 
@@ -1267,5 +1269,6 @@ async fn native_entry_with_same_rv_earns_entry_credit_not_success() -> Result<()
     );
 
     harness.shutdown().await?;
+    eprintln!("native-contract-complete:native_entry_with_same_rv_earns_entry_credit_not_success");
     Ok(())
 }

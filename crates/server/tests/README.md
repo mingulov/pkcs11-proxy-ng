@@ -75,6 +75,47 @@ never qualify as real-provider evidence by totals.
 cargo test -p pkcs11-proxy-ng --test parameterized_mechanism_test -- --test-threads=1
 ```
 
+## Compact native-contract feedback gate
+
+From the standalone repository root:
+
+```sh
+python3 scripts/run-native-contracts.py --output target/native-contracts/receipt.json
+```
+
+This required-work gate builds the three deterministic native oracle libraries,
+production shim, and relevant test binaries once through Cargo JSON artifact
+messages. It checks the exact ignored-case inventory in
+`tests/native-contracts.json`, then runs all 19 selected cases serially in fresh
+bounded processes. Every case must report one successful test and its exact
+completion marker after the existing native assertions and shutdown. Shape
+controls require exactly one matching named observation with exact numeric
+backend-admission/native-entry counts, and store those observed values;
+loaded exact cases retain their RV, length, pointer-presence and call-count
+assertions. The retention case checks retained native pointer identity.
+
+The JSON receipt identifies source/artifact hashes, selected/executed IDs,
+per-command output and timings, semantic markers, and process cleanup.
+Explicit loaded cleanup checks shim close/finalize, native backend finalize,
+server stop delivery, and the expected server join or abort cancellation before
+a completion marker can be emitted. Panic-path cleanup remains best effort.
+The Linux runner establishes exclusive child ownership as a subreaper, uses
+pidfds to signal owned processes, and reaps adopted descendants even after
+`setsid` or double-fork detachment. Unsupported ownership fails before launch.
+Inherited proxy/oracle selector variables are removed. Missing tools, artifacts,
+empty or changed inventories, missing markers, failed tests, and timed-out or
+leftover children and failed temporary-directory removal fail the gate.
+A successful status is assigned only after required cleanup completes. Rust, Cargo, `flock`, a C linker, and `protoc`
+are required. Each Cargo build uses the shared local feedback lock and two build
+jobs. `--list` and `--no-run` produce explicitly nonpassing informational/build
+receipts; neither is an executed gate.
+
+This is deterministic native-contract feedback. It excludes real-provider
+cryptography, the ordinary standalone-daemon journey, native cross-width and
+platform topologies, the missing-Begin variant, full workspace testing, provider
+matrices, performance, frozen qualification, and release acceptance. Warm
+execution time is measured separately from provisioning and compilation.
+
 ## Ignored test taxonomy
 
 These Rust tests are ignored by default because they need a provider,
@@ -97,6 +138,9 @@ build, set `PKCS11_PROXY_SHIM_LIB=/path/to/libpkcs11_proxy_ng_shim.so`.
 | `crates/server/tests/mechanism_out_gcm_iv_test.rs` | AES-GCM generated-IV output using patched SoftHSM2 | Patched libsofthsm2.so built from [pkcs11-check](https://github.com/mingulov/pkcs11-check) `docker/softhsm2/patches/`; set SOFTHSM2_GCM_IV_SIM_LIB to its path; softhsm2-util | `SOFTHSM2_GCM_IV_SIM_LIB=/path/to/patched/libsofthsm2.so cargo test -p pkcs11-proxy-ng --test mechanism_out_gcm_iv_test -- --ignored --test-threads=1` |
 | `crates/server/tests/shim_c_abi_mechanism_out_test.rs` | Loaded-shim C ABI mechanism-output, C_GetMechanismInfo zero-flag, and C_WaitForSlotEvent lifecycle coverage | Built shim shared library from cargo build -p pkcs11-proxy-ng-shim or PKCS11_PROXY_SHIM_LIB | `cargo build -p pkcs11-proxy-ng-shim && cargo test -p pkcs11-proxy-ng --test shim_c_abi_mechanism_out_test -- --ignored --test-threads=1` |
 | `crates/server/tests/noncontract_begin_health_test.rs` | Native-oracle legacy Begin completion-health coverage | Normal and missing-message-begin oracle builds via PKCS11_PROXY_EXACT_ORACLE_LIB and PKCS11_PROXY_MISSING_BEGIN_ORACLE_LIB | `cargo test -p pkcs11-proxy-ng --test noncontract_begin_health_test -- --ignored --test-threads=1` |
+| `crates/server/tests/bounded_child_test.rs` | Sentinel-gated child helpers owned by bounded-harness parent controls | Linux; ignored helpers are launched only by their owning parent with scenario sentinels | `cargo test --locked -p pkcs11-proxy-ng --test bounded_child_test` |
+| `crates/server/tests/exact_output_error/loaded.rs` | Loaded shim exact-output native contracts | Rust, Cargo, flock, a C linker and protoc; built native oracles and shim are managed by the runner | `python3 scripts/run-native-contracts.py --output target/native-contracts/receipt.json` |
+| `crates/server/tests/exact_output_error/fix_round_one.rs` | Direct/proxy exact-output regression contracts | Rust, Cargo, flock, a C linker and protoc; built native oracles and shim are managed by the runner | `python3 scripts/run-native-contracts.py --output target/native-contracts/receipt.json` |
 | `crates/server/tests/nss_mechanism_coverage_test.rs` | NSS softokn mechanism coverage | NSS softokn libsoftokn3.so and certutil | `cargo test -p pkcs11-proxy-ng --test nss_mechanism_coverage_test -- --ignored --test-threads=1` |
 | `crates/server/tests/nss_tls_mkd_mechanism_out_test.rs` | NSS softokn SSL3 master-key-derive mechanism-output coverage | NSS softokn libsoftokn3.so and certutil | `cargo test -p pkcs11-proxy-ng --test nss_tls_mkd_mechanism_out_test -- --ignored --test-threads=1` |
 | `crates/server/tests/provider_matrix_test.rs` | Optional NSS and Kryoptic provider matrix smoke coverage | NSS softokn libsoftokn3.so and certutil; Kryoptic module via PKCS11_PROXY_KRYOPTIC_MODULE | `cargo test -p pkcs11-proxy-ng --test provider_matrix_test nss_softokn_smoke_suite -- --ignored --test-threads=1`<br>`cargo test -p pkcs11-proxy-ng --test provider_matrix_test kryoptic_smoke_suite -- --ignored --test-threads=1` |
@@ -105,6 +149,12 @@ build, set `PKCS11_PROXY_SHIM_LIB=/path/to/libpkcs11_proxy_ng_shim.so`.
 | `crates/server/tests/softhsm_fixture_test.rs` | SoftHSM2 fixture variant coverage | SoftHSM2 module and softhsm2-util | `cargo test -p pkcs11-proxy-ng --test softhsm_fixture_test -- --ignored --test-threads=1` |
 | `crates/server/tests/template_compat_test.rs` | Template compatibility tests using SoftHSM2 | SoftHSM2 module and softhsm2-util | `cargo test -p pkcs11-proxy-ng --test template_compat_test -- --ignored --test-threads=1` |
 | `crates/server/tests/test_hooks_topology_test.rs` | Hook-gated control-plane topology coverage (real daemon subprocess) | SoftHSM2 module and softhsm2-util; native-owner-test-hooks feature build; built workspace binaries | `cargo test -p pkcs11-proxy-ng --features native-owner-test-hooks --test test_hooks_topology_test -- --ignored --test-threads=1` |
+
+The ignored `bounded_child_test.rs` helper bodies (`fixture_entry` and
+`probe_entry`) are internal subprocess entries. The documented normal target
+command runs their owning parent controls, which select helper entries exactly
+with scenario sentinels. Do not invoke these bodies directly or include them
+in the native-contract manifest.
 
 ## Environment variables for optional providers
 

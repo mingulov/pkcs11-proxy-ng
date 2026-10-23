@@ -268,34 +268,55 @@ async fn t3_healthy_call_completes_alongside_stalled_call() {
     let healthy_session = healthy_client.open_session(slots[0], flags).await.unwrap();
 
     let key = t3_sign_key(&mut stalled_client, stalled_session).await;
-    // Park the stalled leg inside the backend; the healthy leg must not wait.
-    // 8 s park: far beyond the healthy-leg bound, short enough to settle.
-    backend.set_data_op_delay(Duration::from_secs(8));
+    // The sender's scope owns release: unwinding drops it and unblocks recv,
+    // so failed assertions cannot strand a blocking backend worker.
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    backend.set_data_op_gate(entered_tx, release_rx);
     stalled_client.sign_init(stalled_session, &rsa_pkcs_mechanism(), key).await.unwrap();
     let before = backend.data_op_call_count();
     let mut stalled_sign = Box::pin(stalled_client.sign(stalled_session, &[0xCDu8; 32]));
-    // Drive the stalled future until native entry is observed, then poll the
-    // healthy leg to completion while the stall is still parked.
-    let entered = tokio::spawn({
-        let backend = backend.clone();
-        async move { await_count(&backend, before + 1).await }
+    let entered = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match entered_rx.try_recv() {
+                Ok(()) => break,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                Err(error) => panic!("native-entry observer disconnected: {error}"),
+            }
+        }
     });
     tokio::select! {
-        _ = &mut stalled_sign => panic!("stalled leg finished while parked"),
-        _ = entered => {}
+        _ = &mut stalled_sign => panic!("stalled leg finished before release"),
+        result = entered => result.expect("native entry must be observed"),
     }
-    let fast_start = tokio::time::Instant::now();
-    let random = healthy_client.generate_random(healthy_session, 16).await.unwrap();
+    assert_eq!(backend.data_op_call_count(), before + 1);
+
+    let random = tokio::time::timeout(
+        Duration::from_secs(5),
+        healthy_client.generate_random(healthy_session, 16),
+    )
+    .await
+    .expect("healthy call must complete while the other call is held")
+    .unwrap();
     assert_eq!(random.len(), 16);
-    assert!(
-        fast_start.elapsed() < Duration::from_secs(5),
-        "healthy call must not queue behind the stall"
-    );
-    // Await the parked leg to completion (clear only affects subsequently
-    // entered ops; the in-flight sleep runs its 8 s course, inside the
-    // 12 s bound). Late completion is fine — its caller already moved on.
-    backend.clear_data_op_delay();
-    let _ = tokio::time::timeout(Duration::from_secs(12), stalled_sign).await;
+    assert!(futures::poll!(&mut stalled_sign).is_pending(), "held call completed before release");
+    drop(release_tx);
+    let signature = tokio::time::timeout(Duration::from_secs(5), stalled_sign)
+        .await
+        .expect("released call must settle")
+        .expect("released call succeeds");
+    assert!(!signature.is_empty());
+    assert_eq!(backend.data_op_call_count(), before + 1);
+
+    // The rendezvous was taken by one call; a subsequent data call is free.
+    stalled_client.sign_init(stalled_session, &rsa_pkcs_mechanism(), key).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), stalled_client.sign(stalled_session, &[0xAB; 32]))
+        .await
+        .expect("one-shot gate must not park a later call")
+        .unwrap();
+    assert_eq!(backend.data_op_call_count(), before + 2);
 }
 
 #[tokio::test]

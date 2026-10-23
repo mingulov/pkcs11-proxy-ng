@@ -17,13 +17,17 @@ use support::ProviderFixture;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::Duration;
+
+#[path = "support/bounded_child.rs"]
+mod bounded_child;
+use bounded_child::BoundedChild;
 
 /// A live hook-enabled daemon child plus its control-socket path.
 /// Kills the child on drop so a failed assert cannot leak a daemon.
 struct HookDaemon {
-    child: Child,
+    _child: BoundedChild,
     control: PathBuf,
     _dir: tempfile::TempDir,
 }
@@ -48,35 +52,13 @@ impl HookDaemon {
         )
         .map_err(|e| format!("write daemon.toml failed: {e}"))?;
 
-        let mut child = Command::new(env!("CARGO_BIN_EXE_pkcs11-proxy-ng"))
-            .arg(&config_path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("spawn daemon failed: {e}"))?;
-
-        // Poll the control socket until the daemon is up (slot population
-        // against SoftHSM is fast, but CI can be slow to schedule).
-        let deadline = Instant::now() + Duration::from_secs(15);
-        let mut last_err = String::new();
-        while Instant::now() < deadline {
-            if let Some(status) = child.try_wait().map_err(|e| format!("wait failed: {e}"))? {
-                let stderr = drain_stderr(&mut child);
-                return Err(format!("daemon exited early with {status}; stderr:\n{stderr}"));
-            }
-            match UnixStream::connect(&control_sock) {
-                Ok(_) => {
-                    return Ok(Self { child, control: control_sock, _dir: dir });
-                }
-                Err(e) => {
-                    last_err = e.to_string();
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-            }
-        }
-        let stderr = drain_stderr(&mut child);
-        let _ = child.kill();
-        Err(format!("control socket never came up ({last_err}); daemon stderr:\n{stderr}"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_pkcs11-proxy-ng"));
+        command.arg(&config_path);
+        let mut child = BoundedChild::spawn(&mut command)?;
+        child.wait_for_ready(Duration::from_secs(15), || {
+            UnixStream::connect(&control_sock).is_ok()
+        })?;
+        Ok(Self { _child: child, control: control_sock, _dir: dir })
     }
 
     /// Raw HTTP/1.1 round trip over the control socket.
@@ -107,23 +89,6 @@ impl HookDaemon {
             .parse()
             .map_err(|e| format!("instance body parses: {body} ({e})"))
     }
-}
-
-impl Drop for HookDaemon {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-fn drain_stderr(child: &mut Child) -> String {
-    let mut out = String::new();
-    if let Some(stderr) = child.stderr.as_mut() {
-        let mut buf = Vec::new();
-        let _ = stderr.read_to_end(&mut buf);
-        out = String::from_utf8_lossy(&buf).into_owned();
-    }
-    out
 }
 
 #[tokio::test]

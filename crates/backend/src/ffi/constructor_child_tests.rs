@@ -21,30 +21,101 @@
 //! - D2 registry-mutex poison: a panic under the registry lock denies
 //!   every later constructor with `MutexPoisoned`, never Vacant.
 
-use std::io::Write as _;
-use std::process::{Command, Output, Stdio};
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write as _};
+use std::os::unix::fs::OpenOptionsExt as _;
+use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 /// Scenario selector env var.
 const CHILD_ENV: &str = "PKCS11_PROXY_CONSTRUCTOR_CHILD";
 /// Exact child entry test path within the lib test binary.
 const CHILD_TEST_PATH: &str = "ffi::constructor_child_tests::constructor_child_entry";
 
+/// Private test-only owner: no dependency on another package's tests or on
+/// new dev dependencies when this package is tested standalone.
+struct ConstructorChild {
+    child: Child,
+    stdout: File,
+    stderr: File,
+}
+
+fn anonymous_log() -> File {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_LOG: AtomicU64 = AtomicU64::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "pkcs11-constructor-{}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        NEXT_LOG.fetch_add(1, Ordering::Relaxed),
+    ));
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .expect("create constructor log");
+    std::fs::remove_file(path).expect("unlink constructor log");
+    file
+}
+
 /// Spawn the lib test binary as a constructor child for `scenario`.
-fn spawn_constructor_child(scenario: &str) -> std::process::Child {
-    let exe = std::env::current_exe().expect("current test exe");
-    Command::new(exe)
-        .arg("--exact")
-        .arg(CHILD_TEST_PATH)
-        .arg("--nocapture")
+fn spawn_constructor_child(scenario: &str) -> ConstructorChild {
+    let stdout = anonymous_log();
+    let stderr = anonymous_log();
+    let child = Command::new(std::env::current_exe().expect("current test exe"))
+        .args(["--exact", CHILD_TEST_PATH, "--nocapture"])
         .env(CHILD_ENV, scenario)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout.try_clone().expect("stdout clone")))
+        .stderr(Stdio::from(stderr.try_clone().expect("stderr clone")))
         .spawn()
-        .expect("spawn constructor child")
+        .expect("spawn constructor child");
+    ConstructorChild { child, stdout, stderr }
+}
+
+impl ConstructorChild {
+    fn wait(mut self, timeout: Duration) -> Result<Output, Output> {
+        let start = Instant::now();
+        let (status, timed_out) = loop {
+            match self.child.try_wait().expect("poll constructor child") {
+                Some(status) => break (status, false),
+                None if start.elapsed() >= timeout => {
+                    let _ = self.child.kill();
+                    break (self.child.wait().expect("reap killed constructor child"), true);
+                }
+                None => std::thread::sleep(Duration::from_millis(10)),
+            }
+        };
+        fn prefix(file: &mut File) -> Vec<u8> {
+            file.seek(SeekFrom::Start(0)).expect("rewind constructor log");
+            let mut bytes = Vec::new();
+            file.take(8192).read_to_end(&mut bytes).expect("read constructor log");
+            bytes
+        }
+        let output =
+            Output { status, stdout: prefix(&mut self.stdout), stderr: prefix(&mut self.stderr) };
+        if timed_out { Err(output) } else { Ok(output) }
+    }
+}
+
+impl Drop for ConstructorChild {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn wait_constructor_child(child: ConstructorChild) -> Output {
+    child.wait(Duration::from_secs(30)).unwrap_or_else(|output| {
+        panic!("constructor child exceeded deadline; killed and reaped: status={} stdout={:?} stderr={:?}",
+            output.status, String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    })
 }
 
 /// Assert the constructor-child record: normal exit 0 with a READY line
-/// (pipe EOF proof), no signal/core.
+/// after reaping, no signal/core.
 fn assert_child_status(output: &Output, scenario: &str) {
     assert_eq!(
         output.status.code(),
@@ -58,7 +129,7 @@ fn assert_child_status(output: &Output, scenario: &str) {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("READY"),
-        "scenario {scenario}: READY line missing (pipe EOF proof), stdout={stdout:?}"
+        "scenario {scenario}: READY line missing after child exit, stdout={stdout:?}"
     );
 }
 
@@ -78,7 +149,27 @@ fn run_constructor_child(scenario: &str) -> ! {
     match scenario {
         "d1-discovery-failure" => run_d1_discovery_failure(),
         "d2-mutex-poison" => run_d2_mutex_poison(),
+        "harness-wedge" | "harness-verbose" => run_harness_control(scenario),
         _ => std::process::exit(11),
+    }
+}
+
+/// Independent child-side backstop: a regression in the parent's watchdog
+/// or output draining must fail these controls rather than hang the suite.
+fn run_harness_control(scenario: &str) -> ! {
+    std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_secs(5));
+        std::process::exit(99);
+    });
+    if scenario == "harness-verbose" {
+        for _ in 0..128 {
+            std::io::stdout().write_all(&[b'v'; 4096]).unwrap();
+            std::io::stderr().write_all(&[b'v'; 4096]).unwrap();
+        }
+        std::process::exit(0);
+    }
+    loop {
+        std::thread::park();
     }
 }
 
@@ -176,7 +267,7 @@ fn run_d2_mutex_poison() -> ! {
 #[test]
 fn constructor_d1_discovery_failure_poisons_until_restart() {
     let child = spawn_constructor_child("d1-discovery-failure");
-    let output = child.wait_with_output().expect("reap constructor child");
+    let output = wait_constructor_child(child);
     if output.status.code() == Some(40) {
         eprintln!("notice: D1 skipped — no loadable non-PKCS#11 library on this host");
         return;
@@ -188,6 +279,24 @@ fn constructor_d1_discovery_failure_poisons_until_restart() {
 #[test]
 fn constructor_d2_registry_mutex_poison_denies() {
     let child = spawn_constructor_child("d2-mutex-poison");
-    let output = child.wait_with_output().expect("reap constructor child");
+    let output = wait_constructor_child(child);
     assert_child_status(&output, "d2-mutex-poison");
+}
+
+#[test]
+fn constructor_harness_reaps_wedged_child() {
+    let child = spawn_constructor_child("harness-wedge");
+    let pid = child.child.id();
+    assert!(child.wait(Duration::from_millis(150)).is_err(), "wedge must time out");
+    let mut status = 0;
+    assert_eq!(unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) }, -1);
+    assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ECHILD));
+}
+
+#[test]
+fn constructor_harness_accepts_verbose_child_with_bounded_diagnostics() {
+    let output = wait_constructor_child(spawn_constructor_child("harness-verbose"));
+    assert!(output.status.success());
+    assert!(output.stdout.len() <= 8192 && output.stderr.len() <= 8192);
+    assert!(output.stdout.contains(&b'v') && output.stderr.contains(&b'v'));
 }
