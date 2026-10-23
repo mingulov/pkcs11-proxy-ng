@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -232,9 +233,32 @@ def main(argv=None) -> int:
             if args.module is None:
                 suite = loader.discover(str(test_root), pattern="test_*.py")
             else:
+                # Named local files are the entire selected inventory. Discovery
+                # would still import packages and recurse for matching basenames.
+                sys.path.insert(0, str(test_root))
                 suites = []
                 for name in selected:
-                    module_suite = loader.discover(str(test_root), pattern=name)
+                    module_name = name.removesuffix(".py")
+                    module = sys.modules.get(module_name)
+                    if module is not None:
+                        origin = getattr(module, "__file__", None)
+                        if origin is None or Path(origin).resolve() != inventory[name].resolve():
+                            raise RuntimeError(f"selected module {name} was imported from another path")
+                    else:
+                        try:
+                            spec = importlib.util.spec_from_file_location(module_name, inventory[name])
+                            if spec is None or spec.loader is None:
+                                raise RuntimeError(f"cannot load selected module {name}")
+                            module = importlib.util.module_from_spec(spec)
+                            sys.modules[module_name] = module
+                            spec.loader.exec_module(module)
+                        except KeyboardInterrupt:
+                            raise
+                        except BaseException as error:
+                            # Import-time SystemExit(0) must not pass the gate.
+                            loader.errors.append(traceback.format_exc())
+                            raise RuntimeError(f"cannot import selected module {name}: {error}") from error
+                    module_suite = loader.loadTestsFromModule(module, pattern=name)
                     if module_suite.countTestCases() == 0:
                         raise RuntimeError(f"zero tests collected from selected module {name}")
                     suites.append(module_suite)

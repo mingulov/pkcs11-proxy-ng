@@ -43,7 +43,9 @@ class ScriptRunnerTests(unittest.TestCase):
             if body is not None:
                 fixtures["test_fixture.py"] = body
             for name, source in fixtures.items():
-                (root / "tests/scripts" / name).write_text(source)
+                fixture = root / "tests/scripts" / name
+                fixture.parent.mkdir(parents=True, exist_ok=True)
+                fixture.write_text(source)
             env = dict(os.environ)
             env.pop("PYTHONPATH", None)
             if path is not None:
@@ -63,6 +65,7 @@ class ScriptRunnerTests(unittest.TestCase):
             result = subprocess.run(command, cwd=root, env=env, text=True,
                                     capture_output=True, timeout=30)
             result.timings = json.loads(receipt.read_text()) if receipt.is_file() else None
+            result.markers = {path.name: path.read_text() for path in root.glob("*.marker")}
             return result
 
     def test_pass_runs_discovered_suite(self):
@@ -177,6 +180,116 @@ class ScriptRunnerTests(unittest.TestCase):
                          {"test_alpha.py", "test_beta.py"})
         self.assertIn("selected scope", result.stderr.lower())
         self.assertNotIn("unselected import must not run", result.stderr)
+
+    def test_selected_module_does_not_traverse_nested_tests_or_package_hooks(self):
+        selected_source = ("import unittest\nclass Gate(unittest.TestCase):\n"
+                           " def test_top(self): pass\n")
+        result = self.run_fixture(modules={
+            "test_only.py": selected_source,
+            "nested/__init__.py": "",
+            "nested/test_only.py": ("from pathlib import Path\nimport unittest\n"
+                                    "class Other(unittest.TestCase):\n"
+                                    " def test_unrequested(self):\n"
+                                    "  Path('nested-test.marker').write_text('executed')\n"),
+            "hooked/__init__.py": (
+                "from pathlib import Path\n"
+                "Path('package-import.marker').write_text('imported')\n"
+                "def load_tests(loader, tests, pattern):\n"
+                " Path('package-hook.marker').write_text('called')\n"
+                " return tests\n"),
+        }, args=("--module", "test_only.py"), timings=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIsNotNone(result.timings, "requested timing receipt is absent")
+        self.assertEqual(result.markers, {}, "selected collection imported or ran an unrelated package")
+        self.assertEqual(result.timings["scope"], "selected")
+        self.assertEqual(result.timings["selected_modules"], ["test_only.py"])
+        self.assertEqual(result.timings["counts"]["collected"], 1)
+        self.assertEqual(result.timings["collected_ids"], ["test_only.Gate.test_top"])
+        self.assertEqual(result.timings["executed_ids"], ["test_only.Gate.test_top"])
+        self.assertEqual([test["module"] for test in result.timings["tests"]], ["test_only.py"])
+        self.assertEqual(result.timings["source_ids"]["modules"], {
+            "test_only.py": hashlib.sha256(selected_source.encode()).hexdigest(),
+        })
+
+    def test_empty_selected_module_cannot_borrow_nested_same_named_tests(self):
+        result = self.run_fixture(modules={
+            "test_empty.py": "# no top-level tests\n",
+            "nested/__init__.py": ("from pathlib import Path\n"
+                                   "Path('package-import.marker').write_text('imported')\n"),
+            "nested/test_empty.py": ("import unittest\nclass Other(unittest.TestCase):\n"
+                                     " def test_unrequested(self): pass\n"),
+        }, args=("--module", "test_empty.py"), timings=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIsNotNone(result.timings, "requested timing receipt is absent")
+        self.assertEqual(result.timings["status"], "error")
+        self.assertEqual(result.timings["executed_ids"], [])
+        self.assertEqual(result.markers, {})
+        self.assertIn("zero tests", result.stderr.lower())
+        self.assertIn("test_empty.py", result.stderr)
+
+    def test_complete_default_still_discovers_nested_packages(self):
+        result = self.run_fixture(modules={
+            "test_only.py": ("import unittest\nclass Gate(unittest.TestCase):\n"
+                             " def test_top(self): pass\n"),
+            "nested/__init__.py": ("from pathlib import Path\n"
+                                   "Path('package-import.marker').write_text('imported')\n"),
+            "nested/test_only.py": ("import unittest\nclass Other(unittest.TestCase):\n"
+                                    " def test_nested(self): pass\n"),
+        }, timings=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIsNotNone(result.timings, "requested timing receipt is absent")
+        self.assertEqual(result.timings["scope"], "complete")
+        self.assertEqual(result.timings["counts"]["collected"], 2)
+        self.assertEqual(set(result.timings["executed_ids"]),
+                         {"test_only.Gate.test_top", "nested.test_only.Other.test_nested"})
+        self.assertEqual(result.markers, {"package-import.marker": "imported"})
+
+    def test_selected_module_preserves_load_tests_and_module_class_fixtures(self):
+        result = self.run_fixture(modules={"test_only.py": (
+            "from pathlib import Path\nimport unittest\n"
+            "def record(event):\n"
+            " with Path('events.marker').open('a') as output: output.write(event + '\\n')\n"
+            "def setUpModule(): record('module setup')\n"
+            "def tearDownModule(): record('module teardown')\n"
+            "class Gate(unittest.TestCase):\n"
+            " @classmethod\n def setUpClass(cls): record('class setup')\n"
+            " @classmethod\n def tearDownClass(cls): record('class teardown')\n"
+            " def test_selected(self): record('selected test')\n"
+            " def test_unselected(self): self.fail('load_tests was ignored')\n"
+            "def load_tests(loader, tests, pattern):\n"
+            " record('load_tests ' + str(pattern))\n"
+            " return loader.loadTestsFromName('test_only.Gate.test_selected')\n"
+        )}, args=("--module", "test_only.py"), timings=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIsNotNone(result.timings, "requested timing receipt is absent")
+        self.assertEqual(result.timings["collected_ids"], ["test_only.Gate.test_selected"])
+        self.assertEqual(result.timings["executed_ids"], ["test_only.Gate.test_selected"])
+        self.assertEqual(result.markers, {"events.marker": (
+            "load_tests test_only.py\nmodule setup\nclass setup\nselected test\n"
+            "class teardown\nmodule teardown\n")})
+
+    def test_selected_import_failure_cannot_exit_successfully(self):
+        for body in ("raise RuntimeError('selected import error')\n", "raise SystemExit(0)\n"):
+            with self.subTest(body=body):
+                result = self.run_fixture(body, args=("--module", "test_fixture.py"), timings=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIsNotNone(result.timings, "requested timing receipt is absent")
+                self.assertNotEqual(result.timings["status"], "passed")
+                self.assertTrue(result.timings["collection_errors"])
+
+    def test_selected_modules_do_not_repeat_normal_sibling_imports(self):
+        result = self.run_fixture(modules={
+            "test_alpha.py": ("import test_beta, unittest\nclass Alpha(unittest.TestCase):\n"
+                              " def test_alpha(self): pass\n"),
+            "test_beta.py": ("from pathlib import Path\nimport unittest\n"
+                             "with Path('imports.marker').open('a') as output: output.write('beta\\n')\n"
+                             "class Beta(unittest.TestCase):\n def test_beta(self): pass\n"),
+        }, args=("--module", "test_alpha.py", "--module", "test_beta.py"), timings=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIsNotNone(result.timings, "requested timing receipt is absent")
+        self.assertEqual(result.timings["collected_ids"],
+                         ["test_alpha.Alpha.test_alpha", "test_beta.Beta.test_beta"])
+        self.assertEqual(result.markers, {"imports.marker": "beta\n"})
 
     def test_invalid_module_selections_refuse_before_import(self):
         for name in ("", "../test_fixture.py", "/tmp/test_fixture.py", "test_*.py",
