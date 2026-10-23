@@ -75,6 +75,8 @@ const EXPECTED_ALLOW_FILES: &[&str] = &[
     // parent-visible signal). Block-scoped allows.
     "crates/server/tests/shutdown_lifetime_test.rs",
     "crates/server/tests/template_compat_test.rs",
+    // Fixed post-assertion native-contract test IDs; no payload values.
+    "crates/server/tests/exact_output_error/loaded.rs",
     "crates/server/tests/exact_output_error/fix_round_one.rs",
     "crates/server/tests/noncontract_begin_health_test.rs",
     "crates/server/tests/shim_c_abi_mechanism_out_test.rs",

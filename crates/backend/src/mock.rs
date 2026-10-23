@@ -272,6 +272,8 @@ pub struct MockBackend {
     /// T3 degraded-operation tests use it to model a slow backend with
     /// entry observed via `data_op_call_count`, never inferred from sleeps.
     data_op_delay: Mutex<Option<std::time::Duration>>,
+    /// Default-off, one-shot entry/release gate for data-operation ordering.
+    data_op_gate: Mutex<Option<InterfaceCapsRendezvous>>,
     /// One-shot gate for the next `init_token` (T09): signals entry, waits
     /// release, then proceeds — models a slow provider reinit.
     init_token_gate: Mutex<Option<TokenRendezvous>>,
@@ -545,6 +547,7 @@ impl MockBackend {
             open_session_delay: Mutex::new(None),
             open_session_flags_log: Mutex::new(Vec::new()),
             data_op_delay: Mutex::new(None),
+            data_op_gate: Mutex::new(None),
             init_token_gate: Mutex::new(None),
             init_token_error: Mutex::new(None),
             token_info_gate: Mutex::new(None),
@@ -1058,6 +1061,17 @@ impl MockBackend {
         self.open_session_flags_log.lock().unwrap().clone()
     }
 
+    /// Install a one-shot entry/release rendezvous for the next data operation.
+    /// Defaults off. Dropping the release sender also unblocks the operation,
+    /// so a failed test cannot strand its blocking worker.
+    pub fn set_data_op_gate(
+        &self,
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    ) {
+        *self.data_op_gate.lock().unwrap() = Some(InterfaceCapsRendezvous { entered, release });
+    }
+
     /// Block every data op for `delay` on entry (T3 slow-backend hook).
     pub fn set_data_op_delay(&self, delay: std::time::Duration) {
         *self.data_op_delay.lock().unwrap() = Some(delay);
@@ -1221,6 +1235,13 @@ impl MockBackend {
     /// but returned ARGUMENTS_BAD" (count incremented).
     pub(crate) fn resolve_input<'a>(&self, input: CkInBuf<'a>) -> CkResult<&'a [u8]> {
         self.data_op_calls.fetch_add(1, Ordering::SeqCst);
+        // Drop the gate mutex before waiting so later operations remain free.
+        // Sender disconnect also releases the call during test unwinding.
+        let gate = self.data_op_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            let _ = gate.entered.send(());
+            let _ = gate.release.recv();
+        }
         if let Some(delay) = *self.data_op_delay.lock().unwrap() {
             std::thread::sleep(delay);
         }
