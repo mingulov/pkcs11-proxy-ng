@@ -168,6 +168,58 @@ mod tests {
     use std::time::{Duration, Instant};
     static SERIAL: Mutex<()> = Mutex::new(());
 
+    /// A native test thread is never detached by a receive deadline or panic.
+    struct OwnedThread<T> {
+        worker: Option<std::thread::JoinHandle<T>>,
+    }
+    impl<T> Drop for OwnedThread<T> {
+        fn drop(&mut self) {
+            if self.worker.is_some() {
+                std::process::exit(71);
+            }
+        }
+    }
+    impl<T> OwnedThread<T> {
+        fn new(worker: std::thread::JoinHandle<T>) -> Self {
+            Self { worker: Some(worker) }
+        }
+        fn wait_finished(&self, budget: Duration) -> bool {
+            let start = Instant::now();
+            while !self.worker.as_ref().expect("owned native thread").is_finished() {
+                if start.elapsed() >= budget {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            true
+        }
+        fn join(mut self, budget: Duration) -> std::thread::Result<T> {
+            if !self.wait_finished(budget) {
+                // Cannot safely kill this native thread. Stop the owning test process.
+                std::process::exit(71);
+            }
+            self.worker.take().expect("completed native thread").join()
+        }
+    }
+
+    #[test]
+    fn native_thread_deadline_retains_owner_until_explicit_release() {
+        let (release, held) = std::sync::mpsc::channel();
+        let (entered, entry) = std::sync::mpsc::channel();
+        let worker = OwnedThread::new(std::thread::spawn(move || {
+            let _ = entered.send(());
+            let _ = held.recv();
+            17
+        }));
+        let entry_observed = entry.recv_timeout(Duration::from_millis(500)).is_ok();
+        let first = worker.wait_finished(Duration::from_millis(5));
+        let retained = worker.worker.is_some();
+        let _ = release.send(());
+        let joined = worker.join(Duration::from_millis(500));
+        assert!(entry_observed && !first, "native thread must outlive the first deadline");
+        assert!(retained && matches!(joined, Ok(17)), "native thread ownership was lost");
+    }
+
     fn open() -> CK_SESSION_HANDLE {
         let mut session = 0;
         assert_eq!(
@@ -286,10 +338,10 @@ mod tests {
         let session = open();
         assert_eq!(command(ARM_CLOSE_GATE, session as u64, 0), 0);
         let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let worker = std::thread::spawn(move || {
+        let worker = OwnedThread::new(std::thread::spawn(move || {
             let rv = unsafe { provider::close_session(session) };
             let _ = done_tx.send(rv);
-        });
+        }));
         let start = Instant::now();
         while observe().gate_holders != 1 && start.elapsed() < Duration::from_secs(2) {
             std::thread::sleep(Duration::from_millis(1));
@@ -302,7 +354,11 @@ mod tests {
         // Release before asserting, so even a broken observer cannot strand a thread.
         assert_eq!(command(RELEASE_CLOSE_GATE, 0, 0), 0);
         let done = done_rx.recv_timeout(Duration::from_secs(2));
-        worker.join().unwrap();
+        if done.is_err() {
+            std::process::exit(71);
+        }
+        let joined = worker.join(Duration::from_secs(2));
+        assert!(joined.is_ok(), "native gate worker panicked");
         assert_eq!((held.gate_holders, held.pending_closes), (1, 1));
         assert_eq!((reset, reset_observation, reuse), (1, 1, 1));
         assert!(early.is_err());

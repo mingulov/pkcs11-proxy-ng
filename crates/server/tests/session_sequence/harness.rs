@@ -1,4 +1,5 @@
 //! Test-owned loaded module, loopback server and checked bounded teardown.
+use super::native_cleanup::{NativeOwner, settle_native};
 use super::oracle_types::*;
 use libloading::Library;
 use pkcs11_proxy_ng::server::{context_manager::ContextManager, grpc_service::Pkcs11ProxyService};
@@ -71,6 +72,32 @@ impl Control {
         })
         .await
         .map_err(|_| format!("timed out waiting for {what}"))?
+    }
+
+    /// A local deadline cannot prove native quiescence. Release the controlled
+    /// fixture gate, then retain this harness until completion or outer process stop.
+    async fn quiescent(&self, errors: &mut Vec<String>) -> Box<ObservationV1> {
+        match self.wait("native quiescence", |o| o.pending_closes == 0 && o.gate_holders == 0).await
+        {
+            Ok(observation) => return observation,
+            Err(error) => errors.push(error),
+        }
+        if let Err(error) = self.command(RELEASE_CLOSE_GATE, 0, 0) {
+            errors.push(error);
+        }
+        loop {
+            match self.observe() {
+                Ok(observation)
+                    if observation.pending_closes == 0 && observation.gate_holders == 0 =>
+                {
+                    return observation;
+                }
+                Ok(_) => {}
+                // Unknown ownership cannot authorize native finalization/unload.
+                Err(_) => std::process::exit(71),
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
     }
 }
 
@@ -220,56 +247,54 @@ impl Harness {
             }
         }
         // A failure must still retire every fixture-owned session, including unregistered carriers.
-        match self
-            .control
-            .wait("native quiescence", |o| o.pending_closes == 0 && o.gate_holders == 0)
-            .await
-        {
-            Ok(observation) => {
-                if observation.session_count as usize > MAX_SESSIONS {
-                    errors.push("invalid cleanup session count".into());
-                } else {
-                    let remaining: Vec<_> = observation.sessions
-                        [..observation.session_count as usize]
-                        .iter()
-                        .filter(|s| s.live != 0)
-                        .map(|s| s.raw)
-                        .collect();
-                    for raw in remaining {
-                        errors
-                            .push(format!("native session {raw} survived normal context cleanup"));
-                        let backend = self.backend.clone();
-                        let joined = tokio::time::timeout(
-                            DEADLINE,
-                            tokio::task::spawn_blocking(move || {
-                                backend.close_session(CkSessionHandle(raw))
-                            }),
-                        )
-                        .await;
-                        if !matches!(joined, Ok(Ok(Ok(())))) {
-                            errors.push(format!("fallback retirement: {joined:?}"));
-                        }
-                    }
-                }
-            }
-            Err(error) => errors.push(error),
+        let observation = self.control.quiescent(&mut errors).await;
+        if observation.session_count as usize > MAX_SESSIONS {
+            std::process::exit(71); // ownership inventory is not trustworthy
         }
-        let before_finalize = self.control.observe()?;
-        if before_finalize.pending_closes != 0
-            || before_finalize.gate_holders != 0
-            || before_finalize.sessions.iter().any(|s| s.live != 0)
-        {
-            errors.push("native work remained before backend finalize".into());
+        let remaining: Vec<_> = observation.sessions[..observation.session_count as usize]
+            .iter()
+            .filter(|s| s.live != 0)
+            .map(|s| s.raw)
+            .collect();
+        for raw in remaining {
+            errors.push(format!("native session {raw} survived normal context cleanup"));
+            let backend = self.backend.clone();
+            let mut owner = NativeOwner::spawn(move || backend.close_session(CkSessionHandle(raw)));
+            let joined = settle_native(
+                &mut owner,
+                DEADLINE,
+                || self.control.command(RELEASE_CLOSE_GATE, 0, 0),
+                &mut errors,
+                "fallback retirement",
+            )
+            .await;
+            if !matches!(joined, Some(Ok(Ok(())))) {
+                errors.push(format!("fallback retirement: {joined:?}"));
+            }
+            if owner.pending() {
+                std::process::exit(71);
+            }
+        }
+        let before_finalize = self.control.quiescent(&mut errors).await;
+        if before_finalize.sessions.iter().any(|s| s.live != 0) {
+            // A joined error still owns a live native session. Do not unload it.
+            std::process::exit(71);
         }
         let backend = self.backend.clone();
-        match tokio::time::timeout(
+        let mut owner = NativeOwner::spawn(move || backend.finalize());
+        let joined = settle_native(
+            &mut owner,
             DEADLINE,
-            tokio::task::spawn_blocking(move || backend.finalize()),
+            || self.control.command(RELEASE_CLOSE_GATE, 0, 0),
+            &mut errors,
+            "native finalize",
         )
-        .await
-        {
-            Ok(Ok(Ok(()))) => {}
-            other => errors.push(format!("native finalize: {other:?}")),
+        .await;
+        if !matches!(joined, Some(Ok(Ok(())))) {
+            errors.push(format!("native finalize: {joined:?}"));
+        }
+        if owner.pending() {
+            std::process::exit(71);
         }
         let after = self.control.observe()?;
         if after.initialized != 0
