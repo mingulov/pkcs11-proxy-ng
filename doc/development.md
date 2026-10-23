@@ -5,9 +5,6 @@ selects it automatically), with `rustfmt` and `clippy`. The minimum
 supported Rust version is **1.88.0**, including when updating dependencies.
 The repository builds independently of the umbrella workspace and OASIS
 specification checkout.
-Use rustup with the toolchain in `rust-toolchain.toml`. The minimum supported
-Rust version is **1.88.0**. This repository builds on its own; no planning
-workspace or OASIS checkout is needed.
 
 ## Ubuntu 24.04 / 26.04
 
@@ -37,7 +34,51 @@ Use `mise exec --` when mise is not activated in your shell.
 
 ## Core checks
 
-Run from this repository:
+Run commands from this repository. For an edit, start with the affected crate
+and its specific regression instead of repeating packaging and platform builds:
+
+```bash
+cargo check --locked -p pkcs11-proxy-ng-client --all-targets
+cargo test --locked -p pkcs11-proxy-ng-client
+```
+
+Replace the package with the crate you changed. A selected Cargo filter that
+matches no tests is missing evidence; inspect the reported count. Shared
+types/protocol, native ownership, authorization and output changes also need
+their consuming-crate tests and the relevant native contracts.
+
+The compact native-contract gate builds the shim, recording providers and test
+executables once, then runs an explicit case manifest in bounded child
+processes. It requires Linux with working pidfd and child-subreaper support,
+Python 3.12 or newer, and the normal Rust/C/protobuf build tools. It needs no
+external token or provider installation:
+
+```bash
+python3 scripts/run-native-contracts.py --output target/native-contracts/receipt.json
+```
+
+The strict default fails for missing artifacts, mismatched or empty selections,
+missing semantic completion, failed tests and incomplete runner-owned child or
+temporary-directory cleanup. `--list` and
+`--no-run` are diagnostic/build modes and do not establish passing native
+contracts. The receipt lists the selected and executed cases and their source
+and artifact identities. These fixture observations cover their declared
+native boundaries; they do not qualify real providers, unexecuted platforms or
+a release package.
+
+For script and workflow changes, use an activated Python virtual environment:
+
+```bash
+python3 -m pip install -r requirements-script-tests.txt
+python3 scripts/run-script-tests.py
+```
+
+This runs the complete public Python regression suite with mandatory tool and
+dependency checks, nonzero collection and no unexpected skips. See the runner's
+prerequisite diagnostics for missing tools. CI executes both regression and
+native-contract gates as required jobs.
+
+Before completing a change, run the canonical workspace validation:
 
 ```bash
 cargo fmt --all -- --check
@@ -45,6 +86,12 @@ cargo check --workspace --all-targets --locked
 cargo build --workspace --locked
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+```
+
+Run the remaining policy, compatibility and packaging checks for the candidate
+being qualified, including after dependency/build/platform changes:
+
+```bash
 cargo audit
 cargo deny check
 cargo +1.88.0 build --workspace --locked --all-targets
@@ -52,8 +99,10 @@ cargo +1.88.0 test --workspace --locked
 scripts/release-dry-run.sh
 ```
 
-Set `CARGO_BUILD_JOBS=2` if memory is limited. After updating dependencies,
-repeat these checks, including the Rust 1.88 build and tests.
+Set `CARGO_BUILD_JOBS=2` if memory is limited. Measure compilation separately
+from warmed test execution when comparing changes. Full provider parity,
+installed-consumer, native platform, performance and release evidence remain
+separate gates; a fast selected run cannot satisfy their unexecuted scope.
 
 ## Extending mechanism parameter support
 
