@@ -50,6 +50,22 @@
       ]
     },
     {
+      "id": "session-oracle",
+      "args": [
+        "build",
+        "--locked",
+        "--manifest-path",
+        "tests/ffi_oracles/session_lifecycle/Cargo.toml"
+      ],
+      "artifacts": [
+        {
+          "id": "session-oracle",
+          "target": "pkcs11_session_lifecycle_oracle",
+          "kind": "cdylib"
+        }
+      ]
+    },
+    {
       "id": "shim",
       "args": [
         "build",
@@ -76,7 +92,9 @@
         "--test",
         "exact_output_error_test",
         "--test",
-        "shape_evidence_test"
+        "shape_evidence_test",
+        "--test",
+        "session_sequence_test"
       ],
       "artifacts": [
         {
@@ -88,6 +106,12 @@
         {
           "id": "entry-tests",
           "target": "shape_evidence_test",
+          "kind": "test",
+          "executable": true
+        },
+        {
+          "id": "session-tests",
+          "target": "session_sequence_test",
           "kind": "test",
           "executable": true
         }
@@ -130,7 +154,8 @@
     "PKCS11_PROXY_SHIM_LIB": "shim",
     "PKCS11_PROXY_EXACT_ORACLE_LIB": "exact-oracle",
     "PKCS11_PROXY_ENTRY_RECORDING_ORACLE_LIB": "entry-oracle",
-    "PKCS11_PROXY_RETAINED_ORACLE_LIB": "retained-oracle"
+    "PKCS11_PROXY_RETAINED_ORACLE_LIB": "retained-oracle",
+    "PKCS11_PROXY_SESSION_ORACLE_LIB": "session-oracle"
   },
   "lanes": [
     {
@@ -278,6 +303,43 @@
           "id": "ffi::retained_owner_contract_tests::native_owner_oracle_retains_init_root_across_calls",
           "markers": [
             "native-contract-complete:ffi::retained_owner_contract_tests::native_owner_oracle_retains_init_root_across_calls"
+          ]
+        }
+      ]
+    },
+    {
+      "artifact": "session-tests",
+      "ignored": true,
+      "prefix": "sequence_",
+      "cases": [
+        {
+          "id": "sequence_login_retry_failed_close_preserves_native_state",
+          "markers": [
+            "native-contract-complete:sequence_login_retry_failed_close_preserves_native_state"
+          ]
+        },
+        {
+          "id": "sequence_partial_close_all_keeps_only_survivor",
+          "markers": [
+            "native-contract-complete:sequence_partial_close_all_keeps_only_survivor"
+          ]
+        },
+        {
+          "id": "sequence_operation_errors_do_not_retire_live_session",
+          "markers": [
+            "native-contract-complete:sequence_operation_errors_do_not_retire_live_session"
+          ]
+        },
+        {
+          "id": "sequence_raw_handle_reuse_never_revives_old_virtual_handle",
+          "markers": [
+            "native-contract-complete:sequence_raw_handle_reuse_never_revives_old_virtual_handle"
+          ]
+        },
+        {
+          "id": "sequence_cancelled_close_replays_late_terminal_and_transient_outcomes",
+          "markers": [
+            "native-contract-complete:sequence_cancelled_close_replays_late_terminal_and_transient_outcomes"
           ]
         }
       ]
