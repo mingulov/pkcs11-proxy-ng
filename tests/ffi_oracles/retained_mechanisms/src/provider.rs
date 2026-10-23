@@ -33,7 +33,7 @@ pub unsafe extern "C" fn initialize(_: CK_VOID_PTR) -> CK_RV {
 pub unsafe extern "C" fn finalize(_: CK_VOID_PTR) -> CK_RV {
     let mut state = lock_state();
     state.2.initialized = false;
-    state.2.retained_mech = 0;
+    state.2.retained.clear();
     CKR_OK
 }
 
@@ -55,7 +55,8 @@ pub unsafe extern "C" fn open_session(
     CKR_OK
 }
 
-pub unsafe extern "C" fn close_session(_: CK_SESSION_HANDLE) -> CK_RV {
+pub unsafe extern "C" fn close_session(session: CK_SESSION_HANDLE) -> CK_RV {
+    lock_state().2.retained.remove(&(session as u64));
     CKR_OK
 }
 
@@ -81,38 +82,142 @@ pub unsafe extern "C" fn get_slot_list(
     CKR_OK
 }
 
+/// Read only bounded synthetic graphs supplied by this fixture's tests.
+/// Bounds reject oversized extents/depth before following that leg. They do
+/// not make arbitrary foreign pointers safe: callers must keep the entire
+/// graph live, including in negative controls. No dangling-pointer probe exists.
+unsafe fn read_graph(mut mechanism: CK_MECHANISM_PTR) -> RetainedOracleDeepGraphV1 {
+    let mut graph = RetainedOracleDeepGraphV1::default();
+    if mechanism.is_null() {
+        return graph;
+    }
+    for index in 0..DEEP_MAX_NODES {
+        let root = unsafe { mechanism.read_unaligned() };
+        let node = &mut graph.nodes[index];
+        node.mechanism_ptr = mechanism as u64;
+        node.parameter_ptr = root.pParameter as u64;
+        node.mechanism = root.mechanism as u64;
+        node.parameter_len = root.ulParameterLen as u64;
+        graph.node_count += 1;
+        let mut nested = std::ptr::null_mut();
+        let valid = match root.mechanism {
+            CKM_AES_CBC => unsafe {
+                read_leg(
+                    root.pParameter.cast(),
+                    root.ulParameterLen,
+                    &mut node.first_ptr,
+                    &mut node.first_len,
+                    &mut node.first_bytes,
+                )
+            },
+            CKM_AES_GCM
+                if !root.pParameter.is_null()
+                    && root.ulParameterLen as usize == std::mem::size_of::<CK_GCM_PARAMS>() =>
+            {
+                let params = unsafe { root.pParameter.cast::<CK_GCM_PARAMS>().read_unaligned() };
+                node.scalar_a = params.ulIvBits as u64;
+                node.scalar_b = params.ulTagBits as u64;
+                unsafe {
+                    read_leg(
+                        params.pIv,
+                        params.ulIvLen,
+                        &mut node.first_ptr,
+                        &mut node.first_len,
+                        &mut node.first_bytes,
+                    ) && read_leg(
+                        params.pAAD,
+                        params.ulAADLen,
+                        &mut node.second_ptr,
+                        &mut node.second_len,
+                        &mut node.second_bytes,
+                    )
+                }
+            }
+            CKM_KIP_DERIVE | CKM_KIP_WRAP | CKM_KIP_MAC
+                if !root.pParameter.is_null()
+                    && root.ulParameterLen as usize == std::mem::size_of::<CK_KIP_PARAMS>() =>
+            {
+                let params = unsafe { root.pParameter.cast::<CK_KIP_PARAMS>().read_unaligned() };
+                node.scalar_a = params.hKey as u64;
+                nested = params.pMechanism;
+                unsafe {
+                    read_leg(
+                        params.pSeed,
+                        params.ulSeedLen,
+                        &mut node.first_ptr,
+                        &mut node.first_len,
+                        &mut node.first_bytes,
+                    )
+                }
+            }
+            _ => false,
+        };
+        if !valid {
+            return graph;
+        }
+        if nested.is_null() {
+            graph.valid = 1;
+            return graph;
+        }
+        mechanism = nested;
+    }
+    // More than five nodes: deliberately invalid, no sixth dereference.
+    graph
+}
+
+unsafe fn read_leg(
+    pointer: CK_BYTE_PTR,
+    length: CK_ULONG,
+    address: &mut u64,
+    extent: &mut u64,
+    bytes: &mut [u8; DEEP_MAX_BYTES],
+) -> bool {
+    *address = pointer as u64;
+    *extent = length as u64;
+    if length as u64 > DEEP_MAX_BYTES as u64 || (pointer.is_null() && length != 0) {
+        return false;
+    }
+    if length != 0 {
+        unsafe { std::ptr::copy_nonoverlapping(pointer, bytes.as_mut_ptr(), length as usize) };
+    }
+    true
+}
+
 pub unsafe extern "C" fn encrypt_init(
-    _: CK_SESSION_HANDLE,
+    session: CK_SESSION_HANDLE,
     mechanism: CK_MECHANISM_PTR,
     _: CK_OBJECT_HANDLE,
 ) -> CK_RV {
     if mechanism.is_null() {
         return CKR_ARGUMENTS_BAD;
     }
-    // Deliberate retention: keep the caller's root address (and nothing
-    // else) for the later operation, like backends that store the pointer
-    // instead of copying the parameters.
+    // Retain the native root per session. The independent snapshot is an
+    // observation only: later readback must follow the original live graph.
     let mut state = lock_state();
     state.1.init_calls += 1;
     state.1.init_mech_ptr = mechanism as u64;
     state.1.init_param_len = unsafe { (*mechanism).ulParameterLen } as u64;
-    state.2.retained_mech = mechanism as u64;
+    if state.2.retained.len() >= 64 && !state.2.retained.contains_key(&(session as u64)) {
+        return CKR_SESSION_COUNT;
+    }
+    let graph = unsafe { read_graph(mechanism) };
+    state.2.retained.insert(session as u64, (mechanism as u64, graph));
     CKR_OK
 }
 
 pub unsafe extern "C" fn encrypt(
-    _: CK_SESSION_HANDLE,
+    session: CK_SESSION_HANDLE,
     _: CK_BYTE_PTR,
     _: CK_ULONG,
     out: CK_BYTE_PTR,
     length: CK_ULONG_PTR,
 ) -> CK_RV {
-    if length.is_null() {
-        return CKR_ARGUMENTS_BAD;
-    }
     {
         let mut state = lock_state();
         state.1.encrypt_calls += 1;
+    }
+    if length.is_null() {
+        return CKR_ARGUMENTS_BAD;
     }
     // Observable barrier before the retained-root readback. The STATE lock
     // is not held across the wait, so observers stay live while held.
@@ -128,14 +233,26 @@ pub unsafe extern "C" fn encrypt(
     // address (Miri flags the cast with a notice for this reason). The
     // provenance-clean party must be the backend under test, not this
     // oracle.
-    let retained = state.2.retained_mech as CK_MECHANISM_PTR;
-    if !retained.is_null() {
-        state.1.encrypt_mech_ptr = retained as u64;
-        state.1.encrypt_param_len = unsafe { (*retained).ulParameterLen } as u64;
-        state.1.encrypt_mech_type = unsafe { (*retained).mechanism } as u64;
+    let (address, init) = state.2.retained.get(&(session as u64)).copied().unwrap_or_default();
+    let retained = address as CK_MECHANISM_PTR;
+    let later = unsafe { read_graph(retained) };
+    // Clear latest-call fields even for an unknown session, never reusing a
+    // previous session's successful observation.
+    state.1.encrypt_mech_ptr = address;
+    state.1.encrypt_param_len = later.nodes[0].parameter_len;
+    state.1.encrypt_mech_type = later.nodes[0].mechanism;
+    state.1.ptr_equal = u32::from(address != 0 && address == init.nodes[0].mechanism_ptr);
+    let graph_equal = u32::from(init.valid == 1 && later.valid == 1 && init == later);
+    state.2.deep = RetainedOracleDeepObservationV1 {
+        version: 1,
+        graph_equal,
+        session: session as u64,
+        init,
+        encrypt: later,
+    };
+    if state.2.require_deep_equal && graph_equal == 0 {
+        return CKR_DEVICE_ERROR;
     }
-    state.1.ptr_equal =
-        u32::from(state.1.init_mech_ptr != 0 && state.1.init_mech_ptr == state.1.encrypt_mech_ptr);
     // Row-12 E2E retention proof: when armed, a mismatched root fails
     // closed here instead of returning the scenario RV. Applies to size
     // queries and fills alike.
