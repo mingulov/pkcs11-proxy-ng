@@ -6,6 +6,8 @@
 mod harness;
 #[path = "session_sequence/model.rs"]
 mod model;
+#[path = "session_sequence/native_cleanup.rs"]
+mod native_cleanup;
 #[allow(dead_code)]
 #[path = "../../../tests/ffi_oracles/session_lifecycle/src/types.rs"]
 mod oracle_types;
