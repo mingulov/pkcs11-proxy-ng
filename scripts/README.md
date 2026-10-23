@@ -17,8 +17,9 @@ Build, test, and release scripts, with their callers. Paths are relative to
 | `ci-package-smoke.py` | `ci.yml` smoke lanes: reusable installed/extracted artifact contract (APK set, Linux tarball, Windows ZIP); reused for registry bundles before asset approval |
 | `test-matrix.sh` | `nightly.yml` and `Dockerfile.test`: local CI gates and provider/consumer lanes |
 | `run-test-tiers.sh` | `nightly.yml`: live test lanes; `all` is the manual canonical `cargo test --workspace --locked` pass, unit/integration/regression are scoped subsets |
-| `run-script-tests.py` | `ci.yml`: complete Python regression discovery with mandatory prerequisites and failure on zero work or unexpected skips |
+| `run-script-tests.py` | `ci.yml`: complete Python regression discovery with mandatory prerequisites and failure on zero work or unexpected skips; optional exact local module selection and timing receipts |
 | `run-native-contracts.py` | `ci.yml`: build recording fixtures and shim once, execute the explicit native-contract manifest in bounded children, and write a source/artifact-bound receipt |
+| `run-mutation-panel.py` | Manual: immutable committed-source baselines and two named assertion mutants in isolated outputs; not a full mutation campaign |
 | `verify-release-subject.sh` | `publish.yml` and `release.yml`: validate the tag subject and version mirrors |
 | `release-dry-run.sh` | Local Linux packaging check and staging; `release.yml` now builds from registry sources instead |
 | `release-windows.sh` | Local Windows ZIP staging; `release.yml` now builds from registry sources instead |

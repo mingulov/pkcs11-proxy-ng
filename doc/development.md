@@ -104,6 +104,81 @@ from warmed test execution when comparing changes. Full provider parity,
 installed-consumer, native platform, performance and release evidence remain
 separate gates; a fast selected run cannot satisfy their unexecuted scope.
 
+## Replayable session sequences
+
+The native gate includes five session lifecycle sequences through the real
+service and FFI backend, using a deterministic native fixture. They check failed
+close retries, partial close-all survivors, operation errors, raw-handle reuse,
+and late native outcomes after handler cancellation. Expectations come from an
+independent logical-session model and native observations.
+
+Three fixed seeds and bounded action suffixes keep canonical runs small. For a
+failure, replay one seed and optionally an action prefix using the commands in
+[the fixture guide](../tests/ffi_oracles/session_lifecycle/README.md). Replays
+emit a diagnostic completion marker and do not qualify the canonical gate. These
+checks exercise native ownership and session semantics; real-provider behavior
+remains a separate gate.
+
+## Selected feedback and test timings
+
+For script work, select exact local modules and retain a timing receipt:
+
+```bash
+python3 scripts/run-script-tests.py \
+    --module test_ci_feedback.py \
+    --module test_perf_compare.py \
+    --module test_support_matrix.py \
+    --timings-json target/script-feedback/selected.json
+```
+
+A selected receipt names its modules and exact collected/executed test IDs. It
+is selected-scope evidence; the no-argument command remains the complete required
+CI regression gate. Timing receipts retain failing outcomes too. Module totals
+are summed test durations and exclude import/module/class fixture time. Profile
+the complete run when that work is authorized before choosing parallelism or
+changing CI selection.
+
+## Small mutation panel
+
+The manual panel checks two specific mistakes: stale HandleMap reverse-binding
+removal and bypassed protected-wire scanning. Commit the development source first;
+the tool checks an immutable Git snapshot and refuses relevant dirty source.
+It builds and runs each baseline, mutated primary test and positive control in
+separate temporary source/output trees. A compilation error, timeout, wrong panic,
+zero test or failed cleanup is an error, never a killed mutant.
+
+```bash
+python3 scripts/run-mutation-panel.py \
+    --output /tmp/pkcs11-mutation-panel.json \
+    --source-ref HEAD \
+    --seed-target "$PWD/target" \
+    --timeout 240
+```
+
+The optional seed target must be a quiescent cache. Seeding requires supported
+reflinks and independent output files; it never uses hardlinks into normal build
+outputs or silently falls back to a large copy. Without a seed, compilation may
+take longer. Receipt output must be outside the checkout and donor cache.
+Compilation and test execution have separate bounded phases. Panel success proves
+that these named assertions detect these mutations, not complete mutation coverage
+or real-provider correctness. Keep the ordinary full Rust/Python, platform and
+release validation contracts for their separately authorized runs.
+
+## Prepared provider smoke
+
+`scripts/test-softhsm2-smoke.sh` is the small standalone-daemon/shim workflow for
+later real-provider execution. Use explicit prebuilt daemon/shim paths and, if
+needed, `PKCS11_PROXY_BACKEND_MODULE` to select the intended SoftHSM2 library.
+It uses a scratch token, generates and signs through the proxy, retires/reaps the
+daemon, then signs directly with the same key. Exported-key OpenSSL verification
+and deterministic signature comparison must both succeed before the smoke passes.
+The command shapes follow the [OpenSC tool and OpenSSL guide](https://github.com/OpenSC/OpenSC/wiki/Using-pkcs11-tool-and-OpenSSL).
+
+Preparing or exercising the script with controlled tool fixtures does not qualify
+SoftHSM2, the daemon binary or a release package. Run the actual provider workflow
+when provider execution is authorized; it is separate from the synthetic native
+session/ownership gate and the full matrix.
+
 ## Extending mechanism parameter support
 
 New `CK_MECHANISM` parameter shapes follow the complete recipe in
