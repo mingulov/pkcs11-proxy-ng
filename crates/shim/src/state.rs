@@ -789,6 +789,17 @@ pub(crate) fn connect_attempts_warning(raw: Option<&str>) -> Option<String> {
     }
 }
 
+// TEMPORARY-R2-DIAG (revert before merge): macOS smoke triage. The
+// shim installs no tracing subscriber, so `tracing!` lines are silent
+// and stderr is the only client-side signal (captured by the smoke
+// script's merged provider-step output). Prints endpoint / attempt /
+// elapsed / transport error only — never secrets. Uses `writeln!`
+// (not `eprintln!`) so the print-sink lints stay green.
+pub(crate) fn r2_diag(message: String) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr(), "{message}");
+}
+
 async fn connect_with_retry(
     endpoint: &str,
     tls_files: Option<pkcs11_proxy_ng_client::tls::ClientTlsFiles>,
@@ -802,6 +813,12 @@ async fn connect_with_retry(
         tracing::warn!("{warning}");
     }
     let max_attempts = connect_attempts_from_value(attempts_raw.as_deref());
+    let series_start = std::time::Instant::now();
+    r2_diag(format!(
+        "[r2diag] connect start endpoint={endpoint} timeout_secs={timeout_secs} \
+         max_attempts={max_attempts} tls={}",
+        tls_files.is_some()
+    ));
 
     for attempt in 0..max_attempts {
         let delay = backoff_for_attempt(attempt);
@@ -820,8 +837,17 @@ async fn connect_with_retry(
                 None => Pkcs11Client::connect(endpoint).await,
             }
         };
+        let attempt_start = std::time::Instant::now();
         match tokio::time::timeout(connect_timeout, connect).await {
-            Ok(Ok(client)) => return Ok(client),
+            Ok(Ok(client)) => {
+                r2_diag(format!(
+                    "[r2diag] attempt {} ok in {:?} (series {:?})",
+                    attempt + 1,
+                    attempt_start.elapsed(),
+                    series_start.elapsed()
+                ));
+                return Ok(client);
+            }
             Ok(Err(e)) => {
                 tracing::warn!(
                     attempt = attempt + 1,
@@ -829,6 +855,12 @@ async fn connect_with_retry(
                     error = %e,
                     "gRPC connect failed, retrying"
                 );
+                r2_diag(format!(
+                    "[r2diag] attempt {} failed in {:?} (series {:?}): {e}",
+                    attempt + 1,
+                    attempt_start.elapsed(),
+                    series_start.elapsed()
+                ));
             }
             Err(_) => {
                 tracing::warn!(
@@ -837,9 +869,19 @@ async fn connect_with_retry(
                     timeout_secs,
                     "gRPC connect timed out, retrying"
                 );
+                r2_diag(format!(
+                    "[r2diag] attempt {} outer-timeout({timeout_secs}s) in {:?} (series {:?})",
+                    attempt + 1,
+                    attempt_start.elapsed(),
+                    series_start.elapsed()
+                ));
             }
         }
     }
+    r2_diag(format!(
+        "[r2diag] connect series exhausted after {:?}: all {max_attempts} attempts failed",
+        series_start.elapsed()
+    ));
     Err(format!("all {max_attempts} connect attempts failed"))
 }
 
