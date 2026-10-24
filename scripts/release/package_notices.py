@@ -31,16 +31,16 @@ WORKSPACE_TARGETS = ("x86_64-unknown-linux-musl", "x86_64-unknown-linux-gnu",
 # upstream revisions recorded by the omitted crates' .cargo_vcs_info.json.
 # The expected hashes also match the pinned upstream repository files.
 REVIEWED_SIBLINGS = {
-    ("asn1-rs-impl", "0.2.0"): ("asn1-rs", "0.7.1", {
+    ("asn1-rs-impl", "0.2.0"): ("asn1-rs", "0.7.2", {
         "LICENSE-APACHE": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
         "LICENSE-MIT": "a5c61b93b6ee1d104af9920cf020ff3c7efe818e31fe562c72261847a728f513",
     }, "a20e5f7319c896737ad0f2557037817b91ad854f"),
-    ("tonic-prost", "0.14.5"): ("tonic", "0.14.5", {
+    ("tonic-prost", "0.14.6"): ("tonic", "0.14.6", {
         "LICENSE": "e24a56698aa6feaf3a02272b3624f9dc255d982970c5ed97ac4525a95056a5b3",
-    }, "21d24942a5a4a1806344beb331d4157d510a210c"),
-    ("tonic-prost-build", "0.14.5"): ("tonic", "0.14.5", {
+    }, "6cb6056b5a748bc5a29bd48f4602dbc4e552bb7d"),
+    ("tonic-prost-build", "0.14.6"): ("tonic", "0.14.6", {
         "LICENSE": "e24a56698aa6feaf3a02272b3624f9dc255d982970c5ed97ac4525a95056a5b3",
-    }, "21d24942a5a4a1806344beb331d4157d510a210c"),
+    }, "6cb6056b5a748bc5a29bd48f4602dbc4e552bb7d"),
 }
 
 
@@ -159,7 +159,7 @@ def collect_material(name: str, version: str, entries: dict[str, bytes],
             if relative != ".cargo_vcs_info.json":
                 material[f"source-supplement/{relative}"] = data
     if name == "rustls-webpki":
-        require(version == "0.103.15", "rustls-webpki notice review requires refresh for a new version")
+        require(version == "0.103.16", "rustls-webpki notice review requires refresh for a new version")
         lib = entries.get("src/lib.rs", b"")
         require(b"mod crl" in lib and b"mod subject_name" in lib,
                 "rustls-webpki production module scope changed")

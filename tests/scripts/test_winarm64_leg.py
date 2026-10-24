@@ -24,7 +24,7 @@ XPLAT_YML = ROOT / ".github" / "workflows" / "cross-platform.yml"
 TARGET = "aarch64-pc-windows-msvc"
 RUNNER = "windows-11-arm"
 RUST_PIN = "1.98.1"
-VS_SHELL_PIN = "egor-tensin/vs-shell@54e4148eac794e4580591c2e0b7750f14b7891fc"
+VS_SHELL_PIN = "egor-tensin/vs-shell@7710434f30f873ff4ab78184b74cc576a10726d6"
 COMPARE_OS = {"ubuntu-26.04", "ubuntu-26.04-arm", "macos-15",
               "windows-2022", "windows-2025"}
 

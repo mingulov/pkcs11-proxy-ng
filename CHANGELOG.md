@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Refresh compatible dependency locks, including rustls 0.23.46 and
+  rustls-webpki 0.103.16 for RUSTSEC-2026-0346 through RUSTSEC-2026-0349
+  and RUSTSEC-2026-0382, and tokio 1.54.1 for RUSTSEC-2026-0384 and
+  RUSTSEC-2026-0386 (tokio 1.54.0 is yanked). Applicability depends on the
+  enabled TLS features and trust configuration; this is not a claim that
+  every advisory was reachable in the proxy.
+
+### Changed
+
+- Refresh compatible CI action pins and mise while retaining Rust 1.98.1,
+  the Rust 1.88 MSRV, and existing dependency policy and CI gates.
+- Pin pkcs11-module to 0.2.0 for both workspace and packaged consumers until
+  its libloading 0.9 API transition can be migrated together with the loader.
+
 ## [0.2.2] - 2026-10-05
 
 v0.2.2 is a testing candidate that follows the published v0.2.1
