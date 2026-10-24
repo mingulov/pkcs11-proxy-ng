@@ -208,7 +208,6 @@ const IGNORED_TEST_TAXONOMY: &[IgnoredTestLane] = &[
         ],
     },
     IgnoredTestLane {
-<<<<<<< HEAD
         file: "crates/server/tests/q01_close_oracle_test.rs",
         reason: "Hook-gated Q01 close-path loaded-oracle coverage (real daemon stack)",
         commands: &[
@@ -219,14 +218,14 @@ const IGNORED_TEST_TAXONOMY: &[IgnoredTestLane] = &[
             "NSS softokn libsoftokn3.so and certutil",
             "native-owner-test-hooks feature build",
         ],
-=======
+    },
+    IgnoredTestLane {
         file: "crates/server/tests/shape_evidence_test.rs",
         reason: "Shape-evidence oracle controls (attempted vs init-accepted vs native-entered vs success, with backend-admission layer discrimination)",
         commands: &[
             "cargo test -p pkcs11-proxy-ng --test shape_evidence_test -- --ignored --test-threads=1",
         ],
         requirements: &["Entry-recording oracle build via PKCS11_PROXY_ENTRY_RECORDING_ORACLE_LIB"],
->>>>>>> 426ba5f (test(q07): separate RPC observations from proven native shape execution)
     },
     IgnoredTestLane {
         file: "crates/server/tests/softhsm_fixture_test.rs",
