@@ -1318,7 +1318,17 @@ mod output_cap_tests {
         // truncating `as` cast. Small values pass through on every host.
         assert_eq!(FfiBackend::ulong_len(7).unwrap(), 7);
         assert_eq!(FfiBackend::ulong_len_u64(7).unwrap(), 7);
-        assert_eq!(FfiBackend::ulong_len(usize::MAX).unwrap(), cryptoki_sys::CK_ULONG::MAX);
+        // `usize::MAX` fits in `CK_ULONG` on LP64 and ILP32; on
+        // LLP64-64 (64-bit Windows) it does not, and the checked
+        // convention fails loudly (FUNCTION_FAILED), never truncates.
+        // First proven by the win-arm64 leg (PR #44 CI): the old
+        // unconditional unwrap panicked there while win32-i686 stayed
+        // green only because its `usize` is 32-bit.
+        if size_of::<usize>() <= size_of::<cryptoki_sys::CK_ULONG>() {
+            assert_eq!(FfiBackend::ulong_len(usize::MAX).unwrap(), cryptoki_sys::CK_ULONG::MAX);
+        } else {
+            assert_eq!(FfiBackend::ulong_len(usize::MAX), Err(CkRv::FUNCTION_FAILED));
+        }
         let too_big = u64::from(u32::MAX) + 1;
         if size_of::<cryptoki_sys::CK_ULONG>() >= size_of::<u64>() {
             assert_eq!(FfiBackend::ulong_len_u64(u64::MAX).unwrap(), cryptoki_sys::CK_ULONG::MAX);

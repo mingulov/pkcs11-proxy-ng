@@ -400,16 +400,30 @@ jobs:
   # needs an ARM64 provider module plus an ADR-0014 scope update (out
   # of scope). Promote (continue-on-error to false) after the first
   # green leg, per the macos/windows-2025 precedent.
-  # KNOWN FAILURE: the shim CBC-matrix tests segfault
+  # KNOWN FAILURE (shim): the lib suite segfaults
   # (STATUS_ACCESS_VIOLATION) on windows-11-arm — first seen in PR
-  # CI with matrix_aes_cbc_encrypt_data, 7ms into the suite, while
+  # #44 CI with matrix_aes_cbc_encrypt_data, 7ms into the suite, while
   # the same tests pass on win-x64/i686 (release), Linux x64
-  # (release), and Linux/macOS ARM64 (debug). The family is cfg-gated
-  # on Windows ARM64 (see the KNOWN DEFECT note in
-  # mechanism_parameter_tests.rs) until the root cause — suspected
-  # AArch64 release codegen over the packed cryptoki structs, but
-  # unproven — is found. Do not promote this leg until the gate is
-  # lifted AND the leg is green.
+  # (release), and Linux/macOS ARM64 (debug). Gating the 5
+  # CBC-matrix tests (see the KNOWN DEFECT note in
+  # mechanism_parameter_tests.rs) did NOT stop the crash: the next
+  # run crashed after matrix_ccm_wrap completed, i.e. outside the
+  # CBC family; the crasher is unidentified (parallel harness) and
+  # the suspected AArch64 release codegen over packed cryptoki
+  # structs stays unproven. The gate remains as containment of the
+  # first crash site, not as a fix.
+  # KNOWN FAILURE (backend): 8 native-domain tests fail because
+  # win-ARM64 is deliberately unqualified (NATIVE_FFI_QUALIFIED
+  # excludes it): FfiBackend::load refuses at the platform check
+  # before the serial-contention logic runs, so
+  # t3_qualified_host_platform_check_is_ok and
+  # active_contention_denies_load fail directly, and the
+  # mid-state-machine panic poisons the global slot (AlreadyReserved
+  # cascade) for the 6 serial/sentinel/race siblings. Test-side
+  # assumptions, not product behavior. (The 9th backend failure,
+  # ulong_len on LLP64-64, was a test bug fixed separately.)
+  # Do not promote this leg until the gate is lifted AND the leg is
+  # green.
   win-arm64:
     name: win-arm64 build + lib tests (windows-11-arm, aarch64-pc-windows-msvc)
     runs-on: windows-11-arm
