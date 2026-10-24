@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 
 import yaml
@@ -616,6 +617,29 @@ class FeedbackWorkflowTests(unittest.TestCase):
         self.assertIn("python3 scripts/run-script-tests.py", commands)
         self.assertNotIn("|| true", commands)
         self.assertNotIn("--pattern", commands)
+
+    def test_script_gate_toolchain_covers_toolchain_file_components(self):
+        # Fix round 1 (F2a): the suite runs `cargo metadata` under the
+        # repo root, so rust-toolchain.toml's components must be
+        # preinstalled in the job — otherwise the first cargo invocation
+        # triggers a test-time rustup component install, which fails on
+        # a fresh minimal toolchain (`conflict: bin/cargo-fmt`) and
+        # errors test_package_manifests.setUpClass.
+        job = workflow()["jobs"].get("script-regressions", {})
+        toolchains = [step for step in job.get("steps", [])
+                      if "dtolnay/rust-toolchain@" in step.get("uses", "")]
+        self.assertEqual(len(toolchains), 1)
+        installed = {component.strip() for component in
+                     toolchains[0].get("with", {}).get("components", "").split(",")}
+        installed.discard("")
+        with (ROOT / "rust-toolchain.toml").open("rb") as handle:
+            required = set(tomllib.load(handle)["toolchain"]["components"])
+        self.assertTrue(required, "rust-toolchain.toml should require components")
+        self.assertTrue(
+            required <= installed,
+            f"script-regressions preinstalls {sorted(installed)}; "
+            f"rust-toolchain.toml requires {sorted(required)}",
+        )
 
     def test_native_gate_uses_strict_receipt_runner(self):
         job = workflow()["jobs"].get("native-contracts", {})

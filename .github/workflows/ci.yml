@@ -241,10 +241,16 @@ jobs:
 
       # Script tests exercise Cargo metadata and tiny offline lock fixtures;
       # they do not build the workspace or contact providers.
-      - name: Install pinned Rust toolchain
+      # rust-toolchain.toml requires rustfmt+clippy, so preinstall both:
+      # otherwise the first in-repo cargo invocation triggers a test-time
+      # rustup component install, which fails on a fresh minimal
+      # toolchain (observed: `conflict: bin/cargo-fmt`) and breaks
+      # test_package_manifests.setUpClass.
+      - name: Install pinned Rust toolchain with rustfmt and clippy
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: 1.98.1
+          components: rustfmt, clippy
 
       - name: Install pinned script-test dependencies in an isolated environment
         run: |
