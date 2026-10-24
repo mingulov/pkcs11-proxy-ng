@@ -242,7 +242,7 @@ jobs:
       # Script tests exercise Cargo metadata and tiny offline lock fixtures;
       # they do not build the workspace or contact providers.
       - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: 1.98.1
 
@@ -272,13 +272,13 @@ jobs:
           sudo apt-get install -y build-essential util-linux
 
       - name: Install protoc (pinned, matches mise.toml)
-        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5
+        uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
         with:
-          version: 2026.10.3
+          version: 2026.10.17
           install_args: "protoc"
 
       - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: 1.98.1
 
@@ -676,13 +676,13 @@ jobs:
           echo "CARGO_TARGET_DIR=$RUNNER_TEMP/pkg-consumers/target" >> "$GITHUB_ENV"
 
       - name: Install protoc (pinned, matches mise.toml)
-        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5
+        uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
         with:
-          version: 2026.10.3
+          version: 2026.10.17
           install_args: "protoc"
 
       - name: Install Rust 1.88.0 (consumer MSRV)
-        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: 1.88.0
 
