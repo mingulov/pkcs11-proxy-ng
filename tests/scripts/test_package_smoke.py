@@ -627,6 +627,29 @@ class CertGenerationTests(unittest.TestCase):
                 capture_output=True, text=True)
             self.assertEqual(client.returncode, 0, client.stderr)
 
+    def test_server_cert_carries_localhost_san(self):
+        # The smoke dials the daemon over localhost TLS: the server
+        # certificate must carry the loopback SAN (this is what the
+        # -extfile transfer in generate_mtls_certs is for).
+        if mod.shutil.which("openssl") is None:
+            self.skipTest("openssl unavailable")
+        with tempfile.TemporaryDirectory() as tmp:
+            certs = mod.generate_mtls_certs(tmp)
+            rendered = subprocess.run(
+                ["openssl", "x509", "-in", certs["server_cert"],
+                 "-noout", "-ext", "subjectAltName"],
+                capture_output=True, text=True)
+            self.assertEqual(rendered.returncode, 0, rendered.stderr)
+            self.assertIn("DNS:localhost", rendered.stdout)
+            self.assertIn("127.0.0.1", rendered.stdout)
+
+    def test_cert_generation_avoids_libressl_unsupported_flags(self):
+        # Fix round 1 (F3): macOS LibreSSL rejects `x509
+        # -copy_extensions` outright, so the smoke transfers the server
+        # SAN via the portable -extfile/-extensions pair instead. Never
+        # reintroduce the OpenSSL-only flag here.
+        self.assertNotIn("copy_extensions", SCRIPT.read_text(encoding="utf-8"))
+
 
 class TarballTests(unittest.TestCase):
     def test_round_trip_and_find_staged(self):

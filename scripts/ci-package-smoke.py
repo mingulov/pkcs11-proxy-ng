@@ -278,7 +278,16 @@ def generate_mtls_certs(workdir):
     os.makedirs(certs_dir, exist_ok=True)
     paths = {name: os.path.join(certs_dir, name)
              for name in ("ca.crt", "ca.key", "server.crt", "server.key",
-                          "server.csr", "client.crt", "client.key", "client.csr")}
+                          "server.csr", "server.ext", "client.crt", "client.key",
+                          "client.csr")}
+    # Portable SAN transfer: the x509 CSR-extension-copy flag exists
+    # only on OpenSSL 3.x — LibreSSL (macOS) rejects it outright
+    # (`x509: Unrecognized flag ...`). Spell the same extension out in
+    # an extfile instead; `-extfile`/`-extensions` is supported by both
+    # implementations.
+    with open(paths["server.ext"], "w", encoding="utf-8") as handle:
+        handle.write("[ server_cert ]\n"
+                     "subjectAltName=DNS:localhost,IP:127.0.0.1\n")
 
     def run_openssl(*args):
         result = subprocess.run([openssl, *args], text=True,
@@ -295,7 +304,8 @@ def generate_mtls_certs(workdir):
                 "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1")
     run_openssl("x509", "-req", "-in", paths["server.csr"],
                 "-CA", paths["ca.crt"], "-CAkey", paths["ca.key"], "-CAcreateserial",
-                "-days", "2", "-copy_extensions", "copy", "-out", paths["server.crt"])
+                "-days", "2", "-extfile", paths["server.ext"],
+                "-extensions", "server_cert", "-out", paths["server.crt"])
     run_openssl("req", "-newkey", "rsa:2048", "-nodes",
                 "-keyout", paths["client.key"], "-out", paths["client.csr"],
                 "-subj", "/CN=package-smoke-client")
