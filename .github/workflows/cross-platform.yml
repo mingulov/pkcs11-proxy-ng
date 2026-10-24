@@ -511,7 +511,9 @@ jobs:
           # still fails when any suite does.
           status=0
           cargo test --locked --release --target aarch64-pc-windows-msvc -p pkcs11-proxy-ng-types || status=1
-          cargo test --locked --release --target aarch64-pc-windows-msvc -p pkcs11-proxy-ng-shim --lib || status=1
+          # TEMP-DIAGNOSTIC (Task 4): serialize + JSON start events to NAME
+          # the STATUS_ACCESS_VIOLATION crasher. Revert before finishing.
+          cargo test --locked --release --target aarch64-pc-windows-msvc -p pkcs11-proxy-ng-shim --lib -- --test-threads=1 --format json || status=1
           cargo test --locked --release --target aarch64-pc-windows-msvc -p pkcs11-proxy-ng-backend --lib || status=1
           cargo test --locked --release --target aarch64-pc-windows-msvc -p pkcs11-proxy-ng --lib || status=1
           exit "$status"
