@@ -1817,6 +1817,45 @@ fn artifact_action_versions_are_uniform() {
 }
 
 #[test]
+fn download_artifact_versions_are_uniform() {
+    // Fix round 1 (F1 sweep): the rebased stack carried a stale
+    // download-artifact pin in the package-consumers job while every
+    // other site had moved on — the same drift class as the
+    // upload-artifact failure above, invisible to that gate. Every
+    // actions/download-artifact site pins the same SHA.
+    let root = workspace_root();
+    let mut pins: Vec<(String, String)> = Vec::new();
+    let workflows_dir = root.join(".github/workflows");
+    let mut names: Vec<String> = fs::read_dir(&workflows_dir)
+        .expect("workflows directory should be readable")
+        .map(|entry| entry.expect("workflow entry should be readable").file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".yml"))
+        .collect();
+    names.sort();
+    for workflow in &names {
+        let text = fs::read_to_string(workflows_dir.join(workflow))
+            .expect("workflow should be readable");
+        for line in text.lines() {
+            let Some(at) = line.find("actions/download-artifact@") else {
+                continue;
+            };
+            let rest = &line[at + "actions/download-artifact@".len()..];
+            let sha: String = rest.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
+            assert_eq!(sha.len(), 40, "download-artifact pin should be a full SHA: `{line}`");
+            pins.push((workflow.clone(), sha));
+        }
+    }
+    assert!(!pins.is_empty(), "expected download-artifact sites");
+    for (workflow, sha) in &pins {
+        assert_eq!(
+            sha, &pins[0].1,
+            "{workflow} download-artifact SHA should match the single pinned version"
+        );
+    }
+}
+
+#[test]
 fn deny_blocks_main_leg_with_standalone_coverage() {
     // W1-L17-15: Task 22 put deny on the build-and-test needs edge; this
     // gate confirms that coverage holds and closes the nightly residual
