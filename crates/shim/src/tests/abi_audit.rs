@@ -2,7 +2,13 @@ use super::*;
 
 #[test]
 fn ck_ulong_is_pointer_width() {
-    assert_eq!(std::mem::size_of::<CK_ULONG>(), std::mem::size_of::<usize>());
+    // CK_ULONG is the platform C ulong on every target; it coincides
+    // with the pointer width on LP64/ILP32 but is 32-bit on LLP64-64
+    // (64-bit Windows).
+    assert_eq!(std::mem::size_of::<CK_ULONG>(), std::mem::size_of::<core::ffi::c_ulong>());
+    if cfg!(not(all(target_pointer_width = "64", target_os = "windows"))) {
+        assert_eq!(std::mem::size_of::<CK_ULONG>(), std::mem::size_of::<usize>());
+    }
 }
 
 #[test]
