@@ -19,8 +19,8 @@ use super::super::authorization;
 use super::super::service_utils::{
     OpenSessionCompletionOwner, ck_rv_only, context_exists, current_context_operation_guard,
     current_peer, login_lock_timeout, principal_quota_key, register_session_handle,
-    resolve_session, resolve_slot, scope_context_operation, scope_peer_admission,
-    spawn_backend, spawn_backend_with_optional_timeout,
+    resolve_session, resolve_slot, scope_context_operation, scope_peer_admission, spawn_backend,
+    spawn_backend_with_optional_timeout,
 };
 
 pub(super) async fn open_session(
