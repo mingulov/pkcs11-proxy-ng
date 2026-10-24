@@ -279,7 +279,7 @@ def generate_mtls_certs(workdir):
     paths = {name: os.path.join(certs_dir, name)
              for name in ("ca.crt", "ca.key", "server.crt", "server.key",
                           "server.csr", "server.ext", "client.crt", "client.key",
-                          "client.csr")}
+                          "client.csr", "client.ext")}
     # Portable SAN transfer: the x509 CSR-extension-copy flag exists
     # only on OpenSSL 3.x — LibreSSL (macOS) rejects it outright
     # (`x509: Unrecognized flag ...`). Spell the same extension out in
@@ -288,6 +288,16 @@ def generate_mtls_certs(workdir):
     with open(paths["server.ext"], "w", encoding="utf-8") as handle:
         handle.write("[ server_cert ]\n"
                      "subjectAltName=DNS:localhost,IP:127.0.0.1\n")
+    # The client certificate needs an extension section too, for a
+    # different minter gap: a bare `x509 -req` emits X.509 v3 on
+    # OpenSSL 3.x (auto SKID/AKID) but v1 on LibreSSL — and rustls
+    # refuses a v1 client identity (`UnsupportedCertVersion`, surfaced
+    # opaquely as tonic "transport error" before any byte is dialed).
+    # Any extension forces v3 on both minters; basicConstraints is the
+    # standard end-entity marker.
+    with open(paths["client.ext"], "w", encoding="utf-8") as handle:
+        handle.write("[ client_cert ]\n"
+                     "basicConstraints=CA:FALSE\n")
 
     def run_openssl(*args):
         result = subprocess.run([openssl, *args], text=True,
@@ -311,7 +321,8 @@ def generate_mtls_certs(workdir):
                 "-subj", "/CN=package-smoke-client")
     run_openssl("x509", "-req", "-in", paths["client.csr"],
                 "-CA", paths["ca.crt"], "-CAkey", paths["ca.key"], "-CAcreateserial",
-                "-days", "2", "-out", paths["client.crt"])
+                "-days", "2", "-extfile", paths["client.ext"],
+                "-extensions", "client_cert", "-out", paths["client.crt"])
     for name in ("ca.key", "server.key", "client.key"):
         os.chmod(paths[name], 0o600)
     log(f"minted smoke mTLS certificates in {certs_dir}")

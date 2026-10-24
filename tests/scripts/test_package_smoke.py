@@ -650,6 +650,34 @@ class CertGenerationTests(unittest.TestCase):
         # reintroduce the OpenSSL-only flag here.
         self.assertNotIn("copy_extensions", SCRIPT.read_text(encoding="utf-8"))
 
+    def test_client_cert_is_version_3_end_entity(self):
+        # Fix round 2: a bare `x509 -req` emits X.509 v3 on OpenSSL 3.x
+        # but v1 on LibreSSL, and rustls refuses a v1 client identity
+        # (UnsupportedCertVersion) before dialing. The minted client
+        # certificate must therefore be v3 with an end-entity marker on
+        # every minter.
+        if mod.shutil.which("openssl") is None:
+            self.skipTest("openssl unavailable")
+        with tempfile.TemporaryDirectory() as tmp:
+            certs = mod.generate_mtls_certs(tmp)
+            rendered = subprocess.run(
+                ["openssl", "x509", "-in", certs["client_cert"],
+                 "-noout", "-text"],
+                capture_output=True, text=True)
+            self.assertEqual(rendered.returncode, 0, rendered.stderr)
+            self.assertIn("Version: 3", rendered.stdout)
+            self.assertIn("CA:FALSE", rendered.stdout)
+
+    def test_client_cert_wired_through_portable_extfile(self):
+        # Fix round 2 guard: the client `x509 -req` must carry the same
+        # portable -extfile/-extensions pair as the server call, so a
+        # future edit cannot silently drop back to a bare (v1 on
+        # LibreSSL) client certificate. Fails against the pre-fix
+        # script, which names no client_cert section.
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('"client.ext"', source)
+        self.assertIn('"-extensions", "client_cert"', source)
+
 
 class TarballTests(unittest.TestCase):
     def test_round_trip_and_find_staged(self):
