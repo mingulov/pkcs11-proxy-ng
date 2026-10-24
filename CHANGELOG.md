@@ -11,9 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Refresh compatible dependency locks, including rustls 0.23.46 and
   rustls-webpki 0.103.16 for RUSTSEC-2026-0346 through RUSTSEC-2026-0349
-  and RUSTSEC-2026-0382. Applicability depends on the enabled TLS features
-  and trust configuration; this is not a claim that every advisory was
-  reachable in the proxy.
+  and RUSTSEC-2026-0382, and tokio 1.54.1 for RUSTSEC-2026-0384 and
+  RUSTSEC-2026-0386 (tokio 1.54.0 is yanked). Applicability depends on the
+  enabled TLS features and trust configuration; this is not a claim that
+  every advisory was reachable in the proxy.
 
 ### Changed
 
