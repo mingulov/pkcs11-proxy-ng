@@ -95,13 +95,12 @@ deny = [
 # covered is already gone and the entry should be removed.
 skip = [
     { crate = "getrandom@0.2.17" },   # 0.2 line still used across the rand stack; 0.4.x is the other
-    { crate = "hashbrown@0.14.5" },   # pulled by older transitive deps; newest in tree is 0.16.x
+    { crate = "hashbrown@0.14.5" },   # pulled by older transitive deps; newest in tree is 0.17.x
     { crate = "hashbrown@0.15.5" },   # intermediate line, same reason
     { crate = "windows-sys@0.52.0" }, # transitive only; host target is Linux so it is never built
     # W1-L16-05 (provenance, intentionally NOT skip-listed): base64
-    # 0.21.7 arrives only via hdrhistogram 7 (server dev-deps:
-    # criterion 0.8 pins hdrhistogram ^7, plus the direct hdrhistogram
-    # 7 bench dep); the production tree is 0.22 via tonic. itertools
+    # 0.23.1 arrives only via pem 4 / rcgen 0.14 (server dev-deps);
+    # the production tree is 0.22 via tonic. itertools
     # 0.13.0 arrives only via criterion 0.8 (server dev-dep); the build
     # tree is 0.14 via prost-build. Both splits are ecosystem-forced
     # and uncollapsible without forking upstream, but deny's bans graph
