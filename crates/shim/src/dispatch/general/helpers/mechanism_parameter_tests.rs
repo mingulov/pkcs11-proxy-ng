@@ -520,6 +520,9 @@ fn reads_handle_string_and_sign_context_parameter_structs() {
     }
 
     #[repr(C)]
+    // Windows PKCS#11 headers are pack(1): natural repr would pad the
+    // CK_ULONG/pointer slots on win64 and diverge from the reader.
+    #[cfg_attr(windows, repr(packed))]
     struct TestSignAdditionalContext {
         hedge_variant: CK_ULONG,
         p_context: *mut CK_BYTE,
@@ -5634,6 +5637,9 @@ fn matrix_ecdh_aes_key_wrap() {
 }
 
 #[repr(C)]
+// Windows PKCS#11 headers are pack(1): natural repr would pad the
+// CK_ULONG/pointer slots on win64 and diverge from the reader.
+#[cfg_attr(windows, repr(packed))]
 struct R17SignAdditionalContext {
     hedge_variant: CK_ULONG,
     p_context: *mut CK_BYTE,
@@ -5641,6 +5647,9 @@ struct R17SignAdditionalContext {
 }
 
 #[repr(C)]
+// Windows PKCS#11 headers are pack(1): natural repr would pad the
+// CK_ULONG/pointer slots on win64 and diverge from the reader.
+#[cfg_attr(windows, repr(packed))]
 struct R17HashSignAdditionalContext {
     hedge_variant: CK_ULONG,
     p_context: *mut CK_BYTE,
