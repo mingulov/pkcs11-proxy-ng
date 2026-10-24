@@ -1834,8 +1834,8 @@ fn download_artifact_versions_are_uniform() {
         .collect();
     names.sort();
     for workflow in &names {
-        let text = fs::read_to_string(workflows_dir.join(workflow))
-            .expect("workflow should be readable");
+        let text =
+            fs::read_to_string(workflows_dir.join(workflow)).expect("workflow should be readable");
         for line in text.lines() {
             let Some(at) = line.find("actions/download-artifact@") else {
                 continue;
