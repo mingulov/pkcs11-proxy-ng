@@ -520,6 +520,9 @@ fn reads_handle_string_and_sign_context_parameter_structs() {
     }
 
     #[repr(C)]
+    // Windows PKCS#11 headers are pack(1): natural repr would pad the
+    // CK_ULONG/pointer slots on win64 and diverge from the reader.
+    #[cfg_attr(windows, repr(packed))]
     struct TestSignAdditionalContext {
         hedge_variant: CK_ULONG,
         p_context: *mut CK_BYTE,
@@ -844,16 +847,21 @@ fn wrap_key_reader_uses_v32_aead_wrap_shapes() {
 fn wrap_key_reader_uses_wrap_shapes_only_on_exact_v32_size() {
     let registry = default_registry();
 
+    // Five padding ulongs, not four: the v1 leg below reads through the
+    // forced-LP64 lens, whose GCM/CCM canonical size is 48 — and on win64
+    // the packed struct (32) plus four ulongs (16) lands exactly on 48,
+    // reading typed instead of oversized. Five keeps the extent larger
+    // than the wrap size yet noncanonical under every ABI lens.
     #[repr(C)]
     struct GcmWithPadding {
         params: CK_GCM_PARAMS,
-        padding: [CK_ULONG; 4],
+        padding: [CK_ULONG; 5],
     }
 
     #[repr(C)]
     struct CcmWithPadding {
         params: CK_CCM_PARAMS,
-        padding: [CK_ULONG; 4],
+        padding: [CK_ULONG; 5],
     }
 
     assert!(std::mem::size_of::<GcmWithPadding>() > std::mem::size_of::<CK_GCM_WRAP_PARAMS>());
@@ -870,7 +878,7 @@ fn wrap_key_reader_uses_wrap_shapes_only_on_exact_v32_size() {
             ulAADLen: gcm_aad.len() as CK_ULONG,
             ulTagBits: 128,
         },
-        padding: [0; 4],
+        padding: [0; 5],
     };
     let mechanism = CK_MECHANISM {
         mechanism: CKM_AES_GCM,
@@ -911,7 +919,7 @@ fn wrap_key_reader_uses_wrap_shapes_only_on_exact_v32_size() {
             ulAADLen: ccm_aad.len() as CK_ULONG,
             ulMACLen: 16,
         },
-        padding: [0; 4],
+        padding: [0; 5],
     };
     let mechanism = CK_MECHANISM {
         mechanism: CKM_AES_CCM,
@@ -3969,15 +3977,20 @@ fn legacy_capability_preservation() {
         other => panic!("legacy canonical GCM must stay typed, got {other:?}"),
     }
 
-    // Wrap-sized GCM under General ignores the wrap layouts in legacy too
-    // (registry shape "gcm", noncanonical length -> Raw).
-    // `ivGenerator: 0` (not `CKG_GENERATE`): reinterpreted as CK_GCM_PARAMS,
-    // that field becomes pAAD=NULL while ulAADLen becomes the (always
-    // nonzero) `pAAD` address bits, so the missing-embedded-pointer guard
-    // yields Raw deterministically on every platform. Any nonzero generator
-    // makes the outcome address-magnitude-dependent instead (native stack
-    // addresses trip the length cap; Miri's small addresses pass it and the
-    // copy faults) — see the Miri UB this leg caught pre-commit.
+    // Wrap-flavored bytes under General ignore the wrap layouts in legacy
+    // too (registry shape "gcm", noncanonical length -> Raw). The declared
+    // length is SHORT (sub-`CK_GCM_PARAMS`) so the Raw outcome rides the
+    // legacy gcm arm's explicit short branch on EVERY layout. A wrap-SIZED
+    // length would instead parse the buffer prefix as CK_GCM_PARAMS, and
+    // the reinterpreted embedded pointer is a layout coincidence: on
+    // LP64/ILP32 it lands NULL+huge (the missing-pointer guard yields
+    // Raw), but on win64 pack(1) the pointer slots shift and it lands
+    // wild-non-null with a small length, which the reader dereferences
+    // per its FFI contract (STATUS_ACCESS_VIOLATION — this block was the
+    // win-arm64 suite crasher). Never feed struct-confused overlong
+    // buffers to the legacy arms. Wrap-sized-under-General stays pinned
+    // where it is deterministic: `wrap_key_operation_context` (the v1
+    // exact-size gate rejects it with MPI on every layout).
     let mut wrap = CK_GCM_WRAP_PARAMS {
         pIv: iv.as_mut_ptr(),
         ulIvLen: iv.len() as CK_ULONG,
@@ -3987,17 +4000,20 @@ fn legacy_capability_preservation() {
         ulAADLen: aad.len() as CK_ULONG,
         ulTagBits: 128,
     };
+    let short = std::mem::size_of::<CK_GCM_PARAMS>() - 1;
     let mechanism = CK_MECHANISM {
         mechanism: CkMechanismType::AES_GCM.0 as CK_MECHANISM_TYPE,
         pParameter: &mut wrap as *mut _ as CK_VOID_PTR,
-        ulParameterLen: std::mem::size_of::<CK_GCM_WRAP_PARAMS>() as CK_ULONG,
+        ulParameterLen: short as CK_ULONG,
     };
     match unsafe { read_r11_legacy(&mechanism, &registry, Operation::General) }
         .expect("read mechanism")
         .params
     {
         Some(CkMechanismParams::Raw(_)) => {}
-        other => panic!("legacy General + wrap-sized GCM must emit Raw, got {other:?}"),
+        other => {
+            panic!("legacy General + short wrap-flavored GCM must emit Raw, got {other:?}")
+        }
     }
 }
 
@@ -5626,6 +5642,9 @@ fn matrix_ecdh_aes_key_wrap() {
 }
 
 #[repr(C)]
+// Windows PKCS#11 headers are pack(1): natural repr would pad the
+// CK_ULONG/pointer slots on win64 and diverge from the reader.
+#[cfg_attr(windows, repr(packed))]
 struct R17SignAdditionalContext {
     hedge_variant: CK_ULONG,
     p_context: *mut CK_BYTE,
@@ -5633,6 +5652,9 @@ struct R17SignAdditionalContext {
 }
 
 #[repr(C)]
+// Windows PKCS#11 headers are pack(1): natural repr would pad the
+// CK_ULONG/pointer slots on win64 and diverge from the reader.
+#[cfg_attr(windows, repr(packed))]
 struct R17HashSignAdditionalContext {
     hedge_variant: CK_ULONG,
     p_context: *mut CK_BYTE,
@@ -5705,16 +5727,6 @@ fn matrix_sign_additional_context() {
 
 /// R17 embedded-field matrix for `aes_cbc_encrypt_data` (single `data`
 /// field; the IV is a fixed inline array, not a pointer).
-// KNOWN DEFECT (win-arm64 segfault, PR #44 CI): matrix_aes died with
-// STATUS_ACCESS_VIOLATION on windows-11-arm before any sibling ran, so
-// the whole CBC-matrix family (one shared reader path) stays gated on
-// Windows ARM64 until the root cause is found. Narrowly scoped: every
-// other platform/profile runs these tests.
-// Update (PR #44 follow-up): gating did NOT stop the suite crash —
-// the next run segfaulted after matrix_ccm_wrap, outside this
-// family. This gate is containment of the first crash site only;
-// see the win-arm64 header in cross-platform.yml.
-#[cfg(not(all(target_arch = "aarch64", target_os = "windows")))]
 #[test]
 fn matrix_aes_cbc_encrypt_data() {
     let registry = pointer_shape_matrix_registry();
@@ -5748,16 +5760,6 @@ fn matrix_aes_cbc_encrypt_data() {
 }
 
 /// R17 embedded-field matrix for `des_cbc_encrypt_data`.
-// KNOWN DEFECT (win-arm64 segfault, PR #44 CI): matrix_aes died with
-// STATUS_ACCESS_VIOLATION on windows-11-arm before any sibling ran, so
-// the whole CBC-matrix family (one shared reader path) stays gated on
-// Windows ARM64 until the root cause is found. Narrowly scoped: every
-// other platform/profile runs these tests.
-// Update (PR #44 follow-up): gating did NOT stop the suite crash —
-// the next run segfaulted after matrix_ccm_wrap, outside this
-// family. This gate is containment of the first crash site only;
-// see the win-arm64 header in cross-platform.yml.
-#[cfg(not(all(target_arch = "aarch64", target_os = "windows")))]
 #[test]
 fn matrix_des_cbc_encrypt_data() {
     let registry = pointer_shape_matrix_registry();
@@ -5791,16 +5793,6 @@ fn matrix_des_cbc_encrypt_data() {
 }
 
 /// R17 embedded-field matrix for `camellia_cbc_encrypt_data`.
-// KNOWN DEFECT (win-arm64 segfault, PR #44 CI): matrix_aes died with
-// STATUS_ACCESS_VIOLATION on windows-11-arm before any sibling ran, so
-// the whole CBC-matrix family (one shared reader path) stays gated on
-// Windows ARM64 until the root cause is found. Narrowly scoped: every
-// other platform/profile runs these tests.
-// Update (PR #44 follow-up): gating did NOT stop the suite crash —
-// the next run segfaulted after matrix_ccm_wrap, outside this
-// family. This gate is containment of the first crash site only;
-// see the win-arm64 header in cross-platform.yml.
-#[cfg(not(all(target_arch = "aarch64", target_os = "windows")))]
 #[test]
 fn matrix_camellia_cbc_encrypt_data() {
     let registry = pointer_shape_matrix_registry();
@@ -5835,16 +5827,6 @@ fn matrix_camellia_cbc_encrypt_data() {
 }
 
 /// R17 embedded-field matrix for `aria_cbc_encrypt_data`.
-// KNOWN DEFECT (win-arm64 segfault, PR #44 CI): matrix_aes died with
-// STATUS_ACCESS_VIOLATION on windows-11-arm before any sibling ran, so
-// the whole CBC-matrix family (one shared reader path) stays gated on
-// Windows ARM64 until the root cause is found. Narrowly scoped: every
-// other platform/profile runs these tests.
-// Update (PR #44 follow-up): gating did NOT stop the suite crash —
-// the next run segfaulted after matrix_ccm_wrap, outside this
-// family. This gate is containment of the first crash site only;
-// see the win-arm64 header in cross-platform.yml.
-#[cfg(not(all(target_arch = "aarch64", target_os = "windows")))]
 #[test]
 fn matrix_aria_cbc_encrypt_data() {
     let registry = pointer_shape_matrix_registry();
@@ -5878,16 +5860,6 @@ fn matrix_aria_cbc_encrypt_data() {
 }
 
 /// R17 embedded-field matrix for `seed_cbc_encrypt_data`.
-// KNOWN DEFECT (win-arm64 segfault, PR #44 CI): matrix_aes died with
-// STATUS_ACCESS_VIOLATION on windows-11-arm before any sibling ran, so
-// the whole CBC-matrix family (one shared reader path) stays gated on
-// Windows ARM64 until the root cause is found. Narrowly scoped: every
-// other platform/profile runs these tests.
-// Update (PR #44 follow-up): gating did NOT stop the suite crash —
-// the next run segfaulted after matrix_ccm_wrap, outside this
-// family. This gate is containment of the first crash site only;
-// see the win-arm64 header in cross-platform.yml.
-#[cfg(not(all(target_arch = "aarch64", target_os = "windows")))]
 #[test]
 fn matrix_seed_cbc_encrypt_data() {
     let registry = pointer_shape_matrix_registry();

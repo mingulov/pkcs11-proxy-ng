@@ -115,11 +115,14 @@ fn sp800_out(handles: &[u64]) -> CkMechanismParams {
 
 #[test]
 fn transactional_sp800_last_handle_checked_before_any_write() {
-    // Entries [_,_] with daemon keys [ok, u64::MAX]: on narrow hosts the
-    // last handle is unrepresentable, so prepare fails and BOTH caller
-    // cells keep their sentinels. On 64-bit hosts u64::MAX fits and both
-    // write (the validate-before-commit ordering is host-independent;
-    // only the narrowing outcome differs).
+    // Entries [_,_] with daemon keys [ok, u64::MAX]: on narrow-handle
+    // hosts the last handle is unrepresentable, so prepare fails and
+    // BOTH caller cells keep their sentinels. On wide-handle hosts
+    // u64::MAX fits and both write (the validate-before-commit
+    // ordering is host-independent; only the narrowing outcome
+    // differs). The gate is the HANDLE width, not the pointer width:
+    // LLP64-64 (64-bit Windows) has 64-bit pointers with 32-bit
+    // CK_OBJECT_HANDLE, so u64::MAX refuses there like on ILP32.
     let mut cells = [SENTINEL_A, SENTINEL_B];
     let mut entries = [
         CK_DERIVED_KEY {
@@ -137,7 +140,7 @@ fn transactional_sp800_last_handle_checked_before_any_write() {
     let mut mechanism = sp800_mechanism(&mut params);
     let prepared =
         unsafe { prepare_mechanism_output_params(&mut mechanism, &sp800_out(&[11, u64::MAX])) };
-    if cfg!(target_pointer_width = "64") {
+    if std::mem::size_of::<CK_OBJECT_HANDLE>() >= std::mem::size_of::<u64>() {
         let plan = prepared.expect("u64::MAX fits a 64-bit handle");
         unsafe { plan.commit() };
         assert_eq!(cells, [11, CK_OBJECT_HANDLE::MAX]);

@@ -130,10 +130,14 @@ fn wait_wide_response_rv_checked_against_caller_width() {
     let rv = unsafe {
         dispatch::general::c_wait_for_slot_event(wait_flags(), &mut slot, std::ptr::null_mut())
     };
-    #[cfg(target_pointer_width = "64")]
-    assert_eq!(rv, (1u64 << 32) as CK_RV, "representable RV passes through");
-    #[cfg(target_pointer_width = "32")]
-    assert_eq!(rv, CKR_FUNCTION_FAILED as CK_RV, "wide RV must refuse on narrow callers");
+    // The gate is the CALLER WIDTH (CK_RV), not the pointer width:
+    // LLP64-64 (64-bit Windows) has 64-bit pointers with 32-bit CK_RV,
+    // so 2^32 refuses there like on ILP32.
+    if std::mem::size_of::<CK_RV>() >= std::mem::size_of::<u64>() {
+        assert_eq!(rv, (1u64 << 32) as CK_RV, "representable RV passes through");
+    } else {
+        assert_eq!(rv, CKR_FUNCTION_FAILED as CK_RV, "wide RV must refuse on narrow callers");
+    }
     assert_eq!(slot, CANARY_SLOT, "RV path must not write the caller slot");
 }
 
