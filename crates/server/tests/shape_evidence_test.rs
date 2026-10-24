@@ -66,7 +66,7 @@ use pkcs11_proxy_ng_types::{
     CkAttribute, CkAttributeType, CkAttributeValue, CkInBuf, CkInfo, CkMechanism, CkMechanismInfo,
     CkMechanismParams, CkMechanismType, CkObjectClass, CkObjectHandle, CkResult, CkRv,
     CkSessionFlags, CkSessionHandle, CkSessionInfo, CkSlotId, CkSlotInfo, CkTokenInfo, CkUserType,
-    GcmParams, InterfaceCapabilities, IvParams, MechanismRegistry, PointerBytes,
+    GcmParams, InitTokenLabel, InterfaceCapabilities, IvParams, MechanismRegistry, PointerBytes,
     RawMechanismParams, SecretBytes, ValidatedMechanismParams,
 };
 use tokio_stream::wrappers::TcpListenerStream;
@@ -501,7 +501,12 @@ impl Pkcs11Backend for AdmissionCountingBackend {
         self.inner.get_mechanism_info(slot_id, mech)
     }
 
-    fn init_token(&self, slot_id: CkSlotId, so_pin: Option<&[u8]>, label: &str) -> CkResult<()> {
+    fn init_token(
+        &self,
+        slot_id: CkSlotId,
+        so_pin: Option<&[u8]>,
+        label: InitTokenLabel<'_>,
+    ) -> CkResult<()> {
         self.inner.init_token(slot_id, so_pin, label)
     }
 
