@@ -97,9 +97,6 @@ unsafe fn parse_init_args(p_init_args: CK_VOID_PTR) -> Option<CK_RV> {
 
 pub unsafe extern "C" fn c_initialize(p_init_args: CK_VOID_PTR) -> CK_RV {
     catch_panics(|| {
-        // TEMPORARY-R2-DIAG (revert before merge): macOS smoke triage markers.
-        let init_start = std::time::Instant::now();
-        state::r2_diag("[r2diag] C_Initialize enter".to_string());
         // R10 step 4: conspicuous test-override marker in the shim log at
         // startup (empty stub without the custom cfg).
         crate::interface_probe::log_test_mechanism_params_v1_override_marker();
@@ -160,13 +157,7 @@ pub unsafe extern "C" fn c_initialize(p_init_args: CK_VOID_PTR) -> CK_RV {
 
         // Establish the gRPC connection outside block_on so that the
         // OnceLock init (which itself uses block_on) does not nest.
-        let ensured = state::ensure_client_connected();
-        state::r2_diag(format!(
-            "[r2diag] ensure_client_connected -> {} after {:?}",
-            if ensured.is_ok() { "ok" } else { "err" },
-            init_start.elapsed()
-        ));
-        if ensured.is_err() {
+        if state::ensure_client_connected().is_err() {
             tracing::error!("Failed to connect to proxy daemon");
             state::mark_finalized();
             // CKR_DEVICE_ERROR is not in the OASIS-permitted return set for
@@ -191,10 +182,6 @@ pub unsafe extern "C" fn c_initialize(p_init_args: CK_VOID_PTR) -> CK_RV {
                 Err(e) => rv_err(e),
             }
         });
-        state::r2_diag(format!(
-            "[r2diag] initialize RPC done rv={rv:#x} after {:?}",
-            init_start.elapsed()
-        ));
 
         // Roll back the flag if the server call failed.
         if rv != rv_ok() {

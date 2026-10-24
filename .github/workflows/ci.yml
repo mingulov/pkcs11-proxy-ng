@@ -1210,10 +1210,6 @@ jobs:
           path: ${{ runner.temp }}/smoke-macos/bundle
 
       - name: Extracted-bundle provider smoke
-        # TEMPORARY-R2-DIAG (revert before merge): daemon debug log for the
-        # macOS smoke triage (one iteration only).
-        env:
-          RUST_LOG: debug
         run: |
           set -euo pipefail
           mkdir -p "${{ runner.temp }}/smoke-macos/work"
