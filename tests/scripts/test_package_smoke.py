@@ -637,7 +637,7 @@ class CertGenerationTests(unittest.TestCase):
             certs = mod.generate_mtls_certs(tmp)
             rendered = subprocess.run(
                 ["openssl", "x509", "-in", certs["server_cert"],
-                 "-noout", "-ext", "subjectAltName"],
+                 "-noout", "-text"],
                 capture_output=True, text=True)
             self.assertEqual(rendered.returncode, 0, rendered.stderr)
             self.assertIn("DNS:localhost", rendered.stdout)
