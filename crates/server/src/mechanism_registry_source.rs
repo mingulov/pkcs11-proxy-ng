@@ -239,7 +239,43 @@ mod tests {
         assert_ne!(rev_a, rev_b);
         std::fs::write(&target, content_a).unwrap();
 
+        // Windows file semantics make two transient errors possible
+        // that POSIX rename never produces (observed on win32-2025):
+        // - the writer's rename can fail with PermissionDenied while a
+        //   reader holds the target open (sharing violation: readers
+        //   open without delete-sharing);
+        // - the reader's open can land in the non-atomic replace gap
+        //   (MoveFileEx delete+move exposes a transient NotFound).
+        // Both clear within microseconds; retry them boundedly with the
+        // repo's condition-based-waiting discipline (deadline + 1ms
+        // sleep, never an unbounded spin). Anything else — parse
+        // errors, pairing mismatches — still fails loudly: that is
+        // what this test proves.
+        fn rename_for_swap(tmp: &Path, target: &Path) {
+            let start = std::time::Instant::now();
+            let timeout = std::time::Duration::from_secs(10);
+            loop {
+                match std::fs::rename(tmp, target) {
+                    Ok(()) => return,
+                    Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                        if start.elapsed() > timeout {
+                            panic!(
+                                "rename {tmp:?} -> {target:?} still sharing-violated \
+                                 after {timeout:?}: {e}"
+                            );
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                    Err(e) => panic!("rename {tmp:?} -> {target:?} failed: {e}"),
+                }
+            }
+        }
+
         const ITERATIONS: usize = 1500;
+        // Consecutive NotFound cap: the replace gap is microseconds, so
+        // a longer streak means the file is really gone (fail loudly,
+        // never spin forever).
+        const NOT_FOUND_STREAK_CAP: usize = 1000;
         let stop = Arc::new(AtomicBool::new(false));
         let writer_stop = stop.clone();
         let writer_target = target.clone();
@@ -248,7 +284,7 @@ mod tests {
             for i in 0..ITERATIONS {
                 let content = if i % 2 == 0 { content_b } else { content_a };
                 std::fs::write(&tmp, content).unwrap();
-                std::fs::rename(&tmp, &writer_target).unwrap();
+                rename_for_swap(&tmp, &writer_target);
                 if writer_stop.load(Ordering::Relaxed) {
                     break;
                 }
@@ -256,14 +292,29 @@ mod tests {
         });
 
         let mut checked = 0usize;
-        for _ in 0..ITERATIONS {
+        let mut not_found_streak = 0usize;
+        while checked < ITERATIONS {
             let src = match MechanismRegistrySource::load(Some(target.as_path())) {
                 Ok(src) => src,
                 // A rename landing mid-read can only yield complete A or B
-                // (atomic rename); any error here is unexpected but must not
-                // mask a pairing violation, so fail loudly instead of skipping.
+                // on POSIX (atomic rename). On Windows the replace gap can
+                // additionally surface as NotFound ("(os error 2)" — the
+                // locale-independent raw-code suffix of the io::Error
+                // Display); retry those, fail loudly on anything else so a
+                // pairing violation is never masked by a skip.
+                Err(e) if e.contains("(os error 2)") => {
+                    not_found_streak += 1;
+                    assert!(
+                        not_found_streak <= NOT_FOUND_STREAK_CAP,
+                        "load hit NotFound {not_found_streak} times in a row; \
+                         the swapped file is really gone: {e}"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    continue;
+                }
                 Err(e) => panic!("load must succeed on atomically-swapped valid files: {e}"),
             };
+            not_found_streak = 0;
             let payload = src.current().unwrap();
             let has_a = payload.params.iter().any(|e| e.mechanisms.contains(&0x8000C302));
             let has_b = payload.params.iter().any(|e| e.mechanisms.contains(&0x8000C303));
