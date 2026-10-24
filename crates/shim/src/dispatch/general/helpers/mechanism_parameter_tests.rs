@@ -3969,15 +3969,20 @@ fn legacy_capability_preservation() {
         other => panic!("legacy canonical GCM must stay typed, got {other:?}"),
     }
 
-    // Wrap-sized GCM under General ignores the wrap layouts in legacy too
-    // (registry shape "gcm", noncanonical length -> Raw).
-    // `ivGenerator: 0` (not `CKG_GENERATE`): reinterpreted as CK_GCM_PARAMS,
-    // that field becomes pAAD=NULL while ulAADLen becomes the (always
-    // nonzero) `pAAD` address bits, so the missing-embedded-pointer guard
-    // yields Raw deterministically on every platform. Any nonzero generator
-    // makes the outcome address-magnitude-dependent instead (native stack
-    // addresses trip the length cap; Miri's small addresses pass it and the
-    // copy faults) — see the Miri UB this leg caught pre-commit.
+    // Wrap-flavored bytes under General ignore the wrap layouts in legacy
+    // too (registry shape "gcm", noncanonical length -> Raw). The declared
+    // length is SHORT (sub-`CK_GCM_PARAMS`) so the Raw outcome rides the
+    // legacy gcm arm's explicit short branch on EVERY layout. A wrap-SIZED
+    // length would instead parse the buffer prefix as CK_GCM_PARAMS, and
+    // the reinterpreted embedded pointer is a layout coincidence: on
+    // LP64/ILP32 it lands NULL+huge (the missing-pointer guard yields
+    // Raw), but on win64 pack(1) the pointer slots shift and it lands
+    // wild-non-null with a small length, which the reader dereferences
+    // per its FFI contract (STATUS_ACCESS_VIOLATION — this block was the
+    // win-arm64 suite crasher). Never feed struct-confused overlong
+    // buffers to the legacy arms. Wrap-sized-under-General stays pinned
+    // where it is deterministic: `wrap_key_operation_context` (the v1
+    // exact-size gate rejects it with MPI on every layout).
     let mut wrap = CK_GCM_WRAP_PARAMS {
         pIv: iv.as_mut_ptr(),
         ulIvLen: iv.len() as CK_ULONG,
@@ -3987,17 +3992,20 @@ fn legacy_capability_preservation() {
         ulAADLen: aad.len() as CK_ULONG,
         ulTagBits: 128,
     };
+    let short = std::mem::size_of::<CK_GCM_PARAMS>() - 1;
     let mechanism = CK_MECHANISM {
         mechanism: CkMechanismType::AES_GCM.0 as CK_MECHANISM_TYPE,
         pParameter: &mut wrap as *mut _ as CK_VOID_PTR,
-        ulParameterLen: std::mem::size_of::<CK_GCM_WRAP_PARAMS>() as CK_ULONG,
+        ulParameterLen: short as CK_ULONG,
     };
     match unsafe { read_r11_legacy(&mechanism, &registry, Operation::General) }
         .expect("read mechanism")
         .params
     {
         Some(CkMechanismParams::Raw(_)) => {}
-        other => panic!("legacy General + wrap-sized GCM must emit Raw, got {other:?}"),
+        other => {
+            panic!("legacy General + short wrap-flavored GCM must emit Raw, got {other:?}")
+        }
     }
 }
 
