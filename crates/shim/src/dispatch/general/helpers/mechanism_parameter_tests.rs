@@ -847,16 +847,21 @@ fn wrap_key_reader_uses_v32_aead_wrap_shapes() {
 fn wrap_key_reader_uses_wrap_shapes_only_on_exact_v32_size() {
     let registry = default_registry();
 
+    // Five padding ulongs, not four: the v1 leg below reads through the
+    // forced-LP64 lens, whose GCM/CCM canonical size is 48 — and on win64
+    // the packed struct (32) plus four ulongs (16) lands exactly on 48,
+    // reading typed instead of oversized. Five keeps the extent larger
+    // than the wrap size yet noncanonical under every ABI lens.
     #[repr(C)]
     struct GcmWithPadding {
         params: CK_GCM_PARAMS,
-        padding: [CK_ULONG; 4],
+        padding: [CK_ULONG; 5],
     }
 
     #[repr(C)]
     struct CcmWithPadding {
         params: CK_CCM_PARAMS,
-        padding: [CK_ULONG; 4],
+        padding: [CK_ULONG; 5],
     }
 
     assert!(std::mem::size_of::<GcmWithPadding>() > std::mem::size_of::<CK_GCM_WRAP_PARAMS>());
@@ -873,7 +878,7 @@ fn wrap_key_reader_uses_wrap_shapes_only_on_exact_v32_size() {
             ulAADLen: gcm_aad.len() as CK_ULONG,
             ulTagBits: 128,
         },
-        padding: [0; 4],
+        padding: [0; 5],
     };
     let mechanism = CK_MECHANISM {
         mechanism: CKM_AES_GCM,
@@ -914,7 +919,7 @@ fn wrap_key_reader_uses_wrap_shapes_only_on_exact_v32_size() {
             ulAADLen: ccm_aad.len() as CK_ULONG,
             ulMACLen: 16,
         },
-        padding: [0; 4],
+        padding: [0; 5],
     };
     let mechanism = CK_MECHANISM {
         mechanism: CKM_AES_CCM,
