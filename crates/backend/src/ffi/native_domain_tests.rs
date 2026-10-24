@@ -93,17 +93,37 @@ fn native_domain_global_serial_second_load_rejected_and_rollback() {
     let first = reserve_for_construction().expect("first reservation succeeds");
     let missing = std::path::Path::new("/nonexistent-pkcs11-proxy-ng-test-module.so");
     let err = FfiBackend::load(missing).map(|_| ()).expect_err("held reservation rejects load");
-    assert!(
-        err.contains("already reserved"),
-        "held reservation must reject before any loader attempt, got: {err}"
-    );
+    if NATIVE_FFI_QUALIFIED {
+        assert!(
+            err.contains("already reserved"),
+            "held reservation must reject before any loader attempt, got: {err}"
+        );
+    } else {
+        // Deliberately unqualified hosts (e.g. win-ARM64, excluded from
+        // NATIVE_FFI_QUALIFIED) refuse at the platform check before the
+        // contention logic runs: `load` checks the platform before the
+        // reservation, so even a held slot reports the platform refusal.
+        assert!(
+            err.contains("native FFI unavailable on this platform"),
+            "unqualified hosts must refuse before the contention logic, got: {err}"
+        );
+    }
     first.rollback_before_native();
     let retry_err =
         FfiBackend::load(missing).map(|_| ()).expect_err("retry after rollback still fails");
-    assert!(
-        retry_err.contains("native module load failed"),
-        "rolled-back registry must attempt loading again, got: {retry_err}"
-    );
+    if NATIVE_FFI_QUALIFIED {
+        assert!(
+            retry_err.contains("native module load failed"),
+            "rolled-back registry must attempt loading again, got: {retry_err}"
+        );
+    } else {
+        // Refusal precedes even `dlopen`: a loader attempt on this
+        // nonexistent path would fail as "native module load failed".
+        assert!(
+            retry_err.contains("native FFI unavailable on this platform"),
+            "unqualified hosts must refuse before any loader attempt, got: {retry_err}"
+        );
+    }
 }
 
 /// TO26a group 1: every pathname spelling of a second load — identical,
@@ -114,7 +134,9 @@ fn native_domain_global_serial_second_load_rejected_and_rollback() {
 /// loadable-lib control (libc, refused identically) proves refusal
 /// precedes even a `dlopen` that would succeed. Discovery is unreachable
 /// past this refusal for the same reason: any discovery attempt would
-/// surface its own error, never AlreadyReserved.
+/// surface its own error, never AlreadyReserved. On deliberately
+/// unqualified hosts (e.g. win-ARM64) the platform refusal preempts the
+/// contention logic instead, and is asserted explicitly per spelling.
 #[test]
 fn native_domain_global_serial_path_variants_refused_before_loader() {
     if cfg!(miri) {
@@ -161,21 +183,41 @@ fn native_domain_global_serial_path_variants_refused_before_loader() {
     };
     for path in &variants {
         let err = FfiBackend::load(path).map(|_| ()).expect_err("held slot rejects every spelling");
-        assert!(
-            err.contains("already reserved"),
-            "path {} must be refused before any loader attempt, got: {err}",
-            path.display()
-        );
+        if NATIVE_FFI_QUALIFIED {
+            assert!(
+                err.contains("already reserved"),
+                "path {} must be refused before any loader attempt, got: {err}",
+                path.display()
+            );
+        } else {
+            // Deliberately unqualified hosts (e.g. win-ARM64, excluded
+            // from NATIVE_FFI_QUALIFIED) refuse at the platform check
+            // before the contention logic runs, for every spelling.
+            assert!(
+                err.contains("native FFI unavailable on this platform"),
+                "path {} must be refused at the platform check, got: {err}",
+                path.display()
+            );
+        }
     }
     first.rollback_before_native();
     #[cfg(unix)]
     let _ = std::fs::remove_dir_all(&link_dir);
     let retry_err =
         FfiBackend::load(missing).map(|_| ()).expect_err("retry after rollback still fails");
-    assert!(
-        retry_err.contains("native module load failed"),
-        "rolled-back registry must attempt loading again, got: {retry_err}"
-    );
+    if NATIVE_FFI_QUALIFIED {
+        assert!(
+            retry_err.contains("native module load failed"),
+            "rolled-back registry must attempt loading again, got: {retry_err}"
+        );
+    } else {
+        // Refusal precedes even `dlopen`: a loader attempt on this
+        // nonexistent path would fail as "native module load failed".
+        assert!(
+            retry_err.contains("native FFI unavailable on this platform"),
+            "unqualified hosts must refuse before any loader attempt, got: {retry_err}"
+        );
+    }
 }
 
 /// TO26a group 1: an Active slot refuses a second constructor before any
@@ -192,10 +234,20 @@ fn native_domain_global_serial_active_contention_denies_load() {
     first.activate().expect("owner activates");
     let missing = std::path::Path::new("/nonexistent-pkcs11-proxy-ng-test-module.so");
     let err = FfiBackend::load(missing).map(|_| ()).expect_err("Active slot rejects load");
-    assert!(
-        err.contains("already reserved"),
-        "Active contention must refuse before any loader attempt, got: {err}"
-    );
+    if NATIVE_FFI_QUALIFIED {
+        assert!(
+            err.contains("already reserved"),
+            "Active contention must refuse before any loader attempt, got: {err}"
+        );
+    } else {
+        // Deliberately unqualified hosts (e.g. win-ARM64, excluded from
+        // NATIVE_FFI_QUALIFIED) refuse at the platform check before the
+        // contention logic runs.
+        assert!(
+            err.contains("native FFI unavailable on this platform"),
+            "unqualified hosts must refuse before the contention logic, got: {err}"
+        );
+    }
     assert!(first.begin_retirement(), "owner enters Retiring");
     assert!(ConstructionPermit::release_if_owner(first.epoch), "completed unload publishes Vacant");
     first.rollback_before_native();
@@ -217,10 +269,20 @@ fn native_domain_global_serial_retiring_contention_denies_load() {
     assert!(first.begin_retirement(), "owner enters Retiring");
     let missing = std::path::Path::new("/nonexistent-pkcs11-proxy-ng-test-module.so");
     let err = FfiBackend::load(missing).map(|_| ()).expect_err("Retiring slot rejects load");
-    assert!(
-        err.contains("already reserved"),
-        "Retiring contention must refuse before any loader attempt, got: {err}"
-    );
+    if NATIVE_FFI_QUALIFIED {
+        assert!(
+            err.contains("already reserved"),
+            "Retiring contention must refuse before any loader attempt, got: {err}"
+        );
+    } else {
+        // Deliberately unqualified hosts (e.g. win-ARM64, excluded from
+        // NATIVE_FFI_QUALIFIED) refuse at the platform check before the
+        // contention logic runs.
+        assert!(
+            err.contains("native FFI unavailable on this platform"),
+            "unqualified hosts must refuse before the contention logic, got: {err}"
+        );
+    }
     assert!(ConstructionPermit::release_if_owner(first.epoch), "completed unload publishes Vacant");
     first.rollback_before_native();
     reserve_for_construction().expect("slot reusable").rollback_before_native();
@@ -232,6 +294,18 @@ fn native_domain_global_serial_retiring_contention_denies_load() {
 /// because `reserve_for_construction` is the gate `load` checks first).
 #[test]
 fn native_domain_global_serial_constructor_race_exactly_one_wins() {
+    // The reservation race is platform-independent; on deliberately
+    // unqualified hosts (e.g. win-ARM64, excluded from
+    // NATIVE_FFI_QUALIFIED) first pin the explicit platform refusal,
+    // then run the identical race below. (This test failed on win-ARM64
+    // only via the AlreadyReserved cascade from siblings that panicked
+    // mid-state-machine.)
+    if !NATIVE_FFI_QUALIFIED {
+        assert!(
+            matches!(check_native_platform(), Err(DomainError::UnsupportedPlatform { .. })),
+            "unqualified hosts must refuse at the platform check"
+        );
+    }
     let _serial = serial_domain_test_guard();
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
     let mut winners = 0u32;
@@ -548,6 +622,16 @@ fn native_domain_unmanaged_sentinel_drop_touches_nothing() {
     // The unmanaged sentinel pairs with unmanaged test backends: its
     // epoch matches no live reservation, so dropping it never mutates
     // the registry (a stale release is a pure no-op).
+    // On deliberately unqualified hosts (e.g. win-ARM64, excluded from
+    // NATIVE_FFI_QUALIFIED) first pin the explicit platform refusal.
+    // (This test failed on win-ARM64 only via the AlreadyReserved
+    // cascade from siblings that panicked mid-state-machine.)
+    if !NATIVE_FFI_QUALIFIED {
+        assert!(
+            matches!(check_native_platform(), Err(DomainError::UnsupportedPlatform { .. })),
+            "unqualified hosts must refuse at the platform check"
+        );
+    }
     let _serial = serial_domain_test_guard();
     drop(RetirementSentinel::unmanaged_test_only());
     reserve_for_construction().expect("slot untouched").rollback_before_native();
@@ -562,6 +646,18 @@ fn native_domain_global_serial_release_drop_recycles_after_full_retirement() {
     if cfg!(miri) {
         eprintln!("skipping: managed backend needs dlopen/dlclose; covered natively");
         return;
+    }
+    // Reservation/retirement is platform-independent; on deliberately
+    // unqualified hosts (e.g. win-ARM64, excluded from
+    // NATIVE_FFI_QUALIFIED) first pin the explicit platform refusal,
+    // then run the identical retirement proof below. (This test failed
+    // on win-ARM64 only via the AlreadyReserved cascade from siblings
+    // that panicked mid-state-machine.)
+    if !NATIVE_FFI_QUALIFIED {
+        assert!(
+            matches!(check_native_platform(), Err(DomainError::UnsupportedPlatform { .. })),
+            "unqualified hosts must refuse at the platform check"
+        );
     }
     let _serial = serial_domain_test_guard();
     let permit = reserve_for_construction().expect("first reservation succeeds");

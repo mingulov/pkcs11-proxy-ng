@@ -1,6 +1,6 @@
 """Windows ARM64 CI leg tests (cross-platform.yml).
 
-The ``win-arm64`` job gives experimental native ARM64 coverage —
+The ``win-arm64`` job gives voting native ARM64 coverage —
 build plus lib suites on ``windows-11-arm`` — mirroring the
 ``win32`` job's shape. It is deliberately NOT a provider
 comparison: the pinned Windows SoftHSM2 module is x64-only and
@@ -44,13 +44,13 @@ class WinArm64LegTests(unittest.TestCase):
     def job(self):
         return load_workflow()["jobs"]["win-arm64"]
 
-    def test_leg_runs_native_arm64_experimentally(self):
+    def test_leg_runs_native_arm64_as_voting(self):
         job = self.job()
         self.assertEqual(job.get("runs-on"), RUNNER)
         self.assertIn("timeout-minutes", job)
-        # Experimental until the first green leg (win32/macOS
-        # precedent): failures must not fail the workflow.
-        self.assertTrue(job.get("continue-on-error"))
+        # Promoted to voting 2026-10-24 after two consecutive green
+        # legs (win32/macOS precedent): failures fail the workflow.
+        self.assertFalse(job.get("continue-on-error"))
 
     def test_toolchain_carries_arm64_target(self):
         steps = [step for step in self.job().get("steps", [])

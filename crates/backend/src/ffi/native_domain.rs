@@ -1592,11 +1592,22 @@ mod tests {
 
     #[test]
     fn t3_qualified_host_platform_check_is_ok() {
-        // This test runs on a qualified native-FFI host (Linux GNU/musl
-        // x86_64/x86/aarch64, macOS aarch64/x86_64, Windows MSVC x86_64/x86);
-        // const itself is covered by
+        // The platform gate must agree with the build-time qualifier:
+        // qualified hosts (Linux GNU/musl x86_64/x86/aarch64, macOS
+        // aarch64/x86_64, Windows MSVC x86_64/x86) pass; deliberately
+        // unqualified hosts (e.g. win-ARM64, which NATIVE_FFI_QUALIFIED
+        // excludes) refuse with UnsupportedPlatform before any
+        // reservation or loader attempt. Qualifier/gate agreement
+        // itself is covered by
         // `native_domain_current_host_reports_qualified_or_refuses`.
-        assert!(check_native_platform().is_ok());
+        if NATIVE_FFI_QUALIFIED {
+            assert!(check_native_platform().is_ok());
+        } else {
+            assert!(
+                matches!(check_native_platform(), Err(DomainError::UnsupportedPlatform { .. })),
+                "unqualified hosts must refuse at the platform check"
+            );
+        }
     }
 
     #[test]
