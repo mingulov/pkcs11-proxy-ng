@@ -5713,16 +5713,6 @@ fn matrix_sign_additional_context() {
 
 /// R17 embedded-field matrix for `aes_cbc_encrypt_data` (single `data`
 /// field; the IV is a fixed inline array, not a pointer).
-// KNOWN DEFECT (win-arm64 segfault, PR #44 CI): matrix_aes died with
-// STATUS_ACCESS_VIOLATION on windows-11-arm before any sibling ran, so
-// the whole CBC-matrix family (one shared reader path) stays gated on
-// Windows ARM64 until the root cause is found. Narrowly scoped: every
-// other platform/profile runs these tests.
-// Update (PR #44 follow-up): gating did NOT stop the suite crash —
-// the next run segfaulted after matrix_ccm_wrap, outside this
-// family. This gate is containment of the first crash site only;
-// see the win-arm64 header in cross-platform.yml.
-#[cfg(not(all(target_arch = "aarch64", target_os = "windows")))]
 #[test]
 fn matrix_aes_cbc_encrypt_data() {
     let registry = pointer_shape_matrix_registry();
@@ -5756,16 +5746,6 @@ fn matrix_aes_cbc_encrypt_data() {
 }
 
 /// R17 embedded-field matrix for `des_cbc_encrypt_data`.
-// KNOWN DEFECT (win-arm64 segfault, PR #44 CI): matrix_aes died with
-// STATUS_ACCESS_VIOLATION on windows-11-arm before any sibling ran, so
-// the whole CBC-matrix family (one shared reader path) stays gated on
-// Windows ARM64 until the root cause is found. Narrowly scoped: every
-// other platform/profile runs these tests.
-// Update (PR #44 follow-up): gating did NOT stop the suite crash —
-// the next run segfaulted after matrix_ccm_wrap, outside this
-// family. This gate is containment of the first crash site only;
-// see the win-arm64 header in cross-platform.yml.
-#[cfg(not(all(target_arch = "aarch64", target_os = "windows")))]
 #[test]
 fn matrix_des_cbc_encrypt_data() {
     let registry = pointer_shape_matrix_registry();
@@ -5799,16 +5779,6 @@ fn matrix_des_cbc_encrypt_data() {
 }
 
 /// R17 embedded-field matrix for `camellia_cbc_encrypt_data`.
-// KNOWN DEFECT (win-arm64 segfault, PR #44 CI): matrix_aes died with
-// STATUS_ACCESS_VIOLATION on windows-11-arm before any sibling ran, so
-// the whole CBC-matrix family (one shared reader path) stays gated on
-// Windows ARM64 until the root cause is found. Narrowly scoped: every
-// other platform/profile runs these tests.
-// Update (PR #44 follow-up): gating did NOT stop the suite crash —
-// the next run segfaulted after matrix_ccm_wrap, outside this
-// family. This gate is containment of the first crash site only;
-// see the win-arm64 header in cross-platform.yml.
-#[cfg(not(all(target_arch = "aarch64", target_os = "windows")))]
 #[test]
 fn matrix_camellia_cbc_encrypt_data() {
     let registry = pointer_shape_matrix_registry();
@@ -5843,16 +5813,6 @@ fn matrix_camellia_cbc_encrypt_data() {
 }
 
 /// R17 embedded-field matrix for `aria_cbc_encrypt_data`.
-// KNOWN DEFECT (win-arm64 segfault, PR #44 CI): matrix_aes died with
-// STATUS_ACCESS_VIOLATION on windows-11-arm before any sibling ran, so
-// the whole CBC-matrix family (one shared reader path) stays gated on
-// Windows ARM64 until the root cause is found. Narrowly scoped: every
-// other platform/profile runs these tests.
-// Update (PR #44 follow-up): gating did NOT stop the suite crash —
-// the next run segfaulted after matrix_ccm_wrap, outside this
-// family. This gate is containment of the first crash site only;
-// see the win-arm64 header in cross-platform.yml.
-#[cfg(not(all(target_arch = "aarch64", target_os = "windows")))]
 #[test]
 fn matrix_aria_cbc_encrypt_data() {
     let registry = pointer_shape_matrix_registry();
@@ -5886,16 +5846,6 @@ fn matrix_aria_cbc_encrypt_data() {
 }
 
 /// R17 embedded-field matrix for `seed_cbc_encrypt_data`.
-// KNOWN DEFECT (win-arm64 segfault, PR #44 CI): matrix_aes died with
-// STATUS_ACCESS_VIOLATION on windows-11-arm before any sibling ran, so
-// the whole CBC-matrix family (one shared reader path) stays gated on
-// Windows ARM64 until the root cause is found. Narrowly scoped: every
-// other platform/profile runs these tests.
-// Update (PR #44 follow-up): gating did NOT stop the suite crash —
-// the next run segfaulted after matrix_ccm_wrap, outside this
-// family. This gate is containment of the first crash site only;
-// see the win-arm64 header in cross-platform.yml.
-#[cfg(not(all(target_arch = "aarch64", target_os = "windows")))]
 #[test]
 fn matrix_seed_cbc_encrypt_data() {
     let registry = pointer_shape_matrix_registry();
