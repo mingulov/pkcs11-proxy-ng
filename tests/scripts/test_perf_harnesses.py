@@ -1167,12 +1167,21 @@ sys.exit(main(sys.argv[1:]))
 
 
 def session_members(sid):
-    """PIDs whose session id is *sid* (via /proc, no external tools).
+    """Live PIDs whose session id is *sid* (via /proc, no external tools).
 
     The repaired script runs each owned job in its own process group
     (job control), so a group scan would miss strays; the session still
     contains exactly the run's processes (each run starts its own
     session and nothing it spawns calls setsid).
+
+    Zombies are excluded: a zombie is dead (its killer already
+    delivered), and only its adopter — PID 1 once the run's shell has
+    exited — can reap it. The harness's own join contract
+    (wait_until_gone) likewise treats zombie as settled. Counting
+    zombies would test the host init's reaping instead of the script:
+    under a non-reaping init (containerized CI) every run's orphans
+    linger as session zombies and fail the oracle deterministically,
+    while under systemd they vanish in milliseconds.
     """
     members = []
     want = str(sid)
@@ -1187,7 +1196,7 @@ def session_members(sid):
         if rparen < 0:
             continue
         fields = stat_text[rparen + 2:].split()
-        if len(fields) >= 4 and fields[3] == want:
+        if len(fields) >= 4 and fields[3] == want and fields[0] != "Z":
             members.append(int(entry.name))
     return sorted(members)
 
