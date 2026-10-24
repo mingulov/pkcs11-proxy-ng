@@ -16,6 +16,8 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 import zipfile
 from pathlib import Path
@@ -218,6 +220,76 @@ class DaemonStartupCleanupTests(unittest.TestCase):
         proc.kill.assert_called_once_with()
         self.assertEqual(proc.wait.call_count, 2,
                          "stop must wait again after killing")
+
+
+class DaemonLogAssertionTests(unittest.TestCase):
+    def test_slow_appearing_lines_pass(self):
+        # Fix round 3: the readiness gate passes on socket-bind, which
+        # precedes the async tracing flush — a writer thread stands in
+        # for the late flush. The assertion must poll, not read once:
+        # the needles are VERIFIED absent at call time, so a single
+        # immediate read would fail this test deterministically.
+        with tempfile.TemporaryDirectory() as tmp:
+            log = os.path.join(tmp, "daemon.log")
+            Path(log).write_text("starting up\n", encoding="utf-8")
+            pre = Path(log).read_text(encoding="utf-8")
+            self.assertNotIn(mod.DAEMON_LOG_TCP, pre)
+            self.assertNotIn(mod.DAEMON_LOG_REGISTRY, pre)
+
+            def late_flush():
+                time.sleep(0.3)
+                with open(log, "a", encoding="utf-8") as handle:
+                    handle.write(f"{mod.DAEMON_LOG_REGISTRY} for 42 mechanisms\n"
+                                 "listening on tcp addr=127.0.0.1:1 auth=Mtls\n"
+                                 "listening on unix socket path=/tmp/x.sock\n")
+
+            writer = threading.Thread(target=late_flush, daemon=True)
+            writer.start()
+            try:
+                mod.assert_daemon_logs(log, mtls=True, uds=True)
+            finally:
+                writer.join(timeout=10)
+            self.assertFalse(writer.is_alive(), "writer thread must finish")
+
+    def test_genuinely_missing_line_fails_closed(self):
+        # Polling must not weaken the gate: a line that never arrives
+        # still fails loudly after the deadline, with the exact
+        # historical message.
+        with tempfile.TemporaryDirectory() as tmp:
+            log = os.path.join(tmp, "daemon.log")
+            Path(log).write_text(f"{mod.DAEMON_LOG_REGISTRY} for 42 mechanisms\n",
+                                 encoding="utf-8")
+            with self.assertRaises(SystemExit) as ctx:
+                mod.assert_daemon_logs(log, mtls=True, uds=False, timeout_s=0.2)
+            self.assertEqual(str(ctx.exception.code),
+                             f"daemon log missing {mod.DAEMON_LOG_TCP!r}; see {log}")
+
+    def test_plaintext_warn_still_required(self):
+        # Plaintext posture without its loud warning keeps the exact
+        # historical message (polled, then fail-closed).
+        with tempfile.TemporaryDirectory() as tmp:
+            log = os.path.join(tmp, "daemon.log")
+            Path(log).write_text(f"{mod.DAEMON_LOG_REGISTRY} for 42 mechanisms\n"
+                                 "listening on tcp addr=127.0.0.1:1 auth=None\n",
+                                 encoding="utf-8")
+            with self.assertRaises(SystemExit) as ctx:
+                mod.assert_daemon_logs(log, mtls=False, uds=False, timeout_s=0.2)
+            self.assertEqual(str(ctx.exception.code),
+                             f"plaintext daemon hid its loud warning; see {log}")
+
+    def test_mtls_warn_rejected(self):
+        # mTLS posture that logged the plaintext warning is still a
+        # loud failure with the exact historical message.
+        with tempfile.TemporaryDirectory() as tmp:
+            log = os.path.join(tmp, "daemon.log")
+            Path(log).write_text(f"{mod.DAEMON_LOG_REGISTRY} for 42 mechanisms\n"
+                                 "listening on tcp addr=127.0.0.1:1 auth=Mtls\n"
+                                 f"{mod.DAEMON_LOG_TCP_WARN} oops\n",
+                                 encoding="utf-8")
+            with self.assertRaises(SystemExit) as ctx:
+                mod.assert_daemon_logs(log, mtls=True, uds=False)
+            self.assertEqual(str(ctx.exception.code),
+                             f"mTLS daemon logged plaintext mode; see {log}")
 
 
 class WindowsProvisioningTests(unittest.TestCase):

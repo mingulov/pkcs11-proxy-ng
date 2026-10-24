@@ -69,6 +69,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import time
 from pathlib import Path
 
 # Drift-checked mirror of the pin enforced by provision_softhsm_windows
@@ -466,19 +467,44 @@ def stop_smoke_daemon(proc):
         proc.wait(timeout=30)
 
 
-def assert_daemon_logs(daemon_log, *, mtls, uds):
-    """Check the daemon logged the rendered posture (and no downgrade)."""
-    with open(daemon_log, encoding="utf-8", errors="replace") as handle:
-        daemon_text = handle.read()
-    for needle in (DAEMON_LOG_TCP, DAEMON_LOG_REGISTRY):
-        if needle not in daemon_text:
-            raise SystemExit(f"daemon log missing {needle!r}; see {daemon_log}")
-    if uds and "listening on unix socket" not in daemon_text:
-        raise SystemExit(f"daemon log missing 'listening on unix socket'; see {daemon_log}")
+def assert_daemon_logs(daemon_log, *, mtls, uds, timeout_s=30):
+    """Check the daemon logged the rendered posture (and no downgrade).
+
+    The readiness gate passes on socket-bind, which the daemon reaches
+    *before* its async tracing pipeline flushes the startup lines — so
+    poll for the positive needles (condition-based wait: deadline +
+    short sleep, mirroring wait_for_port) instead of a single immediate
+    read. Failure messages are unchanged, and a genuinely missing line
+    still fails loudly after the deadline.
+    """
+    deadline = time.monotonic() + timeout_s
+    daemon_text = ""
+    while True:
+        try:
+            with open(daemon_log, encoding="utf-8", errors="replace") as handle:
+                daemon_text = handle.read()
+        except OSError:
+            daemon_text = ""
+        tcp_ok = DAEMON_LOG_TCP in daemon_text
+        registry_ok = DAEMON_LOG_REGISTRY in daemon_text
+        uds_ok = not uds or "listening on unix socket" in daemon_text
+        warn_ok = mtls or DAEMON_LOG_TCP_WARN in daemon_text
+        if tcp_ok and registry_ok and uds_ok and warn_ok:
+            break
+        if time.monotonic() >= deadline:
+            if not tcp_ok:
+                raise SystemExit(f"daemon log missing {DAEMON_LOG_TCP!r}; see {daemon_log}")
+            if not registry_ok:
+                raise SystemExit(
+                    f"daemon log missing {DAEMON_LOG_REGISTRY!r}; see {daemon_log}")
+            if not uds_ok:
+                raise SystemExit(
+                    "daemon log missing 'listening on unix socket';"
+                    f" see {daemon_log}")
+            raise SystemExit(f"plaintext daemon hid its loud warning; see {daemon_log}")
+        time.sleep(0.05)
     if mtls and DAEMON_LOG_TCP_WARN in daemon_text:
         raise SystemExit(f"mTLS daemon logged plaintext mode; see {daemon_log}")
-    if not mtls and DAEMON_LOG_TCP_WARN not in daemon_text:
-        raise SystemExit(f"plaintext daemon hid its loud warning; see {daemon_log}")
     log("daemon up; startup assertions observed")
 
 
