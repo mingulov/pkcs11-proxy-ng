@@ -38,7 +38,7 @@ module = "/CHANGE_ME/path/to/backend.so"
 # limit refuses a second concurrent client; it does not establish
 # multi-client isolation and does not clear native login state.
 max_contexts = 1
-# Production runs longer-lived contexts; default 30s is fine but
+# Production runs longer-lived contexts; the 3600s default is fine but
 # tune up if your apps do heavy session reuse.
 lease_seconds = 30
 # Generous concurrency — real HSMs handle parallel calls well.
