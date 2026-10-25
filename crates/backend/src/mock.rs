@@ -62,6 +62,18 @@ struct OpenSessionRendezvous {
     release: std::sync::mpsc::Receiver<()>,
 }
 
+/// One-shot rendezvous gate for slow-mint simulation (P2-13): the next
+/// handle-minting call (create/copy object, generate/derive/unwrap,
+/// encapsulate/decapsulate) signals on `entered` with the op name,
+/// blocks on `release`, then proceeds with the real allocation.
+/// Taken (not cloned) so only the first mint parks — settlement
+/// destroys and later calls run normally, which keeps multi-RPC
+/// tests deadlock-free.
+struct MintRendezvous {
+    entered: std::sync::mpsc::Sender<&'static str>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
 /// Predicate over a `find_objects_init` template: installed with
 /// [`MockBackend::set_find_template_gate`] so `find_objects` can simulate
 /// class-sensitive search.
@@ -299,6 +311,12 @@ pub struct MockBackend {
     /// may arrive after caller cancellation. Set via
     /// [`MockBackend::set_open_session_gate`].
     open_session_gate: Mutex<Option<OpenSessionRendezvous>>,
+    /// One-shot gate for the next handle-minting call (P2-13): signals
+    /// entry with the op name, parks until release, then proceeds with
+    /// the real allocation — modeling a slow provider mint whose
+    /// result may arrive after caller cancellation. Set via
+    /// [`MockBackend::set_mint_gate`].
+    mint_gate: Mutex<Option<MintRendezvous>>,
     /// Error that `login` specifically returns (before `login_impl`). Used to
     /// simulate PIN failures (e.g. CKR_PIN_INCORRECT) so tests can exercise
     /// the per-slot failed-login budget without a real PKCS#11 module.
@@ -554,6 +572,7 @@ impl MockBackend {
             interface_caps_gate: Mutex::new(None),
             interface_caps_calls: AtomicUsize::new(0),
             open_session_gate: Mutex::new(None),
+            mint_gate: Mutex::new(None),
             injected_login_rv: Mutex::new(None),
             encrypt_init_output: Mutex::new(None),
             encrypt_operation_output: Mutex::new(None),
@@ -1138,6 +1157,32 @@ impl MockBackend {
         release: std::sync::mpsc::Receiver<()>,
     ) {
         *self.open_session_gate.lock().unwrap() = Some(OpenSessionRendezvous { entered, release });
+    }
+
+    /// Install a one-shot gate for the next handle-minting call
+    /// (P2-13): it signals `entered` with the op name, blocks until
+    /// `release` fires, then proceeds with the real allocation. Only
+    /// the first mint parks; later calls run normally.
+    pub fn set_mint_gate(
+        &self,
+        entered: std::sync::mpsc::Sender<&'static str>,
+        release: std::sync::mpsc::Receiver<()>,
+    ) {
+        *self.mint_gate.lock().unwrap() = Some(MintRendezvous { entered, release });
+    }
+
+    /// P2-13 slow-mint rendezvous: when a gate is installed, signal
+    /// entry and park until released. Must run BEFORE any `state`
+    /// lock is taken so test-side counters and settlement destroys
+    /// can proceed while the mint is parked. Bound before the branch
+    /// (an if-let scrutinee take would hold the guard across the park
+    /// and wedge later calls — same discipline as the open gate).
+    fn rendezvous_mint_gate(&self, op: &'static str) {
+        let gate = self.mint_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            let _ = gate.entered.send(op);
+            let _ = gate.release.recv();
+        }
     }
 
     /// Number of currently open backend sessions. Leak accounting for
@@ -2740,6 +2785,7 @@ impl Pkcs11Backend for MockBackend {
         session: CkSessionHandle,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
+        self.rendezvous_mint_gate("create_object");
         self.create_object_impl(session, template.unwrap_or(&[]))
     }
     fn copy_object(
@@ -2748,6 +2794,7 @@ impl Pkcs11Backend for MockBackend {
         object: CkObjectHandle,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
+        self.rendezvous_mint_gate("copy_object");
         self.copy_object_impl(session, object, template.unwrap_or(&[]))
     }
     fn destroy_object(&self, session: CkSessionHandle, object: CkObjectHandle) -> CkResult<()> {

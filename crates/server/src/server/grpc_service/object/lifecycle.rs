@@ -7,9 +7,10 @@ use super::super::super::handle_map::{BackendHandle, VirtualHandle};
 use super::super::HandlerContext;
 use super::super::convert_template_opt;
 use super::super::service_utils::{
-    backend_object_token_state, ck_rv_only, ensure_private_mint_allowed, object_is_private,
-    register_session_object_handle, resolve_session, resolve_session_and_object, spawn_backend,
-    template_declares_private_object, template_declares_token_object, template_has_private_attr,
+    LateMintedObjects, ObjectMintCompletionOwner, backend_object_token_state, ck_rv_only,
+    ensure_private_mint_allowed, object_is_private, register_session_object_handle,
+    resolve_session, resolve_session_and_object, spawn_backend, template_declares_private_object,
+    template_declares_token_object, template_has_private_attr,
 };
 
 pub(super) async fn create_object(
@@ -82,13 +83,25 @@ pub(super) async fn create_object(
     let is_token_object = template_declares_token_object(template_view);
     let is_private = template_declares_private_object(template_view);
     let virtual_session = VirtualHandle(req.session_handle);
+    // P2-13: own the late result. On timeout/cancel before the awaited
+    // result is consumed the owner destroys the late-minted object; no
+    // `.await` may sit between the `spawn_backend` return and the
+    // settle calls below (disarm/settle atomic with consumption).
+    let (completion_tx, mut completion_owner) = ObjectMintCompletionOwner::arm(&ctx.backend);
     let backend = ctx.backend.clone();
-    let result = spawn_backend(move || backend.create_object(session, template.as_deref())).await?;
+    let result = spawn_backend(move || {
+        let outcome = backend.create_object(session, template.as_deref());
+        let _ = completion_tx.send(match &outcome {
+            Ok(object) => Ok(LateMintedObjects::single(session, *object)),
+            Err(rv) => Err(*rv),
+        });
+        outcome
+    })
+    .await?;
 
     match result {
-        Ok(object) => Ok(Response::new(pkcs11_proxy_ng_proto::CreateObjectResponse {
-            ck_rv: CkRv::OK.0,
-            object_handle: register_session_object_handle(
+        Ok(object) => {
+            let object_handle = register_session_object_handle(
                 &ctx.context_manager,
                 &ctx_id,
                 virtual_session,
@@ -96,12 +109,25 @@ pub(super) async fn create_object(
                 is_token_object,
                 Some(is_private),
             )
-            .await,
-        })),
-        Err(error) => Ok(Response::new(pkcs11_proxy_ng_proto::CreateObjectResponse {
-            ck_rv: error.0,
-            object_handle: 0,
-        })),
+            .await;
+            // Adopted: disarm. A zero handle means the context is gone
+            // and nobody adopted the object — stay armed so the owner
+            // destroys it instead of leaking it on the token.
+            if object_handle != 0 {
+                completion_owner.disarm();
+            }
+            Ok(Response::new(pkcs11_proxy_ng_proto::CreateObjectResponse {
+                ck_rv: CkRv::OK.0,
+                object_handle,
+            }))
+        }
+        Err(error) => {
+            completion_owner.settle_on_error();
+            Ok(Response::new(pkcs11_proxy_ng_proto::CreateObjectResponse {
+                ck_rv: error.0,
+                object_handle: 0,
+            }))
+        }
     }
 }
 
@@ -205,9 +231,20 @@ pub(super) async fn copy_object(
         object_is_private(ctx, &ctx_id, req.object_handle, session, object).await
     };
     let virtual_session = VirtualHandle(req.session_handle);
+    // P2-13: own the late result. The owner stays armed across the
+    // post-`Ok` token-state probe below — cancellation during that
+    // await must not orphan the already-minted copy.
+    let (completion_tx, mut completion_owner) = ObjectMintCompletionOwner::arm(&ctx.backend);
     let backend = ctx.backend.clone();
-    let result =
-        spawn_backend(move || backend.copy_object(session, object, template.as_deref())).await?;
+    let result = spawn_backend(move || {
+        let outcome = backend.copy_object(session, object, template.as_deref());
+        let _ = completion_tx.send(match &outcome {
+            Ok(new_object) => Ok(LateMintedObjects::single(session, *new_object)),
+            Err(rv) => Err(*rv),
+        });
+        outcome
+    })
+    .await?;
 
     match result {
         Ok(new_object) => {
@@ -222,23 +259,32 @@ pub(super) async fn copy_object(
                 .await
                 .or(token_override)
                 .unwrap_or(false);
+            let new_object_handle = register_session_object_handle(
+                &ctx.context_manager,
+                &ctx_id,
+                virtual_session,
+                new_object,
+                is_token,
+                Some(new_is_private),
+            )
+            .await;
+            // Adopted: disarm. Zero (context gone) stays armed so the
+            // owner destroys the unadopted copy (see create_object).
+            if new_object_handle != 0 {
+                completion_owner.disarm();
+            }
             Ok(Response::new(pkcs11_proxy_ng_proto::CopyObjectResponse {
                 ck_rv: CkRv::OK.0,
-                new_object_handle: register_session_object_handle(
-                    &ctx.context_manager,
-                    &ctx_id,
-                    virtual_session,
-                    new_object,
-                    is_token,
-                    Some(new_is_private),
-                )
-                .await,
+                new_object_handle,
             }))
         }
-        Err(error) => Ok(Response::new(pkcs11_proxy_ng_proto::CopyObjectResponse {
-            ck_rv: error.0,
-            new_object_handle: 0,
-        })),
+        Err(error) => {
+            completion_owner.settle_on_error();
+            Ok(Response::new(pkcs11_proxy_ng_proto::CopyObjectResponse {
+                ck_rv: error.0,
+                new_object_handle: 0,
+            }))
+        }
     }
 }
 
@@ -1044,5 +1090,155 @@ mod tests {
                 "{name}: virtual lifetime after closing creator with another session open"
             );
         }
+    }
+
+    /// P2-13 shared fixture: mock + one backend session registered as a
+    /// virtual session in a fresh context. Returns (mock, backend,
+    /// ctx_mgr, ctx_id, virtual session handle).
+    async fn mint_settlement_fixture() -> (
+        Arc<MockBackend>,
+        Arc<dyn Pkcs11Backend>,
+        Arc<ContextManager>,
+        crate::server::context_manager::ClientContextId,
+        u64,
+    ) {
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let backend_session = mock.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+        let session_vh = ctx_mgr
+            .get_context(&ctx_id, |ctx| {
+                ctx.register_session(
+                    BackendHandle(backend_session.0),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                )
+            })
+            .await
+            .unwrap();
+        (mock, backend, ctx_mgr, ctx_id, session_vh.0)
+    }
+
+    /// Poll until the mock's live-object count and destroy count reach
+    /// the expected settlement state, or fail loudly instead of hanging.
+    async fn await_mint_settlement(mock: &Arc<MockBackend>, live: usize, destroys: usize) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if mock.live_object_count() == live && mock.destroy_call_count() == destroys {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for mint settlement: live={} destroys={} (want live={live} destroys={destroys})",
+                mock.live_object_count(),
+                mock.destroy_call_count()
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// P2-13: cancelling CreateObject after native entry must not
+    /// orphan the late-minted object: the completion owner destroys it
+    /// exactly once and no mapping is ever published.
+    #[tokio::test]
+    async fn create_object_cancel_after_entry_leaves_no_orphan() {
+        let (mock, backend, ctx_mgr, ctx_id, session_vh) = mint_settlement_fixture().await;
+        assert_eq!(mock.live_object_count(), 0, "fixture starts empty");
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        mock.set_mint_gate(entered_tx, release_rx);
+
+        let rpc = {
+            let (ctx_mgr, backend, ctx_id) = (ctx_mgr.clone(), backend.clone(), ctx_id.clone());
+            tokio::spawn(async move {
+                super::create_object(
+                    &HandlerContext::for_test(&ctx_mgr, &backend),
+                    Request::new(pkcs11_proxy_ng_proto::CreateObjectRequest {
+                        client_context_id: ctx_id.0.clone(),
+                        session_handle: session_vh,
+                        template: vec![pkcs11_proxy_ng_proto::Attribute {
+                            attr_type: CkAttributeType::TOKEN.0,
+                            value: Some(pkcs11_proxy_ng_proto::attribute::Value::BoolValue(true)),
+                        }],
+                        template_null: false,
+                    }),
+                )
+                .await
+            })
+        };
+        let op = tokio::task::spawn_blocking(move || {
+            entered_rx.recv_timeout(Duration::from_secs(10)).expect("native entry observed")
+        })
+        .await
+        .unwrap();
+        assert_eq!(op, "create_object");
+
+        rpc.abort();
+        assert!(rpc.await.expect_err("aborted join must err").is_cancelled());
+        release_tx.send(()).expect("parked worker alive");
+
+        await_mint_settlement(&mock, 0, 1).await;
+        let published =
+            ctx_mgr.get_context(&ctx_id, |ctx| ctx.created_objects.len()).await.unwrap_or(0);
+        assert_eq!(published, 0, "cancelled mint must never publish a mapping");
+    }
+
+    /// P2-13: cancelling CopyObject after native entry must not orphan
+    /// the late-minted copy (the source object must survive).
+    #[tokio::test]
+    async fn copy_object_cancel_after_entry_leaves_no_orphan() {
+        let (mock, backend, ctx_mgr, ctx_id, session_vh) = mint_settlement_fixture().await;
+        // Source object, minted + mapped directly (no handler).
+        let backend_session = ctx_mgr
+            .get_context(&ctx_id, |ctx| {
+                ctx.session_handles.resolve(crate::server::handle_map::VirtualHandle(session_vh))
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let source = mock
+            .create_object(CkSessionHandle(backend_session.0), Some(&[]))
+            .expect("source object");
+        let source_vh = ctx_mgr
+            .get_context(&ctx_id, |ctx| ctx.object_handles.insert(BackendHandle(source.0)))
+            .await
+            .unwrap();
+        assert_eq!(mock.live_object_count(), 1, "only the source exists");
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        mock.set_mint_gate(entered_tx, release_rx);
+
+        let rpc = {
+            let (ctx_mgr, backend, ctx_id) = (ctx_mgr.clone(), backend.clone(), ctx_id.clone());
+            tokio::spawn(async move {
+                super::copy_object(
+                    &HandlerContext::for_test(&ctx_mgr, &backend),
+                    Request::new(pkcs11_proxy_ng_proto::CopyObjectRequest {
+                        client_context_id: ctx_id.0.clone(),
+                        session_handle: session_vh,
+                        object_handle: source_vh.0,
+                        template: vec![],
+                        template_null: false,
+                    }),
+                )
+                .await
+            })
+        };
+        let op = tokio::task::spawn_blocking(move || {
+            entered_rx.recv_timeout(Duration::from_secs(10)).expect("native entry observed")
+        })
+        .await
+        .unwrap();
+        assert_eq!(op, "copy_object");
+
+        rpc.abort();
+        assert!(rpc.await.expect_err("aborted join must err").is_cancelled());
+        release_tx.send(()).expect("parked worker alive");
+
+        // The late copy is destroyed exactly once; the source survives.
+        await_mint_settlement(&mock, 1, 1).await;
     }
 }
