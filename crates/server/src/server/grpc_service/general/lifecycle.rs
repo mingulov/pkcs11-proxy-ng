@@ -16,7 +16,7 @@ use super::super::service_utils::current_context_operation_guard;
 
 pub(super) async fn initialize(
     ctx_mgr: &Arc<ContextManager>,
-    _backend_ref: &Arc<dyn Pkcs11Backend>,
+    backend_ref: &Arc<dyn Pkcs11Backend>,
     request: Request<pkcs11_proxy_ng_proto::InitializeRequest>,
     tcp_auth_mode: crate::config::TcpAuthMode,
     unix_auth_mode: crate::config::UnixAuthMode,
@@ -60,17 +60,49 @@ pub(super) async fn initialize(
             daemon_effects_version_max: Some(EXACT_OUTPUT_EFFECTS_VERSION_MAX),
         }));
     }
-    let ctx_id = match ctx_mgr.create_context(Some(identity.to_string())).await {
-        Ok(id) => id,
-        Err(rv) => {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::InitializeResponse {
-                ck_rv: rv.0,
-                client_context_id: String::new(),
-                daemon_effects_version_min: Some(EXACT_OUTPUT_EFFECTS_VERSION_MIN),
-                daemon_effects_version_max: Some(EXACT_OUTPUT_EFFECTS_VERSION_MAX),
-            }));
-        }
-    };
+    // Same-identity orphan replacement: at the admission cap, an idle
+    // context owned by THIS identity (e.g. left behind by a previous
+    // process of the same logical client that exited without Finalize)
+    // is replaced instead of wedging admission until lease expiry. A
+    // different identity, or a busy context, keeps the HOST_MEMORY
+    // refusal. Initialize passes Some(..) for every auth mode including
+    // unauthenticated, where all peers share one identity string — that
+    // no-isolation posture already lets any peer use any context, so
+    // replacing an idle unauthenticated orphan grants nothing new (see
+    // `create_context_replacing_idle_same_identity`).
+    let (ctx_id, replaced) =
+        match ctx_mgr.create_context_replacing_idle_same_identity(Some(identity.to_string())).await
+        {
+            Ok(admitted) => admitted,
+            Err(rv) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::InitializeResponse {
+                    ck_rv: rv.0,
+                    client_context_id: String::new(),
+                    daemon_effects_version_min: Some(EXACT_OUTPUT_EFFECTS_VERSION_MIN),
+                    daemon_effects_version_max: Some(EXACT_OUTPUT_EFFECTS_VERSION_MAX),
+                }));
+            }
+        };
+    if let Some(mut replaced) = replaced {
+        // D6(2)/D9 shared teardown path, exactly like finalize:
+        // refcount-checked session reaping plus last-holder backend
+        // logout (best-effort; never fails this Initialize and never
+        // disturbs live tenants). The plan is computed after the new
+        // context inserted, so its liveness probes observe only live
+        // tenants, the new (empty) context included.
+        let replaced_id = replaced.id.clone();
+        let plan = ctx_mgr.plan_removed_context_teardown(&mut replaced);
+        let session_count = plan.sessions_to_close.len();
+        let logout_count = plan.slot_logouts.len();
+        ctx_mgr.execute_teardown_plans(backend_ref, vec![plan]).await;
+        debug!(
+            context_id = %ctx_id.0,
+            replaced_context_id = %replaced_id.0,
+            sessions_closed = session_count,
+            logouts = logout_count,
+            "Initialize: replaced idle same-identity context at admission cap"
+        );
+    }
     debug!(context_id = %ctx_id.0, "Initialize: created context");
     Ok(Response::new(pkcs11_proxy_ng_proto::InitializeResponse {
         ck_rv: CkRv::OK.0,
@@ -509,6 +541,150 @@ mod tests {
         assert_eq!(again.ck_rv, CkRv::CRYPTOKI_NOT_INITIALIZED.0);
     }
 
+    // --- Same-identity orphan replacement at the admission cap ---
+    //
+    // A client process that exits without Finalize (pkcs11-check's
+    // per-file processes) leaves an orphaned context holding the single
+    // cap-1 slot until lease/lifetime expiry. A later Initialize from the
+    // SAME identity must replace that idle orphan (with full teardown)
+    // instead of wedging on HOST_MEMORY; a DIFFERENT identity, or a busy
+    // context, must still be refused.
+
+    fn orphan_request() -> Request<pkcs11_proxy_ng_proto::InitializeRequest> {
+        Request::new(pkcs11_proxy_ng_proto::InitializeRequest {
+            client_context_id: String::new(),
+            client_effects_version_min: None,
+            client_effects_version_max: None,
+        })
+    }
+
+    async fn initialize_ok(
+        ctx_mgr: &Arc<ContextManager>,
+        backend: &Arc<dyn Pkcs11Backend>,
+    ) -> pkcs11_proxy_ng_proto::InitializeResponse {
+        super::initialize(
+            ctx_mgr,
+            backend,
+            orphan_request(),
+            crate::config::TcpAuthMode::None,
+            crate::config::UnixAuthMode::None,
+        )
+        .await
+        .unwrap()
+        .into_inner()
+    }
+
+    /// (a) At cap 1, a second Initialize with the SAME identity as an idle
+    /// existing context succeeds by replacing it: the orphan's backend
+    /// sessions are closed and its login released via the shared teardown
+    /// path, and exactly the new context remains.
+    #[tokio::test]
+    async fn initialize_replaces_idle_same_identity_orphan_at_cap1_and_tears_it_down() {
+        use crate::server::context_manager::LoginState;
+        use crate::server::handle_map::BackendHandle;
+
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+        mock.initialize().unwrap();
+        let backend: Arc<dyn Pkcs11Backend> = Arc::clone(&mock) as _;
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 1));
+        let slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
+        ctx_mgr.register_slot(slot).await;
+
+        // First "process": Initialize, open a backend session, log in —
+        // then vanish without Finalize (no finalize call below).
+        let first = initialize_ok(&ctx_mgr, &backend).await;
+        assert_eq!(first.ck_rv, CkRv::OK.0);
+        let orphan_id = ClientContextId(first.client_context_id.clone());
+        let session = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
+        mock.login(session, CkUserType::User, Some(b"1234")).unwrap();
+        ctx_mgr
+            .get_context(&orphan_id, |ctx| {
+                ctx.register_session(BackendHandle(session.0), slot);
+                ctx.login_state.insert(slot, LoginState::User);
+            })
+            .await;
+        ctx_mgr.note_login_acquired(&orphan_id, slot);
+        assert_eq!(mock.open_session_count(), 1);
+        assert!(ctx_mgr.any_login_state_for_slot(slot));
+
+        // Second "process", same identity (unauthenticated): must be
+        // admitted by replacing the idle orphan, not refused HOST_MEMORY.
+        let second = initialize_ok(&ctx_mgr, &backend).await;
+        assert_eq!(
+            second.ck_rv,
+            CkRv::OK.0,
+            "same-identity Initialize at cap1 must replace the idle orphan"
+        );
+        assert_ne!(second.client_context_id, first.client_context_id);
+        assert_eq!(ctx_mgr.context_count(), 1, "replacement must not exceed cap1");
+        assert!(
+            ctx_mgr.get_context(&orphan_id, |_| ()).await.is_none(),
+            "the replaced orphan must be gone"
+        );
+        let new_id = ClientContextId(second.client_context_id);
+        assert!(ctx_mgr.get_context(&new_id, |_| ()).await.is_some(), "the new context must live");
+        // Teardown ran like finalize: backend session closed, login released.
+        assert_eq!(mock.open_session_count(), 0, "orphan backend session must be closed");
+        assert!(mock.close_session_call_count() >= 1, "teardown must close the backend session");
+        assert!(
+            !ctx_mgr.any_login_state_for_slot(slot),
+            "orphan login must be released with the replaced context"
+        );
+    }
+
+    /// (b) At cap 1, an Initialize whose identity DIFFERS from the idle
+    /// holder's is still refused HOST_MEMORY; the holder stays intact.
+    #[tokio::test]
+    async fn initialize_at_cap1_refuses_different_identity() {
+        let backend = test_backend();
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 1));
+        // Seed the sole slot with a different identity than the
+        // unauthenticated identity the request below derives.
+        let holder = ctx_mgr.create_context(Some("uid=424242".into())).await.unwrap();
+
+        let resp = initialize_ok(&ctx_mgr, &backend).await;
+        assert_eq!(
+            resp.ck_rv,
+            CkRv::HOST_MEMORY.0,
+            "a different identity at cap must still be refused"
+        );
+        assert!(resp.client_context_id.is_empty());
+        assert_eq!(ctx_mgr.context_count(), 1);
+        assert!(
+            ctx_mgr.get_context(&holder, |_| ()).await.is_some(),
+            "the different-identity holder must stay intact"
+        );
+    }
+
+    /// (c) At cap 1, a same-identity context with a foreign in-flight
+    /// operation is NOT replaced: Initialize is refused and the busy
+    /// context remains intact.
+    #[tokio::test]
+    async fn initialize_at_cap1_does_not_replace_busy_same_identity_context() {
+        let backend = test_backend();
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 1));
+
+        let first = initialize_ok(&ctx_mgr, &backend).await;
+        assert_eq!(first.ck_rv, CkRv::OK.0);
+        let busy_id = ClientContextId(first.client_context_id);
+        // Foreign op in flight on the holder (not initialize's own guard).
+        let _foreign_guard =
+            Arc::clone(&ctx_mgr).begin_operation(&busy_id).expect("context exists");
+
+        let resp = initialize_ok(&ctx_mgr, &backend).await;
+        assert_eq!(
+            resp.ck_rv,
+            CkRv::HOST_MEMORY.0,
+            "a busy same-identity context must never be replaced"
+        );
+        assert!(resp.client_context_id.is_empty());
+        assert_eq!(ctx_mgr.context_count(), 1);
+        assert!(
+            ctx_mgr.get_context(&busy_id, |_| ()).await.is_some(),
+            "the busy context must remain intact"
+        );
+    }
+
     // --- Q18 (SEC-H2): atomic context guardrail ---
 
     fn init_request() -> Request<pkcs11_proxy_ng_proto::InitializeRequest> {
@@ -559,12 +735,18 @@ mod tests {
         rvs
     }
 
-    /// Q18 (SEC-H2): barrier-controlled concurrent Initialize at cap1 mints
-    /// exactly one context; every loser answers the existing cap-refusal RV
-    /// (`CKR_HOST_MEMORY`, the `create_context` refusal — looked up in
-    /// `context_manager.rs`, not invented here).
+    /// Q18 (SEC-H2): barrier-controlled concurrent Initialize at cap1
+    /// never over-admits — exactly one context is live afterwards — and
+    /// every racer answers OK or the existing cap-refusal RV
+    /// (`CKR_HOST_MEMORY`, the admission refusal — looked up in
+    /// `context_manager.rs`, not invented here). All racers here share
+    /// one (unauthenticated) identity, so under same-identity orphan
+    /// replacement a racer may legitimately win by replacing the
+    /// previous racer's idle context: the Q18 invariant is the live
+    /// count bound, not a single OK. Cross-identity refusal is pinned by
+    /// `initialize_at_cap1_refuses_different_identity`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-    async fn q18_barrier_concurrent_initialize_at_cap1_mints_exactly_one() {
+    async fn q18_barrier_concurrent_initialize_at_cap1_never_exceeds_cap() {
         const TASKS: usize = 32;
         const ROUNDS: usize = 200;
         let backend = test_backend();
@@ -578,14 +760,23 @@ mod tests {
                     "Q18: raced Initialize must answer OK or the existing HOST_MEMORY refusal, got {rv:#x}"
                 );
             }
-            assert_eq!(oks, 1, "Q18: exactly one Initialize must win the race at cap1");
+            assert!(oks >= 1, "Q18: at least one Initialize must be admitted at cap1");
+            assert_eq!(
+                ctx_mgr.total_contexts_created(),
+                oks as u64,
+                "Q18: every OK minted exactly one context, no phantom admissions"
+            );
             assert_eq!(ctx_mgr.context_count(), 1, "Q18: no over-admission past cap1");
         }
     }
 
     /// Q18 (SEC-H2): finalizing the cap1 holder releases admission capacity
     /// — a later Initialize is admitted — and the post-release race still
-    /// mints exactly one context (release reuse plus atomicity).
+    /// never over-admits past cap1 (release reuse plus atomicity). The
+    /// pre-finalize second Initialize shares the holder's identity, so
+    /// under same-identity orphan replacement it is admitted by
+    /// replacing the idle holder (the wedge fix) rather than refused;
+    /// cross-identity refusal is pinned separately.
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn q18_finalize_releases_capacity_for_later_initialize() {
         const TASKS: usize = 32;
@@ -604,7 +795,8 @@ mod tests {
             .unwrap()
             .into_inner();
             assert_eq!(first.ck_rv, CkRv::OK.0);
-            let refused = super::initialize(
+            let first_id = ClientContextId(first.client_context_id.clone());
+            let second = super::initialize(
                 &ctx_mgr,
                 &backend,
                 init_request(),
@@ -615,15 +807,21 @@ mod tests {
             .unwrap()
             .into_inner();
             assert_eq!(
-                refused.ck_rv,
-                CkRv::HOST_MEMORY.0,
-                "Q18: second Initialize at cap1 must answer the existing refusal RV"
+                second.ck_rv,
+                CkRv::OK.0,
+                "same-identity second Initialize at cap1 must replace the idle holder"
+            );
+            assert_ne!(second.client_context_id, first.client_context_id);
+            assert_eq!(ctx_mgr.context_count(), 1, "Q18: replacement must not exceed cap1");
+            assert!(
+                ctx_mgr.get_context(&first_id, |_| ()).await.is_none(),
+                "the replaced first context must be gone"
             );
             let finalized = super::finalize(
                 &ctx_mgr,
                 &backend,
                 Request::new(pkcs11_proxy_ng_proto::FinalizeRequest {
-                    client_context_id: first.client_context_id,
+                    client_context_id: second.client_context_id,
                 }),
             )
             .await
@@ -633,7 +831,7 @@ mod tests {
             assert_eq!(ctx_mgr.context_count(), 0, "Q18: finalize must empty the cap1 manager");
             let rvs = race_initializes(Arc::clone(&ctx_mgr), Arc::clone(&backend), TASKS).await;
             let oks = rvs.iter().filter(|rv| **rv == CkRv::OK.0).count();
-            assert_eq!(oks, 1, "Q18: the released slot must admit exactly one racing Initialize");
+            assert!(oks >= 1, "Q18: the released slot must admit a racing Initialize");
             assert_eq!(ctx_mgr.context_count(), 1, "Q18: no over-admission past cap1");
         }
     }
