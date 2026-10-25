@@ -367,7 +367,8 @@ async fn unwrap_key_authenticated_impl(
     // Complements the in-closure `PendingNativeObject`, which covers
     // post-mint validate/convert failures inside this same closure
     // (those report `Err` here and disarm via `settle_on_error`).
-    let (completion_tx, mut completion_owner) = ObjectMintCompletionOwner::arm(backend_ref);
+    let (completion_tx, mut completion_owner) =
+        ObjectMintCompletionOwner::arm_for_session(backend_ref, session);
     let result = spawn_backend(move || {
         let outcome = wrapped_key.expose(|wrapped_raw| {
             aad.expose(|aad_raw| {

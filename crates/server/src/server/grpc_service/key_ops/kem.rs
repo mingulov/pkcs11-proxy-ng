@@ -180,7 +180,8 @@ pub(crate) async fn encapsulate_key(
     // P2-13: own the late result until registration adopts the key.
     // Only the handle integer is reported to the owner — never the
     // ciphertext.
-    let (completion_tx, mut completion_owner) = ObjectMintCompletionOwner::arm(backend_ref);
+    let (completion_tx, mut completion_owner) =
+        ObjectMintCompletionOwner::arm_for_session(backend_ref, session);
     let result = spawn_backend(move || {
         let outcome = backend.encapsulate_key(session, &validated, public_key, template.as_deref());
         let _ = completion_tx.send(match &outcome {
@@ -363,7 +364,8 @@ pub(crate) async fn decapsulate_key(
         }
     };
     // P2-13: own the late result until registration adopts the key.
-    let (completion_tx, mut completion_owner) = ObjectMintCompletionOwner::arm(backend_ref);
+    let (completion_tx, mut completion_owner) =
+        ObjectMintCompletionOwner::arm_for_session(backend_ref, session);
     let result = spawn_backend(move || {
         let outcome = backend.decapsulate_key(
             session,
@@ -619,7 +621,8 @@ pub(crate) async fn encapsulate_key_exact(
     // condition registration uses below (`CKR_OK` + non-zero); the
     // exact health classification is untouched (`ExactCompletion`
     // still captures the raw outcome).
-    let (completion_tx, mut completion_owner) = ObjectMintCompletionOwner::arm(backend_ref);
+    let (completion_tx, mut completion_owner) =
+        ObjectMintCompletionOwner::arm_for_session(backend_ref, session);
     let result = spawn_backend_exact(move || {
         let outcome = backend.encapsulate_key_exact(
             session,

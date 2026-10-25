@@ -279,6 +279,41 @@ pub trait Pkcs11Backend: Send + Sync {
         template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle>;
     fn destroy_object(&self, session: CkSessionHandle, object: CkObjectHandle) -> CkResult<()>;
+    /// The live incarnation id for `session`, when the backend tracks
+    /// one (P2-13). Captured when detached late-mint settlement is
+    /// armed and checked again at destroy time, so a destroy bound to
+    /// a closed session cannot land on a replacement session when the
+    /// provider recycles the numeric handle. The default `None` means
+    /// this backend cannot bind destroys to an incarnation; settlement
+    /// then falls back to the legacy raw-handle destroy, preserving
+    /// behavior for backends without incarnation tracking.
+    fn session_incarnation(&self, _session: CkSessionHandle) -> Option<u64> {
+        None
+    }
+    /// Destroy `object` only when `session` is still the incarnation
+    /// captured at mint time (P2-13 detached settlement). With no
+    /// captured incarnation (`None`), or when this backend reports no
+    /// live incarnation to check against, this falls back to the
+    /// legacy [`Self::destroy_object`]. A live incarnation that
+    /// differs refuses with `SESSION_HANDLE_INVALID` and issues no
+    /// destroy. Backends with a real fence (FFI) override this with
+    /// an atomic checked entry; the default composes the query and
+    /// the destroy for simpler backends (mock).
+    fn destroy_object_if_incarnation(
+        &self,
+        session: CkSessionHandle,
+        object: CkObjectHandle,
+        incarnation: Option<u64>,
+    ) -> CkResult<()> {
+        let Some(expected) = incarnation else {
+            return self.destroy_object(session, object);
+        };
+        match self.session_incarnation(session) {
+            Some(current) if current == expected => self.destroy_object(session, object),
+            Some(_) => Err(CkRv::SESSION_HANDLE_INVALID),
+            None => self.destroy_object(session, object),
+        }
+    }
     /// Destroy a quarantined native object from `Drop` (`PendingNativeObject`
     /// cleanup) WITHOUT ordinary admission. The `FfiBackend` override rides
     /// the enclosing op's exclusion via the control choke (admitting would

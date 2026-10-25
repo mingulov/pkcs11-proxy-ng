@@ -8,6 +8,10 @@ pub(super) struct MockState {
     pub(super) initialized: bool,
     pub(super) next_session: u64,
     pub(super) next_object: u64,
+    /// Live session incarnation per numeric handle (P2-13 simulation):
+    /// assigned on open, removed on close, so a recycled handle always
+    /// reports a different incarnation than the closed session did.
+    pub(super) session_incarnations: HashMap<u64, u64>,
     pub(super) open_sessions: Vec<(CkSessionHandle, CkSlotId, CkSessionFlags)>,
     pub(super) login_state: HashMap<CkSlotId, CkUserType>,
     pub(super) live_objects: HashSet<u64>,

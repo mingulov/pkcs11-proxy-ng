@@ -342,6 +342,17 @@ impl Pkcs11Backend for TestBackend3x {
     fn destroy_object(&self, s: CkSessionHandle, object: CkObjectHandle) -> CkResult<()> {
         self.inner.destroy_object(s, object)
     }
+    fn session_incarnation(&self, s: CkSessionHandle) -> Option<u64> {
+        self.inner.session_incarnation(s)
+    }
+    fn destroy_object_if_incarnation(
+        &self,
+        s: CkSessionHandle,
+        object: CkObjectHandle,
+        incarnation: Option<u64>,
+    ) -> CkResult<()> {
+        self.inner.destroy_object_if_incarnation(s, object, incarnation)
+    }
     fn get_object_size(&self, s: CkSessionHandle, object: CkObjectHandle) -> CkResult<u64> {
         self.inner.get_object_size(s, object)
     }

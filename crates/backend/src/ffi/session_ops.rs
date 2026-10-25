@@ -299,6 +299,13 @@ impl FfiBackend {
         }
     }
 
+    /// The live fence incarnation for `session` (P2-13), creating the
+    /// fence entry when the session has not entered one yet so arming
+    /// settlement before a mint captures the id that mint runs under.
+    pub(super) fn ffi_session_incarnation(&self, session: CkSessionHandle) -> Option<u64> {
+        Some(self.session_fences.incarnation_or_create(session))
+    }
+
     pub(super) fn ffi_get_session_info(&self, session: CkSessionHandle) -> CkResult<CkSessionInfo> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let mut info = cryptoki_sys::CK_SESSION_INFO::default();

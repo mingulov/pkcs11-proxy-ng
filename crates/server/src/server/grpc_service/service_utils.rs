@@ -528,6 +528,11 @@ pub(super) trait LateMintSettlement: Send + 'static {
     fn is_empty(&self) -> bool {
         false
     }
+    /// Bind the session incarnation captured when the owner was
+    /// armed (P2-13). Only the detached destroy path consumes it;
+    /// payloads without a session-incarnation binding (late session
+    /// closes) keep the default no-op.
+    fn bind_incarnation(&mut self, _incarnation: Option<u64>) {}
     /// Retire the minted native state through the backend.
     fn settle(self, backend: &dyn pkcs11_proxy_ng_backend::Pkcs11Backend) -> CkResult<()>;
 }
@@ -552,6 +557,11 @@ impl LateMintSettlement for CkSessionHandle {
 pub(super) struct LateMintedObjects {
     session: CkSessionHandle,
     handles: Vec<CkObjectHandle>,
+    /// Session incarnation captured when the owner was armed
+    /// (P2-13). `None` until the owner binds it at settlement (or
+    /// forever for directly constructed payloads), in which case the
+    /// destroy falls back to the legacy raw-handle path.
+    incarnation: Option<u64>,
 }
 
 impl LateMintedObjects {
@@ -565,7 +575,7 @@ impl LateMintedObjects {
                 kept.push(handle);
             }
         }
-        Self { session, handles: kept }
+        Self { session, handles: kept, incarnation: None }
     }
 
     pub(super) fn single(session: CkSessionHandle, handle: CkObjectHandle) -> Self {
@@ -584,12 +594,22 @@ impl LateMintSettlement for LateMintedObjects {
         self.handles.is_empty()
     }
 
+    fn bind_incarnation(&mut self, incarnation: Option<u64>) {
+        self.incarnation = incarnation;
+    }
+
     fn settle(self, backend: &dyn pkcs11_proxy_ng_backend::Pkcs11Backend) -> CkResult<()> {
         // Best-effort every handle: one failed destroy must not strand
         // the rest. The first failure is reported for the caller's log.
+        // The destroy is incarnation-bound (P2-13): it reaches the
+        // provider only while the session is still the incarnation
+        // captured at arm time, so it can never destroy a replacement
+        // object minted after the provider recycled both handles.
         let mut first_error = None;
         for handle in self.handles {
-            if let Err(rv) = backend.destroy_object(self.session, handle) {
+            if let Err(rv) =
+                backend.destroy_object_if_incarnation(self.session, handle, self.incarnation)
+            {
                 first_error.get_or_insert(rv);
             }
         }
@@ -637,13 +657,25 @@ impl LateMintSettlement for LateMintedObjects {
 /// The late handle is solely owned: it settles here only when no
 /// mapping was published, and nobody else can name a handle that was
 /// never returned or registered. For object payloads the settlement
-/// destroys through the originating session; the FFI backend's
-/// per-session fence either admits that destroy before any native
-/// close of the session or refuses it without native entry.
+/// destroys through the originating session, bound to the session
+/// incarnation captured at arm time: the FFI backend's incarnation-
+/// checked fence entry (and the mock's simulation of it) admits the
+/// destroy only while that incarnation is still live, and refuses
+/// without native entry once the session has closed — including
+/// when the provider has recycled both the session and object
+/// handles for a replacement session and object, which the bare
+/// fence alone cannot distinguish because a committed close removes
+/// its entry and the next enter creates a fresh one. Only the
+/// detached destroy path is incarnation-bound: the adoption path
+/// (registration of a consumed `Ok`) and the exact-RV live path run
+/// under the live session and are untouched.
 pub(super) struct MintCompletionOwner<P: LateMintSettlement> {
     completion: Option<oneshot::Receiver<CkResult<P>>>,
     backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
     runtime: tokio::runtime::Handle,
+    /// Session incarnation captured at arm time for object payloads
+    /// (P2-13); `None` for session payloads and unbound owners.
+    incarnation: Option<u64>,
 }
 
 /// Q16 box 2 instantiation (late `OpenSession` results).
@@ -664,6 +696,26 @@ impl<P: LateMintSettlement> MintCompletionOwner<P> {
             completion: Some(rx),
             backend: backend.clone(),
             runtime: tokio::runtime::Handle::current(),
+            incarnation: None,
+        };
+        (tx, owner)
+    }
+
+    /// Arm the owner for a mint on `session`, capturing the session's
+    /// live incarnation now (P2-13) so detached settlement can bind
+    /// its destroy to this incarnation. Object-mint handlers use this
+    /// form; the session form above needs no binding (a late session
+    /// close settles a handle nobody else can name).
+    pub(super) fn arm_for_session(
+        backend: &Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
+        session: CkSessionHandle,
+    ) -> (oneshot::Sender<CkResult<P>>, Self) {
+        let (tx, rx) = oneshot::channel();
+        let owner = Self {
+            completion: Some(rx),
+            backend: backend.clone(),
+            runtime: tokio::runtime::Handle::current(),
+            incarnation: backend.session_incarnation(session),
         };
         (tx, owner)
     }
@@ -696,7 +748,12 @@ impl<P: LateMintSettlement> MintCompletionOwner<P> {
             // uses. No mapping was (or will be) published for it.
             Ok(Ok(payload)) => {
                 self.completion = None;
-                Self::spawn_settlement(&self.runtime, self.backend.clone(), payload);
+                Self::spawn_settlement(
+                    &self.runtime,
+                    self.backend.clone(),
+                    payload,
+                    self.incarnation,
+                );
             }
             // Worker still out: the primary is the proxy timeout RV.
             // Stay armed; `Drop` spawns the late closer.
@@ -717,7 +774,10 @@ impl<P: LateMintSettlement> MintCompletionOwner<P> {
         runtime: &tokio::runtime::Handle,
         backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
         payload: P,
+        incarnation: Option<u64>,
     ) {
+        let mut payload = payload;
+        payload.bind_incarnation(incarnation);
         if payload.is_empty() {
             return;
         }
@@ -761,13 +821,14 @@ impl<P: LateMintSettlement> Drop for MintCompletionOwner<P> {
         // polls and shutdown native `Finalize` reaps instead.
         let backend = self.backend.clone();
         let runtime = self.runtime.clone();
+        let incarnation = self.incarnation;
         self.runtime.spawn(async move {
             // Only a late success settles. A late backend error owns no
             // handle; a dropped sender (worker panic) leaves the outcome
             // unknown, and no blind settlement runs — same terminal
             // semantics as the `Status` path, now explicit.
             if let Ok(Ok(payload)) = rx.await {
-                Self::spawn_settlement(&runtime, backend, payload);
+                Self::spawn_settlement(&runtime, backend, payload, incarnation);
             }
         });
     }
@@ -4612,6 +4673,92 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert_eq!(mock.destroy_call_count(), 0, "no settlement destroy on error/consumed paths");
         assert_eq!(mock.live_object_count(), 1, "consumed object must survive");
+    }
+
+    /// P2-13 incarnation regression: a timed-out mint under the first
+    /// session incarnation settles after that session closed and the
+    /// provider recycled both numeric handles (mock recycling reuses
+    /// session 7 / object 9 shapes — here the first handles). The
+    /// detached destroy is bound to the captured incarnation, so the
+    /// replacement object on the replacement session must survive
+    /// and no destroy may reach the backend.
+    #[tokio::test]
+    async fn object_mint_owner_recycled_handles_replacement_survives() {
+        use pkcs11_proxy_ng_backend::MockBackend;
+        use pkcs11_proxy_ng_backend::Pkcs11Backend as _;
+
+        let mock = Arc::new(MockBackend::default_test());
+        mock.set_handle_recycling(true);
+        mock.initialize().unwrap();
+        let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock.clone();
+        let session = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
+        let incarnation_a = backend.session_incarnation(session).expect("open session bound");
+
+        // Timed-out mint: arm (capturing incarnation A), mint the late
+        // object, then stay armed through the error arm and Drop.
+        let (tx, mut owner) = ObjectMintCompletionOwner::arm_for_session(&backend, session);
+        let minted = mock.create_object(session, Some(&[])).unwrap();
+        owner.settle_on_error();
+        assert!(owner.completion.is_some(), "pending worker must stay armed");
+        drop(owner);
+
+        // The original session closes (its session objects die with
+        // it) and the provider recycles both numeric handles.
+        mock.close_session(session).unwrap();
+        assert_eq!(backend.session_incarnation(session), None, "close invalidates incarnation");
+        let reopened = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
+        assert_eq!(reopened, session, "recycling mock must reuse the session handle");
+        let incarnation_b = backend.session_incarnation(reopened).expect("reopened bound");
+        assert_ne!(incarnation_a, incarnation_b, "reopened session gets a fresh incarnation");
+        let replacement = mock.create_object(reopened, Some(&[])).unwrap();
+        assert_eq!(replacement, minted, "recycling mock must reuse the object handle");
+        assert_eq!(mock.live_object_count(), 1);
+
+        // The late mint result now arrives at the detached settler.
+        tx.send(Ok(LateMintedObjects::single(session, minted))).expect("settler awaiting");
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            mock.destroy_call_count(),
+            0,
+            "stale-incarnation destroy must not reach backend"
+        );
+        assert_eq!(mock.live_object_count(), 1, "replacement object must survive settlement");
+        mock.get_object_size(reopened, replacement).expect("replacement remains usable");
+    }
+
+    /// P2-13 positive control: settlement under the same live
+    /// incarnation still destroys the late-minted object.
+    #[tokio::test]
+    async fn object_mint_owner_same_incarnation_settle_still_destroys() {
+        use pkcs11_proxy_ng_backend::MockBackend;
+
+        let mock = Arc::new(MockBackend::default_test());
+        mock.set_handle_recycling(true);
+        mock.initialize().unwrap();
+        let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock.clone();
+        let session = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
+
+        let (tx, mut owner) = ObjectMintCompletionOwner::arm_for_session(&backend, session);
+        let minted = mock.create_object(session, Some(&[])).unwrap();
+        owner.settle_on_error();
+        assert!(owner.completion.is_some(), "pending worker must stay armed");
+        drop(owner);
+        tx.send(Ok(LateMintedObjects::single(session, minted))).expect("settler awaiting");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if mock.live_object_count() == 0 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "same-incarnation settler must destroy the late object"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(mock.destroy_call_count(), 1, "same-incarnation settle destroys exactly once");
     }
 
     /// Q16 box 2 (fix round 1): a sender dropped without reporting

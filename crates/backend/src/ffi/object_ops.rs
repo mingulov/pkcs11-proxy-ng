@@ -192,6 +192,33 @@ impl FfiBackend {
         )
     }
 
+    /// Incarnation-bound destroy for detached late-mint settlement
+    /// (P2-13): the fence entry is checked against `incarnation`
+    /// before any native call, so a destroy minted under a session
+    /// that has since closed refuses without native entry even when
+    /// the provider recycled both the session and object handles.
+    /// `None` keeps the legacy raw-handle destroy for callers that
+    /// captured no incarnation.
+    pub(super) fn ffi_destroy_object_if_incarnation(
+        &self,
+        session: CkSessionHandle,
+        object: CkObjectHandle,
+        incarnation: Option<u64>,
+    ) -> CkResult<()> {
+        let Some(expected) = incarnation else {
+            return self.ffi_destroy_object(session, object);
+        };
+        let admission = self.lifecycle_domain.admit_ordinary()?;
+        let h_session = Self::session_handle(session)?;
+        let h_object = Self::object_handle(object)?;
+        let _session_fence = self.session_fences.enter_checked(&admission, session, expected)?;
+        Self::call_unit(
+            &admission,
+            unsafe { (*self.func_list).C_DestroyObject },
+            |function| unsafe { function(h_session, h_object) },
+        )
+    }
+
     /// Drop-path destroy: rides the enclosing op's exclusion via the control
     /// choke instead of admitting (a nested `admit_ordinary` under the live
     /// guard would deadlock behind a queued Finalize writer). Debug-pins the

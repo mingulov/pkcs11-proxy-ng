@@ -1135,6 +1135,17 @@ fn backend_methods_have_proto_rpcs() {
             "destroy_quarantined_object",
             "drop-path destroy riding the enclosing op's RPC; never on the wire (F-01)",
         ),
+        // P2-13 detached late-mint settlement helpers: daemon-local
+        // incarnation binding for the DestroyObject path; never on the
+        // wire, so no proto methods exist for them.
+        (
+            "session_incarnation",
+            "daemon-local incarnation query for late-mint settlement; never on the wire (P2-13)",
+        ),
+        (
+            "destroy_object_if_incarnation",
+            "incarnation-bound variant of DestroyObject for late-mint settlement; shares its RPC (P2-13)",
+        ),
     ];
 
     // The exemption list itself must not rot: every entry names a real trait

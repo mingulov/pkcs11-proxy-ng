@@ -253,7 +253,8 @@ async fn generate_key_pair_impl(
     // P2-13: own the late result (both keys) until registration adopts
     // them; no `.await` between the `spawn_backend` return and the
     // settle calls below.
-    let (completion_tx, mut completion_owner) = ObjectMintCompletionOwner::arm(backend_ref);
+    let (completion_tx, mut completion_owner) =
+        ObjectMintCompletionOwner::arm_for_session(backend_ref, session);
     let result = spawn_backend(move || {
         let outcome = backend.generate_key_pair(
             session,
@@ -500,7 +501,8 @@ async fn generate_key_impl(
     // calls below. Extraction is the primary handle only: this path
     // never virtualizes handles out of `mechanism_out`, so none are
     // adopted from it either.
-    let (completion_tx, mut completion_owner) = ObjectMintCompletionOwner::arm(backend_ref);
+    let (completion_tx, mut completion_owner) =
+        ObjectMintCompletionOwner::arm_for_session(backend_ref, session);
     let result = spawn_backend(move || {
         let outcome = backend.generate_key_with_output(session, &validated, template.as_deref());
         let _ = completion_tx.send(match &outcome {
@@ -789,7 +791,8 @@ async fn derive_key_impl(
     // output-param handle are adopted below. The closure extracts
     // the minted set from the raw backend result (before the
     // virtualize rewrites) under the same `CKR_OK` trust condition.
-    let (completion_tx, mut completion_owner) = ObjectMintCompletionOwner::arm(backend_ref);
+    let (completion_tx, mut completion_owner) =
+        ObjectMintCompletionOwner::arm_for_session(backend_ref, session);
     let result = spawn_backend(move || {
         let outcome = backend.derive_key_with_output_result(
             session,
