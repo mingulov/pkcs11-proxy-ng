@@ -797,7 +797,27 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), server::shutdown
             ))
             .add_service(health_service.clone())
             .add_service(svc.clone());
-        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+        // Track each accepted connection in the shared registry: the
+        // tracked stream marks its ConnectionState closed and
+        // unregisters it on drop, so contexts bound to it become
+        // transport-dead exactly when the connection dies.
+        let connection_registry = context_manager.connection_registry();
+        let incoming = {
+            use tokio_stream::StreamExt as _;
+            tokio_stream::wrappers::TcpListenerStream::new(listener).map(move |item| {
+                item.map(|stream| {
+                    let peer_key = match stream.peer_addr() {
+                        Ok(peer) => pkcs11_proxy_ng::server::connection_state::tcp_peer_key(peer),
+                        Err(_) => "tcp:unknown".to_string(),
+                    };
+                    pkcs11_proxy_ng::server::connection_state::TrackedStream::new(
+                        stream,
+                        connection_registry.clone(),
+                        peer_key,
+                    )
+                })
+            })
+        };
         let shutdown = server::shutdown::listener_shutdown(shutdown_rx.clone());
         tracing::info!(addr = %local_addr, auth = ?tcp_cfg.auth, "listening on tcp");
         serve_futures.push(Box::pin(router.serve_with_incoming_shutdown(incoming, shutdown)));
@@ -820,7 +840,27 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), server::shutdown
                 ))
                 .add_service(health_service.clone())
                 .add_service(svc.clone());
-        let incoming = tokio_stream::wrappers::UnixListenerStream::new(listener);
+        // Tracked connections as on TCP (peer key: peer pid when
+        // available, else the socket path).
+        let connection_registry = context_manager.connection_registry();
+        let socket_path = uds_cfg.path.clone();
+        let incoming = {
+            use tokio_stream::StreamExt as _;
+            tokio_stream::wrappers::UnixListenerStream::new(listener).map(move |item| {
+                item.map(|stream| {
+                    let cred = stream.peer_cred().ok();
+                    let peer_key = pkcs11_proxy_ng::server::connection_state::uds_peer_key(
+                        cred.as_ref(),
+                        &socket_path,
+                    );
+                    pkcs11_proxy_ng::server::connection_state::TrackedStream::new(
+                        stream,
+                        connection_registry.clone(),
+                        peer_key,
+                    )
+                })
+            })
+        };
         let shutdown = server::shutdown::listener_shutdown(shutdown_rx.clone());
         tracing::info!(path = %uds_cfg.path.display(), auth = ?uds_cfg.auth, "listening on unix socket");
         serve_futures.push(Box::pin(router.serve_with_incoming_shutdown(incoming, shutdown)));
