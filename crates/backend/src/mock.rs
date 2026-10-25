@@ -2749,6 +2749,7 @@ impl Pkcs11Backend for MockBackend {
         wrapped_key: CkInBuf<'_>,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
+        self.rendezvous_mint_gate("unwrap_key");
         let _ = self.resolve_input(wrapped_key)?;
         self.require_mechanism_workflow_for_session(
             session,
@@ -4459,6 +4460,7 @@ impl Pkcs11Backend for MockBackend {
         template: Option<&[CkAttribute]>,
         aad: CkInBuf<'_>,
     ) -> CkResult<(CkObjectHandle, SecretBytes)> {
+        self.rendezvous_mint_gate("unwrap_key_authenticated");
         self.record_wrap_entry(
             MockWrapEntry::UnwrapAuthenticated,
             session,
