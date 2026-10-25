@@ -3082,10 +3082,16 @@ async fn close_session_without_login_does_not_release_backend_login() {
 async fn evict_expired_context_holding_login_releases_backend_login() {
     // D9 lease-expiry path through the same shared teardown: an expired
     // context holding the last login releases the backend login on reap.
+    // The absolute lifetime cap is zero so the session-holding holder is
+    // reapable past the cap (D4); B below stays under the lease.
     let mock = MockBackend::default_test();
     mock.initialize().unwrap();
     let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
-    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_millis(20), 0));
+    let ctx_mgr = Arc::new(ContextManager::new_with_max_context_lifetime(
+        std::time::Duration::from_millis(20),
+        0,
+        std::time::Duration::ZERO,
+    ));
     ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
     let ctx_a = ctx_mgr.create_context(None).await.unwrap();
     let session_a = open_test_session(&ctx_mgr, &backend, &ctx_a).await;

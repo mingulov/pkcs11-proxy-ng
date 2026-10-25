@@ -197,7 +197,8 @@ async fn capacity_eviction_skips_contexts_with_open_backend_sessions() {
     // M4: the inline capacity-eviction path must NOT drop an expired context
     // that still holds open backend sessions — it cannot close them (no backend
     // ref here), so doing so would leak them. Those are left to the background
-    // reaper (evict_expired), which closes them properly. At capacity with only
+    // reaper (evict_expired), which closes them properly once they pass the
+    // absolute lifetime cap (D4). At capacity with only
     // such a context present, creation is rejected rather than leaking.
     let mgr = ContextManager::new(std::time::Duration::from_millis(1), 1);
     let ctx_a = mgr.create_context(None).await.unwrap();
@@ -468,7 +469,9 @@ async fn evict_expired_keeps_recently_active_context() {
 async fn evict_expired_bounded_under_wedged_backend() {
     // W1-C2-03: a backend wedged on logout AND close must not stall lease
     // reaping — eviction completes within the teardown bound and the
-    // context does not accumulate.
+    // context does not accumulate. The absolute lifetime cap is zero so
+    // the session-holding context is reapable past the cap (D4) and this
+    // exercises teardown-on-reap.
     use pkcs11_proxy_ng_backend::MockBackend;
     use pkcs11_proxy_ng_backend::Pkcs11Backend as _;
 
@@ -480,7 +483,11 @@ async fn evict_expired_bounded_under_wedged_backend() {
     mock.set_logout_delay(std::time::Duration::from_secs(3));
     let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = Arc::clone(&mock) as _;
 
-    let mgr = ContextManager::new(std::time::Duration::from_secs(0), 0);
+    let mgr = ContextManager::new_with_max_context_lifetime(
+        std::time::Duration::from_secs(0),
+        0,
+        std::time::Duration::ZERO,
+    );
     mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
     let id = mgr.create_context(None).await.unwrap();
     // Give the context a backend session and a login so teardown has both
@@ -516,7 +523,8 @@ async fn evict_expired_bounded_under_wedged_backend() {
 #[tokio::test]
 async fn evict_expired_closes_backend_sessions() {
     // W1-C2-03 (no-regression): bounded teardown still reaps backend
-    // sessions on a healthy backend.
+    // sessions on a healthy backend. The absolute lifetime cap is zero
+    // so the session-holding context is reapable past the cap (D4).
     use pkcs11_proxy_ng_backend::MockBackend;
     use pkcs11_proxy_ng_backend::Pkcs11Backend as _;
 
@@ -524,7 +532,11 @@ async fn evict_expired_closes_backend_sessions() {
     mock.initialize().unwrap();
     let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = Arc::clone(&mock) as _;
 
-    let mgr = ContextManager::new(std::time::Duration::from_secs(0), 0);
+    let mgr = ContextManager::new_with_max_context_lifetime(
+        std::time::Duration::from_secs(0),
+        0,
+        std::time::Duration::ZERO,
+    );
     mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
     let id = mgr.create_context(None).await.unwrap();
     let session = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
@@ -568,6 +580,110 @@ async fn evict_expired_skips_context_with_in_flight_operation() {
     tokio::time::sleep(std::time::Duration::from_millis(2)).await;
     let evicted = mgr.evict_expired(&backend).await;
     assert!(evicted.contains(&id), "context reapable after the in-flight op ends");
+}
+
+#[tokio::test]
+async fn evict_expired_skips_session_holding_context_idle_past_lease() {
+    // D4: a context holding open backend sessions is live work — sitting
+    // idle past the lease between calls must not get it reaped by the
+    // background reaper (parity with the capacity-eviction path, M4).
+    use pkcs11_proxy_ng_backend::MockBackend;
+    use pkcs11_proxy_ng_backend::Pkcs11Backend as _;
+    use pkcs11_proxy_ng_types::CkMechanismType;
+
+    let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+    mock.initialize().unwrap();
+    let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = Arc::clone(&mock) as _;
+
+    let mgr = ContextManager::new(std::time::Duration::from_millis(10), 0);
+    mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let id = mgr.create_context(None).await.unwrap();
+    let session = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
+    let virtual_session = mgr
+        .get_context(&id, |ctx| {
+            ctx.register_session(
+                BackendHandle(session.0),
+                crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+            )
+        })
+        .await
+        .expect("context exists");
+    // Idle far past the 10ms lease; age (since creation) stays ~now, far
+    // under the absolute lifetime cap.
+    mgr.get_context(&id, |ctx| {
+        ctx.last_active = std::time::Instant::now() - std::time::Duration::from_secs(1);
+    })
+    .await;
+
+    let evicted = mgr.evict_expired(&backend).await;
+    assert!(
+        !evicted.contains(&id),
+        "session-holding context idle past lease must survive evict_expired"
+    );
+    // Still usable: the virtual session still resolves and the backend
+    // session was never closed.
+    assert_eq!(
+        mgr.get_context(&id, |ctx| ctx.session_handles.resolve(virtual_session)).await,
+        Some(Some(BackendHandle(session.0))),
+        "surviving context must remain usable"
+    );
+    assert_eq!(mock.open_session_count(), 1, "backend session must stay open");
+    assert_eq!(mock.close_session_call_count(), 0, "reaper must not close the live session");
+}
+
+#[tokio::test]
+async fn evict_expired_reaps_session_holding_context_past_absolute_lifetime_cap() {
+    // D4 bound: the session-holding exemption cannot leak forever — past
+    // the absolute maximum lifetime since creation (24h in production,
+    // shrunk to 1s here) the context is reaped even though it still
+    // holds an open backend session, and teardown closes that session.
+    use pkcs11_proxy_ng_backend::MockBackend;
+    use pkcs11_proxy_ng_backend::Pkcs11Backend as _;
+    use pkcs11_proxy_ng_types::CkMechanismType;
+
+    let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+    mock.initialize().unwrap();
+    let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = Arc::clone(&mock) as _;
+
+    let mgr = ContextManager::new_with_max_context_lifetime(
+        std::time::Duration::from_millis(10),
+        0,
+        std::time::Duration::from_secs(1),
+    );
+    mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let id = mgr.create_context(None).await.unwrap();
+    let session = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
+    mgr.get_context(&id, |ctx| {
+        ctx.register_session(
+            BackendHandle(session.0),
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+        );
+    })
+    .await;
+
+    // Idle past the lease but younger than the cap: exempt, survives.
+    mgr.get_context(&id, |ctx| {
+        ctx.last_active = std::time::Instant::now() - std::time::Duration::from_millis(100);
+    })
+    .await;
+    let evicted = mgr.evict_expired(&backend).await;
+    assert!(!evicted.contains(&id), "session-holding context under the absolute cap must survive");
+
+    // Past the absolute cap (and again idle past the lease): reaped even
+    // though it holds a session; teardown closes the backend session.
+    mgr.get_context(&id, |ctx| {
+        ctx.created_at = std::time::Instant::now() - std::time::Duration::from_secs(2);
+        ctx.last_active = std::time::Instant::now() - std::time::Duration::from_millis(100);
+    })
+    .await;
+    let evicted = mgr.evict_expired(&backend).await;
+    assert!(
+        evicted.contains(&id),
+        "session-holding context past the absolute lifetime cap must be evicted"
+    );
+    assert!(mgr.get_context(&id, |_| ()).await.is_none());
+    assert_eq!(mock.open_session_count(), 0, "backend session must be reaped at the cap");
+    assert_eq!(mock.close_session_call_count(), 1);
 }
 
 #[tokio::test]

@@ -455,6 +455,15 @@ impl LogicalClientInstance {
         backend_handle
     }
 
+    /// Whether this context holds any open backend session. The single
+    /// "has open sessions" criterion for eviction parity: the admission
+    /// capacity path (M4) and the idle reaper (D4) both refuse to drop
+    /// such a context on lease expiry alone. Suspended (mid-close)
+    /// mappings count — the backend session is still open.
+    pub fn has_open_backend_sessions(&self) -> bool {
+        self.session_handles.backend_handles().next().is_some()
+    }
+
     /// Prepare teardown: collect backend session handles, then clear maps.
     /// Returns the backend session handles that must be closed via the
     /// backend trait. The CALLER is responsible for calling
@@ -521,6 +530,11 @@ pub struct ContextManager {
     slot_map: Arc<RwLock<SlotMap>>,
     lease_duration: std::time::Duration,
     max_contexts: usize,
+    /// Absolute maximum lifetime since creation (D4): bounds the
+    /// session-holding exemption in `is_reapable`. Production value is
+    /// `MAX_CONTEXT_LIFETIME`; tests shrink it via
+    /// `new_with_max_context_lifetime`.
+    max_context_lifetime: std::time::Duration,
     /// Cache of `(label, serial)` per backend slot, captured when the daemon
     /// last read `C_GetTokenInfo` for an authorization check (M9). Authorization
     /// is otherwise a blocking backend call on every discovery/open. Entries are
@@ -768,6 +782,7 @@ impl ContextManager {
             slot_map: Arc::new(RwLock::new(SlotMap::new())),
             lease_duration,
             max_contexts,
+            max_context_lifetime: MAX_CONTEXT_LIFETIME,
             token_info_cache: Arc::new(DashMap::new()),
             token_info_publication: Arc::new(std::sync::Mutex::new(())),
             login_locks: Arc::new(DashMap::new()),
@@ -779,6 +794,20 @@ impl ContextManager {
             total_contexts_removed: AtomicU64::new(0),
             context_admission_reservations: Arc::new(std::sync::Mutex::new(0)),
         }
+    }
+
+    /// Test constructor with an explicit absolute lifetime cap (D4), so
+    /// cap-expiry tests need not backdate creation time by 24h (an
+    /// `Instant` cannot precede boot on a fresh machine).
+    #[cfg(test)]
+    pub(crate) fn new_with_max_context_lifetime(
+        lease_duration: std::time::Duration,
+        max_contexts: usize,
+        max_context_lifetime: std::time::Duration,
+    ) -> Self {
+        let mut mgr = Self::new(lease_duration, max_contexts);
+        mgr.max_context_lifetime = max_context_lifetime;
+        mgr
     }
 
     /// Snapshot of carrier sessions stranded by failed carrier closes
@@ -1334,7 +1363,8 @@ impl ContextManager {
     /// At capacity the reserve first reclaims expired sessionless contexts
     /// (the M4 admission-time eviction, unchanged: this path has no
     /// backend handle and so cannot close backend sessions; contexts
-    /// holding sessions are reclaimed by the background reaper).
+    /// holding sessions are reclaimed by the background reaper only past
+    /// the absolute lifetime cap, D4).
     ///
     /// Even a strict cap is an admission guardrail, not native isolation:
     /// admitted contexts still share one backend/native chain, and
@@ -1368,7 +1398,8 @@ impl ContextManager {
     /// Reclaim expired sessionless contexts for one admission attempt
     /// (M4; called with the admission mutex held). Contexts holding
     /// backend sessions are left for the background reaper
-    /// (`evict_expired`), which closes them properly.
+    /// (`evict_expired`), which closes them properly once they pass the
+    /// absolute lifetime cap (D4).
     fn evict_expired_sessionless_for_admission(&self) {
         // ONLY contexts holding no open backend sessions: this path has no
         // backend handle and so cannot close backend sessions; dropping a
@@ -1378,8 +1409,7 @@ impl ContextManager {
             .contexts
             .iter()
             .filter(|entry| {
-                self.is_reapable(entry.value(), now)
-                    && entry.value().session_handles.backend_handles().next().is_none()
+                self.is_reapable(entry.value(), now) && !entry.value().has_open_backend_sessions()
             })
             .map(|entry| entry.key().clone())
             .collect();
@@ -2212,9 +2242,20 @@ impl ContextManager {
     /// A context is reapable only when its lease has expired AND it has no
     /// backend operation in flight (a long in-flight op must never be evicted
     /// mid-call — that is the whole point of the in-flight counter).
+    ///
+    /// D4: a context holding open backend sessions is additionally exempt
+    /// while younger than the absolute lifetime cap
+    /// (`MAX_CONTEXT_LIFETIME` since creation) — it is live work sitting
+    /// idle between calls, and reaping it would kill its sessions. Past
+    /// the cap it is reapable again, bounding the exemption. This mirrors
+    /// the admission capacity path's refusal (M4), which still never
+    /// drops a session-holding context at any age (it has no backend
+    /// handle to close sessions with).
     fn is_reapable(&self, ctx: &LogicalClientInstance, now: Instant) -> bool {
         ctx.in_flight.load(Ordering::Relaxed) == 0
             && now.duration_since(ctx.last_active) > self.lease_duration
+            && (!ctx.has_open_backend_sessions()
+                || now.duration_since(ctx.created_at) > self.max_context_lifetime)
     }
 
     fn collect_expired_context_ids(&self, now: Instant) -> Vec<ClientContextId> {
@@ -2254,6 +2295,13 @@ impl ContextManager {
 /// data-plane `proxy.request_timeout_secs` default — a wedged backend must
 /// not stall lease reaping (or session close) beyond this per call.
 const TEARDOWN_BACKEND_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Absolute maximum lifetime of a context since creation: 24h (D4).
+/// `evict_expired` exempts contexts holding open backend sessions from
+/// idle lease eviction — they are live work between calls — but a
+/// context older than this cap is reaped even if it holds sessions, so
+/// an abandoned session-holding context cannot leak forever.
+const MAX_CONTEXT_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[cfg(test)]
 mod tests;

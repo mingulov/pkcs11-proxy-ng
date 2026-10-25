@@ -579,7 +579,7 @@ fn default_rate_limit_window_secs() -> u64 {
 }
 
 fn default_lease_seconds() -> u64 {
-    30
+    3600
 }
 fn default_max_message_bytes() -> usize {
     4 * 1024 * 1024 // 4 MiB — tonic default

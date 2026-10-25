@@ -33,7 +33,7 @@ module = "."
     assert_eq!(config.backend.module.to_str().unwrap(), ".");
     assert!(config.backend.initialize_args.is_none());
     assert_eq!(config.proxy.mechanism_discovery, MechanismDiscovery::Transparent);
-    assert_eq!(config.proxy.lease_seconds, 30);
+    assert_eq!(config.proxy.lease_seconds, 3600);
     assert_eq!(config.proxy.eviction_interval_secs, 5);
     assert_eq!(config.proxy.max_contexts, 1);
     assert_eq!(config.proxy.http2_keepalive_interval_secs, 15);

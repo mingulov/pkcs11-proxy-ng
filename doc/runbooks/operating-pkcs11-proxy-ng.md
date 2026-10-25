@@ -426,7 +426,7 @@ non-idempotent call.
 ### CKR_CRYPTOKI_NOT_INITIALIZED (0x190)
 
 **Most likely cause.** Daemon restart beyond `lease_seconds`
-(default 30) — the previous `client_context_id` is gone, the shim
+(default 3600) — the previous `client_context_id` is gone, the shim
 detected it, and is asking the app to re-init.
 
 **Triage.**

@@ -3168,10 +3168,29 @@ mod lifecycle_transition_tests {
         direction: Direction,
         lease_duration: Duration,
     ) -> (HandlerContext, Arc<MockBackend>, ClientContextId, u64) {
+        setup_with_lifetime(direction, lease_duration, None).await
+    }
+
+    async fn setup_with_lease_and_max_lifetime(
+        direction: Direction,
+        lease_duration: Duration,
+        max_context_lifetime: Duration,
+    ) -> (HandlerContext, Arc<MockBackend>, ClientContextId, u64) {
+        setup_with_lifetime(direction, lease_duration, Some(max_context_lifetime)).await
+    }
+
+    async fn setup_with_lifetime(
+        direction: Direction,
+        lease_duration: Duration,
+        max_context_lifetime: Option<Duration>,
+    ) -> (HandlerContext, Arc<MockBackend>, ClientContextId, u64) {
         let mock = Arc::new(MockBackend::default_test());
         mock.initialize().unwrap();
         let backend: Arc<dyn Pkcs11Backend> = mock.clone();
-        let manager = Arc::new(ContextManager::new(lease_duration, 0));
+        let manager = Arc::new(match max_context_lifetime {
+            Some(cap) => ContextManager::new_with_max_context_lifetime(lease_duration, 0, cap),
+            None => ContextManager::new(lease_duration, 0),
+        });
         manager.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
         let context_id = manager.create_context(None).await.unwrap();
         let raw_session = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
@@ -3681,7 +3700,11 @@ mod lifecycle_transition_tests {
         use crate::server::grpc_service::service_utils::scope_context_operation;
 
         let direction = Direction::Encrypt;
-        let (ctx, mock, context_id, session) = setup_with_lease(direction, Duration::ZERO).await;
+        // Zero absolute lifetime cap: once the guard drops, the
+        // session-holding context is reapable past the cap (D4), so the
+        // final reap below still proves the guard was released.
+        let (ctx, mock, context_id, session) =
+            setup_with_lease_and_max_lifetime(direction, Duration::ZERO, Duration::ZERO).await;
         let calls_before = mock.close_session_call_count();
         mock.set_next_message_lifecycle_action(MockMessageLifecycleAction::Delay(
             Duration::from_millis(80),
