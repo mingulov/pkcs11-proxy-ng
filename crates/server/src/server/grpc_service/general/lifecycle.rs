@@ -12,7 +12,7 @@ use pkcs11_proxy_ng_types::*;
 use super::super::super::auth::identity::AuthenticatedIdentity;
 use super::super::super::context_manager::{ClientContextId, ContextManager, RemoveIfIdleOutcome};
 use super::super::super::rate_limit;
-use super::super::service_utils::current_context_operation_guard;
+use super::super::service_utils::{current_context_operation_guard, spawn_settlement};
 
 pub(super) async fn initialize(
     ctx_mgr: &Arc<ContextManager>,
@@ -99,11 +99,21 @@ pub(super) async fn initialize(
         // disturbs live tenants). The plan is computed after the new
         // context inserted, so its liveness probes observe only live
         // tenants, the new (empty) context included.
+        //
+        // Cancellation-independent: the plan executes in a detached,
+        // breaker-owned settlement and this future awaits only its
+        // completion signal, so a cancelled Initialize cannot drop
+        // the remaining session closes.
         let replaced_id = replaced.id.clone();
         let plan = ctx_mgr.plan_removed_context_teardown(&mut replaced);
         let session_count = plan.sessions_to_close.len();
         let logout_count = plan.slot_logouts.len();
-        ctx_mgr.execute_teardown_plans(backend_ref, vec![plan]).await;
+        let teardown_mgr = Arc::clone(ctx_mgr);
+        let teardown_backend = Arc::clone(backend_ref);
+        let settled = spawn_settlement(async move {
+            teardown_mgr.execute_teardown_plans(&teardown_backend, vec![plan]).await;
+        });
+        let _ = settled.await;
         debug!(
             context_id = %ctx_id.0,
             replaced_context_id = %replaced_id.0,
@@ -167,10 +177,21 @@ pub(super) async fn finalize(
             // D6(2)/D9 shared teardown path: refcount-checked session reaping
             // plus last-holder backend logout (best-effort; never fails the
             // Finalize itself and never disturbs live tenants).
+            //
+            // Cancellation-independent: the plan executes in a detached,
+            // breaker-owned settlement and this future awaits only its
+            // completion signal, so a cancelled Finalize cannot drop the
+            // remaining session closes. The busy/missing RVs above are
+            // computed before any teardown and are unaffected.
             let plan = ctx_mgr.plan_removed_context_teardown(&mut ctx);
             let session_count = plan.sessions_to_close.len();
             let logout_count = plan.slot_logouts.len();
-            ctx_mgr.execute_teardown_plans(backend_ref, vec![plan]).await;
+            let teardown_mgr = Arc::clone(ctx_mgr);
+            let teardown_backend = Arc::clone(backend_ref);
+            let settled = spawn_settlement(async move {
+                teardown_mgr.execute_teardown_plans(&teardown_backend, vec![plan]).await;
+            });
+            let _ = settled.await;
             debug!(
                 context_id = %ctx_id.0,
                 sessions_closed = session_count,
@@ -991,5 +1012,118 @@ mod tests {
             assert!(oks >= 1, "Q18: the released slot must admit a racing Initialize");
             assert_eq!(ctx_mgr.context_count(), 1, "Q18: no over-admission past cap1");
         }
+    }
+
+    // --- Cancellation-independent teardown ---
+    //
+    // Replacement (Initialize) and Finalize execute their teardown
+    // plan in a detached, breaker-owned settlement; the request
+    // future only awaits its completion signal. Cancelling the
+    // request mid-teardown must not lose the remaining session
+    // closes (3 sessions, delayed closes).
+
+    async fn wait_for_close_count(mock: &MockBackend, want: usize) {
+        // The call count increments when a close starts; also wait
+        // for the sessions to actually drain (last close in flight).
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while mock.close_session_call_count() < want || mock.open_session_count() != 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {want} closes, saw {} calls / {} open",
+                mock.close_session_call_count(),
+                mock.open_session_count()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    async fn seed_three_sessions(
+        mock: &Arc<MockBackend>,
+        ctx_mgr: &Arc<ContextManager>,
+        ctx_id: &ClientContextId,
+    ) {
+        use crate::server::handle_map::BackendHandle;
+        let slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
+        for _ in 0..3 {
+            let session = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
+            ctx_mgr
+                .get_context(ctx_id, |ctx| {
+                    ctx.register_session(BackendHandle(session.0), slot);
+                })
+                .await;
+        }
+        assert_eq!(mock.open_session_count(), 3);
+    }
+
+    /// Cancelling the Finalize future mid-teardown still closes all
+    /// three backend sessions.
+    #[tokio::test]
+    async fn finalize_cancellation_mid_teardown_still_closes_all_sessions() {
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+        mock.initialize().unwrap();
+        let backend: Arc<dyn Pkcs11Backend> = Arc::clone(&mock) as _;
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        let slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
+        ctx_mgr.register_slot(slot).await;
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+        seed_three_sessions(&mock, &ctx_mgr, &ctx_id).await;
+        mock.set_close_session_delay(Duration::from_millis(400));
+
+        let task_mgr = Arc::clone(&ctx_mgr);
+        let task_backend = Arc::clone(&backend);
+        let task_ctx = ctx_id.clone();
+        let handle = tokio::spawn(async move {
+            super::finalize(&task_mgr, &task_backend, finalize_request(&task_ctx)).await
+        });
+        // Let teardown start (first delayed close in flight), then
+        // cancel the request future.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        handle.abort();
+        assert!(handle.await.unwrap_err().is_cancelled());
+
+        wait_for_close_count(&mock, 3).await;
+        assert_eq!(mock.close_session_call_count(), 3, "all closes must land despite cancellation");
+        assert_eq!(mock.open_session_count(), 0);
+        assert!(ctx_mgr.get_context(&ctx_id, |_| ()).await.is_none());
+    }
+
+    /// Cancelling the Initialize (replacement) future mid-teardown
+    /// still closes all three of the replaced orphan's sessions.
+    #[tokio::test]
+    async fn initialize_replacement_cancellation_mid_teardown_still_closes_all_sessions() {
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+        mock.initialize().unwrap();
+        let backend: Arc<dyn Pkcs11Backend> = Arc::clone(&mock) as _;
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 1));
+        let slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
+        ctx_mgr.register_slot(slot).await;
+
+        let first = initialize_ok(&ctx_mgr, &backend).await;
+        assert_eq!(first.ck_rv, CkRv::OK.0);
+        let orphan_id = ClientContextId(first.client_context_id.clone());
+        seed_three_sessions(&mock, &ctx_mgr, &orphan_id).await;
+        mock.set_close_session_delay(Duration::from_millis(400));
+
+        let task_mgr = Arc::clone(&ctx_mgr);
+        let task_backend = Arc::clone(&backend);
+        let handle = tokio::spawn(async move {
+            super::initialize(
+                &task_mgr,
+                &task_backend,
+                orphan_request(),
+                crate::config::TcpAuthMode::None,
+                crate::config::UnixAuthMode::None,
+            )
+            .await
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        handle.abort();
+        assert!(handle.await.unwrap_err().is_cancelled());
+
+        wait_for_close_count(&mock, 3).await;
+        assert_eq!(mock.close_session_call_count(), 3, "all closes must land despite cancellation");
+        assert_eq!(mock.open_session_count(), 0);
+        assert!(ctx_mgr.get_context(&orphan_id, |_| ()).await.is_none());
+        assert_eq!(ctx_mgr.context_count(), 1, "the successor context stays admitted");
     }
 }
