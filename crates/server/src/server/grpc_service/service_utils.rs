@@ -514,6 +514,27 @@ where
     }
 }
 
+/// Spawn detached settlement work and return a oneshot receiver
+/// that fires when it finishes. The work runs in its own task, so
+/// cancelling (or dropping) the awaiting caller cannot drop the
+/// remaining settlement steps: the caller awaits only the completion
+/// signal, never the work itself. Settlement work that touches the
+/// backend must route through [`spawn_backend`] (breaker + timeout),
+/// which keeps the detached steps breaker-owned exactly like the
+/// awaited path. Work runs until it completes or the runtime shuts
+/// down (daemon shutdown's native retirement then owns what is left).
+pub(super) fn spawn_settlement<F>(work: F) -> oneshot::Receiver<()>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let (done_tx, done_rx) = oneshot::channel();
+    tokio::spawn(async move {
+        work.await;
+        let _ = done_tx.send(());
+    });
+    done_rx
+}
+
 /// How a late-minted payload retires its native state when the mint's
 /// primary result was never consumed (P2-13, generalizing Q16 box 2).
 /// Implementations move only plain handle integers — never secret
