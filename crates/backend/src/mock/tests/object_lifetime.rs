@@ -119,6 +119,75 @@ fn mint_capture_collects_mint_pairs_atomically() {
     backend.get_object_size(session, replacement).expect("replacement remains usable");
 }
 
+/// Contention poison (Defect A, mock mirror): a fresh record that
+/// finds an existing lifetime entry for the same numeric handle
+/// under ANY session is racing another object's record. The table
+/// still updates to the newest id, but the mint capture reports
+/// nothing, so settlement (None against Some) refuses and the
+/// tracked object survives. The competitor entry is seeded
+/// directly because the mock allocator cannot reissue a live
+/// handle — seeding is the deterministic equivalent of the
+/// competitor's fresh record landing inside the allocation funnel
+/// between handle allocation and lifetime recording.
+#[test]
+fn contended_mint_capture_is_poisoned_and_replacement_survives() {
+    let backend = MockBackend::default_test();
+    backend.set_handle_recycling(true);
+    backend.initialize().unwrap();
+    let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let other = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let incarnation = backend.session_incarnation(session);
+
+    // Competitor tracks handle 1 (the next handle this mint will
+    // allocate) under a different session.
+    backend.state.lock().unwrap().object_lifetimes.insert((other.0, 1), 9999);
+
+    let capture = crate::mint_capture::begin(session);
+    let minted = backend.create_object(session, Some(&[])).unwrap();
+    assert_eq!(minted, CkObjectHandle(1), "setup: mint must allocate the contended handle");
+    let captured = capture.captured();
+    let captured_lifetime = capture_lifetime_for(&captured, minted);
+    drop(capture);
+
+    assert_eq!(
+        captured,
+        Vec::<(CkObjectHandle, u64)>::new(),
+        "contended mint capture must be poisoned (report nothing)"
+    );
+    assert_eq!(captured_lifetime, None, "poisoned capture carries None for the handle");
+    assert!(
+        backend.object_lifetime(session, minted).is_some(),
+        "table must still update its entry to the newest fresh id"
+    );
+    assert_ne!(
+        backend.object_lifetime(session, minted),
+        Some(9999),
+        "table entry must be the newest fresh id, not the competitor's"
+    );
+
+    let destroys_before = backend.destroy_call_count();
+    assert_eq!(
+        backend.destroy_object_if_bound(session, minted, incarnation, captured_lifetime),
+        Err(CkRv::OBJECT_HANDLE_INVALID),
+        "poisoned settlement (None against a tracking backend) must refuse"
+    );
+    assert_eq!(backend.destroy_call_count(), destroys_before, "refusal must issue no destroy");
+    assert_eq!(backend.live_object_count(), 1, "tracked object must survive");
+    backend.get_object_size(session, minted).expect("object remains usable");
+
+    // Positive control: an undisturbed mint still captures and
+    // settles exactly once.
+    let capture2 = crate::mint_capture::begin(session);
+    let second = backend.create_object(session, Some(&[])).unwrap();
+    let captured2 = capture2.captured();
+    let captured2_lifetime = capture_lifetime_for(&captured2, second);
+    drop(capture2);
+    let second_lifetime = backend.object_lifetime(session, second).expect("tracked mint");
+    assert_eq!(captured2, vec![(second, second_lifetime)]);
+    backend.destroy_object_if_bound(session, second, incarnation, captured2_lifetime).unwrap();
+    assert_eq!(backend.object_lifetime(session, second), None);
+}
+
 fn capture_lifetime_for(captured: &[(CkObjectHandle, u64)], handle: CkObjectHandle) -> Option<u64> {
     captured.iter().find(|(h, _)| *h == handle).map(|(_, l)| *l)
 }

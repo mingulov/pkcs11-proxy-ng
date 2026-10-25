@@ -1523,12 +1523,22 @@ impl MockBackend {
         }
         // Fresh object lifetime for every mint (this funnel covers
         // create/copy/derive/unwrap/generate/pair/KEM allocations).
+        // Contention poison (mirrors the FFI fresh-record site): an
+        // existing entry for this numeric handle under ANY session
+        // means this record races another object's live record, so
+        // the capture is poisoned for the handle even though the
+        // table still updates to the newest id.
+        let contended = state.object_lifetimes.keys().any(|&(_, obj)| obj == handle.0);
         let lifetime = state.next_object_lifetime;
         state.next_object_lifetime += 1;
         state.object_lifetimes.insert((session.0, handle.0), lifetime);
-        // Atomic mint capture (mirrors the FFI fresh-record site):
-        // report while the mint is still on this thread.
-        crate::mint_capture::report(session, handle, lifetime);
+        if contended {
+            crate::mint_capture::poison(session, handle);
+        } else {
+            // Atomic mint capture (mirrors the FFI fresh-record site):
+            // report while the mint is still on this thread.
+            crate::mint_capture::report(session, handle, lifetime);
+        }
         Ok(handle)
     }
 

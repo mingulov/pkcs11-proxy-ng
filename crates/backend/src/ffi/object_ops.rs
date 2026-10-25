@@ -581,6 +581,143 @@ mod lifecycle_output_tests {
         assert!(backend.object_lifetime(session, replacement).is_some());
     }
 
+    static CONTENDED_MINT_DESTROY_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C" fn destroy_counting_contended(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _object: cryptoki_sys::CK_OBJECT_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        CONTENDED_MINT_DESTROY_CALLS.fetch_add(1, Ordering::SeqCst);
+        cryptoki_sys::CKR_OK
+    }
+
+    /// Contention poison (Defect A): a competitor FindObjects-record,
+    /// destroy and recreate landing BEFORE the original mint's
+    /// fresh record must poison that mint's capture. The table still
+    /// updates to the newest id, but the capture reports nothing, so
+    /// settlement (None against Some) refuses and the valid
+    /// replacement survives with no native destroy.
+    #[test]
+    fn contended_mint_capture_is_poisoned_and_replacement_survives() {
+        use crate::traits::Pkcs11Backend;
+        CONTENDED_MINT_DESTROY_CALLS.store(0, Ordering::SeqCst);
+        let (backend, _functions) = backend_with_object_stubs();
+        unsafe { (*backend.func_list).C_DestroyObject = Some(destroy_counting_contended) };
+        backend.lifecycle_domain.open_for_tests();
+        let session = CkSessionHandle(7);
+        let handle = CkObjectHandle(43);
+
+        // Original mint: capture begins, native handle is known, but
+        // its fresh record has not run yet (delayed record below).
+        let capture = crate::mint_capture::begin(session);
+        // Competitor interleaving on another thread, simulated with a
+        // nested capture so its mint report cannot leak into the
+        // original capture (captures are thread-local in production).
+        // The competitor works through a DIFFERENT session, proving
+        // contention detection is under any session.
+        {
+            let other = CkSessionHandle(8);
+            let competitor = crate::mint_capture::begin(other);
+            backend.record_object_lifetime_if_absent(other, handle);
+            backend.destroy_object(other, handle).unwrap();
+            let replacement = backend.create_object(other, Some(&[])).unwrap();
+            assert_eq!(replacement, handle, "stub re-mints the same numeric handle");
+            drop(competitor);
+        }
+        assert_eq!(CONTENDED_MINT_DESTROY_CALLS.load(Ordering::SeqCst), 1);
+
+        // Original mint's late fresh record.
+        backend.record_object_lifetime_fresh(session, handle);
+        let captured = capture.captured();
+        let captured_lifetime = capture.lifetime_for(handle);
+        drop(capture);
+
+        assert_eq!(
+            captured,
+            Vec::<(CkObjectHandle, u64)>::new(),
+            "contended mint capture must be poisoned (report nothing)"
+        );
+        assert_eq!(captured_lifetime, None, "poisoned capture carries None for the handle");
+        assert!(
+            backend.object_lifetime(session, handle).is_some(),
+            "table must still update its entry to the newest fresh id"
+        );
+
+        let destroys_before = CONTENDED_MINT_DESTROY_CALLS.load(Ordering::SeqCst);
+        assert_eq!(
+            backend.destroy_object_if_bound(
+                session,
+                handle,
+                backend.session_incarnation(session),
+                captured_lifetime,
+            ),
+            Err(CkRv::OBJECT_HANDLE_INVALID),
+            "poisoned settlement (None against a tracking backend) must refuse"
+        );
+        assert_eq!(
+            CONTENDED_MINT_DESTROY_CALLS.load(Ordering::SeqCst),
+            destroys_before,
+            "poisoned settlement must issue no native destroy"
+        );
+        assert!(
+            backend.object_lifetime(session, handle).is_some(),
+            "valid replacement must survive poisoned settlement"
+        );
+    }
+
+    static UNDISTURBED_MINT_DESTROY_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C" fn destroy_counting_undisturbed(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _object: cryptoki_sys::CK_OBJECT_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        UNDISTURBED_MINT_DESTROY_CALLS.fetch_add(1, Ordering::SeqCst);
+        cryptoki_sys::CKR_OK
+    }
+
+    /// Positive control: an undisturbed mint still captures its
+    /// lifetime and settles exactly once.
+    #[test]
+    fn undisturbed_mint_capture_still_settles_exactly_once() {
+        use crate::traits::Pkcs11Backend;
+        UNDISTURBED_MINT_DESTROY_CALLS.store(0, Ordering::SeqCst);
+        let (backend, _functions) = backend_with_object_stubs();
+        unsafe { (*backend.func_list).C_DestroyObject = Some(destroy_counting_undisturbed) };
+        backend.lifecycle_domain.open_for_tests();
+        let session = CkSessionHandle(7);
+
+        let capture = crate::mint_capture::begin(session);
+        let handle = backend.create_object(session, Some(&[])).unwrap();
+        let captured = capture.captured();
+        let captured_lifetime = capture.lifetime_for(handle);
+        drop(capture);
+        let lifetime = backend.object_lifetime(session, handle).expect("tracked mint");
+        assert_eq!(captured, vec![(handle, lifetime)]);
+        assert_eq!(captured_lifetime, Some(lifetime));
+
+        backend
+            .destroy_object_if_bound(
+                session,
+                handle,
+                backend.session_incarnation(session),
+                captured_lifetime,
+            )
+            .unwrap();
+        assert_eq!(UNDISTURBED_MINT_DESTROY_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.object_lifetime(session, handle), None);
+        // Second settle refuses and destroys nothing more.
+        assert_eq!(
+            backend.destroy_object_if_bound(
+                session,
+                handle,
+                backend.session_incarnation(session),
+                captured_lifetime,
+            ),
+            Err(CkRv::OBJECT_HANDLE_INVALID),
+        );
+        assert_eq!(UNDISTURBED_MINT_DESTROY_CALLS.load(Ordering::SeqCst), 1);
+    }
+
     /// Destroy invalidation (FFI parity): destroying through another
     /// session drops the entry under ALL sessions.
     #[test]
