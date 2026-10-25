@@ -111,6 +111,16 @@ pub fn grpc_status_to_ck_rv_kind(code: Code, kind: RpcKind) -> CkRv {
         },
         Code::Internal => CkRv::GENERAL_ERROR,
         Code::FailedPrecondition => CkRv::GENERAL_ERROR,
+        // Version skew (D6): the daemon does not implement this RPC.
+        // CKR_FUNCTION_NOT_SUPPORTED is the spec's stub return for an
+        // unsupported function ("even unsupported functions … should
+        // simply return CKR_FUNCTION_NOT_SUPPORTED"); the strict
+        // per-function return lists describe a *supported*
+        // implementation. This codebase already surfaces peer-skew the
+        // same way at every kind — init version negotiation at
+        // C_Initialize, absent discovery info, `MessageCallError`
+        // protocol errors — so no kind keeps the catch-alls here.
+        Code::Unimplemented => CkRv::FUNCTION_NOT_SUPPORTED,
         _ => match kind {
             // CKR_DEVICE_ERROR isn't permitted from C_Initialize, fall
             // back to CKR_GENERAL_ERROR there.
@@ -185,6 +195,26 @@ mod tests {
         // Legacy wrapper preserves the historical mapping for session-
         // scoped callers.
         assert_eq!(grpc_status_to_ck_rv(Code::Cancelled, true), CkRv::FUNCTION_CANCELED);
+    }
+
+    // D6: a daemon that lacks an RPC (version skew) answers
+    // `Code::Unimplemented`; the honest PKCS#11 reflection is
+    // CKR_FUNCTION_NOT_SUPPORTED — the spec's stub return for unsupported
+    // functions, already used for peer-skew at every kind (init version
+    // negotiation, absent discovery info, protocol errors) — not the
+    // DEVICE_ERROR/GENERAL_ERROR transport catch-alls.
+    #[test]
+    fn unimplemented_returns_function_not_supported_for_every_kind() {
+        for kind in [RpcKind::Lifecycle, RpcKind::SlotOrToken, RpcKind::Session] {
+            assert_eq!(
+                grpc_status_to_ck_rv_kind(Code::Unimplemented, kind),
+                CkRv::FUNCTION_NOT_SUPPORTED,
+                "{kind:?} must surface version skew as FUNCTION_NOT_SUPPORTED"
+            );
+        }
+        // Legacy wrapper agrees on both flag values.
+        assert_eq!(grpc_status_to_ck_rv(Code::Unimplemented, true), CkRv::FUNCTION_NOT_SUPPORTED);
+        assert_eq!(grpc_status_to_ck_rv(Code::Unimplemented, false), CkRv::FUNCTION_NOT_SUPPORTED);
     }
 
     #[test]
