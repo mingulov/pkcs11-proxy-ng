@@ -35,7 +35,7 @@ module = "."
     assert_eq!(config.proxy.mechanism_discovery, MechanismDiscovery::Transparent);
     assert_eq!(config.proxy.lease_seconds, 30);
     assert_eq!(config.proxy.eviction_interval_secs, 5);
-    assert_eq!(config.proxy.max_contexts, 1000);
+    assert_eq!(config.proxy.max_contexts, 1);
     assert_eq!(config.proxy.http2_keepalive_interval_secs, 15);
     assert_eq!(config.proxy.http2_keepalive_timeout_secs, 5);
 }
@@ -706,7 +706,7 @@ module = "."
 "#;
     let config: DaemonConfig = toml::from_str(toml).unwrap();
     assert_eq!(config.proxy.eviction_interval_secs, 5);
-    assert_eq!(config.proxy.max_contexts, 1000);
+    assert_eq!(config.proxy.max_contexts, 1);
     assert_eq!(config.proxy.http2_keepalive_interval_secs, 15);
     assert_eq!(config.proxy.http2_keepalive_timeout_secs, 5);
 }

@@ -1,8 +1,10 @@
 """Supported-sample guardrails (SEC-H1/H3).
 
 Every recommended deployment sample carries the single-client
-admission guardrail explicitly, while the reusable library default
-stays untouched by this task.
+admission guardrail explicitly, and the code default is itself
+that guardrail (``max_contexts = 1``). The reusable
+``proxy.toml.default`` defers to the code default rather than
+repeating it.
 """
 
 import tomllib
@@ -20,7 +22,8 @@ GUARDED_SAMPLES = (
     "packaging/windows/proxy.toml.template",
 )
 
-# Reusable defaults: this task must not change them.
+# Reusable defaults: defer to the code default (now 1) instead of
+# repeating it.
 UNGUARDED_DEFAULTS = (
     "packaging/config/proxy.toml.default",
 )
@@ -41,10 +44,10 @@ class SampleGuardrailTests(unittest.TestCase):
                 self.assertNotIn("max_contexts", config.get("proxy", {}),
                                  f"{relative} must keep deferring to the code default")
 
-    def test_code_default_stays_1000(self):
+    def test_code_default_is_one(self):
         source = (ROOT / "crates/server/src/config.rs").read_text(encoding="utf-8")
-        self.assertRegex(source, r"(?s)fn default_max_contexts\(\) -> usize \{\s*1000\s*\}",
-                         "default_max_contexts must stay 1000 in this task")
+        self.assertRegex(source, r"(?s)fn default_max_contexts\(\) -> usize \{\s*1\s*\}",
+                         "default_max_contexts must be 1 (single-client guardrail)")
 
 
 if __name__ == "__main__":
