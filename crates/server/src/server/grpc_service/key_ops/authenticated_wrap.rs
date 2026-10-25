@@ -412,7 +412,11 @@ async fn unwrap_key_authenticated_impl(
             })
         });
         let _ = completion_tx.send(match &outcome {
-            Ok((key, _, _)) => Ok(LateMintedObjects::single(session, CkObjectHandle(key.0 as u64))),
+            Ok((key, _, _)) => Ok(LateMintedObjects::single_bound(
+                session,
+                CkObjectHandle(key.0 as u64),
+                &*backend,
+            )),
             Err(rv) => Err(*rv),
         });
         outcome

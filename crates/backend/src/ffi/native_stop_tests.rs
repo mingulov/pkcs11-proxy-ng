@@ -287,6 +287,7 @@ fn child_backend_managed(
         lifecycle: Default::default(),
         lifecycle_domain: Default::default(),
         session_fences: Default::default(),
+        object_lifetimes: Default::default(),
     }
 }
 
@@ -932,6 +933,7 @@ fn child_backend_unmanaged(
         lifecycle: Default::default(),
         lifecycle_domain: Default::default(),
         session_fences: Default::default(),
+        object_lifetimes: Default::default(),
         retirement_sentinel: super::native_domain::RetirementSentinel::unmanaged_test_only(),
     }
 }

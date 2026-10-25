@@ -12,6 +12,13 @@ pub(super) struct MockState {
     /// assigned on open, removed on close, so a recycled handle always
     /// reports a different incarnation than the closed session did.
     pub(super) session_incarnations: HashMap<u64, u64>,
+    /// Live object lifetime per `(session, object)` (late-mint
+    /// settlement simulation): assigned fresh on every mint,
+    /// record-if-absent on find, removed on destroy/close/finalize,
+    /// so a recycled numeric handle always reports a different
+    /// lifetime than the destroyed object did.
+    pub(super) object_lifetimes: HashMap<(u64, u64), u64>,
+    pub(super) next_object_lifetime: u64,
     pub(super) open_sessions: Vec<(CkSessionHandle, CkSlotId, CkSessionFlags)>,
     pub(super) login_state: HashMap<CkSlotId, CkUserType>,
     pub(super) live_objects: HashSet<u64>,

@@ -25,7 +25,8 @@ impl FfiBackend {
         let h_base_key = Self::object_handle(base_key)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
         let ck_attr_len = Self::ffi_attr_len(&ffi_attrs)?;
-        Self::call_object_with_mechanism(
+        self.call_object_with_mechanism(
+            session,
             &admission,
             unsafe { (*self.func_list).C_DeriveKey },
             mechanism,
@@ -59,7 +60,8 @@ impl FfiBackend {
         let h_base_key = Self::object_handle(base_key)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
         let ck_attr_len = Self::ffi_attr_len(&ffi_attrs)?;
-        Self::call_object_with_mechanism_output(
+        self.call_object_with_mechanism_output(
+            session,
             &admission,
             unsafe { (*self.func_list).C_DeriveKey },
             mechanism,
@@ -89,7 +91,8 @@ impl FfiBackend {
         let h_base_key = Self::object_handle(base_key)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
         let ck_attr_len = Self::ffi_attr_len(&ffi_attrs)?;
-        Self::call_object_with_mechanism_output_result(
+        self.call_object_with_mechanism_output_result(
+            session,
             &admission,
             unsafe { (*self.func_list).C_DeriveKey },
             mechanism,
@@ -196,7 +199,8 @@ impl FfiBackend {
         let _session_fence = self.session_fences.enter(&admission, session)?;
         let ck_wk_len = Self::ulong_len_u64(wk_len)?;
         let ck_attr_len = Self::ffi_attr_len(&ffi_attrs)?;
-        Self::call_object_with_mechanism(
+        self.call_object_with_mechanism(
+            session,
             &admission,
             unsafe { (*self.func_list).C_UnwrapKey },
             mechanism,
@@ -226,7 +230,8 @@ impl FfiBackend {
         let h_session = Self::session_handle(session)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
         let ck_attr_len = Self::ffi_attr_len(&ffi_attrs)?;
-        Self::call_object_with_mechanism(
+        self.call_object_with_mechanism(
+            session,
             &admission,
             unsafe { (*self.func_list).C_GenerateKey },
             mechanism,
@@ -249,7 +254,8 @@ impl FfiBackend {
         let h_session = Self::session_handle(session)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
         let ck_attr_len = Self::ffi_attr_len(&ffi_attrs)?;
-        Self::call_object_with_mechanism_output(
+        self.call_object_with_mechanism_output(
+            session,
             &admission,
             unsafe { (*self.func_list).C_GenerateKey },
             mechanism,
@@ -273,7 +279,8 @@ impl FfiBackend {
         let _session_fence = self.session_fences.enter(&admission, session)?;
         let ck_pub_attr_len = Self::ffi_attr_len(&pub_ffi)?;
         let ck_priv_attr_len = Self::ffi_attr_len(&priv_ffi)?;
-        Self::call_object_pair_with_mechanism(
+        self.call_object_pair_with_mechanism(
+            session,
             &admission,
             unsafe { (*self.func_list).C_GenerateKeyPair },
             mechanism,

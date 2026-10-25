@@ -278,6 +278,7 @@ mod tests {
             lifecycle: Default::default(),
             lifecycle_domain: Default::default(),
             session_fences: Default::default(),
+            object_lifetimes: Default::default(),
             retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
             ),
         };

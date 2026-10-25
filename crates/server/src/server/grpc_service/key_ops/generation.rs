@@ -263,9 +263,10 @@ async fn generate_key_pair_impl(
             private_key_template.as_deref(),
         );
         let _ = completion_tx.send(match &outcome {
-            Ok((public_key, private_key)) => Ok(LateMintedObjects::new(
+            Ok((public_key, private_key)) => Ok(LateMintedObjects::new_bound(
                 session,
                 [CkObjectHandle(public_key.0 as u64), CkObjectHandle(private_key.0 as u64)],
+                &*backend,
             )),
             Err(rv) => Err(*rv),
         });
@@ -506,9 +507,11 @@ async fn generate_key_impl(
     let result = spawn_backend(move || {
         let outcome = backend.generate_key_with_output(session, &validated, template.as_deref());
         let _ = completion_tx.send(match &outcome {
-            Ok((object, _)) => {
-                Ok(LateMintedObjects::single(session, CkObjectHandle(object.0 as u64)))
-            }
+            Ok((object, _)) => Ok(LateMintedObjects::single_bound(
+                session,
+                CkObjectHandle(object.0 as u64),
+                &*backend,
+            )),
             Err(rv) => Err(*rv),
         });
         outcome
@@ -801,9 +804,11 @@ async fn derive_key_impl(
             template.as_deref(),
         );
         let _ = completion_tx.send(match &outcome {
-            Ok(derive_result) if derive_result.rv.is_ok() => {
-                Ok(LateMintedObjects::new(session, derive_minted_handles(derive_result)))
-            }
+            Ok(derive_result) if derive_result.rv.is_ok() => Ok(LateMintedObjects::new_bound(
+                session,
+                derive_minted_handles(derive_result),
+                &*backend,
+            )),
             Ok(derive_result) => Err(derive_result.rv),
             Err(rv) => Err(*rv),
         });

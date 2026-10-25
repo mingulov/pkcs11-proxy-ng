@@ -275,6 +275,8 @@ impl FfiBackend {
     }
 
     pub(super) fn call_object_output<TFunction, F>(
+        &self,
+        session: CkSessionHandle,
         _admission: &OrdinaryGuard,
         function: Option<TFunction>,
         mut call: F,
@@ -284,7 +286,9 @@ impl FfiBackend {
         F: FnMut(TFunction, *mut cryptoki_sys::CK_OBJECT_HANDLE) -> cryptoki_sys::CK_RV,
     {
         let function = Self::require_fn(function)?;
-        Self::object_output(|handle| call(function, handle))
+        let handle = Self::object_output(|handle| call(function, handle))?;
+        self.record_object_lifetime_fresh(session, handle);
+        Ok(handle)
     }
 
     pub(super) fn object_pair_output<F>(mut call: F) -> CkResult<(CkObjectHandle, CkObjectHandle)>
@@ -514,6 +518,7 @@ impl FfiBackend {
         self.session_slot_map.clear();
         self.slot_sessions.clear();
         self.session_fences.clear();
+        self.object_lifetimes.clear();
     }
 
     /// Read one family's retained `output_params()`. Returns None when the
@@ -550,6 +555,8 @@ impl FfiBackend {
     }
 
     pub(super) fn call_object_with_mechanism<TFunction, F>(
+        &self,
+        session: CkSessionHandle,
         _admission: &OrdinaryGuard,
         function: Option<TFunction>,
         mechanism: &ValidatedMechanismParams,
@@ -565,7 +572,10 @@ impl FfiBackend {
     {
         let function = Self::require_fn(function)?;
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
-        Self::object_output(|handle| call(function, ffi_mech.ck_mechanism_mut(), handle))
+        let handle =
+            Self::object_output(|handle| call(function, ffi_mech.ck_mechanism_mut(), handle))?;
+        self.record_object_lifetime_fresh(session, handle);
+        Ok(handle)
     }
 
     /// Single FFI call with exact buffer semantics.
@@ -685,6 +695,8 @@ impl FfiBackend {
     /// derive).  Mirrors [`Self::call_object_with_mechanism`] but
     /// surfaces `output_params()` for callers that need it.
     pub(super) fn call_object_with_mechanism_output<TFunction, F>(
+        &self,
+        session: CkSessionHandle,
         _admission: &OrdinaryGuard,
         function: Option<TFunction>,
         mechanism: &ValidatedMechanismParams,
@@ -702,12 +714,17 @@ impl FfiBackend {
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
         let handle =
             Self::object_output(|handle| call(function, ffi_mech.ck_mechanism_mut(), handle))?;
-        Ok((handle, ffi_mech.output_params()))
+        self.record_object_lifetime_fresh(session, handle);
+        let output_params = ffi_mech.output_params();
+        self.record_mechanism_output_lifetimes(session, &output_params);
+        Ok((handle, output_params))
     }
 
     /// `C_DeriveKey`-style call with mechanism-param write-back, preserving
     /// post-call output params even when the PKCS#11 return value is not OK.
     pub(super) fn call_object_with_mechanism_output_result<TFunction, F>(
+        &self,
+        session: CkSessionHandle,
         _admission: &OrdinaryGuard,
         function: Option<TFunction>,
         mechanism: &ValidatedMechanismParams,
@@ -733,6 +750,8 @@ impl FfiBackend {
         let rv = CkRv(call(function, ffi_mech.ck_mechanism_mut(), &mut handle) as u64);
         let mechanism_out = ffi_mech.output_params();
         if rv.is_ok() {
+            self.record_object_lifetime_fresh(session, CkObjectHandle(handle as u64));
+            self.record_mechanism_output_lifetimes(session, &mechanism_out);
             Ok(CkDeriveKeyOutputResult::ok(CkObjectHandle(handle as u64), mechanism_out))
         } else {
             Ok(CkDeriveKeyOutputResult::error(rv, mechanism_out))
@@ -859,6 +878,8 @@ impl FfiBackend {
     }
 
     pub(super) fn call_object_pair_with_mechanism<TFunction, F>(
+        &self,
+        session: CkSessionHandle,
         _admission: &OrdinaryGuard,
         function: Option<TFunction>,
         mechanism: &ValidatedMechanismParams,
@@ -875,9 +896,12 @@ impl FfiBackend {
     {
         let function = Self::require_fn(function)?;
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
-        Self::object_pair_output(|first, second| {
+        let pair = Self::object_pair_output(|first, second| {
             call(function, ffi_mech.ck_mechanism_mut(), first, second)
-        })
+        })?;
+        self.record_object_lifetime_fresh(session, pair.0);
+        self.record_object_lifetime_fresh(session, pair.1);
+        Ok(pair)
     }
 }
 

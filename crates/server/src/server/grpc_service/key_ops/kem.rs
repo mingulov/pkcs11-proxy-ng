@@ -185,7 +185,11 @@ pub(crate) async fn encapsulate_key(
     let result = spawn_backend(move || {
         let outcome = backend.encapsulate_key(session, &validated, public_key, template.as_deref());
         let _ = completion_tx.send(match &outcome {
-            Ok((_, key)) => Ok(LateMintedObjects::single(session, CkObjectHandle(key.0 as u64))),
+            Ok((_, key)) => Ok(LateMintedObjects::single_bound(
+                session,
+                CkObjectHandle(key.0 as u64),
+                &*backend,
+            )),
             Err(rv) => Err(*rv),
         });
         outcome
@@ -375,7 +379,11 @@ pub(crate) async fn decapsulate_key(
             input_from_wire(&ciphertext, ciphertext_null_len),
         );
         let _ = completion_tx.send(match &outcome {
-            Ok(key) => Ok(LateMintedObjects::single(session, CkObjectHandle(key.0 as u64))),
+            Ok(key) => Ok(LateMintedObjects::single_bound(
+                session,
+                CkObjectHandle(key.0 as u64),
+                &*backend,
+            )),
             Err(rv) => Err(*rv),
         });
         outcome
@@ -632,7 +640,9 @@ pub(crate) async fn encapsulate_key_exact(
             &spec,
         );
         let _ = completion_tx.send(match &outcome {
-            Ok(r) if r.ck_rv == CkRv::OK => Ok(LateMintedObjects::new(session, r.object_handle)),
+            Ok(r) if r.ck_rv == CkRv::OK => {
+                Ok(LateMintedObjects::new_bound(session, r.object_handle, &*backend))
+            }
             Ok(r) => Err(r.ck_rv),
             Err(rv) => Err(*rv),
         });

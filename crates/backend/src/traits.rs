@@ -314,6 +314,56 @@ pub trait Pkcs11Backend: Send + Sync {
             None => self.destroy_object(session, object),
         }
     }
+    /// The live object-lifetime id for `(session, object)`, when the
+    /// backend tracks one. Captured when detached late-mint settlement
+    /// is armed (at payload construction, right after the mint returns)
+    /// and checked again at destroy time, so a destroy bound to a
+    /// minted object cannot land on a replacement object when the
+    /// provider recycles the numeric handle within the same live
+    /// session. The default `None` means this backend cannot bind
+    /// destroys to an object lifetime; settlement then falls back to
+    /// the session-incarnation binding alone, preserving behavior for
+    /// backends without object-lifetime tracking.
+    fn object_lifetime(&self, _session: CkSessionHandle, _object: CkObjectHandle) -> Option<u64> {
+        None
+    }
+    /// Destroy `object` only when `session` is still the incarnation
+    /// captured at mint time AND the object is still the lifetime
+    /// captured at payload construction. With no captured incarnation
+    /// (`None`), or when this backend reports no live incarnation to
+    /// check against, the incarnation leg falls back to the legacy
+    /// [`Self::destroy_object`]; likewise a missing captured object
+    /// lifetime, or a backend reporting no live lifetime for the
+    /// object, lets the lifetime leg pass (legacy fallback preserved).
+    /// A live incarnation that differs refuses with
+    /// `SESSION_HANDLE_INVALID`; a live object lifetime that differs
+    /// refuses with `OBJECT_HANDLE_INVALID`; both refusals issue no
+    /// destroy. Backends with a real fence (FFI) override this with an
+    /// atomic checked entry; the default composes the queries and the
+    /// destroy for simpler backends (mock).
+    fn destroy_object_if_bound(
+        &self,
+        session: CkSessionHandle,
+        object: CkObjectHandle,
+        incarnation: Option<u64>,
+        object_lifetime: Option<u64>,
+    ) -> CkResult<()> {
+        if let Some(expected) = incarnation {
+            match self.session_incarnation(session) {
+                Some(current) if current == expected => {}
+                Some(_) => return Err(CkRv::SESSION_HANDLE_INVALID),
+                None => {}
+            }
+        }
+        if let Some(expected) = object_lifetime {
+            match self.object_lifetime(session, object) {
+                Some(current) if current == expected => {}
+                Some(_) => return Err(CkRv::OBJECT_HANDLE_INVALID),
+                None => {}
+            }
+        }
+        self.destroy_object(session, object)
+    }
     /// Destroy a quarantined native object from `Drop` (`PendingNativeObject`
     /// cleanup) WITHOUT ordinary admission. The `FfiBackend` override rides
     /// the enclosing op's exclusion via the control choke (admitting would

@@ -243,6 +243,7 @@ impl FfiBackend {
             Ok(()) => {
                 self.session_fences.commit_close(&close_fence);
                 self.drop_mech_cache_session(session);
+                self.object_lifetimes.drop_session(session);
                 self.forget_session_slot(session);
                 // Count only provider-confirmed closes.
                 self.lifecycle.note_sessions_closed(1);
@@ -288,6 +289,9 @@ impl FfiBackend {
         match outcome {
             Ok(()) => {
                 self.session_fences.commit_close_all(&close_fences);
+                for handle in &known {
+                    self.object_lifetimes.drop_session(CkSessionHandle(*handle));
+                }
                 self.drop_mech_cache_for_slot(slot_id);
                 self.lifecycle.note_sessions_closed(known_open);
                 Ok(())
