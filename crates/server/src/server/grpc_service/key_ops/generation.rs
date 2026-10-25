@@ -18,7 +18,8 @@ use super::super::mechanism_input::{
     sanitize_mechanism_input, validate_mechanism_transport,
 };
 use super::super::service_utils::{
-    ensure_private_mint_allowed, ensure_private_use_allowed, gate_object_handle, parse_mechanism,
+    LateMintedObjects, ObjectMintCompletionOwner, ensure_private_mint_allowed,
+    ensure_private_use_allowed, gate_object_handle, parse_mechanism,
     register_session_object_handle, register_session_object_pair, resolve_session,
     resolve_session_and_key, spawn_backend, template_declares_private_object,
     template_declares_token_object,
@@ -249,13 +250,25 @@ async fn generate_key_pair_impl(
             }));
         }
     };
+    // P2-13: own the late result (both keys) until registration adopts
+    // them; no `.await` between the `spawn_backend` return and the
+    // settle calls below.
+    let (completion_tx, mut completion_owner) = ObjectMintCompletionOwner::arm(backend_ref);
     let result = spawn_backend(move || {
-        backend.generate_key_pair(
+        let outcome = backend.generate_key_pair(
             session,
             &validated,
             public_key_template.as_deref(),
             private_key_template.as_deref(),
-        )
+        );
+        let _ = completion_tx.send(match &outcome {
+            Ok((public_key, private_key)) => Ok(LateMintedObjects::new(
+                session,
+                [CkObjectHandle(public_key.0 as u64), CkObjectHandle(private_key.0 as u64)],
+            )),
+            Err(rv) => Err(*rv),
+        });
+        outcome
     })
     .await?;
 
@@ -275,12 +288,15 @@ async fn generate_key_pair_impl(
             .await;
             match virtual_handles {
                 Some((public_key_handle, private_key_handle)) => {
+                    completion_owner.disarm();
                     Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyPairResponse {
                         ck_rv: CkRv::OK.0,
                         public_key_handle,
                         private_key_handle,
                     }))
                 }
+                // Context gone: stay armed so the owner destroys the
+                // unadopted pair instead of leaking both keys.
                 None => Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyPairResponse {
                     ck_rv: CkRv::CRYPTOKI_NOT_INITIALIZED.0,
                     public_key_handle: 0,
@@ -288,11 +304,14 @@ async fn generate_key_pair_impl(
                 })),
             }
         }
-        Err(error) => Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyPairResponse {
-            ck_rv: error.0,
-            public_key_handle: 0,
-            private_key_handle: 0,
-        })),
+        Err(error) => {
+            completion_owner.settle_on_error();
+            Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyPairResponse {
+                ck_rv: error.0,
+                public_key_handle: 0,
+                private_key_handle: 0,
+            }))
+        }
     }
 }
 
@@ -476,8 +495,21 @@ async fn generate_key_impl(
             }));
         }
     };
+    // P2-13: own the late result until registration adopts the key;
+    // no `.await` between the `spawn_backend` return and the settle
+    // calls below. Extraction is the primary handle only: this path
+    // never virtualizes handles out of `mechanism_out`, so none are
+    // adopted from it either.
+    let (completion_tx, mut completion_owner) = ObjectMintCompletionOwner::arm(backend_ref);
     let result = spawn_backend(move || {
-        backend.generate_key_with_output(session, &validated, template.as_deref())
+        let outcome = backend.generate_key_with_output(session, &validated, template.as_deref());
+        let _ = completion_tx.send(match &outcome {
+            Ok((object, _)) => {
+                Ok(LateMintedObjects::single(session, CkObjectHandle(object.0 as u64)))
+            }
+            Err(rv) => Err(*rv),
+        });
+        outcome
     })
     .await?;
 
@@ -492,6 +524,11 @@ async fn generate_key_impl(
                 Some(is_private),
             )
             .await;
+            // Adopted: disarm. Zero (context gone) stays armed so the
+            // owner destroys the unadopted key.
+            if key_handle != 0 {
+                completion_owner.disarm();
+            }
             let mechanism_out = match mechanism_out_params
                 .map(|params| {
                     pkcs11_proxy_ng_proto::Mechanism::try_from(
@@ -522,11 +559,14 @@ async fn generate_key_impl(
                 mechanism_out,
             }))
         }
-        Err(error) => Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyResponse {
-            ck_rv: error.0,
-            key_handle: 0,
-            mechanism_out: None,
-        })),
+        Err(error) => {
+            completion_owner.settle_on_error();
+            Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyResponse {
+                ck_rv: error.0,
+                key_handle: 0,
+                mechanism_out: None,
+            }))
+        }
     }
 }
 
@@ -745,8 +785,26 @@ async fn derive_key_impl(
             }));
         }
     };
+    // P2-13: own the late result until the primary key and every
+    // output-param handle are adopted below. The closure extracts
+    // the minted set from the raw backend result (before the
+    // virtualize rewrites) under the same `CKR_OK` trust condition.
+    let (completion_tx, mut completion_owner) = ObjectMintCompletionOwner::arm(backend_ref);
     let result = spawn_backend(move || {
-        backend.derive_key_with_output_result(session, &validated, base_key, template.as_deref())
+        let outcome = backend.derive_key_with_output_result(
+            session,
+            &validated,
+            base_key,
+            template.as_deref(),
+        );
+        let _ = completion_tx.send(match &outcome {
+            Ok(derive_result) if derive_result.rv.is_ok() => {
+                Ok(LateMintedObjects::new(session, derive_minted_handles(derive_result)))
+            }
+            Ok(derive_result) => Err(derive_result.rv),
+            Err(rv) => Err(*rv),
+        });
+        outcome
     })
     .await?;
 
@@ -768,6 +826,10 @@ async fn derive_key_impl(
                     None => 0,
                 }
             } else {
+                // Inner error RV: no handle is trusted minted (the
+                // extraction reported `Err`); the mutated
+                // `mechanism_out` is still surfaced unchanged below.
+                completion_owner.disarm();
                 0
             };
             if derive_result.rv.is_ok()
@@ -777,6 +839,12 @@ async fn derive_key_impl(
                     .await;
                 virtualize_key_mat_out_handles(ctx_mgr, &ctx_id, virtual_session, is_token, params)
                     .await;
+            }
+            // Adopted: disarm after the last registration. A primary
+            // that failed to register (context gone) stays armed so
+            // the owner destroys the whole unadopted minted set.
+            if derive_result.rv.is_ok() && (derive_result.key_handle.is_none() || key_handle != 0) {
+                completion_owner.disarm();
             }
             let mechanism_out = match derive_result
                 .mechanism_out
@@ -809,11 +877,14 @@ async fn derive_key_impl(
                 mechanism_out,
             }))
         }
-        Err(error) => Ok(Response::new(pkcs11_proxy_ng_proto::DeriveKeyResponse {
-            ck_rv: error.0,
-            key_handle: 0,
-            mechanism_out: None,
-        })),
+        Err(error) => {
+            completion_owner.settle_on_error();
+            Ok(Response::new(pkcs11_proxy_ng_proto::DeriveKeyResponse {
+                ck_rv: error.0,
+                key_handle: 0,
+                mechanism_out: None,
+            }))
+        }
     }
 }
 
@@ -982,6 +1053,49 @@ fn write_sp800_108_key_handle_value(handle: u64, width: usize) -> Result<Vec<u8>
     }
 }
 
+/// P2-13 settlement extraction for a completed derive: every backend
+/// handle the call minted — the primary key plus the output-param
+/// handles the `virtualize_*` helpers below would adopt (SP800-108
+/// additional derived keys, SSL3/TLS/WTLS key-mat OUT handles).
+/// Trusted only on inner `CKR_OK`, mirroring the adoption condition
+/// exactly: on an error RV the output fields may echo caller input,
+/// and destroying those could hit unrelated objects. Zero handles
+/// are filtered by [`LateMintedObjects`].
+fn derive_minted_handles(
+    result: &pkcs11_proxy_ng_backend::traits::CkDeriveKeyOutputResult,
+) -> Vec<CkObjectHandle> {
+    let mut handles = Vec::new();
+    if !result.rv.is_ok() {
+        return handles;
+    }
+    if let Some(primary) = result.key_handle {
+        handles.push(primary);
+    }
+    match &result.mechanism_out {
+        Some(CkMechanismParams::Sp800108Kdf(params)) => {
+            if let Some(keys) = params.additional_derived_keys_presence.as_present() {
+                handles.extend(keys.iter().map(|key| key.key_handle));
+            }
+        }
+        Some(CkMechanismParams::Sp800108FeedbackKdf(params)) => {
+            if let Some(keys) = params.additional_derived_keys_presence.as_present() {
+                handles.extend(keys.iter().map(|key| key.key_handle));
+            }
+        }
+        Some(CkMechanismParams::Ssl3KeyMat(params)) => handles.extend([
+            params.client_mac_secret_handle,
+            params.server_mac_secret_handle,
+            params.client_key_handle,
+            params.server_key_handle,
+        ]),
+        Some(CkMechanismParams::WtlsKeyMat(params)) => {
+            handles.extend([params.mac_secret_handle, params.key_handle])
+        }
+        _ => {}
+    }
+    handles
+}
+
 async fn virtualize_sp800_108_additional_handles(
     ctx_mgr: &Arc<ContextManager>,
     ctx_id: &ClientContextId,
@@ -1105,7 +1219,7 @@ mod tests {
     use crate::server::grpc_service::HandlerContext;
     use crate::server::grpc_service::service_utils::resolve_session_and_object;
     use crate::server::handle_map::BackendHandle;
-    use pkcs11_proxy_ng_backend::MockBackend;
+    use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend as _};
     use pkcs11_proxy_ng_types::{
         CkMechanism, CkMechanismType, CkSlotId, MechanismRegistry, PointerArray, PointerBytes,
         PrfDataParam, Sp800108FeedbackKdfParams, Sp800108KdfParams,
@@ -1791,5 +1905,288 @@ mod tests {
             CkRv::KEY_HANDLE_INVALID.0,
             "destroyed DeriveKey base key must answer CKR_KEY_HANDLE_INVALID"
         );
+    }
+
+    /// P2-13 fixture: mock + backend session in a fresh context.
+    /// Returns (mock, backend, ctx_mgr, ctx_id, virtual session).
+    async fn generation_settlement_fixture() -> (
+        Arc<MockBackend>,
+        Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
+        Arc<ContextManager>,
+        ClientContextId,
+        u64,
+    ) {
+        let mock = Arc::new(MockBackend::new(
+            vec![CkSlotId(0)],
+            vec![
+                CkMechanismType::AES_KEY_GEN,
+                CkMechanismType::RSA_PKCS_KEY_PAIR_GEN,
+                CkMechanismType::HKDF_DERIVE,
+                CkMechanismType::SHA256,
+            ],
+        ));
+        mock.initialize().unwrap();
+        let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock.clone();
+        let backend_session = mock
+            .open_session(CkSlotId(0), pkcs11_proxy_ng_types::CkSessionFlags::default())
+            .unwrap();
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+        let session_vh = ctx_mgr
+            .get_context(&ctx_id, |ctx| {
+                ctx.register_session(
+                    BackendHandle(backend_session.0),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                )
+            })
+            .await
+            .unwrap();
+        (mock, backend, ctx_mgr, ctx_id, session_vh.0)
+    }
+
+    async fn await_generation_settlement(mock: &Arc<MockBackend>, live: usize, destroys: usize) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if mock.live_object_count() == live && mock.destroy_call_count() == destroys {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for mint settlement: live={} destroys={} (want live={live} destroys={destroys})",
+                mock.live_object_count(),
+                mock.destroy_call_count()
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    fn parameterless_proto(mechanism_type: CkMechanismType) -> pkcs11_proxy_ng_proto::Mechanism {
+        pkcs11_proxy_ng_proto::Mechanism::try_from(&CkMechanism { mechanism_type, params: None })
+            .expect("parameterless mechanism converts")
+    }
+
+    /// P2-13: cancelling GenerateKey after native entry destroys the
+    /// late-minted key exactly once and publishes no mapping.
+    #[tokio::test]
+    async fn generate_key_cancel_after_entry_leaves_no_orphan() {
+        let (mock, backend, ctx_mgr, ctx_id, session_vh) = generation_settlement_fixture().await;
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        mock.set_mint_gate(entered_tx, release_rx);
+
+        let rpc = {
+            let (ctx_mgr, backend, ctx_id) = (ctx_mgr.clone(), backend.clone(), ctx_id.clone());
+            tokio::spawn(async move {
+                generate_key_impl(
+                    &HandlerContext::for_test(&ctx_mgr, &backend),
+                    Request::new(pkcs11_proxy_ng_proto::GenerateKeyRequest {
+                        client_context_id: ctx_id.0.clone(),
+                        session_handle: session_vh,
+                        mechanism: Some(parameterless_proto(CkMechanismType::AES_KEY_GEN)),
+                        template: vec![],
+                        template_null: false,
+                    }),
+                )
+                .await
+            })
+        };
+        let op = tokio::task::spawn_blocking(move || {
+            entered_rx.recv_timeout(Duration::from_secs(10)).expect("native entry observed")
+        })
+        .await
+        .unwrap();
+        assert_eq!(op, "generate_key");
+        rpc.abort();
+        assert!(rpc.await.expect_err("aborted join must err").is_cancelled());
+        release_tx.send(()).expect("parked worker alive");
+        await_generation_settlement(&mock, 0, 1).await;
+        let published =
+            ctx_mgr.get_context(&ctx_id, |ctx| ctx.created_objects.len()).await.unwrap_or(0);
+        assert_eq!(published, 0, "cancelled mint must never publish a mapping");
+    }
+
+    /// P2-13: cancelling GenerateKeyPair after native entry destroys
+    /// BOTH late-minted keys.
+    #[tokio::test]
+    async fn generate_key_pair_cancel_after_entry_leaves_no_orphan() {
+        let (mock, backend, ctx_mgr, ctx_id, session_vh) = generation_settlement_fixture().await;
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        mock.set_mint_gate(entered_tx, release_rx);
+
+        let rpc = {
+            let (ctx_mgr, backend, ctx_id) = (ctx_mgr.clone(), backend.clone(), ctx_id.clone());
+            tokio::spawn(async move {
+                generate_key_pair_impl(
+                    &HandlerContext::for_test(&ctx_mgr, &backend),
+                    Request::new(pkcs11_proxy_ng_proto::GenerateKeyPairRequest {
+                        client_context_id: ctx_id.0.clone(),
+                        session_handle: session_vh,
+                        mechanism: Some(parameterless_proto(
+                            CkMechanismType::RSA_PKCS_KEY_PAIR_GEN,
+                        )),
+                        public_key_template: vec![],
+                        private_key_template: vec![],
+                        public_template_null: false,
+                        private_template_null: false,
+                    }),
+                )
+                .await
+            })
+        };
+        let op = tokio::task::spawn_blocking(move || {
+            entered_rx.recv_timeout(Duration::from_secs(10)).expect("native entry observed")
+        })
+        .await
+        .unwrap();
+        assert_eq!(op, "generate_key_pair");
+        rpc.abort();
+        assert!(rpc.await.expect_err("aborted join must err").is_cancelled());
+        release_tx.send(()).expect("parked worker alive");
+        await_generation_settlement(&mock, 0, 2).await;
+    }
+
+    /// P2-13: cancelling DeriveKey after native entry destroys the
+    /// late derived key; the base key survives.
+    #[tokio::test]
+    async fn derive_key_cancel_after_entry_leaves_no_orphan() {
+        use pkcs11_proxy_ng_types::HkdfParams;
+
+        let (mock, backend, ctx_mgr, ctx_id, session_vh) = generation_settlement_fixture().await;
+        // Base key minted + mapped directly (public, so no login gate).
+        let backend_session = ctx_mgr
+            .get_context(&ctx_id, |ctx| ctx.session_handles.resolve(VirtualHandle(session_vh)))
+            .await
+            .unwrap()
+            .unwrap();
+        let base =
+            mock.create_object(CkSessionHandle(backend_session.0), Some(&[])).expect("base key");
+        let base_vh = register_session_object_handle(
+            &ctx_mgr,
+            &ctx_id,
+            VirtualHandle(session_vh),
+            base,
+            false,
+            Some(false),
+        )
+        .await;
+        assert_eq!(mock.live_object_count(), 1, "only the base key exists");
+
+        let mechanism = pkcs11_proxy_ng_proto::Mechanism::try_from(&CkMechanism {
+            mechanism_type: CkMechanismType::HKDF_DERIVE,
+            params: Some(CkMechanismParams::Hkdf(HkdfParams {
+                extract: true,
+                expand: true,
+                prf_hash_mechanism: CkMechanismType::SHA256,
+                salt_type: cryptoki_sys::CKF_HKDF_SALT_KEY as u64,
+                salt_key_handle: CkObjectHandle(base_vh),
+                salt_presence: PointerBytes::present_copy(&[]),
+                info_presence: PointerBytes::present_copy(&[]),
+            })),
+        })
+        .expect("hkdf mechanism converts");
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        mock.set_mint_gate(entered_tx, release_rx);
+
+        let rpc = {
+            let (ctx_mgr, backend, ctx_id) = (ctx_mgr.clone(), backend.clone(), ctx_id.clone());
+            tokio::spawn(async move {
+                derive_key_impl(
+                    &HandlerContext::for_test(&ctx_mgr, &backend),
+                    Request::new(pkcs11_proxy_ng_proto::DeriveKeyRequest {
+                        client_context_id: ctx_id.0.clone(),
+                        session_handle: session_vh,
+                        mechanism: Some(mechanism),
+                        base_key_handle: base_vh,
+                        template: vec![],
+                        template_null: false,
+                    }),
+                )
+                .await
+            })
+        };
+        let op = tokio::task::spawn_blocking(move || {
+            entered_rx.recv_timeout(Duration::from_secs(10)).expect("native entry observed")
+        })
+        .await
+        .unwrap();
+        assert_eq!(op, "derive_key");
+        rpc.abort();
+        assert!(rpc.await.expect_err("aborted join must err").is_cancelled());
+        release_tx.send(()).expect("parked worker alive");
+        // Derived key destroyed once; base key untouched.
+        await_generation_settlement(&mock, 1, 1).await;
+    }
+
+    /// P2-13: derive settlement extraction mirrors the adoption set —
+    /// primary + SP800-108 additional + key-mat OUT handles on
+    /// `CKR_OK`, and nothing at all on an inner error RV (output
+    /// fields may echo caller input there).
+    #[test]
+    fn derive_minted_handles_mirrors_adoption_set() {
+        use pkcs11_proxy_ng_backend::traits::CkDeriveKeyOutputResult;
+        use pkcs11_proxy_ng_types::{Ssl3KeyMatParams, SslRandomData};
+
+        let kdf = CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
+            prf_type: CkMechanismType::SHA256,
+            data_params_presence: PointerArray::present(Vec::new()),
+            additional_derived_keys_presence: PointerArray::present(vec![
+                Sp800108DerivedKey {
+                    template_presence: PointerArray::present(Vec::new()),
+                    key_handle: CkObjectHandle(0xC1),
+                    ph_key_is_null: false,
+                },
+                Sp800108DerivedKey {
+                    template_presence: PointerArray::present(Vec::new()),
+                    key_handle: CkObjectHandle(0),
+                    ph_key_is_null: true,
+                },
+            ]),
+        });
+        let ok = CkDeriveKeyOutputResult::ok(CkObjectHandle(0xAA), Some(kdf.clone()));
+        assert_eq!(
+            derive_minted_handles(&ok),
+            vec![CkObjectHandle(0xAA), CkObjectHandle(0xC1), CkObjectHandle(0)],
+            "extraction lists every OUT field; LateMintedObjects filters zeros"
+        );
+
+        let key_mat = CkMechanismParams::Ssl3KeyMat(Ssl3KeyMatParams {
+            mac_size_bits: 128,
+            key_size_bits: 128,
+            iv_size_bits: 0,
+            is_export: false,
+            random_info: SslRandomData {
+                client_random_presence: PointerBytes::present_copy(&[1; 32]),
+                server_random_presence: PointerBytes::present_copy(&[2; 32]),
+            },
+            prf_hash_mechanism: CkMechanismType(0),
+            client_mac_secret_handle: CkObjectHandle(0xA1),
+            server_mac_secret_handle: CkObjectHandle(0),
+            client_key_handle: CkObjectHandle(0xA2),
+            server_key_handle: CkObjectHandle(0xA3),
+            client_iv_presence: PointerBytes::present_copy(&[]),
+            server_iv_presence: PointerBytes::present_copy(&[]),
+            returned_key_material_is_null: false,
+        });
+        let ok = CkDeriveKeyOutputResult::ok(CkObjectHandle(0xAA), Some(key_mat));
+        assert_eq!(
+            derive_minted_handles(&ok),
+            vec![
+                CkObjectHandle(0xAA),
+                CkObjectHandle(0xA1),
+                CkObjectHandle(0),
+                CkObjectHandle(0xA2),
+                CkObjectHandle(0xA3),
+            ],
+            "extraction lists every OUT field; LateMintedObjects filters zeros"
+        );
+
+        // Inner error: mutated output params are still surfaced to the
+        // caller by the handler, but no handle in them is trusted.
+        let err = CkDeriveKeyOutputResult::error(CkRv::TEMPLATE_INCONSISTENT, Some(kdf));
+        assert!(derive_minted_handles(&err).is_empty());
     }
 }
