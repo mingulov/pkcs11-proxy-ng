@@ -2422,12 +2422,13 @@ async fn uds_group_same_process_surviving_connection_replaces_own_idle() {
     drop(second);
 }
 
-/// Rebind-on-use semantics: only a live `Some` connection
-/// overwrites the binding — `None` and closed states never strip a
-/// live binding — and a live state revives a transport-dead context
-/// onto its new connection (read back through the current binding).
+/// Rebind-on-use set semantics: only a live `Some` connection is
+/// ADDED to the binding set — `None` and closed states never add
+/// and never strip a live entry — adding never evicts a still-live
+/// older entry, and a live state added after every entry died
+/// revives a transport-dead context (read back through the set).
 #[tokio::test]
-async fn rebind_only_live_some_overwrites_binding() {
+async fn rebind_only_live_some_adds_to_binding_set() {
     use crate::server::connection_state::ConnectionState;
     let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
     let state_a = ConnectionState::new();
@@ -2436,32 +2437,186 @@ async fn rebind_only_live_some_overwrites_binding() {
         .await
         .unwrap();
 
-    // None never overwrites.
+    // None never adds or strips.
     mgr.rebind_context_connection(&holder, None);
     let same = mgr.get_context(&holder, |c| c.same_connection_as(Some(&state_a))).await.unwrap();
-    assert!(same, "None rebind must leave the live binding untouched");
+    assert!(same, "None rebind must leave the live binding set untouched");
 
-    // A closed state never overwrites.
+    // A closed state never adds or strips.
     let closed = ConnectionState::new();
     closed.mark_closed();
     mgr.rebind_context_connection(&holder, Some(closed));
     let same = mgr.get_context(&holder, |c| c.same_connection_as(Some(&state_a))).await.unwrap();
-    assert!(same, "closed rebind must leave the live binding untouched");
+    assert!(same, "closed rebind must leave the live binding set untouched");
 
-    // The bound connection dies; a live successor revives the context.
-    state_a.mark_closed();
-    let dead = mgr.get_context(&holder, |c| c.is_transport_dead()).await.unwrap();
-    assert!(dead, "setup: context must be transport-dead once A closes");
+    // A live successor is added alongside A: both match.
     let state_b = ConnectionState::new();
     mgr.rebind_context_connection(&holder, Some(Arc::clone(&state_b)));
-    let (dead, same_b) = mgr
-        .get_context(&holder, |c| (c.is_transport_dead(), c.same_connection_as(Some(&state_b))))
+    let (same_a, same_b, dead) = mgr
+        .get_context(&holder, |c| {
+            (
+                c.same_connection_as(Some(&state_a)),
+                c.same_connection_as(Some(&state_b)),
+                c.is_transport_dead(),
+            )
+        })
+        .await
+        .unwrap();
+    assert!(same_a && same_b && !dead, "live rebind must add B without evicting live A");
+
+    // A dies: B still lives, so the context is not transport-dead.
+    state_a.mark_closed();
+    let dead = mgr.get_context(&holder, |c| c.is_transport_dead()).await.unwrap();
+    assert!(!dead, "context must stay live on B after A closes");
+
+    // B dies too: the bound set prunes to empty and is transport-dead.
+    state_b.mark_closed();
+    let dead = mgr.get_context(&holder, |c| c.is_transport_dead()).await.unwrap();
+    assert!(dead, "context must be transport-dead once every bound connection closes");
+
+    // A live successor added afterwards revives the context.
+    let state_c = ConnectionState::new();
+    mgr.rebind_context_connection(&holder, Some(Arc::clone(&state_c)));
+    let (dead, same_c) = mgr
+        .get_context(&holder, |c| (c.is_transport_dead(), c.same_connection_as(Some(&state_c))))
         .await
         .unwrap();
     assert!(!dead, "live rebind must revive the context");
-    assert!(same_b, "context must read back the new binding");
+    assert!(same_c, "context must read back the new binding");
 
     // Unknown contexts are a no-op (no panic, no creation).
-    mgr.rebind_context_connection(&ClientContextId("missing".into()), Some(state_b));
+    mgr.rebind_context_connection(&ClientContextId("missing".into()), Some(state_c));
     assert_eq!(mgr.context_count(), 1);
+}
+
+/// Set binding (Defect B): a context used from A then B keeps BOTH
+/// live connections. Dropping A must not reap it while B lives;
+/// dropping B (the last live entry) makes it transport-dead and
+/// reapable.
+#[tokio::test]
+async fn rebind_set_used_from_a_then_b_drop_a_does_not_reap_drop_b_reaps() {
+    use crate::server::connection_state::ConnectionState;
+    use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
+    let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::clone(&mock) as _;
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let state_a = ConnectionState::new();
+    let state_b = ConnectionState::new();
+    let holder = mgr
+        .create_context_with_connection(Some("unauthenticated".into()), Some(Arc::clone(&state_a)))
+        .await
+        .unwrap();
+    mgr.get_context(&holder, |c| {
+        c.register_session(BackendHandle(781), crate::server::slot_map::BackendSlotId(CkSlotId(0)));
+    })
+    .await;
+
+    // Used from B as well: the binding must retain both A and B.
+    mgr.rebind_context_connection(&holder, Some(Arc::clone(&state_b)));
+    // Dedup: rebinding B again must not affect liveness.
+    mgr.rebind_context_connection(&holder, Some(Arc::clone(&state_b)));
+    let (same_a, same_b, dead) = mgr
+        .get_context(&holder, |c| {
+            (
+                c.same_connection_as(Some(&state_a)),
+                c.same_connection_as(Some(&state_b)),
+                c.is_transport_dead(),
+            )
+        })
+        .await
+        .unwrap();
+    assert!(same_a, "set binding must retain A after use from B");
+    assert!(same_b, "set binding must include B");
+    assert!(!dead, "context with live A and B must not be transport-dead");
+
+    // Drop A: B still lives, so eviction must not reap.
+    state_a.mark_closed();
+    drop(state_a);
+    let evicted = mgr.evict_expired(&backend).await;
+    assert!(evicted.is_empty(), "drop of A must not reap while B lives: {evicted:?}");
+    assert!(mgr.get_context(&holder, |_| ()).await.is_some(), "context must survive drop of A");
+    let dead = mgr.get_context(&holder, |c| c.is_transport_dead()).await.unwrap();
+    assert!(!dead, "context must not be transport-dead while B lives");
+
+    // Drop B: no live entry remains in a bound set, so it reaps.
+    state_b.mark_closed();
+    let evicted = mgr.evict_expired(&backend).await;
+    assert_eq!(evicted, vec![holder.clone()], "drop of last live connection must reap");
+    assert!(mgr.get_context(&holder, |_| ()).await.is_none());
+}
+
+/// Set binding (Defect B, order sensitivity): a late request from
+/// the older channel A after the context was bound to the newer
+/// channel B must not lose liveness when A then drops — B is
+/// still live in the set.
+#[tokio::test]
+async fn rebind_set_late_older_rebind_does_not_lose_liveness_when_older_drops() {
+    use crate::server::connection_state::ConnectionState;
+    use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
+    let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::clone(&mock) as _;
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let state_a = ConnectionState::new(); // older channel
+    let state_b = ConnectionState::new(); // newer channel
+    // Context is bound to the newer channel B first.
+    let holder = mgr
+        .create_context_with_connection(Some("unauthenticated".into()), Some(Arc::clone(&state_b)))
+        .await
+        .unwrap();
+    mgr.get_context(&holder, |c| {
+        c.register_session(BackendHandle(782), crate::server::slot_map::BackendSlotId(CkSlotId(0)));
+    })
+    .await;
+
+    // A late request arrives on the older (still live) channel A.
+    mgr.rebind_context_connection(&holder, Some(Arc::clone(&state_a)));
+    let (same_a, same_b) = mgr
+        .get_context(&holder, |c| {
+            (c.same_connection_as(Some(&state_a)), c.same_connection_as(Some(&state_b)))
+        })
+        .await
+        .unwrap();
+    assert!(same_a, "set binding must include the late older channel");
+    assert!(same_b, "late older rebind must not evict the newer channel from the set");
+
+    // Older channel drops: newer B still lives.
+    state_a.mark_closed();
+    drop(state_a);
+    let dead = mgr.get_context(&holder, |c| c.is_transport_dead()).await.unwrap();
+    assert!(!dead, "context must not be transport-dead while newer B lives");
+    let evicted = mgr.evict_expired(&backend).await;
+    assert!(evicted.is_empty(), "evict must not reap while B lives: {evicted:?}");
+    assert!(mgr.get_context(&holder, |_| ()).await.is_some());
+
+    // Newer channel drops too: now transport-dead and reapable.
+    state_b.mark_closed();
+    let dead = mgr.get_context(&holder, |c| c.is_transport_dead()).await.unwrap();
+    assert!(dead, "context must be transport-dead once every bound connection drops");
+    let evicted = mgr.evict_expired(&backend).await;
+    assert_eq!(evicted, vec![holder.clone()]);
+}
+
+/// Peerless contract preserved under set semantics: a context that
+/// was never bound is never transport-dead and matches a peerless
+/// (`None`) counterpart, while a bound context whose set prunes to
+/// empty IS transport-dead and matches nothing.
+#[test]
+fn peerless_never_dead_but_bound_empty_set_is_dead() {
+    use crate::server::connection_state::ConnectionState;
+    let peerless = LogicalClientInstance::new(None);
+    assert!(!peerless.is_transport_dead(), "never-bound context must never be transport-dead");
+    assert!(peerless.same_connection_as(None), "peerless must match a peerless counterpart");
+    assert!(peerless.live_connection_state().is_none());
+
+    let state = ConnectionState::new();
+    let bound = LogicalClientInstance::new_with_connection(None, Some(Arc::clone(&state)));
+    assert!(!bound.is_transport_dead());
+    assert!(bound.same_connection_as(Some(&state)));
+    state.mark_closed();
+    assert!(bound.is_transport_dead(), "bound context with no live entry must be transport-dead");
+    assert!(!bound.same_connection_as(None), "bound-dead context must not match peerless");
+    assert!(!bound.same_connection_as(Some(&state)), "closed entry must not match");
+    assert!(bound.live_connection_state().is_none());
 }

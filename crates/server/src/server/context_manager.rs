@@ -270,18 +270,23 @@ pub struct LogicalClientInstance {
     /// consulted only for the owning context, never cross-context).
     pub contended_slot_login: HashSet<BackendSlotId>,
     pub authenticated_identity: Option<String>, // bound at creation (ADR-0005 §4)
-    /// Transport connection group that carried this context's
-    /// `Initialize` (same process on UDS, same connection on TCP),
-    /// as a `Weak` so the context never keeps a dead group alive.
-    /// Resolved through the shared connection registry from the request
-    /// extensions at Initialize. `None` for contexts created without a
-    /// connection (tests/internal callers): never transport-dead.
-    /// Interior-mutable so a successful request arriving on a NEW
-    /// connection (client reconnect) can rebind the context to that
-    /// live connection (`rebind_connection`) without an exclusive
-    /// context lock; readers (`is_transport_dead`,
-    /// `same_connection_as`) always observe the current binding.
-    pub connection_state: std::sync::RwLock<Option<Weak<ConnectionState>>>,
+    /// Set of transport connection groups that have carried
+    /// owner-checked requests for this context, starting with the
+    /// group that carried its `Initialize` (same process on UDS,
+    /// same connection on TCP), each as a `Weak` so the context
+    /// never keeps a dead group alive. Resolved through the shared
+    /// connection registry from the request extensions.
+    /// `None` means never bound (tests/internal callers): never
+    /// transport-dead. `Some` is a bound context even when every
+    /// entry has since died and the set prunes to empty — that
+    /// bound-but-empty state IS transport-dead. Interior-mutable so
+    /// a successful request arriving on a NEW connection (client
+    /// reconnect) can add that live connection (`rebind_connection`)
+    /// without an exclusive context lock and without evicting any
+    /// still-live older connection; readers (`is_transport_dead`,
+    /// `same_connection_as`) prune dead entries and observe the
+    /// current live set.
+    pub connection_state: std::sync::RwLock<Option<Vec<Weak<ConnectionState>>>>,
     /// Last TCP peer IP seen opening a session on this context (W1-L7-02).
     /// Recorded only for unauthenticated contexts while the session quota
     /// is active, so [`ContextManager::session_count_for_principal`] can
@@ -359,8 +364,8 @@ impl LogicalClientInstance {
     }
 
     /// Create a context bound to the connection that carried its
-    /// `Initialize` (stored as a `Weak`; `None` = connectionless,
-    /// never transport-dead).
+    /// `Initialize` (stored as a singleton set of one `Weak`;
+    /// `None` = never bound, never transport-dead).
     pub fn new_with_connection(
         identity: Option<String>,
         connection: Option<Arc<ConnectionState>>,
@@ -383,69 +388,90 @@ impl LogicalClientInstance {
             login_state: HashMap::new(),
             contended_slot_login: HashSet::new(),
             authenticated_identity: identity,
-            connection_state: std::sync::RwLock::new(connection.as_ref().map(Arc::downgrade)),
+            connection_state: std::sync::RwLock::new(
+                connection.as_ref().map(|state| vec![Arc::downgrade(state)]),
+            ),
             last_peer_ip: None,
             in_flight: Arc::new(AtomicI64::new(0)),
             message_operations: HashMap::new(),
         }
     }
 
-    /// Read the current connection binding (cloned out from under
-    /// the lock so liveness probes never run while holding it).
-    fn connection_binding(&self) -> Option<Weak<ConnectionState>> {
-        self.connection_state.read().unwrap_or_else(|poison| poison.into_inner()).clone()
+    /// Prune dead entries from the binding set and return the live
+    /// states cloned out from under the lock, together with whether
+    /// the context was ever bound. `None` (never bound) yields
+    /// `(false, [])`; a bound context whose entries all died yields
+    /// `(true, [])`. An entry is dead when its `Weak` no longer
+    /// upgrades or its group is closed.
+    fn live_connection_bindings(&self) -> (bool, Vec<Arc<ConnectionState>>) {
+        let mut binding =
+            self.connection_state.write().unwrap_or_else(|poison| poison.into_inner());
+        let Some(entries) = binding.as_mut() else {
+            return (false, Vec::new());
+        };
+        entries.retain(|weak| weak.upgrade().is_some_and(|state| !state.is_closed()));
+        let live = entries.iter().filter_map(Weak::upgrade).collect();
+        (true, live)
     }
 
-    /// Rebind this context to `connection` (rebind-on-use after a
-    /// client reconnect). Only a LIVE `Some` state overwrites the
-    /// current binding; `None` or a closed state never overwrites
-    /// (a peerless or dying request must not strip a live binding,
-    /// nor resurrect a dead one onto a closed group).
+    /// Add `connection` to this context's binding set (rebind-on-use
+    /// after a client reconnect). Only a LIVE `Some` state is added;
+    /// `None` or a closed state never adds (a peerless or dying
+    /// request must not strip a live binding, nor resurrect a dead
+    /// one onto a closed group). Adding never evicts another live
+    /// entry — an older channel that is still live stays in the set
+    /// alongside a newer one, so whichever drops first cannot make
+    /// the context transport-dead while the other still lives.
+    /// Duplicate live entries are deduplicated by `Arc` identity.
     pub fn rebind_connection(&self, connection: Option<Arc<ConnectionState>>) {
         let Some(state) = connection.filter(|state| !state.is_closed()) else {
             return;
         };
-        *self.connection_state.write().unwrap_or_else(|poison| poison.into_inner()) =
-            Some(Arc::downgrade(&state));
-    }
-
-    /// Transport-dead: the bound connection group's state is closed
-    /// (every connection in the group dropped — for UDS, the owning
-    /// process has no live connections left) or has been dropped
-    /// entirely. Connectionless contexts (`None`) are never
-    /// transport-dead.
-    pub fn is_transport_dead(&self) -> bool {
-        match self.connection_binding() {
-            None => false,
-            Some(weak) => match weak.upgrade() {
-                None => true,
-                Some(state) => state.is_closed(),
-            },
+        let mut binding =
+            self.connection_state.write().unwrap_or_else(|poison| poison.into_inner());
+        match binding.as_mut() {
+            None => *binding = Some(vec![Arc::downgrade(&state)]),
+            Some(entries) => {
+                entries.retain(|weak| weak.upgrade().is_some_and(|s| !s.is_closed()));
+                if !entries.iter().filter_map(Weak::upgrade).any(|live| Arc::ptr_eq(&live, &state))
+                {
+                    entries.push(Arc::downgrade(&state));
+                }
+            }
         }
     }
 
-    /// The live connection state for this context, when bound and
-    /// still alive.
+    /// Transport-dead: no live entry remains in the binding set
+    /// (every bound group's state is closed — for UDS, the owning
+    /// process has no live connections left — or has been dropped
+    /// entirely). Never-bound contexts (`None` at construction:
+    /// tests/internal callers) are never transport-dead; a bound
+    /// context whose set prunes to empty IS transport-dead.
+    pub fn is_transport_dead(&self) -> bool {
+        let (ever_bound, live) = self.live_connection_bindings();
+        ever_bound && live.is_empty()
+    }
+
+    /// A live connection state for this context, when bound and at
+    /// least one entry is still alive.
     pub fn live_connection_state(&self) -> Option<Arc<ConnectionState>> {
-        self.connection_binding()
-            .and_then(|weak| Weak::upgrade(&weak))
-            .filter(|state| !state.is_closed())
+        self.live_connection_bindings().1.into_iter().next()
     }
 
     /// Whether this context lives in the same live connection group
     /// as `other` (the group carrying a new `Initialize`): the same
     /// process on UDS, the same connection on TCP — group identity
     /// is `Arc` identity, shared by every connection in the group.
-    /// Two connectionless endpoints count as the same (the
-    /// legacy/test path both replacement tests and peerless callers
-    /// use); a connectionless context never matches a live group.
+    /// Matches when ANY live entry in the set is that group. Two
+    /// connectionless endpoints count as the same (the legacy/test
+    /// path both replacement tests and peerless callers use); a
+    /// never-bound context never matches a live group, and a bound
+    /// context never matches a peerless endpoint.
     pub fn same_connection_as(&self, other: Option<&Arc<ConnectionState>>) -> bool {
-        match (self.connection_binding(), other) {
-            (None, None) => true,
-            (Some(weak), Some(other)) => {
-                weak.upgrade().is_some_and(|state| Arc::ptr_eq(&state, other) && !state.is_closed())
-            }
-            _ => false,
+        let (ever_bound, live) = self.live_connection_bindings();
+        match other {
+            None => !ever_bound,
+            Some(other) => !other.is_closed() && live.iter().any(|state| Arc::ptr_eq(state, other)),
         }
     }
 
@@ -907,15 +933,18 @@ impl ContextManager {
         super::connection_state::connection_state_for_request(&self.connection_registry, request)
     }
 
-    /// Rebind `id` to `connection` on use (client reconnect): only a
-    /// live `Some` state overwrites the current binding; `None` or a
-    /// closed state never overwrites a live binding. Unknown
-    /// contexts are a no-op. Called from the one common dispatch
-    /// path after the context-owner check has matched the request's
-    /// transport identity to the context's owner, so a reconnected
-    /// client keeps its context out of transport-dead reaping while
-    /// its new connection lives — and the context reaps normally
-    /// once that connection drops too.
+    /// Add `connection` to `id`'s binding set on use (client
+    /// reconnect): only a live `Some` state is added; `None` or a
+    /// closed state never adds and never strips a live binding.
+    /// Adding never evicts another live entry, so an older channel
+    /// arriving late cannot displace a newer live channel (and vice
+    /// versa). Unknown contexts are a no-op. Called from the one
+    /// common dispatch path after the context-owner check has
+    /// matched the request's transport identity to the context's
+    /// owner, so a reconnected client keeps its context out of
+    /// transport-dead reaping while ANY connection that has carried
+    /// it still lives — and the context reaps normally once every
+    /// bound connection has dropped.
     pub fn rebind_context_connection(
         &self,
         id: &ClientContextId,
@@ -1601,8 +1630,9 @@ impl ContextManager {
     }
 
     /// [`Self::create_context`] binding the new context to the
-    /// connection that carried its `Initialize`. Admission discipline
-    /// is identical; only the stored connection `Weak` differs.
+    /// connection that carried its `Initialize` (initial singleton
+    /// binding set). Admission discipline is identical; only the
+    /// stored connection binding differs.
     pub async fn create_context_with_connection(
         &self,
         identity: Option<String>,
@@ -1684,15 +1714,16 @@ impl ContextManager {
     /// Connection-aware form of
     /// [`Self::create_context_replacing_idle_same_identity`]: at the cap
     /// it may replace ONE idle same-identity context only when that
-    /// context is transport-dead (its group is closed/dropped — the
-    /// exited-process orphan; on UDS the process has no live
-    /// connections left) OR lives in the same live group as this
-    /// `Initialize` (`connection`, resolved from the request's
-    /// transport extensions: same process on UDS, same connection on
-    /// TCP). A different live group is NEVER replaced, even for the
-    /// shared unauthenticated identity: a still-running client's live
+    /// context is transport-dead (no live entry in its binding set —
+    /// the exited-process orphan; on UDS the process has no live
+    /// connections left) OR any live entry in its binding set is the
+    /// same group as this `Initialize` (`connection`, resolved from
+    /// the request's transport extensions: same process on UDS, same
+    /// connection on TCP). A context whose live set contains only
+    /// different groups is NEVER replaced, even for the shared
+    /// unauthenticated identity: a still-running client's live
     /// context survives another client's Initialize. The new context
-    /// is bound to `connection`.
+    /// is bound to `connection` as its initial singleton set.
     pub async fn create_context_replacing_idle_same_identity_on_connection(
         &self,
         identity: Option<String>,
@@ -1755,9 +1786,10 @@ impl ContextManager {
     }
 
     /// Remove `id` only when it is idle AND replaceable by a new
-    /// `Initialize` on `request_connection`: transport-dead, or living
-    /// in that same live group (same process on UDS, same connection
-    /// on TCP). The idle + liveness checks and the remove are atomic
+    /// `Initialize` on `request_connection`: transport-dead (no live
+    /// entry in its binding set), or any live entry in its set is
+    /// that same group (same process on UDS, same connection on
+    /// TCP). The idle + liveness checks and the remove are atomic
     /// under the shard write lock (same discipline as
     /// [`Self::remove_context_if_idle`]), so an operation or a
     /// connection change landing after the candidate scan can never be
