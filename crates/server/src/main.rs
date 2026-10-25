@@ -797,19 +797,23 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), server::shutdown
             ))
             .add_service(health_service.clone())
             .add_service(svc.clone());
-        // Track each accepted connection in the shared registry: the
-        // tracked stream marks its ConnectionState closed and
-        // unregisters it on drop, so contexts bound to it become
-        // transport-dead exactly when the connection dies.
+        // Track each accepted connection in the shared registry
+        // (per-connection group, TCP peer key below): the tracked
+        // stream releases its group on drop, so contexts bound to
+        // it become transport-dead exactly when the connection
+        // dies. A connection whose peer address is unavailable is
+        // peerless — nothing is registered and its contexts bind
+        // `None` (never transport-dead); there is no fallback key,
+        // because the request side can never produce one either.
         let connection_registry = context_manager.connection_registry();
         let incoming = {
             use tokio_stream::StreamExt as _;
             tokio_stream::wrappers::TcpListenerStream::new(listener).map(move |item| {
                 item.map(|stream| {
-                    let peer_key = match stream.peer_addr() {
-                        Ok(peer) => pkcs11_proxy_ng::server::connection_state::tcp_peer_key(peer),
-                        Err(_) => "tcp:unknown".to_string(),
-                    };
+                    let peer_key = stream
+                        .peer_addr()
+                        .ok()
+                        .map(pkcs11_proxy_ng::server::connection_state::tcp_peer_key);
                     pkcs11_proxy_ng::server::connection_state::TrackedStream::new(
                         stream,
                         connection_registry.clone(),
@@ -840,19 +844,20 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), server::shutdown
                 ))
                 .add_service(health_service.clone())
                 .add_service(svc.clone());
-        // Tracked connections as on TCP (peer key: peer pid when
-        // available, else the socket path).
+        // Tracked connections as on TCP, except UDS groups are
+        // per-process (peer key: peer pid). A connection whose
+        // peer pid is unavailable is peerless — nothing is
+        // registered and its contexts bind `None` (never
+        // transport-dead); there is no socket-path fallback key,
+        // because the request side can never produce one either.
         let connection_registry = context_manager.connection_registry();
-        let socket_path = uds_cfg.path.clone();
         let incoming = {
             use tokio_stream::StreamExt as _;
             tokio_stream::wrappers::UnixListenerStream::new(listener).map(move |item| {
                 item.map(|stream| {
                     let cred = stream.peer_cred().ok();
-                    let peer_key = pkcs11_proxy_ng::server::connection_state::uds_peer_key(
-                        cred.as_ref(),
-                        &socket_path,
-                    );
+                    let peer_key =
+                        pkcs11_proxy_ng::server::connection_state::uds_peer_key(cred.as_ref());
                     pkcs11_proxy_ng::server::connection_state::TrackedStream::new(
                         stream,
                         connection_registry.clone(),
