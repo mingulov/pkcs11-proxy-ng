@@ -286,9 +286,25 @@ async fn reinitialize_after_lease_expiry() {
     let slots = client.get_slot_list(false).await.unwrap();
     let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
 
+    // D4 (bfa055b): a context holding open backend sessions is exempt
+    // from idle lease eviction until the 24h absolute lifetime cap
+    // (`MAX_CONTEXT_LIFETIME`) — it is live work idle between calls, so
+    // an open session would correctly survive this sleep. That
+    // exemption (and its cap) is covered by the context_manager unit
+    // tests `evict_expired_skips_session_holding_context_idle_past_lease`
+    // and `evict_expired_reaps_session_holding_context_past_absolute_lifetime_cap`
+    // in `crates/server/src/server/context_manager/tests.rs`. Close the
+    // session first so this context is sessionless and reapable, keeping
+    // this test on its eviction -> reinitialize path.
+    client.close_session(session).await.unwrap();
+
     // Wait for lease to expire
     tokio::time::sleep(Duration::from_millis(250)).await;
 
+    // The context is gone, so the server reports CRYPTOKI_NOT_INITIALIZED
+    // before any session-handle resolution; after reinitialize (below)
+    // the same stale handle resolves against the new context and yields
+    // SESSION_HANDLE_INVALID instead.
     let stale_after_eviction = client.get_session_info(session).await.unwrap_err();
     assert_eq!(stale_after_eviction, CkRv::CRYPTOKI_NOT_INITIALIZED);
 
