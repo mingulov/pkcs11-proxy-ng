@@ -183,12 +183,15 @@ pub(crate) async fn encapsulate_key(
     let (completion_tx, mut completion_owner) =
         ObjectMintCompletionOwner::arm_for_session(backend_ref, session);
     let result = spawn_backend(move || {
+        let capture = pkcs11_proxy_ng_backend::mint_capture::begin(session);
         let outcome = backend.encapsulate_key(session, &validated, public_key, template.as_deref());
+        let captured = capture.captured();
+        drop(capture);
         let _ = completion_tx.send(match &outcome {
-            Ok((_, key)) => Ok(LateMintedObjects::single_bound(
+            Ok((_, key)) => Ok(LateMintedObjects::from_captured(
                 session,
-                CkObjectHandle(key.0 as u64),
-                &*backend,
+                [CkObjectHandle(key.0 as u64)],
+                &captured,
             )),
             Err(rv) => Err(*rv),
         });
@@ -371,6 +374,7 @@ pub(crate) async fn decapsulate_key(
     let (completion_tx, mut completion_owner) =
         ObjectMintCompletionOwner::arm_for_session(backend_ref, session);
     let result = spawn_backend(move || {
+        let capture = pkcs11_proxy_ng_backend::mint_capture::begin(session);
         let outcome = backend.decapsulate_key(
             session,
             &validated,
@@ -378,11 +382,13 @@ pub(crate) async fn decapsulate_key(
             template.as_deref(),
             input_from_wire(&ciphertext, ciphertext_null_len),
         );
+        let captured = capture.captured();
+        drop(capture);
         let _ = completion_tx.send(match &outcome {
-            Ok(key) => Ok(LateMintedObjects::single_bound(
+            Ok(key) => Ok(LateMintedObjects::from_captured(
                 session,
-                CkObjectHandle(key.0 as u64),
-                &*backend,
+                [CkObjectHandle(key.0 as u64)],
+                &captured,
             )),
             Err(rv) => Err(*rv),
         });
@@ -632,6 +638,7 @@ pub(crate) async fn encapsulate_key_exact(
     let (completion_tx, mut completion_owner) =
         ObjectMintCompletionOwner::arm_for_session(backend_ref, session);
     let result = spawn_backend_exact(move || {
+        let capture = pkcs11_proxy_ng_backend::mint_capture::begin(session);
         let outcome = backend.encapsulate_key_exact(
             session,
             &validated,
@@ -639,9 +646,11 @@ pub(crate) async fn encapsulate_key_exact(
             template.as_deref(),
             &spec,
         );
+        let captured = capture.captured();
+        drop(capture);
         let _ = completion_tx.send(match &outcome {
             Ok(r) if r.ck_rv == CkRv::OK => {
-                Ok(LateMintedObjects::new_bound(session, r.object_handle, &*backend))
+                Ok(LateMintedObjects::from_captured(session, r.object_handle, &captured))
             }
             Ok(r) => Err(r.ck_rv),
             Err(rv) => Err(*rv),

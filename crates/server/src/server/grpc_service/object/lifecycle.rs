@@ -91,9 +91,15 @@ pub(super) async fn create_object(
         ObjectMintCompletionOwner::arm_for_session(&ctx.backend, session);
     let backend = ctx.backend.clone();
     let result = spawn_backend(move || {
+        // Atomic mint capture: begun on this minting thread BEFORE
+        // the backend call, so the payload binds exactly this mint's
+        // lifetimes even under later handle reuse.
+        let capture = pkcs11_proxy_ng_backend::mint_capture::begin(session);
         let outcome = backend.create_object(session, template.as_deref());
+        let captured = capture.captured();
+        drop(capture);
         let _ = completion_tx.send(match &outcome {
-            Ok(object) => Ok(LateMintedObjects::single_bound(session, *object, &*backend)),
+            Ok(object) => Ok(LateMintedObjects::from_captured(session, [*object], &captured)),
             Err(rv) => Err(*rv),
         });
         outcome
@@ -239,9 +245,14 @@ pub(super) async fn copy_object(
         ObjectMintCompletionOwner::arm_for_session(&ctx.backend, session);
     let backend = ctx.backend.clone();
     let result = spawn_backend(move || {
+        let capture = pkcs11_proxy_ng_backend::mint_capture::begin(session);
         let outcome = backend.copy_object(session, object, template.as_deref());
+        let captured = capture.captured();
+        drop(capture);
         let _ = completion_tx.send(match &outcome {
-            Ok(new_object) => Ok(LateMintedObjects::single_bound(session, *new_object, &*backend)),
+            Ok(new_object) => {
+                Ok(LateMintedObjects::from_captured(session, [*new_object], &captured))
+            }
             Err(rv) => Err(*rv),
         });
         outcome

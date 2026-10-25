@@ -202,7 +202,10 @@ impl FfiBackend {
             |function| unsafe { function(h_session, h_object) },
         );
         if result.is_ok() {
-            lifetimes.remove(&(session.0, object.0));
+            // The object is gone under every session (token objects
+            // are visible across sessions): drop all its entries so
+            // no stale lifetime survives under another session.
+            lifetimes.retain(|&(_, obj), _| obj != object.0);
         }
         result
     }
@@ -220,7 +223,27 @@ impl FfiBackend {
         object: CkObjectHandle,
         incarnation: Option<u64>,
     ) -> CkResult<()> {
-        self.ffi_destroy_object_if_bound(session, object, incarnation, None)
+        // Incarnation-only legacy entry (settlement uses the
+        // fail-safe `ffi_destroy_object_if_bound`): check the fence,
+        // then destroy without the lifetime leg, mirroring the
+        // trait-default and mock compositions of this entry.
+        let Some(expected) = incarnation else {
+            return self.ffi_destroy_object(session, object);
+        };
+        let admission = self.lifecycle_domain.admit_ordinary()?;
+        let h_session = Self::session_handle(session)?;
+        let h_object = Self::object_handle(object)?;
+        let _session_fence = self.session_fences.enter_checked(&admission, session, expected)?;
+        let mut lifetimes = self.object_lifetimes.lock_for_destroy();
+        let result = Self::call_unit(
+            &admission,
+            unsafe { (*self.func_list).C_DestroyObject },
+            |function| unsafe { function(h_session, h_object) },
+        );
+        if result.is_ok() {
+            lifetimes.retain(|&(_, obj), _| obj != object.0);
+        }
+        result
     }
 
     pub(super) fn ffi_object_lifetime(
@@ -233,11 +256,16 @@ impl FfiBackend {
 
     /// Incarnation- and object-lifetime-bound destroy for detached
     /// late-mint settlement: the fence entry is checked against
-    /// `incarnation` and the lifetime entry against `object_lifetime`
-    /// before any native call. The lifetime table lock is held across
-    /// the check, the native destroy, and the entry removal, so a
-    /// destroy/recreate pair cannot slip a fresh lifetime in between.
-    /// `None` legs keep the legacy fallbacks.
+    /// `incarnation` and the lifetime entry against the captured
+    /// lifetime before any native call. The lifetime table lock is
+    /// held across the check, the native destroy, and the entry
+    /// removal, so a destroy/recreate pair cannot slip a fresh
+    /// lifetime in between. The lifetime leg is fail-safe (see the
+    /// trait contract on
+    /// [`crate::traits::Pkcs11Backend::destroy_object_if_bound`]):
+    /// only an exact match — or no capture against an untracked
+    /// object — destroys; every other combination refuses with
+    /// `OBJECT_HANDLE_INVALID` and issues no native destroy.
     pub(super) fn ffi_destroy_object_if_bound(
         &self,
         session: CkSessionHandle,
@@ -245,9 +273,6 @@ impl FfiBackend {
         incarnation: Option<u64>,
         object_lifetime: Option<u64>,
     ) -> CkResult<()> {
-        if incarnation.is_none() && object_lifetime.is_none() {
-            return self.ffi_destroy_object(session, object);
-        }
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let h_session = Self::session_handle(session)?;
         let h_object = Self::object_handle(object)?;
@@ -256,12 +281,12 @@ impl FfiBackend {
             None => self.session_fences.enter(&admission, session)?,
         };
         let mut lifetimes = self.object_lifetimes.lock_for_destroy();
-        if let Some(expected) = object_lifetime {
-            match lifetimes.get(&(session.0, object.0)) {
-                Some(current) if *current == expected => {}
-                Some(_) => return Err(CkRv::OBJECT_HANDLE_INVALID),
-                None => {}
-            }
+        match (object_lifetime, lifetimes.get(&(session.0, object.0)).copied()) {
+            (Some(expected), Some(current)) if current == expected => {}
+            (Some(_), Some(_)) => return Err(CkRv::OBJECT_HANDLE_INVALID),
+            (Some(_), None) => return Err(CkRv::OBJECT_HANDLE_INVALID),
+            (None, Some(_)) => return Err(CkRv::OBJECT_HANDLE_INVALID),
+            (None, None) => {}
         }
         let result = Self::call_unit(
             &admission,
@@ -269,7 +294,7 @@ impl FfiBackend {
             |function| unsafe { function(h_session, h_object) },
         );
         if result.is_ok() {
-            lifetimes.remove(&(session.0, object.0));
+            lifetimes.retain(|&(_, obj), _| obj != object.0);
         }
         result
     }
@@ -294,7 +319,7 @@ impl FfiBackend {
             |function| unsafe { function(h_session, h_object) },
         );
         if result.is_ok() {
-            lifetimes.remove(&(session.0, object.0));
+            lifetimes.retain(|&(_, obj), _| obj != object.0);
         }
         result
     }
@@ -460,6 +485,111 @@ mod lifecycle_output_tests {
             .unwrap();
         assert_eq!(BOUND_DESTROY_CALLS.load(Ordering::SeqCst), 2);
         assert_eq!(backend.object_lifetime(session, replacement), None);
+    }
+
+    static FAILSAFE_DESTROY_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C" fn destroy_counting_failsafe(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _object: cryptoki_sys::CK_OBJECT_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        FAILSAFE_DESTROY_CALLS.fetch_add(1, Ordering::SeqCst);
+        cryptoki_sys::CKR_OK
+    }
+
+    /// Fail-safe settlement (FFI parity): no capture against a tracked
+    /// object, and a captured lifetime whose entry is gone, both
+    /// refuse without any native destroy.
+    #[test]
+    fn bound_destroy_failsafe_combinations_refuse_without_native_destroy() {
+        use crate::traits::Pkcs11Backend;
+        FAILSAFE_DESTROY_CALLS.store(0, Ordering::SeqCst);
+        let (backend, _functions) = backend_with_object_stubs();
+        unsafe { (*backend.func_list).C_DestroyObject = Some(destroy_counting_failsafe) };
+        backend.lifecycle_domain.open_for_tests();
+        let session = CkSessionHandle(7);
+        let incarnation = backend.session_incarnation(session);
+
+        let handle = backend.create_object(session, Some(&[])).unwrap();
+        let lifetime = backend.object_lifetime(session, handle).expect("tracked mint");
+
+        // Captured None + current Some: missed capture, refuse.
+        assert_eq!(
+            backend.destroy_object_if_bound(session, handle, incarnation, None),
+            Err(CkRv::OBJECT_HANDLE_INVALID),
+        );
+        assert_eq!(FAILSAFE_DESTROY_CALLS.load(Ordering::SeqCst), 0);
+        assert_eq!(backend.object_lifetime(session, handle), Some(lifetime));
+
+        // Destroy plainly, then captured Some + current None: refuse.
+        backend.destroy_object(session, handle).unwrap();
+        assert_eq!(FAILSAFE_DESTROY_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            backend.destroy_object_if_bound(session, handle, incarnation, Some(lifetime)),
+            Err(CkRv::OBJECT_HANDLE_INVALID),
+        );
+        assert_eq!(
+            FAILSAFE_DESTROY_CALLS.load(Ordering::SeqCst),
+            1,
+            "refusals must issue no native destroy"
+        );
+    }
+
+    /// Atomic mint capture (FFI parity): the pair reported at the
+    /// fresh-record site still names the original lifetime after a
+    /// destroy+recreate, so settlement refuses and issues no destroy.
+    #[test]
+    fn mint_capture_binds_original_lifetime_after_recreate() {
+        use crate::traits::Pkcs11Backend;
+        FAILSAFE_DESTROY_CALLS.store(0, Ordering::SeqCst);
+        let (backend, _functions) = backend_with_object_stubs();
+        unsafe { (*backend.func_list).C_DestroyObject = Some(destroy_counting_failsafe) };
+        backend.lifecycle_domain.open_for_tests();
+        let session = CkSessionHandle(7);
+
+        let capture = crate::mint_capture::begin(session);
+        let handle = backend.create_object(session, Some(&[])).unwrap();
+        let captured = capture.captured();
+        drop(capture);
+        let lifetime = backend.object_lifetime(session, handle).expect("tracked mint");
+        assert_eq!(captured, vec![(handle, lifetime)]);
+
+        backend.destroy_object(session, handle).unwrap();
+        assert_eq!(FAILSAFE_DESTROY_CALLS.load(Ordering::SeqCst), 1);
+        let replacement = backend.create_object(session, Some(&[])).unwrap();
+        assert_eq!(replacement, handle, "stub re-mints the same numeric handle");
+        assert_eq!(
+            backend.destroy_object_if_bound(
+                session,
+                replacement,
+                backend.session_incarnation(session),
+                captured.first().map(|(_, l)| *l),
+            ),
+            Err(CkRv::OBJECT_HANDLE_INVALID),
+        );
+        assert_eq!(FAILSAFE_DESTROY_CALLS.load(Ordering::SeqCst), 1);
+        assert!(backend.object_lifetime(session, replacement).is_some());
+    }
+
+    /// Destroy invalidation (FFI parity): destroying through another
+    /// session drops the entry under ALL sessions.
+    #[test]
+    fn destroy_through_other_session_invalidates_origin_entry() {
+        use crate::traits::Pkcs11Backend;
+        let (backend, _functions) = backend_with_object_stubs();
+        backend.lifecycle_domain.open_for_tests();
+        let origin = CkSessionHandle(7);
+        let other = CkSessionHandle(8);
+
+        let handle = backend.create_object(origin, Some(&[])).unwrap();
+        assert!(backend.object_lifetime(origin, handle).is_some());
+        // Simulate the object surfacing in the other session (find).
+        backend.record_object_lifetime_if_absent(other, handle);
+        assert!(backend.object_lifetime(other, handle).is_some());
+
+        backend.destroy_object(other, handle).unwrap();
+        assert_eq!(backend.object_lifetime(origin, handle), None);
+        assert_eq!(backend.object_lifetime(other, handle), None);
     }
 
     #[test]
