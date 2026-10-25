@@ -1526,6 +1526,9 @@ impl MockBackend {
         let lifetime = state.next_object_lifetime;
         state.next_object_lifetime += 1;
         state.object_lifetimes.insert((session.0, handle.0), lifetime);
+        // Atomic mint capture (mirrors the FFI fresh-record site):
+        // report while the mint is still on this thread.
+        crate::mint_capture::report(session, handle, lifetime);
         Ok(handle)
     }
 
@@ -2878,20 +2881,22 @@ impl Pkcs11Backend for MockBackend {
         object_lifetime: Option<u64>,
     ) -> CkResult<()> {
         // Simulation of the FFI checked entry: a stale incarnation or
-        // a stale object lifetime refuses without counting a destroy
-        // (no native call), so a recycled replacement survives.
+        // a fail-safe lifetime mismatch refuses without counting a
+        // destroy (no native call), so a recycled replacement
+        // survives. Only an exact lifetime match — or no capture
+        // against an untracked object — destroys.
         if let Some(expected) = incarnation {
             match self.session_incarnation(session) {
                 Some(current) if current == expected => {}
                 _ => return Err(CkRv::SESSION_HANDLE_INVALID),
             }
         }
-        if let Some(expected) = object_lifetime {
-            match self.object_lifetime(session, object) {
-                Some(current) if current == expected => {}
-                Some(_) => return Err(CkRv::OBJECT_HANDLE_INVALID),
-                None => {}
-            }
+        match (object_lifetime, self.object_lifetime(session, object)) {
+            (Some(expected), Some(current)) if current == expected => {}
+            (Some(_), Some(_)) => return Err(CkRv::OBJECT_HANDLE_INVALID),
+            (Some(_), None) => return Err(CkRv::OBJECT_HANDLE_INVALID),
+            (None, Some(_)) => return Err(CkRv::OBJECT_HANDLE_INVALID),
+            (None, None) => {}
         }
         self.destroy_object(session, object)
     }

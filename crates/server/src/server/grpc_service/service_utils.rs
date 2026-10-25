@@ -593,10 +593,13 @@ impl LateMintSettlement for CkSessionHandle {
 pub(super) struct LateMintedObjects {
     session: CkSessionHandle,
     handles: Vec<CkObjectHandle>,
-    /// Per-handle object lifetime captured at payload construction
-    /// (right after the mint returned), parallel to `handles`.
-    /// `None` for directly constructed payloads, in which case the
-    /// destroy falls back to the session-incarnation binding alone.
+    /// Per-handle object lifetime captured atomically at mint
+    /// time (via `mint_capture`, during the backend call),
+    /// parallel to `handles`. `None` for directly constructed
+    /// payloads and for handles the backend never reported, in
+    /// which case settlement takes the fail-safe lifetime leg (see
+    /// `destroy_object_if_bound`): it destroys only against an
+    /// equally untracked object.
     lifetimes: Vec<Option<u64>>,
     /// Session incarnation captured when the owner was armed
     /// (P2-13). `None` until the owner binds it at settlement (or
@@ -627,31 +630,33 @@ impl LateMintedObjects {
         Self::new(session, [handle])
     }
 
-    /// Bound construction: capture each minted handle's object
-    /// lifetime from `backend` NOW — the moment right after the mint
-    /// returned, inside the `spawn_backend` closure — so detached
-    /// settlement can refuse to destroy a replacement object that
-    /// later reuses the numeric handle within the same live session.
-    pub(super) fn new_bound(
+    /// Captured construction: build the payload from the
+    /// `(handle, lifetime)` pairs a
+    /// [`pkcs11_proxy_ng_backend::mint_capture`] capture collected
+    /// DURING the mint call (the handler begins the capture on the
+    /// minting thread before the backend call, so the pairs are
+    /// atomically the mint's own objects — a destroy+recreate
+    /// landing after the mint cannot substitute a replacement's
+    /// lifetime). Each kept handle takes the lifetime from its
+    /// captured pair, else `None` (the backend never reported it:
+    /// untracked legacy path for that handle).
+    pub(super) fn from_captured(
         session: CkSessionHandle,
         handles: impl IntoIterator<Item = CkObjectHandle>,
-        backend: &dyn pkcs11_proxy_ng_backend::Pkcs11Backend,
+        captured: &[(CkObjectHandle, u64)],
     ) -> Self {
         let mut payload = Self::new(session, handles);
         payload.lifetimes = payload
             .handles
             .iter()
-            .map(|handle| backend.object_lifetime(session, *handle))
+            .map(|handle| {
+                captured
+                    .iter()
+                    .find(|(captured_handle, _)| captured_handle == handle)
+                    .map(|(_, lifetime)| *lifetime)
+            })
             .collect();
         payload
-    }
-
-    pub(super) fn single_bound(
-        session: CkSessionHandle,
-        handle: CkObjectHandle,
-        backend: &dyn pkcs11_proxy_ng_backend::Pkcs11Backend,
-    ) -> Self {
-        Self::new_bound(session, [handle], backend)
     }
 }
 
@@ -676,7 +681,7 @@ impl LateMintSettlement for LateMintedObjects {
         // The destroy is incarnation- and object-lifetime-bound
         // (P2-13): it reaches the provider only while the session is
         // still the incarnation captured at arm time AND the object
-        // is still the lifetime captured at payload construction, so
+        // is still the lifetime captured atomically at mint time, so
         // it can never destroy a replacement object minted after the
         // provider recycled the session handle, the object handle, or
         // both — including handle reuse within the same live session.
@@ -4697,12 +4702,22 @@ mod tests {
         assert!(owner.completion.is_some(), "pending worker must stay armed");
         drop(owner);
 
+        // Handler shape: capture begun before the mints, so the
+        // payload carries their lifetimes (an uncaptured payload
+        // against this tracking backend must refuse, by design).
+        let capture = pkcs11_proxy_ng_backend::mint_capture::begin(session);
         let first = mock.create_object(session, Some(&[])).unwrap();
         let second = mock.create_object(session, Some(&[])).unwrap();
+        let captured = capture.captured();
+        drop(capture);
         assert_eq!(mock.live_object_count(), 2);
         // Zero handles and duplicates in the extraction are inert.
-        tx.send(Ok(LateMintedObjects::new(session, [first, CkObjectHandle(0), second, first])))
-            .expect("settler awaiting");
+        tx.send(Ok(LateMintedObjects::from_captured(
+            session,
+            [first, CkObjectHandle(0), second, first],
+            &captured,
+        )))
+        .expect("settler awaiting");
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
             if mock.live_object_count() == 0 {
@@ -4817,11 +4832,16 @@ mod tests {
         let session = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
 
         let (tx, mut owner) = ObjectMintCompletionOwner::arm_for_session(&backend, session);
+        // Handler shape: capture begun before the mint.
+        let capture = pkcs11_proxy_ng_backend::mint_capture::begin(session);
         let minted = mock.create_object(session, Some(&[])).unwrap();
+        let captured = capture.captured();
+        drop(capture);
         owner.settle_on_error();
         assert!(owner.completion.is_some(), "pending worker must stay armed");
         drop(owner);
-        tx.send(Ok(LateMintedObjects::single(session, minted))).expect("settler awaiting");
+        tx.send(Ok(LateMintedObjects::from_captured(session, [minted], &captured)))
+            .expect("settler awaiting");
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
             if mock.live_object_count() == 0 {
@@ -4853,10 +4873,13 @@ mod tests {
         let session = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
 
         let (tx, mut owner) = ObjectMintCompletionOwner::arm_for_session(&backend, session);
+        // Handler shape: capture begun BEFORE the mint, so the
+        // payload binds the mint's own lifetime atomically.
+        let capture = pkcs11_proxy_ng_backend::mint_capture::begin(session);
         let minted = mock.create_object(session, Some(&[])).unwrap();
-        // Payload construction captures the object lifetime NOW, the
-        // moment right after the mint returns (closure timing).
-        let payload = LateMintedObjects::single_bound(session, minted, &*backend);
+        let captured = capture.captured();
+        drop(capture);
+        let payload = LateMintedObjects::from_captured(session, [minted], &captured);
         owner.settle_on_error();
         assert!(owner.completion.is_some(), "pending worker must stay armed");
         drop(owner);
@@ -4881,6 +4904,130 @@ mod tests {
         );
         assert_eq!(mock.live_object_count(), 1, "replacement object must survive settlement");
         mock.get_object_size(session, replacement).expect("replacement remains usable");
+    }
+
+    /// Atomic capture (payload level): lifetimes captured at mint
+    /// time (capture begun before the mint, as the handlers do) still
+    /// name the ORIGINAL object after a destroy+recreate in the same
+    /// session, so settlement refuses and the replacement survives.
+    #[test]
+    fn captured_payload_settle_after_same_session_replacement_survives() {
+        use pkcs11_proxy_ng_backend::MockBackend;
+        use pkcs11_proxy_ng_backend::Pkcs11Backend as _;
+
+        let mock = MockBackend::default_test();
+        mock.set_handle_recycling(true);
+        mock.initialize().unwrap();
+        let backend: &dyn pkcs11_proxy_ng_backend::Pkcs11Backend = &mock;
+        let session = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
+
+        // Handler shape: capture begins BEFORE the backend mint call
+        // on the minting thread; the payload is built from the pairs.
+        let capture = pkcs11_proxy_ng_backend::mint_capture::begin(session);
+        let minted = mock.create_object(session, Some(&[])).unwrap();
+        let captured = capture.captured();
+        drop(capture);
+        let payload = LateMintedObjects::from_captured(session, [minted], &captured);
+
+        mock.destroy_object(session, minted).unwrap();
+        let replacement = mock.create_object(session, Some(&[])).unwrap();
+        assert_eq!(replacement, minted, "recycling mock must reuse the object handle");
+        assert_eq!(mock.destroy_call_count(), 1, "only the explicit destroy so far");
+
+        assert_eq!(payload.settle(backend), Err(CkRv::OBJECT_HANDLE_INVALID));
+        assert_eq!(mock.destroy_call_count(), 1, "settlement must issue no destroy");
+        assert_eq!(mock.live_object_count(), 1, "replacement must survive settlement");
+        mock.get_object_size(session, replacement).expect("replacement remains usable");
+    }
+
+    /// Missed capture (payload level): a payload carrying NO captured
+    /// lifetime settling against the tracking mock after replacement
+    /// must refuse — never a blind raw-handle destroy.
+    #[test]
+    fn uncaptured_payload_settle_after_replacement_survives() {
+        use pkcs11_proxy_ng_backend::MockBackend;
+        use pkcs11_proxy_ng_backend::Pkcs11Backend as _;
+
+        let mock = MockBackend::default_test();
+        mock.set_handle_recycling(true);
+        mock.initialize().unwrap();
+        let backend: &dyn pkcs11_proxy_ng_backend::Pkcs11Backend = &mock;
+        let session = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
+
+        let minted = mock.create_object(session, Some(&[])).unwrap();
+        mock.destroy_object(session, minted).unwrap();
+        let replacement = mock.create_object(session, Some(&[])).unwrap();
+        assert_eq!(replacement, minted);
+        let destroys_before = mock.destroy_call_count();
+
+        let payload = LateMintedObjects::single(session, replacement);
+        assert_eq!(payload.settle(backend), Err(CkRv::OBJECT_HANDLE_INVALID));
+        assert_eq!(mock.destroy_call_count(), destroys_before, "no destroy may be issued");
+        assert_eq!(mock.live_object_count(), 1, "replacement must survive");
+        mock.get_object_size(session, replacement).expect("replacement remains usable");
+    }
+
+    /// Cross-session destroy (payload level): the origin session's
+    /// captured settlement must not destroy a replacement minted
+    /// under the destroying session.
+    #[test]
+    fn captured_payload_cross_session_destroy_settle_survives() {
+        use pkcs11_proxy_ng_backend::MockBackend;
+        use pkcs11_proxy_ng_backend::Pkcs11Backend as _;
+
+        let mock = MockBackend::default_test();
+        mock.set_handle_recycling(true);
+        mock.initialize().unwrap();
+        let backend: &dyn pkcs11_proxy_ng_backend::Pkcs11Backend = &mock;
+        let origin = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
+        let other = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
+        let token_template = [CkAttribute {
+            attr_type: CkAttributeType::TOKEN,
+            value: Some(CkAttributeValue::Bool(true)),
+        }];
+
+        let capture = pkcs11_proxy_ng_backend::mint_capture::begin(origin);
+        let minted = mock.create_object(origin, Some(&token_template)).unwrap();
+        let captured = capture.captured();
+        drop(capture);
+        let mut payload = LateMintedObjects::from_captured(origin, [minted], &captured);
+        payload.bind_incarnation(backend.session_incarnation(origin));
+
+        mock.set_find_objects_result(vec![minted]);
+        mock.find_objects_init(other, Some(&[])).unwrap();
+        assert_eq!(mock.find_objects(other, 10).unwrap(), vec![minted]);
+        mock.find_objects_final(other).unwrap();
+        mock.destroy_object(other, minted).unwrap();
+        let replacement = mock.create_object(other, Some(&token_template)).unwrap();
+        assert_eq!(replacement, minted);
+        let destroys_before = mock.destroy_call_count();
+
+        assert_eq!(payload.settle(backend), Err(CkRv::OBJECT_HANDLE_INVALID));
+        assert_eq!(mock.destroy_call_count(), destroys_before, "no destroy may be issued");
+        assert_eq!(mock.live_object_count(), 1, "replacement must survive");
+        mock.get_object_size(other, replacement).expect("replacement remains usable");
+    }
+
+    /// Positive control (payload level): an undisturbed captured
+    /// mint settles exactly once.
+    #[test]
+    fn captured_payload_undisturbed_settles_exactly_once() {
+        use pkcs11_proxy_ng_backend::MockBackend;
+
+        let mock = MockBackend::default_test();
+        mock.initialize().unwrap();
+        let backend: &dyn pkcs11_proxy_ng_backend::Pkcs11Backend = &mock;
+        let session = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
+
+        let capture = pkcs11_proxy_ng_backend::mint_capture::begin(session);
+        let minted = mock.create_object(session, Some(&[])).unwrap();
+        let captured = capture.captured();
+        drop(capture);
+        let payload = LateMintedObjects::from_captured(session, [minted], &captured);
+
+        payload.settle(backend).expect("undisturbed captured mint must settle");
+        assert_eq!(mock.live_object_count(), 0);
+        assert_eq!(mock.destroy_call_count(), 1, "settled exactly once");
     }
 
     /// Q16 box 2 (fix round 1): a sender dropped without reporting

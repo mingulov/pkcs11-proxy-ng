@@ -102,7 +102,12 @@ impl super::FfiBackend {
         object: CkObjectHandle,
     ) {
         if object.0 != 0 {
-            self.object_lifetimes.record_fresh(session, object);
+            let id = self.object_lifetimes.record_fresh(session, object);
+            // Atomic mint capture: report the pair while the mint
+            // call is still on this thread, so a caller's payload
+            // binds exactly this mint's lifetime even if the handle
+            // is destroyed and reused before the call returns.
+            crate::mint_capture::report(session, object, id);
         }
     }
 

@@ -370,6 +370,7 @@ async fn unwrap_key_authenticated_impl(
     let (completion_tx, mut completion_owner) =
         ObjectMintCompletionOwner::arm_for_session(backend_ref, session);
     let result = spawn_backend(move || {
+        let capture = pkcs11_proxy_ng_backend::mint_capture::begin(session);
         let outcome = wrapped_key.expose(|wrapped_raw| {
             aad.expose(|aad_raw| {
                 object_cleanup.ensure_clear()?;
@@ -411,11 +412,13 @@ async fn unwrap_key_authenticated_impl(
                 }
             })
         });
+        let captured = capture.captured();
+        drop(capture);
         let _ = completion_tx.send(match &outcome {
-            Ok((key, _, _)) => Ok(LateMintedObjects::single_bound(
+            Ok((key, _, _)) => Ok(LateMintedObjects::from_captured(
                 session,
-                CkObjectHandle(key.0 as u64),
-                &*backend,
+                [CkObjectHandle(key.0 as u64)],
+                &captured,
             )),
             Err(rv) => Err(*rv),
         });

@@ -256,17 +256,20 @@ async fn generate_key_pair_impl(
     let (completion_tx, mut completion_owner) =
         ObjectMintCompletionOwner::arm_for_session(backend_ref, session);
     let result = spawn_backend(move || {
+        let capture = pkcs11_proxy_ng_backend::mint_capture::begin(session);
         let outcome = backend.generate_key_pair(
             session,
             &validated,
             public_key_template.as_deref(),
             private_key_template.as_deref(),
         );
+        let captured = capture.captured();
+        drop(capture);
         let _ = completion_tx.send(match &outcome {
-            Ok((public_key, private_key)) => Ok(LateMintedObjects::new_bound(
+            Ok((public_key, private_key)) => Ok(LateMintedObjects::from_captured(
                 session,
                 [CkObjectHandle(public_key.0 as u64), CkObjectHandle(private_key.0 as u64)],
-                &*backend,
+                &captured,
             )),
             Err(rv) => Err(*rv),
         });
@@ -505,12 +508,15 @@ async fn generate_key_impl(
     let (completion_tx, mut completion_owner) =
         ObjectMintCompletionOwner::arm_for_session(backend_ref, session);
     let result = spawn_backend(move || {
+        let capture = pkcs11_proxy_ng_backend::mint_capture::begin(session);
         let outcome = backend.generate_key_with_output(session, &validated, template.as_deref());
+        let captured = capture.captured();
+        drop(capture);
         let _ = completion_tx.send(match &outcome {
-            Ok((object, _)) => Ok(LateMintedObjects::single_bound(
+            Ok((object, _)) => Ok(LateMintedObjects::from_captured(
                 session,
-                CkObjectHandle(object.0 as u64),
-                &*backend,
+                [CkObjectHandle(object.0 as u64)],
+                &captured,
             )),
             Err(rv) => Err(*rv),
         });
@@ -797,17 +803,20 @@ async fn derive_key_impl(
     let (completion_tx, mut completion_owner) =
         ObjectMintCompletionOwner::arm_for_session(backend_ref, session);
     let result = spawn_backend(move || {
+        let capture = pkcs11_proxy_ng_backend::mint_capture::begin(session);
         let outcome = backend.derive_key_with_output_result(
             session,
             &validated,
             base_key,
             template.as_deref(),
         );
+        let captured = capture.captured();
+        drop(capture);
         let _ = completion_tx.send(match &outcome {
-            Ok(derive_result) if derive_result.rv.is_ok() => Ok(LateMintedObjects::new_bound(
+            Ok(derive_result) if derive_result.rv.is_ok() => Ok(LateMintedObjects::from_captured(
                 session,
                 derive_minted_handles(derive_result),
-                &*backend,
+                &captured,
             )),
             Ok(derive_result) => Err(derive_result.rv),
             Err(rv) => Err(*rv),

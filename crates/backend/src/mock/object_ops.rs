@@ -460,7 +460,9 @@ impl MockBackend {
         }
         if state.live_objects.contains(&object.0) {
             self.remove_objects(&mut state, &[object.0]);
-            state.object_lifetimes.remove(&(session.0, object.0));
+            // The object is gone under every session (token objects
+            // are visible across sessions): drop all its entries.
+            state.object_lifetimes.retain(|&(_, obj), _| obj != object.0);
             Ok(())
         } else {
             Err(CkRv::OBJECT_HANDLE_INVALID)

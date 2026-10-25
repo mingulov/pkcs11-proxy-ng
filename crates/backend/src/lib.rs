@@ -8,6 +8,7 @@
 
 pub mod ffi;
 pub mod host_abi;
+pub mod mint_capture;
 pub mod mock;
 pub mod object_cleanup;
 mod sp800_108_data_values;

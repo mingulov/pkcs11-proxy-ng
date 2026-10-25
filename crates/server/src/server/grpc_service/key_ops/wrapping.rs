@@ -261,6 +261,7 @@ async fn unwrap_key_impl(
     let (completion_tx, mut completion_owner) =
         ObjectMintCompletionOwner::arm_for_session(backend_ref, session);
     let result = spawn_backend(move || {
+        let capture = pkcs11_proxy_ng_backend::mint_capture::begin(session);
         let outcome = wrapped_key.expose(|raw| {
             backend.unwrap_key(
                 session,
@@ -270,11 +271,13 @@ async fn unwrap_key_impl(
                 template.as_deref(),
             )
         });
+        let captured = capture.captured();
+        drop(capture);
         let _ = completion_tx.send(match &outcome {
-            Ok(object) => Ok(LateMintedObjects::single_bound(
+            Ok(object) => Ok(LateMintedObjects::from_captured(
                 session,
-                CkObjectHandle(object.0 as u64),
-                &*backend,
+                [CkObjectHandle(object.0 as u64)],
+                &captured,
             )),
             Err(rv) => Err(*rv),
         });

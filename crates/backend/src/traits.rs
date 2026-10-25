@@ -315,32 +315,45 @@ pub trait Pkcs11Backend: Send + Sync {
         }
     }
     /// The live object-lifetime id for `(session, object)`, when the
-    /// backend tracks one. Captured when detached late-mint settlement
-    /// is armed (at payload construction, right after the mint returns)
-    /// and checked again at destroy time, so a destroy bound to a
-    /// minted object cannot land on a replacement object when the
-    /// provider recycles the numeric handle within the same live
-    /// session. The default `None` means this backend cannot bind
-    /// destroys to an object lifetime; settlement then falls back to
-    /// the session-incarnation binding alone, preserving behavior for
+    /// backend tracks one. Captured atomically with the mint itself
+    /// (see [`crate::mint_capture`]: the fresh-record site reports
+    /// the pair while the mint call is still on its thread) and
+    /// checked again at destroy time, so a destroy bound to a minted
+    /// object cannot land on a replacement object when the provider
+    /// recycles the numeric handle within the same live session.
+    /// The default `None` means this backend cannot bind destroys
+    /// to an object lifetime; settlement then falls back to the
+    /// session-incarnation binding alone, preserving behavior for
     /// backends without object-lifetime tracking.
     fn object_lifetime(&self, _session: CkSessionHandle, _object: CkObjectHandle) -> Option<u64> {
         None
     }
     /// Destroy `object` only when `session` is still the incarnation
     /// captured at mint time AND the object is still the lifetime
-    /// captured at payload construction. With no captured incarnation
-    /// (`None`), or when this backend reports no live incarnation to
-    /// check against, the incarnation leg falls back to the legacy
-    /// [`Self::destroy_object`]; likewise a missing captured object
-    /// lifetime, or a backend reporting no live lifetime for the
-    /// object, lets the lifetime leg pass (legacy fallback preserved).
-    /// A live incarnation that differs refuses with
-    /// `SESSION_HANDLE_INVALID`; a live object lifetime that differs
-    /// refuses with `OBJECT_HANDLE_INVALID`; both refusals issue no
-    /// destroy. Backends with a real fence (FFI) override this with an
-    /// atomic checked entry; the default composes the queries and the
-    /// destroy for simpler backends (mock).
+    /// captured atomically at mint time (see
+    /// [`crate::mint_capture`]). The session-incarnation mismatch
+    /// refuses first with `SESSION_HANDLE_INVALID` and issues no
+    /// destroy. The lifetime leg is fail-safe:
+    ///
+    /// - captured `Some` + current `Some` (equal): destroy;
+    /// - captured `Some` + current `Some` (different): refuse
+    ///   `OBJECT_HANDLE_INVALID`, no destroy — the handle now names
+    ///   a replacement object;
+    /// - captured `Some` + current `None`: refuse
+    ///   `OBJECT_HANDLE_INVALID`, no destroy — the object is gone
+    ///   or untracked under this session now, and a raw destroy
+    ///   could hit a replacement recorded under another session;
+    /// - captured `None` + current `Some`: refuse
+    ///   `OBJECT_HANDLE_INVALID`, no destroy — the live entry
+    ///   proves this backend tracks lifetimes, so the payload
+    ///   missed its capture and must not destroy blind;
+    /// - captured `None` + current `None`: legacy
+    ///   [`Self::destroy_object`] (an untracked backend, or an
+    ///   object it never tracked).
+    ///
+    /// Backends with a real fence (FFI) override this with an
+    /// atomic checked entry; the default composes the queries and
+    /// the destroy for simpler backends (mock).
     fn destroy_object_if_bound(
         &self,
         session: CkSessionHandle,
@@ -355,12 +368,12 @@ pub trait Pkcs11Backend: Send + Sync {
                 None => {}
             }
         }
-        if let Some(expected) = object_lifetime {
-            match self.object_lifetime(session, object) {
-                Some(current) if current == expected => {}
-                Some(_) => return Err(CkRv::OBJECT_HANDLE_INVALID),
-                None => {}
-            }
+        match (object_lifetime, self.object_lifetime(session, object)) {
+            (Some(expected), Some(current)) if current == expected => {}
+            (Some(_), Some(_)) => return Err(CkRv::OBJECT_HANDLE_INVALID),
+            (Some(_), None) => return Err(CkRv::OBJECT_HANDLE_INVALID),
+            (None, Some(_)) => return Err(CkRv::OBJECT_HANDLE_INVALID),
+            (None, None) => {}
         }
         self.destroy_object(session, object)
     }
