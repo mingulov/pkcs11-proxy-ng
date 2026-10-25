@@ -146,7 +146,7 @@ jobs:
       # W1-L17-15: same standalone-lock coverage as the ci.yml deny job —
       # the root `cargo deny check` above never sees the standalone test
       # workspaces' own locks.
-      - name: cargo deny check (standalone test workspaces)
+      - name: cargo deny check (standalone workspaces)
         run: scripts/audit-test-workspaces.sh deny
 
   # ── Live cross-width topology matrix ─────────────────────────────────────

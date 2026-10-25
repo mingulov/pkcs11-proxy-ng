@@ -3,6 +3,7 @@ name = "pkcs11-proxy-ng-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
+license = "Apache-2.0 OR MIT"
 
 [package.metadata]
 cargo-fuzz = true
