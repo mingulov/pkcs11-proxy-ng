@@ -271,7 +271,11 @@ async fn unwrap_key_impl(
             )
         });
         let _ = completion_tx.send(match &outcome {
-            Ok(object) => Ok(LateMintedObjects::single(session, CkObjectHandle(object.0 as u64))),
+            Ok(object) => Ok(LateMintedObjects::single_bound(
+                session,
+                CkObjectHandle(object.0 as u64),
+                &*backend,
+            )),
             Err(rv) => Err(*rv),
         });
         outcome

@@ -82,6 +82,18 @@ impl MockBackend {
             let take = (max_count as usize).min(remaining);
             let batch = objects[start..start + take].to_vec();
             *cursor = start + take;
+            drop(cursor);
+            // Record-if-absent: found handles become tracked so a
+            // later bound destroy can be lifetime-checked.
+            let mut state = self.state.lock().unwrap();
+            for handle in &batch {
+                if handle.0 != 0 && !state.object_lifetimes.contains_key(&(session.0, handle.0)) {
+                    let lifetime = state.next_object_lifetime;
+                    state.next_object_lifetime += 1;
+                    state.object_lifetimes.insert((session.0, handle.0), lifetime);
+                }
+            }
+            drop(state);
             return Ok(batch);
         }
         Ok(vec![])
@@ -448,6 +460,7 @@ impl MockBackend {
         }
         if state.live_objects.contains(&object.0) {
             self.remove_objects(&mut state, &[object.0]);
+            state.object_lifetimes.remove(&(session.0, object.0));
             Ok(())
         } else {
             Err(CkRv::OBJECT_HANDLE_INVALID)

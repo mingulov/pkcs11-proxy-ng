@@ -46,6 +46,9 @@ impl FfiBackend {
                 &mut key_handle,
             )
         })?;
+        if output.ck_rv == CkRv::OK {
+            self.record_object_lifetime_fresh(session, CkObjectHandle(key_handle as u64));
+        }
         Ok(CkOutputAndHandleResult {
             ck_rv: output.ck_rv,
             returned_len: output.returned_len,
@@ -111,6 +114,7 @@ impl FfiBackend {
             )
         })?;
         ciphertext.truncate(ciphertext_len as usize);
+        self.record_object_lifetime_fresh(session, CkObjectHandle(key_handle as u64));
 
         Ok((ciphertext.into(), CkObjectHandle(key_handle as u64)))
     }
@@ -146,6 +150,7 @@ impl FfiBackend {
             Self::ulong_len_u64(ct_len)?,
             &mut key_handle
         )?;
+        self.record_object_lifetime_fresh(session, CkObjectHandle(key_handle as u64));
 
         Ok(CkObjectHandle(key_handle as u64))
     }

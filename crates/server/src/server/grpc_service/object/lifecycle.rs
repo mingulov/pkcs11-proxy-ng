@@ -93,7 +93,7 @@ pub(super) async fn create_object(
     let result = spawn_backend(move || {
         let outcome = backend.create_object(session, template.as_deref());
         let _ = completion_tx.send(match &outcome {
-            Ok(object) => Ok(LateMintedObjects::single(session, *object)),
+            Ok(object) => Ok(LateMintedObjects::single_bound(session, *object, &*backend)),
             Err(rv) => Err(*rv),
         });
         outcome
@@ -241,7 +241,7 @@ pub(super) async fn copy_object(
     let result = spawn_backend(move || {
         let outcome = backend.copy_object(session, object, template.as_deref());
         let _ = completion_tx.send(match &outcome {
-            Ok(new_object) => Ok(LateMintedObjects::single(session, *new_object)),
+            Ok(new_object) => Ok(LateMintedObjects::single_bound(session, *new_object, &*backend)),
             Err(rv) => Err(*rv),
         });
         outcome

@@ -5,6 +5,7 @@
 mod derive;
 mod exact_outputs;
 mod find_swap;
+mod object_lifetime;
 mod profiles;
 mod rest;
 mod session_state;

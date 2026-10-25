@@ -537,6 +537,8 @@ impl MockBackend {
                 next_session: 1,
                 next_object: 1,
                 session_incarnations: HashMap::new(),
+                object_lifetimes: HashMap::new(),
+                next_object_lifetime: 1,
                 open_sessions: Vec::new(),
                 login_state: HashMap::new(),
                 live_objects: std::collections::HashSet::new(),
@@ -1519,6 +1521,11 @@ impl MockBackend {
         if !Self::template_requests_token_object(template) {
             state.session_objects.insert(handle.0, session.0);
         }
+        // Fresh object lifetime for every mint (this funnel covers
+        // create/copy/derive/unwrap/generate/pair/KEM allocations).
+        let lifetime = state.next_object_lifetime;
+        state.next_object_lifetime += 1;
+        state.object_lifetimes.insert((session.0, handle.0), lifetime);
         Ok(handle)
     }
 
@@ -2856,6 +2863,34 @@ impl Pkcs11Backend for MockBackend {
             match self.session_incarnation(session) {
                 Some(current) if current == expected => {}
                 _ => return Err(CkRv::SESSION_HANDLE_INVALID),
+            }
+        }
+        self.destroy_object(session, object)
+    }
+    fn object_lifetime(&self, session: CkSessionHandle, object: CkObjectHandle) -> Option<u64> {
+        self.state.lock().unwrap().object_lifetimes.get(&(session.0, object.0)).copied()
+    }
+    fn destroy_object_if_bound(
+        &self,
+        session: CkSessionHandle,
+        object: CkObjectHandle,
+        incarnation: Option<u64>,
+        object_lifetime: Option<u64>,
+    ) -> CkResult<()> {
+        // Simulation of the FFI checked entry: a stale incarnation or
+        // a stale object lifetime refuses without counting a destroy
+        // (no native call), so a recycled replacement survives.
+        if let Some(expected) = incarnation {
+            match self.session_incarnation(session) {
+                Some(current) if current == expected => {}
+                _ => return Err(CkRv::SESSION_HANDLE_INVALID),
+            }
+        }
+        if let Some(expected) = object_lifetime {
+            match self.object_lifetime(session, object) {
+                Some(current) if current == expected => {}
+                Some(_) => return Err(CkRv::OBJECT_HANDLE_INVALID),
+                None => {}
             }
         }
         self.destroy_object(session, object)

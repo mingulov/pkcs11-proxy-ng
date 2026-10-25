@@ -578,6 +578,11 @@ impl LateMintSettlement for CkSessionHandle {
 pub(super) struct LateMintedObjects {
     session: CkSessionHandle,
     handles: Vec<CkObjectHandle>,
+    /// Per-handle object lifetime captured at payload construction
+    /// (right after the mint returned), parallel to `handles`.
+    /// `None` for directly constructed payloads, in which case the
+    /// destroy falls back to the session-incarnation binding alone.
+    lifetimes: Vec<Option<u64>>,
     /// Session incarnation captured when the owner was armed
     /// (P2-13). `None` until the owner binds it at settlement (or
     /// forever for directly constructed payloads), in which case the
@@ -596,11 +601,42 @@ impl LateMintedObjects {
                 kept.push(handle);
             }
         }
-        Self { session, handles: kept, incarnation: None }
+        let lifetimes = vec![None; kept.len()];
+        Self { session, handles: kept, lifetimes, incarnation: None }
     }
 
+    /// Unbound single-handle construction for tests: directly
+    /// constructed payloads keep `None` lifetimes (legacy fallback).
+    #[cfg(test)]
     pub(super) fn single(session: CkSessionHandle, handle: CkObjectHandle) -> Self {
         Self::new(session, [handle])
+    }
+
+    /// Bound construction: capture each minted handle's object
+    /// lifetime from `backend` NOW — the moment right after the mint
+    /// returned, inside the `spawn_backend` closure — so detached
+    /// settlement can refuse to destroy a replacement object that
+    /// later reuses the numeric handle within the same live session.
+    pub(super) fn new_bound(
+        session: CkSessionHandle,
+        handles: impl IntoIterator<Item = CkObjectHandle>,
+        backend: &dyn pkcs11_proxy_ng_backend::Pkcs11Backend,
+    ) -> Self {
+        let mut payload = Self::new(session, handles);
+        payload.lifetimes = payload
+            .handles
+            .iter()
+            .map(|handle| backend.object_lifetime(session, *handle))
+            .collect();
+        payload
+    }
+
+    pub(super) fn single_bound(
+        session: CkSessionHandle,
+        handle: CkObjectHandle,
+        backend: &dyn pkcs11_proxy_ng_backend::Pkcs11Backend,
+    ) -> Self {
+        Self::new_bound(session, [handle], backend)
     }
 }
 
@@ -622,14 +658,17 @@ impl LateMintSettlement for LateMintedObjects {
     fn settle(self, backend: &dyn pkcs11_proxy_ng_backend::Pkcs11Backend) -> CkResult<()> {
         // Best-effort every handle: one failed destroy must not strand
         // the rest. The first failure is reported for the caller's log.
-        // The destroy is incarnation-bound (P2-13): it reaches the
-        // provider only while the session is still the incarnation
-        // captured at arm time, so it can never destroy a replacement
-        // object minted after the provider recycled both handles.
+        // The destroy is incarnation- and object-lifetime-bound
+        // (P2-13): it reaches the provider only while the session is
+        // still the incarnation captured at arm time AND the object
+        // is still the lifetime captured at payload construction, so
+        // it can never destroy a replacement object minted after the
+        // provider recycled the session handle, the object handle, or
+        // both — including handle reuse within the same live session.
         let mut first_error = None;
-        for handle in self.handles {
+        for (handle, lifetime) in self.handles.into_iter().zip(self.lifetimes) {
             if let Err(rv) =
-                backend.destroy_object_if_incarnation(self.session, handle, self.incarnation)
+                backend.destroy_object_if_bound(self.session, handle, self.incarnation, lifetime)
             {
                 first_error.get_or_insert(rv);
             }
@@ -4780,6 +4819,53 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         assert_eq!(mock.destroy_call_count(), 1, "same-incarnation settle destroys exactly once");
+    }
+
+    /// Object-lifetime regression: a timed-out mint whose payload was
+    /// bound at mint time settles after the client destroyed the
+    /// original and a new mint reused the numeric handle in the SAME
+    /// live session. The stale settlement must refuse on lifetime and
+    /// issue no destroy, so the valid replacement survives.
+    #[tokio::test]
+    async fn object_mint_owner_same_session_recycled_handle_replacement_survives() {
+        use pkcs11_proxy_ng_backend::MockBackend;
+        use pkcs11_proxy_ng_backend::Pkcs11Backend as _;
+
+        let mock = Arc::new(MockBackend::default_test());
+        mock.set_handle_recycling(true);
+        mock.initialize().unwrap();
+        let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock.clone();
+        let session = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
+
+        let (tx, mut owner) = ObjectMintCompletionOwner::arm_for_session(&backend, session);
+        let minted = mock.create_object(session, Some(&[])).unwrap();
+        // Payload construction captures the object lifetime NOW, the
+        // moment right after the mint returns (closure timing).
+        let payload = LateMintedObjects::single_bound(session, minted, &*backend);
+        owner.settle_on_error();
+        assert!(owner.completion.is_some(), "pending worker must stay armed");
+        drop(owner);
+
+        // The client destroys the original; a new mint reuses the
+        // numeric handle in the same live session.
+        mock.destroy_object(session, minted).unwrap();
+        assert_eq!(mock.live_object_count(), 0);
+        let replacement = mock.create_object(session, Some(&[])).unwrap();
+        assert_eq!(replacement, minted, "recycling mock must reuse the object handle");
+        assert_eq!(mock.destroy_call_count(), 1, "only the explicit destroy so far");
+
+        tx.send(Ok(payload)).expect("settler awaiting");
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            mock.destroy_call_count(),
+            1,
+            "stale-lifetime settlement must issue no extra destroy"
+        );
+        assert_eq!(mock.live_object_count(), 1, "replacement object must survive settlement");
+        mock.get_object_size(session, replacement).expect("replacement remains usable");
     }
 
     /// Q16 box 2 (fix round 1): a sender dropped without reporting

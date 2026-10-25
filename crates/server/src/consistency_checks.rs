@@ -1146,6 +1146,14 @@ fn backend_methods_have_proto_rpcs() {
             "destroy_object_if_incarnation",
             "incarnation-bound variant of DestroyObject for late-mint settlement; shares its RPC (P2-13)",
         ),
+        (
+            "object_lifetime",
+            "daemon-local object-lifetime query for late-mint settlement; never on the wire (P2-13)",
+        ),
+        (
+            "destroy_object_if_bound",
+            "incarnation- and object-lifetime-bound variant of DestroyObject for late-mint settlement; shares its RPC (P2-13)",
+        ),
     ];
 
     // The exemption list itself must not rot: every entry names a real trait

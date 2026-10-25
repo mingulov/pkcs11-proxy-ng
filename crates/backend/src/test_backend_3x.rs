@@ -353,6 +353,18 @@ impl Pkcs11Backend for TestBackend3x {
     ) -> CkResult<()> {
         self.inner.destroy_object_if_incarnation(s, object, incarnation)
     }
+    fn object_lifetime(&self, s: CkSessionHandle, object: CkObjectHandle) -> Option<u64> {
+        self.inner.object_lifetime(s, object)
+    }
+    fn destroy_object_if_bound(
+        &self,
+        s: CkSessionHandle,
+        object: CkObjectHandle,
+        incarnation: Option<u64>,
+        object_lifetime: Option<u64>,
+    ) -> CkResult<()> {
+        self.inner.destroy_object_if_bound(s, object, incarnation, object_lifetime)
+    }
     fn get_object_size(&self, s: CkSessionHandle, object: CkObjectHandle) -> CkResult<u64> {
         self.inner.get_object_size(s, object)
     }

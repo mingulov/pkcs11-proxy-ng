@@ -227,7 +227,7 @@ impl FfiBackend {
         let _session_fence = self.session_fences.enter(&admission, session)?;
         let ck_attr_len = Self::ffi_attr_len(&attrs)?;
         let handle =
-            Self::call_object_output(&admission, Some(f), |function, handle_out| unsafe {
+            self.call_object_output(session, &admission, Some(f), |function, handle_out| unsafe {
                 function(
                     h_session,
                     native.pointer(),

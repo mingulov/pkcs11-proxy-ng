@@ -49,6 +49,8 @@ mod native_stop;
 #[cfg(all(test, unix))]
 #[path = "ffi/native_stop_tests.rs"]
 mod native_stop_tests;
+#[path = "ffi/object_lifetime.rs"]
+mod object_lifetime;
 #[path = "ffi/object_ops.rs"]
 mod object_ops;
 #[path = "ffi/session_3x_ops.rs"]
@@ -348,6 +350,8 @@ pub struct FfiBackend {
     /// Per-session generation fences (TF01b/I4): every session-bearing
     /// ordinary path enters its fence under its admission; closes mark.
     session_fences: session_fence::SessionFenceTable,
+    /// Per-object lifetime ids for late-mint settlement binding.
+    object_lifetimes: object_lifetime::ObjectLifetimeTable,
     /// Last-field retirement sentinel (C3M step 7). MUST stay the last
     /// field: field drops run in declaration order, so its `Drop`
     /// publishes the next `Vacant` only after every other field —
@@ -406,6 +410,7 @@ impl FfiBackend {
             lifecycle: Default::default(),
             lifecycle_domain: Default::default(),
             session_fences: Default::default(),
+            object_lifetimes: Default::default(),
         })
     }
 
@@ -435,6 +440,7 @@ impl FfiBackend {
             lifecycle: Default::default(),
             lifecycle_domain: Default::default(),
             session_fences: Default::default(),
+            object_lifetimes: Default::default(),
             retirement_sentinel: native_domain::RetirementSentinel::unmanaged_test_only(),
         }
     }
@@ -1200,6 +1206,18 @@ impl Pkcs11Backend for FfiBackend {
         incarnation: Option<u64>,
     ) -> CkResult<()> {
         self.ffi_destroy_object_if_incarnation(session, object, incarnation)
+    }
+    fn object_lifetime(&self, session: CkSessionHandle, object: CkObjectHandle) -> Option<u64> {
+        self.ffi_object_lifetime(session, object)
+    }
+    fn destroy_object_if_bound(
+        &self,
+        session: CkSessionHandle,
+        object: CkObjectHandle,
+        incarnation: Option<u64>,
+        object_lifetime: Option<u64>,
+    ) -> CkResult<()> {
+        self.ffi_destroy_object_if_bound(session, object, incarnation, object_lifetime)
     }
     fn destroy_quarantined_object(
         &self,
