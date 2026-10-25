@@ -799,8 +799,8 @@ impl ContextManager {
     /// Test constructor with an explicit absolute lifetime cap (D4), so
     /// cap-expiry tests need not backdate creation time by 24h (an
     /// `Instant` cannot precede boot on a fresh machine).
-    #[cfg(test)]
-    pub(crate) fn new_with_max_context_lifetime(
+    #[doc(hidden)]
+    pub fn new_with_max_context_lifetime(
         lease_duration: std::time::Duration,
         max_contexts: usize,
         max_context_lifetime: std::time::Duration,
