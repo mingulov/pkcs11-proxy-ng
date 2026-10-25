@@ -143,13 +143,16 @@ impl Pkcs11ProxyService {
         // the request's transport extensions). The owner check above
         // has just matched the request's live transport identity to
         // the context's bound owner identity, so rebinding only ever
-        // happens on an identity match. A client that reconnected on
-        // a new connection and keeps using its context rebinds the
-        // context to that live connection; without this, the stale
-        // dead binding lets `evict_expired` reap the context
-        // mid-workflow. Only a live connection overwrites (see
-        // `rebind_context_connection`); peerless requests resolve
-        // `None` and leave the binding untouched.
+        // happens on an identity match. This fires after the owner
+        // check passes and before handler execution — not on
+        // successful use: a live owner presenting its context
+        // rebinds it even if the handler later fails. A client that
+        // reconnected on a new connection and keeps using its
+        // context rebinds the context to that live connection;
+        // without this, the stale dead binding lets `evict_expired`
+        // reap the context mid-workflow. Only a live connection
+        // overwrites (see `rebind_context_connection`); peerless
+        // requests resolve `None` and leave the binding untouched.
         let connection = self.ctx.context_manager.connection_state_for_request(request);
         self.ctx.context_manager.rebind_context_connection(&ctx_id, connection);
         Ok(())

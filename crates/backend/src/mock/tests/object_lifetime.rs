@@ -123,6 +123,56 @@ fn capture_lifetime_for(captured: &[(CkObjectHandle, u64)], handle: CkObjectHand
     captured.iter().find(|(h, _)| *h == handle).map(|(_, l)| *l)
 }
 
+/// Mint-capture isolation: a dropped capture leaks nothing into the
+/// next capture on the same thread (pooled blocking threads mint
+/// sequentially), and dropping a nested capture restores the outer
+/// one, which keeps collecting.
+#[test]
+fn mint_capture_sequential_and_nested_captures_are_isolated() {
+    let session = CkSessionHandle(71);
+
+    // Sequential: the first capture collects and drops; the second
+    // capture on the same thread starts empty.
+    let first = crate::mint_capture::begin(session);
+    crate::mint_capture::report(session, CkObjectHandle(101), 1001);
+    assert_eq!(first.captured(), vec![(CkObjectHandle(101), 1001)]);
+    drop(first);
+
+    let second = crate::mint_capture::begin(session);
+    assert!(second.captured().is_empty(), "second capture must start empty");
+    crate::mint_capture::report(session, CkObjectHandle(102), 1002);
+    assert_eq!(second.captured(), vec![(CkObjectHandle(102), 1002)]);
+    drop(second);
+
+    // Nested: the inner capture starts empty and collects only its
+    // own report; dropping it restores the outer capture, which
+    // still holds its earlier pair and keeps collecting.
+    let outer = crate::mint_capture::begin(session);
+    crate::mint_capture::report(session, CkObjectHandle(201), 2001);
+    {
+        let inner = crate::mint_capture::begin(session);
+        assert!(inner.captured().is_empty(), "inner capture must start empty");
+        crate::mint_capture::report(session, CkObjectHandle(202), 2002);
+        assert_eq!(inner.captured(), vec![(CkObjectHandle(202), 2002)]);
+        drop(inner);
+    }
+    assert_eq!(outer.captured(), vec![(CkObjectHandle(201), 2001)]);
+    crate::mint_capture::report(session, CkObjectHandle(203), 2003);
+    assert_eq!(
+        outer.captured(),
+        vec![(CkObjectHandle(201), 2001), (CkObjectHandle(203), 2003)],
+        "outer capture must still collect after the inner capture drops"
+    );
+    drop(outer);
+
+    // After the outer capture drops, no capture remains on this
+    // thread: a stray report is a no-op and the next capture is empty.
+    crate::mint_capture::report(session, CkObjectHandle(999), 9999);
+    let third = crate::mint_capture::begin(session);
+    assert!(third.captured().is_empty(), "capture after outer drop must start empty");
+    drop(third);
+}
+
 /// Fail-safe settlement (captured Some, current None): the object is
 /// gone or untracked under the settling session now — a raw destroy
 /// could hit a replacement recorded under another session — so the
