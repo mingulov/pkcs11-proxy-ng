@@ -535,15 +535,25 @@ mod lifecycle_output_tests {
         );
     }
 
+    static MINT_CAPTURE_DESTROY_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C" fn destroy_counting_mint_capture(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _object: cryptoki_sys::CK_OBJECT_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        MINT_CAPTURE_DESTROY_CALLS.fetch_add(1, Ordering::SeqCst);
+        cryptoki_sys::CKR_OK
+    }
+
     /// Atomic mint capture (FFI parity): the pair reported at the
     /// fresh-record site still names the original lifetime after a
     /// destroy+recreate, so settlement refuses and issues no destroy.
     #[test]
     fn mint_capture_binds_original_lifetime_after_recreate() {
         use crate::traits::Pkcs11Backend;
-        FAILSAFE_DESTROY_CALLS.store(0, Ordering::SeqCst);
+        MINT_CAPTURE_DESTROY_CALLS.store(0, Ordering::SeqCst);
         let (backend, _functions) = backend_with_object_stubs();
-        unsafe { (*backend.func_list).C_DestroyObject = Some(destroy_counting_failsafe) };
+        unsafe { (*backend.func_list).C_DestroyObject = Some(destroy_counting_mint_capture) };
         backend.lifecycle_domain.open_for_tests();
         let session = CkSessionHandle(7);
 
@@ -555,7 +565,7 @@ mod lifecycle_output_tests {
         assert_eq!(captured, vec![(handle, lifetime)]);
 
         backend.destroy_object(session, handle).unwrap();
-        assert_eq!(FAILSAFE_DESTROY_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(MINT_CAPTURE_DESTROY_CALLS.load(Ordering::SeqCst), 1);
         let replacement = backend.create_object(session, Some(&[])).unwrap();
         assert_eq!(replacement, handle, "stub re-mints the same numeric handle");
         assert_eq!(
@@ -567,7 +577,7 @@ mod lifecycle_output_tests {
             ),
             Err(CkRv::OBJECT_HANDLE_INVALID),
         );
-        assert_eq!(FAILSAFE_DESTROY_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(MINT_CAPTURE_DESTROY_CALLS.load(Ordering::SeqCst), 1);
         assert!(backend.object_lifetime(session, replacement).is_some());
     }
 
