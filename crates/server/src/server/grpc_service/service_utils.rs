@@ -514,53 +514,149 @@ where
     }
 }
 
-/// Narrow completion owner for a single `OpenSession` backend call
-/// (Q16 box 2). The `open_session` handler registers the native
-/// session only after the awaited `spawn_backend` result returns; a
-/// caller cancellation or internal timeout before then discards a
-/// late `Ok(handle)` with no mapping and no close — a native session
+/// How a late-minted payload retires its native state when the mint's
+/// primary result was never consumed (P2-13, generalizing Q16 box 2).
+/// Implementations move only plain handle integers — never secret
+/// payload — and run inside ordinary [`spawn_backend`].
+pub(super) trait LateMintSettlement: Send + 'static {
+    /// Short op label for settlement logs (never payload data).
+    const LABEL: &'static str;
+    /// One representative native handle for log correlation.
+    fn log_handle(&self) -> u64;
+    /// True when the payload carries no minted handle, so settlement
+    /// must not issue any backend call.
+    fn is_empty(&self) -> bool {
+        false
+    }
+    /// Retire the minted native state through the backend.
+    fn settle(self, backend: &dyn pkcs11_proxy_ng_backend::Pkcs11Backend) -> CkResult<()>;
+}
+
+impl LateMintSettlement for CkSessionHandle {
+    const LABEL: &'static str = "OpenSession";
+
+    fn log_handle(&self) -> u64 {
+        self.0
+    }
+
+    fn settle(self, backend: &dyn pkcs11_proxy_ng_backend::Pkcs11Backend) -> CkResult<()> {
+        backend.close_session(self)
+    }
+}
+
+/// Objects minted by one backend call under `session` (CreateObject,
+/// GenerateKey, DeriveKey incl. output-param handles, unwrap, KEM…).
+/// Zero handles are dropped at construction: `CK_INVALID_HANDLE`
+/// names nothing the provider created for this call.
+#[derive(Debug)]
+pub(super) struct LateMintedObjects {
+    session: CkSessionHandle,
+    handles: Vec<CkObjectHandle>,
+}
+
+impl LateMintedObjects {
+    pub(super) fn new(
+        session: CkSessionHandle,
+        handles: impl IntoIterator<Item = CkObjectHandle>,
+    ) -> Self {
+        let mut kept: Vec<CkObjectHandle> = Vec::new();
+        for handle in handles {
+            if handle.0 != 0 && !kept.contains(&handle) {
+                kept.push(handle);
+            }
+        }
+        Self { session, handles: kept }
+    }
+
+    pub(super) fn single(session: CkSessionHandle, handle: CkObjectHandle) -> Self {
+        Self::new(session, [handle])
+    }
+}
+
+impl LateMintSettlement for LateMintedObjects {
+    const LABEL: &'static str = "object mint";
+
+    fn log_handle(&self) -> u64 {
+        self.handles.first().map_or(0, |handle| handle.0)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.handles.is_empty()
+    }
+
+    fn settle(self, backend: &dyn pkcs11_proxy_ng_backend::Pkcs11Backend) -> CkResult<()> {
+        // Best-effort every handle: one failed destroy must not strand
+        // the rest. The first failure is reported for the caller's log.
+        let mut first_error = None;
+        for handle in self.handles {
+            if let Err(rv) = backend.destroy_object(self.session, handle) {
+                first_error.get_or_insert(rv);
+            }
+        }
+        match first_error {
+            Some(rv) => Err(rv),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Narrow completion owner for a single handle-minting backend call
+/// (Q16 box 2 for `OpenSession`; P2-13 generalizes the same owner to
+/// object mints). A mint handler registers the native handle only
+/// after the awaited `spawn_backend` result returns; a caller
+/// cancellation or internal timeout before then discards a late
+/// `Ok(handle)` with no mapping and no close/destroy — a native
 /// orphan that survives service close-all (mapped handles only) and
 /// context teardown (mapped handles only) until daemon shutdown.
 ///
-/// The owner holds a `oneshot` copy of the backend result. The
+/// The owner holds a `oneshot` copy of the minted payload. The
 /// sender moves into the `spawn_backend` closure, which reports its
 /// outcome immediately after the backend call returns:
 ///
-/// * `Ok(handle)` arm: [`Self::disarm`] — ownership transfers to the
-///   existing register/fallback-close settlement, unchanged.
+/// * Consumed `Ok`: [`Self::disarm`] once registration adopted the
+///   handle — ownership transfers to the existing handle tables,
+///   unchanged. Registration failure leaves the owner armed, so the
+///   `Drop` settler retires a handle nobody adopted.
 /// * `Err(_)` arm: [`Self::settle_on_error`] — a present error copy
 ///   proves the genuine backend error (the send strictly precedes the
 ///   primary return) and disarms with zero behavior change; a present
 ///   success copy is a timeout that raced completion and is settled
-///   through the detached close; an absent copy proves the worker is
-///   still out (the internal timeout shape) and stays armed; a
-///   dropped sender (breaker refusal, worker panic) disarms since
-///   nothing will arrive.
+///   through the detached settlement; an absent copy proves the
+///   worker is still out (the internal timeout shape) and stays
+///   armed; a dropped sender (breaker refusal, worker panic) disarms
+///   since nothing will arrive.
 /// * Still armed at `Drop` (early handler return, future
 ///   cancellation): a detached settlement task awaits the real
-///   completion and closes a late `Ok(handle)` exactly once through
-///   the normal `spawn_backend` (breaker + timeout). Any other late
+///   completion and settles a late success exactly once through the
+///   normal `spawn_backend` (breaker + timeout). Any other late
 ///   outcome settles nothing — no handle exists, and no blind
 ///   state-changing call runs on an unknown result.
 ///
 /// The late handle is solely owned: it settles here only when no
 /// mapping was published, and nobody else can name a handle that was
-/// never returned or registered. Used ONLY by `open_session`; sibling
-/// creation handlers need their own per-op settlement review.
-pub(super) struct OpenSessionCompletionOwner {
-    completion: Option<oneshot::Receiver<CkResult<CkSessionHandle>>>,
+/// never returned or registered. For object payloads the settlement
+/// destroys through the originating session; the FFI backend's
+/// per-session fence either admits that destroy before any native
+/// close of the session or refuses it without native entry.
+pub(super) struct MintCompletionOwner<P: LateMintSettlement> {
+    completion: Option<oneshot::Receiver<CkResult<P>>>,
     backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
     runtime: tokio::runtime::Handle,
 }
 
-impl OpenSessionCompletionOwner {
+/// Q16 box 2 instantiation (late `OpenSession` results).
+pub(super) type OpenSessionCompletionOwner = MintCompletionOwner<CkSessionHandle>;
+/// P2-13 instantiation for object-minting handlers.
+pub(super) type ObjectMintCompletionOwner = MintCompletionOwner<LateMintedObjects>;
+
+impl<P: LateMintSettlement> MintCompletionOwner<P> {
     /// Arm the owner. The returned sender moves into the
     /// `spawn_backend` closure and reports the backend outcome; the
     /// owner settles it unless disarmed. Must be called inside the
-    /// runtime (the `open_session` handler always is).
+    /// runtime (mint handlers always are).
     pub(super) fn arm(
         backend: &Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
-    ) -> (oneshot::Sender<CkResult<CkSessionHandle>>, Self) {
+    ) -> (oneshot::Sender<CkResult<P>>, Self) {
         let (tx, rx) = oneshot::channel();
         let owner = Self {
             completion: Some(rx),
@@ -593,12 +689,12 @@ impl OpenSessionCompletionOwner {
             // Timeout raced completion: the primary is the synthesized
             // proxy timeout RV, but the worker already reported a real
             // success. `try_recv` consumed the only copy, so the owner
-            // takes it here — disarm and settle the known handle
-            // through the same detached close the `Drop` settler uses.
-            // No mapping was (or will be) published for it.
-            Ok(Ok(session)) => {
+            // takes it here — disarm and settle the known payload
+            // through the same detached settlement the `Drop` settler
+            // uses. No mapping was (or will be) published for it.
+            Ok(Ok(payload)) => {
                 self.completion = None;
-                Self::spawn_settlement(&self.runtime, self.backend.clone(), session);
+                Self::spawn_settlement(&self.runtime, self.backend.clone(), payload);
             }
             // Worker still out: the primary is the proxy timeout RV.
             // Stay armed; `Drop` spawns the late closer.
@@ -610,7 +706,7 @@ impl OpenSessionCompletionOwner {
         }
     }
 
-    /// Spawn the detached settlement close for a known late `session`
+    /// Spawn the detached settlement for a known late payload
     /// (sole ownership: no mapping was published for it). Shared by
     /// the timeout-race arm and the `Drop` settler. Failures log
     /// loudly and keep today's terminal semantics (orphan until
@@ -618,36 +714,46 @@ impl OpenSessionCompletionOwner {
     fn spawn_settlement(
         runtime: &tokio::runtime::Handle,
         backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
-        session: CkSessionHandle,
+        payload: P,
     ) {
+        if payload.is_empty() {
+            return;
+        }
+        let log_handle = payload.log_handle();
         runtime.spawn(async move {
-            tracing::debug!(session = session.0, "closing late OpenSession result with no consumer");
-            match spawn_backend(move || backend.close_session(session)).await {
+            tracing::debug!(
+                op = P::LABEL,
+                handle = log_handle,
+                "settling late mint result with no consumer"
+            );
+            match spawn_backend(move || payload.settle(&*backend)).await {
                 Ok(Ok(())) => {}
                 Ok(Err(rv)) => tracing::warn!(
-                    session = session.0,
+                    op = P::LABEL,
+                    handle = log_handle,
                     rv = rv.0,
-                    "late OpenSession settlement close failed; native session orphaned until shutdown"
+                    "late mint settlement failed; native state orphaned until shutdown"
                 ),
                 Err(status) => tracing::warn!(
-                    session = session.0,
+                    op = P::LABEL,
+                    handle = log_handle,
                     status = status.message(),
-                    "late OpenSession settlement close failed; native session orphaned until shutdown"
+                    "late mint settlement failed; native state orphaned until shutdown"
                 ),
             }
         });
     }
 }
 
-impl Drop for OpenSessionCompletionOwner {
+impl<P: LateMintSettlement> Drop for MintCompletionOwner<P> {
     fn drop(&mut self) {
         let Some(rx) = self.completion.take() else {
             return;
         };
         // Armed: the primary result was never consumed into the
-        // register/fallback arms (early timeout return or caller
+        // registration arm (early timeout return or caller
         // cancellation). Await the real completion off the handler
-        // and close a late success. The captured `Handle` spawns from
+        // and settle a late success. The captured `Handle` spawns from
         // any thread without ambient runtime context; if the runtime
         // is already gone (daemon shutdown) the settlement task never
         // polls and shutdown native `Finalize` reaps instead.
@@ -656,10 +762,10 @@ impl Drop for OpenSessionCompletionOwner {
         self.runtime.spawn(async move {
             // Only a late success settles. A late backend error owns no
             // handle; a dropped sender (worker panic) leaves the outcome
-            // unknown, and no blind close runs — same terminal semantics
-            // as the `Status` path, now explicit.
-            if let Ok(Ok(session)) = rx.await {
-                Self::spawn_settlement(&runtime, backend, session);
+            // unknown, and no blind settlement runs — same terminal
+            // semantics as the `Status` path, now explicit.
+            if let Ok(Ok(payload)) = rx.await {
+                Self::spawn_settlement(&runtime, backend, payload);
             }
         });
     }
@@ -4434,6 +4540,76 @@ mod tests {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert_eq!(mock.close_session_call_count(), 1, "only the explicit close ran");
+    }
+
+    /// P2-13: the object instantiation of the same owner — timeout
+    /// shape (worker still out) stays armed, and the detached settler
+    /// destroys every late-minted object exactly once.
+    #[tokio::test]
+    async fn object_mint_owner_timeout_shape_destroys_late_objects() {
+        use pkcs11_proxy_ng_backend::MockBackend;
+
+        let mock = Arc::new(MockBackend::default_test());
+        mock.initialize().unwrap();
+        let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock.clone();
+        let session = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
+
+        let (tx, mut owner) = ObjectMintCompletionOwner::arm(&backend);
+        owner.settle_on_error();
+        assert!(owner.completion.is_some(), "pending worker must stay armed");
+        drop(owner);
+
+        let first = mock.create_object(session, Some(&[])).unwrap();
+        let second = mock.create_object(session, Some(&[])).unwrap();
+        assert_eq!(mock.live_object_count(), 2);
+        // Zero handles and duplicates in the extraction are inert.
+        tx.send(Ok(LateMintedObjects::new(session, [first, CkObjectHandle(0), second, first])))
+            .expect("settler awaiting");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if mock.live_object_count() == 0 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "settler must destroy the late objects"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(mock.destroy_call_count(), 2, "each late object destroyed exactly once");
+    }
+
+    /// P2-13: object instantiation — a reported genuine error disarms
+    /// and a disarmed (consumed) success issues no destroy.
+    #[tokio::test]
+    async fn object_mint_owner_error_and_consumed_paths_destroy_nothing() {
+        use pkcs11_proxy_ng_backend::MockBackend;
+
+        let mock = Arc::new(MockBackend::default_test());
+        mock.initialize().unwrap();
+        let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock.clone();
+        let session = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
+
+        // Genuine backend error: copy present, disarms synchronously.
+        let (tx, mut owner) = ObjectMintCompletionOwner::arm(&backend);
+        tx.send(Err(CkRv::DEVICE_MEMORY)).expect("owner awaiting");
+        owner.settle_on_error();
+        assert!(owner.completion.is_none(), "genuine error must disarm");
+        drop(owner);
+
+        // Consumed success: queue the copy, then disarm — no destroy.
+        let live = mock.create_object(session, Some(&[])).unwrap();
+        let (tx, mut owner) = ObjectMintCompletionOwner::arm(&backend);
+        tx.send(Ok(LateMintedObjects::single(session, live))).expect("owner awaiting");
+        owner.disarm();
+        assert!(owner.completion.is_none(), "consumed success must disarm");
+        drop(owner);
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(mock.destroy_call_count(), 0, "no settlement destroy on error/consumed paths");
+        assert_eq!(mock.live_object_count(), 1, "consumed object must survive");
     }
 
     /// Q16 box 2 (fix round 1): a sender dropped without reporting
