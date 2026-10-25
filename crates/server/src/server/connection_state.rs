@@ -27,12 +27,18 @@
 //!   nothing is registered for them, requests on them resolve no
 //!   connection, and their contexts bind `None`.
 //!
-//! A context created by `Initialize` stores only a `Weak` to its
-//! group's state (resolved through the registry from the request's
-//! transport extensions, mirroring `request_identity`). It is
-//! transport-dead when the weak fails to upgrade (state dropped) or
-//! upgrades to a closed state. Contexts with no connection binding
-//! (tests, internal callers) store `None` and are never transport-dead.
+//! A context created by `Initialize` stores a SET of `Weak`s to
+//! the groups that have carried owner-checked requests for it,
+//! starting with its `Initialize` group (resolved through the
+//! registry from the request's transport extensions, mirroring
+//! `request_identity`) and adding each live group a later request
+//! arrives on — never evicting a still-live older group, so the
+//! set's liveness is independent of request order. It is
+//! transport-dead only when it was bound and no live entry remains
+//! (every weak fails to upgrade or upgrades to a closed state,
+//! pruned on read). Contexts never bound (tests, internal callers)
+//! store `None` and are never transport-dead; a bound context whose
+//! set prunes to empty IS transport-dead.
 
 use std::io::IoSlice;
 use std::net::SocketAddr;
