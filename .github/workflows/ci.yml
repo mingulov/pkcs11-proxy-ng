@@ -115,7 +115,7 @@ jobs:
 
       # W1-L16-14: the standalone test workspaces carry their own locks;
       # audit them too so advisories there fail the gate.
-      - name: cargo audit (standalone test workspaces)
+      - name: cargo audit (standalone workspaces)
         run: scripts/audit-test-workspaces.sh audit
 
   # ── Tier 0b2: dependency policy (licenses / bans / sources) ───────────────
@@ -152,7 +152,7 @@ jobs:
         run: cargo deny check
 
       # W1-L16-14: same standalone-lock coverage as the audit job.
-      - name: cargo deny check (standalone test workspaces)
+      - name: cargo deny check (standalone workspaces)
         run: scripts/audit-test-workspaces.sh deny
 
   # ── Tier 0b3: packaging smoke (APK/RPM mirrors + syntax) ───────────────────

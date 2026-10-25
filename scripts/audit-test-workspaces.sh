@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# W1-L16-14: run cargo audit + cargo deny over the standalone test
+# W1-L16-14: run cargo audit + cargo deny over the standalone
 # workspaces (each carries its own Cargo.lock outside the root
 # workspace, so the root `cargo audit` / `cargo deny check` never see
 # them). Called by the CI audit/deny jobs and test-matrix.sh fast
@@ -23,7 +23,9 @@ case "$MODE" in
         ;;
 esac
 
-# The six standalone test workspaces (each has [workspace] + own lock).
+# The eight standalone workspaces: six test workspaces with their own
+# [workspace] + lock, the publish probe (own [workspace] + lock), and
+# fuzz (excluded from the root workspace, own lock).
 WORKSPACES=(
     tests/chaos/cert_minter
     tests/r2_resilience/slow_backend
@@ -31,6 +33,8 @@ WORKSPACES=(
     tests/ffi_oracles/entry_recording
     tests/ffi_oracles/session_lifecycle
     tests/ffi_oracles/retained_mechanisms
+    tools/publish-probe
+    fuzz
 )
 
 require_cmd() {

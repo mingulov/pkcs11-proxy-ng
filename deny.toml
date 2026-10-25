@@ -59,7 +59,14 @@ allow = [
 # Crates that ship with no SPDX license expression in their
 # Cargo.toml. Each must be reviewed individually before being added
 # here; the rest of the file flags any new bare crate.
-exceptions = []
+exceptions = [
+    # libfuzzer-sys (fuzz/ only, the cargo-fuzz runtime; never in a
+    # shipped artifact) is (MIT OR Apache-2.0) AND NCSA: the NCSA
+    # (University of Illinois) term covers its bundled libFuzzer
+    # sources. NCSA is OSI-approved and permissive, and the exception
+    # is scoped to this crate so NCSA stays rejected everywhere else.
+    { allow = ["NCSA"], name = "libfuzzer-sys", version = "0.4" },
+]
 
 # Per-crate license clarifications for crates whose Cargo.toml is
 # ambiguous or whose effective license is documented in a LICENSE
@@ -98,6 +105,7 @@ skip = [
     { crate = "hashbrown@0.14.5" },   # pulled by older transitive deps; newest in tree is 0.17.x
     { crate = "hashbrown@0.15.5" },   # intermediate line, same reason
     { crate = "windows-sys@0.52.0" }, # transitive only; host target is Linux so it is never built
+    { crate = "syn@2.0.119" },        # fuzz lock resolves async-trait/serde_derive onto syn 3 while the prost/pin-project stack stays on syn 2; compile-time proc-macros only
     # W1-L16-05 (provenance, intentionally NOT skip-listed): base64
     # 0.23.1 arrives only via pem 4 / rcgen 0.14 (server dev-deps);
     # the production tree is 0.22 via tonic. itertools

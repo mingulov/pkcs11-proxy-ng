@@ -10,7 +10,7 @@ Build, test, and release scripts, with their callers. Paths are relative to
 
 | Script | Caller / purpose |
 | --- | --- |
-| `audit-test-workspaces.sh` | `ci.yml` and `nightly.yml`: audit/deny the standalone test workspaces; also called by `test-matrix.sh` |
+| `audit-test-workspaces.sh` | `ci.yml` and `nightly.yml`: audit/deny the standalone workspaces (test workspaces, `tools/publish-probe`, `fuzz/`); also called by `test-matrix.sh` |
 | `packaging-smoke.sh` | `ci.yml` and `test-matrix.sh`: packaging/version consistency |
 | `musl-dynamic-link-flags.sh` | `ci.yml` and `run-musl-test.sh`: common musl link flags |
 | `ci-direct-vs-proxy.py` | `cross-platform.yml`: native direct-versus-proxied provider comparisons |
