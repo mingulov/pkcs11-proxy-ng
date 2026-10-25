@@ -276,7 +276,12 @@ pub struct LogicalClientInstance {
     /// Resolved through the shared connection registry from the request
     /// extensions at Initialize. `None` for contexts created without a
     /// connection (tests/internal callers): never transport-dead.
-    pub connection_state: Option<Weak<ConnectionState>>,
+    /// Interior-mutable so a successful request arriving on a NEW
+    /// connection (client reconnect) can rebind the context to that
+    /// live connection (`rebind_connection`) without an exclusive
+    /// context lock; readers (`is_transport_dead`,
+    /// `same_connection_as`) always observe the current binding.
+    pub connection_state: std::sync::RwLock<Option<Weak<ConnectionState>>>,
     /// Last TCP peer IP seen opening a session on this context (W1-L7-02).
     /// Recorded only for unauthenticated contexts while the session quota
     /// is active, so [`ContextManager::session_count_for_principal`] can
@@ -378,11 +383,30 @@ impl LogicalClientInstance {
             login_state: HashMap::new(),
             contended_slot_login: HashSet::new(),
             authenticated_identity: identity,
-            connection_state: connection.as_ref().map(Arc::downgrade),
+            connection_state: std::sync::RwLock::new(connection.as_ref().map(Arc::downgrade)),
             last_peer_ip: None,
             in_flight: Arc::new(AtomicI64::new(0)),
             message_operations: HashMap::new(),
         }
+    }
+
+    /// Read the current connection binding (cloned out from under
+    /// the lock so liveness probes never run while holding it).
+    fn connection_binding(&self) -> Option<Weak<ConnectionState>> {
+        self.connection_state.read().unwrap_or_else(|poison| poison.into_inner()).clone()
+    }
+
+    /// Rebind this context to `connection` (rebind-on-use after a
+    /// client reconnect). Only a LIVE `Some` state overwrites the
+    /// current binding; `None` or a closed state never overwrites
+    /// (a peerless or dying request must not strip a live binding,
+    /// nor resurrect a dead one onto a closed group).
+    pub fn rebind_connection(&self, connection: Option<Arc<ConnectionState>>) {
+        let Some(state) = connection.filter(|state| !state.is_closed()) else {
+            return;
+        };
+        *self.connection_state.write().unwrap_or_else(|poison| poison.into_inner()) =
+            Some(Arc::downgrade(&state));
     }
 
     /// Transport-dead: the bound connection group's state is closed
@@ -391,7 +415,7 @@ impl LogicalClientInstance {
     /// entirely. Connectionless contexts (`None`) are never
     /// transport-dead.
     pub fn is_transport_dead(&self) -> bool {
-        match &self.connection_state {
+        match self.connection_binding() {
             None => false,
             Some(weak) => match weak.upgrade() {
                 None => true,
@@ -403,7 +427,9 @@ impl LogicalClientInstance {
     /// The live connection state for this context, when bound and
     /// still alive.
     pub fn live_connection_state(&self) -> Option<Arc<ConnectionState>> {
-        self.connection_state.as_ref().and_then(Weak::upgrade).filter(|state| !state.is_closed())
+        self.connection_binding()
+            .and_then(|weak| Weak::upgrade(&weak))
+            .filter(|state| !state.is_closed())
     }
 
     /// Whether this context lives in the same live connection group
@@ -414,7 +440,7 @@ impl LogicalClientInstance {
     /// legacy/test path both replacement tests and peerless callers
     /// use); a connectionless context never matches a live group.
     pub fn same_connection_as(&self, other: Option<&Arc<ConnectionState>>) -> bool {
-        match (&self.connection_state, other) {
+        match (self.connection_binding(), other) {
             (None, None) => true,
             (Some(weak), Some(other)) => {
                 weak.upgrade().is_some_and(|state| Arc::ptr_eq(&state, other) && !state.is_closed())
@@ -879,6 +905,28 @@ impl ContextManager {
         request: &tonic::Request<T>,
     ) -> Option<Arc<ConnectionState>> {
         super::connection_state::connection_state_for_request(&self.connection_registry, request)
+    }
+
+    /// Rebind `id` to `connection` on use (client reconnect): only a
+    /// live `Some` state overwrites the current binding; `None` or a
+    /// closed state never overwrites a live binding. Unknown
+    /// contexts are a no-op. Called from the one common dispatch
+    /// path after the context-owner check has matched the request's
+    /// transport identity to the context's owner, so a reconnected
+    /// client keeps its context out of transport-dead reaping while
+    /// its new connection lives — and the context reaps normally
+    /// once that connection drops too.
+    pub fn rebind_context_connection(
+        &self,
+        id: &ClientContextId,
+        connection: Option<Arc<ConnectionState>>,
+    ) {
+        let Some(state) = connection.filter(|state| !state.is_closed()) else {
+            return;
+        };
+        if let Some(ctx) = self.contexts.get(id) {
+            ctx.rebind_connection(Some(state));
+        }
     }
 
     /// Test constructor with an explicit absolute lifetime cap (D4), so

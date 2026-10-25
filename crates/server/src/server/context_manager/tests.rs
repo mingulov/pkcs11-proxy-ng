@@ -2421,3 +2421,47 @@ async fn uds_group_same_process_surviving_connection_replaces_own_idle() {
     assert!(mgr.get_context(&successor, |_| ()).await.is_some());
     drop(second);
 }
+
+/// Rebind-on-use semantics: only a live `Some` connection
+/// overwrites the binding — `None` and closed states never strip a
+/// live binding — and a live state revives a transport-dead context
+/// onto its new connection (read back through the current binding).
+#[tokio::test]
+async fn rebind_only_live_some_overwrites_binding() {
+    use crate::server::connection_state::ConnectionState;
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let state_a = ConnectionState::new();
+    let holder = mgr
+        .create_context_with_connection(Some("unauthenticated".into()), Some(Arc::clone(&state_a)))
+        .await
+        .unwrap();
+
+    // None never overwrites.
+    mgr.rebind_context_connection(&holder, None);
+    let same = mgr.get_context(&holder, |c| c.same_connection_as(Some(&state_a))).await.unwrap();
+    assert!(same, "None rebind must leave the live binding untouched");
+
+    // A closed state never overwrites.
+    let closed = ConnectionState::new();
+    closed.mark_closed();
+    mgr.rebind_context_connection(&holder, Some(closed));
+    let same = mgr.get_context(&holder, |c| c.same_connection_as(Some(&state_a))).await.unwrap();
+    assert!(same, "closed rebind must leave the live binding untouched");
+
+    // The bound connection dies; a live successor revives the context.
+    state_a.mark_closed();
+    let dead = mgr.get_context(&holder, |c| c.is_transport_dead()).await.unwrap();
+    assert!(dead, "setup: context must be transport-dead once A closes");
+    let state_b = ConnectionState::new();
+    mgr.rebind_context_connection(&holder, Some(Arc::clone(&state_b)));
+    let (dead, same_b) = mgr
+        .get_context(&holder, |c| (c.is_transport_dead(), c.same_connection_as(Some(&state_b))))
+        .await
+        .unwrap();
+    assert!(!dead, "live rebind must revive the context");
+    assert!(same_b, "context must read back the new binding");
+
+    // Unknown contexts are a no-op (no panic, no creation).
+    mgr.rebind_context_connection(&ClientContextId("missing".into()), Some(state_b));
+    assert_eq!(mgr.context_count(), 1);
+}

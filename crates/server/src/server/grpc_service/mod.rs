@@ -129,14 +129,30 @@ impl Pkcs11ProxyService {
         request: &Request<T>,
         raw_ctx_id: &str,
     ) -> Result<(), Status> {
+        let ctx_id = super::context_manager::ClientContextId(raw_ctx_id.to_owned());
         authorization::enforce_context_owner(
             &self.ctx.context_manager,
             request,
-            &super::context_manager::ClientContextId(raw_ctx_id.to_owned()),
+            &ctx_id,
             self.ctx.tcp_auth_mode,
             self.ctx.unix_auth_mode,
         )
-        .await
+        .await?;
+        // Rebind-on-use (the ONE common per-request path: every
+        // context-carrying RPC passes here with both the ctx_id and
+        // the request's transport extensions). The owner check above
+        // has just matched the request's live transport identity to
+        // the context's bound owner identity, so rebinding only ever
+        // happens on an identity match. A client that reconnected on
+        // a new connection and keeps using its context rebinds the
+        // context to that live connection; without this, the stale
+        // dead binding lets `evict_expired` reap the context
+        // mid-workflow. Only a live connection overwrites (see
+        // `rebind_context_connection`); peerless requests resolve
+        // `None` and leave the binding untouched.
+        let connection = self.ctx.context_manager.connection_state_for_request(request);
+        self.ctx.context_manager.rebind_context_connection(&ctx_id, connection);
+        Ok(())
     }
 }
 
@@ -465,6 +481,86 @@ mod dispatch_rate_quota_tests {
                 "all concurrent open_session calls must succeed with no limit"
             );
         }
+    }
+
+    /// Reconnect rebind regression: a context created at peer A keeps
+    /// working after the client reconnects at peer B (new TCP
+    /// connection, same identity). Successful use at B must rebind
+    /// the context to B's live connection, so `evict_expired` does
+    /// not reap it mid-workflow; once B also drops, it reaps.
+    #[tokio::test]
+    async fn reconnected_context_rebinds_on_use_and_survives_eviction() {
+        use crate::server::connection_state::{ConnectionState, tcp_peer_key};
+        use crate::server::context_manager::ClientContextId;
+        use std::net::SocketAddr;
+
+        let ctx_mgr = make_ctx_mgr();
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let backend = make_backend();
+        let svc = Pkcs11ProxyService::insecure_for_tests(ctx_mgr.clone(), backend.clone());
+        let peer_a: SocketAddr = "192.0.2.31:40001".parse().unwrap();
+        let peer_b: SocketAddr = "192.0.2.31:40002".parse().unwrap();
+        let registry = ctx_mgr.connection_registry();
+        let state_a = registry.register(tcp_peer_key(peer_a), ConnectionState::new());
+        let state_b = registry.register(tcp_peer_key(peer_b), ConnectionState::new());
+
+        // Context created at peer A (Initialize over A's connection).
+        let mut init_req = Request::new(pkcs11_proxy_ng_proto::InitializeRequest {
+            client_context_id: String::new(),
+            client_effects_version_min: None,
+            client_effects_version_max: None,
+        });
+        init_req.extensions_mut().insert(tonic::transport::server::TcpConnectInfo {
+            local_addr: None,
+            remote_addr: Some(peer_a),
+        });
+        let init = general::initialize(
+            &ctx_mgr,
+            &backend,
+            init_req,
+            crate::config::TcpAuthMode::None,
+            crate::config::UnixAuthMode::None,
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(init.ck_rv, CkRv::OK.0, "initialize at peer A must succeed");
+        let ctx_id = ClientContextId(init.client_context_id.clone());
+
+        // Peer A drops: the context's bound connection is dead.
+        state_a.mark_closed();
+        registry.unregister(&tcp_peer_key(peer_a), &state_a);
+        drop(state_a);
+        let dead = ctx_mgr.get_context(&ctx_id, |c| c.is_transport_dead()).await.unwrap();
+        assert!(dead, "setup: context must be transport-dead after A drops");
+
+        // The client reconnects at peer B and uses the context
+        // successfully (same unauthenticated identity).
+        let mut use_req = Request::new(pkcs11_proxy_ng_proto::GetInfoRequest {
+            client_context_id: ctx_id.0.clone(),
+        });
+        use_req.extensions_mut().insert(tonic::transport::server::TcpConnectInfo {
+            local_addr: None,
+            remote_addr: Some(peer_b),
+        });
+        let used = svc.get_info(use_req).await.unwrap().into_inner();
+        assert_eq!(used.ck_rv, CkRv::OK.0, "context must remain usable from peer B");
+
+        // Rebind-on-use: eviction must NOT reap the live workflow.
+        let evicted = ctx_mgr.evict_expired(&backend).await;
+        assert!(evicted.is_empty(), "rebound context must survive eviction, got {evicted:?}");
+        assert!(
+            ctx_mgr.get_context(&ctx_id, |_| ()).await.is_some(),
+            "rebound context must still exist after eviction"
+        );
+
+        // Once B also drops, the context is an orphan again and reaps.
+        state_b.mark_closed();
+        registry.unregister(&tcp_peer_key(peer_b), &state_b);
+        drop(state_b);
+        let evicted = ctx_mgr.evict_expired(&backend).await;
+        assert_eq!(evicted, vec![ctx_id.clone()], "orphaned context must reap after B drops");
+        assert!(ctx_mgr.get_context(&ctx_id, |_| ()).await.is_none());
     }
 }
 
