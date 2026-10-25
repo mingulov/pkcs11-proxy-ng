@@ -1460,6 +1460,109 @@ impl ContextManager {
         Ok(id)
     }
 
+    /// Initialize-path admission with same-identity orphan replacement.
+    ///
+    /// Identical to [`Self::create_context`] except at the cap: after the
+    /// sessionless-expired reclaim (M4), if admission is still full it may
+    /// atomically replace ONE existing context that is (a) owned by the
+    /// SAME authenticated identity as the caller and (b) idle (no foreign
+    /// operation in flight, the [`Self::remove_context_if_idle`]
+    /// discipline with `own_guards = 0`). The removed context is returned
+    /// to the caller, which MUST tear it down through
+    /// [`Self::plan_removed_context_teardown`] +
+    /// [`Self::execute_teardown_plans`] exactly like finalize — this
+    /// method has no backend handle and closes nothing itself.
+    ///
+    /// Why: a client process that exits without Finalize leaves an
+    /// orphaned context holding an admission slot until lease/lifetime
+    /// expiry. At `max_contexts = 1` one such orphan wedges every later
+    /// Initialize from the same logical client (observed with
+    /// pkcs11-check's per-file processes at a 3600s lease). Letting the
+    /// same identity replace its own idle orphan restores admission
+    /// without weakening the guardrail across identities: a DIFFERENT
+    /// identity at cap still gets `HOST_MEMORY`, and a busy context is
+    /// never replaced.
+    ///
+    /// Identity comparison is the stored
+    /// [`LogicalClientInstance::authenticated_identity`] string against the
+    /// `identity` string this method receives. Initialize passes
+    /// `Some(identity.to_string())` for every auth mode, including
+    /// unauthenticated — where every peer shares the single
+    /// `"unauthenticated"` string. That mode is an explicit no-isolation
+    /// posture (any peer may already use any context), so an
+    /// unauthenticated Initialize replacing an idle unauthenticated orphan
+    /// grants nothing the posture does not already grant. An absent
+    /// identity (`None`, test/internal callers of `create_context`) never
+    /// replaces anything.
+    ///
+    /// Lock order: admission mutex OUTER (held across the whole
+    /// check → reclaim → replace → insert sequence, so no concurrent
+    /// admission can observe or fill the freed slot), contexts-DashMap
+    /// shard guards INNER (transient, inside the reclaim, the candidate
+    /// scan, the predicate-remove, and the insert). Never call while
+    /// holding a contexts guard.
+    ///
+    /// Intentionally `async` for the same reason as `create_context` (L5:
+    /// uniform awaited-accessor shape; the empty future is zero-cost).
+    pub async fn create_context_replacing_idle_same_identity(
+        &self,
+        identity: Option<String>,
+    ) -> CkResult<(ClientContextId, Option<Box<LogicalClientInstance>>)> {
+        let outstanding =
+            self.context_admission_reservations.lock().unwrap_or_else(|e| e.into_inner());
+
+        let mut replaced: Option<Box<LogicalClientInstance>> = None;
+        if self.max_contexts > 0 && self.contexts.len() + *outstanding >= self.max_contexts {
+            self.evict_expired_sessionless_for_admission();
+        }
+        if self.max_contexts > 0 && self.contexts.len() + *outstanding >= self.max_contexts {
+            // Still full: try to free exactly one slot by replacing an
+            // idle same-identity context. Candidate ids are collected
+            // first (shard guards released), then each removal re-checks
+            // idleness atomically under its shard write lock, so an op
+            // that began after the scan can never be cut off.
+            if let Some(want) = identity.as_deref() {
+                let candidates: Vec<ClientContextId> = self
+                    .contexts
+                    .iter()
+                    .filter(|entry| entry.value().authenticated_identity.as_deref() == Some(want))
+                    .map(|entry| entry.key().clone())
+                    .collect();
+                for candidate in candidates {
+                    match self.remove_context_if_idle(&candidate, 0) {
+                        RemoveIfIdleOutcome::Removed(ctx) => {
+                            replaced = Some(ctx);
+                            break;
+                        }
+                        // Busy: never replace; a later candidate may be
+                        // idle. Missing: a concurrent removal freed a
+                        // slot, which the cap re-check below observes.
+                        RemoveIfIdleOutcome::Busy | RemoveIfIdleOutcome::Missing => {}
+                    }
+                }
+            }
+            // A replaced context frees exactly the slot this admission
+            // takes, so admit unconditionally then. Otherwise the cap
+            // must genuinely have room (a raced removal may have freed
+            // one without a replacement).
+            if replaced.is_none() && self.contexts.len() + *outstanding >= self.max_contexts {
+                tracing::error!(
+                    count = self.contexts.len(),
+                    max = self.max_contexts,
+                    "context limit reached"
+                );
+                return Err(CkRv::HOST_MEMORY);
+            }
+        }
+
+        let ctx = LogicalClientInstance::new(identity);
+        let id = ctx.id.clone();
+        self.contexts.insert(id.clone(), ctx);
+        self.total_contexts_created.fetch_add(1, Ordering::SeqCst);
+        drop(outstanding);
+        Ok((id, replaced))
+    }
+
     /// Returns the current number of active contexts.
     // Not `async`: a DashMap read needs no `.await` (L5).
     pub fn context_count(&self) -> usize {

@@ -2037,3 +2037,116 @@ async fn q18_cancelled_reservation_permits_later_admission() {
     mgr.create_context(None).await.expect("Q18: the cancelled slot must admit a later context");
     assert_eq!(mgr.context_count(), 1);
 }
+
+// --- Same-identity orphan replacement at the admission cap ---
+//
+// `create_context_replacing_idle_same_identity` is the Initialize-path
+// sibling of `create_context`: at cap, after the sessionless-expired
+// reclaim, it may atomically replace ONE idle context owned by the SAME
+// identity (returning it for caller teardown). Different identities and
+// busy contexts keep the plain HOST_MEMORY refusal, and `create_context`
+// itself is unchanged.
+
+/// (a) Under cap the sibling admits normally and replaces nothing; at
+/// cap 1 it replaces the idle same-identity holder and returns it (with
+/// its backend sessions still recorded) for the caller's teardown.
+#[tokio::test]
+async fn replacing_admission_replaces_idle_same_identity_at_cap() {
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 1);
+    let (first, replaced) = mgr
+        .create_context_replacing_idle_same_identity(Some("uid=1000".into()))
+        .await
+        .expect("first admission under cap");
+    assert!(replaced.is_none(), "under-cap admission must replace nothing");
+
+    // The holder has live work recorded (a backend session): replacement
+    // is about idleness (no in-flight op), not about being sessionless —
+    // the returned context carries the session so the caller can close it.
+    mgr.get_context(&first, |ctx| {
+        ctx.register_session(
+            BackendHandle(777),
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+        );
+    })
+    .await;
+
+    let (second, replaced) = mgr
+        .create_context_replacing_idle_same_identity(Some("uid=1000".into()))
+        .await
+        .expect("same-identity admission at cap must replace the idle holder");
+    let replaced = replaced.expect("the idle same-identity holder must be returned for teardown");
+    assert_eq!(replaced.id, first);
+    assert!(
+        replaced.session_handles.backend_handles().any(|b| b == BackendHandle(777)),
+        "the returned orphan still records its backend session for teardown"
+    );
+    assert_ne!(second, first);
+    assert_eq!(mgr.context_count(), 1, "replacement must not exceed the cap");
+    assert!(mgr.get_context(&first, |_| ()).await.is_none());
+    assert!(mgr.get_context(&second, |_| ()).await.is_some());
+    assert_eq!(mgr.total_contexts_removed(), 1);
+    assert_eq!(mgr.total_contexts_created(), 2);
+}
+
+/// (b) At cap 1 a DIFFERENT identity (and an absent identity) is refused
+/// HOST_MEMORY; the holder stays intact. Plain `create_context` never
+/// replaces, even for the same identity.
+#[tokio::test]
+async fn replacing_admission_refuses_different_identity_at_cap() {
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 1);
+    let holder = mgr.create_context(Some("uid=1000".into())).await.unwrap();
+
+    let err = mgr
+        .create_context_replacing_idle_same_identity(Some("uid=2000".into()))
+        .await
+        .map(|(id, _)| id)
+        .expect_err("a different identity at cap must be refused");
+    assert_eq!(err, CkRv::HOST_MEMORY);
+    let err = mgr
+        .create_context_replacing_idle_same_identity(None)
+        .await
+        .map(|(id, _)| id)
+        .expect_err("an absent identity never replaces");
+    assert_eq!(err, CkRv::HOST_MEMORY);
+    let err = mgr
+        .create_context(Some("uid=1000".into()))
+        .await
+        .expect_err("plain create_context must not gain replacement behavior");
+    assert_eq!(err, CkRv::HOST_MEMORY);
+
+    assert_eq!(mgr.context_count(), 1);
+    assert!(mgr.get_context(&holder, |_| ()).await.is_some(), "the holder must stay intact");
+    assert_eq!(mgr.total_contexts_removed(), 0);
+}
+
+/// (c) At cap 1 a same-identity holder with a foreign in-flight operation
+/// is NOT replaced (refused, intact); once the op drains the same
+/// admission replaces it (no latch).
+#[tokio::test]
+async fn replacing_admission_never_replaces_busy_same_identity() {
+    let mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 1));
+    let holder = mgr.create_context(Some("uid=1000".into())).await.unwrap();
+    let foreign_guard = mgr.begin_operation(&holder).expect("context exists");
+
+    let err = mgr
+        .create_context_replacing_idle_same_identity(Some("uid=1000".into()))
+        .await
+        .map(|(id, _)| id)
+        .expect_err("a busy same-identity context must never be replaced");
+    assert_eq!(err, CkRv::HOST_MEMORY);
+    assert_eq!(mgr.context_count(), 1);
+    assert!(
+        mgr.get_context(&holder, |_| ()).await.is_some(),
+        "the busy context must remain intact"
+    );
+    assert_eq!(mgr.total_contexts_removed(), 0);
+
+    drop(foreign_guard);
+    let (second, replaced) = mgr
+        .create_context_replacing_idle_same_identity(Some("uid=1000".into()))
+        .await
+        .expect("once idle, the same admission replaces");
+    assert_eq!(replaced.expect("idle holder returned").id, holder);
+    assert!(mgr.get_context(&second, |_| ()).await.is_some());
+    assert_eq!(mgr.context_count(), 1);
+}
