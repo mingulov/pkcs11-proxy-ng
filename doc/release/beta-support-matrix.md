@@ -110,6 +110,13 @@ These remain valuable but do **not** block or qualify the beta:
 
 ## Known limitations
 
+- **`C_OpenSession` Notify callbacks unsupported:** an application that
+  passes a non-NULL `Notify` callback (with `pApplication`) gets a working
+  session, but surrender notifications (`CKN_SURRENDER`) are never
+  delivered — the proxy has no callback channel back into the application
+  and opens the backend session with a NULL Notify. The shim logs a
+  one-time warning per process when a non-NULL Notify is supplied; the
+  returned `CK_RV` is unaffected.
 - **Backend-crash blast radius:** multiple logical clients share a backend; a
   hard backend crash can affect co-located clients. Mitigated operationally (run
   multiple daemon instances + client reconnect); see the

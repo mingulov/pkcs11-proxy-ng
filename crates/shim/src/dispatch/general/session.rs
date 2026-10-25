@@ -1,3 +1,5 @@
+use std::sync::Once;
+
 use cryptoki_sys::*;
 use pkcs11_proxy_ng_client::MessageCallErrorOrigin;
 use pkcs11_proxy_ng_types::*;
@@ -7,14 +9,35 @@ use super::helpers::{
     write_session_handle_output,
 };
 
+static NOTIFY_UNSUPPORTED_ONCE: Once = Once::new();
+
+/// The proxy cannot deliver `CK_NOTIFY` callbacks (`CKN_SURRENDER`): the
+/// backend session is opened with a NULL Notify and no callback channel
+/// exists back into the application. Warn once per process when an
+/// application supplies a non-NULL Notify so the silent drop is visible;
+/// a NULL Notify stays silent. Never alters the returned `CK_RV`. The
+/// `Once` is injectable so unit tests can exercise the check with a
+/// fresh cell instead of the process-global one.
+pub(crate) fn warn_notify_unsupported_once(notify: CK_NOTIFY, once: &Once) {
+    if notify.is_some() {
+        once.call_once(|| {
+            tracing::warn!(
+                "C_OpenSession Notify callbacks are not supported by the proxy; \
+                 sessions work without surrender notifications, which will never be delivered"
+            );
+        });
+    }
+}
+
 pub unsafe extern "C" fn c_open_session(
     slot_id: CK_SLOT_ID,
     flags: CK_FLAGS,
     _p_application: CK_VOID_PTR,
-    _notify: CK_NOTIFY,
+    notify: CK_NOTIFY,
     ph_session: CK_SESSION_HANDLE_PTR,
 ) -> CK_RV {
     catch_panics(|| {
+        warn_notify_unsupported_once(notify, &NOTIFY_UNSUPPORTED_ONCE);
         if ph_session.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
