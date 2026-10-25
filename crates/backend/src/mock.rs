@@ -130,7 +130,7 @@ mod wrap_entry;
 
 pub use self::mechanism_entry::{MockEmbeddedHandles, MockMechanismEntry};
 pub use self::mock_types::{MockAbi, MockAttributeSlot, MultiPartOp};
-use self::state::{MockState, compute_session_state};
+use self::state::{MockState, ObjectLifetimeEntry, compute_session_state};
 pub use self::wrap_entry::{MockWrapAction, MockWrapEntry, MockWrapObservation};
 
 const CK_SP800_108_DKM_LENGTH_SUM_OF_KEYS: u64 = 0x0000_0001;
@@ -1528,10 +1528,10 @@ impl MockBackend {
         // means this record races another object's live record, so
         // the capture is poisoned for the handle even though the
         // table still updates to the newest id.
-        let contended = state.object_lifetimes.keys().any(|&(_, obj)| obj == handle.0);
+        let contended = state.object_lifetimes.contains_key(&handle.0);
         let lifetime = state.next_object_lifetime;
         state.next_object_lifetime += 1;
-        state.object_lifetimes.insert((session.0, handle.0), lifetime);
+        state.object_lifetimes.insert(handle.0, ObjectLifetimeEntry { lifetime, owner: session.0 });
         if contended {
             crate::mint_capture::poison(session, handle);
         } else {
@@ -2880,8 +2880,11 @@ impl Pkcs11Backend for MockBackend {
         }
         self.destroy_object(session, object)
     }
-    fn object_lifetime(&self, session: CkSessionHandle, object: CkObjectHandle) -> Option<u64> {
-        self.state.lock().unwrap().object_lifetimes.get(&(session.0, object.0)).copied()
+    fn object_lifetime(&self, _session: CkSessionHandle, object: CkObjectHandle) -> Option<u64> {
+        self.state.lock().unwrap().object_lifetimes.get(&object.0).map(|e| e.lifetime)
+    }
+    fn tracks_object_lifetimes(&self) -> bool {
+        true
     }
     fn destroy_object_if_bound(
         &self,
@@ -2894,11 +2897,9 @@ impl Pkcs11Backend for MockBackend {
         // a fail-safe lifetime mismatch refuses without counting a
         // destroy (no native call), so a recycled replacement
         // survives. With a captured lifetime it destroys only when
-        // the settling session's entry exists and every entry for
-        // the handle across all sessions equals the captured id;
-        // any differing entry or a missing settling-session entry
-        // refuses. With no capture the legacy leg is unchanged: a
-        // live settling-session entry refuses, no entry destroys.
+        // the single handle-global entry exists and equals it; any
+        // absence or mismatch refuses. With no capture this tracking
+        // backend always refuses, even with an empty table.
         if let Some(expected) = incarnation {
             match self.session_incarnation(session) {
                 Some(current) if current == expected => {}
@@ -2907,17 +2908,11 @@ impl Pkcs11Backend for MockBackend {
         }
         let refuse = {
             let state = self.state.lock().unwrap();
-            let session_entry = state.object_lifetimes.get(&(session.0, object.0)).copied();
             match object_lifetime {
-                Some(expected) => match session_entry {
-                    Some(current) if current == expected => state
-                        .object_lifetimes
-                        .iter()
-                        .any(|((_, obj), &id)| *obj == object.0 && id != expected),
-                    Some(_) => true,
-                    None => true,
-                },
-                None => session_entry.is_some(),
+                Some(expected) => {
+                    !matches!(state.object_lifetimes.get(&object.0), Some(entry) if entry.lifetime == expected)
+                }
+                None => true,
             }
         };
         if refuse {

@@ -34,6 +34,7 @@ impl FfiBackend {
         let mut key_handle: cryptoki_sys::CK_OBJECT_HANDLE = 0;
         let _session_fence = self.session_fences.enter(&admission, session)?;
         let ck_attr_len = Self::ffi_attr_len(&ffi_attrs)?;
+        let mut lifetimes = self.object_lifetimes.lock_entries();
         let output = Self::single_call_bytes_exact(&admission, spec, |buffer, length| unsafe {
             function(
                 h_session,
@@ -47,7 +48,11 @@ impl FfiBackend {
             )
         })?;
         if output.ck_rv == CkRv::OK {
-            self.record_object_lifetime_fresh(session, CkObjectHandle(key_handle as u64));
+            self.record_object_lifetime_fresh_in(
+                &mut lifetimes,
+                session,
+                CkObjectHandle(key_handle as u64),
+            );
         }
         Ok(CkOutputAndHandleResult {
             ck_rv: output.ck_rv,
@@ -84,6 +89,7 @@ impl FfiBackend {
         let mut ciphertext_len: cryptoki_sys::CK_ULONG = 0;
         let mut key_handle: cryptoki_sys::CK_OBJECT_HANDLE = 0;
         let ck_attr_len = Self::ffi_attr_len(&ffi_attrs)?;
+        let mut lifetimes = self.object_lifetimes.lock_entries();
         Self::call_unit(&admission, Some(function), |function| unsafe {
             function(
                 h_session,
@@ -114,7 +120,11 @@ impl FfiBackend {
             )
         })?;
         ciphertext.truncate(ciphertext_len as usize);
-        self.record_object_lifetime_fresh(session, CkObjectHandle(key_handle as u64));
+        self.record_object_lifetime_fresh_in(
+            &mut lifetimes,
+            session,
+            CkObjectHandle(key_handle as u64),
+        );
 
         Ok((ciphertext.into(), CkObjectHandle(key_handle as u64)))
     }
@@ -136,6 +146,7 @@ impl FfiBackend {
         let mut key_handle: cryptoki_sys::CK_OBJECT_HANDLE = 0;
 
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let mut lifetimes = self.object_lifetimes.lock_entries();
         call_3x_fn!(
             &admission,
             self,
@@ -150,7 +161,11 @@ impl FfiBackend {
             Self::ulong_len_u64(ct_len)?,
             &mut key_handle
         )?;
-        self.record_object_lifetime_fresh(session, CkObjectHandle(key_handle as u64));
+        self.record_object_lifetime_fresh_in(
+            &mut lifetimes,
+            session,
+            CkObjectHandle(key_handle as u64),
+        );
 
         Ok(CkObjectHandle(key_handle as u64))
     }

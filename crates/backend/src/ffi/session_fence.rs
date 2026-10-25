@@ -106,7 +106,7 @@ impl SessionFence {
 /// Per-session fence table, owned by [`super::FfiBackend`]. Entries are
 /// created on first enter (open or op) and removed when a close commits;
 /// the re-Initialize purge clears the table (under lifecycle write, so no
-/// fence holder can exist — see `drop_all_mech_cache`).
+/// fence holder can exist — see `drop_all_mech_cache_in`).
 #[derive(Debug, Default)]
 pub(in crate::ffi) struct SessionFenceTable {
     fences: DashMap<u64, Arc<SessionFence>>,

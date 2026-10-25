@@ -228,11 +228,20 @@ impl FfiBackend {
         if let Some(delay) = crate::test_hooks::take_native_close_delay() {
             std::thread::sleep(delay);
         }
+        // Lifetime lock across the native close + owned-entry
+        // removal (fence write already entered; lifetime is the leaf).
+        // The guard drops before fence/mech settlement below, which
+        // takes no part in the lifetime ordering.
+        let mut lifetimes = self.object_lifetimes.lock_entries();
         let outcome = Self::call_unit(
             &admission,
             unsafe { (*self.func_list).C_CloseSession },
             |function| unsafe { function(h_session) },
         );
+        if outcome.is_ok() {
+            super::object_lifetime::ObjectLifetimeTable::drop_session_in(&mut lifetimes, session);
+        }
+        drop(lifetimes);
         // Hook-gated completion log (Q01 loaded oracle): the native
         // call returned (either outcome).
         #[cfg(feature = "native-owner-test-hooks")]
@@ -243,7 +252,6 @@ impl FfiBackend {
             Ok(()) => {
                 self.session_fences.commit_close(&close_fence);
                 self.drop_mech_cache_session(session);
-                self.object_lifetimes.drop_session(session);
                 self.forget_session_slot(session);
                 // Count only provider-confirmed closes.
                 self.lifecycle.note_sessions_closed(1);
@@ -281,17 +289,24 @@ impl FfiBackend {
         crate::test_hooks::record_native_session_event(
             crate::test_hooks::NativeSessionEvent::CloseAllSessions { slot: slot_id.0 },
         );
+        let mut lifetimes = self.object_lifetimes.lock_entries();
         let outcome = Self::call_unit(
             &admission,
             unsafe { (*self.func_list).C_CloseAllSessions },
             |function| unsafe { function(h_slot) },
         );
+        if outcome.is_ok() {
+            for handle in &known {
+                super::object_lifetime::ObjectLifetimeTable::drop_session_in(
+                    &mut lifetimes,
+                    CkSessionHandle(*handle),
+                );
+            }
+        }
+        drop(lifetimes);
         match outcome {
             Ok(()) => {
                 self.session_fences.commit_close_all(&close_fences);
-                for handle in &known {
-                    self.object_lifetimes.drop_session(CkSessionHandle(*handle));
-                }
                 self.drop_mech_cache_for_slot(slot_id);
                 self.lifecycle.note_sessions_closed(known_open);
                 Ok(())

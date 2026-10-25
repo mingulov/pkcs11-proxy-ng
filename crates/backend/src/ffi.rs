@@ -501,6 +501,11 @@ impl FfiBackend {
         // An `enter_finalizing` failure drops the seal through the Drop
         // backstop, abandoning the seal before the error propagates.
         seal.enter_finalizing()?;
+        // Lifetime lock across the native Finalize + purge below. The
+        // seal already drained and sealed ordinary work, so no admitted
+        // mint can be waiting on this lock while holding lifecycle read
+        // (the usual lifecycle -> lifetime order cannot cycle here).
+        let mut lifetimes = self.object_lifetimes.lock_entries();
         // Control choke: Finalize holds no read (the seal above took short
         // writes only, never read) — the choke takes no guard, structurally.
         let outcome =
@@ -529,7 +534,7 @@ impl FfiBackend {
         // and closes its sessions. Once the underlying module accepts
         // C_Finalize, every cached session binding is out of scope.
         self.lifecycle_domain.publish_finalized_with_purge(seal, || {
-            self.drop_all_mech_cache();
+            self.drop_all_mech_cache_in(&mut lifetimes);
         })?;
         Ok(())
     }
@@ -597,6 +602,9 @@ impl Pkcs11Backend for FfiBackend {
         // a failed `C_Initialize` ran provider code, so the reservation
         // must poison instead of recycling.
         self.lifecycle.note_init_attempted();
+        // Lifetime lock across the native Initialize + purge below
+        // (begin above drained/sealed ordinary work, as in Finalize).
+        let mut lifetimes = self.object_lifetimes.lock_entries();
         // Control choke: Initialize takes the write lock (above) while
         // holding no read — the choke takes no guard, structurally.
         let outcome =
@@ -630,7 +638,7 @@ impl Pkcs11Backend for FfiBackend {
         let generation_changed = self.lifecycle.current_generation() != generation_before;
         self.lifecycle_domain.publish_open_with_purge(init_control, || {
             if generation_changed {
-                self.drop_all_mech_cache();
+                self.drop_all_mech_cache_in(&mut lifetimes);
             }
         })?;
         Ok(())
@@ -1209,6 +1217,9 @@ impl Pkcs11Backend for FfiBackend {
     }
     fn object_lifetime(&self, session: CkSessionHandle, object: CkObjectHandle) -> Option<u64> {
         self.ffi_object_lifetime(session, object)
+    }
+    fn tracks_object_lifetimes(&self) -> bool {
+        true
     }
     fn destroy_object_if_bound(
         &self,

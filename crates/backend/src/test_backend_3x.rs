@@ -356,6 +356,9 @@ impl Pkcs11Backend for TestBackend3x {
     fn object_lifetime(&self, s: CkSessionHandle, object: CkObjectHandle) -> Option<u64> {
         self.inner.object_lifetime(s, object)
     }
+    fn tracks_object_lifetimes(&self) -> bool {
+        self.inner.tracks_object_lifetimes()
+    }
     fn destroy_object_if_bound(
         &self,
         s: CkSessionHandle,

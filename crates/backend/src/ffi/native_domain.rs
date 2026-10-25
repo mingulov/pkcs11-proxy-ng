@@ -565,7 +565,7 @@ impl LifecycleTracker {
     }
 
     /// Record a successful native `C_Finalize`. The provider has destroyed
-    /// every session, matching `drop_all_mech_cache`, so the open count
+    /// every session, matching `drop_all_mech_cache_in`, so the open count
     /// returns to zero together with the cleared session maps.
     pub(in crate::ffi) fn note_finalized(&self) {
         self.finalized_ok.store(true, SeqCst);

@@ -223,7 +223,7 @@ impl MockBackend {
         {
             let (_, slot_id, _) = state.open_sessions.remove(pos);
             state.session_incarnations.remove(&session.0);
-            state.object_lifetimes.retain(|&(owner, _), _| owner != session.0);
+            state.object_lifetimes.retain(|_, entry| entry.owner != session.0);
             state.active_ops.remove(&session.0);
             self.remove_session_owned_objects(&mut state, &[session.0]);
             self.clear_session_scoped_side_state(session.0);
@@ -248,7 +248,7 @@ impl MockBackend {
         state.open_sessions.retain(|(_, open_slot, _)| *open_slot != slot_id);
         for handle in &closing {
             state.session_incarnations.remove(handle);
-            state.object_lifetimes.retain(|&(owner, _), _| owner != *handle);
+            state.object_lifetimes.retain(|_, entry| entry.owner != *handle);
             state.active_ops.remove(handle);
         }
         self.remove_session_owned_objects(&mut state, &closing);

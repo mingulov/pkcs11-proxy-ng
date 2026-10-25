@@ -286,8 +286,13 @@ impl FfiBackend {
         F: FnMut(TFunction, *mut cryptoki_sys::CK_OBJECT_HANDLE) -> cryptoki_sys::CK_RV,
     {
         let function = Self::require_fn(function)?;
+        // No visibility gap: the lifetime lock spans the native call
+        // and its record, so the minted object is never provider-
+        // visible while unrecorded (lifetime lock is a leaf here;
+        // admission and fence entry already happened in the caller).
+        let mut lifetimes = self.object_lifetimes.lock_entries();
         let handle = Self::object_output(|handle| call(function, handle))?;
-        self.record_object_lifetime_fresh(session, handle);
+        self.record_object_lifetime_fresh_in(&mut lifetimes, session, handle);
         Ok(handle)
     }
 
@@ -512,13 +517,18 @@ impl FfiBackend {
     /// bindings cached under the dead generation must not survive it.
     /// Session fences clear with the same purge (no guard — hence no fence
     /// holder — can exist under the publish write that runs this).
-    pub(super) fn drop_all_mech_cache(&self) {
+    /// Purge for a caller holding the lifetime lock across its
+    /// native Finalize/Initialize + purge.
+    pub(super) fn drop_all_mech_cache_in(
+        &self,
+        lifetimes: &mut super::object_lifetime::ObjectLifetimeEntries,
+    ) {
         self.mech_cache.clear();
         self.last_init_family.clear();
         self.session_slot_map.clear();
         self.slot_sessions.clear();
         self.session_fences.clear();
-        self.object_lifetimes.clear();
+        lifetimes.clear();
     }
 
     /// Read one family's retained `output_params()`. Returns None when the
@@ -572,9 +582,10 @@ impl FfiBackend {
     {
         let function = Self::require_fn(function)?;
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
+        let mut lifetimes = self.object_lifetimes.lock_entries();
         let handle =
             Self::object_output(|handle| call(function, ffi_mech.ck_mechanism_mut(), handle))?;
-        self.record_object_lifetime_fresh(session, handle);
+        self.record_object_lifetime_fresh_in(&mut lifetimes, session, handle);
         Ok(handle)
     }
 
@@ -712,11 +723,12 @@ impl FfiBackend {
     {
         let function = Self::require_fn(function)?;
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
+        let mut lifetimes = self.object_lifetimes.lock_entries();
         let handle =
             Self::object_output(|handle| call(function, ffi_mech.ck_mechanism_mut(), handle))?;
-        self.record_object_lifetime_fresh(session, handle);
+        self.record_object_lifetime_fresh_in(&mut lifetimes, session, handle);
         let output_params = ffi_mech.output_params();
-        self.record_mechanism_output_lifetimes(session, &output_params);
+        self.record_mechanism_output_lifetimes_in(&mut lifetimes, session, &output_params);
         Ok((handle, output_params))
     }
 
@@ -746,12 +758,17 @@ impl FfiBackend {
             Ok(ffi_mech) => ffi_mech,
             Err(rv) => return Ok(CkDeriveKeyOutputResult::error(rv, None)),
         };
+        let mut lifetimes = self.object_lifetimes.lock_entries();
         let mut handle: cryptoki_sys::CK_OBJECT_HANDLE = 0;
         let rv = CkRv(call(function, ffi_mech.ck_mechanism_mut(), &mut handle) as u64);
         let mechanism_out = ffi_mech.output_params();
         if rv.is_ok() {
-            self.record_object_lifetime_fresh(session, CkObjectHandle(handle as u64));
-            self.record_mechanism_output_lifetimes(session, &mechanism_out);
+            self.record_object_lifetime_fresh_in(
+                &mut lifetimes,
+                session,
+                CkObjectHandle(handle as u64),
+            );
+            self.record_mechanism_output_lifetimes_in(&mut lifetimes, session, &mechanism_out);
             Ok(CkDeriveKeyOutputResult::ok(CkObjectHandle(handle as u64), mechanism_out))
         } else {
             Ok(CkDeriveKeyOutputResult::error(rv, mechanism_out))
@@ -896,11 +913,12 @@ impl FfiBackend {
     {
         let function = Self::require_fn(function)?;
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
+        let mut lifetimes = self.object_lifetimes.lock_entries();
         let pair = Self::object_pair_output(|first, second| {
             call(function, ffi_mech.ck_mechanism_mut(), first, second)
         })?;
-        self.record_object_lifetime_fresh(session, pair.0);
-        self.record_object_lifetime_fresh(session, pair.1);
+        self.record_object_lifetime_fresh_in(&mut lifetimes, session, pair.0);
+        self.record_object_lifetime_fresh_in(&mut lifetimes, session, pair.1);
         Ok(pair)
     }
 }

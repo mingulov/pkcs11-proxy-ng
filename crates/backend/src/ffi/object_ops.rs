@@ -44,6 +44,9 @@ impl FfiBackend {
         let mut found: cryptoki_sys::CK_ULONG = 0;
         let h_session = Self::session_handle(session)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        // Lifetime lock across the native search + its records, so a
+        // found handle is never returned while unrecorded.
+        let mut lifetimes = self.object_lifetimes.lock_entries();
         Self::call_unit(
             &admission,
             unsafe { (*self.func_list).C_FindObjects },
@@ -57,7 +60,7 @@ impl FfiBackend {
         let found_handles: Vec<CkObjectHandle> =
             handles[..n].iter().map(|&h| CkObjectHandle(h as u64)).collect();
         for handle in &found_handles {
-            self.record_object_lifetime_if_absent(session, *handle);
+            self.record_object_lifetime_if_absent_in(&mut lifetimes, session, *handle);
         }
         Ok(found_handles)
     }
@@ -202,10 +205,7 @@ impl FfiBackend {
             |function| unsafe { function(h_session, h_object) },
         );
         if result.is_ok() {
-            // The object is gone under every session (token objects
-            // are visible across sessions): drop all its entries so
-            // no stale lifetime survives under another session.
-            lifetimes.retain(|&(_, obj), _| obj != object.0);
+            lifetimes.remove(&object.0);
         }
         result
     }
@@ -241,7 +241,7 @@ impl FfiBackend {
             |function| unsafe { function(h_session, h_object) },
         );
         if result.is_ok() {
-            lifetimes.retain(|&(_, obj), _| obj != object.0);
+            lifetimes.remove(&object.0);
         }
         result
     }
@@ -263,14 +263,14 @@ impl FfiBackend {
     /// lifetime in between. The lifetime leg is fail-safe (see the
     /// trait contract on
     /// [`crate::traits::Pkcs11Backend::destroy_object_if_bound`]):
-    /// with a captured lifetime it destroys only when the settling
-    /// session's entry exists and every lifetime entry for the
-    /// numeric handle across all sessions equals the captured id —
-    /// any differing entry (a replacement tracked under another
-    /// session) or a missing settling-session entry refuses with
+    /// with a captured lifetime it destroys only when the single
+    /// handle-global entry exists and equals the captured id — any
+    /// absence (a replacement's owner closed, emptying the table) or
+    /// mismatch (a replacement) refuses with
     /// `OBJECT_HANDLE_INVALID` and issues no native destroy. With
-    /// no capture, the legacy rule is unchanged: a live settling-
-    /// session entry refuses, no entry destroys.
+    /// no capture this tracking backend always refuses: a poisoned
+    /// or missed capture must never reach the legacy raw destroy,
+    /// even after a destroy+recreate+close cycle empties the table.
     pub(super) fn ffi_destroy_object_if_bound(
         &self,
         session: CkSessionHandle,
@@ -287,33 +287,11 @@ impl FfiBackend {
         };
         let mut lifetimes = self.object_lifetimes.lock_for_destroy();
         match object_lifetime {
-            Some(expected) => {
-                // Cross-session fail-safe: the settling session's
-                // entry must exist and match, and every entry for
-                // this handle under any session must match. A
-                // differing entry names a replacement tracked under
-                // another session; a token destroy from the settling
-                // session would destroy it, so refuse.
-                match lifetimes.get(&(session.0, object.0)).copied() {
-                    Some(current) if current == expected => {
-                        if lifetimes
-                            .iter()
-                            .any(|((_, obj), &id)| *obj == object.0 && id != expected)
-                        {
-                            return Err(CkRv::OBJECT_HANDLE_INVALID);
-                        }
-                    }
-                    Some(_) => return Err(CkRv::OBJECT_HANDLE_INVALID),
-                    None => return Err(CkRv::OBJECT_HANDLE_INVALID),
-                }
-            }
-            None => {
-                // Unchanged legacy leg: a live settling-session entry
-                // proves tracking and refuses a blind destroy.
-                if lifetimes.get(&(session.0, object.0)).is_some() {
-                    return Err(CkRv::OBJECT_HANDLE_INVALID);
-                }
-            }
+            Some(expected) => match lifetimes.get(&object.0) {
+                Some(entry) if entry.lifetime == expected => {}
+                _ => return Err(CkRv::OBJECT_HANDLE_INVALID),
+            },
+            None => return Err(CkRv::OBJECT_HANDLE_INVALID),
         }
         let result = Self::call_unit(
             &admission,
@@ -321,7 +299,7 @@ impl FfiBackend {
             |function| unsafe { function(h_session, h_object) },
         );
         if result.is_ok() {
-            lifetimes.retain(|&(_, obj), _| obj != object.0);
+            lifetimes.remove(&object.0);
         }
         result
     }
@@ -346,7 +324,7 @@ impl FfiBackend {
             |function| unsafe { function(h_session, h_object) },
         );
         if result.is_ok() {
-            lifetimes.retain(|&(_, obj), _| obj != object.0);
+            lifetimes.remove(&object.0);
         }
         result
     }
@@ -766,7 +744,11 @@ mod lifecycle_output_tests {
         let id_b =
             backend.object_lifetime(other, handle).expect("competitor replacement must be tracked");
         assert_ne!(id_a, id_b);
-        assert_eq!(backend.object_lifetime(origin, handle), Some(id_a));
+        assert_eq!(
+            backend.object_lifetime(origin, handle),
+            Some(id_b),
+            "single handle-global entry must name the newest replacement, not the origin's stale id"
+        );
 
         let destroys_before = CROSS_SESSION_DELAYED_DESTROY_CALLS.load(Ordering::SeqCst);
         assert_eq!(
@@ -828,7 +810,11 @@ mod lifecycle_output_tests {
         drop(capture);
         let id_a = backend.object_lifetime(origin, handle).expect("tracked original");
         assert_eq!(captured_lifetime, Some(id_a));
-        assert_eq!(backend.object_lifetime(other, handle), None);
+        assert_eq!(
+            backend.object_lifetime(other, handle),
+            Some(id_a),
+            "handle-global entry is the same record whichever session asks"
+        );
 
         let destroys_before = CROSS_SESSION_NO_RECREATE_DESTROY_CALLS.load(Ordering::SeqCst);
         backend
@@ -995,6 +981,187 @@ mod lifecycle_output_tests {
         backend.destroy_object(other, handle).unwrap();
         assert_eq!(backend.object_lifetime(origin, handle), None);
         assert_eq!(backend.object_lifetime(other, handle), None);
+    }
+
+    static V2_CLOSE_DESTROY_CALLS: AtomicUsize = AtomicUsize::new(0);
+    unsafe extern "C" fn destroy_counting_v2_close(
+        _s: cryptoki_sys::CK_SESSION_HANDLE,
+        _o: cryptoki_sys::CK_OBJECT_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        V2_CLOSE_DESTROY_CALLS.fetch_add(1, Ordering::SeqCst);
+        cryptoki_sys::CKR_OK
+    }
+
+    /// Ordering (i): competitor close must not leave origin's stale
+    /// entry sole-matching a still-live replacement.
+    #[test]
+    fn v2_competitor_close_then_origin_settle_refuses() {
+        use crate::traits::Pkcs11Backend;
+        V2_CLOSE_DESTROY_CALLS.store(0, Ordering::SeqCst);
+        let (backend, _f) = backend_with_object_stubs();
+        unsafe { (*backend.func_list).C_DestroyObject = Some(destroy_counting_v2_close) };
+        backend.lifecycle_domain.open_for_tests();
+        let origin = CkSessionHandle(7);
+        let other = CkSessionHandle(8);
+        let handle = CkObjectHandle(43);
+        let capture = crate::mint_capture::begin(origin);
+        backend.record_object_lifetime_if_absent(other, handle);
+        backend.destroy_object(other, handle).unwrap();
+        backend.record_object_lifetime_fresh(origin, handle);
+        let id_a = capture.lifetime_for(handle).expect("delayed origin capture");
+        drop(capture);
+        let replacement = backend.create_object(other, Some(&[])).unwrap();
+        assert_eq!(replacement, handle);
+        let id_b = backend.object_lifetime(other, handle).expect("replacement tracked");
+        assert_ne!(id_a, id_b);
+        backend.object_lifetimes.drop_session(other);
+        let before = V2_CLOSE_DESTROY_CALLS.load(Ordering::SeqCst);
+        assert_eq!(
+            backend.destroy_object_if_bound(
+                origin,
+                handle,
+                backend.session_incarnation(origin),
+                Some(id_a)
+            ),
+            Err(CkRv::OBJECT_HANDLE_INVALID),
+            "competitor-close must not make origin settlement destroy replacement"
+        );
+        assert_eq!(V2_CLOSE_DESTROY_CALLS.load(Ordering::SeqCst), before);
+        assert_eq!(backend.get_object_size(origin, handle).unwrap(), 17);
+    }
+
+    static V2_POISON_DESTROY_CALLS: AtomicUsize = AtomicUsize::new(0);
+    unsafe extern "C" fn destroy_counting_v2_poison(
+        _s: cryptoki_sys::CK_SESSION_HANDLE,
+        _o: cryptoki_sys::CK_OBJECT_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        V2_POISON_DESTROY_CALLS.fetch_add(1, Ordering::SeqCst);
+        cryptoki_sys::CKR_OK
+    }
+
+    /// Ordering (ii): poisoned (None) capture must not reach legacy
+    /// destroy after destroy+recreate+owner-close empties the table.
+    #[test]
+    fn v2_poisoned_capture_after_emptying_cycle_refuses() {
+        use crate::traits::Pkcs11Backend;
+        V2_POISON_DESTROY_CALLS.store(0, Ordering::SeqCst);
+        let (backend, _f) = backend_with_object_stubs();
+        unsafe { (*backend.func_list).C_DestroyObject = Some(destroy_counting_v2_poison) };
+        backend.lifecycle_domain.open_for_tests();
+        let origin = CkSessionHandle(7);
+        let other = CkSessionHandle(8);
+        let handle = CkObjectHandle(43);
+        let capture = crate::mint_capture::begin(origin);
+        {
+            let comp = crate::mint_capture::begin(other);
+            backend.record_object_lifetime_if_absent(other, handle);
+            backend.destroy_object(other, handle).unwrap();
+            assert_eq!(backend.create_object(other, Some(&[])).unwrap(), handle);
+            drop(comp);
+        }
+        backend.record_object_lifetime_fresh(origin, handle);
+        let captured = capture.lifetime_for(handle);
+        drop(capture);
+        assert_eq!(captured, None, "contended mint must be poisoned");
+        backend.destroy_object(origin, handle).unwrap();
+        assert_eq!(backend.create_object(other, Some(&[])).unwrap(), handle);
+        backend.object_lifetimes.drop_session(other);
+        assert_eq!(backend.object_lifetime(origin, handle), None);
+        let before = V2_POISON_DESTROY_CALLS.load(Ordering::SeqCst);
+        assert_eq!(
+            backend.destroy_object_if_bound(
+                origin,
+                handle,
+                backend.session_incarnation(origin),
+                captured
+            ),
+            Err(CkRv::OBJECT_HANDLE_INVALID),
+            "poisoned capture on tracking backend must refuse even with empty table"
+        );
+        assert_eq!(V2_POISON_DESTROY_CALLS.load(Ordering::SeqCst), before);
+        assert_eq!(backend.get_object_size(origin, handle).unwrap(), 17);
+    }
+
+    static V2_PARK_GATE: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>> = Mutex::new(None);
+    static V2_PARK_DESTROY_CALLS: AtomicUsize = AtomicUsize::new(0);
+    unsafe extern "C" fn create_object_parked_v2(
+        _s: cryptoki_sys::CK_SESSION_HANDLE,
+        _t: cryptoki_sys::CK_ATTRIBUTE_PTR,
+        _c: cryptoki_sys::CK_ULONG,
+        handle: *mut cryptoki_sys::CK_OBJECT_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        if !handle.is_null() {
+            unsafe { *handle = 43 };
+        }
+        let gate = V2_PARK_GATE.lock().unwrap().take();
+        if let Some((entered, release)) = gate {
+            let _ = entered.send(());
+            let _ = release.recv_timeout(Duration::from_secs(10));
+        }
+        cryptoki_sys::CKR_OK
+    }
+    unsafe extern "C" fn destroy_counting_v2_park(
+        _s: cryptoki_sys::CK_SESSION_HANDLE,
+        _o: cryptoki_sys::CK_OBJECT_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        V2_PARK_DESTROY_CALLS.fetch_add(1, Ordering::SeqCst);
+        cryptoki_sys::CKR_OK
+    }
+
+    /// Ordering (iii): settlement racing a parked mint (object
+    /// provider-visible, record not yet landed) must never destroy
+    /// the replacement; under the fix it blocks on the lifetime lock
+    /// until the mint records, then refuses on the newer id.
+    #[test]
+    fn v2_settlement_racing_parked_mint_never_destroys_replacement() {
+        use crate::traits::Pkcs11Backend;
+        V2_PARK_DESTROY_CALLS.store(0, Ordering::SeqCst);
+        let (backend, _f) = backend_with_object_stubs();
+        unsafe {
+            (*backend.func_list).C_CreateObject = Some(create_object_parked_v2);
+            (*backend.func_list).C_DestroyObject = Some(destroy_counting_v2_park);
+        }
+        backend.lifecycle_domain.open_for_tests();
+        let origin = CkSessionHandle(7);
+        let other = CkSessionHandle(8);
+        let handle = CkObjectHandle(43);
+        let capture = crate::mint_capture::begin(origin);
+        backend.record_object_lifetime_if_absent(other, handle);
+        backend.destroy_object(other, handle).unwrap();
+        backend.record_object_lifetime_fresh(origin, handle);
+        let id_a = capture.lifetime_for(handle).expect("delayed origin capture");
+        drop(capture);
+        let incarnation = backend.session_incarnation(origin);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        *V2_PARK_GATE.lock().unwrap() = Some((entered_tx, release_rx));
+        let backend_ref = &backend;
+        std::thread::scope(|scope| {
+            let mint = scope.spawn(move || backend_ref.create_object(other, Some(&[])));
+            entered_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("mint parks inside native create after writing handle");
+            let settle = scope.spawn(move || {
+                backend_ref.destroy_object_if_bound(origin, handle, incarnation, Some(id_a))
+            });
+            std::thread::sleep(Duration::from_millis(200));
+            release_tx.send(()).expect("release parked mint");
+            let minted = mint.join().expect("mint joins").expect("mint succeeds");
+            assert_eq!(minted, handle);
+            let settled = settle.join().expect("settle joins");
+            assert_eq!(
+                settled,
+                Err(CkRv::OBJECT_HANDLE_INVALID),
+                "settlement racing mint must refuse replacement"
+            );
+        });
+        assert_eq!(
+            V2_PARK_DESTROY_CALLS.load(Ordering::SeqCst),
+            1,
+            "only the setup destroy may reach native"
+        );
+        assert!(backend.object_lifetime(other, handle).is_some());
+        assert_eq!(backend.get_object_size(other, handle).unwrap(), 17);
     }
 
     #[test]

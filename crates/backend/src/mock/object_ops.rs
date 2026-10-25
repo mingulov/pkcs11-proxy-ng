@@ -85,27 +85,20 @@ impl MockBackend {
             drop(cursor);
             // Record-if-absent: found handles become tracked so a
             // later bound destroy can be lifetime-checked. Found-object
-            // sharing (mirrors the FFI table): when any session already
-            // tracks the handle, reuse that lifetime id for this
-            // session instead of minting a differing id for the same
-            // physical object; mint fresh only when untracked anywhere.
+            // sharing (mirrors the FFI table): a tracked handle's
+            // existing id and ownership are reused unchanged; mint
+            // fresh only when untracked.
             let mut state = self.state.lock().unwrap();
             for handle in &batch {
-                if handle.0 == 0 || state.object_lifetimes.contains_key(&(session.0, handle.0)) {
+                if handle.0 == 0 || state.object_lifetimes.contains_key(&handle.0) {
                     continue;
                 }
-                if let Some(existing) = state
-                    .object_lifetimes
-                    .iter()
-                    .find(|((_, obj), _)| *obj == handle.0)
-                    .map(|(_, &id)| id)
-                {
-                    state.object_lifetimes.insert((session.0, handle.0), existing);
-                } else {
-                    let lifetime = state.next_object_lifetime;
-                    state.next_object_lifetime += 1;
-                    state.object_lifetimes.insert((session.0, handle.0), lifetime);
-                }
+                let lifetime = state.next_object_lifetime;
+                state.next_object_lifetime += 1;
+                state.object_lifetimes.insert(
+                    handle.0,
+                    super::state::ObjectLifetimeEntry { lifetime, owner: session.0 },
+                );
             }
             drop(state);
             return Ok(batch);
@@ -474,9 +467,7 @@ impl MockBackend {
         }
         if state.live_objects.contains(&object.0) {
             self.remove_objects(&mut state, &[object.0]);
-            // The object is gone under every session (token objects
-            // are visible across sessions): drop all its entries.
-            state.object_lifetimes.retain(|&(_, obj), _| obj != object.0);
+            state.object_lifetimes.remove(&object.0);
             Ok(())
         } else {
             Err(CkRv::OBJECT_HANDLE_INVALID)
