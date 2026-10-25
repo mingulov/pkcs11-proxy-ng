@@ -436,7 +436,9 @@ pub struct ProxyConfig {
     /// How often (in seconds) the eviction task sweeps for expired contexts.
     #[serde(default = "default_eviction_interval_secs")]
     pub eviction_interval_secs: u64,
-    /// Maximum number of active contexts. 0 = unlimited.
+    /// Maximum number of active contexts. Default 1 — the
+    /// single-logical-client admission guardrail (see AGENTS.md §2);
+    /// 0 = unlimited, any other explicit value is honoured as set.
     #[serde(default = "default_max_contexts")]
     pub max_contexts: usize,
     /// HTTP/2 keepalive ping interval (seconds). 0 = disabled.
@@ -588,7 +590,7 @@ fn default_eviction_interval_secs() -> u64 {
     5
 }
 fn default_max_contexts() -> usize {
-    1000
+    1
 }
 fn default_http2_keepalive_interval_secs() -> u64 {
     15

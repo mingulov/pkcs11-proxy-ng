@@ -487,7 +487,7 @@ allow_insecure_tcp = true
     // Spot-check a few fields filled in from defaults:
     assert!(cfg.proxy.rate_limit_window_secs > 0);
     assert_eq!(cfg.proxy.rate_limit_get_backend_interfaces, 0);
-    // The reusable code default stays 1000; recommended samples set
-    // their own explicit guardrail (SEC-H1).
-    assert_eq!(cfg.proxy.max_contexts, 1000);
+    // The code default is the single-client guardrail (1);
+    // recommended samples also set it explicitly (SEC-H1).
+    assert_eq!(cfg.proxy.max_contexts, 1);
 }
