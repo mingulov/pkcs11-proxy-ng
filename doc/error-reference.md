@@ -331,6 +331,9 @@ Also returned at `C_Initialize` when the shim's and daemon's
 exact-output effects version ranges are disjoint (W1-L5-05): the
 peers cannot agree on an effects encoding, so init fails fast
 instead of corrupting per-RPC effects later.
+Also returned when the daemon answers a call with gRPC
+`Unimplemented` — it does not implement that RPC (version skew
+between shim/client and daemon); upgrade the older peer.
 
 **Operator action.** Confirm the backend version supports the
 function; some HSMs ship truncated function lists for older
