@@ -1,11 +1,13 @@
+use super::connection_state::ConnectionRegistry;
+pub use super::connection_state::{ConnectionState, tcp_peer_key};
 use super::handle_map::{BackendHandle, HandleMap, VirtualHandle};
 use super::slot_map::{BackendSlotId, SlotMap, VirtualSlotId};
 use dashmap::DashMap;
 use pkcs11_proxy_ng_proto::convert::message_params::MessageParameterShape;
 use pkcs11_proxy_ng_types::*;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 use uuid::Uuid;
@@ -268,6 +270,12 @@ pub struct LogicalClientInstance {
     /// consulted only for the owning context, never cross-context).
     pub contended_slot_login: HashSet<BackendSlotId>,
     pub authenticated_identity: Option<String>, // bound at creation (ADR-0005 §4)
+    /// Transport connection that carried this context's `Initialize`,
+    /// as a `Weak` so the context never keeps a dead connection alive.
+    /// Resolved through the shared connection registry from the request
+    /// extensions at Initialize. `None` for contexts created without a
+    /// connection (tests/internal callers): never transport-dead.
+    pub connection_state: Option<Weak<ConnectionState>>,
     /// Last TCP peer IP seen opening a session on this context (W1-L7-02).
     /// Recorded only for unauthenticated contexts while the session quota
     /// is active, so [`ContextManager::session_count_for_principal`] can
@@ -341,6 +349,16 @@ pub struct LogicalClientInstance {
 
 impl LogicalClientInstance {
     pub fn new(identity: Option<String>) -> Self {
+        Self::new_with_connection(identity, None)
+    }
+
+    /// Create a context bound to the connection that carried its
+    /// `Initialize` (stored as a `Weak`; `None` = connectionless,
+    /// never transport-dead).
+    pub fn new_with_connection(
+        identity: Option<String>,
+        connection: Option<Arc<ConnectionState>>,
+    ) -> Self {
         let now = Instant::now();
         Self {
             id: ClientContextId::generate(),
@@ -359,9 +377,44 @@ impl LogicalClientInstance {
             login_state: HashMap::new(),
             contended_slot_login: HashSet::new(),
             authenticated_identity: identity,
+            connection_state: connection.as_ref().map(Arc::downgrade),
             last_peer_ip: None,
             in_flight: Arc::new(AtomicI64::new(0)),
             message_operations: HashMap::new(),
+        }
+    }
+
+    /// Transport-dead: the bound connection's state is closed or has
+    /// been dropped entirely. Connectionless contexts (`None`) are
+    /// never transport-dead.
+    pub fn is_transport_dead(&self) -> bool {
+        match &self.connection_state {
+            None => false,
+            Some(weak) => match weak.upgrade() {
+                None => true,
+                Some(state) => state.is_closed(),
+            },
+        }
+    }
+
+    /// The live connection state for this context, when bound and
+    /// still alive.
+    pub fn live_connection_state(&self) -> Option<Arc<ConnectionState>> {
+        self.connection_state.as_ref().and_then(Weak::upgrade).filter(|state| !state.is_closed())
+    }
+
+    /// Whether this context lives on the same live connection as
+    /// `other` (the connection carrying a new `Initialize`). Two
+    /// connectionless endpoints count as the same (the legacy/test
+    /// path both replacement tests and peerless callers use); a
+    /// connectionless context never matches a live connection.
+    pub fn same_connection_as(&self, other: Option<&Arc<ConnectionState>>) -> bool {
+        match (&self.connection_state, other) {
+            (None, None) => true,
+            (Some(weak), Some(other)) => {
+                weak.upgrade().is_some_and(|state| Arc::ptr_eq(&state, other) && !state.is_closed())
+            }
+            _ => false,
         }
     }
 
@@ -618,6 +671,13 @@ pub struct ContextManager {
     /// INNER (transient, inside the reserve check and the admission-time
     /// eviction). Never acquire this mutex while holding a contexts guard.
     context_admission_reservations: Arc<std::sync::Mutex<usize>>,
+    /// Live transport connections by peer key, shared with the
+    /// listeners' tracked streams. Listeners register on accept and
+    /// unregister on drop; `Initialize` resolves its own connection
+    /// here and contexts keep only a `Weak` to it, so a dead
+    /// connection makes its contexts reapable/replaceable without the
+    /// registry ever keeping a context (or connection) alive.
+    connection_registry: Arc<ConnectionRegistry>,
 }
 
 /// A transient-carrier session left open by a failed carrier close
@@ -793,7 +853,27 @@ impl ContextManager {
             total_contexts_created: AtomicU64::new(0),
             total_contexts_removed: AtomicU64::new(0),
             context_admission_reservations: Arc::new(std::sync::Mutex::new(0)),
+            connection_registry: ConnectionRegistry::new(),
         }
+    }
+
+    /// The shared live-connection registry. The daemon's listeners
+    /// register each accepted connection here (via the tracked stream
+    /// wrapper in `main`); `Initialize` resolves its connection from
+    /// it. The same `Arc` backs both sides, so it is constructed with
+    /// the manager and cloned out for the listeners.
+    pub fn connection_registry(&self) -> Arc<ConnectionRegistry> {
+        Arc::clone(&self.connection_registry)
+    }
+
+    /// Resolve the live connection state that carried `request`
+    /// through this manager's registry (peer key from the request's
+    /// transport extensions, as in `request_identity`).
+    pub fn connection_state_for_request<T>(
+        &self,
+        request: &tonic::Request<T>,
+    ) -> Option<Arc<ConnectionState>> {
+        super::connection_state::connection_state_for_request(&self.connection_registry, request)
     }
 
     /// Test constructor with an explicit absolute lifetime cap (D4), so
@@ -1460,6 +1540,33 @@ impl ContextManager {
         Ok(id)
     }
 
+    /// [`Self::create_context`] binding the new context to the
+    /// connection that carried its `Initialize`. Admission discipline
+    /// is identical; only the stored connection `Weak` differs.
+    pub async fn create_context_with_connection(
+        &self,
+        identity: Option<String>,
+        connection: Option<Arc<ConnectionState>>,
+    ) -> CkResult<ClientContextId> {
+        let reservation = match self.try_reserve_context() {
+            Some(reservation) => reservation,
+            None => {
+                tracing::error!(
+                    count = self.contexts.len(),
+                    max = self.max_contexts,
+                    "context limit reached"
+                );
+                return Err(CkRv::HOST_MEMORY);
+            }
+        };
+        let ctx = LogicalClientInstance::new_with_connection(identity, connection);
+        let id = ctx.id.clone();
+        self.contexts.insert(id.clone(), ctx);
+        self.total_contexts_created.fetch_add(1, Ordering::SeqCst);
+        drop(reservation);
+        Ok(id)
+    }
+
     /// Initialize-path admission with same-identity orphan replacement.
     ///
     /// Identical to [`Self::create_context`] except at the cap: after the
@@ -1488,11 +1595,13 @@ impl ContextManager {
     /// `identity` string this method receives. Initialize passes
     /// `Some(identity.to_string())` for every auth mode, including
     /// unauthenticated — where every peer shares the single
-    /// `"unauthenticated"` string. That mode is an explicit no-isolation
-    /// posture (any peer may already use any context), so an
-    /// unauthenticated Initialize replacing an idle unauthenticated orphan
-    /// grants nothing the posture does not already grant. An absent
-    /// identity (`None`, test/internal callers of `create_context`) never
+    /// `"unauthenticated"` string, so identity alone cannot distinguish
+    /// connections. The connection-aware sibling therefore ALSO requires
+    /// the candidate be transport-dead or live on the SAME connection
+    /// as the caller (see
+    /// [`Self::create_context_replacing_idle_same_identity_on_connection`]);
+    /// a different live connection is never replaced. An absent identity
+    /// (`None`, test/internal callers of `create_context`) never
     /// replaces anything.
     ///
     /// Lock order: admission mutex OUTER (held across the whole
@@ -1507,6 +1616,24 @@ impl ContextManager {
     pub async fn create_context_replacing_idle_same_identity(
         &self,
         identity: Option<String>,
+    ) -> CkResult<(ClientContextId, Option<Box<LogicalClientInstance>>)> {
+        self.create_context_replacing_idle_same_identity_on_connection(identity, None).await
+    }
+
+    /// Connection-aware form of
+    /// [`Self::create_context_replacing_idle_same_identity`]: at the cap
+    /// it may replace ONE idle same-identity context only when that
+    /// context is transport-dead (its connection is closed/dropped —
+    /// the exited-process orphan) OR lives on the same live connection
+    /// as this `Initialize` (`connection`, resolved from the request's
+    /// transport extensions). A different live connection is NEVER
+    /// replaced, even for the shared unauthenticated identity: a
+    /// still-running client's live context survives another client's
+    /// Initialize. The new context is bound to `connection`.
+    pub async fn create_context_replacing_idle_same_identity_on_connection(
+        &self,
+        identity: Option<String>,
+        connection: Option<Arc<ConnectionState>>,
     ) -> CkResult<(ClientContextId, Option<Box<LogicalClientInstance>>)> {
         let outstanding =
             self.context_admission_reservations.lock().unwrap_or_else(|e| e.into_inner());
@@ -1529,14 +1656,15 @@ impl ContextManager {
                     .map(|entry| entry.key().clone())
                     .collect();
                 for candidate in candidates {
-                    match self.remove_context_if_idle(&candidate, 0) {
+                    match self.remove_context_if_replaceable(&candidate, connection.as_ref()) {
                         RemoveIfIdleOutcome::Removed(ctx) => {
                             replaced = Some(ctx);
                             break;
                         }
-                        // Busy: never replace; a later candidate may be
-                        // idle. Missing: a concurrent removal freed a
-                        // slot, which the cap re-check below observes.
+                        // Busy or live on a different connection: never
+                        // replace; a later candidate may be replaceable.
+                        // Missing: a concurrent removal freed a slot,
+                        // which the cap re-check below observes.
                         RemoveIfIdleOutcome::Busy | RemoveIfIdleOutcome::Missing => {}
                     }
                 }
@@ -1555,12 +1683,39 @@ impl ContextManager {
             }
         }
 
-        let ctx = LogicalClientInstance::new(identity);
+        let ctx = LogicalClientInstance::new_with_connection(identity, connection);
         let id = ctx.id.clone();
         self.contexts.insert(id.clone(), ctx);
         self.total_contexts_created.fetch_add(1, Ordering::SeqCst);
         drop(outstanding);
         Ok((id, replaced))
+    }
+
+    /// Remove `id` only when it is idle AND replaceable by a new
+    /// `Initialize` on `request_connection`: transport-dead, or living
+    /// on that same live connection. The idle + liveness checks and the
+    /// remove are atomic under the shard write lock (same discipline
+    /// as [`Self::remove_context_if_idle`]), so an operation or a
+    /// connection change landing after the candidate scan can never be
+    /// cut off. A live context on a different connection reports
+    /// `Busy` (left intact; admission then refuses at the cap).
+    fn remove_context_if_replaceable(
+        &self,
+        id: &ClientContextId,
+        request_connection: Option<&Arc<ConnectionState>>,
+    ) -> RemoveIfIdleOutcome {
+        if let Some((_, ctx)) = self.contexts.remove_if(id, |_, ctx| {
+            ctx.in_flight.load(Ordering::Relaxed) <= 0
+                && (ctx.is_transport_dead() || ctx.same_connection_as(request_connection))
+        }) {
+            self.total_contexts_removed.fetch_add(1, Ordering::SeqCst);
+            return RemoveIfIdleOutcome::Removed(Box::new(ctx));
+        }
+        if self.contexts.contains_key(id) {
+            RemoveIfIdleOutcome::Busy
+        } else {
+            RemoveIfIdleOutcome::Missing
+        }
     }
 
     /// Returns the current number of active contexts.
@@ -2342,12 +2497,14 @@ impl ContextManager {
         evicted
     }
 
-    /// A context is reapable only when its lease has expired AND it has no
-    /// backend operation in flight (a long in-flight op must never be evicted
-    /// mid-call — that is the whole point of the in-flight counter).
+    /// A context is reapable when it has no backend operation in flight
+    /// (a long in-flight op must never be evicted mid-call — that is the
+    /// whole point of the in-flight counter) AND either its transport
+    /// connection is dead (its owner is gone; sessions/lease no longer
+    /// matter and teardown closes its sessions) or its lease has expired.
     ///
-    /// D4: a context holding open backend sessions is additionally exempt
-    /// while younger than the absolute lifetime cap
+    /// D4: on the lease path, a context holding open backend sessions is
+    /// additionally exempt while younger than the absolute lifetime cap
     /// (`MAX_CONTEXT_LIFETIME` since creation) — it is live work sitting
     /// idle between calls, and reaping it would kill its sessions. Past
     /// the cap it is reapable again, bounding the exemption. This mirrors
@@ -2355,8 +2512,17 @@ impl ContextManager {
     /// drops a session-holding context at any age (it has no backend
     /// handle to close sessions with).
     fn is_reapable(&self, ctx: &LogicalClientInstance, now: Instant) -> bool {
-        ctx.in_flight.load(Ordering::Relaxed) == 0
-            && now.duration_since(ctx.last_active) > self.lease_duration
+        if ctx.in_flight.load(Ordering::Relaxed) != 0 {
+            return false;
+        }
+        // Transport-dead: the connection that owned this context is
+        // gone, so the context is an orphan regardless of sessions or
+        // lease/lifetime age. Eviction teardown closes its sessions
+        // through the shared plan exactly as for any other reap.
+        if ctx.is_transport_dead() {
+            return true;
+        }
+        now.duration_since(ctx.last_active) > self.lease_duration
             && (!ctx.has_open_backend_sessions()
                 || now.duration_since(ctx.created_at) > self.max_context_lifetime)
     }

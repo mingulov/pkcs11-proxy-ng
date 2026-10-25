@@ -2150,3 +2150,164 @@ async fn replacing_admission_never_replaces_busy_same_identity() {
     assert!(mgr.get_context(&second, |_| ()).await.is_some());
     assert_eq!(mgr.context_count(), 1);
 }
+
+// --- Transport-aware liveness (connection state) ---
+//
+// A context bound to a connection is transport-dead when that
+// connection's state is closed or dropped. Transport-dead + idle is
+// reapable regardless of sessions/lease, and admission replacement
+// requires transport-dead OR the same live connection — a different
+// live connection of the same (e.g. unauthenticated) identity must
+// never be replaced.
+
+fn live_connection(mgr: &ContextManager, peer: &str) -> Arc<ConnectionState> {
+    let state = ConnectionState::new();
+    mgr.connection_registry().register(peer.to_string(), Arc::clone(&state));
+    state
+}
+
+/// A session-holding context on a live connection is not reapable
+/// before lease/lifetime expiry; once its connection is dead it is
+/// reaped by `evict_expired` regardless of sessions or lease.
+#[tokio::test]
+async fn transport_dead_session_holding_context_reaped_by_evict_expired() {
+    use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
+    let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::clone(&mock) as _;
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let state = live_connection(&mgr, "tcp:192.0.2.10:40001");
+    let ctx = mgr
+        .create_context_with_connection(Some("unauthenticated".into()), Some(Arc::clone(&state)))
+        .await
+        .unwrap();
+    mgr.get_context(&ctx, |c| {
+        c.register_session(BackendHandle(777), crate::server::slot_map::BackendSlotId(CkSlotId(0)));
+    })
+    .await;
+
+    // Live connection, young, session-holding: not reapable.
+    let evicted = mgr.evict_expired(&backend).await;
+    assert!(evicted.is_empty(), "live session-holding context must not be reaped: {evicted:?}");
+    assert!(mgr.get_context(&ctx, |_| ()).await.is_some());
+
+    // Connection dies (tracked-stream drop marks closed + unregisters).
+    state.mark_closed();
+    mgr.connection_registry().unregister("tcp:192.0.2.10:40001", &state);
+
+    let evicted = mgr.evict_expired(&backend).await;
+    assert_eq!(evicted, vec![ctx.clone()], "transport-dead context must be reaped");
+    assert!(mgr.get_context(&ctx, |_| ()).await.is_none());
+}
+
+/// Dropping every strong `ConnectionState` (no registry entry, no
+/// tracked stream) also makes the context transport-dead via the
+/// failed `Weak` upgrade.
+#[tokio::test]
+async fn transport_dropped_state_makes_session_holding_context_reapable() {
+    use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
+    let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::clone(&mock) as _;
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let state = ConnectionState::new();
+    let ctx = mgr
+        .create_context_with_connection(Some("unauthenticated".into()), Some(state))
+        .await
+        .unwrap();
+    mgr.get_context(&ctx, |c| {
+        c.register_session(BackendHandle(778), crate::server::slot_map::BackendSlotId(CkSlotId(0)));
+    })
+    .await;
+    // `state` was moved into the call above; the only strong owners
+    // were that Arc (now dropped after downgrade) — create a fresh
+    // check: the Weak must no longer upgrade.
+    let evicted = mgr.evict_expired(&backend).await;
+    assert_eq!(evicted, vec![ctx.clone()], "dropped-connection context must be reaped");
+    assert!(mgr.get_context(&ctx, |_| ()).await.is_none());
+}
+
+/// At cap 1 a LIVE different connection of the same identity is never
+/// replaced: HOST_MEMORY stands and the holder stays intact.
+#[tokio::test]
+async fn replacing_admission_live_different_connection_never_replaces() {
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 1);
+    let state_a = live_connection(&mgr, "tcp:192.0.2.11:40001");
+    let holder = mgr
+        .create_context_with_connection(Some("unauthenticated".into()), Some(state_a))
+        .await
+        .unwrap();
+    let state_b = live_connection(&mgr, "tcp:192.0.2.11:40002");
+
+    let err = mgr
+        .create_context_replacing_idle_same_identity_on_connection(
+            Some("unauthenticated".into()),
+            Some(state_b),
+        )
+        .await
+        .map(|(id, _)| id)
+        .expect_err("a different live connection must never be replaced");
+    assert_eq!(err, CkRv::HOST_MEMORY);
+    assert_eq!(mgr.context_count(), 1);
+    assert!(mgr.get_context(&holder, |_| ()).await.is_some(), "live holder must stay intact");
+    assert_eq!(mgr.total_contexts_removed(), 0);
+}
+
+/// A re-Initialize on the SAME live connection replaces its own idle
+/// context at cap 1.
+#[tokio::test]
+async fn replacing_admission_same_connection_replaces() {
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 1);
+    let state_a = live_connection(&mgr, "tcp:192.0.2.12:40001");
+    let holder = mgr
+        .create_context_with_connection(Some("unauthenticated".into()), Some(Arc::clone(&state_a)))
+        .await
+        .unwrap();
+
+    let (second, replaced) = mgr
+        .create_context_replacing_idle_same_identity_on_connection(
+            Some("unauthenticated".into()),
+            Some(state_a),
+        )
+        .await
+        .expect("same-connection re-Initialize must replace");
+    assert_eq!(replaced.expect("holder returned for teardown").id, holder);
+    assert_ne!(second, holder);
+    assert_eq!(mgr.context_count(), 1);
+    assert!(mgr.get_context(&second, |_| ()).await.is_some());
+}
+
+/// CI scenario: the holder's connection is dead and a successor on a
+/// NEW live connection (same unauthenticated identity) replaces it.
+#[tokio::test]
+async fn replacing_admission_dead_connection_successor_replaces() {
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 1);
+    let state_a = live_connection(&mgr, "tcp:192.0.2.13:40001");
+    let holder = mgr
+        .create_context_with_connection(Some("unauthenticated".into()), Some(Arc::clone(&state_a)))
+        .await
+        .unwrap();
+    mgr.get_context(&holder, |c| {
+        c.register_session(BackendHandle(779), crate::server::slot_map::BackendSlotId(CkSlotId(0)));
+    })
+    .await;
+    state_a.mark_closed();
+    mgr.connection_registry().unregister("tcp:192.0.2.13:40001", &state_a);
+    let state_b = live_connection(&mgr, "tcp:192.0.2.13:40002");
+
+    let (second, replaced) = mgr
+        .create_context_replacing_idle_same_identity_on_connection(
+            Some("unauthenticated".into()),
+            Some(state_b),
+        )
+        .await
+        .expect("dead-connection successor must replace the orphan");
+    let replaced = replaced.expect("orphan returned for teardown");
+    assert_eq!(replaced.id, holder);
+    assert!(
+        replaced.session_handles.backend_handles().any(|b| b == BackendHandle(779)),
+        "returned orphan carries its session for teardown"
+    );
+    assert_eq!(mgr.context_count(), 1);
+    assert!(mgr.get_context(&second, |_| ()).await.is_some());
+}

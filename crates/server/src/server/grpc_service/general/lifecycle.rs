@@ -60,29 +60,38 @@ pub(super) async fn initialize(
             daemon_effects_version_max: Some(EXACT_OUTPUT_EFFECTS_VERSION_MAX),
         }));
     }
+    // Resolve this request's live connection (peer key from the
+    // transport extensions, as `request_identity` discriminates) so
+    // admission and the new context can key on connection liveness:
+    // unauthenticated identity is shared by every peer and cannot
+    // distinguish a still-running client from an exited one.
+    let connection = ctx_mgr.connection_state_for_request(&request);
     // Same-identity orphan replacement: at the admission cap, an idle
     // context owned by THIS identity (e.g. left behind by a previous
     // process of the same logical client that exited without Finalize)
-    // is replaced instead of wedging admission until lease expiry. A
-    // different identity, or a busy context, keeps the HOST_MEMORY
-    // refusal. Initialize passes Some(..) for every auth mode including
-    // unauthenticated, where all peers share one identity string — that
-    // no-isolation posture already lets any peer use any context, so
-    // replacing an idle unauthenticated orphan grants nothing new (see
-    // `create_context_replacing_idle_same_identity`).
-    let (ctx_id, replaced) =
-        match ctx_mgr.create_context_replacing_idle_same_identity(Some(identity.to_string())).await
-        {
-            Ok(admitted) => admitted,
-            Err(rv) => {
-                return Ok(Response::new(pkcs11_proxy_ng_proto::InitializeResponse {
-                    ck_rv: rv.0,
-                    client_context_id: String::new(),
-                    daemon_effects_version_min: Some(EXACT_OUTPUT_EFFECTS_VERSION_MIN),
-                    daemon_effects_version_max: Some(EXACT_OUTPUT_EFFECTS_VERSION_MAX),
-                }));
-            }
-        };
+    // is replaced instead of wedging admission until lease expiry —
+    // but only when it is transport-dead or lives on THIS connection.
+    // A different live connection (a still-running client,
+    // distinguished here even though unauthenticated identity is
+    // shared), a different identity, or a busy context keeps the
+    // HOST_MEMORY refusal.
+    let (ctx_id, replaced) = match ctx_mgr
+        .create_context_replacing_idle_same_identity_on_connection(
+            Some(identity.to_string()),
+            connection,
+        )
+        .await
+    {
+        Ok(admitted) => admitted,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::InitializeResponse {
+                ck_rv: rv.0,
+                client_context_id: String::new(),
+                daemon_effects_version_min: Some(EXACT_OUTPUT_EFFECTS_VERSION_MIN),
+                daemon_effects_version_max: Some(EXACT_OUTPUT_EFFECTS_VERSION_MAX),
+            }));
+        }
+    };
     if let Some(mut replaced) = replaced {
         // D6(2)/D9 shared teardown path, exactly like finalize:
         // refcount-checked session reaping plus last-holder backend
@@ -683,6 +692,154 @@ mod tests {
             ctx_mgr.get_context(&busy_id, |_| ()).await.is_some(),
             "the busy context must remain intact"
         );
+    }
+
+    // --- Transport-aware replacement (connection liveness) ---
+    //
+    // Unauthenticated identity does not distinguish connections, so
+    // replacement must key on connection liveness: a different LIVE
+    // connection never replaces, the SAME live connection may, and a
+    // successor on a new connection may replace a dead-connection
+    // orphan (the pkcs11-check CI scenario).
+
+    fn peer_request(
+        peer: std::net::SocketAddr,
+    ) -> Request<pkcs11_proxy_ng_proto::InitializeRequest> {
+        let mut req = orphan_request();
+        req.extensions_mut().insert(tonic::transport::server::TcpConnectInfo {
+            local_addr: None,
+            remote_addr: Some(peer),
+        });
+        req
+    }
+
+    async fn initialize_at_peer(
+        ctx_mgr: &Arc<ContextManager>,
+        backend: &Arc<dyn Pkcs11Backend>,
+        peer: std::net::SocketAddr,
+    ) -> pkcs11_proxy_ng_proto::InitializeResponse {
+        super::initialize(
+            ctx_mgr,
+            backend,
+            peer_request(peer),
+            crate::config::TcpAuthMode::None,
+            crate::config::UnixAuthMode::None,
+        )
+        .await
+        .unwrap()
+        .into_inner()
+    }
+
+    fn register_connection(
+        ctx_mgr: &Arc<ContextManager>,
+        peer: std::net::SocketAddr,
+    ) -> Arc<crate::server::connection_state::ConnectionState> {
+        let state = crate::server::connection_state::ConnectionState::new();
+        ctx_mgr
+            .connection_registry()
+            .register(crate::server::connection_state::tcp_peer_key(peer), Arc::clone(&state));
+        state
+    }
+
+    /// A second Initialize from a different LIVE connection (same
+    /// unauthenticated identity, different peer port) at cap 1 is
+    /// refused HOST_MEMORY and the live holder stays intact.
+    #[tokio::test]
+    async fn initialize_live_different_connection_not_replaceable_at_cap1() {
+        let backend = test_backend();
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 1));
+        let peer_a: std::net::SocketAddr = "192.0.2.21:40001".parse().unwrap();
+        let peer_b: std::net::SocketAddr = "192.0.2.21:40002".parse().unwrap();
+        let _state_a = register_connection(&ctx_mgr, peer_a);
+        let _state_b = register_connection(&ctx_mgr, peer_b);
+
+        let first = initialize_at_peer(&ctx_mgr, &backend, peer_a).await;
+        assert_eq!(first.ck_rv, CkRv::OK.0);
+        let holder = ClientContextId(first.client_context_id.clone());
+
+        let second = initialize_at_peer(&ctx_mgr, &backend, peer_b).await;
+        assert_eq!(
+            second.ck_rv,
+            CkRv::HOST_MEMORY.0,
+            "a different live connection must never replace the live holder"
+        );
+        assert!(second.client_context_id.is_empty());
+        assert_eq!(ctx_mgr.context_count(), 1);
+        assert!(ctx_mgr.get_context(&holder, |_| ()).await.is_some(), "live holder must stay");
+    }
+
+    /// A re-Initialize on the SAME live connection replaces its own
+    /// idle context at cap 1.
+    #[tokio::test]
+    async fn initialize_same_connection_replaces_at_cap1() {
+        let backend = test_backend();
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 1));
+        let peer_a: std::net::SocketAddr = "192.0.2.22:40001".parse().unwrap();
+        let _state_a = register_connection(&ctx_mgr, peer_a);
+
+        let first = initialize_at_peer(&ctx_mgr, &backend, peer_a).await;
+        assert_eq!(first.ck_rv, CkRv::OK.0);
+
+        let second = initialize_at_peer(&ctx_mgr, &backend, peer_a).await;
+        assert_eq!(second.ck_rv, CkRv::OK.0, "same-connection re-Initialize must replace");
+        assert_ne!(second.client_context_id, first.client_context_id);
+        assert_eq!(ctx_mgr.context_count(), 1);
+        let old = ClientContextId(first.client_context_id);
+        assert!(ctx_mgr.get_context(&old, |_| ()).await.is_none(), "replaced context gone");
+    }
+
+    /// CI scenario: the first process exits without Finalize (its
+    /// connection dies) and a successor process on a NEW connection
+    /// with the same unauthenticated identity replaces the orphan,
+    /// tearing down its backend session.
+    #[tokio::test]
+    async fn initialize_dead_connection_successor_replaces_at_cap1() {
+        use crate::server::context_manager::LoginState;
+        use crate::server::handle_map::BackendHandle;
+
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+        mock.initialize().unwrap();
+        let backend: Arc<dyn Pkcs11Backend> = Arc::clone(&mock) as _;
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 1));
+        let slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
+        ctx_mgr.register_slot(slot).await;
+        let peer_a: std::net::SocketAddr = "192.0.2.23:40001".parse().unwrap();
+        let peer_b: std::net::SocketAddr = "192.0.2.23:40002".parse().unwrap();
+        let state_a = register_connection(&ctx_mgr, peer_a);
+        let _state_b = register_connection(&ctx_mgr, peer_b);
+
+        let first = initialize_at_peer(&ctx_mgr, &backend, peer_a).await;
+        assert_eq!(first.ck_rv, CkRv::OK.0);
+        let orphan_id = ClientContextId(first.client_context_id.clone());
+        let session = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
+        mock.login(session, CkUserType::User, Some(b"1234")).unwrap();
+        ctx_mgr
+            .get_context(&orphan_id, |ctx| {
+                ctx.register_session(BackendHandle(session.0), slot);
+                ctx.login_state.insert(slot, LoginState::User);
+            })
+            .await;
+        ctx_mgr.note_login_acquired(&orphan_id, slot);
+        assert_eq!(mock.open_session_count(), 1);
+
+        // First process dies: tracked-stream drop marks its state
+        // closed and unregisters it.
+        state_a.mark_closed();
+        ctx_mgr
+            .connection_registry()
+            .unregister(&crate::server::connection_state::tcp_peer_key(peer_a), &state_a);
+        drop(state_a);
+
+        let second = initialize_at_peer(&ctx_mgr, &backend, peer_b).await;
+        assert_eq!(
+            second.ck_rv,
+            CkRv::OK.0,
+            "dead-connection successor must replace the orphan, not wedge on HOST_MEMORY"
+        );
+        assert_ne!(second.client_context_id, first.client_context_id);
+        assert_eq!(ctx_mgr.context_count(), 1);
+        assert!(ctx_mgr.get_context(&orphan_id, |_| ()).await.is_none());
+        assert_eq!(mock.open_session_count(), 0, "orphan backend session must be closed");
     }
 
     // --- Q18 (SEC-H2): atomic context guardrail ---

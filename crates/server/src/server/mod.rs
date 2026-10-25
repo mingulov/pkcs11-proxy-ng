@@ -1,6 +1,7 @@
 pub mod attestation;
 pub mod audit;
 pub mod auth;
+pub mod connection_state;
 pub mod context_manager;
 #[cfg(feature = "native-owner-test-hooks")]
 pub mod control;
