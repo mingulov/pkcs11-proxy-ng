@@ -1151,6 +1151,10 @@ fn backend_methods_have_proto_rpcs() {
             "daemon-local object-lifetime query for late-mint settlement; never on the wire (P2-13)",
         ),
         (
+            "tracks_object_lifetimes",
+            "daemon-local tracking signal for late-mint settlement; never on the wire (P2-13)",
+        ),
+        (
             "destroy_object_if_bound",
             "incarnation- and object-lifetime-bound variant of DestroyObject for late-mint settlement; shares its RPC (P2-13)",
         ),
