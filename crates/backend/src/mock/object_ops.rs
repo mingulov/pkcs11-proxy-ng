@@ -84,10 +84,24 @@ impl MockBackend {
             *cursor = start + take;
             drop(cursor);
             // Record-if-absent: found handles become tracked so a
-            // later bound destroy can be lifetime-checked.
+            // later bound destroy can be lifetime-checked. Found-object
+            // sharing (mirrors the FFI table): when any session already
+            // tracks the handle, reuse that lifetime id for this
+            // session instead of minting a differing id for the same
+            // physical object; mint fresh only when untracked anywhere.
             let mut state = self.state.lock().unwrap();
             for handle in &batch {
-                if handle.0 != 0 && !state.object_lifetimes.contains_key(&(session.0, handle.0)) {
+                if handle.0 == 0 || state.object_lifetimes.contains_key(&(session.0, handle.0)) {
+                    continue;
+                }
+                if let Some(existing) = state
+                    .object_lifetimes
+                    .iter()
+                    .find(|((_, obj), _)| *obj == handle.0)
+                    .map(|(_, &id)| id)
+                {
+                    state.object_lifetimes.insert((session.0, handle.0), existing);
+                } else {
                     let lifetime = state.next_object_lifetime;
                     state.next_object_lifetime += 1;
                     state.object_lifetimes.insert((session.0, handle.0), lifetime);

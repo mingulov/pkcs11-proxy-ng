@@ -263,9 +263,14 @@ impl FfiBackend {
     /// lifetime in between. The lifetime leg is fail-safe (see the
     /// trait contract on
     /// [`crate::traits::Pkcs11Backend::destroy_object_if_bound`]):
-    /// only an exact match — or no capture against an untracked
-    /// object — destroys; every other combination refuses with
-    /// `OBJECT_HANDLE_INVALID` and issues no native destroy.
+    /// with a captured lifetime it destroys only when the settling
+    /// session's entry exists and every lifetime entry for the
+    /// numeric handle across all sessions equals the captured id —
+    /// any differing entry (a replacement tracked under another
+    /// session) or a missing settling-session entry refuses with
+    /// `OBJECT_HANDLE_INVALID` and issues no native destroy. With
+    /// no capture, the legacy rule is unchanged: a live settling-
+    /// session entry refuses, no entry destroys.
     pub(super) fn ffi_destroy_object_if_bound(
         &self,
         session: CkSessionHandle,
@@ -281,12 +286,34 @@ impl FfiBackend {
             None => self.session_fences.enter(&admission, session)?,
         };
         let mut lifetimes = self.object_lifetimes.lock_for_destroy();
-        match (object_lifetime, lifetimes.get(&(session.0, object.0)).copied()) {
-            (Some(expected), Some(current)) if current == expected => {}
-            (Some(_), Some(_)) => return Err(CkRv::OBJECT_HANDLE_INVALID),
-            (Some(_), None) => return Err(CkRv::OBJECT_HANDLE_INVALID),
-            (None, Some(_)) => return Err(CkRv::OBJECT_HANDLE_INVALID),
-            (None, None) => {}
+        match object_lifetime {
+            Some(expected) => {
+                // Cross-session fail-safe: the settling session's
+                // entry must exist and match, and every entry for
+                // this handle under any session must match. A
+                // differing entry names a replacement tracked under
+                // another session; a token destroy from the settling
+                // session would destroy it, so refuse.
+                match lifetimes.get(&(session.0, object.0)).copied() {
+                    Some(current) if current == expected => {
+                        if lifetimes
+                            .iter()
+                            .any(|((_, obj), &id)| *obj == object.0 && id != expected)
+                        {
+                            return Err(CkRv::OBJECT_HANDLE_INVALID);
+                        }
+                    }
+                    Some(_) => return Err(CkRv::OBJECT_HANDLE_INVALID),
+                    None => return Err(CkRv::OBJECT_HANDLE_INVALID),
+                }
+            }
+            None => {
+                // Unchanged legacy leg: a live settling-session entry
+                // proves tracking and refuses a blind destroy.
+                if lifetimes.get(&(session.0, object.0)).is_some() {
+                    return Err(CkRv::OBJECT_HANDLE_INVALID);
+                }
+            }
         }
         let result = Self::call_unit(
             &admission,
@@ -615,6 +642,7 @@ mod lifecycle_output_tests {
         // original capture (captures are thread-local in production).
         // The competitor works through a DIFFERENT session, proving
         // contention detection is under any session.
+        let competitor_lifetime;
         {
             let other = CkSessionHandle(8);
             let competitor = crate::mint_capture::begin(other);
@@ -622,6 +650,8 @@ mod lifecycle_output_tests {
             backend.destroy_object(other, handle).unwrap();
             let replacement = backend.create_object(other, Some(&[])).unwrap();
             assert_eq!(replacement, handle, "stub re-mints the same numeric handle");
+            competitor_lifetime =
+                backend.object_lifetime(other, handle).expect("competitor replacement tracked");
             drop(competitor);
         }
         assert_eq!(CONTENDED_MINT_DESTROY_CALLS.load(Ordering::SeqCst), 1);
@@ -638,9 +668,12 @@ mod lifecycle_output_tests {
             "contended mint capture must be poisoned (report nothing)"
         );
         assert_eq!(captured_lifetime, None, "poisoned capture carries None for the handle");
-        assert!(
-            backend.object_lifetime(session, handle).is_some(),
-            "table must still update its entry to the newest fresh id"
+        let stored = backend
+            .object_lifetime(session, handle)
+            .expect("table must still update its entry to the newest fresh id");
+        assert_ne!(
+            stored, competitor_lifetime,
+            "stored entry must be the exact newest fresh id, not the competitor's"
         );
 
         let destroys_before = CONTENDED_MINT_DESTROY_CALLS.load(Ordering::SeqCst);
@@ -663,6 +696,231 @@ mod lifecycle_output_tests {
             backend.object_lifetime(session, handle).is_some(),
             "valid replacement must survive poisoned settlement"
         );
+    }
+
+    static CROSS_SESSION_DELAYED_DESTROY_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C" fn destroy_counting_cross_session_delayed(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _object: cryptoki_sys::CK_OBJECT_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        CROSS_SESSION_DELAYED_DESTROY_CALLS.fetch_add(1, Ordering::SeqCst);
+        cryptoki_sys::CKR_OK
+    }
+
+    /// I-1 cross-session residual: the original mint's native create
+    /// has returned handle 43 but its fresh record is delayed.
+    /// A competitor on another session FindObjects-records and
+    /// destroys (clearing every entry for 43); the original thread
+    /// then records fresh uncontended `(origin,43)=idA` and captures
+    /// `idA`; the competitor recreates, finds `(origin,43)`, poisons
+    /// its own capture and inserts `(competitor,43)=idB`. Settlement
+    /// from the origin with `idA` must refuse and issue no native
+    /// destroy, leaving the competitor's valid replacement usable.
+    #[test]
+    fn cross_session_delayed_record_then_recreate_refuses_origin_settlement() {
+        use crate::traits::Pkcs11Backend;
+        CROSS_SESSION_DELAYED_DESTROY_CALLS.store(0, Ordering::SeqCst);
+        let (backend, _functions) = backend_with_object_stubs();
+        unsafe {
+            (*backend.func_list).C_DestroyObject = Some(destroy_counting_cross_session_delayed)
+        };
+        backend.lifecycle_domain.open_for_tests();
+        let origin = CkSessionHandle(7);
+        let other = CkSessionHandle(8);
+        let handle = CkObjectHandle(43);
+
+        // Original mint: capture begins, native handle known, fresh
+        // record delayed until after the competitor destroy below.
+        let capture = crate::mint_capture::begin(origin);
+        backend.record_object_lifetime_if_absent(other, handle);
+        backend.destroy_object(other, handle).unwrap();
+        assert_eq!(CROSS_SESSION_DELAYED_DESTROY_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.object_lifetime(origin, handle), None);
+        assert_eq!(backend.object_lifetime(other, handle), None);
+
+        // Original thread's fresh record lands between the competitor
+        // destroy and recreate: uncontended, reports idA.
+        backend.record_object_lifetime_fresh(origin, handle);
+        let captured = capture.captured();
+        let captured_lifetime = capture.lifetime_for(handle);
+        drop(capture);
+        let id_a = backend
+            .object_lifetime(origin, handle)
+            .expect("original delayed record must be tracked");
+        assert_eq!(captured, vec![(handle, id_a)]);
+        assert_eq!(captured_lifetime, Some(id_a));
+
+        // Competitor recreates the same numeric handle.
+        {
+            let competitor = crate::mint_capture::begin(other);
+            let replacement = backend.create_object(other, Some(&[])).unwrap();
+            assert_eq!(replacement, handle, "stub re-mints the same numeric handle");
+            assert_eq!(
+                competitor.captured(),
+                Vec::<(CkObjectHandle, u64)>::new(),
+                "competitor recreate capture must be poisoned by the origin entry"
+            );
+            drop(competitor);
+        }
+        let id_b =
+            backend.object_lifetime(other, handle).expect("competitor replacement must be tracked");
+        assert_ne!(id_a, id_b);
+        assert_eq!(backend.object_lifetime(origin, handle), Some(id_a));
+
+        let destroys_before = CROSS_SESSION_DELAYED_DESTROY_CALLS.load(Ordering::SeqCst);
+        assert_eq!(
+            backend.destroy_object_if_bound(
+                origin,
+                handle,
+                backend.session_incarnation(origin),
+                Some(id_a),
+            ),
+            Err(CkRv::OBJECT_HANDLE_INVALID),
+            "origin settlement must refuse when another session tracks a newer lifetime"
+        );
+        assert_eq!(
+            CROSS_SESSION_DELAYED_DESTROY_CALLS.load(Ordering::SeqCst),
+            destroys_before,
+            "refused origin settlement must issue no native destroy"
+        );
+        assert_eq!(
+            backend.object_lifetime(other, handle),
+            Some(id_b),
+            "competitor replacement must survive origin settlement"
+        );
+        assert_eq!(backend.get_object_size(other, handle).unwrap(), 17);
+    }
+
+    static CROSS_SESSION_NO_RECREATE_DESTROY_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C" fn destroy_counting_cross_session_no_recreate(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _object: cryptoki_sys::CK_OBJECT_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        CROSS_SESSION_NO_RECREATE_DESTROY_CALLS.fetch_add(1, Ordering::SeqCst);
+        cryptoki_sys::CKR_OK
+    }
+
+    /// Control: the same cross-session interleaving WITHOUT the
+    /// competitor recreate still settles the original exactly once.
+    /// After the competitor destroy clears the table, the original's
+    /// delayed fresh record is the only entry, so settlement with
+    /// `idA` destroys once and a second settle refuses.
+    #[test]
+    fn cross_session_delayed_record_without_recreate_settles_once() {
+        use crate::traits::Pkcs11Backend;
+        CROSS_SESSION_NO_RECREATE_DESTROY_CALLS.store(0, Ordering::SeqCst);
+        let (backend, _functions) = backend_with_object_stubs();
+        unsafe {
+            (*backend.func_list).C_DestroyObject = Some(destroy_counting_cross_session_no_recreate)
+        };
+        backend.lifecycle_domain.open_for_tests();
+        let origin = CkSessionHandle(7);
+        let other = CkSessionHandle(8);
+        let handle = CkObjectHandle(43);
+
+        let capture = crate::mint_capture::begin(origin);
+        backend.record_object_lifetime_if_absent(other, handle);
+        backend.destroy_object(other, handle).unwrap();
+        backend.record_object_lifetime_fresh(origin, handle);
+        let captured_lifetime = capture.lifetime_for(handle);
+        drop(capture);
+        let id_a = backend.object_lifetime(origin, handle).expect("tracked original");
+        assert_eq!(captured_lifetime, Some(id_a));
+        assert_eq!(backend.object_lifetime(other, handle), None);
+
+        let destroys_before = CROSS_SESSION_NO_RECREATE_DESTROY_CALLS.load(Ordering::SeqCst);
+        backend
+            .destroy_object_if_bound(
+                origin,
+                handle,
+                backend.session_incarnation(origin),
+                Some(id_a),
+            )
+            .unwrap();
+        assert_eq!(
+            CROSS_SESSION_NO_RECREATE_DESTROY_CALLS.load(Ordering::SeqCst),
+            destroys_before + 1,
+            "uncontended delayed record must settle exactly once"
+        );
+        assert_eq!(backend.object_lifetime(origin, handle), None);
+        assert_eq!(
+            backend.destroy_object_if_bound(
+                origin,
+                handle,
+                backend.session_incarnation(origin),
+                Some(id_a),
+            ),
+            Err(CkRv::OBJECT_HANDLE_INVALID),
+        );
+        assert_eq!(
+            CROSS_SESSION_NO_RECREATE_DESTROY_CALLS.load(Ordering::SeqCst),
+            destroys_before + 1,
+            "second settle must issue no further destroy"
+        );
+    }
+
+    static FOUND_SHARED_DESTROY_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C" fn destroy_counting_found_shared(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _object: cryptoki_sys::CK_OBJECT_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        FOUND_SHARED_DESTROY_CALLS.fetch_add(1, Ordering::SeqCst);
+        cryptoki_sys::CKR_OK
+    }
+
+    /// Found-object sharing control: an object minted in session A
+    /// and then found in session B must share one lifetime id, so
+    /// settlement from A with the captured id destroys exactly once
+    /// with no false refusal from B's found entry.
+    #[test]
+    fn found_object_shared_across_sessions_settles_from_origin() {
+        use crate::traits::Pkcs11Backend;
+        FOUND_SHARED_DESTROY_CALLS.store(0, Ordering::SeqCst);
+        let (backend, _functions) = backend_with_object_stubs();
+        unsafe { (*backend.func_list).C_DestroyObject = Some(destroy_counting_found_shared) };
+        backend.lifecycle_domain.open_for_tests();
+        let origin = CkSessionHandle(7);
+        let other = CkSessionHandle(8);
+
+        let capture = crate::mint_capture::begin(origin);
+        let handle = backend.create_object(origin, Some(&[])).unwrap();
+        let captured_lifetime = capture.lifetime_for(handle);
+        drop(capture);
+        let id_a = backend.object_lifetime(origin, handle).expect("tracked mint");
+        assert_eq!(captured_lifetime, Some(id_a));
+
+        // FindObjects in the other session records the found object.
+        backend.record_object_lifetime_if_absent(other, handle);
+        assert_eq!(
+            backend.object_lifetime(other, handle),
+            Some(id_a),
+            "found object must reuse the existing lifetime id across sessions"
+        );
+
+        backend
+            .destroy_object_if_bound(
+                origin,
+                handle,
+                backend.session_incarnation(origin),
+                Some(id_a),
+            )
+            .unwrap();
+        assert_eq!(FOUND_SHARED_DESTROY_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.object_lifetime(origin, handle), None);
+        assert_eq!(backend.object_lifetime(other, handle), None);
+        assert_eq!(
+            backend.destroy_object_if_bound(
+                origin,
+                handle,
+                backend.session_incarnation(origin),
+                Some(id_a),
+            ),
+            Err(CkRv::OBJECT_HANDLE_INVALID),
+        );
+        assert_eq!(FOUND_SHARED_DESTROY_CALLS.load(Ordering::SeqCst), 1);
     }
 
     static UNDISTURBED_MINT_DESTROY_CALLS: AtomicUsize = AtomicUsize::new(0);

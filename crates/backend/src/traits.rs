@@ -351,9 +351,27 @@ pub trait Pkcs11Backend: Send + Sync {
     ///   [`Self::destroy_object`] (an untracked backend, or an
     ///   object it never tracked).
     ///
+    /// Cross-session rule for overriding backends: token objects are
+    /// visible across sessions, so a captured-`Some` destroy must
+    /// also refuse when any *other* session tracks the same numeric
+    /// handle under a different lifetime id, and when the settling
+    /// session's own entry is missing — a native destroy from the
+    /// settling session would destroy the other session's valid
+    /// replacement. Backends that override this method with access
+    /// to the whole lifetime table (FFI, mock) enforce that rule
+    /// atomically: destroy only when the settling session's entry
+    /// exists and every entry for the handle equals the captured id.
+    /// Found objects share one lifetime id across sessions (the
+    /// find path reuses the tracked id), so sharing alone never
+    /// triggers the refusal. The captured-`None` leg above is
+    /// unchanged. This default keeps the simpler per-session
+    /// composition for backends that only expose
+    /// [`Self::object_lifetime`] for the settling session; such
+    /// backends cannot observe other sessions' entries.
+    ///
     /// Backends with a real fence (FFI) override this with an
     /// atomic checked entry; the default composes the queries and
-    /// the destroy for simpler backends (mock).
+    /// the destroy for simpler backends.
     fn destroy_object_if_bound(
         &self,
         session: CkSessionHandle,
