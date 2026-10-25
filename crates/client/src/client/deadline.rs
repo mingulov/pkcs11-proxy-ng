@@ -16,6 +16,13 @@
 //! misdescribes a timeout. This layer yields a real `DeadlineExceeded`
 //! status on every construction path and is reconfigurable at runtime via
 //! [`Pkcs11Client::set_rpc_timeout`].
+//!
+//! Operator knob (D6): `PKCS11_PROXY_RPC_TIMEOUT_SECS` overrides the
+//! 60-second default at client construction. A trimmed positive integer
+//! is taken as seconds; unset, unparseable, or zero values fall back to
+//! [`DEFAULT_RPC_TIMEOUT`] (a set-but-ignored value logs a warning — the
+//! shim's `PKCS11_PROXY_CONNECT_*` tolerance style). The shim inherits
+//! the knob because it builds its client through these constructors.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -26,8 +33,54 @@ use std::time::Duration;
 ///
 /// Bounds a wedged daemon without tripping slow-but-healthy operations
 /// (HSM key generation and attestation can take tens of seconds).
-/// Override per client with [`Pkcs11Client::set_rpc_timeout`][crate::client::Pkcs11Client::set_rpc_timeout].
+/// Operators override it at client construction with
+/// `PKCS11_PROXY_RPC_TIMEOUT_SECS` (see [`default_rpc_timeout`]), or per
+/// client with [`Pkcs11Client::set_rpc_timeout`][crate::client::Pkcs11Client::set_rpc_timeout].
 pub const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Env var overriding the per-RPC deadline at client construction (D6).
+const RPC_TIMEOUT_ENV_VAR: &str = "PKCS11_PROXY_RPC_TIMEOUT_SECS";
+
+/// Resolve the effective default deadline from a raw env value: a
+/// trimmed positive integer is taken as seconds; unset, unparseable, or
+/// zero falls back to [`DEFAULT_RPC_TIMEOUT`]. Pure so the parse matrix
+/// is unit-tested without mutating process-global env (the shim's
+/// `connect_attempts_from_value` pattern).
+pub(crate) fn rpc_timeout_from_value(raw: Option<&str>) -> Duration {
+    raw.and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_RPC_TIMEOUT)
+}
+
+/// Loud warning when `PKCS11_PROXY_RPC_TIMEOUT_SECS` is set but will be
+/// ignored. The predicate matches [`rpc_timeout_from_value`] exactly
+/// (trimmed positive `u64`), so the warning fires exactly when the
+/// default engages despite a set value — never silently.
+pub(crate) fn rpc_timeout_warning(raw: Option<&str>) -> Option<String> {
+    match raw {
+        None => None,
+        Some(value) => match value.trim().parse::<u64>() {
+            Ok(secs) if secs > 0 => None,
+            _ => Some(format!(
+                "{RPC_TIMEOUT_ENV_VAR}={value:?} is not a valid positive number of seconds; \
+                 using default {}",
+                DEFAULT_RPC_TIMEOUT.as_secs()
+            )),
+        },
+    }
+}
+
+/// The deadline a freshly constructed client starts with:
+/// `PKCS11_PROXY_RPC_TIMEOUT_SECS` when set to a positive integer,
+/// [`DEFAULT_RPC_TIMEOUT`] otherwise.
+pub(crate) fn default_rpc_timeout() -> Duration {
+    let raw = std::env::var(RPC_TIMEOUT_ENV_VAR).ok();
+    if let Some(warning) = rpc_timeout_warning(raw.as_deref()) {
+        tracing::warn!("{warning}");
+    }
+    rpc_timeout_from_value(raw.as_deref())
+}
 
 /// Tower layer bounding each gRPC call (and lazy connect) by `timeout`.
 ///
@@ -80,5 +133,51 @@ where
                 .into()),
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // D6: `PKCS11_PROXY_RPC_TIMEOUT_SECS` resolves through the pure
+    // parser, so the matrix below needs no process-global env mutation
+    // (the shim's `connect_attempts_from_value` pattern).
+    #[test]
+    fn rpc_timeout_unset_falls_back_to_sixty_seconds() {
+        assert_eq!(rpc_timeout_from_value(None), Duration::from_secs(60));
+        assert_eq!(rpc_timeout_from_value(None), DEFAULT_RPC_TIMEOUT);
+    }
+
+    #[test]
+    fn rpc_timeout_valid_value_is_used() {
+        assert_eq!(rpc_timeout_from_value(Some("120")), Duration::from_secs(120));
+        assert_eq!(rpc_timeout_from_value(Some("1")), Duration::from_secs(1));
+        // Neighbouring parsers trim before parsing.
+        assert_eq!(rpc_timeout_from_value(Some(" 30 ")), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn rpc_timeout_invalid_and_zero_fall_back_to_sixty_seconds() {
+        for raw in ["junk", "", "0", "-5", "1.5"] {
+            assert_eq!(
+                rpc_timeout_from_value(Some(raw)),
+                Duration::from_secs(60),
+                "{raw:?} must fall back to the 60s default"
+            );
+        }
+    }
+
+    #[test]
+    fn rpc_timeout_warning_fires_exactly_when_a_set_value_is_ignored() {
+        assert_eq!(rpc_timeout_warning(None), None);
+        assert_eq!(rpc_timeout_warning(Some("120")), None);
+        for raw in ["junk", "0"] {
+            let warning = rpc_timeout_warning(Some(raw)).expect("ignored value must warn");
+            assert!(
+                warning.contains("PKCS11_PROXY_RPC_TIMEOUT_SECS") && warning.contains(raw),
+                "warning must name the var and the value: {warning}"
+            );
+        }
     }
 }

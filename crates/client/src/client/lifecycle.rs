@@ -3,7 +3,7 @@ use pkcs11_proxy_ng_types::shape_descriptors::ParamAbi;
 use pkcs11_proxy_ng_types::*;
 use tonic::transport::Channel;
 
-use super::deadline::{DEFAULT_RPC_TIMEOUT, RpcDeadline};
+use super::deadline::{RpcDeadline, default_rpc_timeout};
 use super::{ConnectionSource, Pkcs11Client};
 use crate::error::{RpcKind, grpc_status_to_ck_rv_kind};
 
@@ -356,7 +356,8 @@ impl Pkcs11Client {
     pub async fn connect(endpoint: &str) -> Result<Self, ConnectError> {
         let timeouts = ConnectTimeouts::default();
         let channel = connect_channel(endpoint, None, &timeouts).await?;
-        let grpc = new_grpc_client(channel.clone(), DEFAULT_RPC_TIMEOUT);
+        let rpc_timeout = default_rpc_timeout();
+        let grpc = new_grpc_client(channel.clone(), rpc_timeout);
         Ok(Self {
             exact_effects_version: Default::default(),
             typed_auth_capability: Default::default(),
@@ -366,7 +367,7 @@ impl Pkcs11Client {
             channel,
             context_id: None,
             source: ConnectionSource::Endpoint { endpoint: endpoint.to_owned(), tls_files: None },
-            rpc_timeout: DEFAULT_RPC_TIMEOUT,
+            rpc_timeout,
             connect_timeouts: timeouts,
         })
     }
@@ -378,7 +379,8 @@ impl Pkcs11Client {
     ) -> Result<Self, ConnectError> {
         let timeouts = ConnectTimeouts::default();
         let channel = connect_channel(endpoint, Some(tls_files.clone()), &timeouts).await?;
-        let grpc = new_grpc_client(channel.clone(), DEFAULT_RPC_TIMEOUT);
+        let rpc_timeout = default_rpc_timeout();
+        let grpc = new_grpc_client(channel.clone(), rpc_timeout);
         Ok(Self {
             exact_effects_version: Default::default(),
             typed_auth_capability: Default::default(),
@@ -391,7 +393,7 @@ impl Pkcs11Client {
                 endpoint: endpoint.to_owned(),
                 tls_files: Some(tls_files),
             },
-            rpc_timeout: DEFAULT_RPC_TIMEOUT,
+            rpc_timeout,
             connect_timeouts: timeouts,
         })
     }
@@ -399,22 +401,25 @@ impl Pkcs11Client {
     /// Build a client from an already-established channel (e.g. for tests or
     /// channel sharing). Reconnection will not be available.
     pub fn from_channel(channel: tonic::transport::Channel) -> Self {
+        let rpc_timeout = default_rpc_timeout();
         Self {
             exact_effects_version: Default::default(),
             typed_auth_capability: Default::default(),
             mechanism_parameter_transport_version: Default::default(),
             exact_token_label_probe: Default::default(),
-            grpc: new_grpc_client(channel.clone(), DEFAULT_RPC_TIMEOUT),
+            grpc: new_grpc_client(channel.clone(), rpc_timeout),
             channel,
             context_id: None,
             source: ConnectionSource::SharedChannel,
-            rpc_timeout: DEFAULT_RPC_TIMEOUT,
+            rpc_timeout,
             connect_timeouts: ConnectTimeouts::default(),
         }
     }
 
     /// The per-RPC deadline currently enforced on every call
-    /// ([`DEFAULT_RPC_TIMEOUT`] unless changed).
+    /// (`PKCS11_PROXY_RPC_TIMEOUT_SECS` at construction, else
+    /// [`DEFAULT_RPC_TIMEOUT`][super::deadline::DEFAULT_RPC_TIMEOUT],
+    /// unless changed).
     pub fn rpc_timeout(&self) -> std::time::Duration {
         self.rpc_timeout
     }
@@ -732,7 +737,8 @@ impl Pkcs11Client {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_RPC_TIMEOUT, Pkcs11Client, pointer_safe_message_parameters_from_wire};
+    use super::super::deadline::DEFAULT_RPC_TIMEOUT;
+    use super::{Pkcs11Client, pointer_safe_message_parameters_from_wire};
 
     // W1-C10-01: the default deadline is pinned (60s: bounds a wedged
     // daemon without tripping slow-but-healthy HSM operations) and every

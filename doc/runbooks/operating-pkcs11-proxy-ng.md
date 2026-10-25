@@ -561,6 +561,7 @@ controls which proxy the shim connects to and how.
 | `PKCS11_PROXY_SOCKET` | Back-compat with the original C `pkcs11-proxy`. Accepts only `tcp://host:port`; `tls://` is **not** supported (use mTLS via `PKCS11_PROXY_ENDPOINT=https://…` + `PKCS11_PROXY_TLS_*`). | `tls://` is a loud error that fails the connection (never falls back to the default endpoint); other non-`tcp://` values log a warning and use the default. |
 | `PKCS11_PROXY_CONNECT_TIMEOUT` | Connect timeout, seconds. Default `5`. | Plain integer. |
 | `PKCS11_PROXY_CONNECT_ATTEMPTS` | Max gRPC connect attempts per `C_Initialize` (bounded backoff + jitter). Default `10`. | Lower it to fail fast on an unreachable daemon; clamped to `1..=10` — it cannot raise the cap. |
+| `PKCS11_PROXY_RPC_TIMEOUT_SECS` | Per-RPC client deadline, seconds. Default `60`. | Positive integer; unset, unparseable, or `0` falls back to `60` with a warning. Raise it for tokens whose operations legitimately run longer. |
 
 ### mTLS (client side)
 
