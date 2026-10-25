@@ -1967,6 +1967,35 @@ fn default_config_header_is_honest_about_env_overrides() {
     );
 }
 
+// P1-7 (D2): the shipped default must not expose an unauthenticated
+// non-loopback listener. Parse with the real DaemonConfig TOML loader
+// (same parse step as DaemonConfig::load; validate() is not run here
+// because the shipped backend.module placeholder rightly fails it).
+#[test]
+fn shipped_default_remote_listener_is_not_unauthenticated_non_loopback() {
+    let content = submodule_file("packaging/config/proxy.toml.default");
+    let cfg: DaemonConfig =
+        toml::from_str(&content).expect("shipped default config must parse as DaemonConfig");
+    let remote =
+        cfg.listener.remote.expect("shipped default config must configure [listener.remote]");
+    if !remote.auth.is_authenticated() {
+        let addr: std::net::SocketAddr = remote
+            .bind
+            .parse()
+            .unwrap_or_else(|e| panic!("shipped default bind {:?} must parse: {e}", remote.bind));
+        assert!(
+            addr.ip().is_loopback(),
+            "shipped default with unauthenticated auth ({:?}) must bind loopback only, got bind {:?}",
+            remote.auth,
+            remote.bind
+        );
+    }
+    assert!(
+        !content.contains("Default operational mode: TCP without authentication"),
+        "shipped default must not present unauthenticated TCP as the default operational mode"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // W1-L8-10: example mTLS headers must describe the wired transport, not the
 // stale "not wired yet" shape.
