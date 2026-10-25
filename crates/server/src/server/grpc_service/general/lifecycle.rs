@@ -12,7 +12,9 @@ use pkcs11_proxy_ng_types::*;
 use super::super::super::auth::identity::AuthenticatedIdentity;
 use super::super::super::context_manager::{ClientContextId, ContextManager, RemoveIfIdleOutcome};
 use super::super::super::rate_limit;
-use super::super::service_utils::{current_context_operation_guard, spawn_settlement};
+use super::super::service_utils::{
+    await_settlement, current_context_operation_guard, spawn_settlement,
+};
 
 pub(super) async fn initialize(
     ctx_mgr: &Arc<ContextManager>,
@@ -113,7 +115,7 @@ pub(super) async fn initialize(
         let settled = spawn_settlement(async move {
             teardown_mgr.execute_teardown_plans(&teardown_backend, vec![plan]).await;
         });
-        let _ = settled.await;
+        await_settlement(settled).await;
         debug!(
             context_id = %ctx_id.0,
             replaced_context_id = %replaced_id.0,
@@ -191,7 +193,7 @@ pub(super) async fn finalize(
             let settled = spawn_settlement(async move {
                 teardown_mgr.execute_teardown_plans(&teardown_backend, vec![plan]).await;
             });
-            let _ = settled.await;
+            await_settlement(settled).await;
             debug!(
                 context_id = %ctx_id.0,
                 sessions_closed = session_count,
@@ -755,11 +757,10 @@ mod tests {
         ctx_mgr: &Arc<ContextManager>,
         peer: std::net::SocketAddr,
     ) -> Arc<crate::server::connection_state::ConnectionState> {
-        let state = crate::server::connection_state::ConnectionState::new();
-        ctx_mgr
-            .connection_registry()
-            .register(crate::server::connection_state::tcp_peer_key(peer), Arc::clone(&state));
-        state
+        ctx_mgr.connection_registry().register(
+            crate::server::connection_state::tcp_peer_key(peer),
+            crate::server::connection_state::ConnectionState::new(),
+        )
     }
 
     /// A second Initialize from a different LIVE connection (same

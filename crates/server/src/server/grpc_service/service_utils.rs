@@ -535,6 +535,21 @@ where
     done_rx
 }
 
+/// Await a [`spawn_settlement`] completion signal. A closed channel
+/// without a send means the detached task panicked before finishing
+/// — its remaining teardown steps are lost — so log a warning
+/// instead of silently treating it as success. Cancellation of the
+/// *caller* is unaffected: the detached work itself never depended
+/// on this await.
+pub(super) async fn await_settlement(settled: oneshot::Receiver<()>) {
+    if settled.await.is_err() {
+        tracing::warn!(
+            "settlement task ended without signalling completion (possible panic); \
+             remaining teardown may be incomplete"
+        );
+    }
+}
+
 /// How a late-minted payload retires its native state when the mint's
 /// primary result was never consumed (P2-13, generalizing Q16 box 2).
 /// Implementations move only plain handle integers — never secret

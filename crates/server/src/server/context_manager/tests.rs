@@ -2161,9 +2161,9 @@ async fn replacing_admission_never_replaces_busy_same_identity() {
 // never be replaced.
 
 fn live_connection(mgr: &ContextManager, peer: &str) -> Arc<ConnectionState> {
-    let state = ConnectionState::new();
-    mgr.connection_registry().register(peer.to_string(), Arc::clone(&state));
-    state
+    // Register returns the group for the key (joining an existing
+    // same-key group), which is the state callers must hold.
+    mgr.connection_registry().register(peer.to_string(), ConnectionState::new())
 }
 
 /// A session-holding context on a live connection is not reapable
@@ -2310,4 +2310,114 @@ async fn replacing_admission_dead_connection_successor_replaces() {
     );
     assert_eq!(mgr.context_count(), 1);
     assert!(mgr.get_context(&second, |_| ()).await.is_some());
+}
+
+/// UDS per-process grouping: two connections from the same pid share
+/// one group. Dropping one leaves the group (and its context) live —
+/// a stranger on a different pid cannot replace it. Dropping both
+/// makes the context transport-dead and replaceable by a successor.
+#[tokio::test]
+async fn uds_group_context_survives_one_of_two_connections_dropping() {
+    use crate::server::connection_state::TrackedStream;
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 1);
+    let registry = mgr.connection_registry();
+    let (_c1, s1) = tokio::io::duplex(64);
+    let (_c2, s2) = tokio::io::duplex(64);
+    let first = TrackedStream::new(s1, Arc::clone(&registry), Some("uds:pid=4242".into()));
+    let group = first.connection_state();
+    let second = TrackedStream::new(s2, Arc::clone(&registry), Some("uds:pid=4242".into()));
+    assert!(Arc::ptr_eq(&group, &second.connection_state()), "same pid must share one group");
+
+    let holder = mgr
+        .create_context_with_connection(Some("unauthenticated".into()), Some(Arc::clone(&group)))
+        .await
+        .unwrap();
+    // Session-holding, so admission must go through replacement
+    // (returning the orphan for teardown), not the sessionless
+    // capacity reclaim.
+    mgr.get_context(&holder, |c| {
+        c.register_session(BackendHandle(780), crate::server::slot_map::BackendSlotId(CkSlotId(0)));
+    })
+    .await;
+
+    // One of the process's two connections drops: group stays live.
+    drop(first);
+    assert!(!group.is_closed(), "group must stay live with one connection left");
+    let dead = mgr.get_context(&holder, |c| c.is_transport_dead()).await.unwrap();
+    assert!(!dead, "context must not be transport-dead while its process has a live connection");
+
+    // A stranger (different pid, live) must not replace the live holder.
+    let (_c3, s3) = tokio::io::duplex(64);
+    let stranger_stream =
+        TrackedStream::new(s3, Arc::clone(&registry), Some("uds:pid=9999".into()));
+    let stranger = stranger_stream.connection_state();
+    let err = mgr
+        .create_context_replacing_idle_same_identity_on_connection(
+            Some("unauthenticated".into()),
+            Some(Arc::clone(&stranger)),
+        )
+        .await
+        .map(|(id, _)| id)
+        .expect_err("a different live process must never replace the live holder");
+    assert_eq!(err, CkRv::HOST_MEMORY);
+    assert!(mgr.get_context(&holder, |_| ()).await.is_some(), "live holder must stay intact");
+
+    // Last connection of the owning process drops: now transport-dead.
+    drop(second);
+    assert!(group.is_closed(), "group must close at zero live connections");
+    let dead = mgr.get_context(&holder, |c| c.is_transport_dead()).await.unwrap();
+    assert!(dead, "context must be transport-dead once its process has no live connections");
+
+    // The still-live stranger can now replace the orphan.
+    let (successor, replaced) = mgr
+        .create_context_replacing_idle_same_identity_on_connection(
+            Some("unauthenticated".into()),
+            Some(stranger),
+        )
+        .await
+        .expect("dead-process successor must replace the orphan");
+    let replaced = replaced.expect("orphan returned for teardown");
+    assert_eq!(replaced.id, holder);
+    assert!(
+        replaced.session_handles.backend_handles().any(|b| b == BackendHandle(780)),
+        "returned orphan carries its session for teardown"
+    );
+    assert_eq!(mgr.context_count(), 1);
+    assert!(mgr.get_context(&successor, |_| ()).await.is_some());
+    drop(stranger_stream);
+}
+
+/// Same process, second connection: after one of two same-pid
+/// connections drops, a re-Initialize arriving on the surviving
+/// connection (registry lookup for the pid yields the same group)
+/// replaces its own idle context at cap 1.
+#[tokio::test]
+async fn uds_group_same_process_surviving_connection_replaces_own_idle() {
+    use crate::server::connection_state::TrackedStream;
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 1);
+    let registry = mgr.connection_registry();
+    let (_c1, s1) = tokio::io::duplex(64);
+    let (_c2, s2) = tokio::io::duplex(64);
+    let first = TrackedStream::new(s1, Arc::clone(&registry), Some("uds:pid=5150".into()));
+    let group = first.connection_state();
+    let second = TrackedStream::new(s2, Arc::clone(&registry), Some("uds:pid=5150".into()));
+    let holder = mgr
+        .create_context_with_connection(Some("unauthenticated".into()), Some(Arc::clone(&group)))
+        .await
+        .unwrap();
+    drop(first);
+    // Request side on the surviving connection resolves the same group.
+    let resolved = registry.lookup("uds:pid=5150").expect("group must still be registered");
+    assert!(Arc::ptr_eq(&resolved, &group));
+    let (successor, replaced) = mgr
+        .create_context_replacing_idle_same_identity_on_connection(
+            Some("unauthenticated".into()),
+            Some(resolved),
+        )
+        .await
+        .expect("same-process re-Initialize on surviving connection must replace");
+    assert_eq!(replaced.expect("own idle holder returned").id, holder);
+    assert_eq!(mgr.context_count(), 1);
+    assert!(mgr.get_context(&successor, |_| ()).await.is_some());
+    drop(second);
 }

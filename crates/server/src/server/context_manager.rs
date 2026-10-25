@@ -270,8 +270,9 @@ pub struct LogicalClientInstance {
     /// consulted only for the owning context, never cross-context).
     pub contended_slot_login: HashSet<BackendSlotId>,
     pub authenticated_identity: Option<String>, // bound at creation (ADR-0005 §4)
-    /// Transport connection that carried this context's `Initialize`,
-    /// as a `Weak` so the context never keeps a dead connection alive.
+    /// Transport connection group that carried this context's
+    /// `Initialize` (same process on UDS, same connection on TCP),
+    /// as a `Weak` so the context never keeps a dead group alive.
     /// Resolved through the shared connection registry from the request
     /// extensions at Initialize. `None` for contexts created without a
     /// connection (tests/internal callers): never transport-dead.
@@ -384,9 +385,11 @@ impl LogicalClientInstance {
         }
     }
 
-    /// Transport-dead: the bound connection's state is closed or has
-    /// been dropped entirely. Connectionless contexts (`None`) are
-    /// never transport-dead.
+    /// Transport-dead: the bound connection group's state is closed
+    /// (every connection in the group dropped — for UDS, the owning
+    /// process has no live connections left) or has been dropped
+    /// entirely. Connectionless contexts (`None`) are never
+    /// transport-dead.
     pub fn is_transport_dead(&self) -> bool {
         match &self.connection_state {
             None => false,
@@ -403,11 +406,13 @@ impl LogicalClientInstance {
         self.connection_state.as_ref().and_then(Weak::upgrade).filter(|state| !state.is_closed())
     }
 
-    /// Whether this context lives on the same live connection as
-    /// `other` (the connection carrying a new `Initialize`). Two
-    /// connectionless endpoints count as the same (the legacy/test
-    /// path both replacement tests and peerless callers use); a
-    /// connectionless context never matches a live connection.
+    /// Whether this context lives in the same live connection group
+    /// as `other` (the group carrying a new `Initialize`): the same
+    /// process on UDS, the same connection on TCP — group identity
+    /// is `Arc` identity, shared by every connection in the group.
+    /// Two connectionless endpoints count as the same (the
+    /// legacy/test path both replacement tests and peerless callers
+    /// use); a connectionless context never matches a live group.
     pub fn same_connection_as(&self, other: Option<&Arc<ConnectionState>>) -> bool {
         match (&self.connection_state, other) {
             (None, None) => true,
@@ -1494,7 +1499,14 @@ impl ContextManager {
             .map(|entry| entry.key().clone())
             .collect();
         for id in &expired {
-            if let Some((_, ctx)) = self.contexts.remove(id) {
+            // Re-check reapability atomically under the shard write
+            // lock (same `remove_if` discipline as `evict_expired`):
+            // a session registered, an operation started, or a touch
+            // since the filter scan must not be dropped on stale
+            // data without a backend close.
+            if let Some((_, ctx)) = self.contexts.remove_if(id, |_, ctx| {
+                self.is_reapable(ctx, now) && !ctx.has_open_backend_sessions()
+            }) {
                 // W1-L13-17: purge holder-index entries (sessionless
                 // evictees hold no login by invariant; the purge is a
                 // no-op then, and future-proofs the index if that ever
@@ -1597,10 +1609,11 @@ impl ContextManager {
     /// unauthenticated — where every peer shares the single
     /// `"unauthenticated"` string, so identity alone cannot distinguish
     /// connections. The connection-aware sibling therefore ALSO requires
-    /// the candidate be transport-dead or live on the SAME connection
-    /// as the caller (see
+    /// the candidate be transport-dead or live in the SAME connection
+    /// group as the caller (same process on UDS, same connection on
+    /// TCP; see
     /// [`Self::create_context_replacing_idle_same_identity_on_connection`]);
-    /// a different live connection is never replaced. An absent identity
+    /// a different live group is never replaced. An absent identity
     /// (`None`, test/internal callers of `create_context`) never
     /// replaces anything.
     ///
@@ -1623,13 +1636,15 @@ impl ContextManager {
     /// Connection-aware form of
     /// [`Self::create_context_replacing_idle_same_identity`]: at the cap
     /// it may replace ONE idle same-identity context only when that
-    /// context is transport-dead (its connection is closed/dropped —
-    /// the exited-process orphan) OR lives on the same live connection
-    /// as this `Initialize` (`connection`, resolved from the request's
-    /// transport extensions). A different live connection is NEVER
-    /// replaced, even for the shared unauthenticated identity: a
-    /// still-running client's live context survives another client's
-    /// Initialize. The new context is bound to `connection`.
+    /// context is transport-dead (its group is closed/dropped — the
+    /// exited-process orphan; on UDS the process has no live
+    /// connections left) OR lives in the same live group as this
+    /// `Initialize` (`connection`, resolved from the request's
+    /// transport extensions: same process on UDS, same connection on
+    /// TCP). A different live group is NEVER replaced, even for the
+    /// shared unauthenticated identity: a still-running client's live
+    /// context survives another client's Initialize. The new context
+    /// is bound to `connection`.
     pub async fn create_context_replacing_idle_same_identity_on_connection(
         &self,
         identity: Option<String>,
@@ -1693,12 +1708,13 @@ impl ContextManager {
 
     /// Remove `id` only when it is idle AND replaceable by a new
     /// `Initialize` on `request_connection`: transport-dead, or living
-    /// on that same live connection. The idle + liveness checks and the
-    /// remove are atomic under the shard write lock (same discipline
-    /// as [`Self::remove_context_if_idle`]), so an operation or a
+    /// in that same live group (same process on UDS, same connection
+    /// on TCP). The idle + liveness checks and the remove are atomic
+    /// under the shard write lock (same discipline as
+    /// [`Self::remove_context_if_idle`]), so an operation or a
     /// connection change landing after the candidate scan can never be
-    /// cut off. A live context on a different connection reports
-    /// `Busy` (left intact; admission then refuses at the cap).
+    /// cut off. A live context in a different group reports `Busy`
+    /// (left intact; admission then refuses at the cap).
     fn remove_context_if_replaceable(
         &self,
         id: &ClientContextId,
