@@ -26,9 +26,9 @@ use super::super::mechanism_input::{
     sanitize_mechanism_input, validate_mechanism_transport,
 };
 use super::super::service_utils::{
-    check_sanitize, ensure_private_mint_allowed, input_from_wire, parse_mechanism,
-    register_session_object_handle, spawn_backend, template_declares_private_object,
-    template_declares_token_object,
+    LateMintedObjects, ObjectMintCompletionOwner, check_sanitize, ensure_private_mint_allowed,
+    input_from_wire, parse_mechanism, register_session_object_handle, spawn_backend,
+    template_declares_private_object, template_declares_token_object,
 };
 use crate::server::context_manager::ClientContextId;
 use crate::server::grpc_service::audit_events::audit_key_outcome;
@@ -363,8 +363,13 @@ async fn unwrap_key_authenticated_impl(
             }));
         }
     };
+    // P2-13: own the late result until registration adopts the key.
+    // Complements the in-closure `PendingNativeObject`, which covers
+    // post-mint validate/convert failures inside this same closure
+    // (those report `Err` here and disarm via `settle_on_error`).
+    let (completion_tx, mut completion_owner) = ObjectMintCompletionOwner::arm(backend_ref);
     let result = spawn_backend(move || {
-        wrapped_key.expose(|wrapped_raw| {
+        let outcome = wrapped_key.expose(|wrapped_raw| {
             aad.expose(|aad_raw| {
                 object_cleanup.ensure_clear()?;
                 if let Some(parameter) = parameter {
@@ -404,7 +409,12 @@ async fn unwrap_key_authenticated_impl(
                         .map(|(key, raw)| (key, secret_to_plain(&raw), None))
                 }
             })
-        })
+        });
+        let _ = completion_tx.send(match &outcome {
+            Ok((key, _, _)) => Ok(LateMintedObjects::single(session, CkObjectHandle(key.0 as u64))),
+            Err(rv) => Err(*rv),
+        });
+        outcome
     })
     .await?;
 
@@ -419,6 +429,11 @@ async fn unwrap_key_authenticated_impl(
                 Some(is_private),
             )
             .await;
+            // Adopted: disarm. Zero (context gone) stays armed so the
+            // owner destroys the unadopted key.
+            if key_handle != 0 {
+                completion_owner.disarm();
+            }
             Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
                 authenticated_output,
                 ck_rv: CkRv::OK.0,
@@ -426,12 +441,15 @@ async fn unwrap_key_authenticated_impl(
                 mechanism_parameter_out,
             }))
         }
-        Err(error) => Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
-            authenticated_output: None,
-            ck_rv: error.0,
-            key_handle: 0,
-            mechanism_parameter_out: Vec::new(),
-        })),
+        Err(error) => {
+            completion_owner.settle_on_error();
+            Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
+                authenticated_output: None,
+                ck_rv: error.0,
+                key_handle: 0,
+                mechanism_parameter_out: Vec::new(),
+            }))
+        }
     }
 }
 
@@ -591,5 +609,99 @@ mod tests {
             CkRv::KEY_FUNCTION_NOT_PERMITTED.0,
             "unauthenticated peer must not be blocked by extract-deny"
         );
+    }
+
+    /// P2-13: cancelling UnwrapKeyAuthenticated (legacy parameter
+    /// route) after native entry destroys the late-unwrapped key
+    /// exactly once; the unwrapping key survives.
+    #[tokio::test]
+    async fn unwrap_key_authenticated_cancel_after_entry_leaves_no_orphan() {
+        use crate::server::grpc_service::service_utils::register_session_object_handle;
+        use crate::server::handle_map::VirtualHandle;
+
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+        mock.initialize().unwrap();
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let backend_session = mock.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+        let unwrapping = mock.create_object(backend_session, Some(&[])).unwrap();
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+        let session_vh = ctx_mgr
+            .get_context(&ctx_id, |ctx| {
+                ctx.register_session(
+                    BackendHandle(backend_session.0),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                )
+            })
+            .await
+            .unwrap();
+        let unwrapping_vh = register_session_object_handle(
+            &ctx_mgr,
+            &ctx_id,
+            VirtualHandle(session_vh.0),
+            unwrapping,
+            false,
+            Some(false),
+        )
+        .await;
+        assert_eq!(mock.live_object_count(), 1, "only the unwrapping key exists");
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        mock.set_mint_gate(entered_tx, release_rx);
+
+        let rpc = {
+            let (ctx_mgr, backend, ctx_id) = (ctx_mgr.clone(), backend.clone(), ctx_id.clone());
+            tokio::spawn(async move {
+                super::unwrap_key_authenticated_impl(
+                    &HandlerContext::for_test(&ctx_mgr, &backend),
+                    Request::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedRequest {
+                        // T12: ZeroizeOnDrop — all fields spelled out.
+                        client_context_id: ctx_id.0.clone(),
+                        session_handle: session_vh.0,
+                        mechanism: Some(
+                            pkcs11_proxy_ng_proto::Mechanism::try_from(&CkMechanism {
+                                mechanism_type: CkMechanismType::RSA_PKCS,
+                                params: None,
+                            })
+                            .expect("parameterless mechanism converts"),
+                        ),
+                        unwrapping_key_handle: unwrapping_vh,
+                        wrapped_key: vec![7; 16],
+                        template: vec![],
+                        template_null: false,
+                        associated_data: vec![],
+                        wrapped_key_null_len: None,
+                        associated_data_null_len: None,
+                        authenticated_parameters: None,
+                    }),
+                )
+                .await
+            })
+        };
+        let op = tokio::task::spawn_blocking(move || {
+            entered_rx.recv_timeout(Duration::from_secs(10)).expect("native entry observed")
+        })
+        .await
+        .unwrap();
+        assert_eq!(op, "unwrap_key_authenticated");
+        rpc.abort();
+        assert!(rpc.await.expect_err("aborted join must err").is_cancelled());
+        release_tx.send(()).expect("parked worker alive");
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if mock.live_object_count() == 1 && mock.destroy_call_count() == 1 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for mint settlement: live={} destroys={} (want live=1 destroys=1)",
+                mock.live_object_count(),
+                mock.destroy_call_count()
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 }
