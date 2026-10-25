@@ -422,6 +422,16 @@ pub struct ProxyConfig {
     pub mechanism_discovery: MechanismDiscovery,
     #[serde(default = "default_lease_seconds")]
     pub lease_seconds: u64,
+    /// gRPC per-message ceiling (both directions), applied as tonic's
+    /// encode/decode limits. Ceiling chain (D6): the client carries a
+    /// fixed 64 MiB cap (`MAX_MESSAGE_BYTES` in
+    /// `crates/client/src/client/lifecycle.rs`), so this default and the
+    /// validator's hard cap are also 64 MiB — no leg silently truncates
+    /// below another. The exact-output path's internal 512 MiB backend
+    /// cap (`MAX_EXACT_OUTPUT_BYTES`) sits behind this wire ceiling and
+    /// is never the binding limit on the wire; flood/concurrency bounds
+    /// (`grpc_concurrency_limit_per_connection`, the backend breaker)
+    /// remain the DoS gate, not this size.
     #[serde(default = "default_max_message_bytes")]
     pub max_message_bytes: usize,
     /// Backend call timeout in seconds. Operations exceeding this are
@@ -582,7 +592,7 @@ fn default_lease_seconds() -> u64 {
     3600
 }
 fn default_max_message_bytes() -> usize {
-    4 * 1024 * 1024 // 4 MiB — tonic default
+    64 * 1024 * 1024 // 64 MiB — matches the client cap and the validator hard cap (D6)
 }
 fn default_request_timeout_secs() -> u64 {
     60

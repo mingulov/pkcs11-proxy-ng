@@ -555,7 +555,9 @@ fn default_max_message_bytes() {
 module = "."
 "#;
     let config: DaemonConfig = toml::from_str(toml).unwrap();
-    assert_eq!(config.proxy.max_message_bytes, 4 * 1024 * 1024);
+    // D6: the default wire ceiling is 64 MiB, matching the client's fixed
+    // cap and the validator's hard cap (`validate` rejects anything above).
+    assert_eq!(config.proxy.max_message_bytes, 64 * 1024 * 1024);
 }
 
 #[test]
@@ -616,6 +618,22 @@ module = "."
 
 [proxy]
 max_message_bytes = 100000000
+"#;
+    let config: DaemonConfig = toml::from_str(toml).unwrap();
+    let err = config.validate().unwrap_err();
+    assert!(err.contains("max_message_bytes"), "error: {err}");
+}
+
+#[test]
+fn validate_max_message_bytes_just_above_limit_rejected() {
+    // D6: 64 MiB is both the default and the hard cap — one byte over the
+    // cap must still be rejected (the cap itself does not move).
+    let toml = r#"
+[backend]
+module = "."
+
+[proxy]
+max_message_bytes = 67108865
 "#;
     let config: DaemonConfig = toml::from_str(toml).unwrap();
     let err = config.validate().unwrap_err();

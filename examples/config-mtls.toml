@@ -30,7 +30,7 @@ module = "/usr/lib/softhsm/libsofthsm2.so"
 [proxy]
 mechanism_discovery = "transparent"
 lease_seconds = 300
-max_message_bytes = 4194304      # 4 MiB
+max_message_bytes = 67108864     # 64 MiB (default; also the hard cap)
 # Backend call timeout in seconds. Calls exceeding this return CKR_DEVICE_ERROR.
 request_timeout_secs = 30
 # Maximum concurrent backend HSM calls.
