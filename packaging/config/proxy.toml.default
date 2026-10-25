@@ -2,7 +2,9 @@
 #
 # Edit [backend].module before starting the daemon. The shipped value
 # is a placeholder — the daemon refuses to start until you replace it
-# with a real path to a PKCS#11 .so on the host.
+# with a real path to a PKCS#11 .so on the host. The shipped listener
+# is loopback-only for local use; to serve other hosts, see the mTLS
+# template under [listener.remote] below.
 #
 # Eight values in this file can also be overridden at runtime by env
 # vars (each marked with an "Override:" comment below; the full list is
@@ -59,18 +61,21 @@ backend_health_consecutive_failures = 3
 # defaults; see crates/server/src/config.rs.
 
 [listener.remote]
-# Default operational mode: TCP without authentication, behind
-# external network protection (k8s NetworkPolicy / VPC).
-# The daemon logs a loud WARN at startup so this configuration is
-# visible in operator log scans — do NOT use this in untrusted
-# networks.
-# Override:  PKCS11_PROXY_BIND="0.0.0.0:7512"
-bind = "0.0.0.0:7512"
+# Default mode: loopback-only local use. The listener binds
+# 127.0.0.1 only, so the unauthenticated plaintext settings below
+# (auth = "none" + allow_insecure_tcp) are reachable solely from
+# this host — the same posture as examples/configs/dev/proxy.toml.
+# Override:  PKCS11_PROXY_BIND="127.0.0.1:7512"
+bind = "127.0.0.1:7512"
 auth = "none"
 allow_insecure_tcp = true
 
-# To enable mTLS, replace the [listener.remote] block above with the
-# template below and remove allow_insecure_tcp.
+# To serve other hosts, replace the [listener.remote] block above
+# with the mTLS template below and remove allow_insecure_tcp.
+# Serving other hosts over plaintext instead requires explicitly
+# editing bind to a non-loopback address AND accepting the loud
+# startup WARN for that posture — do NOT use it in untrusted
+# networks.
 #
 # [listener.remote]
 # bind = "0.0.0.0:7512"
