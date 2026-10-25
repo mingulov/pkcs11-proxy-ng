@@ -281,6 +281,38 @@ def differential_jsonl(report_jsonl):
     return out
 
 
+def proxy_config_text(module_toml, port):
+    """Daemon config (``proxy.toml``) text for the direct-vs-proxy harness.
+
+    ``module_toml`` is the already TOML-escaped backend module path.
+    """
+    # max_contexts: the production default stays 1 (D3 single-logical-client
+    # guardrail; crates/server/src/config.rs default_max_contexts). This
+    # harness is a multi-process driver -- pkcs11-check runs one parent
+    # process per test file and spawns transient probe children that each
+    # C_Initialize concurrently while the parent holds its context, and
+    # exited children are reaped via transport-dead detection -- so it
+    # declares its own topology here instead of inheriting the single-client
+    # default. 32 is bounded headroom for parent + concurrent probes.
+    # The key name must be exact: ProxyConfig is deny_unknown_fields, so a
+    # typo would be rejected at daemon startup rather than ignored.
+    return (
+        "[backend]\n"
+        f'module = "{module_toml}"\n'
+        "\n[proxy]\n"
+        "request_timeout_secs = 30\n"
+        "startup_timeout_secs = 30\n"
+        "shutdown_grace_secs = 30\n"
+        "backend_health_consecutive_failures = 3\n"
+        "max_contexts = 32\n"
+        "\n[listener.remote]\n"
+        f'bind = "127.0.0.1:{port}"\n'
+        'auth = "none"\n'
+        "allow_insecure_tcp = true\n"
+        "\n[auth]\n"
+    )
+
+
 def provision_softhsm_windows(workdir):
     """Fetch the pinned disig portable zip (hash-verified) and unpack it."""
     dl_dir = os.path.join(workdir, "dl")
@@ -416,20 +448,7 @@ def main():
     # daemon never binds. No-op on Unix (no backslashes in the path).
     module_toml = softhsm_lib.replace("\\", "\\\\")
     with open(proxy_toml, "w", encoding="utf-8") as f:
-        f.write(
-            "[backend]\n"
-            f'module = "{module_toml}"\n'
-            "\n[proxy]\n"
-            "request_timeout_secs = 30\n"
-            "startup_timeout_secs = 30\n"
-            "shutdown_grace_secs = 30\n"
-            "backend_health_consecutive_failures = 3\n"
-            "\n[listener.remote]\n"
-            f'bind = "127.0.0.1:{port}"\n'
-            'auth = "none"\n'
-            "allow_insecure_tcp = true\n"
-            "\n[auth]\n"
-        )
+        f.write(proxy_config_text(module_toml, port))
 
     common_p11 = [
         "--slot",

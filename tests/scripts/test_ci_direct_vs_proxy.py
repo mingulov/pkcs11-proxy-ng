@@ -161,6 +161,20 @@ class TokenProvisioningTests(unittest.TestCase):
             run.assert_called_once_with(mod.init_token_argv("softhsm2-util"))
 
 
+class ProxyConfigTests(unittest.TestCase):
+    def test_generated_config_pins_max_contexts(self) -> None:
+        import tomllib
+
+        text = mod.proxy_config_text("/tmp/libsofthsm2.so", 4433)
+        config = tomllib.loads(text)
+        # Harness is multi-process (parent + transient probe children);
+        # production default remains 1, so the harness must pin its own
+        # bounded value explicitly. Exact key matters (deny_unknown_fields).
+        self.assertEqual(config["proxy"]["max_contexts"], 32)
+        self.assertEqual(config["backend"]["module"], "/tmp/libsofthsm2.so")
+        self.assertEqual(config["listener"]["remote"]["bind"], "127.0.0.1:4433")
+
+
 class DifferentialArgvTests(unittest.TestCase):
     def test_argv_shape(self) -> None:
         argv = mod.differential_argv("/w/direct/report.jsonl", "/w/proxied/report.jsonl")
