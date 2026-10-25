@@ -279,7 +279,14 @@ fn run_wedge_eviction() -> ! {
     // scheduling jitter (~0ms), so only a parked finalize makes the
     // timeout (→ exit 2) deterministic.
     backend.inject_finalize_park(true);
-    let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+    // Session-holding contexts are D4-exempt until the absolute cap;
+    // a ZERO cap puts the seeded context past cap so the wedged-tick
+    // teardown path under test still runs.
+    let ctx_mgr = Arc::new(ContextManager::new_with_max_context_lifetime(
+        Duration::from_secs(300),
+        0,
+        Duration::ZERO,
+    ));
 
     let runtime = build_child_runtime();
     let code = runtime.block_on(async {
@@ -383,7 +390,14 @@ fn run_stuck_trip() -> ! {
     let backend = Arc::new(MockBackend::default_test());
     backend.initialize().expect("init");
     backend.set_close_session_delay(Duration::from_secs(8));
-    let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+    // Session-holding contexts are D4-exempt until the absolute cap;
+    // a ZERO cap puts the seeded context past cap so the wedged-tick
+    // teardown path under test still runs.
+    let ctx_mgr = Arc::new(ContextManager::new_with_max_context_lifetime(
+        Duration::from_secs(300),
+        0,
+        Duration::ZERO,
+    ));
 
     let runtime = build_child_runtime();
     let code = runtime.block_on(async {
@@ -732,7 +746,14 @@ fn run_wedge_eviction_ffi() -> ! {
     let backend = Arc::new(backend);
     backend.initialize().expect("fixture init");
 
-    let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+    // Session-holding contexts are D4-exempt until the absolute cap;
+    // a ZERO cap puts the seeded context past cap so the wedged-tick
+    // teardown path under test still runs.
+    let ctx_mgr = Arc::new(ContextManager::new_with_max_context_lifetime(
+        Duration::from_secs(300),
+        0,
+        Duration::ZERO,
+    ));
     let runtime = build_child_runtime();
     let code = runtime.block_on(async {
         let ctx_id = ctx_mgr.create_context(None).await.expect("ctx");
