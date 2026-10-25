@@ -2893,20 +2893,35 @@ impl Pkcs11Backend for MockBackend {
         // Simulation of the FFI checked entry: a stale incarnation or
         // a fail-safe lifetime mismatch refuses without counting a
         // destroy (no native call), so a recycled replacement
-        // survives. Only an exact lifetime match — or no capture
-        // against an untracked object — destroys.
+        // survives. With a captured lifetime it destroys only when
+        // the settling session's entry exists and every entry for
+        // the handle across all sessions equals the captured id;
+        // any differing entry or a missing settling-session entry
+        // refuses. With no capture the legacy leg is unchanged: a
+        // live settling-session entry refuses, no entry destroys.
         if let Some(expected) = incarnation {
             match self.session_incarnation(session) {
                 Some(current) if current == expected => {}
                 _ => return Err(CkRv::SESSION_HANDLE_INVALID),
             }
         }
-        match (object_lifetime, self.object_lifetime(session, object)) {
-            (Some(expected), Some(current)) if current == expected => {}
-            (Some(_), Some(_)) => return Err(CkRv::OBJECT_HANDLE_INVALID),
-            (Some(_), None) => return Err(CkRv::OBJECT_HANDLE_INVALID),
-            (None, Some(_)) => return Err(CkRv::OBJECT_HANDLE_INVALID),
-            (None, None) => {}
+        let refuse = {
+            let state = self.state.lock().unwrap();
+            let session_entry = state.object_lifetimes.get(&(session.0, object.0)).copied();
+            match object_lifetime {
+                Some(expected) => match session_entry {
+                    Some(current) if current == expected => state
+                        .object_lifetimes
+                        .iter()
+                        .any(|((_, obj), &id)| *obj == object.0 && id != expected),
+                    Some(_) => true,
+                    None => true,
+                },
+                None => session_entry.is_some(),
+            }
+        };
+        if refuse {
+            return Err(CkRv::OBJECT_HANDLE_INVALID);
         }
         self.destroy_object(session, object)
     }

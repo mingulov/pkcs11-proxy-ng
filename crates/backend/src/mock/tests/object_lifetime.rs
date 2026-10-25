@@ -369,3 +369,182 @@ fn object_lifetime_removed_on_destroy_close_and_finalize() {
     backend.finalize().unwrap();
     assert_eq!(backend.object_lifetime(session2, third), None);
 }
+
+/// I-1 cross-session residual (mock mirror): the original mint's
+/// delayed fresh record lands between a competitor's cross-session
+/// destroy and its recreate. The table then holds
+/// `(origin,H)=idA` and `(competitor,H)=idB` for the replacement.
+/// Settlement from the origin with `idA` must refuse with no counted
+/// destroy, leaving the replacement usable. The delayed record is
+/// seeded directly because the mock allocation funnel records
+/// atomically with allocation and cannot split native return from
+/// record; the competitor find/destroy/recreate run through real
+/// mock APIs and the seeded entry is exactly the delayed record.
+#[test]
+fn cross_session_delayed_record_then_recreate_refuses_origin_settlement() {
+    let backend = MockBackend::default_test();
+    backend.set_handle_recycling(true);
+    backend.initialize().unwrap();
+    let origin = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let other = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let origin_incarnation = backend.session_incarnation(origin);
+    let token_template = [CkAttribute {
+        attr_type: CkAttributeType::TOKEN,
+        value: Some(CkAttributeValue::Bool(true)),
+    }];
+
+    // Original mint in the origin session; capture its lifetime.
+    let capture = crate::mint_capture::begin(origin);
+    let minted = backend.create_object(origin, Some(&token_template)).unwrap();
+    let captured = capture.captured();
+    let captured_lifetime = capture_lifetime_for(&captured, minted);
+    drop(capture);
+    let id_a = backend.object_lifetime(origin, minted).expect("tracked mint");
+    assert_eq!(captured_lifetime, Some(id_a));
+
+    // Competitor FindObjects-records and destroys through the other
+    // session, clearing every entry for the handle.
+    backend.set_find_objects_result(vec![minted]);
+    backend.find_objects_init(other, Some(&[])).unwrap();
+    assert_eq!(backend.find_objects(other, 10).unwrap(), vec![minted]);
+    backend.find_objects_final(other).unwrap();
+    backend.destroy_object(other, minted).unwrap();
+    assert_eq!(backend.object_lifetime(origin, minted), None);
+    assert_eq!(backend.object_lifetime(other, minted), None);
+    assert_eq!(backend.live_object_count(), 0);
+
+    // Original thread's delayed fresh record lands now ( seeded:
+    // the funnel cannot delay its record past the destroy above).
+    backend.state.lock().unwrap().object_lifetimes.insert((origin.0, minted.0), id_a);
+    assert_eq!(backend.object_lifetime(origin, minted), Some(id_a));
+
+    // Competitor recreates the same numeric handle; its capture is
+    // poisoned by the origin entry and it inserts a newer id.
+    let competitor_capture = crate::mint_capture::begin(other);
+    let replacement = backend.create_object(other, Some(&token_template)).unwrap();
+    assert_eq!(replacement, minted, "recycling mock must reuse the object handle");
+    assert_eq!(
+        competitor_capture.captured(),
+        Vec::<(CkObjectHandle, u64)>::new(),
+        "competitor recreate capture must be poisoned by the origin entry"
+    );
+    drop(competitor_capture);
+    let id_b = backend.object_lifetime(other, replacement).expect("tracked replacement");
+    assert_ne!(id_a, id_b);
+    assert_eq!(backend.object_lifetime(origin, replacement), Some(id_a));
+
+    let destroys_before = backend.destroy_call_count();
+    assert_eq!(
+        backend.destroy_object_if_bound(origin, replacement, origin_incarnation, Some(id_a)),
+        Err(CkRv::OBJECT_HANDLE_INVALID),
+        "origin settlement must refuse when another session tracks a newer lifetime"
+    );
+    assert_eq!(
+        backend.destroy_call_count(),
+        destroys_before,
+        "refused origin settlement must issue no destroy"
+    );
+    assert_eq!(backend.live_object_count(), 1, "replacement must survive");
+    backend.get_object_size(other, replacement).expect("replacement remains usable");
+    assert_eq!(backend.object_lifetime(other, replacement), Some(id_b));
+}
+
+/// Control: the same cross-session interleaving WITHOUT the
+/// competitor recreate still settles the original exactly once.
+/// The competitor destroy clears the prior object; the origin then
+/// mints and records the only entry for the handle, so settlement
+/// with its captured id destroys once and a second settle refuses.
+#[test]
+fn cross_session_delayed_record_without_recreate_settles_once() {
+    let backend = MockBackend::default_test();
+    backend.set_handle_recycling(true);
+    backend.initialize().unwrap();
+    let origin = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let other = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let origin_incarnation = backend.session_incarnation(origin);
+    let token_template = [CkAttribute {
+        attr_type: CkAttributeType::TOKEN,
+        value: Some(CkAttributeValue::Bool(true)),
+    }];
+
+    // Prior object under the competitor session, found and destroyed
+    // there so every entry for the handle is cleared.
+    let prior = backend.create_object(other, Some(&token_template)).unwrap();
+    backend.destroy_object(other, prior).unwrap();
+    assert_eq!(backend.object_lifetime(origin, prior), None);
+    assert_eq!(backend.object_lifetime(other, prior), None);
+
+    // Origin mints the handle with no competitor recreate afterwards.
+    let capture = crate::mint_capture::begin(origin);
+    let minted = backend.create_object(origin, Some(&token_template)).unwrap();
+    assert_eq!(minted, prior, "recycling mock must reuse the object handle");
+    let captured = capture.captured();
+    let captured_lifetime = capture_lifetime_for(&captured, minted);
+    drop(capture);
+    let id_a = backend.object_lifetime(origin, minted).expect("tracked mint");
+    assert_eq!(captured_lifetime, Some(id_a));
+    assert_eq!(backend.object_lifetime(other, minted), None);
+
+    let destroys_before = backend.destroy_call_count();
+    backend.destroy_object_if_bound(origin, minted, origin_incarnation, Some(id_a)).unwrap();
+    assert_eq!(
+        backend.destroy_call_count(),
+        destroys_before + 1,
+        "uncontended origin record must settle exactly once"
+    );
+    assert_eq!(backend.live_object_count(), 0);
+    assert_eq!(backend.object_lifetime(origin, minted), None);
+    assert_eq!(
+        backend.destroy_object_if_bound(origin, minted, origin_incarnation, Some(id_a)),
+        Err(CkRv::OBJECT_HANDLE_INVALID),
+    );
+    assert_eq!(backend.destroy_call_count(), destroys_before + 1);
+}
+
+/// Found-object sharing control: an object minted in session A and
+/// then found in session B must share one lifetime id, so settlement
+/// from A with the captured id destroys exactly once with no false
+/// refusal from B's found entry.
+#[test]
+fn found_object_shared_across_sessions_settles_from_origin() {
+    let backend = MockBackend::default_test();
+    backend.set_handle_recycling(true);
+    backend.initialize().unwrap();
+    let origin = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let other = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let origin_incarnation = backend.session_incarnation(origin);
+    let token_template = [CkAttribute {
+        attr_type: CkAttributeType::TOKEN,
+        value: Some(CkAttributeValue::Bool(true)),
+    }];
+
+    let capture = crate::mint_capture::begin(origin);
+    let minted = backend.create_object(origin, Some(&token_template)).unwrap();
+    let captured = capture.captured();
+    let captured_lifetime = capture_lifetime_for(&captured, minted);
+    drop(capture);
+    let id_a = backend.object_lifetime(origin, minted).expect("tracked mint");
+    assert_eq!(captured_lifetime, Some(id_a));
+
+    backend.set_find_objects_result(vec![minted]);
+    backend.find_objects_init(other, Some(&[])).unwrap();
+    assert_eq!(backend.find_objects(other, 10).unwrap(), vec![minted]);
+    backend.find_objects_final(other).unwrap();
+    assert_eq!(
+        backend.object_lifetime(other, minted),
+        Some(id_a),
+        "found object must reuse the existing lifetime id across sessions"
+    );
+
+    let destroys_before = backend.destroy_call_count();
+    backend.destroy_object_if_bound(origin, minted, origin_incarnation, Some(id_a)).unwrap();
+    assert_eq!(backend.destroy_call_count(), destroys_before + 1);
+    assert_eq!(backend.live_object_count(), 0);
+    assert_eq!(backend.object_lifetime(origin, minted), None);
+    assert_eq!(backend.object_lifetime(other, minted), None);
+    assert_eq!(
+        backend.destroy_object_if_bound(origin, minted, origin_incarnation, Some(id_a)),
+        Err(CkRv::OBJECT_HANDLE_INVALID),
+    );
+    assert_eq!(backend.destroy_call_count(), destroys_before + 1);
+}

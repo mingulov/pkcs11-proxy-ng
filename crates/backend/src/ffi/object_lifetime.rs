@@ -51,8 +51,11 @@ impl ObjectLifetimeTable {
         session: CkSessionHandle,
         object: CkObjectHandle,
     ) -> (u64, bool) {
-        let id = self.next.fetch_add(1, Ordering::SeqCst);
         let mut entries = self.lock_entries();
+        // Fetch inside the entries lock so concurrent fresh records
+        // store ids in lock order: the last writer holds the newest
+        // id (M-3).
+        let id = self.next.fetch_add(1, Ordering::SeqCst);
         let contended = entries.keys().any(|&(_, obj)| obj == object.0);
         entries.insert((session.0, object.0), id);
         (id, contended)
@@ -60,20 +63,32 @@ impl ObjectLifetimeTable {
 
     /// Record a lifetime only when the object is not yet tracked
     /// (handles surfaced by `C_FindObjects`).
+    ///
+    /// Found-object sharing: when any session already tracks this
+    /// numeric handle, the new session's entry reuses that existing
+    /// lifetime id instead of minting a different id for the same
+    /// physical object. Differing ids for one object would make a
+    /// legitimate bound destroy from the minting session look like
+    /// it races a replacement and false-refuse. A fresh id is minted
+    /// only when no entry for the handle exists anywhere.
     pub(in crate::ffi) fn record_if_absent(
         &self,
         session: CkSessionHandle,
         object: CkObjectHandle,
     ) -> u64 {
         let mut entries = self.lock_entries();
-        match entries.get(&(session.0, object.0)) {
-            Some(&id) => id,
-            None => {
-                let id = self.next.fetch_add(1, Ordering::SeqCst);
-                entries.insert((session.0, object.0), id);
-                id
-            }
+        if let Some(&id) = entries.get(&(session.0, object.0)) {
+            return id;
         }
+        if let Some(existing) =
+            entries.iter().find(|((_, obj), _)| *obj == object.0).map(|(_, &id)| id)
+        {
+            entries.insert((session.0, object.0), existing);
+            return existing;
+        }
+        let id = self.next.fetch_add(1, Ordering::SeqCst);
+        entries.insert((session.0, object.0), id);
+        id
     }
 
     pub(in crate::ffi) fn lifetime(
