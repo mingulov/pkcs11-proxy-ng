@@ -2691,6 +2691,7 @@ impl Pkcs11Backend for MockBackend {
         base_key: CkObjectHandle,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<CkDeriveKeyOutputResult> {
+        self.rendezvous_mint_gate("derive_key");
         self.record_mechanism_entry(MockMechanismEntry::DeriveKey, Some(mechanism.mechanism()));
         if let Err(rv) = self.require_mechanism_workflow_for_session(
             session,
@@ -2765,6 +2766,7 @@ impl Pkcs11Backend for MockBackend {
         m: &ValidatedMechanismParams,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
+        self.rendezvous_mint_gate("generate_key");
         self.record_mechanism_entry(MockMechanismEntry::GenerateKey, Some(m.mechanism()));
         self.require_mechanism_workflow_for_session(
             session,
@@ -2826,6 +2828,7 @@ impl Pkcs11Backend for MockBackend {
         public_template: Option<&[CkAttribute]>,
         private_template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, CkObjectHandle)> {
+        self.rendezvous_mint_gate("generate_key_pair");
         self.record_mechanism_entry(MockMechanismEntry::GenerateKeyPair, Some(m.mechanism()));
         self.keygen_templates.lock().unwrap().push((
             m.mechanism().clone(),
