@@ -45,6 +45,18 @@ pub(crate) async fn async_complete(
     let function_name = req.function_name;
     info!(context_id = %ctx_id.0, function_name = %function_name, "AsyncComplete");
 
+    // LATENT TRAP: the `object_handle` / `additional_object_handle`
+    // returned below reach the client RAW — this handler registers /
+    // virtualizes nothing, unlike every mint handler. Harmless only
+    // while no FFI backend implements `async_complete` (trait default:
+    // `FUNCTION_NOT_SUPPORTED`; in-tree test backends return `(0, 0)`).
+    // If FFI async completion is ever implemented, handle
+    // virtualization and late-completion settlement must land
+    // together in the same change (the `MintCompletionOwner`
+    // pattern used by the object-mint handlers): virtualization
+    // alone would still orphan handles from completions that land
+    // after a timeout/cancel, and settlement without virtualization
+    // would destroy handles the client was just handed raw.
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || backend.async_complete(session, &function_name)).await?;
 
