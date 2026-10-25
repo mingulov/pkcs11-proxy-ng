@@ -23,6 +23,13 @@
 //! [`DEFAULT_RPC_TIMEOUT`] (a set-but-ignored value logs a warning — the
 //! shim's `PKCS11_PROXY_CONNECT_*` tolerance style). The shim inherits
 //! the knob because it builds its client through these constructors.
+//!
+//! Raising this deadline only helps if the server is raised to match:
+//! the daemon independently abandons a backend call at its own
+//! `proxy.request_timeout_secs` (default 60s as well), so an operation
+//! longer than the server timeout still fails there no matter how long
+//! the client is willing to wait. The effective bound is the smaller
+//! of the two; raise both together.
 
 use std::future::Future;
 use std::pin::Pin;
