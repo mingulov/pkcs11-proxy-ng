@@ -89,6 +89,8 @@ fn public_size_attr(
     }))
 }
 
+// Legacy-family caller per ADR-0010 Scope-2 disposition (2026-10-25);
+// see `handlers::crypto` for the CLI owner-surface note.
 pub(crate) async fn wrap_key(
     client: &mut Pkcs11Client,
     slot_id: u64,
