@@ -60,6 +60,7 @@ mod interface;
 mod kryoptic_gav_null;
 #[cfg(not(miri))] // real kryoptic provider via libloading + daemon; covered natively
 mod kryoptic_label_probe;
+mod notify_unsupported;
 mod null_pointers;
 #[cfg(not(miri))] // binds TcpListeners (tokio); covered natively
 mod output_semantics;
