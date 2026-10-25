@@ -258,7 +258,8 @@ async fn unwrap_key_impl(
         }
     };
     // P2-13: own the late result until registration adopts the key.
-    let (completion_tx, mut completion_owner) = ObjectMintCompletionOwner::arm(backend_ref);
+    let (completion_tx, mut completion_owner) =
+        ObjectMintCompletionOwner::arm_for_session(backend_ref, session);
     let result = spawn_backend(move || {
         let outcome = wrapped_key.expose(|raw| {
             backend.unwrap_key(

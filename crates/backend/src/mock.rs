@@ -9,7 +9,7 @@ use pkcs11_proxy_ng_proto::convert::message_effects::ParameterEffectCallMode;
 use pkcs11_proxy_ng_proto::convert::message_params::MessageParameter;
 use pkcs11_proxy_ng_types::*;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 /// One-shot behavior for the next stateful lifecycle call covered by the
@@ -401,6 +401,15 @@ pub struct MockBackend {
     /// uninitialized → CNI, malformed → AB + termination, reinit →
     /// clean recovery.
     terminating_duals: AtomicBool,
+    /// Next mock session incarnation (P2-13 simulation). Assigned on
+    /// open, invalidated on close; monotonically increasing per mock
+    /// instance so a recycled numeric handle never reuses an id.
+    next_session_incarnation: AtomicU64,
+    /// Provider-style handle recycling for tests (P2-13): when on,
+    /// session and object allocation reuse the smallest freed numeric
+    /// handle the way real providers recycle handles after a close or
+    /// destroy. Default off (legacy monotonic allocation).
+    recycle_handles: AtomicBool,
     /// Per-session init flags for terminating mode (bitmask of the
     /// `DUAL_*` constants). Separate from `active_ops`: real tokens
     /// run the two dual legs as independent state machines, while the
@@ -527,6 +536,7 @@ impl MockBackend {
                 initialized: false,
                 next_session: 1,
                 next_object: 1,
+                session_incarnations: HashMap::new(),
                 open_sessions: Vec::new(),
                 login_state: HashMap::new(),
                 live_objects: std::collections::HashSet::new(),
@@ -593,6 +603,8 @@ impl MockBackend {
             data_op_calls: AtomicUsize::new(0),
             last_data_op: Mutex::new(None),
             terminating_duals: AtomicBool::new(false),
+            next_session_incarnation: AtomicU64::new(1),
+            recycle_handles: AtomicBool::new(false),
             dual_state: Mutex::new(HashMap::new()),
             message_begin_calls: AtomicUsize::new(0),
             message_init_contract: Mutex::new(None),
@@ -1458,12 +1470,31 @@ impl MockBackend {
         self
     }
 
+    /// Enable provider-style handle recycling (P2-13 tests): session
+    /// and object allocation reuse the smallest freed numeric handle,
+    /// the way real providers recycle handles after a close/destroy.
+    pub fn set_handle_recycling(&self, enabled: bool) {
+        self.recycle_handles.store(enabled, Ordering::SeqCst);
+    }
+
     fn allocate_object(&self, state: &mut MockState) -> CkResult<CkObjectHandle> {
         if self.max_objects > 0 && state.live_objects.len() as u64 >= self.max_objects {
             return Err(CkRv::DEVICE_MEMORY);
         }
-        let handle = CkObjectHandle(state.next_object as u64);
-        state.next_object += 1;
+        let handle = if self.recycle_handles.load(Ordering::SeqCst) {
+            let mut candidate = 1u64;
+            while state.live_objects.contains(&candidate) {
+                candidate += 1;
+            }
+            // Keep the monotonic counter ahead of recycled handles so
+            // disabling recycling later cannot reissue a live handle.
+            state.next_object = state.next_object.max(candidate + 1);
+            CkObjectHandle(candidate)
+        } else {
+            let handle = CkObjectHandle(state.next_object as u64);
+            state.next_object += 1;
+            handle
+        };
         state.live_objects.insert(handle.0);
         Ok(handle)
     }
@@ -2806,6 +2837,28 @@ impl Pkcs11Backend for MockBackend {
             return Err(rv);
         }
         self.destroy_object_impl(session, object)
+    }
+    fn session_incarnation(&self, session: CkSessionHandle) -> Option<u64> {
+        self.state.lock().unwrap().session_incarnations.get(&session.0).copied()
+    }
+    fn destroy_object_if_incarnation(
+        &self,
+        session: CkSessionHandle,
+        object: CkObjectHandle,
+        incarnation: Option<u64>,
+    ) -> CkResult<()> {
+        // Simulation of the FFI checked entry: a stale or absent
+        // incarnation refuses without counting a destroy (no native
+        // call), so a recycled replacement object survives. The trait
+        // default would route the refusal through `destroy_object`
+        // and miscount, so the check runs here first.
+        if let Some(expected) = incarnation {
+            match self.session_incarnation(session) {
+                Some(current) if current == expected => {}
+                _ => return Err(CkRv::SESSION_HANDLE_INVALID),
+            }
+        }
+        self.destroy_object(session, object)
     }
     fn get_object_size(&self, session: CkSessionHandle, object: CkObjectHandle) -> CkResult<u64> {
         self.object_size(session, object)

@@ -1190,6 +1190,17 @@ impl Pkcs11Backend for FfiBackend {
     fn destroy_object(&self, session: CkSessionHandle, object: CkObjectHandle) -> CkResult<()> {
         self.ffi_destroy_object(session, object)
     }
+    fn session_incarnation(&self, session: CkSessionHandle) -> Option<u64> {
+        self.ffi_session_incarnation(session)
+    }
+    fn destroy_object_if_incarnation(
+        &self,
+        session: CkSessionHandle,
+        object: CkObjectHandle,
+        incarnation: Option<u64>,
+    ) -> CkResult<()> {
+        self.ffi_destroy_object_if_incarnation(session, object, incarnation)
+    }
     fn destroy_quarantined_object(
         &self,
         session: CkSessionHandle,

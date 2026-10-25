@@ -87,7 +87,8 @@ pub(super) async fn create_object(
     // result is consumed the owner destroys the late-minted object; no
     // `.await` may sit between the `spawn_backend` return and the
     // settle calls below (disarm/settle atomic with consumption).
-    let (completion_tx, mut completion_owner) = ObjectMintCompletionOwner::arm(&ctx.backend);
+    let (completion_tx, mut completion_owner) =
+        ObjectMintCompletionOwner::arm_for_session(&ctx.backend, session);
     let backend = ctx.backend.clone();
     let result = spawn_backend(move || {
         let outcome = backend.create_object(session, template.as_deref());
@@ -234,7 +235,8 @@ pub(super) async fn copy_object(
     // P2-13: own the late result. The owner stays armed across the
     // post-`Ok` token-state probe below — cancellation during that
     // await must not orphan the already-minted copy.
-    let (completion_tx, mut completion_owner) = ObjectMintCompletionOwner::arm(&ctx.backend);
+    let (completion_tx, mut completion_owner) =
+        ObjectMintCompletionOwner::arm_for_session(&ctx.backend, session);
     let backend = ctx.backend.clone();
     let result = spawn_backend(move || {
         let outcome = backend.copy_object(session, object, template.as_deref());

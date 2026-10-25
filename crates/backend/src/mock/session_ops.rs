@@ -37,6 +37,7 @@ impl MockBackend {
             }
             state.initialized = false;
             state.open_sessions.clear();
+            state.session_incarnations.clear();
             state.login_state.clear();
             state.live_objects.clear();
             state.session_objects.clear();
@@ -185,8 +186,21 @@ impl MockBackend {
         if self.max_sessions > 0 && state.open_sessions.len() as u64 >= self.max_sessions {
             return Err(CkRv::SESSION_COUNT);
         }
-        let handle = CkSessionHandle(state.next_session as u64);
-        state.next_session += 1;
+        let handle = if self.recycle_handles.load(std::sync::atomic::Ordering::SeqCst) {
+            let mut candidate = 1u64;
+            while state.open_sessions.iter().any(|(open, _, _)| open.0 == candidate) {
+                candidate += 1;
+            }
+            state.next_session = state.next_session.max(candidate + 1);
+            CkSessionHandle(candidate)
+        } else {
+            let handle = CkSessionHandle(state.next_session as u64);
+            state.next_session += 1;
+            handle
+        };
+        let incarnation =
+            self.next_session_incarnation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        state.session_incarnations.insert(handle.0, incarnation);
         state.open_sessions.push((handle, slot_id, flags));
         Ok(handle)
     }
@@ -207,6 +221,7 @@ impl MockBackend {
         if let Some(pos) = state.open_sessions.iter().position(|(handle, _, _)| *handle == session)
         {
             let (_, slot_id, _) = state.open_sessions.remove(pos);
+            state.session_incarnations.remove(&session.0);
             state.active_ops.remove(&session.0);
             self.remove_session_owned_objects(&mut state, &[session.0]);
             self.clear_session_scoped_side_state(session.0);
@@ -230,6 +245,7 @@ impl MockBackend {
             .collect();
         state.open_sessions.retain(|(_, open_slot, _)| *open_slot != slot_id);
         for handle in &closing {
+            state.session_incarnations.remove(handle);
             state.active_ops.remove(handle);
         }
         self.remove_session_owned_objects(&mut state, &closing);

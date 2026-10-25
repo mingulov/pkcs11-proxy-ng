@@ -71,6 +71,13 @@ const FENCE_CLOSING: u64 = u64::MAX - 1;
 /// the interval bounds close latency after the last reader exits.
 const FENCE_DRAIN_POLL: Duration = Duration::from_micros(100);
 
+/// Process-wide source of fence incarnation ids (P2-13). Every fence
+/// creation draws a fresh id, so a numeric session handle recycled by
+/// the provider after a committed close always carries a different
+/// incarnation than the closed session did. Starts at 1 so `0` can
+/// never be a live incarnation.
+static NEXT_FENCE_INCARNATION: AtomicU64 = AtomicU64::new(1);
+
 /// One session's fence: a reader count plus a lifecycle word. Lock-free;
 /// shared by cloning the `Arc`, never by holding table or shard locks.
 /// No `Default`: the zero state would read as closed-at-epoch-0; use
@@ -79,11 +86,20 @@ const FENCE_DRAIN_POLL: Duration = Duration::from_micros(100);
 pub(in crate::ffi) struct SessionFence {
     readers: AtomicU64,
     lifecycle: AtomicU64,
+    /// Immutable incarnation id drawn at creation. Bound into detached
+    /// late-mint settlement so a destroy issued for a closed session
+    /// cannot land on a replacement session (or its objects) when the
+    /// provider recycles the numeric handle.
+    incarnation: u64,
 }
 
 impl SessionFence {
     fn new() -> Self {
-        Self { readers: AtomicU64::new(0), lifecycle: AtomicU64::new(FENCE_OPEN) }
+        Self {
+            readers: AtomicU64::new(0),
+            lifecycle: AtomicU64::new(FENCE_OPEN),
+            incarnation: NEXT_FENCE_INCARNATION.fetch_add(1, SeqCst),
+        }
     }
 }
 
@@ -135,6 +151,14 @@ impl std::fmt::Debug for SessionFenceGuard<'_> {
     }
 }
 
+impl SessionFenceGuard<'_> {
+    /// The fence incarnation this guard entered under.
+    #[allow(dead_code)]
+    pub(in crate::ffi) fn incarnation(&self) -> u64 {
+        self.fence.incarnation
+    }
+}
+
 impl SessionFenceTable {
     /// Enter `session`'s fence for ordinary op/cancel activity. The admission
     /// proves lifecycle read exclusion; the epoch stamps this entry's
@@ -157,6 +181,65 @@ impl SessionFenceTable {
         // A close that marked between the load and the increment still wins:
         // uncount and fail rather than running under a closing fence.
         if fence.lifecycle.load(SeqCst) != FENCE_OPEN {
+            fence.readers.fetch_sub(1, SeqCst);
+            return Err(CkRv::SESSION_HANDLE_INVALID);
+        }
+        Ok(SessionFenceGuard {
+            fence,
+            mode: FenceMode::Read,
+            session: session.0,
+            epoch,
+            settled: Cell::new(true),
+            _gate: PhantomData,
+            _confine: PhantomData,
+        })
+    }
+
+    /// The live fence incarnation for `session`, if a fence entry
+    /// currently exists. Never creates an entry: after a committed
+    /// close removes the entry this returns `None`, so a stale
+    /// incarnation can never be re-minted by querying.
+    #[allow(dead_code)]
+    pub(in crate::ffi) fn session_incarnation(&self, session: CkSessionHandle) -> Option<u64> {
+        self.fences.get(&session.0).map(|fence| fence.incarnation)
+    }
+
+    /// The fence incarnation for `session`, creating the fence entry
+    /// first when none exists yet. Used when arming detached late-mint
+    /// settlement before the mint's own `enter` would create the
+    /// fence, so the captured id is the id the mint runs under. Like
+    /// [`Self::enter`], this creates an entry for any well-formed
+    /// handle (see the module-level residual note).
+    pub(in crate::ffi) fn incarnation_or_create(&self, session: CkSessionHandle) -> u64 {
+        self.fences.entry(session.0).or_insert_with(|| Arc::new(SessionFence::new())).incarnation
+    }
+
+    /// Enter `session`'s fence only when the live fence is the
+    /// incarnation `expected` (P2-13 detached settlement). Refuses
+    /// with `SESSION_HANDLE_INVALID` — without creating an entry and
+    /// without counting a reader — when no fence is live or its
+    /// incarnation differs, so a destroy bound to a closed session
+    /// can never reach the provider under a recycled handle. A live
+    /// fence that is closing or closed likewise refuses, exactly as
+    /// [`Self::enter`] does.
+    pub(in crate::ffi) fn enter_checked<'g>(
+        &self,
+        admission: &'g OrdinaryGuard<'_>,
+        session: CkSessionHandle,
+        expected: u64,
+    ) -> CkResult<SessionFenceGuard<'g>> {
+        let epoch = admission.epoch();
+        let Some(fence) = self.fences.get(&session.0).map(|fence| fence.clone()) else {
+            return Err(CkRv::SESSION_HANDLE_INVALID);
+        };
+        if fence.incarnation != expected {
+            return Err(CkRv::SESSION_HANDLE_INVALID);
+        }
+        if fence.lifecycle.load(SeqCst) != FENCE_OPEN {
+            return Err(CkRv::SESSION_HANDLE_INVALID);
+        }
+        fence.readers.fetch_add(1, SeqCst);
+        if fence.lifecycle.load(SeqCst) != FENCE_OPEN || fence.incarnation != expected {
             fence.readers.fetch_sub(1, SeqCst);
             return Err(CkRv::SESSION_HANDLE_INVALID);
         }
@@ -634,5 +717,80 @@ mod tests {
                 .expect("duplicate-ID close-all completes");
         });
         assert_eq!(table.len_for_tests(), 0);
+    }
+
+    #[test]
+    fn incarnation_differs_after_commit_close_and_checked_entry_refuses_stale() {
+        // P2-13 reproduction: incarnation A is captured under the first
+        // session, the close commits (entry removed), and the provider
+        // recycles the numeric handle. The re-entered fence must carry
+        // a different incarnation, and a checked entry bound to A must
+        // refuse without creating an entry or counting a reader.
+        let domain = open_domain();
+        let admission = domain.admit_ordinary().expect("admits");
+        let table = SessionFenceTable::default();
+        let first = table.enter(&admission, CkSessionHandle(7)).expect("first enters");
+        let incarnation_a = first.incarnation();
+        assert_eq!(table.session_incarnation(CkSessionHandle(7)), Some(incarnation_a));
+        assert_ne!(incarnation_a, 0);
+        drop(first);
+
+        let closer = table.enter_write(&admission, CkSessionHandle(7)).expect("closer enters");
+        assert_eq!(closer.incarnation(), incarnation_a, "close runs under incarnation A");
+        table.commit_close(&closer);
+        assert_eq!(table.len_for_tests(), 0, "commit removes the entry");
+        assert_eq!(table.session_incarnation(CkSessionHandle(7)), None);
+
+        // Absent fence: the checked entry refuses and creates nothing.
+        assert_eq!(
+            table.enter_checked(&admission, CkSessionHandle(7), incarnation_a).unwrap_err(),
+            CkRv::SESSION_HANDLE_INVALID,
+            "stale incarnation must refuse with no live fence"
+        );
+        assert_eq!(table.len_for_tests(), 0, "checked entry must not create an entry");
+
+        // Recycled handle: a fresh fence with a different incarnation.
+        let fresh = table.enter(&admission, CkSessionHandle(7)).expect("fresh fence re-created");
+        let incarnation_b = fresh.incarnation();
+        assert_ne!(incarnation_a, incarnation_b, "recycled handle gets a fresh incarnation");
+        assert_eq!(table.session_incarnation(CkSessionHandle(7)), Some(incarnation_b));
+        assert_eq!(table.readers_for_tests(7), Some(1));
+
+        // Stale A still refuses against the live replacement fence, and
+        // the refusal counts no reader.
+        assert_eq!(
+            table.enter_checked(&admission, CkSessionHandle(7), incarnation_a).unwrap_err(),
+            CkRv::SESSION_HANDLE_INVALID,
+            "stale incarnation must refuse against the replacement fence"
+        );
+        assert_eq!(table.readers_for_tests(7), Some(1), "refusal must not count a reader");
+
+        // Positive control: the live incarnation enters.
+        let checked = table
+            .enter_checked(&admission, CkSessionHandle(7), incarnation_b)
+            .expect("live enters");
+        assert_eq!(checked.incarnation(), incarnation_b);
+        assert_eq!(table.readers_for_tests(7), Some(2));
+        drop(checked);
+        drop(fresh);
+        assert_eq!(table.readers_for_tests(7), Some(0));
+    }
+
+    #[test]
+    fn incarnation_is_stable_across_failed_close_reopen() {
+        // A failed close proves nothing: reopen keeps the same fence,
+        // so its incarnation (and any settlement bound to it) survives.
+        let domain = open_domain();
+        let admission = domain.admit_ordinary().expect("admits");
+        let table = SessionFenceTable::default();
+        let first = table.enter(&admission, CkSessionHandle(7)).expect("first enters");
+        let incarnation = first.incarnation();
+        drop(first);
+        let closer = table.enter_write(&admission, CkSessionHandle(7)).expect("closer enters");
+        table.reopen(&closer);
+        assert_eq!(table.session_incarnation(CkSessionHandle(7)), Some(incarnation));
+        table
+            .enter_checked(&admission, CkSessionHandle(7), incarnation)
+            .expect("same incarnation still enters after reopen");
     }
 }
