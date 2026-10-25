@@ -59,6 +59,7 @@ pub fn env_var_help() -> String {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DaemonConfig {
     pub backend: BackendConfig,
     #[serde(default)]
@@ -85,6 +86,7 @@ pub struct DaemonConfig {
 /// closed at startup (see `server::validate_test_hooks_config`) instead of
 /// silently ignoring it.
 #[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct TestHooksConfig {
     /// If set, a Unix-domain control endpoint (mode 0600) is bound here,
     /// serving the hook surface (`GET /hooks/instance`,
@@ -98,6 +100,7 @@ pub struct TestHooksConfig {
 /// If `config_path` is absent the daemon serves the embedded default
 /// registry (revision = "embedded-default").
 #[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct MechanismsConfig {
     pub config_path: Option<PathBuf>,
 }
@@ -109,6 +112,7 @@ pub const BACKEND_MODULE_PLACEHOLDER: &str = "/CHANGE_ME/path/to/backend.so";
 
 /// Authorization configuration (ADR-0005).
 #[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct AuthConfig {
     #[serde(default)]
     pub allow_all_authenticated: bool,
@@ -127,6 +131,7 @@ pub struct AuthConfig {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PolicyEntry {
     pub identity: String,
     pub tokens: TokenAccessSpec,
@@ -369,6 +374,7 @@ impl<'de> Deserialize<'de> for TokenAccessSpec {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BackendConfig {
     pub module: PathBuf,
     pub initialize_args: Option<String>,
@@ -410,6 +416,7 @@ impl MechanismDiscovery {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProxyConfig {
     #[serde(default)]
     pub mechanism_discovery: MechanismDiscovery,
@@ -621,6 +628,7 @@ fn default_grpc_load_shed() -> bool {
 }
 
 #[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ListenerGroup {
     pub local: Option<UnixListenerConfig>,
     pub remote: Option<TcpListenerConfig>,
@@ -629,6 +637,7 @@ pub struct ListenerGroup {
 /// Opt-in pathological-object-population detection + local metrics endpoint.
 /// Absent section => all fields `None` => feature inert (byte-identical to today).
 #[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ResilienceConfig {
     /// If set, a `C_FindObjects` result larger than this is counted as a
     /// pathological-population event and logged. Count-only: NO extra backend calls.
@@ -681,6 +690,7 @@ pub struct ResilienceConfig {
 /// failed-login budget (G2-PR3). All fields are `None` by default: an absent
 /// `[rate_limit]` section is byte-identical to having no rate limiting at all.
 #[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct RateLimitConfig {
     /// Maximum concurrent in-flight operations per principal (identified by
     /// mTLS SPKI or Unix peer-cred). `None` (default) → no cap.
@@ -698,6 +708,7 @@ pub struct RateLimitConfig {
 
 /// Opt-in tamper-evident audit stream (ADR-0012, G1). Off unless `dir` is set.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AuditConfig {
     /// Directory the daemon writes rotated JSONL audit logs + the anchor into.
     /// Absent => audit disabled (byte-identical to today).
@@ -812,6 +823,7 @@ pub enum UnixAuthMode {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UnixListenerConfig {
     pub path: PathBuf,
     #[serde(default)]
@@ -832,6 +844,7 @@ pub enum TcpAuthMode {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TcpListenerConfig {
     pub bind: String,
     #[serde(default)]

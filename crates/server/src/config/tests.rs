@@ -201,6 +201,37 @@ lease_seconds = 0
 }
 
 #[test]
+fn unknown_top_level_key_rejected_naming_key() {
+    let toml = r#"
+bogus_key = 1
+
+[backend]
+module = "."
+"#;
+    let err = toml::from_str::<DaemonConfig>(toml).unwrap_err().to_string();
+    assert!(
+        err.contains("bogus_key"),
+        "unknown top-level key must be named in the load error: {err}"
+    );
+}
+
+#[test]
+fn unknown_proxy_key_rejected_naming_key() {
+    let toml = r#"
+[backend]
+module = "."
+
+[proxy]
+lease_secondz = 30
+"#;
+    let err = toml::from_str::<DaemonConfig>(toml).unwrap_err().to_string();
+    assert!(
+        err.contains("lease_secondz"),
+        "unknown [proxy] key must be named in the load error: {err}"
+    );
+}
+
+#[test]
 fn validate_missing_backend_module_rejected() {
     let toml = r#"
 [backend]
