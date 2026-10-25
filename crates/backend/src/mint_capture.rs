@@ -48,6 +48,28 @@ pub fn begin(session: CkSessionHandle) -> MintCapture {
     })
 }
 
+/// Poison the active capture for `object`: drop any pair already
+/// reported for that handle so the capture carries nothing for it.
+/// Backends call this at their fresh-record site when the record
+/// was contended (an existing lifetime entry for the same numeric
+/// handle under any session proved a racing object's record), so
+/// detached settlement presents `None` for the handle and refuses
+/// against a tracking backend instead of destroying the valid
+/// replacement. A no-op outside a capture, for a different
+/// session, and for the null handle.
+pub fn poison(session: CkSessionHandle, object: CkObjectHandle) {
+    if object.0 == 0 {
+        return;
+    }
+    ACTIVE.with(|active| {
+        if let Some(state) = active.borrow_mut().as_mut()
+            && state.session == session.0
+        {
+            state.pairs.retain(|(handle, _)| *handle != object.0);
+        }
+    });
+}
+
 /// Report a freshly assigned object lifetime into the active
 /// capture, when one is running for `session` on this thread.
 /// Backends call this at their fresh-record site; it is a no-op

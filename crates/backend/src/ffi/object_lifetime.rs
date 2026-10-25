@@ -36,14 +36,26 @@ impl ObjectLifetimeTable {
 
     /// Record a FRESH lifetime for a newly minted object, replacing
     /// any stale entry for the recycled numeric handle.
+    ///
+    /// Returns the new id and whether the record was *contended*:
+    /// an existing lifetime entry for this numeric handle under ANY
+    /// session means the object is currently tracked as alive, so
+    /// this fresh record is racing another object's record (a
+    /// competitor found, destroyed and recreated the handle before
+    /// this mint's record ran). The entry still updates to the
+    /// newest id, but the caller must poison its mint capture for
+    /// the handle (report nothing) so detached settlement carries
+    /// `None` and refuses against the tracking backend.
     pub(in crate::ffi) fn record_fresh(
         &self,
         session: CkSessionHandle,
         object: CkObjectHandle,
-    ) -> u64 {
+    ) -> (u64, bool) {
         let id = self.next.fetch_add(1, Ordering::SeqCst);
-        self.lock_entries().insert((session.0, object.0), id);
-        id
+        let mut entries = self.lock_entries();
+        let contended = entries.keys().any(|&(_, obj)| obj == object.0);
+        entries.insert((session.0, object.0), id);
+        (id, contended)
     }
 
     /// Record a lifetime only when the object is not yet tracked
@@ -102,12 +114,23 @@ impl super::FfiBackend {
         object: CkObjectHandle,
     ) {
         if object.0 != 0 {
-            let id = self.object_lifetimes.record_fresh(session, object);
-            // Atomic mint capture: report the pair while the mint
-            // call is still on this thread, so a caller's payload
-            // binds exactly this mint's lifetime even if the handle
-            // is destroyed and reused before the call returns.
-            crate::mint_capture::report(session, object, id);
+            let (id, contended) = self.object_lifetimes.record_fresh(session, object);
+            if contended {
+                // Fail-safe contention poison: this mint's record
+                // raced another object's live record for the same
+                // numeric handle, so its capture must carry nothing
+                // for the handle. Settlement then presents `None`
+                // against a tracking backend (`Some`) and refuses
+                // instead of destroying the valid replacement now
+                // tracked under the newest id.
+                crate::mint_capture::poison(session, object);
+            } else {
+                // Atomic mint capture: report the pair while the mint
+                // call is still on this thread, so a caller's payload
+                // binds exactly this mint's lifetime even if the handle
+                // is destroyed and reused before the call returns.
+                crate::mint_capture::report(session, object, id);
+            }
         }
     }
 
