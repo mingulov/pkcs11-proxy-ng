@@ -3180,6 +3180,7 @@ impl Pkcs11Backend for MockBackend {
         public_key: CkObjectHandle,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<(SecretBytes, CkObjectHandle)> {
+        self.rendezvous_mint_gate("encapsulate_key");
         self.record_mechanism_entry(
             MockMechanismEntry::EncapsulateKey,
             Some(mechanism.mechanism()),
@@ -3207,6 +3208,7 @@ impl Pkcs11Backend for MockBackend {
         template: Option<&[CkAttribute]>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputAndHandleResult> {
+        self.rendezvous_mint_gate("encapsulate_key_exact");
         self.record_mechanism_entry(
             MockMechanismEntry::EncapsulateKeyExact,
             Some(mechanism.mechanism()),
@@ -3756,6 +3758,7 @@ impl Pkcs11Backend for MockBackend {
         template: Option<&[CkAttribute]>,
         ciphertext: CkInBuf<'_>,
     ) -> CkResult<CkObjectHandle> {
+        self.rendezvous_mint_gate("decapsulate_key");
         self.record_mechanism_entry(
             MockMechanismEntry::DecapsulateKey,
             Some(mechanism.mechanism()),

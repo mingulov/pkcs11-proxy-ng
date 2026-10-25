@@ -25,9 +25,10 @@ use super::super::mechanism_input::{
     sanitize_mechanism_input, validate_mechanism_transport,
 };
 use super::super::service_utils::{
-    ExactCompletion, check_sanitize, ensure_private_mint_allowed, input_from_wire, parse_mechanism,
-    register_session_object_handle, resolve_session_and_key, spawn_backend, spawn_backend_exact,
-    template_declares_private_object, template_declares_token_object,
+    ExactCompletion, LateMintedObjects, ObjectMintCompletionOwner, check_sanitize,
+    ensure_private_mint_allowed, input_from_wire, parse_mechanism, register_session_object_handle,
+    resolve_session_and_key, spawn_backend, spawn_backend_exact, template_declares_private_object,
+    template_declares_token_object,
 };
 use crate::server::context_manager::ClientContextId;
 use crate::server::handle_map::VirtualHandle;
@@ -176,8 +177,17 @@ pub(crate) async fn encapsulate_key(
             }));
         }
     };
+    // P2-13: own the late result until registration adopts the key.
+    // Only the handle integer is reported to the owner — never the
+    // ciphertext.
+    let (completion_tx, mut completion_owner) = ObjectMintCompletionOwner::arm(backend_ref);
     let result = spawn_backend(move || {
-        backend.encapsulate_key(session, &validated, public_key, template.as_deref())
+        let outcome = backend.encapsulate_key(session, &validated, public_key, template.as_deref());
+        let _ = completion_tx.send(match &outcome {
+            Ok((_, key)) => Ok(LateMintedObjects::single(session, CkObjectHandle(key.0 as u64))),
+            Err(rv) => Err(*rv),
+        });
+        outcome
     })
     .await?;
 
@@ -192,17 +202,23 @@ pub(crate) async fn encapsulate_key(
                 Some(is_private),
             )
             .await;
+            if key_handle != 0 {
+                completion_owner.disarm();
+            }
             Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyResponse {
                 ck_rv: CkRv::OK.0,
                 ciphertext: secret_to_plain(&ciphertext),
                 key_handle,
             }))
         }
-        Err(error) => Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyResponse {
-            ck_rv: error.0,
-            ciphertext: Vec::new(),
-            key_handle: 0,
-        })),
+        Err(error) => {
+            completion_owner.settle_on_error();
+            Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyResponse {
+                ck_rv: error.0,
+                ciphertext: Vec::new(),
+                key_handle: 0,
+            }))
+        }
     }
 }
 
@@ -346,14 +362,21 @@ pub(crate) async fn decapsulate_key(
             }));
         }
     };
+    // P2-13: own the late result until registration adopts the key.
+    let (completion_tx, mut completion_owner) = ObjectMintCompletionOwner::arm(backend_ref);
     let result = spawn_backend(move || {
-        backend.decapsulate_key(
+        let outcome = backend.decapsulate_key(
             session,
             &validated,
             private_key,
             template.as_deref(),
             input_from_wire(&ciphertext, ciphertext_null_len),
-        )
+        );
+        let _ = completion_tx.send(match &outcome {
+            Ok(key) => Ok(LateMintedObjects::single(session, CkObjectHandle(key.0 as u64))),
+            Err(rv) => Err(*rv),
+        });
+        outcome
     })
     .await?;
 
@@ -368,15 +391,21 @@ pub(crate) async fn decapsulate_key(
                 Some(is_private),
             )
             .await;
+            if key_handle != 0 {
+                completion_owner.disarm();
+            }
             Ok(Response::new(pkcs11_proxy_ng_proto::DecapsulateKeyResponse {
                 ck_rv: CkRv::OK.0,
                 key_handle,
             }))
         }
-        Err(error) => Ok(Response::new(pkcs11_proxy_ng_proto::DecapsulateKeyResponse {
-            ck_rv: error.0,
-            key_handle: 0,
-        })),
+        Err(error) => {
+            completion_owner.settle_on_error();
+            Ok(Response::new(pkcs11_proxy_ng_proto::DecapsulateKeyResponse {
+                ck_rv: error.0,
+                key_handle: 0,
+            }))
+        }
     }
 }
 
@@ -585,20 +614,33 @@ pub(crate) async fn encapsulate_key_exact(
             }));
         }
     };
+    // P2-13: own the late result until registration adopts the key.
+    // The extraction trusts `object_handle` under the identical
+    // condition registration uses below (`CKR_OK` + non-zero); the
+    // exact health classification is untouched (`ExactCompletion`
+    // still captures the raw outcome).
+    let (completion_tx, mut completion_owner) = ObjectMintCompletionOwner::arm(backend_ref);
     let result = spawn_backend_exact(move || {
-        ExactCompletion::capture(backend.encapsulate_key_exact(
+        let outcome = backend.encapsulate_key_exact(
             session,
             &validated,
             public_key,
             template.as_deref(),
             &spec,
-        ))
+        );
+        let _ = completion_tx.send(match &outcome {
+            Ok(r) if r.ck_rv == CkRv::OK => Ok(LateMintedObjects::new(session, r.object_handle)),
+            Ok(r) => Err(r.ck_rv),
+            Err(rv) => Err(*rv),
+        });
+        ExactCompletion::capture(outcome)
     })
     .await?;
 
     match result {
         Ok(r) => {
             // Register the returned object handle through the context manager
+            let minted = r.ck_rv == CkRv::OK && r.object_handle.is_some_and(|h| h.0 != 0);
             let virtual_handle = if r.ck_rv == CkRv::OK
                 && let Some(handle) = r.object_handle.filter(|h| h.0 != 0)
             {
@@ -614,6 +656,11 @@ pub(crate) async fn encapsulate_key_exact(
             } else {
                 0
             };
+            // Adopted (or nothing minted): disarm. A minted key whose
+            // registration failed stays armed for settlement destroy.
+            if !minted || virtual_handle != 0 {
+                completion_owner.disarm();
+            }
             Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
                 result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
                     apply_returned_len: Some(r.returned_len.is_some()),
@@ -628,16 +675,19 @@ pub(crate) async fn encapsulate_key_exact(
                 }),
             }))
         }
-        Err(error) => Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
-            result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
-                apply_returned_len: Some(false),
-                apply_object_handle: Some(false),
-                ck_rv: error.0,
-                returned_len: 0,
-                value: None,
-                object_handle: 0,
-            }),
-        })),
+        Err(error) => {
+            completion_owner.settle_on_error();
+            Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
+                result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
+                    apply_returned_len: Some(false),
+                    apply_object_handle: Some(false),
+                    ck_rv: error.0,
+                    returned_len: 0,
+                    value: None,
+                    object_handle: 0,
+                }),
+            }))
+        }
     }
 }
 
@@ -716,5 +766,194 @@ mod tests {
         assert_eq!(result.returned_len, 0);
         assert_eq!(result.value, None);
         assert_eq!(result.object_handle, 0);
+    }
+
+    /// P2-13 fixture: mock + session + one key object. Returns
+    /// (mock, backend, manager, context_id, virtual session,
+    /// virtual key).
+    async fn kem_settlement_fixture() -> (
+        Arc<MockBackend>,
+        Arc<dyn Pkcs11Backend>,
+        Arc<ContextManager>,
+        crate::server::context_manager::ClientContextId,
+        u64,
+        u64,
+    ) {
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+        mock.initialize().unwrap();
+        let backend_session =
+            mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
+        let key = mock.create_object(backend_session, Some(&[])).unwrap();
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        manager.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let context_id = manager.create_context(None).await.unwrap();
+        let virtual_session = register_session_handle(
+            &manager,
+            &context_id,
+            backend_session,
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+        )
+        .await
+        .unwrap();
+        let virtual_key = register_session_object_handle(
+            &manager,
+            &context_id,
+            VirtualHandle(virtual_session),
+            key,
+            false,
+            Some(false),
+        )
+        .await;
+        (mock, backend, manager, context_id, virtual_session, virtual_key)
+    }
+
+    fn rsa_pkcs_proto() -> pkcs11_proxy_ng_proto::Mechanism {
+        pkcs11_proxy_ng_proto::Mechanism {
+            mechanism_type: CkMechanismType::RSA_PKCS.0,
+            params: None,
+            parameter_encoding_version: 0,
+        }
+    }
+
+    async fn await_kem_settlement(mock: &Arc<MockBackend>, live: usize, destroys: usize) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if mock.live_object_count() == live && mock.destroy_call_count() == destroys {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for mint settlement: live={} destroys={} (want live={live} destroys={destroys})",
+                mock.live_object_count(),
+                mock.destroy_call_count()
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// P2-13: cancelling EncapsulateKey after native entry destroys
+    /// the late encapsulated key exactly once.
+    #[tokio::test]
+    async fn encapsulate_key_cancel_after_entry_leaves_no_orphan() {
+        let (mock, backend, manager, context_id, session, key) = kem_settlement_fixture().await;
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        mock.set_mint_gate(entered_tx, release_rx);
+
+        let rpc = {
+            let (manager, backend, context_id) =
+                (manager.clone(), backend.clone(), context_id.clone());
+            tokio::spawn(async move {
+                encapsulate_key(
+                    &HandlerContext::for_test(&manager, &backend),
+                    Request::new(pkcs11_proxy_ng_proto::EncapsulateKeyRequest {
+                        client_context_id: context_id.0.clone(),
+                        session_handle: session,
+                        mechanism: Some(rsa_pkcs_proto()),
+                        public_key_handle: key,
+                        template: vec![],
+                        template_null: false,
+                    }),
+                )
+                .await
+            })
+        };
+        let op = tokio::task::spawn_blocking(move || {
+            entered_rx.recv_timeout(Duration::from_secs(10)).expect("native entry observed")
+        })
+        .await
+        .unwrap();
+        assert_eq!(op, "encapsulate_key");
+        rpc.abort();
+        assert!(rpc.await.expect_err("aborted join must err").is_cancelled());
+        release_tx.send(()).expect("parked worker alive");
+        await_kem_settlement(&mock, 1, 1).await;
+    }
+
+    /// P2-13: cancelling DecapsulateKey after native entry destroys
+    /// the late decapsulated key exactly once.
+    #[tokio::test]
+    async fn decapsulate_key_cancel_after_entry_leaves_no_orphan() {
+        let (mock, backend, manager, context_id, session, key) = kem_settlement_fixture().await;
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        mock.set_mint_gate(entered_tx, release_rx);
+
+        let rpc = {
+            let (manager, backend, context_id) =
+                (manager.clone(), backend.clone(), context_id.clone());
+            tokio::spawn(async move {
+                decapsulate_key(
+                    &HandlerContext::for_test(&manager, &backend),
+                    Request::new(pkcs11_proxy_ng_proto::DecapsulateKeyRequest {
+                        client_context_id: context_id.0.clone(),
+                        session_handle: session,
+                        mechanism: Some(rsa_pkcs_proto()),
+                        private_key_handle: key,
+                        template: vec![],
+                        template_null: false,
+                        ciphertext: vec![9; 16],
+                        ciphertext_null_len: None,
+                    }),
+                )
+                .await
+            })
+        };
+        let op = tokio::task::spawn_blocking(move || {
+            entered_rx.recv_timeout(Duration::from_secs(10)).expect("native entry observed")
+        })
+        .await
+        .unwrap();
+        assert_eq!(op, "decapsulate_key");
+        rpc.abort();
+        assert!(rpc.await.expect_err("aborted join must err").is_cancelled());
+        release_tx.send(()).expect("parked worker alive");
+        await_kem_settlement(&mock, 1, 1).await;
+    }
+
+    /// P2-13: cancelling EncapsulateKeyExact after native entry
+    /// destroys the late exact-encapsulated key exactly once.
+    #[tokio::test]
+    async fn encapsulate_key_exact_cancel_after_entry_leaves_no_orphan() {
+        let (mock, backend, manager, context_id, session, key) = kem_settlement_fixture().await;
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        mock.set_mint_gate(entered_tx, release_rx);
+
+        let rpc = {
+            let (manager, backend, context_id) =
+                (manager.clone(), backend.clone(), context_id.clone());
+            tokio::spawn(async move {
+                encapsulate_key_exact(
+                    &HandlerContext::for_test(&manager, &backend),
+                    Request::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactRequest {
+                        exact_output_effects_version: 1,
+                        client_context_id: context_id.0.clone(),
+                        session_handle: session,
+                        mechanism: Some(rsa_pkcs_proto()),
+                        public_key_handle: key,
+                        template: Vec::new(),
+                        output_spec: Some(pkcs11_proxy_ng_proto::OutputBufferSpec {
+                            buffer_present: true,
+                            buffer_len: 1024,
+                            length_pointer_null: false,
+                        }),
+                        template_null: false,
+                    }),
+                )
+                .await
+            })
+        };
+        let op = tokio::task::spawn_blocking(move || {
+            entered_rx.recv_timeout(Duration::from_secs(10)).expect("native entry observed")
+        })
+        .await
+        .unwrap();
+        assert_eq!(op, "encapsulate_key_exact");
+        rpc.abort();
+        assert!(rpc.await.expect_err("aborted join must err").is_cancelled());
+        release_tx.send(()).expect("parked worker alive");
+        await_kem_settlement(&mock, 1, 1).await;
     }
 }
