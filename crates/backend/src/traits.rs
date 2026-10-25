@@ -328,6 +328,17 @@ pub trait Pkcs11Backend: Send + Sync {
     fn object_lifetime(&self, _session: CkSessionHandle, _object: CkObjectHandle) -> Option<u64> {
         None
     }
+    /// Whether this backend tracks object lifetimes at all.
+    /// Tracking backends (FFI, mock) return `true`: a settlement
+    /// payload that captured no lifetime (`None`) must then refuse
+    /// rather than destroy blind, whether or not a live entry
+    /// currently exists — after a destroy+recreate+close cycle an
+    /// emptied table would otherwise reopen the legacy raw destroy
+    /// against a still-live replacement. The `(None, None)` legacy
+    /// destroy remains only for backends that do not track.
+    fn tracks_object_lifetimes(&self) -> bool {
+        false
+    }
     /// Destroy `object` only when `session` is still the incarnation
     /// captured at mint time AND the object is still the lifetime
     /// captured atomically at mint time (see
@@ -343,31 +354,27 @@ pub trait Pkcs11Backend: Send + Sync {
     ///   `OBJECT_HANDLE_INVALID`, no destroy — the object is gone
     ///   or untracked under this session now, and a raw destroy
     ///   could hit a replacement recorded under another session;
-    /// - captured `None` + current `Some`: refuse
-    ///   `OBJECT_HANDLE_INVALID`, no destroy — the live entry
-    ///   proves this backend tracks lifetimes, so the payload
-    ///   missed its capture and must not destroy blind;
-    /// - captured `None` + current `None`: legacy
-    ///   [`Self::destroy_object`] (an untracked backend, or an
-    ///   object it never tracked).
+    /// - captured `None` against a tracking backend
+    ///   ([`Self::tracks_object_lifetimes`]): refuse
+    ///   `OBJECT_HANDLE_INVALID`, no destroy, whether or not a
+    ///   current entry exists — the payload missed (or was
+    ///   poisoned out of) its capture and must not destroy blind;
+    /// - captured `None` + current `Some` on a non-tracking
+    ///   backend: refuse, as above;
+    /// - captured `None` + current `None` on a non-tracking
+    ///   backend: legacy [`Self::destroy_object`] (an untracked
+    ///   backend, or an object it never tracked).
     ///
-    /// Cross-session rule for overriding backends: token objects are
-    /// visible across sessions, so a captured-`Some` destroy must
-    /// also refuse when any *other* session tracks the same numeric
-    /// handle under a different lifetime id, and when the settling
-    /// session's own entry is missing — a native destroy from the
-    /// settling session would destroy the other session's valid
-    /// replacement. Backends that override this method with access
-    /// to the whole lifetime table (FFI, mock) enforce that rule
-    /// atomically: destroy only when the settling session's entry
-    /// exists and every entry for the handle equals the captured id.
-    /// Found objects share one lifetime id across sessions (the
-    /// find path reuses the tracked id), so sharing alone never
-    /// triggers the refusal. The captured-`None` leg above is
-    /// unchanged. This default keeps the simpler per-session
-    /// composition for backends that only expose
-    /// [`Self::object_lifetime`] for the settling session; such
-    /// backends cannot observe other sessions' entries.
+    /// Lifetime ownership is handle-global for overriding backends
+    /// (FFI, mock): one entry per numeric handle naming its current
+    /// lifetime id and owner session. A captured-`Some` destroy
+    /// destroys only when that single entry exists and equals the
+    /// captured id; any absence or mismatch refuses. Session close
+    /// removes only entries the closing session owns, so a
+    /// competitor's close cannot leave a stale sole entry matching
+    /// a still-live token replacement, and a found object (whose
+    /// find reuses the tracked id without changing ownership)
+    /// still settles from its minting session.
     ///
     /// Backends with a real fence (FFI) override this with an
     /// atomic checked entry; the default composes the queries and
@@ -385,6 +392,9 @@ pub trait Pkcs11Backend: Send + Sync {
                 Some(_) => return Err(CkRv::SESSION_HANDLE_INVALID),
                 None => {}
             }
+        }
+        if object_lifetime.is_none() && self.tracks_object_lifetimes() {
+            return Err(CkRv::OBJECT_HANDLE_INVALID);
         }
         match (object_lifetime, self.object_lifetime(session, object)) {
             (Some(expected), Some(current)) if current == expected => {}

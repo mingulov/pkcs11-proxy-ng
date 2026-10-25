@@ -47,12 +47,12 @@ fn bound_destroy_refuses_stale_object_lifetime_in_same_session() {
     assert_eq!(backend.object_lifetime(session, replacement), None);
 }
 
-/// Legacy fallback preserved: with NO captured lifetime against an
-/// object the backend does not track (current `None` — the state an
-/// untracked backend reports for every object), the bound destroy is
-/// the legacy raw destroy. An uncaptured incarnation likewise keeps
-/// the legacy path. (No capture against a TRACKED object refuses
-/// instead; see `bound_destroy_no_capture_against_tracking_backend_refuses`.)
+/// Tracking backend, no legacy fallback: with NO captured lifetime
+/// the bound destroy refuses even when no live entry exists for the
+/// handle (the emptied-table state). The `(None, None)` legacy raw
+/// destroy remains only for non-tracking backends (see
+/// `untracked_backend_legacy_destroy_still_works`). An uncaptured
+/// incarnation with a captured lifetime still destroys.
 #[test]
 fn bound_destroy_legacy_fallbacks_still_destroy() {
     let backend = MockBackend::default_test();
@@ -60,11 +60,18 @@ fn bound_destroy_legacy_fallbacks_still_destroy() {
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
 
     let first = backend.create_object(session, Some(&[])).unwrap();
-    // Simulate an untracked object (what a backend without lifetime
-    // tracking reports): no live entry for the handle.
-    backend.state.lock().unwrap().object_lifetimes.remove(&(session.0, first.0));
+    backend.state.lock().unwrap().object_lifetimes.remove(&first.0);
     assert_eq!(backend.object_lifetime(session, first), None);
-    backend.destroy_object_if_bound(session, first, None, None).unwrap();
+    assert!(backend.tracks_object_lifetimes(), "mock is a tracking backend");
+    let destroys_before = backend.destroy_call_count();
+    assert_eq!(
+        backend.destroy_object_if_bound(session, first, None, None),
+        Err(CkRv::OBJECT_HANDLE_INVALID),
+        "tracking backend must refuse a None capture even with an empty table"
+    );
+    assert_eq!(backend.destroy_call_count(), destroys_before);
+    assert_eq!(backend.live_object_count(), 1, "object must survive the refused settle");
+    backend.destroy_object(session, first).unwrap();
     assert_eq!(backend.live_object_count(), 0);
 
     let second = backend.create_object(session, Some(&[])).unwrap();
@@ -140,7 +147,12 @@ fn contended_mint_capture_is_poisoned_and_replacement_survives() {
 
     // Competitor tracks handle 1 (the next handle this mint will
     // allocate) under a different session.
-    backend.state.lock().unwrap().object_lifetimes.insert((other.0, 1), 9999);
+    backend
+        .state
+        .lock()
+        .unwrap()
+        .object_lifetimes
+        .insert(1, super::super::state::ObjectLifetimeEntry { lifetime: 9999, owner: other.0 });
 
     let capture = crate::mint_capture::begin(session);
     let minted = backend.create_object(session, Some(&[])).unwrap();
@@ -415,7 +427,10 @@ fn cross_session_delayed_record_then_recreate_refuses_origin_settlement() {
 
     // Original thread's delayed fresh record lands now ( seeded:
     // the funnel cannot delay its record past the destroy above).
-    backend.state.lock().unwrap().object_lifetimes.insert((origin.0, minted.0), id_a);
+    backend.state.lock().unwrap().object_lifetimes.insert(
+        minted.0,
+        super::super::state::ObjectLifetimeEntry { lifetime: id_a, owner: origin.0 },
+    );
     assert_eq!(backend.object_lifetime(origin, minted), Some(id_a));
 
     // Competitor recreates the same numeric handle; its capture is
@@ -431,7 +446,11 @@ fn cross_session_delayed_record_then_recreate_refuses_origin_settlement() {
     drop(competitor_capture);
     let id_b = backend.object_lifetime(other, replacement).expect("tracked replacement");
     assert_ne!(id_a, id_b);
-    assert_eq!(backend.object_lifetime(origin, replacement), Some(id_a));
+    assert_eq!(
+        backend.object_lifetime(origin, replacement),
+        Some(id_b),
+        "single handle-global entry must name the newest replacement, not the origin's stale id"
+    );
 
     let destroys_before = backend.destroy_call_count();
     assert_eq!(
@@ -483,7 +502,11 @@ fn cross_session_delayed_record_without_recreate_settles_once() {
     drop(capture);
     let id_a = backend.object_lifetime(origin, minted).expect("tracked mint");
     assert_eq!(captured_lifetime, Some(id_a));
-    assert_eq!(backend.object_lifetime(other, minted), None);
+    assert_eq!(
+        backend.object_lifetime(other, minted),
+        Some(id_a),
+        "handle-global entry is the same record whichever session asks"
+    );
 
     let destroys_before = backend.destroy_call_count();
     backend.destroy_object_if_bound(origin, minted, origin_incarnation, Some(id_a)).unwrap();
@@ -499,6 +522,138 @@ fn cross_session_delayed_record_without_recreate_settles_once() {
         Err(CkRv::OBJECT_HANDLE_INVALID),
     );
     assert_eq!(backend.destroy_call_count(), destroys_before + 1);
+}
+
+/// Ordering (i) v2: competitor close must not leave origin's stale
+/// entry sole-matching a still-live token replacement.
+#[test]
+fn v2_competitor_close_then_origin_settle_refuses() {
+    let backend = MockBackend::default_test();
+    backend.set_handle_recycling(true);
+    backend.initialize().unwrap();
+    let origin = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let other = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let origin_incarnation = backend.session_incarnation(origin);
+    let token_template = [CkAttribute {
+        attr_type: CkAttributeType::TOKEN,
+        value: Some(CkAttributeValue::Bool(true)),
+    }];
+    let capture = crate::mint_capture::begin(origin);
+    let minted = backend.create_object(origin, Some(&token_template)).unwrap();
+    let id_a = capture.lifetime_for(minted).expect("mint capture");
+    drop(capture);
+    backend.set_find_objects_result(vec![minted]);
+    backend.find_objects_init(other, Some(&[])).unwrap();
+    assert_eq!(backend.find_objects(other, 10).unwrap(), vec![minted]);
+    backend.find_objects_final(other).unwrap();
+    backend.destroy_object(other, minted).unwrap();
+    // Delayed origin record (seeded; mock funnel records atomically).
+    backend.state.lock().unwrap().object_lifetimes.insert(
+        minted.0,
+        super::super::state::ObjectLifetimeEntry { lifetime: id_a, owner: origin.0 },
+    );
+    let comp_capture = crate::mint_capture::begin(other);
+    let replacement = backend.create_object(other, Some(&token_template)).unwrap();
+    assert_eq!(replacement, minted);
+    assert_eq!(comp_capture.captured(), Vec::<(CkObjectHandle, u64)>::new());
+    drop(comp_capture);
+    let id_b = backend.object_lifetime(other, replacement).expect("replacement tracked");
+    assert_ne!(id_a, id_b);
+    backend.close_session(other).unwrap();
+    let destroys_before = backend.destroy_call_count();
+    assert_eq!(
+        backend.destroy_object_if_bound(origin, replacement, origin_incarnation, Some(id_a)),
+        Err(CkRv::OBJECT_HANDLE_INVALID),
+        "competitor-close must not make origin settlement destroy replacement"
+    );
+    assert_eq!(backend.destroy_call_count(), destroys_before);
+    assert_eq!(backend.live_object_count(), 1);
+    backend.get_object_size(origin, replacement).expect("replacement usable via origin");
+}
+
+/// Ordering (ii) v2: poisoned capture must not reach legacy destroy
+/// after destroy+recreate+owner-close empties the table.
+#[test]
+fn v2_poisoned_capture_after_emptying_cycle_refuses() {
+    let backend = MockBackend::default_test();
+    backend.set_handle_recycling(true);
+    backend.initialize().unwrap();
+    let origin = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let other = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let token_template = [CkAttribute {
+        attr_type: CkAttributeType::TOKEN,
+        value: Some(CkAttributeValue::Bool(true)),
+    }];
+    backend
+        .state
+        .lock()
+        .unwrap()
+        .object_lifetimes
+        .insert(1, super::super::state::ObjectLifetimeEntry { lifetime: 9999, owner: other.0 });
+    let capture = crate::mint_capture::begin(origin);
+    let minted = backend.create_object(origin, Some(&token_template)).unwrap();
+    assert_eq!(minted, CkObjectHandle(1));
+    let captured = capture.lifetime_for(minted);
+    drop(capture);
+    assert_eq!(captured, None, "contended mint must be poisoned");
+    backend.destroy_object(origin, minted).unwrap();
+    let replacement = backend.create_object(other, Some(&token_template)).unwrap();
+    assert_eq!(replacement, minted);
+    backend.close_session(other).unwrap();
+    assert_eq!(backend.object_lifetime(origin, replacement), None);
+    let destroys_before = backend.destroy_call_count();
+    assert_eq!(
+        backend.destroy_object_if_bound(
+            origin,
+            replacement,
+            backend.session_incarnation(origin),
+            captured
+        ),
+        Err(CkRv::OBJECT_HANDLE_INVALID),
+        "poisoned capture on tracking backend must refuse even with empty table"
+    );
+    assert_eq!(backend.destroy_call_count(), destroys_before);
+    assert_eq!(backend.live_object_count(), 1);
+    backend.get_object_size(origin, replacement).expect("replacement usable via origin");
+}
+
+/// Ordering (iii) v2: settlement racing a competitor
+/// destroy+recreate must never destroy the replacement.
+#[test]
+fn v2_settlement_racing_recreate_never_destroys_replacement() {
+    let backend = MockBackend::default_test();
+    backend.set_handle_recycling(true);
+    backend.initialize().unwrap();
+    let origin = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let other = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let origin_incarnation = backend.session_incarnation(origin);
+    let token_template = [CkAttribute {
+        attr_type: CkAttributeType::TOKEN,
+        value: Some(CkAttributeValue::Bool(true)),
+    }];
+    let minted = backend.create_object(origin, Some(&token_template)).unwrap();
+    let id_a = backend.object_lifetime(origin, minted).expect("tracked mint");
+    let backend_ref = &backend;
+    let replacement = std::thread::scope(|scope| {
+        let competitor = scope.spawn(move || {
+            let _ = backend_ref.destroy_object(other, minted);
+            backend_ref.create_object(other, Some(&token_template)).expect("recreate succeeds")
+        });
+        let settle = scope.spawn(move || {
+            backend_ref.destroy_object_if_bound(origin, minted, origin_incarnation, Some(id_a))
+        });
+        let repl = competitor.join().expect("competitor joins");
+        let _ = settle.join().expect("settle joins");
+        repl
+    });
+    assert_eq!(backend.live_object_count(), 1, "replacement must survive the race");
+    backend.get_object_size(other, replacement).expect("replacement usable");
+    // A second settle with the stale id must also refuse.
+    assert_eq!(
+        backend.destroy_object_if_bound(origin, replacement, origin_incarnation, Some(id_a)),
+        Err(CkRv::OBJECT_HANDLE_INVALID)
+    );
+    assert_eq!(backend.live_object_count(), 1);
 }
 
 /// Found-object sharing control: an object minted in session A and
@@ -547,4 +702,379 @@ fn found_object_shared_across_sessions_settles_from_origin() {
         Err(CkRv::OBJECT_HANDLE_INVALID),
     );
     assert_eq!(backend.destroy_call_count(), destroys_before + 1);
+}
+
+/// Non-tracking test backend: wraps the mock for object storage but
+/// exposes no lifetime tracking at the trait surface (default
+/// `object_lifetime`/`tracks_object_lifetimes`/`destroy_object_if_bound`),
+/// so settlement keeps the `(None, None)` legacy raw destroy.
+struct UntrackedBackend {
+    inner: MockBackend,
+}
+
+impl UntrackedBackend {
+    fn new() -> Self {
+        Self { inner: MockBackend::default_test() }
+    }
+}
+
+impl Pkcs11Backend for UntrackedBackend {
+    fn initialize(&self) -> CkResult<()> {
+        self.inner.initialize()
+    }
+    fn finalize(&self) -> CkResult<()> {
+        self.inner.finalize()
+    }
+    fn get_info(&self) -> CkResult<CkInfo> {
+        self.inner.get_info()
+    }
+    fn get_slot_list(&self, token_present: bool) -> CkResult<Vec<CkSlotId>> {
+        self.inner.get_slot_list(token_present)
+    }
+    fn get_slot_info(&self, slot_id: CkSlotId) -> CkResult<CkSlotInfo> {
+        self.inner.get_slot_info(slot_id)
+    }
+    fn get_token_info(&self, slot_id: CkSlotId) -> CkResult<CkTokenInfo> {
+        self.inner.get_token_info(slot_id)
+    }
+    fn get_mechanism_list(&self, slot_id: CkSlotId) -> CkResult<Vec<CkMechanismType>> {
+        self.inner.get_mechanism_list(slot_id)
+    }
+    fn get_mechanism_info(
+        &self,
+        slot_id: CkSlotId,
+        mech: CkMechanismType,
+    ) -> CkResult<CkMechanismInfo> {
+        self.inner.get_mechanism_info(slot_id, mech)
+    }
+    fn init_token(
+        &self,
+        slot_id: CkSlotId,
+        so_pin: Option<&[u8]>,
+        label: InitTokenLabel<'_>,
+    ) -> CkResult<()> {
+        self.inner.init_token(slot_id, so_pin, label)
+    }
+    fn init_pin(&self, session: CkSessionHandle, pin: Option<&[u8]>) -> CkResult<()> {
+        self.inner.init_pin(session, pin)
+    }
+    fn set_pin(
+        &self,
+        session: CkSessionHandle,
+        old_pin: Option<&[u8]>,
+        new_pin: Option<&[u8]>,
+    ) -> CkResult<()> {
+        self.inner.set_pin(session, old_pin, new_pin)
+    }
+    fn open_session(&self, slot_id: CkSlotId, flags: CkSessionFlags) -> CkResult<CkSessionHandle> {
+        self.inner.open_session(slot_id, flags)
+    }
+    fn close_session(&self, session: CkSessionHandle) -> CkResult<()> {
+        self.inner.close_session(session)
+    }
+    fn close_all_sessions(&self, slot_id: CkSlotId) -> CkResult<()> {
+        // W1-C5-04: entries are keyed by handle, and handles are never
+        // reused, so a slot close-all leaves other slots' live entries
+        // untouched; closed sessions' entries become unreachable but stay
+        // bounded by the test's session count.
+        self.inner.close_all_sessions(slot_id)
+    }
+    fn get_session_info(&self, session: CkSessionHandle) -> CkResult<CkSessionInfo> {
+        self.inner.get_session_info(session)
+    }
+    fn login(
+        &self,
+        session: CkSessionHandle,
+        user_type: CkUserType,
+        pin: Option<&[u8]>,
+    ) -> CkResult<()> {
+        self.inner.login(session, user_type, pin)
+    }
+    fn logout(&self, session: CkSessionHandle) -> CkResult<()> {
+        self.inner.logout(session)
+    }
+    fn find_objects_init(&self, s: CkSessionHandle, t: Option<&[CkAttribute]>) -> CkResult<()> {
+        self.inner.find_objects_init(s, t)
+    }
+    fn find_objects(&self, s: CkSessionHandle, m: u32) -> CkResult<Vec<CkObjectHandle>> {
+        self.inner.find_objects(s, m)
+    }
+    fn find_objects_final(&self, s: CkSessionHandle) -> CkResult<()> {
+        self.inner.find_objects_final(s)
+    }
+    fn get_attribute_value(
+        &self,
+        s: CkSessionHandle,
+        object: CkObjectHandle,
+        template: &mut [CkAttribute],
+    ) -> CkResult<()> {
+        self.inner.get_attribute_value(s, object, template)
+    }
+    fn get_attribute_value_exact(
+        &self,
+        s: CkSessionHandle,
+        object: CkObjectHandle,
+        queries: Option<&[CkAttributeQuery]>,
+    ) -> CkResult<(CkRv, Vec<CkAttributeQueryResult>)> {
+        self.inner.get_attribute_value_exact(s, object, queries)
+    }
+    fn sign_init(
+        &self,
+        s: CkSessionHandle,
+        m: &ValidatedMechanismParams,
+        k: CkObjectHandle,
+    ) -> CkResult<()> {
+        self.inner.sign_init(s, m, k)
+    }
+    fn sign(&self, s: CkSessionHandle, d: CkInBuf<'_>) -> CkResult<SecretBytes> {
+        self.inner.sign(s, d)
+    }
+    fn sign_update(&self, s: CkSessionHandle, p: CkInBuf<'_>) -> CkResult<()> {
+        self.inner.sign_update(s, p)
+    }
+    fn sign_final(&self, s: CkSessionHandle) -> CkResult<SecretBytes> {
+        self.inner.sign_final(s)
+    }
+    fn sign_recover_init(
+        &self,
+        s: CkSessionHandle,
+        m: &ValidatedMechanismParams,
+        k: CkObjectHandle,
+    ) -> CkResult<()> {
+        self.inner.sign_recover_init(s, m, k)
+    }
+    fn sign_recover(&self, s: CkSessionHandle, d: CkInBuf<'_>) -> CkResult<SecretBytes> {
+        self.inner.sign_recover(s, d)
+    }
+    fn verify_recover_init(
+        &self,
+        s: CkSessionHandle,
+        m: &ValidatedMechanismParams,
+        k: CkObjectHandle,
+    ) -> CkResult<()> {
+        self.inner.verify_recover_init(s, m, k)
+    }
+    fn verify_recover(&self, s: CkSessionHandle, sig: CkInBuf<'_>) -> CkResult<SecretBytes> {
+        self.inner.verify_recover(s, sig)
+    }
+    fn verify_init(
+        &self,
+        s: CkSessionHandle,
+        m: &ValidatedMechanismParams,
+        k: CkObjectHandle,
+    ) -> CkResult<()> {
+        self.inner.verify_init(s, m, k)
+    }
+    fn verify(&self, s: CkSessionHandle, d: CkInBuf<'_>, sig: CkInBuf<'_>) -> CkResult<()> {
+        self.inner.verify(s, d, sig)
+    }
+    fn verify_update(&self, s: CkSessionHandle, p: CkInBuf<'_>) -> CkResult<()> {
+        self.inner.verify_update(s, p)
+    }
+    fn verify_final(&self, s: CkSessionHandle, sig: CkInBuf<'_>) -> CkResult<()> {
+        self.inner.verify_final(s, sig)
+    }
+    fn digest_init(&self, s: CkSessionHandle, m: &ValidatedMechanismParams) -> CkResult<()> {
+        self.inner.digest_init(s, m)
+    }
+    fn digest(&self, s: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<SecretBytes> {
+        self.inner.digest(s, data)
+    }
+    fn digest_update(&self, s: CkSessionHandle, p: CkInBuf<'_>) -> CkResult<()> {
+        self.inner.digest_update(s, p)
+    }
+    fn digest_key(&self, s: CkSessionHandle, k: CkObjectHandle) -> CkResult<()> {
+        self.inner.digest_key(s, k)
+    }
+    fn digest_final(&self, s: CkSessionHandle) -> CkResult<SecretBytes> {
+        self.inner.digest_final(s)
+    }
+    fn encrypt_init(
+        &self,
+        s: CkSessionHandle,
+        m: &ValidatedMechanismParams,
+        k: CkObjectHandle,
+    ) -> CkResult<Option<CkMechanismParams>> {
+        self.inner.encrypt_init(s, m, k)
+    }
+    fn encrypt(&self, s: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<SecretBytes> {
+        self.inner.encrypt(s, data)
+    }
+    fn encrypt_update(&self, s: CkSessionHandle, part: CkInBuf<'_>) -> CkResult<SecretBytes> {
+        self.inner.encrypt_update(s, part)
+    }
+    fn encrypt_final(&self, s: CkSessionHandle) -> CkResult<SecretBytes> {
+        self.inner.encrypt_final(s)
+    }
+    fn decrypt_init(
+        &self,
+        s: CkSessionHandle,
+        m: &ValidatedMechanismParams,
+        k: CkObjectHandle,
+    ) -> CkResult<Option<CkMechanismParams>> {
+        self.inner.decrypt_init(s, m, k)
+    }
+    fn decrypt(&self, s: CkSessionHandle, encrypted_data: CkInBuf<'_>) -> CkResult<SecretBytes> {
+        self.inner.decrypt(s, encrypted_data)
+    }
+    fn decrypt_update(
+        &self,
+        s: CkSessionHandle,
+        encrypted_part: CkInBuf<'_>,
+    ) -> CkResult<SecretBytes> {
+        self.inner.decrypt_update(s, encrypted_part)
+    }
+    fn decrypt_final(&self, s: CkSessionHandle) -> CkResult<SecretBytes> {
+        self.inner.decrypt_final(s)
+    }
+    fn derive_key(
+        &self,
+        s: CkSessionHandle,
+        m: &ValidatedMechanismParams,
+        base_key: CkObjectHandle,
+        template: Option<&[CkAttribute]>,
+    ) -> CkResult<CkObjectHandle> {
+        self.inner.derive_key(s, m, base_key, template)
+    }
+    fn wrap_key(
+        &self,
+        s: CkSessionHandle,
+        m: &ValidatedMechanismParams,
+        wrapping_key: CkObjectHandle,
+        key: CkObjectHandle,
+    ) -> CkResult<SecretBytes> {
+        self.inner.wrap_key(s, m, wrapping_key, key)
+    }
+    fn unwrap_key(
+        &self,
+        s: CkSessionHandle,
+        m: &ValidatedMechanismParams,
+        unwrapping_key: CkObjectHandle,
+        wrapped_key: CkInBuf<'_>,
+        template: Option<&[CkAttribute]>,
+    ) -> CkResult<CkObjectHandle> {
+        self.inner.unwrap_key(s, m, unwrapping_key, wrapped_key, template)
+    }
+    fn generate_key(
+        &self,
+        s: CkSessionHandle,
+        m: &ValidatedMechanismParams,
+        template: Option<&[CkAttribute]>,
+    ) -> CkResult<CkObjectHandle> {
+        self.inner.generate_key(s, m, template)
+    }
+    fn create_object(
+        &self,
+        s: CkSessionHandle,
+        template: Option<&[CkAttribute]>,
+    ) -> CkResult<CkObjectHandle> {
+        self.inner.create_object(s, template)
+    }
+    fn copy_object(
+        &self,
+        s: CkSessionHandle,
+        object: CkObjectHandle,
+        template: Option<&[CkAttribute]>,
+    ) -> CkResult<CkObjectHandle> {
+        self.inner.copy_object(s, object, template)
+    }
+    fn destroy_object(&self, s: CkSessionHandle, object: CkObjectHandle) -> CkResult<()> {
+        self.inner.destroy_object(s, object)
+    }
+    fn session_incarnation(&self, s: CkSessionHandle) -> Option<u64> {
+        self.inner.session_incarnation(s)
+    }
+    fn destroy_object_if_incarnation(
+        &self,
+        s: CkSessionHandle,
+        object: CkObjectHandle,
+        incarnation: Option<u64>,
+    ) -> CkResult<()> {
+        self.inner.destroy_object_if_incarnation(s, object, incarnation)
+    }
+    fn get_object_size(&self, s: CkSessionHandle, object: CkObjectHandle) -> CkResult<u64> {
+        self.inner.get_object_size(s, object)
+    }
+    fn set_attribute_value(
+        &self,
+        s: CkSessionHandle,
+        object: CkObjectHandle,
+        template: Option<&[CkAttribute]>,
+    ) -> CkResult<()> {
+        self.inner.set_attribute_value(s, object, template)
+    }
+    fn generate_key_pair(
+        &self,
+        s: CkSessionHandle,
+        m: &ValidatedMechanismParams,
+        pub_t: Option<&[CkAttribute]>,
+        priv_t: Option<&[CkAttribute]>,
+    ) -> CkResult<(CkObjectHandle, CkObjectHandle)> {
+        self.inner.generate_key_pair(s, m, pub_t, priv_t)
+    }
+    fn wait_for_slot_event(&self, flags: u64) -> CkResult<CkSlotId> {
+        self.inner.wait_for_slot_event(flags)
+    }
+    fn admit_slot_wait(&self, flags: u64) -> CkResult<()> {
+        self.inner.admit_slot_wait(flags)
+    }
+    fn get_operation_state(&self, s: CkSessionHandle) -> CkResult<SecretBytes> {
+        self.inner.get_operation_state(s)
+    }
+    fn set_operation_state(
+        &self,
+        s: CkSessionHandle,
+        state: CkInBuf<'_>,
+        enc_key: CkObjectHandle,
+        auth_key: CkObjectHandle,
+    ) -> CkResult<()> {
+        self.inner.set_operation_state(s, state, enc_key, auth_key)
+    }
+    fn seed_random(&self, s: CkSessionHandle, seed: CkInBuf<'_>) -> CkResult<()> {
+        self.inner.seed_random(s, seed)
+    }
+    fn generate_random(&self, s: CkSessionHandle, len: u32) -> CkResult<SecretBytes> {
+        self.inner.generate_random(s, len)
+    }
+    fn digest_encrypt_update(
+        &self,
+        s: CkSessionHandle,
+        part: CkInBuf<'_>,
+    ) -> CkResult<SecretBytes> {
+        self.inner.digest_encrypt_update(s, part)
+    }
+    fn decrypt_digest_update(
+        &self,
+        s: CkSessionHandle,
+        encrypted_part: CkInBuf<'_>,
+    ) -> CkResult<SecretBytes> {
+        self.inner.decrypt_digest_update(s, encrypted_part)
+    }
+    fn sign_encrypt_update(&self, s: CkSessionHandle, part: CkInBuf<'_>) -> CkResult<SecretBytes> {
+        self.inner.sign_encrypt_update(s, part)
+    }
+    fn decrypt_verify_update(
+        &self,
+        s: CkSessionHandle,
+        encrypted_part: CkInBuf<'_>,
+    ) -> CkResult<SecretBytes> {
+        self.inner.decrypt_verify_update(s, encrypted_part)
+    }
+}
+
+#[test]
+fn untracked_backend_legacy_destroy_still_works() {
+    let backend = UntrackedBackend::new();
+    assert!(!backend.tracks_object_lifetimes(), "wrapper must not track");
+    backend.inner.initialize().unwrap();
+    let session = backend.inner.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let object = backend.create_object(session, Some(&[])).unwrap();
+    assert_eq!(backend.object_lifetime(session, object), None);
+    assert_eq!(backend.inner.live_object_count(), 1);
+    backend.destroy_object_if_bound(session, object, None, None).unwrap();
+    assert_eq!(
+        backend.inner.live_object_count(),
+        0,
+        "legacy (None,None) destroy must still work for non-tracking backends"
+    );
 }
