@@ -613,10 +613,12 @@ impl LateMintSettlement for LateMintedObjects {
 /// sender moves into the `spawn_backend` closure, which reports its
 /// outcome immediately after the backend call returns:
 ///
-/// * Consumed `Ok`: [`Self::disarm`] once registration adopted the
-///   handle — ownership transfers to the existing handle tables,
-///   unchanged. Registration failure leaves the owner armed, so the
-///   `Drop` settler retires a handle nobody adopted.
+/// * Consumed `Ok`: [`Self::disarm`] — ownership transfers to the
+///   handler's adoption path (registration into the handle tables;
+///   for `OpenSession`, its register/fallback-close settlement),
+///   unchanged. Where adoption can fail, handlers leave the owner
+///   armed on that failure so the `Drop` settler retires a handle
+///   nobody adopted.
 /// * `Err(_)` arm: [`Self::settle_on_error`] — a present error copy
 ///   proves the genuine backend error (the send strictly precedes the
 ///   primary return) and disarms with zero behavior change; a present
