@@ -171,6 +171,17 @@ pub struct EvictionTask {
     pub cancel: watch::Sender<bool>,
 }
 
+/// Whether context usage should raise the "above 80%" warning.
+///
+/// A percentage threshold is meaningless at tiny caps: at the default
+/// cap of 1 it rounds to 0, so the single expected client would warn
+/// on every eviction tick (and below a cap of 10, 80% is within a slot
+/// or two of full, where admission refusals already surface the same
+/// pressure). Only warn once the cap gives 80% useful granularity.
+fn context_usage_warns(ctx_count: usize, max_contexts: usize) -> bool {
+    max_contexts >= 10 && ctx_count > max_contexts * 80 / 100
+}
+
 /// Spawn the context-eviction ticker.
 ///
 /// The task evicts expired contexts, logs resource pressure, and trips
@@ -201,7 +212,7 @@ pub fn spawn_eviction_task(
 
             // Resource-aware logging
             let ctx_count = context_manager.context_count();
-            if max_contexts > 0 && ctx_count > max_contexts * 80 / 100 {
+            if context_usage_warns(ctx_count, max_contexts) {
                 tracing::warn!(contexts = ctx_count, max = max_contexts, "context usage above 80%");
             }
             let in_flight = super::grpc_service::service_utils::backend_in_flight();
@@ -526,5 +537,28 @@ mod tests {
             skew < Duration::from_secs(2),
             "origin must not drift past the signal (skew {skew:?})"
         );
+    }
+
+    /// I1: at the default cap of 1 the 80% threshold rounds to 0, so the
+    /// one expected client would trip "context usage above 80%" on every
+    /// eviction tick. Tiny caps must never warn; at caps where 80% has
+    /// useful granularity the warning fires strictly above the threshold.
+    #[test]
+    fn context_usage_warning_skips_tiny_caps() {
+        // The default deployment: one admitted context at cap 1 is the
+        // expected state, not resource pressure.
+        assert!(!context_usage_warns(1, 1), "cap 1 must not warn at its one expected context");
+        assert!(!context_usage_warns(0, 1));
+        // Other tiny caps: 80% is within a slot or two of full, so the
+        // warning would repeat every tick whenever the cap is reached.
+        assert!(!context_usage_warns(2, 2));
+        assert!(!context_usage_warns(9, 9));
+        // 0 = no configured cap, as before.
+        assert!(!context_usage_warns(5, 0));
+        // At and above the floor the 80% threshold still applies.
+        assert!(!context_usage_warns(8, 10), "exactly 80% must not warn");
+        assert!(context_usage_warns(9, 10));
+        assert!(!context_usage_warns(80, 100));
+        assert!(context_usage_warns(81, 100));
     }
 }
