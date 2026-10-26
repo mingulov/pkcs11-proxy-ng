@@ -58,6 +58,89 @@ pub fn env_var_help() -> String {
     out
 }
 
+/// Every operator-facing TOML leaf knob, as dotted paths. Sourced from the
+/// `pub` fields of the config structs in this file; the D8 doc-sync tests
+/// (`config/tests.rs`) assert this list matches the source field-for-field
+/// AND that runbook §8d documents every path. A new config field without a
+/// list entry + runbook row fails CI.
+pub const OPERATOR_KNOBS: &[&str] = &[
+    "backend.initialize_args",
+    "backend.module",
+    "proxy.backend_health_consecutive_failures",
+    "proxy.eviction_interval_secs",
+    "proxy.grpc_concurrency_limit_per_connection",
+    "proxy.grpc_load_shed",
+    "proxy.grpc_max_concurrent_streams",
+    "proxy.http2_keepalive_interval_secs",
+    "proxy.http2_keepalive_timeout_secs",
+    "proxy.lease_seconds",
+    "proxy.login_lock_timeout_secs",
+    "proxy.max_blocking_threads",
+    "proxy.max_concurrent_backend_calls",
+    "proxy.max_contexts",
+    "proxy.max_message_bytes",
+    "proxy.max_stuck_backend_calls",
+    "proxy.mechanism_discovery",
+    "proxy.rate_limit_get_backend_interfaces",
+    "proxy.rate_limit_window_secs",
+    "proxy.request_timeout_secs",
+    "proxy.sanitize_inputs",
+    "proxy.shutdown_grace_secs",
+    "proxy.startup_timeout_secs",
+    "listener.local.allow_insecure_unix",
+    "listener.local.auth",
+    "listener.local.path",
+    "listener.remote.allow_insecure_tcp",
+    "listener.remote.auth",
+    "listener.remote.bind",
+    "listener.remote.ca_cert",
+    "listener.remote.server_cert",
+    "listener.remote.server_key",
+    "auth.allow_all_authenticated",
+    "auth.anonymous_principal",
+    "auth.policy",
+    "auth.policy.identity",
+    "auth.policy.tokens",
+    "auth.policy.tokens.classes",
+    "auth.policy.tokens.extract",
+    "auth.policy.tokens.mechanisms",
+    "auth.policy.tokens.objects",
+    "auth.policy.tokens.objects.extract",
+    "auth.policy.tokens.objects.id",
+    "auth.policy.tokens.token",
+    "mechanisms.config_path",
+    "resilience.coalesce_attributes",
+    "resilience.find_result_warn_threshold",
+    "resilience.metrics_socket",
+    "audit.channel_capacity",
+    "audit.checkpoint_interval_secs",
+    "audit.data_plane",
+    "audit.dir",
+    "audit.fail_closed_reserve",
+    "audit.rotate_keep_files",
+    "audit.rotate_max_bytes",
+    "audit.signing_key",
+    "rate_limit.per_principal_max_in_flight",
+    "rate_limit.per_principal_max_sessions",
+    "rate_limit.per_slot_failed_login_budget",
+    "rate_limit.per_slot_failed_login_cooldown_secs",
+    "test_hooks.control_socket",
+];
+
+/// Every top-level config section (the `DaemonConfig` fields). Same D8 sync
+/// contract as [`OPERATOR_KNOBS`]: a new section without §8d coverage fails CI.
+pub const OPERATOR_SECTIONS: &[&str] = &[
+    "audit",
+    "auth",
+    "backend",
+    "listener",
+    "mechanisms",
+    "proxy",
+    "rate_limit",
+    "resilience",
+    "test_hooks",
+];
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DaemonConfig {

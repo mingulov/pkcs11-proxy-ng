@@ -2330,3 +2330,122 @@ fn env_var_surfaces_agree_on_all_vars() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// D8 (step 16): every operator knob in config.rs must be listed in
+// OPERATOR_KNOBS and documented in runbook §8d, mirroring the §8a daemon
+// env-var sync. A new config field without docs fails CI.
+// ---------------------------------------------------------------------------
+
+/// (struct name, TOML prefix) for every operator-knob struct in config.rs.
+/// `DaemonConfig` is handled separately via OPERATOR_SECTIONS (its fields
+/// are sections, not knobs).
+fn knob_struct_prefixes() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("BackendConfig", "backend"),
+        ("ProxyConfig", "proxy"),
+        ("UnixListenerConfig", "listener.local"),
+        ("TcpListenerConfig", "listener.remote"),
+        ("AuthConfig", "auth"),
+        ("PolicyEntry", "auth.policy"),
+        ("RichGrantConfig", "auth.policy.tokens"),
+        ("ObjectAclRichConfig", "auth.policy.tokens.objects"),
+        ("MechanismsConfig", "mechanisms"),
+        ("ResilienceConfig", "resilience"),
+        ("AuditConfig", "audit"),
+        ("RateLimitConfig", "rate_limit"),
+        ("TestHooksConfig", "test_hooks"),
+    ]
+}
+
+/// `pub` field names of `pub struct <name>` in `source`, scanned between the
+/// struct's braces with brace-depth tracking so nested types cannot leak
+/// fields in or cut the scan short.
+fn struct_pub_fields(source: &str, name: &str) -> Vec<String> {
+    let needle = format!("pub struct {name}");
+    let mut search_from = 0;
+    // Match the declaration whose name is exactly `name` (not a longer
+    // identifier that merely starts with it).
+    let decl = loop {
+        let rel = source[search_from..]
+            .find(&needle)
+            .unwrap_or_else(|| panic!("config.rs must define pub struct {name}"));
+        let abs = search_from + rel;
+        let after = source[abs + needle.len()..].chars().next().unwrap_or(' ');
+        if after.is_alphanumeric() || after == '_' {
+            search_from = abs + needle.len();
+            continue;
+        }
+        break abs;
+    };
+    let body_start = source[decl..]
+        .find('{')
+        .map(|i| decl + i + 1)
+        .unwrap_or_else(|| panic!("pub struct {name} must have a braced body"));
+    let mut fields = Vec::new();
+    let mut depth = 1usize;
+    for line in source[body_start..].lines() {
+        let trimmed = line.trim_start();
+        if depth == 1 && !trimmed.starts_with("//") && trimmed.starts_with("pub ") {
+            let rest = trimmed.strip_prefix("pub ").unwrap_or("");
+            let ident: String =
+                rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+            if !ident.is_empty() && rest[ident.len()..].trim_start().starts_with(':') {
+                fields.push(ident);
+            }
+        }
+        depth += line.chars().filter(|c| *c == '{').count();
+        depth = depth.saturating_sub(line.chars().filter(|c| *c == '}').count());
+        if depth == 0 {
+            break;
+        }
+    }
+    assert!(!fields.is_empty(), "pub struct {name} scan found no pub fields — scanner drift?");
+    fields
+}
+
+#[test]
+fn operator_knob_list_matches_config_source() {
+    let source = own_config_source();
+    let mut expected = std::collections::BTreeSet::new();
+    for (name, prefix) in knob_struct_prefixes() {
+        for field in struct_pub_fields(&source, name) {
+            expected.insert(format!("{prefix}.{field}"));
+        }
+    }
+    let listed: std::collections::BTreeSet<String> =
+        OPERATOR_KNOBS.iter().map(|s| s.to_string()).collect();
+    let missing: Vec<_> = expected.difference(&listed).collect();
+    let stale: Vec<_> = listed.difference(&expected).collect();
+    assert!(
+        missing.is_empty(),
+        "config.rs fields missing from OPERATOR_KNOBS (add the knob + a runbook §8d row): {missing:?}"
+    );
+    assert!(
+        stale.is_empty(),
+        "OPERATOR_KNOBS entries with no config.rs field (remove them): {stale:?}"
+    );
+
+    let sections: std::collections::BTreeSet<String> =
+        struct_pub_fields(&source, "DaemonConfig").into_iter().collect();
+    let listed_sections: std::collections::BTreeSet<String> =
+        OPERATOR_SECTIONS.iter().map(|s| s.to_string()).collect();
+    assert_eq!(
+        sections, listed_sections,
+        "OPERATOR_SECTIONS must match the DaemonConfig fields field-for-field"
+    );
+}
+
+#[test]
+fn runbook_knob_table_covers_every_operator_knob() {
+    assert!(!OPERATOR_KNOBS.is_empty(), "OPERATOR_KNOBS must not be empty");
+    let runbook = submodule_file("doc/runbooks/operating-pkcs11-proxy-ng.md");
+    let table = section_between(&runbook, "## 8d.", "## 9.");
+    for knob in OPERATOR_KNOBS {
+        assert!(table.contains(knob), "runbook §8d must document operator knob {knob}");
+    }
+    for section in OPERATOR_SECTIONS {
+        let header = format!("[{section}");
+        assert!(table.contains(&header), "runbook §8d must have a [{section}] block");
+    }
+}

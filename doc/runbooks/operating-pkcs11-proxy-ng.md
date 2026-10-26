@@ -601,6 +601,135 @@ Extract and inspect every file before sharing the archive. If logs or config
 fragments are needed, review and redact them separately; share only the
 relevant excerpt.
 
+## 8d. Operator knob reference (daemon TOML)
+
+Every daemon knob below is sourced from `crates/server/src/config.rs`
+(the reference named by the shipped `packaging/config/proxy.toml.default`).
+Unknown fields are rejected at parse time, and every constraint in the
+tables is enforced loud at startup — the daemon refuses to start rather
+than running degraded. Only the 8 vars in §8a are env-overridable;
+everything else comes from the TOML file. The shim (consumer) side is
+env-only and lives in §8b — note in particular
+`PKCS11_PROXY_RPC_TIMEOUT_SECS`, the client half of the deadline pair
+with `proxy.request_timeout_secs`.
+
+A doc-sync test (`operator_knob_list_matches_config_source` +
+`runbook_knob_table_covers_every_operator_knob`) pins this section:
+adding a config field without a row here fails CI.
+
+### [backend]
+
+| Knob | Default | Notes |
+| --- | --- | --- |
+| `backend.module` | (required) | Absolute path to the backend PKCS#11 `.so`. The shipped placeholder is refused at startup; the path must exist and must not be group/world-writable. |
+| `backend.initialize_args` | unset | Backend-specific `C_Initialize` args string (e.g. NSS config dir spec). |
+
+### [proxy]
+
+| Knob | Default | Notes |
+| --- | --- | --- |
+| `proxy.mechanism_discovery` | `transparent` | `transparent` (server is a pure discovery proxy) or `filtered`. |
+| `proxy.lease_seconds` | `3600` | Context lease, seconds. Must be > 0. |
+| `proxy.max_message_bytes` | `67108864` (64 MiB) | gRPC per-message ceiling, both directions. Must be 1..=64 MiB; matches the client cap so no leg truncates below another. |
+| `proxy.request_timeout_secs` | `60` | Deadline pair (daemon half): backend-call and gRPC request timeout, seconds. Past it the call is abandoned and `CKR_DEVICE_ERROR` is returned. Must be > 0. Raise together with the shim's `PKCS11_PROXY_RPC_TIMEOUT_SECS` (§8b) — raising the client deadline alone does not extend the daemon's abandonment. |
+| `proxy.max_concurrent_backend_calls` | `200` | Breaker cap on concurrent backend calls. Must be > 0 and ≤ `max_blocking_threads`. |
+| `proxy.max_blocking_threads` | `512` | Tokio blocking pool for backend FFI calls. Must be > 0. |
+| `proxy.eviction_interval_secs` | `5` | Eviction-task sweep period, seconds. Must be > 0. |
+| `proxy.max_contexts` | `1` | Max active contexts; `0` = unlimited. The default `1` is the single-logical-client admission guardrail. |
+| `proxy.http2_keepalive_interval_secs` | `15` | HTTP/2 keepalive ping interval, seconds. `0` = disabled. |
+| `proxy.http2_keepalive_timeout_secs` | `5` | HTTP/2 keepalive ping timeout, seconds. |
+| `proxy.startup_timeout_secs` | `30` | `populate_slots` deadline at startup; the daemon exits 1 past it. Raise for slow hardware HSMs. Must be > 0. |
+| `proxy.shutdown_grace_secs` | `30` | Single overall shutdown deadline (listener drain, eviction stop, audit completion, native retirement share it). k8s `terminationGracePeriodSeconds` must exceed this plus the 10 s runtime-teardown tail. Must be > 0. |
+| `proxy.backend_health_consecutive_failures` | `3` | Consecutive backend-call failures before tonic-health flips to `NOT_SERVING` (drives k8s readiness); the next success flips it back. Must be > 0. |
+| `proxy.rate_limit_get_backend_interfaces` | `0` | Max `GetBackendInterfaces` RPCs per peer IP per `rate_limit_window_secs`. `0` = disabled. |
+| `proxy.rate_limit_window_secs` | `1` | Per-peer limiter window, seconds. Must be > 0. |
+| `proxy.sanitize_inputs` | `false` | Opt-in: reject spec-invalid inputs at the daemon before the module (ADR-0010; off by default). |
+| `proxy.max_stuck_backend_calls` | unset | Opt-in self-exit: the daemon exits nonzero once stuck backend calls exceed this, so a supervisor restarts it. Unset = never self-exit. Must be > 0 if set. |
+| `proxy.login_lock_timeout_secs` | `10` | Per-slot login-lock hold for in-flight `C_Login`/`C_Logout`, seconds. Must be > 0. |
+| `proxy.grpc_concurrency_limit_per_connection` | `256` | Transport flood bound: max in-flight gRPC requests per connection (TCP and Unix). Must be > 0. |
+| `proxy.grpc_max_concurrent_streams` | `256` | Transport flood bound: HTTP/2 `SETTINGS_MAX_CONCURRENT_STREAMS` per connection. Must be > 0. |
+| `proxy.grpc_load_shed` | `true` | Reject (vs buffer) requests past the per-connection cap with `RESOURCE_EXHAUSTED`. |
+
+### [listener.local]
+
+| Knob | Default | Notes |
+| --- | --- | --- |
+| `listener.local.path` | (required) | Unix socket path. |
+| `listener.local.auth` | `peer_cred` | `peer_cred` (authenticated) or `none`. |
+| `listener.local.allow_insecure_unix` | `false` | Explicit opt-in required for `auth = "none"` (every local user reaches every token). |
+
+### [listener.remote]
+
+| Knob | Default | Notes |
+| --- | --- | --- |
+| `listener.remote.bind` | (required) | `IP:port` listen address. Must parse as a `SocketAddr`; hostnames are not resolved. |
+| `listener.remote.auth` | `mtls` | `mtls` (authenticated) or `none`. |
+| `listener.remote.ca_cert` | (mtls: required) | PEM trust anchor for client certs. Must exist. |
+| `listener.remote.server_cert` | (mtls: required) | PEM server cert. Must exist. |
+| `listener.remote.server_key` | (mtls: required) | PEM server key. Must exist. |
+| `listener.remote.allow_insecure_tcp` | `false` | Explicit opt-in required for `auth = "none"`. |
+
+At least one of `[listener.local]` / `[listener.remote]` must be configured.
+
+### [auth]
+
+| Knob | Default | Notes |
+| --- | --- | --- |
+| `auth.allow_all_authenticated` | `false` | Blanket grant to every authenticated peer. Refused at startup with any `auth = "none"` listener. |
+| `auth.policy` | `[]` | `[[auth.policy]]` entries (rows below). Refused at startup with any `auth = "none"` listener — a policy cannot apply to unauthenticated peers. |
+| `auth.anonymous_principal` | unset | Audit-identity label for unauthenticated peers; relaxes the audit+`auth = "none"` refuse-to-start guard. Audit-identity only — never an authz grant; must not also appear as a policy identity. |
+| `auth.policy.identity` | (required) | `uid=<n>` (Unix `peer_cred`) or `x509:spki=<hex>` / legacy `x509:issuer=<dn>;subject=<dn>` (mTLS). Must be producible by a configured authenticated listener; duplicates rejected. |
+| `auth.policy.tokens` | (required) | `"all"` (or `"*"` alias) for blanket access, or a list of bare selectors (`"label:X"`, `"serial:Y"`) and/or rich grant tables (rows below; the forms mix). |
+| `auth.policy.tokens.token` | (required in a rich grant) | Token selector, same syntax as bare strings. |
+| `auth.policy.tokens.classes` | all | Object-class allow-list (e.g. `secret_key`, `private_key`). Absent = all classes. |
+| `auth.policy.tokens.mechanisms` | all | Mechanism allow-list (e.g. `CKM_AES_GCM`). Absent = all mechanisms. |
+| `auth.policy.tokens.extract` | `allow` | `allow` or `deny` extraction of sensitive key material. |
+| `auth.policy.tokens.objects` | all | `CKA_UNIQUE_ID` allow-list (bare hex strings or rich `{ id, extract }` tables). Absent = all objects. Requires a v3.0+ backend; refused with any `auth = "none"` listener (silently inert there). |
+| `auth.policy.tokens.objects.id` | (required in a rich object entry) | `CKA_UNIQUE_ID` as hex bytes. |
+| `auth.policy.tokens.objects.extract` | inherit | Per-object `allow`/`deny` override. Absent = inherit the grant-level extract policy. |
+
+### [mechanisms]
+
+| Knob | Default | Notes |
+| --- | --- | --- |
+| `mechanisms.config_path` | unset (embedded default) | Mechanism registry TOML served to shims over `GetBackendInterfaces`. Set only to layer vendor extensions; a set path must exist. |
+
+### [resilience]
+
+| Knob | Default | Notes |
+| --- | --- | --- |
+| `resilience.find_result_warn_threshold` | unset (unbounded) | `C_FindObjects` result size above which a pathological-population event is counted and logged; also bounds each filter scan (loud failure past it instead of draining unboundedly). |
+| `resilience.metrics_socket` | unset | Unix-domain metrics endpoint path (mode 0600), serving Prometheus text on `GET /metrics`. |
+| `resilience.coalesce_attributes` | `false` | Opt-in session-scoped cache of repeated non-secret `C_GetAttributeValue` results. Read-heavy single-writer workloads only — a second writer's mutations are not invalidated. Secret attributes are never cached. Hits/misses surface as `pkcs11_proxy_attr_coalesce_{hits,misses}_total`. |
+
+### [audit]
+
+| Knob | Default | Notes |
+| --- | --- | --- |
+| `audit.dir` | unset (disabled) | Directory for rotated JSONL audit logs + anchor. Unset = audit off. Enabled audit with an `auth = "none"` listener requires `auth.anonymous_principal` (else refuse-to-start). |
+| `audit.signing_key` | unset (hash-chain only) | Ed25519 private-key file (raw 32-byte seed) for signed checkpoints. Loaded, never generated. |
+| `audit.rotate_max_bytes` | `67108864` (64 MiB) | Rotation size trigger. Must be > 0. |
+| `audit.rotate_keep_files` | `10` | Retained rotated files. Must be > 0. |
+| `audit.checkpoint_interval_secs` | `300` | Time-triggered signed checkpoint, seconds. `0` disables. Only effective with `signing_key`. |
+| `audit.data_plane` | `false` | Emit DataPlane-class records (fail-open admission: dropped near capacity rather than blocking). |
+| `audit.channel_capacity` | `4096` | Emitter→writer channel slots. Must be > 0. |
+| `audit.fail_closed_reserve` | `256` | Slots reserved for fail-closed classes (Auth, KeyMgmt, System, Deny). Must be strictly < `channel_capacity`. |
+
+### [rate_limit]
+
+| Knob | Default | Notes |
+| --- | --- | --- |
+| `rate_limit.per_principal_max_in_flight` | unset (no cap) | Max concurrent in-flight ops per principal (mTLS SPKI or Unix peer-cred). Must be > 0 if set (`0` would block everything; omit to disable). |
+| `rate_limit.per_principal_max_sessions` | unset (no cap) | Max concurrent open sessions per principal. Must be > 0 if set. |
+| `rate_limit.per_slot_failed_login_budget` | unset (no budget) | Consecutive failed `C_Login` attempts per slot before a cooldown. Must be > 0 if set. |
+| `rate_limit.per_slot_failed_login_cooldown_secs` | `60` (when a budget is set) | Cooldown after the budget is exhausted. Must be > 0 if set; inert without a budget. |
+
+### [test_hooks]
+
+| Knob | Default | Notes |
+| --- | --- | --- |
+| `test_hooks.control_socket` | unset (inert) | Hook-gated control endpoint path (mode 0600) for fault-injection tests. Requires a `native-owner-test-hooks` build; default builds fail closed. |
+
 ## 9. Known limitations
 
 These limits may affect a deployment:
