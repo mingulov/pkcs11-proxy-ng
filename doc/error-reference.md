@@ -49,6 +49,8 @@ the distinct return values described below.
 for `backend exceeded failure threshold; flipping readiness to
 NOT_SERVING`. If present, the daemon has gated itself out of the
 Service endpoints. Investigate the backend (HSM) health directly.
+The full readiness promise is the [health
+contract](release/health-contract.md).
 
 **Application action.** Check whether the call may have reached the provider
 before retrying a state-changing operation. Back off on transport failures;

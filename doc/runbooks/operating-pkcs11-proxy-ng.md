@@ -451,10 +451,13 @@ remedy is the same.
 
 ### NOT_SERVING readiness probe
 
-The daemon's health endpoint reports `NOT_SERVING` during
-graceful-shutdown drain and after repeated unhealthy backend outcomes exceed
-`backend_health_consecutive_failures`. Kubernetes pulls
-the pod out of the Service endpoint pool.
+The daemon's health endpoint reports `NOT_SERVING` after repeated
+unhealthy backend outcomes reach `backend_health_consecutive_failures`
+(full contract: [health-contract.md](../release/health-contract.md)).
+Kubernetes pulls the pod out of the Service endpoint pool. During
+graceful-shutdown drain the daemon does not flip to `NOT_SERVING` —
+it stops accepting, so probes fail or stall past their timeout
+instead of reporting a verdict.
 
 **Triage.**
 
