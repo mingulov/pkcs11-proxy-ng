@@ -2869,16 +2869,23 @@ impl Pkcs11Backend for MockBackend {
     ) -> CkResult<()> {
         // Simulation of the FFI checked entry: a stale or absent
         // incarnation refuses without counting a destroy (no native
-        // call), so a recycled replacement object survives. The trait
-        // default would route the refusal through `destroy_object`
-        // and miscount, so the check runs here first.
+        // call), so a recycled replacement object survives. The check,
+        // counting, and destroy run inside one state-lock critical
+        // section (mirroring the FFI `lock_for_destroy` fence), so a
+        // close/reopen or destroy/recreate cannot slip between the
+        // check and the destroy.
+        let mut state = self.state.lock().unwrap();
         if let Some(expected) = incarnation {
-            match self.session_incarnation(session) {
-                Some(current) if current == expected => {}
+            match state.session_incarnations.get(&session.0) {
+                Some(current) if *current == expected => {}
                 _ => return Err(CkRv::SESSION_HANDLE_INVALID),
             }
         }
-        self.destroy_object(session, object)
+        self.destroy_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(rv) = *self.destroy_error.lock().unwrap() {
+            return Err(rv);
+        }
+        self.destroy_object_locked(&mut state, session, object)
     }
     fn object_lifetime(&self, _session: CkSessionHandle, object: CkObjectHandle) -> Option<u64> {
         self.state.lock().unwrap().object_lifetimes.get(&object.0).map(|e| e.lifetime)
@@ -2899,26 +2906,31 @@ impl Pkcs11Backend for MockBackend {
         // survives. With a captured lifetime it destroys only when
         // the single handle-global entry exists and equals it; any
         // absence or mismatch refuses. With no capture this tracking
-        // backend always refuses, even with an empty table.
+        // backend always refuses, even with an empty table. The
+        // incarnation check, lifetime check, counting, and destroy
+        // run inside one state-lock critical section (mirroring the
+        // FFI `lock_for_destroy` fence), so a destroy+recreate
+        // cannot slip a fresh lifetime between the check and the
+        // destroy.
+        let mut state = self.state.lock().unwrap();
         if let Some(expected) = incarnation {
-            match self.session_incarnation(session) {
-                Some(current) if current == expected => {}
+            match state.session_incarnations.get(&session.0) {
+                Some(current) if *current == expected => {}
                 _ => return Err(CkRv::SESSION_HANDLE_INVALID),
             }
         }
-        let refuse = {
-            let state = self.state.lock().unwrap();
-            match object_lifetime {
-                Some(expected) => {
-                    !matches!(state.object_lifetimes.get(&object.0), Some(entry) if entry.lifetime == expected)
-                }
-                None => true,
-            }
-        };
-        if refuse {
-            return Err(CkRv::OBJECT_HANDLE_INVALID);
+        match object_lifetime {
+            Some(expected) => match state.object_lifetimes.get(&object.0) {
+                Some(entry) if entry.lifetime == expected => {}
+                _ => return Err(CkRv::OBJECT_HANDLE_INVALID),
+            },
+            None => return Err(CkRv::OBJECT_HANDLE_INVALID),
         }
-        self.destroy_object(session, object)
+        self.destroy_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(rv) = *self.destroy_error.lock().unwrap() {
+            return Err(rv);
+        }
+        self.destroy_object_locked(&mut state, session, object)
     }
     fn get_object_size(&self, session: CkSessionHandle, object: CkObjectHandle) -> CkResult<u64> {
         self.object_size(session, object)
