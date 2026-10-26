@@ -154,8 +154,11 @@ def bundle_doc_mapping(repo: Path, version: str, target: str | None = None) -> d
             notes_path.stat().st_size > 0,
             f"release notes for version {version} are missing: "
             f"expected doc/release/{notes_name}")
+    # health-contract.md travels with the bundle so the runbook and
+    # error-reference links stay bundle-local (a version-pinned online
+    # URL cannot resolve before the file is released under a tag).
     for name in ("beta-support-matrix.md", "mtls-setup.md", "parity-validation.md",
-                 notes_name):
+                 "health-contract.md", notes_name):
         mapping[f"doc/release/{name}"] = repo / "doc/release" / name
     # The parity guide links this versioned export; it must travel
     # with the bundle so the reference stays bundle-local (an empty

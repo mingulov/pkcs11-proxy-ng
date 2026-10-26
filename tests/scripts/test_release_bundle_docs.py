@@ -125,6 +125,7 @@ class BundleMemberTests(notices_tests.BundleTests):
             "doc/release/beta-support-matrix.md",
             "doc/release/mtls-setup.md",
             "doc/release/parity-validation.md",
+            "doc/release/health-contract.md",
             "doc/release/pool-evidence.json",
             "doc/release/v0.2.0-release-notes.md",
             "doc/runbooks/operating-pkcs11-proxy-ng.md",
