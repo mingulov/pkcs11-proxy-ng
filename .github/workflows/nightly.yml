@@ -315,7 +315,11 @@ jobs:
   miri-shim:
     name: Miri shim parse paths
     runs-on: ubuntu-26.04
-    timeout-minutes: 30
+    # Throughput-bound, not hung (measured 2026-10-26): the
+    # mechanism_parameter_tests line grew 56 -> 171 tests since the
+    # 2026-09-30 gating and progresses steadily at ~11 s/test, so it
+    # alone needs ~32 min; 60 min covers it plus the remaining lines.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -361,7 +365,9 @@ jobs:
           # stalls (~48 done at the 500 s cap) — same Miri-harness
           # interaction shape as mock:: (no UB signal; root cause not
           # isolated). These cover the unsafe mechanism/message param
-          # readers the scope comment names.
+          # readers the scope comment names. Re-measured 2026-10-26:
+          # the mechanism line alone is now 171 tests at ~11 s/test
+          # (see the job timeout note).
           cargo +nightly miri test --locked -p pkcs11-proxy-ng-shim --lib -- \
             dispatch::general::helpers::mechanism_parameter_tests --test-threads=1
           cargo +nightly miri test --locked -p pkcs11-proxy-ng-shim --lib -- \
@@ -438,8 +444,13 @@ jobs:
           # Backend pure-logic FFI suites (measured 2026-09-30, each green
           # standalone, ~35 s total): mapping (7), native_allocation (4),
           # lifecycle_domain_tests (34), call_helpers (13), session_fence
-          # (11), retained_owner_contract_tests (9+2 ignored; the
-          # dlopen-needing oracle_retains_init_root... test is skipped).
+          # (11), retained_owner_contract_tests (re-measured 2026-10-26:
+          # 9 run + 8 ignored + 1 --skip'd; the 6 dlopen-needing tests
+          # are gated per-test or --skip'd, the 2 live-corruption /
+          # ABI-probe tests are miri-ignored — they model C-realistic
+          # caller-mutates-while-provider-retains aliasing that both
+          # borrow models reject — and the cdylib test stays #[ignore]d;
+          # all stay covered natively).
           # Deliberately NOT gated: wrap/contract, exact_output_contract,
           # native_stop, interface_caps, constructor_child, crypto_ops,
           # message_ops, session_ops, kem_ops, object_ops,
