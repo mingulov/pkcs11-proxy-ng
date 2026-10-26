@@ -827,11 +827,12 @@ fn redact_endpoint_userinfo(endpoint: &str) -> String {
         None => match endpoint.strip_prefix("//") {
             Some(stripped) => ("//", stripped),
             // Invalid but scheme-like initial prefix (e.g. `1http://`):
-            // the "://" must precede any '/', '?', '#' — a later one
-            // belongs to a path/query/fragment and falls through to
-            // the schemeless parse instead of hijacking the split.
+            // the "://" must precede any '/', '?', '#', or '@' — a
+            // later one belongs to a path/query/fragment, and an
+            // earlier '@' means schemeless userinfo; both fall through
+            // to the schemeless parse instead of hijacking the split.
             None => match endpoint.find("://") {
-                Some(i) if endpoint[..i].find(&['/', '?', '#'][..]).is_none() => {
+                Some(i) if endpoint[..i].find(&['/', '?', '#', '@'][..]).is_none() => {
                     endpoint.split_at(i + 3)
                 }
                 _ => ("", endpoint),
@@ -1201,6 +1202,11 @@ mod connect_retry_tests {
             ),
             ("user:R3_SECRET@daemon:7512#next://x", "***@daemon:7512#next://x"),
             ("daemon:8443/path://segment", "daemon:8443/path://segment"),
+            // Credentials preceding "://" are schemeless userinfo, not
+            // part of an invalid scheme (round 7). The split keeps the
+            // conservative shape: secret gone, host visible.
+            ("user:R3_SECRET@daemon:7512://segment", "***@daemon:7512://segment"),
+            ("user:R3_SECRET@http://daemon:7512", "***@http://daemon:7512"),
             // Invalid but scheme-like prefixes: tonic still accepts
             // these, so the authority after the first "://" redacts
             // rather than risk leaking userinfo (round 5).

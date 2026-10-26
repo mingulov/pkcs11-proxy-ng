@@ -163,6 +163,8 @@ fn resolver_logs_redact_socket_userinfo() {
         // Schemeless with a later "://" (round 6).
         "review_user:R3_SCHEMELESS_PATH_SECRET@daemon:7512/path://segment",
         "review_user:R3_SCHEMELESS_QUERY_SECRET@daemon:7512?next=https://other.invalid/",
+        // Credentials preceding "://" (round 7).
+        "early_user:R3_EARLY_AT_SECRET@daemon:7512://segment",
     ] {
         set_socket_only(socket);
         let logs = capture_logs(|| {
@@ -178,7 +180,9 @@ fn resolver_logs_redact_socket_userinfo() {
             "R3_UNDERSCORE_SECRET",
             "R3_SCHEMELESS_PATH_SECRET",
             "R3_SCHEMELESS_QUERY_SECRET",
+            "R3_EARLY_AT_SECRET",
             "review_user",
+            "early_user",
         ] {
             assert!(
                 !logs.contains(sentinel),
