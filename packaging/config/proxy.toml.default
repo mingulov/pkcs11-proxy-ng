@@ -57,8 +57,60 @@ backend_health_consecutive_failures = 3
 # grpc_max_concurrent_streams = 256
 # grpc_load_shed = true
 
-# Other timeouts and pool sizes use the documented ProxyConfig
-# defaults; see crates/server/src/config.rs.
+# Lease, context caps, ceilings, and pool sizes (defaults shown; every
+# knob is documented in runbook §8d "Operator knob reference").
+# lease_seconds = 3600
+# max_contexts = 1
+# max_message_bytes = 67108864
+# max_concurrent_backend_calls = 200
+# max_blocking_threads = 512
+# eviction_interval_secs = 5
+# http2_keepalive_interval_secs = 15
+# http2_keepalive_timeout_secs = 5
+# rate_limit_get_backend_interfaces = 0
+# rate_limit_window_secs = 1
+# login_lock_timeout_secs = 10
+# max_stuck_backend_calls = 5
+# mechanism_discovery = "transparent"
+
+# [listener.local]
+# Unix-domain listener with peer-credential auth.
+# path = "/run/pkcs11-proxy-ng/proxy.sock"
+# auth = "peer_cred"
+# allow_insecure_unix = false
+
+# [resilience]
+# Pathological-population detection, metrics endpoint, attr coalescer.
+# find_result_warn_threshold = 100000
+# metrics_socket = "/run/pkcs11-proxy-ng/metrics.sock"
+# Override:  PKCS11_PROXY_RESILIENCE_METRICS_SOCKET="/run/pkcs11-proxy-ng/metrics.sock"
+# Override:  PKCS11_PROXY_RESILIENCE_FIND_THRESHOLD=100000
+# coalesce_attributes = false
+
+# [audit]
+# Tamper-evident audit stream (off unless dir is set). Enabled audit
+# with an auth="none" listener requires auth.anonymous_principal.
+# dir = "/var/log/pkcs11-proxy-ng/audit"
+# signing_key = "/etc/pkcs11-proxy-ng/audit.key"
+# rotate_max_bytes = 67108864
+# rotate_keep_files = 10
+# checkpoint_interval_secs = 300
+# data_plane = false
+# channel_capacity = 4096
+# fail_closed_reserve = 256
+
+# [rate_limit]
+# Per-principal quotas and per-slot login budget (all off unless set).
+# per_principal_max_in_flight = 32
+# per_principal_max_sessions = 8
+# per_slot_failed_login_budget = 5
+# per_slot_failed_login_cooldown_secs = 60
+
+# [test_hooks]
+# Hook-gated control endpoint (inert unless set; requires a
+# native-owner-test-hooks build, default builds fail closed).
+# Override:  PKCS11_PROXY_TEST_HOOKS_CONTROL_SOCKET="/run/pkcs11-proxy-ng/hooks.sock"
+# control_socket = "/run/pkcs11-proxy-ng/hooks.sock"
 
 [listener.remote]
 # Default mode: loopback-only local use. The listener binds
@@ -97,6 +149,10 @@ allow_insecure_tcp = true
 # to all tokens.
 # The legacy x509:issuer=<dn>;subject=<dn> form still works but is
 # deprecated (the daemon logs a per-key migration warning).
+#
+# Audit-identity label for unauthenticated peers (audit-only, never a
+# grant). Required to combine [audit] with an auth="none" listener.
+# anonymous_principal = "local-dev"
 
 [mechanisms]
 # Path to the mechanism parameter registry served to shims over the
