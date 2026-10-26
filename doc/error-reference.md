@@ -26,7 +26,7 @@ See the PKCS#11 specification for the complete meaning of each code.
   blocking-pool panic) — into the health-gate's unhealthy set.
   Backend-returned `TOKEN_NOT_PRESENT` and `CKR_DEVICE_ERROR` are
   per-request responses and do not flip readiness, but the **return
-  value to the caller is still the exact backend RV** (per CLAUDE.md
+  value to the caller is still the exact backend RV** (per AGENTS.md
   rule 2).
 
 Daemon transport/capacity failures that formerly shared this code now

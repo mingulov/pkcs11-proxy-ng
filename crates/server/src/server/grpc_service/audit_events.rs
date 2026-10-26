@@ -9,7 +9,7 @@
 //!
 //! SECURITY: audit records MUST NOT contain PINs, keys, labels, or any other
 //! sensitive request payload — only method/identity/slot/session/ck_rv/latency.
-//! (CLAUDE.md §4.)
+//! (AGENTS.md §4.)
 
 use std::sync::OnceLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
