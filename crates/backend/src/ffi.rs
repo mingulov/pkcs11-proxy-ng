@@ -2539,8 +2539,15 @@ mod tests {
         // leaf lock parks the publisher inside its purge closure with the
         // lifecycle write still held, so the tracker state observable at
         // that moment is exactly what any re-Initialize released after
-        // the publish would inherit. No sleeps order this test; every
-        // wait is a channel/condition wait with a bounded failure timeout.
+        // the publish would inherit. The gate below polls the open-session
+        // count, not `try_state_for_tests`: `None` there only proves a
+        // writer holds *or queues*, so it can fire before the record runs.
+        // The count starts at 1 and only `note_finalized` zeroes it, so
+        // observing 0 while still holding the leaf lock proves the record
+        // already ran inside the publish section (the publisher cannot
+        // leave that section without the leaf lock). No sleeps order this
+        // test; every wait is a channel/condition wait or a bounded poll
+        // whose timeout is only a failure bound.
         use std::sync::{Arc, mpsc};
         use std::time::{Duration, Instant};
         let _lock = TRACKER_TEST_LOCK.lock().unwrap();
@@ -2576,11 +2583,23 @@ mod tests {
         // still holding the lifecycle write.
         let lifetimes_guard = backend.object_lifetimes.lock_entries();
         release_tx.send(()).expect("release the parked finalize into its publish");
-        // Poll (bounded) until the publish write is observably held: a
-        // `try_read` can only fail while a writer holds the domain.
+        // Bounded-poll until the record provably happened: the count was
+        // seeded to 1 above and only `note_finalized` zeroes it. Do NOT
+        // gate on `try_state_for_tests()` being `None` — that also fires
+        // for a merely queued writer, before the publish section (and its
+        // first-step record) runs. While this test holds the leaf lock,
+        // the publisher cannot leave the publish section, so once 0 is
+        // observed the record is inside the section and the write is
+        // still held. On the pre-fix shape the record runs only after the
+        // publish returns (which needs this leaf lock), so the count
+        // never reaches 0 here and the bound expires as RED.
         let deadline = Instant::now() + Duration::from_secs(5);
-        while backend.lifecycle_domain.try_state_for_tests().is_some() {
-            assert!(Instant::now() < deadline, "publish write must be held within the bound");
+        while backend.lifecycle.open_session_count_for_tests() != 0 {
+            assert!(
+                Instant::now() < deadline,
+                "tracker finalized fact (zeroed open count) must be recorded inside \
+                 the publish section, before the lifecycle write is released"
+            );
             std::thread::yield_now();
         }
         assert_eq!(
@@ -2588,6 +2607,12 @@ mod tests {
             0,
             "tracker finalized fact (zeroed open count) must be recorded inside \
              the publish section, before the lifecycle write is released"
+        );
+        assert!(
+            backend.lifecycle_domain.try_state_for_tests().is_none(),
+            "publish write must still be held after the in-section record: \
+             the publisher cannot leave the publish section without the \
+             object-lifetime leaf lock this test still holds"
         );
         assert_eq!(
             backend.lifecycle.retirement_decision(),
