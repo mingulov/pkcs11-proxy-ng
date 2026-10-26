@@ -269,6 +269,10 @@ gh attestation verify <bundle> \
   --signer-workflow mingulov/pkcs11-proxy-ng/.github/workflows/release.yml
 ```
 
+When a release run fails or wedges instead, recover it via the
+[release recovery runbook](recovery.md) — never by re-running a
+fixed workflow in place (a rerun replays the frozen file).
+
 ## Recovery
 
 - Individual member: dispatch `publish.yml` with `package` set to the
