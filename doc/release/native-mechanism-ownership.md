@@ -218,8 +218,8 @@ not a volatile-store reset or erasure boundary — even the same client
 must not depend on it to clear token state. The v0.2 scope is one
 logical client per daemon ("restart both before switching"), so no
 supported deployment shares a daemon across mutually untrusting
-clients; per-client backend-state teardown is a v0.3 multi-tenancy
-question. Locked by
+clients; per-client backend-state teardown is a later-version
+multi-tenancy question (see the [v0.4.0 scope](v0.4.0-scope.md)). Locked by
 `memory_token_object_survives_client_restart_by_design`.
 
 The following ordering is mandatory. Existing transport authentication,

@@ -156,7 +156,7 @@ client in one trusted security domain per daemon and provider instance.
 Restart the daemon and provider before switching to an independent client or
 domain. Do not share an instance between mutually untrusted clients.
 `[proxy] max_contexts = 1` limits admission; it does not isolate native
-authentication state. [Multi-client isolation](v0.3.0-scope.md) remains planned.
+authentication state. [Multi-client isolation](v0.4.0-scope.md) remains planned.
 
 The candidate supports `C_WaitForSlotEvent` only with `CKF_DONT_BLOCK`.
 Blocking mode returns local `CKR_FUNCTION_NOT_SUPPORTED`; clients share

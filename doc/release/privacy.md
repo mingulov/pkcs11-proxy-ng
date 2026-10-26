@@ -11,7 +11,7 @@ Use one logical client in one trusted security domain per daemon/provider
 instance. Restart both before an independent client or domain takes over.
 `[proxy] max_contexts = 1` limits admission but does not clear native login
 state or establish cross-client object privacy. Multi-client isolation is
-deferred to the [v0.3 scope](v0.3.0-scope.md).
+deferred to the [later scope](v0.4.0-scope.md).
 
 ## Classification
 
