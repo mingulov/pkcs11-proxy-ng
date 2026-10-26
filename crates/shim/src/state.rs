@@ -796,13 +796,29 @@ pub(crate) fn connect_attempts_warning(raw: Option<&str>) -> Option<String> {
 /// log or error string. The resolver passes `PKCS11_PROXY_ENDPOINT`
 /// through verbatim and tonic accepts userinfo URIs, so the raw string
 /// must never be emitted; the host stays visible for diagnosis.
-/// Authority parsing: split the scheme (a leading `//` without one
-/// still opens an authority section), end the authority at the first
-/// `/`, `?`, or `#`, and run userinfo to the LAST `@` inside it — the
-/// host never contains `@` while passwords in the wild do.
+/// Authority parsing: the scheme is valid only as the initial
+/// component (`ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )` before the
+/// first `://`), so a later `://` in a path, query, or fragment can
+/// never hijack recognition. Without a valid scheme, a leading `//`
+/// still opens an authority section. The authority ends at the first
+/// `/`, `?`, or `#`, and userinfo runs to the LAST `@` inside it —
+/// the host never contains `@` while passwords in the wild do.
+/// Split `scheme://rest` only when `scheme` is a valid initial URI
+/// scheme; otherwise return `None` so the caller falls back to the
+/// leading-`//` or schemeless parse. Slicing is ASCII-safe: both the
+/// scheme alphabet and the `://` separator are single-byte.
+fn split_valid_scheme(endpoint: &str) -> Option<(&str, &str)> {
+    let end = endpoint.find("://")?;
+    let scheme = &endpoint[..end];
+    let mut chars = scheme.chars();
+    let head_valid = matches!(chars.next(), Some(c) if c.is_ascii_alphabetic());
+    let tail_valid = chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+    if head_valid && tail_valid { Some(endpoint.split_at(end + 3)) } else { None }
+}
+
 fn redact_endpoint_userinfo(endpoint: &str) -> String {
-    let (prefix, rest) = match endpoint.find("://") {
-        Some(i) => endpoint.split_at(i + 3),
+    let (prefix, rest) = match split_valid_scheme(endpoint) {
+        Some((prefix, rest)) => (prefix, rest),
         None => match endpoint.strip_prefix("//") {
             Some(stripped) => ("//", stripped),
             None => ("", endpoint),
@@ -1150,10 +1166,18 @@ mod connect_retry_tests {
             ("https://user:p@ss@daemon:8443", "https://***@daemon:8443"),
             ("user:R3_SECRET@daemon:8443", "***@daemon:8443"),
             ("//user:R3_SECRET@daemon:8443", "//***@daemon:8443"),
+            // A later "://" must not hijack scheme recognition: the
+            // scheme is valid only as the initial component.
+            ("//user:R3_SECRET@daemon:8443/path://segment", "//***@daemon:8443/path://segment"),
             (
                 "https://daemon:8443?email=alice@example.invalid",
                 "https://daemon:8443?email=alice@example.invalid",
             ),
+            (
+                "https://daemon:8443?next=https://other.invalid/",
+                "https://daemon:8443?next=https://other.invalid/",
+            ),
+            ("daemon:8443?x=://y", "daemon:8443?x=://y"),
             ("https://daemon:8443/path@document", "https://daemon:8443/path@document"),
             ("unix:/tmp/daemon@domain.sock", "unix:/tmp/daemon@domain.sock"),
             ("https://user:p@[::1]:8443", "https://***@[::1]:8443"),
