@@ -737,3 +737,138 @@ fn drop_quiescence_poisoned_domain_reports_poison() {
     });
     assert!(domain.quiescence_poisoned(), "poisoned domain reports poison");
 }
+
+// --- Abandon-section tracker records (Codex round 9) ---
+//
+// The publish side records tracker facts inside its validated write
+// section (80b6f33); the abandon side must do the same. Each test below
+// composes a `LifecycleDomain` with a `LifecycleTracker` exactly as
+// `FfiBackend::initialize` / `finish_finalize` wire them, deterministically
+// and single-threaded: ticket currency is controlled by begin order and
+// the test-only state injection, never by sleeps or thread races.
+
+#[test]
+fn abandon_init_record_reasserts_attempt_after_interleaved_finalize() {
+    // Pending-Initialize retirement hole: A begins and records its attempt,
+    // then B completes a full Initialize+Finalize cycle (finalized facts
+    // recorded inside the publish section, as production does), clearing
+    // A's exposure. A's stale abandon must re-assert the attempt inside
+    // its own abandon section, or retirement releases over native code
+    // that ran after the Finalize.
+    let domain = LifecycleDomain::new();
+    let tracker = LifecycleTracker::default();
+    let a = domain.begin_initialize().expect("A begins");
+    tracker.note_init_attempted();
+    let b = domain.begin_initialize().expect("B begins behind A");
+    tracker.note_init_attempted();
+    tracker.note_initialized().expect("B cycle opens");
+    domain.publish_open(b).expect("B publish opens");
+    let seal = domain.begin_finalize().expect("B finalize begins");
+    seal.enter_finalizing().expect("B enters exclusive phase");
+    domain
+        .publish_finalized_with_purge(seal, || tracker.note_finalized())
+        .expect("B finalize publishes");
+    assert_eq!(
+        tracker.retirement_decision(),
+        RetirementDecision::Release,
+        "interleaved Finalize cleared A's exposure (defect precondition)"
+    );
+    let seen = std::cell::Cell::new(None);
+    domain.abandon_initialize_with_record(a, |current| {
+        seen.set(Some(current));
+        tracker.note_init_attempted();
+    });
+    assert_eq!(seen.get(), Some(false), "A's ticket is stale after B's cycle");
+    assert_eq!(domain.state_for_tests(), ModuleState::Finalized);
+    assert_eq!(
+        tracker.retirement_decision(),
+        RetirementDecision::Poison,
+        "stale Initialize abandon must re-assert the attempt exposure"
+    );
+}
+
+#[test]
+fn abandon_finalize_record_skips_stale_failure() {
+    // Stale-Finalize overwrite hole: F1 sealed, then a newer cycle
+    // completed (simulated with the test state/epoch controls plus the
+    // tracker's finalized record, as production's publish performs it).
+    // F1's late failure record must not land over the newer incarnation:
+    // setting `finalize_failed` there strands the backend (Initialize
+    // refuses already-initialized while Finalize reports not-initialized).
+    let domain = open_domain();
+    let tracker = LifecycleTracker::default();
+    tracker.note_initialized().expect("cycle opens");
+    let f1 = domain.begin_finalize().expect("F1 seals");
+    f1.enter_finalizing().expect("F1 enters exclusive phase");
+    let f1_epoch = f1.epoch_for_tests();
+    domain.set_state_for_tests(ModuleState::Finalized, f1_epoch + 1);
+    tracker.note_finalized();
+    tracker.check_reinitialize().expect("newer finalized cycle admits re-init");
+    let seen = std::cell::Cell::new(None);
+    domain.abandon_finalize_with_record(f1, |current| {
+        seen.set(Some(current));
+        if current {
+            tracker.note_finalize_failed();
+        }
+    });
+    assert_eq!(seen.get(), Some(false), "F1's ticket is stale after the newer cycle");
+    assert_eq!(domain.state_for_tests(), ModuleState::Finalized);
+    assert_eq!(domain.epoch_for_tests(), f1_epoch + 1, "stale abandon consumes nothing");
+    tracker.check_reinitialize().expect("stale finalize failure must not refuse re-initialization");
+}
+
+#[test]
+fn abandon_finalize_record_current_failure_refuses_until_successful_finalize() {
+    // Current-failure control (F-08 preserved): a current failed Finalize
+    // still records `finalize_failed` inside the abandon section, refuses
+    // re-initialization, and a later successful Finalize clears it.
+    let domain = open_domain();
+    let tracker = LifecycleTracker::default();
+    tracker.note_initialized().expect("cycle opens");
+    let f1 = domain.begin_finalize().expect("F1 seals");
+    f1.enter_finalizing().expect("F1 enters exclusive phase");
+    let seen = std::cell::Cell::new(None);
+    domain.abandon_finalize_with_record(f1, |current| {
+        seen.set(Some(current));
+        if current {
+            tracker.note_finalize_failed();
+        }
+    });
+    assert_eq!(seen.get(), Some(true), "unraced F1 ticket stays current");
+    assert_eq!(domain.state_for_tests(), ModuleState::Open, "current abandon restores Open");
+    assert_eq!(
+        tracker.check_reinitialize().unwrap_err(),
+        LifecycleRefusal::FailedFinalizeUnresolved,
+        "current finalize failure refuses re-initialization"
+    );
+    let f2 = domain.begin_finalize().expect("retry seals from restored Open");
+    f2.enter_finalizing().expect("retry enters exclusive phase");
+    domain
+        .publish_finalized_with_purge(f2, || tracker.note_finalized())
+        .expect("successful finalize publishes");
+    tracker.check_reinitialize().expect("successful finalize clears the failure");
+}
+
+#[test]
+fn abandon_with_record_on_poisoned_domain_skips_record() {
+    // Poisoned lifecycle lock: the abandon cannot validate currency, so
+    // the record closure must not run at all. The domain poison itself
+    // already fails closed (every admission/control denies, and backend
+    // `Drop` stop-fires on the quiescence probe), so skipping the record
+    // cannot soften retirement.
+    let domain = open_domain();
+    let tracker = LifecycleTracker::default();
+    tracker.note_initialized().expect("cycle opens");
+    let ticket = domain.begin_initialize().expect("begin succeeds");
+    std::thread::scope(|scope| {
+        let parked = scope.spawn(|| {
+            domain.hold_write_across_for_tests(|| panic!("intentional LifecycleDomain poison"))
+        });
+        assert!(parked.join().is_err(), "poisoning thread must panic");
+    });
+    assert!(domain.quiescence_poisoned(), "domain reports poison");
+    let recorded = std::cell::Cell::new(false);
+    domain.abandon_initialize_with_record(ticket, |_current| recorded.set(true));
+    assert!(!recorded.get(), "poisoned abandon must not run the record closure");
+    assert_eq!(domain.admit_ordinary().unwrap_err(), CkRv::GENERAL_ERROR);
+}

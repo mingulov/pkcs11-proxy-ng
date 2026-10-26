@@ -986,14 +986,37 @@ impl LifecycleDomain {
         ticket.settle_publish(purge)
     }
 
-    /// Abandon a failed/refused Initialize cycle (best-effort cleanup, no
-    /// failure mode of its own): if the ticket epoch still matches, restore
-    /// the prior stable state — or `Uncertain` when the prior was the
-    /// transient `Initializing` (a concurrent control op began first). On
-    /// epoch mismatch a later control op already moved the domain, so the
-    /// stale ticket is a silent no-op. Poison ⇒ no-op (already fail-closed).
+    /// Test-only plain abandon: production abandons through
+    /// `abandon_initialize_with_record` so the attempt record is atomic
+    /// with the settlement. Best-effort cleanup, no failure mode of its
+    /// own: if the ticket epoch still matches, restore the prior stable
+    /// state — or `Uncertain` when the prior was the transient
+    /// `Initializing` (a concurrent control op began first). On epoch
+    /// mismatch a later control op already moved the domain, so the stale
+    /// ticket is a silent no-op. Poison ⇒ no-op (already fail-closed).
+    #[cfg(test)]
     pub(in crate::ffi) fn abandon_initialize(&self, ticket: InitTicket<'_>) {
         ticket.settle_abandon();
+    }
+
+    /// Abandon like [`abandon_initialize`](Self::abandon_initialize),
+    /// running `record` with the ticket's currency (`true` when the ticket
+    /// epoch still matches) INSIDE the same lifecycle write section that
+    /// validates the epoch and restores the prior state — the abandon-side
+    /// mirror of the publish-side purge/record section. The closure runs
+    /// under lifecycle write, so it may only perform inner-leaf stores
+    /// (the lifecycle tracker's atomics qualify, exactly as in the publish
+    /// sections); it must never admit, begin control, or touch native
+    /// entry points. On a poisoned lock the closure does NOT run: domain
+    /// poison already fails closed (every admission/control denies and
+    /// backend `Drop` stop-fires on the quiescence probe), so a skipped
+    /// record cannot soften retirement.
+    pub(in crate::ffi) fn abandon_initialize_with_record(
+        &self,
+        ticket: InitTicket<'_>,
+        record: impl FnOnce(bool),
+    ) {
+        ticket.settle_abandon_with_record(record);
     }
 
     /// Start the Finalize control transition (I3 drain-then-seal): the
@@ -1097,14 +1120,29 @@ impl LifecycleDomain {
         ticket.settle_publish(purge)
     }
 
-    /// Abandon a failed Finalize cycle (best-effort cleanup, no failure
-    /// mode of its own): if the ticket epoch still matches, restore the
-    /// prior stable state (`Open` — begin proceeds only from there) or
-    /// `Uncertain` when the prior was transient. On epoch mismatch a
-    /// later control op already moved the domain, so the stale ticket is
-    /// a silent no-op. Poison ⇒ no-op (already fail-closed).
+    /// Test-only plain abandon: production abandons through
+    /// `abandon_finalize_with_record` so the failure record is atomic
+    /// with the settlement. Best-effort cleanup, no failure mode of its
+    /// own: if the ticket epoch still matches, restore the prior stable
+    /// state (`Open` — begin proceeds only from there) or `Uncertain`
+    /// when the prior was transient. On epoch mismatch a later control
+    /// op already moved the domain, so the stale ticket is a silent
+    /// no-op. Poison ⇒ no-op (already fail-closed).
+    #[cfg(test)]
     pub(in crate::ffi) fn abandon_finalize(&self, ticket: FinalizeTicket<'_>) {
         ticket.settle_abandon();
+    }
+
+    /// Abandon like [`abandon_finalize`](Self::abandon_finalize), running
+    /// `record` with the ticket's currency inside the abandon write
+    /// section. Same closure contract and poison behavior as
+    /// [`abandon_initialize_with_record`](Self::abandon_initialize_with_record).
+    pub(in crate::ffi) fn abandon_finalize_with_record(
+        &self,
+        ticket: FinalizeTicket<'_>,
+        record: impl FnOnce(bool),
+    ) {
+        ticket.settle_abandon_with_record(record);
     }
 
     /// Backend-`Drop` quiescence probe (I4/conc-M3): a non-blocking
@@ -1463,33 +1501,58 @@ impl InitTicket<'_> {
         }
     }
 
+    #[cfg(test)]
     fn settle_abandon(mut self) {
         self.settled = true;
         Self::abandon_raw(self.domain, self.prior, self.epoch);
     }
 
+    fn settle_abandon_with_record(mut self, record: impl FnOnce(bool)) {
+        self.settled = true;
+        Self::abandon_raw_with_record(self.domain, self.prior, self.epoch, record);
+    }
+
     fn abandon_raw(domain: &LifecycleDomain, prior: ModuleState, epoch: u64) {
+        Self::abandon_raw_with_record(domain, prior, epoch, |_| {});
+    }
+
+    fn abandon_raw_with_record(
+        domain: &LifecycleDomain,
+        prior: ModuleState,
+        epoch: u64,
+        record: impl FnOnce(bool),
+    ) {
         let Ok(mut write) = domain.inner.write() else {
+            // Poisoned: no validation is possible, so the record does not
+            // run (domain poison already fails closed — see
+            // `abandon_initialize_with_record`).
             return;
         };
-        if write.epoch != epoch {
-            // Stale ticket: a later control op owns the outcome.
-            return;
-        }
-        // The only live ticket at u64::MAX is this one (begin is denied
-        // there), so restoring without a bump is confusion-free; control
-        // frozen from here on, incarnation pinned (a restored `Open` keeps
-        // admitting — only new control cycles are denied).
-        if let Some(next) = write.epoch.checked_add(1) {
-            write.epoch = next;
-        }
-        write.state = match prior {
-            // Transient prior: nothing stable to restore — fail closed.
-            ModuleState::Initializing | ModuleState::Draining | ModuleState::Finalizing => {
-                ModuleState::Uncertain
+        let current = write.epoch == epoch;
+        if current {
+            // The only live ticket at u64::MAX is this one (begin is denied
+            // there), so restoring without a bump is confusion-free; control
+            // frozen from here on, incarnation pinned (a restored `Open` keeps
+            // admitting — only new control cycles are denied).
+            if let Some(next) = write.epoch.checked_add(1) {
+                write.epoch = next;
             }
-            stable => stable,
-        };
+            write.state = match prior {
+                // Transient prior: nothing stable to restore — fail closed.
+                ModuleState::Initializing | ModuleState::Draining | ModuleState::Finalizing => {
+                    ModuleState::Uncertain
+                }
+                stable => stable,
+            };
+        }
+        // Still under the abandon write: the record is atomic with the
+        // currency validation and the prior-state restore above, so no
+        // interleaved control cycle can observe or overwrite the recorded
+        // facts in between. A stale ticket restores nothing but still
+        // reports `current == false` so its caller can re-assert exposure
+        // facts an interleaved cycle may have cleared.
+        record(current);
+        drop(write);
     }
 
     #[cfg(test)]
@@ -1557,33 +1620,53 @@ impl FinalizeTicket<'_> {
         }
     }
 
+    #[cfg(test)]
     fn settle_abandon(mut self) {
         self.settled = true;
         Self::abandon_raw(self.domain, self.prior, self.epoch);
     }
 
+    fn settle_abandon_with_record(mut self, record: impl FnOnce(bool)) {
+        self.settled = true;
+        Self::abandon_raw_with_record(self.domain, self.prior, self.epoch, record);
+    }
+
     fn abandon_raw(domain: &LifecycleDomain, prior: ModuleState, epoch: u64) {
+        Self::abandon_raw_with_record(domain, prior, epoch, |_| {});
+    }
+
+    fn abandon_raw_with_record(
+        domain: &LifecycleDomain,
+        prior: ModuleState,
+        epoch: u64,
+        record: impl FnOnce(bool),
+    ) {
         let Ok(mut write) = domain.inner.write() else {
+            // Poisoned: no validation is possible, so the record does not
+            // run (domain poison already fails closed — see
+            // `abandon_initialize_with_record`).
             return;
         };
-        if write.epoch != epoch {
-            // Stale ticket: a later control op owns the outcome.
-            return;
-        }
-        // The only live ticket at u64::MAX is this one (begin is denied
-        // there), so restoring without a bump is confusion-free; control
-        // frozen from here on, incarnation pinned (a restored `Open` keeps
-        // admitting — only new control cycles are denied).
-        if let Some(next) = write.epoch.checked_add(1) {
-            write.epoch = next;
-        }
-        write.state = match prior {
-            // Transient prior: nothing stable to restore — fail closed.
-            ModuleState::Initializing | ModuleState::Draining | ModuleState::Finalizing => {
-                ModuleState::Uncertain
+        let current = write.epoch == epoch;
+        if current {
+            // The only live ticket at u64::MAX is this one (begin is denied
+            // there), so restoring without a bump is confusion-free; control
+            // frozen from here on, incarnation pinned (a restored `Open` keeps
+            // admitting — only new control cycles are denied).
+            if let Some(next) = write.epoch.checked_add(1) {
+                write.epoch = next;
             }
-            stable => stable,
-        };
+            write.state = match prior {
+                // Transient prior: nothing stable to restore — fail closed.
+                ModuleState::Initializing | ModuleState::Draining | ModuleState::Finalizing => {
+                    ModuleState::Uncertain
+                }
+                stable => stable,
+            };
+        }
+        // Still under the abandon write: see `InitTicket::abandon_raw_with_record`.
+        record(current);
+        drop(write);
     }
 
     #[cfg(test)]
