@@ -2445,7 +2445,16 @@ fn runbook_knob_table_covers_every_operator_knob() {
         assert!(table.contains(knob), "runbook §8d must document operator knob {knob}");
     }
     for section in OPERATOR_SECTIONS {
-        let header = format!("[{section}");
-        assert!(table.contains(&header), "runbook §8d must have a [{section}] block");
+        if *section == "listener" {
+            // No bare `[listener]` TOML block exists — only the two
+            // subsections — so pin both subsection headers explicitly.
+            for sub in ["listener.local", "listener.remote"] {
+                let header = format!("### [{sub}]");
+                assert!(table.contains(&header), "runbook §8d must have a [{sub}] block");
+            }
+        } else {
+            let header = format!("### [{section}]");
+            assert!(table.contains(&header), "runbook §8d must have a [{section}] block");
+        }
     }
 }
