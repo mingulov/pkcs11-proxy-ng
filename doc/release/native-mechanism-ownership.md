@@ -12,7 +12,7 @@ untrusted clients or share a daemon/provider between independent domains.
 Restart the daemon and its provider instance before changing to an independent
 client or security domain. `[proxy] max_contexts = 1` is an admission guardrail,
 not a repair for isolation or residual native authentication state.
-Multi-client isolation is deferred to the [v0.3 scope](v0.3.0-scope.md).
+Multi-client isolation is deferred to the [later scope](v0.4.0-scope.md).
 
 ## Supported deployment boundary
 

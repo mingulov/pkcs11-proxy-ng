@@ -2079,7 +2079,8 @@ async fn backend_object_has_other_class(
 /// (`mint_recorded_private` resolves through the live map; unmapped
 /// reads fail closed to `None`).
 ///
-/// Two related legs stay open for v0.3: session close and logout evict
+/// Two related legs stay open for the later multi-client version (v0.4
+/// scope): session close and logout evict
 /// only the acting context's session mappings, and there is no global
 /// object→backend-session link to broadcast with (mappings record the
 /// virtual session, which is per-context). The intended design is lazy
@@ -2144,7 +2145,8 @@ pub(super) async fn find_result_visible_to_context(
 /// Read the cached privacy bit, or probe CKA_PRIVATE when it is uncached.
 /// The current boolean representation can conflate unknown metadata with
 /// false and can retain stale defaults. It is not authoritative evidence
-/// for multi-client isolation; see the deferred v0.3 privacy contract.
+/// for multi-client isolation; see the deferred later-version (v0.4 scope)
+/// privacy contract.
 pub(super) async fn object_is_private(
     ctx: &HandlerContext,
     ctx_id: &ClientContextId,

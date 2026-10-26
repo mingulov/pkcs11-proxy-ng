@@ -13,7 +13,7 @@ instance. Restart both before handing the instance to an independent client or
 domain, even after disconnect or logout. `[proxy] max_contexts = 1` limits
 admission but does not clear native login state. Independent clients need
 separate daemon/provider instances; shared HSM or token isolation needs its
-own validation. See the [v0.3 scope](../release/v0.3.0-scope.md) for
+own validation. See the [later scope](../release/v0.4.0-scope.md) for
 multi-client work.
 
 ## v0.2 native-lifetime stop (implemented; candidate qualification separate)

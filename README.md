@@ -28,7 +28,8 @@ Use **one logical client in one trusted security domain per daemon/provider
 instance**. Do not share it with mutually untrusted clients. Restart the daemon
 and provider before switching independent clients or domains.
 `[proxy] max_contexts = 1` limits admission; it does not establish isolation.
-Multi-client isolation is planned for [v0.3](./doc/release/v0.3.0-scope.md).
+Multi-client isolation is planned for a later version
+([v0.4 scope](./doc/release/v0.4.0-scope.md)).
 
 ## Quick start
 

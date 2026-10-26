@@ -202,6 +202,17 @@ class RealRepoBundleLinkTests(unittest.TestCase):
                         self.assertNotIn("/blob/main/", url)
                         self.assertNotIn("/tree/main/", url)
 
+    def test_install_guide_notes_link_tracks_workspace_version(self):
+        # The install guide ships in the bundle next to exactly one
+        # notes file (v{version}-release-notes.md). A stale notes link
+        # would be "repaired" into an online pointer at old notes while
+        # the current notes sit bundle-local beside the guide.
+        from release.package_bundles import bundle_doc_mapping
+        version = workspace_version()
+        mapping = bundle_doc_mapping(ROOT, version)
+        guide = Path(mapping["INSTALL.md"]).read_text(encoding="utf-8")
+        self.assertIn(f"(v{version}-release-notes.md)", guide)
+
     def test_real_bundle_template_members_exist(self):
         from release.package_bundles import bundle_doc_mapping
         mapping = bundle_doc_mapping(ROOT, workspace_version())
@@ -228,8 +239,11 @@ class RealRepoBundleLinkTests(unittest.TestCase):
         tag = f"v{version}"
         tagged = subprocess.run(["git", "rev-parse", "--verify", tag],
                                 cwd=ROOT, capture_output=True)
-        if tagged.returncode != 0:
-            self.skipTest(f"{tag} unavailable in this checkout")
+        # Pre-tag candidates must validate too (the script gate refuses
+        # skips): verify the link targets against the candidate tree at
+        # HEAD, which is what the tag will freeze. Post-tag the pinned
+        # tag itself is authoritative.
+        ref = tag if tagged.returncode == 0 else "HEAD"
         mapping = bundle_doc_mapping(ROOT, version)
         with tempfile.TemporaryDirectory() as temp:
             stage = Path(temp) / "stage"
@@ -249,12 +263,12 @@ class RealRepoBundleLinkTests(unittest.TestCase):
                 _kind, pinned, target = match.group(1), match.group(2), match.group(3)
                 target = target.split("#", 1)[0]
                 self.assertEqual(pinned, version, f"URL pins the wrong version: {url}")
-                probe = subprocess.run(["git", "cat-file", "-e", f"{tag}:{target}"],
+                probe = subprocess.run(["git", "cat-file", "-e", f"{ref}:{target}"],
                                        cwd=ROOT, capture_output=True)
                 if probe.returncode != 0:
                     missing.append(f"{staged_rel} -> {url}")
         self.assertEqual(missing, [],
-                         f"online references missing at {tag}: {missing}")
+                         f"online references missing at {ref}: {missing}")
 
 
 class RealRepoBundleGuideTests(unittest.TestCase):

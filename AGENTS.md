@@ -53,7 +53,7 @@ AI agents, automation, and human contributors.
   clients or domains.
 - `max_contexts = 1` is an admission guardrail, not an isolation repair.
   Multi-client authentication-state and object-privacy work is deferred to
-  `doc/release/v0.3.0-scope.md`; do not describe it as completed.
+  `doc/release/v0.4.0-scope.md`; do not describe it as completed.
 - Preserve native semantics within the stated scope. A narrower testing scope
   does not authorize removing authorization checks or normalizing provider RVs.
 
