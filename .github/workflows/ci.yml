@@ -629,10 +629,8 @@ jobs:
         with:
           toolchain: 1.98.1
 
-      - name: Install Rust 1.88.0 (consumer MSRV)
-        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-        with:
-          toolchain: 1.88.0
+      # No MSRV install here: packaging uses +1.98.1 explicitly and the
+      # consumer gates install their own 1.88.0 in package-consumers.
 
       - name: Set up Python 3.12
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7

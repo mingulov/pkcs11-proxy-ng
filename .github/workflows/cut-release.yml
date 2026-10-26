@@ -177,8 +177,14 @@ jobs:
       - name: Gate clippy
         run: cargo clippy --workspace --locked --all-targets --all-features -- -D warnings
 
+      # Same enforced MSRV standard as the CI msrv job (locked
+      # all-targets build + full test suite): a plain check cannot see
+      # test/example/bench regressions on the minimum toolchain.
       - name: Gate msrv
-        run: cargo +1.88.0 check --workspace --locked
+        run: cargo +1.88.0 build --workspace --locked --all-targets
+
+      - name: Gate msrv test suite
+        run: cargo +1.88.0 test --workspace --locked
 
       - name: Cache cargo audit binary
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6

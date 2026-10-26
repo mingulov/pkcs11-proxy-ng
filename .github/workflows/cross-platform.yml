@@ -80,11 +80,11 @@ jobs:
             experimental: false
           - os: windows-2022
             experimental: false
-          # windows-2025 (Server 2025 + VS2026) starts experimental;
-          # promote to blocking after the first green leg, per the
-          # macos precedent above.
+          # windows-2025 (Server 2025 + VS2026) PROMOTED to voting
+          # 2026-10-26 after two consecutive green legs (runs 40331416346
+          # + 40335691707, compare job SUCCESS), per the macos precedent.
           - os: windows-2025
-            experimental: true
+            experimental: false
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -272,10 +272,11 @@ jobs:
         include:
           - os: windows-2022
             experimental: false
-          # windows-2025 (VS2026 x86 tools) starts experimental; promote
-          # after the first green leg.
+          # windows-2025 (VS2026 x86 tools) PROMOTED to voting 2026-10-26
+          # after two consecutive green legs (runs 40331416346 +
+          # 40335691707, win32 job SUCCESS).
           - os: windows-2025
-            experimental: true
+            experimental: false
     env:
       PKCS11_PROXY_NG_WIN32_STUB_MODULE: ${{ github.workspace }}/target/win32-stub/p11win32stub.dll
     steps:
