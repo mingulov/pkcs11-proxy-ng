@@ -656,6 +656,101 @@ fn v2_settlement_racing_recreate_never_destroys_replacement() {
     assert_eq!(backend.live_object_count(), 1);
 }
 
+/// Repeated race regression: settlement racing a competitor
+/// destroy+recreate of the same numeric handle must never destroy
+/// the replacement. The bound destroy historically composed
+/// `session_incarnation()` + `object_lifetime()` (each locking
+/// briefly) and then `destroy_object()` (locking again), so a
+/// destroy+recreate could slip between the check and the destroy
+/// and the bound destroy killed a valid replacement. Loop with a
+/// barrier start to force interleavings; the replacement must
+/// survive EVERY iteration.
+#[test]
+fn bound_destroy_racing_destroy_recreate_never_destroys_replacement_repeated() {
+    let backend = MockBackend::default_test();
+    backend.set_handle_recycling(true);
+    backend.initialize().unwrap();
+    let origin = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let other = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let origin_incarnation = backend.session_incarnation(origin);
+    let token_template = [CkAttribute {
+        attr_type: CkAttributeType::TOKEN,
+        value: Some(CkAttributeValue::Bool(true)),
+    }];
+    let backend_ref = &backend;
+    let token_template_ref = &token_template;
+    for iteration in 0..200u32 {
+        let minted = backend.create_object(origin, Some(&token_template)).unwrap();
+        let id_a = backend.object_lifetime(origin, minted).expect("tracked mint");
+        let destroys_before = backend.destroy_call_count();
+        let barrier = std::sync::Barrier::new(3);
+        let barrier_ref = &barrier;
+        let (replacement, competitor_result, settle_result) = std::thread::scope(|scope| {
+            let competitor = scope.spawn(move || {
+                barrier_ref.wait();
+                let result = backend_ref.destroy_object(other, minted);
+                let repl = backend_ref
+                    .create_object(other, Some(token_template_ref.as_slice()))
+                    .expect("recreate succeeds");
+                (repl, result)
+            });
+            let settle = scope.spawn(move || {
+                barrier_ref.wait();
+                backend_ref.destroy_object_if_bound(origin, minted, origin_incarnation, Some(id_a))
+            });
+            barrier_ref.wait();
+            let (repl, comp) = competitor.join().expect("competitor joins");
+            let settle_res = settle.join().expect("settle joins");
+            (repl, comp, settle_res)
+        });
+        assert_eq!(
+            replacement, minted,
+            "iteration {iteration}: recycling mock must reuse the object handle"
+        );
+        assert!(
+            !(competitor_result.is_ok() && settle_result.is_ok()),
+            "iteration {iteration}: both destroys succeeded — settlement destroyed the replacement"
+        );
+        assert_eq!(
+            backend.live_object_count(),
+            1,
+            "iteration {iteration}: replacement must survive the race"
+        );
+        backend.get_object_size(other, replacement).unwrap_or_else(|rv| {
+            panic!("iteration {iteration}: replacement remains usable: {rv:?}")
+        });
+        // Only legitimate destroys count: the competitor's plain
+        // destroy always counts one call; a bound destroy counts
+        // only when it actually destroys (Ok), never on refusal.
+        let expected_destroys = destroys_before + 1 + usize::from(settle_result.is_ok());
+        assert_eq!(
+            backend.destroy_call_count(),
+            expected_destroys,
+            "iteration {iteration}: destroy_call_count reflects only legitimate destroys"
+        );
+        // A second settle with the stale id must also refuse with
+        // no counted destroy.
+        let destroys_before_second = backend.destroy_call_count();
+        assert_eq!(
+            backend.destroy_object_if_bound(origin, replacement, origin_incarnation, Some(id_a)),
+            Err(CkRv::OBJECT_HANDLE_INVALID),
+            "iteration {iteration}: stale settle after race must refuse"
+        );
+        assert_eq!(
+            backend.destroy_call_count(),
+            destroys_before_second,
+            "iteration {iteration}: stale refusal must issue no destroy"
+        );
+        assert_eq!(backend.live_object_count(), 1, "iteration {iteration}: replacement still live");
+        backend.destroy_object(other, replacement).unwrap();
+        assert_eq!(
+            backend.live_object_count(),
+            0,
+            "iteration {iteration}: cleanup destroys replacement"
+        );
+    }
+}
+
 /// Found-object sharing control: an object minted in session A and
 /// then found in session B must share one lifetime id, so settlement
 /// from A with the captured id destroys exactly once with no false

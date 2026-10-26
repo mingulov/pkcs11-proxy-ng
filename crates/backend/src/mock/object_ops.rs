@@ -4,6 +4,7 @@
 
 use pkcs11_proxy_ng_types::*;
 
+use super::state::MockState;
 use super::{MockAttributeSlot, MockBackend, MultiPartOp};
 
 impl MockBackend {
@@ -456,22 +457,34 @@ impl MockBackend {
         self.allocate_session_object_with_template(&mut state, session, template)
     }
 
+    /// Lock-held destroy: the caller already holds the state lock,
+    /// so a bound destroy can perform its incarnation/lifetime
+    /// checks and this mutation inside one critical section.
+    pub(super) fn destroy_object_locked(
+        &self,
+        state: &mut MockState,
+        session: CkSessionHandle,
+        object: CkObjectHandle,
+    ) -> CkResult<()> {
+        if !state.has_session(session) {
+            return Err(CkRv::SESSION_HANDLE_INVALID);
+        }
+        if state.live_objects.contains(&object.0) {
+            self.remove_objects(state, &[object.0]);
+            state.object_lifetimes.remove(&object.0);
+            Ok(())
+        } else {
+            Err(CkRv::OBJECT_HANDLE_INVALID)
+        }
+    }
+
     pub(super) fn destroy_object_impl(
         &self,
         session: CkSessionHandle,
         object: CkObjectHandle,
     ) -> CkResult<()> {
         let mut state = self.state.lock().unwrap();
-        if !state.has_session(session) {
-            return Err(CkRv::SESSION_HANDLE_INVALID);
-        }
-        if state.live_objects.contains(&object.0) {
-            self.remove_objects(&mut state, &[object.0]);
-            state.object_lifetimes.remove(&object.0);
-            Ok(())
-        } else {
-            Err(CkRv::OBJECT_HANDLE_INVALID)
-        }
+        self.destroy_object_locked(&mut state, session, object)
     }
 
     pub(super) fn object_size(
