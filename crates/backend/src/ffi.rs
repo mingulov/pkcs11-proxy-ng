@@ -495,10 +495,6 @@ impl FfiBackend {
     /// kept) and the provider RV propagates. The caller holds the armed
     /// `DeadlineGuard` across this call.
     fn finish_finalize(&self, seal: native_domain::FinalizeTicket<'_>) -> CkResult<()> {
-        // Tracker generation at seal time: a stale completion must not
-        // record finalized facts over a newer incarnation (checked again
-        // after the currency-validated publish below).
-        let generation_at_seal = self.lifecycle.current_generation();
         // Exclusive native call on this thread, which holds the armed
         // `DeadlineGuard` (no spawned worker; the ticket is detached —
         // write is NOT held across native entry, mirroring Initialize).
@@ -543,20 +539,25 @@ impl FfiBackend {
         // tracker facts, so nothing is recorded) or epoch-exhausted
         // (domain Uncertain — leaving the tracker unrecorded poisons the
         // retirement decision conservatively instead of releasing on a
-        // finalized proof whose sealed publish never landed). Recording
-        // only after a validated publish, and only when the tracker
-        // generation is unchanged, keeps a stale completion from setting
-        // finalized_ok, clearing finalize_failed, or zeroing the live
-        // incarnation's open sessions.
+        // finalized proof whose sealed publish never landed). The purge
+        // closure runs only after that currency validation succeeds and
+        // still under the publish write, so recording the tracker facts
+        // as the closure's first step makes them atomic with the
+        // validated publish: no new Initialize can begin (its begin needs
+        // the same write) between the publish and the record, and a
+        // stale or exhausted publish records nothing. Recording after
+        // the publish instead would let a completed re-Initialize
+        // re-affirm the still-unfinalized tracker (no generation bump,
+        // no count reset), after which the resumed record would zero
+        // the new incarnation's sessions and prove `Release` over live
+        // native state.
         self.lifecycle_domain.publish_finalized_with_purge(seal, || {
+            self.lifecycle.note_finalized();
             // Brief leaf hold under the publish write (lifecycle ->
             // lifetime), mirroring the incarnation purge above it.
             let mut lifetimes = self.object_lifetimes.lock_entries();
             self.drop_all_mech_cache_in(&mut lifetimes);
         })?;
-        if self.lifecycle.current_generation() == generation_at_seal {
-            self.lifecycle.note_finalized();
-        }
         Ok(())
     }
 }
@@ -2504,6 +2505,118 @@ mod tests {
             backend.lifecycle.open_session_count_for_tests(),
             1,
             "stale completion must not zero the new incarnation's open sessions"
+        );
+    }
+
+    static TRACKER_FINALIZE_GATE: std::sync::Mutex<
+        Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+    > = std::sync::Mutex::new(None);
+    static TRACKER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    unsafe extern "C" fn finalize_tracker_parkable(
+        _: *mut std::ffi::c_void,
+    ) -> cryptoki_sys::CK_RV {
+        if park_overlap_gate(&TRACKER_FINALIZE_GATE) {
+            cryptoki_sys::CKR_OK
+        } else {
+            cryptoki_sys::CKR_FUNCTION_FAILED
+        }
+    }
+
+    #[test]
+    fn finalize_records_tracker_inside_publish_before_reinit_with_live_session() {
+        // Regression for the Finalize tracker race: the tracker facts
+        // (`note_finalized`: finalized proof + zeroed open count) must be
+        // recorded INSIDE the validated publish write section, before that
+        // write is released. Otherwise a re-Initialize + session open that
+        // completes in the gap after the publish sees `finalized_ok` still
+        // clear (so it re-affirms instead of opening a new generation) and
+        // the resumed Finalize zeroes the new incarnation's count and
+        // leaves `Release` while native state is live.
+        //
+        // Deterministic composition point: the publish purge takes the
+        // object-lifetime leaf lock inside the write section. Holding that
+        // leaf lock parks the publisher inside its purge closure with the
+        // lifecycle write still held, so the tracker state observable at
+        // that moment is exactly what any re-Initialize released after
+        // the publish would inherit. No sleeps order this test; every
+        // wait is a channel/condition wait with a bounded failure timeout.
+        use std::sync::{Arc, mpsc};
+        use std::time::{Duration, Instant};
+        let _lock = TRACKER_TEST_LOCK.lock().unwrap();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        *TRACKER_FINALIZE_GATE.lock().unwrap() = Some((entered_tx, release_rx));
+
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_Initialize = Some(initialize_ok);
+        functions.C_Finalize = Some(finalize_tracker_parkable);
+        // Leaked on purpose, mirroring the bridge test: a detached worker
+        // must never meet a freed table on a failure path.
+        let func_list = Box::leak(functions) as *mut cryptoki_sys::CK_FUNCTION_LIST;
+        let backend = Arc::new(FfiBackend::test_backend_with_tables(func_list, None, None));
+        backend.initialize().expect("initial initialize opens the incarnation");
+        backend.lifecycle.note_session_opened();
+        assert_eq!(backend.lifecycle.current_generation(), 1);
+        assert_eq!(backend.lifecycle.open_session_count_for_tests(), 1);
+
+        let (fin_tx, fin_rx) = mpsc::channel();
+        {
+            let backend = Arc::clone(&backend);
+            std::thread::spawn(move || {
+                let _ = fin_tx.send(backend.finalize());
+            });
+        }
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("finalize parks inside native C_Finalize");
+        // Hold the leaf lock the publish purge needs. Releasing the native
+        // stub now lets the publisher enter its write section, flip
+        // `Finalized`, and park inside the purge closure on this lock —
+        // still holding the lifecycle write.
+        let lifetimes_guard = backend.object_lifetimes.lock_entries();
+        release_tx.send(()).expect("release the parked finalize into its publish");
+        // Poll (bounded) until the publish write is observably held: a
+        // `try_read` can only fail while a writer holds the domain.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while backend.lifecycle_domain.try_state_for_tests().is_some() {
+            assert!(Instant::now() < deadline, "publish write must be held within the bound");
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            backend.lifecycle.open_session_count_for_tests(),
+            0,
+            "tracker finalized fact (zeroed open count) must be recorded inside \
+             the publish section, before the lifecycle write is released"
+        );
+        assert_eq!(
+            backend.lifecycle.retirement_decision(),
+            native_domain::RetirementDecision::Release,
+            "a completed publish must already carry its finalized proof while \
+             the write is still held, so no later tracker record can be stale"
+        );
+        drop(lifetimes_guard);
+        assert_eq!(
+            fin_rx.recv_timeout(Duration::from_secs(5)).expect("finalize must complete"),
+            Ok(())
+        );
+        assert_eq!(backend.lifecycle.current_generation(), 1);
+
+        // The brief's invariant, sequentially: a completed re-Initialize
+        // plus a live session in the new incarnation keeps its count, the
+        // generation has advanced, and retirement stays Poison.
+        backend.initialize().expect("re-initialize after successful finalize succeeds");
+        assert_eq!(
+            backend.lifecycle.current_generation(),
+            2,
+            "re-Initialize after a recorded Finalize opens a new generation"
+        );
+        backend.lifecycle.note_session_opened();
+        assert_eq!(backend.lifecycle.open_session_count_for_tests(), 1);
+        assert_eq!(
+            backend.lifecycle.retirement_decision(),
+            native_domain::RetirementDecision::Poison,
+            "new incarnation with a live session must never retire as Release"
         );
     }
 
