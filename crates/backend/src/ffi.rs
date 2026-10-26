@@ -668,9 +668,18 @@ impl Pkcs11Backend for FfiBackend {
         let generation_before = self.lifecycle.current_generation();
         // Checked record: the residual refusal (a Finalize failed, or the
         // last generation was claimed, after the gate passed) propagates
-        // before the purge, so a refused cycle purges nothing. (The `?`
-        // also drops the control ticket, abandoning the domain transition.)
-        self.lifecycle.note_initialized().map_err(lifecycle_refusal_rv)?;
+        // before the purge, so a refused cycle purges nothing. Native
+        // state is LIVE on this path (`C_Initialize` succeeded), so the
+        // ticket settles through the recording abandon with the same
+        // unconditional re-assert as the native-failure path — dropping
+        // it would let an interleaved successful Finalize's cleared
+        // exposure stand, and retirement would release over live state.
+        if let Err(refusal) = self.lifecycle.note_initialized() {
+            self.lifecycle_domain.abandon_initialize_with_record(init_control, |_current| {
+                self.lifecycle.note_init_attempted();
+            });
+            return Err(lifecycle_refusal_rv(refusal));
+        }
         // Publish `Open` with the incarnation purge INSIDE the publish
         // write section (I2): the write acquisition drains pre-publish
         // in-flight readers, and post-publish admissions wait until the
@@ -2898,6 +2907,99 @@ mod tests {
             backend.lifecycle.retirement_decision(),
             crate::ffi::native_domain::RetirementDecision::Release,
             "pre-native refusal records no attempt"
+        );
+    }
+
+    static REFUSAL_INIT_CALLS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    static REFUSAL_INIT_GATE: std::sync::Mutex<
+        Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+    > = std::sync::Mutex::new(None);
+    static REFUSAL_INIT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    unsafe extern "C" fn initialize_refusal_parkable(
+        _: *mut std::ffi::c_void,
+    ) -> cryptoki_sys::CK_RV {
+        // The first call (initializer A) parks until the test releases it;
+        // every later call (initializer B) succeeds immediately.
+        match REFUSAL_INIT_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+            0 => {
+                if park_overlap_gate(&REFUSAL_INIT_GATE) {
+                    cryptoki_sys::CKR_OK
+                } else {
+                    cryptoki_sys::CKR_FUNCTION_FAILED
+                }
+            }
+            _ => cryptoki_sys::CKR_OK,
+        }
+    }
+
+    #[test]
+    fn post_native_initialize_refusal_records_attempt_after_interleaved_finalize() {
+        // Codex round 10 boundary: A passes the pre-native gate, then B
+        // claims the last generation and successfully finalizes (clearing
+        // `init_attempted_since_finalize`). A's native Initialize then
+        // succeeds — native state is live — but its checked record refuses
+        // at `u64::MAX`. The refusal must re-assert A's attempt through the
+        // recording abandon, or retirement observes `Release` over live
+        // native state. Deterministic: A parks inside its native call on
+        // channels while B's whole cycle runs; no sleeps order the test.
+        use std::sync::atomic::Ordering;
+        use std::sync::{Arc, mpsc};
+        use std::time::Duration;
+        let _lock = REFUSAL_INIT_TEST_LOCK.lock().unwrap();
+        REFUSAL_INIT_CALLS.store(0, Ordering::SeqCst);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        *REFUSAL_INIT_GATE.lock().unwrap() = Some((entered_tx, release_rx));
+
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_Initialize = Some(initialize_refusal_parkable);
+        functions.C_Finalize = Some(finalize_ok);
+        // Leaked on purpose, mirroring the overlap harness: detached
+        // workers must never meet a freed table on a failure path.
+        let func_list = Box::leak(functions) as *mut cryptoki_sys::CK_FUNCTION_LIST;
+        let backend = Arc::new(FfiBackend::test_backend_with_tables(func_list, None, None));
+        backend.lifecycle.set_generation_for_tests(u64::MAX - 1);
+
+        let (a_tx, a_rx) = mpsc::channel();
+        {
+            let backend = Arc::clone(&backend);
+            std::thread::spawn(move || {
+                let _ = a_tx.send(backend.initialize());
+            });
+        }
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("initializer A parks inside native C_Initialize");
+
+        // B claims the last generation and finalizes, clearing A's
+        // pre-native attempt exposure exactly as the brief describes.
+        backend.initialize().expect("initializer B claims the last generation");
+        assert_eq!(backend.lifecycle.current_generation(), u64::MAX);
+        backend.finalize().expect("interleaved finalize succeeds");
+        assert_eq!(
+            backend.lifecycle.retirement_decision(),
+            crate::ffi::native_domain::RetirementDecision::Release,
+            "precondition: interleaved finalize cleared A's exposure"
+        );
+
+        release_tx.send(()).expect("release initializer A's native call");
+        assert_eq!(
+            a_rx.recv_timeout(Duration::from_secs(5)).expect("initializer A must complete"),
+            Err(CkRv::GENERAL_ERROR),
+            "post-native refusal RV is unchanged (GenerationExhausted)"
+        );
+        assert_eq!(backend.lifecycle.current_generation(), u64::MAX);
+        assert_eq!(
+            backend.lifecycle_domain.state_for_tests(),
+            native_domain::ModuleState::Finalized,
+            "stale refusal abandon leaves the finalized domain standing"
+        );
+        assert_eq!(
+            backend.lifecycle.retirement_decision(),
+            crate::ffi::native_domain::RetirementDecision::Poison,
+            "post-native refusal must record the attempt: retirement poisons over live native state"
         );
     }
 
