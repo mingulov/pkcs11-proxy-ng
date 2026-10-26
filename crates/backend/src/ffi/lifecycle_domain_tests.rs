@@ -117,16 +117,17 @@ fn ticket_drop_abandons_unsettled_begin() {
 
 #[test]
 fn stale_abandon_after_publish_is_noop_epoch_mismatch() {
-    // Two concurrent control attempts: A publishes while B is mid-flight.
-    // B's ticket is stale (epoch mismatch); abandoning it must NOT clobber
-    // A's published Open — the later control op owns the outcome.
+    // Two concurrent control attempts: the current (second-begun) ticket
+    // publishes while the first is mid-flight. The first ticket is stale
+    // (epoch mismatch); abandoning it must NOT clobber the published
+    // Open — the later control op owns the outcome.
     let domain = LifecycleDomain::new();
     let first = domain.begin_initialize().expect("first begin");
     let second = domain.begin_initialize().expect("second begin");
-    domain.publish_open(first).expect("first publish wins");
+    domain.publish_open(second).expect("current publish wins");
     assert_eq!(domain.state_for_tests(), ModuleState::Open);
     let epoch_after_publish = domain.epoch_for_tests();
-    domain.abandon_initialize(second);
+    domain.abandon_initialize(first);
     assert_eq!(domain.state_for_tests(), ModuleState::Open, "stale abandon is a no-op");
     assert_eq!(
         domain.epoch_for_tests(),
@@ -152,15 +153,64 @@ fn abandon_transient_prior_goes_uncertain_fail_closed() {
 }
 
 #[test]
-fn publish_last_writer_wins() {
+fn publish_stale_ticket_is_refused_and_current_publish_stands() {
+    // Fenced publish (rewrites publish_last_writer_wins): the older ticket
+    // is stale once a newer begin advanced the epoch, even though the
+    // domain is still Initializing. Its publish is refused without
+    // sealing, purging, or consuming an epoch; the current ticket's
+    // publish is the first-current publish and stands.
     let domain = LifecycleDomain::new();
     let first = domain.begin_initialize().expect("first begin");
     let second = domain.begin_initialize().expect("second begin");
-    domain.publish_open(first).expect("first publish");
-    let epoch_after_first = domain.epoch_for_tests();
-    domain.publish_open(second).expect("second publish also succeeds");
+    let epoch_before_stale = domain.epoch_for_tests();
+    let purged = std::sync::atomic::AtomicBool::new(false);
+    assert_eq!(
+        domain
+            .publish_open_with_purge(first, || purged
+                .store(true, std::sync::atomic::Ordering::SeqCst))
+            .unwrap_err(),
+        CkRv::GENERAL_ERROR,
+        "stale Initialize publish must be refused"
+    );
+    assert!(
+        !purged.load(std::sync::atomic::Ordering::SeqCst),
+        "stale publish must not run the purge"
+    );
+    assert_eq!(domain.state_for_tests(), ModuleState::Initializing);
+    assert_eq!(domain.epoch_for_tests(), epoch_before_stale, "stale publish consumes no epoch");
+    domain.publish_open(second).expect("current publish stands");
     assert_eq!(domain.state_for_tests(), ModuleState::Open);
-    assert!(domain.epoch_for_tests() > epoch_after_first, "each publish consumes an epoch");
+    assert_eq!(domain.epoch_for_tests(), epoch_before_stale + 1);
+    domain.admit_ordinary().expect("published Open still admits");
+}
+
+#[test]
+fn stale_initialize_publish_after_newer_open_is_refused_without_purge() {
+    // Stale-Initialize twin of the stale-Finalize publish fence: after the
+    // current ticket published Open, the older ticket's publish must not
+    // re-seal Open, consume an epoch, or run its purge.
+    let domain = LifecycleDomain::new();
+    let first = domain.begin_initialize().expect("first begin");
+    let second = domain.begin_initialize().expect("second begin");
+    domain.publish_open(second).expect("current publish opens");
+    assert_eq!(domain.state_for_tests(), ModuleState::Open);
+    let epoch_after_publish = domain.epoch_for_tests();
+    let purged = std::sync::atomic::AtomicBool::new(false);
+    assert_eq!(
+        domain
+            .publish_open_with_purge(first, || purged
+                .store(true, std::sync::atomic::Ordering::SeqCst))
+            .unwrap_err(),
+        CkRv::GENERAL_ERROR,
+        "stale Initialize publish after newer Open must be refused"
+    );
+    assert!(
+        !purged.load(std::sync::atomic::Ordering::SeqCst),
+        "stale publish must not run the purge"
+    );
+    assert_eq!(domain.state_for_tests(), ModuleState::Open);
+    assert_eq!(domain.epoch_for_tests(), epoch_after_publish, "stale publish consumes no epoch");
+    domain.admit_ordinary().expect("published Open still admits");
 }
 
 #[test]
@@ -539,6 +589,58 @@ fn finalize_stale_abandon_is_noop_epoch_mismatch() {
     domain.abandon_finalize(seal);
     assert_eq!(domain.state_for_tests(), ModuleState::Draining, "stale abandon is a no-op");
     assert_eq!(domain.epoch_for_tests(), seal_epoch + 1, "stale abandon consumes nothing");
+}
+
+#[test]
+fn stale_finalize_publish_after_newer_open_is_refused_without_purge() {
+    // Finalize twin of finalize_stale_abandon_is_noop_epoch_mismatch: a
+    // newer Open publish moved the domain past the seal's epoch. The stale
+    // publish must leave Open standing, consume no epoch, and run no purge.
+    // (Unreachable without injection — every other begin is denied from a
+    // sealed domain — so the newer Open publish is simulated; the publish
+    // fence itself is real.)
+    let domain = open_domain();
+    let seal = domain.begin_finalize().expect("begin succeeds");
+    seal.enter_finalizing().expect("enter exclusive phase");
+    let seal_epoch = seal.epoch_for_tests();
+    domain.set_state_for_tests(ModuleState::Open, seal_epoch + 1);
+    let epoch_before_stale = domain.epoch_for_tests();
+    let purged = std::sync::atomic::AtomicBool::new(false);
+    assert_eq!(
+        domain
+            .publish_finalized_with_purge(seal, || purged
+                .store(true, std::sync::atomic::Ordering::SeqCst))
+            .unwrap_err(),
+        CkRv::GENERAL_ERROR,
+        "stale Finalize publish after newer Open must be refused"
+    );
+    assert!(
+        !purged.load(std::sync::atomic::Ordering::SeqCst),
+        "stale publish must not run the purge"
+    );
+    assert_eq!(domain.state_for_tests(), ModuleState::Open);
+    assert_eq!(domain.epoch_for_tests(), epoch_before_stale, "stale publish consumes no epoch");
+    domain.admit_ordinary().expect("newer Open still admits");
+}
+
+#[test]
+fn stale_finalize_enter_finalizing_is_refused() {
+    // A stale seal must not mark a newer cycle's Draining as its own:
+    // enter_finalizing is epoch-fenced as well as state-fenced.
+    let domain = open_domain();
+    let seal = domain.begin_finalize().expect("begin succeeds");
+    let seal_epoch = seal.epoch_for_tests();
+    domain.set_state_for_tests(ModuleState::Draining, seal_epoch + 1);
+    assert_eq!(
+        seal.enter_finalizing().unwrap_err(),
+        CkRv::GENERAL_ERROR,
+        "stale enter_finalizing must be refused"
+    );
+    assert_eq!(domain.state_for_tests(), ModuleState::Draining);
+    assert_eq!(domain.epoch_for_tests(), seal_epoch + 1);
+    drop(seal);
+    assert_eq!(domain.state_for_tests(), ModuleState::Draining, "stale ticket drop is a no-op");
+    assert_eq!(domain.epoch_for_tests(), seal_epoch + 1);
 }
 
 #[test]
