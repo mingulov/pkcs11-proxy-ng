@@ -154,12 +154,22 @@ fn resolver_logs_redact_socket_userinfo() {
         "tcp://review_user:R3_LEGACY_SECRET@daemon:7512",
         "tls://review_user:R3_TLS_SECRET@daemon:7512",
         "bad://review_user:R3_BAD_SECRET@daemon:7512",
+        // A later "://" must not defeat scheme recognition (round 4).
+        "tcp://review_user:R3_PATH_SECRET@daemon:7512/path://segment",
+        "//review_user:R3_BAD2_SECRET@daemon:7512/path://segment",
     ] {
         set_socket_only(socket);
         let logs = capture_logs(|| {
             let _ = crate::state::resolve_endpoint_from_env();
         });
-        for sentinel in ["R3_LEGACY_SECRET", "R3_TLS_SECRET", "R3_BAD_SECRET", "review_user"] {
+        for sentinel in [
+            "R3_LEGACY_SECRET",
+            "R3_TLS_SECRET",
+            "R3_BAD_SECRET",
+            "R3_PATH_SECRET",
+            "R3_BAD2_SECRET",
+            "review_user",
+        ] {
             assert!(
                 !logs.contains(sentinel),
                 "socket {socket:?} leaked {sentinel} into logs: {logs}"
