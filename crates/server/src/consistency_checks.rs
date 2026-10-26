@@ -1286,12 +1286,60 @@ fn public_docs_present() {
         "doc/error-reference.md",
         "doc/runbooks/operating-pkcs11-proxy-ng.md",
         "doc/release/beta-support-matrix.md",
+        "doc/release/health-contract.md",
         "doc/release/parity-validation.md",
         "scripts/README.md",
     ] {
         let path = root.join(rel);
         assert!(path.exists(), "public doc missing: {} (expected at {})", rel, path.display());
     }
+}
+
+// Step 17 (observability disposition): the health contract is the
+// single place where the readiness behavior is stated as a promise.
+// Pin its load-bearing claims so code and doc cannot drift apart
+// silently: the gRPC service name, the gate knob and its default,
+// the CLI exit-code contract, and the explicit latency/SLO non-goal.
+#[test]
+fn health_contract_matches_code() {
+    let raw = std::fs::read_to_string(repo_root().join("doc/release/health-contract.md"))
+        .expect("health contract must exist (see public_docs_present)");
+    // Match against whitespace-normalized text so markdown line
+    // wraps cannot break (or accidentally satisfy) the pins.
+    let text = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    // gRPC health service name, pinned against the server const.
+    assert!(
+        text.contains(crate::server::health::SERVICE_NAME),
+        "contract must name the health service {}",
+        crate::server::health::SERVICE_NAME
+    );
+    // Gate knob, pinned against the config default in its own
+    // sentence — a bare digit would match section numbering.
+    let default = crate::config::ProxyConfig::default().backend_health_consecutive_failures;
+    assert!(
+        text.contains("backend_health_consecutive_failures"),
+        "contract must name the backend-health gate knob"
+    );
+    assert!(
+        text.contains(&format!("(default `{default}`")),
+        "contract must state the gate default ({default})"
+    );
+    // CLI probe exit-code contract, pinned as one sentence (mirrors
+    // cli.rs health_help_documents_exit_codes, which owns the CLI
+    // side; this crate cannot depend on the CLI crate).
+    assert!(
+        text.contains("exits `0` if SERVING, `1` if NOT_SERVING, `2` if"),
+        "contract must state the 0/1/2 probe exit-code contract"
+    );
+    // The metrics/SLO fork must resolve loudly, never by omission:
+    // pin the non-goal section and both named dispositions, so a
+    // silent reversal or deletion fails.
+    assert!(
+        text.contains("## 8. Explicit non-goals")
+            && text.contains("No per-RPC latency metrics or histograms")
+            && text.contains("No named SLOs and no error budgets"),
+        "contract must record the latency-metrics/SLO disposition explicitly"
+    );
 }
 
 #[test]
