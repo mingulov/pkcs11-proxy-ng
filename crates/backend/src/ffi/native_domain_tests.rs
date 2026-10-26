@@ -485,6 +485,60 @@ fn native_domain_lifecycle_open_sessions_block_release_until_closed() {
 }
 
 #[test]
+fn native_domain_lifecycle_completion_count_covers_both_arms_and_refusals() {
+    // Codex R11 seal bound: every record presented after a native success
+    // counts — new-cycle, re-affirm, and tracker-refused alike — because
+    // each one's native call ran and may have left the provider live.
+    let tracker = LifecycleTracker::default();
+    assert_eq!(tracker.init_completion_count(), 0);
+    tracker.note_initialized().expect("new cycle records");
+    assert_eq!(tracker.init_completion_count(), 1);
+    tracker.note_initialized().expect("re-affirm records");
+    assert_eq!(tracker.init_completion_count(), 2, "re-affirm arm counts");
+    tracker.note_finalize_failed();
+    assert_eq!(tracker.note_initialized().unwrap_err(), LifecycleRefusal::FailedFinalizeUnresolved);
+    assert_eq!(tracker.init_completion_count(), 3, "refused record still counts (fail-closed)");
+}
+
+#[test]
+fn native_domain_lifecycle_bounded_finalize_unchanged_count_releases() {
+    // Normal init→finalize: no completion after the seal snapshot, so the
+    // bounded record clears the attempt exposure exactly like the plain
+    // record and the cycle retires Release.
+    let tracker = LifecycleTracker::default();
+    tracker.note_init_attempted();
+    tracker.note_initialized().expect("cycle opens");
+    tracker.note_session_opened();
+    let completions_at_seal = tracker.init_completion_count();
+    tracker.note_finalized_bounded(completions_at_seal);
+    assert_eq!(tracker.open_session_count_for_tests(), 0, "session reset stays unconditional");
+    assert_eq!(tracker.retirement_decision(), RetirementDecision::Release);
+}
+
+#[test]
+fn native_domain_lifecycle_bounded_finalize_post_seal_completion_poisons() {
+    // Codex R11 at the tracker: a re-affirm completing after the seal
+    // snapshot keeps its attempt exposure through the bounded publish.
+    let tracker = LifecycleTracker::default();
+    tracker.note_init_attempted();
+    tracker.note_initialized().expect("cycle opens");
+    let completions_at_seal = tracker.init_completion_count();
+    // Stale initializer: attempted before the seal, native success (and
+    // its re-affirm record) lands after it.
+    tracker.note_init_attempted();
+    tracker.note_initialized().expect("post-seal re-affirm records");
+    tracker.note_finalized_bounded(completions_at_seal);
+    assert_eq!(
+        tracker.retirement_decision(),
+        RetirementDecision::Poison,
+        "post-seal completion must survive the bounded finalized record"
+    );
+    // A later unconditional successful Finalize still re-earns release.
+    tracker.note_finalized();
+    assert_eq!(tracker.retirement_decision(), RetirementDecision::Release);
+}
+
+#[test]
 fn native_domain_lifecycle_generation_advances_per_initialization_cycle() {
     // C3M.4/row 10: each initialization cycle gets a fresh generation so
     // stale work cannot publish into a reinitialized domain. Re-affirming
