@@ -754,7 +754,9 @@ fn abandon_init_record_reasserts_attempt_after_interleaved_finalize() {
     // recorded inside the publish section, as production does), clearing
     // A's exposure. A's stale abandon must re-assert the attempt inside
     // its own abandon section, or retirement releases over native code
-    // that ran after the Finalize.
+    // that ran after the Finalize. Models A's native FAILURE (no success
+    // record), so the abandon records via `note_init_native_failed`
+    // exactly as `FfiBackend::initialize` wires it (Codex R12).
     let domain = LifecycleDomain::new();
     let tracker = LifecycleTracker::default();
     let a = domain.begin_initialize().expect("A begins");
@@ -776,7 +778,7 @@ fn abandon_init_record_reasserts_attempt_after_interleaved_finalize() {
     let seen = std::cell::Cell::new(None);
     domain.abandon_initialize_with_record(a, |current| {
         seen.set(Some(current));
-        tracker.note_init_attempted();
+        tracker.note_init_native_failed();
     });
     assert_eq!(seen.get(), Some(false), "A's ticket is stale after B's cycle");
     assert_eq!(domain.state_for_tests(), ModuleState::Finalized);
@@ -824,6 +826,84 @@ fn finalize_publish_bounded_by_seal_time_completions() {
     assert_eq!(domain.publish_open(a).unwrap_err(), CkRv::GENERAL_ERROR);
     assert_eq!(domain.state_for_tests(), ModuleState::Finalized);
     assert_eq!(tracker.retirement_decision(), RetirementDecision::Poison);
+}
+
+#[test]
+fn finalize_publish_bounded_by_seal_time_failed_completion() {
+    // Codex R12 failed variant, composed exactly as `finish_finalize` +
+    // `initialize` wire it, single thread: A begins and records its
+    // attempt; B opens the incarnation; F seals and snapshots after
+    // `enter_finalizing`; A's native Initialize FAILS after the seal and
+    // settles (stale abandon with the failed-completion record) BEFORE F
+    // publishes. The publish lands (`Finalized`) but must not clear A's
+    // post-seal failure exposure.
+    let domain = LifecycleDomain::new();
+    let tracker = LifecycleTracker::default();
+    let a = domain.begin_initialize().expect("A begins");
+    tracker.note_init_attempted();
+    let b = domain.begin_initialize().expect("B begins behind A");
+    tracker.note_init_attempted();
+    tracker.note_initialized().expect("B cycle opens");
+    domain.publish_open(b).expect("B publish opens");
+    let seal = domain.begin_finalize().expect("F seals from Open");
+    seal.enter_finalizing().expect("F enters exclusive phase");
+    let completions_at_seal = tracker.init_completion_count();
+    assert_eq!(completions_at_seal, 1, "only B had completed at seal time");
+    // A's native Initialize fails after the seal and settles before F
+    // publishes — production's native-failure abandon closure.
+    let seen = std::cell::Cell::new(None);
+    domain.abandon_initialize_with_record(a, |current| {
+        seen.set(Some(current));
+        tracker.note_init_native_failed();
+    });
+    assert_eq!(seen.get(), Some(false), "A's ticket is stale after B's cycle");
+    assert_eq!(tracker.init_completion_count(), 2, "failed completion counts");
+    domain
+        .publish_finalized_with_purge(seal, || tracker.note_finalized_bounded(completions_at_seal))
+        .expect("F publish lands");
+    assert_eq!(domain.state_for_tests(), ModuleState::Finalized);
+    assert_eq!(
+        tracker.retirement_decision(),
+        RetirementDecision::Poison,
+        "bounded publish keeps the post-seal failure's exposure"
+    );
+}
+
+#[test]
+fn finalize_publish_before_failed_settlement_still_poisons() {
+    // Codex R12 publication-before-settlement control: same composition,
+    // opposite order — F publishes bounded BEFORE A's failure settles.
+    // The publish sees an unchanged count and clears the exposure, but
+    // A's stale abandon then re-asserts it. Poisons both before and after
+    // the R12 count cover (the re-assert, not the bound, owns this order).
+    let domain = LifecycleDomain::new();
+    let tracker = LifecycleTracker::default();
+    let a = domain.begin_initialize().expect("A begins");
+    tracker.note_init_attempted();
+    let b = domain.begin_initialize().expect("B begins behind A");
+    tracker.note_init_attempted();
+    tracker.note_initialized().expect("B cycle opens");
+    domain.publish_open(b).expect("B publish opens");
+    let seal = domain.begin_finalize().expect("F seals from Open");
+    seal.enter_finalizing().expect("F enters exclusive phase");
+    let completions_at_seal = tracker.init_completion_count();
+    domain
+        .publish_finalized_with_purge(seal, || tracker.note_finalized_bounded(completions_at_seal))
+        .expect("F publish lands");
+    assert_eq!(domain.state_for_tests(), ModuleState::Finalized);
+    // A's native failure settles after the publish; its re-assert restores
+    // the exposure the publish cleared.
+    let seen = std::cell::Cell::new(None);
+    domain.abandon_initialize_with_record(a, |current| {
+        seen.set(Some(current));
+        tracker.note_init_native_failed();
+    });
+    assert_eq!(seen.get(), Some(false), "A's ticket is stale after F's publish");
+    assert_eq!(
+        tracker.retirement_decision(),
+        RetirementDecision::Poison,
+        "late failure re-asserts the exposure a bounded publish cleared"
+    );
 }
 
 #[test]

@@ -501,15 +501,16 @@ impl FfiBackend {
         // An `enter_finalizing` failure drops the seal through the Drop
         // backstop, abandoning the seal before the error propagates.
         seal.enter_finalizing()?;
-        // Codex R11 seal bound: snapshot completed initializations NOW —
-        // after the seal, before the native call. A stale Initialize whose
-        // native call succeeds after this point increments the count, and
-        // the bounded publish record below then keeps its attempt
-        // exposure instead of clearing it. Snapshotting after the native
-        // call would be wrong (it would absorb exactly those completions);
-        // completions landing between the seal and this snapshot ran
-        // before the native Finalize, which tears them down, so including
-        // them is precise — and any residual race errs toward Poison.
+        // Codex R11 seal bound (R12: failures count too): snapshot
+        // completed initializations NOW — after the seal, before the native
+        // call. A stale Initialize whose native call completes (success or
+        // failure) after this point increments the count, and the bounded
+        // publish record below then keeps its attempt exposure instead of
+        // clearing it. Snapshotting after the native call would be wrong
+        // (it would absorb exactly those completions); completions landing
+        // between the seal and this snapshot ran before the native Finalize,
+        // which tears them down, so including them is precise — and any
+        // residual race errs toward Poison.
         let completions_at_seal = self.lifecycle.init_completion_count();
         // No lifetime lock across the native call: lifecycle write is
         // acquired again by abandon/publish below, and holding the leaf
@@ -658,16 +659,19 @@ impl Pkcs11Backend for FfiBackend {
         if outcome.is_err() {
             // Native failure restores the prior domain state (behavior
             // parity: a failed re-Initialize leaves a live incarnation
-            // usable, exactly as before the domain existed). The attempt
-            // exposure is re-asserted INSIDE the abandon write section,
-            // unconditionally: when this ticket is current no Finalize can
-            // have completed since the pre-entry marker, so re-asserting
-            // is harmless, and when it is stale the re-assert restores
-            // exactly the evidence an interleaved successful Finalize
-            // cleared — this attempt's native code ran after that
-            // Finalize, so retirement must poison instead of releasing.
+            // usable, exactly as before the domain existed). The failed
+            // completion (attempt exposure + seal-bound count) is recorded
+            // INSIDE the abandon write section, unconditionally: when this
+            // ticket is current no Finalize can have completed since the
+            // pre-entry marker, so re-asserting is harmless, and when it
+            // is stale the record restores exactly the evidence an
+            // interleaved successful Finalize cleared — this attempt's
+            // native code ran after that Finalize, so retirement must
+            // poison instead of releasing (Codex R12: failures count
+            // toward the seal bound, exactly like successes, or a
+            // failure settling before F publishes would be erased).
             self.lifecycle_domain.abandon_initialize_with_record(init_control, |_current| {
-                self.lifecycle.note_init_attempted();
+                self.lifecycle.note_init_native_failed();
             });
             return outcome;
         }
@@ -680,10 +684,13 @@ impl Pkcs11Backend for FfiBackend {
         // last generation was claimed, after the gate passed) propagates
         // before the purge, so a refused cycle purges nothing. Native
         // state is LIVE on this path (`C_Initialize` succeeded), so the
-        // ticket settles through the recording abandon with the same
-        // unconditional re-assert as the native-failure path — dropping
-        // it would let an interleaved successful Finalize's cleared
-        // exposure stand, and retirement would release over live state.
+        // ticket settles through the recording abandon with an
+        // unconditional re-assert — dropping it would let an interleaved
+        // successful Finalize's cleared exposure stand, and retirement
+        // would release over live state. Flags-only here (no extra count):
+        // `note_initialized()` above already incremented increment-first,
+        // including refused records, so this re-assert is already
+        // bound-covered (Codex R12: no change needed on this path).
         if let Err(refusal) = self.lifecycle.note_initialized() {
             self.lifecycle_domain.abandon_initialize_with_record(init_control, |_current| {
                 self.lifecycle.note_init_attempted();
@@ -3171,6 +3178,172 @@ mod tests {
             backend.lifecycle.retirement_decision(),
             native_domain::RetirementDecision::Poison,
             "post-seal completion survives F's publish: retirement poisons over live native state"
+        );
+    }
+
+    // --- Codex R12: Finalize publish must not erase a post-seal FAILED Initialize ---
+    static FINFAIL_INIT_CALLS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    static FINFAIL_INIT_GATE: std::sync::Mutex<
+        Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+    > = std::sync::Mutex::new(None);
+    static FINFAIL_FIN_GATE1: std::sync::Mutex<
+        Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+    > = std::sync::Mutex::new(None);
+    static FINFAIL_FIN_GATE2: std::sync::Mutex<
+        Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+    > = std::sync::Mutex::new(None);
+    static FINFAIL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    unsafe extern "C" fn initialize_finproof_parkable_fails_first(
+        _: *mut std::ffi::c_void,
+    ) -> cryptoki_sys::CK_RV {
+        // Initializer A (first call) parks until released, then FAILS; B succeeds at once.
+        match FINFAIL_INIT_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+            0 => {
+                if park_overlap_gate(&FINFAIL_INIT_GATE) {
+                    cryptoki_sys::CKR_GENERAL_ERROR
+                } else {
+                    cryptoki_sys::CKR_FUNCTION_FAILED
+                }
+            }
+            _ => cryptoki_sys::CKR_OK,
+        }
+    }
+
+    unsafe extern "C" fn finalize_finproof_two_step(
+        _: *mut std::ffi::c_void,
+    ) -> cryptoki_sys::CK_RV {
+        // Two-step park: the first gate proves seal+entry; releasing it runs
+        // the provider logic to success, then the stub parks on the second
+        // gate — still inside the native call, before return, before any
+        // publish attempt — so the test can settle A's failure first,
+        // deterministically, with no held-write race.
+        if !park_overlap_gate(&FINFAIL_FIN_GATE1) {
+            return cryptoki_sys::CKR_FUNCTION_FAILED;
+        }
+        if !park_overlap_gate(&FINFAIL_FIN_GATE2) {
+            return cryptoki_sys::CKR_FUNCTION_FAILED;
+        }
+        cryptoki_sys::CKR_OK
+    }
+
+    #[test]
+    fn finalize_publish_does_not_erase_failed_initialization_completed_after_seal() {
+        // Codex round 12 (failed variant of the R11 fixture): A begins
+        // (attempt recorded) and parks inside its native Initialize; B
+        // initializes and publishes Open (generation 1, completions 1); F
+        // seals and parks inside its native Finalize; F's provider logic
+        // succeeds (first gate released) but F stays parked inside native
+        // (second gate, before return); A's native Initialize then FAILS —
+        // provider code ran after F's native success — and A settles
+        // (abandon) BEFORE F publishes; F is released and publishes
+        // bounded. F's publish must not clear A's failure exposure:
+        // retirement poisons. Deterministic: every ordering point is a
+        // channel; no sleeps, no held-write race.
+        use std::sync::atomic::Ordering;
+        use std::sync::{Arc, mpsc};
+        use std::time::Duration;
+        let _lock = FINFAIL_TEST_LOCK.lock().unwrap();
+        FINFAIL_INIT_CALLS.store(0, Ordering::SeqCst);
+        let (init_entered_tx, init_entered_rx) = mpsc::channel();
+        let (init_release_tx, init_release_rx) = mpsc::channel();
+        *FINFAIL_INIT_GATE.lock().unwrap() = Some((init_entered_tx, init_release_rx));
+        let (fin1_entered_tx, fin1_entered_rx) = mpsc::channel();
+        let (fin1_release_tx, fin1_release_rx) = mpsc::channel();
+        *FINFAIL_FIN_GATE1.lock().unwrap() = Some((fin1_entered_tx, fin1_release_rx));
+        let (fin2_entered_tx, fin2_entered_rx) = mpsc::channel();
+        let (fin2_release_tx, fin2_release_rx) = mpsc::channel();
+        *FINFAIL_FIN_GATE2.lock().unwrap() = Some((fin2_entered_tx, fin2_release_rx));
+
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_Initialize = Some(initialize_finproof_parkable_fails_first);
+        functions.C_Finalize = Some(finalize_finproof_two_step);
+        // Leaked on purpose, mirroring the R11 harness: detached workers
+        // must never meet a freed table on a failure path.
+        let func_list = Box::leak(functions) as *mut cryptoki_sys::CK_FUNCTION_LIST;
+        let backend = Arc::new(FfiBackend::test_backend_with_tables(func_list, None, None));
+
+        // 1: A begins and parks inside its native Initialize.
+        let (a_tx, a_rx) = mpsc::channel();
+        {
+            let backend = Arc::clone(&backend);
+            std::thread::spawn(move || {
+                let _ = a_tx.send(backend.initialize());
+            });
+        }
+        init_entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("initializer A parks inside native C_Initialize");
+
+        // 2: B initializes successfully and publishes Open.
+        backend.initialize().expect("initializer B opens the incarnation");
+        assert_eq!(backend.lifecycle.current_generation(), 1);
+        assert_eq!(backend.lifecycle.init_completion_count(), 1);
+
+        // 3: F seals and parks inside its native Finalize (first gate).
+        let (f_tx, f_rx) = mpsc::channel();
+        {
+            let backend = Arc::clone(&backend);
+            std::thread::spawn(move || {
+                let _ = f_tx.send(backend.finalize());
+            });
+        }
+        fin1_entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("finalize parks inside native C_Finalize (first gate)");
+        assert_eq!(
+            backend.lifecycle_domain.state_for_tests(),
+            native_domain::ModuleState::Finalizing,
+            "sealed finalize is in its exclusive native phase"
+        );
+
+        // 4: F's provider logic succeeds, but F stays parked inside native
+        // (second gate) — before return, before any publish attempt.
+        fin1_release_tx.send(()).expect("run F's native Finalize to success");
+        fin2_entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("finalize parks on the second gate before returning");
+
+        // 5: A's native Initialize FAILS after F's native success, and A
+        // settles (abandon) while F is still parked — provably before F
+        // publishes (no write contention: F holds no lock inside native).
+        init_release_tx.send(()).expect("release initializer A's native call into failure");
+        assert_eq!(
+            a_rx.recv_timeout(Duration::from_secs(5)).expect("initializer A must complete"),
+            Err(CkRv::GENERAL_ERROR),
+            "A's native failure propagates"
+        );
+        assert!(f_rx.try_recv().is_err(), "F must still be parked before publication");
+        assert_eq!(
+            backend.lifecycle_domain.state_for_tests(),
+            native_domain::ModuleState::Finalizing,
+            "A settled before F published"
+        );
+
+        // 6: F returns and publishes bounded. A's post-seal failure must
+        // survive: retirement poisons over native code that ran after the
+        // Finalize.
+        fin2_release_tx.send(()).expect("release F's native Finalize into publication");
+        assert_eq!(
+            f_rx.recv_timeout(Duration::from_secs(5)).expect("finalize must complete"),
+            Ok(())
+        );
+        assert_eq!(backend.lifecycle.current_generation(), 1, "failed A never bumped");
+        assert_eq!(
+            backend.lifecycle_domain.state_for_tests(),
+            native_domain::ModuleState::Finalized,
+            "F's publication lands"
+        );
+        assert_eq!(
+            backend.lifecycle.retirement_decision(),
+            native_domain::RetirementDecision::Poison,
+            "post-seal failure survives F's publish: retirement poisons over native code that ran after the Finalize"
+        );
+        assert_eq!(
+            backend.lifecycle.init_completion_count(),
+            2,
+            "failed native completion counts toward the seal bound"
         );
     }
 
