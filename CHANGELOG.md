@@ -382,7 +382,8 @@ validation remain open; see the [release notes](doc/release/v0.2.0-release-notes
 - Added request-context ownership checks, object-handle virtualization,
   certificate-bundle validation, per-context concurrency limits, serialized
   slot login/logout, and bind-time Unix-socket permissions. Multi-client
-  authentication-state and privacy isolation still require the v0.3 work.
+  authentication-state and privacy isolation still required the then-planned
+  v0.3 work (now the v0.4 scope; see `doc/release/v0.4.0-scope.md`).
 - Secret buffers use wiping owners with redacted `Debug` output. Secret wire
   fields are classified, and malformed or ambiguous protobuf input is rejected
   before secret-bearing generated messages are allocated. See the

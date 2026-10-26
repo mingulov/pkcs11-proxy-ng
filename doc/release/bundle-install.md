@@ -6,7 +6,7 @@ checkout and no `cargo` build. It covers one daemon plus one logical
 client in one trusted security domain — the
 [supported testing scope](beta-support-matrix.md#unreleased-testing-scope).
 For design background and qualification status, see the
-[release notes](v0.2.2-release-notes.md) shipped in the same archive.
+[release notes](v0.3.0-release-notes.md) shipped in the same archive.
 
 Windows operators: the Windows ZIP carries its own
 `proxy.toml.template` plus the `Run-Pkcs11ProxyNg.ps1` supervisor, and
@@ -17,8 +17,8 @@ macOS tarballs.
 ## 1. Unpack and inspect
 
 ```bash
-tar -xzf pkcs11-proxy-ng-v0.2.2-x86_64-unknown-linux-gnu.tar.gz
-cd pkcs11-proxy-ng-v0.2.2-x86_64-unknown-linux-gnu
+tar -xzf pkcs11-proxy-ng-v<version>-x86_64-unknown-linux-gnu.tar.gz
+cd pkcs11-proxy-ng-v<version>-x86_64-unknown-linux-gnu
 ls bin lib examples/configs doc/release
 ```
 
@@ -38,7 +38,7 @@ ls bin lib examples/configs doc/release
 
 Before proceeding, verify the download against the published release
 (checksums and Sigstore attestation), as described in the
-[publication guide](https://github.com/mingulov/pkcs11-proxy-ng/blob/v0.2.2/doc/release/crates-io-publishing.md#registry-source-binaries-and-github-release).
+[publication guide](crates-io-publishing.md#registry-source-binaries-and-github-release).
 
 ## 2. Certificates (mTLS path only)
 

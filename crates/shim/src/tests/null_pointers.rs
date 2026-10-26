@@ -1964,7 +1964,8 @@ mod issue32_stale_handle {
     // only at daemon shutdown) and backend objects are never
     // enumerated or destroyed, so both memory and SQLite token
     // objects persist for the daemon's lifetime. Per-client teardown
-    // is a v0.3 multi-tenancy question, not a v0.2 defect. Pins the
+    // is a later-version (v0.4 scope) multi-tenancy question, not a v0.2
+    // defect. Pins the
     // full restart lifecycle: token survival, session-object death
     // with its session, zero native finalize, zero destroy attempts.
     // RED history: the reporter's literal 0-match expectation fails

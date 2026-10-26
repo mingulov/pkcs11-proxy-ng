@@ -860,7 +860,12 @@ async fn connect_with_retry(
             }
         }
     }
-    Err(connect_exhausted_message(endpoint, max_attempts, last_failure.as_deref()))
+    // The caller maps this Err to CkRv::DEVICE_ERROR and drops the
+    // string, so log the summary here: it is the only place the
+    // endpoint/attempts/last-error diagnosis reaches the operator.
+    let exhausted = connect_exhausted_message(endpoint, max_attempts, last_failure.as_deref());
+    tracing::warn!("{exhausted}");
+    Err(exhausted)
 }
 
 #[cfg(test)]
