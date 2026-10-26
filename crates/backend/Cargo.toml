@@ -49,5 +49,11 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Diagnostics_Debug", "Win32_System_Memory", "Win32_System_SystemInformation"] }
 
+[dev-dependencies]
+# Step 20: property tests for the D4/T05 wire narrowers
+# (`ffi_conversion::tests::narrow_wire_proptests`). 1.12 carries
+# rust-version 1.88, matching the workspace MSRV.
+proptest = "1"
+
 [lints]
 workspace = true

@@ -2198,3 +2198,74 @@ mod output_params_equal_tests {
         assert!(ns_per_iter < 1_000_000, "hotspot blew past 1ms/iter: {ns_per_iter} ns");
     }
 }
+
+/// Step-20 wire-narrowing properties (D4/T05): the checked narrowers
+/// must fail loudly on unrepresentable values, never truncate.
+///
+/// Deterministic `TestRunner` (fixed seed, no fork, no regression-file
+/// IO): same cases on every run, native and i686 alike. On a 64-bit
+/// host the ulong property is a pass-through law; the i686 Tier-0e leg
+/// takes the narrow branch.
+#[cfg(test)]
+mod narrow_wire_proptests {
+    use proptest::prelude::*;
+    use proptest::test_runner::TestRunner;
+
+    use super::{narrow_wire_byte, narrow_wire_ulong};
+    use pkcs11_proxy_ng_types::CkRv;
+
+    // Miri: the 256-case runner loop is interpreter-slow and this pure
+    // narrowing has no UB surface beyond the tried conversion itself
+    // (the Tree Borrows materializer suite covers the call sites).
+    // Native + i686 runs stay authoritative.
+    #[cfg_attr(miri, ignore = "proptest runner too slow under Miri; covered natively + i686")]
+    #[test]
+    #[allow(clippy::unnecessary_cast)] // width-generic: `as u64` is a no-op on 64-bit only
+    fn narrow_wire_ulong_never_truncates() {
+        let max = cryptoki_sys::CK_ULONG::MAX as u64;
+        let strategy = prop_oneof![
+            Just(0u64),
+            Just(u32::MAX as u64),
+            Just(u32::MAX as u64 + 1),
+            Just(u64::MAX),
+            Just(max),
+            Just(max.saturating_add(1)),
+            proptest::num::u64::ANY,
+        ];
+        TestRunner::deterministic()
+            .run(&strategy, |value| {
+                if value <= max {
+                    prop_assert_eq!(narrow_wire_ulong(value).unwrap() as u64, value);
+                } else {
+                    prop_assert_eq!(narrow_wire_ulong(value).unwrap_err(), CkRv::FUNCTION_FAILED);
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[cfg_attr(miri, ignore = "proptest runner too slow under Miri; covered natively + i686")]
+    #[test]
+    fn narrow_wire_byte_never_truncates() {
+        let strategy = prop_oneof![
+            Just(0u32),
+            Just(255u32),
+            Just(256u32),
+            Just(u32::MAX),
+            proptest::num::u32::ANY,
+        ];
+        TestRunner::deterministic()
+            .run(&strategy, |value| {
+                if value <= 255 {
+                    prop_assert_eq!(narrow_wire_byte(value).unwrap(), value as u8);
+                } else {
+                    prop_assert_eq!(
+                        narrow_wire_byte(value).unwrap_err(),
+                        CkRv::MECHANISM_PARAM_INVALID
+                    );
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+}
