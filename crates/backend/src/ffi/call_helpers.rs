@@ -517,8 +517,9 @@ impl FfiBackend {
     /// bindings cached under the dead generation must not survive it.
     /// Session fences clear with the same purge (no guard — hence no fence
     /// holder — can exist under the publish write that runs this).
-    /// Purge for a caller holding the lifetime lock across its
-    /// native Finalize/Initialize + purge.
+    /// The caller holds the lifetime lock only for this purge, taken
+    /// briefly inside the publish write section — never across the
+    /// native Finalize/Initialize call itself.
     pub(super) fn drop_all_mech_cache_in(
         &self,
         lifetimes: &mut super::object_lifetime::ObjectLifetimeEntries,
