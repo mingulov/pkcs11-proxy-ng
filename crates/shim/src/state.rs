@@ -789,6 +789,23 @@ pub(crate) fn connect_attempts_warning(raw: Option<&str>) -> Option<String> {
     }
 }
 
+/// Final error after the retry loop exhausts its attempts: names the
+/// endpoint, the attempt count, and the last observed failure so the
+/// operator can tell "daemon down" from "TLS misconfigured" from
+/// "handshake hanging" without re-running at debug level.
+pub(crate) fn connect_exhausted_message(
+    endpoint: &str,
+    max_attempts: u32,
+    last_error: Option<&str>,
+) -> String {
+    match last_error {
+        Some(last) => {
+            format!("all {max_attempts} connect attempts to {endpoint} failed; last error: {last}")
+        }
+        None => format!("all {max_attempts} connect attempts to {endpoint} failed"),
+    }
+}
+
 async fn connect_with_retry(
     endpoint: &str,
     tls_files: Option<pkcs11_proxy_ng_client::tls::ClientTlsFiles>,
@@ -802,6 +819,7 @@ async fn connect_with_retry(
         tracing::warn!("{warning}");
     }
     let max_attempts = connect_attempts_from_value(attempts_raw.as_deref());
+    let mut last_failure: Option<String> = None;
 
     for attempt in 0..max_attempts {
         let delay = backoff_for_attempt(attempt);
@@ -829,6 +847,7 @@ async fn connect_with_retry(
                     error = %e,
                     "gRPC connect failed, retrying"
                 );
+                last_failure = Some(e.to_string());
             }
             Err(_) => {
                 tracing::warn!(
@@ -837,10 +856,11 @@ async fn connect_with_retry(
                     timeout_secs,
                     "gRPC connect timed out, retrying"
                 );
+                last_failure = Some(format!("connect timed out after {timeout_secs}s"));
             }
         }
     }
-    Err(format!("all {max_attempts} connect attempts failed"))
+    Err(connect_exhausted_message(endpoint, max_attempts, last_failure.as_deref()))
 }
 
 #[cfg(test)]
@@ -1035,6 +1055,36 @@ mod env_warning_tests {
             "slot must hold exactly one claimant's pid, got {final_pid}"
         );
         assert!(wins.load(Ordering::Relaxed) > 0, "some claim must have won");
+    }
+}
+
+#[cfg(test)]
+mod connect_retry_tests {
+    use super::*;
+
+    // Connect-retry UX: the exhausted error must name the endpoint, the
+    // attempt count, and the last observed failure, so the operator can
+    // tell "daemon down" from "TLS misconfigured" from "handshake
+    // hanging" without re-running at debug level.
+    #[test]
+    fn exhausted_message_names_endpoint_attempts_and_last_error() {
+        let message =
+            connect_exhausted_message("https://daemon:8443", 10, Some("connection refused"));
+        assert!(
+            message.contains("https://daemon:8443")
+                && message.contains("10")
+                && message.contains("connection refused"),
+            "exhausted error must name endpoint, attempts, and last error, got: {message}"
+        );
+    }
+
+    #[test]
+    fn exhausted_message_without_last_error_omits_suffix() {
+        let message = connect_exhausted_message("https://daemon:8443", 10, None);
+        assert!(
+            message.contains("https://daemon:8443") && !message.contains("last error"),
+            "error without a last failure must still name the endpoint, got: {message}"
+        );
     }
 }
 
