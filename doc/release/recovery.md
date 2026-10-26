@@ -28,14 +28,17 @@ restarts publication.
    (`release_checks.py`, smoke and verify scripts) still runs from
    the tag checkout, so a fix to any of those requires re-cutting
    the tag to include it.
-2. **Dispatch inputs are exact.** `release.yml` accepts exactly four
-   `workflow_dispatch` inputs; anything else is rejected with HTTP 422.
-   Recover them from the `dispatch-inputs-<tag>-<run>-<attempt>`
-   artifact the `publish.yml` run uploaded (see below; only the
-   publish run knows its own run id, which is the `candidate_run_id`),
-   or — for runs that predate it — from the failed run's first job
-   log, which echoes `CANDIDATE_RUN_ID`, `QUALIFICATION_URL`, and
-   `QUALIFICATION_SUBJECT` in its environment.
+2. **Dispatch inputs are exact.** `release.yml` accepts exactly eight
+   `workflow_dispatch` inputs — `tag`, `candidate_run_id`, and the six
+   qualification inputs (`qualification-url`, `qualification-subject`,
+   `qualification-run-id`, `qualification-framework`,
+   `qualification-record-sha256`, `qualification-receipt-sha256`);
+   anything else is rejected with HTTP 422. Recover them from the
+   `dispatch-inputs-<tag>-<run>-<attempt>` artifact the `publish.yml`
+   run uploaded (see below; only the publish run knows its own run
+   id, which is the `candidate_run_id`), or — for runs that predate
+   it — from the failed run's dispatch record (the `recover` job
+   exports them as `CANDIDATE_RUN_ID` and `QUALIFICATION_*` env).
 3. **Uploads are idempotent.** The compare step stages only missing
    assets and refuses divergent bytes; the uploader rewrites identical
    bytes via `--clobber` and retries transient stalls (5 attempts,
@@ -54,7 +57,10 @@ uploads the rest:
 gh release delete-asset <tag> <asset>
 gh workflow run release.yml --ref main \
   -f tag=<tag> -f candidate_run_id=<id> \
-  -f qualification-url=<url> -f qualification-subject=<sha>
+  -f qualification-url=<url> -f qualification-subject=<sha> \
+  -f qualification-run-id=<run-id> -f qualification-framework=<sha> \
+  -f qualification-record-sha256=<sha256> \
+  -f qualification-receipt-sha256=<sha256>
 ```
 
 **Exit 127 in the publish job.** A repo script is missing from the

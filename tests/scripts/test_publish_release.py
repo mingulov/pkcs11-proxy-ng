@@ -765,6 +765,28 @@ class ReleaseRecoveryTests(unittest.TestCase):
             with self.subTest(job=job_id):
                 self.assertIn("registry-recheck", jobs[job_id]["needs"])
 
+    def test_recovery_doc_matches_dispatch_inputs(self):
+        # doc/release/recovery.md is the runbook for re-dispatching
+        # release.yml by hand; its example commands must name exactly
+        # the current workflow_dispatch inputs (derived from the
+        # workflow itself) or a copy-pasted retry fails
+        # required-input validation. Either side drifting fails
+        # the sync.
+        workflow = load_workflow(RELEASE_YML)
+        triggers = workflow_triggers(workflow)
+        inputs = set(triggers["workflow_dispatch"].get("inputs", {}))
+        self.assertTrue(inputs)
+        text = (ROOT / "doc" / "release" / "recovery.md").read_text(
+            encoding="utf-8")
+        flags = set(re.findall(r"-f ([A-Za-z0-9_-]+)=", text))
+        self.assertEqual(flags, inputs)
+
+    def test_publishing_guide_links_release_recovery_runbook(self):
+        # recovery.md must be reachable from the release docs, not
+        # an orphan: the crates.io guide (the normal-pipeline
+        # companion recovery.md itself cites) links it.
+        self.assertIn("recovery.md", GUIDE.read_text(encoding="utf-8"))
+
     def test_binary_jobs_use_registry_source_only(self):
         workflow = load_workflow(RELEASE_YML)
         for job_id in ("binary-linux", "binary-windows"):
