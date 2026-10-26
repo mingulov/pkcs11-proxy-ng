@@ -441,12 +441,14 @@ pub(in crate::ffi) struct LifecycleTracker {
     /// identities can be qualified against the incarnation that created
     /// them and stale work cannot publish into a reinitialized domain.
     generation: std::sync::atomic::AtomicU64,
-    /// Count of initialization records presented to
-    /// [`LifecycleTracker::note_initialized`] (Codex R11 seal bound). In
-    /// production that method runs only after a native `C_Initialize`
-    /// returned success, so every increment — new-cycle, re-affirm, and
-    /// records the tracker then refuses (generation exhausted, unresolved
-    /// failed Finalize) — proves native code ran and may have left the
+    /// Count of initialization completions presented to
+    /// [`LifecycleTracker::note_initialized`] or
+    /// [`LifecycleTracker::note_init_native_failed`] (Codex R11 seal bound,
+    /// R12 failed-completion cover). In production those methods run only
+    /// after a native `C_Initialize` returned — success or failure — so
+    /// every increment — new-cycle, re-affirm, tracker-refused records
+    /// (generation exhausted, unresolved failed Finalize), and failed
+    /// native completions — proves native code ran and may have left the
     /// provider live. `finish_finalize` snapshots this count at seal time;
     /// the publish-side finalized record may clear
     /// `init_attempted_since_finalize` only when the count is unchanged, so
@@ -500,6 +502,27 @@ impl LifecycleTracker {
     /// decision treats a stale finalized proof as invalid until a later
     /// successful `C_Finalize` (TO26a proof-invalidation battery case).
     pub(in crate::ffi) fn note_init_attempted(&self) {
+        self.init_attempted.store(true, SeqCst);
+        self.init_attempted_since_finalize.store(true, SeqCst);
+    }
+
+    /// Record a FAILED native `C_Initialize` completion (Codex R12): the
+    /// attempt flags plus one seal-bound completion count, counted exactly
+    /// once per failed native call. Production calls this only from the
+    /// native-failure abandon closure in `FfiBackend::initialize`, which
+    /// runs inside the abandon write section — the failure's exposure and
+    /// its count diverge atomically with the settlement, so a racing
+    /// Finalize publish either snapshots before the increment (diverged —
+    /// keeps the exposure) or settles after it (re-assert lands after the
+    /// publish — poisons). Increment-first, mirroring
+    /// [`LifecycleTracker::note_initialized`]: a record pausing between
+    /// the increment and the flag stores still diverges from the seal
+    /// snapshot and keeps its exposure. The post-native refusal path needs
+    /// no such record: it calls `note_initialized()` first, which already
+    /// increments (refused records count), so its re-assert is already
+    /// bound-covered.
+    pub(in crate::ffi) fn note_init_native_failed(&self) {
+        self.init_completions.fetch_add(1, SeqCst);
         self.init_attempted.store(true, SeqCst);
         self.init_attempted_since_finalize.store(true, SeqCst);
     }
@@ -612,13 +635,14 @@ impl LifecycleTracker {
     }
 
     /// Publish-side finalized record bounded by the seal-time completion
-    /// snapshot (Codex R11): exactly like
+    /// snapshot (Codex R11, R12 failed-completion cover): exactly like
     /// [`note_finalized`](Self::note_finalized), except
     /// `init_attempted_since_finalize` is cleared ONLY when no
     /// initialization completed after the snapshot. A post-seal completion
-    /// (a stale Initialize whose native call succeeded after the native
-    /// Finalize) keeps its attempt exposure, so `retirement_decision`
-    /// poisons instead of releasing over live native state.
+    /// (a stale Initialize whose native call succeeded OR failed after the
+    /// native Finalize) keeps its attempt exposure, so `retirement_decision`
+    /// poisons instead of releasing over native code that ran after the
+    /// Finalize.
     /// `finalized_ok`, the failure-flag clear and the session-count reset
     /// keep their unconditional behavior: the native Finalize did succeed
     /// and did destroy the sealed incarnation's sessions.

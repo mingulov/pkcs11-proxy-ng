@@ -539,6 +539,32 @@ fn native_domain_lifecycle_bounded_finalize_post_seal_completion_poisons() {
 }
 
 #[test]
+fn native_domain_lifecycle_failed_completion_counts_and_poisons_bounded_publish() {
+    // Codex R12 at the tracker: a FAILED native completion counts toward
+    // the seal bound exactly like a success — attempt flags plus one
+    // count, counted exactly once — so a failure landing after the seal
+    // snapshot keeps its exposure through the bounded publish.
+    let tracker = LifecycleTracker::default();
+    tracker.note_init_attempted();
+    tracker.note_initialized().expect("cycle opens");
+    assert_eq!(tracker.init_completion_count(), 1);
+    let completions_at_seal = tracker.init_completion_count();
+    // Stale initializer: attempted before the seal, native FAILURE lands
+    // after it (production records this inside the abandon write section).
+    tracker.note_init_native_failed();
+    assert_eq!(tracker.init_completion_count(), 2, "failed completion counts");
+    tracker.note_finalized_bounded(completions_at_seal);
+    assert_eq!(
+        tracker.retirement_decision(),
+        RetirementDecision::Poison,
+        "post-seal failure must survive the bounded finalized record"
+    );
+    // A later unconditional successful Finalize still re-earns release.
+    tracker.note_finalized();
+    assert_eq!(tracker.retirement_decision(), RetirementDecision::Release);
+}
+
+#[test]
 fn native_domain_lifecycle_generation_advances_per_initialization_cycle() {
     // C3M.4/row 10: each initialization cycle gets a fresh generation so
     // stale work cannot publish into a reinitialized domain. Re-affirming
