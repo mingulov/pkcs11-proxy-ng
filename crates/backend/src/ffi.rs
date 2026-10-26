@@ -518,9 +518,18 @@ impl FfiBackend {
             // is abandoned (the live incarnation keeps admitting) and every
             // binding stays — but the incarnation is now uncertain, and a
             // later re-initialization is refused until a successful
-            // C_Finalize (F-08).
-            self.lifecycle_domain.abandon_finalize(seal);
-            self.lifecycle.note_finalize_failed();
+            // C_Finalize (F-08). The failure fact is recorded INSIDE the
+            // abandon write section, and only when this seal is still
+            // current: a stale failure (a newer cycle already completed)
+            // must not set `finalize_failed` over the newer incarnation's
+            // finalized facts, which would strand the backend (Initialize
+            // refusing already-initialized while Finalize reports
+            // not-initialized, with no cycle able to clear it).
+            self.lifecycle_domain.abandon_finalize_with_record(seal, |current| {
+                if current {
+                    self.lifecycle.note_finalize_failed();
+                }
+            });
             return outcome;
         }
         // Publish `Finalized` with the incarnation purge INSIDE the publish
@@ -639,8 +648,17 @@ impl Pkcs11Backend for FfiBackend {
         if outcome.is_err() {
             // Native failure restores the prior domain state (behavior
             // parity: a failed re-Initialize leaves a live incarnation
-            // usable, exactly as before the domain existed).
-            self.lifecycle_domain.abandon_initialize(init_control);
+            // usable, exactly as before the domain existed). The attempt
+            // exposure is re-asserted INSIDE the abandon write section,
+            // unconditionally: when this ticket is current no Finalize can
+            // have completed since the pre-entry marker, so re-asserting
+            // is harmless, and when it is stale the re-assert restores
+            // exactly the evidence an interleaved successful Finalize
+            // cleared — this attempt's native code ran after that
+            // Finalize, so retirement must poison instead of releasing.
+            self.lifecycle_domain.abandon_initialize_with_record(init_control, |_current| {
+                self.lifecycle.note_init_attempted();
+            });
             return outcome;
         }
         // A new initialization cycle starts a clean incarnation (C3M.4/row
