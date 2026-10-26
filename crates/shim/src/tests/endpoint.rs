@@ -105,3 +105,88 @@ fn well_formed_endpoints_parse_unchanged() {
     }
     assert_eq!(crate::state::resolve_endpoint_from_env().as_deref(), Ok("http://127.0.0.1:7512"));
 }
+
+/// Log capture for the redaction tests (mirrors the `CapturedWriter`
+/// pattern in `interface.rs`).
+#[derive(Clone, Default)]
+struct CapturedWriter {
+    buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+}
+
+impl std::io::Write for CapturedWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.buf.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedWriter {
+    type Writer = CapturedWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+fn capture_logs(f: impl FnOnce()) -> String {
+    let writer = CapturedWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_writer(writer.clone())
+        .finish();
+    tracing::subscriber::with_default(subscriber, f);
+    String::from_utf8_lossy(&writer.buf.lock().unwrap()).to_string()
+}
+
+/// Resolver logs must redact socket userinfo: tcp translation, tls
+/// rejection, and bad-scheme warnings all emitted raw socket values
+/// (external review round 3; the exhausted-connect summary already
+/// redacts at its choke point). The host stays visible for diagnosis.
+#[test]
+fn resolver_logs_redact_socket_userinfo() {
+    let _guard = shim_state_test_guard();
+    let _saved = SavedEndpointEnv::capture();
+    for socket in [
+        "tcp://review_user:R3_LEGACY_SECRET@daemon:7512",
+        "tls://review_user:R3_TLS_SECRET@daemon:7512",
+        "bad://review_user:R3_BAD_SECRET@daemon:7512",
+    ] {
+        set_socket_only(socket);
+        let logs = capture_logs(|| {
+            let _ = crate::state::resolve_endpoint_from_env();
+        });
+        for sentinel in ["R3_LEGACY_SECRET", "R3_TLS_SECRET", "R3_BAD_SECRET", "review_user"] {
+            assert!(
+                !logs.contains(sentinel),
+                "socket {socket:?} leaked {sentinel} into logs: {logs}"
+            );
+        }
+        assert!(
+            logs.contains("daemon:7512"),
+            "socket {socket:?} must keep the host visible in logs: {logs}"
+        );
+    }
+}
+
+/// The tls-rejection error message redacts userinfo while still naming
+/// the variable and the offending value class.
+#[test]
+fn tls_rejection_error_redacts_socket_userinfo() {
+    let _guard = shim_state_test_guard();
+    let _saved = SavedEndpointEnv::capture();
+    set_socket_only("tls://review_user:R3_TLS_SECRET@daemon:7512");
+    let err = crate::state::resolve_endpoint_from_env()
+        .expect_err("tls:// socket must be rejected, not resolved");
+    assert!(
+        !err.contains("R3_TLS_SECRET") && !err.contains("review_user"),
+        "rejection error must redact userinfo: {err}"
+    );
+    assert!(
+        err.contains("PKCS11_PROXY_SOCKET") && err.contains("tls://"),
+        "rejection error must still name the variable and value class: {err}"
+    );
+}

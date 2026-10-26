@@ -597,25 +597,28 @@ pub(crate) fn resolve_endpoint_from_env() -> Result<String, String> {
         return Ok(endpoint);
     }
     if let Ok(socket) = std::env::var("PKCS11_PROXY_SOCKET") {
+        // Never emit the raw socket: it may carry userinfo credentials
+        // (see `redact_endpoint_userinfo`).
+        let shown = redact_endpoint_userinfo(&socket);
         if let Some(rest) = socket.strip_prefix("tcp://") {
             let translated = format!("http://{rest}");
             tracing::info!(
-                socket = %socket,
-                endpoint = %translated,
+                socket = %shown,
+                endpoint = %redact_endpoint_userinfo(&translated),
                 "translating legacy PKCS11_PROXY_SOCKET to PKCS11_PROXY_ENDPOINT"
             );
             return Ok(translated);
         }
         if socket.starts_with("tls://") {
             let msg = format!(
-                "PKCS11_PROXY_SOCKET has unsupported tls:// endpoint {socket:?}; \
+                "PKCS11_PROXY_SOCKET has unsupported tls:// endpoint {shown:?}; \
                  use PKCS11_PROXY_ENDPOINT=https://... and PKCS11_PROXY_TLS_* env vars for mTLS"
             );
-            tracing::error!(socket = %socket, "{msg}");
+            tracing::error!(socket = %shown, "{msg}");
             return Err(msg);
         }
         tracing::warn!(
-            socket = %socket,
+            socket = %shown,
             "PKCS11_PROXY_SOCKET must use tcp:// prefix; ignoring"
         );
     }
@@ -793,18 +796,24 @@ pub(crate) fn connect_attempts_warning(raw: Option<&str>) -> Option<String> {
 /// log or error string. The resolver passes `PKCS11_PROXY_ENDPOINT`
 /// through verbatim and tonic accepts userinfo URIs, so the raw string
 /// must never be emitted; the host stays visible for diagnosis.
+/// Authority parsing: split the scheme (a leading `//` without one
+/// still opens an authority section), end the authority at the first
+/// `/`, `?`, or `#`, and run userinfo to the LAST `@` inside it — the
+/// host never contains `@` while passwords in the wild do.
 fn redact_endpoint_userinfo(endpoint: &str) -> String {
-    let Some(scheme_end) = endpoint.find("://") else {
+    let (prefix, rest) = match endpoint.find("://") {
+        Some(i) => endpoint.split_at(i + 3),
+        None => match endpoint.strip_prefix("//") {
+            Some(stripped) => ("//", stripped),
+            None => ("", endpoint),
+        },
+    };
+    let auth_end = rest.find(&['/', '?', '#'][..]).unwrap_or(rest.len());
+    let (authority, suffix) = rest.split_at(auth_end);
+    let Some(at) = authority.rfind('@') else {
         return endpoint.to_string();
     };
-    let rest = &endpoint[scheme_end + 3..];
-    let Some(at) = rest.find('@') else {
-        return endpoint.to_string();
-    };
-    if rest[..at].contains('/') {
-        return endpoint.to_string();
-    }
-    format!("{}://***@{}", &endpoint[..scheme_end], &rest[at + 1..])
+    format!("{prefix}***@{}{suffix}", &authority[at + 1..])
 }
 
 /// Final error after the retry loop exhausts its attempts: names the
@@ -1127,6 +1136,32 @@ mod connect_retry_tests {
                 && !message.contains("sentinel-pass-9f3"),
             "exhausted error must redact userinfo but keep the host, got: {message}"
         );
+    }
+
+    // Authority/userinfo delimitation: the authority ends at the first
+    // '/', '?', or '#', and userinfo (if any) runs to the LAST '@'
+    // inside it — the host never contains '@' while passwords in the
+    // wild do. Schemeless and network-path forms redact too; '@'
+    // outside the authority and userinfo-free endpoints pass through
+    // byte-identical.
+    #[test]
+    fn redaction_delimits_authority() {
+        let cases = [
+            ("https://user:p@ss@daemon:8443", "https://***@daemon:8443"),
+            ("user:R3_SECRET@daemon:8443", "***@daemon:8443"),
+            ("//user:R3_SECRET@daemon:8443", "//***@daemon:8443"),
+            (
+                "https://daemon:8443?email=alice@example.invalid",
+                "https://daemon:8443?email=alice@example.invalid",
+            ),
+            ("https://daemon:8443/path@document", "https://daemon:8443/path@document"),
+            ("unix:/tmp/daemon@domain.sock", "unix:/tmp/daemon@domain.sock"),
+            ("https://user:p@[::1]:8443", "https://***@[::1]:8443"),
+            ("http://127.0.0.1:7512", "http://127.0.0.1:7512"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(redact_endpoint_userinfo(input), expected, "input: {input}");
+        }
     }
 }
 
