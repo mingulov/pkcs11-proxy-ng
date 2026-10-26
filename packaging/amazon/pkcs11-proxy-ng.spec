@@ -11,7 +11,7 @@
 # tools and the explicitly namespaced Python 3.11 interpreter.
 
 Name:           pkcs11-proxy-ng
-Version:        0.2.2
+Version:        0.3.0
 Release:        1%{?dist}
 Summary:        Rust PKCS#11 remote proxy
 

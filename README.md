@@ -9,7 +9,7 @@ connected to the token or HSM, preserving the backend's results within the
 app ──dlopen──▶ libpkcs11_proxy_ng_shim.so ──gRPC/TLS──▶ pkcs11-proxy-ng (daemon) ──FFI──▶ backend .so (HSM/token)
 ```
 
-> **Current source version: `v<!-- SYNC-VERSION -->0.2.2<!-- /SYNC-VERSION -->`.**
+> **Current source version: `v<!-- SYNC-VERSION -->0.3.0<!-- /SYNC-VERSION -->`.**
 >
 > Latest published release: [v0.2.2](https://github.com/mingulov/pkcs11-proxy-ng/releases/tag/v0.2.2)
 > (2026-10-06; [release notes](./doc/release/v0.2.2-release-notes.md)).
