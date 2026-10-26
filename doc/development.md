@@ -325,6 +325,25 @@ stay covered by fuzzing instead.
 2026-09-28). Bump the floor up as coverage sustainably improves; never
 lower it to fit a change — add tests instead.
 
+**Known limits** (recorded for the step-20 audit; scope as of this
+tree): fuzzing covers the types + proto crates only — the five `fuzz/`
+targets link just those two crates, so daemon, client, shim-dispatch,
+and backend-FFI paths are outside the fuzz corpus; nightly runs a
+90 s/target smoke, with longer campaigns on demand. Kani covers the
+types crate only (31 harnesses over bounded models); registry-query
+and proto proofs were attempted and removed as CBMC-intractable (see
+`kani_proofs.rs`), leaving those edges to fuzzing. Miri runs three
+legs — types (all but the two TOML suites), the shim's raw-pointer
+parse paths and pure `tests::` suites, and the backend
+lifecycle/registry/mock suites plus the Tree Borrows FFI-materializer
+line; the server, client, CLI, and proto crates have no Miri leg.
+Under Miri, real `dlopen` is unsupported, so dlopen-dependent tests
+self-skip (`cfg!(miri)` early returns, covered natively), as do
+daemon/socket/fs/time-dependent tests via per-test gates
+(`cfg_attr(miri, ignore)` with measured notes) and `#[cfg(not(miri))]`
+modules; the TOML suites and the backend FFI suites that need
+`dlopen(NULL)` stay native-only.
+
 Target-specific commands are in [ci.yml](../.github/workflows/ci.yml) and
 [nightly.yml](../.github/workflows/nightly.yml). Live tests may also need
 provider images, 32-bit libraries, or Wine; see the [test guide](../crates/server/tests/README.md).
