@@ -800,13 +800,18 @@ pub(crate) fn connect_attempts_warning(raw: Option<&str>) -> Option<String> {
 /// component (`ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )` before the
 /// first `://`), so a later `://` in a path, query, or fragment can
 /// never hijack recognition. Without a valid scheme, a leading `//`
-/// still opens an authority section. The authority ends at the first
-/// `/`, `?`, or `#`, and userinfo runs to the LAST `@` inside it —
-/// the host never contains `@` while passwords in the wild do.
+/// still opens an authority section. Otherwise, an invalid but
+/// scheme-like prefix (e.g. `1http://`, `bad_scheme://`) still splits
+/// at the first `://`: tonic accepts these, so redacting the authority
+/// after it is the conservative choice over risking a userinfo leak.
+/// The authority ends at the first `/`, `?`, or `#`, and userinfo runs
+/// to the LAST `@` inside it — the host never contains `@` while
+/// passwords in the wild do.
 /// Split `scheme://rest` only when `scheme` is a valid initial URI
 /// scheme; otherwise return `None` so the caller falls back to the
-/// leading-`//` or schemeless parse. Slicing is ASCII-safe: both the
-/// scheme alphabet and the `://` separator are single-byte.
+/// leading-`//`, invalid-scheme-like, or schemeless parse. Slicing is
+/// ASCII-safe: both the scheme alphabet and the `://` separator are
+/// single-byte.
 fn split_valid_scheme(endpoint: &str) -> Option<(&str, &str)> {
     let end = endpoint.find("://")?;
     let scheme = &endpoint[..end];
@@ -821,7 +826,10 @@ fn redact_endpoint_userinfo(endpoint: &str) -> String {
         Some((prefix, rest)) => (prefix, rest),
         None => match endpoint.strip_prefix("//") {
             Some(stripped) => ("//", stripped),
-            None => ("", endpoint),
+            None => match endpoint.find("://") {
+                Some(i) => endpoint.split_at(i + 3),
+                None => ("", endpoint),
+            },
         },
     };
     let auth_end = rest.find(&['/', '?', '#'][..]).unwrap_or(rest.len());
@@ -1178,6 +1186,11 @@ mod connect_retry_tests {
                 "https://daemon:8443?next=https://other.invalid/",
             ),
             ("daemon:8443?x=://y", "daemon:8443?x=://y"),
+            // Invalid but scheme-like prefixes: tonic still accepts
+            // these, so the authority after the first "://" redacts
+            // rather than risk leaking userinfo (round 5).
+            ("1http://user:SENTINEL@daemon:7512", "1http://***@daemon:7512"),
+            ("bad_scheme://user:SENTINEL@daemon:7512", "bad_scheme://***@daemon:7512"),
             ("https://daemon:8443/path@document", "https://daemon:8443/path@document"),
             ("unix:/tmp/daemon@domain.sock", "unix:/tmp/daemon@domain.sock"),
             ("https://user:p@[::1]:8443", "https://***@[::1]:8443"),

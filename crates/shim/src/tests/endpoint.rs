@@ -157,6 +157,9 @@ fn resolver_logs_redact_socket_userinfo() {
         // A later "://" must not defeat scheme recognition (round 4).
         "tcp://review_user:R3_PATH_SECRET@daemon:7512/path://segment",
         "//review_user:R3_BAD2_SECRET@daemon:7512/path://segment",
+        // Invalid but tonic-accepted schemes (round 5).
+        "1http://review_user:R3_NUMSCHEME_SECRET@daemon:7512",
+        "bad_scheme://review_user:R3_UNDERSCORE_SECRET@daemon:7512",
     ] {
         set_socket_only(socket);
         let logs = capture_logs(|| {
@@ -168,6 +171,8 @@ fn resolver_logs_redact_socket_userinfo() {
             "R3_BAD_SECRET",
             "R3_PATH_SECRET",
             "R3_BAD2_SECRET",
+            "R3_NUMSCHEME_SECRET",
+            "R3_UNDERSCORE_SECRET",
             "review_user",
         ] {
             assert!(
