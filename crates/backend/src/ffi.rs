@@ -495,6 +495,10 @@ impl FfiBackend {
     /// kept) and the provider RV propagates. The caller holds the armed
     /// `DeadlineGuard` across this call.
     fn finish_finalize(&self, seal: native_domain::FinalizeTicket<'_>) -> CkResult<()> {
+        // Tracker generation at seal time: a stale completion must not
+        // record finalized facts over a newer incarnation (checked again
+        // after the currency-validated publish below).
+        let generation_at_seal = self.lifecycle.current_generation();
         // Exclusive native call on this thread, which holds the armed
         // `DeadlineGuard` (no spawned worker; the ticket is detached —
         // write is NOT held across native entry, mirroring Initialize).
@@ -523,23 +527,36 @@ impl FfiBackend {
             self.lifecycle.note_finalize_failed();
             return outcome;
         }
-        // Record the clean close BEFORE publishing: a (practically
-        // unreachable) publish failure must not leave C3M believing an
-        // incarnation is live after its provider finalized.
-        self.lifecycle.note_finalized();
         // Publish `Finalized` with the incarnation purge INSIDE the publish
         // write section (I2 mirror): `Finalized` implies purged, so a racing
-        // re-Initialize observes no dead bindings.
+        // re-Initialize observes no dead bindings. The publish is
+        // currency-validated inside that section; only a current ticket
+        // seals or purges.
         // This is the daemon/backend finalizer, not the per-client gRPC
         // Finalize path. Per-client Finalize removes only that client context
         // and closes its sessions. Once the underlying module accepts
         // C_Finalize, every cached session binding is out of scope.
+        //
+        // Publish-failure reasoning (replaces the former note-before-
+        // publish): if the publish fails, this completion is either stale
+        // (superseded — a newer incarnation owns the domain and the
+        // tracker facts, so nothing is recorded) or epoch-exhausted
+        // (domain Uncertain — leaving the tracker unrecorded poisons the
+        // retirement decision conservatively instead of releasing on a
+        // finalized proof whose sealed publish never landed). Recording
+        // only after a validated publish, and only when the tracker
+        // generation is unchanged, keeps a stale completion from setting
+        // finalized_ok, clearing finalize_failed, or zeroing the live
+        // incarnation's open sessions.
         self.lifecycle_domain.publish_finalized_with_purge(seal, || {
             // Brief leaf hold under the publish write (lifecycle ->
             // lifetime), mirroring the incarnation purge above it.
             let mut lifetimes = self.object_lifetimes.lock_entries();
             self.drop_all_mech_cache_in(&mut lifetimes);
         })?;
+        if self.lifecycle.current_generation() == generation_at_seal {
+            self.lifecycle.note_finalized();
+        }
         Ok(())
     }
 }
@@ -2185,11 +2202,12 @@ mod tests {
 
     // --- Overlapping-Initialize / admitted-mint deadlock regression ---
     //
-    // Two Initialize calls overlap: A parks inside its native call, B
-    // begins behind A. A then succeeds and publishes `Open`, an ordinary
-    // mint admits (lifecycle read) and reaches for the object-lifetime
-    // lock, and B's native call returns ALREADY_INITIALIZED so B must
-    // abandon (lifecycle write). If B holds the lifetime lock across its
+    // Two Initialize calls overlap: B parks inside its native call, A
+    // begins behind B as the current ticket. A then succeeds and
+    // publishes `Open`, an ordinary mint admits (lifecycle read) and
+    // reaches for the object-lifetime lock, and B's native call returns
+    // ALREADY_INITIALIZED so B must abandon (lifecycle write). If B
+    // holds the lifetime lock across its
     // native call — the shape this pins against — the cycle is
     // permanent: B waits for lifecycle write behind the mint's read
     // while the mint waits for B's lifetime lock. All three calls must
@@ -2206,6 +2224,9 @@ mod tests {
         Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
     > = std::sync::Mutex::new(None);
     static OVERLAP_INIT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static OVERLAP_CREATE_GATE: std::sync::Mutex<
+        Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+    > = std::sync::Mutex::new(None);
 
     fn park_overlap_gate(
         gate: &std::sync::Mutex<
@@ -2227,23 +2248,44 @@ mod tests {
     unsafe extern "C" fn initialize_overlapping_parkable(
         _: *mut std::ffi::c_void,
     ) -> cryptoki_sys::CK_RV {
-        // First overlapping call succeeds; the second observes the
-        // incarnation A opened and reports already-initialized.
+        // The first-begun overlapping call is stale under the fenced
+        // publish (a newer begin owns the epoch) and reports
+        // already-initialized on release; the second-begun (current)
+        // call succeeds and publishes the incarnation.
         match OVERLAP_INIT_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
             0 => {
                 if park_overlap_gate(&OVERLAP_INIT_FIRST_GATE) {
-                    cryptoki_sys::CKR_OK
+                    cryptoki_sys::CKR_CRYPTOKI_ALREADY_INITIALIZED
                 } else {
                     cryptoki_sys::CKR_FUNCTION_FAILED
                 }
             }
             _ => {
                 if park_overlap_gate(&OVERLAP_INIT_SECOND_GATE) {
-                    cryptoki_sys::CKR_CRYPTOKI_ALREADY_INITIALIZED
+                    cryptoki_sys::CKR_OK
                 } else {
                     cryptoki_sys::CKR_FUNCTION_FAILED
                 }
             }
+        }
+    }
+
+    unsafe extern "C" fn create_object_overlap_parkable(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _template: cryptoki_sys::CK_ATTRIBUTE_PTR,
+        _count: cryptoki_sys::CK_ULONG,
+        handle: *mut cryptoki_sys::CK_OBJECT_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        // Parked inside the native call, the mint provably holds its
+        // OrdinaryGuard read and the object-lifetime lock (the lock
+        // spans the native call in call_object_output).
+        if park_overlap_gate(&OVERLAP_CREATE_GATE) {
+            if !handle.is_null() {
+                unsafe { *handle = 43 };
+            }
+            cryptoki_sys::CKR_OK
+        } else {
+            cryptoki_sys::CKR_FUNCTION_FAILED
         }
     }
 
@@ -2272,11 +2314,14 @@ mod tests {
         let (second_release_tx, second_release_rx) = mpsc::channel();
         *OVERLAP_INIT_FIRST_GATE.lock().unwrap() = Some((first_entered_tx, first_release_rx));
         *OVERLAP_INIT_SECOND_GATE.lock().unwrap() = Some((second_entered_tx, second_release_rx));
+        let (create_entered_tx, create_entered_rx) = mpsc::channel();
+        let (create_release_tx, create_release_rx) = mpsc::channel();
+        *OVERLAP_CREATE_GATE.lock().unwrap() = Some((create_entered_tx, create_release_rx));
 
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
         functions.C_Initialize = Some(initialize_overlapping_parkable);
         functions.C_Finalize = Some(finalize_ok);
-        functions.C_CreateObject = Some(create_object_overlap_ok);
+        functions.C_CreateObject = Some(create_object_overlap_parkable);
         // Leaked on purpose: detached workers must never meet a freed
         // table, including on the RED timeout path where the buggy
         // shape leaves them deadlocked past the end of this test.
@@ -2287,59 +2332,74 @@ mod tests {
         let (b_tx, b_rx) = mpsc::channel();
         let (mint_tx, mint_rx) = mpsc::channel();
 
-        // Initializer A parks inside its native call.
-        {
-            let backend = Arc::clone(&backend);
-            std::thread::spawn(move || {
-                let _ = a_tx.send(backend.initialize());
-            });
-        }
-        first_entered_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("initializer A parks inside native C_Initialize");
-        // Initializer B overlaps A. B signals nothing before its native
-        // call in the buggy shape (it blocks on the lifetime lock A
-        // holds), so this settle window is what guarantees B began
-        // before A publishes — the same unobservable-queue pattern as
-        // `queued_writer_stalls_new_admissions`.
+        // Initializer B (stale abandoner) parks inside its native call
+        // first, so it holds the older ticket.
         {
             let backend = Arc::clone(&backend);
             std::thread::spawn(move || {
                 let _ = b_tx.send(backend.initialize());
             });
         }
+        first_entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("initializer B parks inside native C_Initialize");
+        // Initializer A (current publisher) overlaps B. A signals nothing
+        // before its native call in the buggy shape (it blocks on the
+        // lifetime lock B holds), so this settle window is what
+        // guarantees A began before B abandons — the same
+        // unobservable-queue pattern as
+        // `queued_writer_stalls_new_admissions`.
+        {
+            let backend = Arc::clone(&backend);
+            std::thread::spawn(move || {
+                let _ = a_tx.send(backend.initialize());
+            });
+        }
         std::thread::sleep(Duration::from_millis(300));
-        // A succeeds and publishes Open.
-        first_release_tx.send(()).expect("release initializer A");
+        // A is inside its native call in both shapes now (the buggy A
+        // acquires the lifetime lock the moment B releases it).
+        second_entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("initializer A parks inside native C_Initialize");
+        // A succeeds and publishes Open as the current ticket.
+        second_release_tx.send(()).expect("release initializer A");
         assert_eq!(
             a_rx.recv_timeout(Duration::from_secs(5)).expect("initializer A must complete"),
             Ok(())
         );
-        // B is inside its native call in both shapes now (the buggy B
-        // acquires the lifetime lock the moment A releases it).
-        second_entered_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("initializer B parks inside native C_Initialize");
-        // The admitted mint races B's abandon path: it holds lifecycle
-        // read while reaching for the lifetime lock.
+        // The admitted mint races B's abandon path. Its native-entry
+        // receipt proves it is admitted (lifecycle read) and holds the
+        // object-lifetime lock (held across the native call) before B
+        // is released — no sleep-based ordering.
         {
             let backend = Arc::clone(&backend);
             std::thread::spawn(move || {
                 let _ = mint_tx.send(backend.create_object(CkSessionHandle(7), Some(&[])));
             });
         }
-        std::thread::sleep(Duration::from_millis(300));
-        second_release_tx.send(()).expect("release initializer B into its abandon path");
+        create_entered_rx.recv_timeout(Duration::from_secs(5)).expect(
+            "admitted mint parks inside native C_CreateObject holding admission and lifetime lock",
+        );
+        first_release_tx.send(()).expect("release initializer B into its abandon path");
+        // B's abandon needs lifecycle write behind the mint's live read,
+        // so it cannot complete until the mint is released below. The
+        // bounded non-completion check pins that contention; the final
+        // completion assertions stay bounded as well.
+        assert!(
+            b_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "initializer B abandon must wait behind the admitted mint"
+        );
+        create_release_tx.send(()).expect("release the admitted mint");
+        assert_eq!(
+            mint_rx.recv_timeout(Duration::from_secs(10)).expect("admitted mint must complete"),
+            Ok(CkObjectHandle(43))
+        );
         assert_eq!(
             b_rx.recv_timeout(Duration::from_secs(10)).expect(
                 "initializer B abandon must complete: deadlock \u{2014} B waits for \
                  lifecycle write while holding the lifetime lock the admitted mint waits for"
             ),
             Err(CkRv::CRYPTOKI_ALREADY_INITIALIZED)
-        );
-        assert_eq!(
-            mint_rx.recv_timeout(Duration::from_secs(10)).expect("admitted mint must complete"),
-            Ok(CkObjectHandle(43))
         );
         backend.lifecycle_domain.admit_ordinary().expect("domain stays open after B abandons");
         // The publish-move keeps purge semantics: the mint's lifetime is
@@ -2348,6 +2408,103 @@ mod tests {
         assert!(backend.object_lifetime(CkSessionHandle(7), CkObjectHandle(43)).is_some());
         backend.finalize().expect("finalize succeeds");
         assert_eq!(backend.object_lifetime(CkSessionHandle(7), CkObjectHandle(43)), None);
+    }
+
+    static BRIDGE_FINALIZE_GATE: std::sync::Mutex<
+        Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+    > = std::sync::Mutex::new(None);
+    static BRIDGE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    unsafe extern "C" fn finalize_bridge_parkable(_: *mut std::ffi::c_void) -> cryptoki_sys::CK_RV {
+        if park_overlap_gate(&BRIDGE_FINALIZE_GATE) {
+            cryptoki_sys::CKR_OK
+        } else {
+            cryptoki_sys::CKR_FUNCTION_FAILED
+        }
+    }
+
+    #[test]
+    fn late_finalize_after_resurrection_preserves_new_incarnation_lifetime() {
+        // Section-2.2 bridge at backend level: a Finalize seals and parks
+        // inside its native call; a newer Open incarnation is then
+        // published underneath it (simulated by injection, as in
+        // finalize_stale_abandon_is_noop_epoch_mismatch — production
+        // begins are denied from the sealed domain, so no gated stub can
+        // begin the resurrecting Initialize while sealed). The late
+        // Finalize completion must be refused as stale: it seals nothing,
+        // purges nothing, and records no finalized tracker facts, so the
+        // new incarnation's lifetime entry and admission survive.
+        use std::sync::{Arc, mpsc};
+        use std::time::Duration;
+        let _lock = BRIDGE_TEST_LOCK.lock().unwrap();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        *BRIDGE_FINALIZE_GATE.lock().unwrap() = Some((entered_tx, release_rx));
+
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_Initialize = Some(initialize_ok);
+        functions.C_Finalize = Some(finalize_bridge_parkable);
+        functions.C_CreateObject = Some(create_object_overlap_ok);
+        let func_list = Box::leak(functions) as *mut cryptoki_sys::CK_FUNCTION_LIST;
+        let backend = Arc::new(FfiBackend::test_backend_with_tables(func_list, None, None));
+        backend.initialize().expect("initial initialize opens the incarnation");
+        assert_eq!(backend.create_object(CkSessionHandle(7), Some(&[])), Ok(CkObjectHandle(43)));
+        assert!(backend.object_lifetime(CkSessionHandle(7), CkObjectHandle(43)).is_some());
+        backend.lifecycle.note_session_opened();
+        assert_eq!(backend.lifecycle.current_generation(), 1);
+
+        let (fin_tx, fin_rx) = mpsc::channel();
+        {
+            let backend = Arc::clone(&backend);
+            std::thread::spawn(move || {
+                let _ = fin_tx.send(backend.finalize());
+            });
+        }
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("finalize parks inside native C_Finalize");
+        // Resurrection / newer Open publish simulated by injection: the
+        // domain moves to Open at a newer epoch and the tracker moves to
+        // generation 2, exactly as a successful newer Initialize publish
+        // would leave them. A mint under that incarnation records 99.
+        let injected_epoch = backend.lifecycle_domain.epoch_for_tests() + 1;
+        backend
+            .lifecycle_domain
+            .set_state_for_tests(native_domain::ModuleState::Open, injected_epoch);
+        backend.lifecycle.set_generation_for_tests(2);
+        backend.record_object_lifetime_fresh(CkSessionHandle(7), CkObjectHandle(99));
+        assert!(backend.object_lifetime(CkSessionHandle(7), CkObjectHandle(99)).is_some());
+
+        release_tx.send(()).expect("release the parked finalize");
+        assert_eq!(
+            fin_rx.recv_timeout(Duration::from_secs(5)).expect("late finalize must complete"),
+            Err(CkRv::GENERAL_ERROR),
+            "stale Finalize completion is visibly refused, not silently sealed"
+        );
+        assert_eq!(
+            backend.lifecycle_domain.state_for_tests(),
+            native_domain::ModuleState::Open,
+            "stale Finalize publish leaves the newer Open standing"
+        );
+        assert_eq!(
+            backend.lifecycle_domain.epoch_for_tests(),
+            injected_epoch,
+            "stale settle consumes no epoch"
+        );
+        assert!(
+            backend.object_lifetime(CkSessionHandle(7), CkObjectHandle(99)).is_some(),
+            "stale purge must not wipe the new incarnation's lifetime entry"
+        );
+        backend
+            .lifecycle_domain
+            .admit_ordinary()
+            .expect("new incarnation still admits ordinary work");
+        assert_eq!(backend.lifecycle.current_generation(), 2);
+        assert_eq!(
+            backend.lifecycle.open_session_count_for_tests(),
+            1,
+            "stale completion must not zero the new incarnation's open sessions"
+        );
     }
 
     fn seed_cache(backend: &FfiBackend) {

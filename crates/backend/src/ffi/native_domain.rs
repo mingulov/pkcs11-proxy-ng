@@ -743,10 +743,12 @@ impl LifecycleTracker {
 // of panicking.
 //
 // Epoch: monotonic under the write lock, stamped into every guard and
-// control ticket at the acquisition that seals it. `abandon_initialize`
-// verifies the ticket epoch: a mismatch means a later control op already
-// moved the domain, so the stale ticket is a no-op (the later op owns the
-// outcome). TF01b session fences correlate on guard epochs.
+// control ticket at the acquisition that seals it. Abandon and publish
+// both verify the ticket epoch (and the ticket's transient state) inside
+// their write section: a mismatch means a later control op already
+// moved the domain, so the stale ticket seals and purges nothing (the
+// later op owns the outcome). TF01b session fences correlate on guard
+// epochs.
 //
 // TF01b completion: the TF01a remainder is fully landed — every choke
 // family threaded, Finalize seal/drain (`Draining`/`Finalizing`/
@@ -1434,6 +1436,12 @@ impl InitTicket<'_> {
     fn settle_publish(mut self, purge: impl FnOnce()) -> CkResult<()> {
         self.settled = true;
         let mut write = self.domain.lock_write()?;
+        if write.epoch != self.epoch || write.state != ModuleState::Initializing {
+            // Stale ticket: a newer incarnation owns the domain. Mirror
+            // abandon_raw — seal nothing, purge nothing, consume no epoch.
+            // The error keeps the superseded caller visibly failed.
+            return Err(CkRv::GENERAL_ERROR);
+        }
         match write.epoch.checked_add(1) {
             Some(epoch) => {
                 write.epoch = epoch;
@@ -1512,7 +1520,7 @@ impl FinalizeTicket<'_> {
     /// sealed domain denies — defense in depth).
     pub(in crate::ffi) fn enter_finalizing(&self) -> CkResult<()> {
         let mut write = self.domain.lock_write()?;
-        if write.state != ModuleState::Draining {
+        if write.epoch != self.epoch || write.state != ModuleState::Draining {
             return Err(CkRv::GENERAL_ERROR);
         }
         write.state = ModuleState::Finalizing;
@@ -1522,6 +1530,13 @@ impl FinalizeTicket<'_> {
     fn settle_publish(mut self, purge: impl FnOnce()) -> CkResult<()> {
         self.settled = true;
         let mut write = self.domain.lock_write()?;
+        if write.epoch != self.epoch || write.state != ModuleState::Finalizing {
+            // Stale ticket: a newer incarnation owns the domain. Mirror
+            // abandon_raw — seal nothing, purge nothing, consume no epoch.
+            // The error keeps the superseded caller visibly failed: its
+            // native Finalize was superseded, not effective.
+            return Err(CkRv::GENERAL_ERROR);
+        }
         match write.epoch.checked_add(1) {
             Some(epoch) => {
                 write.epoch = epoch;
