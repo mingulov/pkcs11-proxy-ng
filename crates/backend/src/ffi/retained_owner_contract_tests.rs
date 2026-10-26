@@ -355,6 +355,7 @@ fn deep_observation() -> RetainedOracleDeepObservationV1 {
     observation
 }
 
+#[cfg_attr(miri, ignore = "Miri cannot dlopen; covered natively")]
 #[test]
 fn delayed_native_gcm_observes_owned_bytes_after_domain_drop() {
     let _guard = oracle::acquire_test_serial();
@@ -428,6 +429,7 @@ fn graph_validated(mechanism: &CkMechanism) -> ValidatedMechanismParams {
     ValidatedMechanismParams::validate(mechanism, &registry, Operation::General, abi, abi).unwrap()
 }
 
+#[cfg_attr(miri, ignore = "Miri cannot dlopen; covered natively")]
 #[test]
 fn delayed_native_generated_presence_and_nested_graph_families() {
     let _guard = oracle::acquire_test_serial();
@@ -592,6 +594,7 @@ fn delayed_native_generated_presence_and_nested_graph_families() {
     backend.finalize().unwrap();
 }
 
+#[cfg_attr(miri, ignore = "Miri cannot dlopen; covered natively")]
 #[test]
 fn delayed_native_interleaved_sessions_keep_distinct_cbc_graphs() {
     let _guard = oracle::acquire_test_serial();
@@ -639,6 +642,10 @@ fn delayed_native_interleaved_sessions_keep_distinct_cbc_graphs() {
     backend.finalize().unwrap();
 }
 
+#[cfg_attr(
+    miri,
+    ignore = "live-corruption model retains caller pointers across &mut writes (C-realistic; both borrow models reject); covered natively"
+)]
 #[test]
 fn delayed_native_live_corruption_and_wrong_session_controls_fail_closed() {
     use cryptoki_sys::*;
@@ -723,6 +730,7 @@ fn delayed_native_live_corruption_and_wrong_session_controls_fail_closed() {
     reset_oracle(controls, 0);
 }
 
+#[cfg_attr(miri, ignore = "Miri cannot dlopen; covered natively")]
 #[test]
 fn delayed_native_exact_output_family_preserves_one_call_and_raw_effects() {
     let _guard = oracle::acquire_test_serial();
@@ -809,6 +817,10 @@ fn delayed_native_exact_output_family_preserves_one_call_and_raw_effects() {
     backend.finalize().unwrap();
 }
 
+#[cfg_attr(
+    miri,
+    ignore = "ABI probe mutates caller structs the oracle retains pointers to (C-realistic; borrow models reject); covered natively"
+)]
 #[test]
 fn delayed_native_observation_abi_and_bounds_are_explicit() {
     use cryptoki_sys::*;
