@@ -17,8 +17,8 @@ macOS tarballs.
 ## 1. Unpack and inspect
 
 ```bash
-tar -xzf pkcs11-proxy-ng-v<version>-x86_64-unknown-linux-gnu.tar.gz
-cd pkcs11-proxy-ng-v<version>-x86_64-unknown-linux-gnu
+tar -xzf pkcs11-proxy-ng-v0.3.0-x86_64-unknown-linux-gnu.tar.gz
+cd pkcs11-proxy-ng-v0.3.0-x86_64-unknown-linux-gnu
 ls bin lib examples/configs doc/release
 ```
 

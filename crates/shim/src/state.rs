@@ -789,6 +789,24 @@ pub(crate) fn connect_attempts_warning(raw: Option<&str>) -> Option<String> {
     }
 }
 
+/// Strip `user:password@` userinfo from an endpoint before it reaches a
+/// log or error string. The resolver passes `PKCS11_PROXY_ENDPOINT`
+/// through verbatim and tonic accepts userinfo URIs, so the raw string
+/// must never be emitted; the host stays visible for diagnosis.
+fn redact_endpoint_userinfo(endpoint: &str) -> String {
+    let Some(scheme_end) = endpoint.find("://") else {
+        return endpoint.to_string();
+    };
+    let rest = &endpoint[scheme_end + 3..];
+    let Some(at) = rest.find('@') else {
+        return endpoint.to_string();
+    };
+    if rest[..at].contains('/') {
+        return endpoint.to_string();
+    }
+    format!("{}://***@{}", &endpoint[..scheme_end], &rest[at + 1..])
+}
+
 /// Final error after the retry loop exhausts its attempts: names the
 /// endpoint, the attempt count, and the last observed failure so the
 /// operator can tell "daemon down" from "TLS misconfigured" from
@@ -798,6 +816,7 @@ pub(crate) fn connect_exhausted_message(
     max_attempts: u32,
     last_error: Option<&str>,
 ) -> String {
+    let endpoint = redact_endpoint_userinfo(endpoint);
     match last_error {
         Some(last) => {
             format!("all {max_attempts} connect attempts to {endpoint} failed; last error: {last}")
@@ -1089,6 +1108,24 @@ mod connect_retry_tests {
         assert!(
             message.contains("https://daemon:8443") && !message.contains("last error"),
             "error without a last failure must still name the endpoint, got: {message}"
+        );
+    }
+
+    // Endpoint credentials must never reach the log: the resolver
+    // passes PKCS11_PROXY_ENDPOINT through verbatim and tonic accepts
+    // userinfo URIs, so userinfo is redacted at the single choke point.
+    #[test]
+    fn exhausted_message_redacts_endpoint_userinfo() {
+        let message = connect_exhausted_message(
+            "https://sentinel-user:sentinel-pass-9f3@daemon:8443",
+            10,
+            Some("connection refused"),
+        );
+        assert!(
+            message.contains("daemon:8443")
+                && !message.contains("sentinel-user")
+                && !message.contains("sentinel-pass-9f3"),
+            "exhausted error must redact userinfo but keep the host, got: {message}"
         );
     }
 }

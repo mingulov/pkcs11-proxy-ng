@@ -212,6 +212,10 @@ class RealRepoBundleLinkTests(unittest.TestCase):
         mapping = bundle_doc_mapping(ROOT, version)
         guide = Path(mapping["INSTALL.md"]).read_text(encoding="utf-8")
         self.assertIn(f"(v{version}-release-notes.md)", guide)
+        # The unpack recipe runs literally (`<version>` would be shell
+        # redirection), so it names the current version's archive.
+        self.assertIn(f"pkcs11-proxy-ng-v{version}-x86_64-unknown-linux-gnu.tar.gz",
+                      guide)
 
     def test_real_bundle_template_members_exist(self):
         from release.package_bundles import bundle_doc_mapping
