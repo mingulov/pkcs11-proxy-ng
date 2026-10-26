@@ -441,6 +441,19 @@ pub(in crate::ffi) struct LifecycleTracker {
     /// identities can be qualified against the incarnation that created
     /// them and stale work cannot publish into a reinitialized domain.
     generation: std::sync::atomic::AtomicU64,
+    /// Count of initialization records presented to
+    /// [`LifecycleTracker::note_initialized`] (Codex R11 seal bound). In
+    /// production that method runs only after a native `C_Initialize`
+    /// returned success, so every increment — new-cycle, re-affirm, and
+    /// records the tracker then refuses (generation exhausted, unresolved
+    /// failed Finalize) — proves native code ran and may have left the
+    /// provider live. `finish_finalize` snapshots this count at seal time;
+    /// the publish-side finalized record may clear
+    /// `init_attempted_since_finalize` only when the count is unchanged, so
+    /// a completion landing after the seal keeps its exposure. Monotonic;
+    /// `u64` exhaustion is unreachable in practice (one increment per
+    /// native Initialize).
+    init_completions: std::sync::atomic::AtomicU64,
     /// A `C_Finalize` failed since the current incarnation opened. The old
     /// incarnation is then uncertain (not cleanly closed): re-initialization
     /// is refused until a later successful `C_Finalize` (F-08). Used only to
@@ -523,6 +536,17 @@ impl LifecycleTracker {
     /// [`LifecycleTracker::note_finalized`] clears it — so a Finalize that
     /// fails concurrently with this call still denies every later cycle.
     pub(in crate::ffi) fn note_initialized(&self) -> Result<(), LifecycleRefusal> {
+        // Count the record FIRST (Codex R11): production calls this only
+        // after a native `C_Initialize` succeeded, so the completion must
+        // be visible to a racing Finalize publish before any cycle facts
+        // move — a record that pauses between this increment and its
+        // branch decision still diverges from the seal snapshot and keeps
+        // its exposure. Refused records count too and are never
+        // decremented: their native call also succeeded, so un-counting
+        // one would let a later publish erase live native state. The only
+        // acceptable error is the reverse (a racing refusal poisons an
+        // incarnation the Finalize had legitimately torn down).
+        self.init_completions.fetch_add(1, SeqCst);
         if self.finalize_failed.load(SeqCst) {
             return Err(LifecycleRefusal::FailedFinalizeUnresolved);
         }
@@ -567,10 +591,43 @@ impl LifecycleTracker {
     /// Record a successful native `C_Finalize`. The provider has destroyed
     /// every session, matching `drop_all_mech_cache_in`, so the open count
     /// returns to zero together with the cleared session maps.
+    ///
+    /// Test-only plain record: production publishes through
+    /// [`note_finalized_bounded`](Self::note_finalized_bounded) so a
+    /// post-seal completion keeps its exposure (Codex R11); tests that
+    /// compose tracker facts directly use this unconditional shape.
+    #[cfg(test)]
     pub(in crate::ffi) fn note_finalized(&self) {
         self.finalized_ok.store(true, SeqCst);
         self.finalize_failed.store(false, SeqCst);
         self.init_attempted_since_finalize.store(false, SeqCst);
+        self.open_sessions.store(0, SeqCst);
+    }
+
+    /// Current initialization-completion count (see `init_completions`).
+    /// `finish_finalize` snapshots this at seal time — after
+    /// `enter_finalizing`, before the native call — to bound its publish.
+    pub(in crate::ffi) fn init_completion_count(&self) -> u64 {
+        self.init_completions.load(SeqCst)
+    }
+
+    /// Publish-side finalized record bounded by the seal-time completion
+    /// snapshot (Codex R11): exactly like
+    /// [`note_finalized`](Self::note_finalized), except
+    /// `init_attempted_since_finalize` is cleared ONLY when no
+    /// initialization completed after the snapshot. A post-seal completion
+    /// (a stale Initialize whose native call succeeded after the native
+    /// Finalize) keeps its attempt exposure, so `retirement_decision`
+    /// poisons instead of releasing over live native state.
+    /// `finalized_ok`, the failure-flag clear and the session-count reset
+    /// keep their unconditional behavior: the native Finalize did succeed
+    /// and did destroy the sealed incarnation's sessions.
+    pub(in crate::ffi) fn note_finalized_bounded(&self, completions_at_seal: u64) {
+        self.finalized_ok.store(true, SeqCst);
+        self.finalize_failed.store(false, SeqCst);
+        if self.init_completions.load(SeqCst) == completions_at_seal {
+            self.init_attempted_since_finalize.store(false, SeqCst);
+        }
         self.open_sessions.store(0, SeqCst);
     }
 

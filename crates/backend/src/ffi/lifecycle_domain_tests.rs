@@ -788,6 +788,45 @@ fn abandon_init_record_reasserts_attempt_after_interleaved_finalize() {
 }
 
 #[test]
+fn finalize_publish_bounded_by_seal_time_completions() {
+    // Codex R11 composed exactly as `finish_finalize` wires it, single
+    // thread: A begins and records its attempt; B opens the incarnation;
+    // F seals and snapshots completions after `enter_finalizing`; A's
+    // native success then records a re-affirm (no domain publish — its
+    // ticket is stale); F publishes with the bounded record. The publish
+    // lands (`Finalized`) but must not clear A's post-seal exposure.
+    let domain = LifecycleDomain::new();
+    let tracker = LifecycleTracker::default();
+    let a = domain.begin_initialize().expect("A begins");
+    tracker.note_init_attempted();
+    let b = domain.begin_initialize().expect("B begins behind A");
+    tracker.note_init_attempted();
+    tracker.note_initialized().expect("B cycle opens");
+    domain.publish_open(b).expect("B publish opens");
+    let seal = domain.begin_finalize().expect("F seals from Open");
+    seal.enter_finalizing().expect("F enters exclusive phase");
+    let completions_at_seal = tracker.init_completion_count();
+    assert_eq!(completions_at_seal, 1, "only B had completed at seal time");
+    // A's native Initialize succeeds after the seal (re-affirm arm: the
+    // incarnation is still marked initialized, no generation bump).
+    tracker.note_initialized().expect("A post-seal re-affirm records");
+    assert_eq!(tracker.init_completion_count(), 2);
+    domain
+        .publish_finalized_with_purge(seal, || tracker.note_finalized_bounded(completions_at_seal))
+        .expect("F publish lands");
+    assert_eq!(domain.state_for_tests(), ModuleState::Finalized);
+    assert_eq!(
+        tracker.retirement_decision(),
+        RetirementDecision::Poison,
+        "bounded publish keeps the post-seal completion's exposure"
+    );
+    // A's stale publish is refused and changes nothing.
+    assert_eq!(domain.publish_open(a).unwrap_err(), CkRv::GENERAL_ERROR);
+    assert_eq!(domain.state_for_tests(), ModuleState::Finalized);
+    assert_eq!(tracker.retirement_decision(), RetirementDecision::Poison);
+}
+
+#[test]
 fn abandon_finalize_record_skips_stale_failure() {
     // Stale-Finalize overwrite hole: F1 sealed, then a newer cycle
     // completed (simulated with the test state/epoch controls plus the
