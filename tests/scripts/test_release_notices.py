@@ -198,7 +198,7 @@ class BundleTests(unittest.TestCase):
             (self.base / name).write_text(name + "\n")
         (self.base / "doc/release").mkdir(parents=True)
         for name in ("beta-support-matrix.md", "mtls-setup.md", "parity-validation.md",
-                     "v0.2.0-release-notes.md", "bundle-install.md"):
+                     "health-contract.md", "v0.2.0-release-notes.md", "bundle-install.md"):
             (self.base / "doc/release" / name).write_text(name + "\n")
         (self.base / "doc/release/pool-evidence.json").write_text(
             '{"format": "pool-evidence/v1", "providers": {}}\n')
