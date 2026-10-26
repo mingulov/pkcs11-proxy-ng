@@ -9,7 +9,9 @@ about what to do when it breaks.
 
 `cut-release.yml` qualifies a candidate, `publish.yml` stages it, and
 a manual `release.yml` dispatch (`tag`, `candidate_run_id`,
-`qualification-url`, `qualification-subject`) rebuilds every bundle,
+`qualification-url`, `qualification-subject`, `qualification-run-id`,
+`qualification-framework`, `qualification-record-sha256`,
+`qualification-receipt-sha256`) rebuilds every bundle,
 rechecks evidence, and uploads assets with
 `scripts/release-upload.sh`. The release goes **live on creation** —
 there is no draft step — so a failed run still leaves a public
@@ -37,8 +39,17 @@ restarts publication.
    `dispatch-inputs-<tag>-<run>-<attempt>` artifact the `publish.yml`
    run uploaded (see below; only the publish run knows its own run
    id, which is the `candidate_run_id`), or — for runs that predate
-   it — from the failed run's dispatch record (the `recover` job
-   exports them as `CANDIDATE_RUN_ID` and `QUALIFICATION_*` env).
+   it — from the failed run's own `release-evidence-<run-id>`
+   artifact: `recovered/qualification-binding.json` inside it carries
+   every value except `tag` (the candidate run id plus all six
+   qualification values, per the
+   [binding contract](qualification-binding-contract.md); `tag` is
+   the release under recovery). Download it with `gh run download
+   <failed-run-id> -n release-evidence-<failed-run-id>`. The failed
+   run preserves no other copy — `recover` uploads only that one
+   artifact and echoes none of the values — and artifacts expire
+   after 90 days; past that, re-collect from the publish run's
+   `crates-candidate-*` artifact, which carries the same binding.
 3. **Uploads are idempotent.** The compare step stages only missing
    assets and refuses divergent bytes; the uploader rewrites identical
    bytes via `--clobber` and retries transient stalls (5 attempts,

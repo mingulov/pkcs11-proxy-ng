@@ -781,6 +781,47 @@ class ReleaseRecoveryTests(unittest.TestCase):
         flags = set(re.findall(r"-f ([A-Za-z0-9_-]+)=", text))
         self.assertEqual(flags, inputs)
 
+    def test_recovery_recap_matches_dispatch_inputs(self):
+        # The Pipeline recap names the manual release.yml dispatch
+        # inputs in prose; that list must equal exactly the current
+        # workflow_dispatch inputs (derived from the workflow
+        # itself), or the recap contradicts the "exactly eight"
+        # rule two paragraphs down.
+        workflow = load_workflow(RELEASE_YML)
+        triggers = workflow_triggers(workflow)
+        inputs = set(triggers["workflow_dispatch"].get("inputs", {}))
+        self.assertTrue(inputs)
+        text = (ROOT / "doc" / "release" / "recovery.md").read_text(
+            encoding="utf-8")
+        recap = text.split("## Pipeline recap", 1)[1].split("## ", 1)[0]
+        match = re.search(r"manual `release\.yml` dispatch \(([^)]*)\)", recap)
+        self.assertIsNotNone(match, "recap must name the dispatch inputs")
+        named = set(re.findall(r"`([A-Za-z0-9_-]+)`", match.group(1)))
+        self.assertEqual(named, inputs)
+
+    def test_recovery_fallback_names_failed_run_evidence(self):
+        # The pre-artifact fallback must name a real retrieval path.
+        # There is no "dispatch record": the recover job persists
+        # exactly one artifact (release-evidence-<run id>, holding
+        # the downloaded candidate binding) and echoes none of the
+        # dispatch values, so the failed run's own release-evidence
+        # artifact is the fallback source.
+        workflow = load_workflow(RELEASE_YML)
+        recover = job_text("recover", workflow)
+        self.assertEqual(recover.count("upload-artifact"), 1)
+        self.assertIn("release-evidence-", recover)
+        self.assertIn("recovered/", recover)
+        echoed = [line for block in run_blocks(workflow["jobs"]["recover"])
+                  for line in block.splitlines()
+                  if "echo" in line
+                  and ("CANDIDATE_RUN_ID" in line or "QUALIFICATION_" in line)]
+        self.assertEqual(echoed, [])
+        doc = (ROOT / "doc" / "release" / "recovery.md").read_text(
+            encoding="utf-8")
+        self.assertIn("release-evidence-", doc)
+        self.assertIn("qualification-binding.json", doc)
+        self.assertNotIn("dispatch record", doc)
+
     def test_publishing_guide_links_release_recovery_runbook(self):
         # recovery.md must be reachable from the release docs, not
         # an orphan: the crates.io guide (the normal-pipeline
