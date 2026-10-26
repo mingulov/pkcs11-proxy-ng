@@ -160,6 +160,9 @@ fn resolver_logs_redact_socket_userinfo() {
         // Invalid but tonic-accepted schemes (round 5).
         "1http://review_user:R3_NUMSCHEME_SECRET@daemon:7512",
         "bad_scheme://review_user:R3_UNDERSCORE_SECRET@daemon:7512",
+        // Schemeless with a later "://" (round 6).
+        "review_user:R3_SCHEMELESS_PATH_SECRET@daemon:7512/path://segment",
+        "review_user:R3_SCHEMELESS_QUERY_SECRET@daemon:7512?next=https://other.invalid/",
     ] {
         set_socket_only(socket);
         let logs = capture_logs(|| {
@@ -173,6 +176,8 @@ fn resolver_logs_redact_socket_userinfo() {
             "R3_BAD2_SECRET",
             "R3_NUMSCHEME_SECRET",
             "R3_UNDERSCORE_SECRET",
+            "R3_SCHEMELESS_PATH_SECRET",
+            "R3_SCHEMELESS_QUERY_SECRET",
             "review_user",
         ] {
             assert!(
